@@ -2,7 +2,7 @@
 // machinery — mirrors Rust's `fantastic-ai-core::BackendConfig`. The
 // `AIProvider` (built per send by `makeProvider`) is the streaming
 // seam; this struct carries the few behavioural / shape differences
-// that remain between ollama, NIM, and Apple FM so a single shared
+// that remain between the backends so a single shared
 // `send`/`history`/`status`/`recall`/… serves all of them.
 
 import FantasticJSON
@@ -10,17 +10,8 @@ import FantasticKernel
 import Foundation
 import OrderedCollections
 
-/// Result of `makeProvider`: either a ready provider or a refusal the
-/// `send` verb returns verbatim (e.g. NIM with no api_key, FM when the
-/// on-device model is unavailable). The error JSON is the EXACT body
-/// the backend used to return inline, preserving wire byte-identity.
-public enum ProviderResult: Sendable {
-    case provider(any AIProvider)
-    case refused(JSON)
-}
-
 /// Per-backend knobs. Defaults match the ollama shape (the simplest
-/// backend); NIM and FM override the handful of fields that differ.
+/// backend); a backend overrides the handful of fields that differ.
 public struct AIBackendConfig: Sendable {
     /// `kind` / `handler_module` short name, e.g. `"ollama_backend"`. Names the
     /// bundle in its refusals; NOT a reflect field (python has no `kind` key).
@@ -35,24 +26,13 @@ public struct AIBackendConfig: Sendable {
     /// pins.
     public var sendTimeout: Double
 
-    /// Map a provider failure to a CLEAN caller-facing error, or `nil` to let it
-    /// RAISE. Python `cfg.error_mapper` — nvidia's only, turning an HTTP status
-    /// into `send: rate limited (429); retry in 5s` / `send: provider HTTP 503`.
-    ///
-    /// The distinction is the whole point: a MAPPED failure is a refusal the
-    /// caller can act on and settles as a `{error, client_id}` reply; an
-    /// UNMAPPED one is a bug, and the handler raises so the caller's settle says
-    /// `raised: true` instead of dressing a crash up as an answer.
-    public var errorMapper: (@Sendable (Error) -> String?)?
-
-    /// Wrap the provider stream. Python `cfg.stream_wrapper` — nvidia's
-    /// retry-once-on-a-pre-stream-429, which needs to EMIT while it waits, so it
-    /// is handed the backend's own status emitter rather than the run state.
-    public var streamWrapper:
-        (
-            @Sendable (any AIProvider, [JSON], AIStatusEmitter) ->
-                AsyncThrowingStream<AIChunk, Error>
-        )?
+    /// THE MODEL'S OWN WINDOW, in tokens — what `context_window` resolves to when
+    /// the record names neither `context_window` nor `num_ctx`. A server backend
+    /// cannot know its model's window and keeps `AIConstants.DEFAULT_CONTEXT_WINDOW`
+    /// (the record's `context_window` is the lever); a backend that can READ the
+    /// real one says so here (foundation_models_backend: the SDK's `contextSize`).
+    /// Its schema's `context_window` default is the same number.
+    public var modelWindow: Int64
 
     /// Extra fields merged into the `reflect` reply AFTER the shared base, in
     /// the order the backend lists them — python `cfg.reflect_extra`, whose
@@ -61,41 +41,30 @@ public struct AIBackendConfig: Sendable {
     /// agent so it can read meta. Pure function — no side effects.
     public var reflectExtra: @Sendable (Agent) -> OrderedDictionary<String, JSON>
 
-    /// python `cfg.require_provider`: build the provider BEFORE the queue and
-    /// fail fast with its refusal (nvidia, no api_key). Every other backend
-    /// builds it inside the turn.
-    public var requireProvider: Bool
-
-    /// Build the provider for one send. Returns `.refused(json)` to
-    /// short-circuit `send` with that exact body (api_key missing), or
-    /// `.provider(p)` to run. THROWS when the record lacks a connector field it
-    /// must name (`requiredMeta`) — the turn fails loud, as python's raise does.
+    /// Build the provider for one send — python `make_provider(id, kernel) ->
+    /// Provider`, inside the turn. THROWS when the record lacks a connector field
+    /// it must name (`requiredMeta`) — the turn fails loud, as python's raise
+    /// does. A key is never read here: the provider reads it through its
+    /// `KeyReader` before each request.
     public var makeProvider:
-        @Sendable (_ agent: Agent, _ clientId: String, _ kernel: Kernel) async throws -> ProviderResult
+        @Sendable (_ agent: Agent, _ clientId: String, _ kernel: Kernel) async throws -> any AIProvider
 
     public init(
         kind: String,
         sentence: String,
         sendTimeout: Double = AIConstants.SEND_TIMEOUT,
-        errorMapper: (@Sendable (Error) -> String?)? = nil,
-        streamWrapper: (
-            @Sendable (any AIProvider, [JSON], AIStatusEmitter) ->
-                AsyncThrowingStream<AIChunk, Error>
-        )? = nil,
+        modelWindow: Int64 = AIConstants.DEFAULT_CONTEXT_WINDOW,
         reflectExtra: @escaping @Sendable (Agent) -> OrderedDictionary<String, JSON> = {
             _ in [:]
         },
-        requireProvider: Bool = false,
         makeProvider:
-            @escaping @Sendable (Agent, String, Kernel) async throws -> ProviderResult
+            @escaping @Sendable (Agent, String, Kernel) async throws -> any AIProvider
     ) {
         self.kind = kind
         self.sentence = sentence
         self.sendTimeout = sendTimeout
-        self.errorMapper = errorMapper
-        self.streamWrapper = streamWrapper
+        self.modelWindow = modelWindow
         self.reflectExtra = reflectExtra
-        self.requireProvider = requireProvider
         self.makeProvider = makeProvider
     }
 }
@@ -112,19 +81,4 @@ public func requiredMeta(_ agent: Agent, _ key: String, _ backend: String) throw
                 + "guessed (update_agent <id> \(key)=…)")
     }
     return v
-}
-
-/// The backend's own `status` emitter, handed to a `streamWrapper` so a wait it
-/// takes is visible as an ordinary `status` event. `detail` is an ORDERED list
-/// because python's `**detail` keyword order is what the event carries.
-public struct AIStatusEmitter: Sendable {
-    let emit: @Sendable (String, [(String, JSON)]) async -> Void
-
-    public init(emit: @escaping @Sendable (String, [(String, JSON)]) async -> Void) {
-        self.emit = emit
-    }
-
-    public func callAsFunction(_ phase: String, _ detail: [(String, JSON)]) async {
-        await emit(phase, detail)
-    }
 }

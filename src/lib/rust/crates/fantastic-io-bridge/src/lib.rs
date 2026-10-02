@@ -5,6 +5,7 @@
 
 pub mod authorizer;
 pub mod codec;
+pub mod ws_deflate;
 
 use std::sync::Arc;
 

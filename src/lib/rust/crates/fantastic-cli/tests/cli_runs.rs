@@ -1271,7 +1271,8 @@ fn one_shot_json(dir: &std::path::Path, args: &[&str]) -> serde_json::Value {
 
 /// Lib request #3 — python `test_the_catalog_carries_each_backend_kinds_record_schema`:
 /// a set-up page reads what a KIND's record takes before any agent of it exists —
-/// every field with required/type/enum/default/hint, and the key var — from the
+/// every field with required/type/enum/default/hint — a key included, as a
+/// `credentials` field (a store ref), never an environment variable — from the
 /// REAL catalog of this binary.
 #[test]
 fn the_catalog_carries_each_backend_kinds_record_schema() {
@@ -1327,17 +1328,64 @@ fn the_catalog_carries_each_backend_kinds_record_schema() {
         fields["reasoning_effort"]["enum"],
         serde_json::json!(["low", "medium", "xhigh"])
     );
-    assert_eq!(vllm["key_var"], serde_json::json!("VLLM_API_KEY")); // sent only when set
+    // the key: optional where a server may be keyless, required where it never is
     assert_eq!(
-        by["responses_backend"]["schema"]["key_var"],
-        "OPENAI_API_KEY"
+        fields["credentials"]["type"],
+        serde_json::json!("credentials")
     );
+    assert_eq!(fields["credentials"]["required"], serde_json::json!(false));
+    let sch = &by["responses_backend"]["schema"];
+    assert!(sch.get("key_var").is_none());
+    let cred = sch["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["name"] == "credentials")
+        .expect("responses_backend: no credentials field");
+    assert_eq!(cred["required"], serde_json::json!(true));
+    // the credential store is an installed bundle, and publishes no schema
     assert_eq!(
-        by["anthropic_backend"]["schema"]["key_var"],
-        "ANTHROPIC_API_KEY"
+        by["credential_store"]["handler_module"],
+        serde_json::json!("credential_store.tools")
     );
+    assert!(by["credential_store"].get("schema").is_none());
     // a bundle that is not a backend publishes none
     assert!(by["file_bridge"].get("schema").is_none());
+}
+
+/// The on-device backend is in the REAL catalog of this binary, in every tier,
+/// with its record schema: two knobs, the shared AI fields, and `context_window`
+/// defaulting to the model's own window (read from the SDK on macOS; Apple's
+/// documented 4096 where none can be asked). Reading it runs no prompt.
+#[test]
+fn the_catalog_carries_the_on_device_backend() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let r = one_shot_json(
+        tmp.path(),
+        &["kernel", "reflect", "bundles=all", "tree=none"],
+    );
+    let fm = r["bundles"]
+        .as_array()
+        .expect("bundles")
+        .iter()
+        .find(|b| b["name"] == serde_json::json!("foundation_models_backend"))
+        .unwrap_or_else(|| panic!("no foundation_models_backend in {r}"));
+    let fields = fm["schema"]["fields"].as_array().expect("a schema");
+    let names: Vec<&str> = fields.iter().map(|f| f["name"].as_str().unwrap()).collect();
+    assert_eq!(
+        names,
+        [
+            "temperature",
+            "max_tokens",
+            "memory_store_id",
+            "context_window",
+            "output_reserve",
+            "context_strategy",
+            "recent_n"
+        ]
+    );
+    let window = fields[3]["default"].as_i64().expect("an int window");
+    assert!(window >= 1, "{window}");
 }
 
 /// Lib request #3 — python `test_the_schema_is_what_the_write_enforces`: ONE
@@ -1352,7 +1400,7 @@ fn the_schema_is_what_the_write_enforces() {
             "kernel_state",
             "create_agent",
             "parent_id=kernel",
-            "handler_module=anthropic_backend.tools",
+            "handler_module=responses_backend.tools",
         ];
         args.extend_from_slice(extra);
         one_shot_json(tmp.path(), &args)
@@ -1363,7 +1411,7 @@ fn the_schema_is_what_the_write_enforces() {
         r["error"]
             .as_str()
             .unwrap()
-            .contains("missing: endpoint, model, memory_store_id"),
+            .contains("missing: endpoint, model, credentials, memory_store_id"),
         "{r}"
     );
     let r = create(&[
@@ -1371,6 +1419,7 @@ fn the_schema_is_what_the_write_enforces() {
         "endpoint=http://127.0.0.1:9/stub",
         "model=m",
         "memory_store_id=memory",
+        r#"credentials={"store": "creds", "ref": "claude"}"#,
         "context_strategy=bogus",
     ]);
     assert_eq!(r["reason"], "invalid_meta", "{r}");
@@ -1383,6 +1432,22 @@ fn the_schema_is_what_the_write_enforces() {
         "endpoint=http://127.0.0.1:9/stub",
         "model=m",
         "memory_store_id=memory",
+        r#"credentials={"store": "creds"}"#,
     ]);
-    assert_eq!(r["id"], "a3", "{r}");
+    assert_eq!(r["reason"], "invalid_meta", "{r}");
+    assert!(
+        r["error"]
+            .as_str()
+            .unwrap()
+            .contains("credentials must be {store"),
+        "{r}"
+    );
+    let r = create(&[
+        "id=a4",
+        "endpoint=http://127.0.0.1:9/stub",
+        "model=m",
+        "memory_store_id=memory",
+        r#"credentials={"store": "creds", "ref": "claude"}"#,
+    ]);
+    assert_eq!(r["id"], "a4", "{r}");
 }

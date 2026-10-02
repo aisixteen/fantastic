@@ -1,5 +1,5 @@
 # responses_backend — an OpenAI Responses-API, context-managed completion agent
-Talks to any endpoint that serves the OpenAI Responses API (`POST …/v1/responses`): OpenAI itself, Ollama ≥ 0.13.4, or a proxy in front of an open-weights model. `endpoint` (the full `…/v1/responses` URL) and `model` are REQUIRED on the record — nothing is guessed; the key is read from `OPENAI_API_KEY` in the environment / `.env`. Per-client chat threads, FIFO lock, and automatic context management. **No agentic loop** — one provider pass per `send`. Conversation in its memory store (`memory_store_id`).
+Talks to any endpoint that serves the OpenAI Responses API (`POST …/v1/responses`): OpenAI itself, Ollama ≥ 0.13.4, or a proxy in front of an open-weights model. `endpoint` (the full `…/v1/responses` URL) and `model` are REQUIRED on the record — nothing is guessed; `credentials` is REQUIRED too: the key is read before each request from the record's `credentials: {store, ref}` — a ref in a `credential_store`, sent only to the ref's host — never from the environment or the record. Per-client chat threads, FIFO lock, and automatic context management. **No agentic loop** — one provider pass per `send`. Conversation in its memory store (`memory_store_id`).
 
 ## Implementation
 This bundle is a thin binding over the shared `ai_core` lib. The queue / FIFO lock, prompt assembly, the ONE-PASS `_run`, and all the context machinery + verb bodies live in `ai_core.core`; this module supplies the `ResponsesProvider` builder (endpoint/model from the agent record) and `ai_core.build()` wires the rest into `(VERBS, handler)`.
@@ -9,6 +9,8 @@ Stateless: every pass sends `store:false` and the whole conversation as `input` 
 
 ## Bare completion + the `<call>` grammar — no native tool API
 `send` performs exactly ONE provider pass: the stream's text is read; it never sends Responses `tools` nor reads `function_call` items (one arriving is a loud error). Tool-calling is RAW and shared by every backend: `ai_core` parses the model's `<call name=…>` tags from the streamed text, dispatches them as ONE batch (`kernel.send([...])`), and each destination's results arrive as ONE fresh turn — there is no loop inside a pass.
+
+**A model never reaches a secret holder.** A call the model emits whose target or `reply_to` is an agent with `holds_secrets: true` on its record (every `credential_store`; any agent the operator marks) is refused before anything is sent — `{reason:"unauthorized"}`, "`<id>` holds secrets — a secret holder answers backends, never a model turn; this call was not dispatched" — and the refusal comes back to the model itself. The backend's own key read goes to the store directly, never through the model's calls. The address is resolved the way the kernel resolves it, so `<this kernel's guid>|<agent>` is that local agent and is judged like the bare id; a connected peer's `<guid>|<agent>` lives on another kernel, its record is not here, so it is not judged here.
 
 ## Context management — owned HERE
 The conversation lives in this agent's MEMORY STORE — `memory_store_id` on the record

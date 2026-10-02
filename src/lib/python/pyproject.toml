@@ -17,9 +17,6 @@ dependencies = [
   "fantastic-file-bridge",
   "fantastic-kernel-state",
   "fantastic-ollama-backend",
-  "fantastic-llamacpp-backend",
-  "fantastic-nvidia-nim-backend",
-  "fantastic-anthropic-backend",
   "fantastic-responses-backend",
   "fantastic-vllm-backend",
   "fantastic-io-bridge",
@@ -29,6 +26,7 @@ dependencies = [
   "fantastic-ai-core",
   "fantastic-static-loader",
   "fantastic-ram-store",
+  "fantastic-credential-store",
   "pyyaml>=6",
 ]
 
@@ -70,9 +68,6 @@ testpaths = [
   "bundled_agents/loader/static_loader/tests",
   "bundled_agents/ai/ai_core/tests",
   "bundled_agents/ai/ollama/ollama_backend/tests",
-  "bundled_agents/ai/llamacpp/llamacpp_backend/tests",
-  "bundled_agents/ai/nvidia/nvidia_nim_backend/tests",
-  "bundled_agents/ai/anthropic/anthropic_backend/tests",
   "bundled_agents/ai/responses/responses_backend/tests",
   "bundled_agents/ai/vllm/vllm_backend/tests",
   "bundled_agents/io/io_bridge/tests",
@@ -80,6 +75,7 @@ testpaths = [
   "bundled_agents/io/relay_connector/tests",
   "bundled_agents/io/exec_bridge/tests",
   "bundled_agents/memory/ram_store/tests",
+  "bundled_agents/security/credential_store/tests",
 ]
 # `-n auto` — xdist across every core BY DEFAULT. It used to live only in
 # run_checks.sh, so a bare `pytest` ran the whole suite on one core while the
@@ -97,9 +93,6 @@ members = [
   "bundled_agents/io/file_bridge",
   "bundled_agents/ai/ai_core",
   "bundled_agents/ai/ollama/ollama_backend",
-  "bundled_agents/ai/llamacpp/llamacpp_backend",
-  "bundled_agents/ai/nvidia/nvidia_nim_backend",
-  "bundled_agents/ai/anthropic/anthropic_backend",
   "bundled_agents/ai/responses/responses_backend",
   "bundled_agents/ai/vllm/vllm_backend",
   "bundled_agents/io/io_bridge",
@@ -109,6 +102,7 @@ members = [
   "bundled_agents/loader/kernel_state",
   "bundled_agents/loader/static_loader",
   "bundled_agents/memory/ram_store",
+  "bundled_agents/security/credential_store",
   "installed_agents/*",
 ]
 
@@ -120,9 +114,6 @@ fantastic-web-rest = { workspace = true }
 fantastic-scheduler = { workspace = true }
 fantastic-file-bridge = { workspace = true }
 fantastic-ollama-backend = { workspace = true }
-fantastic-llamacpp-backend = { workspace = true }
-fantastic-nvidia-nim-backend = { workspace = true }
-fantastic-anthropic-backend = { workspace = true }
 fantastic-responses-backend = { workspace = true }
 fantastic-vllm-backend = { workspace = true }
 fantastic-io-bridge = { workspace = true }
@@ -133,3 +124,4 @@ fantastic-ai-core = { workspace = true }
 fantastic-kernel-state = { workspace = true }
 fantastic-static-loader = { workspace = true }
 fantastic-ram-store = { workspace = true }
+fantastic-credential-store = { workspace = true }

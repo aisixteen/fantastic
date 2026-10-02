@@ -163,14 +163,7 @@ fn render_status(payload: &Value) -> Result<Option<String>, BundleError> {
             let ahead = str_or(py_get(&detail, "ahead")?, "0");
             format!("{prefix} queued ({ahead} ahead)")
         }
-        "thinking" => {
-            if py_get(&detail, "waiting_on")? == Some(&json!("rate_limit")) {
-                let wait = str_or(py_get(&detail, "wait_s")?, "?");
-                format!("{prefix} rate-limited; waiting {wait}s")
-            } else {
-                format!("{prefix} thinking…")
-            }
-        }
+        "thinking" => format!("{prefix} thinking…"),
         "tool_calling" => {
             let tool = or_empty_dict(py_get(&detail, "tool")?);
             let verb = str_or(py_get(&tool, "verb")?, "");

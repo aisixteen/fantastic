@@ -24,6 +24,24 @@ OPEN = {"ingress_rule": "allow_all_ingress"}
 MEMORY = "memory"
 
 
+#: THE AI KIND every family drives: `vllm_backend` against the scripted OpenAI
+#: chat stub (`stubs/openai_chat.py`).
+VLLM = "vllm_backend.tools"
+#: Its required record fields, fixed ONCE so no family guesses one. `kv_slots`
+#: is far above the AI count of any family and `evict` never refuses, so the
+#: endpoint's KV session table never decides a capture.
+VLLM_MAX_TOKENS = 4096
+VLLM_KV_SLOTS = 64
+
+
+def vllm(endpoint: str, **meta) -> dict:
+    """A `vllm_backend` record's model half: the stub's `/v1` URL and the five
+    fields the write requires. No `credentials`: the key is optional on vllm, and
+    a stub wants none — the one case about the key (`providers`) names its own."""
+    return {"model": "stub-model", "endpoint": endpoint, "max_tokens": VLLM_MAX_TOKENS,
+            "kv_slots": VLLM_KV_SLOTS, "kv_overflow": "evict", **meta}
+
+
 def ai(**meta) -> dict:
     """An AI agent's record: its conversation store NAMED and GRANTED.
 

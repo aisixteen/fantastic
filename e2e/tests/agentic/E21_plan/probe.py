@@ -1,13 +1,13 @@
 """LIVE TEST 3 — plan, change, report.
 
-    cd src/lib/python && BACKEND=anthropic uv run python ../../../tmp/live_plan.py
+    cd src/lib/python && uv run python ../../../e2e/run.py --group agentic --id plan --lanes 1
 
 Harder than `live_compose.py` in a different direction: there is no single right
 action, there is a right SET of actions, and which ones they are has to be worked
 out from what each agent says about itself.
 
 Three `file_bridge` agents guard three directories, each holding something this
-kernel really keeps: served web assets, AI chat transcripts, an api_key sidecar.
+kernel really keeps: served web assets, AI chat transcripts, key material.
 Each carries a `description`. ONE names an untrusted audience; the other two name
 readers who are real but are not "any client". Nothing states which is which, and
 each directory has contents, so a label can be checked against what is actually
@@ -55,19 +55,14 @@ from helpers.kernel import open_kernel
 # The plug, resolved once (see e2e/backends): which model, reached how.
 BK = _resolve_backend()
 BACKEND, MODEL = BK.name, BK.model
-NVIDIA_KEY = os.environ.get("NVIDIA_API_KEY", "")
-# llama-server serves exactly ONE model (whichever -hf/-m loaded) and ignores the
-# request's `model` field, so BACKEND=llamacpp sends no model at all — there is
-# nothing to name and nothing to get wrong.
 CTX = int(os.environ.get("CTX", "262144"))
-MAX_TOKENS_FIELD = int(os.environ.get("MAX_TOKENS", "0"))
 # IDLE is silence-since-the-last-pass, so it must exceed ONE turn's wall clock, not
-# the run's. A hosted frontier model answers in seconds; a local 12B does not.
-# Measured 2026-08-04 on gemma-4-12B-it Q4_0 / M1 Pro: 20 tok/s generation, and this
-# task's own transcript is 14,340 tokens over 16 passes — so a late turn is a ~10k
-# prompt plus a thought plus an answer. At 60 the harness gives up MID-RUN and the
-# truncation reads as a model failure; `live_dialog.py` already recorded that once.
-IDLE = float(os.environ.get("IDLE", "60" if BACKEND == "anthropic" else "240"))
+# the run's. Measured 2026-08-04 on gemma-4-12B-it Q4_0 / M1 Pro: 20 tok/s
+# generation, and this task's own transcript is 14,340 tokens over 16 passes — so a
+# late turn is a ~10k prompt plus a thought plus an answer. At 60 the harness gives
+# up MID-RUN and the truncation reads as a model failure; `live_dialog.py` already
+# recorded that once. The launcher sets it from `test.yaml`.
+IDLE = float(os.environ.get("IDLE", "240"))
 SHOW_SYSTEM = os.environ.get("SHOW_SYSTEM") == "1"
 # A CEILING. Without one this harness has no end but IDLE: run 03 reached turn 77
 # and run 04 turn 89, both killed by hand, both re-verifying a posture already set.
@@ -96,8 +91,7 @@ W = 78
 #   transcripts — AI chat history really does persist as yaml sidecars under
 #                 .fantastic/agents/<ai>/agents/<chat>/state.yaml. In-kernel readers
 #                 only: it is the user's conversation, not browser content.
-#   secrets     — the nvidia/anthropic backends really do keep an api_key sidecar at
-#                 agents/<id>/api_key. Never leaves the host.
+#   secrets     — key material (an `api_key` file). Never leaves the host.
 #
 # Only `assets` names an untrusted audience, and `allow_all` is the only open value
 # there is — so the middle tier is open to in-kernel agents (which reach it by id
@@ -121,7 +115,7 @@ GUARDS = [
         "secrets",
         "Deployment credentials and signing keys. Never leaves the host.",
         False,
-        ("api_key", "nvapi-REDACTED-TESTFIXTURE\n"),
+        ("api_key", "REDACTED-TESTFIXTURE-KEY\n"),
     ),
 ]
 

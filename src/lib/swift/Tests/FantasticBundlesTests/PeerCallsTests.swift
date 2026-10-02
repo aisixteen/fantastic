@@ -100,7 +100,7 @@ private func until(_ what: String, _ pred: () -> Bool) async throws {
     }
 }
 
-private func sendToPage(_ k: Kernel, _ payload: JSON, binary: Data? = nil) -> Task<Outcome, Never>
+private func sendToPage(_ k: Kernel, _ payload: JSON, binary: Blob? = nil) -> Task<Outcome, Never>
 {
     var item = Item(AgentId("\(PAGE)|canvas"), payload)
     item.binary = binary
@@ -225,7 +225,7 @@ struct PeerCallsTests {
         ws.cancel(with: .normalClosure, reason: nil)
         try await until("peer dropped") { k.peer(PAGE) == nil }
         let (out, _) = await route.call(
-            "canvas", around(), caller: "\(HOST)|kernel", body: nil)
+            "canvas", around(), caller: "\(HOST)|kernel", secret: [], body: nil)
         #expect(out["reason"].asString == "transport_error", "\(out.serialize())")
         await stop(k)
     }
@@ -239,18 +239,100 @@ struct PeerCallsTests {
         try await push(ws, hello(PAGE))
         try await until("peer registered") { k.peer(PAGE) != nil }
         let send = sendToPage(
-            k, .object(["type": .string("write_stream")]), binary: Data([0, 1, 2, 255]))
+            k, .object(["type": .string("write_stream")]),
+            binary: Blob("bytes", Data([0, 1, 2, 255])))
         let (call, body) = try await next(ws, "call")
-        #expect(call["_binary_path"].asString == "payload.bytes", "\(call.serialize())")
+        #expect(call["_binary_path"] == ["payload", "bytes"], "\(call.serialize())")
         #expect(body == Data([0, 1, 2, 255]))
         let head: JSON = .object([
             "type": .string("reply"), "id": call["id"],
-            "data": .object(["bytes": .null]), "_binary_path": .string("data.bytes"),
+            "data": .object(["bytes": .null]), "_binary_path": ["data", "bytes"],
         ])
         try await ws.send(.data(Codec.encodeBinaryFrame(header: head, body: Data([9, 8]))))
         let out = await send.value
         #expect(out.status == .completed, "\(out.result.serialize())")
         #expect(out.body == Data([9, 8]))
+        ws.cancel(with: .normalClosure, reason: nil)
+        await stop(k)
+    }
+
+    /// web_rest's `X-Fantastic-Bytes-Field: a.b` binds the LITERAL key `"a.b"`,
+    /// and it stays literal on its way to a peer: the call frame names it
+    /// `["payload", "a.b"]`, beside a nested `a` → `b` left as sent, and the
+    /// page's chunk comes back as the octet body. Python
+    /// `test_web_rest_literal_binding_stays_literal_across_a_bridge` (d). Swift's
+    /// reply carrier holds a chunk at the reply's `bytes` only, so the page answers
+    /// at `["data", "bytes"]` (python's echo answers at `["data", "x.y"]`).
+    @Test(.timeLimit(.minutes(1)))
+    func aRestLiteralBindingStaysLiteralToAPeer() async throws {
+        let k = try await webKernel()
+        let made = await k.send([
+            Item(
+                AgentId("kernel"),
+                .object([
+                    "type": .string("create_agent"), "parent_id": .string("web"),
+                    "handler_module": .string("web_rest.tools"), "id": .string("rest"),
+                    "ingress_rule": .string("allow_all_ingress"),
+                    "can_call": .object(["\(PAGE)|canvas": .string("*")]),
+                ]))
+        ])[0].result
+        #expect(made["id"].asString == "rest", "\(made.serialize())")
+        _ = await k.send([
+            Item(AgentId("web"), .object(["type": .string("mount"), "child_id": .string("rest")]))
+        ])[0].result
+        let ws = socket(k)
+        try await push(ws, hello(PAGE))
+        try await until("peer registered") { k.peer(PAGE) != nil }
+        let raw = Data([0x00]) + Data("raw".utf8) + Data([0xFF])
+        var req = URLRequest(
+            url: URL(string: "http://127.0.0.1:\(k.httpPort())/rest/\(PAGE)%7Ccanvas")!)
+        req.httpMethod = "POST"
+        req.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        req.setValue(
+            #"{"type": "take", "a": {"b": "kept"}}"#, forHTTPHeaderField: "X-Fantastic-Payload")
+        req.setValue("a.b", forHTTPHeaderField: "X-Fantastic-Bytes-Field")
+        req.httpBody = raw
+        let request = req
+        let post = Task { () async throws -> (Int, Data, String?, String?) in
+            let (d, resp) = try await URLSession(configuration: .ephemeral).data(for: request)
+            let http = resp as? HTTPURLResponse
+            return (
+                http?.statusCode ?? 0, d,
+                http?.value(forHTTPHeaderField: "X-Fantastic-Bytes-Field"),
+                http?.value(forHTTPHeaderField: "X-Fantastic-Payload")
+            )
+        }
+        let (call, body) = try await next(ws, "call")
+        #expect(call["_binary_path"] == ["payload", "a.b"], "\(call.serialize())")
+        // the null sits at the literal key; the nested twin is untouched
+        #expect(
+            call["payload"]
+                == .object([
+                    "type": .string("take"), "a": .object(["b": .string("kept")]), "a.b": .null,
+                ]),
+            "\(call.serialize())")
+        #expect(call["caller"].asString == "\(HOST)|rest", "\(call.serialize())")
+        #expect(body == raw)
+        let head: JSON = .object([
+            "type": .string("reply"), "id": call["id"],
+            "data": .object([
+                "keys": .array(["a", "a.b", "type"].map { .string($0) }),
+                "x": .object(["y": .string("kept")]),
+            ]),
+            "_binary_path": ["data", "bytes"],
+        ])
+        try await ws.send(.data(Codec.encodeBinaryFrame(header: head, body: Data("back".utf8))))
+        let (status, chunk, field, rest) = try await post.value
+        #expect(status == 200, "\(String(decoding: chunk, as: UTF8.self))")
+        #expect(chunk == Data("back".utf8))
+        #expect(field == "bytes")
+        #expect(
+            try JSON.parse(rest ?? "")
+                == .object([
+                    "keys": .array(["a", "a.b", "type"].map { .string($0) }),
+                    "x": .object(["y": .string("kept")]),
+                ]),
+            "\(rest ?? "")")
         ws.cancel(with: .normalClosure, reason: nil)
         await stop(k)
     }

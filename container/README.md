@@ -256,7 +256,9 @@ agents see it.
    (xterm), bound by id; flow-control + clipboard-image paste. *(PTY runs in-image)*
 3. **AI chat with tool-use** — an `ai_*` backend (+ a `ram_store` for its conversation) + `ai_view`;
    the model calls `exec_bridge`/`file_bridge` as tools and routes its own
-   output (emergent, no `reply_to`). *(key via `-e ANTHROPIC_API_KEY`)*
+   output (emergent, no `reply_to`). *(key, when the endpoint wants one: a
+   `credential_store` ref named in the record's `credentials` — e.g. an `env`-backed
+   store reading `-e VLLM_API_KEY` or `-e OPENAI_API_KEY`)*
 4. **Background compute / training runner** — `exec_bridge.start` → `job_id` +
    streamed `progress`/`job_done` → a live html panel (or the job's own UI via a
    `file_bridge` agent). *(⚠ GPU = host's; this image is CPU-only)*

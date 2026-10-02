@@ -57,9 +57,11 @@ async def open_kernel(prefix: str = "probe_", reach: list[str] | None = None):
         root = boot_root()
         Cli(root.ctx, parent=root)
         # THE MEMORY STORE, then the start sequence — as the daemon does.
-        from helpers import memory
+        from helpers import creds, memory
 
         await memory.wire_in_process(root)
+        # THE KEYS — a backend reads its key from the `creds` store, never the env.
+        creds.wire_in_process(root, creds.env_refs())
 
         async def close() -> None:
             return None

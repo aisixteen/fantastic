@@ -12,18 +12,18 @@ from io_bridge import decode_frame, encode_frame, find_bytes_path, set_path
 
 
 def test_find_bytes_path_top_level():
-    assert find_bytes_path({"bytes": b"\x00\x01"}) == ("bytes", b"\x00\x01")
+    assert find_bytes_path({"bytes": b"\x00\x01"}) == (["bytes"], b"\x00\x01")
 
 
 def test_find_bytes_path_nested():
     p, v = find_bytes_path({"payload": {"pcm": b"raw"}})
-    assert p == "payload.pcm"
+    assert p == ["payload", "pcm"]
     assert v == b"raw"
 
 
 def test_find_bytes_path_in_list():
     p, v = find_bytes_path({"items": [{"data": b"hi"}]})
-    assert p == "items.0.data"
+    assert p == ["items", 0, "data"]
     assert v == b"hi"
 
 
@@ -33,13 +33,13 @@ def test_find_bytes_path_none_when_no_bytes():
 
 def test_set_path_nested():
     obj = {"a": {"b": {"c": "old"}}}
-    set_path(obj, "a.b.c", "new")
+    set_path(obj, ["a", "b", "c"], "new")
     assert obj["a"]["b"]["c"] == "new"
 
 
 def test_set_path_in_list():
     obj = {"items": [None, None]}
-    set_path(obj, "items.1", "value")
+    set_path(obj, ["items", 1], "value")
     assert obj["items"][1] == "value"
 
 
@@ -61,7 +61,7 @@ def test_encode_binary_when_bytes_in_payload():
     # Frame: [4-byte len][header JSON][body]
     head_len = int.from_bytes(frame[:4], "big")
     head = json.loads(frame[4 : 4 + head_len].decode("utf-8"))
-    assert head["_binary_path"] == "payload.pcm"
+    assert head["_binary_path"] == ["payload", "pcm"]
     assert head["payload"]["pcm"] is None
     assert frame[4 + head_len :] == body
 

@@ -1,0 +1,26 @@
+[package]
+publish = false
+name = "fantastic-foundation-models-backend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Apple Foundation Models (on-device) LLM bundle — links the swift FMCore through its C ABI (FantasticFMBridge)."
+# The native library this crate links. One crate in a build may declare it, so
+# the swift bridge is never linked twice.
+links = "FantasticFMBridge"
+build = "build.rs"
+
+[dependencies]
+fantastic-ai-core = { path = "../fantastic-ai-core" }
+fantastic-bundle = { path = "../../fantastic-bundle" }
+fantastic-kernel = { path = "../../fantastic-kernel" }
+async-trait = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+futures-util = { workspace = true }
+
+[dev-dependencies]
+# Every AI agent keeps its conversation in a memory store; the tests wire one.
+fantastic-ram-store = { path = "../fantastic-ram-store" }
+tempfile = "3"
+tokio = { workspace = true, features = ["test-util", "macros"] }

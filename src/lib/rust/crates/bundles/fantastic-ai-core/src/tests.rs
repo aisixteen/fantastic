@@ -186,7 +186,7 @@ fn pass(text: impl Into<String>) -> Vec<ScriptEvent> {
 
 const CFG: BackendConfig = BackendConfig {
     name: "mock_backend",
-    provider_missing_error: None,
+    model_window: crate::context::DEFAULT_CONTEXT_WINDOW,
 };
 
 #[async_trait]
@@ -215,9 +215,9 @@ impl Bundle for MockBundle {
         // backend dispatches it — boot is a new incarnation there too.
         let script = script_for(agent_id);
         let reply = verbs::handle_common(agent_id, payload, kernel, CFG, move |_client| {
-            Some(Arc::new(MockProvider {
+            Arc::new(MockProvider {
                 script: Arc::clone(&script),
-            }) as Arc<dyn Provider>)
+            }) as Arc<dyn Provider>
         })
         .await?
         .unwrap_or_else(|| json!({"error": format!("mock_backend: unknown type {verb:?}")}));
@@ -981,23 +981,29 @@ fn context_estimate_and_budget() {
     let mut m = Map::new();
     m.insert("context_window".into(), json!(8000));
     m.insert("num_ctx".into(), json!(2000));
-    assert_eq!(resolve_context_window(&m), 8000);
+    assert_eq!(
+        resolve_context_window(&m, crate::context::DEFAULT_CONTEXT_WINDOW),
+        8000
+    );
     let mut m2 = Map::new();
     m2.insert("num_ctx".into(), json!(2000));
-    assert_eq!(resolve_context_window(&m2), 2000);
+    assert_eq!(
+        resolve_context_window(&m2, crate::context::DEFAULT_CONTEXT_WINDOW),
+        2000
+    );
     // The default is 131072, not 4096: at 4096 the budget (4096 − 1024 reserve
     // = 3072) no longer fit the kernel's OWN ~3174-token system block, so every
     // agent created without an explicit window failfasted `too_small` before
     // the model was called.
     assert_eq!(
-        resolve_context_window(&Map::new()),
+        resolve_context_window(&Map::new(), crate::context::DEFAULT_CONTEXT_WINDOW),
         crate::context::DEFAULT_CONTEXT_WINDOW
     );
     assert_eq!(crate::context::DEFAULT_CONTEXT_WINDOW, 131_072);
     let mut tiny = Map::new();
     tiny.insert("context_window".into(), json!(100));
     tiny.insert("output_reserve".into(), json!(1000));
-    assert_eq!(budget(&tiny), 256); // floor
+    assert_eq!(budget(&tiny, crate::context::DEFAULT_CONTEXT_WINDOW), 256); // floor
 }
 
 #[tokio::test]
@@ -2492,6 +2498,7 @@ async fn every_model_call_carries_the_layer_default_timeout() {
         None,
         String::new(),
         0.2,
+        crate::context::DEFAULT_CONTEXT_WINDOW,
         None,
         false,
     )
@@ -2547,6 +2554,7 @@ async fn a_malformed_timeout_arg_settles_the_kernels_refusal() {
         None,
         String::new(),
         0.2,
+        crate::context::DEFAULT_CONTEXT_WINDOW,
         None,
         false,
     )
@@ -3073,6 +3081,7 @@ async fn the_compaction_cursor_is_the_store_length_not_the_view() {
         &kernel,
         "probe",
         "mock_backend",
+        crate::context::DEFAULT_CONTEXT_WINDOW,
         fat,
         store_len,
     )
@@ -3121,6 +3130,7 @@ async fn a_batch_of_calls_without_reply_to_all_come_back() {
         None,
         "[reply to x · y z]".to_string(),
         30.0,
+        crate::context::DEFAULT_CONTEXT_WINDOW,
         None,
         false,
     )
@@ -3700,7 +3710,7 @@ async fn grep_answers_under_the_inline_cap_even_when_everything_matches() {
     let serialized = serde_json::to_string(&r).unwrap();
     assert!(
         crate::context::estimate_one(&json!({"role": "user", "content": serialized}))
-            <= crate::context::inline_cap(&meta),
+            <= crate::context::inline_cap(&meta, crate::context::DEFAULT_CONTEXT_WINDOW),
         "grep must answer under the inline cap"
     );
 }
@@ -3898,6 +3908,7 @@ async fn a_fold_projection_over_budget_writes_folds() {
         &kernel,
         "cli",
         "mock",
+        crate::context::DEFAULT_CONTEXT_WINDOW,
         messages.clone(),
         store_len,
     )
@@ -3972,7 +3983,15 @@ async fn successive_fold_projections_do_not_nest_into_a_chain() {
         .await
         .expect("store read");
         let _ = crate::projection::project_context(
-            &provider, &backend, &state, &kernel, "cli", "mock", messages, store_len,
+            &provider,
+            &backend,
+            &state,
+            &kernel,
+            "cli",
+            "mock",
+            crate::context::DEFAULT_CONTEXT_WINDOW,
+            messages,
+            store_len,
         )
         .await;
         let rows: Vec<Value> = crate::memory::load_history(&backend, &kernel, false)
@@ -4147,23 +4166,82 @@ fn budget_meta_parses_like_python() {
     // 0 and that 0 is the window; `output_reserve` "-5" is not a digit string, so
     // 1024; the budget then floors at 256. Measured python: {0, 1024, 256}.
     let m = meta(json!({"context_window": 0.5, "output_reserve": "-5", "recent_n": 1000.0}));
-    assert_eq!(crate::context::resolve_context_window(&m), 0);
+    assert_eq!(
+        crate::context::resolve_context_window(&m, crate::context::DEFAULT_CONTEXT_WINDOW),
+        0
+    );
     assert_eq!(crate::context::output_reserve(&m), 1024);
-    assert_eq!(crate::context::budget(&m), 256);
+    assert_eq!(
+        crate::context::budget(&m, crate::context::DEFAULT_CONTEXT_WINDOW),
+        256
+    );
     assert_eq!(crate::context::recent_n(&m), 50);
     // `+12` is not `isdigit()`, `1000.0` is not an int, `true` is `int(True)` = 1.
     let m = meta(json!({"context_window": "+12", "output_reserve": 1000.0, "recent_n": true}));
-    assert_eq!(crate::context::resolve_context_window(&m), 131_072);
+    assert_eq!(
+        crate::context::resolve_context_window(&m, crate::context::DEFAULT_CONTEXT_WINDOW),
+        131_072
+    );
     assert_eq!(crate::context::output_reserve(&m), 1024);
     assert_eq!(crate::context::recent_n(&m), 1);
     // A positive float window truncates; the budget then floors.
     let m = meta(json!({"context_window": 12.9}));
-    assert_eq!(crate::context::resolve_context_window(&m), 12);
-    assert_eq!(crate::context::budget(&m), 256);
+    assert_eq!(
+        crate::context::resolve_context_window(&m, crate::context::DEFAULT_CONTEXT_WINDOW),
+        12
+    );
+    assert_eq!(
+        crate::context::budget(&m, crate::context::DEFAULT_CONTEXT_WINDOW),
+        256
+    );
     // A bool is never a window; `" 7 "` is `int()`-able.
     let m = meta(json!({"context_window": true, "recent_n": " 7 "}));
-    assert_eq!(crate::context::resolve_context_window(&m), 131_072);
+    assert_eq!(
+        crate::context::resolve_context_window(&m, crate::context::DEFAULT_CONTEXT_WINDOW),
+        131_072
+    );
     assert_eq!(crate::context::recent_n(&m), 7);
+}
+
+/// python `_as_id` / `_as_pos_int` / `output_reserve` take ASCII digits only
+/// (`isascii() and isdigit()`): a Unicode decimal (`'٣'`) or a compatibility
+/// digit (`'²'`) is not a number. Vectors measured with python's own functions.
+#[test]
+fn id_and_window_digit_strings_are_ascii_only() {
+    use crate::retrieval::as_id;
+    for (v, want) in [
+        (json!("٣"), None),
+        (json!("²"), None),
+        (json!("12٣"), None),
+        (json!(" 3 "), Some(3)),
+        (json!("\u{2003}3\u{2003}"), Some(3)),
+        (json!("\u{1c}3"), Some(3)),
+        (json!("0"), Some(0)),
+        (json!("+5"), None),
+        (json!(""), None),
+        (json!(7), Some(7)),
+        (json!(0), None),
+        (json!(true), None),
+        (json!(2.0), None),
+    ] {
+        assert_eq!(as_id(&v), want, "_as_id({v})");
+    }
+    let meta = |v: Value| v.as_object().unwrap().clone();
+    for v in ["٣", "²"] {
+        let m = meta(json!({"context_window": v, "output_reserve": v}));
+        assert_eq!(
+            crate::context::resolve_context_window(&m, crate::context::DEFAULT_CONTEXT_WINDOW),
+            131_072,
+            "{v}"
+        );
+        assert_eq!(crate::context::output_reserve(&m), 1024, "{v}");
+    }
+    let m = meta(json!({"context_window": "\u{2003} 12 ", "output_reserve": "\u{2003} 12 "}));
+    assert_eq!(
+        crate::context::resolve_context_window(&m, crate::context::DEFAULT_CONTEXT_WINDOW),
+        12
+    );
+    assert_eq!(crate::context::output_reserve(&m), 12);
 }
 
 #[test]
@@ -4860,7 +4938,15 @@ async fn the_seam_keeps_the_goal_the_strategies_pinned() {
             }
             let len = messages.len() - 1;
             let out = crate::projection::project_context(
-                &provider, &backend, &state, &kernel, "cli", "mock", messages, len,
+                &provider,
+                &backend,
+                &state,
+                &kernel,
+                "cli",
+                "mock",
+                crate::context::DEFAULT_CONTEXT_WINDOW,
+                messages,
+                len,
             )
             .await
             .expect("the projection must fit, not failfast");
@@ -5185,6 +5271,10 @@ async fn context_clear_starts_a_new_thread_without_deleting() {
 /// The memory-store features (python `test_memory_features.py`), on this harness.
 #[path = "tests_memory.rs"]
 mod memory_features;
+
+/// A model never reaches a secret holder (python `test_secret_holders.py`).
+#[path = "tests_secret_holders.rs"]
+mod secret_holders;
 
 /// STEP-4 PIN (2026-10-01): per-agent backend state. Two agents never share a
 /// state slot; `drop_state` (every backend's `on_delete`) frees the slot so the

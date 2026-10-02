@@ -59,7 +59,7 @@ async fn call(k: &Arc<Kernel>, payload: Value) -> Value {
 /// On the BINARY channel: the blob IS the `bytes` argument.
 async fn call_bin(k: &Arc<Kernel>, payload: Value, blob: &[u8]) -> Value {
     k.send(vec![
-        Item::new(AgentId::from("fb"), payload).with_binary(blob.to_vec())
+        Item::new(AgentId::from("fb"), payload).with_binary_key("bytes", blob.to_vec())
     ])
     .await
     .remove(0)

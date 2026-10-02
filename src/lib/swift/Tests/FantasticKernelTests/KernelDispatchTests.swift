@@ -30,7 +30,7 @@ struct EchoBundle: AgentBundle {
 final class EventCapture: @unchecked Sendable {
     private let lock = NSLock()
     private var events: [JSON] = []
-    private var bodies: [InboxBody?] = []
+    private var bodies: [Blob?] = []
 
     func handler() -> StateSubscriber {
         return { [weak self] ev, body in
@@ -48,7 +48,7 @@ final class EventCapture: @unchecked Sendable {
     }
 
     /// The raw body that rode beside each event — `nil` for a text payload.
-    func bodySnapshot() -> [InboxBody?] {
+    func bodySnapshot() -> [Blob?] {
         lock.lock()
         defer { lock.unlock() }
         return bodies
@@ -422,17 +422,17 @@ struct WatcherFanoutTests {
         var it = watcher.makeAsyncIterator()
         let blob = Data([1, 2, 3, 4, 5])
         _ = await kernel.send([
-            Item("sink", ["type": "write_stream", "path": "a.bin"], binary: blob),
+            Item("sink", ["type": "write_stream", "path": "a.bin"], binary: Blob("bytes", blob)),
         ])
         let got = await it.next()
         #expect(got?.payload["type"].asString == "write_stream")
         #expect(got?.payload["bytes"] == JSON.null)
-        #expect(got?.body?.path == "bytes")
-        #expect(got?.body?.data == Data([1, 2, 3, 4, 5]))
+        #expect(got?.body?.parts == ["bytes"])
+        #expect(got?.body?.bytes == Data([1, 2, 3, 4, 5]))
         // The state event carries the same body, and its summary shrinks it.
         let idx = cap.snapshot().firstIndex { $0["kind"].asString == "send" }
         #expect(idx != nil)
-        #expect(cap.bodySnapshot()[idx ?? 0]?.data == Data([1, 2, 3, 4, 5]))
+        #expect(cap.bodySnapshot()[idx ?? 0]?.bytes == Data([1, 2, 3, 4, 5]))
         #expect(
             cap.snapshot()[idx ?? 0]["summary"].asString
                 == #"{"type": "write_stream", "path": "a.bin", "bytes": "<bytes:5>"}"#)

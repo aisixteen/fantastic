@@ -31,7 +31,7 @@ final class StubHTTP: @unchecked Sendable {
             self.body = body
         }
 
-        /// A finished Anthropic/OpenAI-style SSE body.
+        /// A finished SSE body.
         static func sse(_ body: String) -> Reply {
             Reply(status: 200, headers: [("Content-Type", "text/event-stream")], body: body)
         }

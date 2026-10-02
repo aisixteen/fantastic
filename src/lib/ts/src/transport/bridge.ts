@@ -1,5 +1,6 @@
 import type { Bridge, Kernel } from "../kernel/kernel.ts";
 import type { Json, Payload } from "../kernel/json.ts";
+import type { Item } from "../kernel/outcome.ts";
 import { encodeFrame, decodeFrame } from "./frame.ts";
 import type { Envelope } from "./frame.ts";
 
@@ -7,6 +8,14 @@ import type { Envelope } from "./frame.ts";
 // wire python web_ws/_proxy.py serves (call/emit/watch/unwatch/reply/error/event +
 // the binary frame), the same one transport.js + ws_bridge speak — no new
 // dialect.
+//
+// A call frame is `{type:"call", target, payload, id, caller?, secret?}` in BOTH
+// directions. `secret` is the batch item's marked paths (`kernel/secret.ts`),
+// carried verbatim: a host-bound send puts its item's marks on the frame (only
+// when it marked some — never `[]`), and a host's call is dispatched here WITH
+// the frame's marks, so whichever kernel receives the call records `<secret>`
+// exactly as the caller does. The reply carries the real result back. Nothing
+// here logs or keeps a frame.
 //
 // FEDERATION ROUTING. The `event` frame carries no source id (the proxy mirrors
 // every watched inbox into one undifferentiated stream). So instead of one
@@ -208,7 +217,12 @@ class Conn {
     }
   }
 
-  async call(envelopePayload: Envelope, target: string, caller?: string): Promise<Json> {
+  async call(
+    envelopePayload: Envelope,
+    target: string,
+    caller?: string,
+    secret?: readonly string[],
+  ): Promise<Json> {
     await this.ready;
     if (!this.connected || this.ws === null) throw new Error("disconnected");
     const id = `${this.idPrefix}-${this.nextId++}`;
@@ -217,6 +231,8 @@ class Conn {
     // it. Absent until this kernel has a guid (its root has booted).
     const env: Envelope = { type: "call", target, payload: envelopePayload, id };
     if (caller !== undefined) env["caller"] = caller;
+    // the item's marks, so the FAR kernel masks its records of this call too
+    if (secret !== undefined && secret.length > 0) env["secret"] = [...secret];
     const frame = encodeFrame(env);
     return new Promise<Json>((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
@@ -373,8 +389,8 @@ export class WsBridge implements Bridge {
    * (`<host guid>|<agent>`). Dispatched through the ordinary send pipeline under
    * a FOREIGN origin: the target's `callable_by` is the whole local check (the
    * host already judged its sender's `can_call`), and only this kernel's own
-   * agents are reachable. The outcome's result — a refusal included — goes back
-   * as the `reply`.
+   * agents are reachable. The frame's `secret` marks go on the item as they came.
+   * The outcome's result — a refusal included — goes back as the `reply`.
    */
   private async answerCall(conn: Conn, frame: Envelope): Promise<void> {
     const id = String(frame["id"] ?? "");
@@ -399,9 +415,13 @@ export class WsBridge implements Bridge {
       });
       return;
     }
-    const [out] = await this.kernel
-      .foreignView(caller)
-      .send([{ target, payload: payload as Payload }]);
+    const item: Item = { target, payload: payload as Payload };
+    // SECRET MARKS cross the leg verbatim (`kernel/secret.ts`): this kernel
+    // records the call as shown, exactly as for a local caller — its own check
+    // refuses a malformed mark (any JSON value the frame carried) before
+    // anything is dispatched (python web_ws `_on_call`, io_bridge's inbound call).
+    if (Object.hasOwn(frame, "secret")) item.secret = frame["secret"] as string[];
+    const [out] = await this.kernel.foreignView(caller).send([item]);
     conn.answer(id, (out?.result ?? null) as Json);
   }
 
@@ -411,16 +431,18 @@ export class WsBridge implements Bridge {
     this.connFor(this.controlEndpoint).announce();
   }
 
-  /** Forward a call to `target`: its own socket if watched, else the control one. */
-  forward(target: string, payload: Payload, caller?: string): Promise<Json> {
+  /** Forward a call to `target`: its own socket if watched, else the control one.
+   *  `secret` — the item's marked paths — rides the frame when there are some. */
+  forward(target: string, payload: Payload, caller?: string, secret?: readonly string[]): Promise<Json> {
     const conn = this.conns.get(target) ?? this.connFor(this.controlEndpoint);
-    return conn.call(payload, target, caller);
+    return conn.call(payload, target, caller, secret);
   }
 
-  /** Forward a call whose payload carries a binary blob (e.g. paste_image). */
-  forwardBinary(target: string, payload: Envelope, caller?: string): Promise<Json> {
+  /** Forward a call whose payload carries a binary blob (e.g. paste_image);
+   *  `secret` rides the frame's JSON head as on `forward`. */
+  forwardBinary(target: string, payload: Envelope, caller?: string, secret?: readonly string[]): Promise<Json> {
     const conn = this.conns.get(target) ?? this.connFor(this.controlEndpoint);
-    return conn.call(payload, target, caller);
+    return conn.call(payload, target, caller, secret);
   }
 
   /** Fire-and-forget emit to a host agent's inbox (e.g. reload_html). */

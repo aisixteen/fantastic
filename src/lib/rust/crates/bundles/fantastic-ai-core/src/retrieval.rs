@@ -24,8 +24,7 @@ use crate::strategies::strip::{pid_of, LOW};
 use crate::think::without_thinking;
 use crate::view::{apply_res, res_of};
 use fantastic_bundle::{
-    decimal_value, py_int, py_int_or, py_split_whitespace, py_splitlines, py_str, py_strip,
-    py_truthy,
+    py_int, py_int_or, py_split_whitespace, py_splitlines, py_str, py_strip, py_truthy,
 };
 use fantastic_kernel::{AgentId, Kernel};
 use futures_util::StreamExt;
@@ -38,8 +37,9 @@ use std::sync::Arc;
 ///
 /// THE TWO BRANCHES DIFFER ON PURPOSE: an int must be POSITIVE, a digit string
 /// need not be (`'0'` → 0, which a lookup then answers as a readable not_found).
-/// The string is python-stripped and its digits are any Unicode decimal (`'٣'`
-/// → 3); `'+5'` is not a digit string and is not an id.
+/// The string is python-stripped and its digits are ASCII only (python's
+/// `isascii() and isdigit()`): `'٣'` and `'²'` are not ids, and `'+5'` is not a
+/// digit string either.
 #[must_use]
 pub fn as_id(x: &Value) -> Option<i64> {
     match x {
@@ -49,7 +49,7 @@ pub fn as_id(x: &Value) -> Option<i64> {
         Value::Number(n) => n.as_i64().filter(|&i| i > 0),
         Value::String(s) => {
             let t = py_strip(s);
-            if !t.is_empty() && t.chars().all(|c| decimal_value(c).is_some()) {
+            if !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()) {
                 py_int(&Value::String(t.to_string())).ok()
             } else {
                 None
@@ -72,7 +72,16 @@ fn bad_arg(msg: &str, arg: &str) -> Value {
 /// ids to search; a fold id searches its members), `limit?`, `width?` (chars of
 /// each matched line, from its start; default 200). Returns `{matches:[{id, line,
 /// text}], total, truncated}`.
-pub async fn grep(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> MemResult<Value> {
+///
+/// `model_window` is the backend's own window
+/// ([`crate::agent_loop::BackendConfig::model_window`]) — the inline cap a page
+/// is measured against.
+pub async fn grep(
+    agent_id: &AgentId,
+    payload: &Value,
+    kernel: &Arc<Kernel>,
+    model_window: i64,
+) -> MemResult<Value> {
     let null = Value::Null;
     // python `str(payload.get("query") or "").strip().lower()` — a NUMERIC query
     // is its digits, not "no query".
@@ -243,7 +252,7 @@ pub async fn grep(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> 
     }
     let (kept, cut) = fit_reply(
         &matches,
-        inline_cap(&agent_meta(agent_id, kernel)),
+        inline_cap(&agent_meta(agent_id, kernel), model_window),
         Some(limit as i64),
     );
     let more = cut || total > kept.len();
@@ -321,6 +330,7 @@ pub async fn context_clear(
     agent_id: &AgentId,
     payload: &Value,
     kernel: &Arc<Kernel>,
+    model_window: i64,
 ) -> MemResult<Value> {
     let meta = agent_meta(agent_id, kernel);
     let members: Vec<i64> = head(agent_id, kernel)
@@ -363,7 +373,14 @@ pub async fn context_clear(
     .await?;
     // The persisted view names rows behind the clear — empty it, so the view is the
     // store from the clear on. RAM is scratch; the store is never cleared.
-    save_view(agent_id, kernel, &[], agent_budget(&meta), "cleared").await?;
+    save_view(
+        agent_id,
+        kernel,
+        &[],
+        agent_budget(&meta, model_window),
+        "cleared",
+    )
+    .await?;
     let st = crate::state::state_for(agent_id);
     *st.projection.lock().expect("projection poisoned") = None;
     *st.compaction_mark.lock().expect("mark poisoned") = None;
@@ -386,6 +403,7 @@ pub async fn context_recall(
     payload: &Value,
     kernel: &Arc<Kernel>,
     provider: Option<&Arc<dyn Provider>>,
+    model_window: i64,
 ) -> MemResult<Value> {
     let meta = agent_meta(agent_id, kernel);
     let rows = load_history(agent_id, kernel, false).await?;
@@ -398,8 +416,8 @@ pub async fn context_recall(
         "role": "system",
         "content": default_system_content(agent_id, kernel).await,
     }));
-    let body_budget =
-        (agent_budget(&meta) - sys_tokens - NOTICE_ENVELOPE_RESERVE).max(BUDGET_FLOOR);
+    let body_budget = (agent_budget(&meta, model_window) - sys_tokens - NOTICE_ENVELOPE_RESERVE)
+        .max(BUDGET_FLOOR);
     let target = (body_budget as f64 * LOW) as i64;
     let view: Vec<Value> = fold_render(&rows)
         .into_iter()

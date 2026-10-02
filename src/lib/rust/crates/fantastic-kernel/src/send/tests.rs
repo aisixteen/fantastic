@@ -1,5 +1,5 @@
 //! Unit tests for [`crate::send`].
-use crate::outcome::Item;
+use crate::outcome::{Blob, Item, Step};
 
 use super::*;
 use crate::agent::Agent;
@@ -15,10 +15,12 @@ async fn send_bin(
     blob: Vec<u8>,
 ) -> (Value, Option<Vec<u8>>) {
     let out = kernel
-        .send(vec![Item::new(target.clone(), payload).with_binary(blob)])
+        .send(vec![
+            Item::new(target.clone(), payload).with_binary_key("bytes", blob)
+        ])
         .await
         .remove(0);
-    (out.result, out.body)
+    (out.result, out.body.map(|b| b.bytes))
 }
 
 fn make_agent(id: &str) -> Arc<Agent> {
@@ -238,12 +240,16 @@ async fn a_binary_item_routes_through_bundle_handle_binary() {
             &self,
             _agent_id: &AgentId,
             _header: Value,
-            blob: Vec<u8>,
+            body: Option<crate::outcome::Blob>,
             _kernel: &Arc<Kernel>,
-        ) -> Result<(Reply, Option<Vec<u8>>), BundleError> {
+        ) -> Result<(Reply, Option<crate::outcome::Blob>), BundleError> {
+            let blob: Vec<u8> = body.map(|b| b.bytes).unwrap_or_default();
             // Echo the bytes back as the reply BODY (symmetric channel).
             let len = blob.len();
-            Ok((Some(json!({"ok": true, "len": len})), Some(blob)))
+            Ok((
+                Some(json!({"ok": true, "len": len})),
+                Some(Blob::key("bytes", blob)),
+            ))
         }
     }
     let mut kernel = Kernel::new();
@@ -347,9 +353,9 @@ async fn a_binary_bundle_error_settles_raised() {
             &self,
             _agent_id: &AgentId,
             _header: Value,
-            _blob: Vec<u8>,
+            _body: Option<crate::outcome::Blob>,
             _kernel: &Arc<Kernel>,
-        ) -> Result<(Reply, Option<Vec<u8>>), BundleError> {
+        ) -> Result<(Reply, Option<crate::outcome::Blob>), BundleError> {
             Err(BundleError::from("kaboom"))
         }
     }
@@ -1555,9 +1561,10 @@ async fn a_watched_write_stream_reaches_the_watcher_with_its_body() {
             &self,
             _a: &AgentId,
             _h: Value,
-            blob: Vec<u8>,
+            body: Option<crate::outcome::Blob>,
             _k: &Arc<Kernel>,
-        ) -> Result<(Reply, Option<Vec<u8>>), BundleError> {
+        ) -> Result<(Reply, Option<crate::outcome::Blob>), BundleError> {
+            let blob: Vec<u8> = body.map(|b| b.bytes).unwrap_or_default();
             Ok((Some(json!({"written": blob.len()})), None))
         }
     }
@@ -1599,7 +1606,234 @@ async fn a_watched_write_stream_reaches_the_watcher_with_its_body() {
         Value::Null,
         "the head carries null where the body was lifted out"
     );
-    assert_eq!(got.body, Some(("bytes".to_string(), vec![1, 2, 3, 4, 5])));
+    assert_eq!(got.body, Some(Blob::key("bytes", vec![1, 2, 3, 4, 5])));
+}
+
+/// A BODY RIDES AT ITS PATH of the payload — where python's dict holds the
+/// bytes (`data` for `paste_image`, `bytes` for `write_stream`). The handler gets
+/// it at that path and a header with NOTHING there; a watcher gets it at that
+/// path with `null` in python's position; the call row records `{len}` there.
+/// A path that names no slot of the payload is refused before anything runs.
+#[tokio::test]
+async fn a_binary_body_rides_at_its_payload_path() {
+    use crate::bundle::{Bundle, BundleError, BundleRegistry, Reply};
+    struct Echo;
+    #[async_trait::async_trait]
+    impl Bundle for Echo {
+        fn name(&self) -> &str {
+            "echo"
+        }
+        async fn handle(
+            &self,
+            _a: &AgentId,
+            _p: &Value,
+            _k: &Arc<Kernel>,
+        ) -> Result<Reply, BundleError> {
+            Ok(Some(json!({"channel": "text"})))
+        }
+        async fn handle_binary(
+            &self,
+            _a: &AgentId,
+            header: Value,
+            body: Option<crate::outcome::Blob>,
+            _k: &Arc<Kernel>,
+        ) -> Result<(Reply, Option<crate::outcome::Blob>), BundleError> {
+            let data = crate::outcome::body_at(body.as_ref(), "data").map(<[u8]>::len);
+            let bytes = crate::outcome::body_at(body.as_ref(), "bytes").map(<[u8]>::len);
+            Ok((
+                Some(json!({"header": header, "data": data, "bytes": bytes})),
+                None,
+            ))
+        }
+    }
+    let mut kernel = Kernel::new();
+    let mut reg = BundleRegistry::new();
+    reg.register("echo.tools", Echo);
+    kernel.bundles = reg;
+    let kernel = Arc::new(kernel);
+    let echo = Agent::new(
+        AgentId::from("echo"),
+        Some("echo.tools".to_string()),
+        None,
+        Map::new(),
+        Path::new("/tmp/nowhere").join("echo"),
+        true,
+    );
+    kernel.register(Arc::clone(&echo));
+    kernel.register(make_agent("tap"));
+    let mut rx = kernel.ensure_inbox(&AgentId::from("tap"));
+    assert!(kernel.watch(&echo.id, AgentId::from("tap")).await.is_none());
+
+    // the caller names the slot (`data: null`) to keep python's key order
+    let out = kernel
+        .send(vec![Item::new(
+            echo.id.clone(),
+            json!({"type": "paste_image", "job_id": 1, "data": null, "mime": "image/png"}),
+        )
+        .with_binary_key("data", vec![9, 8, 7])])
+        .await
+        .remove(0);
+    assert_eq!(
+        out.result,
+        json!({"header": {"type": "paste_image", "job_id": 1, "mime": "image/png"},
+               "data": 3, "bytes": null}),
+        "the handler reads its body at `data`, and nothing is there in its header"
+    );
+    let got = rx.try_recv().expect("the watcher was mirrored");
+    assert_eq!(
+        serde_json::to_string(&got.payload).unwrap(),
+        r#"{"type":"paste_image","job_id":1,"data":null,"mime":"image/png"}"#
+    );
+    assert_eq!(got.body, Some(Blob::key("data", vec![9, 8, 7])));
+    let row = kernel
+        .rows
+        .all()
+        .into_iter()
+        .find(|r| r.get("verb") == Some(&json!("paste_image")))
+        .expect("the call row");
+    assert_eq!(
+        serde_json::to_string(&row["payload"]).unwrap(),
+        r#"{"type":"paste_image","job_id":1,"data":{"len":3},"mime":"image/png"}"#
+    );
+
+    // a NESTED path: the slot inside the payload, the leaf gone from the header
+    let out = kernel
+        .send(vec![Item::new(
+            echo.id.clone(),
+            json!({"type": "take", "meta": {"k": 1}}),
+        )
+        .with_binary(
+            vec![Step::from("meta"), Step::from("blob")],
+            vec![1],
+        )])
+        .await
+        .remove(0);
+    assert_eq!(
+        out.result["header"],
+        json!({"type": "take", "meta": {"k": 1}})
+    );
+    assert_eq!(out.result["data"], Value::Null);
+    let got = rx.try_recv().expect("mirrored");
+    assert_eq!(got.payload["meta"], json!({"k": 1, "blob": null}));
+    assert_eq!(
+        got.body,
+        Some(Blob::new(
+            vec![Step::from("meta"), Step::from("blob")],
+            vec![1]
+        ))
+    );
+
+    // a path that names no slot of the payload is refused, nothing runs
+    let out = kernel
+        .send(vec![Item::new(echo.id.clone(), json!({"type": "take"}))
+            .with_binary(
+                vec![Step::from("nope"), Step::from("deep")],
+                vec![1],
+            )])
+        .await
+        .remove(0);
+    assert_eq!(out.pid, None);
+    assert_eq!(out.result["reason"], json!("bad_arg"), "{}", out.result);
+    assert_eq!(out.result["arg"], json!("binary"));
+    assert!(rx.try_recv().is_none(), "a refused item mirrors nothing");
+}
+
+/// A body bound to ONE LITERAL KEY (`Item::with_binary_key` — the REST octet
+/// leg's `X-Fantastic-Bytes-Field`, python's `payload[field] = body`): `a.b` is
+/// the key `"a.b"`, never `payload["a"]["b"]`. The handler gets it at that key
+/// with a nested `a.b` left as sent; the watcher and the call row hold the key
+/// where python's dict does; an envelope with no `a` is no refusal.
+#[tokio::test]
+async fn a_literal_key_body_is_one_top_level_key() {
+    use crate::bundle::{Bundle, BundleError, BundleRegistry, Reply};
+    struct Echo;
+    #[async_trait::async_trait]
+    impl Bundle for Echo {
+        fn name(&self) -> &str {
+            "echo"
+        }
+        async fn handle(
+            &self,
+            _a: &AgentId,
+            _p: &Value,
+            _k: &Arc<Kernel>,
+        ) -> Result<Reply, BundleError> {
+            Ok(Some(json!({"channel": "text"})))
+        }
+        async fn handle_binary(
+            &self,
+            _a: &AgentId,
+            header: Value,
+            body: Option<crate::outcome::Blob>,
+            _k: &Arc<Kernel>,
+        ) -> Result<(Reply, Option<crate::outcome::Blob>), BundleError> {
+            let at = crate::outcome::body_at(body.as_ref(), "a.b").map(<[u8]>::len);
+            Ok((Some(json!({"header": header, "a.b": at})), None))
+        }
+    }
+    let mut kernel = Kernel::new();
+    let mut reg = BundleRegistry::new();
+    reg.register("echo.tools", Echo);
+    kernel.bundles = reg;
+    let kernel = Arc::new(kernel);
+    let echo = Agent::new(
+        AgentId::from("echo"),
+        Some("echo.tools".to_string()),
+        None,
+        Map::new(),
+        Path::new("/tmp/nowhere").join("echo"),
+        true,
+    );
+    kernel.register(Arc::clone(&echo));
+    kernel.register(make_agent("tap"));
+    let mut rx = kernel.ensure_inbox(&AgentId::from("tap"));
+    assert!(kernel.watch(&echo.id, AgentId::from("tap")).await.is_none());
+
+    let out = kernel
+        .send(vec![Item::new(
+            echo.id.clone(),
+            json!({"type": "take", "a": {"b": "kept"}}),
+        )
+        .with_binary_key("a.b", vec![1, 2])])
+        .await
+        .remove(0);
+    assert_eq!(
+        out.result,
+        json!({"header": {"type": "take", "a": {"b": "kept"}}, "a.b": 2})
+    );
+    let got = rx.try_recv().expect("mirrored");
+    assert_eq!(
+        serde_json::to_string(&got.payload).unwrap(),
+        r#"{"type":"take","a":{"b":"kept"},"a.b":null}"#
+    );
+    // the watcher's body names the ONE key, never the nested `a` → `b`
+    assert_eq!(got.body, Some(Blob::key("a.b", vec![1, 2])));
+    assert_eq!(
+        got.body
+            .as_ref()
+            .map(|b| fantastic_bundle::path::steps_value(&b.path)),
+        Some(json!(["a.b"]))
+    );
+    let row = kernel
+        .rows
+        .all()
+        .into_iter()
+        .find(|r| r.get("verb") == Some(&json!("take")))
+        .expect("the call row");
+    assert_eq!(
+        serde_json::to_string(&row["payload"]).unwrap(),
+        r#"{"type":"take","a":{"b":"kept"},"a.b":{"len":2}}"#
+    );
+
+    // no `a` in the payload: the key is literal, so nothing is missing
+    let out = kernel
+        .send(vec![
+            Item::new(echo.id.clone(), json!({"type": "take"})).with_binary_key("a.b", vec![1])
+        ])
+        .await
+        .remove(0);
+    assert_eq!(out.status, Status::Completed, "{}", out.result);
+    assert_eq!(out.result, json!({"header": {"type": "take"}, "a.b": 1}));
 }
 
 #[tokio::test]
@@ -1686,9 +1920,35 @@ async fn a_bytes_payload_summarizes_as_bytes_n() {
     // C77/C86: the summary shrinks a body to `<bytes:N>` at the path it rode.
     let s = summarize_payload(
         &json!({"type": "write_stream", "bytes": null}),
-        Some(&("bytes".to_string(), vec![0u8; 12])),
+        Some(&Blob::key("bytes", vec![0u8; 12])),
     );
     assert_eq!(s, r#"{"type": "write_stream", "bytes": "<bytes:12>"}"#);
+}
+
+/// The marker sits at the body's LITERAL key, as python's `_shrink` writes it in
+/// the dict: `a.b` is the key `"a.b"`, its nested twin `a` → `b` untouched. A
+/// nested and a list slot are their own steps.
+#[tokio::test]
+async fn a_literal_dotted_key_summarizes_at_that_key() {
+    let s = summarize_payload(
+        &json!({"type": "take", "a": {"b": "kept"}, "a.b": null}),
+        Some(&Blob::key("a.b", vec![0u8; 3])),
+    );
+    assert_eq!(
+        s,
+        r#"{"type": "take", "a": {"b": "kept"}, "a.b": "<bytes:3>"}"#
+    );
+    let s = summarize_payload(
+        &json!({"type": "take", "items": [{"n": 0}, {"data": null}]}),
+        Some(&Blob::new(
+            vec![Step::from("items"), Step::Index(1), Step::from("data")],
+            vec![0u8; 2],
+        )),
+    );
+    assert_eq!(
+        s,
+        r#"{"type": "take", "items": [{"n": 0}, {"data": "<bytes:2>"}]}"#
+    );
 }
 
 // ─── C2 + C4 — the kernel_verbs map is python's `_SYSTEM_VERB_DOCS` ─────────
@@ -1796,7 +2056,7 @@ async fn send_binary(
 ) -> crate::outcome::Outcome {
     kernel
         .send(vec![
-            Item::new(AgentId::from(target), payload).with_binary(blob)
+            Item::new(AgentId::from(target), payload).with_binary_key("bytes", blob)
         ])
         .await
         .remove(0)
@@ -1897,13 +2157,15 @@ impl crate::bundle::Bundle for NoReply {
         &self,
         _agent_id: &AgentId,
         header: Value,
-        blob: Vec<u8>,
+        body: Option<crate::outcome::Blob>,
         _kernel: &Arc<Kernel>,
-    ) -> Result<(crate::bundle::Reply, Option<Vec<u8>>), crate::bundle::BundleError> {
+    ) -> Result<(crate::bundle::Reply, Option<crate::outcome::Blob>), crate::bundle::BundleError>
+    {
+        let blob: Vec<u8> = body.map(|b| b.bytes).unwrap_or_default();
         match verb_of(&header) {
             "raise" => Err(crate::bundle::BundleError::from("binary kaboom")),
             "empty" => Ok((None, None)),
-            _ => Ok((None, Some(blob))),
+            _ => Ok((None, Some(crate::outcome::Blob::key("bytes", blob)))),
         }
     }
 }
@@ -1931,7 +2193,11 @@ async fn a_binary_handler_with_no_reply_settles_null_and_keeps_its_body() {
     let out = send_binary(&kernel, "nr", json!({"type": "echo"}), vec![4, 5, 6]).await;
     assert_eq!(out.status, crate::outcome::Status::Completed);
     assert_eq!(out.result, Value::Null, "Ok(None) is a null reply");
-    assert_eq!(out.body, Some(vec![4, 5, 6]), "the body still rides back");
+    assert_eq!(
+        out.body,
+        Some(Blob::key("bytes", vec![4, 5, 6])),
+        "the body still rides back"
+    );
     let out = send_binary(&kernel, "nr", json!({"type": "empty"}), vec![4]).await;
     assert_eq!(out.result, Value::Null);
     assert_eq!(out.body, None, "no chunk at all stays no chunk");

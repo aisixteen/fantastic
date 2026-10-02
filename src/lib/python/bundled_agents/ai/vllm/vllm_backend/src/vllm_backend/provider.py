@@ -25,10 +25,11 @@ What is vLLM-specific here, and why each piece exists (measured by the
   conversation re-prefills from scratch. The table keeps the number of LIVE
   conversations under that ceiling and rotates the least-recently-used one out.
 - THE KEY, when the door needs one (owner, 2026-09-30: an HTTPS door in front of
-  the shared GPU takes `Authorization: Bearer <key>`). Read from `VLLM_API_KEY`
-  at CALL time, never from the record; set ⇒ sent as a Bearer header, unset ⇒ no
-  header at all, so a local vLLM started without `--api-key` keeps working. A 401
-  or 403 names the variable.
+  the shared GPU takes `Authorization: Bearer <key>`). Read before EACH request
+  through `key` — the record's `credentials` ref in a credential store
+  (`ai_core/credentials.py`), never the environment or the record; a record with
+  no `credentials` sends no header at all, so a local vLLM started without
+  `--api-key` keeps working. A 401 or 403 says to name `credentials`.
 """
 
 from __future__ import annotations
@@ -36,7 +37,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 import time
 from collections import OrderedDict
 from collections.abc import AsyncIterator
@@ -84,9 +84,6 @@ PASSTHROUGH = (
 
 # ─── connection ──────────────────────────────────────────────────────────────
 #
-# The environment variable the key is read from, at call time. Unset = keyless.
-KEY_VAR = "VLLM_API_KEY"
-#
 # TWO timeouts on purpose. A stopped instance drops SYNs silently, so one long
 # timeout would hang a caller for the whole read deadline; connect fails fast.
 # Read is long because a max-length generation decodes for many minutes (a
@@ -105,13 +102,6 @@ KV_OVERFLOWS = ("evict", "reject")
 
 class KvSlotsFull(RuntimeError):
     """`kv_overflow: reject` and every slot on the endpoint is live."""
-
-
-def _auth_headers() -> dict:
-    """`Authorization: Bearer <key>` when `KEY_VAR` is set, nothing when it is
-    not — read per call, so a key set after the agent was built is used."""
-    key = (os.environ.get(KEY_VAR) or "").strip()
-    return {"Authorization": f"Bearer {key}"} if key else {}
 
 
 class SessionTable:
@@ -223,6 +213,7 @@ class VllmProvider:
         *,
         endpoint: str,
         model: str,
+        key,
         max_tokens: int,
         kv_slots: int,
         kv_overflow: str,
@@ -236,6 +227,9 @@ class VllmProvider:
     ):
         self._endpoint = endpoint.rstrip("/")
         self._model = model
+        # `async key(endpoint) -> str | None`, awaited before EACH request; None =
+        # no `credentials` on the record, no header.
+        self._key = key
         self._max_tokens = int(max_tokens)
         self._kv = (int(kv_slots), kv_overflow, float(kv_ttl))
         # The effective sampling: the record's values over SAMPLING_DEFAULTS,
@@ -337,14 +331,17 @@ class VllmProvider:
         thinking = False
         saw_finish = False
         client = self._get_client()
+        key = await self._key(self._endpoint)
+        headers = {"Authorization": f"Bearer {key}"} if key else {}
         try:
             async with client.stream(
-                "POST", "/chat/completions", json=body, headers=_auth_headers()
+                "POST", "/chat/completions", json=body, headers=headers
             ) as resp:
                 if resp.status_code >= 400:
                     detail = (await resp.aread()).decode("utf-8", "replace")[:500]
                     why = (
-                        f" — the door wants a key: set {KEY_VAR}"
+                        " — the door wants a key: name it in `credentials` "
+                        "({store, ref})"
                         if resp.status_code in (401, 403)
                         else ""
                     )

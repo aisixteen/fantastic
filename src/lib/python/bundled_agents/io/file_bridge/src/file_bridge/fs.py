@@ -158,24 +158,57 @@ def read_text(root, path, *, external: bool = False) -> str:
 
 
 def write_bytes(
-    root, path, data: bytes, *, atomic: bool = True, external: bool = False
+    root,
+    path,
+    data: bytes,
+    *,
+    atomic: bool = True,
+    external: bool = False,
+    mode: int | None = None,
 ) -> None:
     """Write whole-file. Creates parent dirs. `atomic` ⇒ temp+rename (the safe default
-    for records/state); non-atomic for in-place streaming writes via write_chunk."""
+    for records/state); non-atomic for in-place streaming writes via write_chunk.
+    `mode` (atomic only) creates the file with exactly those permission bits — a
+    0600 secret file is never readable by others, not even between create and chmod."""
     target = resolve(root, path, external=external)
     target.parent.mkdir(parents=True, exist_ok=True)
     if atomic:
         tmp = target.with_name(target.name + ".tmp")
-        tmp.write_bytes(data)
+        if mode is None:
+            tmp.write_bytes(data)
+        else:
+            tmp.unlink(missing_ok=True)
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+            try:
+                os.fchmod(fd, mode)  # the umask may have narrowed it; never widened
+                os.write(fd, data)
+            finally:
+                os.close(fd)
         os.replace(tmp, target)
     else:
+        if mode is not None:
+            raise ValueError("fs: `mode` needs an atomic write")
         target.write_bytes(data)
 
 
 def write_text(
-    root, path, text: str, *, atomic: bool = True, external: bool = False
+    root,
+    path,
+    text: str,
+    *,
+    atomic: bool = True,
+    external: bool = False,
+    mode: int | None = None,
 ) -> None:
-    write_bytes(root, path, text.encode("utf-8"), atomic=atomic, external=external)
+    write_bytes(
+        root, path, text.encode("utf-8"), atomic=atomic, external=external, mode=mode
+    )
+
+
+def lstat(root, path, *, external: bool = False) -> os.stat_result:
+    """The entry's OWN stat (a symlink is not followed) — for a caller that must
+    check what a path IS (type, owner, permission bits) before trusting it."""
+    return _lexical_leaf(root, path, external=external).lstat()
 
 
 def open_append(root, path, *, external: bool = False):

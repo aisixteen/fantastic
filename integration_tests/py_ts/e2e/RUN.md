@@ -1,6 +1,6 @@
 # E2E runbook — live integration + emergence from zero → a connected system
 
-> scope: whole stack (host Python + browser JS + live Anthropic + a spawned builder)
+> scope: whole stack (host Python + browser JS + a live vLLM server + a spawned builder)
 > cost: real tokens + minutes. Run RARELY. See `README.md`.
 > The operating agent (Claude Code) executes the phases below in order.
 
@@ -10,8 +10,10 @@
 - The canvas page is packed by `boot_bare_host.sh` itself
   (`src/tui/web/canvas/scripts/pack.sh` → `dist/canvas.zip`).
 - `chromeAvailable()` (system Chrome) — else Phase 1/2c skip.
-- `ANTHROPIC_API_KEY` in repo `.env` — else Phase 1 (B–E) and
-  Phase 2 skip (the deterministic Phase-1 A still runs).
+- `VLLM_ENDPOINT`, `FANTASTIC_AI_MODEL`, `VLLM_KV_SLOTS`, `VLLM_KV_OVERFLOW` exported
+  and the server listing the model on `/models` — else Phase 1 (B–E) and Phase 2 skip
+  (the deterministic Phase-1 A still runs). A server that wants a key: `VLLM_API_KEY`
+  in repo `.env`, read by an env-backed `creds` credential_store, never by the backend.
 
 ## Phase 1 — live integration (scripted)
 
@@ -48,8 +50,8 @@ web / web_ws / web_rest / web_loader / a seeded `canvas` / the served frontend �
 ### 2b. Spawn the readme-only builder agent
 
 Spawn a sub-agent (general-purpose) with **exactly** this prompt, substituting the
-`REST_URL` from 2a. It gets **only** `curl` + what the system tells it — it must NOT
-read this repo's source or use any kernel tools.
+`REST_URL` from 2a and the four vLLM values from Phase 0. It gets **only** `curl` +
+what the system tells it — it must NOT read this repo's source or use any kernel tools.
 
 > You are wiring a live agent system you've never seen, through ONE door: HTTP at
 > `<REST_URL>`. `POST <REST_URL>/<target_id>` with a JSON body `{"type":"<verb>",
@@ -68,8 +70,10 @@ read this repo's source or use any kernel tools.
 >      answer, one reading the shared memory), each a frontend `html_agent.ts`
 >      record persisted under `canvas` via the `web_loader` store, watching the host
 >      agent(s) by id.
-> Use the AI bundle `anthropic_backend.tools` (each AI needs its own history `file_bridge`
-> agent via `file_bridge_id`); the scheduler needs a `file_bridge` agent too. Keep prompts
+> Use the AI bundle `vllm_backend.tools` with `endpoint` `<VLLM_ENDPOINT>`, `model`
+> `<FANTASTIC_AI_MODEL>`, `kv_slots` `<VLLM_KV_SLOTS>`, `kv_overflow` `<VLLM_KV_OVERFLOW>`
+> (its record also needs `max_tokens` and a `memory_store_id`; `reflect bundles=all`
+> shows the schema); the scheduler needs a `file_bridge` agent too. Keep prompts
 > tiny (one-word / one-number answers) to stay cheap. Make the schedule recurring
 > with a modest interval (~8s) so a browser opened later catches a fresh fire.
 >
@@ -121,7 +125,7 @@ from self-description ALONE — never told a number:
   `fantastic.send`/`watch`es a *many-jobs* runtime by id, behaviorally).
 
 Reuses `boot_bare_host.sh` (2a). The builder is **the operating agent's spawned Claude
-Code sub-agent**, NOT the kernel's Anthropic backend — curl + reflect only. It curls
+Code sub-agent**, NOT the kernel's AI backend — curl + reflect only. It curls
 the HOST backend readmes (terminal/ai/exec_bridge); the FRONTEND view-bundle
 readmes (not curl-reachable on a bare host) are handed to it verbatim below — real
 strings, **no cardinality stated**. The builder must DERIVE the cardinality.

@@ -2,8 +2,9 @@
 //
 // Mirrors python's `responses_backend` (canonical) and Rust's
 // `fantastic-responses-backend`. POSTs the full `…/v1/responses` URL named on the
-// record with `Authorization: Bearer $OPENAI_API_KEY`; streams RAW TEXT through the
-// Responses event-typed Server-Sent Events.
+// record with `Authorization: Bearer <key>` — the key read before each request from
+// the record's `credentials` ref in a credential store (`Credentials.swift`); streams
+// RAW TEXT through the Responses event-typed Server-Sent Events.
 //
 // STATELESS: `store:false` and the whole conversation as typed `input` items every
 // pass — the conversation is the agent's, never the endpoint's. NO NATIVE TOOLS: a
@@ -21,17 +22,8 @@ import OrderedCollections
 
 public let HANDLER_MODULE = "responses_backend.tools"
 
-/// The ONE variable the key is read from. No second spelling.
-public let KEY_VAR = "OPENAI_API_KEY"
-
 /// Per-turn output budget (`max_output_tokens`) when the record names none.
 public let DEFAULT_MAX_TOKENS = 8192
-
-/// Read the key from the environment. An EMPTY variable is no key.
-func readApiKey() -> String? {
-    guard let raw = ProcessInfo.processInfo.environment[KEY_VAR], !raw.isEmpty else { return nil }
-    return raw
-}
 
 public final class ResponsesBundle: AgentBundle, @unchecked Sendable {
     public let name = "responses_backend"
@@ -46,17 +38,17 @@ public final class ResponsesBundle: AgentBundle, @unchecked Sendable {
                 sentence:
                     "OpenAI Responses-API LLM agent (raw prompt-and-parse tool-calling).",
                 // NO reflect extras: python's binding passes no `reflect_extra`.
-                makeProvider: { agent, _, _ in
+                makeProvider: { agent, _, kernel in
                     // `endpoint` and `model` are REQUIRED on the record; the key
-                    // is checked INSIDE `chat()`, so an unwired connector reaches
-                    // `status(thinking)` and then raises — python's order.
-                    .provider(
-                        try ResponsesProvider(
-                            endpoint: try requiredMeta(agent, "endpoint", "responses_backend"),
-                            model: try requiredMeta(agent, "model", "responses_backend"),
-                            apiKey: readApiKey(),
-                            maxTokens: Self.maxTokens(agent.metaValue(forKey: "max_tokens")),
-                            sampling: Self.sampling(agent.metaValue(forKey: "sampling"))))
+                    // is read INSIDE `chat()`, from the record's `credentials`,
+                    // so an unwired connector reaches `status(thinking)` and then
+                    // raises — python's order.
+                    try ResponsesProvider(
+                        endpoint: try requiredMeta(agent, "endpoint", "responses_backend"),
+                        model: try requiredMeta(agent, "model", "responses_backend"),
+                        key: keyReader(agent.id, kernel, backend: "responses_backend", required: true),
+                        maxTokens: Self.maxTokens(agent.metaValue(forKey: "max_tokens")),
+                        sampling: Self.sampling(agent.metaValue(forKey: "sampling")))
                 }
             ))
     }
@@ -88,13 +80,13 @@ public final class ResponsesBundle: AgentBundle, @unchecked Sendable {
                 default: .integer(Int64(DEFAULT_MAX_TOKENS))),
             RecordSchema.field(
                 "sampling", "map", "runner params merged verbatim into the request body"),
-        ],
-        keyVar: KEY_VAR)
+            RecordSchema.credentialsField(required: true),
+        ])
 
     /// THE PYTHON FILE, BYTE FOR BYTE (`responses_backend/readme.md`).
     static let readmeText = #"""
     # responses_backend — an OpenAI Responses-API, context-managed completion agent
-    Talks to any endpoint that serves the OpenAI Responses API (`POST …/v1/responses`): OpenAI itself, Ollama ≥ 0.13.4, or a proxy in front of an open-weights model. `endpoint` (the full `…/v1/responses` URL) and `model` are REQUIRED on the record — nothing is guessed; the key is read from `OPENAI_API_KEY` in the environment / `.env`. Per-client chat threads, FIFO lock, and automatic context management. **No agentic loop** — one provider pass per `send`. Conversation in its memory store (`memory_store_id`).
+    Talks to any endpoint that serves the OpenAI Responses API (`POST …/v1/responses`): OpenAI itself, Ollama ≥ 0.13.4, or a proxy in front of an open-weights model. `endpoint` (the full `…/v1/responses` URL) and `model` are REQUIRED on the record — nothing is guessed; `credentials` is REQUIRED too: the key is read before each request from the record's `credentials: {store, ref}` — a ref in a `credential_store`, sent only to the ref's host — never from the environment or the record. Per-client chat threads, FIFO lock, and automatic context management. **No agentic loop** — one provider pass per `send`. Conversation in its memory store (`memory_store_id`).
 
     ## Implementation
     This bundle is a thin binding over the shared `ai_core` lib. The queue / FIFO lock, prompt assembly, the ONE-PASS `_run`, and all the context machinery + verb bodies live in `ai_core.core`; this module supplies the `ResponsesProvider` builder (endpoint/model from the agent record) and `ai_core.build()` wires the rest into `(VERBS, handler)`.
@@ -104,6 +96,8 @@ public final class ResponsesBundle: AgentBundle, @unchecked Sendable {
 
     ## Bare completion + the `<call>` grammar — no native tool API
     `send` performs exactly ONE provider pass: the stream's text is read; it never sends Responses `tools` nor reads `function_call` items (one arriving is a loud error). Tool-calling is RAW and shared by every backend: `ai_core` parses the model's `<call name=…>` tags from the streamed text, dispatches them as ONE batch (`kernel.send([...])`), and each destination's results arrive as ONE fresh turn — there is no loop inside a pass.
+
+    **A model never reaches a secret holder.** A call the model emits whose target or `reply_to` is an agent with `holds_secrets: true` on its record (every `credential_store`; any agent the operator marks) is refused before anything is sent — `{reason:"unauthorized"}`, "`<id>` holds secrets — a secret holder answers backends, never a model turn; this call was not dispatched" — and the refusal comes back to the model itself. The backend's own key read goes to the store directly, never through the model's calls. The address is resolved the way the kernel resolves it, so `<this kernel's guid>|<agent>` is that local agent and is judged like the bare id; a connected peer's `<guid>|<agent>` lives on another kernel, its record is not here, so it is not judged here.
 
     ## Context management — owned HERE
     The conversation lives in this agent's MEMORY STORE — `memory_store_id` on the record
@@ -179,12 +173,13 @@ let OWNED_KEYS: Set<String> = [
 ]
 
 /// Responses-API SSE provider — Bearer auth and a bounded retry for transient
-/// GATEWAY failures (the anthropic provider's rule; nothing else is retried).
+/// GATEWAY failures (nothing else is retried).
 struct ResponsesProvider: AIProvider {
     let endpoint: String
     let model: String
-    /// Read at construction, CHECKED in `chat()` — nil is a raise inside the turn.
-    let apiKey: String?
+    /// `key(endpoint) -> key`, awaited before EACH request (`Credentials.swift`);
+    /// a refused read is a raise inside the turn.
+    let key: KeyReader
     let maxTokens: Int64
     /// The record's `sampling`, merged VERBATIM after the fixed fields.
     let sampling: OrderedDictionary<String, JSON>
@@ -192,7 +187,7 @@ struct ResponsesProvider: AIProvider {
     /// The keys this provider owns are refused, never silently overridden
     /// (audit d8 — python raises the same `ValueError` in its constructor).
     init(
-        endpoint: String, model: String, apiKey: String?, maxTokens: Int64,
+        endpoint: String, model: String, key: @escaping KeyReader, maxTokens: Int64,
         sampling: OrderedDictionary<String, JSON>
     ) throws(PyError) {
         let owned = sampling.keys.filter { OWNED_KEYS.contains($0) }.sorted()
@@ -204,7 +199,7 @@ struct ResponsesProvider: AIProvider {
         }
         self.endpoint = endpoint
         self.model = model
-        self.apiKey = apiKey
+        self.key = key
         self.maxTokens = maxTokens
         self.sampling = sampling
     }
@@ -212,6 +207,13 @@ struct ResponsesProvider: AIProvider {
     /// reason.
     let usage: AIUsage? = AIUsage()
 
+    /// EDGE TRANSPORT FAILURES — not answers, and not statements about the
+    /// request. A 4xx, or any 5xx carrying a JSON body, is the endpoint
+    /// DELIBERATELY answering: that is the caller's bug and it stays loud. These
+    /// codes with a NON-JSON body are a CDN/proxy error page, meaning the request
+    /// never reached anything that could judge it. Retrying the same single path
+    /// on a transport failure is not a second mechanism — nothing was tried and
+    /// nothing is being routed around. Python `TRANSPORT_CODES`.
     static let transportCodes: Set<Int> = [502, 503, 504, 520, 521, 522, 523, 524]
 
     /// One client for every pass: connect bounded at 15 s, no read clock.
@@ -248,17 +250,13 @@ struct ResponsesProvider: AIProvider {
     func chat(messages: [JSON], maxTokens sideBound: Int?) -> AsyncThrowingStream<AIChunk, Error> {
         let endpoint = endpoint
         let model = model
-        let apiKey = apiKey
+        let key = key
         let usage = usage
         let payload = JSON.object(requestBody(messages: messages, maxTokens: sideBound)).serialize()
         return AsyncThrowingStream { continuation in
             let task = Task {
-                // python's order: the key, then the endpoint, then the model.
-                guard let apiKey, !apiKey.isEmpty else {
-                    continuation.finish(
-                        throwing: PyError("RuntimeError", "\(KEY_VAR) not set in environment (.env)"))
-                    return
-                }
+                // python's order: the endpoint, then the model, then the key (read
+                // while the headers are built — once per request, not per retry).
                 if endpoint.isEmpty {
                     continuation.finish(
                         throwing: PyError(
@@ -274,6 +272,13 @@ struct ResponsesProvider: AIProvider {
                             "RuntimeError",
                             "responses_backend: no `model` set — this connector does not "
                                 + "guess one. Name a model on the agent record (model=...)."))
+                    return
+                }
+                let apiKey: String
+                do {
+                    apiKey = try await key(endpoint) ?? ""
+                } catch {
+                    continuation.finish(throwing: error)
                     return
                 }
                 var attempt = 0

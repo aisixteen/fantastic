@@ -209,7 +209,8 @@ async fn a_sealed_leg_carries_no_peer() {
 }
 
 /// A raw body rides the call both ways on the binary channel: out at
-/// `payload.bytes` (python's payload dict holds it there), back at `data.bytes`.
+/// `["payload", "bytes"]` (python's payload dict holds it there), back at
+/// `["data", "bytes"]`.
 #[tokio::test]
 async fn a_raw_body_rides_the_call_both_ways() {
     let tmp = TempDir::new().unwrap();
@@ -222,29 +223,36 @@ async fn a_raw_body_rides_the_call_both_ways() {
             AgentId::from(format!("{PAGE}|files")),
             json!({"type": "write_stream", "path": "a.bin"}),
         )
-        .with_binary(b"ping".to_vec()),
+        .with_binary_key("bytes", b"ping".to_vec()),
     );
-    let (head, body) = loop {
+    let wire = loop {
         let msg = tokio::time::timeout(Duration::from_secs(5), ws.next())
             .await
             .expect("a frame in time")
             .expect("stream open")
             .expect("frame ok");
         if let TMessage::Binary(b) = msg {
-            break fantastic_io_bridge::codec::decode_binary_frame(&b).expect("binary frame");
+            break b;
         }
     };
+    let head = wire_head(&wire);
     assert_eq!(head["type"], "call", "{head}");
-    assert_eq!(head["_binary_path"], "payload.bytes", "{head}");
+    assert_eq!(head["_binary_path"], json!(["payload", "bytes"]), "{head}");
     assert_eq!(head["payload"]["bytes"], Value::Null, "{head}");
+    let body = fantastic_io_bridge::codec::decode_binary_frame(&wire)
+        .expect("binary frame")
+        .body;
     assert_eq!(body, b"ping");
     let reply = json!({"type": "reply", "id": head["id"], "data": {"ok": true, "bytes": null},
-                       "_binary_path": "data.bytes"});
+                       "_binary_path": ["data", "bytes"]});
     ws.send(TMessage::Binary(build_binary_frame(&reply, b"pong")))
         .await
         .expect("send reply");
     let out = settled(send).await;
     assert_eq!(out.result["ok"], true, "{:?}", out.result);
-    assert_eq!(out.body.as_deref(), Some(&b"pong"[..]));
+    assert_eq!(
+        out.body,
+        Some(fantastic_kernel::Blob::key("bytes", b"pong".to_vec()))
+    );
     stop(&kernel, "web_peer_bytes").await;
 }

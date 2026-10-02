@@ -3,7 +3,10 @@
 Two on-the-wire formats, picked automatically by payload content:
 
   TEXT FRAMES (JSON, default):
-    C->S {type:"call",   target, payload, id}     -> kernel.send -> reply
+    C->S {type:"call",   target, payload, id, secret?}
+                                                  -> kernel.send -> reply
+                                                     (`secret` = the item's marked
+                                                     paths, `kernel/_secret`)
     C->S {type:"emit",   target, payload}         -> kernel.emit (no reply)
     C->S {type:"watch",  src}                     -> mirror src's inbox into ours
     C->S {type:"unwatch", src}
@@ -16,10 +19,12 @@ Two on-the-wire formats, picked automatically by payload content:
   BINARY FRAMES (when payload contains a `bytes` value anywhere):
     [4-byte BE uint32 H | H-byte JSON envelope | M-byte raw blob]
     Envelope JSON has the bytes value replaced by null and an extra
-    field `_binary_path: "<dotted.path.to.bytes.field>"`. Receiver
-    parses header, reads remaining bytes as the binary body, sets the
-    body at `_binary_path` in the envelope, then handles it as a
-    regular text-frame envelope.
+    field `_binary_path`: the steps to it from the envelope root, a
+    JSON array — a key as a string (taken literally, so
+    `["payload", "a.b"]` is the key "a.b"), a list index as an int.
+    Receiver parses header, reads remaining bytes as the binary body,
+    sets the body at `_binary_path` in the envelope, then handles it as
+    a regular text-frame envelope.
 
 The binary path eliminates base64 + JSON encoding for byte-heavy
 payloads (audio, image, etc.). It's transparent to bundle handlers —
@@ -193,6 +198,11 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
         item = {"target": target, "payload": payload}
         if isinstance(fid, str) and fid:
             item["id"] = fid
+        # SECRET MARKS cross the leg verbatim (`kernel/_secret`): this kernel
+        # records the call as shown, exactly as for a local caller — the kernel's
+        # own check refuses a malformed mark before anything is dispatched.
+        if "secret" in frame:
+            item["secret"] = frame["secret"]
         with sender_context(web_agent_id):
             reply = (await kernel.send([item]))[0]["result"]
         await _send_envelope({"type": "reply", "id": fid, "data": reply})
@@ -339,7 +349,9 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
     out_calls: dict[str, asyncio.Future] = {}
     out_seq = [0]
 
-    async def _call_page(agent_id: str, payload: dict, caller: str) -> dict:
+    async def _call_page(
+        agent_id: str, payload: dict, caller: str, secret: tuple
+    ) -> dict:
         # A call that resolved this route just as the socket closed must not wait
         # on a future the teardown has already swept — it settles now, the same
         # way the teardown settles the ones already waiting.
@@ -352,16 +364,18 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
         fid = f"h{out_seq[0]}"
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
         out_calls[fid] = fut
+        frame = {
+            "type": "call",
+            "id": fid,
+            "target": agent_id,
+            "payload": payload,
+            "caller": caller,
+        }
+        # the item's marks, so the PAGE kernel masks its records of this call too
+        if secret:
+            frame["secret"] = list(secret)
         try:
-            await _send_envelope(
-                {
-                    "type": "call",
-                    "id": fid,
-                    "target": agent_id,
-                    "payload": payload,
-                    "caller": caller,
-                }
-            )
+            await _send_envelope(frame)
             return await fut
         finally:
             out_calls.pop(fid, None)

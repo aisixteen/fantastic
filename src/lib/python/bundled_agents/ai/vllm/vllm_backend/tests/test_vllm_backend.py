@@ -48,9 +48,15 @@ def _transport(sse: str, sink: list | None = None, status: int = 200):
     return httpx.MockTransport(handler)
 
 
+async def _nokey(endpoint: str) -> None:
+    """The reader of a record with no `credentials`: no key, no header."""
+    return None
+
+
 def _provider(transport, **kw) -> VllmProvider:
     args = dict(
         endpoint=ENDPOINT,
+        key=_nokey,
         model="qwen3.8-27b",
         max_tokens=8000,
         kv_slots=7,
@@ -387,33 +393,43 @@ def _recording(seen: list, status: int = 200):
     return httpx.MockTransport(handler)
 
 
-async def test_the_key_rides_as_a_bearer_header_only_when_set(monkeypatch):
+async def test_the_key_rides_as_a_bearer_header_only_when_set():
     seen: list = []
-    monkeypatch.delenv(vp.KEY_VAR, raising=False)
+    asked: list = []
+    keys = iter(["k-123", "k-rotated"])
+
+    async def key(endpoint):
+        asked.append(endpoint)
+        return next(keys)
+
     assert await _drain(_provider(_recording(seen))) == "ok"
-    monkeypatch.setenv(vp.KEY_VAR, "k-123")
-    assert await _drain(_provider(_recording(seen))) == "ok"
-    # unset: NO header at all (a keyless local vLLM); set: Bearer, read per call
-    assert seen == [None, "Bearer k-123"], seen
+    p = _provider(_recording(seen), key=key)
+    assert await _drain(p) == "ok"
+    assert await _drain(p) == "ok"
+    # no credentials: NO header at all (a keyless local vLLM); with them: Bearer,
+    # read before EACH request — a rotated key is used by the next one
+    assert seen == [None, "Bearer k-123", "Bearer k-rotated"], seen
+    assert asked == [ENDPOINT, ENDPOINT]
 
 
-async def test_a_refused_key_names_the_variable(monkeypatch):
-    monkeypatch.delenv(vp.KEY_VAR, raising=False)
+async def test_a_refused_key_says_to_name_credentials():
     with pytest.raises(RuntimeError) as e:
         await _drain(_provider(_recording([], status=401)))
-    assert "HTTP 401" in str(e.value) and f"set {vp.KEY_VAR}" in str(e.value), e.value
+    assert "HTTP 401" in str(e.value) and "`credentials`" in str(e.value), e.value
 
 
-def test_the_schema_names_the_key_var():
+def test_the_schema_takes_optional_credentials():
     from vllm_backend.tools import RECORD_SCHEMA
 
-    assert RECORD_SCHEMA["key_var"] == "VLLM_API_KEY"
+    assert "key_var" not in RECORD_SCHEMA
+    f = next(f for f in RECORD_SCHEMA["fields"] if f["name"] == "credentials")
+    assert f["type"] == "credentials" and f["required"] is False
 
 
 # ─── the wire, pinned (reduction candidate A: one OpenAI SSE loop) ──────────
 #
-# Where vllm DIFFERS from the nvidia/llamacpp loops today: a non-JSON `data:`
-# line RAISES (it is not skipped), and a stream may end inside the thought.
+# A non-JSON `data:` line RAISES (it is not skipped), and a stream may end
+# inside the thought.
 
 
 async def test_a_non_json_data_line_raises_not_skipped():

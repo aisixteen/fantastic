@@ -1,5 +1,5 @@
 //! fantastic-ai-core — shared machinery for **context-managed completion**
-//! backends behind a [`Provider`] seam. The ollama / NIM / anthropic backends
+//! backends behind a [`Provider`] seam. The ollama / responses / vllm backends
 //! supply only their `Provider` impl + a thin `Bundle` that dispatches verbs
 //! through this crate.
 //!
@@ -30,9 +30,12 @@
 //!
 //!  2. PER-BACKEND CONFIG ([`agent_loop::BackendConfig`]): the caller route
 //!     (cli round-trip vs per-client inbox) + error-name prefix. The
-//!     [`Provider`] (built per agent by the backend) is the streaming seam.
-//!     NIM-only bits (api_key verbs, Bearer client cache, 429 retry, SSE
-//!     parse) stay IN the nvidia crate.
+//!     [`Provider`] (built per agent by the backend) is the streaming seam. A
+//!     backend's KEY is read from a credential store before each request
+//!     ([`credentials`]) — never the environment, never the record. A MODEL never
+//!     reaches a secret holder: [`route`] refuses every model-parsed call whose
+//!     target or `reply_to` carries `holds_secrets: true` (every
+//!     `credential_store`; any agent the operator marks), before anything is sent.
 //!
 //! ## LLM backend contract (canonical reference)
 //!
@@ -70,7 +73,7 @@
 //! ### Reasoning channel
 //!
 //! A reasoning model's deliberation arrives on a SEPARATE provider channel
-//! (ollama `message.thinking`, NIM `reasoning_content`). A provider that reads
+//! (ollama `message.thinking`, vLLM `reasoning_content`). A provider that reads
 //! only the content channel reports a reasoning turn as an EMPTY completion, so
 //! every provider reads BOTH and wraps the deliberation in
 //! [`think::THINK_OPEN`]/[`think::THINK_CLOSE`] — **once per turn**. The
@@ -83,6 +86,7 @@ pub mod agent_loop;
 pub mod assembly;
 pub mod constants;
 pub mod context;
+pub mod credentials;
 pub mod events;
 pub mod folds;
 pub mod helpers;
@@ -110,4 +114,8 @@ pub use verbs::{CANCEL_DOC, SEND_TIMEOUT_SECS};
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod tests_credentials;
+#[cfg(test)]
 mod tests_folds;
+#[cfg(test)]
+mod tests_model_window;

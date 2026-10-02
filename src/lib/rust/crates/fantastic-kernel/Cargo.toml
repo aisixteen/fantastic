@@ -15,7 +15,11 @@ tokio = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-yaml-rust2 = { workspace = true }
+# THE YAML READER (`yaml_io::load`) is PyYAML's `CSafeLoader`: libyaml gives
+# the EVENTS (each scalar's tag and `plain_implicit`) and `yaml_io/read.rs`
+# applies PyYAML's YAML 1.1 resolver + `SafeConstructor` to them. No Rust YAML
+# crate implements 1.1 plain scalars, tags and `<<` merges as PyYAML does.
+unsafe-libyaml = "0.2"
 regex = "1"
 dashmap = { workspace = true }
 futures-util = { workspace = true }

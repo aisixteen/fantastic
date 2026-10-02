@@ -97,8 +97,9 @@ pub trait Bundle: Send + Sync {
     }
 
     /// What this bundle KIND's record takes — `{fields:[{name, type, required,
-    /// enum?, default?, hint}], key_var}` — readable before any agent of it
-    /// exists (lib request #3, 2026-09-30). The substrate attaches it to this
+    /// enum?, default?, hint}]}` — readable before any agent of it exists (lib
+    /// request #3, 2026-09-30); a key is a `credentials` field (`{store, ref}`),
+    /// never an environment variable. The substrate attaches it to this
     /// bundle's entry in the `reflect bundles=all` catalog, and nowhere else.
     /// Python's duck-typed module-level `RECORD_SCHEMA`.
     ///
@@ -111,38 +112,44 @@ pub trait Bundle: Send + Sync {
     }
 
     /// Dispatch a binary-framed verb. The binary channel is **symmetric**:
-    /// a request carries `(header, blob)` and the reply carries
+    /// a request carries `(header, body)` and the reply carries
     /// `(Reply, body)` — raw bytes flow in BOTH directions, never base64
-    /// (mirrors Python's `read_stream`/`write_stream`, where `bytes` is a
-    /// native `bytes` value in the dict). `header` is the JSON header
-    /// object from the framed WS message (carries `target`, `type`,
-    /// optional `id`, etc.); `blob` is the raw request body.
+    /// (mirrors Python's `read_stream`/`write_stream`/`paste_image`, where the
+    /// bytes are a native `bytes` value in the dict). `header` is the payload
+    /// with NOTHING at the body's path (python holds the bytes there); `body` is
+    /// the raw request body AT ITS PATH ([`crate::outcome::Blob`]) — a handler
+    /// reads ITS OWN key with [`crate::outcome::Blob::at`], exactly as python's
+    /// reads `payload.get("data")` / `payload.get("bytes")`, so a body placed
+    /// under another key is not its body. `None` = the binary channel with no
+    /// request body (a raw read: `read_stream`).
     ///
-    /// The reply body is `Option<Vec<u8>>`, NOT `Vec<u8>`: `Some` means the
-    /// verb RETURNED A CHUNK and `None` means it returned none, so a 0-byte
-    /// chunk (`Some(vec![])`, an empty file read) stays distinguishable from
-    /// `write_stream`'s bodiless status reply. Python has the distinction for
-    /// free — `isinstance(reply["bytes"], bytes)` — and every wire leg branches
-    /// on it (the REST octet decision, the WS binary-frame decision, the file
-    /// proxy's "is this a SOURCE" probe), which is why an `is_empty()` test
-    /// served an empty file as JSON and a denial as a 200.
+    /// The reply body is an `Option<Blob>` — the chunk AND ITS SLOT in the
+    /// reply, as python's reply dict holds a `bytes` value at a key: a
+    /// `read_stream` chunk is `Blob::key("bytes", …)`, a bridge relaying a
+    /// peer's reply keeps the slot the peer's frame named (`["x.y"]` is the
+    /// reply key `"x.y"`, never `x` → `y`). `Some` means the verb RETURNED A
+    /// CHUNK and `None` means it returned none, so a 0-byte chunk (an empty
+    /// file read) stays distinguishable from `write_stream`'s bodiless status
+    /// reply. Python has the distinction for free — `isinstance(reply["bytes"],
+    /// bytes)` — and every wire leg branches on it (the REST octet decision,
+    /// the WS binary-frame decision, the file proxy's "is this a SOURCE"
+    /// probe), which is why an `is_empty()` test served an empty file as JSON
+    /// and a denial as a 200.
     ///
     /// Default impl: a bundle with no binary surface gets its JSON `header`
-    /// dispatched through [`Self::handle`] and the raw `blob` is DROPPED —
+    /// dispatched through [`Self::handle`] and the raw body is DROPPED —
     /// never base64-encoded onto the payload. base64 on the wire is banned
     /// (pure streams): raw bytes ride the binary carrier only, and a bundle
     /// that actually wants them overrides this method
     /// (`file_bridge.read_stream`/`write_stream`,
-    /// `exec_bridge.paste_image`). This mirrors the fallback the shipped
-    /// overrides already use for their non-binary verbs (header→`handle`,
-    /// blob unused). Returns NO reply body.
+    /// `exec_bridge.paste_image`). Returns NO reply body.
     async fn handle_binary(
         &self,
         agent_id: &AgentId,
         header: Value,
-        _blob: Vec<u8>,
+        _body: Option<crate::outcome::Blob>,
         kernel: &Arc<Kernel>,
-    ) -> Result<(Reply, Option<Vec<u8>>), BundleError> {
+    ) -> Result<(Reply, Option<crate::outcome::Blob>), BundleError> {
         let reply = self.handle(agent_id, &header, kernel).await?;
         Ok((reply, None))
     }

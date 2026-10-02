@@ -15,9 +15,9 @@ from __future__ import annotations
 
 import time
 
-from families import BASE, MEMORY, OPEN, ai, call, save_kernel_log
+from families import BASE, MEMORY, OPEN, VLLM, ai, call, save_kernel_log, vllm
+from helpers.creds import credentials
 from spec import CTX_RESERVE, CTX_WINDOW
-from stubs.anthropic_sse import AnthropicStub, Handler as AnthropicHandler
 from stubs.ollama_chat import Handler as OllamaHandler, OllamaStub
 from stubs.openai_chat import Handler as OpenAIHandler, OpenAIChatStub
 
@@ -25,41 +25,36 @@ NAME = "providers"
 
 DONE = '<call name="done"></call>'
 
-#: `(case, script, env_drop, extra meta)` per provider. `env_drop` names an
-#: environment variable the kernel is started WITHOUT — the no-key cases.
-ANTHROPIC_CASES = [
+#: `(case, script, env_drop, extra)` per provider. `env_drop` names an
+#: environment variable the kernel is started WITHOUT — the no-key case.
+#: `extra["key"]` makes the record name `credentials` (the `vllm` ref in the
+#: seeded `creds` store, which reads `VLLM_API_KEY`): the one place a key is
+#: meant to be read, so the request's `Authorization` header is measured.
+VLLM_CASES = [
     ("ok_baseline", [DONE], (), {}),
-    ("http_400_json", [{"status": 400, "body": {"type": "error", "error": {
-        "type": "invalid_request_error", "message": "stub says no"}}}], (), {}),
+    ("keyed_baseline", [DONE], (), {"key": True}),
+    ("keyed_no_key", [DONE], ("VLLM_API_KEY",), {"key": True}),
+    ("http_400_json", [{"status": 400, "body": {
+        "object": "error", "message": "stub says no", "type": "BadRequestError",
+        "param": None, "code": 400}}], (), {}),
+    ("http_401_wants_key", [{"status": 401, "body": {"error": "unauthorized"}}], (), {}),
     ("http_502_html_twice_then_200", [
         {"status": 502, "content_type": "text/html", "body": "<html>bad gateway</html>"},
         {"status": 502, "content_type": "text/html", "body": "<html>bad gateway</html>"},
         DONE], (), {}),
-    ("event_error_midstream", [{"text": DONE, "event_error": True}], (), {}),
-    ("stream_cut_before_stop", [{"text": DONE, "cut": True}], (), {}),
-    ("stop_reason_tool_use_no_block", [{"text": "thinking about a tool",
-                                        "stop_reason": "tool_use"}], (), {}),
-    ("no_key_at_all", [DONE], ("ANTHROPIC_API_KEY",), {}),
-]
-
-OPENAI_CASES = [
-    ("nim_ok_baseline", [DONE], (), {"handler": "nvidia_nim_backend.tools"}),
-    ("nim_429_retry_after_then_200", [
-        {"status": 429, "retry_after": 1, "body": {"error": "rate limited"}}, DONE],
-     (), {"handler": "nvidia_nim_backend.tools"}),
-    ("nim_429_twice", [
-        {"status": 429, "retry_after": 1, "body": {"error": "rate limited"}},
-        {"status": 429, "retry_after": 1, "body": {"error": "rate limited"}},
-        DONE],
-     (), {"handler": "nvidia_nim_backend.tools"}),
-    ("nim_no_key", [DONE], ("NVIDIA_API_KEY",), {"handler": "nvidia_nim_backend.tools"}),
-    ("llamacpp_ok_baseline", [DONE], (), {"handler": "llamacpp_backend.tools"}),
+    # A stream that ends with NO finish_reason: vLLM died mid-answer.
+    ("stream_cut_no_finish_reason", [{"text": DONE, "cut": True}], (), {}),
+    # …and the same cut INSIDE the reasoning channel: the think span must still close.
+    ("stream_cut_mid_reasoning", [{"reasoning": "weighing it", "text": "", "cut": True}],
+     (), {}),
+    # A main turn cut at the record's max_tokens fails, naming the cut.
+    ("finish_length", [{"text": "an answer the budget cut", "finish_reason": "length"}],
+     (), {}),
+    # The reasoning channel (`reasoning_content`) before the answer.
+    ("reasoning_then_answer", [{"reasoning": "weighing it", "text": DONE}], (), {}),
     # B2.11 — one line, a stall, then the rest: a token event must reach the
     # stream before the whole reply is released.
-    ("llamacpp_token_before_release", [{"text": "first line\n" + DONE, "stall": 2}],
-     (), {"handler": "llamacpp_backend.tools"}),
-    ("llamacpp_no_temperature_no_model", [DONE], (),
-     {"handler": "llamacpp_backend.tools", "no_model": True}),
+    ("token_before_release", [{"text": "first line\n" + DONE, "stall_mid": 2}], (), {}),
 ]
 
 OLLAMA_CASES = [
@@ -69,7 +64,8 @@ OLLAMA_CASES = [
 ]
 
 
-def drive(ctx, provider: str, case: str, stub, handler_meta: dict, env_drop) -> None:
+def drive(ctx, provider: str, case: str, stub, handler_meta: dict, env_drop,
+          keyed: dict[str, str] | None = None) -> None:
     """One boot, one send, everything recorded."""
     import shutil
 
@@ -81,8 +77,9 @@ def drive(ctx, provider: str, case: str, stub, handler_meta: dict, env_drop) -> 
     tree = ctx.work / ".fantastic"
     if tree.exists():
         shutil.rmtree(tree)
+    # `keyed` = `{ref: endpoint}` the seeded `creds` store holds for this boot.
     k = ctx.boot(reach=["readings", "ai", "web", "rest", "ws"], port=ports.take("main"),
-                 env_drop=tuple(env_drop))
+                 env_drop=tuple(env_drop), creds=keyed)
     cb = {**BASE, "rest": "*", "web": "*", "ws": "*"}
     try:
         rec.json(f"{rel}/create_readings", k.create(
@@ -114,29 +111,18 @@ def run(ctx) -> None:
     rec, ports = ctx.rec, ctx.ports
     (ctx.work / "a.txt").write_text("7\n")
 
-    # ── anthropic ──
-    for case, script, env_drop, extra in ANTHROPIC_CASES:
-        stub = AnthropicStub(rec, f"anthropic/{case}/stub", ports.take("stub"))
+    # ── vllm: the OpenAI chat wire ──
+    for case, script, env_drop, extra in VLLM_CASES:
+        stub = OpenAIChatStub(rec, f"vllm/{case}/stub", ports.take("stub"))
         stub.set_chain(case, script)
-        stub.start(AnthropicHandler)
-        try:
-            drive(ctx, "anthropic", case, stub,
-                  {"handler_module": "anthropic_backend.tools", "model": "stub-model",
-                   "endpoint": stub.url()}, env_drop)
-        finally:
-            stub.flush()
-            stub.stop()
-
-    # ── openai-compatible: nvidia_nim and llamacpp on ONE surface ──
-    for case, script, env_drop, extra in OPENAI_CASES:
-        stub = OpenAIChatStub(rec, f"openai/{case}/stub", ports.take("stub"))
-        stub.set_script(script)
         stub.start(OpenAIHandler)
-        meta = {"handler_module": extra["handler"], "endpoint": stub.base_url()}
-        if not extra.get("no_model"):
-            meta["model"] = "stub-model"
+        meta = {"handler_module": VLLM, **vllm(stub.base_url())}
+        keyed = None
+        if extra.get("key"):
+            meta["credentials"] = credentials("vllm")
+            keyed = {"vllm": stub.base_url()}
         try:
-            drive(ctx, "openai", case, stub, meta, env_drop)
+            drive(ctx, "vllm", case, stub, meta, env_drop, keyed)
         finally:
             stub.flush()
             stub.stop()

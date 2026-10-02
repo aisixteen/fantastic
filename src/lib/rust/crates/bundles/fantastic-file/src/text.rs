@@ -314,7 +314,7 @@ async fn write(
             return err;
         }
     }
-    if let Err(e) = fs::write_bytes(root, path, &data, true) {
+    if let Err(e) = fs::write_bytes(root, path, &data, true, None) {
         return transport(e);
     }
     st.slots().insert((bridge.to_string(), key), before);
@@ -589,10 +589,10 @@ fn edit_txn(
     }
     let mut written: Vec<usize> = Vec::new();
     for (i, e) in plan.iter().enumerate() {
-        if let Err(err) = fs::write_bytes(root, &e.path, &e.new, true) {
+        if let Err(err) = fs::write_bytes(root, &e.path, &e.new, true, None) {
             // ROLL BACK what already landed — every pre-image is in hand.
             for &w in &written {
-                let _ = fs::write_bytes(root, &plan[w].path, &plan[w].before, true);
+                let _ = fs::write_bytes(root, &plan[w].path, &plan[w].before, true, None);
             }
             let mut out = transport(err);
             rf::with(
@@ -669,7 +669,7 @@ async fn undo(
             Some(_) => fs::remove(root, path, false),
             None => Ok(()),
         },
-        Some(bytes) => fs::write_bytes(root, path, bytes, true),
+        Some(bytes) => fs::write_bytes(root, path, bytes, true, None),
     };
     if let Err(e) = done {
         return transport(e);

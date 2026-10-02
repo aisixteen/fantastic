@@ -66,8 +66,8 @@ async def test_unknown_type_returns_none(seeded_kernel):
 
 
 async def test_status_handler_renders_phase_markers(seeded_kernel, capsys):
-    """queued, thinking (regular + rate-limit), tool_calling entry+exit
-    each produce one specific line. streaming and done produce nothing."""
+    """queued, thinking, tool_calling entry+exit each produce one specific
+    line. streaming and done produce nothing."""
     (
         await seeded_kernel.send(
             [
@@ -93,21 +93,6 @@ async def test_status_handler_renders_phase_markers(seeded_kernel, capsys):
                         "source": "ollama_xx",
                         "phase": "thinking",
                         "detail": {"send_id": "abc"},
-                    },
-                }
-            ]
-        )
-    )[0]["result"]
-    (
-        await seeded_kernel.send(
-            [
-                {
-                    "target": "cli",
-                    "payload": {
-                        "type": "status",
-                        "source": "nvidia_nim_xx",
-                        "phase": "thinking",
-                        "detail": {"waiting_on": "rate_limit", "wait_s": 5},
                     },
                 }
             ]
@@ -163,12 +148,11 @@ async def test_status_handler_renders_phase_markers(seeded_kernel, capsys):
     )[0]["result"]
     out = capsys.readouterr().out
     lines = [line for line in out.splitlines() if line.strip()]
-    assert len(lines) == 5, f"expected 5 lines, got {len(lines)}: {lines}"
+    assert len(lines) == 4, f"expected 4 lines, got {len(lines)}: {lines}"
     assert "queued (2 ahead)" in lines[0]
     assert "thinking" in lines[1]
-    assert "rate-limited" in lines[2] and "5s" in lines[2]
-    assert "→ list_agents(kernel_state)" in lines[3]
-    assert "← list_agents(kernel_state)" in lines[4]
+    assert "→ list_agents(kernel_state)" in lines[2]
+    assert "← list_agents(kernel_state)" in lines[3]
 
 
 async def test_status_streaming_and_done_are_silent(seeded_kernel, capsys):

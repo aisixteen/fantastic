@@ -170,7 +170,8 @@
                 await call(k, "pty_l", ["type": "paste_image", "job_id": jid, "mime": "image/png"])
                     == bad("paste_image", "data", "raw bytes"))
             func paste(_ header: JSON, _ data: Data) async -> String {
-                await k.send([Item(AgentId("pty_l"), header, binary: data)])[0].result.serialize()
+                await k.send([Item(AgentId("pty_l"), header, binary: Blob("data", data))])[0].result
+                    .serialize()
             }
             #expect(
                 await paste(

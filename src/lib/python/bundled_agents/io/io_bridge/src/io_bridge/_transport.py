@@ -16,7 +16,8 @@ Every transport exposes:
     @property
     closed: bool
 
-Wire shape is the kernel bridge protocol: `{type:'call', target, payload, id}` /
+Wire shape is the kernel bridge protocol: `{type:'call', target, payload, id,
+caller, secret?}` (`secret` = the item's marked paths, `kernel/_secret`) /
 `{type:'reply', id, data}` / `{type:'watch', src}` / `{type:'event', payload}`.
 """
 

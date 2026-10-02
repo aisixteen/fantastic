@@ -40,6 +40,14 @@ extension Kernel {
         // `send` itself. Swift's `send` does not throw, so every item of the batch
         // settles `failed` with that raise as its body — the caller learns the
         // same thing, and nothing is dispatched on a lookup that did not happen.
+        //
+        // TODO(parity, owner 2026-10-02 — left as is, rare failure): python's raise
+        // also reaches the WIRE: `web_rest` answers HTTP 500 for the whole request,
+        // where swift's legs answer 200 with every item failed. Mirroring it needs
+        // `send` to throw — either `send` itself becomes `throws` (changes every
+        // caller) or a separate throwing entry point used only by the wire legs (two
+        // entry points). Both outcomes are loud and carry the store's error text, so
+        // only the response SHAPE differs.
         if storeId != nil, items.contains(where: { item in
             let raw = item.rawId ?? item.id.map { JSON.string($0) }
             return raw != nil && raw != .null
@@ -110,6 +118,22 @@ extension Kernel {
         // 2. payload dict.
         guard case .object(let obj) = item.payload else {
             return .settled(Outcome.refused(Refusal.missing("send", "payload")))
+        }
+        // 2b. A RAW BODY sits at a slot of its payload — where python's dict holds
+        // the bytes. A path that names none could never be mirrored, recorded or
+        // read by the handler; every wire leg places its body before it gets here,
+        // so this only refuses an in-process caller's typo. Rust `_launch` 2b.
+        if let blob = item.binary {
+            var probe = item.payload
+            do {
+                try pySetPath(&probe, parts: blob.parts, .null)
+            } catch {
+                return .settled(
+                    Outcome.refused(
+                        Refusal.badGot(
+                            "send", "binary", "a body path naming a slot of the payload",
+                            got: .array(blob.parts.map(\.json)))))
+            }
         }
         // 3. timeout — `item.rawTimeout` (C38) supersedes the typed `item.
         // timeout` when a caller is forwarding a value it did not itself
@@ -274,9 +298,9 @@ extension Kernel {
             // THE CALL ROW, on the TARGET, under the pre-minted id — the trace of
             // who was asked what, parented to the dispatch that asked. It carries
             // the WHOLE call — the dispatch payload verbatim (raw bytes reduced to
-            // `{len}`), the retry budget, the attempt count as at dispatch, the
-            // deadline — and is what the kernel flushes into its memory store and
-            // reads back for `ledger` and named-call dedup.
+            // `{len}` at their path), the retry budget, the attempt count as at
+            // dispatch, the deadline — and is what the kernel flushes into its
+            // memory store and reads back for `ledger` and named-call dedup.
             // KEY ORDER IS PYTHON'S: id, kind, verb, parent, caller, payload,
             // named, retries, attempts, timeout[, name][, secret]. (`origin` →
             // `caller`: replies own `origin` now.)
@@ -287,8 +311,8 @@ extension Kernel {
             callRow["caller"] = caller.map { JSON.string($0.value) } ?? .null
             // SHOWN, never the secret values — the row is what the store keeps.
             callRow["payload"] =
-                shown.map { Kernel.storeValue($0.json, bytes: $0.blob?.count) }
-                ?? Kernel.storeValue(item.payload, bytes: item.binary?.count)
+                shown.map { Kernel.tapedPayload($0.json, $0.blob) }
+                ?? Kernel.tapedPayload(item.payload, item.binary)
             callRow["named"] = .bool(name != nil)
             callRow["retries"] = .integer(Int64(retries))
             callRow["attempts"] = .integer(1)
@@ -317,7 +341,8 @@ extension Kernel {
             Dispatch(
                 target: target, payload: item.payload, verb: verb,
                 timeout: timeout, execId: execId, taskId: taskId,
-                binary: item.binary, shown: shown))
+                binary: item.binary, rawReply: item.rawReply, shown: shown,
+                secretPaths: secret?.paths.compactMap(\.asString) ?? []))
     }
 
     /// `timeout` validation (C30/C38): `item.rawTimeout`, when forwarded by a
@@ -444,7 +469,7 @@ extension Kernel {
                 let (r, s, b) = await runDispatchOutcome(
                     target: d.target, payload: d.payload, verb: d.verb,
                     taskOut: box, timeout: d.timeout, taskId: nextPid, binary: d.binary,
-                    shown: d.shown)
+                    rawReply: d.rawReply, shown: d.shown, secretPaths: d.secretPaths)
                 reply = r
                 status = s
                 body = b
@@ -643,11 +668,18 @@ struct Dispatch {
     /// A caller's name resolves to it; a retry re-registers under the same id.
     let execId: Int64
     let taskId: TaskId
-    /// A RAW request body: present ⇒ dispatch through the BINARY channel.
-    let binary: Data?
+    /// A RAW request body at its payload path: present ⇒ dispatch through the
+    /// BINARY channel.
+    let binary: Blob?
+    /// The binary channel with no request body — the reply's chunk comes back
+    /// raw (`Item.rawReply`).
+    let rawReply: Bool
     /// The payload AS SHOWN when the item marked `secret` paths: what the fanout
     /// publishes on every attempt; the handler gets `payload` (and `binary`).
     let shown: ShownPayload?
+    /// The item's `secret` paths as given, readable by the handler as
+    /// `KernelTaskLocals.currentSecret` — on every attempt.
+    let secretPaths: [String]
 }
 
 /// An item's own deadline: the seconds the kernel waits, and the value as the

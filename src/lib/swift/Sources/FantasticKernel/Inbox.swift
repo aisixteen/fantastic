@@ -4,9 +4,10 @@
 // rides the inbox like any other field and a drainer hands the queued dict
 // straight to `encode_frame`. Swift's `JSON` cannot hold raw `Data` (nor can
 // rust's `serde_json::Value`), so the carrier splits: `payload` is the head,
-// with `null` where the bytes lived, and `body` is `(path, data)` — the dotted
-// path WITHIN the payload, which is exactly what `_binary_path` names once a
-// drainer nests the payload inside its own envelope.
+// with `null` where the bytes lived, and `body` is the `Blob` — the bytes and
+// their slot WITHIN the payload, whose steps are exactly what `_binary_path`
+// names (after the envelope's own `payload` step) once a drainer nests the
+// payload inside its own envelope.
 //
 // Without this half no watcher could ever receive the binary frame python sends
 // it: the fanout carried the header alone and the bytes were dropped on the
@@ -15,18 +16,14 @@
 import FantasticJSON
 import Foundation
 
-/// `(dotted path within a payload, raw bytes)` — the body half of a payload
-/// that carries bytes.
-public typealias InboxBody = (path: String, data: Data)
-
 /// ONE queued payload — the whole payload, bytes included.
 public struct InboxItem: Sendable {
     /// The payload dict. For a binary payload the bytes field is `null` here.
     public let payload: JSON
     /// The raw bytes and where in `payload` they lived, or `nil` for text.
-    public let body: InboxBody?
+    public let body: Blob?
 
-    public init(payload: JSON, body: InboxBody?) {
+    public init(payload: JSON, body: Blob?) {
         self.payload = payload
         self.body = body
     }
@@ -36,9 +33,10 @@ public struct InboxItem: Sendable {
         InboxItem(payload: payload, body: nil)
     }
 
-    /// A payload whose `path` field held `data`; `payload` carries `null` there.
-    public static func binary(_ payload: JSON, _ path: String, _ data: Data) -> InboxItem {
-        InboxItem(payload: payload, body: (path: path, data: data))
+    /// A payload whose slot `body` names held its bytes; `payload` carries `null`
+    /// there.
+    public static func binary(_ payload: JSON, _ body: Blob) -> InboxItem {
+        InboxItem(payload: payload, body: body)
     }
 }
 

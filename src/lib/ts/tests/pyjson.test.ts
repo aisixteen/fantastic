@@ -3,7 +3,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { pyDumps, pyInt, pyRepr } from "../src/kernel/pyjson.ts";
+import { pyDumps, pyRepr } from "../src/kernel/pyjson.ts";
 
 // python `repr(float)` / `json.dumps(float)`: shortest round-trip digits, the
 // exponent form exactly when the decimal exponent is < -4 or >= 16.
@@ -35,40 +35,4 @@ test("ensure_ascii escapes DEL as python does; ensure_ascii off leaves it", () =
   assert.equal(pyDumps({ "\x7f": 1 }), '{"\\u007f": 1}');
   assert.equal(pyDumps("\x7f", { ensureAscii: false }), '"\x7f"');
   assert.equal(pyDumps("~"), '"~"');
-});
-
-// python `int(s)` (base 10) — the grammar a `_binary_path` list step goes through.
-test("pyInt reads a str as python int() does", () => {
-  const ok: [string, bigint][] = [
-    ["0", 0n],
-    ["1_0", 10n],
-    ["-0", 0n],
-    [" -5 ", -5n],
-    ["+7", 7n],
-    ["007", 7n],
-    ["0\u{a0}", 0n],
-    ["\u{661}\u{662}", 12n],
-    ["\u{1d7d9}", 1n],
-    ["99999999999999999999", 99999999999999999999n],
-  ];
-  for (const [s, want] of ok) assert.equal(pyInt(s), want, pyRepr(s));
-  const bad: [string, string][] = [
-    ["_1", "'_1'"],
-    ["1_", "'1_'"],
-    ["1__0", "'1__0'"],
-    ["+-1", "'+-1'"],
-    ["", "''"],
-    ["0x1", "'0x1'"],
-    ["1e0", "'1e0'"],
-    ["1.5", "'1.5'"],
-    ["\x1c0", "'\\x1c0'"],
-    ["\u{feff}0", "'\\ufeff0'"],
-  ];
-  for (const [s, quoted] of bad) {
-    assert.throws(() => pyInt(s), { message: `invalid literal for int() with base 10: ${quoted}` });
-  }
-  // python cuts the quoted literal at 200 characters (`%.200R`)
-  assert.throws(() => pyInt("x".repeat(300)), {
-    message: `invalid literal for int() with base 10: '${"x".repeat(199)}`,
-  });
 });

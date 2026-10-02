@@ -101,7 +101,7 @@ pub(crate) async fn store_write(
 ) -> Value {
     store_send(
         kernel,
-        Item::new(store_id.clone(), payload).with_binary(body),
+        Item::new(store_id.clone(), payload).with_binary_key("bytes", body),
     )
     .await
     .0
@@ -111,7 +111,8 @@ async fn store_send(kernel: &Arc<Kernel>, item: Item) -> (Value, Option<Vec<u8>>
     let out = Box::pin(crate::send::with_operator(kernel.send(vec![item])))
         .await
         .remove(0);
-    (out.result, out.body)
+    // a store's chunk is the reply's `bytes` — one anywhere else is not a chunk
+    (out.result, out.body.and_then(|b| b.into_at("bytes")))
 }
 
 /// DISCOVER the ROOT loader's persistence provider — [`find_store_for`] the

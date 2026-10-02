@@ -42,6 +42,9 @@ interface Launched {
   /** The payload AS SHOWN when the item marked `secret` paths (`secret.ts`):
    *  what the fanout mirrors on every attempt; the handler gets `payload`. */
   shown?: Payload;
+  /** The item's `secret` paths as given — a host-bound dispatch puts them on its
+   *  call frame, so the host masks its records of the call too. */
+  secretPaths?: readonly string[];
   timeout?: number | undefined;
   /** True when this item JOINED an existing execution instead of starting one. */
   joined?: boolean;
@@ -252,7 +255,8 @@ export function launch(k: Kernel, index: number, item: Item): Launched {
   // UNNAMED work is ledgered too, under its minted id: one id space, one engine.
   const pid = k.mintId();
   const exec = openExecution(k, pid, resolvedId, verb, payload, timeout, retries, name, secret, shown);
-  return { index, exec, target: resolvedId, payload, shown, timeout, identityRead };
+  const secretPaths = secret !== null ? secret.paths : [];
+  return { index, exec, target: resolvedId, payload, shown, secretPaths, timeout, identityRead };
 }
 
 /**
@@ -393,7 +397,7 @@ async function runOnce(k: Kernel, l: Launched, pid: number, attempt: number): Pr
   const killed = new Promise<typeof CANCELLED>((res) => {
     task.onCancel.push(() => res(CANCELLED));
   });
-  const run = k.dispatch(target, payload, pid, l.shown);
+  const run = k.dispatch(target, payload, pid, l.shown, l.secretPaths);
   run.catch(() => undefined); // a late failure after a cancel has no reader
   try {
     const raced = Promise.race([run, killed]);

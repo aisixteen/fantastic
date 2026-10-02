@@ -89,6 +89,7 @@ from kernel._kernel import (
     Kernel,
     TIMED_OUT,
     _current_origin,
+    _current_secret,
     _current_remote,
     _current_sender,
     _current_task,
@@ -224,6 +225,23 @@ _SYSTEM_VERB_DOCS = {
     ),
 }
 
+# THE SECRET-HOLDER MARK (owner 2026-10-02). `holds_secrets: true` on a record makes
+# that agent unreachable from a model turn (ai_core refuses the call). The kernel
+# owns two rules about the field itself, at the write:
+#   - its SHAPE (`_bad_holder_mark`): exactly `true`, or `null` — anything else is
+#     `invalid_meta`, on every agent, at create_agent and update_agent alike;
+#   - who LOWERS it (`_check_holder_mark`, in the gate): on an agent whose record
+#     says `true`, only the operator may write anything else.
+# `null` IS THE CLEAR. update_agent REPLACES a named field, so `holds_secrets: null`
+# leaves a record whose value is `null` — not a holder, since only exactly `true`
+# marks one — the same way `delete_lock: null` lifts a lock.
+HOLDS_SECRETS = "holds_secrets"
+HOLDER_MARK_SIDE = "secret-holder"
+HOLDER_MARK_HINT = (
+    "only the operator clears it (update_agent holds_secrets=null); an agent may "
+    "mark a holder, never unmark one"
+)
+
 
 def _json_safe(o):
     """A reply body a JSON wire can carry: bytes become `<bytes:N>` (the telemetry
@@ -275,6 +293,8 @@ class _Dispatched:
     # The payload AS SHOWN when the item marked `secret` paths (`kernel/_secret`):
     # what the fanout publishes on every attempt; the handler gets `payload`.
     shown: dict | None = None
+    # The item's `secret` paths, readable by the handler as `current_secret()`.
+    secret_paths: tuple = ()
 
 
 class RemoteTarget:
@@ -283,8 +303,9 @@ class RemoteTarget:
     The send pipeline treats it like any target — a ledger row, a task-table
     row, a settled outcome — except that its dispatch hands the call to the
     peer's route instead of a handler here, carrying the caller as
-    `<this guid>|<sender>` so the peer's gate can judge it. The transport that
-    route rides only carries frames.
+    `<this guid>|<sender>` so the peer's gate can judge it, and the item's
+    `secret` marks so the peer masks its records as this kernel does. The
+    transport that route rides only carries frames.
     """
 
     parent = None
@@ -300,7 +321,12 @@ class RemoteTarget:
         self.handler_module = None
 
     async def _dispatch_task(
-        self, task_id, payload: dict, origin: str | None = None, shown=None
+        self,
+        task_id,
+        payload: dict,
+        origin: str | None = None,
+        shown=None,
+        secret_paths: tuple = (),
     ):
         _current_task.set(task_id)
         own = self._via._root()._meta.get("guid")
@@ -312,8 +338,14 @@ class RemoteTarget:
                 f"send: this kernel has no guid yet (its root has not booted), so a "
                 f"call to {self.id} cannot say who is calling",
             )
+        # The item's `secret` marks ride along: this kernel already records the
+        # call as shown, and the peer must too — its call/settle rows, ledger and
+        # state stream are records of the SAME call.
         return await self.route.call(
-            self.agent_id, payload, f"{own}|{origin if origin else 'kernel'}"
+            self.agent_id,
+            payload,
+            f"{own}|{origin if origin else 'kernel'}",
+            secret_paths,
         )
 
 
@@ -767,6 +799,7 @@ class Agent:
         if bad_secret is not None:
             return outcome(None, FAILED, bad_secret)
         shown = _secret.shown_payload(payload, secret) if secret is not None else None
+        secret_paths = tuple(secret.paths) if secret is not None else ()
         # A DYING TASK REGISTERS NO NEW WORK. `cancel_task` marks the whole
         # subtree before it aborts anything, because `on_cancel` hooks await —
         # so a doomed handler gets scheduling passes on its way out, and what it
@@ -920,7 +953,7 @@ class Agent:
                 )
                 return None
             pid, task = self._spawn_dispatch(
-                target, payload, task_id=exec_id, shown=shown
+                target, payload, task_id=exec_id, shown=shown, secret_paths=secret_paths
             )
             dispatched.append(
                 _Dispatched(
@@ -933,6 +966,7 @@ class Agent:
                     exec_fut=fut,
                     name=name,
                     shown=shown,
+                    secret_paths=secret_paths,
                 )
             )
             return None
@@ -953,10 +987,20 @@ class Agent:
         )
         if bad is not None:
             return bad
-        pid, task = self._spawn_dispatch(target, payload, task_id=pid, shown=shown)
+        pid, task = self._spawn_dispatch(
+            target, payload, task_id=pid, shown=shown, secret_paths=secret_paths
+        )
         dispatched.append(
             _Dispatched(
-                index, pid, task, timeout, target, payload, exec_fut=fut, shown=shown
+                index,
+                pid,
+                task,
+                timeout,
+                target,
+                payload,
+                exec_fut=fut,
+                shown=shown,
+                secret_paths=secret_paths,
             )
         )
         return None
@@ -1047,7 +1091,13 @@ class Agent:
         return fut, None
 
     def _spawn_dispatch(
-        self, target: "Agent", payload: dict, *, task_id: int, shown: dict | None = None
+        self,
+        target: "Agent",
+        payload: dict,
+        *,
+        task_id: int,
+        shown: dict | None = None,
+        secret_paths: tuple = (),
     ) -> tuple[int, "asyncio.Task"]:
         """Start ONE dispatch as a registered asyncio.Task — the unit of the task
         table — under the message id its call row was opened with. Tasks never
@@ -1058,7 +1108,7 @@ class Agent:
         # target's own id — this is the same value the gate just authorized.
         origin = _current_sender.get()
         task = asyncio.create_task(
-            target._dispatch_task(task_id, payload, origin, shown),
+            target._dispatch_task(task_id, payload, origin, shown, secret_paths),
             name=f"fantastic:{task_id}",
         )
         ctx.register_task(
@@ -1096,7 +1146,11 @@ class Agent:
             # SAME task id is free to register again — one id, one `cancel`
             # handle, attempt after attempt.
             _pid, task = self._spawn_dispatch(
-                d.target, d.payload, task_id=d.pid, shown=d.shown
+                d.target,
+                d.payload,
+                task_id=d.pid,
+                shown=d.shown,
+                secret_paths=d.secret_paths,
             )
             d.task = task
 
@@ -1577,12 +1631,42 @@ class Agent:
                 }
         return None
 
+    def _check_holder_mark(self, sender_id: str, payload: dict) -> dict | None:
+        """Only the OPERATOR lowers a secret holder's mark. An agent's
+        `update_agent` naming `holds_secrets` with any value but `true` on an agent
+        whose record says `holds_secrets: true` is refused — else a model granted
+        `update_agent` could unmark a credential_store and then call it. Setting
+        `true` (on a holder or not) passes: protection may be added from anywhere.
+        Judged on the record the verb would patch (`ctx.agents[id]`), before the
+        write-time shape check, so a non-operator's malformed value on a holder
+        gets THIS refusal. The operator (`sender is None`) never reaches here."""
+        if payload.get("type") != "update_agent" or HOLDS_SECRETS not in payload:
+            return None
+        if payload[HOLDS_SECRETS] is True:
+            return None
+        edited = payload.get("id")
+        target = self.ctx.agents.get(edited) if isinstance(edited, str) else None
+        if target is None or target._meta.get(HOLDS_SECRETS) is not True:
+            return None
+        return {
+            "error": (
+                f"{sender_id} may not clear holds_secrets on {edited}: it holds "
+                "secrets, and only the operator lowers that mark"
+            ),
+            "reason": UNAUTHORIZED,
+            "side": HOLDER_MARK_SIDE,
+            "hint": HOLDER_MARK_HINT,
+        }
+
     def _check_conferral(self, sender_id, s_can, s_parent, s_kids, root_id, payload):
         """Authority flows from ABOVE only: an agent may not raise its OWN
         authority, and may confer on another only a SUBSET of its own `can_call`.
-        Operator conferral (`sender is None`) never reaches here."""
+        Nor may it lower a secret holder's mark (`_check_holder_mark`, judged
+        first). Operator conferral (`sender is None`) never reaches here."""
         if not isinstance(payload, dict):
             return None
+        if (held := self._check_holder_mark(sender_id, payload)) is not None:
+            return held
         if "can_call" not in payload and "callable_by" not in payload:
             return None
         edited = payload.get("id")
@@ -1877,7 +1961,10 @@ class Agent:
         # reply and knows nothing of the substrate's gate fields, so they are added
         # here — the same way `description` is. Absent means "baseline only", which
         # is what the kernel stamps; it never means "unknown".
-        for _gate in ("can_call", "callable_by"):
+        # `holds_secrets` rides the same way: a SECRET HOLDER (a credential_store
+        # stamps it; an operator may set it on any agent) says so on its reflect,
+        # because ai_core refuses every model-parsed call that names it.
+        for _gate in ("can_call", "callable_by", "holds_secrets"):
             if _gate in target._meta and _gate not in reply:
                 reply[_gate] = target._meta[_gate]
         # Kernel runtime identity + deployment context — surfaced on the ROOT
@@ -2027,8 +2114,8 @@ class Agent:
         next reflect.
 
         With `schemas`, an entry also carries `schema` when its handler module
-        publishes `RECORD_SCHEMA` — what that KIND's record takes (`fields`,
-        `key_var`), readable before any agent of it exists (lib request #3,
+        publishes `RECORD_SCHEMA` — what that KIND's record takes (`fields`),
+        readable before any agent of it exists (lib request #3,
         2026-09-30). Duck-typed like `validate_meta`, which enforces the same
         schema at the write. Importing the module is the cost of asking, so the
         cheap `bundles=ids` listing never does it."""
@@ -2280,6 +2367,7 @@ class Agent:
         payload: dict,
         origin: str | None = None,
         shown: dict | None = None,
+        secret_paths: tuple = (),
     ) -> dict | None:
         """The body of a registered task: stamp `_current_task` so nested sends
         become CHILDREN of this task, then dispatch. The contextvar is set (not
@@ -2291,6 +2379,9 @@ class Agent:
         # PAYLOAD names a resource can tell whose it is. `_current_sender` is
         # about to become this agent's own id, which is why this is separate.
         _current_origin.set(origin)
+        # the caller's `secret` marks, for THIS dispatch only (a task owns a copy
+        # of the context, so the handler's own sends do not inherit them)
+        _current_secret.set(secret_paths)
         # A bridge leg relaying a remote caller marked its send; the address belongs
         # to THIS dispatch only when the leg itself is its origin. Consumed here, so
         # the handler's own sends carry no remote caller.
@@ -2731,6 +2822,24 @@ class Agent:
                     )
         return None
 
+    @staticmethod
+    def _bad_holder_mark(meta: dict) -> str | None:
+        """`holds_secrets`'s SHAPE, judged at WRITE time on every agent: exactly
+        `true` marks a holder, `null` is the operator's clear — nothing else is a
+        value the record may carry (`false`, `"yes"`, `1` read as a mark to one
+        reader and as none to another). Runs after the grant shape and BEFORE the
+        bundle's own `validate_meta`, so for a credential_store a malformed value
+        gets this text and `null` gets the store's."""
+        if HOLDS_SECRETS not in meta:
+            return None
+        v = meta[HOLDS_SECRETS]
+        if v is True or v is None:
+            return None
+        return (
+            "holds_secrets must be exactly true (this agent holds secrets) or null "
+            f"(the operator clears the mark) — got {type(v).__name__}"
+        )
+
     async def _verb_create_agent(self, payload: dict) -> dict:
         """args: handler_module, parent_id (REQUIRED), id?, **meta.
 
@@ -2796,7 +2905,7 @@ class Agent:
         # that boots, half-works, and fails three calls later somewhere else.
         # No record exists yet, so the merged view IS the patch — a create that
         # omits a field its handler requires genuinely cannot run and is refused here.
-        if why := self._bad_grant_shape(meta):
+        if why := self._bad_grant_shape(meta) or self._bad_holder_mark(meta):
             return refusal(INVALID_META, why)
         if why := self._refuse_meta(handler_module, meta, {}):
             return refusal(INVALID_META, why)
@@ -2847,6 +2956,10 @@ class Agent:
         NOT refused when the baseline is absent: dropping a grant is a legitimate
         thing for an operator to express, and a wrong grant is recoverable with
         another `update_agent`. Documented, not gated.
+
+        `holds_secrets` is the exception that IS gated: only `true` or `null` is
+        written (`_bad_holder_mark`), and on a holder only the operator writes
+        `null` — its clear (`_check_holder_mark`, in the gate).
         """
         target_id = payload.get("id")
         if not isinstance(target_id, str) or not target_id:
@@ -2887,7 +3000,7 @@ class Agent:
         # that agent failed. Accepting a value you cannot honour, and reporting
         # success, is the worst of both — the caller believes a security control is
         # in place that is not. Same discovery + optionality as `on_delete`.
-        if why := self._bad_grant_shape(meta):
+        if why := self._bad_grant_shape(meta) or self._bad_holder_mark(meta):
             return refusal(INVALID_META, why, id=target_id)
         if why := self._refuse_meta(target.handler_module, meta, target.record):
             return refusal(INVALID_META, why, id=target_id)

@@ -507,7 +507,7 @@ fn write_record(
         on_disk.insert(k.clone(), v.clone());
     }
     let body = fantastic_kernel::yaml_io::dump(&Value::Object(on_disk));
-    fantastic_fs::write_bytes(root, persistence::RECORD_FILE, body.as_bytes(), true)
+    fantastic_fs::write_bytes(root, persistence::RECORD_FILE, body.as_bytes(), true, None)
         .map_err(raise_fs)?;
     seed_readme(root, record.get("handler_module"), kernel);
     Ok(())
@@ -535,7 +535,7 @@ fn seed_readme(root: &Path, handler_module: Option<&Value>, kernel: &Kernel) {
         match fantastic_fs::exists(root, &rel) {
             Ok(true) => continue,
             Ok(false) => {
-                if fantastic_fs::write_bytes(root, &rel, body.as_bytes(), true).is_err() {
+                if fantastic_fs::write_bytes(root, &rel, body.as_bytes(), true, None).is_err() {
                     return;
                 }
             }
@@ -733,7 +733,9 @@ impl Bundle for KernelStateBundle {
             // CODED. A reason-less error on the ROOT — the most-addressed agent
             // in the kernel — is decorated by `apply_reflect_flags` into
             // something that reads like a healthy reflect (python 2026-09-02).
-            other => {
+            // `verb` echoes the RAW `type` (python `verb=t`): null when absent, `5`
+            // for a number — never the empty string the dispatch matched on.
+            _ => {
                 let t = payload.get("type").cloned().unwrap_or(Value::Null);
                 let mut r = fantastic_kernel::refusal(
                     fantastic_kernel::refusal::UNHANDLED,
@@ -742,7 +744,7 @@ impl Bundle for KernelStateBundle {
                         fantastic_bundle::py_repr_value(&t)
                     ),
                 );
-                fantastic_kernel::refusal::with(&mut r, "verb", json!(other));
+                fantastic_kernel::refusal::with(&mut r, "verb", t);
                 r
             }
         };

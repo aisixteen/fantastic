@@ -57,7 +57,6 @@ RECORD_SCHEMA = schema(
         field("num_predict", "int", "a turn's output budget (tokens)"),
         field("think", "bool", "turn the model's thinking channel on or off"),
     ],
-    key_var=None,
 )
 
 

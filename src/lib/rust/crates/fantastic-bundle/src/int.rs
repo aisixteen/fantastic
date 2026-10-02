@@ -3,7 +3,7 @@
 use serde_json::Value;
 
 use crate::repr::{py_repr, py_truthy};
-use crate::unicode::{is_space, transform_decimal_and_space_to_ascii};
+use crate::unicode::transform_decimal_and_space_to_ascii;
 
 /// A python exception a helper would have raised: its class and its `str(e)`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -161,8 +161,9 @@ fn parse_int_literal(s: &str) -> Result<i64, PyError> {
 /// `float(x)`.
 ///
 /// A bool is 0.0/1.0, a number is itself, a string parses as CPython's float
-/// literal (python whitespace stripped, `inf`/`infinity`/`nan` in any case,
-/// single `_` between digits); `None`, a list and a dict raise `TypeError`.
+/// literal (non-ASCII spaces and C `isspace` stripped, never `\x1c`-`\x1f`;
+/// `inf`/`infinity`/`nan` in any case; single `_` between digits); `None`, a
+/// list and a dict raise `TypeError`.
 ///
 /// # Errors
 /// python's `TypeError` / `ValueError`, with CPython's message.
@@ -182,12 +183,16 @@ pub fn py_float(v: &Value) -> Result<f64, PyError> {
 fn parse_float_literal(s: &str) -> Result<f64, PyError> {
     let invalid =
         || PyError::ValueError(format!("could not convert string to float: {}", py_repr(s)));
-    // Unicode `Nd` digits and spaces to ASCII FIRST — the same first step
-    // `int()` takes (`transform_decimal_and_space_to_ascii`) — then python
-    // strips its own whitespace set, then `_` is allowed only between digits —
-    // a leading, trailing or doubled one is a ValueError.
+    // Unicode `Nd` digits and NON-ASCII spaces to ASCII FIRST — the same first
+    // step `int()` takes (`transform_decimal_and_space_to_ascii`) — then CPython
+    // strips C `isspace` (` \t\n\v\f\r`) only: `\x1c`-`\x1f` are `str.isspace()`
+    // but an ASCII char is never transformed, so `float('\x1c7')` is a
+    // ValueError. Then `_` is allowed only between digits — a leading, trailing
+    // or doubled one is a ValueError.
     let transformed = transform_decimal_and_space_to_ascii(s);
-    let body: String = transformed.trim_matches(is_space).to_string();
+    let body: String = transformed
+        .trim_matches(|c: char| matches!(c, ' ' | '\t' | '\n' | '\x0b' | '\x0c' | '\r'))
+        .to_string();
     if body.is_empty() {
         return Err(invalid());
     }

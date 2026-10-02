@@ -70,12 +70,12 @@ function containerRunArgs(name: string, port: number, tmp: string): string[] {
   ];
   // Forward LLM keys for the (opt-in, paid) live-LLM tests.
   const env = envFromDotenv();
-  // Forward ONLY the selected backend's secret (no anthropic key into an ollama
+  // Forward ONLY the selected backend's secret (no vLLM key into an ollama
   // run) — same no-leak guarantee as daemonEnv(), for the container target.
   const forward =
     LLM_BACKEND === "ollama"
       ? ["OLLAMA_HOST"]
-      : ["ANTHROPIC_API_KEY", "OLLAMA_HOST"];
+      : ["VLLM_API_KEY", "OLLAMA_HOST"];
   for (const k of forward) {
     if (env[k]) args.push("-e", `${k}=${env[k]}`);
   }
@@ -84,8 +84,9 @@ function containerRunArgs(name: string, port: number, tmp: string): string[] {
 }
 
 /** Parse the repo `.env` into a {KEY: value} map (so the spawned daemon — which
- *  runs in a tmp cwd and can't see the repo `.env` — gets e.g. ANTHROPIC_API_KEY in
- *  its environment). Stdlib-only, mirrors the python `_load_dotenv` rules. */
+ *  runs in a tmp cwd and can't see the repo `.env` — gets e.g. VLLM_API_KEY in
+ *  its environment, where the `creds` store reads it). Stdlib-only, mirrors the
+ *  python `_load_dotenv` rules. */
 function envFromDotenv(): Record<string, string> {
   const out: Record<string, string> = {};
   try {
@@ -107,7 +108,7 @@ function envFromDotenv(): Record<string, string> {
 }
 
 /** Read one key from the repo `.env` (or process env) — test-side gating for
- *  live-LLM tests, e.g. `dotenvKey("ANTHROPIC_API_KEY")`. */
+ *  live-LLM tests, e.g. `dotenvKey("VLLM_API_KEY")`. */
 export function dotenvKey(name: string): string | undefined {
   return process.env[name] ?? envFromDotenv()[name];
 }
@@ -154,15 +155,21 @@ export interface BootOptions {
   /** Also create an `exec_bridge` agent (the background-script runner). */
   execBridge?: boolean;
   /** Also create an LLM backend agent (+ its history `file_bridge` agent). `bundle`
-   *  picks the backend (default `ollama_backend.tools`; e.g.
-   *  `anthropic_backend.tools` for Claude). `model`/`endpoint` are passed only
-   *  when set (each bundle defaults its own). The repo `.env` is injected into
-   *  the daemon env, so a key like ANTHROPIC_API_KEY reaches the backend. */
+   *  picks the backend (default `ollama_backend.tools`; e.g. `vllm_backend.tools`).
+   *  Each record field is passed only when set — the backend refuses a record
+   *  missing one it requires (vllm: endpoint, model, max_tokens, kv_slots,
+   *  kv_overflow). A KEYED bundle reads its key from a `creds` credential_store
+   *  (env backend) named in its `credentials` — the repo `.env` is injected into
+   *  the daemon env, so the STORE reads e.g. VLLM_API_KEY; no backend reads a key
+   *  from the environment. */
   llm?: {
     bundle?: string;
     model?: string;
     endpoint?: string;
     num_ctx?: number;
+    max_tokens?: number;
+    kv_slots?: number;
+    kv_overflow?: string;
     /** More reach for the AI: host id → verbs (`"*"` or a list). Written on
      *  BOTH halves — the AI's `can_call`, and each target's `callable_by`
      *  (the root included: `kernel_state`). */
@@ -262,16 +269,24 @@ export function recordField(file: string, key: string): string | undefined {
 }
 
 // ─── LLM backend selection — ONE env switch (`LLM_BACKEND`) so every live-LLM
-//     itest runs against either Claude or a local ollama model (parity). The
-//     in-kernel AI agent is created identically via `bootHost({ llm })`; only the
-//     bundle/model differ, so the whole suite is reused verbatim, no fork. ───
-export const LLM_BACKEND = (process.env.LLM_BACKEND ?? "claude").toLowerCase();
+//     itest runs against either a vLLM server or a local ollama model (parity).
+//     The in-kernel AI agent is created identically via `bootHost({ llm })`; only
+//     the bundle/record differ, so the whole suite is reused verbatim, no fork. ───
+export const LLM_BACKEND = (process.env.LLM_BACKEND ?? "vllm").toLowerCase();
+
+/** The vLLM record fields that have NO default anywhere — the backend refuses a
+ *  record without them, so an unset one skips the live tests (`llmReachable`). */
+const VLLM_REQUIRED = ["VLLM_ENDPOINT", "FANTASTIC_AI_MODEL", "VLLM_KV_SLOTS", "VLLM_KV_OVERFLOW"];
 
 /** The active LLM agent config for `bootHost({ llm })`, chosen by `LLM_BACKEND`.
- *  `claude` (default) → anthropic_backend; `ollama` → ollama_backend at the
- *  MODEL'S FULL context (gemma4:12b = 262144 / 256K) — proven to fit RAM on the
- *  32GB box (resident KV is usage-based, ~8GB at low fill), not an invented cap.
- *  Override the model/ctx via env for a different model. */
+ *  `vllm` (default) → vllm_backend: the server's `/v1` URL (`VLLM_ENDPOINT`), the
+ *  served model (`FANTASTIC_AI_MODEL`) and the KV session table's size and policy
+ *  (`VLLM_KV_SLOTS`, `VLLM_KV_OVERFLOW`) — all required, nothing guessed; a turn's
+ *  `max_tokens` is the e2e suite's one budget (65536, `MAX_TOKENS` overrides).
+ *  `ollama` → ollama_backend at the MODEL'S FULL context (gemma4:12b = 262144 /
+ *  256K) — proven to fit RAM on the 32GB box (resident KV is usage-based, ~8GB at
+ *  low fill), not an invented cap. Override the model/ctx via env for a
+ *  different model. */
 export const ACTIVE_LLM: NonNullable<BootOptions["llm"]> =
   LLM_BACKEND === "ollama"
     ? {
@@ -281,13 +296,34 @@ export const ACTIVE_LLM: NonNullable<BootOptions["llm"]> =
         endpoint: process.env.OLLAMA_ENDPOINT, // unset → ollama_backend default :11434
       }
     : {
-        bundle: "anthropic_backend.tools",
-        model: process.env.ANTHROPIC_MODEL ?? "claude-opus-4-8",
+        bundle: "vllm_backend.tools",
+        model: process.env.FANTASTIC_AI_MODEL,
+        endpoint: process.env.VLLM_ENDPOINT,
+        max_tokens: Number(process.env.MAX_TOKENS ?? 65536),
+        kv_slots: process.env.VLLM_KV_SLOTS ? Number(process.env.VLLM_KV_SLOTS) : undefined,
+        kv_overflow: process.env.VLLM_KV_OVERFLOW,
       };
 
+/** The keyed bundles: the env var their key is read from — by the `creds` STORE.
+ *  A bundle in OPTIONAL_KEY is wired to the store only when its variable is set:
+ *  a vLLM server started without `--api-key` takes no key at all. */
+const KEY_VAR: Record<string, string> = {
+  "responses_backend.tools": "OPENAI_API_KEY",
+  "vllm_backend.tools": "VLLM_API_KEY",
+};
+const OPTIONAL_KEY = new Set(["vllm_backend.tools"]);
+
+/** The env var `bundle`'s key is read from, or undefined when it takes none. */
+function keyVarFor(bundle: string): string | undefined {
+  const v = KEY_VAR[bundle];
+  if (v === undefined) return undefined;
+  return OPTIONAL_KEY.has(bundle) && !dotenvKey(v) ? undefined : v;
+}
+
 /** Is the active backend reachable? (skip — never hang/fail — when not.) ollama:
- *  the server answers `/api/tags` AND has the model pulled. Claude: a key in
- *  `.env` AND api.anthropic.com reachable. */
+ *  the server answers `/api/tags` AND has the model pulled. vllm: every required
+ *  variable is set AND the server's `/models` lists the model (with the key as a
+ *  Bearer header when `VLLM_API_KEY` is set). */
 export async function llmReachable(): Promise<boolean> {
   if (LLM_BACKEND === "ollama") {
     const raw = process.env.OLLAMA_HOST ?? "127.0.0.1:11434";
@@ -304,10 +340,16 @@ export async function llmReachable(): Promise<boolean> {
       return false;
     }
   }
-  if (!dotenvKey("ANTHROPIC_API_KEY")) return false;
+  if (VLLM_REQUIRED.some((v) => !process.env[v])) return false;
+  const key = dotenvKey("VLLM_API_KEY");
   try {
-    await fetch("https://api.anthropic.com/", { signal: AbortSignal.timeout(3000) });
-    return true;
+    const r = await fetch(`${(ACTIVE_LLM.endpoint as string).replace(/\/+$/, "")}/models`, {
+      headers: key ? { Authorization: `Bearer ${key}` } : {},
+      signal: AbortSignal.timeout(3000),
+    });
+    if (!r.ok) return false;
+    const j = (await r.json()) as { data?: { id?: string }[] };
+    return (j.data ?? []).some((m) => m.id === ACTIVE_LLM.model);
   } catch {
     return false;
   }
@@ -315,12 +357,12 @@ export async function llmReachable(): Promise<boolean> {
 
 /** The daemon's env: process env + repo `.env`, but with the NON-selected
  *  backend's secret STRIPPED. An `LLM_BACKEND=ollama` run therefore carries NO
- *  ANTHROPIC_API_KEY — Claude cannot run, and any stray `anthropic_backend` agent
- *  fails loudly instead of silently "leaking" Claude into the ollama comparison. */
+ *  VLLM_API_KEY — any stray keyed `vllm_backend` agent fails loudly instead of
+ *  silently "leaking" the vLLM server into the ollama comparison. */
 function daemonEnv(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env, ...envFromDotenv() };
   if (LLM_BACKEND === "ollama") {
-    delete env.ANTHROPIC_API_KEY;
+    delete env.VLLM_API_KEY;
   }
   return env;
 }
@@ -519,6 +561,21 @@ export async function bootHost(port = 8911, opts: BootOptions = {}): Promise<Hos
   if (opts.llm !== undefined) {
     const bundle = opts.llm.bundle ?? "ollama_backend.tools";
     const more = opts.llm.reach ?? {};
+    // THE KEY, for a keyed bundle: an env-backed `creds` store, one ref bound to
+    // the endpoint's host, readable by `llm` alone; the record names it.
+    const keyVar = keyVarFor(bundle);
+    if (keyVar !== undefined) {
+      runCli(tmp, [
+        "kernel",
+        "create_agent",
+        "parent_id=kernel_state",
+        "handler_module=credential_store.tools",
+        "id=creds",
+        "backend=env",
+        `refs=${JSON.stringify({ llm: { host: opts.llm.endpoint, env: { api_key: keyVar }, readers: ["llm"] } })}`,
+        `callable_by=${JSON.stringify({ $self: "*", $parent: "*", $children: "*", llm: ["get"] })}`,
+      ]);
+    }
     const args = [
       "kernel",
       "create_agent",
@@ -526,12 +583,16 @@ export async function bootHost(port = 8911, opts: BootOptions = {}): Promise<Hos
       `handler_module=${bundle}`,
       "id=llm",
       "memory_store_id=memory",
-      `can_call=${JSON.stringify({ $self: "*", $parent: "*", $children: "*", memory: "*", ...(pyId ? { [pyId]: "*" } : {}), ...more })}`,
+      `can_call=${JSON.stringify({ $self: "*", $parent: "*", $children: "*", memory: "*", ...(keyVar !== undefined ? { creds: ["get"] } : {}), ...(pyId ? { [pyId]: "*" } : {}), ...more })}`,
       `callable_by=${JSON.stringify({ $self: "*", $parent: "*", $children: "*", [webWsId]: "*" })}`,
     ];
+    if (keyVar !== undefined) args.push(`credentials=${JSON.stringify({ store: "creds", ref: "llm" })}`);
     if (opts.llm.model) args.push(`model=${opts.llm.model}`);
     if (opts.llm.endpoint) args.push(`endpoint=${opts.llm.endpoint}`);
     if (opts.llm.num_ctx) args.push(`num_ctx=${opts.llm.num_ctx}`);
+    if (opts.llm.max_tokens) args.push(`max_tokens=${opts.llm.max_tokens}`);
+    if (opts.llm.kv_slots) args.push(`kv_slots=${opts.llm.kv_slots}`);
+    if (opts.llm.kv_overflow) args.push(`kv_overflow=${opts.llm.kv_overflow}`);
     runCli(tmp, args);
     runCli(tmp, [
       "kernel",
@@ -610,7 +671,7 @@ export async function bootHost(port = 8911, opts: BootOptions = {}): Promise<Hos
 
   // Spawn the daemon. container: `podman/docker run -d` (publishes the port,
   // mounts the workdir + dist). local: the venv binary, with the repo `.env`
-  // (e.g. ANTHROPIC_API_KEY) injected — it runs in `tmp`, so the cwd-relative
+  // (e.g. VLLM_API_KEY) injected — it runs in `tmp`, so the cwd-relative
   // `_load_dotenv` wouldn't find it otherwise.
   let proc: ChildProcess | undefined;
   let container: string | undefined;

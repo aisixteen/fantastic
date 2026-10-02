@@ -1052,3 +1052,40 @@ async fn unknown_type_wire_shape_is_byte_exact() {
         assert_eq!(serde_json::to_string(&v).unwrap(), want, "{verb}");
     }
 }
+
+/// The handler's `verb` echoes the RAW `type` — python `verb=t`: null when it is
+/// absent, the number for `5` — never the empty string the dispatch matched on.
+/// `send` refuses those payloads before any handler runs (python measured: `send:
+/// payload.type required` / `must be a non-empty string`), so the handler is
+/// called directly, as a bundle that forwards a payload would.
+#[tokio::test]
+async fn an_unknown_type_echoes_the_raw_value_as_verb() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = booted(&tmp);
+    let root = kernel.root().expect("root").id.clone();
+    for (payload, want) in [
+        (
+            json!({}),
+            r#"{"error":"kernel_state: unknown type None","reason":"unhandled","verb":null}"#,
+        ),
+        (
+            json!({"type": null}),
+            r#"{"error":"kernel_state: unknown type None","reason":"unhandled","verb":null}"#,
+        ),
+        (
+            json!({"type": 5}),
+            r#"{"error":"kernel_state: unknown type 5","reason":"unhandled","verb":5}"#,
+        ),
+        (
+            json!({"type": ""}),
+            r#"{"error":"kernel_state: unknown type ''","reason":"unhandled","verb":""}"#,
+        ),
+    ] {
+        let r = KernelStateBundle::default()
+            .handle(&root, &payload, &kernel)
+            .await
+            .expect("a refusal, not a raise")
+            .expect("a reply");
+        assert_eq!(serde_json::to_string(&r).unwrap(), want, "{payload}");
+    }
+}

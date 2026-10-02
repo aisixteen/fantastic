@@ -54,8 +54,8 @@ private func edit(_ k: Kernel, _ edits: [(String, String, String)]) async -> JSO
     let list: [JSON] = edits.map { .object(["path": .string($0.0), "hunks": .integer(1)]) }
     return await k.send([
         Item(
-            AgentId("fs"), .object(["type": "edit", "edits": .array(list)]), binary: Data(blob.utf8)
-        )
+            AgentId("fs"), .object(["type": "edit", "edits": .array(list)]),
+            binary: Blob("bytes", Data(blob.utf8)))
     ])[0].result
 }
 
@@ -100,12 +100,12 @@ struct DocumentLocksPinTests {
         _ = await k.send([
             Item(
                 AgentId("fs"), .object(["type": "write", "path": "a.py"]),
-                binary: Data((left + right).utf8))
+                binary: Blob("bytes", Data((left + right).utf8)))
         ])
         _ = await k.send([
             Item(
                 AgentId("fs"), .object(["type": "write", "path": "b.py"]),
-                binary: Data((left + right).utf8))
+                binary: Blob("bytes", Data((left + right).utf8)))
         ])
         await withTaskGroup(of: JSON.self) { group in
             for i in 0..<rounds {

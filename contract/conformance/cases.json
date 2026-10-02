@@ -184,6 +184,37 @@
         "verb": "ps"
       },
       "note": "Kernel verbs act on the TREE, so the agent named is the OPERAND, not the actor — every runtime refuses them at a non-root agent with `not_here` AND names the misaddressed verb in `verb`, which the ports used to omit."
+    },
+    {
+      "name": "secret-marked-payload",
+      "target": "c21_probe",
+      "payload": {
+        "type": "poke",
+        "value": "c21-secret-value"
+      },
+      "secret": [
+        "payload.value"
+      ],
+      "expect": {
+        "poked": "c21-secret-value"
+      },
+      "note": "`secret` is the batch item's field beside `payload` (`kernel/_secret`), and it crosses every transport except a relay_connector leg, which seals it (refuses any call carrying marks): a ws/bridge `call` frame carries it as its own `secret` field, web_rest as the `X-Fantastic-Secret` header (a JSON array), an exec_bridge guest program's `{op:\"send\", rid, target, payload, secret?}` frame as its own `secret` field (the connector's `kernel.send(target, payload, secret=[...])`), and a `forward` takes it as the outer call's marks re-rooted one level down (`payload.payload.<f>` -> `payload.<f>`, `result[.<f>]` as is). The TARGET gets the real value and the caller the real reply on every transport that carries it. What the records keep (`<secret>`) is not a reply, so it is graded by each runtime's own tests, not here."
+    },
+    {
+      "name": "secret-cannot-hide-the-verb",
+      "target": "c21_probe",
+      "payload": {
+        "type": "poke",
+        "value": 1
+      },
+      "secret": [
+        "payload.type"
+      ],
+      "expect": {
+        "reason": "bad_arg",
+        "arg": "secret"
+      },
+      "note": "The RECEIVING kernel's own `secret` check refuses the mark before anything is dispatched, in the same words on every transport. It is the proof the marks crossed: a leg that dropped them would answer {poked: 1}."
     }
   ]
 }

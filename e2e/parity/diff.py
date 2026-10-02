@@ -121,6 +121,16 @@ class Norm:
             return True
         return False
 
+    #: N4 — the documentation examples the kernel prints into every AI system
+    #: prompt (`ai_core/core.py` `_SEND_TO_HOWTO` and the list-shape line), each
+    #: with its numbers fenced off as literals (see `string`).
+    DOC_EXAMPLES = (
+        ("[from solver_1 · to solver_2, solver_3 · msg 412]",
+         "[from solver_1 · to solver_2, solver_3 · msg <DOC:412>]"),
+        ("<ids><item>12</item><item>15</item></ids>",
+         "<ids><item><DOC:12></item><item><DOC:15></item></ids>"),
+    )
+
     #: A capture's own work root is `runs/parity/w/<slot>/` (run.py --slot) — two
     #: characters that name the CAPTURE, never the runtime's behaviour.
     SLOT = re.compile(r"(/e2e/runs/parity/w/)[0-9A-Za-z]{2}(?=/)")
@@ -179,6 +189,29 @@ class Norm:
         if new != out:
             self.fired.add("N3")
         out = new
+        # N23 — the vllm KV session table's conversation ids INSIDE TEXT: a reflect
+        # rendered into a system prompt (`<conversations> <item>hex16</item> …`) and
+        # the same list as embedded json. Each id is a digest over a prompt prefix
+        # that embeds values already declared incomparable (N2, N3, N8), so it can
+        # only differ. HOW MANY there are, and where, stays compared.
+        def _kv_items(m):
+            return re.sub(r"[0-9a-f]{16}", "<KV_CONVERSATION:hex16>", m.group(0))
+        new = re.sub(r"<conversations>(?:(?:\s|\\n)*<item>[0-9a-f]{16}</item>)+"
+                     r"(?:\s|\\n)*</conversations>", _kv_items, out)
+        new = re.sub(r'\\?"conversations\\?"\s*:\s*\[(?:\s*\\?"[0-9a-f]{16}\\?"\s*,?)+\s*\]',
+                     _kv_items, new)
+        if new != out:
+            self.fired.add("N23")
+        out = new
+        # N25 — the port's catalog without `foundation_models_backend`, in TEXT:
+        # the comma-joined `bundles=…` a system prompt carries and a `"bundles":
+        # [...]` id list inside an embedded json document. The PORT side only:
+        # python ships no such bundle (owner, 2026-10-02).
+        if self.runtime != "python":
+            new = drop_fm_text(out)
+            if new != out:
+                self.fired.add("N25")
+            out = new
         # N7 random tokens, by SHAPE.
         for pat, rep, tag in (
             (r"\bsnd_[0-9a-f]{8}\b", "<SEND_ID:snd_hex8>", "N7"),
@@ -280,6 +313,19 @@ class Norm:
         if new != out:
             self.fired.add("N10")
         out = new
+        # N4 — the kernel's OWN documentation examples are literals, not minted
+        # ids. The send-to howto every AI system prompt carries shows a header
+        # `[from solver_1 · to solver_2, solver_3 · msg 412]` and a list
+        # `<ids><item>12</item><item>15</item></ids>`; both shapes are N4 anchors,
+        # so the example numbers were renamed like ids — and a REAL row that
+        # happened to be 412 then shared the example's placeholder on one run and
+        # not on the other. Measured 2026-10-02 on the python self-diff,
+        # `ctx/req/ai_compact_main_t11.json`: `↑<ID#3>` against `↑<ID#x1>`, the two
+        # runs' row ids 3 apart. The example text stays compared, verbatim.
+        for doc, lit in self.DOC_EXAMPLES:
+            if doc in out:
+                out = out.replace(doc, lit)
+                self.fired.add("N4")
         # N4 text anchors.
         for pat in (r"\[reply to (\d+)", r"↑(\d+)",
                     # the same arrow ESCAPED, as a frame's `text` carries it
@@ -329,7 +375,11 @@ class Norm:
         def _renumber_list(m):
             return m.group(1) + re.sub(
                 r"\d+", lambda mm: self._id_placeholder(int(mm.group(0))), m.group(2)) + m.group(3)
-        out = re.sub(r'("(?:expand|ids|refs|view_ids)"\s*:\s*\[)([\d,\s]*)(\])',
+        # `covers` too: a ledger flush row names the executions it wrote, and the
+        # memory store's state event quotes that row as embedded json (measured
+        # 2026-10-02, `wire/frames.jsonl` `"covers": [717, …]` against `[720, …]`,
+        # the runs' ids 3 apart). `\\?"` — the same document quoted once more.
+        out = re.sub(r'(\\?"(?:expand|ids|refs|view_ids|covers)\\?"\s*:\s*\[)([\d,\s]*)(\])',
                      _renumber_list, out)
         # N4 — a minted id inside an EMBEDDED json document (the fold prompt
         # quotes the rows it is folding as json). `pid` is left to N5: that one
@@ -437,6 +487,10 @@ class Norm:
             if key == "runtime":
                 self.fired.add("N2")
                 return "<RUNTIME>"
+            if key == "conversations" and re.fullmatch(r"[0-9a-f]{16}", v):
+                # N23 — a KV session-table conversation id (see `string`).
+                self.fired.add("N23")
+                return "<KV_CONVERSATION:hex16>"
             return self.string(v)
         if isinstance(v, (int, float)):
             if key in self.TIME_KEYS:
@@ -559,6 +613,14 @@ class Norm:
                 if k == "harness" or k in HARNESS_FIELDS:
                     self.fired.add("N14")
                     continue
+                # N25 — a catalog LIST on the port side: the bundle python does
+                # not ship leaves it, whether the entry is a name (`bundles=ids`)
+                # or a `{name, handler_module, schema}` (`bundles=all`).
+                if k == "bundles" and isinstance(v, list) and self.runtime != "python":
+                    kept = drop_fm_entries(v)
+                    if len(kept) != len(v):
+                        self.fired.add("N25")
+                        v = kept
                 nk = self.string(k) if isinstance(k, str) else k
                 if isinstance(v, (dict, list)):
                     out[nk] = self.walk(v, k)
@@ -1571,6 +1633,141 @@ def _canon_ai_events(rel: str, doc):
             for k, v in doc.items()}
 
 
+def exclude_flush_rows(doc):
+    """N24 — the memory store's reflect `rows` WITHOUT the kernel's `flush`
+    bookkeeping rows. Returns `(doc, fired)`.
+
+    Each flush appends ONE `flush` row beside the batch it writes, and how many
+    flushes a run made is the flusher's debounce against the runtime's speed
+    (measured: python 334, rust/swift 333 on the same scenario). `store.py`
+    brackets the reflect with two `{rows, flush}` censuses of the whole store
+    (one `dump` each) under `harness.flush_rows`. The census whose `rows` equals
+    the reflect's is the store the reflect saw; its `flush` is subtracted and
+    the count becomes `<ROWS_EXCLUDING_FLUSH:n>`, compared exactly. NOT FIRED —
+    the raw count stays and is a line — when no census was taken, when none
+    matches (two flushes inside the bracket), or when both match with different
+    flush counts."""
+    if not isinstance(doc, dict):
+        return doc, False
+    h, rows = doc.get("harness"), doc.get("rows")
+    cens = h.get("flush_rows") if isinstance(h, dict) else None
+    if not isinstance(cens, list) or not isinstance(rows, int) or isinstance(rows, bool):
+        return doc, False
+    flush = {c["flush"] for c in cens
+             if isinstance(c, dict) and c.get("rows") == rows
+             and isinstance(c.get("flush"), int) and not isinstance(c["flush"], bool)}
+    if len(flush) != 1:
+        return doc, False
+    return {**doc, "rows": f"<ROWS_EXCLUDING_FLUSH:{rows - flush.pop()}>"}, True
+
+
+#: N25 — python ships no `foundation_models_backend` (owner, 2026-10-02: py has
+#: no FM); rust and swift do. Dropped from the PORT side of a catalog only.
+FM_BUNDLE = "foundation_models_backend"
+_FM_COMMA = re.compile(r"(?<![\w])bundles=([\w,]+)")
+#: A `"bundles": [...]` of NAMES inside text (a cli stdout, a REST body recorded
+#: as a string), quoted once or more. No bracket or brace inside: a
+#: `bundles=all` list of objects is not a list of names.
+_FM_ARRAY = re.compile(r'(\\*"bundles\\*"\s*:\s*\[)([^\[\]{}]*)(\])')
+
+
+def _bundle_name(e):
+    if isinstance(e, str):
+        return e
+    if isinstance(e, dict) and isinstance(e.get("name"), str):
+        return e["name"]
+    return None
+
+
+def drop_fm_entries(lst: list) -> list:
+    """N25 — a catalog list without the bundle python does not ship."""
+    return [e for e in lst if _bundle_name(e) != FM_BUNDLE]
+
+
+def drop_fm_text(s: str) -> str:
+    """N25 — the same, in TEXT: the comma-joined `bundles=a,b,c` a system prompt
+    carries, and a `"bundles": [...]` id list in compact or indented json. The
+    entry goes with ONE separator, so the list around it is what python's is."""
+    def comma(m):
+        toks = m.group(1).split(",")
+        kept = [t for t in toks if t != FM_BUNDLE]
+        return m.group(0) if len(kept) == len(toks) else "bundles=" + ",".join(kept)
+
+    def array(m):
+        inner = m.group(2)
+        name = re.escape(FM_BUNDLE)
+        new = re.sub(rf'\s*(\\*"){name}\1\s*,', "", inner)              # first / middle
+        new = re.sub(rf'\s*,\s*(\\*"){name}\1(?=\s*$)', "", new)         # last
+        new = re.sub(rf'^\s*(\\*"){name}\1\s*$', "", new)                # the only one
+        return m.group(1) + new + m.group(3)
+
+    return _FM_ARRAY.sub(array, _FM_COMMA.sub(comma, s))
+
+
+def repage_without_fm(doc):
+    """N25 — a PAGED catalog walk (`families.page_walk` over a `bundles` reflect)
+    on the port side, re-paged as if the bundle python does not ship were absent.
+    Returns `(doc, fired)`.
+
+    Dropping the entry from its page is not enough: every page boundary after
+    it shifts by one (python: 16 names, 8 pages of 2; a port with the bundle: 17
+    names, 9 pages, `[foundation_models_backend, kernel_state]` on page 3), so
+    the cursor of every later page and the page count differ for that one name.
+
+    The walk is re-paged ONLY when the port's own walk is a well-formed limit
+    paging in python's convention — every page but the last holds exactly
+    `limit` entries and names its last entry as `bundles_next`, each next page
+    asks `after` that cursor, the last page has no cursor — so a port paging bug
+    is never re-paged away: the walk is left as recorded and is a line. The pages
+    are then rebuilt from the port's catalog minus the bundle, in chunks of
+    `limit`: page j keeps every other field of the port's own page j (the last
+    page those of the port's own last page, so its last-page convention is the
+    port's), and the cursors and `after`s are derived the way the port's own
+    walk derived them."""
+    if not (isinstance(doc, dict) and isinstance(doc.get("pages"), list)
+            and isinstance(doc.get("base_payload"), dict)):
+        return doc, False
+    base, pages = doc["base_payload"], doc["pages"]
+    limit = base.get("limit")
+    if ("bundles" not in base or not isinstance(limit, int) or isinstance(limit, bool)
+            or limit < 1 or not pages or doc.get("stop") != "no_cursor"
+            or doc.get("page_count") != len(pages)):
+        return doc, False
+    catalog = []
+    for i, p in enumerate(pages):
+        r = p.get("reply") if isinstance(p, dict) else None
+        if not isinstance(r, dict) or not isinstance(r.get("bundles"), list):
+            return doc, False
+        names = [_bundle_name(e) for e in r["bundles"]]
+        if None in names or p.get("payload") != (
+                base if i == 0 else {**base, "after": pages[i - 1].get("cursor")}):
+            return doc, False
+        if i < len(pages) - 1:
+            if not (len(names) == limit and p.get("cursor_key") == "bundles_next"
+                    and p.get("cursor") == names[-1] == r.get("bundles_next")):
+                return doc, False
+        elif not (1 <= len(names) <= limit and p.get("cursor") is None
+                  and r.get("bundles_next") is None):
+            return doc, False
+        catalog += r["bundles"]
+    kept = drop_fm_entries(catalog)
+    if len(kept) == len(catalog) or not kept:
+        return doc, False
+    chunks = [kept[i:i + limit] for i in range(0, len(kept), limit)]
+    new_pages: list = []
+    for j, chunk in enumerate(chunks):
+        last = j == len(chunks) - 1
+        tmpl = pages[-1] if last else pages[j]
+        cur = None if last else _bundle_name(chunk[-1])
+        reply = {k: (chunk if k == "bundles" else cur if k == "bundles_next" and not last else v)
+                 for k, v in tmpl["reply"].items()}
+        fields = {"payload": base if j == 0 else {**base, "after": new_pages[-1]["cursor"]},
+                  "reply": reply, "cursor_key": None if last else "bundles_next",
+                  "cursor": cur}
+        new_pages.append({k: fields.get(k, v) for k, v in tmpl.items()})
+    return {**doc, "page_count": len(new_pages), "pages": new_pages}, True
+
+
 def file_lines(rel: str, pa: Path, pb: Path, ports_a, ports_b, root_alias, rt_b) -> list:
     ka, a = load(pa)
     kb, b = load(pb)
@@ -1581,6 +1778,25 @@ def file_lines(rel: str, pa: Path, pb: Path, ports_a, ports_b, root_alias, rt_b)
         b = {k: v for k, v in (b or {}).items() if k in META_MEASURED}
     na = Norm(ports_a, None, "python")
     nb = Norm(ports_b, root_alias, rt_b)
+    if ka == "json" and kb == "json":
+        # N24 — both sides: the memory store's row count without its flush rows.
+        a, fired_a = exclude_flush_rows(a)
+        b, fired_b = exclude_flush_rows(b)
+        if fired_a or fired_b:
+            na.fired.add("N24")
+        # N25 — the port side: a paged catalog walk re-paged without the bundle
+        # python does not ship.
+        if rt_b != "python":
+            b, fired = repage_without_fm(b)
+            if fired:
+                nb.fired.add("N25")
+    if ka == "text" and kb == "text" and rt_b != "python":
+        # N25 — the port side, BEFORE the text is cut into lines: an indented
+        # `"bundles": [` list puts the entry on a line of its own (a cli stdout).
+        new = drop_fm_text(b)
+        if new != b:
+            nb.fired.add("N25")
+            b = new
     if ka != kb:
         return [{"file": rel, "where": "$", "base": f"<{ka}>", "other": f"<{kb}>",
                  "note": "different file KIND"}]
@@ -2466,6 +2682,52 @@ def cmd_rulecheck() -> int:
          lambda: cjr({"ai": canon_self_reflect([PEER, SELF, REPLY, QUEUED, THINK])},
                      {"ai": canon_self_reflect([PEER, REPLY, THINK, SELF])},
                      "ai_paths/events.json"), True),
+        ("N4 — a documentation example's number is a literal, not an id",
+         lambda: cjr({"text": "[from solver_1 · to solver_2, solver_3 · msg 412]\n"
+                              "[reply to 5 · docs read · ↑412]"},
+                     {"text": "[from solver_1 · to solver_2, solver_3 · msg 412]\n"
+                              "[reply to 5 · docs read · ↑409]"},
+                     "t/ctx/req/x.json"), False),
+        ("N4 — a real header's msg id is still renamed like any id",
+         lambda: cjr({"text": "[from ai · to ai2 · msg 412]"},
+                     {"text": "[from ai · to ai2 · msg 409]"},
+                     "t/ctx/req/x.json"), False),
+        ("N4 — the documentation example with another number is still a line",
+         lambda: cjr({"text": "[from solver_1 · to solver_2, solver_3 · msg 412]"},
+                     {"text": "[from solver_1 · to solver_2, solver_3 · msg 413]"},
+                     "t/ctx/req/x.json"), True),
+        ("N4 — a flush's `covers` inside embedded json",
+         lambda: cjr({"summary": '{"id": 723, "kind": "flush", "covers": [717, 718]}'},
+                     {"summary": '{"id": 726, "kind": "flush", "covers": [720, 721]}'},
+                     "t/wire/frames.jsonl"), False),
+        ("N4 — a `covers` of another LENGTH is still a line",
+         lambda: cjr({"summary": '{"id": 723, "kind": "flush", "covers": [717, 718]}'},
+                     {"summary": '{"id": 726, "kind": "flush", "covers": [720, 721, 722]}'},
+                     "t/wire/frames.jsonl"), True),
+        ("N23 — a KV conversation id in a reflect",
+         lambda: cjr({"kv": {"live": 1, "conversations": ["022609017e2a0f28"]}},
+                     {"kv": {"live": 1, "conversations": ["715ef89e7813c656"]}},
+                     "t/tree/reflect_ai.json"), False),
+        ("N23 — a different NUMBER of conversations is still a line",
+         lambda: cjr({"kv": {"live": 1, "conversations": ["022609017e2a0f28"]}},
+                     {"kv": {"live": 2, "conversations": ["715ef89e7813c656",
+                                                          "0123456789abcdef"]}},
+                     "t/tree/reflect_ai.json"), True),
+        ("N23 — a conversations entry that is not a 16-hex id is still compared",
+         lambda: cjr({"kv": {"conversations": ["abc"]}}, {"kv": {"conversations": ["abd"]}},
+                     "t/tree/reflect_ai.json"), True),
+        ("N23 — the ids rendered into a prompt",
+         lambda: cjr({"text": "<live>1</live> <conversations> <item>022609017e2a0f28</item> "
+                              "</conversations> <evicted>0</evicted>"},
+                     {"text": "<live>1</live> <conversations> <item>715ef89e7813c656</item> "
+                              "</conversations> <evicted>0</evicted>"},
+                     "t/ai_paths/x.json"), False),
+        ("N23 — the table's other fields beside them are still compared",
+         lambda: cjr({"text": "<conversations> <item>022609017e2a0f28</item> "
+                              "</conversations> <evicted>0</evicted>"},
+                     {"text": "<conversations> <item>715ef89e7813c656</item> "
+                              "</conversations> <evicted>1</evicted>"},
+                     "t/ai_paths/x.json"), True),
     ]
     for name, fn, want in new_cases:
         lines = fn()
@@ -2500,6 +2762,128 @@ def cmd_rulecheck() -> int:
             bad += 0 if ok else 1
             total += 1
             print(f"  {'ok  ' if ok else 'FAIL'} {name}")
+
+    # ── N24 / N25 (2026-10-02) — each both ways, through `file_lines`, where
+    # the two passes run. ─────────────────────────────────────────────────────
+    def flines(a, b, rel, rt="rust"):
+        with tempfile.TemporaryDirectory() as d:
+            suffix = Path(rel).suffix or ".txt"
+            pa, pb = Path(d) / f"a{suffix}", Path(d) / f"b{suffix}"
+            for p, doc in ((pa, a), (pb, b)):
+                p.write_text(doc if isinstance(doc, str) else json.dumps(doc))
+            return file_lines(rel, pa, pb, {}, {}, None, rt)
+
+    def mem(rows, *cens):
+        doc = {"id": "memory", "owners": 1, "rows": rows, "grants": 0}
+        return {**doc, "harness": {"flush_rows": list(cens)}} if cens else doc
+
+    def cen(rows, flush):
+        return {"rows": rows, "flush": flush}
+
+    MEM = "store/s1/readme_true/memory.json"
+    PY_MEM = mem(334, cen(334, 34), cen(334, 34))
+
+    def pwalk(names, limit, objs=False, size=None):
+        """A `families.page_walk` record over a `bundles` reflect, built the way
+        the family builds it; `size` != `limit` is a runtime paging bug."""
+        base = {"type": "reflect", "tree": "none", "bundles": "all" if objs else "ids",
+                "limit": limit}
+        ents = [{"name": n, "handler_module": f"{n}.tools"} if objs else n for n in names]
+        size = size or limit
+        pages, payload = [], dict(base)
+        for i in range(0, len(ents), size):
+            chunk = ents[i:i + size]
+            reply = {"id": "kernel_state", "sentence": "s", "bundles": chunk}
+            cur = None
+            if i + size < len(ents):
+                cur = reply["bundles_next"] = _bundle_name(chunk[-1])
+            pages.append({"payload": dict(payload), "reply": reply,
+                          "cursor_key": "bundles_next" if cur else None, "cursor": cur})
+            payload = {**base, "after": cur}
+        return {"base_payload": base, "stop": "no_cursor", "page_count": len(pages),
+                "pages": pages}
+
+    CAT = ["cli", "exec_bridge", "file_bridge", "kernel_state", "ollama_backend", "web"]
+    CAT_FM = CAT[:3] + [FM_BUNDLE] + CAT[3:]
+    WALK = "store/s2/root/bundles_ids_limit2_pages.json"
+
+    def stdout(names):
+        return "{\n  \"runtime\": \"x\",\n  \"bundles\": [\n" + ",\n".join(
+            f"    \"{n}\"" for n in names) + "\n  ]\n}\n"
+
+    def edit_page(walk, i, **kw):
+        walk["pages"][i]["reply"].update(kw)
+        return walk
+
+    n2425 = [
+        ("N24 — flush rows the runtime's speed made are not a difference",
+         lambda: flines(PY_MEM, mem(333, cen(333, 33), cen(333, 33)), MEM), False),
+        ("N24 — a different count of NON-flush rows is still a line",
+         lambda: flines(PY_MEM, mem(334, cen(334, 33), cen(334, 33)), MEM), True),
+        ("N24 — a flush between the first census and the reflect: the second one counts",
+         lambda: flines(PY_MEM, mem(339, cen(333, 33), cen(339, 39)), MEM), False),
+        ("N24 — a reflect that matches NO census is a line, not a guess",
+         lambda: flines(PY_MEM, mem(336, cen(333, 33), cen(339, 34)), MEM), True),
+        ("N24 — two matching censuses that disagree on flushes is a line",
+         lambda: flines(PY_MEM, mem(333, cen(333, 33), cen(333, 32)), MEM), True),
+        ("N24 — a port that took no census is a line",
+         lambda: flines(PY_MEM, mem(333), MEM), True),
+        ("N24 — another field of the reflect beside it is still compared",
+         lambda: flines(PY_MEM, {**mem(333, cen(333, 33)), "grants": 1}, MEM), True),
+        ("N25 — the port's catalog list without the bundle python does not ship",
+         lambda: cjr({"bundles": CAT}, {"bundles": CAT_FM}, "t/store/x.json"), False),
+        ("N25 — the same as `bundles=all` objects",
+         lambda: cjr(pwalk(CAT, 99, objs=True)["pages"][0]["reply"],
+                     pwalk(CAT_FM, 99, objs=True)["pages"][0]["reply"], "t/store/x.json"), False),
+        ("N25 — any OTHER extra bundle on the port is still a line",
+         lambda: cjr({"bundles": CAT}, {"bundles": CAT + ["extra_backend"]},
+                     "t/store/x.json"), True),
+        ("N25 — PYTHON carrying it is still a line (the port side only)",
+         lambda: cjr({"bundles": CAT_FM}, {"bundles": CAT_FM}, "t/store/x.json"), True),
+        ("N25 — the comma-joined catalog in a system prompt",
+         lambda: cjr({"text": "not to find one.  bundles=" + ",".join(CAT) + "\\n\\nYou are"},
+                     {"text": "not to find one.  bundles=" + ",".join(CAT_FM) + "\\n\\nYou are"},
+                     "t/ctx/req/x.json"), False),
+        ("N25 — a prompt catalog missing a bundle is still a line",
+         lambda: cjr({"text": "bundles=" + ",".join(CAT)},
+                     {"text": "bundles=" + ",".join(CAT_FM[:-1])}, "t/ctx/req/x.json"), True),
+        ("N25 — an id list in a REST body, compact, first / middle / last",
+         lambda: cjr({"t": [json.dumps({"bundles": n}, separators=(",", ":"))
+                            for n in (CAT, CAT, CAT)]},
+                     {"t": [json.dumps({"bundles": n}, separators=(",", ":"))
+                            for n in ([FM_BUNDLE] + CAT, CAT_FM, CAT + [FM_BUNDLE])]},
+                     "t/wire/rest.json"), False),
+        ("N25 — an indented id list in a cli stdout, inside a json record",
+         lambda: cjr({"stdout": stdout(CAT)}, {"stdout": stdout(CAT_FM)}, "t/cli/x.json"),
+         False),
+        ("N25 — the same stdout as a raw text file (the line goes, not the text of it)",
+         lambda: flines(stdout(CAT), stdout(CAT_FM), "cli/cli/x.stdout"), False),
+        ("N25 — a stdout list missing ANOTHER entry is still a line",
+         lambda: flines(stdout(CAT), stdout(CAT_FM[:-1]), "cli/cli/x.stdout"), True),
+        ("N25 — a paged walk re-paged without it (ids)",
+         lambda: flines(pwalk(CAT, 2), pwalk(CAT_FM, 2), WALK), False),
+        ("N25 — a paged walk re-paged without it (objects)",
+         lambda: flines(pwalk(CAT, 2, objs=True), pwalk(CAT_FM, 2, objs=True), WALK), False),
+        ("N25 — re-paged when it sits FIRST, and alone on the port's last page",
+         lambda: flines(pwalk(CAT, 2), pwalk([FM_BUNDLE] + CAT, 2), WALK)
+         + flines(pwalk(CAT, 2), pwalk(CAT + [FM_BUNDLE], 2), WALK), False),
+        ("N25 — a port that pages by 3 under limit=2 is left as recorded",
+         lambda: flines(pwalk(CAT, 2), pwalk(CAT_FM, 2, size=3), WALK), True),
+        ("N25 — another field on a re-paged page is still a line",
+         lambda: flines(pwalk(CAT, 2), edit_page(pwalk(CAT_FM, 2), 1, sentence="t"), WALK),
+         True),
+        ("N25 — a port walk missing another bundle is still a line",
+         lambda: flines(pwalk(CAT, 2), pwalk(CAT_FM[:-1], 2), WALK), True),
+        ("N25 — python's own walk is never re-paged",
+         lambda: flines(pwalk(CAT_FM, 2), pwalk(CAT, 2), WALK, rt="python"), True),
+    ]
+    for name, fn, want in n2425:
+        lines = fn()
+        ok = bool(lines) == want
+        bad += 0 if ok else 1
+        total += 1
+        print(f"  {'ok  ' if ok else 'FAIL'} {name}: {len(lines)} line(s), "
+              f"expected {'>0' if want else '0'}")
 
     # ── The diff is written INSIDE the run tree, never beside it. ───────────
     for name, given, want in (

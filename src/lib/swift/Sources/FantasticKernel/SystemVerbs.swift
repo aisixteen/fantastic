@@ -342,6 +342,19 @@ extension Kernel {
         return nil
     }
 
+    /// `holds_secrets`'s SHAPE, judged at WRITE time on every agent: exactly
+    /// `true` marks a holder, `null` is the operator's clear — nothing else is a
+    /// value the record may carry (`false`, `"yes"`, `1` read as a mark to one
+    /// reader and as none to another). Runs after the grant shape and BEFORE the
+    /// bundle's own `validateMeta`, so for a credential_store a malformed value
+    /// gets this text and `null` gets the store's. Python `Agent._bad_holder_mark`.
+    private func badHolderMark(_ meta: OrderedDictionary<String, JSON>) -> String? {
+        guard let v = meta[holdsSecretsField] else { return nil }
+        if v == .bool(true) || v == .null { return nil }
+        return "holds_secrets must be exactly true (this agent holds secrets) or null "
+            + "(the operator clears the mark) — got \(pyTypeName(v))"
+    }
+
     func createFromPayload(payload: JSON) async -> JSON {
         guard let hm = payload["handler_module"].asString, !hm.isEmpty else {
             return Refusal.missing("create_agent", "handler_module")
@@ -400,7 +413,7 @@ extension Kernel {
         // WRITE-TIME VALIDATION, same gate as update_agent (py-canonical: create
         // used to bypass it, so a record could be born with meta its own bundle
         // refuses). Record is empty at create: the merged view IS the patch.
-        if let why = badGrantShape(meta) {
+        if let why = badGrantShape(meta) ?? badHolderMark(meta) {
             return Refusal.make(Refusal.invalidMeta, why)
         }
         if let bundle = bundles.get(hm), let why = bundle.validateMeta(meta, record: [:]) {
@@ -647,7 +660,10 @@ extension Kernel {
         // Grant-map SHAPE, judged here at write time — the gate only judges
         // edges (py-canonical, 2026-09-01: `can_call:"*"` accepted as a bare
         // string left a silently-dead grant; refuse loud at the mistake).
-        if let why = badGrantShape(patch) {
+        // `holds_secrets` is the field that IS gated: only `true` or `null` is
+        // written (`badHolderMark`), and on a holder only the operator writes
+        // `null` — its clear (`checkHolderMark`, in the gate).
+        if let why = badGrantShape(patch) ?? badHolderMark(patch) {
             return Refusal.make(Refusal.invalidMeta, why, extra: [("id", .string(idStr))])
         }
         // WRITE-TIME VALIDATION. Ask the target's bundle whether it can honour this

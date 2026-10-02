@@ -87,14 +87,14 @@ residuals:
     #   1. The table's own SHAPE: its length (`headers · len`, 9 vs 6), a pair's
     #      length, and the NAME slot `headers[i][0]`. Because the tables are
     #      compared BY POSITION, one missing header slides every later name by
-    #      one, so `Accept-Encoding` lands opposite `x-api-key` and the name slot
-    #      of a credential header IS part of the census (94 such lines on rust,
-    #      measured 2026-09-21b) — the old lookahead dropped exactly those and
-    #      left them unmapped.
+    #      one, so `Accept-Encoding` lands opposite a credential header and the
+    #      name slot of a credential header IS part of the census (94 such lines
+    #      on rust, measured 2026-09-21b) — the old lookahead dropped exactly
+    #      those and left them unmapped.
     #   2. The VALUE slot, as before, and only when the line names no credential
     #      header: a credential VALUE that differs is a kernel difference, not a
     #      client default.
-    anchor: '"where": "\$\[[0-9]+\]\.headers(\[[0-9]+\])?( · len|\[0\])"|^(?!.*[Aa]uthorization)(?!.*[Xx]-[Aa][Pp][Ii]-[Kk]ey).*headers\[[0-9]+\]'
+    anchor: '"where": "\$\[[0-9]+\]\.headers(\[[0-9]+\])?( · len|\[0\])"|^(?!.*[Aa]uthorization).*headers\[[0-9]+\]'
     allowed_tail_regex: ".*"
     items: []
     note: >
@@ -123,7 +123,7 @@ residuals:
     # R-D4-9's file_glob widened by the one file it could not name (fnmatch has
     # no alternation).
     file_glob: "**/stub/index.json"
-    anchor: '"where": "\$\[[0-9]+\]\.headers(\[[0-9]+\])?( · len|\[0\])"|^(?!.*[Aa]uthorization)(?!.*[Xx]-[Aa][Pp][Ii]-[Kk]ey).*headers\[[0-9]+\]'
+    anchor: '"where": "\$\[[0-9]+\]\.headers(\[[0-9]+\])?( · len|\[0\])"|^(?!.*[Aa]uthorization).*headers\[[0-9]+\]'
     allowed_tail_regex: ".*"
     items: []
     note: >
@@ -285,7 +285,7 @@ residuals:
     file_glob: "providers/**"
     anchor: '"raised": true'
     allowed_tail_regex: "^(RuntimeError|ValueError|TypeError|KeyError|AttributeError|UnicodeDecodeError|BlockingIOError|ModuleNotFoundError): "
-    items: [B2.1, B4.2, B4.6]
+    items: [B2.1, B4.6]
 
   - id: R-D3-3
     decision: D3

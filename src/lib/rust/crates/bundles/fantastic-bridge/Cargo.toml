@@ -20,5 +20,8 @@ futures-util = { workspace = true }
 
 [dev-dependencies]
 fantastic-file = { path = "../fantastic-file" }
+# The memory store each test kernel flushes into — the secret tests read every
+# record a kernel keeps, the store's included.
+fantastic-ram-store = { path = "../fantastic-ram-store" }
 tempfile = "3"
 tokio = { workspace = true, features = ["test-util", "macros"] }

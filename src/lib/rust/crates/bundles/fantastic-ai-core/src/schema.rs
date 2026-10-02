@@ -5,16 +5,19 @@
 //! A set-up page asks the catalog (`reflect bundles=all`: each entry carries the
 //! bundle's `schema` when its [`Bundle::record_schema`] publishes one) and builds
 //! its inputs from it; it guesses nothing. Per field: `name`, `type`
-//! (`str|int|float|bool|enum|list|map`), `required`, `enum` (the legal values, for
-//! an `enum`), `default` (THE BACKEND'S OWN value, present only where the backend
-//! has one — a required field never has one: nothing is guessed), and a one-line
-//! `hint`. `key_var` names the environment variable the backend reads its key
-//! from (`null`: it takes none). Keys never ride the record.
+//! (`str|int|float|bool|enum|list|map|credentials`), `required`, `enum` (the
+//! legal values, for an `enum`), `default` (THE BACKEND'S OWN value, present only
+//! where the backend has one — a required field never has one: nothing is
+//! guessed), and a one-line `hint`. Keys never ride the record: a backend that
+//! sends one has a `credentials` field (type `credentials`, `{store, ref}` — the
+//! credential store and the ref it reads the key from at each request,
+//! [`crate::credentials`]).
 //!
 //! ONE TRUTH. The same schema is what the backend's `validate_meta` enforces AT
 //! THE WRITE ([`validate`]): every required field is refused at `create_agent`/
 //! `update_agent` when absent, and an `enum` field outside its values is refused
-//! — so the page and the kernel cannot disagree about what a record needs. A
+//! — and a `credentials` value must be `{store, ref}` — so the page and the
+//! kernel cannot disagree about what a record needs. A
 //! field's other checks (a positive int, a budget below `max_tokens`) stay in the
 //! backend's own `validate_meta`, beside this one.
 //!
@@ -24,12 +27,22 @@
 //! [`Bundle::record_schema`]: fantastic_kernel::bundle::Bundle::record_schema
 
 use crate::constants::{DEFAULT_CONTEXT_WINDOW, DEFAULT_OUTPUT_RESERVE, RECENT_N, RECENT_N_RANGE};
+use crate::credentials::shape_error;
 use crate::strategies::{DEFAULT_STRATEGY, STRATEGY_NAMES};
 use fantastic_bundle::{py_repr_value, py_strip};
 use serde_json::{json, Map, Value};
 
 /// The field types a schema may name. Python `TYPES`.
-pub const TYPES: [&str; 7] = ["str", "int", "float", "bool", "enum", "list", "map"];
+pub const TYPES: [&str; 8] = [
+    "str",
+    "int",
+    "float",
+    "bool",
+    "enum",
+    "list",
+    "map",
+    "credentials",
+];
 
 /// One field, as built by a backend. [`Field::json`] renders it — and refuses
 /// (panics, python's `ValueError` at import) a field python would refuse to
@@ -120,6 +133,14 @@ impl Field {
 /// `AI_FIELDS`.
 #[must_use]
 pub fn ai_fields() -> Vec<Field> {
+    ai_fields_with_window(DEFAULT_CONTEXT_WINDOW)
+}
+
+/// [`ai_fields`] with `context_window` defaulting to `context_window` — the
+/// backend's own window ([`crate::agent_loop::BackendConfig::model_window`]),
+/// where it can read one. Swift `RecordSchema.aiFields(contextWindow:)`.
+#[must_use]
+pub fn ai_fields_with_window(context_window: i64) -> Vec<Field> {
     let (lo, hi) = RECENT_N_RANGE;
     vec![
         Field::new(
@@ -129,7 +150,7 @@ pub fn ai_fields() -> Vec<Field> {
         )
         .required(),
         Field::new("context_window", "int", "tokens the model sees per turn")
-            .default(json!(DEFAULT_CONTEXT_WINDOW)),
+            .default(json!(context_window)),
         Field::new(
             "output_reserve",
             "int",
@@ -152,14 +173,49 @@ pub fn ai_fields() -> Vec<Field> {
     ]
 }
 
+/// The `credentials` field of a backend that sends a key. Python
+/// `credentials_field(required=…)`.
+#[must_use]
+pub fn credentials_field(required: bool) -> Field {
+    let hint = format!(
+        "{{store, ref}}: the credential store and ref holding `api_key` — read at each \
+         request, sent only to the ref's host{}",
+        if required {
+            ""
+        } else {
+            "; absent = no key (a keyless server)"
+        }
+    );
+    let f = Field::new("credentials", "credentials", hint);
+    if required {
+        f.required()
+    } else {
+        f
+    }
+}
+
 /// A backend's whole record schema: its own fields, then [`ai_fields`] — python
-/// `schema(backend_fields, key_var=…)`.
+/// `schema(backend_fields)`.
 ///
 /// # Panics
 /// On a duplicate field name, or a field [`Field::json`] refuses.
 #[must_use]
-pub fn schema(backend_fields: Vec<Field>, key_var: Option<&str>) -> Value {
-    let fields: Vec<Field> = backend_fields.into_iter().chain(ai_fields()).collect();
+pub fn schema(backend_fields: Vec<Field>) -> Value {
+    schema_with_window(backend_fields, DEFAULT_CONTEXT_WINDOW)
+}
+
+/// The same, for a backend whose model window is its own
+/// ([`crate::agent_loop::BackendConfig::model_window`]): `context_window`
+/// defaults to it. Swift `RecordSchema.schema(_:contextWindow:)`.
+///
+/// # Panics
+/// On a duplicate field name, or a field [`Field::json`] refuses.
+#[must_use]
+pub fn schema_with_window(backend_fields: Vec<Field>, context_window: i64) -> Value {
+    let fields: Vec<Field> = backend_fields
+        .into_iter()
+        .chain(ai_fields_with_window(context_window))
+        .collect();
     let names: Vec<&str> = fields.iter().map(|f| f.name).collect();
     let mut seen = std::collections::HashSet::new();
     assert!(
@@ -168,7 +224,6 @@ pub fn schema(backend_fields: Vec<Field>, key_var: Option<&str>) -> Value {
     );
     json!({
         "fields": fields.iter().map(Field::json).collect::<Vec<_>>(),
-        "key_var": key_var,
     })
 }
 
@@ -198,8 +253,9 @@ fn present(f: &Value, v: Option<&Value>) -> bool {
 
 /// THE WRITE-TIME CHECK the schema implies, on the MERGED record — python
 /// `validate(sch, backend, meta, record)`: an `enum` field the write names must be
-/// one of its values, and every required field must be present. Every missing
-/// field is named at once, each with its hint, so one retry fixes the record.
+/// one of its values, a `credentials` field must be `{store, ref}`, and every
+/// required field must be present. Every missing field is named at once, each
+/// with its hint, so one retry fixes the record.
 #[must_use]
 pub fn validate(
     sch: &Value,
@@ -212,6 +268,12 @@ pub fn validate(
         let Some(v) = meta.get(name).filter(|v| !v.is_null()) else {
             continue;
         };
+        if str_of(f, "type") == "credentials" {
+            if let Some(bad) = shape_error(v) {
+                return Some(bad);
+            }
+            continue;
+        }
         if str_of(f, "type") != "enum" {
             continue;
         }
@@ -272,13 +334,10 @@ mod tests {
     }
 
     fn sample() -> Value {
-        schema(
-            vec![
-                Field::new("endpoint", "str", "the URL").required(),
-                Field::new("mode", "enum", "a or b").one_of(&["a", "b"]),
-            ],
-            Some("KEY"),
-        )
+        schema(vec![
+            Field::new("endpoint", "str", "the URL").required(),
+            Field::new("mode", "enum", "a or b").one_of(&["a", "b"]),
+        ])
     }
 
     #[test]
@@ -297,7 +356,12 @@ mod tests {
                 "recent_n"
             ]
         );
-        assert_eq!(sch["key_var"], "KEY");
+        // no `key_var`: a key is never read from the environment — a backend
+        // that sends one has a `credentials` field
+        assert_eq!(
+            sch.as_object().unwrap().keys().collect::<Vec<_>>(),
+            ["fields"]
+        );
         assert_eq!(
             sch["fields"][6]["hint"],
             "recent turns a compaction keeps verbatim (1–50)"
@@ -367,6 +431,55 @@ mod tests {
     #[test]
     #[should_panic(expected = "duplicate field in schema")]
     fn a_backend_field_may_not_shadow_an_ai_field() {
-        let _ = schema(vec![Field::new("recent_n", "int", "h")], None);
+        let _ = schema(vec![Field::new("recent_n", "int", "h")]);
+    }
+
+    #[test]
+    fn the_credentials_field_is_pythons() {
+        assert_eq!(
+            credentials_field(true).json(),
+            json!({"name": "credentials", "type": "credentials", "required": true,
+                   "hint": "{store, ref}: the credential store and ref holding `api_key` — \
+                            read at each request, sent only to the ref's host"})
+        );
+        assert_eq!(
+            credentials_field(false).json()["hint"],
+            json!(
+                "{store, ref}: the credential store and ref holding `api_key` — read at each \
+                 request, sent only to the ref's host; absent = no key (a keyless server)"
+            )
+        );
+        assert_eq!(credentials_field(false).json()["required"], json!(false));
+    }
+
+    #[test]
+    fn a_credentials_value_must_be_store_and_ref() {
+        let sch = schema(vec![credentials_field(true)]);
+        let rec = obj(json!({"memory_store_id": "m"}));
+        let v = |c: Value| validate(&sch, "x", &obj(json!({ "credentials": c })), &rec);
+        assert_eq!(
+            v(json!({"store": "creds"})).as_deref(),
+            Some("credentials must be {store: <credential_store id>, ref: <ref>}")
+        );
+        assert_eq!(
+            v(json!({"store": "creds", "ref": "r", "x": 1})).as_deref(),
+            Some("credentials must be {store: <credential_store id>, ref: <ref>}")
+        );
+        assert_eq!(
+            v(json!("creds/r")).as_deref(),
+            Some("credentials must be {store: <credential_store id>, ref: <ref>}")
+        );
+        assert_eq!(
+            v(json!({"store": " ", "ref": "r"})).as_deref(),
+            Some("credentials.store must be a non-empty string")
+        );
+        assert_eq!(
+            v(json!({"store": "creds", "ref": 5})).as_deref(),
+            Some("credentials.ref must be a non-empty string")
+        );
+        assert_eq!(v(json!({"store": "creds", "ref": "r"})), None);
+        // required: its absence is named with its hint
+        assert!(validate(&sch, "x", &Map::new(), &rec)
+            .is_some_and(|e| e.contains("missing: credentials —")));
     }
 }

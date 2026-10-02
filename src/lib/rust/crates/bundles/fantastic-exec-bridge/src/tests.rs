@@ -536,8 +536,10 @@ async fn stop_sigkills_the_job() {
 #[test]
 fn connector_matches_python_source() {
     let py = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../../..")
-        .join("src/lib/python/bundled_agents/io/exec_bridge/src/exec_bridge/_connector.py");
+        .ancestors()
+        .nth(4) // src/lib above crates/bundles/<crate>
+        .expect("src/lib above the crate")
+        .join("python/bundled_agents/io/exec_bridge/src/exec_bridge/_connector.py");
     let Ok(src) = std::fs::read_to_string(&py) else {
         eprintln!("skipping: python tree not present at {}", py.display());
         return;
@@ -985,12 +987,16 @@ impl fantastic_kernel::bundle::Bundle for BlobStore {
         &self,
         _id: &AgentId,
         header: Value,
-        blob: Vec<u8>,
+        body: Option<fantastic_kernel::Blob>,
         _kernel: &Arc<Kernel>,
     ) -> Result<
-        (fantastic_kernel::bundle::Reply, Option<Vec<u8>>),
+        (
+            fantastic_kernel::bundle::Reply,
+            Option<fantastic_kernel::Blob>,
+        ),
         fantastic_kernel::bundle::BundleError,
     > {
+        let blob: Vec<u8> = body.map(|b| b.bytes).unwrap_or_default();
         match header["type"].as_str() {
             Some("write_stream") => {
                 let n = blob.len();
@@ -999,7 +1005,10 @@ impl fantastic_kernel::bundle::Bundle for BlobStore {
             }
             Some("read_stream") => {
                 let b = self.0.lock().unwrap().clone();
-                Ok((Some(json!({"eof": true, "size": b.len()})), Some(b)))
+                Ok((
+                    Some(json!({"eof": true, "size": b.len()})),
+                    Some(fantastic_kernel::Blob::key("bytes", b)),
+                ))
             }
             other => Ok((Some(json!({"error": format!("{other:?}")})), None)),
         }
@@ -1438,8 +1447,10 @@ fn reflect_reports_egress_posture() {
 #[test]
 fn readme_matches_python_source() {
     let py = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../../..")
-        .join("src/lib/python/bundled_agents/io/exec_bridge/src/exec_bridge/readme.md");
+        .ancestors()
+        .nth(4) // src/lib above crates/bundles/<crate>
+        .expect("src/lib above the crate")
+        .join("python/bundled_agents/io/exec_bridge/src/exec_bridge/readme.md");
     let Ok(src) = std::fs::read_to_string(&py) else {
         eprintln!("skipping: python tree not present at {}", py.display());
         return;
@@ -2356,9 +2367,12 @@ async fn the_relay_forwards_a_send_untouched_and_a_binary_one_through_the_batch(
 
     // Kind B: `[len | 'B' | io_bridge binary frame]`.
     let head = json!({"op": "send", "rid": 2, "target": a.as_str(),
-                      "payload": {"type": "status", "bytes": null},
-                      "_binary_path": "payload.bytes"});
-    let frame = fantastic_io_bridge::codec::encode_binary_frame(&head, b"xyz");
+                      "payload": {"type": "status", "bytes": null}});
+    let path = [
+        fantastic_kernel::Step::from("payload"),
+        fantastic_kernel::Step::from("bytes"),
+    ];
+    let frame = fantastic_io_bridge::codec::encode_binary_frame(&head, &path, b"xyz");
     let body = [b"B".as_slice(), &frame].concat();
     child
         .write_all(&[&(body.len() as u32).to_be_bytes()[..], &body].concat())
@@ -2473,3 +2487,12 @@ async fn arg_refusals_are_byte_exact_in_key_order() {
         )
     );
 }
+
+// Secret marks on the guest wire — python `test_exec_bridge.py`'s twins.
+#[path = "tests_secret.rs"]
+mod tests_secret;
+
+// `_binary_path` as a list of steps on the guest wire — python
+// `test_binary_path_steps.py` (e)'s twins.
+#[path = "tests_binary_steps.rs"]
+mod tests_binary_steps;

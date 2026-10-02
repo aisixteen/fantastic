@@ -344,8 +344,10 @@
                             + "frames; a payload carrying a bytes value rides the binary channel raw: "
                             + "`write_stream` puts its chunk in `bytes`, `read_stream` passes `bytes: b''` "
                             + "and gets its chunk back raw in the reply's `bytes`) and "
-                            + "exposes `kernel.send(target, payload) -> reply` (raises if the relay could "
-                            + "not deliver), "
+                            + "exposes `kernel.send(target, payload, secret=None) -> reply` (raises if "
+                            + "the relay could not deliver; `secret` marks values the kernel must not "
+                            + "record — `['payload.<field>']`, `['result']` — and the reply still "
+                            + "carries them to you, so never print one: that is the job output), "
                             + "`kernel.emit(payload)`, `kernel.watch(src, cb)`, `kernel.on_message(cb)`, "
                             + "`kernel.self_id`. Arguments arrive as ARGV, like any command — there is "
                             + "no `kernel.args`. One frame caps at 16 MiB; move more than that with "
@@ -362,12 +364,7 @@
             case "output":
                 return outputReply(agentId, payload)
             case "paste_image":
-                // `data` is bytes: on the text channel there is none to paste —
-                // the job is checked first, as python's handler does.
-                switch ptyJob("paste_image", agentId, payload) {
-                case .failure(let r): return r.json
-                case .success: return Refusal.bad("paste_image", "data", "raw bytes")
-                }
+                return pasteImageText(agentId, payload)
             case "interrupt", "stop":
                 let want: TaskId?
                 switch jobArg(verb, payload, required: false) {
@@ -861,7 +858,17 @@
             ])
         }
 
-        /// `paste_image` — the BINARY channel: `data` IS the blob.
+        /// `paste_image` with no image at `data` — `data` is bytes: on the text
+        /// channel (or with a body under another key) there is none to paste. The
+        /// job is checked first, as python's handler does.
+        private func pasteImageText(_ agentId: AgentId, _ payload: JSON) -> JSON {
+            switch ptyJob("paste_image", agentId, payload) {
+            case .failure(let r): return r.json
+            case .success: return Refusal.bad("paste_image", "data", "raw bytes")
+            }
+        }
+
+        /// `paste_image` — the BINARY channel: the body at `data` IS the image.
         private func pasteImageReply(_ agentId: AgentId, _ header: JSON, _ data: Data) async -> JSON {
             let pty: PtyJob
             switch ptyJob("paste_image", agentId, header) {
@@ -904,10 +911,12 @@
             return .object(["path": .string(path), "bytes": .integer(Int64(data.count))])
         }
 
-        /// The BINARY channel: `paste_image`'s `data` IS the blob. Every other verb
-        /// takes the text path.
+        /// The BINARY channel: `paste_image` reads ITS key — the body at `data`
+        /// (python's `payload.get("data")` is the bytes). A body under any other key
+        /// is not the image: python's `data` is then absent, `bad_arg` "raw bytes".
+        /// Every other verb takes the text path.
         public func handleBinary(
-            agentId: AgentId, header: JSON, blob: Data, kernel: Kernel
+            agentId: AgentId, header: JSON, body: Blob?, kernel: Kernel
         ) async throws -> (JSON?, Data?) {
             guard header["type"].asString == "paste_image" else {
                 return (try await handle(agentId: agentId, payload: header, kernel: kernel), nil)
@@ -922,7 +931,10 @@
                     return (d.asRefusal, nil)
                 }
             }
-            return (await pasteImageReply(agentId, header, blob), nil)
+            guard let data = bodyAt(body, "data") else {
+                return (pasteImageText(agentId, header), nil)
+            }
+            return (await pasteImageReply(agentId, header, data), nil)
         }
 
         /// The child's WHOLE environment, from the record (python `_child_env`): the
@@ -1445,13 +1457,18 @@
 
             Framing both directions: `[4-byte big-endian length | kind | rest]` — kind `T`: a JSON
             envelope; kind `B`: the io_bridge binary frame `[4-byte BE H | H-byte JSON header | raw
-            body]`, the header's `_binary_path` naming where the body belongs, so a `read_stream`
-            chunk or a `write_stream` payload crosses raw (never base64). Child → parent, the six
-            ops: `{op:"send", rid, target, payload}` · `{op:"emit", target?, payload}` ·
+            body]`, the header's `_binary_path` naming where the body belongs — a JSON array of
+            steps from the frame root, a key as a string (taken literally: `["payload", "a.b"]` is
+            the key `"a.b"`, never `a` → `b`), a list index as an int — so a `read_stream` chunk or
+            a `write_stream` payload crosses raw (never base64). Child → parent, the six
+            ops: `{op:"send", rid, target, payload, secret?}` · `{op:"emit", target?, payload}` ·
             `{op:"watch", src}` · `{op:"unwatch", src}` · `{op:"onmessage"}` · `{op:"offmessage"}`.
             Parent → child: `{op:"reply", rid, data}` · `{op:"event", src, payload}` ·
             `{op:"inbox", payload}`. `rid` correlates a `send` with its `reply`; the parent echoes it
-            back untouched. ONE FRAME CAPS AT 16 MiB in every runtime — over it the length prefix is a
+            back untouched. `secret` is the call's marks — `["payload.<field>", …]`, `["result"]`,
+            `["result.<field>"]` — put on the dispatched call as sent (absent when the program marks
+            nothing): every record of the call shows `<secret>`, and a bad mark comes back as the
+            kernel's refusal in `data`. ONE FRAME CAPS AT 16 MiB in every runtime — over it the length prefix is a
             wire violation and the relay closes the socket, so move bulk with `write_stream` chunks
             (the reference client raises rather than writing such a frame). **EOF on the fd means the kernel is GONE** — exit, or become an orphan
             nothing can reach. Traffic goes child → spawner → kernel only: a job never dials a host and
@@ -1463,8 +1480,8 @@
 
             ```python
             kernel.send(target, payload) -> reply      # request/reply to any agent by id
+            kernel.send(target, payload, secret=[...]) # …with the call's secret marks
             kernel.emit(payload)                       # fire-and-forget on YOUR OWN agent
-            kernel.emit(target, payload)               # …or on another
             kernel.reflect(target="kernel")
             off = kernel.watch(src, cb)                # PUSH: cb(payload) per event from src
             off = kernel.on_message(cb)                # PUSH: turns on THIS agent's inbox
@@ -1474,6 +1491,14 @@
             So a job is a first-class routine: read memory anywhere, call an AI, spawn another job, push
             to any peer — all by id. A step written as a program and a step written as an LLM call are
             substitutable.
+
+            **Secrets on the guest wire.** A program marks a call's secret values exactly as any
+            caller does: `kernel.send("creds", {"type": "get", "ref": "openai/main"},
+            secret=["result"])` reads a credential, `secret=["payload.fields"]` stores one. The
+            kernel records `<secret>` in the call's rows, ledger, state stream and memory store; the
+            reply carries the real values to the program. From there the PROGRAM is the receiver and
+            holds them — whatever it prints lands in the job output (`status`, `progress`,
+            `job_done`), its own leak, not masked.
 
             ## Not a sandbox
 
@@ -1528,7 +1553,7 @@
                         "{type:'output', job_id, data} — a PTY job's output chunk (UTF-8)"),
                 ]),
                 "wire": .string(
-                    "A program speaks the kernel over the inherited fd FANTASTIC_CTRL_FD, a BIDIRECTIONAL socket (one end of a socketpair): frame is [4-byte BE length | kind | rest], both directions — kind T: a JSON envelope; kind B: [4-byte BE H | H-byte JSON header | raw body], the header's `_binary_path` naming where the body belongs (a stream chunk rides raw, never base64). To CALL another agent: write {op:'send', rid:<your id>, target, payload} and the reply COMES BACK on the SAME fd as {op:'reply', rid:<same id>, data} — the fd is not one-way. It is not inline, though: read frames in a loop and skip any whose rid isn't yours (event/inbox frames can arrive first) until you see your reply. ops: send/emit/reflect/watch/on_message. A command that never reads the fd runs exactly like any OS process."
+                    "A program speaks the kernel over the inherited fd FANTASTIC_CTRL_FD, a BIDIRECTIONAL socket (one end of a socketpair): frame is [4-byte BE length | kind | rest], both directions — kind T: a JSON envelope; kind B: [4-byte BE H | H-byte JSON header | raw body], the header's `_binary_path` naming where the body belongs as a list of steps from the frame root — a key as a string (taken literally: ['payload', 'a.b'] is the key 'a.b'), a list index as an int (a stream chunk rides raw, never base64). To CALL another agent: write {op:'send', rid:<your id>, target, payload, secret?} and the reply COMES BACK on the SAME fd as {op:'reply', rid:<same id>, data} — the fd is not one-way. It is not inline, though: read frames in a loop and skip any whose rid isn't yours (event/inbox frames can arrive first) until you see your reply. `secret` is the call's marks ['payload.<field>' | 'result' | 'result.<field>']: every record of the call shows <secret>, the reply carries the real values to you — print one and it is in the job output. ops: send/emit/reflect/watch/on_message. A command that never reads the fd runs exactly like any OS process."
                 ),
                 "inbox": .string(
                     "Any verb NOT listed in `verbs` is MAIL for the running program, delivered to its on_message and ACKed {queued:true}. With no live job it is an error — a script that only defines something exits before its first message arrives."

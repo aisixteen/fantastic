@@ -189,6 +189,6 @@ async def test_a_call_racing_the_disconnect_settles_instead_of_hanging(seeded_ke
     ws.close()
     await asyncio.wait_for(task, 3)
     out = await asyncio.wait_for(
-        route.call("canvas", {"type": "around"}, f"{HOST}|kernel"), 3
+        route.call("canvas", {"type": "around"}, f"{HOST}|kernel", ()), 3
     )
     assert out["reason"] == "transport_error", out

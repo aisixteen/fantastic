@@ -297,7 +297,7 @@ struct MemoryStoreTests {
         let out = await k.send([
             Item(
                 AgentId("probe"), .object(["type": .string("work"), "none": .null]),
-                binary: Data([0, 1, 2]))
+                binary: Blob("bytes", Data([0, 1, 2])))
         ])[0]
         await k.flushExecutions()
         let c = await kernelRows(k).first { $0["id"].asInt == out.pid!.value }

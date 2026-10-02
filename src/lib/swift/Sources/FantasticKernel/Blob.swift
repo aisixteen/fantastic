@@ -42,11 +42,16 @@ extension Kernel {
     /// THROUGH THE BATCH (C47): ONE binary item, so the blob verbs, the message
     /// log are ledger executions with call, task and settle rows — python's `persist_blob` is a plain `kernel.send([...])` and leaves
     /// exactly those. `sendWithBinary` minted none of them.
-    func storeBookkeepingBinary(_ store: AgentId, _ header: JSON, _ blob: Data) async
+    ///
+    /// `body` is the request's chunk (the payload's `bytes`, a `write_stream`);
+    /// `nil` asks for the reply's chunk raw (a `read_stream`).
+    func storeBookkeepingBinary(_ store: AgentId, _ header: JSON, _ body: Data?) async
         -> (JSON, Data?)
     {
         await asBookkeeping {
-            let out = await self.send([Item(store, header, binary: blob)])[0]
+            let item = Item(
+                store, header, binary: body.map { Blob("bytes", $0) }, rawReply: body == nil)
+            let out = await self.send([item])[0]
             return (out.result, out.body)
         }
     }
@@ -240,7 +245,7 @@ extension Kernel {
                 .object([
                     "type": .string("read_stream"), "path": .string(ok.path),
                     "offset": .integer(Int64(offset)),
-                ]), Data())
+                ]), nil)
             last = reply
             // python tests `isinstance(reply.get("bytes"), bytes)` — on the swift
             // binary channel the body rides beside the header, and a refusal

@@ -2,7 +2,7 @@
 
 LIVE TEST 5 — build a SUB-AI that keeps working after you leave.
 
-    cd src/lib/python && BACKEND=llamacpp uv run python -u ../../../tmp/live_subai.py
+    cd src/lib/python && uv run python -u ../../../e2e/run.py --group agentic_advanced --id subai --lanes 1
 
 The probes so far all end when the model's turn ends. This one asks for something
 that OUTLIVES the conversation: a small specialised agent, wired to compute children,

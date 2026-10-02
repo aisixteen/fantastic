@@ -10,6 +10,8 @@ Symmetric across request and reply. Never base64.
 from __future__ import annotations
 
 import json
+import sys
+import types
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -88,3 +90,68 @@ def test_json_path_unchanged(seeded_kernel):
         assert r.status_code == 200
         assert r.headers["content-type"].startswith("application/json")
         assert r.json()["id"] == "kernel_state"
+
+
+# ─── the bytes field is a LITERAL top-level key ──────────────────────────────
+
+_echo = types.ModuleType("rest_bytes_echo.tools")
+
+
+async def _echo_handler(id, payload, kernel):
+    """Reports which top-level keys arrived and what each holds (bytes decoded)."""
+    if payload.get("type") in ("boot", "shutdown"):
+        return None
+    return {
+        "keys": sorted(payload),
+        "values": {
+            k: v.decode() if isinstance(v, bytes) else v for k, v in payload.items()
+        },
+    }
+
+
+_echo.handler = _echo_handler
+_echo.VERBS = {}
+sys.modules["rest_bytes_echo.tools"] = _echo
+
+
+def test_the_bytes_field_header_names_a_literal_top_level_key(seeded_kernel):
+    """`X-Fantastic-Bytes-Field: a.b` binds the body to the key `"a.b"` — never a
+    dotted path into the envelope: a nested `a.b` already in X-Fantastic-Payload is
+    left as sent. An absent header binds `bytes`. (Forwarded over a bridge the key
+    stays literal: the binary frame's `_binary_path` is `["payload", "a.b"]` —
+    `io_bridge/tests/test_binary_path_steps.py`.)"""
+    seeded_kernel.create(
+        "web_rest.tools",
+        id="rest_xyz",
+        ingress_rule="allow_all_ingress",
+        can_call={"echo": ["*"]},
+    )
+    seeded_kernel.create(
+        "rest_bytes_echo.tools", id="echo", callable_by={"rest_xyz": ["*"]}
+    )
+    octet = {"content-type": "application/octet-stream"}
+    with TestClient(_mount(seeded_kernel)) as c:
+        r = c.post(
+            "/rest_xyz/echo",
+            content=b"raw",
+            headers={
+                **octet,
+                "X-Fantastic-Payload": json.dumps({"type": "take", "a": {"b": "kept"}}),
+                "X-Fantastic-Bytes-Field": "a.b",
+            },
+        )
+        assert r.status_code == 200, r.text
+        assert r.json() == {
+            "keys": ["a", "a.b", "type"],
+            "values": {"type": "take", "a": {"b": "kept"}, "a.b": "raw"},
+        }
+        r = c.post(
+            "/rest_xyz/echo",
+            content=b"raw",
+            headers={**octet, "X-Fantastic-Payload": json.dumps({"type": "take"})},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json() == {
+            "keys": ["bytes", "type"],
+            "values": {"type": "take", "bytes": "raw"},
+        }

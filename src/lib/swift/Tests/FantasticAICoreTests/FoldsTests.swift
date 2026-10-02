@@ -160,7 +160,7 @@ struct FoldsTests {
     /// summary. python `test_grep_and_history_descend_into_a_fold`.
     @Test func grepAndHistoryDescendIntoAFold() async throws {
         let (kernel, ids, _) = await bootMockKernel(
-            config: baseConfig { .provider(MockProvider()) }, backendIds: [AI],
+            config: baseConfig { MockProvider() }, backendIds: [AI],
             contextWindow: 12000, meta: ["output_reserve": .integer(0)])
         let agentId = ids[AI]!
         let f = FoldFixture(kernel: kernel, agent: AI)

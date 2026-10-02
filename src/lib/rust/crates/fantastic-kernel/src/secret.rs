@@ -22,14 +22,15 @@
 //!
 //! Not secret-able: `payload.type` — the verb is how every row is read.
 //!
-//! THE RAW BODY. Python's payload/reply dict holds bytes natively at `bytes`; a
-//! rust `Value` cannot, so the body rides beside it ([`crate::outcome::Item::
-//! binary`], [`Outcome::body`]). Here the body IS the value at the root `bytes`
-//! key — `payload.bytes` / `result.bytes` name it, and marking it hides it from
+//! THE RAW BODY. Python's payload/reply dict holds bytes natively; a rust `Value`
+//! cannot, so the body rides beside it ([`crate::outcome::Item::binary`], at the
+//! payload path its [`crate::outcome::Blob`] names; [`Outcome::body`], at the
+//! reply's `bytes` key). Here the body IS the value at that path —
+//! `payload.<its path>` / `result.bytes` name it, and marking it hides it from
 //! every record and mirror (python `_put` writes the placeholder over the bytes).
 //! Its scrub value is what python's `str(bytes)` gives: the bytes' repr.
 
-use crate::outcome::{Item, Outcome};
+use crate::outcome::{Blob, Item, Outcome, Step};
 use fantastic_bundle::{py_repr, py_repr_value, py_str};
 use serde_json::{json, Value};
 
@@ -58,8 +59,8 @@ pub struct Shown {
     /// The payload with every secret field → [`PLACEHOLDER`] and every secret
     /// value scrubbed out of its strings.
     pub payload: Value,
-    /// The item's raw request body was itself marked (`payload.bytes`): no record
-    /// or mirror carries it — `payload["bytes"]` holds the placeholder instead.
+    /// The item's raw request body was itself marked (`payload.<its path>`): no
+    /// record or mirror carries it — its slot holds the placeholder instead.
     pub body_hidden: bool,
 }
 
@@ -89,12 +90,29 @@ fn get<'a>(obj: &'a Value, keys: &[String]) -> Option<&'a Value> {
     Some(cur)
 }
 
-/// `get` over the value AND its body: the body is the value at the root `bytes`
-/// key of an object, and nothing lies below it (python `_step` into bytes fails).
-fn find<'a>(root: &'a Value, body: Option<&'a [u8]>, keys: &[String]) -> Option<Found<'a>> {
-    if let (Some(b), Value::Object(_)) = (body, root) {
-        if keys.first().map(String::as_str) == Some("bytes") {
-            return (keys.len() == 1).then_some(Found::Body(b));
+/// A raw body beside a JSON object: the steps to the slot it sits at
+/// ([`crate::outcome::Blob::steps`]), and its bytes.
+type BodyAt<'a> = Option<(&'a [Step], &'a [u8])>;
+
+/// Whether the mark's key `k` names the body's step `p` — the same step `step`
+/// takes: an object key verbatim, a list index by its digits.
+fn names_step(k: &str, p: &Step) -> bool {
+    match p {
+        Step::Key(key) => k == key,
+        Step::Index(i) => {
+            !k.is_empty()
+                && k.bytes().all(|b| b.is_ascii_digit())
+                && k.parse::<usize>().ok() == Some(*i)
+        }
+    }
+}
+
+/// `get` over the value AND its body: the body is the value at its own path of
+/// an object, and nothing lies below it (python `_step` into bytes fails).
+fn find<'a>(root: &'a Value, body: BodyAt<'a>, keys: &[String]) -> Option<Found<'a>> {
+    if let (Some((at, b)), Value::Object(_)) = (body, root) {
+        if keys.len() >= at.len() && keys.iter().zip(at).all(|(k, p)| names_step(k, p)) {
+            return (keys.len() == at.len()).then_some(Found::Body(b));
         }
     }
     get(root, keys).map(Found::Json)
@@ -115,23 +133,49 @@ fn strings(x: &Value, out: &mut Vec<String>) {
     }
 }
 
-/// [`strings`] of a whole value whose raw body rides beside it at `bytes` — in
-/// the key's place, or last when the value has no slot for it (where
-/// [`crate::jsonsafe::with_body`] puts it).
-fn strings_with_body(x: &Value, body: Option<&[u8]>, out: &mut Vec<String>) {
-    let (Value::Object(m), Some(b)) = (x, body) else {
+/// [`strings`] of a whole value whose raw body rides beside it at its slot — in
+/// that slot's place (appended last when the value has no key there yet, where
+/// [`crate::jsonsafe::with_body`] puts it). A body with no slot in the value is
+/// not part of it.
+fn strings_with_body(x: &Value, body: Option<&Blob>, out: &mut Vec<String>) {
+    let Some(b) = body else {
         strings(x, out);
         return;
     };
-    for (k, v) in m {
-        if k == "bytes" {
-            out.push(py_bytes_repr(b));
-        } else {
-            strings(v, out);
-        }
+    let mut placed = x.clone();
+    if b.place(&mut placed, Value::Null).is_err() {
+        strings(x, out);
+        return;
     }
-    if !m.contains_key("bytes") {
-        out.push(py_bytes_repr(b));
+    strings_along(&placed, &b.path, &b.bytes, out);
+}
+
+/// [`strings`] of `x`, with the body's bytes standing at the steps `at`.
+fn strings_along(x: &Value, at: &[Step], bytes: &[u8], out: &mut Vec<String>) {
+    let Some((first, rest)) = at.split_first() else {
+        out.push(py_bytes_repr(bytes));
+        return;
+    };
+    match (x, first) {
+        (Value::Object(m), Step::Key(key)) => {
+            for (k, v) in m {
+                if k == key {
+                    strings_along(v, rest, bytes, out);
+                } else {
+                    strings(v, out);
+                }
+            }
+        }
+        (Value::Array(a), Step::Index(i)) => {
+            for (j, v) in a.iter().enumerate() {
+                if j == *i {
+                    strings_along(v, rest, bytes, out);
+                } else {
+                    strings(v, out);
+                }
+            }
+        }
+        _ => strings(x, out),
     }
 }
 
@@ -184,7 +228,12 @@ pub fn check(item: &Item) -> Result<Option<Secret>, Value> {
             py_repr_value(raw)
         )));
     };
-    let body = item.binary.as_deref();
+    let steps = item.binary.as_ref().map(crate::outcome::Blob::steps);
+    let body = item
+        .binary
+        .as_ref()
+        .zip(steps)
+        .map(|(b, at)| (at, b.bytes.as_slice()));
     let mut paths: Vec<String> = Vec::with_capacity(list.len());
     let mut payload_paths: Vec<Vec<String>> = Vec::new();
     let mut result_paths: Vec<Vec<String>> = Vec::new();
@@ -315,17 +364,24 @@ fn scrub_sorted(x: &Value, values: &[&String]) -> Value {
 }
 
 /// The payload as recorded and shown: secret fields → placeholder (the raw body
-/// too, when `payload.bytes` is marked), then every secret value scrubbed out.
+/// too, when `payload.<its path>` is marked), then every secret value scrubbed out.
 #[must_use]
-pub fn shown_payload(payload: &Value, body: Option<&[u8]>, s: &Secret) -> Shown {
+pub fn shown_payload(payload: &Value, body: Option<&crate::outcome::Blob>, s: &Secret) -> Shown {
     let mut out = payload.clone();
     let mut body_hidden = false;
+    let steps = body.map(crate::outcome::Blob::steps);
     for kp in &s.payload_paths {
-        let live = if body_hidden { None } else { body };
-        if matches!(find(&out, live, kp), Some(Found::Body(_))) {
-            if let Some(m) = out.as_object_mut() {
-                m.insert("bytes".to_string(), Value::String(PLACEHOLDER.to_string()));
-            }
+        let live = match (body, steps) {
+            (Some(b), Some(at)) if !body_hidden => Some((b, at)),
+            _ => None,
+        };
+        let is_body = matches!(
+            find(&out, live.map(|(b, at)| (at, b.bytes.as_slice())), kp),
+            Some(Found::Body(_))
+        );
+        if let (true, Some((b, _))) = (is_body, live) {
+            // the launch admitted only a path that names a slot of the payload
+            let _ = b.place(&mut out, Value::String(PLACEHOLDER.to_string()));
             body_hidden = true;
         } else {
             out = put(&out, kp);
@@ -347,12 +403,16 @@ pub fn shown_outcome(out: &Outcome, s: &Secret) -> Outcome {
     let mut values = s.values.clone();
     for kp in &s.result_paths {
         if kp.is_empty() {
-            strings_with_body(&res, body.as_deref(), &mut values);
+            strings_with_body(&res, body.as_ref(), &mut values);
             res = Value::String(PLACEHOLDER.to_string());
             body = None;
             continue;
         }
-        let is_body = match find(&res, body.as_deref(), kp) {
+        let is_body = match find(
+            &res,
+            body.as_ref().map(|b| (b.steps(), b.bytes.as_slice())),
+            kp,
+        ) {
             Some(Found::Json(v)) => {
                 strings(v, &mut values);
                 false
@@ -364,8 +424,9 @@ pub fn shown_outcome(out: &Outcome, s: &Secret) -> Outcome {
             None => continue,
         };
         if is_body {
-            if let Some(m) = res.as_object_mut() {
-                m.insert("bytes".to_string(), Value::String(PLACEHOLDER.to_string()));
+            if let Some(b) = &body {
+                // found there, so the slot resolves
+                let _ = b.place(&mut res, Value::String(PLACEHOLDER.to_string()));
             }
             body = None;
         } else {

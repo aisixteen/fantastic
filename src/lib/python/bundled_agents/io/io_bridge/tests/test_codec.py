@@ -53,8 +53,9 @@ def test_bad_header_json_raises_value_error():
 
 
 def test_bogus_binary_path_raises_value_error():
-    head = json.dumps({"type": "reply", "_binary_path": "no.such.place"}).encode()
-    with pytest.raises(ValueError):
+    head = json.dumps({"type": "reply", "_binary_path": ["no", "such", "place"]})
+    head = head.encode()
+    with pytest.raises(ValueError, match="bad _binary_path"):
         decode_frame(struct.pack(">I", len(head)) + head + b"body")
 
 

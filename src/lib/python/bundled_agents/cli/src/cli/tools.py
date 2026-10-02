@@ -75,10 +75,7 @@ async def _status(id, payload, kernel):
         ahead = detail.get("ahead", 0)
         print(f"{prefix} queued ({ahead} ahead)")
     elif phase == "thinking":
-        if detail.get("waiting_on") == "rate_limit":
-            print(f"{prefix} rate-limited; waiting {detail.get('wait_s', '?')}s")
-        else:
-            print(f"{prefix} thinking…")
+        print(f"{prefix} thinking…")
     elif phase == "tool_calling":
         tool = detail.get("tool") or {}
         verb = tool.get("verb", "")

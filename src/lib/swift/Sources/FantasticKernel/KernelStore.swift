@@ -187,15 +187,27 @@ extension Kernel {
     }
 
     /// A row value with RAW BYTES reduced to their LENGTH — THE ONE REDUCTION.
-    /// A store holds no raw bytes and base64 is banned, so a `write_stream` body
-    /// in a call's payload and a `read_stream` chunk in a result are recorded as
-    /// `{"len": N}` — python reduces the `bytes` value it holds INSIDE the dict
-    /// (`_store_safe`); swift carries those bytes on the binary side channel
-    /// (`Item.binary`, `Outcome.body`) and puts the same `bytes` key back here.
+    /// A store holds no raw bytes and base64 is banned, so a `read_stream` chunk
+    /// in a result is recorded as `{"len": N}` — python reduces the `bytes` value
+    /// it holds INSIDE the dict (`_store_safe`); swift carries those bytes on the
+    /// binary side channel (`Outcome.body`) and puts the same `bytes` key back
+    /// here. A call's PAYLOAD body sits at its own path: `tapedPayload`.
     public static func storeValue(_ value: JSON, bytes: Int?) -> JSON {
         guard let n = bytes, case .object(var map) = value else { return value }
         map["bytes"] = .object(["len": .integer(Int64(n))])
         return .object(map)
+    }
+
+    /// `storeValue` for a call's PAYLOAD: its request body (`Item.binary`) is
+    /// written as its LENGTH at the path it rides on — where python's own payload
+    /// dict holds it, which python's `_store_safe` writes as `{len: N}` in place.
+    /// Everything else — all text, all JSON — is untouched. Rust `taped_payload`.
+    static func tapedPayload(_ value: JSON, _ body: Blob?) -> JSON {
+        guard let body else { return value }
+        var out = value
+        // admitted at launch: the path names a slot of the payload
+        try? pySetPath(&out, parts: body.parts, .object(["len": .integer(Int64(body.bytes.count))]))
+        return out
     }
 
     // MARK: - the store state

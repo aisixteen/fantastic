@@ -57,17 +57,11 @@ async def _default(kernel) -> None:
             raise RuntimeError(
                 f"{started['error']}" + (f"\n  hint: {hint}" if hint else "")
             )
-        # Second PTY push: the "all booted" close. Each agent already announced
-        # its OWN endpoints to cli during its boot (e.g. web sent its listening
-        # URL) — the kernel does NOT gather them. Non-tty (the container daemon)
-        # keeps the plain one-line marker so logs / smoke greps are unchanged.
-        if has_repl:
-            (await kernel.send([{"target": "cli", "payload": {"type": "booted"}}]))[0][
-                "result"
-            ]
-        else:
-            print("[kernel] up", flush=True)
-
+        # The stop handlers go in BEFORE the "all booted" close / `[kernel] up`:
+        # whoever reads that line may signal at once, and a SIGTERM that landed
+        # before the handler existed took the default action — the process died
+        # with no teardown (rust closed the same window: `StopSignals::install`).
+        #
         # Graceful-shutdown plumbing: SIGTERM / SIGINT / SIGHUP set
         # the stop event, the `wait(FIRST_COMPLETED)` returns, and the
         # `finally` block walks the tree calling each bundle's
@@ -100,6 +94,17 @@ async def _default(kernel) -> None:
                 # Windows / non-Unix loops can't install signal
                 # handlers — KeyboardInterrupt still propagates.
                 pass
+
+        # Second PTY push: the "all booted" close. Each agent already announced
+        # its OWN endpoints to cli during its boot (e.g. web sent its listening
+        # URL) — the kernel does NOT gather them. Non-tty (the container daemon)
+        # keeps the plain one-line marker so logs / smoke greps are unchanged.
+        if has_repl:
+            (await kernel.send([{"target": "cli", "payload": {"type": "booted"}}]))[0][
+                "result"
+            ]
+        else:
+            print("[kernel] up", flush=True)
 
         tasks: list[asyncio.Task] = []
         if web_agents:

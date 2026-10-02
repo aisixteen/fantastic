@@ -14,7 +14,6 @@ so the request log is evidence, not debugging.
 
 from __future__ import annotations
 
-import json
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -70,40 +69,6 @@ class StubBase:
 
     def flush(self) -> None:
         self.rec.json(f"{self.rel}/requests", self.requests)
-
-
-def sse(events: list[tuple[str, dict]]) -> bytes:
-    return "".join(f"event: {e}\ndata: {json.dumps(d)}\n\n" for e, d in events).encode()
-
-
-def anthropic_events(text: str, *, stop_reason: str = "end_turn",
-                     chunk: int | None = None) -> list[tuple[str, dict]]:
-    """The message_start → message_stop shape the anthropic backend parses.
-
-    `chunk` splits the text across several `text_delta`s — the wire family needs
-    that (a token event per delta is the thing under test); everything else sends
-    one delta so a prompt diff is not drowned in framing.
-    """
-    parts = [text[i:i + chunk] for i in range(0, len(text), chunk)] if chunk else [text]
-    ev = [
-        ("message_start", {"type": "message_start", "message": {
-            "id": "m", "type": "message", "role": "assistant", "content": [],
-            "model": "stub", "stop_reason": None,
-            "usage": {"input_tokens": 1, "output_tokens": 0}}}),
-        ("content_block_start", {"type": "content_block_start", "index": 0,
-                                 "content_block": {"type": "text", "text": ""}}),
-    ]
-    ev += [("content_block_delta", {"type": "content_block_delta", "index": 0,
-                                    "delta": {"type": "text_delta", "text": c}})
-           for c in (parts or [""])]
-    ev += [
-        ("content_block_stop", {"type": "content_block_stop", "index": 0}),
-        ("message_delta", {"type": "message_delta",
-                           "delta": {"stop_reason": stop_reason, "stop_sequence": None},
-                           "usage": {"output_tokens": 1}}),
-        ("message_stop", {"type": "message_stop"}),
-    ]
-    return ev
 
 
 class JSONHandler(BaseHTTPRequestHandler):

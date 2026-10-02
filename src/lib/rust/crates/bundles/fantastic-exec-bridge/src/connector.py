@@ -15,30 +15,28 @@ try:
     # frame.
     _MAX_FRAME = 16 * 1024 * 1024
 
-    def _bytes_at(obj, prefix=""):
-        # The first bytes value, depth-first: (dotted path, value) or None.
+    def _bytes_at(obj, path=()):
+        # The first bytes value, depth-first: (path, value) or None. The path is
+        # a list of steps — an object key as a string (taken literally, dots
+        # and all), a list index as an int.
         if isinstance(obj, (bytes, bytearray)):
-            return (prefix, bytes(obj))
+            return (list(path), bytes(obj))
         if isinstance(obj, dict):
             for k, v in obj.items():
-                r = _bytes_at(v, prefix + "." + k if prefix else k)
+                r = _bytes_at(v, path + (k,))
                 if r is not None:
                     return r
         elif isinstance(obj, list):
             for i, v in enumerate(obj):
-                r = _bytes_at(v, prefix + "." + str(i) if prefix else str(i))
+                r = _bytes_at(v, path + (i,))
                 if r is not None:
                     return r
         return None
 
     def _set_at(obj, path, value):
-        parts = path.split(".")
-        for p in parts[:-1]:
-            obj = obj[int(p)] if isinstance(obj, list) else obj[p]
-        if isinstance(obj, list):
-            obj[int(parts[-1])] = value
-        else:
-            obj[parts[-1]] = value
+        for step in path[:-1]:
+            obj = obj[step]
+        obj[path[-1]] = value
 
     def _frame(obj):
         # Kind T: JSON. Kind B: a payload carrying bytes rides as the io_bridge
@@ -148,16 +146,21 @@ try:
         # any runtime ever set the env var one would have ridden in.
         self_id = _o.environ.get("FANTASTIC_SELF_ID")
 
-        def send(self, target, payload=None):
+        def send(self, target, payload=None, secret=None):
             with _wlock:
                 _rid[0] += 1
                 r = str(_rid[0])
             q = _q.Queue()
             _pending[r] = q
+            f = {"op": "send", "rid": r, "target": target, "payload": payload or {}}
+            if secret:
+                # The call's SECRET marks (`payload.<field>`, `result[.<field>]`):
+                # the kernel shows `<secret>` in every record of the call, and the
+                # reply still carries the real values — to THIS program, which
+                # holds them from here on (print one and it is in the job output).
+                f["secret"] = secret
             try:
-                _frame(
-                    {"op": "send", "rid": r, "target": target, "payload": payload or {}}
-                )
+                _frame(f)
             except Exception:
                 _pending.pop(r, None)
                 raise

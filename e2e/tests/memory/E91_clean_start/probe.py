@@ -34,6 +34,8 @@ async def main():
         r = (await root.send([{"target": root.id, "payload": {
             "type": "create_agent", "parent_id": root.id, "id": "ai",
             "handler_module": "ollama_backend.tools", "model": "stub",
+            # required at the write; never dialled — the provider is stubbed below
+            "endpoint": "http://127.0.0.1:9",
             **memory.ai_memory_meta({"cli": "*"})}}]))[0]["result"]
         assert not r.get("error"), r
         await memory.open_ingress(root, memory.MEMORY, "ai")

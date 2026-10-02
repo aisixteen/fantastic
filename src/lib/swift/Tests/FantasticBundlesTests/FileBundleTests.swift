@@ -46,10 +46,15 @@ struct FileBundleTests {
         await k.send([Item(AgentId("fs"), .object(payload))])[0].result
     }
 
-    private func bin(_ k: Kernel, _ header: OrderedDictionary<String, JSON>, _ blob: Data = Data())
+    /// `blob` is the request's chunk (at the payload's `bytes`); `nil` asks for
+    /// the reply's chunk raw (a `read_stream`).
+    private func bin(_ k: Kernel, _ header: OrderedDictionary<String, JSON>, _ blob: Data? = nil)
         async -> (JSON, Data?)
     {
-        let out = await k.send([Item(AgentId("fs"), .object(header), binary: blob)])[0]
+        let item = Item(
+            AgentId("fs"), .object(header), binary: blob.map { Blob("bytes", $0) },
+            rawReply: blob == nil)
+        let out = await k.send([item])[0]
         return (out.result, out.body)
     }
 

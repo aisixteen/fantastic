@@ -91,15 +91,31 @@ fn coerce_scalar_matches_python_digit_for_digit() {
         ("True", "true"),
         ("tRuE", "true"),
         ("fAlSe", "false"),
+        ("\u{85}7", "7"),
+        ("\u{0b}7", "7"),
+        ("\u{0c}7.5", "7.5"),
     ] {
         let got = fantastic_kernel::coerce_scalar(input);
         assert_eq!(serde_json::to_string(&got).unwrap(), want, "{input:?}");
     }
-    // the shapes python's int() AND float() refuse stay the text as written.
-    // (NOT pinned: `"\u{1c}7"` / `"7\u{1f}"` — python keeps them as text, rust
-    // reads 7.0 because `py_float` strips the ASCII separators CPython's
-    // float() does not; reported as a divergence, step 4, 2026-10-01.)
-    for input in ["0x10", "²", "  ", "", "1__0", "_1", "1_"] {
+    // the shapes python's int() AND float() refuse stay the text as written —
+    // `\x1c`-`\x1f` included: `str.isspace()` says yes, but CPython's
+    // `int()`/`float()` strip C `isspace` only (an ASCII char is never
+    // transformed), so `"\u{1c}7"` is text, not 7.0.
+    for input in [
+        "0x10",
+        "²",
+        "  ",
+        "",
+        "1__0",
+        "_1",
+        "1_",
+        "\u{1c}7",
+        "7\u{1f}",
+        "\u{1c}7\u{a0}",
+        "\u{1e}7.5",
+        "\u{1d}",
+    ] {
         assert_eq!(
             fantastic_kernel::coerce_scalar(input),
             json!(input),

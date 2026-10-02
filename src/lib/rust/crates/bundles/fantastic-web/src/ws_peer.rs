@@ -9,7 +9,7 @@
 //! kernel routes and gates, the page kernel gates its own agents. One guid per
 //! connection, pinned by the first hello.
 
-use super::{error_frame, gate_leg, send_envelope, Out, INBOUND_BINARY_PATH};
+use super::{error_frame, gate_leg, send_envelope, Out, INBOUND_PAYLOAD_KEY};
 use fantastic_io_bridge::authorizer::Decision;
 use fantastic_kernel::refusal::{bad, refusal, TRANSPORT_ERROR};
 use fantastic_kernel::{AgentId, Kernel, PeerReply, PeerRoute};
@@ -67,9 +67,14 @@ impl Drop for Forget {
 }
 
 /// ONE call into the page: an outbound `{type:"call", id, target, payload,
-/// caller}` frame, resolved by the inbound answer carrying the same id. A body
-/// rides the binary channel at `payload.bytes` — where python's payload dict
-/// holds it and where the page's decoder puts it back.
+/// caller, secret?}` frame, resolved by the inbound answer carrying the same id.
+/// `secret` is the item's marks, verbatim, so the PAGE kernel masks its records
+/// of this call too; it is on the frame only when the item marked paths. A body
+/// rides the binary channel at `payload.<its path>` — where python's payload
+/// dict holds it and where the page's decoder puts it back.
+// One argument per python `_call_page` input (agent_id, payload, caller,
+// secret) plus the connection's own state and the raw body beside the payload.
+#[allow(clippy::too_many_arguments)]
 async fn call_page(
     calls: Arc<Mutex<Calls>>,
     out: WeakSender<Out>,
@@ -77,7 +82,8 @@ async fn call_page(
     agent_id: String,
     mut payload: Value,
     caller: String,
-    body: Option<Vec<u8>>,
+    secret: Vec<String>,
+    body: Option<fantastic_kernel::Blob>,
 ) -> PeerReply {
     let (fid, rx) = {
         let mut c = calls.lock().expect("peer calls poisoned");
@@ -99,19 +105,23 @@ async fn call_page(
     let Some(out) = out.upgrade() else {
         return (disconnected(&guid), None);
     };
-    if body.is_some() {
-        if let Some(m) = payload.as_object_mut() {
-            m.insert("bytes".to_string(), Value::Null);
-        }
+    // the slot python's dict holds the bytes in: `null` on the head, in place
+    // (the kernel admitted the path at launch)
+    if let Some(b) = &body {
+        let _ = b.place(&mut payload, Value::Null);
     }
-    let envelope = json!({
+    let mut envelope = json!({
         "type": "call",
         "id": fid,
         "target": agent_id,
         "payload": payload,
         "caller": caller,
     });
-    send_envelope(&out, envelope, body, INBOUND_BINARY_PATH).await;
+    // the item's marks, so the PAGE kernel masks its records of this call too
+    if !secret.is_empty() {
+        envelope["secret"] = json!(secret);
+    }
+    send_envelope(&out, envelope, body, INBOUND_PAYLOAD_KEY).await;
     drop(out);
     // The sender side is dropped only by the disconnect settle, which answers
     // first — a closed channel still means the page is gone.
@@ -163,17 +173,21 @@ impl PeerLink {
             let calls = Arc::clone(&self.calls);
             let weak = out.downgrade();
             let g = guid.to_string();
-            PeerRoute::new(leg.0.clone(), move |agent_id, payload, caller, body| {
-                Box::pin(call_page(
-                    Arc::clone(&calls),
-                    weak.clone(),
-                    g.clone(),
-                    agent_id,
-                    payload,
-                    caller,
-                    body,
-                ))
-            })
+            PeerRoute::new(
+                leg.0.clone(),
+                move |agent_id, payload, caller, secret, body| {
+                    Box::pin(call_page(
+                        Arc::clone(&calls),
+                        weak.clone(),
+                        g.clone(),
+                        agent_id,
+                        payload,
+                        caller,
+                        secret,
+                        body,
+                    ))
+                },
+            )
         };
         if let Some(taken) = kernel.register_peer(guid, &route) {
             answer_error(out, fid, &taken).await;
@@ -186,7 +200,11 @@ impl PeerLink {
     /// is that call's outcome (a page-side refusal included), a non-object
     /// wrapped as `{result}`. An id we are not waiting on is ignored. Python
     /// `_on_answer`.
-    pub(super) fn answer(&self, frame: &Value, body: Option<Vec<u8>>) {
+    ///
+    /// `body` is the frame's raw body at its envelope path (`["data", …]`): the
+    /// reply holds it at the rest of that path — under `result` when `data` was
+    /// not an object and got wrapped, as python's dict holds it.
+    pub(super) fn answer(&self, frame: &Value, body: Option<fantastic_kernel::Blob>) {
         let Some(fid) = frame.get("id").and_then(Value::as_str) else {
             return;
         };
@@ -197,10 +215,24 @@ impl PeerLink {
             .waiting
             .remove(fid);
         let Some(tx) = waiting else { return };
-        let data = match frame.get("data") {
-            Some(d @ Value::Object(_)) => d.clone(),
-            other => json!({"result": other.cloned().unwrap_or(Value::Null)}),
+        let (data, wrapped) = match frame.get("data") {
+            Some(d @ Value::Object(_)) => (d.clone(), false),
+            other => (
+                json!({"result": other.cloned().unwrap_or(Value::Null)}),
+                true,
+            ),
         };
+        let body = body.and_then(|b| {
+            let rest = b.path.get(1..).unwrap_or_default().to_vec();
+            let path = if wrapped {
+                let mut p = vec![fantastic_kernel::Step::from("result")];
+                p.extend(rest);
+                p
+            } else {
+                rest
+            };
+            (!path.is_empty()).then(|| fantastic_kernel::Blob::new(path, b.bytes))
+        });
         let _ = tx.send((data, body));
     }
 

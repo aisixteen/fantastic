@@ -1,0 +1,87 @@
+"""THE KEYS, REACHED THE SAME WAY ON EVERY RUNTIME — a credential store.
+
+No backend reads a key from the environment: an AI agent's record names
+`credentials: {store, ref}` and the backend reads `api_key` from that
+`credential_store` before each request, pinned to its endpoint's host
+(`ai_core/credentials.py`). Every e2e kernel gets one store — `creds` — with the
+`env` backend (read-only): the run still exports the key it always did
+(`OPENAI_API_KEY`, `VLLM_API_KEY`), and the STORE reads it. One ref per keyed
+plug, bound to the host of that plug's endpoint.
+
+Wiring, explicit on every end, written by the operator before anything runs:
+  * the ROOT holds a HERITABLE egress `{creds: {verbs: [get], for: descendants}}`
+    — every agent under the root may ask, the ones a MODEL creates included;
+  * the store's `callable_by` and each ref's `readers` name `$subtree:<root>`.
+A test kernel is one trust domain; a deployment would name its readers.
+"""
+
+from __future__ import annotations
+
+import os
+from typing import Any
+
+#: The one store id every e2e kernel carries.
+CREDS = "creds"
+
+#: What an agent may do on the store: read a key. Nothing writes in a run.
+GET = ["get"]
+
+#: Per keyed plug: (ref, the env var the store reads, the env var naming the
+#: plug's endpoint). The ref IS the plug name.
+KEYED: dict[str, tuple[str, str]] = {
+    "responses": ("OPENAI_API_KEY", "RESPONSES_ENDPOINT"),
+    "vllm": ("VLLM_API_KEY", "VLLM_ENDPOINT"),
+}
+
+
+def credentials(ref: str) -> dict:
+    """The `credentials` field of an AI record reading `ref` from `creds`."""
+    return {"store": CREDS, "ref": ref}
+
+
+def env_refs() -> dict[str, tuple[str, str]]:
+    """`{ref: (env var, endpoint)}` for every keyed plug whose endpoint this run
+    names — the store a live run seeds. A ref whose key var is unset still
+    exists: reading it fails loud, naming the variable."""
+    return {
+        ref: (var, os.environ[ep_var])
+        for ref, (var, ep_var) in KEYED.items()
+        if os.environ.get(ep_var)
+    }
+
+
+def store_record(root_id: str, refs: dict[str, tuple[str, str]]) -> dict:
+    """The `creds` record: env-backed, one ref per `{ref: (env var, endpoint)}`,
+    readable by the root's whole subtree."""
+    everyone = f"$subtree:{root_id}"
+    return {
+        "id": CREDS,
+        "handler_module": "credential_store.tools",
+        "parent_id": root_id,
+        "backend": "env",
+        "refs": {
+            ref: {"host": endpoint, "env": {"api_key": var}, "readers": [everyone]}
+            for ref, (var, endpoint) in refs.items()
+        },
+        "callable_by": {everyone: GET},
+    }
+
+
+def root_grant() -> dict:
+    """The heritable egress the ROOT holds, so every descendant may read a key."""
+    return {CREDS: {"verbs": GET, "for": "descendants"}}
+
+
+def wire_in_process(root: Any, refs: dict[str, tuple[str, str]]) -> None:
+    """In-process kernel: create `creds` under the root and grant the subtree."""
+    ctx = root.ctx
+    if CREDS not in ctx.agents:
+        rec = store_record(root.id, refs)
+        made = root.create(
+            rec.pop("handler_module"),
+            **{k: v for k, v in rec.items() if k != "parent_id"},
+        )
+        assert made.get("id") == CREDS, made
+    cc = dict(root._meta.get("can_call") or {})
+    cc.update(root_grant())
+    ctx.update(root.id, can_call=cc)

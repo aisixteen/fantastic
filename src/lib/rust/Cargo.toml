@@ -16,16 +16,15 @@ members = [
     "crates/bundles/fantastic-web-rest",
     "crates/bundles/fantastic-file",
     "crates/bundles/fantastic-ram-store",
+    "crates/bundles/fantastic-credential-store",
     "crates/bundles/fantastic-static-loader",
     "crates/bundles/fantastic-scheduler",
     "crates/bundles/fantastic-ai-core",
     "crates/bundles/fantastic-ollama-backend",
     "crates/bundles/fantastic-bridge",
-    "crates/bundles/fantastic-nvidia-nim-backend",
-    "crates/bundles/fantastic-anthropic-backend",
     "crates/bundles/fantastic-responses-backend",
     "crates/bundles/fantastic-vllm-backend",
-    "crates/bundles/fantastic-llamacpp-backend",
+    "crates/bundles/fantastic-foundation-models-backend",
     "crates/bundles/fantastic-cli-bundle",
     "crates/bundles/fantastic-scenario-probes",
     "crates/bundles/fantastic-exec-bridge",
@@ -57,11 +56,6 @@ serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision
 # scopes would be silently lost at every item.
 futures-util = "0.3"
 
-# The on-disk YAML (records, the message tape, lock, sidecars) is READ through
-# yaml-rust2's event parser (pure rust, YAML 1.2, key order kept); the WRITER is
-# hand-rolled in `fantastic_kernel::yaml` to match python's libyaml bytes.
-yaml-rust2 = { version = "0.13", default-features = false }
-
 # Concurrent maps for kernel.agents + kernel.inboxes.
 dashmap = "6"
 arc-swap = "1"
@@ -69,6 +63,18 @@ arc-swap = "1"
 # HTTP + WS surfaces.
 axum = { version = "0.7", features = ["ws"] }
 tokio-tungstenite = "0.24"
+# The upgraded connection under a WS leg: hyper's `OnUpgrade` (axum re-exports
+# none of it) and the tokio adapter around the upgraded IO.
+hyper = "1"
+hyper-util = { version = "0.1", features = ["tokio"] }
+# permessage-deflate (RFC 7692), which python's websockets negotiates on every
+# WS leg. zlib-rs (pure rust) because the negotiated LZ77 window
+# (`*_max_window_bits`) needs zlib's `windowBits`, which flate2's default
+# miniz backend cannot set.
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
+# The WS client handshake's response head, read where the extension is
+# negotiated.
+httparse = "1"
 
 # Path-safety + cross-platform PID checks for the lock file.
 libc = "0.2"

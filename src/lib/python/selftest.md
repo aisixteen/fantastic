@@ -135,7 +135,6 @@ agent answers them natively for its own children, so there's no
 | `bundled_agents/scheduler/selftest.md` | kernel, persistence, time | schedule/tick/fire, schedule_events.yaml persisted through the loader (no store ⇒ fails loud) |
 | `bundled_agents/io/file_bridge/selftest.md` | kernel, persistence | sealed-by-default fs edge — read/write/list/delete/rename/mkdir, running-dir clamp, path safety |
 | `bundled_agents/ai/ollama/ollama_backend/selftest.md` | kernel, ai, persistence | reflect-driven assembly, native tool-calls, multi-step loop |
-| `bundled_agents/ai/nvidia/nvidia_nim_backend/selftest.md` | kernel, ai, persistence, http | NVIDIA NIM (OpenAI-compatible); api_key sidecar; rate-limit retry; live single-shot |
 | `bundled_agents/io/ws_bridge/selftest.md` | kernel, ws | cross-kernel WS bridge — asymmetric raw call frames to remote `web_ws` (no peer bridge); memory + WS transports; streaming via `watch_remote` (subscribed `src` only) |
 | `bundled_agents/io/exec_bridge/selftest.md` | kernel, pty | sealed-by-default command runner — regex `allowed` allowlist (refusal names the patterns), record-owned cwd/env/inherit_env, start/status/stop/interrupt/clear/boot, PTY jobs (write/resize/ack/output/paste_image), control wire, mail to a live program, task-table row + cancel |
 
@@ -160,7 +159,7 @@ selftests belong to the apps on the TS kernel library, not here.
 ```
 # Selftest report — <date>, branch <git rev>
 
-provider used: <ollama@localhost / anthropic / openai / none>
+provider used: <ollama@localhost / vllm / openai / none>
 files run: <N>   files skipped: <N>
 
 | file | test# | name | pass | notes |

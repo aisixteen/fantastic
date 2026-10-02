@@ -1,6 +1,6 @@
 // Responses event-typed SSE → text pieces. The wire decode, as a PURE function —
 // the only way it is testable under "unit tests only", apart from the HTTP/retry
-// plumbing (the same reason `decodeAnthropicSSELine` lives on its own).
+// plumbing.
 //
 // Each event is an `event:` line plus a `data:` JSON line whose own `type` is what
 // dispatch reads; `event:` lines are ignored.

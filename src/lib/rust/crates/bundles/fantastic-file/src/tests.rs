@@ -59,6 +59,52 @@ fn resolve_refuses_absolute_path() {
 }
 
 #[test]
+fn an_atomic_write_with_a_mode_creates_exactly_those_bits() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::TempDir::new().unwrap();
+    fs::write_bytes(tmp.path(), "d/secret.yaml", b"k: v\n", true, Some(0o600)).unwrap();
+    let p = tmp.path().join("d/secret.yaml");
+    assert_eq!(std::fs::read(&p).unwrap(), b"k: v\n");
+    assert_eq!(
+        std::fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert!(!tmp.path().join("d/secret.yaml.tmp").exists());
+    // a rewrite replaces it, the bits held — a stale `.tmp` is cleared first
+    std::fs::write(tmp.path().join("d/secret.yaml.tmp"), b"stale").unwrap();
+    fs::write_bytes(tmp.path(), "d/secret.yaml", b"k: w\n", true, Some(0o600)).unwrap();
+    assert_eq!(std::fs::read(&p).unwrap(), b"k: w\n");
+    assert_eq!(
+        std::fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    // python: `ValueError("fs: `mode` needs an atomic write")`
+    assert_eq!(
+        fs::write_bytes(tmp.path(), "x", b"", false, Some(0o600)).unwrap_err(),
+        "fs: `mode` needs an atomic write"
+    );
+}
+
+#[test]
+fn lstat_reports_the_entry_itself_never_its_target() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::fs::write(tmp.path().join("real"), b"x").unwrap();
+    std::os::unix::fs::symlink(tmp.path().join("real"), tmp.path().join("link")).unwrap();
+    assert!(fs::lstat(tmp.path(), "real").unwrap().file_type().is_file());
+    assert!(fs::lstat(tmp.path(), "link")
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert!(fs::lstat(tmp.path(), "missing")
+        .unwrap_err()
+        .starts_with("[Errno 2] No such file or directory: "));
+    assert_eq!(
+        fs::lstat(tmp.path(), "../out").unwrap_err(),
+        "fs: path '..' escapes root"
+    );
+}
+
+#[test]
 fn resolve_dot_dot_after_descent_is_ok() {
     // a/b/.. resolves to root/a — still inside.
     let tmp = tempfile::TempDir::new().unwrap();
@@ -1056,7 +1102,7 @@ async fn text_write_stream_with_string_bytes_is_missing_arg() {
             AgentId::from("fb"),
             json!({"type": "write_stream", "path": "a.txt", "truncate": true}),
         )
-        .with_binary(b"line one\n".to_vec())])
+        .with_binary_key("bytes", b"line one\n".to_vec())])
         .await
         .remove(0)
         .result;
@@ -1070,12 +1116,16 @@ async fn text_write_stream_with_string_bytes_is_missing_arg() {
             AgentId::from("fb"),
             json!({"type": "read_stream", "path": "a.txt", "offset": 0}),
         )
-        .with_binary(Vec::new())])
+        .with_binary_key("bytes", Vec::new())])
         .await
         .remove(0);
     assert_eq!(back.result["bytes"], Value::Null, "{}", back.result);
     assert_eq!(back.result["eof"], true, "{}", back.result);
-    assert_eq!(back.body, Some(b"line one\n".to_vec()));
+    assert_eq!(
+        back.body,
+        Some(fantastic_kernel::Blob::key("bytes", b"line one\n".to_vec())),
+        "the chunk sits at the reply's `bytes`"
+    );
 }
 
 #[tokio::test]
@@ -1448,9 +1498,8 @@ async fn a_readonly_leg_refuses_a_binary_write_before_judging_the_chunk() {
         json!({"type": "write_stream", "path": "a.txt"}),
     ] {
         let out = kernel
-            .send(vec![
-                Item::new(AgentId::from("fb"), header.clone()).with_binary(b"data".to_vec())
-            ])
+            .send(vec![Item::new(AgentId::from("fb"), header.clone())
+                .with_binary_key("bytes", b"data".to_vec())])
             .await
             .remove(0)
             .result;
@@ -1548,14 +1597,14 @@ async fn both(
     let txt = call(kernel, header.clone()).await;
     let bin = kernel
         .send(vec![
-            Item::new(AgentId::from("fb"), header).with_binary(blob.to_vec())
+            Item::new(AgentId::from("fb"), header).with_binary_key("bytes", blob.to_vec())
         ])
         .await
         .remove(0);
     (
         serde_json::to_string(&txt).unwrap(),
         serde_json::to_string(&bin.result).unwrap(),
-        bin.body,
+        bin.body.map(|b| b.bytes),
     )
 }
 
@@ -1671,7 +1720,12 @@ async fn a_leg_that_is_not_registered_says_no_agent_on_both_channels() {
     let b = FileBundle::default();
     for verb in ["read_stream", "write", "list"] {
         let (bin, body) = b
-            .handle_binary(&ghost, json!({"type": verb, "path": "a"}), vec![1], &kernel)
+            .handle_binary(
+                &ghost,
+                json!({"type": verb, "path": "a"}),
+                Some(fantastic_kernel::Blob::key("bytes", vec![1])),
+                &kernel,
+            )
             .await
             .unwrap();
         let txt = b

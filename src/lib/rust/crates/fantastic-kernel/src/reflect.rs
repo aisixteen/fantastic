@@ -415,8 +415,12 @@ pub async fn apply_reflect_flags(
     // identity and would otherwise never report its authority, so an agent
     // could not read what it may call or who may call it — only discover it by
     // trying. Same two keys the distilled tree nodes carry.
+    //
+    // `holds_secrets` rides the same way: a SECRET HOLDER (a credential_store
+    // stamps it; an operator may set it on any agent) says so on its reflect,
+    // because ai_core refuses every model-parsed call that names it.
     if let Ok(meta) = target.meta.read() {
-        for k in ["can_call", "callable_by"] {
+        for k in ["can_call", "callable_by", "holds_secrets"] {
             if let Some(v) = meta.get(k) {
                 obj.entry(k.to_string()).or_insert_with(|| v.clone());
             }

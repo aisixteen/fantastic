@@ -58,15 +58,15 @@ pub use authz::{
 pub use bundle::{Bundle, BundleRegistry, Reply};
 pub use errors::{KernelError, KernelResult};
 pub use kernel::{Kernel, StateSubscriber, SubscriberToken, DEFAULT_INBOX_BOUND};
-pub use outcome::{Item, Outcome, Status};
+pub use outcome::{body_at, Blob, Item, Outcome, Status, Step};
 pub use paging::page;
 pub use peers::{PeerCallFuture, PeerReply, PeerRoute};
 pub use refusal::{bad, missing, not_here, refusal, refusal_hint, unknown_agent};
 pub use rows::{Row, RowStore, RowTail};
 pub use scalar::{coerce_scalar, py_strip};
 pub use send::{
-    current_origin, current_remote_caller, current_sender, with_operator, with_remote_caller,
-    with_sender, CURRENT_ORIGIN, CURRENT_SENDER,
+    current_origin, current_remote_caller, current_secret, current_sender, with_operator,
+    with_remote_caller, with_sender, CURRENT_ORIGIN, CURRENT_SENDER,
 };
 pub use state::{KernelState, CURRENT_VERSION};
 pub use storage::StorageMode;

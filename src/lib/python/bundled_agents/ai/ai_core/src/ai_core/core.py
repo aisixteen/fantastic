@@ -1,12 +1,12 @@
-"""Shared reflect-driven LLM-agent machinery for the ollama / anthropic /
-nvidia_nim backends.
+"""Shared reflect-driven LLM-agent machinery for the ollama / responses /
+vllm backends.
 
 Two layers:
 
   1. MODULE-GLOBAL STATE, keyed by agent id. The provider cache, per-backend
      FIFO locks, and the queue / current-entry status state. These are keyed
      by the agent's id, so three backends loaded into ONE kernel share these
-     dicts SAFELY — an ollama agent's id never collides with an anthropic
+     dicts SAFELY — an ollama agent's id never collides with a vllm
      agent's id. A bundle's tests patch them as
      `<bundle>.tools._providers[id] = fake`, so each bundle re-exports the
      SAME dict objects (see `build()`'s note).
@@ -18,11 +18,10 @@ Two layers:
   2. PER-BACKEND CONFIG, captured by a `Backend` dataclass. `build()` is a
      CLOSURE FACTORY: each backend calls it with its own Provider builder +
      constants and gets back a `(VERBS, handler)` pair whose verb closures
-     capture THAT backend's `Backend`. So `sentence`, the provider builder,
-     the optional rate-limit stream wrapper, and the error-message prefix
-     are per-backend; the state above is shared. An ollama agent and an
-     anthropic agent in the same kernel each use their own provider and
-     never clobber each other. Tool-calling is uniform + RAW for all of them
+     capture THAT backend's `Backend`. So `sentence`, the provider builder
+     and the error-message prefix are per-backend; the state above is
+     shared. An ollama agent and a vllm agent in the same kernel each use
+     their own provider and never clobber each other. Tool-calling is uniform + RAW for all of them
      (owned by this base class via `tool_parse`, not any native provider API).
 
 `SEND_TIMEOUT` is read LIVE off the calling bundle module (each bundle
@@ -58,6 +57,7 @@ from ai_core.context import (
     output_reserve,
     resolve_context_window,
 )
+from ai_core.credentials import secret_holder_refusal
 from ai_core.folds import expand_ids as expand_fold_ids
 from ai_core.strategies import DEFAULT_STRATEGY, get_strategy, strategy_names
 from ai_core.strategies.base import NOTICE_ENVELOPE_RESERVE
@@ -156,16 +156,11 @@ class Backend:
     """
 
     sentence: str
-    make_provider: Callable[
-        [str, Any], Any
-    ]  # (id, kernel) -> Provider | None; sync OR async
+    make_provider: Callable[[str, Any], Any]  # (id, kernel) -> Provider; sync OR async
     name: str  # error-message prefix, e.g. "ollama_backend"
     module_name: str
     extra_verbs: dict = field(default_factory=dict)
     reflect_extra: Callable[[str, Any], Awaitable[dict] | dict] | None = None
-    stream_wrapper: Callable | None = None
-    require_provider: bool = False  # nvidia: send failfasts when make_provider -> None
-    provider_missing_error: str | None = None
 
     @property
     def send_timeout(self) -> float:
@@ -834,15 +829,13 @@ def required_meta(rec: dict, key: str, backend: str) -> str:
 
 async def _get_provider(self_id: str, kernel, cfg: Backend):
     """Return the cached provider for `self_id`, building it via the
-    backend's `make_provider` (sync OR async) on cache miss. May return
-    None when the backend's builder declines (e.g. nvidia with no key)."""
+    backend's `make_provider` (sync OR async) on cache miss. A record missing
+    what the provider needs raises, naming the field."""
     if self_id in _providers:
         return _providers[self_id]
     prov = cfg.make_provider(self_id, kernel)
     if inspect.isawaitable(prov):
         prov = await prov
-    if prov is None:
-        return None
     _providers[self_id] = prov
     return prov
 
@@ -1187,7 +1180,7 @@ async def _deliver(
 # ─── thinking: PARSED, not PERSISTED ────────────────────────────
 #
 # A reasoning model streams two things. ollama labels them `message.thinking` /
-# `message.content`; NIM labels them `reasoning_content` / `content`. We must read
+# `message.content`; vLLM labels them `reasoning_content` / `content`. We must read
 # BOTH — a turn spent entirely reasoning is otherwise an empty completion that
 # silently ends the chain (gemma4:12b, 2026-08-02). But we must not KEEP both:
 # feeding a reasoning model its own prior deliberation back is against every
@@ -1699,6 +1692,24 @@ async def _route_reply(
                 )
             continue
         target = target.strip()
+        # A MODEL NEVER REACHES A SECRET HOLDER (owner, 2026-10-02). This loop is
+        # the one place a model-parsed call becomes a dispatch — one call, a
+        # batch, a `to` fan-out (already one call per recipient here), a call
+        # beside `await` — so the refusal lives here and nowhere else. The
+        # target AND the `reply_to` are checked, each resolved as the kernel
+        # resolves it (`<this kernel's guid>|<holder>` IS the holder): a
+        # delivery to a holder is a dispatch on the model's behalf too. Refused calls are not dispatched
+        # and not counted in flight; the refusal always goes to SELF, so the
+        # model reads it whatever `reply_to` said. The backend's own key read
+        # (`credentials.key_reader`) never passes through here.
+        held = secret_holder_refusal(kernel, target)
+        if held is None and reply_to:
+            held = secret_holder_refusal(kernel, reply_to)
+        if held is not None:
+            payload = args.get("payload")
+            verb = payload.get("type", "?") if isinstance(payload, dict) else "-"
+            units.append((self_id, target, verb, None, render_reply(held)))
+            continue
         payload = args.get("payload")
         if not isinstance(payload, dict) or not payload:
             # NO PAYLOAD, NO SEND — what arrives here has no verb in it, and
@@ -2421,11 +2432,6 @@ async def _run(
     system_prompt: str | None = None,
 ) -> dict:
     provider = await _get_provider(self_id, kernel, cfg)
-    # Caller (`_send`) pre-checks when require_provider; this is defensive.
-    if provider is None:
-        return {
-            "error": cfg.provider_missing_error or f"{cfg.name}: provider unavailable"
-        }
     if self_id in _recall_due:
         _recall_due.discard(self_id)
         await _context_recall(self_id, {}, kernel, cfg)
@@ -2451,8 +2457,7 @@ async def _run(
     messages = projected
     # ONE provider pass — no tool loop. The provider streams pure text; every chunk
     # is a content token routed to the caller. Any tool convention is the caller's
-    # (an authored agent reads this completion + drives its own loop). The optional
-    # per-backend stream wrapper (nvidia's 429 retry) wraps the raw provider stream.
+    # (an authored agent reads this completion + drives its own loop).
     content_parts: list[str] = []
     first_chunk = True
     model_messages = _render_for_model(messages)
@@ -2462,11 +2467,7 @@ async def _run(
         provider.last_prompt_tokens = None
     except AttributeError:
         pass
-    if cfg.stream_wrapper is not None:
-        raw = cfg.stream_wrapper(provider, model_messages, kernel, self_id, client_id)
-    else:
-        raw = provider.chat(model_messages)
-    async for chunk in raw:
+    async for chunk in provider.chat(model_messages):
         if first_chunk:
             # First text chunk — phase transitions thinking → streaming.
             await _emit_status(kernel, self_id, client_id, "streaming")
@@ -2739,17 +2740,6 @@ def _make_send(cfg: Backend):
         send_to = payload.get("send_to")
         if not isinstance(send_to, str) or not send_to.strip():
             send_to = None
-        # History is auto-mounted (the JSONL sidecar, persisted via its file leg) —
-        # no operator wiring needed; nothing to failfast on here.
-        # Backends that require a provider up front (nvidia: api_key) failfast here.
-        if cfg.require_provider:
-            provider = await _get_provider(id, kernel, cfg)
-            if provider is None:
-                return {
-                    "error": cfg.provider_missing_error
-                    or f"{cfg.name}: provider unavailable",
-                    "client_id": client_id,
-                }
         text = payload.get("text", "")
         # A message is TEXT whatever the caller typed: the tag grammar types a bare
         # number (`<text>586</text>` → 586, measured 2026-09-10 multisubai, a
@@ -2853,15 +2843,6 @@ def _make_send(cfg: Backend):
                 # transcript (2026-09-09: "Object of type bytes is not JSON
                 # serializable" with no frame to name where).
                 traceback.print_exc()
-                # A backend may install a custom error mapper (nvidia: clean
-                # 429 / HTTP messages instead of re-raising).
-                if cfg._error_mapper is not None:
-                    mapped = cfg._error_mapper(e)
-                    if mapped is not None:
-                        await _emit_status(
-                            kernel, id, client_id, "done", reason="error", error=mapped
-                        )
-                        return {"error": mapped, "client_id": client_id}
                 await _emit_status(
                     kernel, id, client_id, "done", reason="error", error=str(e)
                 )
@@ -3714,15 +3695,11 @@ def build(
     module_name: str,
     extra_verbs: dict | None = None,
     reflect_extra: Callable | None = None,
-    stream_wrapper: Callable | None = None,
-    require_provider: bool = False,
-    provider_missing_error: str | None = None,
-    error_mapper: Callable | None = None,
 ) -> tuple[dict, Callable]:
     """Bind one backend's config into a fresh `(VERBS, handler)` pair.
 
     The verb closures capture the returned `Backend`, so the per-backend
-    config (sentence, provider builder, stream wrapper, error prefix) is
+    config (sentence, provider builder, error prefix) is
     isolated; the module-global STATE (`_providers`, `_queue`, `_current`,
     `_locks`) is shared and keyed by agent id, so multiple backends
     coexist in one kernel.
@@ -3735,7 +3712,7 @@ def build(
 
     Args:
       sentence: the agent's one-line self-description (reflect `sentence`).
-      make_provider: fn(id, kernel) -> Provider | None. May be sync OR
+      make_provider: fn(id, kernel) -> Provider. May be sync OR
         async (awaited if a coroutine). Called only on a `_providers`
         cache miss — tests pre-seed `_providers[id]` to bypass it.
       name: error-message prefix (e.g. "ollama_backend").
@@ -3745,14 +3722,7 @@ def build(
         into VERBS. No bundle uses it today — the key-storage verbs it
         carried are gone (keys come from the environment).
       reflect_extra: fn(id, kernel) -> dict (sync OR async), merged into
-        the reflect reply (nvidia: {"has_api_key": ...}).
-      stream_wrapper: fn(provider, messages, kernel, id, client_id) ->
-        async-iter, wrapping provider.chat() (nvidia: 429 retry).
-      require_provider: True makes `send` failfast when make_provider
-        returns None (nvidia: api_key not set yet).
-      provider_missing_error: the error string for that failfast.
-      error_mapper: fn(exc) -> str | None; maps a provider exception to a
-        clean caller-facing error inside `send` (nvidia: 429 / HTTP).
+        the reflect reply (vllm: the effective sampling + the KV table).
     """
     cfg = Backend(
         sentence=sentence,
@@ -3761,13 +3731,7 @@ def build(
         module_name=module_name,
         extra_verbs=extra_verbs or {},
         reflect_extra=reflect_extra,
-        stream_wrapper=stream_wrapper,
-        require_provider=require_provider,
-        provider_missing_error=provider_missing_error,
     )
-    # Stash hooks the verb closures read but that aren't part of the
-    # public Backend surface.
-    cfg._error_mapper = error_mapper  # type: ignore[attr-defined]
 
     verbs: dict[str, Callable] = {
         "reflect": _make_reflect(cfg),

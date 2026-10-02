@@ -6,41 +6,34 @@
 //! and a full streamed `send`.
 
 use super::*;
+use fantastic_ai_core::credentials::{CredentialError, KeySource};
+use fantastic_credential_store::test_support as creds;
 use fantastic_kernel::Agent;
 use fantastic_kernel::Item;
 use std::time::Duration;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-/// Every test touching the key var takes this lock and restores what it found.
-static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// The key reader a provider awaits before each request (in the kernel, the
+/// record's `credentials` read from a credential store — python's `_key`).
+struct FixedKey(&'static str);
 
-struct KeyEnv {
-    prev: Option<String>,
-    _guard: tokio::sync::MutexGuard<'static, ()>,
-}
-
-impl KeyEnv {
-    async fn set(value: Option<&str>) -> Self {
-        let guard = ENV_LOCK.lock().await;
-        let prev = std::env::var(KEY_VAR).ok();
-        match value {
-            Some(k) => std::env::set_var(KEY_VAR, k),
-            None => std::env::remove_var(KEY_VAR),
-        }
-        Self {
-            prev,
-            _guard: guard,
-        }
+#[async_trait]
+impl KeySource for FixedKey {
+    async fn key(&self, _endpoint: &str) -> Result<Option<String>, CredentialError> {
+        Ok(Some(self.0.to_string()))
     }
 }
 
-impl Drop for KeyEnv {
-    fn drop(&mut self) {
-        match &self.prev {
-            Some(x) => std::env::set_var(KEY_VAR, x),
-            None => std::env::remove_var(KEY_VAR),
-        }
+/// python's `_refused` reader.
+struct Refused;
+
+#[async_trait]
+impl KeySource for Refused {
+    async fn key(&self, _endpoint: &str) -> Result<Option<String>, CredentialError> {
+        Err(CredentialError(
+            "responses_backend: credentials creds/openai: no such ref".to_string(),
+        ))
     }
 }
 
@@ -86,6 +79,7 @@ fn provider(endpoint: String, max_tokens: i64, sampling: Map<String, Value>) -> 
         self_id: AgentId::from(format!("resp_{}", endpoint.len()).as_str()),
         endpoint,
         model: "qwen-test".to_string(),
+        key: Arc::new(FixedKey("sk-test")),
         max_tokens,
         sampling,
         report: ReportCell::default(),
@@ -192,7 +186,6 @@ fn to_responses_matches_python() {
 
 #[tokio::test]
 async fn request_is_stateless_typed_items_no_tools_in_pythons_key_order() {
-    let _key = KeyEnv::set(Some("sk-test")).await;
     let (server, ep) = serve(text(&["ok"], "completed", None)).await;
     let mut sampling = Map::new();
     sampling.insert("temperature".into(), json!(0.2));
@@ -319,10 +312,17 @@ fn response_failed_and_a_native_function_call_are_loud() {
 
 #[tokio::test]
 async fn missing_key_endpoint_or_model_fail_loud_naming_it() {
-    let _key = KeyEnv::set(None).await;
-    let p = provider("http://127.0.0.1:1/v1/responses".into(), 16, Map::new());
-    assert!(drain(&p, None).await.unwrap_err().contains(KEY_VAR));
-    std::env::set_var(KEY_VAR, "sk");
+    let mut p = provider("http://127.0.0.1:1/v1/responses".into(), 16, Map::new());
+    p.key = Arc::new(Refused);
+    let e = match p.chat(&msgs(), None).await {
+        Err(e) => e,
+        Ok(_) => panic!("a refused key must fail the pass"),
+    };
+    assert_eq!(
+        e.message,
+        "responses_backend: credentials creds/openai: no such ref"
+    );
+    assert_eq!(e.kind, "CredentialError");
     let p = provider(String::new(), 16, Map::new());
     assert!(drain(&p, None)
         .await
@@ -338,7 +338,6 @@ async fn missing_key_endpoint_or_model_fail_loud_naming_it() {
 
 #[tokio::test]
 async fn transport_retry_is_bounded_and_deliberate_answers_are_not_retried() {
-    let _key = KeyEnv::set(Some("sk")).await;
     // a CDN error page twice, then success
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -376,7 +375,20 @@ async fn transport_retry_is_bounded_and_deliberate_answers_are_not_retried() {
     assert_eq!(server.received_requests().await.unwrap().len(), 1);
 }
 
-/// A kernel with the ram store and one responses agent pointed at `endpoint`.
+/// The ref the agent's record names in the test credential store.
+const KEY_REF: &str = "openai";
+
+/// Store (or rotate) the agent's key, bound to the host of its endpoint.
+async fn set_key(kernel: &Arc<Kernel>, tmp: &tempfile::TempDir, id: &AgentId, key: &str) {
+    let endpoint = fantastic_ai_core::helpers::agent_meta(id, kernel)["endpoint"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    creds::set_key(kernel, tmp.path(), id.as_str(), KEY_REF, &endpoint, key).await;
+}
+
+/// A kernel with the ram store, the credential store, and one responses agent
+/// pointed at `endpoint` whose `credentials` name the store's `openai` ref.
 async fn mk_kernel(tmp: &tempfile::TempDir, endpoint: &str) -> (Arc<Kernel>, AgentId) {
     let mut kernel = Kernel::new();
     kernel.bundles.register(HANDLER_MODULE, ResponsesBundle);
@@ -384,6 +396,9 @@ async fn mk_kernel(tmp: &tempfile::TempDir, endpoint: &str) -> (Arc<Kernel>, Age
         fantastic_ram_store::HANDLER_MODULE,
         fantastic_ram_store::RamStoreBundle::default(),
     );
+    kernel
+        .bundles
+        .register(fantastic_credential_store::HANDLER_MODULE, creds::bundle());
     let kernel = Arc::new(kernel);
     let root = Agent::new(
         AgentId::from("kernel_state"),
@@ -403,8 +418,10 @@ async fn mk_kernel(tmp: &tempfile::TempDir, endpoint: &str) -> (Arc<Kernel>, Age
             .to_string_lossy()
             .replace('.', "_")
     );
-    let memory =
+    let mut memory =
         fantastic_ram_store::test_support::memory_meta(&kernel, &id, json!({"cli": "*"})).await;
+    creds::ensure_store(&kernel, tmp.path(), &id).await;
+    creds::add_credentials(&mut memory, KEY_REF);
     let mut create = json!({
         "type": "create_agent",
         "parent_id": "kernel",
@@ -458,7 +475,7 @@ async fn send_streams_tokens_raw_on_both_channels() {
         .await;
     let tmp = tempfile::TempDir::new().unwrap();
     let (kernel, id) = mk_kernel(&tmp, &format!("{}/v1/responses", server.uri())).await;
-    let _key = KeyEnv::set(Some("sk-x")).await;
+    set_key(&kernel, &tmp, &id, "sk-x").await;
     let mut rx = kernel.ensure_inbox(&id);
     let k2 = Arc::clone(&kernel);
     let id2 = id.clone();
@@ -699,7 +716,7 @@ async fn a_body_cut_mid_stream_raises_stream_and_the_cause_chain() {
     .await;
     let tmp = tempfile::TempDir::new().unwrap();
     let (kernel, id) = mk_kernel(&tmp, &format!("http://127.0.0.1:{port}/v1/responses")).await;
-    let _key = KeyEnv::set(Some("sk")).await;
+    set_key(&kernel, &tmp, &id, "sk").await;
     let r = send_once(&kernel, &id).await;
     assert_eq!(r["raised"], json!(true), "{r}");
     assert_eq!(
@@ -709,17 +726,18 @@ async fn a_body_cut_mid_stream_raises_stream_and_the_cause_chain() {
     );
 }
 
-/// The key rides VERBATIM (never trimmed) as `Authorization: Bearer <key>`;
-/// the client is rebuilt when the environment's key CHANGES, and never pools.
+/// The key rides VERBATIM (never trimmed) as `Authorization: Bearer <key>`; a
+/// key ROTATED in the store rides the very next request (it is read per
+/// request, never cached), and nothing pools.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_key_rides_verbatim_a_changed_key_rebuilds_and_nothing_pools() {
+async fn the_key_rides_verbatim_a_rotated_key_rides_next_and_nothing_pools() {
     let (port, log) = raw_stub(ok_response).await;
     let tmp = tempfile::TempDir::new().unwrap();
     let (kernel, id) = mk_kernel(&tmp, &format!("http://127.0.0.1:{port}/v1/responses")).await;
-    let _key = KeyEnv::set(Some(" sk-pad ")).await;
+    set_key(&kernel, &tmp, &id, " sk-pad ").await;
     assert_eq!(send_once(&kernel, &id).await["response"], json!(DONE_OK));
     let first = log.heads().len();
-    std::env::set_var(KEY_VAR, "sk-next");
+    set_key(&kernel, &tmp, &id, "sk-next").await;
     assert_eq!(send_once(&kernel, &id).await["response"], json!(DONE_OK));
     let heads = log.heads();
     assert!(first >= 1 && heads.len() > first, "{heads:#?}");
@@ -739,7 +757,7 @@ async fn the_key_rides_verbatim_a_changed_key_rebuilds_and_nothing_pools() {
         assert_eq!(
             raw_header(h, "authorization").as_deref(),
             Some("Bearer sk-next"),
-            "a changed key rebuilds the client: {h}"
+            "a rotated key rides the next request: {h}"
         );
     }
     assert_eq!(

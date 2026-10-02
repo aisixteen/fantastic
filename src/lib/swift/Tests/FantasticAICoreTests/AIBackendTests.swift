@@ -33,7 +33,7 @@ struct AIBackendTests {
     // rendered into every prompt.
     @Test func reflectBaseMatchesPythonKeysAndOrder() async throws {
         let (kernel, id) = try await freshMockKernel(
-            config: baseConfig { .provider(MockProvider()) })
+            config: baseConfig { MockProvider() })
         let r = await kernel.send([Item(id, .object(["type": .string("reflect")]))])[0].result
         // The kernel appends its own frame (can_call/callable_by/…) after the
         // bundle's body; the BODY is what this pins.
@@ -72,7 +72,7 @@ struct AIBackendTests {
     // `status(phase='done')` IS the completion event.
     @Test func reflectEmitsArePythonVerbatim() async throws {
         let (kernel, id) = try await freshMockKernel(
-            config: baseConfig { .provider(MockProvider()) })
+            config: baseConfig { MockProvider() })
         let r = await kernel.send([Item(id, .object(["type": .string("reflect")]))])[0].result
         #expect(r["emits"].asObject?.keys.elementsEqual(["token", "status", "context"]) == true)
         #expect(
@@ -100,14 +100,14 @@ struct AIBackendTests {
 
     @Test func backendStateIsNotAVerb() async throws {
         let (kernel, id) = try await freshMockKernel(
-            config: baseConfig { .provider(MockProvider()) })
+            config: baseConfig { MockProvider() })
         let r = await kernel.send([Item(id, .object(["type": .string("backend_state")]))])[0].result
         #expect(r["error"].asString == "mock_backend: unknown type 'backend_state'")
     }
 
     @Test func unknownVerbErrors() async throws {
         let (kernel, id) = try await freshMockKernel(
-            config: baseConfig { .provider(MockProvider()) })
+            config: baseConfig { MockProvider() })
         let r = await kernel.send([Item(id, .object(["type": .string("nope")]))])[0].result
         #expect(r["error"].asString == "mock_backend: unknown type 'nope'")
     }
@@ -118,7 +118,7 @@ struct AIBackendTests {
     /// ack on the third.
     @Test func sendReturnsTheCompletedText() async throws {
         let (kernel, id) = try await freshMockKernel(
-            config: baseConfig { .provider(MockProvider()) })
+            config: baseConfig { MockProvider() })
         let r = await kernel.send([Item(id, .object(["type": .string("send"), "text": .string("hi")]))])[0].result
         #expect(r["response"].asString == "Hello")
         #expect(r["final"].asString == r["response"].asString)
@@ -132,7 +132,7 @@ struct AIBackendTests {
     /// third with a reason the others never produce.
     @Test func sendDefaultsMissingTextToEmpty() async throws {
         let (kernel, id) = try await freshMockKernel(
-            config: baseConfig { .provider(MockProvider()) })
+            config: baseConfig { MockProvider() })
         let r = await kernel.send([Item(id, .object(["type": .string("send")]))])[0].result
         #expect(r["error"].asString == nil, "a missing `text` is not a refusal: \(r.serialize())")
         #expect(r["response"].asString == "Hello", "the turn RAN")
@@ -149,7 +149,7 @@ struct AIBackendTests {
         let raw = "tab 1/x"
         let (kernel, id) = try await freshMockKernel(
             config: baseConfig {
-                .provider(MockProvider(tokens: ["a", "b", "c"], chunkDelayNanos: 40_000_000))
+                MockProvider(tokens: ["a", "b", "c"], chunkDelayNanos: 40_000_000)
             })
         let running = Task {
             _ = await kernel.send([Item(id, .object([
@@ -177,21 +177,9 @@ struct AIBackendTests {
         #expect(conversationRows(kernel: kernel, id: id).count == 2, "the turn landed in the one store")
     }
 
-    @Test func makeProviderRefusalReturnedVerbatim() async throws {
-        let refusal: JSON = .object([
-            "error": .string("no_key"), "reason": .string("missing"),
-        ])
-        let (kernel, id) = try await freshMockKernel(
-            config: baseConfig { .refused(refusal) })
-        let r = await kernel.send([Item(id, .object(["type": .string("send"), "text": .string("hi")]))])[0].result
-        #expect(r["error"].asString == "no_key")
-        #expect(r["reason"].asString == "missing")
-        #expect(r["queued"].asBool == nil)
-    }
-
     @Test func streamPersistsUserAndAssistantHistory() async throws {
         let (kernel, id) = try await freshMockKernel(
-            config: baseConfig { .provider(MockProvider(tokens: ["Hel", "lo"])) })
+            config: baseConfig { MockProvider(tokens: ["Hel", "lo"]) })
         _ = await kernel.send([Item(id, .object([
                 "type": .string("send"), "text": .string("hi"),
                 "client_id": .string("c1"),
@@ -220,7 +208,7 @@ struct AIBackendTests {
     /// row's text behind `recall`. `limit`/`after` page it by row id.
     @Test func historyIsADigestPageByRowId() async throws {
         let (kernel, id) = try await freshMockKernel(
-            config: baseConfig { .provider(MockProvider(tokens: ["x ", doneEnvelope])) })
+            config: baseConfig { MockProvider(tokens: ["x ", doneEnvelope]) })
         for t in ["one\nline two", "two"] {
             _ = await kernel.send([Item(id, .object(["type": .string("send"), "text": .string(t)]))])[0].result
         }
@@ -296,8 +284,8 @@ struct AIBackendTests {
         //     guidance and compounds turn over turn.
         let (kernel, id) = try await freshMockKernel(
             config: baseConfig {
-                .provider(
-                    MockProvider(tokens: ["<think>", "weigh ", "options", "</think>", "42"]))
+                
+                    MockProvider(tokens: ["<think>", "weigh ", "options", "</think>", "42"])
             })
         let sink = EventSink()
         let inbox = kernel.ensureInbox(id)
@@ -343,7 +331,7 @@ struct AIBackendTests {
         // thinking budget, then a clean `stop` with no answer).
         let (kernel, id) = try await freshMockKernel(
             config: baseConfig {
-                .provider(MockProvider(tokens: ["<think>", "all of my turn", "</think>"]))
+                MockProvider(tokens: ["<think>", "all of my turn", "</think>"])
             })
         // This provider thinks forever; a cap of 1 gives up at the FIRST silent
         // turn, so the test observes exactly ONE pass (no rerolls streaming more
@@ -381,7 +369,7 @@ struct AIBackendTests {
 
     @Test func anErroredStreamPersistsNEITHERHalfOfTheTurn() async throws {
         let (kernel, id) = try await freshMockKernel(
-            config: baseConfig { .provider(MockProvider(throwsError: true)) })
+            config: baseConfig { MockProvider(throwsError: true) })
         _ = await kernel.send([Item(id, .object([
                 "type": .string("send"), "text": .string("hi"),
                 "client_id": .string("c"),
@@ -404,10 +392,10 @@ struct AIBackendTests {
         // client is never left hanging, with no phantom generation behind.
         let (kernel, id) = try await freshMockKernel(
             config: baseConfig {
-                .provider(
+                
                     MockProvider(
                         tokens: Array(repeating: "x", count: 200),
-                        chunkDelayNanos: 10_000_000))
+                        chunkDelayNanos: 10_000_000)
             })
         let sink = EventSink()
         let inbox = kernel.ensureInbox(id)
@@ -485,7 +473,7 @@ struct AIBackendTests {
         // AGENT ID IS CONVERSATION ID. A second client on the same agent reads
         // the same thread — a second conversation is a second agent (python).
         let (kernel, id) = try await freshMockKernel(
-            config: baseConfig { .provider(MockProvider(tokens: ["z"])) })
+            config: baseConfig { MockProvider(tokens: ["z"]) })
         _ = await kernel.send([Item(id, .object([
                 "type": .string("send"), "text": .string("a"),
                 "client_id": .string("c1"),
@@ -503,7 +491,7 @@ struct AIBackendTests {
             // DONE-TERMINATED: a call-less turn is nudged now, and the nudge is
             // itself a turn — so a fixture that just streams prose grows the
             // history under the assertion.
-            config: baseConfig { .provider(MockProvider(tokens: ["x ", doneEnvelope])) })
+            config: baseConfig { MockProvider(tokens: ["x ", doneEnvelope]) })
         _ = await kernel.send([Item(id, .object([
                 "type": .string("send"), "text": .string("one"),
                 "client_id": .string("c"),
@@ -536,7 +524,7 @@ struct AIBackendTests {
         // send fails loud before any turn (python `_send`'s `_store_of`).
         let registry = BundleRegistry()
         registry.register(
-            "mock_backend.tools", MockBundle(config: baseConfig { .provider(MockProvider(tokens: ["ok ", doneEnvelope])) }))
+            "mock_backend.tools", MockBundle(config: baseConfig { MockProvider(tokens: ["ok ", doneEnvelope]) }))
         registry.register("ram_store.tools", RamStoreBundle())
         let kernel = Kernel(storage: .inMemory, bundles: registry)
         let root = Agent(
@@ -572,7 +560,7 @@ struct AIBackendTests {
 
     @Test func statusIdleShapeWhenNothingInFlight() async throws {
         let (kernel, id) = try await freshMockKernel(
-            config: baseConfig { .provider(MockProvider()) })
+            config: baseConfig { MockProvider() })
         let s = await kernel.send([Item(id, .object(["type": .string("status"), "client_id": .string("c")]))])[0].result
         #expect(s["source"].asString == id.value)
         #expect(s["generating"].asBool == false)
@@ -585,8 +573,8 @@ struct AIBackendTests {
         // A slow stream stays in-flight long enough to observe `status`.
         let (kernel, id) = try await freshMockKernel(
             config: baseConfig {
-                .provider(
-                    MockProvider(tokens: ["a", "b", "c"], chunkDelayNanos: 40_000_000))
+                
+                    MockProvider(tokens: ["a", "b", "c"], chunkDelayNanos: 40_000_000)
             })
         // CONCURRENT send: the pass now runs INLINE (py/rust parity), so the
         // dispatch does not return until the generation is done. Observing it
@@ -618,7 +606,7 @@ struct AIBackendTests {
     @Test func statusRedactsOtherClientsText() async throws {
         let (kernel, id) = try await freshMockKernel(
             config: baseConfig {
-                .provider(MockProvider(tokens: ["a", "b"], chunkDelayNanos: 40_000_000))
+                MockProvider(tokens: ["a", "b"], chunkDelayNanos: 40_000_000)
             })
         // CONCURRENT send: the pass now runs INLINE (py/rust parity), so the
         // dispatch does not return until the generation is done. Observing it
@@ -650,7 +638,7 @@ struct AIBackendTests {
         // the load→save of chat history race-free: both turns survive.
         let (kernel, id) = try await freshMockKernel(
             config: baseConfig {
-                .provider(MockProvider(tokens: ["x"], chunkDelayNanos: 20_000_000))
+                MockProvider(tokens: ["x"], chunkDelayNanos: 20_000_000)
             })
         async let a: JSON = kernel.send([Item(id, .object([
                 "type": .string("send"), "text": .string("one"), "client_id": .string("c"),
@@ -707,7 +695,7 @@ struct AIBackendTests {
     }
 
     @Test func contextNoticeShapes() async throws {
-        let backend = buildAIBackend(baseConfig { .provider(MockProvider()) })
+        let backend = buildAIBackend(baseConfig { MockProvider() })
         let n = backend.contextNotice(
             strategy: "compact", summary: "MY SUMMARY", omittedMarker: false, droppedN: 7)
         #expect(n["role"].asString == "user")
@@ -723,7 +711,7 @@ struct AIBackendTests {
 
     @Test func recallPagesStoreAndContextStatusShape() async throws {
         let (kernel, id) = try await freshMockKernel(
-            config: baseConfig { .provider(MockProvider(tokens: ["noted"])) })
+            config: baseConfig { MockProvider(tokens: ["noted"]) })
         _ = await kernel.send([Item(id, .object([
                 "type": .string("send"),
                 "text": .string("my project codename is HALCYON"),
@@ -761,9 +749,9 @@ struct AIBackendTests {
                 // DONE-TERMINATED: a call-less turn is nudged, and the nudge is a
                 // second submission that contends for the same FIFO lock — a
                 // second `queued` status the count would blame on this test.
-                .provider(
+                
                     MockProvider(
-                        tokens: ["a", "b", "c ", doneEnvelope], chunkDelayNanos: 40_000_000))
+                        tokens: ["a", "b", "c ", doneEnvelope], chunkDelayNanos: 40_000_000)
             })
         let sink = EventSink()
         let inbox = kernel.ensureInbox(id)
@@ -806,7 +794,7 @@ struct AIBackendTests {
     /// replies, and the cut half is exactly what a model pages back FOR.
     @Test func recallReturnsTheTurnWhole() async throws {
         let (kernel, id) = try await freshMockKernel(
-            config: baseConfig { .provider(MockProvider()) })
+            config: baseConfig { MockProvider() })
         let long = "HEAD " + String(repeating: "x", count: 6000) + " TAIL"
         _ = await kernel.send([Item(id, .object([
                 "type": .string("send"), "text": .string(long), "client_id": .string("chat"),
@@ -850,7 +838,7 @@ struct AIBackendTests {
             "the superseded reflect must be gone from the VIEW")
 
         // ② and the mark records the STORE's length, not the view's.
-        let backend = buildAIBackend(baseConfig { .provider(MockProvider()) })
+        let backend = buildAIBackend(baseConfig { MockProvider() })
         var fat: [JSON] = [.object(["role": .string("system"), "content": .string("sys")])]
         for i in 0..<60 {
             fat.append(
@@ -906,7 +894,7 @@ struct AIBackendTests {
             -> Agent
         {
             let (kernel, ids, _) = await bootMockKernel(
-                config: baseConfig { .provider(MockProvider()) }, backendIds: ["mock"],
+                config: baseConfig { MockProvider() }, backendIds: ["mock"],
                 contextWindow: 131_072, meta: meta)
             return kernel.agent(ids["mock"]!)!
         }
@@ -916,9 +904,9 @@ struct AIBackendTests {
             "context_window": .double(0.5), "output_reserve": .string("-5"),
             "recent_n": .double(1000.0),
         ])
-        #expect(AIContext.resolveContextWindow(a) == 0)
+        #expect(AIContext.resolveContextWindow(a, modelWindow: AIConstants.DEFAULT_CONTEXT_WINDOW) == 0)
         #expect(AIContext.outputReserve(a) == 1024)
-        #expect(AIContext.budget(a) == 256)
+        #expect(AIContext.budget(a, modelWindow: AIConstants.DEFAULT_CONTEXT_WINDOW) == 256)
         #expect(AIContext.recentN(a) == 50)
         // `"+12"` is not `isdigit()`, so the window falls through to the default;
         // `1000.0` is not an int, so the reserve is the default; `true` is 1.
@@ -926,16 +914,16 @@ struct AIBackendTests {
             "context_window": .string("+12"), "output_reserve": .double(1000.0),
             "recent_n": .bool(true),
         ])
-        #expect(AIContext.resolveContextWindow(b) == 131_072)
+        #expect(AIContext.resolveContextWindow(b, modelWindow: AIConstants.DEFAULT_CONTEXT_WINDOW) == 131_072)
         #expect(AIContext.outputReserve(b) == 1024)
-        #expect(AIContext.budget(b) == 130_048)
+        #expect(AIContext.budget(b, modelWindow: AIConstants.DEFAULT_CONTEXT_WINDOW) == 130_048)
         #expect(AIContext.recentN(b) == 1)
     }
 
     // B1.9 + B1.22: the opt-in blocks read python TRUTHINESS, and the primer
     // reflect goes to the reserved `kernel` address (the root id differs per runtime).
     @Test func primerReflectTargetsKernelAliasAndFlagsArePythonTruthy() async throws {
-        let cfg = baseConfig { .provider(MockProvider()) }
+        let cfg = baseConfig { MockProvider() }
         let (kernel, ids, _) = await bootMockKernel(
             config: cfg, backendIds: ["mock"], meta: ["context_titles": .integer(1)])
         let backend = buildAIBackend(cfg)

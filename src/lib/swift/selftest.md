@@ -104,7 +104,6 @@ Surviving bundles that run cross-runtime against the Swift binary
 | web_ws | [`io/web_ws/selftest.md`](../python/bundled_agents/io/web_ws/selftest.md) |
 | web_rest | [`io/web_rest/selftest.md`](../python/bundled_agents/io/web_rest/selftest.md) |
 | ollama_backend | [`ai/ollama/ollama_backend/selftest.md`](../python/bundled_agents/ai/ollama/ollama_backend/selftest.md) (needs running ollama) |
-| nvidia_nim_backend | [`ai/nvidia/nvidia_nim_backend/selftest.md`](../python/bundled_agents/ai/nvidia/nvidia_nim_backend/selftest.md) (needs `NVAPI_KEY`) |
 | exec_bridge | [`io/exec_bridge/selftest.md`](../python/bundled_agents/io/exec_bridge/selftest.md) (Full tier only) |
 
 View/webapp specs live in the decoupled frontend kernel — see
@@ -124,6 +123,11 @@ Python equivalent:
 | File | Scopes | Requires |
 |---|---|---|
 | [`selftest/feature_gates.md`](selftest/feature_gates.md) | build, packaging | `swift` toolchain + Xcode iPhoneSimulator SDK |
+| [`selftest/foundation_models_backend.md`](selftest/foundation_models_backend.md) | ai, on-device, packaging | macOS 26+ with Apple Intelligence on; `clang` |
+
+`foundation_models_backend` runs Apple's on-device model live (opt-in) and
+links the `FantasticFMBridge` static C ABI from plain C — the library the rust
+kernel's foundation_models_backend links. It has no python twin (Apple-only).
 
 `feature_gates` asserts the Embedded vs Full tier
 split (the `#if os(macOS)` compile gate that drops the four subprocess

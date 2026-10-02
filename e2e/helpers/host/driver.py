@@ -43,7 +43,7 @@ import urllib.request
 from pathlib import Path
 
 from . import artifacts
-from helpers import memory
+from helpers import creds, memory
 
 BASE = {"$self": "*", "$parent": "*", "$children": "*"}
 #: PRIVILEGED verbs lose their wildcard cover — named explicitly, as everywhere.
@@ -241,7 +241,8 @@ class HostKernel:
         # `ws` may read the STATE STREAM — the grant forensics (the other half
         # of this edge is on the ws leg's own `can_call`, below).
         root["callable_by"] = {**BASE, "rest": "*", "ws": ["state_subscribe"]}
-        root["can_call"] = {**BASE, "rest": "*"}
+        # THE KEYS: every descendant may read one from `creds` (`helpers/creds.py`).
+        root["can_call"] = {**BASE, "rest": "*", **creds.root_grant()}
         # THE KERNEL'S MEMORY STORE — `kernel_start` refuses to run without one. One
         # ram_store for the kernel's own rows AND every AI agent's conversation; the
         # driver's legs are its admins (they read and plant rows for the probes),
@@ -257,6 +258,10 @@ class HostKernel:
                              **{t: "*" for t in self.reach
                                 if t not in (self.root_id, memory.MEMORY)}},
             )))
+        # THE CREDENTIAL STORE — env-backed, one ref per keyed plug this run names.
+        (w / "agents" / creds.CREDS).mkdir(parents=True, exist_ok=True)
+        (w / "agents" / creds.CREDS / "agent.yaml").write_text(_dump(
+            creds.store_record(self.root_id, creds.env_refs())))
         # `web` NEEDS EGRESS OF ITS OWN. A `watch` frame is dispatched as the
         # WEB agent, not as the ws leg that carried it, so without this every
         # subscription is refused `web may not call "watch" on <id>` — and a

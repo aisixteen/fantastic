@@ -453,7 +453,7 @@ fn stored_outcome_keeps_a_named_result_a_dead_error_else_a_digest() {
     assert!(kept.get("result").is_none() && kept.get("raised").is_none());
     // a raw body is recorded as its length in the store, a marker on the wire
     let read = Outcome::new(None, Status::Completed, json!({"bytes": null, "eof": true}))
-        .with_body(Some(b"abc".to_vec()));
+        .with_body(Some(crate::outcome::Blob::key("bytes", b"abc".to_vec())));
     assert_eq!(
         stored_outcome(&read, true, BodyAs::Len)["result"]["bytes"],
         json!({"len": 3})
@@ -481,12 +481,15 @@ fn a_reply_with_a_binary_body_stays_whole_in_the_ledger() {
             json!({"path": "agent.yaml", "offset": 0, "bytes": null,
                    "next_offset": 326, "eof": true, "size": 326}),
         )
-        .with_body(Some(b"{\"id\": \"kernel_state\"}".to_vec())),
+        .with_body(Some(crate::outcome::Blob::key(
+            "bytes",
+            b"{\"id\": \"kernel_state\"}".to_vec(),
+        ))),
     );
 
     match open(&l, "read-1", "store", 0).1 {
         Opened::Settled(o, _) => {
-            assert_eq!(o.body.as_deref(), Some(&b"{\"id\": \"kernel_state\"}"[..]));
+            assert_eq!(o.body_bytes(), Some(&b"{\"id\": \"kernel_state\"}"[..]));
         }
         _ => panic!("expected the settled outcome"),
     }

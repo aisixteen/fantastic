@@ -7,8 +7,11 @@
 //!
 //! Python `responses_backend` is canonical. Responses-local extras:
 //!
-//! - the key is read from the ENVIRONMENT (`OPENAI_API_KEY`, one name) at call
-//!   time; an absent key fails loud NAMING it. No key-storage verb, no sidecar.
+//! - the key is read before EACH request from the record's `credentials: {store,
+//!   ref}` — a ref in a `credential_store`, sent only to the ref's host
+//!   (`fantastic_ai_core::credentials`) — never from the environment or the
+//!   record. `credentials` is REQUIRED; a refused read fails the turn, naming
+//!   the store and the ref. No key-storage verb, no sidecar.
 //! - NO guessed host and NO guessed model: `endpoint` (the full `…/v1/responses`
 //!   URL, used verbatim) and `model` must be on the record; the sentinels exist
 //!   only so `reflect` can say what is true.
@@ -23,6 +26,7 @@
 #![deny(missing_docs)]
 
 use async_trait::async_trait;
+use fantastic_ai_core::credentials::{key_reader, KeySource};
 use fantastic_ai_core::provider::{
     Provider, ProviderError, ProviderEvent, ProviderReport, ProviderStream, ReportCell,
     Unconfigured,
@@ -52,13 +56,10 @@ const BACKEND: &str = "responses_backend";
 /// `sentence`, verbatim.
 pub const SENTENCE: &str = "OpenAI Responses-API LLM agent (raw prompt-and-parse tool-calling).";
 
-/// The ONE env var the key is read from. No second spelling.
-pub const KEY_VAR: &str = "OPENAI_API_KEY";
-
 /// Per-turn output budget (`max_output_tokens`) when the record names none.
 pub const DEFAULT_MAX_TOKENS: u64 = 8192;
 
-/// EDGE TRANSPORT FAILURES — the anthropic provider's rule. A 4xx, or any 5xx
+/// EDGE TRANSPORT FAILURES. A 4xx, or any 5xx
 /// carrying a JSON body, is the endpoint deliberately answering and stays loud;
 /// these codes with a NON-JSON body are a CDN/proxy error page and are retried,
 /// bounded. Python `provider.py`'s `TRANSPORT_CODES`.
@@ -85,15 +86,17 @@ const TEXT_DELTAS: [&str; 2] = ["response.output_text.delta", "response.refusal.
 /// Per-backend config: per-client-inbox routing; serial dispatch.
 const CFG: BackendConfig = BackendConfig {
     name: "responses_backend",
-    provider_missing_error: None,
+    // A server's window is the record's to name (`context_window`); the kernel
+    // cannot read it.
+    model_window: fantastic_ai_core::constants::DEFAULT_CONTEXT_WINDOW,
 };
 
-// ── HTTP client cache (Bearer key baked into the default headers) ───
+// ── HTTP client cache (the key rides each request, never the client) ─
 
 static HTTP_CLIENTS: OnceLockHttpMap = OnceLockHttpMap::new();
 
-/// Per agent: the key the client was built with, and the client.
-type ClientMap = HashMap<AgentId, (String, Arc<reqwest::Client>)>;
+/// Per agent: its client.
+type ClientMap = HashMap<AgentId, Arc<reqwest::Client>>;
 
 struct OnceLockHttpMap(OnceLock<Mutex<ClientMap>>);
 impl OnceLockHttpMap {
@@ -120,11 +123,8 @@ fn error_chain(e: &dyn std::error::Error) -> String {
     out
 }
 
-fn build_client(api_key: &str) -> Result<reqwest::Client, String> {
+fn build_client() -> Result<reqwest::Client, String> {
     let mut headers = reqwest::header::HeaderMap::new();
-    let auth = reqwest::header::HeaderValue::from_str(&format!("Bearer {api_key}"))
-        .map_err(|e| format!("api_key has illegal header chars: {e}"))?;
-    headers.insert(reqwest::header::AUTHORIZATION, auth);
     headers.insert(
         reqwest::header::ACCEPT,
         reqwest::header::HeaderValue::from_static("text/event-stream"),
@@ -133,37 +133,29 @@ fn build_client(api_key: &str) -> Result<reqwest::Client, String> {
         .default_headers(headers)
         .connect_timeout(Duration::from_secs(15))
         // A fresh connection per request and HTTP/1.1 only — python opens a new
-        // `httpx.AsyncClient` per pass; the anthropic crate measured why a pooled
-        // or h2 connection through the CloudFront proxy dies mid-request.
+        // `httpx.AsyncClient` per pass; a pooled or h2 connection through the
+        // CloudFront proxy was measured dying mid-request.
         .pool_max_idle_per_host(0)
         .http1_only()
         .build()
         .map_err(|e| format!("build client: {e}"))
 }
 
-/// The cached client for this agent — rebuilt when the key changed, since the key
-/// rides the client's default headers.
-fn get_or_build_client(self_id: &AgentId, key: &str) -> Result<Arc<reqwest::Client>, String> {
-    if let Some((k, c)) = HTTP_CLIENTS.lock().get(self_id).cloned() {
-        if k == key {
-            return Ok(c);
-        }
+/// The cached client for this agent — the transport only: the key is read per
+/// request and rides that request's headers.
+fn get_or_build_client(self_id: &AgentId) -> Result<Arc<reqwest::Client>, String> {
+    if let Some(c) = HTTP_CLIENTS.lock().get(self_id).cloned() {
+        return Ok(c);
     }
-    let client = Arc::new(build_client(key)?);
+    let client = Arc::new(build_client()?);
     HTTP_CLIENTS
         .lock()
-        .insert(self_id.clone(), (key.to_string(), Arc::clone(&client)));
+        .insert(self_id.clone(), Arc::clone(&client));
     Ok(client)
 }
 
 fn drop_cached_client(self_id: &AgentId) {
     HTTP_CLIENTS.lock().remove(self_id);
-}
-
-/// Read the key from the environment. Never written to disk, never on a record.
-fn read_api_key() -> Option<String> {
-    // VERBATIM, as python reads it (`os.environ.get(KEY_VAR)`) — never trimmed.
-    std::env::var(KEY_VAR).ok().filter(|s| !s.is_empty())
 }
 
 // ── plain messages → Responses translation ──────────────────────────
@@ -215,6 +207,8 @@ struct ResponsesProvider {
     self_id: AgentId,
     endpoint: String,
     model: String,
+    /// The key reader, awaited before EACH request.
+    key: Arc<dyn KeySource>,
     max_tokens: i64,
     /// The record's `sampling` object, merged VERBATIM into the body after the
     /// fixed fields (python `body.update(self._sampling)`); it may not name a
@@ -248,12 +242,8 @@ impl Provider for ResponsesProvider {
         messages: &[Value],
         max_tokens: Option<i64>,
     ) -> Result<ProviderStream, ProviderError> {
-        // Python's order: the key, then the endpoint, then the model.
-        let Some(key) = read_api_key() else {
-            return Err(ProviderError::raised(format!(
-                "{KEY_VAR} not set in environment (.env)"
-            )));
-        };
+        // Python's order: the endpoint, then the model, then the key (read
+        // inside the turn, before the request).
         if self.endpoint.is_empty() {
             return Err(ProviderError::raised(
                 "responses_backend: no `endpoint` set — this connector does not \
@@ -288,15 +278,22 @@ impl Provider for ResponsesProvider {
             body.insert(k.clone(), v.clone());
         }
         let body = Value::Object(body);
+        // THE KEY, read before EACH request (python `await self._key(...)` in
+        // the headers): a refused read raises inside the turn.
+        let key = self.key.key(&self.endpoint).await?.unwrap_or_default();
+        let mut auth = reqwest::header::HeaderValue::from_str(&format!("Bearer {key}"))
+            .map_err(|e| ProviderError::raised(format!("api_key has illegal header chars: {e}")))?;
+        auth.set_sensitive(true);
         if wire_on() {
             println!("{}", wire_request_line(&body, items.len()));
         }
 
         let mut attempt: u32 = 0;
         let resp = loop {
-            let client = get_or_build_client(&self.self_id, &key).map_err(ProviderError::raised)?;
+            let client = get_or_build_client(&self.self_id).map_err(ProviderError::raised)?;
             let resp = client
                 .post(&self.endpoint)
+                .header(reqwest::header::AUTHORIZATION, auth.clone())
                 .json(&body)
                 .send()
                 .await
@@ -624,25 +621,23 @@ fn consume_sse(resp: reqwest::Response, report: ReportCell, bounded: bool) -> Pr
 pub fn record_schema() -> &'static Value {
     static SCHEMA: OnceLock<Value> = OnceLock::new();
     SCHEMA.get_or_init(|| {
-        schema::schema(
-            vec![
-                Field::new(
-                    "endpoint",
-                    "str",
-                    "the full Responses API URL (…/v1/responses)",
-                )
-                .required(),
-                Field::new("model", "str", "the model name").required(),
-                Field::new("max_tokens", "int", "a turn's output budget (tokens)")
-                    .default(json!(DEFAULT_MAX_TOKENS)),
-                Field::new(
-                    "sampling",
-                    "map",
-                    "runner params merged verbatim into the request body",
-                ),
-            ],
-            Some(KEY_VAR),
-        )
+        schema::schema(vec![
+            Field::new(
+                "endpoint",
+                "str",
+                "the full Responses API URL (…/v1/responses)",
+            )
+            .required(),
+            Field::new("model", "str", "the model name").required(),
+            Field::new("max_tokens", "int", "a turn's output budget (tokens)")
+                .default(json!(DEFAULT_MAX_TOKENS)),
+            Field::new(
+                "sampling",
+                "map",
+                "runner params merged verbatim into the request body",
+            ),
+            schema::credentials_field(true),
+        ])
     })
 }
 
@@ -684,10 +679,7 @@ impl Bundle for ResponsesBundle {
             return Ok(Some(reflect_reply(agent_id, kernel)));
         }
         // EVERY OTHER ai_core VERB, one table for every backend (python `build`).
-        let provider = |client: &str| {
-            let _ = client;
-            Some(build_provider(agent_id, kernel))
-        };
+        let provider = |_client: &str| build_provider(agent_id, kernel);
         if let Some(reply) = verbs::handle_common(agent_id, payload, kernel, CFG, provider).await? {
             return Ok(Some(reply));
         }
@@ -723,7 +715,8 @@ impl Bundle for ResponsesBundle {
 }
 
 /// The provider this agent is configured for — built per call from the record
-/// (python `make_provider`); the key is the provider's own business at call time.
+/// (python `make_provider`); the key is read through the reader inside each pass,
+/// from the record's `credentials`.
 fn build_provider(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Arc<dyn Provider> {
     let meta = helpers::agent_meta(agent_id, kernel);
     // python's argument order: `endpoint`, `model`, `max_tokens`, then the
@@ -769,6 +762,7 @@ fn build_provider(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Arc<dyn Provider>
         self_id: agent_id.clone(),
         endpoint,
         model,
+        key: Arc::new(key_reader(agent_id, kernel, BACKEND, true)),
         max_tokens,
         sampling,
         report: ReportCell::default(),
@@ -827,7 +821,12 @@ fn py_int_or(v: Option<&Value>, default: u64) -> Result<i64, String> {
 
 /// `reflect` — python `_make_reflect` with no `reflect_extra`.
 fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
-    Value::Object(verbs::reflect_base(agent_id, kernel, SENTENCE))
+    Value::Object(verbs::reflect_base(
+        agent_id,
+        kernel,
+        SENTENCE,
+        CFG.model_window,
+    ))
 }
 
 #[cfg(test)]

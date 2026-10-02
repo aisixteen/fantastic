@@ -9,7 +9,8 @@
 // watched events back. Cross-platform (Linux too).
 //
 // Frame protocol (matches python `PB/io/web_ws/src/web_ws/_proxy.py::run`):
-//   client → server : {"type":"call",   "target":"<id>", "payload":{...}, "id":"<id>"}
+//   client → server : {"type":"call",   "target":"<id>", "payload":{...}, "id":"<id>", "secret":[..]?}
+//                     (`secret` = the item's marked paths, `Secret`)
 //   client → server : {"type":"emit",   "target":"<id>", "payload":{...}}
 //   client → server : {"type":"watch",  "src":"<id>"}
 //   client → server : {"type":"unwatch","src":"<id>"}
@@ -21,7 +22,7 @@
 //                     {"type":"event",  "payload":{...}}   (emitted to this connection)
 //   server → client : {"type":"state_snapshot"|"state_event", ...}
 //   client → server : {"type":"hello",  "guid":"<page kernel guid>"}   (the page as a peer)
-//   server → client : {"type":"call",   "id":"h<n>", "target", "payload", "caller"}
+//   server → client : {"type":"call",   "id":"h<n>", "target", "payload", "caller", "secret"?}
 //   client → server : {"type":"reply"|"error", "id":"h<n>", "data":{...}}
 //
 // **THE PAGE AS A PEER KERNEL** (owner, 2026-09-30). A client that is itself a
@@ -302,38 +303,23 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
     }
 
     /// A decoded inbound frame: the envelope, plus the raw body when the frame
-    /// carried one at `payload.bytes`.
+    /// carried one under its `payload` or at `["data", "bytes"]`.
     private struct Inbound {
         let envelope: JSON
-        /// `.some` only when `_binary_path` named the payload's own `bytes`
-        /// field — the one path this runtime's carrier (`Item.binary`) can
-        /// place.
-        let body: Data?
-        /// `.some` only when `_binary_path` named an ANSWER's `data.bytes` — a
-        /// page replying to one of the host's calls with raw bytes, which is
-        /// where python's `find_bytes_path` puts a reply's chunk.
+        /// `.some` when `_binary_path` named a slot under the frame's `payload` —
+        /// the body AT its steps in the payload (`Item.binary` carries both).
+        let body: Blob?
+        /// `.some` only when `_binary_path` named an ANSWER's
+        /// `["data", "bytes"]` — a page replying to one of the host's calls with
+        /// raw bytes, which is where python's `find_bytes_path` puts a reply's
+        /// chunk.
         var replyBody: Data? = nil
     }
-
-    /// The path an inbound binary frame must name for its body to reach the
-    /// target: the payload's own `bytes` field, which is where python's
-    /// `set_path` puts it before `kernel.send`.
-    static let inboundBinaryPath = "payload.bytes"
 
     /// Where a binary reply's chunk sits in the reply ENVELOPE — python's
     /// `find_bytes_path` walks `{type:reply, id, data:{…bytes…}}` and finds
     /// exactly this.
-    private static let replyBinaryPath = "data.bytes"
-
-    /// The verbs a TEXT `call` frame must route down the BINARY channel, chosen
-    /// STATICALLY by verb (A11.9/A13.1).
-    ///
-    /// Python needs no such list: its payload dict simply holds a `bytes` value
-    /// and `encode_outbound` finds it. Swift's `JSON` cannot, so the carrier is
-    /// the item's binary channel and the decision has to be made from the verb —
-    /// the same pair on both wire legs, so a browser and a curl client get the
-    /// same answer for the same request.
-    static let binaryEdgeVerbs: Set<String> = ["read_stream", "write_stream"]
+    private static let replyBinaryPath: [PathStep] = ["data", "bytes"]
 
     /// python `decode_inbound` + `isinstance(frame, dict)`: parse a text frame
     /// as JSON or a binary frame as `[4B len | header | body]`, pop
@@ -352,34 +338,33 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
             b = bytes
         }
         guard let (head, body) = try? Codec.decodeBinaryFrame(b) else { return nil }
-        guard case .object(var members) = head else { return nil }
-        // `head.pop("_binary_path", None)`: a JSON null IS python's "absent".
-        let rawPath = members["_binary_path"]
-        members.removeValue(forKey: "_binary_path")
-        var envelope: JSON = .object(members)
-        guard let rawPath, !rawPath.isNull else {
+        guard case .object = head else { return nil }
+        // `head.pop("_binary_path", None)` + `set_path(head, path, body)`: swift
+        // cannot store the bytes in the `JSON`, so `null` takes the slot and the
+        // body rides beside the envelope. A path python cannot place is the
+        // frame error (`decodeBinaryFrame` already refused it).
+        var envelope = head
+        let placed: [PathStep]?
+        do {
+            placed = try Codec.placeBody(&envelope)
+        } catch {
+            return nil
+        }
+        guard let path = placed else {
             // No path ⇒ a plain envelope; a body that came with one is dropped,
             // exactly as python drops it (nothing names where it would go).
             return Inbound(envelope: envelope, body: nil)
         }
-        // A non-string path raises out of python's `path.split(".")`.
-        guard let path = rawPath.asString else { return nil }
-        // VALIDATE THE PLACEMENT — python actually performs `set_path(head,
-        // path, body)` and a `KeyError`/`IndexError`/`TypeError` becomes the
-        // frame error. Swift cannot store the bytes in the `JSON`, so it places
-        // a `null` in the same slot and keeps the body beside the envelope.
-        do {
-            try Codec.setPath(&envelope, path, .null)
-        } catch {
-            return nil
+        // A body under the frame's `payload` reaches the handler AT ITS STEPS
+        // there (`Item.binary` carries both). An answer's `["data", "bytes"]` is
+        // the body of a reply to the host's own call. Any other placeable path
+        // keeps its `null` and the body is dropped.
+        if path.count > 1, path[0] == "payload" {
+            return Inbound(
+                envelope: envelope, body: Blob(parts: Array(path.dropFirst()), body))
         }
-        // Only the payload's own `bytes` field reaches a handler here: that is
-        // the slot `Item.binary` fills. An answer's `data.bytes` is the body of
-        // a reply to the host's own call. Any other placeable path keeps its
-        // `null` and the body is dropped.
         return Inbound(
-            envelope: envelope, body: path == inboundBinaryPath ? body : nil,
-            replyBody: path == replyBinaryPath ? body : nil)
+            envelope: envelope, body: nil, replyBody: path == replyBinaryPath ? body : nil)
     }
 
     /// python `bad("frame", "frame", "a well-formed call/emit/watch envelope")`
@@ -564,24 +549,30 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
                 // ledger instead of running the side effect twice.
                 var item = Item(AgentId(target), payload)
                 if let s = fid.asString, !s.isEmpty { item.id = s }
+                // SECRET MARKS cross the leg verbatim (`Secret`): this kernel
+                // records the call as shown, exactly as for a local caller — the
+                // kernel's own check refuses a malformed mark before anything is
+                // dispatched. Python `if "secret" in frame: item["secret"] = …`.
+                if let marks = frame.asObject?["secret"] { item.secret = marks }
                 // A binary-edge verb rides the BINARY channel even when the
                 // client sent a text frame: that is the only way the bundle
                 // returns (or receives) a raw chunk (A11.9/A13.1).
                 let verb = payload["type"].asString ?? ""
-                if body != nil || Self.binaryEdgeVerbs.contains(verb) {
-                    // python's `payload[field] = body` OVERWRITES whatever the
-                    // client put there — but ONLY when a body actually arrived
-                    // (`_binary_path` named the slot). A TEXT frame carries no
-                    // body, so python leaves the client's JSON `bytes` value in
-                    // the payload and `file_bridge` types it: `write_stream`
-                    // with `bytes:"abc"` is `missing_arg`, nothing written
-                    // (A13.19). Stripping the key unconditionally turned that
-                    // refusal into a silent 0-byte write.
-                    if body != nil, case .object(var p) = item.payload {
-                        p.removeValue(forKey: "bytes")
-                        item.payload = .object(p)
+                if body != nil || Codec.binaryEdgeVerbs.contains(verb) {
+                    // ONLY A BINARY FRAME OVERWRITES THE KEY. python's
+                    // `payload[field] = body` runs where a body EXISTS; a TEXT
+                    // frame's `bytes` reaches the target as the JSON value the
+                    // client sent, and `write_stream` answers `missing_arg` for
+                    // it (an ABSENT key stays an empty chunk) (A13.19). The
+                    // decode left `null` in the slot python's `set_path` fills —
+                    // kept, so the call row and the watcher frame keep python's
+                    // key order; the kernel hands the handler a header with
+                    // nothing there.
+                    if let body {
+                        item.binary = body
+                    } else {
+                        item.rawReply = true
                     }
-                    item.binary = body ?? Data()
                 }
                 let out = await kernel.send([item])[0]
                 // Verb-level errors travel inside `data.error` (python's wire
@@ -611,17 +602,10 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
             {
                 return  // a denied emit is DROPPED, never answered
             }
-            let item: InboxItem
-            if let b = inbound.body {
-                var head = payload
-                if case .object(var o) = head {
-                    o["bytes"] = .null
-                    head = .object(o)
-                }
-                item = .binary(head, "bytes", b)
-            } else {
-                item = .text(payload)
-            }
+            // The body rides at ITS path; the decode already left `null` in that
+            // slot of `payload`, in python's position.
+            let item: InboxItem =
+                inbound.body.map { .binary(payload, $0) } ?? .text(payload)
             // INLINE, before the next frame is read: python awaits
             // `kernel.emit` in the read loop, so two emits — or an emit and the
             // call after it — reach their watchers in the order they were sent.
@@ -689,7 +673,7 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
             // Conversation rows are not on this stream — an AI agent announces
             // its own rows to its watchers (`watch` on that agent, gated there).
             let token = kernel.subscribe {
-                [weak kernel] (event: JSON, body: InboxBody?) in
+                [weak kernel] (event: JSON, body: Blob?) in
                 guard case .object(let ev) = event else { return }
                 // `type` FIRST, then the event's own keys — python's
                 // `{"type": "state_event", **event}`, which is the byte order a
@@ -707,8 +691,8 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
                 }
                 outLock.sync {
                     Self.sendEnvelope(
-                        channel: channel, envelope: .object(out), body: body?.data,
-                        path: body.map { "payload.\($0.path)" } ?? "")
+                        channel: channel, envelope: .object(out), body: body?.bytes,
+                        path: ["payload"] + (body?.parts ?? []))
                 }
             }
             stateTokens.append(token)
@@ -758,10 +742,10 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
         }
         let calls = peerCalls
         let outLock = self.outLock
-        let route = PeerRoute(via: legId.value) { agentId, payload, caller, body in
+        let route = PeerRoute(via: legId.value) { agentId, payload, caller, secret, body in
             await calls.call(
-                guid: guid, agentId: agentId, payload: payload, caller: caller, body: body,
-                channel: channel, outLock: outLock)
+                guid: guid, agentId: agentId, payload: payload, caller: caller, secret: secret,
+                body: body, channel: channel, outLock: outLock)
         }
         if let taken = kernel.registerPeer(guid, route) {
             answerError(taken, frameId: frameId, channel: channel)
@@ -808,10 +792,10 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
         }
         var head = frame
         if case .object(var o) = head {
-            o["_binary_path"] = .string("payload.\(body.path)")
+            o["_binary_path"] = Codec.payloadPath(body.parts)
             head = .object(o)
         }
-        writeBinary(channel: channel, bytes: Codec.encodeBinaryFrame(header: head, body: body.data))
+        writeBinary(channel: channel, bytes: Codec.encodeBinaryFrame(header: head, body: body.bytes))
     }
 
     /// `{type:"reply", id, data}` — the frame `id` is echoed RAW, whatever JSON
@@ -827,7 +811,7 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
     /// and names it in `_binary_path`. Testing the body's LENGTH instead served
     /// an empty file as JSON.
     static func sendEnvelope(
-        channel: Channel, envelope: JSON, body: Data?, path: String
+        channel: Channel, envelope: JSON, body: Data?, path: [PathStep]
     ) {
         guard let body else {
             writeText(channel: channel, text: Codec.encodeText(envelope))
@@ -835,7 +819,7 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
         }
         var head = envelope
         if case .object(var o) = head {
-            o["_binary_path"] = .string(path)
+            o["_binary_path"] = Codec.binaryPath(path)
             head = .object(o)
         }
         writeBinary(channel: channel, bytes: Codec.encodeBinaryFrame(header: head, body: body))
@@ -927,12 +911,14 @@ final class PeerCalls: @unchecked Sendable {
     }
 
     /// ONE call into the page: an outbound `{type:"call", id, target, payload,
-    /// caller}` frame, resolved by the inbound answer carrying the same id. A body
-    /// rides the binary channel at `payload.bytes` — where python's payload dict
-    /// holds it and where the page's decoder puts it back.
+    /// caller, secret?}` frame, resolved by the inbound answer carrying the same
+    /// id. A body rides the binary channel at `payload.<its path>` — where
+    /// python's payload dict holds it and where the page's decoder puts it back.
+    /// `secret` is the item's marks, on the frame only when there are any, so the
+    /// PAGE kernel masks its records of this call too.
     func call(
-        guid: String, agentId: String, payload: JSON, caller: String, body: Data?,
-        channel: Channel, outLock: OutboundLock
+        guid: String, agentId: String, payload: JSON, caller: String, secret: [String],
+        body: Blob?, channel: Channel, outLock: OutboundLock
     ) async -> (JSON, Data?) {
         let fid: String? = lock.withLock {
             // A call that resolved this route just as the socket closed must not
@@ -943,15 +929,18 @@ final class PeerCalls: @unchecked Sendable {
             return "h\(seq)"
         }
         guard let fid else { return (Self.disconnected(guid), nil) }
+        // The body's slot in the payload is `null` on the wire, in python's
+        // position (`encode_frame` nulls the bytes where they sat); the kernel
+        // admitted the path at launch.
         var p = payload
-        if body != nil, case .object(var o) = p {
-            o["bytes"] = .null
-            p = .object(o)
-        }
-        let envelope: JSON = .object([
+        if let body { try? pySetPath(&p, parts: body.parts, .null) }
+        var envelope: JSON = .object([
             "type": .string("call"), "id": .string(fid), "target": .string(agentId),
             "payload": p, "caller": .string(caller),
         ])
+        // the item's marks, so the PAGE kernel masks its records of this call too
+        if !secret.isEmpty { envelope["secret"] = .array(secret.map { .string($0) }) }
+        let frame = envelope
         return await withTaskCancellationHandler {
             await withCheckedContinuation { (cont: CheckedContinuation<(JSON, Data?), Never>) in
                 let settled: (JSON, Data?)? = lock.withLock {
@@ -968,8 +957,8 @@ final class PeerCalls: @unchecked Sendable {
                 }
                 outLock.sync {
                     WebSocketProxyHandler.sendEnvelope(
-                        channel: channel, envelope: envelope, body: body,
-                        path: WebSocketProxyHandler.inboundBinaryPath)
+                        channel: channel, envelope: frame, body: body?.bytes,
+                        path: ["payload"] + (body?.parts ?? []))
                 }
             }
         } onCancel: {

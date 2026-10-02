@@ -4,9 +4,8 @@
 // Every expectation here is python's (`ai_core/core.py`), pinned as text or as a
 // key list. The two halves that matter:
 //
-//   • a provider failure is MAPPED (a refusal the caller can act on) or
-//     UNMAPPED (a bug, which RAISES) — `{error, client_id}` vs
-//     `{error:"<Type>: <msg>", raised:true}`;
+//   • a provider failure RAISES — `{error:"<Type>: <msg>", raised:true}`, never
+//     dressed up as a `{error, client_id}` refusal;
 //   • `status(phase:'done')` IS the completion. There is no `done` event, the
 //     token event carries `text`, and every detail key is in python's order.
 
@@ -44,25 +43,18 @@ private final class StalledProvider: AIProvider, @unchecked Sendable {
     }
 }
 
-/// The nvidia-shaped failure the mapper recognises.
-private struct StubHTTPError: Error, CustomStringConvertible {
-    let code: Int
-    var description: String { "HTTP \(code)" }
-}
-
 @Suite("AI events and refusals")
 struct EventsAndRefusalsTests {
 
-    // ── B2.1 / B2.16: two kinds of provider failure ──────────────────────
+    // ── B2.1 / B2.16: a provider failure raises ──────────────────────────
 
-    /// UNMAPPED: the backend installed no mapper (or it did not recognise this
-    /// one), so the handler RAISES. The kernel settles `failed` with
+    /// The handler RAISES. The kernel settles `failed` with
     /// `{error:"<Type>: <msg>", raised:true}` — a crash the caller can tell from
     /// a decision — while the status event carries the bare `str(e)`.
-    @Test func unmappedProviderErrorSettlesRaised() async throws {
+    @Test func aProviderErrorSettlesRaised() async throws {
         let (kernel, id) = try await freshMockKernel(
             config: baseConfig {
-                .provider(FailingProvider(PyError("RuntimeError", "upstream said no")))
+                FailingProvider(PyError("RuntimeError", "upstream said no"))
             })
         let sink = EventSink()
         let inbox = kernel.ensureInbox(id)
@@ -93,12 +85,12 @@ struct EventsAndRefusalsTests {
                 == ["reason", "error", "send_id", "started_at", "queue_depth"])
     }
 
-    /// A backend that does not REQUIRE its provider up front builds it INSIDE
-    /// the turn (python `_run`): a build that raises (responses' sampling
+    /// A backend builds its provider INSIDE the turn (python `_run`): a build
+    /// that raises (responses' sampling
     /// naming an owned key, a missing `model`) is seen as `thinking` then
     /// `done(reason:error)`, and the handler raises.
     @Test func aProviderBuildFailureEndsTheTurnWithDoneError() async throws {
-        var cfg = baseConfig { .refused(.object(["error": .string("unreachable")])) }
+        var cfg = baseConfig { throw PyError("RuntimeError", "unreachable") }
         cfg.makeProvider = { _, _, _ in
             throw PyError("ValueError", "sampling sets an owned key: 'model'")
         }
@@ -125,25 +117,6 @@ struct EventsAndRefusalsTests {
             sink.statusDone()?["detail"]["error"].asString == "sampling sets an owned key: 'model'")
     }
 
-    /// MAPPED: nvidia's `_error_mapper` turns an HTTP status into a clean
-    /// sentence, and that is a REFUSAL — `{error, client_id}`, not a raise.
-    @Test func mappedProviderErrorIsACleanRefusal() async throws {
-        var cfg = baseConfig { .provider(FailingProvider(StubHTTPError(code: 503))) }
-        cfg.errorMapper = { error in
-            (error as? StubHTTPError).map { "send: provider HTTP \($0.code)" }
-        }
-        let (kernel, id) = try await freshMockKernel(config: cfg)
-        let out = await kernel.send([
-            Item(
-                id,
-                .object(["type": .string("send"), "text": .string("hi"), "client_id": .string("c")])
-            )
-        ])[0]
-        #expect(out.result["error"].asString == "send: provider HTTP 503")
-        #expect(out.result["client_id"].asString == "c")
-        #expect(out.result["raised"] == .null, "a mapped failure is not a raise")
-    }
-
     // ── B2.2: a projection refusal is the reply, verbatim ────────────────
 
     /// The too_small failsafe means the MODEL WAS NEVER CALLED: python returns
@@ -152,7 +125,7 @@ struct EventsAndRefusalsTests {
     /// `context:too_small` event is the one thing that fires.
     @Test func aProjectionRefusalIsReturnedVerbatimWithNoDoneStatus() async throws {
         let (kernel, ids, _) = await bootMockKernel(
-            config: baseConfig { .provider(MockProvider()) },
+            config: baseConfig { MockProvider() },
             backendIds: ["mock"],
             // Smaller than the system block alone: the seam fails the turn.
             contextWindow: 64)
@@ -188,7 +161,7 @@ struct EventsAndRefusalsTests {
     /// prefix. Swift minted `snd_<8 hex>`.
     @Test func sendIdIsElevenCharsOfBase64Url() async throws {
         let (kernel, id) = try await freshMockKernel(
-            config: baseConfig { .provider(MockProvider()) })
+            config: baseConfig { MockProvider() })
         let sink = EventSink()
         let inbox = kernel.ensureInbox(id)
         let pump = Task { for await ev in inbox { sink.add(ev.payload) } }
@@ -211,7 +184,7 @@ struct EventsAndRefusalsTests {
     // ── B2.10: `_safe_client` is per CODE POINT ──────────────────────────
 
     @Test func safeClientMapsCodePointsLikePython() {
-        let backend = buildAIBackend(baseConfig { .provider(MockProvider()) })
+        let backend = buildAIBackend(baseConfig { MockProvider() })
         // A DECOMPOSED `é` is TWO code points to python: the letter survives, the
         // combining accent does not. Swift mapped Characters, so it kept both.
         #expect(backend.safeClient("e\u{301}x") == "e_x")
@@ -234,7 +207,7 @@ struct EventsAndRefusalsTests {
 
     @Test func tokenEventIsTypeTextSourceClientId() async throws {
         let (kernel, id) = try await freshMockKernel(
-            config: baseConfig { .provider(MockProvider(tokens: ["ab"])) })
+            config: baseConfig { MockProvider(tokens: ["ab"]) })
         let sink = EventSink()
         let inbox = kernel.ensureInbox(id)
         let pump = Task { for await ev in inbox { sink.add(ev.payload) } }
@@ -260,7 +233,7 @@ struct EventsAndRefusalsTests {
     /// only compared a deadline BETWEEN chunks, so a stall before chunk one was
     /// unbounded. python wraps the whole of `_run` in `asyncio.timeout`.
     @Test func aStalledProviderTimesOutAtTheCeiling() async throws {
-        var cfg = baseConfig { .provider(StalledProvider()) }
+        var cfg = baseConfig { StalledProvider() }
         cfg.sendTimeout = 0.1
         let (kernel, id) = try await freshMockKernel(config: cfg)
         let sink = EventSink()
@@ -283,7 +256,7 @@ struct EventsAndRefusalsTests {
         // AND THE AGENT IS NOT STRANDED: the FIFO guard was released, so the
         // next turn runs.
         var next = cfg
-        next.makeProvider = { _, _, _ in .provider(MockProvider(tokens: ["ok"])) }
+        next.makeProvider = { _, _, _ in MockProvider(tokens: ["ok"]) }
         _ = next
         let s = await kernel.send([
             Item(id, .object(["type": .string("status"), "client_id": .string("c")]))
@@ -298,7 +271,7 @@ struct EventsAndRefusalsTests {
         // turn's three: a nudge would open another turn whose own events land
         // after these rows and make "the last status" mean something else.
         let (kernel, id) = try await freshMockKernel(
-            config: baseConfig { .provider(MockProvider(tokens: ["ok " + doneEnvelope])) })
+            config: baseConfig { MockProvider(tokens: ["ok " + doneEnvelope]) })
         let rowsAtStatus = RowCountProbe()
         // A SYNCHRONOUS subscriber: it runs inside `emit`, so what it reads is
         // the store as it stood at that instant — an async inbox reader could
@@ -335,7 +308,7 @@ struct EventsAndRefusalsTests {
     /// python `test_cli_caller_routes_to_cli_only`.
     @Test func cliCallerRoutesToCliOnly() async throws {
         let (kernel, ids, recorder) = await bootMockKernel(
-            config: baseConfig { .provider(MockProvider(tokens: ["hel", "lo ", doneEnvelope])) },
+            config: baseConfig { MockProvider(tokens: ["hel", "lo ", doneEnvelope]) },
             backendIds: ["mock"])
         let id = ids["mock"]!
         // The cli agent the backend streams to — granted both ways, like the
@@ -386,7 +359,7 @@ struct EventsAndRefusalsTests {
     /// the cli. python `test_browser_caller_routes_to_own_inbox_only`.
     @Test func browserCallerRoutesToOwnInboxOnly() async throws {
         let (kernel, ids, recorder) = await bootMockKernel(
-            config: baseConfig { .provider(MockProvider(tokens: ["hi ", doneEnvelope])) },
+            config: baseConfig { MockProvider(tokens: ["hi ", doneEnvelope]) },
             backendIds: ["mock"])
         let id = ids["mock"]!
         _ = await kernel.send([
@@ -423,7 +396,7 @@ struct EventsAndRefusalsTests {
 
     @Test func unknownTypeNamesTheBundleAndReprsTheVerb() async throws {
         let (kernel, id) = try await freshMockKernel(
-            config: baseConfig { .provider(MockProvider()) })
+            config: baseConfig { MockProvider() })
         let garbage = await kernel.send([
             Item(id, .object(["type": .string("garbage")]))
         ])[0].result
@@ -469,7 +442,7 @@ struct EventsAndRefusalsTests {
     private func inquiryError(answer: String) async throws -> String? {
         let turn = "<call name=\"inquiry_answer\">\(answer)</call>"
         let (kernel, id) = try await freshMockKernel(
-            config: baseConfig { .provider(MockProvider(tokens: [turn])) })
+            config: baseConfig { MockProvider(tokens: [turn]) })
         let r = await kernel.send([
             Item(id, .object(["type": .string("inquiry"), "text": .string("well?")]))
         ])[0].result
@@ -481,7 +454,7 @@ struct EventsAndRefusalsTests {
     @Test func statusCurrentHasTwoShapes() async throws {
         let (kernel, id) = try await freshMockKernel(
             config: baseConfig {
-                .provider(MockProvider(tokens: ["a", "b"], chunkDelayNanos: 80_000_000))
+                MockProvider(tokens: ["a", "b"], chunkDelayNanos: 80_000_000)
             })
         let running = Task {
             await kernel.send([
@@ -533,7 +506,7 @@ struct EventsAndRefusalsTests {
 
     @Test func sendRefusesACycleAndOverDepth() async throws {
         let (kernel, id) = try await freshMockKernel(
-            config: baseConfig { .provider(MockProvider()) })
+            config: baseConfig { MockProvider() })
         let cycle = await kernel.send([
             Item(
                 id,

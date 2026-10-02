@@ -4,7 +4,7 @@ This is the **most expensive** test layer in the repo. It is **NOT** part of
 `pytest`, `npm test`, or the normal `node --test` runs — those stay fast and free.
 This one:
 
-- spends **real Anthropic tokens** (live `claude-opus-4-8` inference turns), and
+- spends **real inference turns** on a live vLLM server (`vllm_backend`), and
 - **spawns a fresh "builder" agent** that wires the system **from zero** using only
   `curl` + the system's own readmes (no source, no kernel tools),
 
@@ -40,7 +40,11 @@ both gaps:
   (`src/tui/web/canvas/scripts/pack.sh` → `dist/canvas.zip`) and serves its
   `bundle.min.js` at `/canvas_page/file/index.html`.
 - System **Chrome** (headless) — see `../_chrome.ts`.
-- **`ANTHROPIC_API_KEY`** in the repo `.env`.
+- A vLLM server named by **`VLLM_ENDPOINT`** (its `/v1` URL), **`FANTASTIC_AI_MODEL`**
+  (the served model), **`VLLM_KV_SLOTS`** and **`VLLM_KV_OVERFLOW`** (`evict` |
+  `reject`) — all required on the record, nothing guessed. A server that wants a key:
+  **`VLLM_API_KEY`** in the repo `.env`, read by the harness's env-backed `creds`
+  credential_store, never by the backend.
 
 If any are missing the runner reports it and skips the affected phase — it never
 hangs or silently "passes".

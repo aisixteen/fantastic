@@ -47,7 +47,7 @@ private func call(_ k: Kernel, _ p: OrderedDictionary<String, JSON>) async -> JS
 private func callBody(_ k: Kernel, _ p: OrderedDictionary<String, JSON>, _ body: Data) async
     -> JSON
 {
-    await k.send([Item(AgentId("fs"), .object(p), binary: body)])[0].result
+    await k.send([Item(AgentId("fs"), .object(p), binary: Blob("bytes", body))])[0].result
 }
 
 private func block(_ old: String, _ new: String) -> String {

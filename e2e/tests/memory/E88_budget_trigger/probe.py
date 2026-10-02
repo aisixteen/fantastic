@@ -44,8 +44,7 @@ async def main():
             (f"compaction fired ({len(conn.compactions)})", len(conn.compactions) >= 1),
             ("the trigger is 0.8 of the budget", st.get("trigger") == 0.8),
             # The calibration follows WHAT THE ENDPOINT REPORTS: a reported prompt size moves
-            # it off 1.0; an endpoint that streams no usage (measured 2026-09-26 on the
-            # anthropic `/cc` route: `message_start` carries input_tokens 0) leaves it at 1.0.
+            # it off 1.0; an endpoint that streams no usage leaves it at 1.0.
             (f"calibration follows the endpoint ({'reported' if reported else 'no usage streamed'})",
              (bool(reported) and st.get("calibration") != 1.0) or (not reported and st.get("calibration") == 1.0)),
             ("never too_small", not too_small),

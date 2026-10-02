@@ -798,8 +798,10 @@ async fn a_non_numeric_tick_sec_is_refused_at_write_time() {
 #[test]
 fn scheduler_readme_is_python_verbatim() {
     let py = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../../..")
-        .join("src/lib/python/bundled_agents/scheduler/src/scheduler/readme.md");
+        .ancestors()
+        .nth(4) // src/lib above crates/bundles/<crate>
+        .expect("src/lib above the crate")
+        .join("python/bundled_agents/scheduler/src/scheduler/readme.md");
     let Ok(src) = std::fs::read_to_string(&py) else {
         eprintln!("skipping: python tree not present at {}", py.display());
         return;

@@ -73,19 +73,19 @@ kernel modules.
 |---|---|---|---|
 | kernel_state | `FantasticKernelState` | both | the ROOT loader + persistence (records, blobs, the record-owner guard; a `root` meta serves a sub-namespace, e.g. a browser app's records) |
 | ram_store | `FantasticRamStore` | both | the MEMORY STORE in RAM — every message, fold refs, grants (anchor cascade), search, inject/dump; one lock over all tables |
+| credential_store | `FantasticCredentialStore` | both | secrets by ref, each bound to one host, read only with a `secret` mark, behind per-ref grants; `file` (0600, read only if this user's and no group/other bits), OS `keychain` (Security.framework; fails loud where there is none) or read-only `env` backend. Every keyed AI backend reads its key here (`credentials: {store, ref}`), before each request. A **secret holder**: it stamps `holds_secrets: true` on its own record at boot and refuses any other value at the write; ai_core refuses every model-parsed call (target or `reply_to`) that names an agent so marked (`{reason:"unauthorized", agent}`), while the backend still reads its key; an operator may mark any agent |
 | static_loader | `FantasticStaticLoader` | both | declarative YAML roster loader — hydrates the declared agents as operator at boot |
 | file_bridge | `FantasticFile` | both | the gated fs edge — sealed by default, deny-all `allow` list, running-dir clamp; text verbs read/write/edit/append/undo (version/if_match) + read_stream/write_stream/pump (raw bytes) |
 | scheduler | `FantasticScheduler` | both | recurring tasks (schedule/unschedule/list/pause/resume/tick_now/history; `interval_seconds`); persists `schedules.yaml`/`schedule_events.yaml` THROUGH the loader (`persist_blob`/`load_blob`); failfast when no store is wired |
 | cli | `FantasticCliBundle` | both | terminal render sink (`cli.tools`): token/done/say/error/status/context + the PTY intro to stdout; unknown verbs dropped |
-| ws_bridge / relay_connector | `FantasticKernelBridge` + `FantasticIoBridge` | both | cross-kernel comms, io_bridge derivations (sealed by default); frames carry a qualified `caller` (`<guid>|<agent>`), ingress refuses the local guid. `relay_connector` dials a relay-KERNEL router (`ws://host/<guid>`, `X-Fantastic-Auth`), reaches a `partner_guid` and tunnels io_bridge frames |
+| ws_bridge / relay_connector | `FantasticKernelBridge` + `FantasticIoBridge` | both | cross-kernel comms, io_bridge derivations (sealed by default); frames carry a qualified `caller` (`<guid>|<agent>`) and the item's `secret` marks (`forward` re-roots its own: `payload.payload.<f>` → `payload.<f>`, `result[.<f>]` as is), so the receiving kernel masks its records too; ingress refuses the local guid. `relay_connector` dials a relay-KERNEL router (`ws://host/<guid>`, `X-Fantastic-Auth`), reaches a `partner_guid` and tunnels io_bridge frames. The relay is SEALED for secrets (relayd records what it routes unmasked): a `forward` carrying any mark, text or binary, and an inbound tunneled `call` naming `secret` are refused `{reason:"unauthorized"}` — secrets go over a direct `ws_bridge` leg |
 | web | `FantasticWeb` | both | HTTP + WS server (swift-nio — serves on macOS + Linux) |
-| web_ws | `FantasticWebWS` | both | composable WS verb surface (child of a `web` host; `web_ws.tools`) |
-| web_rest | `FantasticWebRest` | both | composable REST verb surface (child of a `web` host; `web_rest.tools`) |
+| web_ws | `FantasticWebWS` | both | composable WS verb surface (child of a `web` host; `web_ws.tools`); a `call` frame's `secret` is dispatched verbatim, and a page peer's calls carry the item's marks |
+| web_rest | `FantasticWebRest` | both | composable REST verb surface (child of a `web` host; `web_rest.tools`); `X-Fantastic-Secret` (a JSON array) is the item's `secret`, on the JSON and octet legs |
 | ollama_backend | `FantasticOllamaBackend` | both | local LLM (thin over `FantasticAICore`) |
-| nvidia_nim_backend | `FantasticNvidiaNimBackend` | both | hosted LLM, OpenAI-compatible, bearer auth + 429 retry (thin over `FantasticAICore`) |
-| llamacpp_backend | `FantasticLlamaCppBackend` | both | local LLM via llama-server, OpenAI-compatible (thin over `FantasticAICore`) |
+| responses_backend | `FantasticResponsesBackend` | both | OpenAI Responses-API LLM (thin over `FantasticAICore`) |
 | vllm_backend | `FantasticVllmBackend` | both | LLM on a vLLM server, spoken to directly; a KV-cache session table per endpoint (thin over `FantasticAICore`) |
-| anthropic_backend | `FantasticAnthropicBackend` | both | Claude via the Anthropic Messages API (thin over `FantasticAICore`) |
+| foundation_models_backend | `FantasticFoundationModelsBackend` + `FantasticFMCore` | both | Apple's on-device model (macOS 26+ with Apple Intelligence; anywhere else a send fails naming why); no endpoint, model or key; `context_window` defaults to the SDK's real window (4096 measured on macOS 27.0). `FantasticFMCore` is the ONE implementation of the FoundationModels calls — rust links it through `FantasticFMBridge`, a static C ABI (`fm_bridge.h`) (thin over `FantasticAICore`) |
 | exec_bridge | `FantasticExecBridge` | Pro | macOS-only — the process edge: a general-purpose command runner gated by a regex allowlist (`allowed`), sealed by default; jobs are kernel tasks; a terminal is a PTY job (`forkpty`) |
 | scenario probes | `FantasticScenarioProbes` | test | fixture agents the shared e2e scenarios name |
 
@@ -109,6 +109,10 @@ swift test                              # full suite
 swift test --filter FantasticKernel     # substrate only
 PYTHON_KERNEL_BIN=<path> swift test \
     --filter FantasticParityTests       # cross-runtime parity (optional)
+FM_LIVE=1 swift test \
+    --filter liveOnDeviceModel          # the on-device model, live (opt-in)
+swift build -c release --product FantasticFMBridge
+                                        # .build/release/libFantasticFMBridge.a (rust links it)
 ```
 
 Requires Swift 6.0+ (Xcode 16+).
@@ -126,10 +130,14 @@ swift/
     FantasticWeb/                      HTTP + WS server (swift-nio; macOS + Linux)
     FantasticKernelState/              the root loader + persistence
     FantasticRamStore/                 the memory store (in RAM)
+    FantasticCredentialStore/          secrets by ref (file / keychain / env)
     FantasticAICore/                   shared LLM machinery (memory-store conversation,
                                        tag grammar, folds, grants); AI backends are thin over this
-    Fantastic{Ollama,NvidiaNim,LlamaCpp,Anthropic,Responses,Vllm}Backend/
+    Fantastic{Ollama,Responses,Vllm}Backend/
                                        the AI backends
+    FantasticFMCore/                   Apple Foundation Models calls (the one implementation)
+    FantasticFMBridge/                 its C ABI for rust — static lib + fm_bridge.h
+    FantasticFoundationModelsBackend/  the on-device AI backend (+ Resources/readme.md)
     Fantastic{File,Scheduler,StaticLoader,
               CliBundle,IoBridge,KernelBridge,WebWS,WebRest}/
                                        supporting bundles

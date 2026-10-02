@@ -302,6 +302,24 @@ fn py_float_is_cpython_float() {
         py_float(&json!("_1")).unwrap_err(),
         PyError::ValueError("could not convert string to float: '_1'".into())
     );
+    // CPython strips C `isspace` (` \t\n\v\f\r`) and the NON-ASCII spaces its
+    // transform turns into ` ` — never `\x1c`-`\x1f`, which `str.isspace()`
+    // counts but an ASCII char is never transformed. Measured python 3.11.
+    for ok in ["\u{0b}7", "\u{0c}7", "\t7\n", "\u{85}7", "\u{a0}7\u{3000}"] {
+        assert_eq!(py_float(&json!(ok)).unwrap(), 7.0, "{ok:?}");
+    }
+    for (bad, shown) in [
+        ("\u{1c}7", "'\\x1c7'"),
+        ("7\u{1f}", "'7\\x1f'"),
+        ("\u{1c}7\u{a0}", "'\\x1c7\\xa0'"),
+        ("7\u{1e}\u{2003}", "'7\\x1e\\u2003'"),
+    ] {
+        assert_eq!(
+            py_float(&json!(bad)).unwrap_err(),
+            PyError::ValueError(format!("could not convert string to float: {shown}")),
+            "{bad:?}"
+        );
+    }
 }
 
 /// C72: `int()`/`float()` transform every Unicode `Nd` digit to its ASCII
@@ -429,4 +447,118 @@ fn a_non_finite_and_a_wide_int_keep_their_python_spelling() {
         "{\"inf\": null}",
         "an f64 infinity never reaches Number::from_f64 — it is null there"
     );
+}
+
+/// python `io_bridge._codec.set_path` over a `_binary_path` LIST OF STEPS: a
+/// string step is an object key taken literally, an int step a list index; the
+/// last object key is set in place or appended; the typed steps come back.
+#[test]
+fn set_path_places_at_literal_keys_and_list_indices() {
+    use path::{set_path, Step};
+    let mut env = json!({"type": "call", "payload": {"a": {"b": "kept"}, "a.b": null}});
+    let got = set_path(&mut env, &json!(["payload", "a.b"]), json!("BODY")).unwrap();
+    assert_eq!(got, vec![Step::from("payload"), Step::from("a.b")]);
+    assert_eq!(
+        env["payload"],
+        json!({"a": {"b": "kept"}, "a.b": "BODY"}),
+        "the literal key, never the nested twin"
+    );
+    let mut env = json!({"data": {"items": [{"n": 1}, {"data": null}]}});
+    let got = set_path(&mut env, &json!(["data", "items", 1, "data"]), json!(2)).unwrap();
+    assert_eq!(got[2], Step::Index(1));
+    assert_eq!(env["data"]["items"][1]["data"], 2);
+    // a key that looks like an index is a key; empty and dotted keys are keys
+    let mut env = json!({"payload": {}});
+    set_path(&mut env, &json!(["payload", "0"]), json!(4)).unwrap();
+    set_path(&mut env, &json!(["payload", ""]), json!(5)).unwrap();
+    set_path(&mut env, &json!(["payload", "a..b."]), json!({})).unwrap();
+    set_path(&mut env, &json!(["payload", "a..b.", "c."]), json!(6)).unwrap();
+    assert_eq!(
+        serde_json::to_string(&env).unwrap(),
+        r#"{"payload":{"0":4,"":5,"a..b.":{"c.":6}}}"#
+    );
+    // the last object key keeps its place when present, is appended when absent
+    let mut env = json!({"a": 1, "b": 2});
+    set_path(&mut env, &json!(["a"]), json!(null)).unwrap();
+    set_path(&mut env, &json!(["c"]), json!(3)).unwrap();
+    assert_eq!(
+        serde_json::to_string(&env).unwrap(),
+        r#"{"a":null,"b":2,"c":3}"#
+    );
+}
+
+/// Every malformed `_binary_path` is ONE refusal, python's `ValueError` text
+/// word for word (`test_binary_path_steps.py`).
+#[test]
+fn set_path_refuses_a_malformed_path_with_python_s_text() {
+    let cases: [(serde_json::Value, &str); 13] = [
+        (json!("payload.bytes"), "not a list of steps"),
+        (json!([]), "an empty path names no slot"),
+        (json!({"payload": "bytes"}), "not a list of steps"),
+        (json!([0]), "step 0 at an object is not a string key"),
+        (
+            json!(["items", "0"]),
+            "step '0' at a list is not a non-negative integer index",
+        ),
+        (
+            json!(["items", -1]),
+            "step -1 at a list is not a non-negative integer index",
+        ),
+        (
+            json!(["items", true]),
+            "step True at a list is not a non-negative integer index",
+        ),
+        (
+            serde_json::from_str(r#"["items", 0.0]"#).unwrap(),
+            "step 0.0 at a list is not a non-negative integer index",
+        ),
+        (
+            json!(["items", 2]),
+            "index 2 is past the end of a list of 2",
+        ),
+        (json!(["nope", "x"]), "no key 'nope'"),
+        (
+            json!(["type", "x"]),
+            "step 'x' goes into a string, not a container",
+        ),
+        (
+            json!(["items", 0, "x"]),
+            "step 'x' goes into a null, not a container",
+        ),
+        (
+            json!(["n", "x"]),
+            "step 'x' goes into a number, not a container",
+        ),
+    ];
+    for (path, why) in cases {
+        let mut head = json!({"type": "reply", "items": [null, null], "n": 1});
+        assert_eq!(
+            path::set_path(&mut head, &path, json!(null)).unwrap_err(),
+            why,
+            "{path}"
+        );
+    }
+}
+
+/// `take`: an object key is removed (order of the rest kept), a list slot
+/// nulled, an unresolvable path refused; `get` follows the same steps.
+#[test]
+fn take_removes_a_key_and_nulls_a_slot() {
+    use path::{get, take, Step};
+    let mut env = json!({"a": 1, "data": null, "b": {"c": [1, 2]}, "x.y": 3});
+    take(&mut env, &[Step::from("data")]).unwrap();
+    take(
+        &mut env,
+        &[Step::from("b"), Step::from("c"), Step::Index(0)],
+    )
+    .unwrap();
+    assert_eq!(get(&env, &[Step::from("x.y")]), Some(&json!(3)));
+    take(&mut env, &[Step::from("x.y")]).unwrap();
+    assert_eq!(
+        serde_json::to_string(&env).unwrap(),
+        r#"{"a":1,"b":{"c":[null,2]}}"#
+    );
+    assert!(take(&mut env, &[Step::from("nope")]).is_err());
+    assert!(take(&mut env, &[Step::from("a"), Step::from("b")]).is_err());
+    assert!(take(&mut env, &[]).is_err());
 }

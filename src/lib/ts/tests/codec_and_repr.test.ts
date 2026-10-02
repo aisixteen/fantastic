@@ -37,7 +37,7 @@ test("bytes inside a list: python's head and path, the body, and a round trip wi
   const enc = encodeFrame(env);
   assert.equal(enc.binary, true);
   assert.deepEqual(split(enc.data as ArrayBuffer), [
-    '{"type": "x", "payload": {"chunks": ["a", null]}, "_binary_path": "payload.chunks.1"}',
+    '{"type": "x", "payload": {"chunks": ["a", null]}, "_binary_path": ["payload", "chunks", 1]}',
     [9, 8],
   ]);
   const dec = decodeFrame(enc.data) as { payload: { chunks: unknown[] } };
@@ -51,22 +51,22 @@ test("bytes inside a list: python's head and path, the body, and a round trip wi
 
 test("the body is exactly the value's bytes: a bare ArrayBuffer, and a view with an offset", () => {
   const ab = new Uint8Array([5, 6, 7]).buffer;
-  assert.deepEqual(split(encodeFrame({ type: "x", b: ab }).data as ArrayBuffer), ['{"type": "x", "b": null, "_binary_path": "b"}', [5, 6, 7]]);
+  assert.deepEqual(split(encodeFrame({ type: "x", b: ab }).data as ArrayBuffer), ['{"type": "x", "b": null, "_binary_path": ["b"]}', [5, 6, 7]]);
   const view = new Uint8Array([0, 1, 2, 3]).subarray(1, 3);
   assert.deepEqual(split(encodeFrame({ type: "x", deep: [{ v: view }] }).data as ArrayBuffer), [
-    '{"type": "x", "deep": [{"v": null}], "_binary_path": "deep.0.v"}',
+    '{"type": "x", "deep": [{"v": null}], "_binary_path": ["deep", 0, "v"]}',
     [1, 2],
   ]);
 });
 
-test("decoding a binary frame: a missing key on the path, a non-object head, the empty path, a bad header", () => {
-  assert.throws(() => decodeFrame(frame({ a: {}, _binary_path: "a.b.c" })), { message: "bad _binary_path 'a.b.c': 'b'" });
-  assert.throws(() => decodeFrame(frame({ a: { b: 1 }, _binary_path: "x.b" })), { message: "bad _binary_path 'x.b': 'x'" });
+test("decoding a binary frame: a missing key on the path, a non-object head, the empty key, a bad header", () => {
+  assert.throws(() => decodeFrame(frame({ a: {}, _binary_path: ["a", "b", "c"] })), { message: "bad _binary_path ['a', 'b', 'c']: no key 'b'" });
+  assert.throws(() => decodeFrame(frame({ a: { b: 1 }, _binary_path: ["x", "b"] })), { message: "bad _binary_path ['x', 'b']: no key 'x'" });
   // a head that is not an object is returned as it is (python: no `_binary_path` to pop)
   assert.deepEqual(decodeFrame(frame("[1, 2]")), [1, 2] as unknown as Envelope);
   assert.equal(decodeFrame(frame("5")), 5 as unknown as Envelope);
-  // the empty path is the key "" (python `obj[""] = body`)
-  const e = decodeFrame(frame({ a: {}, _binary_path: "" })) as Record<string, unknown>;
+  // the step "" is the key "" (python `obj[""] = body`)
+  const e = decodeFrame(frame({ a: {}, _binary_path: [""] })) as Record<string, unknown>;
   assert.deepEqual(Object.keys(e), ["a", ""]);
   assert.deepEqual([...(e[""] as Uint8Array)], [1, 2]);
   // a header that is not strict JSON, or not UTF-8, is one Error with python's prefix

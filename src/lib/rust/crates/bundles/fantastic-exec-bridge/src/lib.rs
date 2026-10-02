@@ -58,7 +58,7 @@ use fantastic_kernel::refusal::{
     bad, missing, refusal, refusal_hint, with, MISSING_ARG, NOT_FOUND, TRANSPORT_ERROR,
     UNAUTHORIZED,
 };
-use fantastic_kernel::{AgentId, Kernel, TaskId};
+use fantastic_kernel::{body_at, AgentId, Blob, Kernel, TaskId};
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
 
@@ -429,8 +429,10 @@ impl Bundle for ExecBridgeBundle {
                           frames; a payload carrying a bytes value rides the binary channel raw: \
                           `write_stream` puts its chunk in `bytes`, `read_stream` passes `bytes: b''` \
                           and gets its chunk back raw in the reply's `bytes`) and \
-                          exposes `kernel.send(target, payload) -> reply` (raises if the relay could \
-                          not deliver), \
+                          exposes `kernel.send(target, payload, secret=None) -> reply` (raises if \
+                          the relay could not deliver; `secret` marks values the kernel must not \
+                          record — `['payload.<field>']`, `['result']` — and the reply still \
+                          carries them to you, so never print one: that is the job output), \
                           `kernel.emit(payload)`, `kernel.watch(src, cb)`, `kernel.on_message(cb)`, \
                           `kernel.self_id`. Arguments arrive as ARGV, like any command — there is \
                           no `kernel.args`. One frame caps at 16 MiB; move more than that with \
@@ -456,24 +458,27 @@ impl Bundle for ExecBridgeBundle {
         Ok(Some(reply))
     }
 
-    /// The BINARY channel: `paste_image`'s `data` IS the blob. Every other verb
-    /// takes the text path.
+    /// The BINARY channel: `paste_image` reads ITS key — the body at `data`
+    /// (python's `payload.get("data")` is the bytes). A body under any other key
+    /// is not the image: python's `data` is then absent, `bad_arg` "raw bytes".
+    /// Every other verb takes the text path.
     async fn handle_binary(
         &self,
         agent_id: &AgentId,
         header: Value,
-        blob: Vec<u8>,
+        body: Option<Blob>,
         kernel: &Arc<Kernel>,
-    ) -> Result<(Reply, Option<Vec<u8>>), BundleError> {
+    ) -> Result<(Reply, Option<Blob>), BundleError> {
         if header.get("type").and_then(Value::as_str) == Some("paste_image") {
             let meta = snapshot_meta(agent_id, kernel);
             if let Some(denied) = gate(&meta, agent_id, "paste_image") {
                 return Ok((Some(denied), None));
             }
-            return Ok((
-                Some(pty::paste_image_reply(agent_id, &header, &blob).await),
-                None,
-            ));
+            let reply = match body_at(body.as_ref(), "data") {
+                Some(data) => pty::paste_image_reply(agent_id, &header, data).await,
+                None => pty::paste_image_text(agent_id, &header),
+            };
+            return Ok((Some(reply), None));
         }
         Ok((self.handle(agent_id, &header, kernel).await?, None))
     }
@@ -635,7 +640,7 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
             "job_done": "{type:'job_done', job_id, exit_code, ok, stdout?, stderr?} — a PTY job carries no stdout/stderr split",
             "output": "{type:'output', job_id, data} — a PTY job's output chunk (UTF-8)",
         },
-        "wire": "A program speaks the kernel over the inherited fd FANTASTIC_CTRL_FD, a BIDIRECTIONAL socket (one end of a socketpair): frame is [4-byte BE length | kind | rest], both directions — kind T: a JSON envelope; kind B: [4-byte BE H | H-byte JSON header | raw body], the header's `_binary_path` naming where the body belongs (a stream chunk rides raw, never base64). To CALL another agent: write {op:'send', rid:<your id>, target, payload} and the reply COMES BACK on the SAME fd as {op:'reply', rid:<same id>, data} — the fd is not one-way. It is not inline, though: read frames in a loop and skip any whose rid isn't yours (event/inbox frames can arrive first) until you see your reply. ops: send/emit/reflect/watch/on_message. A command that never reads the fd runs exactly like any OS process.",
+        "wire": "A program speaks the kernel over the inherited fd FANTASTIC_CTRL_FD, a BIDIRECTIONAL socket (one end of a socketpair): frame is [4-byte BE length | kind | rest], both directions — kind T: a JSON envelope; kind B: [4-byte BE H | H-byte JSON header | raw body], the header's `_binary_path` naming where the body belongs as a list of steps from the frame root — a key as a string (taken literally: ['payload', 'a.b'] is the key 'a.b'), a list index as an int (a stream chunk rides raw, never base64). To CALL another agent: write {op:'send', rid:<your id>, target, payload, secret?} and the reply COMES BACK on the SAME fd as {op:'reply', rid:<same id>, data} — the fd is not one-way. It is not inline, though: read frames in a loop and skip any whose rid isn't yours (event/inbox frames can arrive first) until you see your reply. `secret` is the call's marks ['payload.<field>' | 'result' | 'result.<field>']: every record of the call shows <secret>, the reply carries the real values to you — print one and it is in the job output. ops: send/emit/reflect/watch/on_message. A command that never reads the fd runs exactly like any OS process.",
         "inbox": "Any verb NOT listed in `verbs` is MAIL for the running program, delivered to its on_message and ACKed {queued:true}. With no live job it is an error — a script that only defines something exits before its first message arrives.",
         "tasks": "Every running job IS a row in the kernel TASK TABLE: its `job_id` is that row's id (an int), listed by the universal `ps`. `cancel task_id=<job_id>` kills it — the OS subprocess is SIGKILLed by this bundle's `on_cancel` hook before the kernel aborts the task, so nothing is orphaned.",
         "authoring": "A general-purpose command runner: <type>start</type> <command>…</command> <args><item>…</item></args>, gated by the `allowed` regexes on the full command line.",

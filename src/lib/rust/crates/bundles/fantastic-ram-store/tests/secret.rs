@@ -34,7 +34,7 @@ impl Bundle for Probe {
         &self,
         id: &AgentId,
         payload: &Value,
-        _kernel: &Arc<Kernel>,
+        kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
         let verb = payload["type"].as_str().unwrap_or("");
         if matches!(verb, "boot" | "shutdown" | "reflect") {
@@ -49,6 +49,20 @@ impl Bundle for Probe {
                 Ok(Some(json!({"ok": true, "len": n})))
             }
             "issue" => Ok(Some(json!({"key": ISSUED, "note": "issued"}))),
+            // The caller's marks as the handler reads them, and as a send the
+            // handler makes itself reads them (it never inherits them).
+            "marks" => Ok(Some(json!({"paths": fantastic_kernel::current_secret()}))),
+            "relay" => {
+                let nested = kernel
+                    .send(vec![Item::new(id.clone(), json!({"type": "marks"}))])
+                    .await
+                    .remove(0)
+                    .result;
+                Ok(Some(json!({
+                    "paths": fantastic_kernel::current_secret(),
+                    "nested": nested["paths"],
+                })))
+            }
             "fail" => Err(format!("rejected key {}", payload["key"].as_str().unwrap_or("")).into()),
             other => Ok(Some(json!({"error": format!("unknown verb '{other}'")}))),
         }
@@ -59,9 +73,10 @@ impl Bundle for Probe {
         &self,
         id: &AgentId,
         header: Value,
-        blob: Vec<u8>,
+        body: Option<fantastic_kernel::Blob>,
         kernel: &Arc<Kernel>,
-    ) -> Result<(Reply, Option<Vec<u8>>), BundleError> {
+    ) -> Result<(Reply, Option<fantastic_kernel::Blob>), BundleError> {
+        let blob: Vec<u8> = body.map(|b| b.bytes).unwrap_or_default();
         if header["type"] != json!("store") {
             return Ok((self.handle(id, &header, kernel).await?, None));
         }
@@ -243,7 +258,7 @@ async fn a_watcher_mirror_shows_the_placeholder() {
         !mirrored.iter().any(|m| mentions(&m.payload, KEY)
             || m.body
                 .as_ref()
-                .is_some_and(|(_, b)| String::from_utf8_lossy(b).contains(KEY))),
+                .is_some_and(|b| String::from_utf8_lossy(&b.bytes).contains(KEY))),
         "{mirrored:?}"
     );
 }
@@ -420,7 +435,7 @@ async fn store_secret(k: &Arc<Kernel>, a: &AgentId, secret: Value) -> Outcome {
     send(
         k,
         Item::new(a.clone(), json!({"type": "store", "label": KEY}))
-            .with_binary(KEY.as_bytes().to_vec())
+            .with_binary_key("bytes", KEY.as_bytes().to_vec())
             .with_secret(secret),
     )
     .await
@@ -483,7 +498,7 @@ async fn a_mark_on_another_field_keeps_the_body_riding() {
     let out = send(
         &k,
         Item::new(a.clone(), json!({"type": "store", "label": KEY}))
-            .with_binary(b"body".to_vec())
+            .with_binary_key("bytes", b"body".to_vec())
             .with_secret(json!(["payload.label"])),
     )
     .await;
@@ -499,6 +514,30 @@ async fn a_mark_on_another_field_keeps_the_body_riding() {
     let mirrored: Vec<_> = std::iter::from_fn(|| rx.try_recv()).collect();
     assert!(mirrored
         .iter()
-        .any(|m| m.body.as_ref().is_some_and(|(_, b)| b == b"body")));
+        .any(|m| m.body.as_ref().is_some_and(|b| b.bytes == b"body")));
     assert!(!mirrored.iter().any(|m| mentions(&m.payload, KEY)));
+}
+
+/// `current_secret()` — the paths the caller marked on the item that started
+/// THIS dispatch, empty when none; a send the handler makes itself starts with
+/// none (python `_current_secret`, set per dispatch task).
+#[tokio::test]
+async fn the_handler_reads_its_callers_marks_and_its_own_sends_inherit_none() {
+    let (k, _got) = seeded();
+    let a = mk(&k).await;
+    let plain = send(&k, Item::new(a.clone(), json!({"type": "marks"}))).await;
+    assert_eq!(plain.result, json!({"paths": []}));
+    let out = send(
+        &k,
+        Item::new(a.clone(), json!({"type": "relay", "key": KEY}))
+            .with_secret(json!(["payload.key", "result.paths"])),
+    )
+    .await;
+    assert_eq!(out.status.as_str(), "completed", "{out:?}");
+    assert_eq!(
+        out.result,
+        json!({"paths": ["payload.key", "result.paths"], "nested": []})
+    );
+    // outside any dispatch there are none
+    assert!(fantastic_kernel::current_secret().is_empty());
 }

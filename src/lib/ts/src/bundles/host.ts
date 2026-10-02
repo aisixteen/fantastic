@@ -1,5 +1,6 @@
 import type { Kernel } from "../kernel/kernel.ts";
 import type { Json, Payload } from "../kernel/json.ts";
+import type { Item } from "../kernel/outcome.ts";
 
 // The link a DOM view-agent uses to talk to the HOST kernel over the bridge.
 // A thin, typed facade over Kernel — mirrors the old transport.js
@@ -34,17 +35,23 @@ export class Host {
    *  `send` is array-only, so a single call is a one-element batch whose one
    *  outcome we unwrap here. The OUTCOME is not discarded lightly: a refusal
    *  arrives in `result` like any other reply, which is exactly what the
-   *  iframe/host callers already branch on. */
-  async call(target: string, payload: Payload): Promise<Json> {
-    return (await this.kernel.send([{ target, payload }]))[0]!.result;
+   *  iframe/host callers already branch on.
+   *
+   *  `secret` — dotted paths (`payload.<field…>` / `result[.<field…>]`) — is the
+   *  item's `secret`: this kernel's records of the call show `<secret>`, and a
+   *  host-bound call carries the marks on its frame so the host masks too. */
+  async call(target: string, payload: Payload, secret?: string[]): Promise<Json> {
+    const item: Item = { target, payload };
+    if (secret !== undefined) item.secret = secret;
+    return (await this.kernel.send([item]))[0]!.result;
   }
 
   /** Call the HOST ROOT (or any host id) over the bridge, bypassing local
    *  resolution — pass `"kernel"` and the host resolves it to its own root
    *  (`kernel_state`/`core`). Used to read the host bundle catalog + create host
-   *  peers without naming a host-specific id. */
-  callHost(target: string, payload: Payload): Promise<Json> {
-    return this.kernel.callHost(target, payload);
+   *  peers without naming a host-specific id. `secret` rides the call frame. */
+  callHost(target: string, payload: Payload, secret?: string[]): Promise<Json> {
+    return this.kernel.callHost(target, payload, secret);
   }
 
   /** Fire-and-forget emit to a host agent's inbox (e.g. reload_html). */
@@ -52,9 +59,10 @@ export class Host {
     this.kernel.emitRemote(target, payload);
   }
 
-  /** Verb call carrying a binary blob (e.g. paste_image Uint8Array). */
-  callBinary(target: string, payload: Record<string, unknown>): Promise<Json> {
-    return this.kernel.forwardBinary(target, payload);
+  /** Verb call carrying a binary blob (e.g. paste_image Uint8Array); `secret`
+   *  rides the call frame. */
+  callBinary(target: string, payload: Record<string, unknown>, secret?: string[]): Promise<Json> {
+    return this.kernel.forwardBinary(target, payload, secret);
   }
 
   /** Watch `src` and call `handler` for each `type` event on its inbox.

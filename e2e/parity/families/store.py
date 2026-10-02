@@ -24,9 +24,10 @@ import threading
 import time
 from pathlib import Path
 
-from families import BASE, MEMORY, OPEN, ai, call, disk_walk, page_walk, quiesce, save_kernel_log
+from families import (BASE, MEMORY, OPEN, VLLM, ai, call, disk_walk, page_walk, quiesce,
+                      save_kernel_log, vllm)
 from spec import CTX_RESERVE, CTX_WINDOW
-from stubs.anthropic_sse import AnthropicStub, Handler as AnthropicHandler
+from stubs.openai_chat import Handler as OpenAIHandler, OpenAIChatStub
 
 NAME = "store"
 
@@ -104,16 +105,14 @@ def roster(stub_url: str, cb: dict, interp: str) -> list:
         ("sload", "static_loader.tools", dict(root=".")),
         ("cli", "cli.tools", {}),
         ("olla", "ollama_backend.tools", ai(model="m", endpoint="http://127.0.0.1:9")),
-        ("llama", "llamacpp_backend.tools", ai(model="m", endpoint="http://127.0.0.1:9")),
-        ("nim", "nvidia_nim_backend.tools", ai(model="m", endpoint="http://127.0.0.1:9")),
         ("absent", "absent_bundle.tools", {}),
         ("dispenser", "dispenser_probe.tools", {}),
         ("plant", "plant_probe.tools", {}),
         ("purchase", "purchase_probe.tools", {}),
         ("user", "user_probe.tools", {}),
         ("oracle", "oracle_probe.tools", dict(lines=["the answer is 42"])),
-        ("ai", "anthropic_backend.tools",
-         ai(model="stub-model", endpoint=stub_url, sampling={"x": 1, "y": None},
+        ("ai", VLLM,
+         ai(**vllm(stub_url), sampling={"x": 1, "y": None},
               context_async=True, context_window=CTX_WINDOW, output_reserve=CTX_RESERVE,
               can_call={"readings": "*", "totals": "*", "runner": "*",
                         "kernel_store": "*", "kernel": "*"})),
@@ -229,6 +228,48 @@ def _scrub(reply):
     return out
 
 
+def store_census(k):
+    """`{rows, flush}` of the memory store in ONE call: every row it holds, any
+    owner, and how many are the kernel's `flush` bookkeeping rows. `dump` is one
+    snapshot of the whole store, so the two numbers are of the same instant —
+    the same thing the store's `reflect` counts in `rows`. `None` when the dump
+    did not answer with tables."""
+    r = call(k, MEMORY, {"type": "dump"})
+    rows = (r.get("tables") or {}).get("rows") if isinstance(r, dict) else None
+    if not isinstance(rows, list):
+        return None, r
+    flush = sum(1 for e in rows if isinstance(e, dict) and isinstance(e.get("row"), dict)
+                and e["row"].get("kind") == "flush")
+    return {"rows": len(rows), "flush": flush}, None
+
+
+def memory_reflect(ctx, k) -> None:
+    """rules.yaml N24 — the memory store's reflect, bracketed by two store
+    censuses.
+
+    Its `rows` counts the kernel's `flush` bookkeeping rows too, and how many
+    flushes a run made is the flusher's debounce against the runtime's speed
+    (measured: python 334, rust/swift 333). The kernel has no verb that settles
+    the flusher, so the count cannot be made still without a wait; instead the
+    flush rows are COUNTED at the same instant. A flush appends a batch, so the
+    census whose `rows` equals the reflect's is the store the reflect saw — a
+    flush landing on either side of the reflect is told apart, not guessed; when
+    neither census matches, N24 does not fire and the note says why. The
+    censuses ride under `harness` (N14 drops it); `diff.py` N24 reads them first.
+    """
+    before, err_b = store_census(k)
+    reply = call(k, MEMORY, {"type": "reflect", "readme": True, "tree": "none"})
+    after, err_a = store_census(k)
+    for err in (err_b, err_a):
+        if err is not None:
+            ctx.rec.note(kind="n24_store_census_failed", reply=err)
+    rows = reply.get("rows") if isinstance(reply, dict) else None
+    if not any(isinstance(c, dict) and c["rows"] == rows for c in (before, after)):
+        ctx.rec.note(kind="n24_reflect_rows_matches_no_census", rows=rows,
+                     before=before, after=after)
+    ctx.rec.json(f"s1/readme_true/{MEMORY}", reply, harness={"flush_rows": [before, after]})
+
+
 def ai_send(ctx, k, stub, case: str, text: str, rel: str) -> None:
     holder: dict = {}
 
@@ -258,12 +299,12 @@ def run(ctx) -> None:
             mid = NEEDLE if i == 150 else "0123456789abcdefghijklmnopqrstuvwxyz" * 13
             fh.write(f"line {i:04d} {mid}\n")
 
-    stub = AnthropicStub(rec, "stub", ports.take("stub"))
-    stub.start(AnthropicHandler)
+    stub = OpenAIChatStub(rec, "stub", ports.take("stub"))
+    stub.start(OpenAIHandler)
     stub.set_cases(CASES)
 
     cb = {"rest": "*", "web": "*", "ws": "*", "ai": "*"}
-    agents = roster(stub.url(), cb, sys.executable)
+    agents = roster(stub.base_url(), cb, sys.executable)
     reach = ["store"] + [a[0] for a in agents] + ["web", "rest", "ws", "ghost"]
     k = ctx.boot(reach=reach, port=ports.take("main"))
     try:
@@ -296,6 +337,9 @@ def run(ctx) -> None:
             raise RuntimeError(f"list_agents returned no ids: {la!r}")
         rec.json("s1/agent_ids_seen", all_ids)
         for aid in all_ids:
+            if aid == MEMORY:
+                memory_reflect(ctx, k)
+                continue
             rec.json(f"s1/readme_true/{aid}",
                      call(k, aid, {"type": "reflect", "readme": True, "tree": "none"}))
         rec.json("s1/root_reflect_persistence", call(k, k.root_id, {"type": "reflect", "tree": "none"}))

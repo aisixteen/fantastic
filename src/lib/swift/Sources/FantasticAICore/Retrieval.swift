@@ -169,7 +169,7 @@ extension AIBackend {
             }
         }
         let (kept, cut) = AIContext.fitReply(
-            matches, capTokens: AIContext.inlineCap(agent), limit: limit)
+            matches, capTokens: AIContext.inlineCap(agent, modelWindow: config.modelWindow), limit: limit)
         let more = cut || total > kept.count
         var out: OrderedDictionary<String, JSON> = [
             "matches": .array(kept),

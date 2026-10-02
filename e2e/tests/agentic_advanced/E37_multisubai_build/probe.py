@@ -72,6 +72,13 @@ def solver_instructions(k: int) -> str:
     )
 
 
+#: What the creator copies from `brain`'s record into each solver: every field the
+#: PLUG put there (handler, model, endpoint, the backend's required fields, the
+#: key's `credentials` when the plug has one) plus the conversation store and the
+#: window. Read off the plug, never a hand-kept list: a list written for one
+#: backend left vllm solvers without `kv_slots`/`kv_overflow` (measured on E37).
+COPY = [*P.BK.record(), "memory_store_id", "context_window"]
+
 TASK = (
     "You are the CREATOR here — the mind building the structure. I am going to walk "
     "away, but I am an AGENT here too: if you genuinely cannot proceed without a "
@@ -89,8 +96,9 @@ TASK = (
     f"STEP 1 — CREATE THREE SOLVERS as YOUR OWN CHILDREN, ids `{SOLVERS[0]}`, "
     f"`{SOLVERS[1]}`, `{SOLVERS[2]}`, in ONE batch of three `create_agent` calls to "
     "`kernel`. Send `kernel` `<type>list_agents</type>` once and copy from the "
-    "`brain` record these fields verbatim into each solver: `handler_module`, "
-    "`model`, `endpoint`, `max_tokens`, `memory_store_id`, `context_window`. Set "
+    "`brain` record these fields verbatim into each solver: "
+    + ", ".join(f"`{f}`" for f in COPY)
+    + ". Set "
     "`parent_id` to YOUR id. Set `description` to what the solver is for "
     f"(solver k holds the ledger of `oracle_k`). Give each solver these grant maps "
     "(a map is a tag whose children are keyed by agent id or a relative token):\n"

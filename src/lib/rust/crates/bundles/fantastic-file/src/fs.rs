@@ -348,20 +348,71 @@ pub fn write_chunk(
 /// commits through a sibling `.tmp` + rename; a non-atomic write is the
 /// in-place one a streaming sink wants.
 ///
+/// `mode` (atomic only) creates the file with exactly those permission bits — a
+/// 0600 secret file is never readable by others, not even between create and
+/// chmod: the `.tmp` is created `O_EXCL` with the mode, then `fchmod`ed to it
+/// (the umask may have narrowed it; never widened).
+///
 /// # Errors
-/// python's `OSError` text, or the clamp's `ValueError` text.
-pub fn write_bytes(root: &Path, path: &str, data: &[u8], atomic: bool) -> Result<(), String> {
+/// python's `OSError` text, the clamp's `ValueError` text, or
+/// `fs: `mode` needs an atomic write` for a mode on a non-atomic write.
+pub fn write_bytes(
+    root: &Path,
+    path: &str,
+    data: &[u8],
+    atomic: bool,
+    mode: Option<u32>,
+) -> Result<(), String> {
     let target = resolve(root, path)?;
     mkdir_parents(&target)?;
     if atomic {
         let mut name = target.file_name().unwrap_or_default().to_os_string();
         name.push(".tmp");
         let tmp = target.with_file_name(name);
-        std::fs::write(&tmp, data).map_err(|e| io_error_str(&e, &tmp))?;
+        match mode {
+            None => std::fs::write(&tmp, data).map_err(|e| io_error_str(&e, &tmp))?,
+            Some(mode) => write_new_with_mode(&tmp, data, mode)?,
+        }
         std::fs::rename(&tmp, &target).map_err(|e| io_error_str(&e, &target))
     } else {
+        if mode.is_some() {
+            return Err("fs: `mode` needs an atomic write".to_string());
+        }
         std::fs::write(&target, data).map_err(|e| io_error_str(&e, &target))
     }
+}
+
+/// python's `tmp.unlink(missing_ok=True)` → `os.open(tmp, O_WRONLY|O_CREAT|O_EXCL,
+/// mode)` → `os.fchmod(fd, mode)` → `os.write(fd, data)`.
+fn write_new_with_mode(tmp: &Path, data: &[u8], mode: u32) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    match std::fs::remove_file(tmp) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            return Err(io_error_str(&e, tmp));
+        }
+        _ => {}
+    }
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(mode)
+        .open(tmp)
+        .map_err(|e| io_error_str(&e, tmp))?;
+    f.set_permissions(std::fs::Permissions::from_mode(mode))
+        .map_err(|e| io_error_str(&e, tmp))?;
+    f.write_all(data).map_err(|e| io_error_str(&e, tmp))
+}
+
+/// python `fs.lstat` — the entry's OWN metadata (a symlink is not followed), for
+/// a caller that must check what a path IS (type, owner, permission bits) before
+/// trusting it.
+///
+/// # Errors
+/// The clamp's text, or python's `OSError` text.
+pub fn lstat(root: &Path, path: &str) -> Result<std::fs::Metadata, String> {
+    let leaf = lexical_leaf(root, path)?;
+    std::fs::symlink_metadata(&leaf).map_err(|e| io_error_str(&e, &leaf))
 }
 
 /// python `fs.list_dir` — the dir's entries as resolved paths, sorted by name

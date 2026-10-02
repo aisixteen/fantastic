@@ -20,7 +20,7 @@ CANVAS="$REPO/src/tui/web/canvas"
 sh "$CANVAS/scripts/pack.sh" >/dev/null
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/ft-e2e-XXXXXX")"
-# so the daemon's cwd-relative _load_dotenv finds ANTHROPIC_API_KEY
+# so the daemon's cwd-relative _load_dotenv finds VLLM_API_KEY (read by a `creds` store)
 [ -f "$REPO/.env" ] && cp "$REPO/.env" "$TMP/.env"
 
 # the canvas page: the packed bundle beside a one-tag page, in the workdir

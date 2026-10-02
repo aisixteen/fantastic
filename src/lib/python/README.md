@@ -209,6 +209,8 @@ curl http://localhost:8888/<id>/file/<path>            # octet proxy → the age
 # WS (when web_ws is mounted)
 # open ws://host/<id>/ws and send
 #   {"type":"call","target":"<id>","payload":{...},"id":"<corr>"}
+# mark secret values on the call: add "secret":["payload.<field>"|"result[.<field>]"]
+# (REST: the X-Fantastic-Secret header, a JSON array) — every record shows <secret>
 
 # REST (when web_rest is mounted; <rest_id> is the agent's id)
 curl -X POST -H 'content-type: application/json' \
@@ -298,10 +300,8 @@ uv run pytest -n auto
     ├── memory/ram_store/                     # the MEMORY STORE in RAM — every message (AI conversations, the kernel's execution rows), grants, inject/dump (ram_store.tools)
     ├── ai/ai_core/                           # shared AI agent state (queue/FIFO lock/menu cache, prompt assembly, the ONE-pass _run, `<call>` parsing, verb bodies); every AI backend binds to it
     ├── ai/ollama/ollama_backend              # local LLM (ollama) — thin binding over ai_core
-    ├── ai/nvidia/nvidia_nim_backend          # NVIDIA NIM (OpenAI-compatible) — thin binding over ai_core; key from NVIDIA_API_KEY, rate-limit retry
-    ├── ai/anthropic/anthropic_backend        # Anthropic LLM (anthropic_backend.tools) — thin binding over ai_core
-    ├── ai/llamacpp/llamacpp_backend          # local llama-server (OpenAI surface) — thin binding over ai_core
     ├── ai/responses/responses_backend        # OpenAI Responses-API LLM (responses_backend.tools) — thin binding over ai_core
+    ├── ai/vllm/vllm_backend                  # vLLM server, OpenAI chat wire, direct (vllm_backend.tools) — thin binding over ai_core
     ├── io/io_bridge/                         # the IO base — a shared LIBRARY, not an agent (channel model, rule registries, read loop/verbs/lifecycle, binary-frame codec, MemoryTransport); bridges + web legs derive from it; IO legs sealed by default
     ├── io/web_ws/, io/web_rest/              # the web call legs (WS / REST) — io_bridge inbound derivations, sealed by default
     ├── io/ws_bridge/                     # cross-kernel WS bridge (asymmetric) — ws transport

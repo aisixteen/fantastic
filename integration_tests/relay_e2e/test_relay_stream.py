@@ -13,8 +13,8 @@ parametrized over every host runtime. Done-when: bytes written through the relay
 land verbatim on B's disk AND read back byte-identical over the same chain.
 
 The codec is reimplemented inline (≈20 lines) on purpose: this test asserts the
-WIRE contract `[4B BE len | JSON header (+_binary_path) | raw body]`, not a
-library import.
+WIRE contract `[4B BE len | JSON header (+_binary_path, a list of steps) | raw
+body]`, not a library import.
 """
 
 from __future__ import annotations
@@ -49,23 +49,24 @@ PAYLOAD = bytes([0x00, 0xFF, 0xCA, 0xFE, 0xBA, 0xBE, 0x10, 0x80]) * 1024  # 8 Ki
 
 def _encode_frame(envelope: dict[str, Any]) -> bytes:
     """`[4B BE len | header | body]` — the single bytes value nulled in the
-    header, its dotted path in `_binary_path`, raw bytes trailing."""
+    header, its path in `_binary_path` (a list of steps: a key as a string, taken
+    literally), raw bytes trailing."""
 
-    def find(obj: Any, prefix: str = "") -> tuple[str, bytes] | None:
+    def find(obj: Any, path: list) -> tuple[list, bytes] | None:
         if isinstance(obj, (bytes, bytearray)):
-            return (prefix, bytes(obj))
+            return (path, bytes(obj))
         if isinstance(obj, dict):
             for k, v in obj.items():
-                r = find(v, f"{prefix}.{k}" if prefix else k)
+                r = find(v, [*path, k])
                 if r:
                     return r
         return None
 
-    path, body = find(envelope) or (None, b"")
+    path, body = find(envelope, []) or (None, b"")
     assert path, "test frame must carry bytes"
 
-    def nulled(obj: Any, at: str) -> Any:
-        head, _, rest = at.partition(".")
+    def nulled(obj: Any, at: list) -> Any:
+        head, rest = at[0], at[1:]
         return {
             k: (nulled(v, rest) if k == head and rest else (None if k == head else v))
             for k, v in obj.items()
@@ -85,10 +86,9 @@ def _decode_frame(wire: bytes) -> dict[str, Any]:
     path = header.pop("_binary_path", None)
     if path:
         obj = header
-        parts = path.split(".")
-        for p in parts[:-1]:
-            obj = obj[p]
-        obj[parts[-1]] = body
+        for step in path[:-1]:
+            obj = obj[step]
+        obj[path[-1]] = body
     return header
 
 

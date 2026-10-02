@@ -42,6 +42,7 @@ from _testkit import boot_root
 from _testkit_relay import _pair as relay_pair
 from io_bridge import MemoryTransport
 from relay_connector import tools as rc
+from relay_connector._relay import secret_sealed
 from ws_bridge import tools as wb
 from web_rest.tools import _make_post_endpoint
 
@@ -66,6 +67,27 @@ def _subst_root(v):
 
 
 CASES = [_subst_root(c) for c in _DOC["cases"]]
+
+# A case may carry `secret` — the batch item's marks, beside `payload`. Each leg
+# puts it where ITS wire carries it: the item (in-proc), the `X-Fantastic-Secret`
+# header (rest), the guest frame's own `secret` (exec guest, through the
+# connector's `kernel.send(target, payload, secret=…)`), the outer `forward` call
+# re-rooted one level up (ws bridge, relay). A wire that does not carry them
+# skips those cases BY NAME, with the reason:
+NO_SECRET_WIRE = {
+    "relay-tunnel": (
+        "SEALED (owner, 2026-10-02): relayd records the frames it routes unmasked, "
+        "so a relay leg refuses every call carrying secret marks — `_leg_relay` "
+        "asserts that refusal instead"
+    ),
+}
+
+
+def _outer_secret(paths: list[str]) -> list[str]:
+    """A case's marks on the OUTER `forward` call: the inverse of the bridge's
+    re-rooting (`payload.<f>` → `payload.payload.<f>`; `result[.<f>]` as is)."""
+    return [p if p.split(".")[0] == "result" else f"payload.{p}" for p in paths]
+
 
 # ─── the probe bundle: deterministic, storeless ──────────────────
 
@@ -325,30 +347,34 @@ async def wired(tmp_path, monkeypatch):
 async def _leg_inproc(ka, kb, bridge_a, relay_a):
     out = []
     for c in CASES:
-        o = (await kb.send([{"target": c["target"], "payload": c["payload"]}]))[0]
+        item = {"target": c["target"], "payload": c["payload"]}
+        if "secret" in c:
+            item["secret"] = c["secret"]
+        o = (await kb.send([item]))[0]
         out.append(_norm(o["result"]))
     return out
 
 
-async def _leg_ws(ka, kb, bridge_a, relay_a):
+async def _forward_leg(ka, leg_id):
     out = []
     for c in CASES:
-        r = (
-            await ka.send(
-                [
-                    {
-                        "target": bridge_a,
-                        "payload": {
-                            "type": "forward",
-                            "target": c["target"],
-                            "payload": c["payload"],
-                        },
-                    }
-                ]
-            )
-        )[0]["result"]
+        item = {
+            "target": leg_id,
+            "payload": {
+                "type": "forward",
+                "target": c["target"],
+                "payload": c["payload"],
+            },
+        }
+        if "secret" in c:
+            item["secret"] = _outer_secret(c["secret"])
+        r = (await ka.send([item]))[0]["result"]
         out.append(_norm(r))
     return out
+
+
+async def _leg_ws(ka, kb, bridge_a, relay_a):
+    return await _forward_leg(ka, bridge_a)
 
 
 async def _leg_rest(ka, kb, bridge_a, relay_a):
@@ -365,15 +391,23 @@ async def _leg_rest(ka, kb, bridge_a, relay_a):
         transport=httpx.ASGITransport(app=app), base_url="http://c21"
     ) as client:
         for c in CASES:
-            r = await client.post(f"/c21_rest/{c['target']}", json=c["payload"])
+            headers = (
+                {"X-Fantastic-Secret": json.dumps(c["secret"])} if "secret" in c else {}
+            )
+            r = await client.post(
+                f"/c21_rest/{c['target']}", json=c["payload"], headers=headers
+            )
             out.append(_norm(r.json()))
     return out
 
 
 async def _leg_exec(ka, kb, bridge_a, relay_a):
+    def mark(c):
+        return f", secret={c['secret']!r}" if "secret" in c else ""
+
     lines = "\n".join(
-        f"print(__import__('json').dumps("
-        f"kernel.send({c['target']!r}, {c['payload']!r}), default=str), flush=True)"
+        f"print(__import__('json').dumps(kernel.send("
+        f"{c['target']!r}, {c['payload']!r}{mark(c)}), default=str), flush=True)"
         for c in CASES
     )
     r = (
@@ -409,23 +443,11 @@ async def _leg_exec(ka, kb, bridge_a, relay_a):
 
 
 async def _leg_relay(ka, kb, bridge_a, relay_a):
-    out = []
-    for c in CASES:
-        r = (
-            await ka.send(
-                [
-                    {
-                        "target": relay_a,
-                        "payload": {
-                            "type": "forward",
-                            "target": c["target"],
-                            "payload": c["payload"],
-                        },
-                    }
-                ]
-            )
-        )[0]["result"]
-        out.append(_norm(r))
+    out = await _forward_leg(ka, relay_a)
+    for i, c in enumerate(CASES):
+        if "secret" in c:  # NO_SECRET_WIRE: the seal's refusal, exactly
+            assert out[i] == _norm(secret_sealed()), (c["name"], out[i])
+            out[i] = None
     return out
 
 
@@ -446,9 +468,10 @@ async def test_every_transport_gives_the_same_reply(wired):
     ref_name = "in-proc"
     for i, case in enumerate(CASES):
         ref = replies[ref_name][i]
+        legs = [n for n in LEGS if not ("secret" in case and n in NO_SECRET_WIRE)]
         # per-case expectations — a wrong answer fails even if every transport
         # agrees on it
-        for name in LEGS:
+        for name in legs:
             got = replies[name][i]
             for key in case.get("expect_keys", []):
                 if not (isinstance(got, dict) and key in got):
@@ -464,7 +487,7 @@ async def test_every_transport_gives_the_same_reply(wired):
         # the origin-scoped ledger, is checked for shape on every leg instead)
         if case.get("pairwise") is False:
             continue
-        for name in LEGS:
+        for name in legs:
             if name == ref_name:
                 continue
             got = replies[name][i]

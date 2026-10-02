@@ -152,17 +152,17 @@ fn the_shown_outcome_masks_result_paths_and_scrubs_payload_and_result_values() {
 fn a_marked_request_body_is_hidden_and_scrubbed_as_its_bytes_repr() {
     let body: &[u8] = b"sk-'x\n\xff";
     let it = Item::new("v", json!({"type": "w"}))
-        .with_binary(body.to_vec())
+        .with_binary_key("bytes", body.to_vec())
         .with_secret(json!(["payload.bytes"]));
     let s = check(&it).unwrap().unwrap();
     // python `str(b"sk-'x\n\xff")`
     assert_eq!(s.values, vec!["b\"sk-'x\\n\\xff\"".to_string()]);
-    let shown = shown_payload(&it.payload, Some(body), &s);
+    let shown = shown_payload(&it.payload, it.binary.as_ref(), &s);
     assert!(shown.body_hidden);
     assert_eq!(shown.payload, json!({"type": "w", "bytes": "<secret>"}));
     // nothing lies below the body
     let deeper = Item::new("v", json!({"type": "w"}))
-        .with_binary(body.to_vec())
+        .with_binary_key("bytes", body.to_vec())
         .with_secret(json!(["payload.bytes.x"]));
     assert!(check(&deeper).is_err());
 }
@@ -175,7 +175,7 @@ fn a_marked_whole_result_drops_the_reply_body() {
         Status::Completed,
         json!({"bytes": null, "n": "q"}),
     )
-    .with_body(Some(b"abc".to_vec()));
+    .with_body(Some(crate::outcome::Blob::key("bytes", b"abc".to_vec())));
     let shown = shown_outcome(&out, &s);
     assert_eq!(shown.result, json!("<secret>"));
     assert!(shown.body.is_none());

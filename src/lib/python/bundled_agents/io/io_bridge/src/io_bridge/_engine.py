@@ -28,11 +28,11 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
 from io_bridge._transport import ConnectionClosed, _BaseTransport
-from io_bridge._base import Action, Decision, EgressRule, IngressRule, parse_spec
+from io_bridge._base import Action, Decision, EgressRule, IngressRule, describe
 from io_bridge.channel import CredentialExtractor, EnvelopeExtractor
 from io_bridge.ingress_rules import DenyInbound, resolve_ingress
 from io_bridge.egress_rules import Silent, resolve_egress
-from kernel import current_origin, remote_caller_context
+from kernel import current_origin, current_secret, remote_caller_context
 from kernel._refusal import NOT_CONNECTED, UNAUTHORIZED, refusal
 
 DEFAULT_FORWARD_TIMEOUT = 30.0
@@ -79,37 +79,6 @@ def stamp_egress(rule: EgressRule, frame: dict) -> dict:
 # config (the engine wraps it into a `{"error": ...}` boot reply). May set
 # `st.cleanup` for transport-specific teardown.
 BuildTransport = Callable[[str, dict, Any, "_BridgeState"], Awaitable[_BaseTransport]]
-
-
-def _rule_name(spec, default: str) -> str:
-    """The rule TYPE name for reflect — never surfaces the rule's config (env var
-    names, etc.). Absent spec ⇒ the caller's `default` (ingress: `deny_inbound`, the
-    SEAL — IO legs seal by default; egress: `silent`)."""
-    name, _ = parse_spec(spec)
-    return name or default
-
-
-def _scoped(name: str, suffix: str, was_scoped: bool) -> str:
-    """Report the SCOPED rule name whichever field it came from. `auth` carries a bare
-    stem; each manifold appends its own suffix, so `reflect` never shows a name that
-    would not resolve if written straight back into `ingress_rule`/`egress_rule`."""
-    if was_scoped or name.endswith(suffix):
-        return name
-    return (
-        "silent_egress"
-        if suffix == "_egress" and name in ("allow_all", "deny")
-        else name + suffix
-    )
-
-
-def _ingress_name(rec: dict) -> str:
-    spec = rec["ingress_rule"] if "ingress_rule" in rec else rec.get("auth")
-    return _scoped(_rule_name(spec, "deny_ingress"), "_ingress", "ingress_rule" in rec)
-
-
-def _egress_name(rec: dict) -> str:
-    spec = rec["egress_rule"] if "egress_rule" in rec else rec.get("auth")
-    return _scoped(_rule_name(spec, "silent_egress"), "_egress", "egress_rule" in rec)
 
 
 @dataclass
@@ -209,6 +178,28 @@ def _check_caller(rec: dict, caller: Any) -> dict | None:
     return None
 
 
+def forwarded_secret(paths) -> list[str]:
+    """The `forward` call's own `secret` marks, RE-ROOTED at the item the far
+    kernel dispatches — so both kernels mask the same values.
+
+    The local item is `{target: <bridge>, payload: {type: forward, target, payload:
+    <inner>}}`; the far item is `{target, payload: <inner>}`. A mark under the
+    inner payload drops ONE `payload.` (`payload.payload.<f…>` → `payload.<f…>`,
+    and `payload.payload` → `payload`, which the far kernel refuses like any bad
+    mark); a `result[.<f…>]` mark is the same reply on both kernels, carried as
+    is. A mark on the forward verb's own fields (`payload.target`,
+    `payload.timeout`) names nothing on the far item and stays on this kernel's
+    record only. Validation is the FAR kernel's own `secret` check, before it
+    dispatches anything."""
+    out: list[str] = []
+    for p in paths:
+        if p == "result" or p.startswith("result."):
+            out.append(p)
+        elif p == "payload.payload" or p.startswith("payload.payload."):
+            out.append(p[len("payload.") :])
+    return out
+
+
 def validate_meta(meta: dict, record: dict) -> str | None:
     """Write-time check of `peer_guid`: one kernel guid (a non-empty string, no
     `|`). Re-exported by every bridge bundle. (This kernel's OWN guid is refused
@@ -267,6 +258,11 @@ async def _serve_inbound_call(
         fid = frame.get("id")
         if isinstance(fid, str) and fid:
             item["id"] = fid
+        # SECRET MARKS cross the bridge verbatim (`kernel/_secret`): this kernel
+        # records the call as shown — its call/settle rows, ledger, state stream —
+        # and its own check refuses a malformed mark before anything dispatches.
+        if "secret" in frame:
+            item["secret"] = frame["secret"]
         caller = frame.get("caller")
         rec = kernel.get(kernel.id) or {}
         bad_caller = _check_caller(rec, caller)
@@ -293,8 +289,9 @@ async def _serve_inbound_call(
 async def _read_loop(id: str, kernel: Any) -> None:
     """Long-lived consumer of the transport. Frame shapes:
 
-      - inbound `call` — `{type:'call', id, target, payload}`: dispatch via
-        `kernel.send([{"target": target, "payload": payload}])`, reply `{type:'reply', id, data}`. (For a
+      - inbound `call` — `{type:'call', id, target, payload, caller, secret?}`:
+        dispatch via `kernel.send([{"target", "payload", "id", "secret"}])` (the
+        frame's `secret` marks carried verbatim), reply `{type:'reply', id, data}`. (For a
         pure-client WS bridge this never fires — its peer is `web_ws`; for paired
         transports — MemoryTransport tests, the relay — it carries the callee role.)
       - inbound `reply` — resolve the pending Future for `id`.
@@ -465,7 +462,7 @@ async def boot(
 
 
 async def _forward(id, payload, kernel):
-    """args: target:str (req — id on the REMOTE kernel) + payload:dict (req — the call to run there; payload is ITSELF a verb frame and MUST carry its own "type") + timeout:float? (default 30s). Example: {"type":"forward","target":"src","payload":{"type":"read_stream","path":"data.bin","offset":0}}. Ships a raw `{type:'call', id, target, payload}` frame over the transport, awaits the matching reply, returns the unwrapped data. Local→local stays direct kernel.send (this verb is only for cross-kernel). Multi-hop loop detection is the caller's responsibility — the bridge ships whatever it's given."""
+    """args: target:str (req — id on the REMOTE kernel) + payload:dict (req — the call to run there; payload is ITSELF a verb frame and MUST carry its own "type") + timeout:float? (default 30s). Example: {"type":"forward","target":"src","payload":{"type":"read_stream","path":"data.bin","offset":0}}. Ships a raw `{type:'call', id, target, payload, caller, secret?}` frame over the transport, awaits the matching reply, returns the unwrapped data. SECRET values: mark them on YOUR call to this verb — `payload.payload.<field>` / `result[.<field>]` — and they ride as `payload.<field>` / `result[.<field>]`, so both kernels record `<secret>`. Local→local stays direct kernel.send (this verb is only for cross-kernel). Multi-hop loop detection is the caller's responsibility — the bridge ships whatever it's given."""
     target = payload.get("target")
     inner = payload.get("payload")
     if not target or not isinstance(inner, dict):
@@ -488,6 +485,11 @@ async def _forward(id, payload, kernel):
     guid = _local_guid(kernel)
     if guid:
         frame["caller"] = f"{guid}|{current_origin() or 'kernel'}"
+    # The caller's `secret` marks on THIS call, re-rooted at the forwarded item,
+    # so the far kernel masks its records of the call as this one does.
+    secret = forwarded_secret(current_secret())
+    if secret:
+        frame["secret"] = secret
     # Stamp this leg's EGRESS credential on the envelope via the shared decorator.
     frame = stamp_egress(st.egress, frame)
     try:
@@ -579,12 +581,13 @@ def make_verbs(
             "pending_count": len(st.pending),
             # The active per-leg rule TYPE names — keyed by the field you SET (config
             # like a `env` is never surfaced). `ingress_rule` (default
-            # `deny_inbound`, the SEAL) + `egress_rule` (default `silent`): read-key ==
-            # write-key, so `reflect` → edit is a direct mirror. IO legs SEAL by default;
-            # SECURING is the default, OPENING is the conscious act.
-            "ingress_rule": _ingress_name(rec),
-            "egress_rule": _egress_name(rec),
-            "sealed": _ingress_name(rec) != "allow_all_ingress",
+            # `deny_ingress`, the SEAL) + `egress_rule` (default `silent_egress`):
+            # read-key == write-key, so `reflect` → edit is a direct mirror. IO legs
+            # SEAL by default; SECURING is the default, OPENING is the conscious act.
+            # The SAME `describe` every leg reflects with — the gate's own scoping,
+            # so a bridge never reports a rule its gate resolves differently (an
+            # `auth: allow_all_ingress` stem read as open while the gate denied).
+            **describe(rec),
             # The ONE peer kernel whose agents this leg serves (`<peer_guid>|<agent>`);
             # null = no pin, no inbound call.
             "peer_guid": rec.get("peer_guid"),

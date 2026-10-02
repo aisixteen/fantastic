@@ -16,9 +16,12 @@ HOST = "h0"  # this kernel's guid, set by hand: the root is not booted here
 PAGE = "g1"
 
 
-def _route(k, calls: list, reply=None):
-    async def call(agent_id, payload, caller):
+def _route(k, calls: list, reply=None, secrets: list | None = None):
+    secrets = [] if secrets is None else secrets
+
+    async def call(agent_id, payload, caller, secret):
         calls.append((agent_id, payload, caller))
+        secrets.append(secret)
         return reply if reply is not None else {"ok": agent_id}
 
     route = PeerRoute(via="leg", call=call)
@@ -46,6 +49,37 @@ async def test_an_operator_send_reaches_the_peer_agent_as_this_kernel(seeded_ker
     assert calls == [
         ("canvas", {"type": "around", "x": 1, "y": 2, "radius": 3}, f"{HOST}|kernel")
     ]
+
+
+async def test_the_items_secret_marks_ride_to_the_peer(seeded_kernel):
+    """The route gets the item's `secret` paths verbatim (rooted at the item, as
+    the peer's item is), so the PEER masks its records; this kernel masks its own."""
+    k = seeded_kernel
+    k._meta["guid"] = HOST
+    calls: list = []
+    marks: list = []
+    _route(k, calls, reply={"ok": True}, secrets=marks)
+    key = "sk-peer-0123456789"
+    out = (
+        await k.send(
+            [
+                {
+                    "target": f"{PAGE}|creds",
+                    "payload": {"type": "set", "fields": {"api_key": key}},
+                    "secret": ["payload.fields", "result"],
+                }
+            ]
+        )
+    )[0]
+    assert out["status"] == "completed", out
+    assert calls == [
+        ("creds", {"type": "set", "fields": {"api_key": key}}, f"{HOST}|kernel")
+    ]
+    assert marks == [("payload.fields", "result")], marks
+    assert k.ctx.rows[out["pid"]]["payload"]["fields"] == "<secret>"
+    # an unmarked call hands the route no marks
+    await _send(k, f"{PAGE}|creds", {"type": "reflect"})
+    assert marks[-1] == (), marks
 
 
 async def test_an_agent_needs_the_qualified_target_in_its_can_call(seeded_kernel):

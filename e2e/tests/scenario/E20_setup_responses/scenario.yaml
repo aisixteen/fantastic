@@ -1,8 +1,11 @@
 # THE SET-UP PAGE WITH THE OPENAI RESPONSES BACKEND, end to end — E17's twin on
 # a build that links `responses_backend.tools` (`--features responses`). No model
 # and no network: the agent's endpoint is a scripted Responses stub on
-# 127.0.0.1 (the FULL …/v1/responses URL — the backend uses it verbatim). The key
-# is a dummy in `OPENAI_API_KEY`; the stub records that it arrived as Bearer.
+# 127.0.0.1 (the FULL …/v1/responses URL — the backend uses it verbatim). THE KEY
+# goes the product's own way: the page chooses where keys are kept (plain, in the
+# run's throwaway FANTASTIC_HOME), `k` stores a dummy into the kernel's credential
+# store as `responses/<host>`, and the write names that ref on the record. No
+# environment variable: the stub records that it arrived as Bearer anyway.
 
 id: setup_responses
 title: fantastic — the set-up page writes a Responses-backend agent, it answers and recalls
@@ -15,11 +18,9 @@ stub:
     # a call-less first turn, then the turn closes
     chain: ["stub-reply-42", '<call name="done"></call>']
   min_requests: 1
-  # every request carried the key as a Bearer token (the env var, never the record)
+  # every request carried the key as a Bearer token — read from the credential
+  # store at each request, never the record or the environment
   auth: "Bearer parity-stub-key"
-
-env:
-  OPENAI_API_KEY: parity-stub-key
 
 screen: {rows: 40, cols: 130}
 
@@ -63,6 +64,31 @@ runs:
       shot filled
       key down
       key down
+      key down
+      key down
+      key down
+      key down
+      key down
+      key down
+      key down
+      key right
+      key right
+      wait 200
+      shot mode
+      key enter
+      wait 800
+      type k
+      type parity-stub-key
+      key enter
+      wait 800
+      shot keyed
+      key up
+      key up
+      key up
+      key up
+      key up
+      key up
+      key up
       key enter
       wait 2000
       shot written
@@ -73,6 +99,9 @@ runs:
     frames:
       page: {contains: ["SET UP AN AI AGENT", "‹ pick one of 1 ›"], lacks: ["no ai backend is linked"]}
       filled: {contains: ["docreader", "‹ responses_backend.tools ›", "stub-model", "http://127.0.0.1:"]}
+      # PLAIN, in the run's throwaway home — a run must never write the real keychain
+      mode: {contains: ["keys kept ‹ plain ›"], lacks: ["‹ secure ›"]}
+      keyed: {contains: ["key stored as `responses/127.0.0.1:", "plain text in"], lacks: ["parity-stub-key", "the keychain ("]}
       written:
         contains: ["✓ written to  .fantastic/agents/set_of_agents/agents/docreader/agent.yaml", "docreader"]
     after_exit:

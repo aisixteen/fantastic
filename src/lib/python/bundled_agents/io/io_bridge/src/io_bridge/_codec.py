@@ -9,10 +9,17 @@ frame**:
     [ 4-byte BE uint32 H | H-byte JSON header | M-byte raw body ]
 
 The header is the envelope with the single bytes value replaced by `null` and an
-extra `_binary_path: "<dotted.path>"` naming where it lived; the receiver parses the
-header, reads the trailing M bytes as the body, and sets it back at that path. A
-frame with NO bytes is plain UTF-8 JSON. This is how raw bytes ride the wire WITHOUT
-base64 — the +33% size + encode/decode tax is gone.
+extra `_binary_path` naming where it lived; the receiver parses the header, reads
+the trailing M bytes as the body, and sets it back at that path. A frame with NO
+bytes is plain UTF-8 JSON. This is how raw bytes ride the wire WITHOUT base64 — the
++33% size + encode/decode tax is gone.
+
+`_binary_path` is a JSON ARRAY of steps from the envelope root: a STRING step is an
+object key, taken literally (a key may hold `.`); an INTEGER step is a list index.
+`["payload", "bytes"]`, `["payload", "a.b"]` (the top-level payload key `"a.b"`),
+`["data", "items", 0, "data"]`. A dotted string could not tell the key `"a.b"` from
+the nested `a` → `b`, so a payload whose bytes sat at a literal dotted key (web_rest's
+`X-Fantastic-Bytes-Field` binds one) arrived rebuilt as a nested slot.
 
 The text/binary distinction is carried by the transport, NOT guessed here. Every
 transport today is WS-based (web_ws, ws_bridge's WSTransport, relay_connector over
@@ -33,34 +40,82 @@ import struct
 from typing import Any
 
 
-def find_bytes_path(obj: Any, prefix: str = "") -> tuple[str, bytes] | None:
-    """Walk obj; return (dotted_path, value) of the first bytes value, or None."""
+def find_bytes_path(
+    obj: Any, prefix: tuple = ()
+) -> tuple[list[str | int], bytes] | None:
+    """Walk obj depth-first; return `(path, value)` of the first bytes value — the
+    path as `_binary_path` spells it (a str per object key, an int per list
+    index) — or None."""
     if isinstance(obj, (bytes, bytearray)):
-        return (prefix, bytes(obj))
+        return (list(prefix), bytes(obj))
     if isinstance(obj, dict):
         for k, v in obj.items():
-            p = f"{prefix}.{k}" if prefix else k
-            r = find_bytes_path(v, p)
+            r = find_bytes_path(v, (*prefix, k))
             if r is not None:
+                if not isinstance(k, str):
+                    # JSON writes the key as a string; a step that is not the
+                    # key the receiver will read is refused here, at the sender.
+                    raise TypeError(
+                        f"the bytes sit under the non-string key {k!r}; "
+                        "a frame's object keys are strings"
+                    )
                 return r
     elif isinstance(obj, list):
         for i, v in enumerate(obj):
-            p = f"{prefix}.{i}" if prefix else str(i)
-            r = find_bytes_path(v, p)
+            r = find_bytes_path(v, (*prefix, i))
             if r is not None:
                 return r
     return None
 
 
-def set_path(obj: Any, path: str, value: Any) -> None:
-    parts = path.split(".")
-    for p in parts[:-1]:
-        obj = obj[int(p)] if isinstance(obj, list) else obj[p]
-    last = parts[-1]
-    if isinstance(obj, list):
-        obj[int(last)] = value
-    else:
-        obj[last] = value
+def set_path(obj: Any, path: Any, value: Any) -> None:
+    """Put `value` at `path` (a `_binary_path`: a non-empty list of steps) in obj.
+
+    The path comes off the wire, so it is checked step by step: at an object the
+    step is a string key (every key before the last must exist; the last is set),
+    at a list a non-negative integer index inside it. Anything else raises
+    `ValueError` naming the step."""
+    if not isinstance(path, list):
+        raise ValueError("not a list of steps")
+    if not path:
+        raise ValueError("an empty path names no slot")
+    for n, step in enumerate(path):
+        last = n == len(path) - 1
+        if isinstance(obj, dict):
+            if not isinstance(step, str):
+                raise ValueError(f"step {step!r} at an object is not a string key")
+            if last:
+                obj[step] = value
+            elif step in obj:
+                obj = obj[step]
+            else:
+                raise ValueError(f"no key {step!r}")
+        elif isinstance(obj, list):
+            if type(step) is not int or step < 0:
+                raise ValueError(
+                    f"step {step!r} at a list is not a non-negative integer index"
+                )
+            if step >= len(obj):
+                raise ValueError(
+                    f"index {step} is past the end of a list of {len(obj)}"
+                )
+            if last:
+                obj[step] = value
+            else:
+                obj = obj[step]
+        else:
+            raise ValueError(f"step {step!r} goes into a {_kind(obj)}, not a container")
+
+
+def _kind(v: Any) -> str:
+    """The JSON name of a scalar, for an error."""
+    if v is None:
+        return "null"
+    if isinstance(v, bool):
+        return "boolean"
+    if isinstance(v, (int, float)):
+        return "number"
+    return "string"
 
 
 def encode_frame(envelope: dict) -> tuple[bytes, bool]:

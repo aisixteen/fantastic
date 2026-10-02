@@ -183,7 +183,7 @@
             let missing = await k.send([
                 Item(
                     AgentId("term_p"), .object(["type": "paste_image", "job_id": jid]),
-                    binary: Data([0x89, 0x50]))
+                    binary: Blob("data", Data([0x89, 0x50])))
             ])[0].result
             #expect(
                 missing["reason"] == "missing_arg" && missing["arg"] == "mime",
@@ -192,7 +192,7 @@
                 Item(
                     AgentId("term_p"),
                     .object(["type": "paste_image", "job_id": jid, "mime": "image/png"]),
-                    binary: Data([0x89, 0x50, 0x4E, 0x47, 0x2E, 0x2E, 0x2E, 0x2E]))
+                    binary: Blob("data", Data([0x89, 0x50, 0x4E, 0x47, 0x2E, 0x2E, 0x2E, 0x2E])))
             ])[0].result
             #expect(r["bytes"] == 8, "\(r.serialize())")
             let path = r["path"].asString ?? ""

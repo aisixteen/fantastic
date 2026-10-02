@@ -285,15 +285,19 @@ public struct FileBundle: AgentBundle {
         }
     }
 
-    /// Binary channel: `read_stream` (empty request → reply BODY = one raw chunk)
-    /// and `write_stream` (request BODY = one raw chunk → status reply, no body).
-    /// Symmetric with py/rust's `bytes`-in-the-dict; never base64. Same
-    /// sealed-by-default gate + running-dir clamp as the text channel. Any other
-    /// verb routes through the text `handle` (its blob is unused).
+    /// Binary channel: `read_stream` (no request body → reply BODY = one raw
+    /// chunk) and `write_stream` (the body at `bytes` = one raw chunk → status
+    /// reply, no body). Symmetric with py/rust's `bytes`-in-the-dict; never
+    /// base64. Every verb reads the body at ITS key, `bytes` — python's
+    /// `payload.get("bytes")` — so a body placed under another key is not a
+    /// chunk. Same sealed-by-default gate + running-dir clamp as the text
+    /// channel. Any other verb routes through the text `handle` (its body is
+    /// unused).
     public func handleBinary(
-        agentId: AgentId, header: JSON, blob: Data, kernel: Kernel
+        agentId: AgentId, header: JSON, body: Blob?, kernel: Kernel
     ) async throws -> (JSON?, Data?) {
         let verb = header["type"].asString ?? ""
+        let chunk = bodyAt(body, "bytes")
         guard verb == "read_stream" || verb == "write_stream" || Self.textBodyVerbs.contains(verb)
         else {
             let reply = try await handle(agentId: agentId, payload: header, kernel: kernel)
@@ -312,15 +316,17 @@ public struct FileBundle: AgentBundle {
             return (denied, nil)
         }
         guard let base = kernel.workdir?.path else { return (Self.noRunningDir(), nil) }
-        // THE DOCUMENT RIDES THE BODY: `write`/`edit`/`append` take `bytes`
-        // verbatim, as python's handler receives it from the binary frame.
+        // THE DOCUMENT RIDES THE BODY: `write`/`edit`/`append` take the body at
+        // `bytes` verbatim, as python's handler receives it from the binary
+        // frame — present even when empty, the bytes-typed carrier a model's
+        // `<bytes>` document rides.
         switch verb {
         case "write":
-            return (await textWrite(agent, header, blob: blob, base: base, kernel: kernel), nil)
+            return (await textWrite(agent, header, blob: chunk, base: base, kernel: kernel), nil)
         case "edit":
-            return (await textEdit(agent, header, blob: blob, base: base, kernel: kernel), nil)
+            return (await textEdit(agent, header, blob: chunk, base: base, kernel: kernel), nil)
         case "append":
-            return (await textAppend(agent, header, blob: blob, base: base, kernel: kernel), nil)
+            return (await textAppend(agent, header, blob: chunk, base: base, kernel: kernel), nil)
         default: break
         }
         if let refused = exposure(verb, agent: agent, payload: header, base: base) {
@@ -339,15 +345,16 @@ public struct FileBundle: AgentBundle {
         if pyTruthy(agent.metaValue(forKey: "readonly") ?? .null) {
             return (readonlyRefusal(), nil)
         }
-        // THE BLOB IS THE CHUNK, and a header `bytes` key of ANY JSON value is
-        // a wire client trying to smuggle one through the envelope — python
-        // OVERWRITES `payload[field]` with the body, so the key never reaches
-        // this handler holding a JSON value (A13.1). Refuse it rather than
-        // write whatever it spelled.
+        // THE BODY AT `bytes` IS THE CHUNK, and a header `bytes` key of ANY JSON
+        // value is a wire client trying to smuggle one through the envelope —
+        // python OVERWRITES `payload[field]` with the body, so the key never
+        // reaches this handler holding a JSON value (A13.1). Refuse it rather
+        // than write whatever it spelled. Nothing at `bytes` (no body, or a body
+        // under another key) is python's default `b""`: `written: 0`.
         if header.asObject?["bytes"] != nil {
             return (Refusal.missing("write_stream", "bytes (one raw chunk)"), nil)
         }
-        return (writeStream(agent: agent, payload: header, blob: blob, base: base), nil)
+        return (writeStream(agent: agent, payload: header, blob: chunk ?? Data(), base: base), nil)
     }
 
     // MARK: - Verbs
@@ -673,7 +680,7 @@ public struct FileBundle: AgentBundle {
                     .object([
                         "type": .string("read_stream"), "path": spath,
                         "offset": .integer(offset), "length": .integer(length),
-                    ]), binary: Data())
+                    ]), rawReply: true)
             ])[0]
             let rmeta = read.result
             // python: the reply must be a dict carrying a `bytes` chunk. The
@@ -689,7 +696,7 @@ public struct FileBundle: AgentBundle {
                     .object([
                         "type": .string("write_stream"), "path": dpath,
                         "offset": .integer(offset), "truncate": .bool(first),
-                    ]), binary: body)
+                    ]), binary: Blob("bytes", body))
             ])[0].result
             guard case .object(let wo) = wmeta, !pyTruthy(wo["error"] ?? .null) else {
                 return Refusal.make(

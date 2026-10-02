@@ -360,7 +360,12 @@ async fn update_from_payload(kernel: &Arc<Kernel>, caller: &Arc<Agent>, payload:
     // Grant-map SHAPE, judged here at write time — the gate only judges edges
     // (py-canonical, 2026-09-01: `can_call:"*"` accepted as a bare string left
     // a silently-dead grant; refuse loud at the point of the mistake).
-    if let Some(why) = crate::lifecycle::bad_grant_shape(&patch) {
+    // `holds_secrets` is the exception that IS gated: only `true` or `null` is
+    // written (`bad_holder_mark`), and on a holder only the operator writes
+    // `null` — its clear (`check_holder_mark`, in the gate).
+    if let Some(why) = crate::lifecycle::bad_grant_shape(&patch)
+        .or_else(|| crate::lifecycle::bad_holder_mark(&patch))
+    {
         let mut r = crate::refusal::refusal(crate::refusal::INVALID_META, &why);
         crate::refusal::with(&mut r, "id", json!(id));
         return r;

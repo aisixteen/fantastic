@@ -236,7 +236,7 @@ fn status_handler_renders_phase_markers() {
             .unwrap(),
         "  ← v(t)  None"
     );
-    // queued / thinking / rate-limited.
+    // queued / thinking.
     assert_eq!(
         status(json!({"phase": "queued", "detail": {"ahead": 3}}))
             .unwrap()
@@ -252,12 +252,6 @@ fn status_handler_renders_phase_markers() {
     assert_eq!(
         status(json!({"phase": "thinking"})).unwrap().unwrap(),
         "  thinking…"
-    );
-    assert_eq!(
-        status(json!({"phase": "thinking", "detail": {"waiting_on": "rate_limit"}}))
-            .unwrap()
-            .unwrap(),
-        "  rate-limited; waiting ?s"
     );
     // `streaming` and `done` are silent; so is an unknown phase.
     assert!(status(json!({"phase": "streaming"})).unwrap().is_none());
@@ -281,12 +275,6 @@ fn status_values_render_like_python_str() {
             .unwrap()
             .unwrap(),
         "  [True] queued ([1, 'a'] ahead)"
-    );
-    assert_eq!(
-        status(json!({"phase": "thinking", "detail": {"waiting_on": "rate_limit", "wait_s": 1.5}}))
-            .unwrap()
-            .unwrap(),
-        "  rate-limited; waiting 1.5s"
     );
     // A falsy source takes the one-space prefix; a truthy non-string is str()ed.
     assert_eq!(

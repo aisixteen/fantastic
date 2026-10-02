@@ -36,6 +36,12 @@ and finished sixteen messages having created nothing.
   baseline `$self`/`$parent`/`$children` among them, or the keys you omit are
   gone. Granting one edge reads like a PATCH and behaves like a PUT.
 
+  `holds_secrets` (a secret holder's mark) is exactly `true` or `null` — anything
+  else is refused `invalid_meta`, here and at `create_agent`, on every agent. On a
+  holder only the OPERATOR writes anything but `true`: `holds_secrets: null` is the
+  clear (the record then says `null` — not a holder); an agent's attempt is refused
+  `{reason:'unauthorized', side:'secret-holder'}`. An agent may set `true`.
+
 `delete_agent` — args: `id:str`
 : **Cascades** — deletes that agent and its whole subtree, deepest first. Refuses
   with `{error, reason:'locked', id}` if any descendant carries `delete_lock`;
@@ -88,7 +94,12 @@ the caller the real reply; every record of the call — its rows, the memory sto
 verb (`payload.type`) cannot be hidden, and a path naming nothing in the payload is
 refused. A named secret call answers a re-send only while it is in RAM: from the
 store its record holds placeholders, so a replay is refused. Masking is not
-isolation — never send a secret to an AI agent (it would enter its prompt and memory).
+isolation — never send a secret to an AI agent (it would enter its prompt and memory);
+an agent whose record says `holds_secrets: true` (every `credential_store`) is never
+reachable from an AI's model — ai_core refuses the call, while the AI's backend still
+reads its key. The marks cross kernels with the call (a frame's `secret`, rest's
+`X-Fantastic-Secret`): the receiving kernel masks its own records the same way
+(`transports`) — except over a relay leg, which refuses marked calls.
 
 `ledger` — no args
 : `{executions:[{id, target, status, attempts, retries, named, outcome?, acked?}]}` —

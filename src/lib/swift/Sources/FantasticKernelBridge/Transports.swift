@@ -152,19 +152,24 @@ public final class MemoryTransport: BridgeTransport, @unchecked Sendable {
         switch frame["type"].asString {
         case "call":
             guard let remote else { throw ConnectionClosed("remote kernel gone") }
-            let target = AgentId(frame["target"].asString ?? "")
+            var item = Item(AgentId(frame["target"].asString ?? ""), frame["payload"])
+            // the frame's `secret` marks, verbatim — what the remote's inbound leg
+            // does with them (`Secret`)
+            if let marks = frame.asObject?["secret"] { item.secret = marks }
+            // A stream verb rides the binary channel even from a text frame, as
+            // the remote's web_ws leg routes it (`Codec.binaryEdgeVerbs`): a
+            // `read_stream` reply is raw bytes whatever frame asked for it.
+            if Codec.binaryEdgeVerbs.contains(frame["payload"]["type"].asString ?? "") {
+                item.rawReply = true
+            }
+            let call = item
             // OPERATOR on the remote: the local sender means nothing in the
             // remote's grant space, and admission was already gated by this
             // leg's own ingress rule.
-            let reply = await KernelTaskLocals.$currentSender.withValue(nil) {
-                await remote.send([Item(target, frame["payload"])])[0].result
+            let out1 = await KernelTaskLocals.$currentSender.withValue(nil) {
+                await remote.send([call])[0]
             }
-            push(
-                (
-                    .object([
-                        "type": .string("reply"), "id": frame["id"], "data": reply,
-                    ]), Data(), false
-                ))
+            pushReply(frame["id"], out1)
         case "watch":
             await startWatch(AgentId(frame["src"].asString ?? ""))
         case "unwatch":
@@ -179,17 +184,32 @@ public final class MemoryTransport: BridgeTransport, @unchecked Sendable {
         guard let remote, header["type"].asString == "call" else { return }
         let target = AgentId(header["target"].asString ?? "")
         // THROUGH THE BATCH, like the text call above: the body rides the
-        // item's binary channel, so the call is an execution with its rows.
+        // item's binary channel AT ITS PATH in the payload, so the call is an
+        // execution with its rows.
         let (payload, binary) = Codec.callPayload(header, body: body)
-        let out1 = await KernelTaskLocals.$currentSender.withValue(nil) {
-            await remote.send([Item(target, payload, binary: binary)])[0]
+        var item = Item(target, payload, binary: binary)
+        if binary == nil, Codec.binaryEdgeVerbs.contains(payload["type"].asString ?? "") {
+            item.rawReply = true
         }
-        var out: JSON = .object([
-            "type": .string("reply"), "id": header["id"], "data": out1.result,
-        ])
-        // THE CARRIER, not the length: a 0-byte chunk is still a chunk (C37).
-        if out1.body != nil { out["_binary_path"] = .string("data.bytes") }
-        push((out, out1.body ?? Data(), true))
+        if let marks = header.asObject?["secret"] { item.secret = marks }
+        let call = item
+        let out1 = await KernelTaskLocals.$currentSender.withValue(nil) {
+            await remote.send([call])[0]
+        }
+        pushReply(header["id"], out1)
+    }
+
+    /// The remote's answer as the frame web_ws writes: THE CARRIER, not the
+    /// length, picks the kind — a reply holding a chunk (a 0-byte one included,
+    /// C37) is a binary frame at `["data", "bytes"]`, any other a text frame.
+    private func pushReply(_ id: JSON, _ out1: Outcome) {
+        var out: JSON = .object(["type": .string("reply"), "id": id, "data": out1.result])
+        guard let body = out1.body else {
+            push((out, Data(), false))
+            return
+        }
+        out["_binary_path"] = Codec.binaryPath(["data", "bytes"])
+        push((out, body, true))
     }
 
     public func recv() async throws -> (frame: JSON, body: Data, isBinary: Bool) {
@@ -265,10 +285,10 @@ public final class MemoryTransport: BridgeTransport, @unchecked Sendable {
                     continue
                 }
                 if case .object(var o) = frame {
-                    o["_binary_path"] = .string("payload.\(body.path)")
+                    o["_binary_path"] = Codec.payloadPath(body.parts)
                     frame = .object(o)
                 }
-                self?.push((frame, body.data, true))
+                self?.push((frame, body.bytes, true))
             }
         }
         withLock { watchers[target] = (watcherId, drain) }

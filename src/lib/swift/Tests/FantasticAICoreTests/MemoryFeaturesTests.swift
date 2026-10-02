@@ -114,10 +114,10 @@ struct MemoryFeaturesTests {
 
     @Test func theEndpointsCountCalibratesTheEstimate() async throws {
         let (kernel, ids, _) = await bootMockKernel(
-            config: baseConfig { .provider(MockProvider()) }, backendIds: ["mf_cal"],
+            config: baseConfig { MockProvider() }, backendIds: ["mf_cal"],
             contextWindow: 12000, meta: ["output_reserve": .integer(0)])
         let agent = kernel.agent(ids["mf_cal"]!)!
-        let backend = buildAIBackend(baseConfig { .provider(MockProvider()) })
+        let backend = buildAIBackend(baseConfig { MockProvider() })
         let msgs: [JSON] = [
             .object(["role": .string("system"), "content": .string("s")]),
             .object(["role": .string("user"), "content": .string(String(repeating: "x", count: 4000))]),
@@ -148,7 +148,7 @@ struct MemoryFeaturesTests {
 
     @Test func aTurnRecordsWhatTheEndpointReported() async throws {
         let (kernel, ids, _) = await bootMockKernel(
-            config: baseConfig { .provider(ReportingProvider(777)) }, backendIds: ["mf_rep"],
+            config: baseConfig { ReportingProvider(777) }, backendIds: ["mf_rep"],
             contextWindow: 32000, meta: ["output_reserve": .integer(0)])
         let id = ids["mf_rep"]!
         _ = await send(kernel, id.value, .object(["type": .string("send"), "text": .string("hello")]))
@@ -356,8 +356,8 @@ struct MemoryFeaturesTests {
 
     @Test func aTurnsRowsAreMintedWhenAppendedSoIdOrderIsAppendOrder() async throws {
         let box = KernelBox()
-        var cfg = baseConfig { .refused(.object(["error": .string("unset")])) }
-        cfg.makeProvider = { agent, _, kernel in .provider(MidTurnWriter(kernel, agent.id.value)) }
+        var cfg = baseConfig { throw PyError("RuntimeError", "unset") }
+        cfg.makeProvider = { agent, _, kernel in MidTurnWriter(kernel, agent.id.value) }
         let (kernel, ids, _) = await bootMockKernel(
             config: cfg, backendIds: ["mf_mint"], contextWindow: 32000,
             meta: ["output_reserve": .integer(0)])

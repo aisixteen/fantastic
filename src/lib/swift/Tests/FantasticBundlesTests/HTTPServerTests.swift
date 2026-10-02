@@ -1116,7 +1116,7 @@ struct ParentProbe: AgentBundle {
 struct ShortSource: AgentBundle {
     let name = "short_source"
     func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? { nil }
-    func handleBinary(agentId: AgentId, header: JSON, blob: Data, kernel: Kernel)
+    func handleBinary(agentId: AgentId, header: JSON, body: Blob?, kernel: Kernel)
         async throws -> (JSON?, Data?)
     {
         if header["offset"].asInt == 0 {

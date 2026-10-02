@@ -2,7 +2,7 @@
 
 LIVE TEST 4 — plan, BUILD a program, and have it actually run.
 
-    cd src/lib/python && BACKEND=llamacpp uv run python -u ../../../tmp/live_build.py
+    cd src/lib/python && uv run python -u ../../../e2e/run.py --group agentic --id build --lanes 1
 
 Harder than `live_plan.py` in the direction that matters: `live_plan` asked for a
 CHANGE (a record edit the model could make with one verb). This asks for an

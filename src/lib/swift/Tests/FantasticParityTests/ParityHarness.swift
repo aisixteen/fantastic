@@ -349,7 +349,7 @@
                     "\(label) bundles=all entry missing name/handler_module")
             }
             // A backend KIND's record schema (lib request #3) is python's, field for
-            // field — names, order, types, enums, defaults, hints, key_var — for every
+            // field — names, order, types, enums, defaults, hints — for every
             // kind BOTH catalogs carry. A kind one runtime publishes a schema for and
             // the other does not is a difference too.
             func schemas(_ r: JSON) -> [String: JSON] {

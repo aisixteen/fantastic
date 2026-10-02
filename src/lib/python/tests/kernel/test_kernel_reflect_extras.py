@@ -137,7 +137,8 @@ async def test_reflect_bundles_all(seeded_kernel):
 
 async def test_the_catalog_carries_each_backend_kinds_record_schema(seeded_kernel):
     """A set-up page reads what a KIND's record takes before any agent of it
-    exists: every field with required/type/enum/default/hint, and the key var."""
+    exists: every field with required/type/enum/default/hint — a key included,
+    as a `credentials` field (a store ref), never an environment variable."""
     r = (
         await seeded_kernel.send(
             [{"target": "kernel", "payload": {"type": "reflect", "bundles": "all"}}]
@@ -162,9 +163,13 @@ async def test_the_catalog_carries_each_backend_kinds_record_schema(seeded_kerne
     assert fields["thinking_token_budget"]["default"] == 16000
     assert fields["kv_overflow"]["enum"] == ["evict", "reject"]
     assert fields["reasoning_effort"]["enum"] == ["low", "medium", "xhigh"]
-    assert vllm["key_var"] == "VLLM_API_KEY"  # sent only when set
-    assert by["responses_backend"]["schema"]["key_var"] == "OPENAI_API_KEY"
-    assert by["anthropic_backend"]["schema"]["key_var"] == "ANTHROPIC_API_KEY"
+    # the key: optional where a server may be keyless, required where it never is
+    assert fields["credentials"]["type"] == "credentials"
+    assert fields["credentials"]["required"] is False
+    sch = by["responses_backend"]["schema"]
+    assert "key_var" not in sch
+    cred = next(f for f in sch["fields"] if f["name"] == "credentials")
+    assert cred["required"] is True
     # a bundle that is not a backend publishes none
     assert "schema" not in by["file_bridge"]
 
@@ -183,7 +188,7 @@ async def test_the_schema_is_what_the_write_enforces(seeded_kernel):
                         "payload": {
                             "type": "create_agent",
                             "parent_id": k.id,
-                            "handler_module": "anthropic_backend.tools",
+                            "handler_module": "responses_backend.tools",
                             **meta,
                         },
                     }
@@ -193,19 +198,33 @@ async def test_the_schema_is_what_the_write_enforces(seeded_kernel):
 
     r = await create(id="a1")
     assert r.get("reason") == "invalid_meta", r
-    assert "missing: endpoint, model, memory_store_id" in r["error"], r
+    assert "missing: endpoint, model, credentials, memory_store_id" in r["error"], r
     r = await create(
         id="a2",
         endpoint="http://127.0.0.1:9/stub",
         model="m",
         memory_store_id="memory",
+        credentials={"store": "creds", "ref": "main"},
         context_strategy="bogus",
     )
     assert r.get("reason") == "invalid_meta" and "context_strategy" in r["error"], r
     r = await create(
-        id="a3", endpoint="http://127.0.0.1:9/stub", model="m", memory_store_id="memory"
+        id="a3",
+        endpoint="http://127.0.0.1:9/stub",
+        model="m",
+        memory_store_id="memory",
+        credentials={"store": "creds"},
     )
-    assert r.get("id") == "a3", r
+    assert r.get("reason") == "invalid_meta", r
+    assert "credentials must be {store" in r["error"], r
+    r = await create(
+        id="a4",
+        endpoint="http://127.0.0.1:9/stub",
+        model="m",
+        memory_store_id="memory",
+        credentials={"store": "creds", "ref": "main"},
+    )
+    assert r.get("id") == "a4", r
 
 
 async def test_reflect_bundles_ids(seeded_kernel):

@@ -60,11 +60,15 @@ public enum AIContext {
 
     /// The model's usable window, by STATIC precedence (no fallback-chain):
     /// `context_window` (explicit override — works on any backend) →
-    /// `num_ctx` (ollama's real knob) → a conservative default.
-    public static func resolveContextWindow(_ agent: Agent) -> Int64 {
+    /// `num_ctx` (ollama's real knob) → `modelWindow`, THE BACKEND'S OWN window
+    /// (`AIBackendConfig.modelWindow`): `AIConstants.DEFAULT_CONTEXT_WINDOW` for a
+    /// server whose window the kernel cannot know, the model's real window where
+    /// the backend can read it (foundation_models_backend: the SDK's
+    /// `contextSize`). Named at every call — a backend's window is never assumed.
+    public static func resolveContextWindow(_ agent: Agent, modelWindow: Int64) -> Int64 {
         if let v = metaPosInt(agent, "context_window") { return v }
         if let v = metaPosInt(agent, "num_ctx") { return v }
-        return AIConstants.DEFAULT_CONTEXT_WINDOW
+        return modelWindow
     }
 
     /// Output headroom reserved out of the window (default 1024).
@@ -86,16 +90,18 @@ public enum AIContext {
     }
 
     /// Token budget for the INPUT (window minus output headroom), floored.
-    public static func budget(_ agent: Agent) -> Int64 {
-        max(resolveContextWindow(agent) - outputReserve(agent), AIConstants.BUDGET_FLOOR)
+    public static func budget(_ agent: Agent, modelWindow: Int64) -> Int64 {
+        max(
+            resolveContextWindow(agent, modelWindow: modelWindow) - outputReserve(agent),
+            AIConstants.BUDGET_FLOOR)
     }
 
     /// Tokens a reply may occupy INLINE in the model's next turn. Above this it
     /// is stored and digested. An eighth of the input budget: a 12k window
     /// inlines ~1.4k tokens (a reflect, an error, a short read) and digests a
     /// 6.8KB file body. Python `_inline_cap`.
-    public static func inlineCap(_ agent: Agent) -> Int64 {
-        max(AIConstants.BUDGET_FLOOR, budget(agent) / 8)
+    public static func inlineCap(_ agent: Agent, modelWindow: Int64) -> Int64 {
+        max(AIConstants.BUDGET_FLOOR, budget(agent, modelWindow: modelWindow) / 8)
     }
 
     /// THE CAP INVARIANT. Every verb an agent calls on itself must answer UNDER

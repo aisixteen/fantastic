@@ -272,7 +272,7 @@ async fn paste_image_types_a_saved_path() {
         AgentId::from("term_p"),
         json!({"type": "paste_image", "job_id": jid}),
     )
-    .with_binary(b"\x89PNG".to_vec());
+    .with_binary_key("data", b"\x89PNG".to_vec());
     let r = k.send(vec![item]).await.remove(0).result;
     assert_eq!(
         (&r["reason"], &r["arg"]),
@@ -283,7 +283,7 @@ async fn paste_image_types_a_saved_path() {
         AgentId::from("term_p"),
         json!({"type": "paste_image", "job_id": jid, "mime": "image/png"}),
     )
-    .with_binary(b"\x89PNG....".to_vec());
+    .with_binary_key("data", b"\x89PNG....".to_vec());
     let r = k.send(vec![item]).await.remove(0).result;
     assert_eq!(r["bytes"], json!(8), "{r}");
     let path = r["path"].as_str().unwrap().to_string();

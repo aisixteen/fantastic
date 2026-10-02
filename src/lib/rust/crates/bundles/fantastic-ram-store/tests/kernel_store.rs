@@ -267,7 +267,7 @@ async fn stored_rows_keep_none_and_reduce_bytes_to_a_length() {
             AgentId::from("probe"),
             json!({"type": "work", "none": null}),
         )
-        .with_binary(vec![0, 1, 2])])
+        .with_binary_key("bytes", vec![0, 1, 2])])
         .await
         .remove(0);
     k.flush_executions().await;
@@ -664,6 +664,109 @@ async fn the_kernels_store_is_pruned_to_its_window() {
             settles.contains(id) || k.ledger.has(*id),
             "no settle row outlives its call and no call loses its settle"
         );
+    }
+}
+
+/// A `ram_store` whose `read` answers an error while `fail_read` is set — the
+/// store going away under the kernel's prune.
+struct FlakyStore {
+    inner: RamStoreBundle,
+    fail_read: Arc<std::sync::atomic::AtomicBool>,
+    refused: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait]
+impl Bundle for FlakyStore {
+    fn name(&self) -> &str {
+        "flaky_store"
+    }
+    async fn handle(
+        &self,
+        id: &AgentId,
+        payload: &Value,
+        kernel: &Arc<Kernel>,
+    ) -> Result<Reply, BundleError> {
+        use std::sync::atomic::Ordering;
+        if payload["type"] == json!("read") && self.fail_read.load(Ordering::SeqCst) {
+            self.refused.fetch_add(1, Ordering::SeqCst);
+            return Ok(Some(json!({"error": "gone"})));
+        }
+        self.inner.handle(id, payload, kernel).await
+    }
+}
+
+/// The twin of python `test_a_failed_store_read_in_the_prune_is_loud_and_the_
+/// flusher_lives`: a store READ that fails inside the window prune prunes
+/// nothing (python prints `  [kernel] prune of the kernel's store failed: …` and
+/// returns 0); the flush LOOP survives it, so a later execution's rows still
+/// leave RAM without anyone calling `flush_executions`.
+#[tokio::test]
+async fn a_failed_store_read_in_the_prune_prunes_nothing_and_the_flusher_lives() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let fail_read = Arc::new(AtomicBool::new(false));
+    let refused = Arc::new(AtomicUsize::new(0));
+    let state = Arc::new(ProbeState::default());
+    let mut reg = registry(&state);
+    reg.register(
+        "flaky_store.tools",
+        FlakyStore {
+            inner: RamStoreBundle::default(),
+            fail_read: Arc::clone(&fail_read),
+            refused: Arc::clone(&refused),
+        },
+    );
+    let k = bootstrap(reg, BootstrapOptions::in_memory())
+        .expect("boot")
+        .kernel;
+    mk(&k, "probe", json!({})).await;
+    let r = call(
+        &k,
+        "kernel",
+        json!({
+            "type": "create_agent", "parent_id": root_id(&k), "id": "memory",
+            "handler_module": "flaky_store.tools", "operator": true, "admins": ["kernel"],
+        }),
+    )
+    .await
+    .result;
+    assert_eq!(r["id"], json!("memory"), "{r}");
+    let mut patch = Map::new();
+    patch.insert("memory_store_id".to_string(), json!("memory"));
+    k.update(&AgentId::from(root_id(&k)), patch);
+    let out = k.start(false).await;
+    assert_eq!(out["started"], json!(true), "{out}");
+    for _ in 0..5 {
+        call(&k, "probe", json!({"type": "work"})).await;
+    }
+    k.set_ledger_cap(Some(1));
+    fail_read.store(true, Ordering::SeqCst);
+    assert_eq!(
+        k.prune_executions().await,
+        0,
+        "a failed read prunes nothing"
+    );
+    // …and INSIDE the flusher task: a new row wakes it, its batch lands, the
+    // window is over the cap, and the prune's read fails.
+    let before = refused.load(Ordering::SeqCst);
+    call(&k, "probe", json!({"type": "work"})).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while refused.load(Ordering::SeqCst) == before {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the flusher never pruned"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    fail_read.store(false, Ordering::SeqCst);
+    let out = call(&k, "probe", json!({"type": "work"})).await;
+    let id = pid(&out);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while k.rows.contains(id) || k.ledger.has(id) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the flusher died: execution {id} never left RAM"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
 

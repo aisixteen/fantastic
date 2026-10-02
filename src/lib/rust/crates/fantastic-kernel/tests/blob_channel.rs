@@ -58,9 +58,11 @@ impl Bundle for FakeStore {
         &self,
         _id: &AgentId,
         header: Value,
-        blob: Vec<u8>,
+        body: Option<fantastic_kernel::Blob>,
         _kernel: &Arc<Kernel>,
-    ) -> Result<(Reply, Option<Vec<u8>>), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(Reply, Option<fantastic_kernel::Blob>), Box<dyn std::error::Error + Send + Sync>>
+    {
+        let blob: Vec<u8> = body.map(|b| b.bytes).unwrap_or_default();
         let path = header.get("path").and_then(Value::as_str).unwrap_or("");
         let target = self.root.join(path);
         match header.get("type").and_then(Value::as_str).unwrap_or("") {
@@ -75,7 +77,7 @@ impl Bundle for FakeStore {
                 // One whole file, `eof: true` — the pump stops on the first pass.
                 Ok(b) => Ok((
                     Some(json!({"path": path, "eof": true, "size": b.len()})),
-                    Some(b),
+                    Some(fantastic_kernel::Blob::key("bytes", b)),
                 )),
                 Err(_) => Ok((
                     Some(json!({"error": format!("no such path {path:?}")})),

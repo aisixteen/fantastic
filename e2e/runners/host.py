@@ -97,9 +97,9 @@ def main(scenario_id: str) -> int:
     spec = ensure_runtime(REPO, rt)
 
     # THE ONE PLUG every probe uses (`e2e/backends`): `BACKEND` names it, the plug
-    # names what it needs. This runner used to build an anthropic agent whatever
-    # BACKEND said, so a `BACKEND=vllm` run of a scenario either failed here or
-    # ran on a different provider than its header claimed.
+    # names what it needs. This runner used to build one hardcoded backend's agent
+    # whatever BACKEND said, so a `BACKEND=vllm` run of a scenario either failed
+    # here or ran on a different provider than its header claimed.
     bk = backend()
     model = bk.model
     if blockers := bk.blockers():

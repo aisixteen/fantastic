@@ -52,7 +52,8 @@ export interface Item {
    * SECRET VALUES (`secret.ts`): dotted paths, each `payload.<field…>` or
    * `result[.<field…>]`. The target gets the real payload and the caller the real
    * reply; every record and mirror of the call shows `<secret>`. `payload.type`
-   * can never be hidden.
+   * can never be hidden. A host-bound item's marks ride its call frame (and a
+   * host's call frame brings its own), so the receiving kernel masks too.
    */
   secret?: string[];
 }

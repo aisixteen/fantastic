@@ -1,26 +1,23 @@
 # THE SET-UP PAGE, END TO END — a scripted keyboard writes an ai agent through
 # the page, and the agent answers. No model and no network: the shell is built
-# with `--features anthropic` (the backend linked, NO endpoint hardwired) and
-# the agent's endpoint is the parity harness's scripted Anthropic stub on
-# 127.0.0.1. The key is the stub's dummy, in the environment — the backend
-# refuses to send without one; the stub ignores it.
+# with `--features vllm` (the backend linked, NO endpoint hardwired) and the
+# agent's endpoint is the parity harness's scripted OpenAI-chat stub on
+# 127.0.0.1 (its /v1 base). Keyless: a vLLM record's key is optional, and a
+# record that names none sends no Authorization header.
 
 id: setup_ai
 title: fantastic — the set-up page writes an ai agent, it boots and answers
 runtimes: [tui]
 costs: free
-features: [anthropic]
+features: [vllm]
 
 stub:
-  anthropic:
+  vllm:
     # a call-less first turn, then the turn closes
     chain: ["stub-reply-42", '<call name="done"></call>']
   min_requests: 1
 
-env:
-  ANTHROPIC_API_KEY: parity-stub-key
-
-screen: {rows: 40, cols: 130}
+screen: {rows: 72, cols: 130}
 
 runs:
   - name: init
@@ -58,6 +55,16 @@ runs:
       key enter
       type stub-model
       key enter
+      key down
+      key enter
+      type 512
+      key enter
+      key down
+      key enter
+      type 4
+      key enter
+      key down
+      key right
       wait 200
       shot filled
       key down
@@ -71,7 +78,7 @@ runs:
       exit 8000
     frames:
       page: {contains: ["SET UP AN AI AGENT", "‹ pick one of 1 ›"], lacks: ["no ai backend is linked"]}
-      filled: {contains: ["docreader", "‹ anthropic_backend.tools ›", "stub-model", "http://127.0.0.1:"]}
+      filled: {contains: ["docreader", "‹ vllm_backend.tools ›", "stub-model", "http://127.0.0.1:"]}
       written:
         contains: ["✓ written to  .fantastic/agents/set_of_agents/agents/docreader/agent.yaml", "docreader"]
     after_exit:

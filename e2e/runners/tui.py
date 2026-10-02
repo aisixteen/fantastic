@@ -12,10 +12,11 @@ A scenario may name cargo `features:` for the build it needs; the built binary
 is COPIED into the run's temp dir, so a parallel scenario rebuilding with other
 features cannot swap it underneath.
 
-A scenario may also declare `stub: {anthropic: {chain: [...]}}`: the scripted
-Anthropic Messages endpoint from the parity harness (`parity/stubs`) starts on
-127.0.0.1, `{stub_url}` in a script becomes its URL, and `env:` is added to the
-shell's environment (a stub key, never a real one). No model, no network.
+A scenario may also declare `stub: {vllm: {chain: [...]}}` (the parity harness's
+scripted OpenAI chat endpoint, `parity/stubs/openai_chat.py`) or
+`stub: {responses: {chain: [...]}}`: the stub starts on 127.0.0.1, `{stub_url}` in a
+script becomes its URL, and `env:` is added to the shell's environment (a stub key,
+never a real one). No model, no network.
 """
 
 from __future__ import annotations
@@ -103,10 +104,11 @@ class _Rec:
 
 
 def start_stub(spec: dict, root: Path):
-    """The scripted model endpoint the scenario names — `anthropic` (the parity
-    harness's Messages stub) or `responses` (an OpenAI Responses stub). Returns
-    (stub, url); for `responses` the url is the FULL `…/v1/responses` URL, as
-    the backend's `endpoint` takes it verbatim."""
+    """The scripted model endpoint the scenario names — `vllm` (the parity
+    harness's OpenAI chat stub) or `responses` (an OpenAI Responses stub). Returns
+    (stub, url): for `vllm` the `/v1` base a vllm_backend record names as its
+    `endpoint`; for `responses` the FULL `…/v1/responses` URL, as that backend's
+    `endpoint` takes it verbatim."""
     import socket
 
     with socket.socket() as s:
@@ -119,14 +121,15 @@ def start_stub(spec: dict, root: Path):
         stub.start()
         return stub, stub.url()
 
+    if "vllm" not in spec:
+        raise SystemExit(f"stub: name `vllm` or `responses`, got {sorted(spec)}")
     sys.path.insert(0, str(E2E / "parity"))
-    from stubs.anthropic_sse import AnthropicStub, Handler  # noqa: E402
+    from stubs.openai_chat import Handler, OpenAIChatStub  # noqa: E402
 
-    a = spec["anthropic"]
-    stub = AnthropicStub(_Rec(root), "stub", port)
-    stub.set_chain("scenario", a["chain"])
+    stub = OpenAIChatStub(_Rec(root), "stub", port)
+    stub.set_chain("scenario", spec["vllm"]["chain"])
     stub.start(Handler)
-    return stub, stub.url()
+    return stub, stub.base_url()
 
 
 def rows(store: Path) -> int:
@@ -224,6 +227,11 @@ def main(argv: list[str]) -> int:
             r = subprocess.run([str(rig), str(binary), str(script), str(frames_dir)],
                                env=env, capture_output=True, text=True, timeout=180)
             out = r.stdout + r.stderr
+            # E2E_TUI_FRAMES=<dir>: keep each run's frames there (debugging a script)
+            if keep := os.environ.get("E2E_TUI_FRAMES"):
+                import shutil
+
+                shutil.copytree(frames_dir, Path(keep) / path.parent.name / name, dirs_exist_ok=True)
             bad = []
             for label, want in (run.get("frames") or {}).items():
                 hits = sorted(frames_dir.glob(f"*_{label}.txt"))

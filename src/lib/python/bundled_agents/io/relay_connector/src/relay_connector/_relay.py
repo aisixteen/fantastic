@@ -44,8 +44,29 @@ from io_bridge import (
     decode_frame,
     encode_frame,
 )
+from kernel._refusal import UNAUTHORIZED, refusal
 
 SUBPROTOCOL = "fantastic.relay.v1"
+
+# THE RELAY SEAL (owner, 2026-10-02). relayd dispatches every tunneled frame into
+# its own kernel and records it UNMASKED, so a secret that crossed a relay leg
+# would sit in the relay's ledger in full. Until relayd masks what it records, a
+# relay leg refuses any call carrying secret marks, in both directions: outbound
+# in `tools._forward`, inbound in `RelayTransport.recv`. ws_bridge (direct WS) is
+# not sealed. One text for both.
+SECRET_SEALED = (
+    "relay_connector: a call carrying secret marks may not cross a relay leg — "
+    "the relay records every frame it routes, unmasked"
+)
+SECRET_SEALED_HINT = "reach that kernel over a direct ws_bridge leg to send a secret"
+
+
+def secret_sealed() -> dict:
+    """The relay seal's refusal — outbound to the local caller, inbound as the
+    reply to the far caller."""
+    return refusal(UNAUTHORIZED, SECRET_SEALED, hint=SECRET_SEALED_HINT)
+
+
 DEFAULT_HEARTBEAT = 30.0
 DEFAULT_RECONNECT = 10.0
 MAX_FRAME = 2**24
@@ -347,6 +368,30 @@ class RelayTransport(_BaseTransport):
                     return {"type": "event", "payload": payload}
                 # A tunnel delivery FROM our partner — the inner bridge frame.
                 if source == self._partner:
+                    if payload.get("type") == "call" and "secret" in payload:
+                        # THE RELAY SEAL, inbound: the frame already crossed the
+                        # relay, and nothing here dispatches it — the far caller is
+                        # answered with the seal's refusal.
+                        # TODO(relay seal): lift once relayd masks what it records.
+                        # The fix is in relayd (../fantastic_relay): when it
+                        # dispatches a tunneled frame into its own kernel, re-root
+                        # the inner frame's `secret` onto its delivery item
+                        # (`payload.<f>` -> `payload.payload.payload.<f>`), so its
+                        # rows, ledger and state stream show `<secret>`; and decide
+                        # how REPLY frames carry result marks — a `reply` names no
+                        # marks today, so the relay would record a secret result
+                        # in full.
+                        try:
+                            await self.send(
+                                {
+                                    "type": "reply",
+                                    "id": payload.get("id"),
+                                    "data": secret_sealed(),
+                                }
+                            )
+                        except ConnectionClosed:
+                            pass  # the socket dropped; the loop re-dials
+                        continue
                     return payload
             # any other peer / type → skip
         raise ConnectionClosed("relay_connector: closed")

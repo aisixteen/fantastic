@@ -1,6 +1,5 @@
 # WHAT to measure and HOW LONG to allow. Never a model, an endpoint, a key
-# or a backend name — those live in e2e/backends/. Runs on ANY backend plug:
-# `BACKEND=anthropic` and `BACKEND=responses` are the two this was written for.
+# or a backend name — those live in e2e/backends/. Runs on ANY backend plug.
 id: provider_contract
 group: backends
 title: "what ai_core needs from a provider, through a live AI agent: stream, stripped thinking, a <call> that runs, a visible cut, a real cancel"

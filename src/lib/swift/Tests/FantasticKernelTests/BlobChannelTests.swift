@@ -52,8 +52,10 @@ private struct Store: AgentBundle {
         }
     }
     func handleBinary(
-        agentId: AgentId, header: JSON, blob: Data, kernel: Kernel
+        agentId: AgentId, header: JSON, body: Blob?, kernel: Kernel
     ) async throws -> (JSON?, Data?) {
+        // the chunk is the payload's `bytes` — python's `payload.get("bytes", b"")`
+        let blob = bodyAt(body, "bytes") ?? Data()
         let path = header["path"].asString ?? ""
         switch header["type"].asString ?? "" {
         case "write_stream":
@@ -380,7 +382,7 @@ struct BlobChannelTests {
         // non-stream verb `{ok:true}` — but `Store` OVERRIDES handleBinary, so
         // the default is exercised through the root's own bundle instead.
         let out = await k.send([
-            Item(AgentId("kernel_state"), .object(["type": .string("boot")]), binary: Data())
+            Item(AgentId("kernel_state"), .object(["type": .string("boot")]), rawReply: true)
         ])[0]
         #expect(out.status != .failed, "\(out.result.serialize())")
         #expect(

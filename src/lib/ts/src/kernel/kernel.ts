@@ -17,6 +17,7 @@ import type { Item, Outcome } from "./outcome.ts";
 import { BAD_ARG, LOCKED, UNHANDLED, refusal, unknown } from "./refusal.ts";
 import { answerKernelVerb, isKernelVerb } from "./kernel_verbs.ts";
 import { authorizeCall, authorizeHeritable, denial } from "./authz.ts";
+import { check as checkSecret } from "./secret.ts";
 
 /**
  * The bridge transport (P2). The pure core depends only on this interface, so
@@ -26,10 +27,19 @@ import { authorizeCall, authorizeHeritable, denial } from "./authz.ts";
 export interface Bridge {
   /** `caller` is the QUALIFIED sender `<this kernel's guid>|<agent id>` (`kernel`
    *  for the operator), stamped on the call frame when this kernel has a guid —
-   *  a far side keys what the call writes by it. */
-  forward(target: string, payload: Payload, caller?: string): Promise<Json>;
+   *  a far side keys what the call writes by it. `secret` is the item's marked
+   *  paths (`secret.ts`; none when the item marked none), rooted at the item
+   *  exactly as the far kernel's item is rooted: the transport puts them on the
+   *  call frame verbatim — only when there are some — so the FAR kernel masks its
+   *  own records of the call too (python `PeerRoute.call`). */
+  forward(target: string, payload: Payload, caller?: string, secret?: readonly string[]): Promise<Json>;
   /** like forward, but the payload may carry a binary blob (Uint8Array). */
-  forwardBinary(target: string, payload: Record<string, unknown>, caller?: string): Promise<Json>;
+  forwardBinary(
+    target: string,
+    payload: Record<string, unknown>,
+    caller?: string,
+    secret?: readonly string[],
+  ): Promise<Json>;
   emitRemote(target: string, payload: Payload): void;
   watchRemote(src: string): void;
   unwatchRemote(src: string): void;
@@ -97,6 +107,15 @@ export class Kernel {
    * resource needs: a memory store keys every row by its writer.
    */
   readonly currentCaller: string | null = null;
+  /**
+   * THE SECRET PATHS of the call the dispatch now running serves — the `secret`
+   * its caller marked on the batch item (`payload.<field…>` / `result[.<field…>]`,
+   * `secret.ts`), as given; empty when none were marked (python
+   * `current_secret()`). Stamped on the dispatch's view like `currentCaller`, so
+   * the handler's own sends never inherit it. A bundle that must only ever be
+   * called WITH a mark (a credential store) reads it and refuses an unmarked call.
+   */
+  readonly currentSecret: readonly string[] = [];
   /**
    * The kernel's OWN traffic — the `shutdown` verbs of a stop, the flush, prune
    * and reads of its memory store. It passes the drain (python's
@@ -344,10 +363,13 @@ export class Kernel {
   }
 
   /** The view a dispatch runs under: its sends are the target's, parented to
-   *  its task, and it knows who called it. */
-  private dispatchView(targetId: string, taskId: number, caller: string | null): Kernel {
+   *  its task, and it knows who called it and which paths that caller marked
+   *  `secret` — stamped on EVERY dispatch view, so a nested dispatch never reads
+   *  its caller's marks through the prototype chain. */
+  private dispatchView(targetId: string, taskId: number, caller: string | null, secret: readonly string[]): Kernel {
     const view = this.scopedFor(targetId, taskId);
     Object.defineProperty(view, "currentCaller", { value: caller, enumerable: true });
+    Object.defineProperty(view, "currentSecret", { value: Object.freeze([...secret]), enumerable: true });
     return view;
   }
 
@@ -583,17 +605,28 @@ export class Kernel {
    * by the handler, so it cannot drift bundle by bundle.
    *
    * `shown` is the payload as the mirrors may see it (an item's `secret` paths,
-   * `secret.ts`); the handler gets `payload`.
+   * `secret.ts`); the handler gets `payload`. `secret` is those paths as the item
+   * gave them — a host-bound call carries them on its frame, a local handler
+   * reads them as `currentSecret`.
    */
-  async dispatch(targetId: string, payload: Payload, taskId: number, shown?: Payload): Promise<Json> {
+  async dispatch(
+    targetId: string,
+    payload: Payload,
+    taskId: number,
+    shown?: Payload,
+    secret: readonly string[] = [],
+  ): Promise<Json> {
     const id = this.resolve(targetId);
     const target = this.agents.get(id);
     const verb = str(payload, "type");
 
     if (target === undefined) {
       // FEDERATION: not ours, so it belongs to the host. `launch` already
-      // refused the no-bridge case, so a bridge is present here.
-      return (this.bridge as Bridge).forward(id, payload, this.qualifiedCaller());
+      // refused the no-bridge case, so a bridge is present here. The item's
+      // `secret` marks ride along: this kernel already records the call as
+      // shown, and the host must too — its rows, ledger and state stream are
+      // records of the SAME call (python `RemoteTarget`).
+      return (this.bridge as Bridge).forward(id, payload, this.qualifiedCaller(), secret);
     }
     // EVERY DISPATCH IS MIRRORED (python `_fanout(kind="send")`): the payload
     // lands in the target's own inbox and in every watcher's — which is what a
@@ -605,7 +638,7 @@ export class Kernel {
       return applyReflectFlags(this, target, payload, identity);
     }
     // `this` is the CALLER's view; the dispatch runs under the target's own.
-    const view = this.dispatchView(target.id, taskId, this.currentOrigin);
+    const view = this.dispatchView(target.id, taskId, this.currentOrigin, secret);
     // Kernel verbs act on the TABLE, the LEDGER and the LIFECYCLE, so they are
     // the root's to answer and the named agent is the operand — refused HERE, in
     // the handler, not in the gate.
@@ -650,23 +683,41 @@ export class Kernel {
     this.bridge?.emitRemote(this.resolve(targetId), payload);
   }
 
-  /** Call a REMOTE host agent with a binary-bearing payload (e.g. paste_image). */
-  forwardBinary(targetId: string, payload: Record<string, unknown>): Promise<Json> {
+  /** Call a REMOTE host agent with a binary-bearing payload (e.g. paste_image).
+   *  `secret` — marked paths, as on a batch item — rides the call frame. */
+  forwardBinary(targetId: string, payload: Record<string, unknown>, secret?: string[]): Promise<Json> {
     if (this.bridge === null) {
       return Promise.resolve({ error: `no bridge to forward to '${targetId}'` });
     }
     const id = this.resolve(targetId);
-    const refused = this.hostBoundRefusal(id, payload);
-    if (refused !== null) return Promise.resolve(refused);
-    return this.bridge.forwardBinary(id, payload, this.qualifiedCaller());
+    const checked = this.hostBound(id, payload, secret);
+    if ("refused" in checked) return Promise.resolve(checked.refused);
+    return this.bridge.forwardBinary(id, payload, this.qualifiedCaller(), checked.secret);
   }
 
-  /** An AGENT's host-bound call passes its own EGRESS gate before the bridge
-   *  sees a byte; the operator (no origin) is the root of trust. */
-  private hostBoundRefusal(targetId: string, payload: Record<string, unknown>): Payload | null {
-    if (this.currentOrigin === null) return null;
-    const verb = typeof payload["type"] === "string" ? payload["type"] : "";
-    return this.egressGate(this.currentOrigin, verb, targetId);
+  /**
+   * The checks a host-bound call passes before the bridge sees a byte: its
+   * `secret` marks are validated exactly as a batch item's (`secret.ts` — a
+   * malformed or typo'd mark is refused `bad_arg`, so the value it meant to hide
+   * never leaves), then an AGENT's own EGRESS gate (the operator, with no origin,
+   * is the root of trust). Answers the refusal, or the marks for the frame.
+   *
+   * These calls bypass the batch, so this kernel keeps no record of them to
+   * mask: the marks matter on the frame, where the host records the call.
+   */
+  private hostBound(
+    targetId: string,
+    payload: Record<string, unknown>,
+    secret: string[] | undefined,
+  ): { refused: Payload } | { secret: readonly string[] } {
+    const [marks, bad] = checkSecret({ secret }, payload as Payload);
+    if (bad !== null) return { refused: bad };
+    if (this.currentOrigin !== null) {
+      const verb = typeof payload["type"] === "string" ? payload["type"] : "";
+      const denied = this.egressGate(this.currentOrigin, verb, targetId);
+      if (denied !== null) return { refused: denied };
+    }
+    return { secret: marks !== null ? marks.paths : [] };
   }
 
   /** Call the HOST directly over the bridge, bypassing LOCAL resolution. The
@@ -674,14 +725,15 @@ export class Kernel {
    *  plain `send("kernel", …)` would dispatch locally; this forwards the
    *  LITERAL target so the HOST resolves `"kernel"` to ITS OWN root
    *  (`kernel_state` on python, `core` on rust/swift). Used to create host peers +
-   *  read the host bundle catalog without the frontend naming a host id. */
-  callHost(target: string, payload: Payload): Promise<Json> {
+   *  read the host bundle catalog without the frontend naming a host id.
+   *  `secret` — marked paths, as on a batch item — rides the call frame. */
+  callHost(target: string, payload: Payload, secret?: string[]): Promise<Json> {
     if (this.bridge === null) {
       return Promise.resolve({ error: `no bridge to reach host '${target}'` });
     }
-    const refused = this.hostBoundRefusal(target, payload);
-    if (refused !== null) return Promise.resolve(refused);
-    return this.bridge.forward(target, payload, this.qualifiedCaller());
+    const checked = this.hostBound(target, payload, secret);
+    if ("refused" in checked) return Promise.resolve(checked.refused);
+    return this.bridge.forward(target, payload, this.qualifiedCaller(), checked.secret);
   }
 
   /** connect/disconnect notifications for a remote endpoint's socket. */

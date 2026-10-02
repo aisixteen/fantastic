@@ -9,20 +9,40 @@
 //! ```
 //!
 //! The header is the envelope with the bytes value replaced by `null` and a
-//! `_binary_path: "<dotted.path>"` naming where it lived; the receiver reconstructs by
-//! reading the trailing M bytes as the body. A frame with NO bytes is plain UTF-8 JSON.
-//! This is how raw bytes ride the wire WITHOUT base64.
+//! `_binary_path` naming where it lived; the receiver reconstructs by reading the
+//! trailing M bytes as the body. A frame with NO bytes is plain UTF-8 JSON. This is
+//! how raw bytes ride the wire WITHOUT base64.
+//!
+//! `_binary_path` is a JSON ARRAY of steps from the envelope root: a STRING step is
+//! an object key, taken literally (a key may hold `.`); an INTEGER step is a list
+//! index. `["payload", "bytes"]`, `["payload", "a.b"]` (the top-level payload key
+//! `"a.b"`), `["data", "items", 0, "data"]`. A dotted string could not tell the key
+//! `"a.b"` from the nested `a` → `b`, so it is refused ([`fantastic_bundle::path`]).
 //!
 //! Rust note vs python: `serde_json::Value` cannot hold a raw `&[u8]`, so here the JSON
 //! header and the raw body are carried SEPARATELY (python finds/restores the bytes value
-//! inside the dict; rust passes the body alongside). The **wire layout is identical**, so
-//! a rust leg and a python web_ws interoperate byte-for-byte.
+//! inside the dict; rust passes the body alongside, with the path it sits at — the
+//! kernel's `Blob`). The **wire layout is identical**, so a rust leg and a python web_ws
+//! interoperate byte-for-byte. Python's `set_path` is [`fantastic_bundle::path::set_path`].
 //!
 //! The text/binary split is carried by the TRANSPORT, not guessed here — every
 //! transport today is WS-based (web_ws, ws_bridge, relay_connector over the relay)
 //! and uses the WS frame type; the relay forwards the frame kind end-to-end.
 
+use fantastic_bundle::path::{set_path, steps_value, Step};
 use serde_json::Value;
+
+/// The verbs whose call rides the kernel's BINARY channel even when the frame
+/// carrying it holds no bytes, chosen STATICALLY by verb (A11.9/A13.1) — on
+/// every leg that turns a wire call into a kernel send (web_ws, web_rest's JSON
+/// leg, the bridge's inbound calls), so every client gets the same answer.
+///
+/// Python needs no such list: its reply dict simply holds a `bytes` value and
+/// `encode_frame` finds it. A `serde_json::Value` cannot, so the carrier is the
+/// item's binary channel and the decision has to be made from the verb: a
+/// `read_stream` reply is raw bytes whatever leg asked, and a `write_stream`
+/// whose `bytes` is a JSON value is `missing_arg` with nothing written.
+pub const BINARY_EDGE_VERBS: [&str; 2] = ["read_stream", "write_stream"];
 
 /// Encode ONE envelope for a TEXT frame — python `encode_frame`'s text half,
 /// `json.dumps(envelope, default=str)`: `, ` / `: ` separators and
@@ -32,11 +52,16 @@ pub fn encode_frame(envelope: &Value) -> String {
     fantastic_bundle::py_json_dumps(envelope, true, None)
 }
 
-/// Encode a binary frame `[4B len | header | body]`. `header` should already carry the
-/// `_binary_path` marker (and `null` at that path) per the convention above so the
-/// receiver can place the body.
-pub fn encode_binary_frame(header: &Value, body: &[u8]) -> Vec<u8> {
-    let head = encode_frame(header).into_bytes();
+/// Encode a binary frame `[4B len | header | body]` — python `encode_frame`'s binary
+/// half. `header` is the envelope holding `null` where the body belongs; `path` is
+/// that slot's steps from the envelope root, written as `_binary_path` (a JSON array,
+/// last key of the header, as python's `head_obj["_binary_path"] = path` puts it).
+pub fn encode_binary_frame(header: &Value, path: &[Step], body: &[u8]) -> Vec<u8> {
+    let mut header = header.clone();
+    if let Value::Object(m) = &mut header {
+        m.insert("_binary_path".to_string(), steps_value(path));
+    }
+    let head = encode_frame(&header).into_bytes();
     let mut out = Vec::with_capacity(4 + head.len() + body.len());
     out.extend_from_slice(&(head.len() as u32).to_be_bytes());
     out.extend_from_slice(&head);
@@ -90,10 +115,31 @@ fn strict_numbers(v: &Value) -> Result<(), String> {
     }
 }
 
-/// Decode a binary frame → `(header, body)`. The header carries `_binary_path`; the body
-/// is the raw trailing bytes. Errors on a short / malformed frame. The header is
-/// parsed STRICTLY ([`loads`]).
-pub fn decode_binary_frame(data: &[u8]) -> Result<(Value, Vec<u8>), String> {
+/// One decoded binary frame — python `decode_frame`'s result, split the way a
+/// `Value` needs it: the envelope with `_binary_path` popped and `null` placed in
+/// the body's slot, the slot's steps, and the raw body beside them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BinaryFrame {
+    /// The envelope; `null` sits where python's dict holds the bytes.
+    pub head: Value,
+    /// Where the body belongs, from the envelope root. `None` when the header
+    /// named no slot (absent or `null`): python places no body then.
+    pub path: Option<Vec<Step>>,
+    /// The raw trailing bytes.
+    pub body: Vec<u8>,
+}
+
+/// Decode a binary frame `[4B len | header | body]` — python `decode_frame`. The
+/// header is parsed STRICTLY ([`loads`]); when it is an object its `_binary_path`
+/// is popped and the slot checked by placing `null` there
+/// ([`fantastic_bundle::path::set_path`] — every step must hold, exactly as
+/// python's placement of the bytes must).
+///
+/// # Errors
+/// A short / malformed frame, a header [`loads`] refuses, or
+/// `bad _binary_path <repr>: <why>` — python's text — for a path that names no
+/// slot (the old dotted string included).
+pub fn decode_binary_frame(data: &[u8]) -> Result<BinaryFrame, String> {
     if data.len() < 4 {
         return Err("binary frame: shorter than the 4-byte length prefix".into());
     }
@@ -101,64 +147,23 @@ pub fn decode_binary_frame(data: &[u8]) -> Result<(Value, Vec<u8>), String> {
     if data.len() < 4 + h {
         return Err("binary frame: header length exceeds the frame".into());
     }
-    let header: Value = loads_slice(&data[4..4 + h])?;
+    let mut head: Value = loads_slice(&data[4..4 + h])?;
     let body = data[4 + h..].to_vec();
-    Ok((header, body))
-}
-
-/// Resolve one python list index: `int(p)` plus python's negative indexing.
-/// `Err` for a non-int spelling or an out-of-range index — python raises
-/// `ValueError` / `IndexError` for both, and `decode_frame` turns either into
-/// the one malformed-frame error.
-fn list_index(part: &str, len: usize) -> Result<usize, String> {
-    let n: i64 = part
-        .parse()
-        .map_err(|_| format!("list index {part:?} is not an int"))?;
-    let i = if n < 0 { n + len as i64 } else { n };
-    if i < 0 || i as usize >= len {
-        return Err(format!("list index {n} out of range"));
-    }
-    Ok(i as usize)
-}
-
-/// Set `value` at a dotted `path` in a JSON object/array (mirrors py `set_path`). Used to
-/// place the body back at `_binary_path` after decoding, or to null it before encoding.
-///
-/// FALLIBLE, like python's, which raises `KeyError`/`IndexError`/`TypeError`
-/// through `decode_frame` into one `ValueError` the read loop answers as a
-/// malformed frame. Rust used to return `()` and SILENTLY do nothing on an
-/// unplaceable path, so a frame naming `payload.nope.deep` was handled as if it
-/// were well-formed and the peer got a reply instead of the frame error.
-pub fn set_path(obj: &mut Value, path: &str, value: Value) -> Result<(), String> {
-    let parts: Vec<&str> = path.split('.').collect();
-    let mut cur = obj;
-    for p in &parts[..parts.len() - 1] {
-        cur = match cur {
-            Value::Array(a) => {
-                let i = list_index(p, a.len())?;
-                &mut a[i]
-            }
-            Value::Object(m) => m
-                .get_mut(*p)
-                .ok_or_else(|| format!("no key {p:?} on the way to {path:?}"))?,
-            _ => return Err(format!("{p:?} is not a container in {path:?}")),
-        };
-    }
-    let last = parts[parts.len() - 1];
-    match cur {
-        Value::Array(a) => {
-            let i = list_index(last, a.len())?;
-            a[i] = value;
-            Ok(())
-        }
-        Value::Object(m) => {
-            m.insert(last.to_string(), value);
-            Ok(())
-        }
-        _ => Err(format!(
-            "{last:?} does not name a settable slot in {path:?}"
-        )),
-    }
+    // `head.pop("_binary_path", None)`: JSON null is python's "absent".
+    let raw = match &mut head {
+        Value::Object(m) => m.shift_remove("_binary_path").filter(|p| !p.is_null()),
+        _ => None,
+    };
+    let path = match raw {
+        None => None,
+        Some(p) => Some(set_path(&mut head, &p, Value::Null).map_err(|why| {
+            format!(
+                "bad _binary_path {}: {why}",
+                fantastic_bundle::py_repr_value(&p)
+            )
+        })?),
+    };
+    Ok(BinaryFrame { head, path, body })
 }
 
 #[cfg(test)]
@@ -197,46 +202,173 @@ mod tests {
         assert!(decode_binary_frame(&wire).is_err());
     }
 
+    fn steps(v: Value) -> Vec<Step> {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|s| match s {
+                Value::String(k) => Step::Key(k.clone()),
+                n => Step::Index(n.as_u64().unwrap() as usize),
+            })
+            .collect()
+    }
+
+    /// The header a frame carries on the wire.
+    fn head_of(wire: &[u8]) -> Value {
+        let h = u32::from_be_bytes([wire[0], wire[1], wire[2], wire[3]]) as usize;
+        serde_json::from_slice(&wire[4..4 + h]).unwrap()
+    }
+
     #[test]
     fn binary_frame_round_trips_raw_bytes() {
-        let header =
-            json!({"type":"reply","id":"1","data":{"bytes":null},"_binary_path":"data.bytes"});
+        let header = json!({"type":"reply","id":"1","data":{"bytes":null}});
         let body: Vec<u8> = (0u8..=255).collect();
-        let wire = encode_binary_frame(&header, &body);
+        let wire = encode_binary_frame(&header, &steps(json!(["data", "bytes"])), &body);
         // 4-byte BE length prefix
         let h = u32::from_be_bytes([wire[0], wire[1], wire[2], wire[3]]) as usize;
         assert_eq!(&wire[4 + h..], &body[..]);
-        let (got_header, got_body) = decode_binary_frame(&wire).unwrap();
-        assert_eq!(got_header["_binary_path"], "data.bytes");
-        assert_eq!(got_body, body);
+        assert_eq!(head_of(&wire)["_binary_path"], json!(["data", "bytes"]));
+        let got = decode_binary_frame(&wire).unwrap();
+        assert_eq!(got.head, header, "the path is popped, the slot holds null");
+        assert_eq!(got.path, Some(steps(json!(["data", "bytes"]))));
+        assert_eq!(got.body, body);
     }
 
+    /// python `test_a_literal_dotted_key_round_trips_beside_its_nested_twin`.
     #[test]
-    fn set_path_places_body_at_binary_path() {
-        let mut env = json!({"type":"reply","data":{"bytes":null}});
-        set_path(&mut env, "data.bytes", json!("RESTORED")).unwrap();
-        assert_eq!(env["data"]["bytes"], "RESTORED");
+    fn a_literal_dotted_key_round_trips_beside_its_nested_twin() {
+        let env = json!({"type": "call", "id": "1", "target": "echo",
+                         "payload": {"type": "take", "a": {"b": "kept"}, "a.b": null}});
+        let wire = encode_binary_frame(&env, &steps(json!(["payload", "a.b"])), b"\x00raw\xff");
+        let head = head_of(&wire);
+        assert_eq!(head["_binary_path"], json!(["payload", "a.b"]));
+        assert_eq!(
+            head["payload"],
+            json!({"type": "take", "a": {"b": "kept"}, "a.b": null}),
+            "the null sits at the literal key; the nested twin is untouched"
+        );
+        let got = decode_binary_frame(&wire).unwrap();
+        assert_eq!(got.head, env);
+        assert_eq!(
+            got.path,
+            Some(vec![Step::from("payload"), Step::from("a.b")])
+        );
     }
 
-    /// python raises `KeyError`/`IndexError`/`TypeError` out of `set_path`, and
-    /// `decode_frame` turns each into the one malformed-frame `ValueError`. A
-    /// silent no-op here made a frame with an unplaceable `_binary_path` look
-    /// well-formed (A11.7 case f).
+    /// python `test_nested_list_and_odd_key_paths_round_trip`.
     #[test]
-    fn set_path_unresolvable_intermediate_errors() {
-        // missing intermediate key
-        let mut env = json!({"payload": {}});
-        assert!(set_path(&mut env, "payload.nope.deep", json!(1)).is_err());
-        // the holder is not a container
-        let mut env = json!({"payload": "text"});
-        assert!(set_path(&mut env, "payload.bytes", json!(1)).is_err());
-        // a non-int list index, and one past the end
-        let mut env = json!({"items": [1, 2]});
-        assert!(set_path(&mut env, "items.x", json!(1)).is_err());
-        assert!(set_path(&mut env, "items.5", json!(1)).is_err());
-        // python's negative indexing resolves
-        set_path(&mut env, "items.-1", json!(9)).unwrap();
-        assert_eq!(env["items"][1], 9);
+    fn nested_list_and_odd_key_paths_round_trip() {
+        for (env, path) in [
+            (json!({"data": {"bytes": null}}), json!(["data", "bytes"])),
+            (
+                json!({"data": {"items": [{"n": 1}, {"data": null}]}}),
+                json!(["data", "items", 1, "data"]),
+            ),
+            (json!({"payload": [null, "tail"]}), json!(["payload", 0])),
+            (json!({"payload": {"0": null}}), json!(["payload", "0"])),
+            (json!({"payload": {"": null}}), json!(["payload", ""])),
+            (
+                json!({"payload": {"a..b.": {"c.": null}}}),
+                json!(["payload", "a..b.", "c."]),
+            ),
+        ] {
+            let wire = encode_binary_frame(&env, &steps(path.clone()), b"\x01");
+            assert_eq!(head_of(&wire)["_binary_path"], path);
+            let got = decode_binary_frame(&wire).unwrap();
+            assert_eq!(got.head, env, "{path}");
+            assert_eq!(got.path, Some(steps(path)));
+            assert_eq!(got.body, b"\x01");
+        }
+    }
+
+    fn bin(head: &Value) -> Vec<u8> {
+        let h = serde_json::to_vec(head).unwrap();
+        let mut wire = (h.len() as u32).to_be_bytes().to_vec();
+        wire.extend_from_slice(&h);
+        wire.extend_from_slice(b"zz");
+        wire
+    }
+
+    /// python `test_a_path_with_no_slot_or_no_path_places_nothing`.
+    #[test]
+    fn a_frame_with_no_path_places_nothing() {
+        for head in [
+            json!({"type": "x"}),
+            json!({"type": "x", "_binary_path": null}),
+        ] {
+            let got = decode_binary_frame(&bin(&head)).unwrap();
+            assert_eq!(got.head, json!({"type": "x"}));
+            assert_eq!(got.path, None);
+        }
+    }
+
+    /// python `test_a_malformed_path_off_the_wire_is_one_value_error`: every bad
+    /// path is ONE error, `bad _binary_path <repr>: <why>`.
+    #[test]
+    fn a_malformed_path_off_the_wire_is_one_error() {
+        let cases: [(Value, &str, &str); 13] = [
+            (
+                json!("payload.bytes"),
+                "'payload.bytes'",
+                "not a list of steps",
+            ),
+            (json!([]), "[]", "an empty path names no slot"),
+            (
+                json!({"payload": "bytes"}),
+                "{'payload': 'bytes'}",
+                "not a list of steps",
+            ),
+            (json!([0]), "[0]", "step 0 at an object is not a string key"),
+            (
+                json!(["items", "0"]),
+                "['items', '0']",
+                "step '0' at a list is not a non-negative integer index",
+            ),
+            (
+                json!(["items", -1]),
+                "['items', -1]",
+                "step -1 at a list is not a non-negative integer index",
+            ),
+            (
+                json!(["items", true]),
+                "['items', True]",
+                "step True at a list is not a non-negative integer index",
+            ),
+            (
+                serde_json::from_str(r#"["items", 0.0]"#).unwrap(),
+                "['items', 0.0]",
+                "step 0.0 at a list is not a non-negative integer index",
+            ),
+            (
+                json!(["items", 2]),
+                "['items', 2]",
+                "index 2 is past the end of a list of 2",
+            ),
+            (json!(["nope", "x"]), "['nope', 'x']", "no key 'nope'"),
+            (
+                json!(["type", "x"]),
+                "['type', 'x']",
+                "step 'x' goes into a string, not a container",
+            ),
+            (
+                json!(["items", 0, "x"]),
+                "['items', 0, 'x']",
+                "step 'x' goes into a null, not a container",
+            ),
+            (
+                json!(["n", "x"]),
+                "['n', 'x']",
+                "step 'x' goes into a number, not a container",
+            ),
+        ];
+        for (path, repr, why) in cases {
+            let head =
+                json!({"type": "reply", "items": [null, null], "n": 1, "_binary_path": path});
+            assert_eq!(
+                decode_binary_frame(&bin(&head)).unwrap_err(),
+                format!("bad _binary_path {repr}: {why}")
+            );
+        }
     }
 
     #[test]

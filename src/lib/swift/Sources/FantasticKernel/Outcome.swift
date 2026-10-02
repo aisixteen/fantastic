@@ -53,6 +53,52 @@ public enum Status: String, Sendable {
     public var isRetryable: Bool { self == .failed || self == .timedOut }
 }
 
+/// A RAW BODY and the slot it sits at in its payload — python's `bytes` value
+/// inside the payload dict, which a `JSON` cannot hold. The bytes ride BESIDE the
+/// JSON (base64 is banned); `parts` say where python's dict holds them, so a
+/// handler finds its body under its own key (`data` for
+/// `exec_bridge.paste_image`, `bytes` for `file_bridge.write_stream`). Rust
+/// `fantastic_kernel::Blob`.
+///
+/// The slot is the STEPS python walks, never a string: a key is taken literally
+/// (web_rest's `X-Fantastic-Bytes-Field: a.b` binds the key `"a.b"`, python
+/// `payload[field] = body`), a list index is an integer — exactly the list a
+/// wire frame's `_binary_path` carries under its envelope's root.
+public struct Blob: Sendable, Equatable {
+    /// The steps from the payload to the body: `["bytes"]`, `["meta", "chunk"]`
+    /// (`meta` → `chunk`), one literal key with dots in it, `["a.b"]`, or a list
+    /// slot, `["items", 1, "data"]`.
+    public var parts: [PathStep]
+    /// The raw body.
+    public var bytes: Data
+
+    /// The body `bytes` at ONE top-level `key`, taken literally — `"a.b"` is the
+    /// key `"a.b"`.
+    public init(_ key: String, _ bytes: Data) {
+        self.parts = [.key(key)]
+        self.bytes = bytes
+    }
+
+    /// The body `bytes` at the slot `parts` names.
+    public init(parts: [PathStep], _ bytes: Data) {
+        self.parts = parts
+        self.bytes = bytes
+    }
+
+    /// The bytes when they sit at the top-level `key` — python's
+    /// `isinstance(payload.get(key), bytes)`: a handler asks for ITS key, and a
+    /// body placed under another key, or nested, is not its body.
+    public func at(_ key: String) -> Data? {
+        parts == [.key(key)] ? bytes : nil
+    }
+}
+
+/// The body a binary dispatch carries at the top-level `key`, if it carries one
+/// there.
+public func bodyAt(_ body: Blob?, _ key: String) -> Data? {
+    body?.at(key)
+}
+
 /// ONE item of a batch send.
 ///
 /// `id` NAMES the execution (ensure-semantics — see the ledger); `timeout` is
@@ -71,13 +117,22 @@ public struct Item: Sendable {
     public var timeout: Double?
     /// Optional retry budget for terminal failed/timed-out attempts.
     public var retries: UInt32?
-    /// Optional RAW request body. Present ⇒ the item rides the BINARY channel
-    /// (`AgentBundle.handleBinary`) instead of the text one, under the same task
-    /// row, ledger id, timeout and retries as any other item. Never base64: the
-    /// bytes travel beside the JSON header, not inside it. `sendWithBinary`
-    /// bypassed the batch entirely, so such a call had no task row, no ledger id
-    /// and no timeout (measured 2026-09-02).
-    public var binary: Data?
+    /// Optional RAW request body AND WHERE IT SITS in the payload — python's
+    /// payload dict holding a `bytes` value at that path (`data` for
+    /// `exec_bridge.paste_image`, `bytes` for `file_bridge.write_stream`).
+    /// Present ⇒ the item rides the BINARY channel (`AgentBundle.handleBinary`)
+    /// instead of the text one, under the same task row, ledger id, timeout and
+    /// retries as any other item. Never base64: the bytes travel beside the JSON
+    /// header, not inside it. A payload may name the slot (`null` there) to keep
+    /// python's key order on the call row and the watcher frame; the handler gets
+    /// the header without it. A path that names no slot of the payload is refused
+    /// before anything runs.
+    public var binary: Blob?
+    /// The caller reads the reply's chunk RAW (`Outcome.body`) — the item rides
+    /// the binary channel with NO request body. Python's reply dict holds `bytes`
+    /// natively; a request that sends none (`read_stream`) is a plain dict on the
+    /// call row and a text frame to a watcher.
+    public var rawReply: Bool
 
     /// The RAW (tag-typed) `exec_id`, when a caller is FORWARDING a value it
     /// did not itself parse — a model's `<exec_id>` argument, or a wire
@@ -108,7 +163,7 @@ public struct Item: Sendable {
     public init(
         _ target: AgentId, _ payload: JSON,
         id: String? = nil, timeout: Double? = nil, retries: UInt32? = nil,
-        binary: Data? = nil
+        binary: Blob? = nil, rawReply: Bool = false
     ) {
         self.target = target
         self.payload = payload
@@ -116,6 +171,7 @@ public struct Item: Sendable {
         self.timeout = timeout
         self.retries = retries
         self.binary = binary
+        self.rawReply = rawReply
     }
 
     /// Read an item off a wire frame's fields.
@@ -147,8 +203,10 @@ public struct Outcome: Sendable {
     /// distinction, exactly as python's `isinstance(reply["bytes"], bytes)`
     /// does; testing `isEmpty` instead served an empty file as JSON.
     ///
-    /// Only a binary item can set it (`Item.binary`), and only the bundle's
-    /// `handleBinary` fills it in.
+    /// Only a binary item can set it (`Item.binary` / `Item.rawReply`), and only
+    /// the bundle's `handleBinary` fills it in. A reply's chunk sits at the
+    /// reply's `bytes` key — the one key every python reply that carries bytes
+    /// uses (`read_stream`).
     public var body: Data?
 
     public init(

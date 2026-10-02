@@ -13,7 +13,7 @@ use axum::extract::FromRequestParts;
 use axum::http::{header, HeaderMap, HeaderValue, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use fantastic_bundle::py_json_dumps;
-use fantastic_kernel::{AgentId, Item};
+use fantastic_kernel::{AgentId, Blob, Item};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio::sync::RwLock as AsyncRwLock;
@@ -32,6 +32,16 @@ const AUTH_HEADER: &str = "x-fantastic-auth";
 const PAYLOAD_HEADER: &str = "x-fantastic-payload";
 /// Header naming the one bytes-valued field on an octet request/reply.
 const BYTES_FIELD_HEADER: &str = "x-fantastic-bytes-field";
+/// SECRET MARKS: the item's `secret` paths (`fantastic_kernel::secret`) ride
+/// `X-Fantastic-Secret` — dispatch metadata about the call, like the execution
+/// id, never part of the payload. The value is a JSON ARRAY of paths, the SAME
+/// value a ws/bridge `call` frame carries in its `secret` field: one parser (the
+/// strict wire `loads`), and the kernel's own check judges it. Not
+/// comma-separated — a path step is a payload key, and a key may hold a comma; a
+/// JSON string escapes any character into the ASCII a header value is safe in;
+/// and a wrong shape (a bare string, `[]`, a number) reaches the kernel's refusal
+/// verbatim instead of being re-invented by a splitter. Python `_SECRET_HEADER`.
+const SECRET_HEADER: &str = "x-fantastic-secret";
 
 /// One chunk of the file proxy, python's `length: 262144`.
 const CHUNK: u64 = 262_144;
@@ -242,7 +252,9 @@ async fn read_chunk(
         kernel2.send(vec![item]).await.remove(0)
     })
     .await;
-    (out.result, out.body)
+    // python takes the chunk at the reply's `bytes` key; one anywhere else is
+    // not a chunk
+    (out.result, out.body.and_then(|b| b.into_at("bytes")))
 }
 
 // ─── `POST /<rest_id>/{target_id}` ──────────────────────────────────
@@ -261,6 +273,22 @@ async fn rest_post(
     let exec_id = header_str(EXEC_ID_HEADER).filter(|v| !v.is_empty());
     let content_type = header_str(header::CONTENT_TYPE.as_str()).unwrap_or_default();
     let auth_token = header_str(AUTH_HEADER);
+    // SECRET MARKS: this kernel records the call as shown, exactly as for a local
+    // caller; a malformed mark is the kernel's own refusal. Read AFTER the gate
+    // (a sealed leg still answers 403 first) — python reads it where it builds
+    // the item. `Err` = the header is not JSON (STRICT, D13: python
+    // `strict_loads`).
+    let secret_marks = || -> Result<Option<Value>, String> {
+        header_str(SECRET_HEADER)
+            .map(|raw| fantastic_io_bridge::codec::loads(&raw))
+            .transpose()
+    };
+    let not_json = || {
+        json_error(
+            StatusCode::BAD_REQUEST,
+            "web_rest: X-Fantastic-Secret is not valid JSON",
+        )
+    };
 
     if content_type.starts_with(OCTET_CT) {
         // python `json.loads(headers.get(...) or "{}")` — an EMPTY header value
@@ -286,42 +314,42 @@ async fn rest_post(
                 "web_rest: X-Fantastic-Payload must be a JSON object",
             );
         };
-        // python binds the body under the NAMED field (`payload[field] = body`).
-        // The kernel's binary channel carries ONE blob, which the target reads
-        // as `bytes`, so the leg can only honour the default name: the body
-        // rides the blob when the field IS `bytes` (overwriting any header
-        // `bytes` key, as python's assignment does), and any other name sends
-        // NO request body with the header untouched — so the target sees the
-        // header's own `bytes` (any value ⇒ missing_arg) or none (empty chunk).
+        // python binds the body under the NAMED field (`payload[header or
+        // "bytes"] = body`) — ONE LITERAL TOP-LEVEL KEY, never a path: `a.b` is
+        // the key `"a.b"`, and a nested `a.b` the envelope already holds is left
+        // as sent (a WS frame's `_binary_path` names the same key `["payload",
+        // "a.b"]`). Each
+        // handler reads its OWN key (`paste_image` reads `data`, `write_stream`
+        // reads `bytes`). The kernel's binary channel carries the body under that
+        // key (`Item::with_binary_key`), so the target finds it exactly where
+        // python's dict holds it. The slot keeps its place (or is appended) —
+        // overwriting any header value there, as python's assignment does — so
+        // the call row lists the field where python's dict holds it. An absent
+        // or empty header is `bytes`.
         let field = header_str(BYTES_FIELD_HEADER)
             .filter(|v| !v.is_empty())
             .unwrap_or_else(|| "bytes".to_string());
-        let blob = if field == "bytes" {
-            // `payload[field] = body`: the slot keeps its place (or is appended),
-            // so the call row lists `bytes` where python's dict holds it.
-            obj.insert("bytes".to_string(), Value::Null);
-            Some(body)
-        } else {
-            None
-        };
+        obj.insert(field.clone(), Value::Null);
         let payload = Value::Object(obj);
         let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
         if let Some(denial) = rest_gate(&state, &owner, &target_id, verb, auth_token.as_deref()) {
             return denial;
         }
+        let Ok(secret) = secret_marks() else {
+            return not_json();
+        };
         // THROUGH THE BATCH, with the header's execution id NAMING the execution
         // (A13.3): python builds `{target, payload+bytes}`, sets `item["id"]`
         // from `X-Fantastic-Execution-Id` and calls `kernel.send([item])`, so a
         // repeated id on the same target REPLAYS instead of re-running.
         let kernel = Arc::clone(&state.kernel);
         let out = fantastic_kernel::send::with_sender(owner.clone(), async move {
-            let mut item = Item::new(target, payload);
-            item = match blob {
-                Some(b) => item.with_binary(b),
-                None => item.with_raw_reply(),
-            };
+            let mut item = Item::new(target, payload).with_binary_key(field, body);
             if let Some(id) = exec_id {
                 item = item.with_id(id);
+            }
+            if let Some(marks) = secret {
+                item = item.with_secret(marks);
             }
             kernel.send(vec![item]).await.remove(0)
         })
@@ -368,11 +396,17 @@ async fn rest_post(
     if let Some(denial) = rest_gate(&state, &owner, &target_id, verb, auth_token.as_deref()) {
         return denial;
     }
+    let Ok(secret) = secret_marks() else {
+        return not_json();
+    };
     let kernel = Arc::clone(&state.kernel);
     let out = fantastic_kernel::send::with_sender(owner.clone(), async move {
         let mut item = Item::new(target.clone(), payload);
         if let Some(id) = exec_id {
             item = item.with_id(id);
+        }
+        if let Some(marks) = secret {
+            item = item.with_secret(marks);
         }
         // A BINARY-EDGE VERB RIDES THE BINARY CHANNEL even on the JSON leg
         // (A13.1): python's `read_stream` reply holds real bytes whatever leg
@@ -382,7 +416,7 @@ async fn rest_post(
             .payload
             .get("type")
             .and_then(Value::as_str)
-            .is_some_and(|v| ws::BINARY_EDGE_VERBS.contains(&v));
+            .is_some_and(|v| fantastic_io_bridge::codec::BINARY_EDGE_VERBS.contains(&v));
         if binary_edge {
             item = item.with_raw_reply();
         }
@@ -392,22 +426,30 @@ async fn rest_post(
     octet_or_json(out.result, out.body)
 }
 
-/// The ONE reply-shape decision, shared by both REST legs: a reply that carries
-/// a CHUNK is octet (a 0-byte chunk included — an empty file is still a file),
-/// anything else is JSON. Python decides the same way, on whether the reply dict
-/// holds a `bytes` value; rust used to test `!out_body.is_empty()`, which served
-/// an empty file as JSON and hardcoded the field name.
-fn octet_or_json(reply: Value, body: Option<Vec<u8>>) -> Response {
+/// The ONE reply-shape decision, shared by both REST legs — python's
+/// `_first_bytes_field`: a reply whose chunk sits at a TOP-LEVEL key is octet (a
+/// 0-byte chunk included — an empty file is still a file), the header naming
+/// THAT key (`bytes` for a `read_stream`, `x.y` for a peer's reply that put it
+/// there); a reply with no chunk is JSON. Rust used to test
+/// `!out_body.is_empty()`, which served an empty file as JSON, and always named
+/// `bytes`.
+fn octet_or_json(reply: Value, body: Option<Blob>) -> Response {
     let Some(body) = body else {
         return json_reply(reply);
+    };
+    let field = match (body.path.as_slice(), reply.is_object()) {
+        ([fantastic_kernel::Step::Key(k)], true) => k.clone(),
+        // python: no top-level bytes field ⇒ `JSONResponse(reply)`, which cannot
+        // render bytes nested inside the reply.
+        _ => return no_json_form(),
     };
     // The bytes value never travels twice: `X-Fantastic-Payload` is the reply
     // MINUS the field, and `X-Fantastic-Bytes-Field` names it.
     let mut head = reply;
     if let Some(m) = head.as_object_mut() {
         // SHIFT, not swap: `Map::remove` moves the LAST key into the hole, so
-        // dropping `bytes` reordered the header python writes in place.
-        m.shift_remove("bytes");
+        // dropping the field reordered the header python writes in place.
+        m.shift_remove(&field);
     }
     routes::respond(
         StatusCode::OK,
@@ -416,13 +458,26 @@ fn octet_or_json(reply: Value, body: Option<Vec<u8>>) -> Response {
                 header::HeaderName::from_static(PAYLOAD_HEADER),
                 py_json_dumps(&head, true, None),
             ),
-            (
-                header::HeaderName::from_static(BYTES_FIELD_HEADER),
-                "bytes".to_string(),
-            ),
+            (header::HeaderName::from_static(BYTES_FIELD_HEADER), field),
         ],
         Some(OCTET_CT),
-        body,
+        body.bytes,
+    )
+}
+
+/// python `_json_reply`'s refusal: a reply holding bytes anywhere but a
+/// top-level key has no JSON form on this leg — a stated `transport_error`, 500.
+fn no_json_form() -> Response {
+    let r = fantastic_kernel::refusal::refusal_hint(
+        fantastic_kernel::refusal::TRANSPORT_ERROR,
+        "web_rest: the reply has no JSON representation on this leg",
+        "this verb answers with in-process objects; call it in-process, not over HTTP",
+    );
+    routes::respond(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        &[],
+        Some("application/json"),
+        r.to_string().into_bytes(),
     )
 }
 
@@ -642,36 +697,104 @@ fn rest_gate(
 
 // ─── the WS upgrade ─────────────────────────────────────────────────
 
-/// Hand the socket to [`ws::ws_loop`], then rewrite the `101` header block into
-/// uvicorn's order (`Upgrade, Connection, Sec-WebSocket-Accept, …, date,
-/// server`). RESIDUAL: python also negotiates `Sec-WebSocket-Extensions:
-/// permessage-deflate` and sends capitalised header names; neither survives
-/// hyper's writer, which lowercases every name and has no deflate codec.
+/// The upgrade, as uvicorn's websockets server answers it: axum checks the
+/// request (method, `Connection`, `Upgrade`, version, key — its own refusals),
+/// then `Sec-WebSocket-Extensions` is negotiated as python's
+/// `ServerPerMessageDeflateFactory()` does ([`ws_deflate::server_negotiate`]),
+/// and the `101` goes out in uvicorn's header order (`Upgrade, Connection,
+/// Sec-WebSocket-Accept, Sec-WebSocket-Extensions?, date, server`). The
+/// upgraded socket runs [`ws::ws_loop`] over a [`ws_deflate::DeflateStream`]
+/// carrying what was negotiated.
+///
+/// A header python cannot parse is its `400`, a compressor its zlib cannot
+/// build (a 256-byte server window) its `500` — each with python's body.
 async fn ws_upgrade(
     state: AppState,
     leg: AgentId,
     caps: Vec<String>,
     req: Request<Body>,
 ) -> Response {
+    use fantastic_io_bridge::ws_deflate::{self, Refused};
     let host = AgentId::from(caps.first().map(String::as_str).unwrap_or(""));
     let (mut parts, _body) = req.into_parts();
-    let upgrade =
-        match axum::extract::ws::WebSocketUpgrade::from_request_parts(&mut parts, &()).await {
-            Ok(u) => u,
-            Err(rej) => return rej.into_response(),
+    // the upgrade handle is shared (an `Arc`): axum takes its own copy to check
+    // the request is upgradable, and this one carries the socket
+    let on_upgrade = parts.extensions.get::<hyper::upgrade::OnUpgrade>().cloned();
+    if let Err(rej) = axum::extract::ws::WebSocketUpgrade::from_request_parts(&mut parts, &()).await
+    {
+        return rej.into_response();
+    }
+    let Some(on_upgrade) = on_upgrade else {
+        // axum refuses a request with no upgrade handle before this
+        return StatusCode::UPGRADE_REQUIRED.into_response();
+    };
+    let offers: Vec<String> = parts
+        .headers
+        .get_all(header::SEC_WEBSOCKET_EXTENSIONS)
+        .iter()
+        .map(|v| routes::latin1(v.as_bytes()))
+        .collect();
+    let offers: Vec<&str> = offers.iter().map(String::as_str).collect();
+    let negotiated = match ws_deflate::server_negotiate(&offers) {
+        Ok(n) => n,
+        Err(Refused::BadRequest(body)) => return handshake_refused(StatusCode::BAD_REQUEST, body),
+        Err(Refused::ServerError(body)) => {
+            return handshake_refused(StatusCode::INTERNAL_SERVER_ERROR, body)
+        }
+    };
+    let accept = parts
+        .headers
+        .get(header::SEC_WEBSOCKET_KEY)
+        .map(|k| tokio_tungstenite::tungstenite::handshake::derive_accept_key(k.as_bytes()));
+    let params = negotiated.as_ref().map(|(_, p)| *p);
+    tokio::spawn(async move {
+        let Ok(upgraded) = on_upgrade.await else {
+            return;
         };
-    let mut resp = upgrade.on_upgrade(move |socket| ws::ws_loop(state, socket, host, leg));
-    let accept = resp.headers().get(header::SEC_WEBSOCKET_ACCEPT).cloned();
+        let Ok(io) =
+            ws_deflate::DeflateStream::negotiated(hyper_util::rt::TokioIo::new(upgraded), params)
+        else {
+            return;
+        };
+        let socket = tokio_tungstenite::WebSocketStream::from_raw_socket(
+            io,
+            tokio_tungstenite::tungstenite::protocol::Role::Server,
+            None,
+        )
+        .await;
+        ws::ws_loop(state, socket, host, leg).await;
+    });
+    let mut resp = Response::new(Body::empty());
+    *resp.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
     let h = resp.headers_mut();
-    h.clear();
     h.insert(header::UPGRADE, HeaderValue::from_static("websocket"));
     h.insert(header::CONNECTION, HeaderValue::from_static("Upgrade"));
-    if let Some(a) = accept {
+    if let Some(a) = accept.and_then(|a| HeaderValue::from_str(&a).ok()) {
         h.insert(header::SEC_WEBSOCKET_ACCEPT, a);
+    }
+    if let Some(v) = negotiated.and_then(|(answer, _)| HeaderValue::from_str(&answer).ok()) {
+        h.insert(header::SEC_WEBSOCKET_EXTENSIONS, v);
     }
     if let Ok(v) = HeaderValue::from_str(&routes::http_date()) {
         h.insert(header::DATE, v);
     }
     h.insert(header::SERVER, HeaderValue::from_static("uvicorn"));
+    resp
+}
+
+/// python's aborted handshake (`legacy/server.py`): the status, `Date`,
+/// `Content-Length`, `Content-Type: text/plain`, `Connection: close` and the
+/// body — no `server` header.
+fn handshake_refused(status: StatusCode, body: String) -> Response {
+    let len = body.len();
+    let mut resp = Response::new(Body::from(body));
+    *resp.status_mut() = status;
+    let h = resp.headers_mut();
+    if let Ok(v) = HeaderValue::from_str(&routes::http_date()) {
+        h.insert(header::DATE, v);
+    }
+    h.insert(header::CONTENT_LENGTH, HeaderValue::from(len));
+    h.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/plain"));
+    h.insert(header::CONNECTION, HeaderValue::from_static("close"));
     resp
 }

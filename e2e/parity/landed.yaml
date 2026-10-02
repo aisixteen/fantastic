@@ -14,7 +14,11 @@
 # below. It is 459 items minus the 31 A6 terminal items (terminal_backend was deleted
 # 2026-09-28, merged into exec_bridge PTY jobs) minus the 15 A3 text_file items (text_file
 # was deleted 2026-09-29, its verbs moved to file_bridge) minus two per runtime (C35, the declared
-# `alias`, was deleted 2026-09-28), not a measurement — what the
+# `alias`, was deleted 2026-09-28) minus the 16 items about the AI backends deleted
+# 2026-10-01 (anthropic_backend, nvidia_nim_backend, llamacpp_backend — A15.4, B1.7,
+# B1.8, B1.13, B1.15, B1.16, B1.25, B2.9, B4.1, B4.2, B4.3, B4.4, B4.7, B4.8, B4.9,
+# B4.10; deleted from `tmp/py_parity_plan.md` and `proofs.yaml` on 2026-10-02, so
+# the plan's total no longer counts them), not a measurement — what the
 # harness measures is whether each claim survives its selector, and that is the
 # `pass` half of the status line. An item claimed here that produces a diff line
 # reads as a REGRESSION, which is the point of writing the claim down.
@@ -44,7 +48,7 @@
 version: 4
 
 
-# rust: 457 of 459; open: A14.14, C55
+# rust: 395 of 397; open: A14.14, C55
 rust:
   - A0.1
   - A0.2
@@ -281,23 +285,17 @@ rust:
   - A15.1
   - A15.2
   - A15.3
-  - A15.4
   - B1.1
   - B1.2
   - B1.3
   - B1.4
   - B1.5
   - B1.6
-  - B1.7
-  - B1.8
   - B1.9
   - B1.10
   - B1.11
   - B1.12
-  - B1.13
   - B1.14
-  - B1.15
-  - B1.16
   - B1.17
   - B1.18
   - B1.19
@@ -306,7 +304,6 @@ rust:
   - B1.22
   - B1.23
   - B1.24
-  - B1.25
   - B1.26
   - B2.1
   - B2.2
@@ -316,7 +313,6 @@ rust:
   - B2.6
   - B2.7
   - B2.8
-  - B2.9
   - B2.10
   - B2.11
   - B2.12
@@ -337,16 +333,8 @@ rust:
   - B3.8
   - B3.9
   - B3.10
-  - B4.1
-  - B4.2
-  - B4.3
-  - B4.4
   - B4.5
   - B4.6
-  - B4.7
-  - B4.8
-  - B4.9
-  - B4.10
   - B5.1
   - B5.2
   - B5.3
@@ -458,7 +446,7 @@ rust:
   - C89
   - C90
 
-# swift: 457 of 459; open: C75, C87
+# swift: 395 of 397; open: C75, C87
 swift:
   - A0.1
   - A0.2
@@ -696,23 +684,17 @@ swift:
   - A15.1
   - A15.2
   - A15.3
-  - A15.4
   - B1.1
   - B1.2
   - B1.3
   - B1.4
   - B1.5
   - B1.6
-  - B1.7
-  - B1.8
   - B1.9
   - B1.10
   - B1.11
   - B1.12
-  - B1.13
   - B1.14
-  - B1.15
-  - B1.16
   - B1.17
   - B1.18
   - B1.19
@@ -721,7 +703,6 @@ swift:
   - B1.22
   - B1.23
   - B1.24
-  - B1.25
   - B1.26
   - B2.1
   - B2.2
@@ -731,7 +712,6 @@ swift:
   - B2.6
   - B2.7
   - B2.8
-  - B2.9
   - B2.10
   - B2.11
   - B2.12
@@ -752,16 +732,8 @@ swift:
   - B3.8
   - B3.9
   - B3.10
-  - B4.1
-  - B4.2
-  - B4.3
-  - B4.4
   - B4.5
   - B4.6
-  - B4.7
-  - B4.8
-  - B4.9
-  - B4.10
   - B5.1
   - B5.2
   - B5.3

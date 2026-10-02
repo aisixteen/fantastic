@@ -46,7 +46,6 @@ from helpers.kernel import open_kernel  # noqa: E402
 
 BK = _resolve_backend()
 BACKEND, MODEL = BK.name, BK.model
-MAX_TOKENS_FIELD = int(os.environ.get("MAX_TOKENS") or 0) or None
 CTX = int(os.environ.get("CTX", "65536"))
 UNATTENDED = float(os.environ.get("UNATTENDED", "600"))
 W = 78
@@ -173,25 +172,10 @@ def _ai_record(agent_id: str, root, store, *, oracle: str, peers: list[str], des
             **{p: "*" for p in peers},
         },
     }
-    if BACKEND == "anthropic":
-        meta["handler_module"] = "anthropic_backend.tools"
-        if ep := os.environ.get("ENDPOINT"):
-            meta["endpoint"] = ep
-        if MAX_TOKENS_FIELD:
-            meta["max_tokens"] = MAX_TOKENS_FIELD
-        meta["model"] = MODEL
-    elif BACKEND == "llamacpp":
-        meta["handler_module"] = "llamacpp_backend.tools"
-        ep = os.environ.get("FANTASTIC_LLAMACPP_ENDPOINT")
-        if not ep:
-            raise SystemExit("FANTASTIC_LLAMACPP_ENDPOINT is unset — name the llama-server URL")
-        meta["endpoint"] = ep
-        meta["think"] = True
-    else:
-        # Every other plug describes ITSELF (e2e/backends) — see E30's `_ai_meta`.
-        # The probe's own wiring (grants, description) wins over the plug's.
-        for k, v in _resolve_backend(BACKEND).record().items():
-            meta.setdefault(k, v)
+    # The plug describes ITSELF (e2e/backends) — see E30's `_ai_meta`. The probe's
+    # own wiring (grants, description) wins over the plug's.
+    for k, v in _resolve_backend(BACKEND).record().items():
+        meta.setdefault(k, v)
     return meta
 
 

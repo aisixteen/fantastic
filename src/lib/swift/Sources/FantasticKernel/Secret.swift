@@ -20,12 +20,13 @@
 //
 // Not secret-able: `payload.type` — the verb is how every row is read.
 //
-// RAW BYTES. Python holds a binary item's body (and a binary reply's chunk) as a
-// `bytes` value under the top-level `bytes` key of the payload (the result).
-// Swift carries those bytes beside the JSON (`Item.binary`, `Outcome.body`), so
-// every path walk here sees them where python does: `payload.bytes` names the
-// item's blob, `result.bytes` the reply's body. A blob's secret VALUE is what
-// python's `str(bytes)` spells — its `b'…'` repr.
+// RAW BYTES. Python holds a binary item's body as a `bytes` value inside the
+// payload dict (at its path: `data` for `paste_image`, `bytes` for
+// `write_stream`), and a binary reply's chunk under the reply's `bytes` key. Swift
+// carries those bytes beside the JSON (`Item.binary` — a `Blob` naming its path —
+// and `Outcome.body`), so every path walk here sees them where python does:
+// `payload.<its path>` names the item's body, `result.bytes` the reply's. A
+// body's secret VALUE is what python's `str(bytes)` spells — its `b'…'` repr.
 
 import FantasticJSON
 import Foundation
@@ -47,7 +48,7 @@ public struct Secret: Sendable {
     /// Validate an item's `secret` (python `check`). Absent (or JSON null) ⇒
     /// nothing secret. A path the payload does not have is refused — a typo would
     /// otherwise record the value it meant to hide.
-    static func check(_ raw: JSON?, payload: JSON, blob: Data?) -> LaunchField<Secret?> {
+    static func check(_ raw: JSON?, payload: JSON, blob: Blob?) -> LaunchField<Secret?> {
         guard let raw, raw != .null else { return .ok(nil) }
         func bad(_ why: String) -> LaunchField<Secret?> {
             .refused(
@@ -93,8 +94,9 @@ public struct Secret: Sendable {
 
     /// The payload as recorded and shown: secret fields → placeholder, then every
     /// secret value scrubbed out of every string (python `shown_payload`). A
-    /// hidden `payload.bytes` drops the blob — the shown payload is text.
-    func shownPayload(_ payload: JSON, blob: Data?) -> ShownPayload {
+    /// hidden body (`payload.<its path>`) drops the blob — its slot holds the
+    /// placeholder, and the shown payload is text.
+    func shownPayload(_ payload: JSON, blob: Blob?) -> ShownPayload {
         var out = Carried(json: payload, blob: blob)
         for kp in payloadPaths { out = out.put(kp) }
         return ShownPayload(json: Secret.scrub(out.json, values), blob: out.blob)
@@ -105,7 +107,8 @@ public struct Secret: Sendable {
     /// text — the status string included, as python scrubs the whole outcome dict
     /// (python `shown_outcome`).
     func shownOutcome(status: String, result: JSON, body: Data?) -> ShownOutcome {
-        var res = Carried(json: result, blob: body)
+        // a reply's chunk sits at the reply's `bytes` key (`Outcome.body`)
+        var res = Carried(json: result, blob: body.map { Blob("bytes", $0) })
         var vals = values
         for kp in resultPaths {
             if let v = res.get(kp) { vals += secretStrings(v) }
@@ -114,7 +117,7 @@ public struct Secret: Sendable {
         let order = Secret.longestFirst(vals)
         return ShownOutcome(
             status: Secret.scrubText(status, order), result: Secret.scrub(res.json, vals),
-            body: res.blob)
+            body: res.blob?.bytes)
     }
 
     /// The answer to re-sending an execution whose record holds placeholders
@@ -190,12 +193,12 @@ public struct Secret: Sendable {
     }
 }
 
-/// A payload as recorded and shown. `blob` is the item's raw body when it is NOT
-/// secret (a watcher still receives it, as python's mirror carries the bytes);
-/// `nil` when there was none or `payload.bytes` hid it.
+/// A payload as recorded and shown. `blob` is the item's raw body (at its path)
+/// when it is NOT secret (a watcher still receives it, as python's mirror carries
+/// the bytes); `nil` when there was none or `payload.<its path>` hid it.
 struct ShownPayload: Sendable {
     let json: JSON
-    let blob: Data?
+    let blob: Blob?
 
     /// The fanout element — python publishes the shown dict, bytes and all.
     var inboxItem: InboxItem {
@@ -221,24 +224,32 @@ private enum Found {
 }
 
 /// A value as python holds it: the JSON, plus — for a binary item or reply — the
-/// raw bytes python keeps under its top-level `bytes` key.
+/// raw bytes python keeps inside it, at the blob's path (a reply's at `bytes`).
 private struct Carried {
     var json: JSON
-    var blob: Data?
+    var blob: Blob?
 
-    /// The blob is at `bytes` only when the value is a dict, as python's is.
-    private var hasBlob: Bool {
-        if blob == nil { return false }
-        if case .object = json { return true }
-        return false
+    /// The blob's path as a mark's keys, when the value is a dict holding one, as
+    /// python's is: a key as itself, a list index in its digits (python `_step`
+    /// indexes a list with a digit key).
+    private var blobKeys: [String]? {
+        guard let blob, case .object = json else { return nil }
+        return blob.parts.map {
+            switch $0 {
+            case .key(let k): return k
+            case .index(let i): return String(i)
+            }
+        }
     }
 
     /// python `_get`: `nil` when the path names nothing. Empty keys = the whole.
     func get(_ keys: [String]) -> Found? {
         if keys.isEmpty { return .whole(self) }
-        if hasBlob, keys[0] == "bytes" {
+        if let at = blobKeys, let blob, keys.count >= at.count,
+            zip(keys, at).allSatisfy({ $0 == $1 })
+        {
             // `_step(bytes, k)` — raw bytes have no fields.
-            return keys.count == 1 ? .blob(blob!) : nil
+            return keys.count == at.count ? .blob(blob.bytes) : nil
         }
         var cur = json
         for k in keys {
@@ -252,11 +263,12 @@ private struct Carried {
     /// as is); empty keys replace the whole value.
     func put(_ keys: [String]) -> Carried {
         if keys.isEmpty { return Carried(json: .string(Secret.placeholder), blob: nil) }
-        guard get(keys) != nil else { return self }
-        if hasBlob, keys[0] == "bytes", case .object(var o) = json {
-            // in place when the header held the key, appended otherwise
-            o["bytes"] = .string(Secret.placeholder)
-            return Carried(json: .object(o), blob: nil)
+        guard let found = get(keys) else { return self }
+        if case .blob = found, let blob {
+            // in place when the header held the slot, appended otherwise
+            var j = json
+            try? pySetPath(&j, parts: blob.parts, .string(Secret.placeholder))
+            return Carried(json: j, blob: nil)
         }
         return Carried(json: putInto(json, keys[...]), blob: blob)
     }
@@ -302,18 +314,21 @@ private func secretStrings(_ f: Found) -> [String] {
     case .json(let j): return jsonStrings(j)
     case .blob(let d): return [pyBytesRepr(d)]
     case .whole(let c):
+        // only a whole RESULT is markable (`result`), so the body is the reply's
+        // chunk at its top-level key — in the key's place, or last when the value
+        // has no slot for it
         guard let blob = c.blob, case .object(let o) = c.json else { return jsonStrings(c.json) }
         var out: [String] = []
         var placed = false
         for (k, v) in o {
-            if k == "bytes" {
-                out.append(pyBytesRepr(blob))
+            if blob.parts == [.key(k)] {
+                out.append(pyBytesRepr(blob.bytes))
                 placed = true
             } else {
                 out += jsonStrings(v)
             }
         }
-        if !placed { out.append(pyBytesRepr(blob)) }
+        if !placed { out.append(pyBytesRepr(blob.bytes)) }
         return out
     }
 }

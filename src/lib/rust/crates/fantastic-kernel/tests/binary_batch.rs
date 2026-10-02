@@ -36,15 +36,17 @@ impl Bundle for Sink {
         &self,
         _id: &AgentId,
         header: Value,
-        blob: Vec<u8>,
+        body: Option<fantastic_kernel::Blob>,
         _kernel: &Arc<Kernel>,
-    ) -> Result<(Reply, Option<Vec<u8>>), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(Reply, Option<fantastic_kernel::Blob>), Box<dyn std::error::Error + Send + Sync>>
+    {
+        let blob: Vec<u8> = body.map(|b| b.bytes).unwrap_or_default();
         // A READ answers a chunk; it never received one.
         if header.get("type").and_then(Value::as_str) == Some("read_stream") {
             return Ok((
                 Some(json!({"path": header.get("path").cloned(), "bytes": null,
                             "header_had_bytes": header.get("bytes").is_some()})),
-                Some(b"chunk".to_vec()),
+                Some(fantastic_kernel::Blob::key("bytes", b"chunk".to_vec())),
             ));
         }
         let n = blob.len();
@@ -94,7 +96,7 @@ async fn a_binary_item_reaches_the_binary_channel_with_a_real_pid() {
             AgentId::from("sink"),
             json!({"type": "write_stream", "path": "blob.bin"}),
         )
-        .with_binary(payload.clone())])
+        .with_binary_key("bytes", payload.clone())])
         .await
         .remove(0);
     assert_eq!(out.status, Status::Completed, "{:?}", out.result);
@@ -114,7 +116,7 @@ async fn a_named_binary_item_dedups_like_any_other() {
             json!({"type": "write_stream", "path": "a"}),
         )
         .with_id("job-b")
-        .with_binary(first.clone())])
+        .with_binary_key("bytes", first.clone())])
         .await
         .remove(0);
     assert_eq!(out.result["written"], 3, "{}", out.result);
@@ -128,7 +130,7 @@ async fn a_named_binary_item_dedups_like_any_other() {
             json!({"type": "write_stream", "path": "a"}),
         )
         .with_id("job-b")
-        .with_binary(vec![9, 9, 9, 9, 9, 9])])
+        .with_binary_key("bytes", vec![9, 9, 9, 9, 9, 9])])
         .await
         .remove(0);
     assert_eq!(
@@ -159,7 +161,7 @@ async fn a_timed_binary_item_still_reaches_the_binary_channel() {
             json!({"type": "write_stream", "path": "answer"}),
         )
         .with_timeout(5.0)
-        .with_binary(payload.clone())])
+        .with_binary_key("bytes", payload.clone())])
         .await
         .remove(0);
     assert_eq!(out.status, Status::Completed, "{:?}", out.result);
@@ -200,7 +202,7 @@ async fn a_raw_reply_read_is_a_plain_call_on_the_row_and_to_watchers() {
         .with_raw_reply()])
         .await
         .remove(0);
-    assert_eq!(out.body.as_deref(), Some(&b"chunk"[..]), "{:?}", out.result);
+    assert_eq!(out.body_bytes(), Some(&b"chunk"[..]), "{:?}", out.result);
     assert_eq!(out.result["header_had_bytes"], false);
     let pid = out.pid.expect("an execution").0;
     let keys: Vec<String> = row_payload(&kernel, pid)
@@ -236,7 +238,7 @@ async fn a_write_keeps_the_bytes_slot_where_python_holds_it() {
             AgentId::from("sink"),
             json!({"type": "write_stream", "path": "a", "bytes": null, "truncate": true}),
         )
-        .with_binary(vec![7, 8, 9])])
+        .with_binary_key("bytes", vec![7, 8, 9])])
         .await
         .remove(0);
     assert_eq!(out.result["written"], 3, "{}", out.result);
@@ -250,5 +252,8 @@ async fn a_write_keeps_the_bytes_slot_where_python_holds_it() {
     let got = rx.try_recv().expect("mirrored");
     let wkeys: Vec<&String> = got.payload.as_object().unwrap().keys().collect();
     assert_eq!(wkeys, ["type", "path", "bytes", "truncate"]);
-    assert_eq!(got.body, Some(("bytes".to_string(), vec![7, 8, 9])));
+    assert_eq!(
+        got.body,
+        Some(fantastic_kernel::Blob::key("bytes", vec![7, 8, 9]))
+    );
 }

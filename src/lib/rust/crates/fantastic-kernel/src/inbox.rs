@@ -14,6 +14,7 @@
 //! An inbox exists iff a READER registered it (`Kernel::ensure_inbox`); nothing
 //! auto-vivifies one, so every queue here has someone draining it.
 
+use crate::outcome::Blob;
 use serde_json::Value;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -25,16 +26,17 @@ use tokio::sync::Notify;
 /// the inbox like any other field and a drainer encodes the queued dict straight
 /// through `encode_frame`. A `serde_json::Value` cannot hold bytes, so the rust
 /// carrier splits: `payload` is the head (null at the bytes field) and `body` is
-/// `(path, bytes)` — the dotted path WITHIN the payload where the value lived,
-/// which is exactly what `_binary_path` names once a drainer nests the payload in
-/// its own envelope. Without this half a watcher could never receive the binary
-/// frame python sends it.
+/// a [`Blob`] — the steps WITHIN the payload to where the value lived (a literal
+/// key stays one step), which is exactly what `_binary_path` names below
+/// `payload` once a drainer nests the payload in its own envelope. Without this
+/// half a watcher could never receive the binary frame python sends it.
 #[derive(Clone, Debug)]
 pub struct InboxItem {
     /// The payload dict. For a binary payload the bytes field is `null` here.
     pub payload: Value,
-    /// `(dotted path within `payload`, raw bytes)` for a payload carrying bytes.
-    pub body: Option<(String, Vec<u8>)>,
+    /// The raw bytes and their slot within `payload`, for a payload carrying
+    /// bytes.
+    pub body: Option<Blob>,
 }
 
 impl InboxItem {
@@ -47,12 +49,13 @@ impl InboxItem {
         }
     }
 
-    /// A payload whose `path` field held `bytes`; `payload` carries `null` there.
+    /// A payload whose `body.path` slot held the bytes; `payload` carries `null`
+    /// there.
     #[must_use]
-    pub fn binary(payload: Value, path: impl Into<String>, bytes: Vec<u8>) -> Self {
+    pub fn binary(payload: Value, body: Blob) -> Self {
         Self {
             payload,
-            body: Some((path.into(), bytes)),
+            body: Some(body),
         }
     }
 }
@@ -168,14 +171,13 @@ mod tests {
         let (tx, mut rx) = inbox(4);
         tx.send(InboxItem::binary(
             json!({"type": "write_stream", "bytes": null}),
-            "bytes",
-            vec![0xde, 0xad, 0xbe, 0xef],
+            Blob::key("bytes", vec![0xde, 0xad, 0xbe, 0xef]),
         ));
         let got = rx.try_recv().expect("one held");
         assert_eq!(got.payload["type"], "write_stream");
         assert_eq!(
             got.body,
-            Some(("bytes".to_string(), vec![0xde, 0xad, 0xbe, 0xef]))
+            Some(Blob::key("bytes", vec![0xde, 0xad, 0xbe, 0xef]))
         );
     }
 }

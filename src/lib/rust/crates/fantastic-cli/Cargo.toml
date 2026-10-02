@@ -16,6 +16,7 @@ fantastic-kernel = { path = "../fantastic-kernel" }
 fantastic-core = { path = "../bundles/fantastic-core" }
 fantastic-file = { path = "../bundles/fantastic-file" }
 fantastic-ram-store = { path = "../bundles/fantastic-ram-store" }
+fantastic-credential-store = { path = "../bundles/fantastic-credential-store" }
 fantastic-web = { path = "../bundles/fantastic-web" }
 fantastic-web-ws = { path = "../bundles/fantastic-web-ws" }
 fantastic-web-rest = { path = "../bundles/fantastic-web-rest" }
@@ -23,11 +24,13 @@ fantastic-scheduler = { path = "../bundles/fantastic-scheduler" }
 fantastic-static-loader = { path = "../bundles/fantastic-static-loader" }
 fantastic-ollama-backend = { path = "../bundles/fantastic-ollama-backend" }
 fantastic-bridge = { path = "../bundles/fantastic-bridge" }
-fantastic-nvidia-nim-backend = { path = "../bundles/fantastic-nvidia-nim-backend" }
-fantastic-anthropic-backend = { path = "../bundles/fantastic-anthropic-backend" }
 fantastic-responses-backend = { path = "../bundles/fantastic-responses-backend" }
 fantastic-vllm-backend = { path = "../bundles/fantastic-vllm-backend" }
-fantastic-llamacpp-backend = { path = "../bundles/fantastic-llamacpp-backend" }
+# Apple's on-device model, in BOTH tiers and on every target (as swift registers
+# it): on macOS its build links the swift FantasticFMBridge static library — no
+# subprocess, no dlopen at run time, so the sandboxed tier may carry it; on every
+# other target nothing is linked and a send is refused naming the platform.
+fantastic-foundation-models-backend = { path = "../bundles/fantastic-foundation-models-backend" }
 fantastic-cli-bundle = { path = "../bundles/fantastic-cli-bundle" }
 # TEST-ONLY fixture agents the shared e2e scenarios name. OPTIONAL and
 # off by default — a production binary carries none of it.

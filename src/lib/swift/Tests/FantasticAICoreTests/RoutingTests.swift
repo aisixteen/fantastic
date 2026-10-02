@@ -496,7 +496,7 @@ struct RoutingTests {
         ])
         var cfg = scriptedConfig(["mock": script])
         cfg.makeProvider = { _, _, _ in
-            .provider(MockProvider(script: script, throwsError: true))
+            MockProvider(script: script, throwsError: true)
         }
         let (kernel, ids, _) = await bootMockKernel(config: cfg, backendIds: ["mock"])
         _ = await kernel.send([Item(ids["mock"]!, .object([
@@ -804,7 +804,7 @@ struct RoutingTests {
             selfId: id, kernel: kernel,
             text: callEnvelope(target: "slowpoke", payload: .object(["type": .string("crawl")])),
             clientId: "c", sendTo: nil, systemPrompt: nil, incoming: "",
-            sendTimeout: 0.1)
+            sendTimeout: 0.1, modelWindow: AIConstants.DEFAULT_CONTEXT_WINDOW)
         #expect(
             await script.waitForCalls(1),
             "the timed-out call produced no block at all — the batch hung")
@@ -1039,7 +1039,7 @@ struct RoutingTests {
         await seedStub(kernel, "meter", "echo.tools")
         await routeReply(
             selfId: AgentId("ai"), kernel: kernel, text: stubCall("meter"), clientId: "cli",
-            sendTo: nil, systemPrompt: nil, incoming: "", sendTimeout: 180.0)
+            sendTo: nil, systemPrompt: nil, incoming: "", sendTimeout: 180.0, modelWindow: AIConstants.DEFAULT_CONTEXT_WINDOW)
 
         // The router returned while the delivery is still running…
         #expect(sent.messages().isEmpty, "the router must not wait for the handoff")
@@ -1090,7 +1090,7 @@ struct RoutingTests {
         #expect(body.hasSuffix(REFLECT_NUDGE), "the nudge is inside the held body, so it is inside the size")
         #expect(
             AIContext.estimateOne(.object(["role": .string("user"), "content": .string(body)]))
-                > AIContext.inlineCap(kernel.agent(id)!))
+                > AIContext.inlineCap(kernel.agent(id)!, modelWindow: AIConstants.DEFAULT_CONTEXT_WINDOW))
         let stub =
             "(settled, \(body.unicodeScalars.count) bytes — NOT inlined, held in memory only "
             + "until this agent restarts. origin: mock reflect {} — re-send it; the output may differ. "
@@ -1164,7 +1164,7 @@ struct RoutingTests {
         let route = Task {
             await routeReply(
                 selfId: AgentId("ai"), kernel: kernel, text: text, clientId: "cli",
-                sendTo: nil, systemPrompt: nil, incoming: "", sendTimeout: 180.0)
+                sendTo: nil, systemPrompt: nil, incoming: "", sendTimeout: 180.0, modelWindow: AIConstants.DEFAULT_CONTEXT_WINDOW)
         }
         var inFlight: Set<String> = []
         for _ in 0..<100 {
@@ -1200,7 +1200,7 @@ struct RoutingTests {
         let text = stubCall("meter") + stubCall("totals", replyTo: "scribe") + stubCall("readings")
         await routeReply(
             selfId: AgentId("ai"), kernel: kernel, text: text, clientId: "cli",
-            sendTo: nil, systemPrompt: nil, incoming: "", sendTimeout: 180.0)
+            sendTo: nil, systemPrompt: nil, incoming: "", sendTimeout: 180.0, modelWindow: AIConstants.DEFAULT_CONTEXT_WINDOW)
 
         let byDest = Dictionary(
             await sent.settled(2).map { ($0.0, $0.1["text"].asString ?? "") },
@@ -1224,7 +1224,7 @@ struct RoutingTests {
         let text = stubCall("meter") + stubCall("totals", replyTo: .some(nil))
         await routeReply(
             selfId: AgentId("ai"), kernel: kernel, text: text, clientId: "cli",
-            sendTo: nil, systemPrompt: nil, incoming: "", sendTimeout: 180.0)
+            sendTo: nil, systemPrompt: nil, incoming: "", sendTimeout: 180.0, modelWindow: AIConstants.DEFAULT_CONTEXT_WINDOW)
 
         #expect(Set(echo.answered().map(\.0)) == ["meter", "totals"], "the discarded call still ran")
         let delivered = await sent.settled(1)
@@ -1255,7 +1255,7 @@ struct RoutingTests {
         let text = stubCall("hung") + stubCall("meter") + renderCall("send", own)
         await routeReply(
             selfId: AgentId("ai"), kernel: kernel, text: text, clientId: "cli",
-            sendTo: nil, systemPrompt: nil, incoming: "", sendTimeout: 0.1)
+            sendTo: nil, systemPrompt: nil, incoming: "", sendTimeout: 0.1, modelWindow: AIConstants.DEFAULT_CONTEXT_WINDOW)
 
         let body = (await sent.settled(1)).first?.1["text"].asString ?? ""
         let blocks = body.components(separatedBy: "\n\n")
@@ -1288,7 +1288,7 @@ struct RoutingTests {
         args["payload"] = .object(["type": .string("withdraw")])
         await routeReply(
             selfId: AgentId("ai"), kernel: kernel, text: renderCall("send", args), clientId: "cli",
-            sendTo: nil, systemPrompt: nil, incoming: "", sendTimeout: 42.0)
+            sendTo: nil, systemPrompt: nil, incoming: "", sendTimeout: 42.0, modelWindow: AIConstants.DEFAULT_CONTEXT_WINDOW)
 
         let jid = try #require(kernel.ledger.resolveName("job-alpha"), "the exec_id opened no named execution")
         let row = try #require(kernel.ledger.entry(jid))
@@ -1314,7 +1314,7 @@ struct RoutingTests {
         args["payload"] = .object(["type": .string("withdraw")])
         await routeReply(
             selfId: AgentId("ai"), kernel: kernel, text: renderCall("send", args), clientId: "cli",
-            sendTo: nil, systemPrompt: nil, incoming: "", sendTimeout: 42.0)
+            sendTo: nil, systemPrompt: nil, incoming: "", sendTimeout: 42.0, modelWindow: AIConstants.DEFAULT_CONTEXT_WINDOW)
         #expect(
             echo.answered().isEmpty,
             "a bad timeout must refuse before dispatch, never reach the target")
@@ -1337,7 +1337,7 @@ struct RoutingTests {
         opener["payload"] = .object(["type": .string("withdraw")])
         await routeReply(
             selfId: AgentId("ai"), kernel: kernel, text: renderCall("send", opener), clientId: "cli",
-            sendTo: nil, systemPrompt: nil, incoming: "", sendTimeout: 42.0)
+            sendTo: nil, systemPrompt: nil, incoming: "", sendTimeout: 42.0, modelWindow: AIConstants.DEFAULT_CONTEXT_WINDOW)
         let jid = try #require(kernel.ledger.resolveName("job-int"))
 
         var joiner: OrderedDictionary<String, JSON> = ["target_id": .string("vault")]
@@ -1346,7 +1346,7 @@ struct RoutingTests {
         joiner["payload"] = .object(["type": .string("withdraw")])
         await routeReply(
             selfId: AgentId("ai"), kernel: kernel, text: renderCall("send", joiner), clientId: "cli",
-            sendTo: nil, systemPrompt: nil, incoming: "", sendTimeout: 42.0)
+            sendTo: nil, systemPrompt: nil, incoming: "", sendTimeout: 42.0, modelWindow: AIConstants.DEFAULT_CONTEXT_WINDOW)
         #expect(echo.answered().count == 1, "the int exec_id must JOIN, not open a second dispatch")
         let bodies = (await sent.settled(2)).map { $0.1["text"].asString ?? "" }
         #expect(bodies.allSatisfy { $0.hasPrefix("[reply to \(jid) ") }, "\(bodies)")
@@ -1373,7 +1373,7 @@ struct RoutingTests {
         // …and each copy REALLY reaches its recipient, carrying the same fields.
         await routeReply(
             selfId: AgentId("ai"), kernel: kernel, text: call, clientId: "cli",
-            sendTo: nil, systemPrompt: nil, incoming: "", sendTimeout: 42.0, messageId: 412)
+            sendTo: nil, systemPrompt: nil, incoming: "", sendTimeout: 42.0, modelWindow: AIConstants.DEFAULT_CONTEXT_WINDOW, messageId: 412)
         let landed = await sent.settled(2)
         let peers = landed.filter { ["solver_2", "solver_3"].contains($0.0) }
         #expect(Set(peers.map(\.0)) == ["solver_2", "solver_3"], "\(peers.map(\.0))")
@@ -1421,7 +1421,7 @@ struct RoutingTests {
         let script = ProviderScript([["waiting <call name=\"await\"></call>"], [doneEnvelope]])
         var cfg = scriptedConfig(["nd_aw2": script])
         cfg.makeProvider = { _, _, _ in
-            .provider(MockProvider(script: script, chunkDelayNanos: 300_000_000))
+            MockProvider(script: script, chunkDelayNanos: 300_000_000)
         }
         // Its own id (python's `nd_aw2`) for the same reason as the case above:
         // `pending` must be THIS agent's queue, not a sibling "mock"'s batch.

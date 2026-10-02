@@ -18,10 +18,10 @@ flags:
 - `bundles=all|ids|none` (default `none`)
   - `all`  — every installable bundle as `{name, handler_module}`, plus `schema`
     where the bundle publishes one: what that KIND's record takes, readable before
-    any agent of it exists — `{fields:[{name, type, required, enum?, default?, hint}],
-    key_var}` (`type` is `str|int|float|bool|enum|list|map`; `default` is the
-    bundle's own value and never present on a required field; `key_var` is the
-    environment variable the key is read from, `null` if none). The same schema is
+    any agent of it exists — `{fields:[{name, type, required, enum?, default?, hint}]}`
+    (`type` is `str|int|float|bool|enum|list|map|credentials`; `default` is the
+    bundle's own value and never present on a required field; a `credentials` field
+    is `{store, ref}` — where a backend reads its key, never the key). The same schema is
     what `create_agent`/`update_agent` enforce: a required field missing is refused
     at the write, every one named with its hint.
   - `ids`  — just the bundle names.

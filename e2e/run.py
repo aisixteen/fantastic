@@ -11,8 +11,8 @@ Three properties worth stating, because each replaces something that bit:
   * ONE VERDICT TOKEN. Probes print `E2E-VERDICT: PASS|FAIL`. A probe that
     prints none is reported `no verdict` — never guessed into a pass. The old
     five wording dialects meant a reworded probe silently became unscoreable.
-  * LANES ARE A SHARED RESOURCE. The GPU behind the proxy holds a fixed number
-    of sequences and other people's traffic shares it. `--lanes` is a promise
+  * LANES ARE A SHARED RESOURCE. The GPU behind the endpoint holds a fixed
+    number of sequences and other people's traffic shares it. `--lanes` is a promise
     about someone else's latency, not a throughput dial.
   * EVERY RUN KEEPS ITS LOG. `runs/<stamp>/<group>.<id>.log` holds the full
     transcript. A failure you cannot re-read is a failure you cannot diagnose —
@@ -268,7 +268,7 @@ _GUESSED_ENDPOINT = re.compile(
 
 def check_no_guessed_endpoints() -> list[str]:
     """No `os.environ.get(VAR, "http://…")` anywhere in the harness. A loopback
-    llama-server default survived in four files for weeks because it only fired in
+    model-server default survived in four files for weeks because it only fired in
     a branch nobody ran — until a probe copied it and every runtime failed on a
     server nobody wired (measured 2026-09-02). Loopback for the harness's OWN
     spawned kernel is fine; a guessed EXTERNAL endpoint is not."""
@@ -394,22 +394,6 @@ async def _run_one(t: dict, bk, logdir: Path, sem: asyncio.Semaphore, results: d
                 cmd = [*t["cmd"], *args]
                 cwd = str(CWDS[t["cwd_key"]])
                 env.update({k: str(v) for k, v in (t.get("extra_env") or {}).items()})
-                for var in (
-                    "ANTHROPIC_ENDPOINT",
-                    "ANTHROPIC_MODEL",
-                    "ANTHROPIC_API_KEY",
-                ):
-                    # The native suites read these names; the launcher is given
-                    # the python-side ones. Bridge them rather than making the
-                    # caller export both spellings.
-                    if var not in env:
-                        src = {
-                            "ANTHROPIC_ENDPOINT": "ENDPOINT",
-                            "ANTHROPIC_MODEL": "FANTASTIC_AI_MODEL",
-                            "ANTHROPIC_API_KEY": "ANTHROPIC_API_KEY",
-                        }[var]
-                        if val := os.environ.get(src):
-                            env[var] = val.replace("/messages", "")
             elif t["module"].suffix in (".js", ".mjs"):
                 cmd = ["node", str(t["module"]), *args]
                 cwd = str(E2E)
