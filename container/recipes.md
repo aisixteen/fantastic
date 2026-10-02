@@ -100,12 +100,13 @@ your project at `/work` so the shell sees your files.
 
 ## 3. AI chat with tool-use (agents as tools, emergent routing)
 
-**Build:** a chat panel to Claude / ollama / NVIDIA NIM; the model **calls other
-agents as tools** and routes its own output.
+**Build:** a chat panel to a vLLM server / an OpenAI Responses endpoint / ollama; the
+model **calls other agents as tools** and routes its own output.
 
 ```text
-HOST:      ai backend (anthropic_backend | ollama_backend | nvidia_nim_backend |
-             llamacpp_backend | responses_backend; endpoint + model on the record)
+HOST:      ai backend (vllm_backend | responses_backend | ollama_backend;
+             endpoint + model on the record — vllm also max_tokens, kv_slots,
+             kv_overflow)
              + ram_store (its conversation; memory_store_id=…)
 FRONTEND:  ai_view (chat panel)  ── by id ──▶ the backend
 ```
@@ -116,11 +117,17 @@ signature, so the model **routes its own result** (no `reply_to` primitive; 1:N
 falls out). Tell it the ids of an `exec_bridge` and a `file_bridge` and it calls them as
 tools. A recursion guard keeps AI→AI chains safe.
 
-**Hand to an LLM:** *"Create an `anthropic_backend` (key from env); attach an
-`ai_view`. Here are the ids of an exec_bridge and a notes file_bridge — use them
-as tools."*
+**Hand to an LLM:** *"Create a `vllm_backend` (endpoint, model, max_tokens, kv_slots,
+kv_overflow on its record; its key, if the server wants one: the `vllm` ref in the
+`creds` credential_store, named in `credentials`); attach an `ai_view`. Here are the
+ids of an exec_bridge and a notes file_bridge — use them as tools."*
 
-**⚠ Today:** fully ported. Pass the key at launch (`-e ANTHROPIC_API_KEY=…`). Durable
+**⚠ Today:** fully ported. No backend reads a key from the environment: create a
+`credential_store` and name its ref on the AI record (`credentials: {store, ref}`). In a
+container the store's `env` backend is the fit — pass the key at launch
+(`-e VLLM_API_KEY=…`) and map it: `refs: {vllm: {host: <endpoint>, env:
+{api_key: VLLM_API_KEY}, readers: [<ai id>]}}`. A vLLM server started without
+`--api-key` takes none: leave `credentials` off. Durable
 memory = files on a DATA `file_bridge` (`root=.fantastic/data allow='["."]'` — keep it
 apart from the `.fantastic` records store, which holds every agent's grants); the
 model decides what to save and recalls it on a fresh turn — judgment emerges, it

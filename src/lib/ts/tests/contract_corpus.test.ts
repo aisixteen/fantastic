@@ -595,6 +595,7 @@ const SKIP_SPECS: { [spec: string]: string } = {
   engine_smoke_bad_entry: `${LOADER}: the boot_error verdict is static_loader's (a file_bridge rule refused at the child's write), so PC-5 is its whole contract`,
   engine_smoke_unreadable_manifest: `${LOADER}: the refused_at_write verdict is static_loader's validate_meta reading the manifest path, so PC-5 is its whole contract`,
   exec_shell: "(c) exec_bridge — the process edge is a host bundle; this kernel spawns no processes, so every EXS requirement is the hosts'",
+  credential_store: "credential_store is a host bundle (py/rs/sw) — it keeps values in a 0600 file, the OS keychain or the environment, none of which a browser kernel has; CRED-1..5 are the hosts'",
   secret: "agentic corpus is py/rs/sw — the spec proves SEC-1..4 through the host file_bridge's `read`/`write` (the bytes land, are read back, and the ledger shows `<secret>`), verbs the file_bridge stand-in does not answer; this kernel's batch-send side of SEC-1..4 is pinned by tests/secret.test.ts",
 };
 
@@ -989,7 +990,7 @@ const EXPECTED = {
   // C18: only its PRECONDITIONS run here (the roster is live, the neighbour's
   // edge works) — the cascade itself is `delete_agent`, which this kernel lacks.
   partial: ["PC-3", "PC-4", "C15", "C18", "C20", "TSG-6"],
-  notApplicable: ["PC-5", "C17", "C23", "SUB-1", "SUB-3", "SUB-4", "SUB-5", "SUB-6", "EXS-1", "EXS-2", "EXS-3", "EXS-4", "EXS-5", "SEC-1", "SEC-2", "SEC-3", "SEC-4"],
+  notApplicable: ["PC-5", "C17", "C23", "SUB-1", "SUB-3", "SUB-4", "SUB-5", "SUB-6", "EXS-1", "EXS-2", "EXS-3", "EXS-4", "EXS-5", "SEC-1", "SEC-2", "SEC-3", "SEC-4", "CRED-1", "CRED-2", "CRED-3", "CRED-4", "CRED-5"],
   // Registry rows whose evidence is NOT in the data corpus: the registry itself
   // points at host test files (C1, C24) or at conformance/cases.json (C21, which
   // `c21_conformance.test.ts` replays against this kernel).

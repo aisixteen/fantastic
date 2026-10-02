@@ -125,3 +125,18 @@ requirements:
   - id: SEC-4
     level: MUST
     title: "a malformed secret mark is refused bad_arg before dispatch; payload.type can never be hidden"
+  - id: CRED-1
+    level: MUST
+    title: "a credential is stored only from a call that marks its values secret, and no record of that call carries them"
+  - id: CRED-2
+    level: MUST
+    title: "a credential is read only by a call that marks the answer secret, which is recorded as `<secret>`"
+  - id: CRED-3
+    level: MUST
+    title: "a ref answers only the agents its grant names — to anyone else it does not exist — and a listing shows metadata, never a value"
+  - id: CRED-4
+    level: MUST
+    title: "a read pinned to a host is refused unless the ref is bound to that host"
+  - id: CRED-5
+    level: MUST
+    title: "forget drops the value and the ref"

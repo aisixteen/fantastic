@@ -1,0 +1,34 @@
+[package]
+publish = false
+name = "fantastic-credential-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Credential store agent: secrets addressed by a ref, each bound to a host, read only with a secret mark, behind per-ref read/write grants; file (0600), OS keychain or env backend."
+
+[dependencies]
+# python-format helpers: repr/str/strip/json.dumps, python-canonical.
+fantastic-bundle = { path = "../../fantastic-bundle" }
+fantastic-kernel = { path = "../../fantastic-kernel" }
+# THE ONE DISK SURFACE: the file backend reads, stats and writes through `fs`
+# (python imports `file_bridge.fs` the same way).
+fantastic-file = { path = "../fantastic-file" }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+# getuid / getpwnam_r: the owner check on the credential file and `~` expansion.
+libc = { workspace = true }
+
+# THE OS KEYCHAIN — the `keychain` backend only, and only where this runtime has
+# one: macOS/iOS Keychain (`apple-native`), Windows Credential Manager
+# (`windows-native`). The backends MUST be named: with none, keyring 3 silently
+# answers from an in-memory mock store. Every other platform has no keychain
+# here and the backend fails LOUD naming it — never another store.
+[target.'cfg(any(target_os = "macos", target_os = "ios", target_os = "windows"))'.dependencies]
+keyring = { version = "3", features = ["apple-native", "windows-native"] }
+
+[dev-dependencies]
+# The kernel flushes its execution rows into a memory store; the ledger the
+# tests read back is that store's.
+fantastic-ram-store = { path = "../fantastic-ram-store" }
+tempfile = "3"
+tokio = { workspace = true, features = ["test-util", "macros"] }

@@ -9,7 +9,9 @@ and ships **raw** bridge frames. A local agent reaches a remote agent with:
         "payload": {"type": "reflect"},
     }}]))[0]["result"]
 
-The bridge sends `{type:'call', id, target, payload}`; B's `web_ws` dispatches it
+The bridge sends `{type:'call', id, target, payload, caller, secret?}` (`secret` =
+the forward call's own marks re-rooted at the forwarded item — `io_bridge`'s
+`forwarded_secret`); B's `web_ws` dispatches it
 via `kernel.send([{"target": target, "payload": payload}])` exactly like a browser call, and the matching
 `{type:'reply', id, data}` flows back. **No B-side bridge agent needed** — the
 bridge is an asymmetric client. Streaming uses `watch_remote` →

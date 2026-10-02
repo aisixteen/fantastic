@@ -13,14 +13,14 @@ extension Kernel {
     /// C34: the SAME refusal texts (+ `verb`) as the text channel — python has
     /// no separate binary dispatch at all, a binary frame runs through the
     /// same `_dispatch` resolution the text channel does.
-    func dispatchBinary(target: Agent, header: JSON, blob: Data) async -> (
+    func dispatchBinary(target: Agent, header: JSON, body: Blob?) async -> (
         JSON?, Data?, raised: Bool
     ) {
         let verb = header["type"].asString ?? ""
         // THE BYTES DO NOT CHANGE WHO ANSWERS. In python a payload carrying
         // `bytes` is an ordinary payload: `_dispatch` answers the kernel verbs,
         // the root's `reflect` (the substrate identity) and a bare agent exactly
-        // as it does without them. Only a bundle's own verb reads the blob.
+        // as it does without them. Only a bundle's own verb reads the body.
         // (Measured: an octet POST of `reflect` to the root answered the loader
         // bundle's reflect — its sentence and `root` — instead of the kernel's.)
         if Kernel.isSystemVerb(verb) || target.handlerModule == nil
@@ -37,7 +37,7 @@ extension Kernel {
         }
         do {
             let (r, b) = try await bundle.handleBinary(
-                agentId: target.id, header: header, blob: blob, kernel: self)
+                agentId: target.id, header: header, body: body, kernel: self)
             return (r, b, false)
         } catch {
             // An exception is a RESULT, exactly as the text channel's catch
@@ -151,7 +151,10 @@ extension Kernel {
         // identity and would otherwise never report its authority, so an agent
         // could not read what it may call or who may call it — only discover it
         // by trying. Same two keys the distilled tree nodes carry.
-        for k in ["can_call", "callable_by"] where obj[k] == nil {
+        // `holds_secrets` rides the same way: a SECRET HOLDER (a credential_store
+        // stamps it; an operator may set it on any agent) says so on its reflect,
+        // because ai_core refuses every model-parsed call that names it.
+        for k in ["can_call", "callable_by", "holds_secrets"] where obj[k] == nil {
             if let v = target.metaValue(forKey: k) { obj[k] = v }
         }
 
@@ -584,12 +587,14 @@ extension Kernel {
     /// COMPLETES — `cancelTask` no-ops on a finished id.
     func runDispatchOutcome(
         target: Agent, payload: JSON, verb: String, taskOut: TaskIdBox?,
-        timeout: Deadline?, taskId: TaskId, binary: Data?, shown: ShownPayload?
+        timeout: Deadline?, taskId: TaskId, binary: Blob?, rawReply: Bool,
+        shown: ShownPayload?, secretPaths: [String]
     ) async -> (JSON, Status, Data?) {
         guard let deadline = timeout else {
             let end = await runDispatch(
                 target: target, payload: payload, verb: verb, taskOut: taskOut,
-                taskId: taskId, binary: binary, shown: shown)
+                taskId: taskId, binary: binary, rawReply: rawReply, shown: shown,
+                secretPaths: secretPaths)
             let (reply, status) = classify(end)
             return (reply, status, end.body)
         }
@@ -614,7 +619,7 @@ extension Kernel {
         // channel" for a call that was correct (e2e `E10_dialog:swift`).
         let end = await runDispatch(
             target: target, payload: payload, verb: verb, taskOut: taskOut, taskId: taskId,
-            binary: binary, shown: shown)
+            binary: binary, rawReply: rawReply, shown: shown, secretPaths: secretPaths)
         killer.cancel()
         if end.stopped && fired.isSet {
             // Python `_agent.py`: `f"send: {d.target.id} {d.payload['type']!r} "
@@ -657,7 +662,8 @@ extension Kernel {
         _ = try? rowsPut(target.id, row)
         let end = await runDispatch(
             target: target, payload: payload, verb: payload["type"].asString ?? "",
-            taskOut: nil, taskId: TaskId(pid), binary: nil, shown: nil)
+            taskOut: nil, taskId: TaskId(pid), binary: nil, rawReply: false, shown: nil,
+            secretPaths: [])
         return classify(end)
     }
 
@@ -694,12 +700,17 @@ extension Kernel {
 
     /// `binary` has NO DEFAULT, deliberately: it defaulted to `nil` until
     /// 2026-09-03 and the timed branch of `runDispatchOutcome` simply forgot to
-    /// pass it, which the compiler accepted. Every caller now states the channel.
+    /// pass it, which the compiler accepted. Every caller now states the channel:
+    /// `binary` (a request body at its payload path) or `rawReply` (the binary
+    /// channel with no request body — a raw read) or neither (the text channel).
     /// `shown` likewise: the payload as the mirrors may see it (an item's
-    /// `secret` paths), published by the fanout while the handler gets `payload`.
+    /// `secret` paths), published by the fanout while the handler gets `payload`;
+    /// `secretPaths` the item's marks, scoped into the handler as
+    /// `currentSecret` (python `_dispatch_task` sets `_current_secret`).
     private func runDispatch(
         target: Agent, payload: JSON, verb: String, taskOut: TaskIdBox?,
-        taskId: TaskId?, binary: Data?, shown: ShownPayload?
+        taskId: TaskId?, binary: Blob?, rawReply: Bool, shown: ShownPayload?,
+        secretPaths: [String]
     ) async -> DispatchEnd {
         // (A killed sender never reaches here: `launch` settles it `cancelled`
         // before an id is minted.)
@@ -751,12 +762,28 @@ extension Kernel {
         }
         if local {
             // SHOWN when the item marked `secret` paths — every mirror, the state
-            // stream's payload and summary included, carries the placeholder.
+            // stream's payload and summary included, carries the placeholder (a
+            // body the secret marks never leaves the handler's side). A REQUEST
+            // BODY rides at ITS path — where python's own payload dict holds it —
+            // so a watcher receives the body, not a header with a hole where it
+            // was. A call that only READS a raw chunk carries none: its payload is
+            // a plain dict, a text frame.
             fanout(
                 target, "send",
                 shown?.inboxItem
                     ?? binary.map { Kernel.binaryItem(payload, $0) } ?? .text(payload))
         }
+        // The BINARY channel whenever bytes travel either way: a request body
+        // goes in, or the reply's chunk comes back raw. A request body IS the
+        // payload's value at its path (python's `payload[field] = body` /
+        // `set_path` overwrites the slot), so the header the handler gets holds
+        // nothing there — a caller names the slot only to keep python's key order
+        // on the row and the watcher frame. (A payload that did not name the slot
+        // leaves nothing to take.)
+        var header = payload
+        if let b = binary { try? pyDelPath(&header, parts: b.parts) }
+        let handlerPayload = header
+        let binaryChannel = binary != nil || rawReply
         // The prologue is done (a remote target has none): the next item of the
         // caller's batch may start.
         KernelTaskLocals.onFanout?()
@@ -775,6 +802,9 @@ extension Kernel {
                 await KernelTaskLocals.$onFanout.withValue(nil) {
                 await KernelTaskLocals.$remoteCaller.withValue(nil) {
                 await KernelTaskLocals.$currentRemote.withValue(remote) {
+                // the caller's `secret` marks, for THIS dispatch only — every
+                // nested dispatch scopes its own item's marks here
+                await KernelTaskLocals.$currentSecret.withValue(secretPaths) {
             await KernelTaskLocals.$currentOrigin.withValue(origin) {
                 await KernelTaskLocals.$currentSender.withValue(target.id) {
                 await KernelTaskLocals.$currentTask.withValue(taskId) {
@@ -791,14 +821,14 @@ extension Kernel {
                                 // relayed `raised` is data, not a raise here.
                                 if let r = target.remote {
                                     let (reply, b) = await self.callPeer(
-                                        r, qualified: target.id, payload: payload,
-                                        origin: origin, body: binary)
+                                        r, qualified: target.id, payload: handlerPayload,
+                                        origin: origin, secret: secretPaths, body: binary)
                                     extras.body = b
                                     return reply
                                 }
-                                if let blob = binary {
+                                if binaryChannel {
                                     let (r, b, raised) = await self.dispatchBinary(
-                                        target: target, header: payload, blob: blob)
+                                        target: target, header: handlerPayload, body: binary)
                                     extras.body = b
                                     extras.raised = raised
                                     return r ?? .null
@@ -814,6 +844,7 @@ extension Kernel {
                 }
             }
                 }
+            }
             }
             }
             }
@@ -972,48 +1003,13 @@ extension Kernel {
 /// drops the end of a payload lies about what was sent — the reader cannot tell a
 /// short payload from a cut one, and the dropped part is exactly what you opened
 /// telemetry to find. Eliding is a RENDER decision, where it is visible.
-func summarize(_ payload: JSON, body: InboxBody? = nil) -> String {
+func summarize(_ payload: JSON, body: Blob? = nil) -> String {
     guard let body = body else { return pyJsonDumps(payload, ensureAscii: false) }
     var shrunk = payload
-    setAtPath(&shrunk, body.path, .string("<bytes:\(body.data.count)>"))
+    // A telemetry line is not worth a refusal: an unplaceable path (never one the
+    // kernel admitted) leaves the payload as it is.
+    try? pySetPath(&shrunk, parts: body.parts, .string("<bytes:\(body.bytes.count)>"))
     return pyJsonDumps(shrunk, ensureAscii: false)
-}
-
-/// Write `value` at a dotted `path` (python's `set_path`: object keys, list
-/// indices). Silently no-ops on a path that does not resolve — the only caller
-/// is the summary above, and a telemetry line is not worth a crash.
-func setAtPath(_ obj: inout JSON, _ path: String, _ value: JSON) {
-    let parts = path.split(separator: ".").map(String.init)
-    guard let last = parts.last else { return }
-    if parts.count == 1 {
-        switch obj {
-        case .object(var o):
-            o[last] = value
-            obj = .object(o)
-        case .array(var a):
-            guard let i = Int(last), a.indices.contains(i) else { return }
-            a[i] = value
-            obj = .array(a)
-        default: return
-        }
-        return
-    }
-    let head = parts[0]
-    let rest = parts.dropFirst().joined(separator: ".")
-    switch obj {
-    case .object(var o):
-        guard var child = o[head] else { return }
-        setAtPath(&child, rest, value)
-        o[head] = child
-        obj = .object(o)
-    case .array(var a):
-        guard let i = Int(head), a.indices.contains(i) else { return }
-        var child = a[i]
-        setAtPath(&child, rest, value)
-        a[i] = child
-        obj = .array(a)
-    default: return
-    }
 }
 
 extension Kernel {
@@ -1286,12 +1282,39 @@ extension Kernel {
         return nil
     }
 
+    /// Only the OPERATOR lowers a secret holder's mark. An agent's `update_agent`
+    /// naming `holds_secrets` with any value but `true` on an agent whose record
+    /// says `holds_secrets: true` is refused — else a model granted `update_agent`
+    /// could unmark a credential_store and then call it. Setting `true` (on a
+    /// holder or not) passes: protection may be added from anywhere. Judged on
+    /// the record the verb would patch, before the write-time shape check, so a
+    /// non-operator's malformed value on a holder gets THIS refusal. The operator
+    /// (`sender` nil) never reaches here. Python `Agent._check_holder_mark`.
+    private func checkHolderMark(sender: AgentId, payload: JSON) -> JSON? {
+        guard payload["type"].asString == "update_agent", case .object(let obj) = payload,
+            let value = obj[holdsSecretsField]
+        else { return nil }
+        if value == .bool(true) { return nil }
+        guard let edited = obj["id"]?.asString,
+            agent(AgentId(edited))?.metaValue(forKey: holdsSecretsField) == .bool(true)
+        else { return nil }
+        return .object([
+            "error": .string(
+                "\(sender.value) may not clear holds_secrets on \(edited): it holds "
+                    + "secrets, and only the operator lowers that mark"),
+            "reason": .string("unauthorized"), "side": .string(holderMarkSide),
+            "hint": .string(holderMarkHint),
+        ])
+    }
+
     /// Authority flows from ABOVE only: an agent may not raise its OWN authority
     /// fields, and may confer on another only a SUBSET of its own `can_call`.
+    /// Nor may it lower a secret holder's mark (`checkHolderMark`, judged first).
     private func checkConferral(
         sender: AgentId, sCan: JSON, sParent: String?, sKids: Set<String>,
         loaderId: String?, payload: JSON
     ) -> JSON? {
+        if let held = checkHolderMark(sender: sender, payload: payload) { return held }
         guard case .object(let obj) = payload,
             obj["can_call"] != nil || obj["callable_by"] != nil
         else { return nil }

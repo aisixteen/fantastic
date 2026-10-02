@@ -25,6 +25,12 @@
 //     capacity it preempts, and a preempted conversation re-prefills from
 //     scratch. The table keeps the conversations THIS kernel drives under that
 //     ceiling and rotates the least-recently-used one out.
+//   * THE KEY, when the door needs one (owner, 2026-09-30: an HTTPS door in
+//     front of the shared GPU takes `Authorization: Bearer <key>`). Read before
+//     EACH request through `key` — the record's `credentials` ref in a credential
+//     store (`Credentials.swift`), never the environment or the record; a record
+//     with no `credentials` sends no header at all, so a local vLLM started
+//     without `--api-key` keeps working. A 401 or 403 says to name `credentials`.
 
 import AsyncHTTPClient
 import CryptoKit
@@ -82,20 +88,6 @@ public let PASSTHROUGH = [
 /// is a record field.
 public let CONNECT_TIMEOUT = 5.0
 public let READ_TIMEOUT = 900.0
-
-/// THE KEY, when the door needs one (owner, 2026-09-30: an HTTPS door in front
-/// of the shared GPU takes `Authorization: Bearer <key>`). Read from this
-/// environment variable at CALL time, never from the record; set ⇒ sent as a
-/// Bearer header, unset ⇒ no header at all, so a vLLM started without
-/// `--api-key` keeps working. A 401/403 names the variable. Python `KEY_VAR`.
-public let KEY_VAR = "VLLM_API_KEY"
-
-/// The key, read per call — nil when unset or blank. Python `_auth_headers`.
-func vllmApiKey() -> String? {
-    guard let raw = ProcessInfo.processInfo.environment[KEY_VAR] else { return nil }
-    let key = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-    return key.isEmpty ? nil : key
-}
 
 // MARK: - the KV-cache session table
 
@@ -354,6 +346,9 @@ struct VllmProvider: AIProvider {
     /// `endpoint.rstrip("/")`.
     let endpoint: String
     let model: String
+    /// `key(endpoint) -> key?`, awaited before EACH request; nil = no
+    /// `credentials` on the record, no header.
+    let key: KeyReader
     /// The record's output budget — bounds a turn; a side call brings its own.
     let maxTokens: Int
     let kvSlots: Int
@@ -371,11 +366,6 @@ struct VllmProvider: AIProvider {
     let agentKey: String
     /// Seconds on a monotonic clock — the table's TTL arithmetic.
     let clock: @Sendable () -> Double
-    /// Where the key comes from, asked on EVERY call: the environment
-    /// (`vllmApiKey`). A parameter so a test can hand one in without `setenv` —
-    /// which races every concurrent `Process.run` in the test process (measured:
-    /// "Bad address", 2026-09-30).
-    var apiKey: @Sendable () -> String? = { vllmApiKey() }
     /// What the endpoint REPORTED for the last pass — the prompt size (ai_core
     /// calibrates with it) and the stop reason.
     let usage: AIUsage? = AIUsage()
@@ -464,8 +454,8 @@ struct VllmProvider: AIProvider {
         req.method = .POST
         req.headers.add(name: "Content-Type", value: "application/json")
         req.headers.add(name: "Accept", value: "text/event-stream")
-        if let key = apiKey() {
-            req.headers.add(name: "Authorization", value: "Bearer \(key)")
+        if let apiKey = try await key(endpoint), !apiKey.isEmpty {
+            req.headers.add(name: "Authorization", value: "Bearer \(apiKey)")
         }
         req.body = .bytes(ByteBuffer(string: payload))
 
@@ -483,7 +473,9 @@ struct VllmProvider: AIProvider {
             let collected = try? await response.body.collect(upTo: 1 << 20)
             // python `.decode("utf-8", "replace")[:500]` — 500 CHARACTERS
             let detail = String((collected.map { String(buffer: $0) } ?? "").prefix(500))
-            let why = code == 401 || code == 403 ? " — the door wants a key: set \(KEY_VAR)" : ""
+            let why =
+                code == 401 || code == 403
+                ? " — the door wants a key: name it in `credentials` ({store, ref})" : ""
             throw PyError(
                 "RuntimeError",
                 "vllm_backend: \(endpoint) answered HTTP \(code)\(why): \(detail)")
@@ -582,7 +574,10 @@ public final class VllmBundle: AgentBundle, @unchecked Sendable {
                     "vLLM-backed LLM agent, talking to the vLLM server directly "
                     + "(raw prompt-and-parse tool-calling; a KV-cache session table per endpoint).",
                 reflectExtra: { agent in Self.reflectExtra(agent) },
-                makeProvider: { agent, _, _ in .provider(try Self.makeProvider(agent)) }
+                makeProvider: { agent, _, kernel in
+                    try Self.makeProvider(
+                        agent, key: keyReader(agent.id, kernel, backend: NAME, required: false))
+                }
             ))
     }
 
@@ -641,6 +636,7 @@ public final class VllmBundle: AgentBundle, @unchecked Sendable {
     /// python's order, so the FIRST missing one is the one named.
     static func makeProvider(
         _ agent: Agent,
+        key: @escaping KeyReader,
         clock: @escaping @Sendable () -> Double = {
             ProcessInfo.processInfo.systemUptime
         }
@@ -662,6 +658,7 @@ public final class VllmBundle: AgentBundle, @unchecked Sendable {
         return VllmProvider(
             endpoint: rstripSlashes(endpoint),
             model: model,
+            key: key,
             maxTokens: maxTokens,
             kvSlots: kvSlots,
             kvOverflow: overflow,
@@ -828,9 +825,9 @@ public final class VllmBundle: AgentBundle, @unchecked Sendable {
             RecordSchema.field(
                 "read_timeout", "float", "seconds to wait on a generation",
                 default: .double(READ_TIMEOUT)),
-        ],
-        // the door's key, when it wants one — sent as a Bearer header only when set
-        keyVar: KEY_VAR)
+            // the door's key, when it wants one — absent = no Authorization header
+            RecordSchema.credentialsField(required: false),
+        ])
 
     /// The fields a turn cannot run without — refused at the write when absent.
     /// The schema's required fields, not a second list. Python `REQUIRED`.
@@ -905,16 +902,18 @@ extension VllmBundle {
 
         ## The key
 
-        A door in front of vLLM may want one (`Authorization: Bearer <key>`). It is read from
-        `VLLM_API_KEY` in the environment at call time — never from the record — and sent
-        only when set: unset, no header goes out, so a vLLM started without `--api-key`
-        works as it is.
+        A door in front of vLLM may want one (`Authorization: Bearer <key>`). Name it with
+        `credentials: {store, ref}` — a ref in a `credential_store`, read before each request
+        and sent only to the ref's host. No `credentials` on the record, no header goes out,
+        so a vLLM started without `--api-key` works as it is.
+
+        **A model never reaches a secret holder.** A call the model emits whose target or `reply_to` is an agent with `holds_secrets: true` on its record (every `credential_store`; any agent the operator marks) is refused before anything is sent — `{reason:"unauthorized"}`, "`<id>` holds secrets — a secret holder answers backends, never a model turn; this call was not dispatched" — and the refusal comes back to the model itself. The backend's own key read goes to the store directly, never through the model's calls. The address is resolved the way the kernel resolves it, so `<this kernel's guid>|<agent>` is that local agent and is judged like the bare id; a connected peer's `<guid>|<agent>` lives on another kernel, its record is not here, so it is not judged here.
 
         ## Failures, in words
 
         - connection refused → vLLM is not listening yet (it loads for ~75 s after boot), or the tunnel is down
         - no answer within `connect_timeout` → the instance is stopped, or the tunnel/port is wrong
-        - HTTP 401/403 → the door wants a key: set `VLLM_API_KEY`
+        - HTTP 401/403 → the door wants a key: name it in `credentials` (`{store, ref}`)
         - the stream drops, or ends without a `finish_reason` → vLLM died mid-answer; the turn is not complete
         - `finish_reason: length` → a cut (`last_stop_reason: max_tokens`), so the caller can continue
 

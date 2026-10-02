@@ -2,8 +2,8 @@
 
 file_bridge and exec_bridge each carry their own handler gate, their own
 write-time refusals and their own Decision→refusal conversion; web_rest and
-web_ws convert a Decision by hand too; and rule-name scoping exists twice
-(`io_bridge._base` and `io_bridge._engine`). Sharing one gate (reduction
+web_ws convert a Decision by hand too; rule-name scoping is ONE function
+(`io_bridge._base.describe`) for legs and bridges alike. Sharing one gate (reduction
 candidate G) must keep, per leg: the sealed-by-default refusal (text, hint, key
 order), which verbs stay UNGATED, the `kind` each leg asks its rule about, the
 write-time refusal texts, and the reflected rule names.
@@ -285,6 +285,24 @@ async def test_a_bridge_leg_reflects_the_same_names(
         "egress_rule": egress,
         "sealed": sealed,
     }
+
+
+async def test_a_bridge_reflects_exactly_what_its_gate_enforces(seeded_kernel):
+    """`auth` carries a bare STEM and the gate appends `_ingress` to it, so
+    `auth: allow_all_ingress` resolves `allow_all_ingress_ingress` — unknown, and
+    it denies. The bridge reflect used to skip an already-suffixed stem and report
+    `allow_all_ingress` / sealed:false, an open door its gate never opened."""
+    k = seeded_kernel
+    k.create("ws_bridge.tools", id="br", transport="memory", auth="allow_all_ingress")
+    rule = ingress_rules.resolve_ingress(k.ctx.get("br"))
+    assert isinstance(rule, ingress_rules.DenyInbound)
+    assert rule.unknown == "allow_all_ingress_ingress"
+    r = await _call(k, "br", {"type": "reflect"})
+    assert (r["ingress_rule"], r["egress_rule"], r["sealed"]) == (
+        "allow_all_ingress_ingress",
+        "allow_all_ingress_egress",
+        True,
+    )
 
 
 # ─── web_rest: every route reads the same gate ───────────────────────────────

@@ -1,7 +1,7 @@
 """backends/provider_contract — what ai_core needs from a provider, measured through
 a live AI agent on whichever backend plug `BACKEND` names.
 
-The wire probes (`wire_anthropic`, `wire_responses`) check the endpoint alone; this
+The wire probe (`wire_responses`) checks the endpoint alone; this
 checks the provider AS THE KERNEL USES IT. Three agents on one kernel, one ask each:
 
   ai         — reads a planted file through `notes` and reports the code word in it:

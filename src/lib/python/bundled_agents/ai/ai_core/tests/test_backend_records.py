@@ -1,4 +1,4 @@
-"""The six AI backends' RECORD surface, pinned: schema, write-time checks, the
+"""The three AI backends' RECORD surface, pinned: schema, write-time checks, the
 provider each record builds, and the reflect extras each record shows.
 
 Every backend coerces its record twice today — once in `make_provider` and once
@@ -19,9 +19,6 @@ from ai_core.schema import AI_FIELDS, field, schema, validate
 
 BACKENDS = (
     "ollama_backend",
-    "llamacpp_backend",
-    "nvidia_nim_backend",
-    "anthropic_backend",
     "responses_backend",
     "vllm_backend",
 )
@@ -43,7 +40,6 @@ _AI_TAIL = [
 #: (name, type, required, default-or-None, enum-or-None) per field, in order.
 SCHEMAS = {
     "ollama_backend": (
-        None,
         [
             ("endpoint", "str", True, None, None),
             ("model", "str", True, None, None),
@@ -51,46 +47,18 @@ SCHEMAS = {
             ("temperature", "float", False, 0.3, None),
             ("num_predict", "int", False, None, None),
             ("think", "bool", False, None, None),
-        ],
-    ),
-    "llamacpp_backend": (
-        None,
-        [
-            ("endpoint", "str", True, None, None),
-            ("model", "str", False, None, None),
-            ("api_key", "str", False, None, None),
-            ("temperature", "float", False, 0.3, None),
-            ("num_predict", "int", False, None, None),
-            ("think", "bool", False, None, None),
-        ],
-    ),
-    "nvidia_nim_backend": (
-        "NVIDIA_API_KEY",
-        [
-            ("endpoint", "str", True, None, None),
-            ("model", "str", True, None, None),
-        ],
-    ),
-    "anthropic_backend": (
-        "ANTHROPIC_API_KEY",
-        [
-            ("endpoint", "str", True, None, None),
-            ("model", "str", True, None, None),
-            ("max_tokens", "int", False, 8192, None),
-            ("sampling", "map", False, None, None),
-        ],
+        ]
     ),
     "responses_backend": (
-        "OPENAI_API_KEY",
         [
             ("endpoint", "str", True, None, None),
             ("model", "str", True, None, None),
             ("max_tokens", "int", False, 8192, None),
             ("sampling", "map", False, None, None),
-        ],
+            ("credentials", "credentials", True, None, None),
+        ]
     ),
     "vllm_backend": (
-        "VLLM_API_KEY",
         [
             ("endpoint", "str", True, None, None),
             ("model", "str", True, None, None),
@@ -112,7 +80,8 @@ SCHEMAS = {
             ("kv_ttl", "float", False, 1800.0, None),
             ("connect_timeout", "float", False, 5.0, None),
             ("read_timeout", "float", False, 900.0, None),
-        ],
+            ("credentials", "credentials", False, None, None),
+        ]
     ),
 }
 
@@ -136,10 +105,11 @@ def _expected_field(name, type_, required, default, enum) -> list:
 
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_each_backend_schema_is_exact(backend):
-    key_var, own = SCHEMAS[backend]
+    own = SCHEMAS[backend]
     sch = _tools(backend).RECORD_SCHEMA
-    assert list(sch) == ["fields", "key_var"]
-    assert sch["key_var"] == key_var
+    # no `key_var`: a key is never read from the environment — a backend that
+    # sends one has a `credentials` field
+    assert list(sch) == ["fields"]
     want = own + _AI_TAIL
     got = [
         (f["name"], f["type"], f["required"], f.get("default"), f.get("enum"))
@@ -169,7 +139,7 @@ def test_the_schema_builders_refuse_malformed_fields():
         field("x", "number", "h")
     assert str(e.value) == (
         "field 'x': type 'number' is not one of "
-        "('str', 'int', 'float', 'bool', 'enum', 'list', 'map')"
+        "('str', 'int', 'float', 'bool', 'enum', 'list', 'map', 'credentials')"
     )
     with pytest.raises(ValueError) as e:
         field("x", "enum", "h")
@@ -181,7 +151,7 @@ def test_the_schema_builders_refuse_malformed_fields():
         field("x", "int", "h", required=True, default=3)
     assert str(e.value) == "field 'x': a required field has no default"
     with pytest.raises(ValueError) as e:
-        schema([field("recent_n", "int", "h")], key_var=None)
+        schema([field("recent_n", "int", "h")])
     assert str(e.value).startswith("duplicate field in schema: ['recent_n', ")
     assert [f["name"] for f in AI_FIELDS] == [t[0] for t in _AI_TAIL]
 
@@ -191,7 +161,7 @@ def test_the_schema_builders_refuse_malformed_fields():
 
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_validate_meta_names_every_missing_required_field(backend):
-    _, own = SCHEMAS[backend]
+    own = SCHEMAS[backend]
     required = [n for (n, _t, req, _d, _e) in own + _AI_TAIL if req]
     err = _tools(backend).validate_meta({}, {})
     assert err is not None
@@ -206,7 +176,7 @@ def test_validate_meta_names_every_missing_required_field(backend):
 
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_validate_meta_judges_the_merged_record(backend):
-    _, own = SCHEMAS[backend]
+    own = SCHEMAS[backend]
     full = {
         "endpoint": "http://x/v1",
         "model": "m",
@@ -214,6 +184,7 @@ def test_validate_meta_judges_the_merged_record(backend):
         "kv_slots": 2,
         "kv_overflow": "evict",
         "memory_store_id": "memory",
+        "credentials": {"store": "creds", "ref": "r"},
     }
     rec = {n: full[n] for (n, _t, req, _d, _e) in own + _AI_TAIL if req}
     assert _tools(backend).validate_meta({}, rec) is None
@@ -295,7 +266,7 @@ def test_vllm_checks_run_before_the_schema_and_a_none_skips_them():
 
 
 def test_validate_is_the_shared_body():
-    sch = schema([field("a", "enum", "pick", enum=("x", "y"))], key_var=None)
+    sch = schema([field("a", "enum", "pick", enum=("x", "y"))])
     assert validate(sch, "b", {"a": "z"}, {}) == (
         "a='z' is not one of the legal values: x, y"
     )
@@ -306,15 +277,19 @@ def test_validate_is_the_shared_body():
 
 class _Spy:
     """Wraps a provider class's __init__ and records the kwargs it was built
-    with — the observable of `make_provider`."""
+    with — the observable of `make_provider`. The `key` reader (a closure) is
+    kept apart, in `keys`."""
 
     def __init__(self, monkeypatch, cls):
         self.calls: list = []
+        self.keys: list = []
         real = cls.__init__
         spy = self
 
         def init(obj, *a, **kw):
-            spy.calls.append((a, kw))
+            rest = dict(kw)
+            spy.keys.append(rest.pop("key", None))
+            spy.calls.append((a, rest))
             real(obj, *a, **kw)
 
         monkeypatch.setattr(cls, "__init__", init)
@@ -375,61 +350,11 @@ def test_ollama_make_provider_coerces_each_knob(monkeypatch):
     ]
 
 
-def test_llamacpp_make_provider_coerces_each_knob(monkeypatch):
-    from llamacpp_backend.provider import LlamaCppProvider
-    from llamacpp_backend.tools import make_provider
+def test_responses_make_provider_from_the_record(monkeypatch):
+    from responses_backend.provider import ResponsesProvider
+    from responses_backend.tools import make_provider as mk
 
-    spy = _Spy(monkeypatch, LlamaCppProvider)
-    make_provider("l", _K({"endpoint": "http://e"}))
-    make_provider(
-        "l",
-        _K(
-            {
-                "endpoint": "http://e",
-                "model": "gemma",
-                "api_key": "k",
-                "temperature": 1,
-                "num_predict": "64",
-                "think": 1,
-            }
-        ),
-    )
-    assert spy.calls == [
-        (
-            (),
-            {
-                "endpoint": "http://e",
-                "model": None,
-                "api_key": None,
-                "temperature": None,
-                "num_predict": None,
-                "think": None,
-            },
-        ),
-        (
-            (),
-            {
-                "endpoint": "http://e",
-                "model": "gemma",
-                "api_key": "k",
-                "temperature": 1.0,
-                "num_predict": 64,
-                "think": True,
-            },
-        ),
-    ]
-
-
-@pytest.mark.parametrize("backend", ["anthropic_backend", "responses_backend"])
-def test_keyed_backends_make_provider_from_the_record(monkeypatch, backend):
-    prov_mod = importlib.import_module(f"{backend}.provider")
-    cls = (
-        prov_mod.AnthropicProvider
-        if backend == "anthropic_backend"
-        else prov_mod.ResponsesProvider
-    )
-    spy = _Spy(monkeypatch, cls)
-    mk = _tools(backend).make_provider
+    spy = _Spy(monkeypatch, ResponsesProvider)
     mk("a", _K({"endpoint": "http://e", "model": "m"}))
     mk(
         "a",
@@ -462,20 +387,7 @@ def test_keyed_backends_make_provider_from_the_record(monkeypatch, backend):
             },
         ),
     ]
-
-
-async def test_nvidia_make_provider_needs_the_key_from_the_env(monkeypatch):
-    from nvidia_nim_backend.provider import NvidiaNimProvider
-    from nvidia_nim_backend.tools import make_provider
-
-    spy = _Spy(monkeypatch, NvidiaNimProvider)
-    monkeypatch.delenv("NVIDIA_API_KEY", raising=False)
-    assert await make_provider("n", _K({"endpoint": "http://e", "model": "m"})) is None
-    monkeypatch.setenv("NVIDIA_API_KEY", "  nvapi-x  ")
-    await make_provider("n", _K({"endpoint": "http://e", "model": "m"}))
-    assert spy.calls == [
-        ((), {"api_key": "nvapi-x", "endpoint": "http://e", "model": "m"})
-    ]
+    assert all(callable(k) for k in spy.keys) and len(spy.keys) == 2
 
 
 def test_vllm_make_provider_builds_the_effective_posture(monkeypatch):
@@ -577,10 +489,7 @@ def test_vllm_make_provider_refusal_texts(rec, text):
     assert str(e.value) == text
 
 
-@pytest.mark.parametrize(
-    "backend",
-    ["ollama_backend", "llamacpp_backend", "anthropic_backend", "responses_backend"],
-)
+@pytest.mark.parametrize("backend", ["ollama_backend", "responses_backend"])
 def test_required_meta_failure_text(backend):
     with pytest.raises(ValueError) as e:
         _tools(backend).make_provider("x", _K({"endpoint": " ", "model": "m"}))
@@ -663,33 +572,16 @@ async def test_ollama_reflect_extras(seeded_kernel):
     assert isinstance(r["temperature"], float)
 
 
-async def test_llamacpp_reflect_extras(seeded_kernel):
+async def test_responses_reflects_no_extras(seeded_kernel):
     k = seeded_kernel
-    await _create(k, "llamacpp_backend", "l1")
-    r = await _reflect(k, "l1")
-    keys = ("temperature", "num_predict", "think", "has_api_key")
-    assert {x: r[x] for x in keys} == {
-        "temperature": 0.3,
-        "num_predict": None,
-        "think": None,
-        "has_api_key": False,
-    }
-    assert "num_ctx" not in r  # the window is the server's, never claimed here
-    await _update(k, "l1", temperature=0.6, num_predict=32, think=True, api_key="s")
-    r = await _reflect(k, "l1")
-    assert {x: r[x] for x in keys} == {
-        "temperature": 0.6,
-        "num_predict": 32,
-        "think": True,
-        "has_api_key": True,
-    }
-    assert "s" not in [v for v in r.values() if isinstance(v, str)]
-
-
-@pytest.mark.parametrize("backend", ["anthropic_backend", "responses_backend"])
-async def test_keyed_backends_reflect_no_extras(seeded_kernel, backend):
-    k = seeded_kernel
-    await _create(k, backend, "a1", max_tokens=100, sampling={"top_k": 3})
+    await _create(
+        k,
+        "responses_backend",
+        "a1",
+        max_tokens=100,
+        sampling={"top_k": 3},
+        credentials={"store": "creds", "ref": "r"},
+    )
     r = await _reflect(k, "a1")
     assert list(r) == list(_SHARED) + [
         "can_call",

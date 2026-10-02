@@ -163,7 +163,7 @@ struct GateRefusalPinTests {
     /// hint names the two can_call spellings that would reach it.
     @Test func aRemoteTargetIsAnEgressDenialNamingThePeer() async {
         let k = await gatedKernel()
-        let route = PeerRoute(via: "leg") { _, _, _, _ in (.object(["ok": true]), nil) }
+        let route = PeerRoute(via: "leg") { _, _, _, _, _ in (.object(["ok": true]), nil) }
         #expect(k.registerPeer("g9", route) == nil)
         #expect(
             await call(k, as: "lonely", "g9|canvas", ["type": "ping"])

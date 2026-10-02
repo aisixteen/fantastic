@@ -2,14 +2,14 @@
 
 LIVE TEST 3 — plan, change, report.
 
-    cd src/lib/python && BACKEND=anthropic uv run python ../../../tmp/live_plan.py
+    cd src/lib/python && uv run python ../../../e2e/run.py --group agentic --id plan --lanes 1
 
 Harder than `live_compose.py` in a different direction: there is no single right
 action, there is a right SET of actions, and which ones they are has to be worked
 out from what each agent says about itself.
 
 Three `file_bridge` agents guard three directories, each holding something this
-kernel really keeps: served web assets, AI chat transcripts, an api_key sidecar.
+kernel really keeps: served web assets, AI chat transcripts, key material.
 Each carries a `description`. ONE names an untrusted audience; the other two name
 readers who are real but are not "any client". Nothing states which is which, and
 each directory has contents, so a label can be checked against what is actually

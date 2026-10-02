@@ -108,7 +108,7 @@ The host can call this kernel's agents directly: it addresses one as
 by `reflect` to `<guid>|kernel`). The bridge's control socket makes that possible:
 it says `{type:"hello", guid}` on every (re)connect and again when the root first
 mints the guid, and answers each inbound `{type:"call", id, target, payload,
-caller}` with `{type:"reply", id, data}` — the call's outcome, a refusal included.
+caller, secret?}` with `{type:"reply", id, data}` — the call's outcome, a refusal included.
 
 Such a call runs under a FOREIGN origin (`caller`, the host agent's
 `<host guid>|<agent>`): the target's `callable_by` is the whole check here — name
@@ -117,6 +117,31 @@ kernel's own agents are reachable. A caller claiming this kernel's own guid is
 refused. A memory store here keys what such a caller writes by its qualified
 address, verbatim. Locally, `<this kernel's guid>|<agent id>` names the local
 agent too (`<guid>|kernel` the root).
+
+**Secret marks cross the bridge.** A batch item's `secret` paths (`payload.<field…>`
+/ `result[.<field…>]`, `src/kernel/secret.ts`) ride its call frame as `secret`, in
+both directions: a host-bound send puts them on the frame it sends (only when the
+item marked some), and a host's `call` frame is dispatched here with its `secret`
+verbatim — so whichever kernel receives the call records `<secret>` (call/settle
+rows, ledger, memory store, inbox and watcher mirrors) exactly as the caller does,
+and a malformed mark is the receiving kernel's own `bad_arg` refusal, before
+dispatch. The reply carries the real result back.
+
+**A handler reads its call's marks** as `kernel.currentSecret` on the view it is
+handed (python `kernel.current_secret()`): the paths as the caller gave them —
+a local item's, or a host call frame's — frozen, `[]` when none were marked.
+Stamped per dispatch like `currentCaller`, so the handler's own sends never
+inherit them. A bundle that must only be called WITH a mark refuses an unmarked
+call by it.
+
+**A view marks its calls** through `Host`: `call(target, payload, secret?)` makes
+the marks the item's `secret` (masked in this kernel's records, on the frame for a
+host target); `callHost(target, payload, secret?)` and
+`callBinary(target, payload, secret?)` — and `Kernel.callHost` /
+`Kernel.forwardBinary` under them — bypass the batch, so this kernel keeps no
+record of them, and put the marks on the call frame. Each validates the marks as
+a batch item's: a malformed one is `bad_arg`, before the egress gate and before a
+byte leaves.
 
 ---
 

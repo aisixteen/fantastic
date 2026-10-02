@@ -9,6 +9,7 @@
 //! off while the live set stays under the server's KV ceiling.
 
 use super::*;
+use fantastic_ai_core::credentials::CredentialError;
 use fantastic_ai_core::think::{THINK_CLOSE, THINK_OPEN};
 use fantastic_kernel::{Agent, Item};
 use tempfile::TempDir;
@@ -44,12 +45,39 @@ async fn server_with(body: String, status: u16) -> (MockServer, String) {
     (server, endpoint)
 }
 
+/// The reader of a record with no `credentials`: no key, no header (python's
+/// `_nokey`).
+struct NoKey;
+
+#[async_trait]
+impl KeySource for NoKey {
+    async fn key(&self, _endpoint: &str) -> Result<Option<String>, CredentialError> {
+        Ok(None)
+    }
+}
+
+/// A reader handing out `keys` in turn, recording the endpoint each read was
+/// for (python's `key` + `asked`).
+struct Keys {
+    keys: Mutex<VecDeque<&'static str>>,
+    asked: Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl KeySource for Keys {
+    async fn key(&self, endpoint: &str) -> Result<Option<String>, CredentialError> {
+        self.asked.lock().unwrap().push(endpoint.to_string());
+        Ok(self.keys.lock().unwrap().pop_front().map(str::to_string))
+    }
+}
+
 fn provider(endpoint: &str) -> VllmProvider {
     let (sampling, _) = sampling(&Map::new());
     VllmProvider {
         agent_id: format!("agent@{endpoint}"),
         endpoint: endpoint.trim_end_matches('/').to_string(),
         model: "qwen3.8-27b".to_string(),
+        key: Arc::new(NoKey),
         max_tokens: 8000,
         kv_slots: 7,
         kv_overflow: "evict".to_string(),
@@ -604,19 +632,29 @@ fn readme_is_python_verbatim() {
 
 // ─── the key (an HTTPS door in front of the GPU) ────────────────────────────
 
-/// One test owns the variable: the others never set it, and a mock server
-/// ignores a header it did not ask for, so a concurrent test is unaffected.
+/// No `credentials`: NO header at all (a keyless local vLLM); with them: Bearer,
+/// read before EACH request — a rotated key is used by the next one, and the
+/// reader is told the endpoint it is for (the store pins its host).
 #[tokio::test]
 async fn the_key_rides_as_a_bearer_header_only_when_set() {
     let ok = sse(&[delta(Some("stop"), json!({"content": "ok"}))], true);
-    std::env::remove_var(KEY_VAR);
     let (s1, ep1) = server_with(ok.clone(), 200).await;
     assert_eq!(drain(&provider(&ep1), &hi(), None).await.unwrap(), "ok");
-    std::env::set_var(KEY_VAR, "k-123");
-    let (s2, ep2) = server_with(ok, 200).await;
-    let got = drain(&provider(&ep2), &hi(), None).await;
-    std::env::remove_var(KEY_VAR);
-    assert_eq!(got.unwrap(), "ok");
+    let (s2, ep2) = server_with(ok.clone(), 200).await;
+    let keys = Arc::new(Keys {
+        keys: Mutex::new(VecDeque::from(["k-123", "k-rotated"])),
+        asked: Mutex::new(Vec::new()),
+    });
+    let mut p = provider(&ep2);
+    p.key = Arc::clone(&keys) as Arc<dyn KeySource>;
+    assert_eq!(drain(&p, &hi(), None).await.unwrap(), "ok");
+    assert_eq!(
+        drain(&p, &[json!({"role": "user", "content": "again"})], None)
+            .await
+            .unwrap(),
+        "ok"
+    );
+    assert_eq!(*keys.asked.lock().unwrap(), vec![ep2.clone(), ep2.clone()]);
     let auth = |reqs: Vec<wiremock::Request>| {
         reqs.iter()
             .map(|r| {
@@ -626,28 +664,47 @@ async fn the_key_rides_as_a_bearer_header_only_when_set() {
             })
             .collect::<Vec<_>>()
     };
-    // unset: NO header at all (a keyless local vLLM); set: Bearer, read per call
     assert_eq!(auth(s1.received_requests().await.unwrap()), vec![None]);
     assert_eq!(
         auth(s2.received_requests().await.unwrap()),
-        vec![Some("Bearer k-123".to_string())]
+        vec![
+            Some("Bearer k-123".to_string()),
+            Some("Bearer k-rotated".to_string())
+        ]
     );
 }
 
 #[tokio::test]
-async fn a_refused_key_names_the_variable() {
+async fn a_refused_key_says_to_name_credentials() {
     let (_s, ep) = server_with("unauthorized".to_string(), 401).await;
     let err = drain(&provider(&ep), &hi(), None).await.unwrap_err();
-    let text = format!("{err:?}");
     assert!(
-        text.contains("HTTP 401") && text.contains("set VLLM_API_KEY"),
-        "{text}"
+        err.message.contains("HTTP 401") && err.message.contains("`credentials`"),
+        "{}",
+        err.message
+    );
+    assert_eq!(
+        err.message,
+        format!(
+            "vllm_backend: {} answered HTTP 401 — the door wants a key: name it in \
+             `credentials` ({{store, ref}}): unauthorized",
+            ep.trim_end_matches('/')
+        )
     );
 }
 
 #[test]
-fn the_schema_names_the_key_var() {
-    assert_eq!(record_schema()["key_var"], json!("VLLM_API_KEY"));
+fn the_schema_takes_optional_credentials() {
+    assert!(record_schema().get("key_var").is_none());
+    let f = record_schema()["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["name"] == "credentials")
+        .cloned()
+        .unwrap();
+    assert_eq!(f["type"], json!("credentials"));
+    assert_eq!(f["required"], json!(false));
 }
 
 // ─── STEP-4 PINS (2026-10-01) ────────────────────────────────────────────────

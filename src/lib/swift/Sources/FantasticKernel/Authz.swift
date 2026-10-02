@@ -123,6 +123,23 @@ public let fromAbove: String =
     + "the operator; a parent may delegate a subset of its own reach. You cannot "
     + "grant it to yourself. Agents are deny-all by default (both to call and to be called)."
 
+// THE SECRET-HOLDER MARK (owner 2026-10-02). `holds_secrets: true` on a record
+// makes that agent unreachable from a model turn (ai_core refuses the call). The
+// kernel owns two rules about the field itself, at the write:
+//   - its SHAPE (`badHolderMark`): exactly `true`, or `null` — anything else is
+//     `invalid_meta`, on every agent, at create_agent and update_agent alike;
+//   - who LOWERS it (`checkHolderMark`, in the gate): on an agent whose record
+//     says `true`, only the operator may write anything else.
+// `null` IS THE CLEAR. update_agent REPLACES a named field, so `holds_secrets: null`
+// leaves a record whose value is `null` — not a holder, since only exactly `true`
+// marks one — the same way `delete_lock: null` lifts a lock. Python `_agent.py`
+// `HOLDS_SECRETS` / `HOLDER_MARK_SIDE` / `HOLDER_MARK_HINT`.
+let holdsSecretsField = "holds_secrets"
+let holderMarkSide = "secret-holder"
+let holderMarkHint =
+    "only the operator clears it (update_agent holds_secrets=null); an agent may "
+    + "mark a holder, never unmark one"
+
 /// The structural baseline stamped + merged on every agent, on `can_call`.
 public func defaultCanCall() -> JSON {
     .object([

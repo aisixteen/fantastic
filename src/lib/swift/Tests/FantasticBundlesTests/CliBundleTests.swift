@@ -93,8 +93,8 @@ struct CliBundleTests {
     }
 
     @Test func statusRendersPhaseMarkers() throws {
-        // queued, thinking (regular + rate-limit), tool_calling entry+exit each
-        // produce one specific line.
+        // queued, thinking, tool_calling entry+exit each produce one specific
+        // line.
         let lines: [String?] = [
             try CliBundle.renderStatus([
                 "type": "status", "source": "ollama_xx", "phase": "queued",
@@ -103,10 +103,6 @@ struct CliBundleTests {
             try CliBundle.renderStatus([
                 "type": "status", "source": "ollama_xx", "phase": "thinking",
                 "detail": ["send_id": "abc"],
-            ]),
-            try CliBundle.renderStatus([
-                "type": "status", "source": "nvidia_nim_xx", "phase": "thinking",
-                "detail": ["waiting_on": "rate_limit", "wait_s": .integer(5)],
             ]),
             try CliBundle.renderStatus([
                 "type": "status", "source": "ollama_xx", "phase": "tool_calling",
@@ -129,14 +125,13 @@ struct CliBundleTests {
             ]),
         ]
         let out = lines.compactMap { $0 }
-        #expect(out.count == 5, "expected 5 lines, got \(out.count): \(out)")
+        #expect(out.count == 4, "expected 4 lines, got \(out.count): \(out)")
         #expect(out[0] == "  [ollama_xx] queued (2 ahead)")
         #expect(out[1] == "  [ollama_xx] thinking…")
-        #expect(out[2] == "  [nvidia_nim_xx] rate-limited; waiting 5s")
         #expect(
-            out[3]
+            out[2]
                 == "  [ollama_xx] → list_agents(kernel_state)  {\"target_id\": \"kernel_state\", \"payload\": {\"type\": \"list_agents\"}}")
-        #expect(out[4] == "  [ollama_xx] ← list_agents(kernel_state)  {\"agents\":[{\"id\":\"kernel_state\"}]}")
+        #expect(out[3] == "  [ollama_xx] ← list_agents(kernel_state)  {\"agents\":[{\"id\":\"kernel_state\"}]}")
     }
 
     @Test func statusStreamingAndDoneAreSilent() throws {
@@ -183,18 +178,6 @@ struct CliBundleTests {
             try CliBundle.renderStatus([
                 "type": "status", "phase": "queued", "detail": ["ahead": .double(1.0)],
             ]) == "  queued (1.0 ahead)")
-        // A DEFAULT IS BY KEY PRESENCE. `detail.get("wait_s", "?")` hands back a
-        // present `null` as `None`; only a missing key becomes `?`.
-        #expect(
-            try CliBundle.renderStatus([
-                "type": "status", "phase": "thinking",
-                "detail": ["waiting_on": "rate_limit"],
-            ]) == "  rate-limited; waiting ?s")
-        #expect(
-            try CliBundle.renderStatus([
-                "type": "status", "phase": "thinking",
-                "detail": ["waiting_on": "rate_limit", "wait_s": .null],
-            ]) == "  rate-limited; waiting Nones")
         // `verb` / `target` are f-string values too, and a missing one is "".
         #expect(
             try CliBundle.renderStatus([

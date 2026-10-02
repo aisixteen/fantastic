@@ -197,7 +197,8 @@ def _inbox_framer(payload):
 
 def _unframe(body: bytes) -> dict:
     """Decode one child frame: kind T = JSON; kind B = the io_bridge binary frame with
-    the raw body restored at `_binary_path` (a `write_stream` payload's bytes)."""
+    the raw body restored at `_binary_path` — its list of steps (a key as a string,
+    a list index as an int) — e.g. a `write_stream` payload's bytes."""
     kind = body[:1]
     if kind == b"B":
         return decode_frame(body[1:])
@@ -293,11 +294,13 @@ async def _serve_ctrl(parent_sock, owner_id, job_id, kernel):
             if op == "send":
                 # A target fault settles as a failed outcome (error in result);
                 # send never raises into the relay loop.
-                data = (
-                    await kernel.send(
-                        [{"target": m.get("target"), "payload": m.get("payload") or {}}]
-                    )
-                )[0]["result"]
+                item = {"target": m.get("target"), "payload": m.get("payload") or {}}
+                if "secret" in m:
+                    # The program's SECRET marks ride onto the item as sent; the
+                    # kernel validates them (a bad mark is a refusal in the reply)
+                    # and masks every record of the call.
+                    item["secret"] = m["secret"]
+                data = (await kernel.send([item]))[0]["result"]
                 push({"op": "reply", "rid": m.get("rid"), "data": data})
                 await writer.drain()
             elif op == "emit":
@@ -1164,13 +1167,18 @@ async def _reflect(id, payload, kernel):
             "a BIDIRECTIONAL socket (one end of a socketpair): frame is "
             "[4-byte BE length | kind | rest], both directions — kind T: a JSON "
             "envelope; kind B: [4-byte BE H | H-byte JSON header | raw body], the "
-            "header's `_binary_path` naming where the body belongs (a stream chunk "
-            "rides raw, never base64). To CALL another agent: "
-            "write {op:'send', rid:<your id>, target, payload} and the reply COMES "
-            "BACK on the SAME fd as {op:'reply', rid:<same id>, data} — the fd is "
-            "not one-way. It is not inline, though: read frames in a loop and skip "
+            "header's `_binary_path` naming where the body belongs as a list of "
+            "steps from the frame root — a key as a string (taken literally: "
+            "['payload', 'a.b'] is the key 'a.b'), a list index as an int "
+            "(a stream chunk rides raw, never base64). To CALL another agent: "
+            "write {op:'send', rid:<your id>, target, payload, secret?} and the reply "
+            "COMES BACK on the SAME fd as {op:'reply', rid:<same id>, data} — the fd "
+            "is not one-way. It is not inline, though: read frames in a loop and skip "
             "any whose rid isn't yours (event/inbox frames can arrive first) until "
-            "you see your reply. ops: send/emit/reflect/watch/on_message. A command "
+            "you see your reply. `secret` is the call's marks ['payload.<field>' | "
+            "'result' | 'result.<field>']: every record of the call shows <secret>, "
+            "the reply carries the real values to you — print one and it is in the "
+            "job output. ops: send/emit/reflect/watch/on_message. A command "
             "that never reads the fd runs exactly like any OS process."
         ),
         "inbox": (
@@ -1211,8 +1219,10 @@ async def _connector(id, payload, kernel):
             "frames; a payload carrying a bytes value rides the binary channel raw: "
             "`write_stream` puts its chunk in `bytes`, `read_stream` passes `bytes: b''` "
             "and gets its chunk back raw in the reply's `bytes`) and "
-            "exposes `kernel.send(target, payload) -> reply` (raises if the relay could "
-            "not deliver), "
+            "exposes `kernel.send(target, payload, secret=None) -> reply` (raises if "
+            "the relay could not deliver; `secret` marks values the kernel must not "
+            "record — `['payload.<field>']`, `['result']` — and the reply still "
+            "carries them to you, so never print one: that is the job output), "
             "`kernel.emit(payload)`, `kernel.watch(src, cb)`, `kernel.on_message(cb)`, "
             "`kernel.self_id`. Arguments arrive as ARGV, like any command — there is "
             "no `kernel.args`. One frame caps at 16 MiB; move more than that with "

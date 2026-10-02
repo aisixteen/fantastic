@@ -18,6 +18,7 @@ import { fileURLToPath } from "node:url";
 import { Kernel } from "../src/kernel/kernel.ts";
 import { Agent } from "../src/kernel/agent.ts";
 import type { Json, Payload } from "../src/kernel/json.ts";
+import type { Item } from "../src/kernel/outcome.ts";
 import { UNHANDLED, refusal } from "../src/kernel/refusal.ts";
 
 const CORPUS = fileURLToPath(
@@ -28,6 +29,9 @@ interface Case {
   name: string;
   target: string;
   payload: Payload;
+  /** The batch item's `secret` marks, beside `payload` — on this in-proc leg
+   *  they go on the item itself. */
+  secret?: string[];
   expect?: Payload;
   expect_keys?: string[];
   pairwise?: boolean;
@@ -124,7 +128,9 @@ for (const c of doc.cases) {
       return;
     }
     const k = wired();
-    const [out] = await k.send([{ target: c.target, payload: c.payload }]);
+    const item: Item = { target: c.target, payload: c.payload };
+    if (c.secret !== undefined) item.secret = c.secret;
+    const [out] = await k.send([item]);
     const reply = out!.result;
 
     if (c.expect !== undefined) {

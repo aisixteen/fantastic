@@ -452,7 +452,7 @@ pub async fn paste_image_reply(owner: &AgentId, header: &Value, data: &[u8]) -> 
     let name = format!("paste_{}.{ext}", crate::rand_hex8());
     // The scratch dir is a system temp dir (outside cwd by design) — written
     // through `fs`, the one disk module.
-    if let Err(e) = fantastic_file::fs::write_bytes(&dir, &name, data, false) {
+    if let Err(e) = fantastic_file::fs::write_bytes(&dir, &name, data, false, None) {
         return refusal(
             TRANSPORT_ERROR,
             format!("exec_bridge: paste_image failed: {e}"),

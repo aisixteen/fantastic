@@ -16,7 +16,6 @@ import httpx
 import pytest
 from ai_core.core import THINK_CLOSE, THINK_OPEN
 from responses_backend.provider import (
-    KEY_VAR,
     RETRIES,
     ResponsesProvider,
 )
@@ -24,11 +23,14 @@ from responses_backend.provider import (
 EP = "http://proxy.test/v1/responses"
 
 
-@pytest.fixture(autouse=True)
-def _key(monkeypatch):
-    """The key is read before the request is built, so even a MockTransport run
-    needs one present. Set here, never read from the developer's real `.env`."""
-    monkeypatch.setenv(KEY_VAR, "sk-test-fixture")
+async def _key(endpoint: str) -> str:
+    """The key reader a provider awaits before each request (in the kernel, the
+    record's `credentials` read from a credential store — `ai_core/credentials.py`)."""
+    return "sk-test-fixture"
+
+
+async def _refused(endpoint: str) -> str:
+    raise RuntimeError("responses_backend: credentials creds/openai: no such ref")
 
 
 def _sse(*events: dict) -> str:
@@ -67,6 +69,7 @@ def _capture(sink: list, sse: str, status: int = 200):
 def _provider(sink: list, sse: str, **kw) -> ResponsesProvider:
     kw.setdefault("model", "qwen-test")
     kw.setdefault("endpoint", EP)
+    kw.setdefault("key", _key)
     return ResponsesProvider(transport=_capture(sink, sse), **kw)
 
 
@@ -132,7 +135,7 @@ def test_sampling_may_not_override_what_the_provider_owns():
     `sampling` key naming either is refused, not merged over it (audit d8)."""
     for key in ("store", "model", "max_output_tokens"):
         with pytest.raises(ValueError, match=key):
-            ResponsesProvider("http://x/v1/responses", "m", sampling={key: 1})
+            ResponsesProvider("http://x/v1/responses", "m", key=_key, sampling={key: 1})
 
 
 async def test_thinking_is_wrapped_not_dropped():
@@ -227,19 +230,18 @@ async def test_a_native_function_call_is_a_loud_error_not_a_silent_drop():
         await _drain(_provider([], sse))
 
 
-async def test_missing_endpoint_model_or_key_fail_loud_naming_it(monkeypatch):
+async def test_missing_endpoint_model_or_key_fail_loud_naming_it():
     with pytest.raises(RuntimeError, match="endpoint"):
-        await _drain(ResponsesProvider(endpoint="", model="m"))
+        await _drain(ResponsesProvider(endpoint="", model="m", key=_key))
     with pytest.raises(RuntimeError, match="model"):
-        await _drain(ResponsesProvider(endpoint=EP, model=""))
-    monkeypatch.delenv(KEY_VAR)
-    with pytest.raises(RuntimeError, match=KEY_VAR):
-        await _drain(ResponsesProvider(endpoint=EP, model="m"))
+        await _drain(ResponsesProvider(endpoint=EP, model="", key=_key))
+    with pytest.raises(RuntimeError, match="credentials"):
+        await _drain(ResponsesProvider(endpoint=EP, model="m", key=_refused))
 
 
 # ── transport retry ──────────────────────────────────────────────────────────
-# Same rule as the anthropic provider: a CDN error page (transport code, non-JSON
-# body) is retried, bounded; anything the endpoint answered deliberately is not.
+# A CDN error page (transport code, non-JSON body) is retried, bounded; anything
+# the endpoint answered deliberately is not.
 
 
 def _sequence(responses: list, sink: list):
@@ -253,7 +255,7 @@ def _sequence(responses: list, sink: list):
 
 def _seq_provider(responses: list, sink: list) -> ResponsesProvider:
     return ResponsesProvider(
-        endpoint=EP, model="m", transport=_sequence(responses, sink)
+        endpoint=EP, model="m", key=_key, transport=_sequence(responses, sink)
     )
 
 
@@ -348,29 +350,28 @@ async def test_an_incomplete_reason_other_than_the_budget_is_the_stop_reason():
     assert p.last_stop_reason == "content_filter"
 
 
-async def test_the_missing_config_texts_are_exact(monkeypatch):
+async def test_the_missing_config_texts_are_exact():
     with pytest.raises(RuntimeError) as e:
-        await _drain(ResponsesProvider(endpoint="", model="m"))
+        await _drain(ResponsesProvider(endpoint="", model="m", key=_key))
     assert str(e.value) == (
         "responses_backend: no `endpoint` set — this connector does not "
         "guess a host. Name the full …/v1/responses URL on the agent "
         "record (endpoint=...)."
     )
     with pytest.raises(RuntimeError) as e:
-        await _drain(ResponsesProvider(endpoint=EP, model=""))
+        await _drain(ResponsesProvider(endpoint=EP, model="", key=_key))
     assert str(e.value) == (
         "responses_backend: no `model` set — this connector does not guess "
         "one. Name a model on the agent record (model=...)."
     )
-    monkeypatch.delenv(KEY_VAR)
     with pytest.raises(RuntimeError) as e:
-        await _drain(ResponsesProvider(endpoint=EP, model="m"))
-    assert str(e.value) == "OPENAI_API_KEY not set in environment (.env)"
+        await _drain(ResponsesProvider(endpoint=EP, model="m", key=_refused))
+    assert str(e.value) == "responses_backend: credentials creds/openai: no such ref"
 
 
 def test_the_owned_key_refusal_text_is_exact():
     with pytest.raises(ValueError) as e:
-        ResponsesProvider(EP, "m", sampling={"store": True, "model": "x"})
+        ResponsesProvider(EP, "m", key=_key, sampling={"store": True, "model": "x"})
     assert str(e.value) == (
         "responses_backend: `sampling` may not set model, store — "
         "those are the record's (`model`, `max_tokens`) or the provider's own"

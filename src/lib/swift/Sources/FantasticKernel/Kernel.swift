@@ -88,6 +88,14 @@ public enum KernelTaskLocals {
     /// Python `current_remote_caller()`.
     @TaskLocal public static var currentRemote: String? = nil
 
+    /// THE SECRET PATHS of the call this dispatch serves — the `secret` its
+    /// caller marked on the batch item (`Secret`), as given
+    /// (`payload.<field…>` / `result[.<field…>]`); empty when none were marked.
+    /// Set per dispatch task, so a handler's own sends never inherit it. A bundle
+    /// that must only ever be called WITH a mark (a credential store) reads it
+    /// and refuses an unmarked call. Python `current_secret()`.
+    @TaskLocal public static var currentSecret: [String] = []
+
     /// Called once a batch item's dispatch has FANNED OUT (its `send` reached the
     /// target's watchers) — the turnstile `send` uses to start the items of one
     /// batch in INPUT ORDER. Python creates the dispatch tasks in order and each
@@ -146,13 +154,13 @@ public struct SubscriberToken: Sendable, Hashable {
 /// A subscriber callback fired on every state event (`send` / `drain` / `emit` /
 /// `added` / `updated` / `removed`). Synchronous, called inline — keep it cheap.
 ///
-/// The second argument is the event payload's RAW BODY — `(path within
-/// `payload`, bytes)` — for a traffic event whose payload carried bytes. Python
+/// The second argument is the event payload's RAW BODY — a `Blob`, its slot
+/// within `payload` — for a traffic event whose payload carried bytes. Python
 /// queues the bytes inside the payload dict and its WS tap re-encodes the whole
 /// event as a binary frame; `JSON` cannot hold raw `Data`, so the body rides
 /// beside the event exactly as it rides beside an `InboxItem`. `nil` for every
 /// event with no bytes.
-public typealias StateSubscriber = @Sendable (JSON, InboxBody?) -> Void
+public typealias StateSubscriber = @Sendable (JSON, Blob?) -> Void
 
 public final class Kernel: @unchecked Sendable {
     /// The flat agents map, in REGISTRATION order — python's registry is a
@@ -570,17 +578,15 @@ public final class Kernel: @unchecked Sendable {
         ])
     }
 
-    /// The inbox element for a BINARY dispatch: the header with `bytes` nulled,
-    /// plus the blob at that same path. `bytes` is the key python's own payload
-    /// dict holds the blob under, so a watcher receives the body — not a header
-    /// with a hole where it was.
-    static func binaryItem(_ header: JSON, _ blob: Data) -> InboxItem {
+    /// The inbox element for a BINARY dispatch: the header with `null` at the
+    /// body's path (in the caller's position when the payload names the slot),
+    /// plus the body at that same path — where python's own payload dict holds
+    /// it, so a watcher receives the body, not a header with a hole where it was.
+    static func binaryItem(_ header: JSON, _ body: Blob) -> InboxItem {
         var head = header
-        if case .object(var o) = head {
-            o["bytes"] = .null
-            head = .object(o)
-        }
-        return .binary(head, "bytes", blob)
+        // admitted at launch: the path names a slot of the payload
+        try? pySetPath(&head, parts: body.parts, .null)
+        return .binary(head, body)
     }
 
     /// The `{agent_id, kind:"drain", backlog}` event every dispatch publishes
@@ -618,7 +624,7 @@ public final class Kernel: @unchecked Sendable {
     /// `ts` is stamped HERE and LAST (python `{**event, "ts": time.time()}`), so
     /// every event carries the moment it was published and no caller has to
     /// remember to add one. No subscribers = no work at all, as in python.
-    func publishState(_ event: JSON, body: InboxBody? = nil) {
+    func publishState(_ event: JSON, body: Blob? = nil) {
         subscriberLock.lock()
         let subs = _subscribers
         subscriberLock.unlock()

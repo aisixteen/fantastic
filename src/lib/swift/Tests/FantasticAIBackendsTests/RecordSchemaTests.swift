@@ -6,11 +6,8 @@
 // against python's own output is in `FantasticParityTests`.
 
 import FantasticAICore
-import FantasticAnthropicBackend
 import FantasticJSON
 import FantasticKernel
-import FantasticLlamaCppBackend
-import FantasticNvidiaNimBackend
 import FantasticOllamaBackend
 import FantasticResponsesBackend
 import FantasticVllmBackend
@@ -27,11 +24,8 @@ private struct Plain: AgentBundle {
 @Suite struct RecordSchemaTests {
     private func kernel() -> Kernel {
         let registry = BundleRegistry()
-        registry.register(FantasticAnthropicBackend.HANDLER_MODULE, AnthropicBundle())
         registry.register(FantasticResponsesBackend.HANDLER_MODULE, ResponsesBundle())
-        registry.register(FantasticNvidiaNimBackend.HANDLER_MODULE, NvidiaNimBundle())
         registry.register(FantasticOllamaBackend.HANDLER_MODULE, OllamaBackendBundle())
-        registry.register(FantasticLlamaCppBackend.HANDLER_MODULE, LlamaCppBundle())
         registry.register(FantasticVllmBackend.HANDLER_MODULE, VllmBundle())
         registry.register("plain.tools", Plain())
         let k = Kernel(storage: .inMemory, bundles: registry)
@@ -66,10 +60,15 @@ private struct Plain: AgentBundle {
         #expect(fields["thinking_token_budget"]?["default"] == .integer(16000))
         #expect(fields["kv_overflow"]?["enum"] == .array(["evict", "reject"]))
         #expect(fields["reasoning_effort"]?["enum"] == .array(["low", "medium", "xhigh"]))
-        #expect(vllm["key_var"] == "VLLM_API_KEY")  // sent only when set
-        #expect(by["responses_backend"]?["schema"]["key_var"] == "OPENAI_API_KEY")
-        #expect(by["anthropic_backend"]?["schema"]["key_var"] == "ANTHROPIC_API_KEY")
-        #expect(by["nvidia_nim_backend"]?["schema"]["key_var"] == "NVIDIA_API_KEY")
+        // the key: optional where a server may be keyless, required where it never
+        // is — a `credentials` field (a store ref), never an environment variable
+        #expect(fields["credentials"]?["type"] == "credentials")
+        #expect(fields["credentials"]?["required"] == .bool(false))
+        #expect(vllm.asObject.map { Array($0.keys) } == ["fields"], "no `key_var`")
+        let sch = by["responses_backend"]?["schema"] ?? .null
+        #expect(sch.asObject.map { Array($0.keys) } == ["fields"], "responses_backend: no `key_var`")
+        let cred = (sch["fields"].asArray ?? []).first { $0["name"] == "credentials" }
+        #expect(cred?["required"] == .bool(true))
         // an entry is `name, handler_module, schema` in that order
         #expect(by["vllm_backend"]?.asObject.map { Array($0.keys) } == ["name", "handler_module", "schema"])
         // a bundle that is not a backend publishes none
@@ -83,7 +82,7 @@ private struct Plain: AgentBundle {
         func create(_ meta: OrderedDictionary<String, JSON>) async -> JSON {
             var payload: OrderedDictionary<String, JSON> = [
                 "type": "create_agent", "parent_id": "kernel_state",
-                "handler_module": "anthropic_backend.tools",
+                "handler_module": "responses_backend.tools",
             ]
             for (key, v) in meta { payload[key] = v }
             return await k.send([Item(AgentId("kernel_state"), .object(payload))])[0].result
@@ -91,28 +90,39 @@ private struct Plain: AgentBundle {
         var r = await create(["id": "a1"])
         #expect(r["reason"] == "invalid_meta", "\(r)")
         #expect(
-            r["error"].asString?.contains("missing: endpoint, model, memory_store_id") == true,
+            r["error"].asString?.contains("missing: endpoint, model, credentials, memory_store_id")
+                == true,
             "\(r)")
         r = await create([
             "id": "a2", "endpoint": "http://127.0.0.1:9/stub", "model": "m",
-            "memory_store_id": "memory", "context_strategy": "bogus",
+            "memory_store_id": "memory", "credentials": ["store": "creds", "ref": "main"],
+            "context_strategy": "bogus",
         ])
         #expect(r["reason"] == "invalid_meta", "\(r)")
         #expect(r["error"].asString?.contains("context_strategy") == true, "\(r)")
         r = await create([
             "id": "a3", "endpoint": "http://127.0.0.1:9/stub", "model": "m",
-            "memory_store_id": "memory",
+            "memory_store_id": "memory", "credentials": ["store": "creds"],
         ])
-        #expect(r["id"] == "a3", "\(r)")
+        #expect(r["reason"] == "invalid_meta", "\(r)")
+        #expect(r["error"].asString?.contains("credentials must be {store") == true, "\(r)")
+        r = await create([
+            "id": "a4", "endpoint": "http://127.0.0.1:9/stub", "model": "m",
+            "memory_store_id": "memory", "credentials": ["store": "creds", "ref": "main"],
+        ])
+        #expect(r["id"] == "a4", "\(r)")
     }
 
     /// The refusal texts are python's, byte for byte.
     @Test func theRefusalTextsArePythons() {
         #expect(
-            NvidiaNimBundle().validateMeta([:], record: [:])
-                == "nvidia_nim_backend: required on the record and missing: endpoint, model, "
-                + "memory_store_id — nothing is guessed. endpoint = the NIM OpenAI-compatible "
-                + "URL; model = the model name; memory_store_id = the memory store agent that "
+            ResponsesBundle().validateMeta([:], record: [:])
+                == "responses_backend: required on the record and missing: endpoint, model, "
+                + "credentials, memory_store_id — nothing is guessed. endpoint = the full "
+                + "Responses API URL (…/v1/responses); model = the model name; credentials = "
+                + "{store, ref}: "
+                + "the credential store and ref holding `api_key` — read at each request, sent "
+                + "only to the ref's host; memory_store_id = the memory store agent that "
                 + "keeps this agent's conversation (e.g. a ram_store)")
         #expect(
             OllamaBackendBundle().validateMeta(
@@ -122,15 +132,34 @@ private struct Plain: AgentBundle {
                 + "strip, fold")
         // a blank string is not a value; a present non-string field is
         #expect(
-            LlamaCppBundle().validateMeta(["endpoint": "  "], record: ["memory_store_id": "m"])?
-                .contains("missing: endpoint —") == true)
+            OllamaBackendBundle().validateMeta(
+                ["endpoint": "  "], record: ["model": "m", "memory_store_id": "m"])
+                == "ollama_backend: required on the record and missing: endpoint — nothing is "
+                + "guessed. endpoint = the ollama server URL")
         // an update is judged on the MERGED record, and a null clears a field
         let full: OrderedDictionary<String, JSON> = [
             "endpoint": "http://h/v1", "model": "m", "memory_store_id": "memory",
+            "credentials": ["store": "creds", "ref": "r"],
         ]
         #expect(ResponsesBundle().validateMeta(["max_tokens": 10], record: full) == nil)
         #expect(
             ResponsesBundle().validateMeta(["model": .null], record: full)?
                 .contains("missing: model —") == true)
+        // a malformed `credentials` is refused at the write, python's texts
+        #expect(
+            ResponsesBundle().validateMeta(["credentials": "creds/r"], record: full)
+                == "credentials must be {store: <credential_store id>, ref: <ref>}")
+        #expect(
+            ResponsesBundle().validateMeta(["credentials": ["store": "", "ref": "r"]], record: full)
+                == "credentials.store must be a non-empty string")
+        // optional on a keyless server: absent is fine, a null clears it
+        #expect(
+            VllmBundle().validateMeta(
+                ["credentials": .null],
+                record: [
+                    "endpoint": "http://h", "model": "m", "max_tokens": 10, "kv_slots": 2,
+                    "kv_overflow": "evict", "memory_store_id": "m",
+                ])
+                == nil)
     }
 }

@@ -7,8 +7,9 @@
 //! Wire: `[4-byte BE length | kind | rest]`, both directions. Kind `T`: a JSON
 //! envelope. Kind `B`: `fantastic_io_bridge::codec`'s binary frame
 //! (`[len | JSON header | raw body]`, the header's `_binary_path` naming where the
-//! body belongs) — how a `read_stream` chunk or a `write_stream` payload crosses the
-//! fd raw, never base64. A raw fd has no WS text/binary frame kind, hence the byte.
+//! body belongs as a list of steps — a key as a string, taken literally, a list
+//! index as an int) — how a `read_stream` chunk or a `write_stream` payload crosses
+//! the fd raw, never base64. A raw fd has no WS text/binary frame kind, hence the byte.
 //! A kind-B `send` carries its body on the kernel's binary channel (`Item::with_binary`),
 //! a kind-T one rides the text channel — the same split a WS transport makes.
 //!
@@ -23,8 +24,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use fantastic_bundle::py_truthy;
-use fantastic_io_bridge::codec::{decode_binary_frame, encode_binary_frame, set_path};
-use fantastic_kernel::{AgentId, Item, Kernel, TaskId};
+use fantastic_io_bridge::codec::{decode_binary_frame, encode_binary_frame};
+use fantastic_kernel::{AgentId, Blob, Item, Kernel, TaskId};
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -78,25 +79,53 @@ async fn push(wr: &Arc<tokio::sync::Mutex<OwnedWriteHalf>>, v: &Value) {
     write_frame(wr, b'T', &body).await;
 }
 
-/// Frame a header + raw body onto the socket (kind `B`). `header` already carries
-/// `_binary_path` with null at that spot.
-async fn push_binary(wr: &Arc<tokio::sync::Mutex<OwnedWriteHalf>>, header: &Value, body: &[u8]) {
-    write_frame(wr, b'B', &encode_binary_frame(header, body)).await;
+/// Frame an envelope + raw body onto the socket (kind `B`): `body.path` is the
+/// slot's steps from the envelope root, written as `_binary_path`, and the head
+/// holds `null` there in python's position (in place when the slot exists,
+/// appended when not — python's `encode_frame` nulls the bytes where they sat).
+async fn push_binary(
+    wr: &Arc<tokio::sync::Mutex<OwnedWriteHalf>>,
+    mut envelope: Value,
+    body: &Blob,
+) {
+    let _ = fantastic_bundle::path::place(&mut envelope, &body.path, Value::Null);
+    write_frame(
+        wr,
+        b'B',
+        &encode_binary_frame(&envelope, &body.path, &body.bytes),
+    )
+    .await;
 }
 
-/// Decode one child frame → `(envelope, raw body)`. Kind `T`: JSON, empty body. Kind
-/// `B`: the io_bridge binary frame — the envelope keeps `_binary_path` (null there)
-/// and the body rides alongside, since a `Value` cannot hold bytes. `None` for a
-/// malformed frame or an unknown kind.
-fn unframe(body: &[u8]) -> Option<(Value, Vec<u8>)> {
+/// Decode one child frame → `(envelope, raw body at its steps from the envelope
+/// root)`. Kind `T`: JSON, no body. Kind `B`: the io_bridge binary frame —
+/// python's `decode_frame`: `_binary_path` popped and the slot checked (the
+/// envelope keeps `null` there), the body beside it, since a `Value` cannot hold
+/// bytes; a frame that names no slot places no body. `None` for a malformed frame
+/// (a path that names no slot included — python's decode raises and the frame is
+/// skipped), a non-object envelope or an unknown kind.
+fn unframe(body: &[u8]) -> Option<(Value, Option<Blob>)> {
     match body.first()? {
         // STRICT (D13): python `_unframe` → `strict_loads`.
         b'T' => fantastic_io_bridge::codec::loads_slice(&body[1..])
             .ok()
-            .map(|v| (v, Vec::new())),
-        b'B' => decode_binary_frame(&body[1..]).ok(),
+            .map(|v| (v, None)),
+        b'B' => {
+            let f = decode_binary_frame(&body[1..]).ok()?;
+            if !f.head.is_object() {
+                return None;
+            }
+            Some((f.head, f.path.map(|p| Blob::new(p, f.body))))
+        }
         _ => None,
     }
+}
+
+/// The body a frame carries INSIDE its `payload`, at its steps there — the
+/// payload python's `m.get("payload")` hands the kernel holds it; anywhere else
+/// it is not part of the payload.
+fn payload_body(blob: Option<Blob>) -> Option<Blob> {
+    blob?.under("payload")
 }
 
 /// Frame one queued inbox item into `envelope` (whose `payload` already holds the
@@ -106,14 +135,14 @@ fn unframe(body: &[u8]) -> Option<(Value, Vec<u8>)> {
 /// header with a hole where the body was.
 async fn push_item(
     wr: &Arc<tokio::sync::Mutex<OwnedWriteHalf>>,
-    mut envelope: Value,
+    envelope: Value,
     item: &fantastic_kernel::inbox::InboxItem,
 ) {
     match &item.body {
         None => push(wr, &envelope).await,
-        Some((path, body)) => {
-            envelope["_binary_path"] = json!(format!("payload.{path}"));
-            push_binary(wr, &envelope, body).await;
+        Some(b) => {
+            let at = Blob::new(b.nested_in("payload"), b.bytes.clone());
+            push_binary(wr, envelope, &at).await;
         }
     }
 }
@@ -182,7 +211,7 @@ pub async fn serve(
         let Some(body) = frame else {
             break; // EOF, a wire violation, or teardown — release and go.
         };
-        let Some((m, blob)) = unframe(&body) else {
+        let Some((m, framed)) = unframe(&body) else {
             continue; // malformed body → skip the frame, never the connection
         };
 
@@ -197,31 +226,37 @@ pub async fn serve(
                     None => json!({}),
                 };
                 // RELAYED UNTOUCHED, as python's `_serve_ctrl` relays it: one
-                // `kernel.send([{target, payload}])`, no tag added, nothing
+                // `kernel.send([{target, payload, secret?}])`, no tag added, nothing
                 // refused here — the kernel's gate is the only judge.
-                // A kind-B frame (bytes alongside, `_binary_path` = `payload.<field>`)
+                // A kind-B frame (bytes alongside, `_binary_path` = `["payload", …]`)
                 // carries a request body: the SAME batch item on the binary
                 // channel, so it gets its pid, rows, `ps` row and deadline like any
                 // other call. Rust's `Value` cannot carry bytes, so the body rides
-                // beside the payload.
+                // beside the payload, at its path there.
                 let mut item = Item::new(AgentId::from(target), payload);
-                if m.get("_binary_path").is_some() {
-                    item = item.with_binary(blob);
+                if let Some(marks) = m.get("secret") {
+                    // The program's SECRET marks ride onto the item as sent; the
+                    // kernel validates them (a bad mark is a refusal in the reply)
+                    // and masks every record of the call.
+                    item = item.with_secret(marks.clone());
+                }
+                if let Some(b) = payload_body(framed) {
+                    item = item.with_binary(b.path, b.bytes);
                 }
                 let out = kernel.send(vec![item]).await.remove(0);
                 let (data, body) = (out.result, out.body);
-                let mut env = json!({"op": "reply", "rid": m.get("rid"), "data": data});
+                let env = json!({"op": "reply", "rid": m.get("rid"), "data": data});
                 match body {
                     // The verb returned NO chunk — a plain text frame. `Some(b)`
                     // with `b` EMPTY is still a chunk (an empty file), so the
                     // test is the carrier, never the length (C37).
                     None => push(&wr, &env).await,
                     Some(body) => {
-                        // A `read_stream` chunk: the reply body rides raw at `data.bytes`
-                        // (python's reply dict holds it there natively).
-                        let _ = set_path(&mut env, "data.bytes", Value::Null);
-                        env["_binary_path"] = json!("data.bytes");
-                        push_binary(&wr, &env, &body).await;
+                        // A chunk rides raw at `["data", …its slot]` — `["data",
+                        // "bytes"]` for a `read_stream` (python's reply dict
+                        // holds it there natively).
+                        let at = Blob::new(body.nested_in("data"), body.bytes);
+                        push_binary(&wr, env, &at).await;
                     }
                 }
             }
@@ -231,7 +266,13 @@ pub async fn serve(
                     Some(p) => p.clone(),
                     None => json!({}),
                 };
-                kernel.emit(&owner, payload).await;
+                // a payload holding bytes is emitted WHOLE: watchers get the body
+                // at its path, as python's `kernel.emit` hands them the dict
+                let item = match payload_body(framed) {
+                    Some(b) => fantastic_kernel::inbox::InboxItem::binary(payload, b),
+                    None => fantastic_kernel::inbox::InboxItem::text(payload),
+                };
+                kernel.emit_item(&owner, item).await;
             }
             Some("watch") => {
                 let Some(src) = m.get("src").and_then(Value::as_str).map(AgentId::from) else {

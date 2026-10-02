@@ -29,17 +29,21 @@ pub struct BackendConfig {
     /// Backend error-message prefix (e.g. `"ollama_backend"`), used by the
     /// context-projection seam's `too_small` / config-error messages.
     pub name: &'static str,
-    /// python `Backend.provider_missing_error`, set only by a backend whose
-    /// `require_provider` is true (nvidia, whose key is the precondition).
-    /// `None` = this backend can always build a provider, so `send` has nothing
-    /// to failfast on and never reads this.
-    pub provider_missing_error: Option<&'static str>,
+    /// THE MODEL'S OWN WINDOW, in tokens — what `context_window` resolves to
+    /// when the record names neither `context_window` nor `num_ctx`
+    /// ([`crate::context::resolve_context_window`]). A server backend cannot
+    /// know its model's window and keeps [`crate::constants::DEFAULT_CONTEXT_WINDOW`]
+    /// (the record's `context_window` is the lever); a backend that can READ the
+    /// real one says so here (foundation_models_backend: the SDK's
+    /// `contextSize`). Its schema's `context_window` default is the same number
+    /// ([`crate::schema::schema_with_window`]). Swift `AIBackendConfig.modelWindow`.
+    pub model_window: i64,
 }
 
 /// Why a generation produced no completion. The two kinds settle differently,
 /// so they are not one string: python returns a projection refusal VERBATIM out
 /// of `_run` (no status event, no `client_id`, no raise), while a provider
-/// failure either maps to a caller-facing sentence or propagates.
+/// failure propagates.
 pub enum GenFailure {
     /// The context-projection seam refused (`too_small` failsafe, unknown
     /// strategy). The dict is the reply — python `_run`'s
@@ -115,11 +119,24 @@ pub async fn run_generation(
     cfg: BackendConfig,
     system_prompt: Option<String>,
 ) -> Result<Generation, GenFailure> {
+    // A PROVIDER THAT CANNOT RUN REFUSES THE TURN FIRST — before the owed
+    // recall, the assembly and the projection, so the caller reads why it
+    // cannot answer rather than a window failure on a model that could never
+    // have answered. Python `_run` builds its provider (`_get_provider`, which
+    // may raise) before anything else; swift's `providerInTurn` likewise.
+    provider.ready().map_err(GenFailure::Provider)?;
     // A RECALL OWED FROM THE LAST FOLD BATCH (or from a boot) runs first, so this
     // turn is assembled over the head the recall chose — python `_recall_due`.
     let due = std::mem::take(&mut *state.recall_due.lock().expect("recall_due poisoned"));
     if due {
-        crate::retrieval::context_recall(self_id, &json!({}), kernel, Some(provider)).await?;
+        crate::retrieval::context_recall(
+            self_id,
+            &json!({}),
+            kernel,
+            Some(provider),
+            cfg.model_window,
+        )
+        .await?;
     }
     let (messages, store_len) = assemble_messages(
         self_id,
@@ -135,7 +152,15 @@ pub async fn run_generation(
     // window is read off the record EVERY turn, so a model switched to a smaller
     // one (`update_agent`) is fitted — folded — on its very next turn.
     let model_messages = match crate::projection::project_context(
-        provider, self_id, state, kernel, client_id, cfg.name, messages, store_len,
+        provider,
+        self_id,
+        state,
+        kernel,
+        client_id,
+        cfg.name,
+        cfg.model_window,
+        messages,
+        store_len,
     )
     .await
     {

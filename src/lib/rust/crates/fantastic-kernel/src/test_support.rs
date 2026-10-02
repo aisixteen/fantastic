@@ -94,9 +94,11 @@ impl Bundle for FakeStore {
         &self,
         _id: &AgentId,
         header: Value,
-        blob: Vec<u8>,
+        body: Option<crate::outcome::Blob>,
         _kernel: &Arc<Kernel>,
-    ) -> Result<(Reply, Option<Vec<u8>>), BundleError> {
+    ) -> Result<(Reply, Option<crate::outcome::Blob>), BundleError> {
+        // the chunk is the payload's `bytes` — python's `payload.get("bytes", b"")`
+        let blob = crate::outcome::body_at(body.as_ref(), "bytes").unwrap_or_default();
         let verb = header.get("type").and_then(Value::as_str).unwrap_or("");
         let path = header.get("path").and_then(Value::as_str).unwrap_or("");
         let target = self.root.join(path);
@@ -104,7 +106,10 @@ impl Bundle for FakeStore {
             // A CHUNK-RETURNING verb answers `Some(bytes)` even when the chunk
             // is empty; anything else answers `None` (C37).
             "read_stream" => match std::fs::read(&target) {
-                Ok(bytes) => Ok((Some(json!({"size": bytes.len()})), Some(bytes))),
+                Ok(bytes) => Ok((
+                    Some(json!({"size": bytes.len()})),
+                    Some(crate::outcome::Blob::key("bytes", bytes)),
+                )),
                 Err(_) => Ok((Some(json!({"error": "not found"})), None)),
             },
             "write_stream" => {
@@ -121,7 +126,7 @@ impl Bundle for FakeStore {
                     .truncate(truncate)
                     .open(&target)
                     .expect("FakeStore: open");
-                std::io::Write::write_all(&mut f, &blob).expect("FakeStore: write");
+                std::io::Write::write_all(&mut f, blob).expect("FakeStore: write");
                 Ok((Some(json!({"written": blob.len()})), None))
             }
             other => Ok((

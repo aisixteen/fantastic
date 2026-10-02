@@ -4,7 +4,7 @@
 //! WRONG tokenizer for gemma/nemotron). Plus window/budget resolution off
 //! the agent record meta. Mirrors the Python `ai_core/context.py`.
 
-use fantastic_bundle::{decimal_value, py_int, py_json_dumps, py_strip};
+use fantastic_bundle::{py_int, py_json_dumps, py_strip};
 use serde_json::{json, Map, Value};
 
 // The tunables live in [`crate::constants`]; re-exported here so every
@@ -32,7 +32,8 @@ pub fn estimate_tokens(messages: &[Value]) -> i64 {
 
 /// Python `_as_pos_int`: a bool is never one; an int must be > 0; a float must
 /// be > 0 and then TRUNCATES (`0.5` → 0, which is why the budget can floor); a
-/// string counts only when `strip().isdigit()` (so `+12` and `-3` are not).
+/// string counts only when `strip().isascii() and strip().isdigit()` (so `+12`,
+/// `-3` and `'٣'` are not).
 fn as_pos_int(v: Option<&Value>) -> Option<i64> {
     match v {
         Some(Value::Bool(_)) => None,
@@ -47,7 +48,7 @@ fn as_pos_int(v: Option<&Value>) -> Option<i64> {
         }
         Some(Value::String(s)) => {
             let t = py_strip(s);
-            if !t.is_empty() && t.chars().all(|c| decimal_value(c).is_some()) {
+            if !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()) {
                 py_int(&Value::String(t.to_string()))
                     .ok()
                     .filter(|&i| i > 0)
@@ -61,19 +62,24 @@ fn as_pos_int(v: Option<&Value>) -> Option<i64> {
 
 /// The model's usable window, by STATIC precedence (no fallback-chain):
 /// `context_window` (the explicit per-agent override — works on any
-/// backend incl. NIM which has no `num_ctx`) → `num_ctx` (ollama's real
-/// knob) → a conservative default.
-pub fn resolve_context_window(meta: &Map<String, Value>) -> i64 {
+/// backend incl. vllm/responses which have no `num_ctx`) → `num_ctx`
+/// (ollama's real knob) → `model_window`, THE BACKEND'S OWN window
+/// ([`crate::agent_loop::BackendConfig::model_window`]): [`DEFAULT_CONTEXT_WINDOW`]
+/// for a server whose window the kernel cannot know, the model's real window
+/// where the backend can read it (foundation_models_backend: the SDK's
+/// `contextSize`). Named at every call — a backend's window is never assumed.
+pub fn resolve_context_window(meta: &Map<String, Value>, model_window: i64) -> i64 {
     for key in ["context_window", "num_ctx"] {
         if let Some(v) = as_pos_int(meta.get(key)) {
             return v;
         }
     }
-    DEFAULT_CONTEXT_WINDOW
+    model_window
 }
 
 /// Output headroom reserved out of the window — python `output_reserve`: a
-/// NON-BOOL int ≥ 0, or a `strip().isdigit()` string, else 1024. A float (even
+/// NON-BOOL int ≥ 0, or a `strip().isascii() and strip().isdigit()` string,
+/// else 1024. A float (even
 /// `1000.0`), a negative, and `+5` all take the default.
 pub fn output_reserve(meta: &Map<String, Value>) -> i64 {
     match meta.get("output_reserve") {
@@ -84,7 +90,7 @@ pub fn output_reserve(meta: &Map<String, Value>) -> i64 {
             .unwrap_or(DEFAULT_OUTPUT_RESERVE),
         Some(Value::String(s)) => {
             let t = py_strip(s);
-            if !t.is_empty() && t.chars().all(|c| decimal_value(c).is_some()) {
+            if !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()) {
                 py_int(&Value::String(t.to_string())).unwrap_or(DEFAULT_OUTPUT_RESERVE)
             } else {
                 DEFAULT_OUTPUT_RESERVE
@@ -95,8 +101,8 @@ pub fn output_reserve(meta: &Map<String, Value>) -> i64 {
 }
 
 /// Token budget for the INPUT (window minus output headroom), floored.
-pub fn budget(meta: &Map<String, Value>) -> i64 {
-    (resolve_context_window(meta) - output_reserve(meta)).max(BUDGET_FLOOR)
+pub fn budget(meta: &Map<String, Value>, model_window: i64) -> i64 {
+    (resolve_context_window(meta, model_window) - output_reserve(meta)).max(BUDGET_FLOOR)
 }
 
 /// The agent's configured `recent_n` (verbatim recent turns kept by
@@ -116,8 +122,8 @@ pub fn recent_n(meta: &Map<String, Value>) -> usize {
 /// ~1.4k tokens (a reflect, an error, a short read) and digests a 6.8KB file
 /// body. Python `_inline_cap`.
 #[must_use]
-pub fn inline_cap(meta: &Map<String, Value>) -> i64 {
-    (budget(meta) / 8).max(BUDGET_FLOOR)
+pub fn inline_cap(meta: &Map<String, Value>, model_window: i64) -> i64 {
+    (budget(meta, model_window) / 8).max(BUDGET_FLOOR)
 }
 
 /// THE CAP INVARIANT. Every verb an agent calls on itself must answer UNDER the

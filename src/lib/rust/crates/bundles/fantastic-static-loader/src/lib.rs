@@ -19,11 +19,9 @@ use fantastic_bundle::{py_repr, py_repr_value, py_str, py_truthy};
 use fantastic_file::fs;
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
 use fantastic_kernel::refusal::{refusal, UNHANDLED};
-use fantastic_kernel::{with_operator, Agent, AgentId, Item, Kernel};
+use fantastic_kernel::{with_operator, yaml_io, Agent, AgentId, Item, Kernel};
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
-
-mod yaml;
 
 /// The `handler_module` value that routes to this bundle.
 pub const HANDLER_MODULE: &str = "static_loader.tools";
@@ -68,7 +66,8 @@ fn load_manifest(agent: &Agent, base: &std::path::Path) -> Result<Vec<Value>, St
             py_repr(&path)
         )
     })?;
-    let data = yaml::safe_load(&text).map_err(|e| {
+    // python `yaml.safe_load` — PyYAML's YAML 1.1, the kernel's one reader.
+    let data = yaml_io::load(&text).map_err(|e| {
         format!(
             "static_loader: manifest {} is not valid YAML: {e}",
             py_repr(&path)

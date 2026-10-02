@@ -138,6 +138,23 @@ pub fn current_remote_caller() -> Option<String> {
 }
 
 tokio::task_local! {
+    /// THE SECRET PATHS of the call this dispatch serves — the `secret` its
+    /// caller marked on the batch item ([`crate::secret`]). Set per dispatch
+    /// task, so a handler's own sends never inherit it. A bundle that must only
+    /// ever be called WITH a mark (a credential store) reads it and refuses an
+    /// unmarked call. Python `_current_secret`.
+    static CURRENT_SECRET: Vec<String>;
+}
+
+/// The paths the caller marked `secret` on the item that started this dispatch
+/// (`payload.<field…>` / `result[.<field…>]`), or empty when none were marked.
+/// Python `current_secret()`.
+#[must_use]
+pub fn current_secret() -> Vec<String> {
+    CURRENT_SECRET.try_with(Clone::clone).unwrap_or_default()
+}
+
+tokio::task_local! {
     /// THE KERNEL'S OWN SHUTDOWN TRAFFIC. `shutdown_agents` sets the drain flag
     /// FIRST (so nothing new enters while it works) and only then sends every
     /// agent its `shutdown` verb — which the drain gate would otherwise refuse
@@ -189,54 +206,22 @@ where
 /// separators and raw non-ASCII, not rust's compact `serde_json::to_string`. A
 /// bytes value becomes `<bytes:N>` — the rust carrier keeps the bytes beside the
 /// payload (see [`crate::inbox::InboxItem`]), so the marker is written back at
-/// the body's own path.
+/// the body's own slot: a literal key `a.b` is the key `"a.b"`, as in python's
+/// dict.
 ///
 /// NOT TRUNCATED — mirrors python. A summary that silently drops the end of a
 /// payload lies about what was sent, and the reader cannot tell a short payload
 /// from a cut one. Elide visibly at render time instead.
-fn summarize_payload(payload: &Value, body: Option<&(String, Vec<u8>)>) -> String {
+fn summarize_payload(payload: &Value, body: Option<&crate::outcome::Blob>) -> String {
     match body {
         None => fantastic_bundle::py_json_dumps(payload, false, None),
-        Some((path, bytes)) => {
+        Some(b) => {
             let mut shrunk = payload.clone();
-            set_at_path(&mut shrunk, path, json!(format!("<bytes:{}>", bytes.len())));
+            // A telemetry line is not worth a refusal: an unplaceable path
+            // (never one the kernel admitted) leaves the payload as it is.
+            let _ = b.place(&mut shrunk, json!(format!("<bytes:{}>", b.bytes.len())));
             fantastic_bundle::py_json_dumps(&shrunk, false, None)
         }
-    }
-}
-
-/// Write `value` at a dotted `path` (python's `set_path`: object keys, list
-/// indices). Silently no-ops on a path that does not resolve — the only caller
-/// is the summary above, and a telemetry line is not worth a panic.
-fn set_at_path(obj: &mut Value, path: &str, value: Value) {
-    let parts: Vec<&str> = path.split('.').collect();
-    let mut cur = obj;
-    for p in &parts[..parts.len() - 1] {
-        cur = match cur {
-            Value::Array(a) => match p.parse::<usize>() {
-                Ok(i) if i < a.len() => &mut a[i],
-                _ => return,
-            },
-            Value::Object(m) => match m.get_mut(*p) {
-                Some(v) => v,
-                None => return,
-            },
-            _ => return,
-        };
-    }
-    let last = parts[parts.len() - 1];
-    match cur {
-        Value::Array(a) => {
-            if let Ok(i) = last.parse::<usize>() {
-                if i < a.len() {
-                    a[i] = value;
-                }
-            }
-        }
-        Value::Object(m) => {
-            m.insert(last.to_string(), value);
-        }
-        _ => {}
     }
 }
 
@@ -442,14 +427,18 @@ struct Dispatch {
     /// `ps`, in `cancel`, in the ledger and in the reply. A retry re-registers
     /// under the same handle.
     task_id: TaskId,
-    /// A RAW request body (python's `payload["bytes"]` holding bytes).
-    binary: Option<Vec<u8>>,
+    /// A RAW request body and the payload path it sits at (python's payload
+    /// dict holding bytes there).
+    binary: Option<crate::outcome::Blob>,
     /// The reply's chunk comes back raw (see [`Item::with_raw_reply`]).
     raw_reply: bool,
     /// The payload AS SHOWN when the item marked `secret` paths
     /// ([`crate::secret`]): what the fanout publishes on EVERY attempt, while the
     /// handler gets `payload`. Python `_Dispatched.shown`.
     shown: Option<crate::secret::Shown>,
+    /// The item's `secret` paths, readable by the handler as
+    /// [`current_secret`]. Python `_Dispatched.secret_paths`.
+    secret_paths: Vec<String>,
     /// A caller-NAMED `kernel` reflect — python's flags-done fast path: the
     /// FIRST attempt is a bare identity read with the flags applied (no task
     /// row, no fanout, no `_in_flight`, and no enforced deadline: `cancel_task`
@@ -504,6 +493,15 @@ impl Kernel {
         // caller's handler). `send` never raises here, so every item of the batch
         // settles `failed` with that raise — the same record python's dispatch
         // makes of it.
+        //
+        // TODO(parity, owner 2026-10-02 — left as is, rare failure): python's raise
+        // also reaches the WIRE: `web_rest` answers HTTP 500 for the whole request,
+        // where rust's legs answer 200 with every item failed. Mirroring it needs
+        // `send` to be fallible — either `send` returns
+        // `Result<Vec<Outcome>, SendError>` (changes every caller, the CLI's
+        // in-process `Arc<Kernel>` use included) or a separate `try_send` used only
+        // by the wire legs (two entry points). Both outcomes are loud and carry the
+        // store's error text, so only the response SHAPE differs.
         if self.store_id().is_some()
             && items
                 .iter()
@@ -609,6 +607,25 @@ impl Kernel {
         if !item.payload.is_object() {
             return Launched::Settled(Outcome::refused(crate::refusal::missing("send", "payload")));
         }
+        // 2b. A RAW BODY sits at a slot of its payload — where python's dict holds
+        // the bytes. A path that names none could never be mirrored, recorded or
+        // read by the handler; every wire leg places its body before it gets here,
+        // so this only refuses an in-process caller's typo.
+        if let Some(blob) = &item.binary {
+            let mut probe = item.payload.clone();
+            if blob.place(&mut probe, Value::Null).is_err() {
+                return Launched::Settled(Outcome::refused(crate::refusal::bad(
+                    "send",
+                    "binary",
+                    &format!(
+                        "a body path naming a slot of the payload, got {}",
+                        fantastic_bundle::py_repr_value(&fantastic_bundle::path::steps_value(
+                            &blob.path
+                        ))
+                    ),
+                )));
+            }
+        }
         // 3. timeout.
         let timeout = match validate_timeout(&item) {
             Ok(t) => t,
@@ -655,7 +672,8 @@ impl Kernel {
         };
         let shown = secret
             .as_ref()
-            .map(|s| crate::secret::shown_payload(&item.payload, item.binary.as_deref(), s));
+            .map(|s| crate::secret::shown_payload(&item.payload, item.binary.as_ref(), s));
+        let secret_paths = secret.as_ref().map(|s| s.paths.clone()).unwrap_or_default();
         // 7. killed — A DYING TASK REGISTERS NO NEW WORK. `cancel_task` marks
         // the whole subtree before it aborts anything, because `on_cancel`
         // hooks await — so a doomed handler gets scheduling passes on its way
@@ -753,7 +771,7 @@ impl Kernel {
         // A body the secret marks is never recorded, not even as its length.
         let recorded_body = match &shown {
             Some(s) if s.body_hidden => None,
-            _ => item.binary.as_deref(),
+            _ => item.binary.as_ref(),
         };
         match self.ledger.open(
             exec_id,
@@ -865,6 +883,7 @@ impl Kernel {
             binary: item.binary,
             raw_reply: item.raw_reply,
             shown,
+            secret_paths,
             // A JOIN never reaches here; a fresh NAMED `kernel` reflect does.
             named_fast_reflect: kernel_reflect,
         }))
@@ -928,6 +947,7 @@ impl Kernel {
             binary,
             raw_reply,
             shown,
+            secret_paths,
             named_fast_reflect,
         } = d;
 
@@ -977,6 +997,7 @@ impl Kernel {
                     binary.clone(),
                     raw_reply,
                     shown.as_ref(),
+                    &secret_paths,
                 )
                 .await;
             // Universal post-process, PER ATTEMPT (python applies it inside
@@ -1068,6 +1089,7 @@ impl Kernel {
                 None,
                 false,
                 None,
+                &[],
             )
             .await;
         (reply, status)
@@ -1215,8 +1237,9 @@ impl Kernel {
     // One attempt needs the target, the payload, the verb, the pid-out slot, the
     // deadline, the task id, (since the binary channel joined the batch) the
     // blob and whether the reply's chunk comes back raw, and (since secret
-    // paths) the payload as the mirrors may see it. Bundling them into a struct
-    // would only move the same nine fields.
+    // paths) the payload as the mirrors may see it plus the paths the handler
+    // reads back. Bundling them into a struct would only move the same ten
+    // fields.
     #[allow(clippy::too_many_arguments)]
     async fn run_dispatch(
         self: &Arc<Self>,
@@ -1226,10 +1249,11 @@ impl Kernel {
         task_out: Option<&mut Option<TaskId>>,
         timeout: Option<Deadline>,
         task_id: TaskId,
-        binary: Option<Vec<u8>>,
+        binary: Option<crate::outcome::Blob>,
         raw_reply: bool,
         shown: Option<&crate::secret::Shown>,
-    ) -> (Value, Status, Option<Vec<u8>>) {
+        secret_paths: &[String],
+    ) -> (Value, Status, Option<crate::outcome::Blob>) {
         // The pid was minted in the SYNCHRONOUS launch phase and IS the ledger
         // key — minting a second one here would split the two apart, so the row
         // and the reply would name different things and a pid could not
@@ -1272,37 +1296,42 @@ impl Kernel {
                 None => (payload, binary.clone()),
             };
             let item = match body {
-                // A REQUEST BODY rides at `bytes` — the key python's own payload
-                // dict holds it under, in the caller's position when the payload
-                // names the slot — so a watcher receives the body, not a header
-                // with a hole where it was. A call that only READS a raw chunk
-                // carries none: its payload is a plain dict, a text frame.
+                // A REQUEST BODY rides at ITS path — where python's own payload
+                // dict holds it, in the caller's position when the payload names
+                // the slot — so a watcher receives the body, not a header with a
+                // hole where it was. A call that only READS a raw chunk carries
+                // none: its payload is a plain dict, a text frame.
                 Some(blob) => {
                     let mut head = mirrored.clone();
-                    if let Some(m) = head.as_object_mut() {
-                        m.insert("bytes".to_string(), Value::Null);
-                    }
-                    crate::inbox::InboxItem::binary(head, "bytes", blob)
+                    // admitted at launch: the path names a slot of the payload.
+                    // The watcher's frame names it step by step, as python's
+                    // encoder does (`_binary_path` is a list of steps).
+                    let _ = blob.place(&mut head, Value::Null);
+                    crate::inbox::InboxItem::binary(head, blob)
                 }
                 None => crate::inbox::InboxItem::text(mirrored.clone()),
             };
             self.fanout(target, "send", &item).await;
         }
         // The BINARY channel whenever bytes travel either way: a request body
-        // goes in, or the reply's chunk comes back raw. A request body IS
-        // `payload["bytes"]` (python's `payload[field] = body` overwrites the
-        // slot), so the header the handler gets carries no second `bytes` — a
-        // caller names the slot only to keep python's key order on the row and
-        // the watcher frame.
-        let (payload_for_handler, channel_blob) = match binary {
+        // goes in, or the reply's chunk comes back raw. A request body IS the
+        // payload's value at its path (python's `payload[field] = body` /
+        // `set_path` overwrites the slot), so the header the handler gets holds
+        // nothing there — a caller names the slot only to keep python's key
+        // order on the row and the watcher frame.
+        //
+        // `channel`: `None` = the text channel; `Some(None)` = the binary channel
+        // with no request body (a raw read); `Some(Some(blob))` = a body at its
+        // path.
+        let (payload_for_handler, channel) = match binary {
             Some(b) => {
                 let mut head = payload.clone();
-                if let Some(m) = head.as_object_mut() {
-                    m.shift_remove("bytes");
-                }
-                (head, Some(b))
+                // a payload that only NAMED the slot holds `null` there; one that
+                // did not leaves nothing to take
+                let _ = b.take(&mut head);
+                (head, Some(Some(b)))
             }
-            None if raw_reply => (payload.clone(), Some(Vec::new())),
+            None if raw_reply => (payload.clone(), Some(None)),
             None => (payload.clone(), None),
         };
 
@@ -1326,8 +1355,11 @@ impl Kernel {
             let tid = task_id;
             let cancel = handle.cancel_signal();
             let killed = handle.killed_flag();
+            // The caller's `secret` marks, for THIS dispatch only — a spawned
+            // task owns its scope, so the handler's own sends do not inherit them.
+            let secret = secret_paths.to_vec();
             tokio::spawn(async move {
-                CURRENT_REMOTE.scope(remote, CURRENT_ORIGIN
+                CURRENT_SECRET.scope(secret, CURRENT_REMOTE.scope(remote, CURRENT_ORIGIN
                     .scope(
                         origin,
                         CURRENT_SENDER.scope(
@@ -1350,18 +1382,19 @@ impl Kernel {
                                         v = async {
                                             // ANOTHER KERNEL'S AGENT: the call
                                             // goes to its peer's route, bytes
-                                            // and all; no handler runs here.
+                                            // and `secret` marks and all; no
+                                            // handler runs here.
                                             // Its reply is that kernel's answer,
                                             // relayed verbatim: never a raise here.
                                             if let Some(remote) = tgt.remote.as_ref() {
                                                 return Ok(crate::peers::call_peer(
-                                                    &kernel, remote, &tgt.id, payload, channel_blob,
+                                                    &kernel, remote, &tgt.id, payload, channel.flatten(),
                                                 )
                                                 .await);
                                             }
-                                            match channel_blob {
-                                                Some(b) => {
-                                                    dispatch_binary(Arc::clone(&kernel), tgt, payload, b).await
+                                            match channel {
+                                                Some(body) => {
+                                                    dispatch_binary(Arc::clone(&kernel), tgt, payload, body).await
                                                 }
                                                 None => dispatch(kernel, tgt, payload)
                                                     .await
@@ -1372,7 +1405,7 @@ impl Kernel {
                                 }),
                             ),
                         ),
-                    ))
+                    )))
                     .await
             })
         };
@@ -1804,19 +1837,18 @@ fn dispatch(
 /// reduction.
 ///
 /// XML text cannot carry raw bytes and base64 is banned, so the binary channel's
-/// body is written as its LENGTH under the key it rides on (`bytes` — the key
-/// python's own payload dict holds it under, and the key a `read_stream` reply
-/// leaves `null` for it, C37). Everything else — all text, all JSON — is
-/// untouched. Durable bytes live behind `file_bridge`, the one disk surface; the
-/// tape records that N of them passed, not which.
-fn taped_payload(value: &Value, body: Option<&[u8]>) -> Value {
+/// body is written as its LENGTH at the path it rides on — where python's own
+/// payload dict holds it, which python's `plain()` writes as `{len: N}` in place.
+/// Everything else — all text, all JSON — is untouched. Durable bytes live behind
+/// `file_bridge`, the one disk surface; the tape records that N of them passed,
+/// not which.
+fn taped_payload(value: &Value, body: Option<&crate::outcome::Blob>) -> Value {
     let Some(body) = body else {
         return value.clone();
     };
     let mut out = value.clone();
-    if let Some(m) = out.as_object_mut() {
-        m.insert("bytes".to_string(), json!({"len": body.len()}));
-    }
+    // admitted at launch: the path names a slot of the payload
+    let _ = body.place(&mut out, json!({"len": body.bytes.len()}));
     out
 }
 
@@ -1837,9 +1869,12 @@ fn dispatch_binary(
     kernel: Arc<Kernel>,
     target: Arc<Agent>,
     header: Value,
-    blob: Vec<u8>,
+    body: Option<crate::outcome::Blob>,
 ) -> std::pin::Pin<
-    Box<dyn std::future::Future<Output = Result<(Value, Option<Vec<u8>>), Value>> + Send>,
+    Box<
+        dyn std::future::Future<Output = Result<(Value, Option<crate::outcome::Blob>), Value>>
+            + Send,
+    >,
 > {
     Box::pin(async move {
         let verb = verb_of(&header);
@@ -1873,8 +1908,11 @@ fn dispatch_binary(
         let Some(bundle) = kernel.bundles.get(hm) else {
             return Ok((not_installed_refusal(&target.id.0, hm, verb), None));
         };
+        // The reply chunk comes back AT ITS SLOT of the reply
+        // (`Bundle::handle_binary`): `bytes` for a `read_stream`, the peer's own
+        // key for a bridge relaying a peer's reply.
         match bundle
-            .handle_binary(&target.id, header, blob, &kernel)
+            .handle_binary(&target.id, header, body, &kernel)
             .await
         {
             Ok((Some(v), body)) => Ok((v, body)),

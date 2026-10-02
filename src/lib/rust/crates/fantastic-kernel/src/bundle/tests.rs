@@ -67,7 +67,12 @@ async fn default_handle_binary_dispatches_header_and_drops_blob() {
     let header = json!({"type": "frob"});
     let blob = vec![0xCA, 0xFE, 0xBA, 0xBE];
     let (reply, body) = b
-        .handle_binary(&AgentId::from("x"), header, blob.clone(), &kernel)
+        .handle_binary(
+            &AgentId::from("x"),
+            header,
+            Some(crate::outcome::Blob::key("data", blob.clone())),
+            &kernel,
+        )
         .await
         .unwrap();
     let reply = reply.unwrap();

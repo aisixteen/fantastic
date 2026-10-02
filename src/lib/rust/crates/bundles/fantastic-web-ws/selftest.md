@@ -90,8 +90,10 @@ PY
 ### Test 5: binary frame round-trip
 
 A binary frame is an ORDINARY envelope plus a body: the header names the
-body's slot in `_binary_path`, and the frame is routed by `type` exactly like
-a text one. There is no chunked-upload dialect.
+body's slot in `_binary_path` — a JSON array of steps from the frame root, a
+key as a string (taken literally: `["payload", "a.b"]` is the key `"a.b"`), a
+list index as an int — and the frame is routed by `type` exactly like a text
+one. There is no chunked-upload dialect.
 
 ```bash
 python3 - <<'PY'
@@ -99,7 +101,7 @@ import asyncio, json, struct, websockets
 async def main():
     head = {"type": "call", "target": "fwsf", "id": "b1",
             "payload": {"type": "write_stream", "path": "x.bin", "truncate": True},
-            "_binary_path": "payload.bytes"}
+            "_binary_path": ["payload", "bytes"]}
     h = json.dumps(head).encode()
     async with websockets.connect("ws://localhost:18181/w/ws") as ws:
         await ws.send(struct.pack(">I", len(h)) + h + bytes([0, 1, 2]))

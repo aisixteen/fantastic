@@ -39,20 +39,19 @@ def _as_pos_int(v: Any) -> int | None:
         return v
     if isinstance(v, float) and v > 0:
         return int(v)
-    if (
-        isinstance(v, str)
-        and v.strip().isascii()
-        and v.strip().isdigit()
-        and int(v) > 0
-    ):
-        return int(v)
+    # Parse the STRIPPED text that was checked: `str.strip` drops `\x1c`-`\x1f` but
+    # `int()` does not, so `int("\x1c12")` raises. ASCII digits only (`'²'` is not one).
+    if isinstance(v, str):
+        t = v.strip()
+        if t.isascii() and t.isdigit() and int(t) > 0:
+            return int(t)
     return None
 
 
 def resolve_context_window(rec: dict) -> int:
     """The model's usable window, by STATIC precedence (no fallback-chain):
     `context_window` (the explicit per-agent override — the UNIFORM lever, works on any
-    backend incl. nvidia which has no `num_ctx`) → `num_ctx` (ollama's real knob) → a
+    backend incl. vllm/responses which have no `num_ctx`) → `num_ctx` (ollama's real knob) → a
     conservative default."""
     for key in ("context_window", "num_ctx"):
         v = _as_pos_int(rec.get(key))
@@ -65,8 +64,10 @@ def output_reserve(rec: dict) -> int:
     v = rec.get("output_reserve")
     if isinstance(v, int) and not isinstance(v, bool) and v >= 0:
         return v
-    if isinstance(v, str) and v.strip().isascii() and v.strip().isdigit():
-        return int(v)
+    if isinstance(v, str):
+        t = v.strip()
+        if t.isascii() and t.isdigit():
+            return int(t)
     return DEFAULT_OUTPUT_RESERVE
 
 

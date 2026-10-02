@@ -11,7 +11,8 @@
 //! accepts only `{type:"event", source==partner}` and returns the inner frame.
 //! PURE STREAMS via the shared codec: a control frame is a TEXT WS frame, a
 //! `read_stream` chunk a BINARY WS frame `[4B len|header|body]` — raw bytes, NO
-//! base64. For a binary frame the `_binary_path` is lifted to `payload.<path>`.
+//! base64. For a binary frame the `_binary_path` is lifted one step, under the
+//! envelope's `payload` (`["data", "bytes"]` → `["payload", "data", "bytes"]`).
 //!
 //! Resilience: the connection is SELF-HEALING. A supervisor task owns the socket
 //! — on a drop it re-dials after `reconnect` seconds (default 10; `0` = one-shot)
@@ -22,7 +23,8 @@
 
 use super::{BridgeTransport, Frame, TransportError};
 use async_trait::async_trait;
-use fantastic_io_bridge::codec::{decode_binary_frame, encode_binary_frame};
+use fantastic_io_bridge::codec::{decode_binary_frame, encode_binary_frame, BinaryFrame};
+use fantastic_kernel::Blob;
 use fantastic_kernel::{AgentId, Kernel};
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
@@ -57,6 +59,42 @@ type RelayPending = Arc<std::sync::Mutex<HashMap<String, oneshot::Sender<Value>>
 
 /// The WS subprotocol the relay pairs + authenticates on.
 pub const SUBPROTOCOL: &str = "fantastic.relay.v1";
+
+// THE RELAY SEAL (owner, 2026-10-02). relayd dispatches every tunneled frame into
+// its own kernel and records it UNMASKED, so a secret that crossed a relay leg
+// would sit in the relay's ledger in full. Until relayd masks what it records, a
+// relay leg refuses any call carrying secret marks, in both directions: outbound
+// in the bundle's `forward` (`crate::dispatch` / `crate::dispatch_binary`),
+// inbound in this transport's `pump`. ws_bridge (direct WS) is not sealed. One
+// text for both.
+
+/// The relay seal's refusal text — python `SECRET_SEALED`, byte for byte.
+pub const SECRET_SEALED: &str = "relay_connector: a call carrying secret marks may not cross \
+                                 a relay leg — the relay records every frame it routes, unmasked";
+
+/// The relay seal's hint — python `SECRET_SEALED_HINT`.
+pub const SECRET_SEALED_HINT: &str =
+    "reach that kernel over a direct ws_bridge leg to send a secret";
+
+/// The relay seal's refusal — outbound to the local caller, inbound as the reply
+/// to the far caller. Python `secret_sealed()`.
+#[must_use]
+pub fn secret_sealed() -> Value {
+    fantastic_kernel::refusal::refusal_hint(
+        fantastic_kernel::refusal::UNAUTHORIZED,
+        SECRET_SEALED,
+        SECRET_SEALED_HINT,
+    )
+}
+
+/// A partner delivery the inbound seal refuses: a tunneled `call` frame that names
+/// `secret` (any value — python `"secret" in payload`). Returns its `id` (`null`
+/// when it has none — python `payload.get("id")`).
+fn sealed_call(frame: &Value) -> Option<Value> {
+    let m = frame.as_object()?;
+    (m.get("type").and_then(Value::as_str) == Some("call") && m.contains_key("secret"))
+        .then(|| m.get("id").cloned().unwrap_or(Value::Null))
+}
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The write DEADLINE on the relay sink.
@@ -347,6 +385,8 @@ async fn pump(
     partner: &str,
     relay_pending: &RelayPending,
     tx: &mpsc::Sender<Result<Frame, TransportError>>,
+    sink: &SharedSink,
+    connected: &AtomicBool,
 ) {
     while let Some(msg) = source.next().await {
         let frame = match msg {
@@ -357,18 +397,56 @@ async fn pump(
             },
             // Binary frames are partner stream chunks only (directory events are text).
             Ok(Message::Binary(b)) => match decode_binary_frame(&b) {
-                Ok((env, body)) => unwrap_binary(env, body, partner),
+                Ok(f) => unwrap_binary(f, partner),
                 Err(_) => None,
             },
             Ok(Message::Close(_)) | Err(_) => break,
             Ok(_) => continue, // ping/pong handled by tungstenite
         };
         if let Some(f) = frame {
+            // A DIRECTORY event surfaces as `{type:"event", …}`, never a `call`, so
+            // only a tunnel delivery FROM our partner can match here.
+            let inner = match &f {
+                Frame::Text(v) | Frame::Binary(v, _) => v,
+            };
+            if let Some(id) = sealed_call(inner) {
+                // THE RELAY SEAL, inbound: the frame already crossed the relay, and
+                // nothing here dispatches it — the far caller is answered with the
+                // seal's refusal.
+                // TODO(relay seal): lift once relayd masks what it records. The fix
+                // is in relayd (../fantastic_relay): when it dispatches a tunneled
+                // frame into its own kernel, re-root the inner frame's `secret` onto
+                // its delivery item (`payload.<f>` -> `payload.payload.payload.<f>`),
+                // so its rows, ledger and state stream show `<secret>`; and decide
+                // how REPLY frames carry result marks — a `reply` names no marks
+                // today, so the relay would record a secret result in full.
+                let reply = json!({"type": "reply", "id": id, "data": secret_sealed()});
+                // the socket dropped → the supervisor re-dials
+                let _ = send_to_partner(sink, connected, partner, reply).await;
+                continue;
+            }
             if tx.send(Ok(f)).await.is_err() {
                 return;
             }
         }
     }
+}
+
+/// Tunnel one bridge frame to `partner`: the relay envelope `{type:"send",
+/// target:<partner>, payload:<frame>}` as a TEXT frame — python
+/// `RelayTransport.send`.
+async fn send_to_partner(
+    sink: &SharedSink,
+    connected: &AtomicBool,
+    partner: &str,
+    frame: Value,
+) -> Result<(), TransportError> {
+    let env = json!({"type":"send","target":partner,"payload":frame});
+    // python's `encode_frame` text half (A13.14).
+    let text = fantastic_io_bridge::codec::encode_frame(&env);
+    send_bounded(sink, connected, Message::Text(text))
+        .await
+        .map_err(TransportError::from)
 }
 
 /// Classify a text relay frame. Resolves a directory `reply` (side effect, no
@@ -469,7 +547,7 @@ async fn supervise(
                 }
             }
         };
-        pump(source, &partner, &relay_pending, &tx).await;
+        pump(source, &partner, &relay_pending, &tx, &sink, &connected).await;
         connected.store(false, Ordering::SeqCst);
         *sink.lock().await = None;
         if reconnect_secs <= 0.0 {
@@ -558,57 +636,48 @@ async fn heartbeat_loop(
     }
 }
 
-/// A binary relay event from our partner → `Frame::Binary(inner header, body)`,
-/// shifting the envelope's `_binary_path` (`payload.<p>`) back to `<p>`.
-fn unwrap_binary(mut env: Value, body: Vec<u8>, partner: &str) -> Option<Frame> {
-    if env.get("type").and_then(Value::as_str) != Some("event")
-        || env.get("source").and_then(Value::as_str) != Some(partner)
+/// A binary relay event from our partner → the inner bridge frame: its body one
+/// step down, the envelope's `["payload", …p]` becoming the inner frame's `p`.
+/// A delivery whose `payload` is not an object is skipped (python
+/// `isinstance(payload, dict)`); a body that did not sit inside it is not part of
+/// the inner frame, which is then a plain envelope.
+fn unwrap_binary(f: BinaryFrame, partner: &str) -> Option<Frame> {
+    let BinaryFrame {
+        mut head,
+        path,
+        body,
+    } = f;
+    if head.get("type").and_then(Value::as_str) != Some("event")
+        || head.get("source").and_then(Value::as_str) != Some(partner)
     {
         return None;
     }
-    let env_path = env
-        .get("_binary_path")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    let mut inner = env
+    let inner = head
         .get_mut("payload")
         .map(Value::take)
         .unwrap_or(Value::Null);
-    if let Some(p) = env_path.strip_prefix("payload.") {
-        if let Value::Object(m) = &mut inner {
-            m.insert("_binary_path".into(), json!(p));
-        }
+    if !inner.is_object() {
+        return None;
     }
-    Some(Frame::Binary(inner, body))
+    Some(
+        match path.and_then(|p| Blob::new(p, body).under("payload")) {
+            Some(b) => Frame::Binary(inner, b),
+            None => Frame::Text(inner),
+        },
+    )
 }
 
 #[async_trait]
 impl BridgeTransport for RelayTransport {
     async fn send_frame(&self, frame: Value) -> Result<(), TransportError> {
-        let env = json!({"type":"send","target":self.partner,"payload":frame});
-        // python's `encode_frame` text half (A13.14).
-        let text = fantastic_io_bridge::codec::encode_frame(&env);
-        send_bounded(&self.sink, &self.connected, Message::Text(text))
-            .await
-            .map_err(TransportError::from)
+        send_to_partner(&self.sink, &self.connected, &self.partner, frame).await
     }
 
-    async fn send_binary(&self, header: Value, body: Vec<u8>) -> Result<(), TransportError> {
-        let inner_path = header
-            .get("_binary_path")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        let mut inner = header;
-        if let Value::Object(m) = &mut inner {
-            m.shift_remove("_binary_path");
-        }
-        let mut env = json!({"type":"send","target":self.partner,"payload":inner});
-        if !inner_path.is_empty() {
-            env["_binary_path"] = json!(format!("payload.{inner_path}"));
-        }
-        let wire = encode_binary_frame(&env, &body);
+    async fn send_binary(&self, header: Value, body: Blob) -> Result<(), TransportError> {
+        // the relay `send` nests the frame under its `payload`, the body's slot
+        // one step down with it
+        let env = json!({"type":"send","target":self.partner,"payload":header});
+        let wire = encode_binary_frame(&env, &body.nested_in("payload"), &body.bytes);
         send_bounded(&self.sink, &self.connected, Message::Binary(wire))
             .await
             .map_err(TransportError::from)
@@ -845,25 +914,47 @@ mod tests {
 
     #[test]
     fn binary_round_trips_raw_body_through_relay_envelope() {
+        use fantastic_kernel::Step;
         let inner = json!({"type":"reply","id":"A:7","data":{"bytes":null}});
-        let env = json!({
-            "type":"event","source":"B","payload": inner,
-            "_binary_path":"payload.data.bytes"
-        });
+        let env = json!({"type":"event","source":"B","payload": inner});
         let body: Vec<u8> = (0u8..=255).collect();
-        let wire = encode_binary_frame(&env, &body);
-        let (decoded_env, decoded_body) = decode_binary_frame(&wire).unwrap();
-        let frame = unwrap_binary(decoded_env, decoded_body, "B").unwrap();
+        let path = vec![
+            Step::from("payload"),
+            Step::from("data"),
+            Step::from("bytes"),
+        ];
+        let wire = encode_binary_frame(&env, &path, &body);
+        let frame = unwrap_binary(decode_binary_frame(&wire).unwrap(), "B").unwrap();
         match frame {
-            Frame::Binary(header, got_body) => {
-                assert_eq!(got_body, body);
-                assert_eq!(header["_binary_path"], "data.bytes");
-                assert_eq!(header["type"], "reply");
+            Frame::Binary(header, got) => {
+                assert_eq!(got.bytes, body);
+                assert_eq!(got.path, vec![Step::from("data"), Step::from("bytes")]);
+                assert_eq!(header, inner);
             }
-            _ => panic!("expected a binary frame"),
+            Frame::Text(_) => panic!("expected a binary frame"),
         }
-        let foreign = json!({"type":"event","source":"C","payload":{}});
-        assert!(unwrap_binary(foreign, vec![], "B").is_none());
+        // a LITERAL dotted key stays one step through the tunnel
+        let inner = json!({"type":"call","id":"A:8","payload":{"a":{"b":"kept"},"a.b":null}});
+        let env = json!({"type":"event","source":"B","payload": inner});
+        let path = vec![
+            Step::from("payload"),
+            Step::from("payload"),
+            Step::from("a.b"),
+        ];
+        let wire = encode_binary_frame(&env, &path, b"x");
+        match unwrap_binary(decode_binary_frame(&wire).unwrap(), "B").unwrap() {
+            Frame::Binary(header, got) => {
+                assert_eq!(got.path, vec![Step::from("payload"), Step::from("a.b")]);
+                assert_eq!(header, inner);
+            }
+            Frame::Text(_) => panic!("expected a binary frame"),
+        }
+        let foreign = BinaryFrame {
+            head: json!({"type":"event","source":"C","payload":{}}),
+            path: None,
+            body: vec![],
+        };
+        assert!(unwrap_binary(foreign, "B").is_none());
     }
     // ── the stalled peer (#88) ──────────────────────────────────────
 

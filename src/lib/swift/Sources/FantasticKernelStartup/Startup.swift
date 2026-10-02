@@ -18,12 +18,12 @@ import FantasticKernel
 import FantasticKernelState
 import FantasticScenarioProbes
 import FantasticKernelBridge
-import FantasticAnthropicBackend
 import FantasticResponsesBackend
-import FantasticLlamaCppBackend
 import FantasticVllmBackend
-import FantasticNvidiaNimBackend
 import FantasticOllamaBackend
+import FantasticFMCore
+import FantasticFoundationModelsBackend
+import FantasticCredentialStore
 import FantasticRamStore
 import FantasticScheduler
 import FantasticStaticLoader
@@ -71,6 +71,9 @@ public func defaultBundleRegistry() -> BundleRegistry {
     // THE MEMORY STORE in RAM — what the root's `memory_store_id` and every AI
     // agent's name (python `memory/ram_store`).
     r.register(RamStoreBundle.handlerModule, RamStoreBundle())
+    // SECRETS BY REF (python `security/credential_store`) — where every AI
+    // backend's key lives: its record names `credentials: {store, ref}`.
+    r.register(CredentialStoreBundle.handlerModule, CredentialStoreBundle())
     // The render sink the AI backends stream their output to (python `cli`).
     r.register(CliBundle.handlerModule, CliBundle())
     r.register("scheduler.tools", SchedulerBundle())
@@ -83,11 +86,12 @@ public func defaultBundleRegistry() -> BundleRegistry {
     r.register("web_ws.tools", WebWSBundle())
     r.register("web_rest.tools", WebRestBundle())
     r.register("ollama_backend.tools", OllamaBackendBundle())
-    r.register("nvidia_nim_backend.tools", NvidiaNimBundle())
-    r.register("anthropic_backend.tools", AnthropicBundle())
     r.register("responses_backend.tools", ResponsesBundle())
-    r.register("llamacpp_backend.tools", LlamaCppBundle())
     r.register("vllm_backend.tools", VllmBundle())
+    // Apple's on-device model (FantasticFMCore — the same code the rust kernel
+    // links through FantasticFMBridge). Registered on every platform: where the
+    // model cannot run, a send fails naming why.
+    r.register("foundation_models_backend.tools", FoundationModelsBackendBundle(engine: SystemFMEngine()))
     #if os(macOS)
         r.register("exec_bridge.tools", ExecBridgeBundle())
     #endif

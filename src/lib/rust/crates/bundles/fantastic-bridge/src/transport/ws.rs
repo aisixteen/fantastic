@@ -10,20 +10,145 @@
 //! The connect helper does NOT spawn the read loop — the bridge
 //! state owns that, since it needs the inbound frames routed to its
 //! `kernel.send` dispatcher + pending oneshot map.
+//!
+//! PYTHON'S CLIENT, ON THE WIRE. `websockets.connect` offers
+//! `permessage-deflate; client_max_window_bits` and deflates every message once
+//! the server accepts; here the socket runs over a
+//! [`fantastic_io_bridge::ws_deflate::DeflateStream`] that makes the same offer
+//! and applies what the server's `101` settled. A send on a closed connection
+//! fails with the text python's `ConnectionClosed` carries (`received 1001
+//! (going away) peer going away; then sent 1001 (going away) peer going away`).
 
 use super::{BridgeTransport, Frame, TransportError};
 use async_trait::async_trait;
 use fantastic_io_bridge::codec::{decode_binary_frame, encode_binary_frame};
+use fantastic_io_bridge::ws_deflate::{DeflateStream, CLIENT_OFFER};
+use fantastic_kernel::Blob;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::error::{Error as WsError, ProtocolError, UrlError};
+use tokio_tungstenite::tungstenite::http::HeaderValue;
+use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+use tokio_tungstenite::tungstenite::stream::Mode;
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::WebSocketStream;
 
-type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
+type WsStream = WebSocketStream<DeflateStream<TcpStream>>;
+
+/// python `websockets.connect`'s `close_timeout`: how long `close()` waits for
+/// the peer's close frame.
+const CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// python `websockets.frames.Close.__str__`: `<code> (<explanation>)`, then the
+/// reason when there is one.
+fn close_text(code: u16, reason: &str) -> String {
+    let explanation = match code {
+        3000..=3999 => "registered",
+        4000..=4999 => "private use",
+        1000 => "OK",
+        1001 => "going away",
+        1002 => "protocol error",
+        1003 => "unsupported data",
+        1005 => "no status received [internal]",
+        1006 => "abnormal closure [internal]",
+        1007 => "invalid frame payload data",
+        1008 => "policy violation",
+        1009 => "message too big",
+        1010 => "mandatory extension",
+        1011 => "internal error",
+        1012 => "service restart",
+        1013 => "try again later",
+        1014 => "bad gateway",
+        1015 => "TLS handshake failure [internal]",
+        _ => "unknown",
+    };
+    if reason.is_empty() {
+        format!("{code} ({explanation})")
+    } else {
+        format!("{code} ({explanation}) {reason}")
+    }
+}
+
+/// The closing handshake as this connection saw it — python's `close_rcvd`,
+/// `close_sent` and `close_rcvd_then_sent`.
+#[derive(Default)]
+struct Closing {
+    rcvd: Option<(u16, String)>,
+    sent: Option<(u16, String)>,
+    rcvd_then_sent: bool,
+}
+
+impl Closing {
+    /// A close frame arrived; if none was sent, it is ECHOED (python echoes the
+    /// frame's own code and reason, and so does tungstenite).
+    fn received(&mut self, code: u16, reason: String) {
+        if self.sent.is_none() {
+            self.sent = Some((code, reason.clone()));
+            self.rcvd_then_sent = true;
+        }
+        self.rcvd = Some((code, reason));
+    }
+
+    /// python `str(ConnectionClosed(rcvd, sent, rcvd_then_sent))`.
+    fn text(&self) -> String {
+        let fmt = |c: &(u16, String)| close_text(c.0, &c.1);
+        match (&self.rcvd, &self.sent) {
+            (None, None) => "no close frame received or sent".to_string(),
+            (None, Some(s)) => format!("sent {}; no close frame received", fmt(s)),
+            (Some(r), None) => format!("received {}; no close frame sent", fmt(r)),
+            (Some(r), Some(s)) if self.rcvd_then_sent => {
+                format!("received {}; then sent {}", fmt(r), fmt(s))
+            }
+            (Some(r), Some(s)) => format!("sent {}; then received {}", fmt(s), fmt(r)),
+        }
+    }
+}
+
+/// tokio-tungstenite's `connect_async`, over a [`DeflateStream`] and with
+/// python's offer on the request: the URL, the host, the TCP connect and the
+/// handshake fail with the same error texts.
+async fn connect_offering_deflate(url: &str) -> Result<WsStream, String> {
+    let text = |e: WsError| e.to_string();
+    let mut request = url.into_client_request().map_err(text)?;
+    request.headers_mut().insert(
+        "Sec-WebSocket-Extensions",
+        HeaderValue::from_static(CLIENT_OFFER),
+    );
+    let domain = request
+        .uri()
+        .host()
+        .ok_or_else(|| text(WsError::Url(UrlError::NoHostName)))?
+        .to_string();
+    let port = request
+        .uri()
+        .port_u16()
+        .or_else(|| match request.uri().scheme_str() {
+            Some("wss") => Some(443),
+            Some("ws") => Some(80),
+            _ => None,
+        })
+        .ok_or_else(|| text(WsError::Url(UrlError::UnsupportedUrlScheme)))?;
+    let socket = TcpStream::connect(format!("{domain}:{port}"))
+        .await
+        .map_err(|e| text(WsError::Io(e)))?;
+    // no TLS is built in: a `wss://` URL fails here, as `connect_async` does
+    if let Mode::Tls =
+        tokio_tungstenite::tungstenite::client::uri_mode(request.uri()).map_err(text)?
+    {
+        return Err(text(WsError::Url(UrlError::TlsFeatureNotEnabled)));
+    }
+    let (stream, _resp) =
+        tokio_tungstenite::client_async_with_config(request, DeflateStream::client(socket), None)
+            .await
+            .map_err(text)?;
+    Ok(stream)
+}
 
 /// python `logger.warning("ws_bridge: skipping malformed frame: %s", e)`
 /// (`ws_bridge/_ws.py:78`). python configures no logging handler, so the record
@@ -49,6 +174,7 @@ pub struct WsTransport {
     sink: Mutex<futures_util::stream::SplitSink<WsStream, Message>>,
     rx: Mutex<mpsc::Receiver<Result<Frame, TransportError>>>,
     reader_task: Mutex<Option<JoinHandle<()>>>,
+    closing: Arc<std::sync::Mutex<Closing>>,
 }
 
 impl WsTransport {
@@ -65,9 +191,9 @@ impl WsTransport {
         url: &str,
         timeout: std::time::Duration,
     ) -> Result<Arc<Self>, TransportError> {
-        let connect_fut = connect_async(url);
-        let (stream, _resp) = match tokio::time::timeout(timeout, connect_fut).await {
-            Ok(Ok(pair)) => pair,
+        let connect_fut = connect_offering_deflate(url);
+        let stream = match tokio::time::timeout(timeout, connect_fut).await {
+            Ok(Ok(s)) => s,
             Ok(Err(e)) => return Err(TransportError::Other(format!("ws connect {url}: {e}"))),
             Err(_) => {
                 return Err(TransportError::Other(format!(
@@ -78,6 +204,8 @@ impl WsTransport {
         };
         let (sink, mut source) = stream.split();
         let (tx, rx) = mpsc::channel::<Result<Frame, TransportError>>(64);
+        let closing: Arc<std::sync::Mutex<Closing>> = Arc::default();
+        let seen = Arc::clone(&closing);
         let reader = tokio::spawn(async move {
             while let Some(msg) = source.next().await {
                 let frame_result = match msg {
@@ -103,8 +231,13 @@ impl WsTransport {
                     },
                     // Binary WS message → the `[4B len|header|body]` codec frame
                     // (a read_stream/write_stream chunk — raw bytes, no base64).
+                    // A frame that named no slot places no body — python's
+                    // decode returns the plain envelope.
                     Ok(Message::Binary(b)) => match decode_binary_frame(&b) {
-                        Ok((h, body)) if h.is_object() => Ok(Frame::Binary(h, body)),
+                        Ok(f) if f.head.is_object() => Ok(match f.path {
+                            Some(path) => Frame::Binary(f.head, Blob::new(path, f.body)),
+                            None => Frame::Text(f.head),
+                        }),
                         Ok(_) => {
                             skip_non_object();
                             continue;
@@ -114,12 +247,23 @@ impl WsTransport {
                             continue;
                         }
                     },
-                    Ok(Message::Close(_)) => {
+                    Ok(Message::Close(frame)) => {
+                        // python's `Close.parse(b"")` for an empty close frame
+                        let (code, reason) = frame.map_or((1005, String::new()), |f| {
+                            (u16::from(f.code), f.reason.into_owned())
+                        });
+                        seen.lock()
+                            .expect("closing poisoned")
+                            .received(code, reason);
                         let _ = tx
                             .send(Err(TransportError::ConnectionClosed(
                                 "peer sent close frame".into(),
                             )))
                             .await;
+                        // KEEP READING until the socket ends: tungstenite sends
+                        // the queued echo of a close on its next read (python
+                        // echoes at once), and the peer then drops the socket.
+                        while let Some(Ok(_)) = source.next().await {}
                         break;
                     }
                     Ok(_) => continue, // ping/pong/etc handled by tungstenite
@@ -138,7 +282,29 @@ impl WsTransport {
             sink: Mutex::new(sink),
             rx: Mutex::new(rx),
             reader_task: Mutex::new(Some(reader)),
+            closing,
         }))
+    }
+
+    /// A failed send, as python reports it: on a closed (or broken)
+    /// connection, `ConnectionClosed`'s text — what was received and sent in
+    /// the closing handshake; anything else, the library's own text.
+    fn send_error(&self, e: &WsError) -> TransportError {
+        let closed = matches!(
+            e,
+            WsError::ConnectionClosed
+                | WsError::AlreadyClosed
+                | WsError::Io(_)
+                | WsError::Protocol(
+                    ProtocolError::SendAfterClosing | ProtocolError::ResetWithoutClosingHandshake
+                )
+        );
+        let text = if closed {
+            self.closing.lock().expect("closing poisoned").text()
+        } else {
+            e.to_string()
+        };
+        TransportError::ConnectionClosed(text)
     }
 }
 
@@ -151,15 +317,15 @@ impl BridgeTransport for WsTransport {
         sink.send(Message::Text(text))
             .await
             // python `ConnectionClosed(str(e))` — the library's text, no prefix.
-            .map_err(|e| TransportError::ConnectionClosed(e.to_string()))
+            .map_err(|e| self.send_error(&e))
     }
 
-    async fn send_binary(&self, header: Value, body: Vec<u8>) -> Result<(), TransportError> {
-        let wire = encode_binary_frame(&header, &body);
+    async fn send_binary(&self, header: Value, body: Blob) -> Result<(), TransportError> {
+        let wire = encode_binary_frame(&header, &body.path, &body.bytes);
         let mut sink = self.sink.lock().await;
         sink.send(Message::Binary(wire))
             .await
-            .map_err(|e| TransportError::ConnectionClosed(e.to_string()))
+            .map_err(|e| self.send_error(&e))
     }
 
     async fn recv_frame(&self) -> Result<Frame, TransportError> {
@@ -173,13 +339,37 @@ impl BridgeTransport for WsTransport {
     }
 
     async fn close(&self) {
-        // Tear down sink first so any in-flight send fails fast.
+        // Tear down sink first so any in-flight send fails fast. python
+        // `ws.close()` closes with 1000 and no reason — unless the peer's close
+        // already arrived, which it has echoed.
         {
             let mut sink = self.sink.lock().await;
+            let first = {
+                let mut c = self.closing.lock().expect("closing poisoned");
+                let first = c.sent.is_none();
+                if first {
+                    c.sent = Some((1000, String::new()));
+                }
+                first
+            };
+            if first {
+                let _ = sink
+                    .send(Message::Close(Some(CloseFrame {
+                        code: CloseCode::Normal,
+                        reason: "".into(),
+                    })))
+                    .await;
+            }
             let _ = sink.close().await;
         }
+        // python's `close()` WAITS for the peer's close frame (its
+        // `close_timeout`, 10 s) before it lets the connection go — so a send
+        // after it reports `sent 1000 (OK); then received 1000 (OK)`.
         if let Some(handle) = self.reader_task.lock().await.take() {
-            handle.abort();
+            let abort = handle.abort_handle();
+            if tokio::time::timeout(CLOSE_TIMEOUT, handle).await.is_err() {
+                abort.abort();
+            }
         }
     }
 }

@@ -4,7 +4,7 @@ LIVE TEST 08 — SUBAI + GRAPH SHAPE: the combined composition — the sub-agent
 task (probe 06) with the state-graph decomposition ask (probe 07's variable).
 No graph library exists anywhere in this codebase; the SHAPE is the variable.
 
-    cd src/lib/python && BACKEND=anthropic uv run python -u ../../../tmp/live_subai_graph.py
+    cd src/lib/python && uv run python -u ../../../e2e/run.py --group agentic_advanced --id subai_graph --lanes 1
 
 ## What this adds over probes 05 and 06
 
@@ -23,14 +23,11 @@ authored on `python_runtime`. So THIS combination has never run:
 That is the "compute, inference, memory and schedule are interchangeable units addressed
 by id" claim in CLAUDE.md, tested as one system instead of one clause at a time.
 
-## The two models are DIFFERENT on purpose
+## Which model is `brain`
 
-builder = `anthropic` (opus) · `brain` = `llamacpp` (local gemma-4-12B).
-
-A strong builder wiring a WEAK LOCAL AI agent is the realistic shape and the one worth
-measuring: the builder must reach that agent by id and tolerate what it returns. It also
-keeps it free while `llama-server` is already up. `_ai_meta(backend=...)` carries
-this; the builder still comes from `BACKEND`.
+`brain` rides the SAME plug as the builder (`BACKEND`). `_ai_meta(backend=...)` lets one
+run name a different plug for `brain` — a strong builder wiring a WEAK AI agent is the
+realistic shape: the builder must reach that agent by id and tolerate what it returns.
 
 ## Why the AI-agent requirement is stated, not left to be discovered
 

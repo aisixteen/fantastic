@@ -157,7 +157,7 @@ struct StripTests {
     @Test func aRecallPageIsTrimmedToHalfTheWindowAndSaysSo() async throws {
         // python `_K(window=12000)`: a 12000 window with no output reserve.
         let (kernel, ids, _) = await bootMockKernel(
-            config: baseConfig { .provider(MockProvider()) }, backendIds: [AI],
+            config: baseConfig { MockProvider() }, backendIds: [AI],
             contextWindow: 12000, meta: ["output_reserve": .integer(0)])
         let agentId = ids[AI]!
         appendRows(agentId, kernel: kernel, (0..<20).map { turn("user", "t\($0) " + String(repeating: "w", count: 8000)) })

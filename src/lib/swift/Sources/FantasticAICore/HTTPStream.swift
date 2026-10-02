@@ -1,6 +1,6 @@
 // Cross-platform line streaming over an async byte sequence.
 //
-// The LLM backends consume streaming HTTP bodies (ollama NDJSON, NIM SSE)
+// The LLM backends consume streaming HTTP bodies (ollama NDJSON, vLLM SSE)
 // line by line. URLSession's `.bytes(for:).lines` is Apple-only, so the
 // backends now use AsyncHTTPClient (NIO, macOS + Linux) whose response body
 // is an `AsyncSequence<ByteBuffer>`. This helper splits that byte stream into

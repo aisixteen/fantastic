@@ -199,8 +199,10 @@ final class MockFileBridge: AgentBundle, @unchecked Sendable {
     }
 
     func handleBinary(
-        agentId: AgentId, header: JSON, blob: Data, kernel: Kernel
+        agentId: AgentId, header: JSON, body: Blob?, kernel: Kernel
     ) async throws -> (JSON?, Data?) {
+        // the chunk is the payload's `bytes` — python's `payload.get("bytes", b"")`
+        let blob = bodyAt(body, "bytes") ?? Data()
         let path = header["path"].asString ?? ""
         switch header["type"].asString ?? "" {
         case "write_stream":
@@ -273,8 +275,10 @@ final class PayloadRecorder: AgentBundle, @unchecked Sendable {
     /// here; one that was not lands on `handle` with the program still stuck in
     /// the JSON header, which is exactly the bug this records the difference for.
     func handleBinary(
-        agentId: AgentId, header: JSON, blob: Data, kernel: Kernel
+        agentId: AgentId, header: JSON, body: Blob?, kernel: Kernel
     ) async throws -> (JSON?, Data?) {
+        // the chunk is the payload's `bytes` — python's `payload.get("bytes", b"")`
+        let blob = bodyAt(body, "bytes") ?? Data()
         lock.withLock { blobs.append((header, blob)) }
         return (.object(["written": .integer(Int64(blob.count))]), nil)
     }
@@ -379,13 +383,13 @@ final class EventSink: @unchecked Sendable {
 // MARK: - config + kernel boot
 
 func baseConfig(
-    provider: @escaping @Sendable () -> ProviderResult
+    provider: @escaping @Sendable () throws -> any AIProvider
 ) -> AIBackendConfig {
     AIBackendConfig(
         kind: "mock_backend",
         sentence: "Mock LLM agent.",
         reflectExtra: { _ in ["extra": .string("yes")] },
-        makeProvider: { _, _, _ in provider() }
+        makeProvider: { _, _, _ in try provider() }
     )
 }
 
@@ -393,18 +397,16 @@ func baseConfig(
 /// each get their own script and their own request log (python does this by
 /// keying `ot._providers` on the agent id).
 ///
-/// An agent with no script is a REFUSAL naming the id — never a silently empty
+/// An agent with no script RAISES naming the id — never a silently empty
 /// provider, which would look exactly like a model that chose to stop.
 func scriptedConfig(_ scripts: [String: ProviderScript]) -> AIBackendConfig {
-    var cfg = baseConfig { .refused(.object(["error": .string("unreachable")])) }
+    var cfg = baseConfig { throw PyError("RuntimeError", "unreachable") }
     cfg.makeProvider = { agent, _, _ in
         guard let script = scripts[agent.id.value] else {
-            return .refused(
-                .object([
-                    "error": .string("test harness: no ProviderScript for \(agent.id.value)")
-                ]))
+            throw PyError(
+                "RuntimeError", "test harness: no ProviderScript for \(agent.id.value)")
         }
-        return .provider(MockProvider(script: script))
+        return MockProvider(script: script)
     }
     return cfg
 }

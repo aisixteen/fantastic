@@ -149,6 +149,21 @@ def remote_caller_context(leg_id: str, address: str):
         _remote_caller.reset(token)
 
 
+# THE SECRET PATHS of the call this dispatch serves — the `secret` its caller
+# marked on the batch item (`kernel/_secret.py`). Set per dispatch task, so a
+# handler's own sends never inherit it. A bundle that must only ever be called
+# WITH a mark (a credential store) reads it and refuses an unmarked call.
+_current_secret: contextvars.ContextVar[tuple[str, ...]] = contextvars.ContextVar(
+    "_current_secret", default=()
+)
+
+
+def current_secret() -> tuple[str, ...]:
+    """The paths the caller marked `secret` on the item that started this dispatch
+    (`payload.<field…>` / `result[.<field…>]`), or () when none were marked."""
+    return _current_secret.get()
+
+
 def current_remote_caller() -> str | None:
     """The qualified `<guid>|<agent id>` of a caller on ANOTHER kernel, when this
     dispatch was relayed by a bridge leg that carried it; None otherwise."""
@@ -376,12 +391,16 @@ BUNDLE_ENTRY_GROUP = "fantastic.bundles"
 @dataclass(eq=False)
 class PeerRoute:
     """How a connected PEER KERNEL is reached: `via` names the transport agent
-    carrying it (reported by the root reflect), `call(agent_id, payload, caller)`
-    delivers ONE call to that kernel's `agent_id` as `caller` (`<this guid>|<sender>`)
-    and returns the peer's reply — or a refusal when the connection ends first."""
+    carrying it (reported by the root reflect), `call(agent_id, payload, caller,
+    secret)` delivers ONE call to that kernel's `agent_id` as `caller` (`<this
+    guid>|<sender>`) and returns the peer's reply — or a refusal when the
+    connection ends first. `secret` is the item's marked paths (`kernel/_secret`,
+    `()` when none), rooted at the item exactly as the peer's item is rooted, so
+    the transport puts them on the call frame verbatim and the PEER masks its own
+    records of the call too."""
 
     via: str
-    call: Callable[[str, dict, str], Any]
+    call: Callable[[str, dict, str, tuple], Any]
 
 
 @dataclass
@@ -856,8 +875,19 @@ class Kernel:
         named one carries a dedup contract, so it goes last) — each with its settle and
         ack rows, and the task/flush rows that only covered what was pruned. A DEAD
         LETTER that nobody acked stays: it is waiting for a person. In-flight work is
-        never pruned. Returns how many executions went."""
-        rows = await self._store_read({})
+        never pruned. Returns how many executions went.
+
+        A store READ that fails is said on stderr and prunes nothing — it never
+        raises: this runs inside the flush loop, and an exception here used to end
+        that task silently, leaving every later execution row in RAM for the rest
+        of the process."""
+        try:
+            rows = await self._store_read({})
+        except RuntimeError as e:
+            print(
+                f"  [kernel] prune of the kernel's store failed: {e}", file=sys.stderr
+            )
+            return 0
         calls = [r for r in rows if r.get("kind") == "call" and not r.get("internal")]
         settles = {r.get("parent"): r for r in rows if r.get("kind") == "settle"}
         acked = {r.get("parent") for r in rows if r.get("kind") == "ack"}

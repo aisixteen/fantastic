@@ -9,6 +9,7 @@
 use super::*;
 use fantastic_kernel::Agent;
 use fantastic_kernel::Item;
+use fantastic_kernel::Step;
 use serde_json::Map;
 use tempfile::TempDir;
 
@@ -135,15 +136,18 @@ async fn mk_kernel_guid(tmp: &TempDir, guid: &str) -> Arc<Kernel> {
 /// A7.1 — TWO readmes, each python's byte for byte.
 #[test]
 fn readme_present_and_titled() {
+    // `src/lib` above the crate (crates/bundles/fantastic-bridge). This used to
+    // climb one level too far and SKIP on the missing tree — the comparison
+    // never ran.
     let py = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../../..")
-        .join("src/lib/python/bundled_agents/io");
-    let Ok(ws) = std::fs::read_to_string(py.join("ws_bridge/src/ws_bridge/readme.md")) else {
-        eprintln!("skipping: python tree not present at {}", py.display());
-        return;
-    };
-    let relay =
-        std::fs::read_to_string(py.join("relay_connector/src/relay_connector/readme.md")).unwrap();
+        .ancestors()
+        .nth(4)
+        .expect("src/lib above the crate")
+        .join("python/bundled_agents/io");
+    let ws = std::fs::read_to_string(py.join("ws_bridge/src/ws_bridge/readme.md"))
+        .expect("python ws_bridge readme");
+    let relay = std::fs::read_to_string(py.join("relay_connector/src/relay_connector/readme.md"))
+        .expect("python relay_connector readme");
     assert_eq!(ws, WS_README, "ws_bridge readme has drifted");
     assert_eq!(relay, RELAY_README, "relay_connector readme has drifted");
 }
@@ -920,11 +924,12 @@ async fn binary_call_round_trips_raw_bytes_over_the_bridge() {
     // Non-UTF-8 bytes — proves it's raw, not text/base64.
     let payload: Vec<u8> = vec![0x00, 0xFF, 0xCA, 0xFE, 0xBA, 0xBE, 0x10, 0x80];
 
-    // write_stream via a binary inbound call.
+    // write_stream via a binary inbound call: the body at `["payload", "bytes"]`.
+    let at_bytes = || vec![Step::from("payload"), Step::from("bytes")];
     peer.send_binary(
         json!({"type":"call","id":"w1","target":"fb","caller":"peer-g|probe",
-               "payload":{"type":"write_stream","path":"blob.bin","truncate":true}}),
-        payload.clone(),
+               "payload":{"type":"write_stream","path":"blob.bin","truncate":true,"bytes":null}}),
+        Blob::new(at_bytes(), payload.clone()),
     )
     .await
     .unwrap();
@@ -932,11 +937,11 @@ async fn binary_call_round_trips_raw_bytes_over_the_bridge() {
     assert_eq!(w["type"], "reply");
     assert_eq!(w["data"]["written"], payload.len(), "write reply: {w}");
 
-    // read_stream via a binary inbound call → reply is a BINARY frame.
-    peer.send_binary(
+    // read_stream (a stream verb, so the binary channel even from a text
+    // frame) → the reply is a BINARY frame, its body at `["data", "bytes"]`.
+    peer.send_frame(
         json!({"type":"call","id":"r1","target":"fb","caller":"peer-g|probe",
-               "payload":{"type":"read_stream","path":"blob.bin"}}),
-        Vec::new(),
+                           "payload":{"type":"read_stream","path":"blob.bin"}}),
     )
     .await
     .unwrap();
@@ -944,7 +949,12 @@ async fn binary_call_round_trips_raw_bytes_over_the_bridge() {
         crate::transport::Frame::Binary(header, body) => {
             assert_eq!(header["id"], "r1");
             assert_eq!(header["data"]["eof"], true);
-            assert_eq!(body, payload, "bytes must round-trip raw over the bridge");
+            assert_eq!(header["data"]["bytes"], Value::Null, "{header}");
+            assert_eq!(body.path, vec![Step::from("data"), Step::from("bytes")]);
+            assert_eq!(
+                body.bytes, payload,
+                "bytes must round-trip raw over the bridge"
+            );
         }
         crate::transport::Frame::Text(v) => panic!("expected a binary reply, got text: {v}"),
     }
@@ -954,8 +964,8 @@ async fn binary_call_round_trips_raw_bytes_over_the_bridge() {
     // and writes nothing — python `_engine` sets `item["id"]` for every call.
     peer.send_binary(
         json!({"type":"call","id":"w1","target":"fb","caller":"peer-g|probe",
-               "payload":{"type":"write_stream","path":"blob.bin","truncate":true}}),
-        b"other".to_vec(),
+               "payload":{"type":"write_stream","path":"blob.bin","truncate":true,"bytes":null}}),
+        Blob::new(at_bytes(), b"other".to_vec()),
     )
     .await
     .unwrap();
@@ -1584,6 +1594,85 @@ async fn unknown_type_is_pythons_reply_with_the_envelope_hint() {
             ask(&kernel, &ws, json!({ "type": verb })).await["error"],
             json!(format!("bridge: unknown type '{verb}'")),
             "{verb} must not exist on a ws leg"
+        );
+    }
+}
+
+/// The twin of python `test_leg_gates.py::
+/// test_a_bridge_reflects_exactly_what_its_gate_enforces`: `auth` carries a bare
+/// STEM and the gate appends `_ingress`, so `auth: allow_all_ingress` resolves
+/// `allow_all_ingress_ingress` — unknown, and it denies. The bridge reflect is
+/// the legs' one `describe`, so it reports exactly that rule and `sealed: true`.
+#[tokio::test]
+async fn a_bridge_reflects_exactly_what_its_gate_enforces() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = mk_two_family_kernel(&tmp).await;
+    let br = id_for("br_gate", &tmp);
+    create_leg(
+        &kernel,
+        WS_HANDLER_MODULE,
+        &br,
+        json!({"transport": "memory", "auth": "allow_all_ingress"}),
+    )
+    .await;
+    assert!(kernel.agents.contains_key(&AgentId::from(br.as_str())));
+    let rule = authorizer::ingress::resolve(
+        rule_spec(&AgentId::from(br.as_str()), &kernel, "ingress_rule").as_ref(),
+    )
+    .unwrap();
+    let Decision::Deny(denial) = rule.authorize(&call_action(None)) else {
+        panic!("an unknown ingress rule must deny");
+    };
+    assert_eq!(
+        denial.reason,
+        "edge sealed — unknown ingress rule 'allow_all_ingress_ingress'"
+    );
+    let r = ask(&kernel, &br, json!({"type": "reflect"})).await;
+    assert_eq!(
+        (&r["ingress_rule"], &r["egress_rule"], &r["sealed"]),
+        (
+            &json!("allow_all_ingress_ingress"),
+            &json!("allow_all_ingress_egress"),
+            &json!(true)
+        ),
+        "{r}"
+    );
+    // The rest of python's `describe` table, measured on python's ws_bridge
+    // reflect. A TYPE-LESS spec (`{type: ""}`) is no rule at all — the manifold
+    // defaults — where this reflect used to scope the empty stem to `_ingress`.
+    for (i, (auth, ingress, egress, sealed)) in [
+        (json!({"type": ""}), "deny_ingress", "silent_egress", true),
+        (
+            json!("allow_all"),
+            "allow_all_ingress",
+            "silent_egress",
+            false,
+        ),
+        (
+            json!({"type": "password", "env": "X"}),
+            "password_ingress",
+            "password_egress",
+            true,
+        ),
+        (json!("deny"), "deny_ingress", "silent_egress", true),
+        (json!("silent"), "silent_ingress", "silent_egress", true),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let id = id_for(&format!("br_gate{i}"), &tmp);
+        create_leg(
+            &kernel,
+            WS_HANDLER_MODULE,
+            &id,
+            json!({"transport": "memory", "auth": auth}),
+        )
+        .await;
+        let r = ask(&kernel, &id, json!({"type": "reflect"})).await;
+        assert_eq!(
+            (&r["ingress_rule"], &r["egress_rule"], &r["sealed"]),
+            (&json!(ingress), &json!(egress), &json!(sealed)),
+            "auth={auth}: {r}"
         );
     }
 }
@@ -2348,8 +2437,21 @@ async fn send_bin(
     header: Value,
     blob: Vec<u8>,
 ) -> fantastic_kernel::Outcome {
+    send_bin_at(kernel, id, header, vec![Step::from("bytes")], blob).await
+}
+
+/// [`send_bin`] with the body at `path` of the payload.
+async fn send_bin_at(
+    kernel: &Arc<Kernel>,
+    id: &str,
+    header: Value,
+    path: Vec<Step>,
+    blob: Vec<u8>,
+) -> fantastic_kernel::Outcome {
     kernel
-        .send(vec![Item::new(AgentId::from(id), header).with_binary(blob)])
+        .send(vec![
+            Item::new(AgentId::from(id), header).with_binary(path, blob)
+        ])
         .await
         .remove(0)
 }
@@ -2380,9 +2482,11 @@ async fn a_binary_non_forward_verb_is_answered_by_the_text_dispatch() {
     assert_eq!(bin.body, None);
 }
 
-/// A binary `forward` ships ONE binary `call` frame — the blob raw beside the
-/// header, `_binary_path: payload.bytes`, the qualified caller — and a binary
-/// reply's body comes back as the reply body.
+/// A binary `forward` ships ONE binary `call` frame — the body raw beside the
+/// header at the path it had inside the forwarded payload (`_binary_path:
+/// ["payload", "bytes"]`, `bytes: null` in python's position), the qualified
+/// caller — and a binary reply's body comes back as the reply body, at its slot
+/// of the reply.
 #[tokio::test]
 async fn a_binary_forward_ships_raw_bytes_and_returns_the_reply_body() {
     let tmp = TempDir::new().unwrap();
@@ -2390,11 +2494,12 @@ async fn a_binary_forward_ships_raw_bytes_and_returns_the_reply_body() {
     let k = Arc::clone(&kernel);
     let b = bid.clone();
     let join = tokio::spawn(async move {
-        send_bin(
+        send_bin_at(
             &k,
             &b,
             json!({"type": "forward", "target": "far_fb",
                    "payload": {"type": "write_stream", "path": "x.bin"}}),
+            vec![Step::from("payload"), Step::from("bytes")],
             vec![0x00, 0xFF, 0x10],
         )
         .await
@@ -2403,7 +2508,8 @@ async fn a_binary_forward_ships_raw_bytes_and_returns_the_reply_body() {
         crate::transport::Frame::Binary(h, b) => (h, b),
         crate::transport::Frame::Text(v) => panic!("expected a binary call, got text: {v}"),
     };
-    assert_eq!(body, vec![0x00, 0xFF, 0x10], "the blob rides raw");
+    assert_eq!(body.bytes, vec![0x00, 0xFF, 0x10], "the blob rides raw");
+    assert_eq!(body.path, vec![Step::from("payload"), Step::from("bytes")]);
     let corr = header["id"].as_str().expect("a correlator").to_string();
     assert_eq!(
         corr,
@@ -2413,10 +2519,15 @@ async fn a_binary_forward_ships_raw_bytes_and_returns_the_reply_body() {
     assert_eq!(
         header,
         json!({"type": "call", "id": corr, "target": "far_fb",
-               "payload": {"type": "write_stream", "path": "x.bin"},
-               "caller": "g-local|kernel", "_binary_path": "payload.bytes"})
+               "payload": {"type": "write_stream", "path": "x.bin", "bytes": null},
+               "caller": "g-local|kernel"})
     );
-    let keys: Vec<&str> = header
+    // on the wire the codec names the slot last, as a list of steps
+    let wire = fantastic_io_bridge::codec::encode_binary_frame(&header, &body.path, &body.bytes);
+    let h = u32::from_be_bytes([wire[0], wire[1], wire[2], wire[3]]) as usize;
+    let head: Value = serde_json::from_slice(&wire[4..4 + h]).unwrap();
+    assert_eq!(head["_binary_path"], json!(["payload", "bytes"]));
+    let keys: Vec<&str> = head
         .as_object()
         .unwrap()
         .keys()
@@ -2427,17 +2538,17 @@ async fn a_binary_forward_ships_raw_bytes_and_returns_the_reply_body() {
         vec!["type", "id", "target", "payload", "caller", "_binary_path"]
     );
     peer.send_binary(
-        json!({"type": "reply", "id": corr, "data": {"eof": true}}),
-        vec![7, 7],
+        json!({"type": "reply", "id": corr, "data": {"eof": true, "bytes": null}}),
+        Blob::new(vec![Step::from("data"), Step::from("bytes")], vec![7, 7]),
     )
     .await
     .unwrap();
     let out = join.await.unwrap();
-    assert_eq!(out.result, json!({"eof": true}));
+    assert_eq!(out.result, json!({"eof": true, "bytes": null}));
     assert_eq!(
         out.body,
-        Some(vec![7, 7]),
-        "a binary reply's body is the reply body"
+        Some(Blob::key("bytes", vec![7, 7])),
+        "a binary reply's body is the reply body, at its slot of the reply"
     );
 
     // a TEXT reply frame to a binary forward carries no chunk at all
@@ -2525,7 +2636,7 @@ async fn both_family_shells_share_one_behaviour() {
                 AgentId::from(id.as_str()),
                 json!({"type": "garbage"}),
             )
-            .with_binary(vec![1])])
+            .with_binary_key("bytes", vec![1])])
             .await
             .remove(0);
         assert_eq!(
@@ -2539,7 +2650,7 @@ async fn both_family_shells_share_one_behaviour() {
                 AgentId::from(id.as_str()),
                 json!({"type": "forward", "target": "far", "payload": {"type": "x"}}),
             )
-            .with_binary(vec![1])])
+            .with_binary_key("bytes", vec![1])])
             .await
             .remove(0);
         assert_eq!(

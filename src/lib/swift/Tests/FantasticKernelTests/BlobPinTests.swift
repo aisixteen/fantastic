@@ -35,9 +35,11 @@ private final class ScriptedStore: AgentBundle, @unchecked Sendable {
         .object(["ok": .bool(true)])
     }
 
-    func handleBinary(agentId: AgentId, header: JSON, blob: Data, kernel: Kernel) async throws
+    func handleBinary(agentId: AgentId, header: JSON, body: Blob?, kernel: Kernel) async throws
         -> (JSON?, Data?)
     {
+        // the chunk is the payload's `bytes` — python's `payload.get("bytes", b"")`
+        let blob = bodyAt(body, "bytes") ?? Data()
         let path = header["path"].asString ?? ""
         let scripted = path == "agents/desk/blob.txt"
         switch header["type"].asString ?? "" {

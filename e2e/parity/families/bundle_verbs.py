@@ -20,7 +20,7 @@ import sys
 import time
 from pathlib import Path
 
-from families import BASE, OPEN, ai, call, save_kernel_log
+from families import BASE, OPEN, VLLM, ai, call, save_kernel_log, vllm
 
 NAME = "bundle_verbs"
 
@@ -69,10 +69,8 @@ def fixtures(work: Path, interp: str) -> list:
         # ── web ──
         ("web4", "web.tools", {}),
         # ── AI (no endpoint reached: every case is a NON-send verb) ──
-        ("ai", "anthropic_backend.tools", ai(model="m", endpoint="http://127.0.0.1:9")),
+        ("ai", VLLM, ai(**vllm("http://127.0.0.1:9", model="m"))),
         ("olla", "ollama_backend.tools", ai(model="m", endpoint="http://127.0.0.1:9")),
-        ("llama", "llamacpp_backend.tools", ai(model="m", endpoint="http://127.0.0.1:9")),
-        ("nim", "nvidia_nim_backend.tools", ai(model="m", endpoint="http://127.0.0.1:9")),
     ]
 
 
@@ -258,10 +256,6 @@ def web_ai_cases() -> list:
         ("ai_shutdown", "ai", {"type": "shutdown"}),
         ("olla_garbage_type", "olla", {"type": "garbage"}),
         ("olla_shutdown", "olla", {"type": "shutdown"}),
-        ("llama_garbage_type", "llama", {"type": "garbage"}),
-        ("llama_shutdown", "llama", {"type": "shutdown"}),
-        ("nim_garbage_type", "nim", {"type": "garbage"}),
-        ("nim_shutdown", "nim", {"type": "shutdown"}),
     ]
 
 

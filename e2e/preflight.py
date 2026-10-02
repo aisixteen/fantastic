@@ -51,56 +51,31 @@ def main() -> int:
     notes: list[str] = []
 
     # ── which backend is being asked for ────────────────────────
+    if str(HERE) not in sys.path:
+        sys.path.insert(0, str(HERE))
+    from backends import REGISTRY, backend as resolve_backend
+    from helpers.creds import KEYED
+
     backend = os.environ.get("BACKEND")
     if not backend:
         print(f"{WARN} BACKEND unset — each probe falls back to its OWN default")
         print("       (several still default to `ollama`, which is not installed)")
-        notes.append("set BACKEND explicitly: llamacpp | anthropic | nvidia")
+        notes.append("set BACKEND explicitly: " + " | ".join(sorted(REGISTRY)))
+    elif backend not in REGISTRY:
+        print(f"{BAD} BACKEND={backend} is not a plug")
+        blockers.append(f"BACKEND={backend} is unknown — one of {' | '.join(sorted(REGISTRY))}")
     else:
         print(f"{OK} BACKEND={backend}")
-
-    # ── the local path: llama.cpp ───────────────────────────────
-    server = _which("llama-server")
-    endpoint = os.environ.get("FANTASTIC_LLAMACPP_ENDPOINT", "http://127.0.0.1:8080/v1")
-    up = _listening("127.0.0.1", 8080)
-    print(f"{OK if server else BAD} llama-server binary  {server or '(not on PATH)'}")
-    print(f"{OK if up else BAD} llama-server on :8080 {endpoint if up else '(nothing listening)'}")
-
-    models = Path.home() / "Projects" / "models"
-    weights = sorted(models.glob("*.gguf")) if models.exists() else []
-    print(f"{OK if weights else BAD} model weights        "
-          f"{weights[0].name if weights else f'(no *.gguf under {models})'}")
-    if backend in (None, "llamacpp") and not (server and up and weights):
-        blockers.append(
-            "llamacpp path is not ready — weights are NOT fetched automatically "
-            "(never download a model on the tool's own initiative). Put a .gguf "
-            f"under {models}, then: llama-server -m <file> --port 8080"
-        )
-
-    # ── the GPU proxy over the SSM tunnel ───────────────────────
-    # Anthropic wire at /cc/v1/messages, raw passthrough at /raw. The probes
-    # already read ENDPOINT for the anthropic path, so this needs no code change
-    # — only the environment.
-    tunnel = _listening("127.0.0.1", 4000)
-    print(f"{OK if tunnel else BAD} GPU proxy :4000     "
-          f"{'answering' if tunnel else '(tunnel down — SSM forwards have died mid-run before)'}")
-    ep = os.environ.get("ENDPOINT")
-    print(f"{OK if ep else WARN} ENDPOINT             {ep or '(unset — anthropic path would hit api.anthropic.com)'}")
-    if backend == "anthropic":
-        if not tunnel:
-            blockers.append("BACKEND=anthropic with the tunnel down — restart the SSM forward")
-        if not ep:
-            blockers.append(
-                "ENDPOINT unset: the record falls back to api.anthropic.com while "
-                "carrying whatever key is exported, which 401s. Set "
-                "ENDPOINT=http://127.0.0.1:4000/cc/v1/messages"
-            )
+        # THE PLUG names what it needs (its endpoint, its required fields, its
+        # key) — asked here, never restated, so the two cannot drift.
+        if os.environ.get("FANTASTIC_AI_MODEL"):
+            blockers += resolve_backend(backend).blockers()
 
     # ── CONCURRENCY: the GPU is shared ──────────────────────────
-    # The GPU holds ~7 sequences and production production traffic shares it, so
-    # exceeding the cap degrades somebody else's work, not just ours. Opened at 3
-    # by the session that built the tunnel; raised to 6 by its owner 2026-08-28.
-    # It is a promise about another team's latency, not a throughput dial.
+    # The vLLM GPU holds a fixed number of sequences and production production
+    # traffic shares it, so exceeding the cap degrades somebody else's work, not
+    # just ours. It is a promise about another team's latency, not a throughput
+    # dial.
     cap = int(os.environ.get("LANE_CAP", "6"))
     lanes = int(os.environ.get("LANES", "1"))
     print(f"{OK if lanes <= cap else BAD} LANES={lanes:<15} "
@@ -108,15 +83,10 @@ def main() -> int:
     if lanes > cap:
         blockers.append(f"LANES={lanes} exceeds the agreed cap of {cap} concurrent lanes")
 
-    # ── the paid paths ──────────────────────────────────────────
-    for var, name in (("ANTHROPIC_API_KEY", "anthropic"), ("NVIDIA_API_KEY", "nvidia")):
+    # ── the keys: read by the run's `creds` store (env backend), never a backend ──
+    for var, _endpoint_var in KEYED.values():
         have = bool(os.environ.get(var))
         print(f"{OK if have else WARN} {var:<20} {'set' if have else 'unset'}")
-        if backend == name and not have:
-            blockers.append(
-                f"BACKEND={name} needs {var} in the environment (or wired through "
-                "the keychain connector)"
-            )
 
     # ── ollama, which several probes still default to ───────────
     if not _which("ollama") and not _listening("127.0.0.1", 11434):

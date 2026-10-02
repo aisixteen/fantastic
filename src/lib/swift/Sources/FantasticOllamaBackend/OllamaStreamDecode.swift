@@ -30,7 +30,7 @@ struct OllamaDecoded: Equatable {
 /// with no tool call and no error. ollama's own log showed the request answered
 /// normally, so it looked like the server had wedged.
 ///
-/// Same defect and same fix as NIM's `reasoning_content`. A raw text protocol
+/// Same defect and same fix as vllm's `reasoning_content`. A raw text protocol
 /// reads the text the model produced; it does not let the provider decide which
 /// of its fields counts as output. (The `?? ""` also normalizes ollama's
 /// occasional explicit `null` — protocol shape, not bug masking.) The reasoning

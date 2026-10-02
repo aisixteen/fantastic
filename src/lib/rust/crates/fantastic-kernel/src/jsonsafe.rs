@@ -57,7 +57,7 @@ pub(crate) fn record_value(rec: &AgentRecord) -> Value {
 }
 
 /// How a raw reply BODY is written where python's reply dict holds the bytes
-/// natively (the `bytes` key — C37).
+/// natively (its slot — the `bytes` key for a bundle's reply, C37).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BodyAs {
     /// `{len: N}` — what a memory store holds (python `_store_safe`; base64 is
@@ -67,25 +67,26 @@ pub enum BodyAs {
     Marker,
 }
 
-/// `value` with the raw `body` written at its `bytes` key, per `how`. No body ⇒
-/// the value verbatim. A rust `Value` never holds bytes itself — the body rides
-/// beside it — so this is the whole of python's `_store_safe`/`_json_safe`.
+/// `value` with the raw `body` written at its slot, per `how`. No body ⇒ the
+/// value verbatim; a body whose slot `value` cannot hold (a non-object reply) is
+/// not written. A rust `Value` never holds bytes itself — the body rides beside
+/// it — so this is the whole of python's `_store_safe`/`_json_safe`.
 #[must_use]
-pub fn with_body(value: &Value, body: Option<&[u8]>, how: BodyAs) -> Value {
+pub fn with_body(value: &Value, body: Option<&crate::outcome::Blob>, how: BodyAs) -> Value {
     let Some(body) = body else {
         return value.clone();
     };
     let mut out = value.clone();
-    if let Some(m) = out.as_object_mut() {
-        let v = match how {
-            BodyAs::Len => {
-                let mut len = Map::new();
-                len.insert("len".to_string(), Value::from(body.len()));
-                Value::Object(len)
-            }
-            BodyAs::Marker => Value::String(format!("<bytes:{}>", body.len())),
-        };
-        m.insert("bytes".to_string(), v);
+    let v = match how {
+        BodyAs::Len => {
+            let mut len = Map::new();
+            len.insert("len".to_string(), Value::from(body.bytes.len()));
+            Value::Object(len)
+        }
+        BodyAs::Marker => Value::String(format!("<bytes:{}>", body.bytes.len())),
+    };
+    if body.place(&mut out, v).is_err() {
+        return value.clone();
     }
     out
 }

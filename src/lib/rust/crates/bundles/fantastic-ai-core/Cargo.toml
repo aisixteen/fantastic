@@ -24,6 +24,8 @@ regex = "1"
 fantastic-file = { path = "../fantastic-file" }
 # Every AI agent keeps its conversation in a memory store; the tests wire one.
 fantastic-ram-store = { path = "../fantastic-ram-store" }
+# A backend reads its key from a credential store; the reader's tests wire one.
+fantastic-credential-store = { path = "../fantastic-credential-store" }
 fantastic-exec-bridge = { path = "../fantastic-exec-bridge" }
 # The author tests allowlist a REAL interpreter — the test acting as operator.
 which = "6"

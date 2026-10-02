@@ -142,6 +142,10 @@ fn mk_kernel() -> Arc<Kernel> {
     kernel
         .bundles
         .register("exec_bridge.tools", fantastic_exec_bridge::ExecBridgeBundle);
+    kernel.bundles.register(
+        fantastic_credential_store::HANDLER_MODULE,
+        fantastic_credential_store::test_support::bundle(),
+    );
     let kernel = Arc::new(kernel);
     // The root's root_path IS the store root the configs declare (`.fantastic`).
     // `find_store` matches a candidate provider's `root` meta against THIS path,
@@ -306,7 +310,7 @@ async fn dispatch_item(
     let mut item = Item::new(AgentId::from(target), payload);
     if is_stream {
         item = match blob {
-            Some(b) => item.with_binary(b),
+            Some(b) => item.with_binary_key("bytes", b),
             None => item.with_raw_reply(),
         };
     }
@@ -320,12 +324,9 @@ async fn dispatch_item(
     }
     let mut out = k.send(vec![item]).await.remove(0);
     if let Some(body) = out.body.take() {
-        if let Some(o) = out.result.as_object_mut() {
-            o.insert(
-                "bytes".into(),
-                Value::String(String::from_utf8_lossy(&body).into_owned()),
-            );
-        }
+        // the chunk, as text, at its own slot of the reply
+        let text = Value::String(String::from_utf8_lossy(&body.bytes).into_owned());
+        let _ = body.place(&mut out.result, text);
     }
     out
 }

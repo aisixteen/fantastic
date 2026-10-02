@@ -432,35 +432,6 @@ struct RootBootTests {
         #expect(verbs == ["boot"], "the boot pass minted \(verbs)")
         await kernel.shutdown()
     }
-
-    /// C85 — `shutdownRequested()` resolves on CANCELLATION as well as on the
-    /// stop signal. It parked on a bare continuation, so the loser of the
-    /// daemon's race was never resumed, `cancelAll()` waited forever, and the
-    /// process had to be SIGKILLed with `lock.yaml` left behind.
-    @Test func awaitStopReturnsWhenCancelled() async throws {
-        let kernel = Kernel(storage: .inMemory, bundles: BundleRegistry())
-        let root = Agent(id: AgentId(ROOT_ID), handlerModule: nil, parentId: nil)
-        kernel.register(root)
-        kernel.setRoot(root)
-        let returned = await withTaskGroup(of: Bool.self) { group in
-            group.addTask {
-                _ = await Bootstrap.awaitStop(kernel: kernel)
-                return true
-            }
-            group.addTask {
-                // The OTHER leg of the daemon's race finishes first.
-                try? await Task.sleep(nanoseconds: 50_000_000)
-                return false
-            }
-            let first = await group.next() ?? false
-            group.cancelAll()
-            // The cancelled `awaitStop` must now RETURN — this await is the
-            // test: it hung forever before.
-            await group.waitForAll()
-            return first
-        }
-        #expect(returned == false, "the signal leg should not have fired")
-    }
 }
 
 private func makeTempDir() -> URL {

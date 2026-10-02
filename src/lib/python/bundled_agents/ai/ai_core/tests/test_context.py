@@ -13,10 +13,12 @@ import pytest
 from ai_core import core
 from ai_core.context import (
     DEFAULT_CONTEXT_WINDOW,
+    DEFAULT_OUTPUT_RESERVE,
     ProjectionCtx,
     budget,
     estimate_one,
     estimate_tokens,
+    output_reserve,
     resolve_context_window,
 )
 from ai_core.core import _compaction_mark, _project_context, _projection
@@ -85,6 +87,50 @@ def test_window_precedence():
 
 def test_budget_floor():
     assert budget({"context_window": 100, "output_reserve": 1000}) == 256
+
+
+@pytest.mark.parametrize(
+    "v, want",
+    [
+        ("٣", None),
+        ("²", None),
+        ("12٣", None),
+        (" 3 ", 3),
+        (" 3 ", 3),
+        ("\x1c3", 3),
+        ("0", 0),
+        ("+5", None),
+        ("", None),
+        (7, 7),
+        (0, None),
+        (True, None),
+        (2.0, None),
+    ],
+)
+def test_id_digit_strings_are_ascii_only(v, want):
+    # rust tests.rs `id_and_window_digit_strings_are_ascii_only`, same vectors.
+    assert core._as_id(v) == want
+
+
+@pytest.mark.parametrize(
+    "v, window, reserve",
+    [
+        ("٣", DEFAULT_CONTEXT_WINDOW, DEFAULT_OUTPUT_RESERVE),
+        ("²", DEFAULT_CONTEXT_WINDOW, DEFAULT_OUTPUT_RESERVE),
+        ("  12 ", 12, 12),
+        # `str.strip` drops the separators `\x1c`-`\x1f`, `int()` does not: the
+        # stripped text is what gets parsed, so these are numbers, not a raise.
+        ("\x1c12", 12, 12),
+        ("\x1f12\x1d", 12, 12),
+        ("0", DEFAULT_CONTEXT_WINDOW, 0),
+        ("\x1c", DEFAULT_CONTEXT_WINDOW, DEFAULT_OUTPUT_RESERVE),
+        ("+5", DEFAULT_CONTEXT_WINDOW, DEFAULT_OUTPUT_RESERVE),
+    ],
+)
+def test_window_and_reserve_digit_strings_parse_what_they_check(v, window, reserve):
+    rec = {"context_window": v, "output_reserve": v}
+    assert resolve_context_window(rec) == window
+    assert output_reserve(rec) == reserve
 
 
 def test_registry_no_memgpt():

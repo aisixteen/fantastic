@@ -24,8 +24,8 @@ by_selector:
      A4.17, A4.26, A4.27, A5.1, A5.15, A7.6,
      A7.8, A7.9, A7.11, A7.12, A7.20, A7.21, A8.11, A8.15, A8.18, A9.1, A9.3,
      A10.1, A10.2, A11.11, A11.12, A11.15, A11.16, A11.22, A11.25, A11.26,
-     B1.2, B1.12, B1.13, B1.14, B1.15, B1.16, B1.23, B1.24, B1.25, B2.15,
-     B4.3, B4.6, B4.7]
+     B1.2, B1.12, B1.14, B1.23, B1.24, B2.15,
+     B4.6]
   tree/reflect_full_*.json: [C4, C5, C11]
   tree/root_reflect_full.json: [C2, C3, C4, C9, C10, C12]
   tree/root_readme_*.json: [A12.1, A12.2, A12.3, A12.4]
@@ -34,13 +34,13 @@ by_selector:
   tree/kernel_ledger*.json: [C16, C24]
   tree/reflect_absent_agent.json: [C24]
   tree/refusal_*.json: [A2.3, C19]
-  tree/stub/req_*.bin: [B1.1, B1.3, B1.7, B1.20, B1.22, B1.23, C1, C5, C7, C9,
+  tree/stub/req_*.bin: [B1.1, B1.3, B1.20, B1.22, B1.23, C1, C5, C7, C9,
                         C12, C14, C19, C20, A2.1, A2.6]
   # §5.4's tree map names `reflect_<id>` and `root_readme_<key>` but not
   # `readme_<id>`, which is where every bundle's own readme BODY lands.
   tree/readme_*.json:
     [A2.8, A4.18, A4.28, A5.2, A7.1, A8.19, A8.23, A9.4,
-     A11.2, A11.6, B4.5, B4.9, C45, A12.1]
+     A11.2, A11.6, B4.5, C45, A12.1]
   tree/ai_send_reply.json: [B3.4]
   tree/ai_history.json: [B3.5, B1.5]
   tree/ai_status.json: [B3.3]
@@ -52,7 +52,7 @@ by_selector:
   store/s1/create_*.json: [C15]
   store/s1/readme_true/*.json:
     [A2.8, A4.18, A4.28, A5.2, A7.1, A8.19, A8.23, A9.4,
-     A11.2, A11.6, B4.5, B4.9, C45]
+     A11.2, A11.6, B4.5, C45]
   store/s1/root_reflect_persistence.json: [C9, C12]
   store/s1/sched_*.json: [A5.6]
   store/store_files_after_create/**: [C14, C15, C16, C36, C42, C43, C44, C45,
@@ -142,21 +142,18 @@ by_selector:
   bridges/relay/*.json: [A7.13, A7.14, A7.16, A7.29]
 
   ai_paths/cases/*.json:
-    [B1.3, B1.6, B1.8, B1.10, B1.11, B1.17, B1.21, B1.26, B2.3, B2.4, B3.2,
+    [B1.3, B1.6, B1.10, B1.11, B1.17, B1.21, B1.26, B2.3, B2.4, B3.2,
      B3.10, C30, C31, C38, B5.12, B5.13, B5.17, B5.19]
   ai_paths/send_timeout/*.json: [B2.8, B2.18]
   ai_paths/events.json: [B2.13, B2.14, B2.15]
 
-  providers/anthropic/**: [B1.7, B2.1, B2.16, B4.1, B4.2]
-  providers/openai/**: [B2.1, B2.9, B2.11, B4.3, B4.4, B4.7, B4.8]
+  providers/vllm/**: [B2.1, B2.11, B2.16]
   providers/ollama/**: [B4.6]
 
   # ── items this harness reaches that §5.4 did not assign a file ──
   # (C86 / C89 / C90 are merged into the wire and kernel_verbs entries above; a
   # repeated YAML key REPLACES the first and would have dropped their lists.)
   ctx/*/update_strategy_bogus.json: [B3.9]
-  providers/anthropic/stream_cut_before_stop/**: [B4.10]
-  providers/anthropic/event_error_midstream/**: [A15.4]
   cli/cli/reflect.json: [C88]
 
 # ── proof: unit — no observable wire effect ──────────────────────────────────

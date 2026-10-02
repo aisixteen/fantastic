@@ -1,6 +1,6 @@
 """responses bundle — reflect-driven LLM agent over the OpenAI Responses API.
 
-A THIN binding over `ai_core` (see anthropic_backend.tools for the pattern): this
+A THIN binding over `ai_core` (see ollama_backend.tools for the pattern): this
 module supplies the ResponsesProvider builder + the backend's identity, and
 `ai_core.build()` returns the `(VERBS, handler)` bound to it. ALL shared machinery
 (queue / FIFO lock, prompt assembly, the ONE-PASS `_run`, context management, the
@@ -10,15 +10,16 @@ working on the shared path — and so is `on_cancel`, the shared bundle CANCEL h
 the substrate discovers on this module (an in-flight `send` is a kernel TASK,
 killed with the universal `ps` → `cancel` system verbs).
 
-Distinct from `nvidia_nim_backend` / `llamacpp_backend` on purpose: those speak
-OpenAI Chat Completions (`/chat/completions`), this one the Responses wire
-(`/responses`) — a different request shape and a different event stream.
+Distinct from `vllm_backend` on purpose: that one speaks OpenAI Chat Completions
+(`/chat/completions`), this one the Responses wire (`/responses`) — a different
+request shape and a different event stream.
 """
 
 from __future__ import annotations
 
 from ai_core import build, required_meta
-from ai_core.schema import field, schema, validate
+from ai_core.credentials import key_reader
+from ai_core.schema import credentials_field, field, schema, validate
 from ai_core.core import (  # noqa: F401 — re-exported test seams + the cancel hook
     DEFAULT_CLIENT_ID,
     MAX_CALL_DEPTH,
@@ -31,7 +32,7 @@ from ai_core.core import (  # noqa: F401 — re-exported test seams + the cancel
     on_cancel,
 )
 
-from responses_backend.provider import KEY_VAR, MAX_TOKENS
+from responses_backend.provider import MAX_TOKENS
 
 NAME = "responses_backend"
 
@@ -52,8 +53,8 @@ RECORD_SCHEMA = schema(
             "max_tokens", "int", "a turn's output budget (tokens)", default=MAX_TOKENS
         ),
         field("sampling", "map", "runner params merged verbatim into the request body"),
+        credentials_field(required=True),
     ],
-    key_var=KEY_VAR,
 )
 
 
@@ -71,6 +72,7 @@ def make_provider(id, kernel):
     return ResponsesProvider(
         endpoint=required_meta(rec, "endpoint", NAME),
         model=required_meta(rec, "model", NAME),
+        key=key_reader(id, kernel, NAME, required=True),
         max_tokens=int(rec.get("max_tokens") or MAX_TOKENS),
         # RUNNER (meta) params — sampling knobs saved on the record, distinct from
         # connection (endpoint/key/model). Merged verbatim into the request body.

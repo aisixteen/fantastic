@@ -1,5 +1,5 @@
 // AIBackend — the shared reflect-driven LLM-agent machinery behind the
-// `AIProvider` seam. The ollama / NIM / Apple-FM bundles supply only
+// `AIProvider` seam. The ollama / responses / vllm / Apple-FM bundles supply only
 // their `AIProvider` impl + an `AIBackendConfig`, and dispatch every
 // verb through the `handle` method here.
 //
@@ -10,7 +10,7 @@
 // streaming task, the token / status event emission, and — since the
 // dispatch phase — READING THE MODEL'S TOOL CALLS OUT OF ITS OWN TEXT
 // AND DISPATCHING THEM (`ToolParse` + `Routing`). The providers own
-// only the upstream wire (NDJSON, SSE+429+Bearer, on-device session).
+// only the upstream wire (NDJSON, SSE+Bearer, on-device session).
 //
 // ONE pass per `send`, and the chain is the MODEL's: after the pass, its
 // completion is parsed and every call it wrote is dispatched, with each reply
@@ -25,9 +25,9 @@
 // Wire contract (python `ai_core/core.py`):
 //
 //   send → {response, final, client_id, message_id}   (the pass runs INLINE;
-//          `{error, client_id}` for a mapped provider failure or a timeout, the
-//          projection's own refusal body verbatim, and a RAISE — settled as
-//          `{error:"<Type>: <msg>", raised:true}` — for anything unmapped)
+//          `{error, client_id}` for a timeout, the projection's own refusal
+//          body verbatim, and a RAISE — settled as
+//          `{error:"<Type>: <msg>", raised:true}` — for a provider failure)
 //   token event  → {type:'token', text, source, client_id}
 //   status event → {type:'status', source, phase, detail, ts, client_id}
 //   history → {rows, next, total}
@@ -344,9 +344,6 @@ public final class AIBackend: @unchecked Sendable {
         /// stripped. Nothing was stored; routing rerolls it with the no-call
         /// reminder (python `_run`'s `dead_turn` reply).
         case dead(String)
-        /// Terminal failure (a MAPPED provider error). The string is the message
-        /// `send` reports as `{error, client_id}`.
-        case failed(String)
         /// The projection REFUSED the turn (too_small failsafe, unknown strategy).
         /// Its body is returned to the caller VERBATIM — no `client_id` bolted on,
         /// and no `status(done)`, because the model was never called.
@@ -551,19 +548,8 @@ public final class AIBackend: @unchecked Sendable {
             text = "[" + parts.joined(separator: " \u{b7} ") + "]\n" + text
         }
 
-        // A backend that REQUIRES its provider up front (python
-        // `cfg.require_provider`: nvidia, no api_key) builds it HERE and fails
-        // fast with its exact refusal body, before the queue. Every other
-        // backend builds it INSIDE the turn (python `_run`), after `queued` /
+        // The provider is built INSIDE the turn (python `_run`), after `queued` /
         // `thinking` — so a failed build ends the turn with `done(error)`.
-        var early: (any AIProvider)? = nil
-        if config.requireProvider {
-            switch try await config.makeProvider(agent, clientId, kernel) {
-            case .refused(let body): return body
-            case .provider(let p): early = p
-            }
-        }
-        let prebuilt = early
 
         // Enqueue this submission. Only ONE generation runs at a time per
         // agent (FIFO) — concurrent callers queue in arrival order, which
@@ -629,24 +615,13 @@ public final class AIBackend: @unchecked Sendable {
         do {
             produced = try await withGenerationCeiling(sendTimeoutSeconds) { [self] in
                 let provider: any AIProvider
-                if let prebuilt {
-                    provider = prebuilt
-                } else {
-                    // `runStream` owns the in-flight count it was bumped for;
-                    // a turn that never reaches it gives the count back here.
-                    let built: ProviderResult
-                    do {
-                        built = try await providerInTurn(agent, clientId, kernel)
-                    } catch {
-                        bumpInFlight(-1)
-                        throw error
-                    }
-                    switch built {
-                    case .refused(let body):
-                        bumpInFlight(-1)
-                        return .refused(body)
-                    case .provider(let p): provider = p
-                    }
+                // `runStream` owns the in-flight count it was bumped for; a turn
+                // that never reaches it gives the count back here.
+                do {
+                    provider = try await providerInTurn(agent, clientId, kernel)
+                } catch {
+                    bumpInFlight(-1)
+                    throw error
                 }
                 return try await runStream(
                     provider: provider,
@@ -670,7 +645,7 @@ public final class AIBackend: @unchecked Sendable {
                 "client_id": .string(clientId),
             ])
         } catch {
-            // AN UNMAPPED PROVIDER FAILURE RAISES (see `runStream`). The lock is
+            // A PROVIDER FAILURE RAISES (see `runStream`). The lock is
             // python's `finally`: it is released on the way out, or the agent is
             // stranded for good.
             st.clearCurrent()
@@ -721,8 +696,6 @@ public final class AIBackend: @unchecked Sendable {
                 "client_id": .string(clientId),
                 "dead_turn": .bool(true),
             ])
-        case .failed(let why):
-            reply = .object(["error": .string(why), "client_id": .string(clientId)])
         case .refused(let body):
             reply = body
         case .cancelled:
@@ -774,6 +747,7 @@ public final class AIBackend: @unchecked Sendable {
                     // THE LAYER'S PER-CALL DEADLINE, threaded to every model call
                     // the router dispatches. The kernel defaults nothing.
                     sendTimeout: deadline,
+                    modelWindow: self.config.modelWindow,
                     runState: st,
                     messageId: messageId,
                     deadTurn: deadTurn,
@@ -792,23 +766,15 @@ public final class AIBackend: @unchecked Sendable {
     /// The reason travels WITH the outcome because `send` returns it: python and
     /// rust both answer `{error, client_id}` when a pass does not finish, and a
     /// bare `nil` could not say which of four things happened.
-    /// python `_run`'s `_get_provider` for a backend that does not require it
-    /// up front: built inside the turn, and a raise is treated as python's
-    /// `_send` treats any raise of the turn — mapped to a clean refusal when the
-    /// backend's mapper knows it, else `done(reason:error)` and re-raised.
+    /// python `_run`'s `_get_provider`: built inside the turn, and a raise is
+    /// treated as python's `_send` treats any raise of the turn —
+    /// `done(reason:error)` and re-raised.
     private func providerInTurn(_ agent: Agent, _ clientId: String, _ kernel: Kernel)
-        async throws -> ProviderResult
+        async throws -> any AIProvider
     {
         do {
             return try await config.makeProvider(agent, clientId, kernel)
         } catch {
-            if let mapped = config.errorMapper?(error) {
-                await emitStatus(
-                    kernel: kernel, agentId: agent.id, clientId: clientId, phase: "done",
-                    detail: [("reason", .string("error")), ("error", .string(mapped))])
-                return .refused(
-                    .object(["error": .string(mapped), "client_id": .string(clientId)]))
-            }
             await emitStatus(
                 kernel: kernel, agentId: agent.id, clientId: clientId, phase: "done",
                 detail: [("reason", .string("error")), ("error", .string(pyErrorText(error)))])
@@ -878,26 +844,11 @@ public final class AIBackend: @unchecked Sendable {
         var accumulated = ""
         var firstToken = true
         do {
-            // THE PER-BACKEND STREAM WRAPPER (nvidia's retry-once-on-429) wraps
-            // the RAW provider stream, exactly as python's `cfg.stream_wrapper`
-            // does — and it is handed this backend's own status emitter so the
-            // wait it takes is an ordinary `status` event.
             let model = renderForModel(messages)
             // A FRESH reading per pass: a provider that reports nothing this time
             // must not leave last pass's number standing.
             provider.usage?.lastPromptTokens = nil
-            let stream: AsyncThrowingStream<AIChunk, Error>
-            if let wrapper = config.streamWrapper {
-                let emitter = AIStatusEmitter { phase, detail in
-                    await emitStatus(
-                        kernel: kernel, agentId: agentId, clientId: clientId, phase: phase,
-                        detail: detail)
-                }
-                stream = wrapper(provider, model, emitter)
-            } else {
-                stream = provider.chat(messages: model)
-            }
-            for try await chunk in stream {
+            for try await chunk in provider.chat(messages: model) {
                 // The KERNEL killed this task (`cancel <task_id>`). `onCancel`
                 // already closed the turn out for the client — status(done,
                 // reason:"cancelled") + done — while we were still alive. Bail
@@ -934,24 +885,12 @@ public final class AIBackend: @unchecked Sendable {
             // OWN kill, not a provider failure. `onCancel` already emitted the
             // terminal events; stay silent.
             if Task.isCancelled { return .cancelled }
-            // TWO KINDS OF PROVIDER FAILURE (python `core.py:2324-2342`).
-            //
-            // MAPPED — a backend installed an `errorMapper` and it recognised
-            // this one (nvidia's 429 / HTTP texts): a clean, caller-facing
-            // refusal. `status(done, reason:error, error:mapped)`, reply
-            // `{error, client_id}`.
-            //
-            // UNMAPPED — everything else. The status carries `str(e)` and the
-            // handler RAISES, so the kernel settles `{error:"<Type>: <msg>",
-            // raised:true}` and the caller can tell a crash from a refusal.
-            // Swallowing it into `{error, client_id}` made every provider bug
-            // look like a decision the backend had taken.
-            if let mapped = config.errorMapper?(error) {
-                await emitStatus(
-                    kernel: kernel, agentId: agentId, clientId: clientId, phase: "done",
-                    detail: [("reason", .string("error")), ("error", .string(mapped))])
-                return .failed(mapped)
-            }
+            // A PROVIDER FAILURE RAISES (python `_send`'s exception handler). The
+            // status carries `str(e)` and the handler RAISES, so the kernel
+            // settles `{error:"<Type>: <msg>", raised:true}` and the caller can
+            // tell a crash from a refusal. Swallowing it into `{error,
+            // client_id}` made every provider bug look like a decision the
+            // backend had taken.
             await emitStatus(
                 kernel: kernel, agentId: agentId, clientId: clientId, phase: "done",
                 detail: [("reason", .string("error")), ("error", .string(pyErrorText(error)))])
@@ -1360,7 +1299,7 @@ public final class AIBackend: @unchecked Sendable {
         // is digested to its origin line. `limit` bounds the count; the cap bounds
         // the bytes. `limit or None` — only ZERO is "no limit".
         let (kept, truncated) = AIContext.fitReply(
-            digest, capTokens: AIContext.inlineCap(agent), limit: limit != 0 ? limit : nil)
+            digest, capTokens: AIContext.inlineCap(agent, modelWindow: config.modelWindow), limit: limit != 0 ? limit : nil)
         var out: OrderedDictionary<String, JSON> = [
             "rows": .array(kept),
             "next": truncated ? (kept.last?["id"] ?? .null) : .null,

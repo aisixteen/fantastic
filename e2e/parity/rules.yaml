@@ -18,7 +18,32 @@
 # status codes, exit codes, stdout vs stderr, close codes, and the FORMAT of
 # send_id / serial / corr / ws-client ids.
 
-version: 8
+version: 10
+#
+# v10 (2026-10-02) — TWO NEW RULES, both owner-approved on the same day, and no
+# existing rule widened:
+#   N24 — the memory store's reflect `rows` counted WITHOUT the kernel's `flush`
+#         bookkeeping rows (their number is the flusher's debounce against the
+#         runtime's speed: python 334, rust/swift 333). It needs a family change:
+#         `store.py` takes a census of the store on each side of that reflect.
+#   N25 — `foundation_models_backend` dropped from the RUST/SWIFT side of a
+#         catalog (python has no FM, owner 2026-10-02), including the PAGED
+#         catalog walks, whose page boundaries the one extra name shifts.
+#
+# v9 (2026-10-02) — ONE NEW RULE, N23: the AI kind the families drive is now
+# `vllm_backend` (anthropic_backend, nvidia_nim_backend and llamacpp_backend were
+# deleted 2026-10-01), and its reflect carries the endpoint's KV session table,
+# whose conversation ids are digests over a prompt prefix that embeds a minted
+# guid and an OS-chosen port. Measured on the first two python captures
+# (`vllm_20261002`): every request body of every AI family differed in that one
+# token, because the agent's own reflect is rendered into its system prompt.
+# N4 REACHES FURTHER, for the same capture: with compaction now firing (the old
+# stub's `input_tokens: 1` had pinned the calibration at 0.0), the two python
+# runs' row ids came out 3 apart, and two places were sensitive to the absolute
+# value — the kernel's own documentation examples (`msg 412`,
+# `<ids><item>12</item><item>15</item></ids>`), renamed as if they were ids and so
+# colliding with a real row 412 on one run only, and a flush row's `covers`
+# quoted as embedded json, which N4 never renamed there.
 #
 # v8 (2026-10-01) — the parity leftovers the owner decided (`tmp/todo.md` (a)/(c)).
 # Three NEW rules, each an order that is not a contract: N20 (reply vs event on
@@ -220,7 +245,9 @@ rules:
       # settled reply. Inside an `<ids>`/`<view_ids>` BLOCK only: `<to><item>5`
       # and `<options><item>true` carry values the HARNESS chose.
       - '<(ids|view_ids|refs|expand)>(<item>N</item>)+</\1>'
-      - '"(expand|ids|refs|view_ids)": [N, …]'
+      # …and a ledger flush row's `covers`, quoted as embedded json by the memory
+      # store's state event; singly or doubly quoted (2026-10-02).
+      - '\\?"(expand|ids|refs|view_ids|covers)\\?": [N, …]'
       # A row quoted as json inside a prompt (the fold prompt does this), reached
       # both singly and doubly quoted.
       - '\\?"(id|task_id|message_id|parent_row|row_id|msg)\\?": N'
@@ -233,6 +260,15 @@ rules:
       `next_id=2001` against `1001`, the prompt otherwise identical). Its presence
       and place stay compared.
     replacement: <ID#n:int> / <ID#n:str>
+    doc_literals: >
+      The kernel's OWN documentation examples, printed into every AI system
+      prompt, are literals and are fenced off before any renaming:
+      `[from solver_1 · to solver_2, solver_3 · msg 412]` → `msg <DOC:412>` and
+      `<ids><item>12</item><item>15</item></ids>` → `<DOC:12>`/`<DOC:15>`. Renamed
+      as ids, they shared a placeholder with a REAL row that happened to carry
+      the same number on one run only (measured 2026-10-02, python self-diff,
+      `ctx/req/ai_compact_main_t11.json`). Exact text only: an example whose
+      number changed is renamed like any id, and is a line.
     never_rename:
       # Harness-chosen ids are deterministic: renaming them would hide a runtime
       # that echoed the WRONG one back.
@@ -513,6 +549,8 @@ rules:
   # `residuals.yaml` R-C10-1, which recorded the same decision, went with it.
   # C10 and C33 are now proved by the ordinary comparison: the bundle catalog and
   # the paging envelope are compared whole, on both runtimes, with no exception.
+  # (2026-10-02: the bundle is back in rust AND swift and python has none, by the
+  # owner's decision — N25 below, a new id.)
 
   - id: N14
     name: harness_fields
@@ -842,3 +880,112 @@ rules:
     must_not_hide:
       - B1.3
       - B1.6
+
+  - id: N23
+    name: kv_conversation_digest
+    why: >
+      `vllm_backend` reflects the endpoint's KV session table, and each live
+      conversation is named by `sha256(system text + first user turn)[:16]`. That
+      prefix embeds values the rules already declare incomparable — the root's
+      minted guid (N3), the stub's OS-chosen port (N8), the runtime naming itself
+      (N2) — so the id can only differ between two captures of the same tree.
+      Measured 2026-10-02 on the python self-diff: every stub request body of
+      `ai_paths`, `ctx`, `store`, `tree` and `wire` differed in exactly this token
+      (the agent's own reflect is rendered into its system prompt). The ids go;
+      HOW MANY there are, their position, `live`, `evicted` and `rejected` stay
+      compared, and a `conversations` entry that is not a 16-hex id is compared
+      as it is.
+    keys: [conversations]
+    text: '`<conversations> <item>hex16</item> … </conversations>` and an embedded
+      json `"conversations": ["hex16", …]`'
+    replacement: <KV_CONVERSATION:hex16>
+    self_check: diff.py rulecheck — the id forgiven in a reflect and in a prompt;
+      a different count, a non-hex entry and a different `evicted` are still lines
+    must_not_hide:
+      - B1.12   # the reflect statics around the table
+      - B1.23   # the reflect base and its ordered extras (`kv` is one) — key order and the list length stay compared
+
+  # ── v10 (2026-10-02) — owner-approved the same day ──
+
+  - id: N24
+    name: memory_rows_without_flush
+    why: >
+      The memory store's reflect `rows` (`store/s1/readme_true/memory.json`)
+      counts every row it holds, and that includes one `flush` row per batch the
+      kernel's ledger flusher wrote. HOW MANY batches a run wrote is the
+      flusher's debounce against the runtime's speed: measured python 334, rust
+      and swift 333 on the same scenario. That is C47's "how often", which C47
+      itself says is not the contract. The kernel has no verb that settles the
+      flusher, and a sleep would only move the race, so the flush rows are
+      COUNTED instead: `store.py` takes a census of the whole store — one `dump`,
+      `{rows, flush}` of one instant — immediately before and immediately after
+      the reflect, under `harness.flush_rows` (N14 drops it after this rule has
+      read it). A flush appends a batch, so the census whose `rows` equals the
+      reflect's is the store the reflect saw; its `flush` is subtracted, and
+      `rows` becomes `<ROWS_EXCLUDING_FLUSH:n>`, compared EXACTLY. Both sides,
+      the same way.
+    not_fired: >
+      No census on a side, no census whose `rows` equals the reflect's (a flush
+      on BOTH sides of it), or two matching censuses with different flush counts.
+      The raw count then stays and is a line; `store.py` also writes a note.
+    cost: >
+      Two `dump` calls per run that were not there before — on every runtime,
+      so every later ledger census carries the same two extra `memory` rows.
+    measured: >
+      2026-10-02, python capture `hk_n24`: the reflect saw 305 rows, both
+      censuses read 305 rows / 2 flush, so `<ROWS_EXCLUDING_FLUSH:303>`. Against
+      the `vllm_20261002` python store family (taken before the census existed)
+      the whole family differed in exactly 2 lines: this count, and the final
+      ledger census of `memory` calls, 13 → 15 (the two `dump`s).
+    self_check: diff.py rulecheck — 7 cases (the flush count forgiven; the second
+      census used when a flush landed before the reflect; a different non-flush
+      count, no matching census, two disagreeing censuses, no census and another
+      reflect field — lines)
+    must_not_hide:
+      - C47   # the flusher's contract: that it flushes — the non-flush rows it wrote are counted exactly
+      - C45   # the readme body in the same reflect, untouched
+
+  - id: N25
+    name: port_catalog_without_foundation_models
+    why: >
+      Python ships no `foundation_models_backend` (owner, 2026-10-02: py has no
+      FM); rust and swift do. Every comparison of a WHOLE bundle catalog (C10 —
+      `bundles=ids|all`, and C8's paging over it) therefore differs by that one
+      name. The name is dropped from the RUST/SWIFT side only. This is
+      deliberately one-sided, as N13 was: on the python side the rule would
+      fire on nothing, and if python ever carried the bundle again it must stay
+      visible.
+    forms:
+      - 'a `bundles` list in a reply — names (`bundles=ids`) or
+         `{name, handler_module, schema}` objects (`bundles=all`)'
+      - 'the comma-joined `bundles=a,b,c` every AI system prompt carries'
+      - 'a `"bundles": [...]` list of NAMES inside text — compact in a REST body,
+         indented in a cli stdout (there the WHOLE LINE goes, before the text is
+         cut into lines), quoted once or more'
+      - 'a PAGED catalog walk (`store/s2/*/bundles_*_limit2_pages.json`): one
+         extra name shifts every later page boundary (python 16 names in 8 pages
+         of 2, a port 17 in 9), so the walk is RE-PAGED from the port catalog
+         minus the name, in chunks of the walk''s `limit` — ONLY when the port''s
+         own walk is a well-formed limit paging in python''s convention (every
+         page but the last holds exactly `limit`, names its last entry as
+         `bundles_next`, the next page asks `after` it, the last page has none).
+         Each page keeps every other field of the port''s own page. A paging bug
+         is never re-paged away: the walk is then compared as recorded'
+    not_covered: >
+      A COUNT derived from a prompt that carries the port's catalog — a token
+      estimate or a `budget` (window − reserve − the system block) — is not
+      touched: the name is ~26 characters, more than N10's one-token tolerance.
+      Not measured on a port capture yet (none was taken with this rule).
+    measured: >
+      Simulated on the python capture `vllm_20261002` (the name inserted into
+      each catalog where a port puts it): the eight `store/s2` walks went from
+      1225 lines to 0, a prompt, a cli stdout (text and json) and a REST body
+      from 1 line each to 0.
+    self_check: diff.py rulecheck — 17 cases (a list of names and of objects, a
+      prompt, a compact and an indented list, a raw stdout, three walks — 0
+      lines; another extra or missing bundle in each form, python carrying it,
+      a port that pages wrongly, another field on a re-paged page — lines)
+    must_not_hide:
+      - C10   # the catalog itself — any OTHER extra or missing bundle is a line
+      - C8    # the paging keys (`bundles_next` only when non-null) — a port that pages wrongly is never re-paged
+      - C17   # the cursor values, re-derived exactly as the port's own walk derived them

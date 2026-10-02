@@ -348,7 +348,7 @@ extension LedgerTests {
             func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? {
                 nil
             }
-            func handleBinary(agentId: AgentId, header: JSON, blob: Data, kernel: Kernel)
+            func handleBinary(agentId: AgentId, header: JSON, body: Blob?, kernel: Kernel)
                 async throws -> (JSON?, Data?)
             {
                 let head: JSON = .object([
@@ -372,7 +372,7 @@ extension LedgerTests {
                 ]))
         ])
         let out = await k.send([
-            Item(AgentId("ch"), .object(["type": .string("read_stream")]), id: "rd", binary: Data())
+            Item(AgentId("ch"), .object(["type": .string("read_stream")]), id: "rd", rawReply: true)
         ])[0]
         #expect(out.body == Data([1, 2, 3]))
         let ledger = await k.send([

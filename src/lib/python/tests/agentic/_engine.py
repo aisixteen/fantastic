@@ -858,8 +858,8 @@ def denied(reply: dict) -> bool:
 
 def denial_side(reply: dict) -> str | None:
     """Which half refused: `egress` (the sender may not call) / `ingress` (the
-    target does not accept) / `self-grant` / `delegation`. This field is the
-    evidence that the gate is two-sided at all."""
+    target does not accept) / `self-grant` / `delegation` / `secret-holder`. This
+    field is the evidence that the gate is two-sided at all."""
     return reply.get("side") if isinstance(reply, dict) else None
 
 

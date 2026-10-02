@@ -2,7 +2,10 @@
 //! `PB/io/web_ws/src/web_ws/_proxy.py::run`.
 //!
 //! ```text
-//! C→S {type:"call",  target, payload, id}     → kernel.send → reply
+//! C→S {type:"call",  target, payload, id, secret?}
+//!                                             → kernel.send → reply
+//!                                               (`secret` = the item's marked
+//!                                               paths, `fantastic_kernel::secret`)
 //! C→S {type:"emit",  target, payload}         → kernel.emit (no reply)
 //! C→S {type:"watch"|"unwatch", src}           → (un)register a watcher
 //! C→S {type:"state_subscribe"|"state_unsubscribe"}
@@ -12,7 +15,7 @@
 //! S→C {type:"event", src, payload}            → an event from a watched agent
 //!                                               (`src` = the name the client watched)
 //! S→C {type:"event", payload}                 → an event emitted to THIS connection
-//! S→C {type:"call", id:"h<n>", target, payload, caller}
+//! S→C {type:"call", id:"h<n>", target, payload, caller, secret?}
 //!                                             → the host calling a page agent
 //! C→S {type:"reply"|"error", id:"h<n>", data} → that call's outcome
 //! ```
@@ -50,14 +53,17 @@
 //! handshake.
 
 use crate::AppState;
-use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use fantastic_io_bridge::authorizer::{ingress, manifold_spec, Action, Decision, Denial};
-use fantastic_io_bridge::codec::{decode_binary_frame, encode_frame, set_path};
+use fantastic_io_bridge::codec::{decode_binary_frame, encode_frame, BINARY_EDGE_VERBS};
+use fantastic_io_bridge::ws_deflate::DeflateStream;
 use fantastic_kernel::{AgentId, Item, Kernel};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+use tokio_tungstenite::tungstenite::Message;
 
 #[path = "ws_peer.rs"]
 mod peer;
@@ -74,25 +80,23 @@ pub(crate) const CLOSE_INTERNAL_ERROR: u16 = 1011;
 /// The close reason websockets sends with it.
 pub(crate) const KEEPALIVE_TIMEOUT_REASON: &str = "keepalive ping timeout";
 
-/// The verbs a TEXT `call` frame must route down the BINARY channel, chosen
-/// STATICALLY by verb (A11.9/A13.1).
-///
-/// Python needs no such list: its payload dict simply holds a `bytes` value and
-/// `encode_outbound` finds it. A `serde_json::Value` cannot, so the carrier is
-/// the item's binary channel and the decision has to be made from the verb —
-/// the same pair on both wire legs, so a browser and a curl client get the same
-/// answer for the same request.
-pub(crate) const BINARY_EDGE_VERBS: [&str; 2] = ["read_stream", "write_stream"];
+/// The envelope key a reply's body sits under — python's `find_bytes_path` walks
+/// `{type:reply, id, data:{…bytes…}}` and finds the chunk below `data`, at the
+/// reply's own slot (`["data", "bytes"]` for a `read_stream`).
+const REPLY_KEY: &str = "data";
 
-/// Where a binary reply's chunk sits in the reply ENVELOPE — python's
-/// `find_bytes_path` walks `{type:reply, id, data:{…bytes…}}` and finds exactly
-/// this.
-const REPLY_BINARY_PATH: &str = "data.bytes";
+/// The envelope key an inbound binary frame's body must sit under for it to
+/// reach the target — at ANY path there, which is where python's `set_path` puts
+/// it before `kernel.send` (`["payload", "data"]` for `paste_image`,
+/// `["payload", "bytes"]` for `write_stream`, `["payload", "a.b"]` for the key
+/// `"a.b"`).
+const INBOUND_PAYLOAD_KEY: &str = "payload";
 
-/// The path an inbound binary frame must name for its body to reach the target:
-/// the payload's own `bytes` field, which is where python's `set_path` puts it
-/// before `kernel.send`.
-const INBOUND_BINARY_PATH: &str = "payload.bytes";
+/// One upgraded socket: tungstenite over the byte stream that carries the
+/// negotiated permessage-deflate (see `handlers::ws_upgrade`).
+pub(crate) type Socket = tokio_tungstenite::WebSocketStream<
+    DeflateStream<hyper_util::rt::TokioIo<hyper::upgrade::Upgraded>>,
+>;
 
 /// One frame leaving the socket. Text and binary share one single-consumer
 /// sink, and the control frames (keepalive ping, the close echo) ride the same
@@ -181,66 +185,59 @@ fn frame_error() -> Value {
 }
 
 /// A decoded inbound frame: the envelope, plus the raw body when the frame
-/// carried one at [`INBOUND_BINARY_PATH`] or [`REPLY_BINARY_PATH`].
+/// carried one under its `payload` or its `data`.
 struct Inbound {
     envelope: Value,
-    /// `Some` only when `_binary_path` named the payload's own `bytes` field —
-    /// the one path this runtime's carrier (`Item::with_binary`) can place.
-    body: Option<Vec<u8>>,
-    /// `Some` only when `_binary_path` named `data.bytes` — a page ANSWERING one
-    /// of the host's calls with a chunk; the body is that call's reply body.
-    answer_body: Option<Vec<u8>>,
+    /// `Some` when `_binary_path` named a slot under the frame's `payload` — the
+    /// body AT that payload path (`Item::with_binary` carries both).
+    body: Option<fantastic_kernel::Blob>,
+    /// `Some` when `_binary_path` named the frame's `data` or a slot under it — a
+    /// page ANSWERING one of the host's calls with bytes; the path is the
+    /// envelope's (`["data", …]`), the answer re-roots it at the reply.
+    answer_body: Option<fantastic_kernel::Blob>,
 }
 
 /// python `decode_inbound` + `isinstance(frame, dict)`: parse a text frame as
 /// JSON or a binary frame as `[4B len | header | body]`, pop `_binary_path` and
 /// place the body there. `Err` is the ONE malformed-frame answer.
 fn decode_inbound(msg: InboundRaw) -> Result<Inbound, ()> {
-    let (mut envelope, body) = match msg {
+    let (envelope, path, bytes) = match msg {
         // STRICT (D13): python `decode_frame` → `io_bridge.loads`.
-        InboundRaw::Text(t) => (fantastic_io_bridge::codec::loads(&t).map_err(|_| ())?, None),
+        InboundRaw::Text(t) => (
+            fantastic_io_bridge::codec::loads(&t).map_err(|_| ())?,
+            None,
+            Vec::new(),
+        ),
+        // python `decode_frame` performs `set_path(head, path, body)` and a bad
+        // path is the frame error; the codec places a `null` in the same slot
+        // (rust cannot store the bytes in the `Value`) and keeps the body beside.
         InboundRaw::Binary(b) => {
-            let (h, body) = decode_binary_frame(&b).map_err(|_| ())?;
-            (h, Some(body))
+            let f = decode_binary_frame(&b).map_err(|_| ())?;
+            (f.head, f.path, f.body)
         }
     };
     if !envelope.is_object() {
         return Err(());
     }
-    // `head.pop("_binary_path", None)`: JSON null is python's "absent".
-    let path = envelope
-        .as_object_mut()
-        .expect("checked above")
-        .shift_remove("_binary_path")
-        .filter(|v| !v.is_null());
+    // No path ⇒ a plain envelope; a body that came with one is dropped, exactly
+    // as python drops it (nothing names where it would go).
     let Some(path) = path else {
-        // No path ⇒ a plain envelope; a body that came with one is dropped,
-        // exactly as python drops it (nothing names where it would go).
         return Ok(Inbound {
             envelope,
             body: None,
             answer_body: None,
         });
     };
-    // A non-string path raises out of python's `path.split(".")`.
-    let Some(path) = path.as_str() else {
-        return Err(());
-    };
-    // VALIDATE THE PLACEMENT — python actually performs `set_path(head, path,
-    // body)` and a `KeyError`/`IndexError`/`TypeError` becomes the frame error.
-    // Rust cannot store the bytes in the `Value`, so it places a `null` in the
-    // same slot and keeps the body beside the envelope.
-    if set_path(&mut envelope, path, Value::Null).is_err() {
-        return Err(());
-    }
-    // Only the payload's own `bytes` field reaches a handler here: that is the
-    // slot `Item::with_binary` fills. An answer's `data.bytes` is the reply body
-    // of a host call into the page. Any other placeable path keeps its `null`
-    // and the body is dropped.
-    let body = body.unwrap_or_default();
-    let (body, answer_body) = match path {
-        INBOUND_BINARY_PATH => (Some(body), None),
-        REPLY_BINARY_PATH => (None, Some(body)),
+    // A body under the frame's `payload` reaches the handler AT ITS PATH there
+    // (`Item::with_binary` carries both). One under `data` is the reply body of
+    // a host call into the page. Any other placed path keeps its `null` and the
+    // body is dropped.
+    let blob = fantastic_kernel::Blob::new(path, bytes);
+    let (body, answer_body) = match blob.path.first() {
+        Some(fantastic_kernel::Step::Key(k)) if k == INBOUND_PAYLOAD_KEY => {
+            (blob.under(INBOUND_PAYLOAD_KEY), None)
+        }
+        Some(fantastic_kernel::Step::Key(k)) if k == REPLY_KEY => (None, Some(blob)),
         _ => (None, None),
     };
     Ok(Inbound {
@@ -257,25 +254,31 @@ enum InboundRaw {
 }
 
 /// Send one server→client envelope, picking the frame kind from the CARRIER:
-/// a reply that holds a chunk is a binary frame whose head keeps `bytes: null`
-/// in its python position and names it in `_binary_path`.
+/// an envelope whose `key` value holds a body is a binary frame whose head
+/// keeps `null` at the body's slot, in its python position, and names it in
+/// `_binary_path` (`[key, …the body's own steps]`).
 async fn send_envelope(
     out_tx: &tokio::sync::mpsc::Sender<Out>,
     envelope: Value,
-    body: Option<Vec<u8>>,
-    path: &str,
+    body: Option<fantastic_kernel::Blob>,
+    key: &str,
 ) {
     let out = match body {
         None => Out::Text(encode_frame(&envelope)),
-        Some(body) => {
-            let mut head = envelope;
-            head["_binary_path"] = json!(path);
-            Out::Binary(fantastic_io_bridge::codec::encode_binary_frame(
-                &head, &body,
-            ))
-        }
+        Some(body) => Out::Binary(binary_out(envelope, &body, key)),
     };
     let _ = out_tx.send(out).await;
+}
+
+/// `envelope[key]` holding `body` at its slot, as one binary frame: `null` placed
+/// there (in place when the slot exists, appended when not — python's
+/// `set_path`), `_binary_path` naming `[key, …steps]`.
+fn binary_out(mut envelope: Value, body: &fantastic_kernel::Blob, key: &str) -> Vec<u8> {
+    let path = body.nested_in(key);
+    // a carrier's slot resolves in its own value; a reply that is not an object
+    // has none, and the frame then names the slot it would sit at
+    let _ = fantastic_bundle::path::place(&mut envelope, &path, Value::Null);
+    fantastic_io_bridge::codec::encode_binary_frame(&envelope, &path, &body.bytes)
 }
 
 /// One queued payload → one `{type:"event", payload}` frame on the OUTBOUND
@@ -296,9 +299,8 @@ async fn forward_event(
     };
     match item.body {
         None => out_tx.send(Out::Text(encode_frame(&frame))).await.is_ok(),
-        Some((path, body)) => {
-            let p = format!("payload.{path}");
-            send_envelope(out_tx, frame, Some(body), &p).await;
+        Some(body) => {
+            send_envelope(out_tx, frame, Some(body), INBOUND_PAYLOAD_KEY).await;
             true
         }
     }
@@ -326,7 +328,7 @@ pub(crate) fn make_client_id() -> String {
 /// the sender every frame dispatches as.
 pub(crate) async fn ws_loop(
     state: AppState,
-    socket: WebSocket,
+    socket: Socket,
     host_agent_id: AgentId,
     leg_agent_id: AgentId,
 ) {
@@ -472,7 +474,7 @@ pub(crate) async fn ws_loop(
                 if awaiting_pong.is_some_and(|sent| sent.elapsed() >= PING_TIMEOUT) {
                     let _ = out_tx
                         .send(Out::Close(Some(CloseFrame {
-                            code: CLOSE_INTERNAL_ERROR,
+                            code: CloseCode::from(CLOSE_INTERNAL_ERROR),
                             reason: KEEPALIVE_TIMEOUT_REASON.into(),
                         })))
                         .await;
@@ -543,6 +545,11 @@ pub(crate) async fn ws_loop(
                     continue;
                 }
                 let body = inbound.body;
+                // SECRET MARKS cross the leg verbatim (`fantastic_kernel::secret`):
+                // this kernel records the call as shown, exactly as for a local
+                // caller — the kernel's own check refuses a malformed mark before
+                // anything is dispatched.
+                let secret = frame.get("secret").cloned();
                 // REGISTERED UNDER THE HOST: a frame handler DISPATCHES, so it
                 // is real work — a `ps` row, reachable by `cancel`, and its send
                 // parented to it instead of becoming a root.
@@ -556,6 +563,9 @@ pub(crate) async fn ws_loop(
                     let mut item = Item::new(target, payload);
                     if let Some(s) = fid.as_str().filter(|s| !s.is_empty()) {
                         item = item.with_id(s);
+                    }
+                    if let Some(marks) = secret {
+                        item = item.with_secret(marks);
                     }
                     // A binary-edge verb rides the BINARY channel even when the
                     // client sent a text frame: that is the only way the bundle
@@ -574,10 +584,10 @@ pub(crate) async fn ws_loop(
                         // chunk). Stripping it unconditionally wrote 0 bytes and
                         // reported success where python refused.
                         match body {
-                            // The decode left `bytes: null` in the slot python's
+                            // The decode left `null` in the slot python's
                             // `set_path` fills — kept, so the call row and the
                             // watcher frame keep python's key order.
-                            Some(b) => item = item.with_binary(b),
+                            Some(b) => item = item.with_binary(b.path, b.bytes),
                             None => item = item.with_raw_reply(),
                         }
                     }
@@ -604,7 +614,7 @@ pub(crate) async fn ws_loop(
                         held.push(g);
                     }
                     let f = json!({"type": "reply", "id": fid, "data": out_item.result});
-                    send_envelope(&out, f, out_item.body, REPLY_BINARY_PATH).await;
+                    send_envelope(&out, f, out_item.body, REPLY_KEY).await;
                     drop(held);
                 });
                 track_call(&state.kernel, &pending_calls, handle);
@@ -617,15 +627,11 @@ pub(crate) async fn ws_loop(
                 if !matches!(gate_leg(&kernel, &leg, "emit", &frame), Decision::Allow) {
                     continue;
                 }
+                // The body rides at ITS path; the decode already left `null` in
+                // that slot of `payload`, in python's position.
                 let item = match inbound.body {
                     None => fantastic_kernel::inbox::InboxItem::text(payload),
-                    Some(b) => {
-                        let mut head = payload;
-                        if let Some(m) = head.as_object_mut() {
-                            m.insert("bytes".to_string(), Value::Null);
-                        }
-                        fantastic_kernel::inbox::InboxItem::binary(head, "bytes", b)
-                    }
+                    Some(b) => fantastic_kernel::inbox::InboxItem::binary(payload, b),
                 };
                 fantastic_kernel::send::with_sender(leg, async {
                     kernel.emit_item(&target, item).await;
@@ -691,7 +697,7 @@ pub(crate) async fn ws_loop(
                 // announces its own rows to its watchers (`watch` on that agent,
                 // gated there).
                 let token = kernel.add_state_subscriber(Arc::new(
-                    move |event: &Value, body: Option<&(String, Vec<u8>)>| {
+                    move |event: &Value, body: Option<&fantastic_kernel::Blob>| {
                         let Value::Object(ev) = event else {
                             return;
                         };
@@ -726,17 +732,12 @@ pub(crate) async fn ws_loop(
                                 frame.insert("name".into(), name);
                             }
                         }
-                        let mut frame = Value::Object(frame);
+                        let frame = Value::Object(frame);
                         // Best-effort: drop if the drain channel is gone
                         // (disconnected mid-fanout).
                         let out = match body {
                             None => Out::Text(encode_frame(&frame)),
-                            Some((path, bytes)) => {
-                                frame["_binary_path"] = json!(format!("payload.{path}"));
-                                Out::Binary(fantastic_io_bridge::codec::encode_binary_frame(
-                                    &frame, bytes,
-                                ))
-                            }
+                            Some(b) => Out::Binary(binary_out(frame, b, INBOUND_PAYLOAD_KEY)),
                         };
                         let _ = out_for_cb.try_send(out);
                     },

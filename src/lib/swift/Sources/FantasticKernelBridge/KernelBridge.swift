@@ -54,9 +54,15 @@ public enum BridgeFamily: Sendable {
     }
 
     /// Python's reflect `verbs` — the first doc line of each, verbatim, in order.
+    /// The relay's `forward` is relay_connector's sealed wrapper, whose doc is the
+    /// engine's plus `BridgeDocs.relaySealedForward`.
     var verbs: JSON {
         var out: OrderedDictionary<String, JSON> = [:]
-        for name in verbNames { out[name] = .string(BridgeDocs.first[name] ?? "") }
+        for name in verbNames {
+            var doc = BridgeDocs.first[name] ?? ""
+            if self == .relay && name == "forward" { doc += BridgeDocs.relaySealedForward }
+            out[name] = .string(doc)
+        }
         return .object(out)
     }
 }
@@ -71,7 +77,7 @@ enum BridgeDocs {
         "reconnect":
             "No args. Teardown + boot — explicit because we don't auto-reconnect on transport failure (keeps real network problems visible to operators / telemetry).",
         "forward":
-            "args: target:str (req — id on the REMOTE kernel) + payload:dict (req — the call to run there; payload is ITSELF a verb frame and MUST carry its own \"type\") + timeout:float? (default 30s). Example: {\"type\":\"forward\",\"target\":\"src\",\"payload\":{\"type\":\"read_stream\",\"path\":\"data.bin\",\"offset\":0}}. Ships a raw `{type:'call', id, target, payload}` frame over the transport, awaits the matching reply, returns the unwrapped data. Local→local stays direct kernel.send (this verb is only for cross-kernel). Multi-hop loop detection is the caller's responsibility — the bridge ships whatever it's given.",
+            "args: target:str (req — id on the REMOTE kernel) + payload:dict (req — the call to run there; payload is ITSELF a verb frame and MUST carry its own \"type\") + timeout:float? (default 30s). Example: {\"type\":\"forward\",\"target\":\"src\",\"payload\":{\"type\":\"read_stream\",\"path\":\"data.bin\",\"offset\":0}}. Ships a raw `{type:'call', id, target, payload, caller, secret?}` frame over the transport, awaits the matching reply, returns the unwrapped data. SECRET values: mark them on YOUR call to this verb — `payload.payload.<field>` / `result[.<field>]` — and they ride as `payload.<field>` / `result[.<field>]`, so both kernels record `<secret>`. Local→local stays direct kernel.send (this verb is only for cross-kernel). Multi-hop loop detection is the caller's responsibility — the bridge ships whatever it's given.",
         "watch_remote":
             "args: target:str (req — id on the REMOTE kernel to watch). Sends `{type:'watch', src:<target>}` over the transport and subscribes this leg to `target`. Subsequent `{type:'event', src, payload}` frames whose `src` is subscribed are re-emitted on THIS bridge agent's inbox as the payload plus `src`; an event for anything not subscribed is dropped. Local watchers subscribe to the bridge with `kernel.watch(<bridge_id>, ...)`. Idempotent (web_ws de-dups via its own `watching` set).",
         "unwatch_remote":
@@ -84,6 +90,12 @@ enum BridgeDocs {
         "set_identity":
             "Advertise/update this peer's DIRECTORY identity — the typed attrs the relay",
     ]
+
+    /// What relay_connector appends to the engine's `forward` doc (python
+    /// `relay_connector/tools.py`, `_forward.__doc__`).
+    static let relaySealedForward =
+        " SEALED for secrets: a call carrying any secret mark is refused — the relay "
+        + "records every frame it routes, unmasked."
 
     /// Python `io_bridge.dispatch`'s teaching hint on an unknown type.
     static let envelopeHint =
@@ -187,6 +199,7 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
             await teardown(agentId)
             return await bootLeg(agentId: agentId, kernel: kernel)
         case "forward":
+            if let sealed = relaySeal() { return sealed }
             return try await forwardVerb(agentId: agentId, payload: payload, kernel: kernel)
         case "watch_remote":
             return await watchVerb(
@@ -220,34 +233,41 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
         }
     }
 
-    /// `forward` carrying a raw request chunk / returning a raw reply chunk.
-    /// Every other binary verb routes through the text `handle`.
+    /// `forward` carrying a raw request chunk (at `payload.<path>`, inside the
+    /// forwarded payload) / returning a raw reply chunk. Every other binary verb
+    /// routes through the text `handle` (its body is unused).
     public func handleBinary(
-        agentId: AgentId, header: JSON, blob: Data, kernel: Kernel
+        agentId: AgentId, header: JSON, body: Blob?, kernel: Kernel
     ) async throws -> (JSON?, Data?) {
         guard header["type"].asString == "forward" else {
             return (try await handle(agentId: agentId, payload: header, kernel: kernel), nil)
         }
+        // A binary `forward` is the same outbound call path python's one
+        // `_forward` covers — sealed the same way.
+        if let sealed = relaySeal() { return (sealed, nil) }
         return try await binaryForwardVerb(
-            agentId: agentId, header: header, blob: blob, kernel: kernel)
+            agentId: agentId, header: header, body: body, kernel: kernel)
+    }
+
+    /// THE RELAY SEAL, outbound (python `relay_connector/tools.py` `_forward`): a
+    /// `forward` whose own call carries ANY secret mark is refused before a frame is
+    /// built. `forward` is the one outbound call path a relay leg has — no relay leg
+    /// registers a `PeerRoute`, so a `<guid>|<agent>` send never rides one (only
+    /// web_ws registers peers). nil on a ws_bridge leg, or with no mark.
+    ///
+    /// TODO(relay seal): lift once relayd masks what it records. The fix is in
+    /// relayd (../fantastic_relay): when it dispatches a tunneled frame into its own
+    /// kernel, re-root the inner frame's `secret` onto its delivery item
+    /// (`payload.<f>` -> `payload.payload.payload.<f>`), so its rows, ledger and
+    /// state stream show `<secret>`; and decide how REPLY frames carry result marks
+    /// — a `reply` names no marks today, so a `result` mark would still leave the
+    /// value in the relay's record of the reply.
+    private func relaySeal() -> JSON? {
+        guard family == .relay, !KernelTaskLocals.currentSecret.isEmpty else { return nil }
+        return secretSealed()
     }
 
     // MARK: - reflect
-
-    /// python `_engine._scoped(_rule_name(spec, default), suffix, was_scoped)`:
-    /// a per-direction field is taken as written, and so is an `auth` name that
-    /// ALREADY carries this manifold's suffix — `auth: allow_all_ingress`
-    /// reports `allow_all_ingress` (unsealed), never `allow_all_ingress_ingress`.
-    static func engineRuleName(
-        _ meta: OrderedDictionary<String, JSON>, field: String, suffix: String,
-        default def: String
-    ) -> String {
-        let scoped = meta.keys.contains(field)
-        let name = ruleName(scoped ? meta[field] : meta["auth"], default: def)
-        if scoped || name.hasSuffix(suffix) { return name }
-        if suffix == "_egress" && (name == "allow_all" || name == "deny") { return "silent_egress" }
-        return name + suffix
-    }
 
     /// Python `_engine._reflect` + the family's `reflect_fields`, in python's key
     /// order. The relay's fields OVERWRITE `connected` in place (a leg
@@ -269,16 +289,12 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
             "pending_count": .integer(Int64(st.pendingCount)),
         ]
         // The active per-leg rule TYPE names — keyed by the field you SET, so
-        // read-key == write-key and `reflect` → edit is a direct mirror. The
-        // ENGINE's names (python `_engine._ingress_name`/`_egress_name`), not
-        // `_base.describe`'s.
-        let ingress = Self.engineRuleName(
-            meta, field: "ingress_rule", suffix: "_ingress", default: "deny_ingress")
-        out["ingress_rule"] = .string(ingress)
-        out["egress_rule"] = .string(
-            Self.engineRuleName(
-                meta, field: "egress_rule", suffix: "_egress", default: "silent_egress"))
-        out["sealed"] = .bool(ingress != "allow_all_ingress")
+        // read-key == write-key and `reflect` → edit is a direct mirror. The SAME
+        // `describe` every leg reflects with (python `**describe(rec)`) — the
+        // gate's own scoping, so a bridge never reports a rule its gate resolves
+        // differently (an `auth: allow_all_ingress` stem read as open while the
+        // gate denied).
+        for (key, value) in describe(meta) { out[key] = value }
         // The ONE peer kernel whose agents this leg serves (`<peer_guid>|<agent>`);
         // null = no pin, no inbound call.
         out["peer_guid"] = meta["peer_guid"] ?? .null
@@ -389,6 +405,11 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
         Transports: `ws` (default) · `memory` (test). No tunnel is spawned here — an ssh tunnel is an `exec_bridge` job or devops; dial its local end.
         Emits: `bridge_up` · `bridge_down` · remote events for a `watch_remote` subscription only (payload + `src`); anything unsubscribed is dropped.
 
+        Secret values: mark your `forward` call — `secret: ["payload.payload.<field>"]` /
+        `["result"]` — and the frame carries them as `payload.<field>` / `result`, so the far
+        kernel records `<secret>` too (see `io_bridge`). An inbound frame's `secret` is
+        dispatched verbatim.
+
         Inbound calls (a paired transport) are served only from the ONE pinned peer: set `peer_guid` (the peer kernel's guid). Every frame names its caller `<guid>|<agent>`, and the target's `callable_by` must name it (or `<guid>|*`) — accepting this leg is not accepting its peer.
 
         """
@@ -402,6 +423,17 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
         as `ws_bridge` (both ride the shared `io_bridge` engine) — `forward`,
         `watch_remote`/`unwatch_remote` work identically; replies and binary
         `read_stream` chunks are tunneled over the relay.
+
+        **SEALED for secret values** (owner, 2026-10-02): the relay daemon dispatches every
+        tunneled frame into its own kernel and records it UNMASKED, so a secret may not cross
+        a relay leg. A `forward` call carrying ANY `secret` mark is refused before a frame
+        leaves, and a tunneled `call` frame that names `secret` is answered with the same
+        refusal and never dispatched: `{reason:"unauthorized", error:"relay_connector: a call
+        carrying secret marks may not cross a relay leg — the relay records every frame it
+        routes, unmasked", hint:"reach that kernel over a direct ws_bridge leg to send a
+        secret"}`. Unmarked calls cross as before. A direct `ws_bridge` leg carries marks.
+        Lifted once relayd re-roots a tunneled frame's marks onto its own delivery item and
+        reply frames carry result marks.
 
         **Sealed by default** — open the inbound leg: `update_agent <id> ingress_rule=allow_all_ingress`
         (or `password` for the group token). The bridge-leg `ingress_rule`/`egress_rule`

@@ -146,14 +146,14 @@ struct BundleSmokeTests {
                 .object([
                     "type": .string("write_stream"), "path": .string("blob.bin"),
                     "truncate": .bool(true),
-                ]), binary: payload)
+                ]), binary: Blob("bytes", payload))
         ])[0].result
         #expect(w["written"].asInt == Int64(payload.count), "\(w)")
         // SOURCE.
         let read = await kernel.send([
             Item(
                 "fs", .object(["type": .string("read_stream"), "path": .string("blob.bin")]),
-                binary: Data())
+                rawReply: true)
         ])[0]
         let (m, body) = (read.result, read.body)
         #expect(body == payload, "bytes must round-trip verbatim")
@@ -586,7 +586,7 @@ struct BundleSmokeTests {
                         "type": .string("write_stream"), "path": .string("blob.bin"),
                         "truncate": .bool(true),
                     ]),
-                ]), binary: payload)
+                ]), binary: Blob(parts: ["payload", "bytes"], payload))
         ])[0].result
         #expect(w["written"].asInt == Int64(payload.count), "\(w)")
         // forward read_stream (binary) → bytes back over the bridge
@@ -598,7 +598,7 @@ struct BundleSmokeTests {
                     "payload": .object([
                         "type": .string("read_stream"), "path": .string("blob.bin"),
                     ]),
-                ]), binary: Data())
+                ]), rawReply: true)
         ])[0].body
         #expect(body == payload, "raw bytes must round-trip cross-kernel over the bridge")
     }
@@ -677,7 +677,7 @@ struct BundleSmokeTests {
                         "type": .string("write_stream"), "path": .string("blob.bin"),
                         "truncate": .bool(true),
                     ]),
-                ]), binary: payload)
+                ]), binary: Blob(parts: ["payload", "bytes"], payload))
         ])[0].result
         #expect(w["written"].asInt == Int64(payload.count), "\(w.serialize())")
         // read_stream (binary) over the wire → raw bytes back
@@ -689,7 +689,7 @@ struct BundleSmokeTests {
                     "payload": .object([
                         "type": .string("read_stream"), "path": .string("blob.bin"),
                     ]),
-                ]), binary: Data())
+                ]), rawReply: true)
         ])[0].body
         #expect(body == payload, "raw bytes must round-trip over the WS wire")
     }

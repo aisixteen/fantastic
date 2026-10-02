@@ -56,7 +56,7 @@ can't see live in-memory state.
 
 ## Index
 
-The Rust runtime ships the same 21 bundles as Python and serves the
+The Rust runtime ships the same bundles as Python and serves the
 same user-facing wire surfaces (CLI, HTTP, WS, REST, PTY, browser).
 Two kinds of specs apply:
 
@@ -84,8 +84,7 @@ cat bundled_agents/web/host/selftest.md
 ```
 
 Specs that work cross-runtime without modification: file, web, web_ws,
-web_rest, ollama_backend (needs running ollama),
-nvidia_nim_backend (needs api_key), scheduler,
+web_rest, ollama_backend (needs running ollama), scheduler,
 kernel_bridge (WS-only, asymmetric; memory + WS transports), local_runner, ssh_runner.
 
 View/webapp specs now live in the decoupled frontend kernel — see
@@ -105,8 +104,10 @@ exercise:
 |---|---|---|
 | [`selftest/feature_gates.md`](selftest/feature_gates.md) | build, packaging | `cargo` |
 | [`selftest/cross_runtime_workdir.md`](selftest/cross_runtime_workdir.md) | persistence, cross-runtime | Both Python `uv sync` and Rust binary |
+| [`selftest/foundation_models_backend.md`](selftest/foundation_models_backend.md) | ai, on-device, packaging | macOS 26+ with Apple Intelligence on (live part); Xcode with a macOS 26+ SDK |
 
 These specs run only against the Rust runtime — they assert things
 the Python kernel doesn't expose (the `FANTASTIC_PYTHON` env, the
-feature-gate compile matrix, and round-trip workdir loading across
-both kernels).
+feature-gate compile matrix, round-trip workdir loading across
+both kernels, and the on-device backend python does not have — its
+swift twin is `../swift/selftest/foundation_models_backend.md`).

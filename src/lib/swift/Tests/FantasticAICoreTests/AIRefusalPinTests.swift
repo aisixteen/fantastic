@@ -135,7 +135,7 @@ struct AIRefusalPinTests {
 
     @Test func historyFoldRefusals() async throws {
         let (k, id) = try await freshMockKernel(
-            config: baseConfig { .provider(MockProvider(tokens: [doneEnvelope])) })
+            config: baseConfig { MockProvider(tokens: [doneEnvelope]) })
         #expect(
             await send(k, id.value, ["type": "history", "fold": "x"])
                 == #"{"error":"history: `fold` must be a fold id (int)","reason":"bad_arg","arg":"fold"}"#
@@ -149,7 +149,7 @@ struct AIRefusalPinTests {
     @Test func inquiryOpenAndCloseRefusals() async throws {
         let (k, id) = try await freshMockKernel(
             config: baseConfig {
-                .provider(MockProvider(tokens: ["I would pick b. " + doneEnvelope]))
+                MockProvider(tokens: ["I would pick b. " + doneEnvelope])
             })
         let empty =
             #"{"error":"inquiry: `text` must be a non-empty string","reason":"missing_arg","arg":"text"}"#
@@ -173,7 +173,7 @@ struct AIRefusalPinTests {
     /// the reply says so with `reason: memory_store` and the caller's client.
     @Test func aSendWhoseStoreFailsFailsFast() async throws {
         let (k, ids, _) = await bootMockKernel(
-            config: baseConfig { .provider(MockProvider(tokens: [doneEnvelope])) },
+            config: baseConfig { MockProvider(tokens: [doneEnvelope]) },
             backendIds: ["lost"], meta: ["memory_store_id": "nowhere"])
         let out = await k.send([
             Item(ids["lost"]!, .object(["type": "send", "text": "hi", "client_id": "c"]))

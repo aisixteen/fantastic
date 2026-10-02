@@ -384,6 +384,13 @@ fn build_binary_frame(header: &Value, blob: &[u8]) -> Vec<u8> {
     out
 }
 
+/// A binary frame's header AS IT CROSSED the wire — `_binary_path` still in it,
+/// the key order kept.
+fn wire_head(wire: &[u8]) -> Value {
+    let h = u32::from_be_bytes([wire[0], wire[1], wire[2], wire[3]]) as usize;
+    serde_json::from_slice(&wire[4..4 + h]).expect("a JSON header")
+}
+
 type TestWs =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
@@ -530,7 +537,7 @@ async fn binary_ws_frame_routes_like_a_text_call() {
     let header = json!({
         "type": "call", "target": "fb_bin", "id": "w1",
         "payload": {"type": "write_stream", "path": "x.bin", "truncate": true},
-        "_binary_path": "payload.bytes",
+        "_binary_path": ["payload", "bytes"],
     });
     let (text, _) = round_trip(
         &mut ws,
@@ -556,11 +563,14 @@ async fn binary_ws_frame_routes_like_a_text_call() {
     });
     let (_, bins) = round_trip(&mut ws, TMessage::Text(frame.to_string())).await;
     let wire = bins.first().expect("a binary reply frame");
-    let (head, body) = fantastic_io_bridge::codec::decode_binary_frame(wire).expect("well-formed");
+    let head = wire_head(wire);
     assert_eq!(head["type"], "reply");
     assert_eq!(head["id"], "r1");
-    assert_eq!(head["_binary_path"], "data.bytes");
+    assert_eq!(head["_binary_path"], json!(["data", "bytes"]));
     assert_eq!(head["data"]["bytes"], Value::Null);
+    let body = fantastic_io_bridge::codec::decode_binary_frame(wire)
+        .expect("well-formed")
+        .body;
     let keys: Vec<&str> = head["data"]
         .as_object()
         .expect("data is an object")
@@ -587,7 +597,8 @@ async fn binary_ws_frame_routes_like_a_text_call() {
 
 /// A11.7 (r2): every undecodable frame gets the ONE frame error and the socket
 /// SURVIVES — a 3-byte binary frame, a header length past the end, JSON that is
-/// not an object, and a `_binary_path` python's `set_path` cannot place.
+/// not an object, a `_binary_path` python's `set_path` cannot place, and the old
+/// dotted-string spelling of one (not a list of steps).
 #[tokio::test]
 async fn malformed_frames_answer_the_frame_error_and_keep_the_socket() {
     use tokio_tungstenite::tungstenite::Message as TMessage;
@@ -629,7 +640,7 @@ async fn malformed_frames_answer_the_frame_error_and_keep_the_socket() {
     expect_error(&t, "a header length past the end");
     let bad_path = json!({
         "type": "call", "target": "kernel", "id": "bp",
-        "payload": {}, "_binary_path": "payload.nope.deep",
+        "payload": {}, "_binary_path": ["payload", "nope", "deep"],
     });
     let (t, _) = round_trip(
         &mut ws,
@@ -637,8 +648,14 @@ async fn malformed_frames_answer_the_frame_error_and_keep_the_socket() {
     )
     .await;
     expect_error(&t, "an unplaceable _binary_path");
+    let dotted = json!({
+        "type": "call", "target": "kernel", "id": "bd",
+        "payload": {"bytes": null}, "_binary_path": "payload.bytes",
+    });
+    let (t, _) = round_trip(&mut ws, TMessage::Binary(build_binary_frame(&dotted, b"x"))).await;
+    expect_error(&t, "the old dotted _binary_path");
 
-    // THE SOCKET SURVIVED all six: an ordinary call still answers.
+    // THE SOCKET SURVIVED all seven: an ordinary call still answers.
     let good =
         json!({"type": "call", "target": "kernel", "id": "ok", "payload": {"type": "reflect"}});
     let (t, _) = round_trip(&mut ws, TMessage::Text(good.to_string())).await;
@@ -2061,6 +2078,55 @@ async fn mount_unmount_and_unknown_verb_match_python() {
     );
 }
 
+/// The twin of python `test_mount.py::
+/// test_a_reboot_replaces_a_legs_routes_and_unmount_removes_them_all`: `boot` on
+/// a running host re-mounts every surface, and a re-mount REPLACES the leg's
+/// routes (python used to append a second copy that outlived `unmount`).
+#[tokio::test]
+async fn a_reboot_replaces_a_legs_routes_and_unmount_removes_them_all() {
+    let tmp = TempDir::new().unwrap();
+    let port = free_port();
+    let kernel = stage_host(&tmp, port, "web_rb", "rest_rb", "fb_rb").await;
+    let table = SERVERS
+        .lock()
+        .get(&AgentId::from("web_rb"))
+        .map(|h| Arc::clone(&h.table))
+        .expect("a running host");
+    let paths = |t: &crate::routes::RouteTable| -> Vec<String> {
+        t.iter().map(|r| r.path.clone()).collect()
+    };
+    let first = paths(&*table.read().await);
+    assert!(
+        first.iter().any(|p| p.starts_with("/rest_rb/")),
+        "{first:?}"
+    );
+    let again = kernel
+        .send(vec![Item::new(
+            AgentId::from("web_rb"),
+            json!({"type": "boot"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(again["running"], json!(true), "{again}");
+    assert_eq!(paths(&*table.read().await), first, "the re-boot body");
+    let out = kernel
+        .send(vec![Item::new(
+            AgentId::from("web_rb"),
+            json!({"type": "unmount", "child_id": "rest_rb"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(out, json!({"unmounted": "rest_rb"}));
+    let left: Vec<String> = paths(&*table.read().await)
+        .into_iter()
+        .filter(|p| p.starts_with("/rest_rb/"))
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
+    stop(&kernel, "web_rb").await;
+}
+
 /// A11.18 — routes change at boot and through `mount`/`unmount`, never through
 /// a state subscriber watching for `created`/`routes_changed`.
 #[tokio::test]
@@ -2334,9 +2400,9 @@ async fn client_close_is_echoed_with_its_code() {
             .await
             .expect("ws connect");
     // A13.17 (partial) — uvicorn's 101 block order, plus `server: uvicorn`.
-    // RESIDUAL: python also sends `Sec-WebSocket-Extensions: permessage-deflate`
-    // and capitalised header names; hyper lowercases every name and tungstenite
-    // has no deflate codec, so neither is reproducible from here.
+    // This client offers no extension, so none is answered (the negotiation is
+    // pinned in `tests_ws_deflate.rs`). RESIDUAL: python sends capitalised
+    // header names; hyper lowercases every name.
     let names: Vec<String> = resp
         .headers()
         .keys()
@@ -2409,7 +2475,7 @@ async fn ws_watcher_gets_a_binary_frame_for_a_bytes_payload() {
             AgentId::from(web_id),
             json!({"type": "write_stream", "path": "x.bin"}),
         )
-        .with_binary(blob.clone())])
+        .with_binary_key("bytes", blob.clone())])
         .await;
 
     let mut binary: Option<Vec<u8>> = None;
@@ -2422,13 +2488,15 @@ async fn ws_watcher_gets_a_binary_frame_for_a_bytes_payload() {
         }
     }
     let wire = binary.expect("the watcher must receive a BINARY event frame");
-    let (header, body) =
-        fantastic_io_bridge::codec::decode_binary_frame(&wire).expect("a well-formed frame");
+    let header = wire_head(&wire);
     assert_eq!(header["type"], "event");
     assert_eq!(header["payload"]["type"], "write_stream");
     assert_eq!(header["payload"]["path"], "x.bin");
     assert_eq!(header["payload"]["bytes"], Value::Null);
-    assert_eq!(header["_binary_path"], "payload.bytes");
+    assert_eq!(header["_binary_path"], json!(["payload", "bytes"]));
+    let body = fantastic_io_bridge::codec::decode_binary_frame(&wire)
+        .expect("a well-formed frame")
+        .body;
     assert_eq!(body, blob, "the raw body rides beside the head, not base64");
 
     stop(&kernel, web_id).await;
@@ -3076,6 +3144,25 @@ mod route_order;
 #[path = "tests_peer_calls.rs"]
 mod peer_calls;
 
+/// A raw body reaches its handler at the field the wire named (python's
+/// `_binary_path` / `X-Fantastic-Bytes-Field`), `paste_image` included.
+#[path = "tests_binary_path.rs"]
+mod binary_path;
+
+/// The ws leg negotiates and speaks permessage-deflate as uvicorn does.
+#[path = "tests_ws_deflate.rs"]
+mod ws_deflate;
+
+/// Secret marks cross the web legs (python
+/// `io_bridge/tests/test_secret_across_bridges.py`, web half).
+#[path = "tests_secret.rs"]
+mod secret_across;
+
+/// `_binary_path` as a list of steps across the web legs (python
+/// `io_bridge/tests/test_binary_path_steps.py`, web half).
+#[path = "tests_binary_steps.rs"]
+mod binary_steps;
+
 /// A read_stream SOURCE that is not file_bridge: `chunked` answers two chunks
 /// whose first carries NO `eof` key; `broken` answers one chunk with neither
 /// `eof` nor `next_offset`.
@@ -3098,26 +3185,27 @@ impl fantastic_kernel::bundle::Bundle for OddSource {
         &self,
         id: &AgentId,
         header: Value,
-        _blob: Vec<u8>,
+        _body: Option<fantastic_kernel::Blob>,
         _kernel: &Arc<Kernel>,
     ) -> Result<
-        (fantastic_kernel::bundle::Reply, Option<Vec<u8>>),
+        (
+            fantastic_kernel::bundle::Reply,
+            Option<fantastic_kernel::Blob>,
+        ),
         fantastic_kernel::bundle::BundleError,
     > {
         let offset = header["offset"].as_u64().unwrap_or(0);
+        let chunk = |b: &[u8]| Some(fantastic_kernel::Blob::key("bytes", b.to_vec()));
         Ok(match (id.as_str(), offset) {
             ("chunked", 0) => (
                 Some(json!({"bytes": null, "next_offset": 3, "size": 6})),
-                Some(b"abc".to_vec()),
+                chunk(b"abc"),
             ),
             ("chunked", _) => (
                 Some(json!({"bytes": null, "eof": true, "size": 6})),
-                Some(b"def".to_vec()),
+                chunk(b"def"),
             ),
-            _ => (
-                Some(json!({"bytes": null, "size": 6})),
-                Some(b"abc".to_vec()),
-            ),
+            _ => (Some(json!({"bytes": null, "size": 6})), chunk(b"abc")),
         })
     }
 }

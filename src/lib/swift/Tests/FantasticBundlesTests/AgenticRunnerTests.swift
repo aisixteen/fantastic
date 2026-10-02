@@ -9,6 +9,7 @@
 // `kernel_state` in python. Parity asserts the per-runtime value, never
 // equality.
 
+import FantasticCredentialStore
 import FantasticExecBridge
 import FantasticFile
 import FantasticJSON
@@ -148,6 +149,10 @@ private func makeKernel(workdir: URL) -> Kernel {
     registry.register("file_bridge.tools", FileBundle())
     registry.register("exec_bridge.tools", ExecBridgeBundle())
     registry.register("lifecycle_probe.tools", LifecycleProbe())
+    // Values in a file UNDER THE RUNNING DIR (the config names a relative
+    // `file`); the keychain is never reached, so the real one is never touched.
+    registry.register(
+        CredentialStoreBundle.handlerModule, CredentialStoreBundle(keychain: MemKeychain()))
     let kernel = Kernel(storage: .disk(workdir), bundles: registry)
     // The root's rootPath IS the store root the configs declare (`.fantastic`).
     // `findStore` matches a candidate provider's `root` meta against THIS path,
@@ -301,7 +306,9 @@ private func dispatchCorpusOutcome(
                 header = .object(o)
             }
             let blob = Data((payload["bytes_utf8"].asString ?? "").utf8)
-            let out = await k.send([fields.apply(Item(AgentId(target), header, binary: blob))])[0]
+            let out = await k.send([
+                fields.apply(Item(AgentId(target), header, binary: Blob("bytes", blob)))
+            ])[0]
             return (out.result, out)
         }
         switch payload["type"].asString ?? "" {
@@ -312,10 +319,12 @@ private func dispatchCorpusOutcome(
                 header = .object(o)
             }
             let blob = Data((payload["bytes_utf8"].asString ?? "").utf8)
-            let out = await k.send([fields.apply(Item(AgentId(target), header, binary: blob))])[0]
+            let out = await k.send([
+                fields.apply(Item(AgentId(target), header, binary: Blob("bytes", blob)))
+            ])[0]
             return (out.result, out)
         case "read_stream":
-            let item = fields.apply(Item(AgentId(target), payload, binary: Data()))
+            let item = fields.apply(Item(AgentId(target), payload, rawReply: true))
             let out = await k.send([item])[0]
             let (reply, body) = (out.result, out.body)
             if case .object(var o) = reply {
@@ -1047,6 +1056,14 @@ private func ownedRoots(of config: JSON) -> Set<String> {
             if let r = o["root"]?.asString, !r.isEmpty, r != "." {
                 let first = r.split(separator: "/").first.map(String.init) ?? r
                 if !first.isEmpty, first != "." { out.insert(first) }
+            }
+            // a credential store's RELATIVE `file` lives under the running dir
+            if o["handler_module"]?.asString == CredentialStoreBundle.handlerModule,
+                let f = o["file"]?.asString, !f.hasPrefix("/"), !f.hasPrefix("~"),
+                let first = f.split(separator: "/").first.map(String.init),
+                !first.isEmpty, first != ".", first != ".."
+            {
+                out.insert(first)
             }
             for (_, x) in o { walk(x) }
         } else if let a = v.asArray {

@@ -116,7 +116,7 @@ async def test_a_remote_target_is_egress_only_with_its_qualified_hint(seeded_ker
     k = seeded_kernel
     k._meta["guid"] = "h0"
 
-    async def call(agent_id, payload, caller):
+    async def call(agent_id, payload, caller, secret):
         return {"remote": agent_id}
 
     assert k.ctx.register_peer("g1", PeerRoute(via="leg", call=call)) is None

@@ -140,8 +140,8 @@ extension AIBackend {
         let calib = AICalibration.calibration(kernel, agentKey)
         let b: Int64 =
             calib > 0
-            ? max(AIConstants.BUDGET_FLOOR, Int64(Double(AIContext.budget(agent)) / calib))
-            : AIContext.budget(agent)
+            ? max(AIConstants.BUDGET_FLOOR, Int64(Double(AIContext.budget(agent, modelWindow: config.modelWindow)) / calib))
+            : AIContext.budget(agent, modelWindow: config.modelWindow)
         if AIContext.estimateTokens(messages) <= Int64(Double(b) * AIConstants.TRIGGER) {
             setProjection(
                 agentKey,
@@ -164,7 +164,7 @@ extension AIBackend {
         // non-negotiable — if there's no room for BOTH, fail loud (so the trim
         // below can never drop the live turn).
         if bodyBudget < lastCost + AIConstants.NOTICE_ENVELOPE_RESERVE {
-            let window = AIContext.resolveContextWindow(agent)
+            let window = AIContext.resolveContextWindow(agent, modelWindow: config.modelWindow)
             let hint =
                 "the system prompt (\(sysTokens) tok) leaves no room in the \(window)-token "
                 + "window for even one turn; reduce agents/menu or raise context_window"
@@ -450,7 +450,7 @@ extension AIBackend {
         // failfast and the chain died. The page is trimmed from the OLDEST end
         // (the newest of what was asked for is kept) and says so, with the index
         // to page further back from — the caller loses a page, never the run.
-        let cap = AIContext.inlineCap(agent)
+        let cap = AIContext.inlineCap(agent, modelWindow: config.modelWindow)
         var trimmed = 0
         func messages(_ pg: [(offset: Int, element: JSON)]) -> JSON {
             .array(
@@ -521,9 +521,9 @@ extension AIBackend {
         let reaction = try await deriveReaction(agent: agent, kernel: kernel)
         let key = agent.id.value
         return .object([
-            "context_window": .integer(AIContext.resolveContextWindow(agent)),
+            "context_window": .integer(AIContext.resolveContextWindow(agent, modelWindow: config.modelWindow)),
             "output_reserve": .integer(AIContext.outputReserve(agent)),
-            "budget": .integer(AIContext.budget(agent)),
+            "budget": .integer(AIContext.budget(agent, modelWindow: config.modelWindow)),
             "trigger": .double(AIConstants.TRIGGER),
             "calibration": .double(round3(AICalibration.calibration(kernel, key))),
             "reported_prompt_tokens":
@@ -538,7 +538,7 @@ extension AIBackend {
     /// The two context-posture fields reflect carries, in python's order.
     func contextReflectFields(agent: Agent) -> OrderedDictionary<String, JSON> {
         var out: OrderedDictionary<String, JSON> = [:]
-        out["context_window"] = .integer(AIContext.resolveContextWindow(agent))
+        out["context_window"] = .integer(AIContext.resolveContextWindow(agent, modelWindow: config.modelWindow))
         out["context_strategy"] = AIContext.strategy(agent)
         out["memory_store_id"] = agent.metaValue(forKey: "memory_store_id") ?? .null
         return out

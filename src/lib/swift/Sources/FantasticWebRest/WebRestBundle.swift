@@ -8,6 +8,10 @@
 // Canonical wire shape (Python parity):
 //
 //   POST /<self_id>/<target_id>           body={type:verb,...} → JSON reply
+//                                         headers: X-Fantastic-Auth (credential),
+//                                         X-Fantastic-Execution-Id (the item `id`),
+//                                         X-Fantastic-Secret (the item `secret`, a
+//                                         JSON array of paths)
 //   GET  /<self_id>/_reflect              → reflect `kernel`
 //   GET  /<self_id>/_reflect/<target_id>  → reflect one agent
 //
@@ -201,17 +205,30 @@ public final class WebRestBundle: AgentBundle, WebRouteEndpoints, @unchecked Sen
         if let execId = headers["x-fantastic-execution-id"].asString, !execId.isEmpty {
             item.id = execId
         }
+        // SECRET MARKS: this kernel records the call as shown, exactly as for a
+        // local caller; a malformed mark is the kernel's own refusal.
+        if let raw = headers.asObject?[Self.secretHeader] {
+            guard let marks = try? JSON.parseStrict(raw.asString ?? "") else {
+                return (
+                    Self.jsonResponse(
+                        400,
+                        .object(["error": .string("web_rest: X-Fantastic-Secret is not valid JSON")])
+                    ), nil
+                )
+            }
+            item.secret = marks
+        }
         // A BINARY-EDGE VERB RIDES THE BINARY CHANNEL even on the JSON leg
         // (A13.1): that is the only way the bundle returns — or receives — a raw
         // chunk. Python needs no such list; its payload dict simply HOLDS the
         // bytes and `_first_bytes_field` finds them in the reply. Here the
-        // carrier is the item's blob, so the decision is static, by verb, and
-        // identical on both legs. The request blob is EMPTY: a JSON body cannot
-        // hold one, so `write_stream` with a JSON-string `bytes` reaches
-        // file_bridge as a header `bytes` key and is refused `missing_arg`
-        // (A13.19), which is python's answer too.
-        if Self.binaryEdgeVerbs.contains(payload["type"].asString ?? "") {
-            item.binary = Data()
+        // carrier is the item's binary channel, so the decision is static, by
+        // verb (`Codec.binaryEdgeVerbs`), and identical on both legs. There is
+        // NO request body: a JSON body cannot hold one, so `write_stream` with a
+        // JSON-string `bytes` reaches file_bridge as a header `bytes` key and is
+        // refused `missing_arg` (A13.19), which is python's answer too.
+        if Codec.binaryEdgeVerbs.contains(payload["type"].asString ?? "") {
+            item.rawReply = true
         }
         let out = await KernelTaskLocals.$currentSender.withValue(legId) {
             await kernel.send([item])[0]
@@ -242,10 +259,17 @@ public final class WebRestBundle: AgentBundle, WebRouteEndpoints, @unchecked Sen
         return .object(o)
     }
 
-    /// The verbs a JSON-leg POST must route down the BINARY channel, chosen
-    /// STATICALLY by verb — the SAME pair the WS leg uses, so a browser and a
-    /// curl client get the same answer for the same request (A11.9/A13.1).
-    static let binaryEdgeVerbs: Set<String> = ["read_stream", "write_stream"]
+    /// The item's `secret` paths (`Secret`) ride `X-Fantastic-Secret` (the host
+    /// lowercases every header) — dispatch metadata about the call, like the
+    /// execution id, never part of the payload. The value is a JSON ARRAY of
+    /// paths, the SAME value a ws/bridge `call` frame carries in its `secret`
+    /// field: one parser (the strict wire parse), and the kernel's own check
+    /// judges it. Not comma-separated — a path step is a payload key, and a key
+    /// may hold a comma; a JSON string escapes any character into the ASCII a
+    /// header value is safe in; and a wrong shape (a bare string, `[]`, a number)
+    /// reaches the kernel's refusal verbatim instead of being re-invented by a
+    /// splitter. Python `web_rest._SECRET_HEADER`.
+    static let secretHeader = "x-fantastic-secret"
 
     /// python `_make_reflect_root` / `_make_reflect_get`.
     private func reflectEndpoint(
@@ -323,6 +347,16 @@ public final class WebRestBundle: AgentBundle, WebRouteEndpoints, @unchecked Sen
         Name an execution with **`X-Fantastic-Execution-Id`** — same id twice returns the
         first outcome instead of running the verb again (dispatch metadata on the
         carrier, never in the body).
+        Mark secret values with **`X-Fantastic-Secret`** — a JSON array of paths, the
+        item's `secret` (`["payload.fields"]`, `["result"]`): the reply is real, every
+        record of the call shows `<secret>`. Not JSON → `400`; a bad mark → the kernel's
+        `bad_arg` refusal.
+        ```
+        curl -X POST -H 'content-type: application/json' \\
+          -H 'X-Fantastic-Secret: ["payload.fields"]' \\
+          -d '{"type":"set","ref":"openai/main","host":"api.openai.com","fields":{"api_key":"…"}}' \\
+          http://<host>/<id>/<creds_id>
+        ```
 
         """
 }

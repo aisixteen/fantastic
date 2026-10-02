@@ -7,4 +7,9 @@ Verbs: `boot` · `reconnect` · `forward(target,payload[,timeout])` · `watch_re
 Transports: `ws` (default) · `memory` (test). No tunnel is spawned here — an ssh tunnel is an `exec_bridge` job or devops; dial its local end.
 Emits: `bridge_up` · `bridge_down` · remote events for a `watch_remote` subscription only (payload + `src`); anything unsubscribed is dropped.
 
+Secret values: mark your `forward` call — `secret: ["payload.payload.<field>"]` /
+`["result"]` — and the frame carries them as `payload.<field>` / `result`, so the far
+kernel records `<secret>` too (see `io_bridge`). An inbound frame's `secret` is
+dispatched verbatim.
+
 Inbound calls (a paired transport) are served only from the ONE pinned peer: set `peer_guid` (the peer kernel's guid). Every frame names its caller `<guid>|<agent>`, and the target's `callable_by` must name it (or `<guid>|*`) — accepting this leg is not accepting its peer.

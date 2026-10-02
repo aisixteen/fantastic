@@ -31,6 +31,7 @@
 //! INBOUND check lives in [`crate::verbs::send`], before the lock.
 
 use crate::constants::MAX_SILENT_TURNS;
+use crate::credentials::secret_holder_refusal;
 use crate::events::emit_status;
 use crate::helpers::mint_batch_token;
 use crate::history_view::REFLECT_NUDGE;
@@ -448,6 +449,10 @@ the chain explicitly: <call name=\"done\"></call>";
 /// `send_timeout` is the AI layer's per-call deadline — the KERNEL defaults
 /// nothing; this layer always supplies one, and the model may override it per
 /// call with a `timeout` arg in the envelope.
+///
+/// `model_window` is the routing agent's backend window
+/// ([`crate::agent_loop::BackendConfig::model_window`]) — the inline cap a reply
+/// body is measured against.
 #[allow(clippy::too_many_arguments)]
 pub async fn route_reply(
     self_id: AgentId,
@@ -458,6 +463,7 @@ pub async fn route_reply(
     system_prompt: Option<String>,
     incoming: String,
     send_timeout: f64,
+    model_window: i64,
     message_id: Option<i64>,
     dead_turn: bool,
 ) {
@@ -479,6 +485,7 @@ pub async fn route_reply(
             system_prompt,
             incoming,
             send_timeout,
+            model_window,
             message_id,
             dead_turn,
         )
@@ -525,6 +532,7 @@ async fn route_reply_gated(
     system_prompt: Option<String>,
     incoming: String,
     send_timeout: f64,
+    model_window: i64,
     message_id: Option<i64>,
     dead_turn: bool,
 ) {
@@ -644,6 +652,38 @@ async fn route_reply_gated(
             }
             continue;
         };
+        // A MODEL NEVER REACHES A SECRET HOLDER (owner, 2026-10-02). This loop is
+        // the one place a model-parsed call becomes a dispatch — one call, a
+        // batch, a `to` fan-out (already one call per recipient here), a call
+        // beside `await` — so the refusal lives here and nowhere else. The
+        // target AND the `reply_to` are checked, each resolved as the kernel
+        // resolves it (`<this kernel's guid>|<holder>` IS the holder): a
+        // delivery to a holder is a dispatch on the model's behalf too. Refused
+        // calls are not dispatched and not counted in flight; the refusal always
+        // goes to SELF, so the model reads it whatever `reply_to` said. The
+        // backend's own key read (`credentials::KeyReader`) never passes through
+        // here.
+        let held = secret_holder_refusal(&kernel, target).or_else(|| {
+            reply_to
+                .as_deref()
+                .and_then(|rt| secret_holder_refusal(&kernel, rt))
+        });
+        if let Some(held) = held {
+            // python `payload.get("type", "?") if isinstance(payload, dict) else "-"`
+            let verb = match args.get("payload") {
+                Some(Value::Object(p)) => p.get("type").map_or_else(|| "?".to_string(), py_str),
+                _ => "-".to_string(),
+            };
+            units.push(Unit {
+                dest: self_id.as_str().to_string(),
+                target: target.to_string(),
+                verb,
+                idx: None,
+                body: Some(crate::tool_parse::render_reply(&held)),
+                title: None,
+            });
+            continue;
+        }
         // AN EMPTY PAYLOAD IS NO PAYLOAD. The grammar always produces the key
         // (every child that is not routing IS the payload), so `{}` is exactly
         // what a send with no verb looks like — and dispatching it reaches the
@@ -709,7 +749,7 @@ async fn route_reply_gated(
         payloads.push((target.to_string(), Value::Object(payload.clone())));
         let mut item = Item::new(AgentId::from(target), Value::Object(payload.clone()));
         if let Some(doc) = document {
-            item = item.with_binary(doc);
+            item = item.with_binary_key("bytes", doc);
         }
         // EVERY dispatched call carries the layer's deadline. The KERNEL
         // defaults nothing, so a call to a handler that never returns used to
@@ -796,7 +836,7 @@ async fn route_reply_gated(
         // is assumed
         let _ = crate::memory::my_grants(&self_id, &kernel).await;
     }
-    let cap = crate::context::inline_cap(&meta);
+    let cap = crate::context::inline_cap(&meta, model_window);
     let blocks: Vec<Block> = units
         .into_iter()
         .map(|u| {

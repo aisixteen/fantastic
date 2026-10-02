@@ -7,8 +7,9 @@ from it; it guesses nothing. Per field: `name`, `type`
 (`str|int|float|bool|enum|list|map`), `required`, `enum` (the legal values, for an
 `enum`), `default` (THE BACKEND'S OWN value, present only where the backend has
 one — a required field never has one: nothing is guessed), and a one-line `hint`.
-`key_var` names the environment variable the backend reads its key from (`null`:
-it takes none). Keys never ride the record.
+Keys never ride the record: a backend that sends one has a `credentials` field
+(type `credentials`, `{store, ref}` — the credential store and the ref it reads
+the key from at each request, `ai_core/credentials.py`).
 
 ONE TRUTH. The same schema is what the backend's `validate_meta` enforces AT THE
 WRITE (`validate`): every required field is refused at `create_agent`/
@@ -29,9 +30,10 @@ from ai_core.constants import (
     RECENT_N,
     RECENT_N_RANGE,
 )
+from ai_core.credentials import shape_error
 from ai_core.strategies import DEFAULT_STRATEGY, strategy_names
 
-TYPES = ("str", "int", "float", "bool", "enum", "list", "map")
+TYPES = ("str", "int", "float", "bool", "enum", "list", "map", "credentials")
 
 
 def field(
@@ -96,13 +98,25 @@ AI_FIELDS: tuple = (
 )
 
 
-def schema(backend_fields, *, key_var: str | None) -> dict:
+def credentials_field(*, required: bool) -> dict:
+    """The `credentials` field of a backend that sends a key."""
+    return field(
+        "credentials",
+        "credentials",
+        "{store, ref}: the credential store and ref holding `api_key` — read at "
+        "each request, sent only to the ref's host"
+        + ("" if required else "; absent = no key (a keyless server)"),
+        required=required,
+    )
+
+
+def schema(backend_fields) -> dict:
     """A backend's whole record schema: its own fields, then `AI_FIELDS`."""
     fields = [*backend_fields, *AI_FIELDS]
     names = [f["name"] for f in fields]
     if len(names) != len(set(names)):
         raise ValueError(f"duplicate field in schema: {names}")
-    return {"fields": fields, "key_var": key_var}
+    return {"fields": fields}
 
 
 def _present(f: dict, v) -> bool:
@@ -127,6 +141,8 @@ def validate(sch: dict, backend: str, meta: dict, record: dict) -> str | None:
                 f"{f['name']}={v!r} is not one of the legal values: "
                 f"{', '.join(map(str, f['enum']))}"
             )
+        if f["type"] == "credentials" and v is not None and shape_error(v):
+            return shape_error(v)
     merged = {**record, **meta}
     missing = [
         f

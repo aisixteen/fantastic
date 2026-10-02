@@ -587,7 +587,7 @@ public final class WebServer: @unchecked Sendable {
                         .object([
                             "type": .string("read_stream"), "path": .string(path),
                             "offset": .integer(Int64(offset)), "length": .integer(262144),
-                        ]), binary: Data())
+                        ]), rawReply: true)
                 ])[0]
             }
             return (out.result, out.body)
@@ -648,6 +648,10 @@ public final class WebServer: @unchecked Sendable {
     static let octetType = "application/octet-stream"
     static let payloadHeader = "x-fantastic-payload"
     static let bytesFieldHeader = "x-fantastic-bytes-field"
+    /// The item's `secret` paths, a JSON array — the octet twin of
+    /// `WebRestBundle.secretHeader` (python `web_rest._SECRET_HEADER`, read by the
+    /// one `_rest_call` both legs share).
+    static let secretHeader = "x-fantastic-secret"
 
     /// Serve a matched leg route. The JSON leg is the endpoint the leg handed
     /// over for this path (python's mounted callable); the octet leg is the
@@ -747,19 +751,19 @@ public final class WebServer: @unchecked Sendable {
                 400,
                 .object(["error": .string("web_rest: X-Fantastic-Payload must be a JSON object")]))
         }
-        // python binds the body at `payload[field]`. Swift's JSON cannot hold
-        // raw bytes, so the blob rides the binary channel — which the target
-        // reads as its `bytes` field. Naming ANOTHER field therefore leaves the
-        // header's own `bytes` in place and sends no blob, exactly as python's
-        // target sees it.
-        let field = headers[Self.bytesFieldHeader] ?? ""
-        let blob: Data
-        if field.isEmpty || field == "bytes" {
-            payload.removeValue(forKey: "bytes")
-            blob = request.body ?? Data()
-        } else {
-            blob = Data()
-        }
+        // python binds the body under the NAMED field (`payload[field] = body`),
+        // and each handler reads its OWN key (`paste_image` reads `data`,
+        // `write_stream` reads `bytes`). The field is ONE LITERAL TOP-LEVEL KEY,
+        // never a dotted path: `a.b` is the key `"a.b"`, and a nested `a.b` the
+        // payload header already holds is left as sent. The kernel's binary
+        // channel carries the body WITH that key as its one step (`Blob(field, …)`),
+        // so the target finds it exactly where python's dict holds it. The slot
+        // keeps its place (or is appended) — overwriting any header value there,
+        // as python's assignment does — so the call row lists the field where
+        // python's dict holds it. An absent or empty header means `bytes`.
+        let named = headers[Self.bytesFieldHeader] ?? ""
+        let field = named.isEmpty ? "bytes" : named
+        payload[field] = .null
 
         // GATE — same io_bridge inbound gate as the JSON path; credential on
         // X-Fantastic-Auth. The web_rest leg is the route's owner.
@@ -779,9 +783,21 @@ public final class WebServer: @unchecked Sendable {
         // `file_bridge: unknown type ""` where python answers
         // `send: payload.type required`, and stuffed the header's `id` into the
         // verb payload the target reads.
-        var item = Item(AgentId(target), .object(payload), binary: blob)
+        var item = Item(
+            AgentId(target), .object(payload), binary: Blob(field, request.body ?? Data()))
         if let execId = headers["x-fantastic-execution-id"], !execId.isEmpty {
             item.id = execId
+        }
+        // SECRET MARKS — the same header and the same 400 as the JSON leg: this
+        // kernel records the call as shown; a malformed mark is the kernel's own
+        // refusal.
+        if let raw = headers[Self.secretHeader] {
+            guard let marks = try? JSON.parseStrict(raw) else {
+                return jsonHTTP(
+                    400,
+                    .object(["error": .string("web_rest: X-Fantastic-Secret is not valid JSON")]))
+            }
+            item.secret = marks
         }
         let out = await KernelTaskLocals.$currentSender.withValue(owner) {
             await kernel.send([item])[0]

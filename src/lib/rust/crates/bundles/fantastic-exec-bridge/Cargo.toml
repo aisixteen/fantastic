@@ -31,6 +31,9 @@ encoding_rs = "0.8"
 # The ROOT LOADER bundle — tests need it registered so the root answers the
 # verbs it serves (`persist_blob`/`load_blob`, `boot`), as it does in production.
 fantastic-core = { path = "../fantastic-core" }
+# A program marking a credential_store `set`/`get` over the guest wire (the
+# store's keychain is its in-memory test double, never the real one).
+fantastic-credential-store = { path = "../fantastic-credential-store" }
 tempfile = "3"
 # TEST-ONLY. The resolver does NOT probe PATH — that would invent an
 # interpreter nobody named. The tests use `which` to find a real python to

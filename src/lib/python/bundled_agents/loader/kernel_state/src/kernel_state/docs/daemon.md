@@ -12,7 +12,7 @@ locked out — go through the daemon's surface. Find it in the tree: a
     body=`{"type":"<verb>",...}`; or browser-pastable
     `GET http://localhost:<port>/<rest_id>/_reflect[/<target>][?readme=1]`
   - `web_ws.tools` child → `ws://localhost:<port>/<agent>/ws`
-    (frames: `{"type":"call","target":..,"payload":..,"id":..}`)
+    (frames: `{"type":"call","target":..,"payload":..,"id":..,"secret":[..]?}`)
   To get the tree itself: `GET http://localhost:<port>/<rest_id>/_reflect`.
 
 **No daemon running** (no live pid). The one-shot CLI works — each call

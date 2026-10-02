@@ -167,12 +167,9 @@ async def connect(
                 ]
             )
 
-    # NOTHING TO DELIVER. Backends read their key from the ENVIRONMENT, and this
-    # kernel runs in THIS process — so the variable the probe was started with is
-    # already the one the backend reads. The key used to be pushed in through a
-    # `set_api_key` verb that then persisted it.
-    if key_var := getattr(backend, "api_key_var", None):
-        assert os.environ.get(key_var), f"{key_var} is unset — the backend will refuse"
+    # NOTHING TO DELIVER. The record names `credentials` (the plug's ref in the
+    # kernel's `creds` store, `helpers/creds.py`); the backend reads the key from
+    # the store per request, the store from the variable the run exported.
 
     conn = Connected(id=aid, root=root, proxy=None, limits=L)  # type: ignore[arg-type]
 

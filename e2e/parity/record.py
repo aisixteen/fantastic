@@ -41,6 +41,9 @@ HARNESS_FIELDS = (
     "ps_polls",
     "request_numbers",
     "quiesce",
+    # the memory-store censuses `store.memory_reflect` takes around its reflect;
+    # `diff.py` N24 reads them before N14 drops them
+    "flush_rows",
 )
 
 

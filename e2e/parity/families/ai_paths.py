@@ -17,9 +17,9 @@ from __future__ import annotations
 import threading
 import time
 
-from families import BASE, MEMORY, OPEN, ai, call, quiesce, save_kernel_log
+from families import BASE, MEMORY, OPEN, VLLM, ai, call, quiesce, save_kernel_log, vllm
 from spec import AI_FILL_CHARS, AI_RESERVE, AI_WINDOW
-from stubs.anthropic_sse import AnthropicStub, Handler as AnthropicHandler
+from stubs.openai_chat import Handler as OpenAIHandler, OpenAIChatStub
 
 NAME = "ai_paths"
 
@@ -54,7 +54,7 @@ CASES = {
         '<item>b</item></options><action><a>1</a><b>—</b></action></call>',
         DONE,
     ],
-    # B1.8 — the stub returns nothing at all.
+    # An empty answer — the stub returns nothing at all (a dead turn).
     "empty_text": ["", DONE],
     # B1.10 — a stateless `messages` send; the rows must not grow.
     "stateless_messages": [tag("kernel", "messages", ids=[1]), DONE],
@@ -127,9 +127,9 @@ def run(ctx) -> None:  # noqa: C901
     rec, ports = ctx.rec, ctx.ports
     (ctx.work / "a.txt").write_text("7\n")
 
-    stub = AnthropicStub(rec, "stub", ports.take("stub"))
+    stub = OpenAIChatStub(rec, "stub", ports.take("stub"))
     stub.set_cases(CASES)
-    stub.start(AnthropicHandler)
+    stub.start(OpenAIHandler)
 
     cb = {**BASE, "rest": "*", "web": "*", "ws": "*", "ai": "*", "ai2": "*"}
     reach = ["readings", "slow", "plant", "ai", "ai2", "web", "rest", "ws"]
@@ -144,16 +144,16 @@ def run(ctx) -> None:  # noqa: C901
         rec.json("setup/plant", k.create(parent_id=k.root_id, id="plant",
                                          handler_module="plant_probe.tools", **OPEN,
                                          callable_by=cb))
-        ai_meta = dict(model="stub-model", endpoint=stub.url(), context_window=AI_WINDOW,
+        ai_meta = vllm(stub.base_url(), context_window=AI_WINDOW,
                        output_reserve=AI_RESERVE, context_async=True)
         rec.json("setup/ai", k.create(parent_id=k.root_id, id="ai",
-                                      handler_module="anthropic_backend.tools", **OPEN,
+                                      handler_module=VLLM, **OPEN,
                                       callable_by=cb,
                                       **ai(can_call={**BASE, "readings": "*", "slow": "*",
                                                      "plant": "*", "kernel": "*", "ai2": "*"},
                                            **ai_meta)))
         rec.json("setup/ai2", k.create(parent_id=k.root_id, id="ai2",
-                                       handler_module="anthropic_backend.tools", **OPEN,
+                                       handler_module=VLLM, **OPEN,
                                        callable_by=cb,
                                        **ai(can_call={**BASE, "readings": "*", "kernel": "*",
                                                       "ai": "*"},
@@ -292,7 +292,7 @@ def run(ctx) -> None:  # noqa: C901
                       env_extra={"FANTASTIC_AI_SEND_TIMEOUT": "0.5"})
         try:
             rec.json("send_timeout/create_ai", k2.create(
-                parent_id=k2.root_id, id="ai_to", handler_module="anthropic_backend.tools",
+                parent_id=k2.root_id, id="ai_to", handler_module=VLLM,
                 **OPEN, callable_by=cb, **ai(can_call={**BASE, "readings": "*"}, **ai_meta)))
             time.sleep(1.0)
             t0 = time.monotonic()
@@ -313,7 +313,7 @@ def run(ctx) -> None:  # noqa: C901
         stub.flush()
         rec.json("stub/index", stub.requests)
         # The cap is DATA: which case ran away, and how far it got before the
-        # harness ended the chain (see `AnthropicStub.case_cap`).
+        # harness ended the chain (see `OpenAIChatStub.case_cap`).
         rec.json("stub/case_turns", {"cap": stub.case_cap, "turns": stub.case_turns,
                                      "cap_hits": stub.cap_hits})
         stub.stop()

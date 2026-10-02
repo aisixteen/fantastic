@@ -11,6 +11,7 @@
 mod int;
 mod json;
 mod oserror;
+pub mod path;
 mod pyset;
 mod repr;
 mod text;
@@ -22,6 +23,7 @@ pub use json::py_json_dumps;
 pub use oserror::{
     io_error_str, os_error_class, os_error_str, os_error_str2, strerror, utf8_decode_error_str,
 };
+pub use path::Step;
 pub use pyset::py_set_order;
 pub use repr::{py_float_repr, py_repr, py_repr_value, py_str, py_truthy};
 pub use text::{py_isdecimal, py_isdigit, py_split_whitespace, py_splitlines, py_strip};

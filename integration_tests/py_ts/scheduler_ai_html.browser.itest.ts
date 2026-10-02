@@ -3,13 +3,13 @@
 // (panels reach the host only through the JS kernel), headless Chrome asserting:
 //
 //   A. scheduler → exec_bridge → 3rd html panel           (DETERMINISTIC — always runs)
-//   B. scheduler → anthropic ai_agent → 3rd html panel    (live: "apples or bananas")
+//   B. scheduler → ai_agent → 3rd html panel              (live: "apples or bananas")
 //   C. AI tool-call → 3rd html panel                       (live: AI actively drives UI)
 //   D. AI tool-call → exec_bridge                          (live: AI spawns compute)
 //   E. AI tool-call → another AI (leaf)                    (live: AI→AI, no recursion)
 //
 // A proves the scheduler→unit→panel chain with zero LLM. B–E exercise REAL tool-use
-// decisions, so they need a reachable Anthropic key — they t.skip cleanly without one
+// decisions, so they need a reachable model (`llmReachable`) — they t.skip cleanly without one
 // (the recursion-deadlock guard itself is covered deterministically in the ollama
 // backend unit tests, test_tool_call_to_self_does_not_deadlock).
 //
@@ -87,7 +87,7 @@ const READ_OUT =
   "(() => { const e = document.getElementById('out'); return e && e.textContent !== '—' ? e.textContent : null; })()";
 
 // Live-LLM gate + backend selector: `llmReachable()` / `ACTIVE_LLM` resolve to
-// Claude (default) or a local ollama model via the `LLM_BACKEND` env switch — so
+// a vLLM server (default) or a local ollama model via the `LLM_BACKEND` env switch — so
 // this whole A–J suite is the PARITY harness: identical chains, either backend,
 // no fork. Offline / missing-key / missing-model skips cleanly (never hangs).
 const J = (s: string): string => JSON.stringify(s);
@@ -125,9 +125,9 @@ fantastic.send(${J(sch)}, { type: "schedule", target: ${J(py)}, interval_seconds
   );
 });
 
-// ─── B. scheduler → anthropic ai_agent → 3rd html panel (live) ──
+// ─── B. scheduler → ai_agent → 3rd html panel (live) ──
 
-test("B: scheduler → anthropic ai_agent → 3rd html panel (apples or bananas)", async (t) => {
+test("B: scheduler → ai_agent → 3rd html panel (apples or bananas)", async (t) => {
   if (!chromeAvailable()) return t.skip("system Chrome not found");
   if (!(await llmReachable())) return t.skip(`${LLM_BACKEND} backend unreachable (key/server/model)`);
   await scenario(
@@ -354,7 +354,7 @@ test("G: ai_view renders inline fronting an AI backend", async (t) => {
         "(() => { const e = document.querySelector('.chat-view .c-model'); return e ? e.textContent : ''; })()",
       );
       // model-agnostic: the rendered backend model must match the ACTIVE backend
-      // (e.g. "claude-opus-4-8" or "gemma4:12b") — not a hard-coded "claude".
+      // (e.g. the served vLLM model or "gemma4:12b") — not a hard-coded name.
       const wantModel = (ACTIVE_LLM.model ?? "").split(":")[0];
       assert.ok(
         (model || "").length > 0 && (wantModel === "" || (model || "").includes(wantModel)),

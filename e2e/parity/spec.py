@@ -45,7 +45,7 @@ from helpers.host.driver import (  # noqa: E402
     _dump,
     free_port,
 )
-from helpers import memory  # noqa: E402
+from helpers import creds, memory  # noqa: E402
 
 import yaml  # noqa: E402
 
@@ -102,7 +102,17 @@ def kernel_cmd(rt: str) -> list[str]:
 
 #: Context constants, recorded in meta rather than left to a default that could
 #: differ between runtimes. `ctx` uses them; nothing else may.
-CTX_WINDOW = 11000
+#:
+#: 16000, MEASURED 2026-10-02 (python, vllm_backend on the chat stub): the
+#: system block is ~6.9k tokens, and the chain's largest live turn (the recall
+#: after the context notice) is ~3.2k. At 11000 that pair overran the 10000
+#: budget and every chain died `too_small` after its 4th turn. At 16000 (budget
+#: 15000, trigger 12000) all four chains run their 19 turns and compact 10–14
+#: times each, the fold chain folds 6 times, and `too_small` fires only where it
+#: is the case (the 60000-char send, and `ai_tiny`). It ran at 11000 for weeks
+#: because nothing compacted at all: the old stub reported `input_tokens: 1`,
+#: ai_core calibrated by it, and every capture recorded `calibration: 0.0`.
+CTX_WINDOW = 16000
 CTX_RESERVE = 1000
 CTX_WINDOW_TINY = 2048
 
@@ -124,30 +134,34 @@ CTX_WINDOW_TINY = 2048
 #: thousands of tokens past the line instead of one character past it.
 #:
 #: THE NUMBERS, MEASURED on a python capture of this family with these values
-#: (2026-09-22). The token series is `ai_core.context.estimate_tokens` recomputed
-#: from each recorded request body — system block plus messages:
-#:   * budget = 30000 - 1000 = 29000 tokens.
-#:   * the scenario's own growth peaks at 12548 tokens (request 61 of 76), i.e.
-#:     16452 tokens short of the budget. Nothing crosses it by accident.
-#:   * the turn BEFORE the filler lands is 11810 tokens — 17190 short.
+#: (2026-10-02, vllm_backend on the chat stub). The token series is
+#: `ai_core.context.estimate_tokens` recomputed from each recorded request body
+#: — system block plus messages. The trigger is 0.8 of the budget
+#: (`ai_core.constants.TRIGGER`), and nothing reports a prompt size, so the
+#: calibration is 1.0:
+#:   * budget = 38000 - 1000 = 37000 tokens; trigger = 29600.
+#:   * the scenario's own growth peaks at 13468 tokens (request 61 of 77), i.e.
+#:     16132 tokens short of the trigger. Nothing crosses it by accident.
+#:   * the turn the filler is answered on is 12255 tokens.
 #:   * `AI_FILL_CHARS` is the filler ONE scripted reply carries. At 4 chars per
 #:     token (`ai_core.context.CHARS_PER_TOKEN`) 80000 chars is ~20000 tokens,
-#:     so the turn it lands on is ~31800 — PAST the budget by ~2800 tokens.
+#:     so the turn it lands on is ~32300 — PAST the trigger by ~2700 tokens.
 #:   * the filler turn is the NEWEST turn, so compaction keeps it and reclaims
-#:     the history behind it (124 turns dropped, 7 kept): the projected prompt
-#:     lands at 26072 tokens, 2928 UNDER the budget, and the four turns that
-#:     follow reach 26033. So the family compacts EXACTLY ONCE — measured, one
-#:     `context`/`compacted` event in `events.json` where there were seven.
-#: The smallest of those margins is 2810 tokens, ~28x the ~100-token spread
+#:     the history behind it: the next three prompts are 27569, 27467 and 27466
+#:     tokens, 2031 UNDER the trigger. So the family compacts EXACTLY ONCE —
+#:     measured, one `context`/`compacted` event in `events.json`. At the old
+#:     30000 (trigger 23200) that post-fill prompt re-fired compaction on every
+#:     turn after the filler (three events).
+#: The smallest of those margins is ~2000 tokens, ~20x the ~100-token spread
 #: between the three runtimes' prompts for the same turn (the `runtime=` word
 #: plus the id digit width) — the spread that used to decide this.
-AI_WINDOW = 30000
+AI_WINDOW = 38000
 AI_RESERVE = 1000
 AI_FILL_CHARS = 80000
 
-#: The stub key every backend reads. Never a real credential: `e2e/backends/
-#: connection.local.env` is not sourced anywhere in this harness, and no capture
-#: reaches a real endpoint.
+#: The stub key the seeded `creds` store reads for a keyed case. Never a real
+#: credential: `e2e/backends/connection.local.env` is not sourced anywhere in this
+#: harness, and no capture reaches a real endpoint.
 STUB_KEY = "parity-stub-key"
 
 
@@ -170,8 +184,9 @@ def kernel_env(rt: str, extra: dict | None = None, drop: tuple[str, ...] = ()) -
         "HOME": str(HOME),
         "LANG": "en_US.UTF-8",
         "TMPDIR": str(TMP),
-        "ANTHROPIC_API_KEY": STUB_KEY,
-        "NVIDIA_API_KEY": STUB_KEY,
+        # Read only by the seeded `creds` store, and only for a ref a boot names
+        # (`providers`' keyed vllm cases): no backend reads the environment.
+        "VLLM_API_KEY": STUB_KEY,
     }
     if rt == "python":
         # The probe bundles are importable ONLY through this entry, exactly as in
@@ -269,6 +284,7 @@ class CaptureKernel(HostKernel):
         env_drop: tuple[str, ...] = (),
         port: int | None = None,
         seed_extra=None,
+        creds: dict[str, str] | None = None,
     ) -> None:
         spec = {"cmd": kernel_cmd(rt), "root_id": "", "env": {}}
         super().__init__(spec, workdir, reach=reach)
@@ -276,6 +292,8 @@ class CaptureKernel(HostKernel):
         self.env = kernel_env(rt, env_extra, env_drop)
         self.preset_port = port
         self.seed_extra = seed_extra
+        # `{ref: endpoint}` — the keyed stubs this boot's AI agents read a key for.
+        self.creds = dict(creds or {})
         self.seed_branch: str | None = None
         self.http: list[dict] = []
         self.last_http: dict | None = None
@@ -328,7 +346,8 @@ class CaptureKernel(HostKernel):
         self.root_id = measured
 
         root["callable_by"] = {**BASE, "rest": "*", "ws": "*"}
-        root["can_call"] = {**BASE, "rest": "*"}
+        # THE KEYS: every descendant may read one from `creds` (`helpers/creds.py`).
+        root["can_call"] = {**BASE, "rest": "*", **creds.root_grant()}
         # THE KERNEL'S MEMORY STORE — `kernel_start` refuses to run without one.
         # One ram_store for the kernel's own rows AND every AI agent's
         # conversation (each AI record names it in `memory_store_id`); the legs
@@ -342,6 +361,12 @@ class CaptureKernel(HostKernel):
             callable_by={**BASE, "rest": "*", "ws": "*", "web": "*",
                          **{t: "*" for t in self.reach
                             if t not in (self.root_id, memory.MEMORY)}}))
+        # THE CREDENTIAL STORE — env-backed (the scrubbed env carries the stub's
+        # dummy key), one ref per keyed stub this boot talks to, bound to its URL.
+        (w / "agents" / creds.CREDS).mkdir(parents=True, exist_ok=True)
+        write_rec(w / "agents" / creds.CREDS / "agent.yaml", creds.store_record(
+            self.root_id,
+            {ref: (creds.KEYED[ref][0], url) for ref, url in self.creds.items()}))
 
         reach = {t: "*" for t in self.reach if t != self.root_id}
         reach[memory.MEMORY] = "*"

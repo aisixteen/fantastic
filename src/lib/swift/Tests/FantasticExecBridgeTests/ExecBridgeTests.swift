@@ -12,6 +12,7 @@
 
 #if os(macOS)
 
+    import FantasticIoBridge
     import FantasticJSON
     import FantasticKernel
     import Foundation
@@ -827,8 +828,10 @@
             .object(["error": .string("text channel: \(payload["type"].asString ?? "")")])
         }
         func handleBinary(
-            agentId: AgentId, header: JSON, blob: Data, kernel: Kernel
+            agentId: AgentId, header: JSON, body: Blob?, kernel: Kernel
         ) async throws -> (JSON?, Data?) {
+            // the chunk is the payload's `bytes` — python's `payload.get("bytes", b"")`
+            let blob = bodyAt(body, "bytes") ?? Data()
             switch header["type"].asString ?? "" {
             case "write_stream":
                 lock.withLock { self.blob = blob }
@@ -1665,6 +1668,286 @@
             #expect(r["reason"].asString == "unauthorized", "\(r.serialize())")
             #expect(
                 r["error"].asString?.contains("group token") == true, "\(r.serialize())")
+        }
+    }
+
+
+    // ─── secret marks on the guest wire ──────────────────────────────
+
+    /// Read exactly `n` bytes off a blocking fd, BOUNDED by `poll`: `nil` on EOF
+    /// or after `timeout` seconds.
+    private func readExactlyPolled(_ fd: Int32, _ n: Int, timeout: Double = 10) -> Data? {
+        var buf = Data()
+        let deadline = Date().addingTimeInterval(timeout)
+        while buf.count < n {
+            let left = deadline.timeIntervalSinceNow
+            if left <= 0 { return nil }
+            var p = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+            guard poll(&p, 1, Int32(left * 1000)) > 0 else { return nil }
+            var chunk = [UInt8](repeating: 0, count: n - buf.count)
+            let r = read(fd, &chunk, chunk.count)
+            if r <= 0 { return nil }
+            buf.append(contentsOf: chunk[0..<r])
+        }
+        return buf
+    }
+
+    /// One `[4B len | kind | rest]` frame off the parent end: `(kind, rest)`.
+    private func readGuestFrame(_ fd: Int32) -> (UInt8, Data)? {
+        guard let head = readExactlyPolled(fd, 4) else { return nil }
+        let n = head.reduce(0) { Int($0) << 8 | Int($1) }
+        guard let body = readExactlyPolled(fd, n), let kind = body.first else { return nil }
+        return (kind, Data(body.dropFirst()))
+    }
+
+    private func writeGuestFrame(_ fd: Int32, _ v: JSON) {
+        var body = Data([UInt8(ascii: "T")])
+        body.append(Data(v.serialize().utf8))
+        let n = UInt32(body.count)
+        var frame = Data([
+            UInt8((n >> 24) & 0xFF), UInt8((n >> 16) & 0xFF), UInt8((n >> 8) & 0xFF),
+            UInt8(n & 0xFF),
+        ])
+        frame.append(body)
+        frame.withUnsafeBytes { raw in
+            var off = 0
+            while off < raw.count {
+                let w = write(fd, raw.baseAddress!.advanced(by: off), raw.count - off)
+                if w <= 0 { return }
+                off += w
+            }
+        }
+    }
+
+    @Suite("exec_bridge guest wire — secret marks")
+    struct ExecBridgeGuestSecretTests {
+
+        /// `kernel.send(target, payload=None, secret=None)`: the frame carries
+        /// `"secret": [...]` exactly as given, and no `secret` key at all when the
+        /// program marks nothing (None or an empty list). Python
+        /// `test_the_connector_puts_secret_on_the_frame_only_when_given`.
+        @Test func theConnectorPutsSecretOnTheFrameOnlyWhenGiven() async throws {
+            guard let py = py3() else { print("skipping: no python3"); return }
+            let code = CONNECTOR_SRC + """
+                kernel.send('x', {'type': 'y', 'k': 'v'}, secret=['payload.k', 'result'])
+                kernel.send('x', {'type': 'y'})
+                kernel.send('x', {'type': 'y'}, secret=[])
+                print('DONE')
+
+                """
+            let s = try Spawn.job(argv: [py, "-u", "-c", code], selfId: "runner", env: [:], cwd: ".")
+            defer { close(s.ctrlFd) }
+            var frames: [JSON] = []
+            for _ in 0..<3 {
+                let (kind, rest) = try #require(readGuestFrame(s.ctrlFd), "a frame from the program")
+                #expect(kind == UInt8(ascii: "T"))
+                let m = try JSON.parseStrict(String(decoding: rest, as: UTF8.self))
+                frames.append(m)
+                writeGuestFrame(s.ctrlFd, ["op": "reply", "rid": m["rid"], "data": .object([:])])
+            }
+            let out = String(decoding: s.stdout.readDataToEndOfFile(), as: UTF8.self)
+            _ = await s.child.wait()
+            #expect(out.contains("DONE"), "\(out)")
+            #expect(
+                frames == [
+                    [
+                        "op": "send", "rid": "1", "target": "x", "payload": ["type": "y", "k": "v"],
+                        "secret": ["payload.k", "result"],
+                    ],
+                    ["op": "send", "rid": "2", "target": "x", "payload": ["type": "y"]],
+                    ["op": "send", "rid": "3", "target": "x", "payload": ["type": "y"]],
+                ], "\(frames.map { $0.serialize() })")
+        }
+
+        /// The relay copies `secret` onto the item as sent: the kernel checks it (a
+        /// mark naming nothing is ITS refusal, in the reply) and records the call
+        /// masked. Python `test_the_relay_puts_the_frames_secret_on_the_dispatched_item`.
+        @Test func theRelayPutsTheFramesSecretOnTheDispatchedItem() async throws {
+            let kernel = freshKernel()
+            let runner = await createPy(kernel, id: "runner", meta: ["can_call": ["probe": "*"]])
+            _ = await createPy(kernel, id: "probe", meta: ["callable_by": ["runner": "*"]])
+            let (fd, relay) = wire(kernel, owner: runner, jobId: TaskId(9101))
+            defer {
+                relay.stop()
+                close(fd)
+            }
+            wireWrite(
+                fd,
+                [
+                    "op": "send", "rid": "1", "target": "probe",
+                    "payload": ["type": "status", "note": "hush-0451"], "secret": ["payload.note"],
+                ])
+            let rep = try #require(await wireRead(fd), "no reply came back")
+            #expect(rep["op"] == "reply" && rep["rid"] == "1", "\(rep.serialize())")
+            #expect(rep["data"].asObject?["jobs"] != nil, "\(rep.serialize())")
+            let rows = kernel.rows.all().filter {
+                $0["kind"]?.asString == "call" && $0["agent"]?.asString == "probe"
+                    && $0["caller"]?.asString == "runner"
+            }
+            #expect(rows.map { $0["secret"] ?? .null } == [["payload.note"]], "\(rows)")
+            #expect(rows.first?["payload"]?["note"] == .string(Secret.placeholder), "\(rows)")
+            #expect(
+                !JSON.array(kernel.rows.all().map { JSON.object($0) }).serialize()
+                    .contains("hush-0451"))
+            wireWrite(
+                fd,
+                [
+                    "op": "send", "rid": "2", "target": "probe", "payload": ["type": "status"],
+                    "secret": ["payload.nope"],
+                ])
+            let bad = try #require(await wireRead(fd), "no reply came back")
+            #expect(bad["rid"] == "2", "\(bad.serialize())")
+            #expect(
+                bad["data"]["reason"] == "bad_arg" && bad["data"]["arg"] == "secret",
+                "\(bad.serialize())")
+        }
+    }
+
+    // ─── the guest wire: `_binary_path` is a list of steps ──────────────
+
+    /// One kind-B frame onto the parent end: `[4B len | "B" | io_bridge frame]`.
+    private func writeGuestBinary(_ fd: Int32, _ head: JSON, _ body: Data) {
+        var rest = Data([UInt8(ascii: "B")])
+        rest.append(Codec.encodeBinaryFrame(header: head, body: body))
+        let n = UInt32(rest.count)
+        var frame = Data([
+            UInt8((n >> 24) & 0xFF), UInt8((n >> 16) & 0xFF), UInt8((n >> 8) & 0xFF),
+            UInt8(n & 0xFF),
+        ])
+        frame.append(rest)
+        frame.withUnsafeBytes { raw in
+            var off = 0
+            while off < raw.count {
+                let w = write(fd, raw.baseAddress!.advanced(by: off), raw.count - off)
+                if w <= 0 { return }
+                off += w
+            }
+        }
+    }
+
+    /// Answers where its body sat and what else the payload held, and hands the
+    /// body back as the reply's chunk.
+    private final class PathEcho: AgentBundle, @unchecked Sendable {
+        let name = "path_echo"
+        func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? {
+            switch payload["type"].asString ?? "" {
+            case "boot", "shutdown": return nil
+            default: return .object(["channel": "text"])
+            }
+        }
+        func handleBinary(
+            agentId: AgentId, header: JSON, body: Blob?, kernel: Kernel
+        ) async throws -> (JSON?, Data?) {
+            var keys = header.asObject.map { Array($0.keys) } ?? []
+            if case .key(let k)? = body?.parts.first, body?.parts.count == 1 { keys.append(k) }
+            return (
+                .object([
+                    "keys": .array(keys.sorted().map { .string($0) }),
+                    "at": body.map { Codec.binaryPath($0.parts) } ?? .null,
+                ]), body?.bytes
+            )
+        }
+    }
+
+    private let RAW = Data([0x00]) + Data("raw".utf8) + Data([0xFF])
+
+    @Suite("exec_bridge guest wire — binary path steps")
+    struct ExecBridgeGuestBinaryPathTests {
+
+        /// The frame a program writes names the LITERAL key `a.b` as
+        /// `["payload", "a.b"]`; a kind-B reply placed at `["data", "x.y"]` lands at
+        /// the literal key in the program, beside a nested `x` → `y`. Python
+        /// `test_the_guest_wire_carries_a_literal_key_both_ways`.
+        @Test func theGuestWireCarriesALiteralKeyBothWays() async throws {
+            guard let py = py3() else { print("skipping: no python3"); return }
+            let code = CONNECTOR_SRC + """
+                r = kernel.send('echo', {'type': 'take', 'a': {'b': 'kept'}, 'a.b': b'\\x00raw\\xff', 'items': [1]})
+                print(sorted(r), r['x.y'], r['x'])
+
+                """
+            let s = try Spawn.job(argv: [py, "-u", "-c", code], selfId: "runner", env: [:], cwd: ".")
+            defer { close(s.ctrlFd) }
+            let (kind, rest) = try #require(readGuestFrame(s.ctrlFd), "a frame from the program")
+            #expect(kind == UInt8(ascii: "B"))
+            let (head, body) = try Codec.decodeBinaryFrame(rest)
+            #expect(head["_binary_path"] == ["payload", "a.b"], "\(head.serialize())")
+            #expect(
+                head["payload"] == ["type": "take", "a": ["b": "kept"], "a.b": .null, "items": [1]],
+                "\(head.serialize())")
+            #expect(body == RAW)
+            writeGuestBinary(
+                s.ctrlFd,
+                [
+                    "op": "reply", "rid": head["rid"],
+                    "data": ["x.y": .null, "x": ["y": "kept"]], "_binary_path": ["data", "x.y"],
+                ], Data("back".utf8))
+            let out = String(decoding: s.stdout.readDataToEndOfFile(), as: UTF8.self)
+            _ = await s.child.wait()
+            #expect(
+                out.trimmingCharacters(in: .whitespacesAndNewlines)
+                    == "['x', 'x.y'] b'back' {'y': 'kept'}", "\(out)")
+        }
+
+        /// A list slot is an INTEGER step. Python
+        /// `test_the_guest_wire_carries_a_list_index_from_the_program`.
+        @Test func theGuestWireCarriesAListIndexFromTheProgram() async throws {
+            guard let py = py3() else { print("skipping: no python3"); return }
+            let code =
+                CONNECTOR_SRC
+                + "kernel.emit({'type': 'chunks', 'items': [{'n': 0}, {'data': b'hi'}]})\n"
+            let s = try Spawn.job(argv: [py, "-u", "-c", code], selfId: "runner", env: [:], cwd: ".")
+            defer { close(s.ctrlFd) }
+            let (kind, rest) = try #require(readGuestFrame(s.ctrlFd), "a frame from the program")
+            #expect(kind == UInt8(ascii: "B"))
+            let (head, body) = try Codec.decodeBinaryFrame(rest)
+            #expect(head["_binary_path"] == ["payload", "items", 1, "data"], "\(head.serialize())")
+            var env = head
+            #expect(try Codec.placeBody(&env) == ["payload", "items", 1, "data"])
+            #expect(
+                env == ["op": "emit", "payload": ["type": "chunks", "items": [["n": 0], ["data": .null]]]],
+                "\(env.serialize())")
+            #expect(body == Data("hi".utf8))
+            _ = s.stdout.readDataToEndOfFile()
+            _ = await s.child.wait()
+        }
+
+        /// The whole guest path: program → relay (decode) → a binary handler that
+        /// finds its body at the literal key → relay (encode) → program. Python
+        /// `test_a_job_round_trips_a_literal_key_through_the_kernel`.
+        @Test func aJobRoundTripsALiteralKeyThroughTheKernel() async throws {
+            guard let py = py3() else { print("skipping: no python3"); return }
+            let registry = BundleRegistry()
+            registry.register("exec_bridge.tools", ExecBridgeBundle())
+            registry.register("path_echo.tools", PathEcho())
+            let kernel = Kernel(storage: .inMemory, bundles: registry)
+            let root = Agent(id: AgentId("kernel_state"), handlerModule: nil, parentId: nil)
+            kernel.register(root)
+            kernel.setRoot(root)
+            let runner = await createPy(
+                kernel, id: "runner", meta: ["can_call": .object(["echo": .string("*")])])
+            _ = await kernel.send([
+                Item(
+                    AgentId("kernel_state"),
+                    .object([
+                        "type": .string("create_agent"), "parent_id": .string("kernel_state"),
+                        "id": .string("echo"), "handler_module": .string("path_echo.tools"),
+                        "callable_by": .object([runner.value: .string("*")]),
+                    ]))
+            ])[0].result
+            let stream = kernel.ensureInbox(runner)
+            _ = await kernel.send([
+                Item(
+                    runner,
+                    pyStart(
+                        py,
+                        "r = kernel.send('echo', {'type': 'take', 'a': {'b': 'kept'}, "
+                            + "'a.b': b'\\x00raw\\xff'})\n"
+                            + "print('GOT', r['keys'], r['bytes'] == b'\\x00raw\\xff', r['at'])",
+                        connector: true))
+            ])[0].result
+            let events = await drainUntil(stream) { $0["type"].asString == "job_done" }
+            let out = events.first { $0["type"].asString == "job_done" }?["stdout"].asString ?? ""
+            #expect(out.contains("GOT ['a', 'a.b', 'type'] True ['a.b']"), "\(out)")
         }
     }
 

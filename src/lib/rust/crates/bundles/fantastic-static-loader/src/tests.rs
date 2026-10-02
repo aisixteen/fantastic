@@ -647,108 +647,27 @@ async fn a_refused_re_apply_names_the_agent_and_forwards_the_error() {
     );
 }
 
-// ─── STEP-4 PINS (2026-10-01): the manifest reader is PyYAML's 1.1 ──────────
-//
-// Every expected value below is python's `yaml.safe_load` on the same text
-// (measured with the repo venv, 2026-10-01), except the three D13 residuals
-// JSON cannot hold, kept as text: an int wider than i64, a non-finite float and
-// a timestamp. A reader swap (the YAML reduction candidate) must keep these.
+// The manifest reader is the kernel's one YAML reader (`yaml_io::load`,
+// PyYAML's `CSafeLoader`); its python vectors live with it
+// (`fantastic-kernel/src/yaml_io/read_tests.rs`).
 
-fn manifest_value(plain: &str) -> Value {
-    crate::yaml::safe_load(&format!("k: {plain}\n")).unwrap_or_else(|e| panic!("{plain}: {e}"))["k"]
-        .clone()
-}
-
+/// A NON-SCALAR mapping key is PyYAML's `ConstructorError ... found unhashable
+/// key`: the manifest is refused as invalid YAML, never read as a mapping with
+/// a stringified key (the old yaml-rust2 reader accepted `? [a]\n: 1`).
 #[test]
-fn manifest_plain_scalars_are_pyyaml_1_1_vectors() {
-    let cases: Vec<(&str, Value)> = vec![
-        ("yes", json!(true)),
-        ("no", json!(false)),
-        ("on", json!(true)),
-        ("off", json!(false)),
-        ("Yes", json!(true)),
-        ("OFF", json!(false)),
-        ("TRUE", json!(true)),
-        ("0644", json!(420)),
-        ("1:30", json!(90)),
-        ("0o17", json!("0o17")),
-        ("1e3", json!("1e3")),
-        ("1e-3", json!("1e-3")),
-        ("1.0e+3", json!(1000.0)),
-        ("0x1F", json!(31)),
-        ("+1", json!(1)),
-        ("1_000", json!(1000)),
-        ("0b101", json!(5)),
-        ("-0", json!(0)),
-        ("08", json!("08")),
-        ("~", json!(null)),
-        ("Null", json!(null)),
-        (".5", json!(0.5)),
-        ("5.", json!(5.0)),
-        ("1:30.5", json!(90.5)),
-        ("1_000.5", json!(1000.5)),
-        ("0o", json!("0o")),
-        ("0x", json!("0x")),
-        // D13 residuals — python holds them, JSON cannot: kept as text
-        (
-            "123456789012345678901234567890",
-            json!("123456789012345678901234567890"),
-        ),
-        ("2001-12-14", json!("2001-12-14")),
-        (".inf", json!("inf")),
-        ("-.Inf", json!("-inf")),
-        (".nan", json!("nan")),
-    ];
-    for (s, want) in cases {
-        let got = manifest_value(s);
-        assert_eq!(got, want, "{s}");
-        if let (Value::Number(g), Value::Number(w)) = (&got, &want) {
-            assert_eq!(g.is_f64(), w.is_f64(), "{s}: int/float kind");
-        }
+fn an_unhashable_mapping_key_is_invalid_yaml() {
+    for doc in ["? [a]\n: 1", "? {a: 1}\n: 1\n", "[a]: 1\n"] {
+        let (fixture, rel) = write_manifest(doc);
+        let agent = loader_with_meta(meta_of(&[("manifest", json!(rel.clone()))]));
+        let err = load_manifest(&agent, &std::env::current_dir().unwrap()).unwrap_err();
+        assert!(
+            err.starts_with(&format!(
+                "static_loader: manifest '{rel}' is not valid YAML: "
+            )) && err.contains("found unhashable key"),
+            "{doc:?}: {err}"
+        );
+        drop(fixture);
     }
-}
-
-#[test]
-fn manifest_tags_aliases_and_merge_errors_read_as_pyyaml() {
-    let y = crate::yaml::safe_load;
-    // an explicit core tag is honoured; anchors + aliases resolve
-    assert_eq!(y("a: !!str 1\n").unwrap(), json!({"a": "1"}));
-    assert_eq!(y("a: !!int '7'\n").unwrap(), json!({"a": 7}));
-    assert_eq!(y("a: &x 1\nb: *x\n").unwrap(), json!({"a": 1, "b": 1}));
-    for (doc, want) in [
-        (
-            "a: !foo 1\n",
-            "could not determine a constructor for the tag '!foo'",
-        ),
-        (
-            "a: <<\n",
-            "could not determine a constructor for the tag 'tag:yaml.org,2002:merge'",
-        ),
-        (
-            "<<: 1\n",
-            "while constructing a mapping: expected a mapping or list of mappings for merging",
-        ),
-        (
-            "<<: [1]\n",
-            "while constructing a mapping: expected a mapping for merging",
-        ),
-        ("a: *nope\n", "found undefined alias 'nope'"),
-        (
-            "---\na: 1\n---\nb: 2\n",
-            "expected a single document in the stream",
-        ),
-        (
-            "a: [1, 2\n",
-            "did not find expected ',' or ']' at line 2, column 1",
-        ),
-    ] {
-        assert_eq!(y(doc).unwrap_err(), want, "{doc:?}");
-    }
-    // a non-string scalar KEY is written as python prints the dict key
-    assert_eq!(
-        y("1: x\nnull: y\n1.5: z\nyes: w\n").unwrap(),
-        json!({"1": "x", "None": "y", "1.5": "z", "True": "w"})
-    );
 }
 
 /// STEP-4 PIN (2026-10-01): the unknown type, as TEXT — key order is part of

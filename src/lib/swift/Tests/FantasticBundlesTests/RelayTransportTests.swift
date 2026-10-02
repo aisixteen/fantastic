@@ -26,6 +26,33 @@ private final class EchoBundle: AgentBundle {
     }
 }
 
+/// The far kernel's probe for a binary forward (python `_echo` in
+/// `test_binary_path_steps.py`): answers the payload's keys — the body's own
+/// top-level key among them — where the body sat and the nested `a`, and hands
+/// the body back as the reply's chunk.
+private final class BytesEcho: AgentBundle {
+    let name = "bytes_echo"
+    func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? {
+        switch payload["type"].asString ?? "" {
+        case "boot", "shutdown": return nil
+        default: return .object(["channel": "text"])
+        }
+    }
+    func handleBinary(agentId: AgentId, header: JSON, body: Blob?, kernel: Kernel) async throws
+        -> (JSON?, Data?)
+    {
+        var keys = header.asObject.map { Array($0.keys) } ?? []
+        if let body, body.parts.count == 1, case .key(let k) = body.parts[0] { keys.append(k) }
+        return (
+            .object([
+                "keys": .array(keys.sorted().map { .string($0) }),
+                "at": body.map { Codec.binaryPath($0.parts) } ?? .null,
+                "a": header["a"],
+            ]), body?.bytes
+        )
+    }
+}
+
 private func makeKernel(
     withEcho: Bool, leg: String? = nil, ingress: JSON? = nil, egress: JSON? = nil,
     auth: JSON? = nil, guid: String? = nil, peerGuid: String? = nil
@@ -183,6 +210,9 @@ private actor MemoryRelayHub {
     private var wires: [String: MemoryRelayWire] = [:]
     /// Per-guid advertised directory attrs (set by an `announce` frame).
     private var announcedAttrs: [String: JSON] = [:]
+    /// The head of every BINARY frame the hub routed — the test's capture of
+    /// what crossed the relay.
+    private(set) var binaryHeads: [JSON] = []
 
     func register(_ guid: String) -> MemoryRelayWire {
         let w = MemoryRelayWire(guid: guid, hub: self)
@@ -216,10 +246,11 @@ private actor MemoryRelayHub {
             guard let (env, body) = try? Codec.decodeBinaryFrame(Data(bytes)),
                 env["type"].asString == "send", let target = env["target"].asString
             else { return }
+            binaryHeads.append(env)
             var event: JSON = .object([
                 "type": .string("event"), "source": .string(sender), "payload": env["payload"],
             ])
-            if let p = env["_binary_path"].asString { event["_binary_path"] = .string(p) }
+            if let p = env.asObject?["_binary_path"] { event["_binary_path"] = p }
             let wire = Codec.encodeBinaryFrame(header: event, body: body)
             await wires[target]?.deliver(.binary([UInt8](wire)))
         }
@@ -229,11 +260,12 @@ private actor MemoryRelayHub {
 /// Wire two relay legs (A↔B) through a fresh hub and BOOT them through the
 /// engine — the transport is injected the way python's `_test_transport_inject`
 /// seam does it, so the verbs, correlation and the inbound gate under test are
-/// the engine's, not a transport shortcut.
+/// the engine's, not a transport shortcut. Returns the hub.
+@discardableResult
 private func pairLegs(
     kernelA: Kernel, bundleA: KernelBridgeBundle,
     kernelB: Kernel, bundleB: KernelBridgeBundle
-) async {
+) async -> MemoryRelayHub {
     let hub = MemoryRelayHub()
     let wireA = await hub.register("A")
     let wireB = await hub.register("B")
@@ -243,6 +275,7 @@ private func pairLegs(
         agentId: "brB", transport: await RelayTransport.attach(wire: wireB, partnerGuid: "A"))
     _ = await kernelA.send([Item("brA", ["type": "boot"])])[0].result
     _ = await kernelB.send([Item("brB", ["type": "boot"])])[0].result
+    return hub
 }
 
 /// `forward` through the leg agent, as any caller reaches it.
@@ -256,15 +289,18 @@ private func forward(_ kernel: Kernel, _ leg: String, target: String, payload: J
     ])[0].result
 }
 
+/// A `forward` on the binary channel: `blob` is the forwarded call's chunk, INSIDE
+/// its payload (`payload.payload.bytes`, where python's dict holds it); `nil` asks
+/// for the reply's chunk raw (a `read_stream`).
 private func binaryForward(
-    _ kernel: Kernel, _ leg: String, target: String, payload: JSON, blob: Data
+    _ kernel: Kernel, _ leg: String, target: String, payload: JSON, blob: Data?
 ) async -> (JSON, Data?) {
     let out = await kernel.send([
         Item(
             AgentId(leg),
             .object([
                 "type": .string("forward"), "target": .string(target), "payload": payload,
-            ]), binary: blob)
+            ]), binary: blob.map { Blob(parts: ["payload", "bytes"], $0) }, rawReply: blob == nil)
     ])[0]
     return (out.result, out.body)
 }
@@ -350,7 +386,7 @@ struct RelayTransportTests {
             // read_stream (binary) over the relay tunnel → raw bytes back
             let (_, body) = await binaryForward(
                 kernelA, "brA", target: "fs",
-                payload: ["type": "read_stream", "path": "blob.bin"], blob: Data())
+                payload: ["type": "read_stream", "path": "blob.bin"], blob: nil)
             #expect(body == payload, "raw bytes must round-trip over the relay tunnel")
             // EACH INBOUND BINARY CALL IS AN EXECUTION, named by its frame id —
             // python sends it through `kernel.send` with `item["id"] = fid`, so a
@@ -364,6 +400,64 @@ struct RelayTransportTests {
                 #expect(row?["named"] == .bool(true), "the frame id names it: \(row ?? [:])")
                 #expect(row?["outcome"]?["status"].asString == "completed")
             }
+
+            await dropLegs(kernelA, kernelB)
+        }
+    }
+
+    /// A LITERAL dotted key crosses a relay `forward`: the tunnel nests the call
+    /// inside a relay send, so the body rides at `["payload", "payload", "a.b"]`,
+    /// and the far echo finds it at the key `"a.b"` beside a nested `a` → `b` left
+    /// as sent. Its chunk comes back at `["payload", "data", "bytes"]` — swift's
+    /// reply carrier holds a chunk at the reply's `bytes` only. Python
+    /// `test_a_literal_key_crosses_a_relay_forward_both_ways` (c).
+    @Test func aLiteralKeyCrossesARelayForward() async throws {
+        try await withDeadline(15) {
+            let open: JSON = .string("allow_all_ingress")
+            let (kernelA, bundleA) = await makeKernel(
+                withEcho: false, leg: "brA", ingress: open, guid: "gA", peerGuid: "gB")
+            let registry = BundleRegistry()
+            registry.register("bytes_echo.tools", BytesEcho())
+            let bundleB = KernelBridgeBundle(family: .relay)
+            registry.register("relay_connector.tools", bundleB)
+            let kernelB = rootedKernel(registry, guid: "gB")
+            _ = await kernelB.send([
+                Item(
+                    "kernel_state",
+                    [
+                        "type": "create_agent", "parent_id": "kernel_state",
+                        "handler_module": "bytes_echo.tools", "id": "echo",
+                    ])
+            ])[0].result
+            await makeLeg(kernelB, id: "brB", canCall: ["echo"], ingress: open, peerGuid: "gA")
+            let hub = await pairLegs(
+                kernelA: kernelA, bundleA: bundleA, kernelB: kernelB, bundleB: bundleB)
+
+            let raw = Data([0x00]) + Data("raw".utf8) + Data([0xFF])
+            let out = await kernelA.send([
+                Item(
+                    "brA",
+                    [
+                        "type": "forward", "target": "echo",
+                        "payload": ["type": "take", "a": ["b": "kept"]],
+                    ], binary: Blob(parts: ["payload", "a.b"], raw))
+            ])[0]
+            #expect(out.status == .completed, "\(out.result.serialize())")
+            #expect(
+                out.result == ["keys": ["a", "a.b", "type"], "at": ["a.b"], "a": ["b": "kept"]],
+                "\(out.result.serialize())")
+            #expect(out.body == raw)
+            let heads = await hub.binaryHeads
+            #expect(
+                heads.map { $0["_binary_path"] }
+                    == [["payload", "payload", "a.b"], ["payload", "data", "bytes"]],
+                "\(JSON.array(heads).serialize())")
+            // the null sits at the literal key of the tunnelled call; the nested
+            // twin is untouched
+            #expect(
+                heads.first?["payload"]["payload"]
+                    == ["type": "take", "a": ["b": "kept"], "a.b": .null],
+                "\(JSON.array(heads).serialize())")
 
             await dropLegs(kernelA, kernelB)
         }
@@ -418,15 +512,21 @@ struct RelayTransportTests {
         #expect(r["emits"].asObject?.keys.contains("bridge_up") == true)
     }
 
-    /// python `_engine._scoped`: an `auth` name that already carries the
-    /// manifold's suffix is reported AS WRITTEN — `allow_all_ingress` is open,
-    /// never `allow_all_ingress_ingress` (sealed).
-    @Test func bridgeReflectKeepsAnAlreadySuffixedAuthName() async throws {
+    /// `auth` carries a bare STEM and the gate appends `_ingress` to it, so
+    /// `auth: allow_all_ingress` resolves `allow_all_ingress_ingress` — unknown,
+    /// and it denies. The bridge reflects with the same `describe` every leg uses
+    /// (python `**describe(rec)`); it used to skip an already-suffixed stem and
+    /// report `allow_all_ingress` / sealed:false, an open door its gate never
+    /// opened. Python `test_a_bridge_reflects_exactly_what_its_gate_enforces`.
+    @Test func aBridgeReflectsExactlyWhatItsGateEnforces() async throws {
+        let rule = try resolveIngress(ingressRule: nil, auth: .string("allow_all_ingress"))
+        let deny = try #require(rule as? IngressRules.DenyInbound)
+        #expect(deny.unknown == "allow_all_ingress_ingress")
         let (kernel, _) = await makeKernel(withEcho: false)
         let cases: [(String, String, String, Bool)] = [
-            ("allow_all_ingress", "allow_all_ingress", "allow_all_ingress_egress", false),
-            ("deny_ingress", "deny_ingress", "deny_ingress_egress", true),
-            ("password_egress", "password_egress_ingress", "password_egress", true),
+            ("allow_all_ingress", "allow_all_ingress_ingress", "allow_all_ingress_egress", true),
+            ("deny_ingress", "deny_ingress_ingress", "deny_ingress_egress", true),
+            ("password_egress", "password_egress_ingress", "password_egress_egress", true),
         ]
         for (i, (auth, ing, egr, sealed)) in cases.enumerated() {
             let id = "rc\(i)"

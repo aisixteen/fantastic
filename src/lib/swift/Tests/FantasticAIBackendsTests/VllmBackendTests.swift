@@ -53,15 +53,14 @@ private func provider(
     sampling: OrderedDictionary<String, JSON> = SAMPLING_DEFAULTS,
     explicitBudget: Bool = false,
     agentKey: String = UUID().uuidString,
-    apiKey: String? = nil
+    key: @escaping KeyReader = fixedKey(nil)
 ) -> VllmProvider {
     VllmProvider(
-        endpoint: endpoint, model: "qwen3.8-27b", maxTokens: maxTokens,
+        endpoint: endpoint, model: "qwen3.8-27b", key: key, maxTokens: maxTokens,
         kvSlots: kvSlots, kvOverflow: kvOverflow, kvTtl: KV_TTL,
         sampling: sampling, explicitBudget: explicitBudget,
         connectTimeout: CONNECT_TIMEOUT, readTimeout: READ_TIMEOUT,
-        agentKey: agentKey, clock: { ProcessInfo.processInfo.systemUptime },
-        apiKey: { apiKey })
+        agentKey: agentKey, clock: { ProcessInfo.processInfo.systemUptime })
 }
 
 private let oneUser: [JSON] = [.object(["role": "user", "content": "hi"])]
@@ -153,26 +152,33 @@ struct VllmBackendTests {
 
     // MARK: the key (an HTTPS door in front of the GPU)
 
-    /// Header only when set: unset, NO `Authorization` at all (a keyless local
-    /// vLLM); set, a Bearer header. Python/rust twin: the env var itself; here
-    /// the provider's key source is handed in (no `setenv` in a threaded test).
+    /// Header only when set: no `credentials`, NO `Authorization` at all (a
+    /// keyless local vLLM); with them, a Bearer header, read before EACH request
+    /// — a rotated key is used by the next one; the reader is told the endpoint.
+    /// Python `test_the_key_rides_as_a_bearer_header_only_when_set`.
     @Test func theKeyRidesAsABearerHeaderOnlyWhenSet() async {
         let ok = sse([delta(["content": "ok"]), delta(finish: "stop")])
         let bare = StubHTTP([ok])
         defer { bare.stop() }
         #expect(await drain(provider(endpoint(port: bare.port))).0 == "ok")
-        let keyed = StubHTTP([ok])
+        let keyed = StubHTTP([ok, ok])
         defer { keyed.stop() }
-        #expect(await drain(provider(endpoint(port: keyed.port), apiKey: "k-123")).0 == "ok")
+        let ep = endpoint(port: keyed.port)
+        let asked = KeyLog(["k-123", "k-rotated"])
+        let p = provider(ep, key: { endpoint in asked.next(endpoint) })
+        #expect(await drain(p).0 == "ok")
+        #expect(await drain(p).0 == "ok")
         let auth = { (raw: String) in
             raw.split(separator: "\r\n").first { $0.lowercased().hasPrefix("authorization:") }
                 .map(String.init)
         }
         #expect(auth(bare.requests[0]) == nil, "\(bare.requests[0])")
         #expect(auth(keyed.requests[0]) == "Authorization: Bearer k-123", "\(keyed.requests[0])")
+        #expect(auth(keyed.requests[1]) == "Authorization: Bearer k-rotated", "\(keyed.requests[1])")
+        #expect(asked.endpoints == [ep, ep])
     }
 
-    @Test func aRefusedKeyNamesTheVariable() async {
+    @Test func aRefusedKeySaysToNameCredentials() async {
         let stub = StubHTTP([.init(status: 401, body: "unauthorized")])
         defer { stub.stop() }
         let ep = endpoint(port: stub.port)
@@ -180,13 +186,16 @@ struct VllmBackendTests {
         #expect(
             error
                 == "RuntimeError: vllm_backend: \(ep) answered HTTP 401 — the door wants a key: "
-                + "set VLLM_API_KEY: unauthorized", "\(error ?? "nil")")
+                + "name it in `credentials` ({store, ref}): unauthorized", "\(error ?? "nil")")
     }
 
-    /// The variable the key is read from, named once — and in the schema.
-    @Test func theKeyIsReadFromTheEnvironmentByName() {
-        #expect(KEY_VAR == "VLLM_API_KEY")
-        #expect(VllmBundle.RECORD_SCHEMA["key_var"] == "VLLM_API_KEY")
+    /// No `key_var`: the key is an optional `credentials` field (a store ref).
+    @Test func theSchemaTakesOptionalCredentials() {
+        #expect(VllmBundle.RECORD_SCHEMA.asObject?["key_var"] == nil)
+        let f = (VllmBundle.RECORD_SCHEMA["fields"].asArray ?? []).first {
+            $0["name"] == "credentials"
+        }
+        #expect(f?["type"] == "credentials" && f?["required"] == .bool(false))
     }
 
     @Test func aRefusedConnectionSaysVLLMIsNotListeningYet() async {
@@ -418,7 +427,7 @@ struct VllmBackendTests {
         func first(_ meta: OrderedDictionary<String, JSON>) -> String {
             let a = Agent(id: AgentId("v"), handlerModule: nil, parentId: nil, meta: meta)
             do {
-                _ = try VllmBundle.makeProvider(a)
+                _ = try VllmBundle.makeProvider(a, key: fixedKey(nil))
                 return ""
             } catch {
                 return "\(error)"
@@ -491,4 +500,19 @@ struct VllmBackendTests {
                     "conversations": .array([]), "evicted": 0, "rejected": 0,
                 ]), "\(out["kv"])")
     }
+}
+
+/// A key reader's answers, in turn, and the endpoints it was asked for.
+private final class KeyLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var answers: [String]
+    private var asked: [String] = []
+    init(_ answers: [String]) { self.answers = answers }
+    func next(_ endpoint: String) -> String? {
+        lock.withLock {
+            asked.append(endpoint)
+            return answers.isEmpty ? nil : answers.removeFirst()
+        }
+    }
+    var endpoints: [String] { lock.withLock { asked } }
 }

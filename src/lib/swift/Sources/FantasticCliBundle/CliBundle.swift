@@ -158,10 +158,6 @@ public struct CliBundle: AgentBundle {
         case "queued":
             return "\(prefix) queued (\(pyStr(get(detail, "ahead", .integer(0)))) ahead)"
         case "thinking":
-            if detail["waiting_on"].asString == "rate_limit" {
-                let wait = pyStr(get(detail, "wait_s", .string("?")))
-                return "\(prefix) rate-limited; waiting \(wait)s"
-            }
             return "\(prefix) thinking…"
         case "tool_calling":
             let tool = try mapping(get(detail, "tool", .null))

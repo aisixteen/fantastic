@@ -1,6 +1,6 @@
 """LIVE TEST 4 — plan, BUILD a program, and have it actually run.
 
-    cd src/lib/python && BACKEND=llamacpp uv run python -u ../../../tmp/live_build.py
+    cd src/lib/python && uv run python -u ../../../e2e/run.py --group agentic --id build --lanes 1
 
 Harder than `live_plan.py` in the direction that matters: `live_plan` asked for a
 CHANGE (a record edit the model could make with one verb). This asks for an
@@ -67,11 +67,8 @@ from helpers.kernel import open_kernel
 # The plug, resolved once (see e2e/backends): which model, reached how.
 BK = _resolve_backend()
 BACKEND, MODEL = BK.name, BK.model
-NVIDIA_KEY = os.environ.get("NVIDIA_API_KEY", "")
-LLAMACPP_ENDPOINT = os.environ.get("FANTASTIC_LLAMACPP_ENDPOINT")  # no guessed host
 CTX = int(os.environ.get("CTX", "262144"))
-MAX_TOKENS_FIELD = int(os.environ.get("MAX_TOKENS", "0"))
-IDLE = float(os.environ.get("IDLE", "60" if BACKEND == "anthropic" else "240"))
+IDLE = float(os.environ.get("IDLE", "240"))
 # A CEILING. Without one these harnesses end only on IDLE: runs have reached turn
 # 77 and 89, both killed by hand, both re-verifying work already done. 0 = no cap.
 MAX_TURNS = int(os.environ.get("MAX_TURNS", "40"))
@@ -134,28 +131,6 @@ def box(title: str, body: str, mark: str = "|") -> None:
     for raw in (body or "(EMPTY)").splitlines() or [""]:
         for i in range(0, len(raw), W):
             print(f"  {mark} {raw[i : i + W]}")
-
-
-def _served_model() -> str:
-    """What the llama-server actually has loaded — for the banner and the transcript.
-
-    The probe does not name the model on this backend, so it asks the server's OpenAI
-    `/models` surface. Discovery, not a guess. The transcripts are kept as evidence and
-    one that misnames its own model is worse than one with no name at all, so a failure
-    to reach the server is reported inline rather than silently filled in.
-    """
-    import urllib.error
-    import urllib.request
-
-    if not LLAMACPP_ENDPOINT:
-        return "<FANTASTIC_LLAMACPP_ENDPOINT unset>"
-    try:
-        with urllib.request.urlopen(f"{LLAMACPP_ENDPOINT}/models", timeout=5) as r:
-            data = json.loads(r.read())
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
-        return f"<llama-server at {LLAMACPP_ENDPOINT} did not name its model: {e}>"
-    served = data.get("data") or []
-    return served[0].get("id", "<unnamed>") if served else "<no model loaded>"
 
 
 async def discover_command_runner(root) -> tuple[str, list[str]]:
@@ -592,7 +567,7 @@ async def run(
 
     total = sum(READINGS.values())
     print("=" * (W + 4))
-    print(f"  {_served_model() if BACKEND == 'llamacpp' else MODEL}  ·  {banner}")
+    print(f"  {MODEL}  ·  {banner}")
     print(f"  {len(READINGS)} readings, minted at test time.  true total = {total}")
     print("=" * (W + 4))
 

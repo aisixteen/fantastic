@@ -151,6 +151,34 @@ struct WebRouteOrderTests {
         #expect(server.routesByChild().keys.map { $0.value } == ["a_ws", "z_literal"])
     }
 
+    /// A re-mount REPLACES the leg's routes, and `unmount` removes them all — a
+    /// second copy appended would keep serving after the unmount. Python
+    /// `test_a_reboot_replaces_a_legs_routes_and_unmount_removes_them_all`.
+    @Test func aRemountReplacesALegsRoutesAndUnmountRemovesThemAll() async throws {
+        let k = try await catchAllFirst()
+        defer { Task { _ = await send(k, "web", .object(["type": .string("stop")])) } }
+        let web = try #require(k.bundles.get("web.tools") as? WebBundle)
+        let server = try #require(web.serverFor(AgentId("web")))
+        func paths() -> [String] {
+            server.routeTable().compactMap {
+                if case .leg(let spec) = $0.target, spec.ownerId == AgentId("z_literal") {
+                    return spec.path
+                }
+                return nil
+            }
+        }
+        let first = paths()
+        #expect(!first.isEmpty)
+        _ = await send(
+            k, "web", .object(["type": .string("mount"), "child_id": .string("z_literal")]))
+        #expect(paths() == first, "\(paths())")
+        let out = await send(
+            k, "web", .object(["type": .string("unmount"), "child_id": .string("z_literal")]))
+            .result
+        #expect(out == .object(["unmounted": .string("z_literal")]), "\(out.serialize())")
+        #expect(paths().isEmpty, "\(paths())")
+    }
+
     /// An actual upgrade to the literal path reaches THAT leg's own endpoint,
     /// though the web_ws catch-all was mounted before it.
     @Test(.timeLimit(.minutes(1)))

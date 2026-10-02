@@ -150,6 +150,12 @@ enum DaemonMode {
             lock.release()
             exit(1)
         }
+        // The stop handlers go in BEFORE the "all booted" close / `[kernel] up`:
+        // whoever reads that line may signal at once, and a SIGTERM that landed
+        // while the handlers were only set up inside the wait below took the
+        // default action — the process died with no teardown and `lock.yaml`
+        // held (rust closed the same window: `StopSignals::install`).
+        let stopSignals = StopSignals.install()
         // Second PTY push: the "all booted" close. Each agent already announced
         // its OWN endpoints during its boot — the kernel does NOT gather them,
         // and does NOT re-`reflect` web for a port. Non-tty keeps the plain
@@ -180,7 +186,7 @@ enum DaemonMode {
                 }
             }
             group.addTask {
-                await Bootstrap.awaitStop(kernel: kernel)
+                await Bootstrap.awaitStop(kernel: kernel, signals: stopSignals)
             }
             // Race — first task to return ends the group; other tasks
             // get cancelled by the task group's structured concurrency.

@@ -34,6 +34,7 @@ from __future__ import annotations
 
 from io_bridge import dispatch, make_verbs
 from io_bridge import on_delete as _engine_on_delete
+from kernel import current_secret
 from io_bridge import validate_meta  # noqa: F401  (the `peer_guid` write check)
 
 # Re-exported so the bundle's tests can inject a transport / inspect engine state
@@ -51,6 +52,7 @@ from relay_connector._relay import (
     _identity_from_record,
     build_transport,
     reflect_fields,
+    secret_sealed,
 )
 
 VERBS = make_verbs(
@@ -59,6 +61,33 @@ VERBS = make_verbs(
     reflect_fields=reflect_fields,
     default_kind="relay",
 )
+
+_engine_forward = VERBS["forward"]
+
+
+async def _forward(id, payload, kernel):
+    # THE RELAY SEAL, outbound: a `forward` whose own call carries ANY secret mark
+    # is refused before a frame is built. `forward` is the one outbound call path a
+    # relay leg has — no relay leg registers a `PeerRoute`, so a `<guid>|<agent>`
+    # send never rides one (only web_ws registers peers).
+    # TODO(relay seal): lift once relayd masks what it records. The fix is in
+    # relayd (../fantastic_relay): when it dispatches a tunneled frame into its own
+    # kernel, re-root the inner frame's `secret` onto its delivery item
+    # (`payload.<f>` -> `payload.payload.payload.<f>`), so its rows, ledger and
+    # state stream show `<secret>`; and decide how REPLY frames carry result marks
+    # — a `reply` names no marks today, so a `result` mark would still leave the
+    # value in the relay's record of the reply.
+    if current_secret():
+        return secret_sealed()
+    return await _engine_forward(id, payload, kernel)
+
+
+_forward.__doc__ = (
+    (_engine_forward.__doc__ or "")
+    + " SEALED for secrets: a call carrying any secret mark is refused — the relay "
+    "records every frame it routes, unmasked."
+)
+VERBS["forward"] = _forward
 
 
 # ── directory surface (relay-specific; the relay's own `relay` agent) ──

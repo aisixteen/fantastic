@@ -64,7 +64,9 @@ struct FileAllowListTests {
         }
         #expect(await call(k, ["type": "list"])["reason"] == "not_found")
         let w = await k.send([
-            Item(AgentId("fs"), .object(["type": "write_stream", "path": "new.txt"]), binary: Data("x".utf8))
+            Item(
+                AgentId("fs"), .object(["type": "write_stream", "path": "new.txt"]),
+                binary: Blob("bytes", Data("x".utf8)))
         ])[0].result
         #expect(w["reason"] == "not_found", "\(w)")
         #expect(!FileManager.default.fileExists(atPath: dir.appendingPathComponent("new.txt").path))

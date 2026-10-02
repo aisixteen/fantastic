@@ -101,6 +101,43 @@ Composition rule: `fantastic` blocks only when the workdir has a
 `web` agent persisted (HTTP daemon) or `stdin` is a tty (REPL).
 Otherwise it exits silently.
 
+## The on-device backend (macOS build)
+
+`fantastic-foundation-models-backend` (`foundation_models_backend.tools`) is the
+rust half of ONE implementation of Apple's Foundation Models calls: the swift
+`FantasticFMCore` (`../swift/Sources/FantasticFMCore`) is linked as the static
+library `libFantasticFMBridge.a` through its C ABI
+(`../swift/Sources/FantasticFMBridge/fm_bridge.h`), so the swift and rust
+bundles run the same code and answer and refuse in the same words. Python has
+no such backend (Apple-only native).
+
+- **macOS target:** the crate's `build.rs` runs `swift build -c release
+  --product FantasticFMBridge --arch <arm64|x86_64>` over `../swift` into
+  `target/…/out/swift-build` (the swift package's own `.build` is untouched), and
+  links the archive, the Foundation and FoundationModels frameworks and the
+  Swift runtime (paths from `xcrun`). It needs Xcode with a macOS 26+ SDK. A
+  failing swift build fails the cargo build — no fallback. FoundationModels is
+  linked WEAK, so the binary still loads on a macOS without it (and the bundle
+  refuses there, naming the platform).
+- **Deployment target 14.0:** the swift objects are built for macOS 14, so
+  `.cargo/config.toml` sets `MACOSX_DEPLOYMENT_TARGET=14.0` (rustc defaults to
+  11.0, where the Swift runtime links through `@rpath` and the binary aborts in
+  dyld). `build.rs` refuses a target below 14.0, naming the variable — another
+  workspace linking this crate must set it too.
+- **Every other target:** nothing is built or linked; the agent's `send` fails
+  `the on-device model is unavailable: platform not macOS 26+ — this is <X>`.
+- **Both tiers:** registered in `full` and `embedded` (no subprocess and no
+  dlopen at run time — the sandboxed macOS tier may run it), as swift's registry
+  does on every platform.
+- **Tests:** the default suite uses a fake engine plus the real bridge's
+  pre-model refusals (no prompt reaches the model); `FM_LIVE=1 cargo test -p
+  fantastic-foundation-models-backend live_on_device_model -- --nocapture` runs
+  tiny real prompts. Spec: [`selftest/foundation_models_backend.md`](selftest/foundation_models_backend.md).
+- **The window is the model's** (4096 tokens, read from the SDK): ai-core's
+  `BackendConfig::model_window` makes it the `context_window` default. The
+  kernel's default system block does not fit it (~5,800 tokens); a `send`
+  carries a short `system_prompt`.
+
 ## Feature gates
 
 Two compile-time tiers gate which bundles ship in the binary:
@@ -116,7 +153,7 @@ embedded # iOS Lite, iPadOS, visionOS, sandboxed macOS
 
 **`embedded`** compiles without any subprocess code. iOS app sandboxes
 forbid `fork()` / `Process` / dynamic library loading; the embedded
-slice excludes anything that touches them at compile time. 15 of 16
+slice excludes anything that touches them at compile time. 16 of 17
 bundles ship under embedded — the iOS-safe ceiling.
 
 Switch with `--no-default-features --features embedded`:
@@ -139,19 +176,18 @@ Bundles that compile under either tier:
 |--------------------------------|------|
 | `fantastic-core`               | the `kernel_state.tools` root loader (id="kernel_state") — records, blobs, the record-owner guard |
 | `fantastic-ram-store`          | the MEMORY STORE in RAM — every message (AI conversations, the kernel's execution rows), fold refs, grants, search, inject/dump |
+| `fantastic-credential-store`   | SECRETS BY REF — a ref holds named fields bound to ONE host; `set`/`get` only with a `secret` mark, per-ref readers/writers, "no such ref" to strangers; backends `file` (0600 YAML, python's bytes), `keychain` (the OS keychain), `env` (read-only). Every AI backend reads its key here before each request (`credentials: {store, ref}`); stamps `holds_secrets: true` on itself at boot, so ai-core refuses every model-parsed call that names it; the kernel judges the field first on every agent — exactly `true` or `null` (the operator's clear) at the write, and only the operator lowers a holder's mark (`side: "secret-holder"`) |
 | `fantastic-static-loader`      | declarative YAML roster loader — hydrates the declared agents as operator at boot |
 | `fantastic-file`               | filesystem-as-agent (the fs edge of the io family; sealed by default, deny-all `allow` list) + the text verbs — read/write/edit/append/undo, version/if_match |
 | `fantastic-web`                | axum HTTP host — rendering routes; mounts child call surfaces |
-| `fantastic-web-ws`             | WS verb channel (mounted onto a parent web); sealed by default |
-| `fantastic-web-rest`           | REST verb channel (mounted onto a parent web); sealed by default |
+| `fantastic-web-ws`             | WS verb channel (mounted onto a parent web); sealed by default; a `call` frame's `secret` marks ride onto the dispatched item |
+| `fantastic-web-rest`           | REST verb channel (mounted onto a parent web); sealed by default; `X-Fantastic-Secret` (a JSON array) carries the item's `secret` marks |
 | `fantastic-scheduler`          | recurring tasks on a tokio tick |
-| `fantastic-bridge`             | cross-kernel bridge — WS-only, asymmetric (memory / WS) |
+| `fantastic-bridge`             | cross-kernel bridge — WS-only, asymmetric (memory / WS); `forward` re-roots its call's `secret` marks onto the frame, an inbound frame's marks ride onto the dispatched item; a `relay_connector` leg is SEALED for marks (relayd records what it routes unmasked) — a marked `forward` and a marked inbound `call` are refused |
 | `fantastic-ollama-backend`     | local LLM via ollama |
-| `fantastic-nvidia-nim-backend` | NVIDIA NIM LLM (OpenAI-compatible) |
-| `fantastic-llamacpp-backend`   | local LLM via llama-server (OpenAI-compatible) |
-| `fantastic-anthropic-backend`  | Claude via the Anthropic Messages API |
 | `fantastic-responses-backend`  | the OpenAI Responses API |
 | `fantastic-vllm-backend`       | a vLLM server, directly (OpenAI chat wire) — KV-cache session table per endpoint |
+| `fantastic-foundation-models-backend` | Apple's on-device Foundation Models system model — links the swift `FantasticFMCore` through its C ABI (`FantasticFMBridge`) on macOS; refuses naming the platform everywhere else (see below) |
 | `fantastic-cli-bundle`         | the `cli` render sink (token/done/say/error/status/context to stdout) |
 
 Full-tier-only bundles (subprocess; excluded from the embedded slice):
@@ -179,6 +215,7 @@ rust/
 │   └── bundles/
 │       ├── fantastic-core/                kernel_state.tools root loader
 │       ├── fantastic-ram-store/           the memory store (in RAM)
+│       ├── fantastic-credential-store/    secrets by ref (file / keychain / env)
 │       ├── fantastic-static-loader/       declarative YAML roster loader
 │       ├── fantastic-file/                fs-as-agent + text verbs
 │       ├── fantastic-web/                 axum host + WS/REST router
@@ -188,11 +225,9 @@ rust/
 │       ├── fantastic-bridge/              cross-kernel bridge
 │       ├── fantastic-ai-core/             shared LLM machinery (Provider seam; internal)
 │       ├── fantastic-ollama-backend/      local LLM (thin binding over ai-core)
-│       ├── fantastic-nvidia-nim-backend/  NVIDIA NIM LLM (thin binding over ai-core)
-│       ├── fantastic-llamacpp-backend/    llama-server LLM (thin binding over ai-core)
-│       ├── fantastic-anthropic-backend/   Claude (thin binding over ai-core)
 │       ├── fantastic-responses-backend/   OpenAI Responses API (thin binding over ai-core)
 │       ├── fantastic-vllm-backend/        vLLM, directly (thin binding over ai-core)
+│       ├── fantastic-foundation-models-backend/  Apple on-device model (swift FMCore via C ABI)
 │       ├── fantastic-cli-bundle/          the cli render sink
 │       ├── fantastic-exec-bridge/         command runner + PTY jobs (full-tier only)
 │       └── fantastic-scenario-probes/     e2e fixture agents (test-only feature)
@@ -222,9 +257,21 @@ HTTP + WebSocket:
 - **WS `/<id>/ws`** — text frames: `call` / `emit` / `watch` /
   `unwatch` / `reply` / `error` / `event`. **Binary frames** carry
   byte-heavy payloads as `[4-byte BE u32 hdr_len][JSON header][raw blob]`,
-  the header naming the blob's slot in `_binary_path`; they are routed by
-  `type` exactly like text frames. There is no chunked-upload dialect — a
-  large transfer is one frame, or a `write_stream` per offset.
+  the header naming the blob's slot in `_binary_path` — a JSON array of steps
+  from the frame root, a key as a string (taken literally:
+  `["payload", "a.b"]` is the key `"a.b"`), a list index as an int; they are
+  routed by `type` exactly like text frames. The body reaches the target AT
+  THAT SLOT (`fantastic_kernel::Blob` — the payload's steps beside the bytes),
+  so each handler reads its own key as python's does (`paste_image` → `data`,
+  `write_stream` → `bytes`), and a reply's body leaves at ITS slot the same
+  way; REST's octet leg names it with `X-Fantastic-Bytes-Field` — ONE LITERAL
+  top-level key (python's `payload[field] = body`: `a.b` is the key `"a.b"`;
+  `Blob::key`), both ways. There is no chunked-upload dialect — a large
+  transfer is one frame, or a `write_stream` per offset.
+- **permessage-deflate** — the ws leg answers an offer as uvicorn's
+  websockets server does and `ws_bridge` offers `permessage-deflate;
+  client_max_window_bits` as python's client does; the frames run through
+  `fantastic_io_bridge::ws_deflate::DeflateStream` under tungstenite.
 - **Streams** — byte-heavy transfers ride the binary channel as a chunked
   PULL (raw bytes, never base64) through the BATCH, NOT events: `read_stream {path, offset?}
   → (header{next_offset, eof, size}, bytes)` (the **SOURCE** — one chunk,
@@ -322,6 +369,8 @@ drive the wire surface against either binary by swapping `PATH`.
 Rust-specific behaviour lives in [`selftest/`](selftest/):
 
 - `feature_gates.md` — `full` vs `embedded` compile matrix
+- `foundation_models_backend.md` — the on-device backend: hermetic suite, the
+  opt-in live run, the linked binary
 - `cross_runtime_workdir.md` — round-trip workdir loading
 
 See [`selftest.md`](selftest.md) for the index + driving workflow.

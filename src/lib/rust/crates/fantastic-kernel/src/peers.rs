@@ -12,27 +12,37 @@
 
 use crate::agent::{Agent, AgentId};
 use crate::kernel::Kernel;
+use crate::outcome::Blob;
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-/// What one peer call comes back with: the peer's reply, and the raw body when
-/// the reply carried one (the binary channel rides beside the JSON, as it does
-/// everywhere in this runtime — python's reply dict simply holds the bytes).
-pub type PeerReply = (Value, Option<Vec<u8>>);
+/// What one peer call comes back with: the peer's reply, and the raw body AT ITS
+/// SLOT of the reply when the reply carried one (the binary channel rides beside
+/// the JSON, as it does everywhere in this runtime — python's reply dict simply
+/// holds the bytes, at whatever key the peer's handler put them).
+pub type PeerReply = (Value, Option<Blob>);
 
 /// The future a route returns for one call.
 pub type PeerCallFuture = Pin<Box<dyn Future<Output = PeerReply> + Send>>;
 
-/// `call(agent_id, payload, caller, body)` — deliver ONE call to the peer's
-/// `agent_id` as `caller` (`<this guid>|<sender>`).
-type PeerCallFn = dyn Fn(String, Value, String, Option<Vec<u8>>) -> PeerCallFuture + Send + Sync;
+/// `call(agent_id, payload, caller, secret, body)` — deliver ONE call to the
+/// peer's `agent_id` as `caller` (`<this guid>|<sender>`), with the item's
+/// `secret` marks ([`crate::secret`], empty when none) and the raw request body
+/// at its payload path when the call carries one.
+type PeerCallFn =
+    dyn Fn(String, Value, String, Vec<String>, Option<Blob>) -> PeerCallFuture + Send + Sync;
 
 /// How a connected PEER KERNEL is reached. `via` names the transport agent
 /// carrying it (the root reflect reports it); the call delivers one call and
 /// resolves with the peer's reply — or a refusal when the connection ends first.
+///
+/// `secret` is the item's marked paths, rooted at the item exactly as the peer's
+/// item is rooted, so the transport puts them on the call frame verbatim and the
+/// PEER masks its own records of the call too (python `PeerRoute.call(agent_id,
+/// payload, caller, secret)`).
 ///
 /// Held as an `Arc`: a route is compared by IDENTITY (python `is`), so only the
 /// connection that registered a guid can unregister it.
@@ -46,7 +56,10 @@ impl PeerRoute {
     /// A route through `via` whose calls `call` delivers.
     pub fn new<F>(via: impl Into<String>, call: F) -> Arc<Self>
     where
-        F: Fn(String, Value, String, Option<Vec<u8>>) -> PeerCallFuture + Send + Sync + 'static,
+        F: Fn(String, Value, String, Vec<String>, Option<Blob>) -> PeerCallFuture
+            + Send
+            + Sync
+            + 'static,
     {
         Arc::new(Self {
             via: via.into(),
@@ -60,9 +73,10 @@ impl PeerRoute {
         agent_id: String,
         payload: Value,
         caller: String,
-        body: Option<Vec<u8>>,
+        secret: Vec<String>,
+        body: Option<Blob>,
     ) -> PeerCallFuture {
-        (self.call)(agent_id, payload, caller, body)
+        (self.call)(agent_id, payload, caller, secret, body)
     }
 }
 
@@ -70,7 +84,9 @@ impl PeerRoute {
 /// `RemoteTarget`. Carried on an unregistered [`Agent`] so the send pipeline
 /// treats it like any target (a ledger row, a task-table row, a settled outcome),
 /// except that its dispatch hands the call to the peer's route instead of a
-/// handler here.
+/// handler here, carrying the caller as `<this guid>|<sender>` so the peer's gate
+/// can judge it, and the item's `secret` marks so the peer masks its records as
+/// this kernel does.
 pub(crate) struct RemoteRef {
     /// The peer kernel's guid.
     pub(crate) guid: String,
@@ -183,14 +199,15 @@ impl Kernel {
 }
 
 /// The dispatch of a call to a remote target: hand it to the peer's route,
-/// carrying the caller as `<this guid>|<sender>` so the peer's gate can judge it.
-/// Python `RemoteTarget._dispatch_task`.
+/// carrying the caller as `<this guid>|<sender>` so the peer's gate can judge it,
+/// and the item's `secret` marks so the peer masks its records too. Python
+/// `RemoteTarget._dispatch_task`.
 pub(crate) async fn call_peer(
     kernel: &Kernel,
     remote: &RemoteRef,
     qualified: &AgentId,
     payload: Value,
-    body: Option<Vec<u8>>,
+    body: Option<Blob>,
 ) -> PeerReply {
     let Some(own) = kernel.own_guid() else {
         // The peer judges the caller by `<guid>|<agent>`; with no guid of our own
@@ -208,9 +225,14 @@ pub(crate) async fn call_peer(
     };
     let origin = crate::send::current_origin();
     let caller = format!("{own}|{}", origin.as_ref().map_or("kernel", |o| o.as_str()));
+    // The item's `secret` marks ride along — this runs inside the dispatch's own
+    // scope, so they are exactly the marks of THIS call. This kernel already
+    // records the call as shown, and the peer must too: its call/settle rows,
+    // ledger and state stream are records of the SAME call.
+    let secret = crate::send::current_secret();
     remote
         .route
-        .call(remote.agent_id.clone(), payload, caller, body)
+        .call(remote.agent_id.clone(), payload, caller, secret, body)
         .await
 }
 

@@ -130,39 +130,6 @@ export function pySplitlines(s: string): string[] {
   return lines;
 }
 
-/** Non-ASCII python whitespace (`str.isspace()`): U+0085 and category Z. */
-const PY_WIDE_SPACE = /[\x85\p{Z}]/u;
-const PY_DECIMAL = /\p{Nd}/u;
-
-/** A Unicode decimal digit's value: category Nd comes in contiguous runs of ten
- *  that start at zero, so it is the offset from its run's start, mod 10. */
-function decimalValue(cp: number): number {
-  let start = cp;
-  while (PY_DECIMAL.test(String.fromCodePoint(start - 1))) start--;
-  return (cp - start) % 10;
-}
-
-/** python `int(s)` of a str, base 10: optional ASCII whitespace around a sign
- *  and digits with single `_` between them; a non-ASCII space reads as a space
- *  and any Unicode decimal digit as its value (`int('\u0661')` is 1). Anything else
- *  throws python's `ValueError` text, the repr cut at 200 characters. */
-export function pyInt(s: string): bigint {
-  let ascii = "";
-  for (const ch of s) {
-    const cp = ch.codePointAt(0) as number;
-    if (cp < 0x7f) ascii += ch;
-    else if (PY_WIDE_SPACE.test(ch)) ascii += " ";
-    else if (PY_DECIMAL.test(ch)) ascii += String(decimalValue(cp));
-    else ascii += "?";
-  }
-  const m = /^[ \t\n\v\f\r]*([+-]?)([0-9](?:_?[0-9])*)[ \t\n\v\f\r]*$/.exec(ascii);
-  if (m === null) {
-    throw new Error(`invalid literal for int() with base 10: ${[...reprStr(s)].slice(0, 200).join("")}`);
-  }
-  const v = BigInt((m[2] as string).replaceAll("_", ""));
-  return m[1] === "-" ? -v : v;
-}
-
 const INT64_MIN = -(2n ** 63n);
 const INT64_MAX = 2n ** 63n - 1n;
 

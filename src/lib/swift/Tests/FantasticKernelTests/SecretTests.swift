@@ -47,15 +47,29 @@ private final class SecretProbe: AgentBundle, @unchecked Sendable {
             return .object(["key": .string(ISSUED), "note": .string("issued")])
         case "fail":
             throw PyError("RuntimeError", "rejected key \(payload["key"].asString ?? "")")
+        case "marks":
+            // what THIS dispatch's caller marked (python `current_secret()`)
+            return .object(["marks": .array(KernelTaskLocals.currentSecret.map { .string($0) })])
+        case "nest":
+            // the handler's OWN send (unmarked) sees none of its caller's marks
+            let inner = await KernelTaskLocals.$currentSender.withValue(nil) {
+                await kernel.send([Item(agentId, .object(["type": .string("marks")]))])[0]
+            }
+            return .object([
+                "outer": .array(KernelTaskLocals.currentSecret.map { .string($0) }),
+                "inner": inner.result["marks"],
+            ])
         default:
             return .object(["error": .string("unknown verb \(pyRepr(verb))")])
         }
     }
 
     /// The swift carrier: `keep` stores the blob, `give` answers with a body.
-    func handleBinary(agentId: AgentId, header: JSON, blob: Data, kernel: Kernel) async throws
+    func handleBinary(agentId: AgentId, header: JSON, body: Blob?, kernel: Kernel) async throws
         -> (JSON?, Data?)
     {
+        // the chunk is the payload's `bytes` — python's `payload.get("bytes", b"")`
+        let blob = bodyAt(body, "bytes") ?? Data()
         switch header["type"].asString ?? "" {
         case "keep":
             lock.withLock {
@@ -98,9 +112,9 @@ private func mk(_ k: Kernel, _ aid: String = "vault") async -> AgentId {
 
 private func item(
     _ target: AgentId, _ payload: OrderedDictionary<String, JSON>, secret: JSON?,
-    id: String? = nil, binary: Data? = nil
+    id: String? = nil, binary: Blob? = nil, rawReply: Bool = false
 ) -> Item {
-    var it = Item(target, .object(payload), id: id, binary: binary)
+    var it = Item(target, .object(payload), id: id, binary: binary, rawReply: rawReply)
     it.secret = secret
     return it
 }
@@ -180,6 +194,25 @@ struct SecretTests {
             #expect(out.result["error"].asString == text, "\(out.result.serialize())")
         }
         #expect(probe.got.isEmpty, "a refused item must not reach the handler")
+    }
+
+    // ─── the handler's view of the marks (python `current_secret()`) ────────
+
+    @Test func theHandlerSeesItsCallersMarksAndItsOwnSendsDoNot() async {
+        let probe = SecretProbe()
+        let k = makeKernel(probe)
+        let a = await mk(k)
+        let marked = await k.send([
+            item(a, ["type": .string("marks"), "key": .string(KEY)], secret: paths("payload.key", "result"))
+        ])[0]
+        #expect(marked.result["marks"] == paths("payload.key", "result"), "\(marked.asJSON.serialize())")
+        let bare = await k.send([item(a, ["type": .string("marks")], secret: nil)])[0]
+        #expect(bare.result["marks"] == .array([]))
+        let nested = await k.send([
+            item(a, ["type": .string("nest"), "key": .string(KEY)], secret: paths("payload.key"))
+        ])[0]
+        #expect(nested.result["outer"] == paths("payload.key"), "\(nested.asJSON.serialize())")
+        #expect(nested.result["inner"] == .array([]), "a task's own sends do not inherit the marks")
     }
 
     // ─── a secret payload field ─────────────────────────────────────────────
@@ -360,7 +393,7 @@ struct SecretTests {
         let out = await k.send([
             item(
                 a, ["type": .string("keep"), "path": .string("k")], secret: paths("payload.bytes"),
-                binary: Data(KEY.utf8))
+                binary: Blob("bytes", Data(KEY.utf8)))
         ])[0]
         #expect(out.status == .completed, "\(out.result.serialize())")
         #expect(probe.blobs == [Data(KEY.utf8)], "the target gets the real blob")
@@ -386,7 +419,7 @@ struct SecretTests {
         let out = await k.send([
             item(
                 a, ["type": .string("give")], secret: paths("result.bytes"), id: "give-1",
-                binary: Data())
+                rawReply: true)
         ])[0]
         #expect(out.body == Data(ISSUED.utf8), "the caller gets the real body")
         let mine = await ledger(k).first { $0["name"].asString == "give-1" }

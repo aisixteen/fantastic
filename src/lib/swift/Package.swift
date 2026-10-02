@@ -15,6 +15,9 @@
 //     (FantasticIoBridge is exported so external hosts — e.g. the
 //      fantastic_relay router — reuse the canonical IngressRules /
 //      egress rules instead of a local copy)
+//   • FantasticFMBridge (static)      — the C ABI over the on-device
+//                                       Foundation Models core, linked by the
+//                                       rust kernel (`fm_bridge.h`)
 //   • fantastic                       — CLI executable
 //
 // FantasticKernelEmbedded is the multi-platform sandbox-safe tier
@@ -52,14 +55,18 @@ let package = Package(
             "FantasticWebWS",
             "FantasticWebRest",
             "FantasticOllamaBackend",
-            "FantasticNvidiaNimBackend",
-            "FantasticAnthropicBackend",
             "FantasticResponsesBackend",
-            "FantasticLlamaCppBackend",
             "FantasticVllmBackend",
+            "FantasticFoundationModelsBackend",
             "FantasticRamStore",
+            "FantasticCredentialStore",
         ]),
         .library(name: "FantasticKernelStartup", targets: ["FantasticKernelStartup"]),
+        // THE C ABI over the on-device Foundation Models core, as a STATIC
+        // library (`libFantasticFMBridge.a`): the rust foundation_models_backend
+        // links it, so both kernels run ONE implementation of the FM calls. The
+        // contract is `Sources/FantasticFMBridge/fm_bridge.h`.
+        .library(name: "FantasticFMBridge", type: .static, targets: ["FantasticFMBridge"]),
 
         // Apple-app-facing umbrella products. Both `@_exported import`
         // the kernel public surface; the tier split is realized by
@@ -82,7 +89,7 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),
         .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.27.0"),
         // Cross-platform (macOS + Linux) streaming HTTP client for the LLM
-        // backends — replaces URLSession.bytes (Apple-only) so ollama/nvidia
+        // backends — replaces URLSession.bytes (Apple-only) so ollama/vllm
         // stream on Linux too. NIO-based, shares the swift-nio above.
         .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.20.0"),
     ],
@@ -144,6 +151,14 @@ let package = Package(
         .target(
             name: "FantasticRamStore",
             dependencies: ["FantasticKernel", "FantasticJSON",
+                           .product(name: "OrderedCollections", package: "swift-collections")]
+        ),
+        // The CREDENTIAL STORE (python `security/credential_store`): secrets by
+        // ref, each bound to one host, read only with a secret mark, behind
+        // per-ref grants; file (0600, through `fs`), OS keychain or env backend.
+        .target(
+            name: "FantasticCredentialStore",
+            dependencies: ["FantasticKernel", "FantasticJSON", "FantasticFile",
                            .product(name: "OrderedCollections", package: "swift-collections")]
         ),
         .target(
@@ -248,32 +263,11 @@ let package = Package(
                            .product(name: "AsyncHTTPClient", package: "async-http-client"),
                            .product(name: "NIOCore", package: "swift-nio")]
         ),
-        .target(
-            name: "FantasticNvidiaNimBackend",
-            dependencies: ["FantasticAICore", "FantasticKernel", "FantasticJSON",
-                           .product(name: "OrderedCollections", package: "swift-collections"),
-                           .product(name: "AsyncHTTPClient", package: "async-http-client"),
-                           .product(name: "NIOCore", package: "swift-nio")]
-        ),
         // TEST-ONLY fixture agents for the shared e2e scenarios. Registration
         // is behind `-DSCENARIO_PROBES`, which only the e2e driver builds with.
         .target(
             name: "FantasticScenarioProbes",
             dependencies: ["FantasticKernel", "FantasticJSON"]
-        ),
-        .target(
-            name: "FantasticLlamaCppBackend",
-            dependencies: ["FantasticAICore", "FantasticKernel", "FantasticJSON",
-                           .product(name: "OrderedCollections", package: "swift-collections"),
-                           .product(name: "AsyncHTTPClient", package: "async-http-client"),
-                           .product(name: "NIOCore", package: "swift-nio")]
-        ),
-        .target(
-            name: "FantasticAnthropicBackend",
-            dependencies: ["FantasticAICore", "FantasticKernel", "FantasticJSON",
-                           .product(name: "OrderedCollections", package: "swift-collections"),
-                           .product(name: "AsyncHTTPClient", package: "async-http-client"),
-                           .product(name: "NIOCore", package: "swift-nio")]
         ),
         .target(
             name: "FantasticResponsesBackend",
@@ -290,6 +284,27 @@ let package = Package(
                            .product(name: "OrderedCollections", package: "swift-collections"),
                            .product(name: "AsyncHTTPClient", package: "async-http-client"),
                            .product(name: "NIOCore", package: "swift-nio")]
+        ),
+        // Apple Foundation Models (on-device). FMCore is THE ONE implementation
+        // of the FoundationModels calls — availability, the window, a raw-text
+        // delta stream over a rebuilt transcript; Foundation only, the FM import
+        // gated inside (`#if canImport(FoundationModels) && os(macOS)`, macOS 26+
+        // at run time), so every other platform compiles and refuses at use. The
+        // bundle uses it directly; FMBridge exposes it to rust as a C ABI.
+        .target(name: "FantasticFMCore"),
+        .target(
+            name: "FantasticFMBridge",
+            dependencies: ["FantasticFMCore"],
+            // The C header is the contract's documentation for the rust side; a
+            // Swift target compiles none of it.
+            exclude: ["fm_bridge.h"]
+        ),
+        .target(
+            name: "FantasticFoundationModelsBackend",
+            dependencies: ["FantasticAICore", "FantasticFMCore", "FantasticKernel", "FantasticJSON",
+                           .product(name: "OrderedCollections", package: "swift-collections")],
+            // ONE readme for both runtimes — rust includes the same file.
+            resources: [.copy("Resources/readme.md")]
         ),
         // ── Shared runner lifecycle (mirrors FantasticAICore) ────
         // Cross-platform dispatch skeleton (reflect/boot/shutdown/
@@ -319,12 +334,11 @@ let package = Package(
                 "FantasticFile",
                 "FantasticScheduler", "FantasticStaticLoader", "FantasticCliBundle",
                 "FantasticKernelBridge", "FantasticWeb", "FantasticWebWS", "FantasticWebRest",
-                "FantasticRamStore",
-                "FantasticOllamaBackend", "FantasticNvidiaNimBackend",
-                "FantasticAnthropicBackend",
+                "FantasticRamStore", "FantasticCredentialStore",
+                "FantasticOllamaBackend",
                 "FantasticResponsesBackend",
-                "FantasticLlamaCppBackend",
                 "FantasticVllmBackend",
+                "FantasticFMCore", "FantasticFoundationModelsBackend",
                 "FantasticExecBridge",
             ]
         ),
@@ -338,7 +352,9 @@ let package = Package(
         // reap the real OS child, asserted on the pid, not on the Swift Task.
         .testTarget(
             name: "FantasticExecBridgeTests",
-            dependencies: ["FantasticExecBridge", "FantasticKernel", "FantasticJSON"]
+            dependencies: [
+                "FantasticExecBridge", "FantasticKernel", "FantasticJSON", "FantasticIoBridge",
+            ]
         ),
         // ── Cross-runtime parity (Phase 8J) ──────────────────────
         // Spawns the Python kernel binary as a subprocess +
@@ -399,7 +415,7 @@ let package = Package(
             ]
         ),
 
-        // Provider WIRE decoders — the ollama NDJSON / NIM SSE line→chunk
+        // Provider WIRE decoders — the ollama NDJSON / responses SSE line→chunk
         // mapping, extracted as PURE functions so the two-channel reading is
         // testable without a live server. Reading a single channel is exactly
         // how these shipped broken (a reasoning model's whole turn read as an
@@ -408,10 +424,29 @@ let package = Package(
         .testTarget(
             name: "FantasticAIBackendsTests",
             dependencies: [
-                "FantasticAICore", "FantasticOllamaBackend", "FantasticNvidiaNimBackend",
-                "FantasticAnthropicBackend",
-                "FantasticResponsesBackend",
-            "FantasticLlamaCppBackend", "FantasticVllmBackend", "FantasticJSON",
+                "FantasticAICore", "FantasticOllamaBackend",
+                "FantasticResponsesBackend", "FantasticVllmBackend", "FantasticJSON",
+                // The key reader against a real credential store (and the memory
+                // store an AI agent's record must name).
+                "FantasticKernel", "FantasticCredentialStore", "FantasticRamStore",
+                // An operator-marked secret holder: a real file_bridge
+                // (`SecretHoldersTests`).
+                "FantasticFile",
+                .product(name: "OrderedCollections", package: "swift-collections"),
+            ]
+        ),
+
+        // The on-device FM stack: the core's pure parts, the C ABI driven through
+        // its own `@_cdecl` functions, and the bundle — all against a FAKE engine.
+        // The one live test runs only with FM_LIVE=1.
+        .testTarget(
+            name: "FantasticFMTests",
+            dependencies: [
+                "FantasticFMCore", "FantasticFMBridge", "FantasticFoundationModelsBackend",
+                "FantasticAICore", "FantasticKernel", "FantasticJSON", "FantasticRamStore",
+                // the default registry carries the bundle
+                "FantasticKernelStartup",
+                .product(name: "OrderedCollections", package: "swift-collections"),
             ]
         ),
 
@@ -423,7 +458,7 @@ let package = Package(
                 "FantasticFile",
                 "FantasticScheduler", "FantasticStaticLoader", "FantasticCliBundle",
                 "FantasticKernelBridge", "FantasticWeb", "FantasticWebWS", "FantasticWebRest",
-                "FantasticKernelStartup", "FantasticRamStore",
+                "FantasticKernelStartup", "FantasticRamStore", "FantasticCredentialStore",
                 // The scenario fixtures are unit-tested here; only their
                 // REGISTRATION is behind -DSCENARIO_PROBES.
                 "FantasticScenarioProbes",
@@ -432,10 +467,6 @@ let package = Package(
                 // manifests name — and Yams to read the corpus itself.
                 .product(name: "Yams", package: "Yams"),
                 "FantasticExecBridge",
-                // The SCENARIO runner (ScenarioTests.swift) reads the shared
-                // scenarios at `e2e/tests/scenario/` and drives a live model,
-                // so it needs the anthropic backend and ordered maps.
-                "FantasticAnthropicBackend",
                 .product(name: "OrderedCollections", package: "swift-collections"),
                 // A stub leg's websocket endpoint is a NIO handler (the web
                 // route seam).

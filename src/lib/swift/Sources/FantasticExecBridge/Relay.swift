@@ -191,8 +191,9 @@
 
         /// Decode one child frame → (envelope, raw body). Kind `T`: JSON, no body.
         /// Kind `B`: the io_bridge binary frame — the envelope keeps `_binary_path`
-        /// (null there) and the body rides alongside, since `JSON` cannot hold bytes.
-        /// `nil` for a malformed frame or an unknown kind.
+        /// (its steps; null at that slot) and the body rides alongside, since `JSON`
+        /// cannot hold bytes. `nil` for a malformed frame — a `_binary_path` python's
+        /// `set_path` cannot place included — or an unknown kind.
         private static func unframe(_ body: Data) -> (env: JSON, body: Data?)? {
             guard let kind = body.first else { return nil }
             let rest = Data(body.dropFirst())
@@ -232,10 +233,10 @@
             }
             var head = envelope
             if case .object(var o) = head {
-                o["_binary_path"] = .string("payload.\(body.path)")
+                o["_binary_path"] = Codec.payloadPath(body.parts)
                 head = .object(o)
             }
-            pushBinary(header: head, body: body.data)
+            pushBinary(header: head, body: body.bytes)
         }
 
         /// Write one frame: `[4-byte BE len | kind | rest]`.
@@ -283,10 +284,16 @@
                 // read `type` without raising.
                 var item = Item(
                     AgentId(target), pyTruthy(m["payload"]) ? m["payload"] : .object([:]))
-                // A kind-B frame (bytes alongside, `_binary_path` = `payload.<field>`)
-                // carries its body on the item's BINARY channel — `JSON` cannot hold
-                // bytes, so that is the only way a program's `write_stream` chunk
-                // reaches the bundle, or a `read_stream` chunk comes back.
+                // The program's SECRET marks ride onto the item as sent; the
+                // kernel validates them (a bad mark is a refusal in the reply)
+                // and masks every record of the call. Python `if "secret" in m:
+                // item["secret"] = m["secret"]`.
+                if let marks = m.asObject?["secret"] { item.secret = marks }
+                // A kind-B frame (bytes alongside, `_binary_path` = `["payload", …]`)
+                // carries its body on the item's BINARY channel, AT ITS PATH in the
+                // payload — `JSON` cannot hold bytes, so that is the only way a
+                // program's `write_stream` chunk reaches the bundle, or a
+                // `read_stream` chunk comes back.
                 // A kind-T frame is JSON and nothing more: a `_binary_path` in it
                 // is an inert key (python's `decode_frame` only `loads` a str).
                 if let blob {
@@ -312,7 +319,7 @@
                         self?.push(env)
                         return
                     }
-                    env["_binary_path"] = .string("data.bytes")
+                    env["_binary_path"] = Codec.binaryPath(["data", "bytes"])
                     self?.pushBinary(header: env, body: body)
                 }
             case "emit":

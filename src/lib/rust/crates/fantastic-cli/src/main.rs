@@ -53,6 +53,13 @@ fn register_default_bundles() -> BundleRegistry {
         fantastic_ram_store::HANDLER_MODULE,
         fantastic_ram_store::RamStoreBundle::default(),
     );
+    // SECRETS BY REF — every AI backend reads its key here (`credentials:
+    // {store, ref}` on its record), before each request. The OS keychain is
+    // reached only by a store whose record chooses `backend: keychain`.
+    reg.register(
+        fantastic_credential_store::HANDLER_MODULE,
+        fantastic_credential_store::CredentialStoreBundle::default(),
+    );
     // The render sink AI backends stream their reply to. Without it that
     // stream had nowhere to land on rust.
     reg.register(
@@ -102,24 +109,20 @@ fn register_default_bundles() -> BundleRegistry {
         fantastic_bridge::RelayConnectorBundle,
     );
     reg.register(
-        "nvidia_nim_backend.tools",
-        fantastic_nvidia_nim_backend::NvidiaNimBundle,
-    );
-    reg.register(
-        fantastic_llamacpp_backend::HANDLER_MODULE,
-        fantastic_llamacpp_backend::LlamaCppBundle,
-    );
-    reg.register(
-        fantastic_anthropic_backend::HANDLER_MODULE,
-        fantastic_anthropic_backend::AnthropicBundle,
-    );
-    reg.register(
         fantastic_responses_backend::HANDLER_MODULE,
         fantastic_responses_backend::ResponsesBundle,
     );
     reg.register(
         fantastic_vllm_backend::HANDLER_MODULE,
         fantastic_vllm_backend::VllmBundle,
+    );
+    // Apple's on-device model — the swift FMCore through its C ABI on macOS.
+    // Registered in both tiers and on every target, as swift's registry does:
+    // where the model cannot run, a send fails naming why. Registering it calls
+    // nothing; the model is asked only when an agent is used.
+    reg.register(
+        fantastic_foundation_models_backend::HANDLER_MODULE,
+        fantastic_foundation_models_backend::FoundationModelsBackendBundle::system(),
     );
     // ── Full-tier-only bundles (subprocess / dynamic-loading / etc.).
     //
@@ -600,15 +603,26 @@ async fn dispatch(
         return Err(msg.into());
     }
 
+    // The stop handlers go in BEFORE `[kernel] up`: whoever reads that line may
+    // signal at once, and a SIGTERM that landed before the handler existed took
+    // the default action — the process died with no teardown and the lock held
+    // (`daemon_output_lines_match_python` flaked on exactly that window).
+    let mut stop = match StopSignals::install() {
+        Ok(s) => s,
+        Err(e) => {
+            kernel.shutdown().await;
+            bootstrap::shutdown(&workdir)?;
+            return Err(format!("cannot install the stop-signal handlers: {e}").into());
+        }
+    };
+
     // A14.13 — python `print("[kernel] up", flush=True)`. The tty half
     // (`cli` intro/booted verbs) has no rust counterpart (A14.14, above).
     println!("[kernel] up");
     let _ = std::io::Write::flush(&mut std::io::stdout());
 
     let sig = tokio::select! {
-        _ = tokio::signal::ctrl_c() => "SIGINT",
-        _ = sigterm() => "SIGTERM",
-        _ = sighup() => "SIGHUP",
+        sig = stop.recv() => sig,
         // A root-only `kernel_stop` verb fired (over web_rest / web_ws).
         // The verb already DEFERRED this signal ~100ms (see send.rs) so the
         // ack was enqueued + flushed over the web surface (WS frame across
@@ -645,34 +659,56 @@ async fn dispatch(
     Ok(ExitCode::SUCCESS)
 }
 
+/// The daemon's stop signals — SIGINT, SIGTERM and SIGHUP, the three python's
+/// `_request_stop` handles. INSTALLED by [`StopSignals::install`]: from the moment
+/// it returns, a delivered signal is HELD until [`StopSignals::recv`] takes it,
+/// however late that await starts. A registration that fails is an error, never a
+/// signal quietly left at its default action.
 #[cfg(unix)]
-async fn sighup() {
-    use tokio::signal::unix::{signal, SignalKind};
-    let mut s = match signal(SignalKind::hangup()) {
-        Ok(s) => s,
-        Err(_) => return std::future::pending::<()>().await,
-    };
-    s.recv().await;
-}
-
-#[cfg(not(unix))]
-async fn sighup() {
-    std::future::pending::<()>().await
+struct StopSignals {
+    int: tokio::signal::unix::Signal,
+    term: tokio::signal::unix::Signal,
+    hup: tokio::signal::unix::Signal,
 }
 
 #[cfg(unix)]
-async fn sigterm() {
-    use tokio::signal::unix::{signal, SignalKind};
-    let mut s = match signal(SignalKind::terminate()) {
-        Ok(s) => s,
-        Err(_) => return std::future::pending::<()>().await,
-    };
-    s.recv().await;
+impl StopSignals {
+    fn install() -> std::io::Result<Self> {
+        use tokio::signal::unix::{signal, SignalKind};
+        Ok(Self {
+            int: signal(SignalKind::interrupt())?,
+            term: signal(SignalKind::terminate())?,
+            hup: signal(SignalKind::hangup())?,
+        })
+    }
+
+    /// The name of the first stop signal to arrive.
+    async fn recv(&mut self) -> &'static str {
+        tokio::select! {
+            _ = self.int.recv() => "SIGINT",
+            _ = self.term.recv() => "SIGTERM",
+            _ = self.hup.recv() => "SIGHUP",
+        }
+    }
 }
 
+/// Off unix there is only Ctrl-C (python's loop cannot install signal handlers
+/// there either).
 #[cfg(not(unix))]
-async fn sigterm() {
-    std::future::pending::<()>().await
+struct StopSignals;
+
+#[cfg(not(unix))]
+impl StopSignals {
+    fn install() -> std::io::Result<Self> {
+        Ok(Self)
+    }
+
+    async fn recv(&mut self) -> &'static str {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("the Ctrl-C handler must install");
+        "SIGINT"
+    }
 }
 
 /// k=v value coercion for one-shot `fantastic <id> <verb> k=v`. Mirrors the
@@ -727,6 +763,30 @@ mod parse_kv_tests {
         assert_eq!(parse_kv("hello"), json!("hello"));
         assert_eq!(parse_kv("a{b"), json!("a{b"));
         assert_eq!(parse_kv("web.tools"), json!("web.tools"));
+    }
+}
+
+/// The daemon installs its stop handlers BEFORE it prints `[kernel] up`; this
+/// pins what that buys: a SIGTERM that lands after `install` and before anyone
+/// awaits is HELD for `recv`, not lost to the default action (which killed the
+/// process with no teardown when the handler was only registered on the first
+/// poll, after the up line).
+#[cfg(all(test, unix))]
+mod stop_signal_tests {
+    use super::StopSignals;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn a_sigterm_before_the_wait_is_held_not_lost() {
+        let mut stop = StopSignals::install().expect("install the stop handlers");
+        // Safety: `raise` only delivers SIGTERM to this process, whose handler is
+        // installed above (tokio keeps it for the life of the process).
+        assert_eq!(unsafe { libc::raise(libc::SIGTERM) }, 0);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let got = tokio::time::timeout(Duration::from_secs(5), stop.recv())
+            .await
+            .expect("the SIGTERM raised before the wait must be held");
+        assert_eq!(got, "SIGTERM");
     }
 }
 

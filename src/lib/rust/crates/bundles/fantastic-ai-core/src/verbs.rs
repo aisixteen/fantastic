@@ -1,6 +1,6 @@
 //! Verb entrypoints the backends dispatch through. A backend's `Bundle`
-//! does only its own pre-checks (api_key, the required record fields) +
-//! provider build, then calls these. The provider is the per-backend seam,
+//! does only its own provider build (from the record's fields), then calls
+//! these. The provider is the per-backend seam,
 //! constructed by the backend and passed in per `send`.
 
 use crate::agent_loop::{run_generation, BackendConfig, GenFailure, Generation};
@@ -80,9 +80,15 @@ pub const CONCURRENCY_DOC: &str = "Per-backend FIFO lock around `send`: one gene
 ///
 /// `model`/`endpoint` are the RECORD's values, raw (absent ⇒ `null`: nothing is
 /// guessed); `context_strategy` takes its default only when ABSENT — a `null`
-/// on the record reflects back as `null`.
+/// on the record reflects back as `null`. `context_window` resolves against
+/// `model_window`, the backend's own window ([`BackendConfig::model_window`]).
 #[must_use]
-pub fn reflect_base(agent_id: &AgentId, kernel: &Kernel, sentence: &str) -> Map<String, Value> {
+pub fn reflect_base(
+    agent_id: &AgentId,
+    kernel: &Kernel,
+    sentence: &str,
+    model_window: i64,
+) -> Map<String, Value> {
     let meta = agent_meta(agent_id, kernel);
     let mut out = Map::new();
     out.insert("id".to_string(), json!(agent_id.as_str()));
@@ -98,7 +104,7 @@ pub fn reflect_base(agent_id: &AgentId, kernel: &Kernel, sentence: &str) -> Map<
     );
     out.insert(
         "context_window".to_string(),
-        json!(resolve_context_window(&meta)),
+        json!(resolve_context_window(&meta, model_window)),
     );
     out.insert(
         "context_strategy".to_string(),
@@ -192,6 +198,7 @@ pub async fn history(
     agent_id: &AgentId,
     payload: &Value,
     kernel: &Arc<Kernel>,
+    model_window: i64,
 ) -> MemResult<Value> {
     let fold_raw = payload.get("fold").filter(|v| !v.is_null());
     let mut head: Option<Value> = None;
@@ -260,7 +267,7 @@ pub async fn history(
     let meta = agent_meta(agent_id, kernel);
     let (kept, truncated) = crate::context::fit_reply(
         &digests,
-        crate::context::inline_cap(&meta),
+        crate::context::inline_cap(&meta, model_window),
         (limit != 0).then_some(limit),
     );
     let next = truncated
@@ -299,7 +306,12 @@ fn recall_render(m: &Value) -> String {
 /// The reply is python's and nothing more: `{messages, total, truncated[,
 /// note]}`. There is no `client_id` — a model reading its own recall was handed
 /// a key python does not send.
-pub async fn recall(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> MemResult<Value> {
+pub async fn recall(
+    agent_id: &AgentId,
+    payload: &Value,
+    kernel: &Arc<Kernel>,
+    model_window: i64,
+) -> MemResult<Value> {
     let full = load_history(agent_id, kernel, true).await?;
     let null = Value::Null;
     // python `str(payload.get("query") or "").lower().strip()`.
@@ -338,7 +350,7 @@ pub async fn recall(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -
     // asked for is kept) and says so, with the index to continue from — the
     // caller loses a page, never the run. Measured on the WHOLE reply serialized
     // as one user turn, which is the unit delivery measures.
-    let cap = crate::context::inline_cap(&agent_meta(agent_id, kernel));
+    let cap = crate::context::inline_cap(&agent_meta(agent_id, kernel), model_window);
     let render_page = |pg: &[&(usize, &Value)]| -> Vec<Value> {
         pg.iter()
             .map(|(i, m)| json!({"index": i, "role": m.get("role"), "content": recall_render(m)}))
@@ -404,7 +416,11 @@ pub async fn recall(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -
 
 /// `context_status` verb: the context-budget posture + the last overflow
 /// projection + the model's derived reaction to it. Read-only.
-pub async fn context_status(agent_id: &AgentId, kernel: &Arc<Kernel>) -> MemResult<Value> {
+pub async fn context_status(
+    agent_id: &AgentId,
+    kernel: &Arc<Kernel>,
+    model_window: i64,
+) -> MemResult<Value> {
     let meta = agent_meta(agent_id, kernel);
     let state = state_for(agent_id);
     let last_projection = state
@@ -425,9 +441,9 @@ pub async fn context_status(agent_id: &AgentId, kernel: &Arc<Kernel>) -> MemResu
     let calib = state.calib.lock().expect("calib poisoned").unwrap_or(1.0);
     let reported = *state.reported.lock().expect("reported poisoned");
     Ok(json!({
-        "context_window": resolve_context_window(&meta),
+        "context_window": resolve_context_window(&meta, model_window),
         "output_reserve": output_reserve(&meta),
-        "budget": agent_budget(&meta),
+        "budget": agent_budget(&meta, model_window),
         "trigger": TRIGGER,
         "calibration": round3(calib),
         "reported_prompt_tokens": reported,
@@ -481,8 +497,8 @@ impl Drop for QueuedGuard {
 /// The shared `send` flow: guard the call chain → the memory store named (fail
 /// loud) → a `late` reply recorded, never a turn → enqueue → FIFO lock → run the
 /// generation under a timeout → clean up → ROUTE the pass's output. The backend
-/// supplies a built `provider` (it has already failfast-checked its api_key and
-/// required record fields) and its `cfg`.
+/// supplies a built `provider` (its key is read inside the pass, before each
+/// request — [`crate::credentials`]) and its `cfg`.
 ///
 /// The generation runs INLINE in this dispatch — the backend spawns no task of
 /// its own. It doesn't need to: a `send` IS a kernel task (`"<agent>:<n>"`, one
@@ -496,12 +512,12 @@ impl Drop for QueuedGuard {
 /// dispatch just held. Only a pass that did not error is routed
 /// (python `core.py:1183`) — a broken chain must not keep spending turns.
 ///
-/// `Err` is python's RAISE — an unmapped provider failure propagates out of the
-/// handler, and the kernel settles that execution as FAILED with
-/// `{error: "RuntimeError: <msg>", raised: true}`. A mapped failure, a refusal
-/// and a timeout are all `Ok`: the turn ANSWERED.
+/// `Err` is python's RAISE — a provider failure propagates out of the handler,
+/// and the kernel settles that execution as FAILED with
+/// `{error: "RuntimeError: <msg>", raised: true}`. A refusal and a timeout are
+/// both `Ok`: the turn ANSWERED.
 pub async fn send(
-    provider: Option<Arc<dyn Provider>>,
+    provider: Arc<dyn Provider>,
     agent_id: &AgentId,
     payload: &Value,
     kernel: &Arc<Kernel>,
@@ -618,19 +634,6 @@ pub async fn send(
         .await?;
         return Ok(json!({"late": true, "client_id": client_id}));
     }
-    // A BACKEND WHOSE PROVIDER IS A PRECONDITION FAILFASTS HERE — python
-    // `_send`'s `if cfg.require_provider`, AFTER the recursion guard and with
-    // the caller's `client_id` on the refusal. nvidia's unset `NVIDIA_API_KEY`
-    // is the only case; rust used to answer it from the backend BEFORE the
-    // guard and without the `client_id`.
-    let Some(provider) = provider else {
-        return Ok(json!({
-            "error": cfg
-                .provider_missing_error
-                .map_or_else(|| format!("{}: provider unavailable", cfg.name), str::to_string),
-            "client_id": client_id,
-        }));
-    };
     let send_id = mint_send_id();
     let state = state_for(agent_id);
 
@@ -782,13 +785,12 @@ pub async fn send(
             .await;
             json!({"error": e.0, "reason": "memory_store", "client_id": client_id})
         }
-        // PROVIDER FAILURE, TWO KINDS (python `core.py`'s `except Exception`).
-        // Either way `status(done, reason='error', error=str(e))` announces it.
-        // The backend's mapper turns nvidia's HTTP-status answers into a clean
-        // sentence the caller READS; everything else python re-raises, and a
-        // raise is a FAILED execution — which is what makes `retries` live and
-        // dead-lettering possible. Rust used to answer every failure with a
-        // completed `{error, client_id}`, so no AI failure was ever retryable.
+        // PROVIDER FAILURE (python `core.py`'s `except Exception`):
+        // `status(done, reason='error', error=str(e))` announces it, then python
+        // re-raises, and a raise is a FAILED execution — which is what makes
+        // `retries` live and dead-lettering possible. Rust used to answer every
+        // failure with a completed `{error, client_id}`, so no AI failure was
+        // ever retryable.
         Ok(Err(GenFailure::Provider(pe))) => {
             emit_status(kernel, &state, agent_id, &client_id, "done", {
                 let mut m = Map::new();
@@ -797,12 +799,8 @@ pub async fn send(
                 m
             })
             .await;
-            if pe.mapped {
-                json!({"error": pe.message, "client_id": client_id})
-            } else {
-                raise = Some((pe.kind, pe.message));
-                Value::Null
-            }
+            raise = Some((pe.kind, pe.message));
+            Value::Null
         }
         Err(_elapsed) => {
             // THE DETAIL IS `reason` AND THE AUTO-FILLS, nothing else — python
@@ -873,6 +871,7 @@ pub async fn send(
                 // THE LAYER'S PER-CALL DEADLINE, threaded to every model call the
                 // router dispatches. The kernel defaults nothing.
                 timeout_secs,
+                cfg.model_window,
                 message_id,
                 dead_turn,
             )
@@ -1243,8 +1242,8 @@ pub fn request_share(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
 /// `VERBS` table — except `reflect`, which carries each backend's own extras, and
 /// the unknown-type refusal, which names the backend. `None` = not one of these.
 ///
-/// `provider_for(client_id)` builds the backend's provider (`None` = the
-/// backend's precondition is unmet — nvidia with no key).
+/// `provider_for(client_id)` builds the backend's provider — always: a record
+/// missing what a pass needs raises from inside that pass, naming the field.
 pub async fn handle_common<F>(
     agent_id: &AgentId,
     payload: &Value,
@@ -1253,7 +1252,7 @@ pub async fn handle_common<F>(
     provider_for: F,
 ) -> Result<Option<Value>, BundleError>
 where
-    F: Fn(&str) -> Option<Arc<dyn Provider>>,
+    F: Fn(&str) -> Arc<dyn Provider>,
 {
     let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
     let client_id = safe_client(
@@ -1275,19 +1274,22 @@ where
                 inquiry_close(out, payload)
             }
         },
-        "history" => history(agent_id, payload, kernel).await?,
+        "history" => history(agent_id, payload, kernel, cfg.model_window).await?,
         "status" => status(agent_id, payload),
-        "context_status" => context_status(agent_id, kernel).await?,
-        "recall" => recall(agent_id, payload, kernel).await?,
+        "context_status" => context_status(agent_id, kernel, cfg.model_window).await?,
+        "recall" => recall(agent_id, payload, kernel, cfg.model_window).await?,
         // FIND the line anywhere in memory — rows, shared rows, bodies held this run.
-        "grep" => crate::retrieval::grep(agent_id, payload, kernel).await?,
+        "grep" => crate::retrieval::grep(agent_id, payload, kernel, cfg.model_window).await?,
         // Rebuild the view from the store: on boot, after folds, on request.
         "context_recall" => {
             let p = provider_for(DEFAULT_CLIENT_ID);
-            crate::retrieval::context_recall(agent_id, payload, kernel, p.as_ref()).await?
+            crate::retrieval::context_recall(agent_id, payload, kernel, Some(&p), cfg.model_window)
+                .await?
         }
         // A new thread on the same store: the view starts here, nothing is deleted.
-        "context_clear" => crate::retrieval::context_clear(agent_id, payload, kernel).await?,
+        "context_clear" => {
+            crate::retrieval::context_clear(agent_id, payload, kernel, cfg.model_window).await?
+        }
         // CONTEXT BY GRANT: start from another agent's shared rows; ask an owner.
         "fork_from" => fork_from(agent_id, payload, kernel).await?,
         "request_share" => request_share(agent_id, payload, kernel),

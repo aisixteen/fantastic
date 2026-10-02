@@ -20,7 +20,7 @@ private let BIG = FOLD_BIG
 /// to drive `assemble`/`contextRecall`/`projectContext` directly — python drives
 /// `core._assemble` and `_context_recall` as functions the same way.
 private func boot(
-    config: AIBackendConfig = baseConfig { .provider(MockProvider()) },
+    config: AIBackendConfig = baseConfig { MockProvider() },
     contextWindow: Int64 = 12000,
     meta: OrderedDictionary<String, JSON> = ["output_reserve": .integer(0)]
 ) async -> (Kernel, Agent, FoldFixture, AIBackend) {
@@ -89,7 +89,7 @@ struct ViewRecallTests {
         let r = await kernel.send([
             Item(agent.id, .object(["type": .string("grep"), "query": .string("marker")]))
         ])[0].result
-        let cap = AIContext.inlineCap(agent)
+        let cap = AIContext.inlineCap(agent, modelWindow: AIConstants.DEFAULT_CONTEXT_WINDOW)
         #expect(
             AIContext.estimateOne(
                 .object(["role": .string("user"), "content": .string(r.serialize())])) <= cap + 64)
@@ -248,7 +248,7 @@ struct ViewRecallTests {
     /// view_for_rebuilding`.
     @Test func bootIsLazyAndMarksTheViewForRebuilding() async throws {
         let (kernel, agent, f, backend) = await boot(
-            config: baseConfig { .refused(.object(["error": .string("no provider")])) })
+            config: baseConfig { throw PyError("RuntimeError", "no provider") })
         f.seed([f.row("user", "GOAL", "user:goal")] + f.chain("a", 8))
         let bootVerb: JSON = .object(["type": .string("boot")])
         let before = storeRows(kernel: kernel, id: agent.id).count
@@ -296,7 +296,7 @@ struct ViewRecallTests {
     /// 2026-09-13 (recall_after_fold:swift): 6 folds, 0 recalls.
     @Test func anOwedRecallRunsAtTheStartOfTheNextLiveTurn() async throws {
         let (kernel, agent, f, _) = await boot(
-            config: baseConfig { .provider(MockProvider(tokens: ["ok ", doneEnvelope])) },
+            config: baseConfig { MockProvider(tokens: ["ok ", doneEnvelope]) },
             contextWindow: 32000,
             meta: ["output_reserve": .integer(0)])
         f.seed([f.row("user", "GOAL", "user:goal")] + f.chain("a", 4, big: false))

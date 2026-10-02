@@ -34,6 +34,25 @@ egress-only stem into `auth` — seals the leg AND names the mistake, rather tha
 looking like an ordinary seal. That failure was real: `auth: silent` used to seal
 every inbound call while reporting only a bare unknown name.
 
+## Secret marks cross the wire
+A call frame is `{type:"call", id, target, payload, caller?, secret?}`. `secret` is
+the batch item's marked paths (`payload.<field…>` / `result[.<field…>]`), carried
+verbatim: the receiving kernel dispatches the item WITH them, so its call/settle
+rows, ledger, state stream and memory store show `<secret>` exactly as the caller's
+do, and a malformed mark is its own refusal, before dispatch. The reply carries the
+real result back. No leg, transport or codec logs or keeps a frame. EXCEPT a relay:
+`relay_connector` is SEALED for marks (relayd records what it routes unmasked) — it
+refuses a marked `forward` and answers a marked inbound `call` with a refusal.
+
+`forward` takes the marks from ITS OWN call and re-roots them at the forwarded item:
+`payload.payload.<f…>` → `payload.<f…>`, `result[.<f…>]` as is; a mark on forward's
+own fields (`payload.target`, `payload.timeout`) stays on this kernel's record.
+```
+send([{target:"<bridge>", payload:{type:"forward", target:"creds",
+       payload:{type:"set", ref, host, fields:{api_key:"…"}}},
+       secret:["payload.payload.fields"]}])
+```
+
 ## Derivations (the actual agents)
 `ws_bridge` · `relay_connector` · `web_ws` · `web_rest` · `file_bridge` ·
 `exec_bridge` — each has its own readme; `reflect readme=true` on the sealed agent to

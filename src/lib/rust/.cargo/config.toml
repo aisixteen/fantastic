@@ -1,0 +1,11 @@
+# The macOS deployment target of every binary this workspace links.
+#
+# 14.0, not rustc's default 11.0: the rust foundation_models_backend links the
+# swift FantasticFMBridge static library, whose objects are built for macOS 14
+# (src/lib/swift/Package.swift `.macOS(.v14)`). Linked for 11.0, the Swift
+# runtime it needs (libswift_Concurrency) resolves through `@rpath` — not in the
+# OS before macOS 12 — and the binary aborts at launch in dyld. The crate's
+# build.rs refuses a build whose target is below 14.0, naming this variable.
+# Ignored on every non-Apple target.
+[env]
+MACOSX_DEPLOYMENT_TARGET = "14.0"

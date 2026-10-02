@@ -1,7 +1,7 @@
 //! Thinking: PARSED, not PERSISTED.
 //!
 //! A reasoning model streams two things. ollama labels them `message.thinking` /
-//! `message.content`; NIM labels them `reasoning_content` / `content`. We must
+//! `message.content`; vLLM labels them `reasoning_content` / `content`. We must
 //! read BOTH — a turn spent entirely reasoning is otherwise an empty completion
 //! that silently ends the chain (measured on gemma4:12b, 2026-08-02). But we
 //! must not KEEP both: feeding a reasoning model its own prior deliberation back
@@ -13,7 +13,7 @@
 //! the STRIPPED text is persisted and shown as the answer. One convention, no
 //! provider learns anything about the tool protocol.
 //!
-//! This lives in its own module because the provider crates (ollama, NIM) import
+//! This lives in its own module because the provider crates (ollama, vllm) import
 //! the markers — they are wire vocabulary, not loop internals.
 
 /// Opening marker a provider wraps reasoning-channel text in.
@@ -121,21 +121,15 @@ impl ThinkWrap {
 }
 
 /// Decode ONE OpenAI-style streaming `delta` into text pieces, reading BOTH
-/// channels. `wrap` carries the per-TURN reasoning span across deltas.
+/// channels. `wrap` carries the per-TURN reasoning span across deltas. A
+/// property of the `/v1/chat/completions` streaming WIRE, not of a vendor.
 ///
-/// SHARED because more than one backend speaks this wire: NVIDIA NIM and
-/// `llama-server` both expose `/v1/chat/completions` with the same streaming
-/// shape, so this is a property of the WIRE, not of either vendor. It lived
-/// inside the NIM crate until llama.cpp needed it; a copy would have drifted on
-/// exactly the detail it exists to get right.
-///
-/// REASONING MODELS SPLIT THEIR OUTPUT. nemotron/deepseek-style models — and
-/// `llama-server` started with `--reasoning-format deepseek` — stream most
-/// tokens as `reasoning_content` and only the conclusion as `content`: measured
-/// 740 chars of reasoning to 129 of content on one NIM turn, and 602 to 176 on
-/// gemma-4-12B. Reading `content` alone silently drops whole turns — observed
-/// live, a model spent an entire pass reasoning, an EMPTY completion came back,
-/// and the chain died with no error anywhere.
+/// REASONING MODELS SPLIT THEIR OUTPUT. nemotron/deepseek-style models stream
+/// most tokens as `reasoning_content` and only the conclusion as `content`:
+/// measured 740 chars of reasoning to 129 of content on one turn, and 602 to
+/// 176 on gemma-4-12B. Reading `content` alone silently drops whole turns —
+/// observed live, a model spent an entire pass reasoning, an EMPTY completion
+/// came back, and the chain died with no error anywhere.
 pub fn decode_openai_delta(delta: &serde_json::Value, wrap: &mut ThinkWrap) -> Vec<String> {
     let mut out = Vec::new();
     let think = delta
@@ -161,11 +155,11 @@ pub fn decode_openai_delta(delta: &serde_json::Value, wrap: &mut ThinkWrap) -> V
     out
 }
 
-/// PROVIDER-REPORTED USAGE off one OpenAI-style streaming chunk — the NIM and
-/// `llama-server` wire alike: `usage.prompt_tokens` (on the last chunk, with
+/// PROVIDER-REPORTED USAGE off one OpenAI-style streaming chunk:
+/// `usage.prompt_tokens` (on the last chunk, with
 /// `stream_options.include_usage`) is what the window really held, and a
 /// `finish_reason` of `length` means the output stopped AT its bound
-/// (`max_tokens`). Python `NvidiaNimProvider.chat` / `LlamaCppProvider.chat`.
+/// (`max_tokens`). Python `VllmProvider.chat`.
 pub fn note_openai_usage(chunk: &serde_json::Value, report: &crate::provider::ReportCell) {
     let mut r = report.lock().expect("report poisoned");
     if let Some(n) = chunk
@@ -195,9 +189,9 @@ pub fn note_openai_usage(chunk: &serde_json::Value, report: &crate::provider::Re
 mod tests {
     use super::*;
 
-    /// PROVIDER-REPORTED USAGE, the OpenAI-compatible shape (nvidia NIM,
-    /// llama-server): `usage.prompt_tokens` calibrates the estimate, and a
-    /// `finish_reason` of `length` is the output stopping AT its bound.
+    /// PROVIDER-REPORTED USAGE, the OpenAI-compatible shape (vllm):
+    /// `usage.prompt_tokens` calibrates the estimate, and a `finish_reason` of
+    /// `length` is the output stopping AT its bound.
     #[test]
     fn openai_usage_reports_prompt_tokens_and_a_cut_as_max_tokens() {
         let report = crate::provider::ReportCell::default();

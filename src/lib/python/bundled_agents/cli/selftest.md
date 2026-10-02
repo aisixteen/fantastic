@@ -101,7 +101,6 @@ async def main():
     Cli(k, parent=root)
     await k.send('cli', {'type':'status','source':'ollama_x','phase':'queued','detail':{'ahead':2,'send_id':'a'}})
     await k.send('cli', {'type':'status','source':'ollama_x','phase':'thinking','detail':{}})
-    await k.send('cli', {'type':'status','source':'nv_x','phase':'thinking','detail':{'waiting_on':'rate_limit','wait_s':5}})
     await k.send('cli', {'type':'status','source':'ollama_x','phase':'tool_calling','detail':{'tool':{'call_id':'c1','target':'kernel_state','verb':'list_agents','args':{}}}})
     await k.send('cli', {'type':'status','source':'ollama_x','phase':'tool_calling','detail':{'tool':{'call_id':'c1','target':'kernel_state','verb':'list_agents','args':{},'reply_preview':'{ok:1}'}}})
     await k.send('cli', {'type':'status','source':'ollama_x','phase':'streaming','detail':{}})
@@ -113,11 +112,10 @@ Expected stdout:
 ```
   [ollama_x] queued (2 ahead)
   [ollama_x] thinking…
-  [nv_x] rate-limited; waiting 5s
   [ollama_x] → list_agents(kernel_state)  {}
   [ollama_x] ← list_agents(kernel_state)  {ok:1}
 ```
-Five lines exactly. `streaming` and `done` produce no output (token
+Four lines exactly. `streaming` and `done` produce no output (token
 and done verbs cover them).
 
 ### Test 6: reflect lists status as accepted event

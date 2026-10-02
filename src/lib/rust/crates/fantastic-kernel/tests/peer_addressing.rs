@@ -61,14 +61,24 @@ fn kernel(tmp: &TempDir, guid: Option<&str>) -> Arc<Kernel> {
 
 type Calls = Arc<Mutex<Vec<(String, Value, String)>>>;
 
+/// The `secret` marks each call handed the route, in call order.
+type Marks = Arc<Mutex<Vec<Vec<String>>>>;
+
 /// A fake route that records every call and answers `reply` (or `{ok: agent}`).
 fn route(via: &str, calls: &Calls, reply: Option<Value>) -> Arc<PeerRoute> {
+    route_marked(via, calls, reply, &Marks::default())
+}
+
+/// [`route`], also recording the `secret` marks of every call.
+fn route_marked(via: &str, calls: &Calls, reply: Option<Value>, marks: &Marks) -> Arc<PeerRoute> {
     let calls = Arc::clone(calls);
-    PeerRoute::new(via, move |agent_id, payload, caller, _body| {
+    let marks = Arc::clone(marks);
+    PeerRoute::new(via, move |agent_id, payload, caller, secret, _body| {
         calls
             .lock()
             .unwrap()
             .push((agent_id.clone(), payload, caller));
+        marks.lock().unwrap().push(secret);
         let r = reply.clone().unwrap_or_else(|| json!({"ok": agent_id}));
         Box::pin(async move { (r, None) })
     })
@@ -109,6 +119,49 @@ async fn an_operator_send_reaches_the_peer_agent_as_this_kernel() {
         *calls.lock().unwrap(),
         vec![("canvas".to_string(), payload, format!("{HOST}|kernel"))]
     );
+}
+
+/// The route gets the item's `secret` paths verbatim (rooted at the item, as the
+/// peer's item is), so the PEER masks its records; this kernel masks its own.
+#[tokio::test]
+async fn the_items_secret_marks_ride_to_the_peer() {
+    let tmp = TempDir::new().unwrap();
+    let k = kernel(&tmp, Some(HOST));
+    let calls = Calls::default();
+    let marks = Marks::default();
+    let r = route_marked("leg", &calls, Some(json!({"ok": true})), &marks);
+    assert!(k.register_peer(PAGE, &r).is_none());
+    let key = "sk-peer-0123456789";
+    let target = format!("{PAGE}|creds");
+    let out = k
+        .send(vec![Item::new(
+            AgentId::from(target.as_str()),
+            json!({"type": "set", "fields": {"api_key": key}}),
+        )
+        .with_secret(json!(["payload.fields", "result"]))])
+        .await
+        .remove(0);
+    assert_eq!(out.status.as_str(), "completed", "{:?}", out.result);
+    assert_eq!(
+        *calls.lock().unwrap(),
+        vec![(
+            "creds".to_string(),
+            json!({"type": "set", "fields": {"api_key": key}}),
+            format!("{HOST}|kernel")
+        )]
+    );
+    assert_eq!(
+        *marks.lock().unwrap(),
+        vec![vec!["payload.fields".to_string(), "result".to_string()]]
+    );
+    let row = k
+        .rows
+        .get_one(out.pid.unwrap().get())
+        .expect("the call row");
+    assert_eq!(row["payload"]["fields"], json!("<secret>"), "{row:?}");
+    // an unmarked call hands the route no marks
+    send(&k, &target, json!({"type": "reflect"}), None).await;
+    assert_eq!(marks.lock().unwrap().last(), Some(&Vec::new()));
 }
 
 #[tokio::test]

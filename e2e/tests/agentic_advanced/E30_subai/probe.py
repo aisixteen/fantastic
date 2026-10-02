@@ -84,17 +84,13 @@ if _ENV.exists():
 # The plug, resolved once (see e2e/backends): which model, reached how.
 BK = _resolve_backend()
 BACKEND, MODEL = BK.name, BK.model
-# No host is guessed here: a llamacpp plug needs FANTASTIC_LLAMACPP_ENDPOINT set,
-# and the plug (backends/) refuses to run without it. Read once, no default.
-LLAMACPP_ENDPOINT = os.environ.get("FANTASTIC_LLAMACPP_ENDPOINT")
 CTX = int(os.environ.get("CTX", "262144"))
-MAX_TOKENS_FIELD = int(os.environ.get("MAX_TOKENS", "0"))
-# The BUILDER's window, separately. `CTX` is sized for the LOCAL AI agent, whose window is
-# fixed at `llama-server` start (`n_ctx_slot`), and claiming more than the server has is
-# a lie the Context Protocol would then plan against. A hosted builder has its own, much
-# larger, window — measured 2026-08-07: the combined arm ran opus inside 31744 usable
-# tokens and spent calls on `context_status`/`recall` managing a ceiling that was the
-# harness's, not the model's. Defaults to CTX, so unset behaves as before.
+# The BUILDER's window, separately. `CTX` is sized for `brain`, whose window is the
+# server's, and claiming more than the server has is a lie the Context Protocol would
+# then plan against. A builder on another plug has its own window — measured
+# 2026-08-07: the combined arm ran its builder inside 31744 usable tokens and spent
+# calls on `context_status`/`recall` managing a ceiling that was the harness's, not
+# the model's. Defaults to CTX, so unset behaves as before.
 BUILDER_CTX = int(os.environ.get("BUILDER_CTX", str(CTX)))
 IDLE = float(os.environ.get("IDLE", "240"))
 # A CEILING. Without one these harnesses end only on IDLE: runs have reached turn
@@ -203,14 +199,13 @@ def box(title: str, body: str, mark: str = "|") -> None:
 def _ai_meta(
     agent_id: str,
     *,
-    think: bool,
     store,
     root,
     backend: str | None = None,
     extra_reach: dict | None = None,
 ) -> dict:
-    """One record shape per backend. `brain` answers with thinking OFF — one completion
-    per send, no loop; `ai` is the BUILDER.
+    """One record shape, its model half from the plug. `brain` is one completion per
+    send, no loop; `ai` is the BUILDER.
 
     `backend` overrides the global for ONE agent, so the builder and that agent can be
     different models. That is the interesting composition: a strong builder wiring a
@@ -276,36 +271,11 @@ def _ai_meta(
         meta["can_call"].update(extra_reach)
     if agent_id == "brain":
         meta["description"] = "A AI agent: one completion per send. No loop of its own."
-    if backend == "anthropic":
-        meta["handler_module"] = "anthropic_backend.tools"
-        # WITHOUT THIS the record falls back to the provider's DEFAULT_ENDPOINT
-        # (api.anthropic.com) while carrying whatever key the run exported — which
-        # is a 401 the moment the key belongs to a different host. Measured
-        # 2026-08-24 in the 6-way suite: this probe died at pass 1 on
-        # `anthropic 401` while its five siblings ran fine, because it was the only
-        # harness that never read ENDPOINT.
-        _ep = os.environ.get("ENDPOINT")
-        if _ep:
-            meta["endpoint"] = _ep
-        if MAX_TOKENS_FIELD:
-            meta["max_tokens"] = MAX_TOKENS_FIELD
-        meta["model"] = MODEL
-    elif backend == "llamacpp":
-        meta["handler_module"] = "llamacpp_backend.tools"
-        if not LLAMACPP_ENDPOINT:
-            raise SystemExit(
-                "FANTASTIC_LLAMACPP_ENDPOINT is unset — name the llama-server URL"
-            )
-        meta["endpoint"] = LLAMACPP_ENDPOINT
-        meta["think"] = think
-    else:
-        # Every other plug describes ITSELF (e2e/backends): its handler, model,
-        # endpoint and required fields come from the plug, never from a branch
-        # here — the branch above used to send every non-anthropic backend to
-        # llama.cpp (a vllm run died on FANTASTIC_LLAMACPP_ENDPOINT, 2026-09-30).
-        # The probe's own wiring (grants, description) wins over the plug's.
-        for k, v in _resolve_backend(backend).record().items():
-            meta.setdefault(k, v)
+    # The plug describes ITSELF (e2e/backends): its handler, model, endpoint,
+    # required fields and key reference come from the plug, never from a branch
+    # here. The probe's own wiring (grants, description) wins over the plug's.
+    for k, v in _resolve_backend(backend).record().items():
+        meta.setdefault(k, v)
     return meta
 
 
@@ -788,7 +758,6 @@ async def run(
                     "target": root.id,
                     "payload": _ai_meta(
                         "brain",
-                        think=False,
                         store=store,
                         root=root,
                         backend=brain_backend,
@@ -804,7 +773,7 @@ async def run(
                 {
                     "target": root.id,
                     "payload": _ai_meta(
-                        "ai", think=True, store=store, root=root, extra_reach=extra_reach
+                        "ai", store=store, root=root, extra_reach=extra_reach
                     ),
                 }
             ]
@@ -1159,6 +1128,6 @@ async def run(
 
 # Guarded so the harness selftest can IMPORT the fixture + scoring instead of
 # duplicating them — an unguarded `asyncio.run` here made importing it run the whole
-# probe, against a llama-server that was not up.
+# probe, against a model server that was not up.
 if __name__ == "__main__":
     asyncio.run(main())

@@ -413,7 +413,7 @@ struct WebSocketTests {
             .binary(
                 .object([
                     "type": .string("chunk"), "path": .string("a.bin"), "bytes": .null,
-                ]), "bytes", blob))
+                ]), Blob("bytes", blob)))
         var frame = Data()
         for _ in 0..<5 {
             if case .data(let d) = try await task.receive() {
@@ -423,7 +423,7 @@ struct WebSocketTests {
         }
         let decoded = try Codec.decodeBinaryFrame(frame)
         #expect(decoded.header["type"].asString == "event")
-        #expect(decoded.header["_binary_path"].asString == "payload.bytes")
+        #expect(decoded.header["_binary_path"] == ["payload", "bytes"])
         #expect(decoded.header["payload"]["type"].asString == "chunk")
         #expect(decoded.body == blob)
     }
@@ -579,7 +579,7 @@ struct WebSocketTests {
             "type": .string("call"), "id": .string("b1"), "target": .string("kernel_state"),
             "payload": .object(["type": .string("reflect")]),
         ])
-        head["_binary_path"] = .string("payload.nope.deep")
+        head["_binary_path"] = ["payload", "nope", "deep"]
         try await task.send(.data(Codec.encodeBinaryFrame(header: head, body: Data("x".utf8))))
         #expect(await awaitFrame(task) { $0["type"].asString == "error" } != nil)
         // THE SOCKET SURVIVED: the next call is answered.
@@ -722,7 +722,7 @@ struct WebSocketTests {
                 "truncate": .bool(true),
             ]),
         ])
-        head["_binary_path"] = .string("payload.bytes")
+        head["_binary_path"] = ["payload", "bytes"]
         try await task.send(.data(Codec.encodeBinaryFrame(header: head, body: blob)))
         let wrote = await awaitFrame(task) {
             $0["type"].asString == "reply" && $0["id"].asString == "w1"
@@ -752,7 +752,7 @@ struct WebSocketTests {
             }
         }
         let g = try #require(got, "read_stream did not answer a binary frame")
-        #expect(g.header["_binary_path"].asString == "data.bytes", "\(g.header)")
+        #expect(g.header["_binary_path"] == ["data", "bytes"], "\(g.header)")
         // R-D16-3 — python's `encode_frame` nulls the bytes value IN PLACE, so
         // the head keeps `bytes: null` where the chunk sat (after `offset`).
         #expect(
@@ -1026,7 +1026,7 @@ struct WebSocketTests {
                     "type": .string("write_stream"), "path": .string("t.txt"),
                     "bytes": .string("abc"), "truncate": .bool(true),
                 ]),
-                "_binary_path": .string("payload.bytes"),
+                "_binary_path": ["payload", "bytes"],
             ]), "ws3")
         #expect(typed["data"]["reason"].asString == "missing_arg", "\(typed)")
         #expect(
@@ -1036,7 +1036,7 @@ struct WebSocketTests {
             .object([
                 "type": .string("call"), "id": .string("ws4"), "target": .string("wsfiles"),
                 "payload": .object(["type": .string("write_stream"), "path": .string("u.txt")]),
-                "_binary_path": .string("payload.nope.deep"),
+                "_binary_path": ["payload", "nope", "deep"],
             ]), "ws4")
         #expect(inert["type"].asString == "reply", "an inert key is not a frame error: \(inert)")
         #expect(inert["data"]["written"].asInt == 0, "\(inert)")

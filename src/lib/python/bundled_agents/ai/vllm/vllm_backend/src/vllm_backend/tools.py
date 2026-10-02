@@ -5,10 +5,10 @@ A THIN binding over `ai_core`, like every backend: this module supplies the
 `ai_core.build()` returns the `(VERBS, handler)` bound to it. There is NO
 agentic loop — one provider pass per send.
 
-Kept SEPARATE from `llamacpp_backend`/`nvidia_nim_backend` although all three
-speak the OpenAI chat wire: reflect must describe the real server, and vLLM has
-its own knobs (`top_k`, `reasoning_effort`, `thinking_token_budget`,
-`no_repeat_ngram_size`), its own failure shapes and — the reason this bundle
+Speaks the OpenAI chat wire, and is named for vLLM on purpose: reflect must
+describe the real server, and vLLM has its own knobs (`top_k`,
+`reasoning_effort`, `thinking_token_budget`, `no_repeat_ngram_size`), its own
+failure shapes and — the reason this bundle
 exists — a KV-cache session table (`kv_slots` + `kv_overflow`) shared per
 endpoint. See `provider.py` for what each is and why.
 
@@ -20,7 +20,8 @@ because that module-level name IS the bundle's cancel hook.
 from __future__ import annotations
 
 from ai_core import build, required_meta
-from ai_core.schema import field, schema, validate
+from ai_core.credentials import key_reader
+from ai_core.schema import credentials_field, field, schema, validate
 from ai_core.core import (  # noqa: F401 — re-exported test seams + the cancel hook
     DEFAULT_CLIENT_ID,
     MAX_CALL_DEPTH,
@@ -35,7 +36,6 @@ from ai_core.core import (  # noqa: F401 — re-exported test seams + the cancel
 
 from vllm_backend.provider import (
     CONNECT_TIMEOUT,
-    KEY_VAR,
     KV_OVERFLOWS,
     KV_TTL,
     PASSTHROUGH,
@@ -89,6 +89,7 @@ def make_provider(id, kernel):
     return VllmProvider(
         endpoint=required_meta(rec, "endpoint", NAME),
         model=required_meta(rec, "model", NAME),
+        key=key_reader(id, kernel, NAME, required=False),
         max_tokens=_required_int(rec, "max_tokens"),
         kv_slots=_required_int(rec, "kv_slots"),
         kv_overflow=overflow,
@@ -199,9 +200,9 @@ RECORD_SCHEMA = schema(
             "seconds to wait on a generation",
             default=READ_TIMEOUT,
         ),
+        # the door's key, when it wants one — absent = no Authorization header
+        credentials_field(required=False),
     ],
-    # the door's key, when it wants one — sent as a Bearer header only when set
-    key_var=KEY_VAR,
 )
 
 #: The fields a turn cannot run without — refused at the write when absent. The

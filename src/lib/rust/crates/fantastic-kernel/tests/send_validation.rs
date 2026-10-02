@@ -138,9 +138,8 @@ async fn empty_target_is_missing_arg() {
     assert_eq!(out.result["error"], "send: target required");
 
     let out = kernel
-        .send(vec![
-            Item::new(AgentId::from(""), json!({"type": "poke"})).with_binary(vec![1, 2, 3])
-        ])
+        .send(vec![Item::new(AgentId::from(""), json!({"type": "poke"}))
+            .with_binary_key("bytes", vec![1, 2, 3])])
         .await
         .remove(0);
     assert_eq!(out.result["reason"], "missing_arg", "{}", out.result);

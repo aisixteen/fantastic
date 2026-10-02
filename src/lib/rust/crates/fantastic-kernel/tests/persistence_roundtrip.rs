@@ -117,15 +117,20 @@ impl Bundle for FakeStore {
         &self,
         _id: &AgentId,
         header: Value,
-        blob: Vec<u8>,
+        body: Option<fantastic_kernel::Blob>,
         _kernel: &Arc<Kernel>,
-    ) -> Result<(Reply, Option<Vec<u8>>), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(Reply, Option<fantastic_kernel::Blob>), Box<dyn std::error::Error + Send + Sync>>
+    {
+        let blob: Vec<u8> = body.map(|b| b.bytes).unwrap_or_default();
         let verb = header.get("type").and_then(Value::as_str).unwrap_or("");
         let path = header.get("path").and_then(Value::as_str).unwrap_or("");
         let target = self.root.join(path);
         match verb {
             "read_stream" => match std::fs::read(&target) {
-                Ok(bytes) => Ok((Some(json!({"size": bytes.len()})), Some(bytes))),
+                Ok(bytes) => Ok((
+                    Some(json!({"size": bytes.len()})),
+                    Some(fantastic_kernel::Blob::key("bytes", bytes)),
+                )),
                 Err(_) => Ok((Some(json!({"error": "not found"})), None)),
             },
             "write_stream" => {
@@ -540,9 +545,11 @@ impl Bundle for TruncatingStore {
         &self,
         _id: &AgentId,
         header: Value,
-        blob: Vec<u8>,
+        body: Option<fantastic_kernel::Blob>,
         _kernel: &Arc<Kernel>,
-    ) -> Result<(Reply, Option<Vec<u8>>), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(Reply, Option<fantastic_kernel::Blob>), Box<dyn std::error::Error + Send + Sync>>
+    {
+        let blob: Vec<u8> = body.map(|b| b.bytes).unwrap_or_default();
         let verb = header.get("type").and_then(Value::as_str).unwrap_or("");
         let path = header.get("path").and_then(Value::as_str).unwrap_or("");
         let target = self.root.join(path);
@@ -555,7 +562,10 @@ impl Bundle for TruncatingStore {
                 match std::fs::read(&target) {
                     Ok(bytes) => {
                         let n = bytes.len().min(self.cap);
-                        Ok((Some(json!({"size": n})), Some(bytes[..n].to_vec())))
+                        Ok((
+                            Some(json!({"size": n})),
+                            Some(fantastic_kernel::Blob::key("bytes", bytes[..n].to_vec())),
+                        ))
                     }
                     Err(_) => Ok((Some(json!({"error": "not found"})), None)),
                 }
@@ -677,10 +687,11 @@ impl Bundle for ArcBundle {
         &self,
         id: &AgentId,
         header: Value,
-        blob: Vec<u8>,
+        body: Option<fantastic_kernel::Blob>,
         kernel: &Arc<Kernel>,
-    ) -> Result<(Reply, Option<Vec<u8>>), Box<dyn std::error::Error + Send + Sync>> {
-        self.0.handle_binary(id, header, blob, kernel).await
+    ) -> Result<(Reply, Option<fantastic_kernel::Blob>), Box<dyn std::error::Error + Send + Sync>>
+    {
+        self.0.handle_binary(id, header, body, kernel).await
     }
 }
 

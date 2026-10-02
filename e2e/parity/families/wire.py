@@ -27,9 +27,9 @@ import struct
 import sys
 import time
 
-from families import BASE, OPEN, ai, call, save_kernel_log
+from families import BASE, OPEN, VLLM, ai, call, save_kernel_log, vllm
 from spec import CTX_RESERVE, CTX_WINDOW, wait_port
-from stubs.anthropic_sse import AnthropicStub, Handler as AnthropicHandler
+from stubs.openai_chat import Handler as OpenAIHandler, OpenAIChatStub
 
 NAME = "wire"
 
@@ -62,8 +62,8 @@ def roster(stub_url: str, cb: dict, interp: str) -> list:
                                                 relay_url="ws://127.0.0.1:9/nowhere",
                                                 guid="wirecap-guid", partner_guid="wirecap-partner",
                                                 reconnect=3)),
-        ("ai", "anthropic_backend.tools",
-         ai(model="stub-model", endpoint=stub_url, context_window=CTX_WINDOW,
+        ("ai", VLLM,
+         ai(**vllm(stub_url), context_window=CTX_WINDOW,
               output_reserve=CTX_RESERVE,
               can_call={**BASE, "files": "*", "cli": "*", "kernel": "*"})),
     ]
@@ -272,12 +272,12 @@ def run(ctx) -> None:  # noqa: C901 - one family, one shape; splitting it hides 
     (ctx.work / "hello.txt").write_bytes(b"hello wire\n")
     W = Recorder(rec, time.monotonic())
 
-    stub = AnthropicStub(rec, "stub", ports.take("stub"))
-    stub.start(AnthropicHandler)
+    stub = OpenAIChatStub(rec, "stub", ports.take("stub"))
+    stub.start(OpenAIHandler)
     stub.set_chain("boot", CHAIN_SCRIPT)
 
     cb = {**{leg: "*" for leg in LEGS}, "ai": "*", "sched": "*"}
-    agents = roster(stub.url(), cb, sys.executable)
+    agents = roster(stub.base_url(), cb, sys.executable)
     reach = [a[0] for a in agents] + ["store", "ghost"]
     port2, port3 = ports.take("web2"), ports.take("web3")
 
@@ -566,7 +566,7 @@ def run(ctx) -> None:  # noqa: C901 - one family, one shape; splitting it hides 
             ("binary_call_write_stream",
              binframe({"type": "call", "target": "files",
                        "payload": {"type": "write_stream", "path": "ws_bin.bin", "offset": 0, "bytes": None},
-                       "id": "p-bin-1", "_binary_path": "payload.bytes"}, b"\x00\x01binary\xff"), "p-bin-1"),
+                       "id": "p-bin-1", "_binary_path": ["payload", "bytes"]}, b"\x00\x01binary\xff"), "p-bin-1"),
             ("binary_call_read_stream_back",
              binframe({"type": "call", "target": "files",
                        "payload": {"type": "read_stream", "path": "ws_bin.bin", "offset": 0},
@@ -576,7 +576,12 @@ def run(ctx) -> None:  # noqa: C901 - one family, one shape; splitting it hides 
             ("binary_frame_bad_header_json", struct.pack(">I", 5) + b"{nope", None),
             ("binary_frame_bad_binary_path",
              binframe({"type": "call", "target": "files", "payload": {"type": "reflect"},
-                       "id": "p-bin-3", "_binary_path": "payload.nope.deep"}, b"zz"), "p-bin-3"),
+                       "id": "p-bin-3", "_binary_path": ["payload", "nope", "deep"]}, b"zz"), "p-bin-3"),
+            # the retired dotted-string spelling is a malformed frame, never a write
+            ("binary_frame_dotted_string_path",
+             binframe({"type": "call", "target": "files",
+                       "payload": {"type": "write_stream", "path": "ws_dotted.bin", "offset": 0, "bytes": None},
+                       "id": "p-bin-4", "_binary_path": "payload.bytes"}, b"zz"), "p-bin-4"),
             ("emit_to_auto_watched_host", json.dumps({"type": "emit", "target": "web", "payload": {"type": "wirecap_ping", "n": 1}}), None),
             ("watch_no_src", json.dumps({"type": "watch"}), None),
             ("watch_unknown_agent", json.dumps({"type": "watch", "src": "ghost", "id": "p-w-ghost"}), None),

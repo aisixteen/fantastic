@@ -537,6 +537,185 @@ def test_the_connector_raises_when_the_relay_cannot_deliver():
     assert b"RAISED fantastic: send('x') failed in transit: boom" in out, (out, err)
 
 
+# ─── secret marks on the guest wire ─────────────────────────────
+
+
+def test_the_connector_puts_secret_on_the_frame_only_when_given():
+    """`kernel.send(target, payload=None, secret=None)`: the frame carries
+    `"secret": [...]` exactly as given, and no `secret` key at all when the program
+    marks nothing (None or an empty list)."""
+    import subprocess
+
+    from exec_bridge._connector import CONNECTOR_SRC
+
+    code = CONNECTOR_SRC + (
+        "kernel.send('x', {'type': 'y', 'k': 'v'}, secret=['payload.k', 'result'])\n"
+        "kernel.send('x', {'type': 'y'})\n"
+        "kernel.send('x', {'type': 'y'}, secret=[])\n"
+        "print('DONE')\n"
+    )
+    parent, child_end = socket.socketpair()
+    proc = subprocess.Popen(
+        [sys.executable, "-u", "-c", code],
+        env={"FANTASTIC_CTRL_FD": str(child_end.fileno()), "PATH": "/usr/bin:/bin"},
+        pass_fds=[child_end.fileno()],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    child_end.close()
+    parent.settimeout(10)
+    frames = []
+    for _ in range(3):
+        (n,) = struct.unpack(">I", parent.recv(4))
+        body = b""
+        while len(body) < n:
+            body += parent.recv(n - len(body))
+        assert body[:1] == b"T", body[:8]
+        m = json.loads(body[1:])
+        frames.append(m)
+        reply = b"T" + json.dumps({"op": "reply", "rid": m["rid"], "data": {}}).encode()
+        parent.sendall(struct.pack(">I", len(reply)) + reply)
+    out, err = proc.communicate(timeout=10)
+    parent.close()
+    assert b"DONE" in out, (out, err)
+    assert frames == [
+        {
+            "op": "send",
+            "rid": "1",
+            "target": "x",
+            "payload": {"type": "y", "k": "v"},
+            "secret": ["payload.k", "result"],
+        },
+        {"op": "send", "rid": "2", "target": "x", "payload": {"type": "y"}},
+        {"op": "send", "rid": "3", "target": "x", "payload": {"type": "y"}},
+    ], frames
+
+
+async def test_the_relay_puts_the_frames_secret_on_the_dispatched_item(seeded_kernel):
+    """The relay copies `secret` onto the item as sent: the kernel checks it (a mark
+    naming nothing is ITS refusal, in the reply) and records the call masked."""
+    k = seeded_kernel
+    await _mk(k, allowed=["x"], can_call={"probe": "*"})
+    await _mk(k, agent_id="probe", allowed=["x"], callable_by={"runner": "*"})
+    child, task = await _wire(k)
+    await _wire_write(
+        child,
+        {
+            "op": "send",
+            "rid": "1",
+            "target": "probe",
+            "payload": {"type": "status", "note": "hush-0451"},
+            "secret": ["payload.note"],
+        },
+    )
+    rep = await _wire_read(child)
+    assert rep["op"] == "reply" and rep["rid"] == "1", rep
+    assert "jobs" in rep["data"], rep
+    rows = [
+        r
+        for r in k.ctx.rows.values()
+        if r.get("kind") == "call"
+        and r.get("agent") == "probe"
+        and r.get("caller") == "runner"
+    ]
+    assert [r.get("secret") for r in rows] == [["payload.note"]], rows
+    assert rows[0]["payload"]["note"] == "<secret>", rows
+    assert "hush-0451" not in repr(list(k.ctx.rows.values()))
+    await _wire_write(
+        child,
+        {
+            "op": "send",
+            "rid": "2",
+            "target": "probe",
+            "payload": {"type": "status"},
+            "secret": ["payload.nope"],
+        },
+    )
+    bad = await _wire_read(child)
+    assert bad["rid"] == "2", bad
+    assert (bad["data"]["reason"], bad["data"]["arg"]) == ("bad_arg", "secret"), bad
+    child.close()
+    await asyncio.wait_for(task, 5)
+
+
+_CREDS_CHILD = (
+    "import json, secrets\n"
+    "key = 'sk-guest-' + secrets.token_hex(16)\n"
+    "s = kernel.send('creds', {'type': 'set', 'ref': 'guest', "
+    "'host': 'api.example.com', 'fields': {'api_key': key}}, "
+    "secret=['payload.fields'])\n"
+    "g = kernel.send('creds', {'type': 'get', 'ref': 'guest'}, secret=['result'])\n"
+    "u = kernel.send('creds', {'type': 'get', 'ref': 'guest'})\n"
+    "print(json.dumps({'stored': s.get('stored'), "
+    "'match': (g.get('fields') or {}).get('api_key') == key, "
+    "'unmarked': [u.get('reason'), u.get('arg')]}), flush=True)\n"
+)
+
+
+async def test_a_program_marks_a_credential_store_set_and_get(seeded_kernel, tmp_path):
+    """A spawned program stores and reads a credential over the guest wire with the
+    same marks any caller uses: it gets the real value back, every record of the
+    calls shows `<secret>`, and an unmarked `get` is refused. The key is minted
+    INSIDE the program, so the only copies are the store's file and the program."""
+    import yaml
+
+    k = seeded_kernel
+    py = sys.executable
+    made = (
+        await k.send(
+            [
+                {
+                    "target": k.id,
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": k.id,
+                        "handler_module": "credential_store.tools",
+                        "id": "creds",
+                        "file": str(tmp_path / "creds.yaml"),
+                        "creators": ["runner"],
+                        "callable_by": {"runner": "*"},
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
+    assert made.get("id") == "creds", made
+    await _mk(k, allowed=[rf"{py} -c .*"], can_call={"creds": "*"})
+    seen: list = []
+    k.add_state_subscriber(seen.append)
+    from exec_bridge._connector import CONNECTOR_SRC
+
+    r = await _start(k, "runner", py, ["-c", CONNECTOR_SRC + _CREDS_CHILD])
+    row = await _wait_done(k, "runner", r["job_id"], secs=15.0)
+    assert row["exit_code"] == 0, row
+    assert json.loads(row["last_line"]) == {
+        "stored": True,
+        "match": True,
+        "unmarked": ["bad_arg", "secret"],
+    }, row
+    key = yaml.safe_load((tmp_path / "creds.yaml").read_text())["refs"]["guest"][
+        "api_key"
+    ]
+    assert key.startswith("sk-guest-"), key
+    calls = {
+        r["verb"]: r
+        for r in k.ctx.rows.values()
+        if r.get("kind") == "call" and r.get("agent") == "creds" and r.get("secret")
+    }
+    assert calls["set"]["secret"] == ["payload.fields"], calls
+    assert calls["get"]["secret"] == ["result"], calls
+    assert calls["set"]["payload"]["fields"] == "<secret>", calls["set"]
+    ledger = (await k.send([{"target": "kernel", "payload": {"type": "ledger"}}]))[0]
+    for where, what in (
+        ("rows", list(k.ctx.rows.values())),
+        ("ledger", ledger),
+        ("state stream", seen),
+        ("records", k.list()),
+        ("job row", row),
+    ):
+        assert key not in repr(what), f"the key reached the {where}"
+
+
 # ─── the relay: denials, leaks, the frame bound ─────────────────
 
 

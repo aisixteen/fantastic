@@ -22,7 +22,7 @@ runs:
   - name: first-load
     # the page seeds its root and the loader writes it under its own anchor
     expect:
-      page_contains: ["canvas canvas"]
+      page_contains: ["canvas · 0 dom"]   # the toolbar: the breadcrumb (the root canvas), then its counts
       files_exist: [.fantastic/web/agent.yaml, .fantastic/web/agents/canvas/agent.yaml]
       canvas_members: 0
       group_size: 0

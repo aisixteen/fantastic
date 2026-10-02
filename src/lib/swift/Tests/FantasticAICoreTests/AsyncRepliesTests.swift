@@ -21,7 +21,7 @@ private let AI = "ai_ar"
 /// reserve.
 private func boot() async -> (Kernel, Agent, FoldFixture) {
     let (kernel, ids, _) = await bootMockKernel(
-        config: baseConfig { .provider(MockProvider()) }, backendIds: [AI],
+        config: baseConfig { MockProvider() }, backendIds: [AI],
         contextWindow: 12000, meta: ["output_reserve": .integer(0)])
     let agent = kernel.agent(ids[AI]!)!
     return (kernel, agent, FoldFixture(kernel: kernel, agent: AI))
@@ -54,7 +54,7 @@ struct AsyncRepliesTests {
             let rec = Agent(
                 id: AgentId("x"), handlerModule: nil, parentId: nil,
                 meta: ["context_window": .integer(window), "output_reserve": .integer(0)])
-            #expect(AIContext.inlineCap(rec) == max(256, AIContext.budget(rec) / 8))
+            #expect(AIContext.inlineCap(rec, modelWindow: AIConstants.DEFAULT_CONTEXT_WINDOW) == max(256, AIContext.budget(rec, modelWindow: AIConstants.DEFAULT_CONTEXT_WINDOW) / 8))
         }
     }
 

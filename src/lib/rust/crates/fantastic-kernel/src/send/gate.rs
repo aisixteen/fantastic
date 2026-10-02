@@ -390,8 +390,50 @@ impl Kernel {
         None
     }
 
+    /// Only the OPERATOR lowers a secret holder's mark — python
+    /// `_check_holder_mark`. An agent's `update_agent` naming `holds_secrets` with
+    /// any value but `true` on an agent whose record says `holds_secrets: true` is
+    /// refused — else a model granted `update_agent` could unmark a
+    /// credential_store and then call it. Setting `true` (on a holder or not)
+    /// passes: protection may be added from anywhere. Judged on the record the
+    /// verb would patch (the literal `id`), before the write-time shape check, so
+    /// a non-operator's malformed value on a holder gets THIS refusal. The
+    /// operator (no sender) never reaches here.
+    fn check_holder_mark(&self, sender_id: &AgentId, obj: &Map<String, Value>) -> Option<Value> {
+        use crate::lifecycle::{HOLDER_MARK_HINT, HOLDER_MARK_SIDE, HOLDS_SECRETS};
+        if obj.get("type").and_then(Value::as_str) != Some("update_agent") {
+            return None;
+        }
+        if obj.get(HOLDS_SECRETS)? == &Value::Bool(true) {
+            return None;
+        }
+        let edited = obj.get("id").and_then(Value::as_str)?;
+        let target = self
+            .agents
+            .get(&AgentId::from(edited))
+            .map(|e| Arc::clone(&e))?;
+        let held = target
+            .meta
+            .read()
+            .expect("meta lock poisoned")
+            .get(HOLDS_SECRETS)
+            == Some(&Value::Bool(true));
+        if !held {
+            return None;
+        }
+        Some(json!({
+            "error": format!(
+                "{sender_id} may not clear holds_secrets on {edited}: it holds secrets, \
+                 and only the operator lowers that mark"
+            ),
+            "reason": "unauthorized", "side": HOLDER_MARK_SIDE, "hint": HOLDER_MARK_HINT,
+        }))
+    }
+
     /// Authority flows from ABOVE only: an agent may not raise its OWN authority
     /// fields, and may confer on another only a SUBSET of its own `can_call`.
+    /// Nor may it lower a secret holder's mark ([`Self::check_holder_mark`],
+    /// judged first).
     fn check_conferral(
         self: &Arc<Self>,
         sender_id: &AgentId,
@@ -402,6 +444,9 @@ impl Kernel {
         payload: &Value,
     ) -> Option<Value> {
         let obj = payload.as_object()?;
+        if let Some(held) = self.check_holder_mark(sender_id, obj) {
+            return Some(held);
+        }
         let confers = obj.contains_key("can_call") || obj.contains_key("callable_by");
         if !confers {
             return None;

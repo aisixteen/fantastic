@@ -2,12 +2,12 @@
 //
 // Ported from the canonical Python `ai_core.core` (`THINK_OPEN` /
 // `THINK_CLOSE` / `without_thinking`, core.py:477-508). Its OWN file because
-// the provider TARGETS (FantasticOllamaBackend, FantasticNvidiaNimBackend)
-// import the markers — they are the only symbols here that are `public`,
-// alongside the `ThinkingWrap` folder that keeps the wrapping correct.
+// the provider TARGETS (FantasticOllamaBackend, FantasticResponsesBackend,
+// FantasticVllmBackend) import the markers — they are the only symbols here that
+// are `public`, alongside the `ThinkingWrap` folder that keeps the wrapping correct.
 //
 // A reasoning model streams two things. ollama labels them `message.thinking` /
-// `message.content`; NIM labels them `reasoning_content` / `content`. We must
+// `message.content`; vLLM labels them `reasoning_content` / `content`. We must
 // read BOTH — a turn spent entirely reasoning is otherwise an empty completion
 // that silently ends the chain (gemma4:12b, 2026-08-02). But we must not KEEP
 // both: feeding a reasoning model its own prior deliberation back is against

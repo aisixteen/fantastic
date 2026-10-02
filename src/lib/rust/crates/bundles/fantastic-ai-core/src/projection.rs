@@ -106,6 +106,7 @@ pub async fn project_context(
     kernel: &Arc<Kernel>,
     client_id: &str,
     name: &str,
+    model_window: i64,
     messages: Vec<Value>,
     store_len: usize,
 ) -> Result<Vec<Value>, ProjectFail> {
@@ -114,9 +115,9 @@ pub async fn project_context(
     // endpoint's own count exceeded our estimate last turn (`calib`).
     let calib = state.calib.lock().expect("calib poisoned").unwrap_or(1.0);
     let b = if calib > 0.0 {
-        ((agent_budget(&meta) as f64 / calib) as i64).max(BUDGET_FLOOR)
+        ((agent_budget(&meta, model_window) as f64 / calib) as i64).max(BUDGET_FLOOR)
     } else {
-        agent_budget(&meta)
+        agent_budget(&meta, model_window)
     };
     if estimate_tokens(&messages) <= (b as f64 * TRIGGER) as i64 {
         *state.projection.lock().expect("projection poisoned") = Some(json!({
@@ -138,7 +139,7 @@ pub async fn project_context(
     // The live user turn AND the notice envelope are both non-negotiable — if
     // there's no room for BOTH, fail loud (so the trim below never drops the live turn).
     if body_budget < last_cost + NOTICE_ENVELOPE_RESERVE {
-        let window = resolve_context_window(&meta);
+        let window = resolve_context_window(&meta, model_window);
         let hint = format!(
             "the system prompt ({sys_tokens} tok) leaves no room in the {window}-token \
              window for even one turn; reduce agents/menu or raise context_window"

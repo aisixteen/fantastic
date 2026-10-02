@@ -43,7 +43,7 @@ private func ctx(
 private func seam(
     window: Int64 = 32768, meta: OrderedDictionary<String, JSON> = ["output_reserve": .integer(0)]
 ) async -> (Kernel, Agent, AIBackend, EventSink, Task<Void, Never>) {
-    let config = baseConfig { .provider(MockProvider(tokens: ["FAKESUMMARY"])) }
+    let config = baseConfig { MockProvider(tokens: ["FAKESUMMARY"]) }
     let (kernel, ids, _) = await bootMockKernel(config: config, backendIds: [AI], contextWindow: window, meta: meta)
     let agent = kernel.agent(ids[AI]!)!
     let sink = EventSink()
@@ -98,13 +98,13 @@ struct ContextSeamTests {
     }
 
     @Test func windowPrecedence() {
-        #expect(AIContext.resolveContextWindow(rec(["context_window": .integer(8000), "num_ctx": .integer(2000)])) == 8000)
-        #expect(AIContext.resolveContextWindow(rec(["num_ctx": .integer(2000)])) == 2000)
-        #expect(AIContext.resolveContextWindow(rec([:])) == AIConstants.DEFAULT_CONTEXT_WINDOW)
+        #expect(AIContext.resolveContextWindow(rec(["context_window": .integer(8000), "num_ctx": .integer(2000)]), modelWindow: AIConstants.DEFAULT_CONTEXT_WINDOW) == 8000)
+        #expect(AIContext.resolveContextWindow(rec(["num_ctx": .integer(2000)]), modelWindow: AIConstants.DEFAULT_CONTEXT_WINDOW) == 2000)
+        #expect(AIContext.resolveContextWindow(rec([:]), modelWindow: AIConstants.DEFAULT_CONTEXT_WINDOW) == AIConstants.DEFAULT_CONTEXT_WINDOW)
     }
 
     @Test func budgetFloor() {
-        #expect(AIContext.budget(rec(["context_window": .integer(100), "output_reserve": .integer(1000)])) == 256)
+        #expect(AIContext.budget(rec(["context_window": .integer(100), "output_reserve": .integer(1000)]), modelWindow: AIConstants.DEFAULT_CONTEXT_WINDOW) == 256)
     }
 
     @Test func registryNoMemgpt() {
@@ -354,5 +354,23 @@ struct AIAsIdTests {
         #expect(aiAsId(.string("²")) == nil)
         #expect(aiAsId(.string("+5")) == nil)
         #expect(!AIContext.pyDigits("١٢") && AIContext.pyDigits("12"))
+    }
+
+    /// `context_window` / `output_reserve` parse the STRIPPED text they check:
+    /// python's strip drops `\x1c`–`\x1f`, `int()` does not, so parsing the raw
+    /// value raised on `"\x1c12"`. Same vectors as python `test_context.py` and
+    /// rust `id_and_window_digit_strings_are_ascii_only`.
+    @Test func windowAndReserveParseTheStrippedText() {
+        let w = AIConstants.DEFAULT_CONTEXT_WINDOW
+        let r = AIConstants.DEFAULT_OUTPUT_RESERVE
+        let vectors: [(String, Int64, Int64)] = [
+            ("٣", w, r), ("²", w, r), ("\u{2003} 12 ", 12, 12), ("\u{1c}12", 12, 12),
+            ("\u{1f}12\u{1d}", 12, 12), ("0", w, 0), ("\u{1c}", w, r), ("+5", w, r),
+        ]
+        for (v, window, reserve) in vectors {
+            let a = rec(["context_window": .string(v), "output_reserve": .string(v)])
+            #expect(AIContext.resolveContextWindow(a, modelWindow: w) == window, "\(v.debugDescription)")
+            #expect(AIContext.outputReserve(a) == reserve, "\(v.debugDescription)")
+        }
     }
 }

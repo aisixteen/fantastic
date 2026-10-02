@@ -490,6 +490,46 @@ async def test_the_kernels_store_is_pruned_to_its_window(seeded_kernel):
     )
 
 
+async def _until(cond, *, timeout=3.0):
+    for _ in range(int(timeout / 0.01)):
+        if cond():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("condition never held")
+
+
+async def test_a_failed_store_read_in_the_prune_is_loud_and_the_flusher_lives(
+    seeded_kernel, capsys, monkeypatch
+):
+    """A store READ that fails inside the window prune is said on stderr and prunes
+    nothing; the flush LOOP survives it, so a later execution's rows still leave RAM.
+    It used to end the flusher task silently — every later row stayed in RAM."""
+    await _mk(seeded_kernel)
+    await _with_store(seeded_kernel)
+    k = seeded_kernel.ctx
+    for _ in range(5):
+        await _call(seeded_kernel, "probe", {"type": "work"})
+    k.ledger_cap = 1
+    real = k._store_read
+    refused: list[dict] = []
+
+    async def failing_read(payload):
+        refused.append(payload)
+        raise RuntimeError("kernel: memory store read failed: {'error': 'gone'}")
+
+    monkeypatch.setattr(k, "_store_read", failing_read)
+    k._flush_wake.set()  # the failure must happen INSIDE the flusher task
+    await _until(lambda: refused)
+    await _until(
+        lambda: "prune of the kernel's store failed" in capsys.readouterr().err
+    )
+    monkeypatch.setattr(k, "_store_read", real)
+    flusher = k.tasks.get(k._flusher_task_id)
+    assert flusher is not None and not flusher["_task"].done(), "the flusher died"
+    out = await _call(seeded_kernel, "probe", {"type": "work"})
+    await _until(lambda: out["pid"] not in k.rows)  # flushed by the loop, not by us
+
+
 # ── the id counter: block reservation in the root record ───────────────
 
 

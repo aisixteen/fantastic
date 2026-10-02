@@ -48,11 +48,13 @@ public protocol BridgeTransport: Sendable {
     func close() async
 }
 
-/// How a pending forward settled: the remote's `data`, or the engine's own
-/// `ConnectionError` text (python `bridge transport closed` / `bridge shut
-/// down`), which the verb renders as `bridge.forward: <text>`.
+/// How a pending forward settled: the remote's `data` (with the reply's chunk
+/// when it ARRIVED as a binary frame — a 0-byte chunk included, C37; `nil` for a
+/// text reply), or the engine's own `ConnectionError` text (python `bridge
+/// transport closed` / `bridge shut down`), which the verb renders as
+/// `bridge.forward: <text>`.
 enum PendingOutcome: Sendable {
-    case data(JSON, Data)
+    case data(JSON, Data?)
     case closed(String)
 }
 
@@ -333,7 +335,9 @@ extension KernelBridgeBundle {
                 st.trackCall(key, t)
             case "reply":
                 if let corr = frame["id"].asString, let resume = st.take(corr) {
-                    resume(.data(frame["data"], body))
+                    // THE CARRIER, not the length: a binary reply holds a chunk
+                    // (an empty one included), a text reply holds none.
+                    resume(.data(frame["data"], isBinary ? body : nil))
                 }
             case "error":
                 if let corr = frame["id"].asString, let resume = st.take(corr) {
@@ -343,7 +347,7 @@ extension KernelBridgeBundle {
                         .data(
                             .object([
                                 "error": .string("remote error: \(pyStr(frame["error"]))")
-                            ]), Data()))
+                            ]), nil))
                 }
             case "event":
                 // The `watch_remote` RETURN half: re-emitted on the bridge's OWN
@@ -355,14 +359,11 @@ extension KernelBridgeBundle {
                 obj["src"] = .string(src)
                 let inner: JSON = .object(obj)
                 // A BINARY event re-emits WHOLE. The envelope's `_binary_path` is
-                // `payload.<p>`; the inbox carrier wants `<p>`, the path INSIDE
+                // `["payload", …steps]`; the inbox carrier wants the steps INSIDE
                 // the payload, so the body reaches a local watcher as the frame
                 // the remote sent rather than a head with a hole in it.
-                let innerPath = frame["_binary_path"].asString.flatMap {
-                    $0.hasPrefix("payload.") ? String($0.dropFirst("payload.".count)) : nil
-                }
-                if isBinary, let p = innerPath {
-                    kernel.emitItem(agentId, .binary(inner, p, body))
+                if isBinary, let blob = Codec.payloadBody(frame, body: body) {
+                    kernel.emitItem(agentId, .binary(inner, blob))
                 } else {
                     await kernel.emit(agentId, inner)
                 }
@@ -420,15 +421,29 @@ extension KernelBridgeBundle {
             // with a nil sender would be an OPERATOR call and the two-sided gate
             // would bound nothing.
             let targetId = AgentId(target.asString ?? "")
-            // ONE ITEM, text or binary: a binary frame's body rides the item's
-            // binary channel, and the frame id names the execution either way —
-            // a replayed binary call joins the recorded outcome instead of
-            // running again.
+            // ONE ITEM, text or binary: a binary frame's body sits at
+            // `["payload", …steps]` (the frame's `_binary_path`) and rides the item's
+            // binary channel AT THAT PATH of the payload, and the frame id names
+            // the execution either way — a replayed binary call joins the recorded
+            // outcome instead of running again. A body the frame put anywhere else
+            // is not in the payload python's decoder hands the kernel.
             var built = Item.fromFrame(targetId, inner, frameId: frame["id"].asString)
+            // SECRET MARKS cross the bridge verbatim (`Secret`): this kernel
+            // records the call as shown — its call/settle rows, ledger, state
+            // stream — and its own check refuses a malformed mark before anything
+            // dispatches. Python `if "secret" in frame: item["secret"] = …`.
+            if let marks = frame.asObject?["secret"] { built.secret = marks }
             if isBinary {
                 let (p, binary) = Codec.callPayload(frame, body: body)
                 built.payload = pyTruthy(p) ? p : .object([:])
                 built.binary = binary
+            }
+            // A stream verb rides the binary channel even with no body: python's
+            // `read_stream` reply holds real bytes whatever frame asked for it.
+            if built.binary == nil,
+                Codec.binaryEdgeVerbs.contains(built.payload["type"].asString ?? "")
+            {
+                built.rawReply = true
             }
             let item = built
             // THE QUALIFIED CALLER rides into the dispatch: the gate checks the
@@ -458,7 +473,7 @@ extension KernelBridgeBundle {
             try? await transport.send(out)
             return
         }
-        out["_binary_path"] = .string("data.bytes")
+        out["_binary_path"] = Codec.binaryPath(["data", "bytes"])
         try? await transport.sendBinary(header: out, body: replyBody)
     }
 
@@ -513,6 +528,17 @@ extension KernelBridgeBundle {
         return "\(g)|\(KernelTaskLocals.currentOrigin?.value ?? "kernel")"
     }
 
+    /// Put this `forward` call's own marks (`KernelTaskLocals.currentSecret`),
+    /// re-rooted by `forwardedSecret`, on the outbound frame — only when any
+    /// survive. Python `_forward`'s `frame["secret"] = secret`. A binary
+    /// `forward`'s body sits INSIDE the forwarded payload (`payload.payload.<path>`,
+    /// where python's dict holds it), so its mark re-roots like any other field:
+    /// `payload.payload.bytes` rides as the far item's `payload.bytes`.
+    private func stampForwardedSecret(_ frame: inout JSON) {
+        let secret = forwardedSecret(KernelTaskLocals.currentSecret)
+        if !secret.isEmpty { frame["secret"] = .array(secret.map { .string($0) }) }
+    }
+
     // MARK: - shared verbs
 
     /// Python `_forward`.
@@ -535,6 +561,9 @@ extension KernelBridgeBundle {
             "type": .string("call"), "id": .string(corr), "target": target, "payload": inner,
         ])
         if let caller = qualifiedCaller(kernel) { frame["caller"] = .string(caller) }
+        // The caller's `secret` marks on THIS call, re-rooted at the forwarded
+        // item, so the far kernel masks its records of the call as this one does.
+        stampForwardedSecret(&frame)
         // Stamp this leg's EGRESS credential on the ENVELOPE (never the payload).
         if let token = st.egress.credential() { frame["auth_token"] = .string(token) }
         let slot = expect(st: st, corr: corr)
@@ -555,18 +584,24 @@ extension KernelBridgeBundle {
         }
     }
 
-    /// `forward` carrying a raw request chunk / returning a raw reply chunk.
-    /// Same correlation, same texts; the body rides beside the frame.
+    /// `forward` carrying a raw request chunk / returning a raw reply chunk —
+    /// the binary channel. Same correlation, same texts. The local caller sends
+    /// `{type:forward, target, payload, timeout?}` with the body INSIDE the inner
+    /// payload (`Blob(parts: ["payload", …steps], …)` — python's forward payload
+    /// holds the bytes there); the bridge ships a binary `call` frame with the body
+    /// at `["payload", …steps]`, or a TEXT one when the call carries no body (a raw
+    /// read). A body anywhere else is not part of the forwarded call, exactly as
+    /// python's inner payload would not hold it. The reply's chunk comes back
+    /// when the remote answered a binary frame — `nil` for a text reply (C37).
     func binaryForwardVerb(
-        agentId: AgentId, header: JSON, blob: Data, kernel: Kernel
-    ) async throws -> (JSON, Data) {
+        agentId: AgentId, header: JSON, body: Blob?, kernel: Kernel
+    ) async throws -> (JSON, Data?) {
         let target = header["target"]
-        let inner = header["payload"]
-        guard pyTruthy(target), case .object = inner else {
+        guard pyTruthy(target), case .object = header["payload"] else {
             return (
                 .object([
                     "error": .string("bridge.forward: target (str) + payload (dict) required")
-                ]), Data()
+                ]), nil
             )
         }
         let timeout = try pyFloat(header.asObject?["timeout"] ?? .double(30.0))
@@ -575,32 +610,49 @@ extension KernelBridgeBundle {
             return (
                 Refusal.make(
                     Refusal.notConnected, "bridge.forward: not connected",
-                    hint: "call boot first"), Data()
+                    hint: "call boot first"), nil
             )
         }
+        let carried: Blob? = body.flatMap {
+            $0.parts.count > 1 && $0.parts[0] == "payload"
+                ? Blob(parts: Array($0.parts.dropFirst()), $0.bytes) : nil
+        }
+        // The body's slot in the inner payload is `null` on the wire, in python's
+        // position (`encode_frame` nulls the bytes where they sat); the kernel
+        // admitted the path at launch.
+        var inner = header["payload"]
+        if let carried { try? pySetPath(&inner, parts: carried.parts, .null) }
         let corr = st.nextCorr(agentId)
         var frame: JSON = .object([
             "type": .string("call"), "id": .string(corr), "target": target, "payload": inner,
-            "_binary_path": .string("payload.bytes"),
         ])
         if let caller = qualifiedCaller(kernel) { frame["caller"] = .string(caller) }
+        stampForwardedSecret(&frame)
         if let token = st.egress.credential() { frame["auth_token"] = .string(token) }
         let slot = expect(st: st, corr: corr)
         do {
-            try await transport.sendBinary(header: frame, body: blob)
+            if let carried {
+                // The request body rides raw at `["payload", …its steps]` (a
+                // python peer reinserts it there; the inner payload's slot stays
+                // null on the wire).
+                frame["_binary_path"] = Codec.payloadPath(carried.parts)
+                try await transport.sendBinary(header: frame, body: carried.bytes)
+            } else {
+                try await transport.send(frame)
+            }
         } catch {
             _ = st.take(corr)
-            return (.object(["error": .string("bridge.forward: send failed: \(error)")]), Data())
+            return (.object(["error": .string("bridge.forward: send failed: \(error)")]), nil)
         }
         switch await awaitPending(st: st, corr: corr, slot: slot, timeout: timeout) {
         case .data(let data, let body): return (data, body)
         case .closed(let reason):
-            return (.object(["error": .string("bridge.forward: \(reason)")]), Data())
+            return (.object(["error": .string("bridge.forward: \(reason)")]), nil)
         case nil:
             return (
                 .object([
                     "error": .string("bridge.forward: timeout after \(pyFloatRepr(timeout))s")
-                ]), Data()
+                ]), nil
             )
         }
     }
@@ -655,6 +707,30 @@ extension KernelBridgeBundle {
         out[replyKey] = .string(target)
         return out
     }
+}
+
+/// The `forward` call's own `secret` marks, RE-ROOTED at the item the far
+/// kernel dispatches — so both kernels mask the same values.
+///
+/// The local item is `{target: <bridge>, payload: {type: forward, target,
+/// payload: <inner>}}`; the far item is `{target, payload: <inner>}`. A mark
+/// under the inner payload drops ONE `payload.` (`payload.payload.<f…>` →
+/// `payload.<f…>`, and `payload.payload` → `payload`, which the far kernel
+/// refuses like any bad mark); a `result[.<f…>]` mark is the same reply on both
+/// kernels, carried as is. A mark on the forward verb's own fields
+/// (`payload.target`, `payload.timeout`) names nothing on the far item and stays
+/// on this kernel's record only. Validation is the FAR kernel's own `secret`
+/// check, before it dispatches anything. Python `io_bridge.forwarded_secret`.
+public func forwardedSecret(_ paths: [String]) -> [String] {
+    var out: [String] = []
+    for p in paths {
+        if p == "result" || p.hasPrefix("result.") {
+            out.append(p)
+        } else if p == "payload.payload" || p.hasPrefix("payload.payload.") {
+            out.append(String(p.dropFirst("payload.".count)))
+        }
+    }
+    return out
 }
 
 /// Carries the read loop's join continuation.

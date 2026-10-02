@@ -34,8 +34,8 @@ enum DotEnvError: Error, CustomStringConvertible {
 
 /// Load `KEY=value` pairs from `path` into the process environment.
 ///
-/// Existing entries are NEVER overwritten — the shell wins, so an
-/// `ANTHROPIC_API_KEY` exported in the parent shell beats whatever `.env` says.
+/// Existing entries are NEVER overwritten — the shell wins, so a variable
+/// exported in the parent shell beats whatever `.env` says.
 /// Silent no-op when the file is absent (python's `path.exists()` guard).
 @discardableResult
 func loadDotEnv(path: String = ".env") throws -> Int {

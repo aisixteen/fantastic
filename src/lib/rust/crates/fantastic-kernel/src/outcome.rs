@@ -24,6 +24,7 @@
 
 use crate::agent::AgentId;
 use crate::tasks::TaskId;
+pub use fantastic_bundle::path::Step;
 use serde_json::Value;
 
 /// How one batch item ended.
@@ -80,6 +81,116 @@ impl std::fmt::Display for Status {
     }
 }
 
+/// A RAW BODY and the slot it sits at — python's `bytes` value inside the
+/// payload (or reply) dict, which a `serde_json::Value` cannot hold. The bytes
+/// ride BESIDE the JSON (base64 is banned); the path says where python's dict
+/// holds them, so a handler finds its body under its own key.
+///
+/// ONE SPELLING OF THE SLOT: a list of [`Step`]s — an object key taken
+/// literally, a list index — exactly a binary frame's `_binary_path` below the
+/// payload. The REST octet leg's `X-Fantastic-Bytes-Field: a.b` is the one key
+/// `"a.b"` ([`Blob::key`]); a nested slot is `[meta, chunk]`. Every place the
+/// kernel puts or takes the slot goes through [`Blob::place`] / [`Blob::take`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Blob {
+    /// Where the body sits, relative to the payload (or the reply):
+    /// `[bytes]`, `[data]`, `[a.b]`, `[meta, chunk]`, `[items, 0]`.
+    pub path: Vec<Step>,
+    /// The raw body.
+    pub bytes: Vec<u8>,
+}
+
+impl Blob {
+    /// The body `bytes` at `path` (non-empty: a body is never the payload itself).
+    #[must_use]
+    pub fn new(path: Vec<Step>, bytes: Vec<u8>) -> Self {
+        Self { path, bytes }
+    }
+
+    /// The body `bytes` under the ONE top-level key `key`, literally — python's
+    /// `payload[field] = body`.
+    #[must_use]
+    pub fn key(key: impl Into<String>, bytes: Vec<u8>) -> Self {
+        Self {
+            path: vec![Step::Key(key.into())],
+            bytes,
+        }
+    }
+
+    /// The steps from the payload to the body's slot.
+    #[must_use]
+    pub fn steps(&self) -> &[Step] {
+        &self.path
+    }
+
+    /// Put `value` in the body's slot of `obj` —
+    /// [`fantastic_bundle::path::place`]: a last object key is assigned (kept in
+    /// place when present, appended when absent — python's dict assignment), a
+    /// list slot replaced.
+    ///
+    /// # Errors
+    /// The slot does not exist in `obj` (every step before the last must).
+    pub fn place(&self, obj: &mut Value, value: Value) -> Result<(), String> {
+        fantastic_bundle::path::place(obj, &self.path, value)
+    }
+
+    /// Take the body's slot out of `obj` — python's `del`: an object key is
+    /// removed (the others keep their order), a list slot nulled
+    /// ([`fantastic_bundle::path::take`]).
+    ///
+    /// # Errors
+    /// The slot is not in `obj`.
+    pub fn take(&self, obj: &mut Value) -> Result<(), String> {
+        fantastic_bundle::path::take(obj, &self.path)
+    }
+
+    /// The bytes when they sit at the ONE top-level key `key` — python's
+    /// `isinstance(payload.get(key), bytes)`: a handler asks for ITS key, and a
+    /// body placed under another key (or nested) is not its body.
+    #[must_use]
+    pub fn at(&self, key: &str) -> Option<&[u8]> {
+        matches!(self.path.as_slice(), [Step::Key(k)] if k == key).then_some(self.bytes.as_slice())
+    }
+
+    /// [`Blob::at`], owned: the bytes when they sit at the ONE top-level key
+    /// `key`, else `None`.
+    #[must_use]
+    pub fn into_at(self, key: &str) -> Option<Vec<u8>> {
+        self.at(key).is_some().then_some(self.bytes)
+    }
+
+    /// The same body one level DOWN: the path below its first step when that
+    /// step is the key `key` (a frame's `payload` → the payload's own path).
+    /// `None` when the body sits elsewhere, or IS that key's value.
+    #[must_use]
+    pub fn under(self, key: &str) -> Option<Self> {
+        match self.path.split_first() {
+            Some((Step::Key(k), rest)) if k == key && !rest.is_empty() => Some(Self {
+                path: rest.to_vec(),
+                bytes: self.bytes,
+            }),
+            _ => None,
+        }
+    }
+
+    /// The same body one level UP, under the key `key` (the payload's path →
+    /// the frame's `payload`).
+    #[must_use]
+    pub fn nested_in(&self, key: &str) -> Vec<Step> {
+        let mut out = Vec::with_capacity(self.path.len() + 1);
+        out.push(Step::Key(key.to_string()));
+        out.extend(self.path.iter().cloned());
+        out
+    }
+}
+
+/// The body a binary dispatch carries at the top-level key `key`, if it carries
+/// one there.
+#[must_use]
+pub fn body_at<'a>(body: Option<&'a Blob>, key: &str) -> Option<&'a [u8]> {
+    body.and_then(|b| b.at(key))
+}
+
 /// ONE item of a batch send.
 ///
 /// `id` NAMES the execution (ensure-semantics — see the ledger); `timeout` is
@@ -98,14 +209,16 @@ pub struct Item {
     pub timeout: Option<f64>,
     /// Optional retry budget for terminal failed/timed_out attempts.
     pub retries: Option<u32>,
-    /// Optional RAW request body — python's `payload["bytes"]` holding bytes.
+    /// Optional RAW request body AND WHERE IT SITS in the payload — python's
+    /// payload dict holding a `bytes` value at that path (`data` for
+    /// `exec_bridge.paste_image`, `bytes` for `file_bridge.write_stream`).
     /// Present ⇒ the item rides the BINARY channel (`Bundle::handle_binary`)
     /// instead of the text one, under the same task row, ledger id, timeout and
     /// retries as any other item. Never base64: the bytes travel beside the JSON
-    /// header, not inside it. A payload may name the slot (`"bytes": null`) to
-    /// keep python's key order on the call row and the watcher frame; the
-    /// handler gets the header without it.
-    pub binary: Option<Vec<u8>>,
+    /// header, not inside it. A payload may name the slot (`null` there) to keep
+    /// python's key order on the call row and the watcher frame; the handler
+    /// gets the header without it.
+    pub binary: Option<Blob>,
     /// The caller reads the reply's chunk RAW ([`Outcome::body`]) — the item
     /// rides the binary channel with no request body. Python's reply dict holds
     /// `bytes` natively; a request that sends none (`read_stream`) is a plain
@@ -158,13 +271,25 @@ impl Item {
         }
     }
 
-    /// Carry a RAW request body — the item dispatches through the binary
-    /// channel, as an ordinary execution of the batch (pid, call/settle rows,
-    /// `ps` row, timeout, dedup, `<guid>|agent` routing). There is no second
-    /// send path for bytes.
+    /// Carry a RAW request body at `path` of the payload (its steps, relative to
+    /// the payload: python's `set_path`, a binary frame's `_binary_path` below
+    /// `payload`) — the item dispatches through the binary channel, as an
+    /// ordinary execution of the batch (pid, call/settle rows, `ps` row, timeout,
+    /// dedup, `<guid>|agent` routing). There is no second send path for bytes. A
+    /// path that names no slot of the payload is refused before anything runs.
     #[must_use]
-    pub fn with_binary(mut self, blob: Vec<u8>) -> Self {
-        self.binary = Some(blob);
+    pub fn with_binary(mut self, path: Vec<Step>, bytes: Vec<u8>) -> Self {
+        self.binary = Some(Blob::new(path, bytes));
+        self
+    }
+
+    /// Carry a RAW request body under the ONE top-level key `key`, literally —
+    /// python's `payload[field] = body`: `a.b` names the key `"a.b"` (a nested
+    /// `a.b` the payload already holds is left as sent). Otherwise
+    /// [`Item::with_binary`].
+    #[must_use]
+    pub fn with_binary_key(mut self, key: impl Into<String>, bytes: Vec<u8>) -> Self {
+        self.binary = Some(Blob::key(key, bytes));
         self
     }
 
@@ -266,8 +391,11 @@ pub struct Outcome {
     /// does; testing `is_empty()` instead served an empty file as JSON.
     ///
     /// Only a binary item can set it (`Item::with_binary` /
-    /// `Item::with_raw_reply`), and only the bundle's `handle_binary` fills it.
-    pub body: Option<Vec<u8>>,
+    /// `Item::with_raw_reply`): a bundle's `handle_binary` returns it at its
+    /// slot of the reply (`["bytes"]` for a `read_stream` chunk); a PEER's reply
+    /// keeps the slot its frame named (`["data", "x.y"]` is the reply key
+    /// `"x.y"`). The path is relative to `result`.
+    pub body: Option<Blob>,
 }
 
 impl Outcome {
@@ -283,11 +411,18 @@ impl Outcome {
         }
     }
 
-    /// …carrying the binary reply body the handler returned (C37).
+    /// …carrying the binary reply body the handler returned, at its slot of the
+    /// result (C37).
     #[must_use]
-    pub fn with_body(mut self, body: Option<Vec<u8>>) -> Self {
+    pub fn with_body(mut self, body: Option<Blob>) -> Self {
         self.body = body;
         self
+    }
+
+    /// The reply body's raw bytes, wherever it sits.
+    #[must_use]
+    pub fn body_bytes(&self) -> Option<&[u8]> {
+        self.body.as_ref().map(|b| b.bytes.as_slice())
     }
 
     /// The item never reached the task table: a gate denial, an unknown agent,

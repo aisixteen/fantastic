@@ -30,13 +30,14 @@ pub const DEFAULT_INBOX_BOUND: usize = 256;
 /// / `removed` / etc.). Synchronous, called inline — keep it cheap;
 /// off-thread the work if it might block.
 ///
-/// The second argument is the event payload's RAW BODY — `(dotted path within
-/// `payload`, bytes)` — for a traffic event whose payload carried bytes. Python
+/// The second argument is the event payload's RAW BODY — its slot within
+/// `payload` and the bytes ([`crate::outcome::Blob`]) — for a traffic event whose
+/// payload carried bytes. Python
 /// queues the bytes inside the payload dict and its WS tap re-encodes the whole
 /// event as a binary frame; a `serde_json::Value` cannot hold bytes, so the body
 /// rides beside the event exactly as it rides beside an
 /// [`crate::inbox::InboxItem`]. `None` for every event with no bytes.
-pub type StateSubscriber = Arc<dyn Fn(&Value, Option<&(String, Vec<u8>)>) + Send + Sync>;
+pub type StateSubscriber = Arc<dyn Fn(&Value, Option<&crate::outcome::Blob>) + Send + Sync>;
 
 /// The registry of state taps. Agent lifecycle + traffic telemetry only:
 /// conversation rows are NOT on it — the kernel holds none; an AI agent announces
@@ -48,7 +49,11 @@ pub(crate) type StateSubs = RwLock<Vec<(SubscriberToken, StateSubscriber)>>;
 /// `ts` is stamped HERE and LAST (python `{**event, "ts": time.time()}`), so
 /// every event carries the moment it was published and no caller has to
 /// remember to add one. No subscribers = no work at all, as in python.
-pub(crate) fn publish_state_to(subs: &StateSubs, event: &Value, body: Option<&(String, Vec<u8>)>) {
+pub(crate) fn publish_state_to(
+    subs: &StateSubs,
+    event: &Value,
+    body: Option<&crate::outcome::Blob>,
+) {
     let subs = subs.read().expect("state subs poisoned");
     if subs.is_empty() {
         return;
@@ -78,7 +83,7 @@ pub(crate) fn publish_state_to(subs: &StateSubs, event: &Value, body: Option<&(S
 /// rust callback has no `Result` to fail with — the equivalent of
 /// "raised" is a panic, caught here so one broken tap never silences
 /// every other subscriber for the rest of the process.
-fn call_state_subscriber(cb: &StateSubscriber, event: &Value, body: Option<&(String, Vec<u8>)>) {
+fn call_state_subscriber(cb: &StateSubscriber, event: &Value, body: Option<&crate::outcome::Blob>) {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cb(event, body)));
     if let Err(payload) = outcome {
         eprintln!(
@@ -711,7 +716,7 @@ impl Kernel {
     /// [`Self::publish_state`] for a traffic event whose payload carried bytes:
     /// the raw body travels beside the event so a tap can rebuild the binary
     /// frame python sends.
-    pub fn publish_state_with_body(&self, event: &Value, body: Option<&(String, Vec<u8>)>) {
+    pub fn publish_state_with_body(&self, event: &Value, body: Option<&crate::outcome::Blob>) {
         publish_state_to(&self.state_subscribers, event, body);
     }
 

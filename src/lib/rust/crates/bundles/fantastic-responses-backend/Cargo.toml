@@ -19,6 +19,8 @@ futures-util = { workspace = true }
 [dev-dependencies]
 # Every AI agent keeps its conversation in a memory store; the tests wire one.
 fantastic-ram-store = { path = "../fantastic-ram-store" }
+# The key is a credential store ref, read per request; the tests wire a store.
+fantastic-credential-store = { path = "../fantastic-credential-store" }
 tempfile = "3"
 tokio = { workspace = true, features = ["test-util", "macros"] }
 wiremock = "0.6"

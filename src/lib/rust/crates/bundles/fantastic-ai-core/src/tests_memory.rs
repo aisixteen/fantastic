@@ -108,6 +108,7 @@ async fn the_endpoints_count_calibrates_the_estimate() {
         &kernel,
         "cli",
         "mock",
+        crate::context::DEFAULT_CONTEXT_WINDOW,
         msgs.clone(),
         1,
     )
@@ -125,6 +126,7 @@ async fn the_endpoints_count_calibrates_the_estimate() {
         &kernel,
         "cli",
         "mock",
+        crate::context::DEFAULT_CONTEXT_WINDOW,
         msgs.clone(),
         1,
     )
@@ -147,7 +149,7 @@ async fn a_turn_records_what_the_endpoint_reported() {
     .await;
     let provider: Arc<dyn Provider> = Arc::new(Reporting(777));
     let out = crate::verbs::send(
-        Some(provider),
+        provider,
         &ai,
         &json!({"type": "send", "text": "hello"}),
         &kernel,
@@ -446,7 +448,7 @@ async fn a_turns_rows_are_minted_when_appended_so_id_order_is_append_order() {
         agent: ai.clone(),
     });
     let out = crate::verbs::send(
-        Some(provider),
+        provider,
         &ai,
         &json!({"type": "send", "text": "hello"}),
         &kernel,

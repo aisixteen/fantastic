@@ -227,7 +227,7 @@ extension AIBackend {
             ])
         // The persisted view names rows behind the clear — empty it, so the view is
         // the store from the clear on. RAM is scratch; the store is never cleared.
-        try await saveView(key, kernel, ids: [], budget: AIContext.budget(agent), why: "cleared")
+        try await saveView(key, kernel, ids: [], budget: AIContext.budget(agent, modelWindow: config.modelWindow), why: "cleared")
         dropScratch(key)
         forgetClearState(key)
         return .object(["cleared": .integer(rid), "rows": .integer(Int64(members.count))])
@@ -248,13 +248,11 @@ extension AIBackend {
     }
 
     /// The provider for a side call (boot's recall, the `context_recall` verb) —
-    /// a refusal (no api_key, model unavailable) is `nil`: the recall then stays
-    /// at the mechanical fit, exactly as python's `_get_provider` failure does.
+    /// a build that raises (a record missing its endpoint or model) is `nil`: the
+    /// recall then stays at the mechanical fit, exactly as python's
+    /// `_get_provider` failure does.
     func sideProvider(agent: Agent, kernel: Kernel) async -> (any AIProvider)? {
-        switch try? await config.makeProvider(agent, AIConstants.DEFAULT_CLIENT_ID, kernel) {
-        case .provider(let p): return p
-        case .refused, nil: return nil
-        }
+        try? await config.makeProvider(agent, AIConstants.DEFAULT_CLIENT_ID, kernel)
     }
 
     // MARK: - the verb
@@ -283,7 +281,7 @@ extension AIBackend {
                     await assembleSystemPrompt(agent: agent, systemPrompt: nil, kernel: kernel)),
             ]))
         let bodyBudget = max(
-            AIConstants.BUDGET_FLOOR, AIContext.budget(agent) - sysTokens - AIConstants.NOTICE_ENVELOPE_RESERVE)
+            AIConstants.BUDGET_FLOOR, AIContext.budget(agent, modelWindow: config.modelWindow) - sysTokens - AIConstants.NOTICE_ENVELOPE_RESERVE)
         let target = Int64(Double(bodyBudget) * AIConstants.LOW)
         let view = AIFolds.render(rows).filter { rowId($0).map { $0 != 0 } ?? false }
         if view.isEmpty {

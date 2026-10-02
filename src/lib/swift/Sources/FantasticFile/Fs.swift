@@ -229,6 +229,17 @@ public func fsIsSymlink(_ root: String, _ path: String, base: String) throws(FsE
     return (st.st_mode & S_IFMT) == S_IFLNK
 }
 
+/// python `fs.lstat` — the entry's OWN stat (a symlink is not followed), for a
+/// caller that must check what a path IS (type, owner, permission bits) before
+/// trusting it. The parent is clamped; a missing entry is the `OSError` python
+/// raises (`[Errno 2] …`).
+public func fsLstat(_ root: String, _ path: String, base: String) throws(FsError) -> stat {
+    let leaf = try fsLexicalLeaf(root, path, base: base)
+    var st = stat()
+    if lstat(leaf, &st) != 0 { throw FsError(osErrorStr(errno, leaf)) }
+    return st
+}
+
 /// `Path.is_dir()` on an already-resolved absolute path.
 func pathIsDir(_ path: String) -> Bool {
     var st = stat()
@@ -261,14 +272,32 @@ public func fsReadBytes(_ root: String, _ path: String, base: String) throws(FsE
 
 /// python `fs.write_bytes` (atomic) — whole-file write through a tmp sibling
 /// (`<name>.tmp`) and an atomic rename; parent dirs created.
-public func fsWriteBytes(_ root: String, _ path: String, _ data: Data, base: String)
-    throws(FsError)
-{
+///
+/// `mode` creates the file with exactly those permission bits — a 0600 secret
+/// file is never readable by others, not even between create and chmod: the tmp
+/// is unlinked, created `O_EXCL` with the mode, then `fchmod`ed (the umask may
+/// have narrowed it; never widened). Python's `mode=`.
+public func fsWriteBytes(
+    _ root: String, _ path: String, _ data: Data, base: String, mode: mode_t? = nil
+) throws(FsError) {
     let target = try fsResolve(root, path, base: base)
     try pyMkdirParents(parentPath(target))
     let tmp = target + ".tmp"
-    let fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0o666)
-    if fd < 0 { throw FsError(osErrorStr(errno, tmp)) }
+    let fd: Int32
+    if let mode {
+        // `tmp.unlink(missing_ok=True)`
+        if unlink(tmp) != 0, errno != ENOENT { throw FsError(osErrorStr(errno, tmp)) }
+        fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL, mode)
+        if fd < 0 { throw FsError(osErrorStr(errno, tmp)) }
+        if fchmod(fd, mode) != 0 {
+            let e = errno
+            close(fd)
+            throw FsError(osErrorStr(e))
+        }
+    } else {
+        fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0o666)
+        if fd < 0 { throw FsError(osErrorStr(errno, tmp)) }
+    }
     var written = 0
     while written < data.count {
         let n = data.withUnsafeBytes { raw -> Int in

@@ -9,6 +9,10 @@ Routes mounted on the parent web's FastAPI app:
 
     POST /<self_id>/<target_id>       body: JSON payload (must contain `type`)
                                       → JSON reply from kernel.send
+                                      headers: X-Fantastic-Auth (credential),
+                                      X-Fantastic-Execution-Id (the item `id`),
+                                      X-Fantastic-Secret (the item `secret`, a
+                                      JSON array of paths)
     GET  /<self_id>/_reflect          → kernel.reflect (substrate primer)
     GET  /<self_id>/_reflect/<target> → reflect on a specific agent
 
@@ -84,6 +88,17 @@ def _deny(decision) -> JSONResponse:
 _OCTET = "application/octet-stream"
 _PAYLOAD_HEADER = "x-fantastic-payload"
 _BYTES_FIELD_HEADER = "x-fantastic-bytes-field"
+
+# ─── secret marks ───────────────────────────────────────────────
+# The item's `secret` paths (`kernel/_secret`) ride `X-Fantastic-Secret` — dispatch
+# metadata about the call, like the execution id, never part of the payload. The
+# value is a JSON ARRAY of paths, the SAME value a ws/bridge `call` frame carries
+# in its `secret` field: one parser (the strict wire `loads`), and the kernel's own
+# check judges it. Not comma-separated — a path step is a payload key, and a key
+# may hold a comma; a JSON string escapes any character into the ASCII a header
+# value is safe in; and a wrong shape (a bare string, `[]`, a number) reaches the
+# kernel's refusal verbatim instead of being re-invented by a splitter.
+_SECRET_HEADER = "x-fantastic-secret"
 
 
 def _json_reply(reply) -> Response:
@@ -184,6 +199,17 @@ def _make_post_endpoint(self_id: str, kernel):
         exec_id = request.headers.get("X-Fantastic-Execution-Id")
         if exec_id:
             item["id"] = exec_id
+        # SECRET MARKS: this kernel records the call as shown, exactly as for a
+        # local caller; a malformed mark is the kernel's own refusal.
+        raw_secret = request.headers.get(_SECRET_HEADER)
+        if raw_secret is not None:
+            try:
+                item["secret"] = strict_loads(raw_secret)
+            except json.JSONDecodeError:
+                return JSONResponse(
+                    {"error": "web_rest: X-Fantastic-Secret is not valid JSON"},
+                    status_code=400,
+                )
         with sender_context(self_id):
             reply = (await kernel.send([item]))[0]["result"]
         if reply is None:

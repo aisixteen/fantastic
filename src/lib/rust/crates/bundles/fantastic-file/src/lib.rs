@@ -46,7 +46,7 @@ use async_trait::async_trait;
 use fantastic_bundle::{py_repr, py_repr_value, py_str, py_truthy};
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
 use fantastic_kernel::refusal as rf;
-use fantastic_kernel::{AgentId, Item, Kernel};
+use fantastic_kernel::{body_at, AgentId, Blob, Item, Kernel};
 use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -309,22 +309,25 @@ impl Bundle for FileBundle {
         Ok(Some(reply))
     }
 
-    /// Binary channel: `read_stream` (empty request blob → reply BODY = the
-    /// raw chunk) and `write_stream` (request blob = the raw chunk → status
+    /// Binary channel: `read_stream` (no request body → reply BODY = the raw
+    /// chunk) and `write_stream` (the body at `bytes` = the raw chunk → status
     /// reply, no body). Symmetric with Python's `bytes`-in-the-dict; never
-    /// base64. Any other verb falls back to the default (→`handle`).
+    /// base64. Every verb reads the body at ITS key, `bytes` — python's
+    /// `payload.get("bytes")` — so a body placed under another key is not a
+    /// chunk. Any other verb falls back to the default (→`handle`).
     async fn handle_binary(
         &self,
         agent_id: &AgentId,
         header: Value,
-        blob: Vec<u8>,
+        body: Option<Blob>,
         kernel: &Arc<Kernel>,
-    ) -> Result<(Reply, Option<Vec<u8>>), BundleError> {
+    ) -> Result<(Reply, Option<Blob>), BundleError> {
         let verb = header.get("type").and_then(Value::as_str).unwrap_or("");
+        let chunk = body_at(body.as_ref(), "bytes");
         if text::TEXT_VERBS.contains(&verb) {
-            // THE BLOB IS THE `bytes` ARGUMENT, present even when empty — the
-            // bytes-typed carrier a model's `<bytes>` document rides. A text verb
-            // answers a document, never a raw chunk: no reply body.
+            // THE BODY AT `bytes` IS THE `bytes` ARGUMENT, present even when
+            // empty — the bytes-typed carrier a model's `<bytes>` document rides.
+            // A text verb answers a document, never a raw chunk: no reply body.
             let Some(agent) = kernel.agents.get(agent_id).map(|e| Arc::clone(&e)) else {
                 return Ok((Some(json!({"error": format!("no agent {agent_id}")})), None));
             };
@@ -341,7 +344,7 @@ impl Bundle for FileBundle {
                 &meta,
                 &root,
                 &header,
-                Some(&blob),
+                chunk,
                 readonly,
             )
             .await;
@@ -369,16 +372,17 @@ impl Bundle for FileBundle {
         }
         match verb {
             "read_stream" => {
+                // the chunk is the reply's `bytes`, as python's dict holds it
                 let (reply, body) = read_stream_reply(agent_id, &root, &header, false);
-                Ok((Some(reply), body))
+                Ok((Some(reply), body.map(|b| Blob::key("bytes", b))))
             }
             "write_stream" => {
-                // THE BLOB IS THE CHUNK on this channel. python's binary leg
-                // PLACES the body at `payload["bytes"]`, so a header that
-                // already carries a `bytes` key is a JSON value where raw bytes
-                // belong — `missing("write_stream", "bytes (one raw chunk)")`,
-                // whatever it holds. An ABSENT key leaves the blob as the
-                // chunk (empty blob ⇒ `written: 0`).
+                // THE BODY AT `bytes` IS THE CHUNK on this channel — python's
+                // `payload.get("bytes", b"")`. A header that carries a `bytes`
+                // key is a JSON value where raw bytes belong —
+                // `missing("write_stream", "bytes (one raw chunk)")`, whatever it
+                // holds. Nothing at `bytes` (no body, or a body under another
+                // key) is python's default `b""`: `written: 0`.
                 //
                 // PYTHON'S ORDER: readonly FIRST (`_readonly_or_none` precedes the
                 // chunk check), so a readonly leg answers `readonly` whatever the
@@ -395,7 +399,12 @@ impl Bundle for FileBundle {
                 // NO CHUNK COMES BACK from a write — `None`, not an empty body,
                 // so a leg can tell this reply from a 0-byte read (C37).
                 Ok((
-                    Some(write_stream_reply(&root, &header, Some(&blob), readonly)),
+                    Some(write_stream_reply(
+                        &root,
+                        &header,
+                        Some(chunk.unwrap_or_default()),
+                        readonly,
+                    )),
                     None,
                 ))
             }
@@ -709,8 +718,12 @@ async fn pump_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -
         let (rmeta, body) = (read.result, read.body);
         // python tests the reply for a `bytes` chunk (`isinstance(r["bytes"],
         // bytes)`); on this channel the chunk rides the body, so the carrier
-        // answers the same question — `None` is "no chunk came back" (C37).
-        let Some(body) = body.filter(|_| rmeta.is_object()) else {
+        // answers the same question — `None`, or a chunk at another slot, is
+        // "no chunk came back" (C37).
+        let Some(body) = body
+            .filter(|_| rmeta.is_object())
+            .and_then(|b| b.into_at("bytes"))
+        else {
             return rf::refusal(
                 rf::TRANSPORT_ERROR,
                 format!(
@@ -725,7 +738,7 @@ async fn pump_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -
                 sink_id.clone(),
                 json!({"type": "write_stream", "path": dpath, "bytes": null, "offset": offset, "truncate": first}),
             )
-            .with_binary(body)])
+            .with_binary_key("bytes", body)])
             .await
             .remove(0)
             .result;

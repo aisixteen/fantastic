@@ -9,7 +9,9 @@
 //!
 //! Routes mounted:
 //!
-//! - `POST /<self_id>/{target_id}` body=payload → kernel.send → JSON
+//! - `POST /<self_id>/{target_id}` body=payload → kernel.send → JSON;
+//!   headers `X-Fantastic-Auth` (credential), `X-Fantastic-Execution-Id` (the
+//!   item `id`), `X-Fantastic-Secret` (the item `secret`, a JSON array of paths)
 //! - `GET  /<self_id>/_reflect` → kernel.reflect (root tree)
 //! - `GET  /<self_id>/_reflect/{target_id}` → reflect on a specific agent
 //!

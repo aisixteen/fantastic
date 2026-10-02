@@ -1,6 +1,6 @@
 //! Per-agent coordination state, keyed by agent id in a process-global
 //! map. State is shared across backends — an ollama agent's id never
-//! collides with a NIM agent's id, so both coexist safely. The provider
+//! collides with a vllm agent's id, so both coexist safely. The provider
 //! (built per agent) is the only per-backend seam.
 
 use crate::helpers::{now_secs, safe_client};

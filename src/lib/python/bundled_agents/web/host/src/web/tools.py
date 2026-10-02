@@ -85,9 +85,8 @@ async def _mount_surface(handle: _ServerHandle, kernel, child_id: str) -> None:
             "exposes no route_endpoints(agent) hook"
         )
     endpoints = hook(child)
-    mounted: list[Any] = []
+    resolved: list[tuple[dict, str, Any]] = []
     for spec in routes:
-        kind = spec.get("kind")
         path = spec.get("path")
         endpoint = endpoints.get(path)
         if not path or not callable(endpoint):
@@ -95,16 +94,22 @@ async def _mount_surface(handle: _ServerHandle, kernel, child_id: str) -> None:
                 f"web: {child_id} declares route {path!r} but route_endpoints() "
                 "hands over no endpoint for it"
             )
-        if kind == "websocket":
+        resolved.append((spec, path, endpoint))
+    # REPLACE, never append: a re-boot re-mounts every surface, and a second copy
+    # of a child's routes outlived its `unmount` (which removes the routes it
+    # recorded — the newest list only), so the first copy kept serving.
+    _unmount_surface(handle, child_id)
+    mounted: list[Any] = []
+    for spec, path, endpoint in resolved:
+        if spec.get("kind") == "websocket":
             handle.app.add_api_websocket_route(path, endpoint)
         else:
             method = (spec.get("method") or "GET").upper()
             handle.app.add_api_route(path, endpoint, methods=[method])
         # The route just appended is the last entry in app.routes.
         mounted.append(handle.app.routes[-1])
-    if mounted:
-        handle.routes_by_child[child_id] = mounted
-        logger.info("web: mounted %d route(s) for %s", len(mounted), child_id)
+    handle.routes_by_child[child_id] = mounted
+    logger.info("web: mounted %d route(s) for %s", len(mounted), child_id)
     _order_routes(handle)
 
 

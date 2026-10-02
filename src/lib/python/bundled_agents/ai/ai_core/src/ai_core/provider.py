@@ -1,6 +1,6 @@
 """Provider — the streaming-chat interface every LLM backend implements.
 
-The real providers (OllamaProvider, AnthropicProvider, NvidiaNimProvider)
+The real providers (OllamaProvider, ResponsesProvider, VllmProvider)
 live in their own bundles; this ABC documents the contract the shared
 `core._run` loop relies on. A provider is a PURE RAW-TEXT streamer: it takes
 plain chat messages (role system/user/assistant, text content) and yields

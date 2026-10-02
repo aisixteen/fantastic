@@ -600,7 +600,7 @@ pub fn is_dead(status: Status) -> bool {
 #[must_use]
 pub fn stored_outcome(out: &Outcome, named: bool, body_as: crate::jsonsafe::BodyAs) -> Value {
     let status = Value::from(out.status.as_str());
-    let res = crate::jsonsafe::with_body(&out.result, out.body.as_deref(), body_as);
+    let res = crate::jsonsafe::with_body(&out.result, out.body.as_ref(), body_as);
     let mut kept = Map::new();
     kept.insert("status".to_string(), status);
     if named {
@@ -623,11 +623,8 @@ pub fn stored_outcome(out: &Outcome, named: bool, body_as: crate::jsonsafe::Body
     }
     // `len(json.dumps(_store_safe(res), default=str))` — python's separators and
     // ASCII escaping, measured over the STORE form (bytes as `{len}`).
-    let stored = crate::jsonsafe::with_body(
-        &out.result,
-        out.body.as_deref(),
-        crate::jsonsafe::BodyAs::Len,
-    );
+    let stored =
+        crate::jsonsafe::with_body(&out.result, out.body.as_ref(), crate::jsonsafe::BodyAs::Len);
     let size = fantastic_bundle::py_json_dumps(&stored, true, None).len();
     kept.insert("bytes".to_string(), json!(size));
     Value::Object(kept)

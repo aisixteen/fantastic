@@ -1267,8 +1267,7 @@ impl crate::bundle::Bundle for Schemaed {
     fn record_schema(&self) -> Option<Value> {
         Some(
             json!({"fields": [{"name": "endpoint", "type": "str", "required": true,
-                                "hint": "the URL"}],
-                    "key_var": null}),
+                                "hint": "the URL"}]}),
         )
     }
 }
@@ -1300,8 +1299,7 @@ async fn bundles_all_carries_a_published_record_schema() {
             {"name": "alpha", "handler_module": "alpha.tools"},
             {"name": "schemaed", "handler_module": "schemaed.tools",
              "schema": {"fields": [{"name": "endpoint", "type": "str", "required": true,
-                                    "hint": "the URL"}],
-                        "key_var": null}},
+                                    "hint": "the URL"}]}},
         ])
     );
     let keys: Vec<&String> = all["bundles"][1].as_object().unwrap().keys().collect();

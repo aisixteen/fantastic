@@ -67,7 +67,9 @@ pub const DEFAULT_TEMPERATURE: f64 = 0.3;
 /// Per-backend config: cli round-trip routing, parallel tool dispatch.
 const CFG: BackendConfig = BackendConfig {
     name: "ollama_backend",
-    provider_missing_error: None,
+    // A server's window is the record's to name (`num_ctx` / `context_window`);
+    // the kernel cannot read it.
+    model_window: fantastic_ai_core::constants::DEFAULT_CONTEXT_WINDOW,
 };
 
 // ── ollama provider (NDJSON transport) ──────────────────────────────
@@ -180,7 +182,6 @@ impl Provider for OllamaProvider {
                 .unwrap_or(text);
             return Err(ProviderError {
                 message: format!("{error} (status code: {code})"),
-                mapped: false,
                 kind: "ResponseError",
             });
         }
@@ -314,7 +315,7 @@ fn note_usage(chunk: &Value, report: &ReportCell) {
 /// with no tool call and no error. ollama's own log showed the request answered
 /// normally, so it looked like the server had wedged.
 ///
-/// Same defect and same fix as NIM's `reasoning_content`. A raw text protocol
+/// Same defect and same fix as vllm's `reasoning_content`. A raw text protocol
 /// reads the text the model produced; it does not let the provider decide which
 /// of its fields counts as output. (Non-string / explicit `null` normalizes to
 /// empty — protocol shape, not bug masking.) The reasoning is WRAPPED once, so
@@ -357,26 +358,23 @@ fn decode_chunk_into(
 pub fn record_schema() -> &'static Value {
     static SCHEMA: OnceLock<Value> = OnceLock::new();
     SCHEMA.get_or_init(|| {
-        schema::schema(
-            vec![
-                Field::new("endpoint", "str", "the ollama server URL").required(),
-                Field::new("model", "str", "the model name").required(),
-                Field::new(
-                    "num_ctx",
-                    "int",
-                    "the context window ollama loads the model with",
-                ),
-                Field::new("temperature", "float", "sampling temperature")
-                    .default(json!(DEFAULT_TEMPERATURE)),
-                Field::new("num_predict", "int", "a turn's output budget (tokens)"),
-                Field::new(
-                    "think",
-                    "bool",
-                    "turn the model's thinking channel on or off",
-                ),
-            ],
-            None,
-        )
+        schema::schema(vec![
+            Field::new("endpoint", "str", "the ollama server URL").required(),
+            Field::new("model", "str", "the model name").required(),
+            Field::new(
+                "num_ctx",
+                "int",
+                "the context window ollama loads the model with",
+            ),
+            Field::new("temperature", "float", "sampling temperature")
+                .default(json!(DEFAULT_TEMPERATURE)),
+            Field::new("num_predict", "int", "a turn's output budget (tokens)"),
+            Field::new(
+                "think",
+                "bool",
+                "turn the model's thinking channel on or off",
+            ),
+        ])
     })
 }
 
@@ -418,7 +416,7 @@ impl Bundle for OllamaBackendBundle {
             return Ok(Some(reflect_reply(agent_id, kernel)?));
         }
         // EVERY OTHER ai_core VERB, one table for every backend (python `build`).
-        let provider = |_client: &str| Some(build_provider(agent_id, kernel));
+        let provider = |_client: &str| build_provider(agent_id, kernel);
         if let Some(reply) = verbs::handle_common(agent_id, payload, kernel, CFG, provider).await? {
             return Ok(Some(reply));
         }
@@ -489,7 +487,7 @@ fn build_provider(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Arc<dyn Provider>
 /// `reflect` — python `_make_reflect` + `ollama_backend/tools.py`'s
 /// `_reflect_extra`: the shared base body, then the sampling knobs.
 fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Result<Value, BundleError> {
-    let mut out = verbs::reflect_base(agent_id, kernel, SENTENCE);
+    let mut out = verbs::reflect_base(agent_id, kernel, SENTENCE, CFG.model_window);
     let meta = helpers::agent_meta(agent_id, kernel);
     out.insert(
         "temperature".to_string(),

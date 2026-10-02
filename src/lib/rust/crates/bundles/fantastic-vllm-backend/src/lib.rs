@@ -26,8 +26,16 @@
 //!   preempts and a preempted conversation re-prefills from scratch. The table
 //!   keeps the number of LIVE conversations under that ceiling and rotates the
 //!   least-recently-used one out.
+//! - THE KEY, when the door needs one (owner, 2026-09-30: an HTTPS door in front
+//!   of the shared GPU takes `Authorization: Bearer <key>`). Read before EACH
+//!   request from the record's `credentials` ref in a credential store
+//!   (`fantastic_ai_core::credentials`), never the environment or the record; a
+//!   record with no `credentials` sends no header at all, so a local vLLM
+//!   started without `--api-key` keeps working. A 401 or 403 says to name
+//!   `credentials`.
 
 use async_trait::async_trait;
+use fantastic_ai_core::credentials::{key_reader, KeySource};
 use fantastic_ai_core::provider::{
     Provider, ProviderError, ProviderEvent, ProviderReport, ProviderStream, ReportCell,
     Unconfigured,
@@ -60,7 +68,9 @@ pub const SENTENCE: &str = "vLLM-backed LLM agent, talking to the vLLM server di
 
 const CFG: BackendConfig = BackendConfig {
     name: NAME,
-    provider_missing_error: None,
+    // A server's window is the record's to name (`context_window`); the kernel
+    // cannot read it.
+    model_window: fantastic_ai_core::constants::DEFAULT_CONTEXT_WINDOW,
 };
 
 // ─── sampling ───────────────────────────────────────────────────────────────
@@ -111,21 +121,6 @@ pub const PASSTHROUGH: [&str; 7] = [
 /// Both are the production's values; each is a record field.
 pub const CONNECT_TIMEOUT: f64 = 5.0;
 pub const READ_TIMEOUT: f64 = 900.0;
-
-/// THE KEY, when the door needs one (owner, 2026-09-30: an HTTPS door in front
-/// of the shared GPU takes `Authorization: Bearer <key>`). Read from this
-/// environment variable at CALL time, never from the record; set ⇒ sent as a
-/// Bearer header, unset ⇒ no header at all, so a vLLM started without
-/// `--api-key` keeps working. A 401/403 names the variable. Python `KEY_VAR`.
-pub const KEY_VAR: &str = "VLLM_API_KEY";
-
-/// The key, read per call — `None` when unset or blank.
-fn api_key() -> Option<String> {
-    std::env::var(KEY_VAR)
-        .ok()
-        .map(|k| k.trim().to_string())
-        .filter(|k| !k.is_empty())
-}
 
 // ─── the KV-cache session table ─────────────────────────────────────────────
 
@@ -191,7 +186,6 @@ impl SessionTable {
                          (kv_overflow=reject) — retry in ~{retry_after:.0}s, or set \
                          kv_overflow=evict to rotate the least-recently-used out"
                     ),
-                    mapped: false,
                     // python raises its own `KvSlotsFull(RuntimeError)`, and a
                     // raise renders as `<class name>: <message>`.
                     kind: "KvSlotsFull",
@@ -341,6 +335,9 @@ struct VllmProvider {
     agent_id: String,
     endpoint: String,
     model: String,
+    /// The key reader, awaited before EACH request; `None` = no `credentials`
+    /// on the record, no header.
+    key: Arc<dyn KeySource>,
     max_tokens: i64,
     kv_slots: i64,
     kv_overflow: String,
@@ -526,10 +523,13 @@ impl Provider for VllmProvider {
             .read_timeout(Duration::from_secs_f64(self.read_timeout))
             .build()
             .map_err(|e| ProviderError::raised(format!("{NAME}: http client: {e}")))?;
+        // THE KEY, read before EACH request (python `await self._key(...)`):
+        // none on the record ⇒ no `Authorization` header at all.
+        let key = self.key.key(&self.endpoint).await?;
         let mut req = client
             .post(format!("{}/chat/completions", self.endpoint))
             .json(&body);
-        if let Some(key) = api_key() {
+        if let Some(key) = key.filter(|k| !k.is_empty()) {
             req = req.bearer_auth(key);
         }
         let resp = req.send().await.map_err(|e| self.connection_error(&e))?;
@@ -538,7 +538,7 @@ impl Provider for VllmProvider {
             let detail = resp.text().await.unwrap_or_default();
             let detail: String = detail.chars().take(500).collect();
             let why = if matches!(status.as_u16(), 401 | 403) {
-                format!(" — the door wants a key: set {KEY_VAR}")
+                " — the door wants a key: name it in `credentials` ({store, ref})".to_string()
             } else {
                 String::new()
             };
@@ -685,7 +685,6 @@ impl SseState {
         // python `json.loads` raises on a malformed line — the turn fails.
         let obj: Value = serde_json::from_str(data).map_err(|e| ProviderError {
             message: e.to_string(),
-            mapped: false,
             kind: "JSONDecodeError",
         })?;
         // `usage.prompt_tokens` and a `length` finish → `max_tokens`
@@ -811,19 +810,20 @@ fn seconds(meta: &Map<String, Value>, key: &str, default: f64) -> Result<f64, Pr
 /// `max_tokens`, `kv_slots`. Built per call (cheap, and the record can change
 /// between turns). A record missing a required field yields a provider whose
 /// every pass raises that refusal.
-fn build_provider(
-    agent_id: &AgentId,
-    kernel: &Arc<Kernel>,
-    _client_id: &str,
-) -> Option<Arc<dyn Provider>> {
+fn build_provider(agent_id: &AgentId, kernel: &Arc<Kernel>, _client_id: &str) -> Arc<dyn Provider> {
     let meta = helpers::agent_meta(agent_id, kernel);
-    match configure(agent_id, &meta) {
-        Ok(p) => Some(Arc::new(p)),
-        Err(e) => Some(Arc::new(Unconfigured(e))),
+    let key: Arc<dyn KeySource> = Arc::new(key_reader(agent_id, kernel, NAME, false));
+    match configure(agent_id, &meta, key) {
+        Ok(p) => Arc::new(p),
+        Err(e) => Arc::new(Unconfigured(e)),
     }
 }
 
-fn configure(agent_id: &AgentId, meta: &Map<String, Value>) -> Result<VllmProvider, ProviderError> {
+fn configure(
+    agent_id: &AgentId,
+    meta: &Map<String, Value>,
+    key: Arc<dyn KeySource>,
+) -> Result<VllmProvider, ProviderError> {
     let (sampling, explicit_budget) = sampling(meta);
     let overflow = meta.get("kv_overflow").and_then(Value::as_str);
     let Some(kv_overflow) = overflow.filter(|o| KV_OVERFLOWS.contains(o)) else {
@@ -839,6 +839,7 @@ fn configure(agent_id: &AgentId, meta: &Map<String, Value>) -> Result<VllmProvid
             .trim_end_matches('/')
             .to_string(),
         model: helpers::required_meta(meta, "model", NAME)?,
+        key,
         max_tokens: required_int(meta, "max_tokens")?,
         kv_slots: required_int(meta, "kv_slots")?,
         kv_overflow: kv_overflow.to_string(),
@@ -856,7 +857,7 @@ fn configure(agent_id: &AgentId, meta: &Map<String, Value>) -> Result<VllmProvid
 /// shared KV session table, so one reflect shows what the next request will
 /// send and how many conversations are live.
 fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Result<Value, BundleError> {
-    let mut out = verbs::reflect_base(agent_id, kernel, SENTENCE);
+    let mut out = verbs::reflect_base(agent_id, kernel, SENTENCE, CFG.model_window);
     let meta = helpers::agent_meta(agent_id, kernel);
     let (sampling, explicit) = sampling(&meta);
     let secs = |key: &str, default: f64| -> Result<f64, BundleError> {
@@ -1009,64 +1010,62 @@ fn sampling_default(key: &str) -> Value {
 pub fn record_schema() -> &'static Value {
     static SCHEMA: OnceLock<Value> = OnceLock::new();
     SCHEMA.get_or_init(|| {
-        schema::schema(
-            vec![
-                Field::new("endpoint", "str", "the vLLM server's /v1 URL").required(),
-                Field::new("model", "str", "the served model name").required(),
-                Field::new("max_tokens", "int", "a turn's output budget (tokens)").required(),
-                Field::new(
-                    "kv_slots",
-                    "int",
-                    "how many conversations may be live on the endpoint",
-                )
-                .required(),
-                Field::new(
-                    "kv_overflow",
-                    "enum",
-                    "all slots live: evict (the least-recently-used rotates out) or reject \
+        schema::schema(vec![
+            Field::new("endpoint", "str", "the vLLM server's /v1 URL").required(),
+            Field::new("model", "str", "the served model name").required(),
+            Field::new("max_tokens", "int", "a turn's output budget (tokens)").required(),
+            Field::new(
+                "kv_slots",
+                "int",
+                "how many conversations may be live on the endpoint",
+            )
+            .required(),
+            Field::new(
+                "kv_overflow",
+                "enum",
+                "all slots live: evict (the least-recently-used rotates out) or reject \
                      (the newcomer is refused)",
-                )
-                .required()
-                .one_of(&KV_OVERFLOWS),
-                Field::new("temperature", "float", "sampling temperature")
-                    .default(sampling_default("temperature")),
-                Field::new("top_p", "float", "nucleus sampling").default(sampling_default("top_p")),
-                Field::new("top_k", "int", "top-k sampling").default(sampling_default("top_k")),
-                Field::new(
-                    "reasoning_effort",
-                    "enum",
-                    "how much the model wants to think (xhigh needs a thinking_token_budget)",
-                )
-                .one_of(&REASONING_EFFORTS)
-                .default(sampling_default("reasoning_effort")),
-                Field::new(
-                    "thinking_token_budget",
-                    "int",
-                    "the hard cap on thinking tokens, below max_tokens; unset, a turn sends \
+            )
+            .required()
+            .one_of(&KV_OVERFLOWS),
+            Field::new("temperature", "float", "sampling temperature")
+                .default(sampling_default("temperature")),
+            Field::new("top_p", "float", "nucleus sampling").default(sampling_default("top_p")),
+            Field::new("top_k", "int", "top-k sampling").default(sampling_default("top_k")),
+            Field::new(
+                "reasoning_effort",
+                "enum",
+                "how much the model wants to think (xhigh needs a thinking_token_budget)",
+            )
+            .one_of(&REASONING_EFFORTS)
+            .default(sampling_default("reasoning_effort")),
+            Field::new(
+                "thinking_token_budget",
+                "int",
+                "the hard cap on thinking tokens, below max_tokens; unset, a turn sends \
                      min(default, max_tokens/2)",
-                )
-                .default(sampling_default("thinking_token_budget")),
-                Field::new("min_p", "float", "min-p sampling; sent only when set"),
-                Field::new("presence_penalty", "float", "sent only when set"),
-                Field::new("frequency_penalty", "float", "sent only when set"),
-                Field::new("repetition_penalty", "float", "sent only when set"),
-                Field::new("no_repeat_ngram_size", "int", "sent only when set"),
-                Field::new("seed", "int", "sent only when set"),
-                Field::new("stop", "list", "stop sequences; sent only when set"),
-                Field::new(
-                    "kv_ttl",
-                    "float",
-                    "seconds an idle conversation keeps its slot",
-                )
-                .default(json!(KV_TTL)),
-                Field::new("connect_timeout", "float", "seconds to reach the server")
-                    .default(json!(CONNECT_TIMEOUT)),
-                Field::new("read_timeout", "float", "seconds to wait on a generation")
-                    .default(json!(READ_TIMEOUT)),
-            ],
-            // the door's key, when it wants one — sent as a Bearer header only when set
-            Some(KEY_VAR),
-        )
+            )
+            .default(sampling_default("thinking_token_budget")),
+            Field::new("min_p", "float", "min-p sampling; sent only when set"),
+            Field::new("presence_penalty", "float", "sent only when set"),
+            Field::new("frequency_penalty", "float", "sent only when set"),
+            Field::new("repetition_penalty", "float", "sent only when set"),
+            Field::new("no_repeat_ngram_size", "int", "sent only when set"),
+            Field::new("seed", "int", "sent only when set"),
+            Field::new("stop", "list", "stop sequences; sent only when set"),
+            Field::new(
+                "kv_ttl",
+                "float",
+                "seconds an idle conversation keeps its slot",
+            )
+            .default(json!(KV_TTL)),
+            Field::new("connect_timeout", "float", "seconds to reach the server")
+                .default(json!(CONNECT_TIMEOUT)),
+            Field::new("read_timeout", "float", "seconds to wait on a generation")
+                .default(json!(READ_TIMEOUT)),
+            // the door's key, when it wants one — absent = no Authorization header
+            schema::credentials_field(false),
+        ])
     })
 }
 

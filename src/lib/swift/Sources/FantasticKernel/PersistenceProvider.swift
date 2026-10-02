@@ -180,11 +180,16 @@ extension Kernel {
     /// Operator authority: the substrate reading and writing its OWN store is
     /// persistence bookkeeping, not an agent reaching out — it never runs
     /// against a grant.
-    private func storeSendBinary(_ storeId: AgentId, _ header: JSON, _ blob: Data) async
+    ///
+    /// `body` is the request's chunk (the payload's `bytes`, a `write_stream`);
+    /// `nil` asks for the reply's chunk raw (a `read_stream`).
+    private func storeSendBinary(_ storeId: AgentId, _ header: JSON, _ body: Data?) async
         -> (JSON, Data?)
     {
         await KernelTaskLocals.$currentSender.withValue(nil) {
-            let out = await send([Item(storeId, header, binary: blob)])[0]
+            let item = Item(
+                storeId, header, binary: body.map { Blob("bytes", $0) }, rawReply: body == nil)
+            let out = await send([item])[0]
             return (out.result, out.body)
         }
     }
@@ -204,7 +209,7 @@ extension Kernel {
                 .object([
                     "type": .string("read_stream"), "path": .string(path),
                     "offset": .integer(offset),
-                ]), Data())
+                ]), nil)
             guard case .object(let o) = got, let chunk = body else { return Data() }
             buf.append(chunk)
             // python `got.get("eof", True) or not isinstance(next_offset, int)`.
@@ -219,7 +224,7 @@ extension Kernel {
     /// `read_stream {path}` whose answer carries a chunk.
     private func presentViaStore(_ storeId: AgentId, _ path: String) async -> Bool {
         let (got, body) = await storeSendBinary(
-            storeId, .object(["type": .string("read_stream"), "path": .string(path)]), Data())
+            storeId, .object(["type": .string("read_stream"), "path": .string(path)]), nil)
         if case .object = got, body != nil { return true }
         return false
     }

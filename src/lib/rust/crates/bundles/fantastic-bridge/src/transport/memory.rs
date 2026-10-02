@@ -81,7 +81,11 @@ impl BridgeTransport for MemoryTransport {
         self.send_any(Frame::Text(frame)).await
     }
 
-    async fn send_binary(&self, header: Value, body: Vec<u8>) -> Result<(), TransportError> {
+    async fn send_binary(
+        &self,
+        header: Value,
+        body: fantastic_kernel::Blob,
+    ) -> Result<(), TransportError> {
         self.send_any(Frame::Binary(header, body)).await
     }
 

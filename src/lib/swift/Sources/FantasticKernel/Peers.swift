@@ -17,21 +17,27 @@ import OrderedCollections
 
 /// How a connected PEER KERNEL is reached. `via` names the transport agent
 /// carrying it (the root reflect reports it); `call(agentId, payload, caller,
-/// body)` delivers ONE call to that kernel's `agentId` as `caller` (`<this
-/// guid>|<sender>`) and returns the peer's reply — or a refusal when the
-/// connection ends first.
+/// secret, body)` delivers ONE call to that kernel's `agentId` as `caller`
+/// (`<this guid>|<sender>`) and returns the peer's reply — or a refusal when the
+/// connection ends first. `secret` is the item's marked paths (`Secret`, `[]`
+/// when none), rooted at the item exactly as the peer's item is rooted, so the
+/// transport puts them on the call frame verbatim and the PEER masks its own
+/// records of the call too. Python `PeerRoute.call(agent_id, payload, caller,
+/// secret)`.
 ///
 /// A CLASS, compared by IDENTITY (python `is`): only the connection that
-/// registered a guid can unregister it. The body rides beside the JSON, as it
-/// does everywhere in this runtime — python's reply dict simply holds the bytes.
+/// registered a guid can unregister it. The request body rides beside the JSON
+/// at its payload path (`Blob`), as it does everywhere in this runtime — python's
+/// payload dict simply holds the bytes there; the reply's chunk rides beside the
+/// reply.
 public final class PeerRoute: @unchecked Sendable {
     /// The transport agent carrying this peer.
     public let via: String
-    private let deliver: @Sendable (String, JSON, String, Data?) async -> (JSON, Data?)
+    private let deliver: @Sendable (String, JSON, String, [String], Blob?) async -> (JSON, Data?)
 
     public init(
         via: String,
-        call: @escaping @Sendable (String, JSON, String, Data?) async -> (JSON, Data?)
+        call: @escaping @Sendable (String, JSON, String, [String], Blob?) async -> (JSON, Data?)
     ) {
         self.via = via
         self.deliver = call
@@ -39,9 +45,9 @@ public final class PeerRoute: @unchecked Sendable {
 
     /// Deliver one call through this route.
     public func call(
-        _ agentId: String, _ payload: JSON, caller: String, body: Data?
+        _ agentId: String, _ payload: JSON, caller: String, secret: [String], body: Blob?
     ) async -> (JSON, Data?) {
-        await deliver(agentId, payload, caller, body)
+        await deliver(agentId, payload, caller, secret, body)
     }
 }
 
@@ -127,9 +133,11 @@ extension Kernel {
 
     /// The dispatch of a call to a remote target: hand it to the peer's route,
     /// carrying the caller as `<this guid>|<sender>` so the peer's gate can judge
-    /// it. Python `RemoteTarget._dispatch_task`.
+    /// it, and the item's `secret` marks so the peer masks its records as this
+    /// kernel does. Python `RemoteTarget._dispatch_task`.
     func callPeer(
-        _ remote: RemoteRef, qualified: AgentId, payload: JSON, origin: AgentId?, body: Data?
+        _ remote: RemoteRef, qualified: AgentId, payload: JSON, origin: AgentId?,
+        secret: [String], body: Blob?
     ) async -> (JSON, Data?) {
         guard let own = ownGuid() else {
             // The peer judges the caller by `<guid>|<agent>`; with no guid of our
@@ -142,7 +150,11 @@ extension Kernel {
                 nil
             )
         }
+        // The item's `secret` marks ride along: this kernel already records the
+        // call as shown, and the peer must too — its call/settle rows, ledger and
+        // state stream are records of the SAME call.
         return await remote.route.call(
-            remote.agentId, payload, caller: "\(own)|\(origin?.value ?? "kernel")", body: body)
+            remote.agentId, payload, caller: "\(own)|\(origin?.value ?? "kernel")",
+            secret: secret, body: body)
     }
 }

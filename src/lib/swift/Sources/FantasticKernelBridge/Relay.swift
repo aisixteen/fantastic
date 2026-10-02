@@ -15,7 +15,7 @@
 //
 // PURE STREAMS: a control frame rides as a TEXT WS frame, a raw `read_stream`
 // chunk as a BINARY WS frame `[4B len|header|body]` (no base64); the bridge
-// frame's `_binary_path` is lifted to `payload.<path>` on the wire.
+// frame's `_binary_path` is lifted to `["payload", …its steps]` on the wire.
 
 import FantasticIoBridge
 import FantasticJSON
@@ -25,6 +25,25 @@ import OrderedCollections
 
 /// Python `_relay.SUBPROTOCOL` / `DEFAULT_HEARTBEAT` / `DEFAULT_RECONNECT`.
 public let RELAY_SUBPROTOCOL = "fantastic.relay.v1"
+
+// THE RELAY SEAL (owner, 2026-10-02). relayd dispatches every tunneled frame into
+// its own kernel and records it UNMASKED, so a secret that crossed a relay leg
+// would sit in the relay's ledger in full. Until relayd masks what it records, a
+// relay leg refuses any call carrying secret marks, in both directions: outbound
+// in `KernelBridgeBundle.handle`/`handleBinary` (`forward`), inbound in
+// `RelayTransport.recv`. ws_bridge (direct WS) is not sealed. One text for both.
+// Python `_relay.SECRET_SEALED` / `SECRET_SEALED_HINT` / `secret_sealed`.
+public let SECRET_SEALED =
+    "relay_connector: a call carrying secret marks may not cross a relay leg — "
+    + "the relay records every frame it routes, unmasked"
+public let SECRET_SEALED_HINT = "reach that kernel over a direct ws_bridge leg to send a secret"
+
+/// The relay seal's refusal — outbound to the local caller, inbound as the reply
+/// to the far caller.
+public func secretSealed() -> JSON {
+    Refusal.make(Refusal.unauthorized, SECRET_SEALED, hint: SECRET_SEALED_HINT)
+}
+
 public let DEFAULT_HEARTBEAT = 30.0
 public let DEFAULT_RECONNECT = 10.0
 /// Python `ROLES`, rendered as python renders the tuple in its refusals.
@@ -213,7 +232,7 @@ public actor RelayTransport: BridgeTransport {
     public func sendBinary(header: JSON, body: Data) async throws {
         guard let client else { throw ConnectionClosed("relay_connector: not connected") }
         var inner = header
-        let innerPath = inner["_binary_path"].asString
+        let innerPath = inner["_binary_path"].asArray
         if case .object(var m) = inner {
             m["_binary_path"] = nil
             inner = .object(m)
@@ -221,7 +240,7 @@ public actor RelayTransport: BridgeTransport {
         var envelope: JSON = .object([
             "type": .string("send"), "target": .string(partner), "payload": inner,
         ])
-        if let innerPath { envelope["_binary_path"] = .string("payload.\(innerPath)") }
+        if let innerPath { envelope["_binary_path"] = .array([.string("payload")] + innerPath) }
         do {
             try await client.send(
                 .binary([UInt8](Codec.encodeBinaryFrame(header: envelope, body: body))))
@@ -294,13 +313,36 @@ public actor RelayTransport: BridgeTransport {
                     )
                 }
                 guard source == partner else { continue }
+                if payload["type"].asString == "call", payload.asObject?["secret"] != nil {
+                    // THE RELAY SEAL, inbound: the frame already crossed the relay,
+                    // and nothing here dispatches it — the far caller is answered
+                    // with the seal's refusal.
+                    // TODO(relay seal): lift once relayd masks what it records.
+                    // The fix is in relayd (../fantastic_relay): when it dispatches
+                    // a tunneled frame into its own kernel, re-root the inner
+                    // frame's `secret` onto its delivery item (`payload.<f>` ->
+                    // `payload.payload.payload.<f>`), so its rows, ledger and state
+                    // stream show `<secret>`; and decide how REPLY frames carry
+                    // result marks — a `reply` names no marks today, so the relay
+                    // would record a secret result in full.
+                    do {
+                        try await send(
+                            .object([
+                                "type": .string("reply"), "id": payload["id"],
+                                "data": secretSealed(),
+                            ]))
+                    } catch is ConnectionClosed {
+                        // the socket dropped; the loop re-dials
+                    }
+                    continue
+                }
                 // The tunnelled frame's OWN `_binary_path`: `sendBinary` lifted
-                // it to `payload.<path>` on the envelope, so it comes back down —
-                // python's `decode_frame` places the body inside the inner frame
-                // at exactly that path.
+                // it to `["payload", …steps]` on the envelope, so it comes back
+                // down — python's `decode_frame` places the body inside the inner
+                // frame at exactly those steps.
                 var frame = payload
-                if isBinary, let p = envelope["_binary_path"].asString, p.hasPrefix("payload.") {
-                    frame["_binary_path"] = .string(String(p.dropFirst("payload.".count)))
+                if isBinary, let inner = Codec.payloadBody(envelope, body: body) {
+                    frame["_binary_path"] = Codec.binaryPath(inner.parts)
                 }
                 return (frame, body, isBinary)
             default:

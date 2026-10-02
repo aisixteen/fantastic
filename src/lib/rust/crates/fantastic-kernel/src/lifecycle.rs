@@ -140,6 +140,43 @@ pub(crate) fn bad_grant_shape(meta: &Map<String, Value>) -> Option<String> {
     None
 }
 
+// THE SECRET-HOLDER MARK (owner 2026-10-02). `holds_secrets: true` on a record makes
+// that agent unreachable from a model turn (ai_core refuses the call). The kernel
+// owns two rules about the field itself, at the write:
+//   - its SHAPE ([`bad_holder_mark`]): exactly `true`, or `null` — anything else is
+//     `invalid_meta`, on every agent, at create_agent and update_agent alike;
+//   - who LOWERS it (`check_holder_mark`, in the gate): on an agent whose record
+//     says `true`, only the operator may write anything else.
+// `null` IS THE CLEAR. update_agent REPLACES a named field, so `holds_secrets: null`
+// leaves a record whose value is `null` — not a holder, since only exactly `true`
+// marks one — the same way `delete_lock: null` lifts a lock. Python `_agent.py`.
+
+/// The record field that marks a secret holder.
+pub(crate) const HOLDS_SECRETS: &str = "holds_secrets";
+/// The `side` of the gate's refusal to lower a holder's mark.
+pub(crate) const HOLDER_MARK_SIDE: &str = "secret-holder";
+/// The `hint` of the gate's refusal to lower a holder's mark.
+pub(crate) const HOLDER_MARK_HINT: &str = "only the operator clears it (update_agent \
+     holds_secrets=null); an agent may mark a holder, never unmark one";
+
+/// `holds_secrets`'s SHAPE, judged at WRITE time on every agent — python
+/// `_bad_holder_mark`: exactly `true` marks a holder, `null` is the operator's
+/// clear — nothing else is a value the record may carry (`false`, `"yes"`, `1`
+/// read as a mark to one reader and as none to another). Runs after the grant
+/// shape and BEFORE the bundle's own `validate_meta`, so for a credential_store a
+/// malformed value gets this text and `null` gets the store's.
+pub(crate) fn bad_holder_mark(meta: &Map<String, Value>) -> Option<String> {
+    let v = meta.get(HOLDS_SECRETS)?;
+    if matches!(v, Value::Bool(true) | Value::Null) {
+        return None;
+    }
+    Some(format!(
+        "holds_secrets must be exactly true (this agent holds secrets) or null \
+         (the operator clears the mark) — got {}",
+        fantastic_bundle::py_type_name(v)
+    ))
+}
+
 pub(crate) async fn create_from_payload(
     kernel: &Arc<Kernel>,
     root: &Arc<Agent>,
@@ -238,7 +275,7 @@ pub(crate) async fn create_from_payload(
     // used to bypass it, so `create_agent ingress_rule=bogus` was ACCEPTED here
     // and REFUSED one update later — two answers for one field). Record is empty
     // at create: the merged view IS the patch.
-    if let Some(why) = bad_grant_shape(&meta) {
+    if let Some(why) = bad_grant_shape(&meta).or_else(|| bad_holder_mark(&meta)) {
         return crate::refusal::refusal(crate::refusal::INVALID_META, &why);
     }
     if let Some(bundle) = kernel.bundles.get(hm) {

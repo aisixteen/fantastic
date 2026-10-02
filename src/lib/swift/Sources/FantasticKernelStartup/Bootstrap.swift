@@ -6,7 +6,7 @@
 //     its `agent.yaml` records, returns a kernel ready to run forever
 //   - `Bootstrap.oneShot(workdir:)` — no lock; for `fantastic <id>
 //     <verb>` style one-off RPC against an existing workdir
-//   - `Bootstrap.awaitStop(kernel:)` — blocks until SIGINT/SIGTERM/SIGHUP or
+//   - `Bootstrap.awaitStop(kernel:signals:)` — blocks until SIGINT/SIGTERM/SIGHUP or
 //     a root-only `kernel_stop`; the real daemon entrypoint (`Fantastic/
 //     Daemon.swift`) races it against the REPL/block tasks and runs the
 //     kernel's graceful `shutdown()` itself.
@@ -66,6 +66,10 @@ public enum Bootstrap {
     /// two are raced; whichever loses is cancelled. Python `longrun` installs
     /// the same three handlers on one stop event that `kernel_stop` shares.
     ///
+    /// `signals` was INSTALLED by the caller before it announced itself
+    /// (`[kernel] up`), so a signal that landed before this wait started is
+    /// HELD and returned here, not lost to the default action.
+    ///
     /// Returns the SIGNAL's name (`"SIGINT"`/`"SIGTERM"`/`"SIGHUP"`) when that
     /// leg won, or `nil` for `kernel_stop`/cancellation — the caller
     /// prints python's `\n[kernel] <SIG> — shutting down...` line ONLY for a
@@ -78,9 +82,9 @@ public enum Bootstrap {
     /// never returned: a SIGTERM printed nothing, the teardown lines never ran,
     /// `kernel.shutdown()` never ran, and the process was still alive 15 s later
     /// with `lock.yaml` left behind (measured; the e2e driver SIGKILLed swift).
-    public static func awaitStop(kernel: Kernel) async -> String? {
+    public static func awaitStop(kernel: Kernel, signals: StopSignals) async -> String? {
         await withTaskGroup(of: String?.self) { group -> String? in
-            group.addTask { await waitForSignal() }
+            group.addTask { await signals.recv() }
             group.addTask {
                 await kernel.shutdownRequested()
                 return nil
@@ -90,84 +94,86 @@ public enum Bootstrap {
             return caught ?? nil
         }
     }
+}
 
-    /// Resolve with the caught signal's name on the first of SIGINT/SIGTERM/
-    /// SIGHUP — or `nil` on cancellation, so a serve loop that ends another
-    /// way (`kernel_stop`) does not hang on a continuation nobody will
-    /// ever resume.
-    private static func waitForSignal() async -> String? {
-        let names: [Int32: String] = [SIGINT: "SIGINT", SIGTERM: "SIGTERM", SIGHUP: "SIGHUP"]
-        let sigs = [SIGINT, SIGTERM, SIGHUP]
-        let sources = sigs.map { sig -> DispatchSourceSignal in
-            let src = DispatchSource.makeSignalSource(signal: sig, queue: .global())
+/// The daemon's stop signals — SIGINT, SIGTERM and SIGHUP, the three python's
+/// `_request_stop` handles. INSTALLED by `install()`: from the moment it
+/// returns, a delivered signal is HELD until `recv()` takes it, however late
+/// that await starts. The daemon installs before it prints `[kernel] up` —
+/// whoever reads that line may signal at once, and a SIGTERM that landed while
+/// the handlers were only set up inside the wait took the default action: the
+/// process died with no teardown and `lock.yaml` held (rust closed the same
+/// window: `StopSignals::install`).
+///
+/// The handlers stay for the life of the object: a second signal during the
+/// teardown is ignored, as python's `_request_stop` ignores it once stop is set.
+public final class StopSignals: @unchecked Sendable {
+    private static let names: [(Int32, String)] = [
+        (SIGINT, "SIGINT"), (SIGTERM, "SIGTERM"), (SIGHUP, "SIGHUP"),
+    ]
+    private let lock = NSLock()
+    private var held: String?
+    private var waiter: CheckedContinuation<String?, Never>?
+    private var sources: [DispatchSourceSignal] = []
+
+    private init() {}
+
+    /// Ignore the three signals' default action and watch each with a dispatch
+    /// source, resumed here — the watch is live when this returns.
+    public static func install() -> StopSignals {
+        let stop = StopSignals()
+        for (sig, name) in names {
             signal(sig, SIG_IGN)
-            return src
+            let src = DispatchSource.makeSignalSource(signal: sig, queue: .global())
+            src.setEventHandler { [weak stop] in stop?.deliver(name) }
+            src.resume()
+            stop.sources.append(src)
         }
-        let resumed = Atomic(false)
-        let slot = ContinuationSlot()
-        let caught = await withTaskCancellationHandler {
+        return stop
+    }
+
+    deinit {
+        for src in sources { src.cancel() }
+    }
+
+    /// The first signal wins: it goes to a parked `recv`, or is held for the
+    /// next one. Later signals are dropped.
+    private func deliver(_ name: String) {
+        let cont: CheckedContinuation<String?, Never>? = lock.withLock {
+            if let w = waiter {
+                waiter = nil
+                return w
+            }
+            if held == nil { held = name }
+            return nil
+        }
+        cont?.resume(returning: name)
+    }
+
+    /// The held signal's name, or the next one to arrive — `nil` on
+    /// cancellation, so a serve loop that ends another way (`kernel_stop`)
+    /// does not hang on a continuation nobody will ever resume.
+    public func recv() async -> String? {
+        await withTaskCancellationHandler {
             await withCheckedContinuation { (cont: CheckedContinuation<String?, Never>) in
-                slot.store(cont)
-                for (sig, src) in zip(sigs, sources) {
-                    src.setEventHandler {
-                        if resumed.compareAndSwap(false, true) {
-                            slot.take()?.resume(returning: names[sig])
-                        }
+                let now: String?? = lock.withLock {
+                    if let h = held {
+                        held = nil
+                        return .some(h)
                     }
-                    src.resume()
+                    if Task.isCancelled { return .some(nil) }
+                    waiter = cont
+                    return nil
                 }
-                // Cancelled before the continuation was stored: honour it now.
-                if Task.isCancelled, resumed.compareAndSwap(false, true) {
-                    slot.take()?.resume(returning: nil)
-                }
+                if let now { cont.resume(returning: now) }
             }
         } onCancel: {
-            if resumed.compareAndSwap(false, true) {
-                slot.take()?.resume(returning: nil)
+            let cont = lock.withLock { () -> CheckedContinuation<String?, Never>? in
+                let w = waiter
+                waiter = nil
+                return w
             }
+            cont?.resume(returning: nil)
         }
-        for src in sources { src.cancel() }
-        return caught
-    }
-}
-
-/// One-slot holder so the signal handlers and the cancellation handler can
-/// hand the same continuation to exactly one resumer.
-private final class ContinuationSlot: @unchecked Sendable {
-    private let lock = NSLock()
-    private var cont: CheckedContinuation<String?, Never>?
-
-    func store(_ c: CheckedContinuation<String?, Never>) {
-        lock.lock()
-        defer { lock.unlock() }
-        cont = c
-    }
-
-    func take() -> CheckedContinuation<String?, Never>? {
-        lock.lock()
-        defer { lock.unlock() }
-        let c = cont
-        cont = nil
-        return c
-    }
-}
-
-/// Minimal compare-and-swap helper for the signal-resume guard.
-/// (We avoid Swift Atomics package dependency for this single
-/// use case; an NSLock-protected Bool is plenty.)
-private final class Atomic<T: Equatable>: @unchecked Sendable {
-    private let lock = NSLock()
-    private var value: T
-
-    init(_ value: T) { self.value = value }
-
-    func compareAndSwap(_ expected: T, _ new: T) -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        if value == expected {
-            value = new
-            return true
-        }
-        return false
     }
 }

@@ -7,6 +7,17 @@ as `ws_bridge` (both ride the shared `io_bridge` engine) — `forward`,
 `watch_remote`/`unwatch_remote` work identically; replies and binary
 `read_stream` chunks are tunneled over the relay.
 
+**SEALED for secret values** (owner, 2026-10-02): the relay daemon dispatches every
+tunneled frame into its own kernel and records it UNMASKED, so a secret may not cross
+a relay leg. A `forward` call carrying ANY `secret` mark is refused before a frame
+leaves, and a tunneled `call` frame that names `secret` is answered with the same
+refusal and never dispatched: `{reason:"unauthorized", error:"relay_connector: a call
+carrying secret marks may not cross a relay leg — the relay records every frame it
+routes, unmasked", hint:"reach that kernel over a direct ws_bridge leg to send a
+secret"}`. Unmarked calls cross as before. A direct `ws_bridge` leg carries marks.
+Lifted once relayd re-roots a tunneled frame's marks onto its own delivery item and
+reply frames carry result marks.
+
 **Sealed by default** — open the inbound leg: `update_agent <id> ingress_rule=allow_all_ingress`
 (or `password` for the group token). The bridge-leg `ingress_rule`/`egress_rule`
 gate the tunneled calls and are INDEPENDENT of the relay's own connection auth.

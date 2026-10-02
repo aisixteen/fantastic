@@ -25,24 +25,15 @@ pub enum ProviderEvent {
     Token(String),
 }
 
-/// Why a provider pass failed — and, with it, what the CALLER reads.
+/// Why a provider pass failed.
 ///
-/// Python's backends install an optional error mapper (`ai_core.build`'s
-/// `error_mapper`): nvidia turns an `httpx.HTTPStatusError` into a clean
-/// caller-facing sentence, and `send` RETURNS `{error, client_id}`. Every other
-/// failure propagates out of the handler, which the kernel settles as
-/// `{error: "<Type>: <msg>", raised: true}` — a FAILED execution, not a
-/// completed one carrying an error. Rust mints the mapped sentence at the site
-/// python's mapper would recognise, so the kind travels as data instead of
-/// being read back off the message text.
+/// Every provider failure propagates out of the handler (python's `_send`
+/// re-raises), which the kernel settles as `{error: "<Type>: <msg>",
+/// raised: true}` — a FAILED execution, not a completed one carrying an error.
 #[derive(Clone, Debug)]
 pub struct ProviderError {
     /// What `status(done, reason='error')` carries — python `str(e)`.
     pub message: String,
-    /// The backend MAPS this failure (python's `error_mapper` returning a
-    /// string): the caller reads `{error, client_id}` and the handler does not
-    /// fail. `false` is python's propagate-and-raise.
-    pub mapped: bool,
     /// The python exception class a raise renders as (`RuntimeError`, or
     /// `ValueError` for a record field the backend cannot run without).
     pub kind: &'static str,
@@ -53,7 +44,6 @@ impl ProviderError {
     pub fn raised(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
-            mapped: false,
             kind: "RuntimeError",
         }
     }
@@ -63,18 +53,7 @@ impl ProviderError {
     pub fn value_error(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
-            mapped: false,
             kind: "ValueError",
-        }
-    }
-
-    /// A failure the backend MAPS to a caller-facing sentence (nvidia's 429 /
-    /// HTTP status): the turn settles as a reply, not as a raise.
-    pub fn mapped(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-            mapped: true,
-            kind: "RuntimeError",
         }
     }
 }
@@ -156,6 +135,17 @@ pub trait Provider: Send + Sync {
 
     /// The upstream model id this provider talks to.
     fn model(&self) -> String;
+
+    /// Whether this provider can run a pass at all — checked FIRST in a turn
+    /// ([`crate::agent_loop::run_generation`]), before the owed recall, the
+    /// assembly and the projection. `Err` fails the turn with that refusal,
+    /// exactly as a failed pass does. Python `_run` builds its provider before
+    /// anything else and a raise there ends the turn; a provider that knows up
+    /// front it cannot answer (foundation_models_backend: the on-device model
+    /// is unavailable) says so here. Default: ready.
+    fn ready(&self) -> Result<(), ProviderError> {
+        Ok(())
+    }
 
     /// What the endpoint reported about the last pass. A provider that reads no
     /// usage reports nothing — `None` everywhere, which leaves the calibration at

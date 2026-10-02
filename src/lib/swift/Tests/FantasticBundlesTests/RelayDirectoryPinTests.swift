@@ -267,7 +267,9 @@ private func guidLegKernel(_ extra: OrderedDictionary<String, JSON>) async -> (
 }
 
 private func binaryForward(_ kernel: Kernel, _ header: JSON) async -> (String, Int) {
-    let out = await kernel.send([Item("brA", header, binary: Data([1, 2, 3]))])[0]
+    // the binary channel with no request body: the forward's own refusals, before
+    // any frame is built
+    let out = await kernel.send([Item("brA", header, rawReply: true)])[0]
     return (out.result.serialize(), out.body?.count ?? 0)
 }
 

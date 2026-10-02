@@ -23,18 +23,16 @@
 //! resolver (which decides when a string must be quoted). No yaml crate emits
 //! libyaml's bytes over `serde_json::Value` with key order kept.
 //!
-//! READING goes through `yaml-rust2`'s event parser (pure rust, streams a `char`
-//! iterator), with ONE resolver of ours for plain scalars — YAML 1.2 core, the
-//! schema python's writer quotes against (`0o17`, `1e3`, `08` are quoted there
-//! exactly because a 1.2 loader would read a number). yaml-rust2's own resolver
-//! is NOT used: it reads `inf`/`nan`/`infinity` as floats (rust's `f64` parse),
-//! which python writes as plain strings.
+//! READING is python's `yaml_io.load` — PyYAML's `CSafeLoader`, YAML 1.1 — in
+//! [`read`]: libyaml events through PyYAML's resolver and `SafeConstructor`. It
+//! is the ONE reader: kernel state and the static_loader's manifests alike.
 
 use std::sync::OnceLock;
 
 use serde_json::{Map, Number, Value};
-use yaml_rust2::parser::{Event, Parser};
-use yaml_rust2::scanner::{Marker, TScalarStyle};
+
+mod read;
+pub use read::{load, load_all};
 
 /// What starts every stream document.
 pub const SEPARATOR: &str = "---\n";
@@ -570,205 +568,6 @@ fn literal(s: &str, indent: usize) -> String {
     // The literal's own final break is the line start the next node needs; a
     // `|-` block ends mid-line and the caller breaks.
     out
-}
-
-// ── read ───────────────────────────────────────────────────────────────────────
-
-/// YAML 1.2 CORE resolution of a PLAIN scalar (see the module doc for why not
-/// yaml-rust2's).
-fn resolve_plain(s: &str) -> Result<Value, String> {
-    static INT: OnceLock<regex::Regex> = OnceLock::new();
-    static FLOAT: OnceLock<regex::Regex> = OnceLock::new();
-    match s {
-        "" | "~" | "null" | "Null" | "NULL" => return Ok(Value::Null),
-        "true" | "True" | "TRUE" => return Ok(Value::Bool(true)),
-        "false" | "False" | "FALSE" => return Ok(Value::Bool(false)),
-        ".inf" | ".Inf" | ".INF" | "+.inf" | "+.Inf" | "+.INF" | "-.inf" | "-.Inf" | "-.INF"
-        | ".nan" | ".NaN" | ".NAN" => {
-            return Err(format!(
-                "the float {s} has no JSON form — a record or row cannot hold it"
-            ))
-        }
-        _ => {}
-    }
-    if let Some(oct) = s.strip_prefix("0o") {
-        if !oct.is_empty() && oct.bytes().all(|b| (b'0'..=b'7').contains(&b)) {
-            return i64::from_str_radix(oct, 8)
-                .map(Value::from)
-                .map_err(|e| format!("{s}: {e}"));
-        }
-    }
-    if let Some(hex) = s.strip_prefix("0x") {
-        if !hex.is_empty() && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return i64::from_str_radix(hex, 16)
-                .map(Value::from)
-                .map_err(|e| format!("{s}: {e}"));
-        }
-    }
-    if re(&INT, r"\A[-+]?[0-9]+\z").is_match(s) {
-        let digits = s.strip_prefix('+').unwrap_or(s);
-        return digits
-            .parse::<Number>()
-            .map(Value::Number)
-            .map_err(|e| format!("{s}: {e}"));
-    }
-    if re(
-        &FLOAT,
-        r"\A[-+]?(\.[0-9]+|[0-9]+(\.[0-9]*)?)([eE][-+]?[0-9]+)?\z",
-    )
-    .is_match(s)
-    {
-        let f: f64 = s.parse().map_err(|e| format!("{s}: {e}"))?;
-        return Number::from_f64(f)
-            .map(Value::Number)
-            .ok_or_else(|| format!("the float {s} has no JSON form"));
-    }
-    Ok(Value::String(s.to_string()))
-}
-
-/// Builds values from parser events — one document at a time.
-enum Frame {
-    Seq(Vec<Value>),
-    Map(Map<String, Value>, Option<String>),
-}
-
-/// A document's value, or an error with where it happened.
-enum DocError {
-    Scan(Marker, String),
-    Shape(String),
-}
-
-/// Pull ONE document's value off the parser (after its `DocumentStart`), through
-/// its `DocumentEnd`.
-fn read_document<T: Iterator<Item = char>>(p: &mut Parser<T>) -> Result<Value, DocError> {
-    let mut stack: Vec<Frame> = Vec::new();
-    loop {
-        let (ev, mark) = p
-            .next_token()
-            .map_err(|e| DocError::Scan(*e.marker(), e.info().to_string()))?;
-        let done: Option<Value> = match ev {
-            Event::Scalar(v, style, _, tag) => {
-                if tag.is_some() {
-                    return Err(DocError::Shape(
-                        "a tagged node — tags are not part of this format".to_string(),
-                    ));
-                }
-                let key_slot = matches!(stack.last(), Some(Frame::Map(_, None)));
-                if key_slot {
-                    // A map KEY is its text (keys are strings, as on the JSON wire).
-                    if let Some(Frame::Map(_, k)) = stack.last_mut() {
-                        *k = Some(v);
-                    }
-                    None
-                } else if style == TScalarStyle::Plain {
-                    Some(resolve_plain(&v).map_err(DocError::Shape)?)
-                } else {
-                    Some(Value::String(v))
-                }
-            }
-            Event::SequenceStart(_, tag) | Event::MappingStart(_, tag) if tag.is_some() => {
-                return Err(DocError::Shape(
-                    "a tagged node — tags are not part of this format".to_string(),
-                ))
-            }
-            Event::SequenceStart(..) => {
-                if matches!(stack.last(), Some(Frame::Map(_, None))) {
-                    return Err(DocError::Shape("a non-scalar map key".to_string()));
-                }
-                stack.push(Frame::Seq(Vec::new()));
-                None
-            }
-            Event::MappingStart(..) => {
-                if matches!(stack.last(), Some(Frame::Map(_, None))) {
-                    return Err(DocError::Shape("a non-scalar map key".to_string()));
-                }
-                stack.push(Frame::Map(Map::new(), None));
-                None
-            }
-            Event::SequenceEnd => match stack.pop() {
-                Some(Frame::Seq(items)) => Some(Value::Array(items)),
-                _ => return Err(DocError::Shape("unbalanced sequence".to_string())),
-            },
-            Event::MappingEnd => match stack.pop() {
-                Some(Frame::Map(m, _)) => Some(Value::Object(m)),
-                _ => return Err(DocError::Shape("unbalanced mapping".to_string())),
-            },
-            Event::Alias(_) => {
-                return Err(DocError::Shape(
-                    "an alias — aliases are not part of this format".to_string(),
-                ))
-            }
-            Event::DocumentEnd => {
-                return Err(DocError::Scan(mark, "an empty document".to_string()));
-            }
-            other => {
-                return Err(DocError::Scan(mark, format!("unexpected event {other:?}")));
-            }
-        };
-        let Some(v) = done else { continue };
-        match stack.last_mut() {
-            None => {
-                // The document's root is complete; its end must follow.
-                let (ev, mark) = p
-                    .next_token()
-                    .map_err(|e| DocError::Scan(*e.marker(), e.info().to_string()))?;
-                if ev != Event::DocumentEnd {
-                    return Err(DocError::Scan(
-                        mark,
-                        "expected the document end".to_string(),
-                    ));
-                }
-                return Ok(v);
-            }
-            Some(Frame::Seq(items)) => items.push(v),
-            Some(Frame::Map(m, k)) => {
-                let key = k.take().unwrap_or_default();
-                m.insert(key, v);
-            }
-        }
-    }
-}
-
-/// Every document of a stream, in order (python `yaml.load_all`).
-pub fn load_all(text: &str) -> Result<Vec<Value>, String> {
-    let mut p = Parser::new(text.chars());
-    let mut out = Vec::new();
-    loop {
-        let (ev, mark) = p.next_token().map_err(|e| e.to_string())?;
-        match ev {
-            Event::StreamStart => {}
-            Event::StreamEnd => return Ok(out),
-            Event::DocumentStart => match read_document(&mut p) {
-                Ok(v) => out.push(v),
-                Err(DocError::Scan(m, info)) => {
-                    return Err(format!(
-                        "{info} at line {} column {}",
-                        m.line(),
-                        m.col() + 1
-                    ))
-                }
-                Err(DocError::Shape(s)) => return Err(s),
-            },
-            other => {
-                return Err(format!(
-                    "unexpected event {other:?} at line {} column {}",
-                    mark.line(),
-                    mark.col() + 1
-                ))
-            }
-        }
-    }
-}
-
-/// One YAML document back (python `yaml.load`): an empty text is `null`, a
-/// stream of several documents is an error.
-pub fn load(text: &str) -> Result<Value, String> {
-    let mut docs = load_all(text)?;
-    match docs.len() {
-        0 => Ok(Value::Null),
-        1 => Ok(docs.remove(0)),
-        _ => Err("expected a single document in the stream".to_string()),
-    }
 }
 
 #[cfg(test)]

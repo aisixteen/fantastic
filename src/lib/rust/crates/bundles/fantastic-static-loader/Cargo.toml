@@ -15,13 +15,6 @@ fantastic-kernel = { path = "../../fantastic-kernel" }
 fantastic-file = { path = "../fantastic-file" }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
-# The manifest is read with PyYAML's semantics (YAML 1.1 plain scalars, `<<`
-# merge keys), which no Rust YAML crate implements: libyaml gives the EVENTS
-# (with each scalar's style) and `yaml.rs` applies PyYAML's resolver +
-# SafeConstructor to them. `regex` carries PyYAML's implicit-resolver patterns
-# verbatim.
-unsafe-libyaml = "0.2"
-regex = "1"
 
 [dev-dependencies]
 # The shared agentic corpus is TEST data (`contract/`), read by the agentic
@@ -32,3 +25,6 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 # The agentic runner (tests/agentic.rs) boots the same rosters the shared corpus
 # at `contract/agentic/` declares, so it needs the bundles those manifests name.
 fantastic-exec-bridge = { path = "../fantastic-exec-bridge" }
+# `credential_store.yaml` declares a credential store (CRED-1..5); its keychain is
+# the in-memory double, so the runner never reaches the real one.
+fantastic-credential-store = { path = "../fantastic-credential-store" }

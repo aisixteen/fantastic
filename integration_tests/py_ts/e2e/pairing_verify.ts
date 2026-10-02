@@ -45,7 +45,7 @@ const hostAgents = flatten((reflectRoot as { tree?: Rec }).tree ?? reflectRoot);
 const frontend = (await postJSON("web_loader", { type: "load_tree" })).records ?? [];
 
 const isAi = (hm: string | undefined) =>
-  /(anthropic|ollama|nvidia_nim|foundation_models)_backend\.tools/.test(hm ?? "");
+  /(ollama|responses|vllm|foundation_models)_backend\.tools/.test(hm ?? "");
 // a terminal backend = an exec_bridge a canvas spawned for a view (it carries `view_id`)
 const termBackends = hostAgents.filter((a) => a.handler_module === "exec_bridge.tools" && typeof a.view_id === "string");
 const aiBackends = hostAgents.filter((a) => isAi(a.handler_module));

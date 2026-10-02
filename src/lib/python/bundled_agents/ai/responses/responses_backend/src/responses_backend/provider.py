@@ -1,6 +1,6 @@
 """ResponsesProvider — streaming chat over the OpenAI Responses API, RAW TEXT.
 
-Matches the AnthropicProvider contract: `chat(messages)` takes plain chat messages
+Matches the `ai_core.provider.Provider` contract: `chat(messages)` takes plain chat messages
 (role system/user/assistant, text content) and yields `str` content tokens ONLY.
 Tool-calling is owned by ai_core, which teaches the `<call>` grammar in the prompt
 and parses it out of this text stream. This provider NEVER declares `tools` and
@@ -12,7 +12,8 @@ Internally translates to the Responses wire shape: the system message becomes
 `instructions`, every other turn a typed `message` item (`input_text` for the user,
 `output_text` for the assistant). Stateless: `store:false`, the whole conversation
 in `input` every pass — the conversation is ai_core's, kept in its memory store,
-never the endpoint's. The key is read from `OPENAI_API_KEY` at call time.
+never the endpoint's. The key is read before each request through `key` — the
+record's `credentials` ref in a credential store (`ai_core/credentials.py`).
 """
 
 from __future__ import annotations
@@ -22,18 +23,22 @@ from typing import AsyncIterator
 
 from ai_core.core import THINK_CLOSE, THINK_OPEN
 
-#: The ONE env var the key is read from. No second spelling.
-KEY_VAR = "OPENAI_API_KEY"
-
-# EDGE TRANSPORT FAILURES — the same rule as the anthropic provider. A 4xx, or any
-# 5xx carrying a JSON body, is the endpoint DELIBERATELY answering and stays loud.
-# These codes with a NON-JSON body are a CDN/proxy error page: the request never
-# reached anything that could judge it, so the one path is retried, bounded.
+# EDGE TRANSPORT FAILURES — not answers, and not statements about the request.
+# A 4xx, or any 5xx carrying a JSON body, is the endpoint DELIBERATELY answering:
+# that is the caller's bug and it stays loud. These codes with a NON-JSON body are
+# a CDN/proxy error page, meaning the request never reached anything that could
+# judge it. Measured 2026-08-24: a `521` from a 1-2s gap while the reverse proxy
+# restarted killed a 26-pass run at pass 5. Retrying the same single path on a
+# transport failure is not a second mechanism — nothing was tried and nothing is
+# being routed around.
 TRANSPORT_CODES = frozenset({502, 503, 504, 520, 521, 522, 523, 524})
 RETRIES = 2
 BACKOFF = 1.5
-# Per-turn OUTPUT budget (`max_output_tokens`) — thinking is spent from it too. A
-# FIELD on the record, not a constant, for the reason the anthropic provider gives.
+# Per-turn OUTPUT budget (`max_output_tokens`). A FIELD on the record, not a
+# constant, because it is a per-model property: the thought of a reasoning model is
+# spent from this same budget, so a value that leaves one model room to finish
+# truncates another mid-thought — a whole turn of thinking, no content, no call.
+# The endpoint's ceiling is `max_output_tokens + prompt <= the model's context`.
 MAX_TOKENS = 8192
 
 #: Reasoning deltas. `reasoning_text` is the model's raw chain of thought (an
@@ -95,10 +100,13 @@ class ResponsesProvider:
         endpoint: str,
         model: str,
         *,
+        key,
         max_tokens: int = MAX_TOKENS,
         sampling: dict | None = None,
         transport=None,
     ):
+        # `async key(endpoint) -> str`, awaited before EACH request.
+        self._key = key
         self._endpoint = endpoint
         self._model = model
         self._max_tokens = max_tokens
@@ -129,9 +137,6 @@ class ResponsesProvider:
 
         import httpx
 
-        key = os.environ.get(KEY_VAR)
-        if not key:
-            raise RuntimeError(f"{KEY_VAR} not set in environment (.env)")
         if not self._endpoint:
             raise RuntimeError(
                 "responses_backend: no `endpoint` set — this connector does not "
@@ -158,12 +163,14 @@ class ResponsesProvider:
             body["instructions"] = instructions
         body.update(self._sampling)
         headers = {
-            "authorization": f"Bearer {key}",
+            "authorization": f"Bearer {await self._key(self._endpoint)}",
             "content-type": "application/json",
         }
 
-        # WIRE TRACE — `FANTASTIC_AI_WIRE=1`, same as the anthropic provider: the
-        # outgoing budget and each completion's terminal status with its item types.
+        # WIRE TRACE — `FANTASTIC_AI_WIRE=1` prints what actually left and what came
+        # back: the outgoing budget and each completion's terminal status with its
+        # item types (the status separates "the model chose to stop" from
+        # "something bounded the output").
         wire = os.environ.get("FANTASTIC_AI_WIRE") == "1"
         if wire:
             print(

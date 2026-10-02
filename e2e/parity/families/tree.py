@@ -23,9 +23,9 @@ import re
 import sys
 import time
 
-from families import MEMORY, OPEN, ai, call, save_kernel_log
+from families import MEMORY, OPEN, VLLM, ai, call, save_kernel_log, vllm
 from spec import CTX_RESERVE, CTX_WINDOW
-from stubs.anthropic_sse import AnthropicStub, Handler as AnthropicHandler
+from stubs.openai_chat import Handler as OpenAIHandler, OpenAIChatStub
 
 NAME = "tree"
 
@@ -61,8 +61,6 @@ def roster(stub_url: str, cb: dict, interp: str) -> list:
         ("sload2", "static_loader.tools", dict(root=".", display_name="")),
         ("cli", "cli.tools", {}),
         ("olla", "ollama_backend.tools", ai(model="m", endpoint="http://127.0.0.1:9")),
-        ("llama", "llamacpp_backend.tools", ai(model="m", endpoint="http://127.0.0.1:9")),
-        ("nim", "nvidia_nim_backend.tools", ai(model="m", endpoint="http://127.0.0.1:9")),
         # NOT `yaml_state.tools`: see the module docstring.
         ("absent", "absent_bundle.tools", {}),
         ("dispenser", "dispenser_probe.tools", {}),
@@ -70,8 +68,8 @@ def roster(stub_url: str, cb: dict, interp: str) -> list:
         ("purchase", "purchase_probe.tools", {}),
         ("user", "user_probe.tools", {}),
         ("oracle", "oracle_probe.tools", dict(lines=["the answer is 42"])),
-        ("ai", "anthropic_backend.tools",
-         ai(model="stub-model", endpoint=stub_url, sampling={"x": 1, "y": None},
+        ("ai", VLLM,
+         ai(**vllm(stub_url), sampling={"x": 1, "y": None},
               context_window=CTX_WINDOW, output_reserve=CTX_RESERVE,
               can_call={"readings": "*", "totals": "*", "runner": "*",
                         "kernel_store": "*", "kernel": "*"})),
@@ -83,12 +81,12 @@ def run(ctx) -> None:
     (ctx.work / "readings").mkdir()
     (ctx.work / "readings" / "a.txt").write_text("7\n")
 
-    stub = AnthropicStub(rec, "stub", ports.take("stub"))
-    stub.start(AnthropicHandler)
+    stub = OpenAIChatStub(rec, "stub", ports.take("stub"))
+    stub.start(OpenAIHandler)
     stub.set_chain("tree", SCRIPT)
 
     cb = {"rest": "*", "web": "*", "ws": "*", "ai": "*"}
-    agents = roster(stub.url(), cb, sys.executable)
+    agents = roster(stub.base_url(), cb, sys.executable)
     ids = [a[0] for a in agents] + ["ghost", "web", "rest", "ws"]
     k = ctx.boot(reach=ids, port=ports.take("main"))
     try:

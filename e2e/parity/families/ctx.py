@@ -25,9 +25,9 @@ import re
 import threading
 import time
 
-from families import BASE, MEMORY, OPEN, ai, call, save_kernel_log
+from families import BASE, MEMORY, OPEN, VLLM, ai, call, save_kernel_log, vllm
 from spec import CTX_RESERVE, CTX_WINDOW, CTX_WINDOW_TINY
-from stubs.anthropic_sse import AnthropicStub, Handler as AnthropicHandler
+from stubs.openai_chat import Handler as OpenAIHandler, OpenAIChatStub, content_text
 
 NAME = "ctx"
 
@@ -98,13 +98,7 @@ def run(ctx) -> None:  # noqa: C901
              "k": None}
     index: list = []
     lock = threading.Lock()
-    stub = AnthropicStub(rec, "stub", ports.take("stub"))
-
-    def content_str(m) -> str:
-        c = m.get("content") if isinstance(m, dict) else None
-        if isinstance(c, list):
-            return "".join(b.get("text", "") for b in c if isinstance(b, dict))
-        return str(c or "")
+    stub = OpenAIChatStub(rec, "stub", ports.take("stub"))
 
     def classify(body: dict, raw: bytes):
         """WHICH prompt this is, from what the KERNEL put in it.
@@ -115,12 +109,13 @@ def run(ctx) -> None:  # noqa: C901
         differently the classification changes, and the change lands in the index
         as data instead of being papered over by a harness-planted tag.
         """
-        sysv = body.get("system")
-        if isinstance(sysv, list):
-            sysv = "".join(b.get("text", "") for b in sysv if isinstance(b, dict))
-        sysv = sysv or ""
-        msgs = body.get("messages") or []
-        contents = [content_str(m) for m in msgs]
+        # The system block is message 0 on this wire (vllm_backend merges every
+        # system message into one there); `msgs` are the turns after it.
+        every = body.get("messages") or []
+        sysv = "\n\n".join(content_text(m) for m in every
+                            if isinstance(m, dict) and m.get("role") == "system")
+        msgs = [m for m in every if not (isinstance(m, dict) and m.get("role") == "system")]
+        contents = [content_text(m) for m in msgs]
         allc = "\n".join(contents)
         m = YOU_ARE.search(sysv)
         cur = state["current"]
@@ -137,7 +132,7 @@ def run(ctx) -> None:  # noqa: C901
 
     def responder(body: dict, raw: bytes):
         kind, agent, sysv, msgs, allc = classify(body, raw)
-        first = content_str(msgs[0]) if msgs else ""
+        first = content_text(msgs[0]) if msgs else ""
         with lock:
             n = len(stub.requests) + 1
             turn = None
@@ -185,7 +180,7 @@ def run(ctx) -> None:  # noqa: C901
         return text
 
     stub.responder = responder
-    stub.start(AnthropicHandler)
+    stub.start(OpenAIHandler)
 
     def quiesce_stub(max_s=240, idle=6):
         t0 = time.time()
@@ -247,13 +242,13 @@ def run(ctx) -> None:  # noqa: C901
                                            "callable_by": {**cb, **{a: "*" for a in [*AIS, "ai_tiny"]}}}),
         ]
         for a in AIS:
-            roster.append((a, "anthropic_backend.tools", ai(**{
-                "model": "stub-model", "endpoint": stub.url(), "context_window": CTX_WINDOW,
+            roster.append((a, VLLM, ai(**{
+                **vllm(stub.base_url()), "context_window": CTX_WINDOW,
                 "output_reserve": CTX_RESERVE, "context_strategy": a.split("_", 1)[1],
                 "context_async": True, "context_titles": True, "recent_n": 4,
                 "callable_by": cb, "can_call": {**BASE, "docs": "*", "kernel": "*"}})))
-        roster.append(("ai_tiny", "anthropic_backend.tools", ai(**{
-            "model": "stub-model", "endpoint": stub.url(), "context_window": CTX_WINDOW_TINY,
+        roster.append(("ai_tiny", VLLM, ai(**{
+            **vllm(stub.base_url()), "context_window": CTX_WINDOW_TINY,
             "output_reserve": CTX_RESERVE, "context_strategy": "compact", "context_async": True,
             "context_titles": True, "recent_n": 4, "callable_by": cb,
             "can_call": {**BASE, "docs": "*", "kernel": "*"}})))

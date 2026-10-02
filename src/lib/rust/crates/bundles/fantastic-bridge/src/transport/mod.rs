@@ -13,7 +13,9 @@
 //! mirrors the Python kernel_bridge):
 //!
 //! ```text
-//! outbound  {type:"call",  id:corr, target, payload}
+//! outbound  {type:"call",  id:corr, target, payload, caller, secret?}
+//!                                     — `secret` = the item's marked paths
+//!                                     (`fantastic_kernel::secret`)
 //! outbound  {type:"watch", src} / {type:"unwatch", src}
 //! inbound   {type:"reply", id, data}
 //! inbound   {type:"error", id, error}
@@ -21,6 +23,7 @@
 //! ```
 
 use async_trait::async_trait;
+use fantastic_kernel::Blob;
 use serde_json::Value;
 use std::fmt;
 
@@ -65,10 +68,13 @@ impl std::error::Error for TransportError {}
 pub enum Frame {
     /// A JSON envelope with no raw bytes.
     Text(Value),
-    /// A JSON header + a raw body. The header carries `_binary_path` naming
-    /// where the body belongs (so a python peer reinserts it); rust uses the
-    /// body alongside the header directly (its `Value` can't hold bytes).
-    Binary(Value, Vec<u8>),
+    /// A JSON header + a raw body AT ITS SLOT: the header holds `null` where the
+    /// body belongs, the [`Blob`]'s path is that slot's steps from the envelope
+    /// root (the wire's `_binary_path`, so a python peer reinserts it there);
+    /// rust uses the body alongside the header directly (its `Value` can't hold
+    /// bytes). A decoded frame that named no slot is a [`Frame::Text`] — python
+    /// places no body then.
+    Binary(Value, Blob),
 }
 
 impl Frame {
@@ -93,10 +99,11 @@ pub trait BridgeTransport: Send + Sync {
     /// queued (memory) / sent over the socket (ws).
     async fn send_frame(&self, frame: Value) -> Result<(), TransportError>;
 
-    /// Push a BINARY frame (`[4B len|header|body]` over a WS binary message).
-    /// Default: refuse — only stream-capable transports (memory/ws/relay)
-    /// override it.
-    async fn send_binary(&self, _header: Value, _body: Vec<u8>) -> Result<(), TransportError> {
+    /// Push a BINARY frame (`[4B len|header|body]` over a WS binary message):
+    /// `header` holds `null` at the body's slot, `body.path` names that slot from
+    /// the envelope root. Default: refuse — only stream-capable transports
+    /// (memory/ws/relay) override it.
+    async fn send_binary(&self, _header: Value, _body: Blob) -> Result<(), TransportError> {
         Err(TransportError::Other(
             "transport does not carry binary frames".into(),
         ))
