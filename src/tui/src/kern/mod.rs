@@ -17,6 +17,3 @@ pub mod setup_agent;
 pub mod templates;
 pub mod terminal;
 pub mod web;
-// CRITICAL TODO(dev-llm): dev-only hardwired LLM endpoint.
-#[cfg(feature = "dev-llm")]
-pub mod dev_llm;

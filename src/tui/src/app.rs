@@ -112,6 +112,11 @@ pub struct App {
     /// Set by the 60 s reconcile: the next read of every hot agent is a full one.
     pub stale: bool,
     pub quit: bool,
+    /// The event being applied came from a THIN CLIENT's View (`share`): a quit
+    /// gesture then detaches that client instead of ending the kernel.
+    pub remote: bool,
+    /// Set by `leave` under `remote`; the ViewModel detaches the client.
+    pub detach: bool,
     pub mouse: bool,
     /// `Ctrl-A` armed for one key.
     pub prefix: bool,
@@ -135,6 +140,16 @@ pub struct App {
     last_tree: Option<Instant>,
     reflect_asked: HashSet<AgentId>,
     watched: HashSet<AgentId>,
+}
+
+/// One View's derived state, held by the ViewModel between that View's
+/// passes: its screen (what a click hit-tests against) and each panel's own
+/// slice (`Panel::take_view`). Every View is arbitrary — a terminal of any
+/// size, a thin client, anything that shows the shell — and owns one of these.
+#[derive(Default)]
+pub struct ViewSlots {
+    screen: ratatui::layout::Rect,
+    panels: HashMap<AgentId, Box<dyn std::any::Any>>,
 }
 
 impl App {
@@ -175,6 +190,8 @@ impl App {
             dirty: true,
             stale: false,
             quit: false,
+            remote: false,
+            detach: false,
             // ON by default: clicks focus. Ctrl-A m turns it off for native copy.
             mouse: true,
             prefix: false,
@@ -387,6 +404,36 @@ impl App {
             self.notes.push(s);
         }
         self.dirty = true;
+    }
+
+    /// ENTER a View: its derived state goes back where the layout and the keys
+    /// read it. Paired with [`App::leave`].
+    pub fn enter(&mut self, mut v: ViewSlots) {
+        self.screen = v.screen;
+        for (id, p) in self.panels.iter_mut() {
+            if let Some(s) = v.panels.remove(id) {
+                p.put_view(s);
+            }
+        }
+    }
+
+    /// LEAVE the current View: its derived state comes out, the panels keep
+    /// their defaults until the next `enter`.
+    pub fn leave(&mut self) -> ViewSlots {
+        ViewSlots {
+            screen: std::mem::take(&mut self.screen),
+            panels: self.panels.iter_mut().filter_map(|(id, p)| p.take_view().map(|s| (id.clone(), s))).collect(),
+        }
+    }
+
+    /// A quit gesture: it ends the shell (and the kernel) when it comes from the
+    /// owner's own terminal, and only DETACHES a thin client's View.
+    pub fn quit_or_detach(&mut self) {
+        if self.remote {
+            self.detach = true;
+        } else {
+            self.quit = true;
+        }
     }
 
     /// TRUE while something on screen is a function of the clock rather than of

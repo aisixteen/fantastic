@@ -1,5 +1,5 @@
 import type { ViewBundle, ViewContext, ViewHandle } from "../view.ts";
-import type { Payload } from "../../lib.ts";
+import type { Item, Payload } from "../../lib.ts";
 import { CONNECTOR_SRC } from "./connector.ts";
 
 // html_view — renders an html_agent's MUTABLE body (`meta.html`) as a FULLY
@@ -13,7 +13,8 @@ import { CONNECTOR_SRC } from "./connector.ts";
 
 export const htmlView: ViewBundle = {
   // The frontend member IS an `html_agent.ts` agent holding its own content.
-  handles: ["html_agent.ts"],
+  // …and a CHILD CANVAS's card on its parent: the same html body, the child's own.
+  handles: ["html_agent.ts", "canvas.ts"],
   // Content, not a host client: its reach is whatever its creator wrote.
   grants: () => ({}),
 
@@ -79,16 +80,23 @@ export const htmlView: ViewBundle = {
         target?: string;
         src?: string;
         payload?: Payload;
+        /** `secret` paths the panel marked (`fantastic.send(t, p, secret)`) */
+        secret?: unknown;
       };
       if (m?.__ft !== true) return;
       switch (m.op) {
-        case "send":
+        case "send": {
+          // the panel's marks ride the item verbatim; the kernel refuses a
+          // malformed mark itself
+          const item: Item = { target: m.target ?? "", payload: m.payload ?? {} };
+          if (Object.hasOwn(m, "secret")) item.secret = m.secret as string[];
           void asSelf
-            .send([{ target: m.target ?? "", payload: m.payload ?? {} }])
+            .send([item])
             .then((outs) =>
               toIframe({ op: "reply", rid: m.rid, data: outs[0]!.result }),
             );
           break;
+        }
         case "emit":
           // local frontend agent → local fan-out; host agent → over the bridge.
           if (kernel.get(m.target ?? "") !== undefined) {

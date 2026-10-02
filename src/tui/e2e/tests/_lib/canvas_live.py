@@ -45,10 +45,37 @@ BIN = SRC / "target" / "debug" / "fantastic"
 RUNS = SRC / "tui" / "e2e" / "runs"
 #: The backends the CLI links, and the cargo feature that links each.
 FEATURES = {
-    "anthropic_backend.tools": "anthropic",
     "responses_backend.tools": "responses",
     "vllm_backend.tools": "vllm",
+    "foundation_models_backend.tools": "foundation-models",
 }
+#: Where a run's key comes from, per provider (the plug's own environment).
+KEY_VARS = {"vllm": "VLLM_API_KEY", "responses": "OPENAI_API_KEY"}
+
+
+def host_of(endpoint: str) -> str:
+    """The `host[:port]` of a URL, lowercased — as the product's `kern/keys`."""
+    rest = endpoint.split("://", 1)[-1]
+    return rest.split("/")[0].split("?")[0].split("#")[0].rsplit("@", 1)[-1].lower()
+
+
+def seed_key(home: Path, record: dict) -> dict:
+    """The PRODUCT's key path, seeded the way a user's set-up leaves it: the
+    plain key mode, the ref remembered, its value in the 0600 credentials file.
+    Returns the template without the plug's own `credentials` (the e2e `creds`
+    store does not exist here): the product names its own ref at spawn."""
+    rec = {k: v for k, v in record.items() if k != "credentials"}
+    provider = str(rec.get("handler_module", "")).removesuffix("_backend.tools")
+    key = os.environ.get(KEY_VARS.get(provider, ""), "")
+    if not key or not rec.get("endpoint"):
+        return rec
+    ref, host = f"{provider}/{host_of(rec['endpoint'])}", host_of(rec["endpoint"])
+    (home / "secrets").mkdir(parents=True, exist_ok=True)
+    os.chmod(home / "secrets", 0o700)
+    private_write(home / "secrets" / "mode", "plain")
+    private_write(home / "secrets" / "refs.json", json.dumps({ref: host}))
+    private_write(home / "credentials.yaml", yaml.safe_dump({"refs": {ref: {"api_key": key}}}))
+    return rec
 
 
 def private_write(p: Path, text: str) -> None:
@@ -109,6 +136,7 @@ class Rig:
         os.chmod(self.home, 0o700)
         os.chmod(self.home / "templates", 0o700)
         if template is not None:
+            template = seed_key(self.home, template)
             private_write(self.home / "templates" / f"{name}.yaml", yaml.safe_dump(template, sort_keys=False))
             private_write(self.home / "templates" / ".preferred", name)
 

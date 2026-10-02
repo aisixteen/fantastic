@@ -260,6 +260,10 @@ impl Panel for TerminalPanel {
         self
     }
 
+    fn sized(&self) -> bool {
+        true
+    }
+
     fn layout(&mut self, area: Rect, _cx: &Cx<'_>) {
         let want = (area.height.max(1), area.width.max(1));
         if self.screen.screen().size() != want {

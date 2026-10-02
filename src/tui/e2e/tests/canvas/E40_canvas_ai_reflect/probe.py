@@ -36,11 +36,8 @@ from helpers.verdict import verdict  # noqa: E402
 SRC = REPO / "src"
 BIN = SRC / "target" / "debug" / "fantastic"
 #: The backends the CLI links, and the cargo feature that links each.
-FEATURES = {
-    "anthropic_backend.tools": "anthropic",
-    "responses_backend.tools": "responses",
-    "vllm_backend.tools": "vllm",
-}
+sys.path.insert(0, str(HERE.parent.parent / "_lib"))
+from canvas_live import FEATURES, seed_key  # noqa: E402
 FIRST_TURN = "Hey! Look around and see whats on a canvas and a backend"
 
 LIMITS = (yaml.safe_load((HERE / "test.yaml").read_text()) or {}).get("limits") or {}
@@ -127,7 +124,7 @@ def main() -> bool:
     (home / "templates").mkdir(parents=True)
     os.chmod(home, 0o700)
     os.chmod(home / "templates", 0o700)
-    private_write(home / "templates" / "plug.yaml", yaml.safe_dump(be.record(), sort_keys=False))
+    private_write(home / "templates" / "plug.yaml", yaml.safe_dump(seed_key(home, be.record()), sort_keys=False))
     private_write(home / "templates" / ".preferred", "plug")
     proj = tmp / "proj"
     proj.mkdir()

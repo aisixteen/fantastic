@@ -4,5 +4,5 @@
 # up into a parent workspace; the kernel workspace under `lib` is excluded.
 [workspace]
 members = ["tui", "tui/bundles/fantastic-web-mcp", "tui/bundles/fantastic-sqlite-store", "tui/bundles/fantastic-canvas-page", "tui/bundles/fantastic-user-home-store"]
-exclude = ["lib", "cli", "shared/kernel", "shared/ai", "shared/term"]
+exclude = ["lib"]
 resolver = "2"

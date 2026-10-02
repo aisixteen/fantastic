@@ -21,8 +21,9 @@ use crate::kern::host::Host;
 /// Where a new agent goes: beside the human's own agents.
 pub const PARENT: &str = "set_of_agents";
 
-/// Fields the WRITE sets itself — never asked for on the page.
-pub const WRITE_OWNED: [&str; 1] = ["memory_store_id"];
+/// Fields the WRITE sets itself — never asked for on the page. `credentials`
+/// names the key stored for the backend at its endpoint (`kern/keys`).
+pub const WRITE_OWNED: [&str; 2] = ["memory_store_id", "credentials"];
 
 /// One field of a backend's record schema.
 #[derive(Debug, Clone, PartialEq)]
@@ -41,8 +42,9 @@ pub struct Backend {
     pub module: String,
     /// The page's fields (the write-owned ones left out), in schema order.
     pub fields: Vec<Field>,
-    /// The variable its key is read from, when it takes one.
-    pub key_var: Option<String>,
+    /// Whether its record takes a key (`Some(required)`): the key is stored
+    /// with `k` and named on the record by the write (`kern/keys`).
+    pub key: Option<bool>,
 }
 
 impl Backend {
@@ -69,7 +71,10 @@ impl Backend {
                     .collect()
             })
             .unwrap_or_default();
-        Self { module: module.to_string(), fields, key_var: schema["key_var"].as_str().map(str::to_string) }
+        let key = schema["fields"].as_array().and_then(|a| {
+            a.iter().find(|f| f["type"] == "credentials").map(|f| f["required"].as_bool().unwrap_or(false))
+        });
+        Self { module: module.to_string(), fields, key }
     }
 }
 
@@ -193,6 +198,7 @@ pub async fn write(host: &Host, rec: &Record) -> Result<String, String> {
     let mut can_call: Map<String, Value> = rec.may_call.iter().map(|t| (t.clone(), json!("*"))).collect();
     can_call.insert(store.clone(), json!("*"));
     let mut create = rec.fields.clone();
+    crate::kern::keys::attach(host, &rec.handler, &mut create)?;
     create.extend(
         json!({
             "type": "create_agent",
@@ -207,11 +213,14 @@ pub async fn write(host: &Host, rec: &Record) -> Result<String, String> {
         .cloned()
         .unwrap_or_default(),
     );
+    let named: Map<String, Value> = create.get("credentials").map(|c| [("credentials".to_string(), c.clone())].into_iter().collect()).unwrap_or_default();
     let create = Value::Object(create);
     let r = host.operator("kernel", create).await;
     if let Some(e) = err_of(&r) {
         return Err(e);
     }
+    // its key, when it names one: the three grants it takes to read it
+    crate::kern::keys::wire_record(host, id, &named).await?;
     merge(host, &user, "can_call", id).await?;
     for t in &rec.may_call {
         merge(host, t, "callable_by", id).await?;

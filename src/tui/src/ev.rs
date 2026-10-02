@@ -215,6 +215,8 @@ pub enum Cmd {
     /// Store a provider key in the keychain (`kern/keys`).
     StoreKey {
         module: String,
+        /// The endpoint the key is for: a key is bound to its host.
+        endpoint: String,
         secret: String,
     },
     /// SHELL-LOCAL, never on the wire: select `agent` and put the cursor on

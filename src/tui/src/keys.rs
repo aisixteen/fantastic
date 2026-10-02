@@ -257,7 +257,7 @@ fn key(app: &mut App, k: KeyEvent) {
             KeyCode::Char('d') => {
                 // DETACH, not shutdown: the kernel is a server and outlives this
                 // client by design.
-                app.quit = true;
+                app.quit_or_detach();
             }
             KeyCode::Char('b') => app.push(Cmd::RosterBoot),
             _ => app.note("Ctrl-A: m mouse · d detach · b boot the roster"),
@@ -415,7 +415,7 @@ pub fn q_hold_streak(prev: u8, last: Option<std::time::Instant>, now: std::time:
 fn quit_gesture(app: &mut App, k: KeyEvent, now: std::time::Instant) -> bool {
     if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) {
         if ctrl_c_exits(app.last_ctrl_c, now) {
-            app.quit = true;
+            app.quit_or_detach();
         } else {
             app.note("press Ctrl-C again to quit — the kernel keeps running.");
         }
@@ -428,7 +428,7 @@ fn quit_gesture(app: &mut App, k: KeyEvent, now: std::time::Instant) -> bool {
         app.q_streak = q_hold_streak(app.q_streak, app.last_q, now);
         app.last_q = Some(now);
         if app.q_streak >= Q_HOLD_STREAK {
-            app.quit = true;
+            app.quit_or_detach();
             return true;
         }
     }

@@ -190,10 +190,19 @@ impl AiCellsBundle {
         let mut cc = peer;
         cc.insert(store.clone(), json!("*"));
         spec.insert("can_call".into(), Value::Object(cc));
+        if let Err(e) = crate::kern::keys::attach(host, &t.handler(), &mut spec) {
+            let _ = host.operator("kernel", json!({"type": "delete_agent", "id": store})).await;
+            return refuse("bad_arg", format!("spawn: the AI from template `{name}`: {e}"), "");
+        }
+        let named = spec.clone();
         let r = host.operator("kernel", Value::Object(spec)).await.result;
         if let Some(e) = r.get("error").and_then(Value::as_str) {
             let _ = host.operator("kernel", json!({"type": "delete_agent", "id": store})).await;
             return refuse("bad_arg", format!("spawn: the AI from template `{name}`: {e}"), "");
+        }
+        if let Err(e) = crate::kern::keys::wire_record(host, &ai, &named).await {
+            let _ = host.operator("kernel", json!({"type": "delete_agent", "id": store})).await;
+            return refuse("bad_arg", format!("spawn: {e}"), "");
         }
         // 3 · the leg reaches the AI BY NAME: it sits two levels down (under its
         // store), past what the leg's structural `$children` covers. Grants for
@@ -377,9 +386,17 @@ impl AiCellsBundle {
         let mut cc = peer;
         cc.insert(to.clone(), json!("*"));
         spec.insert("can_call".into(), Value::Object(cc));
+        let handler = spec.get("handler_module").and_then(Value::as_str).unwrap_or("").to_string();
+        if let Err(e) = crate::kern::keys::attach(host, &handler, &mut spec) {
+            return refuse("bad_arg", format!("reopen: {e}"), "");
+        }
+        let named = spec.clone();
         let r = host.operator("kernel", Value::Object(spec)).await.result;
         if let Some(e) = r.get("error").and_then(Value::as_str) {
             return refuse("bad_arg", format!("reopen: re-making the AI: {e}"), "");
+        }
+        if let Err(e) = crate::kern::keys::wire_record(host, &ai, &named).await {
+            return refuse("bad_arg", format!("reopen: {e}"), "");
         }
         if let Err(e) = Self::grant_leg(host, &leg, &ai).await {
             return refuse("bad_arg", e, "");

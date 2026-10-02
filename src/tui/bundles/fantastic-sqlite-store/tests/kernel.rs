@@ -66,7 +66,7 @@ impl Provider for Canned {
     }
 }
 
-const CFG: BackendConfig = BackendConfig { name: "canned_ai", provider_missing_error: None };
+const CFG: BackendConfig = BackendConfig { name: "canned_ai", model_window: fantastic_ai_core::constants::DEFAULT_CONTEXT_WINDOW };
 
 struct CannedAi;
 
@@ -80,7 +80,7 @@ impl Bundle for CannedAi {
             return Ok(Some(json!({"id": id.0, "sentence": "canned AI", "verbs": {"send": ""}})));
         }
         let out = fantastic_ai_core::verbs::handle_common(id, payload, k, CFG, |_| {
-            Some(Arc::new(Canned) as Arc<dyn Provider>)
+            Arc::new(Canned) as Arc<dyn Provider>
         })
         .await?;
         Ok(Some(out.unwrap_or_else(|| json!({"reason": "unhandled"}))))

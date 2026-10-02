@@ -107,6 +107,18 @@ export const CANVAS_CSS = `
     background: rgba(40, 20, 26, 0.9); color: #ffb3b3; padding: 8px 14px; border-radius: 10px;
     font: 13px ui-monospace, SFMono-Regular, monospace; box-shadow: 0 0 0 1px rgba(255,120,120,0.3); }
   #toolbar .setup-link { margin-left: 12px; color: #b78cff; text-decoration: none; }
+  /* THE BREADCRUMB: root ▸ … ▸ the viewed agent */
+  #toolbar .crumbs .crumb { color: rgba(220,230,245,0.7); text-decoration: none; }
+  #toolbar .crumbs .crumb:hover { color: #fff; }
+  #toolbar .crumbs .crumb.here { color: #fff; font-weight: 600; }
+  #toolbar .crumbs .sep { opacity: .45; }
+  /* VIEWING ONE AGENT FULL: no world transform, the frame fills the page
+     beside the sidebar */
+  #canvas.full-view .canvas-world { transform: none !important; }
+  #canvas.full-view .agent-frame.full { left: 248px !important; top: 56px !important;
+    width: calc(100vw - 260px) !important; height: calc(100vh - 68px) !important; }
+  #canvas.full-view .agent-frame.full .resize-handle { display: none; }
+  #chats .agent.viewed { background: rgba(183,140,255,0.18); }
   #toolbar .setup-link:hover { text-decoration: underline; }
   #toolbar code { color: #cde; background: rgba(255,255,255,0.08); padding: 1px 6px; border-radius: 4px; }
 `;

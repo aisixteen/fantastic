@@ -10,7 +10,7 @@ Colors don't survive the text dump — but layout, text, and the block-font `█
 FANTASTIC title do, which is enough to verify legibility and behaviour headless.
 
 ## How it works
-- **Harness**: `src/shared/term/examples/screenshot.rs` — a `cargo example` that
+- **Harness**: `src/tui/e2e/screenshot.rs` — a `cargo example` that
   opens a PTY, spawns the binary, runs a script, writes frames. Runs the binary in
   a **throwaway temp cwd** so `@sh`/`@ws`/brain-history never touch the repo.
 - **Runner**: `run.sh` — extracts the ` ```script ` block from a scenario `.md`
