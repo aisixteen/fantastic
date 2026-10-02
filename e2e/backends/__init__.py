@@ -223,10 +223,28 @@ def _vllm() -> Backend:
     )
 
 
+class _FoundationModels(Backend):
+    """Apple's on-device model (rust + swift only — python has no FM backend). Its
+    record names no model, endpoint or key: the backend refuses them."""
+
+    def record(self, **overrides: Any) -> dict:
+        meta: dict[str, Any] = {"handler_module": self.handler_module, **self.extra}
+        meta.update(overrides)
+        return meta
+
+    async def provider(self, agent_id: str, root):
+        raise NotImplementedError("python has no foundation_models backend — run with --runtime rust|swift")
+
+
+def _foundation_models() -> Backend:
+    return _FoundationModels(name="foundation_models", handler_module="foundation_models_backend.tools", model="")
+
+
 REGISTRY = {
     "ollama": _ollama,
     "responses": _responses,
     "vllm": _vllm,
+    "foundation_models": _foundation_models,
 }
 
 
