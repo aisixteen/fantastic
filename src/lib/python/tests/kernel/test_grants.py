@@ -125,6 +125,33 @@ def test_the_baseline_never_reaches_the_kernel_controls():
         assert _auth({"boss": [verb]}, verb, "boss").allowed, verb
 
 
+def test_the_baseline_never_reaches_an_agents_lifecycle_or_routes():
+    # Measured 2026-10-03 (audit BV-1): a web_ws/web_rest leg's `$parent:*` let any
+    # client it admitted `stop` its web host for every client, or `unmount` a sealed
+    # sibling's routes. By verb name, whatever the bundle: a structural token's
+    # wildcard (`$parent`, `$children`) covers none of them; a NAMED verb or a
+    # NAMED id's `*` does.
+    for verb in ("stop", "mount", "unmount", "boot"):
+        assert not _auth(dict(DEFAULT_CAN_CALL), verb, "boss").allowed, verb
+        assert not _auth(dict(DEFAULT_CAN_CALL), verb, "kid").allowed, verb
+        assert _auth({"$parent": [verb]}, verb, "boss").allowed, verb
+        assert _auth({"boss": "*"}, verb, "boss").allowed, verb
+        # ingress (`enforce_privileged=False`): `$children:*` still accepts it
+        assert _auth({"$children": "*"}, verb, "kid", enforce_privileged=False).allowed
+
+
+def test_watching_the_root_loses_a_structural_wildcard():
+    # Audit 2026-10-03 (KV-2): `watch` whose src is the ROOT (`loader_id`) needs a
+    # NAMED grant; every other `watch` is an ordinary verb.
+    on_root = dict(loader_id="boss")
+    assert not _auth(dict(DEFAULT_CAN_CALL), "watch", "boss", **on_root).allowed
+    assert _auth({"boss": ["watch"]}, "watch", "boss", **on_root).allowed
+    assert _auth({"boss": "*"}, "watch", "boss", **on_root).allowed
+    assert _auth({"$parent": ["watch"]}, "watch", "boss", **on_root).allowed
+    assert _auth(dict(DEFAULT_CAN_CALL), "watch", "kid", **on_root).allowed
+    assert _auth(dict(DEFAULT_CAN_CALL), "watch", "boss").allowed  # not the root
+
+
 def test_a_named_wildcard_covers_privileged_verbs():
     # `*` under a NAMED id is the operator's own statement — it covers
     # everything, privileged verbs included. Whoever writes it owns it.

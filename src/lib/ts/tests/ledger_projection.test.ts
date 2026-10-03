@@ -57,12 +57,15 @@ async function call(k: Kernel, target: string, payload: Payload, item: Partial<I
   return (await k.send([{ target, payload, ...item }]))[0]!;
 }
 
-/** Started, with the background flusher cancelled: every flush is the test's. */
+/** Started, with the background flusher switched off: every flush is the test's.
+ *  (`cancel` refuses the flusher — a kernel service task — so the test drops its
+ *  row and its handle itself.) */
 async function started(k: Kernel): Promise<void> {
   const out = (await startKernel(k, false)) as Payload;
   assert.equal(out["started"], true, JSON.stringify(out));
   const fid = k.store.flusherTask as number;
-  assert.deepEqual((await call(k, "kernel", { type: "cancel", task_id: fid })).result, { cancelled: true, killed: [fid] });
+  k.store.flusherTask = null;
+  k.tasks.done(fid);
 }
 
 async function kernelRows(k: Kernel): Promise<Payload[]> {

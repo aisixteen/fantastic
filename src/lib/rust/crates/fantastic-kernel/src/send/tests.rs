@@ -609,6 +609,76 @@ async fn an_ungranted_agent_cannot_watch_another() {
 }
 
 #[tokio::test]
+async fn watching_the_root_needs_a_named_grant() {
+    // py `test_watch_gate.py::test_watching_the_root_needs_a_named_grant` —
+    // measured before the fix (audit 2026-10-03, KV-2): every direct child of the
+    // root watched the root inbox on the baseline `$parent:*` alone and read every
+    // kernel verb's payload, other agents' `persist_blob` contents included.
+    let base = json!({"$self": "*", "$parent": "*", "$children": "*"});
+    let kernel = Arc::new(Kernel::new());
+    let root = granted("kernel_state", None, "callable_by", base.clone());
+    kernel.register(Arc::clone(&root));
+    kernel.set_root(Arc::clone(&root));
+    let watch_as = |grant: Value, src: &'static str| {
+        let kernel = Arc::clone(&kernel);
+        async move {
+            let nosy = granted("nosy", Some("kernel_state"), "can_call", grant);
+            kernel.register(Arc::clone(&nosy));
+            let _rx = kernel.ensure_inbox(&AgentId::from("nosy"));
+            crate::send::with_sender(AgentId::from("nosy"), async {
+                kernel
+                    .watch(&AgentId::from(src), AgentId::from("nosy"))
+                    .await
+            })
+            .await
+        }
+    };
+    root.add_child(granted(
+        "nosy",
+        Some("kernel_state"),
+        "can_call",
+        base.clone(),
+    ));
+    let denial = watch_as(base.clone(), "kernel_state")
+        .await
+        .expect("refused");
+    assert_eq!(denial["reason"], "unauthorized");
+    assert_eq!(denial["side"], "egress");
+    assert_eq!(denial["error"], "nosy may not call 'watch' on kernel_state");
+    assert!(!root
+        .watcher_ids
+        .read()
+        .await
+        .contains(&AgentId::from("nosy")));
+    let spelled = json!({"$self": "*", "$parent": ["*"], "$children": "*"});
+    assert!(watch_as(spelled, "kernel_state").await.is_some());
+    for named in [
+        json!({"$self": "*", "$parent": "*", "kernel_state": ["watch"]}),
+        json!({"$self": "*", "$parent": "*", "kernel_state": "*"}),
+        json!({"$self": "*", "$parent": ["watch"]}),
+    ] {
+        assert!(
+            watch_as(named.clone(), "kernel_state").await.is_none(),
+            "{named}"
+        );
+    }
+    // every other watch is unchanged: the baseline still watches its own child
+    let kid = granted("nosy_kid", Some("nosy"), "callable_by", base.clone());
+    kernel.register(Arc::clone(&kid));
+    let nosy = granted("nosy", Some("kernel_state"), "can_call", base.clone());
+    nosy.add_child(Arc::clone(&kid));
+    kernel.register(Arc::clone(&nosy));
+    let _rx = kernel.ensure_inbox(&AgentId::from("nosy"));
+    let ok = crate::send::with_sender(AgentId::from("nosy"), async {
+        kernel
+            .watch(&AgentId::from("nosy_kid"), AgentId::from("nosy"))
+            .await
+    })
+    .await;
+    assert!(ok.is_none(), "{ok:?}");
+}
+
+#[tokio::test]
 async fn an_operator_watch_stays_ungated() {
     // `sender = None` is the origin root of trust — the bootstrap wiring a
     // renderer, a test driver. Same rule as send.
@@ -2145,13 +2215,10 @@ impl crate::bundle::Bundle for NoReply {
     async fn handle(
         &self,
         _agent_id: &AgentId,
-        payload: &Value,
+        _payload: &Value,
         _kernel: &Arc<Kernel>,
     ) -> Result<crate::bundle::Reply, crate::bundle::BundleError> {
-        match verb_of(payload) {
-            "raise" => Err(crate::bundle::BundleError::from("text kaboom")),
-            _ => Ok(None),
-        }
+        Ok(None)
     }
     async fn handle_binary(
         &self,
@@ -2163,7 +2230,7 @@ impl crate::bundle::Bundle for NoReply {
     {
         let blob: Vec<u8> = body.map(|b| b.bytes).unwrap_or_default();
         match verb_of(&header) {
-            "raise" => Err(crate::bundle::BundleError::from("binary kaboom")),
+            "raise" => Err(crate::bundle::BundleError::from("kaboom")),
             "empty" => Ok((None, None)),
             _ => Ok((None, Some(crate::outcome::Blob::key("bytes", blob)))),
         }
@@ -2211,21 +2278,24 @@ async fn a_binary_handler_with_no_reply_settles_null_and_keeps_its_body() {
 }
 
 #[tokio::test]
-async fn a_bundle_error_raises_the_same_shape_on_both_channels() {
+async fn a_bundle_error_raises_one_shape_with_or_without_a_request_body() {
+    // ONE dispatch (`handle_binary`) — a call with a body and a plain call reach
+    // the same handler and settle the same raise.
     let kernel = kernel_with_no_reply();
     let bin = send_binary(&kernel, "nr", json!({"type": "raise"}), vec![1]).await;
     assert_eq!(bin.status, crate::outcome::Status::Failed);
     assert_eq!(
         serde_json::to_string(&bin.result).unwrap(),
-        r#"{"error":"binary kaboom","raised":true}"#
+        r#"{"error":"kaboom","raised":true}"#
     );
     assert_eq!(bin.body, None);
     let txt = send_text(&kernel, "nr", json!({"type": "raise"})).await;
     assert_eq!(txt.status, crate::outcome::Status::Failed);
     assert_eq!(
         serde_json::to_string(&txt.result).unwrap(),
-        r#"{"error":"text kaboom","raised":true}"#
+        r#"{"error":"kaboom","raised":true}"#
     );
+    assert_eq!(txt.body, None);
 }
 
 #[tokio::test]

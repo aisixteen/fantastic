@@ -9,10 +9,10 @@ FAILED boot (a raise), an ERRORED boot (an `error` reply), a refused flush.
 
 from __future__ import annotations
 
-import sys
 import types
 
 import ram_store.tools as rst
+from kernel import register_unlisted
 
 _mod = types.ModuleType("status_probe.tools")
 
@@ -32,7 +32,7 @@ async def _handler(id, payload, kernel):
 
 _mod.handler = _handler
 _mod.VERBS = {}
-sys.modules["status_probe.tools"] = _mod
+register_unlisted("status_probe.tools", _mod)
 
 RAISED = {"error": "RuntimeError: boot blew", "raised": True}
 

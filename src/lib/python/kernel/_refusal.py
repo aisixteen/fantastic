@@ -108,7 +108,7 @@ def bad(verb: str, arg: str, want: str, *, hint: str = "") -> dict:
     return refusal(BAD_ARG, f"{verb}: {arg} must be {want}", hint=hint, arg=arg)
 
 
-def guard_agent_id(verb: str, agent_id: object) -> dict | None:
+def guard_agent_id(verb: str, agent_id: object, arg: str = "id") -> dict | None:
     """Refuse an agent id that is not ONE SAFE PATH SEGMENT. Returns a refusal,
     or None when the id is fine.
 
@@ -129,36 +129,40 @@ def guard_agent_id(verb: str, agent_id: object) -> dict | None:
     (`_guard_blob_name`) and simply was never applied to ids. It is enforced HERE
     — at the kernel, where ids are minted — so every consumer inherits it rather
     than each remembering.
+
+    `arg` names the field when the segment is not an id: a record's
+    `children_dir` becomes a directory too (`<agent>/<children_dir>/<child>`),
+    so `create_agent` / `update_agent` hold it to the same rule.
     """
     if not isinstance(agent_id, str) or not agent_id:
-        return bad(verb, "id", "a non-empty string")
+        return bad(verb, arg, "a non-empty string")
     if "/" in agent_id or "\\" in agent_id:
         return bad(
-            verb, "id", f"a single path segment (no separators); got {agent_id!r}"
+            verb, arg, f"a single path segment (no separators); got {agent_id!r}"
         )
     if agent_id == "." or agent_id == ".." or ".." in agent_id:
-        return bad(verb, "id", f"a name that is not a path traversal; got {agent_id!r}")
+        return bad(verb, arg, f"a name that is not a path traversal; got {agent_id!r}")
     if agent_id.startswith("."):
-        return bad(verb, "id", f"a name that is not hidden; got {agent_id!r}")
+        return bad(verb, arg, f"a name that is not hidden; got {agent_id!r}")
     if agent_id.isdigit():
         # Message ids are plain integers; in prompt text an all-digit agent id
         # would read as one. Names are words.
         return bad(
-            verb, "id", f"a name, not a number (message ids are ints); got {agent_id!r}"
+            verb, arg, f"a name, not a number (message ids are ints); got {agent_id!r}"
         )
     if "|" in agent_id:
         # `|` qualifies a FOREIGN agent (`<guid>|<agent>`): a local id never
         # carries one, so a gate can tell local from foreign by the id alone.
         return bad(
             verb,
-            "id",
+            arg,
             f"a local name without `|` (it marks a foreign `guid|agent`); got {agent_id!r}",
         )
     if agent_id == RESERVED_ID:
         # `kernel` names the operator: sends to it reach the root, and a memory
         # store serves the operator under it. An agent holding that id would BE
         # the operator to every store (measured 2026-09-28).
-        return bad(verb, "id", f"a name other than the reserved {RESERVED_ID!r}")
+        return bad(verb, arg, f"a name other than the reserved {RESERVED_ID!r}")
     return None
 
 

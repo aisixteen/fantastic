@@ -36,7 +36,7 @@ struct RootGuidTests {
         // Materialize (python's `persist(k)`) and confirm the on-disk root
         // record carries it — with no store wired the writer keeps it in RAM,
         // which is the auto-flush law, not a gap.
-        try Persistence.persist(agent: kernel.root!, storage: .disk(tmp))
+        try persist(kernel.root!)
         let recFile = tmp.appendingPathComponent(".fantastic/agent.yaml")
         let parsed = try YamlIO.load(String(decoding: try Data(contentsOf: recFile), as: UTF8.self))
         #expect(parsed["guid"].asString == guid)
@@ -50,7 +50,7 @@ struct RootGuidTests {
         _ = await k1.send([Item(AgentId("kernel"), .object(["type": .string("boot")]))])[0]
         let g1 = await k1.send([Item(AgentId("kernel_state"), .object(["type": .string("reflect")]))])[0].result["guid"]
             .asString
-        try Persistence.persist(agent: k1.root!, storage: .disk(tmp))
+        try persist(k1.root!)
 
         // Second boot of the SAME dir must read the guid back verbatim.
         let k2 = try await startKernel(workdir: tmp.path)
@@ -82,7 +82,7 @@ struct RootGuidTests {
         #expect(isThirtyTwoHex(guid))
 
         // And it lands on disk for the next boot.
-        try Persistence.persist(agent: kernel.root!, storage: .disk(tmp))
+        try persist(kernel.root!)
         let reparsed = try YamlIO.load(String(decoding: try Data(contentsOf: recFile), as: UTF8.self))
         #expect(reparsed["guid"].asString == guid)
     }
@@ -118,6 +118,15 @@ struct RootGuidTests {
             .asString
         #expect(isThirtyTwoHex(guid), "in-memory root reflect guid not 32-hex: \(guid ?? "nil")")
     }
+}
+
+/// Python `_testkit.persist`, for one agent: write its record to its own
+/// agent.yaml — the cold materialization a test needs with no store wired.
+private func persist(_ agent: Agent) throws {
+    try FileManager.default.createDirectory(
+        at: agent.rootPath, withIntermediateDirectories: true)
+    try Persistence.recordBytes(agent.record().ordered).write(
+        to: agent.agentFile, options: .atomic)
 }
 
 private func makeTempDir() -> URL {

@@ -109,7 +109,15 @@ impl Kernel {
         if let Some(root) = self.root() {
             let mut patch = Map::new();
             patch.insert("next_id".to_string(), Value::from(bound));
+            // Inside the silent flush (`STATE_QUIET`, audit CLI-B) the reservation
+            // publishes nothing, like everything else the flush does; the root
+            // loader's writer is told directly, so the bound still lands — its own
+            // call and settle ids are minted here too, and a bound that never
+            // landed would hand the same ids out again after a crash.
             self.update(&root.id, patch);
+            if crate::send::state_quiet() {
+                self.mark_record_dirty(&root.id);
+            }
         }
     }
 
@@ -435,7 +443,9 @@ impl Kernel {
         let mut payload = Map::new();
         payload.insert("type".to_string(), Value::from("append"));
         payload.insert("rows".to_string(), Value::Array(batch));
-        let out = self.operator_send(&store_id, Value::Object(payload)).await;
+        // nothing of this send is published on the state stream (audit CLI-B)
+        let send = self.operator_send(&store_id, Value::Object(payload));
+        let out = crate::send::STATE_QUIET.scope(true, send).await;
         let refused = out.result.get("error").is_some_and(py_truthy);
         if out.status != Status::Completed || refused {
             eprintln!(
@@ -900,4 +910,50 @@ fn now_secs() -> f64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
         .unwrap_or(0.0)
+}
+
+#[cfg(test)]
+mod quiet_reservation_tests {
+    use crate::agent::{Agent, AgentId};
+    use crate::kernel::Kernel;
+    use serde_json::{json, Map, Value};
+    use std::sync::{Arc, Mutex};
+
+    /// Audit CLI-B: an id block reserved inside the kernel's own ledger flush
+    /// publishes NOTHING on the state stream, and the root loader's writer still
+    /// queues the root record — the bound lands.
+    #[tokio::test]
+    async fn a_block_reserved_inside_the_flush_is_quiet_and_reaches_the_loader() {
+        let k = Arc::new(Kernel::new());
+        let root = Agent::new(
+            AgentId::from("kernel_state"),
+            Some("kernel_state.tools".to_string()),
+            None,
+            Map::new(),
+            std::env::temp_dir(),
+            false,
+        );
+        k.register(Arc::clone(&root));
+        k.set_root(Arc::clone(&root));
+        let w = crate::persistence::install_persist_writer(&k, &root.id);
+        k.exec.lock().started = true;
+        let seen: Arc<Mutex<Vec<Value>>> = Arc::default();
+        let tap = Arc::clone(&seen);
+        let token = k.add_state_subscriber(Arc::new(move |v: &Value, _| {
+            tap.lock().unwrap().push(v.clone());
+        }));
+        let before = k.rows.id_reserved();
+        crate::send::STATE_QUIET.sync_scope(true, || {
+            while k.rows.id_reserved() == before {
+                k.mint_id();
+            }
+        });
+        assert_eq!(*seen.lock().unwrap(), Vec::<Value>::new());
+        assert_eq!(
+            root.meta.read().unwrap()["next_id"],
+            json!(k.rows.id_reserved())
+        );
+        assert_eq!(w.pending(), vec![root.id.clone()]);
+        k.remove_state_subscriber(token);
+    }
 }

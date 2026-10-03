@@ -111,14 +111,14 @@ struct FantasticCLI {
         """
     }
 
-    /// Python `kernel/modes/dispatch.py:65-70` — a one-shot's refusal.
+    /// Python `kernel/modes/dispatch.py:call` — a one-shot's refusal.
     static func callLockRefusal(pid: Int) -> String {
         "[call] another fantastic owns this dir (pid=\(pid)). "
             + "Stop it, or forward your call over the WS bridge "
             + "(see ws_bridge bundle)."
     }
 
-    /// Python `kernel/modes/dispatch.py:109-113` — `init`'s own refusal (a
+    /// Python `kernel/modes/dispatch.py:init` — `init`'s own refusal (a
     /// shorter text than the generic one-shot's `callLockRefusal`).
     static func initLockRefusal(pid: Int) -> String {
         "[init] another fantastic owns this dir (pid=\(pid)). Stop it first."
@@ -299,9 +299,11 @@ struct FantasticCLI {
     private static func runOneShotRPC(target: String, rest: [String]) async {
         let verb = rest[0]
 
-        // Acquire PID lock for dispatch duration. Refuse if a live
-        // daemon owns the workdir — BEFORE any bootstrap, so a conflicting
-        // invocation writes nothing (python `dispatch.py:63-71`).
+        // Acquire the workdir lock for dispatch duration — THE DAEMON'S OWN
+        // flock, BEFORE any bootstrap, so a conflicting invocation writes
+        // nothing (python `dispatch.py:_lock_or_exit`). Only a live holder
+        // refuses: a lock file naming a pid that is alive but holds no flock (a
+        // reused pid) is stale, and taken over (owner, 2026-10-03).
         let workdirURL = URL(
             fileURLWithPath: FileManager.default.currentDirectoryPath,
             isDirectory: true)
@@ -357,6 +359,8 @@ struct FantasticCLI {
         let loaderName = rest[0]
         let manifest = rest[1]
 
+        // python `dispatch.py:_lock_or_exit`: the daemon's own flock; only a
+        // live holder refuses (a stale file naming a reused pid is taken over).
         let workdirURL = URL(
             fileURLWithPath: FileManager.default.currentDirectoryPath,
             isDirectory: true)

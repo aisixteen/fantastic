@@ -1,19 +1,21 @@
 // SECRET MARKS CROSS EVERY BRIDGE (owner-approved, 2026-10-02).
 //
-// A batch item's `secret` paths (`Secret.swift`) used to stop at the edge of the
+// A batch item's `secret` marks (`Secret.swift`) used to stop at the edge of the
 // kernel that held them: a call frame carried no marks, so the RECEIVING kernel
 // recorded the value verbatim (call/settle rows, ledger, state stream, memory
 // store), and a credential store on the far side refused the call outright. Now
 // the marks ride the call:
 //
-//   * a ws / bridge `call` frame carries `secret: [paths]` beside `payload`, and
+//   * a ws / bridge `call` frame carries `secret: [marks]` beside `payload` (each a
+//     dotted string or an array of steps, as given), and
 //     every inbound leg (web_ws, the io_bridge engine serving ws_bridge peers)
 //     puts it on the dispatched item verbatim;
 //   * web_rest reads it from `X-Fantastic-Secret`, a JSON array (both the JSON
 //     leg and the host's octet leg);
 //   * outbound, a `<guid>|<agent>` send hands its marks to the peer route, and
-//     `forward` re-roots the marks on its own call (`payload.payload.<f>` →
-//     `payload.<f>`, `result[.<f>]` as is).
+//     `forward` re-roots the marks on its own call, in each mark's spelling
+//     (`payload.payload.<f>` → `payload.<f>`, `["payload","payload",<s>…]` →
+//     `["payload",<s>…]`, a `result` mark as is).
 //
 // A RELAY leg is SEALED for secrets (owner, 2026-10-02): relayd records the frames
 // it routes unmasked, so `relay_connector` refuses any call carrying marks,
@@ -42,6 +44,7 @@ import Testing
 @testable import FantasticKernelBridge
 
 private let KEY = "sk-cross-0123456789abcdef"
+private let KEY2 = "sk-cross-dotted-key-77aa77aa"
 private let ISSUED = "tok-cross-issued-fedcba98"
 private let PLACEHOLDER = Secret.placeholder
 
@@ -70,6 +73,8 @@ private final class Vault: AgentBundle, @unchecked Sendable {
             return .object(["ok": .bool(true), "len": .integer(Int64(key.count))])
         case "issue":
             return .object(["key": .string(ISSUED), "note": .string("issued")])
+        case "issue_dotted":
+            return ["a.b": .string(ISSUED), "a": ["b": "nested-plain"]]
         default:
             return .object(["error": .string("unknown verb \(pyRepr(.string(verb)))")])
         }
@@ -78,7 +83,7 @@ private final class Vault: AgentBundle, @unchecked Sendable {
     /// A body arrives at the payload's `bytes` — where python's dict holds it — on
     /// the binary channel (an octet REST call, a binary forward).
     func handleBinary(agentId: AgentId, header: JSON, body: Blob?, kernel: Kernel) async throws
-        -> (JSON?, Data?)
+        -> (JSON?, Blob?)
     {
         // the chunk is the payload's `bytes` — python's `payload.get("bytes", b"")`
         let blob = bodyAt(body, "bytes") ?? Data()
@@ -243,9 +248,9 @@ private func create(_ x: K, _ fields: OrderedDictionary<String, JSON>) async -> 
 /// One end of a PAIRED in-process transport — python `MemoryTransport.pair()`:
 /// what one end sends, the other receives, through the real wire codec (a text
 /// frame is serialized and re-parsed strictly; a binary one is encoded
-/// `[4B len|header|body]` and decoded). Unlike `MemoryTransport(remote:)`, which
-/// SERVES a kernel itself, both ends here are driven by the bridge ENGINE.
-private final class PairEnd: BridgeTransport, @unchecked Sendable {
+/// `[4B len|header|body]` and decoded) — where `MemoryTransport.pair()` hands
+/// each frame across as it is. Both ends are driven by the bridge ENGINE.
+final class PairEnd: BridgeTransport, @unchecked Sendable {
     private let lock = NSLock()
     private var queue: [(JSON, Data, Bool)] = []
     private var waiter: CheckedContinuation<(JSON, Data, Bool)?, Never>?
@@ -572,6 +577,13 @@ private let BAD: [(JSON, String)] = [
     (paths("payload.nope"), "names nothing in the payload"),
     (paths("payload.type"), "cannot hide payload.type"),
     (paths("payload"), "must start with 'payload.'"),
+    // arrays of steps
+    ([[]], "path [] has no steps"),
+    ([["payload", true]], "step True is neither a string"),
+    ([["nope", "key"]], "must start with 'payload' and a step under it"),
+    ([["payload", "type"]], "cannot hide payload.type"),
+    ([["payload", "nope"]], "path ['payload', 'nope'] names nothing in the payload"),
+    (["payload.key", ["payload", "k.x"]], "names nothing in the payload"),
 ]
 
 // ─── the tests ──────────────────────────────────────────────────────────────
@@ -588,6 +600,25 @@ struct SecretAcrossBridgesTests {
                 "payload.target", "payload.timeout", "payload.payload",
             ]) == ["payload.key", "payload.fields.api_key", "result", "result.key", "payload"])
         #expect(forwardedSecret([]) == [])
+        // an ARRAY of steps re-roots as an array: one `payload` step dropped
+        #expect(
+            forwardedSecret([
+                ["payload", "payload", "a.b"],
+                ["payload", "payload", "items", 0],
+                ["result"],
+                ["result", "a.b"],
+                ["payload", "target"],
+                ["payload", "timeout"],
+                ["payload", "payload"],
+                "payload.payload.key",
+            ]) == [
+                ["payload", "a.b"],
+                ["payload", "items", 0],
+                ["result"],
+                ["result", "a.b"],
+                ["payload"],
+                "payload.key",
+            ])
     }
 
     // ─── (a) a payload mark across a bridge ─────────────────────────────────
@@ -738,6 +769,52 @@ struct SecretAcrossBridgesTests {
         await dropLeg(b, bLeg)
     }
 
+    // ─── (b2) an ARRAY mark (a literal dotted key) across a bridge ──────────
+
+    /// `["payload", "payload", "a.b"]` on the forward rides as `["payload",
+    /// "a.b"]`: the far kernel masks the KEY `"a.b"` (not `a` → `b`), and records
+    /// the marks as the frame carried them — arrays and strings side by side.
+    @Test(.timeLimit(.minutes(1)))
+    func anArrayMarkMasksALiteralDottedKeyAcrossAWsBridge() async {
+        let (a, b, vault) = await twoKernels()
+        await vaultOn(b, callers: ["A-g|*"])
+        let (aLeg, bLeg) = await bridgePair(a, b, .ws)
+        let sent: JSON = [
+            "type": "issue_dotted", "key": .string(KEY), "a.b": .string(KEY2),
+            "a": ["b": "nested-plain"],
+        ]
+        let out = await forward(
+            a, aLeg, sent,
+            secret: ["payload.payload.key", ["payload", "payload", "a.b"], ["result", "a.b"]])
+        #expect(vault.got == [sent], "\(JSON.array(vault.got).serialize())")
+        #expect(
+            out.result == ["a.b": .string(ISSUED), "a": ["b": "nested-plain"]],
+            "\(out.result.serialize())")
+        let rb = await records(b)
+        let row = callRow(rb, "vault", "issue_dotted")
+        #expect(
+            row["secret"] == ["payload.key", ["payload", "a.b"], ["result", "a.b"]],
+            "\(row.serialize())")
+        #expect(
+            row["payload"]
+                == [
+                    "type": "issue_dotted", "key": .string(PLACEHOLDER), "a.b": .string(PLACEHOLDER),
+                    "a": ["b": "nested-plain"],
+                ], "\(row.serialize())")
+        // the frame id names the far execution: its settle keeps the whole result
+        #expect(
+            settleOf(rb, row["id"])["outcome"]["result"]
+                == ["a.b": .string(PLACEHOLDER), "a": ["b": "nested-plain"]])
+        keptOut(b, rb, KEY, KEY2, ISSUED)
+        let ra = await records(a)
+        let fwd = callRow(ra, aLeg, "forward")
+        #expect(fwd["payload"]["payload"]["a.b"].asString == PLACEHOLDER, "\(fwd.serialize())")
+        #expect(fwd["payload"]["payload"]["a"] == ["b": "nested-plain"], "\(fwd.serialize())")
+        keptOut(a, ra, KEY, KEY2, ISSUED)
+        await dropLeg(a, aLeg)
+        await dropLeg(b, bLeg)
+    }
+
     // ─── (c) a malformed mark is refused before dispatch ────────────────────
 
     @Test(.timeLimit(.minutes(1)))
@@ -804,14 +881,16 @@ struct SecretAcrossBridgesTests {
         arguments: [
             ("payload.payload", "must start with 'payload.'"),
             ("payload.payload.type", "cannot hide payload.type"),
-        ])
-    func aForwardMarkThatMapsToNothingValidIsTheFarKernelsRefusal(_ c: (String, String)) async {
+            (["payload", "payload"], "must start with 'payload' and a step under it"),
+            (["payload", "payload", "type"], "cannot hide payload.type"),
+        ] as [(JSON, String)])
+    func aForwardMarkThatMapsToNothingValidIsTheFarKernelsRefusal(_ c: (JSON, String)) async {
         let (mark, why) = c
         let (a, b, vault) = await twoKernels()
         await vaultOn(b, callers: ["A-g|*"])
         let (aLeg, bLeg) = await bridgePair(a, b, .ws)
         let out = await forward(
-            a, aLeg, ["type": "set_key", "key": .string(KEY)], secret: .array([.string(mark)]))
+            a, aLeg, ["type": "set_key", "key": .string(KEY)], secret: .array([mark]))
         let r = out.result
         #expect(r["reason"].asString == "bad_arg", "\(r.serialize())")
         #expect(r["arg"].asString == "secret", "\(r.serialize())")
@@ -841,13 +920,26 @@ struct SecretAcrossBridgesTests {
             let (d, resp) = try await session.data(for: req)
             return ((resp as? HTTPURLResponse)?.statusCode ?? 0, (try? JSON.parse(d)) ?? .null)
         }
-        try await printedNothing([KEY, ISSUED]) {
+        try await printedNothing([KEY, KEY2, ISSUED]) {
             let setBody = "{\"type\":\"set_key\",\"key\":\"\(KEY)\"}"
             let (s1, r1) = try await post(setBody, secret: "[\"payload.key\"]")
             #expect(s1 == 200 && r1 == ["ok": true, "len": .integer(Int64(KEY.count))], "\(r1)")
             let (_, r2) = try await post(
                 "{\"type\":\"issue\"}", secret: "[\"result.key\"]", execId: "issue-rest-1")
             #expect(r2 == ["key": .string(ISSUED), "note": "issued"], "\(r2)")
+            // an element may be an ARRAY of steps: the key "a.b", taken literally
+            let (_, r5) = try await post(
+                "{\"type\":\"issue_dotted\",\"a.b\":\"\(KEY2)\",\"a\":{\"b\":\"nested-plain\"}}",
+                secret: #"[["payload","a.b"],["result","a.b"]]"#, execId: "issue-rest-2")
+            #expect(r5 == ["a.b": .string(ISSUED), "a": ["b": "nested-plain"]], "\(r5)")
+            // a malformed array is the kernel's own refusal, in its words
+            let (_, r6) = try await post(setBody, secret: #"[["payload", "a.b"]]"#)
+            #expect(
+                r6
+                    == [
+                        "error": "send: secret path ['payload', 'a.b'] names nothing in the payload",
+                        "reason": "bad_arg", "arg": "secret",
+                    ], "\(r6)")
             // a header that is not JSON is the leg's own 400 — nothing dispatched
             let (s3, r3) = try await post(setBody, secret: "payload.key")
             #expect(s3 == 400, "\(r3)")
@@ -856,14 +948,30 @@ struct SecretAcrossBridgesTests {
             let (_, r4) = try await post(setBody, secret: "\"payload.key\"")
             #expect(r4["reason"].asString == "bad_arg" && r4["arg"].asString == "secret", "\(r4)")
             #expect(
-                vault.got == [["type": "set_key", "key": .string(KEY)], ["type": "issue"]],
+                vault.got
+                    == [
+                        ["type": "set_key", "key": .string(KEY)], ["type": "issue"],
+                        ["type": "issue_dotted", "a.b": .string(KEY2), "a": ["b": "nested-plain"]],
+                    ],
                 "\(vault.got)")
             let rb = await records(b)
             #expect(callRow(rb, "vault", "set_key")["payload"]["key"].asString == PLACEHOLDER)
             let issue = callRow(rb, "vault", "issue")
             #expect(
                 settleOf(rb, issue["id"])["outcome"]["result"]["key"].asString == PLACEHOLDER)
-            keptOut(b, rb, KEY, ISSUED)
+            let dotted = callRow(rb, "vault", "issue_dotted")
+            #expect(
+                dotted["secret"] == [["payload", "a.b"], ["result", "a.b"]], "\(dotted.serialize())")
+            #expect(
+                dotted["payload"]
+                    == [
+                        "type": "issue_dotted", "a.b": .string(PLACEHOLDER),
+                        "a": ["b": "nested-plain"],
+                    ], "\(dotted.serialize())")
+            #expect(
+                settleOf(rb, dotted["id"])["outcome"]["result"]
+                    == ["a.b": .string(PLACEHOLDER), "a": ["b": "nested-plain"]])
+            keptOut(b, rb, KEY, KEY2, ISSUED)
         }
         await stopWeb(b)
     }
@@ -925,22 +1033,27 @@ struct SecretAcrossBridgesTests {
             p,
             [
                 "parent_id": "kernel_state", "handler_module": "credential_store.tools",
-                "id": "p_creds", "file": .string(credsFile.path), "creators": ["H-g|kernel"],
+                "id": "p_creds", "file": .string(credsFile.path),
+                "refs": [
+                    "openai/main": [
+                        "host": "api.openai.com", "readers": ["H-g|kernel"], "writers": ["H-g|kernel"],
+                    ]
+                ],
                 "callable_by": ["H-g|kernel": "*"],
             ])
         let client = try await NIOWebSocketClient.connect(
             url: URL(string: "ws://127.0.0.1:\(port)/web/ws")!)
-        let sock = Recording(WSTransport(client: client))
+        let sock = Recording(WSTransport(client: client, sealed: false))
         try await sock.send(["type": "hello", "guid": "P-g"])
         p.ws.injectTransport(agentId: AgentId(pLeg), transport: sock)
         #expect(await op(p.k, pLeg, ["type": "boot"]).result["booted"].asBool == true)
-        try await until("P-g connected") { h.k.peer("P-g") != nil }
+        try await until("P-g connected") { !h.k.peerRoutes("P-g").isEmpty }
 
         await printedNothing([KEY]) {
             let put = await op(
                 h.k, "P-g|p_creds",
                 [
-                    "type": "set", "ref": "openai/main", "host": "https://api.openai.com/v1",
+                    "type": "set", "ref": "openai/main",
                     "fields": ["api_key": .string(KEY)],
                 ], secret: paths("payload.fields"))
             #expect(put.status == .completed, "\(put.result.serialize())")
@@ -973,7 +1086,7 @@ struct SecretAcrossBridgesTests {
             let bare = await op(
                 h.k, "P-g|p_creds",
                 [
-                    "type": "set", "ref": "openai/main", "host": "api.openai.com",
+                    "type": "set", "ref": "openai/main",
                     "fields": ["api_key": "sk-unmarked-x"],
                 ])
             #expect(bare.result["arg"].asString == "secret", "\(bare.result.serialize())")
@@ -1029,8 +1142,11 @@ struct SecretAcrossBridgesTests {
     /// far kernel, and the caller's own records stay masked.
     @Test(
         .timeLimit(.minutes(1)),
-        arguments: [["payload.payload.key"], ["result"], ["payload.timeout"]])
-    func theRelayRefusesAMarkedForwardBeforeAFrameLeaves(_ secret: [String]) async {
+        arguments: [
+            ["payload.payload.key"], ["result"], ["payload.timeout"],
+            [["payload", "payload", "key"]],
+        ] as [JSON])
+    func theRelayRefusesAMarkedForwardBeforeAFrameLeaves(_ secret: JSON) async {
         let (a, b, vault) = await twoKernels()
         await vaultOn(b, callers: ["A-g|*"])
         let (aLeg, bLeg) = await bridgePair(a, b, .relay)
@@ -1039,7 +1155,7 @@ struct SecretAcrossBridgesTests {
             [
                 "type": "forward", "target": "vault",
                 "payload": ["type": "set_key", "key": .string(KEY)], "timeout": 5,
-            ], secret: .array(secret.map { .string($0) }))
+            ], secret: secret)
         #expect(out.status == .errored, "\(out.asJSON.serialize())")
         #expect(out.result == SEALED, "\(out.result.serialize())")
         #expect(vault.got.isEmpty, "nothing crossed the relay")

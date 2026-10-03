@@ -187,6 +187,20 @@ test("pyRepr and pyDumps walk the same nested value as python's repr and json.du
   assert.equal(pyDumps({ u: undefined, l: [undefined] }), '{"l": [null]}');
 });
 
+test("a wire-parsed python float JS holds as an integer keeps python's repr", () => {
+  // python `repr(json.loads(text))`, printed 2026-10-03: a number spelled with a
+  // fraction or an exponent is a float (`1.0`, `1e+20`, `-0.0`); one spelled as
+  // digits is an int (`-0` is `0`).
+  const text =
+    '{"f": [1.0, 1e20, -0.0, 1, -0, 1.5, 1e15, 1e16, 1.5e16, -1e20, 0.0], "g": {"x": 2.0, "y": 2}}';
+  assert.equal(
+    pyRepr(decodeFrame(text)),
+    "{'f': [1.0, 1e+20, -0.0, 1, 0, 1.5, 1000000000000000.0, 1e+16, 1.5e+16, -1e+20, 0.0], 'g': {'x': 2.0, 'y': 2}}",
+  );
+  // a value built in JS has no spelling: an integral number is an int
+  assert.equal(pyRepr({ f: [1.0, 1e20, -0] }), "{'f': [1, 100000000000000000000, 0]}");
+});
+
 test("str reads a string field, or the fallback for anything else", () => {
   assert.equal(str({ type: "go" }, "type"), "go");
   assert.equal(str({ type: 5 }, "type"), "");

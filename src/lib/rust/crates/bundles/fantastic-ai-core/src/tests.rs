@@ -186,7 +186,7 @@ fn pass(text: impl Into<String>) -> Vec<ScriptEvent> {
 
 const CFG: BackendConfig = BackendConfig {
     name: "mock_backend",
-    model_window: crate::context::DEFAULT_CONTEXT_WINDOW,
+    model_window: crate::constants::DEFAULT_CONTEXT_WINDOW,
 };
 
 #[async_trait]
@@ -234,6 +234,12 @@ impl Bundle for MockBundle {
         kernel: &Arc<Kernel>,
     ) -> Result<(), BundleError> {
         verbs::on_cancel(agent_id, &task_id.0.to_string(), kernel).await;
+        Ok(())
+    }
+
+    /// Every backend's delete hook: the shared teardown.
+    async fn on_delete(&self, agent_id: &AgentId, kernel: &Arc<Kernel>) -> Result<(), BundleError> {
+        verbs::on_delete(agent_id, kernel);
         Ok(())
     }
 }
@@ -982,13 +988,13 @@ fn context_estimate_and_budget() {
     m.insert("context_window".into(), json!(8000));
     m.insert("num_ctx".into(), json!(2000));
     assert_eq!(
-        resolve_context_window(&m, crate::context::DEFAULT_CONTEXT_WINDOW),
+        resolve_context_window(&m, crate::constants::DEFAULT_CONTEXT_WINDOW),
         8000
     );
     let mut m2 = Map::new();
     m2.insert("num_ctx".into(), json!(2000));
     assert_eq!(
-        resolve_context_window(&m2, crate::context::DEFAULT_CONTEXT_WINDOW),
+        resolve_context_window(&m2, crate::constants::DEFAULT_CONTEXT_WINDOW),
         2000
     );
     // The default is 131072, not 4096: at 4096 the budget (4096 − 1024 reserve
@@ -996,14 +1002,14 @@ fn context_estimate_and_budget() {
     // agent created without an explicit window failfasted `too_small` before
     // the model was called.
     assert_eq!(
-        resolve_context_window(&Map::new(), crate::context::DEFAULT_CONTEXT_WINDOW),
-        crate::context::DEFAULT_CONTEXT_WINDOW
+        resolve_context_window(&Map::new(), crate::constants::DEFAULT_CONTEXT_WINDOW),
+        crate::constants::DEFAULT_CONTEXT_WINDOW
     );
-    assert_eq!(crate::context::DEFAULT_CONTEXT_WINDOW, 131_072);
+    assert_eq!(crate::constants::DEFAULT_CONTEXT_WINDOW, 131_072);
     let mut tiny = Map::new();
     tiny.insert("context_window".into(), json!(100));
     tiny.insert("output_reserve".into(), json!(1000));
-    assert_eq!(budget(&tiny, crate::context::DEFAULT_CONTEXT_WINDOW), 256); // floor
+    assert_eq!(budget(&tiny, crate::constants::DEFAULT_CONTEXT_WINDOW), 256); // floor
 }
 
 #[tokio::test]
@@ -2498,7 +2504,7 @@ async fn every_model_call_carries_the_layer_default_timeout() {
         None,
         String::new(),
         0.2,
-        crate::context::DEFAULT_CONTEXT_WINDOW,
+        crate::constants::DEFAULT_CONTEXT_WINDOW,
         None,
         false,
     )
@@ -2554,7 +2560,7 @@ async fn a_malformed_timeout_arg_settles_the_kernels_refusal() {
         None,
         String::new(),
         0.2,
-        crate::context::DEFAULT_CONTEXT_WINDOW,
+        crate::constants::DEFAULT_CONTEXT_WINDOW,
         None,
         false,
     )
@@ -3081,7 +3087,7 @@ async fn the_compaction_cursor_is_the_store_length_not_the_view() {
         &kernel,
         "probe",
         "mock_backend",
-        crate::context::DEFAULT_CONTEXT_WINDOW,
+        crate::constants::DEFAULT_CONTEXT_WINDOW,
         fat,
         store_len,
     )
@@ -3130,7 +3136,7 @@ async fn a_batch_of_calls_without_reply_to_all_come_back() {
         None,
         "[reply to x · y z]".to_string(),
         30.0,
-        crate::context::DEFAULT_CONTEXT_WINDOW,
+        crate::constants::DEFAULT_CONTEXT_WINDOW,
         None,
         false,
     )
@@ -3710,7 +3716,7 @@ async fn grep_answers_under_the_inline_cap_even_when_everything_matches() {
     let serialized = serde_json::to_string(&r).unwrap();
     assert!(
         crate::context::estimate_one(&json!({"role": "user", "content": serialized}))
-            <= crate::context::inline_cap(&meta, crate::context::DEFAULT_CONTEXT_WINDOW),
+            <= crate::context::inline_cap(&meta, crate::constants::DEFAULT_CONTEXT_WINDOW),
         "grep must answer under the inline cap"
     );
 }
@@ -3908,7 +3914,7 @@ async fn a_fold_projection_over_budget_writes_folds() {
         &kernel,
         "cli",
         "mock",
-        crate::context::DEFAULT_CONTEXT_WINDOW,
+        crate::constants::DEFAULT_CONTEXT_WINDOW,
         messages.clone(),
         store_len,
     )
@@ -3989,7 +3995,7 @@ async fn successive_fold_projections_do_not_nest_into_a_chain() {
             &kernel,
             "cli",
             "mock",
-            crate::context::DEFAULT_CONTEXT_WINDOW,
+            crate::constants::DEFAULT_CONTEXT_WINDOW,
             messages,
             store_len,
         )
@@ -4167,19 +4173,19 @@ fn budget_meta_parses_like_python() {
     // 1024; the budget then floors at 256. Measured python: {0, 1024, 256}.
     let m = meta(json!({"context_window": 0.5, "output_reserve": "-5", "recent_n": 1000.0}));
     assert_eq!(
-        crate::context::resolve_context_window(&m, crate::context::DEFAULT_CONTEXT_WINDOW),
+        crate::context::resolve_context_window(&m, crate::constants::DEFAULT_CONTEXT_WINDOW),
         0
     );
     assert_eq!(crate::context::output_reserve(&m), 1024);
     assert_eq!(
-        crate::context::budget(&m, crate::context::DEFAULT_CONTEXT_WINDOW),
+        crate::context::budget(&m, crate::constants::DEFAULT_CONTEXT_WINDOW),
         256
     );
     assert_eq!(crate::context::recent_n(&m), 50);
     // `+12` is not `isdigit()`, `1000.0` is not an int, `true` is `int(True)` = 1.
     let m = meta(json!({"context_window": "+12", "output_reserve": 1000.0, "recent_n": true}));
     assert_eq!(
-        crate::context::resolve_context_window(&m, crate::context::DEFAULT_CONTEXT_WINDOW),
+        crate::context::resolve_context_window(&m, crate::constants::DEFAULT_CONTEXT_WINDOW),
         131_072
     );
     assert_eq!(crate::context::output_reserve(&m), 1024);
@@ -4187,17 +4193,17 @@ fn budget_meta_parses_like_python() {
     // A positive float window truncates; the budget then floors.
     let m = meta(json!({"context_window": 12.9}));
     assert_eq!(
-        crate::context::resolve_context_window(&m, crate::context::DEFAULT_CONTEXT_WINDOW),
+        crate::context::resolve_context_window(&m, crate::constants::DEFAULT_CONTEXT_WINDOW),
         12
     );
     assert_eq!(
-        crate::context::budget(&m, crate::context::DEFAULT_CONTEXT_WINDOW),
+        crate::context::budget(&m, crate::constants::DEFAULT_CONTEXT_WINDOW),
         256
     );
     // A bool is never a window; `" 7 "` is `int()`-able.
     let m = meta(json!({"context_window": true, "recent_n": " 7 "}));
     assert_eq!(
-        crate::context::resolve_context_window(&m, crate::context::DEFAULT_CONTEXT_WINDOW),
+        crate::context::resolve_context_window(&m, crate::constants::DEFAULT_CONTEXT_WINDOW),
         131_072
     );
     assert_eq!(crate::context::recent_n(&m), 7);
@@ -4230,7 +4236,7 @@ fn id_and_window_digit_strings_are_ascii_only() {
     for v in ["٣", "²"] {
         let m = meta(json!({"context_window": v, "output_reserve": v}));
         assert_eq!(
-            crate::context::resolve_context_window(&m, crate::context::DEFAULT_CONTEXT_WINDOW),
+            crate::context::resolve_context_window(&m, crate::constants::DEFAULT_CONTEXT_WINDOW),
             131_072,
             "{v}"
         );
@@ -4238,7 +4244,7 @@ fn id_and_window_digit_strings_are_ascii_only() {
     }
     let m = meta(json!({"context_window": "\u{2003} 12 ", "output_reserve": "\u{2003} 12 "}));
     assert_eq!(
-        crate::context::resolve_context_window(&m, crate::context::DEFAULT_CONTEXT_WINDOW),
+        crate::context::resolve_context_window(&m, crate::constants::DEFAULT_CONTEXT_WINDOW),
         12
     );
     assert_eq!(crate::context::output_reserve(&m), 12);
@@ -4944,7 +4950,7 @@ async fn the_seam_keeps_the_goal_the_strategies_pinned() {
                 &kernel,
                 "cli",
                 "mock",
-                crate::context::DEFAULT_CONTEXT_WINDOW,
+                crate::constants::DEFAULT_CONTEXT_WINDOW,
                 messages,
                 len,
             )
@@ -5312,6 +5318,98 @@ fn backend_state_is_per_agent_and_drop_frees_the_slot_not_the_incarnation() {
     assert!(!crate::state::is_generating(&a));
     crate::state::drop_state(&a);
     crate::state::drop_state(&b);
+}
+
+/// ARCH2-2 delete-time teardown (python `test_delete_drops_every_row_but_the_incarnation`):
+/// `delete_agent` runs the backend's `on_delete`, which drops every per-id table,
+/// so the id re-created later starts clean; the incarnation stays monotonic, so a
+/// reply to a call the deleted agent made never becomes a live turn of the new one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delete_drops_every_row_but_the_incarnation() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "del").await;
+    let id = backend.as_str().to_string();
+    let file_id = format!("ff_{id}");
+    let old = crate::state::state_for(&backend);
+    old.queue
+        .lock()
+        .unwrap()
+        .push_back(crate::state::QueuedEntry {
+            client_id: "c".into(),
+            text: "t".into(),
+            send_id: "s".into(),
+            queued_at: 0.0,
+        });
+    *old.projection.lock().unwrap() = Some(json!({"fired": false}));
+    *old.compaction_mark.lock().unwrap() = Some((1, "c".into()));
+    *old.folds_since.lock().unwrap() = 1;
+    *old.recall_due.lock().unwrap() = true;
+    *old.view_source.lock().unwrap() = Some("array".into());
+    *old.calib.lock().unwrap() = Some(2.0);
+    *old.reported.lock().unwrap() = Some(10);
+    crate::route::inflight()
+        .lock()
+        .unwrap()
+        .insert(id.clone(), 1);
+    crate::route::silent()
+        .lock()
+        .unwrap()
+        .insert((id.clone(), "c".into()), 2);
+    crate::strategies::strip::stripped_state()
+        .lock()
+        .unwrap()
+        .insert(id.clone(), ["x".to_string()].into());
+    let mem = crate::memory::mem(&kernel);
+    mem.heads.lock().unwrap().insert(id.clone(), vec![]);
+    mem.bodies.lock().unwrap().insert(id.clone(), vec![]);
+    mem.grants.lock().unwrap().insert(id.clone(), vec![]);
+    mem.watchers.lock().unwrap().insert(id.clone(), vec![]);
+    let incarnation = crate::state::incarnation(&backend);
+    assert!(incarnation >= 1, "booted");
+
+    let out = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type": "delete_agent", "id": id}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(out["deleted"], true, "{out}");
+    assert!(!crate::route::inflight().lock().unwrap().contains_key(&id));
+    assert!(!crate::route::silent()
+        .lock()
+        .unwrap()
+        .keys()
+        .any(|chain| chain.0 == id));
+    assert!(!crate::strategies::strip::stripped_state()
+        .lock()
+        .unwrap()
+        .contains_key(&id));
+    assert!(!mem.heads.lock().unwrap().contains_key(&id));
+    assert!(!mem.bodies.lock().unwrap().contains_key(&id));
+    assert!(!mem.grants.lock().unwrap().contains_key(&id));
+    assert!(!mem.watchers.lock().unwrap().contains_key(&id));
+    assert_eq!(crate::state::incarnation(&backend), incarnation);
+
+    // The same id, re-created: a fresh slot, and the next incarnation.
+    add_backend(&kernel, &id, &file_id).await;
+    let fresh = crate::state::state_for(&backend);
+    assert!(!Arc::ptr_eq(&old, &fresh), "a deleted id's slot is rebuilt");
+    assert!(fresh.queue.lock().unwrap().is_empty());
+    assert!(fresh.current_meta.lock().unwrap().is_none());
+    assert!(fresh.projection.lock().unwrap().is_none());
+    assert!(fresh.compaction_mark.lock().unwrap().is_none());
+    assert_eq!(*fresh.folds_since.lock().unwrap(), 0);
+    assert!(
+        *fresh.recall_due.lock().unwrap(),
+        "boot's own mark, as any boot"
+    );
+    assert!(fresh.view_source.lock().unwrap().is_none());
+    assert!(fresh.calib.lock().unwrap().is_none());
+    assert!(fresh.reported.lock().unwrap().is_none());
+    assert!(crate::memory::bodies(&backend, &kernel).is_empty());
+    assert_eq!(crate::state::incarnation(&backend), incarnation + 1);
 }
 
 /// STEP-4 PIN (2026-10-01): `history fold=…` — the fold id parse (retrieval's

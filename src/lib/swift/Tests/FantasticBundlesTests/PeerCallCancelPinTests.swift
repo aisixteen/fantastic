@@ -85,8 +85,8 @@ struct PeerCallCancelPinTests {
         let k = try await webKernel()
         let ws = socket(k)
         try await push(ws, .object(["type": .string("hello"), "guid": .string(PAGE)]))
-        try await until("peer registered") { k.peer(PAGE) != nil }
-        let route = try #require(k.peer(PAGE))
+        try await until("peer registered") { !k.peerRoutes(PAGE).isEmpty }
+        let route = try #require(k.peerRoutes(PAGE).first)
 
         // cancelled WHILE waiting on the page
         let waiting = Task {
@@ -107,7 +107,7 @@ struct PeerCallCancelPinTests {
             ]))
 
         // cancelled BEFORE it parks: settles at once, its frame never goes out
-        let early = Task { () -> (JSON, Data?) in
+        let early = Task { () -> (JSON, Blob?) in
             while !Task.isCancelled { await Task.yield() }
             return await route.call("canvas", around, caller: "\(HOST)|kernel", secret: [], body: nil)
         }

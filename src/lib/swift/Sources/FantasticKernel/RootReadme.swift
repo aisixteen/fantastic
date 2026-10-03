@@ -24,16 +24,17 @@ public enum RootReadme {
 
     /// Seed `<workdir>/.fantastic/readme.md` from [`text`] if missing.
     /// Idempotent — preserves any operator edits. Mirrors Rust's
-    /// `seed_root_readme` and Python's `Core._seed_root_readme`.
-    public static func seed(workdir: URL) {
+    /// `seed_root_readme` and Python's `Core._seed_root_readme`. A failed write
+    /// THROWS, as python's seed raises (audit 2026-10-03, ARCH2-9).
+    public static func seed(workdir: URL) throws {
         let dest = workdir
             .appendingPathComponent(".fantastic")
             .appendingPathComponent("readme.md")
         let fm = FileManager.default
         if fm.fileExists(atPath: dest.path) { return }
-        try? fm.createDirectory(
+        try fm.createDirectory(
             at: dest.deletingLastPathComponent(),
             withIntermediateDirectories: true)
-        try? text.write(to: dest, atomically: true, encoding: .utf8)
+        try text.write(to: dest, atomically: true, encoding: .utf8)
     }
 }

@@ -56,14 +56,6 @@ class OllamaProvider:
         # An agentic backend wants the ACTION, not the rumination: set `think=False`.
         # None = don't send it (non-thinking models reject the field).
         self._think = think
-        self._client = None
-
-    def _get_client(self):
-        if self._client is None:
-            import ollama
-
-            self._client = ollama.AsyncClient(host=self._endpoint)
-        return self._client
 
     async def chat(
         self, messages: list[dict], max_tokens: int | None = None
@@ -75,7 +67,8 @@ class OllamaProvider:
                 "ollama_backend: no `model` set — this connector does not guess one. "
                 "Name a model on the agent record (model=...)."
             )
-        client = self._get_client()
+        import ollama
+
         options: dict = {"temperature": self._temperature}
         if self._num_ctx:
             options["num_ctx"] = self._num_ctx
@@ -86,13 +79,6 @@ class OllamaProvider:
         kwargs: dict = {}
         if self._think is not None:
             kwargs["think"] = self._think
-        stream = await client.chat(
-            model=self._model,
-            messages=messages,
-            stream=True,
-            options=options,
-            **kwargs,
-        )
         # THINKING MODELS SPLIT THEIR OUTPUT — read every text field, not just one.
         # ollama streams a reasoning model's tokens as `message.thinking` and only
         # its conclusion as `message.content`. Measured on gemma4:12b: 336 chars of
@@ -110,33 +96,40 @@ class OllamaProvider:
         # it (see `ai_core.core.without_thinking`). Opened on the first thinking
         # chunk and closed when content starts or the stream ends — not per chunk,
         # or the text would be a confetti of tags.
-        thinking = False
-        async for chunk in stream:
-            if chunk.get("prompt_eval_count"):
-                # PROVIDER-REPORTED USAGE — ai_core calibrates its estimate with it.
-                self.last_prompt_tokens = int(chunk["prompt_eval_count"])
-            if chunk.get("done_reason"):
-                dr = chunk["done_reason"]
-                self.last_stop_reason = "max_tokens" if dr == "length" else dr
-            message = chunk.get("message") or {}
-            think = message.get("thinking") or ""
-            if think:
-                if not thinking:
-                    thinking = True
-                    yield THINK_OPEN
-                yield think
-            content = message.get("content") or ""
-            if content:
-                if thinking:
-                    thinking = False
-                    yield THINK_CLOSE
-                yield content
+        # ONE client per call: the provider is built per turn, and a client kept
+        # on it would hold its connection past the turn.
+        async with ollama.AsyncClient(host=self._endpoint) as client:
+            stream = await client.chat(
+                model=self._model,
+                messages=messages,
+                stream=True,
+                options=options,
+                **kwargs,
+            )
+            thinking = False
+            async for chunk in stream:
+                if chunk.get("prompt_eval_count"):
+                    # PROVIDER-REPORTED USAGE — ai_core calibrates its estimate with it.
+                    self.last_prompt_tokens = int(chunk["prompt_eval_count"])
+                if chunk.get("done_reason"):
+                    dr = chunk["done_reason"]
+                    self.last_stop_reason = "max_tokens" if dr == "length" else dr
+                message = chunk.get("message") or {}
+                think = message.get("thinking") or ""
+                if think:
+                    if not thinking:
+                        thinking = True
+                        yield THINK_OPEN
+                    yield think
+                content = message.get("content") or ""
+                if content:
+                    if thinking:
+                        thinking = False
+                        yield THINK_CLOSE
+                    yield content
         if thinking:
             yield THINK_CLOSE
 
     @property
     def model(self) -> str:
         return self._model
-
-    def stop(self) -> None:
-        self._client = None

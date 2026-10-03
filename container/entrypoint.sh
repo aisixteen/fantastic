@@ -83,6 +83,8 @@ if ! has_web; then
   echo "    $BIN $ROOT create_agent handler_module=web.tools id=web port=$PORT host=0.0.0.0 allowed_origins=http://localhost:$PORT" >&2
   echo "    $BIN web create_agent handler_module=web_ws.tools id=web_ws" >&2
   echo "    $BIN web create_agent handler_module=web_rest.tools id=rest" >&2
+  echo "  Host guard (audit W-2, owner-accepted): a host=0.0.0.0 web answers only Host 0.0.0.0:$PORT —" >&2
+  echo "  a port-mapped (-p → localhost/127.0.0.1), LAN or tunnel name is refused (403)." >&2
   echo "  (without a web host the kernel boots, has nothing to serve, and exits.)" >&2
 fi
 

@@ -313,20 +313,20 @@ struct HTTPServerTests {
         let restId = await mountRest(kernel)
         defer { Task { await stopWeb(kernel) } }
         // No route at all.
-        let miss = try rawRequest(port: port, "GET /nope HTTP/1.1\r\nHost: h\r\n\r\n")
+        let miss = try rawRequest(port: port, "GET /nope HTTP/1.1\r\nHost: 127.0.0.1:\(port)\r\n\r\n")
         #expect(miss.contains("HTTP/1.1 404 Not Found"), "\(miss)")
         #expect(miss.hasSuffix("{\"detail\":\"Not Found\"}"), "\(miss)")
         #expect(miss.contains("content-length: 22"), "\(miss)")
         // Path matches POST /<rest>/{target_id} only.
         for method in ["GET", "PUT", "HEAD"] {
             let r = try rawRequest(
-                port: port, "\(method) /\(restId)/kernel_state HTTP/1.1\r\nHost: h\r\n\r\n")
+                port: port, "\(method) /\(restId)/kernel_state HTTP/1.1\r\nHost: 127.0.0.1:\(port)\r\n\r\n")
             #expect(r.contains("HTTP/1.1 405 Method Not Allowed"), "\(method) → \(r)")
             #expect(r.contains("allow: POST"), "\(method) → \(r)")
         }
         // HEAD on a GET route: no implicit HEAD on a FastAPI APIRoute.
         let head = try rawRequest(
-            port: port, "HEAD /\(restId)/_reflect/kernel_state HTTP/1.1\r\nHost: h\r\n\r\n")
+            port: port, "HEAD /\(restId)/_reflect/kernel_state HTTP/1.1\r\nHost: 127.0.0.1:\(port)\r\n\r\n")
         #expect(head.contains("HTTP/1.1 405 Method Not Allowed"), "\(head)")
         #expect(head.contains("allow: GET"), "\(head)")
     }
@@ -359,16 +359,16 @@ struct HTTPServerTests {
         defer { Task { await stopWeb(kernel) } }
         let r = try rawRequest(
             port: port,
-            "POST /\(restId)/kernel_state/ HTTP/1.1\r\nHost: h\r\ncontent-length: 0\r\n\r\n")
+            "POST /\(restId)/kernel_state/ HTTP/1.1\r\nHost: 127.0.0.1:\(port)\r\ncontent-length: 0\r\n\r\n")
         #expect(r.hasPrefix("HTTP/1.1 307 "), "\(r)")
-        #expect(r.contains("location: http://h/\(restId)/kernel_state"), "\(r)")
+        #expect(r.contains("location: http://127.0.0.1:\(port)/\(restId)/kernel_state"), "\(r)")
         // starlette's RedirectResponse carries an empty body and no media type.
         #expect(r.contains("content-length: 0"), "\(r)")
         #expect(!r.contains("content-type"), "\(r)")
         let q = try rawRequest(
-            port: port, "GET /\(restId)/_reflect/?tree=none HTTP/1.1\r\nHost: h\r\n\r\n")
+            port: port, "GET /\(restId)/_reflect/?tree=none HTTP/1.1\r\nHost: 127.0.0.1:\(port)\r\n\r\n")
         #expect(q.hasPrefix("HTTP/1.1 307 "), "\(q)")
-        #expect(q.contains("location: http://h/\(restId)/_reflect?tree=none"), "\(q)")
+        #expect(q.contains("location: http://127.0.0.1:\(port)/\(restId)/_reflect?tree=none"), "\(q)")
     }
 
     // MARK: - A13.8 framing
@@ -379,7 +379,7 @@ struct HTTPServerTests {
         let kernel = try await startWebKernel()
         let port = await bootWeb(kernel)
         defer { Task { await stopWeb(kernel) } }
-        let raw = try rawRequest(port: port, "GET /nope HTTP/1.1\r\nHost: h\r\n\r\n")
+        let raw = try rawRequest(port: port, "GET /nope HTTP/1.1\r\nHost: 127.0.0.1:\(port)\r\n\r\n")
         let headBlock = String(raw.components(separatedBy: "\r\n\r\n")[0])
         let names = headBlock.components(separatedBy: "\r\n").dropFirst().map {
             String($0.split(separator: ":")[0])
@@ -398,8 +398,8 @@ struct HTTPServerTests {
         let port = await bootWeb(kernel)
         defer { Task { await stopWeb(kernel) } }
         for request in [
-            "GET /nope HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n",
-            "GET /nope HTTP/1.0\r\nHost: h\r\n\r\n",
+            "GET /nope HTTP/1.1\r\nHost: 127.0.0.1:\(port)\r\nConnection: close\r\n\r\n",
+            "GET /nope HTTP/1.0\r\nHost: 127.0.0.1:\(port)\r\n\r\n",
         ] {
             let raw = try rawRequest(port: port, request)
             let headBlock = String(raw.components(separatedBy: "\r\n\r\n")[0])
@@ -420,10 +420,10 @@ struct HTTPServerTests {
         defer { Task { await stopWeb(kernel) } }
         let sock = try RawHTTPClient(port: port)
         defer { sock.close() }
-        try sock.write("GET /nope HTTP/1.1\r\nHost: h\r\n\r\n")
+        try sock.write("GET /nope HTTP/1.1\r\nHost: 127.0.0.1:\(port)\r\n\r\n")
         let first = sock.readSome()
         #expect(first.contains("404"), "\(first)")
-        try sock.write("GET /nope HTTP/1.1\r\nHost: h\r\n\r\n")
+        try sock.write("GET /nope HTTP/1.1\r\nHost: 127.0.0.1:\(port)\r\n\r\n")
         let second = sock.readSome()
         #expect(second.contains("404"), "second request on the same socket: \(second)")
     }
@@ -520,10 +520,8 @@ struct HTTPServerTests {
     }
 
     /// A13.5 — a null reply is 204 with no body and no content-type (swift
-    /// answered `jsonHTTP(200, null)`). Driven over the JSON leg: the octet
-    /// branch takes the same decision, but `sendWithBinary` admits only the
-    /// binary-edge verbs, so no null-answering verb reaches it until C37 moves
-    /// that leg onto the batch.
+    /// answered `jsonHTTP(200, null)`). Driven over the JSON leg; the octet
+    /// branch takes the same decision.
     @Test func webRestOctetNullReplyIs204() async throws {
         let kernel = try await startWebKernel()
         let port = await bootWeb(kernel)
@@ -531,7 +529,7 @@ struct HTTPServerTests {
         defer { Task { await stopWeb(kernel) } }
         let raw = try rawRequest(
             port: port,
-            "POST /\(restId)/\(restId) HTTP/1.1\r\nHost: h\r\n"
+            "POST /\(restId)/\(restId) HTTP/1.1\r\nHost: 127.0.0.1:\(port)\r\n"
                 + "content-type: application/json\r\n"
                 + "content-length: \("{\"type\":\"boot\"}".utf8.count)\r\n\r\n"
                 + "{\"type\":\"boot\"}")
@@ -813,7 +811,7 @@ struct HTTPServerTests {
         let sock = try RawHTTPClient(port: port)
         defer { sock.close() }
         try sock.write(
-            "POST /\(restId)/files HTTP/1.1\r\nHost: h\r\n"
+            "POST /\(restId)/files HTTP/1.1\r\nHost: 127.0.0.1:\(port)\r\n"
                 + "content-type: application/octet-stream\r\n"
                 + "x-fantastic-payload: {\"type\":\"read_stream\",\"path\":\"naïve.txt\"}\r\n"
                 + "content-length: 0\r\n\r\n")
@@ -924,7 +922,7 @@ struct HTTPServerTests {
         defer { Task { await stopWeb(kernel) } }
         let raw = try rawRequest(
             port: port,
-            "POST /\(restId)/files HTTP/1.1\r\nHost: h\r\n"
+            "POST /\(restId)/files HTTP/1.1\r\nHost: 127.0.0.1:\(port)\r\n"
                 + "content-type: application/octet-stream\r\n"
                 + "x-fantastic-payload: {\"type\":\"read_stream\",\"path\":\"naïve.txt\"}\r\n"
                 + "content-length: 0\r\n\r\n")
@@ -989,6 +987,32 @@ struct HTTPServerTests {
                     == "web_rest: request body is not valid JSON",
                 "\(body): \(String(data: data, encoding: .utf8) ?? "")")
         }
+    }
+
+    /// IO-3 — a REST body of 100k nested arrays used to overflow the NIO thread's
+    /// stack in the JSON scanner (the body is parsed before the gate) and kill the
+    /// kernel. Now the parse refuses it past python's json recursion limit: the
+    /// body is not valid JSON (400), and the next request is served.
+    @Test func webRestHundredThousandNestedArraysAreNotValidJSON() async throws {
+        let kernel = try await startWebKernel()
+        let port = await bootWeb(kernel)
+        let restId = await mountRest(kernel)
+        defer { Task { await stopWeb(kernel) } }
+        let session = URLSession(configuration: .ephemeral)
+        func post(_ body: String) async throws -> (JSON, Int) {
+            var req = URLRequest(
+                url: URL(string: "http://127.0.0.1:\(port)/\(restId)/kernel_state")!)
+            req.httpMethod = "POST"
+            req.httpBody = Data(body.utf8)
+            let (data, response) = try await session.data(for: req)
+            return (try JSON.parse(data), (response as? HTTPURLResponse)?.statusCode ?? 0)
+        }
+        let deep = String(repeating: "[", count: 100_000) + String(repeating: "]", count: 100_000)
+        let (bad, status) = try await post(deep)
+        #expect(status == 400)
+        #expect(bad["error"].asString == "web_rest: request body is not valid JSON", "\(bad)")
+        let (ok, okStatus) = try await post(#"{"type": "reflect"}"#)
+        #expect(okStatus == 200 && ok["id"].asString == "kernel_state", "\(ok)")
     }
 
     /// `get_routes` over REST, and ONE MEASURED DIVERGENCE FROM PYTHON, PINNED
@@ -1117,14 +1141,14 @@ struct ShortSource: AgentBundle {
     let name = "short_source"
     func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? { nil }
     func handleBinary(agentId: AgentId, header: JSON, body: Blob?, kernel: Kernel)
-        async throws -> (JSON?, Data?)
+        async throws -> (JSON?, Blob?)
     {
         if header["offset"].asInt == 0 {
             return (
                 .object([
                     "path": header["path"], "offset": .integer(0), "bytes": .null,
                     "next_offset": .integer(4), "eof": .bool(false), "size": .integer(10),
-                ]), Data([1, 2, 3, 4])
+                ]), Blob("bytes", Data([1, 2, 3, 4]))
             )
         }
         return (

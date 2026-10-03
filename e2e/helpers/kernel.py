@@ -13,13 +13,62 @@ from __future__ import annotations
 
 import os
 import tempfile
+from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import Any
 
 from helpers import e2e_root
 
 #: Runtimes that are SPAWNED and driven over REST. python runs in-process
 #: because a probe's own asserts read the live tree directly.
 SPAWNED = ("rust", "swift")
+
+#: THE PROVIDER SEAM, in process only. ai_core builds an AI agent's provider for
+#: every turn from its live record (`core._build_provider`); `seat_providers`
+#: patches that ONE function to consult this table by agent id. An entry is
+#: `async wrap(build)`, `build()` building the provider ai_core would have used:
+#: a reader WRAPS it (`wrap_with`), fresh each turn as the product builds it, so an
+#: `update_agent` mid-run reaches the model; a stub REPLACES it (`replace_with`) and
+#: nothing is built. An id with no entry turns on the product's own provider.
+WRAPS: dict[str, Callable[[Callable[[], Awaitable[Any]]], Awaitable[Any]]] = {}
+
+_real_build = None
+
+
+async def _seated_build(self_id: str, kernel, cfg):
+    wrap = WRAPS.get(self_id)
+    if wrap is None:
+        return await _real_build(self_id, kernel, cfg)
+    return await wrap(lambda: _real_build(self_id, kernel, cfg))
+
+
+def seat_providers(core) -> None:
+    """Route `core._build_provider` through `WRAPS` — once per process, where the
+    harness boots its in-process kernel."""
+    global _real_build
+    if _real_build is None:
+        _real_build = core._build_provider
+        core._build_provider = _seated_build
+
+
+def wrap_with(reader):
+    """A `WRAPS` entry that puts `reader` between ai_core and the model: its
+    `inner` becomes the provider ai_core built for this turn."""
+
+    async def wrap(build):
+        reader.inner = await build()
+        return reader
+
+    return wrap
+
+
+def replace_with(provider):
+    """A `WRAPS` entry that hands ai_core `provider` instead of building one."""
+
+    async def wrap(build):
+        return provider
+
+    return wrap
 
 
 def runtime_name() -> str:
@@ -33,27 +82,33 @@ async def open_kernel(prefix: str = "probe_", reach: list[str] | None = None):
     """`(root, core, close)` for the named runtime.
 
     `core` is the in-process `ai_core.core` module when there is one and `None`
-    otherwise — the connector uses it to install the provider-wrapping reader,
-    and falls back to reading the agent's history when it is absent.
+    otherwise — the connector wraps the provider (`WRAPS`) when it is there, and
+    reads the agent's history when it is absent.
     """
     rt = runtime_name()
     if rt == "python":
-        # TEST-ONLY BUNDLES, in process. A spawned kernel gets `e2e/probes` on
-        # its PYTHONPATH (see `helpers/host/driver.py`); the in-process one is
-        # this process, so the same directory goes on `sys.path` here. Without
-        # it `handler_module: user_probe.tools` is unimportable and the human
-        # loads as a bare record that answers nothing.
+        # TEST-ONLY BUNDLES, in process. A spawned kernel runs
+        # `probes/scenario_probes.py` (see `helpers/host/driver.py`); the
+        # in-process one is this process, so the same directory goes on
+        # `sys.path` and the probes are REGISTERED here — the kernel resolves a
+        # handler_module only from its catalog plus `register_unlisted`. Without
+        # it `handler_module: user_probe.tools` is unresolvable and the human
+        # loads as a record that answers nothing.
         import sys
 
         probes = str(e2e_root() / "probes")
         if probes not in sys.path:
             sys.path.insert(0, probes)
+        import scenario_probes
+
+        scenario_probes.register()
         os.chdir(tempfile.mkdtemp(prefix=prefix))
         from _testkit import boot_root
         from ai_core import core
 
         from cli import Cli
 
+        seat_providers(core)
         root = boot_root()
         Cli(root.ctx, parent=root)
         # THE MEMORY STORE, then the start sequence — as the daemon does.
@@ -142,7 +197,7 @@ async def restart(root, core):
         with shutdown_context():
             tables = await memory.dump(root)
         persist(root)
-        core._providers.clear()
+        WRAPS.clear()
         core._projection.clear()
         core._compaction_mark.clear()
         root2 = boot_root()

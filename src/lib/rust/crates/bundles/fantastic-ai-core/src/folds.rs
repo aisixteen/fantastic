@@ -252,41 +252,6 @@ pub fn expand_ids(rows: &[Value], ids: &[i64]) -> Vec<i64> {
     out
 }
 
-/// The foldable PREFIX of an open chain: everything but the last `keep_tail`
-/// rows, cut back so it ends on a reply (never between a call and its answer).
-#[must_use]
-pub fn closed_prefix(rows: &[Value], chain: &[usize], keep_tail: usize) -> Vec<usize> {
-    if chain.len() <= keep_tail + 1 {
-        return Vec::new();
-    }
-    let mut span = &chain[..chain.len() - keep_tail];
-    while let Some(&last) = span.last() {
-        if row_role(&rows[last]) == "assistant" {
-            span = &span[..span.len() - 1];
-        } else {
-            break;
-        }
-    }
-    if span.len() >= 2 {
-        span.to_vec()
-    } else {
-        Vec::new()
-    }
-}
-
-/// Fraction of the view's bytes that are fold rows.
-#[must_use]
-pub fn fold_share(view: &[Value]) -> f64 {
-    let total: usize = view.iter().map(|r| row_content(r).len()).sum();
-    let total = if total == 0 { 1 } else { total };
-    let folded: usize = view
-        .iter()
-        .filter(|r| is_fold(r))
-        .map(|r| row_content(r).len())
-        .sum();
-    folded as f64 / total as f64
-}
-
 /// 1 for a fold of rows, 2 for a fold of folds, and so on.
 #[must_use]
 pub fn level(rows: &[Value], fold_row: &Value) -> i64 {

@@ -16,7 +16,6 @@ from __future__ import annotations
 import asyncio
 import json
 import struct
-import sys
 import types
 
 import pytest
@@ -25,7 +24,7 @@ from _testkit import boot_root
 from io_bridge import MemoryTransport
 from io_bridge import _engine as engine
 from ws_bridge import _ws
-from ws_bridge import tools as wb
+from kernel import register_unlisted
 
 
 # ─── a probe bundle that bounces a call back over the same bridge ────
@@ -60,7 +59,7 @@ async def _probe_handler(id, payload, kernel):
 
 _probe.handler = _probe_handler
 _probe.VERBS = {}
-sys.modules["bounce_probe.tools"] = _probe
+register_unlisted("bounce_probe.tools", _probe)
 
 
 # ─── fixtures ────────────────────────────────────────────────────────
@@ -78,8 +77,8 @@ def two_kernels(tmp_path, monkeypatch):
     kbk = boot_root()
     monkeypatch.chdir(tmp_path)
     yield ka, kbk
-    wb._bridges.clear()
-    wb._test_transport_inject.clear()
+    engine._bridges.clear()
+    engine._test_transport_inject.clear()
 
 
 async def _open_bridge(kernel, peer_id: str) -> str:
@@ -121,8 +120,8 @@ async def _wire_pair(ka, kbk) -> tuple[str, str]:
     ka.update(a_id, peer_id=b_id, peer_guid="guid-b")
     kbk.update(b_id, peer_guid="guid-a")
     mt_a, mt_b = MemoryTransport.pair()
-    wb._test_transport_inject[a_id] = mt_a
-    wb._test_transport_inject[b_id] = mt_b
+    engine._test_transport_inject[a_id] = mt_a
+    engine._test_transport_inject[b_id] = mt_b
     for k, bid in ((ka, a_id), (kbk, b_id)):
         r = (await k.send([{"target": bid, "payload": {"type": "boot"}}]))[0]["result"]
         assert r.get("booted") is True, r
@@ -185,11 +184,11 @@ async def test_read_loop_keeps_reading_while_a_call_is_in_flight(two_kernels):
     in-flight set holds the call while the next frame is already being read."""
     ka, kbk = two_kernels
     a_id, b_id = await _wire_pair(ka, kbk)
-    st = wb._state(b_id)
+    st = engine._state(b_id)
     assert st.pending_calls == set()
     # Teardown cancels whatever is in flight (nothing here) and clears the set.
     await engine._teardown(b_id)
-    assert wb._state(b_id).pending_calls == set()
+    assert engine._state(b_id).pending_calls == set()
 
 
 # ─── 2. malformed frames ─────────────────────────────────────────────
@@ -218,9 +217,64 @@ async def test_ws_transport_skips_malformed_frames_and_keeps_reading():
         "[1]",  # well-formed JSON, not an envelope
         good,
     ]
-    t = _ws.WSTransport(_FakeWS(frames))
+    t = _ws.WSTransport(_FakeWS(frames), sealed=False)
     frame = await asyncio.wait_for(t.recv(), timeout=2.0)
     assert frame == {"type": "reply", "id": "1", "data": {"ok": True}}
+
+
+@pytest.mark.parametrize(
+    "junk",
+    [
+        {"type": "reply", "id": ["x"], "data": {}},
+        {"type": "error", "id": {"a": 1}, "error": "e"},
+    ],
+)
+async def test_a_mistyped_answer_id_is_skipped_while_a_forward_waits(two_kernels, junk):
+    """Only a STRING id names one of our forwards. A list/object id used to be
+    hashed by `pending.pop` while a forward was waiting; the TypeError ended the
+    read loop, the forward failed `bridge transport closed`, and every later
+    frame went unread while `reflect` said `connected:true`. Now the frame is
+    skipped: the waiting forward settles with the peer's real reply and the next
+    inbound call is served."""
+    ka, _ = two_kernels
+    ka.update(ka.id, guid="guid-a")
+    _accept(ka, ka.id, "guid-b|*")
+    a_id = await _open_bridge(ka, "peer")
+    ka.update(a_id, peer_guid="guid-b")
+    mine, peer = MemoryTransport.pair()
+    engine._test_transport_inject[a_id] = mine
+    r = (await ka.send([{"target": a_id, "payload": {"type": "boot"}}]))[0]["result"]
+    assert r.get("booted") is True, r
+    fwd = asyncio.ensure_future(
+        ka.send(
+            [
+                {
+                    "target": a_id,
+                    "payload": {
+                        "type": "forward",
+                        "target": "far",
+                        "payload": {"type": "reflect"},
+                        "timeout": 5.0,
+                    },
+                }
+            ]
+        )
+    )
+    out = await asyncio.wait_for(peer.recv(), 2.0)
+    await peer.send(junk)
+    await peer.send({"type": "reply", "id": out["id"], "data": {"ok": True}})
+    assert (await asyncio.wait_for(fwd, 5.0))[0]["result"] == {"ok": True}
+    await peer.send(
+        {
+            "type": "call",
+            "id": "in-1",
+            "target": "kernel_state",
+            "payload": {"type": "reflect", "tree": "none"},
+            "caller": "guid-b|ai",
+        }
+    )
+    reply = await asyncio.wait_for(peer.recv(), 2.0)
+    assert reply["id"] == "in-1" and reply["data"]["id"] == "kernel_state", reply
 
 
 # ─── 3. awaitable teardown ───────────────────────────────────────────

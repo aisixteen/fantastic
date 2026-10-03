@@ -16,7 +16,7 @@ KEY = "sk-live-0123456789"
 KEY2 = "sk-rotated-9876543210"
 
 
-async def _store_set(k, ref, host, value):
+async def _store_set(k, ref, value):
     out = (
         await k.send(
             [
@@ -25,7 +25,6 @@ async def _store_set(k, ref, host, value):
                     "payload": {
                         "type": "set",
                         "ref": ref,
-                        "host": host,
                         "fields": {"api_key": value},
                     },
                     "secret": ["payload.fields"],
@@ -42,12 +41,10 @@ async def _mk(k, tmp_path, *, readers=("ai",), host="api.example.com"):
         "credential_store.tools",
         id="creds",
         file=str(tmp_path / "creds.yaml"),
+        refs={"main": {"host": host, "readers": list(readers)}},  # declared
         callable_by={"ai": "*"},
     )
-    await _store_set(k, "main", host, KEY)
-    refs = k.ctx.agents["creds"].record["refs"]
-    refs["main"]["readers"] = list(readers)
-    k.ctx.update("creds", refs=refs)
+    await _store_set(k, "main", KEY)
     rec = k.create(
         "responses_backend.tools",
         id="ai",
@@ -69,7 +66,7 @@ async def test_the_provider_reads_the_key_per_request_and_records_none(
     k = await _mk(seeded_kernel, tmp_path)
     prov = make_provider("ai", k)
     assert await prov._key(EP) == KEY
-    await _store_set(k, "main", "api.example.com", KEY2)  # rotate
+    await _store_set(k, "main", KEY2)  # rotate
     assert await prov._key(EP) == KEY2, "a rotated key is used by the next request"
     ledger = (await k.send([{"target": "kernel", "payload": {"type": "ledger"}}]))[0]
     assert KEY not in repr(ledger) and KEY2 not in repr(ledger)
@@ -101,3 +98,45 @@ async def test_no_credentials_is_no_key_or_a_loud_refusal(seeded_kernel):
     with pytest.raises(CredentialError) as e:
         await key_reader("bare", k, "responses_backend", required=True)(EP)
     assert "no `credentials` on bare" in str(e.value)
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        KEY + "\n",
+        KEY + "\r\nX-Probe: y",
+        KEY + " ",
+        " " + KEY,
+        KEY + "\t",
+        KEY[:4] + "\x00" + KEY[4:],
+        KEY[:4] + "\x7f" + KEY[4:],
+        KEY + "é",
+    ],
+)
+async def test_a_key_that_is_not_a_legal_header_value_is_refused_by_its_ref(
+    seeded_kernel, tmp_path, bad
+):
+    """Audit S1: an HTTP client QUOTES a header it refuses (h11: `Illegal header
+    value b'Bearer <key>\\n'`), so a key pasted with a trailing newline would ride
+    that text into the caller's reply and the logs. The reader refuses it first,
+    naming the ref — never the value — and the store keeps whatever it was given
+    (a field may be a multi-line PEM)."""
+    k = await _mk(seeded_kernel, tmp_path)
+    await _store_set(k, "main", bad)
+    read = key_reader("ai", k, "responses_backend", required=True)
+    with pytest.raises(CredentialError) as e:
+        await read(EP)
+    assert str(e.value) == (
+        "responses_backend: credential 'main' in 'creds': 'api_key' is not a legal "
+        "HTTP header value (a control or non-ASCII character, or whitespace at an "
+        "edge) — store it again without"
+    )
+    assert KEY[4:] not in str(e.value)
+
+
+async def test_a_key_with_inner_spaces_is_a_legal_header_value(seeded_kernel, tmp_path):
+    k = await _mk(seeded_kernel, tmp_path)
+    await _store_set(k, "main", "sk a\tb")
+    assert await key_reader("ai", k, "responses_backend", required=True)(EP) == (
+        "sk a\tb"
+    )

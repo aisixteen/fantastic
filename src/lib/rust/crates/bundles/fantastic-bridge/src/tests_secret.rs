@@ -8,10 +8,11 @@
 //! A batch item's `secret` paths (`fantastic_kernel::secret`) used to stop at the
 //! edge of the kernel that held them: a call frame carried no marks, so the
 //! RECEIVING kernel recorded the value verbatim (call/settle rows, ledger, state
-//! stream, memory store). Now a bridge `call` frame carries `secret: [paths]`
+//! stream, memory store). Now a bridge `call` frame carries `secret: [marks]`
 //! beside `payload`, the serving leg puts it on the dispatched item verbatim, and
-//! `forward` re-roots the marks on its own call (`payload.payload.<f>` →
-//! `payload.<f>`, `result[.<f>]` as is).
+//! `forward` re-roots the marks on its own call, each in its own spelling
+//! (`payload.payload.<f>` → `payload.<f>`, `["payload", "payload", <s>…]` →
+//! `["payload", <s>…]`, a `result` mark as is).
 //!
 //! A RELAY leg is SEALED for secrets (owner, 2026-10-02): relayd records the
 //! frames it routes unmasked, so `relay_connector` refuses any call carrying
@@ -24,6 +25,7 @@
 //! production one.
 
 use super::*;
+use crate::tests::{register_relay_store, relay_password, with_relay_password};
 use fantastic_kernel::bootstrap::{bootstrap, BootstrapOptions};
 use fantastic_kernel::bundle::BundleRegistry;
 use fantastic_kernel::secret::PLACEHOLDER;
@@ -33,6 +35,7 @@ use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message;
 
 const KEY: &str = "sk-cross-0123456789abcdef";
+const KEY2: &str = "sk-cross-dotted-key-77aa77aa";
 const ISSUED: &str = "tok-cross-issued-fedcba98";
 
 /// Set in the child run of [`nothing_on_the_way_prints_a_value`].
@@ -68,6 +71,7 @@ impl Bundle for Vault {
                 json!({"ok": true, "len": payload["key"].as_str().map_or(0, |k| k.chars().count())})
             }
             "issue" => json!({"key": ISSUED, "note": "issued"}),
+            "issue_dotted" => json!({"a.b": ISSUED, "a": {"b": "nested-plain"}}),
             other => json!({"error": format!("unknown verb '{other}'")}),
         }))
     }
@@ -123,6 +127,7 @@ async fn kernel(guid: &str, store: &str, got: &Got) -> K {
     );
     reg.register(WS_HANDLER_MODULE, WsBridgeBundle);
     reg.register(RELAY_HANDLER_MODULE, RelayConnectorBundle);
+    register_relay_store(&mut reg);
     reg.register("xsecret_probe.tools", Vault(Arc::clone(got)));
     let k = bootstrap(reg, BootstrapOptions::in_memory())
         .expect("boot")
@@ -360,13 +365,14 @@ async fn bridge_pair(ka: &K, kb: &K, leg: Leg) -> (String, String) {
     let (a_id, b_id) = (format!("{t}_a"), format!("{t}_b"));
     let serving = json!({"peer_guid": "A-g", "ingress_rule": "allow_all_ingress",
                          "can_call": {"vault": "*"}});
-    let (handler, extra_a, mut extra_b) = match leg {
+    let (handler, mut extra_a, mut extra_b, hub) = match leg {
         Leg::Ws => {
             inject_pair(&AgentId::from(a_id.as_str()), &AgentId::from(b_id.as_str()));
             (
                 WS_HANDLER_MODULE,
                 json!({"transport": "memory", "peer_id": "B"}),
                 json!({"transport": "memory", "peer_id": "A"}),
+                None,
             )
         }
         Leg::Relay => {
@@ -378,11 +384,19 @@ async fn bridge_pair(ka: &K, kb: &K, leg: Leg) -> (String, String) {
                        "partner_guid": rb, "heartbeat": 0, "reconnect": 0}),
                 json!({"transport": "relay", "relay_url": hub, "guid": rb,
                        "partner_guid": ra, "heartbeat": 0, "reconnect": 0}),
+                Some(hub),
             )
         }
     };
     for (key, v) in serving.as_object().cloned().unwrap() {
         extra_b[key] = v;
+    }
+    // a relay leg reads its password from a store before every dial (audit IO-7)
+    if let Some(hub) = hub {
+        let sa = relay_password(&ka.k, &a_id, &hub, "pw-a").await;
+        let sb = relay_password(&kb.k, &b_id, &hub, "pw-b").await;
+        with_relay_password(&mut extra_a, &sa);
+        with_relay_password(&mut extra_b, &sb);
     }
     create_leg(&ka.k, handler, &a_id, extra_a).await;
     create_leg(&kb.k, handler, &b_id, extra_b).await;
@@ -407,7 +421,7 @@ fn forward(target: &str, inner: Value) -> Value {
 
 #[test]
 fn forward_re_roots_the_marks_at_the_forwarded_item() {
-    let given: Vec<String> = [
+    let given: Vec<Value> = [
         "payload.payload.key",
         "payload.payload.fields.api_key",
         "result",
@@ -417,19 +431,41 @@ fn forward_re_roots_the_marks_at_the_forwarded_item() {
         "payload.payload",
     ]
     .iter()
-    .map(|s| (*s).to_string())
+    .map(|s| json!(s))
     .collect();
     assert_eq!(
         forwarded_secret(&given),
         vec![
-            "payload.key",
-            "payload.fields.api_key",
-            "result",
-            "result.key",
-            "payload"
+            json!("payload.key"),
+            json!("payload.fields.api_key"),
+            json!("result"),
+            json!("result.key"),
+            json!("payload")
         ]
     );
     assert!(forwarded_secret(&[]).is_empty());
+    // an ARRAY of steps re-roots as an array: one `payload` step dropped
+    let arrays = json!([
+        ["payload", "payload", "a.b"],
+        ["payload", "payload", "items", 0],
+        ["result"],
+        ["result", "a.b"],
+        ["payload", "target"],
+        ["payload", "timeout"],
+        ["payload", "payload"],
+        "payload.payload.key"
+    ]);
+    assert_eq!(
+        Value::Array(forwarded_secret(arrays.as_array().unwrap())),
+        json!([
+            ["payload", "a.b"],
+            ["payload", "items", 0],
+            ["result"],
+            ["result", "a.b"],
+            ["payload"],
+            "payload.key"
+        ])
+    );
 }
 
 // ─── (a) a payload mark across a bridge ──────────────────────────────────────
@@ -528,6 +564,69 @@ async fn without_a_mark_the_receiving_settle_keeps_the_value() {
     );
 }
 
+// ─── (b2) an ARRAY mark (a literal dotted key) across a bridge ───────────────
+
+/// `["payload", "payload", "a.b"]` on the forward rides as `["payload", "a.b"]`:
+/// the far kernel masks the KEY `"a.b"` (not `a` → `b`), and records the marks as
+/// the frame carried them — arrays and strings side by side.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_array_mark_masks_a_literal_dotted_key_across_a_ws_bridge() {
+    let (ka, kb, got) = two().await;
+    vault_on(&kb, "A-g|*").await;
+    let (a_leg, _) = bridge_pair(&ka, &kb, Leg::Ws).await;
+    let sent = json!({"type": "issue_dotted", "key": KEY, "a.b": KEY2,
+                      "a": {"b": "nested-plain"}});
+    let out = op_marked(
+        &ka.k,
+        &a_leg,
+        forward("vault", sent.clone()),
+        json!([
+            "payload.payload.key",
+            ["payload", "payload", "a.b"],
+            ["result", "a.b"]
+        ]),
+    )
+    .await;
+    assert_eq!(*got.lock().unwrap(), vec![sent]);
+    assert_eq!(
+        out.result,
+        json!({"a.b": ISSUED, "a": {"b": "nested-plain"}}),
+        "{out:?}"
+    );
+    let rb = records(&kb).await;
+    let row = call_row(&rb, "vault", "issue_dotted");
+    assert_eq!(
+        row["secret"],
+        json!(["payload.key", ["payload", "a.b"], ["result", "a.b"]]),
+        "{row}"
+    );
+    assert_eq!(
+        row["payload"],
+        json!({"type": "issue_dotted", "key": PLACEHOLDER, "a.b": PLACEHOLDER,
+               "a": {"b": "nested-plain"}}),
+        "{row}"
+    );
+    // the frame id names the far execution: its settle keeps the whole result
+    assert_eq!(
+        settle_of(&rb, &row["id"])["outcome"]["result"],
+        json!({"a.b": PLACEHOLDER, "a": {"b": "nested-plain"}})
+    );
+    assert_kept_out("B", &rb, &[KEY, KEY2, ISSUED]);
+    let ra = records(&ka).await;
+    let fwd = call_row(&ra, &a_leg, "forward");
+    assert_eq!(
+        fwd["payload"]["payload"]["a.b"],
+        json!(PLACEHOLDER),
+        "{fwd}"
+    );
+    assert_eq!(
+        fwd["payload"]["payload"]["a"],
+        json!({"b": "nested-plain"}),
+        "{fwd}"
+    );
+    assert_kept_out("A", &ra, &[KEY, KEY2, ISSUED]);
+}
+
 // ─── (c) a malformed mark is refused before dispatch ─────────────────────────
 
 /// python `_BAD`: a frame's raw `secret` and the words of its refusal.
@@ -538,6 +637,22 @@ fn bad_marks() -> Vec<(Value, &'static str)> {
         (json!(["payload.nope"]), "names nothing in the payload"),
         (json!(["payload.type"]), "cannot hide payload.type"),
         (json!(["payload"]), "must start with 'payload.'"),
+        // arrays of steps
+        (json!([[]]), "path [] has no steps"),
+        (json!([["payload", true]]), "step True is neither a string"),
+        (
+            json!([["nope", "key"]]),
+            "must start with 'payload' and a step under it",
+        ),
+        (json!([["payload", "type"]]), "cannot hide payload.type"),
+        (
+            json!([["payload", "nope"]]),
+            "path ['payload', 'nope'] names nothing in the payload",
+        ),
+        (
+            json!(["payload.key", ["payload", "k.x"]]),
+            "names nothing in the payload",
+        ),
     ]
 }
 
@@ -627,6 +742,24 @@ async fn a_forward_mark_on_the_whole_inner_payload_is_the_far_kernels_refusal() 
 async fn a_forward_mark_on_the_inner_verb_is_the_far_kernels_refusal() {
     a_forward_mark_mapping_to_nothing_valid(
         json!(["payload.payload.type"]),
+        "cannot hide payload.type",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_array_forward_mark_on_the_whole_inner_payload_is_the_far_kernels_refusal() {
+    a_forward_mark_mapping_to_nothing_valid(
+        json!([["payload", "payload"]]),
+        "must start with 'payload' and a step under it",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_array_forward_mark_on_the_inner_verb_is_the_far_kernels_refusal() {
+    a_forward_mark_mapping_to_nothing_valid(
+        json!([["payload", "payload", "type"]]),
         "cannot hide payload.type",
     )
     .await;
@@ -740,6 +873,11 @@ async fn the_relay_refuses_a_forward_with_a_mark_on_its_own_field_before_a_frame
     the_relay_refuses_a_marked_forward(json!(["payload.timeout"])).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_relay_refuses_a_forward_with_an_array_mark_before_a_frame_leaves() {
+    the_relay_refuses_a_marked_forward(json!([["payload", "payload", "key"]])).await;
+}
+
 /// Inbound: a tunneled `call` frame that names `secret` is answered with the
 /// seal's refusal; the far target never runs and the serving kernel records no
 /// call to it.
@@ -751,21 +889,19 @@ async fn the_relay_refuses_an_inbound_marked_frame_and_dispatches_nothing() {
     let t = tag();
     let (ra, rb) = (format!("{t}RA"), format!("{t}RB"));
     let b_leg = format!("{t}_b");
-    create_leg(
-        &kb.k,
-        RELAY_HANDLER_MODULE,
-        &b_leg,
-        json!({"transport": "relay", "relay_url": hub, "guid": rb, "partner_guid": ra,
-               "heartbeat": 0, "reconnect": 0, "peer_guid": "A-g",
-               "ingress_rule": "allow_all_ingress", "can_call": {"vault": "*"}}),
-    )
-    .await;
+    let mut extra = json!({"transport": "relay", "relay_url": hub, "guid": rb,
+                           "partner_guid": ra, "heartbeat": 0, "reconnect": 0,
+                           "peer_guid": "A-g", "ingress_rule": "allow_all_ingress",
+                           "can_call": {"vault": "*"}});
+    let store = relay_password(&kb.k, &b_leg, &hub, "pw-b").await;
+    with_relay_password(&mut extra, &store);
+    create_leg(&kb.k, RELAY_HANDLER_MODULE, &b_leg, extra).await;
     boot_leg(&kb.k, &b_leg).await;
     // the far end: a bare relay transport dialing the same hub as A's guid
     let ta = transport::relay::RelayTransport::connect(
         &hub,
         &ra,
-        "",
+        Arc::new(|| Box::pin(async { Ok(String::new()) })),
         &rb,
         0.0,
         0.0,
@@ -841,7 +977,7 @@ fn nothing_on_the_way_prints_a_value() {
         printed.contains("the_relay_refuses_an_inbound_marked_frame_and_dispatches_nothing"),
         "the child ran nothing:\n{printed}"
     );
-    for v in [KEY, ISSUED] {
+    for v in [KEY, KEY2, ISSUED] {
         assert!(!printed.contains(v), "{v:?} printed:\n{printed}");
     }
 }

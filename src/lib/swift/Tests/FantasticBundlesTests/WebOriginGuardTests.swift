@@ -1,7 +1,8 @@
 // Twins of python `web/host/tests/test_origin_guard.py` (2026-09-24): the web
-// host binds LOOPBACK unless its record names a `host`, and refuses a FOREIGN
+// host binds LOOPBACK unless its record names a `host`, refuses a FOREIGN
 // browser origin on websocket upgrades and non-GET/HEAD/OPTIONS HTTP requests
-// unless the record's `allowed_origins` lists it.
+// unless the record's `allowed_origins` lists it, and (audit W-2) refuses EVERY
+// request whose Host is not the host's own authority.
 
 import FantasticJSON
 import FantasticKernel
@@ -122,5 +123,124 @@ struct WebOriginGuardTests {
             ]))
         #expect(await wsOpens(port, origin: "http://evil.example") == false)
         #expect(await wsOpens(port, origin: "https://ui.example") == true)
+    }
+
+    // MARK: - the Host guard (audit W-2)
+
+    @Test func ownAuthoritiesAreTheBoundHostPortPlusLoopbackSpellings() {
+        let loopback: Set<String> = ["127.0.0.1:8088", "localhost:8088", "[::1]:8088"]
+        #expect(webOwnAuthorities(.object(["port": .integer(8088)])) == loopback)
+        #expect(
+            webOwnAuthorities(.object(["host": .string("localhost"), "port": .integer(8088)]))
+                == loopback)
+        // a non-loopback bind answers its own host:port and nothing else
+        #expect(
+            webOwnAuthorities(.object(["host": .string("0.0.0.0"), "port": .integer(8088)]))
+                == ["0.0.0.0:8088"])
+        #expect(
+            webOwnAuthorities(.object(["host": .string("192.168.1.5"), "port": .integer(8088)]))
+                == ["192.168.1.5:8088"])
+        // an IPv6 literal is bracketed, as a Host header spells it
+        #expect(
+            webOwnAuthorities(.object(["host": .string("::"), "port": .integer(8088)]))
+                == ["[::]:8088"])
+        // no Host header at all is not an authority
+        #expect(!webOwnAuthorities(.object(["port": .integer(8088)])).contains(""))
+    }
+
+    /// One raw request naming `host` (URLSession will not send a foreign Host).
+    private func raw(
+        _ port: UInt16, _ method: String, _ path: String, host: String
+    ) throws -> String {
+        let sock = try RawHTTPClient(port: port)
+        defer { sock.close() }
+        try sock.write("\(method) \(path) HTTP/1.1\r\nHost: \(host)\r\nConnection: close\r\n\r\n")
+        return sock.readSome()
+    }
+
+    /// THE REBINDING READ: a page whose domain rebinds to 127.0.0.1 sends a
+    /// same-origin GET — no Origin header — naming its own domain in Host.
+    @Test func aReboundHostIsRefusedOnEveryMethodWithNoOrigin() async throws {
+        let kernel = try await startWebKernel()
+        defer { Task { _ = await call(kernel, "web", .object(["type": .string("stop")])) } }
+        let port = kernel.httpPort()
+        let rebound = "rebind.invalid:\(port)"
+        let got = try raw(port, "GET", "/_assets/favicon.png", host: rebound)
+        #expect(got.hasPrefix("HTTP/1.1 403 "), "\(got)")
+        #expect(
+            got.hasSuffix(
+                "{\"error\": \"host '\(rebound)' is not this server's own authority\", "
+                    + "\"reason\": \"unauthorized\", \"hint\": \"address the host by its bound "
+                    + "host:port (a loopback bind also answers localhost, 127.0.0.1 and [::1] "
+                    + "on that port)\"}"),
+            "\(got)")
+        for method in ["HEAD", "OPTIONS", "POST"] {
+            let r = try raw(port, method, "/_assets/favicon.png", host: rebound)
+            #expect(r.hasPrefix("HTTP/1.1 403 "), "\(method): \(r)")
+        }
+        // an own authority passes the guard: the router answers (`/nope` is its 404)
+        for host in ["127.0.0.1:\(port)", "localhost:\(port)", "[::1]:\(port)"] {
+            let r = try raw(port, "GET", "/nope", host: host)
+            #expect(r.hasPrefix("HTTP/1.1 404 "), "\(host): \(r)")
+        }
+        for host in ["127.0.0.1:\(port &+ 1)", "localhost", "127.0.0.1"] {
+            let r = try raw(port, "GET", "/_assets/favicon.png", host: host)
+            #expect(r.hasPrefix("HTTP/1.1 403 "), "\(host): \(r)")
+        }
+    }
+
+    /// `0.0.0.0` publishes the port, but the only Host it answers is
+    /// `0.0.0.0:<port>` — a port map, a LAN name, a tunnel name, even the loopback
+    /// spellings are other authorities (owner-accepted, audit W-2). Judged on the
+    /// request head, without binding a public port.
+    @Test func aPublishedBindAdmitsOnlyItsOwnHostPort() async throws {
+        let kernel = try await startKernelInMemory(portHint: 0)
+        _ = await call(
+            kernel, "kernel_state",
+            .object([
+                "type": .string("update_agent"), "id": .string("web"),
+                "host": .string("0.0.0.0"), "port": .integer(8088),
+            ]))
+        let server = WebServer(kernel: kernel, agentId: AgentId("web"), port: 8088)
+        func status(_ host: String) -> Int? {
+            if case .respond(let r) = server.resolve(
+                method: "GET", path: "/_assets/favicon.png", headers: ["host": host])
+            {
+                return r.status
+            }
+            return nil
+        }
+        #expect(status("0.0.0.0:8088") == nil)
+        for host in ["127.0.0.1:8088", "localhost:8088", "192.168.1.5:8088", "box.lan:8088"] {
+            #expect(status(host) == 403, "\(host)")
+        }
+    }
+
+    @Test func aReboundWebsocketUpgradeIsRefused() async throws {
+        let kernel = try await startWebKernel()
+        defer { Task { _ = await call(kernel, "web", .object(["type": .string("stop")])) } }
+        let port = kernel.httpPort()
+        _ = await call(
+            kernel, "kernel",
+            .object([
+                "type": .string("create_agent"), "parent_id": .string("web"),
+                "handler_module": .string("web_ws.tools"), "id": .string("web_ws"),
+                "ingress_rule": .string("allow_all_ingress"),
+            ]))
+        _ = await call(
+            kernel, "web", .object(["type": .string("mount"), "child_id": .string("web_ws")]))
+        func upgrade(_ host: String) throws -> String {
+            let sock = try RawHTTPClient(port: port)
+            defer { sock.close() }
+            try sock.write(
+                "GET /kernel_state/ws HTTP/1.1\r\nHost: \(host)\r\nUpgrade: websocket\r\n"
+                    + "Connection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                    + "Sec-WebSocket-Version: 13\r\n\r\n")
+            return sock.readSome()
+        }
+        let refused = try upgrade("rebind.invalid:\(port)")
+        #expect(refused.hasPrefix("HTTP/1.1 403 "), "\(refused)")
+        let own = try upgrade("127.0.0.1:\(port)")
+        #expect(own.hasPrefix("HTTP/1.1 101 "), "\(own)")
     }
 }

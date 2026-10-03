@@ -39,6 +39,12 @@ import math
 import struct
 from typing import Any
 
+#: THE ONE FRAME CAP every wire leg holds: 16 MiB — a WS frame (`ws_bridge`'s
+#: `max_size`, the relay's `MAX_FRAME`, uvicorn's default `ws_max_size` under
+#: `web_ws`), an exec_bridge control-fd frame, and a web_rest request body (the
+#: http face of the same envelope). Larger data moves in chunks (`write_stream`).
+MAX_FRAME = 16 * 1024 * 1024
+
 
 def find_bytes_path(
     obj: Any, prefix: tuple = ()
@@ -179,7 +185,11 @@ def loads(text: str | bytes):
         `json.loads` alone accepts them;
       * an integer outside int64, or a number that overflows a double — rust and
         swift parse it into a different value;
-      * a lone surrogate in a string — not text; no runtime can write it as UTF-8.
+      * a lone surrogate in a string — not text; no runtime can write it as UTF-8;
+      * a document nested deeper than the json scanner can enter — it charges
+        every `[`/`{` against `sys.getrecursionlimit()` and raises
+        `RecursionError`, which no "not valid JSON" path catches (web_rest
+        answered a bare 500). Swift's scanner refuses at the same depth.
     (parity 2026-09-30: python took a `NaN` REST body, `12345678901234567890` and
     `"\\udcff"` that rust and swift refuse or change.)"""
     try:
@@ -188,7 +198,7 @@ def loads(text: str | bytes):
         )
         _no_lone_surrogate(out)
         return out
-    except ValueError as e:
+    except (ValueError, RecursionError) as e:
         if isinstance(e, json.JSONDecodeError):
             raise
         doc = text if isinstance(text, str) else ""

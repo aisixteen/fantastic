@@ -35,7 +35,10 @@ private struct Probe: AgentBundle {
 }
 
 private let MOD = "holder_mark_probe.tools"
-private let UPDATER: JSON = ["kernel_state": ["update_agent"]]
+// AN AGENT EDITS A RECORD IT NAMES (AV-1): `update_agent` is gated on its operand —
+// egress naming it with the verb, and the operand's ingress accepting the editor.
+private let UPDATER: JSON = ["vault": ["update_agent"], "plain": ["update_agent"]]
+private let ACCEPTS_A: JSON = ["a": ["update_agent"]]
 
 private func unmark(_ sender: String, _ target: String) -> JSON {
     .object([
@@ -115,7 +118,7 @@ struct HolderMarkTests {
 
     @Test func anAgentCannotClearTheMarkOnAHolder() async {
         let k = seeded()
-        await make(k, "vault", ["holds_secrets": true])
+        await make(k, "vault", ["holds_secrets": true, "callable_by": ACCEPTS_A])
         await make(k, "a", ["can_call": UPDATER])
         for v in [JSON.null] + BAD.map({ $0.0 }) {
             let out = await asAgent(
@@ -131,7 +134,7 @@ struct HolderMarkTests {
     /// The whole update is refused — a field beside the clear is not written.
     @Test func theRefusalWinsOverEveryOtherFieldInThePatch() async {
         let k = seeded()
-        await make(k, "vault", ["holds_secrets": true])
+        await make(k, "vault", ["holds_secrets": true, "callable_by": ACCEPTS_A])
         await make(k, "a", ["can_call": UPDATER])
         let r = await asAgent(
             k, "a",
@@ -158,8 +161,8 @@ struct HolderMarkTests {
     /// is the value already there. Other fields of a holder stay writable.
     @Test func anAgentMayMarkButNeverUnmark() async {
         let k = seeded()
-        await make(k, "plain")
-        await make(k, "vault", ["holds_secrets": true])
+        await make(k, "plain", ["callable_by": ACCEPTS_A])
+        await make(k, "vault", ["holds_secrets": true, "callable_by": ACCEPTS_A])
         await make(k, "a", ["can_call": UPDATER])
         for target in ["plain", "vault"] {
             let out = await asAgent(
@@ -180,7 +183,7 @@ struct HolderMarkTests {
     /// protects, so it is not refused.
     @Test func nullOnAnUnmarkedAgentIsNotAClear() async {
         let k = seeded()
-        await make(k, "plain")
+        await make(k, "plain", ["callable_by": ACCEPTS_A])
         await make(k, "a", ["can_call": UPDATER])
         let out = await asAgent(
             k, "a", ["type": "update_agent", "id": "plain", "holds_secrets": .null])
@@ -191,8 +194,8 @@ struct HolderMarkTests {
     /// plain agent, the shape's.
     @Test func theGateJudgesBeforeTheShape() async {
         let k = seeded()
-        await make(k, "plain")
-        await make(k, "vault", ["holds_secrets": true])
+        await make(k, "plain", ["callable_by": ACCEPTS_A])
+        await make(k, "vault", ["holds_secrets": true, "callable_by": ACCEPTS_A])
         await make(k, "a", ["can_call": UPDATER])
         let onHolder = await asAgent(
             k, "a", ["type": "update_agent", "id": "vault", "holds_secrets": "yes"]
@@ -212,7 +215,7 @@ struct HolderMarkTests {
     /// so the record carries `null` — not a holder (only exactly `true` marks one).
     @Test func theOperatorClearsTheMarkWithNull() async {
         let k = seeded()
-        await make(k, "vault", ["holds_secrets": true])
+        await make(k, "vault", ["holds_secrets": true, "callable_by": ACCEPTS_A])
         let out = await op(k, ["type": "update_agent", "id": "vault", "holds_secrets": .null])
         #expect(out["updated"] == .bool(true), "\(out.serialize())")
         #expect(out["agent"].asObject?["holds_secrets"] == .null, "\(out.serialize())")
@@ -228,7 +231,7 @@ struct HolderMarkTests {
 
     @Test func everyNonTrueValueIsRefusedAtUpdate() async {
         let k = seeded()
-        await make(k, "plain")
+        await make(k, "plain", ["callable_by": ACCEPTS_A])
         for (v, got) in BAD {
             let r = await op(k, ["type": "update_agent", "id": "plain", "holds_secrets": v])
             #expect(

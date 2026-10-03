@@ -18,14 +18,17 @@
 //! and applies what the server's `101` settled. A send on a closed connection
 //! fails with the text python's `ConnectionClosed` carries (`received 1001
 //! (going away) peer going away; then sent 1001 (going away) peer going away`).
+//!
+//! A leg dialed to a NON-LOOPBACK host is SEALED for secrets ([`SECRET_SEALED`]).
 
+use super::relay::sealed_call;
 use super::{BridgeTransport, Frame, TransportError};
 use async_trait::async_trait;
 use fantastic_io_bridge::codec::{decode_binary_frame, encode_binary_frame};
 use fantastic_io_bridge::ws_deflate::{DeflateStream, CLIENT_OFFER};
 use fantastic_kernel::Blob;
 use futures_util::{SinkExt, StreamExt};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, Mutex};
@@ -40,6 +43,43 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 
 type WsStream = WebSocketStream<DeflateStream<TcpStream>>;
+
+/// The record `host` values that name THIS machine — a leg dialed to one of them
+/// (an ssh tunnel's local end included) may carry a secret. Exact strings. Python
+/// `_ws.LOOPBACK_HOSTS`.
+pub const LOOPBACK_HOSTS: [&str; 3] = ["localhost", "127.0.0.1", "[::1]"];
+
+// THE WS SEAL (owner, 2026-10-03, audit S8). `ws://` carries every frame in clear,
+// and a forward's secret values ride its frame verbatim (the far kernel needs
+// them), so a leg dialed to a non-loopback host refuses any call carrying secret
+// marks, in both directions: outbound in the bundle's `forward`
+// (`crate::dispatch`), inbound in this transport's `recv_frame`. A loopback leg
+// (an ssh tunnel's local end) is not sealed. One text for both.
+
+/// The ws seal's refusal text — python `_ws.SECRET_SEALED`, byte for byte.
+pub const SECRET_SEALED: &str = "ws_bridge: a call carrying secret marks may not cross a ws:// \
+                                 leg to a non-loopback host — ws:// carries every frame in clear";
+
+/// The ws seal's hint — python `_ws.SECRET_SEALED_HINT`.
+pub const SECRET_SEALED_HINT: &str =
+    "dial a loopback host (an ssh tunnel's local end) to send a secret";
+
+/// The ws seal's refusal — outbound to the local caller, inbound as the reply to
+/// the far caller. Python `_ws.secret_sealed()`.
+#[must_use]
+pub fn secret_sealed() -> Value {
+    fantastic_kernel::refusal::refusal_hint(
+        fantastic_kernel::refusal::UNAUTHORIZED,
+        SECRET_SEALED,
+        SECRET_SEALED_HINT,
+    )
+}
+
+/// Whether a leg dialed to `host` is sealed — python `host not in LOOPBACK_HOSTS`.
+#[must_use]
+pub fn host_is_sealed(host: &str) -> bool {
+    !LOOPBACK_HOSTS.contains(&host)
+}
 
 /// python `websockets.connect`'s `close_timeout`: how long `close()` waits for
 /// the peer's close frame.
@@ -76,12 +116,14 @@ fn close_text(code: u16, reason: &str) -> String {
 }
 
 /// The closing handshake as this connection saw it — python's `close_rcvd`,
-/// `close_sent` and `close_rcvd_then_sent`.
+/// `close_sent` and `close_rcvd_then_sent` — and whether the socket has ended.
 #[derive(Default)]
 struct Closing {
     rcvd: Option<(u16, String)>,
     sent: Option<(u16, String)>,
     rcvd_then_sent: bool,
+    /// The reader saw the socket's last frame (a close, an error, the end).
+    ended: bool,
 }
 
 impl Closing {
@@ -93,6 +135,12 @@ impl Closing {
             self.rcvd_then_sent = true;
         }
         self.rcvd = Some((code, reason));
+    }
+
+    /// python `websockets`' `state in (CLOSING, CLOSED)`: a close frame was
+    /// sent or received, or the socket is gone.
+    fn is_closed(&self) -> bool {
+        self.rcvd.is_some() || self.sent.is_some() || self.ended
     }
 
     /// python `str(ConnectionClosed(rcvd, sent, rcvd_then_sent))`.
@@ -143,10 +191,13 @@ async fn connect_offering_deflate(url: &str) -> Result<WsStream, String> {
     {
         return Err(text(WsError::Url(UrlError::TlsFeatureNotEnabled)));
     }
-    let (stream, _resp) =
-        tokio_tungstenite::client_async_with_config(request, DeflateStream::client(socket), None)
-            .await
-            .map_err(text)?;
+    let (stream, _resp) = tokio_tungstenite::client_async_with_config(
+        request,
+        DeflateStream::client(socket),
+        Some(super::ws_config()),
+    )
+    .await
+    .map_err(text)?;
     Ok(stream)
 }
 
@@ -175,14 +226,17 @@ pub struct WsTransport {
     rx: Mutex<mpsc::Receiver<Result<Frame, TransportError>>>,
     reader_task: Mutex<Option<JoinHandle<()>>>,
     closing: Arc<std::sync::Mutex<Closing>>,
+    /// Dialed to a non-loopback host — the ws seal holds ([`SECRET_SEALED`]).
+    sealed: bool,
 }
 
 impl WsTransport {
     /// Connect to `url` (e.g. `ws://host:port/peer_id/ws`) with a
     /// default 5s timeout and return a transport wrapping the live
-    /// socket. Spawns the reader task as a side-effect.
-    pub async fn connect(url: &str) -> Result<Arc<Self>, TransportError> {
-        Self::connect_with_timeout(url, std::time::Duration::from_secs(5)).await
+    /// socket. Spawns the reader task as a side-effect. `sealed`: the
+    /// host is not loopback ([`host_is_sealed`]).
+    pub async fn connect(url: &str, sealed: bool) -> Result<Arc<Self>, TransportError> {
+        Self::connect_with_timeout(url, std::time::Duration::from_secs(5), sealed).await
     }
 
     /// Connect with an explicit timeout. Used by tests + callers who
@@ -190,6 +244,7 @@ impl WsTransport {
     pub async fn connect_with_timeout(
         url: &str,
         timeout: std::time::Duration,
+        sealed: bool,
     ) -> Result<Arc<Self>, TransportError> {
         let connect_fut = connect_offering_deflate(url);
         let stream = match tokio::time::timeout(timeout, connect_fut).await {
@@ -277,12 +332,14 @@ impl WsTransport {
                     break;
                 }
             }
+            seen.lock().expect("closing poisoned").ended = true;
         });
         Ok(Arc::new(Self {
             sink: Mutex::new(sink),
             rx: Mutex::new(rx),
             reader_task: Mutex::new(Some(reader)),
             closing,
+            sealed,
         }))
     }
 
@@ -328,14 +385,45 @@ impl BridgeTransport for WsTransport {
             .map_err(|e| self.send_error(&e))
     }
 
+    /// python `WSTransport.closed` — the socket's own state, so a leg whose
+    /// remote dropped reflects `connected:false` and `boot` dials again.
+    fn closed(&self) -> bool {
+        self.closing.lock().expect("closing poisoned").is_closed()
+    }
+
     async fn recv_frame(&self) -> Result<Frame, TransportError> {
         let mut rx = self.rx.lock().await;
-        match rx.recv().await {
-            Some(r) => r,
-            None => Err(TransportError::ConnectionClosed(
-                "ws reader task ended".into(),
-            )),
+        loop {
+            let frame = match rx.recv().await {
+                Some(r) => r?,
+                None => {
+                    return Err(TransportError::ConnectionClosed(
+                        "ws reader task ended".into(),
+                    ))
+                }
+            };
+            let head = match &frame {
+                Frame::Text(v) | Frame::Binary(v, _) => v,
+            };
+            if self.sealed {
+                if let Some(id) = sealed_call(head) {
+                    // THE WS SEAL, inbound: the frame already crossed the network
+                    // in clear, and nothing here dispatches it — the far caller is
+                    // answered with the seal's refusal.
+                    // TODO(ws seal): wss:// (TLS) is the later path — a TLS leg
+                    // carries secrets to any host, and this seal lifts for it.
+                    let reply = json!({"type": "reply", "id": id, "data": secret_sealed()});
+                    // the socket dropped → the next read reports it
+                    let _ = self.send_frame(reply).await;
+                    continue;
+                }
+            }
+            return Ok(frame);
         }
+    }
+
+    fn seals_secrets(&self) -> bool {
+        self.sealed
     }
 
     async fn close(&self) {

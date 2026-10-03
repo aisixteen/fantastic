@@ -22,7 +22,7 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
-from .launcher import as_launcher
+from .launcher import Launcher, as_launcher
 
 _ROOT_ID_CACHE: dict[str, str] = {}
 _RUNTIME_CACHE: dict[str, str | None] = {}
@@ -84,7 +84,7 @@ def expected_bundle_sha(zip_path: Path) -> str:
     return m.group(1)
 
 
-def root_id(binary: Path, workdir: Path, *, timeout: float = 15.0) -> str:
+def root_id(binary: Launcher | Path, workdir: Path, *, timeout: float = 15.0) -> str:
     """Discover the runtime's ROOT agent id via a one-shot `reflect`.
 
     Python's root is `kernel_state`; rust/swift use `core`. The harness must

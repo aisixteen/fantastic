@@ -494,6 +494,39 @@ struct SystemVerbTests {
         #expect(names.contains("alpha"))
     }
 
+    /// The `agent_created` event lands on the PARENT's inbox at every depth
+    /// (audit 2026-10-03, KV-4). It was emitted as the root, so the gate judged
+    /// root→parent, and the root's `$children` baseline reaches depth 1 only: a
+    /// parent two levels down never got it — an operator create included, an
+    /// agent creating under itself too — and nothing reported the drop.
+    @Test func agentCreatedReachesAParentAtAnyDepth() async {
+        let kernel = makeKernel()
+        func create(_ parent: String, _ id: String) async -> JSON {
+            await kernel.send([
+                Item("kernel", [
+                    "type": "create_agent", "parent_id": .string(parent),
+                    "handler_module": "echo.tools", "id": .string(id),
+                ])
+            ])[0].result
+        }
+        #expect(await create("kernel", "kv4_a")["id"].asString == "kv4_a")
+        #expect(await create("kv4_a", "kv4_b")["id"].asString == "kv4_b")  // depth 2
+        let inbox = kernel.ensureInbox("kv4_b")
+        #expect(await create("kv4_b", "kv4_by_operator")["id"].asString == "kv4_by_operator")
+        // baseline only: placement under itself
+        let bySelf = await KernelTaskLocals.$currentSender.withValue(AgentId("kv4_b")) {
+            await create("kv4_b", "kv4_by_self")
+        }
+        #expect(bySelf["id"].asString == "kv4_by_self", "\(bySelf)")
+        var created: [String] = []
+        while let item = inbox.tryTake() {
+            if item.payload["type"].asString == "agent_created" {
+                created.append(item.payload["id"].asString ?? "")
+            }
+        }
+        #expect(created == ["kv4_by_operator", "kv4_by_self"])
+    }
+
     @Test func createAgentRequiresHandlerModule() async {
         let kernel = makeKernel()
         let reply = await kernel.send([Item("kernel_state", ["type": "create_agent", "parent_id": "kernel_state", "id": "x"])])[0].result

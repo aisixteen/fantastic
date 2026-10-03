@@ -45,6 +45,8 @@ async fn the_connector_puts_secret_on_the_frame_only_when_given() {
          kernel.send('x', {{'type': 'y', 'k': 'v'}}, secret=['payload.k', 'result'])\n\
          kernel.send('x', {{'type': 'y'}})\n\
          kernel.send('x', {{'type': 'y'}}, secret=[])\n\
+         kernel.send('x', {{'type': 'y', 'a.b': 'v'}}, secret=[['payload', 'a.b'], \
+         'result', ['result', 'items', 0]])\n\
          print('DONE')\n"
     );
     let argv = vec![
@@ -55,7 +57,7 @@ async fn the_connector_puts_secret_on_the_frame_only_when_given() {
     ];
     let mut sp = crate::spawn::spawn_job(&argv, "owner_agent", &Map::new(), ".").expect("spawn");
     let mut frames = Vec::new();
-    for _ in 0..3 {
+    for _ in 0..4 {
         let m = read_t_frame(&mut sp.ctrl).await;
         wire_write(
             &mut sp.ctrl,
@@ -82,6 +84,9 @@ async fn the_connector_puts_secret_on_the_frame_only_when_given() {
                    "secret": ["payload.k", "result"]}),
             json!({"op": "send", "rid": "2", "target": "x", "payload": {"type": "y"}}),
             json!({"op": "send", "rid": "3", "target": "x", "payload": {"type": "y"}}),
+            json!({"op": "send", "rid": "4", "target": "x",
+                   "payload": {"type": "y", "a.b": "v"},
+                   "secret": [["payload", "a.b"], "result", ["result", "items", 0]]}),
         ],
     );
 }
@@ -150,6 +155,30 @@ async fn the_relay_puts_the_frames_secret_on_the_dispatched_item() {
         (&json!("bad_arg"), &json!("secret")),
         "{bad}"
     );
+    // an ARRAY mark rides as given: the literal key "a.b" is masked
+    wire_write(
+        &mut child,
+        &json!({"op": "send", "rid": "3", "target": probe,
+                "payload": {"type": "status", "a.b": "hush-dotted-0452"},
+                "secret": [["payload", "a.b"]]}),
+    )
+    .await;
+    let rep = wire_read(&mut child).await;
+    assert!(
+        rep["rid"] == "3" && rep["data"].get("jobs").is_some(),
+        "{rep}"
+    );
+    let dotted: Vec<Value> = kernel
+        .rows
+        .all()
+        .into_iter()
+        .map(Value::Object)
+        .filter(|r| r["kind"] == "call" && r["secret"] == json!([["payload", "a.b"]]))
+        .collect();
+    assert_eq!(dotted.len(), 1, "{dotted:?}");
+    assert_eq!(dotted[0]["payload"]["a.b"], "<secret>", "{dotted:?}");
+    let all = Value::Array(kernel.rows.all().into_iter().map(Value::Object).collect());
+    assert!(!all.to_string().contains("hush-dotted-0452"), "{all}");
     stop.notify_one();
     tokio::time::timeout(Duration::from_secs(5), relay)
         .await
@@ -160,7 +189,7 @@ async fn the_relay_puts_the_frames_secret_on_the_dispatched_item() {
 const CREDS_CHILD: &str = "import json, secrets\n\
 key = 'sk-guest-' + secrets.token_hex(16)\n\
 s = kernel.send('creds', {'type': 'set', 'ref': 'guest', \
-'host': 'api.example.com', 'fields': {'api_key': key}}, \
+'fields': {'api_key': key}}, \
 secret=['payload.fields'])\n\
 g = kernel.send('creds', {'type': 'get', 'ref': 'guest'}, secret=['result'])\n\
 u = kernel.send('creds', {'type': 'get', 'ref': 'guest'})\n\
@@ -210,7 +239,9 @@ async fn a_program_marks_a_credential_store_set_and_get() {
     let made = op(json!({"type": "create_agent", "parent_id": "kernel",
                          "handler_module": fantastic_credential_store::HANDLER_MODULE,
                          "id": "creds", "file": file.to_string_lossy(),
-                         "creators": [runner.as_str()],
+                         "refs": {"guest": {"host": "api.example.com",
+                                            "readers": [runner.as_str()],
+                                            "writers": [runner.as_str()]}},
                          "callable_by": {runner.as_str(): "*"}}))
     .await;
     assert_eq!(made["id"], json!("creds"), "{made}");
@@ -267,7 +298,13 @@ async fn a_program_marks_a_credential_store_set_and_get() {
     );
     let doc = fantastic_kernel::yaml_io::load(&std::fs::read_to_string(&file).unwrap())
         .expect("the store's file");
-    let key = doc["refs"]["guest"]["api_key"]
+    // the value at rest carries the ref's declared host (audit S3)
+    assert_eq!(
+        doc["refs"]["guest"]["host"],
+        json!("api.example.com"),
+        "{doc}"
+    );
+    let key = doc["refs"]["guest"]["fields"]["api_key"]
         .as_str()
         .expect("the stored key")
         .to_string();

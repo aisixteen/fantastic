@@ -28,7 +28,7 @@ private func serialized(_ rows: [JSON]) -> String { JSON.array(rows).serialize()
 
 @Suite("folds: a mark, not a deletion", .serialized)
 struct FoldsTests {
-    init() { AIStripStrategy.forget(AI) }
+    init() { AIStripStrategy.forget(nil, AI) }
 
     // ── chains and closure ──────────────────────────────────────────────
 

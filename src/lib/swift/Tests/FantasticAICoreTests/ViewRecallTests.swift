@@ -50,7 +50,7 @@ private final class AskCounter: @unchecked Sendable {
 
 @Suite("the view array is the state", .serialized)
 struct ViewRecallTests {
-    init() { AIStripStrategy.forget(AI) }
+    init() { AIStripStrategy.forget(nil, AI) }
 
     // ── the cap invariant ────────────────────────────────────────────────
 
@@ -231,13 +231,13 @@ struct ViewRecallTests {
         f.seed([f.row("user", "GOAL", "user:goal")] + f.chain("a", 8))
         backend.setProjection(AI, .object(["fired": .bool(true)]))
         backend.setMark(AI, index: 3, client: "cli")
-        AIStripStrategy.set(AI, ["n:1"])
+        AIStripStrategy.set(kernel, AI, ["n:1"])
         let before = try await loadHistory(agent.id.value, kernel).count
         _ = try await backend.contextRecall(
             agent: agent, payload: dry(), kernel: kernel, provider: nil)
         #expect(backend.getProjection(AI) == .null)
         #expect(markOf(backend, AI) == nil)
-        #expect(!AIStripStrategy.has(AI))
+        #expect(!AIStripStrategy.has(kernel, AI))
         #expect(
             try await loadHistory(agent.id.value, kernel).count == before + 1,
             "one recall row appended, nothing removed")

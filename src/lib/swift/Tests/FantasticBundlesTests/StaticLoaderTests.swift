@@ -153,7 +153,7 @@ private func createLoader(_ kernel: Kernel, _ id: String, _ manifest: JSON) asyn
 /// A8.8 / A8.12 — the manifest read is `fs.resolve(Kernel.workdir, path)`: the
 /// BOOT reports an unreadable manifest with python's own exception text, and a
 /// path outside the running dir (or an ABSOLUTE one, even inside it) escapes.
-@Test func anUnreadableManifestIsReportedAtBoot() async {
+@Test func anUnreadableManifestIsReportedAtBoot() async throws {
     let kernel = mkKernel()
     let outside = await createLoader(kernel, "sl2", "/no/such/path/nope.yaml")
     #expect(outside["id"].asString == "sl2", "\(outside.serialize())")
@@ -164,13 +164,13 @@ private func createLoader(_ kernel: Kernel, _ id: String, _ manifest: JSON) asyn
             == "static_loader: cannot read manifest '/no/such/path/nope.yaml': "
             + "fs: path '/no/such/path/nope.yaml' escapes root", "\(b.serialize())")
     // A MISSING relative manifest names the RESOLVED path, python's OSError str.
-    let cwd = FileManager.default.currentDirectoryPath
+    let cwd = try pyRealpath(FileManager.default.currentDirectoryPath)
     _ = await createLoader(kernel, "sl3", "nope.yaml")
     let miss = await kernel.send([Item("sl3", ["type": "boot"])])[0].result
     #expect(
         miss["error"].asString
             == "static_loader: cannot read manifest 'nope.yaml': "
-            + "[Errno 2] No such file or directory: \(pyRepr(pyRealpath(cwd) + "/nope.yaml"))",
+            + "[Errno 2] No such file or directory: \(pyRepr(cwd + "/nope.yaml"))",
         "\(miss.serialize())")
 }
 
@@ -426,4 +426,72 @@ private func createLoader(_ kernel: Kernel, _ id: String, _ manifest: JSON) asyn
     let r = await kernel.send([Item("static_loader", ["type": "boot"])])[0].result
     #expect(r["booted"].asBool == false, "\(r.serialize())")
     #expect(kernel.agent(AgentId("memory")) == nil)
+}
+
+/// Audit G-2/BV-2 — the roster pass runs AS OPERATOR, so only the kernel's own
+/// boot (origin none) may start it. A roster agent whose grant the operator
+/// revoked sent `boot` to its loader and got the grant back; a deleted roster
+/// agent came back. The edge is NAMED on both ends, so the refusal is the
+/// loader's own, whatever the gate makes of `boot`. Python
+/// `test_an_agent_sent_boot_is_refused_and_re_runs_nothing`.
+@Test func anAgentSentBootIsRefusedAndReRunsNothing() async {
+    let kernel = mkKernel()
+    let (path, cleanup) = writeManifest(
+        """
+        agents:
+          - id: memory
+            handler_module: cli.tools
+          - id: worker
+            handler_module: cli.tools
+            can_call:
+              memory: [set, read]
+              static_loader: [boot]
+        """)
+    defer { cleanup() }
+    let rec = await kernel.send([
+        Item(
+            "kernel_state",
+            [
+                "type": "create_agent", "parent_id": "kernel_state",
+                "handler_module": .string(StaticLoaderBundle.handlerModule),
+                "id": "static_loader", "manifest": .string(path),
+                "callable_by": ["worker": ["boot"]],
+            ])
+    ])[0].result
+    #expect(rec["id"].asString == "static_loader", "\(rec.serialize())")
+    // The operator revokes worker's lateral edge and deletes `memory`.
+    for p: JSON in [
+        [
+            "type": "update_agent", "id": "worker",
+            "can_call": [
+                "$self": "*", "$parent": "*", "$children": "*", "static_loader": ["boot"],
+            ],
+        ],
+        ["type": "delete_agent", "id": "memory"],
+    ] {
+        let r = await kernel.send([Item("kernel", p)])[0].result
+        #expect(r["error"] == .null, "\(r.serialize())")
+    }
+    let r = await kernel.sendAs(
+        sender: "worker", target: "static_loader", payload: ["type": "boot"])
+    #expect(
+        r
+            == .object([
+                "error": .string(
+                    "static_loader: an agent-sent boot is refused — the roster is hydrated "
+                        + "with operator authority, so only the kernel's own boot (cold boot, "
+                        + "create_agent) runs it"),
+                "reason": "unauthorized",
+                "hint": .string(
+                    "change an agent's record with update_agent (the conferral rule applies "
+                        + "there); the operator re-boots the loader"),
+            ]), "\(r.serialize())")
+    #expect(kernel.agent(AgentId("memory")) == nil)
+    let can = kernel.agent(AgentId("worker"))?.metaValue(forKey: "can_call") ?? .null
+    #expect(can["memory"] == .null)
+    // The operator's boot is the kernel's own: it re-runs the manifest.
+    let again = await kernel.send([Item("static_loader", ["type": "boot"])])[0].result
+    #expect(
+        again == ["booted": true, "created": ["memory"], "reapplied": ["worker"]],
+        "\(again.serialize())")
 }

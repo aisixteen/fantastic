@@ -94,16 +94,6 @@ def test_external_remove_recursive(tmp_path):
     assert not base.exists()
 
 
-def test_open_append_hands_back_a_sink(tmp_path):
-    base = tmp_path / "logs"
-    h = fs.open_append(str(base), "serve.log", external=True)
-    try:
-        h.write(b"line\n")
-    finally:
-        h.close()
-    assert fs.read_bytes(str(base), "serve.log", external=True) == b"line\n"
-
-
 # ─── symlinks are names, not their targets ──────────────────────
 
 
@@ -142,3 +132,31 @@ def test_absolute_path_refuses_not_re_roots(tmp_path, monkeypatch):
     fs.write_text(R, "x.txt", "x")
     with pytest.raises(ValueError):
         fs.resolve(R, "/x.txt")
+
+
+def test_read_private_judges_the_open_descriptor_it_reads(tmp_path):
+    """F5 (audit 2026-10-03): `read_private` opens ONCE (`O_NOFOLLOW`) and judges
+    the open descriptor — regular, this user's, no group/other bits — before
+    reading it, so no swap can land between the check and the read. A symlink in
+    the leaf's place, a widened mode and a FIFO are refused (`NotPrivate`, a
+    PermissionError, nothing read); an absent file is FileNotFoundError."""
+    import os
+
+    secret = tmp_path / "s.yaml"
+    secret.write_bytes(b"k: v\n")
+    os.chmod(secret, 0o600)
+    assert fs.read_private(tmp_path, "s.yaml", external=True) == b"k: v\n"
+    os.chmod(secret, 0o644)
+    with pytest.raises(fs.NotPrivate) as wide:
+        fs.read_private(tmp_path, "s.yaml", external=True)
+    assert (wide.value.mode, wide.value.uid) == (0o644, os.getuid())
+    assert isinstance(wide.value, PermissionError)
+    os.chmod(secret, 0o600)
+    (tmp_path / "link.yaml").symlink_to(secret)
+    with pytest.raises(fs.NotPrivate):
+        fs.read_private(tmp_path, "link.yaml", external=True)
+    os.mkfifo(tmp_path / "pipe")
+    with pytest.raises(fs.NotPrivate):  # judged, never a hang on the open
+        fs.read_private(tmp_path, "pipe", external=True)
+    with pytest.raises(FileNotFoundError):
+        fs.read_private(tmp_path, "absent.yaml", external=True)

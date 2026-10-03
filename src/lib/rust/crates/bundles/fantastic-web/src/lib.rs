@@ -76,6 +76,10 @@ pub(crate) struct ServerHandle {
     /// The port the record asked for (python reports `handle.port`, the
     /// CONFIGURED port, never the bound one).
     pub port: u16,
+    /// The bind address, read off the record when the handle is built (python
+    /// `_spawn` puts it in uvicorn's config) — what the listener binds and what
+    /// the boot announcement names.
+    pub host: String,
 }
 
 mod once_cell_lock {
@@ -336,18 +340,15 @@ fn browser_reachable(web_id: &AgentId, kernel: &Kernel) -> Vec<String> {
 fn leg_admits(meta: &Map<String, Value>, target: &str, verb: &str) -> bool {
     use fantastic_io_bridge::authorizer::{ingress, manifold_spec, Action, Decision};
     let spec = manifold_spec(meta.get("ingress_rule"), meta.get("auth"), "_ingress");
-    match ingress::resolve(spec.as_ref()) {
-        Ok(rule) => matches!(
-            rule.authorize(&Action {
-                kind: "call",
-                target,
-                verb,
-                token: None,
-            }),
-            Decision::Allow
-        ),
-        Err(_) => false,
-    }
+    matches!(
+        ingress::resolve(spec.as_ref()).authorize(&Action {
+            kind: "call",
+            target,
+            verb,
+            token: None,
+        }),
+        Decision::Allow
+    )
 }
 
 /// python `_boot` — build the host on `rec.port`, mount every child's surface,
@@ -372,13 +373,15 @@ Set port on create_agent or via update_agent."
                 task: None,
                 table: Arc::new(AsyncRwLock::new(RouteTable::base())),
                 port,
+                // LOOPBACK unless the record names a host (`host: "0.0.0.0"` to publish).
+                host: origin::effective_host(&read_rec(agent_id, kernel)),
             },
         );
     }
-    let Some((table, port)) = SERVERS
+    let Some((table, port, host)) = SERVERS
         .lock()
         .get(agent_id)
-        .map(|h| (Arc::clone(&h.table), h.port))
+        .map(|h| (Arc::clone(&h.table), h.port, h.host.clone()))
     else {
         return Ok(json!({"running": false}));
     };
@@ -396,13 +399,14 @@ Set port on create_agent or via update_agent."
     for cid in children {
         mount_surface(&table, kernel, &cid).await;
     }
-    start_serving(agent_id, &state, &table, port).await;
+    start_serving(agent_id, &state, &table, &host, port).await;
     // Announce OURSELVES to the cli renderer (the boot-event convention): the
     // web host owns its port, so it tells the terminal where to attach — the
     // renderer never reaches in for it. No cli (non-tty) ⇒ nobody is told; the
-    // bound port is on this agent's reflect.
+    // bound port is on this agent's reflect. The URL names the BOUND host — a
+    // host bound to a LAN address does not answer at 127.0.0.1 (audit ARCH2-10).
     let line = format!(
-        "listening on http://127.0.0.1:{port}/ · rest/ws are children (reflect kernel for ids)"
+        "listening on http://{host}:{port}/ · rest/ws are children (reflect kernel for ids)"
     );
     kernel
         .send(vec![Item::new(
@@ -422,6 +426,7 @@ async fn start_serving(
     agent_id: &AgentId,
     state: &AppState,
     table: &Arc<AsyncRwLock<RouteTable>>,
+    host: &str,
     port: u16,
 ) {
     if SERVERS
@@ -431,9 +436,7 @@ async fn start_serving(
     {
         return;
     }
-    // LOOPBACK unless the record names a host (`host: "0.0.0.0"` to publish).
-    let host = origin::effective_host(&read_rec(agent_id, &state.kernel));
-    let listener = match tokio::net::TcpListener::bind((host.as_str(), port)).await {
+    let listener = match tokio::net::TcpListener::bind((host, port)).await {
         Ok(l) => l,
         Err(e) => {
             // python `logger.error("webapp %s :%d serve failed: %s", …)`

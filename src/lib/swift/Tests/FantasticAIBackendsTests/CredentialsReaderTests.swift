@@ -29,10 +29,10 @@ private func send(_ k: Kernel, _ target: String, _ payload: OrderedDictionary<St
     return await k.send([it])[0]
 }
 
-private func storeSet(_ k: Kernel, _ ref: String, _ host: String, _ value: String) async {
+private func storeSet(_ k: Kernel, _ ref: String, _ value: String) async {
     let out = await send(
         k, "creds",
-        ["type": "set", "ref": .string(ref), "host": .string(host), "fields": ["api_key": .string(value)]],
+        ["type": "set", "ref": .string(ref), "fields": ["api_key": .string(value)]],
         secret: ["payload.fields"])
     #expect(out.status == .completed && out.result["stored"] == true, "\(out.asJSON.serialize())")
 }
@@ -63,14 +63,12 @@ private func mk(readers: [String] = ["ai"], host: String = "api.example.com") as
     ])
     _ = await create(k, [
         "handler_module": .string(CredentialStoreBundle.handlerModule), "id": "creds",
-        "file": .string(dir.appendingPathComponent("creds.yaml").path), "callable_by": ["ai": "*"],
+        "file": .string(dir.appendingPathComponent("creds.yaml").path),
+        // declared
+        "refs": ["main": ["host": .string(host), "readers": .array(readers.map { .string($0) })]],
+        "callable_by": ["ai": "*"],
     ])
-    await storeSet(k, "main", host, KEY)
-    var refs = k.agent(AgentId("creds"))?.meta["refs"]?.asObject ?? [:]
-    var entry = refs["main"]?.asObject ?? [:]
-    entry["readers"] = .array(readers.map { .string($0) })
-    refs["main"] = .object(entry)
-    k.update(AgentId("creds"), ["refs": .object(refs)])
+    await storeSet(k, "main", KEY)
     let rec = await create(k, [
         "handler_module": .string(HANDLER_MODULE), "id": "ai", "endpoint": .string(EP),
         "model": "m", "memory_store_id": "memory",
@@ -98,7 +96,7 @@ struct CredentialsReaderTests {
         let built = try await ResponsesBundle().core.config.makeProvider(agent, "c", k)
         let prov = try #require(built as? ResponsesProvider)
         #expect(try await prov.key(EP) == KEY)
-        await storeSet(k, "main", "api.example.com", KEY2)  // rotate
+        await storeSet(k, "main", KEY2)  // rotate
         #expect(try await prov.key(EP) == KEY2, "a rotated key is used by the next request")
         let ledger = await k.send([Item("kernel", ["type": "ledger"])])[0].result.serialize()
         #expect(!ledger.contains(KEY) && !ledger.contains(KEY2))
@@ -213,16 +211,15 @@ struct CredentialsReaderTests {
                 pyErrorText(error)
                     == "responses_backend: credentials must be {store: <credential_store id>, ref: <ref>}")
         }
+        // declared first — a set never creates a ref
+        var refs = k.agent(AgentId("creds"))?.meta["refs"]?.asObject ?? [:]
+        refs["tok"] = ["host": "api.example.com", "readers": ["ai"]]
+        k.update(AgentId("creds"), ["refs": .object(refs)])
         let out = await send(
             k, "creds",
-            ["type": "set", "ref": "tok", "host": "api.example.com", "fields": ["token": "t"]],
+            ["type": "set", "ref": "tok", "fields": ["token": "t"]],
             secret: ["payload.fields"])
-        #expect(out.status == .completed)
-        var refs = k.agent(AgentId("creds"))?.meta["refs"]?.asObject ?? [:]
-        var entry = refs["tok"]?.asObject ?? [:]
-        entry["readers"] = ["ai"]
-        refs["tok"] = .object(entry)
-        k.update(AgentId("creds"), ["refs": .object(refs)])
+        #expect(out.status == .completed, "\(out.asJSON.serialize())")
         k.update(AgentId("ai"), ["credentials": ["store": "creds", "ref": "tok"]])
         do {
             _ = try await keyReader(AgentId("ai"), k, backend: "responses_backend", required: true)(EP)
@@ -232,5 +229,44 @@ struct CredentialsReaderTests {
                 pyErrorText(error)
                     == "responses_backend: credential 'tok' in 'creds' has no 'api_key' field")
         }
+    }
+
+    /// Audit S1: a key that is not a legal HTTP header value — a control
+    /// character, a non-ASCII one, whitespace at an edge — is refused by the
+    /// reader, naming the ref and never the value (python's client quotes a
+    /// refused header in its error). The store keeps whatever it was given; a key
+    /// with inner spaces rides.
+    @Test func aKeyThatIsNotALegalHeaderValueIsRefusedByItsRef() async throws {
+        let (k, dir) = await mk()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let read = keyReader(AgentId("ai"), k, backend: "responses_backend", required: true)
+        let bad = [
+            KEY + "\n", KEY + "\r\nX-Probe: y", KEY + " ", " " + KEY, KEY + "\t",
+            "sk-l\u{0}ive", "sk-l\u{7f}ive", KEY + "é",
+        ]
+        for b in bad {
+            await storeSet(k, "main", b)
+            do {
+                _ = try await read(EP)
+                Issue.record("an illegal header value must not be read: \(b.debugDescription)")
+            } catch {
+                #expect((error as? PyError)?.type == "CredentialError")
+                #expect(
+                    pyErrorText(error)
+                        == "responses_backend: credential 'main' in 'creds': 'api_key' is not a "
+                        + "legal HTTP header value (a control or non-ASCII character, or "
+                        + "whitespace at an edge) — store it again without",
+                    "\(b.debugDescription)")
+                #expect(!pyErrorText(error).contains("0123456789"))
+            }
+        }
+        await storeSet(k, "main", "sk a\tb")
+        #expect(try await read(EP) == "sk a\tb")
+    }
+
+    @Test func withoutKeyScrubsEveryOccurrence() {
+        #expect(withoutKey("a sk-1 b sk-1", "sk-1") == "a <secret> b <secret>")
+        #expect(withoutKey("a sk-1", nil) == "a sk-1")
+        #expect(withoutKey("a sk-1", "") == "a sk-1")
     }
 }

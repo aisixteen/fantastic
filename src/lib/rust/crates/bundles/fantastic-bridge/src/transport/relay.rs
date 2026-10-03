@@ -3,7 +3,10 @@
 //! Mirrors `python/bundled_agents/io/relay_connector/_relay.py::RelayTransport`.
 //! The relay is itself a kernel: we dial `ws://<host>/<guid>` (subprotocol
 //! `fantastic.relay.v1`, header `X-Fantastic-Auth: <group password>` checked once
-//! at the WS upgrade) and reach a fixed `partner` GUID. The relay routes by
+//! at the WS upgrade) and reach a fixed `partner` GUID. The password is a SECRET
+//! and lives only in a credential_store (audit IO-7/F4, 2026-10-03): the
+//! transport is handed a [`PasswordReader`] and awaits it before EVERY dial —
+//! nothing cached, a rotated password is used by the next dial. The relay routes by
 //! `target` and delivers peer→peer ONE-WAY as `{type:"event", source, payload}`.
 //!
 //! So this transport TUNNELS the shared bridge frames: `send` wraps each frame in
@@ -39,7 +42,7 @@ use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{connect_async_with_config, MaybeTlsStream, WebSocketStream};
 
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 type WsSink = SplitSink<WsStream, Message>;
@@ -60,13 +63,19 @@ type RelayPending = Arc<std::sync::Mutex<HashMap<String, oneshot::Sender<Value>>
 /// The WS subprotocol the relay pairs + authenticates on.
 pub const SUBPROTOCOL: &str = "fantastic.relay.v1";
 
+/// The relay's own directory agent: a directory request is addressed `target` to
+/// it, and a directory event reaches the engine as an `event` frame from `src` it
+/// — so `watch_directory` subscribes the leg to it like any watched agent (python
+/// `_relay.DIRECTORY_SRC`).
+pub const DIRECTORY_SRC: &str = "relay";
+
 // THE RELAY SEAL (owner, 2026-10-02). relayd dispatches every tunneled frame into
 // its own kernel and records it UNMASKED, so a secret that crossed a relay leg
 // would sit in the relay's ledger in full. Until relayd masks what it records, a
 // relay leg refuses any call carrying secret marks, in both directions: outbound
 // in the bundle's `forward` (`crate::dispatch` / `crate::dispatch_binary`),
-// inbound in this transport's `pump`. ws_bridge (direct WS) is not sealed. One
-// text for both.
+// inbound in this transport's `pump`. ws_bridge (direct WS) is sealed only to a
+// non-loopback host (its own seal, `transport::ws`). One text for both.
 
 /// The relay seal's refusal text — python `SECRET_SEALED`, byte for byte.
 pub const SECRET_SEALED: &str = "relay_connector: a call carrying secret marks may not cross \
@@ -89,8 +98,9 @@ pub fn secret_sealed() -> Value {
 
 /// A partner delivery the inbound seal refuses: a tunneled `call` frame that names
 /// `secret` (any value — python `"secret" in payload`). Returns its `id` (`null`
-/// when it has none — python `payload.get("id")`).
-fn sealed_call(frame: &Value) -> Option<Value> {
+/// when it has none — python `payload.get("id")`). The ws seal reads the same
+/// shape off a direct frame.
+pub(crate) fn sealed_call(frame: &Value) -> Option<Value> {
     let m = frame.as_object()?;
     (m.get("type").and_then(Value::as_str) == Some("call") && m.contains_key("secret"))
         .then(|| m.get("id").cloned().unwrap_or(Value::Null))
@@ -210,8 +220,22 @@ pub struct RelayTransport {
     identity: SharedIdentity,
 }
 
-/// Build the WS upgrade request (path GUID + subprotocol + auth header) and dial.
-async fn dial(url: &str, token: &str) -> Result<WsStream, TransportError> {
+/// The relay password, read at dial time — python `PasswordReader`, `() -> str`:
+/// `Err` names the store and the ref (python's `CredentialError`).
+pub type PasswordReader =
+    Arc<dyn Fn() -> futures_util::future::BoxFuture<'static, Result<String, String>> + Send + Sync>;
+
+/// One dial: the password read at USE time, every (re)dial — a rotated password
+/// reaches the relay on the next connect, and no copy outlives this call. Python
+/// `_default_dialer`'s `dial`.
+async fn dial(url: &str, password: &PasswordReader) -> Result<WsStream, TransportError> {
+    let token = password().await.map_err(TransportError::Other)?;
+    open_ws(url, &token).await
+}
+
+/// THE network dial — the one place a relay socket opens (python `_open_ws`):
+/// the WS upgrade request (path GUID + subprotocol + auth header).
+async fn open_ws(url: &str, token: &str) -> Result<WsStream, TransportError> {
     let mut req = url
         .into_client_request()
         .map_err(|e| TransportError::Other(format!("relay url {url}: {e}")))?;
@@ -227,7 +251,8 @@ async fn dial(url: &str, token: &str) -> Result<WsStream, TransportError> {
                 .map_err(|e| TransportError::Other(format!("relay auth header: {e}")))?,
         );
     }
-    match tokio::time::timeout(HANDSHAKE_TIMEOUT, connect_async(req)).await {
+    let dial = connect_async_with_config(req, Some(super::ws_config()), false);
+    match tokio::time::timeout(HANDSHAKE_TIMEOUT, dial).await {
         Ok(Ok((stream, _resp))) => Ok(stream),
         Ok(Err(e)) => Err(TransportError::Other(format!("relay connect {url}: {e}"))),
         Err(_) => Err(TransportError::Other(format!(
@@ -244,7 +269,7 @@ impl RelayTransport {
     pub async fn connect(
         relay_url: &str,
         guid: &str,
-        token: &str,
+        password: PasswordReader,
         partner_guid: &str,
         reconnect_secs: f64,
         heartbeat_secs: f64,
@@ -252,7 +277,6 @@ impl RelayTransport {
         spawn: RelaySpawn,
     ) -> Result<Arc<Self>, TransportError> {
         let url = format!("{}/{}", relay_url.trim_end_matches('/'), guid);
-        let token = token.to_string();
         let partner = partner_guid.to_string();
         let sink: SharedSink = Arc::new(Mutex::new(None));
         let (tx, rx) = mpsc::channel::<Result<Frame, TransportError>>(64);
@@ -264,7 +288,7 @@ impl RelayTransport {
 
         // Eager first dial. On success seed the initial source; on failure with
         // reconnect off, fail the boot; otherwise heal in the background.
-        let initial: Option<SplitStream<WsStream>> = match dial(&url, &token).await {
+        let initial: Option<SplitStream<WsStream>> = match dial(&url, &password).await {
             Ok(stream) => {
                 let (s, source) = stream.split();
                 *sink.lock().await = Some(s);
@@ -288,7 +312,7 @@ impl RelayTransport {
 
         let supervisor = tokio::spawn(supervise(
             url,
-            token,
+            password,
             partner.clone(),
             Arc::clone(&sink),
             tx,
@@ -450,8 +474,8 @@ async fn send_to_partner(
 }
 
 /// Classify a text relay frame. Resolves a directory `reply` (side effect, no
-/// frame); surfaces a `source:"relay"` event as `{type:"event", payload}`;
-/// unwraps a `source:partner` delivery. Returns None for anything else.
+/// frame); surfaces a `source:"relay"` event as `{type:"event", src:"relay",
+/// payload}`; unwraps a `source:partner` delivery. Returns None for anything else.
 fn classify_text(env: Value, partner: &str, relay_pending: &RelayPending) -> Option<Frame> {
     match env.get("type").and_then(Value::as_str) {
         Some("reply") => {
@@ -475,9 +499,12 @@ fn classify_text(env: Value, partner: &str, relay_pending: &RelayPending) -> Opt
             // python skips ANY event whose payload is not a dict, directory
             // included, before it ever looks at the source.
             _ if !env.get("payload").is_some_and(Value::is_object) => None,
-            // Directory event → re-emit on the connector inbox via the engine.
-            Some("relay") => Some(Frame::Text(json!({
+            // Directory event → an `event` from the directory, which the engine
+            // re-emits on the connector inbox while `watch_directory` holds it in
+            // the leg's `watching`.
+            Some(DIRECTORY_SRC) => Some(Frame::Text(json!({
                 "type": "event",
+                "src": DIRECTORY_SRC,
                 "payload": env.get("payload").cloned().unwrap_or(Value::Null),
             }))),
             // Partner tunnel delivery → the inner bridge frame.
@@ -496,7 +523,7 @@ fn classify_text(env: Value, partner: &str, relay_pending: &RelayPending) -> Opt
 #[allow(clippy::too_many_arguments)]
 async fn supervise(
     url: String,
-    token: String,
+    password: PasswordReader,
     partner: String,
     sink: SharedSink,
     tx: mpsc::Sender<Result<Frame, TransportError>>,
@@ -528,7 +555,7 @@ async fn supervise(
             if closed.load(Ordering::SeqCst) {
                 break;
             }
-            match dial(&url, &token).await {
+            match dial(&url, &password).await {
                 Ok(stream) => {
                     let (s, source) = stream.split();
                     *sink.lock().await = Some(s);
@@ -765,6 +792,11 @@ impl BridgeTransport for RelayTransport {
 mod tests {
     use super::*;
 
+    /// A reader for a relay that checks no password (the fake ones here).
+    fn no_password() -> PasswordReader {
+        Arc::new(|| Box::pin(async { Ok(String::new()) }))
+    }
+
     /// python starts the beat in `_on_socket_open`, so a leg whose eager dial
     /// FAILED has no `relay_heartbeat` task at all — and no `ps` row for one.
     /// Rust spawned it at construction, so an unreachable relay carried a row
@@ -775,7 +807,7 @@ mod tests {
         let t = RelayTransport::connect(
             "ws://127.0.0.1:1",
             "A",
-            "",
+            no_password(),
             "B",
             60.0,
             1.0,
@@ -835,7 +867,7 @@ mod tests {
         let t = RelayTransport::connect(
             &format!("ws://127.0.0.1:{port}"),
             "A",
-            "",
+            no_password(),
             "B",
             60.0,
             0.0,
@@ -888,11 +920,14 @@ mod tests {
             classify_text(event, "B", &pending).unwrap().into_value(),
             bridge
         );
-        // directory event (source:"relay") → a bridge `event` frame for the inbox.
+        // directory event (source:"relay") → a bridge `event` frame from the
+        // directory, for the inbox.
         let dir = json!({"type":"event","source":"relay","payload":{"type":"peer_status","guid":"C","status":"yellow"}});
         let f = classify_text(dir, "B", &pending).unwrap().into_value();
-        assert_eq!(f["type"], "event");
-        assert_eq!(f["payload"]["type"], "peer_status");
+        assert_eq!(
+            f,
+            json!({"type":"event","src":"relay","payload":{"type":"peer_status","guid":"C","status":"yellow"}})
+        );
         // a foreign peer → skipped.
         assert!(classify_text(
             json!({"type":"event","source":"X","payload":{}}),

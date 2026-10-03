@@ -17,7 +17,7 @@
 //! that reads its key before every pass.
 
 use super::*;
-use crate::credentials::{key_reader, secret_holder_text};
+use crate::credentials::{key_reader, secret_holder_text, secret_join_text};
 use fantastic_kernel::{PeerRoute, Status};
 
 const EP: &str = "https://api.example.com/v1/responses";
@@ -153,7 +153,7 @@ async fn route(kernel: &Arc<Kernel>, ai: &AgentId, text: String, message_id: Opt
         None,
         String::new(),
         9.0,
-        crate::context::DEFAULT_CONTEXT_WINDOW,
+        crate::constants::DEFAULT_CONTEXT_WINDOW,
         message_id,
         false,
     )
@@ -331,11 +331,15 @@ async fn a_peer_qualified_target_is_not_judged_here() {
     let _s = script(&ai, vec![pass(DONE)], Duration::ZERO);
     let calls: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
     let log = Arc::clone(&calls);
-    let r = PeerRoute::new("leg", move |agent_id, _payload, _caller, _secret, _body| {
-        log.lock().unwrap().push(agent_id.clone());
-        Box::pin(async move { (json!({"ok": agent_id}), None) })
-    });
-    assert!(kernel.register_peer("g1", &r).is_none());
+    let r = PeerRoute::new(
+        "leg",
+        move |agent_id, _payload, _caller, _secret, _body| {
+            log.lock().unwrap().push(agent_id.clone());
+            Box::pin(async move { (json!({"ok": agent_id}), None) })
+        },
+        |_, _, _, _| Box::pin(async {}),
+    );
+    kernel.register_peer("g1", &r);
     let text = call("g1|creds", "get", "self", json!({"ref": "main"}));
     route(&kernel, &ai, text, None).await;
     settle(&kernel, &ai, 1).await;
@@ -399,6 +403,10 @@ struct KeyedProvider {
     read: crate::credentials::KeyReader,
     keys: Keys,
     script: Arc<MockScript>,
+    /// python `_JoiningModel`: on its FIRST pass the model JOINS the backend's
+    /// latest key read of this target — a send naming that read's message id as
+    /// `<exec_id>` (ids are sequential: a model can scan them).
+    join: Option<(Arc<Kernel>, AgentId, String)>,
 }
 
 #[async_trait]
@@ -410,6 +418,23 @@ impl Provider for KeyedProvider {
     ) -> Result<ProviderStream, ProviderError> {
         let key = self.read.read(EP).await?;
         self.keys.lock().unwrap().push(key);
+        if let Some((kernel, agent, target)) = &self.join {
+            if self.script.passes_served() == 0 {
+                let joined = rows(kernel, target, "get")
+                    .iter()
+                    .filter_map(|r| r["id"].as_i64())
+                    .max()
+                    .expect("the backend's key read is a row");
+                joined_ids().insert(agent.as_str().to_string(), joined);
+                let mut a = Map::new();
+                a.insert("target_id".into(), json!(target));
+                a.insert("payload".into(), json!({"type": "get", "ref": "main"}));
+                a.insert("reply_to".into(), json!("self"));
+                a.insert("exec_id".into(), json!(joined));
+                let text = crate::tool_parse::render_call("send", &a);
+                self.script.passes.lock().unwrap().push_front(pass(text));
+            }
+        }
         MockProvider {
             script: Arc::clone(&self.script),
         }
@@ -426,6 +451,15 @@ impl Provider for KeyedProvider {
 struct KeyedBundle {
     required: bool,
     keys: Keys,
+    /// The target a [`KeyedProvider`] JOINS on its first pass, when set.
+    join: Option<String>,
+}
+
+/// The message id each joining model named as its `<exec_id>`, by agent.
+fn joined_ids() -> std::sync::MutexGuard<'static, std::collections::HashMap<String, i64>> {
+    static IDS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, i64>>> =
+        std::sync::OnceLock::new();
+    IDS.get_or_init(Default::default).lock().unwrap()
 }
 
 #[async_trait]
@@ -442,12 +476,17 @@ impl Bundle for KeyedBundle {
         let script = script_for(agent_id);
         let read = key_reader(agent_id, kernel, "responses_backend", self.required);
         let keys = Arc::clone(&self.keys);
+        let join = self
+            .join
+            .clone()
+            .map(|t| (Arc::clone(kernel), agent_id.clone(), t));
         let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
         let reply = verbs::handle_common(agent_id, payload, kernel, CFG, move |_client| {
             Arc::new(KeyedProvider {
                 read: read.clone(),
                 keys: Arc::clone(&keys),
                 script: Arc::clone(&script),
+                join: join.clone(),
             }) as Arc<dyn Provider>
         })
         .await?
@@ -457,13 +496,32 @@ impl Bundle for KeyedBundle {
 }
 
 async fn keyed_kernel(tmp: &TempDir, required: bool, keys: &Keys) -> Arc<Kernel> {
+    keyed_kernel_joining(tmp, required, keys, None).await
+}
+
+/// [`keyed_kernel`] whose models JOIN the backend's latest key read of `join`
+/// on their first pass.
+async fn keyed_kernel_joining(
+    tmp: &TempDir,
+    required: bool,
+    keys: &Keys,
+    join: Option<&str>,
+) -> Arc<Kernel> {
     let keys = Arc::clone(keys);
+    let join = join.map(str::to_string);
     base_kernel(tmp, move |k| {
         k.bundles.register(
             fantastic_credential_store::HANDLER_MODULE,
             fantastic_credential_store::test_support::bundle(),
         );
-        k.bundles.register(KEYED, KeyedBundle { required, keys });
+        k.bundles.register(
+            KEYED,
+            KeyedBundle {
+                required,
+                keys,
+                join,
+            },
+        );
     })
     .await
 }
@@ -498,6 +556,7 @@ async fn store_and_ai(
         kernel,
         json!({"handler_module": fantastic_credential_store::HANDLER_MODULE, "id": "creds",
                "file": tmp.path().join("creds.yaml").to_string_lossy(),
+               "refs": {"main": {"host": "api.example.com", "readers": [aid.as_str()]}},
                "callable_by": {aid.as_str(): "*"}}),
     )
     .await;
@@ -511,18 +570,12 @@ async fn store_and_ai(
     let put = kernel
         .send(vec![Item::new(
             creds.clone(),
-            json!({"type": "set", "ref": "main", "host": "api.example.com",
-                   "fields": {"api_key": KEY}}),
+            json!({"type": "set", "ref": "main", "fields": {"api_key": KEY}}),
         )
         .with_secret(json!(["payload.fields"]))])
         .await
         .remove(0);
     assert_eq!(put.result["stored"], json!(true), "{}", put.result);
-    let mut refs = meta("refs").unwrap();
-    refs["main"]["readers"] = json!([aid.as_str()]);
-    let mut patch = Map::new();
-    patch.insert("refs".into(), refs);
-    kernel.update(&creds, patch);
     add_ai(
         kernel,
         &aid,
@@ -727,7 +780,8 @@ async fn a_model_cannot_unmark_a_holder_then_call_it() {
         &kernel,
         &tmp,
         "sh_unmark",
-        Some(json!({"creds": "*", "cli": "*", "kernel_state": ["update_agent"]})),
+        // the store's record is the operand: the agent names it with `update_agent`
+        Some(json!({"creds": ["*", "update_agent"], "cli": "*"})),
     )
     .await;
     let unmark = call(
@@ -779,4 +833,158 @@ async fn a_model_cannot_unmark_a_holder_then_call_it() {
     );
     assert!((0..3).all(|i| !s.request(i).contains(KEY)));
     assert!(!Value::Array(all_rows(&kernel)).to_string().contains(KEY));
+}
+
+// ─── a model never JOINS an execution that carried secrets (audit F2) ────────
+
+const PEER_KEY: &str = "sk-peer-0123456789abcdef";
+
+fn join_refused(exec_id: &str) -> String {
+    secret_join_text(exec_id)
+}
+
+#[test]
+fn the_join_refusal_text_is_pythons() {
+    assert_eq!(
+        join_refused("7"),
+        "exec_id 7 names an execution that carried secret values — a model never joins \
+         one; this call was not dispatched"
+    );
+}
+
+/// THE BYPASS (measured 2026-10-03): the key lives in a credential_store on a
+/// CONNECTED PEER (`P-g|creds`) — a peer address this layer cannot judge as a
+/// holder — and the backend reads it as the agent, marked. The model, the same
+/// agent, sent `<exec_id>` = that read's pid: the kernel joined it (same caller,
+/// no second dispatch, the peer never saw it) and the model got the key.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_model_cannot_join_its_backends_key_read_on_a_peer() {
+    let tmp = TempDir::new().unwrap();
+    let keys = Keys::default();
+    let kernel = keyed_kernel_joining(&tmp, true, &keys, Some("P-g|creds")).await;
+    set_guid(&kernel, "A-g");
+    type PeerSeen = Arc<std::sync::Mutex<Vec<(String, String, String, Vec<Value>)>>>;
+    let seen: PeerSeen = Arc::default();
+    let log = Arc::clone(&seen);
+    let peer = PeerRoute::new(
+        "leg",
+        move |agent_id, payload, caller, secret, _body| {
+            let verb = payload["type"].as_str().unwrap_or("").to_string();
+            log.lock()
+                .unwrap()
+                .push((agent_id, verb, caller, secret.clone()));
+            let marked = secret
+                .iter()
+                .any(|m| *m == json!("result") || *m == json!(["result"]));
+            Box::pin(async move {
+                if !marked {
+                    return (
+                        json!({"error": "get: mark the answer secret", "reason": "bad_arg"}),
+                        None,
+                    );
+                }
+                (
+                    json!({"ref": "main", "host": "api.example.com",
+                       "fields": {"api_key": PEER_KEY}}),
+                    None,
+                )
+            })
+        },
+        |_, _, _, _| Box::pin(async {}),
+    );
+    kernel.register_peer("P-g", &peer);
+    let aid = id_for(&tmp, "sh_join_peer");
+    add_ai(
+        &kernel,
+        &aid,
+        KEYED,
+        json!({"P-g|creds": ["get"]}),
+        json!({"credentials": {"store": "P-g|creds", "ref": "main"}}),
+    )
+    .await;
+    let ai = AgentId::from(aid.as_str());
+    let s = script(&ai, vec![pass(DONE)], Duration::ZERO);
+    let _ = op(
+        &kernel,
+        ai.as_str(),
+        json!({"type": "send", "text": "read your key"}),
+    )
+    .await;
+    assert!(until_passes(&s, 2).await, "the second pass never came");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        keys.lock().unwrap()[0].as_deref(),
+        Some(PEER_KEY),
+        "the backend still reads its key"
+    );
+    let joined = *joined_ids().get(ai.as_str()).expect("the model joined");
+    let nxt = last_content(&s, 1);
+    assert!(nxt.contains(&join_refused(&joined.to_string())), "{nxt}");
+    assert!(nxt.contains("unauthorized"), "{nxt}");
+    assert!(!s.request(0).contains(PEER_KEY) && !s.request(1).contains(PEER_KEY));
+    assert!(
+        seen.lock()
+            .unwrap()
+            .iter()
+            .all(|(_, _, _, m)| *m == vec![json!("result")]),
+        "only the backend's reads"
+    );
+}
+
+/// By NAME, on a target that is no holder: an execution whose item carried
+/// `secret` marks is refused to a model whoever opened it — the call is never
+/// dispatched.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_model_cannot_join_a_named_secret_execution() {
+    let tmp = TempDir::new().unwrap();
+    let keys = Keys::default();
+    let kernel = keyed_kernel(&tmp, false, &keys).await;
+    std::fs::write(tmp.path().join("vault.txt"), "TOP-SECRET-9c1d\n").unwrap();
+    let aid = id_for(&tmp, "sh_join_name");
+    create(
+        &kernel,
+        json!({"handler_module": "file_bridge.tools", "id": "notes_fs", "allow": ["."],
+               "root": tmp.path().to_string_lossy(),
+               "ingress_rule": "allow_all_ingress", "callable_by": {aid.as_str(): "*"}}),
+    )
+    .await;
+    let read = kernel
+        .send(vec![Item::new(
+            AgentId::from("notes_fs"),
+            json!({"type": "read", "path": "vault.txt"}),
+        )
+        .with_id("vault-read")
+        .with_secret(json!(["result"]))])
+        .await
+        .remove(0);
+    assert_eq!(read.status, Status::Completed, "{}", read.result);
+    add_ai(
+        &kernel,
+        &aid,
+        KEYED,
+        json!({"notes_fs": "*", "cli": "*"}),
+        json!({}),
+    )
+    .await;
+    let ai = AgentId::from(aid.as_str());
+    let mut a = Map::new();
+    a.insert("target_id".into(), json!("notes_fs"));
+    a.insert(
+        "payload".into(),
+        json!({"type": "read", "path": "vault.txt"}),
+    );
+    a.insert("reply_to".into(), json!("self"));
+    a.insert("exec_id".into(), json!("vault-read"));
+    let join = crate::tool_parse::render_call("send", &a);
+    let s = script(&ai, vec![pass(join), pass(DONE)], Duration::ZERO);
+    let _ = op(
+        &kernel,
+        &aid,
+        json!({"type": "send", "text": "read the vault"}),
+    )
+    .await;
+    assert!(until_passes(&s, 2).await, "the second pass never came");
+    let nxt = last_content(&s, 1);
+    assert!(nxt.contains(&join_refused("vault-read")), "{nxt}");
+    assert!(!s.request(0).contains("TOP-SECRET-9c1d") && !s.request(1).contains("TOP-SECRET-9c1d"));
 }

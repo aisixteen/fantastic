@@ -81,7 +81,9 @@ impl Kernel {
             );
             node = a.parent_id.clone();
         }
-        crate::authz::authorize_heritable(grants.iter(), verb, target_id).allowed
+        let loader_id = self.root().map(|r| r.id.0.clone());
+        crate::authz::authorize_heritable(grants.iter(), verb, target_id, loader_id.as_deref())
+            .allowed
     }
 
     /// Two-sided gate on the PLACEMENT TARGET of `create_agent`. Returns a
@@ -90,7 +92,12 @@ impl Kernel {
     /// Placing inside your OWN subtree is baseline (no grant). Anywhere else
     /// needs egress on the parent (explicitly named — `create_agent` is
     /// privileged, so a wildcard never covers it) AND the parent's own
-    /// `callable_by` accepting the sender.
+    /// `callable_by` accepting the sender — judged as the qualified
+    /// `<guid>|<agent>` when a bridge leg relays a foreign caller.
+    ///
+    /// A RELAYED caller owns no subtree here: the leg's subtree is the leg's,
+    /// not its peer's, so the baseline never applies on the leg's behalf (audit
+    /// 2026-10-03, G-1) — it takes the path any other placement takes.
     fn gate_placement(
         self: &Arc<Self>,
         sender_id: &AgentId,
@@ -100,7 +107,9 @@ impl Kernel {
         loader_id: Option<&str>,
         parent: &Arc<Agent>,
     ) -> Option<Value> {
-        let mut node = Some(Arc::clone(parent));
+        let foreign = crate::send::relayed_caller(sender_id);
+        // a relayed caller owns no subtree here — no baseline walk
+        let mut node = foreign.is_none().then(|| Arc::clone(parent));
         while let Some(n) = node {
             if n.id == *sender_id {
                 return None; // your own subtree — baseline
@@ -129,11 +138,12 @@ impl Kernel {
                 "reason": "unauthorized", "hint": d.hint, "side": "egress",
             }));
         }
+        let in_sender = foreign.unwrap_or_else(|| sender_id.0.clone());
         let (t_call, t_parent, t_kids) = grant_facts(Some(parent.as_ref()), "callable_by");
         let di = crate::authz::authorize_call(
             &t_call,
             "create_agent",
-            sender_id.as_str(),
+            &in_sender,
             parent.id.as_str(),
             t_parent.as_deref(),
             &t_kids,
@@ -143,8 +153,81 @@ impl Kernel {
         );
         if !di.allowed {
             return Some(json!({
-                "error": format!("{} does not accept a child from {sender_id}", parent.id),
+                "error": format!("{} does not accept a child from {in_sender}", parent.id),
                 "reason": "unauthorized", "hint": di.hint, "side": "ingress",
+            }));
+        }
+        None
+    }
+
+    /// Two-sided gate on the OPERAND of `update_agent` / `delete_agent` (the
+    /// record `payload.id` names). Returns a refusal, or `None` when the sender
+    /// may act on `operand`. Python `_gate_operand`.
+    ///
+    /// Inside your OWN subtree (yourself included) it is baseline (no grant).
+    /// Anywhere else needs egress NAMING the operand with the verb
+    /// ([`crate::authz::names_operand`]: a literal `<id>: ["<verb>"]`, never a
+    /// wildcard or a token; or a heritable entry for that id naming the verb) AND
+    /// the operand's own `callable_by` accepting the sender — judged as the
+    /// qualified `<guid>|<agent>` when a bridge leg relays a foreign caller.
+    /// That caller owns no subtree here, the leg's own record included (G-1, as
+    /// [`Self::gate_placement`]).
+    fn gate_operand(
+        self: &Arc<Self>,
+        sender_id: &AgentId,
+        verb: &str,
+        s_can: &Value,
+        loader_id: Option<&str>,
+        operand: &Arc<Agent>,
+    ) -> Option<Value> {
+        let foreign = crate::send::relayed_caller(sender_id);
+        // a relayed caller owns no subtree here — no baseline walk
+        let mut node = foreign.is_none().then(|| Arc::clone(operand));
+        while let Some(n) = node {
+            if n.id == *sender_id {
+                return None; // your own subtree — baseline
+            }
+            node = n
+                .parent_id
+                .as_ref()
+                .and_then(|p| self.agents.get(p).map(|e| Arc::clone(&e)));
+        }
+        if !crate::authz::names_operand(s_can, verb, operand.id.as_str())
+            && !self.heritable_egress(sender_id.as_str(), verb, operand.id.as_str())
+        {
+            return Some(json!({
+                "error": format!("{sender_id} may not {verb} {}", operand.id),
+                "reason": "unauthorized",
+                "hint": format!(
+                    "{0} is outside your subtree: your can_call must name it with the \
+                     verb — {{'{0}': ['{verb}']}}, never a wildcard — and its \
+                     callable_by must accept you",
+                    operand.id
+                ),
+                "side": "egress",
+            }));
+        }
+        let in_sender = foreign.unwrap_or_else(|| sender_id.0.clone());
+        let (t_call, t_parent, t_kids) = grant_facts(Some(operand.as_ref()), "callable_by");
+        let di = crate::authz::authorize_call(
+            &t_call,
+            verb,
+            &in_sender,
+            operand.id.as_str(),
+            t_parent.as_deref(),
+            &t_kids,
+            loader_id,
+            false,
+            Some(&|o: &str, x: &str| self.in_subtree(o, x)),
+        );
+        if !di.allowed {
+            return Some(json!({
+                "error": format!(
+                    "{} does not accept {} from {in_sender}",
+                    operand.id,
+                    fantastic_bundle::py_repr(verb)
+                ),
+                "reason": "unauthorized", "hint": crate::authz::FROM_ABOVE, "side": "ingress",
             }));
         }
         None
@@ -280,6 +363,40 @@ impl Kernel {
             // itself answers `unknown_agent`.
         }
 
+        // THE RECORD IS THE OPERAND — the same rule for `update_agent` /
+        // `delete_agent`. Gating the root made one grant
+        // (`<root>:[update_agent, delete_agent]`, the builder wiring) a key to
+        // every record — rewrite a credential store's refs, open a sealed leg,
+        // clear a delete_lock and delete — while an agent could not edit its OWN
+        // child without that tree-wide grant (audit 2026-10-03, AV-1). The id is
+        // a LITERAL agent id (`kernel` is no alias here), as python's
+        // `ctx.agents.get(oid)`.
+        if crate::authz::RECORD_OPERAND_VERBS.contains(&verb) && target.parent_id.is_none() {
+            let operand = payload
+                .get("id")
+                .and_then(Value::as_str)
+                .and_then(|oid| self.agents.get(&AgentId::from(oid)).map(|e| Arc::clone(&e)));
+            if let Some(operand) = operand {
+                if let Some(denial) =
+                    self.gate_operand(sender_id, verb, &s_can, loader_id.as_deref(), &operand)
+                {
+                    return Some(denial);
+                }
+                if verb == "update_agent" {
+                    return self.check_conferral(
+                        sender_id,
+                        &s_can,
+                        s_parent.as_deref(),
+                        &s_kids,
+                        loader_id.as_deref(),
+                        payload,
+                    );
+                }
+                return None;
+            }
+            // No such record: the ordinary path; the verb answers `unknown_agent`.
+        }
+
         // Egress — may the SENDER call the target?
         let d = crate::authz::authorize_call(
             &s_can,
@@ -309,8 +426,18 @@ impl Kernel {
         // the operator edit the ROOT's record for every agent that wants to
         // read the task table. Consequence accepted: an agent granted
         // `<root>:[ps,cancel]` can kill ANY task; the per-victim edge a
-        // manifest could grant before is GONE.
-        if is_kernel_verb(verb) && target.parent_id.is_none() {
+        // manifest could grant before is GONE. The tree mutators are the
+        // exception: whenever their operand names an agent they were judged ON
+        // THAT AGENT above (`gate_placement` / `gate_operand`); only an unknown
+        // operand gets here.
+        //
+        // A FOREIGN caller a bridge leg relays is the exception to the exception:
+        // the leg's `can_call` is the leg's reach, not its peer's, so the root's
+        // `callable_by` must ALSO accept the caller as `<guid>|<agent>` or
+        // `<guid>|*` — it takes the ingress check below (audit 2026-10-03, AV-3).
+        // Local callers are unchanged.
+        let foreign = crate::send::relayed_caller(sender_id);
+        if is_kernel_verb(verb) && target.parent_id.is_none() && foreign.is_none() {
             // ...but CONFERRAL still applies. `update_agent` is a kernel verb
             // whose target is ALWAYS the root, so returning flat here made
             // `check_conferral` unreachable for the exact case it guards: any
@@ -338,7 +465,6 @@ impl Kernel {
         // A bridge leg relaying a FOREIGN caller is judged by that caller's
         // qualified `<guid>|<agent>`, never by the leg: the target names who on the
         // other kernel it accepts, and the baseline tokens never match a foreign id.
-        let foreign = crate::send::relayed_caller(sender_id);
         let in_sender = foreign.clone().unwrap_or_else(|| sender_id.0.clone());
         let (t_call, t_parent, t_kids) = grant_facts(Some(target.as_ref()), "callable_by");
         let di = crate::authz::authorize_call(

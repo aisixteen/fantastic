@@ -1,6 +1,6 @@
 // THE SECRET SURFACE a ts bundle and a ts view hold (owner-approved, 2026-10-02):
 //
-//   (a) `kernel.currentSecret` — a handler reads the paths its caller marked on the
+//   (a) `kernel.currentSecret` — a handler reads the marks its caller put on the
 //       item that started its dispatch (python `kernel.current_secret()`), so a ts
 //       bundle can refuse an unmarked call. Stamped per dispatch view, like
 //       `currentCaller`: a handler's own sends never inherit it.
@@ -23,6 +23,7 @@ import type { Json, Payload } from "../src/kernel/json.ts";
 import type { Item, Outcome } from "../src/kernel/outcome.ts";
 import { BAD_ARG, refusal } from "../src/kernel/refusal.ts";
 import { PLACEHOLDER } from "../src/kernel/secret.ts";
+import type { Mark } from "../src/kernel/secret.ts";
 
 const ROOT = "kernel_state";
 const KEY = "sk-surface-0123456789abcdef";
@@ -30,7 +31,7 @@ const KEY = "sk-surface-0123456789abcdef";
 // ─── a bundle that reports the marks it was called with ─────────────────────
 
 /** What each dispatch read as `currentSecret`, in order: `[agent, verb, marks]`. */
-const seen: [string, string, readonly string[]][] = [];
+const seen: [string, string, readonly Mark[]][] = [];
 
 async function probe(id: string, payload: Payload, k: Kernel): Promise<Json> {
   const verb = String(payload["type"]);
@@ -257,7 +258,8 @@ test("Host.call: the marks become the item's — masked here, on the frame for a
 test("callHost / callBinary (Host and Kernel): the marks ride the frame; a bad mark is refused before a byte leaves", async () => {
   const { k, bridge, sock } = wired();
   const host = new Host(k, "outer");
-  const lit = host.callHost("kernel", { type: "create_agent", token: KEY }, ["payload.token"]);
+  // (not `create_agent`: a mark on its fields is refused — a record field cannot be secret)
+  const lit = host.callHost("kernel", { type: "set", token: KEY }, ["payload.token"]);
   const f1 = await answer(sock, 1, { id: "x" });
   assert.deepEqual(await lit, { id: "x" });
   assert.equal(f1["target"], "kernel", "callHost forwards the LITERAL target");
@@ -305,5 +307,47 @@ test("an agent's host-bound call: a bad mark is refused before its egress gate, 
   assert.deepEqual(await p, { ok: true });
   assert.deepEqual(f["secret"], ["payload.key"]);
   assert.equal(f["caller"], "g1|outer");
+  bridge.close();
+});
+
+// ─── array-of-steps marks on the frame, both ways (owner, 2026-10-03) ────────
+
+test("array marks ride a host-bound frame as given and come in from a host's frame as given", async () => {
+  // python exec_bridge `test_the_connector_puts_secret_on_the_frame_only_when_given`
+  // (arrays as given) and `test_the_relay_puts_the_frames_secret_on_the_dispatched_item`
+  // (a literal "a.b" masked), on this kernel's own wire.
+  const { k, bridge, sock } = wired();
+  const host = new Host(k, "outer");
+  // outbound: Host.call to a host target, arrays and strings side by side
+  const marks: Mark[] = [["payload", "a.b"], "result", ["result", "items", 0]];
+  const p = host.call("creds", { type: "y", "a.b": "v" }, marks);
+  const f1 = await answer(sock, 1, { items: ["t"] });
+  assert.deepEqual(await p, { items: ["t"] });
+  assert.deepEqual(f1["secret"], marks);
+  assert.deepEqual(f1["payload"], { type: "y", "a.b": "v" });
+  // callHost validates an array mark like a batch item's, then carries it
+  const lit = k.callHost("kernel", { type: "set", "a.b": KEY }, [["payload", "a.b"]]);
+  const f2 = await answer(sock, 2, { ok: true });
+  await lit;
+  assert.deepEqual(f2["secret"], [["payload", "a.b"]]);
+  assert.deepEqual(await k.callHost("kernel", { type: "set", "a.b": KEY }, [["payload", "a", "b"]]), {
+    error: "send: secret path ['payload', 'a', 'b'] names nothing in the payload",
+    reason: "bad_arg",
+    arg: "secret",
+  });
+  assert.equal(sock().calls().length, 2, "the refused call reached no wire");
+  // inbound: a host's call frame carries an array mark — the handler reads it as
+  // given, this kernel's record masks the literal key "a.b"
+  k.updateMeta("inner", { callable_by: { "h0|*": "*" } });
+  sock().deliver({
+    type: "call", id: "c1", target: "inner", caller: "h0|ai",
+    payload: { type: "peek", "a.b": "hush-dotted-0452" }, secret: [["payload", "a.b"]],
+  });
+  await until(() => sock().replyTo("c1") !== undefined);
+  assert.deepEqual(sock().replyTo("c1")!["data"], { marks: [["payload", "a.b"]] });
+  const rows = [...k.store.rows.values()].filter((r) => r["kind"] === "call" && JSON.stringify(r["secret"]) === '[["payload","a.b"]]');
+  assert.equal(rows.length, 1, JSON.stringify(rows));
+  assert.equal((rows[0]!["payload"] as Payload)["a.b"], PLACEHOLDER);
+  assert.ok(!JSON.stringify([...k.store.rows.values()]).includes("hush-dotted-0452"));
   bridge.close();
 });

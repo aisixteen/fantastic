@@ -108,7 +108,7 @@ async fn the_endpoints_count_calibrates_the_estimate() {
         &kernel,
         "cli",
         "mock",
-        crate::context::DEFAULT_CONTEXT_WINDOW,
+        crate::constants::DEFAULT_CONTEXT_WINDOW,
         msgs.clone(),
         1,
     )
@@ -126,7 +126,7 @@ async fn the_endpoints_count_calibrates_the_estimate() {
         &kernel,
         "cli",
         "mock",
-        crate::context::DEFAULT_CONTEXT_WINDOW,
+        crate::constants::DEFAULT_CONTEXT_WINDOW,
         msgs.clone(),
         1,
     )

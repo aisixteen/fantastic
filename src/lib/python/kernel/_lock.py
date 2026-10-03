@@ -1,21 +1,36 @@
-"""Per-project-dir PID lock — `.fantastic/lock.yaml`.
+"""Per-project-dir lock — `.fantastic/lock.yaml`.
 
-The lock is **PID-only**: one fantastic process per project dir at a
-time, enforced by checking whether the recorded pid is still alive.
-Nothing else lives in the lock file.
+One fantastic process per project dir at a time. The decision is an `flock`
+on `lock.yaml`, held on an open descriptor for the life of the process: the OS
+grants it to exactly one opener, and drops it the moment its holder exits —
+however it exits — so a dead holder's lock is simply taken over. Python, rust
+and swift take the SAME flock on the SAME file, so kernels of different
+runtimes exclude each other too.
 
-Lock file contents: `{pid: int}` as a YAML mapping (`pid: 123`). That's it. Endpoint discovery (port
-for HTTP/WS) is a separate concern belonging to whichever bundle
-publishes a transport — not the substrate.
+Lock file contents: `{pid: int}` as a YAML mapping (`pid: 123`) — the holder's
+pid, for the human-readable refusal, never for the decision. The one-shot CLI
+paths (`call`, `init`) take this same flock — they never judge a pid alive. It is in the file
+BEFORE the file is `lock.yaml`: the pid goes into a private
+`lock.yaml.tmp.<hex>`, which is flocked and then hard-linked to `lock.yaml`
+(atomic, refused when the name exists), so no opener ever reads a lock without
+its pid. A `lock.yaml` nobody holds (its holder died) is replaced by renaming
+the staged file over it while holding the dead file's flock — a second taker
+of the same dead file finds it held. Endpoint discovery (port for HTTP/WS) is
+a separate concern belonging to whichever bundle publishes a transport — not
+the substrate.
 
-Use the `FantasticLock` context manager rather than calling
-`acquire_lock` / `release_lock` directly — it pairs them safely.
+Use the `FantasticLock` context manager rather than calling `acquire_lock` /
+`release_lock` directly — it pairs them safely. The one exception is the
+one-shot CLI (`modes/dispatch.py`): it calls `acquire_lock` itself, to word its
+own refusal from `LockHeld`, and releases in a `finally`.
 """
 
 from __future__ import annotations
 
 import atexit
+import fcntl
 import os
+import secrets
 from pathlib import Path
 
 import yaml
@@ -23,68 +38,128 @@ import yaml
 FANTASTIC_DIR = Path(".fantastic")
 LOCK_FILE = FANTASTIC_DIR / "lock.yaml"
 
+# The descriptor whose flock IS this process's lock; open while it is held.
+_held: int | None = None
 
-def _pid_alive(pid: int) -> bool:
-    if pid <= 0:
-        return False
+
+class LockHeld(RuntimeError):
+    """A live process holds the flock. `pid` is the one its file names — for the
+    refusal text (the daemon's own, or a one-shot's `[call]`/`[init]` line)."""
+
+    def __init__(self, pid: int) -> None:
+        super().__init__(
+            f"another fantastic owns this dir: pid={pid}\n"
+            f"  -> kill it:  kill {pid}\n"
+            f"  -> or, if stale, remove the lock:  rm {LOCK_FILE}"
+        )
+        self.pid = pid
+
+
+def _parse_lock(raw: str | bytes) -> dict | None:
     try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        # EPERM means the process EXISTS and belongs to someone else. Treating it
-        # as dead let a second kernel overwrite a live lock and run two daemons
-        # in one workdir (measured 2026-09-02).
-        return True
-    except OSError:
-        return False
+        doc = yaml.load(raw, Loader=yaml.CSafeLoader)
+    except yaml.YAMLError:
+        return None
+    return doc if isinstance(doc, dict) else None
 
 
 def _read_lock() -> dict | None:
     if not LOCK_FILE.exists():
         return None
     try:
-        doc = yaml.load(LOCK_FILE.read_text(), Loader=yaml.CSafeLoader)
-    except (yaml.YAMLError, OSError):
+        return _parse_lock(LOCK_FILE.read_text())
+    except OSError:
         return None
-    return doc if isinstance(doc, dict) else None
 
 
 def acquire_lock() -> None:
-    """Acquire the PID lock for `.fantastic/`. Refuses if another
-    live pid owns it. Stale locks (dead pid) are silently overwritten.
+    """Take the flock on `.fantastic/lock.yaml` for the life of this process.
+    Raises `LockHeld` if a live process holds it; a lock whose holder died is
+    taken over.
     atexit-registers release so abnormal exits still clean up."""
-    cur = _read_lock()
-    if cur:
-        cur_pid = cur.get("pid")
-        if isinstance(cur_pid, int) and _pid_alive(cur_pid):
-            raise RuntimeError(
-                f"another fantastic owns this dir: pid={cur_pid}\n"
-                f"  -> kill it:  kill {cur_pid}\n"
-                f"  -> or, if stale, remove the lock:  rm {LOCK_FILE}"
-            )
+    global _held
     FANTASTIC_DIR.mkdir(parents=True, exist_ok=True)
-    LOCK_FILE.write_text(
-        yaml.dump({"pid": os.getpid()}, Dumper=yaml.CSafeDumper, sort_keys=False)
-    )
+    staged = LOCK_FILE.with_name(f"{LOCK_FILE.name}.tmp.{secrets.token_hex(4)}")
+    fd = os.open(staged, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o644)
+    try:
+        os.write(
+            fd,
+            yaml.dump(
+                {"pid": os.getpid()}, Dumper=yaml.CSafeDumper, sort_keys=False
+            ).encode(),
+        )
+        fcntl.flock(fd, fcntl.LOCK_EX)  # uncontended: the staged file is ours alone
+        while not _publish(staged):
+            pass
+    except BaseException:
+        os.close(fd)
+        staged.unlink(missing_ok=True)
+        raise
+    staged.unlink(missing_ok=True)
+    _held = fd
     atexit.register(release_lock)
 
 
+def _publish(staged: Path) -> bool:
+    """One attempt to make the staged (flocked, pid-filled) file `lock.yaml`.
+    True once it is; False when `lock.yaml` changed under us (try again); raises
+    when a live process holds it."""
+    try:
+        os.link(staged, LOCK_FILE)
+        return True
+    except FileExistsError:
+        pass
+    try:
+        cur = os.open(LOCK_FILE, os.O_RDONLY)
+    except FileNotFoundError:
+        return False  # its holder released it between the two calls
+    try:
+        try:
+            fcntl.flock(cur, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            # Held: a live owner — or a taker still replacing a dead lock, whose
+            # file (and dead pid) this racer then reads. Either way, refused.
+            doc = _parse_lock(os.read(cur, 4096))
+            pid = doc.get("pid") if doc else None
+            if not isinstance(pid, int):
+                raise RuntimeError(
+                    f"lock file at {LOCK_FILE}: lock.yaml malformed"
+                ) from None
+            raise LockHeld(pid) from None
+        # Nobody holds it: its holder died. Replace it — but only while it is
+        # still the file `lock.yaml` names (another taker may have replaced it).
+        try:
+            same = os.path.samestat(os.fstat(cur), os.stat(LOCK_FILE))
+        except FileNotFoundError:
+            return False
+        if not same:
+            return False
+        os.rename(staged, LOCK_FILE)
+        return True
+    finally:
+        os.close(cur)
+
+
 def release_lock() -> None:
-    """Remove the lock file if this pid owns it. No-op otherwise."""
+    """Drop the lock if this process holds it: remove the file while it still
+    names this pid, then close the descriptor (which releases the flock).
+    No-op otherwise."""
+    global _held
+    if _held is None:
+        return
     cur = _read_lock()
     if cur and cur.get("pid") == os.getpid():
         try:
             LOCK_FILE.unlink()
         except OSError:
             pass
+    os.close(_held)
+    _held = None
 
 
 class FantasticLock:
-    """Context manager for the PID lock. PID-only — no port, no
-    discovery. Raises `RuntimeError` on `__enter__` if another live
-    pid owns the dir."""
+    """Context manager for the lock. No port, no discovery. Raises
+    `RuntimeError` on `__enter__` if another live process holds the dir."""
 
     def __enter__(self) -> "FantasticLock":
         acquire_lock()

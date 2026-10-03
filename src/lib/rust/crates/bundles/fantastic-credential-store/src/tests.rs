@@ -116,24 +116,50 @@ fn store_meta(k: &Kernel, key: &str) -> Value {
         .unwrap_or(Value::Null)
 }
 
-/// python `_seed`: the operator stores `openai/main`, then names alice its reader
-/// and bob its writer.
+/// The kernel's own answer to an operator call.
+async fn op(k: &Arc<Kernel>, payload: Value) -> Value {
+    k.send(vec![Item::new(AgentId::from("kernel"), payload)])
+        .await
+        .remove(0)
+        .result
+}
+
+/// python `_declare`: declare refs the ONE way there is — the operator's
+/// `update_agent` on the store's `refs`. It replaces the map, so the refs already
+/// there ride along.
+async fn declare(k: &Arc<Kernel>, refs: Value) {
+    let mut all = store_meta(k, "refs")
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    for (r, e) in refs.as_object().cloned().unwrap_or_default() {
+        all.insert(r, e);
+    }
+    let out = op(
+        k,
+        json!({"type": "update_agent", "id": "creds", "refs": Value::Object(all)}),
+    )
+    .await;
+    assert_eq!(out["updated"], json!(true), "{out}");
+}
+
+/// python `_seed`: the operator declares `openai/main` — alice its reader, bob its
+/// writer — then stores its value.
 async fn seed(k: &Arc<Kernel>) -> Outcome {
+    declare(
+        k,
+        json!({"openai/main": {"host": "api.openai.com", "readers": ["alice"],
+                               "writers": ["bob"]}}),
+    )
+    .await;
     let out = call(
         k,
-        json!({"type": "set", "ref": "openai/main", "host": "https://api.openai.com/v1",
-               "fields": {"api_key": KEY}}),
+        json!({"type": "set", "ref": "openai/main", "fields": {"api_key": KEY}}),
         None,
         MARK_SET,
     )
     .await;
     assert_eq!(out.status.as_str(), "completed", "{}", out.result);
-    let mut refs = store_meta(k, "refs");
-    refs["openai/main"]["readers"] = json!(["alice"]);
-    refs["openai/main"]["writers"] = json!(["bob"]);
-    let mut patch = Map::new();
-    patch.insert("refs".into(), refs);
-    k.update(&AgentId::from("creds"), patch);
     out
 }
 
@@ -156,19 +182,25 @@ async fn set_stores_the_value_0600_and_the_record_keeps_only_metadata() {
     assert_eq!(rec["refs"]["openai/main"]["fields"], json!(["api_key"]));
 }
 
-/// THE FILE IS PYTHON'S, BYTE FOR BYTE — `yaml.safe_dump({"refs": refs},
-/// sort_keys=True, default_flow_style=False)` (measured with the python
-/// kernel, 2026-10-01), so either runtime reads the other's.
+/// THE FILE IS PYTHON'S, BYTE FOR BYTE — the kernel's YAML emitter over every
+/// map's keys sorted, each ref's entry `{fields, host}` (the host stored WITH the
+/// value, audit S3; measured with the python kernel, 2026-10-03), so either
+/// runtime reads the other's.
 #[tokio::test]
 async fn the_file_is_pythons_bytes() {
     let f = mk(json!({})).await;
+    declare(
+        &f.k,
+        json!({"openai/main": {"host": "h.example"}, "b": {"host": "h.example"}}),
+    )
+    .await;
     for (r, fields) in [
         ("openai/main", json!({"api_key": KEY})),
         ("b", json!({"token": "x y", "api_key": "k-2"})),
     ] {
         let out = call(
             &f.k,
-            json!({"type": "set", "ref": r, "host": "h.example", "fields": fields}),
+            json!({"type": "set", "ref": r, "fields": fields}),
             None,
             MARK_SET,
         )
@@ -177,13 +209,15 @@ async fn the_file_is_pythons_bytes() {
     }
     assert_eq!(
         std::fs::read_to_string(f.file()).unwrap(),
-        "refs:\n  b:\n    api_key: k-2\n    token: x y\n  openai/main:\n    api_key: \
-         sk-live-0123456789abcdef\n"
+        "refs:\n  b:\n    fields:\n      api_key: k-2\n      token: x y\n    host: \
+         h.example\n  openai/main:\n    fields:\n      api_key: sk-live-0123456789abcdef\n    \
+         host: h.example\n"
     );
     // and a python-written file reads back
     std::fs::write(
         f.file(),
-        "refs:\n  openai/main:\n    api_key: sk-from-python\n",
+        "refs:\n  openai/main:\n    fields:\n      api_key: sk-from-python\n    host: \
+         h.example\n",
     )
     .unwrap();
     std::fs::set_permissions(f.file(), std::fs::Permissions::from_mode(0o600)).unwrap();
@@ -202,7 +236,7 @@ async fn values_move_only_with_a_secret_mark() {
     let f = mk(json!({})).await;
     let unmarked = call(
         &f.k,
-        json!({"type": "set", "ref": "r", "host": "h", "fields": {"api_key": KEY}}),
+        json!({"type": "set", "ref": "r", "fields": {"api_key": KEY}}),
         None,
         None,
     )
@@ -272,6 +306,85 @@ async fn values_move_only_with_a_secret_mark() {
     );
 }
 
+/// python `_call(k, payload, secret=[…])` as the operator — any marks, either
+/// spelling.
+async fn call_marked(k: &Arc<Kernel>, payload: Value, secret: Value) -> Outcome {
+    k.send(vec![
+        Item::new(AgentId::from("creds"), payload).with_secret(secret)
+    ])
+    .await
+    .remove(0)
+}
+
+/// A mark may be a dotted string or an array of steps (`fantastic_kernel::secret`):
+/// the store accepts either, alone or mixed. A field name holding a dot is named
+/// only by an array — `result.fields.x.y` is `x` → `y`, which would not mask it.
+#[tokio::test]
+async fn either_spelling_of_a_mark_counts() {
+    let f = mk(json!({})).await;
+    declare(&f.k, json!({"r1": {"host": "h"}, "r2": {"host": "h"}})).await;
+    let put = call_marked(
+        &f.k,
+        json!({"type": "set", "ref": "r1", "fields": {"api_key": KEY}}),
+        json!([["payload", "fields"]]),
+    )
+    .await;
+    assert_eq!(put.status.as_str(), "completed", "{}", put.result);
+    let put = call_marked(
+        &f.k,
+        json!({"type": "set", "ref": "r2", "fields": {"api_key": KEY, "x.y": KEY2}}),
+        json!(["payload.fields.api_key", ["payload", "fields", "x.y"]]),
+    )
+    .await;
+    assert_eq!(put.status.as_str(), "completed", "{}", put.result);
+    let got = call_marked(
+        &f.k,
+        json!({"type": "get", "ref": "r1"}),
+        json!([["result"]]),
+    )
+    .await;
+    assert_eq!(
+        got.result["fields"],
+        json!({"api_key": KEY}),
+        "{}",
+        got.result
+    );
+    let got = call_marked(
+        &f.k,
+        json!({"type": "get", "ref": "r2"}),
+        json!([["result", "fields", "api_key"], ["result", "fields", "x.y"]]),
+    )
+    .await;
+    assert_eq!(
+        got.result["fields"],
+        json!({"api_key": KEY, "x.y": KEY2}),
+        "{}",
+        got.result
+    );
+    // the dotted spelling of the dotted field name names `x` → `y`: refused
+    let bare = call_marked(
+        &f.k,
+        json!({"type": "get", "ref": "r2"}),
+        json!(["result.fields.api_key", "result.fields.x.y"]),
+    )
+    .await;
+    assert_eq!(
+        (&bare.result["reason"], &bare.result["arg"]),
+        (&json!("bad_arg"), &json!("secret")),
+        "{}",
+        bare.result
+    );
+    let ledger =
+        f.k.send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type": "ledger"}),
+        )])
+        .await
+        .remove(0);
+    let text = ledger.result.to_string();
+    assert!(!text.contains(KEY) && !text.contains(KEY2), "{text}");
+}
+
 #[tokio::test]
 async fn readers_read_writers_rotate_strangers_see_nothing() {
     let f = mk(json!({})).await;
@@ -288,8 +401,7 @@ async fn readers_read_writers_rotate_strangers_see_nothing() {
     // a reader may not write — told so, since it knows the ref
     let w = call(
         &f.k,
-        json!({"type": "set", "ref": "openai/main", "host": "api.openai.com",
-               "fields": {"api_key": KEY2}}),
+        json!({"type": "set", "ref": "openai/main", "fields": {"api_key": KEY2}}),
         Some("alice"),
         MARK_SET,
     )
@@ -302,8 +414,7 @@ async fn readers_read_writers_rotate_strangers_see_nothing() {
     // a writer rotates; the reader's next read gets the new value
     let r = call(
         &f.k,
-        json!({"type": "set", "ref": "openai/main", "host": "api.openai.com",
-               "fields": {"api_key": KEY2}}),
+        json!({"type": "set", "ref": "openai/main", "fields": {"api_key": KEY2}}),
         Some("bob"),
         MARK_SET,
     )
@@ -355,32 +466,56 @@ async fn readers_read_writers_rotate_strangers_see_nothing() {
     );
 }
 
+/// A ref is declared ONLY by `update_agent` on the store's `refs`. `set` on an
+/// undeclared ref answers "no such ref" — to an agent AND to the operator — and
+/// stores nothing; once declared, its writer stores and its reader reads.
 #[tokio::test]
-async fn a_creator_owns_the_ref_it_makes_others_cannot_make_one() {
-    let f = mk(json!({"creators": ["maker"]})).await;
-    let made = call(
+async fn set_never_creates_a_ref_update_agent_declares_it() {
+    let f = mk(json!({})).await;
+    let put = json!({"type": "set", "ref": "mine", "fields": {"token": KEY}});
+    for who in [None, Some("maker")] {
+        let nope = call(&f.k, put.clone(), who, MARK_SET).await;
+        assert_eq!(
+            nope.result,
+            json!({"error": "credential_store: no such ref 'mine'", "reason": "not_found",
+                   "arg": "ref"}),
+            "{who:?}"
+        );
+    }
+    assert!(store_meta(&f.k, "refs").get("mine").is_none());
+    assert!(!f.file().exists(), "an undeclared set stores nothing");
+    declare(
         &f.k,
-        json!({"type": "set", "ref": "mine", "host": "x.example", "fields": {"token": KEY}}),
-        Some("maker"),
-        MARK_SET,
+        json!({"mine": {"host": "x.example", "readers": ["maker"], "writers": ["maker"]}}),
     )
     .await;
+    let made = call(&f.k, put.clone(), Some("maker"), MARK_SET).await;
     assert_eq!(made.result["stored"], json!(true), "{}", made.result);
+    let got = call(
+        &f.k,
+        json!({"type": "get", "ref": "mine"}),
+        Some("maker"),
+        MARK_GET,
+    )
+    .await;
+    assert_eq!(
+        got.result["fields"],
+        json!({"token": KEY}),
+        "{}",
+        got.result
+    );
+    // the grants the declaration named are the grants it keeps
     let entry = &store_meta(&f.k, "refs")["mine"];
     assert_eq!(entry["readers"], json!(["maker"]));
     assert_eq!(entry["writers"], json!(["maker"]));
-    // the record's key order: the grants, then host and the field NAMES
+    // the record's key order: the declaration's, then the field NAMES
     assert_eq!(
         entry.as_object().unwrap().keys().collect::<Vec<_>>(),
-        ["readers", "writers", "host", "fields"]
+        ["host", "readers", "writers", "fields"]
     );
-    let nope = call(
-        &f.k,
-        json!({"type": "set", "ref": "theirs", "host": "x.example", "fields": {"token": KEY}}),
-        Some("eve"),
-        MARK_SET,
-    )
-    .await;
+    let mut theirs = put;
+    theirs["ref"] = json!("theirs");
+    let nope = call(&f.k, theirs, Some("eve"), MARK_SET).await;
     assert_eq!(nope.result["reason"], json!("not_found"), "{}", nope.result);
 }
 
@@ -431,10 +566,15 @@ async fn a_subtree_grant_covers_descendants() {
     assert_eq!(e.result["reason"], json!("not_found"));
 }
 
+/// AV-5 (audit 2026-10-03): `forget` drops the VALUE — from the backend, with
+/// its field names — and nothing else. The declaration (host, readers, writers)
+/// is the operator's, written and removed by `update_agent` alone, so a writer can
+/// no longer undeclare a ref nobody could then set again.
 #[tokio::test]
-async fn forget_drops_the_value_and_the_grants() {
+async fn forget_drops_the_value_and_keeps_the_declaration() {
     let f = mk(json!({})).await;
     seed(&f.k).await;
+    let declared = store_meta(&f.k, "refs")["openai/main"].clone();
     // a reader is no writer: the ref does not exist for it here
     let a = call(
         &f.k,
@@ -452,8 +592,163 @@ async fn forget_drops_the_value_and_the_grants() {
     )
     .await;
     assert_eq!(out.result, json!({"forgotten": true, "ref": "openai/main"}));
-    assert!(store_meta(&f.k, "refs").get("openai/main").is_none());
     assert!(!std::fs::read_to_string(f.file()).unwrap().contains(KEY));
+    assert_eq!(
+        store_meta(&f.k, "refs")["openai/main"],
+        json!({"host": declared["host"], "readers": declared["readers"],
+               "writers": declared["writers"]})
+    );
+    // a reader now finds the ref declared and empty
+    let empty = call(
+        &f.k,
+        json!({"type": "get", "ref": "openai/main"}),
+        Some("alice"),
+        MARK_GET,
+    )
+    .await;
+    assert_eq!(
+        empty.result,
+        json!({"error": "credential_store: ref 'openai/main' has no value in the backend",
+               "reason": "not_found", "arg": "ref"})
+    );
+    // its writer sets it again, and the reader reads the new value
+    let back = call(
+        &f.k,
+        json!({"type": "set", "ref": "openai/main", "fields": {"api_key": KEY2}}),
+        Some("bob"),
+        MARK_SET,
+    )
+    .await;
+    assert_eq!(back.result["stored"], json!(true), "{}", back.result);
+    let got = call(
+        &f.k,
+        json!({"type": "get", "ref": "openai/main"}),
+        Some("alice"),
+        MARK_GET,
+    )
+    .await;
+    assert_eq!(
+        got.result["fields"],
+        json!({"api_key": KEY2}),
+        "{}",
+        got.result
+    );
+    // a stranger still sees no ref; undeclaring is update_agent's alone
+    let nope = call(
+        &f.k,
+        json!({"type": "forget", "ref": "openai/main"}),
+        Some("eve"),
+        None,
+    )
+    .await;
+    assert_eq!(nope.result["reason"], json!("not_found"), "{}", nope.result);
+}
+
+/// AV-4 (audit 2026-10-03): a ref's host is its DECLARATION — written by
+/// `update_agent` on the store's `refs`, the one path. `set` stores the value of
+/// a declared ref and takes no host: a writer naming one is refused, loud, with
+/// nothing stored and the declared host untouched, so a writer can never rebind a
+/// ref (and deny every reader at the real host).
+#[tokio::test]
+async fn set_takes_no_host_the_declaration_is_the_binding() {
+    let f = mk(json!({})).await;
+    seed(&f.k).await;
+    let rebind = call(
+        &f.k,
+        json!({"type": "set", "ref": "openai/main", "host": "attacker.example",
+               "fields": {"api_key": KEY2}}),
+        Some("bob"),
+        MARK_SET,
+    )
+    .await;
+    assert_eq!(
+        rebind.result,
+        json!({"error": "credential_store set: takes no host — a ref's host is its \
+                         declaration, written by update_agent on this store's refs",
+               "reason": "bad_arg", "arg": "host"})
+    );
+    assert_eq!(
+        store_meta(&f.k, "refs")["openai/main"]["host"],
+        json!("api.openai.com")
+    );
+    assert!(
+        !std::fs::read_to_string(f.file()).unwrap().contains(KEY2),
+        "nothing stored"
+    );
+    // the operator too: the host moves only with the declaration
+    let op_set = call(
+        &f.k,
+        json!({"type": "set", "ref": "openai/main", "host": "api.openai.com",
+               "fields": {"api_key": KEY2}}),
+        None,
+        MARK_SET,
+    )
+    .await;
+    assert_eq!(op_set.result["arg"], json!("host"), "{}", op_set.result);
+    // a set with no host stores the value under the declared host
+    let ok = call(
+        &f.k,
+        json!({"type": "set", "ref": "openai/main", "fields": {"api_key": KEY2}}),
+        Some("bob"),
+        MARK_SET,
+    )
+    .await;
+    assert_eq!(
+        ok.result,
+        json!({"ref": "openai/main", "host": "api.openai.com", "fields": ["api_key"],
+               "stored": true})
+    );
+    let got = call(
+        &f.k,
+        json!({"type": "get", "ref": "openai/main", "host": "https://api.openai.com/v1"}),
+        Some("alice"),
+        MARK_GET,
+    )
+    .await;
+    assert_eq!(
+        got.result["fields"],
+        json!({"api_key": KEY2}),
+        "{}",
+        got.result
+    );
+}
+
+/// The host is the binding, so a declaration without one is refused at the
+/// write: a value stored under it could be sent nowhere — or anywhere.
+#[tokio::test]
+async fn a_ref_is_declared_with_its_host() {
+    let f = mk(json!({})).await;
+    let r = op(
+        &f.k,
+        json!({"type": "update_agent", "id": "creds",
+               "refs": {"nohost": {"readers": ["alice"]}}}),
+    )
+    .await;
+    assert_eq!(
+        r,
+        json!({"error": "refs['nohost'].host is required — the one host this ref's value \
+                         may be sent to",
+               "reason": "invalid_meta", "id": "creds"})
+    );
+}
+
+/// The env backend is read-only: its value is the variable, so `forget` — which
+/// drops only a value — has nothing it may drop, and says so.
+#[tokio::test]
+async fn forget_on_the_env_backend_is_refused() {
+    let f = mk(json!({
+        "backend": "env",
+        "refs": {"ci/key": {"host": "api.example", "env": {"api_key": "CI_TEST_KEY"}}},
+    }))
+    .await;
+    let out = call(&f.k, json!({"type": "forget", "ref": "ci/key"}), None, None).await;
+    assert_eq!(
+        out.result,
+        json!({"error": "credential_store forget: the env backend is read-only — unset the \
+                         environment variable its ref names",
+               "reason": "bad_arg", "arg": "backend"})
+    );
+    assert!(store_meta(&f.k, "refs").get("ci/key").is_some());
 }
 
 #[tokio::test]
@@ -499,9 +794,19 @@ async fn a_file_others_can_read_is_refused_loud() {
         .contains("must be a regular file"));
 }
 
-/// A RELATIVE `file` lives under the kernel's running dir, clamped there.
+fn relative(p: &str) -> String {
+    format!(
+        "file={} must be an absolute path (starting with / or ~) — a relative path is refused",
+        py_repr(p)
+    )
+}
+
+/// `file` is `/…` or `~…` — never relative to the kernel's running dir. A
+/// relative one is refused AT THE WRITE (create and update alike), and a record
+/// that carries one past the write (an in-process register) is refused at use,
+/// loud, with nothing read or written.
 #[tokio::test]
-async fn a_relative_file_is_clamped_under_the_running_dir() {
+async fn the_file_is_an_absolute_path_a_relative_one_is_refused() {
     let tmp = tempfile::TempDir::new().unwrap();
     let mut reg = BundleRegistry::new();
     register_root_loader(&mut reg);
@@ -510,75 +815,130 @@ async fn a_relative_file_is_clamped_under_the_running_dir() {
         .expect("boot")
         .kernel;
     let root = k.root().unwrap().id.clone();
-    for (id, file) in [("inside", "sub/creds.yaml"), ("outside", "../creds.yaml")] {
-        let r = k
-            .send(vec![Item::new(
-                AgentId::from("kernel"),
-                json!({"type": "create_agent", "parent_id": root.0, "id": id,
-                       "handler_module": HANDLER_MODULE, "file": file}),
-            )])
-            .await
-            .remove(0)
-            .result;
-        assert_eq!(r["id"], json!(id), "{r}");
-    }
-    let set = |id: &str| {
-        Item::new(
-            AgentId::from(id),
-            json!({"type": "set", "ref": "r", "host": "h", "fields": {"k": "v"}}),
+    for rel in ["creds.yaml", "sub/creds.yaml", "./creds.yaml"] {
+        let r = op(
+            &k,
+            json!({"type": "create_agent", "parent_id": root.0, "id": "rel",
+                   "handler_module": HANDLER_MODULE, "file": rel}),
         )
-        .with_secret(json!(["payload.fields"]))
-    };
-    let ok = k.send(vec![set("inside")]).await.remove(0);
-    assert_eq!(ok.result["stored"], json!(true), "{}", ok.result);
-    assert!(tmp.path().join("sub/creds.yaml").is_file());
-    let refused = k.send(vec![set("outside")]).await.remove(0);
-    assert_eq!(refused.status.as_str(), "failed");
+        .await;
+        assert_eq!(
+            r,
+            json!({"error": relative(rel), "reason": "invalid_meta"}),
+            "{rel}"
+        );
+        assert!(!k.agents.contains_key(&AgentId::from("rel")));
+    }
+    let abs = tmp.path().join("creds.yaml").to_string_lossy().to_string();
+    let made = op(
+        &k,
+        json!({"type": "create_agent", "parent_id": root.0, "id": "creds",
+               "handler_module": HANDLER_MODULE, "file": abs}),
+    )
+    .await;
+    assert_eq!(made["id"], json!("creds"), "{made}");
+    let r = op(
+        &k,
+        json!({"type": "update_agent", "id": "creds", "file": "creds.yaml"}),
+    )
+    .await;
     assert_eq!(
-        refused.result["error"],
-        json!("ValueError: fs: root '..' escapes the running dir")
+        r,
+        json!({"error": relative("creds.yaml"), "reason": "invalid_meta", "id": "creds"})
     );
+    assert_eq!(store_meta(&k, "file"), json!(abs));
+    // `~…` passes the write (no disk is touched to judge it)
+    let b = CredentialStoreBundle::default();
+    let v = |m: Value| b.validate_meta(m.as_object().unwrap(), &Map::new());
+    assert_eq!(v(json!({"file": "~/.fantastic/credentials/x.yaml"})), None);
+    assert_eq!(
+        v(json!({"keychain_namespace": ""})).as_deref(),
+        Some("keychain_namespace must be a non-empty string")
+    );
+    // past the write: refused at use, nothing written under the running dir
+    k.register(Agent::new(
+        AgentId::from("sneaky"),
+        Some(HANDLER_MODULE.to_string()),
+        Some(root.clone()),
+        json!({"file": "creds.yaml", "refs": {"r": {"host": "h"}}})
+            .as_object()
+            .cloned()
+            .unwrap(),
+        std::path::PathBuf::new(),
+        false,
+    ));
+    let out = k
+        .send(vec![Item::new(
+            AgentId::from("sneaky"),
+            json!({"type": "set", "ref": "r", "fields": {"api_key": KEY}}),
+        )
+        .with_secret(json!(["payload.fields"]))])
+        .await
+        .remove(0);
+    assert_eq!(out.status.as_str(), "failed", "{}", out.result);
+    assert_eq!(
+        out.result["error"],
+        json!(format!(
+            "ValueError: credential_store: {}",
+            relative("creds.yaml")
+        ))
+    );
+    assert!(!k.workdir().unwrap().join("creds.yaml").exists());
+    assert!(!tmp.path().join("creds.yaml").exists());
 }
 
 // ─── the keychain backend (an in-memory keychain — never the real one) ───────
 
+/// One item per ref, under `keychain_namespace` (default `fantastic` — the
+/// keychain's own word for it is the item's "service"), account `<id>/<ref>`.
 #[tokio::test]
 async fn the_keychain_backend_keeps_one_item_per_ref() {
-    let f = mk(json!({"backend": "keychain"})).await;
-    seed(&f.k).await;
-    assert_eq!(
-        f.keychain.accounts(),
-        [("fantastic".to_string(), "creds/openai/main".to_string())]
-    );
-    assert_eq!(
-        f.keychain
-            .get_password("fantastic", "creds/openai/main")
-            .unwrap(),
-        Some(format!("{{\"api_key\": \"{KEY}\"}}"))
-    );
-    assert!(!f.file().exists(), "no file is written");
-    let got = call(
-        &f.k,
-        json!({"type": "get", "ref": "openai/main"}),
-        None,
-        MARK_GET,
-    )
-    .await;
-    assert_eq!(got.result["fields"], json!({"api_key": KEY}));
-    call(
-        &f.k,
-        json!({"type": "forget", "ref": "openai/main"}),
-        None,
-        None,
-    )
-    .await;
-    assert!(f.keychain.accounts().is_empty());
-    // the reflect names the backend and no file
-    let r = call(&f.k, json!({"type": "reflect"}), None, None)
-        .await
-        .result;
-    assert_eq!(r["backend"], json!("keychain"));
-    assert!(r.get("file").is_none());
+    for (meta, namespace) in [
+        (json!({"backend": "keychain"}), "fantastic"),
+        (
+            json!({"backend": "keychain", "keychain_namespace": "acme"}),
+            "acme",
+        ),
+    ] {
+        let f = mk(meta).await;
+        seed(&f.k).await;
+        assert_eq!(
+            f.keychain.accounts(),
+            [(namespace.to_string(), "creds/openai/main".to_string())]
+        );
+        assert_eq!(
+            f.keychain
+                .get_password(namespace, "creds/openai/main")
+                .unwrap(),
+            // the item holds the declared host WITH the value (audit S3)
+            Some(format!(
+                "{{\"host\": \"api.openai.com\", \"fields\": {{\"api_key\": \"{KEY}\"}}}}"
+            ))
+        );
+        assert!(!f.file().exists(), "no file is written");
+        let got = call(
+            &f.k,
+            json!({"type": "get", "ref": "openai/main"}),
+            None,
+            MARK_GET,
+        )
+        .await;
+        assert_eq!(got.result["fields"], json!({"api_key": KEY}));
+        call(
+            &f.k,
+            json!({"type": "forget", "ref": "openai/main"}),
+            None,
+            None,
+        )
+        .await;
+        assert!(f.keychain.accounts().is_empty());
+        // the reflect names the backend and no file
+        let r = call(&f.k, json!({"type": "reflect"}), None, None)
+            .await
+            .result;
+        assert_eq!(r["backend"], json!("keychain"));
+        assert!(r.get("file").is_none());
+    }
 }
 
 /// A platform with no keychain in this runtime fails LOUD, naming it — never
@@ -616,8 +976,7 @@ async fn the_env_backend_reads_named_variables_and_refuses_writes() {
     );
     let w = call(
         &f.k,
-        json!({"type": "set", "ref": "ci/key", "host": "api.example",
-               "fields": {"api_key": KEY2}}),
+        json!({"type": "set", "ref": "ci/key", "fields": {"api_key": KEY2}}),
         None,
         MARK_SET,
     )
@@ -644,6 +1003,84 @@ async fn the_env_backend_reads_named_variables_and_refuses_writes() {
         .await
         .result;
     assert_eq!(listed["refs"][0]["fields"], json!(["api_key"]));
+}
+
+/// Audit BV-6/S4: the marks are judged against the fields the backend RETURNS,
+/// not the declared names. An `env` map wider than `fields` returns a field no
+/// per-field mark covered — refused, and the ledger holds neither value.
+#[tokio::test]
+async fn per_field_marks_must_cover_every_returned_field() {
+    // variables no other test names (the environment is process-wide)
+    let (var, extra) = ("CRED_STORE_TEST_KEY_BV6", "CRED_STORE_TEST_EXTRA_BV6");
+    let f = mk(json!({
+        "backend": "env",
+        "refs": {"ci/key": {"readers": ["alice"], "host": "api.example",
+                            "fields": ["api_key"],
+                            "env": {"api_key": var, "extra": extra}}},
+    }))
+    .await;
+    std::env::set_var(var, KEY);
+    std::env::set_var(extra, KEY2);
+    let one = call_marked(
+        &f.k,
+        json!({"type": "get", "ref": "ci/key"}),
+        json!(["result.fields.api_key"]),
+    )
+    .await;
+    assert_eq!(
+        (&one.result["reason"], &one.result["arg"]),
+        (&json!("bad_arg"), &json!("secret")),
+        "{}",
+        one.result
+    );
+    let both = call_marked(
+        &f.k,
+        json!({"type": "get", "ref": "ci/key"}),
+        json!(["result.fields.api_key", "result.fields.extra"]),
+    )
+    .await;
+    assert_eq!(
+        both.result["fields"],
+        json!({"api_key": KEY, "extra": KEY2})
+    );
+    std::env::remove_var(var);
+    std::env::remove_var(extra);
+    let ledger = op(&f.k, json!({"type": "ledger"})).await.to_string();
+    assert!(!ledger.contains(KEY) && !ledger.contains(KEY2), "{ledger}");
+}
+
+/// The file variant of BV-6: a writer stored {api_key, extra}; the operator then
+/// re-declared the ref with fields [api_key]. A get marking only api_key is
+/// refused — `extra` is still returned by the backend.
+#[tokio::test]
+async fn per_field_marks_after_a_narrower_redeclaration() {
+    let f = mk(json!({})).await;
+    declare(&f.k, json!({"r": {"host": "h", "readers": ["alice"]}})).await;
+    let put = call(
+        &f.k,
+        json!({"type": "set", "ref": "r", "fields": {"api_key": KEY, "extra": KEY2}}),
+        None,
+        MARK_SET,
+    )
+    .await;
+    assert_eq!(put.status.as_str(), "completed", "{}", put.result);
+    let mut entry = store_meta(&f.k, "refs")["r"].clone();
+    entry["fields"] = json!(["api_key"]);
+    declare(&f.k, json!({"r": entry})).await;
+    let one = call_marked(
+        &f.k,
+        json!({"type": "get", "ref": "r"}),
+        json!(["result.fields.api_key"]),
+    )
+    .await;
+    assert_eq!(
+        (&one.result["reason"], &one.result["arg"]),
+        (&json!("bad_arg"), &json!("secret")),
+        "{}",
+        one.result
+    );
+    let ledger = op(&f.k, json!({"type": "ledger"})).await.to_string();
+    assert!(!ledger.contains(KEY) && !ledger.contains(KEY2), "{ledger}");
 }
 
 // ─── the host a ref is bound to ──────────────────────────────────────────────
@@ -691,6 +1128,146 @@ async fn a_read_pinned_to_another_host_is_refused() {
         .as_str()
         .unwrap()
         .ends_with("not None — refused, nothing read"));
+}
+
+// ─── the host at rest (audit S3, 2026-10-03) ─────────────────────────────────
+
+/// python `_at_rest` — the `get {ref, host}` host-mismatch shape: bound to the
+/// declared host, not the stored one.
+fn at_rest(r: &str, stored: &str, declared: &str) -> Value {
+    json!({
+        "error": format!(
+            "credential_store: ref {} is bound to host {}, not {} — refused, nothing read",
+            py_repr(r), py_repr(declared), py_repr(stored)
+        ),
+        "reason": "bad_arg",
+        "arg": "host",
+    })
+}
+
+/// S3: the value is stored WITH the host its declaration named at `set`. The
+/// operator re-declaring the ref with another host does not carry the value
+/// there: every `get` is refused, with or without a `host`, and nothing is read —
+/// until a writer sets the value again, which stores it under the new host.
+#[tokio::test]
+async fn a_redeclared_host_reads_nothing_until_the_value_is_set_again() {
+    let f = mk(json!({})).await;
+    seed(&f.k).await;
+    let mut entry = store_meta(&f.k, "refs")["openai/main"].clone();
+    entry["host"] = json!("attacker.example");
+    declare(&f.k, json!({"openai/main": entry})).await;
+    for payload in [
+        json!({"type": "get", "ref": "openai/main"}),
+        json!({"type": "get", "ref": "openai/main", "host": "attacker.example"}),
+    ] {
+        let out = call(&f.k, payload, Some("alice"), MARK_GET).await;
+        assert_eq!(
+            out.result,
+            at_rest("openai/main", "api.openai.com", "attacker.example")
+        );
+        assert!(!out.result.to_string().contains(KEY));
+    }
+    let back = call(
+        &f.k,
+        json!({"type": "set", "ref": "openai/main", "fields": {"api_key": KEY2}}),
+        Some("bob"),
+        MARK_SET,
+    )
+    .await;
+    assert_eq!(
+        back.result["host"],
+        json!("attacker.example"),
+        "{}",
+        back.result
+    );
+    let got = call(
+        &f.k,
+        json!({"type": "get", "ref": "openai/main"}),
+        Some("alice"),
+        MARK_GET,
+    )
+    .await;
+    assert_eq!(
+        got.result,
+        json!({"ref": "openai/main", "host": "attacker.example", "fields": {"api_key": KEY2}})
+    );
+}
+
+/// S3, the shared-default case: a second store naming the same `file` declares
+/// the SAME ref with another host. The value was stored for the first store's
+/// host, so the second store's `get` is refused — the operator's included.
+#[tokio::test]
+async fn another_store_sharing_the_file_reads_nothing_for_its_host() {
+    let f = mk(json!({})).await;
+    seed(&f.k).await;
+    let root = f.k.root().expect("root");
+    let made = op(
+        &f.k,
+        json!({"type": "create_agent", "parent_id": root.id.0,
+               "handler_module": HANDLER_MODULE, "id": "other",
+               "file": f.file().to_string_lossy(),
+               "refs": {"openai/main": {"host": "blocked.invalid", "readers": ["eve"]}}}),
+    )
+    .await;
+    assert_eq!(made["id"], json!("other"), "{made}");
+    let out =
+        f.k.send(vec![Item::new(
+            AgentId::from("other"),
+            json!({"type": "get", "ref": "openai/main", "host": "blocked.invalid"}),
+        )
+        .with_secret(json!(["result"]))])
+            .await
+            .remove(0);
+    assert_eq!(
+        out.result,
+        at_rest("openai/main", "api.openai.com", "blocked.invalid")
+    );
+    assert!(!out.result.to_string().contains(KEY));
+}
+
+/// S3, no back-compat: a value at rest that carries no host — the old
+/// `{field: value}` shape, or a hand-written entry — is refused, nothing read.
+#[tokio::test]
+async fn a_stored_value_without_a_host_is_refused() {
+    let no_host = json!({
+        "error": "credential_store: ref 'openai/main' is bound to host 'api.openai.com', \
+                  not None — refused, nothing read",
+        "reason": "bad_arg",
+        "arg": "host",
+    });
+    for backend in ["file", "keychain"] {
+        let f = mk(json!({"backend": backend})).await;
+        declare(
+            &f.k,
+            json!({"openai/main": {"host": "api.openai.com", "readers": ["alice"]}}),
+        )
+        .await;
+        if backend == "file" {
+            std::fs::write(
+                f.file(),
+                format!("refs:\n  openai/main:\n    api_key: {KEY}\n"),
+            )
+            .unwrap();
+            std::fs::set_permissions(f.file(), std::fs::Permissions::from_mode(0o600)).unwrap();
+        } else {
+            f.keychain
+                .set_password(
+                    "fantastic",
+                    "creds/openai/main",
+                    &format!("{{\"api_key\": \"{KEY}\"}}"),
+                )
+                .unwrap();
+        }
+        let out = call(
+            &f.k,
+            json!({"type": "get", "ref": "openai/main"}),
+            Some("alice"),
+            MARK_GET,
+        )
+        .await;
+        assert_eq!(out.result, no_host, "{backend}");
+        assert!(!out.result.to_string().contains(KEY), "{backend}");
+    }
 }
 
 #[test]
@@ -817,13 +1394,17 @@ fn validate_meta_texts_are_pythons() {
         Some("file must be a non-empty string")
     );
     assert_eq!(
-        v(json!({"keychain_service": 3})).as_deref(),
-        Some("keychain_service must be a non-empty string")
+        v(json!({"keychain_namespace": 3})).as_deref(),
+        Some("keychain_namespace must be a non-empty string")
     );
     assert_eq!(
-        v(json!({"creators": ["a", ""]})).as_deref(),
-        Some("creators must be a list of agent ids")
+        v(json!({"file": " creds.yaml"})).as_deref(),
+        Some(
+            "file=' creds.yaml' must be an absolute path (starting with / or ~) — a relative \
+             path is refused"
+        )
     );
+    assert_eq!(v(json!({"file": "/abs/creds.yaml"})), None);
     assert_eq!(
         v(json!({"refs": []})).as_deref(),
         Some("refs must be a map of ref to {readers, writers, host, fields, env}")
@@ -844,8 +1425,14 @@ fn validate_meta_texts_are_pythons() {
         v(json!({"refs": {"r": {"host": "://"}}})).as_deref(),
         Some("refs['r'].host must be a non-empty host")
     );
+    for nohost in [json!({}), json!({"host": null, "readers": ["a"]})] {
+        assert_eq!(
+            v(json!({"refs": {"r": nohost}})).as_deref(),
+            Some("refs['r'].host is required — the one host this ref's value may be sent to")
+        );
+    }
     assert_eq!(
-        v(json!({"refs": {"r": {"env": {"api_key": ""}}}})).as_deref(),
+        v(json!({"refs": {"r": {"host": "h", "env": {"api_key": ""}}}})).as_deref(),
         Some("refs['r'].env must map field names to variable names")
     );
     assert_eq!(
@@ -892,11 +1479,6 @@ async fn missing_args_and_unknown_verbs_are_refused_in_pythons_words() {
             "ref",
         ),
         (
-            json!({"type": "set", "ref": "r", "fields": {"k": "v"}}),
-            "credential_store set: host required",
-            "host",
-        ),
-        (
             json!({"type": "get", "ref": " "}),
             "credential_store get: ref required",
             "ref",
@@ -915,7 +1497,7 @@ async fn missing_args_and_unknown_verbs_are_refused_in_pythons_words() {
     }
     let bad = call(
         &f.k,
-        json!({"type": "set", "ref": "r", "host": "h", "fields": {"k": 1}}),
+        json!({"type": "set", "ref": "r", "fields": {"k": 1}}),
         None,
         None,
     )
@@ -941,12 +1523,16 @@ async fn missing_args_and_unknown_verbs_are_refused_in_pythons_words() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_sets_lose_no_ref() {
     let f = mk(json!({})).await;
+    let mut refs = Map::new();
+    for i in 0..16 {
+        refs.insert(format!("r{i:02}"), json!({"host": "h.example"}));
+    }
+    declare(&f.k, Value::Object(refs)).await;
     let items: Vec<Item> = (0..16)
         .map(|i| {
             Item::new(
                 AgentId::from("creds"),
-                json!({"type": "set", "ref": format!("r{i:02}"), "host": "h.example",
-                       "fields": {"api_key": format!("k{i}")}}),
+                json!({"type": "set", "ref": format!("r{i:02}"), "fields": {"api_key": format!("k{i}")}}),
             )
             .with_secret(json!(["payload.fields"]))
         })

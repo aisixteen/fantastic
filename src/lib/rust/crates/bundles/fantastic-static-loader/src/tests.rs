@@ -236,7 +236,9 @@ async fn an_unreadable_manifest_is_reported_at_boot() {
     let rec = create_loader(&kernel, "sl2", json!("nope.yaml")).await;
     assert!(rec.get("error").is_none(), "{rec}");
     let r = boot_loader(&kernel, "sl2").await;
-    let abs = fs::realpath(&std::env::current_dir().unwrap()).join("nope.yaml");
+    let abs = fantastic_bundle::realpath(&std::env::current_dir().unwrap())
+        .unwrap()
+        .join("nope.yaml");
     assert_eq!(
         r,
         json!({
@@ -695,5 +697,77 @@ async fn unknown_type_wire_shape_is_byte_exact() {
     assert_eq!(
         serde_json::to_string(&r).unwrap(),
         r#"{"error":"static_loader: unknown type None","reason":"unhandled","verb":null}"#
+    );
+}
+
+/// Audit G-2/BV-2 — the roster pass runs AS OPERATOR, so only the kernel's own
+/// boot (origin none) may start it. A roster agent whose grant the operator
+/// revoked sent `boot` to its loader and got the grant back; a deleted roster
+/// agent came back. The edge is NAMED on both ends, so the refusal is the
+/// loader's own, whatever the gate makes of `boot`. Python
+/// `test_an_agent_sent_boot_is_refused_and_re_runs_nothing`.
+#[tokio::test]
+async fn an_agent_sent_boot_is_refused_and_re_runs_nothing() {
+    let kernel = mk_kernel();
+    let (_fixture, path) = write_manifest(
+        "agents:\n  - id: memory\n    handler_module: mock.tools\n  - id: worker\n    \
+         handler_module: mock.tools\n    can_call:\n      memory: [set, read]\n      \
+         static_loader: [boot]\n",
+    );
+    let rec = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({
+                "type": "create_agent", "parent_id": "kernel",
+                "handler_module": HANDLER_MODULE, "id": "static_loader",
+                "manifest": path, "callable_by": {"worker": ["boot"]},
+            }),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(rec["id"], json!("static_loader"), "{rec}");
+    // The operator revokes worker's lateral edge and deletes `memory`.
+    for p in [
+        json!({"type": "update_agent", "id": "worker", "can_call": {
+            "$self": "*", "$parent": "*", "$children": "*", "static_loader": ["boot"]}}),
+        json!({"type": "delete_agent", "id": "memory"}),
+    ] {
+        let r = kernel
+            .send(vec![Item::new(AgentId::from("kernel"), p)])
+            .await
+            .remove(0)
+            .result;
+        assert!(r.get("error").is_none(), "{r}");
+    }
+    let r = with_sender(
+        AgentId::from("worker"),
+        kernel.send(vec![Item::new(
+            AgentId::from("static_loader"),
+            json!({"type": "boot"}),
+        )]),
+    )
+    .await
+    .remove(0)
+    .result;
+    assert_eq!(
+        r,
+        json!({
+            "error": "static_loader: an agent-sent boot is refused — the roster is \
+                      hydrated with operator authority, so only the kernel's own boot \
+                      (cold boot, create_agent) runs it",
+            "reason": "unauthorized",
+            "hint": "change an agent's record with update_agent (the conferral rule \
+                     applies there); the operator re-boots the loader",
+        })
+    );
+    assert!(!kernel.agents.contains_key(&AgentId::from("memory")));
+    assert!(record(&kernel, "worker").meta["can_call"]
+        .get("memory")
+        .is_none());
+    // The operator's boot is the kernel's own: it re-runs the manifest.
+    assert_eq!(
+        boot_loader(&kernel, "static_loader").await,
+        json!({"booted": true, "created": ["memory"], "reapplied": ["worker"]})
     );
 }

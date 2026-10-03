@@ -7,9 +7,14 @@ never read its endpoint variable and so died on a 401 while its five siblings ra
 fine against the same server (measured 2026-08-24).
 
 So the choice lives HERE, once. A probe asks for `backend()` and gets an object
-that knows how to describe itself as a record, how to build its provider, and
-what it needs before it can run. Adding a backend is adding a file, not editing
-ten probes.
+that knows how to describe itself as a record and what it needs before it can
+run. Adding a backend is adding a file, not editing ten probes.
+
+NO PROVIDER IS BUILT HERE. ai_core builds an agent's provider for every turn from
+its live record; a reader wraps THAT build (`helpers.kernel.wrap_with`). A
+connect-time build only duplicated it. A plug a runtime cannot run (FM on python:
+no such bundle in python's catalog) fails at the kernel instead — its first call
+is refused `unhandled`, "cannot be imported in this runtime".
 
 NO DEFAULTS THAT REACH A NETWORK. The substrate refuses to guess a model or an
 endpoint and so does this: an unset `FANTASTIC_AI_MODEL` is an error naming the
@@ -54,8 +59,7 @@ from typing import Any
 
 @dataclass
 class Backend:
-    """One inference plug: how to CREATE it, how to BUILD its provider, and what
-    it needs first."""
+    """One inference plug: how to CREATE it, and what it needs first."""
 
     name: str
     handler_module: str
@@ -89,31 +93,6 @@ class Backend:
             if not os.environ.get(var):
                 out.append(f"{var} is unset — {why}")
         return out
-
-    async def provider(self, agent_id: str, root):
-        """Build the live provider for an already-created agent."""
-        raise NotImplementedError
-
-
-class _Ollama(Backend):
-    async def provider(self, agent_id: str, root):
-        import ollama_backend.tools as ot
-
-        return ot.make_provider(agent_id, root)
-
-
-class _Responses(Backend):
-    async def provider(self, agent_id: str, root):
-        import responses_backend.tools as rt
-
-        return rt.make_provider(agent_id, root)
-
-
-class _Vllm(Backend):
-    async def provider(self, agent_id: str, root):
-        import vllm_backend.tools as vt
-
-        return vt.make_provider(agent_id, root)
 
 
 def _model_or_die(name: str) -> str:
@@ -151,7 +130,7 @@ def _runner_params() -> dict[str, Any]:
 
 
 def _ollama() -> Backend:
-    return _Ollama(
+    return Backend(
         name="ollama",
         handler_module="ollama_backend.tools",
         model=_model_or_die("ollama"),
@@ -167,7 +146,7 @@ def _responses() -> Backend:
     # NO knobs from the JSON beside this file: `no_repeat_ngram_size` and
     # `repetition_penalty` are vLLM sampling fields, not Responses fields. A
     # Responses run that wants a knob names it in its own record.
-    return _Responses(
+    return Backend(
         name="responses",
         handler_module="responses_backend.tools",
         model=_model_or_die("responses"),
@@ -209,7 +188,7 @@ def _vllm() -> Backend:
     for knob in ("no_repeat_ngram_size", "repetition_penalty"):
         if knob in runner:
             extra[knob] = runner[knob]
-    return _Vllm(
+    return Backend(
         name="vllm",
         handler_module="vllm_backend.tools",
         model=_model_or_die("vllm"),
@@ -231,9 +210,6 @@ class _FoundationModels(Backend):
         meta: dict[str, Any] = {"handler_module": self.handler_module, **self.extra}
         meta.update(overrides)
         return meta
-
-    async def provider(self, agent_id: str, root):
-        raise NotImplementedError("python has no foundation_models backend — run with --runtime rust|swift")
 
 
 def _foundation_models() -> Backend:

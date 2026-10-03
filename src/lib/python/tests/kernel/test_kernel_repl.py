@@ -65,3 +65,23 @@ def test_find_bundle_module_resolves_via_entry_points():
 
 def test_find_bundle_module_returns_none_for_missing():
     assert _find_bundle_module("definitely_not_a_bundle_xyz") is None
+
+
+def test_help_prints_the_cheatsheet_and_an_unreadable_one_raises(
+    capsys, monkeypatch, tmp_path
+):
+    """`help` prints `cli/help.md`. Unreadable, it RAISES — a substitute line
+    printed in its place hid a broken install (audit 2026-10-03, ARCH2-9)."""
+    import importlib.resources
+
+    import pytest
+
+    from kernel.modes.help import _print_help
+
+    _print_help()
+    shipped = (importlib.resources.files("cli") / "help.md").read_text(encoding="utf-8")
+    assert capsys.readouterr().out == shipped.rstrip() + "\n"
+    monkeypatch.setattr(importlib.resources, "files", lambda pkg: tmp_path)
+    with pytest.raises(FileNotFoundError):
+        _print_help()
+    assert capsys.readouterr().out == ""

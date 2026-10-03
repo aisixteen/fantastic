@@ -7,26 +7,53 @@ the next read picks it up, with no restart.
 
 | verb | what |
 |---|---|
-| `set {ref, host, fields}` | store or rotate; call with `secret: ['payload.fields']` |
-| `get {ref, host?}` | `{ref, host, fields}`; call with `secret: ['result']`; `host` refuses a ref bound elsewhere |
+| `set {ref, fields}` | store or rotate the value of a DECLARED ref (writers); call with `secret: ['payload.fields']`; takes no `host` — the declaration's is the binding |
+| `get {ref, host?}` | `{ref, host, fields}` (readers); call with `secret: ['result']`; `host` refuses a ref bound elsewhere |
 | `list` | the refs YOU may read or write: metadata, never a value |
-| `forget {ref}` | drop the value and its grants (writers only) |
+| `forget {ref}` | drop the VALUE (writers only); the declaration stays |
 
-**Backends** (`backend` on the record): `file` (default) — one YAML file,
-`~/.fantastic/credentials/<id>.yaml` unless `file` names another path, written
+**Backends** (`backend` on the record): `file` (default) — one YAML file at an
+ABSOLUTE path, `~/.fantastic/credentials/<id>.yaml` unless `file` names another
+(`/…` or `~…`; a relative path is refused at the write: "file='creds.yaml' must be
+an absolute path (starting with / or ~) — a relative path is refused"), written
 0600 and read only if it is a regular file owned by this user with no group/other
-bits; `keychain` — the OS keychain, one item per ref (service `keychain_service`,
-default `fantastic`; account `<id>/<ref>`); `env` — read-only, each ref maps fields
-to variables: `refs: {<ref>: {host, env: {api_key: VAR}}}`.
+bits — judged on the one open it is read from (`O_NOFOLLOW`, then `fstat` of that
+descriptor), so nothing can swap it between the check and the read; `keychain` — the OS keychain, one item per ref under the namespace
+`keychain_namespace` (default `fantastic` — macOS calls it the item's "service";
+account `<id>/<ref>`); `env` — read-only, each ref maps fields to variables:
+`refs: {<ref>: {host, env: {api_key: VAR}}}`.
 
-**Grants, per ref**, on the store's record (the operator edits them with
-`update_agent`): `refs: {<ref>: {readers: [...], writers: [...], host, fields}}`. An
-entry is an agent id, `$subtree:<id>`, or a `<guid>|<agent>` caller on another
-kernel. An agent in `creators` may make a NEW ref, which it then reads and writes. A
-caller with no grant is answered "no such ref". The operator may do everything.
+**The host is stored with the value**: the file entry and the keychain item are
+`{host, fields}`, the host written by `set` from the ref's declaration. A `get`
+whose declaration names another host than the stored one is refused with the
+same answer as a `get {ref, host}` naming another host
+("credential_store: ref '<ref>' is bound to host '<declared>', not '<stored>' —
+refused, nothing read", `reason: bad_arg`, `arg: host`), and so is a stored value
+carrying no host (`… not None — …`) — a writer sets the value again. A store elsewhere declaring the same id and ref with
+another host reads nothing. `env` keeps no value at rest.
+
+**A ref is declared ONLY by `update_agent`** on the store's own record — the kernel's
+privileged verb, granted explicitly, is the one path:
+`refs: {<ref>: {host, readers: [...], writers: [...], fields?/env?}}` (it replaces
+the whole `refs` map — write every ref you keep; `host` is required: "refs['<ref>'].host
+is required — the one host this ref's value may be sent to"). The declaration is the
+operator's alone: `set` never creates a ref (an undeclared one answers "no such ref",
+the operator included) and takes no host ("credential_store set: takes no host — a
+ref's host is its declaration, written by update_agent on this store's refs");
+`forget` drops the value and keeps the declaration (host, readers, writers) — only
+`update_agent` undeclares. On the `env` backend `forget` is refused like `set`
+("credential_store forget: the env backend is read-only — unset the environment
+variable its ref names"). A ref's `fields` are its stored value's names: `set`
+writes them, `forget` drops them.
+`set`/`forget` need the caller in `writers`, `get` in `readers`; an entry is an agent id,
+`$subtree:<id>`, or a `<guid>|<agent>` caller on another kernel. A caller with no
+grant is answered "no such ref". The operator passes every reader and writer check.
 
 **No value is ever recorded.** An unmarked `set`/`get` is refused: the value would
-land in the ledger, the memory store and the state stream. The record holds the
+land in the ledger, the memory store and the state stream. Either spelling of a mark
+counts (`['payload', 'fields']` is `payload.fields`), as does marking every field;
+a field name holding a dot is marked only as an array (`['result', 'fields', 'a.b']`
+— `result.fields.a.b` is `a` → `b`). The record holds the
 host and the field NAMES only. The kernel's call gate still decides who may reach
 this agent at all. Never give a credential to an AI agent's prompt — give it to a
 bundle that sends it (an AI backend reads its own key this way).
@@ -49,4 +76,5 @@ cannot unmark this store and then call it.
 
 **Not over a relay, yet.** A `relay_connector` leg refuses every call carrying
 secret marks (the relay records the frames it routes unmasked), so a remote
-`set`/`get` goes over a direct `ws_bridge` leg.
+`set`/`get` goes over a direct `ws_bridge` leg to a loopback host (an ssh tunnel's
+local end) — a `ws://` leg to any other host refuses secret marks too.

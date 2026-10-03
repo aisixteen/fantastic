@@ -253,6 +253,33 @@ public final class AIBackend: @unchecked Sendable {
             ])
     }
 
+    /// The `onDelete` bundle hook, shared by every backend (vllm drops its own
+    /// table beside it). Drops every row this module keeps for the deleted id,
+    /// so an id re-created later starts clean and nothing leaks (audit ARCH2-2):
+    /// the FIFO lock and queue, the in-flight entry, the projection and its
+    /// marks, the fold and recall counters, the calibration, the silent streaks,
+    /// the strip set, and this kernel's head, bodies, grants and watchers.
+    /// Python `on_delete`.
+    ///
+    /// NOT the incarnation: it stays monotonic across a re-create, so a reply to
+    /// a call the deleted agent made never becomes a live turn of the new one.
+    public func onDelete(agentId: AgentId, kernel: Kernel) async {
+        let id = agentId.value
+        AIRunStates.forget(kernel, id)
+        projectionLock.withLock {
+            projectionCache[id] = nil
+            compactionMark[id] = nil
+            viewSource[id] = nil
+            foldsSince[id] = nil
+            recallDue.remove(id)
+        }
+        AICalibration.forget(kernel, id)
+        await inFlightTurns.forget(id)
+        AISilentStreaks.forget(kernel, agent: id)
+        AIStripStrategy.forget(kernel, id)
+        AIMemory.forget(kernel, id)
+    }
+
     // MARK: - reflect
 
     /// PYTHON'S KEYS, IN PYTHON'S ORDER: `id, sentence, model, endpoint,
@@ -285,7 +312,7 @@ public final class AIBackend: @unchecked Sendable {
         fields["cancel"] = .string(CANCEL_DOC)
         fields["emits"] = .object(Self.REFLECT_EMITS)
         fields["concurrency"] = .string(CONCURRENCY_DOC)
-        for (k, v) in config.reflectExtra(agent) {
+        for (k, v) in config.reflectExtra(agent, kernel) {
             fields[k] = v
         }
         return .object(fields)

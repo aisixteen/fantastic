@@ -70,24 +70,86 @@ struct WorkdirLockTests {
         #expect(bytes == "pid: \(getpid())\n", "\(bytes)")
     }
 
-    /// C82: a live recorded pid refuses acquisition even when NOTHING holds
-    /// this file's `flock` — the shape a python or rust daemon's lock is
-    /// always in, since neither takes one. The previous swift ordering
-    /// (flock checked first) treated an uncontested flock as free rein to
-    /// overwrite a live foreign pid.
-    @Test func acquireRefusesALiveRecordedPidWithoutFlock() throws {
+    /// The pid in the file is for the message, never the decision: a file
+    /// naming a LIVE pid (this very test process) that holds no flock — its
+    /// holder gone, the pid reused — is taken over. Python, rust and swift all
+    /// decide by the flock alone.
+    @Test func aLivePidWithoutTheFlockIsTakenOver() throws {
         let tmp = makeTempDir()
         defer { try? FileManager.default.removeItem(at: tmp) }
         let lockPath = tmp.appendingPathComponent(".fantastic/lock.yaml")
         try FileManager.default.createDirectory(
             at: lockPath.deletingLastPathComponent(), withIntermediateDirectories: true)
-        // getpid() is a genuinely live pid (this very test process) and the
-        // file is written with NO flock held on it — exactly a python/rust
-        // daemon's own lock shape.
-        try #"{"pid": \#(getpid())}"#.write(to: lockPath, atomically: true, encoding: .utf8)
+        try #"{"pid": \#(getppid())}"#.write(to: lockPath, atomically: true, encoding: .utf8)
         let lock = WorkdirLock(workdir: tmp)
-        #expect(throws: WorkdirLock.LockError.self) {
-            try lock.acquire()
+        try lock.acquire()
+        defer { lock.release() }
+        let bytes = try String(contentsOf: lockPath, encoding: .utf8)
+        #expect(bytes == "pid: \(getpid())\n", "\(bytes)")
+    }
+
+    /// The refusal names the holder's pid, and leaves no staged file behind.
+    @Test func refusalNamesTheHolderAndLeavesNoStagedFile() throws {
+        let tmp = makeTempDir()
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let first = WorkdirLock(workdir: tmp)
+        try first.acquire()
+        defer { first.release() }
+        do {
+            try WorkdirLock(workdir: tmp).acquire()
+            Issue.record("a second acquisition must be refused")
+        } catch WorkdirLock.LockError.alreadyRunning(let pid, _) {
+            #expect(pid == getpid())
+        }
+        let names = try FileManager.default.contentsOfDirectory(
+            atPath: tmp.appendingPathComponent(".fantastic").path)
+        #expect(names == ["lock.yaml"], "\(names)")
+    }
+
+    @Test func releaseLetsTheNextAcquireIn() throws {
+        let tmp = makeTempDir()
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let first = WorkdirLock(workdir: tmp)
+        try first.acquire()
+        first.release()
+        let second = WorkdirLock(workdir: tmp)
+        try second.acquire()
+        second.release()
+    }
+
+    /// ARCH2-3: python and rust read-then-wrote the lock, so two acquisitions
+    /// racing in one dir BOTH took it. Each racer here opens its own
+    /// descriptor, and flock excludes descriptors of one process as it
+    /// excludes processes — so every round, on a fresh dir and over a dead
+    /// holder's lock alike, exactly one wins.
+    @Test(arguments: [false, true])
+    func twoRacingAcquisitionsExactlyOneWins(overDeadLock: Bool) throws {
+        for _ in 0..<20 {
+            let tmp = makeTempDir()
+            defer { try? FileManager.default.removeItem(at: tmp) }
+            if overDeadLock {
+                let lockPath = tmp.appendingPathComponent(".fantastic/lock.yaml")
+                try FileManager.default.createDirectory(
+                    at: lockPath.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try "pid: 2147483646\n".write(to: lockPath, atomically: true, encoding: .utf8)
+            }
+            let locks = [WorkdirLock(workdir: tmp), WorkdirLock(workdir: tmp)]
+            let gate = NSCondition()
+            nonisolated(unsafe) var arrived = 0
+            nonisolated(unsafe) var won = [false, false]
+            DispatchQueue.concurrentPerform(iterations: 2) { i in
+                gate.lock()
+                arrived += 1
+                gate.broadcast()
+                while arrived < 2 { gate.wait() }
+                gate.unlock()
+                let ok = (try? locks[i].acquire()) != nil
+                gate.lock()
+                won[i] = ok
+                gate.unlock()
+            }
+            #expect(won.filter { $0 }.count == 1, "\(won)")
+            locks.forEach { $0.release() }
         }
     }
 
@@ -216,7 +278,7 @@ struct HydrationWalkTests {
         try seed(
             store, "agents/a/agents/b/agent.yaml", #"{"id": "b", "parent_id": "kernel_state"}"#)
 
-        let recs = Persistence.readTree(rootDir: store)
+        let recs = try Persistence.readTree(rootDir: store)
         #expect(recs.map(\.id) == ["kernel_state", "a", "b"])
         #expect(recs.map(\.parentId) == [nil, "kernel_state", "a"])
     }
@@ -232,7 +294,7 @@ struct HydrationWalkTests {
         try seed(store, "agents/empty/agents/ghost/agent.yaml", #"{"id": "ghost"}"#)
         try seed(store, "agents/good/agent.yaml", #"{"id": "good"}"#)
 
-        let recs = Persistence.readTree(rootDir: store)
+        let recs = try Persistence.readTree(rootDir: store)
         #expect(recs.map(\.id) == ["kernel_state", "good"])
     }
 
@@ -244,7 +306,7 @@ struct HydrationWalkTests {
         for id in ["zeta", "alpha", "mid"] {
             try seed(store, "agents/\(id)/agent.yaml", #"{"id": "\#(id)"}"#)
         }
-        let recs = Persistence.readTree(rootDir: store)
+        let recs = try Persistence.readTree(rootDir: store)
         #expect(recs.map(\.id) == ["kernel_state", "alpha", "mid", "zeta"])
     }
 
@@ -261,7 +323,7 @@ struct HydrationWalkTests {
         // A tree under the DEFAULT name is invisible once another is declared.
         try seed(store, "agents/never/agent.yaml", #"{"id": "never"}"#)
 
-        let recs = Persistence.readTree(rootDir: store)
+        let recs = try Persistence.readTree(rootDir: store)
         #expect(recs.map(\.id) == ["kernel_state", "a", "b"])
 
         // `.disk` takes the WORKDIR; the kernel appends `.fantastic` itself.
@@ -286,7 +348,7 @@ struct HydrationWalkTests {
              "can_call": {"$self": "*", "$parent": "*", "rest": ["reflect"], "ws": "*"},
              "display_name": "Web"}
             """#)
-        let recs = Persistence.readTree(rootDir: store)
+        let recs = try Persistence.readTree(rootDir: store)
         let web = try #require(recs.first { $0.id == "web" })
         #expect(web.meta.keys.elements == ["port", "can_call", "display_name"])
         #expect(
@@ -313,6 +375,54 @@ struct HydrationWalkTests {
         #expect(kernel.agent(AgentId("kernel_state")) != nil)
         #expect(kernel.agent(AgentId("ts_thing")) == nil)
         #expect(kernel.agent(AgentId("under_it")) == nil, "the subtree goes with it")
+    }
+
+    /// ARCH2-6: python's cold walk opens only through the `fs` clamp, so a
+    /// `children_dir` that resolves outside `.fantastic` raises — the boot
+    /// fails — where swift used to join it raw and hydrate another directory.
+    @Test func coldWalkRefusesAnEscapingChildrenDir() throws {
+        let tmp = makeTempDir()
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let work = tmp.appendingPathComponent("work")
+        try seed(work, ".fantastic/agent.yaml", "id: kernel_state\nchildren_dir: ../sibling\n")
+        try seed(work, "sibling/probe_a/agent.yaml", "id: probe_a\n")
+        #expect(throws: PyError("ValueError", "fs: path '../sibling' escapes root")) {
+            try Persistence.readTree(rootDir: work.appendingPathComponent(".fantastic"))
+        }
+    }
+
+    @Test func coldWalkRefusesAnOutwardSymlinkedEntry() throws {
+        let tmp = makeTempDir()
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let store = tmp.appendingPathComponent("work/.fantastic")
+        try seed(store, "agent.yaml", "id: kernel_state\n")
+        try seed(tmp, "outside/agent.yaml", "id: probe_out\n")
+        try FileManager.default.createDirectory(
+            at: store.appendingPathComponent("agents"), withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(
+            at: store.appendingPathComponent("agents/evil"),
+            withDestinationURL: tmp.appendingPathComponent("outside"))
+        #expect(
+            throws: PyError("ValueError", "fs: path 'agents/evil/agent.yaml' escapes root")
+        ) {
+            try Persistence.readTree(rootDir: store)
+        }
+    }
+
+    @Test func coldWalkFollowsAnInwardSymlinkedEntry() throws {
+        let tmp = makeTempDir()
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let store = tmp.appendingPathComponent("work/.fantastic")
+        try seed(store, "agent.yaml", "id: kernel_state\n")
+        try seed(store, "stash/a/agent.yaml", "id: a\n")
+        try FileManager.default.createDirectory(
+            at: store.appendingPathComponent("agents"), withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(
+            at: store.appendingPathComponent("agents/a"),
+            withDestinationURL: store.appendingPathComponent("stash/a"))
+        let recs = try Persistence.readTree(rootDir: store)
+        #expect(recs.map(\.id) == ["kernel_state", "a"])
+        #expect(recs.last?.parentId == "kernel_state")
     }
 }
 
@@ -376,6 +486,57 @@ struct RootBootTests {
         _ = try await startKernel(workdir: tmp.path)
         #expect(!fm.fileExists(atPath: memory.path), "a deleted doc stays deleted")
         #expect(!fm.fileExists(atPath: frontend.path))
+    }
+
+    /// A `.fantastic` that cannot be made, or a root record that cannot be
+    /// written, FAILS the start, as python's seed raises. Both were `try?`: the
+    /// kernel booted "fine" with an unpersisted root and minted a new guid every
+    /// start, breaking peers pinned to it (audit 2026-10-03, ARCH2-9).
+    @Test func aFailedColdSeedFailsTheStart() async throws {
+        let fm = FileManager.default
+        let blockedDir = makeTempDir()
+        defer { try? fm.removeItem(at: blockedDir) }
+        try "a FILE where .fantastic goes".write(
+            to: blockedDir.appendingPathComponent(".fantastic"), atomically: true, encoding: .utf8)
+        await #expect(throws: (any Error).self) { _ = try await startKernel(workdir: blockedDir.path) }
+
+        let blockedRecord = makeTempDir()
+        defer { try? fm.removeItem(at: blockedRecord) }
+        try fm.createDirectory(
+            at: blockedRecord.appendingPathComponent(".fantastic/agent.yaml"),
+            withIntermediateDirectories: true)
+        await #expect(throws: (any Error).self) {
+            _ = try await startKernel(workdir: blockedRecord.path)
+        }
+    }
+
+    /// ARCH2-6: the boot reads the root record through the `fs` clamp, as
+    /// python's `read_tree` does, so a root `agent.yaml` linked outside
+    /// `.fantastic` refuses the start with `fs`'s text — and NOTHING is reseeded
+    /// over the link. Swift read it raw: a dangling link read as "no record",
+    /// and the seed wrote a fresh root over it.
+    @Test func anOutwardSymlinkedRootRecordRefusesTheStartAndIsNotReseeded() async throws {
+        let tmp = makeTempDir()
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let fm = FileManager.default
+        let work = tmp.appendingPathComponent("work")
+        let dot = work.appendingPathComponent(".fantastic")
+        try fm.createDirectory(at: dot, withIntermediateDirectories: true)
+        let link = dot.appendingPathComponent("agent.yaml")
+        let outside = tmp.appendingPathComponent("outside.yaml")
+        try fm.createSymbolicLink(at: link, withDestinationURL: outside)
+        let escapes = PyError("ValueError", "fs: path 'agent.yaml' escapes root")
+
+        // dangling: the target does not exist
+        await #expect(throws: escapes) { _ = try await startKernel(workdir: work.path) }
+        #expect(try fm.destinationOfSymbolicLink(atPath: link.path) == outside.path)
+        #expect(!fm.fileExists(atPath: outside.path), "nothing was written through the link")
+
+        // a mapping outside is refused the same way, and left as it was
+        try "id: kernel_state\n".write(to: outside, atomically: true, encoding: .utf8)
+        await #expect(throws: escapes) { _ = try await startKernel(workdir: work.path) }
+        #expect(try fm.destinationOfSymbolicLink(atPath: link.path) == outside.path)
+        #expect(try String(contentsOf: outside, encoding: .utf8) == "id: kernel_state\n")
     }
 
     /// A MISSING root record is the same path — a virgin dir.

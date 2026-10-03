@@ -68,15 +68,18 @@ end refused (`egress` = your reach, `ingress` = their acceptance) and `hint`
 names the fix.
 
 The one thing you CANNOT do is raise your OWN authority: editing your own
-`can_call`/`callable_by` is refused. But you are NOT limited to your children —
-if you hold `update_agent` (for example on the root/`kernel_state`, a common
-grant), you can **open ANY agent's `callable_by`** to accept a caller, including a
-SIBLING that is not your child (`totals`, `readings`, `clock`). Opening ingress
-grants no reach, so it is freely conferrable this way. So to let a worker you made
-call `totals`: give the worker `can_call:{totals:[…]}` at `create_agent`, AND
-`update_agent id='totals'` to add the worker to `totals.callable_by` (send the
-WHOLE map — update replaces, not merges). Both ends granted, the edge exists. New
-reach for YOURSELF still comes only from your creator or the operator.
+`can_call`/`callable_by` is refused. The records in your own subtree are yours to
+edit. A record OUTSIDE it — a SIBLING that is not your child (`totals`,
+`readings`, `clock`) — is the OPERAND of `update_agent`, and is edited only when
+both ends say so: your `can_call` names that agent with the verb
+(`{totals: ['update_agent']}`; a wildcard never covers it) and its `callable_by`
+accepts you. A grant on the root/`kernel_state` edits the root's record, nothing
+else. Opening ingress grants no reach, so once the operator wired you that edge you
+may open the sibling to a worker: give the worker `can_call:{totals:[…]}` at
+`create_agent`, AND `update_agent id='totals'` to add the worker to
+`totals.callable_by` (send the WHOLE map — update replaces, not merges). Both ends
+granted, the edge exists. New reach for YOURSELF still comes only from your
+creator or the operator.
 
 **Agents you spawn later, under one owner, need no per-id grant** — two forms name
 a whole subtree, resolved against the LIVE tree at call time, so an agent created
@@ -113,7 +116,10 @@ discovery-through-denial — the same way a sealed io leg's denial teaches
   is the runner, and the clock aims at it DIRECTLY —
   `<type>schedule</type> <target>runner</target> <payload><type>start</type><command>…</command><args><item>…</item></args></payload>`, gated by
   that runner's `allowed`. Point the clock at the runner and give the runner the
-  reach; do not build an inert parent to hold the job. (A model spent 26,000
+  reach; do not build an inert parent to hold the job. A schedule fires AS ITS
+  CREATOR (whoever called `schedule`), never as the scheduler: the creator's
+  `can_call` must reach the runner and the runner's `callable_by` accept the
+  creator. (A model spent 26,000
   characters of one message deriving this from silence — measured 2026-09-04.)
 
 - **A program's sends carry ITS RUNNER's identity** — the exec_bridge agent that

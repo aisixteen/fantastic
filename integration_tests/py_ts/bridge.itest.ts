@@ -90,9 +90,9 @@ test("watchRemote streams a host agent's inbox events to a local watcher", async
     kernel.watch(host.webId, "viewer"); // remote → bridge.watchRemote(web)
 
     // EMIT to the web agent's inbox over the wire; the watch mirrors it back.
-    // (A child created under `web` no longer announces `agent_created` on the
-    // parent's inbox — kernel verbs are the root's, and creation is a state
-    // event — so the stream is driven directly.)
+    // (Driven by `emit`, not by a side effect such as creating a child under
+    // `web`, so the test measures the watch path alone: one event it chose,
+    // and nothing created on the shared host.)
     await new Promise((r) => setTimeout(r, 200)); // let the watch socket open
     bridge.emitRemote(host.webId, { type: "itest_ping", n: 1 });
 

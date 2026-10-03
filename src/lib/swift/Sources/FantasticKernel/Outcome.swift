@@ -91,6 +91,20 @@ public struct Blob: Sendable, Equatable {
     public func at(_ key: String) -> Data? {
         parts == [.key(key)] ? bytes : nil
     }
+
+    /// The same body one level DOWN: the steps below its first one when that
+    /// step is the key `key` (a frame's `data` → the reply's own slot). `nil`
+    /// when the body sits elsewhere, or IS that key's value. Rust `Blob::under`.
+    public func under(_ key: String) -> Blob? {
+        guard parts.count > 1, parts[0] == .key(key) else { return nil }
+        return Blob(parts: Array(parts.dropFirst()), bytes)
+    }
+
+    /// The same body one level UP, under the key `key` (the reply's slot → the
+    /// frame's `["data", …]`). Rust `Blob::nested_in`.
+    public func nested(in key: String) -> Blob {
+        Blob(parts: [.key(key)] + parts, bytes)
+    }
 }
 
 /// The body a binary dispatch carries at the top-level `key`, if it carries one
@@ -132,6 +146,13 @@ public struct Item: Sendable {
     /// the binary channel with NO request body. Python's reply dict holds `bytes`
     /// natively; a request that sends none (`read_stream`) is a plain dict on the
     /// call row and a text frame to a watcher.
+    ///
+    /// EVERY WIRE LEG SETS IT on a call that carries no request body, whatever
+    /// the verb (web_ws, web_rest's JSON leg, a bridge serving an inbound call,
+    /// the exec relay): ANY handler may answer with a raw body
+    /// (`AgentBundle.handleBinary`), and the leg answers binary exactly when the
+    /// reply carries one — python's `encode_frame` / `_first_bytes_field`, with
+    /// no list of verbs.
     public var rawReply: Bool
 
     /// The RAW (tag-typed) `exec_id`, when a caller is FORWARDING a value it
@@ -152,9 +173,11 @@ public struct Item: Sendable {
     /// The RAW `retries`, forwarded untouched (C38) for the same reason. Set,
     /// this SUPERSEDES the typed `retries` above.
     public var rawRetries: JSON?
-    /// SECRET paths (`Secret`), RAW: `[path, …]`, each `payload.<field…>` or
-    /// `result[.<field…>]`. The target gets the real payload and the caller the
-    /// real reply; every record and mirror of the call shows `<secret>`. The
+    /// SECRET marks (`Secret`), RAW: `[mark, …]`, each a dotted string
+    /// (`payload.<field…>` or `result[.<field…>]`) or an array of steps
+    /// (`["payload", <step>, …]` / `["result", <step>…]`). The target gets the
+    /// real payload and the caller the real reply; every record and mirror of the
+    /// call shows `<secret>`. The
     /// kernel validates it at launch (python `kernel/_secret.check`); absent or
     /// null = nothing secret.
     public var secret: JSON?
@@ -196,21 +219,22 @@ public struct Outcome: Sendable {
     public var result: JSON
     /// How many dispatch attempts this execution spent (1 unless retried).
     public var attempts: UInt32
-    /// THE BINARY REPLY BODY — the carrier for the `bytes` value python's reply
-    /// dict holds natively (C37). `nil` = the verb returned NO chunk;
-    /// `.some(d)` = it returned one, `d` possibly EMPTY (a 0-byte read of an
-    /// empty file). Every wire leg picks its response shape from THAT
-    /// distinction, exactly as python's `isinstance(reply["bytes"], bytes)`
-    /// does; testing `isEmpty` instead served an empty file as JSON.
+    /// THE BINARY REPLY BODY — the carrier for the bytes value python's reply
+    /// dict holds natively (C37), AND ITS SLOT in the reply. `nil` = the verb
+    /// returned NO chunk; `.some(b)` = it returned one, `b.bytes` possibly EMPTY
+    /// (a 0-byte read of an empty file). Every wire leg picks its response shape
+    /// from THAT distinction, exactly as python's `isinstance(reply["bytes"],
+    /// bytes)` does; testing `isEmpty` instead served an empty file as JSON.
     ///
-    /// Only a binary item can set it (`Item.binary` / `Item.rawReply`), and only
-    /// the bundle's `handleBinary` fills it in. A reply's chunk sits at the
-    /// reply's `bytes` key — the one key every python reply that carries bytes
-    /// uses (`read_stream`).
-    public var body: Data?
+    /// Only a binary item can set it (`Item.binary` / `Item.rawReply`): a
+    /// bundle's `handleBinary` returns it at its slot of the reply (`["bytes"]`
+    /// for a `read_stream` chunk); a PEER's reply keeps the slot its frame named
+    /// (`["data", "x.y"]` on the frame is the reply key `"x.y"`, never `x` →
+    /// `y`). The steps are relative to `result`. Rust `Outcome::body`.
+    public var body: Blob?
 
     public init(
-        pid: TaskId?, status: Status, result: JSON, attempts: UInt32 = 1, body: Data? = nil
+        pid: TaskId?, status: Status, result: JSON, attempts: UInt32 = 1, body: Blob? = nil
     ) {
         self.pid = pid
         self.status = status

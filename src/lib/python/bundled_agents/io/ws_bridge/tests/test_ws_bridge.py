@@ -16,6 +16,7 @@ import pytest
 
 from _testkit import boot_root
 from io_bridge import MemoryTransport
+from io_bridge import _engine
 from ws_bridge import tools as kb
 
 
@@ -50,8 +51,8 @@ def two_kernels(tmp_path, monkeypatch):
     yield ka, kb_kern
     # Wipe the shared _bridges process-memory dict between tests so
     # state from one test doesn't leak into the next.
-    kb._bridges.clear()
-    kb._test_transport_inject.clear()
+    _engine._bridges.clear()
+    _engine._test_transport_inject.clear()
 
 
 def _accept(kernel, agent_id: str, foreign: str) -> None:
@@ -146,8 +147,8 @@ async def _wire_memory_pair(ka, kb_kern):
     ka.update(a_id, peer_id=b_id)
 
     mt_a, mt_b = MemoryTransport.pair()
-    kb._test_transport_inject[a_id] = mt_a
-    kb._test_transport_inject[b_id] = mt_b
+    _engine._test_transport_inject[a_id] = mt_a
+    _engine._test_transport_inject[b_id] = mt_b
 
     r_a = (await ka.send([{"target": a_id, "payload": {"type": "boot"}}]))[0]["result"]
     r_b = (await kb_kern.send([{"target": b_id, "payload": {"type": "boot"}}]))[0][
@@ -228,21 +229,21 @@ async def test_forward_before_boot_errors(two_kernels):
 
 
 async def test_corr_id_namespacing_no_collision(two_kernels):
-    """Two bridges minting corr_ids independently must not collide:
-    the namespace prefix is the bridge id."""
+    """Two bridges minting corr_ids independently must not collide: the
+    namespace prefix is the bridge id plus the nonce its boot minted."""
     ka, kb_kern = two_kernels
     a_id, b_id = await _wire_memory_pair(ka, kb_kern)
-    sa = kb._state(a_id)
-    sb = kb._state(b_id)
+    sa = _engine._state(a_id)
+    sb = _engine._state(b_id)
     sa.corr_counter = 41  # next will be 42
     sb.corr_counter = 41
-    c1 = kb._next_corr(a_id, sa)
-    c2 = kb._next_corr(b_id, sb)
+    c1 = _engine._next_corr(sa)
+    c2 = _engine._next_corr(sb)
     assert c1 != c2
     # DASH since the frame id became the execution id — ":" would land the
     # correlator in the kernel-minted pid namespace and be refused remotely.
-    assert c1 == f"{a_id}-42"
-    assert c2 == f"{b_id}-42"
+    assert c1 == f"{sa.corr_prefix}-42" and sa.corr_prefix.startswith(f"{a_id}-")
+    assert c2 == f"{sb.corr_prefix}-42" and sb.corr_prefix.startswith(f"{b_id}-")
 
 
 async def test_on_delete_cancels_read_task_and_rejects_pending(two_kernels):
@@ -251,7 +252,7 @@ async def test_on_delete_cancels_read_task_and_rejects_pending(two_kernels):
     ConnectionError so callers don't hang forever."""
     ka, kb_kern = two_kernels
     a_id, b_id = await _wire_memory_pair(ka, kb_kern)
-    st = kb._state(a_id)
+    st = _engine._state(a_id)
 
     # Inject a pending Future that nothing will resolve.
     fake_fut = asyncio.get_event_loop().create_future()
@@ -270,7 +271,7 @@ async def test_on_delete_via_cascade(two_kernels):
     before removing the record. The bridge must clean up cleanly."""
     ka, kb_kern = two_kernels
     a_id, b_id = await _wire_memory_pair(ka, kb_kern)
-    assert kb._state(a_id).transport is not None
+    assert _engine._state(a_id).transport is not None
     r = (
         await ka.send(
             [
@@ -283,8 +284,8 @@ async def test_on_delete_via_cascade(two_kernels):
     )[0]["result"]
     assert r.get("deleted") is True
     # State left in re-bootable shape.
-    assert kb._state(a_id).transport is None
-    assert kb._state(a_id).read_task is None
+    assert _engine._state(a_id).transport is None
+    assert _engine._state(a_id).read_task is None
 
 
 async def test_inbound_call_to_unknown_target_replies_error(two_kernels):
@@ -316,7 +317,7 @@ async def test_inbound_call_to_unknown_target_replies_error(two_kernels):
     )[0]["result"]
     a_id = rec_a["id"]
     mt_a, mt_test = MemoryTransport.pair()
-    kb._test_transport_inject[a_id] = mt_a
+    _engine._test_transport_inject[a_id] = mt_a
     r = (await ka.send([{"target": a_id, "payload": {"type": "boot"}}]))[0]["result"]
     assert r.get("booted") is True
 
@@ -368,7 +369,7 @@ async def _boot_solo_bridge(kernel, *, auth=None):
     ]
     a_id = rec["id"]
     mt_a, mt_test = MemoryTransport.pair()
-    kb._test_transport_inject[a_id] = mt_a
+    _engine._test_transport_inject[a_id] = mt_a
     r = (await kernel.send([{"target": a_id, "payload": {"type": "boot"}}]))[0][
         "result"
     ]
@@ -545,7 +546,7 @@ async def test_inbound_error_frame_fails_forward_promptly(two_kernels):
     )[0]["result"]
     a_id = rec_a["id"]
     mt_a, mt_peer = MemoryTransport.pair()
-    kb._test_transport_inject[a_id] = mt_a
+    _engine._test_transport_inject[a_id] = mt_a
     (await ka.send([{"target": a_id, "payload": {"type": "boot"}}]))[0]["result"]
 
     # Fire a forward with a long timeout; if the error frame isn't
@@ -625,7 +626,7 @@ async def test_watch_remote_sends_watch_frame(two_kernels):
     )[0]["result"]
     a_id = rec_a["id"]
     mt_a, mt_peer = MemoryTransport.pair()
-    kb._test_transport_inject[a_id] = mt_a
+    _engine._test_transport_inject[a_id] = mt_a
     r = (await ka.send([{"target": a_id, "payload": {"type": "boot"}}]))[0]["result"]
     assert r.get("booted") is True
 
@@ -670,7 +671,7 @@ async def test_event_frame_re_emits_on_bridge_inbox_only_when_subscribed(two_ker
     )[0]["result"]
     a_id = rec_a["id"]
     mt_a, mt_peer = MemoryTransport.pair()
-    kb._test_transport_inject[a_id] = mt_a
+    _engine._test_transport_inject[a_id] = mt_a
     r = (await ka.send([{"target": a_id, "payload": {"type": "boot"}}]))[0]["result"]
     assert r.get("booted") is True
 
@@ -850,7 +851,7 @@ async def test_unwatch_remote_sends_unwatch_frame(two_kernels):
     )[0]["result"]
     a_id = rec_a["id"]
     mt_a, mt_peer = MemoryTransport.pair()
-    kb._test_transport_inject[a_id] = mt_a
+    _engine._test_transport_inject[a_id] = mt_a
     (await ka.send([{"target": a_id, "payload": {"type": "boot"}}]))[0]["result"]
 
     (

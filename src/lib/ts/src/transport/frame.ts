@@ -20,7 +20,7 @@
 // This file lives in transport/ (not the DOM-less kernel/) because it
 // uses TextEncoder/DataView — platform globals, not view concerns.
 
-import { pyDumps, pyRepr, strictLoads } from "../kernel/pyjson.ts";
+import { pyDumps, pyRepr, pyReprAt, strictLoads, wireFloat } from "../kernel/pyjson.ts";
 
 /** An on-wire envelope. May carry one binary blob (ArrayBuffer/typed-array). */
 export type Envelope = { [key: string]: unknown };
@@ -81,21 +81,25 @@ function setPath(obj: unknown, path: unknown, value: unknown): void {
     const step: unknown = path[n];
     const last = n === path.length - 1;
     if (Array.isArray(cur)) {
-      if (typeof step !== "number" || !Number.isInteger(step) || step < 0) {
-        throw new Error(`step ${pyRepr(step)} at a list is not a non-negative integer index`);
+      // A FLOAT step (owner 2026-10-03, fixed): python reads `1.0`, `1e0`, `1e20`
+      // as a float and refuses it here; JS holds it as the integer 1. The head is
+      // parsed by `strictLoads`, which keeps each number's spelling from the
+      // parse's source text, so `wireFloat` names the step python refuses.
+      if (typeof step !== "number" || !Number.isInteger(step) || step < 0 || wireFloat(path, n)) {
+        throw new Error(`step ${pyReprAt(path, n)} at a list is not a non-negative integer index`);
       }
       if (step >= cur.length) throw new Error(`index ${step} is past the end of a list of ${cur.length}`);
       if (last) cur[step] = value;
       else cur = cur[step];
     } else if (cur !== null && typeof cur === "object") {
-      if (typeof step !== "string") throw new Error(`step ${pyRepr(step)} at an object is not a string key`);
+      if (typeof step !== "string") throw new Error(`step ${pyReprAt(path, n)} at an object is not a string key`);
       // An OWN data property: `__proto__` assigned with `=` would replace the
       // object's prototype instead of setting a key.
       if (last) Object.defineProperty(cur, step, { value, writable: true, enumerable: true, configurable: true });
       else if (Object.hasOwn(cur, step)) cur = (cur as Record<string, unknown>)[step];
       else throw new Error(`no key ${pyRepr(step)}`);
     } else {
-      throw new Error(`step ${pyRepr(step)} goes into a ${kind(cur)}, not a container`);
+      throw new Error(`step ${pyReprAt(path, n)} goes into a ${kind(cur)}, not a container`);
     }
   }
 }

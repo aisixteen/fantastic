@@ -40,7 +40,7 @@ async fn bare_reflect(kernel: &Arc<Kernel>, agent: &Arc<Agent>, payload: &Value)
 #[test]
 fn tree_node_includes_id_and_empty_children() {
     let a = mk_agent("leaf", Some(AgentId::from("p")));
-    let v = tree_node(&a);
+    let v = tree_node(&a, &|_| true);
     assert_eq!(v["id"], "leaf");
     assert_eq!(v["parent_id"], "p");
     assert_eq!(v["children"], json!([]));
@@ -710,7 +710,7 @@ async fn tree_children_keep_creation_order() {
         .add_child(Arc::clone(&g));
 
     // `tree` frame.
-    let node = tree_node(&root);
+    let node = tree_node(&root, &|_| true);
     let kids: Vec<&str> = node["children"]
         .as_array()
         .unwrap()
@@ -955,6 +955,89 @@ async fn distilled_tree_is_the_gated_roster() {
 }
 
 #[tokio::test]
+async fn full_tree_applies_the_same_per_node_gate() {
+    // py `test_reflect_roster_gate.py::test_the_full_tree_applies_the_same_per_node_gate`
+    // — measured before the fix (audit 2026-10-03, KV-3): a depth-2 agent refused
+    // `reflect` on its sibling read that sibling's description and grants by
+    // reflecting its own parent with `detail:"full"`. A denied node keeps `id` +
+    // `children`.
+    let (kernel, root) = roster_kernel();
+    let base = json!({"$self": "*", "$parent": "*", "$children": "*"});
+    let parent = probe_child(
+        &kernel,
+        "rgf_parent",
+        &root,
+        json!({"description": "the parent", "callable_by": base}),
+    );
+    let sibling = probe_child(
+        &kernel,
+        "rgf_sibling",
+        &parent,
+        json!({
+            "description": "the prod deploy key",
+            "can_call": {"$self": "*", "$parent": "*", "$children": "*", "rgf_peer": "*"},
+            "callable_by": base,
+        }),
+    );
+    let _kid = probe_child(
+        &kernel,
+        "rgf_kid",
+        &sibling,
+        json!({"description": "deeper", "callable_by": base}),
+    );
+    let reader = probe_child(
+        &kernel,
+        "rgf_reader",
+        &parent,
+        json!({"can_call": base, "callable_by": base}),
+    );
+    let direct = crate::send::with_sender(
+        reader.id.clone(),
+        kernel.send(vec![Item::new(
+            sibling.id.clone(),
+            json!({"type": "reflect"}),
+        )]),
+    )
+    .await
+    .remove(0)
+    .result;
+    assert_eq!(direct["reason"], "unauthorized", "{direct}");
+    let r = crate::send::with_sender(
+        reader.id.clone(),
+        kernel.send(vec![Item::new(
+            parent.id.clone(),
+            json!({"type": "reflect", "detail": "full"}),
+        )]),
+    )
+    .await
+    .remove(0)
+    .result;
+    let tree = &r["tree"];
+    assert_eq!(tree["description"], "the parent", "{tree}");
+    assert_eq!(
+        find(tree, "rgf_sibling").unwrap(),
+        &json!({"id": "rgf_sibling", "children": [{"id": "rgf_kid", "children": []}]}),
+        "{tree}"
+    );
+    assert_eq!(
+        find(tree, "rgf_reader").unwrap()["handler_module"],
+        "roster_probe.tools"
+    );
+    // The operator sees everything, as everywhere else.
+    let op = kernel
+        .send(vec![Item::new(
+            parent.id.clone(),
+            json!({"type": "reflect", "detail": "full"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let op_sib = find(&op["tree"], "rgf_sibling").unwrap();
+    assert_eq!(op_sib["description"], "the prod deploy key", "{op_sib}");
+    assert!(op_sib["can_call"].get("rgf_peer").is_some(), "{op_sib}");
+}
+
+#[tokio::test]
 async fn distilled_tree_reflect_echoes_to_node_watchers() {
     // The per-node reflect is a REAL dispatch: the node's watchers hear
     // `{type:'reflect'}`, and an `internal` call row is written that nothing
@@ -1185,13 +1268,13 @@ async fn empty_display_name_falls_back_to_id() {
     meta.insert("display_name".into(), json!(""));
     let a = mk_agent_meta("nameless", Some(AgentId::from("kernel_state")), meta);
     assert_eq!(reflect_identity(&a)["display_name"], "nameless");
-    assert_eq!(tree_node(&a)["display_name"], "nameless");
+    assert_eq!(tree_node(&a, &|_| true)["display_name"], "nameless");
 
     let mut meta = Map::new();
     meta.insert("display_name".into(), json!("Named"));
     let b = mk_agent_meta("named", Some(AgentId::from("kernel_state")), meta);
     assert_eq!(reflect_identity(&b)["display_name"], "Named");
-    assert_eq!(tree_node(&b)["display_name"], "Named");
+    assert_eq!(tree_node(&b, &|_| true)["display_name"], "Named");
 }
 
 /// C12: the TREE ROOT answers `reflect` with the substrate identity even when

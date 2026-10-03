@@ -420,6 +420,7 @@ def test_vllm_make_provider_builds_the_effective_posture(monkeypatch):
     )
     (_, a), (_, b) = spy.calls
     assert a == {
+        "agent_id": "v",
         "endpoint": "http://e",
         "model": "m",
         "max_tokens": 8000,

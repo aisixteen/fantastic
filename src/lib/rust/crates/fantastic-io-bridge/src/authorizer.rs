@@ -15,7 +15,7 @@
 //! `ingress_rule`/`egress_rule` (symmetric), or the `auth` shorthand (sets
 //! both sides). Rules are TRANSITIONAL (inline plumbing), not invocational (agents).
 
-use fantastic_bundle::py_truthy;
+use fantastic_bundle::{py_repr_value, py_truthy};
 use serde_json::{json, Value};
 
 pub mod egress;
@@ -127,7 +127,7 @@ pub(crate) const DEFAULT_TOKEN_ENV: &str = "FANTASTIC_GROUP_TOKEN";
 /// Normalize a rule spec `Value` to `(type_name, secret_env_key)`. python
 /// `io_bridge._base.parse_spec`: a FALSY spec (absent, null, `""`, `0`, `[]`,
 /// `{}`) is `(None, None)`, a string is `(name, None)`, an object is
-/// `(type, env)`.
+/// `(type, env)`; a null `type`/`env` is an absent one.
 ///
 /// `type` and `env` are the only spellings.
 ///
@@ -135,21 +135,34 @@ pub(crate) const DEFAULT_TOKEN_ENV: &str = "FANTASTIC_GROUP_TOKEN";
 /// it. It used to be an `Err` that every caller turned into its own shape: the
 /// file gate answered a bare `{error:"rule object missing 'type'"}` and refused
 /// the write, and exec_bridge threw the same string out of `handle`.
-pub(crate) fn parse_spec(spec: Option<&Value>) -> Result<(Option<String>, Option<String>), String> {
+///
+/// MALFORMED ⇒ `(python repr of the spec, None)`: a spec that is neither a
+/// string nor an object, or an object whose `type` or `env` is not a string, is
+/// named by its own repr — a name no registry holds, so ingress SEALS on it
+/// (`DenyInbound::unknown`) and egress refuses it like any unknown name. It was
+/// an `Err` each gate worded its own way (`bridge: bad auth rule: unsupported
+/// rule spec Number(7)`), a non-string `type` read as no rule at all, and a
+/// non-string `env` as the DEFAULT variable — a malformed password rule admitted
+/// the default group token (audit W-8, 2026-10-03).
+pub(crate) fn parse_spec(spec: Option<&Value>) -> (Option<String>, Option<String>) {
     let Some(spec) = spec else {
-        return Ok((None, None));
+        return (None, None);
     };
     if !py_truthy(spec) {
-        return Ok((None, None));
+        return (None, None);
     }
+    let text = |key: &str, o: &serde_json::Map<String, Value>| match o.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => Ok(Some(s.clone())),
+        Some(_) => Err(()),
+    };
     match spec {
-        Value::String(s) => Ok((Some(s.clone()), None)),
-        Value::Object(o) => {
-            let name = o.get("type").and_then(Value::as_str).map(str::to_string);
-            let env = o.get("env").and_then(Value::as_str).map(str::to_string);
-            Ok((name, env))
-        }
-        other => Err(format!("unsupported rule spec {other:?}")),
+        Value::String(s) => (Some(s.clone()), None),
+        Value::Object(o) => match (text("type", o), text("env", o)) {
+            (Ok(name), Ok(env)) => (name, env),
+            _ => (Some(py_repr_value(spec)), None),
+        },
+        other => (Some(py_repr_value(other)), None),
     }
 }
 
@@ -174,7 +187,7 @@ pub fn manifold_spec(primary: Option<&Value>, auth: Option<&Value>, suffix: &str
         return Some(v.clone());
     }
     let spec = auth?;
-    let (name, env) = parse_spec(Some(spec)).ok()?;
+    let (name, env) = parse_spec(Some(spec));
     let stem = name?;
     if suffix == "_egress" && (stem == "allow_all" || stem == "deny") {
         return Some(Value::String("silent_egress".to_string()));
@@ -192,7 +205,7 @@ pub fn manifold_spec(primary: Option<&Value>, auth: Option<&Value>, suffix: &str
 /// `rule_name`: `parse_spec(spec)[0] or default`.
 pub fn rule_name(spec: Option<&Value>, default: &str) -> String {
     match parse_spec(spec) {
-        Ok((Some(name), _)) if !name.is_empty() => name,
+        (Some(name), _) if !name.is_empty() => name,
         _ => default.to_string(),
     }
 }
@@ -301,5 +314,78 @@ mod describe_tests {
             posture(json!({"ingress_rule": "allow_all_ingress"})),
             json!({"ingress_rule": "allow_all_ingress", "egress_rule": "silent_egress", "sealed": false})
         );
+    }
+}
+
+#[cfg(test)]
+mod malformed_spec_tests {
+    use super::*;
+    use fantastic_bundle::py_repr;
+
+    /// python `parse_spec` (audit W-8): a spec that is not a string or an object,
+    /// or whose `type`/`env` is not a string, is named by its python repr — a
+    /// name no registry holds — so ingress SEALS on it, egress refuses it, and
+    /// reflect reports it, in python's words. It was an `Err` worded per gate, a
+    /// plain seal, or (a non-string `env`) the DEFAULT token variable.
+    #[test]
+    fn a_malformed_spec_is_named_by_its_python_repr() {
+        for (spec, name) in [
+            (json!(7), "7"),
+            (json!(["allow_all_ingress"]), "['allow_all_ingress']"),
+            (json!({"type": ["x"]}), "{'type': ['x']}"),
+            (json!({"type": {"a": 1}}), "{'type': {'a': 1}}"),
+            (
+                json!({"type": "password_ingress", "env": 7}),
+                "{'type': 'password_ingress', 'env': 7}",
+            ),
+        ] {
+            assert_eq!(ingress::unknown(Some(&spec)).as_deref(), Some(name));
+            let Decision::Deny(d) = ingress::resolve(Some(&spec)).authorize(&Action {
+                kind: "call",
+                target: "t",
+                verb: "reflect",
+                token: Some("x"),
+            }) else {
+                panic!("a malformed rule must never allow: {spec}");
+            };
+            assert_eq!(
+                d.reason,
+                format!("edge sealed — unknown ingress rule {}", py_repr(name))
+            );
+            assert_eq!(
+                egress::resolve(Some(&spec)).err(),
+                Some(format!("unknown egress rule type {}", py_repr(name)))
+            );
+            let rec = json!({ "ingress_rule": spec });
+            assert_eq!(
+                describe(rec.as_object().expect("a record"))["ingress_rule"],
+                name
+            );
+            assert_eq!(
+                ingress::unknown_refusal(rec.as_object().expect("a record"), &ingress::REGISTRY),
+                Some(format!(
+                    "ingress_rule={} is not a rule this bundle implements — legal values: \
+                     allow_all_ingress, deny_ingress, password_ingress",
+                    py_repr_value(&spec)
+                ))
+            );
+        }
+        // null inside a spec is ABSENT, as it is for the whole spec.
+        assert!(ingress::unknown(Some(&json!({"type": null}))).is_none());
+        assert_eq!(
+            parse_spec(Some(&json!({"type": "password_ingress", "env": null}))),
+            (Some("password_ingress".to_string()), None)
+        );
+        // an implemented name, or no `ingress_rule`, is no refusal.
+        for rec in [
+            json!({"ingress_rule": "password_ingress"}),
+            json!({"auth": "nope"}),
+        ] {
+            assert!(ingress::unknown_refusal(
+                rec.as_object().expect("a record"),
+                &ingress::REGISTRY
+            )
+            .is_none());
+        }
     }
 }

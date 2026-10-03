@@ -8,7 +8,8 @@
 //                 settle digest are byte-identical across runtimes.
 //   pySplitlines — `str.splitlines()`: every line boundary python knows.
 //   strictLoads — the wire's STRICT JSON (owner D13, 2026-10-01): only values every
-//                 runtime can hold.
+//                 runtime can hold. It keeps one fact JS drops: which integral
+//                 numbers python reads as a FLOAT (`wireFloat`).
 
 import type { Json } from "./json.ts";
 
@@ -49,21 +50,25 @@ function reprStr(s: string): string {
  *  round-trip — JS and python pick the same ones — in EXPONENT form exactly when
  *  the decimal exponent is below -4 or at least 16 (`1e-05`, `1.5e+16`; JS
  *  switches only below -6 / at 21), with a sign and at least two exponent digits.
- *  An integral JS number reads as a python int (`String(n)`); what the wire does
- *  with integers beyond 2^53 is an open owner decision, left as it is. */
-function reprNum(n: number): string {
+ *  An integral JS number reads as a python int (`String(n)`) unless `float` says
+ *  python holds it as a float (`1.0`, `1e+20`, `-0.0` — `wireFloat`); what the
+ *  wire does with integers beyond 2^53 is an open owner decision, left as it is. */
+function reprNum(n: number, float = false): string {
   if (Number.isNaN(n)) return "nan";
   if (n === Infinity) return "inf";
   if (n === -Infinity) return "-inf";
-  if (Number.isInteger(n)) return String(n);
+  const integral = Number.isInteger(n);
+  if (integral && !float) return String(n);
+  if (Object.is(n, -0)) return "-0.0";
   const [mant, exp] = n.toExponential().split("e") as [string, string];
   const e = Number(exp);
   if (e < -4 || e >= 16) return `${mant}e${e < 0 ? "-" : "+"}${String(Math.abs(e)).padStart(2, "0")}`;
-  return String(n);
+  return integral ? `${String(n)}.0` : String(n);
 }
 
 /** python `repr(x)` of a JSON value. A JS array reads as a python list; pass
- *  `tuple: true` for a python tuple (`('a', 'b')`). */
+ *  `tuple: true` for a python tuple (`('a', 'b')`). A number off the wire that
+ *  python reads as a float reads as one (`wireFloat`). */
 export function pyRepr(x: unknown, opts: { tuple?: boolean } = {}): string {
   if (x === null || x === undefined) return "None";
   if (x === true) return "True";
@@ -71,17 +76,38 @@ export function pyRepr(x: unknown, opts: { tuple?: boolean } = {}): string {
   if (typeof x === "string") return reprStr(x);
   if (typeof x === "number") return reprNum(x);
   if (Array.isArray(x)) {
-    const items = x.map((v) => pyRepr(v));
+    const items = x.map((_, i) => pyReprAt(x, i));
     if (opts.tuple === true) return items.length === 1 ? `(${items[0]},)` : `(${items.join(", ")})`;
     return `[${items.join(", ")}]`;
   }
   if (typeof x === "object") {
     return `{${Object.entries(x as { [k: string]: unknown })
       .filter(([, v]) => v !== undefined)
-      .map(([k, v]) => `${reprStr(k)}: ${pyRepr(v)}`)
+      .map(([k]) => `${reprStr(k)}: ${pyReprAt(x, k)}`)
       .join(", ")}}`;
   }
   return reprStr(String(x));
+}
+
+/** python `repr(holder[key])` — a slot of a container, so a number off the wire
+ *  that python reads as a float reads as one (`wireFloat`). */
+export function pyReprAt(holder: object, key: string | number): string {
+  const v = (holder as { [k: string]: unknown })[key];
+  return typeof v === "number" && wireFloat(holder, key) ? reprNum(v, true) : pyRepr(v);
+}
+
+/** python `type(holder[key]).__name__` — how a refusal names a value it must not
+ *  echo (`int`, `NoneType`, `bytes`). A number off the wire that python reads as a
+ *  float is a `float` (`wireFloat`); a binary frame's blob is `bytes`. */
+export function pyTypeNameAt(holder: object, key: string | number): string {
+  const v = (holder as { [k: string]: unknown })[key];
+  if (v === null || v === undefined) return "NoneType";
+  if (typeof v === "boolean") return "bool";
+  if (typeof v === "number") return Number.isInteger(v) && !wireFloat(holder, key) ? "int" : "float";
+  if (typeof v === "string") return "str";
+  if (v instanceof Uint8Array) return "bytes";
+  if (Array.isArray(v)) return "list";
+  return "dict";
 }
 
 /** python `ensure_ascii` escapes every code unit outside printable ASCII
@@ -192,12 +218,45 @@ function checkSurrogates(x: unknown): void {
   }
 }
 
+/** The slots of wire-parsed containers whose number python reads as a FLOAT
+ *  while JS holds it as an integer: spelled with a fraction or an exponent
+ *  (`1.0`, `1e0`, `1e20`, `-0.0`) — python's `json.loads` makes a float of exactly
+ *  those. Keyed by the container the parse built, so the fact lives as long as
+ *  that object and is gone from any copy of it. */
+const FLOAT_SLOTS = new WeakMap<object, Set<string>>();
+
+/** Whether `holder[key]` came off the wire as a number python reads as a float
+ *  though JS holds it as an integer (`strictLoads`). A step there is not a list
+ *  index: python refuses `1.0` where it takes `1`. */
+export function wireFloat(holder: object, key: string | number): boolean {
+  return FLOAT_SLOTS.get(holder)?.has(String(key)) === true;
+}
+
+/** The `JSON.parse` reviver of `strictLoads`: reads each number's SPELLING from
+ *  the parse's source text (the reviver's `context.source`) and records a slot
+ *  whose integral value python reads as a float. A runtime whose `JSON.parse`
+ *  gives no source text cannot tell `1.0` from `1`: refused, loud. */
+function markFloats(this: object, key: string, value: unknown, context?: { source?: string }): unknown {
+  if (typeof value !== "number") return value;
+  const source = context?.source;
+  if (source === undefined) {
+    throw new SyntaxError("JSON.parse here gives no source text (reviver context.source); the wire needs it");
+  }
+  if (Number.isInteger(value) && /[.eE]/.test(source)) {
+    let slots = FLOAT_SLOTS.get(this);
+    if (slots === undefined) FLOAT_SLOTS.set(this, (slots = new Set()));
+    slots.add(key);
+  }
+  return value;
+}
+
 /** python `io_bridge._codec.loads`: JSON off the wire, STRICTLY. `NaN` /
  *  `Infinity` are not JSON (`JSON.parse` already refuses them); an integer
  *  outside int64, a number that overflows a double and a lone surrogate are
- *  refused too — rust and swift cannot hold them. Throws a `SyntaxError`. */
+ *  refused too — rust and swift cannot hold them. Throws a `SyntaxError`. An
+ *  integral number python reads as a float is recorded (`wireFloat`). */
 export function strictLoads(text: string): Json {
-  const out = JSON.parse(text) as Json; // not JSON at all: refused here
+  const out = JSON.parse(text, markFloats) as Json; // not JSON at all: refused here
   checkNumbers(text);
   checkSurrogates(out);
   return out;

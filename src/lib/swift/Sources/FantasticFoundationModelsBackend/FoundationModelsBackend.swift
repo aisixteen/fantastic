@@ -56,7 +56,7 @@ public final class FoundationModelsBackendBundle: AgentBundle, @unchecked Sendab
                     "Apple Foundation Models LLM agent — the on-device system model (raw "
                     + "prompt-and-parse tool-calling; no endpoint, no model choice, no key).",
                 modelWindow: Int64(engine.contextSize),
-                reflectExtra: { agent in Self.reflectExtra(agent, engine: engine) },
+                reflectExtra: { agent, _ in Self.reflectExtra(agent, engine: engine) },
                 makeProvider: { agent, _, _ in try Self.makeProvider(agent, engine: engine) }
             ))
     }
@@ -71,6 +71,11 @@ public final class FoundationModelsBackendBundle: AgentBundle, @unchecked Sendab
     /// caller; the cancellation itself tears the on-device stream down.
     public func onCancel(agentId: AgentId, taskId: TaskId, kernel: Kernel) async throws {
         await core.onCancel(agentId: agentId, taskId: taskId, kernel: kernel)
+    }
+
+    /// The shared delete hook: the deleted id's AI-core rows go with it.
+    public func onDelete(agentId: AgentId, kernel: Kernel) async throws {
+        await core.onDelete(agentId: agentId, kernel: kernel)
     }
 
     // MARK: - record -> provider

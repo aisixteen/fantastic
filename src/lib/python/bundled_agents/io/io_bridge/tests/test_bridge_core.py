@@ -34,13 +34,24 @@ def test_make_verbs_builds_the_six_verbs():
     }
 
 
-def test_next_corr_namespaces_by_agent_id():
+def test_next_corr_namespaces_by_agent_id_and_boot():
+    """`<bridge id>-<boot nonce>-<n>`: the id keeps bridges apart, the nonce keeps
+    BOOTS apart — the counter restarts at every boot, and a frame id names the
+    execution on the receiver (audit IO-5)."""
     core._bridges.clear()
     sa = core._state("a")
     sb = core._state("b")
-    assert core._next_corr("a", sa) == "a-1"
-    assert core._next_corr("a", sa) == "a-2"
-    assert core._next_corr("b", sb) == "b-1"  # independent counter per agent
+    sa.corr_prefix, sb.corr_prefix = (
+        core._new_corr_prefix("a"),
+        core._new_corr_prefix("b"),
+    )
+    assert core._next_corr(sa) == f"{sa.corr_prefix}-1"
+    assert core._next_corr(sa) == f"{sa.corr_prefix}-2"
+    assert core._next_corr(sb) == f"{sb.corr_prefix}-1"  # independent per agent
+    assert sa.corr_prefix.startswith("a-") and len(sa.corr_prefix) == len("a-") + 12
+    assert ":" not in sa.corr_prefix, "the kernel-minted namespace stays out"
+    reboot = core._new_corr_prefix("a")
+    assert reboot != sa.corr_prefix, "every boot mints its own nonce"
     core._bridges.clear()
 
 

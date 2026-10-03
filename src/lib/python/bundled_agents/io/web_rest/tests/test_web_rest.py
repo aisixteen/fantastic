@@ -76,6 +76,11 @@ def test_post_endpoint_mountable_on_fastapi(seeded_kernel):
 
 
 def test_post_endpoint_rejects_non_object_body(seeded_kernel):
+    # The body is read only once the leg admits the request (gate first, audit
+    # IO-4) — so the leg is OPEN here; a sealed one answers 403 unread.
+    seeded_kernel.create(
+        "web_rest.tools", id="rest_xyz", ingress_rule="allow_all_ingress"
+    )
     app = FastAPI()
     app.add_api_route(
         "/rest_xyz/{target_id}",
@@ -89,6 +94,11 @@ def test_post_endpoint_rejects_non_object_body(seeded_kernel):
 
 
 def test_post_endpoint_rejects_bad_json(seeded_kernel):
+    # The body is read only once the leg admits the request (gate first, audit
+    # IO-4) — so the leg is OPEN here; a sealed one answers 403 unread.
+    seeded_kernel.create(
+        "web_rest.tools", id="rest_xyz", ingress_rule="allow_all_ingress"
+    )
     app = FastAPI()
     app.add_api_route(
         "/rest_xyz/{target_id}",
@@ -272,3 +282,31 @@ def test_post_endpoint_rejects_a_non_finite_number(seeded_kernel):
         )
         assert r.status_code == 400, r.text
         assert "not valid JSON" in r.json()["error"]
+
+
+def test_post_endpoint_rejects_a_too_deep_body(seeded_kernel):
+    """A body nested past what the json scanner can enter is malformed JSON — 400
+    like `{not json`, not the bare 500 'Internal Server Error' the escaped
+    `RecursionError` answered."""
+    seeded_kernel.create(
+        "web_rest.tools", id="rest_deep", ingress_rule="allow_all_ingress"
+    )
+    app = FastAPI()
+    app.add_api_route(
+        "/rest_deep/{target_id}",
+        _make_post_endpoint("rest_deep", seeded_kernel),
+        methods=["POST"],
+    )
+    deep = 100_000
+    with TestClient(app, raise_server_exceptions=False) as c:
+        for body in (
+            "[" * deep + "]" * deep,
+            '{"type": "reflect", "x": ' + "[" * deep + "]" * deep + "}",
+        ):
+            r = c.post(
+                "/rest_deep/kernel_state",
+                content=body.encode(),
+                headers={"content-type": "application/json"},
+            )
+            assert r.status_code == 400, r.text
+            assert "not valid JSON" in r.json()["error"]

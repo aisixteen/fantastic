@@ -1,6 +1,7 @@
 import type { Kernel } from "../kernel/kernel.ts";
 import type { Json, Payload } from "../kernel/json.ts";
 import type { Item } from "../kernel/outcome.ts";
+import type { Mark } from "../kernel/secret.ts";
 
 // The link a DOM view-agent uses to talk to the HOST kernel over the bridge.
 // A thin, typed facade over Kernel — mirrors the old transport.js
@@ -37,10 +38,12 @@ export class Host {
    *  arrives in `result` like any other reply, which is exactly what the
    *  iframe/host callers already branch on.
    *
-   *  `secret` — dotted paths (`payload.<field…>` / `result[.<field…>]`) — is the
-   *  item's `secret`: this kernel's records of the call show `<secret>`, and a
-   *  host-bound call carries the marks on its frame so the host masks too. */
-  async call(target: string, payload: Payload, secret?: string[]): Promise<Json> {
+   *  `secret` — marks, each a dotted string (`payload.<field…>` /
+   *  `result[.<field…>]`) or an array of steps (`["payload", "a.b"]`, a key
+   *  holding a dot) — is the item's `secret`: this kernel's records of the call
+   *  show `<secret>`, and a host-bound call carries the marks on its frame so the
+   *  host masks too. */
+  async call(target: string, payload: Payload, secret?: Mark[]): Promise<Json> {
     const item: Item = { target, payload };
     if (secret !== undefined) item.secret = secret;
     return (await this.kernel.send([item]))[0]!.result;
@@ -50,7 +53,7 @@ export class Host {
    *  resolution — pass `"kernel"` and the host resolves it to its own root
    *  (`kernel_state`/`core`). Used to read the host bundle catalog + create host
    *  peers without naming a host-specific id. `secret` rides the call frame. */
-  callHost(target: string, payload: Payload, secret?: string[]): Promise<Json> {
+  callHost(target: string, payload: Payload, secret?: Mark[]): Promise<Json> {
     return this.kernel.callHost(target, payload, secret);
   }
 
@@ -61,7 +64,7 @@ export class Host {
 
   /** Verb call carrying a binary blob (e.g. paste_image Uint8Array); `secret`
    *  rides the call frame. */
-  callBinary(target: string, payload: Record<string, unknown>, secret?: string[]): Promise<Json> {
+  callBinary(target: string, payload: Record<string, unknown>, secret?: Mark[]): Promise<Json> {
     return this.kernel.forwardBinary(target, payload, secret);
   }
 

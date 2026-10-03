@@ -40,11 +40,13 @@
 // match it, so the baseline gives foreign agents nothing.
 //
 // PRIVILEGED verbs (the tree mutators, the bulk reads, the kernel's lifecycle and
-// task controls, the loader's record verbs) are never covered by a wildcard under
-// a STRUCTURAL token (the baseline, and `$subtree:<X>`) or in a heritable entry —
-// a NAMED verb covers one — EXCEPT when the other end is the holder
-// itself (acting on your OWN subtree is baseline). A `*` under a NAMED id is the
-// operator's own statement and covers everything. This is an EGRESS rule
+// task controls, the loader's record verbs, every agent's `stop`/`mount`/
+// `unmount`/`boot`) are never covered by a wildcard under a STRUCTURAL token (the
+// baseline, and `$subtree:<X>`) or in a heritable entry — a NAMED verb covers one
+// — EXCEPT when the other end is the holder itself (acting on your OWN subtree is
+// baseline). A `*` under a NAMED id is the operator's own statement and covers
+// everything. `watch` whose src is the ROOT loses a structural wildcard's cover
+// the same way. This is an EGRESS rule
 // (`enforcePrivileged`): on the ingress side a `$children:*` callee legitimately
 // accepts a privileged verb, since egress already guards escalation.
 
@@ -90,6 +92,11 @@ public let privilegedVerbs: Set<String> = [
     // The LOADER's record verbs — they write, delete and read the persisted tree,
     // grants included.
     "persist_record", "forget_record", "load_tree",
+    // An agent's own LIFECYCLE and a host's ROUTES. By verb name, whatever the
+    // bundle: a web_ws/web_rest leg's `$parent:*` let any client it admitted stop
+    // its web host for every client, or unmount a sealed sibling's routes (audit
+    // 2026-10-03, BV-1).
+    "stop", "mount", "unmount", "boot",
 ]
 
 /// The structural tokens — the baseline's vocabulary. A privileged verb loses a
@@ -195,8 +202,14 @@ public func authorizeCall(
 ) -> Decision {
     // Privileged verbs lose wildcard cover UNLESS the other end is the holder
     // itself (acting on your own subtree is baseline) — egress only.
+    // `watch` whose src is the ROOT (`loaderId`) is held to the same rule: the
+    // root's inbox carries every kernel verb's payload, `persist_blob` contents
+    // included, and `$parent:*` handed it to every direct child (audit 2026-10-03,
+    // KV-2). Every other watch is an ordinary verb.
     let privileged =
-        enforcePrivileged && privilegedVerbs.contains(verb) && otherId != holderId
+        enforcePrivileged
+        && (privilegedVerbs.contains(verb) || (verb == "watch" && loaderId == otherId))
+        && otherId != holderId
     if case .object(let map) = grant {
         for (key, g) in map {
             let matched: Bool
@@ -225,16 +238,41 @@ public func authorizeCall(
     return Decision(allowed: false, reason: "", hint: fromAbove)
 }
 
+/// The verbs whose OPERAND is a record (`payload.id`): the root answers them, the
+/// agent they name is what is acted upon, so that agent is what the gate judges.
+/// Python `_authz.RECORD_OPERAND_VERBS`.
+public let recordOperandVerbs: Set<String> = ["update_agent", "delete_agent"]
+
+/// EGRESS on a record operand (`update_agent` / `delete_agent` outside the
+/// holder's own subtree): does the holder's `can_call` NAME the operand with the
+/// verb — a literal key equal to its id whose list holds the verb by name?
+///
+/// Stricter than `authorizeCall`, on purpose: no structural token resolves to the
+/// operand, no `<guid>|*`, and no wildcard covers it — `<id>: "*"` and
+/// `<id>: ["*"]` are reach to the agent, never authority over its record.
+/// Python `_authz.names_operand`.
+public func namesOperand(_ grant: JSON, verb: String, operandId: String) -> Bool {
+    guard case .object(let map) = grant, case .array(let verbs)? = map[operandId] else {
+        return false
+    }
+    return verbs.contains(.string(verb))
+}
+
 /// The heritable half of EGRESS: may a sender call `targetId` through a heritable
 /// `can_call` entry one of its ANCESTORS holds? `ancestorGrants` is their `can_call`
 /// maps, nearest first. A NAMED verb covers a privileged one; `*` covers only an
-/// ordinary verb. First allow wins.
-public func authorizeHeritable(ancestorGrants: [JSON], verb: String, targetId: String) -> Decision {
+/// ordinary verb — and never `watch` on the ROOT (`loaderId`), which needs an
+/// explicit named grant (audit KV-2). First allow wins.
+public func authorizeHeritable(
+    ancestorGrants: [JSON], verb: String, targetId: String, loaderId: String?
+) -> Decision {
+    let privileged =
+        privilegedVerbs.contains(verb) || (verb == "watch" && loaderId == targetId)
     for grant in ancestorGrants {
         guard case .object(let map) = grant, let entry = map[targetId],
             let verbs = heritableVerbs(entry)
         else { continue }
-        if verbs.contains(verb) || (verbs.contains("*") && !privilegedVerbs.contains(verb)) {
+        if verbs.contains(verb) || (verbs.contains("*") && !privileged) {
             return Decision(allowed: true, reason: "", hint: "")
         }
     }

@@ -16,8 +16,8 @@ Idempotency is the substrate's property, not the author's chore.
 
 from __future__ import annotations
 
-import sys
 import types
+from kernel import register_unlisted
 
 _counts: dict[str, int] = {}
 
@@ -38,7 +38,7 @@ async def _desk_handler(id, payload, kernel):
 
 _desk.handler = _desk_handler
 _desk.VERBS = {}
-sys.modules["adv1_desk.tools"] = _desk
+register_unlisted("adv1_desk.tools", _desk)
 
 # The orchestrator mirrors the LangGraph failure shape: a "node" that does a
 # side effect, then suspends on approval. Its resume path is DELIBERATELY the
@@ -88,7 +88,7 @@ async def _orc_handler(id, payload, kernel):
 
 _orc.handler = _orc_handler
 _orc.VERBS = {}
-sys.modules["adv1_orc.tools"] = _orc
+register_unlisted("adv1_orc.tools", _orc)
 
 
 async def _wire(kernel):

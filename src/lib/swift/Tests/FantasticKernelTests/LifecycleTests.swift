@@ -757,21 +757,22 @@ struct HookFailureLineTests {
                     + "No module named 'absent_bundle'\n"), "\(lines)")
     }
 
-    /// Python's `ModuleNotFoundError` text, measured with `importlib`: the
-    /// first dotted prefix that does not resolve; a child of a plain module
-    /// adds `; '<parent>' is not a package`; a package imports (`nil`).
-    @Test func moduleNotFoundIsPythonsImportText() {
+    /// Python's `ModuleNotFoundError` text for a name outside its catalog
+    /// (`import_handler`, audit 2026-10-03 ARCH2-1): nothing is imported, the
+    /// TOP-LEVEL package is named — under an installed package too, and for
+    /// the bare package; only a registered name resolves (`nil`).
+    @Test func moduleNotFoundIsPythonsCatalogText() {
         let registry = BundleRegistry()
         registry.register("file_bridge.tools", EchoBundle())
+        registry.registerUnlisted("probe.tools", EchoBundle())
         #expect(registry.moduleNotFound("absent_bundle.tools") == "No module named 'absent_bundle'")
         #expect(registry.moduleNotFound("absent_bundle") == "No module named 'absent_bundle'")
+        #expect(registry.moduleNotFound("file_bridge.nope") == "No module named 'file_bridge'")
         #expect(
-            registry.moduleNotFound("file_bridge.nope") == "No module named 'file_bridge.nope'")
-        #expect(
-            registry.moduleNotFound("file_bridge.tools.sub")
-                == "No module named 'file_bridge.tools.sub'; 'file_bridge.tools' is not a package")
+            registry.moduleNotFound("file_bridge.tools.sub") == "No module named 'file_bridge'")
+        #expect(registry.moduleNotFound("file_bridge") == "No module named 'file_bridge'")
         #expect(registry.moduleNotFound("file_bridge.tools") == nil)
-        #expect(registry.moduleNotFound("file_bridge") == nil)
+        #expect(registry.moduleNotFound("probe.tools") == nil)
     }
 }
 

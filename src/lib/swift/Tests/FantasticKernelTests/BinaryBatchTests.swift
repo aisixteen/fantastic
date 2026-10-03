@@ -27,7 +27,7 @@ private final class Sink: AgentBundle, @unchecked Sendable {
     }
     func handleBinary(
         agentId: AgentId, header: JSON, body: Blob?, kernel: Kernel
-    ) async throws -> (JSON?, Data?) {
+    ) async throws -> (JSON?, Blob?) {
         // the chunk is the payload's `bytes` — python's `payload.get("bytes", b"")`
         let blob = bodyAt(body, "bytes") ?? Data()
         lock.withLock { seen = blob }
@@ -177,7 +177,7 @@ struct BinaryBatchTests {
             }
             func handleBinary(
                 agentId: AgentId, header: JSON, body: Blob?, kernel: Kernel
-            ) async throws -> (JSON?, Data?) {
+            ) async throws -> (JSON?, Blob?) {
                 throw Boom()
             }
         }
@@ -218,7 +218,7 @@ struct BinaryBatchTests {
             }
             func handleBinary(
                 agentId: AgentId, header: JSON, body: Blob?, kernel: Kernel
-            ) async throws -> (JSON?, Data?) {
+            ) async throws -> (JSON?, Blob?) {
                 let data = bodyAt(body, "data").map { JSON.integer(Int64($0.count)) } ?? .null
                 let bytes = bodyAt(body, "bytes").map { JSON.integer(Int64($0.count)) } ?? .null
                 return (.object(["header": header, "data": data, "bytes": bytes]), nil)
@@ -345,8 +345,8 @@ struct BinaryBatchTests {
             }
             func handleBinary(
                 agentId: AgentId, header: JSON, body: Blob?, kernel: Kernel
-            ) async throws -> (JSON?, Data?) {
-                (.object(["had_body": .bool(body != nil), "eof": true]), Data([4, 2]))
+            ) async throws -> (JSON?, Blob?) {
+                (.object(["had_body": .bool(body != nil), "eof": true]), Blob("bytes", Data([4, 2])))
             }
         }
         let registry = BundleRegistry()
@@ -369,7 +369,7 @@ struct BinaryBatchTests {
             Item(AgentId("chunk"), .object(["type": "read_stream", "path": "x"]), rawReply: true)
         ])[0]
         #expect(out.result == .object(["had_body": false, "eof": true]))
-        #expect(out.body == Data([4, 2]))
+        #expect(out.body == Blob("bytes", Data([4, 2])))
         let got = try #require(tap.tryTake())
         #expect(got.body == nil && got.payload.serialize() == #"{"type":"read_stream","path":"x"}"#)
         let row = try #require(

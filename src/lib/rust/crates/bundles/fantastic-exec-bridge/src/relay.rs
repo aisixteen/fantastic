@@ -10,8 +10,10 @@
 //! body belongs as a list of steps — a key as a string, taken literally, a list
 //! index as an int) — how a `read_stream` chunk or a `write_stream` payload crosses
 //! the fd raw, never base64. A raw fd has no WS text/binary frame kind, hence the byte.
-//! A kind-B `send` carries its body on the kernel's binary channel (`Item::with_binary`),
-//! a kind-T one rides the text channel — the same split a WS transport makes.
+//! A kind-B `send` carries its request body beside the payload (`Item::with_binary`); a
+//! kind-T one carries none. EVERY reply that holds bytes goes back kind B, whatever
+//! the send's kind — python's relay `encode_frame`s each reply dict, with no list of
+//! verbs, so a kind-T `read_stream` gets its chunk raw at `["data", "bytes"]`.
 //!
 //! | child → parent | parent → child |
 //! |---|---|
@@ -157,13 +159,46 @@ async fn drop_proxy(kernel: &Arc<Kernel>, src: &AgentId, sub: Sub) {
     kernel.cancel_task(&sub.drain).await;
 }
 
+/// The verbs that DRIVE one job — python `DRIVE_VERBS`. A running program's
+/// owner-inbox relay drops one of these whose `job_id` names ANOTHER job (audit
+/// BV-9): the fanout mirrors every payload sent to the leg, so a program started
+/// by one caller saw another caller's keystrokes, paste bytes and drive calls
+/// aimed at that caller's job. One with no `job_id` (bulk) or naming this job is
+/// forwarded.
+const DRIVE_VERBS: [&str; 6] = [
+    "write",
+    "resize",
+    "paste_image",
+    "stop",
+    "interrupt",
+    "clear",
+];
+
 /// The job's own telemetry echoes back through the owner's watcher fanout; drop it so a
-/// tool does not receive its own `progress`/`job_started`/`job_done` as inbox mail.
-fn inbox_framer(p: &Value) -> Option<Value> {
-    match p.get("type").and_then(Value::as_str) {
-        Some("progress") | Some("output") | Some("job_started") | Some("job_done") => None,
-        _ => Some(json!({"op": "inbox", "payload": p})),
+/// tool does not receive its own `progress`/`job_started`/`job_done` as inbox mail —
+/// drop a drive verb addressed to ANOTHER job ([`DRIVE_VERBS`], audit BV-9) — and
+/// drop whatever the leg's gate refuses (python `_inbox_framer`, audit BV-8). The
+/// substrate's fanout mirrors every payload to the owner's watchers BEFORE any
+/// handler runs, so a sealed leg whose handler refused the call still had it
+/// delivered here.
+fn inbox_framer(p: &Value, owner: &AgentId, job_id: TaskId, kernel: &Kernel) -> Option<Value> {
+    let verb = match p.get("type").and_then(Value::as_str) {
+        Some("progress") | Some("output") | Some("job_started") | Some("job_done") => return None,
+        v => v.unwrap_or(""),
+    };
+    // Dropped only when an int `job_id` names ANOTHER job — no id (bulk) or this
+    // job's id is forwarded; a bool, a string or a float names no job.
+    if DRIVE_VERBS.contains(&verb)
+        && p.get("job_id")
+            .and_then(Value::as_i64)
+            .is_some_and(|j| j != job_id.get())
+    {
+        return None;
     }
+    if crate::gate(&crate::snapshot_meta(owner, kernel), owner, verb).is_some() {
+        return None;
+    }
+    Some(json!({"op": "inbox", "payload": p}))
 }
 
 /// Read one `[4-byte BE len | payload]` frame. `None` = the socket is finished:
@@ -345,11 +380,17 @@ pub async fn serve(
                     continue;
                 }
                 let w = Arc::clone(&wr);
+                // The framer reads the LIVE record per payload; a weak handle, so
+                // the drain (a row in the kernel's own task table) never keeps the
+                // kernel alive.
+                let weak = Arc::downgrade(&kernel);
+                let o = owner.clone();
                 // REGISTERED as a kernel task `inbox_drain` (A4.13) — see the
                 // `watch_drain` above.
                 let drain = kernel.spawn_task(&owner, "inbox_drain", async move {
                     while let Some(p) = rx.recv().await {
-                        if let Some(f) = inbox_framer(&p.payload) {
+                        let Some(k) = weak.upgrade() else { break };
+                        if let Some(f) = inbox_framer(&p.payload, &o, job_id, &k) {
                             push_item(&w, f, &p).await;
                         }
                     }

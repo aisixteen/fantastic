@@ -16,7 +16,7 @@ import assert from "node:assert/strict";
 import { writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { bootHost, teardownHost, ACTIVE_LLM, llmReachable, LLM_BACKEND, writeRecord } from "./_host.ts";
+import { bootHost, teardownHost, ACTIVE_LLM, llmReachable, LLM_SKIP, writeRecord } from "./_host.ts";
 import type { Host } from "./_host.ts";
 import { Browser, chromeAvailable } from "./_chrome.ts";
 
@@ -130,7 +130,7 @@ async function wsCall(origin: string, target: string, payload: Record<string, un
 before(async () => {
   if (!chromeAvailable()) return void (skipReason = "system Chrome not found");
   if (!(await llmReachable()))
-    return void (skipReason = `${LLM_BACKEND} backend unreachable (key/server/model)`);
+    return void (skipReason = LLM_SKIP);
   try {
     // The AI builds the demo itself, so it gets the reach the task needs —
     // written on both halves by the harness: the kernel (reflect + records),

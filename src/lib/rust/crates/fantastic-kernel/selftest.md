@@ -81,7 +81,7 @@ jq -e '[.tree | recurse(.children[]?) | select(.id == "ghost_1")] | length == 0'
 Expect: ghost_1 is logged + skipped, NOT in the reflected tree. The
 record `agent.yaml` is left untouched on disk for the next runtime.
 
-### Test 5: lock.yaml + PID liveness
+### Test 5: lock.yaml + flock
 
 ```bash
 $FANTASTIC kernel_state create_agent handler_module=web.tools port=18181
@@ -135,5 +135,5 @@ Expect: both test files pass. Together they assert:
 | 2. persistence round-trip (merge) |  |  |
 | 3. cascade delete |  |  |
 | 4. weak-load skip+log |  |  |
-| 5. lock.yaml + PID liveness |  |  |
+| 5. lock.yaml + flock |  |  |
 | 6. in-memory boot + save/load |  |  |

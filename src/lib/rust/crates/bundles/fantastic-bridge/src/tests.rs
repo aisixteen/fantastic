@@ -7,6 +7,7 @@
 //! selftest, not in-process Rust unit tests.
 
 use super::*;
+use fantastic_io_bridge::authorizer;
 use fantastic_kernel::Agent;
 use fantastic_kernel::Item;
 use fantastic_kernel::Step;
@@ -123,6 +124,76 @@ fn accept(kernel: &Arc<Kernel>, id: &str, foreign: &str) {
         .unwrap_or_default();
     cb.insert(foreign.to_string(), json!("*"));
     patch(kernel, id, "callable_by", Value::Object(cb));
+}
+
+/// The ref every relay leg's password sits at, in its own store.
+pub(super) const RELAY_REF: &str = "relay/group";
+
+/// Register the credential store a relay leg reads its password from — on its
+/// in-memory keychain double, so no test touches a file or the real keychain.
+pub(super) fn register_relay_store(reg: &mut fantastic_kernel::BundleRegistry) {
+    reg.register(
+        fantastic_credential_store::HANDLER_MODULE,
+        fantastic_credential_store::test_support::bundle(),
+    );
+}
+
+/// THE RELAY PASSWORD a relay leg reads before every dial (audit IO-7/F4): a
+/// credential_store `<leg>_pw` holding `password` at [`RELAY_REF`], bound to the
+/// relay URL's host and readable by `leg`, its `callable_by` opening `get` for
+/// the leg. Made BEFORE the leg (a started kernel boots a leg at create). Returns
+/// the store id; [`with_relay_password`] puts the leg's side on its record.
+pub(super) async fn relay_password(
+    k: &Arc<Kernel>,
+    leg: &str,
+    relay_url: &str,
+    pw: &str,
+) -> String {
+    let root = k.root().expect("a root").id.0.clone();
+    let store = format!("{leg}_pw");
+    let host = relay_url
+        .split_once("://")
+        .map_or(relay_url, |(_, rest)| rest)
+        .trim_end_matches('/');
+    let made = k
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type": "create_agent", "parent_id": root,
+                   "handler_module": fantastic_credential_store::HANDLER_MODULE, "id": store,
+                   "backend": "keychain",
+                   "refs": {RELAY_REF: {"host": host, "readers": [leg]}},
+                   "callable_by": {leg: ["get"]}}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(made["id"], json!(store), "{made}");
+    set_relay_password(k, &store, pw).await;
+    store
+}
+
+/// Store (or rotate) the relay password in `store`, marked secret.
+pub(super) async fn set_relay_password(k: &Arc<Kernel>, store: &str, pw: &str) {
+    let put = k
+        .send(vec![Item::new(
+            AgentId::from(store),
+            json!({"type": "set", "ref": RELAY_REF, "fields": {"password": pw}}),
+        )
+        .with_secret(json!(["payload.fields"]))])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(put["stored"], json!(true), "{put}");
+}
+
+/// A relay leg's side of the wiring: `credentials` naming `store`, and a `get`
+/// on it merged into the leg's `can_call`.
+pub(super) fn with_relay_password(extra: &mut Value, store: &str) {
+    extra["credentials"] = json!({"store": store, "ref": RELAY_REF});
+    if !extra["can_call"].is_object() {
+        extra["can_call"] = json!({});
+    }
+    extra["can_call"][store] = json!(["get"]);
 }
 
 /// A kernel whose root carries an instance `guid` — what a bridge stamps on its
@@ -630,32 +701,28 @@ fn ingress_resolves_allow_and_deny() {
     use authorizer::ingress::resolve;
     // absent / null ⇒ DenyInbound (SEALED by default)
     assert!(matches!(
-        resolve(None).unwrap().authorize(&call_action(None)),
+        resolve(None).authorize(&call_action(None)),
         Decision::Deny(_)
     ));
     assert!(matches!(
-        resolve(Some(&Value::Null))
-            .unwrap()
-            .authorize(&call_action(None)),
+        resolve(Some(&Value::Null)).authorize(&call_action(None)),
         Decision::Deny(_)
     ));
     // explicit allow_all_ingress opens it
     assert!(matches!(
-        resolve(Some(&json!("allow_all_ingress")))
-            .unwrap()
-            .authorize(&call_action(None)),
+        resolve(Some(&json!("allow_all_ingress"))).authorize(&call_action(None)),
         Decision::Allow
     ));
     // string + object form; `type` is the ONLY object spelling
-    let s = resolve(Some(&json!("deny_ingress"))).unwrap();
+    let s = resolve(Some(&json!("deny_ingress")));
     assert!(matches!(s.authorize(&call_action(None)), Decision::Deny(_)));
-    let o = resolve(Some(&json!({"type": "deny_ingress"}))).unwrap();
+    let o = resolve(Some(&json!({"type": "deny_ingress"})));
     assert!(matches!(o.authorize(&call_action(None)), Decision::Deny(_)));
     // An object with no `type` is NOT a rule — and python resolves "no rule" to
     // the plain SEAL, not to an error (A1.2). It used to be an `Err` each caller
     // rendered its own way: `{error:"rule object missing 'type'"}` with no
     // `reason` from the fs gate, a throw out of `handle` in swift.
-    let typeless = resolve(Some(&json!({"policy": "deny_ingress"}))).unwrap();
+    let typeless = resolve(Some(&json!({"policy": "deny_ingress"})));
     match typeless.authorize(&call_action(None)) {
         Decision::Deny(d) => assert_eq!(d.reason, "edge sealed by policy"),
         Decision::Allow => panic!("a type-less rule object must seal"),
@@ -677,8 +744,7 @@ fn ingress_resolves_allow_and_deny() {
     // of the handler, which killed the caller's whole chain with no reply at all. An
     // unresolvable rule is not an authorization, so deny — and say which name was
     // wrong. Mirrors py `test_resolve_ingress_unknown_type_seals_and_names_the_bad_rule`.
-    let unknown = resolve(Some(&json!("password:kernel-internal-transcripts")))
-        .expect("unknown rule must resolve to a seal, not an error");
+    let unknown = resolve(Some(&json!("password:kernel-internal-transcripts")));
     match unknown.authorize(&Action {
         kind: "call",
         target: "t",
@@ -710,7 +776,7 @@ fn ingress_password_checks_envelope_token() {
     let env = "FANTASTIC_GROUP_TOKEN_RS_ING";
     std::env::set_var(env, "s3cret");
     // `env` (new) spelling threads to the rule
-    let p = resolve(Some(&json!({"type": "password_ingress", "env": env}))).unwrap();
+    let p = resolve(Some(&json!({"type": "password_ingress", "env": env})));
     assert!(matches!(
         p.authorize(&call_action(Some("s3cret"))),
         Decision::Allow
@@ -765,7 +831,7 @@ fn a_name_from_the_other_manifold_is_loud_not_silent() {
     //
     // It still DENIES — an unresolvable rule is not an authorization — but it now names
     // the manifold mistake instead of looking like an ordinary seal.
-    let sealed = authorizer::ingress::resolve(Some(&json!("silent_egress"))).unwrap();
+    let sealed = authorizer::ingress::resolve(Some(&json!("silent_egress")));
     let Decision::Deny(denial) = sealed.authorize(&call_action(None)) else {
         panic!("an egress name in ingress_rule must deny");
     };
@@ -781,10 +847,10 @@ fn a_name_from_the_other_manifold_is_loud_not_silent() {
 
     // And the stems that DO span both manifolds still work from one field.
     for stem in ["password", "allow_all"] {
-        assert!(authorizer::ingress::resolve(
+        assert!(authorizer::ingress::unknown(
             authorizer::manifold_spec(None, Some(&json!(stem)), "_ingress").as_ref()
         )
-        .is_ok());
+        .is_none());
     }
 }
 
@@ -797,8 +863,7 @@ fn auth_shorthand_is_symmetric() {
     let spec = json!({"type": "password", "env": env});
     let ing = authorizer::ingress::resolve(
         authorizer::manifold_spec(None, Some(&spec), "_ingress").as_ref(),
-    )
-    .unwrap();
+    );
     let eg = authorizer::egress::resolve(
         authorizer::manifold_spec(None, Some(&spec), "_egress").as_ref(),
     )
@@ -1618,8 +1683,7 @@ async fn a_bridge_reflects_exactly_what_its_gate_enforces() {
     assert!(kernel.agents.contains_key(&AgentId::from(br.as_str())));
     let rule = authorizer::ingress::resolve(
         rule_spec(&AgentId::from(br.as_str()), &kernel, "ingress_rule").as_ref(),
-    )
-    .unwrap();
+    );
     let Decision::Deny(denial) = rule.authorize(&call_action(None)) else {
         panic!("an unknown ingress rule must deny");
     };
@@ -1831,13 +1895,14 @@ async fn boot_error_texts_match_python() {
         })
     );
 
-    // a bad auth rule tears the leg down and says so.
+    // an egress rule the registry does not know refuses the boot, before dialing
+    // (the leg's rules are read per frame now — boot caches none, audit ARCH-2).
     let bad = id_for("a713_bad", &tmp);
     create_leg(
         &kernel,
         WS_HANDLER_MODULE,
         &bad,
-        json!({"transport": "memory", "ingress_rule": 42}),
+        json!({"transport": "memory", "egress_rule": "nope_egress"}),
     )
     .await;
     inject_pair(
@@ -1845,12 +1910,9 @@ async fn boot_error_texts_match_python() {
         &AgentId::from("a713_bad_peer"),
     );
     let r = ask(&kernel, &bad, json!({"type": "boot"})).await;
-    assert!(
-        r["error"]
-            .as_str()
-            .unwrap_or("")
-            .starts_with("bridge: bad auth rule: "),
-        "{r}"
+    assert_eq!(
+        r,
+        json!({"error": "bridge: bad auth rule: unknown egress rule type 'nope_egress'"})
     );
 }
 
@@ -1892,7 +1954,9 @@ async fn relay_boot_missing_partner_mints_no_guid() {
         RELAY_HANDLER_MODULE,
         &bad_role,
         json!({"transport": "relay", "relay_url": "ws://127.0.0.1:1",
-               "partner_guid": "B", "role": "boss"}),
+               "partner_guid": "B", "role": "boss",
+               // checked (shape) before the guid; the store is never asked
+               "credentials": {"store": "creds", "ref": RELAY_REF}}),
     )
     .await;
     assert_eq!(
@@ -2263,7 +2327,7 @@ async fn a_malformed_frame_is_skipped_and_the_reader_survives() {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     });
 
-    let t = transport::ws::WsTransport::connect(&format!("ws://127.0.0.1:{port}/peer/ws"))
+    let t = transport::ws::WsTransport::connect(&format!("ws://127.0.0.1:{port}/peer/ws"), false)
         .await
         .expect("connect to the local ws server");
     let frame = tokio::time::timeout(std::time::Duration::from_secs(5), t.recv_frame())
@@ -2390,7 +2454,8 @@ async fn a_minted_relay_guid_is_a_uuid4_hex() {
             RELAY_HANDLER_MODULE,
             &relay,
             json!({"transport": "relay", "relay_url": "ws://127.0.0.1:1",
-                   "partner_guid": "B", "role": "boss"}),
+                   "partner_guid": "B", "role": "boss",
+                   "credentials": {"store": "creds", "ref": RELAY_REF}}),
         )
         .await;
         let _ = ask(&kernel, &relay, json!({"type": "boot"})).await;
@@ -2511,11 +2576,16 @@ async fn a_binary_forward_ships_raw_bytes_and_returns_the_reply_body() {
     assert_eq!(body.bytes, vec![0x00, 0xFF, 0x10], "the blob rides raw");
     assert_eq!(body.path, vec![Step::from("payload"), Step::from("bytes")]);
     let corr = header["id"].as_str().expect("a correlator").to_string();
-    assert_eq!(
-        corr,
-        format!("{bid}-1"),
-        "dash, not colon: never a kernel pid"
+    // `<leg id>-<boot nonce>-<n>` (audit IO-5): dash, not colon — never a kernel pid
+    let nonce = corr
+        .strip_prefix(&format!("{bid}-"))
+        .and_then(|rest| rest.strip_suffix("-1"))
+        .unwrap_or_else(|| panic!("{corr}"));
+    assert!(
+        nonce.len() == 12 && nonce.bytes().all(|b| b.is_ascii_hexdigit()),
+        "{corr}"
     );
+    assert!(!corr.contains(':'), "dash, not colon: never a kernel pid");
     assert_eq!(
         header,
         json!({"type": "call", "id": corr, "target": "far_fb",
@@ -2564,7 +2634,11 @@ async fn a_binary_forward_ships_raw_bytes_and_returns_the_reply_body() {
         .await
     });
     let header = peer.recv_frame().await.expect("a call frame").into_value();
-    assert_eq!(header["id"], json!(format!("{bid}-2")));
+    let corr = header["id"].as_str().expect("a correlator");
+    assert!(
+        corr.starts_with(&format!("{bid}-")) && corr.ends_with("-2"),
+        "this boot's nonce, the second forward: {corr}"
+    );
     peer.send_frame(json!({"type": "reply", "id": header["id"], "data": {"ok": 1}}))
         .await
         .unwrap();
@@ -2674,4 +2748,109 @@ async fn both_family_shells_share_one_behaviour() {
             "{hm}"
         );
     }
+}
+
+/// A leg across its lifetime: a live record change, a sender restart (python
+/// `ws_bridge/tests/test_leg_lifetime.py`; audit ARCH-2 / IO-5).
+#[path = "tests_leg_lifetime.rs"]
+mod leg_lifetime;
+
+/// The relay password lives in a credential_store (python
+/// `relay_connector/tests/test_relay_credentials.py`; audit IO-7/F4).
+#[path = "tests_relay_credentials.rs"]
+mod relay_credentials;
+
+/// Audit W-8 — a bridge leg makes the one write-time check every leg makes
+/// (python `io_bridge._engine.validate_meta` → `unknown_ingress_refusal`): an
+/// unknown name or a malformed spec is refused with the wire legal values, after
+/// `peer_guid`; a rule it implements is not. Both bundles, the same text.
+#[test]
+fn validate_meta_refuses_an_unknown_or_malformed_ingress_rule() {
+    let legs: [&dyn Bundle; 2] = [&WsBridgeBundle, &RelayConnectorBundle];
+    for leg in legs {
+        for (spec, shown) in [
+            (json!("open_sesame"), "'open_sesame'"),
+            (json!(7), "7"),
+            (json!(["allow_all_ingress"]), "['allow_all_ingress']"),
+            (json!({"type": ["x"]}), "{'type': ['x']}"),
+            (
+                json!({"type": "password_ingress", "env": 7}),
+                "{'type': 'password_ingress', 'env': 7}",
+            ),
+        ] {
+            let mut meta = Map::new();
+            meta.insert("ingress_rule".into(), spec);
+            assert_eq!(
+                leg.validate_meta(&meta, &Map::new()),
+                Some(format!(
+                    "ingress_rule={shown} is not a rule this bundle implements — legal \
+                     values: allow_all_ingress, deny_ingress, password_ingress"
+                ))
+            );
+        }
+        for spec in [
+            json!("password_ingress"),
+            json!({"type": "password_ingress", "env": "GROUP_TOKEN"}),
+        ] {
+            let mut meta = Map::new();
+            meta.insert("ingress_rule".into(), spec);
+            assert_eq!(leg.validate_meta(&meta, &Map::new()), None);
+        }
+    }
+}
+
+/// Audit W-8 — a record can still carry a malformed rule (written below the
+/// verbs, or by hand on disk): the inbound call is ANSWERED with the seal's
+/// denial, in python's words — it used to answer `bridge: bad auth rule:
+/// unsupported rule spec Number(7)`.
+#[tokio::test]
+async fn a_malformed_rule_on_the_record_denies_in_python_s_words() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = mk_kernel(&tmp).await;
+    let bid = id_for("brg_malformed", &tmp);
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel_state"),
+            json!({
+                "type": "create_agent", "parent_id": "kernel",
+                "handler_module": WS_HANDLER_MODULE,
+                "id": bid,
+                "peer_id": "stand_in",
+                "transport": "memory",
+            }),
+        )])
+        .await
+        .remove(0)
+        .result;
+    patch(&kernel, &bid, "ingress_rule", json!(7));
+    let peer = inject_one(&AgentId::from(bid.as_str()));
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from(bid.as_str()),
+            json!({"type": "boot"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    peer.send_frame(json!({
+        "type": "call",
+        "id": "c7",
+        "target": "kernel_state",
+        "payload": {"type": "reflect"},
+    }))
+    .await
+    .unwrap();
+    let reply = peer.recv_frame().await.expect("a reply frame").into_value();
+    assert_eq!(reply["id"], "c7");
+    assert_eq!(
+        reply["data"]["error"],
+        "edge sealed — unknown ingress rule '7'"
+    );
+    assert_eq!(reply["data"]["reason"], "unauthorized");
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from(bid.as_str()),
+            json!({"type": "shutdown"}),
+        )])
+        .await;
 }

@@ -176,14 +176,14 @@ Bundles that compile under either tier:
 |--------------------------------|------|
 | `fantastic-core`               | the `kernel_state.tools` root loader (id="kernel_state") — records, blobs, the record-owner guard |
 | `fantastic-ram-store`          | the MEMORY STORE in RAM — every message (AI conversations, the kernel's execution rows), fold refs, grants, search, inject/dump |
-| `fantastic-credential-store`   | SECRETS BY REF — a ref holds named fields bound to ONE host; `set`/`get` only with a `secret` mark, per-ref readers/writers, "no such ref" to strangers; backends `file` (0600 YAML, python's bytes), `keychain` (the OS keychain), `env` (read-only). Every AI backend reads its key here before each request (`credentials: {store, ref}`); stamps `holds_secrets: true` on itself at boot, so ai-core refuses every model-parsed call that names it; the kernel judges the field first on every agent — exactly `true` or `null` (the operator's clear) at the write, and only the operator lowers a holder's mark (`side: "secret-holder"`) |
+| `fantastic-credential-store`   | SECRETS BY REF — a ref holds named fields bound to ONE host; `set`/`get` only with a `secret` mark, per-ref readers/writers, "no such ref" to strangers; a ref is DECLARED only by `update_agent` on the store's `refs` — `set` stores a declared ref's value, takes no `host` and never creates one; `forget` drops the value and keeps the declaration; the file is read through ONE `O_NOFOLLOW` open judged on its own descriptor; backends `file` (0600 YAML at an ABSOLUTE path — a relative `file` is refused; python's bytes), `keychain` (the OS keychain, items under `keychain_namespace`), `env` (read-only). Every AI backend reads its key here before each request (`credentials: {store, ref}`); stamps `holds_secrets: true` on itself at boot, so ai-core refuses every model-parsed call that names it; the kernel judges the field first on every agent — exactly `true` or `null` (the operator's clear) at the write, and only the operator lowers a holder's mark (`side: "secret-holder"`) |
 | `fantastic-static-loader`      | declarative YAML roster loader — hydrates the declared agents as operator at boot |
 | `fantastic-file`               | filesystem-as-agent (the fs edge of the io family; sealed by default, deny-all `allow` list) + the text verbs — read/write/edit/append/undo, version/if_match |
 | `fantastic-web`                | axum HTTP host — rendering routes; mounts child call surfaces |
 | `fantastic-web-ws`             | WS verb channel (mounted onto a parent web); sealed by default; a `call` frame's `secret` marks ride onto the dispatched item |
-| `fantastic-web-rest`           | REST verb channel (mounted onto a parent web); sealed by default; `X-Fantastic-Secret` (a JSON array) carries the item's `secret` marks |
-| `fantastic-scheduler`          | recurring tasks on a tokio tick |
-| `fantastic-bridge`             | cross-kernel bridge — WS-only, asymmetric (memory / WS); `forward` re-roots its call's `secret` marks onto the frame, an inbound frame's marks ride onto the dispatched item; a `relay_connector` leg is SEALED for marks (relayd records what it routes unmasked) — a marked `forward` and a marked inbound `call` are refused |
+| `fantastic-web-rest`           | REST verb channel (mounted onto a parent web); sealed by default; the gate runs BEFORE the body is read, and a body past 16 MiB (io_bridge `MAX_FRAME`) is a 413; `X-Fantastic-Secret` (a JSON array) carries the item's `secret` marks |
+| `fantastic-scheduler`          | recurring tasks on a tokio tick; a schedule fires AS ITS CREATOR (`owner`), and a caller sees and drives only its own schedules |
+| `fantastic-bridge`             | cross-kernel bridge — WS-only, asymmetric (memory / WS); `forward` re-roots its call's `secret` marks onto the frame, an inbound frame's marks ride onto the dispatched item; a `relay_connector` leg is SEALED for marks (relayd records what it routes unmasked) — a marked `forward` and a marked inbound `call` are refused; a leg's rules are read off its record per frame; frame ids are `<leg>-<boot nonce>-<n>`; a relay leg reads its password from a credential_store ref (`credentials: {store, ref}`) before every dial |
 | `fantastic-ollama-backend`     | local LLM via ollama |
 | `fantastic-responses-backend`  | the OpenAI Responses API |
 | `fantastic-vllm-backend`       | a vLLM server, directly (OpenAI chat wire) — KV-cache session table per endpoint |
@@ -194,7 +194,7 @@ Full-tier-only bundles (subprocess; excluded from the embedded slice):
 
 | crate                          | role |
 |--------------------------------|------|
-| `fantastic-exec-bridge`        | the process edge — a general-purpose command runner, sealed, gated by a regex allowlist; a terminal is a PTY job (flow control, UTF-8 incremental decode, image-paste) |
+| `fantastic-exec-bridge`        | the process edge — a general-purpose command runner, sealed, gated by a regex allowlist; a terminal is a PTY job (flow control, UTF-8 incremental decode, image-paste); a job is driven (`write`/`resize`/`paste_image`/`stop`/`interrupt`/`clear`) only by the caller that started it, or the operator |
 
 Internal / test crates:
 
@@ -272,15 +272,22 @@ HTTP + WebSocket:
   websockets server does and `ws_bridge` offers `permessage-deflate;
   client_max_window_bits` as python's client does; the frames run through
   `fantastic_io_bridge::ws_deflate::DeflateStream` under tungstenite.
-- **Streams** — byte-heavy transfers ride the binary channel as a chunked
+- **Raw reply bodies** — ANY verb may answer raw bytes beside its JSON
+  (`Bundle::handle_binary`, the one dispatch the kernel runs for every call);
+  every leg answers binary exactly when the reply carries a body — a WS binary
+  frame, a bridge's binary reply frame, a REST octet reply naming the field.
+  There is no verb list and nothing to declare.
+- **Streams** — byte-heavy transfers ride as raw bodies in a chunked
   PULL (raw bytes, never base64) through the BATCH, NOT events: `read_stream {path, offset?}
   → (header{next_offset, eof, size}, bytes)` (the **SOURCE** — one chunk,
   stateless cursor via `next_offset`); `write_stream {path, offset?,
   truncate?}` + body bytes (the **SINK**); `pump {source, source_path, sink,
   sink_path?}` (the **PUMP** — a server-side SOURCE→SINK copy by id that never
-  touches the bytes). `file_bridge` is the reference SOURCE+SINK; the
+  touches the bytes; both ends run AS THE PUMP'S CALLER — its own grants on both
+  ends). `file_bridge` is the reference SOURCE+SINK; the
   `/<id>/file/<path>` route is read_stream-only.
-- **REST** `POST /<rest_id>/<target_id>` body=payload → `kernel.send` → JSON.
+- **REST** `POST /<rest_id>/<target_id>` body=payload → `kernel.send` → JSON
+  (octet when the reply carries a raw body at a top-level key).
   `GET /<rest_id>/_reflect[/<target_id>]` for static discovery.
 - **`.fantastic/`** — disk-mode workdir state. Python-compatible
   per-agent layout: `agent.yaml` for the root + `agents/<id>/agent.yaml`

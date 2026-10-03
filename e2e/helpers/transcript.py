@@ -1,8 +1,8 @@
 """WHAT THE MODEL SAID — one interface, two ways of finding out.
 
-In process we can WRAP the provider: `core._providers[aid] = ProxyReader(inner)`
-puts us between `ai_core` and the model, so we see the prompt going in and the
-text coming out. Out of process there is nothing to wrap — the kernel is another
+In process we can WRAP the provider: `WRAPS[aid] = wrap_with(ProxyReader(...))`
+(`helpers/kernel.py`) puts us between `ai_core` and the model, so we see the
+prompt going in and the text coming out. Out of process there is nothing to wrap — the kernel is another
 program on the other side of a socket — so the same facts have to come from the
 kernel's own event stream instead.
 

@@ -41,7 +41,7 @@ use fantastic_ai_core::provider::{
     Provider, ProviderError, ProviderEvent, ProviderReport, ProviderStream, ReportCell,
 };
 use fantastic_ai_core::schema::{self, Field};
-use fantastic_ai_core::{agent_loop::BackendConfig, helpers, state, verbs};
+use fantastic_ai_core::{agent_loop::BackendConfig, helpers, verbs};
 use fantastic_bundle::{py_repr_value, py_str};
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
 use fantastic_kernel::{AgentId, Kernel, TaskId};
@@ -265,12 +265,8 @@ impl Bundle for FoundationModelsBackendBundle {
         })))
     }
 
-    async fn on_delete(
-        &self,
-        agent_id: &AgentId,
-        _kernel: &Arc<Kernel>,
-    ) -> Result<(), BundleError> {
-        state::drop_state(agent_id);
+    async fn on_delete(&self, agent_id: &AgentId, kernel: &Arc<Kernel>) -> Result<(), BundleError> {
+        verbs::on_delete(agent_id, kernel);
         Ok(())
     }
 

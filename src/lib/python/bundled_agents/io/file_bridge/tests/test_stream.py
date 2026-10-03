@@ -274,8 +274,92 @@ async def test_pump_names_a_refused_write_and_the_sealed_read(
     assert "unauthorized" in res["error"]
     missing = (
         await seeded_kernel.send(
-            [{"target": src, "payload": {"type": "pump", "source_path": "nope.bin"}}]
+            [
+                {
+                    "target": src,
+                    "payload": {
+                        "type": "pump",
+                        "source_path": "nope.bin",
+                        "sink_path": "out.bin",
+                    },
+                }
+            ]
         )
     )[0]["result"]
     assert missing["reason"] == "transport_error", missing
     assert missing["error"].startswith(f"pump: read from {src!r} failed: {{"), missing
+
+
+async def test_a_pump_onto_its_own_source_is_refused(
+    seeded_kernel, file_bridge, tmp_path
+):
+    """Audit BV-7: with only `source_path` the sink and sink_path default to the
+    source, and the first write's `truncate` cut the file the next read comes
+    from — 200 KiB became 64 KiB under a success reply. Refused, the path judged
+    normalised (`./x` is `x`); the file is untouched."""
+    k, fb = seeded_kernel, file_bridge
+    data = bytes(range(256)) * 800
+    (tmp_path / "self.bin").write_bytes(data)
+    want = {
+        "error": "pump: sink_path must be another file than source_path when the "
+        "sink is the source — a pump onto its own source truncates it after the "
+        "first chunk",
+        "reason": "bad_arg",
+        "arg": "sink_path",
+    }
+    for extra in (
+        {},
+        {"sink_path": "self.bin"},
+        {"sink_path": "./self.bin"},
+        {"sink": fb, "sink_path": "sub/../self.bin"},
+    ):
+        out = (
+            await k.send(
+                [
+                    {
+                        "target": fb,
+                        "payload": {"type": "pump", "source_path": "self.bin", **extra},
+                    }
+                ]
+            )
+        )[0]["result"]
+        assert out == want, (extra, out)
+    assert (tmp_path / "self.bin").read_bytes() == data
+    # another file on the same bridge still copies
+    out = (
+        await k.send(
+            [
+                {
+                    "target": fb,
+                    "payload": {
+                        "type": "pump",
+                        "source_path": "self.bin",
+                        "sink_path": "copy.bin",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
+    assert out["bytes"] == len(data), out
+    assert (tmp_path / "copy.bin").read_bytes() == data
+
+
+async def test_pump_takes_source_path_only(seeded_kernel, file_bridge, tmp_path):
+    """ARCH2-8: `path` is no alias for `source_path` — the verb doc lists only
+    `source_path`, so a `path` names nothing and the read end refuses the empty
+    source."""
+    k, fb = seeded_kernel, file_bridge
+    (tmp_path / "a.txt").write_bytes(b"hello")
+    out = (
+        await k.send(
+            [
+                {
+                    "target": fb,
+                    "payload": {"type": "pump", "path": "a.txt", "sink_path": "b.txt"},
+                }
+            ]
+        )
+    )[0]["result"]
+    assert out["reason"] == "transport_error", out
+    assert out["error"].startswith(f"pump: read from {fb!r} failed: {{"), out
+    assert not (tmp_path / "b.txt").exists()

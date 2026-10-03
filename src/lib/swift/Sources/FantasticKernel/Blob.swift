@@ -44,7 +44,8 @@ extension Kernel {
     /// exactly those. `sendWithBinary` minted none of them.
     ///
     /// `body` is the request's chunk (the payload's `bytes`, a `write_stream`);
-    /// `nil` asks for the reply's chunk raw (a `read_stream`).
+    /// `nil` asks for the reply's chunk raw (a `read_stream`). The chunk comes
+    /// back when the reply holds it at `bytes` — python reads `reply["bytes"]`.
     func storeBookkeepingBinary(_ store: AgentId, _ header: JSON, _ body: Data?) async
         -> (JSON, Data?)
     {
@@ -52,7 +53,7 @@ extension Kernel {
             let item = Item(
                 store, header, binary: body.map { Blob("bytes", $0) }, rawReply: body == nil)
             let out = await self.send([item])[0]
-            return (out.result, out.body)
+            return (out.result, bodyAt(out.body, "bytes"))
         }
     }
 

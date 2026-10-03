@@ -26,12 +26,18 @@ every call's target and `reply_to` and refuses a holder, loud, before anything i
 sent. The address is resolved the way the kernel's `send` resolves it first, so
 `<this kernel's guid>|<holder>` is the holder, not an unknown id. The reader below
 is untouched: it calls `kernel.send` itself, never through the model's tool
-dispatch."""
+dispatch.
+
+Nor does a model JOIN a secret (audit F2, 2026-10-03): a model call whose
+`<exec_id>` names an execution that carried `secret` marks is refused the same way
+(`secret_join_refusal`) — the backend's key read is such an execution, and the
+kernel hands a join by the SAME caller the real reply."""
 
 from __future__ import annotations
 
 from kernel import sender_context
 from kernel._refusal import UNAUTHORIZED, refusal
+from kernel._secret import PLACEHOLDER
 
 #: The credential field a backend sends as its key.
 FIELD = "api_key"
@@ -44,6 +50,13 @@ HOLDS_SECRETS = "holds_secrets"
 SECRET_HOLDER_TEXT = (
     "{agent} holds secrets — a secret holder answers backends, never a model "
     "turn; this call was not dispatched"
+)
+
+#: What the model reads when its `<exec_id>` names an execution that carried
+#: secret values (a key read, or any call whose item was marked `secret`).
+SECRET_JOIN_TEXT = (
+    "exec_id {exec_id} names an execution that carried secret values — a model "
+    "never joins one; this call was not dispatched"
 )
 
 
@@ -76,8 +89,9 @@ def secret_holder_refusal(kernel, agent_id: str) -> dict | None:
     `<this kernel's guid>|<holder>` reaches the holder, so it is refused like the
     bare id. Only what THIS kernel can see is judged: a connected peer's
     `<guid>|<agent>` lives on another kernel and its record is not here, so it
-    passes; that kernel's own AI layer guards its own holders, and a holder's
-    value is only ever sent to a caller that marked it secret."""
+    passes; that kernel's own AI layer guards its own holders, a holder's value
+    is only ever sent to a caller that marked it secret, and a model's join of
+    that marked read is `secret_join_refusal`'s."""
     rec = _local_record(kernel, agent_id)
     if not isinstance(rec, dict) or rec.get(HOLDS_SECRETS) is not True:
         return None
@@ -86,8 +100,53 @@ def secret_holder_refusal(kernel, agent_id: str) -> dict | None:
     )
 
 
+def secret_join_refusal(kernel, exec_id) -> dict | None:
+    """The refusal for a model-parsed call whose `<exec_id>` names an execution
+    that carried `secret` marks, or None when the call may go.
+
+    A JOIN is a receive: the kernel hands the joiner that execution's outcome. A
+    model cannot mark a call secret, so such an execution was never its own — it
+    is its backend's key read (same agent: the kernel would hand back the REAL
+    reply) or another caller's (the kernel hands back the shown one). Either way a
+    model does not join it. This is what closes a holder on a CONNECTED PEER,
+    which `secret_holder_refusal` cannot judge: the backend's read of
+    `<peer guid>|creds` is a local execution, and joining it by its id never
+    reaches the peer. The id is resolved as the kernel's `send` resolves it."""
+    if not kernel.ctx.carried_secret(exec_id):
+        return None
+    return refusal(
+        UNAUTHORIZED, SECRET_JOIN_TEXT.format(exec_id=exec_id), exec_id=exec_id
+    )
+
+
 class CredentialError(RuntimeError):
     """The key could not be read — the turn fails, naming the store and the ref."""
+
+
+def header_safe(key: str) -> bool:
+    """Whether `key` can ride `Authorization: Bearer <key>` as it is: visible ASCII,
+    spaces or tabs only BETWEEN visible characters. An HTTP client refuses anything
+    else and QUOTES the header it refused in its error (h11: `Illegal header value
+    b'Bearer <key>\\n'`) — a key pasted with a trailing newline would ride that
+    text into the caller's reply, the ledger and the logs (audit S1)."""
+    if key != key.strip(" \t"):
+        return False
+    return all(c in " \t" or "!" <= c <= "~" for c in key)
+
+
+def without_key(text: str, key: str | None) -> str:
+    """`text` with every occurrence of `key` replaced by the placeholder a recorded
+    secret reads as. A provider HOLDS its key, so every error text it raises
+    passes through here first: an HTTP client may quote the header it sent and an
+    endpoint may echo the request in its error body (audit S1). The key is
+    matched as sent AND as a Python literal shows it (h11 quotes the refused
+    header as `b'Bearer <key>\\n'`, its newline escaped)."""
+    if not key:
+        return text
+    forms = {key, repr(key)[1:-1], repr(key.encode())[2:-1]}
+    for form in sorted(forms, key=len, reverse=True):
+        text = text.replace(form, PLACEHOLDER)
+    return text
 
 
 def shape_error(v) -> str | None:
@@ -103,8 +162,9 @@ def shape_error(v) -> str | None:
 
 def key_reader(self_id: str, kernel, backend: str, *, required: bool):
     """The async `read(endpoint) -> key | None` a provider awaits before each
-    request. Raises `CredentialError` when the store refuses or the field is
-    missing, and when a required key has no `credentials` on the record."""
+    request. Raises `CredentialError` when the store refuses, the field is missing
+    or is not a legal HTTP header value (`header_safe`), and when a required key
+    has no `credentials` on the record."""
 
     async def read(endpoint: str) -> str | None:
         cred = (kernel.get(self_id) or {}).get("credentials")
@@ -146,6 +206,12 @@ def key_reader(self_id: str, kernel, backend: str, *, required: bool):
         if not isinstance(key, str) or not key:
             raise CredentialError(
                 f"{backend}: credential {ref!r} in {store!r} has no {FIELD!r} field"
+            )
+        if not header_safe(key):  # named by its ref, never by its value
+            raise CredentialError(
+                f"{backend}: credential {ref!r} in {store!r}: {FIELD!r} is not a legal "
+                "HTTP header value (a control or non-ASCII character, or whitespace at "
+                "an edge) — store it again without"
             )
         return key
 

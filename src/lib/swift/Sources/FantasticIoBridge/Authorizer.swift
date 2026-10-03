@@ -103,8 +103,9 @@ public protocol EgressRule: Sendable {
     func credential() -> String?
 }
 
-/// Thrown when a rule spec names an unknown type or is malformed — fails the boot
-/// loudly rather than silently mis-securing.
+/// Thrown when an EGRESS rule spec names a type the registry does not implement
+/// (a malformed spec is named by its repr, `parseSpec`) — fails the boot loudly
+/// rather than silently mis-securing. Ingress never throws: it seals.
 public struct AuthPolicyError: Error, CustomStringConvertible {
     public let message: String
     public init(_ message: String) { self.message = message }
@@ -114,10 +115,20 @@ public struct AuthPolicyError: Error, CustomStringConvertible {
 /// Normalize a rule spec to `(type name, env var)` — python `parse_spec`.
 ///
 /// Python-falsy (absent, null, `""`, `false`, `0`, `[]`, `{}`) ⇒ `(nil, nil)`. A
-/// string ⇒ `(name, nil)`. An object ⇒ `(type, env)`; an object with no `type`
-/// has no name, which every resolver reads as a plain seal — python seals it
-/// (`edge sealed by policy`), where this used to throw out of `handle`.
-func parseSpec(_ spec: JSON?) throws -> (name: String?, tokenEnv: String?) {
+/// string ⇒ `(name, nil)`. An object ⇒ `(type, env)`; a null `type`/`env` is an
+/// absent one, and an object with no `type` has no name, which every resolver
+/// reads as a plain seal — python seals it (`edge sealed by policy`), where this
+/// used to throw out of `handle`.
+///
+/// MALFORMED ⇒ `(python repr of the spec, nil)`: a spec that is neither a string
+/// nor an object, or an object whose `type` or `env` is not a string, is named by
+/// its own repr — a name no registry holds, so ingress SEALS on it
+/// (`DenyInbound(unknown:)`) and egress refuses it like any unknown name. It
+/// threw `unsupported rule spec` (a web leg answered a bare `{error}`), read a
+/// non-string `type` as no rule at all, and a non-string `env` as the DEFAULT
+/// variable — a malformed password rule admitted the default group token
+/// (audit W-8, 2026-10-03).
+func parseSpec(_ spec: JSON?) -> (name: String?, tokenEnv: String?) {
     guard let spec, pyTruthy(spec) else { return (nil, nil) }
     switch spec {
     case .string(let s):
@@ -126,9 +137,14 @@ func parseSpec(_ spec: JSON?) throws -> (name: String?, tokenEnv: String?) {
         // `type` and `env` are the only spellings. The `policy` / `token_env` aliases
         // were swift+rust only — python's parse_spec never accepted them — so they gave
         // one wire key two names and are deleted.
-        return (o["type"]?.asString, o["env"]?.asString)
+        let name = o["type"] ?? .null
+        let env = o["env"] ?? .null
+        guard name.isNull || name.asString != nil, env.isNull || env.asString != nil else {
+            return (pyRepr(spec), nil)
+        }
+        return (name.asString, env.asString)
     default:
-        throw AuthPolicyError("unsupported rule spec")
+        return (pyRepr(spec), nil)
     }
 }
 
@@ -151,7 +167,9 @@ public func manifoldSpec(_ primary: JSON?, _ auth: JSON?, _ suffix: String) -> J
     // KEY PRESENCE decides, as python's `"ingress_rule" in record`: a present
     // `null` is a seal, never a fall-through to `auth`.
     if let primary { return primary }
-    guard let auth, let (name, env) = try? parseSpec(auth), let stem = name else { return nil }
+    guard let auth else { return nil }
+    let (name, env) = parseSpec(auth)
+    guard let stem = name else { return nil }
     if suffix == "_egress" && (stem == "allow_all" || stem == "deny") {
         return .string("silent_egress")
     }
@@ -165,7 +183,7 @@ public func manifoldSpec(_ primary: JSON?, _ auth: JSON?, _ suffix: String) -> J
 /// `deny_ingress` for ingress (IO legs seal by default) and `silent_egress` for
 /// egress.
 public func ruleName(_ spec: JSON?, default def: String) -> String {
-    guard let name = (try? parseSpec(spec))?.name, !name.isEmpty else { return def }
+    guard let name = parseSpec(spec).name, !name.isEmpty else { return def }
     return name
 }
 
@@ -223,8 +241,8 @@ func constantTimeEquals(_ a: String, _ b: String) -> Bool {
 /// behaviour and the opposite of what the code does. The code was right; the comment
 /// was wrong in the dangerous direction — an operator reading it would believe a fresh
 /// leg admits traffic.
-public func resolveIngress(ingressRule: JSON?, auth: JSON?) throws -> IngressRule {
-    try IngressRules.resolve(manifoldSpec(ingressRule, auth, "_ingress"))
+public func resolveIngress(ingressRule: JSON?, auth: JSON?) -> IngressRule {
+    IngressRules.resolve(manifoldSpec(ingressRule, auth, "_ingress"))
 }
 
 /// Resolve the leg's EGRESS rule: `egress_rule` if present, else the `auth`

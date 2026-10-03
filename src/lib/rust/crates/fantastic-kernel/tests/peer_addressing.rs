@@ -12,8 +12,10 @@ use fantastic_kernel::{
     Agent, AgentId, Bundle, BundleRegistry, Item, Kernel, Outcome, PeerRoute, Reply,
 };
 use serde_json::{json, Map, Value};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
+use tokio::sync::oneshot;
 
 const HOST: &str = "h0"; // this kernel's guid, set by hand: the root is not booted here
 const PAGE: &str = "g1";
@@ -62,7 +64,7 @@ fn kernel(tmp: &TempDir, guid: Option<&str>) -> Arc<Kernel> {
 type Calls = Arc<Mutex<Vec<(String, Value, String)>>>;
 
 /// The `secret` marks each call handed the route, in call order.
-type Marks = Arc<Mutex<Vec<Vec<String>>>>;
+type Marks = Arc<Mutex<Vec<Vec<Value>>>>;
 
 /// A fake route that records every call and answers `reply` (or `{ok: agent}`).
 fn route(via: &str, calls: &Calls, reply: Option<Value>) -> Arc<PeerRoute> {
@@ -73,20 +75,24 @@ fn route(via: &str, calls: &Calls, reply: Option<Value>) -> Arc<PeerRoute> {
 fn route_marked(via: &str, calls: &Calls, reply: Option<Value>, marks: &Marks) -> Arc<PeerRoute> {
     let calls = Arc::clone(calls);
     let marks = Arc::clone(marks);
-    PeerRoute::new(via, move |agent_id, payload, caller, secret, _body| {
-        calls
-            .lock()
-            .unwrap()
-            .push((agent_id.clone(), payload, caller));
-        marks.lock().unwrap().push(secret);
-        let r = reply.clone().unwrap_or_else(|| json!({"ok": agent_id}));
-        Box::pin(async move { (r, None) })
-    })
+    PeerRoute::new(
+        via,
+        move |agent_id, payload, caller, secret, _body| {
+            calls
+                .lock()
+                .unwrap()
+                .push((agent_id.clone(), payload, caller));
+            marks.lock().unwrap().push(secret);
+            let r = reply.clone().unwrap_or_else(|| json!({"ok": agent_id}));
+            Box::pin(async move { (r, None) })
+        },
+        |_, _, _, _| Box::pin(async {}),
+    )
 }
 
 fn connect(k: &Arc<Kernel>, calls: &Calls, reply: Option<Value>) -> Arc<PeerRoute> {
     let r = route("leg", calls, reply);
-    assert!(k.register_peer(PAGE, &r).is_none());
+    k.register_peer(PAGE, &r);
     r
 }
 
@@ -121,7 +127,7 @@ async fn an_operator_send_reaches_the_peer_agent_as_this_kernel() {
     );
 }
 
-/// The route gets the item's `secret` paths verbatim (rooted at the item, as the
+/// The route gets the item's `secret` marks verbatim (rooted at the item, as the
 /// peer's item is), so the PEER masks its records; this kernel masks its own.
 #[tokio::test]
 async fn the_items_secret_marks_ride_to_the_peer() {
@@ -130,7 +136,7 @@ async fn the_items_secret_marks_ride_to_the_peer() {
     let calls = Calls::default();
     let marks = Marks::default();
     let r = route_marked("leg", &calls, Some(json!({"ok": true})), &marks);
-    assert!(k.register_peer(PAGE, &r).is_none());
+    k.register_peer(PAGE, &r);
     let key = "sk-peer-0123456789";
     let target = format!("{PAGE}|creds");
     let out = k
@@ -152,7 +158,7 @@ async fn the_items_secret_marks_ride_to_the_peer() {
     );
     assert_eq!(
         *marks.lock().unwrap(),
-        vec![vec!["payload.fields".to_string(), "result".to_string()]]
+        vec![vec![json!("payload.fields"), json!("result")]]
     );
     let row = k
         .rows
@@ -162,6 +168,29 @@ async fn the_items_secret_marks_ride_to_the_peer() {
     // an unmarked call hands the route no marks
     send(&k, &target, json!({"type": "reflect"}), None).await;
     assert_eq!(marks.lock().unwrap().last(), Some(&Vec::new()));
+    // an ARRAY of steps rides as given — an array, beside a dotted string
+    let out = k
+        .send(vec![Item::new(
+            AgentId::from(target.as_str()),
+            json!({"type": "set", "fields": {"a.b": key}}),
+        )
+        .with_secret(json!([["payload", "fields", "a.b"], "result"]))])
+        .await
+        .remove(0);
+    assert_eq!(out.status.as_str(), "completed", "{:?}", out.result);
+    assert_eq!(
+        marks.lock().unwrap().last(),
+        Some(&vec![json!(["payload", "fields", "a.b"]), json!("result")])
+    );
+    let row = k
+        .rows
+        .get_one(out.pid.unwrap().get())
+        .expect("the call row");
+    assert_eq!(
+        row["payload"]["fields"],
+        json!({"a.b": "<secret>"}),
+        "{row:?}"
+    );
 }
 
 #[tokio::test]
@@ -264,27 +293,145 @@ async fn the_root_reflect_lists_connected_peers() {
     assert_eq!(out.result["peers"], json!([]));
 }
 
+/// The tabs of one identity are ONE principal (owner, 2026-10-03): a second
+/// route for a live guid is ADDED, and a disconnect removes only its own.
 #[tokio::test]
-async fn one_guid_one_live_route() {
+async fn one_guid_holds_a_set_of_live_routes() {
     let tmp = TempDir::new().unwrap();
     let k = kernel(&tmp, Some(HOST));
     let calls = Calls::default();
     let first = connect(&k, &calls, None);
     let other = route("leg2", &calls, None);
-    let refused = k.register_peer(PAGE, &other).expect("refused");
-    assert!(
-        refused["error"]
-            .as_str()
-            .unwrap()
-            .contains("already connected via leg"),
-        "{refused}"
+    k.register_peer(PAGE, &other);
+    k.register_peer(PAGE, &other); // the same route twice stays one
+    assert_eq!(
+        k.peer_rows(),
+        json!([{"guid": PAGE, "via": "leg"}, {"guid": PAGE, "via": "leg2"}])
     );
-    assert_eq!(refused["arg"], "guid");
-    // only the registered route may unregister it
     k.unregister_peer(PAGE, &other);
-    assert!(k.peer(PAGE).is_some());
+    let left = k.peer_routes(PAGE);
+    assert!(left.len() == 1 && Arc::ptr_eq(&left[0], &first));
     k.unregister_peer(PAGE, &first);
-    assert!(k.peer(PAGE).is_none());
+    assert!(k.peer_routes(PAGE).is_empty());
+    assert_eq!(k.peer_rows(), json!([]));
+}
+
+/// Set when the future it lives in is dropped — completed or abandoned.
+struct DropFlag(Arc<AtomicBool>);
+
+impl Drop for DropFlag {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+/// One TAB of the identity PAGE: records the call as `<name>:<agent>`, answers
+/// when `answer` does, and flags `dropped` when its call future goes away.
+fn tab(
+    k: &Arc<Kernel>,
+    name: &str,
+    calls: &Calls,
+    answer: oneshot::Receiver<Value>,
+    dropped: &Arc<AtomicBool>,
+) -> Arc<PeerRoute> {
+    let calls = Arc::clone(calls);
+    let answer = Arc::new(Mutex::new(Some(answer)));
+    let dropped = Arc::clone(dropped);
+    let name = name.to_string();
+    let r = PeerRoute::new(
+        format!("leg_{name}"),
+        move |agent_id, payload, caller, _s, _b| {
+            calls
+                .lock()
+                .unwrap()
+                .push((format!("{name}:{agent_id}"), payload, caller));
+            let rx = answer.lock().unwrap().take().expect("one call per tab");
+            let flag = DropFlag(Arc::clone(&dropped));
+            Box::pin(async move {
+                let _flag = flag;
+                (rx.await.unwrap_or(Value::Null), None)
+            })
+        },
+        |_, _, _, _| Box::pin(async {}),
+    );
+    k.register_peer(PAGE, &r);
+    r
+}
+
+#[tokio::test]
+async fn a_call_reaches_every_tab_and_settles_with_the_first_reply() {
+    let tmp = TempDir::new().unwrap();
+    let k = kernel(&tmp, Some(HOST));
+    let calls = Calls::default();
+    let (a_tx, a_rx) = oneshot::channel();
+    let (b_tx, b_rx) = oneshot::channel();
+    let (a_gone, b_gone) = (
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
+    );
+    tab(&k, "a", &calls, a_rx, &a_gone);
+    tab(&k, "b", &calls, b_rx, &b_gone);
+    let k2 = Arc::clone(&k);
+    let send = tokio::spawn(async move {
+        send(
+            &k2,
+            &format!("{PAGE}|canvas"),
+            json!({"type": "around"}),
+            None,
+        )
+        .await
+    });
+    while calls.lock().unwrap().len() < 2 {
+        tokio::task::yield_now().await;
+    }
+    let mut seen = calls.lock().unwrap().clone();
+    seen.sort_by(|x, y| x.0.cmp(&y.0));
+    let caller = format!("{HOST}|kernel");
+    assert_eq!(
+        seen,
+        vec![
+            (
+                "a:canvas".to_string(),
+                json!({"type": "around"}),
+                caller.clone()
+            ),
+            ("b:canvas".to_string(), json!({"type": "around"}), caller),
+        ]
+    );
+    b_tx.send(json!({"from": "b"})).unwrap();
+    let out = tokio::time::timeout(std::time::Duration::from_secs(3), send)
+        .await
+        .expect("settles")
+        .unwrap();
+    assert_eq!(out.status.as_str(), "completed", "{:?}", out.result);
+    assert_eq!(out.result, json!({"from": "b"}));
+    // the slower tab's call is dropped, not left waiting
+    assert!(a_gone.load(Ordering::SeqCst));
+    drop(a_tx);
+}
+
+#[tokio::test]
+async fn a_disconnected_tab_leaves_the_identity_routable() {
+    let tmp = TempDir::new().unwrap();
+    let k = kernel(&tmp, Some(HOST));
+    let calls = Calls::default();
+    let (_a_tx, a_rx) = oneshot::channel();
+    let (b_tx, b_rx) = oneshot::channel();
+    let flag = Arc::new(AtomicBool::new(false));
+    let gone = tab(&k, "a", &calls, a_rx, &flag);
+    tab(&k, "b", &calls, b_rx, &flag);
+    b_tx.send(json!({"from": "b"})).unwrap();
+    k.unregister_peer(PAGE, &gone);
+    let out = send(
+        &k,
+        &format!("{PAGE}|canvas"),
+        json!({"type": "around"}),
+        None,
+    )
+    .await;
+    assert_eq!(out.result, json!({"from": "b"}), "{:?}", out.result);
+    let who: Vec<String> = calls.lock().unwrap().iter().map(|c| c.0.clone()).collect();
+    assert_eq!(who, vec!["b:canvas".to_string()]);
 }
 
 #[tokio::test]

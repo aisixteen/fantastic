@@ -41,7 +41,10 @@ export interface Exec {
   attempts: number;
   named: boolean;
   name: string | null;
-  /** The id that ORIGINATED this execution; null = operator. Scopes `ledger`. */
+  /** The id that ORIGINATED this execution; null = operator; a caller on another
+   *  kernel by its `<guid>|<agent>`. Scopes `ledger`, and is the one identity a
+   *  join of a secret-marked execution hands the REAL outcome to (python's RAM
+   *  `origin`). */
   caller: string | null;
   settled: boolean;
   outcome: Outcome | null;
@@ -50,7 +53,8 @@ export interface Exec {
    *  `KernelStore.settle` masks the recorded outcome with. null = nothing secret. */
   secret: Secret | null;
   /** The outcome AS RECORDED when `secret` is set — what the `ledger` reads
-   *  back. The caller and in-RAM joiners hold the real one (`outcome`). */
+   *  back. The caller holds the real one (`outcome`), and so does a joiner that
+   *  IS the caller; any other joiner gets it as shown (`batch.ts`). */
   shownOut: Outcome | null;
   /** Resolves with the ONE true outcome. Joiners await exactly this. */
   promise: Promise<Outcome>;

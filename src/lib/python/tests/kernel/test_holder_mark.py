@@ -12,10 +12,9 @@ Order is fixed: the gate (who) → the kernel's shape checks → the bundle's ow
 
 from __future__ import annotations
 
-import sys
 import types
 
-from kernel import sender_context
+from kernel import sender_context, register_unlisted
 
 _mod = types.ModuleType("holder_mark_probe.tools")
 
@@ -31,10 +30,13 @@ async def _handler(id, payload, kernel):
 
 _mod.handler = _handler
 _mod.VERBS = {}
-sys.modules["holder_mark_probe.tools"] = _mod
+register_unlisted("holder_mark_probe.tools", _mod)
 
 MOD = "holder_mark_probe.tools"
-UPDATER = {"kernel_state": ["update_agent"]}
+# AN AGENT EDITS A RECORD IT NAMES (AV-1): `update_agent` is gated on its operand —
+# egress naming it with the verb, and the operand's ingress accepting the editor.
+UPDATER = {"vault": ["update_agent"], "plain": ["update_agent"]}
+ACCEPTS_A = {"a": ["update_agent"]}
 
 
 def _unmark(sender: str, target: str) -> dict:
@@ -86,7 +88,7 @@ async def _as(k, sender: str, payload: dict) -> dict:
 
 async def test_an_agent_cannot_clear_the_mark_on_a_holder(seeded_kernel):
     k = seeded_kernel
-    k.create(MOD, id="vault", holds_secrets=True)
+    k.create(MOD, id="vault", holds_secrets=True, callable_by=ACCEPTS_A)
     k.create(MOD, id="a", can_call=UPDATER)
     for v in (None, *(b for b, _ in BAD)):
         out = await _as(
@@ -102,7 +104,7 @@ async def test_an_agent_cannot_clear_the_mark_on_a_holder(seeded_kernel):
 async def test_the_refusal_wins_over_every_other_field_in_the_patch(seeded_kernel):
     """The whole update is refused — a field beside the clear is not written."""
     k = seeded_kernel
-    k.create(MOD, id="vault", holds_secrets=True)
+    k.create(MOD, id="vault", holds_secrets=True, callable_by=ACCEPTS_A)
     k.create(MOD, id="a", can_call=UPDATER)
     r = (
         await _as(
@@ -136,8 +138,8 @@ async def test_an_agent_may_mark_but_never_unmark(seeded_kernel):
     """`true` passes from anywhere — on a plain agent it marks it, on a holder it is
     the value already there. Other fields of a holder stay writable."""
     k = seeded_kernel
-    k.create(MOD, id="plain")
-    k.create(MOD, id="vault", holds_secrets=True)
+    k.create(MOD, id="plain", callable_by=ACCEPTS_A)
+    k.create(MOD, id="vault", holds_secrets=True, callable_by=ACCEPTS_A)
     k.create(MOD, id="a", can_call=UPDATER)
     for target in ("plain", "vault"):
         out = await _as(
@@ -159,7 +161,7 @@ async def test_null_on_an_unmarked_agent_is_not_a_clear(seeded_kernel):
     """The rule guards a HOLDER. `null` on an agent with no mark changes nothing it
     protects, so it is not refused."""
     k = seeded_kernel
-    k.create(MOD, id="plain")
+    k.create(MOD, id="plain", callable_by=ACCEPTS_A)
     k.create(MOD, id="a", can_call=UPDATER)
     out = await _as(
         k, "a", {"type": "update_agent", "id": "plain", "holds_secrets": None}
@@ -171,8 +173,8 @@ async def test_the_gate_judges_before_the_shape(seeded_kernel):
     """A non-operator's malformed value on a HOLDER gets the gate's refusal; on a
     plain agent, the shape's."""
     k = seeded_kernel
-    k.create(MOD, id="plain")
-    k.create(MOD, id="vault", holds_secrets=True)
+    k.create(MOD, id="plain", callable_by=ACCEPTS_A)
+    k.create(MOD, id="vault", holds_secrets=True, callable_by=ACCEPTS_A)
     k.create(MOD, id="a", can_call=UPDATER)
     on_holder = (
         await _as(
@@ -196,7 +198,7 @@ async def test_the_operator_clears_the_mark_with_null(seeded_kernel):
     """`holds_secrets: null` is the clear: update_agent REPLACES the named field, so
     the record carries `null` — not a holder (only exactly `true` marks one)."""
     k = seeded_kernel
-    k.create(MOD, id="vault", holds_secrets=True)
+    k.create(MOD, id="vault", holds_secrets=True, callable_by=ACCEPTS_A)
     out = await _op(k, {"type": "update_agent", "id": "vault", "holds_secrets": None})
     assert out.get("updated") is True, out
     assert out["agent"]["holds_secrets"] is None
@@ -214,7 +216,7 @@ async def test_the_operator_clears_the_mark_with_null(seeded_kernel):
 
 async def test_every_non_true_value_is_refused_at_update(seeded_kernel):
     k = seeded_kernel
-    k.create(MOD, id="plain")
+    k.create(MOD, id="plain", callable_by=ACCEPTS_A)
     for v, got in BAD:
         r = await _op(k, {"type": "update_agent", "id": "plain", "holds_secrets": v})
         assert r == {"error": _shape(got), "reason": "invalid_meta", "id": "plain"}, (

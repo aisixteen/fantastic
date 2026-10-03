@@ -92,10 +92,10 @@ impl Bundle for FakeStore {
     }
     async fn handle_binary(
         &self,
-        _id: &AgentId,
+        id: &AgentId,
         header: Value,
         body: Option<crate::outcome::Blob>,
-        _kernel: &Arc<Kernel>,
+        kernel: &Arc<Kernel>,
     ) -> Result<(Reply, Option<crate::outcome::Blob>), BundleError> {
         // the chunk is the payload's `bytes` — python's `payload.get("bytes", b"")`
         let blob = crate::outcome::body_at(body.as_ref(), "bytes").unwrap_or_default();
@@ -129,10 +129,9 @@ impl Bundle for FakeStore {
                 std::io::Write::write_all(&mut f, blob).expect("FakeStore: write");
                 Ok((Some(json!({"written": blob.len()})), None))
             }
-            other => Ok((
-                Some(json!({"error": format!("FakeStore: {other:?}")})),
-                None,
-            )),
+            // every other verb is the JSON half — the kernel dispatches
+            // EVERY call here
+            _ => Ok((self.handle(id, &header, kernel).await?, None)),
         }
     }
 }
@@ -172,10 +171,10 @@ impl Bundle for RootLoader {
                 Ok(None)
             }
             "persist_blob" => Ok(Some(
-                crate::persistence::persist_blob(kernel, &agent, payload).await,
+                crate::persistence::persist_blob(kernel, &agent, payload).await?,
             )),
             "load_blob" => Ok(Some(
-                crate::persistence::load_blob(kernel, &agent, payload).await,
+                crate::persistence::load_blob(kernel, &agent, payload).await?,
             )),
             other => Ok(Some(json!({
                 "error": format!("kernel_state: unknown type '{other}'"),

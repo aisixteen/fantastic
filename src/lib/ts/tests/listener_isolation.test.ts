@@ -212,11 +212,11 @@ test("cancel is idempotent: an unknown id kills nothing, and a row already kille
   while (running.size < 2) await sleep(1);
   const parentPid = k.tasks.ids().find((t) => k.tasks.get(t)!.agent === "parent")!;
   const childPid = k.tasks.ids().find((t) => k.tasks.get(t)!.agent === "child")!;
-  assert.deepEqual(k.tasks.cancel(987654), []);
+  assert.deepEqual(k.tasks.cancel(987654, k.rootId), []);
   // the child first, then — in the same tick, its row still in the table — the parent
-  assert.deepEqual(k.tasks.cancel(childPid), [childPid]);
-  assert.deepEqual(k.tasks.cancel(parentPid), [parentPid]);
-  assert.deepEqual(k.tasks.cancel(parentPid), [], "a killed row is not killed again");
+  assert.deepEqual(k.tasks.cancel(childPid, k.rootId), [childPid]);
+  assert.deepEqual(k.tasks.cancel(parentPid, k.rootId), [parentPid]);
+  assert.deepEqual(k.tasks.cancel(parentPid, k.rootId), [], "a killed row is not killed again");
   assert.deepEqual(hooks, ["child", "parent"]);
   assert.equal((await held)[0]!.status, "cancelled");
 });

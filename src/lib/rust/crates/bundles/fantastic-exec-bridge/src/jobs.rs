@@ -30,6 +30,12 @@ pub struct Job {
     /// The agent that owns it. Every verb filters on this, so a known job_id from
     /// another agent is still "no job".
     pub owner: AgentId,
+    /// WHO started it — the calling agent, a foreign caller's `<guid>|<agent>`
+    /// relayed by a bridge leg, or `None` for the operator. The verbs that DRIVE a
+    /// job (`write`, `resize`, `paste_image`, `stop`, `interrupt`, `clear`) answer
+    /// this caller and the operator only (audit AV-8, 2026-10-03); the READ verbs
+    /// (`status`, `output`, `ack`) stay gated by grants alone.
+    pub starter: Option<String>,
     /// OS pid — `stop`/`interrupt` signal it directly.
     pub pid: u32,
     /// The relay task serving this job's control socket — its row in the kernel
@@ -156,8 +162,7 @@ async fn drain_to_eof<R: tokio::io::AsyncRead + Unpin>(rd: &mut BufReader<R>) {
 /// The pump's own line counter, shared by the job's two pipes.
 ///
 /// It lives HERE and not on the job row because python's counter lives on the dict
-/// the pump closed over: `clear {job_id}` drops the ROW, and the pump keeps counting
-/// from where it was, so `progress.n` never restarts (A4.15).
+/// the pump closed over (A4.15).
 #[derive(Default)]
 struct Counter {
     n: u64,
@@ -330,7 +335,7 @@ pub async fn pump(
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     // ONE counter across both pipes, held by the PUMP: `n` is a single monotonic
-    // sequence over stdout and stderr, and it survives `clear` dropping the row.
+    // sequence over stdout and stderr.
     let counter = Arc::new(Mutex::new(Counter::default()));
     let (ro, re) = tokio::join!(
         async {

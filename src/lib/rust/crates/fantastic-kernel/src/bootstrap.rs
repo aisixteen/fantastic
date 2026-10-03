@@ -136,7 +136,7 @@ fn boot_disk(
     // missing or unparseable root `agent.yaml` does not hide the children under
     // `agents/` (python `read_tree`, 2026-09-20) — they are parented to the root
     // id the seed below mints.
-    let mut records = read_tree(&fantastic_dir, &opts.root_id);
+    let mut records = read_tree(&fantastic_dir, &opts.root_id)?;
     let seeded = !records
         .iter()
         .any(|r| r.get("parent_id").is_none_or(Value::is_null));
@@ -193,10 +193,19 @@ fn boot_disk(
 /// python `kernel_state.read_tree` for the bootstrap's own `.fantastic`: the root
 /// record (absent / unreadable / not a mapping ⇒ none) and every record under its
 /// children dir, flat, `parent_id` from DISK POSITION. Corrupt siblings skip.
-fn read_tree(fantastic_dir: &Path, root_id: &str) -> Vec<Map<String, Value>> {
-    let root_rec = std::fs::read_to_string(fantastic_dir.join(persistence::RECORD_FILE))
-        .ok()
-        .and_then(|raw| persistence::parse_record(&raw));
+///
+/// Every path is clamped under `.fantastic` as python's `fs` clamps it
+/// ([`persistence::clamp`]): a `children_dir` that resolves outside (`../x`), or
+/// a record (or its dir) linked outside, refuses the boot — python raises
+/// `ValueError: fs: path '<rel>' escapes root` there — instead of hydrating
+/// records from another directory.
+fn read_tree(fantastic_dir: &Path, root_id: &str) -> KernelResult<Vec<Map<String, Value>>> {
+    let refused = |text: String| KernelError::Persistence {
+        path: fantastic_dir.to_path_buf(),
+        source: std::io::Error::new(std::io::ErrorKind::InvalidInput, text),
+    };
+    let root_rec = persistence::read_record_clamped(fantastic_dir, persistence::RECORD_FILE)
+        .map_err(refused)?;
     let mut out: Vec<Value> = Vec::new();
     match root_rec {
         None => persistence::walk_tree(
@@ -215,15 +224,17 @@ fn read_tree(fantastic_dir: &Path, root_id: &str) -> Vec<Map<String, Value>> {
                 .to_string();
             let id = rec.get("id").cloned().unwrap_or(Value::Null);
             out.push(Value::Object(rec));
-            persistence::walk_tree(fantastic_dir, &cd, &id, &mut out, &cd);
+            persistence::walk_tree(fantastic_dir, &cd, &id, &mut out, &cd)
         }
     }
-    out.into_iter()
+    .map_err(refused)?;
+    Ok(out
+        .into_iter()
         .filter_map(|v| match v {
             Value::Object(m) => Some(m),
             _ => None,
         })
-        .collect()
+        .collect())
 }
 
 fn boot_in_memory(kernel: &Arc<Kernel>, root_id: &str) -> KernelResult<BootedKernel> {

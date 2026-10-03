@@ -141,6 +141,23 @@ pub fn status(agent_id: &AgentId, payload: &Value) -> Value {
     status_snapshot(agent_id, payload)
 }
 
+/// The `on_delete` bundle hook, SHARED by every backend (each one's hook calls
+/// it, like [`on_cancel`]; vllm drops its own table too). Drops every row this
+/// crate keeps for the deleted id, so an id re-created later starts clean and
+/// nothing leaks (audit ARCH2-2): the FIFO lock and queue, the in-flight entry,
+/// the projection and its marks, the fold and recall counters, the calibration
+/// (the state slot), the routing count, the silent streaks, the strip set, and
+/// this kernel's head, bodies, grants and watchers. Python `on_delete`.
+///
+/// NOT the incarnation: it stays monotonic across a re-create, so a reply to a
+/// call the deleted agent made never becomes a live turn of the new one.
+pub fn on_delete(agent_id: &AgentId, kernel: &Kernel) {
+    crate::state::drop_state(agent_id);
+    crate::route::forget(agent_id.as_str());
+    crate::strategies::strip::forget(agent_id.as_str());
+    crate::memory::forget(agent_id, kernel);
+}
+
 /// The `on_cancel` bundle hook, shared by every backend: the kernel is killing
 /// `task_id` and will DROP this generation's future the moment we return.
 ///

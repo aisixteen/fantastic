@@ -21,7 +21,8 @@ agent that answers them is a stream end:
   It only coordinates (drives `read_stream` → `write_stream` by id) and never
   touches the bytes, so it copies fs→fs, `network_bridge`→`file_bridge`,
   anywhere→anywhere identically. Each end self-gates + self-clamps; a sealed
-  end refuses.
+  end refuses. Both ends run AS THE PUMP'S CALLER — you need your own
+  `read_stream` grant on the source and `write_stream` on the sink.
 
 A consumer is therefore storage-agnostic — it pulls/pushes by id, blind to
 what's behind it (a file, a socket, a generator). `file_bridge` is the

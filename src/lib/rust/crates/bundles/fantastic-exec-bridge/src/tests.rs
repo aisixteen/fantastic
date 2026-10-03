@@ -1094,6 +1094,171 @@ async fn a_stream_chunk_crosses_the_wire_raw() {
     );
 }
 
+/// A TEXT send (kind T, no bytes in the call) whose reply holds bytes comes back
+/// kind B: python's relay `encode_frame`s every reply dict, with no list of verbs,
+/// so the program needs no `bytes: b''` to get its chunk raw. Swift's
+/// `aTextSendsBytesReplyComesBackRaw` twin.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_text_sends_bytes_reply_comes_back_raw() {
+    let Some(py) = find_real_python() else {
+        return;
+    };
+    let tmp = TempDir::new().unwrap();
+    let mut kernel = Kernel::new();
+    kernel.bundles.register(HANDLER_MODULE, ExecBridgeBundle);
+    kernel
+        .bundles
+        .register("blob.tools", BlobStore(std::sync::Mutex::new(Vec::new())));
+    let kernel = Arc::new(kernel);
+    let root = Agent::new(
+        AgentId::from("kernel_state"),
+        None,
+        None,
+        Map::new(),
+        tmp.path().join(".fantastic"),
+        false,
+    );
+    kernel.register(Arc::clone(&root));
+    kernel.set_root(Arc::clone(&root));
+    let a = AgentId::from(agent_id_for(&tmp).as_str());
+    for rec in [
+        json!({"type": "create_agent", "parent_id": "kernel", "id": a.as_str(),
+               "handler_module": HANDLER_MODULE,
+               "ingress_rule": "allow_all_ingress", "allowed": [".*"],
+               "cwd": tmp.path().to_string_lossy(),
+               "can_call": {"blob": "*"}}),
+        json!({"type": "create_agent", "parent_id": "kernel_state", "id": "blob",
+               "handler_module": "blob.tools",
+               "callable_by": {a.as_str(): "*"}}),
+    ] {
+        let r = kernel
+            .send(vec![Item::new(AgentId::from("kernel_state"), rec)])
+            .await
+            .remove(0)
+            .result;
+        assert!(r.get("error").is_none(), "{r}");
+    }
+    let mut rx = inbox(&kernel, &a);
+    let _ = kernel
+        .send(vec![Item::new(
+            a.clone(),
+            py_start(
+                &py,
+                "raw = bytes(range(256))\n\
+                 kernel.send('blob', {'type': 'write_stream', 'path': 'b', 'bytes': raw})\n\
+                 r = kernel.send('blob', {'type': 'read_stream', 'path': 'b'})\n\
+                 print('READ', r.get('error'), type(r.get('bytes')).__name__, \
+                 r.get('bytes') == raw)\n",
+                true,
+            ),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let done = until(&mut rx, |v| v["type"] == "job_done", 25)
+        .await
+        .expect("no job_done");
+    assert!(
+        done["stdout"]
+            .as_str()
+            .unwrap()
+            .contains("READ None bytes True"),
+        "a text send's bytes reply was not raw: {done}"
+    );
+}
+
+/// The same reply AS IT CROSSES the fd, from the real `file_bridge`: a kind-T
+/// `send` of `read_stream` is answered by ONE kind-B frame whose `_binary_path` is
+/// `["data", "bytes"]`, the header holding `null` in that slot and the raw body
+/// beside it — python's `encode_frame` of `{op, rid, data: {..., bytes: b"…"}}`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_text_read_stream_is_answered_by_one_binary_frame() {
+    use tokio::io::AsyncReadExt;
+    let tmp = TempDir::new().unwrap();
+    let mut kernel = Kernel::new();
+    kernel.bundles.register(HANDLER_MODULE, ExecBridgeBundle);
+    kernel
+        .bundles
+        .register("file_bridge.tools", fantastic_file::FileBundle::default());
+    let kernel = Arc::new(kernel);
+    let root = Agent::new(
+        AgentId::from("kernel_state"),
+        None,
+        None,
+        Map::new(),
+        tmp.path().join(".fantastic"),
+        false,
+    );
+    kernel.register(Arc::clone(&root));
+    kernel.set_root(Arc::clone(&root));
+    let served = tmp.path().join("served");
+    std::fs::create_dir_all(&served).unwrap();
+    let raw: Vec<u8> = (0..=255u8).collect();
+    std::fs::write(served.join("blob.bin"), &raw).unwrap();
+    let a = AgentId::from(agent_id_for(&tmp).as_str());
+    for (rec, id) in [
+        (
+            json!({"type": "create_agent", "parent_id": "kernel", "id": a.as_str(),
+                   "handler_module": HANDLER_MODULE,
+                   "ingress_rule": "allow_all_ingress",
+                   "cwd": tmp.path().to_string_lossy(),
+                   "can_call": {"fb": "*"}}),
+            a.as_str(),
+        ),
+        (
+            json!({"type": "create_agent", "parent_id": "kernel_state", "id": "fb",
+                   "handler_module": "file_bridge.tools", "allow": ["."],
+                   "ingress_rule": "allow_all_ingress",
+                   "root": served.to_string_lossy(),
+                   "callable_by": {a.as_str(): "*"}}),
+            "fb",
+        ),
+    ] {
+        let r = kernel
+            .send(vec![Item::new(AgentId::from("kernel_state"), rec)])
+            .await
+            .remove(0)
+            .result;
+        assert_eq!(r["id"], id, "{r}");
+    }
+
+    let (mut child, stop, relay) = wire(&kernel, &a, 9004);
+    wire_write(
+        &mut child,
+        &json!({"op": "send", "rid": 7, "target": "fb",
+                "payload": {"type": "read_stream", "path": "blob.bin"}}),
+    )
+    .await;
+    let mut head = [0u8; 4];
+    tokio::time::timeout(Duration::from_secs(5), child.read_exact(&mut head))
+        .await
+        .expect("no frame within 5s")
+        .expect("head");
+    let mut body = vec![0u8; u32::from_be_bytes(head) as usize];
+    child.read_exact(&mut body).await.expect("body");
+    assert_eq!(body[0], b'B', "a bytes reply must cross as a binary frame");
+    let f = fantastic_io_bridge::codec::decode_binary_frame(&body[1..]).expect("a frame");
+    assert_eq!(
+        f.path,
+        Some(vec![
+            fantastic_kernel::Step::from("data"),
+            fantastic_kernel::Step::from("bytes")
+        ])
+    );
+    assert_eq!(f.body, raw);
+    assert_eq!(f.head["op"], "reply", "{}", f.head);
+    assert_eq!(f.head["rid"], 7, "{}", f.head);
+    assert_eq!(f.head["data"]["bytes"], Value::Null, "{}", f.head);
+    assert_eq!(f.head["data"]["eof"], true, "{}", f.head);
+    assert_eq!(f.head["data"]["size"], 256, "{}", f.head);
+
+    stop.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), relay)
+        .await
+        .expect("relay did not stop")
+        .expect("relay");
+}
+
 // ─── the relay: denials, leaks, the frame bound ─────────────────
 //
 // The relay is the unit under test here, so these drive it over a socketpair the
@@ -1235,6 +1400,154 @@ async fn stopping_a_watching_program_leaves_no_proxy_or_watcher() {
     for (p, spy) in proxies.iter().zip(spies.iter_mut()) {
         assert!(spy.try_recv().is_none(), "{p} left a watcher row");
     }
+}
+
+/// Audit BV-8 — the seal covers every verb but `reflect`/`connector`, MAIL
+/// INCLUDED. The substrate's fanout reaches the program's `_xbself_` proxy BEFORE
+/// the handler, so the relay's inbox drain drops what the gate refuses: a sealed
+/// leg's program receives nothing, and receives again once the leg is reopened.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_sealed_leg_refuses_mail_and_relays_nothing() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    let (mut child, stop, relay) = wire(&kernel, &a, 9006);
+    wire_write(&mut child, &json!({"op": "onmessage"})).await;
+    let proxy = AgentId::from("_xbself_9006");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline && !kernel.inboxes.contains_key(&proxy) {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        kernel.inboxes.contains_key(&proxy),
+        "the owner proxy never registered"
+    );
+    let rule = |r: &str| {
+        Item::new(
+            AgentId::from("kernel_state"),
+            json!({"type": "update_agent", "id": a.as_str(), "ingress_rule": r}),
+        )
+    };
+    let up = kernel.send(vec![rule("deny_ingress")]).await.remove(0);
+    assert_eq!(up.result["updated"], true, "{}", up.result);
+    for p in [
+        json!({"type": "status"}),
+        json!({"type": "probe_mail", "x": "TEST-VALUE-MAIL"}),
+    ] {
+        let out = kernel
+            .send(vec![Item::new(a.clone(), p.clone())])
+            .await
+            .remove(0)
+            .result;
+        assert_eq!(out["reason"], "unauthorized", "{p} → {out}");
+    }
+    kernel.send(vec![rule("allow_all_ingress")]).await;
+    kernel
+        .send(vec![Item::new(a.clone(), json!({"type": "after"}))])
+        .await;
+    // the first frame down the fd is the mail sent AFTER the reopen
+    assert_eq!(
+        wire_read(&mut child).await,
+        json!({"op": "inbox", "payload": {"type": "after"}})
+    );
+    stop.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), relay)
+        .await
+        .expect("relay did not stop")
+        .expect("relay");
+}
+
+/// Audit BV-9 — the fanout mirrors every payload sent to the leg into the owner
+/// inbox, so a program started by one caller saw another caller's `write`
+/// keystrokes, paste bytes and drive calls aimed at that caller's job. A drive
+/// verb whose int `job_id` names ANOTHER job is dropped; one with no `job_id`
+/// (bulk) or naming this job is forwarded, and so is one whose id names no job
+/// (a string). Other mail is unchanged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_inbox_drops_a_drive_verb_naming_another_job() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    let (mut child, stop, relay) = wire(&kernel, &a, 9008);
+    wire_write(&mut child, &json!({"op": "onmessage"})).await;
+    let proxy = AgentId::from("_xbself_9008");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline && !kernel.inboxes.contains_key(&proxy) {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        kernel.inboxes.contains_key(&proxy),
+        "the owner proxy never registered"
+    );
+    for p in [
+        json!({"type": "write", "job_id": 9009, "data": "TEST-VALUE-KEYS\n"}),
+        json!({"type": "resize", "job_id": 9009, "cols": 10, "rows": 5}),
+        json!({"type": "paste_image", "job_id": 9009, "bytes": "TEST-VALUE-PNG"}),
+        json!({"type": "stop", "job_id": 9009}),
+        json!({"type": "interrupt", "job_id": 9009}),
+        json!({"type": "clear", "job_id": 9009}),
+        // the bulk forms name no job — forwarded
+        json!({"type": "stop"}),
+        json!({"type": "interrupt"}),
+        json!({"type": "clear"}),
+        json!({"type": "write", "job_id": "9008", "data": "str"}),
+        json!({"type": "write", "job_id": 9008, "data": "own"}),
+        json!({"type": "mail", "n": 1}),
+    ] {
+        kernel.send(vec![Item::new(a.clone(), p)]).await;
+    }
+    // every frame down the fd, in order: none of them names job 9009
+    for want in [
+        json!({"type": "stop"}),
+        json!({"type": "interrupt"}),
+        json!({"type": "clear"}),
+        json!({"type": "write", "job_id": "9008", "data": "str"}),
+        json!({"type": "write", "job_id": 9008, "data": "own"}),
+        json!({"type": "mail", "n": 1}),
+    ] {
+        assert_eq!(
+            wire_read(&mut child).await,
+            json!({"op": "inbox", "payload": want})
+        );
+    }
+    stop.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), relay)
+        .await
+        .expect("relay did not stop")
+        .expect("relay");
+}
+
+/// Audit W-9 (python `test_a_malformed_ctrl_frame_is_skipped_never_fatal`) — JSON
+/// that is no envelope, or a `src` that is no string, is skipped; the relay keeps
+/// serving and the next call is answered. Python ended the relay task here.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_malformed_ctrl_frame_is_skipped_never_fatal() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    let (mut child, stop, relay) = wire(&kernel, &a, 9007);
+    for junk in [
+        json!([1]),
+        json!("str"),
+        json!({"op": "watch", "src": ["x"]}),
+        json!({"op": "watch", "src": {"a": 1}}),
+        json!({"op": "unwatch", "src": ["x"]}),
+        json!({"op": "unwatch", "src": {"a": 1}}),
+    ] {
+        wire_write(&mut child, &junk).await;
+    }
+    wire_write(
+        &mut child,
+        &json!({"op": "send", "rid": "r1", "target": a.as_str(), "payload": {"type": "status"}}),
+    )
+    .await;
+    let reply = wire_read(&mut child).await;
+    assert_eq!(reply["op"], "reply", "{reply}");
+    assert_eq!(reply["rid"], "r1", "{reply}");
+    assert!(reply["data"]["jobs"].is_array(), "{reply}");
+    assert!(!relay.is_finished(), "a malformed frame ended the relay");
+    stop.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), relay)
+        .await
+        .expect("relay did not stop")
+        .expect("relay");
 }
 
 /// A length prefix over the bound is a WIRE VIOLATION — the framing itself is
@@ -1510,7 +1823,7 @@ async fn reflect_verbs_are_python_first_docstring_lines() {
     );
     assert_eq!(
         verbs["clear"],
-        "args: job_id:int? — drop finished jobs (one, or all non-running) from the RAM"
+        "args: job_id:int? — drop YOUR finished jobs (one, or all non-running; the operator: all) from the RAM"
     );
     assert_eq!(
         verbs["boot"],
@@ -1878,11 +2191,13 @@ async fn status_job_id_is_the_integer_task_id() {
         .result;
 }
 
-/// A4.22 — a NAMED `clear` drops the row whatever its status. python's filter is
-/// `k == jid if jid else v["status"] not in ("running", "stopping")`: the label only
-/// decides which rows a BARE `clear` sweeps.
+/// Audit BV-5 — a NAMED `clear` follows the bare form's rule: a `running` (or
+/// `stopping`) row is refused. It used to drop the row whatever its status, and the
+/// row is the only handle `stop`, `cancel`, `delete` and shutdown kill a process
+/// through — the process outlived all four. Once the job is finished, the named
+/// clear drops it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn clear_named_job_drops_it_regardless_of_status() {
+async fn a_named_clear_refuses_a_running_job() {
     let Some(py) = find_real_python() else {
         return;
     };
@@ -1891,12 +2206,22 @@ async fn clear_named_job_drops_it_regardless_of_status() {
     let r = kernel
         .send(vec![Item::new(
             a.clone(),
-            py_start(&py, "import time; time.sleep(2)", false),
+            py_start(&py, "import time; time.sleep(30)", false),
         )])
         .await
         .remove(0)
         .result;
-    let jid = r["job_id"].clone();
+    let jid = r["job_id"].as_i64().expect("job_id");
+    let clear = || async {
+        kernel
+            .send(vec![Item::new(
+                a.clone(),
+                json!({"type": "clear", "job_id": jid}),
+            )])
+            .await
+            .remove(0)
+            .result
+    };
     // A BARE clear leaves it — it is running.
     let bare = kernel
         .send(vec![Item::new(a.clone(), json!({"type": "clear"}))])
@@ -1904,74 +2229,42 @@ async fn clear_named_job_drops_it_regardless_of_status() {
         .remove(0)
         .result;
     assert_eq!(bare["cleared"], 0, "a running row is not swept: {bare}");
-    let named = kernel
+    let named = clear().await;
+    assert_eq!(
+        serde_json::to_string(&named).unwrap(),
+        format!(
+            "{{\"error\":\"clear: job_id must be a finished job (job {jid} is running — \
+             `stop` it, then clear)\",\"reason\":\"bad_arg\",\"arg\":\"job_id\"}}"
+        )
+    );
+    assert!(
+        jobs::jobs().contains_key(&(a.clone(), TaskId(jid))),
+        "the row stays"
+    );
+    let _ = kernel
         .send(vec![Item::new(
             a.clone(),
-            json!({"type": "clear", "job_id": jid}),
+            json!({"type": "stop", "job_id": jid}),
         )])
-        .await
-        .remove(0)
-        .result;
-    assert_eq!(
-        named["cleared"], 1,
-        "a NAMED running row is dropped: {named}"
-    );
+        .await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let done = jobs::jobs()
+            .get(&(a.clone(), TaskId(jid)))
+            .is_some_and(|j| j.status == "stopped");
+        if done || tokio::time::Instant::now() > deadline {
+            assert!(done, "the stopped row never left `stopping`");
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(clear().await, json!({"cleared": 1}));
     let st = kernel
         .send(vec![Item::new(a.clone(), json!({"type": "status"}))])
         .await
         .remove(0)
         .result;
     assert_eq!(st["jobs"], json!([]));
-}
-
-/// A4.15 — `progress.n` is the PUMP's counter, so it keeps counting after `clear`
-/// has dropped the row. python's pump closes over the job dict; popping `_jobs`
-/// leaves that dict (and its counter) alive.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn progress_count_survives_clear() {
-    let Some(py) = find_real_python() else {
-        return;
-    };
-    let tmp = TempDir::new().unwrap();
-    let (kernel, a) = mk_kernel(&tmp).await;
-    let mut rx = inbox(&kernel, &a);
-    let r = kernel
-        .send(vec![Item::new(
-            a.clone(),
-            py_start(
-                &py,
-                "import time\nprint('L1', flush=True)\ntime.sleep(2)\nprint('L2', flush=True)\n",
-                false,
-            ),
-        )])
-        .await
-        .remove(0)
-        .result;
-    let jid = r["job_id"].clone();
-    let first = until(&mut rx, |v| v["type"] == "progress", 20)
-        .await
-        .expect("no first progress");
-    assert_eq!(first["n"], 1, "{first}");
-    let cleared = kernel
-        .send(vec![Item::new(
-            a.clone(),
-            json!({"type": "clear", "job_id": jid}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    assert_eq!(cleared["cleared"], 1, "{cleared}");
-    let second = until(
-        &mut rx,
-        |v| v["type"] == "progress" && v["line"] == "L2",
-        20,
-    )
-    .await
-    .expect("no second progress");
-    assert_eq!(
-        second["n"], 2,
-        "the counter restarted at the clear: {second}"
-    );
 }
 
 /// A4.21 — output is collected RAW: the newline stays on each line, a lone `\r` is

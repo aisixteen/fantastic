@@ -184,12 +184,13 @@ async def connect(
 
         conn.proxy = WireTranscript(root.k, aid)
     else:
+        from helpers.kernel import WRAPS, wrap_with
         from helpers.proxy import ProxyReader
 
-        conn.proxy = ProxyReader(
-            await backend.provider(aid, root), L, trips=conn.trips, watch=watch
-        )
-        core._providers[aid] = conn.proxy
+        # NO CONNECT-TIME BUILD: `inner` is the provider ai_core builds for each
+        # turn (`wrap_with` seats it), so nothing is built before the first turn.
+        conn.proxy = ProxyReader(None, L, trips=conn.trips, watch=watch)
+        WRAPS[aid] = wrap_with(conn.proxy)
 
     # SEE A DEAD CHAIN — subscribe to the AI's own status events. A failed
     # handoff announces itself this way; with nobody listening, a chain that died

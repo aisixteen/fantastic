@@ -182,7 +182,8 @@ extension Kernel {
     /// against a grant.
     ///
     /// `body` is the request's chunk (the payload's `bytes`, a `write_stream`);
-    /// `nil` asks for the reply's chunk raw (a `read_stream`).
+    /// `nil` asks for the reply's chunk raw (a `read_stream`). The chunk comes
+    /// back when the reply holds it at `bytes` — python reads `reply["bytes"]`.
     private func storeSendBinary(_ storeId: AgentId, _ header: JSON, _ body: Data?) async
         -> (JSON, Data?)
     {
@@ -190,7 +191,7 @@ extension Kernel {
             let item = Item(
                 storeId, header, binary: body.map { Blob("bytes", $0) }, rawReply: body == nil)
             let out = await send([item])[0]
-            return (out.result, out.body)
+            return (out.result, bodyAt(out.body, "bytes"))
         }
     }
 
@@ -308,16 +309,23 @@ extension Kernel {
         }
     }
 
-    /// One `.md` file through the provider, copy-if-missing.
+    /// One `.md` file through the provider, copy-if-missing. A refused write is
+    /// LOUD (`persistFailed`), as a record write is — python
+    /// `_seed_doc_via_store`: its reply used to be dropped, so a doc that never
+    /// landed was invisible (audit 2026-10-03, ARCH2-9).
     private func seedDocViaStore(_ storeId: AgentId, _ path: String, _ content: String) async {
         if await presentViaStore(storeId, path) { return }
-        _ = await storeSendBinary(
+        let written = await storeSendBinary(
             storeId,
             .object([
                 "type": .string("write_stream"), "path": .string(path),
                 "truncate": .bool(true),
             ]),
             Data(content.utf8))
+        guard case .object = written.0, !pyTruthy(written.0["error"]) else {
+            persistFailed(storeId, path, written.0)
+            return
+        }
     }
 
     /// Remove an agent's dir THROUGH the provider (the `delete` verb). Never the

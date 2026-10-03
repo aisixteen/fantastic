@@ -25,6 +25,7 @@ sys.path.insert(
     str(next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())),
 )
 from helpers import memory, verdict
+from helpers.kernel import WRAPS, replace_with, seat_providers
 
 GUID = "g92rehydrate"
 BASE = {"$self": "*", "$parent": "*", "$children": "*"}
@@ -100,18 +101,24 @@ async def main():
     _record(d, {"id": "viewer", "parent_id": "kernel_state", "can_call": {**BASE, memory.MEMORY: "*"}})
     _record(d, {"id": "worker", "handler_module": "slow_probe.tools", "parent_id": "kernel_state"})
     sys.path.insert(0, str(next(p for p in Path(__file__).resolve().parents if (p / ".e2e-root").exists()) / "probes"))
+    # `worker` is `slow_probe.tools`: REGISTERED, since the kernel resolves a
+    # handler_module only from its catalog plus `register_unlisted`.
+    import scenario_probes
+
+    scenario_probes.register()
     from _testkit import boot_root
     from ai_core import core
     from cli import Cli
 
     from kernel import sender_context
 
+    seat_providers(core)
     root = boot_root()
     Cli(root.ctx, parent=root)
     try:
         injected = await memory.inject(root, _tables())
         started = await root.ctx.start(boot_all=True)
-        core._providers["ai"] = _Stub()
+        WRAPS["ai"] = replace_with(_Stub())
         turn = (await root.send([{"target": "ai", "payload": {"type": "send", "text": "status?"}}]))[0]
         await asyncio.sleep(0.3)
         sent = "\n".join(str(m.get("content")) for m in _Stub.seen)
@@ -148,7 +155,7 @@ async def main():
         verdict(allok, "a seeded store came back whole: view, clear, folds, grants, ledger, dedup"
                 if allok else "a rehydrate check failed")
     finally:
-        core._providers.pop("ai", None)
+        WRAPS.pop("ai", None)
         await root.ctx.shutdown()
 
 

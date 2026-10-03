@@ -33,7 +33,6 @@ import asyncio
 import contextlib
 import contextvars
 from collections.abc import Coroutine
-import importlib
 import json
 import sys
 import time
@@ -90,6 +89,18 @@ def shutdown_context():
         yield
     finally:
         _in_shutdown.reset(tok)
+
+
+# THE LEDGER FLUSH IS SILENT on the state stream (owner 2026-10-03, audit CLI-B).
+# The kernel's own flush `send` — and every send, emit and state event inside its
+# execution (the store's dispatch, its drain) — publishes nothing: a subscriber
+# woken by the flush (a long-poll `events` waiter) made a call, the call made
+# rows, the rows made the next flush, forever, filling the store. The rows stay
+# recorded by the flush row. Copied into every task the flush starts, like the
+# other contextvars here.
+_state_quiet: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "_state_quiet", default=False
+)
 
 
 # WHO CALLED THIS DISPATCH. `_current_sender` is rewritten to the TARGET's id
@@ -149,18 +160,20 @@ def remote_caller_context(leg_id: str, address: str):
         _remote_caller.reset(token)
 
 
-# THE SECRET PATHS of the call this dispatch serves — the `secret` its caller
+# THE SECRET MARKS of the call this dispatch serves — the `secret` its caller
 # marked on the batch item (`kernel/_secret.py`). Set per dispatch task, so a
 # handler's own sends never inherit it. A bundle that must only ever be called
 # WITH a mark (a credential store) reads it and refuses an unmarked call.
-_current_secret: contextvars.ContextVar[tuple[str, ...]] = contextvars.ContextVar(
-    "_current_secret", default=()
+_current_secret: contextvars.ContextVar[tuple[str | list, ...]] = (
+    contextvars.ContextVar("_current_secret", default=())
 )
 
 
-def current_secret() -> tuple[str, ...]:
-    """The paths the caller marked `secret` on the item that started this dispatch
-    (`payload.<field…>` / `result[.<field…>]`), or () when none were marked."""
+def current_secret() -> tuple[str | list, ...]:
+    """The marks the caller put on the item that started this dispatch, exactly as
+    given and in order — each a dotted string (`payload.<field…>` /
+    `result[.<field…>]`) or an array of steps (`["payload", <step>, …]` /
+    `["result", <step>…]`, a list) — or () when none were marked."""
     return _current_secret.get()
 
 
@@ -394,13 +407,17 @@ class PeerRoute:
     carrying it (reported by the root reflect), `call(agent_id, payload, caller,
     secret)` delivers ONE call to that kernel's `agent_id` as `caller` (`<this
     guid>|<sender>`) and returns the peer's reply — or a refusal when the
-    connection ends first. `secret` is the item's marked paths (`kernel/_secret`,
-    `()` when none), rooted at the item exactly as the peer's item is rooted, so
-    the transport puts them on the call frame verbatim and the PEER masks its own
-    records of the call too."""
+    connection ends first. `secret` is the item's marks as given (`kernel/_secret`
+    — dotted strings and/or arrays of steps, `()` when none), rooted at the item
+    exactly as the peer's item is rooted, so the transport puts them on the call
+    frame verbatim and the PEER masks its own records of the call too.
+    `emit(agent_id, payload, caller)` drops ONE event into that kernel's
+    `agent_id` (no reply) — `caller` is `<this guid>|<sender>` when an agent
+    emitted it, `None` for an operator emit."""
 
     via: str
     call: Callable[[str, dict, str, tuple], Any]
+    emit: Callable[[str, dict, "str | None"], Any]
 
 
 @dataclass
@@ -484,14 +501,19 @@ class Kernel:
     # leaves the kernel — `ps` serves the five public fields only.
     tasks: dict[int, dict] = field(default_factory=dict)
 
-    # CONNECTED PEER KERNELS — guid → the route to it (owner, 2026-09-30). An agent
-    # on another kernel is addressed `<guid>|<agent id>`; when that guid is here,
-    # `send` hands the call to its route and the reply is the call's ordinary
-    # outcome. A TRANSPORT registers the peer it is connected to (the web ws leg
-    # when a page says `hello`) and unregisters it when the connection ends — the
-    # transport only carries frames; addressing is the kernel's. A guid that is not
-    # here is an unknown target like any other.
-    peers: dict[str, "PeerRoute"] = field(default_factory=dict)
+    # CONNECTED PEER KERNELS — guid → the LIVE routes to it (owner, 2026-09-30). An
+    # agent on another kernel is addressed `<guid>|<agent id>`; when that guid is
+    # here, `send` hands the call to its routes and the reply is the call's
+    # ordinary outcome. A TRANSPORT registers the peer it is connected to (the web
+    # ws leg when a page says `hello`) and unregisters it when the connection ends —
+    # the transport only carries frames; addressing is the kernel's. A guid that is
+    # not here is an unknown target like any other.
+    #
+    # A SET PER GUID (owner, 2026-10-03): the tabs of one identity are ONE
+    # principal — every tab says hello with the identity's guid, each is a live
+    # route of it, a call to `<guid>|x` goes to all of them and settles with the
+    # first reply (`RemoteTarget`). Kept in registration order.
+    peers: dict[str, list["PeerRoute"]] = field(default_factory=dict)
 
     # THE ONE COUNTER. Every id in the kernel — a call (one per batch item), a
     # forked task, a settle, a conversation row an AI agent writes to its store —
@@ -573,6 +595,10 @@ class Kernel:
         if n >= self.id_reserved:
             self.id_reserved = n + self.ID_BLOCK
             if self.started and self.root is not None:
+                # The reservation reaches the loader through its `updated` event —
+                # except inside the kernel's own flush (`_state_quiet`), where
+                # NOTHING publishes (CLI-B): the record holds the bound, the
+                # next published update carries it.
                 self.root.update(self.root.id, next_id=self.id_reserved)
         return n
 
@@ -629,6 +655,24 @@ class Kernel:
     def resolve_name(self, name: str) -> int | None:
         """The message id a caller's name stands for, while its execution is held."""
         return self.names.get(name)
+
+    def carried_secret(self, item_id: object) -> bool:
+        """Did the execution a batch item's `id` names — resolved as `send`
+        resolves it: an int is a message id, a string a caller's NAME — carry
+        `secret` marks? False when it names no execution held in RAM (the send
+        itself answers that id; one replayed from the store answers a refusal,
+        never a value). Asked by ai_core before it dispatches a model-parsed call
+        that would JOIN an execution: a model never receives a secret."""
+        if isinstance(item_id, bool):
+            return False
+        if isinstance(item_id, int):
+            eid: int | None = item_id
+        elif isinstance(item_id, str):
+            eid = self.resolve_name(item_id)
+        else:
+            return False
+        exe = self.executions.get(eid) if eid is not None else None
+        return exe is not None and exe.get("secret") is not None
 
     def ledger_put(self, exec_id: int, row: dict) -> None:
         """Insert one execution's PROCESS state, then enforce the ring."""
@@ -823,30 +867,36 @@ class Kernel:
             ids = sorted(self.rows)
             if not ids:
                 return {"flushed": 0}
-            fid = self.mint_id()
-            self._own_flushes.add(fid)
-            batch_kinds = {i: self.rows[i].get("kind") for i in ids}
-            batch = [_store_safe(self.rows[i]) for i in ids]
-            batch.append(
-                {
-                    "id": fid,
-                    "kind": "flush",
-                    "covers": ids,
-                    "status": "done",
-                    "ts": time.time(),
-                }
-            )
-            with operator_context():
-                out = (
-                    await self.send(
-                        [
-                            {
-                                "target": self.store_id,
-                                "payload": {"type": "append", "rows": batch},
-                            }
-                        ]
-                    )
-                )[0]
+            # Nothing of this flush is published — its own id mints (and an
+            # id-block reservation they cross) included (CLI-B).
+            quiet = _state_quiet.set(True)
+            try:
+                fid = self.mint_id()
+                self._own_flushes.add(fid)
+                batch_kinds = {i: self.rows[i].get("kind") for i in ids}
+                batch = [_store_safe(self.rows[i]) for i in ids]
+                batch.append(
+                    {
+                        "id": fid,
+                        "kind": "flush",
+                        "covers": ids,
+                        "status": "done",
+                        "ts": time.time(),
+                    }
+                )
+                with operator_context():
+                    out = (
+                        await self.send(
+                            [
+                                {
+                                    "target": self.store_id,
+                                    "payload": {"type": "append", "rows": batch},
+                                }
+                            ]
+                        )
+                    )[0]
+            finally:
+                _state_quiet.reset(quiet)
             res = out["result"]
             if out["status"] != COMPLETED or (
                 isinstance(res, dict) and res.get("error")
@@ -1294,13 +1344,27 @@ class Kernel:
             for e in self.tasks.values()
         ]
 
+    def is_service_task(self, entry: dict) -> bool:
+        """A KERNEL SERVICE TASK — a keepalive loop the ROOT owns: the execution
+        flusher, the record persister. `cancel` never kills one (audit KV-5,
+        owner 2026-10-03): killing it stopped ledger durability and record
+        persistence until the process restarted, and nothing restarted it. It
+        stays listed in `ps`; the kernel's own stop ends it."""
+        return (
+            bool(entry.get("_keepalive"))
+            and self.root is not None
+            and entry["agent"] == self.root.id
+        )
+
     def task_subtree(self, task_id: int) -> list[int]:
         """`task_id` + every descendant, POST-ORDER (leaves first) — the kill
         order of a process group: children die before the parent that awaits
-        them."""
+        them. A kernel service task below `task_id` (a flusher started by a
+        `kernel_start` some agent's dispatch sent) is not part of the group: it
+        and its own work are left out."""
         kids: dict[int, list[int]] = {}
         for e in self.tasks.values():
-            if e["parent"] is not None:
+            if e["parent"] is not None and not self.is_service_task(e):
                 kids.setdefault(e["parent"], []).append(e["id"])
         out: list[int] = []
 
@@ -1326,9 +1390,20 @@ class Kernel:
 
         Returns {cancelled, killed:[task_id]}. An unknown or already-finished
         id is NOT in the table → {"cancelled": False, "killed": []}: cancel
-        fails honestly, it never pretends."""
-        if task_id not in self.tasks:
+        fails honestly, it never pretends. A kernel service task
+        (`is_service_task`) is refused, and left alive."""
+        entry = self.tasks.get(task_id)
+        if entry is None:
             return {"cancelled": False, "killed": []}
+        if self.is_service_task(entry):
+            return refusal(
+                BAD_ARG,
+                f"cancel: task {task_id} ({entry['verb']}) is a kernel service "
+                "task — not cancellable",
+                hint="it runs for the life of the kernel and stays listed in ps; "
+                "kernel_stop ends it",
+                arg="task_id",
+            )
         ids = self.task_subtree(task_id)
         # MARK FIRST, kill second. `on_cancel` runs real teardown and can await,
         # so a handler in the doomed subtree gets scheduling passes between the
@@ -1393,30 +1468,32 @@ class Kernel:
     # Big enough for any hand-composed kernel, small enough not to bury the error.
     UNKNOWN_AGENT_IDS_MAX = 40
 
-    def register_peer(self, guid: str, route: "PeerRoute") -> dict | None:
-        """Make `<guid>|<agent>` reachable through `route`. Refused (the refusal
-        returned) when that guid is already connected through ANOTHER route —
-        re-pointing a live address silently would hand one kernel's calls to
-        another; the second connection is told so instead."""
-        held = self.peers.get(guid)
-        if held is not None and held is not route:
-            return refusal(
-                BAD_ARG,
-                f"peer {guid} is already connected via {held.via} — one kernel, "
-                "one live route; close the other connection first",
-                arg="guid",
-            )
-        self.peers[guid] = route
-        return None
+    def register_peer(self, guid: str, route: "PeerRoute") -> None:
+        """Make `<guid>|<agent>` reachable through `route` — ADDED to the guid's
+        live routes: another connection saying hello with a live guid is another
+        tab of that identity, one principal with the rest. A route already there
+        stays one."""
+        routes = self.peers.setdefault(guid, [])
+        if not any(r is route for r in routes):
+            routes.append(route)
 
     def unregister_peer(self, guid: str, route: "PeerRoute") -> None:
-        """Forget `guid` — only if `route` is still the one registered."""
-        if self.peers.get(guid) is route:
-            del self.peers[guid]
+        """Forget `route` — that one connection. The guid stays reachable through
+        its other live routes, and stops being an address with its last."""
+        rest = [r for r in self.peers.get(guid, ()) if r is not route]
+        if rest:
+            self.peers[guid] = rest
+        else:
+            self.peers.pop(guid, None)
 
     def peer_rows(self) -> list[dict]:
-        """The connected peer kernels, for the root reflect: `[{guid, via}]`."""
-        return [{"guid": g, "via": r.via} for g, r in sorted(self.peers.items())]
+        """The connected peer kernels, for the root reflect: `[{guid, via}]` —
+        one row per live route, so a guid connected twice shows twice."""
+        return [
+            {"guid": g, "via": r.via}
+            for g, rs in sorted(self.peers.items())
+            for r in rs
+        ]
 
     def unknown_agent(self, agent_id: str, **extra) -> dict:
         """The reply for an id that names no agent — carrying the LIVE id index.
@@ -1630,11 +1707,13 @@ class Kernel:
         drops the current tree, then DFS-rebuilds from the root.
 
         Weak-load: a record whose `handler_module` isn't importable in
-        THIS runtime is logged + skipped along with its whole subtree,
+        THIS runtime (`import_handler`: the bundle catalog + `register_unlisted`
+        only) is logged + skipped along with its whole subtree,
         left untouched in the snapshot/on disk. Builds in-memory only
         (Agent never touches disk); fires no `boot` — the bootstrap
         does that after, which is when a loader subscribes + persists."""
         from kernel._agent import Agent  # local import — Agent imports this module
+        from kernel._bundles import import_handler  # local — it imports this module
 
         if isinstance(snapshot, dict):
             version = snapshot.get("version", CURRENT_VERSION)
@@ -1668,7 +1747,7 @@ class Kernel:
             hm = rec.get("handler_module")
             if hm:
                 try:
-                    importlib.import_module(hm)
+                    import_handler(hm)
                 except Exception:
                     # canonical log shape — CI + selftests grep it verbatim.
                     sys.stderr.write(
@@ -1711,8 +1790,9 @@ class Kernel:
         inboxes. Subscribers may call agent.send/emit/create/delete
         from inside their callback; that produces normal traffic
         events (bounded; never feedback-loops because state events
-        themselves don't re-publish)."""
-        if not self.state_subscribers:
+        themselves don't re-publish). Nothing inside the kernel's own ledger
+        flush is published (`_state_quiet`)."""
+        if not self.state_subscribers or _state_quiet.get():
             return
         event = {**event, "ts": time.time()}
         # Snapshot so a subscriber that unsubscribes mid-iteration

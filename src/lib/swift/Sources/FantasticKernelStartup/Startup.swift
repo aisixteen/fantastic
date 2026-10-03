@@ -50,8 +50,8 @@ public func defaultBundleRegistry() -> BundleRegistry {
     // TEST-ONLY. The shared e2e scenarios declare stateful fixture roles that
     // python and js register in process; a compiled kernel can only run what is
     // compiled in, so without these the scenarios naming them are SKIPPED.
-    // UNLISTED: python registers them as importable modules with no
-    // `fantastic.bundles` entry point, so they dispatch but never show up in
+    // UNLISTED: python registers them with `register_unlisted` (no
+    // `fantastic.bundles` entry point), so they dispatch but never show up in
     // the `bundles` catalog a model reflects.
     #if SCENARIO_PROBES
         r.registerUnlisted(DISPENSER_MODULE, DispenserProbe())
@@ -143,7 +143,7 @@ public func startKernelInMemory(portHint: UInt16 = 0) async throws -> Kernel {
 /// Boot a disk-backed kernel that hydrates from
 /// `<workdir>/.fantastic/agents/<id>/agent.yaml` files written by
 /// any Fantastic implementation (Python is canonical; Swift writes
-/// the same shape via `Persistence.persist`).
+/// the same shape via `Persistence.recordBytes`).
 ///
 /// Mirrors Python's daemon-mode startup contract: the kernel loads
 /// whatever persisted state is on disk + weak-loads (skips agents
@@ -169,18 +169,23 @@ public func startKernel(
         bundles: defaultBundleRegistry()
     )
     let dotFantastic = url.appendingPathComponent(".fantastic")
-    try? fm.createDirectory(at: dotFantastic, withIntermediateDirectories: true)
-    // THE ROOT RECORD, or a fresh seed. Python's `read_tree` returns `[]` when
-    // `.fantastic/agent.yaml` is MISSING **or not a YAML mapping**, and `_bootstrap` then
-    // seeds a fresh root, overwrites the file, and hydrates NO CHILDREN on that
-    // boot — a tree whose root is unreadable has no walk to start from. A corrupt
-    // root used to be overwritten here while the children were hydrated anyway.
+    // THROWS, as python's seed raises: a `.fantastic` that cannot be made left a
+    // kernel booting "fine" with nothing persisted (audit 2026-10-03, ARCH2-9).
+    try fm.createDirectory(at: dotFantastic, withIntermediateDirectories: true)
+    // THE ROOT RECORD, or a fresh seed. When `.fantastic/agent.yaml` is MISSING
+    // **or not a YAML mapping**, python's `_bootstrap` seeds a fresh root and
+    // overwrites the file — and its `read_tree` still walks the children under the
+    // default `agents/` layout, parented to the id the reseed mints, so the
+    // reseeded root keeps its children (see the hydration below).
+    // CLAMPED, as python's `read_tree` reads it through `fs`: a root `agent.yaml`
+    // linked outside `.fantastic` throws `fs: path 'agent.yaml' escapes root`
+    // HERE, before the seed below could write over the link (audit ARCH2-6).
     let rootRecordFile = dotFantastic.appendingPathComponent(RECORD_FILE)
     var rootId = ROOT_ID
     var rootHandler: String? = ROOT_HANDLER_MODULE
     var rootMeta: OrderedDictionary<String, JSON> = [:]
     var seeded = true
-    if let obj = Persistence.readRecord(rootRecordFile) {
+    if let obj = try Persistence.readRecordClamped(dotFantastic, RECORD_FILE) {
         seeded = false
         // A PERSISTED RECORD IS AUTHORITATIVE, id and handler_module included —
         // the tree on disk says what its root is called and what answers for it.
@@ -212,7 +217,9 @@ public func startKernel(
     // order (`can_call, callable_by`), and the loader's `boot` appends `guid`
     // after them. COLD primitive — it runs before any provider exists.
     if seeded {
-        try? Persistence.recordBytes(root.record().ordered)
+        // THROWS, as python's `write_record` raises: a root record that never
+        // landed minted a new guid every boot, breaking peers pinned to it.
+        try Persistence.recordBytes(root.record().ordered)
             .write(to: rootRecordFile, options: .atomic)
         // ONLY ON THE SEED, as python does: `_bootstrap` calls `write_record`
         // (which is what seeds `readme.md` + the keyed `docs/` tree) under `if
@@ -221,8 +228,8 @@ public func startKernel(
         // removed by hand came back on the next `reflect`, where python leaves
         // the tree as the operator left it. Copy-if-missing per file still
         // holds, so an edited doc is never clobbered.
-        RootReadme.seed(workdir: url)
-        RootDocs.seed(workdir: url)
+        try RootReadme.seed(workdir: url)
+        try RootDocs.seed(workdir: url)
     }
 
     // Hydrate persisted children. Reads every
@@ -231,7 +238,9 @@ public func startKernel(
     // weak-load — agents whose handler_module isn't in the current bundle
     // registry are skipped silently. A RESEEDED ROOT KEEPS ITS CHILDREN (python
     // `read_tree`, 2026-09-20): the walk runs whether or not the root parsed.
-    var records = Persistence.readTree(rootDir: dotFantastic, fallbackRootId: rootId)
+    // THROWS where python's clamped walk raises: a `children_dir` or a record
+    // that resolves outside `.fantastic` refuses the boot.
+    var records = try Persistence.readTree(rootDir: dotFantastic, fallbackRootId: rootId)
     if !records.isEmpty {
         // `readTree` yields the root record first when `.fantastic/agent.yaml`
         // parsed; a reseeded root is not on disk as a record it yields, so the

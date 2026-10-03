@@ -3,7 +3,13 @@
 // Python `relay_connector/_relay.py`, shape for shape. We dial
 // `ws://<host>/<guid>` (subprotocol `fantastic.relay.v1`, header
 // `X-Fantastic-Auth: <group password>` checked once at the WS upgrade) and reach
-// a fixed `partner` GUID. The relay routes by `target` and delivers peer→peer
+// a fixed `partner` GUID. The password is a SECRET and lives only in a
+// credential_store (audit IO-7/F4, 2026-10-03): the record names it —
+// `credentials: {store, ref}` — and before EVERY dial the connector reads the
+// ref's `password` field as itself, the answer marked `secret: ['result']`,
+// pinned to the relay URL's host, exactly as an AI backend reads its key
+// (`FantasticAICore/Credentials`). Nothing is cached: a rotated password is used
+// by the next dial. The relay routes by `target` and delivers peer→peer
 // ONE-WAY as `{type:"event", source, payload}` — there is NO relay-level reply
 // correlation for peer→peer.
 //
@@ -26,12 +32,87 @@ import OrderedCollections
 /// Python `_relay.SUBPROTOCOL` / `DEFAULT_HEARTBEAT` / `DEFAULT_RECONNECT`.
 public let RELAY_SUBPROTOCOL = "fantastic.relay.v1"
 
+/// Python `_relay.DIRECTORY_SRC` — the relay's own directory agent: a directory
+/// request is addressed `target` to it, and a directory event reaches the engine
+/// as an `event` frame from `src` it, so `watch_directory` subscribes the leg to it
+/// like any watched agent.
+public let DIRECTORY_SRC = "relay"
+
+/// The relay password, read at dial time (throws naming store + ref). Python
+/// `PasswordReader`.
+public typealias RelayPasswordReader = @Sendable () async throws -> String
+
+/// The credential field that holds the relay group password. Python `FIELD`.
+public let RELAY_PASSWORD_FIELD = "password"
+
+/// The relay password could not be read — the dial fails, naming the store and
+/// the ref. Python `CredentialError`.
+public struct RelayCredentialError: Error, CustomStringConvertible, Sendable {
+    public let message: String
+    public init(_ message: String) { self.message = message }
+    public var description: String { message }
+}
+
+/// Why a `credentials` value is malformed, or nil: a map of exactly a non-empty
+/// `store` id and a non-empty `ref` (ai_core's shape, its texts). Python
+/// `credentials_shape_error`.
+public func relayCredentialsShapeError(_ v: JSON) -> String? {
+    guard case .object(let o) = v, Set(o.keys) == ["store", "ref"] else {
+        return "credentials must be {store: <credential_store id>, ref: <ref>}"
+    }
+    for k in ["store", "ref"] {
+        guard case .string(let s)? = o[k], !pyStrip(s).isEmpty else {
+            return "credentials.\(k) must be a non-empty string"
+        }
+    }
+    return nil
+}
+
+/// The `read() -> password` a dial awaits — every dial, nothing cached. Asks the
+/// store named by the record's `credentials` AS THIS CONNECTOR for the ref's
+/// `password`, the answer marked secret (it lands in no row, ledger or stream)
+/// and pinned to the relay URL's host (the store refuses a ref bound elsewhere).
+/// Throws `RelayCredentialError` on any refusal or a missing field. Python
+/// `password_reader`.
+public func relayPasswordReader(_ selfId: AgentId, _ kernel: Kernel, relayURL: String)
+    -> RelayPasswordReader
+{
+    { [weak kernel] in
+        guard let kernel else { throw RelayCredentialError("relay_connector: kernel gone") }
+        let cred = kernel.agent(selfId)?.metaValue(forKey: "credentials") ?? .null
+        if let bad = relayCredentialsShapeError(cred) {
+            throw RelayCredentialError("relay_connector: \(bad)")
+        }
+        let store = cred["store"].asString ?? ""
+        let ref = cred["ref"].asString ?? ""
+        var item = Item(
+            AgentId(store),
+            .object(["type": "get", "ref": .string(ref), "host": .string(relayURL)]))
+        item.secret = ["result"]
+        let out = await KernelTaskLocals.$currentSender.withValue(selfId) {
+            await kernel.send([item])[0]
+        }
+        let res = out.result
+        if out.status != .completed || res.asObject == nil || pyTruthy(res["error"]) {
+            let err = res.asObject != nil ? pyStr(res["error"]) : out.status.rawValue
+            throw RelayCredentialError("relay_connector: credentials \(store)/\(ref): \(err)")
+        }
+        guard case .string(let pw) = res["fields"][RELAY_PASSWORD_FIELD], !pw.isEmpty else {
+            throw RelayCredentialError(
+                "relay_connector: credential \(pyRepr(ref)) in \(pyRepr(store)) has no "
+                    + "\(pyRepr(RELAY_PASSWORD_FIELD)) field")
+        }
+        return pw
+    }
+}
+
 // THE RELAY SEAL (owner, 2026-10-02). relayd dispatches every tunneled frame into
 // its own kernel and records it UNMASKED, so a secret that crossed a relay leg
 // would sit in the relay's ledger in full. Until relayd masks what it records, a
 // relay leg refuses any call carrying secret marks, in both directions: outbound
 // in `KernelBridgeBundle.handle`/`handleBinary` (`forward`), inbound in
-// `RelayTransport.recv`. ws_bridge (direct WS) is not sealed. One text for both.
+// `RelayTransport.recv`. ws_bridge (direct WS) is sealed only to a non-loopback
+// host (its own seal, `WS_SECRET_SEALED`). One text for both.
 // Python `_relay.SECRET_SEALED` / `SECRET_SEALED_HINT` / `secret_sealed`.
 public let SECRET_SEALED =
     "relay_connector: a call carrying secret marks may not cross a relay leg — "
@@ -119,7 +200,7 @@ public actor RelayTransport: BridgeTransport {
     public static func connect(
         relayURL: URL,
         guid: String,
-        token: String,
+        password: @escaping RelayPasswordReader,
         partnerGuid: String,
         heartbeat: Double = DEFAULT_HEARTBEAT,
         reconnect: Double = DEFAULT_RECONNECT,
@@ -132,8 +213,10 @@ public actor RelayTransport: BridgeTransport {
         // without a network, and it is python's own signature.
         let dialURL = relayURL.appendingPathComponent(guid)
         let dialer: @Sendable () async throws -> any RelayWire = dialer ?? {
+            // Read at USE time, every (re)dial: a rotated password reaches the
+            // relay on the next connect, and no copy outlives this call.
             try await NIOWebSocketClient.connect(
-                url: dialURL, subprotocols: [RELAY_SUBPROTOCOL], authToken: token)
+                url: dialURL, subprotocols: [RELAY_SUBPROTOCOL], authToken: try await password())
         }
         var initial: (any RelayWire)?
         do {
@@ -305,11 +388,16 @@ public actor RelayTransport: BridgeTransport {
                 let payload = envelope["payload"]
                 guard case .object = payload else { continue }
                 let source = envelope["source"].asString
-                if source == "relay" {
-                    // A DIRECTORY event — surfaced as a bridge `event` so the
-                    // engine re-emits it on this connector's inbox.
+                if source == DIRECTORY_SRC {
+                    // A DIRECTORY event — surfaced as a bridge `event` from the
+                    // directory, which the engine re-emits on this connector's
+                    // inbox while `watch_directory` holds it in the leg's
+                    // `watching`.
                     return (
-                        .object(["type": .string("event"), "payload": payload]), Data(), false
+                        .object([
+                            "type": .string("event"), "src": .string(DIRECTORY_SRC),
+                            "payload": payload,
+                        ]), Data(), false
                     )
                 }
                 guard source == partner else { continue }
@@ -478,7 +566,9 @@ final class RelayWaiter: @unchecked Sendable {
 
 extension KernelBridgeBundle {
     /// Python `relay_connector._relay.build_transport`. Required: `relay_url`,
-    /// `partner_guid`. `guid` (our WS path) is auto-minted on first boot if
+    /// `partner_guid`, `credentials` ({store, ref} — the relay password's
+    /// credential_store ref, field `password`, bound to the relay's host; read
+    /// before every dial). `guid` (our WS path) is auto-minted on first boot if
     /// absent and PERSISTED, so every later hydration re-dials the SAME path; an
     /// explicit guid always wins and a minted one is never regenerated.
     func buildRelayTransport(
@@ -488,6 +578,17 @@ extension KernelBridgeBundle {
         let partnerValue = meta["partner_guid"] ?? .null
         guard pyTruthy(relayURLValue), pyTruthy(partnerValue) else {
             throw BridgeConfigError("relay_connector requires relay_url, partner_guid")
+        }
+        let cred = meta["credentials"] ?? .null
+        if cred == .null {
+            let id = agentId.value
+            throw BridgeConfigError(
+                "relay_connector: no `credentials` on \(id) — name the relay password's "
+                    + "credential store and ref (update_agent \(id) credentials={store: <id>, "
+                    + "ref: <ref>}; the ref's field `password`, bound to the relay's host)")
+        }
+        if let bad = relayCredentialsShapeError(cred) {
+            throw BridgeConfigError("relay_connector: \(bad)")
         }
         // The guid is minted only AFTER the required fields validate, so a
         // half-configured leg leaves no durable identity behind.
@@ -506,15 +607,15 @@ extension KernelBridgeBundle {
             throw BridgeConfigError(
                 "relay_connector role must be one of \(RELAY_ROLES_TEXT), got \(pyRepr(roleValue))")
         }
-        let tokenValue = meta["relay_token"] ?? .null
-        let token = pyTruthy(tokenValue) ? pyStr(tokenValue) : ""
         let heartbeat = try floatArg(meta["heartbeat"] ?? .double(DEFAULT_HEARTBEAT))
         let reconnect = try floatArg(meta["reconnect"] ?? .double(DEFAULT_RECONNECT))
         guard let relayURL = URL(string: pyStr(relayURLValue)) else {
             throw BridgeConfigError("relay_connector: malformed relay_url")
         }
         return try await RelayTransport.connect(
-            relayURL: relayURL, guid: guid, token: token, partnerGuid: pyStr(partnerValue),
+            relayURL: relayURL, guid: guid,
+            password: relayPasswordReader(agentId, kernel, relayURL: pyStr(relayURLValue)),
+            partnerGuid: pyStr(partnerValue),
             heartbeat: heartbeat, reconnect: reconnect, identity: relayIdentity(meta),
             spawn: { verb, work in
                 kernel.spawnTask(agent: agentId, verb: verb, work: work)

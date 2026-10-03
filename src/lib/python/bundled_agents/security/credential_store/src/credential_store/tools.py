@@ -6,29 +6,48 @@ plus the host it may be sent to. A bundle that needs one names it on its own rec
 other host — so rotating a key is rewriting the ref, and no restart is ever needed.
 
 WHERE THE VALUES LIVE — `backend` on the record, one of:
-  * `file` (the default): a YAML file in the user's home,
-    `~/.fantastic/credentials/<store id>.yaml` unless `file` names another path. It
-    is written 0600 and READ ONLY IF it is a regular file owned by this user with
-    no group/other bits — anything else is refused, loud.
+  * `file` (the default): a YAML file at an ABSOLUTE path —
+    `~/.fantastic/credentials/<store id>.yaml` unless `file` names another one
+    (`/…` or `~…`; a relative path is refused at the write). It is written 0600
+    and READ ONLY IF it is a regular file owned by this user with no group/other
+    bits — anything else is refused, loud. It is judged on the ONE open it is read
+    from (`fs.read_private`: `O_NOFOLLOW`, then `fstat` of that descriptor), so no
+    swap can land between the check and the read.
   * `keychain`: the OS keychain (macOS Keychain, Secret Service, Windows Credential
-    Locker), one item per ref — service `keychain_service` (default `fantastic`),
-    account `<store id>/<ref>`. The explicit choice for the strongest at-rest
-    protection.
+    Locker), one item per ref, under the namespace `keychain_namespace` (default
+    `fantastic` — macOS calls it the item's "service"), account
+    `<store id>/<ref>`. The explicit choice for the strongest at-rest protection.
   * `env`: read-only; each ref maps its fields to environment variables
     (`refs: {ref: {host, env: {api_key: VAR}}}`), for a container or CI.
 
-WHO MAY DO WHAT — per ref, on the store's own record (the OPERATOR manages it with
-`update_agent`): `refs: {<ref>: {readers: [...], writers: [...], host, fields}}`.
-An entry is a local agent id, `$subtree:<id>` (that agent and every live descendant),
-or a qualified `<guid>|<agent>` caller on another kernel. The operator may do
-everything. An agent listed in `creators` may create a NEW ref, which it then reads
-and writes. A caller with no grant on a ref is answered "no such ref" — never told
-the ref exists.
+THE HOST IS STORED WITH THE VALUE (audit S3, 2026-10-03): `set` writes the ref's
+declared host beside its fields — the file entry and the keychain item are
+`{host, fields}` — and `get` refuses a value whose stored host is not the one its
+declaration names, or that carries none: a store elsewhere declaring the same id
+and ref with another host reads nothing. The `env` backend keeps no value at rest.
+
+A REF IS DECLARED ONLY BY `update_agent` on the store's own record — the kernel's
+privileged verb, granted explicitly, is the one path:
+`refs: {<ref>: {host, readers: [...], writers: [...], fields?/env?}}` (it replaces
+the whole map; `host` is required — the binding). The DECLARATION is the
+operator's and only `update_agent` writes or removes it (audit AV-4/AV-5,
+2026-10-03): `set` stores the value of a DECLARED ref, never creates one and takes
+no `host` (an undeclared ref answers "no such ref", to the operator too; a `host`
+on the call is refused); `forget` drops the value and keeps the declaration.
+`set`/`forget` need the caller in `writers`, `get` in `readers`; an entry is a
+local agent id, `$subtree:<id>` (that agent and every live descendant), or a
+qualified `<guid>|<agent>` caller on another kernel. The operator passes every
+reader and writer check. A caller with no grant on a ref is answered "no such
+ref" — never told the ref exists. `fields` on a ref are the stored value's NAMES:
+`set` writes them, `forget` drops them.
 
 NO VALUE IS EVER RECORDED. `set` must be called with `secret: ['payload.fields']`
 and `get` with `secret: ['result']` (`kernel/_secret.py`): the call is refused
 otherwise, because the value would land in the ledger, the memory store and the
-state stream. The record holds only metadata — the host and the field NAMES.
+state stream. Either spelling of a mark counts (`['payload', 'fields']` is
+`payload.fields`), as does marking every field one by one; a field name holding a
+dot is marked only as an array (`['result', 'fields', 'a.b']`). The record holds
+only metadata — the host and the field NAMES.
 
 The kernel's call gate still decides who may reach this agent at all.
 
@@ -44,7 +63,6 @@ from __future__ import annotations
 
 import json
 import os
-import stat
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -66,7 +84,7 @@ BACKENDS = ("file", "keychain", "env")
 #: a model-parsed call to an agent so marked.
 HOLDS_SECRETS = "holds_secrets"
 DEFAULT_DIR = "~/.fantastic/credentials"
-KEYCHAIN_SERVICE = "fantastic"
+KEYCHAIN_NAMESPACE = "fantastic"
 SUBTREE = "$subtree:"
 
 
@@ -118,64 +136,80 @@ def _host(h) -> str | None:
     return h.lower() or None
 
 
-def _marked(prefix: str, names) -> bool:
-    """Whether the caller marked `prefix` (or every `prefix.<name>`) secret."""
-    paths = current_secret()
-    return prefix in paths or (
-        bool(names) and all(f"{prefix}.{n}" in paths for n in names)
-    )
+def _names(mark, steps: list[str]) -> bool:
+    """Whether one secret mark names exactly `steps` — a dotted string by its
+    dots, an array of steps step for step (`kernel/_secret`). A field name holding
+    a dot is named only by an array: `result.fields.a.b` is `a` → `b`, never the
+    field `a.b`, so it would not mask it."""
+    if isinstance(mark, str):
+        return mark.split(".") == steps
+    return isinstance(mark, list) and mark == steps
+
+
+def _marked(prefix: list[str], names) -> bool:
+    """Whether the caller marked `prefix` (or every `prefix` + `<name>`) secret, in
+    either spelling of a mark."""
+    marks = current_secret()
+
+    def has(steps: list[str]) -> bool:
+        return any(_names(m, steps) for m in marks)
+
+    return has(prefix) or (bool(names) and all(has([*prefix, n]) for n in names))
 
 
 # ─── where the values live ───────────────────────────────────────
 
 
+def _relative_file(p: str) -> str | None:
+    """The refusal for a `file` that is not absolute (`/…` or `~…`), or None."""
+    if p.startswith("/") or p.startswith("~"):
+        return None
+    return f"file={p!r} must be an absolute path (starting with / or ~) — a relative path is refused"
+
+
 class _File:
-    """The default backend: one YAML document of `{refs: {ref: {field: value}}}`."""
+    """The default backend: one YAML document of
+    `{refs: {ref: {host, fields: {field: value}}}}`, at an absolute path."""
 
     def __init__(self, agent):
         p = agent.record.get("file") or f"{DEFAULT_DIR}/{agent.id}.yaml"
-        if p.startswith("~") or p.startswith("/"):
-            full = Path(p).expanduser()
-            self.base, self.name, self.external = str(full.parent), full.name, True
-        else:  # relative: under the kernel's running dir, clamped
-            rel = Path(p)
-            self.base = fs.Root(agent.ctx.workdir, str(rel.parent))
-            self.name, self.external = rel.name, False
-        self.shown = p
-
-    def _check(self) -> None:
-        st = fs.lstat(self.base, self.name, external=self.external)
-        mode = stat.S_IMODE(st.st_mode)
-        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or mode & 0o077:
-            raise PermissionError(
-                f"{NAME}: credential file {self.shown} must be a regular file owned "
-                f"by this user with mode 0600 (is {oct(mode)}, uid {st.st_uid}) — "
-                "refused, nothing read"
-            )
+        if why := _relative_file(p):  # a record written past `validate_meta`
+            raise ValueError(f"{NAME}: {why}")
+        full = Path(p).expanduser()
+        self.base, self.name, self.shown = str(full.parent), full.name, p
 
     def load(self) -> dict:
-        if not fs.exists(self.base, self.name, external=self.external):
+        if not fs.exists(self.base, self.name, external=True):
             return {}
-        self._check()
-        doc = yaml_io.load(fs.read_text(self.base, self.name, external=self.external))
+        # ONE open, judged on its own descriptor (`fs.read_private`): checking the
+        # path and then reading the path again was a window a swapped leaf slipped
+        # through (audit F5, 2026-10-03).
+        try:
+            raw = fs.read_private(self.base, self.name, external=True)
+        except fs.NotPrivate as e:
+            raise PermissionError(
+                f"{NAME}: credential file {self.shown} must be a regular file owned "
+                f"by this user with mode 0600 (is {oct(e.mode)}, uid {e.uid}) — "
+                "refused, nothing read"
+            ) from None
+        doc = yaml_io.load(raw.decode("utf-8"))
         refs = (doc or {}).get("refs") if isinstance(doc, dict) else None
         return refs if isinstance(refs, dict) else {}
 
     def get(self, ref: str) -> dict | None:
+        """The ref's entry at rest, `{host, fields}`."""
         v = self.load().get(ref)
         return v if isinstance(v, dict) else None
 
     def _save(self, refs: dict) -> None:
         # THE KERNEL'S ONE EMITTER (`kernel_state/yaml_io.py`) — the bytes the rust
-        # and swift ports reproduce — over refs and fields in sorted order.
-        text = yaml_io.dump(
-            {"refs": {r: dict(sorted(refs[r].items())) for r in sorted(refs)}}
-        )
-        fs.write_text(self.base, self.name, text, external=self.external, mode=0o600)
+        # and swift ports reproduce — every map's keys in sorted order.
+        text = yaml_io.dump(_sorted({"refs": refs}))
+        fs.write_text(self.base, self.name, text, external=True, mode=0o600)
 
-    def put(self, ref: str, fields: dict) -> None:
+    def put(self, ref: str, host: str, fields: dict) -> None:
         refs = self.load()
-        refs[ref] = fields
+        refs[ref] = {"host": host, "fields": fields}
         self._save(refs)
 
     def drop(self, ref: str) -> None:
@@ -185,7 +219,7 @@ class _File:
 
 
 class _Keychain:
-    """The OS keychain: one item per ref, the fields as a JSON object."""
+    """The OS keychain: one item per ref, `{host, fields}` as a JSON object."""
 
     def __init__(self, agent):
         try:
@@ -195,27 +229,33 @@ class _Keychain:
                 f"{NAME}: the keychain backend needs `keyring`: {e}"
             ) from e
         self.kr = keyring
-        self.service = agent.record.get("keychain_service") or KEYCHAIN_SERVICE
+        # the keychain's own word for it is the item's "service"
+        self.namespace = agent.record.get("keychain_namespace") or KEYCHAIN_NAMESPACE
         self.prefix = f"{agent.id}/"
 
     def get(self, ref: str) -> dict | None:
-        raw = self.kr.get_password(self.service, self.prefix + ref)
+        """The ref's item, `{host, fields}`."""
+        raw = self.kr.get_password(self.namespace, self.prefix + ref)
         if raw is None:
             return None
         v = json.loads(raw)
         return v if isinstance(v, dict) else None
 
-    def put(self, ref: str, fields: dict) -> None:
-        self.kr.set_password(self.service, self.prefix + ref, json.dumps(fields))
+    def put(self, ref: str, host: str, fields: dict) -> None:
+        self.kr.set_password(
+            self.namespace,
+            self.prefix + ref,
+            json.dumps({"host": host, "fields": fields}),
+        )
 
     def drop(self, ref: str) -> None:
-        if self.kr.get_password(self.service, self.prefix + ref) is not None:
-            self.kr.delete_password(self.service, self.prefix + ref)
+        if self.kr.get_password(self.namespace, self.prefix + ref) is not None:
+            self.kr.delete_password(self.namespace, self.prefix + ref)
 
 
 class _Env:
     """Read-only: each ref's fields come from the environment variables its record
-    entry names (`env: {field: VAR}`)."""
+    entry names (`env: {field: VAR}`). No value at rest, so no host at rest."""
 
     def __init__(self, agent):
         self.agent = agent
@@ -238,6 +278,34 @@ class _Env:
 def _backend(agent):
     kind = agent.record.get("backend") or "file"
     return {"file": _File, "keychain": _Keychain, "env": _Env}[kind](agent)
+
+
+def _sorted(v):
+    """Every map's keys in order, all the way down (PyYAML's `sort_keys=True`)."""
+    if isinstance(v, dict):
+        return {k: _sorted(v[k]) for k in sorted(v)}
+    return v
+
+
+def _host_mismatch(ref: str, bound, other) -> dict:
+    """THE host-mismatch refusal: the ref is bound to `bound`, not `other`. One
+    shape for a `get {ref, host}` naming another host and a value stored for
+    another host — or for none (audit S3)."""
+    return refusal(
+        BAD_ARG,
+        f"{NAME}: ref {ref!r} is bound to host {bound!r}, not {other!r} — refused, "
+        "nothing read",
+        arg="host",
+    )
+
+
+def _host_at_rest(ref: str, stored, declared: str | None) -> dict | None:
+    """The refusal for a stored value whose host is not the declared one — or that
+    carries none (audit S3) — or None."""
+    at_rest = _host(stored)
+    if at_rest is None or at_rest != declared:
+        return _host_mismatch(ref, declared, at_rest)
+    return None
 
 
 # ─── verbs ─────────────────────────────────────────────────────────
@@ -269,13 +337,17 @@ async def _boot(id, payload, agent):
 
 
 async def _set(id, payload, agent):
-    """args: ref:str, host:str (where the value may be sent), fields:{name: value} (req). Store or rotate a credential. Call it with secret: ['payload.fields']. Returns {ref, host, fields:[names], stored}."""
+    """args: ref:str, fields:{name: value} (req). Store or rotate the value of a DECLARED ref — its host is the declaration's (refs are declared by update_agent on this store's record; set never creates one and takes no host). Call it with secret: ['payload.fields']. Returns {ref, host, fields:[names], stored}."""
     ref, fields = payload.get("ref"), payload.get("fields")
     if not isinstance(ref, str) or not ref.strip():
         return missing(f"{NAME} set", "ref")
-    host = _host(payload.get("host"))
-    if host is None:
-        return missing(f"{NAME} set", "host")
+    if "host" in payload:  # the binding is the declaration's alone (audit AV-4)
+        return refusal(
+            BAD_ARG,
+            f"{NAME} set: takes no host — a ref's host is its declaration, written "
+            "by update_agent on this store's refs",
+            arg="host",
+        )
     if (
         not isinstance(fields, dict)
         or not fields
@@ -289,7 +361,7 @@ async def _set(id, payload, agent):
             f"{NAME} set: fields must be a non-empty map of field name to string value",
             arg="fields",
         )
-    if not _marked("payload.fields", list(fields)):
+    if not _marked(["payload", "fields"], list(fields)):
         return refusal(
             BAD_ARG,
             f"{NAME} set: mark the values secret — secret: ['payload.fields'] — or "
@@ -306,13 +378,9 @@ async def _set(id, payload, agent):
     caller = _caller()
     refs = _refs(agent)
     entry = refs.get(ref)
-    if entry is None:
-        creators = agent.record.get("creators") or []
-        if caller is not None and not _covers(agent, creators, caller):
-            return _no_such_ref(ref)
-        owner = [caller] if caller is not None else []
-        entry = {"readers": owner, "writers": list(owner)}
-    elif not _covers(agent, entry.get("writers"), caller):
+    if entry is None:  # declared by update_agent alone — set never makes one
+        return _no_such_ref(ref)
+    if not _covers(agent, entry.get("writers"), caller):
         return (
             refusal(
                 UNAUTHORIZED,
@@ -322,10 +390,16 @@ async def _set(id, payload, agent):
             if _covers(agent, entry.get("readers"), caller)
             else _no_such_ref(ref)
         )
-    _backend(agent).put(ref, dict(fields))
-    refs[ref] = {**entry, "host": host, "fields": sorted(fields)}
+    # the declared host is stored WITH the value (audit S3)
+    _backend(agent).put(ref, _host(entry.get("host")), dict(fields))
+    refs[ref] = {**entry, "fields": sorted(fields)}  # the value's NAMES, never a value
     agent.ctx.update(id, refs=refs)
-    return {"ref": ref, "host": host, "fields": sorted(fields), "stored": True}
+    return {
+        "ref": ref,
+        "host": _host(entry.get("host")),
+        "fields": sorted(fields),
+        "stored": True,
+    }
 
 
 async def _get(id, payload, agent):
@@ -339,24 +413,30 @@ async def _get(id, payload, agent):
     if payload.get("host") is not None:
         want = _host(payload.get("host"))
         if want is None or want != _host(entry.get("host")):
-            return refusal(
-                BAD_ARG,
-                f"{NAME}: ref {ref!r} is bound to host {entry.get('host')!r}, not "
-                f"{want!r} — refused, nothing read",
-                arg="host",
-            )
-    names = entry.get("fields") or list((entry.get("env") or {}).keys())
-    if not (_marked("result", None) or _marked("result.fields", names)):
+            return _host_mismatch(ref, entry.get("host"), want)
+    backend = _backend(agent)
+    fields = backend.get(ref)
+    if fields and not isinstance(backend, _Env):
+        # THE HOST AT REST (audit S3): a value is read only for the host it was
+        # stored with — the declaration of a store elsewhere sharing this id and
+        # ref names its own host, and reads nothing.
+        if bad := _host_at_rest(ref, fields.get("host"), _host(entry.get("host"))):
+            return bad
+        fields = fields.get("fields")
+    if not isinstance(fields, dict) or not fields:
+        return refusal(
+            NOT_FOUND, f"{NAME}: ref {ref!r} has no value in the backend", arg="ref"
+        )
+    # The marks are judged against the field names the backend RETURNED, never the
+    # declared ones: a declaration can name fewer than the backend holds (an `env`
+    # map wider than `fields`, a re-declared ref, a hand-edited file), and a
+    # returned field no mark covers would be recorded in plain (audit BV-6/S4).
+    if not (_marked(["result"], None) or _marked(["result", "fields"], list(fields))):
         return refusal(
             BAD_ARG,
             f"{NAME} get: mark the answer secret — secret: ['result'] — or the value "
             "would be recorded in the ledger, the memory store and the state stream",
             arg="secret",
-        )
-    fields = _backend(agent).get(ref)
-    if not fields:
-        return refusal(
-            NOT_FOUND, f"{NAME}: ref {ref!r} has no value in the backend", arg="ref"
         )
     return {"ref": ref, "host": _host(entry.get("host")), "fields": fields}
 
@@ -385,19 +465,25 @@ async def _list(id, payload, agent):
 
 
 async def _forget(id, payload, agent):
-    """args: ref:str (req). Drop a credential — its value and its grants. Writers and the operator only. Returns {forgotten, ref}."""
+    """args: ref:str (req). Drop a ref's VALUE from the backend; its declaration (host, readers, writers) stays — update_agent alone undeclares a ref. Writers and the operator only. Returns {forgotten, ref}."""
     ref = payload.get("ref")
     if not isinstance(ref, str) or not ref.strip():
         return missing(f"{NAME} forget", "ref")
+    if (agent.record.get("backend") or "file") == "env":
+        return refusal(
+            BAD_ARG,
+            f"{NAME} forget: the env backend is read-only — unset the environment "
+            "variable its ref names",
+            arg="backend",
+        )
     refs = _refs(agent)
     entry = refs.get(ref)
-    caller = _caller()
-    if entry is None or not _covers(agent, entry.get("writers"), caller):
+    if entry is None or not _covers(agent, entry.get("writers"), _caller()):
         return _no_such_ref(ref)
-    if (agent.record.get("backend") or "file") != "env":
-        _backend(agent).drop(ref)
-    refs.pop(ref)
-    agent.ctx.update(id, refs=refs)
+    _backend(agent).drop(ref)
+    if "fields" in entry:  # the value's names go with the value (audit AV-5)
+        refs[ref] = {k: v for k, v in entry.items() if k != "fields"}
+        agent.ctx.update(id, refs=refs)
     return {"forgotten": True, "ref": ref}
 
 
@@ -418,22 +504,15 @@ def validate_meta(meta: dict, record: dict) -> str | None:
     b = meta.get("backend")
     if b is not None and b not in BACKENDS:
         return f"backend={b!r} is not one of {', '.join(BACKENDS)}"
-    for k in ("file", "keychain_service"):
+    for k in ("file", "keychain_namespace"):
         if (
             k in meta
             and meta[k] is not None
             and (not isinstance(meta[k], str) or not meta[k].strip())
         ):
             return f"{k} must be a non-empty string"
-    if (
-        "creators" in meta
-        and meta["creators"] is not None
-        and not (
-            isinstance(meta["creators"], list)
-            and all(isinstance(x, str) and x for x in meta["creators"])
-        )
-    ):
-        return "creators must be a list of agent ids"
+    if meta.get("file") is not None and (why := _relative_file(meta["file"])):
+        return why
     refs = meta.get("refs")
     if refs is not None:
         if not isinstance(refs, dict):
@@ -449,7 +528,12 @@ def validate_meta(meta: dict, record: dict) -> str | None:
                     isinstance(v, list) and all(isinstance(x, str) and x for x in v)
                 ):
                     return f"refs[{ref!r}].{k} must be a list of strings"
-            if e.get("host") is not None and _host(e.get("host")) is None:
+            if e.get("host") is None:
+                return (
+                    f"refs[{ref!r}].host is required — the one host this ref's value "
+                    "may be sent to"
+                )
+            if _host(e.get("host")) is None:
                 return f"refs[{ref!r}].host must be a non-empty host"
             env = e.get("env")
             if env is not None and not (

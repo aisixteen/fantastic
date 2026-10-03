@@ -362,9 +362,10 @@ async def _boot(id, payload, kernel):
     # Announce OURSELVES to the cli renderer (the boot-event convention): the web
     # host owns its port, so it tells the terminal where to attach — the renderer
     # never reaches in for it. No cli (non-tty) ⇒ nobody is told; the bound port
-    # is on this agent's reflect.
+    # is on this agent's reflect. The URL names the BOUND host (uvicorn's config)
+    # — a host bound to a LAN address does not answer at 127.0.0.1 (audit ARCH2-10).
     line = (
-        f"listening on http://127.0.0.1:{handle.port}/"
+        f"listening on http://{handle.server.config.host}:{handle.port}/"
         " · rest/ws are children (reflect kernel for ids)"
     )
     await kernel.send(

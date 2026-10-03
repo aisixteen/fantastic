@@ -13,7 +13,10 @@ That seeds a `static_loader` agent (record field `manifest: ./fantastic.yaml`)
 under the root and boots it. On `boot` the loader reads the manifest and creates
 each declared agent as a child of itself — under `operator_context()`, so the
 hydration is the operator's authority at boot, not standing power the loader
-holds.
+holds. That pass runs only on the kernel's own boot (the cold boot, or
+`create_agent` booting the loader it just made): a `boot` an agent sends is
+refused (`reason: unauthorized`), so reaching the loader never
+re-runs the manifest with operator authority.
 
 Manifest:
 

@@ -6,9 +6,10 @@
 //! store is untouched (the notice lives only in the model view). Mirrors the
 //! Python `ai_core/core.py` `_project_context` / `_context_notice`.
 
+use crate::constants::{BUDGET_FLOOR, NOTICE_ENVELOPE_RESERVE};
 use crate::context::{
     budget as agent_budget, estimate_one, estimate_tokens, recent_n as cfg_recent_n,
-    resolve_context_window, BUDGET_FLOOR, NOTICE_ENVELOPE_RESERVE,
+    resolve_context_window,
 };
 use crate::events::to_caller;
 use crate::helpers::{agent_meta, now_secs};

@@ -1,10 +1,11 @@
 // The OS keychain behind `credential_store`'s `keychain` backend — a small seam
 // (python reaches it through `keyring`).
 //
-// One generic-password item per ref: service `keychain_service` (default
-// `fantastic`), account `<store id>/<ref>`, the value the ref's fields as a JSON
-// object — the same item python's `keyring` (macOS backend) reads and writes, so
-// either runtime finds the other's credential.
+// One generic-password item per ref: service = the record's `keychain_namespace`
+// (default `fantastic` — "service" is the keychain's own word for it), account
+// `<store id>/<ref>`, the value the ref's fields as a JSON object — the same item
+// python's `keyring` (macOS backend) reads and writes, so either runtime finds the
+// other's credential.
 //
 // The real keychain is Security.framework's SecItem API. A platform without it
 // FAILS LOUD at use, naming the platform — it never falls back to another

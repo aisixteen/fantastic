@@ -30,6 +30,17 @@ export interface TaskRow {
   forked: boolean;
 }
 
+/**
+ * A KERNEL SERVICE TASK — a keepalive loop the ROOT owns: the execution flusher.
+ * `cancel` never kills one (audit KV-5, owner 2026-10-03): killing it stopped
+ * ledger durability until the process restarted, and nothing restarted it. It
+ * stays listed in `ps`; the kernel's own stop ends it. Python
+ * `Kernel.is_service_task`.
+ */
+export function isService(row: TaskRow, root: string | null): boolean {
+  return row.keepalive && root !== null && row.agent === root;
+}
+
 export interface TaskOpts {
   keepalive?: boolean;
   forked?: boolean;
@@ -93,9 +104,11 @@ export class TaskTable {
    *
    * Returns the ids actually killed. An unknown or already-finished id kills
    * nothing and says so, rather than erroring: `cancel` is idempotent because
-   * the caller usually cannot know whether the race was already lost.
+   * the caller usually cannot know whether the race was already lost. A kernel
+   * service task below `id` (`isService` against `root`) is not part of the
+   * group: it and its own work are left out.
    */
-  cancel(id: number): number[] {
+  cancel(id: number, root: string | null): number[] {
     const row = this.rows.get(id);
     if (row === undefined) return [];
     // POST-ORDER (python `task_subtree`): children before the parent that awaits
@@ -106,7 +119,7 @@ export class TaskTable {
       if (r.killed) return;
       for (const cid of [...r.children]) {
         const c = this.rows.get(cid);
-        if (c !== undefined) walk(c);
+        if (c !== undefined && !isService(c, root)) walk(c);
       }
       order.push(r);
     };

@@ -18,6 +18,7 @@ import { BAD_ARG, LOCKED, UNHANDLED, refusal, unknown } from "./refusal.ts";
 import { answerKernelVerb, isKernelVerb } from "./kernel_verbs.ts";
 import { authorizeCall, authorizeHeritable, denial } from "./authz.ts";
 import { check as checkSecret } from "./secret.ts";
+import type { Mark } from "./secret.ts";
 
 /**
  * The bridge transport (P2). The pure core depends only on this interface, so
@@ -27,18 +28,19 @@ import { check as checkSecret } from "./secret.ts";
 export interface Bridge {
   /** `caller` is the QUALIFIED sender `<this kernel's guid>|<agent id>` (`kernel`
    *  for the operator), stamped on the call frame when this kernel has a guid —
-   *  a far side keys what the call writes by it. `secret` is the item's marked
-   *  paths (`secret.ts`; none when the item marked none), rooted at the item
-   *  exactly as the far kernel's item is rooted: the transport puts them on the
-   *  call frame verbatim — only when there are some — so the FAR kernel masks its
-   *  own records of the call too (python `PeerRoute.call`). */
-  forward(target: string, payload: Payload, caller?: string, secret?: readonly string[]): Promise<Json>;
+   *  a far side keys what the call writes by it. `secret` is the item's marks as
+   *  given (`secret.ts` — dotted strings and/or arrays of steps; none when the
+   *  item marked none), rooted at the item exactly as the far kernel's item is
+   *  rooted: the transport puts them on the call frame verbatim — only when there
+   *  are some — so the FAR kernel masks its own records of the call too (python
+   *  `PeerRoute.call`). */
+  forward(target: string, payload: Payload, caller?: string, secret?: readonly Mark[]): Promise<Json>;
   /** like forward, but the payload may carry a binary blob (Uint8Array). */
   forwardBinary(
     target: string,
     payload: Record<string, unknown>,
     caller?: string,
-    secret?: readonly string[],
+    secret?: readonly Mark[],
   ): Promise<Json>;
   emitRemote(target: string, payload: Payload): void;
   watchRemote(src: string): void;
@@ -108,14 +110,16 @@ export class Kernel {
    */
   readonly currentCaller: string | null = null;
   /**
-   * THE SECRET PATHS of the call the dispatch now running serves — the `secret`
-   * its caller marked on the batch item (`payload.<field…>` / `result[.<field…>]`,
-   * `secret.ts`), as given; empty when none were marked (python
-   * `current_secret()`). Stamped on the dispatch's view like `currentCaller`, so
-   * the handler's own sends never inherit it. A bundle that must only ever be
-   * called WITH a mark (a credential store) reads it and refuses an unmarked call.
+   * THE SECRET MARKS of the call the dispatch now running serves — the `secret`
+   * its caller marked on the batch item, exactly as given and in order: each a
+   * dotted string (`payload.<field…>` / `result[.<field…>]`) or an array of steps
+   * (`["payload", <step>, …]` / `["result", <step>…]`), `secret.ts`; empty when
+   * none were marked (python `current_secret()`). Stamped on the dispatch's view
+   * like `currentCaller`, so the handler's own sends never inherit it. A bundle
+   * that must only ever be called WITH a mark (a credential store) reads it and
+   * refuses an unmarked call.
    */
-  readonly currentSecret: readonly string[] = [];
+  readonly currentSecret: readonly Mark[] = [];
   /**
    * The kernel's OWN traffic — the `shutdown` verbs of a stop, the flush, prune
    * and reads of its memory store. It passes the drain (python's
@@ -363,13 +367,15 @@ export class Kernel {
   }
 
   /** The view a dispatch runs under: its sends are the target's, parented to
-   *  its task, and it knows who called it and which paths that caller marked
-   *  `secret` — stamped on EVERY dispatch view, so a nested dispatch never reads
+   *  its task, and it knows who called it and which marks that caller put on
+   *  its item — stamped on EVERY dispatch view, so a nested dispatch never reads
    *  its caller's marks through the prototype chain. */
-  private dispatchView(targetId: string, taskId: number, caller: string | null, secret: readonly string[]): Kernel {
+  private dispatchView(targetId: string, taskId: number, caller: string | null, secret: readonly Mark[]): Kernel {
     const view = this.scopedFor(targetId, taskId);
     Object.defineProperty(view, "currentCaller", { value: caller, enumerable: true });
-    Object.defineProperty(view, "currentSecret", { value: Object.freeze([...secret]), enumerable: true });
+    // frozen all the way down: no handler can rewrite the marks it was handed
+    const marks = secret.map((m) => (typeof m === "string" ? m : Object.freeze([...m])));
+    Object.defineProperty(view, "currentSecret", { value: Object.freeze(marks), enumerable: true });
     return view;
   }
 
@@ -531,7 +537,7 @@ export class Kernel {
     if (ok) return null;
     // A HERITABLE entry on an ANCESTOR covers its descendants (never its holder):
     // walk parent → root, live tree, at call time.
-    if (sender !== undefined && authorizeHeritable(this.ancestorGrants(sender.parentId), verb, targetId)) {
+    if (sender !== undefined && authorizeHeritable(this.ancestorGrants(sender.parentId), verb, targetId, this.rootId)) {
       return null;
     }
     return denial("egress", senderId, targetId, verb);
@@ -604,8 +610,8 @@ export class Kernel {
    * `reflect` is answered uniformly by the KERNEL for every local agent, never
    * by the handler, so it cannot drift bundle by bundle.
    *
-   * `shown` is the payload as the mirrors may see it (an item's `secret` paths,
-   * `secret.ts`); the handler gets `payload`. `secret` is those paths as the item
+   * `shown` is the payload as the mirrors may see it (an item's `secret` marks,
+   * `secret.ts`); the handler gets `payload`. `secret` is those marks as the item
    * gave them — a host-bound call carries them on its frame, a local handler
    * reads them as `currentSecret`.
    */
@@ -614,7 +620,7 @@ export class Kernel {
     payload: Payload,
     taskId: number,
     shown?: Payload,
-    secret: readonly string[] = [],
+    secret: readonly Mark[] = [],
   ): Promise<Json> {
     const id = this.resolve(targetId);
     const target = this.agents.get(id);
@@ -684,8 +690,8 @@ export class Kernel {
   }
 
   /** Call a REMOTE host agent with a binary-bearing payload (e.g. paste_image).
-   *  `secret` — marked paths, as on a batch item — rides the call frame. */
-  forwardBinary(targetId: string, payload: Record<string, unknown>, secret?: string[]): Promise<Json> {
+   *  `secret` — marks, as on a batch item — rides the call frame. */
+  forwardBinary(targetId: string, payload: Record<string, unknown>, secret?: Mark[]): Promise<Json> {
     if (this.bridge === null) {
       return Promise.resolve({ error: `no bridge to forward to '${targetId}'` });
     }
@@ -708,8 +714,8 @@ export class Kernel {
   private hostBound(
     targetId: string,
     payload: Record<string, unknown>,
-    secret: string[] | undefined,
-  ): { refused: Payload } | { secret: readonly string[] } {
+    secret: Mark[] | undefined,
+  ): { refused: Payload } | { secret: readonly Mark[] } {
     const [marks, bad] = checkSecret({ secret }, payload as Payload);
     if (bad !== null) return { refused: bad };
     if (this.currentOrigin !== null) {
@@ -726,8 +732,8 @@ export class Kernel {
    *  LITERAL target so the HOST resolves `"kernel"` to ITS OWN root
    *  (`kernel_state` on python, `core` on rust/swift). Used to create host peers +
    *  read the host bundle catalog without the frontend naming a host id.
-   *  `secret` — marked paths, as on a batch item — rides the call frame. */
-  callHost(target: string, payload: Payload, secret?: string[]): Promise<Json> {
+   *  `secret` — marks, as on a batch item — rides the call frame. */
+  callHost(target: string, payload: Payload, secret?: Mark[]): Promise<Json> {
     if (this.bridge === null) {
       return Promise.resolve({ error: `no bridge to reach host '${target}'` });
     }

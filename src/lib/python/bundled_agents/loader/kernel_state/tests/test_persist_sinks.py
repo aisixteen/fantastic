@@ -12,6 +12,7 @@ read_stream chunk included), and the commit that never leaves a torn record.
 
 from __future__ import annotations
 
+import asyncio
 import importlib.resources
 from pathlib import Path
 
@@ -19,6 +20,7 @@ import pytest
 import yaml
 
 import file_bridge.tools as fbt
+import kernel_state.tools as kst
 from file_bridge import fs
 from kernel_state.tools import on_shutdown, write_record
 
@@ -105,6 +107,20 @@ def test_direct_sink_without_a_package_seeds_nothing(tmp_path, monkeypatch):
     for hm in (None, "no_such_pkg_pin.tools", "kernel"):
         write_record(fs.Root(tmp_path, Path("n")), {"id": "n", "handler_module": hm})
     assert _tree(tmp_path / "n") == ["agent.yaml"]
+
+
+def test_direct_sink_a_failed_seed_write_raises(tmp_path, monkeypatch):
+    """A seed write that fails RAISES, as the record write does — it was
+    swallowed with the package lookups, so a doc tree that never landed was
+    invisible (audit 2026-10-03, ARCH2-9)."""
+    monkeypatch.chdir(tmp_path)
+    d = tmp_path / "blocked"
+    d.mkdir()
+    (d / "docs").write_text("a FILE where the docs dir goes")
+    rec = {"id": "blocked", "handler_module": "kernel_state.tools"}
+    with pytest.raises(OSError):
+        write_record(fs.Root(tmp_path, Path("blocked")), rec)
+    assert (d / "agent.yaml").exists()  # the record landed; the seed did not
 
 
 # ─── the store sink (the auto-flush through a discovered file_bridge) ────────
@@ -236,6 +252,37 @@ async def test_store_sink_a_failed_rename_leaves_the_old_record_and_the_tmp(
     ) in capsys.readouterr().err
 
 
+async def test_store_sink_a_refused_doc_seed_is_loud(
+    wired, tmp_path, monkeypatch, capsys
+):
+    """A refused seed write is LOUD — stderr and `persistence.error` — as a
+    refused record write is. Its reply used to be dropped, so a readme that
+    never landed was invisible (audit 2026-10-03, ARCH2-9)."""
+    root = wired
+    real = fbt.VERBS["write_stream"]
+
+    async def refuse_readmes(id, payload, kernel):
+        if str(payload.get("path", "")).endswith("readme.md"):
+            return {"error": "write_stream: disk full", "reason": "bad_arg"}
+        return await real(id, payload, kernel)
+
+    refuse_readmes.__doc__ = real.__doc__  # the store's reflect lists verb docs
+    monkeypatch.setitem(fbt.VERBS, "write_stream", refuse_readmes)
+    capsys.readouterr()
+    root.create("file_bridge.tools", id="seedless", allow=["."])
+    await _flush(root)
+    d = tmp_path / ".fantastic" / "agents" / "seedless"
+    assert (d / "agent.yaml").exists() and not (d / "readme.md").exists()
+    assert (
+        "  [kernel_state] persist through 'store' failed: agents/seedless/readme.md: "
+        "write_stream: disk full"
+    ) in capsys.readouterr().err
+    r = (await root.send([{"target": "kernel", "payload": {"type": "reflect"}}]))[0][
+        "result"
+    ]
+    assert r["persistence"]["error"]["path"] == "agents/seedless/readme.md", r
+
+
 async def test_store_sink_forget_removes_the_whole_subtree(wired, tmp_path):
     root = wired
     root.create("file_bridge.tools", id="parent", allow=["."])
@@ -252,6 +299,37 @@ async def test_store_sink_forget_removes_the_whole_subtree(wired, tmp_path):
     await _flush(root)
     assert not d.exists()
     assert (tmp_path / ".fantastic" / "agent.yaml").exists()  # the root stays
+
+
+async def test_a_flush_waits_for_the_drain_the_loop_already_took(
+    wired, tmp_path, monkeypatch
+):
+    """`aflush` returns once everything dirty has LANDED — also what the debounced
+    loop took first. Past the 0.15 s debounce the loop's own drain holds the probe's
+    record; the flush found the queue empty and returned with that write still in
+    flight (measured: a 0.152–0.160 s gap between `create` and `aflush` left
+    `agent.yaml`, `readme.md` and `docs/` unwritten in 13/15 runs). The loop's write
+    is held here, so the overlap is certain, not a timing window."""
+    root = wired
+    real = kst._persist_via_store
+    took, release = asyncio.Event(), asyncio.Event()
+
+    async def held(agent, store_id, abs_path, record):
+        if record.get("id") == "probe":
+            took.set()
+            await release.wait()
+        await real(agent, store_id, abs_path, record)
+
+    monkeypatch.setattr(kst, "_persist_via_store", held)
+    root.create("kernel_state.tools", id="probe", watch=False, root="sess")
+    await asyncio.wait_for(took.wait(), 2)  # the debounced loop's drain has it
+    flush = asyncio.create_task(root._fs_flush_loop.aflush())
+    await asyncio.sleep(0.05)
+    assert not flush.done(), "aflush returned with the loop's write in flight"
+    release.set()
+    await asyncio.wait_for(flush, 2)
+    d = tmp_path / ".fantastic" / "agents" / "probe"
+    assert _tree(d) == sorted(["agent.yaml", *_shipped_tree()])
 
 
 # ─── the record verbs on the direct sink (persist_record / forget_record) ────

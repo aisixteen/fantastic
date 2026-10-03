@@ -364,6 +364,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "fantastic-bundle",
+ "fantastic-credential-store",
  "fantastic-file",
  "fantastic-io-bridge",
  "fantastic-kernel",
@@ -484,6 +485,7 @@ dependencies = [
  "fantastic-bundle",
  "fantastic-io-bridge",
  "fantastic-kernel",
+ "libc",
  "serde_json",
  "sha2",
  "tempfile",

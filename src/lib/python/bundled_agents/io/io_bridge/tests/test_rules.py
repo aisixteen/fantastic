@@ -4,7 +4,9 @@ lives in the bridge suites; here we test the rules + resolvers in isolation."""
 
 from __future__ import annotations
 
-from io_bridge import Action
+import pytest
+
+from io_bridge import Action, gate_inbound
 from io_bridge._base import describe
 from io_bridge.egress_rules import Silent, resolve_egress
 from io_bridge.egress_rules.password import Password as EgressPassword
@@ -109,6 +111,47 @@ def test_resolve_ingress_unknown_type_seals_and_names_the_bad_rule():
     assert plain.allowed is False and "unknown" not in plain.reason
 
 
+@pytest.mark.parametrize(
+    "spec, name",
+    [
+        (7, "7"),
+        (["allow_all_ingress"], "['allow_all_ingress']"),
+        ({"type": ["x"]}, "{'type': ['x']}"),
+        ({"type": {"a": 1}}, "{'type': {'a': 1}}"),
+        (
+            {"type": "password_ingress", "env": 7},
+            "{'type': 'password_ingress', 'env': 7}",
+        ),
+    ],
+)
+def test_a_malformed_spec_seals_and_names_itself(spec, name):
+    """A spec that is not a string or an object, or whose `type`/`env` is not a
+    string, is named by its repr — a name no registry holds — so it SEALS like an
+    unknown name. It used to raise on every frame (`.get` on an int, a dict lookup
+    with a list, `os.environ.get(7)`), so a web_rest leg answered 500 and a bridge
+    call got no reply at all."""
+    rule = resolve_ingress({"ingress_rule": spec})
+    assert isinstance(rule, DenyInbound) and rule.unknown == name
+    d = gate_inbound(
+        rule, "call", {"target": "t", "payload": {"type": "reflect"}, "auth_token": "x"}
+    )
+    assert d.allowed is False
+    assert d.reason == f"edge sealed — unknown ingress rule {name!r}"
+    assert describe({"ingress_rule": spec})["ingress_rule"] == name
+    with pytest.raises(ValueError) as e:
+        resolve_egress({"egress_rule": spec})
+    assert str(e.value) == f"unknown egress rule type {name!r}"
+
+
+def test_a_null_type_or_env_is_an_absent_one():
+    """null is ABSENT inside a spec as it is for the whole spec: a null `type`
+    is a plain seal, a null `env` is the default variable."""
+    plain = resolve_ingress({"ingress_rule": {"type": None}})
+    assert isinstance(plain, DenyInbound) and plain.unknown is None
+    pw = resolve_ingress({"ingress_rule": {"type": "password_ingress", "env": None}})
+    assert isinstance(pw, IngressPassword) and pw.env == "FANTASTIC_GROUP_TOKEN"
+
+
 # ─── password rule, both sides (kernel-group shared secret) ─────
 
 
@@ -123,6 +166,22 @@ def test_ingress_password_checks_envelope_token(monkeypatch):
     assert not p.authorize(Action("watch", "t", "watch", {})).allowed
     assert p.authorize(Action("watch", "t", "watch", {}, token="s3cret")).allowed
     assert not p.authorize(Action("state_subscribe", "t", "ss", {})).allowed
+
+
+def test_ingress_password_compares_utf8_bytes_so_any_token_is_a_plain_answer(
+    monkeypatch,
+):
+    """IO-6 (audit 2026-10-03): the compare is over UTF-8 BYTES, as rust and swift
+    do. On `str` `hmac.compare_digest` raises TypeError for any non-ASCII text, so
+    a tokenless client sending `é` got a 500 / a dead dispatch instead of a denial,
+    and a non-ASCII group token refused its own holders."""
+    monkeypatch.setenv("FANTASTIC_GROUP_TOKEN", "s3cret")
+    for odd in ("é", "s3cr€t", "\ud800", "été"):
+        d = IngressPassword().authorize(_call(odd))
+        assert not d.allowed and d.reason == "invalid or missing group token", odd
+    monkeypatch.setenv("FANTASTIC_GROUP_TOKEN", "päss-wört")
+    assert IngressPassword().authorize(_call("päss-wört")).allowed
+    assert not IngressPassword().authorize(_call("pass-wort")).allowed
 
 
 def test_ingress_password_fails_closed_when_token_unset(monkeypatch):

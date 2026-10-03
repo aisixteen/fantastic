@@ -13,6 +13,7 @@
 //! nowhere would be the opposite of that — the caller believes it saved.
 
 use crate::agent::{Agent, AgentId};
+use crate::bundle::BundleError;
 use crate::kernel::Kernel;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -87,7 +88,12 @@ fn guard_owner(aid: &str) -> Result<(), String> {
 /// `_blob_reldir(agent, aid)`). Prefers the LIVE agent's own `root_path`; a
 /// record that is no longer (or not yet) live resolves by walking its parent
 /// chain under that loader, as python's `_resolve_path` does.
-fn blob_reldir(kernel: &Arc<Kernel>, loader: &Agent, aid: &str) -> String {
+///
+/// A WALK THAT REFUSES RAISES. Python's `_blob_reldir` → `_resolve_path` →
+/// `_disk_parents` → `_walk` has no `try`, so an entry that escapes the loader's
+/// root fails the verb (`ValueError: fs: path '<rel>' escapes root`, settled
+/// `failed`) — it is not a reply the handler composed.
+fn blob_reldir(kernel: &Arc<Kernel>, loader: &Agent, aid: &str) -> Result<String, BundleError> {
     let abs = match kernel.agents.get(&AgentId::from(aid)) {
         Some(agent) => agent.root_path.clone(),
         None => super::RecordPlaces::new(
@@ -96,9 +102,19 @@ fn blob_reldir(kernel: &Arc<Kernel>, loader: &Agent, aid: &str) -> String {
             super::loader_children(loader),
             loader.id.0.clone(),
         )
-        .resolve(aid, None),
+        .resolve(aid, None)
+        .map_err(|e| -> BundleError {
+            // A clamp refusal is a `ValueError`; the cwd's `OSError` leads with
+            // `[Errno N]`, and its class follows from the errno.
+            let class = e
+                .strip_prefix("[Errno ")
+                .and_then(|r| r.split(']').next())
+                .and_then(|n| n.parse::<i32>().ok())
+                .map_or("ValueError", fantastic_bundle::os_error_class);
+            format!("{class}: {e}").into()
+        })?,
     };
-    super::loader_reldir(kernel, loader, &abs)
+    Ok(super::loader_reldir(kernel, loader, &abs))
 }
 
 /// A BARE `{error}`, python's shape. The blob verbs are the loader BUNDLE's, not
@@ -114,13 +130,35 @@ fn err(verb: &str, why: impl std::fmt::Display) -> Value {
 /// the store lookup, so a bad payload is named before "no store wired" — the
 /// caller is told what IT got wrong first. `content` is the caller's to pass, so
 /// the check rides in `persist_blob` and this returns before the store lookup.
+///
+/// `Ok(Err(reply))` = the bare `{error}` the verb answers with; `Err` = the walk
+/// RAISED ([`blob_reldir`]).
 fn resolve(
     kernel: &Arc<Kernel>,
     loader: &Agent,
     verb: &str,
     payload: &Value,
-) -> Result<(AgentId, String), Value> {
-    guard_args(verb, payload)?;
+) -> Result<Result<(AgentId, String), Value>, BundleError> {
+    let (aid, name) = match guard_args(verb, payload) {
+        Ok(v) => v,
+        Err(e) => return Ok(Err(e)),
+    };
+    // THE ADDRESSED LOADER's store (python `_find_store(agent)`), never another's.
+    let Some(store) = super::find_store_for(kernel, loader) else {
+        return Ok(Err(err(verb, "no store wired — persistence not available")));
+    };
+    let reldir = blob_reldir(kernel, loader, aid)?;
+    let path = if reldir.is_empty() {
+        name.to_string()
+    } else {
+        format!("{reldir}/{name}")
+    };
+    Ok(Ok((store, path)))
+}
+
+/// agent_id → name → owner, python's order, shared by both verbs. Answers the
+/// validated `(agent_id, name)`.
+fn guard_args<'a>(verb: &str, payload: &'a Value) -> Result<(&'a str, &'a str), Value> {
     let aid = payload
         .get("agent_id")
         .and_then(Value::as_str)
@@ -132,47 +170,29 @@ fn resolve(
         out["reason"] = json!("unauthorized");
         return Err(out);
     }
-    // THE ADDRESSED LOADER's store (python `_find_store(agent)`), never another's.
-    let store = super::find_store_for(kernel, loader)
-        .ok_or_else(|| err(verb, "no store wired — persistence not available"))?;
-    let reldir = blob_reldir(kernel, loader, aid);
-    let path = if reldir.is_empty() {
-        name.to_string()
-    } else {
-        format!("{reldir}/{name}")
-    };
-    Ok((store, path))
-}
-
-/// agent_id → name → owner, python's order, shared by both verbs.
-fn guard_args(verb: &str, payload: &Value) -> Result<(), Value> {
-    let aid = payload
-        .get("agent_id")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| err(verb, "agent_id (str) required"))?;
-    guard_name(payload.get("name").and_then(Value::as_str)).map_err(|e| err(verb, e))?;
-    if let Err(e) = guard_owner(aid) {
-        let mut out = err(verb, e);
-        out["reason"] = json!("unauthorized");
-        return Err(out);
-    }
-    Ok(())
+    Ok((aid, name))
 }
 
 /// `persist_blob` — whole-file write of one sidecar, through `loader`'s store.
-pub async fn persist_blob(kernel: &Arc<Kernel>, loader: &Agent, payload: &Value) -> Value {
+///
+/// # Errors
+/// The walk to a record that is not live RAISED ([`blob_reldir`]).
+pub async fn persist_blob(
+    kernel: &Arc<Kernel>,
+    loader: &Agent,
+    payload: &Value,
+) -> Result<Value, BundleError> {
     if let Err(e) = guard_args("persist_blob", payload) {
-        return e;
+        return Ok(e);
     }
     // CONTENT BEFORE THE STORE (python's order): what the caller got wrong is
     // named before what the kernel does not have.
     let Some(content) = payload.get("content").and_then(Value::as_str) else {
-        return err("persist_blob", "content (str) required");
+        return Ok(err("persist_blob", "content (str) required"));
     };
-    let (store, path) = match resolve(kernel, loader, "persist_blob", payload) {
+    let (store, path) = match resolve(kernel, loader, "persist_blob", payload)? {
         Ok(v) => v,
-        Err(e) => return e,
+        Err(e) => return Ok(e),
     };
     // The loader writing to its OWN discovered store is persistence bookkeeping —
     // a side effect of this already-authorized verb, not the loader reaching out
@@ -198,13 +218,13 @@ pub async fn persist_blob(kernel: &Arc<Kernel>, loader: &Agent, payload: &Value)
                 out[k] = v.clone();
             }
         }
-        return out;
+        return Ok(out);
     }
-    json!({
+    Ok(json!({
         "ok": true,
         "name": payload.get("name").cloned().unwrap_or(Value::Null),
         "size": reply.get("size").cloned().unwrap_or(Value::Null),
-    })
+    }))
 }
 
 /// Decode a sidecar STRICTLY. `errors="replace"` turned a non-text file into
@@ -235,10 +255,17 @@ fn decoded_blob(name: &Value, raw: Vec<u8>) -> Value {
 /// PUMPED TO EOF. `read_stream` is a CHUNK verb, so a single call returns a
 /// PREFIX of any larger sidecar; returning that prefix is data loss dressed as a
 /// successful load. A store that reports no forward progress is said, not spun on.
-pub async fn load_blob(kernel: &Arc<Kernel>, loader: &Agent, payload: &Value) -> Value {
-    let (store, path) = match resolve(kernel, loader, "load_blob", payload) {
+///
+/// # Errors
+/// The walk to a record that is not live RAISED ([`blob_reldir`]).
+pub async fn load_blob(
+    kernel: &Arc<Kernel>,
+    loader: &Agent,
+    payload: &Value,
+) -> Result<Value, BundleError> {
+    let (store, path) = match resolve(kernel, loader, "load_blob", payload)? {
         Ok(v) => v,
-        Err(e) => return e,
+        Err(e) => return Ok(e),
     };
     let name = payload.get("name").cloned().unwrap_or(Value::Null);
     let mut chunks: Vec<u8> = Vec::new();
@@ -257,12 +284,12 @@ pub async fn load_blob(kernel: &Arc<Kernel>, loader: &Agent, payload: &Value) ->
         }
         chunks.extend_from_slice(&body.unwrap_or_default());
         if reply.get("eof").and_then(Value::as_bool).unwrap_or(false) {
-            return decoded_blob(&name, chunks);
+            return Ok(decoded_blob(&name, chunks));
         }
         match reply.get("next_offset").and_then(Value::as_u64) {
             Some(n) if n > offset => offset = n,
             _ => {
-                return json!({
+                return Ok(json!({
                     "error": format!(
                         "load_blob: {} stalled at offset {offset} — the store \
                          returned no forward progress",
@@ -270,12 +297,12 @@ pub async fn load_blob(kernel: &Arc<Kernel>, loader: &Agent, payload: &Value) ->
                     ),
                     "name": name,
                     "content": Value::Null,
-                })
+                }))
             }
         }
     }
     if !chunks.is_empty() {
-        return decoded_blob(&name, chunks);
+        return Ok(decoded_blob(&name, chunks));
     }
     if last.get("reason").and_then(Value::as_str) == Some("unauthorized") {
         let mut out = json!({
@@ -289,9 +316,9 @@ pub async fn load_blob(kernel: &Arc<Kernel>, loader: &Agent, payload: &Value) ->
         if let Some(h) = last.get("hint").filter(|v| fantastic_bundle::py_truthy(v)) {
             out["hint"] = h.clone();
         }
-        return out;
+        return Ok(out);
     }
-    json!({ "name": name, "content": Value::Null })
+    Ok(json!({ "name": name, "content": Value::Null }))
 }
 
 #[cfg(test)]

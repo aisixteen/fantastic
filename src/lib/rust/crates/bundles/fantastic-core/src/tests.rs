@@ -248,30 +248,36 @@ async fn full_root_frame_key_order_is_pythons() {
     assert!(v["docs"].as_str().unwrap().contains("keyed doc tree"));
 }
 
-/// A doc that will not decode takes the WHOLE root frame with it, exactly as
-/// python does: `_readme_index` raises out of `reflect_root_extra` and the
-/// substrate's merge site swallows the exception, so a `detail:"full"` reflect
-/// carries none of persistence/guid/readmes/docs/self_extension. Degrading to
-/// an empty `readmes` list published a frame python never sends (measured in
-/// the acceptance capture: `store/s2/root/detail_full_tree_ids`).
+/// A doc that will not decode FAILS the full root reflect, exactly as python
+/// does: `_readme_index` raises out of `reflect_root_extra`, and the substrate's
+/// merge site lets the raise through. It used to swallow it, and the reply
+/// carried none of persistence/guid/readmes/docs/self_extension with nothing to
+/// say why (audit 2026-10-03, ARCH2-9).
 #[tokio::test]
-async fn full_root_frame_is_dropped_whole_when_a_doc_will_not_decode() {
+async fn full_root_reflect_fails_when_a_doc_will_not_decode() {
     let tmp = TempDir::new().unwrap();
     let kernel = booted(&tmp);
     let docs = kernel.root().expect("root").root_path.join("docs");
     std::fs::create_dir_all(&docs).unwrap();
     std::fs::write(docs.join("bad.md"), b"# head\n\xff\xfe not utf-8\n").unwrap();
-    let v = root_reflect(
-        &kernel,
-        json!({"type": "reflect", "detail": "full", "tree": "none"}),
-    )
-    .await;
-    for k in ["persistence", "guid", "readmes", "docs", "self_extension"] {
-        assert!(v.get(k).is_none(), "{k} survived: {v}");
-    }
-    // The substrate's own identity is untouched — only the loader's frame goes.
-    assert_eq!(v["id"], json!("kernel_state"));
-    assert_eq!(v["runtime"], json!("rust"));
+    let root = kernel.root().expect("root").id.clone();
+    let out = kernel
+        .send(vec![Item::new(
+            root,
+            json!({"type": "reflect", "detail": "full", "tree": "none"}),
+        )])
+        .await
+        .remove(0);
+    assert_eq!(
+        out.status,
+        fantastic_kernel::outcome::Status::Failed,
+        "{}",
+        out.result
+    );
+    assert_eq!(
+        out.result,
+        json!({"error": "UnicodeDecodeError: 'utf-8' codec can't decode byte 0xff in position 7: invalid start byte", "raised": true}),
+    );
 }
 
 /// C9: the FULL `self_extension` is python's text VERBATIM — and it ends at

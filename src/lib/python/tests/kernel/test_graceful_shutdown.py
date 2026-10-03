@@ -24,10 +24,10 @@ def _stub_bundle(
     on_shutdown=None,
     on_delete=None,
 ):
-    """Plant a fake handler module in sys.modules under `name` so an
-    agent's `importlib.import_module(name)` resolves to a stub
+    """Register a fake handler module under `name` (`register_unlisted`) so an
+    agent's `import_handler(name)` resolves to a stub
     carrying whatever hooks the test wants to observe."""
-    import sys
+    from kernel import register_unlisted
 
     mod = types.ModuleType(name)
     mod.VERBS = {}  # type: ignore[attr-defined]
@@ -40,7 +40,7 @@ def _stub_bundle(
         mod.on_shutdown = on_shutdown  # type: ignore[attr-defined]
     if on_delete is not None:
         mod.on_delete = on_delete  # type: ignore[attr-defined]
-    sys.modules[name] = mod
+    register_unlisted(name, mod)
     return mod
 
 

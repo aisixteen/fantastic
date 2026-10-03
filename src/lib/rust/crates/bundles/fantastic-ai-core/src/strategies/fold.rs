@@ -21,7 +21,8 @@
 
 use super::strip::{strip, LOW};
 use super::{Projection, ProjectionCtx};
-use crate::context::{estimate_one, estimate_tokens, NOTICE_ENVELOPE_RESERVE};
+use crate::constants::NOTICE_ENVELOPE_RESERVE;
+use crate::context::{estimate_one, estimate_tokens};
 use crate::folds::{
     chain_text, is_fold, level, make_fold, quoted_title, render, row_id, row_parent, row_role,
 };

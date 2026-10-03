@@ -333,6 +333,16 @@ async fn update_from_payload(kernel: &Arc<Kernel>, caller: &Arc<Agent>, payload:
             );
         }
     }
+    // `children_dir` BECOMES A DIRECTORY — one safe segment, as at create.
+    if let Some(cd) = payload.get("children_dir") {
+        if let Some(r) = crate::refusal::guard_agent_id_as(
+            "update_agent",
+            "children_dir",
+            cd.as_str().unwrap_or(""),
+        ) {
+            return r;
+        }
+    }
     // Patch is every field in payload except `type`, `id` and `parent_id`.
     // `parent_id` is STRUCTURAL — where the agent actually sits, which only
     // the tree knows. Letting it into meta lets a record LIE about its own

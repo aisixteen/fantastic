@@ -167,20 +167,28 @@ final class VllmSessionTable: @unchecked Sendable {
     }
 }
 
-/// endpoint (normalised) → its table. Process state, keyed like every other
-/// per-kernel map in these bundles (one kernel per process).
+/// endpoint (normalised) → its table, PER KERNEL. Python's table is one per
+/// endpoint in its one kernel ("it sees only THIS kernel's traffic"); swift
+/// hosts many kernels in one process, so the map is keyed by `kernel.serial`
+/// like the AI core's side tables (`AIRunStates`), and a kernel's teardown takes
+/// its tables with it (`VllmSideTables`).
 enum VllmTables {
     private static let lock = NSLock()
-    nonisolated(unsafe) private static var tables: [String: VllmSessionTable] = [:]
+    nonisolated(unsafe) private static var tables: [UInt64: [String: VllmSessionTable]] = [:]
 
-    static func table(for endpoint: String) -> VllmSessionTable {
+    static func table(_ kernelSerial: UInt64, for endpoint: String) -> VllmSessionTable {
         let key = rstripSlashes(endpoint)
         return lock.withLock {
-            if let t = tables[key] { return t }
+            if let t = tables[kernelSerial]?[key] { return t }
             let t = VllmSessionTable()
-            tables[key] = t
+            tables[kernelSerial, default: [:]][key] = t
             return t
         }
+    }
+
+    /// Drop a dead kernel's whole sub-table.
+    static func forget(_ kernel: Kernel) {
+        lock.withLock { _ = tables.removeValue(forKey: kernel.serial) }
     }
 }
 
@@ -193,22 +201,47 @@ func rstripSlashes(_ s: String) -> String {
 
 /// The thinking budget each agent's last pass actually SENT — surfaced in
 /// reflect, so a caller debugging a cut can see what the adapted default
-/// became. Python keeps it on its cached provider; FantasticAICore builds the
-/// provider per send, so it lives here, keyed by agent id, cleared on delete.
+/// became. The provider is built per send, so it lives here, keyed by kernel
+/// (`kernel.serial`) and agent id, cleared on delete and on the kernel's
+/// teardown.
 enum VllmLastBudget {
     private static let lock = NSLock()
-    nonisolated(unsafe) private static var values: [String: Int] = [:]
+    nonisolated(unsafe) private static var values: [UInt64: [String: Int]] = [:]
 
-    static func set(_ agent: String, _ budget: Int?) {
-        lock.withLock { values[agent] = budget }
+    static func set(_ kernelSerial: UInt64, _ agent: String, _ budget: Int?) {
+        lock.withLock { values[kernelSerial, default: [:]][agent] = budget }
     }
 
-    static func get(_ agent: String) -> Int? {
-        lock.withLock { values[agent] }
+    static func get(_ kernelSerial: UInt64, _ agent: String) -> Int? {
+        lock.withLock { values[kernelSerial]?[agent] }
     }
 
-    static func clear(_ agent: String) {
-        lock.withLock { _ = values.removeValue(forKey: agent) }
+    static func clear(_ kernelSerial: UInt64, _ agent: String) {
+        lock.withLock { _ = values[kernelSerial]?.removeValue(forKey: agent) }
+    }
+
+    /// Drop a dead kernel's whole sub-table.
+    static func forget(_ kernel: Kernel) {
+        lock.withLock { _ = values.removeValue(forKey: kernel.serial) }
+    }
+}
+
+/// The vllm side tables are keyed by `Kernel.serial`, so a kernel that shuts
+/// down must take its rows with it. Registered ONCE, when the bundle is first
+/// built — the kernel cannot reach into this module itself.
+enum VllmSideTables {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var installed = false
+
+    static func installTeardownHook() {
+        lock.withLock {
+            if installed { return }
+            installed = true
+            Kernel.onTeardown { kernel in
+                VllmTables.forget(kernel)
+                VllmLastBudget.forget(kernel)
+            }
+        }
     }
 }
 
@@ -264,6 +297,11 @@ func vllmTransportError(
 ) -> Error {
     if error is CancellationError || error is PyError { return error }
     if let e = error as? HTTPClientError {
+        // The client refused a header value and its error QUOTES it — the key.
+        // A fixed text instead, rust's (audit S1).
+        if e.shortDescription == "Invalid header field values" {
+            return PyError("RuntimeError", ILLEGAL_HEADER_TEXT)
+        }
         if e == .connectTimeout {
             return PyError(
                 "RuntimeError",
@@ -362,8 +400,10 @@ struct VllmProvider: AIProvider {
     let explicitBudget: Bool
     let connectTimeout: Double
     let readTimeout: Double
-    /// Whose last budget reflect reports (the agent id).
+    /// Whose last budget reflect reports (the agent id), and the kernel whose
+    /// tables this provider reads and writes (`kernel.serial`).
     let agentKey: String
+    let kernelSerial: UInt64
     /// Seconds on a monotonic clock — the table's TTL arithmetic.
     let clock: @Sendable () -> Double
     /// What the endpoint REPORTED for the last pass — the prompt size (ai_core
@@ -410,7 +450,7 @@ struct VllmProvider: AIProvider {
             if let v = sampling[key], v != .null { body[key] = v }
         }
         let budget = try budget(for: callMax, sideCall: sideCall)
-        VllmLastBudget.set(agentKey, budget)
+        VllmLastBudget.set(kernelSerial, agentKey, budget)
         if let budget { body["thinking_token_budget"] = .integer(Int64(budget)) }
         return body
     }
@@ -446,7 +486,7 @@ struct VllmProvider: AIProvider {
             try body(messages, callMax: callMax, sideCall: sideBound != nil)
         ).serialize()
         // Admission BEFORE the request: a `reject` must not reach the GPU.
-        _ = try VllmTables.table(for: endpoint).admit(
+        _ = try VllmTables.table(kernelSerial, for: endpoint).admit(
             conversationKey(messages), slots: kvSlots, overflow: kvOverflow, ttl: kvTtl,
             now: clock())
 
@@ -454,7 +494,8 @@ struct VllmProvider: AIProvider {
         req.method = .POST
         req.headers.add(name: "Content-Type", value: "application/json")
         req.headers.add(name: "Accept", value: "text/event-stream")
-        if let apiKey = try await key(endpoint), !apiKey.isEmpty {
+        let apiKey = try await key(endpoint).flatMap { $0.isEmpty ? nil : $0 }
+        if let apiKey {
             req.headers.add(name: "Authorization", value: "Bearer \(apiKey)")
         }
         req.body = .bytes(ByteBuffer(string: payload))
@@ -471,8 +512,10 @@ struct VllmProvider: AIProvider {
         let code = Int(response.status.code)
         if code >= 400 {
             let collected = try? await response.body.collect(upTo: 1 << 20)
-            // python `.decode("utf-8", "replace")[:500]` — 500 CHARACTERS
-            let detail = String((collected.map { String(buffer: $0) } ?? "").prefix(500))
+            // python `.decode("utf-8", "replace")[:500]` — 500 CHARACTERS, the key
+            // scrubbed BEFORE the cut, so a key the cut splits cannot survive
+            let detail = String(
+                withoutKey(collected.map { String(buffer: $0) } ?? "", apiKey).prefix(500))
             let why =
                 code == 401 || code == 403
                 ? " — the door wants a key: name it in `credentials` ({store, ref})" : ""
@@ -567,16 +610,18 @@ public final class VllmBundle: AgentBundle, @unchecked Sendable {
     let core: AIBackend
 
     public init() {
+        VllmSideTables.installTeardownHook()
         self.core = buildAIBackend(
             AIBackendConfig(
                 kind: NAME,
                 sentence:
                     "vLLM-backed LLM agent, talking to the vLLM server directly "
                     + "(raw prompt-and-parse tool-calling; a KV-cache session table per endpoint).",
-                reflectExtra: { agent in Self.reflectExtra(agent) },
+                reflectExtra: { agent, kernel in Self.reflectExtra(agent, kernel) },
                 makeProvider: { agent, _, kernel in
                     try Self.makeProvider(
-                        agent, key: keyReader(agent.id, kernel, backend: NAME, required: false))
+                        agent, kernel: kernel,
+                        key: keyReader(agent.id, kernel, backend: NAME, required: false))
                 }
             ))
     }
@@ -591,9 +636,11 @@ public final class VllmBundle: AgentBundle, @unchecked Sendable {
         await core.onCancel(agentId: agentId, taskId: taskId, kernel: kernel)
     }
 
-    /// The last-budget entry is this agent's process state: it goes with it.
+    /// The shared delete hook, plus this backend's own table: the last-budget
+    /// entry is this agent's process state, and it goes with it too.
     public func onDelete(agentId: AgentId, kernel: Kernel) async throws {
-        VllmLastBudget.clear(agentId.value)
+        await core.onDelete(agentId: agentId, kernel: kernel)
+        VllmLastBudget.clear(kernel.serial, agentId.value)
     }
 
     // MARK: record → provider
@@ -636,6 +683,7 @@ public final class VllmBundle: AgentBundle, @unchecked Sendable {
     /// python's order, so the FIRST missing one is the one named.
     static func makeProvider(
         _ agent: Agent,
+        kernel: Kernel,
         key: @escaping KeyReader,
         clock: @escaping @Sendable () -> Double = {
             ProcessInfo.processInfo.systemUptime
@@ -668,6 +716,7 @@ public final class VllmBundle: AgentBundle, @unchecked Sendable {
             connectTimeout: try seconds(agent, "connect_timeout", CONNECT_TIMEOUT),
             readTimeout: try seconds(agent, "read_timeout", READ_TIMEOUT),
             agentKey: agent.id.value,
+            kernelSerial: kernel.serial,
             clock: clock)
     }
 
@@ -675,7 +724,7 @@ public final class VllmBundle: AgentBundle, @unchecked Sendable {
     /// timeouts, and the endpoint's shared KV session table — so one reflect
     /// shows what the next request will send and how many conversations are
     /// live. Python `_reflect_extra`, its key order.
-    static func reflectExtra(_ agent: Agent) -> OrderedDictionary<String, JSON> {
+    static func reflectExtra(_ agent: Agent, _ kernel: Kernel) -> OrderedDictionary<String, JSON> {
         let (sampling, explicit) = Self.sampling(agent)
         var kv: OrderedDictionary<String, JSON> = [
             "slots": agent.metaValue(forKey: "kv_slots") ?? .null,
@@ -684,13 +733,13 @@ public final class VllmBundle: AgentBundle, @unchecked Sendable {
         ]
         // shared by every vllm_backend agent on the same endpoint
         if case .string(let endpoint)? = agent.metaValue(forKey: "endpoint") {
-            for (k, v) in VllmTables.table(for: endpoint).view() { kv[k] = v }
+            for (k, v) in VllmTables.table(kernel.serial, for: endpoint).view() { kv[k] = v }
         }
         return [
             "sampling": .object(sampling),
             "thinking_token_budget_source": .string(explicit ? "record" : "default"),
             // what the last pass actually SENT (the default adapts to small calls)
-            "last_thinking_budget": VllmLastBudget.get(agent.id.value).map {
+            "last_thinking_budget": VllmLastBudget.get(kernel.serial, agent.id.value).map {
                 .integer(Int64($0))
             } ?? .null,
             "max_tokens": agent.metaValue(forKey: "max_tokens") ?? .null,

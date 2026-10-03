@@ -32,17 +32,12 @@
 use fantastic_bundle::path::{set_path, steps_value, Step};
 use serde_json::Value;
 
-/// The verbs whose call rides the kernel's BINARY channel even when the frame
-/// carrying it holds no bytes, chosen STATICALLY by verb (A11.9/A13.1) — on
-/// every leg that turns a wire call into a kernel send (web_ws, web_rest's JSON
-/// leg, the bridge's inbound calls), so every client gets the same answer.
-///
-/// Python needs no such list: its reply dict simply holds a `bytes` value and
-/// `encode_frame` finds it. A `serde_json::Value` cannot, so the carrier is the
-/// item's binary channel and the decision has to be made from the verb: a
-/// `read_stream` reply is raw bytes whatever leg asked, and a `write_stream`
-/// whose `bytes` is a JSON value is `missing_arg` with nothing written.
-pub const BINARY_EDGE_VERBS: [&str; 2] = ["read_stream", "write_stream"];
+/// THE ONE FRAME CAP every wire leg holds: 16 MiB — a WS frame (`ws_bridge`'s
+/// `max_size`, the relay's `MAX_FRAME`, the web_ws socket), an exec_bridge
+/// control-fd frame, and a web_rest request body (the http face of the same
+/// envelope). Larger data moves in chunks (`write_stream`). Python
+/// `io_bridge.MAX_FRAME`.
+pub const MAX_FRAME: usize = 16 * 1024 * 1024;
 
 /// Encode ONE envelope for a TEXT frame — python `encode_frame`'s text half,
 /// `json.dumps(envelope, default=str)`: `, ` / `: ` separators and

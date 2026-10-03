@@ -596,6 +596,50 @@ struct WebSocketTests {
         #expect(reply != nil, "the socket did not survive the malformed frames")
     }
 
+    /// IO-3 — ONE deeply nested frame used to overflow the NIO thread's stack in
+    /// the JSON scanner and kill the whole kernel, before any gate. Now it is
+    /// python's bad frame (`decode_frame` refuses it past the json recursion
+    /// limit): the frame error, and the socket answers the next call. Text and
+    /// binary-header frames, 100k nested arrays each.
+    @Test func hundredThousandNestedArraysAnswerTheFrameErrorAndKeepTheSocket() async throws {
+        let kernel = try await startWebKernel()
+        _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("boot")]))])[0].result
+        await mountWebWS(kernel)
+        defer { Task { await stopWebHost(kernel) } }
+        let port = kernel.httpPort()
+        let task = URLSession(configuration: .ephemeral)
+            .webSocketTask(with: URL(string: "ws://127.0.0.1:\(port)/kernel_state/ws")!)
+        task.resume()
+        defer { task.cancel(with: .normalClosure, reason: nil) }
+        let deep = String(repeating: "[", count: 100_000) + String(repeating: "]", count: 100_000)
+        var header = Data()
+        let head = Data(deep.utf8)
+        withUnsafeBytes(of: UInt32(head.count).bigEndian) { header.append(contentsOf: $0) }
+        let frames: [URLSessionWebSocketTask.Message] = [
+            .string(deep), .string(String(repeating: "[", count: 100_000)), .data(header + head + Data("x".utf8)),
+        ]
+        for frame in frames {
+            try await task.send(frame)
+            let err = await awaitFrame(task) { $0["type"].asString == "error" }
+            let e = try #require(err, "no frame error for a 100k-deep frame")
+            #expect(
+                e["error"].asString
+                    == "frame: frame must be a well-formed call/emit/watch envelope", "\(e)")
+            #expect(e["reason"].asString == "bad_arg" && e["arg"].asString == "frame", "\(e)")
+        }
+        try await task.send(
+            .string(
+                JSON.object([
+                    "type": .string("call"), "id": .string("after"),
+                    "target": .string("kernel_state"),
+                    "payload": .object(["type": .string("list_agents")]),
+                ]).serialize()))
+        let reply = await awaitFrame(task) {
+            $0["type"].asString == "reply" && $0["id"].asString == "after"
+        }
+        #expect(reply != nil, "the socket did not survive the 100k-deep frames")
+    }
+
     /// A11.8 — a `call` frame with no `payload` dispatches `{}`, which the
     /// KERNEL refuses `send: payload.type required`; the frame `id` defaults to
     /// `""` and is always echoed.
@@ -882,7 +926,7 @@ struct WebSocketTests {
         let sock = try RawHTTPClient(port: port)
         defer { sock.close() }
         try sock.write(
-            "GET /kernel_state/ws HTTP/1.1\r\nHost: h\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+            "GET /kernel_state/ws HTTP/1.1\r\nHost: 127.0.0.1:\(port)\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
                 + "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
                 + "Sec-WebSocket-Version: 13\r\n\r\n")
         let raw = sock.readSome()

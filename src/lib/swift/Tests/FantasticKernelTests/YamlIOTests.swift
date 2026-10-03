@@ -103,7 +103,7 @@ struct YamlIOTests {
         try Persistence.recordBytes(back).write(to: file)
         #expect(try String(contentsOf: file, encoding: .utf8) == first)
         #expect(!first.split(separator: "\n").contains("..."))
-        let tree = Persistence.readTree(rootDir: dir)
+        let tree = try Persistence.readTree(rootDir: dir)
         #expect(tree.first?.id == "tricky_0a1b2c")
     }
 

@@ -17,7 +17,8 @@ reflect `verbs`.
                 `{"type":"call","target":..,"payload":..,"id":..,"secret":[..]?}`.
 - rest        — `POST http://host:port/<rest_id>/<target_id>` body=payload;
                 headers `X-Fantastic-Execution-Id` (the item's `id`) and
-                `X-Fantastic-Secret` (the item's `secret`, a JSON array);
+                `X-Fantastic-Secret` (the item's `secret`, a JSON array of
+                dotted strings and/or arrays of steps);
                 browser-pastable `GET .../<rest_id>/_reflect[/<target>][?readme=1]`.
 - binary      — for byte-heavy payloads, a WS binary frame
                 `[4-byte BE uint32 H | H-byte JSON header | M-byte body]`;
@@ -40,17 +41,22 @@ accepts you, as `<this guid>|<you>`. A guid not in `peers` is an unknown agent. 
 browser page becomes a peer when its kernel sends `{"type":"hello","guid":..}` on
 its ws; the host's calls then arrive as `{"type":"call","id":..,"target":..,
 "payload":..,"caller":..,"secret":[..]?}` frames the page answers with
-`{"type":"reply"|"error","id":..,"data":..}`.
+`{"type":"reply"|"error","id":..,"data":..}`. The tabs of one identity say hello
+with ONE guid and are one principal: a call to `<guid>|<agent>` goes to every live
+tab and settles with the first reply; `peers` lists one row per live connection.
 
-**Secret marks cross every wire.** An item's `secret` paths (see `system-verbs`)
-ride its call wherever it goes — the `secret` field of a ws / bridge `call` frame,
+**Secret marks cross every wire.** An item's `secret` marks (see `system-verbs` —
+dotted strings and/or arrays of steps, carried as given) ride its call wherever it goes — the `secret` field of a ws / bridge `call` frame,
 the `X-Fantastic-Secret` header on rest, the frame a `<guid>|<agent>` send puts on
 the peer's wire, a spawned program's `{op:"send", …, secret}` on the exec_bridge
 guest wire — and the RECEIVING kernel dispatches the item with them, so it
 records `<secret>` exactly as the calling kernel does; a malformed mark is that
 kernel's own refusal, before dispatch. On a bridge's `forward`, mark YOUR call:
-`payload.payload.<field>` rides as `payload.<field>`, `result[.<field>]` as is.
+`payload.payload.<field>` rides as `payload.<field>` (an array
+`["payload","payload",<step>…]` as `["payload",<step>…]`), `result[.<field>]` /
+`["result",<step>…]` as is.
 A RELAY leg (`relay_connector`) is the exception — SEALED: the relay records the
 frames it routes unmasked, so a call carrying any mark is refused there, both ways;
-send secrets over a direct `ws_bridge` leg. To operate a running daemon's live surface (find its
+send secrets over a direct `ws_bridge` leg to a loopback host (an ssh tunnel's local
+end) — a `ws://` leg to any other host is SEALED the same way (cleartext). To operate a running daemon's live surface (find its
 port, POST/WS to it, stop it), `reflect kernel readme=daemon`.

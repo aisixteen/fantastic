@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from _testkit import memory_meta
 
-import ollama_backend.tools as ot
-
 
 class _FakeProvider:
     def __init__(self, scripts):
@@ -17,7 +15,9 @@ class _FakeProvider:
             yield x
 
 
-async def test_persistence_routing_through_the_memory_store(seeded_kernel):
+async def test_persistence_routing_through_the_memory_store(
+    seeded_kernel, fake_providers
+):
     """ollama_backend.send appends its turns to the agent's memory store (the AI
     writes no disk and holds no rows of its own); read them back via `recall`."""
     ob = (
@@ -43,7 +43,7 @@ async def test_persistence_routing_through_the_memory_store(seeded_kernel):
             )
         )[0]["result"]
     )["id"]
-    ot._providers[ob] = _FakeProvider([["hello"]])
+    fake_providers[ob] = _FakeProvider([["hello"]])
     try:
         (
             await seeded_kernel.send(
@@ -51,7 +51,7 @@ async def test_persistence_routing_through_the_memory_store(seeded_kernel):
             )
         )[0]["result"]
     finally:
-        ot._providers.pop(ob, None)
+        fake_providers.pop(ob, None)
     data = (
         (await seeded_kernel.send([{"target": ob, "payload": {"type": "recall"}}]))[0][
             "result"

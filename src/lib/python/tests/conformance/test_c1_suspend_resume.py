@@ -28,12 +28,11 @@ from __future__ import annotations
 from _testkit import memory_meta
 import asyncio
 import json
-import sys
 import types
 
 import pytest
+from kernel import register_unlisted
 
-from ai_core import core
 
 QUESTION = {
     "request_id": "q-color",
@@ -66,7 +65,7 @@ async def _user_handler(id, payload, kernel):
 
 _user_mod = types.ModuleType("c1_user.tools")
 _user_mod.handler = _user_handler
-sys.modules["c1_user.tools"] = _user_mod
+register_unlisted("c1_user.tools", _user_mod)
 
 
 def _call(verb_payload: dict) -> str:
@@ -123,7 +122,7 @@ class _FakeProvider:
 
 
 @pytest.fixture
-async def wired(seeded_kernel):
+async def wired(seeded_kernel, fake_providers):
     _ASKED.clear()
     seeded_kernel.create(
         "c1_user.tools",
@@ -150,11 +149,8 @@ async def wired(seeded_kernel):
         ),
     )
     fp = _FakeProvider()
-    core._providers["c1_ai"] = fp
-    try:
-        yield seeded_kernel, fp
-    finally:
-        core._providers.pop("c1_ai", None)
+    fake_providers["c1_ai"] = fp
+    yield seeded_kernel, fp
 
 
 async def _value(kernel, key):

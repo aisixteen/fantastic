@@ -41,8 +41,9 @@ ROLE_BUNDLE = {
     "compute": "exec_bridge.tools",
     # STATEFUL FIXTURES. TEST-ONLY on every runtime, and gated so a default
     # build carries none of them: a rust feature (`scenario-probes`), a swift
-    # define (`SCENARIO_PROBES`), a `PYTHONPATH` entry for python. The MODULE
-    # NAMES are shared, which is what lets one map serve all three.
+    # define (`SCENARIO_PROBES`), the registering launcher for python
+    # (`probes/scenario_probes.py`). The MODULE NAMES are shared, which is what
+    # lets one map serve all three.
     "dispenser": "dispenser_probe.tools",
     "flaky_plant": "plant_probe.tools",
     "purchase_desk": "purchase_probe.tools",

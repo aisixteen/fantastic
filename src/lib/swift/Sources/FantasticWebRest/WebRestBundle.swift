@@ -11,7 +11,8 @@
 //                                         headers: X-Fantastic-Auth (credential),
 //                                         X-Fantastic-Execution-Id (the item `id`),
 //                                         X-Fantastic-Secret (the item `secret`, a
-//                                         JSON array of paths)
+//                                         JSON array of marks — dotted strings
+//                                         and/or arrays of steps)
 //   GET  /<self_id>/_reflect              → reflect `kernel`
 //   GET  /<self_id>/_reflect/<target_id>  → reflect one agent
 //
@@ -34,6 +35,15 @@ public final class WebRestBundle: AgentBundle, WebRouteEndpoints, @unchecked Sen
     public init() {}
 
     public var readme: String? { Self.readmeText }
+
+    /// The leg's `ingress_rule`, refused at the WRITE when no rule implements it
+    /// — the one check every leg makes (python `validate_meta` →
+    /// `io_bridge.unknown_ingress_refusal`).
+    public func validateMeta(
+        _ meta: OrderedDictionary<String, JSON>, record: OrderedDictionary<String, JSON>
+    ) -> String? {
+        IngressRules.unknownRefusal(meta)
+    }
 
     public func handle(
         agentId: AgentId,
@@ -122,7 +132,7 @@ public final class WebRestBundle: AgentBundle, WebRouteEndpoints, @unchecked Sen
     }
 
     /// Serve one matched request (see `WebEndpoint.http`).
-    func serveRoute(legId: AgentId, request: JSON, kernel: Kernel) async -> (JSON, Data?) {
+    func serveRoute(legId: AgentId, request: JSON, kernel: Kernel) async -> (JSON, OctetReply?) {
         let method = request["method"].asString ?? "GET"
         let target = request["params"]["target_id"].asString
         if method == "POST" {
@@ -141,7 +151,7 @@ public final class WebRestBundle: AgentBundle, WebRouteEndpoints, @unchecked Sen
     /// raw bytes or response headers).
     private func postEndpoint(
         legId: AgentId, target: String?, request: JSON, kernel: Kernel
-    ) async -> (JSON, Data?) {
+    ) async -> (JSON, OctetReply?) {
         guard let target = target else {
             return (
                 Self.jsonResponse(400, .object(["error": .string("web_rest: missing target")])), nil
@@ -185,16 +195,11 @@ public final class WebRestBundle: AgentBundle, WebRouteEndpoints, @unchecked Sen
             }
             payload = parsed
         }
-        // GATE — web_rest is an io_bridge inbound (http) derivation: SEALED by
-        // default. The credential rides the X-Fantastic-Auth header; the host
-        // lowercases every header before handing them over.
+        // GATED BEFORE THE BODY WAS READ (audit IO-4): the host ran this leg's
+        // ingress rule on the request's head — its target and `X-Fantastic-Auth`
+        // (`WebServer.preflight`) — and bounded the body; only an admitted
+        // request reaches here. The host lowercases every header.
         let headers = request["headers"]
-        if let denied = gateWebLeg(
-            kernel: kernel, legId: legId, kind: "call", target: target,
-            verb: payload["type"].asString ?? "", token: headers["x-fantastic-auth"].asString)
-        {
-            return (Self.jsonResponse(403, denied), nil)
-        }
         // NAMING an execution. The credential rides `X-Fantastic-Auth`; an
         // execution id rides its own header for the same reason — it is dispatch
         // metadata about the call, not part of the verb payload the target agent
@@ -218,57 +223,46 @@ public final class WebRestBundle: AgentBundle, WebRouteEndpoints, @unchecked Sen
             }
             item.secret = marks
         }
-        // A BINARY-EDGE VERB RIDES THE BINARY CHANNEL even on the JSON leg
-        // (A13.1): that is the only way the bundle returns — or receives — a raw
-        // chunk. Python needs no such list; its payload dict simply HOLDS the
-        // bytes and `_first_bytes_field` finds them in the reply. Here the
-        // carrier is the item's binary channel, so the decision is static, by
-        // verb (`Codec.binaryEdgeVerbs`), and identical on both legs. There is
-        // NO request body: a JSON body cannot hold one, so `write_stream` with a
-        // JSON-string `bytes` reaches file_bridge as a header `bytes` key and is
-        // refused `missing_arg` (A13.19), which is python's answer too.
-        if Codec.binaryEdgeVerbs.contains(payload["type"].asString ?? "") {
-            item.rawReply = true
-        }
+        // EVERY CALL MAY BE ANSWERED WITH RAW BYTES, whatever its verb (A13.1):
+        // python's reply dict holds them and `_first_bytes_field` finds them,
+        // with no list of verbs. This leg carries the reply's body
+        // (`rawReply`), and answers octet exactly when the reply holds one.
+        // There is NO request body: a JSON body cannot hold one, so
+        // `write_stream` with a JSON-string `bytes` reaches file_bridge as a
+        // header `bytes` key and is refused `missing_arg` (A13.19), which is
+        // python's answer too.
+        item.rawReply = true
         let out = await KernelTaskLocals.$currentSender.withValue(legId) {
             await kernel.send([item])[0]
         }
         if case .null = out.result { return (Self.noContent, nil) }
         // The host turns a CHUNK — a 0-byte one included — into the octet reply;
-        // a refusal carries none and stays JSON. `payload_header` is the reply
-        // dict rendered with python's `json.dumps` DEFAULTS, which is what rides
-        // `X-Fantastic-Payload`; the JSON body uses the compact separators
+        // a refusal carries none and stays JSON. The octet reply's header is the
+        // reply dict WITHOUT the chunk's key, rendered with python's `json.dumps`
+        // DEFAULTS, and the key rides `X-Fantastic-Bytes-Field` (`RestOctet.split`,
+        // python `_first_bytes_field`); the JSON body uses the compact separators
         // starlette's `JSONResponse` writes, so the two are not the same bytes.
         if let chunk = out.body {
-            var route = Self.jsonResponse(200, out.result)
-            if case .object(var o) = route {
-                o["payload_header"] = .string(pyJsonDumps(Self.withoutBytesField(out.result)))
-                route = .object(o)
+            guard let octet = RestOctet.split(out.result, chunk) else {
+                return (Self.jsonResponse(500, RestOctet.noJSONForm), nil)
             }
-            return (route, chunk)
+            return (Self.jsonResponse(200, out.result), octet)
         }
         return (Self.jsonResponse(200, out.result), nil)
     }
 
-    /// python `{k: v for k, v in reply.items() if k != field}` — the octet
-    /// reply's header is the reply WITHOUT the bytes field, whose value is the
-    /// body itself.
-    static func withoutBytesField(_ reply: JSON) -> JSON {
-        guard case .object(var o) = reply else { return reply }
-        o.removeValue(forKey: "bytes")
-        return .object(o)
-    }
-
-    /// The item's `secret` paths (`Secret`) ride `X-Fantastic-Secret` (the host
+    /// The item's `secret` marks (`Secret`) ride `X-Fantastic-Secret` (the host
     /// lowercases every header) — dispatch metadata about the call, like the
     /// execution id, never part of the payload. The value is a JSON ARRAY of
-    /// paths, the SAME value a ws/bridge `call` frame carries in its `secret`
-    /// field: one parser (the strict wire parse), and the kernel's own check
-    /// judges it. Not comma-separated — a path step is a payload key, and a key
-    /// may hold a comma; a JSON string escapes any character into the ASCII a
-    /// header value is safe in; and a wrong shape (a bare string, `[]`, a number)
-    /// reaches the kernel's refusal verbatim instead of being re-invented by a
-    /// splitter. Python `web_rest._SECRET_HEADER`.
+    /// marks, each a dotted string (`"payload.key"`) or an array of steps
+    /// (`["payload", "a.b"]` — a key holding a dot), the SAME value a ws/bridge
+    /// `call` frame carries in its `secret` field: one parser (the strict wire
+    /// parse), and the kernel's own check judges it. Not comma-separated — a path
+    /// step is a payload key, and a key may hold a comma; a JSON string escapes
+    /// any character into the ASCII a header value is safe in; and a wrong shape
+    /// (a bare string, `[]`, a number) reaches the kernel's refusal verbatim
+    /// instead of being re-invented by a splitter. Python
+    /// `web_rest._SECRET_HEADER`.
     static let secretHeader = "x-fantastic-secret"
 
     /// python `_make_reflect_root` / `_make_reflect_get`.
@@ -344,17 +338,29 @@ public final class WebRestBundle: AgentBundle, WebRouteEndpoints, @unchecked Sen
         `GET /<id>/_reflect[/<target>][?readme=1]` — reflect shortcuts.
         **Sealed by default** — open: `update_agent <id> ingress_rule=allow_all_ingress`.
         Token on **`X-Fantastic-Auth` header** (not the envelope — HTTP has no envelope).
+        **Gate first, then the body**: a POST is judged on its target and `X-Fantastic-Auth`
+        before one body byte is read — a refused client's body is never read. An admitted
+        body is read up to **16 MiB** (`MAX_BODY` = io_bridge `MAX_FRAME`, the one frame cap
+        every wire leg holds); larger → `413` `{reason:"transport_error", limit}` ("the
+        request body exceeds 16777216 bytes …") — a declared `Content-Length` over it is
+        refused unread. Send more in chunks (`write_stream`).
         Name an execution with **`X-Fantastic-Execution-Id`** — same id twice returns the
         first outcome instead of running the verb again (dispatch metadata on the
         carrier, never in the body).
-        Mark secret values with **`X-Fantastic-Secret`** — a JSON array of paths, the
-        item's `secret` (`["payload.fields"]`, `["result"]`): the reply is real, every
+        Mark secret values with **`X-Fantastic-Secret`** — a JSON array of marks, the
+        item's `secret`: dotted strings (`["payload.fields"]`, `["result"]`) and/or arrays
+        of steps for a key holding a dot (`[["payload","a.b"]]`): the reply is real, every
         record of the call shows `<secret>`. Not JSON → `400`; a bad mark → the kernel's
         `bad_arg` refusal.
+        **One leg is one principal** (audit S6, 2026-10-03): every request admitted to this
+        leg is dispatched AS the leg, so grants, a credential_store's `readers`,
+        `X-Fantastic-Execution-Id` names and a secret-marked execution's join (the real
+        outcome goes to its original caller — the leg) see ONE caller. Everyone admitted to
+        one leg is one principal — one tenant per leg.
         ```
         curl -X POST -H 'content-type: application/json' \\
           -H 'X-Fantastic-Secret: ["payload.fields"]' \\
-          -d '{"type":"set","ref":"openai/main","host":"api.openai.com","fields":{"api_key":"…"}}' \\
+          -d '{"type":"set","ref":"openai/main","fields":{"api_key":"…"}}' \\
           http://<host>/<id>/<creds_id>
         ```
 

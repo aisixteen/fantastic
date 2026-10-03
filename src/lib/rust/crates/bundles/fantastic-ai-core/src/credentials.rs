@@ -28,6 +28,11 @@
 //! kernel's `send` resolves it first, so `<this kernel's guid>|<holder>` is the
 //! holder, not an unknown id. The reader below is untouched: it calls
 //! `kernel.send` itself, never through the model's tool dispatch.
+//!
+//! Nor does a model JOIN a secret (audit F2, 2026-10-03): a model call whose
+//! `<exec_id>` names an execution that carried `secret` marks is refused the same
+//! way ([`secret_join_refusal`]) — the backend's key read is such an execution,
+//! and the kernel hands a join by the SAME caller the real reply.
 
 use std::sync::Arc;
 
@@ -53,6 +58,17 @@ pub fn secret_holder_text(agent: &str) -> String {
     format!(
         "{agent} holds secrets — a secret holder answers backends, never a model turn; \
          this call was not dispatched"
+    )
+}
+
+/// What the model reads when its `<exec_id>` names an execution that carried
+/// secret values (a key read, or any call whose item was marked `secret`) —
+/// python's `SECRET_JOIN_TEXT.format(exec_id=…)`, byte for byte.
+#[must_use]
+pub fn secret_join_text(exec_id: &str) -> String {
+    format!(
+        "exec_id {exec_id} names an execution that carried secret values — a model \
+         never joins one; this call was not dispatched"
     )
 }
 
@@ -100,8 +116,9 @@ fn local_record(kernel: &Kernel, address: &str) -> Option<Arc<Agent>> {
 /// `<this kernel's guid>|<holder>` reaches the holder, so it is refused like the
 /// bare id. Only what THIS kernel can see is judged: a connected peer's
 /// `<guid>|<agent>` lives on another kernel and its record is not here, so it
-/// passes; that kernel's own AI layer guards its own holders, and a holder's
-/// value is only ever sent to a caller that marked it secret.
+/// passes; that kernel's own AI layer guards its own holders, a holder's value
+/// is only ever sent to a caller that marked it secret, and a model's join of
+/// that marked read is [`secret_join_refusal`]'s.
 #[must_use]
 pub fn secret_holder_refusal(kernel: &Kernel, agent_id: &str) -> Option<Value> {
     let holds = local_record(kernel, agent_id).is_some_and(|a| {
@@ -112,6 +129,29 @@ pub fn secret_holder_refusal(kernel: &Kernel, agent_id: &str) -> Option<Value> {
     }
     let mut out = refusal(UNAUTHORIZED, secret_holder_text(agent_id));
     with(&mut out, "agent", json!(agent_id));
+    Some(out)
+}
+
+/// The refusal for a model-parsed call whose `<exec_id>` names an execution that
+/// carried `secret` marks, or `None` when the call may go. Python
+/// `secret_join_refusal`.
+///
+/// A JOIN is a receive: the kernel hands the joiner that execution's outcome. A
+/// model cannot mark a call secret, so such an execution was never its own — it
+/// is its backend's key read (same agent: the kernel would hand back the REAL
+/// reply) or another caller's (the kernel hands back the shown one). Either way a
+/// model does not join it. This is what closes a holder on a CONNECTED PEER,
+/// which [`secret_holder_refusal`] cannot judge: the backend's read of
+/// `<peer guid>|creds` is a local execution, and joining it by its id never
+/// reaches the peer. The id is resolved as the kernel's `send` resolves it
+/// ([`Kernel::carried_secret`]).
+#[must_use]
+pub fn secret_join_refusal(kernel: &Kernel, exec_id: &Value) -> Option<Value> {
+    if !kernel.carried_secret(exec_id) {
+        return None;
+    }
+    let mut out = refusal(UNAUTHORIZED, secret_join_text(&py_str(exec_id)));
+    with(&mut out, "exec_id", exec_id.clone());
     Some(out)
 }
 
@@ -135,6 +175,31 @@ impl From<CredentialError> for ProviderError {
             message: e.0,
             kind: "CredentialError",
         }
+    }
+}
+
+/// Whether `key` can ride `Authorization: Bearer <key>` as it is: visible ASCII,
+/// spaces or tabs only BETWEEN visible characters. Python `header_safe`: an HTTP
+/// client refuses anything else, and python's QUOTES the header it refused in its
+/// error — a key pasted with a trailing newline would ride that text into the
+/// caller's reply, the ledger and the logs (audit S1).
+#[must_use]
+pub fn header_safe(key: &str) -> bool {
+    key == key.trim_matches(|c| c == ' ' || c == '\t')
+        && key
+            .chars()
+            .all(|c| c == ' ' || c == '\t' || ('!'..='~').contains(&c))
+}
+
+/// `text` with every occurrence of `key` replaced by the placeholder a recorded
+/// secret reads as. Python `without_key`: a provider HOLDS its key, so every
+/// error text it raises passes through here first — an endpoint may echo the
+/// request in its error body (audit S1).
+#[must_use]
+pub fn without_key(text: &str, key: Option<&str>) -> String {
+    match key.filter(|k| !k.is_empty()) {
+        Some(k) => text.replace(k, fantastic_kernel::secret::PLACEHOLDER),
+        None => text.to_string(),
     }
 }
 
@@ -273,6 +338,17 @@ impl KeyReader {
             )));
         }
         match res.get("fields").and_then(|f| f.get(FIELD)) {
+            // named by its ref, never by its value
+            Some(Value::String(key)) if !key.is_empty() && !header_safe(key) => {
+                Err(CredentialError(format!(
+                    "{backend}: credential {} in {}: {} is not a legal HTTP header value (a \
+                     control or non-ASCII character, or whitespace at an edge) — store it \
+                     again without",
+                    py_repr(&r),
+                    py_repr(&store),
+                    py_repr(FIELD)
+                )))
+            }
             Some(Value::String(key)) if !key.is_empty() => Ok(Some(key.clone())),
             _ => Err(CredentialError(format!(
                 "{backend}: credential {} in {} has no {} field",

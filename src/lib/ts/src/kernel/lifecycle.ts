@@ -147,7 +147,7 @@ export async function shutdownAgents(k: Kernel, me: number | null): Promise<Json
   for (const tid of pending()) {
     const row = k.tasks.get(tid);
     if (row === undefined || row.parent !== null) continue;
-    cancelled.push(...k.tasks.cancel(tid));
+    cancelled.push(...k.tasks.cancel(tid, k.rootId));
   }
   deadline = Date.now() + s.settleTimeoutMs;
   // An execution whose task is gone or KILLED but that has not recorded its

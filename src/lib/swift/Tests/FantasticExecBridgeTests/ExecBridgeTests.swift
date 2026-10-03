@@ -470,6 +470,11 @@
         return try? JSON.parse(Data(body.dropFirst()))
     }
 
+    /// The `{op:"inbox", payload:{type}}` frame a program's on_message receives.
+    private func inboxFrame(_ type: String) -> JSON {
+        .object(["op": .string("inbox"), "payload": .object(["type": .string(type)])])
+    }
+
     /// True once the relay has closed its end of the socket.
     private func wireClosed(_ fd: Int32, timeout: Double = 5) async -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
@@ -543,6 +548,173 @@
             #expect(
                 owner.watcherIds().isDisjoint(with: proxies),
                 "a proxy leaked past teardown: \(owner.watcherIds())")
+        }
+
+        /// Audit BV-8 — the seal covers every verb but `reflect`/`connector`, MAIL
+        /// INCLUDED. The fanout reaches the program's `_xbself_` proxy BEFORE the
+        /// handler, so the relay's inbox drain drops what the gate refuses: a sealed
+        /// leg's program receives nothing, and receives again once reopened.
+        @Test func aSealedLegRefusesMailAndRelaysNothing() async throws {
+            let kernel = freshKernel()
+            let a = await createPy(kernel, id: "sealed_mail")
+            let (fd, relay) = wire(kernel, owner: a, jobId: TaskId(9006))
+            defer {
+                relay.stop()
+                close(fd)
+            }
+            wireWrite(fd, .object(["op": .string("onmessage")]))
+            let owner = try #require(kernel.agent(a))
+            let deadline = Date().addingTimeInterval(5)
+            while Date() < deadline && !owner.watcherIds().contains(AgentId("_xbself_9006")) {
+                try await Task.sleep(nanoseconds: 20_000_000)
+            }
+            func rule(_ r: String) async -> JSON {
+                await kernel.send([
+                    Item(
+                        AgentId("kernel_state"),
+                        .object([
+                            "type": .string("update_agent"), "id": .string(a.value),
+                            "ingress_rule": .string(r),
+                        ]))
+                ])[0].result
+            }
+            #expect(await rule("deny_ingress")["updated"] == .bool(true))
+            for p: JSON in [
+                .object(["type": .string("status")]),
+                .object(["type": .string("probe_mail"), "x": .string("TEST-VALUE-MAIL")]),
+            ] {
+                let out = await kernel.send([Item(a, p)])[0].result
+                #expect(out["reason"].asString == "unauthorized", "\(p) → \(out.serialize())")
+            }
+            _ = await rule("allow_all_ingress")
+            _ = await kernel.send([Item(a, .object(["type": .string("after")]))])
+            // the first frame down the fd is the mail sent AFTER the reopen
+            let first = try #require(await wireRead(fd), "no frame came back")
+            #expect(first == inboxFrame("after"), "\(first.serialize())")
+        }
+
+        /// Audit BV-9 (python `test_the_inbox_relays_a_drive_verb_only_for_its_own_job`)
+        /// — the fanout mirrors every payload sent to the leg into the owner inbox,
+        /// so a program started by one caller saw another caller's `write`
+        /// keystrokes, paste bytes and drive calls aimed at that caller's job. A drive
+        /// verb whose `job_id` names ANOTHER job is dropped; one with no `job_id`
+        /// (bulk) or naming this job is forwarded; other mail is unchanged.
+        @Test func theInboxRelaysADriveVerbOnlyForItsOwnJob() async throws {
+            let kernel = freshKernel()
+            let a = await createPy(kernel, id: "bv9_drive")
+            let (fd, relay) = wire(kernel, owner: a, jobId: TaskId(9008))
+            defer {
+                relay.stop()
+                close(fd)
+            }
+            wireWrite(fd, .object(["op": .string("onmessage")]))
+            let owner = try #require(kernel.agent(a))
+            let deadline = Date().addingTimeInterval(5)
+            while Date() < deadline && !owner.watcherIds().contains(AgentId("_xbself_9008")) {
+                try await Task.sleep(nanoseconds: 20_000_000)
+            }
+            let payloads: [JSON] = [
+                ["type": "write", "job_id": 9009, "data": "TEST-VALUE-KEYS\n"],
+                ["type": "resize", "job_id": 9009, "cols": 10, "rows": 5],
+                ["type": "paste_image", "job_id": 9009, "bytes": "TEST-VALUE-PNG"],
+                ["type": "stop", "job_id": 9009],
+                ["type": "interrupt", "job_id": 9009],
+                ["type": "clear", "job_id": 9009],
+                // the bulk forms name no job: forwarded
+                ["type": "stop"],
+                ["type": "interrupt"],
+                ["type": "clear"],
+                ["type": "write", "job_id": 9008, "data": "own"],
+                ["type": "mail", "n": 1],
+            ]
+            for p in payloads { _ = await kernel.send([Item(a, p)]) }
+            let expected: [JSON] = [
+                ["type": "stop"],
+                ["type": "interrupt"],
+                ["type": "clear"],
+                ["type": "write", "job_id": 9008, "data": "own"],
+                ["type": "mail", "n": 1],
+            ]
+            for want in expected {
+                let got = try #require(await wireRead(fd), "no frame for \(want.serialize())")
+                #expect(got == ["op": "inbox", "payload": want], "\(got.serialize())")
+            }
+        }
+
+        /// Audit W-9 (python `test_a_malformed_ctrl_frame_is_skipped_never_fatal`) —
+        /// JSON that is no envelope, or a `src` that is no string, is skipped; the
+        /// relay keeps serving and the next call is answered. Python ended the relay
+        /// task here.
+        @Test func aMalformedCtrlFrameIsSkippedNeverFatal() async throws {
+            let kernel = freshKernel()
+            let a = await createPy(kernel, id: "w9_junk")
+            let (fd, relay) = wire(kernel, owner: a, jobId: TaskId(9007))
+            defer {
+                relay.stop()
+                close(fd)
+            }
+            let junk: [JSON] = [
+                .array([.integer(1)]), .string("str"),
+                .object(["op": .string("watch"), "src": .array([.string("x")])]),
+                .object(["op": .string("watch"), "src": .object(["a": .integer(1)])]),
+                .object(["op": .string("unwatch"), "src": .array([.string("x")])]),
+                .object(["op": .string("unwatch"), "src": .object(["a": .integer(1)])]),
+            ]
+            for j in junk { wireWrite(fd, j) }
+            wireWrite(
+                fd,
+                .object([
+                    "op": .string("send"), "rid": .string("r1"), "target": .string(a.value),
+                    "payload": .object(["type": .string("status")]),
+                ]))
+            let reply = try #require(await wireRead(fd), "the relay stopped answering")
+            #expect(reply["op"].asString == "reply", "\(reply.serialize())")
+            #expect(reply["rid"].asString == "r1", "\(reply.serialize())")
+            #expect(reply["data"]["jobs"].asArray != nil, "\(reply.serialize())")
+        }
+
+        /// Audit ARCH2-5 — the owner-inbox table is keyed PER KERNEL. Two kernels in
+        /// one process, an exec agent of the same id in each: keyed by the bare id,
+        /// kernel B's `onmessage` took kernel A's entry, and A's own `offmessage`
+        /// then found B's job there and released nothing — A's proxy stayed watched.
+        @Test func theOwnerInboxIsPerKernel() async throws {
+            let ka = freshKernel()
+            let kb = freshKernel()
+            let a = await createPy(ka, id: "xb_twin")
+            let b = await createPy(kb, id: "xb_twin")
+            let (fa, ra) = wire(ka, owner: a, jobId: TaskId(9100))
+            let (fb, rb) = wire(kb, owner: b, jobId: TaskId(9101))
+            defer {
+                ra.stop()
+                rb.stop()
+                close(fa)
+                close(fb)
+            }
+            let oa = try #require(ka.agent(a))
+            let ob = try #require(kb.agent(b))
+            func until(_ what: String, _ pred: () -> Bool) async throws {
+                let deadline = Date().addingTimeInterval(5)
+                while Date() < deadline && !pred() {
+                    try await Task.sleep(nanoseconds: 20_000_000)
+                }
+                #expect(pred(), "\(what) never held")
+            }
+            wireWrite(fa, .object(["op": .string("onmessage")]))
+            try await until("A subscribed") { oa.watcherIds().contains(AgentId("_xbself_9100")) }
+            wireWrite(fb, .object(["op": .string("onmessage")]))
+            try await until("B subscribed") { ob.watcherIds().contains(AgentId("_xbself_9101")) }
+            // each kernel's program receives its own kernel's mail
+            _ = await ka.send([Item(a, .object(["type": .string("mail_a")]))])
+            #expect(await wireRead(fa) == inboxFrame("mail_a"))
+            _ = await kb.send([Item(b, .object(["type": .string("mail_b")]))])
+            #expect(await wireRead(fb) == inboxFrame("mail_b"))
+            // A gives its inbox back — its OWN entry, not B's
+            wireWrite(fa, .object(["op": .string("offmessage")]))
+            try await until("A released") { !oa.watcherIds().contains(AgentId("_xbself_9100")) }
+            // …and B's subscription is untouched
+            #expect(ob.watcherIds().contains(AgentId("_xbself_9101")))
+            _ = await kb.send([Item(b, .object(["type": .string("mail_b2")]))])
+            #expect(await wireRead(fb) == inboxFrame("mail_b2"))
         }
 
         /// A length prefix over the bound is a WIRE VIOLATION — the framing itself is
@@ -829,7 +1001,7 @@
         }
         func handleBinary(
             agentId: AgentId, header: JSON, body: Blob?, kernel: Kernel
-        ) async throws -> (JSON?, Data?) {
+        ) async throws -> (JSON?, Blob?) {
             // the chunk is the payload's `bytes` — python's `payload.get("bytes", b"")`
             let blob = bodyAt(body, "bytes") ?? Data()
             switch header["type"].asString ?? "" {
@@ -838,7 +1010,10 @@
                 return (.object(["written": .integer(Int64(blob.count))]), nil)
             case "read_stream":
                 let b = lock.withLock { self.blob }
-                return (.object(["eof": .bool(true), "size": .integer(Int64(b.count))]), b)
+                return (
+                    .object(["eof": .bool(true), "size": .integer(Int64(b.count))]),
+                    Blob("bytes", b)
+                )
             default:
                 return (.object(["error": .string(header["type"].asString ?? "")]), nil)
             }
@@ -880,6 +1055,39 @@
             let events = await drainUntil(stream) { $0["type"].asString == "job_done" }
             let out = events.first { $0["type"].asString == "job_done" }?["stdout"].asString ?? ""
             #expect(out.contains("WROTE 768 READ 768 True bytes"), "bytes did not round-trip raw: \(out)")
+        }
+
+        /// A TEXT send (kind T, no bytes in the call) whose reply holds bytes comes
+        /// back kind B: python's relay `encode_frame`s the reply dict, with no list of
+        /// verbs, so the program needs no `bytes: b''` to get its chunk raw.
+        @Test func aTextSendsBytesReplyComesBackRaw() async throws {
+            guard let py = py3() else { return }
+            let registry = BundleRegistry()
+            registry.register("exec_bridge.tools", ExecBridgeBundle())
+            registry.register("blob.tools", BlobStore())
+            let kernel = Kernel(storage: .inMemory, bundles: registry)
+            let root = Agent(id: AgentId("kernel_state"), handlerModule: nil, parentId: nil)
+            kernel.register(root)
+            kernel.setRoot(root)
+            let a = await createPy(
+                kernel, id: "dur_text_bytes", meta: ["can_call": .object(["blob": .string("*")])])
+            _ = await kernel.send([Item(AgentId("kernel_state"), .object([
+                "type": .string("create_agent"), "parent_id": .string("kernel_state"),
+                "id": .string("blob"), "handler_module": .string("blob.tools"),
+                "callable_by": .object([a.value: .string("*")]),
+            ]))])[0].result
+            let stream = kernel.ensureInbox(a)
+            _ = await kernel.send([Item(a, pyStart(
+                py,
+                "raw = bytes(range(256))\n"
+                    + "kernel.send('blob', {'type': 'write_stream', 'path': 'b', 'bytes': raw})\n"
+                    + "r = kernel.send('blob', {'type': 'read_stream', 'path': 'b'})\n"
+                    + "print('READ', r.get('error'), type(r.get('bytes')).__name__, "
+                    + "r.get('bytes') == raw)",
+                connector: true))])[0].result
+            let events = await drainUntil(stream) { $0["type"].asString == "job_done" }
+            let out = events.first { $0["type"].asString == "job_done" }?["stdout"].asString ?? ""
+            #expect(out.contains("READ None bytes True"), "a text send's bytes reply was not raw: \(out)")
         }
     }
 
@@ -995,9 +1203,10 @@
 
         // MARK: A4.3 — `shutdown` is mail
 
-        /// A4.3 — python's VERBS table has no `shutdown`, so it is MAIL: ungated,
+        /// A4.3 — python's VERBS table has no `shutdown`, so it is MAIL:
         /// `{queued:true}` with a live job and the unknown-type error without one.
-        /// It is not advertised as a verb either.
+        /// It is not advertised as a verb either. Gated like every verb but
+        /// `reflect`/`connector` (audit BV-8): a sealed leg refuses it.
         @Test func shutdownIsMailNotAVerb() async throws {
             let kernel = freshKernel()
             let a = await createPy(kernel, id: "sd_open")
@@ -1011,7 +1220,7 @@
                 "\(r.serialize())")
             #expect(r["reason"].isNull, "mail is not a refusal: \(r.serialize())")
 
-            // …and it is UNGATED: a sealed leg answers the same, not `unauthorized`.
+            // …and, like all mail, it is GATED: a sealed leg refuses it (BV-8).
             let sealedId = await kernel.send([
                 Item(
                     AgentId("kernel_state"),
@@ -1025,8 +1234,7 @@
             let s = await kernel.send([
                 Item(AgentId("sd_sealed"), .object(["type": .string("shutdown")]))
             ])[0].result
-            #expect(s["reason"].isNull, "shutdown must not be gated: \(s.serialize())")
-            #expect(s["error"].asString?.contains("no running job") == true, "\(s.serialize())")
+            #expect(s["reason"].asString == "unauthorized", "mail on a sealed leg: \(s.serialize())")
         }
 
         // MARK: A4.4 / A4.5 — python repr in every refusal
@@ -1388,36 +1596,40 @@
             #expect(done?["stderr"].asString == "", "\(done?["stderr"].serialize() ?? "none")")
         }
 
-        /// A4.15 — the counter lives on the PUMP: python's `_read_stream` closes
-        /// over the job dict, so `clear {job_id}` dropping a RUNNING row does not
-        /// reset `progress.n`.
-        @Test func progressCountSurvivesClear() async throws {
+        /// Audit BV-5 — a NAMED `clear` follows the bulk form's rule: a `running`
+        /// (or `stopping`) row is refused. It used to drop the row whatever its
+        /// status, and the row is the only handle `stop`, `cancel`, delete and
+        /// shutdown kill a process through — the process outlived all four.
+        @Test func aNamedClearRefusesARunningJob() async throws {
             guard let py = py3() else { return }
             let kernel = freshKernel()
-            let a = await createPy(kernel, id: "clr_count")
-            let stream = kernel.ensureInbox(a)
-            let r = await kernel.send([
-                Item(
-                    a,
-                    pyStart(
-                        py,
-                        "import sys, time\n"
-                            + "for i in range(6):\n    print(i)\n    sys.stdout.flush()\n    time.sleep(0.3)\n"
-                    ))
-            ])[0].result
+            let a = await createPy(kernel, id: "clr_named")
+            let r = await kernel.send([Item(a, pyStart(py, "import time; time.sleep(30)"))])[0]
+                .result
             let jid = try #require(r["job_id"].asInt)
-            // FORGET the row while it still runs — a NAMED clear drops a running one.
-            try await Task.sleep(nanoseconds: 500_000_000)
-            let cleared = await kernel.send([
-                Item(a, .object(["type": .string("clear"), "job_id": .integer(jid)]))
-            ])[0].result
+            func clear() async -> JSON {
+                await kernel.send([
+                    Item(a, .object(["type": .string("clear"), "job_id": .integer(jid)]))
+                ])[0].result
+            }
             #expect(
-                cleared["cleared"].asInt == 1,
-                "a named clear drops a running row: \(cleared.serialize())")
-            // ONE consumer per stream: the inbox buffers, so this sees the whole run.
-            let events = await drainUntil(stream, timeout: 20) { $0["n"].asInt == 6 }
-            let ns = events.compactMap { $0["type"].asString == "progress" ? $0["n"].asInt : nil }
-            #expect(ns.contains(6), "the count restarted or stopped after clear: \(ns)")
+                await clear().serialize()
+                    == "{\"error\":\"clear: job_id must be a finished job (job \(jid) is running — "
+                    + "`stop` it, then clear)\",\"reason\":\"bad_arg\",\"arg\":\"job_id\"}")
+            _ = await kernel.send([
+                Item(a, .object(["type": .string("stop"), "job_id": .integer(jid)]))
+            ])
+            var status = ""
+            let deadline = Date().addingTimeInterval(10)
+            while Date() < deadline {
+                let st = await kernel.send([Item(a, .object(["type": .string("status")]))])[0]
+                    .result
+                status = st["jobs"].asArray?.first?["status"].asString ?? ""
+                if status == "stopped" { break }
+                try await Task.sleep(nanoseconds: 50_000_000)
+            }
+            #expect(status == "stopped", "the stopped row settled as \(status)")
+            #expect(await clear() == .object(["cleared": .integer(1)]))
         }
 
         /// A4.29 — invalid UTF-8 is REPLACED, not dropped: python decodes with
@@ -1732,13 +1944,14 @@
                 kernel.send('x', {'type': 'y', 'k': 'v'}, secret=['payload.k', 'result'])
                 kernel.send('x', {'type': 'y'})
                 kernel.send('x', {'type': 'y'}, secret=[])
+                kernel.send('x', {'type': 'y', 'a.b': 'v'}, secret=[['payload', 'a.b'], 'result', ['result', 'items', 0]])
                 print('DONE')
 
                 """
             let s = try Spawn.job(argv: [py, "-u", "-c", code], selfId: "runner", env: [:], cwd: ".")
             defer { close(s.ctrlFd) }
             var frames: [JSON] = []
-            for _ in 0..<3 {
+            for _ in 0..<4 {
                 let (kind, rest) = try #require(readGuestFrame(s.ctrlFd), "a frame from the program")
                 #expect(kind == UInt8(ascii: "T"))
                 let m = try JSON.parseStrict(String(decoding: rest, as: UTF8.self))
@@ -1756,6 +1969,10 @@
                     ],
                     ["op": "send", "rid": "2", "target": "x", "payload": ["type": "y"]],
                     ["op": "send", "rid": "3", "target": "x", "payload": ["type": "y"]],
+                    [
+                        "op": "send", "rid": "4", "target": "x", "payload": ["type": "y", "a.b": "v"],
+                        "secret": [["payload", "a.b"], "result", ["result", "items", 0]],
+                    ],
                 ], "\(frames.map { $0.serialize() })")
         }
 
@@ -1800,6 +2017,25 @@
             #expect(
                 bad["data"]["reason"] == "bad_arg" && bad["data"]["arg"] == "secret",
                 "\(bad.serialize())")
+            // an ARRAY mark rides as given: the literal key "a.b" is masked
+            wireWrite(
+                fd,
+                [
+                    "op": "send", "rid": "3", "target": "probe",
+                    "payload": ["type": "status", "a.b": "hush-dotted-0452"],
+                    "secret": [["payload", "a.b"]],
+                ])
+            let arr = try #require(await wireRead(fd), "no reply came back")
+            #expect(
+                arr["rid"] == "3" && arr["data"].asObject?["jobs"] != nil, "\(arr.serialize())")
+            let dotted = kernel.rows.all().filter {
+                $0["kind"]?.asString == "call" && $0["secret"] == [["payload", "a.b"]]
+            }
+            #expect(dotted.count == 1, "\(dotted)")
+            #expect(dotted.first?["payload"]?["a.b"] == .string(Secret.placeholder), "\(dotted)")
+            #expect(
+                !JSON.array(kernel.rows.all().map { JSON.object($0) }).serialize()
+                    .contains("hush-dotted-0452"))
         }
     }
 
@@ -1825,8 +2061,9 @@
         }
     }
 
-    /// Answers where its body sat and what else the payload held, and hands the
-    /// body back as the reply's chunk.
+    /// Python `_echo` (`test_binary_path_steps.py`): answers the payload's keys —
+    /// the body's own key among them — and hands the body at `a.b` back at the
+    /// LITERAL reply key `x.y`, beside a nested `x` → `y`.
     private final class PathEcho: AgentBundle, @unchecked Sendable {
         let name = "path_echo"
         func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? {
@@ -1837,14 +2074,14 @@
         }
         func handleBinary(
             agentId: AgentId, header: JSON, body: Blob?, kernel: Kernel
-        ) async throws -> (JSON?, Data?) {
+        ) async throws -> (JSON?, Blob?) {
             var keys = header.asObject.map { Array($0.keys) } ?? []
             if case .key(let k)? = body?.parts.first, body?.parts.count == 1 { keys.append(k) }
             return (
                 .object([
                     "keys": .array(keys.sorted().map { .string($0) }),
-                    "at": body.map { Codec.binaryPath($0.parts) } ?? .null,
-                ]), body?.bytes
+                    "x.y": .null, "x": ["y": "kept"],
+                ]), Blob("x.y", bodyAt(body, "a.b") ?? Data())
             )
         }
     }
@@ -1911,6 +2148,60 @@
             _ = await s.child.wait()
         }
 
+        /// A kind-B EMIT carries its bytes to the owner's watchers. Python's relay
+        /// emits the DECODED payload (`kernel.emit(owner_id, m.get("payload") or
+        /// {})`), its bytes at their `_binary_path`; a watcher receives the payload
+        /// with `null` in that slot and the body AT its steps — a list slot and a
+        /// literal dotted key alike — not a head with the bytes dropped.
+        @Test func aGuestEmitCarriesItsBytesToAWatcher() async throws {
+            guard let py = py3() else { print("skipping: no python3"); return }
+            let registry = BundleRegistry()
+            registry.register("exec_bridge.tools", ExecBridgeBundle())
+            let kernel = Kernel(storage: .inMemory, bundles: registry)
+            let root = Agent(id: AgentId("kernel_state"), handlerModule: nil, parentId: nil)
+            kernel.register(root)
+            kernel.setRoot(root)
+            let runner = await createPy(kernel, id: "runner")
+            let tap = AgentId("tap")
+            let stream = kernel.ensureInbox(tap)
+            #expect(kernel.watch(src: runner, watcher: tap) == nil)
+            final class Sink: @unchecked Sendable {
+                let lock = NSLock()
+                var items: [InboxItem] = []
+                func add(_ i: InboxItem) { lock.withLock { items.append(i) } }
+                func all() -> [InboxItem] { lock.withLock { items } }
+            }
+            let sink = Sink()
+            let consumer = Task { for await item in stream { sink.add(item) } }
+            defer { consumer.cancel() }
+            _ = await kernel.send([
+                Item(
+                    runner,
+                    pyStart(
+                        py,
+                        "kernel.emit({'type': 'chunks', 'items': [{'n': 0}, {'data': b'hi'}]})\n"
+                            + "kernel.emit({'type': 'blob', 'a.b': b'\\x00raw\\xff', 'a': {'b': 'kept'}})\n",
+                        connector: true))
+            ])[0].result
+            let deadline = Date().addingTimeInterval(20)
+            func emitted() -> [InboxItem] {
+                sink.all().filter { ["chunks", "blob"].contains($0.payload["type"].asString ?? "") }
+            }
+            while emitted().count < 2 && Date() < deadline {
+                try await Task.sleep(nanoseconds: 20_000_000)
+            }
+            let got = emitted()
+            #expect(got.count == 2, "\(got.map { $0.payload.serialize() })")
+            #expect(
+                got.first?.payload == ["type": "chunks", "items": [["n": 0], ["data": .null]]],
+                "\(got.first?.payload.serialize() ?? "nil")")
+            #expect(got.first?.body == Blob(parts: ["items", 1, "data"], Data("hi".utf8)))
+            #expect(
+                got.last?.payload.serialize() == #"{"type":"blob","a.b":null,"a":{"b":"kept"}}"#,
+                "\(got.last?.payload.serialize() ?? "nil")")
+            #expect(got.last?.body == Blob(parts: ["a.b"], RAW))
+        }
+
         /// The whole guest path: program → relay (decode) → a binary handler that
         /// finds its body at the literal key → relay (encode) → program. Python
         /// `test_a_job_round_trips_a_literal_key_through_the_kernel`.
@@ -1942,12 +2233,13 @@
                         py,
                         "r = kernel.send('echo', {'type': 'take', 'a': {'b': 'kept'}, "
                             + "'a.b': b'\\x00raw\\xff'})\n"
-                            + "print('GOT', r['keys'], r['bytes'] == b'\\x00raw\\xff', r['at'])",
+                            + "print('GOT', r['keys'], r['x.y'] == b'\\x00raw\\xff', r['x'])",
                         connector: true))
             ])[0].result
             let events = await drainUntil(stream) { $0["type"].asString == "job_done" }
             let out = events.first { $0["type"].asString == "job_done" }?["stdout"].asString ?? ""
-            #expect(out.contains("GOT ['a', 'a.b', 'type'] True ['a.b']"), "\(out)")
+            // the reply's chunk lands in the program at the LITERAL key `x.y`
+            #expect(out.contains("GOT ['a', 'a.b', 'type'] True {'y': 'kept'}"), "\(out)")
         }
     }
 

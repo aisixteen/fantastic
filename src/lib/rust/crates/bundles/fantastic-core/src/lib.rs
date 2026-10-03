@@ -110,7 +110,8 @@ regexes (reflect it). (3) Re-run the same command to keep it current. A \
 COMPUTE worker is an `exec_bridge.tools` agent + a program file — NOT a new \
 handler_module. Create it as YOUR child; to wire it to a SIBLING (`totals`) \
 grant `can_call:{totals}` AND `update_agent id='totals'` to add it to \
-`totals.callable_by`. Read <type>reflect</type> \
+`totals.callable_by` (needs `{totals:['update_agent']}` + totals accepting \
+you). Read <type>reflect</type> \
 <readme>self-extension</readme> — send it to 'kernel' — for the fd wire.";
 
 /// The one-liner teaching keyed doc fetch — python `reflect_root_extra`'s `docs`.
@@ -146,12 +147,14 @@ EXISTING command runner) that owns a program file — you never author a new \
 handler_module (you cannot add modules to the catalog and do not need to). \
 'A specialist with child workers' = a parent agent whose children are \
 exec_bridge runners, each with its own program file.\nWIRING TO A SIBLING: \
-you cannot raise your OWN authority, but if you hold `update_agent` (e.g. \
-on the root) you may open ANY agent's ingress — including a sibling like \
-`totals`/`readings` that is not your child. To let your worker call \
-`totals`: grant the worker `can_call:{totals}` AND `update_agent \
-id='totals'` to add the worker to `totals.callable_by` (send the WHOLE map \
-— update replaces, not merges).\nA SPAWNED PROGRAM reaches agents over its \
+you cannot raise your OWN authority. The records in your own subtree are \
+yours to edit; a sibling like `totals`/`readings` that is not your child is \
+edited only when your can_call names it with `update_agent` \
+(`{totals: ['update_agent']}` — a wildcard never covers it) and its \
+callable_by accepts you; a grant on the root edits only the root. To let \
+your worker call `totals`: grant the worker `can_call:{totals}` AND \
+`update_agent id='totals'` to add the worker to `totals.callable_by` (send \
+the WHOLE map — update replaces, not merges).\nA SPAWNED PROGRAM reaches agents over its \
 control fd — a TWO-WAY socket (FANTASTIC_CTRL_FD): write {op:'send', rid, \
 target, payload}; the reply comes back on the SAME fd as {op:'reply', rid, \
 data}. It is not inline — read frames until one carries your `rid`, \
@@ -553,8 +556,8 @@ fn children_name(agent: &Arc<Agent>) -> String {
 /// Where records REALLY are for this loader — python `_where`: the live tree
 /// first, then its own persisted records under its root (disk position), read
 /// once and only when a node is not live. That read goes through the clamp, so
-/// a root outside the running dir raises exactly where python's `_disk_parents`
-/// does.
+/// a root outside the running dir — or a children dir or entry that resolves
+/// outside the root — raises exactly where python's `_disk_parents` does.
 struct Places<'a> {
     agent: &'a Arc<Agent>,
     kernel: &'a Arc<Kernel>,
@@ -577,11 +580,10 @@ impl<'a> Places<'a> {
         }
         if self.disk.is_none() {
             let root = clamp(self.kernel, &loader_root(self.agent))?;
-            self.disk = Some(persistence::disk_parents(
-                &root,
-                &children_name(self.agent),
-                &self.agent.id.0,
-            ));
+            self.disk = Some(
+                persistence::disk_parents(&root, &children_name(self.agent), &self.agent.id.0)
+                    .map_err(raise_fs)?,
+            );
         }
         let disk = self.disk.as_ref().expect("filled above");
         Ok(match disk.get(node) {
@@ -728,8 +730,8 @@ impl Bundle for KernelStateBundle {
             "load_tree" => self.load_tree(&agent, kernel).await?,
             "persist_record" => self.persist_record(&agent, payload, kernel).await?,
             "forget_record" => self.forget_record(&agent, payload, kernel).await?,
-            "persist_blob" => persistence::persist_blob(kernel, &agent, payload).await,
-            "load_blob" => persistence::load_blob(kernel, &agent, payload).await,
+            "persist_blob" => persistence::persist_blob(kernel, &agent, payload).await?,
+            "load_blob" => persistence::load_blob(kernel, &agent, payload).await?,
             // CODED. A reason-less error on the ROOT — the most-addressed agent
             // in the kernel — is decorated by `apply_reflect_flags` into
             // something that reads like a healthy reflect (python 2026-09-02).
@@ -759,7 +761,7 @@ impl Bundle for KernelStateBundle {
         agent: &Arc<Agent>,
         full: bool,
         kernel: &Arc<Kernel>,
-    ) -> Option<Map<String, Value>> {
+    ) -> Result<Option<Map<String, Value>>, Value> {
         let mut out = Map::new();
         // `provider` only while writes land; a failing store shows as `error`.
         let persistence = match persistence::persist_error(kernel) {
@@ -778,23 +780,17 @@ impl Bundle for KernelStateBundle {
         );
         if !full {
             out.insert("self_extension".to_string(), json!(SELF_EXTENSION_SHORT));
-            return Some(out);
+            return Ok(Some(out));
         }
-        // A DOC THAT WILL NOT DECODE KILLS THE WHOLE EXTRA, not just `readmes`.
-        // python's `_readme_index` lets the UnicodeDecodeError out of
-        // `reflect_root_extra`, and the substrate's merge site swallows it
-        // (`except Exception: pass`) — so the full root reflect carries no
-        // `persistence`, `guid`, `readmes`, `docs` or `self_extension` at all.
-        // Degrading to an empty index published a frame python does not.
-        let Ok(readmes) =
-            fantastic_kernel::reflect::readme_index(&agent.root_path.join("docs"), "")
-        else {
-            return None;
-        };
+        // A DOC THAT WILL NOT DECODE FAILS THE REFLECT. python's `_readme_index`
+        // lets the UnicodeDecodeError out of `reflect_root_extra`, and the
+        // substrate's merge site no longer swallows it (audit 2026-10-03,
+        // ARCH2-9) — the full root reflect settles `failed` with that raise.
+        let readmes = fantastic_kernel::reflect::readme_index(&agent.root_path.join("docs"), "")?;
         out.insert("readmes".to_string(), Value::Array(readmes));
         out.insert("docs".to_string(), json!(DOCS_LINE));
         out.insert("self_extension".to_string(), json!(SELF_EXTENSION_FULL));
-        Some(out)
+        Ok(Some(out))
     }
 
     /// LAND EVERYTHING while the provider child is still alive. The kernel awaits

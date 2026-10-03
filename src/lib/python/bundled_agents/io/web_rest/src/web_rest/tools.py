@@ -12,7 +12,8 @@ Routes mounted on the parent web's FastAPI app:
                                       headers: X-Fantastic-Auth (credential),
                                       X-Fantastic-Execution-Id (the item `id`),
                                       X-Fantastic-Secret (the item `secret`, a
-                                      JSON array of paths)
+                                      JSON array of marks — dotted strings
+                                      and/or arrays of steps)
     GET  /<self_id>/_reflect          → kernel.reflect (substrate primer)
     GET  /<self_id>/_reflect/<target> → reflect on a specific agent
 
@@ -23,6 +24,15 @@ only path for arbitrary verbs.
 
 The `self_id` is baked into the path literal so several `web_rest`
 agents under the same `web` parent don't collide.
+
+GATE FIRST, THEN THE BODY (audit IO-4, 2026-10-03). A POST is judged by the leg's
+ingress rule on what the request says up front — its target and its
+`X-Fantastic-Auth` credential — and only an admitted request's body is read, at
+most `MAX_BODY` bytes (16 MiB: io_bridge's `MAX_FRAME`, the one frame cap every
+wire leg holds); a larger body is refused 413, loud, with nothing past the bound
+read (a declared `Content-Length` over it is refused unread). Reading and parsing
+the whole body before the gate let a client the leg was about to refuse make the
+kernel buffer any amount of data.
 
 Verbs:
   reflect       -> identity + URL patterns
@@ -44,8 +54,9 @@ from fastapi.responses import JSONResponse, Response
 
 from kernel import sender_context
 
+from io_bridge import MAX_FRAME
 from io_bridge import describe as _describe
-from io_bridge import gate_inbound, resolve_ingress
+from io_bridge import gate_inbound, resolve_ingress, unknown_ingress_refusal
 from io_bridge import loads as strict_loads
 from kernel._refusal import TRANSPORT_ERROR, UNHANDLED, refusal
 
@@ -69,6 +80,38 @@ def _gate(self_id: str, kernel, target_id: str, payload: dict, request: Request)
     return gate_inbound(resolve_ingress(rec), "call", frame)
 
 
+#: The most body bytes this leg reads from one request: io_bridge's one frame cap.
+MAX_BODY = MAX_FRAME
+
+
+async def _read_body(request: Request) -> bytes | None:
+    """The request body — at most `MAX_BODY` bytes, read chunk by chunk; None when
+    it is larger, with nothing past the bound read (a declared `Content-Length`
+    over it is refused before one byte)."""
+    declared = request.headers.get("content-length")
+    if declared is not None and declared.isdigit() and int(declared) > MAX_BODY:
+        return None
+    buf = bytearray()
+    async for chunk in request.stream():
+        buf += chunk
+        if len(buf) > MAX_BODY:
+            return None
+    return bytes(buf)
+
+
+def _too_large() -> JSONResponse:
+    return JSONResponse(
+        refusal(
+            TRANSPORT_ERROR,
+            f"web_rest: the request body exceeds {MAX_BODY} bytes — the one frame "
+            "cap every wire leg holds (io_bridge MAX_FRAME); send larger data in "
+            "chunks (write_stream)",
+            limit=MAX_BODY,
+        ),
+        status_code=413,
+    )
+
+
 def _deny(decision) -> JSONResponse:
     data = {"error": decision.reason, "reason": "unauthorized"}
     if decision.hint:
@@ -90,14 +133,16 @@ _PAYLOAD_HEADER = "x-fantastic-payload"
 _BYTES_FIELD_HEADER = "x-fantastic-bytes-field"
 
 # ─── secret marks ───────────────────────────────────────────────
-# The item's `secret` paths (`kernel/_secret`) ride `X-Fantastic-Secret` — dispatch
+# The item's `secret` marks (`kernel/_secret`) ride `X-Fantastic-Secret` — dispatch
 # metadata about the call, like the execution id, never part of the payload. The
-# value is a JSON ARRAY of paths, the SAME value a ws/bridge `call` frame carries
-# in its `secret` field: one parser (the strict wire `loads`), and the kernel's own
-# check judges it. Not comma-separated — a path step is a payload key, and a key
-# may hold a comma; a JSON string escapes any character into the ASCII a header
-# value is safe in; and a wrong shape (a bare string, `[]`, a number) reaches the
-# kernel's refusal verbatim instead of being re-invented by a splitter.
+# value is a JSON ARRAY of marks, each a dotted string (`"payload.key"`) or an
+# array of steps (`["payload", "a.b"]` — a key holding a dot), the SAME value a
+# ws/bridge `call` frame carries in its `secret` field: one parser (the strict wire
+# `loads`), and the kernel's own check judges it. Not comma-separated — a path
+# step is a payload key, and a key may hold a comma; a JSON string escapes any
+# character into the ASCII a header value is safe in; and a wrong shape (a bare
+# string, `[]`, a number) reaches the kernel's refusal verbatim instead of being
+# re-invented by a splitter.
 _SECRET_HEADER = "x-fantastic-secret"
 
 
@@ -143,7 +188,14 @@ def _first_bytes_field(d: dict) -> tuple[str | None, bytes | None]:
 
 def _make_post_endpoint(self_id: str, kernel):
     async def _rest_call(request: Request, target_id: str):
-        body = await request.body()
+        # THE GATE FIRST, on what the request says before its body: the target and
+        # the `X-Fantastic-Auth` credential. A refused client's body is never read.
+        decision = _gate(self_id, kernel, target_id, {}, request)
+        if not decision.allowed:
+            return _deny(decision)
+        body = await _read_body(request)
+        if body is None:
+            return _too_large()
         if request.headers.get("content-type", "").startswith(_OCTET):
             # Binary leg: the raw body IS one field's bytes; the rest of the
             # envelope rides `X-Fantastic-Payload`, the field named by
@@ -182,9 +234,6 @@ def _make_post_endpoint(self_id: str, kernel):
                 return JSONResponse(
                     {"error": "web_rest: body must be a JSON object"}, status_code=400
                 )
-        decision = _gate(self_id, kernel, target_id, payload, request)
-        if not decision.allowed:
-            return _deny(decision)
         # Tag the dispatch with this surface's id so telemetry rays
         # originate visually from this sprite. Without this an external
         # HTTP caller has no agent context and rays drop.
@@ -365,6 +414,12 @@ VERBS = {
     "boot": _boot,
     "get_routes": _get_routes,
 }
+
+
+def validate_meta(meta: dict, record: dict) -> str | None:
+    """The leg's `ingress_rule`, refused at the WRITE when no rule implements it
+    — the one check every leg makes (`io_bridge.unknown_ingress_refusal`)."""
+    return unknown_ingress_refusal(meta)
 
 
 async def handler(id: str, payload: dict, kernel) -> dict | None:

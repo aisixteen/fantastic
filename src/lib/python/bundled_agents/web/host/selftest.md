@@ -181,14 +181,14 @@ d = json.load(open('.fantastic/lock.yaml'))
 def alive(p):
     try: os.kill(p,0); return True
     except: return False
-# Lock is PID-only; the new serve owns it iff pid is alive and != $KPID.
+# The dead holder's flock went with it; the new serve owns the lock iff its pid is alive and != $KPID.
 print('PASS' if alive(d['pid']) and d['pid'] != $KPID else f'FAIL d={d}')
 "
 pkill -9 -f "fantastic" 2>/dev/null
 rm -f /tmp/serve2.log
 ```
 Expected: `PASS` (new serve replaced the stale lock). Regression
-signal: stale lock blocked the relaunch → `_pid_alive` check broken.
+signal: stale lock blocked the relaunch → the flock takeover is broken.
 
 ### Test 10: there is NO server-side render route (`/<id>/` is not served)
 

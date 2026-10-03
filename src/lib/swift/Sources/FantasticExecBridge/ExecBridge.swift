@@ -214,10 +214,10 @@
             "start": .string("args: command:str (req — on a PTY start, absent = the child's $SHELL), args:list[str]? (argv, default []), pty:{cols,rows}? (run on a terminal). The FULL line (command + args) must fullmatch one of the `allowed` regexes, or be the shell line the record's `shell` permits."),
             "status": .string("args: job_id:int? — one job (with full stdout/stderr), or all of this agent's jobs (summary). A job's id is its kernel task id: `ps` lists it, `cancel task_id=` kills it. Returns {jobs:[…]}."),
             "stop": .string(
-                "args: job_id:int? — SIGKILL one job (its whole session: the command and everything it launched) or ALL of this agent's running jobs."
+                "args: job_id:int? — SIGKILL one of YOUR jobs (its whole session: the command and everything it launched) or ALL your running jobs on this agent (the operator: all)."
             ),
-            "interrupt": .string("args: job_id:int? — SIGINT one job or ALL of this agent's running jobs."),
-            "clear": .string("args: job_id:int? — drop finished jobs (one, or all non-running) from the RAM"),
+            "interrupt": .string("args: job_id:int? — SIGINT one of YOUR jobs or ALL your running jobs on this agent (the operator: all)."),
+            "clear": .string("args: job_id:int? — drop YOUR finished jobs (one, or all non-running; the operator: all) from the RAM"),
             "write": .string("args: job_id:int (req), data:str (req). Keystrokes/paste into a PTY job, written IN FULL and serialized per job (a bracketed paste is never truncated or interleaved). Returns {written:int}."),
             "resize": .string("args: job_id:int (req), cols:int (req), rows:int (req). Sets a PTY job's window size (the tty sends SIGWINCH, so a TUI redraws). Returns {resized:true, cols, rows}."),
             "ack": .string("args: job_id:int (req), chars:int (req). Flow control from a streaming consumer (an xterm acks each `output` chunk after parsing it): the reader pauses past 100K unacked chars and resumes under 5K. Returns {unacked:int, paused:bool}."),
@@ -240,6 +240,12 @@
         /// (`command`/`args`/`cwd`) is recorded so `status` can report WHAT ran.
         private struct Job {
             let agent: AgentId
+            /// WHO started it — the calling agent, a foreign caller's
+            /// `<guid>|<agent>`, or nil for the operator. The verbs that DRIVE a
+            /// job (write, resize, paste_image, stop, interrupt, clear) answer this
+            /// caller and the operator only; the READ verbs (status, output, ack)
+            /// stay gated by grants alone (audit AV-8, 2026-10-03).
+            let starter: String?
             let child: Child
             var relay: Relay?
             let command: String
@@ -247,8 +253,7 @@
             let cwd: JSON
             let startedAt: Double
             /// The PUMP holds this, not the table: python's `_read_stream` closes over
-            /// the job dict, so `clear` dropping the row does not stop the count and
-            /// `progress.n` keeps rising for a job nobody lists any more.
+            /// the job dict.
             let counter: LineCounter
             var status: String = "running"
             var exitCode: Int32? = nil
@@ -295,30 +300,16 @@
             let verb = payload["type"].asString ?? ""
             // AUTH GATE — the process edge is an io_bridge leg: SEALED by default,
             // kind "spawn". `reflect` and `connector` are UNGATED (discovery works
-            // sealed); mail is ungated too (py parity — the fanout already delivered).
+            // sealed); every other type is gated, MAIL INCLUDED (python `handler`,
+            // audit BV-8): a sealed leg delivers nothing to its program — the
+            // relay's inbox drain refuses the same payloads, since the fanout
+            // reaches it before this handler runs.
             // `shutdown` is NOT a verb here: python's VERBS table has no such key, so
             // it is mail like any other unowned type.
-            let owned = [
-                "start", "boot", "status", "clear", "interrupt", "stop", "write", "resize", "ack",
-                "output", "paste_image",
-            ]
-            if owned.contains(verb), let agent = kernel.agent(agentId) {
-                let rule = try resolveIngress(
-                    ingressRule: agent.metaValue(forKey: "ingress_rule"),
-                    auth: agent.metaValue(forKey: "auth"))
-                // NO CREDENTIAL FROM THE RECORD. Python builds the action from the
-                // target and the payload alone (`gate_inbound(rule, "spawn",
-                // {"target", "payload"})`) — a leg that stored `auth_token` on its own
-                // record used to satisfy `password_ingress` with its own secret, which
-                // is the leg letting itself in.
-                let action = AuthAction(
-                    kind: "spawn", target: agentId.value, verb: verb, token: nil)
-                // FORWARDED, not re-worded — the rule states the reason and the
-                // repair; this hint was a second, shorter wording of the same
-                // thing, so the same seal read differently per edge.
-                if case .deny(let d) = rule.authorize(action) {
-                    return d.asRefusal
-                }
+            if verb != "reflect", verb != "connector",
+                let denied = Self.gate(agentId, verb: verb, kernel: kernel)
+            {
+                return denied
             }
             switch verb {
             case "reflect":
@@ -346,7 +337,8 @@
                             + "and gets its chunk back raw in the reply's `bytes`) and "
                             + "exposes `kernel.send(target, payload, secret=None) -> reply` (raises if "
                             + "the relay could not deliver; `secret` marks values the kernel must not "
-                            + "record — `['payload.<field>']`, `['result']` — and the reply still "
+                            + "record — `['payload.<field>']`, `['result']`, `[['payload', 'a.b']]` "
+                            + "for a key holding a dot — and the reply still "
                             + "carries them to you, so never print one: that is the job output), "
                             + "`kernel.emit(payload)`, `kernel.watch(src, cb)`, `kernel.on_message(cb)`, "
                             + "`kernel.self_id`. Arguments arrive as ARGV, like any command — there is "
@@ -371,7 +363,7 @@
                 case .failure(let r): return r.json
                 case .success(let j): want = j
                 }
-                if let gone = noSuchJob(agentId, want) { return gone }
+                if let gone = noSuchJob(verb, agentId, want) { return gone }
                 let sig = verb == "stop" ? SIGKILL : SIGINT
                 let key = verb == "stop" ? "killed" : "interrupted"
                 return .object([key: .integer(Int64(signalJobs(agentId, want, sig)))])
@@ -388,6 +380,29 @@
                             + "(no running job to receive it)")
                 ])
             }
+        }
+
+        /// THE LEG'S GATE on one payload, off the LIVE record — python `_gate`:
+        /// nil when its `ingress_rule` admits it, else the rule's refusal. The
+        /// handler asks it for every verb but `reflect`/`connector`, mail included;
+        /// the relay's inbox drain asks it for every payload.
+        static func gate(_ agentId: AgentId, verb: String, kernel: Kernel) -> JSON? {
+            // No record is python's `kernel.get(id) or {}`: no rule, so sealed.
+            let agent = kernel.agent(agentId)
+            let rule = resolveIngress(
+                ingressRule: agent?.metaValue(forKey: "ingress_rule"),
+                auth: agent?.metaValue(forKey: "auth"))
+            // NO CREDENTIAL FROM THE RECORD. Python builds the action from the
+            // target and the payload alone (`gate_inbound(rule, "spawn",
+            // {"target", "payload"})`) — a leg that stored `auth_token` on its own
+            // record used to satisfy `password_ingress` with its own secret, which
+            // is the leg letting itself in.
+            let action = AuthAction(kind: "spawn", target: agentId.value, verb: verb, token: nil)
+            // FORWARDED, not re-worded — the rule states the reason and the
+            // repair; this hint was a second, shorter wording of the same
+            // thing, so the same seal read differently per edge.
+            if case .deny(let d) = rule.authorize(action) { return d.asRefusal }
+            return nil
         }
 
         /// Any live process of this owner.
@@ -573,9 +588,11 @@
             }
             let relay = Relay(
                 fd: ctrlFd, owner: agentId, jobId: jobId, kernel: kernel)
+            // WHO started it — its job verbs answer this caller (and the operator).
+            let starter = Self.caller()
             lock.withLock {
                 jobs[jobId] = Job(
-                    agent: agentId, child: child,
+                    agent: agentId, starter: starter, child: child,
                     relay: relay, command: command, args: args, cwd: cwd,
                     startedAt: Date().timeIntervalSince1970, counter: counter, pty: pty)
             }
@@ -705,7 +722,7 @@
 
         /// Emit one `progress` per output line. The counter is SHARED across stdout
         /// and stderr and lives on the PUMP, not the table — python's `_read_stream`
-        /// closes over the job dict, so `clear` dropping the row leaves `n` counting.
+        /// closes over the job dict.
         private func emitLine(
             _ line: String, stream: String, agentId: AgentId, jobId: TaskId,
             counter: LineCounter, kernel: Kernel
@@ -725,8 +742,35 @@
         /// A refusal carried through a `Result`.
         struct RefusalJSON: Error { let json: JSON }
 
-        /// A live PTY job this agent owns, or the refusal (python `_pty_job`).
-        private func ptyJob(_ verb: String, _ agentId: AgentId, _ payload: JSON) -> Result<PtyJob, RefusalJSON> {
+        /// THIS dispatch's caller: the calling agent's id, a foreign caller's
+        /// `<guid>|<agent>` (relayed by a bridge leg), or nil for the operator.
+        /// Python `_caller`.
+        static func caller() -> String? {
+            KernelTaskLocals.currentRemote ?? KernelTaskLocals.currentOrigin?.value
+        }
+
+        /// Whether THIS dispatch's caller drives `job`: its starter, or the
+        /// operator. Python `_yours`.
+        private func yours(_ job: Job) -> Bool {
+            guard let caller = Self.caller() else { return true }
+            return job.starter == caller
+        }
+
+        /// Python `_not_yours`.
+        private func notYours(_ verb: String, _ jid: TaskId) -> JSON {
+            Refusal.make(
+                Refusal.unauthorized,
+                "exec_bridge: job \(jid.value) is not yours — only the caller that started it "
+                    + "(or the operator) may \(verb) it",
+                extra: [("job_id", .integer(jid.value))])
+        }
+
+        /// A live PTY job this agent owns — and, for a verb that DRIVES it, one
+        /// this caller started (or the operator) — or the refusal (python
+        /// `_pty_job`).
+        private func ptyJob(_ verb: String, _ agentId: AgentId, _ payload: JSON, drive: Bool)
+            -> Result<PtyJob, RefusalJSON>
+        {
             let jid: TaskId
             switch jobArg(verb, payload, required: true) {
             case .failure(let r): return .failure(r)
@@ -734,6 +778,7 @@
             }
             let found = lock.withLock { jobs[jid].flatMap { $0.agent == agentId ? $0 : nil } }
             guard let job = found else { return .failure(RefusalJSON(json: noJob(jid))) }
+            if drive && !yours(job) { return .failure(RefusalJSON(json: notYours(verb, jid))) }
             guard let pty = job.pty else {
                 return .failure(
                     RefusalJSON(json: Refusal.bad(verb, "job_id", "a PTY job (started with `pty`)")))
@@ -772,7 +817,7 @@
 
         private func writeReply(_ agentId: AgentId, _ payload: JSON) async -> JSON {
             let pty: PtyJob
-            switch ptyJob("write", agentId, payload) {
+            switch ptyJob("write", agentId, payload, drive: true) {
             case .failure(let r): return r.json
             case .success(let p): pty = p
             }
@@ -790,7 +835,7 @@
 
         private func resizeReply(_ agentId: AgentId, _ payload: JSON) -> JSON {
             let pty: PtyJob
-            switch ptyJob("resize", agentId, payload) {
+            switch ptyJob("resize", agentId, payload, drive: true) {
             case .failure(let r): return r.json
             case .success(let p): pty = p
             }
@@ -813,7 +858,7 @@
 
         private func ackReply(_ agentId: AgentId, _ payload: JSON) -> JSON {
             let pty: PtyJob
-            switch ptyJob("ack", agentId, payload) {
+            switch ptyJob("ack", agentId, payload, drive: false) {
             case .failure(let r): return r.json
             case .success(let p): pty = p
             }
@@ -862,7 +907,7 @@
         /// channel (or with a body under another key) there is none to paste. The
         /// job is checked first, as python's handler does.
         private func pasteImageText(_ agentId: AgentId, _ payload: JSON) -> JSON {
-            switch ptyJob("paste_image", agentId, payload) {
+            switch ptyJob("paste_image", agentId, payload, drive: true) {
             case .failure(let r): return r.json
             case .success: return Refusal.bad("paste_image", "data", "raw bytes")
             }
@@ -871,7 +916,7 @@
         /// `paste_image` — the BINARY channel: the body at `data` IS the image.
         private func pasteImageReply(_ agentId: AgentId, _ header: JSON, _ data: Data) async -> JSON {
             let pty: PtyJob
-            switch ptyJob("paste_image", agentId, header) {
+            switch ptyJob("paste_image", agentId, header, drive: true) {
             case .failure(let r): return r.json
             case .success(let p): pty = p
             }
@@ -917,12 +962,12 @@
         /// Every other verb takes the text path.
         public func handleBinary(
             agentId: AgentId, header: JSON, body: Blob?, kernel: Kernel
-        ) async throws -> (JSON?, Data?) {
+        ) async throws -> (JSON?, Blob?) {
             guard header["type"].asString == "paste_image" else {
                 return (try await handle(agentId: agentId, payload: header, kernel: kernel), nil)
             }
             if let agent = kernel.agent(agentId) {
-                let rule = try resolveIngress(
+                let rule = resolveIngress(
                     ingressRule: agent.metaValue(forKey: "ingress_rule"),
                     auth: agent.metaValue(forKey: "auth"))
                 if case .deny(let d) = rule.authorize(
@@ -1037,20 +1082,34 @@
             }
         }
 
-        /// `clear` — drop finished rows of this agent (one, or all non-running). The
-        /// ONE caller that wants the status LABEL rather than process liveness: it is
-        /// deciding what is finished enough to forget. No `not_found` guard (python
-        /// has none): an unknown id simply clears nothing.
+        /// `clear` — drop finished rows of this agent (one, or all non-running) that
+        /// THIS caller started (the operator: all). The ONE caller that wants the
+        /// status LABEL rather than process liveness: it is deciding what is
+        /// finished enough to forget. No `not_found` guard (python has none): an
+        /// unknown id simply clears nothing; another caller's job is refused.
+        ///
+        /// A NAMED job follows the bulk form's rule (python `_clear`, audit BV-5):
+        /// a row still `running` or `stopping` is refused. That row is the only
+        /// handle `stop`, `cancel`, delete and shutdown kill its process through —
+        /// dropped, the process outlived all four.
         private func clearReply(_ agentId: AgentId, payload: JSON) -> JSON {
             let want: TaskId?
             switch jobArg("clear", payload, required: false) {
             case .failure(let r): return r.json
             case .success(let j): want = j
             }
+            if let jid = want, let job = lock.withLock({ jobs[jid] }), job.agent == agentId {
+                if !yours(job) { return notYours("clear", jid) }
+                if job.status == "running" || job.status == "stopping" {
+                    return Refusal.bad(
+                        "clear", "job_id",
+                        "a finished job (job \(jid) is \(job.status) — `stop` it, then clear)")
+                }
+            }
             let doomed: [TaskId] = lock.withLock {
                 jobs.filter { (id, j) in
-                    j.agent == agentId
-                        && (want.map { $0 == id } ?? (j.status != "running" && j.status != "stopping"))
+                    j.agent == agentId && yours(j) && (want.map { $0 == id } ?? true)
+                        && j.status != "running" && j.status != "stopping"
                 }.map { $0.key }
             }
             lock.withLock { for id in doomed { jobs.removeValue(forKey: id) } }
@@ -1069,9 +1128,14 @@
         /// …and the guard that decides. A `job_id` naming nothing used to answer
         /// `{killed:0}` / `{interrupted:0}` — the same reply as "it had already
         /// exited", so a typo read as success. `nil` = no job named ("every job").
-        private func noSuchJob(_ agentId: AgentId, _ want: TaskId?) -> JSON? {
+        ///
+        /// A job another caller started is the `unauthorized` refusal instead
+        /// (python `_no_job`, audit AV-8).
+        private func noSuchJob(_ verb: String, _ agentId: AgentId, _ want: TaskId?) -> JSON? {
             guard let want else { return nil }
-            let known = lock.withLock { jobs[want]?.agent == agentId }
+            let job = lock.withLock { jobs[want].flatMap { $0.agent == agentId ? $0 : nil } }
+            if let job, !yours(job) { return notYours(verb, want) }
+            let known = job != nil
             // NOT a ternary: `JSON` is `ExpressibleByNilLiteral`, so
             // `known ? nil : noJob(want)` unifies BOTH branches at `JSON` and the
             // "known" branch hands back `.some(.null)` — the caller's
@@ -1087,7 +1151,9 @@
             return lock.withLock {
                 var n = 0
                 for (id, var j) in jobs {
-                    if j.agent != agentId || (want.map { $0 != id } ?? false) { continue }
+                    if j.agent != agentId || !yours(j) || (want.map { $0 != id } ?? false) {
+                        continue
+                    }
                     if !j.child.isAlive { continue }  // already gone — never pretend
                     if sig == SIGKILL {
                         j.status = "stopping"
@@ -1235,14 +1301,12 @@
         public func validateMeta(
             _ meta: OrderedDictionary<String, JSON>, record: OrderedDictionary<String, JSON>
         ) -> String? {
-            if let spec = meta["ingress_rule"],
-                let rule = try? IngressRules.resolve(spec),
-                let deny = rule as? IngressRules.DenyInbound, deny.unknown != nil
+            // python names the SPEC AS WRITTEN (`{spec!r}`), not the stem it
+            // resolved to — the operator has to see what they typed.
+            if let bad = IngressRules.unknownRefusal(
+                meta, legal: ["allow_all_ingress", "deny_ingress"])
             {
-                // python names the SPEC AS WRITTEN (`{spec!r}`), not the stem it
-                // resolved to — the operator has to see what they typed.
-                return "ingress_rule=\(pyRepr(spec)) is not a rule this bundle implements — "
-                    + "legal values: allow_all_ingress, deny_ingress"
+                return bad
             }
             // `password_ingress` is meaningless on an in-process leg: the token is
             // read off a WIRE ENVELOPE and the process edge has none — no frame ever
@@ -1355,6 +1419,15 @@
               resumes under 5K), `output(job_id, max_bytes?)` (the 256 KiB ring — replay it when you
               re-attach) and `paste_image(job_id, data, mime)` (saves the image, types its path).
               Each is a gated verb: a viewer granted only `status`/`output`/`ack` cannot type.
+              **A job is DRIVEN only by the caller that started it** (its `starter`; the operator
+              drives every job): `write`/`resize`/`paste_image`/`stop`/`interrupt`/`clear` naming a
+              job another caller started are refused — `{reason:"unauthorized", job_id}`,
+              "exec_bridge: job <id> is not yours — only the caller that started it (or the
+              operator) may <verb> it". The reads — `status`, `output`, `ack` — stay gated by grants
+              alone, so a read-only viewer re-attaches to a job someone else started. A running
+              program's `on_message` never gets a drive verb whose `job_id` names another job —
+              another job's keystrokes, pastes and drive calls never reach it; a bulk call (no
+              `job_id`) does.
               Nothing respawns a terminal — `boot` starts nothing; a client that attaches and finds no
               live PTY job `start`s one.
             - `status(job_id?)` → `{jobs:[…]}` — one job with its full stdout/stderr (a PTY job: its
@@ -1364,7 +1437,7 @@
               stopping the kernel does the same. A process that leaves the session on purpose
               (`setsid`) escapes — containment beyond that is the OS's ·
               `interrupt(job_id?)` SIGINT · `clear(job_id?)` forget finished rows. Omit `job_id` and
-              it applies to all of this agent's jobs.
+              it applies to all YOUR jobs on this agent (the operator: all of them).
             - `boot` — no-op. Nothing auto-restarts: a command is started by a caller, not by the record.
 
             Every running job IS a row in the kernel TASK TABLE: its `job_id` is that row's id (an int
@@ -1466,7 +1539,8 @@
             Parent → child: `{op:"reply", rid, data}` · `{op:"event", src, payload}` ·
             `{op:"inbox", payload}`. `rid` correlates a `send` with its `reply`; the parent echoes it
             back untouched. `secret` is the call's marks — `["payload.<field>", …]`, `["result"]`,
-            `["result.<field>"]` — put on the dispatched call as sent (absent when the program marks
+            `["result.<field>"]`, or an array of steps `[["payload", "a.b"]]` (a key holding a
+            dot) — put on the dispatched call as sent (absent when the program marks
             nothing): every record of the call shows `<secret>`, and a bad mark comes back as the
             kernel's refusal in `data`. ONE FRAME CAPS AT 16 MiB in every runtime — over it the length prefix is a
             wire violation and the relay closes the socket, so move bulk with `write_stream` chunks
@@ -1553,7 +1627,7 @@
                         "{type:'output', job_id, data} — a PTY job's output chunk (UTF-8)"),
                 ]),
                 "wire": .string(
-                    "A program speaks the kernel over the inherited fd FANTASTIC_CTRL_FD, a BIDIRECTIONAL socket (one end of a socketpair): frame is [4-byte BE length | kind | rest], both directions — kind T: a JSON envelope; kind B: [4-byte BE H | H-byte JSON header | raw body], the header's `_binary_path` naming where the body belongs as a list of steps from the frame root — a key as a string (taken literally: ['payload', 'a.b'] is the key 'a.b'), a list index as an int (a stream chunk rides raw, never base64). To CALL another agent: write {op:'send', rid:<your id>, target, payload, secret?} and the reply COMES BACK on the SAME fd as {op:'reply', rid:<same id>, data} — the fd is not one-way. It is not inline, though: read frames in a loop and skip any whose rid isn't yours (event/inbox frames can arrive first) until you see your reply. `secret` is the call's marks ['payload.<field>' | 'result' | 'result.<field>']: every record of the call shows <secret>, the reply carries the real values to you — print one and it is in the job output. ops: send/emit/reflect/watch/on_message. A command that never reads the fd runs exactly like any OS process."
+                    "A program speaks the kernel over the inherited fd FANTASTIC_CTRL_FD, a BIDIRECTIONAL socket (one end of a socketpair): frame is [4-byte BE length | kind | rest], both directions — kind T: a JSON envelope; kind B: [4-byte BE H | H-byte JSON header | raw body], the header's `_binary_path` naming where the body belongs as a list of steps from the frame root — a key as a string (taken literally: ['payload', 'a.b'] is the key 'a.b'), a list index as an int (a stream chunk rides raw, never base64). To CALL another agent: write {op:'send', rid:<your id>, target, payload, secret?} and the reply COMES BACK on the SAME fd as {op:'reply', rid:<same id>, data} — the fd is not one-way. It is not inline, though: read frames in a loop and skip any whose rid isn't yours (event/inbox frames can arrive first) until you see your reply. `secret` is the call's marks ['payload.<field>' | 'result' | 'result.<field>' | ['payload', <key>, …] — an array of steps, a key taken literally]: every record of the call shows <secret>, the reply carries the real values to you — print one and it is in the job output. ops: send/emit/reflect/watch/on_message. A command that never reads the fd runs exactly like any OS process."
                 ),
                 "inbox": .string(
                     "Any verb NOT listed in `verbs` is MAIL for the running program, delivered to its on_message and ACKed {queued:true}. With no live job it is an error — a script that only defines something exits before its first message arrives."
@@ -1585,10 +1659,8 @@
 
     /// The job's output-line counter, held by the PUMP rather than by the job row.
     ///
-    /// python's `_read_stream` closes over the job DICT, so `clear {job_id}` dropping
-    /// the row from the table does not reset or stop the count — `progress.n` keeps
-    /// rising for a job nothing lists any more. A counter on the row could not do
-    /// that. Shared across stdout and stderr, so `n` is one monotonic sequence.
+    /// python's `_read_stream` closes over the job DICT (A4.15). Shared across
+    /// stdout and stderr, so `n` is one monotonic sequence.
     final class LineCounter: @unchecked Sendable {
         private let lock = NSLock()
         private var count = 0

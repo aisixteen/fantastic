@@ -36,7 +36,7 @@ public final class OllamaBackendBundle: AgentBundle, @unchecked Sendable {
                 // The SAMPLING KNOBS, in python's order — `model` and `endpoint`
                 // are base fields now. `temperature` falls back to the provider's
                 // 0.3; the rest are null unless the record sets them.
-                reflectExtra: { agent in
+                reflectExtra: { agent, _ in
                     [
                         "temperature": .double(Self.temperature(agent: agent)),
                         "num_ctx": Self.numCtx(agent: agent).map(JSON.integer) ?? .null,
@@ -159,6 +159,11 @@ public final class OllamaBackendBundle: AgentBundle, @unchecked Sendable {
     /// own). There is no `interrupt` verb any more: cancellation is the kernel's.
     public func onCancel(agentId: AgentId, taskId: TaskId, kernel: Kernel) async throws {
         await core.onCancel(agentId: agentId, taskId: taskId, kernel: kernel)
+    }
+
+    /// The shared delete hook: the deleted id's AI-core rows go with it.
+    public func onDelete(agentId: AgentId, kernel: Kernel) async throws {
+        await core.onDelete(agentId: agentId, kernel: kernel)
     }
 
     // MARK: - meta helpers

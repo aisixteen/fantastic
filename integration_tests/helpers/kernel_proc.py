@@ -123,7 +123,8 @@ class KernelProc:
         `verb` is the dispatched verb name; `args` are the verb's
         payload kwargs. Note the helper uses `agent_id=` not
         `target=` so callers can pass `target=...` as a verb arg
-        (e.g. `bridge.forward(target=..., payload=...)`)."""
+        (e.g. `bridge.forward(target=..., payload=...)`). `secret=[...]` is
+        not a verb arg: it is the call's secret marks (see `ws_call`)."""
         return await ws_call(self.port, agent_id, verb, **args)
 
     def terminate(self) -> None:

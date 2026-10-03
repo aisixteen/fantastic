@@ -52,12 +52,19 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import posixpath
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 
 from file_bridge import fs
 from io_bridge import describe as _describe
-from io_bridge import gate_inbound, resolve_ingress
+from io_bridge import gate_inbound, resolve_ingress, unknown_ingress_refusal
 from io_bridge._base import parse_spec
+from kernel import (
+    current_origin,
+    current_remote_caller,
+    operator_context,
+    remote_caller_context,
+    sender_context,
+)
 from kernel._refusal import (
     NOT_FOUND,
     TRANSPORT_ERROR,
@@ -483,6 +490,35 @@ async def _write_stream(id, payload, kernel):
     return {"path": path, "written": len(data), "offset": off, "size": size}
 
 
+def _one_file(a, b) -> bool:
+    """Do two pump paths name ONE file — equal once normalised (`./x` is `x`)? Only
+    a root-relative path to something inside the root is judged; anything else
+    (absent, not a string, absolute, climbing out, the root itself) is its end's
+    to refuse."""
+    if not (isinstance(a, str) and isinstance(b, str)):
+        return False
+    n = _norm(a)
+    return n not in (None, ".") and n == _norm(b)
+
+
+@contextmanager
+def _as_caller():
+    """Run the enclosed sends AS THIS DISPATCH'S CALLER: the operator stays the
+    operator; a local agent is itself; a foreign `<guid>|<agent>` is the same pair
+    its bridge leg relayed (the leg as sender, the foreign id judged by the
+    target's `callable_by`)."""
+    origin, remote = current_origin(), current_remote_caller()
+    if origin is None:
+        with operator_context():
+            yield
+    elif remote is not None:
+        with sender_context(origin), remote_caller_context(origin, remote):
+            yield
+    else:
+        with sender_context(origin):
+            yield
+
+
 async def _pump(id, payload, kernel):
     """The PUMP — a server-side stream copy SOURCE→SINK, chunk by chunk, in ONE call.
     (vs a consumer driving each read/write over the wire). Storage-agnostic:
@@ -491,53 +527,67 @@ async def _pump(id, payload, kernel):
 
     args: source:str? (provider id, default self) + source_path:str (req) + sink:str?
     (provider id, default self) + sink_path:str? (default = source_path) +
-    chunk:int=65536. Each end SELF-gates + SELF-clamps (the pump only coordinates —
-    it never reads/writes bytes itself, so a sealed end refuses it). Returns
-    {source, sink, bytes, chunks}."""
+    chunk:int=65536. BOTH ENDS RUN AS YOU: `read_stream` on the source and
+    `write_stream` on the sink go out under the caller's identity, so you need your
+    own grants on both (this bridge is no deputy). Each end SELF-gates + SELF-clamps
+    (the pump only coordinates — it never reads/writes bytes itself, so a sealed end
+    refuses it). A pump ONTO ITS OWN SOURCE (the sink is the source and sink_path
+    names the same file) is refused. Returns {source, sink, bytes, chunks}."""
     src = payload.get("source") or id
     sink = payload.get("sink") or id
-    spath = payload.get("source_path") or payload.get("path") or ""
+    spath = payload.get("source_path") or ""
     dpath = payload.get("sink_path") or spath
     length, err = _int_arg("pump", payload, "chunk", 65536, 1)
     if err:
         return err
+    if src == sink and _one_file(spath, dpath):
+        # The first write's `truncate` empties the file the next read comes from:
+        # everything past the first chunk was lost under a success reply — the
+        # bare `{source_path}` form did it, sink and sink_path defaulted (audit
+        # BV-7).
+        return bad(
+            "pump",
+            "sink_path",
+            "another file than source_path when the sink is the source — a pump "
+            "onto its own source truncates it after the first chunk",
+        )
     offset, first, chunks = 0, True, 0
+
+    async def as_caller(item: dict):
+        # AS THE CALLER (audit AV-7, 2026-10-03): sent from this dispatch, both
+        # ends judged THIS BRIDGE — a client holding only `pump` copied a file it
+        # could never read and overwrote one it could never write.
+        with _as_caller():
+            return (await kernel.send([item]))[0]["result"]
+
     while True:
-        r = (
-            await kernel.send(
-                [
-                    {
-                        "target": src,
-                        "payload": {
-                            "type": "read_stream",
-                            "path": spath,
-                            "offset": offset,
-                            "length": length,
-                        },
-                    }
-                ]
-            )
-        )[0]["result"]
+        r = await as_caller(
+            {
+                "target": src,
+                "payload": {
+                    "type": "read_stream",
+                    "path": spath,
+                    "offset": offset,
+                    "length": length,
+                },
+            }
+        )
         if not isinstance(r, dict) or not isinstance(
             r.get("bytes"), (bytes, bytearray)
         ):
             return refusal(TRANSPORT_ERROR, f"pump: read from {src!r} failed: {r}")
-        w = (
-            await kernel.send(
-                [
-                    {
-                        "target": sink,
-                        "payload": {
-                            "type": "write_stream",
-                            "path": dpath,
-                            "bytes": r["bytes"],
-                            "offset": offset,
-                            "truncate": first,
-                        },
-                    }
-                ]
-            )
-        )[0]["result"]
+        w = await as_caller(
+            {
+                "target": sink,
+                "payload": {
+                    "type": "write_stream",
+                    "path": dpath,
+                    "bytes": r["bytes"],
+                    "offset": offset,
+                    "truncate": first,
+                },
+            }
+        )
         if not isinstance(w, dict) or w.get("error"):
             return refusal(TRANSPORT_ERROR, f"pump: write to {sink!r} failed: {w}")
         first, chunks = False, chunks + 1
@@ -1082,13 +1132,8 @@ def validate_meta(meta: dict, record: dict) -> str | None:
                 "allow must be a list of paths relative to the root (a file, or a "
                 "directory exposing everything under it; `.` = the whole root)"
             )
-    if "ingress_rule" in meta:
-        spec = meta["ingress_rule"]
-        if getattr(resolve_ingress({"ingress_rule": spec}), "unknown", None):
-            return (
-                f"ingress_rule={spec!r} is not a rule this bundle implements — "
-                "legal values: allow_all_ingress, deny_ingress"
-            )
+    if bad := unknown_ingress_refusal(meta, ("allow_all_ingress", "deny_ingress")):
+        return bad
     return _password_refusal(meta, "fs edge")
 
 

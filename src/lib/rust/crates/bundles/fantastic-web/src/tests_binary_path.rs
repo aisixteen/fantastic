@@ -159,16 +159,28 @@ async fn paste_image_reads_its_body_at_data_over_ws_and_rest() {
     let port = free_port();
     let web = "web_bp_paste";
     let kernel = stage(&tmp, port, web).await;
-    let started = kernel
-        .send(vec![Item::new(
-            AgentId::from("term"),
-            json!({"type": "start", "command": "/bin/cat", "pty": {"cols": 80, "rows": 24}}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    let job = started["job_id"].clone();
-    assert_eq!(started["pty"], json!(true), "{started}");
+    // A job is DRIVEN by the caller that started it (audit AV-8): each leg pastes
+    // into a terminal it started.
+    let start_as = |leg: String| {
+        let k = Arc::clone(&kernel);
+        async move {
+            let started = fantastic_kernel::send::with_sender(
+                AgentId::from(leg.as_str()),
+                k.send(vec![Item::new(
+                    AgentId::from("term"),
+                    json!({"type": "start", "command": "/bin/cat",
+                           "pty": {"cols": 80, "rows": 24}}),
+                )]),
+            )
+            .await
+            .remove(0)
+            .result;
+            assert_eq!(started["pty"], json!(true), "{started}");
+            started["job_id"].clone()
+        }
+    };
+    let job = start_as(format!("{web}_ws")).await;
+    let rest_job = start_as(format!("{web}_rest")).await;
     let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/{web}/ws"))
         .await
         .expect("ws connect");
@@ -217,7 +229,7 @@ async fn paste_image_reads_its_body_at_data_over_ws_and_rest() {
         .header("content-type", "application/octet-stream")
         .header(
             "x-fantastic-payload",
-            json!({"type": "paste_image", "job_id": job, "mime": "image/png"}).to_string(),
+            json!({"type": "paste_image", "job_id": rest_job, "mime": "image/png"}).to_string(),
         )
         .header("x-fantastic-bytes-field", "data")
         .body(rest_png.to_vec())
@@ -235,7 +247,7 @@ async fn paste_image_reads_its_body_at_data_over_ws_and_rest() {
     let _ = kernel
         .send(vec![Item::new(
             AgentId::from("term"),
-            json!({"type": "stop", "job_id": job}),
+            json!({"type": "stop"}),
         )])
         .await;
     stop(&kernel, web).await;

@@ -6,7 +6,7 @@ import json
 import sys
 from typing import Any
 
-from kernel._lock import FantasticLock, _pid_alive, _read_lock
+from kernel._lock import LockHeld, acquire_lock, release_lock
 
 from kernel.modes.help import _print_help
 from kernel.modes.longrun import _default
@@ -45,9 +45,9 @@ async def dispatch_argv(kernel, argv: list[str]) -> Any:
 
 
 async def call(kernel, target: str, rest: list[str]) -> None:
-    """One-shot RPC. Always acquires the PID lock + dispatches in-
-    process. Fails if another fantastic owns the dir (use ws_bridge
-    to forward to it over WS instead).
+    """One-shot RPC. Always takes the dir's lock (the daemon's flock) +
+    dispatches in-process. Fails if another fantastic holds it (use
+    ws_bridge to forward to it over WS instead).
 
     The kernel does NOT speak HTTP for substrate calls. Browsers /
     cross-kernel callers go through the WS frame protocol exposed by
@@ -60,16 +60,12 @@ async def call(kernel, target: str, rest: list[str]) -> None:
         sys.exit(2)
     verb, *kv_args = rest
     body = {"type": verb, **_parse_kv(kv_args)}
-    cur = _read_lock()
-    if cur and isinstance(cur.get("pid"), int) and _pid_alive(cur["pid"]):
-        print(
-            f"[call] another fantastic owns this dir (pid={cur.get('pid')}). "
-            "Stop it, or forward your call over the WS bridge "
-            "(see ws_bridge bundle).",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-    with FantasticLock():
+    _lock_or_exit(
+        "[call] another fantastic owns this dir (pid={pid}). "
+        "Stop it, or forward your call over the WS bridge "
+        "(see ws_bridge bundle)."
+    )
+    try:
         # Boot the root loader so this call's mutations (create/update/
         # delete) subscribe + persist. The debounce task won't tick
         # before we exit, so drain it synchronously after the call.
@@ -84,7 +80,22 @@ async def call(kernel, target: str, rest: list[str]) -> None:
         loop = getattr(kernel.root, "_fs_flush_loop", None)
         if loop is not None:
             await loop.aflush()
+    finally:
+        release_lock()
     return None
+
+
+def _lock_or_exit(refusal: str) -> None:
+    """A one-shot takes THE DAEMON'S OWN LOCK — the flock `acquire_lock` takes —
+    and is refused only when a live process holds it: `refusal` (formatted with
+    the pid its file names) on stderr, exit 1. There is no pid pre-check: a lock
+    file naming a pid that is alive but holds no flock (a reused pid) is stale,
+    and taken over (audit, owner 2026-10-03)."""
+    try:
+        acquire_lock()
+    except LockHeld as e:
+        print(refusal.format(pid=e.pid), file=sys.stderr)
+        sys.exit(1)
 
 
 async def init(kernel, rest: list[str]) -> None:
@@ -96,7 +107,7 @@ async def init(kernel, rest: list[str]) -> None:
 
         fantastic init static_loader ./fantastic.yaml
 
-    Takes the PID lock (it mutates the tree) and persists through the root
+    Takes the dir's lock (it mutates the tree) and persists through the root
     loader, exactly like a one-shot `create_agent`. The loader agent's id is the
     bundle name, so a second `init` is idempotent (create refuses a dup id)."""
     if len(rest) < 2:
@@ -107,15 +118,8 @@ async def init(kernel, rest: list[str]) -> None:
         )
         sys.exit(2)
     loader_name, manifest = rest[0], rest[1]
-    cur = _read_lock()
-    if cur and isinstance(cur.get("pid"), int) and _pid_alive(cur["pid"]):
-        print(
-            f"[init] another fantastic owns this dir (pid={cur.get('pid')}). "
-            "Stop it first.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-    with FantasticLock():
+    _lock_or_exit("[init] another fantastic owns this dir (pid={pid}). Stop it first.")
+    try:
         if kernel.root is not None:
             # Boot the root loader so the new records subscribe + persist.
             (
@@ -146,6 +150,8 @@ async def init(kernel, rest: list[str]) -> None:
         loop = getattr(kernel.root, "_fs_flush_loop", None)
         if loop is not None:
             await loop.aflush()
+    finally:
+        release_lock()
     return None
 
 

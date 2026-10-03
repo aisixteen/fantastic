@@ -124,7 +124,7 @@ async fn the_client_offers_deflate_and_speaks_it_as_python_s_client_does() {
         write_frame(&mut sock, 0xc1, &wire).await;
         (head, got)
     });
-    let t = WsTransport::connect(&format!("ws://127.0.0.1:{port}/peer/ws"))
+    let t = WsTransport::connect(&format!("ws://127.0.0.1:{port}/peer/ws"), false)
         .await
         .expect("connect");
     t.send_frame(
@@ -163,7 +163,7 @@ async fn a_server_that_declines_gets_plain_frames() {
         handshake(&mut sock, None).await;
         read_frame(&mut sock).await
     });
-    let t = WsTransport::connect(&format!("ws://127.0.0.1:{port}/peer/ws"))
+    let t = WsTransport::connect(&format!("ws://127.0.0.1:{port}/peer/ws"), false)
         .await
         .expect("connect");
     t.send_frame(json!({"a": 1})).await.unwrap();
@@ -187,7 +187,7 @@ async fn a_send_after_the_peer_closed_reports_the_closing_handshake() {
         // the echo: the same code and reason
         read_frame(&mut sock).await
     });
-    let t = WsTransport::connect(&format!("ws://127.0.0.1:{port}/peer/ws"))
+    let t = WsTransport::connect(&format!("ws://127.0.0.1:{port}/peer/ws"), false)
         .await
         .expect("connect");
     match t.recv_frame().await {
@@ -221,7 +221,7 @@ async fn a_send_after_closing_reports_what_was_sent_then_received() {
         write_frame(&mut sock, b0, &payload).await;
         payload
     });
-    let t = WsTransport::connect(&format!("ws://127.0.0.1:{port}/peer/ws"))
+    let t = WsTransport::connect(&format!("ws://127.0.0.1:{port}/peer/ws"), false)
         .await
         .expect("connect");
     t.close().await;
@@ -236,4 +236,184 @@ async fn a_send_after_closing_reports_what_was_sent_then_received() {
         }
         other => panic!("a send on a closed socket must fail: {other:?}"),
     }
+}
+
+/// `closed` FOLLOWS THE SOCKET (audit W-7): false while open, true once the peer's
+/// close frame arrived — python's `state in (CLOSING, CLOSED)`.
+#[tokio::test]
+async fn closed_follows_the_peer_s_close() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (go, wait) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        handshake(&mut sock, None).await;
+        wait.await.unwrap();
+        write_frame(&mut sock, 0x88, &1000u16.to_be_bytes()).await;
+        read_frame(&mut sock).await
+    });
+    let t = WsTransport::connect(&format!("ws://127.0.0.1:{port}/peer/ws"), false)
+        .await
+        .expect("connect");
+    assert!(!t.closed(), "an open socket is not closed");
+    go.send(()).unwrap();
+    assert!(matches!(
+        t.recv_frame().await,
+        Err(TransportError::ConnectionClosed(_))
+    ));
+    assert!(t.closed(), "the peer closed the socket");
+    server.await.unwrap();
+}
+
+/// An ABRUPT drop (no close frame, the TCP connection just ends) closes it too —
+/// python's `CLOSED`.
+#[tokio::test]
+async fn closed_follows_an_abrupt_drop() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (go, wait) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        handshake(&mut sock, None).await;
+        wait.await.unwrap();
+        drop(sock);
+    });
+    let t = WsTransport::connect(&format!("ws://127.0.0.1:{port}/peer/ws"), false)
+        .await
+        .expect("connect");
+    assert!(!t.closed());
+    go.send(()).unwrap();
+    assert!(matches!(
+        t.recv_frame().await,
+        Err(TransportError::ConnectionClosed(_))
+    ));
+    assert!(t.closed(), "the socket ended");
+    server.await.unwrap();
+}
+
+/// A ws LEG whose remote dropped reflects `connected:false`, refuses a forward as
+/// not connected, and `boot` DIALS AGAIN instead of answering `{already:true}`
+/// (audit W-7 — only `reconnect` used to recover it).
+#[tokio::test]
+async fn a_dropped_leg_reflects_down_and_boot_dials_again() {
+    use fantastic_kernel::{Agent, AgentId, Item, Kernel};
+    use std::sync::Arc;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    // The remote: every connection stays open until the test drops it.
+    let (drop_tx, mut drop_rx) = tokio::sync::mpsc::channel::<()>(4);
+    let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let count = Arc::clone(&accepted);
+    let server = tokio::spawn(async move {
+        let mut held = Vec::new();
+        loop {
+            tokio::select! {
+                conn = listener.accept() => {
+                    let (mut sock, _) = conn.unwrap();
+                    handshake(&mut sock, None).await;
+                    count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    held.push(sock);
+                }
+                Some(()) = drop_rx.recv() => {
+                    let mut sock = held.remove(0);
+                    write_frame(&mut sock, 0x88, &1000u16.to_be_bytes()).await;
+                }
+            }
+        }
+    });
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mut kernel = Kernel::new();
+    kernel
+        .bundles
+        .register(super::WS_HANDLER_MODULE, super::WsBridgeBundle);
+    let kernel = Arc::new(kernel);
+    let root = Agent::new(
+        AgentId::from("kernel_state"),
+        None,
+        None,
+        serde_json::Map::new(),
+        tmp.path().join(".fantastic"),
+        false,
+    );
+    kernel.register(Arc::clone(&root));
+    kernel.set_root(Arc::clone(&root));
+    let leg = format!(
+        "w7_leg_{}",
+        tmp.path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .replace('.', "_")
+    );
+    let ask = |payload: serde_json::Value| {
+        let kernel = Arc::clone(&kernel);
+        let leg = leg.clone();
+        async move {
+            kernel
+                .send(vec![Item::new(AgentId::from(leg.as_str()), payload)])
+                .await
+                .remove(0)
+                .result
+        }
+    };
+    let made = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel_state"),
+            json!({
+                "type": "create_agent", "parent_id": "kernel_state",
+                "handler_module": super::WS_HANDLER_MODULE, "id": leg,
+                "transport": "ws", "host": "127.0.0.1", "port": port, "peer_id": "peer",
+            }),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(made["id"], json!(leg), "{made}");
+
+    // create_agent booted the leg; a live socket makes `boot` a no-op.
+    assert_eq!(
+        ask(json!({"type": "boot"})).await,
+        json!({"already": true, "transport": "ws"})
+    );
+    assert_eq!(
+        ask(json!({"type": "reflect"})).await["connected"],
+        json!(true)
+    );
+
+    drop_tx.send(()).await.unwrap();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    while ask(json!({"type": "reflect"})).await["connected"] != json!(false) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "reflect kept saying connected after the remote closed"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let fwd = ask(json!({"type": "forward", "target": "x", "payload": {"type": "reflect"}})).await;
+    assert_eq!(fwd["reason"], json!("not_connected"), "{fwd}");
+
+    let dials = accepted.load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        ask(json!({"type": "boot"})).await,
+        json!({"booted": true, "transport": "ws"})
+    );
+    assert_eq!(
+        accepted.load(std::sync::atomic::Ordering::SeqCst),
+        dials + 1
+    );
+    assert_eq!(
+        ask(json!({"type": "reflect"})).await["connected"],
+        json!(true)
+    );
+
+    // the remote goes away first, so the leg's close finds the socket gone
+    server.abort();
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel_state"),
+            json!({"type": "delete_agent", "id": leg}),
+        )])
+        .await;
 }

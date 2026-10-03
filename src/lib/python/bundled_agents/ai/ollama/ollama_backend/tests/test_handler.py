@@ -7,6 +7,7 @@ import asyncio
 
 
 import ollama_backend.tools as ot
+from ai_core import core
 
 
 async def _async_iter(items):
@@ -92,10 +93,10 @@ async def test_reflect_lists_send(seeded_kernel, store_agent):
     assert "send" in r["verbs"]
 
 
-async def test_send_works(seeded_kernel, store_agent):
+async def test_send_works(seeded_kernel, store_agent, fake_providers):
     oid = await _make_ollama(seeded_kernel)
     fp = _FakeProvider([["ok"]])
-    ot._providers[oid] = fp
+    fake_providers[oid] = fp
     try:
         r = (
             await seeded_kernel.send(
@@ -104,7 +105,7 @@ async def test_send_works(seeded_kernel, store_agent):
         )[0]["result"]
         assert r["final"] == "ok"
     finally:
-        ot._providers.pop(oid, None)
+        fake_providers.pop(oid, None)
 
 
 async def test_history_empty_when_no_turns(seeded_kernel, store_agent):
@@ -115,10 +116,10 @@ async def test_history_empty_when_no_turns(seeded_kernel, store_agent):
     assert r["messages"] == []
 
 
-async def test_history_returns_messages(seeded_kernel, store_agent):
+async def test_history_returns_messages(seeded_kernel, store_agent, fake_providers):
     oid = await _make_ollama(seeded_kernel)
     fp = _FakeProvider([['hello <call name="done"></call>']])
-    ot._providers[oid] = fp
+    fake_providers[oid] = fp
     try:
         (
             await seeded_kernel.send(
@@ -126,7 +127,7 @@ async def test_history_returns_messages(seeded_kernel, store_agent):
             )
         )[0]["result"]
     finally:
-        ot._providers.pop(oid, None)
+        fake_providers.pop(oid, None)
     r = (await seeded_kernel.send([{"target": oid, "payload": {"type": "recall"}}]))[0][
         "result"
     ]
@@ -136,10 +137,12 @@ async def test_history_returns_messages(seeded_kernel, store_agent):
     ]
 
 
-async def test_run_no_tool_calls_returns_content(seeded_kernel, store_agent):
+async def test_run_no_tool_calls_returns_content(
+    seeded_kernel, store_agent, fake_providers
+):
     oid = await _make_ollama(seeded_kernel)
     fp = _FakeProvider([["Hello! ", "How are you?"]])
-    ot._providers[oid] = fp
+    fake_providers[oid] = fp
     try:
         r = (
             await seeded_kernel.send(
@@ -149,7 +152,7 @@ async def test_run_no_tool_calls_returns_content(seeded_kernel, store_agent):
         assert r["final"] == "Hello! How are you?"
         assert fp.calls == 1
     finally:
-        ot._providers.pop(oid, None)
+        fake_providers.pop(oid, None)
 
 
 # ─── system_prompt / messages door + recursion guard ────────────
@@ -171,11 +174,13 @@ class _RecordProvider:
             yield x
 
 
-async def test_system_prompt_override_replaces_auto_prompt(seeded_kernel, store_agent):
+async def test_system_prompt_override_replaces_auto_prompt(
+    seeded_kernel, store_agent, fake_providers
+):
     """A caller-supplied system_prompt REPLACES the auto-built substrate prompt."""
     oid = await _make_ollama(seeded_kernel)
     rp = _RecordProvider([["ok"]])
-    ot._providers[oid] = rp
+    fake_providers[oid] = rp
     try:
         r = (
             await seeded_kernel.send(
@@ -195,17 +200,17 @@ async def test_system_prompt_override_replaces_auto_prompt(seeded_kernel, store_
         assert rp.last_messages[0]["role"] == "system"
         assert rp.last_messages[0]["content"] == "ROLE-XYZ"
     finally:
-        ot._providers.pop(oid, None)
+        fake_providers.pop(oid, None)
 
 
-async def test_a_send_with_no_memory_store_fails_loud(seeded_kernel):
+async def test_a_send_with_no_memory_store_fails_loud(seeded_kernel, fake_providers):
     """No `memory_store_id` ⇒ no turn: the send refuses up front, naming the fix —
     the conversation has nowhere to live, and nothing falls back to RAM."""
     rec = seeded_kernel.create(
         "ollama_backend.tools", id="storeless", can_call={"cli": "*"}
     )
     assert rec.get("id") == "storeless", rec
-    ot._providers["storeless"] = _FakeProvider([["never"]])
+    fake_providers["storeless"] = _FakeProvider([["never"]])
     try:
         boot = (
             await seeded_kernel.send(
@@ -219,9 +224,9 @@ async def test_a_send_with_no_memory_store_fails_loud(seeded_kernel):
             )
         )[0]["result"]
         assert out["reason"] == "missing_arg" and "memory_store_id" in out["error"]
-        assert ot._providers["storeless"].calls == 0, "the model was never called"
+        assert fake_providers["storeless"].calls == 0, "the model was never called"
     finally:
-        ot._providers.pop("storeless", None)
+        fake_providers.pop("storeless", None)
 
 
 async def test_send_refuses_cycle(seeded_kernel, store_agent):
@@ -243,7 +248,7 @@ async def test_send_refuses_cycle(seeded_kernel, store_agent):
 async def test_send_refuses_over_depth(seeded_kernel, store_agent):
     """_call_stack at/over MAX_CALL_DEPTH → depth refusal (before the lock)."""
     oid = await _make_ollama(seeded_kernel)
-    deep = [f"x{i}" for i in range(ot.MAX_CALL_DEPTH)]
+    deep = [f"x{i}" for i in range(core.MAX_CALL_DEPTH)]
     r = (
         await seeded_kernel.send(
             [
@@ -257,11 +262,11 @@ async def test_send_refuses_over_depth(seeded_kernel, store_agent):
     assert "error" in r and "depth" in r["error"]
 
 
-async def test_run_persists_history(seeded_kernel, store_agent):
+async def test_run_persists_history(seeded_kernel, store_agent, fake_providers):
     """Default caller (no client_id) persists user+assistant to the chat JSONL sidecar."""
     oid = await _make_ollama(seeded_kernel)
     fp = _FakeProvider([["reply"]])
-    ot._providers[oid] = fp
+    fake_providers[oid] = fp
     try:
         (
             await seeded_kernel.send(
@@ -269,7 +274,7 @@ async def test_run_persists_history(seeded_kernel, store_agent):
             )
         )[0]["result"]
     finally:
-        ot._providers.pop(oid, None)
+        fake_providers.pop(oid, None)
     data = (
         (await seeded_kernel.send([{"target": oid, "payload": {"type": "recall"}}]))[0][
             "result"
@@ -289,14 +294,16 @@ async def test_unknown_verb_errors(seeded_kernel, store_agent):
     assert "error" in r
 
 
-async def test_cli_caller_routes_to_cli_only(seeded_kernel, store_agent):
+async def test_cli_caller_routes_to_cli_only(
+    seeded_kernel, store_agent, fake_providers
+):
     """Default caller (client_id='cli') has events dispatched via
     kernel.send([{"target": 'cli', "payload": …}]) so cli's stdout handler runs. No leak to the
     backend's own inbox (which would broadcast to unrelated WS subscribers).
     """
     oid = await _make_ollama(seeded_kernel)
     fp = _FakeProvider([["chunk1 ", "chunk2"]])
-    ot._providers[oid] = fp
+    fake_providers[oid] = fp
     events: list[dict] = []
     unsub = seeded_kernel.add_state_subscriber(events.append)
     try:
@@ -334,16 +341,18 @@ async def test_cli_caller_routes_to_cli_only(seeded_kernel, store_agent):
         assert all(p.get("client_id") == "cli" for p in cli_tokens + cli_done)
     finally:
         unsub()
-        ot._providers.pop(oid, None)
+        fake_providers.pop(oid, None)
 
 
-async def test_browser_caller_routes_to_own_inbox_only(seeded_kernel, store_agent):
+async def test_browser_caller_routes_to_own_inbox_only(
+    seeded_kernel, store_agent, fake_providers
+):
     """Caller passes a non-cli client_id (e.g. browser uuid) → events
     emit to backend's own inbox tagged with client_id, NOT to cli.
     """
     oid = await _make_ollama(seeded_kernel)
     fp = _FakeProvider([["a", "b"]])
-    ot._providers[oid] = fp
+    fake_providers[oid] = fp
     events: list[dict] = []
     unsub = seeded_kernel.add_state_subscriber(events.append)
     try:
@@ -389,10 +398,12 @@ async def test_browser_caller_routes_to_own_inbox_only(seeded_kernel, store_agen
         assert cli_stream == [], f"cli leak: {cli_stream}"
     finally:
         unsub()
-        ot._providers.pop(oid, None)
+        fake_providers.pop(oid, None)
 
 
-async def test_contended_send_emits_queued_event(seeded_kernel, store_agent):
+async def test_contended_send_emits_queued_event(
+    seeded_kernel, store_agent, fake_providers
+):
     """Second concurrent send arrives while the first holds the lock →
     backend emits a `queued` event tagged with the second caller's
     client_id. UI uses this to mark the message as waiting; first
@@ -410,7 +421,7 @@ async def test_contended_send_emits_queued_event(seeded_kernel, store_agent):
                 await asyncio.sleep(0.20)
             yield 'ok <call name="done"></call>'
 
-    ot._providers[oid] = _SlowFirst()
+    fake_providers[oid] = _SlowFirst()
 
     events: list[dict] = []
     unsub = seeded_kernel.add_state_subscriber(events.append)
@@ -490,10 +501,12 @@ async def test_contended_send_emits_queued_event(seeded_kernel, store_agent):
         assert len(bob_tokens) >= 1
     finally:
         unsub()
-        ot._providers.pop(oid, None)
+        fake_providers.pop(oid, None)
 
 
-async def test_concurrent_sends_serialize_per_backend(seeded_kernel, store_agent):
+async def test_concurrent_sends_serialize_per_backend(
+    seeded_kernel, store_agent, fake_providers
+):
     """Two concurrent _send calls on the same backend → run sequentially
     via the per-backend asyncio.Lock. Verified by the order of provider
     invocations vs the order tasks finish.
@@ -519,7 +532,7 @@ async def test_concurrent_sends_serialize_per_backend(seeded_kernel, store_agent
             finally:
                 in_flight -= 1
 
-    ot._providers[oid] = _SerialProvider()
+    fake_providers[oid] = _SerialProvider()
     try:
         results = await asyncio.gather(
             seeded_kernel.send(
@@ -545,7 +558,7 @@ async def test_concurrent_sends_serialize_per_backend(seeded_kernel, store_agent
         assert all(r["final"].startswith("ok") for r in replies)
         assert {r["client_id"] for r in replies} == {"a", "b"}
     finally:
-        ot._providers.pop(oid, None)
+        fake_providers.pop(oid, None)
 
 
 # ─── status pipeline ───────────────────────────────────────────
@@ -587,11 +600,13 @@ def _statuses_for(events: list[dict], client_id: str) -> list[dict]:
     ]
 
 
-async def test_status_event_sequence_no_tool_calls(seeded_kernel, store_agent):
+async def test_status_event_sequence_no_tool_calls(
+    seeded_kernel, store_agent, fake_providers
+):
     """thinking → streaming → done(reason=ok). All carry the same send_id."""
     oid = await _make_ollama(seeded_kernel)
     fp = _FakeProvider([['hello <call name="done"></call>']])
-    ot._providers[oid] = fp
+    fake_providers[oid] = fp
     sends, emits, ctx = _capture(seeded_kernel)
     try:
         with ctx:
@@ -616,10 +631,12 @@ async def test_status_event_sequence_no_tool_calls(seeded_kernel, store_agent):
         send_ids = {s["detail"].get("send_id") for s in statuses}
         assert len(send_ids) == 1 and None not in send_ids
     finally:
-        ot._providers.pop(oid, None)
+        fake_providers.pop(oid, None)
 
 
-async def test_queue_populated_and_drained_on_contention(seeded_kernel, store_agent):
+async def test_queue_populated_and_drained_on_contention(
+    seeded_kernel, store_agent, fake_providers
+):
     """Two concurrent sends; _queue grows, _current is set; both drain."""
     oid = await _make_ollama(seeded_kernel)
 
@@ -634,11 +651,11 @@ async def test_queue_populated_and_drained_on_contention(seeded_kernel, store_ag
             if self.calls == 1:
                 # While we're "thinking", measure queue depth.
                 await asyncio.sleep(0.10)
-                queue_sizes.append(len(ot._queue.get(oid, [])))
+                queue_sizes.append(len(core._queue.get(oid, [])))
                 await asyncio.sleep(0.10)
             yield 'ok <call name="done"></call>'
 
-    ot._providers[oid] = _SlowFirst()
+    fake_providers[oid] = _SlowFirst()
     try:
         t1 = asyncio.create_task(
             seeded_kernel.send(
@@ -671,14 +688,14 @@ async def test_queue_populated_and_drained_on_contention(seeded_kernel, store_ag
         )
         await asyncio.gather(t1, t2)
     finally:
-        ot._providers.pop(oid, None)
+        fake_providers.pop(oid, None)
 
     # Mid-flight: alice was the current entry (popped from queue),
     # bob was waiting in the queue.
     assert queue_sizes == [1], queue_sizes
     # After both complete: queue empty, no current.
-    assert ot._queue.get(oid, []) == []
-    assert oid not in ot._current
+    assert core._queue.get(oid, []) == []
+    assert oid not in core._current
 
 
 async def test_status_verb_shape_when_idle(seeded_kernel, store_agent):
@@ -695,7 +712,9 @@ async def test_status_verb_shape_when_idle(seeded_kernel, store_agent):
     assert r["client_id"] == "alice"
 
 
-async def test_status_verb_shape_during_inflight_mine(seeded_kernel, store_agent):
+async def test_status_verb_shape_during_inflight_mine(
+    seeded_kernel, store_agent, fake_providers
+):
     """Mid-flight, the caller's status snapshot reflects current entry
     with is_mine=True and full text."""
     oid = await _make_ollama(seeded_kernel)
@@ -716,7 +735,7 @@ async def test_status_verb_shape_during_inflight_mine(seeded_kernel, store_agent
             captured_status.append(r)
             yield 'ok <call name="done"></call>'
 
-    ot._providers[oid] = _SlowProvider()
+    fake_providers[oid] = _SlowProvider()
     try:
         (
             await seeded_kernel.send(
@@ -733,7 +752,7 @@ async def test_status_verb_shape_during_inflight_mine(seeded_kernel, store_agent
             )
         )[0]["result"]
     finally:
-        ot._providers.pop(oid, None)
+        fake_providers.pop(oid, None)
 
     snap = captured_status[0]
     assert snap["generating"] is True
@@ -743,7 +762,7 @@ async def test_status_verb_shape_during_inflight_mine(seeded_kernel, store_agent
     assert snap["current"]["elapsed"] >= 0.0
 
 
-async def test_status_verb_privacy_filter(seeded_kernel, store_agent):
+async def test_status_verb_privacy_filter(seeded_kernel, store_agent, fake_providers):
     """Bob's running, alice's queued. Alice's snapshot: is_mine=False,
     no text in current. Bob's snapshot: is_mine=True with text;
     alice's pending shows up as others_pending=1."""
@@ -781,7 +800,7 @@ async def test_status_verb_privacy_filter(seeded_kernel, store_agent):
                 )[0]["result"]
             yield 'ok <call name="done"></call>'
 
-    ot._providers[oid] = _PrivacyProvider()
+    fake_providers[oid] = _PrivacyProvider()
     try:
         t1 = asyncio.create_task(
             seeded_kernel.send(
@@ -814,7 +833,7 @@ async def test_status_verb_privacy_filter(seeded_kernel, store_agent):
         )
         await asyncio.gather(t1, t2)
     finally:
-        ot._providers.pop(oid, None)
+        fake_providers.pop(oid, None)
 
     a = snapshots["alice"]
     assert a["current"]["is_mine"] is False
@@ -831,7 +850,9 @@ async def test_status_verb_privacy_filter(seeded_kernel, store_agent):
     assert b["others_pending"] == 1  # alice's pending
 
 
-async def test_status_verb_no_client_id_redacts_text(seeded_kernel, store_agent):
+async def test_status_verb_no_client_id_redacts_text(
+    seeded_kernel, store_agent, fake_providers
+):
     """Without client_id the snapshot redacts text everywhere."""
     oid = await _make_ollama(seeded_kernel)
     snap_holder: list[dict] = []
@@ -847,7 +868,7 @@ async def test_status_verb_no_client_id_redacts_text(seeded_kernel, store_agent)
             )
             yield 'ok <call name="done"></call>'
 
-    ot._providers[oid] = _RedactProvider()
+    fake_providers[oid] = _RedactProvider()
     try:
         (
             await seeded_kernel.send(
@@ -864,7 +885,7 @@ async def test_status_verb_no_client_id_redacts_text(seeded_kernel, store_agent)
             )
         )[0]["result"]
     finally:
-        ot._providers.pop(oid, None)
+        fake_providers.pop(oid, None)
 
     snap = snap_holder[0]
     assert snap["client_id"] is None
@@ -874,7 +895,9 @@ async def test_status_verb_no_client_id_redacts_text(seeded_kernel, store_agent)
     assert snap["others_pending"] >= 0
 
 
-async def test_kernel_cancel_kills_an_in_flight_send(seeded_kernel, store_agent):
+async def test_kernel_cancel_kills_an_in_flight_send(
+    seeded_kernel, store_agent, fake_providers
+):
     """The backend's bespoke `interrupt` is GONE — an in-flight `send` is a KERNEL
     TASK, so it is cancelled the way any dispatch is: find it in `ps`, kill it with
     `cancel`. The bundle's `on_cancel` hook closes the turn out (status(done,
@@ -888,7 +911,7 @@ async def test_kernel_cancel_kills_an_in_flight_send(seeded_kernel, store_agent)
             await asyncio.sleep(5.0)
             yield "never"
 
-    ot._providers[oid] = _SlowProvider()
+    fake_providers[oid] = _SlowProvider()
     sends, emits, ctx = _capture(seeded_kernel)
     try:
         with ctx:
@@ -962,7 +985,7 @@ async def test_kernel_cancel_kills_an_in_flight_send(seeded_kernel, store_agent)
         assert rr["generating"] is False
         assert "interrupt" not in rr["verbs"]
         # The FIFO lock was released with the aborted dispatch — the next send runs.
-        ot._providers[oid] = _FakeProvider([["after"]])
+        fake_providers[oid] = _FakeProvider([["after"]])
         assert (
             (
                 (
@@ -974,7 +997,7 @@ async def test_kernel_cancel_kills_an_in_flight_send(seeded_kernel, store_agent)
             == "after"
         )
     finally:
-        ot._providers.pop(oid, None)
+        fake_providers.pop(oid, None)
 
 
 async def test_on_cancel_ignores_a_non_generation_task(seeded_kernel, store_agent):
@@ -986,9 +1009,9 @@ async def test_on_cancel_ignores_a_non_generation_task(seeded_kernel, store_agen
     try:
         # No generation in flight: a stray task id for this agent is a no-op.
         await ot.on_cancel(oid, f"{oid}:999", agent)
-        assert oid not in ot._current
+        assert oid not in core._current
         # A generation in flight, but a DIFFERENT task id → entry survives.
-        ot._current[oid] = {
+        core._current[oid] = {
             "client_id": "alice",
             "send_id": "s1",
             "started_at": 0.0,
@@ -997,24 +1020,24 @@ async def test_on_cancel_ignores_a_non_generation_task(seeded_kernel, store_agen
             "task_id": f"{oid}:1",
         }
         await ot.on_cancel(oid, f"{oid}:2", agent)
-        assert ot._current[oid]["send_id"] == "s1"
+        assert core._current[oid]["send_id"] == "s1"
     finally:
-        ot._current.pop(oid, None)
+        core._current.pop(oid, None)
 
 
 async def test_status_done_emits_with_reason_timeout(
-    seeded_kernel, store_agent, monkeypatch
+    seeded_kernel, store_agent, monkeypatch, fake_providers
 ):
     """Patched low SEND_TIMEOUT → done with reason='timeout'."""
     oid = await _make_ollama(seeded_kernel)
-    monkeypatch.setattr(ot, "SEND_TIMEOUT", 0.05)
+    monkeypatch.setattr(core, "SEND_TIMEOUT", 0.05)
 
     class _ForeverProvider:
         async def chat(self, messages, max_tokens=None):
             await asyncio.sleep(5.0)
             yield "never"
 
-    ot._providers[oid] = _ForeverProvider()
+    fake_providers[oid] = _ForeverProvider()
     sends, emits, ctx = _capture(seeded_kernel)
     try:
         with ctx:
@@ -1041,14 +1064,16 @@ async def test_status_done_emits_with_reason_timeout(
         assert len(done_status) == 1
         assert done_status[0]["detail"]["reason"] == "timeout"
     finally:
-        ot._providers.pop(oid, None)
+        fake_providers.pop(oid, None)
 
 
-async def test_status_event_includes_send_id(seeded_kernel, store_agent):
+async def test_status_event_includes_send_id(
+    seeded_kernel, store_agent, fake_providers
+):
     """Drift guard: every status event detail carries a send_id."""
     oid = await _make_ollama(seeded_kernel)
     fp = _FakeProvider([["ok"]])
-    ot._providers[oid] = fp
+    fake_providers[oid] = fp
     sends, emits, ctx = _capture(seeded_kernel)
     try:
         with ctx:
@@ -1070,4 +1095,4 @@ async def test_status_event_includes_send_id(seeded_kernel, store_agent):
         for s in statuses:
             assert "send_id" in s["detail"], s
     finally:
-        ot._providers.pop(oid, None)
+        fake_providers.pop(oid, None)

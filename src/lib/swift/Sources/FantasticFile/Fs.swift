@@ -3,10 +3,36 @@
 //
 // The running-dir law lives here: a `root` is clamped to the running dir, a
 // `path` is clamped to that root (`../`, `~`, absolute paths and outward
-// symlinks all refuse), and every read or write funnels through one of these
-// calls. The clamp is unbypassable because there is no other disk code to go
-// around to — `FileBundle` is the GATE and the verb shape over this, and the
-// cold bring-up readers (`static_loader`'s manifest) come through here too.
+// symlinks all refuse), and every read or write of a path a caller names funnels
+// through one of these calls. The clamp is unbypassable for those paths:
+// nothing reads or writes one outside its allowed root by going around this
+// file — `FileBundle` is the GATE and the verb shape over this, and the cold
+// bring-up readers (`static_loader`'s manifest) come through here too, as does
+// `credential_store` (its `file` backend — secrets at an absolute path OUTSIDE
+// the running dir by design, written 0600, read through `fsReadPrivate`).
+//
+// The ONLY disk code outside this file (none of it opens a caller-named path):
+//   - the substrate module `FantasticKernel`, which cannot depend on a bundle:
+//     `WorkdirLock` (`lock.yaml`), `Persistence` (`readRecord`, and the cold
+//     tree read — `readTree` / `walkRecords` / `readRecordClamped`, clamped as
+//     this file clamps), the reflect path in `KernelDispatch`
+//     (an agent's own `readme.md` and `docs/` topic tree, via `RootDocs.walk`),
+//     and `RootReadme.seed` / `RootDocs.seed` (the cold copy-if-missing seed of
+//     `.fantastic/readme.md` + `docs/`);
+//   - `FantasticKernelStartup`: `startKernel` creates `.fantastic`, reads the
+//     root record (`readRecordClamped`) and writes the virgin seed's root
+//     record; `daemon` checks the workdir is a directory;
+//   - the `Fantastic` CLI target's `.env` read (`loadDotEnv`);
+//   - `KernelStateBundle`'s `fileExists` probes of clamped paths (a session
+//     loader's anchor record, a forgotten record's dir) before it writes or
+//     removes through here;
+//   - `FantasticExecBridge`'s process plumbing: `Spawn` probes the child's
+//     `PATH` dirs for a bare command (`fileExists` + `access` — metadata only;
+//     the OS opens what it execs), `PtyJob.pasteDirectory` creates a PTY job's
+//     paste scratch dir (`mkdtemp` in `NSTemporaryDirectory()`) — the image
+//     itself is written through here;
+//   - `Bundle.module` reads of a target's OWN baked-in resources (the root
+//     readme and docs text, a backend's readme, the web favicon).
 //
 // Every failure carries the text PYTHON writes for it: a clamp violation is the
 // `ValueError` string (`fs: path 'x' escapes root`), a disk failure the
@@ -15,9 +41,7 @@
 //
 // Path resolution is python's `Path.resolve(strict=False)` — `os.path.realpath`:
 // symlinks followed component by component, `..` applied to the RESOLVED prefix,
-// a missing tail kept as written. Foundation's `standardizedFileURL` folds `..`
-// lexically instead, which admits `link/..` escapes, and
-// `resolvingSymlinksInPath` drops `/private`.
+// a missing tail kept as written (`pyRealpath`, shared with the cold tree read).
 
 import FantasticJSON
 import Foundation
@@ -26,8 +50,26 @@ import Foundation
 /// the `ValueError` of a clamp violation or the `str(OSError)` of a disk error.
 public struct FsError: Error, CustomStringConvertible, Equatable, Sendable {
     public let message: String
-    public init(_ message: String) { self.message = message }
+    /// Set when `fsReadPrivate` refused the entry as not private — python's
+    /// `fs.NotPrivate` (a `PermissionError`): what the entry IS, for the
+    /// caller's own refusal text. Nil for every other failure.
+    public let notPrivate: FsNotPrivate?
+    public init(_ message: String, notPrivate: FsNotPrivate? = nil) {
+        self.message = message
+        self.notPrivate = notPrivate
+    }
     public var description: String { message }
+}
+
+/// What `fsReadPrivate` found instead of a private file: its permission bits and
+/// its owner. Python `NotPrivate.mode` / `.uid`.
+public struct FsNotPrivate: Equatable, Sendable {
+    public let mode: Int
+    public let uid: uid_t
+    public init(mode: Int, uid: uid_t) {
+        self.mode = mode
+        self.uid = uid
+    }
 }
 
 // MARK: - resolution (the clamp)
@@ -37,8 +79,8 @@ public struct FsError: Error, CustomStringConvertible, Equatable, Sendable {
 /// is allowed only inside it; `~`/`..` escapes refuse. Returns the resolved
 /// absolute path.
 public func fsResolveRoot(_ root: String, base: String) throws(FsError) -> String {
-    let b = pyRealpath(base)
-    let p = pyRealpath(root.hasPrefix("/") ? root : b + "/" + root)
+    let b = try fsRealpath(base)
+    let p = try fsRealpath(root.hasPrefix("/") ? root : b + "/" + root)
     guard pathIsUnder(p, b) else {
         throw FsError("fs: root \(pyRepr(root)) escapes the running dir")
     }
@@ -51,7 +93,7 @@ public func fsResolveRoot(_ root: String, base: String) throws(FsError) -> Strin
 public func fsResolve(_ root: String, _ path: String, base: String) throws(FsError) -> String {
     let rootPath = try fsResolveRoot(root, base: base)
     if path.hasPrefix("/") { throw FsError("fs: path \(pyRepr(path)) escapes root") }
-    let target = path.isEmpty ? rootPath : pyRealpath(rootPath + "/" + path)
+    let target = try path.isEmpty ? rootPath : fsRealpath(rootPath + "/" + path)
     guard pathIsUnder(target, rootPath) else {
         throw FsError("fs: path \(pyRepr(path)) escapes root")
     }
@@ -79,118 +121,14 @@ private func pathIsUnder(_ p: String, _ r: String) -> Bool {
     return p.hasPrefix(r + "/")
 }
 
-/// CPython `posixpath.realpath(path, strict=False)`: walk the components,
-/// resolving every symlink, applying `..` to what is already resolved and
-/// keeping a component that does not exist. A symlink loop stops resolving and
-/// the rest is kept as written (python raises `RuntimeError` one frame up; the
-/// partial path it built is what this returns).
-public func pyRealpath(_ path: String) -> String {
-    var seen: [String: String?] = [:]
-    let (resolved, _) = joinRealpath("", path, &seen)
-    // posixpath.abspath: a relative result joins the cwd (python's `os.getcwd`).
-    if resolved.hasPrefix("/") { return resolved }
-    let cwd = FileManager.default.currentDirectoryPath
-    return pyNormpath(cwd + "/" + resolved)
-}
-
-private func joinRealpath(
-    _ start: String, _ rest: String, _ seen: inout [String: String?]
-) -> (String, Bool) {
-    var path = start
-    var rest = Substring(rest)
-    if rest.hasPrefix("/") {
-        rest = rest.dropFirst()
-        path = "/"
+/// `pyRealpath` (`FantasticJSON`, the one copy) under `fs`'s error: a cwd that
+/// cannot be read is the `str(OSError)` python's `os.getcwd` raises.
+private func fsRealpath(_ path: String) throws(FsError) -> String {
+    do {
+        return try pyRealpath(path)
+    } catch {
+        throw FsError(error.message)
     }
-    while !rest.isEmpty {
-        let name: Substring
-        if let slash = rest.firstIndex(of: "/") {
-            name = rest[rest.startIndex..<slash]
-            rest = rest[rest.index(after: slash)...]
-        } else {
-            name = rest
-            rest = rest[rest.endIndex...]
-        }
-        if name.isEmpty || name == "." { continue }
-        if name == ".." {
-            if !path.isEmpty {
-                let (head, tail) = pySplit(path)
-                path = tail == ".." ? pyJoin(pyJoin(path, ".."), "..") : head
-            } else {
-                path = ".."
-            }
-            continue
-        }
-        let newPath = pyJoin(path, String(name))
-        var st = stat()
-        let isLink = lstat(newPath, &st) == 0 && (st.st_mode & S_IFMT) == S_IFLNK
-        if !isLink {
-            path = newPath
-            continue
-        }
-        if let cached = seen[newPath] {
-            if let resolved = cached {
-                path = resolved
-                continue
-            }
-            // A symlink loop: the already-resolved part + the rest, unchanged.
-            return (pyJoin(newPath, String(rest)), false)
-        }
-        seen[newPath] = String?.none
-        let (joined, ok) = joinRealpath(path, readLink(newPath), &seen)
-        if !ok { return (pyJoin(joined, String(rest)), false) }
-        path = joined
-        seen[newPath] = joined
-    }
-    return (path, true)
-}
-
-/// `posixpath.split` — the head keeps a lone `/`, otherwise trailing slashes go.
-private func pySplit(_ p: String) -> (head: String, tail: String) {
-    guard let slash = p.lastIndex(of: "/") else { return ("", p) }
-    var head = String(p[p.startIndex...slash])
-    let tail = String(p[p.index(after: slash)...])
-    if !head.isEmpty && head != String(repeating: "/", count: head.count) {
-        while head.hasSuffix("/") { head.removeLast() }
-    }
-    return (head, tail)
-}
-
-/// `posixpath.join` of exactly two components.
-private func pyJoin(_ a: String, _ b: String) -> String {
-    if b.hasPrefix("/") { return b }
-    if a.isEmpty || a.hasSuffix("/") { return a + b }
-    return a + "/" + b
-}
-
-/// `posixpath.normpath` — enough of it for an absolute path: fold `.`, `..` and
-/// repeated slashes.
-private func pyNormpath(_ p: String) -> String {
-    let absolute = p.hasPrefix("/")
-    var parts: [Substring] = []
-    for part in p.split(separator: "/") {
-        if part == "." { continue }
-        if part == ".." {
-            if let last = parts.last, last != ".." {
-                parts.removeLast()
-            } else if !absolute {
-                parts.append(part)
-            }
-            continue
-        }
-        parts.append(part)
-    }
-    let joined = parts.joined(separator: "/")
-    if absolute { return "/" + joined }
-    return joined.isEmpty ? "." : joined
-}
-
-private func readLink(_ path: String) -> String {
-    var buf = [CChar](repeating: 0, count: Int(PATH_MAX) + 1)
-    let n = readlink(path, &buf, buf.count - 1)
-    guard n >= 0 else { return "" }
-    buf[n] = 0
-    return String(cString: buf)
 }
 
 // MARK: - existence / stat
@@ -229,17 +167,6 @@ public func fsIsSymlink(_ root: String, _ path: String, base: String) throws(FsE
     return (st.st_mode & S_IFMT) == S_IFLNK
 }
 
-/// python `fs.lstat` — the entry's OWN stat (a symlink is not followed), for a
-/// caller that must check what a path IS (type, owner, permission bits) before
-/// trusting it. The parent is clamped; a missing entry is the `OSError` python
-/// raises (`[Errno 2] …`).
-public func fsLstat(_ root: String, _ path: String, base: String) throws(FsError) -> stat {
-    let leaf = try fsLexicalLeaf(root, path, base: base)
-    var st = stat()
-    if lstat(leaf, &st) != 0 { throw FsError(osErrorStr(errno, leaf)) }
-    return st
-}
-
 /// `Path.is_dir()` on an already-resolved absolute path.
 func pathIsDir(_ path: String) -> Bool {
     var st = stat()
@@ -263,6 +190,50 @@ public func fsReadText(_ root: String, _ path: String, base: String) throws(FsEr
     let data = try readWhole(target)
     if let bad = pyUtf8DecodeError(data) { throw FsError(bad) }
     return String(decoding: data, as: UTF8.self)
+}
+
+/// python `fs.read_private` — read a PRIVATE file (a regular file owned by this
+/// user with no group/other permission bits) through ONE open. `O_NOFOLLOW`
+/// refuses a symlink in the leaf's place, and the OPEN DESCRIPTOR is what is
+/// judged (`fstat`) and read, so nothing can swap the file between the check and
+/// the read (audit F5, 2026-10-03: an `lstat` of the path and then a read of the
+/// path again was a window). `O_NONBLOCK` so a FIFO planted there cannot hang the
+/// open — it is judged and refused like any other non-regular entry. Throws an
+/// `FsError` carrying `notPrivate` (nothing read) when the entry is not private;
+/// the `OSError` text (`[Errno 2] …`) when absent.
+public func fsReadPrivate(_ root: String, _ path: String, base: String) throws(FsError) -> Data {
+    let leaf = try fsLexicalLeaf(root, path, base: base)
+    func refuse(_ mode: Int, _ uid: uid_t) -> FsError {
+        FsError(
+            "fs: \(leaf) is not a private file (mode 0o\(String(mode, radix: 8)), uid \(uid)) "
+                + "— refused, nothing read",
+            notPrivate: FsNotPrivate(mode: mode, uid: uid))
+    }
+    let fd = open(leaf, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+    if fd < 0 {
+        let e = errno
+        guard e == ELOOP else { throw FsError(osErrorStr(e, leaf)) }
+        // the symlink itself, named in the refusal — never read
+        var st = stat()
+        if lstat(leaf, &st) != 0 { throw FsError(osErrorStr(errno, leaf)) }
+        throw refuse(Int(st.st_mode) & 0o7777, st.st_uid)
+    }
+    defer { close(fd) }
+    var st = stat()
+    if fstat(fd, &st) != 0 { throw FsError(osErrorStr(errno, leaf)) }
+    let mode = Int(st.st_mode) & 0o7777
+    if (st.st_mode & S_IFMT) != S_IFREG || st.st_uid != getuid() || mode & 0o077 != 0 {
+        throw refuse(mode, st.st_uid)
+    }
+    var out = Data()
+    var buf = [UInt8](repeating: 0, count: 65536)
+    while true {
+        let n = buf.withUnsafeMutableBytes { read(fd, $0.baseAddress, 65536) }
+        if n < 0 { throw FsError(osErrorStr(errno)) }
+        if n == 0 { break }
+        out.append(contentsOf: buf[0..<n])
+    }
+    return out
 }
 
 /// python `fs.read_bytes` — the whole file.

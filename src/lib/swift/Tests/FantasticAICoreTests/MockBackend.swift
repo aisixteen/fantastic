@@ -148,7 +148,7 @@ enum MockError: Error, CustomStringConvertible {
 /// Test bundle wrapping `AIBackend` with a configurable mock provider.
 final class MockBundle: AgentBundle, @unchecked Sendable {
     let name = "mock_backend"
-    private let core: AIBackend
+    let core: AIBackend
 
     init(config: AIBackendConfig) {
         self.core = buildAIBackend(config)
@@ -161,6 +161,11 @@ final class MockBundle: AgentBundle, @unchecked Sendable {
     /// The shared cancel hook — every real backend forwards exactly like this.
     func onCancel(agentId: AgentId, taskId: TaskId, kernel: Kernel) async throws {
         await core.onCancel(agentId: agentId, taskId: taskId, kernel: kernel)
+    }
+
+    /// The shared delete hook — forwarded the same way.
+    func onDelete(agentId: AgentId, kernel: Kernel) async throws {
+        await core.onDelete(agentId: agentId, kernel: kernel)
     }
 }
 
@@ -200,7 +205,7 @@ final class MockFileBridge: AgentBundle, @unchecked Sendable {
 
     func handleBinary(
         agentId: AgentId, header: JSON, body: Blob?, kernel: Kernel
-    ) async throws -> (JSON?, Data?) {
+    ) async throws -> (JSON?, Blob?) {
         // the chunk is the payload's `bytes` — python's `payload.get("bytes", b"")`
         let blob = bodyAt(body, "bytes") ?? Data()
         let path = header["path"].asString ?? ""
@@ -229,7 +234,7 @@ final class MockFileBridge: AgentBundle, @unchecked Sendable {
                 .object([
                     "eof": .bool(true), "size": .integer(Int64(data.count)),
                     "next_offset": .integer(Int64(data.count)),
-                ]), data
+                ]), Blob("bytes", data)
             )
         default:
             return (.object(["error": .string("unknown verb")]), nil)
@@ -276,7 +281,7 @@ final class PayloadRecorder: AgentBundle, @unchecked Sendable {
     /// the JSON header, which is exactly the bug this records the difference for.
     func handleBinary(
         agentId: AgentId, header: JSON, body: Blob?, kernel: Kernel
-    ) async throws -> (JSON?, Data?) {
+    ) async throws -> (JSON?, Blob?) {
         // the chunk is the payload's `bytes` — python's `payload.get("bytes", b"")`
         let blob = bodyAt(body, "bytes") ?? Data()
         lock.withLock { blobs.append((header, blob)) }
@@ -388,14 +393,14 @@ func baseConfig(
     AIBackendConfig(
         kind: "mock_backend",
         sentence: "Mock LLM agent.",
-        reflectExtra: { _ in ["extra": .string("yes")] },
+        reflectExtra: { _, _ in ["extra": .string("yes")] },
         makeProvider: { _, _, _ in try provider() }
     )
 }
 
 /// The routing config: one `ProviderScript` PER AGENT ID, so a chain and its peer
 /// each get their own script and their own request log (python does this by
-/// keying `ot._providers` on the agent id).
+/// keying its `fake_providers` table on the agent id).
 ///
 /// An agent with no script RAISES naming the id — never a silently empty
 /// provider, which would look exactly like a model that chose to stop.

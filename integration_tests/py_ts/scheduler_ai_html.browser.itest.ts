@@ -27,7 +27,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
-import { bootHost, teardownHost, ACTIVE_LLM, llmReachable, LLM_BACKEND, writeRecord } from "./_host.ts";
+import { bootHost, teardownHost, ACTIVE_LLM, llmReachable, LLM_SKIP, writeRecord } from "./_host.ts";
 import type { BootOptions, Host } from "./_host.ts";
 import { Browser, chromeAvailable } from "./_chrome.ts";
 
@@ -87,9 +87,10 @@ const READ_OUT =
   "(() => { const e = document.getElementById('out'); return e && e.textContent !== '—' ? e.textContent : null; })()";
 
 // Live-LLM gate + backend selector: `llmReachable()` / `ACTIVE_LLM` resolve to
-// a vLLM server (default) or a local ollama model via the `LLM_BACKEND` env switch — so
-// this whole A–J suite is the PARITY harness: identical chains, either backend,
-// no fork. Offline / missing-key / missing-model skips cleanly (never hangs).
+// a vLLM server or a local ollama model via the `LLM_BACKEND` env switch (no
+// default) — so this whole A–J suite is the PARITY harness: identical chains,
+// either backend, no fork. Unset / offline / missing-key / missing-model skips
+// cleanly with `LLM_SKIP` (never hangs).
 const J = (s: string): string => JSON.stringify(s);
 const W = (ms: number): number => Math.round(ms * Number(process.env.LLM_WAIT_X ?? 1)); // scale LLM waits for slow local models
 
@@ -129,7 +130,7 @@ fantastic.send(${J(sch)}, { type: "schedule", target: ${J(py)}, interval_seconds
 
 test("B: scheduler → ai_agent → 3rd html panel (apples or bananas)", async (t) => {
   if (!chromeAvailable()) return t.skip("system Chrome not found");
-  if (!(await llmReachable())) return t.skip(`${LLM_BACKEND} backend unreachable (key/server/model)`);
+  if (!(await llmReachable())) return t.skip(LLM_SKIP);
   await scenario(
     8921,
     { webLoader: true, serveDist: true, scheduler: true, llm: ACTIVE_LLM },
@@ -165,7 +166,7 @@ fantastic.send(${J(sch)}, { type: "schedule", target: ${J(ai)}, interval_seconds
 
 test("C: AI tool-call → 3rd html panel (AI drives the UI by id)", async (t) => {
   if (!chromeAvailable()) return t.skip("system Chrome not found");
-  if (!(await llmReachable())) return t.skip(`${LLM_BACKEND} backend unreachable (key/server/model)`);
+  if (!(await llmReachable())) return t.skip(LLM_SKIP);
   await scenario(
     8922,
     { webLoader: true, serveDist: true, llm: ACTIVE_LLM },
@@ -208,7 +209,7 @@ const out = () => document.getElementById("out");
 
 test("D: AI tool-call → exec_bridge (AI spawns a compute job)", async (t) => {
   if (!chromeAvailable()) return t.skip("system Chrome not found");
-  if (!(await llmReachable())) return t.skip(`${LLM_BACKEND} backend unreachable (key/server/model)`);
+  if (!(await llmReachable())) return t.skip(LLM_SKIP);
   await scenario(
     8923,
     { webLoader: true, serveDist: true, execBridge: true, llm: ACTIVE_LLM },
@@ -240,7 +241,7 @@ fantastic.send(${J(ai)}, { type: "send", client_id: "d",
 
 test("E: AI tool-call → another AI leaf (AI→AI, no recursion)", async (t) => {
   if (!chromeAvailable()) return t.skip("system Chrome not found");
-  if (!(await llmReachable())) return t.skip(`${LLM_BACKEND} backend unreachable (key/server/model)`);
+  if (!(await llmReachable())) return t.skip(LLM_SKIP);
   await scenario(
     8924,
     { webLoader: true, serveDist: true, llm: ACTIVE_LLM },
@@ -289,7 +290,7 @@ const out = () => document.getElementById("out");
 
 test("F: python job uses its kernel connector to call an AI → result on a panel", async (t) => {
   if (!chromeAvailable()) return t.skip("system Chrome not found");
-  if (!(await llmReachable())) return t.skip(`${LLM_BACKEND} backend unreachable (key/server/model)`);
+  if (!(await llmReachable())) return t.skip(LLM_SKIP);
   await scenario(
     8925,
     { webLoader: true, serveDist: true, execBridge: true, llm: ACTIVE_LLM },
@@ -328,6 +329,7 @@ fantastic.send(${J(py)}, ${PYSTART(host, JOB)});
 
 test("G: ai_view renders inline fronting an AI backend", async (t) => {
   if (!chromeAvailable()) return t.skip("system Chrome not found");
+  if (ACTIVE_LLM === undefined) return t.skip(LLM_SKIP);
   await scenario(
     8926,
     { webLoader: true, serveDist: true, llm: ACTIVE_LLM },
@@ -369,7 +371,7 @@ test("G: ai_view renders inline fronting an AI backend", async (t) => {
 
 test("H: AI tool-calls scheduler to compose a schedule → it fires python → panel", async (t) => {
   if (!chromeAvailable()) return t.skip("system Chrome not found");
-  if (!(await llmReachable())) return t.skip(`${LLM_BACKEND} backend unreachable (key/server/model)`);
+  if (!(await llmReachable())) return t.skip(LLM_SKIP);
   await scenario(
     8927,
     { webLoader: true, serveDist: true, execBridge: true, scheduler: true, llm: ACTIVE_LLM },
@@ -409,7 +411,7 @@ fantastic.watch(${J(py)}, (ev) => {
 
 test("I: scheduler fires a python job that calls an AI via its connector → panel", async (t) => {
   if (!chromeAvailable()) return t.skip("system Chrome not found");
-  if (!(await llmReachable())) return t.skip(`${LLM_BACKEND} backend unreachable (key/server/model)`);
+  if (!(await llmReachable())) return t.skip(LLM_SKIP);
   await scenario(
     8928,
     { webLoader: true, serveDist: true, execBridge: true, scheduler: true, llm: ACTIVE_LLM },
@@ -446,7 +448,7 @@ fantastic.send(${J(sched)}, { type: "schedule", target: ${J(py)}, interval_secon
 
 test("J: scheduler tick drives a panel that calls the AI", async (t) => {
   if (!chromeAvailable()) return t.skip("system Chrome not found");
-  if (!(await llmReachable())) return t.skip(`${LLM_BACKEND} backend unreachable (key/server/model)`);
+  if (!(await llmReachable())) return t.skip(LLM_SKIP);
   await scenario(
     8929,
     { webLoader: true, serveDist: true, scheduler: true, llm: ACTIVE_LLM },

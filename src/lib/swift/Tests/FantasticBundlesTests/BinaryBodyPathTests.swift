@@ -32,7 +32,7 @@ private final class Capture: AgentBundle, @unchecked Sendable {
         }
     }
     func handleBinary(agentId: AgentId, header: JSON, body: Blob?, kernel: Kernel) async throws
-        -> (JSON?, Data?)
+        -> (JSON?, Blob?)
     {
         (
             .object([
@@ -57,7 +57,7 @@ private final class PyView: AgentBundle, @unchecked Sendable {
         }
     }
     func handleBinary(agentId: AgentId, header: JSON, body: Blob?, kernel: Kernel) async throws
-        -> (JSON?, Data?)
+        -> (JSON?, Blob?)
     {
         var whole = header
         if let body {
@@ -74,10 +74,15 @@ private final class PyView: AgentBundle, @unchecked Sendable {
 
 /// The far kernel's probe for a bridge forward (python `_echo` in
 /// `test_binary_path_steps.py`): answers the payload's keys — the body's own
-/// top-level key among them — where the body sat and the nested `a`, and hands
-/// the body back as the reply's chunk.
+/// top-level key among them — and hands the body at `a.b` back at the LITERAL
+/// reply key `x.y`, beside a nested `x` → `y`, so the reply crosses the same way
+/// back.
 private final class BytesEcho: AgentBundle, @unchecked Sendable {
     let name = "bytes_echo"
+    private let lock = NSLock()
+    private var got: [JSON] = []
+    /// What reached the binary channel: the header and where the body sat.
+    var seen: [JSON] { lock.withLock { got } }
     func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? {
         switch payload["type"].asString ?? "" {
         case "boot", "shutdown": return nil
@@ -85,16 +90,22 @@ private final class BytesEcho: AgentBundle, @unchecked Sendable {
         }
     }
     func handleBinary(agentId: AgentId, header: JSON, body: Blob?, kernel: Kernel) async throws
-        -> (JSON?, Data?)
+        -> (JSON?, Blob?)
     {
+        lock.withLock {
+            got.append([
+                "header": header, "at": body.map { Codec.binaryPath($0.parts) } ?? .null,
+            ])
+        }
+        // `nest`: the chunk NESTED in the reply (`x` → `z`), not at a top-level key
+        if header["type"] == "nest" {
+            return (["x": ["z": .null]], Blob(parts: ["x", "z"], bodyAt(body, "a.b") ?? Data()))
+        }
         var keys = header.asObject.map { Array($0.keys) } ?? []
         if let body, body.parts.count == 1, case .key(let k) = body.parts[0] { keys.append(k) }
         return (
-            .object([
-                "keys": .array(keys.sorted().map { .string($0) }),
-                "at": body.map { Codec.binaryPath($0.parts) } ?? .null,
-                "a": header["a"],
-            ]), body?.bytes
+            .object(["keys": .array(keys.sorted().map { .string($0) }), "x.y": .null, "x": ["y": "kept"]]),
+            Blob("x.y", bodyAt(body, "a.b") ?? Data())
         )
     }
 }
@@ -127,7 +138,7 @@ private actor RecordingWire: RelayWire {
 /// `term`, a `cap`ture agent, a python-`view` agent and a bytes `echo` both legs
 /// may call.
 /// Returns the bound port.
-private func stage(_ dir: URL) async -> (Kernel, UInt16) {
+private func stage(_ dir: URL, echo: BytesEcho = BytesEcho()) async -> (Kernel, UInt16) {
     let r = BundleRegistry()
     r.register("web.tools", WebBundle())
     r.register("web_ws.tools", WebWSBundle())
@@ -135,7 +146,7 @@ private func stage(_ dir: URL) async -> (Kernel, UInt16) {
     r.register("exec_bridge.tools", ExecBridgeBundle())
     r.register("capture.tools", Capture())
     r.register("pyview.tools", PyView())
-    r.register("bytes_echo.tools", BytesEcho())
+    r.register("bytes_echo.tools", echo)
     let k = Kernel(storage: .inMemory, bundles: r)
     let root = Agent(id: AgentId("kernel_state"), handlerModule: nil, parentId: nil)
     k.register(root)
@@ -262,6 +273,49 @@ private func octet(
 
 private let RAW = Data([0x00]) + Data("raw".utf8) + Data([0xFF])
 
+/// The `reply` frame answering `id` — its head as sent (`_binary_path` in it)
+/// and its raw body (`nil` for a text frame), BOUNDED: past 5 s the socket is
+/// cancelled.
+private func rawReplyOf(_ task: URLSessionWebSocketTask, _ id: String) async throws -> (
+    JSON, Data?
+) {
+    let timer = Task {
+        try await Task.sleep(nanoseconds: 5_000_000_000)
+        task.cancel(with: .goingAway, reason: nil)
+    }
+    defer { timer.cancel() }
+    while true {
+        let (frame, body): (JSON, Data?)
+        switch try await task.receive() {
+        case .string(let s): (frame, body) = (try JSON.parse(s), nil)
+        case .data(let d):
+            let f = try Codec.decodeBinaryFrame(d)
+            (frame, body) = (f.header, f.body)
+        @unknown default: continue
+        }
+        if frame["type"].asString == "reply", frame["id"].asString == id { return (frame, body) }
+    }
+}
+
+/// An octet POST to `rest_leg/<target>` with the body bound under `field`: the
+/// status, the raw response body and the two octet headers.
+private func octetRaw(
+    _ port: UInt16, _ target: String, _ payload: String, field: String, _ body: Data
+) async throws -> (status: Int, body: Data, field: String?, payload: String?) {
+    var req = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/rest_leg/\(target)")!)
+    req.httpMethod = "POST"
+    req.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+    req.setValue(payload, forHTTPHeaderField: "X-Fantastic-Payload")
+    req.setValue(field, forHTTPHeaderField: "X-Fantastic-Bytes-Field")
+    req.httpBody = body
+    let (d, resp) = try await URLSession(configuration: .ephemeral).data(for: req)
+    let http = resp as? HTTPURLResponse
+    return (
+        http?.statusCode ?? 0, d, http?.value(forHTTPHeaderField: "X-Fantastic-Bytes-Field"),
+        http?.value(forHTTPHeaderField: "X-Fantastic-Payload")
+    )
+}
+
 private func tmpDir() -> URL {
     let d = FileManager.default.temporaryDirectory
         .appendingPathComponent("binpath-\(UUID().uuidString.prefix(8))")
@@ -282,13 +336,23 @@ struct BinaryBodyPathTests {
         let dir = tmpDir()
         defer { try? FileManager.default.removeItem(at: dir) }
         let (k, port) = await stage(dir)
-        let started = await k.send([
-            Item(
-                AgentId("term"),
-                .object(["type": "start", "command": "/bin/cat", "pty": ["cols": 80, "rows": 24]]))
-        ])[0].result
-        #expect(started["pty"] == true, "\(started.serialize())")
-        let job = started["job_id"]
+        // A job is DRIVEN by the caller that started it (audit AV-8): each leg
+        // pastes into a terminal it started itself, as its wire calls run.
+        func start(as leg: String) async -> JSON {
+            let started = await KernelTaskLocals.$currentSender.withValue(AgentId(leg)) {
+                await k.send([
+                    Item(
+                        AgentId("term"),
+                        .object([
+                            "type": "start", "command": "/bin/cat", "pty": ["cols": 80, "rows": 24],
+                        ]))
+                ])[0].result
+            }
+            #expect(started["pty"] == true, "\(started.serialize())")
+            return started["job_id"]
+        }
+        let job = await start(as: "ws_leg")
+        let restJob = await start(as: "rest_leg")
         let ws = socket(port)
         defer { ws.cancel(with: .normalClosure, reason: nil) }
         let png = Data([0x89] + Array("PNG\r\n\u{1a}\n-ws-".utf8))
@@ -312,13 +376,15 @@ struct BinaryBodyPathTests {
         let restPng = Data([0x89] + Array("PNG\r\n\u{1a}\n-rest-".utf8))
         let (status, rr) = try await octet(
             port, "term",
-            JSON.object(["type": "paste_image", "job_id": job, "mime": "image/png"]).serialize(),
+            JSON.object(["type": "paste_image", "job_id": restJob, "mime": "image/png"]).serialize(),
             field: "data", restPng)
         #expect(status == 200, "\(rr.serialize())")
         #expect(rr["bytes"] == .integer(Int64(restPng.count)), "\(rr.serialize())")
         #expect(FileManager.default.contents(atPath: rr["path"].asString ?? "") == restPng)
 
-        _ = await k.send([Item(AgentId("term"), .object(["type": "stop", "job_id": job]))])
+        for j in [job, restJob] {
+            _ = await k.send([Item(AgentId("term"), .object(["type": "stop", "job_id": j]))])
+        }
         await stopWeb(k)
     }
 
@@ -435,18 +501,18 @@ struct BinaryBodyPathTests {
         await stopWeb(k)
     }
 
-    /// A literal key crosses a ws_bridge `forward` into a web_ws leg: the bridge
-    /// sends the body at `["payload", "a.b"]`, the far echo finds it at the key
-    /// `"a.b"` beside a nested `a` → `b` left as sent, and its chunk comes back
-    /// on a binary reply. Python
-    /// `test_a_literal_key_crosses_a_ws_bridge_forward_both_ways` (b). Swift's
-    /// reply carrier holds a chunk at the reply's `bytes` only, so the chunk comes
-    /// back at `["data", "bytes"]`, where python's echo puts it at `["data", "x.y"]`.
+    /// A literal key crosses a ws_bridge `forward` into a web_ws leg, BOTH WAYS:
+    /// the bridge sends the body at `["payload", "a.b"]`, the far echo finds it at
+    /// the key `"a.b"` beside a nested `a` → `b` left as sent, and answers with its
+    /// chunk at the LITERAL reply key `x.y` beside a nested `x` → `y` — web_ws
+    /// ships it at `["data", "x.y"]` and the bridge hands it back at `["x.y"]`.
+    /// Python `test_a_literal_key_crosses_a_ws_bridge_forward_both_ways` (b).
     @Test(.timeLimit(.minutes(1)))
     func aLiteralKeyCrossesAWsBridgeForwardIntoWebWs() async throws {
         let dir = tmpDir()
         defer { try? FileManager.default.removeItem(at: dir) }
-        let (kb, port) = await stage(dir)
+        let echo = BytesEcho()
+        let (kb, port) = await stage(dir, echo: echo)
         // kernel A: a ws_bridge leg whose socket is B's web_ws, recorded
         let ra = BundleRegistry()
         let bridge = KernelBridgeBundle(family: .ws)
@@ -466,7 +532,7 @@ struct BinaryBodyPathTests {
                 ])
         ])[0].result
         #expect(made["id"] == "a_leg", "\(made.serialize())")
-        bridge.injectTransport(agentId: AgentId("a_leg"), transport: WSTransport(client: wire))
+        bridge.injectTransport(agentId: AgentId("a_leg"), transport: WSTransport(client: wire, sealed: false))
         let booted = await ka.send([Item(AgentId("a_leg"), ["type": "boot"])])[0].result
         #expect(booted["booted"] == true, "\(booted.serialize())")
         let out = await ka.send([
@@ -479,12 +545,15 @@ struct BinaryBodyPathTests {
         ])[0]
         #expect(out.status == .completed, "\(out.result.serialize())")
         #expect(
-            out.result == ["keys": ["a", "a.b", "type"], "at": ["a.b"], "a": ["b": "kept"]],
+            echo.seen == [["header": ["type": "take", "a": ["b": "kept"]], "at": ["a.b"]]],
+            "the body reached the far handler at the literal key, the nested twin as sent")
+        #expect(
+            out.result.serialize() == #"{"keys":["a","a.b","type"],"x.y":null,"x":{"y":"kept"}}"#,
             "\(out.result.serialize())")
-        #expect(out.body == RAW)
+        #expect(out.body == Blob(parts: ["x.y"], RAW), "the reply's literal key came back as one key")
         let heads = await wire.heads
         #expect(
-            heads.map { $0["_binary_path"] } == [["payload", "a.b"], ["data", "bytes"]],
+            heads.map { $0["_binary_path"] } == [["payload", "a.b"], ["data", "x.y"]],
             "\(JSON.array(heads).serialize())")
         // the null sits at the literal key; the nested twin is untouched
         #expect(
@@ -494,5 +563,50 @@ struct BinaryBodyPathTests {
             Item(AgentId("kernel"), .object(["type": "delete_agent", "id": "a_leg"]))
         ])
         await stopWeb(kb)
+    }
+
+    /// A reply's chunk keeps ITS key on both wire legs. The echo answers with its
+    /// chunk at the LITERAL reply key `x.y`: web_ws ships it at `["data", "x.y"]`,
+    /// `null` there in python's position, and web_rest's octet reply names
+    /// `X-Fantastic-Bytes-Field: x.y` with the reply WITHOUT that key on
+    /// `X-Fantastic-Payload` (python `_first_bytes_field`). A chunk NESTED in the
+    /// reply rides the WS leg at its steps and has no JSON form on the REST leg
+    /// (python `_json_reply`: a stated `transport_error`, 500).
+    @Test(.timeLimit(.minutes(1)))
+    func aReplyChunkKeepsItsKeyOnTheWsAndRestLegs() async throws {
+        let dir = tmpDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let (k, port) = await stage(dir)
+        let ws = socket(port)
+        defer { ws.cancel(with: .normalClosure, reason: nil) }
+        try await ws.send(
+            callFrame("k1", "echo", ["type": "take", "a": ["b": "kept"]], ["a.b"], RAW))
+        let (head, body) = try await rawReplyOf(ws, "k1")
+        #expect(head["_binary_path"] == ["data", "x.y"], "\(head.serialize())")
+        #expect(
+            head["data"].serialize() == #"{"keys":["a","a.b","type"],"x.y":null,"x":{"y":"kept"}}"#,
+            "\(head.serialize())")
+        #expect(body == RAW)
+        try await ws.send(callFrame("k2", "echo", ["type": "nest"], ["a.b"], RAW))
+        let (nested, nestedBody) = try await rawReplyOf(ws, "k2")
+        #expect(nested["_binary_path"] == ["data", "x", "z"], "\(nested.serialize())")
+        #expect(nested["data"] == ["x": ["z": .null]], "\(nested.serialize())")
+        #expect(nestedBody == RAW)
+
+        let rest = try await octetRaw(
+            port, "echo", #"{"type": "take", "a": {"b": "kept"}}"#, field: "a.b", RAW)
+        #expect(rest.status == 200, "\(String(decoding: rest.body, as: UTF8.self))")
+        #expect(rest.body == RAW)
+        #expect(rest.field == "x.y", "the reply's first top-level bytes field")
+        #expect(
+            rest.payload == #"{"keys": ["a", "a.b", "type"], "x": {"y": "kept"}}"#,
+            "\(rest.payload ?? "nil")")
+        let deep = try await octetRaw(port, "echo", #"{"type": "nest"}"#, field: "a.b", RAW)
+        #expect(deep.status == 500, "\(String(decoding: deep.body, as: UTF8.self))")
+        #expect(
+            try JSON.parse(String(decoding: deep.body, as: UTF8.self)) == RestOctet.noJSONForm,
+            "\(String(decoding: deep.body, as: UTF8.self))")
+        #expect(deep.field == nil)
+        await stopWeb(k)
     }
 }

@@ -19,11 +19,20 @@ ollama / responses / vllm backends. Holds:
     `interrupt` verb — an in-flight `send` is a kernel TASK, killed with
     the universal `ps` → `cancel` system verbs; this hook closes the turn
     out for the client.
+  - `on_delete(agent)`: the shared bundle DELETE hook, re-exported the same
+    way — it drops every row `core` keeps for the deleted id.
 """
 
 from __future__ import annotations
 
-from .core import CANCEL_DOC, build, on_cancel, required_meta
+from .core import CANCEL_DOC, build, on_cancel, on_delete, required_meta
 from .provider import Provider
 
-__all__ = ["CANCEL_DOC", "Provider", "build", "on_cancel", "required_meta"]
+__all__ = [
+    "CANCEL_DOC",
+    "Provider",
+    "build",
+    "on_cancel",
+    "on_delete",
+    "required_meta",
+]

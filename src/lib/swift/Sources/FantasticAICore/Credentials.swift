@@ -28,6 +28,11 @@
 // `<this kernel's guid>|<holder>` is the holder, not an unknown id.
 // The reader below is untouched: it calls `kernel.send` itself, never through the
 // model's tool dispatch.
+//
+// Nor does a model JOIN a secret (audit F2, 2026-10-03): a model call whose
+// `<exec_id>` names an execution that carried `secret` marks is refused the same way
+// (`secretJoinRefusal`) — the backend's key read is such an execution, and the
+// kernel hands a join by the SAME caller the real reply.
 
 import FantasticJSON
 import FantasticKernel
@@ -46,6 +51,13 @@ public let HOLDS_SECRETS = "holds_secrets"
 public let SECRET_HOLDER_TEXT =
     "{agent} holds secrets — a secret holder answers backends, never a model "
     + "turn; this call was not dispatched"
+
+/// What the model reads when its `<exec_id>` names an execution that carried
+/// secret values (a key read, or any call whose item was marked `secret`);
+/// `{exec_id}` is the id as the model wrote it. Python `SECRET_JOIN_TEXT`.
+public let SECRET_JOIN_TEXT =
+    "exec_id {exec_id} names an execution that carried secret values — a model "
+    + "never joins one; this call was not dispatched"
 
 /// The agent (and so the record) `address` names on THIS kernel, resolved the
 /// way `send` resolves a target: a local id is itself; the reserved `kernel` (no
@@ -74,9 +86,10 @@ func localRecord(_ kernel: Kernel, _ address: String) -> Agent? {
 /// `<this kernel's guid>|<holder>` reaches the holder, so it is refused like the
 /// bare id. Only what THIS kernel can see is judged: a connected peer's
 /// `<guid>|<agent>` lives on another kernel and its record is not here, so it
-/// passes; that kernel's own AI layer guards its own holders, and a holder's value
-/// is only ever sent to a caller that marked it secret. The refusal names the
-/// address as the model wrote it.
+/// passes; that kernel's own AI layer guards its own holders, a holder's value is
+/// only ever sent to a caller that marked it secret, and a model's join of that
+/// marked read is `secretJoinRefusal`'s. The refusal names the address as the
+/// model wrote it.
 public func secretHolderRefusal(_ kernel: Kernel, _ agentId: String) -> JSON? {
     guard localRecord(kernel, agentId)?.metaValue(forKey: HOLDS_SECRETS) == .bool(true)
     else { return nil }
@@ -86,10 +99,58 @@ public func secretHolderRefusal(_ kernel: Kernel, _ agentId: String) -> JSON? {
         extra: [("agent", .string(agentId))])
 }
 
+/// The refusal for a model-parsed call whose `<exec_id>` names an execution that
+/// carried `secret` marks, or nil when the call may go. Python
+/// `secret_join_refusal`.
+///
+/// A JOIN is a receive: the kernel hands the joiner that execution's outcome. A
+/// model cannot mark a call secret, so such an execution was never its own — it
+/// is its backend's key read (same agent: the kernel would hand back the REAL
+/// reply) or another caller's (the kernel hands back the shown one). Either way a
+/// model does not join it. This is what closes a holder on a CONNECTED PEER,
+/// which `secretHolderRefusal` cannot judge: the backend's read of
+/// `<peer guid>|creds` is a local execution, and joining it by its id never
+/// reaches the peer. The id is resolved as the kernel's `send` resolves it.
+public func secretJoinRefusal(_ kernel: Kernel, _ execId: JSON) -> JSON? {
+    guard kernel.carriedSecret(execId) else { return nil }
+    return Refusal.make(
+        Refusal.unauthorized,
+        SECRET_JOIN_TEXT.replacingOccurrences(of: "{exec_id}", with: pyStr(execId)),
+        extra: [("exec_id", execId)])
+}
+
 /// What a provider awaits before each request: `read(endpoint) -> key?`. THROWS
-/// a `CredentialError` (python's class, a `RuntimeError`) when the store refuses
-/// or the field is missing, and when a required key has no `credentials`.
+/// a `CredentialError` (python's class, a `RuntimeError`) when the store refuses,
+/// the field is missing or is not a legal HTTP header value (`headerSafe`), and
+/// when a required key has no `credentials`.
 public typealias KeyReader = @Sendable (_ endpoint: String) async throws -> String?
+
+/// Whether `key` can ride `Authorization: Bearer <key>` as it is: visible ASCII,
+/// spaces or tabs only BETWEEN visible characters. Python `header_safe`: an HTTP
+/// client refuses anything else, and python's QUOTES the header it refused in its
+/// error — a key pasted with a trailing newline would ride that text into the
+/// caller's reply, the ledger and the logs (audit S1).
+public func headerSafe(_ key: String) -> Bool {
+    let edge: (Unicode.Scalar) -> Bool = { $0 == " " || $0 == "\t" }
+    let scalars = key.unicodeScalars
+    if let f = scalars.first, edge(f) { return false }
+    if let l = scalars.last, edge(l) { return false }
+    return scalars.allSatisfy { edge($0) || (0x21...0x7E).contains($0.value) }
+}
+
+/// `text` with every occurrence of `key` replaced by the placeholder a recorded
+/// secret reads as. Python `without_key`: a provider HOLDS its key, so every
+/// error text it raises passes through here first — an endpoint may echo the
+/// request in its error body (audit S1).
+public func withoutKey(_ text: String, _ key: String?) -> String {
+    guard let key, !key.isEmpty else { return text }
+    return text.replacingOccurrences(of: key, with: Secret.placeholder)
+}
+
+/// What an HTTP client's refusal of a header value reads as — never the value
+/// (AsyncHTTPClient's `invalidHeaderFieldValues` carries it); rust's reqwest says
+/// the same, byte for byte (audit S1).
+public let ILLEGAL_HEADER_TEXT = "api_key has illegal header chars: failed to parse header value"
 
 /// Why a `credentials` value is malformed, or nil: a map of exactly a non-empty
 /// `store` id and a non-empty `ref`. Python `shape_error`.
@@ -145,6 +206,13 @@ public func keyReader(
             throw fail(
                 "\(backend): credential \(pyRepr(ref)) in \(pyRepr(store)) has no "
                     + "\(pyRepr(CREDENTIAL_FIELD)) field")
+        }
+        // named by its ref, never by its value
+        guard headerSafe(k) else {
+            throw fail(
+                "\(backend): credential \(pyRepr(ref)) in \(pyRepr(store)): "
+                    + "\(pyRepr(CREDENTIAL_FIELD)) is not a legal HTTP header value (a control "
+                    + "or non-ASCII character, or whitespace at an edge) — store it again without")
         }
         return k
     }

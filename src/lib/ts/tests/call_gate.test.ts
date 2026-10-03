@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import { Kernel } from "../src/kernel/kernel.ts";
 import { Agent } from "../src/kernel/agent.ts";
 import type { Payload } from "../src/kernel/json.ts";
-import { PRIVILEGED_VERBS, authorizeCall } from "../src/kernel/authz.ts";
+import { PRIVILEGED_VERBS, authorizeCall, authorizeHeritable } from "../src/kernel/authz.ts";
 
 function tree(): Kernel {
   const k = new Kernel();
@@ -186,6 +186,36 @@ test("joining an execution is gated on the verb THAT execution ran", async () =>
     { target: "vault", payload: { type: "steal" }, id: "job1" },
   ]);
   assert.equal((again!.result as Payload)["secret"], "TOP-SECRET");
+});
+
+test("a FOREIGN joiner is judged by the target's half, on the verb that execution ran", async () => {
+  // A caller on another kernel has no record here, so its launch is judged at
+  // ingress alone — and so is its join (python judges a relayed caller's join by
+  // its qualified `<guid>|<agent>` on the target's callable_by). Before
+  // 2026-10-03 the join was put through the full two-sided gate, whose egress
+  // half refuses every recordless sender: a foreign caller could not even join
+  // its OWN execution.
+  const k = tree();
+  k.registerBundle("vault.tools", (_id, payload) =>
+    payload["type"] === "steal" ? { secret: "TOP-SECRET" } : { ok: true },
+  );
+  k.register(
+    new Agent({
+      id: "vault",
+      parentId: "kernel_state",
+      handlerModule: "vault.tools",
+      meta: { callable_by: { "P-g|a": ["steal"], "P-g|b": ["harmless"] } },
+    }),
+  );
+  const [a] = await k.foreignView("P-g|a").send([{ target: "vault", payload: { type: "steal" }, id: "job1" }]);
+  assert.equal((a!.result as Payload)["secret"], "TOP-SECRET");
+  const [again] = await k.foreignView("P-g|a").send([{ target: "vault", payload: { type: "steal" }, id: "job1" }]);
+  assert.equal(again!.status, "completed", JSON.stringify(again));
+  assert.equal(again!.pid, a!.pid);
+  const [b] = await k.foreignView("P-g|b").send([{ target: "vault", payload: { type: "harmless" }, id: "job1" }]);
+  assert.equal(b!.status, "failed");
+  assert.equal((b!.result as Payload)["side"], "ingress", JSON.stringify(b));
+  assert.equal((b!.result as Payload)["error"], "vault does not accept 'steal' from P-g|b");
 });
 
 // ── python `_gate` / rust `gate.rs` parity (found by the contract corpus) ────
@@ -429,4 +459,104 @@ test("denial texts: egress, ingress, and a foreign caller at ingress", async () 
     f["hint"],
     "a foreign caller is accepted only by name: callable_by {'g9|scout': [...]} or {'g9|*': [...]} on bob",
   );
+});
+
+test("an agent's lifecycle and a host's routes are privileged: stop / mount / unmount / boot (BV-1)", () => {
+  // Measured 2026-10-03: a web_ws/web_rest leg's `$parent:*` let any client it
+  // admitted `stop` its web host for every client, or `unmount` a sealed
+  // sibling's routes. By verb name, whatever the bundle.
+  const ctx = { holderId: "a", holderParent: "p", holderChildren: new Set(["kid"]) };
+  for (const verb of ["stop", "mount", "unmount", "boot"]) {
+    assert.ok(PRIVILEGED_VERBS.has(verb), verb);
+    assert.equal(authorizeCall({ $parent: "*", $children: "*" }, verb, "p", ctx), false, verb);
+    assert.equal(authorizeCall({ $parent: "*", $children: "*" }, verb, "kid", ctx), false, verb);
+    assert.equal(authorizeCall({ $parent: [verb] }, verb, "p", ctx), true, verb);
+    assert.equal(authorizeCall({ p: "*" }, verb, "p", ctx), true, verb);
+    // ingress: a callee's `$children:*` still accepts it
+    assert.equal(authorizeCall({ $children: "*" }, verb, "kid", { ...ctx, enforcePrivileged: false }), true, verb);
+  }
+  assert.equal(PRIVILEGED_VERBS.size, 20);
+});
+
+test("watching the ROOT needs a NAMED grant; every other watch is unchanged (KV-2)", () => {
+  // Measured 2026-10-03 (python): every direct child of the root watched the
+  // root inbox on the baseline `$parent:*` alone and read every kernel verb's
+  // payload, other agents' `persist_blob` contents included.
+  const k = tree();
+  const alice = k.scopedFor("alice", null);
+  const denied = alice.watch("kernel_state", "alice");
+  assert.equal(denied?.["reason"], "unauthorized");
+  assert.equal(denied?.["side"], "egress");
+  assert.equal(denied?.["error"], "alice may not call 'watch' on kernel_state");
+  const base = { $self: "*", $parent: "*", $children: "*" };
+  k.get("alice")!.meta["can_call"] = { ...base, $parent: ["*"] };
+  assert.notEqual(alice.watch("kernel_state", "alice"), null, "a spelled-out structural wildcard is still one");
+  for (const named of [{ kernel_state: ["watch"] }, { kernel_state: "*" }, { $parent: ["watch"] }]) {
+    k.get("alice")!.meta["can_call"] = { ...base, ...named };
+    assert.equal(alice.watch("kernel_state", "alice"), null, JSON.stringify(named));
+  }
+  // the baseline still watches its own child
+  k.get("alice")!.meta["can_call"] = { ...base };
+  k.register(new Agent({ id: "alice_kid", parentId: "alice", handlerModule: "probe.tools" }));
+  assert.equal(alice.watch("alice_kid", "alice"), null);
+});
+
+test("a heritable `*` on the ROOT does not cover watch; a named one does (KV-2)", () => {
+  const wild = [{ kernel_state: { verbs: ["*"], for: "descendants" } }];
+  assert.equal(authorizeHeritable(wild, "list_agents", "kernel_state", "kernel_state"), true);
+  assert.equal(authorizeHeritable(wild, "watch", "kernel_state", "kernel_state"), false);
+  const named = [{ kernel_state: { verbs: ["watch"], for: "descendants" } }];
+  assert.equal(authorizeHeritable(named, "watch", "kernel_state", "kernel_state"), true);
+  const other = [{ x: { verbs: ["*"], for: "descendants" } }];
+  assert.equal(authorizeHeritable(other, "watch", "x", "kernel_state"), true);
+});
+
+test("a foreign caller's kernel verb at the root is judged on the root's callable_by (AV-3)", async () => {
+  // A call from another kernel is gated at INGRESS only — kernel verbs at the
+  // root included (python/rust/swift: audit 2026-10-03, AV-3).
+  const k = tree();
+  const [no] = await k.foreignView("g9|mallory").send([{ target: "kernel", payload: { type: "ps" } }]);
+  const n = no!.result as Payload;
+  assert.equal(n["error"], "kernel_state does not accept 'ps' from g9|mallory");
+  assert.equal(n["side"], "ingress");
+  k.get("kernel_state")!.meta["callable_by"] = {
+    ...(k.get("kernel_state")!.meta["callable_by"] as Payload),
+    "g9|*": ["ps"],
+  };
+  const [ok] = await k.foreignView("g9|mallory").send([{ target: "kernel", payload: { type: "ps" } }]);
+  assert.equal(ok!.status, "completed", JSON.stringify(ok!.result));
+});
+
+test("reflect detail:\"full\" applies the roster's per-node gate (KV-3)", async () => {
+  // Measured 2026-10-03 (python): a depth-2 agent refused `reflect` on its
+  // sibling read that sibling's description and grants by reflecting its own
+  // parent with `detail:"full"`. A denied node keeps `id` + `children`.
+  const k = new Kernel();
+  k.setRoot(new Agent({ id: "kernel_state" }));
+  k.registerBundle("probe.tools", () => ({ ok: true }));
+  k.register(new Agent({ id: "rgf_parent", parentId: "kernel_state", handlerModule: "probe.tools", meta: { description: "the parent" } }));
+  k.register(new Agent({
+    id: "rgf_sibling",
+    parentId: "rgf_parent",
+    handlerModule: "probe.tools",
+    meta: { description: "the prod deploy key", can_call: { rgf_peer: "*" } },
+  }));
+  k.register(new Agent({ id: "rgf_kid", parentId: "rgf_sibling", handlerModule: "probe.tools", meta: { description: "deeper" } }));
+  k.register(new Agent({ id: "rgf_reader", parentId: "rgf_parent", handlerModule: "probe.tools" }));
+  const reader = k.scopedFor("rgf_reader", null);
+  const [direct] = await reader.send([{ target: "rgf_sibling", payload: { type: "reflect" } }]);
+  assert.equal((direct!.result as Payload)["reason"], "unauthorized");
+  const [r] = await reader.send([{ target: "rgf_parent", payload: { type: "reflect", detail: "full" } }]);
+  const tree_ = (r!.result as Payload)["tree"] as Payload;
+  assert.equal(tree_["description"], "the parent");
+  const kids = tree_["children"] as Payload[];
+  const sib = kids.find((c) => c["id"] === "rgf_sibling")!;
+  assert.deepEqual(sib, { id: "rgf_sibling", children: [{ id: "rgf_kid", children: [] }] });
+  assert.equal(kids.find((c) => c["id"] === "rgf_reader")!["handler_module"], "probe.tools");
+  // The operator sees everything, as everywhere else.
+  const [op] = await k.send([{ target: "rgf_parent", payload: { type: "reflect", detail: "full" } }]);
+  const opSib = ((op!.result as Payload)["tree"] as Payload)["children"] as Payload[];
+  const s = opSib.find((c) => c["id"] === "rgf_sibling")!;
+  assert.equal(s["description"], "the prod deploy key");
+  assert.equal((s["can_call"] as Payload)["rgf_peer"], "*");
 });

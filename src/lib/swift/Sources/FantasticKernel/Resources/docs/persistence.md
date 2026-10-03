@@ -26,7 +26,8 @@ choice, with no fallback to soften it. It stops LOUDLY: see below.)
 records is reported at boot, and every refused persist write prints to stderr and
 sets `error` `{store, path, error}` (with `provider:null`) until a write lands
 again. With `detail:"full"` each tree node carries its posture inline
-(`ingress_rule` — absent on an io leg ⇒ sealed; `root`; `allow`). One
+(`ingress_rule` — absent on an io leg ⇒ sealed; `root`; `allow`) — each node you
+may `reflect`; any other keeps only its `id` and `children`. One
 `reflect detail=full` shows every leg's lock + the live provider.
 
 **Records vs data — keep them in two stores.** The records store above holds the

@@ -87,13 +87,49 @@ async fn missing_type_is_missing_arg_before_gate() {
 async fn non_string_type_is_bad_arg() {
     let (_t, kernel) = mk();
     create(&kernel, "a", json!({})).await;
-    for bad in [json!(["x"]), json!(7), json!(""), json!(null)] {
+    // A non-string is named by its TYPE, never echoed — python's
+    // `type(verb).__name__` (audit 2026-10-03, W-11).
+    for (bad, got) in [
+        (json!(["x"]), "list"),
+        (json!(7), "int"),
+        (json!(1.5), "float"),
+        (json!({"a": 1}), "dict"),
+        (json!(""), "''"),
+        (json!(null), "NoneType"),
+    ] {
         let out = kernel
             .send(vec![Item::new(AgentId::from("a"), json!({"type": bad}))])
             .await
             .remove(0);
         assert_eq!(out.result["reason"], "bad_arg", "{bad}: {}", out.result);
         assert_eq!(out.result["arg"], "payload.type");
+        assert_eq!(
+            out.result["error"],
+            format!("send: payload.type must be a non-empty string, got {got}"),
+        );
+    }
+}
+
+/// A RAW BODY sent AS `type` (the octet REST leg's `X-Fantastic-Bytes-Field:
+/// type`, a binary frame's `_binary_path: [payload, type]`) is python's `bytes`
+/// there: named by its type, never echoed — python's repr of it made a 1 MiB
+/// body a 5 MiB refusal (audit 2026-10-03, W-11).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_body_sent_as_type_is_refused_by_its_type() {
+    let (_t, kernel) = mk();
+    create(&kernel, "a", json!({})).await;
+    for payload in [json!({"type": null}), json!({})] {
+        let out = kernel
+            .send(vec![
+                Item::new(AgentId::from("a"), payload).with_binary_key("type", vec![0u8; 4096])
+            ])
+            .await
+            .remove(0);
+        assert_eq!(
+            out.result,
+            json!({"error": "send: payload.type must be a non-empty string, got bytes",
+                   "reason": "bad_arg", "arg": "payload.type"}),
+        );
     }
 }
 

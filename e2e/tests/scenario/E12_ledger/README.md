@@ -24,7 +24,8 @@ The roster names a ROLE; each runner supplies whatever its kernel has:
 | `render_sink` | `cli` | `cli` bundle | `cli` bundle |
 
 `dispenser_probe` is a TEST-ONLY bundle on every runtime (a rust feature `scenario-probes`, a
-swift define `SCENARIO_PROBES`, a `PYTHONPATH` entry for python); a default build
+swift define `SCENARIO_PROBES`, the `e2e/probes/scenario_probes.py` launcher that registers it
+for python); a default build
 carries none of it.
 
 ## Running it

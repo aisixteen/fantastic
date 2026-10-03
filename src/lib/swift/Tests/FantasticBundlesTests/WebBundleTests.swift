@@ -379,6 +379,40 @@ struct WebBundleTests {
                 + " · rest/ws are children (reflect kernel for ids)", "\(said)")
     }
 
+    /// ARCH2-10 — the announcement names the host the listener BOUND (`host` on
+    /// the record), not a hardcoded `127.0.0.1`: a host bound elsewhere does not
+    /// answer there. Twin of python `test_boot_announces_the_bound_host`.
+    @Test func webBootAnnouncesTheBoundHost() async throws {
+        let kernel = try await startWebKernel()
+        let port = kernel.httpPort()
+        _ = await call(kernel, "web", .object(["type": .string("stop")]))
+        let probe = SayProbe()
+        kernel.bundles.register("say_probe.tools", probe)
+        _ = await call(
+            kernel, "kernel_state",
+            .object([
+                "type": .string("create_agent"), "parent_id": .string("kernel_state"),
+                "handler_module": .string("say_probe.tools"), "id": .string("cli"),
+                "callable_by": .object([
+                    "$self": .string("*"), "$parent": .string("*"), "$children": .string("*"),
+                    "web": .string("*"),
+                ]),
+            ]))
+        _ = await call(
+            kernel, "kernel_state",
+            .object([
+                "type": .string("update_agent"), "id": .string("web"),
+                "can_call": .object(["cli": .string("*")]), "host": .string("localhost"),
+            ]))
+        defer { Task { _ = await call(kernel, "web", .object(["type": .string("stop")])) } }
+        _ = await call(kernel, "web", .object(["type": .string("boot")]))
+        let said = try #require(probe.lines().last)
+        #expect(
+            said["text"].asString
+                == "listening on http://localhost:\(port)/"
+                + " · rest/ws are children (reflect kernel for ids)", "\(said)")
+    }
+
     // MARK: - browser_reachable (A11.22)
 
     /// python's `_browser_reachable` asks the REAL gates: both halves of the

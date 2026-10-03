@@ -27,6 +27,8 @@ from web_ws.tools import _make_endpoint
 
 
 def _wire(kernel, can_call):
+    # `port`: the authority the web's Host guard admits (audit W-2).
+    kernel.create(None, id="adv4_web", port=8088)
     app = make_app("adv4_web", kernel)
     # a leg under the root: the baseline `$parent: "*"` reaches the root, plus
     # whatever named grant the case adds
@@ -44,7 +46,7 @@ def _wire(kernel, can_call):
 def wired(seeded_kernel):
     # named verbs on the kernel, none of them privileged
     app = _wire(seeded_kernel, {"kernel_state": ["reflect", "list_agents"]})
-    with TestClient(app) as c:
+    with TestClient(app, headers={"host": "127.0.0.1:8088"}) as c:
         yield seeded_kernel, c
 
 
@@ -111,7 +113,7 @@ def test_a_named_wildcard_is_the_operators_own_statement(seeded_kernel):
     """`*` under a NAMED id covers privileged verbs — whoever wrote it owns it.
     The frame still runs AS the leg: the mint is the leg's act, not the operator's."""
     app = _wire(seeded_kernel, {"kernel_state": "*"})
-    with TestClient(app) as client:
+    with TestClient(app, headers={"host": "127.0.0.1:8088"}) as client:
         with client.websocket_connect("/kernel_state/ws") as ws:
             data = _ws_call(
                 ws, "m2", "kernel_state", dict(_MINT, parent_id="kernel_state")

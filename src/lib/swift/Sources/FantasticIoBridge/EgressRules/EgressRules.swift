@@ -13,14 +13,15 @@ public enum EgressRules {
     /// an inbound-only stem reaching here through `auth` was already collapsed to
     /// `silent_egress` by `manifoldSpec`, so there are no cross-manifold aliases.
     public static func resolve(_ spec: JSON?) throws -> EgressRule {
-        let (name, env) = try parseSpec(spec)
+        let (name, env) = parseSpec(spec)
         switch name {
         case nil, .some("silent_egress"):
             return Silent()
         case .some("password_egress"):
             return Password(tokenEnv: env ?? DefaultGroupTokenEnv)
         case .some(let other):
-            throw AuthPolicyError("unknown egress rule type \"\(other)\"")
+            // python `f"unknown egress rule type {name!r}"`
+            throw AuthPolicyError("unknown egress rule type \(pyRepr(other))")
         }
     }
 }

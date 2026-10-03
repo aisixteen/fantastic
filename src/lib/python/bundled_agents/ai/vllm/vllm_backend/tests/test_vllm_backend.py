@@ -55,6 +55,7 @@ async def _nokey(endpoint: str) -> None:
 
 def _provider(transport, **kw) -> VllmProvider:
     args = dict(
+        agent_id="v1",
         endpoint=ENDPOINT,
         key=_nokey,
         model="qwen3.8-27b",
@@ -76,8 +77,10 @@ async def _drain(p: VllmProvider, messages=None, **kw) -> str:
 @pytest.fixture(autouse=True)
 def _fresh_tables():
     vp._tables.clear()
+    vp.last_budgets.clear()
     yield
     vp._tables.clear()
+    vp.last_budgets.clear()
 
 
 # ─── the stream ──────────────────────────────────────────────────────────────
@@ -94,7 +97,6 @@ async def test_the_thought_channel_is_wrapped_once_not_dropped():
     p = _provider(_transport(sse))
     assert await _drain(p) == f"{THINK_OPEN}let me think{THINK_CLOSE}answer"
     assert (p.last_stop_reason, p.last_prompt_tokens) == ("stop", 42)
-    await p.aclose()
 
 
 async def test_a_cut_main_turn_fails_naming_the_cut():
@@ -103,7 +105,6 @@ async def test_a_cut_main_turn_fails_naming_the_cut():
     with pytest.raises(RuntimeError, match=r"cut at max_tokens=8000"):
         await _drain(p)
     assert p.last_stop_reason == "max_tokens"
-    await p.aclose()
 
 
 async def test_a_cut_bounded_side_call_is_its_answer():
@@ -111,7 +112,6 @@ async def test_a_cut_bounded_side_call_is_its_answer():
     p = _provider(_transport(_sse(_delta(content="half"), _delta(finish="length"))))
     assert await _drain(p, max_tokens=50) == "half"
     assert p.last_stop_reason == "max_tokens"
-    await p.aclose()
 
 
 async def test_a_stream_that_ends_without_finish_reason_is_an_error():
@@ -119,14 +119,12 @@ async def test_a_stream_that_ends_without_finish_reason_is_an_error():
     p = _provider(_transport(_sse(_delta(content="partial"), done=False)))
     with pytest.raises(RuntimeError, match="without a finish_reason"):
         await _drain(p)
-    await p.aclose()
 
 
 async def test_an_http_error_names_the_endpoint_and_the_body():
     p = _provider(_transport('{"error":"bad effort"}', status=400))
     with pytest.raises(RuntimeError, match=r"answered HTTP 400: .*bad effort"):
         await _drain(p)
-    await p.aclose()
 
 
 @pytest.mark.parametrize(
@@ -144,7 +142,6 @@ async def test_each_connection_failure_says_what_it_means(exc, words):
     p = _provider(httpx.MockTransport(handler))
     with pytest.raises(RuntimeError, match=words):
         await _drain(p)
-    await p.aclose()
 
 
 # ─── the request ─────────────────────────────────────────────────────────────
@@ -163,7 +160,6 @@ async def test_the_body_carries_the_defaults_and_only_what_the_record_set():
     assert body["reasoning_effort"] == "medium" and body["seed"] == 7
     # never defaulted: a penalty is sent only when the record sets one
     assert "presence_penalty" not in body and "frequency_penalty" not in body
-    await p.aclose()
 
 
 async def test_every_system_message_becomes_one_at_index_0():
@@ -180,7 +176,6 @@ async def test_every_system_message_becomes_one_at_index_0():
     p = _provider(_transport(_sse(_delta(finish="stop")), sink))
     await _drain(p, messages=msgs)
     assert [m["role"] for m in sink[0]["messages"]] == ["system", "user"]
-    await p.aclose()
 
 
 async def test_the_default_budget_halves_on_a_smaller_call_and_none_below_the_floor():
@@ -190,8 +185,7 @@ async def test_the_default_budget_halves_on_a_smaller_call_and_none_below_the_fl
     await _drain(p, max_tokens=2000)  # a fold summary → min(16000, 1000)
     await _drain(p, max_tokens=40)  # half is 20, under the 256 floor → none
     assert [b.get("thinking_token_budget") for b in sink] == [4000, 1000, None]
-    assert p.last_thinking_budget is None
-    await p.aclose()
+    assert vp.last_budgets["v1"] is None
 
 
 async def test_an_explicit_budget_rules_the_turn_and_halves_on_a_side_call():
@@ -209,7 +203,6 @@ async def test_an_explicit_budget_rules_the_turn_and_halves_on_a_side_call():
     await _drain(p, max_tokens=2000)
     await _drain(p, max_tokens=300)
     assert [b.get("thinking_token_budget") for b in sink] == [8000, 1000, None]
-    await p.aclose()
 
 
 # ─── the KV-cache session table ──────────────────────────────────────────────
@@ -253,8 +246,6 @@ async def test_the_table_is_shared_per_endpoint_across_agents():
     await _drain(other, messages=[{"role": "user", "content": "second"}])
     # the SAME conversation on the full endpoint is already live: admitted
     await _drain(p2, messages=[{"role": "user", "content": "first"}])
-    for p in (p1, p2, other):
-        await p.aclose()
 
 
 def test_a_conversation_is_its_prefix():
@@ -437,7 +428,6 @@ async def test_a_non_json_data_line_raises_not_skipped():
     p = _provider(_transport(sse))
     with pytest.raises(json.JSONDecodeError):
         await _drain(p)
-    await p.aclose()
 
 
 async def test_blank_data_lines_are_skipped_and_trailing_data_after_done_ignored():
@@ -448,14 +438,12 @@ async def test_blank_data_lines_are_skipped_and_trailing_data_after_done_ignored
     )
     p = _provider(_transport(sse))
     assert await _drain(p) == "first"
-    await p.aclose()
 
 
 async def test_a_turn_that_finishes_inside_the_thought_closes_the_wrapper():
     sse = _sse(_delta(reasoning_content="hm"), _delta(finish="stop"))
     p = _provider(_transport(sse))
     assert await _drain(p) == f"{THINK_OPEN}hm{THINK_CLOSE}"
-    await p.aclose()
 
 
 @pytest.mark.parametrize(
@@ -486,7 +474,6 @@ async def test_each_transport_failure_text_is_exact(exc, text):
     with pytest.raises(RuntimeError) as e:
         await _drain(p)
     assert str(e.value) == text
-    await p.aclose()
 
 
 async def test_no_finish_reason_and_main_turn_cut_texts_are_exact():
@@ -505,8 +492,6 @@ async def test_no_finish_reason_and_main_turn_cut_texts_are_exact():
         "(finish_reason=length) — it did not finish; raise max_tokens on "
         "the record, or lower thinking_token_budget / reasoning_effort"
     )
-    for q in (p, p2):
-        await q.aclose()
 
 
 async def test_no_budget_in_sampling_sends_none():
@@ -516,8 +501,7 @@ async def test_no_budget_in_sampling_sends_none():
     p = _provider(_transport(_sse(_delta(finish="stop")), sink), sampling=sampling)
     await _drain(p)
     assert "thinking_token_budget" not in sink[0]
-    assert p.last_thinking_budget is None
-    await p.aclose()
+    assert vp.last_budgets["v1"] is None
 
 
 async def test_an_evicted_conversation_is_logged_by_its_key(caplog):
@@ -531,4 +515,52 @@ async def test_an_evicted_conversation_is_logged_by_its_key(caplog):
         f"vllm_backend: KV slot rotated — conversation {conversation_key(first)} out"
         in caplog.text
     )
-    await p.aclose()
+
+
+# ── the key never leaves in an error text (audit S1) ─────────────────────────
+
+
+async def test_a_header_the_client_refuses_leaves_with_the_key_scrubbed():
+    """h11 refuses a header holding a newline and QUOTES it in its error. The
+    provider raises that text with the key replaced by `<secret>`, its chain cut
+    (a traceback must not print the original)."""
+    import asyncio
+
+    async def handle(r, w):
+        try:
+            await asyncio.wait_for(r.read(4096), 1)
+        except Exception:
+            pass
+        w.close()
+
+    srv = await asyncio.start_server(handle, "127.0.0.1", 0)
+    port = srv.sockets[0].getsockname()[1]
+
+    async def key(endpoint: str) -> str:
+        return "sk-test-fixture\n"
+
+    p = _provider(None, endpoint=f"http://127.0.0.1:{port}/v1", key=key)
+    try:
+        with pytest.raises(RuntimeError) as e:
+            await _drain(p)
+    finally:
+        srv.close()
+    assert "sk-test-fixture" not in str(e.value), e.value
+    assert str(e.value).startswith("vllm_backend: LocalProtocolError: "), e.value
+    assert "<secret>" in str(e.value), e.value
+    assert e.value.__suppress_context__, "the original (quoting the key) is cut"
+
+
+async def test_an_error_body_echoing_the_key_is_scrubbed():
+    async def key(endpoint: str) -> str:
+        return "sk-test-fixture"
+
+    p = _provider(
+        _transport("invalid key: Bearer sk-test-fixture", status=401), key=key
+    )
+    with pytest.raises(RuntimeError) as e:
+        await _drain(p)
+    assert str(e.value) == (
+        f"vllm_backend: {ENDPOINT} answered HTTP 401 — the door wants a key: name it "
+        "in `credentials` ({store, ref}): invalid key: Bearer <secret>"
+    )

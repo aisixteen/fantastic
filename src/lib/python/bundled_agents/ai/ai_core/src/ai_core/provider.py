@@ -47,8 +47,3 @@ class Provider(ABC):
     def model(self) -> str:
         """The upstream model id this provider talks to."""
         raise NotImplementedError
-
-    @abstractmethod
-    def stop(self) -> None:
-        """Release any held client/connection. Idempotent."""
-        raise NotImplementedError

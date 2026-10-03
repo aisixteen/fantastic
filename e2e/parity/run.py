@@ -109,7 +109,7 @@ def check_entry_points() -> dict:
         "print(json.dumps({'names': sorted(names), 'bad': bad}))\n"
     )
     r = subprocess.run([py, "-c", code], capture_output=True, text=True,
-                       env={"PATH": "/usr/bin:/bin", "PYTHONPATH": str(spec.REPO / "e2e/probes")})
+                       env={"PATH": "/usr/bin:/bin"})
     try:
         got = json.loads(r.stdout.strip().splitlines()[-1])
     except (ValueError, IndexError):

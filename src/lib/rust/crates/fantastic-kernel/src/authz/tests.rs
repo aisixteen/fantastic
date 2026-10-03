@@ -169,6 +169,59 @@ fn the_baseline_never_reaches_the_kernel_controls() {
     }
 }
 
+/// Measured 2026-10-03 (audit BV-1): a web_ws/web_rest leg's `$parent:*` let any
+/// client it admitted `stop` its web host for every client, or `unmount` a sealed
+/// sibling's routes. By verb name, whatever the bundle: a structural token's
+/// wildcard covers none of them; a NAMED verb or a NAMED id's `*` does.
+#[test]
+fn the_baseline_never_reaches_an_agents_lifecycle_or_routes() {
+    let baseline = Value::Object(default_can_call());
+    for verb in ["stop", "mount", "unmount", "boot"] {
+        assert!(PRIVILEGED_VERBS.contains(&verb), "{verb}");
+        assert!(!auth(&baseline, verb, "boss").allowed, "{verb}");
+        assert!(!auth(&baseline, verb, "kid").allowed, "{verb}");
+        assert!(
+            auth(&json!({"$parent": [verb]}), verb, "boss").allowed,
+            "{verb}"
+        );
+        assert!(auth(&json!({"boss": "*"}), verb, "boss").allowed, "{verb}");
+        // ingress: a callee's `$children:*` still accepts it
+        assert!(
+            auth_ingress(&json!({"$children": "*"}), verb, "kid").allowed,
+            "{verb}"
+        );
+    }
+    assert_eq!(PRIVILEGED_VERBS.len(), 20);
+}
+
+/// Audit 2026-10-03 (KV-2): `watch` whose src is the ROOT (`loader_id`) needs a
+/// NAMED grant; every other `watch` is an ordinary verb.
+#[test]
+fn watching_the_root_loses_a_structural_wildcard() {
+    let baseline = Value::Object(default_can_call());
+    // holder "worker", child of the root "boss"
+    let on_root = |grant: &Value, other: &str| {
+        authorize_call(
+            grant,
+            "watch",
+            other,
+            "worker",
+            Some("boss"),
+            &kids(&["kid"]),
+            Some("boss"),
+            true,
+            None,
+        )
+        .allowed
+    };
+    assert!(!on_root(&baseline, "boss"));
+    assert!(on_root(&json!({"boss": ["watch"]}), "boss"));
+    assert!(on_root(&json!({"boss": "*"}), "boss"));
+    assert!(on_root(&json!({"$parent": ["watch"]}), "boss"));
+    assert!(on_root(&baseline, "kid"));
+    assert!(auth(&baseline, "watch", "boss").allowed); // "boss" is not the root here
+}
+
 /// `*` under a NAMED id is the operator's own statement — it covers everything,
 /// privileged verbs included. Whoever writes it owns it.
 #[test]
@@ -314,23 +367,37 @@ fn heritable_shape_is_exact() {
 fn heritable_egress_walks_ancestors() {
     let owner = json!({"served": {"verbs": ["list", "allow"], "for": "descendants"}});
     let plain = json!({"served": ["mkdir"]}); // a plain grant is not heritable
-    assert!(authorize_heritable([&plain, &owner], "list", "served").allowed);
-    assert!(authorize_heritable([&owner], "allow", "served").allowed); // named privileged
-    assert!(!authorize_heritable([&plain, &owner], "mkdir", "served").allowed);
-    assert!(!authorize_heritable([&owner], "list", "other").allowed);
-    assert!(!authorize_heritable(std::iter::empty(), "list", "served").allowed);
+    assert!(authorize_heritable([&plain, &owner], "list", "served", None).allowed);
+    assert!(authorize_heritable([&owner], "allow", "served", None).allowed); // named privileged
+    assert!(!authorize_heritable([&plain, &owner], "mkdir", "served", None).allowed);
+    assert!(!authorize_heritable([&owner], "list", "other", None).allowed);
+    assert!(!authorize_heritable(std::iter::empty(), "list", "served", None).allowed);
 }
 
 #[test]
 fn heritable_wildcard_never_covers_a_privileged_verb() {
     let owner = json!({"served": {"verbs": ["*"], "for": "descendants"}});
-    assert!(authorize_heritable([&owner], "list", "served").allowed);
+    assert!(authorize_heritable([&owner], "list", "served", None).allowed);
     for verb in PRIVILEGED_VERBS {
         assert!(
-            !authorize_heritable([&owner], verb, "served").allowed,
+            !authorize_heritable([&owner], verb, "served", None).allowed,
             "{verb}"
         );
     }
+}
+
+/// Audit KV-2: `watch` on the ROOT needs a NAMED grant — a heritable `*` on the
+/// root does not cover it; `watch` on any other agent stays ordinary.
+#[test]
+fn heritable_wildcard_does_not_cover_watch_on_the_root() {
+    let wild = json!({"kernel_state": {"verbs": ["*"], "for": "descendants"},
+                      "served": {"verbs": ["*"], "for": "descendants"}});
+    let root = Some("kernel_state");
+    assert!(authorize_heritable([&wild], "list", "kernel_state", root).allowed);
+    assert!(!authorize_heritable([&wild], "watch", "kernel_state", root).allowed);
+    assert!(authorize_heritable([&wild], "watch", "served", root).allowed);
+    let named = json!({"kernel_state": {"verbs": ["watch"], "for": "descendants"}});
+    assert!(authorize_heritable([&named], "watch", "kernel_state", root).allowed);
 }
 
 #[test]

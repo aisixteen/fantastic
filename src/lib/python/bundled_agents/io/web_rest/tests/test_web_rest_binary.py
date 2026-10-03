@@ -10,13 +10,13 @@ Symmetric across request and reply. Never base64.
 from __future__ import annotations
 
 import json
-import sys
 import types
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from web_rest.tools import _make_post_endpoint
+from kernel import register_unlisted
 
 
 def _mount(kernel):
@@ -111,7 +111,7 @@ async def _echo_handler(id, payload, kernel):
 
 _echo.handler = _echo_handler
 _echo.VERBS = {}
-sys.modules["rest_bytes_echo.tools"] = _echo
+register_unlisted("rest_bytes_echo.tools", _echo)
 
 
 def test_the_bytes_field_header_names_a_literal_top_level_key(seeded_kernel):

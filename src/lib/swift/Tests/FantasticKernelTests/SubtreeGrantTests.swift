@@ -89,7 +89,9 @@ private func ingress(
 
 @Test func heritableEgressNamesOrWildcardsTheVerb() {
     func her(_ grants: [JSON], _ verb: String, _ target: String = "served") -> Bool {
-        authorizeHeritable(ancestorGrants: grants, verb: verb, targetId: target).allowed
+        authorizeHeritable(
+            ancestorGrants: grants, verb: verb, targetId: target, loaderId: "kernel_state"
+        ).allowed
     }
     let named: JSON = .object(["served": heritable(["list", "allow"])])
     #expect(her([named], "list"))
@@ -107,6 +109,21 @@ private func ingress(
             "list"))
     // first allow wins, nearest first; a refusing ancestor does not stop the walk
     #expect(her([.object([:]), named], "list"))
+}
+
+@Test func heritableWildcardNeverCoversWatchOnTheRoot() {
+    func her(_ grants: [JSON], _ verb: String, _ target: String) -> Bool {
+        authorizeHeritable(
+            ancestorGrants: grants, verb: verb, targetId: target, loaderId: "kernel_state"
+        ).allowed
+    }
+    // audit KV-2: watch on the root needs an explicit named grant
+    let wild: JSON = .object(["kernel_state": heritable(["*"])])
+    #expect(!her([wild], "watch", "kernel_state"))
+    #expect(her([wild], "list_agents", "kernel_state"))
+    #expect(her([.object(["kernel_state": heritable(["watch"])])], "watch", "kernel_state"))
+    // every other watch is an ordinary verb
+    #expect(her([.object(["served": heritable(["*"])])], "watch", "served"))
 }
 
 @Test func heritableShapeIsExact() {

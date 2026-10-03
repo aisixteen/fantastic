@@ -7,6 +7,8 @@
 //! the io_bridge readme) instead of dead-ending. Discovery-through-denial is the
 //! design.
 
+use fantastic_bundle::py_repr;
+
 use super::super::{Action, Decision, Denial, IngressRule};
 
 /// The repair, WORD FOR WORD as python's `DenyInbound` states it
@@ -56,10 +58,13 @@ impl IngressRule for DenyInbound {
         // says how to open it, and the unknown-rule variant appends the legal
         // names — so a caller that followed a wrong name is handed the right ones
         // instead of the same wall twice.
-        Decision::Deny(match &self.unknown {
+        // The name is python's `{unknown!r}` — a malformed spec's name is its
+        // repr, quotes and all — and an EMPTY name is python-falsy: a plain seal.
+        Decision::Deny(match self.unknown.as_deref().filter(|n| !n.is_empty()) {
             Some(n) => {
-                Denial::new(format!("edge sealed — unknown ingress rule '{n}'")).with_hint(format!(
-                    "{OPEN_IT}. '{n}' is not an INGRESS rule name — the legal values \
+                let n = py_repr(n);
+                Denial::new(format!("edge sealed — unknown ingress rule {n}")).with_hint(format!(
+                    "{OPEN_IT}. {n} is not an INGRESS rule name — the legal values \
                      are allow_all_ingress, deny_ingress, password_ingress (names are \
                      manifold-scoped: an egress name here is a typo, not a policy)"
                 ))
@@ -136,5 +141,27 @@ mod tests {
         assert!(d
             .hint
             .contains("allow_all_ingress, deny_ingress, password_ingress"));
+    }
+
+    /// A MALFORMED spec seals under its python repr — `{unknown!r}`, so a name
+    /// holding `'` is double-quoted exactly as python prints it — and an empty
+    /// name is a plain seal (python-falsy). Audit W-8.
+    #[test]
+    fn a_malformed_spec_seals_under_its_python_repr() {
+        let rule = super::super::resolve(Some(&serde_json::json!({"type": ["x"]})));
+        let Decision::Deny(d) = rule.authorize(&act("call")) else {
+            panic!("a malformed rule must never allow");
+        };
+        assert_eq!(
+            d.reason,
+            "edge sealed — unknown ingress rule \"{'type': ['x']}\""
+        );
+        assert!(d
+            .hint
+            .contains("\"{'type': ['x']}\" is not an INGRESS rule name"));
+        let Decision::Deny(d) = DenyInbound::unknown("").authorize(&act("call")) else {
+            panic!("an empty rule name must never allow");
+        };
+        assert_eq!(d.reason, "edge sealed by policy");
     }
 }

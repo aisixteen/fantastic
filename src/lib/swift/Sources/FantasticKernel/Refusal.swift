@@ -124,38 +124,45 @@ public enum Refusal {
     /// `forget_record` with `id: "../../x"` to the root loader and recursively
     /// deleted a directory OUTSIDE the store. The gate was not bypassed;
     /// nothing validated the id.
-    public static func guardAgentId(_ verb: String, _ agentId: String) -> JSON? {
-        if agentId.isEmpty { return bad(verb, "id", "a non-empty string") }
+    ///
+    /// `arg` names the field when the segment is not an id: a record's
+    /// `children_dir` becomes a directory too (`<agent>/<children_dir>/<child>`),
+    /// so `create_agent` / `update_agent` hold it to the same rule (python
+    /// `guard_agent_id(..., arg="children_dir")`).
+    public static func guardAgentId(_ verb: String, _ agentId: String, arg: String = "id")
+        -> JSON?
+    {
+        if agentId.isEmpty { return bad(verb, arg, "a non-empty string") }
         if agentId.contains("/") || agentId.contains("\\") {
             return bad(
-                verb, "id", "a single path segment (no separators); got \(pyRepr(agentId))")
+                verb, arg, "a single path segment (no separators); got \(pyRepr(agentId))")
         }
         if agentId == "." || agentId == ".." || agentId.contains("..") {
-            return bad(verb, "id", "a name that is not a path traversal; got \(pyRepr(agentId))")
+            return bad(verb, arg, "a name that is not a path traversal; got \(pyRepr(agentId))")
         }
         if agentId.hasPrefix(".") {
-            return bad(verb, "id", "a name that is not hidden; got \(pyRepr(agentId))")
+            return bad(verb, arg, "a name that is not hidden; got \(pyRepr(agentId))")
         }
         // Message ids are plain integers; in prompt text an all-digit agent id
         // would be indistinguishable from a row id. Python `guard_agent_id`'s
         // `str.isdigit()` — any Unicode digit (`²`, `١٢`), not ASCII only.
         if pyIsDigitString(agentId) {
             return bad(
-                verb, "id",
+                verb, arg,
                 "a name, not a number (message ids are ints); got \(pyRepr(agentId))")
         }
         // `|` qualifies a FOREIGN agent (`<guid>|<agent>`): a local id never
         // carries one, so a gate can tell local from foreign by the id alone.
         if agentId.contains("|") {
             return bad(
-                verb, "id",
+                verb, arg,
                 "a local name without `|` (it marks a foreign `guid|agent`); got \(pyRepr(agentId))")
         }
         // `kernel` names the operator: sends to it reach the root, and a memory
         // store serves the operator under it. An agent holding that id would BE
         // the operator to every store (measured in python 2026-09-28).
         if agentId == reservedId {
-            return bad(verb, "id", "a name other than the reserved \(pyRepr(reservedId))")
+            return bad(verb, arg, "a name other than the reserved \(pyRepr(reservedId))")
         }
         return nil
     }
@@ -178,8 +185,9 @@ public enum Refusal {
     }
 
     /// [`bad`], plus what was actually GIVEN — python's `f"{verb}: {arg} must
-    /// be {want}, got {value!r}"` tail (C30/C38's `timeout`/`payload.type`/
-    /// `id`/`retries` refusals all carry it; `bad` alone omits it).
+    /// be {want}, got {value!r}"` tail (C30/C38's `timeout`/`id`/`retries`
+    /// refusals all carry it; `bad` alone omits it; `payload.type` names only a
+    /// non-string's TYPE — see `BatchSend.launch`).
     public static func badGot(_ verb: String, _ arg: String, _ want: String, got: JSON) -> JSON {
         make(
             badArg, "\(verb): \(arg) must be \(want), got \(pyRepr(got))",

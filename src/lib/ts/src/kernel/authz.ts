@@ -22,7 +22,10 @@ import { pyRepr } from "./pyjson.ts";
  *  explicit list entry names one, so a broad `$parent:"*"` can never silently
  *  become "mutate the graph through my parent". The mutators change the tree;
  *  `state_subscribe` reads the WHOLE tree's stream; `allow`/`disallow` change a
- *  file_bridge's exposure; the lifecycle, task and loader verbs are the root's.
+ *  file_bridge's exposure; the lifecycle, task and loader verbs are the root's;
+ *  `stop`/`mount`/`unmount`/`boot` are any agent's own lifecycle and a host's
+ *  routes. `watch` whose src is the ROOT loses a structural wildcard's cover the
+ *  same way (`authorizeCall`).
  *  This kernel answers few of them — the set is gate POLICY, the same in every
  *  runtime, so a grant means one thing wherever it is read. */
 export const PRIVILEGED_VERBS: ReadonlySet<string> = new Set([
@@ -42,6 +45,14 @@ export const PRIVILEGED_VERBS: ReadonlySet<string> = new Set([
   "persist_record",
   "forget_record",
   "load_tree",
+  // An agent's own LIFECYCLE and a host's ROUTES. By verb name, whatever the
+  // bundle: a web_ws/web_rest leg's `$parent:*` let any client it admitted stop
+  // its web host for every client, or unmount a sealed sibling's routes (audit
+  // 2026-10-03, BV-1).
+  "stop",
+  "mount",
+  "unmount",
+  "boot",
 ]);
 
 /** Structural baseline, merged UNDER any explicit grant on every agent: reach
@@ -109,9 +120,14 @@ export function authorizeCall(
   if (grant !== null && grant !== undefined && (typeof grant !== "object" || Array.isArray(grant))) return false;
   const g = grant ?? {};
   // Acting on your OWN subtree is baseline, not escalation — egress only.
+  // `watch` whose src is the ROOT (`loaderId`) is held to the same rule: the
+  // root's inbox carries every kernel verb's payload, `persist_blob` contents
+  // included, and `$parent:*` handed it to every direct child (audit 2026-10-03,
+  // KV-2). Every other watch is an ordinary verb.
   const privileged =
     ctx.enforcePrivileged !== false &&
-    PRIVILEGED_VERBS.has(verb) &&
+    (PRIVILEGED_VERBS.has(verb) ||
+      (verb === "watch" && ctx.loaderId !== undefined && ctx.loaderId !== null && otherId === ctx.loaderId)) &&
     otherId !== ctx.holderId;
 
   for (const [key, value] of Object.entries(g)) {
@@ -160,20 +176,24 @@ export function isHeritable(value: Json | undefined): value is { verbs: string[]
  * `ancestorGrants` are the `can_call` maps of the sender's ancestors, parent
  * first. An entry keyed by the target's literal id lets the holder's
  * DESCENDANTS call it: a NAMED verb covers even a privileged one, `*` covers
- * only a non-privileged verb. The holder itself is never covered — its own map
- * reaches `verbAllowed`, which refuses a map value.
+ * only a non-privileged verb — and not `watch` on the ROOT (`loaderId`), held to
+ * the structural-wildcard rule (KV-2). The holder itself is never covered — its
+ * own map reaches `verbAllowed`, which refuses a map value.
  */
 export function authorizeHeritable(
   ancestorGrants: Iterable<Payload | null | undefined>,
   verb: string,
   targetId: string,
+  loaderId: string | null,
 ): boolean {
+  const privileged = PRIVILEGED_VERBS.has(verb) ||
+    (verb === "watch" && loaderId !== null && targetId === loaderId);
   for (const g of ancestorGrants) {
     if (g === null || g === undefined || typeof g !== "object" || Array.isArray(g)) continue;
     const entry = (g as Payload)[targetId];
     if (!isHeritable(entry)) continue;
     if (entry.verbs.includes(verb)) return true;
-    if (entry.verbs.includes("*") && !PRIVILEGED_VERBS.has(verb)) return true;
+    if (entry.verbs.includes("*") && !privileged) return true;
   }
   return false;
 }

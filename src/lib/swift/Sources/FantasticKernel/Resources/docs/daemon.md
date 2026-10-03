@@ -5,8 +5,8 @@
 Check `.fantastic/lock.yaml` first — it holds `{pid}`. One kernel per dir,
 so the two paths are mutually exclusive:
 
-**A daemon IS running** (lock.yaml has a live pid). The one-shot CLI is
-locked out — go through the daemon's surface. Find it in the tree: a
+**A daemon IS running** (it holds the flock on lock.yaml, which names its
+pid). The one-shot CLI is locked out — go through the daemon's surface. Find it in the tree: a
 `web.tools` node carries the HTTP `port`; its children are the surfaces.
   - `web_rest.tools` child → `POST http://localhost:<port>/<rest_id>/<target>`
     body=`{"type":"<verb>",...}`; or browser-pastable
@@ -15,8 +15,9 @@ locked out — go through the daemon's surface. Find it in the tree: a
     (frames: `{"type":"call","target":..,"payload":..,"id":..,"secret":[..]?}`)
   To get the tree itself: `GET http://localhost:<port>/<rest_id>/_reflect`.
 
-**No daemon running** (no live pid). The one-shot CLI works — each call
-spawns a fresh kernel, reads disk, dispatches, exits:
+**No daemon running** (nobody holds that flock — a lock.yaml left behind is
+stale, even when its pid is alive again). The one-shot CLI works — each call
+takes the lock, spawns a fresh kernel, reads disk, dispatches, exits:
   - `fantastic reflect` — the agent tree (add `bundles=all` for the catalog)
   - `fantastic <id> <verb> [k=v ...]` — call any verb on any agent
   (one-shots don't see live process-memory state — they're disk-only.)

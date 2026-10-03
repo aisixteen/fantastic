@@ -51,6 +51,27 @@ private func substRoot(_ v: JSON) -> JSON {
     }
 }
 
+/// `$workdir` in a loader's `manifest` — a string VALUE that is `$workdir` or
+/// starts with `$workdir/` — means the kernel's running dir, ABSOLUTE. It is how
+/// a config names an absolute path that is still the test's: a credential_store's
+/// `file` is refused relative, and the user's home is never touched. Substituted
+/// when the manifest is written — the one moment the dir is known; keys and
+/// `manifest_text` are left as written. Python `_subst_workdir`.
+private let WORKDIR = "$workdir"
+
+private func substWorkdir(_ v: JSON, _ cwd: URL) -> JSON {
+    switch v {
+    case .string(let s) where s == WORKDIR || s.hasPrefix(WORKDIR + "/"):
+        return .string(cwd.path + s.dropFirst(WORKDIR.count))
+    case .array(let a): return .array(a.map { substWorkdir($0, cwd) })
+    case .object(let o):
+        var out = OrderedDictionary<String, JSON>()
+        for (k, x) in o { out[k] = substWorkdir(x, cwd) }
+        return .object(out)
+    default: return v
+    }
+}
+
 /// Yams' `Any` tree → our `JSON`, walked by hand.
 ///
 /// `internal`, not `private`: the SCENARIO runner in this same target reads the
@@ -149,8 +170,9 @@ private func makeKernel(workdir: URL) -> Kernel {
     registry.register("file_bridge.tools", FileBundle())
     registry.register("exec_bridge.tools", ExecBridgeBundle())
     registry.register("lifecycle_probe.tools", LifecycleProbe())
-    // Values in a file UNDER THE RUNNING DIR (the config names a relative
-    // `file`); the keychain is never reached, so the real one is never touched.
+    // Values in a file UNDER THE RUNNING DIR (the config names an absolute
+    // `$workdir/…` `file`); the keychain is never reached, so the real one is
+    // never touched.
     registry.register(
         CredentialStoreBundle.handlerModule, CredentialStoreBundle(keychain: MemKeychain()))
     let kernel = Kernel(storage: .disk(workdir), bundles: registry)
@@ -199,7 +221,8 @@ private func hydrate(_ sc: Scenario, workdir: URL) async throws -> Hydration {
             // Written as JSON, deliberately: YAML is a SUPERSET of JSON, so the
             // loader reads this unchanged, and round-tripping through a YAML
             // emitter would have to represent values it refuses (a bare null).
-            try loader["manifest"].serialize().write(to: path, atomically: true, encoding: .utf8)
+            try substWorkdir(loader["manifest"], workdir).serialize()
+                .write(to: path, atomically: true, encoding: .utf8)
         } else if let text = loader["manifest_text"].asString {
             try text.write(to: path, atomically: true, encoding: .utf8)
         }
@@ -326,7 +349,7 @@ private func dispatchCorpusOutcome(
         case "read_stream":
             let item = fields.apply(Item(AgentId(target), payload, rawReply: true))
             let out = await k.send([item])[0]
-            let (reply, body) = (out.result, out.body)
+            let (reply, body) = (out.result, bodyAt(out.body, "bytes"))
             if case .object(var o) = reply {
                 o["bytes"] = .string(String(data: body ?? Data(), encoding: .utf8) ?? "")
                 return (.object(o), out)
@@ -1057,10 +1080,10 @@ private func ownedRoots(of config: JSON) -> Set<String> {
                 let first = r.split(separator: "/").first.map(String.init) ?? r
                 if !first.isEmpty, first != "." { out.insert(first) }
             }
-            // a credential store's RELATIVE `file` lives under the running dir
+            // a credential store's `$workdir/…` `file` lives under the running dir
             if o["handler_module"]?.asString == CredentialStoreBundle.handlerModule,
-                let f = o["file"]?.asString, !f.hasPrefix("/"), !f.hasPrefix("~"),
-                let first = f.split(separator: "/").first.map(String.init),
+                let f = o["file"]?.asString, f.hasPrefix(WORKDIR + "/"),
+                let first = f.dropFirst(WORKDIR.count + 1).split(separator: "/").first.map(String.init),
                 !first.isEmpty, first != ".", first != ".."
             {
                 out.insert(first)

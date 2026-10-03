@@ -240,13 +240,32 @@ struct ReflectUniformTests {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("rootdocs_\(UUID().uuidString.prefix(8))")
         defer { try? FileManager.default.removeItem(at: dir) }
-        RootDocs.seed(workdir: dir)
+        try RootDocs.seed(workdir: dir)
         let routing = dir.appendingPathComponent(".fantastic/docs/frontend/routing.md")
         #expect(FileManager.default.fileExists(atPath: routing.path))
         #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent(".fantastic/docs/system-verbs.md").path))
         try "edited".write(to: routing, atomically: true, encoding: .utf8)
-        RootDocs.seed(workdir: dir)
+        try RootDocs.seed(workdir: dir)
         #expect(try String(contentsOf: routing, encoding: .utf8) == "edited")
+    }
+
+    /// A seed write that fails THROWS, as python's seed raises — `try?` dropped
+    /// it, so a doc tree that never landed was invisible (audit 2026-10-03,
+    /// ARCH2-9).
+    @Test func aFailedSeedWriteThrows() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rootdocs_\(UUID().uuidString.prefix(8))")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let fdir = dir.appendingPathComponent(".fantastic")
+        try FileManager.default.createDirectory(at: fdir, withIntermediateDirectories: true)
+        try "a FILE where the docs dir goes".write(
+            to: fdir.appendingPathComponent("docs"), atomically: true, encoding: .utf8)
+        #expect(throws: (any Error).self) { try RootDocs.seed(workdir: dir) }
+        try "a FILE where readme.md's dir goes".write(
+            to: dir.appendingPathComponent("blocked"), atomically: true, encoding: .utf8)
+        #expect(throws: (any Error).self) {
+            try RootReadme.seed(workdir: dir.appendingPathComponent("blocked"))
+        }
     }
 
     @Test func nonRootHasNoReadmesFrame() async {
@@ -628,15 +647,12 @@ struct ReadmeDiskModeTests {
         #expect(idx["raised"].asBool == true, "\(idx)")
     }
 
-    /// C12 — the duck-typed ROOT FRAME is BEST EFFORT, and that is a different
-    /// rule from C60 above. Python wraps the whole `reflect_root_extra` call in
-    /// a bare `except Exception: pass` (`P/kernel/_agent.py`), so the same
-    /// non-UTF-8 doc that fails an explicit `readme=` read merely DROPS
-    /// `persistence`/`readmes`/`docs`/`self_extension` from a `detail=full`
-    /// root reflect — the reply still carries the identity and the tree. Swift
-    /// propagated the `UnicodeDecodeError` and answered `{error, raised}` for
-    /// the whole reflect.
-    @Test func aRaisingRootFrameIsDroppedNotPropagated() async throws {
+    /// C12 — a duck-typed ROOT FRAME that raises FAILS the reflect, as python's
+    /// bare hook call does: the same non-UTF-8 doc that fails an explicit
+    /// `readme=` read fails a `detail=full` root reflect. It used to be
+    /// swallowed, and the reply carried no `persistence`/`guid`/`readmes`/`docs`/
+    /// `self_extension` with nothing to say why (audit 2026-10-03, ARCH2-9).
+    @Test func aRaisingRootFrameFailsTheReflect() async throws {
         let storeRoot = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("readme_rootframe_\(UUID().uuidString.prefix(8))")
         let docs = storeRoot.appendingPathComponent("docs")
@@ -654,19 +670,17 @@ struct ReadmeDiskModeTests {
         kernel.setRoot(root)
 
         let fullCall = Item("kernel_state", ["type": "reflect", "detail": "full", "tree": "ids"])
-        let full = await kernel.send([fullCall])[0].result
-        #expect(full["raised"].isNull, "the root frame must not fail the reflect: \(full)")
-        #expect(full["id"].asString == "kernel_state", "\(full)")
-        let treeIds = full["tree"].asArray?.compactMap { $0.asString }
-        #expect(treeIds == ["kernel_state"], "\(full)")
-        // Everything the hook would have contributed is simply absent.
-        for k in ["persistence", "readmes", "docs", "self_extension"] {
-            #expect(full[k].isNull, "\(k) survived a raising root frame: \(full)")
-        }
-        // An explicit `readme=` read of the same tree still raises (C60).
-        let indexCall = Item("kernel_state", ["type": "reflect", "readme": "index"])
-        let idx = await kernel.send([indexCall])[0].result
-        #expect(idx["raised"].asBool == true, "\(idx)")
+        let full = await kernel.send([fullCall])[0]
+        #expect(full.status == .failed, "\(full.result)")
+        #expect(full.result["raised"].asBool == true, "\(full.result)")
+        #expect(
+            full.result["error"].asString
+                == "UnicodeDecodeError: 'utf-8' codec can't decode byte 0xff in position 1: invalid start byte",
+            "\(full.result)")
+        // A distilled reflect builds no doc frame, so it still answers.
+        let distilled = await kernel.send([Item("kernel_state", ["type": "reflect", "tree": "ids"])])[0]
+        #expect(distilled.status == .completed, "\(distilled.result)")
+        #expect(distilled.result["persistence"].asObject != nil, "\(distilled.result)")
     }
 
     /// python 2026-09-20: the key check is LEXICAL and then the INDEX — a `..`

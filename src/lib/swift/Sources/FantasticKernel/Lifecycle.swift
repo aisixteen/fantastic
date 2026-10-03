@@ -285,9 +285,7 @@ extension Kernel {
         guard let hm = node.handlerModule else { return }
         // A record whose bundle this runtime does not have — `create_agent`
         // accepts one at runtime — is python's failed import: SAID on stderr
-        // with python's `ModuleNotFoundError` text, and the walk goes on. A
-        // name that imports (a package) but has no hook is python's absent
-        // `on_shutdown`: nothing to free, nothing said.
+        // with python's `ModuleNotFoundError` text, and the walk goes on.
         guard let bundle = bundles.get(hm) else {
             if let missing = bundles.moduleNotFound(hm) {
                 RuntimeLog.warn(

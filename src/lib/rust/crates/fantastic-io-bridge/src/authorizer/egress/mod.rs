@@ -21,11 +21,17 @@ pub use silent::Silent;
 /// Resolve an egress rule spec (string | `{type, env}` | null) BY NAME. Absent ⇒
 /// `Silent` (present nothing). Unknown type ⇒ `Err`.
 pub fn resolve(spec: Option<&Value>) -> Result<Arc<dyn EgressRule>, String> {
-    let (name, token_env) = parse_spec(spec)?;
+    let (name, token_env) = parse_spec(spec);
     let rule: Arc<dyn EgressRule> = match name.as_deref() {
         None | Some("silent_egress") => Arc::new(Silent),
         Some("password_egress") => Arc::new(Password::new(token_env)),
-        Some(other) => return Err(format!("unknown egress rule type {other:?}")),
+        // python `f"unknown egress rule type {name!r}"`
+        Some(other) => {
+            return Err(format!(
+                "unknown egress rule type {}",
+                fantastic_bundle::py_repr(other)
+            ))
+        }
     };
     Ok(rule)
 }

@@ -47,7 +47,8 @@ struct FileBundleTests {
     }
 
     /// `blob` is the request's chunk (at the payload's `bytes`); `nil` asks for
-    /// the reply's chunk raw (a `read_stream`).
+    /// the reply's chunk raw (a `read_stream`), which file_bridge returns at the
+    /// reply's `bytes` — python's `reply["bytes"]`.
     private func bin(_ k: Kernel, _ header: OrderedDictionary<String, JSON>, _ blob: Data? = nil)
         async -> (JSON, Data?)
     {
@@ -55,7 +56,8 @@ struct FileBundleTests {
             AgentId("fs"), .object(header), binary: blob.map { Blob("bytes", $0) },
             rawReply: blob == nil)
         let out = await k.send([item])[0]
-        return (out.result, out.body)
+        #expect(out.body == nil || out.body?.parts == ["bytes"], "the chunk sits at `bytes`")
+        return (out.result, out.body?.bytes)
     }
 
     private func write(_ dir: URL, _ path: String, _ text: String) {
@@ -501,12 +503,11 @@ struct FileBundleTests {
         let (k, dir) = await openBridge()
         defer { try? FileManager.default.removeItem(at: dir) }
         write(dir, "a.txt", "abcdef")
-        // empty source/sink = self; empty source_path falls through to `path`;
-        // absent sink_path = the source path.
+        // empty source/sink = self.
         let r = await call(
             k,
             [
-                "type": "pump", "source": "", "sink": "", "source_path": "", "path": "a.txt",
+                "type": "pump", "source": "", "sink": "", "source_path": "a.txt",
                 "sink_path": "b.txt",
             ])
         #expect(r["source"].asString == "a.txt" && r["sink"].asString == "b.txt", "\(r)")
@@ -520,6 +521,47 @@ struct FileBundleTests {
         #expect(
             bad["error"].asString?.hasPrefix("pump: read from 'kernel_state' failed: ") == true,
             "\(bad)")
+    }
+
+    /// Audit BV-7 — python `test_a_pump_onto_its_own_source_is_refused`. With only
+    /// `source_path`, sink and sink_path default to the source, and the first
+    /// write's `truncate` cut the file the next read comes from — 200 KiB became
+    /// 64 KiB under a success reply. Refused, the path judged normalised (`./x` is
+    /// `x`); the file is untouched.
+    @Test func aPumpOntoItsOwnSourceIsRefused() async {
+        let (k, dir) = await openBridge()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let data = Data((0..<800).flatMap { _ in (0...255).map { UInt8($0) } })
+        try? data.write(to: dir.appendingPathComponent("self.bin"))
+        let want =
+            "{\"error\":\"pump: sink_path must be another file than source_path when the "
+            + "sink is the source — a pump onto its own source truncates it after the first "
+            + "chunk\",\"reason\":\"bad_arg\",\"arg\":\"sink_path\"}"
+        for extra: OrderedDictionary<String, JSON> in [
+            [:], ["sink_path": "self.bin"], ["sink_path": "./self.bin"],
+            ["sink": "fs", "sink_path": "sub/../self.bin"],
+        ] {
+            var p: OrderedDictionary<String, JSON> = ["type": "pump", "source_path": "self.bin"]
+            for (key, v) in extra { p[key] = v }
+            let out = await call(k, p)
+            #expect(out.serialize() == want, "\(extra) → \(out.serialize())")
+        }
+        #expect((try? Data(contentsOf: dir.appendingPathComponent("self.bin"))) == data)
+    }
+
+    /// ARCH2-8 — `path` is no alias for `source_path`: the verb doc lists only
+    /// `source_path`, so a `path` names nothing and the read end refuses the empty
+    /// source.
+    @Test func pumpTakesSourcePathOnly() async {
+        let (k, dir) = await openBridge()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        write(dir, "a.txt", "hello")
+        let out = await call(k, ["type": "pump", "path": "a.txt", "sink_path": "b.txt"])
+        #expect(out["reason"].asString == "transport_error", "\(out.serialize())")
+        #expect(
+            out["error"].asString?.hasPrefix("pump: read from 'fs' failed: {") == true,
+            "\(out.serialize())")
+        #expect(!FileManager.default.fileExists(atPath: dir.appendingPathComponent("b.txt").path))
     }
 
     /// Every chunk the pump moves is an EXECUTION — python sends each read and
@@ -665,7 +707,7 @@ struct FileBundleTests {
     }
 
     /// A2.20 — an ABSENT root serves the workdir, for reflect AND data verbs.
-    @Test func absentRootServesTheWorkdir() async {
+    @Test func absentRootServesTheWorkdir() async throws {
         let (k, dir) = await openBridge()
         defer { try? FileManager.default.removeItem(at: dir) }
         let r = await k.send([
@@ -678,9 +720,9 @@ struct FileBundleTests {
                 ]))
         ])[0].result
         #expect(r["id"].asString == "wd", "\(r)")
-        let cwd = FileManager.default.currentDirectoryPath
+        let cwd = try pyRealpath(FileManager.default.currentDirectoryPath)
         let refl = await k.send([Item(AgentId("wd"), .object(["type": "reflect"]))])[0].result
-        #expect(refl["root"].asString == pyRealpath(cwd), "\(refl)")
+        #expect(refl["root"].asString == cwd, "\(refl)")
         let l = await k.send([Item(AgentId("wd"), .object(["type": "list"]))])[0].result
         let names = (l["files"].asArray ?? []).compactMap { $0["name"].asString }
         #expect(names.contains("Package.swift"), "the workdir itself is served: \(names)")

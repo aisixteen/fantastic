@@ -2288,6 +2288,62 @@ async fn boot_announces_say_to_cli() {
     stop(&kernel, "web_say").await;
 }
 
+/// ARCH2-10 — the announcement names the host the listener BOUND, not a
+/// hardcoded `127.0.0.1`: a host bound elsewhere does not answer there. The
+/// twin of python `test_boot_announces_the_bound_host`.
+#[tokio::test]
+async fn boot_announces_the_bound_host() {
+    let tmp = TempDir::new().unwrap();
+    let mut kernel = Kernel::new();
+    kernel.bundles.register(HANDLER_MODULE, WebBundle);
+    kernel.bundles.register("cli_probe.tools", SayProbe);
+    let kernel = Arc::new(kernel);
+    let root = Agent::new(
+        AgentId::from("kernel_state"),
+        None,
+        None,
+        Map::new(),
+        tmp.path().join(".fantastic"),
+        false,
+    );
+    kernel.register(Arc::clone(&root));
+    kernel.set_root(Arc::clone(&root));
+    let port = free_port();
+    for item in [
+        json!({"type": "create_agent", "parent_id": "kernel",
+               "handler_module": "cli_probe.tools", "id": "cli",
+               "callable_by": {"$self": "*", "$parent": "*", "$children": "*", "web_host": "*"}}),
+        json!({"type": "create_agent", "parent_id": "kernel",
+               "handler_module": HANDLER_MODULE, "id": "web_host", "port": port,
+               "host": "localhost",
+               "can_call": {"$self": "*", "$parent": "*", "$children": "*", "cli": "*"}}),
+    ] {
+        let reply = kernel
+            .send(vec![Item::new(AgentId::from("kernel_state"), item)])
+            .await
+            .remove(0)
+            .result;
+        assert!(reply.get("error").is_none(), "stage: {reply}");
+    }
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("web_host"),
+            json!({"type": "boot"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let said = SAID.lock().expect("said").clone();
+    assert!(
+        said.iter().any(|s| s
+            == &format!(
+            "listening on http://localhost:{port}/ · rest/ws are children (reflect kernel for ids)"
+        )),
+        "cli never heard the bound host: {said:?}"
+    );
+    stop(&kernel, "web_host").await;
+}
+
 /// Every `say` text the boot announcement sent, for `boot_announces_say_to_cli`.
 static SAID: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
@@ -3131,6 +3187,11 @@ async fn foreign_websocket_upgrade_is_refused_listed_origin_passes() {
     stop(&kernel, "web_ow").await;
 }
 
+/// W-2 (audit 2026-10-03): every request whose Host is not the server's own
+/// authority is refused, GET and the websocket upgrade included.
+#[path = "tests_host_guard.rs"]
+mod host_guard;
+
 /// The one watch path (python `web_ws/tests/test_watch_path.py`).
 #[path = "tests_watch_path.rs"]
 mod watch_path;
@@ -3153,6 +3214,11 @@ mod binary_path;
 #[path = "tests_ws_deflate.rs"]
 mod ws_deflate;
 
+/// W-3 (audit 2026-10-03): a ws message, fragmented or not, is bounded by the
+/// one frame cap.
+#[path = "tests_ws_message_cap.rs"]
+mod ws_message_cap;
+
 /// Secret marks cross the web legs (python
 /// `io_bridge/tests/test_secret_across_bridges.py`, web half).
 #[path = "tests_secret.rs"]
@@ -3162,6 +3228,11 @@ mod secret_across;
 /// `io_bridge/tests/test_binary_path_steps.py`, web half).
 #[path = "tests_binary_steps.rs"]
 mod binary_steps;
+
+/// ANY verb whose reply carries raw bytes answers binary on every leg — no verb
+/// list (python `io_bridge/tests/test_any_verb_bytes_reply.py`).
+#[path = "tests_any_verb_bytes.rs"]
+mod any_verb_bytes;
 
 /// A read_stream SOURCE that is not file_bridge: `chunked` answers two chunks
 /// whose first carries NO `eof` key; `broken` answers one chunk with neither
@@ -3390,3 +3461,8 @@ async fn deleting_one_web_agent_frees_only_its_own_listener() {
     assert_eq!(reflect("web_s4a").await["running"], json!(true));
     stop(&kernel, "web_s4a").await;
 }
+
+// IO-4 (audit 2026-10-03): the rest leg's gate runs before its body is read, and
+// the body is bounded by the one frame cap.
+#[path = "tests_rest_ingress_order.rs"]
+mod rest_ingress_order;

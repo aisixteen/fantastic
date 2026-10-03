@@ -1,7 +1,7 @@
 """Drive an AI agent on a SPAWNED kernel — the wire half of `helpers/ai.py`.
 
 The in-process connector reaches inside the kernel: it wraps the provider
-object (`core._providers[aid] = proxy`) to capture the transcript and taps
+object (`WRAPS[aid] = wrap_with(proxy)`) to capture the transcript and taps
 `root.ctx.inboxes` for status events. Neither exists across a socket, so this
 module supplies the same two things over the REST face:
 

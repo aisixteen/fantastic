@@ -393,7 +393,18 @@ async def test_delegating_on_an_agent_that_does_not_exist_names_that(seeded_kern
     false and sent a builder into a 382-second deliberation (measured 2026-09-02,
     E30 subai:python). The same grant in the NEXT send passes."""
     root = seeded_kernel.id
-    peer = await _mk(seeded_kernel, id="peer_dg")
+    # The peer's record is the OPERAND of the grant (AV-1): the granter names it
+    # with `update_agent`, and the peer accepts the granter's edit.
+    peer = await _mk(
+        seeded_kernel,
+        id="peer_dg",
+        callable_by={
+            "$self": "*",
+            "$parent": "*",
+            "$children": "*",
+            "granter_dg": ["update_agent"],
+        },
+    )
     await _mk(
         seeded_kernel,
         id="granter_dg",
@@ -402,6 +413,7 @@ async def test_delegating_on_an_agent_that_does_not_exist_names_that(seeded_kern
             "$parent": "*",
             "$children": "*",
             root: ["*", "create_agent", "update_agent"],
+            "peer_dg": ["update_agent"],
         },
     )
     with sender_context("granter_dg"):

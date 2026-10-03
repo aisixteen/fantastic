@@ -23,9 +23,12 @@ async def _async_iter(items):
 
 
 def _patched_client(stream_items):
-    """Build a mock for ollama.AsyncClient that returns stream_items from chat()."""
+    """Build a mock for ollama.AsyncClient that returns stream_items from chat().
+    The provider opens it per call as an async context manager."""
     client = MagicMock()
     client.chat = AsyncMock(return_value=_async_iter(stream_items))
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=False)
     return client
 
 
@@ -75,11 +78,16 @@ def test_endpoint_and_model_are_required():
         OllamaProvider()
 
 
-def test_stop_resets_client():
+async def test_the_client_is_opened_and_closed_per_call():
+    """The provider is built per turn: each call opens its own client and closes
+    it, so nothing holds a connection past the turn (audit ARCH2-2)."""
     p = OllamaProvider(endpoint="http://ollama.test", model="ollama-test")
-    p._client = "fake"
-    p.stop()
-    assert p._client is None
+    client = _patched_client([_mk_chunk(content="ok")])
+    with patch("ollama.AsyncClient", return_value=client) as made:
+        assert [x async for x in p.chat([{"role": "user", "content": "hi"}])] == ["ok"]
+    made.assert_called_once_with(host="http://ollama.test")
+    client.__aenter__.assert_awaited_once()
+    client.__aexit__.assert_awaited_once()
 
 
 # ─── the stream, pinned (reduction candidate A: a shared ThinkWrap) ─────────

@@ -6,18 +6,18 @@ drift. Dispatch is CONCURRENT, the returned array preserves input order, and
 Expiry goes through the FRONT DOOR (`cancel_task`), so every bundle's
 `on_cancel` hook runs before the abort.
 
-Statuses: completed | failed | cancelled | timed_out.
+Statuses: completed | errored | failed | cancelled | timed_out.
 Invariant: `pid is None` ⟺ the item never reached the task table.
 """
 
 from __future__ import annotations
 
 import asyncio
-import sys
 import time
 import types
 
 from kernel._kernel import Kernel
+from kernel import register_unlisted
 
 # A SELF-OWNED slow bundle. Importing test_task_table's would share its module
 # state, and under xdist the import can be a SECOND instance of that module —
@@ -61,7 +61,7 @@ _mod = types.ModuleType("batch_slow_agent.tools")
 _mod.handler = _bslow_handler
 _mod.on_cancel = _bslow_on_cancel
 _mod.VERBS = {}
-sys.modules["batch_slow_agent.tools"] = _mod
+register_unlisted("batch_slow_agent.tools", _mod)
 
 SLOW = "batch_slow_agent.tools"
 
@@ -232,7 +232,7 @@ async def test_no_timeout_waits_out_a_slow_handler(seeded_kernel):
 
     mod.handler = handler
     mod.VERBS = {}
-    sys.modules["dawdle_agent.tools"] = mod
+    register_unlisted("dawdle_agent.tools", mod)
     rec = (
         await seeded_kernel.send(
             [
@@ -334,7 +334,7 @@ async def test_handler_raise_settles_as_failed_and_send_never_raises(seeded_kern
 
     mod.handler = handler
     mod.VERBS = {}
-    sys.modules["raiser_agent.tools"] = mod
+    register_unlisted("raiser_agent.tools", mod)
     rec = (
         await seeded_kernel.send(
             [
@@ -360,6 +360,85 @@ async def test_handler_raise_settles_as_failed_and_send_never_raises(seeded_kern
     assert outs[0]["result"]["raised"] is True
     assert "RuntimeError: kaput" in outs[0]["result"]["error"]
     assert outs[1]["status"] == "completed", "a sibling must not be poisoned"
+
+
+async def test_a_handler_sys_exit_settles_failed_and_the_loop_runs_on(seeded_kernel):
+    """A SystemExit out of an asyncio task stops the EVENT LOOP — the whole
+    kernel, for one handler that called sys.exit (audit 2026-10-03, ARCH2-1).
+    It is a raise like any other: that call settles failed, a sibling and the
+    next call complete."""
+    mod = types.ModuleType("exiter_agent.tools")
+
+    async def handler(id, payload, kernel):
+        if payload.get("type") == "quit":
+            raise SystemExit(3)
+        return None
+
+    mod.handler = handler
+    register_unlisted("exiter_agent.tools", mod)
+    seeded_kernel.create("exiter_agent.tools", id="exiter")
+    outs = await seeded_kernel.send(
+        [
+            {"target": "exiter", "payload": {"type": "quit"}},
+            {"target": "kernel", "payload": {"type": "ps"}},
+        ]
+    )
+    assert outs[0]["status"] == "failed", outs[0]
+    assert outs[0]["result"] == {"error": "SystemExit: 3", "raised": True}
+    assert outs[1]["status"] == "completed", "a sibling must not be poisoned"
+    again = await seeded_kernel.send([{"target": "kernel", "payload": {"type": "ps"}}])
+    assert again[0]["status"] == "completed"
+
+
+async def test_a_module_whose_top_level_exits_is_never_imported(
+    seeded_kernel, tmp_path, monkeypatch
+):
+    """`create_agent` imported ANY handler_module on `sys.path` to validate its
+    meta, and any agent may create under ITSELF on its baseline — so one call
+    naming a module whose top level exits (stdlib `unittest.__main__` is one)
+    took the python kernel down (audit 2026-10-03, ARCH2-1). A name outside the
+    bundle catalog is never imported now: the create keeps the record as one this
+    runtime cannot answer (as rust and swift do), the call to it is refused, and
+    the kernel answers the next call."""
+    from kernel import sender_context
+
+    (tmp_path / "arch21_exit_mod.py").write_text("raise SystemExit(7)\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    seeded_kernel.create(None, id="arch21_worker")  # the baseline only
+    with sender_context("arch21_worker"):
+        out = (
+            await seeded_kernel.send(
+                [
+                    {
+                        "target": "kernel",
+                        "payload": {
+                            "type": "create_agent",
+                            "parent_id": "arch21_worker",
+                            "handler_module": "arch21_exit_mod",
+                            "id": "arch21_child",
+                        },
+                    }
+                ]
+            )
+        )[0]
+    assert out["status"] == "completed", out
+    assert "arch21_child" in seeded_kernel.ctx.agents
+    called = (
+        await seeded_kernel.send(
+            [{"target": "arch21_child", "payload": {"type": "ping"}}]
+        )
+    )[0]
+    assert called["result"] == {
+        "error": (
+            "agent 'arch21_child': handler_module 'arch21_exit_mod' cannot be "
+            "imported in this runtime: ModuleNotFoundError: No module named "
+            "'arch21_exit_mod'"
+        ),
+        "reason": "unhandled",
+        "verb": "ping",
+    }
+    again = await seeded_kernel.send([{"target": "kernel", "payload": {"type": "ps"}}])
+    assert again[0]["status"] == "completed"
 
 
 # ─── the fast path and the Kernel facade ───────────────────────
@@ -424,7 +503,7 @@ async def _overlap_handler(id, payload, kernel):
 _ov = types.ModuleType("overlap_agent.tools")
 _ov.handler = _overlap_handler
 _ov.VERBS = {}
-sys.modules["overlap_agent.tools"] = _ov
+register_unlisted("overlap_agent.tools", _ov)
 
 
 async def test_a_batch_executes_its_items_in_parallel_and_delivers_them_in_order(

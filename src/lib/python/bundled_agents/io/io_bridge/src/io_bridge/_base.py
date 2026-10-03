@@ -54,16 +54,30 @@ def parse_spec(spec) -> tuple[str | None, dict]:
     """Normalize a rule spec to `(type_name, config)`.
 
     Falsy ⇒ `(None, {})`. A bare string ⇒ `(name, {})`. An object ⇒
-    `(type, {…config})`. `env` is the secret-env key. Unknown keys pass through and
-    are tolerantly filtered to the rule's own fields by `construct`."""
+    `(type, {…config})`. `env` is the secret-env key; a null `type`/`env` is an
+    absent one. Unknown keys pass through and are tolerantly filtered to the
+    rule's own fields by `construct`.
+
+    MALFORMED ⇒ `(repr(spec), {})`: a spec that is neither a string nor an
+    object, or an object whose `type` or `env` is not a string, is named by its
+    own repr — a name no registry holds, so ingress SEALS on it
+    (`DenyInbound(unknown=…)`) and egress refuses it like any unknown name. It
+    used to reach `.get` on an int, a dict lookup with a list, `os.environ.get`
+    with an int: every frame on the leg raised instead of being denied (audit
+    W-8, 2026-10-03; rust and swift denied)."""
     if not spec:
         return None, {}
     if isinstance(spec, str):
         return spec, {}
+    if not isinstance(spec, dict) or any(
+        spec.get(k) is not None and not isinstance(spec[k], str)
+        for k in ("type", "env")
+    ):
+        return repr(spec), {}
     name = spec.get("type")
     cfg: dict = {}
     for k, v in spec.items():
-        if k == "type":
+        if k == "type" or (k == "env" and v is None):
             continue
         cfg[k] = v
     return name, cfg

@@ -15,7 +15,11 @@ class Password(IngressRule):
     leg's group token, read from an env var (`env`, default
     `FANTASTIC_GROUP_TOKEN`) so the secret never touches the portable `.fantastic`
     workdir. Fail-closed: an unset/empty env var refuses every inbound `call`.
-    Constant-time compare. The egress mirror (`egress_rules.password`) PRESENTS the
+    Constant-time compare over the UTF-8 BYTES of both sides (rust and swift compare
+    bytes): on `str`, `hmac.compare_digest` raises TypeError for any non-ASCII text,
+    so a stray `é` from a tokenless client was an unhandled error instead of a
+    denial, and a non-ASCII group token refused its own holders (audit IO-6,
+    2026-10-03). The egress mirror (`egress_rules.password`) PRESENTS the
     same token, so one group token in env makes a leg a full member."""
 
     env: str = "FANTASTIC_GROUP_TOKEN"
@@ -31,6 +35,14 @@ class Password(IngressRule):
         presented = (
             action.token
         )  # the frame-envelope token (NOT the dispatched payload)
-        if isinstance(presented, str) and hmac.compare_digest(presented, expected):
+        if isinstance(presented, str) and hmac.compare_digest(
+            _utf8(presented), _utf8(expected)
+        ):
             return ALLOW
         return Decision(False, "invalid or missing group token")
+
+
+def _utf8(text: str) -> bytes:
+    """A token's bytes as compared. `surrogatepass` so no `str` can raise here — a
+    lone surrogate is bytes no real token has, so it simply does not match."""
+    return text.encode("utf-8", "surrogatepass")

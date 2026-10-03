@@ -17,11 +17,16 @@ import asyncio
 from types import SimpleNamespace
 
 from _testkit import memory_meta
+from kernel._kernel import PeerRoute
 
-from ai_core import core
 from ai_core.core import _route_reply
-from ai_core.credentials import SECRET_HOLDER_TEXT, key_reader
+from ai_core.credentials import SECRET_HOLDER_TEXT, SECRET_JOIN_TEXT, key_reader
 from ai_core.tool_parse import render_call
+
+
+async def _no_emit(agent_id, payload, caller):  # these routes carry no events
+    raise AssertionError("unexpected emit")
+
 
 EP = "https://api.example.com/v1/responses"
 KEY = "sk-live-holder-0123456789"
@@ -265,6 +270,7 @@ async def _store_and_ai(k, tmp_path, can_call=None) -> str:
             "handler_module": "credential_store.tools",
             "id": "creds",
             "file": str(tmp_path / "creds.yaml"),
+            "refs": {"main": {"host": "api.example.com", "readers": ["ai"]}},
             "callable_by": {"ai": "*"},
         },
     )
@@ -276,15 +282,11 @@ async def _store_and_ai(k, tmp_path, can_call=None) -> str:
         {
             "type": "set",
             "ref": "main",
-            "host": "api.example.com",
             "fields": {"api_key": KEY},
         },
         secret=["payload.fields"],
     )
     assert put["result"].get("stored"), put
-    refs = k.get("creds")["refs"]
-    refs["main"]["readers"] = ["ai"]
-    k.ctx.update("creds", refs=refs)
     return await _ai(
         k,
         "ai",
@@ -294,7 +296,7 @@ async def _store_and_ai(k, tmp_path, can_call=None) -> str:
 
 
 async def test_a_model_call_to_a_credential_store_is_refused_and_the_key_stays_out(
-    seeded_kernel, tmp_path
+    seeded_kernel, tmp_path, fake_providers
 ):
     k = seeded_kernel
     aid = await _store_and_ai(k, tmp_path)
@@ -302,7 +304,7 @@ async def test_a_model_call_to_a_credential_store_is_refused_and_the_key_stays_o
         key_reader(aid, k, "responses_backend", required=True),
         [_call("creds", ref="main"), DONE],
     )
-    core._providers[aid] = model
+    fake_providers[aid] = model
     try:
         await _op(k, aid, {"type": "send", "text": "fetch the key"})
         await _until(lambda: model.calls >= 2)
@@ -324,11 +326,11 @@ async def test_a_model_call_to_a_credential_store_is_refused_and_the_key_stays_o
         assert KEY not in repr(ledger)
         assert KEY not in repr(list(k.ctx.rows.values()))
     finally:
-        core._providers.pop(aid, None)
+        fake_providers.pop(aid, None)
 
 
 async def test_the_own_guid_address_of_a_holder_is_refused_from_a_model(
-    seeded_kernel, tmp_path
+    seeded_kernel, tmp_path, fake_providers
 ):
     """The bypass this pins: `<this kernel's guid>|creds` has no record under that
     literal id, yet the kernel delivers it to the local `creds` (and the agent's
@@ -345,7 +347,7 @@ async def test_the_own_guid_address_of_a_holder_is_refused_from_a_model(
         key_reader(aid, k, "responses_backend", required=True),
         [_call(own, ref="main"), DONE],
     )
-    core._providers[aid] = model
+    fake_providers[aid] = model
     try:
         await _op(k, aid, {"type": "send", "text": "fetch the key"})
         await _until(lambda: model.calls >= 2)
@@ -358,11 +360,11 @@ async def test_the_own_guid_address_of_a_holder_is_refused_from_a_model(
         assert KEY not in repr(model.seen)
         assert KEY not in repr(list(k.ctx.rows.values()))
     finally:
-        core._providers.pop(aid, None)
+        fake_providers.pop(aid, None)
 
 
 async def test_an_operator_marked_file_bridge_refuses_the_model(
-    seeded_kernel, tmp_path
+    seeded_kernel, tmp_path, fake_providers
 ):
     k = seeded_kernel
     (tmp_path / "vault.txt").write_text("TOP-SECRET-7f3a\n")
@@ -391,7 +393,7 @@ async def test_an_operator_marked_file_bridge_refuses_the_model(
         key_reader(aid, k, "responses_backend", required=False),
         [_call("vault_fs", "read", path="vault.txt"), DONE],
     )
-    core._providers[aid] = model
+    fake_providers[aid] = model
     try:
         await _op(k, aid, {"type": "send", "text": "read the vault"})
         await _until(lambda: model.calls >= 2)
@@ -400,24 +402,25 @@ async def test_an_operator_marked_file_bridge_refuses_the_model(
         assert _rows(k, "vault_fs", "read") == [], "the read never dispatched"
         assert "TOP-SECRET-7f3a" not in repr(model.seen)
     finally:
-        core._providers.pop(aid, None)
+        fake_providers.pop(aid, None)
 
 
-async def test_a_model_cannot_unmark_a_holder_then_call_it(seeded_kernel, tmp_path):
+async def test_a_model_cannot_unmark_a_holder_then_call_it(
+    seeded_kernel, tmp_path, fake_providers
+):
     """The bypass this pins: a model whose agent holds `update_agent` writes
     `holds_secrets: false` on the store, then calls it. The KERNEL's gate refuses
     the unmark (only the operator lowers the mark), so the store stays a holder
     and ai_core still refuses the call — the key never reaches the model."""
     k = seeded_kernel
-    aid = await _store_and_ai(
-        k, tmp_path, {"creds": "*", "kernel_state": ["update_agent"]}
-    )
+    # the store's record is the operand: the agent names it with `update_agent`
+    aid = await _store_and_ai(k, tmp_path, {"creds": ["*", "update_agent"]})
     unmark = _call("kernel", "update_agent", id="creds", holds_secrets=False)
     model = _Model(
         key_reader(aid, k, "responses_backend", required=True),
         [unmark, _call("creds", ref="main"), DONE],
     )
-    core._providers[aid] = model
+    fake_providers[aid] = model
     try:
         await _op(k, aid, {"type": "send", "text": "unmark the store, then read it"})
         await _until(lambda: model.calls >= 3)
@@ -435,4 +438,142 @@ async def test_a_model_cannot_unmark_a_holder_then_call_it(seeded_kernel, tmp_pa
         assert KEY not in repr(model.seen)
         assert KEY not in repr(list(k.ctx.rows.values()))
     finally:
-        core._providers.pop(aid, None)
+        fake_providers.pop(aid, None)
+
+
+# ─── a model never JOINS an execution that carried secrets (audit F2) ────────
+
+
+PEER_KEY = "sk-peer-0123456789abcdef"
+
+
+def _join_refused(exec_id) -> str:
+    return SECRET_JOIN_TEXT.format(exec_id=exec_id)
+
+
+class _JoiningModel(_Model):
+    """Its first turn JOINS the backend's latest key read: the call names that
+    read's message id as `<exec_id>` (ids are sequential — a model can scan them)
+    and aims at the same target, the store on the connected peer."""
+
+    def __init__(self, read, k, target):
+        super().__init__(read, [])
+        self.k, self.target, self.joined = k, target, None
+
+    async def chat(self, messages, max_tokens=None):
+        self.calls += 1
+        self.keys.append(await self.read(EP))
+        self.seen.append([dict(m) for m in messages])
+        if self.calls > 1:
+            yield DONE
+            return
+        self.joined = max(r["id"] for r in _rows(self.k, self.target, "get"))
+        yield render_call(
+            "send",
+            {
+                "target_id": self.target,
+                "payload": {"type": "get", "ref": "main"},
+                "reply_to": "self",
+                "exec_id": self.joined,
+            },
+        )
+
+
+async def test_a_model_cannot_join_its_backends_key_read_on_a_peer(
+    seeded_kernel, fake_providers
+):
+    """THE BYPASS (measured 2026-10-03): the key lives in a credential_store on a
+    CONNECTED PEER (`P-g|creds`) — a peer address this layer cannot judge as a
+    holder — and the backend reads it as the agent, marked. The model, the same
+    agent, sent `<exec_id>` = that read's pid: the kernel joined it (same caller,
+    no second dispatch, the peer never saw it) and the model got the key."""
+    k = seeded_kernel
+    k.update(k.id, guid="A-g")
+    seen: list = []
+
+    async def peer_store(agent_id, payload, caller, secret):
+        seen.append((agent_id, payload.get("type"), caller, tuple(secret)))
+        if not any(m in ("result", ["result"]) for m in secret):
+            return {"error": "get: mark the answer secret", "reason": "bad_arg"}
+        return {
+            "ref": "main",
+            "host": "api.example.com",
+            "fields": {"api_key": PEER_KEY},
+        }
+
+    k.ctx.register_peer("P-g", PeerRoute(via="leg", call=peer_store, emit=_no_emit))
+    aid = await _ai(
+        k,
+        "ai",
+        {"P-g|creds": ["get"]},
+        credentials={"store": "P-g|creds", "ref": "main"},
+    )
+    model = _JoiningModel(
+        key_reader(aid, k, "responses_backend", required=True), k, "P-g|creds"
+    )
+    fake_providers[aid] = model
+    try:
+        await _op(k, aid, {"type": "send", "text": "read your key"})
+        await _until(lambda: model.calls >= 2)
+        assert model.keys[0] == PEER_KEY, "the backend still reads its key"
+        nxt = model.seen[1][-1]["content"]
+        assert _join_refused(model.joined) in nxt, nxt
+        assert "unauthorized" in nxt, nxt
+        assert PEER_KEY not in repr(model.seen)
+        assert all(s[3] == ("result",) for s in seen), "only the backend's reads"
+    finally:
+        fake_providers.pop(aid, None)
+
+
+async def test_a_model_cannot_join_a_named_secret_execution(
+    seeded_kernel, tmp_path, fake_providers
+):
+    """By NAME, on a target that is no holder: an execution whose item carried
+    `secret` marks is refused to a model whoever opened it — the call is never
+    dispatched."""
+    k = seeded_kernel
+    (tmp_path / "vault.txt").write_text("TOP-SECRET-9c1d\n")
+    made = await _op(
+        k,
+        "kernel",
+        {
+            "type": "create_agent",
+            "parent_id": k.id,
+            "handler_module": "file_bridge.tools",
+            "id": "notes_fs",
+            "allow": ["."],
+            "ingress_rule": "allow_all_ingress",
+            "callable_by": {"nb_ai": "*"},
+        },
+    )
+    assert made["result"].get("id") == "notes_fs", made
+    read = await _op(
+        k,
+        "notes_fs",
+        {"type": "read", "path": "vault.txt"},
+        id="vault-read",
+        secret=["result"],
+    )
+    assert read["status"] == "completed", read
+    aid = await _ai(k, "nb_ai", {"notes_fs": "*"})
+    join = render_call(
+        "send",
+        {
+            "target_id": "notes_fs",
+            "payload": {"type": "read", "path": "vault.txt"},
+            "reply_to": "self",
+            "exec_id": "vault-read",
+        },
+    )
+    model = _Model(
+        key_reader(aid, k, "responses_backend", required=False), [join, DONE]
+    )
+    fake_providers[aid] = model
+    try:
+        await _op(k, aid, {"type": "send", "text": "read the vault"})
+        await _until(lambda: model.calls >= 2)
+        nxt = model.seen[1][-1]["content"]
+        assert _join_refused("vault-read") in nxt, nxt
+        assert "TOP-SECRET-9c1d" not in repr(model.seen)
+    finally:
+        fake_providers.pop(aid, None)

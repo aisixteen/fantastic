@@ -39,7 +39,7 @@
     private let CREDS_CHILD = """
         import json, secrets
         key = 'sk-guest-' + secrets.token_hex(16)
-        s = kernel.send('creds', {'type': 'set', 'ref': 'guest', 'host': 'api.example.com', 'fields': {'api_key': key}}, secret=['payload.fields'])
+        s = kernel.send('creds', {'type': 'set', 'ref': 'guest', 'fields': {'api_key': key}}, secret=['payload.fields'])
         g = kernel.send('creds', {'type': 'get', 'ref': 'guest'}, secret=['result'])
         u = kernel.send('creds', {'type': 'get', 'ref': 'guest'})
         print(json.dumps({'stored': s.get('stored'), 'match': (g.get('fields') or {}).get('api_key') == key, 'unmarked': [u.get('reason'), u.get('arg')]}), flush=True)
@@ -74,7 +74,12 @@
                 [
                     "type": "create_agent", "parent_id": "kernel_state",
                     "handler_module": .string(CredentialStoreBundle.handlerModule), "id": "creds",
-                    "file": .string(file.path), "creators": ["runner"],
+                    "file": .string(file.path),
+                    "refs": [
+                        "guest": [
+                            "host": "api.example.com", "readers": ["runner"], "writers": ["runner"],
+                        ]
+                    ],
                     "callable_by": ["runner": "*"],
                 ],
                 [

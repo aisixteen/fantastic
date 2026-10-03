@@ -18,7 +18,7 @@ import asyncio
 import pytest
 
 from io_bridge import MemoryTransport
-from ws_bridge import tools as wb
+from io_bridge import _engine
 
 
 @pytest.fixture
@@ -60,12 +60,12 @@ async def leg(seeded_kernel):
         )
     )[0]["result"]["id"]
     mt_leg, mt_peer = MemoryTransport.pair()
-    wb._test_transport_inject[leg_id] = mt_leg
+    _engine._test_transport_inject[leg_id] = mt_leg
     r = (await k.send([{"target": leg_id, "payload": {"type": "boot"}}]))[0]["result"]
     assert r.get("booted") is True, r
     yield k, leg_id, target, mt_peer
-    wb._bridges.clear()
-    wb._test_transport_inject.clear()
+    _engine._bridges.clear()
+    _engine._test_transport_inject.clear()
 
 
 async def _call(mt_peer, caller, target="notes", verb="reflect"):

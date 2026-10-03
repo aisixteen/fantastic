@@ -56,10 +56,14 @@ async fn delegating_on_an_agent_that_does_not_exist_names_that() {
     kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
 
+    // The peer's record is the OPERAND of the grant (AV-1): the granter names it
+    // with `update_agent`, and the peer accepts the granter's edit.
     let peer = create(
         &kernel,
         json!({"type": "create_agent", "parent_id": "kernel_state", "id": "peer",
-               "handler_module": "noop.tools"}),
+               "handler_module": "noop.tools",
+               "callable_by": {"$self": "*", "$parent": "*", "$children": "*",
+                               "granter": ["update_agent"]}}),
     )
     .await;
     assert_eq!(peer["id"], "peer", "{peer}");
@@ -68,7 +72,8 @@ async fn delegating_on_an_agent_that_does_not_exist_names_that() {
         json!({"type": "create_agent", "parent_id": "kernel_state", "id": "granter",
                "handler_module": "noop.tools",
                "can_call": {"$self": "*", "$parent": "*", "$children": "*",
-                            "kernel_state": ["*", "create_agent", "update_agent"]}}),
+                            "kernel_state": ["*", "create_agent", "update_agent"],
+                            "peer": ["update_agent"]}}),
     )
     .await;
     assert_eq!(granter["id"], "granter", "{granter}");

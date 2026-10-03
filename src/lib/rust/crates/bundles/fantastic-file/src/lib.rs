@@ -183,16 +183,11 @@ impl Bundle for FileBundle {
                 );
             }
         }
-        if let Some(spec) = meta.get("ingress_rule") {
-            if fantastic_io_bridge::authorizer::ingress::unknown(Some(spec)).is_some() {
-                return Some(format!(
-                    "ingress_rule={} is not a rule this bundle implements — \
-                     legal values: allow_all_ingress, deny_ingress",
-                    py_repr_value(spec)
-                ));
-            }
-        }
-        password_refusal(meta, "fs edge")
+        fantastic_io_bridge::authorizer::ingress::unknown_refusal(
+            meta,
+            &["allow_all_ingress", "deny_ingress"],
+        )
+        .or_else(|| password_refusal(meta, "fs edge"))
     }
 
     fn name(&self) -> &str {
@@ -278,17 +273,15 @@ impl Bundle for FileBundle {
                         keep_exposed(&mut out, &allow_list(&meta), &root);
                         out
                     }
-                    // THE STREAM VERBS ON THE TEXT CHANNEL, as python serves
-                    // them: a model writes a document VERBATIM between `<bytes>`
-                    // and `</bytes>` and python's parser delivers that as utf-8
-                    // bytes to the same handler; a chunk read back renders utf-8
-                    // in the reply. The binary channel stays for real blobs.
-                    "read_stream" => read_stream_reply(agent_id, &root, payload, true).0,
-                    // `bytes` ON THE TEXT CHANNEL IS NEVER A CHUNK. python types
-                    // the argument (`isinstance(data, (bytes, bytearray))`), and
+                    // THE JSON HALF of a read: the chunk is the reply body
+                    // `handle_binary` returns beside it (the kernel's dispatch);
+                    // a JSON-only reply holds `bytes: null` in its slot.
+                    "read_stream" => read_stream_reply(agent_id, &root, payload).0,
+                    // `bytes` IN THE JSON IS NEVER A CHUNK. python types the
+                    // argument (`isinstance(data, (bytes, bytearray))`), and
                     // JSON has no bytes, so ANY present value here — a string, a
                     // number — is `missing_arg`, and nothing is written (A13.19).
-                    // A raw chunk reaches this bundle on the BINARY channel only;
+                    // A raw chunk reaches this bundle as a request body only;
                     // that is the carrier a model's `<bytes>` document rides too.
                     // Absent ⇒ python's `payload.get("bytes", b"")`: an empty
                     // chunk, which is a legal write.
@@ -309,12 +302,12 @@ impl Bundle for FileBundle {
         Ok(Some(reply))
     }
 
-    /// Binary channel: `read_stream` (no request body → reply BODY = the raw
-    /// chunk) and `write_stream` (the body at `bytes` = the raw chunk → status
-    /// reply, no body). Symmetric with Python's `bytes`-in-the-dict; never
-    /// base64. Every verb reads the body at ITS key, `bytes` — python's
-    /// `payload.get("bytes")` — so a body placed under another key is not a
-    /// chunk. Any other verb falls back to the default (→`handle`).
+    /// The kernel's dispatch for every verb: `read_stream` (reply BODY = the raw
+    /// chunk, whatever the call carried) and `write_stream` (the body at `bytes`
+    /// = the raw chunk → status reply, no body). Symmetric with Python's
+    /// `bytes`-in-the-dict; never base64. Every verb reads the body at ITS key,
+    /// `bytes` — python's `payload.get("bytes")` — so a body placed under
+    /// another key is not a chunk. Any other verb takes `handle`.
     async fn handle_binary(
         &self,
         agent_id: &AgentId,
@@ -351,8 +344,9 @@ impl Bundle for FileBundle {
             return Ok((Some(reply), None));
         }
         if !matches!(verb, "read_stream" | "write_stream") {
-            // file_bridge has no other binary verb — route the header through
-            // the text path (which gates + dispatches); the blob is unused.
+            // file_bridge has no other verb that takes or answers bytes — route
+            // the header through `handle` (which gates + dispatches); a request
+            // body is unused.
             let reply = self.handle(agent_id, &header, kernel).await?;
             return Ok((reply, None));
         }
@@ -361,7 +355,7 @@ impl Bundle for FileBundle {
             None => return Ok((Some(json!({"error": format!("no agent {agent_id}")})), None)),
         };
         let meta = agent.meta.read().expect("meta poisoned").clone();
-        // GATE — same sealed-by-default choke point as the text channel.
+        // GATE — same sealed-by-default choke point as `handle`.
         if let Some(denied) = gate(&meta, agent_id, verb) {
             return Ok((Some(denied), None));
         }
@@ -373,11 +367,11 @@ impl Bundle for FileBundle {
         match verb {
             "read_stream" => {
                 // the chunk is the reply's `bytes`, as python's dict holds it
-                let (reply, body) = read_stream_reply(agent_id, &root, &header, false);
+                let (reply, body) = read_stream_reply(agent_id, &root, &header);
                 Ok((Some(reply), body.map(|b| Blob::key("bytes", b))))
             }
             "write_stream" => {
-                // THE BODY AT `bytes` IS THE CHUNK on this channel — python's
+                // THE REQUEST BODY AT `bytes` IS THE CHUNK — python's
                 // `payload.get("bytes", b"")`. A header that carries a `bytes`
                 // key is a JSON value where raw bytes belong —
                 // `missing("write_stream", "bytes (one raw chunk)")`, whatever it
@@ -386,7 +380,7 @@ impl Bundle for FileBundle {
                 //
                 // PYTHON'S ORDER: readonly FIRST (`_readonly_or_none` precedes the
                 // chunk check), so a readonly leg answers `readonly` whatever the
-                // header holds — the text channel already does this.
+                // header holds — `handle` already does this.
                 if readonly {
                     return Ok((Some(readonly_refusal()), None));
                 }
@@ -433,10 +427,7 @@ fn gate(meta: &Map<String, Value>, agent_id: &AgentId, verb: &str) -> Option<Val
         meta.get("auth"),
         "_ingress",
     );
-    let rule = match fantastic_io_bridge::authorizer::ingress::resolve(spec.as_ref()) {
-        Ok(r) => r,
-        Err(e) => return Some(json!({"error": e})),
-    };
+    let rule = fantastic_io_bridge::authorizer::ingress::resolve(spec.as_ref());
     // NO token: the fs edge has no wire envelope, so nothing can present one.
     // It used to read `auth_token` off the RECORD — a persisted secret in the
     // portable workdir satisfied a `password_ingress` leg, the one thing the
@@ -488,21 +479,19 @@ fn clamp_root(
         .and_then(|b| fs::resolve_root(&root_str(meta), &b))
 }
 
-/// The SOURCE half — read ONE raw chunk at `offset`. `text_channel` carries the
-/// chunk in the reply's `bytes` key (python's shape); the binary channel carries
-/// it in the reply BODY. Stateless cursor (no open handle): pull the next chunk
-/// by calling again with `offset=next_offset`. Mirrors py `_read_stream`.
+/// The SOURCE half — read ONE raw chunk at `offset`; the chunk is the reply
+/// BODY, at the reply's `bytes` key. Stateless cursor (no open handle): pull
+/// the next chunk by calling again with `offset=next_offset`. Mirrors py
+/// `_read_stream`.
 ///
-/// ON THE BINARY CHANNEL THE `bytes` KEY STILL EXISTS, holding `null`, IN ITS
-/// PYTHON POSITION between `offset` and `next_offset` — python's reply dict
-/// always has it and the codec nulls it in place when it lifts the value onto
-/// the wire. A leg reads the frame kind off that key; a head that simply omitted
-/// it left the browser a different dict shape on the two channels (A11.9).
+/// THE `bytes` KEY STILL EXISTS, holding `null`, IN ITS PYTHON POSITION between
+/// `offset` and `next_offset` — python's reply dict always has it and the codec
+/// nulls it in place when it lifts the value onto the wire, so a binary frame's
+/// head keeps python's dict shape (A11.9).
 fn read_stream_reply(
     agent_id: &AgentId,
     root: &Result<PathBuf, String>,
     payload: &Value,
-    text_channel: bool,
 ) -> (Value, Option<Vec<u8>>) {
     let path_str = match path_arg("read_stream", payload, "path") {
         Ok(p) => p,
@@ -540,14 +529,8 @@ fn read_stream_reply(
     let mut out = Map::new();
     out.insert("path".to_string(), json!(path_str));
     out.insert("offset".to_string(), json!(offset));
-    out.insert(
-        "bytes".to_string(),
-        if text_channel {
-            json!(String::from_utf8_lossy(&chunk).into_owned())
-        } else {
-            Value::Null
-        },
-    );
+    // the slot python's dict holds the chunk in; the chunk is the reply body
+    out.insert("bytes".to_string(), Value::Null);
     out.insert("next_offset".to_string(), json!(next_offset));
     out.insert("eof".to_string(), json!(next_offset >= size));
     out.insert("size".to_string(), json!(size));
@@ -561,8 +544,7 @@ fn read_stream_reply(
     );
     // A CHUNK CAME BACK — `Some`, even when it is empty (an empty file, or a
     // read past the end). Only that tells a leg it may answer octet.
-    let body = if text_channel { None } else { Some(chunk) };
-    (Value::Object(out), body)
+    (Value::Object(out), Some(chunk))
 }
 
 /// python's `missing("write_stream", "bytes (one raw chunk)")`.
@@ -679,11 +661,35 @@ fn write_stream_reply(
     }
 }
 
+/// Send `item` AS THIS DISPATCH'S CALLER: the operator stays the operator; a
+/// local agent is itself; a foreign `<guid>|<agent>` is the same pair its bridge
+/// leg relayed (the leg as sender, the foreign id judged by the target's
+/// `callable_by`). Python `_as_caller`.
+async fn send_as_caller(kernel: &Arc<Kernel>, item: Item) -> fantastic_kernel::Outcome {
+    use fantastic_kernel::send::{with_operator, with_remote_caller, with_sender};
+    let send = kernel.send(vec![item]);
+    let mut out = match (
+        fantastic_kernel::current_origin(),
+        fantastic_kernel::current_remote_caller(),
+    ) {
+        (None, _) => with_operator(send).await,
+        (Some(origin), Some(remote)) => {
+            with_sender(origin.clone(), with_remote_caller(origin, remote, send)).await
+        }
+        (Some(origin), None) => with_sender(origin, send).await,
+    };
+    out.remove(0)
+}
+
 /// The PUMP — a server-side SOURCE→SINK copy, chunk by chunk, in ONE call.
 /// Storage-agnostic: both ends are bound BY ID + the duck-typed stream verbs, so
 /// a `network_bridge` SOURCE pumps to a `file_bridge` SINK the same as fs→fs.
-/// Each end SELF-gates + SELF-clamps — the pump only coordinates, never touching
-/// bytes, so a sealed end refuses it. Mirrors py `_pump`.
+/// BOTH ENDS RUN AS THE CALLER: `read_stream` on the source and `write_stream` on
+/// the sink go out under the caller's identity ([`send_as_caller`]), so the
+/// caller needs its own grants on both (this bridge is no deputy). Each end
+/// SELF-gates + SELF-clamps — the pump only coordinates, never touching bytes, so
+/// a sealed end refuses it. A pump ONTO ITS OWN SOURCE (the sink is the source and
+/// `sink_path` names the same file) is refused. Mirrors py `_pump`.
 async fn pump_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
     let self_id = json!(agent_id.0.as_str());
     let truthy_or = |key: &str, fallback: Value| -> Value {
@@ -694,27 +700,42 @@ async fn pump_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -
     };
     let src = truthy_or("source", self_id.clone());
     let sink = truthy_or("sink", self_id);
-    let spath = truthy_or("source_path", truthy_or("path", json!("")));
+    let spath = truthy_or("source_path", json!(""));
     let dpath = truthy_or("sink_path", spath.clone());
     let chunk = match int_arg("pump", payload, "chunk", 65536, 1) {
         Ok(n) => n,
         Err(e) => return e,
     };
+    if src == sink && one_file(&spath, &dpath) {
+        // The first write's `truncate` empties the file the next read comes from:
+        // everything past the first chunk was lost under a success reply — the
+        // bare `{source_path}` form did it, sink and sink_path defaulted (python
+        // `_pump`, audit BV-7).
+        return rf::bad(
+            "pump",
+            "sink_path",
+            "another file than source_path when the sink is the source — a pump \
+             onto its own source truncates it after the first chunk",
+        );
+    }
     let src_id = AgentId::from(target_id(&src));
     let sink_id = AgentId::from(target_id(&sink));
     let (mut offset, mut first, mut chunks) = (0u64, true, 0u64);
     loop {
         // TWO ORDINARY SENDS, python's: each end is a batch item (pid, rows,
         // `ps` row), the read taking its chunk back raw, the write carrying it at
-        // `bytes` in python's key order.
-        let read = kernel
-            .send(vec![Item::new(
+        // `bytes` in python's key order. AS THE CALLER (audit AV-7, 2026-10-03):
+        // sent from this dispatch, both ends judged THIS BRIDGE — a client holding
+        // only `pump` copied a file it could never read and overwrote one it could
+        // never write.
+        let read = send_as_caller(
+            kernel,
+            Item::new(
                 src_id.clone(),
                 json!({"type": "read_stream", "path": spath, "offset": offset, "length": chunk}),
-            )
-            .with_raw_reply()])
-            .await
-            .remove(0);
+            ),
+        )
+        .await;
         let (rmeta, body) = (read.result, read.body);
         // python tests the reply for a `bytes` chunk (`isinstance(r["bytes"],
         // bytes)`); on this channel the chunk rides the body, so the carrier
@@ -733,15 +754,16 @@ async fn pump_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -
                 ),
             );
         };
-        let wmeta = kernel
-            .send(vec![Item::new(
+        let wmeta = send_as_caller(
+            kernel,
+            Item::new(
                 sink_id.clone(),
                 json!({"type": "write_stream", "path": dpath, "bytes": null, "offset": offset, "truncate": first}),
             )
-            .with_binary_key("bytes", body)])
-            .await
-            .remove(0)
-            .result;
+            .with_binary_key("bytes", body),
+        )
+        .await
+        .result;
         if !wmeta.is_object() || py_truthy(wmeta.get("error").unwrap_or(&Value::Null)) {
             return rf::refusal(
                 rf::TRANSPORT_ERROR,
@@ -774,6 +796,17 @@ async fn pump_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -
         }
     }
     json!({"source": spath, "sink": dpath, "bytes": offset, "chunks": chunks})
+}
+
+/// Do two pump paths name ONE file — equal once normalised (`./x` is `x`)?
+/// python `_one_file`: only a root-relative path to something inside the root is
+/// judged; anything else (absent, not a string, absolute, climbing out, the root
+/// itself) is its end's to refuse.
+fn one_file(a: &Value, b: &Value) -> bool {
+    match (a.as_str(), b.as_str()) {
+        (Some(a), Some(b)) => norm(a).is_some_and(|n| n != "." && Some(&n) == norm(b).as_ref()),
+        _ => false,
+    }
 }
 
 /// The id a pump end addresses: a string as written, anything else as python
@@ -1303,5 +1336,7 @@ fn mkdir_reply(root: &Result<PathBuf, String>, payload: &Value, readonly: bool) 
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_pump_identity;
 #[cfg(test)]
 mod tests_text;

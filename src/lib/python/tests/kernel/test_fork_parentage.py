@@ -47,12 +47,12 @@ _NOTES: list = []
 
 
 def _install_mailbox() -> None:
-    import sys
     import types
+    from kernel import register_unlisted
 
     m = types.ModuleType("mailbox_probe.tools")
     m.handler = _mailbox_handler
-    sys.modules["mailbox_probe.tools"] = m
+    register_unlisted("mailbox_probe.tools", m)
 
 
 async def test_a_programs_send_is_parented_to_the_job_not_a_dead_dispatch(

@@ -57,6 +57,19 @@ def own_origins(rec: dict) -> set[str]:
     return out
 
 
+def own_authorities(rec: dict) -> set[str]:
+    """The Host values that ARE this web host: `<host>:<port>` (an IPv6 literal in
+    brackets), plus the three loopback spellings when it binds loopback. Nothing else
+    — a container port map, a LAN name, a tunnel name are other authorities and are
+    refused; a `0.0.0.0` bind answers only `0.0.0.0:<port>`."""
+    host = rec.get("host") or DEFAULT_HOST
+    port = rec.get("port")
+    out = {f"[{host}]:{port}" if ":" in host else f"{host}:{port}"}
+    if host in ("127.0.0.1", "localhost", "::1"):
+        out |= {f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}"}
+    return out
+
+
 def origin_allowed(rec: dict, origin: str | None) -> bool:
     """No Origin header ⇒ a non-browser client (CLI, curl, a bridge): allowed — the leg's
     own `ingress_rule` still gates it. A browser Origin must be the host's own or listed
@@ -74,47 +87,72 @@ def extra_origins(rec: dict) -> list[str]:
 
 
 class _OriginGuard:
-    """ASGI guard in front of every route of this host: a websocket upgrade, or an HTTP
-    request that is not GET/HEAD/OPTIONS, from a FOREIGN browser origin is refused —
-    403 with a coded body on HTTP, a refused upgrade (403) on a websocket — and logged.
-    Reads the record per request, so `allowed_origins` edits apply without a restart."""
+    """ASGI guard in front of every route of this host, two checks:
+    - HOST (audit W-2): EVERY request — GET/HEAD/OPTIONS, unsafe methods and the
+      websocket upgrade alike — whose `Host` header is not one of `own_authorities`
+      is refused. A DNS-rebinding page sends a same-origin GET with no `Origin`, so
+      the Origin check never sees it; its `Host` still names the attacker's domain.
+    - ORIGIN: a websocket upgrade, or an HTTP request that is not GET/HEAD/OPTIONS,
+      from a FOREIGN browser origin is refused.
+    Either refusal is 403 with a coded body on HTTP, a refused upgrade (403) on a
+    websocket, and logged. Reads the record per request, so `host`/`port`/
+    `allowed_origins` edits apply without a restart."""
 
     def __init__(self, app, web_agent_id: str, kernel):
         self.app, self.web_agent_id, self.kernel = app, web_agent_id, kernel
+
+    async def _refuse(self, kind, send, error: str, hint: str):
+        if kind == "websocket":
+            await send({"type": "websocket.close", "code": 1008})
+            return
+        body = json.dumps(
+            {"error": error, "reason": "unauthorized", "hint": hint}
+        ).encode()
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 403,
+                "headers": [(b"content-type", b"application/json")],
+            }
+        )
+        await send({"type": "http.response.body", "body": body})
 
     async def __call__(self, scope, receive, send):
         kind = scope.get("type")
         if kind in ("http", "websocket"):
             headers = dict(scope.get("headers") or [])
+            rec = self.kernel.get(self.web_agent_id) or {}
+            host = headers.get(b"host", b"").decode("latin-1")
+            if host not in own_authorities(rec):
+                print(
+                    f"  [web] {self.web_agent_id}: refused {kind} {scope.get('path')} "
+                    f"for foreign host {host!r}",
+                    flush=True,
+                )
+                await self._refuse(
+                    kind,
+                    send,
+                    f"host {host!r} is not this server's own authority",
+                    "address the host by its bound host:port (a loopback bind also "
+                    "answers localhost, 127.0.0.1 and [::1] on that port)",
+                )
+                return
             origin = headers.get(b"origin", b"").decode("latin-1") or None
             gated = (
                 kind == "websocket" or scope.get("method", "GET") not in _SAFE_METHODS
             )
-            rec = self.kernel.get(self.web_agent_id) or {}
             if gated and not origin_allowed(rec, origin):
                 print(
                     f"  [web] {self.web_agent_id}: refused {kind} {scope.get('path')} "
                     f"from foreign origin {origin!r}",
                     flush=True,
                 )
-                if kind == "websocket":
-                    await send({"type": "websocket.close", "code": 1008})
-                    return
-                body = json.dumps(
-                    {
-                        "error": f"origin {origin!r} is not allowed on this host",
-                        "reason": "unauthorized",
-                        "hint": "add it to the web record's allowed_origins",
-                    }
-                ).encode()
-                await send(
-                    {
-                        "type": "http.response.start",
-                        "status": 403,
-                        "headers": [(b"content-type", b"application/json")],
-                    }
+                await self._refuse(
+                    kind,
+                    send,
+                    f"origin {origin!r} is not allowed on this host",
+                    "add it to the web record's allowed_origins",
                 )
-                await send({"type": "http.response.body", "body": body})
                 return
         await self.app(scope, receive, send)
 

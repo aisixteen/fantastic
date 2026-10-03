@@ -11,16 +11,14 @@ candidate K) must keep every text, `reason`, extra key and key order below.
 from __future__ import annotations
 
 import asyncio
-import sys
 import types
 
 import pytest
 from _testkit import memory_meta
 
-import ollama_backend.tools as ot
 from ai_core import core
 from ai_core.tool_parse import render_call
-from kernel import sender_context
+from kernel import sender_context, register_unlisted
 
 NAME = "ollama_backend"
 
@@ -54,15 +52,17 @@ def _ai(k, aid: str, provider=None, **meta) -> str:
     )
     assert rec.get("id") == aid, rec
     if provider is not None:
-        ot._providers[aid] = provider
+        _fakes[aid] = provider
     return aid
 
 
+#: The test's `fake_providers` table, reachable from the helpers here.
+_fakes: dict = {}
+
+
 @pytest.fixture(autouse=True)
-def _drop_providers():
-    yield
-    for aid in [a for a in list(ot._providers) if a.startswith("kp_")]:
-        ot._providers.pop(aid, None)
+def _seat_fakes(fake_providers, monkeypatch):
+    monkeypatch.setitem(globals(), "_fakes", fake_providers)
 
 
 async def _call(k, target, payload, as_=None) -> dict:
@@ -100,7 +100,9 @@ async def test_send_refuses_a_cycle_and_an_over_deep_chain(seeded_kernel):
     }
 
 
-async def test_send_without_a_store_fails_before_the_turn(seeded_kernel):
+async def test_send_without_a_store_fails_before_the_turn(
+    seeded_kernel, fake_providers
+):
     k = seeded_kernel
     _ai(k, "kp_ns", _Script())
     k.ctx.update("kp_ns", memory_store_id="")
@@ -115,7 +117,7 @@ async def test_send_without_a_store_fails_before_the_turn(seeded_kernel):
         "reason": "missing_arg",
         "client_id": "cli",
     }
-    assert ot._providers["kp_ns"].seen == []
+    assert fake_providers["kp_ns"].seen == []
 
 
 async def test_a_store_that_refuses_is_a_memory_store_failure(seeded_kernel):
@@ -136,7 +138,7 @@ async def test_a_store_that_refuses_is_a_memory_store_failure(seeded_kernel):
 
 async def test_a_turn_over_the_send_timeout(seeded_kernel, monkeypatch):
     k = seeded_kernel
-    monkeypatch.setattr(ot, "SEND_TIMEOUT", 0.05)
+    monkeypatch.setattr(core, "SEND_TIMEOUT", 0.05)
     _ai(k, "kp_to", _Script(["late"], hold=5))
     r = await _call(k, "kp_to", {"type": "send", "text": "x"})
     assert r == {"error": "send: timeout after 0.05s", "client_id": "cli"}
@@ -153,7 +155,7 @@ async def test_an_unknown_verb_names_the_backend(seeded_kernel):
 # ─── inquiry ─────────────────────────────────────────────────────────────────
 
 
-async def test_inquiry_texts(seeded_kernel):
+async def test_inquiry_texts(seeded_kernel, fake_providers):
     k = seeded_kernel
     _ai(k, "kp_iq0", _Script())
     for bad in ("", "   ", None, 5):
@@ -185,7 +187,7 @@ async def test_inquiry_texts(seeded_kernel):
     _ai(k, "kp_iq3", _Script([render_call("inquiry_answer", {"answer": "ship it"})]))
     opts = {**q, "options": ["a", "b"], "action": {"type": "deploy"}}
     assert await _call(k, "kp_iq3", opts) == {"answer": "ship it", "request_id": "r1"}
-    first_turn = ot._providers["kp_iq3"].seen[0]
+    first_turn = fake_providers["kp_iq3"].seen[0]
     last_user = [m for m in first_turn if m["role"] == "user"][-1]
     assert last_user["content"].endswith(
         'ship?\n\nOptions: a, b\n\nProposed action: {"type": "deploy"}'
@@ -299,14 +301,14 @@ async def _big_handler(id, payload, kernel):
 
 _big_mod.handler = _big_handler
 _big_mod.VERBS = {}
-sys.modules["kp_big_probe.tools"] = _big_mod
+register_unlisted("kp_big_probe.tools", _big_mod)
 
 
 async def _turn_reply(k, aid: str, payload: dict) -> str:
     """Run one AI turn that calls `big` with `payload`; return the reply text the
     model is handed on its NEXT turn."""
     prov = _Script([render_call("send", {"target_id": "big", "payload": payload})])
-    ot._providers[aid] = prov
+    _fakes[aid] = prov
     await _call(k, aid, {"type": "send", "text": "fetch it"})
     for _ in range(200):
         if len(prov.seen) >= 2:
@@ -463,7 +465,7 @@ async def test_a_fold_grant_covers_only_the_folds_closure(seeded_kernel):
 
 async def _turn_text(k, aid: str, call_text: str) -> str:
     prov = _Script([call_text])
-    ot._providers[aid] = prov
+    _fakes[aid] = prov
     await _call(k, aid, {"type": "send", "text": "go"})
     for _ in range(200):
         if len(prov.seen) >= 2:

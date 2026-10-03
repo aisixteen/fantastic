@@ -1,22 +1,24 @@
-// PID-ONLY workdir lock — python `kernel/_lock.py`.
+// Workdir lock — python `kernel/_lock.py`.
 //
-// C82: the ONE decision is the recorded pid's liveness, exactly as python's
-// `_pid_alive` makes it (`kill(pid,0)`: alive on success OR `EPERM` — the
-// process exists and is owned by someone else — dead on `ESRCH` or any other
-// error; `pid <= 0` is always dead). Python holds NO flock at all — a bare
-// pid file, checked and rewritten by plain read/write. The `flock` this class
-// still takes is an ADDITIONAL guard against two SWIFT processes racing the
-// same open, never the admission decision: checking flock success FIRST (the
-// previous shape here) let an uncontested flock silently overwrite a live
-// python or rust daemon's lock, since neither of those takes one. So the pid
-// check always runs BEFORE any flock attempt, and a flock failure can only
-// make acquisition MORE conservative, never less.
+// The decision is an `flock(LOCK_EX)` on `<workdir>/.fantastic/lock.yaml`,
+// held on an open descriptor for the life of the process: the OS grants it to
+// exactly one opener and drops it the moment its holder exits — however it
+// exits — so a dead holder's lock is simply taken over. Python, rust and swift
+// take the SAME flock on the SAME file, so kernels of different runtimes
+// exclude each other too.
 //
-// Writes `<workdir>/.fantastic/lock.yaml` with `pid: <pid>` — python's own
-// `yaml.dump({"pid": pid})` bytes (`YamlIO.dump`). And
-// `release()` removes the file only when it still names OUR pid (python's
-// `release_lock`) — a second kernel that reclaimed a stale lock now owns
-// the file, and this process's release must not delete THAT lock.
+// The file holds `pid: <pid>` — python's own `yaml.dump({"pid": pid})` bytes
+// (`YamlIO.dump`) — for the refusal text, never for the decision. It is in the
+// file BEFORE the file is `lock.yaml`: the pid goes into a private
+// `lock.yaml.tmp.<hex>`, which is flocked and then hard-linked to `lock.yaml`
+// (atomic, refused when the name exists), so no opener ever reads a lock
+// without its pid. A `lock.yaml` nobody holds (its holder died) is replaced by
+// renaming the staged file over it while holding the dead file's flock — a
+// second taker of the same dead file finds it held. `release()` removes the
+// file only while it still names OUR pid (python's `release_lock`).
+//
+// The one-shot CLI paths (`call`, `init`) take this same flock and refuse on
+// `.alreadyRunning` — they never judge a pid alive (owner, 2026-10-03).
 
 #if canImport(Darwin)
     import Darwin
@@ -35,6 +37,7 @@ public final class WorkdirLock: @unchecked Sendable {
     }
 
     private let lockFile: URL
+    /// The descriptor whose flock IS the lock; open while it is held.
     private var fileDescriptor: Int32 = -1
 
     public init(workdir: URL) {
@@ -44,85 +47,116 @@ public final class WorkdirLock: @unchecked Sendable {
             .appendingPathComponent("lock.yaml")
     }
 
-    /// Acquire the lock. Throws `.alreadyRunning` if a live process
-    /// already holds it (checked from the FILE's recorded pid alone, C82).
-    /// Stale locks (dead pid, or no file at all) are silently reclaimed.
+    /// Take the flock on `.fantastic/lock.yaml` for the life of this process.
+    /// Throws `.alreadyRunning` naming the pid in the file if a live process
+    /// holds it; a lock whose holder died is taken over.
     public func acquire() throws {
         // Ensure parent dir exists.
         try? FileManager.default.createDirectory(
             at: lockFile.deletingLastPathComponent(),
             withIntermediateDirectories: true)
 
-        // THE ONE DECISION, made first and unconditionally: a live recorded
-        // pid refuses, whether or not anything holds this file's flock (a
-        // python or rust daemon holds none at all).
-        if let existingPid = readExistingPid(), pidAlive(existingPid) {
-            throw LockError.alreadyRunning(
-                pid: existingPid,
-                workdir: lockFile.deletingLastPathComponent()
-                    .deletingLastPathComponent().path
-            )
-        }
-
-        // Safe to take: open (create if absent) and flock as a same-runtime
-        // race guard ONLY — its failure here can only refuse MORE often
-        // than python would, never admit a live pid python would refuse.
-        let fd = open(lockFile.path, O_RDWR | O_CREAT, 0o644)
+        let staged =
+            lockFile.path + ".tmp." + String(format: "%08x", UInt32.random(in: .min ... .max))
+        let fd = open(staged, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0o644)
         guard fd >= 0 else {
-            throw LockError.openFailed("open \(lockFile.path): errno=\(errno)")
+            throw LockError.openFailed("open \(staged): errno=\(errno)")
         }
-        if flock(fd, LOCK_EX | LOCK_NB) != 0 {
-            let flockErrno = errno
+        do {
+            // python's own `yaml.dump({"pid": N})` bytes (`pid: N\n`).
+            let body = Array(YamlIO.dump(.object(["pid": .integer(Int64(getpid()))])).utf8)
+            let written = write(fd, body, body.count)
+            if written != body.count {
+                throw LockError.writeFailed("partial write: \(written)/\(body.count)")
+            }
+            // uncontended: the staged file is ours alone
+            if flock(fd, LOCK_EX) != 0 { throw LockError.flockFailed(errno: errno) }
+            while try !publish(staged) {}
+        } catch {
             close(fd)
-            throw LockError.flockFailed(errno: flockErrno)
+            unlink(staged)
+            throw error
         }
+        // After a link the staged name is a second name for `lock.yaml`; after
+        // a rename it is already gone.
+        unlink(staged)
         self.fileDescriptor = fd
-
-        // Write our pid into the file — python's own `yaml.dump({"pid": N})`
-        // bytes (`pid: N\n`).
-        let pid = getpid()
-        let body = YamlIO.dump(.object(["pid": .integer(Int64(pid))]))
-        // Truncate then write so old contents (from a stale-lock takeover)
-        // don't trail off the end.
-        ftruncate(fileDescriptor, 0)
-        lseek(fileDescriptor, 0, SEEK_SET)
-        guard let data = body.data(using: .utf8) else {
-            throw LockError.writeFailed("serialize")
-        }
-        let written = data.withUnsafeBytes { ptr in
-            write(fileDescriptor, ptr.baseAddress, data.count)
-        }
-        if written != data.count {
-            throw LockError.writeFailed("partial write: \(written)/\(data.count)")
-        }
     }
 
-    /// Release the lock. Safe to call multiple times. Removes the FILE only
-    /// when it still names OUR pid (python's `release_lock`) — a second
-    /// kernel that reclaimed a stale lock in the meantime now owns it, and
-    /// this call must not delete that live lock out from under it.
-    public func release() {
-        let owned = readExistingPid() == getpid()
-        if fileDescriptor >= 0 {
-            flock(fileDescriptor, LOCK_UN)
-            close(fileDescriptor)
-            fileDescriptor = -1
+    /// One attempt to make the staged (flocked, pid-filled) file `lock.yaml` —
+    /// python `_publish`. `true` once it is; `false` when `lock.yaml` changed
+    /// under us (try again); throws `.alreadyRunning` when a live process holds it.
+    private func publish(_ staged: String) throws -> Bool {
+        let path = lockFile.path
+        if link(staged, path) == 0 { return true }
+        guard errno == EEXIST else { throw LockError.openFailed("link \(path): errno=\(errno)") }
+        let cur = open(path, O_RDONLY | O_CLOEXEC)
+        if cur < 0 {
+            // its holder released it between the two calls
+            if errno == ENOENT { return false }
+            throw LockError.openFailed("open \(path): errno=\(errno)")
         }
-        if owned {
+        defer { close(cur) }
+        if flock(cur, LOCK_EX | LOCK_NB) != 0 {
+            let flockErrno = errno
+            guard flockErrno == EWOULDBLOCK else { throw LockError.flockFailed(errno: flockErrno) }
+            // Held: a live owner — or a taker still replacing a dead lock, whose
+            // file (and dead pid) this racer then reads. Either way, refused.
+            guard let pid = Self.parsePid(Self.readAll(cur)) else {
+                // python's `lock file at .fantastic/lock.yaml: lock.yaml malformed`.
+                throw LockError.openFailed("lock file at .fantastic/lock.yaml: lock.yaml malformed")
+            }
+            throw LockError.alreadyRunning(
+                pid: pid,
+                workdir: lockFile.deletingLastPathComponent().deletingLastPathComponent().path)
+        }
+        // Nobody holds it: its holder died. Replace it — but only while it is
+        // still the file `lock.yaml` names (another taker may have replaced it).
+        var held = stat()
+        var named = stat()
+        guard fstat(cur, &held) == 0 else {
+            throw LockError.openFailed("fstat \(path): errno=\(errno)")
+        }
+        if stat(path, &named) != 0 {
+            if errno == ENOENT { return false }
+            throw LockError.openFailed("stat \(path): errno=\(errno)")
+        }
+        guard held.st_dev == named.st_dev, held.st_ino == named.st_ino else { return false }
+        guard rename(staged, path) == 0 else {
+            throw LockError.writeFailed("rename \(staged): errno=\(errno)")
+        }
+        return true
+    }
+
+    /// Release the lock. Safe to call multiple times; a no-op when this
+    /// instance holds none. Removes the FILE only while it still names OUR pid
+    /// (python's `release_lock`) — a file replaced by hand is not ours to
+    /// delete — then closes the descriptor, which drops the flock.
+    public func release() {
+        guard fileDescriptor >= 0 else { return }
+        if Self.currentHolder(lockFile) == getpid() {
             try? FileManager.default.removeItem(at: lockFile)
         }
+        close(fileDescriptor)
+        fileDescriptor = -1
     }
 
     deinit { release() }
 
     // MARK: - Helpers
 
-    /// The file's recorded pid, or `nil` for a missing/unparseable file —
-    /// python's `_read_lock`. NOT bounds-checked against `pid_t` with a
-    /// trapping cast: a malformed huge value reads as absent-of-a-valid-pid
-    /// (dead) rather than crashing the acquiring process.
-    private func readExistingPid() -> pid_t? {
-        guard let text = try? String(contentsOf: lockFile, encoding: .utf8),
+    /// The pid `<workdir>/.fantastic/lock.yaml` records, or `nil` for a
+    /// missing/unparseable file — python's `_read_lock`.
+    private static func currentHolder(_ lockFile: URL) -> pid_t? {
+        (try? Data(contentsOf: lockFile)).flatMap { parsePid(Array($0)) }
+    }
+
+    /// A lock file's recorded pid, or `nil` when the bytes are not a YAML
+    /// mapping with an integer `pid`. NOT bounds-checked against `pid_t` with
+    /// a trapping cast: a malformed huge value reads as no valid pid rather
+    /// than crashing the acquiring process.
+    private static func parsePid(_ bytes: [UInt8]) -> pid_t? {
+        guard let text = String(bytes: bytes, encoding: .utf8),
             case .object(let doc)? = try? YamlIO.load(text),
             let pid = doc["pid"]?.asInt
         else {
@@ -131,12 +165,15 @@ public final class WorkdirLock: @unchecked Sendable {
         return pid_t(exactly: pid)
     }
 
-    /// Python's `_pid_alive`: `pid <= 0` is always dead; `kill(pid, 0)`
-    /// success or `EPERM` (the process exists, owned by someone else) is
-    /// alive; `ESRCH` (no such process) or any other errno is dead.
-    private func pidAlive(_ pid: pid_t) -> Bool {
-        if pid <= 0 { return false }
-        if kill(pid, 0) == 0 { return true }
-        return errno == EPERM
+    /// Everything readable from `fd`.
+    private static func readAll(_ fd: Int32) -> [UInt8] {
+        var out: [UInt8] = []
+        var chunk = [UInt8](repeating: 0, count: 4096)
+        while true {
+            let n = read(fd, &chunk, chunk.count)
+            if n <= 0 { return out }
+            out.append(contentsOf: chunk[0..<n])
+        }
     }
+
 }

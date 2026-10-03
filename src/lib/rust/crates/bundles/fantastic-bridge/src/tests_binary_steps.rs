@@ -47,11 +47,18 @@ impl Bundle for BinEcho {
     }
     async fn handle_binary(
         &self,
-        _id: &AgentId,
+        id: &AgentId,
         header: Value,
         body: Option<Blob>,
-        _kernel: &Arc<Kernel>,
+        kernel: &Arc<Kernel>,
     ) -> Result<(Reply, Option<Blob>), BundleError> {
+        // the kernel dispatches EVERY call here — lifecycle verbs are not a take
+        if matches!(
+            header["type"].as_str(),
+            Some("boot" | "shutdown" | "reflect")
+        ) {
+            return Ok((self.handle(id, &header, kernel).await?, None));
+        }
         // python `sorted(payload)` — the header's keys and the body's own key
         let mut keys: Vec<String> = header
             .as_object()
@@ -103,6 +110,7 @@ async fn kernel(guid: &str, got: &Got) -> Arc<Kernel> {
     );
     reg.register(WS_HANDLER_MODULE, WsBridgeBundle);
     reg.register(RELAY_HANDLER_MODULE, RelayConnectorBundle);
+    crate::tests::register_relay_store(&mut reg);
     reg.register("binpath_echo.tools", BinEcho(Arc::clone(got)));
     let k = bootstrap(reg, BootstrapOptions::in_memory())
         .expect("boot")
@@ -200,21 +208,19 @@ async fn a_literal_key_crosses_a_relay_forward_both_ways() {
         format!("{t}RA"),
         format!("{t}RB"),
     );
-    create(
-        &ka,
-        json!({"handler_module": RELAY_HANDLER_MODULE, "id": a_id, "transport": "relay",
-               "relay_url": hub, "guid": ra, "partner_guid": rb,
-               "heartbeat": 0, "reconnect": 0}),
-    )
-    .await;
-    create(
-        &kb,
-        json!({"handler_module": RELAY_HANDLER_MODULE, "id": b_id, "transport": "relay",
-               "relay_url": hub, "guid": rb, "partner_guid": ra,
-               "heartbeat": 0, "reconnect": 0, "peer_guid": "A-g",
-               "ingress_rule": "allow_all_ingress", "can_call": {"echo": "*"}}),
-    )
-    .await;
+    let mut a = json!({"handler_module": RELAY_HANDLER_MODULE, "id": a_id, "transport": "relay",
+                       "relay_url": hub, "guid": ra, "partner_guid": rb,
+                       "heartbeat": 0, "reconnect": 0});
+    let mut b = json!({"handler_module": RELAY_HANDLER_MODULE, "id": b_id, "transport": "relay",
+                       "relay_url": hub, "guid": rb, "partner_guid": ra,
+                       "heartbeat": 0, "reconnect": 0, "peer_guid": "A-g",
+                       "ingress_rule": "allow_all_ingress", "can_call": {"echo": "*"}});
+    let sa = crate::tests::relay_password(&ka, &a_id, &hub, "pw-a").await;
+    let sb = crate::tests::relay_password(&kb, &b_id, &hub, "pw-b").await;
+    crate::tests::with_relay_password(&mut a, &sa);
+    crate::tests::with_relay_password(&mut b, &sb);
+    create(&ka, a).await;
+    create(&kb, b).await;
     boot_leg(&ka, &a_id).await;
     boot_leg(&kb, &b_id).await;
     let out = forward_sent(&ka, &a_id).await;

@@ -30,6 +30,8 @@ fn open(l: &Ledger, name: &str, target: &str, retries: u32) -> (i64, Opened) {
         retries,
         Some(name),
         None,
+        None,
+        None,
     );
     (id, opened)
 }
@@ -85,7 +87,7 @@ fn an_unknown_id_opens_fresh_and_a_settled_one_returns_its_outcome() {
 
     // C11: the recorded outcome comes back and NOTHING runs again.
     match open(&l, "job-1", "desk", 0).1 {
-        Opened::Settled(o, _) => {
+        Opened::Settled(o, ..) => {
             assert_eq!(o.result["v"], "first");
             assert_eq!(o.attempts, 1);
         }
@@ -101,7 +103,7 @@ async fn a_second_caller_joins_instead_of_running_twice() {
     assert!(matches!(open(&l, "job-2", "desk", 0).1, Opened::Fresh));
     l.attempt(id_of(&l, "job-2"));
 
-    let Opened::Join(mut rx, _) = open(&l, "job-2", "desk", 0).1 else {
+    let Opened::Join(mut rx, ..) = open(&l, "job-2", "desk", 0).1 else {
         panic!("an in-flight id must be joinable");
     };
     assert!(rx.borrow_and_update().is_none(), "not settled yet");
@@ -157,6 +159,8 @@ fn an_int_id_rebind_renders_bare_digits() {
         0,
         None,
         None,
+        None,
+        None,
     );
     match l.open(
         301,
@@ -164,6 +168,8 @@ fn an_int_id_rebind_renders_bare_digits() {
         &tid("elsewhere"),
         &json!({"type": "probe"}),
         0,
+        None,
+        None,
         None,
         None,
     ) {
@@ -210,6 +216,8 @@ fn the_view_is_caller_scoped() {
         0,
         Some("mine"),
         Some(tid("alice")),
+        None,
+        None,
     );
     let _ = l.open(
         102,
@@ -219,6 +227,8 @@ fn the_view_is_caller_scoped() {
         0,
         Some("yours"),
         Some(tid("bob")),
+        None,
+        None,
     );
     let _ = open(&l, "operators", "desk", 0).1;
 
@@ -253,6 +263,8 @@ fn the_ring_evicts_settled_unnamed_before_named_and_never_in_flight() {
             &tid("d"),
             &json!({"type": "probe"}),
             0,
+            None,
+            None,
             None,
             None,
         );
@@ -311,7 +323,7 @@ fn a_settled_call_comes_back_from_its_store_rows() {
         1,
     ));
     match open(&l, "done-1", "desk", 0).1 {
-        Opened::Settled(o, payload) => {
+        Opened::Settled(o, payload, ..) => {
             assert_eq!(o.result["v"], "kept");
             assert_eq!(o.status, Status::Completed);
             // THE LIVE SHAPE: a joiner after a restart is handed exactly what a
@@ -356,8 +368,10 @@ fn an_unnamed_settle_comes_back_as_what_it_kept() {
         0,
         None,
         None,
+        None,
+        None,
     ) {
-        Opened::Settled(o, _) => assert_eq!(o.result, json!({"bytes": 12})),
+        Opened::Settled(o, ..) => assert_eq!(o.result, json!({"bytes": 12})),
         _ => panic!("a recalled execution returns what the store kept"),
     }
 }
@@ -407,7 +421,7 @@ fn a_parked_dead_letter_stays_dead_across_a_restart() {
     // Re-sending the SAME NAME returns the recorded failure — it is not retried
     // silently. A retry is an explicit NEW name.
     match open(&l2, "dead-1", "desk", 5).1 {
-        Opened::Settled(o, _) => {
+        Opened::Settled(o, ..) => {
             assert_eq!(o.status, Status::Failed);
             assert_eq!(o.attempts, 2);
         }
@@ -488,7 +502,7 @@ fn a_reply_with_a_binary_body_stays_whole_in_the_ledger() {
     );
 
     match open(&l, "read-1", "store", 0).1 {
-        Opened::Settled(o, _) => {
+        Opened::Settled(o, ..) => {
             assert_eq!(o.body_bytes(), Some(&b"{\"id\": \"kernel_state\"}"[..]));
         }
         _ => panic!("expected the settled outcome"),
@@ -502,10 +516,94 @@ fn a_reply_with_a_binary_body_stays_whole_in_the_ledger() {
         1,
     ));
     match open(&l2, "read-1", "store", 0).1 {
-        Opened::Settled(o, _) => {
+        Opened::Settled(o, ..) => {
             assert!(o.body.is_none());
             assert_eq!(o.result["bytes"]["len"], 22);
         }
         _ => panic!("expected the recalled outcome"),
     }
+}
+
+/// audit KV-1 (owner-approved 2026-10-03): a join of a caller-scoped verb's
+/// execution by any caller but the one that sent it carries the refusal — in
+/// flight, settled and recalled from the store alike; the original caller's join
+/// and every other verb's carry none.
+#[test]
+fn a_foreign_join_of_a_caller_scoped_verb_carries_the_refusal() {
+    let l = Ledger::default();
+    let led = json!({"type": "ledger"});
+    let open_as = |id: i64, name: &str, payload: &Value, caller: Option<&str>| {
+        l.open(
+            id,
+            &json!(name),
+            &tid("kernel_state"),
+            payload,
+            0,
+            Some(name),
+            caller.map(tid),
+            caller.map(str::to_string),
+            None,
+        )
+    };
+    let text = "send: id 'led-A' names another caller's ledger execution — ledger \
+                answers only the caller that sent it, so it cannot be joined; make \
+                your own ledger call under a new id";
+    let want = json!({"error": text, "reason": "bad_arg", "arg": "id"});
+    assert!(matches!(
+        open_as(601, "led-A", &led, Some("A")),
+        Opened::Fresh
+    ));
+    match open_as(601, "led-A", &led, Some("B")) {
+        Opened::Join(_, _, _, Some(r)) => assert_eq!(*r, want),
+        _ => panic!("B's in-flight join must carry the refusal"),
+    }
+    match open_as(601, "led-A", &led, None) {
+        Opened::Join(_, _, _, Some(_)) => {}
+        _ => panic!("the operator is a caller like any other here"),
+    }
+    assert!(matches!(
+        open_as(601, "led-A", &led, Some("A")),
+        Opened::Join(_, _, _, None)
+    ));
+    l.attempt(601);
+    l.settle(601, done("view"));
+    assert!(matches!(
+        open_as(601, "led-A", &led, Some("B")),
+        Opened::Settled(_, _, _, Some(_))
+    ));
+    // another verb: open by design
+    let ps = json!({"type": "ps"});
+    assert!(matches!(
+        open_as(602, "ps-A", &ps, Some("A")),
+        Opened::Fresh
+    ));
+    assert!(matches!(
+        open_as(602, "ps-A", &ps, Some("B")),
+        Opened::Join(_, _, _, None)
+    ));
+
+    // RECALLED from the store: the call row's `caller` still decides
+    let l2 = Ledger::default();
+    let mut row = call_row(603, "kernel_state", 0, Some("led-A"));
+    row.insert("payload".to_string(), led.clone());
+    row.insert("caller".to_string(), json!("A"));
+    assert!(l2.put_settled(603, &row, &settle_outcome("completed", json!({})), 1));
+    let reopen = |caller: Option<&str>| {
+        l2.open(
+            603,
+            &json!("led-A"),
+            &tid("kernel_state"),
+            &led,
+            0,
+            Some("led-A"),
+            caller.map(tid),
+            caller.map(str::to_string),
+            None,
+        )
+    };
+    assert!(matches!(
+        reopen(Some("B")),
+        Opened::Settled(_, _, _, Some(_))
+    ));
+    assert!(matches!(reopen(Some("A")), Opened::Settled(_, _, _, None)));
 }

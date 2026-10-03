@@ -4,8 +4,9 @@
 //! ```text
 //! C→S {type:"call",  target, payload, id, secret?}
 //!                                             → kernel.send → reply
-//!                                               (`secret` = the item's marked
-//!                                               paths, `fantastic_kernel::secret`)
+//!                                               (`secret` = the item's marks —
+//!                                               dotted strings and/or arrays
+//!                                               of steps, `fantastic_kernel::secret`)
 //! C→S {type:"emit",  target, payload}         → kernel.emit (no reply)
 //! C→S {type:"watch"|"unwatch", src}           → (un)register a watcher
 //! C→S {type:"state_subscribe"|"state_unsubscribe"}
@@ -18,6 +19,10 @@
 //! S→C {type:"call", id:"h<n>", target, payload, caller, secret?}
 //!                                             → the host calling a page agent
 //! C→S {type:"reply"|"error", id:"h<n>", data} → that call's outcome
+//! S→C {type:"emit", target, payload, caller?}  → a host emit to a page agent
+//!                                               (every tab of the guid)
+//! S→C {type:"reply_mirror", id, data}          → a reply this leg sent ANOTHER
+//!                                               tab of this connection's guid
 //! ```
 //!
 //! **CROSS-KERNEL ADDRESSING (owner, 2026-09-30).** After `hello`, the host
@@ -53,8 +58,8 @@
 //! handshake.
 
 use crate::AppState;
-use fantastic_io_bridge::authorizer::{ingress, manifold_spec, Action, Decision, Denial};
-use fantastic_io_bridge::codec::{decode_binary_frame, encode_frame, BINARY_EDGE_VERBS};
+use fantastic_io_bridge::authorizer::{ingress, manifold_spec, Action, Decision};
+use fantastic_io_bridge::codec::{decode_binary_frame, encode_frame};
 use fantastic_io_bridge::ws_deflate::DeflateStream;
 use fantastic_kernel::{AgentId, Item, Kernel};
 use futures_util::{SinkExt, StreamExt};
@@ -156,16 +161,12 @@ fn gate_leg(kernel: &Arc<Kernel>, leg: &AgentId, kind: &str, frame: &Value) -> D
         .and_then(Value::as_str)
         .unwrap_or("");
     let spec = manifold_spec(primary.as_ref(), auth.as_ref(), "_ingress");
-    match ingress::resolve(spec.as_ref()) {
-        Ok(rule) => rule.authorize(&Action {
-            kind,
-            target: addr,
-            verb,
-            token: frame.get("auth_token").and_then(Value::as_str),
-        }),
-        // A spec that will not parse is not an authorization.
-        Err(e) => Decision::Deny(Denial::new(format!("web_ws: bad ingress rule: {e}"))),
-    }
+    ingress::resolve(spec.as_ref()).authorize(&Action {
+        kind,
+        target: addr,
+        verb,
+        token: frame.get("auth_token").and_then(Value::as_str),
+    })
 }
 
 /// python `bad("frame", "frame", "a well-formed call/emit/watch envelope")`
@@ -460,7 +461,7 @@ pub(crate) async fn ws_loop(
     }
 
     // THE PEER HALF — the page kernel's address on the host, once it says hello.
-    let mut peer = peer::PeerLink::default();
+    let mut peer = peer::PeerLink::new(&state.kernel, client_id.0.clone());
 
     let mut ping = tokio::time::interval(PING_INTERVAL);
     ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -542,6 +543,7 @@ pub(crate) async fn ws_loop(
                 if let Some(data) = denial {
                     let f = json!({"type": "reply", "id": fid, "data": data});
                     let _ = out.send(Out::Text(encode_frame(&f))).await;
+                    peer::mirror_reply(peer.mirror().siblings(), &fid, &data, None).await;
                     continue;
                 }
                 let body = inbound.body;
@@ -555,6 +557,7 @@ pub(crate) async fn ws_loop(
                 // parented to it instead of becoming a root.
                 let spawner = Arc::clone(&state.kernel);
                 let flush_readers = Arc::clone(&readers);
+                let mirror = peer.mirror();
                 let handle = spawner.spawn_task(&host_agent_id, "ws_call", async move {
                     // THE FRAME ID IS THE EXECUTION ID. One id space: the same
                     // id arriving twice — a double-click, a second tab, a
@@ -567,29 +570,22 @@ pub(crate) async fn ws_loop(
                     if let Some(marks) = secret {
                         item = item.with_secret(marks);
                     }
-                    // A binary-edge verb rides the BINARY channel even when the
-                    // client sent a text frame: that is the only way the bundle
-                    // returns (or receives) a raw chunk (A11.9/A13.1).
-                    let verb = item
-                        .payload
-                        .get("type")
-                        .and_then(Value::as_str)
-                        .unwrap_or("");
-                    if body.is_some() || BINARY_EDGE_VERBS.contains(&verb) {
-                        // ONLY A BINARY FRAME OVERWRITES THE KEY. python's
-                        // `payload[field] = body` runs where a body EXISTS; a
-                        // TEXT frame's `bytes` reaches the target as the JSON
-                        // value the client sent, and `write_stream` answers
-                        // `missing_arg` for it (an ABSENT key stays an empty
-                        // chunk). Stripping it unconditionally wrote 0 bytes and
-                        // reported success where python refused.
-                        match body {
-                            // The decode left `null` in the slot python's
-                            // `set_path` fills — kept, so the call row and the
-                            // watcher frame keep python's key order.
-                            Some(b) => item = item.with_binary(b.path, b.bytes),
-                            None => item = item.with_raw_reply(),
-                        }
+                    // ONLY A BINARY FRAME OVERWRITES THE KEY. python's
+                    // `payload[field] = body` runs where a body EXISTS; a TEXT
+                    // frame's `bytes` reaches the target as the JSON value the
+                    // client sent, and `write_stream` answers `missing_arg` for
+                    // it (an ABSENT key stays an empty chunk). Stripping it
+                    // unconditionally wrote 0 bytes and reported success where
+                    // python refused. The decode left `null` in the slot
+                    // python's `set_path` fills — kept, so the call row and the
+                    // watcher frame keep python's key order.
+                    //
+                    // The REPLY needs nothing from the call: any verb whose reply
+                    // carries a body answers a binary frame (`send_envelope`),
+                    // whatever frame asked — python's `encode_frame` finds the
+                    // bytes, no verb list.
+                    if let Some(b) = body {
+                        item = item.with_binary(b.path, b.bytes);
                     }
                     let out_item = fantastic_kernel::send::with_sender(leg, async {
                         kernel.send(vec![item]).await.remove(0)
@@ -613,9 +609,17 @@ pub(crate) async fn ws_loop(
                         }
                         held.push(g);
                     }
+                    // the guid's other tabs get it too (`reply_mirror`) — read
+                    // at reply time, so a hello that landed meanwhile counts
+                    let siblings = mirror.siblings();
+                    let mirrored = (!siblings.is_empty())
+                        .then(|| (out_item.result.clone(), out_item.body.clone()));
                     let f = json!({"type": "reply", "id": fid, "data": out_item.result});
                     send_envelope(&out, f, out_item.body, REPLY_KEY).await;
                     drop(held);
+                    if let Some((data, body)) = mirrored {
+                        peer::mirror_reply(siblings, &fid, &data, body.as_ref()).await;
+                    }
                 });
                 track_call(&state.kernel, &pending_calls, handle);
             }

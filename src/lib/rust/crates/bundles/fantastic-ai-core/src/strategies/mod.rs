@@ -12,7 +12,8 @@
 pub mod fold;
 pub mod strip;
 
-use crate::context::{estimate_one, NOTICE_ENVELOPE_RESERVE};
+use crate::constants::NOTICE_ENVELOPE_RESERVE;
+use crate::context::estimate_one;
 use crate::provider::{Provider, ProviderEvent};
 use fantastic_bundle::{py_str, py_strip};
 use fantastic_kernel::{AgentId, Kernel};

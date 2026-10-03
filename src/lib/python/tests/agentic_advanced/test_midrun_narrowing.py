@@ -12,8 +12,8 @@ it can react to. No restart, no recompile, no new process.
 
 from __future__ import annotations
 
-import sys
 import types
+from kernel import register_unlisted
 
 _steps: list[dict] = []
 
@@ -33,7 +33,7 @@ async def _desk_handler(id, payload, kernel):
 
 _desk.handler = _desk_handler
 _desk.VERBS = {}
-sys.modules["adv3_desk.tools"] = _desk
+register_unlisted("adv3_desk.tools", _desk)
 
 _worker = types.ModuleType("adv3_worker.tools")
 
@@ -55,7 +55,7 @@ async def _worker_handler(id, payload, kernel):
 
 _worker.handler = _worker_handler
 _worker.VERBS = {}
-sys.modules["adv3_worker.tools"] = _worker
+register_unlisted("adv3_worker.tools", _worker)
 
 
 async def test_revoking_a_tool_mid_run_is_immediate_and_model_visible(kernel):

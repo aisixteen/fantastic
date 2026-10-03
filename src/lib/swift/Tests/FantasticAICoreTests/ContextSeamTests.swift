@@ -88,7 +88,7 @@ private func rec(_ meta: OrderedDictionary<String, JSON>) -> Agent {
 
 @Suite("the context seam", .serialized)
 struct ContextSeamTests {
-    init() { AIStripStrategy.forget(AI) }
+    init() { AIStripStrategy.forget(nil, AI) }
 
     // ── primitives ──────────────────────────────────────────────────────
 

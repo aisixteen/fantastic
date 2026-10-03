@@ -72,12 +72,12 @@ pub type MemResult<T> = Result<T, MemoryStoreError>;
 /// kernels in one process never share them. Python `_mem(kernel)`.
 #[derive(Default)]
 pub struct Mem {
-    heads: Mutex<HashMap<String, Vec<Value>>>,
+    pub(crate) heads: Mutex<HashMap<String, Vec<Value>>>,
     /// `agent → [(pid, body)]`, in the order the bodies arrived (python's dict).
-    bodies: Mutex<HashMap<String, Vec<(i64, String)>>>,
-    grants: Mutex<HashMap<String, Vec<Value>>>,
+    pub(crate) bodies: Mutex<HashMap<String, Vec<(i64, String)>>>,
+    pub(crate) grants: Mutex<HashMap<String, Vec<Value>>>,
     /// `agent → [(watcher id, wants bodies)]`, in registration order.
-    watchers: Mutex<HashMap<String, Vec<(String, bool)>>>,
+    pub(crate) watchers: Mutex<HashMap<String, Vec<(String, bool)>>>,
 }
 
 /// The memory layer's state on `kernel`.
@@ -358,6 +358,19 @@ pub async fn save_history(
         }
     }
     Ok(ids)
+}
+
+/// Drop a deleted agent's head, bodies, grants and watchers on this kernel
+/// ([`crate::verbs::on_delete`]).
+pub fn forget(self_id: &AgentId, kernel: &Kernel) {
+    let m = mem(kernel);
+    m.heads.lock().expect("heads poisoned").remove(&self_id.0);
+    m.bodies.lock().expect("bodies poisoned").remove(&self_id.0);
+    m.grants.lock().expect("grants poisoned").remove(&self_id.0);
+    m.watchers
+        .lock()
+        .expect("watchers poisoned")
+        .remove(&self_id.0);
 }
 
 /// Drop this agent's head cache and cached grants — a new incarnation reads its

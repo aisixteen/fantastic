@@ -184,9 +184,10 @@ fn row_payload(kernel: &Arc<Kernel>, pid: i64) -> Value {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_raw_reply_read_is_a_plain_call_on_the_row_and_to_watchers() {
+async fn a_plain_read_is_a_plain_call_on_the_row_and_to_watchers() {
     // python's `read_stream` payload carries no bytes: the call row is the plain
-    // dict and a watcher gets a text frame. Only the REPLY carries a raw chunk.
+    // dict and a watcher gets a text frame. Only the REPLY carries a raw chunk —
+    // and a plain item gets it back with nothing declared on the call.
     let (_t, kernel, _seen) = mk().await;
     let tap = AgentId::from("tap_read");
     let mut rx = kernel.ensure_inbox(&tap);
@@ -198,8 +199,7 @@ async fn a_raw_reply_read_is_a_plain_call_on_the_row_and_to_watchers() {
         .send(vec![Item::new(
             AgentId::from("sink"),
             json!({"type": "read_stream", "path": "a", "offset": 0}),
-        )
-        .with_raw_reply()])
+        )])
         .await
         .remove(0);
     assert_eq!(out.body_bytes(), Some(&b"chunk"[..]), "{:?}", out.result);

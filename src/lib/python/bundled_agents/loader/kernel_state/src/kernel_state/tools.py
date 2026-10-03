@@ -48,6 +48,7 @@ import yaml
 from kernel_state import yaml_io
 
 from kernel import CURRENT_VERSION, operator_context
+from kernel._bundles import bundle_package
 from kernel import current_origin
 from kernel._refusal import UNAUTHORIZED, UNHANDLED, guard_agent_id, missing, refusal
 
@@ -141,24 +142,22 @@ def _seed_readme(root_path: fs.Root, handler_module: str | None) -> None:
     if not handler_module:
         return
     rp = root_path
-    pkg = handler_module.split(".")[0]
+    pkg = bundle_package(handler_module)
+    if pkg is None:
+        return  # not a catalog bundle — nothing is imported to read it (ARCH2-1)
     try:
         base = importlib.resources.files(pkg)
-        readme = base / "readme.md"
-        if readme.is_file() and not fs.exists(rp, "readme.md"):
-            fs.write_text(rp, "readme.md", readme.read_text(encoding="utf-8"))
-        _seed_docs_local(base / "docs", rp, "docs")
-    except (
-        ModuleNotFoundError,
-        FileNotFoundError,
-        OSError,
-        TypeError,
-        AttributeError,
-        ValueError,
-    ):
-        # AttributeError: handler modules that aren't proper packages
-        # (single-file modules, synthetic test stubs). Nothing to seed.
-        pass
+    except (ModuleNotFoundError, TypeError, AttributeError):
+        # No package to read from: a bundle of another runtime, a single-file
+        # module (TypeError), a synthetic test stub (AttributeError). Nothing
+        # to seed.
+        return
+    # The WRITES raise, as the record write above does: a failed seed used to
+    # be swallowed with the lookups, invisible (audit 2026-10-03, ARCH2-9).
+    readme = base / "readme.md"
+    if readme.is_file() and not fs.exists(rp, "readme.md"):
+        fs.write_text(rp, "readme.md", readme.read_text(encoding="utf-8"))
+    _seed_docs_local(base / "docs", rp, "docs")
 
 
 def _seed_docs_local(src_dir, rp: fs.Root, rel: str) -> None:
@@ -468,23 +467,26 @@ async def _seed_readme_via_store(
     (in-process resource); sink is the stream provider."""
     if not handler_module:
         return
-    kernel = agent.ctx
-    pkg = handler_module.split(".")[0]
+    pkg = bundle_package(handler_module)
+    if pkg is None:
+        return  # not a catalog bundle (see `_seed_readme`) — nothing to seed
     prefix = f"{reldir}/" if reldir else ""
     try:
         base = importlib.resources.files(pkg)
-        await _seed_doc_via_store(
-            kernel, store_id, base / "readme.md", f"{prefix}readme.md"
-        )
-        await _seed_docs_via_store(kernel, store_id, base / "docs", f"{prefix}docs")
-    except (ModuleNotFoundError, FileNotFoundError, OSError, TypeError, AttributeError):
-        pass
+    except (ModuleNotFoundError, TypeError, AttributeError):
+        return  # no package to read from (see `_seed_readme`) — nothing to seed
+    await _seed_doc_via_store(agent, store_id, base / "readme.md", f"{prefix}readme.md")
+    await _seed_docs_via_store(agent, store_id, base / "docs", f"{prefix}docs")
 
 
-async def _seed_doc_via_store(kernel, store_id: str, src, path: str) -> None:
-    """Copy one `.md` file THROUGH the provider, copy-if-missing (never clobber)."""
+async def _seed_doc_via_store(agent, store_id: str, src, path: str) -> None:
+    """Copy one `.md` file THROUGH the provider, copy-if-missing (never clobber).
+    A refused write is LOUD (`_persist_failed`), as a record write is: its reply
+    used to be dropped, so a doc that never landed was invisible (audit
+    2026-10-03, ARCH2-9)."""
     if not src.is_file():
         return
+    kernel = agent.ctx
     got = (
         await kernel.send(
             [{"target": store_id, "payload": {"type": "read_stream", "path": path}}]
@@ -492,7 +494,7 @@ async def _seed_doc_via_store(kernel, store_id: str, src, path: str) -> None:
     )[0]["result"]
     if isinstance(got, dict) and isinstance(got.get("bytes"), (bytes, bytearray)):
         return
-    (
+    w = (
         await kernel.send(
             [
                 {
@@ -507,9 +509,11 @@ async def _seed_doc_via_store(kernel, store_id: str, src, path: str) -> None:
             ]
         )
     )[0]["result"]
+    if not isinstance(w, dict) or w.get("error"):
+        _persist_failed(agent, store_id, path, w)
 
 
-async def _seed_docs_via_store(kernel, store_id: str, src_dir, rel: str) -> None:
+async def _seed_docs_via_store(agent, store_id: str, src_dir, rel: str) -> None:
     """Recursively copy a `docs/` topic tree THROUGH the provider (absent ⇒ no-op)."""
     try:
         if not src_dir.is_dir():
@@ -519,9 +523,9 @@ async def _seed_docs_via_store(kernel, store_id: str, src_dir, rel: str) -> None
     for child in src_dir.iterdir():
         childrel = f"{rel}/{child.name}"
         if child.is_dir():
-            await _seed_docs_via_store(kernel, store_id, child, childrel)
+            await _seed_docs_via_store(agent, store_id, child, childrel)
         elif child.is_file() and child.name.endswith(".md"):
-            await _seed_doc_via_store(kernel, store_id, child, childrel)
+            await _seed_doc_via_store(agent, store_id, child, childrel)
 
 
 async def _forget_via_store(agent, store_id: str, abs_path: Path) -> None:
@@ -561,6 +565,7 @@ class _FlushLoop:
         self._forget: dict[str, Path] = {}  # id -> dir to remove
         self._paths: dict[str, Path] = {}  # id -> dir cache (for removed ids)
         self._wake = asyncio.Event()
+        self._drain = asyncio.Lock()  # one drain at a time; flushes wait FIFO
         self._unsub = None
         self._task: asyncio.Task | None = None
 
@@ -609,24 +614,36 @@ class _FlushLoop:
             pass
 
     async def aflush(self) -> None:
-        store_id = _find_store(self.agent)
-        if store_id is None:
-            return  # no provider wired → records stay queued until one is. NO fallback.
-        persist_ids = list(self._persist.keys())
-        self._persist.clear()
-        forget = dict(self._forget)
-        self._forget.clear()
-        # The loader streaming the live tree to its OWN store is persistence
-        # bookkeeping — it runs with operator authority (like persist_blob), not
-        # against the root's own grant (the bootstrap root carries none).
-        with operator_context():
-            for aid in persist_ids:
-                a = self.kernel.get_agent(aid)
-                if a is None or type(a).ephemeral:
-                    continue
-                await _persist_via_store(self.agent, store_id, a._root_path, a.record)
-            for path in forget.values():
-                await _forget_via_store(self.agent, store_id, path)
+        """Drain the dirty queues once — the loop's body AND what `flush_pending` /
+        a one-shot awaits.
+
+        ONE DRAIN AT A TIME. When it returns, every write that was dirty when it was
+        called has LANDED — also the ones the debounced loop took first. It used to
+        return at once when the loop held them, with their writes still in flight:
+        the flush came back before the record and its readme were on disk
+        (measured: a 0.152–0.160 s gap between `create` and `aflush`, just past the
+        debounce, left `agent.yaml`, `readme.md` and `docs/` unwritten)."""
+        async with self._drain:
+            store_id = _find_store(self.agent)
+            if store_id is None:
+                return  # no provider wired → records stay queued. NO fallback.
+            persist_ids = list(self._persist.keys())
+            self._persist.clear()
+            forget = dict(self._forget)
+            self._forget.clear()
+            # The loader streaming the live tree to its OWN store is persistence
+            # bookkeeping — it runs with operator authority (like persist_blob), not
+            # against the root's own grant (the bootstrap root carries none).
+            with operator_context():
+                for aid in persist_ids:
+                    a = self.kernel.get_agent(aid)
+                    if a is None or type(a).ephemeral:
+                        continue
+                    await _persist_via_store(
+                        self.agent, store_id, a._root_path, a.record
+                    )
+                for path in forget.values():
+                    await _forget_via_store(self.agent, store_id, path)
 
     async def stop(self) -> None:
         if self._unsub is not None:
@@ -715,7 +732,9 @@ def reflect_root_extra(agent, *, full: bool = True) -> dict:
             "current. A COMPUTE worker is an `exec_bridge.tools` agent + a program "
             "file — NOT a new handler_module. Create it as YOUR child; to wire it "
             "to a SIBLING (`totals`) grant `can_call:{totals}` AND `update_agent "
-            "id='totals'` to add it to `totals.callable_by`. Read <type>reflect</type> "
+            "id='totals'` to add it to `totals.callable_by` (needs "
+            "`{totals:['update_agent']}` + totals accepting you). Read "
+            "<type>reflect</type> "
             "<readme>self-extension</readme> — send it to 'kernel' — for the fd wire."
         )
         return base
@@ -754,10 +773,12 @@ def reflect_root_extra(agent, *, full: bool = True) -> dict:
             "handler_module (you cannot add modules to the catalog and do not need "
             "to). 'A specialist with child workers' = a parent agent whose children "
             "are exec_bridge runners, each with its own program file.\n"
-            "WIRING TO A SIBLING: you cannot raise your OWN authority, but if you "
-            "hold `update_agent` (e.g. on the root) you may open ANY agent's ingress "
-            "— including a sibling like `totals`/`readings` that is not your child. "
-            "To let your worker call `totals`: grant the worker `can_call:{totals}` "
+            "WIRING TO A SIBLING: you cannot raise your OWN authority. The records in "
+            "your own subtree are yours to edit; a sibling like `totals`/`readings` "
+            "that is not your child is edited only when your can_call names it with "
+            "`update_agent` (`{totals: ['update_agent']}` — a wildcard never covers "
+            "it) and its callable_by accepts you; a grant on the root edits only the "
+            "root. To let your worker call `totals`: grant the worker `can_call:{totals}` "
             "AND `update_agent id='totals'` to add the worker to `totals.callable_by` "
             "(send the WHOLE map — update replaces, not merges).\n"
             "A SPAWNED PROGRAM reaches agents over its control fd — a TWO-WAY socket "

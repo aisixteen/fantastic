@@ -118,11 +118,112 @@ struct SideTablePinTests {
     /// it.
     @Test func theStripSeams() {
         let id = "strip-seam-\(UUID().uuidString.prefix(8))"
-        #expect(!AIStripStrategy.has(id))
-        AIStripStrategy.set(id, ["a:00000001"])
-        #expect(AIStripStrategy.has(id))
-        AIStripStrategy.forget(id)
-        #expect(!AIStripStrategy.has(id))
+        #expect(!AIStripStrategy.has(nil, id))
+        AIStripStrategy.set(nil, id, ["a:00000001"])
+        #expect(AIStripStrategy.has(nil, id))
+        AIStripStrategy.forget(nil, id)
+        #expect(!AIStripStrategy.has(nil, id))
+    }
+
+    /// Audit ARCH2-5: the stripped set is keyed by kernel — two kernels with an
+    /// agent of the same id strip apart, forgetting one leaves the other, and a
+    /// kernel's teardown drops its sets.
+    @Test func theStripTableIsPerKernel() async {
+        AISideTables.installTeardownHook()
+        let a = bareKernel()
+        let b = bareKernel()
+        AIStripStrategy.set(a, "ai", ["a:00000001"])
+        #expect(AIStripStrategy.has(a, "ai"))
+        #expect(!AIStripStrategy.has(b, "ai"))
+        AIStripStrategy.set(b, "ai", ["b:00000002"])
+        AIStripStrategy.forget(b, "ai")
+        #expect(AIStripStrategy.has(a, "ai") && !AIStripStrategy.has(b, "ai"))
+        AIStripStrategy.set(b, "ai", ["b:00000002"])
+        await a.shutdown()
+        #expect(!AIStripStrategy.has(a, "ai"), "the dead kernel's set was not dropped")
+        #expect(AIStripStrategy.has(b, "ai"))
+        await b.shutdown()
+    }
+
+    /// Audit ARCH2-2 (python `test_delete_drops_every_row_but_the_incarnation`):
+    /// `delete_agent` runs the backend's `onDelete`, which drops every row the AI
+    /// core keeps for the id, so the id re-created later starts clean. The
+    /// incarnation stays monotonic: a reply to a call the deleted agent made
+    /// never becomes a live turn of the new one.
+    @Test func deleteDropsEveryRowButTheIncarnationAndARecreateStartsClean() async throws {
+        let id = "ai_del"
+        let (k, ids, _) = await bootMockKernel(
+            config: scriptedConfig([:]), backendIds: [id])
+        #expect(ids[id]?.value == id)
+        let core = try #require(k.bundles.get("mock_backend.tools") as? MockBundle).core
+        let run = AIRunStates.of(k, id)
+        run.enqueue(AIQueuedEntry(clientId: "c", text: "t", sendId: "s", queuedAt: 0))
+        core.projectionLock.withLock {
+            core.projectionCache[id] = ["fired": false]
+            core.compactionMark[id] = (0, "c")
+            core.viewSource[id] = "array"
+            core.foldsSince[id] = 1
+        }
+        core.markRecallDue(id)
+        AICalibration.record(k, id, reported: 10, estimate: 5)
+        await inFlightTurns.bump(id, 1)
+        _ = AISilentStreaks.bump(k, id, "c")
+        _ = AISilentStreaks.bump(k, id, "d")
+        AIStripStrategy.set(k, id, ["x"])
+        AIMemory.of(k).with { m in
+            m.heads[id] = []
+            m.bodies[id] = [:]
+            m.grants[id] = []
+            m.watchers[id] = ["w": true]
+        }
+        let incarnation = AIIncarnation.of(k, id)
+        #expect(incarnation >= 1, "create_agent boots the agent")
+
+        let gone = await k.send([Item("kernel_state", ["type": "delete_agent", "id": .string(id)])])
+        #expect(gone[0].result["deleted"] == true, "\(gone[0].result.serialize())")
+
+        /// Every per-id row is absent; `recallOwed` is what the table says.
+        func expectClean(recallOwed: Bool) async {
+            #expect(AIRunStates.of(k, id) !== run, "the run state was not dropped")
+            #expect(AIRunStates.of(k, id).queueDepth() == 0)
+            #expect(AIRunStates.of(k, id).currentSnapshot() == nil)
+            core.projectionLock.withLock {
+                #expect(core.projectionCache[id] == nil)
+                #expect(core.compactionMark[id] == nil)
+                #expect(core.viewSource[id] == nil)
+                #expect(core.foldsSince[id] == nil)
+                #expect(core.recallDue.contains(id) == recallOwed)
+            }
+            #expect(AICalibration.calibration(k, id) == 1.0)
+            #expect(AICalibration.reportedTokens(k, id) == nil)
+            #expect(await inFlightTurns.count(id) == 0)
+            #expect(!AIStripStrategy.has(k, id))
+            AIMemory.of(k).with { m in
+                #expect(m.heads[id] == nil && m.bodies[id] == nil)
+                #expect(m.grants[id] == nil && m.watchers[id] == nil)
+            }
+        }
+        await expectClean(recallOwed: false)
+        #expect(AIIncarnation.of(k, id) == incarnation, "the incarnation is kept")
+
+        // RE-CREATED under the same id: a fresh agent — its boot owes a recall
+        // and bumps the kept incarnation, and nothing of the deleted one is back.
+        let again = await k.send([
+            Item(
+                "kernel_state",
+                [
+                    "type": "create_agent", "parent_id": "kernel_state",
+                    "handler_module": "mock_backend.tools", "id": .string(id),
+                    "memory_store_id": "memory", "context_window": 32768,
+                    "can_call": ["memory": "*"],
+                ])
+        ])
+        #expect(again[0].result["id"] == .string(id), "\(again[0].result.serialize())")
+        await expectClean(recallOwed: true)
+        #expect(AIIncarnation.of(k, id) == incarnation + 1)
+        #expect(AISilentStreaks.bump(k, id, "c") == 1, "the old streak is gone")
+        #expect(AISilentStreaks.bump(k, id, "d") == 1)
+        await k.shutdown()
     }
 
     /// One generation at a time per agent: queued acquirers are served in

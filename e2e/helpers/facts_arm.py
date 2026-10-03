@@ -21,6 +21,7 @@ from pathlib import Path
 
 from helpers import Limits, connect, ctx_score, drive, human, memory
 from helpers.ai import Connected  # noqa: F401  (re-exported for probes)
+from helpers.kernel import WRAPS
 
 # THE SQUEEZE. The model itself has 256k; this is the window the probes hand the agent so
 # folds, strips and recalls fire inside a run. 12k (2026-09-05) starved the multi-root
@@ -166,7 +167,7 @@ async def reboot_agent(root, core, bk, fb: str, aid: str, strategy: str, extra: 
     r = await call(root, root.id, {"type": "delete_agent", "id": aid})
     assert not (isinstance(r, dict) and r.get("error")), f"delete_agent({aid}): {r}"
     if core is not None:
-        core._providers.pop(aid, None)
+        WRAPS.pop(aid, None)
         core._projection.pop(aid, None)
         core._compaction_mark.pop(aid, None)
     return await connect(

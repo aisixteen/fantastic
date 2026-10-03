@@ -26,6 +26,7 @@ from __future__ import annotations
 from fastapi import WebSocket
 
 from io_bridge import describe as _describe
+from io_bridge import unknown_ingress_refusal
 from web_ws._proxy import run as _proxy_run
 from kernel._refusal import UNHANDLED, refusal
 
@@ -97,6 +98,12 @@ VERBS = {
     "boot": _boot,
     "get_routes": _get_routes,
 }
+
+
+def validate_meta(meta: dict, record: dict) -> str | None:
+    """The leg's `ingress_rule`, refused at the WRITE when no rule implements it
+    — the one check every leg makes (`io_bridge.unknown_ingress_refusal`)."""
+    return unknown_ingress_refusal(meta)
 
 
 async def handler(id: str, payload: dict, kernel) -> dict | None:

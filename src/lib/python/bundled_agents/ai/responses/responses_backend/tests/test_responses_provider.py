@@ -421,3 +421,66 @@ async def test_the_wire_trace_prints_what_left_and_what_came_back(monkeypatch, c
     out = capsys.readouterr().out
     assert "[wire] -> max_output_tokens=8192 items=3" in out
     assert "[wire] <- status='completed' reason=None items=['message']" in out
+
+
+# ── the key never leaves in an error text (audit S1) ─────────────────────────
+
+
+async def _listener():
+    """A 127.0.0.1 listener that reads and closes — a request never gets far."""
+    import asyncio
+
+    async def handle(r, w):
+        try:
+            await asyncio.wait_for(r.read(4096), 1)
+        except Exception:
+            pass
+        w.close()
+
+    srv = await asyncio.start_server(handle, "127.0.0.1", 0)
+    return srv, srv.sockets[0].getsockname()[1]
+
+
+async def test_a_header_the_client_refuses_leaves_with_the_key_scrubbed():
+    """h11 refuses a header holding a newline and QUOTES it in its error. The
+    provider raises that text with the key replaced by `<secret>`, its chain cut
+    (a traceback must not print the original)."""
+    srv, port = await _listener()
+    bad = "sk-test-fixture\n"
+
+    async def key(endpoint: str) -> str:
+        return bad
+
+    p = ResponsesProvider(
+        endpoint=f"http://127.0.0.1:{port}/v1/responses", model="m", key=key
+    )
+    try:
+        with pytest.raises(RuntimeError) as e:
+            await _drain(p)
+    finally:
+        srv.close()
+    assert "sk-test-fixture" not in str(e.value), e.value
+    assert str(e.value).startswith("responses_backend: LocalProtocolError: "), e.value
+    assert "<secret>" in str(e.value), e.value
+    assert e.value.__suppress_context__, "the original (quoting the key) is cut"
+
+
+async def test_an_error_body_echoing_the_key_is_scrubbed():
+    sink: list = []
+    p = _seq_provider(
+        [(401, "invalid key: Bearer sk-test-fixture", "application/json")], sink
+    )
+    with pytest.raises(RuntimeError) as e:
+        await _drain(p)
+    assert "sk-test-fixture" not in str(e.value), e.value
+    assert str(e.value) == "responses 401: invalid key: Bearer <secret>"
+
+
+async def test_a_stream_error_echoing_the_key_is_scrubbed():
+    sse = _sse({"type": "error", "message": "bad key sk-test-fixture"})
+    with pytest.raises(RuntimeError) as e:
+        await _drain(_provider([], sse))
+    assert "sk-test-fixture" not in str(e.value), e.value
+    assert str(e.value) == (
+        "responses stream error: {'type': 'error', 'message': 'bad key <secret>'}"
+    )

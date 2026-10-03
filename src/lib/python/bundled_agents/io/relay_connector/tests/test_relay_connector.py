@@ -19,7 +19,7 @@ import pytest
 from _testkit import boot_root, persist
 from io_bridge import ConnectionClosed
 from relay_connector import _relay as rc_relay
-from relay_connector import tools as rc
+from io_bridge import _engine
 from relay_connector._relay import RelayTransport
 
 
@@ -123,6 +123,27 @@ async def test_recv_reconnects_after_drop():
     assert a.is_live is False
 
 
+async def test_recv_skips_non_object_frames_and_mistyped_reply_ids():
+    """A frame that decodes to a non-object, or a relay reply whose id is not a
+    string, is skipped like an undecodable one. `.get` on `[1]` and a
+    `_relay_pending.pop` of a list id used to raise out of `recv` and end the
+    engine read loop with the leg still `connected`."""
+    hub = FakeRelayHub()
+    ws_a = hub.register("A")
+    a = RelayTransport(
+        dialer=_const_dialer(ws_a), partner_guid="B", reconnect=0, heartbeat=0, ws=ws_a
+    )
+    for raw in ("[1]", "7", '"s"', "null"):
+        await hub.inboxes["A"].put(raw)
+    await hub.inboxes["A"].put(json.dumps({"type": "reply", "id": ["a"], "data": {}}))
+    good = {"type": "reply", "id": "x"}
+    await hub.inboxes["A"].put(
+        json.dumps({"type": "event", "source": "B", "payload": good})
+    )
+    assert await asyncio.wait_for(a.recv(), 1.0) == good
+    await a.close()
+
+
 async def test_directory_list_peers_and_watch():
     """The directory surface: `list_peers` is a relay-LEVEL call to `target:"relay"`
     (not the partner) returning the peers snapshot; `watch_directory` subscribes and
@@ -158,12 +179,70 @@ async def test_directory_list_peers_and_watch():
         await asyncio.sleep(0.05)
         assert {
             "type": "event",
+            "src": "relay",
             "payload": {"type": "peer_status", "guid": "C", "status": "yellow"},
         } in events
     finally:
         await a.close()
         await asyncio.sleep(0)
         drain_task.cancel()
+
+
+async def test_watch_directory_re_emits_directory_events_on_the_connector_inbox(
+    seeded_kernel,
+):
+    """THROUGH THE ENGINE (audit W-10, 2026-10-03): the directory event reached
+    the read loop with no `src`, and the engine re-emits only a subscribed `src` —
+    so `watch_directory` delivered nothing. Now the leg subscribes to the
+    directory (`src:"relay"`): nothing flows before `watch_directory` or after
+    `unwatch_directory`, and in between every `peer_*` event lands on the
+    connector's inbox."""
+    k = seeded_kernel
+    hub = FakeRelayHub()
+    ws_a = hub.register("A")
+    hub.register("B")
+    leg = await _make_leg(k, partner="B")
+    _engine._test_transport_inject[leg] = RelayTransport(
+        dialer=_const_dialer(ws_a), partner_guid="B", reconnect=0, heartbeat=0, ws=ws_a
+    )
+    inbox = k.ctx.ensure_inbox("dir_watcher")
+    k.ctx.agents[leg]._watcher_ids.add("dir_watcher")
+
+    async def call(verb: str) -> dict:
+        return (await k.send([{"target": leg, "payload": {"type": verb}}]))[0]["result"]
+
+    async def directory_events() -> list:
+        got = []
+        try:
+            while True:
+                item = await asyncio.wait_for(inbox.get(), 0.2)
+                if str(item.get("type", "")).startswith("peer_"):
+                    got.append(item)
+        except asyncio.TimeoutError:
+            return got
+
+    def raw_directory_event(**payload) -> str:
+        return json.dumps({"type": "event", "source": "relay", "payload": payload})
+
+    try:
+        assert (await call("boot")).get("booted") is True
+        # before the subscription: dropped
+        await hub.inboxes["A"].put(raw_directory_event(type="peer_left", guid="X"))
+        assert await directory_events() == []
+
+        assert await call("watch_directory") == {"ok": True}
+        await hub.push_directory({"type": "peer_joined", "guid": "C"})
+        await hub.push_directory({"type": "peer_status", "guid": "C", "status": "red"})
+        assert await directory_events() == [
+            {"type": "peer_joined", "guid": "C", "src": "relay"},
+            {"type": "peer_status", "guid": "C", "status": "red", "src": "relay"},
+        ]
+
+        assert (await call("unwatch_directory")).get("ok") is True
+        await hub.inboxes["A"].put(raw_directory_event(type="peer_evicted", guid="C"))
+        assert await directory_events() == []
+    finally:
+        await _engine._teardown(leg)
 
 
 # ─── directory identity (advertise role/owner_guid/exposes) ─────
@@ -225,6 +304,7 @@ async def test_set_identity_republishes_and_surfaces_peer_updated():
         assert hub.attrs["A"] == {"role": "manager", "exposes": ["stop"]}
         assert {
             "type": "event",
+            "src": "relay",
             "payload": {
                 "type": "peer_updated",
                 "guid": "A",
@@ -278,7 +358,7 @@ async def test_set_identity_verb_persists_and_announces(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     hub = FakeRelayHub()
 
-    def fake_default_dialer(relay_url, guid, token):
+    def fake_default_dialer(relay_url, guid, password):
         ws = hub.register(guid)
 
         async def dial():
@@ -305,6 +385,9 @@ async def test_set_identity_verb_persists_and_announces(tmp_path, monkeypatch):
                         "role": "manager",
                         "heartbeat": 0,
                         "reconnect": 0,
+                        # the dial is stubbed (it never reads the password); a
+                        # leg with no `credentials` refuses to boot
+                        "credentials": {"store": "creds", "ref": "relay/group"},
                     },
                 }
             ]
@@ -349,8 +432,8 @@ def two_kernels(tmp_path, monkeypatch):
     kb.update(kb.id, guid="kern-b")
     monkeypatch.chdir(tmp_path)
     yield ka, kb
-    rc._bridges.clear()
-    rc._test_transport_inject.clear()
+    _engine._bridges.clear()
+    _engine._test_transport_inject.clear()
 
 
 async def _make_leg(kernel, *, partner, ingress=None, peer_guid=None):
@@ -393,8 +476,8 @@ async def test_forward_round_trips_through_relay_tunnel(two_kernels):
     )
 
     mt_a, mt_b = _pair("A", "B")
-    rc._test_transport_inject[a_id] = mt_a
-    rc._test_transport_inject[b_id] = mt_b
+    _engine._test_transport_inject[a_id] = mt_a
+    _engine._test_transport_inject[b_id] = mt_b
     assert (
         (
             (await ka.send([{"target": a_id, "payload": {"type": "boot"}}]))[0][
@@ -440,8 +523,8 @@ async def test_forward_denied_when_partner_leg_sealed(two_kernels):
     b_id = await _make_leg(kb, partner="A")  # sealed
 
     mt_a, mt_b = _pair("A", "B")
-    rc._test_transport_inject[a_id] = mt_a
-    rc._test_transport_inject[b_id] = mt_b
+    _engine._test_transport_inject[a_id] = mt_a
+    _engine._test_transport_inject[b_id] = mt_b
     (await ka.send([{"target": a_id, "payload": {"type": "boot"}}]))[0]["result"]
     (await kb.send([{"target": b_id, "payload": {"type": "boot"}}]))[0]["result"]
 
@@ -514,7 +597,7 @@ async def test_guid_auto_mints_once_and_persists(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     hub = FakeRelayHub()
 
-    def fake_default_dialer(relay_url, guid, token):
+    def fake_default_dialer(relay_url, guid, password):
         ws = hub.register(guid)  # dial succeeds over the in-memory hub
 
         async def dial():
@@ -539,6 +622,7 @@ async def test_guid_auto_mints_once_and_persists(tmp_path, monkeypatch):
                         "partner_guid": "B",  # the peer address stays explicit (required)
                         "heartbeat": 0,
                         "reconnect": 0,
+                        "credentials": {"store": "creds", "ref": "relay/group"},
                         # NO guid — it must be minted.
                     },
                 }

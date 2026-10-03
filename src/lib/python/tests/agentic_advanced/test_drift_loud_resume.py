@@ -13,8 +13,8 @@ execution refuses instead of joining. Live authority beats history.
 
 from __future__ import annotations
 
-import sys
 import types
+from kernel import register_unlisted
 
 _bought: list[str] = []
 
@@ -35,7 +35,7 @@ async def _desk_handler(id, payload, kernel):
 
 _desk.handler = _desk_handler
 _desk.VERBS = {}
-sys.modules["adv2_desk.tools"] = _desk
+register_unlisted("adv2_desk.tools", _desk)
 
 _caller = types.ModuleType("adv2_caller.tools")
 
@@ -56,7 +56,7 @@ async def _caller_handler(id, payload, kernel):
 
 _caller.handler = _caller_handler
 _caller.VERBS = {}
-sys.modules["adv2_caller.tools"] = _caller
+register_unlisted("adv2_caller.tools", _caller)
 
 
 async def _wire(kernel):

@@ -44,11 +44,13 @@
 //! match it, so the baseline gives foreign agents nothing.
 //!
 //! PRIVILEGED verbs (the tree mutators, the bulk reads, the kernel's lifecycle and
-//! task controls, the loader's record verbs) are never covered by a wildcard under
-//! a STRUCTURAL token (`$self`/`$parent`/`$children`/`$loader`/`$subtree:<X>`) or
-//! in a heritable entry — EXCEPT when the other end is the holder itself (acting on
-//! your OWN subtree is baseline). A NAMED verb covers one. A `*` under a NAMED id
-//! is the operator's own statement and covers everything. This is an EGRESS rule
+//! task controls, the loader's record verbs, every agent's `stop`/`mount`/
+//! `unmount`/`boot`) are never covered by a wildcard under a STRUCTURAL token
+//! (`$self`/`$parent`/`$children`/`$loader`/`$subtree:<X>`) or in a heritable entry
+//! — EXCEPT when the other end is the holder itself (acting on your OWN subtree is
+//! baseline). A NAMED verb covers one. A `*` under a NAMED id is the operator's own
+//! statement and covers everything. `watch` whose src is the ROOT loses a
+//! structural or heritable wildcard's cover the same way. This is an EGRESS rule
 //! (`enforce_privileged`): on the ingress side a `$children:*` callee legitimately
 //! accepts a privileged verb, since egress already guards escalation.
 
@@ -89,7 +91,7 @@ impl Decision {
 /// structural baseline (`$parent: "*"`) silently handed the entire stream to
 /// every direct child of the root — which is how a leaf browser leg could tap it
 /// while holding no grant that names it (dataroom audit, 2026-08-27).
-pub const PRIVILEGED_VERBS: [&str; 16] = [
+pub const PRIVILEGED_VERBS: [&str; 20] = [
     "create_agent",
     "delete_agent",
     "update_agent",
@@ -115,6 +117,14 @@ pub const PRIVILEGED_VERBS: [&str; 16] = [
     "persist_record",
     "forget_record",
     "load_tree",
+    // An agent's own LIFECYCLE and a host's ROUTES. By verb name, whatever the
+    // bundle: a web_ws/web_rest leg's `$parent:*` let any client it admitted stop
+    // its web host for every client, or unmount a sealed sibling's routes (audit
+    // 2026-10-03, BV-1).
+    "stop",
+    "mount",
+    "unmount",
+    "boot",
 ];
 
 /// The structural tokens — the baseline's vocabulary. A privileged verb loses a
@@ -214,8 +224,13 @@ pub fn authorize_call(
 ) -> Decision {
     // Privileged verbs lose wildcard cover UNLESS the other end is the holder
     // itself (acting on your own subtree is baseline, not escalation) — egress only.
-    let privileged =
-        enforce_privileged && PRIVILEGED_VERBS.contains(&verb) && other_id != holder_id;
+    // `watch` whose src is the ROOT (`loader_id`) is held to the same rule: the
+    // root's inbox carries every kernel verb's payload, `persist_blob` contents
+    // included, and `$parent:*` handed it to every direct child (audit 2026-10-03,
+    // KV-2). Every other watch is an ordinary verb.
+    let privileged = enforce_privileged
+        && (PRIVILEGED_VERBS.contains(&verb) || (verb == "watch" && loader_id == Some(other_id)))
+        && other_id != holder_id;
     if let Some(map) = grant.as_object() {
         for (key, g) in map {
             let matched = match key.as_str() {
@@ -250,15 +265,40 @@ pub fn authorize_call(
     }
 }
 
+/// The verbs whose OPERAND is a record (`payload.id`): the root answers them, the
+/// agent they name is what is acted upon, so that agent is what the gate judges.
+/// Python `RECORD_OPERAND_VERBS`.
+pub const RECORD_OPERAND_VERBS: [&str; 2] = ["update_agent", "delete_agent"];
+
+/// EGRESS on a record operand (`update_agent` / `delete_agent` outside the
+/// holder's own subtree): does the holder's `can_call` NAME the operand with the
+/// verb — a literal key equal to its id whose list holds the verb by name?
+///
+/// Stricter than [`authorize_call`], on purpose: no structural token resolves to
+/// the operand, no `<guid>|*`, and no wildcard covers it — `<id>: "*"` and
+/// `<id>: ["*"]` are reach to the agent, never authority over its record. Python
+/// `names_operand`.
+#[must_use]
+pub fn names_operand(grant: &Value, verb: &str, operand_id: &str) -> bool {
+    grant
+        .get(operand_id)
+        .and_then(Value::as_array)
+        .is_some_and(|a| a.iter().any(|v| v.as_str() == Some(verb)))
+}
+
 /// The heritable half of EGRESS: may a sender call `target_id` through a
 /// heritable `can_call` entry one of its ANCESTORS holds? `ancestor_grants` is
 /// their `can_call` maps, nearest first. A NAMED verb covers a privileged one;
-/// `*` covers only an ordinary verb. First allow wins.
+/// `*` covers only an ordinary verb — and not `watch` on the ROOT (`loader_id`),
+/// which needs the name (audit KV-2). First allow wins.
 pub fn authorize_heritable<'a>(
     ancestor_grants: impl IntoIterator<Item = &'a Value>,
     verb: &str,
     target_id: &str,
+    loader_id: Option<&str>,
 ) -> Decision {
+    let privileged =
+        PRIVILEGED_VERBS.contains(&verb) || (verb == "watch" && loader_id == Some(target_id));
     for grant in ancestor_grants {
         let Some(entry) = grant.get(target_id) else {
             continue;
@@ -268,7 +308,7 @@ pub fn authorize_heritable<'a>(
         }
         let verbs = entry.get("verbs").and_then(Value::as_array);
         let names = |w: &str| verbs.is_some_and(|a| a.iter().any(|v| v.as_str() == Some(w)));
-        if names(verb) || (names("*") && !PRIVILEGED_VERBS.contains(&verb)) {
+        if names(verb) || (names("*") && !privileged) {
             return Decision::allow();
         }
     }

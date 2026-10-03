@@ -14,7 +14,7 @@
 //!
 //! ```text
 //! outbound  {type:"call",  id:corr, target, payload, caller, secret?}
-//!                                     — `secret` = the item's marked paths
+//!                                     — `secret` = the item's marks
 //!                                     (`fantastic_kernel::secret`)
 //! outbound  {type:"watch", src} / {type:"unwatch", src}
 //! inbound   {type:"reply", id, data}
@@ -30,6 +30,19 @@ use std::fmt;
 pub mod memory;
 pub mod relay;
 pub mod ws;
+
+/// Every dialled socket (ws_bridge, relay_connector): a MESSAGE, like a frame,
+/// is at most io_bridge's one frame cap (audit W-3). tungstenite's default
+/// message cap is 64 MiB, so a peer's message fragmented into frames under the
+/// frame cap was buffered and parsed at four times what python's client
+/// (`websockets.connect(max_size=MAX_FRAME)`) allows.
+pub(crate) fn ws_config() -> tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+    tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+        max_message_size: Some(fantastic_io_bridge::codec::MAX_FRAME),
+        max_frame_size: Some(fantastic_io_bridge::codec::MAX_FRAME),
+        ..Default::default()
+    }
+}
 
 /// Errors a transport can raise. Kept narrow on purpose — every
 /// failure is either "the peer hung up" or "I couldn't serialize
@@ -118,11 +131,15 @@ pub trait BridgeTransport: Send + Sync {
     /// `ConnectionClosed`; subsequent `send_frame` likewise.
     async fn close(&self);
 
-    /// python `_BaseTransport.closed` — the engine's `connected` and every
-    /// forward/watch pre-check read it. Default `false`: a python `websockets`
-    /// client has no `closed` attribute, so a ws leg NEVER reports closed (§7 —
-    /// do not add drop detection here).
-    fn closed(&self) -> bool {
+    /// python `_BaseTransport.closed` — the engine's `connected`, `boot`'s
+    /// idempotency and every forward/watch pre-check read it. Every transport
+    /// answers it itself.
+    fn closed(&self) -> bool;
+
+    /// The ws seal: this transport refuses every call carrying secret marks (a
+    /// `ws://` socket to a non-loopback host — python `WSTransport.sealed`). Only
+    /// ws_bridge's `forward` reads it.
+    fn seals_secrets(&self) -> bool {
         false
     }
 

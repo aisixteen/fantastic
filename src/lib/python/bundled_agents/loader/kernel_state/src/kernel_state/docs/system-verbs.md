@@ -42,10 +42,24 @@ and finished sixteen messages having created nothing.
   clear (the record then says `null` — not a holder); an agent's attempt is refused
   `{reason:'unauthorized', side:'secret-holder'}`. An agent may set `true`.
 
+  **Who may: the record you name is the OPERAND** (as `parent_id` is for
+  `create_agent`). Inside your own subtree — yourself, your children, theirs — it
+  needs no grant. Any other record needs BOTH ends: your `can_call` names that
+  agent with the verb, `{<id>: ['update_agent']}` (a wildcard never covers it — not
+  `<id>: '*'`, not `$parent`), and its `callable_by` accepts you. Otherwise
+  `{reason:'unauthorized', side:'egress'}` "<you> may not update_agent <id>" or
+  `side:'ingress'` "<id> does not accept 'update_agent' from <you>". A grant on the
+  root (`kernel_state: ['update_agent']`) edits the root's own record, nothing else.
+  You never edit your own `can_call`/`callable_by` (`side:'self-grant'`) or confer
+  reach you do not hold (`side:'delegation'`).
+
 `delete_agent` — args: `id:str`
 : **Cascades** — deletes that agent and its whole subtree, deepest first. Refuses
   with `{error, reason:'locked', id}` if any descendant carries `delete_lock`;
-  clear it with `update_agent` first.
+  clear it with `update_agent` first. Gated on its operand exactly as
+  `update_agent` is: your own subtree is yours to delete; any other agent needs
+  `{<id>: ['delete_agent']}` in your `can_call` AND its `callable_by` accepting
+  you.
 
 `list_agents` — no args
 : Every agent's record, flat. Records only — metadata, no descriptions. To learn
@@ -72,11 +86,15 @@ handler's task, so the table is a tree.
 
   Cancelling frees real resources where a bundle implements `on_cancel`: an
   `exec_bridge` job's child process is SIGKILLed, an AI backend's in-flight
-  generation is cleared and closed out with a `done` event.
+  generation is cleared and closed out with a `done` event. Each hook runs as its
+  own agent, whoever cancelled (as does `on_delete`).
 
   Note the granularity: an agent granted `cancel` on the kernel can kill ANY
-  task. Before these moved to the root a manifest could grant "A may watch and
-  kill B's work" as one edge; that is gone, knowingly.
+  task but the kernel's own service tasks — the keepalive loops the root owns
+  (the execution flusher, the record persister): `cancel` refuses one
+  (`bad_arg`), it stays in `ps`, and a group kill leaves it out. Before these
+  moved to the root a manifest could grant "A may watch and kill B's work" as
+  one edge; that is gone, knowingly.
 
 ## Executions
 
@@ -87,24 +105,39 @@ flushed execution leaves RAM. A call carrying an `id` is NAMED: a second send of
 same id returns the recorded outcome instead of running again — across a flush and a
 restart, because the store is read before dispatch.
 
-A call may mark SECRET values on its item, beside `payload`: `secret: [path, …]`,
-each `payload.<field…>` or `result[.<field…>]`. The target gets the real payload and
-the caller the real reply; every record of the call — its rows, the memory store,
-`ledger`, the state stream, watcher mirrors, error texts — shows `<secret>`. The
-verb (`payload.type`) cannot be hidden, and a path naming nothing in the payload is
-refused. A named secret call answers a re-send only while it is in RAM: from the
-store its record holds placeholders, so a replay is refused. Masking is not
+A call may mark SECRET values on its item, beside `payload`: `secret: [mark, …]`,
+each a dotted string — `payload.<field…>` or `result[.<field…>]`, split on its dots —
+or an array of steps — `["payload", <step>, …]` or `["result", <step>…]`, exact: a
+string step is an object key taken literally (`["payload", "a.b"]` is the key
+`"a.b"`), a non-negative integer step a list index. One list may mix both. The
+target gets the real payload and the caller the real reply; every record of the
+call — its rows, the memory store, `ledger`, the state stream, watcher mirrors,
+error texts — shows `<secret>`: a value inside any string, and a dict key or a
+number EQUAL to one. The verb (`payload.type`) cannot be hidden; a
+`create_agent`/`update_agent` payload field cannot be marked (it becomes the agent's
+record — "a record field cannot be secret — use a credential_store ref": keep the
+value in a `credential_store` and name the ref); and a payload mark naming nothing
+is refused, as is an empty array, a step that is
+neither a string nor a non-negative integer, or a first step other than `payload`
+(with a step after it) or `result`. A named secret call answers a re-send only while it is in RAM: from the
+store its record holds placeholders, so a replay is refused. A re-send that JOINS a
+secret-marked execution gets its real outcome only when it comes from the execution's
+own caller (the same agent, the operator, or the same `<guid>|<agent>` relayed by a
+bridge); any other joiner gets it as shown, `<secret>` where the values were. Masking is not
 isolation — never send a secret to an AI agent (it would enter its prompt and memory);
 an agent whose record says `holds_secrets: true` (every `credential_store`) is never
 reachable from an AI's model — ai_core refuses the call, while the AI's backend still
-reads its key. The marks cross kernels with the call (a frame's `secret`, rest's
+reads its key; nor may a model's `exec_id` join an execution that carried secret
+marks (its own backend's key read included) — refused, never dispatched. The marks cross kernels with the call (a frame's `secret`, rest's
 `X-Fantastic-Secret`): the receiving kernel masks its own records the same way
 (`transports`) — except over a relay leg, which refuses marked calls.
 
 `ledger` — no args
 : `{executions:[{id, target, status, attempts, retries, named, outcome?, acked?}]}` —
   a projection over the store plus what is not yet flushed, scoped to what YOU
-  originated. Paged. What a settle KEEPS of an outcome: a NAMED call's whole result
+  originated. Paged. A `ledger` or `ack_deadletter` execution answers only the
+  caller that sent it: naming ANOTHER caller's (its id or name) to join it is
+  refused — make your own call under a new id. What a settle KEEPS of an outcome: a NAMED call's whole result
   (its dedup contract), a dead letter's error text, and `{status, bytes}` for
   everything else — a reply body is its caller's, never the kernel's record.
 

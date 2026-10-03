@@ -8,14 +8,13 @@ counter's block reservation, and the graceful stop landing its last rows."""
 from __future__ import annotations
 
 import asyncio
-import sys
 import types
 from pathlib import Path
 
 import yaml
 
 from _testkit import boot_root, persist
-from kernel import sender_context
+from kernel import sender_context, register_unlisted
 from kernel._kernel import shutdown_context
 
 # ── a probe bundle: advertises `shutdown`, can hold, fail, and count ───────────
@@ -52,7 +51,7 @@ async def _handler(id, payload, kernel):
 _mod = types.ModuleType("mem_probe.tools")
 _mod.handler = _handler
 _mod.VERBS = {"reflect": None, "shutdown": None, "slow": None, "work": None}
-sys.modules["mem_probe.tools"] = _mod
+register_unlisted("mem_probe.tools", _mod)
 
 
 async def _call(root, target, payload, **item):

@@ -9,8 +9,15 @@ covered in `web_ws/tests/test_peer_calls.py`.
 
 from __future__ import annotations
 
+import asyncio
+
 from kernel import sender_context
 from kernel._kernel import PeerRoute
+
+
+async def _no_emit(agent_id, payload, caller):  # these routes carry no events
+    raise AssertionError("unexpected emit")
+
 
 HOST = "h0"  # this kernel's guid, set by hand: the root is not booted here
 PAGE = "g1"
@@ -24,7 +31,7 @@ def _route(k, calls: list, reply=None, secrets: list | None = None):
         secrets.append(secret)
         return reply if reply is not None else {"ok": agent_id}
 
-    route = PeerRoute(via="leg", call=call)
+    route = PeerRoute(via="leg", call=call, emit=_no_emit)
     assert k.ctx.register_peer(PAGE, route) is None
     return route
 
@@ -137,17 +144,74 @@ async def test_the_root_reflect_lists_connected_peers(seeded_kernel):
     assert r["peers"] == [], r
 
 
-async def test_one_guid_one_live_route(seeded_kernel):
+async def test_one_guid_holds_a_set_of_live_routes(seeded_kernel):
+    """The tabs of one identity are ONE principal (owner, 2026-10-03): a second
+    route for a live guid is ADDED, and a disconnect removes only its own."""
     k = seeded_kernel
     first = _route(k, [])
-    other = PeerRoute(via="leg2", call=first.call)
-    refused = k.ctx.register_peer(PAGE, other)
-    assert refused and "already connected via leg" in refused["error"], refused
-    # only the registered route may unregister it
+    other = PeerRoute(via="leg2", call=first.call, emit=_no_emit)
+    assert k.ctx.register_peer(PAGE, other) is None
+    k.ctx.register_peer(PAGE, other)  # the same route twice stays one
+    assert k.ctx.peer_rows() == [
+        {"guid": PAGE, "via": "leg"},
+        {"guid": PAGE, "via": "leg2"},
+    ]
     k.ctx.unregister_peer(PAGE, other)
-    assert PAGE in k.ctx.peers
+    assert k.ctx.peers[PAGE] == [first]
     k.ctx.unregister_peer(PAGE, first)
     assert PAGE not in k.ctx.peers
+
+
+def _tab(k, name: str, calls: list, answer: asyncio.Future) -> PeerRoute:
+    """One TAB of the identity PAGE: records the call, answers when `answer` does."""
+
+    async def call(agent_id, payload, caller, secret):
+        calls.append((name, agent_id, payload, caller))
+        return await answer
+
+    route = PeerRoute(via=f"leg_{name}", call=call, emit=_no_emit)
+    k.ctx.register_peer(PAGE, route)
+    return route
+
+
+async def test_a_call_reaches_every_tab_and_settles_with_the_first_reply(
+    seeded_kernel,
+):
+    k = seeded_kernel
+    k._meta["guid"] = HOST
+    loop = asyncio.get_running_loop()
+    calls: list = []
+    a, b = loop.create_future(), loop.create_future()
+    _tab(k, "a", calls, a)
+    _tab(k, "b", calls, b)
+    send = asyncio.create_task(_send(k, f"{PAGE}|canvas", {"type": "around"}))
+    while len(calls) < 2:
+        await asyncio.sleep(0)
+    assert sorted(calls) == [
+        ("a", "canvas", {"type": "around"}, f"{HOST}|kernel"),
+        ("b", "canvas", {"type": "around"}, f"{HOST}|kernel"),
+    ], calls
+    b.set_result({"from": "b"})
+    out = await asyncio.wait_for(send, 3)
+    assert out["status"] == "completed" and out["result"] == {"from": "b"}, out
+    # the slower tab's call is dropped, not left waiting
+    await asyncio.sleep(0)
+    assert a.cancelled(), a
+
+
+async def test_a_disconnected_tab_leaves_the_identity_routable(seeded_kernel):
+    k = seeded_kernel
+    k._meta["guid"] = HOST
+    loop = asyncio.get_running_loop()
+    calls: list = []
+    gone = _tab(k, "a", calls, loop.create_future())
+    live = loop.create_future()
+    live.set_result({"from": "b"})
+    _tab(k, "b", calls, live)
+    k.ctx.unregister_peer(PAGE, gone)
+    out = await _send(k, f"{PAGE}|canvas", {"type": "around"})
+    assert out["result"] == {"from": "b"}, out
+    assert [c[0] for c in calls] == ["b"], calls
 
 
 async def test_a_kernel_with_no_guid_cannot_say_who_is_calling(seeded_kernel):

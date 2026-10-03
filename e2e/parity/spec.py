@@ -87,13 +87,14 @@ def kernel_cmd(rt: str) -> list[str]:
     """The argv that runs this runtime's kernel.
 
     python from the SOURCE tree (its venv holds the bundle entry points the
-    capture reflects over); rust and swift from the staged release-shaped
+    capture reflects over), through the probe launcher — the probes registered,
+    then `main.py`'s own entry; rust and swift from the staged release-shaped
     artifact, never from a build tree.
     """
     if rt == "python":
         return [
             str(REPO / "src/lib/python/.venv/bin/python"),
-            str(REPO / "src/lib/python/main.py"),
+            str(REPO / "e2e/probes/scenario_probes.py"),
         ]
     if rt in ("rust", "swift"):
         return [str(DIST / rt / "fantastic_kernel")]
@@ -189,11 +190,10 @@ def kernel_env(rt: str, extra: dict | None = None, drop: tuple[str, ...] = ()) -
         "VLLM_API_KEY": STUB_KEY,
     }
     if rt == "python":
-        # The probe bundles are importable ONLY through this entry, exactly as in
-        # the driver — the compiled runtimes get the same gate from a build flag.
-        env["PYTHONPATH"] = str(REPO / "e2e/probes")
-        # Unbuffered, or a SIGKILLed teardown loses the tail of the kernel log,
-        # which is where several items are read (A9.5–A9.7, A11.1).
+        # The probe bundles are registered by the launcher `kernel_cmd` runs,
+        # exactly as in the driver — the compiled runtimes get the same gate from
+        # a build flag. Unbuffered, or a SIGKILLed teardown loses the tail of the
+        # kernel log, which is where several items are read (A9.5–A9.7, A11.1).
         env["PYTHONUNBUFFERED"] = "1"
     for name in drop:
         env.pop(name, None)
@@ -507,7 +507,7 @@ def wait_port(port: int, secs: float = 25) -> bool:
 
 
 def leftover_kernels(families: list[str] | None = None) -> list[str]:
-    """Any `fantastic_kernel`/`main.py` process whose cwd is under the run work
+    """Any `fantastic_kernel`/`scenario_probes.py` process whose cwd is under the run work
     tree — every slot (preflight, `families=None`), or only THIS capture's own
     family dirs (other families of the same slot run beside it). Preflight check (c): a leftover kernel holds the lock on the very
     directory the next capture wipes, and the failure it produces reads like a
@@ -524,7 +524,7 @@ def leftover_kernels(families: list[str] | None = None) -> list[str]:
         if not line:
             continue
         pid, _, cmd = line.partition(" ")
-        if "fantastic_kernel" not in cmd and "src/lib/python/main.py" not in cmd:
+        if "fantastic_kernel" not in cmd and "e2e/probes/scenario_probes.py" not in cmd:
             continue
         try:
             cwd = subprocess.run(

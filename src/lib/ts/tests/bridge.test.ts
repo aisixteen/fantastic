@@ -511,6 +511,54 @@ test("a host call is answered by the page kernel, gated by the target's callable
   bridge.close();
 });
 
+// owner 2026-10-03: every emit and reply for an identity reaches all its tabs
+test("a host emit frame is delivered gated like a host call; refused or malformed ones are dropped", async () => {
+  const fk = fakeFactory();
+  const k = pageKernel("p1");
+  const bridge = new WsBridge(k, { origin: "ws://host", controlEndpoint: "kernel_state", makeSocket: fk.factory });
+  bridge.announce();
+  await until(() => fk.forEndpoint("kernel_state")[0]?.sent.some((f) => f["type"] === "hello") ?? false);
+  const sock = fk.forEndpoint("kernel_state")[0]!;
+  const canvas: Payload[] = [];
+  const secret: Payload[] = [];
+  k.onInbox("canvas", (pl) => canvas.push(pl));
+  k.onInbox("secret", (pl) => secret.push(pl));
+
+  sock.deliver({ type: "emit", target: "canvas", payload: { type: "around", n: 1 }, caller: "h0|cell_7" });
+  sock.deliver({ type: "emit", target: "canvas", payload: { type: "clear" }, caller: "h0|cell_7" }); // verb refused
+  sock.deliver({ type: "emit", target: "secret", payload: { type: "read" }, caller: "h0|cell_7" }); // accepts nobody
+  sock.deliver({ type: "emit", target: "canvas", payload: { type: "around" }, caller: "p1|canvas" }); // own guid
+  sock.deliver({ type: "emit", target: "canvas", payload: { n: 2 }, caller: "h0|cell_7" }); // no verb
+  sock.deliver({ type: "emit", target: "canvas", payload: { type: "around", n: 3 } }); // the host operator
+  assert.deepEqual(canvas, [{ type: "around", n: 1 }, { type: "around", n: 3 }]);
+  assert.deepEqual(secret, []);
+
+  // the socket survived every dropped frame
+  sock.deliver({ type: "call", id: "h9", target: "canvas", payload: { type: "around" }, caller: "h0|cell_7" });
+  await until(() => repliesTo(sock, "h9") !== undefined);
+  bridge.close();
+});
+
+test("a reply_mirror frame lands on the bridge conn's inbox and resolves no pending call", async () => {
+  const fk = fakeFactory();
+  const k = pageKernel("p1");
+  const bridge = new WsBridge(k, { origin: "ws://host", controlEndpoint: "kernel_state", makeSocket: fk.factory });
+  const got: Payload[] = [];
+  k.onInbox("kernel_state", (pl) => got.push(pl));
+  let settled = false;
+  const call = bridge.forward("kernel", { type: "ps" }).then(() => (settled = true));
+  await until(() => fk.forEndpoint("kernel_state")[0]?.lastCall() !== undefined);
+  const sock = fk.forEndpoint("kernel_state")[0]!;
+  const id = String(sock.lastCall()!["id"]);
+  sock.deliver({ type: "reply_mirror", id, data: { other: "tab" } });
+  assert.deepEqual(got, [{ type: "reply_mirror", id, data: { other: "tab" } }]);
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(settled, false);
+  sock.deliver({ type: "reply", id, data: { mine: true } });
+  await call;
+  bridge.close();
+});
+
 test("a binary path through an own key named constructor / __proto__ round-trips, as in python", () => {
   for (const key of ["constructor", "__proto__", "prototype"]) {
     const payload: Record<string, unknown> = {};

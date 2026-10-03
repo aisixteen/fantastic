@@ -167,24 +167,30 @@ async fn a_malformed_record_or_a_missing_field_is_named() {
                 .to_string()
         )
     );
-    // a ref with no `api_key` field
+    // a ref with no `api_key` field — declared by the operator's `update_agent`
+    // (which replaces the map, so `claude` rides along), then stored
     set_cred(json!({"store": "creds", "ref": "other"}));
+    let store = AgentId::from(creds::STORE);
+    let mut refs = k.agents.get(&store).unwrap().meta.read().unwrap()["refs"].clone();
+    refs["other"] = json!({"host": "api.example.com", "readers": ["ai"]});
+    let declared = k
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type": "update_agent", "id": creds::STORE, "refs": refs}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(declared["updated"], json!(true), "{declared}");
     let out = k
         .send(vec![Item::new(
-            AgentId::from(creds::STORE),
-            json!({"type": "set", "ref": "other", "host": "api.example.com",
-                   "fields": {"token": "t"}}),
+            store,
+            json!({"type": "set", "ref": "other", "fields": {"token": "t"}}),
         )
         .with_secret(json!(["payload.fields"]))])
         .await
         .remove(0);
     assert_eq!(out.result["stored"], json!(true), "{}", out.result);
-    let store = AgentId::from(creds::STORE);
-    let mut refs = k.agents.get(&store).unwrap().meta.read().unwrap()["refs"].clone();
-    refs["other"]["readers"] = json!(["ai"]);
-    let mut patch = Map::new();
-    patch.insert("refs".into(), refs);
-    k.update(&store, patch);
     assert_eq!(
         key_reader(&ai, &k, "responses_backend", true)
             .read(EP)
@@ -193,4 +199,49 @@ async fn a_malformed_record_or_a_missing_field_is_named() {
             .0,
         "responses_backend: credential 'other' in 'creds' has no 'api_key' field"
     );
+}
+
+/// Audit S1: a key that is not a legal HTTP header value — a control character,
+/// a non-ASCII one, whitespace at an edge — is refused by the reader, naming
+/// the ref and never the value (python's client quotes a refused header in its
+/// error). The store keeps whatever it was given; a key with inner spaces rides.
+#[tokio::test]
+async fn a_key_that_is_not_a_legal_header_value_is_refused_by_its_ref() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = mk(&tmp, &["ai"]).await;
+    let read = key_reader(&AgentId::from("ai"), &k, "responses_backend", true);
+    for bad in [
+        format!("{KEY}\n"),
+        format!("{KEY}\r\nX-Probe: y"),
+        format!("{KEY} "),
+        format!(" {KEY}"),
+        format!("{KEY}\t"),
+        format!("{}\u{0}{}", &KEY[..4], &KEY[4..]),
+        format!("{}\u{7f}{}", &KEY[..4], &KEY[4..]),
+        format!("{KEY}é"),
+    ] {
+        creds::set_key(&k, tmp.path(), "ai", "claude", "api.example.com", &bad).await;
+        let e = read.read(EP).await.unwrap_err();
+        assert_eq!(
+            e.0,
+            "responses_backend: credential 'claude' in 'creds': 'api_key' is not a legal \
+             HTTP header value (a control or non-ASCII character, or whitespace at an edge) \
+             — store it again without",
+            "{bad:?}"
+        );
+        assert!(!e.0.contains(&KEY[4..]));
+    }
+    creds::set_key(&k, tmp.path(), "ai", "claude", "api.example.com", "sk a\tb").await;
+    assert_eq!(read.read(EP).await, Ok(Some("sk a\tb".to_string())));
+}
+
+#[test]
+fn without_key_scrubs_every_occurrence() {
+    use crate::credentials::without_key;
+    assert_eq!(
+        without_key("a sk-1 b sk-1", Some("sk-1")),
+        "a <secret> b <secret>"
+    );
+    assert_eq!(without_key("a sk-1", None), "a sk-1");
+    assert_eq!(without_key("a sk-1", Some("")), "a sk-1");
 }

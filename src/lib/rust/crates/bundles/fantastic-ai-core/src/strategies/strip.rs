@@ -30,7 +30,8 @@
 //! Mirrors python `ai_core/strategies/strip.py`.
 
 use super::{fit_tail, Projection, ProjectionCtx};
-use crate::context::{estimate_one, estimate_tokens, NOTICE_ENVELOPE_RESERVE};
+use crate::constants::NOTICE_ENVELOPE_RESERVE;
+use crate::context::{estimate_one, estimate_tokens};
 use crate::history_view::reply_blocks;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -41,7 +42,7 @@ pub use crate::constants::LOW;
 /// Per-agent set of stripped pids, as the TAG writes them. In-memory,
 /// process-lifetime — a strip is a VIEW decision and the durable store is
 /// untouched, so losing this on restart costs one re-strip and nothing else.
-fn stripped_state() -> &'static Mutex<HashMap<String, HashSet<String>>> {
+pub(crate) fn stripped_state() -> &'static Mutex<HashMap<String, HashSet<String>>> {
     static S: OnceLock<Mutex<HashMap<String, HashSet<String>>>> = OnceLock::new();
     S.get_or_init(|| Mutex::new(HashMap::new()))
 }

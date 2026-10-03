@@ -67,4 +67,31 @@ def resolve_ingress(record: dict) -> IngressRule:
     return construct(cls, cfg)
 
 
-__all__ = ["REGISTRY", "AllowAll", "DenyInbound", "Password", "resolve_ingress"]
+def unknown_ingress_refusal(meta: dict, legal: tuple = tuple(REGISTRY)) -> str | None:
+    """THE write-time check every leg's `validate_meta` makes: an `ingress_rule`
+    this registry does not implement (an unknown name, or a malformed spec) is
+    refused at the WRITE, next to the typo. The gate would seal on it anyway, but
+    `{"updated": true}` for a control that does not exist is its own failure.
+    `legal` is the leg's own list — an in-process edge (fs/process) has no wire
+    envelope to carry a token, so it names no `password_ingress`. Only a PRESENT
+    `ingress_rule` is judged: the `auth` stem's ingress half may legitimately
+    name no rule here."""
+    if "ingress_rule" not in meta:
+        return None
+    spec = meta["ingress_rule"]
+    if not getattr(resolve_ingress({"ingress_rule": spec}), "unknown", None):
+        return None
+    return (
+        f"ingress_rule={spec!r} is not a rule this bundle implements — "
+        f"legal values: {', '.join(legal)}"
+    )
+
+
+__all__ = [
+    "REGISTRY",
+    "AllowAll",
+    "DenyInbound",
+    "Password",
+    "resolve_ingress",
+    "unknown_ingress_refusal",
+]

@@ -693,6 +693,27 @@ async fn a_refused_key_says_to_name_credentials() {
     );
 }
 
+/// Audit S1: an endpoint that echoes the request in its error body does not
+/// carry the key into the error text — it leaves as `<secret>`.
+#[tokio::test]
+async fn an_error_body_echoing_the_key_is_scrubbed() {
+    let (_s, ep) = server_with("invalid key: Bearer sk-test-fixture".to_string(), 401).await;
+    let mut p = provider(&ep);
+    p.key = Arc::new(Keys {
+        keys: Mutex::new(VecDeque::from(["sk-test-fixture"])),
+        asked: Mutex::new(Vec::new()),
+    });
+    let err = drain(&p, &hi(), None).await.unwrap_err();
+    assert_eq!(
+        err.message,
+        format!(
+            "vllm_backend: {} answered HTTP 401 — the door wants a key: name it in \
+             `credentials` ({{store, ref}}): invalid key: Bearer <secret>",
+            ep.trim_end_matches('/')
+        )
+    );
+}
+
 #[test]
 fn the_schema_takes_optional_credentials() {
     assert!(record_schema().get("key_var").is_none());

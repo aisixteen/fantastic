@@ -8,24 +8,23 @@ loaders:
     manifest:
       agents:
         # `lifecycle_probe.tools` is a TEST BUNDLE — `tests/agentic/
-        # lifecycle_probe/`, a real package beside the suite, on the sys.path
-        # pytest already prepends for the agentic conftest. No shipped bundle
+        # lifecycle_probe/`, a real package beside the suite, registered
+        # UNLISTED by the agentic conftest (python resolves a handler_module
+        # only from the bundle catalog plus `register_unlisted`). No shipped bundle
         # offers a cancellable in-flight dispatch without a subprocess or a
         # socket (`scheduler`'s tick is a bare `create_task`, outside the task
         # table; `exec_bridge` would have to name an interpreter path), and
         # inventing a kernel mechanism to make a test expressible is not on.
         #
-        # WHY ON DISK, MEASURED: a module object registered into `sys.modules`
-        # by the validator resolves for `Agent._dispatch` but not for
-        # `Kernel.load`, which re-imports the handler when the persisted record
-        # is read back. Running the general runner ALONE
-        # (`pytest tests/agentic/test_manifest_contract.py`, which never imports
-        # the validator) then dropped this record on the PC-4 reboot — stderr
-        # `[kernel] skipping agent slowbot: bundle lifecycle_probe.tools not
-        # installed in this runtime` — and the loader re-CREATED it, so PC-4
-        # went red for this config and no other. A package on disk resolves for
-        # every entry point into the suite and couples nothing to collection
-        # order.
+        # WHY THE CONFTEST, MEASURED: a module registered by the validator
+        # resolved for `Agent._dispatch` but not for `Kernel.load` when the
+        # general runner ran ALONE (`pytest tests/agentic/test_manifest_contract.py`,
+        # which never imports the validator): the record was dropped on the PC-4
+        # reboot — stderr `[kernel] skipping agent slowbot: bundle
+        # lifecycle_probe.tools not installed in this runtime` — and the loader
+        # re-CREATED it, so PC-4 went red for this config and no other. Every
+        # invocation of the suite passes through the conftest, so resolution
+        # couples nothing to collection order.
         - id: slowbot
           handler_module: lifecycle_probe.tools
           callable_by:

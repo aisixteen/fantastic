@@ -93,8 +93,8 @@ export class KernelStore {
   private flushChain: Promise<unknown> = Promise.resolve();
   /** THE FLUSHER'S TASK (python `spawn_task(root, "flush_executions",
    *  keepalive=True)`): a row in the task table from `kernel_start` on, so `ps`
-   *  shows it and `cancel` stops it; every write it makes parents to it. null =
-   *  not started, cancelled, or stopped. */
+   *  shows it — a kernel service task, which `cancel` refuses (`isService`);
+   *  every write it makes parents to it. null = not started, or stopped. */
   flusherTask: number | null = null;
   // The flush rows this kernel wrote (by id), and the calls that carried them:
   // those calls' own rows are ALREADY RECORDED — the flush row is their record.
@@ -103,6 +103,10 @@ export class KernelStore {
   /** How many `call` rows the store holds for the kernel (re-read at every
    *  prune) — what the retention window is measured against. */
   storedCalls = 0;
+  /** > 0 while the kernel's own flush runs: an id-block reservation then
+   *  publishes nothing (python `_state_quiet`; a page has no task-scoped
+   *  context, so a reservation by other work in that window is quiet too). */
+  private flushing = 0;
   /** UNSTARTED ONLY: execution id → its settle/ack row ids. A kernel that was
    *  never started has nowhere to flush, so when the ledger's RAM ring evicts an
    *  execution its rows go with it — RAM stays bounded by the same ring (a
@@ -123,7 +127,15 @@ export class KernelStore {
     if (n >= this.idReserved) {
       this.idReserved = n + ID_BLOCK;
       if (this.started && this.k.rootId !== null) {
-        this.k.updateMeta(this.k.rootId, { next_id: this.idReserved });
+        if (this.flushing > 0) {
+          // Inside the kernel's own flush NOTHING publishes (python
+          // `_state_quiet`, CLI-B): the record holds the bound, the next
+          // published update carries it.
+          const root = this.k.agents.get(this.k.rootId);
+          if (root !== undefined) root.meta["next_id"] = this.idReserved;
+        } else {
+          this.k.updateMeta(this.k.rootId, { next_id: this.idReserved });
+        }
       }
     }
     return n;
@@ -186,15 +198,12 @@ export class KernelStore {
     this.unflushable.clear();
     const root = this.k.rootId as string;
     const tid = this.put(root, { kind: "task", verb: "flush_executions", parent });
-    const row = this.k.tasks.register(tid, root, "flush_executions", parent, { keepalive: true, forked: true });
-    // A cancel ends the loop (python cancels the flusher's asyncio task): no
-    // further batch is written by it.
-    row.onCancel.push(() => this.endFlusher());
+    this.k.tasks.register(tid, root, "flush_executions", parent, { keepalive: true, forked: true });
     this.flusherTask = tid;
     this.wake();
   }
 
-  /** Stop the flush loop and drop its row (a cancel, or the stop's last step). */
+  /** Stop the flush loop and drop its row (the stop's last step). */
   private endFlusher(): void {
     if (this.flushTimer !== null) {
       timers().clearTimeout(this.flushTimer);
@@ -368,14 +377,24 @@ export class KernelStore {
     }
     const ids = [...this.rows.keys()].sort((a, b) => a - b);
     if (ids.length === 0) return { flushed: 0 };
-    const fid = this.mintId();
-    this.ownFlushes.add(fid);
-    const kinds = new Map(ids.map((i) => [i, this.rows.get(i)!.kind]));
-    const batch: Json[] = ids.map((i) => storeSafe(this.rows.get(i)));
-    batch.push({ id: fid, kind: "flush", covers: ids, status: "done", ts: nowSeconds() });
-    const out = (await via.kernelView().send([
-      { target: this.storeId, payload: { type: "append", rows: batch } },
-    ]))[0]!;
+    // Nothing of this flush is published — its own id mints (and an id-block
+    // reservation they cross) included (CLI-B).
+    this.flushing++;
+    let fid: number;
+    let kinds: Map<number, string>;
+    let out;
+    try {
+      fid = this.mintId();
+      this.ownFlushes.add(fid);
+      kinds = new Map(ids.map((i) => [i, this.rows.get(i)!.kind]));
+      const batch: Json[] = ids.map((i) => storeSafe(this.rows.get(i)));
+      batch.push({ id: fid, kind: "flush", covers: ids, status: "done", ts: nowSeconds() });
+      out = (await via.kernelView().send([
+        { target: this.storeId, payload: { type: "append", rows: batch } },
+      ]))[0]!;
+    } finally {
+      this.flushing--;
+    }
     const res = out.result;
     if (out.status !== "completed" || isErr(res)) {
       warn(

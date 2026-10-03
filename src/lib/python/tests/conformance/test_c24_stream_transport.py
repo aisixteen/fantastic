@@ -21,7 +21,7 @@ import asyncio
 
 from _testkit import boot_root
 from io_bridge import MemoryTransport
-from ws_bridge import tools as wb
+from io_bridge import _engine
 
 N_EVENTS = 30
 
@@ -45,7 +45,7 @@ async def _bridge(kernel):
     )[0]["result"]
     a_id = rec["id"]
     mt_a, mt_peer = MemoryTransport.pair()
-    wb._test_transport_inject[a_id] = mt_a
+    _engine._test_transport_inject[a_id] = mt_a
     booted = (await kernel.send([{"target": a_id, "payload": {"type": "boot"}}]))[0][
         "result"
     ]

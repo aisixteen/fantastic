@@ -94,7 +94,7 @@ async fn hello_makes_the_page_an_address_and_a_call_round_trips() {
     let tmp = TempDir::new().unwrap();
     let (kernel, mut ws, leg) = open(&tmp, "web_peer_rt", true).await;
     push(&mut ws, json!({"type": "hello", "guid": PAGE})).await;
-    until("peer registered", || kernel.peer(PAGE).is_some()).await;
+    until("peer registered", || !kernel.peer_routes(PAGE).is_empty()).await;
     assert_eq!(kernel.peer_rows(), json!([{"guid": PAGE, "via": leg}]));
     let send = send_to_page(&kernel, json!({"type": "around", "radius": 2}));
     let call = next_of(&mut ws, "call").await;
@@ -123,7 +123,7 @@ async fn a_page_side_refusal_is_the_calls_outcome() {
     let tmp = TempDir::new().unwrap();
     let (kernel, mut ws, _) = open(&tmp, "web_peer_refusal", true).await;
     push(&mut ws, json!({"type": "hello", "guid": PAGE})).await;
-    until("peer registered", || kernel.peer(PAGE).is_some()).await;
+    until("peer registered", || !kernel.peer_routes(PAGE).is_empty()).await;
     let send = send_to_page(&kernel, json!({"type": "around"}));
     let call = next_of(&mut ws, "call").await;
     let refusal = json!({
@@ -144,7 +144,7 @@ async fn a_disconnect_settles_waiting_calls_and_drops_the_address() {
     let tmp = TempDir::new().unwrap();
     let (kernel, mut ws, _) = open(&tmp, "web_peer_gone", true).await;
     push(&mut ws, json!({"type": "hello", "guid": PAGE})).await;
-    until("peer registered", || kernel.peer(PAGE).is_some()).await;
+    until("peer registered", || !kernel.peer_routes(PAGE).is_empty()).await;
     let send = send_to_page(&kernel, json!({"type": "around"}));
     next_of(&mut ws, "call").await;
     ws.close(None).await.expect("close");
@@ -158,44 +158,170 @@ async fn a_disconnect_settles_waiting_calls_and_drops_the_address() {
         "{:?}",
         out.result
     );
-    assert!(kernel.peer(PAGE).is_none());
+    assert!(kernel.peer_routes(PAGE).is_empty());
     let gone = settled(send_to_page(&kernel, json!({"type": "around"}))).await;
     assert_eq!(gone.result["reason"], "unknown_agent", "{:?}", gone.result);
     stop(&kernel, "web_peer_gone").await;
 }
 
 #[tokio::test]
-async fn one_guid_per_connection_and_per_kernel() {
+async fn one_guid_per_connection() {
     let tmp = TempDir::new().unwrap();
-    let (kernel, mut ws, leg) = open(&tmp, "web_peer_pin", true).await;
-    let port = kernel
-        .agents
-        .get(&AgentId::from("web_peer_pin"))
-        .and_then(|a| a.meta.read().unwrap().get("port").and_then(Value::as_u64))
-        .expect("port") as u16;
-    let mut ws2 = connect(port, "web_peer_pin").await;
+    let (kernel, mut ws, _) = open(&tmp, "web_peer_pin", true).await;
     push(&mut ws, json!({"type": "hello", "guid": PAGE})).await;
-    until("peer registered", || kernel.peer(PAGE).is_some()).await;
+    until("peer registered", || !kernel.peer_routes(PAGE).is_empty()).await;
     // the same connection cannot become someone else
     push(&mut ws, json!({"type": "hello", "guid": "other"})).await;
     let err = next_of(&mut ws, "error").await;
     assert_eq!(err["arg"], "guid", "{err}");
     assert!(err["error"].as_str().unwrap().contains(PAGE), "{err}");
-    // another connection cannot take a guid that is live
-    push(&mut ws2, json!({"type": "hello", "guid": PAGE})).await;
-    let err2 = next_of(&mut ws2, "error").await;
-    assert!(
-        err2["error"]
-            .as_str()
-            .unwrap()
-            .contains(&format!("already connected via {leg}")),
-        "{err2}"
-    );
     // and a malformed guid is refused
-    push(&mut ws2, json!({"type": "hello", "guid": "a|b"})).await;
-    let err3 = next_of(&mut ws2, "error").await;
+    push(&mut ws, json!({"type": "hello", "guid": "a|b"})).await;
+    let err3 = next_of(&mut ws, "error").await;
     assert_eq!(err3["arg"], "guid", "{err3}");
     stop(&kernel, "web_peer_pin").await;
+}
+
+/// Owner, 2026-10-03: every tab says hello with the identity's guid; the host
+/// calls ALL of them, the first reply settles, the other is dropped; a closed tab
+/// leaves the guid routable through the other.
+#[tokio::test]
+async fn two_tabs_of_one_identity_are_one_principal() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, mut ws, leg) = open(&tmp, "web_peer_tabs", true).await;
+    let port = kernel
+        .agents
+        .get(&AgentId::from("web_peer_tabs"))
+        .and_then(|a| a.meta.read().unwrap().get("port").and_then(Value::as_u64))
+        .expect("port") as u16;
+    let mut ws2 = connect(port, "web_peer_tabs").await;
+    push(&mut ws, json!({"type": "hello", "guid": PAGE})).await;
+    push(&mut ws2, json!({"type": "hello", "guid": PAGE})).await;
+    until("both tabs registered", || {
+        kernel.peer_routes(PAGE).len() == 2
+    })
+    .await;
+    assert_eq!(
+        kernel.peer_rows(),
+        json!([{"guid": PAGE, "via": leg}, {"guid": PAGE, "via": leg}])
+    );
+    let send = send_to_page(&kernel, json!({"type": "around"}));
+    let c1 = next_of(&mut ws, "call").await;
+    let c2 = next_of(&mut ws2, "call").await;
+    for c in [&c1, &c2] {
+        assert_eq!(c["target"], "canvas", "{c}");
+        assert_eq!(c["caller"], json!(format!("{HOST}|kernel")), "{c}");
+    }
+    push(
+        &mut ws2,
+        json!({"type": "reply", "id": c2["id"], "data": {"tab": 2}}),
+    )
+    .await;
+    assert_eq!(settled(send).await.result, json!({"tab": 2}));
+    // dropped: nothing waits on it any more
+    push(
+        &mut ws,
+        json!({"type": "reply", "id": c1["id"], "data": {"tab": 1}}),
+    )
+    .await;
+    // one tab closes: the identity stays an address through the other
+    ws.close(None).await.expect("close");
+    until("one tab left", || kernel.peer_routes(PAGE).len() == 1).await;
+    let again = send_to_page(&kernel, json!({"type": "around"}));
+    let c3 = next_of(&mut ws2, "call").await;
+    push(
+        &mut ws2,
+        json!({"type": "reply", "id": c3["id"], "data": {"tab": 2, "n": 2}}),
+    )
+    .await;
+    assert_eq!(settled(again).await.result, json!({"tab": 2, "n": 2}));
+    ws2.close(None).await.expect("close");
+    until("no tab left", || kernel.peer_routes(PAGE).is_empty()).await;
+    stop(&kernel, "web_peer_tabs").await;
+}
+
+/// Two tabs of one identity on the web agent `web_id`'s server, both said hello.
+async fn two_tabs(tmp: &TempDir, web_id: &str) -> (Arc<Kernel>, TestWs, TestWs, String) {
+    let (kernel, mut ws, leg) = open(tmp, web_id, true).await;
+    let port = kernel
+        .agents
+        .get(&AgentId::from(web_id))
+        .and_then(|a| a.meta.read().unwrap().get("port").and_then(Value::as_u64))
+        .expect("port") as u16;
+    let mut ws2 = connect(port, web_id).await;
+    push(&mut ws, json!({"type": "hello", "guid": PAGE})).await;
+    push(&mut ws2, json!({"type": "hello", "guid": PAGE})).await;
+    until("both tabs registered", || {
+        kernel.peer_routes(PAGE).len() == 2
+    })
+    .await;
+    (kernel, ws, ws2, leg)
+}
+
+/// Owner, 2026-10-03: an emit to `<guid>|<agent>` reaches EVERY live tab of the
+/// guid as `{type:"emit", target, payload}` — plus `caller` when an agent
+/// emitted (granted `emit` on the peer), none for an operator emit.
+#[tokio::test]
+async fn an_emit_to_the_identity_reaches_every_tab() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, mut ws, mut ws2, leg) = two_tabs(&tmp, "web_peer_emit").await;
+    let target = AgentId::from(format!("{PAGE}|canvas"));
+    kernel.emit(&target, json!({"type": "ping", "n": 1})).await;
+    for tab in [&mut ws, &mut ws2] {
+        let e = next_of(tab, "emit").await;
+        assert_eq!(
+            e,
+            json!({"type": "emit", "target": "canvas", "payload": {"type": "ping", "n": 1}})
+        );
+    }
+    kernel
+        .agents
+        .get(&AgentId::from(leg.as_str()))
+        .unwrap()
+        .meta
+        .write()
+        .unwrap()
+        .insert(
+            "can_call".to_string(),
+            json!({format!("{PAGE}|*"): ["emit"]}),
+        );
+    fantastic_kernel::send::with_sender(AgentId::from(leg.as_str()), async {
+        kernel.emit(&target, json!({"type": "ping", "n": 2})).await;
+    })
+    .await;
+    for tab in [&mut ws, &mut ws2] {
+        let e = next_of(tab, "emit").await;
+        assert_eq!(e["payload"]["n"], 2, "{e}");
+        assert_eq!(e["caller"], json!(format!("{HOST}|{leg}")), "{e}");
+    }
+    stop(&kernel, "web_peer_emit").await;
+}
+
+/// Owner, 2026-10-03: a reply this leg sends one tab reaches the OTHER tabs of
+/// its guid as `{type:"reply_mirror", id, data}` — never the asking tab itself.
+#[tokio::test]
+async fn a_reply_is_mirrored_to_the_sibling_tab() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, mut ws, mut ws2, _) = two_tabs(&tmp, "web_peer_mirror").await;
+    push(
+        &mut ws,
+        json!({"type": "call", "id": "c1", "target": "kernel_state", "payload": {"type": "reflect"}}),
+    )
+    .await;
+    let reply = next_of(&mut ws, "reply").await;
+    let mirror = next_of(&mut ws2, "reply_mirror").await;
+    assert_eq!(
+        mirror,
+        json!({"type": "reply_mirror", "id": "c1", "data": reply["data"]})
+    );
+    push(
+        &mut ws2,
+        json!({"type": "call", "id": "c2", "target": "kernel_state", "payload": {"type": "reflect"}}),
+    )
+    .await;
+    // the first mirror tab 1 sees is tab 2's: its own reply never came back
+    assert_eq!(next_of(&mut ws, "reply_mirror").await["id"], "c2");
+    stop(&kernel, "web_peer_mirror").await;
 }
 
 #[tokio::test]
@@ -204,7 +330,7 @@ async fn a_sealed_leg_carries_no_peer() {
     let (kernel, mut ws, _) = open(&tmp, "web_peer_sealed", false).await;
     push(&mut ws, json!({"type": "hello", "guid": PAGE})).await;
     tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(kernel.peer(PAGE).is_none());
+    assert!(kernel.peer_routes(PAGE).is_empty());
     stop(&kernel, "web_peer_sealed").await;
 }
 
@@ -216,7 +342,7 @@ async fn a_raw_body_rides_the_call_both_ways() {
     let tmp = TempDir::new().unwrap();
     let (kernel, mut ws, _) = open(&tmp, "web_peer_bytes", true).await;
     push(&mut ws, json!({"type": "hello", "guid": PAGE})).await;
-    until("peer registered", || kernel.peer(PAGE).is_some()).await;
+    until("peer registered", || !kernel.peer_routes(PAGE).is_empty()).await;
     let send = send_item(
         &kernel,
         Item::new(

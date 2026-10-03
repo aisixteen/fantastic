@@ -111,3 +111,33 @@ async fn unknown_type_wire_shape_is_byte_exact() {
         assert_eq!(serde_json::to_string(&reply).unwrap(), want, "{payload}");
     }
 }
+
+/// Audit W-8 — the one write-time check every leg makes (python
+/// `validate_meta` → `io_bridge.unknown_ingress_refusal`): an unknown name or a
+/// malformed spec is refused with the wire legal values; a rule it implements is
+/// not.
+#[test]
+fn validate_meta_refuses_an_unknown_or_malformed_ingress_rule() {
+    for (spec, shown) in [
+        (json!("open_sesame"), "'open_sesame'"),
+        (json!(7), "7"),
+        (json!({"type": ["x"]}), "{'type': ['x']}"),
+        (
+            json!({"type": "password_ingress", "env": 7}),
+            "{'type': 'password_ingress', 'env': 7}",
+        ),
+    ] {
+        let mut meta = Map::new();
+        meta.insert("ingress_rule".into(), spec);
+        assert_eq!(
+            WebWsBundle.validate_meta(&meta, &Map::new()),
+            Some(format!(
+                "ingress_rule={shown} is not a rule this bundle implements — legal \
+                 values: allow_all_ingress, deny_ingress, password_ingress"
+            ))
+        );
+    }
+    let mut meta = Map::new();
+    meta.insert("ingress_rule".into(), json!("password_ingress"));
+    assert_eq!(WebWsBundle.validate_meta(&meta, &Map::new()), None);
+}
