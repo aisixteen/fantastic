@@ -4,26 +4,22 @@
 //!
 //! The human's surfaces that are not the in-proc operator reach every agent the
 //! way the shell does: the MCP leg (`mcp`, a coding CLI), `user` — the shell's
-//! own identity, which a canvas tab acts as through the users gateway when it
-//! has no token (owner, 2026-10-03) — and every AI CELL under the canvas leg
-//! (the canvas's control plane, owner 2026-09-30). The canvas leg itself
-//! reaches only the gateway (`kern/web`). The shell is the operator (ungated);
-//! these are not, so THIS CLI — the in-proc operator — writes BOTH edges for
-//! every agent:
+//! own identity, which every canvas tab calls through (`user.forward`) — every
+//! AI agent, and the host-side helpers that act for the human (the `backend`
+//! folders, the canvas set-up agents) — a strictly single-user dev tool (owner
+//! 2026-10-04). The shell is the operator (ungated); these are not, so THIS CLI
+//! — the in-proc operator — writes BOTH edges, BY ID, for every agent:
 //!
-//! - the agent's `callable_by` accepts `$subtree:<leg>` for each leg (the leg
-//!   AND everything under it — the AI cells under the canvas leg) and `user`,
-//!   with [`verbs`];
-//! - each HOLDER's `can_call` names the agent with the same list — a heritable
-//!   entry cannot serve both the leg and its descendants, so each holder
-//!   carries its own (no `*` id key exists by design: each target, by id,
-//!   `kernel` included).
+//! - the agent's `callable_by` names each holder with [`verbs`];
+//! - each holder's `can_call` names the agent (and `kernel`) with the same.
 //!
-//! `*` never covers a PRIVILEGED verb, so each one is named. Done for every agent
-//! when a leg is set up, and again for each agent the state stream reports
-//! `added` (made by an AI, by exec, loaded from disk, or a leg itself). Every
-//! grant lives in the records: the human reshapes them with `update_agent`. A
-//! leg's `ingress_rule` still decides who may open frames on it.
+//! The canvas leg holds only what its own frames need: `watch` on every agent
+//! and the state stream on the root ([`leg_verbs`]); its calls go through
+//! `user`. Done for every agent when a leg is set up, and again for each
+//! agent the state stream reports `added` (made by an AI, by exec, loaded from
+//! disk, or a leg itself). Every grant lives in the records: the human reshapes
+//! them with `update_agent`. A leg's `ingress_rule` still decides who may open
+//! frames on it.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -35,18 +31,13 @@ use crate::kern::host::Host;
 /// The canvas leg's id.
 pub const CANVAS_LEG: &str = crate::kern::web::CANVAS_WS_ID;
 
-/// Every leg whose subtree the targets accept, when it exists.
-pub const LEGS: [&str; 2] = [CANVAS_LEG, crate::mcp::LEG];
-/// The legs that HOLD the reach themselves (the canvas leg reaches only the
-/// users gateway).
+/// The legs that HOLD the reach themselves (the canvas leg reaches only
+/// `user`).
 pub const HOLDING_LEGS: [&str; 1] = [crate::mcp::LEG];
-/// The shell's own identity: a canvas tab with no token acts as it.
-pub const DEFAULT_USER: &str = fantastic_canvas_users::DEFAULT_USER;
 
-/// Every verb: `*`, and each privileged verb by name (a `*` never covers one) —
-/// the kernel's own list, so a verb the lib makes privileged is covered here too.
+/// Every verb: `*` covers each one (the kernel has no privileged list).
 pub fn verbs() -> Vec<&'static str> {
-    std::iter::once("*").chain(fantastic_kernel::authz::PRIVILEGED_VERBS).collect()
+    vec!["*"]
 }
 
 fn exists(h: &Host, id: &str) -> bool {
@@ -61,59 +52,68 @@ fn field(h: &Host, id: &str, f: &str) -> Map<String, Value> {
         .unwrap_or_default()
 }
 
-/// The legs present in this kernel.
-fn legs(h: &Host) -> Vec<&'static str> {
-    LEGS.into_iter().filter(|l| exists(h, l)).collect()
-}
 
-/// The HOLDERS of the reach: each present holding leg, `user`, and every AI
-/// agent under the canvas leg (an agent that names a memory store — `ai_cells` spawns them as
-/// the leg's descendants).
+/// The HOLDERS of the reach (strictly single-user dev tool, owner 2026-10-04):
+/// each present holding leg, `user`, every AI agent (a non-root agent naming a
+/// memory store), and the host-side helpers that act for the human — every
+/// `backend` folder and every canvas set-up agent.
 fn holders(h: &Host) -> Vec<String> {
-    let under_canvas = |id: &str| -> bool {
-        let mut cur = h.kernel.agents.get(&fantastic_kernel::AgentId::from(id)).and_then(|a| a.value().record().parent_id);
-        while let Some(p) = cur {
-            if p == CANVAS_LEG {
-                return true;
-            }
-            cur = h.kernel.agents.get(&fantastic_kernel::AgentId::from(p.as_str())).and_then(|a| a.value().record().parent_id);
-        }
-        false
-    };
+    let root = h.kernel.root().map(|r| r.id.0.clone());
+    let helper = [crate::kern::backend::HANDLER_MODULE, crate::kern::setup_agent::HANDLER_MODULE];
     let mut v: Vec<String> = HOLDING_LEGS.into_iter().filter(|l| exists(h, l)).map(String::from).collect();
-    if exists(h, DEFAULT_USER) {
-        v.push(DEFAULT_USER.to_string());
+    if exists(h, crate::env::HUMAN) {
+        v.push(crate::env::HUMAN.to_string());
     }
     v.extend(
         h.kernel
             .agents
             .iter()
-            .filter(|e| e.value().record().meta.get("memory_store_id").and_then(Value::as_str).is_some())
-            .map(|e| e.key().0.clone())
-            .filter(|id| under_canvas(id)),
+            .filter(|e| Some(&e.key().0) != root.as_ref())
+            .filter(|e| {
+                let r = e.value().record();
+                r.meta.get("memory_store_id").and_then(Value::as_str).is_some()
+                    || r.handler_module.as_deref().is_some_and(|m| helper.contains(&m))
+            })
+            .map(|e| e.key().0.clone()),
     );
     v
 }
 
-/// Grant every holder every verb on `ids` — both edges: each target's
-/// `callable_by` accepts `$subtree:<leg>` for each present leg and `user`, and each
-/// holder's `can_call` names the target (and `kernel`). One write per changed
-/// record.
+/// What the canvas leg itself may do on `id`: WATCH it (a tab's terminal
+/// output, an AI's tokens ride the leg's own frames), and on the root also tap
+/// the state stream (the stream cell). Every call goes through `user` instead.
+fn leg_verbs(h: &Host, id: &str) -> Value {
+    if id == h.root || id == "kernel" {
+        json!(["watch", "state_subscribe"])
+    } else {
+        json!(["watch"])
+    }
+}
+
+/// Grant every holder every verb on `ids` — both edges, BY ID (no subtree
+/// keys): each target's `callable_by` names each holder, and each holder's
+/// `can_call` names the target (and `kernel`); the canvas leg, both edges, its
+/// [`leg_verbs`]. One write per changed record.
 pub async fn grant(h: &Host, ids: &[String]) -> Result<(), String> {
     let all = json!(verbs());
-    let mut subs: Vec<String> = legs(h).into_iter().map(|l| format!("$subtree:{l}")).collect();
-    if exists(h, DEFAULT_USER) {
-        subs.push(DEFAULT_USER.to_string());
-    }
+    let holders = holders(h);
+    let leg = exists(h, CANVAS_LEG);
     for id in ids {
         if !exists(h, id) {
             continue;
         }
         let mut cb = field(h, id, "callable_by");
         let mut changed = false;
-        for sub in &subs {
-            if cb.get(sub) != Some(&all) {
-                cb.insert(sub.clone(), all.clone());
+        for holder in holders.iter().filter(|x| *x != id) {
+            if cb.get(holder) != Some(&all) {
+                cb.insert(holder.clone(), all.clone());
+                changed = true;
+            }
+        }
+        if leg && id != CANVAS_LEG {
+            let lv = leg_verbs(h, id);
+            if cb.get(CANVAS_LEG) != Some(&lv) {
+                cb.insert(CANVAS_LEG.to_string(), lv);
                 changed = true;
             }
         }
@@ -124,15 +124,20 @@ pub async fn grant(h: &Host, ids: &[String]) -> Result<(), String> {
             }
         }
     }
-    for holder in holders(h) {
+    let mut writers: Vec<(String, bool)> = holders.into_iter().map(|x| (x, true)).collect();
+    if leg {
+        writers.push((CANVAS_LEG.to_string(), false));
+    }
+    for (holder, full) in writers {
         let mut cc = field(h, &holder, "can_call");
         let mut changed = false;
         for id in ids.iter().map(String::as_str).chain(["kernel"]) {
             if id == holder || (id != "kernel" && !exists(h, id)) {
                 continue;
             }
-            if cc.get(id) != Some(&all) {
-                cc.insert(id.to_string(), all.clone());
+            let want = if full { all.clone() } else { leg_verbs(h, id) };
+            if cc.get(id) != Some(&want) {
+                cc.insert(id.to_string(), want);
                 changed = true;
             }
         }

@@ -85,6 +85,10 @@ def private_write(p: Path, text: str) -> None:
     os.close(fd)
 
 
+# the root view's backend folder on the host: a cell's backend lives here
+FOLDER = "agents/user/agents/web/agents/canvas_page/agents/canvas/agents/backend/agents/view_root"
+
+
 class Rig:
     """One test's world: its artifacts dir, its binary, its home, its host."""
 
@@ -191,21 +195,30 @@ class Rig:
     # ── the disk: seeding and reading the two trees ─────────────────────────
     @property
     def cells_dir(self) -> Path:
-        return self.proj / ".fantastic" / "web" / "agents" / "canvas" / "agents"
+        return self.proj / ".fantastic" / "web" / "agents" / "canvas" / "agents" / "view_root" / "agents"
 
     def seed_cells(self, cells: list[dict]) -> None:
-        """Write page cells as the ws loader stores them (host stopped)."""
+        """Write page cells into the root view as the page loader stores them (host stopped)."""
         for c in cells:
-            rec = {"parent_id": "canvas", **c}
+            rec = {"parent_id": "view_root", **c}
             (self.cells_dir / c["id"]).mkdir(parents=True, exist_ok=True)
             (self.cells_dir / c["id"] / "agent.yaml").write_text(yaml.safe_dump(rec, sort_keys=False, allow_unicode=True))
 
     def seed_host_agent(self, parent_path: str, rec: dict) -> None:
-        """Write a HOST agent record under `parent_path` (e.g.
-        `agents/web/agents/canvas_ws`) — loaded at the next boot."""
+        """Write a HOST agent record under `parent_path` (e.g. `FOLDER`, the
+        root view's backend folder) — loaded at the next boot."""
         d = self.proj / ".fantastic" / parent_path / "agents" / rec["id"]
         d.mkdir(parents=True, exist_ok=True)
         (d / "agent.yaml").write_text(yaml.safe_dump(rec, sort_keys=False))
+
+    def patch_host_agent(self, agent_id: str, fields: dict) -> None:
+        """Merge `fields` into a HOST agent's record on disk (host stopped)."""
+        for f in (self.proj / ".fantastic").rglob(f"{agent_id}/agent.yaml"):
+            rec = yaml.safe_load(f.read_text()) or {}
+            rec.update(fields)
+            f.write_text(yaml.safe_dump(rec, sort_keys=False))
+            return
+        raise SystemExit(f"no host record {agent_id} to patch")
 
     def cells(self) -> list[dict]:
         out = []
@@ -237,11 +250,11 @@ class Rig:
     def looks_since_spawn(self) -> list[str]:
         """How the AI LOOKED at the canvas once its cell existed: every call to a
         page agent, and every host-side read of the canvas's records (`web_loader
-        load_tree` — its control-plane reach allows it) after `ai_cells spawn`."""
+        load_tree` — its control-plane reach allows it) after its view folder's `spawn`."""
         g = self.page_guid()
         out, armed = [], False
         for line in self.log.read_text().splitlines():
-            if re.match(r"^\[\d+\] ai_cells call spawn", line):
+            if re.match(r"^\[\d+\] view_\S+ call spawn", line):
                 armed = True
             elif armed and (re.match(r"^\[\d+\] web_loader call load_tree", line)
                             or (g and re.match(rf"^\[\d+\] {re.escape(g)}\|\S+ call \S+", line))):

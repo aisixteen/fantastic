@@ -2,13 +2,14 @@
 //!
 //! Every scenario of ram_store's own suite (`fantastic-ram-store/src/tests.rs`,
 //! the twin of python `test_ram_store.py`) runs against BOTH bundles; every reply
-//! is recorded, and the two transcripts must be IDENTICAL (grant `ts` scrubbed —
-//! a clock). ram_store's own assertions run against both as well.
+//! is recorded, and the two transcripts must be IDENTICAL. ram_store's own
+//! assertions run against both as well.
 
 use std::sync::{Arc, Once};
 
 use fantastic_kernel::agent::Agent;
-use fantastic_kernel::{with_remote_caller, with_sender, AgentId, Item, Kernel};
+use fantastic_kernel::test_support::as_agent;
+use fantastic_kernel::{AgentId, Item, Kernel};
 use serde_json::{json, Value};
 
 const RAM: &str = fantastic_ram_store::HANDLER_MODULE;
@@ -46,15 +47,10 @@ fn store(handler: &str, tag: &str) -> Arc<Kernel> {
     let root = agent("kernel_state", None, None, json!({"guid": "g1"}));
     k.register(Arc::clone(&root));
     k.set_root(root);
-    for a in ["alice", "bob", "carol", "leg"] {
+    for a in ["alice", "bob", "carol"] {
         k.register(agent(a, None, Some("kernel_state"), json!({"can_call": {"mem": "*"}})));
     }
-    let mut meta = json!({
-        "operator": true,
-        "admins": ["kernel"],
-        // a foreign caller is accepted only BY NAME (its qualified address)
-        "callable_by": {"alice": "*", "bob": "*", "carol": "*", "leg": "*", "g2|scout": "*"},
-    });
+    let mut meta = json!({"callable_by": {"alice": "*", "bob": "*", "carol": "*"}});
     if handler == SQL {
         let path = format!("stores/{tag}.db");
         let _ = std::fs::remove_file(dir.join(&path));
@@ -69,41 +65,18 @@ struct T {
     log: Vec<Value>,
 }
 
-fn scrub(mut v: Value) -> Value {
-    match &mut v {
-        Value::Object(m) => {
-            if m.contains_key("ts") && (m.contains_key("grant") || m.contains_key("reader")) {
-                m.insert("ts".into(), json!("<ts>"));
-            }
-            for (_, x) in m.iter_mut() {
-                *x = scrub(x.take());
-            }
-        }
-        Value::Array(a) => {
-            for x in a.iter_mut() {
-                *x = scrub(x.take());
-            }
-        }
-        _ => {}
-    }
-    v
-}
-
 impl T {
     async fn call(&mut self, payload: Value, as_: Option<&str>) -> Value {
         let item = Item::new(AgentId::from("mem"), payload);
         let out = match as_ {
             None => self.k.send(vec![item]).await.remove(0).result,
-            Some(who) => with_sender(AgentId::from(who), self.k.send(vec![item])).await.remove(0).result,
+            Some(who) => as_agent(AgentId::from(who), self.k.send(vec![item])).await.remove(0).result,
         };
-        self.log.push(scrub(out.clone()));
+        self.log.push(out.clone());
         out
     }
     async fn append(&mut self, who: &str, rows: Value) -> Value {
         self.call(json!({"type": "append", "rows": rows}), Some(who)).await
-    }
-    fn update(&self, id: &str, patch: Value) {
-        self.k.update(&AgentId::from(id), patch.as_object().unwrap().clone());
     }
 }
 
@@ -143,34 +116,24 @@ async fn s_rows_are_keyed_by_caller(t: &mut T) {
 conform!(rows_are_keyed_by_caller, s_rows_are_keyed_by_caller);
 
 async fn s_owner_is_never_a_writable_field(t: &mut T) {
+    // an `owner` on the call names nobody: the row lands under the CALLER's key
     let out = t.call(json!({"type": "append", "owner": "bob", "rows": [{"id": 5}]}), Some("alice")).await;
-    assert_eq!(out["reason"], json!("unauthorized"));
-    let out = t.call(json!({"type": "read", "owner": "bob"}), Some("alice")).await;
-    assert_eq!(out["reason"], json!("unauthorized"));
+    assert_eq!(out["ids"], json!([5]), "{out}");
+    let bob = t.call(json!({"type": "read"}), Some("bob")).await;
+    assert_eq!(bob["rows"], json!([]));
+    let alice = t.call(json!({"type": "read", "owner": "bob"}), Some("alice")).await;
+    assert_eq!(ids(&alice), vec![5]);
 }
 conform!(owner_is_never_a_writable_field, s_owner_is_never_a_writable_field);
 
-async fn s_operator_needs_explicit_service(t: &mut T) {
-    t.update("mem", json!({"operator": false}));
-    let out = t.call(json!({"type": "read"}), None).await;
-    assert_eq!(out["reason"], json!("unauthorized"));
-    t.update("mem", json!({"operator": true}));
+async fn s_the_operator_is_keyed_as_kernel(t: &mut T) {
     t.call(json!({"type": "append", "rows": [{"id": 7, "kind": "call"}]}), None).await;
     let got = t.call(json!({"type": "read", "kinds": ["call"]}), None).await;
     assert_eq!(ids(&got), vec![7]);
     let a = t.call(json!({"type": "read"}), Some("alice")).await;
     assert_eq!(a["rows"], json!([]));
 }
-conform!(operator_needs_explicit_service, s_operator_needs_explicit_service);
-
-async fn s_admin_may_name_an_owner(t: &mut T) {
-    t.append("alice", json!([{"id": 1, "content": "a"}])).await;
-    let got = t.call(json!({"type": "read", "owner": "alice"}), None).await;
-    assert_eq!(ids(&got), vec![1]);
-    let out = t.call(json!({"type": "append", "owner": "alice", "rows": [{"id": 2}]}), None).await;
-    assert_eq!(out["ids"], json!([2]));
-}
-conform!(admin_may_name_an_owner, s_admin_may_name_an_owner);
+conform!(the_operator_is_keyed_as_kernel, s_the_operator_is_keyed_as_kernel);
 
 async fn s_refs_must_name_own_rows(t: &mut T) {
     t.append("bob", json!([{"id": 10}])).await;
@@ -183,63 +146,12 @@ async fn s_refs_must_name_own_rows(t: &mut T) {
 }
 conform!(refs_must_name_own_rows, s_refs_must_name_own_rows);
 
-async fn s_share_read_and_zero_tolerance(t: &mut T) {
-    t.append("alice", json!([{"id": 1, "content": "a1"}, {"id": 2, "content": "a2"}, {"id": 3, "content": "a3"}])).await;
-    t.append("bob", json!([{"id": 50, "content": "b"}])).await;
-    let g = t.call(json!({"type": "share", "with": "bob", "scope": {"head_until": 2}, "why": "context"}), Some("alice")).await;
-    assert_eq!(g["created"], json!(true));
-    assert_eq!(g["anchor"], json!(1));
-    let got = t.call(json!({"type": "read", "grant": g["grant"]}), Some("bob")).await;
-    assert_eq!(ids(&got), vec![1, 2]);
-    let out = t.call(json!({"type": "read", "grant": g["grant"]}), Some("carol")).await;
-    assert_eq!(out["reason"], json!("unauthorized"));
-    let out = t.call(json!({"type": "share", "with": "carol", "scope": {"row": 1}}), Some("bob")).await;
-    assert_eq!(out["reason"], json!("not_found"));
-    let again = t.call(json!({"type": "share", "with": "bob", "scope": {"head_until": 2}}), Some("alice")).await;
-    assert_eq!(again["grant"], g["grant"]);
-    assert_eq!(again["created"], json!(false));
-    // the rest of the scope grammar, refusals included
-    t.call(json!({"type": "share", "with": "bob", "scope": {"range": {"from": 2, "to": 3}}, "mode": "live"}), Some("alice")).await;
-    t.call(json!({"type": "share", "with": "bob", "scope": {"range": {"from": 9, "to": 3}}}), Some("alice")).await;
-    t.call(json!({"type": "share", "with": "bob", "scope": {"fold": 1}}), Some("alice")).await;
-    t.call(json!({"type": "share", "with": "bob", "scope": [1, 2]}), Some("alice")).await;
-    t.call(json!({"type": "share", "with": "alice", "scope": {"row": 1}}), Some("alice")).await;
-    t.call(json!({"type": "share", "with": "bob", "scope": {"row": 1}, "mode": "hot"}), Some("alice")).await;
-}
-conform!(share_read_and_zero_tolerance, s_share_read_and_zero_tolerance);
-
-async fn s_frozen_stops_live_follows(t: &mut T) {
-    t.append("alice", json!([{"id": 1}, {"id": 2}])).await;
-    let frozen = t.call(json!({"type": "share", "with": "bob", "scope": {"head_until": 2}}), Some("alice")).await;
-    let live = t.call(json!({"type": "share", "with": "bob", "scope": {"head_until": 2}, "mode": "live"}), Some("alice")).await;
-    t.append("alice", json!([{"id": 3}])).await;
-    let f = t.call(json!({"type": "read", "grant": frozen["grant"]}), Some("bob")).await;
-    let lv = t.call(json!({"type": "read", "grant": live["grant"]}), Some("bob")).await;
-    assert_eq!(ids(&f), vec![1, 2]);
-    assert_eq!(ids(&lv), vec![1, 2, 3]);
-}
-conform!(frozen_stops_live_follows, s_frozen_stops_live_follows);
-
-async fn s_fold_scope_reaches_members(t: &mut T) {
-    t.append("alice", json!([{"id": 1}, {"id": 2}, {"id": 3, "kind": "fold", "refs": [1, 2]}, {"id": 4}])).await;
-    let g = t.call(json!({"type": "share", "with": "bob", "scope": {"fold": 3}}), Some("alice")).await;
-    let got = t.call(json!({"type": "read", "grant": g["grant"]}), Some("bob")).await;
-    assert_eq!(ids(&got), vec![1, 2, 3]);
-    assert_eq!(got["rows"][2]["refs"], json!([1, 2]));
-}
-conform!(fold_scope_reaches_members, s_fold_scope_reaches_members);
-
-async fn s_prune_cascades_to_grants_and_fold_refs(t: &mut T) {
+async fn s_prune_cascades_to_fold_refs(t: &mut T) {
     t.append("alice", json!([{"id": 1}, {"id": 2}, {"id": 3, "kind": "fold", "refs": [1, 2]}])).await;
-    let g = t.call(json!({"type": "share", "with": "bob", "scope": {"head_until": 3}}), Some("alice")).await;
     let out = t.call(json!({"type": "prune", "before_id": 2}), Some("alice")).await;
-    assert_eq!(out, json!({"pruned": 1, "grants_removed": 1}));
-    let gone = t.call(json!({"type": "read", "grant": g["grant"]}), Some("bob")).await;
-    assert_eq!(gone["reason"], json!("not_found"));
+    assert_eq!(out, json!({"pruned": 1}));
     let fold = t.call(json!({"type": "read", "ids": [3]}), Some("alice")).await;
     assert_eq!(fold["rows"][0]["refs"], json!([2]));
-    let listed = t.call(json!({"type": "grants", "side": "given"}), Some("alice")).await;
-    assert_eq!(listed["grants"], json!([]));
     // every member pruned: the fold keeps an EMPTY refs list
     t.call(json!({"type": "prune", "ids": [2]}), Some("alice")).await;
     let fold = t.call(json!({"type": "read", "ids": [3]}), Some("alice")).await;
@@ -250,26 +162,7 @@ async fn s_prune_cascades_to_grants_and_fold_refs(t: &mut T) {
     t.call(json!({"type": "read"}), Some("alice")).await;
     t.call(json!({"type": "prune"}), Some("alice")).await;
 }
-conform!(prune_cascades_to_grants_and_fold_refs, s_prune_cascades_to_grants_and_fold_refs);
-
-async fn s_unshare_and_grants_listing(t: &mut T) {
-    t.append("alice", json!([{"id": 1}])).await;
-    let g = t.call(json!({"type": "share", "with": "bob", "scope": {"row": 1}}), Some("alice")).await;
-    let rec = t.call(json!({"type": "grants", "side": "received"}), Some("bob")).await;
-    assert_eq!(rec["grants"][0]["owner"], json!("alice"));
-    let out = t.call(json!({"type": "unshare", "grant": g["grant"]}), Some("bob")).await;
-    assert_eq!(out["reason"], json!("unauthorized"));
-    let ok = t.call(json!({"type": "unshare", "grant": g["grant"]}), Some("alice")).await;
-    assert_eq!(ok["unshared"], json!(true));
-    let out = t.call(json!({"type": "read", "grant": g["grant"]}), Some("bob")).await;
-    assert_eq!(out["reason"], json!("not_found"));
-    // a revoked id is never reused
-    let again = t.call(json!({"type": "share", "with": "bob", "scope": {"row": 1}}), Some("alice")).await;
-    assert_ne!(again["grant"], g["grant"]);
-    t.call(json!({"type": "grants", "side": "sideways"}), Some("alice")).await;
-    t.call(json!({"type": "unshare", "grant": 999}), Some("alice")).await;
-}
-conform!(unshare_and_grants_listing, s_unshare_and_grants_listing);
+conform!(prune_cascades_to_fold_refs, s_prune_cascades_to_fold_refs);
 
 async fn s_search_lines_and_fold_descent(t: &mut T) {
     t.append("alice", json!([
@@ -318,24 +211,22 @@ conform!(read_paging_and_selectors, s_read_paging_and_selectors);
 
 async fn s_dump_inject_roundtrip(t: &mut T) {
     t.append("alice", json!([{"id": 1}, {"id": 2}, {"id": 3, "kind": "fold", "refs": [1, 2]}])).await;
-    t.call(json!({"type": "share", "with": "bob", "scope": {"fold": 3}}), Some("alice")).await;
-    let refused = t.call(json!({"type": "dump"}), Some("alice")).await;
-    assert_eq!(refused["reason"], json!("unauthorized"));
+    // a plain verb — the gate decides who reaches it
+    let by_alice = t.call(json!({"type": "dump"}), Some("alice")).await;
+    assert!(by_alice["tables"].is_object(), "{by_alice}");
     let tables = t.call(json!({"type": "dump"}), None).await["tables"].clone();
     t.call(json!({"type": "prune", "before_id": 99}), Some("alice")).await;
     let empty = t.call(json!({"type": "read"}), Some("alice")).await;
     assert_eq!(empty["rows"], json!([]));
     let out = t.call(json!({"type": "inject", "tables": tables}), None).await;
-    assert_eq!(out, json!({"rows": 3, "grants": 1}));
+    assert_eq!(out, json!({"rows": 3}));
     assert_eq!(t.call(json!({"type": "dump"}), None).await["tables"], tables);
+    // a broken FK is refused and nothing changes
     let mut bad = tables.clone();
-    bad["grants"][0]["anchor"] = json!(999);
+    bad["fold_refs"][0]["members"] = json!([999]);
     let refused = t.call(json!({"type": "inject", "tables": bad}), None).await;
     assert_eq!(refused["reason"], json!("bad_arg"));
     assert_eq!(t.call(json!({"type": "dump"}), None).await["tables"], tables);
-    // the grant counter follows the injected max, as ram_store's does
-    t.append("alice", json!([{"id": 20}])).await;
-    t.call(json!({"type": "share", "with": "carol", "scope": {"row": 20}}), Some("alice")).await;
 }
 conform!(dump_inject_roundtrip, s_dump_inject_roundtrip);
 
@@ -368,23 +259,6 @@ async fn s_cursor_reads_match_with_every_filter(t: &mut T) {
 }
 conform!(cursor_reads_match_with_every_filter, s_cursor_reads_match_with_every_filter);
 
-async fn s_remote_caller_is_keyed_by_its_qualified_address(t: &mut T) {
-    let item = Item::new(AgentId::from("mem"), json!({"type": "append", "rows": [{"id": 1}]}));
-    let out = with_remote_caller(
-        AgentId::from("leg"),
-        "g2|scout".to_string(),
-        with_sender(AgentId::from("leg"), t.k.send(vec![item])),
-    )
-    .await
-    .remove(0)
-    .result;
-    t.log.push(out.clone());
-    assert_eq!(out["ids"], json!([1]), "{out}");
-    t.append("leg", json!([{"id": 2}])).await;
-    t.call(json!({"type": "dump"}), None).await;
-}
-conform!(remote_caller_is_keyed_by_its_qualified_address, s_remote_caller_is_keyed_by_its_qualified_address);
-
 /// A ram_store dump injects into sqlite and back, identically.
 #[tokio::test]
 async fn a_ram_dump_injects_into_sqlite_and_back() {
@@ -394,9 +268,8 @@ async fn a_ram_dump_injects_into_sqlite_and_back() {
     let mut s = T { k: sql, log: Vec::new() };
     r.append("alice", json!([{"id": 1, "content": "a"}, {"id": 2}, {"id": 3, "kind": "clear", "refs": [1, 2]}])).await;
     r.append("bob", json!([{"id": 1, "content": "b"}])).await;
-    r.call(json!({"type": "share", "with": "bob", "scope": {"fold": 3}, "mode": "live"}), Some("alice")).await;
     let tables = r.call(json!({"type": "dump"}), None).await["tables"].clone();
-    assert_eq!(s.call(json!({"type": "inject", "tables": tables.clone()}), None).await, json!({"rows": 4, "grants": 1}));
+    assert_eq!(s.call(json!({"type": "inject", "tables": tables.clone()}), None).await, json!({"rows": 4}));
     let back = s.call(json!({"type": "dump"}), None).await["tables"].clone();
     assert_eq!(back, tables, "sqlite gives back exactly the ram dump");
     let mut r2 = T { k: store(RAM, "x-ram2"), log: Vec::new() };
@@ -413,13 +286,11 @@ async fn reflect_names_the_same_verbs_and_says_durable() {
         assert_eq!(r["durable"], json!(h == SQL));
         assert_eq!(r["owners"], json!(1));
         assert_eq!(r["rows"], json!(1));
-        assert_eq!(r["operator"], json!(true));
-        assert_eq!(r["admins"], json!(["kernel"]));
         assert_eq!(r["optional_verbs"], json!(["search"]));
         let verbs: Vec<&String> = r["verbs"].as_object().unwrap().keys().collect();
         assert_eq!(
             verbs,
-            vec!["reflect", "boot", "append", "read", "search", "share", "unshare", "grants", "prune", "inject", "dump"]
+            vec!["reflect", "boot", "append", "read", "search", "prune", "inject", "dump"]
         );
     }
 }

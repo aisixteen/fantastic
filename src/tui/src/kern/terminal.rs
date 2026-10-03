@@ -1,7 +1,7 @@
 //! THE IN-APP TERMINAL, as an agent. `t` in the tree opens it and `t` again
 //! closes it.
 //!
-//! It is an `exec_bridge` agent `term` under `set_of_agents`, running ONE PTY
+//! It is an `exec_bridge` agent `term` under `user`, running ONE PTY
 //! job: the human's `$SHELL`. It sits in the tree like everything else, and a
 //! coder run inside it reaches the kernel the same way any other client does.
 //!
@@ -57,7 +57,7 @@ pub async fn open(host: &Host, cols: u16, rows: u16) -> Result<Attach, String> {
     if !host.kernel.agents.contains_key(&id) {
         let mut create = json!({
             "type": "create_agent",
-            "parent_id": "set_of_agents",
+            "parent_id": host.cfg.user.as_str(),
             "id": TERM_ID,
             "handler_module": fantastic_exec_bridge::HANDLER_MODULE,
             "ingress_rule": "allow_all_ingress",

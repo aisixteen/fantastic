@@ -131,11 +131,8 @@ impl UserHomeStore {
     /// project's, and a project record (cloned, or written by an AI) must not be
     /// able to widen who reads or rewrites them. The caller is the dispatch's
     /// ORIGIN (the handler's own "sender" is itself); a call relayed across a
-    /// bridge is never served.
+    /// bridge arrives as its leg, which is not one of the callers.
     fn served(&self) -> Result<(), Value> {
-        if let Some(remote) = fantastic_kernel::send::current_remote_caller() {
-            return Err(refusal(UNAUTHORIZED, format!("user_home_store serves no remote caller ({remote})")));
-        }
         match fantastic_kernel::send::current_origin() {
             None => Ok(()),
             Some(s) if self.callers.iter().any(|c| c == &s.0) => Ok(()),

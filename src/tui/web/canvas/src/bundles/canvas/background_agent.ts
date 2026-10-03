@@ -1,27 +1,44 @@
 import { str } from "../../lib.ts";
 import { bodyText } from "../body_text.ts";
+import { panelRelay } from "../panel_relay.ts";
 import type { Handler, Json } from "../../lib.ts";
 
-// THE BACKGROUND — its own agent on the canvas's surface, a SINGLETON (owner,
-// 2026-09-30): exactly one per canvas, a child of the canvas root, created by
-// the canvas when missing; it cannot be closed or deleted (`delete_lock: true`
-// on its record — the kernel refuses `delete_agent` on it, or on any ancestor
-// of it), only updated. Its one piece of state is `bg_source`: a GL source (the
+// THE BACKGROUND — its own agent on a view's surface, a SINGLETON (owner,
+// 2026-09-30/10-04): exactly one per view, a child of the view, with no
+// children of its own, created by the page when missing; the root view's
+// cannot be closed or deleted (`delete_lock: true` on its record — the kernel
+// refuses `delete_agent` on it, or on any ancestor of it), only updated. Its one piece of state is `bg_source`: a GL source (the
 // same THREE/GLSL text a gl_agent holds), rendered behind every member and
 // swapped in place when it changes. It persists through the ws loader.
 
 export const BACKGROUND = "background.ts";
 
-/** The background's id on every canvas. */
+/** The root view's background id (a nested view's is `<view>_bg`). */
 export const BACKGROUND_ID = "background";
+
+/** The background's verbs its view may call — granted BY NAME on both ends
+ *  (explicit grants only: no implicit parent reach). */
+export const BG_PARENT_VERBS = ["set_bg", "clear_bg", "get_bg", "get_gl_view", "reflect"] as const;
+
+/** The background's own record grant: its view (`$parent`) may call it. */
+export function bgCallableBy(): Record<string, string[]> {
+  return { $parent: [...BG_PARENT_VERBS] };
+}
+
+/** The view's grant onto its background (`$children`), merged into `can_call`. */
+export function viewToBg(cc: Record<string, unknown> | undefined): Record<string, unknown> {
+  const had = cc?.["$children"];
+  const verbs = had === "*" ? "*" : [...new Set([...(Array.isArray(had) ? (had as string[]) : []), ...BG_PARENT_VERBS])];
+  return { ...(cc ?? {}), $children: verbs };
+}
 
 /** How a GL source runs (the GL host's contract, `gl_host.ts`). */
 export const GL_SIGNATURE = ["THREE", "scene", "t", "onFrame", "cleanup"] as const;
 
 export const BACKGROUND_README =
-  "The canvas's BACKGROUND — a singleton: one per canvas, delete-locked (it can only be updated). " +
+  "A view's BACKGROUND — a singleton: one per view (the root view's is delete-locked: it can only be updated). " +
   "`set_bg {bytes}` replaces it: `bytes` is JAVASCRIPT, verbatim, run as " +
-  "`new Function(\"THREE\", \"scene\", \"t\", \"onFrame\", \"cleanup\", bytes)` in the canvas's shared three.js scene, " +
+  "`new Function(\"THREE\", \"scene\", \"t\", \"onFrame\", \"cleanup\", bytes)` in the page's shared three.js scene, " +
   "behind every cell — NOT CSS, NOT GLSL alone. `THREE` is three.js, `scene` the scene to add meshes to, `t` the " +
   "time, `onFrame(fn)` registers a per-frame callback `fn(t)`, `cleanup(fn)` runs on replace. Example — a slow blue " +
   "gradient: `const m = new THREE.ShaderMaterial({uniforms:{u:{value:0}}, vertexShader:'void main(){gl_Position=vec4(position.xy,0.,1.);}', " +
@@ -29,7 +46,10 @@ export const BACKGROUND_README =
   "scene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), m)); onFrame(t => m.uniforms.u.value = t);`. " +
   "A source that does not compile is refused, with the error. `clear_bg` removes it, `get_bg` returns it; it persists with its record.";
 
-export const backgroundAgent: Handler = (id, payload, kernel): Json => {
+export const backgroundAgent: Handler = (id, payload, kernel): Json | Promise<Json> => {
+  // its GL source's own emits, as this agent (`panel_relay.ts`)
+  const relayed = panelRelay(kernel, payload);
+  if (relayed !== undefined) return relayed;
   const agent = kernel.get(id);
   const bg = (): string => {
     const s = agent?.meta["bg_source"];

@@ -20,13 +20,13 @@ def main() -> bool:
                         "-c:v", "libvpx-vp9", "-b:v", "200k", str(rig.proj / "media" / "clip.webm")], capture_output=True)
     if r.returncode != 0:
         return verdict(*rig.finish(False, f"ffmpeg could not make the clip: {r.stderr[-300:]!r}"))
-    files = {"id": "media_files", "handler_module": "file_bridge.tools", "parent_id": "web", "root": ".", "readonly": True,
-             "allow": ["media/"], "ingress_rule": "allow_all_ingress"}
-    rig.init(host_agents=[("agents/web", files)])
+    # the canvas's one file leg, `static_files` (deny-all): expose media/
+    rig.init()
     base = rig.url.split("/canvas_page/")[0]
     rig.stop()
+    rig.patch_host_agent("static_files", {"allow": ["media/"]})
     rig.seed_cells([
-        html_cell("video", "Video", 700, 60, f"<video id='v' src='{base}/media_files/file/media/clip.webm' muted autoplay loop playsinline style='width:100%'></video>", 360, 240),
+        html_cell("video", "Video", 700, 60, f"<video id='v' src='{base}/static_files/file/media/clip.webm' muted autoplay loop playsinline style='width:100%'></video>", 360, 240),
         html_cell("audio", "Audio", 1100, 60, "<p id='s'>?</p><script>const a=new AudioContext();const o=a.createOscillator();const g=a.createGain();g.gain.value=0;o.connect(g).connect(a.destination);o.start();setInterval(()=>document.getElementById('s').textContent=a.state,300)</script>", 240, 160),
     ])
     rig.start()

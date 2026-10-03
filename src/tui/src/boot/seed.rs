@@ -144,8 +144,8 @@ mod tests {
 
     /// The root's id, as the kernel names it — never spelled in the tui.
     const ROOT_ID: &str = fantastic_kernel::bootstrap::DEFAULT_ROOT_ID;
-    /// The level-one grouping node the blueprint writes.
-    const SET: &str = "set_of_agents";
+    /// The one level-one node the blueprint writes: everything is under it.
+    const USER: &str = "user";
 
     fn sandbox(tag: &str) -> Paths {
         let d = std::env::temp_dir().join(format!("fc-seed-{}-{tag}", std::process::id()));
@@ -172,17 +172,17 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
         lvl1.sort();
-        assert_eq!(lvl1, vec!["fs_loader", "memory", "set_of_agents", "store"]);
+        assert_eq!(lvl1, vec![USER]);
 
-        // The set: exactly three, and NESTED under it, which is what makes them
+        // Under `user`: exactly these, NESTED under it, which is what makes them
         // its children — the kernel reads the parent off the directory.
-        let mut inset: Vec<String> = std::fs::read_dir(p.store.join("agents/set_of_agents/agents"))
+        let mut inset: Vec<String> = std::fs::read_dir(p.store.join("agents/user/agents"))
             .unwrap()
             .filter_map(Result::ok)
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
         inset.sort();
-        assert_eq!(inset, vec!["exec", "files", "user"]);
+        assert_eq!(inset, vec!["exec", "files", "fs_loader", "memory", "store"]);
 
         assert!(
             !p.is_fresh(),
@@ -197,7 +197,8 @@ mod tests {
         let f = root_fields().unwrap();
         assert_eq!(f["memory_store_id"], json!("memory"));
         let list = entries(BLUEPRINT).unwrap();
-        let mem = list.iter().find(|e| e["id"] == json!("memory")).expect("the store is in the blueprint");
+        let kids = list.iter().find(|e| e["id"] == json!(USER)).and_then(|u| u["agents"].as_array()).expect("user holds the tree");
+        let mem = kids.iter().find(|e| e["id"] == json!("memory")).expect("the store is in the blueprint");
         assert_eq!(mem["handler_module"], json!(fantastic_sqlite_store::HANDLER_MODULE));
         assert_eq!(mem["operator"], json!(true));
         assert_eq!(mem["admins"], json!(["kernel"]));
@@ -219,11 +220,12 @@ mod tests {
         let p = sandbox("noparent");
         write_all(&p).unwrap();
         for r in [
-            "set_of_agents/agent.yaml",
-            "fs_loader/agent.yaml",
-            "set_of_agents/agents/exec/agent.yaml",
-            "set_of_agents/agents/files/agent.yaml",
-            "set_of_agents/agents/user/agent.yaml",
+            "user/agent.yaml",
+            "user/agents/fs_loader/agent.yaml",
+            "user/agents/memory/agent.yaml",
+            "user/agents/store/agent.yaml",
+            "user/agents/exec/agent.yaml",
+            "user/agents/files/agent.yaml",
         ] {
             assert!(
                 rec(&p, r).get("parent_id").is_none(),
@@ -234,24 +236,10 @@ mod tests {
     }
 
     #[test]
-    fn the_grouping_node_dispatches_nothing() {
-        let p = sandbox("bare");
-        write_all(&p).unwrap();
-        let set = rec(&p, "set_of_agents/agent.yaml");
-        assert_eq!(set["id"], "set_of_agents");
-        assert!(
-            set.get("handler_module").is_none(),
-            "a bare node has no handler — and the kernel still loads it, so its \
-             children are reachable"
-        );
-        let _ = std::fs::remove_dir_all(&p.cwd);
-    }
-
-    #[test]
     fn exec_can_run_anything_and_is_not_sealed() {
         let p = sandbox("exec");
         write_all(&p).unwrap();
-        let e = rec(&p, "set_of_agents/agents/exec/agent.yaml");
+        let e = rec(&p, "user/agents/exec/agent.yaml");
         assert_eq!(e["allowed"], json!([".*"]));
         // Both halves are needed: an unsealed leg with no `allowed` runs nothing,
         // and `allowed` on a sealed leg never gets asked.
@@ -264,20 +252,20 @@ mod tests {
     fn files_is_clamped_to_the_running_directory() {
         let p = sandbox("files");
         write_all(&p).unwrap();
-        let f = rec(&p, "set_of_agents/agents/files/agent.yaml");
+        let f = rec(&p, "user/agents/files/agent.yaml");
         assert_eq!(f["root"], ".");
         assert_eq!(f["ingress_rule"], "allow_all_ingress");
         let _ = std::fs::remove_dir_all(&p.cwd);
     }
 
     #[test]
-    fn the_human_is_granted_every_sibling_it_must_drive() {
-        // The born-with baseline is {$self, $parent, $children}, which does NOT
-        // reach a sibling. Without these names the human can call nothing.
+    fn the_human_is_granted_every_agent_it_must_drive() {
+        // The born-with baseline is {$self} alone: without these names the
+        // human can call nothing, not even its own children.
         let p = sandbox("grants");
         write_all(&p).unwrap();
-        let u = rec(&p, "set_of_agents/agents/user/agent.yaml");
-        for id in ["exec", "files", SET, LOADER, ROOT_ID] {
+        let u = rec(&p, "user/agent.yaml");
+        for id in ["exec", "files", "memory", "store", LOADER, ROOT_ID] {
             assert_eq!(u["can_call"][id], "*", "the human cannot reach {id}");
         }
         let _ = std::fs::remove_dir_all(&p.cwd);
@@ -346,7 +334,7 @@ mod tests {
         // Without it the kernel keeps the ledger and messages in RAM.
         let p = sandbox("store");
         write_all(&p).unwrap();
-        let s = rec(&p, "store/agent.yaml");
+        let s = rec(&p, "user/agents/store/agent.yaml");
         assert_eq!(s["handler_module"], "file_bridge.tools");
         assert_eq!(s["allow"], json!(["."]), "a bridge is deny-all per path: the store exposes its whole dir");
         assert_eq!(s["root"], ".fantastic");
@@ -357,7 +345,7 @@ mod tests {
     fn a_root_grant_is_written_as_the_kernels_own_root_id() {
         let p = sandbox("root_id");
         write_all(&p).unwrap();
-        let u = rec(&p, "set_of_agents/agents/user/agent.yaml");
+        let u = rec(&p, "user/agent.yaml");
         assert!(u["can_call"].get(ROOT_PLACEHOLDER).is_none(), "the placeholder never reaches disk");
         assert_eq!(u["can_call"][ROOT_ID], "*");
         let _ = std::fs::remove_dir_all(&p.cwd);

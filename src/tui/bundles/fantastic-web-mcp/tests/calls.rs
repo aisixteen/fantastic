@@ -12,7 +12,6 @@ use async_trait::async_trait;
 use fantastic_kernel::{
     bootstrap::{bootstrap, BootstrapOptions},
     bundle::BundleError,
-    send::with_operator,
     AgentId, Bundle, BundleRegistry, Item, Kernel, Reply,
 };
 use fantastic_web_mcp::{McpCore, WebMcpBundle, HANDLER_MODULE};
@@ -39,9 +38,9 @@ impl Bundle for Sleeper {
 }
 
 async fn op(k: &Arc<Kernel>, target: &str, payload: Value) -> Value {
-    let k2 = Arc::clone(k);
+    // a send outside every dispatch is the operator's
     let item = Item::new(AgentId::from(target), payload);
-    with_operator(async move { k2.send(vec![item]).await }).await.remove(0).result
+    Arc::clone(k).send(vec![item]).await.remove(0).result
 }
 
 /// A kernel with a leg `mcp` and a `sleeper` it may call.

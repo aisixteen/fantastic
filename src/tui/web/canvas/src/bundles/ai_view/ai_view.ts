@@ -168,8 +168,8 @@ export const aiView: ViewBundle = {
   handles: ["ai_view.ts"],
   // Fronts a backend it never spawns; cancels a turn through the host root's
   // task table.
-  // `$parent: [update]`: [make main] names this cell on its canvas.
-  grants: (backend) => ({ [backend]: ["watch", "reflect", "history", "status", "send"], kernel: ["ps", "cancel"], ai_cells: ["keep", "rename"], $parent: ["update"] }),
+  // `$parent: [update]`: [make main] names this cell on its view.
+  grants: (backend) => ({ [backend]: ["watch", "reflect", "history", "status", "send"], kernel: ["ps", "cancel"], backend: ["keep", "rename"], $parent: ["update"] }),
 
   async mount(ctx: ViewContext): Promise<ViewHandle> {
     const { kernel, mount, selfId, backend, record } = ctx;
@@ -235,7 +235,7 @@ export const aiView: ViewBundle = {
       }
       /** Keep the dialog; false (said in the dialog) when the host refused. */
       const keep = async (): Promise<boolean> => {
-        const r = (await host.callHost("ai_cells", { type: "keep", id: backend } as never)) as Dict;
+        const r = (await host.callHost("backend", { type: "keep", id: backend } as never)) as Dict;
         if (typeof r["error"] === "string") {
           addMsg("notice", `✕ ${r["error"]}`, dialogEl).classList.add("too-small");
           return false;
@@ -255,7 +255,7 @@ export const aiView: ViewBundle = {
         input.select();
         const done = async (save: boolean): Promise<void> => {
           if (save && input.value.trim()) {
-            const r = (await host.callHost("ai_cells", { type: "rename", id: backend, name: input.value.trim() } as never)) as Dict;
+            const r = (await host.callHost("backend", { type: "rename", id: backend, name: input.value.trim() } as never)) as Dict;
             if (typeof r["error"] !== "string") {
               kernel.updateMeta(selfId, { dialog_name: r["name"] } as never);
               showKept(String(r["name"]));
@@ -272,10 +272,10 @@ export const aiView: ViewBundle = {
       $<HTMLElement>(".c-agent").after(badge);
       if (!badge.classList.contains("kept")) badge.after(keepBtn);
 
-      // THE CANVAS'S MAIN CHAT (its one voice): [make main] keeps the dialog
-      // first when it is ephemeral, then names this cell on its canvas — the
-      // canvas delete-locks it and demotes the previous main. `★ main`, clicked,
-      // unmakes it. The canvas record is the truth: every chat cell follows it.
+      // THE VIEW'S MAIN CHAT (its one voice): [make main] keeps the dialog
+      // first when it is ephemeral, then names this cell on its view — the view
+      // delete-locks it and demotes the previous main. `★ main`, clicked,
+      // unmakes it. The view record is the truth: every chat cell follows it.
       const canvasId = kernel.get(selfId)?.parentId ?? null;
       if (canvasId !== null) {
         const mainBtn = document.createElement("button");
@@ -290,8 +290,8 @@ export const aiView: ViewBundle = {
           mainBtn.classList.toggle("is-main", isMain);
           mainBtn.textContent = isMain ? "★ main" : "make main";
           mainBtn.title = isMain
-            ? "this canvas's main chat (delete-locked) — click to unmake it"
-            : "make this the canvas's main chat: kept, delete-locked, named on the canvas";
+            ? "this view's main chat (delete-locked) — click to unmake it"
+            : "make this the view's main chat: kept, delete-locked, named on the view";
           mainBtn.onclick = (): void => void setMain(isMain ? null : selfId);
         };
         showMain();

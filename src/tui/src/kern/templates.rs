@@ -60,16 +60,17 @@ fn err_of(v: &Value) -> Option<String> {
     })
 }
 
-/// Make `user_home` exist, and set the grants both ways to exactly [`VERBS`].
+/// Make `user_home` exist under `user`, its `callable_by` exactly [`VERBS`] for
+/// `user` — written as `user`, its parent. (`user`'s own side is `kern/reach`'s.)
 pub async fn ensure(host: &Host) -> Result<(), String> {
     let user = host.cfg.user.clone();
     let id = fantastic_kernel::AgentId::from(HOME_ID);
     let grant = json!({ user.as_str(): VERBS });
     if !host.kernel.agents.contains_key(&id) {
         let r = host
-            .operator(
+            .act(
                 "kernel",
-                json!({"type": "create_agent", "parent_id": host.root, "id": HOME_ID,
+                json!({"type": "create_agent", "parent_id": host.cfg.user.as_str(), "id": HOME_ID,
                        "handler_module": fantastic_user_home_store::HANDLER_MODULE, "callable_by": grant}),
             )
             .await;
@@ -77,23 +78,12 @@ pub async fn ensure(host: &Host) -> Result<(), String> {
             return Err(format!("could not create `{HOME_ID}`: {e}"));
         }
     } else {
-        let r = host.operator("kernel", json!({"type": "update_agent", "id": HOME_ID, "callable_by": grant})).await;
+        let r = host.act("kernel", json!({"type": "update_agent", "id": HOME_ID, "callable_by": grant})).await;
         if let Some(e) = err_of(&r.result) {
             return Err(format!("could not narrow `{HOME_ID}`'s grants: {e}"));
         }
     }
-    let mut cc = host
-        .kernel
-        .agents
-        .get(&fantastic_kernel::AgentId::from(user.as_str()))
-        .and_then(|a| a.value().record().meta.get("can_call").and_then(Value::as_object).cloned())
-        .unwrap_or_default();
-    cc.insert(HOME_ID.into(), json!(VERBS));
-    let r = host.operator("kernel", json!({"type": "update_agent", "id": user, "can_call": cc})).await;
-    match err_of(&r.result) {
-        Some(e) => Err(format!("could not grant `{user}` → `{HOME_ID}`: {e}")),
-        None => Ok(()),
-    }
+    Ok(())
 }
 
 /// What is saved.

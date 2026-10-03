@@ -66,8 +66,9 @@ pub fn main(argv: &[String]) -> ! {
             std::process::exit(2);
         }
     };
-    match fantastic_kernel::lock::current_holder(&paths.cwd) {
-        Ok(Some(pid)) if pid != std::process::id() && fantastic_kernel::lock::pid_alive(pid) => attach(pid),
+    // the OS lock, not the pid in the file: a stale lock.yaml naming a reused pid is not held
+    match fantastic_kernel::lock::held(&paths.cwd) {
+        Ok(Some(pid)) if pid != std::process::id() => attach(pid),
         Ok(_) => own(paths),
         Err(e) => {
             eprintln!("fantastic mcp: {e}");
@@ -372,7 +373,7 @@ async fn ensure_leg(host: &Host) -> Result<(), String> {
                     "kernel",
                     json!({
                         "type": "create_agent",
-                        "parent_id": host.root,
+                        "parent_id": host.cfg.user.as_str(),
                         "id": LEG,
                         "handler_module": HANDLER_MODULE,
                     }),

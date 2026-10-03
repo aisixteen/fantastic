@@ -1,15 +1,15 @@
 [package]
-name = "fantastic-canvas-users"
+name = "fantastic-user"
 version = "0.1.0"
 edition = "2021"
 license = "AGPL-3.0-or-later"
 publish = false
-description = "The canvas's USERS: one gateway agent (`canvas_users.tools`) that resolves a token to a user agent and acts as it — forward, the page-loader relay filtered by the user's grants, a watch / state relay and the events pull every tab reads."
+description = "`user` — the one human, as an agent (`user.tools`): every call the terminal and the canvas make goes out through it (`forward`, token-checked for a wire caller when a token is set), `around` from the page records, and the probe's own verbs."
 
 # Outside `src/lib`, like the MCP leg: only the kernel's public surface.
 [dependencies]
 fantastic-kernel = { path = "../../../lib/rust/crates/fantastic-kernel" }
-fantastic-bridge = { path = "../../../lib/rust/crates/bundles/fantastic-bridge" }
+fantastic-scenario-probes = { path = "../../../lib/rust/crates/bundles/fantastic-scenario-probes" }
 async-trait = "0.1"
 serde_json = "1"
 sha2 = "0.10"

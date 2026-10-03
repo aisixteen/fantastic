@@ -9,10 +9,10 @@ import { setupView } from "../setup_view/setup_view.ts";
 import { reflectView } from "../reflect_view/reflect_view.ts";
 import { streamView } from "../stream_view/stream_view.ts";
 import { openActionPopup } from "./action_popup.ts";
-import { CANVAS, CANVAS_VERBS, CARD_HTML, setScaffold } from "./canvas_agent.ts";
+import { CARD_HTML, ROOT_VIEW, VIEW, VIEW_VERBS, setScaffold } from "./canvas_agent.ts";
 import { containerOf, hashFor, isContainer, onMac, pathTo, viewFromHash } from "./viewer.ts";
 import type { Lookup } from "./viewer.ts";
-import { BACKGROUND, BACKGROUND_ID } from "./background_agent.ts";
+import { BACKGROUND, BACKGROUND_ID, bgCallableBy, viewToBg } from "./background_agent.ts";
 
 /** What a host agent (a cell's AI) may ask ANY cell: look at it, read and
  *  write a panel's html, emit to it. */
@@ -20,7 +20,7 @@ const CELL_VERBS = ["reflect", "get_html", "set_html", "emit"] as const;
 /** What a cell's AI may ask the background. */
 const BG_VERBS = ["set_bg", "clear_bg", "get_bg", "reflect"] as const;
 import { createSidebar } from "./sidebar.ts";
-import type { Dialog, Question, TreeNode } from "./sidebar.ts";
+import type { Dialog, TreeNode } from "./sidebar.ts";
 import type { Pick, Presets } from "./action_popup.ts";
 import { htmlView } from "../html_agent/html_view.ts";
 import { createGlHost } from "./gl_host.ts";
@@ -44,24 +44,19 @@ function viewFor(handlerModule: unknown): ViewBundle | undefined {
 // catalog — never matched, never guessed.
 const DEFAULT_VIEW = terminalView;
 
+// THE HOST'S BACKEND (`kern/backend`): `backend`, and under it one FOLDER per
+// page view with the view's own id, mirroring the page's view hierarchy. A
+// folder creates and deletes its own children; the top deletes anywhere under it.
+const BACKEND = "backend";
+const BACKEND_MODULE = "backend.tools";
+
 export interface MountOptions {
   kernel: Kernel;
   mount: HTMLElement;
   selfId: string;
-  /** The host socket LEG this page speaks through, in the host's own words
-   *  (its loader's parent). Every backend the canvas spawns for a view is the
-   *  leg's CHILD — its own subtree, both gates covered by the born-with
-   *  baseline. Absent ⇒ the canvas spawns nothing, and says so. */
-  leg?: string;
-  /** Land every pending record through the loader NOW — a view is on disk
+  /** Land every pending record through the loader NOW — a cell is on disk
    *  before its backend exists, so no page ever sees a backend without one. */
   flush: () => Promise<void>;
-  /** Whether this tab's USER may write page agent `id` (its page grants —
-   *  `user_bridge.ts`). Absent: everything is writable. A canvas the user may
-   *  not write is LOCKED here: no popup, drag, resize, ✕, lock, set-up or
-   *  composer. The host refuses those writes anyway; this keeps them off the
-   *  screen. */
-  writable?: (id: string) => boolean;
 }
 
 interface Rec {
@@ -88,16 +83,20 @@ const str = (r: Rec, k: string): string | undefined =>
 const bool = (r: Rec, k: string): boolean => r[k] === true;
 
 export async function mountCanvas(opts: MountOptions): Promise<void> {
-  const { kernel, mount, selfId, leg, flush } = opts;
-  const writable = opts.writable ?? ((): boolean => true);
+  const { kernel, mount, selfId, flush } = opts;
   const host = new Host(kernel, selfId);
 
-  // THE PAIR: a view the canvas spawned a backend for, and that backend. The
-  // backend is a child of the leg carrying its view's id and this canvas's
-  // (`view_id`, `canvas_id`); the view carries the backend's (`backend_id`,
-  // `owns_backend`) and the grant to call it (`can_call`). The leg lives its
-  // own life — a page connecting, leaving or reloading never touches the
-  // backends behind it; only closing the view deletes its backend.
+  // THE ROOT VIEW: every page has exactly one, under the canvas root.
+  if (kernel.get(ROOT_VIEW) === undefined && kernel.rootId !== null) {
+    kernel.register(new Agent({ id: ROOT_VIEW, parentId: kernel.rootId, handlerModule: VIEW, sentence: "The root view: the canvas's first view." }));
+  }
+
+  // THE PAIR: a cell the canvas spawned a backend for, and that backend. The
+  // backend is a child of its VIEW's folder under `backend`, carrying the
+  // cell's id (`cell_id`); the cell carries the backend's (`backend_id`,
+  // `owns_backend`) and the grant to call it (`can_call`). The backend lives
+  // its own life — a page connecting, leaving or reloading never touches it;
+  // only closing the cell deletes its backend.
 
   // The host catalog, paged to the end, for ONE exact handler_module.
   const inCatalog = async (module: string): Promise<boolean> => {
@@ -113,13 +112,28 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     return false;
   };
 
-  // Spawn the backend `bundle` fronts, for view `viewId`, as a child of the leg.
-  // Returns its id, or null (said why).
-  const spawnBackend = async (bundle: ViewBundle, viewId: string): Promise<string | null> => {
-    if (leg === undefined) {
-      console.error("[canvas] the host loader names no parent leg — cannot spawn a backend");
-      return null;
+  // THE FOLDER of the view that holds `cellId`, made on the host (with every
+  // folder above it) when missing: the page's view path, one folder per view.
+  const folders = new Set<string>([ROOT_VIEW]);
+  const folderFor = async (cellId: string): Promise<string | null> => {
+    const view = containerOf(look, cellId) ?? ROOT_VIEW;
+    const chain = pathTo(look, view).filter((id) => isContainer(look, id));
+    for (let i = 1; i < chain.length; i++) {
+      const [parent, child] = [chain[i - 1]!, chain[i]!];
+      if (folders.has(child)) continue;
+      const r = (await host.callHost(parent, { type: "create", record: { id: child, handler_module: BACKEND_MODULE } } as unknown as Payload)) as Rec | null;
+      if (!r || typeof r["error"] === "string") {
+        console.error(`[canvas] the backend folder for view ${child}:`, JSON.stringify(r));
+        return null;
+      }
+      folders.add(child);
     }
+    return view;
+  };
+
+  // Spawn the backend `bundle` fronts, for cell `cellId`, in its view's folder.
+  // Returns its id, or null (said why).
+  const spawnBackend = async (bundle: ViewBundle, cellId: string): Promise<string | null> => {
     const module = bundle.fronts;
     if (module === undefined) {
       console.error(`[canvas] ${bundle.handles.join(",")} declares no backend it fronts — cannot spawn one`);
@@ -129,13 +143,11 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       console.error(`[canvas] the host does not link ${module}`);
       return null;
     }
-    const created = (await host.callHost("kernel", {
-      ...(bundle.backendFields ?? {}),
-      type: "create_agent",
-      parent_id: leg,
-      handler_module: module,
-      view_id: viewId,
-      canvas_id: selfId,
+    const folder = await folderFor(cellId);
+    if (folder === null) return null;
+    const created = (await host.callHost(folder, {
+      type: "create",
+      record: { ...(bundle.backendFields ?? {}), handler_module: module, cell_id: cellId },
     } as unknown as Payload)) as { id?: string; error?: string };
     if (!created || created.error || typeof created.id !== "string") {
       console.error("[canvas] backend create failed:", JSON.stringify(created));
@@ -144,9 +156,14 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     return created.id;
   };
 
-  // BIND a spawned backend to its view: the id, and the view's own grant.
-  const bind = (viewId: string, bundle: ViewBundle, backendId: string): void => {
-    kernel.updateMeta(viewId, {
+  // A backend gone with its cell: the top backend deletes anywhere under it.
+  const deleteBackend = (id: string): void => {
+    void host.callHost(BACKEND, { type: "delete", id } as unknown as Payload);
+  };
+
+  // BIND a spawned backend to its cell: the id, and the cell's own grant.
+  const bind = (cellId: string, bundle: ViewBundle, backendId: string): void => {
+    kernel.updateMeta(cellId, {
       backend_id: backendId,
       backend_lost: false,
       can_call: { ...bundle.grants(backendId) },
@@ -168,45 +185,37 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     }
   };
 
-  // THE BACKGROUND SINGLETON: exactly one per canvas, made here when missing,
-  // delete-locked (it can only be updated). A second is never made; one found
-  // beside the first is said loudly and left for the human.
-  // A CHILD canvas's background carries no lock: a locked descendant would
-  // refuse the child canvas's own removal.
+  // THE BACKGROUND SINGLETON: exactly one per view, made here when missing,
+  // delete-locked on the root view (it can only be updated). A second is never
+  // made; one found beside the first is said loudly and left for the human.
+  // A NESTED view's background carries no lock: a locked descendant would
+  // refuse the nested view's own removal.
   const ensureBackground = (container: string): void => {
     const c = kernel.get(container);
     if (c === undefined) return;
     const bgs = [...c.children.values()].filter((a) => a.record().handler_module === BACKGROUND);
-    if (bgs.length > 1) console.error(`[canvas] ${bgs.length} background agents — a canvas has exactly one: ${bgs.map((a) => a.id).join(", ")}`);
+    if (bgs.length > 1) console.error(`[canvas] ${bgs.length} background agents — a view has exactly one: ${bgs.map((a) => a.id).join(", ")}`);
     if (bgs.length > 0) return;
-    const isRoot = container === kernel.rootId;
+    const isRoot = container === ROOT_VIEW;
     kernel.register(
       new Agent({
         id: isRoot ? BACKGROUND_ID : `${container}_bg`,
         parentId: c.id,
         handlerModule: BACKGROUND,
-        meta: isRoot ? { delete_lock: true, bg_source: "" } : { bg_source: "" },
+        meta: isRoot
+          ? { delete_lock: true, bg_source: "", callable_by: bgCallableBy() }
+          : { bg_source: "", callable_by: bgCallableBy() },
       }),
     );
+    // the view reaches its background BY NAME (both ends; no implicit parent
+    // reach), and its cells may `update` it — a chat's [make main]
+    const cb = (c.meta["callable_by"] as Record<string, unknown> | undefined) ?? {};
+    const had = cb["$children"];
+    kernel.updateMeta(c.id, {
+      can_call: viewToBg(c.meta["can_call"] as Record<string, unknown> | undefined),
+      callable_by: { ...cb, $children: had === "*" ? "*" : [...new Set([...(Array.isArray(had) ? (had as string[]) : []), "update"])] },
+    } as unknown as Payload);
   };
-
-  // THE HOST'S AGENTS MAY ASK THIS CANVAS its control-plane verbs and
-  // `reflect` — its `callable_by` names `<host guid>|*` for exactly those (the
-  // cells' AIs call it as peers; `around` is the host's own, `users.around`,
-  // from the page records). The host's guid is its root record's.
-  const admitHost = async (): Promise<void> => {
-    const hostRoot = (await hostAgents()).find((a) => a["parent_id"] === undefined || a["parent_id"] === null);
-    const g = typeof hostRoot?.["guid"] === "string" ? (hostRoot["guid"] as string) : undefined;
-    if (g === undefined) {
-      console.error("[canvas] the host's root names no guid — its AIs cannot reach this canvas");
-      return;
-    }
-    // EVERY page agent — every canvas (its control plane), every background,
-    // every cell (a cell's AI reflects what `users.around` found) — now and as added.
-    hostGuid = g;
-    for (const id of everyAgent()) admitReflect(id);
-  };
-  let hostGuid: string | null = null;
 
   // ─── THE VIEWER (`viewer.ts`): what this page shows ───────────────
   const look: Lookup = (id) => {
@@ -226,65 +235,54 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     return out;
   };
   const fromHash = viewFromHash(location.hash);
-  let viewed: string = fromHash !== null && kernel.get(fromHash) !== undefined ? fromHash : rootOr();
-  // the canvas whose world is drawn: the viewed one, or (viewing a cell FULL)
-  // the canvas it sits on
-  const containerNow = (): string => containerOf(look, viewed) ?? rootOr();
+  let viewed: string = fromHash !== null && kernel.get(fromHash) !== undefined ? fromHash : ROOT_VIEW;
+  // the view whose world is drawn: the viewed one, or (viewing a cell FULL)
+  // the view it sits on
+  const containerNow = (): string => containerOf(look, viewed) ?? ROOT_VIEW;
   const fullNow = (): boolean => !isContainer(look, viewed);
-  // the canvas a cell is drawn on (a child canvas's CARD sits on its parent)
+  // the view a cell is drawn on (a nested view's CARD sits on its parent)
   const hostCanvasOf = (id: string): string | null => {
     const p = look(id)?.parentId ?? null;
     return p === null ? null : containerOf(look, p);
   };
-  // each canvas keeps its own camera across switches
+  // each view keeps its own camera across switches
   const cameras = new Map<string, { z: number; ox: number; oy: number }>();
-  const admitReflect = (id: string): void => {
-    const a = kernel.get(id);
-    if (hostGuid === null || a === undefined) return;
-    const hm = a.record().handler_module;
-    const want: readonly string[] = hm === CANVAS ? CANVAS_VERBS : hm === BACKGROUND ? BG_VERBS : CELL_VERBS;
-    const cb: Record<string, unknown> = (a.meta["callable_by"] as Record<string, unknown> | undefined) ?? {};
-    const key = `${hostGuid}|*`;
-    const had = cb[key];
-    if (Array.isArray(had) && want.every((v) => (had as string[]).includes(v))) return;
-    const verbs = [...new Set([...(Array.isArray(had) ? (had as string[]) : []), ...want])];
-    kernel.updateMeta(id, { callable_by: { ...cb, [key]: verbs } } as unknown as Payload);
-  };
-
   // RECONCILE THIS CANVAS'S PAIRS, once, before the first render. Nothing on
   // the host enforces the pairing, so the one party that sees both sides keeps
-  // it by rule — and only for backends carrying ITS canvas id:
-  //   · a backend whose view is gone, or whose view is bound to another
+  // it by rule — for the backends under `backend` carrying a `cell_id`:
+  //   · a backend whose cell is gone, or whose cell is bound to another
   //     backend, is DELETED (a crash, or a close while the host was down);
-  //   · a backend whose view exists but is not bound yet is LEFT (a spawn in
-  //     flight in another tab — the view lands on disk before its backend);
-  //   · a spawned view whose backend is gone is marked `backend_lost` and waits
+  //   · a backend whose cell exists but is not bound yet is LEFT (a spawn in
+  //     flight in another tab — the cell lands on disk before its backend);
+  //   · a spawned cell whose backend is gone is marked `backend_lost` and waits
   //     for ⟳ — never respawned silently.
   const reconcile = async (): Promise<void> => {
-    if (leg === undefined) return;
-    const backends = new Map<string, string>(); // backend id → its view id
-    for (const a of await hostAgents()) {
-      if (a["parent_id"] === leg && a["canvas_id"] === selfId && typeof a["id"] === "string" && typeof a["view_id"] === "string") {
-        backends.set(a["id"], a["view_id"]);
-      }
+    const all = await hostAgents();
+    const parent = new Map<string, string>();
+    for (const a of all) if (typeof a["id"] === "string" && typeof a["parent_id"] === "string") parent.set(a["id"], a["parent_id"]);
+    const underBackend = (id: string): boolean => {
+      for (let p = parent.get(id), hops = 0; p !== undefined && hops < 4096; p = parent.get(p), hops++) if (p === BACKEND) return true;
+      return false;
+    };
+    const backends = new Map<string, string>(); // backend id → its cell id
+    for (const a of all) {
+      if (typeof a["id"] === "string" && typeof a["cell_id"] === "string" && underBackend(a["id"])) backends.set(a["id"], a["cell_id"]);
     }
-    const views = new Map<string, Rec>(everyAgent().map((id) => [id, kernel.get(id)!.record() as Rec]));
-    // every backend some view binds (a kept dialog may be open in several cells)
+    const cells = new Map<string, Rec>(everyAgent().map((id) => [id, kernel.get(id)!.record() as Rec]));
+    // every backend some cell binds (a kept dialog may be open in several cells)
     const boundAny = new Set<string>();
-    for (const v of views.values()) {
+    for (const v of cells.values()) {
       for (const k of ["backend_root", "backend_id"]) if (str(v, k) !== undefined) boundAny.add(str(v, k)!);
     }
-    for (const [bid, vid] of backends) {
+    for (const [bid, cid] of backends) {
       if (boundAny.has(bid)) continue;
-      const v = views.get(vid);
-      // an AI cell's backend is a SUBTREE (its store, the AI under it): the view
+      const v = cells.get(cid);
+      // an AI cell's backend is a SUBTREE (its store, the AI under it): the cell
       // names its root in `backend_root`
       const bound = v === undefined ? undefined : (str(v, "backend_root") ?? str(v, "backend_id"));
-      if (v === undefined || (bound !== undefined && bound !== bid)) {
-        await host.callHost("kernel", { type: "delete_agent", id: bid });
-      }
+      if (v === undefined || (bound !== undefined && bound !== bid)) deleteBackend(bid);
     }
-    for (const v of views.values()) {
+    for (const v of cells.values()) {
       const bid = str(v, "backend_root") ?? str(v, "backend_id");
       if (bool(v, "owns_backend") && bid !== undefined && !backends.has(bid) && !bool(v, "backend_lost")) {
         kernel.updateMeta(v.id, { backend_lost: true });
@@ -456,7 +454,6 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
 
   const startDrag = (e: MouseEvent, aid: string, el: HTMLElement): void => {
     e.preventDefault();
-    if (!writable(aid)) return;
     el.classList.add("dragging");
     document.body.classList.add("dragging-frame");
     const sx = e.clientX;
@@ -481,7 +478,6 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   const startResize = (e: MouseEvent, aid: string, el: HTMLElement): void => {
     e.preventDefault();
     e.stopPropagation();
-    if (!writable(aid)) return;
     el.classList.add("resizing");
     document.body.classList.add("dragging-frame");
     const sx = e.clientX;
@@ -546,7 +542,6 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     });
     (el.querySelector(".lock") as HTMLElement).addEventListener("click", (e) => {
       e.stopPropagation();
-      if (!writable(rec.id)) return;
       const cur = bool(frames.get(rec.id)?.rec ?? rec, "delete_lock");
       const lockEl = el.querySelector(".lock") as HTMLElement;
       lockEl.classList.toggle("locked", !cur);
@@ -561,20 +556,19 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     };
   };
 
-  // CLOSE a view: if it SPAWNED its host backend (owns_backend — e.g. the
+  // CLOSE a cell: if it SPAWNED its host backend (owns_backend — e.g. the
   // dblclick terminal), that peer is deleted too, so the pair goes TOGETHER
-  // (the backend's on_delete tears down its process). A view bound to a
+  // (the backend's on_delete tears down its process). A cell bound to a
   // PRE-EXISTING / shared backend leaves it running (weak peer — reopening
   // re-attaches). A delete_lock refuses both: the KERNEL's `remove` is the gate
   // (it refuses a locked agent or one with a locked descendant, and removes
-  // nothing), so the view goes first and its backend only once it is gone.
-  const closeView = (viewId: string): void => {
-    if (!writable(viewId)) return;
-    const r = frames.get(viewId)?.rec ?? (kernel.get(viewId)?.record() as Rec | undefined);
+  // nothing), so the cell goes first and its backend only once it is gone.
+  const closeView = (cellId: string): void => {
+    const r = frames.get(cellId)?.rec ?? (kernel.get(cellId)?.record() as Rec | undefined);
     if (r === undefined) return;
-    const out = kernel.remove(viewId) as unknown as Rec;
+    const out = kernel.remove(cellId) as unknown as Rec;
     if (out["deleted"] !== true) {
-      toast(`✕ ${typeof out["error"] === "string" ? out["error"] : `could not close ${viewId}`}`);
+      toast(`✕ ${typeof out["error"] === "string" ? out["error"] : `could not close ${cellId}`}`);
       return;
     }
     // An AI cell: THIS PAGE counts its cells on the AI — the backend goes with
@@ -584,21 +578,19 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       const ai = str(r, "backend_id")!;
       const root = str(r, "backend_root") ?? ai;
       const still = aiCells().some((c) => c["backend_id"] === ai);
-      if (!still) void host.callHost("kernel", { type: "delete_agent", id: root });
+      if (!still) deleteBackend(root);
       renderSoon();
       return;
     }
     // the backend's ROOT goes (a terminal's exec agent)
     const backendId = str(r, "backend_root") ?? str(r, "backend_id");
-    if (bool(r, "owns_backend") && backendId) {
-      void host.callHost("kernel", { type: "delete_agent", id: backendId });
-    }
+    if (bool(r, "owns_backend") && backendId) deleteBackend(backendId);
   };
 
   // ── AI CELLS ─────────────────────────────────────────────────────────
-  // The host's `ai_cells` agent spawns a cell's backend from one of the user's
-  // templates (only the CLI reads those): a RAM store, the AI under it.
-  const AI_CELLS = "ai_cells";
+  // The cell's view folder (`kern/backend`) spawns its backend from one of the
+  // user's templates (only the CLI reads those): a RAM store, the AI under it.
+  // The templates and the kept dialogs are the top `backend`'s to answer.
   const toast = (text: string): void => {
     const t = document.createElement("div");
     t.className = "canvas-toast";
@@ -607,34 +599,37 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     setTimeout(() => t.remove(), 6000);
   };
   const presets = async (): Promise<Presets | null> => {
-    const r = (await host.callHost(AI_CELLS, { type: "presets" } as unknown as Payload).catch(() => null)) as Rec | null;
+    const r = (await host.callHost(BACKEND, { type: "presets" } as unknown as Payload).catch(() => null)) as Rec | null;
     if (!r || typeof r["error"] === "string") return null;
-    const d = (await host.callHost(AI_CELLS, { type: "dialogs" } as unknown as Payload).catch(() => null)) as Rec | null;
+    const d = (await host.callHost(BACKEND, { type: "dialogs" } as unknown as Payload).catch(() => null)) as Rec | null;
     return {
       templates: (r["templates"] as Presets["templates"]) ?? [],
       preferred: (r["preferred"] as string | null) ?? null,
       dialogs: ((d?.["dialogs"] as Presets["dialogs"] | undefined) ?? []).map((x) => ({ id: x.id, name: x.name })),
     };
   };
-  // THE CANVAS AS A PEER: a cell's AI (on the host) reaches this canvas at
-  // `<page guid>|<canvas id>` — its control plane and `reflect`.
-  const peerGrants = (): Record<string, string[]> =>
-    kernel.guid !== null
-      ? {
-          // the canvas's control plane over its cells
-          [`${kernel.guid}|${selfId}`]: [...CANVAS_VERBS],
-          [`${kernel.guid}|${BACKGROUND_ID}`]: [...BG_VERBS],
-          // any cell on this canvas — and the canvas verbs, since the cells are
-          // their OPERANDS (`move {id}`, `wire {sender, receiver}`): the host's egress
-          // gate checks the agents a call names, not only its target
-          [`${kernel.guid}|*`]: [...new Set([...CELL_VERBS, ...CANVAS_VERBS])],
-        }
-      : {};
-  const spawnAi = async (viewId: string, template: string | null): Promise<Rec | null> => {
-    const r = (await host.callHost(AI_CELLS, {
+  // THE VIEW AS A PEER: a cell's AI (on the host) reaches the cell's view at
+  // `<page guid>|<view id>` — its control plane and `reflect`.
+  const peerGrants = (view: string): Record<string, string[]> => {
+    if (kernel.guid === null) return {};
+    const bg = [...(kernel.get(view)?.children.values() ?? [])].find((a) => a.record().handler_module === BACKGROUND)?.id;
+    return {
+      // the view's control plane over its cells
+      [`${kernel.guid}|${view}`]: [...VIEW_VERBS],
+      ...(bg !== undefined ? { [`${kernel.guid}|${bg}`]: [...BG_VERBS] } : {}),
+      // any cell — and the view verbs, since the cells are their OPERANDS
+      // (`move {id}`, `wire {sender, receiver}`): the host's egress gate checks
+      // the agents a call names, not only its target
+      [`${kernel.guid}|*`]: [...new Set([...CELL_VERBS, ...VIEW_VERBS])],
+    };
+  };
+  const spawnAi = async (cellId: string, template: string | null): Promise<Rec | null> => {
+    const folder = await folderFor(cellId);
+    if (folder === null) return null;
+    const r = (await host.callHost(folder, {
       type: "spawn",
-      stamp: { view_id: viewId, canvas_id: selfId },
-      peer_grants: peerGrants(),
+      stamp: { cell_id: cellId },
+      peer_grants: peerGrants(folder),
       ...(template ? { template } : {}),
     } as unknown as Payload)) as Rec;
     if (typeof r["error"] === "string") {
@@ -643,8 +638,8 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     }
     return r;
   };
-  const bindAi = (viewId: string, r: Rec): void => {
-    kernel.updateMeta(viewId, {
+  const bindAi = (cellId: string, r: Rec): void => {
+    kernel.updateMeta(cellId, {
       backend_id: r["id"],
       backend_root: r["root"],
       backend_lost: false,
@@ -670,7 +665,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     }
     if (bool(rec, "backend_lost")) {
       // Its backend is gone: say so, mount nothing, and let ⟳ respawn it (a
-      // fresh child of the leg, bound to this same view).
+      // fresh child of its view's folder, bound to this same cell).
       const note = document.createElement("div");
       note.className = "backend-lost";
       note.textContent = `backend ${str(rec, "backend_id") ?? "?"} is gone — ⟳ respawns it`;
@@ -694,9 +689,9 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       return;
     }
     const backend = str(rec, "backend_id") ?? rec.id; // weak peer ref to a host backend (or self)
-    // THE VIEW SENDS AS ITSELF: its kernel is scoped to its own id, so the
-    // page's egress gate checks the view's `can_call` before anything leaves.
-    const asView = kernel.scopedFor(rec.id, null);
+    // the cell sends from outside any handler: as the page's operator; the
+    // host judges every call as `user` (`user.forward`)
+    const asView = kernel;
     const close = (): void => closeView(rec.id);
     // The frame is REGISTERED before the mount's awaits: a refresh landing
     // meanwhile must see it, or it mounts the same view a second time.
@@ -717,12 +712,12 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
         if (f) f.handle = h;
       });
     };
-    // a CHILD CANVAS's card: ↗ opens it
-    if (rec["handler_module"] === CANVAS) {
+    // a NESTED VIEW's card: ↗ opens it
+    if (rec["handler_module"] === VIEW) {
       const chip = document.createElement("span");
       chip.className = "ext open-canvas";
       chip.textContent = "↗";
-      chip.title = "open this canvas";
+      chip.title = "open this view";
       chip.addEventListener("click", (e) => {
         e.stopPropagation();
         setViewed(rec.id);
@@ -784,12 +779,10 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
 
   let bgShown = ""; // the background source the GL host shows now
   const refresh = async (): Promise<void> => {
-    // the viewed canvas is LOCKED for a user who may not write it
-    document.body.classList.toggle("ro", !writable(containerNow()));
-    // Members are this canvas's OWN children in the LOCAL tree (hydrated from
+    // Members are this view's OWN children in the LOCAL tree (hydrated from
     // web/kernel_state, persisted back via proxy_loader). No host membership read.
-    // THE VIEWED: a canvas's own children on its world, or one agent FULL.
-    if (kernel.get(viewed) === undefined) viewed = rootOr(); // removed meanwhile
+    // THE VIEWED: a view's own children on its world, or one agent FULL.
+    if (kernel.get(viewed) === undefined) viewed = ROOT_VIEW; // removed meanwhile
     const full = fullNow();
     const cont = kernel.get(containerNow());
     const all: Rec[] = cont !== undefined ? [...cont.children.values()].map((a) => a.record() as Rec) : [];
@@ -816,7 +809,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       if (existing !== undefined) {
         existing.rec = rec;
         applyRectFromRec(existing.el, rec);
-        // the lock chip follows the record (a main chat is locked by its canvas)
+        // the lock chip follows the record (a main chat is locked by its view)
         const lockEl = existing.el.querySelector(":scope > .frame-head .lock") as HTMLElement | null;
         if (lockEl !== null) {
           const locked = bool(rec, "delete_lock");
@@ -860,7 +853,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
         seenGl.add(mid);
       }
     }
-    // THE BACKGROUND: the singleton `background` agent's `bg_source`, mounted
+    // THE BACKGROUND: the view's singleton background agent's `bg_source`, mounted
     // as a GL view under its id, behind every member; swapped in place.
     const bgSource = bgRec !== undefined && typeof bgRec["bg_source"] === "string" ? (bgRec["bg_source"] as string) : "";
     if (bgSource !== "" && bgRec !== undefined) {
@@ -887,17 +880,17 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   // its membership; the proxy_loader syncs it to the host independently.
   kernel.addStateSubscriber(() => void refresh());
 
-  // dblclick → the DEFAULT VIEW and its backend, in THIS order: the view
-  // record lands on disk first (flushed through the loader), then the backend
-  // is spawned for it, then the view is bound. A crash in between leaves a view
-  // without a backend (shown lost, ⟳ respawns), never a backend without a view
-  // — so no page's reconcile can delete a live backend another page is binding.
+  // dblclick → the DEFAULT VIEW BUNDLE's cell and its backend, in THIS order:
+  // the cell record lands on disk first (flushed through the loader), then the
+  // backend is spawned for it, then the cell is bound. A crash in between leaves
+  // a cell without a backend (shown lost, ⟳ respawns), never a backend without a
+  // cell — so no page's reconcile can delete a live backend another page is binding.
   // every cell is CREATED with its geometry (the host answers `around` from the records)
   const spawnPairAt = async (bundle: ViewBundle, w: { x: number; y: number }, size: { width?: number; height?: number } = { width: 480, height: 320 }): Promise<void> => {
-    const viewId = `view_${crypto.randomUUID().slice(0, 8)}`;
+    const cellId = `cell_${crypto.randomUUID().slice(0, 8)}`;
     kernel.register(
       new Agent({
-        id: viewId,
+        id: cellId,
         parentId: containerNow(),
         handlerModule: bundle.handles[0]!,
         meta: {
@@ -909,25 +902,25 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       }),
     );
     await flush();
-    const backendId = await spawnBackend(bundle, viewId);
+    const backendId = await spawnBackend(bundle, cellId);
     if (backendId === null) {
-      kernel.remove(viewId);
+      kernel.remove(cellId);
       return;
     }
-    bind(viewId, bundle, backendId);
+    bind(cellId, bundle, backendId);
   };
   const spawnTerminalAt = (w: { x: number; y: number }): Promise<void> => spawnPairAt(DEFAULT_VIEW, w);
 
   // MOVE TO a cell: centre it in the viewport (zoom kept) and flash it.
-  const moveTo = (viewId: string): void => {
-    // FOCUS: a cell on another canvas (or viewed full) — view its canvas first
-    const hc = hostCanvasOf(viewId);
+  const moveTo = (cellId: string): void => {
+    // FOCUS: a cell on another view (or viewed full) — view its view first
+    const hc = hostCanvasOf(cellId);
     if (hc !== null && (hc !== viewed || fullNow())) {
       setViewed(hc);
-      void refresh().then(() => moveTo(viewId));
+      void refresh().then(() => moveTo(cellId));
       return;
     }
-    const f = frames.get(viewId);
+    const f = frames.get(cellId);
     if (!f) return;
     const r = rectFromRec(f.rec, 480, 320, 0);
     const rect = canvas.getBoundingClientRect();
@@ -938,7 +931,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     setTimeout(() => f.el.classList.remove("flash"), 900);
   };
 
-  // THE SET-UP CELL — one per canvas: opening it again moves to it.
+  // THE SET-UP CELL — one per view: opening it again moves to it.
   const openSetupAt = (w: { x: number; y: number }): void => {
     const c = kernel.get(containerNow());
     const open = c ? [...c.children.values()].find((a) => a.record().handler_module === setupView.handles[0]) : undefined;
@@ -947,12 +940,12 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   };
 
   // An AI cell at the spot, its first turn what was typed. The same order as a
-  // terminal: the view lands on disk first, then its backend, then the bind.
+  // terminal: the cell lands on disk first, then its backend, then the bind.
   const spawnAiAt = async (w: { x: number; y: number }, template: string | null, text: string): Promise<void> => {
     await spawnAiIn(containerNow(), w, template, text);
   };
-  // An AI cell on canvas `parent`: the view, then its backend. Its id, or null
-  // (the refusal toasted, the view removed).
+  // An AI cell on view `parent`: the cell, then its backend. Its id, or null
+  // (the refusal toasted, the cell removed).
   const spawnAiIn = async (parent: string, w: { x: number; y: number }, template: string | null, text: string): Promise<string | null> => {
     const viewId = `ai_view_${crypto.randomUUID().slice(0, 8)}`;
     const x = Math.round(w.x);
@@ -982,16 +975,16 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     return viewId;
   };
 
-  // THE SCAFFOLD: a child canvas placed with a template gets its MAIN chat — a
+  // THE SCAFFOLD: a nested view placed with a template gets its MAIN chat — a
   // kept AI cell from that template, made main (`canvas_agent.ts` place).
-  setScaffold(async (canvasId: string, template: string): Promise<Json> => {
-    const viewId = await spawnAiIn(canvasId, { x: 40, y: 40 }, template, "");
+  setScaffold(async (viewOf: string, template: string): Promise<Json> => {
+    const viewId = await spawnAiIn(viewOf, { x: 40, y: 40 }, template, "");
     if (viewId === null) return { error: `the main chat from template \`${template}\` could not be spawned`, reason: "bad_arg", arg: "template" };
     const ai = String(kernel.get(viewId)?.meta["backend_id"] ?? "");
-    const k = (await host.callHost(AI_CELLS, { type: "keep", id: ai } as unknown as Payload)) as Rec;
+    const k = (await host.callHost(BACKEND, { type: "keep", id: ai } as unknown as Payload)) as Rec;
     if (typeof k["error"] === "string") return { error: `the main chat was not kept: ${k["error"]}`, reason: "bad_arg", view: viewId } as unknown as Json;
     kernel.updateMeta(viewId, { kept: true, dialog_name: k["name"], owns_backend: false } as unknown as Payload);
-    const [out] = await kernel.send([{ target: canvasId, payload: { type: "update", id: canvasId, fields: { main_ai_chat: viewId } } as unknown as Payload }]);
+    const [out] = await kernel.send([{ target: viewOf, payload: { type: "update", id: viewOf, fields: { main_ai_chat: viewId } } as unknown as Payload }]);
     const m = (out?.result ?? null) as Rec | null;
     if (m !== null && typeof m["error"] === "string") return m as unknown as Json;
     return { view: viewId, ai, name: k["name"] } as unknown as Json;
@@ -1010,11 +1003,16 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       }),
     );
     await flush();
-    const r = (await host.callHost(AI_CELLS, {
+    const folder = await folderFor(viewId);
+    if (folder === null) {
+      kernel.remove(viewId);
+      return;
+    }
+    const r = (await host.callHost(folder, {
       type: "reopen",
       id: dialog.id,
-      stamp: { view_id: viewId, canvas_id: selfId },
-      peer_grants: peerGrants(),
+      stamp: { cell_id: viewId },
+      peer_grants: peerGrants(folder),
     } as unknown as Payload)) as Rec;
     if (typeof r["error"] === "string") {
       toast(`✕ ${r["error"]}`);
@@ -1024,7 +1022,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     bindAi(viewId, r);
   };
 
-  // VIEW an agent: a canvas (its world, its camera, its background) or any
+  // VIEW an agent: a view (its world, its camera, its background) or any
   // other page agent FULL. `push`: a new history entry (`#view=<id>`).
   function setViewed(id: string, push = true): void {
     if (kernel.get(id) === undefined || id === viewed) return;
@@ -1064,12 +1062,11 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   // ── THE SIDEBAR (`sidebar.ts`): chats + every kernel's agent tree ──────
   setupLink.addEventListener("click", (e) => {
     e.preventDefault();
-    if (!writable(containerNow())) return;
     openSetupAt(screenToWorld(window.innerWidth / 2, window.innerHeight / 2));
   });
   const centre = (): { x: number; y: number } => screenToWorld(window.innerWidth / 2, window.innerHeight / 2);
   const pageRoot = (): Agent | undefined => (kernel.rootId !== null ? kernel.get(kernel.rootId) : undefined);
-  // every AI cell on every canvas of this page
+  // every AI cell on every view of this page
   const aiCells = (): Rec[] =>
     everyAgent()
       .map((id) => kernel.get(id)!.record() as Rec)
@@ -1081,7 +1078,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   const sidebar = createSidebar({
     mount,
     dialogs: async () => {
-      const r = (await host.callHost(AI_CELLS, { type: "dialogs" } as unknown as Payload)) as Rec | null;
+      const r = (await host.callHost(BACKEND, { type: "dialogs" } as unknown as Payload)) as Rec | null;
       return (r?.["dialogs"] as Dialog[] | undefined) ?? [];
     },
     aiCells,
@@ -1131,11 +1128,6 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       );
       setTimeout(() => moveTo(viewId), 400);
     },
-    activity: async () => {
-      const r = (await host.callHost("activity", { type: "open" } as unknown as Payload)) as Rec | null;
-      const toMain = ((r?.["to_main"] as Question[] | undefined) ?? []).map((q) => ({ ...q, kind: "main" as const }));
-      return [...((r?.["open"] as Question[] | undefined) ?? []), ...toMain];
-    },
     reopen: (dlg) => void reopenAt(centre(), dlg),
     newChat: () => void spawnAiAt(centre(), null, ""),
   });
@@ -1161,14 +1153,14 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     );
   };
 
-  // A CHILD CANVAS at the spot: nested under the canvas being viewed, shown on
-  // it as its card — html the child rewrites itself.
-  const spawnCanvasAt = (w: { x: number; y: number }): void => {
+  // A NESTED VIEW at the spot: under the view being viewed, shown on it as its
+  // card — html the nested view rewrites itself.
+  const spawnNestedViewAt = (w: { x: number; y: number }): void => {
     kernel.register(
       new Agent({
-        id: `canvas_${crypto.randomUUID().slice(0, 8)}`,
+        id: `view_${crypto.randomUUID().slice(0, 8)}`,
         parentId: containerNow(),
-        handlerModule: CANVAS,
+        handlerModule: VIEW,
         meta: { x: Math.round(w.x), y: Math.round(w.y), width: 340, height: 220, html: CARD_HTML },
       }),
     );
@@ -1215,7 +1207,6 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     pointer = { x: e.clientX, y: e.clientY };
   });
   const spotAt = async (sx: number, sy: number): Promise<void> => {
-    if (!writable(containerNow())) return;
     const w = screenToWorld(sx, sy);
     openActionPopup({
       screenX: sx,
@@ -1227,7 +1218,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
         else if (p.kind === "setup") openSetupAt(w);
         else if (p.kind === "stream") spawnStreamAt(w);
         else if (p.kind === "chat") void reopenAt(w, { id: p.id, name: p.name });
-        else if (p.kind === "canvas") spawnCanvasAt(w);
+        else if (p.kind === "view") spawnNestedViewAt(w);
         else if (p.kind === "demo") spawnDemoAt(w);
         else void spawnAiAt(w, p.template, p.text);
       },
@@ -1245,18 +1236,12 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   });
 
   kernel.addStateSubscriber(renderSoon);
-  // a cell added later is admitted for reflect too
-  kernel.addStateSubscriber((e) => {
-    const ev = e as unknown as Rec;
-    if (ev["kind"] === "added" && typeof ev["agent_id"] === "string") admitReflect(ev["agent_id"] as string);
-  });
-  ensureBackground(rootOr());
+  ensureBackground(ROOT_VIEW);
   if (isContainer(look, viewed)) ensureBackground(viewed);
   window.addEventListener("hashchange", () => {
     const want = viewFromHash(location.hash);
     if (want !== null && want !== viewed && kernel.get(want) !== undefined) setViewed(want, false);
   });
-  await admitHost();
   await reconcile();
   await refresh();
   await renderChats();

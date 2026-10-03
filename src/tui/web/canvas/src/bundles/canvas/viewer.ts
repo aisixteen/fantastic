@@ -2,20 +2,20 @@
 // (owner, 2026-10-02: "multicanvas … a viewer which switches on which agent you
 // click"). Pure: the compositor (`canvas.ts`) owns the DOM.
 //
-//   · VIEWED is one page agent: a CANVAS (a container: its cells drawn on its
+//   · VIEWED is one page agent: a VIEW (a container: its cells drawn on its
 //     own world, its own background) or any other agent (drawn FULL — an html
 //     panel as a page, a chat, a terminal, a reflect card).
-//   · A canvas may hold CHILD CANVASES (`place {kind: canvas}`): nested in the
-//     tree; on its parent each is a cell showing ITS OWN card html, which the
-//     child rewrites itself (`set_html` on the child canvas).
+//   · A view may hold NESTED VIEWS (`place {kind: view}`): nested in the tree;
+//     on its parent each is a cell showing ITS OWN card html, which the nested
+//     view rewrites itself (`set_html` on it).
 //   · A click in the tree VIEWS the agent; ⌘-click (Ctrl-click off macOS —
-//     Ctrl-click is the Mac's right click) FOCUSES it instead: its canvas is
+//     Ctrl-click is the Mac's right click) FOCUSES it instead: its view is
 //     viewed and the cell centred.
 //   · `#view=<id>` is the link: back / forward walk the views.
 
-import { CANVAS } from "./canvas_agent.ts";
+import { VIEW } from "./canvas_agent.ts";
 
-export { CANVAS };
+export { VIEW };
 
 /** The slice of a page agent the viewer reads. */
 export interface Node {
@@ -26,17 +26,17 @@ export interface Node {
 
 export type Lookup = (id: string) => Node | undefined;
 
-/** Whether `id` is a container (a canvas). */
+/** Whether `id` is a container (a view). */
 export function isContainer(get: Lookup, id: string): boolean {
-  return get(id)?.handler === CANVAS;
+  return get(id)?.handler === VIEW;
 }
 
-/** The canvas that shows `id`: itself when it is one, else its nearest
- *  canvas ancestor; null when it sits under none. */
+/** The view that shows `id`: itself when it is one, else its nearest view
+ *  ancestor; null when it sits under none. */
 export function containerOf(get: Lookup, id: string): string | null {
   let cur = get(id);
   while (cur !== undefined) {
-    if (cur.handler === CANVAS) return cur.id;
+    if (cur.handler === VIEW) return cur.id;
     cur = cur.parentId === null ? undefined : get(cur.parentId);
   }
   return null;

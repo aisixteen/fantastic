@@ -19,7 +19,7 @@ backend's own default. Only a field changed from its default is written.
 ## The record
 
 A write admits the new agent to the memory store `memory`, creates it under
-`set_of_agents` (`memory_store_id: memory`, `callable_by {user}`, `can_call`
+`user` (`memory_store_id: memory`, `callable_by {user}`, `can_call`
 its targets and `memory`), grants both sides, boots and flushes it.
 
 ## Keys

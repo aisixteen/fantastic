@@ -13,8 +13,6 @@
 //   fantastic.emit("panel2", { type:"value", value });                     // → another agent
 //   const off = fantastic.watch("exec_bridge_x", (ev) => …);            // ← agent events
 //   fantastic.onMessage((p) => …);                                         // ← messages sent to ME
-//   await fantastic.send("credentials", { type:"set", ref, host, fields:{api_key: k} }, ["payload.fields"]);
-//                                       // `secret` paths: no kernel records the value (rows, ledger, stream)
 
 export const CONNECTOR_SRC = `(() => {
   const pending = new Map();
@@ -36,13 +34,11 @@ export const CONNECTOR_SRC = `(() => {
     }
   });
   globalThis.fantastic = {
-    send(target, payload, secret) {
+    send(target, payload) {
       const id = String(++rid);
       return new Promise((res) => {
         pending.set(id, res);
-        const m = { op: "send", rid: id, target: target, payload: payload || {} };
-        if (secret && secret.length) m.secret = secret;
-        post(m);
+        post({ op: "send", rid: id, target: target, payload: payload || {} });
       });
     },
     emit(target, payload) { post({ op: "emit", target: target, payload: payload || {} }); },

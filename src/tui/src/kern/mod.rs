@@ -5,9 +5,9 @@
 //! pid, no socket, no request and no reply — the terminal is an agent on the same
 //! spine as everything else, and `host` is how it reaches that spine.
 
-pub mod activity;
 pub mod reach;
-pub mod ai_cells;
+pub mod backend;
+pub mod canvas_node;
 pub mod host;
 pub mod keys;
 pub mod model;

@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from _lib.canvas_live import Rig, verdict, answer, ask, html_cell, http_get, in_frame, say, spot, wait_quiet  # noqa: E402,F401
+from _lib.canvas_live import FOLDER, Rig, verdict, answer, ask, html_cell, http_get, in_frame, say, spot, wait_quiet  # noqa: E402,F401
 
 def main() -> bool:
     rig = Rig(__file__)
@@ -22,7 +22,7 @@ def main() -> bool:
     from _lib.dev_surface import exec_record, reactive_check, write_project
     port = free_port()
     write_project(rig.proj)
-    rig.init(host_agents=[("agents/web/agents/canvas_ws", exec_record(port))])
+    rig.init(host_agents=[(FOLDER, exec_record(port))])
     ask_text = (f"Set up a workspace for this project using the exec agent `dev` — it may run exactly `sh build.sh` and "
                 f"`python3 -m http.server {port} --directory dist`. I want: a controls panel with Build, Run and Stop buttons, "
                 "a build log panel, a run log panel, a panel showing the running app, and a status panel that says "

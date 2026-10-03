@@ -53,8 +53,7 @@ pub struct Src<'a> {
 /// A BARE GROUPING NODE IS NOT A ROW. A node with no handler (other than the
 /// root) dispatches nothing and has no UI to open, so its label is noise: it
 /// is not drawn, and its subtree rises one level. The grouping still exists in
-/// the kernel; the sidebar just doesn't spend a row saying so (design decision:
-/// the `set_of_agents` label is gone).
+/// the kernel; the sidebar just doesn't spend a row saying so.
 ///
 /// A FILTER FLATTENS RATHER THAN PRUNES. Keeping ancestors of a match would show
 /// rows the human did not search for, and hiding them would orphan the matches;
@@ -389,13 +388,13 @@ mod tests {
 
     #[test]
     fn a_bare_grouping_node_is_not_drawn_and_its_children_rise_one_level() {
-        // The design decision: `set_of_agents` dispatches nothing, so its label
-        // is noise. It is not a row; what it groups sits one level up.
+        // A bare node dispatches nothing, so its label is noise. It is not a
+        // row; what it groups sits one level up.
         let t = node(
             "kernel_state",
             Some("kernel_state.tools"),
             vec![
-                node("set_of_agents", None, vec![
+                node("group", None, vec![
                     node("exec", Some("exec_bridge.tools"), vec![]),
                     node("files", Some("file_bridge.tools"), vec![]),
                 ]),
