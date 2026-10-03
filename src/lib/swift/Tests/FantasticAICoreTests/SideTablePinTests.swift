@@ -173,7 +173,6 @@ struct SideTablePinTests {
         AIMemory.of(k).with { m in
             m.heads[id] = []
             m.bodies[id] = [:]
-            m.grants[id] = []
             m.watchers[id] = ["w": true]
         }
         let incarnation = AIIncarnation.of(k, id)
@@ -200,7 +199,7 @@ struct SideTablePinTests {
             #expect(!AIStripStrategy.has(k, id))
             AIMemory.of(k).with { m in
                 #expect(m.heads[id] == nil && m.bodies[id] == nil)
-                #expect(m.grants[id] == nil && m.watchers[id] == nil)
+                #expect(m.watchers[id] == nil)
             }
         }
         await expectClean(recallOwed: false)

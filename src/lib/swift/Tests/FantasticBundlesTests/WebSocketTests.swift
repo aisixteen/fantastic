@@ -44,7 +44,7 @@ struct WebSocketTests {
     ///
     /// `granted` is the leg's EGRESS half. An inbound frame dispatches AS THE LEG
     /// (see `WebSocketProxyHandler.trackCall`), so reaching `core` — the leg's
-    /// GRANDparent, which no structural baseline token covers — needs an explicit
+    /// GRANDparent, which no baseline token covers — needs an explicit
     /// grant on BOTH ends. `granted: false` leaves the leg open inbound and
     /// granted nothing outbound: the sealed-by-composition case.
     @discardableResult
@@ -63,11 +63,8 @@ struct WebSocketTests {
         let rec = await kernel.send([Item(AgentId("kernel"), payload)])[0].result
         let wsId = rec["id"].asString ?? "web_ws"
         if granted {
-            // The INGRESS half, on the root: the leg is core's GRANDchild, so
-            // `$children` does not reach it.
-            var grants: JSON = .object([
-                "$self": .string("*"), "$parent": .string("*"), "$children": .string("*"),
-            ])
+            // The INGRESS half, on the root: an explicit grant.
+            var grants: JSON = .object(["$self": .string("*")])
             grants[wsId] = .string("*")
             _ = await kernel.send([Item(AgentId("kernel_state"), .object([
                     "type": .string("update_agent"),
@@ -75,6 +72,7 @@ struct WebSocketTests {
                     "callable_by": grants,
                 ]))])[0].result
         }
+        wire(kernel, "web", wsId)  // the host reads its leg's routes
         _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("mount"), "child_id": .string(wsId)]))])[0].result
         return wsId
     }
@@ -194,6 +192,7 @@ struct WebSocketTests {
         let kernel = try await startWebKernel()
         _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("boot")]))])[0].result
         await mountWebWS(kernel)
+        wire(kernel, "web_ws", "web", ["watch"])  // the explicit watch: its own edge
         defer {
             Task {
                 _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("stop")]))])[0].result
@@ -304,14 +303,15 @@ struct WebSocketTests {
         kernel.bundles.register("ws_slow.tools", SlowProbe(flag: flag))
         _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("boot")]))])[0].result
         let wsId = await mountWebWS(kernel)
-        // A CHILD of the leg: the structural baseline ($parent/$children) covers
-        // both directions, so the gate is not what this test is measuring.
+        // A CHILD of the leg, wired both ways: the gate is not what this test
+        // is measuring.
         let probeId = await kernel.send([Item(AgentId("kernel"), .object([
                 "type": .string("create_agent"),
                 "parent_id": .string(wsId),
                 "handler_module": .string("ws_slow.tools"),
                 "id": .string("ws_slow_probe"),
             ]))])[0].result["id"].asString ?? "ws_slow_probe"
+        wire(kernel, wsId, probeId)
         defer {
             Task {
                 _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("stop")]))])[0].result
@@ -466,6 +466,7 @@ struct WebSocketTests {
                 ]))
         ])[0].result
         let wsId = rec["id"].asString ?? "web_ws"
+        wire(kernel, "web", wsId)
         _ = await kernel.send([
             Item(AgentId("web"), .object(["type": .string("mount"), "child_id": .string(wsId)]))
         ])[0].result
@@ -867,7 +868,7 @@ struct WebSocketTests {
 
     /// A11.29 (r2 WSF-5) — WITHOUT the root grant the leg gets python's
     /// FLATTENED denial frame, not a `data`-wrapped reply and not silence. The
-    /// leg holds only the structural baseline: a NAMED `*` on the root would
+    /// leg holds only the baseline: a NAMED `*` on the root would
     /// cover `state_subscribe` (audit 2026-09-28).
     @Test(.timeLimit(.minutes(1)))
     func stateSubscribeWithoutRootGrantAnswersFlattenedError() async throws {
@@ -1006,8 +1007,7 @@ struct WebSocketTests {
             .appendingPathComponent(rel)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
-        // A CHILD of the leg: `$children` (egress) + `$parent` (ingress) are the
-        // structural baseline, so no explicit grant is needed either way.
+        // A CHILD of the leg, wired both ways.
         _ = await kernel.send([
             Item(
                 AgentId("kernel"),
@@ -1017,6 +1017,7 @@ struct WebSocketTests {
                     "root": .string(rel), "ingress_rule": .string("allow_all_ingress"),
                 ]))
         ])[0].result
+        wire(kernel, wsId, "wsfiles")
         defer { Task { await stopWebHost(kernel) } }
         let port = kernel.httpPort()
         let task = URLSession(configuration: .ephemeral)

@@ -9,10 +9,10 @@ description: >
   file_bridge legs and one exec_bridge leg differing ONLY in posture — so every
   refusal below is attributable to one declared fact and nothing else.
 
-  The manifest declares NO grants at all. Every roster agent is a child of the
-  loader, so the structural baseline ($parent/$children) already opens the CALL
-  gate on each loader→leg edge; anything that still refuses is refusing at the
-  IO gate, which is the whole subject of this scenario.
+  The only grants declared are the loader→leg edges, both halves (the loader's
+  `$children` egress, each leg's `$parent` ingress), so the CALL gate is open on
+  each of them; anything that still refuses is refusing at the IO gate, which is
+  the whole subject of this scenario.
 
 requirements: [C20, C23]
 

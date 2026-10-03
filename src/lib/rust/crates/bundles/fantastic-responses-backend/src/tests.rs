@@ -126,7 +126,7 @@ async fn serve(body: String) -> (MockServer, String) {
 /// Decode a whole body through the line decoder; the text, then the verdict.
 fn decode_all(body: &str, bounded: bool) -> (String, Option<String>, ReportCell) {
     let report = ReportCell::default();
-    let mut st = SseState::new(Arc::clone(&report), bounded, None);
+    let mut st = SseState::new(Arc::clone(&report), bounded);
     let mut out = String::new();
     for line in body.lines() {
         match decode_sse_line(&mut st, line) {
@@ -373,36 +373,6 @@ async fn transport_retry_is_bounded_and_deliberate_answers_are_not_retried() {
     let p = provider(format!("{}/v1/responses", server.uri()), 16, Map::new());
     assert!(drain(&p, None).await.unwrap_err().contains("responses 404"));
     assert_eq!(server.received_requests().await.unwrap().len(), 1);
-}
-
-/// Audit S1: an endpoint that echoes the request in its error body or in an
-/// error event does not carry the key into the error text — it leaves as
-/// `<secret>` (python `without_key`).
-#[tokio::test]
-async fn an_error_echoing_the_key_is_scrubbed() {
-    let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .respond_with(
-            ResponseTemplate::new(401)
-                .insert_header("content-type", "application/json")
-                .set_body_string("invalid key: Bearer sk-test"),
-        )
-        .mount(&server)
-        .await;
-    let p = provider(format!("{}/v1/responses", server.uri()), 16, Map::new());
-    assert_eq!(
-        drain(&p, None).await.unwrap_err(),
-        "responses 401: invalid key: Bearer <secret>"
-    );
-    let (_s, ep) = serve(sse(&[
-        json!({"type": "error", "message": "bad key sk-test"}),
-    ]))
-    .await;
-    let p = provider(ep, 16, Map::new());
-    assert_eq!(
-        drain(&p, None).await.unwrap_err(),
-        "responses stream error: {'type': 'error', 'message': 'bad key <secret>'}"
-    );
 }
 
 /// The ref the agent's record names in the test credential store.

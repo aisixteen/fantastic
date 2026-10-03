@@ -37,11 +37,10 @@ async def _mk(kernel, handler_module: str, aid: str, **meta) -> str:
 
 @pytest.fixture
 async def host(seeded_kernel):
-    """A web host with no uvicorn serve loop — `_spawn` builds the app and the
-    handle; nothing binds until `_start_serving`, which this never calls."""
-    web_id = await _mk(
-        seeded_kernel, "web.tools", "mount_web", parent_id=seeded_kernel.id, port=8999
-    )
+    """A web host with no uvicorn serve loop — the record only (`create`, which
+    boots nothing); `_spawn` builds the app and the handle, and nothing binds until
+    `_start_serving`, which this never calls."""
+    web_id = seeded_kernel.create("web.tools", id="mount_web", port=8999)["id"]
     yield web_id
     _servers.pop(web_id, None)
 

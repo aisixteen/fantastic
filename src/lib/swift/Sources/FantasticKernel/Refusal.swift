@@ -119,9 +119,8 @@ public enum Refusal {
     /// carrying `..` or a separator walks out of the store and the write, or a
     /// recursive delete, lands wherever it pointed.
     ///
-    /// Measured in python 2026-08-28: an agent holding NO explicit grant — only
-    /// the structural baseline, which lets any child call its parent — sent
-    /// `forget_record` with `id: "../../x"` to the root loader and recursively
+    /// Measured in python 2026-08-28: an agent the call gate admitted to the
+    /// root loader sent `forget_record` with `id: "../../x"` and recursively
     /// deleted a directory OUTSIDE the store. The gate was not bypassed;
     /// nothing validated the id.
     ///

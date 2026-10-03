@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 
 from web_rest.tools import _make_post_endpoint
 from kernel import register_unlisted
+from _testkit import wire
 
 
 def _mount(kernel):
@@ -39,6 +40,7 @@ def test_binary_leg_request_and_reply_round_trip(seeded_kernel, tmp_path, monkey
         ingress_rule="allow_all_ingress",
         can_call={"fb": ["*"]},
     )
+    wire(seeded_kernel, "rest_xyz", "kernel_state")
     seeded_kernel.create(
         "file_bridge.tools",
         allow=["."],
@@ -85,6 +87,7 @@ def test_json_path_unchanged(seeded_kernel):
     seeded_kernel.create(
         "web_rest.tools", id="rest_xyz", ingress_rule="allow_all_ingress"
     )
+    wire(seeded_kernel, "rest_xyz", "kernel_state")
     with TestClient(_mount(seeded_kernel)) as c:
         r = c.post("/rest_xyz/kernel_state", json={"type": "reflect"})
         assert r.status_code == 200
@@ -126,6 +129,7 @@ def test_the_bytes_field_header_names_a_literal_top_level_key(seeded_kernel):
         ingress_rule="allow_all_ingress",
         can_call={"echo": ["*"]},
     )
+    wire(seeded_kernel, "rest_xyz", "kernel_state")
     seeded_kernel.create(
         "rest_bytes_echo.tools", id="echo", callable_by={"rest_xyz": ["*"]}
     )

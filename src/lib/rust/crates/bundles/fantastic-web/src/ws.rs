@@ -61,7 +61,7 @@ use crate::AppState;
 use fantastic_io_bridge::authorizer::{ingress, manifold_spec, Action, Decision};
 use fantastic_io_bridge::codec::{decode_binary_frame, encode_frame};
 use fantastic_io_bridge::ws_deflate::DeflateStream;
-use fantastic_kernel::{AgentId, Item, Kernel};
+use fantastic_kernel::{AgentId, Kernel};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
@@ -547,11 +547,6 @@ pub(crate) async fn ws_loop(
                     continue;
                 }
                 let body = inbound.body;
-                // SECRET MARKS cross the leg verbatim (`fantastic_kernel::secret`):
-                // this kernel records the call as shown, exactly as for a local
-                // caller — the kernel's own check refuses a malformed mark before
-                // anything is dispatched.
-                let secret = frame.get("secret").cloned();
                 // REGISTERED UNDER THE HOST: a frame handler DISPATCHES, so it
                 // is real work — a `ps` row, reachable by `cancel`, and its send
                 // parented to it instead of becoming a root.
@@ -563,12 +558,11 @@ pub(crate) async fn ws_loop(
                     // id arriving twice — a double-click, a second tab, a
                     // reconnect replaying its queue — is ONE intent, deduped
                     // and joined by the ledger instead of running twice.
-                    let mut item = Item::new(target, payload);
+                    let mut item = serde_json::Map::new();
+                    item.insert("target".into(), json!(target.as_str()));
+                    item.insert("payload".into(), payload);
                     if let Some(s) = fid.as_str().filter(|s| !s.is_empty()) {
-                        item = item.with_id(s);
-                    }
-                    if let Some(marks) = secret {
-                        item = item.with_secret(marks);
+                        item.insert("id".into(), json!(s));
                     }
                     // ONLY A BINARY FRAME OVERWRITES THE KEY. python's
                     // `payload[field] = body` runs where a body EXISTS; a TEXT
@@ -584,12 +578,20 @@ pub(crate) async fn ws_loop(
                     // carries a body answers a binary frame (`send_envelope`),
                     // whatever frame asked — python's `encode_frame` finds the
                     // bytes, no verb list.
-                    if let Some(b) = body {
-                        item = item.with_binary(b.path, b.bytes);
-                    }
-                    let out_item = fantastic_kernel::send::with_sender(leg, async {
-                        kernel.send(vec![item]).await.remove(0)
-                    })
+                    // HANDED TO THE LEG: this loop runs outside every dispatch, so
+                    // it never sends onward itself — the leg's `inbound_call`
+                    // does, AS THE LEG (`fantastic_io_bridge::inbound`).
+                    let body = body.map(|b| {
+                        let mut path = vec![fantastic_kernel::Step::Key("item".into())];
+                        path.extend(b.nested_in("payload"));
+                        fantastic_kernel::Blob::new(path, b.bytes)
+                    });
+                    let out_item = fantastic_io_bridge::inbound::hand_in(
+                        &kernel,
+                        &leg,
+                        json!({"type": "inbound_call", "item": Value::Object(item)}),
+                        body,
+                    )
                     .await;
                     // Verb-level errors travel inside `data.error` (python's
                     // wire shape); a `type:"error"` frame is reserved for
@@ -631,15 +633,18 @@ pub(crate) async fn ws_loop(
                 if !matches!(gate_leg(&kernel, &leg, "emit", &frame), Decision::Allow) {
                     continue;
                 }
-                // The body rides at ITS path; the decode already left `null` in
-                // that slot of `payload`, in python's position.
-                let item = match inbound.body {
-                    None => fantastic_kernel::inbox::InboxItem::text(payload),
-                    Some(b) => fantastic_kernel::inbox::InboxItem::binary(payload, b),
-                };
-                fantastic_kernel::send::with_sender(leg, async {
-                    kernel.emit_item(&target, item).await;
-                })
+                // HANDED TO THE LEG (`inbound_emit`), which emits AS ITSELF. The
+                // body rides at ITS path below `payload`; the decode already left
+                // `null` in that slot, in python's position.
+                let body = inbound
+                    .body
+                    .map(|b| fantastic_kernel::Blob::new(b.nested_in("payload"), b.bytes));
+                let _ = fantastic_io_bridge::inbound::hand_in(
+                    &kernel,
+                    &leg,
+                    json!({"type": "inbound_emit", "target": target.as_str(), "payload": payload}),
+                    body,
+                )
                 .await;
             }
             "watch" => {
@@ -680,10 +685,20 @@ pub(crate) async fn ws_loop(
                 // target, verb and payload summary, for every agent in the
                 // tree. So it is gated on the ROOT — an ingress rule answers
                 // "may this client reach this leg", never "what may it READ".
-                let denial = fantastic_kernel::send::with_sender(leg.clone(), async {
-                    kernel.authorize_state_subscribe(&leg)
-                })
-                .await;
+                // HANDED TO THE LEG (`inbound_state_subscribe`): the tap is
+                // gated as the leg, on the root.
+                let asked = fantastic_io_bridge::inbound::hand_in(
+                    &kernel,
+                    &leg,
+                    json!({"type": "inbound_state_subscribe"}),
+                    None,
+                )
+                .await
+                .result;
+                let denial = asked
+                    .get("error")
+                    .is_some_and(fantastic_bundle::py_truthy)
+                    .then_some(asked);
                 if let Some(d) = denial {
                     let _ = out
                         .send(Out::Text(encode_frame(&error_frame(&fid, &d))))
@@ -816,9 +831,8 @@ pub(crate) async fn ws_loop(
 /// explicit watch that followed was then skipped as a duplicate.)
 ///
 /// The name resolves the way `send` resolves a target (`kernel` or a literal
-/// id), and the watch runs UNDER THE LEG'S OWN IDENTITY, so
-/// the kernel's gate sees a real caller — without it the kernel reads the watch
-/// as an OPERATOR's and the two-sided gate never runs.
+/// id), and the watch is HANDED TO THE LEG (`inbound_watch`), whose handler
+/// asks the kernel as the leg — so the two-sided gate judges the leg.
 #[allow(clippy::too_many_arguments)]
 async fn watch_path(
     kernel: &Arc<fantastic_kernel::Kernel>,
@@ -852,9 +866,18 @@ async fn watch_path(
     let reader = AgentId::from(format!("{client_id}>{}", target.id).as_str());
     let rx = Arc::new(tokio::sync::Mutex::new(kernel.ensure_inbox(&reader)));
     let ready = kernel.ensure_inbox(&reader);
-    let denial =
-        fantastic_kernel::send::with_sender(leg.clone(), kernel.watch(&target.id, reader.clone()))
-            .await;
+    let asked = fantastic_io_bridge::inbound::hand_in(
+        kernel,
+        leg,
+        json!({"type": "inbound_watch", "src": target.id.as_str(), "reader": reader.as_str()}),
+        None,
+    )
+    .await
+    .result;
+    let denial = asked
+        .get("error")
+        .is_some_and(fantastic_bundle::py_truthy)
+        .then_some(asked);
     if let Some(d) = denial {
         kernel.remove_inbox(&reader);
         // python `{"type":"error", "id":…, **denial}` — the denial's keys are

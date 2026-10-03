@@ -118,6 +118,26 @@ extension Kernel {
         }
     }
 
+    /// `runHandler`, bounded: true when the handler COMPLETED within `seconds`.
+    /// On expiry the handler's task is cancelled and the wait ends at once — a
+    /// handler that ignores cancellation is not waited on.
+    func runHandlerBounded(_ target: Agent, _ payload: JSON, seconds: Double) async -> Bool {
+        let box = DispatchBox()
+        let work = Task {
+            let (_, status) = await self.runHandler(target, payload)
+            box.resolve(.bool(status == .completed))
+        }
+        let timer = Task {
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            if Task.isCancelled { return }
+            work.cancel()
+            box.resolve(nil)
+        }
+        let done = await box.wait()
+        timer.cancel()
+        return done == .bool(true)
+    }
+
     // ── shutdown_agents ─────────────────────────────────────────
 
     /// THE AGENT HALF OF A GRACEFUL STOP — also the `shutdown_agents` kernel
@@ -152,17 +172,28 @@ extension Kernel {
         }
         var shut: [String] = []
         if !targets.isEmpty {
-            let items = targets.map {
-                Item(
-                    $0, .object(["type": .string("shutdown")]),
-                    timeout: Kernel.SHUTDOWN_VERB_TIMEOUT)
+            // THE KERNEL'S OWN BOOKKEEPING: each advertiser's handler runs
+            // directly (`runHandler`), as itself, concurrently, bounded by
+            // `SHUTDOWN_VERB_TIMEOUT` — never a send against anyone's grant.
+            // EXEMPT FROM THE DRAIN GATE: this IS the shutdown, so what those
+            // handlers send passes it.
+            let ok: [Bool] = await withTaskGroup(of: (Int, Bool).self) { group in
+                for (i, id) in targets.enumerated() {
+                    guard let a = agent(id) else { continue }
+                    group.addTask {
+                        let done = await KernelTaskLocals.withShutdown {
+                            await self.runHandlerBounded(
+                                a, .object(["type": .string("shutdown")]),
+                                seconds: Kernel.SHUTDOWN_VERB_TIMEOUT)
+                        }
+                        return (i, done)
+                    }
+                }
+                var out = [Bool](repeating: false, count: targets.count)
+                for await (i, done) in group { out[i] = done }
+                return out
             }
-            // EXEMPT FROM THE DRAIN GATE: this IS the shutdown. Operator
-            // authority, as python's `operator_context()`.
-            let outs = await KernelTaskLocals.$currentSender.withValue(nil) {
-                await KernelTaskLocals.withShutdown { await self.send(items) }
-            }
-            for (id, o) in zip(targets, outs) where o.status == .completed {
+            for (id, done) in zip(targets, ok) where done {
                 shut.append(id.value)
             }
         }
@@ -183,9 +214,7 @@ extension Kernel {
             // ROOTS ONLY: the subtree dies with its root, so cancelling a child
             // here would race the parent's own teardown.
             guard tasks.isRoot(tid) else { continue }
-            let out = await KernelTaskLocals.$currentSender.withValue(nil) {
-                await self.cancelTask(tid)
-            }
+            let out = await cancelTask(tid)
             cancelled += (out["killed"].asArray ?? []).compactMap { $0.asInt }
         }
         // EVERY CALL SETTLES before this returns. A killed dispatch's batch
@@ -229,7 +258,10 @@ extension Kernel {
             for a in self.allAgents() {
                 guard let hm = a.handlerModule, let b = self.bundles.get(hm) else { continue }
                 do {
-                    try await b.flushPending(agentId: a.id, kernel: self)
+                    // the kernel running the agent's own hook: AS the agent
+                    try await self.asSelf(a.id) {
+                        try await b.flushPending(agentId: a.id, kernel: self)
+                    }
                 } catch {
                     // C87: python's line carries NO agent id
                     // (`print(f"  [shutdown] flush_pending raised: {e}",
@@ -294,7 +326,10 @@ extension Kernel {
             return
         }
         do {
-            try await bundle.onShutdown(agentId: node.id, kernel: self)
+            // the kernel running the agent's own hook: AS the agent
+            try await asSelf(node.id) {
+                try await bundle.onShutdown(agentId: node.id, kernel: self)
+            }
         } catch {
             FileHandle.standardError.write(
                 "  [shutdown] \(node.id.value) hook raised: \(pyErrorText(error))\n"

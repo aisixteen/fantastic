@@ -101,22 +101,55 @@ by `tests/contract_corpus.test.ts` and `tests/c21_conformance.test.ts`.
   types, the same rule as `ws_bridge`. It can CALL it once the page has said hello
   (see below): by guid and agent id, learned through reflect.
 
+## The call gate
+
+Two record fields, `can_call` (egress) and `callable_by` (ingress), each
+`{key: "*" | [verb, ...]}`. Keys: a literal agent id, `$self`, `$parent`,
+`$children` (direct children) — and, in `can_call` only, `<guid>|<agent>` /
+`<guid>|*`, an outbound peer address. A caller is always a LOCAL agent, so a
+`<guid>|…` key in `callable_by` never matches. Tokens resolve relative to the
+record that holds the map. The baseline stamped on every agent is
+`{"$self": "*"}` on both fields and nothing else: every other edge is an explicit
+grant. An agent send passes iff the sender's `can_call` grants (target, verb) AND
+the target's `callable_by` grants (sender, verb); `"*"` covers every verb. The
+kernel verbs the root answers take the same two-sided check against the root. An
+operator send (no origin) is ungated. A reflect that passes the gate returns the
+tree whole. A denial's hint: "grants come from above — the agent's parent
+(update_agent on its direct child) or the operator writes can_call and
+callable_by; an agent never raises its own".
+
+**Identity comes only from dispatch.** When the kernel runs an agent's handler it
+hands it a view of the kernel; what the handler sends through that view (and
+through anything it starts with it) is that agent's. There is no API to send as
+anyone else. Code outside every dispatch — the app, the bridge's frame handler, a
+test driver — holds the kernel itself and sends as the operator. To act as an
+agent from outside, call the agent and let its handler make the onward send.
+`Host` follows the kernel it is built with: the kernel itself (operator), or the
+view a view-agent's handler was handed (that agent).
+
+**Kernel bookkeeping** is a plain call into an agent's handler, never a send
+(`kernel.bookkeeping`): the boots and the store probe of `kernel_start`, the
+`shutdown` of a stop, every read and write of the kernel's rows in its memory
+store. No gate, no task row, no call row; the handler runs as itself with no
+caller (the kernel asked).
+
 ## Called from the host (cross-kernel addressing)
 
 The host can call this kernel's agents directly: it addresses one as
 `<this kernel's guid>|<agent id>` with an ordinary `send` (and learns what is here
 by `reflect` to `<guid>|kernel`). The bridge's control socket makes that possible:
 it says `{type:"hello", guid}` on every (re)connect and again when the root first
-mints the guid, and answers each inbound `{type:"call", id, target, payload,
-caller, secret?}` with `{type:"reply", id, data}` — the call's outcome, a refusal included.
+mints the guid, and answers each inbound `{type:"call", id, target, payload}` with
+`{type:"reply", id, data}` — the call's outcome, a refusal included. A call frame
+names no caller, in either direction: the kernel that receives a call judges it
+as the leg it arrived through.
 
-Such a call runs under a FOREIGN origin (`caller`, the host agent's
-`<host guid>|<agent>`): the target's `callable_by` is the whole check here — name
-the caller, or `<host guid>|*` for every agent of that host — and only this
-kernel's own agents are reachable. A caller claiming this kernel's own guid is
-refused. A memory store here keys what such a caller writes by its qualified
-address, verbatim. Locally, `<this kernel's guid>|<agent id>` names the local
-agent too (`<guid>|kernel` the root).
+This kernel's leg is its own bridge — the kernel's transport, not an agent of the
+tree — so a host call is handed in as the OPERATOR: the host's `can_call` decided
+that its agent may reach this kernel. Only this kernel's own agents are
+reachable: any other target is `unknown_agent`, never forwarded back to the host.
+A host `emit` frame is delivered the same way. Locally, `<this kernel's
+guid>|<agent id>` names the local agent too (`<guid>|kernel` the root).
 
 **The tabs of one identity are one principal** (owner, 2026-10-03). Every tab of
 every browser hydrates the same tree and so says hello with the SAME guid — there is
@@ -124,42 +157,6 @@ no per-tab guid. The host holds each such connection as one more live route of t
 guid: a host call to `<guid>|<agent>` reaches every tab and settles with the first
 reply (the others are dropped); a closed tab leaves the guid reachable through the
 rest.
-
-**Secret marks cross the bridge.** A batch item's `secret` marks
-(`src/kernel/secret.ts`) — dotted strings (`payload.<field…>` / `result[.<field…>]`)
-and/or arrays of steps (`["payload", "a.b"]`: a string step a literal key, an int
-step a list index) — ride its call frame as `secret`, in both directions: a
-host-bound send puts them on the frame it sends as given (only when the item
-marked some), and a host's `call` frame is dispatched here with its `secret`
-verbatim — so whichever kernel receives the call records `<secret>` (call/settle
-rows, ledger, memory store, inbox and watcher mirrors) exactly as the caller does,
-and a malformed mark is the receiving kernel's own `bad_arg` refusal, before
-dispatch. The reply carries the real result back.
-
-**A JOIN of a secret-marked execution** (audit F1, 2026-10-03): the REAL outcome
-goes to the execution's ORIGINAL caller only — the identity that opened it (its
-`caller`: the sending agent; the operator, null; a caller on another kernel by its
-`<guid>|<agent>`). Any other joiner — operator included — gets it AS SHOWN
-(`shownOutcome`, what the `ledger` reads back): the gate re-checks the joiner on
-the original VERB (a foreign joiner on the target's `callable_by`, as at launch),
-but a handler that answers by WHO asks never runs for a joiner. An unmarked
-execution joins unchanged.
-
-**A handler reads its call's marks** as `kernel.currentSecret` on the view it is
-handed (python `kernel.current_secret()`): the marks as the caller gave them —
-a local item's, or a host call frame's — frozen, `[]` when none were marked.
-Stamped per dispatch like `currentCaller`, so the handler's own sends never
-inherit them. A bundle that must only be called WITH a mark refuses an unmarked
-call by it.
-
-**A view marks its calls** through `Host`: `call(target, payload, secret?)` makes
-the marks the item's `secret` (masked in this kernel's records, on the frame for a
-host target); `callHost(target, payload, secret?)` and
-`callBinary(target, payload, secret?)` — and `Kernel.callHost` /
-`Kernel.forwardBinary` under them — bypass the batch, so this kernel keeps no
-record of them, and put the marks on the call frame. Each validates the marks as
-a batch item's: a malformed one is `bad_arg`, before the egress gate and before a
-byte leaves.
 
 ---
 

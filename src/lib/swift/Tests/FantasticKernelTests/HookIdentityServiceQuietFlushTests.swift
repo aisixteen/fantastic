@@ -133,7 +133,6 @@ private func started(_ k: Kernel) async {
         .object([
             "type": .string("create_agent"), "parent_id": .string("kernel_state"),
             "id": .string("memory"), "handler_module": .string("ram_store.tools"),
-            "operator": .bool(true), "admins": .array([.string("kernel")]),
         ])
     ).result
     #expect(r["id"].asString == "memory", "\(r.serialize())")
@@ -277,9 +276,10 @@ struct HookIdentityServiceQuietFlushTests {
         let token = k.subscribe { e, _ in tap.hit(e) }
         defer { k.unsubscribe(token) }
         await call(k, "kernel", .object(["type": .string("list_agents")]))
-        // the flush mints its flush row id at the last id of the block; the call
-        // it sends crosses the bound inside the silent flush
-        while k.nextId < k.idReserved - 1 { _ = k.mintId() }
+        // the flush row's id is the first past the block: the flush mints the
+        // one id it needs (it sends nothing) and crosses the bound inside the
+        // silent flush
+        while k.nextId < k.idReserved { _ = k.mintId() }
         tap.reset()
         let before = k.idReserved
         _ = await k.flushExecutions()

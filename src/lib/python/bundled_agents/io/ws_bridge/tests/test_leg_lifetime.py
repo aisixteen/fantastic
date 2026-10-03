@@ -33,8 +33,8 @@ async def _op(k, payload) -> dict:
 
 @pytest.fixture
 async def leg(seeded_kernel):
-    """One leg on `k`, pinned to `peer-g`, its raw peer end in hand; `notes` (a
-    child of the leg) accepts the foreign caller `peer-g|ai`."""
+    """One leg on `k`, its raw peer end in hand; `notes` (a child of the leg)
+    accepts the leg — an inbound call is the leg's own send."""
     k = seeded_kernel
     k.update(k.id, guid="local-g")
     leg_id = (
@@ -44,8 +44,8 @@ async def leg(seeded_kernel):
                 "type": "create_agent",
                 "parent_id": k.id,
                 "handler_module": "ws_bridge.tools",
+                "can_call": {"$children": "*", "kernel_state": "*"},
                 "transport": "memory",
-                "peer_guid": "peer-g",
                 "ingress_rule": "allow_all_ingress",
             },
         )
@@ -57,7 +57,7 @@ async def leg(seeded_kernel):
             "parent_id": leg_id,
             "handler_module": "file_bridge.tools",
             "id": "notes",
-            "callable_by": {"peer-g|ai": "*"},
+            "callable_by": {leg_id: "*"},
         },
     )
     assert notes.get("id") == "notes", notes
@@ -77,7 +77,6 @@ async def _inbound(mt_peer, n: int) -> dict:
             "id": f"peer-call-{n}",
             "target": "notes",
             "payload": {"type": "reflect"},
-            "caller": "peer-g|ai",
         }
     )
     return (await asyncio.wait_for(mt_peer.recv(), timeout=2.0))["data"]
@@ -223,8 +222,8 @@ async def test_a_restarted_sender_never_joins_a_settled_execution(two_kernels):
                 "type": "create_agent",
                 "parent_id": ka.id,
                 "handler_module": "ws_bridge.tools",
+                "can_call": {"$children": "*", "kernel_state": "*"},
                 "transport": "memory",
-                "peer_guid": "guid-b",
             },
         )
     )["id"]
@@ -235,9 +234,9 @@ async def test_a_restarted_sender_never_joins_a_settled_execution(two_kernels):
                 "type": "create_agent",
                 "parent_id": kb.id,
                 "handler_module": "ws_bridge.tools",
+                "can_call": {"$children": "*", "kernel_state": "*"},
                 "transport": "memory",
                 "ingress_rule": "allow_all_ingress",
-                "peer_guid": "guid-a",
             },
         )
     )["id"]
@@ -250,7 +249,7 @@ async def test_a_restarted_sender_never_joins_a_settled_execution(two_kernels):
             "id": "doc",
             "allow": ["."],
             "ingress_rule": "allow_all_ingress",
-            "callable_by": {"guid-a|*": "*"},
+            "callable_by": {b_id: "*"},
         },
     )
     assert doc.get("id") == "doc", doc

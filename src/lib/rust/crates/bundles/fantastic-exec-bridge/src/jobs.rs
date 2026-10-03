@@ -30,12 +30,6 @@ pub struct Job {
     /// The agent that owns it. Every verb filters on this, so a known job_id from
     /// another agent is still "no job".
     pub owner: AgentId,
-    /// WHO started it — the calling agent, a foreign caller's `<guid>|<agent>`
-    /// relayed by a bridge leg, or `None` for the operator. The verbs that DRIVE a
-    /// job (`write`, `resize`, `paste_image`, `stop`, `interrupt`, `clear`) answer
-    /// this caller and the operator only (audit AV-8, 2026-10-03); the READ verbs
-    /// (`status`, `output`, `ack`) stay gated by grants alone.
-    pub starter: Option<String>,
     /// OS pid — `stop`/`interrupt` signal it directly.
     pub pid: u32,
     /// The relay task serving this job's control socket — its row in the kernel

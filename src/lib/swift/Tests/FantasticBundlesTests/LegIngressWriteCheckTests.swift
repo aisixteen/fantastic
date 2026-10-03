@@ -74,7 +74,6 @@ struct LegIngressWriteCheckTests {
                 [
                     "type": "create_agent", "parent_id": "kernel_state",
                     "handler_module": "ws_bridge.tools", "id": "b_leg", "transport": "memory",
-                    "peer_guid": "guid-a",
                 ])
         ])[0].result
         #expect(made["id"] == "b_leg", "\(made.serialize())")
@@ -85,7 +84,7 @@ struct LegIngressWriteCheckTests {
         #expect(booted["booted"] == true, "\(booted.serialize())")
         try await peer.send([
             "type": "call", "id": "c7", "target": "kernel_state",
-            "payload": ["type": "reflect"], "caller": "guid-a|ai",
+            "payload": ["type": "reflect"],
         ])
         let reply = try await peer.recv().frame
         #expect(reply["id"] == "c7")

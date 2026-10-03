@@ -21,45 +21,38 @@ and finished sixteen messages having created nothing.
 ## Composition
 
 `create_agent` — args: `handler_module:str`, `parent_id:str` **(required)**, `id:str?`, `**meta`
-: Create a child of `parent_id` and boot it. Name **your own id** to grow your own
-  subtree — that needs no grant, because forking what you own is baseline
-  authority. Name `kernel_state` for a top-level agent. There is no default
+: Create a child of `parent_id` and boot it. An agent names **its own id** — it
+  creates only its OWN children (`side:'mutator'` otherwise, "<you> may only
+  create_agent its own children — <parent_id> is not one"), and needs
+  `create_agent` granted on both ends (its `can_call` on the root, the root's
+  `callable_by` for it). The operator names any parent (`kernel_state` for a
+  top-level agent). There is no default
   parent: placement is always stated, never inferred from who sent the call.
   `id` is minted as `{bundle}_{hex6}` when omitted. Everything else becomes the
   record's meta — that is how a bundle is configured (`mode`, `root`, `allow`,
-  `ingress_rule`, …). Returns the new record.
+  `ingress_rule`, …). The child's `boot` is the kernel's own bookkeeping, run as
+  the child — never a send gated against you. Returns the new record.
 
 `update_agent` — args: `id:str`, `**meta`
 : Patch a record's meta. **Every field you name is REPLACED, not merged** (a field
   you do not name is untouched), so a dict field must be sent WHOLE —
   `can_call`/`callable_by` included: restate every key you want to keep, the
-  baseline `$self`/`$parent`/`$children` among them, or the keys you omit are
-  gone. Granting one edge reads like a PATCH and behaves like a PUT.
+  baseline `$self` among them, or the keys you omit are gone. Granting one edge reads like a PATCH and behaves like a PUT.
 
-  `holds_secrets` (a secret holder's mark) is exactly `true` or `null` — anything
-  else is refused `invalid_meta`, here and at `create_agent`, on every agent. On a
-  holder only the OPERATOR writes anything but `true`: `holds_secrets: null` is the
-  clear (the record then says `null` — not a holder); an agent's attempt is refused
-  `{reason:'unauthorized', side:'secret-holder'}`. An agent may set `true`.
-
-  **Who may: the record you name is the OPERAND** (as `parent_id` is for
-  `create_agent`). Inside your own subtree — yourself, your children, theirs — it
-  needs no grant. Any other record needs BOTH ends: your `can_call` names that
-  agent with the verb, `{<id>: ['update_agent']}` (a wildcard never covers it — not
-  `<id>: '*'`, not `$parent`), and its `callable_by` accepts you. Otherwise
-  `{reason:'unauthorized', side:'egress'}` "<you> may not update_agent <id>" or
-  `side:'ingress'` "<id> does not accept 'update_agent' from <you>". A grant on the
-  root (`kernel_state: ['update_agent']`) edits the root's own record, nothing else.
-  You never edit your own `can_call`/`callable_by` (`side:'self-grant'`) or confer
-  reach you do not hold (`side:'delegation'`).
+  **Who may:** an agent updates only its OWN DIRECT CHILDREN — the record `id`
+  names must have the sender as its parent — after the two-sided gate on the root
+  (`update_agent` in its `can_call` on the root and in the root's `callable_by`).
+  Otherwise `{reason:'unauthorized', side:'mutator'}`, "<you> may only
+  update_agent its own children — <id> is not one" — an id naming no agent
+  included. A missing or non-string `id` (or `parent_id` for `create_agent`) gets
+  the verb's own `missing_arg` refusal instead. So no agent edits its own record:
+  grants come from above — the agent's parent or the operator writes them.
 
 `delete_agent` — args: `id:str`
 : **Cascades** — deletes that agent and its whole subtree, deepest first. Refuses
   with `{error, reason:'locked', id}` if any descendant carries `delete_lock`;
-  clear it with `update_agent` first. Gated on its operand exactly as
-  `update_agent` is: your own subtree is yours to delete; any other agent needs
-  `{<id>: ['delete_agent']}` in your `can_call` AND its `callable_by` accepting
-  you.
+  clear it with `update_agent` first. Gated exactly as `update_agent` is:
+  an agent deletes only its OWN DIRECT CHILDREN (`side:'mutator'` otherwise).
 
 `list_agents` — no args
 : Every agent's record, flat. Records only — metadata, no descriptions. To learn
@@ -105,32 +98,10 @@ flushed execution leaves RAM. A call carrying an `id` is NAMED: a second send of
 same id returns the recorded outcome instead of running again — across a flush and a
 restart, because the store is read before dispatch.
 
-A call may mark SECRET values on its item, beside `payload`: `secret: [mark, …]`,
-each a dotted string — `payload.<field…>` or `result[.<field…>]`, split on its dots —
-or an array of steps — `["payload", <step>, …]` or `["result", <step>…]`, exact: a
-string step is an object key taken literally (`["payload", "a.b"]` is the key
-`"a.b"`), a non-negative integer step a list index. One list may mix both. The
-target gets the real payload and the caller the real reply; every record of the
-call — its rows, the memory store, `ledger`, the state stream, watcher mirrors,
-error texts — shows `<secret>`: a value inside any string, and a dict key or a
-number EQUAL to one. The verb (`payload.type`) cannot be hidden; a
-`create_agent`/`update_agent` payload field cannot be marked (it becomes the agent's
-record — "a record field cannot be secret — use a credential_store ref": keep the
-value in a `credential_store` and name the ref); and a payload mark naming nothing
-is refused, as is an empty array, a step that is
-neither a string nor a non-negative integer, or a first step other than `payload`
-(with a step after it) or `result`. A named secret call answers a re-send only while it is in RAM: from the
-store its record holds placeholders, so a replay is refused. A re-send that JOINS a
-secret-marked execution gets its real outcome only when it comes from the execution's
-own caller (the same agent, the operator, or the same `<guid>|<agent>` relayed by a
-bridge); any other joiner gets it as shown, `<secret>` where the values were. Masking is not
-isolation — never send a secret to an AI agent (it would enter its prompt and memory);
-an agent whose record says `holds_secrets: true` (every `credential_store`) is never
-reachable from an AI's model — ai_core refuses the call, while the AI's backend still
-reads its key; nor may a model's `exec_id` join an execution that carried secret
-marks (its own backend's key read included) — refused, never dispatched. The marks cross kernels with the call (a frame's `secret`, rest's
-`X-Fantastic-Secret`): the receiving kernel masks its own records the same way
-(`transports`) — except over a relay leg, which refuses marked calls.
+A call's rows hold its payload and what its settle keeps, in clear — the kernel
+masks nothing. A value you must not have recorded does not ride a call: keep it in
+a `credential_store` and name the ref. A re-send that JOINS an execution is gated
+on the execution's original verb, and receives its recorded outcome.
 
 `ledger` — no args
 : `{executions:[{id, target, status, attempts, retries, named, outcome?, acked?}]}` —

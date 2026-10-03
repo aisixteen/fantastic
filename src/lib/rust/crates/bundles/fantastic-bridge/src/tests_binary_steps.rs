@@ -123,8 +123,7 @@ async fn kernel(guid: &str, got: &Got) -> Arc<Kernel> {
     patch("guid", json!(guid));
     create(
         &k,
-        json!({"handler_module": fantastic_ram_store::HANDLER_MODULE, "id": "memory",
-               "operator": true, "admins": ["kernel"]}),
+        json!({"handler_module": fantastic_ram_store::HANDLER_MODULE, "id": "memory"}),
     )
     .await;
     patch("memory_store_id", json!("memory"));
@@ -194,12 +193,6 @@ async fn a_literal_key_crosses_a_relay_forward_both_ways() {
     let got: Got = Arc::default();
     let ka = kernel("A-g", &got).await;
     let kb = kernel("B-g", &got).await;
-    create(
-        &kb,
-        json!({"handler_module": "binpath_echo.tools", "id": "echo",
-               "callable_by": {"A-g|*": "*"}}),
-    )
-    .await;
     let hub = fake_relay_hub().await;
     let t = tag();
     let (a_id, b_id, ra, rb) = (
@@ -208,12 +201,19 @@ async fn a_literal_key_crosses_a_relay_forward_both_ways() {
         format!("{t}RA"),
         format!("{t}RB"),
     );
+    // the serving leg B calls `echo` AS ITSELF: echo accepts the leg
+    create(
+        &kb,
+        json!({"handler_module": "binpath_echo.tools", "id": "echo",
+               "callable_by": {&b_id: "*"}}),
+    )
+    .await;
     let mut a = json!({"handler_module": RELAY_HANDLER_MODULE, "id": a_id, "transport": "relay",
                        "relay_url": hub, "guid": ra, "partner_guid": rb,
                        "heartbeat": 0, "reconnect": 0});
     let mut b = json!({"handler_module": RELAY_HANDLER_MODULE, "id": b_id, "transport": "relay",
                        "relay_url": hub, "guid": rb, "partner_guid": ra,
-                       "heartbeat": 0, "reconnect": 0, "peer_guid": "A-g",
+                       "heartbeat": 0, "reconnect": 0,
                        "ingress_rule": "allow_all_ingress", "can_call": {"echo": "*"}});
     let sa = crate::tests::relay_password(&ka, &a_id, &hub, "pw-a").await;
     let sb = crate::tests::relay_password(&kb, &b_id, &hub, "pw-b").await;
@@ -227,8 +227,100 @@ async fn a_literal_key_crosses_a_relay_forward_both_ways() {
     assert_crossed_both_ways(&got, &out);
 }
 
+/// A FAKE RELAY HUB on a real socket — the relay kernel's routing emulated
+/// (python `_testkit_relay.FakeRelayHub`): a peer dials `ws://<hub>/<guid>`, and a
+/// `send` to a target guid reaches that guid's socket as a `source`-tagged
+/// `event`, the WS frame kind kept.
 async fn fake_relay_hub() -> String {
-    super::secret_across::fake_relay().await
+    use futures_util::{SinkExt, StreamExt};
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+    use tokio_tungstenite::tungstenite::http::HeaderValue;
+    use tokio_tungstenite::tungstenite::Message;
+    type Peers = Arc<Mutex<HashMap<String, tokio::sync::mpsc::UnboundedSender<Message>>>>;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let peers: Peers = Arc::default();
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let peers = Arc::clone(&peers);
+            tokio::spawn(async move {
+                let path: Arc<Mutex<String>> = Arc::default();
+                let seen = Arc::clone(&path);
+                #[allow(clippy::result_large_err)]
+                let cb = move |req: &Request, mut resp: Response| {
+                    *seen.lock().unwrap() = req.uri().path().trim_start_matches('/').to_string();
+                    resp.headers_mut().insert(
+                        "Sec-WebSocket-Protocol",
+                        HeaderValue::from_static(transport::relay::SUBPROTOCOL),
+                    );
+                    Ok(resp)
+                };
+                let Ok(ws) = tokio_tungstenite::accept_hdr_async(stream, cb).await else {
+                    return;
+                };
+                let me = path.lock().unwrap().clone();
+                let (mut sink, mut source) = ws.split();
+                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Message>();
+                peers.lock().unwrap().insert(me.clone(), tx);
+                tokio::spawn(async move {
+                    while let Some(m) = rx.recv().await {
+                        if sink.send(m).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+                while let Some(Ok(msg)) = source.next().await {
+                    let routed = match msg {
+                        Message::Text(t) => {
+                            let Ok(env) = fantastic_io_bridge::codec::loads(&t) else {
+                                continue;
+                            };
+                            (env["type"] == "send").then(|| {
+                                let event = json!({"type": "event", "source": me,
+                                                   "payload": env["payload"]});
+                                (
+                                    env["target"].as_str().unwrap_or("").to_string(),
+                                    Message::Text(fantastic_io_bridge::codec::encode_frame(&event)),
+                                )
+                            })
+                        }
+                        Message::Binary(b) => {
+                            // the delivery nests the frame under the same `payload`
+                            // key, so the body's steps carry over unchanged
+                            let Ok(f) = fantastic_io_bridge::codec::decode_binary_frame(&b) else {
+                                continue;
+                            };
+                            let Some(path) = f.path else { continue };
+                            let env = f.head;
+                            (env["type"] == "send").then(|| {
+                                let event = json!({"type": "event", "source": me,
+                                                   "payload": env["payload"]});
+                                (
+                                    env["target"].as_str().unwrap_or("").to_string(),
+                                    Message::Binary(
+                                        fantastic_io_bridge::codec::encode_binary_frame(
+                                            &event, &path, &f.body,
+                                        ),
+                                    ),
+                                )
+                            })
+                        }
+                        Message::Close(_) => break,
+                        _ => None,
+                    };
+                    if let Some((target, m)) = routed {
+                        let to = peers.lock().unwrap().get(&target).cloned();
+                        if let Some(to) = to {
+                            let _ = to.send(m);
+                        }
+                    }
+                }
+            });
+        }
+    });
+    format!("ws://127.0.0.1:{port}")
 }
 
 // ─── a ws_bridge pair: the serving leg's call and reply ──────────────────────
@@ -241,14 +333,15 @@ async fn a_literal_key_crosses_a_ws_bridge_pair_both_ways() {
     let got: Got = Arc::default();
     let ka = kernel("A-g", &got).await;
     let kb = kernel("B-g", &got).await;
+    let t = tag();
+    let (a_id, b_id) = (format!("{t}_a"), format!("{t}_b"));
+    // the serving leg B calls `echo` AS ITSELF: echo accepts the leg
     create(
         &kb,
         json!({"handler_module": "binpath_echo.tools", "id": "echo",
-               "callable_by": {"A-g|*": "*"}}),
+               "callable_by": {&b_id: "*"}}),
     )
     .await;
-    let t = tag();
-    let (a_id, b_id) = (format!("{t}_a"), format!("{t}_b"));
     inject_pair(&AgentId::from(a_id.as_str()), &AgentId::from(b_id.as_str()));
     create(
         &ka,
@@ -259,7 +352,7 @@ async fn a_literal_key_crosses_a_ws_bridge_pair_both_ways() {
     create(
         &kb,
         json!({"handler_module": WS_HANDLER_MODULE, "id": b_id,
-               "transport": "memory", "peer_id": "A", "peer_guid": "A-g",
+               "transport": "memory", "peer_id": "A",
                "ingress_rule": "allow_all_ingress", "can_call": {"echo": "*"}}),
     )
     .await;

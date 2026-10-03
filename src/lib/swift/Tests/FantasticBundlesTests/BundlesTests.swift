@@ -37,7 +37,7 @@ func makeKernelWithAll(
     let kernel = Kernel(storage: .inMemory, bundles: registry)
     // The root's own dir IS the store root: `findStore` discovers a
     // `file_bridge` child whose `root` resolves to it, which is how the loader
-    // owns sidecar placement.
+    // owns where a sidecar lands.
     let root = Agent(
         id: AgentId(ROOT_ID), handlerModule: ROOT_HANDLER_MODULE, parentId: nil,
         rootPath: rootPath)
@@ -58,17 +58,20 @@ func wireMemoryPair(_ k1: Kernel, _ k2: Kernel) async {
     k2.bundles.register("ws_bridge.tools", b2)
     k1.update(AgentId(ROOT_ID), ["guid": "guid-a"])
     k2.update(AgentId(ROOT_ID), ["guid": "guid-b"])
+    // a call the far leg serves is judged as THAT LEG: the root accepts it
     var cb = k2.agent(AgentId(ROOT_ID))?.meta["callable_by"]?.asObject ?? [:]
-    cb["guid-a|*"] = "*"
+    cb["br_peer"] = "*"
     k2.update(AgentId(ROOT_ID), ["callable_by": .object(cb)])
     _ = await k1.send([Item("kernel_state", [
             "type": "create_agent", "parent_id": "kernel_state", "handler_module": "ws_bridge.tools",
-            "id": "br", "transport": "memory", "peer_guid": "guid-b",
+            "id": "br", "transport": "memory",
         ])])[0].result
     _ = await k2.send([Item("kernel_state", [
             "type": "create_agent", "parent_id": "kernel_state", "handler_module": "ws_bridge.tools",
-            "id": "br_peer", "transport": "memory", "peer_guid": "guid-a",
+            "id": "br_peer", "transport": "memory",
             "ingress_rule": "allow_all_ingress",
+            // the leg's reach is explicit: the root and its own children
+            "can_call": ["$children": "*", "kernel_state": "*"],
         ])])[0].result
     let (t1, t2) = MemoryTransport.pair()
     b1.injectTransport(agentId: "br", transport: t1)
@@ -273,6 +276,7 @@ struct BundleSmokeTests {
                 "type": "create_agent", "parent_id": "kernel_state", "handler_module": "scheduler.tools", "id": "sched",
                 "can_call": ["store": "*"],
             ])])[0].result
+        wire(kernel, "sched", "kernel_state")  // a schedule fires AS the scheduler
         let r = await kernel.send([Item("sched", [
                 "type": "schedule", "target": "kernel_state", "interval_seconds": .integer(3600),
                 "payload": ["type": "list_agents"] as JSON,
@@ -590,7 +594,7 @@ struct BundleSmokeTests {
         let kernel2 = makeKernelWithAll()
         await wireMemoryPair(kernel1, kernel2)
         // kernel2: an OPEN file_bridge in a cwd-relative dir, under the serving
-        // leg, accepting kernel1's agents.
+        // leg, accepting that leg (what it serves is the leg's own call).
         let fm = FileManager.default
         let rel = "fantastic-brstream-\(UUID().uuidString)"
         let dir = URL(fileURLWithPath: fm.currentDirectoryPath).appendingPathComponent(rel)
@@ -599,7 +603,7 @@ struct BundleSmokeTests {
         _ = await kernel2.send([Item("kernel_state", [
                 "type": "create_agent", "parent_id": "br_peer", "handler_module": "file_bridge.tools", "allow": ["."], "id": "fs",
                 "root": .string(rel), "ingress_rule": "allow_all_ingress",
-                "callable_by": ["guid-a|*": "*"],
+                "callable_by": ["br_peer": "*"],
             ])])[0].result
         let payload = Data([0x00, 0xFF, 0xCA, 0xFE, 0xBA, 0xBE, 0x10, 0x80])
         // forward write_stream (binary) → kernel2.fs
@@ -649,10 +653,11 @@ struct BundleSmokeTests {
                 "ingress_rule": .string("allow_all_ingress"),
                 // The EGRESS half. An inbound frame dispatches AS THE LEG now, and
                 // `fs` is the leg's cousin (child of core, while the leg is a child
-                // of web) — no structural baseline token reaches it.
+                // of web) — no baseline token reaches it.
                 "can_call": .object(["fs": .string("*")]),
             ]))])[0].result
         let wsId = rec["id"].asString ?? "web_ws"
+        wire(kernel, "web", wsId)
         _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("mount"), "child_id": .string(wsId)]))])[0].result
         defer {
             Task {
@@ -918,6 +923,8 @@ private func schedulerOnAStore(_ tag: String) async throws -> (Kernel, URL) {
     store["callable_by"] = ["sched": "*"]
     _ = await ask(kernel, "kernel_state", store)
     await newScheduler(kernel, "sched", ["can_call": ["store": "*"] as JSON])
+    // a schedule fires AS the scheduler: its own edge to the root
+    wire(kernel, "sched", "kernel_state")
     return (kernel, dir)
 }
 
@@ -956,7 +963,7 @@ struct SchedulerParityTests {
         let r = await ask(kernel, "s_emits", ["type": "reflect"])
         #expect(
             r["emits"]["schedule_fired"].asString
-                == "{type:'schedule_fired', schedule_id, scheduler_id, owner, target, payload, result, error, ts, duration_ms} — emitted on the scheduler's OWN inbox after every fire (never the target's — the payload send is the tick); `owner` is who the fire ran as",
+                == "{type:'schedule_fired', schedule_id, scheduler_id, target, payload, result, error, ts, duration_ms} — emitted on the scheduler's OWN inbox after every fire (never the target's — the payload send is the tick)",
             "\(r["emits"].serialize())")
     }
 
@@ -1042,40 +1049,6 @@ struct SchedulerParityTests {
         // A truthy non-string target is STORED VERBATIM, python-style.
         let e = await addSchedule(kernel, target: .integer(7), payload: ["type": "hit"])
         #expect(e["schedule"]["target"] == .integer(7), "\(e.serialize())")
-    }
-
-    /// Audit S5 (python `test_a_schedule_carrying_secret_marks_is_refused`) — the
-    /// scheduler re-sends the payload as a fresh, UNMARKED call on every fire, and
-    /// keeps it in its sidecar: a marked value landed in clear in the fire's rows,
-    /// the state stream and the portable workdir. As the relay seal: a `schedule`
-    /// call carrying ANY mark is refused, and nothing is kept.
-    @Test func aScheduleCarryingSecretMarksIsRefused() async throws {
-        let (kernel, dir) = try await schedulerOnAStore("schedsecret")
-        defer { try? FileManager.default.removeItem(at: dir) }
-        for marks: JSON in [["payload.payload.key"], ["result"]] {
-            var it = Item(
-                AgentId("sched"),
-                [
-                    "type": "schedule", "target": "kernel_state", "interval_seconds": 60,
-                    "payload": ["type": "set_key", "key": "TEST-VALUE-50"] as JSON,
-                ])
-            it.secret = marks
-            let r = await kernel.send([it])[0].result
-            #expect(
-                r
-                    == .object([
-                        "error": .string(
-                            "scheduler: a call carrying secret marks may not be scheduled — "
-                                + "a schedule keeps its payload and every fire re-sends it unmarked"),
-                        "reason": "unauthorized",
-                        "hint": "send a secret-bearing call yourself, marked, each time",
-                    ]), "\(marks.serialize()) → \(r.serialize())")
-        }
-        let listed = await ask(kernel, "sched", ["type": "list"])
-        #expect(listed["schedules"] == .array([]), "\(listed.serialize())")
-        let sidecar = dir.appendingPathComponent("agents/sched/schedules.yaml")
-        let raw = (try? String(contentsOf: sidecar, encoding: .utf8)) ?? ""
-        #expect(!raw.contains("TEST-VALUE-50"), "kept on disk: \(raw)")
     }
 
     /// A5.6 — `timeout` is stored AS SENT: an int `5` stays an int, in the reply

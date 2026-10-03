@@ -17,9 +17,9 @@ expect:
     - name: the declared worker→memory edge is usable
       reach: {from: worker, to: memory, send: {type: write, path: probe.txt, bytes_utf8: "1"}}
       expect: {allow: true}
-    - name: a loader reaches its own child on the structural baseline
+    - name: a loader reaches not even its own child without a grant
       reach: {from: static_loader, to: memory, send: {type: reflect}}
-      expect: {allow: true}
+      expect: {allow: false, side: egress}
     - name: a verb outside the grant is refused by the sender's own egress
       reach: {from: worker, to: memory, send: {type: append, path: probe.txt, bytes_utf8: x}}
       expect: {allow: false, side: egress}

@@ -47,8 +47,6 @@ pub async fn ensure_memory(kernel: &Arc<Kernel>) -> AgentId {
                     "parent_id": root.id.0,
                     "handler_module": crate::HANDLER_MODULE,
                     "id": MEMORY,
-                    "operator": true,
-                    "admins": ["kernel"],
                 }),
             )])
             .await

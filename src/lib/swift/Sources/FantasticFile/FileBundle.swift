@@ -8,8 +8,8 @@
 // and any symlink pointing out of the root.
 //
 // Verbs: reflect / boot / list / read / write / edit / append / undo /
-//        read_stream / write_stream / pump / delete / rename / mkdir /
-//        allow / disallow / allowed. The text verbs live in `TextVerbs.swift`.
+//        read_stream / write_stream / pump / delete / rename / mkdir. The text
+//        verbs live in `TextVerbs.swift`.
 //
 // Every refusal is the one kernel shape (`Refusal`): a caller branches on
 // `reason`, never on prose. A payload can never trap this bundle — a negative
@@ -129,12 +129,6 @@ public struct FileBundle: AgentBundle {
             "args: old_path:str, new_path:str (both req). Returns {old_path, new_path}. Creates new parent dirs. Refused if readonly.",
         "mkdir":
             "args: path:str (req). Returns {path, created:true}. Recursive (parents ok). Refused if readonly.",
-        "allow":
-            "args: path:str (req — a file, or a directory exposing everything under it; `.` = the whole root). Adds it to the `allow` list (idempotent). Returns {path, allowed:true, count}.",
-        "disallow":
-            "args: path:str (req — an entry of the `allow` list). Removes it. Returns {path, allowed:false, count}.",
-        "allowed":
-            "args: limit:int?, after:str? (the last path of the previous page). The `allow` list in path order. Returns {paths, next, total}.",
     ] as JSON
 
     /// The text verbs' RAM state — per bundle instance, keyed by kernel (see
@@ -179,7 +173,7 @@ public struct FileBundle: AgentBundle {
     /// The verbs this bundle serves, in python's `VERBS` order.
     static let verbs: [String] = [
         "reflect", "boot", "list", "read", "write", "edit", "append", "undo",
-        "read_stream", "write_stream", "pump", "delete", "rename", "mkdir", "allow", "disallow", "allowed",
+        "read_stream", "write_stream", "pump", "delete", "rename", "mkdir",
     ]
 
     public func handle(
@@ -224,8 +218,6 @@ public struct FileBundle: AgentBundle {
             return refused
         }
         switch verb {
-        case "allow", "disallow", "allowed":
-            return allowVerb(verb, agent: agent, payload: payload, base: base, kernel: kernel)
         case "boot":
             return .null
         case "list":
@@ -653,12 +645,11 @@ public struct FileBundle: AgentBundle {
     /// over the binary channel, so a `network_bridge` SOURCE pumps to a
     /// `file_bridge` SINK the same as fs→fs. Each end SELF-gates + SELF-clamps.
     ///
-    /// BOTH ENDS RUN AS THE CALLER (audit AV-7, 2026-10-03): sent from this
-    /// dispatch, both ends judged THIS BRIDGE — a client holding only `pump`
-    /// copied a file it could never read and overwrote one it could never write.
-    /// `read_stream` on the source and `write_stream` on the sink now go out under
-    /// the caller's identity (`asCaller`), so the caller needs its own grants on
-    /// both. A pump ONTO ITS OWN SOURCE (the sink is the source and `sink_path`
+    /// BOTH ENDS RUN AS THIS BRIDGE: `read_stream` on the source and
+    /// `write_stream` on the sink are this bridge's own sends (identity comes only
+    /// from dispatch), so the bridge needs the grants on both — a caller holding
+    /// `pump` on it borrows exactly that reach, which is what granting `pump`
+    /// means. A pump ONTO ITS OWN SOURCE (the sink is the source and `sink_path`
     /// names the same file) is refused.
     private func pump(agent: Agent, payload: JSON, kernel: Kernel) async -> JSON {
         let selfId = JSON.string(agent.id.value)
@@ -696,7 +687,7 @@ public struct FileBundle: AgentBundle {
                     "type": .string("read_stream"), "path": spath,
                     "offset": .integer(offset), "length": .integer(length),
                 ]), rawReply: true)
-            let read = await asCaller { await kernel.send([readItem])[0] }
+            let read = await kernel.send([readItem])[0]
             let rmeta = read.result
             // python: the reply must be a dict carrying a `bytes` chunk. The
             // chunk is the outcome's BODY at `bytes`, so no body there is the
@@ -712,7 +703,7 @@ public struct FileBundle: AgentBundle {
                     "type": .string("write_stream"), "path": dpath,
                     "offset": .integer(offset), "truncate": .bool(first),
                 ]), binary: Blob("bytes", body))
-            let wmeta = await asCaller { await kernel.send([writeItem])[0].result }
+            let wmeta = await kernel.send([writeItem])[0].result
             guard case .object(let wo) = wmeta, !pyTruthy(wo["error"] ?? .null) else {
                 return Refusal.make(
                     Refusal.transportError,
@@ -739,24 +730,6 @@ public struct FileBundle: AgentBundle {
         ])
     }
 
-    /// Run `body`'s sends AS THIS DISPATCH'S CALLER: the operator stays the
-    /// operator; a local agent is itself; a foreign `<guid>|<agent>` is the same
-    /// pair its bridge leg relayed (the leg as sender, the foreign id judged by
-    /// the target's `callable_by`). Python `_as_caller`.
-    private func asCaller<T: Sendable>(_ body: () async -> T) async -> T {
-        guard let origin = KernelTaskLocals.currentOrigin else {
-            return await KernelTaskLocals.$currentSender.withValue(nil) { await body() }
-        }
-        if let remote = KernelTaskLocals.currentRemote {
-            return await KernelTaskLocals.$currentSender.withValue(origin) {
-                await KernelTaskLocals.withRemoteCaller(leg: origin, address: remote) {
-                    await body()
-                }
-            }
-        }
-        return await KernelTaskLocals.$currentSender.withValue(origin) { await body() }
-    }
-
     // MARK: - The allow list (what this bridge exposes)
     //
     // DENY-ALL AT THE PATH LEVEL — python `file_bridge` is canonical. The record's
@@ -774,7 +747,7 @@ public struct FileBundle: AgentBundle {
     func unexposed(_ verb: String, _ path: String) -> JSON {
         Refusal.make(
             Refusal.notFound, "\(verb): \(pyRepr(path)) is not exposed by this bridge",
-            hint: "expose it first — `allow {path}` (whoever holds that grant)",
+            hint: "expose it first — add it to the bridge's `allow` record field (update_agent)",
             extra: [("path", .string(path))])
     }
 
@@ -864,73 +837,15 @@ public struct FileBundle: AgentBundle {
         return .object(o)
     }
 
-    /// `allow` / `disallow` / `allowed` — edit and read the list one path at a
-    /// time. Record state: edited through `Kernel.update`, persisted by the loader.
-    func allowVerb(_ verb: String, agent: Agent, payload: JSON, base: String, kernel: Kernel) -> JSON {
-        // ONE read-modify-write at a time: two concurrent `allow`s read the same
-        // snapshot and the second update silently dropped the first (audit d3).
-        Self.allowLock.lock()
-        defer { Self.allowLock.unlock() }
-        var allow = allowList(agent)
-        func save() { kernel.update(agent.id, ["allow": .array(allow.map { .string($0) })]) }
-        switch verb {
-        case "allow":
-            let raw: String
-            do { raw = try pathArg("allow", payload, "path") } catch { return error.json }
-            if raw.isEmpty { return Refusal.missing("allow", "path") }
-            guard let path = allowNorm(raw) else {
-                return Refusal.bad("allow", "path", "a path relative to the bridge's root")
-            }
-            do {
-                _ = try fsResolve(rootStr(agent), path, base: base)
-            } catch {
-                return Refusal.bad("allow", "path", "a path inside the root (\(error.message))")
-            }
-            if !allow.contains(path) {
-                allow.append(path)
-                save()
-            }
-            return .object(["path": .string(path), "allowed": true, "count": .integer(Int64(allow.count))])
-        case "disallow":
-            let raw: String
-            do { raw = try pathArg("disallow", payload, "path") } catch { return error.json }
-            if raw.isEmpty { return Refusal.missing("disallow", "path") }
-            guard let path = allowNorm(raw), allow.contains(path) else {
-                return notFound("disallow: \(pyRepr(raw)) is not in the allow list", path: raw)
-            }
-            allow.removeAll { $0 == path }
-            save()
-            return .object(["path": .string(path), "allowed": false, "count": .integer(Int64(allow.count))])
-        default:
-            var paths = allow.sorted()
-            if let after = payload["after"].asString, !after.isEmpty {
-                paths = paths.filter { $0 > after }
-            }
-            let total = paths.count
-            let limit: Int64
-            do {
-                limit = try intArg("allowed", payload, "limit", default: 0, minimum: 0)
-            } catch { return error.json }
-            let page = limit > 0 ? Array(paths.prefix(Int(limit))) : paths
-            let next: JSON = (limit > 0 && total > page.count) ? .string(page.last ?? "") : .null
-            return .object([
-                "paths": .array(page.map { .string($0) }), "next": next,
-                "total": .integer(Int64(total)),
-            ])
-        }
-    }
-
-    private static let allowLock = NSLock()
-
     /// python's `readme.md`, verbatim.
     static let readmeText = """
         # file_bridge — filesystem edge
 
-        Verbs: `read(path,offset?,limit?)` · `write(path,bytes,if_match?)` · `edit(edits,bytes,dry_run?)` · `append(path,bytes)` · `undo(path)` · `read_stream(path,offset?,length?)` · `write_stream(path,bytes,offset?,truncate?)` · `pump(source_path,sink?,sink_path?)` · `list(path?)` · `delete(path)` · `rename(old,new)` · `mkdir(path)` · `allow(path)` · `disallow(path)` · `allowed(limit?,after?)` · `reflect`
+        Verbs: `read(path,offset?,limit?)` · `write(path,bytes,if_match?)` · `edit(edits,bytes,dry_run?)` · `append(path,bytes)` · `undo(path)` · `read_stream(path,offset?,length?)` · `write_stream(path,bytes,offset?,truncate?)` · `pump(source_path,sink?,sink_path?)` · `list(path?)` · `delete(path)` · `rename(old,new)` · `mkdir(path)` · `reflect`
         **Streams** (the SOURCE/SINK protocol — file_bridge is the fs implementor):
         - `read_stream(path, offset=0, length=65536)` → `{bytes, next_offset, eof, size}` — `bytes` is the RAW chunk (rides the transport as raw bytes — web_ws / bridge binary frame, never base64); pull chunks until `eof` (stateless cursor).
         - `write_stream(path, bytes, offset?, truncate?)` → push RAW chunks (`bytes` = one raw chunk; append by default; `truncate:true` on the first to start fresh). Text files use the whole-file `write`.
-        - `pump(source?, source_path, sink?, sink_path?, chunk=65536)` → server-side SOURCE→SINK copy in ONE call (vs driving each chunk over the wire). Both ends bound by id + the stream verbs, each SELF-gating — so any provider (a `network_bridge` SOURCE, a `file_bridge` SINK) composes. Omitted `source`/`sink` = this bridge. **Both ends run AS YOU** (the pump's caller), never as this bridge: you need your own `read_stream` grant on the source and `write_stream` on the sink — `pump` alone reaches nothing this bridge can reach and you cannot.
+        - `pump(source?, source_path, sink?, sink_path?, chunk=65536)` → server-side SOURCE→SINK copy in ONE call (vs driving each chunk over the wire). Both ends bound by id + the stream verbs, each SELF-gating — so any provider (a `network_bridge` SOURCE, a `file_bridge` SINK) composes. Omitted `source`/`sink` = this bridge. **Both ends run AS THIS BRIDGE**: its `can_call` must reach the source (`read_stream`) and the sink (`write_stream`), and each end's `callable_by` must accept it.
         **Text documents** (any format — the bridge imposes none):
         - `read(path, offset=0, limit=200)` → a line-numbered page `{lines:[{n,text}], total, eof, version}`; refuses binary.
         - `write(path, bytes, if_match?)` → atomic whole-document write; `append(path, bytes)` → one chunk at the end.
@@ -940,7 +855,7 @@ public struct FileBundle: AgentBundle {
 
         A consumer (file serving · a pump · kernel_state) is **storage-agnostic** — it pulls/pushes by id, so a `network_bridge` answering the same verbs serves a *remote* file the same way (G1).
 
-        **Deny-all at the path level** — the `allow` list on the record names what this bridge EXPOSES, relative to `root`: a file, or everything under a directory (`.` = the whole root). No list, or an empty one, exposes NOTHING. Every path verb sees only exposed paths; anything else is `not_found` whether or not it exists (nothing leaks past the list), and `list` also shows the directories on the way to an exposed path. BOTH ends count: the path as asked AND the file it lands on (symlinks followed) must be inside the list — a link that stays inside serves, a link pointing out of it serves nothing. Set it at create (`allow=["docs/a.pdf", "img"]`) or one path at a time with `allow {path}` / `disallow {path}` (gated like any verb); `allowed` pages it. Writes are still governed by `readonly`. Writing an exposed path creates its missing parent directories, even ones the list does not name (`allow:["a/b/c.txt"]` + `write a/b/c.txt` creates `a/` and `a/b/`); `list` shows them as the way to it, nothing else in them is exposed.
+        **Deny-all at the path level** — the `allow` list on the record names what this bridge EXPOSES, relative to `root`: a file, or everything under a directory (`.` = the whole root). No list, or an empty one, exposes NOTHING. Every path verb sees only exposed paths; anything else is `not_found` whether or not it exists (nothing leaks past the list), and `list` also shows the directories on the way to an exposed path. BOTH ends count: the path as asked AND the file it lands on (symlinks followed) must be inside the list — a link that stays inside serves, a link pointing out of it serves nothing. Set it at create (`allow=["docs/a.pdf", "img"]`) or by `update_agent` (it replaces the list). Writes are still governed by `readonly`. Writing an exposed path creates its missing parent directories, even ones the list does not name (`allow:["a/b/c.txt"]` + `write a/b/c.txt` creates `a/` and `a/b/`); `list` shows them as the way to it, nothing else in them is exposed.
 
         **Sealed by default** — open: `update_agent <id> ingress_rule=allow_all_ingress`.
         **Running-dir law**: root is clamped inside the kernel's running dir (the dir holding its root's `.fantastic`) — `../`, `~`, absolute paths

@@ -99,6 +99,34 @@ def py_start_payload(code: str, **extra) -> dict:
 # kernel's guid, which a booted root mints; an unbooted test root gets one here.
 
 
+# ─── acting as an agent ──────────────────────────────────────────────────────
+
+
+def as_agent(kernel, agent_id: str):
+    """The test standing in for `agent_id`'s HANDLER: the enclosed sends are that
+    agent's, exactly as when the kernel runs the agent's own code
+    (`Agent._as_self` — the dispatch identity, the only identity there is). A send
+    made outside it is the operator's. A test driver, never a product path."""
+    return kernel.ctx.agents[agent_id]._as_self()
+
+
+# ─── explicit grants (the call gate's baseline is `{$self: "*"}` only) ───────
+
+
+def wire(kernel, sender: str, target: str, verbs="*") -> None:
+    """Open the edge `sender` → `target` on BOTH ends — `sender.can_call[target]`
+    and `target.callable_by[sender]` — merged into the live records, as an
+    operator would. `verbs` is `"*"` (every verb) or a list."""
+    ctx = kernel.ctx
+    for holder, field, other in (
+        (sender, "can_call", target),
+        (target, "callable_by", sender),
+    ):
+        cur = dict(ctx.agents[holder]._meta.get(field) or {})
+        cur[other] = verbs
+        ctx.update(holder, **{field: cur})
+
+
 def ensure_memory(root, store: str = "memory") -> str:
     """The shared test memory store under the root (created on first use); the root
     gets a guid if it was never booted. Returns the store id."""
@@ -106,7 +134,7 @@ def ensure_memory(root, store: str = "memory") -> str:
     if not root.record.get("guid"):
         ctx.update(root.id, guid="test-guid")
     if store not in ctx.agents:
-        rec = root.create("ram_store.tools", id=store, operator=True, admins=["kernel"])
+        rec = root.create("ram_store.tools", id=store)
         assert rec.get("id") == store, rec
     return store
 

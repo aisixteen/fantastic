@@ -48,7 +48,7 @@ function kernel(): { k: Kernel; p: Probe } {
   registerRamStore(k);
   k.setRoot(new Agent({ id: ROOT }));
   k.register(new Agent({ id: "probe", parentId: ROOT, handlerModule: "probe.ts" }));
-  k.register(new Agent({ id: "memory", parentId: ROOT, handlerModule: "ram_store.ts", meta: { operator: true, admins: ["kernel"] } }));
+  k.register(new Agent({ id: "memory", parentId: ROOT, handlerModule: "ram_store.ts" }));
   k.updateMeta(ROOT, { memory_store_id: "memory" });
   return { k, p };
 }
@@ -151,13 +151,12 @@ test("recall AT the ring cap: the recalled named execution is evicted at once an
   k.store.halt();
 });
 
-test("the flusher's store writes parent to the flusher; the stop's final flush and a direct flush to nothing; the start's probe to its verb", async () => {
-  const seen: { verb: string; parent: number | null }[] = [];
+test("the store is kernel bookkeeping: run inside the flusher's task, the start's, or none — no task row, no call row", async () => {
+  const seen: { verb: string; task: number | null; caller: string | null }[] = [];
   const k = new Kernel();
   k.registerBundle("spy_store.ts", (_id, payload, kernel) => {
     const verb = String(payload["type"]);
-    const row = kernel.currentTask !== null ? kernel.tasks.get(kernel.currentTask) : undefined;
-    seen.push({ verb, parent: row?.parent ?? null });
+    seen.push({ verb, task: kernel.currentTask, caller: kernel.currentCaller });
     if (verb === "boot") return null;
     if (verb === "read") return { rows: [], next: null, total: 0 };
     if (verb === "append") return { ids: [], appended: (payload["rows"] as Json[]).length };
@@ -170,25 +169,32 @@ test("the flusher's store writes parent to the flusher; the stop's final flush a
   k.updateMeta(ROOT, { memory_store_id: "memory" });
   const start = await call(k, "kernel", { type: "kernel_start" });
   assert.equal((start.result as Payload)["started"], true);
-  assert.deepEqual(seen.filter((s) => s.verb === "read"), [{ verb: "read", parent: start.pid }], "the probe read parents to kernel_start");
+  assert.deepEqual(
+    seen.filter((s) => s.verb === "boot" || s.verb === "read"),
+    [{ verb: "boot", task: start.pid, caller: null }, { verb: "read", task: start.pid, caller: null }],
+    "the store's boot and the probe run inside kernel_start, with the kernel as the caller",
+  );
+  // no call row was minted for any of it: the only call row is kernel_start's own
+  const calls = [...k.store.rows.values()].filter((r) => r.kind === "call");
+  assert.deepEqual(calls.map((r) => r["verb"]), ["kernel_start"]);
   const fid = k.store.flusherTask as number;
   seen.length = 0;
   await call(k, "probe", { type: "work" });
   await sleep(300); // the debounce fires: the flusher writes
   const flusherWrites = seen.filter((s) => s.verb === "append");
   assert.ok(flusherWrites.length > 0, "the flusher wrote nothing");
-  assert.ok(flusherWrites.every((s) => s.parent === fid), JSON.stringify(flusherWrites));
+  assert.ok(flusherWrites.every((s) => s.task === fid), JSON.stringify(flusherWrites));
   seen.length = 0;
   await call(k, "probe", { type: "work" });
   await k.store.flush();
-  assert.deepEqual(seen.filter((s) => s.verb === "append").map((s) => s.parent).slice(0, 1), [null], "a direct flush is no task's");
+  assert.deepEqual(seen.filter((s) => s.verb === "append").map((s) => s.task).slice(0, 1), [null], "a direct flush is no task's");
   seen.length = 0;
   await call(k, "probe", { type: "work" });
   await stopKernel(k);
   // the stop's final flush is its last write (a debounced one may precede it)
   const appends = seen.filter((s) => s.verb === "append");
   assert.ok(appends.length > 0, "the stop flushed the last rows");
-  assert.equal(appends[appends.length - 1]!.parent, null, JSON.stringify(seen));
+  assert.equal(appends[appends.length - 1]!.task, null, JSON.stringify(seen));
 });
 
 test("what the store keeps: bytes as their length at any depth, an absent field absent, the digest measured on that", async () => {

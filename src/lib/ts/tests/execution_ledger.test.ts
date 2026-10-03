@@ -10,6 +10,8 @@ import assert from "node:assert/strict";
 import { Kernel } from "../src/kernel/kernel.ts";
 import { Agent } from "../src/kernel/agent.ts";
 import type { Payload } from "../src/kernel/json.ts";
+import { kin } from "./kit.ts";
+import { sendAs } from "./kit.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -121,10 +123,10 @@ test("a spent retry budget PARKS the failure — the dead-letter queue is a quer
 test("the ledger verb is ORIGIN-SCOPED — an agent sees only what it originated", async () => {
   const k = kernelWith({
     worker: () => ({ ok: true }),
-    // `nosy` sends on its own behalf, then reads the ledger as ITSELF.
+    // `nosy` reads the ledger as ITSELF.
     nosy: () => ({ ok: true }),
   });
-  await k.send([{ target: "worker", payload: { type: "secret" }, id: "operator-job" }]);
+  await k.send([{ target: "worker", payload: { type: "private" }, id: "operator-job" }]);
 
   // As the operator: everything is visible.
   const all = ((await k.send([{ target: "kernel", payload: { type: "ledger" } }]))[0]!.result) as Payload;
@@ -133,10 +135,10 @@ test("the ledger verb is ORIGIN-SCOPED — an agent sees only what it originated
 
   // As an AGENT: only its own rows. Unscoped, this verb would hand any agent
   // the result BODIES of everything every other agent ran. (`ledger` is
-  // privileged, so the grant names the root.)
+  // two-sided, so both ends name it.)
   k.updateMeta("nosy", { can_call: { kernel_state: ["ledger"] } });
-  const scoped = k.scopedFor("nosy", null);
-  const mine = ((await scoped.send([{ target: "kernel", payload: { type: "ledger" } }]))[0]!.result) as Payload;
+  k.updateMeta("kernel_state", { callable_by: { nosy: ["ledger"] } });
+  const mine = ((await sendAs(k, "nosy", [{ target: "kernel", payload: { type: "ledger" } }]))[0]!.result) as Payload;
   const mineRows = mine["executions"] as { name?: string }[];
   assert.ok(
     !mineRows.some((r) => r.name === "operator-job"),
@@ -192,9 +194,9 @@ test("cancel kills the subtree leaves first", async () => {
     const next = id === "c1" ? "c2" : "c3";
     return (await view.send([{ target: next, payload: { type: "go" } }]))[0]!.result;
   });
-  k.register(new Agent({ id: "c1", parentId: "kernel_state", handlerModule: "chain.tools" }));
-  k.register(new Agent({ id: "c2", parentId: "c1", handlerModule: "chain.tools" }));
-  k.register(new Agent({ id: "c3", parentId: "c2", handlerModule: "chain.tools" }));
+  k.register(new Agent({ id: "c1", parentId: "kernel_state", handlerModule: "chain.tools", meta: kin() }));
+  k.register(new Agent({ id: "c2", parentId: "c1", handlerModule: "chain.tools", meta: kin() }));
+  k.register(new Agent({ id: "c3", parentId: "c2", handlerModule: "chain.tools", meta: kin() }));
   const run = k.send([{ target: "c1", payload: { type: "go" } }]);
   while (k.tasks.size() < 3) await sleep(2);
   const [top, mid, leaf] = k.tasks.ids();

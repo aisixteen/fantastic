@@ -18,6 +18,7 @@ import types
 
 from kernel._kernel import Kernel
 from kernel import register_unlisted
+from _testkit import wire
 
 # A SELF-OWNED slow bundle. Importing test_task_table's would share its module
 # state, and under xdist the import can be a SECOND instance of that module —
@@ -110,11 +111,11 @@ async def test_mixed_batch_settles_in_input_order(seeded_kernel):
 async def test_gate_denial_is_a_failed_outcome_with_no_pid(seeded_kernel):
     """A two-sided-gate denial never reaches the task table; the refusal dict
     rides in `result` unchanged (same shape callers always branched on)."""
-    from kernel._kernel import sender_context
+    from _testkit import as_agent
 
     await _mk(seeded_kernel, "gated_a")  # deny-all: no can_call grants
     await _mk(seeded_kernel, "gated_b")  # sibling — outside the $parent baseline
-    with sender_context("gated_a"):
+    with as_agent(seeded_kernel, "gated_a"):
         out = (
             await seeded_kernel.send(
                 [{"target": "gated_b", "payload": {"type": "reflect"}}]
@@ -400,12 +401,13 @@ async def test_a_module_whose_top_level_exits_is_never_imported(
     bundle catalog is never imported now: the create keeps the record as one this
     runtime cannot answer (as rust and swift do), the call to it is refused, and
     the kernel answers the next call."""
-    from kernel import sender_context
+    from _testkit import as_agent
 
     (tmp_path / "arch21_exit_mod.py").write_text("raise SystemExit(7)\n")
     monkeypatch.syspath_prepend(str(tmp_path))
-    seeded_kernel.create(None, id="arch21_worker")  # the baseline only
-    with sender_context("arch21_worker"):
+    seeded_kernel.create(None, id="arch21_worker")
+    wire(seeded_kernel, "arch21_worker", "kernel_state", ["create_agent"])
+    with as_agent(seeded_kernel, "arch21_worker"):
         out = (
             await seeded_kernel.send(
                 [

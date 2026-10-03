@@ -4,7 +4,7 @@ name = "fantastic-credential-store"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Credential store agent: secrets addressed by a ref, each bound to a host, read only with a secret mark, behind per-ref read/write grants; file (0600), OS keychain or env backend."
+description = "Credential store agent: secrets addressed by a ref, each bound to a host, reached by whoever the call gate admits; file (0600), OS keychain or env backend."
 
 [dependencies]
 # python-format helpers: repr/str/strip/json.dumps, python-canonical.

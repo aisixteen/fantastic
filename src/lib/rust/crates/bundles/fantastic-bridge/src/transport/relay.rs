@@ -69,42 +69,6 @@ pub const SUBPROTOCOL: &str = "fantastic.relay.v1";
 /// `_relay.DIRECTORY_SRC`).
 pub const DIRECTORY_SRC: &str = "relay";
 
-// THE RELAY SEAL (owner, 2026-10-02). relayd dispatches every tunneled frame into
-// its own kernel and records it UNMASKED, so a secret that crossed a relay leg
-// would sit in the relay's ledger in full. Until relayd masks what it records, a
-// relay leg refuses any call carrying secret marks, in both directions: outbound
-// in the bundle's `forward` (`crate::dispatch` / `crate::dispatch_binary`),
-// inbound in this transport's `pump`. ws_bridge (direct WS) is sealed only to a
-// non-loopback host (its own seal, `transport::ws`). One text for both.
-
-/// The relay seal's refusal text — python `SECRET_SEALED`, byte for byte.
-pub const SECRET_SEALED: &str = "relay_connector: a call carrying secret marks may not cross \
-                                 a relay leg — the relay records every frame it routes, unmasked";
-
-/// The relay seal's hint — python `SECRET_SEALED_HINT`.
-pub const SECRET_SEALED_HINT: &str =
-    "reach that kernel over a direct ws_bridge leg to send a secret";
-
-/// The relay seal's refusal — outbound to the local caller, inbound as the reply
-/// to the far caller. Python `secret_sealed()`.
-#[must_use]
-pub fn secret_sealed() -> Value {
-    fantastic_kernel::refusal::refusal_hint(
-        fantastic_kernel::refusal::UNAUTHORIZED,
-        SECRET_SEALED,
-        SECRET_SEALED_HINT,
-    )
-}
-
-/// A partner delivery the inbound seal refuses: a tunneled `call` frame that names
-/// `secret` (any value — python `"secret" in payload`). Returns its `id` (`null`
-/// when it has none — python `payload.get("id")`). The ws seal reads the same
-/// shape off a direct frame.
-pub(crate) fn sealed_call(frame: &Value) -> Option<Value> {
-    let m = frame.as_object()?;
-    (m.get("type").and_then(Value::as_str) == Some("call") && m.contains_key("secret"))
-        .then(|| m.get("id").cloned().unwrap_or(Value::Null))
-}
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The write DEADLINE on the relay sink.
@@ -310,7 +274,10 @@ impl RelayTransport {
         }
         send_announce(&sink, &connected, &identity).await;
 
-        let supervisor = tokio::spawn(supervise(
+        // THE CONNECTOR'S OWN WORK: `connect` runs in its `boot` dispatch, so the
+        // supervisor carries that identity (`spawn_inherit`) — every re-dial's
+        // password read is the connector's send, gated as it.
+        let supervisor = fantastic_kernel::spawn_inherit(supervise(
             url,
             password,
             partner.clone(),
@@ -409,8 +376,6 @@ async fn pump(
     partner: &str,
     relay_pending: &RelayPending,
     tx: &mpsc::Sender<Result<Frame, TransportError>>,
-    sink: &SharedSink,
-    connected: &AtomicBool,
 ) {
     while let Some(msg) = source.next().await {
         let frame = match msg {
@@ -428,27 +393,6 @@ async fn pump(
             Ok(_) => continue, // ping/pong handled by tungstenite
         };
         if let Some(f) = frame {
-            // A DIRECTORY event surfaces as `{type:"event", …}`, never a `call`, so
-            // only a tunnel delivery FROM our partner can match here.
-            let inner = match &f {
-                Frame::Text(v) | Frame::Binary(v, _) => v,
-            };
-            if let Some(id) = sealed_call(inner) {
-                // THE RELAY SEAL, inbound: the frame already crossed the relay, and
-                // nothing here dispatches it — the far caller is answered with the
-                // seal's refusal.
-                // TODO(relay seal): lift once relayd masks what it records. The fix
-                // is in relayd (../fantastic_relay): when it dispatches a tunneled
-                // frame into its own kernel, re-root the inner frame's `secret` onto
-                // its delivery item (`payload.<f>` -> `payload.payload.payload.<f>`),
-                // so its rows, ledger and state stream show `<secret>`; and decide
-                // how REPLY frames carry result marks — a `reply` names no marks
-                // today, so the relay would record a secret result in full.
-                let reply = json!({"type": "reply", "id": id, "data": secret_sealed()});
-                // the socket dropped → the supervisor re-dials
-                let _ = send_to_partner(sink, connected, partner, reply).await;
-                continue;
-            }
             if tx.send(Ok(f)).await.is_err() {
                 return;
             }
@@ -574,7 +518,7 @@ async fn supervise(
                 }
             }
         };
-        pump(source, &partner, &relay_pending, &tx, &sink, &connected).await;
+        pump(source, &partner, &relay_pending, &tx).await;
         connected.store(false, Ordering::SeqCst);
         *sink.lock().await = None;
         if reconnect_secs <= 0.0 {

@@ -263,7 +263,7 @@ async def test_a_malformed_rule_on_a_bridge_record_denies_the_call(seeded_kernel
 
     k = seeded_kernel
     k.update(k.id, guid="guid-a")
-    k.create("ws_bridge.tools", id="br", transport="memory", peer_guid="guid-b")
+    k.create("ws_bridge.tools", id="br", transport="memory")
     k.update("br", ingress_rule=7)
     mine, peer = MemoryTransport.pair()
     _test_transport_inject["br"] = mine
@@ -274,7 +274,6 @@ async def test_a_malformed_rule_on_a_bridge_record_denies_the_call(seeded_kernel
             "id": "in-1",
             "target": k.id,
             "payload": {"type": "reflect"},
-            "caller": "guid-b|ai",
         }
     )
     reply = await asyncio.wait_for(peer.recv(), 2.0)

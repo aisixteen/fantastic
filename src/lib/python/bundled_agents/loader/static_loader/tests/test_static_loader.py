@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from kernel import sender_context
+from _testkit import as_agent
 
 MANIFEST = """\
 agents:
@@ -64,26 +64,21 @@ async def test_declared_agents_carry_baseline_plus_explicit_grants(seeded_kernel
     await _init_loader(seeded_kernel)
     can = seeded_kernel.ctx.get("worker")["can_call"]
     # Baseline is merged in…
-    assert can["$self"] == "*" and can["$parent"] == "*" and can["$children"] == "*"
+    assert can["$self"] == "*" and "$parent" not in can and "$children" not in can
     # …and the manifest's explicit lateral grant is present.
     assert can["memory"] == ["write", "read"]
     # memory got the baseline even with no explicit can_call in the manifest.
     mem = seeded_kernel.ctx.get("memory")["can_call"]
     assert mem["$self"] == "*"
-    # NOTHING is auto-granted. `$loader` is real reach on the kernel's control
-    # surface (ps/cancel/ledger/shutdown_kernel resolve through it), and only an
-    # agent that keeps its OWN sidecar — an AI's chat file, the scheduler's
-    # schedules — has any use for persist_blob/load_blob. A file surface or a
-    # runner never persists anything of its own, so a roster-wide grant would be
-    # reach handed out for nothing. A manifest that needs it declares it.
-    assert "$loader" not in can and "$loader" not in mem
+    # NOTHING else is auto-granted.
+    assert set(mem) == {"$self"}
 
 
 async def test_roster_is_closed_a_child_cannot_create_more(seeded_kernel):
     await _init_loader(seeded_kernel)
     # deny-all: a roster agent is not granted `create_agent` on anyone → the set
     # of agents is FIXED by the manifest.
-    with sender_context("worker"):
+    with as_agent(seeded_kernel, "worker"):
         r = (
             await seeded_kernel.send(
                 [
@@ -104,7 +99,7 @@ async def test_roster_is_closed_a_child_cannot_create_more(seeded_kernel):
 
 async def test_worker_may_use_its_declared_edge_but_not_others(seeded_kernel):
     await _init_loader(seeded_kernel)
-    with sender_context("worker"):
+    with as_agent(seeded_kernel, "worker"):
         ok = (
             await seeded_kernel.send(
                 [
@@ -382,17 +377,17 @@ async def test_an_agent_sent_boot_is_refused_and_re_runs_nothing(seeded_kernel):
     ):
         r = (await k.send([{"target": "kernel", "payload": p}]))[0]["result"]
         assert not r.get("error"), r
-    with sender_context("worker"):
+    with as_agent(seeded_kernel, "worker"):
         r = (await k.send([{"target": "static_loader", "payload": {"type": "boot"}}]))[
             0
         ]["result"]
     assert r == {
-        "error": "static_loader: an agent-sent boot is refused — the roster is "
-        "hydrated with operator authority, so only the kernel's own boot (cold "
-        "boot, create_agent) runs it",
+        "error": "static_loader: an agent-sent boot is refused — hydrating the "
+        "roster is the kernel's own bookkeeping, so only the kernel's own boot "
+        "(cold boot, create_agent) runs it",
         "reason": "unauthorized",
-        "hint": "change an agent's record with update_agent (the conferral rule "
-        "applies there); the operator re-boots the loader",
+        "hint": "change an agent's record with update_agent (its parent writes "
+        "it); the operator re-boots the loader",
     }
     assert "memory" not in k.ctx.agents
     assert "memory" not in k.ctx.get("worker")["can_call"]

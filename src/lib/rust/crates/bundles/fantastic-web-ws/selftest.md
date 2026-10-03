@@ -17,12 +17,14 @@ mkdir -p /tmp/fws_test
 cd /tmp/fws_test
 FANTASTIC=/path/to/rust/target/release/fantastic_kernel
 PORT=18181
-$FANTASTIC kernel_state create_agent handler_module=web.tools id=w port=$PORT
+# Grants are explicit, both ends: the host pulls `get_routes` from its leg, and
+# the leg auto-watches its host.
+$FANTASTIC kernel_state create_agent handler_module=web.tools id=w port=$PORT can_call='{"$children": ["get_routes"]}' callable_by='{"$children": ["watch"]}'
 # THE LEG IS THE SENDER of every frame, and a leg with no `ingress_rule` is
 # SEALED — open it consciously, and grant it the reach the frames below need
 # (a grant map is keyed by a literal id, never `*`).
-$FANTASTIC w create_agent handler_module=web_ws.tools id=wws ingress_rule=allow_all_ingress can_call='{"kernel_state": "*"}'
-$FANTASTIC kernel_state update_agent id=kernel_state callable_by='{"$self": "*", "$parent": "*", "$children": "*", "wws": "*"}'
+$FANTASTIC w create_agent handler_module=web_ws.tools id=wws ingress_rule=allow_all_ingress can_call='{"kernel_state": "*", "$parent": ["watch"]}' callable_by='{"$parent": ["get_routes"]}'
+$FANTASTIC kernel_state update_agent id=kernel_state callable_by='{"$self": "*", "wws": "*"}'
 $FANTASTIC &
 DAEMON_PID=$!
 trap 'kill $DAEMON_PID 2>/dev/null' EXIT

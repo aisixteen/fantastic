@@ -10,6 +10,8 @@ from fastapi.testclient import TestClient
 
 from web_ws.tools import _get_routes, _make_endpoint, _reflect, route_endpoints
 
+from _testkit import wire
+
 
 async def test_reflect_describes_surface(seeded_kernel):
     r = await _reflect("ws_xyz", {}, seeded_kernel)
@@ -40,6 +42,7 @@ def test_endpoint_mountable_on_fastapi(seeded_kernel):
     a `call` frame round-trips through the proxy."""
     # Sealed by default ⇒ open the leg so the inbound `call` dispatches.
     seeded_kernel.create("web_ws.tools", id="test_ws", ingress_rule="allow_all_ingress")
+    wire(seeded_kernel, "test_ws", "kernel_state")
     app = FastAPI()
     app.add_api_websocket_route(
         "/{host_id}/ws", _make_endpoint("test_ws", seeded_kernel)

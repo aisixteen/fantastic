@@ -64,8 +64,8 @@ private func create(_ k: Kernel, _ fields: OrderedDictionary<String, JSON>) asyn
     return out["id"].asString ?? ""
 }
 
-/// Python fixture `leg`: one leg on `k`, pinned to `peer-g`, its raw peer end in
-/// hand; `notes` (a child of the leg) accepts the foreign caller `peer-g|ai`.
+/// Python fixture `leg`: one leg on `k`, its raw peer end in hand; `notes` (a
+/// child of the leg) accepts the leg — what the leg serves is its own call.
 private func leg() async -> (Kernel, String, PairEnd, URL) {
     let dir = tmpDir("arch2")
     let (k, ws) = kernel(guid: "local-g", dir: dir)
@@ -73,13 +73,14 @@ private func leg() async -> (Kernel, String, PairEnd, URL) {
         k,
         [
             "parent_id": "kernel_state", "handler_module": "ws_bridge.tools",
-            "transport": "memory", "peer_guid": "peer-g", "ingress_rule": "allow_all_ingress",
+            "can_call": ["$children": "*", "kernel_state": "*"],
+            "transport": "memory", "ingress_rule": "allow_all_ingress",
         ])
     let notes = await create(
         k,
         [
             "parent_id": .string(legId), "handler_module": "file_bridge.tools", "id": "notes",
-            "callable_by": ["peer-g|ai": "*"],
+            "callable_by": .object([legId: "*"]),
         ])
     #expect(notes == "notes")
     let (mine, peer) = PairEnd.pair()
@@ -89,12 +90,12 @@ private func leg() async -> (Kernel, String, PairEnd, URL) {
     return (k, legId, peer, dir)
 }
 
-/// One inbound `reflect` of `notes` from `peer-g|ai`; the reply's `data`.
+/// One inbound `reflect` of `notes` from the peer; the reply's `data`.
 private func inbound(_ peer: PairEnd, _ n: Int) async throws -> JSON {
     try await peer.send(
         [
             "type": "call", "id": .string("peer-call-\(n)"), "target": "notes",
-            "payload": ["type": "reflect"], "caller": "peer-g|ai",
+            "payload": ["type": "reflect"],
         ])
     return try await peer.recv().frame["data"]
 }
@@ -192,15 +193,15 @@ struct LegLifetimeTests {
             kb,
             [
                 "parent_id": "kernel_state", "handler_module": "ws_bridge.tools",
+            "can_call": ["$children": "*", "kernel_state": "*"],
                 "id": "b_leg", "transport": "memory", "ingress_rule": "allow_all_ingress",
-                "peer_guid": "guid-a",
             ])
         let doc = await create(
             kb,
             [
                 "parent_id": .string(bId), "handler_module": "file_bridge.tools", "id": "doc",
                 "allow": ["."], "ingress_rule": "allow_all_ingress",
-                "callable_by": ["guid-a|*": "*"],
+                "callable_by": ["b_leg": "*"],
             ])
         #expect(doc == "doc")
 
@@ -212,7 +213,8 @@ struct LegLifetimeTests {
                 ka,
                 [
                     "parent_id": "kernel_state", "handler_module": "ws_bridge.tools",
-                    "id": "a_leg", "transport": "memory", "peer_guid": "guid-b",
+            "can_call": ["$children": "*", "kernel_state": "*"],
+                    "id": "a_leg", "transport": "memory",
                 ])
             let (ta, tb) = PairEnd.pair()
             wsA.injectTransport(agentId: AgentId(aId), transport: ta)

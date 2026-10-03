@@ -108,7 +108,7 @@ extension Kernel {
     /// One item's SYNCHRONOUS half: validate, resolve, gate, claim the row.
     /// Python `Agent._launch` (`kernel/_agent.py:601-732`) — C30's check
     /// order: target → payload dict → timeout → payload.type → id → retries
-    /// → secret → killed → draining → resolve → gate.
+    /// → killed → draining → resolve → gate.
     func launch(_ item: Item) -> Launched {
         // 1. target — python: `if not isinstance(target_id, str) or not
         // target_id: missing("send", "target")`.
@@ -191,16 +191,6 @@ extension Kernel {
         case .ok(let r): retries = r
         case .refused(let r): return .settled(Outcome.refused(r))
         }
-        // 6b. SECRET paths (`Secret`): validated with the item's other own
-        // fields, before anything runs; `shown` is what every record and mirror
-        // of this call carries. Python `Agent._launch` → `_secret.check`.
-        let secret: Secret?
-        switch Secret.check(item.secret, payload: item.payload, blob: item.binary) {
-        case .ok(let s): secret = s
-        case .refused(let r): return .settled(Outcome.refused(r))
-        }
-        let shown = secret?.shownPayload(item.payload, blob: item.binary)
-
         // 7. killed — A DYING TASK REGISTERS NO NEW WORK. `cancelTask` marks
         // the whole subtree before it aborts anything, because `onCancel`
         // hooks await — so a doomed handler gets scheduling passes on its way
@@ -248,8 +238,8 @@ extension Kernel {
         }
 
         // 10. ── CALL GATE — fully-gated, two-sided, from-above ────────────
-        // An operator send (`currentSender` is nil) is the origin root of trust
-        // and never reaches here. Every AGENT send — ANY verb, `reflect`
+        // An operator send (`currentSender` is nil — made outside every
+        // dispatch) is the origin root of trust and never reaches here. Every AGENT send — ANY verb, `reflect`
         // included — needs BOTH ends to grant the edge.
         if let orig = KernelTaskLocals.currentSender {
             if let denial = gate(sender: orig, verb: verb, target: target, payload: item.payload) {
@@ -288,49 +278,32 @@ extension Kernel {
         let taskId = TaskId(execId)
         let caller = KernelTaskLocals.currentSender
 
-        // The RAM entry holds the SHOWN payload, never the secret values.
         switch ledger.open(
-            execId, target: target.id, payload: shown?.json ?? item.payload, retries: retries,
-            name: name, caller: caller, callerId: callerId, secret: secret,
-            origin: KernelTaskLocals.callerIdentity())
+            execId, target: target.id, payload: item.payload, retries: retries,
+            name: name, caller: caller, callerId: callerId)
         {
         case .refused(let r):
             return .settled(Outcome.refused(r))
         // ALREADY SETTLED — the recorded outcome IS the answer, and the handler
         // must not run a second time. Idempotency and once-only in one field.
-        case .settled(let o, let origPayload, _, let hide, let foreign):
+        case .settled(let o, let origPayload, _):
             // AUTHORIZED AGAINST THE EXECUTION IT JOINS. The recorded outcome
             // belongs to whoever ran it, so handing it back is equivalent to
             // having made THAT call — the gate must be asked that question, not
             // about the verb this caller happened to send. Measured in python
             // 2026-08-28: a caller granted only a harmless verb reused another's
-            // id and received its secret verbatim.
+            // id and received another caller's result verbatim.
             if let d = joinDenial(origin: caller, payload: origPayload, target: target) {
                 return .settled(Outcome.refused(d))
             }
-            // A CALLER-SCOPED VERB (`ledger`, `ack_deadletter`) answers its own
-            // caller's view: a foreign join is refused, after the gate (why, and
-            // which joins stay open: `ExecutionLedger.open`, audit KV-1).
-            if let r = foreign { return .settled(Outcome.refused(r)) }
-            // A SECRET-MARKED EXECUTION'S REAL OUTCOME IS ITS CALLER'S ALONE.
-            // The gate above judges the VERB; a handler whose answer depends on
-            // WHO asks (a credential_store's per-ref `readers`) and the caller's
-            // own `secret` marks never run for a joiner. Measured 2026-10-03
-            // (audit F1): `eve`, granted `get` on a store but no reader of the
-            // ref, joined `alice`'s marked `get` by its pid and received the key.
-            // So a joiner that is not the identity which opened the execution
-            // (`callerIdentity`: the agent, the operator, or a relayed
-            // `<guid>|<agent>`) gets the outcome AS SHOWN — what the ledger
-            // reads back. Unmarked executions are unchanged.
-            return .settled(hide.map { $0.shownToJoiner(o) } ?? o)
+            return .settled(o)
         // IN FLIGHT — join it. A joiner's own `timeout` bounds only ITS wait: it
         // does not own the execution and must not kill it.
-        case .join(let origPayload, let jid, let box, let hide, let foreign):
+        case .join(let origPayload, let jid, let box):
             if let d = joinDenial(origin: caller, payload: origPayload, target: target) {
                 return .settled(Outcome.refused(d))
             }
-            if let r = foreign { return .settled(Outcome.refused(r)) }
-            return .joining(jid, timeout, box, hide)
+            return .joining(jid, timeout, box)
         case .fresh:
             // THE CALL ROW, on the TARGET, under the pre-minted id — the trace of
             // who was asked what, parented to the dispatch that asked. It carries
@@ -339,17 +312,14 @@ extension Kernel {
             // dispatch, the deadline — and is what the kernel flushes into its
             // memory store and reads back for `ledger` and named-call dedup.
             // KEY ORDER IS PYTHON'S: id, kind, verb, parent, caller, payload,
-            // named, retries, attempts, timeout[, name][, secret]. (`origin` →
-            // `caller`: replies own `origin` now.)
+            // named, retries, attempts, timeout[, name]. (`origin` → `caller`:
+            // replies own `origin` now.)
             var callRow: Row = [
                 "id": .integer(execId), "kind": .string("call"), "verb": .string(verb),
             ]
             callRow["parent"] = KernelTaskLocals.currentTask.map { JSON.integer($0.value) } ?? .null
             callRow["caller"] = caller.map { JSON.string($0.value) } ?? .null
-            // SHOWN, never the secret values — the row is what the store keeps.
-            callRow["payload"] =
-                shown.map { Kernel.tapedPayload($0.json, $0.blob) }
-                ?? Kernel.tapedPayload(item.payload, item.binary)
+            callRow["payload"] = Kernel.tapedPayload(item.payload, item.binary)
             callRow["named"] = .bool(name != nil)
             callRow["retries"] = .integer(Int64(retries))
             callRow["attempts"] = .integer(1)
@@ -361,9 +331,6 @@ extension Kernel {
                 callRow["timeout"] = timeout.map { JSON.double($0.seconds) } ?? .null
             }
             if let name { callRow["name"] = .string(name) }
-            // the MARKS are not secret (as given — dotted strings and/or arrays of
-            // steps): they say this record cannot answer a replay
-            if let secret { callRow["secret"] = .array(secret.paths) }
             _ = try? rowsPut(target.id, callRow)
         }
 
@@ -379,8 +346,7 @@ extension Kernel {
             Dispatch(
                 target: target, payload: item.payload, verb: verb,
                 timeout: timeout, execId: execId, taskId: taskId,
-                binary: item.binary, rawReply: item.rawReply, shown: shown,
-                secretPaths: secret?.paths ?? []))
+                binary: item.binary, rawReply: item.rawReply))
     }
 
     /// `timeout` validation (C30/C38): `item.rawTimeout`, when forwarded by a
@@ -484,8 +450,8 @@ extension Kernel {
         switch launched {
         case .settled(let o):
             return o
-        case .joining(let execId, let timeout, let box, let hide):
-            return await joinExecution(execId, timeout: timeout, box: box, hide: hide)
+        case .joining(let execId, let timeout, let box):
+            return await joinExecution(execId, timeout: timeout, box: box)
         case .dispatch(let d):
             var nextPid = d.taskId
             var pid: TaskId? = nil
@@ -507,7 +473,7 @@ extension Kernel {
                 let (r, s, b) = await runDispatchOutcome(
                     target: d.target, payload: d.payload, verb: d.verb,
                     taskOut: box, timeout: d.timeout, taskId: nextPid, binary: d.binary,
-                    rawReply: d.rawReply, shown: d.shown, secretPaths: d.secretPaths)
+                    rawReply: d.rawReply)
                 reply = r
                 status = s
                 body = b
@@ -572,36 +538,21 @@ extension Kernel {
     /// the outcome stamp on the live call row (while it is still in RAM), the
     /// `settle` row on the root, and — for a dead ending — the `on_deadletter`
     /// announcement. Python `Agent._record` + `_stamp_call`.
-    ///
-    /// A call with `secret` paths is RECORDED as shown: its result fields and
-    /// every secret value in its text → placeholder. The caller (and every
-    /// joiner) gets the real outcome; the `ledger` reads back the shown one.
     private func recordSettle(
         execId: Int64, target: AgentId, pid: TaskId?, status: Status, reply: JSON, body: Blob?
     ) -> Outcome {
         let named = ledger.isNamed(execId)
-        // What is RECORDED: the outcome itself, or — for a secret call — as shown.
-        // Kept BEFORE the settle publishes the outcome: python sets the future and
-        // stamps in one synchronous step, and here a `ledger` read on another
-        // thread must never find the settled outcome without its shown form.
-        var shownReply = reply
-        var shownBody = body
-        if let secret = ledger.secret(execId) {
-            let s = secret.shownOutcome(result: reply, body: body)
-            ledger.setShown(execId, s)
-            (shownReply, shownBody) = (s.result, s.body)
-        }
         let out = ledger.settle(
             execId, Outcome(pid: pid, status: status, result: reply, body: body))
         // The live call row learns how it ended — python's `{status, error?,
         // reason?}` stamp: an error's first 200 CODE POINTS, `reason` copied RAW.
         // The call row may already be flushed (and gone from RAM) by now.
         var stamp: Row = ["status": .string(status.rawValue)]
-        let err = shownReply["error"]
+        let err = reply["error"]
         if pyTruthy(err) {
             stamp["error"] = .string(
                 String(String.UnicodeScalarView(pyStr(err).unicodeScalars.prefix(200))))
-            let reason = shownReply["reason"]
+            let reason = reply["reason"]
             if pyTruthy(reason) { stamp["reason"] = reason }
         }
         rows.stamp(execId, ["outcome": .object(stamp)])
@@ -617,7 +568,7 @@ extension Kernel {
                 "outcome": .object(
                     storedOutcome(
                         status: status.rawValue,
-                        result: Kernel.storeValue(shownReply, body: shownBody),
+                        result: Kernel.storeValue(reply, body: body),
                         named: named)),
                 "attempts": .integer(Int64(out.attempts)),
             ]
@@ -636,17 +587,12 @@ extension Kernel {
     /// The joiner's `timeout` bounds only its OWN wait — on expiry it settles
     /// `timed_out` and the execution KEEPS RUNNING, because a joiner does not own
     /// it and killing another caller's work would be a surprise.
-    ///
-    /// `hide`: the joiner is not the identity that opened a secret-marked
-    /// execution — the settled outcome is handed over AS SHOWN.
-    func joinExecution(
-        _ execId: Int64, timeout: Deadline?, box: OutcomeBox, hide: Secret?
-    ) async -> Outcome {
+    func joinExecution(_ execId: Int64, timeout: Deadline?, box: OutcomeBox) async -> Outcome {
         let deadline = timeout.map { Date().addingTimeInterval($0.seconds) }
         while true {
             // THE FUTURE THE OWNER SETTLES, held since launch: the execution may
             // already have been flushed and forgotten by the time we look.
-            if let o = box.outcome { return hide.map { $0.shownToJoiner(o) } ?? o }
+            if let o = box.outcome { return o }
             if let d = deadline, Date() >= d {
                 // Python `_agent.py`: `pid` is the JOINED execution's id (not
                 // nil — the caller can still `cancel`/`ps` it), the text names
@@ -684,9 +630,7 @@ enum Launched {
     /// the task table (python `_Dispatched(pid=None)`).
     case reflectFast(ReflectFast)
     /// Already in flight under this id: wait for ITS outcome, run nothing.
-    /// The `Secret` is set when the joiner is handed the outcome AS SHOWN
-    /// (`Opened.join`'s `hide`).
-    case joining(Int64, Deadline?, OutcomeBox, Secret?)
+    case joining(Int64, Deadline?, OutcomeBox)
     /// Passed the gate and claimed its row.
     case dispatch(Dispatch)
 }
@@ -717,12 +661,6 @@ struct Dispatch {
     /// The binary channel with no request body — the reply's chunk comes back
     /// raw (`Item.rawReply`).
     let rawReply: Bool
-    /// The payload AS SHOWN when the item marked `secret` paths: what the fanout
-    /// publishes on every attempt; the handler gets `payload` (and `binary`).
-    let shown: ShownPayload?
-    /// The item's `secret` marks as given, readable by the handler as
-    /// `KernelTaskLocals.currentSecret` — on every attempt.
-    let secretPaths: [JSON]
 }
 
 /// An item's own deadline: the seconds the kernel waits, and the value as the

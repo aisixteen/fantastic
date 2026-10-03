@@ -1,18 +1,34 @@
 // The memory-store era of ai_core: calibrated compaction trigger, repeat-read
-// dedupe, fold summaries with a budget and a mechanical index, context by grant
-// (`fork_from`, `request_share`), the head cache that never diverges from the
-// store, and the row event (`watch`).
+// dedupe, fold summaries with a budget and a mechanical index, the head cache
+// that never diverges from the store, and the row event (`watch`).
 //
 // Twin of python `ai_core/tests/test_memory_features.py`.
 
 import FantasticJSON
-import FantasticKernel
+@testable import FantasticKernel
 import Foundation
 import OrderedCollections
 import Testing
 
 @testable import FantasticAICore
 @testable import FantasticRamStore
+
+/// The agent's own turn, which the test stands in for (python `as_agent`): the
+/// memory store keys a row by its writer, and the history is the agent's.
+private func loadHistory(_ selfId: String, _ kernel: Kernel, behind: Bool = false) async throws
+    -> [JSON]
+{
+    try await KernelTaskLocals.$sender.withValue(AgentId(selfId)) {
+        try await FantasticAICore.loadHistory(selfId, kernel, behind: behind)
+    }
+}
+
+/// `saveHistory`, as the agent (see `loadHistory`).
+private func saveHistory(_ selfId: String, _ kernel: Kernel, _ newTurns: [JSON]) async throws {
+    try await KernelTaskLocals.$sender.withValue(AgentId(selfId)) {
+        try await FantasticAICore.saveHistory(selfId, kernel, newTurns)
+    }
+}
 
 /// A provider that REPORTS a prompt size, like the real endpoints do.
 private final class ReportingProvider: AIProvider, @unchecked Sendable {
@@ -59,7 +75,7 @@ private func send(_ k: Kernel, _ target: String, _ payload: JSON, as sender: Str
 {
     let item = Item(AgentId(target), payload)
     if let sender {
-        return await KernelTaskLocals.$currentSender.withValue(AgentId(sender)) {
+        return await KernelTaskLocals.$sender.withValue(AgentId(sender)) {
             await k.send([item])[0].result
         }
     }
@@ -221,8 +237,6 @@ struct MemoryFeaturesTests {
         #expect(await AIFoldStrategy.summarize(sctx(s.fn), bigRows(), Array(1...5)) == nil)
     }
 
-    // ── context by grant: fork_from, request_share ──
-
     private func pair() async -> (Kernel, ProviderScript, ProviderScript) {
         let a = ProviderScript([[doneEnvelope], [doneEnvelope]])
         let b = ProviderScript([[doneEnvelope], [doneEnvelope]])
@@ -231,105 +245,18 @@ struct MemoryFeaturesTests {
         return (kernel, a, b)
     }
 
-    private func shareHead(_ k: Kernel) async -> JSON {
-        await send(
-            k, "memory",
-            .object([
-                "type": .string("share"), "with": .string("bob"),
-                "scope": .object(["head_until": .integer(1_000_000_000)]),
-            ]), as: "alice")
-    }
-
-    @Test func forkFromReadsTheOwnersRowsUnderTheGrant() async throws {
-        let (kernel, _, b) = await pair()
-        try await saveHistory(
-            "alice", kernel, [.object(["role": .string("user"), "content": .string("the vault code is 4711")])])
-        let g = await shareHead(kernel)
-        let out = await send(
-            kernel, "bob",
-            .object([
-                "type": .string("fork_from"), "owner": .string("alice"), "grant": g["grant"],
-                "message": .string("what is the code?"),
-            ]))
-        #expect(out["forked"].asBool == true && out["rows"].asInt == 1, "\(out.serialize())")
-        let hist = try await loadHistory("bob", kernel)
-        let fork = try #require(hist.first { $0["kind"].asString == "fork" })
-        #expect((fork["content"].asString ?? "").contains("[shared from alice \u{b7} read-only"))
-        #expect((fork["content"].asString ?? "").contains("4711"), "the owner's row, read back under the grant")
-        // the kickstart: the fork's turn starts at once with the framing + message
-        // (its first model call is the recall a boot owes — create_agent booted
-        // it — then the turn itself)
-        #expect(await b.waitForCalls(2), "the fork never started")
-        let turn = b.requestText(1)
-        #expect(turn.contains("you are a new agent, not alice"))
-        #expect(turn.contains("what is the code?"))
-        // the owner revokes — the reader's next read fails fast
-        _ = await send(
-            kernel, "memory", .object(["type": .string("unshare"), "grant": g["grant"]]), as: "alice")
-        await #expect(throws: MemoryStoreError.self) { try await loadHistory("bob", kernel) }
-    }
-
-    @Test func forkFromRefusesAnOwnerTheGrantDoesNotName() async throws {
-        let (kernel, _, _) = await pair()
-        try await saveHistory(
-            "alice", kernel, [.object(["role": .string("user"), "content": .string("alice's row")])])
-        let g = await shareHead(kernel)
-        var out = await send(
-            kernel, "bob",
-            .object([
-                "type": .string("fork_from"), "owner": .string("mallory"), "grant": g["grant"],
-                "message": .string("go"),
-            ]))
-        #expect(out["reason"].asString == "bad_arg" && (out["error"].asString ?? "").contains("given by alice"))
-        out = await send(
-            kernel, "bob",
-            .object([
-                "type": .string("fork_from"), "owner": .string("alice"), "grant": .integer(99999),
-                "message": .string("go"),
-            ]))
-        #expect(out["reason"].asString == "not_found")
-    }
-
-    @Test func requestShareReachesTheOwnersModel() async throws {
-        let (kernel, a, _) = await pair()
-        let out = await send(
-            kernel, "alice",
-            .object(["type": .string("request_share"), "row": .integer(42), "why": .string("need it")]),
-            as: "bob")
-        #expect(out == .object(["requested": .bool(true), "owner": .string("alice"), "row": .integer(42)]))
-        #expect(await a.waitForCalls(1), "the owner's model never heard it")
-        let turn = a.requestText(0)
-        #expect(turn.contains("[request_share from bob \u{b7} row 42] need it"))
-        #expect(turn.contains("<type>share</type>"))
-    }
-
-    @Test func aSharedScopeShowsAThirdOwnersRowAsAStub() {
-        let rows: [JSON] = [
-            .object(["id": .integer(1), "role": .string("user"), "content": .string("mine")]),
-            .object([
-                "id": .integer(2), "role": .string("user"), "kind": .string("fork"),
-                "owner": .string("carol"), "as_of": .integer(57), "content": .string("[fork of carol]"),
-            ]),
-        ]
-        let text = renderShared(owner: "alice", asOf: .integer(2), rows: rows)
-        #expect(text.contains("(user \u{b7} row 1) mine"))
-        // carol's OWN row id — the one `request_share` to carol can name
-        #expect(text.contains("[row 57 \u{b7} owner carol \u{b7} not shared with you]"))
-    }
-
-    // ── the head cache never diverges from the store ──
-
     @Test func aRowAnotherWriterAppendsReachesTheNextHeadRead() async throws {
         let (kernel, _, _) = await pair()
         try await saveHistory("alice", kernel, [.object(["role": .string("user"), "content": .string("first")])])
         #expect(try await loadHistory("alice", kernel).map { $0["content"] } == [.string("first")])
         let rid = kernel.mintId()
+        // another writer under alice's key: a send AS alice, outside its own turn
         let out = await send(
             kernel, "memory",
             .object([
-                "type": .string("append"), "owner": .string("alice"),
+                "type": .string("append"),
                 "rows": .array([.object(["id": .integer(rid), "role": .string("user"), "content": .string("planted")])]),
-            ]))
+            ]), as: "alice")
         #expect(out["ids"] == .array([.integer(rid)]), "\(out.serialize())")
         let hist = try await loadHistory("alice", kernel)
         #expect(hist.map { $0["content"] } == [.string("first"), .string("planted")])
@@ -372,32 +299,25 @@ struct MemoryFeaturesTests {
 
     // ── the row event: an agent announces its own rows to its watchers ──
 
-    @Test func watchAnnouncesDigestsAndBodiesOnlyUnderALiveGrant() async throws {
+    @Test func watchAnnouncesDigestsAndBodiesOnRequest() async throws {
         let (kernel, _, _) = await pair()
         let inbox = kernel.ensureInbox(AgentId("bob"))
-        var w = await send(
-            kernel, "alice", .object(["type": .string("watch"), "body": .bool(true)]), as: "bob")
-        #expect(w == .object(["watching": .bool(true), "watcher": .string("bob"), "body": .bool(true)]))
+        var w = await send(kernel, "alice", .object(["type": .string("watch")]), as: "bob")
+        #expect(w == .object(["watching": .bool(true), "watcher": .string("bob"), "body": .bool(false)]))
         try await saveHistory("alice", kernel, [.object(["role": .string("user"), "content": .string("secret one")])])
         var events: [JSON] = []
         while let item = inbox.tryTake() { events.append(item.payload) }
         var row = try #require(events.last { $0["type"].asString == "row" })
         #expect(row["source"].asString == "alice" && row["row"]["role"].asString == "user")
-        #expect(row["row"].asObject?["content"] == nil, "no grant, no body")
-        // alice shares LIVE with bob — its model's share refreshes the grant cache
-        _ = await send(
-            kernel, "memory",
-            .object([
-                "type": .string("share"), "with": .string("bob"),
-                "scope": .object(["head_until": .integer(1_000_000_000)]), "mode": .string("live"),
-            ]), as: "alice")
-        forgetGrants("alice", kernel)
-        try await myGrants("alice", kernel)
-        try await saveHistory("alice", kernel, [.object(["role": .string("user"), "content": .string("secret two")])])
+        #expect(row["row"].asObject?["content"] == nil, "a digest carries no content")
+        w = await send(
+            kernel, "alice", .object(["type": .string("watch"), "body": .bool(true)]), as: "bob")
+        #expect(w["body"] == .bool(true))
+        try await saveHistory("alice", kernel, [.object(["role": .string("user"), "content": .string("two")])])
         events = []
         while let item = inbox.tryTake() { events.append(item.payload) }
         row = try #require(events.last { $0["type"].asString == "row" })
-        #expect(row["row"]["content"].asString == "secret two", "\(row.serialize())")
+        #expect(row["row"]["content"].asString == "two", "\(row.serialize())")
         w = await send(kernel, "alice", .object(["type": .string("unwatch")]), as: "bob")
         #expect(w["watching"] == .bool(false))
         // an agent watches for ITSELF

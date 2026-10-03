@@ -1,5 +1,5 @@
 {
-  "_doc": "The reflect contract, captured from the PYTHON kernel's own replies (src/lib/python, `kernel/_agent.py` `_apply_reflect_flags` / `_roster`) and reproduced by the ts kernel (tests/reflect.test.ts replays every case from `tree` + `bundles`). DISTILLED by default: `tree` is the roster {id, sentence, description?, mode?, children} (gated per node \u2014 see the last case), `kernel_verbs` sorted and cut at the first em-dash, and a `more` line; `detail:\"full\"` gives the wiring tree and every verb doc whole. `tree` is decided by key presence (absent = all, null/none = omitted), `tree:\"ids\"` and `bundles` page with `limit`/`after` (`next` / `bundles_next`), `readme` is true | \"index\" | \"<key>\" (this kernel's doc tree is empty). Differences BY DESIGN, per runtime: the root's `runtime` (\"ts\") and handler_module; the kernel verbs this kernel answers (no tree CRUD \u2014 the `_` line says so); the bundle catalog; python's root also carries its loader's doc frame (`self_extension`, and `readmes`/`docs` under full), which this kernel has no loader to contribute. The browser kernel has no OS env, so env is always \"host\" and version null.",
+  "_doc": "The reflect contract, captured from the PYTHON kernel's own replies (src/lib/python, `kernel/_agent.py` `_apply_reflect_flags` / `_roster`) and reproduced by the ts kernel (tests/reflect.test.ts replays every case from `tree` + `bundles`). DISTILLED by default: `tree` is the roster {id, sentence, description?, mode?, children} (whole: a reflect that passes the gate returns the tree whole), `kernel_verbs` sorted and cut at the first em-dash, and a `more` line; `detail:\"full\"` gives the wiring tree and every verb doc whole. `tree` is decided by key presence (absent = all, null/none = omitted), `tree:\"ids\"` and `bundles` page with `limit`/`after` (`next` / `bundles_next`), `readme` is true | \"index\" | \"<key>\" (this kernel's doc tree is empty). Differences BY DESIGN, per runtime: the root's `runtime` (\"ts\") and handler_module; the kernel verbs this kernel answers (no tree CRUD \u2014 the `_` line says so); the bundle catalog; python's root also carries its loader's doc frame (`self_extension`, and `readmes`/`docs` under full), which this kernel has no loader to contribute. The browser kernel has no OS env, so env is always \"host\" and version null.",
   "bundles": [
     "terminal_view.js",
     "canvas.js"
@@ -38,14 +38,10 @@
         "handler_module": null,
         "display_name": "kernel_state",
         "can_call": {
-          "$self": "*",
-          "$parent": "*",
-          "$children": "*"
+          "$self": "*"
         },
         "callable_by": {
-          "$self": "*",
-          "$parent": "*",
-          "$children": "*"
+          "$self": "*"
         },
         "kernel_verbs": {
           "_": "Kernel-owned: send to 'kernel'. The id you name is the OPERAND, not the actor. (`verbs` is what this agent itself does.) This kernel answers the verbs below; tree CRUD lives on the HOST root, reached over the bridge. A browser kernel has no process to exit: `kernel_stop` stops it in place, refusing new work until the page reloads.",
@@ -100,14 +96,10 @@
         "handler_module": null,
         "display_name": "kernel_state",
         "can_call": {
-          "$self": "*",
-          "$parent": "*",
-          "$children": "*"
+          "$self": "*"
         },
         "callable_by": {
-          "$self": "*",
-          "$parent": "*",
-          "$children": "*"
+          "$self": "*"
         },
         "kernel_verbs": {
           "_": "Kernel-owned: send to 'kernel'. The id you name is the OPERAND, not the actor. (`verbs` is what this agent itself does.) This kernel answers the verbs below; tree CRUD lives on the HOST root, reached over the bridge. A browser kernel has no process to exit: `kernel_stop` stops it in place, refusing new work until the page reloads.",
@@ -133,14 +125,10 @@
           "handler_module": null,
           "display_name": "kernel_state",
           "can_call": {
-            "$self": "*",
-            "$parent": "*",
-            "$children": "*"
+            "$self": "*"
           },
           "callable_by": {
-            "$self": "*",
-            "$parent": "*",
-            "$children": "*"
+            "$self": "*"
           },
           "children": [
             {
@@ -149,14 +137,10 @@
               "handler_module": null,
               "display_name": "zeta",
               "can_call": {
-                "$self": "*",
-                "$parent": "*",
-                "$children": "*"
+                "$self": "*"
               },
               "callable_by": {
-                "$self": "*",
-                "$parent": "*",
-                "$children": "*"
+                "$self": "*"
               },
               "children": []
             },
@@ -167,14 +151,10 @@
               "display_name": "Alpha",
               "description": "The chat pane.",
               "can_call": {
-                "$self": "*",
-                "$parent": "*",
-                "$children": "*"
+                "$self": "*"
               },
               "callable_by": {
-                "$self": "*",
-                "$parent": "*",
-                "$children": "*"
+                "$self": "*"
               },
               "children": []
             }
@@ -197,14 +177,10 @@
         "handler_module": null,
         "display_name": "kernel_state",
         "can_call": {
-          "$self": "*",
-          "$parent": "*",
-          "$children": "*"
+          "$self": "*"
         },
         "callable_by": {
-          "$self": "*",
-          "$parent": "*",
-          "$children": "*"
+          "$self": "*"
         },
         "kernel_verbs": {
           "_": "Kernel-owned: send to 'kernel'. The id you name is the OPERAND, not the actor. (`verbs` is what this agent itself does.) This kernel answers the verbs below; tree CRUD lives on the HOST root, reached over the bridge. A browser kernel has no process to exit: `kernel_stop` stops it in place, refusing new work until the page reloads.",
@@ -246,14 +222,10 @@
         "handler_module": null,
         "display_name": "kernel_state",
         "can_call": {
-          "$self": "*",
-          "$parent": "*",
-          "$children": "*"
+          "$self": "*"
         },
         "callable_by": {
-          "$self": "*",
-          "$parent": "*",
-          "$children": "*"
+          "$self": "*"
         },
         "kernel_verbs": {
           "_": "Kernel-owned: send to 'kernel'. The id you name is the OPERAND, not the actor. (`verbs` is what this agent itself does.) This kernel answers the verbs below; tree CRUD lives on the HOST root, reached over the bridge. A browser kernel has no process to exit: `kernel_stop` stops it in place, refusing new work until the page reloads.",
@@ -292,14 +264,10 @@
         "handler_module": null,
         "display_name": "kernel_state",
         "can_call": {
-          "$self": "*",
-          "$parent": "*",
-          "$children": "*"
+          "$self": "*"
         },
         "callable_by": {
-          "$self": "*",
-          "$parent": "*",
-          "$children": "*"
+          "$self": "*"
         },
         "kernel_verbs": {
           "_": "Kernel-owned: send to 'kernel'. The id you name is the OPERAND, not the actor. (`verbs` is what this agent itself does.) This kernel answers the verbs below; tree CRUD lives on the HOST root, reached over the bridge. A browser kernel has no process to exit: `kernel_stop` stops it in place, refusing new work until the page reloads.",
@@ -341,14 +309,10 @@
         "description": "The chat pane.",
         "mode": "chat",
         "can_call": {
-          "$self": "*",
-          "$parent": "*",
-          "$children": "*"
+          "$self": "*"
         },
         "callable_by": {
-          "$self": "*",
-          "$parent": "*",
-          "$children": "*"
+          "$self": "*"
         },
         "kernel_verbs": {
           "_": "Kernel-owned: send to 'kernel'. The id you name is the OPERAND, not the actor. (`verbs` is what this agent itself does.) This kernel answers the verbs below; tree CRUD lives on the HOST root, reached over the bridge. A browser kernel has no process to exit: `kernel_stop` stops it in place, refusing new work until the page reloads.",
@@ -387,14 +351,10 @@
         "description": "The chat pane.",
         "mode": "chat",
         "can_call": {
-          "$self": "*",
-          "$parent": "*",
-          "$children": "*"
+          "$self": "*"
         },
         "callable_by": {
-          "$self": "*",
-          "$parent": "*",
-          "$children": "*"
+          "$self": "*"
         },
         "kernel_verbs": {
           "_": "Kernel-owned: send to 'kernel'. The id you name is the OPERAND, not the actor. (`verbs` is what this agent itself does.) This kernel answers the verbs below; tree CRUD lives on the HOST root, reached over the bridge. A browser kernel has no process to exit: `kernel_stop` stops it in place, refusing new work until the page reloads.",
@@ -423,14 +383,10 @@
         "handler_module": null,
         "display_name": "zeta",
         "can_call": {
-          "$self": "*",
-          "$parent": "*",
-          "$children": "*"
+          "$self": "*"
         },
         "callable_by": {
-          "$self": "*",
-          "$parent": "*",
-          "$children": "*"
+          "$self": "*"
         },
         "kernel_verbs": {
           "_": "Kernel-owned: send to 'kernel'. The id you name is the OPERAND, not the actor. (`verbs` is what this agent itself does.) This kernel answers the verbs below; tree CRUD lives on the HOST root, reached over the bridge. A browser kernel has no process to exit: `kernel_stop` stops it in place, refusing new work until the page reloads.",
@@ -463,14 +419,10 @@
         "handler_module": null,
         "display_name": "zeta",
         "can_call": {
-          "$self": "*",
-          "$parent": "*",
-          "$children": "*"
+          "$self": "*"
         },
         "callable_by": {
-          "$self": "*",
-          "$parent": "*",
-          "$children": "*"
+          "$self": "*"
         },
         "kernel_verbs": {
           "_": "Kernel-owned: send to 'kernel'. The id you name is the OPERAND, not the actor. (`verbs` is what this agent itself does.) This kernel answers the verbs below; tree CRUD lives on the HOST root, reached over the bridge. A browser kernel has no process to exit: `kernel_stop` stops it in place, refusing new work until the page reloads.",
@@ -504,14 +456,10 @@
         "handler_module": null,
         "display_name": "zeta",
         "can_call": {
-          "$self": "*",
-          "$parent": "*",
-          "$children": "*"
+          "$self": "*"
         },
         "callable_by": {
-          "$self": "*",
-          "$parent": "*",
-          "$children": "*"
+          "$self": "*"
         },
         "kernel_verbs": {
           "_": "Kernel-owned: send to 'kernel'. The id you name is the OPERAND, not the actor. (`verbs` is what this agent itself does.) This kernel answers the verbs below; tree CRUD lives on the HOST root, reached over the bridge. A browser kernel has no process to exit: `kernel_stop` stops it in place, refusing new work until the page reloads.",
@@ -545,14 +493,10 @@
         "handler_module": null,
         "display_name": "zeta",
         "can_call": {
-          "$self": "*",
-          "$parent": "*",
-          "$children": "*"
+          "$self": "*"
         },
         "callable_by": {
-          "$self": "*",
-          "$parent": "*",
-          "$children": "*"
+          "$self": "*"
         },
         "kernel_verbs": {
           "_": "Kernel-owned: send to 'kernel'. The id you name is the OPERAND, not the actor. (`verbs` is what this agent itself does.) This kernel answers the verbs below; tree CRUD lives on the HOST root, reached over the bridge. A browser kernel has no process to exit: `kernel_stop` stops it in place, refusing new work until the page reloads.",
@@ -566,65 +510,6 @@
         },
         "more": "Distilled: every agent and what it is FOR. Reflect one agent for its verbs (<type>reflect</type>). Manual: <type>reflect</type> <readme>index</readme> - keys include system-verbs (ps/cancel/create_agent args) and self-extension (author your own durable tools). <detail>full</detail> on a reflect adds wiring and posture - ask for it only when you need to see how agents are plumbed, not to find one.",
         "readme": null
-      }
-    },
-    {
-      "name": "gated roster (as zeta)",
-      "from": "zeta",
-      "target": "kernel_state",
-      "payload": {
-        "type": "reflect"
-      },
-      "expect": {
-        "id": "kernel_state",
-        "sentence": "Fantastic kernel. Everything is reachable by sending messages to agents.",
-        "parent_id": null,
-        "handler_module": null,
-        "display_name": "kernel_state",
-        "can_call": {
-          "$self": "*",
-          "$parent": "*",
-          "$children": "*"
-        },
-        "callable_by": {
-          "$self": "*",
-          "$parent": "*",
-          "$children": "*"
-        },
-        "kernel_verbs": {
-          "_": "Kernel-owned: send to 'kernel'. The id you name is the OPERAND, not the actor. (`verbs` is what this agent itself does.) This kernel answers the verbs below; tree CRUD lives on the HOST root, reached over the bridge. A browser kernel has no process to exit: `kernel_stop` stops it in place, refusing new work until the page reloads.",
-          "ack_deadletter": "args: id:int|str (req",
-          "cancel": "args: task_id:str. Kills that task AND ITS SUBTREE",
-          "kernel_start": "No args. THE START SEQUENCE",
-          "kernel_stop": "No args. Stops the kernel PROCESS gracefully",
-          "ledger": "No args. EVERY execution and what it became",
-          "ps": "No args. The live kernel-wide TASK TABLE",
-          "shutdown_agents": "No args. Stops the AGENTS, not the process: drains (new roots refused), sends `shutdown` to every agent advertising it, waits for in-flight work, cancels the rest. Returns {drained, shut:[ids], cancelled:[ids]}."
-        },
-        "runtime": "ts",
-        "peers": [],
-        "env": "host",
-        "version": null,
-        "persistence": {
-          "provider": null
-        },
-        "guid": null,
-        "tree": {
-          "id": "kernel_state",
-          "sentence": "Fantastic kernel. Everything is reachable by sending messages to agents.",
-          "children": [
-            {
-              "id": "zeta",
-              "sentence": "Bare agent (no handler_module) \u2014 answers substrate verbs only.",
-              "children": []
-            },
-            {
-              "id": "alpha",
-              "children": []
-            }
-          ]
-        },
-        "more": "Distilled: every agent and what it is FOR. Reflect one agent for its verbs (<type>reflect</type>). Manual: <type>reflect</type> <readme>index</readme> - keys include system-verbs (ps/cancel/create_agent args) and self-extension (author your own durable tools). <detail>full</detail> on a reflect adds wiring and posture - ask for it only when you need to see how agents are plumbed, not to find one."
       }
     }
   ]

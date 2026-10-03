@@ -67,7 +67,7 @@ async fn missing_type_is_missing_arg_before_gate() {
     let (_t, kernel) = mk();
     create(&kernel, "a", json!({})).await;
     create(&kernel, "b", json!({})).await; // no edge a→b: the gate WOULD refuse
-    let out = fantastic_kernel::send::with_sender(AgentId::from("a"), async {
+    let out = fantastic_kernel::test_support::as_agent(AgentId::from("a"), async {
         kernel
             .send(vec![Item::new(AgentId::from("b"), json!({}))])
             .await

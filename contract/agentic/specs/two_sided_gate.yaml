@@ -53,9 +53,9 @@ expect:
       reach: {from: both_grant, to: caller, send: {type: list, path: ""}}
       expect: {allow: false, side: egress}
 
-    - name: a roster agent reaches its loader on the structural baseline
+    - name: a roster agent reaches not even its loader without a grant
       reach: {from: caller, to: gate_loader, send: {type: reflect}}
-      expect: {allow: true}
+      expect: {allow: false, side: egress}
 
     # ── the SWEEPS: reconciliations, not hand-listed probes ──────
     #
@@ -67,7 +67,7 @@ expect:
       reconcile_grants: {min_probes: 6, payloads: {list: {path: ""}, mkdir: {path: sweep_probe}}}
       because: TSG-3
 
-    - name: nothing rides along — the reachable set is baseline plus declared
+    - name: nothing rides along — the reachable set is self plus declared
       sweep_undeclared: {verbs: [list, reflect], payloads: {list: {path: ""}}}
       because: TSG-4
 
@@ -107,8 +107,10 @@ expect:
     # ── the repair path: a peer cannot supply the missing half ───
     #
     # Authority descends. An agent editing its OWN can_call to reach further is
-    # refused `side: self-grant` — and the refusal is then re-probed for EFFECT,
-    # not inspected as a field: a denied self-grant must leave the edge shut.
+    # refused (a mutator acts on the sender's own children only, and this one
+    # holds no reach to the root) — and the refusal is then re-probed for
+    # EFFECT, not inspected as a field: an agent's denied attempt to raise its
+    # own grant must leave the edge shut.
 
     - name: a roster agent cannot grant itself the half it lacks
       reach:
@@ -132,15 +134,14 @@ expect:
       expect: {allow: true}
       because: TSG-5
 
-    # ── a lateral grant must not silently close the structural ones ──
+    # ── a lateral grant must not silently close the others ──
     #
     # `update_agent` REPLACES a field rather than merging it, so a bare
-    # `{other: verbs}` would drop the structural baseline off the live record and
-    # sever the agent from its own parent. The runner's `grant` step merges; this
-    # asserts the merge actually held.
+    # `{other: verbs}` would drop every other grant off the live record. The
+    # runner's `grant` step merges; this asserts the merge actually held.
 
-    - name: after a lateral grant the structural parent edge still works
-      reach: {from: caller, to: gate_loader, send: {type: reflect}}
+    - name: after a lateral grant the declared edges still work
+      reach: {from: caller, to: both_grant, send: {type: list, path: ""}}
       expect: {allow: true}
       because: TSG-6
 
@@ -155,8 +156,8 @@ expect:
 
     - name: a reboot re-applies the manifest over the hydrated record
       reboot: {}
-    - name: the structural baseline survives the re-apply
-      reach: {from: caller, to: gate_loader, send: {type: reflect}}
+    - name: the narrowed edge the manifest declares survives the re-apply
+      reach: {from: caller, to: callee_narrows_verbs, send: {type: list, path: ""}}
       expect: {allow: true}
       because: TSG-6
     - name: and every edge the manifest declares is back

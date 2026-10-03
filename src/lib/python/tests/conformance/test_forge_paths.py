@@ -20,7 +20,9 @@ from __future__ import annotations
 
 import types
 
-from kernel._kernel import current_origin, sender_context
+from kernel._kernel import current_origin
+
+from _testkit import as_agent
 from kernel import register_unlisted
 
 # ─── a recorder bundle: every invocation logs WHO the kernel says it was ───
@@ -83,7 +85,7 @@ async def test_a_gated_out_agent_cannot_invoke_by_emitting(kernel):
     target = await _mk(kernel, "forge_target")
     await _mk(kernel, "forge_attacker")  # deny-all: no can_call for the target
 
-    with sender_context("forge_attacker"):
+    with as_agent(kernel, "forge_attacker"):
         denied = (await kernel.send([{"target": target, "payload": {"type": "act"}}]))[
             0
         ]["result"]
@@ -91,7 +93,7 @@ async def test_a_gated_out_agent_cannot_invoke_by_emitting(kernel):
     assert _invocations == [], "the refused send must not have invoked"
 
     # the forge attempt: same payload, emit path, same attacker
-    with sender_context("forge_attacker"):
+    with as_agent(kernel, "forge_attacker"):
         await kernel.ctx.agents[target].emit(target, {"type": "act"})
     assert _invocations == [], (
         "an emitted event INVOKED a handler — emit is a forgery channel"
@@ -119,10 +121,10 @@ async def test_no_agent_initiated_path_arrives_as_operator(kernel):
     # operator baseline: the ONLY caller that may arrive as None
     await kernel.send([{"target": a, "payload": {"type": "act"}}])
     # direct agent-attributed send
-    with sender_context("forge_a"):
+    with as_agent(kernel, "forge_a"):
         await kernel.send([{"target": b, "payload": {"type": "act"}}])
     # nested hop: agent a -> b (hop) -> c ; the SECOND hop must not launder
-    with sender_context("forge_a"):
+    with as_agent(kernel, "forge_a"):
         await kernel.send(
             [{"target": b, "payload": {"type": "hop", "next": "forge_c"}}]
         )

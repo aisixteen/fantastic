@@ -97,8 +97,6 @@ public final class ResponsesBundle: AgentBundle, @unchecked Sendable {
     ## Bare completion + the `<call>` grammar — no native tool API
     `send` performs exactly ONE provider pass: the stream's text is read; it never sends Responses `tools` nor reads `function_call` items (one arriving is a loud error). Tool-calling is RAW and shared by every backend: `ai_core` parses the model's `<call name=…>` tags from the streamed text, dispatches them as ONE batch (`kernel.send([...])`), and each destination's results arrive as ONE fresh turn — there is no loop inside a pass.
 
-    **A model never reaches a secret holder.** A call the model emits whose target or `reply_to` is an agent with `holds_secrets: true` on its record (every `credential_store`; any agent the operator marks) is refused before anything is sent — `{reason:"unauthorized"}`, "`<id>` holds secrets — a secret holder answers backends, never a model turn; this call was not dispatched" — and the refusal comes back to the model itself. The backend's own key read goes to the store directly, never through the model's calls. The address is resolved the way the kernel resolves it, so `<this kernel's guid>|<agent>` is that local agent and is judged like the bare id; a connected peer's `<guid>|<agent>` lives on another kernel, its record is not here, so it is not judged here.
-
     ## Context management — owned HERE
     The conversation lives in this agent's MEMORY STORE — `memory_store_id` on the record
     is REQUIRED (a `send` fails loud naming it): every turn, fold and view is a row under
@@ -107,11 +105,8 @@ public final class ResponsesBundle: AgentBundle, @unchecked Sendable {
     the budget (calibrated by the endpoint's reported prompt size when it reports one)
     with the per-agent `context_strategy` (default `compact`; `fold`, `truncate`) and a
     `[context-notice]`; `context_status`, `context_recall`, `history {fold?}`, `grep` and
-    `context_clear` (a boundary, nothing deleted) inspect and page it. Sharing is by
-    GRANT, by the owner's own choice: it `share`s a scope of its rows through the store;
-    another agent starts from it with `fork_from {owner, grant, message}` and asks for a
-    third agent's row with `request_share`. `watch {body?}` / `unwatch` subscribe to this
-    agent's row events (a digest; bodies only for a watcher the rows are shared with).
+    `context_clear` (a boundary, nothing deleted) inspect and page it. `watch {body?}` /
+    `unwatch` subscribe to this agent's row events (a digest; with `body` the content too).
     ## Calling this agent
     `send {type:'send', text, client_id?}` runs ONE completion (per-backend FIFO lock)
     and returns `{response, final}`. A first-class peer of `exec_bridge`: a scheduler,
@@ -120,7 +115,7 @@ public final class ResponsesBundle: AgentBundle, @unchecked Sendable {
     The record's own `system_prompt` (a non-empty string; `null` clears it) replaces
     the default block on EVERY turn of this agent — a main turn, a nudge, a turn a reply
     wakes — read live each turn; a per-call `system_prompt` beats it for that delivery.
-    There is no caller-supplied history: a one-off completion is a disposable agent with its own store; context for another agent travels in the text, or by grant (`share` → `fork_from`).
+    There is no caller-supplied history: a one-off completion is a disposable agent with its own store; context for another agent travels in the text.
 
     ## Streaming
     You stream `token`/`status`/`done` on your OWN id. Any caller that `watch`es your id
@@ -305,9 +300,7 @@ struct ResponsesProvider: AIProvider {
                         let code = Int(response.status.code)
                         if code >= 400 {
                             let collected = try? await response.body.collect(upTo: 1 << 20)
-                            // an endpoint may echo the request: the key leaves scrubbed
-                            let detail = withoutKey(
-                                collected.map { String(buffer: $0) } ?? "", apiKey)
+                            let detail = collected.map { String(buffer: $0) } ?? ""
                             let ctype = response.headers.first(name: "content-type") ?? ""
                             if !(Self.transportCodes.contains(code)
                                 && !ctype.lowercased().contains("json")
@@ -330,7 +323,7 @@ struct ResponsesProvider: AIProvider {
                                 for token in d.tokens { continuation.yield(.token(token)) }
                                 if let err = d.error {
                                     continuation.finish(
-                                        throwing: PyError("RuntimeError", withoutKey(err, apiKey)))
+                                        throwing: PyError("RuntimeError", err))
                                     return
                                 }
                                 if d.done { break }
@@ -352,13 +345,6 @@ struct ResponsesProvider: AIProvider {
                             continuation.finish()
                             return
                         }
-                    } catch let e as HTTPClientError
-                        where e.shortDescription == "Invalid header field values"
-                    {
-                        // The client refused a header value and its error QUOTES it —
-                        // the key. A fixed text instead, rust's (audit S1).
-                        continuation.finish(throwing: PyError("RuntimeError", ILLEGAL_HEADER_TEXT))
-                        return
                     } catch {
                         continuation.finish(throwing: error)
                         return

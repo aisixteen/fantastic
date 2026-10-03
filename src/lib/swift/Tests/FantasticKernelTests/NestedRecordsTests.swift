@@ -39,7 +39,7 @@ private func call(_ k: Kernel, _ target: String, _ payload: JSON, as sender: Str
     -> JSON
 {
     let item = Item(AgentId(target), payload)
-    return await KernelTaskLocals.$currentSender.withValue(sender.map { AgentId($0) }) {
+    return await KernelTaskLocals.$sender.withValue(sender.map { AgentId($0) }) {
         await k.send([item])[0].result
     }
 }
@@ -60,7 +60,7 @@ private func setup() async -> Fixture {
     k.setRoot(rootAgent)
     let root = workdir.appendingPathComponent(".fantastic/web")
     let recs: [OrderedDictionary<String, JSON>] = [
-        // the loader's record verbs are privileged: the owning leg names them
+        // explicit grants: the owning leg names the loader's record verbs
         [
             "id": .string("wws"), "handler_module": .string("leg.tools"),
             "parent_id": .string(ROOT_ID),
@@ -78,7 +78,7 @@ private func setup() async -> Fixture {
         [
             "id": .string("web_loader"), "handler_module": .string(ROOT_HANDLER_MODULE),
             "parent_id": .string("wws"), "root": ".fantastic/web", "watch": .bool(false),
-            "callable_by": .object(["rest_leg": .string("*")]),
+            "callable_by": .object(["rest_leg": .string("*"), "wws": .string("*")]),
         ],
     ]
     for rec in recs {
@@ -160,7 +160,7 @@ struct NestedRecordsTests {
         #expect(f.exists("agents/canvas/agents/terminal_view/agent.yaml"))
     }
 
-    /// No fallback: a brand-new record's placement comes from the payload, and
+    /// No fallback: a brand-new record's location comes from the payload, and
     /// the walk from there must still reach the caller.
     @Test func anIdInNeitherTreeNorDiskIsPlacedByThePayloadAndGuarded() async {
         let f = await setup()

@@ -104,11 +104,10 @@ private func rootedKernel(_ registry: BundleRegistry, guid: String?) -> Kernel {
 /// Create the relay leg's OWN agent record, with the grants for wherever its
 /// inbound frames land.
 ///
-/// An inbound frame now dispatches AS THE LEG — `RelayTransport.dispatchCall`
-/// wraps `kernel.send` in the leg's `currentSender` — so the leg has to BE an
-/// agent and hold real grants, exactly as in production. Before, the frame
-/// reached the kernel with a nil sender and ran as the OPERATOR: the two-sided
-/// gate never ran and a peer with a passing ingress rule could call anything.
+/// An inbound frame dispatches AS THE LEG — the leg's read loop is a task its
+/// `boot` spawned, so what it serves is the leg's own send — so the leg has to
+/// BE an agent and hold real grants, exactly as in production, and every target
+/// must accept the leg. `peerGuid` only says the leg serves inbound calls.
 private func makeLeg(
     _ kernel: Kernel, id: String, canCall: [String], ingress: JSON? = nil, egress: JSON? = nil,
     auth: JSON? = nil, peerGuid: String? = nil
@@ -126,18 +125,14 @@ private func makeLeg(
     if let ingress { create["ingress_rule"] = ingress }
     if let egress { create["egress_rule"] = egress }
     if let auth { create["auth"] = auth }
-    // The ONE peer this leg serves inbound calls for (audit 2026-09-28).
-    if let peerGuid { create["peer_guid"] = .string(peerGuid) }
     _ = await kernel.send([Item("kernel_state", create)])[0].result
-    // The INGRESS half. An inbound call is judged as its FOREIGN caller
-    // (`<peer guid>|<agent>`), so every target opens the edge to `<peer guid>|*`;
-    // a local sibling call through the leg still needs the leg by name.
+    // The INGRESS half: an inbound call is judged as THE LEG, so every target
+    // accepts the leg by name.
     for t in canCall where t != "kernel_state" || peerGuid != nil {
         var accept: JSON = .object([
             "$self": .string("*"), "$parent": .string("*"), "$children": .string("*"),
         ])
         accept[id] = .string("*")
-        if let peerGuid { accept["\(peerGuid)|*"] = .string("*") }
         _ = await kernel.send([
             Item(
                 "kernel_state",
@@ -511,9 +506,9 @@ struct RelayTransportTests {
         // The kernel appends its own reflect flags (can_call, kernel_verbs, tree)
         // after the bundle's keys, so the BUNDLE half is the prefix.
         #expect(
-            Array((r.asObject?.keys ?? []).prefix(18)) == [
+            Array((r.asObject?.keys ?? []).prefix(17)) == [
                 "id", "sentence", "transport", "connected", "pending_count", "ingress_rule",
-                "egress_rule", "sealed", "peer_guid", "relay_url", "guid", "partner_guid",
+                "egress_rule", "sealed", "relay_url", "guid", "partner_guid",
                 "reconnect", "role", "owner_guid", "exposes", "verbs", "emits",
             ], "\(r.serialize())")
         #expect(r["transport"].asString == "relay")
@@ -580,10 +575,9 @@ struct RelayTransportTests {
         ])[0].result
         let r = await kernel.send([Item("wb", ["type": "reflect"])])[0].result
         #expect(
-            Array((r.asObject?.keys ?? []).prefix(14)) == [
+            Array((r.asObject?.keys ?? []).prefix(13)) == [
                 "id", "sentence", "transport", "connected", "pending_count", "ingress_rule",
-                "egress_rule", "sealed", "peer_guid", "host", "peer_id", "port", "verbs",
-                "emits",
+                "egress_rule", "sealed", "host", "peer_id", "port", "verbs", "emits",
             ], "\(r.serialize())")
         #expect(r["transport"].asString == "ws")
         // A7.24 — the dial to a dead port FAILED, so nothing attached: boot is
@@ -591,7 +585,6 @@ struct RelayTransportTests {
         #expect(r["connected"].asBool == false)
         #expect(r["host"].isNull && r["peer_id"].asString == "kernel_state")
         #expect(r["port"].asInt == 8123)
-        #expect(r["peer_guid"].isNull)
         #expect(r["verbs"].asObject?.count == 6)
         #expect(
             r["sentence"].asString
@@ -1149,7 +1142,7 @@ struct WSFrameResilienceTests {
                 .text("{not json"),  // bad text frame
                 .text("[1]"),  // well-formed JSON, not an envelope
                 .text(good),
-            ]), sealed: false)
+            ]))
 
         var frame: JSON = .null
         let lines = await RuntimeLog.capture {
@@ -1183,7 +1176,7 @@ struct WSFrameResilienceTests {
                 .text(deep),
                 .binary(binaryFrame(headerLen: UInt32(deep.utf8.count), Array(deep.utf8))),
                 .text(#"{"type": "reply", "id": "1", "data": {"ok": true}}"#),
-            ]), sealed: false)
+            ]))
         var frame: JSON = .null
         let lines = await RuntimeLog.capture {
             frame = try! await withDeadline(5) { try await transport.recv().frame }

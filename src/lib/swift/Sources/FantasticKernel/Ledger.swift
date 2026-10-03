@@ -67,18 +67,9 @@ public enum Opened {
     /// execution's outcome verbatim, so the gate must be asked about the call
     /// that was actually made. `nil` after a recall from the store, where
     /// python's row carries the payload but the joiner is gated on it the same.
-    ///
-    /// `hide`: the execution's `secret` when its item marked secret paths AND
-    /// this joiner is not the identity that opened it — the joiner is then handed
-    /// the outcome AS SHOWN, masked with these marks, never the real values.
-    ///
-    /// `foreign`: the refusal when the execution ran a caller-scoped verb
-    /// (`callerScopedVerbs`) and this joiner is not the caller that sent it —
-    /// answered once the gate has passed the joiner.
-    case join(payload: JSON?, id: Int64, box: OutcomeBox, hide: Secret?, foreign: JSON?)
+    case join(payload: JSON?, id: Int64, box: OutcomeBox)
     /// Already settled: this IS the answer; the handler must not run again.
-    /// `hide` and `foreign` as for `join`.
-    case settled(Outcome, payload: JSON?, id: Int64, hide: Secret?, foreign: JSON?)
+    case settled(Outcome, payload: JSON?, id: Int64)
     /// The id is unusable — the refusal to hand back verbatim.
     case refused(JSON)
 }
@@ -94,26 +85,6 @@ public struct LedgerEntry: Sendable {
     public let caller: AgentId?
     public let outcome: Outcome?
     public let acked: Bool
-    /// The outcome AS RECORDED when the item marked `secret` paths — what the
-    /// `ledger` read-back shows instead of `outcome` (python `shown_out`).
-    let shown: ShownOutcome?
-}
-
-/// The kernel verbs whose answer is scoped to the caller that sends them
-/// (`ledger`, `ack_deadletter`: the executions THAT caller originated). A join of
-/// one by any other caller is refused (`ExecutionLedger.open`); a new
-/// caller-scoped verb joins this set. Python `_CALLER_SCOPED_VERBS`.
-let callerScopedVerbs: Set<String> = ["ledger", "ack_deadletter"]
-
-/// The answer to joining another caller's execution of a caller-scoped verb, in
-/// python's words (`_foreign_scoped_join`): the caller's raw id as given.
-func foreignScopedJoin(_ callerId: JSON, _ verb: String) -> JSON {
-    Refusal.make(
-        Refusal.badArg,
-        "send: id \(pyRepr(callerId)) names another caller's \(verb) execution — "
-            + "\(verb) answers only the caller that sent it, so it cannot be joined; "
-            + "make your own \(verb) call under a new id",
-        extra: [("arg", .string("id"))])
 }
 
 /// One execution and what it became.
@@ -137,18 +108,6 @@ private struct LedgerRow {
     var box: OutcomeBox
     /// A dead letter someone acknowledged (`ack_deadletter`).
     var acked: Bool = false
-    /// RAM only: the item's `secret` paths and values — what the settle masks the
-    /// recorded outcome with. Never on a recalled row.
-    var secret: Secret? = nil
-    /// RAM only: the identity a joiner must BE to receive the real outcome of a
-    /// secret-marked execution (`Kernel.callerIdentity()`: the sending agent,
-    /// the relayed `<guid>|<agent>`, or `nil` for the operator). Python the
-    /// entry's `origin`.
-    var origin: String? = nil
-    /// The outcome AS RECORDED (python `shown_out`), set at the settle of a call
-    /// with `secret`; the `ledger` read-back shows it, the caller and joiners got
-    /// the real one.
-    var shown: ShownOutcome? = nil
     var outcome: Outcome? { box.outcome }
 }
 
@@ -182,16 +141,9 @@ public final class ExecutionLedger: @unchecked Sendable {
     ///
     /// `callerId` is the CALLER's raw id AS GIVEN — a string name or an int
     /// (C38) — used ONLY to render the rebind refusal in python's exact words.
-    ///
-    /// `payload` is the payload AS SHOWN when the item marked `secret` paths —
-    /// the RAM entry never holds the values; `secret` is kept for the settle.
-    ///
-    /// `origin` is WHO this call is (`Kernel.callerIdentity()`): recorded on a
-    /// fresh execution, compared on a join — a secret-marked execution's REAL
-    /// outcome is its caller's alone (audit 2026-10-03, F1).
     public func open(
         _ execId: Int64, target: AgentId, payload: JSON, retries: UInt32, name: String?,
-        caller: AgentId?, callerId: JSON, secret: Secret?, origin: String?
+        caller: AgentId?, callerId: JSON
     ) -> Opened {
         lock.lock()
         defer { lock.unlock() }
@@ -212,39 +164,17 @@ public final class ExecutionLedger: @unchecked Sendable {
                             + "new id",
                         extra: [("arg", .string("id"))]))
             }
-            let hide = row.secret != nil && origin != row.origin ? row.secret : nil
-            // A CALLER-SCOPED VERB'S ANSWER IS ITS CALLER'S VIEW, NOT A FACT
-            // (owner-approved 2026-10-03, audit KV-1). `ledger` and
-            // `ack_deadletter` answer from WHO sends them — the executions that
-            // caller originated (`LedgerRow.caller`); a join never re-runs the
-            // handler, so the joiner would be handed the original caller's view.
-            // Measured: `B`, granted `ledger`, joined `A`'s named ledger read and
-            // got A's rows (and the operator's unscoped read by its int pid: every
-            // caller's). So a join by any caller other than the one that sent it
-            // is REFUSED — the operator included, whose own read is unscoped
-            // anyway. Any NEW caller-scoped verb joins `callerScopedVerbs`.
-            // Cross-caller joins of every OTHER verb stay open by design: one
-            // execution under one id is the once-only contract (a wire frame id IS
-            // the execution id), the gate asks the joiner the original call's
-            // question, and a secret-marked outcome goes over as shown (`hide`).
-            // Python `_agent.py` (the join branch).
-            var foreign: JSON? = nil
-            if let verb = row.payload?["type"].asString, callerScopedVerbs.contains(verb),
-                row.caller != caller
-            {
-                foreign = foreignScopedJoin(callerId, verb)
-            }
+            // A join re-gates the ORIGINAL verb (`joinDenial`).
             if let o = row.outcome {
-                return .settled(o, payload: row.payload, id: execId, hide: hide, foreign: foreign)
+                return .settled(o, payload: row.payload, id: execId)
             }
-            return .join(
-                payload: row.payload, id: execId, box: row.box, hide: hide, foreign: foreign)
+            return .join(payload: row.payload, id: execId, box: row.box)
         }
 
         if let n = name { names[n] = execId }
         rows[execId] = LedgerRow(
             target: target, payload: payload, retries: retries, attempts: 0, name: name,
-            caller: caller, box: OutcomeBox(), secret: secret, origin: origin)
+            caller: caller, box: OutcomeBox())
         order.append(execId)
         evict()
         return .fresh
@@ -297,17 +227,6 @@ public final class ExecutionLedger: @unchecked Sendable {
         return rows[execId]?.outcome
     }
 
-    /// The `secret` an execution's item marked, while it is held in RAM.
-    func secret(_ execId: Int64) -> Secret? {
-        lock.withLock { rows[execId]?.secret }
-    }
-
-    /// Keep the outcome AS RECORDED for the `ledger` read-back (python
-    /// `exe["shown_out"] = out`).
-    func setShown(_ execId: Int64, _ shown: ShownOutcome) {
-        lock.withLock { rows[execId]?.shown = shown }
-    }
-
     /// Is `execId` held and NAMED? (What the settle row keeps depends on it.)
     public func isNamed(_ execId: Int64) -> Bool {
         lock.withLock { rows[execId]?.named ?? false }
@@ -320,7 +239,7 @@ public final class ExecutionLedger: @unchecked Sendable {
         guard let r = rows[execId] else { return nil }
         return LedgerEntry(
             id: execId, target: r.target, retries: r.retries, attempts: r.attempts,
-            name: r.name, caller: r.caller, outcome: r.outcome, acked: r.acked, shown: r.shown)
+            name: r.name, caller: r.caller, outcome: r.outcome, acked: r.acked)
     }
 
     /// Every execution still in RAM, oldest first — the RAM half of the ledger
@@ -332,7 +251,7 @@ public final class ExecutionLedger: @unchecked Sendable {
             guard let r = rows[id] else { return nil }
             return LedgerEntry(
                 id: id, target: r.target, retries: r.retries, attempts: r.attempts,
-                name: r.name, caller: r.caller, outcome: r.outcome, acked: r.acked, shown: r.shown)
+                name: r.name, caller: r.caller, outcome: r.outcome, acked: r.acked)
         }
     }
 

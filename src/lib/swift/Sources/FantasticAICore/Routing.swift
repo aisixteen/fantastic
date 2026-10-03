@@ -541,38 +541,6 @@ func routeReply(
             continue
         }
 
-        // A MODEL NEVER REACHES A SECRET HOLDER (owner, 2026-10-02). This loop is
-        // the one place a model-parsed call becomes a dispatch — one call, a
-        // batch, a `to` fan-out (already one call per recipient here), a call
-        // beside `await` — so the refusal lives here and nowhere else. The
-        // target AND the `reply_to` are checked, each resolved as the kernel
-        // resolves it (`<this kernel's guid>|<holder>` IS the holder): a delivery
-        // to a holder is a dispatch on the model's behalf too. Refused calls are
-        // not dispatched and not counted in flight; the refusal always goes to
-        // SELF, so the model reads it whatever `reply_to` said. The backend's own
-        // key read (`keyReader`) never passes through here. Python `_route_reply`.
-        var held = secretHolderRefusal(kernel, target)
-        if held == nil, let replyTo { held = secretHolderRefusal(kernel, replyTo) }
-        // Nor does it JOIN an execution that carried secrets (audit F2): a join
-        // hands back that execution's outcome, so `<exec_id>` = the backend's own
-        // key read was the key — even from a store on a connected peer, which the
-        // holder check above cannot see.
-        if held == nil, let execId = args["exec_id"] { held = secretJoinRefusal(kernel, execId) }
-        if let held {
-            // python `payload.get("type", "?") if isinstance(payload, dict) else "-"`
-            let verb: String
-            if case .object(let p)? = args["payload"] {
-                verb = p["type"].map { pyStr($0) } ?? "?"
-            } else {
-                verb = "-"
-            }
-            units.append(
-                RouteUnit(
-                    dest: selfId.value, target: target, verb: verb, idx: nil,
-                    body: renderReply(held)))
-            continue
-        }
-
         // AN EMPTY PAYLOAD IS NO PAYLOAD. The grammar always produces the key
         // (every child that is not routing IS the payload), so `{}` is exactly
         // what a send with no verb looks like — and dispatching it reaches the
@@ -696,21 +664,6 @@ func routeReply(
             await kernel.send(items)
         }
     if hadItems { await inFlightTurns.bump(selfId.value, -1) }
-    // THE GRANTS CACHE IS WRITE-THROUGH: a share/unshare this turn made on its
-    // own store changes who may read row bodies — reload before the next row
-    // event. A store that fails the reload leaves the cache empty: the next body
-    // event simply carries none — no grant is assumed. Python `_route_reply`.
-    let myStore = kernel.agent(selfId)?.metaValue(forKey: "memory_store_id")
-    if let myStore,
-        items.contains(where: {
-            JSON.string($0.target.value) == myStore
-                && ["share", "unshare"].contains($0.payload["type"].asString ?? "")
-        })
-    {
-        forgetGrants(selfId.value, kernel)
-        _ = try? await myGrants(selfId.value, kernel)
-    }
-
     // The result — INCLUDING an error — goes back. A call that failed silently is
     // the one thing a model can never debug.
     //

@@ -121,6 +121,9 @@ private func one() async -> (Kernel, UInt16, Probe) {
         #expect(made["error"].isNull, "stage: \(made.serialize())")
     }
     for leg in ["t_ws", "t_rest"] {
+        // explicit edges: the host reads its leg's routes; the leg reaches the root
+        wire(k, "web", leg)
+        wire(k, leg, "kernel_state")
         _ = await k.send([Item(AgentId("web"), .object(["type": "mount", "child_id": .string(leg)]))])
     }
     return (k, k.httpPort(), probe)
@@ -221,6 +224,8 @@ private func serveWeb(_ k: Kernel, legs: [OrderedDictionary<String, JSON>]) asyn
     for var leg in legs {
         leg["parent_id"] = "web"
         let id = await create(k, leg)
+        wire(k, "web", id)
+        wire(k, id, "kernel_state")
         _ = await k.send([Item(AgentId("web"), .object(["type": "mount", "child_id": .string(id)]))])
     }
     return k.httpPort()
@@ -273,7 +278,7 @@ private final class WireTap: BridgeTransport, @unchecked Sendable {
 private func tapWeb(_ port: UInt16) async throws -> WireTap {
     let client = try await NIOWebSocketClient.connect(
         url: URL(string: "ws://127.0.0.1:\(port)/web/ws")!)
-    return WireTap(WSTransport(client: client, sealed: false))
+    return WireTap(WSTransport(client: client))
 }
 
 /// python `_until`: poll `pred` for up to 3 s.
@@ -452,14 +457,15 @@ struct AnyVerbBytesReplyTests {
             kp,
             [
                 "parent_id": "kernel_state", "handler_module": "ws_bridge.tools",
-                "transport": "memory", "peer_id": "kernel_state", "peer_guid": "A-g",
+                "transport": "memory", "peer_id": "kernel_state",
                 "ingress_rule": "allow_all_ingress", "can_call": ["probe": "*"],
             ])
+        // what the serving leg relays is its own call: the probe accepts the leg
         _ = await create(
             kp,
             [
                 "parent_id": "kernel_state", "handler_module": "anyverb_bytes_probe.tools",
-                "id": "probe", "callable_by": ["A-g|h_rest": "*"],
+                "id": "probe", "callable_by": .object([pLeg: "*"]),
             ])
         let sock = try await tapWeb(port)
         try await sock.send(["type": "hello", "guid": "P-g"])

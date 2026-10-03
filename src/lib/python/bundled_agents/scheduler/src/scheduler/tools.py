@@ -1,7 +1,7 @@
 """scheduler bundle — recurring tasks as an agent.
 
 State (sidecars in `.fantastic/agents/{id}/`, persisted THROUGH the loader):
-  schedules.yaml         — a YAML sequence of {id, target, payload, interval_seconds, next_run, paused, run_count, owner, via?, timeout?}
+  schedules.yaml         — a YAML sequence of {id, target, payload, interval_seconds, next_run, paused, run_count, timeout?}
   schedule_events.yaml   — a YAML STREAM, one `---` document per schedule_fired event,
                            ring-trimmed to HISTORY_MAX
   Both are written by `kernel_state.yaml_io.dump` — the one emitter config the
@@ -22,23 +22,15 @@ Verbs:
   tick_now     args: schedule_id                        -> fire immediately
   history      args: limit?, schedule_id?              -> {history: [...]}
 
-A SCHEDULE FIRES AS ITS CREATOR (audit AV-6, 2026-10-03). `schedule` records WHO
-asked — `owner`: the calling agent's id, a foreign caller's `<guid>|<agent>` (with
-`via`, the bridge leg that relayed it), or null for the operator — and every fire
-goes out under that identity (`sender_context`; `remote_caller_context` for a
-foreign owner; `operator_context` for null). So a schedule can do only what its
-creator could: the gate judges the creator's `can_call` and the target's
-`callable_by` for the creator, never the scheduler's. The scheduler is no deputy —
-and a caller lists, ticks, pauses, resumes, unschedules and reads the history of
-its OWN schedules only (the operator: all; another's schedule is "not found").
-The `owner` key must be PRESENT (audit ARCH2-4): a schedule whose key is absent,
-or neither null nor a string, does not fire — the fire is refused and its
-`schedule_fired` event's `error` names why.
+A SCHEDULE FIRES AS THE SCHEDULER ITSELF: every fire goes out under the
+scheduler's own id, so the gate judges the SCHEDULER's `can_call` and the
+target's `callable_by` for the scheduler. Every verb — list, history, tick_now,
+unschedule, pause, resume — sees every schedule.
 
 A tick collects every DUE schedule, bumps `run_count`/`next_run`, persists FIRST
 (a crash inside the fire window cannot re-fire on reboot), then fires them all —
-ONE `kernel.send([{target, payload, timeout?}, ...])` batch per owner, the batches
-concurrent, so one hung target never blocks the others. `timeout` is the schedule's own per-fire
+ONE `kernel.send([{target, payload, timeout?}, ...])` batch, the items concurrent,
+so one hung target never blocks the others. `timeout` is the schedule's own per-fire
 bound (seconds); absent = wait forever (the kernel never defaults it). After
 firing, scheduler emits one `{type:"schedule_fired", ...}` per outcome to its OWN
 inbox only — the target gets the PAYLOAD, which is the tick; echoing telemetry
@@ -54,30 +46,14 @@ import time
 
 import yaml
 from kernel_state import yaml_io
+from kernel_state.tools import load_blob, persist_blob
 
-from kernel import (
-    current_origin,
-    current_remote_caller,
-    current_secret,
-    operator_context,
-    remote_caller_context,
-    sender_context,
-)
-from kernel._refusal import UNAUTHORIZED, bad, refusal
+from kernel._refusal import bad
 
 logger = logging.getLogger(__name__)
 
 HISTORY_MAX = 500
 
-# THE SCHEDULER SEAL (owner 2026-10-03, audit S5) — as the relay seal: a schedule
-# keeps its payload in the sidecar and every fire re-sends it as a fresh call
-# carrying no marks, so its rows, the state stream and the memory store would all
-# hold the value in clear. A `schedule` call carrying ANY secret mark is refused.
-SECRET_REFUSED = (
-    "scheduler: a call carrying secret marks may not be scheduled — a schedule "
-    "keeps its payload and every fire re-sends it unmarked"
-)
-SECRET_REFUSED_HINT = "send a secret-bearing call yourself, marked, each time"
 #: seconds between tick-loop sweeps when the record does not name one.
 DEFAULT_TICK_SEC = 1.0
 
@@ -141,45 +117,34 @@ _SCHED_NAME = "schedules.yaml"
 _HISTORY_NAME = "schedule_events.yaml"
 
 
+def _loader(kernel):
+    """The root loader the sidecars persist through, or None when the root is not
+    a `kernel_state` (then a write fails loud and a read is empty)."""
+    root = kernel.ctx.root
+    if root is None or root.handler_module != "kernel_state.tools":
+        return None
+    return root
+
+
 async def _file_read(sid: str, kernel, name: str) -> str | None:
-    """Read a sidecar THROUGH the loader. Missing / no-store ⇒ None (reads lenient)."""
-    # Persist from ABOVE — sidecar I/O through the loader is operator bookkeeping
-    # (a side effect of the scheduler's own authorized verb), not a lateral call.
-    with operator_context():
-        r = (
-            await kernel.send(
-                [
-                    {
-                        "target": "kernel_state",
-                        "payload": {"type": "load_blob", "agent_id": sid, "name": name},
-                    }
-                ]
-            )
-        )[0]["result"]
+    """Read a sidecar THROUGH the loader. Missing / no-store ⇒ None (reads lenient).
+    Persistence through the loader is bookkeeping: a direct call of the loader's
+    `load_blob`, never a gated send."""
+    loader = _loader(kernel)
+    if loader is None:
+        return None
+    r = await load_blob(loader, sid, name)
     return r.get("content") if isinstance(r, dict) else None
 
 
 async def _file_write(sid: str, kernel, name: str, content: str) -> dict | None:
-    """Write a sidecar THROUGH the loader. Returns an error dict on a denied/no-store
-    write (no silent loss), or None on success."""
-    with (
-        operator_context()
-    ):  # persist from above — operator bookkeeping (see _file_read)
-        w = (
-            await kernel.send(
-                [
-                    {
-                        "target": "kernel_state",
-                        "payload": {
-                            "type": "persist_blob",
-                            "agent_id": sid,
-                            "name": name,
-                            "content": content,
-                        },
-                    }
-                ]
-            )
-        )[0]["result"]
+    """Write a sidecar THROUGH the loader (a direct `persist_blob` call — see
+    `_file_read`). Returns an error dict on a denied/no-store write (no silent
+    loss), or None on success."""
+    loader = _loader(kernel)
+    if loader is None:
+        return {"error": "scheduler: the root is not a kernel_state loader — no store"}
+    w = await persist_blob(loader, sid, name, content)
     if isinstance(w, dict) and w.get("error"):
         out = {"error": w["error"]}
         if w.get("reason"):
@@ -243,55 +208,6 @@ async def _read_history(sid: str, kernel, limit: int) -> list[dict]:
     return _parse_events(raw)[-limit:]
 
 
-# ─── who scheduled it (the identity a schedule fires under) ──────
-
-
-def _caller() -> tuple[str | None, str | None]:
-    """`(owner, via)` of THIS dispatch's caller: a local agent → `(id, None)`; a
-    foreign caller relayed by a bridge leg → (`<guid>|<agent>`, the leg); the
-    operator → `(None, None)`."""
-    remote = current_remote_caller()
-    if remote is not None:
-        return remote, current_origin()
-    return current_origin(), None
-
-
-def _mine(sch: dict) -> bool:
-    """Whether THIS dispatch's caller owns `sch` — the operator owns them all."""
-    owner, _ = _caller()
-    return owner is None or sch.get("owner") == owner
-
-
-def _owner_refusal(sch: dict) -> str | None:
-    """Why `sch` may not fire, or None. The `owner` key must be PRESENT: null is
-    the operator, a string an agent (`<guid>|<agent>` with `via`). An ABSENT key
-    (audit ARCH2-4) or any other value names nobody, and reading it as null would
-    fire it with the operator's ungated authority — so it does not fire."""
-    if "owner" not in sch:
-        problem = "the schedule's owner key is absent"
-    elif sch["owner"] is None or isinstance(sch["owner"], str):
-        return None
-    else:
-        problem = "the schedule's owner is not null or a string"
-    return (
-        f"scheduler: not fired — {problem}; a schedule fires only as its "
-        "recorded owner (null = the operator, a string = an agent)"
-    )
-
-
-async def _send_as(kernel, owner, via, items: list[dict]) -> list:
-    """`kernel.send(items)` under the schedule owner's identity — task-local, so
-    batches for different owners run side by side."""
-    if owner is None:
-        with operator_context():
-            return list(await kernel.send(items))
-    if via is not None:
-        with sender_context(via), remote_caller_context(via, owner):
-            return list(await kernel.send(items))
-    with sender_context(owner):
-        return list(await kernel.send(items))
-
-
 # ─── tick loop ──────────────────────────────────────────────────
 
 
@@ -338,42 +254,23 @@ def _fire_item(sch: dict) -> dict:
 
 
 async def _fire_many(sid: str, due: list[dict], kernel) -> None:
-    """Fire every due schedule AS ITS OWNER — one batch send per owner, the
-    batches concurrent, no head-of-line blocking — then record one
-    `schedule_fired` per outcome. A schedule with no valid `owner` is refused
-    (`_owner_refusal`): nothing is sent, and its event carries the refusal."""
+    """Fire every due schedule AS THE SCHEDULER — one batch send, the items
+    concurrent, no head-of-line blocking — then record one `schedule_fired` per
+    outcome. The tick loop is a task the scheduler's `boot` spawned and `tick_now`
+    is its own dispatch, so the batch is the scheduler's, gated as it."""
     ts = time.time()
-    refused = {i: why for i, sch in enumerate(due) if (why := _owner_refusal(sch))}
-    groups: dict[tuple, list[int]] = {}
-    for i, sch in enumerate(due):
-        if i not in refused:
-            groups.setdefault((sch["owner"], sch.get("via")), []).append(i)
-
-    async def fire(key, idxs):
-        try:
-            return await _send_as(kernel, *key, [_fire_item(due[i]) for i in idxs])
-        except Exception as e:
-            failure = {
-                "status": "failed",
-                "result": {"error": f"{type(e).__name__}: {e}"},
-            }
-            return [failure for _ in idxs]
-
-    keys = list(groups)
-    results = await asyncio.gather(*(fire(key, groups[key]) for key in keys))
-    outcomes: list[dict | None] = [None] * len(due)
-    for key, outs in zip(keys, results):
-        for i, out in zip(groups[key], outs):
-            outcomes[i] = out
+    try:
+        outcomes = list(await kernel.send([_fire_item(sch) for sch in due]))
+    except Exception as e:
+        failure = {"status": "failed", "result": {"error": f"{type(e).__name__}: {e}"}}
+        outcomes = [failure for _ in due]
     duration_ms = int((time.time() - ts) * 1000)
-    for i, (sch, out) in enumerate(zip(due, outcomes)):
+    for sch, out in zip(due, outcomes):
         status = (out or {}).get("status")
         res = (out or {}).get("result")
         result = None
         error = None
-        if i in refused:
-            error = refused[i]
-        elif status == "completed":
+        if status == "completed":
             result = res
         else:
             detail = res.get("error") if isinstance(res, dict) else res
@@ -382,7 +279,6 @@ async def _fire_many(sid: str, due: list[dict], kernel) -> None:
             "type": "schedule_fired",
             "schedule_id": sch["id"],
             "scheduler_id": sid,
-            "owner": sch.get("owner"),
             "target": sch.get("target", ""),
             "payload": sch.get("payload") or {},
             "result": result,
@@ -422,7 +318,7 @@ async def _reflect(id, payload, kernel):
             n: (f.__doc__ or "").strip().splitlines()[0] for n, f in VERBS.items()
         },
         "emits": {
-            "schedule_fired": "{type:'schedule_fired', schedule_id, scheduler_id, owner, target, payload, result, error, ts, duration_ms} — emitted on the scheduler's OWN inbox after every fire (never the target's — the payload send is the tick); `owner` is who the fire ran as",
+            "schedule_fired": "{type:'schedule_fired', schedule_id, scheduler_id, target, payload, result, error, ts, duration_ms} — emitted on the scheduler's OWN inbox after every fire (never the target's — the payload send is the tick)",
         },
     }
 
@@ -441,9 +337,7 @@ async def _boot(id, payload, kernel):
 
 
 async def _schedule(id, payload, kernel):
-    """args: target:str, payload:{type:..,...}, interval_seconds:int (default 60), timeout:number? (seconds per fire; absent = wait forever). Every fire runs AS YOU (the schedule's `owner`) — it can reach only what you can. Returns {schedule_id, schedule}. Persisted THROUGH the loader; failfast if no store wired."""
-    if current_secret():
-        return refusal(UNAUTHORIZED, SECRET_REFUSED, hint=SECRET_REFUSED_HINT)
+    """args: target:str, payload:{type:..,...}, interval_seconds:int (default 60), timeout:number? (seconds per fire; absent = wait forever). Every fire runs AS THE SCHEDULER — it reaches what the scheduler's can_call grants. Returns {schedule_id, schedule}. Persisted THROUGH the loader; failfast if no store wired."""
     target = payload.get("target", "")
     sched_payload = payload.get("payload")
     if sched_payload is None:
@@ -465,7 +359,6 @@ async def _schedule(id, payload, kernel):
         or timeout <= 0
     ):
         return bad("schedule", "timeout", "a positive number of seconds")
-    owner, via = _caller()
     sch = {
         "id": f"sch_{secrets.token_hex(3)}",
         "target": target,
@@ -475,11 +368,7 @@ async def _schedule(id, payload, kernel):
         "next_run": time.time() + interval,
         "run_count": 0,
         "paused": False,
-        # WHO asked — every fire runs as them (null = the operator).
-        "owner": owner,
     }
-    if via is not None:
-        sch["via"] = via
     if timeout is not None:
         sch["timeout"] = timeout
     (await _load(id, kernel)).append(sch)
@@ -494,13 +383,13 @@ async def _schedule(id, payload, kernel):
 
 
 async def _unschedule(id, payload, kernel):
-    """args: schedule_id:str (req — one of YOUR schedules). Returns {removed:bool, schedule_id}."""
+    """args: schedule_id:str (req). Returns {removed:bool, schedule_id}."""
     sid = payload.get("schedule_id")
     if not sid:
         return {"error": "unschedule: schedule_id required"}
     cur = await _load(id, kernel)
     before = len(cur)
-    _cache[id] = [s for s in cur if not (s["id"] == sid and _mine(s))]
+    _cache[id] = [s for s in cur if s["id"] != sid]
     removed = len(_cache[id]) < before
     if removed:
         if err := await _save(id, kernel):
@@ -512,20 +401,20 @@ async def _unschedule(id, payload, kernel):
 
 
 async def _list(id, payload, kernel):
-    """No args. Returns {schedules: [<schedule record>, ...]} — YOUR schedules (the operator: all)."""
+    """No args. Returns {schedules: [<schedule record>, ...]} — every schedule."""
     return {
-        "schedules": [s for s in await _load(id, kernel) if _mine(s)],
+        "schedules": list(await _load(id, kernel)),
         "origin": f"{id} list — re-send; changes as schedules change",
     }
 
 
 async def _pause(id, payload, kernel):
-    """args: schedule_id:str?. With id pauses one of YOUR schedules; without, pauses the whole scheduler."""
+    """args: schedule_id:str?. With id pauses one schedule; without, pauses the whole scheduler."""
     sid = payload.get("schedule_id")
     if sid:
         touched = 0
         for s in await _load(id, kernel):
-            if s["id"] == sid and _mine(s):
+            if s["id"] == sid:
                 s["paused"] = True
                 touched += 1
         if touched:
@@ -540,12 +429,12 @@ async def _pause(id, payload, kernel):
 
 
 async def _resume(id, payload, kernel):
-    """args: schedule_id:str?. With id resumes one of YOUR schedules; without, resumes the whole scheduler."""
+    """args: schedule_id:str?. With id resumes one schedule; without, resumes the whole scheduler."""
     sid = payload.get("schedule_id")
     if sid:
         touched = 0
         for s in await _load(id, kernel):
-            if s["id"] == sid and _mine(s):
+            if s["id"] == sid:
                 s["paused"] = False
                 touched += 1
         if touched:
@@ -560,12 +449,12 @@ async def _resume(id, payload, kernel):
 
 
 async def _tick_now(id, payload, kernel):
-    """args: schedule_id:str (req — one of YOUR schedules). Bumps run_count, persists, then fires that schedule immediately, as its owner. Returns {fired:true, schedule_id}."""
+    """args: schedule_id:str (req). Bumps run_count, persists, then fires that schedule immediately, as the scheduler. Returns {fired:true, schedule_id}."""
     sid = payload.get("schedule_id")
     if not sid:
         return {"error": "tick_now: schedule_id required"}
     for s in await _load(id, kernel):
-        if s["id"] == sid and _mine(s):
+        if s["id"] == sid:
             s["run_count"] = s.get("run_count", 0) + 1
             if err := await _save(id, kernel):
                 s["run_count"] -= 1
@@ -574,20 +463,16 @@ async def _tick_now(id, payload, kernel):
                     **({"reason": err["reason"]} if err.get("reason") else {}),
                 }
             await _fire_many(id, [s], kernel)
-            if why := _owner_refusal(s):
-                return {"error": why}
             return {"fired": True, "schedule_id": sid}
     return {"error": f"schedule {sid!r} not found"}
 
 
 async def _history(id, payload, kernel):
-    """args: limit:int? (1..500, default 100), schedule_id:str?. Returns {history:[event,...], count} — the fires of YOUR schedules (the operator: all)."""
+    """args: limit:int? (1..500, default 100), schedule_id:str?. Returns {history:[event,...], count} — every schedule's fires."""
     limit = _int_arg(payload, "limit", 100, "history", 1)
     if isinstance(limit, dict):
         return limit
-    # YOUR fires first, then the newest `limit` of them.
-    mine = [e for e in await _read_history(id, kernel, 2 * HISTORY_MAX) if _mine(e)]
-    entries = mine[-min(500, limit) :]
+    entries = (await _read_history(id, kernel, 2 * HISTORY_MAX))[-min(500, limit) :]
     sid = payload.get("schedule_id")
     if sid:
         entries = [e for e in entries if e.get("schedule_id") == sid]

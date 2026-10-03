@@ -44,6 +44,7 @@ private func mountLeg(_ k: Kernel, _ id: String, ingress: JSON?) async {
     _ = await k.send([
         Item("kernel", ["type": "update_agent", "id": "kernel_state", "callable_by": .object(cb)])
     ])
+    wire(k, "web", id)
     _ = await k.send([Item("web", ["type": "mount", "child_id": .string(id)])])
 }
 

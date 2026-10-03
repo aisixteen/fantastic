@@ -88,8 +88,8 @@ private func bootLoader(_ text: String) async -> (Kernel, () -> Void) {
     defer { cleanup() }
     let can = kernel.agent(AgentId("worker"))?.metaValue(forKey: "can_call") ?? .null
     #expect(can["$self"].asString == "*")
-    #expect(can["$parent"].asString == "*")
-    #expect(can["$children"].asString == "*")
+    #expect(can.asObject?.keys.contains("$parent") == false, "the baseline is `$self` alone")
+    #expect(can.asObject?.keys.contains("$children") == false)
     #expect(can["memory"].asArray?.compactMap { $0.asString } == ["set", "read"])
     // memory got the baseline with no explicit can_call in the manifest.
     let mem = kernel.agent(AgentId("memory"))?.metaValue(forKey: "can_call") ?? .null
@@ -428,8 +428,8 @@ private func createLoader(_ kernel: Kernel, _ id: String, _ manifest: JSON) asyn
     #expect(kernel.agent(AgentId("memory")) == nil)
 }
 
-/// Audit G-2/BV-2 — the roster pass runs AS OPERATOR, so only the kernel's own
-/// boot (origin none) may start it. A roster agent whose grant the operator
+/// Audit G-2/BV-2 — the roster pass is the kernel's own bookkeeping (direct
+/// kernel-verb calls), so only the kernel's own boot (origin none) may start it. A roster agent whose grant the operator
 /// revoked sent `boot` to its loader and got the grant back; a deleted roster
 /// agent came back. The edge is NAMED on both ends, so the refusal is the
 /// loader's own, whatever the gate makes of `boot`. Python
@@ -478,13 +478,13 @@ private func createLoader(_ kernel: Kernel, _ id: String, _ manifest: JSON) asyn
         r
             == .object([
                 "error": .string(
-                    "static_loader: an agent-sent boot is refused — the roster is hydrated "
-                        + "with operator authority, so only the kernel's own boot (cold boot, "
-                        + "create_agent) runs it"),
+                    "static_loader: an agent-sent boot is refused — hydrating the roster is "
+                        + "the kernel's own bookkeeping, so only the kernel's own boot (cold "
+                        + "boot, create_agent) runs it"),
                 "reason": "unauthorized",
                 "hint": .string(
-                    "change an agent's record with update_agent (the conferral rule applies "
-                        + "there); the operator re-boots the loader"),
+                    "change an agent's record with update_agent (its parent writes it); the "
+                        + "operator re-boots the loader"),
             ]), "\(r.serialize())")
     #expect(kernel.agent(AgentId("memory")) == nil)
     let can = kernel.agent(AgentId("worker"))?.metaValue(forKey: "can_call") ?? .null

@@ -4,6 +4,7 @@ import { Kernel } from "../src/kernel/kernel.ts";
 import { Agent } from "../src/kernel/agent.ts";
 import type { Bridge } from "../src/kernel/kernel.ts";
 import type { Json, Payload } from "../src/kernel/json.ts";
+import { as } from "./kit.ts";
 
 function withRoot(): Kernel {
   const k = new Kernel();
@@ -144,7 +145,7 @@ test("a SEND is mirrored to the target's own inbox and to its watchers", async (
   assert.deepEqual(mirrored, [{ type: "say", text: "hi" }]);
 });
 
-test("watch is gated as the agent RUNNING the code, not the reader it names", () => {
+test("watch is gated as the agent RUNNING the code, not the reader it names", async () => {
   // python `Agent.watch` gates `_current_sender` → src: naming a reader that holds
   // a grant does not borrow it.
   const k = withRoot();
@@ -152,11 +153,9 @@ test("watch is gated as the agent RUNNING the code, not the reader it names", ()
   k.register(new Agent({ id: "trusted", parentId: "kernel_state", meta: { can_call: { src: ["watch"] } } }));
   k.register(new Agent({ id: "nosy", parentId: "kernel_state" }));
   k.get("src")!.meta["callable_by"] = { trusted: ["watch"], nosy: [] };
-  const asNosy = k.scopedFor("nosy", null);
-  const d = asNosy.watch("src", "trusted");
+  const d = await as(k, "nosy", (v) => v.watch("src", "trusted"));
   assert.equal((d as Payload | null)?.["error"], "nosy may not call 'watch' on src");
-  const asTrusted = k.scopedFor("trusted", null);
-  assert.equal(asTrusted.watch("src", "trusted"), null);
+  assert.equal(await as(k, "trusted", (v) => v.watch("src", "trusted")), null);
 });
 
 test("record(): parent_id comes LAST from the tree; meta cannot shadow it; the root has none", () => {

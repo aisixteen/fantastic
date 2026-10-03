@@ -169,9 +169,9 @@ impl Agent {
     }
 
     /// The target ONE send resolved `<guid>|<agent id>` to on a connected peer.
-    /// No structural baseline: it is nobody's parent or child here, and its
-    /// `callable_by` is python's empty map — whether it accepts a call is decided
-    /// on its own kernel.
+    /// No baseline: it is nobody's parent or child here, and its `callable_by` is
+    /// python's empty map — whether it accepts a call is decided on its own
+    /// kernel.
     pub(crate) fn remote(qualified: AgentId, remote: crate::peers::RemoteRef) -> Arc<Self> {
         Arc::new(Self {
             id: qualified,

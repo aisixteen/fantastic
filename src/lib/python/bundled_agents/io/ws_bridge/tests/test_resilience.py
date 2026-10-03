@@ -25,6 +25,7 @@ from io_bridge import MemoryTransport
 from io_bridge import _engine as engine
 from ws_bridge import _ws
 from kernel import register_unlisted
+from _testkit import wire
 
 
 # ─── a probe bundle that bounces a call back over the same bridge ────
@@ -91,6 +92,7 @@ async def _open_bridge(kernel, peer_id: str) -> str:
                         "type": "create_agent",
                         "parent_id": "kernel_state",
                         "handler_module": "ws_bridge.tools",
+                        "can_call": {"$children": "*", "kernel_state": "*"},
                         "transport": "memory",
                         "peer_id": peer_id,
                         # BOTH legs serve inbound here — the round trip is symmetric.
@@ -103,22 +105,21 @@ async def _open_bridge(kernel, peer_id: str) -> str:
     return rec["id"]
 
 
-def _accept(kernel, agent_id: str, foreign: str) -> None:
-    """Open `agent_id` to a FOREIGN caller — an inbound bridge call is judged by
-    its qualified `<guid>|<agent>`, never by the leg that relays it."""
+def _accept(kernel, agent_id: str, leg: str) -> None:
+    """Open `agent_id` to a bridge LEG — an inbound bridge call is the leg's own
+    send, judged as the leg."""
     cb = dict(kernel.ctx.agents[agent_id]._meta.get("callable_by") or {})
-    kernel.update(agent_id, callable_by={**cb, foreign: "*"})
+    kernel.update(agent_id, callable_by={**cb, leg: "*"})
 
 
 async def _wire_pair(ka, kbk) -> tuple[str, str]:
     ka.update(ka.id, guid="guid-a")
     kbk.update(kbk.id, guid="guid-b")
-    _accept(ka, ka.id, "guid-b|*")
-    _accept(kbk, kbk.id, "guid-a|*")
     a_id = await _open_bridge(ka, "PLACEHOLDER")
     b_id = await _open_bridge(kbk, a_id)
-    ka.update(a_id, peer_id=b_id, peer_guid="guid-b")
-    kbk.update(b_id, peer_guid="guid-a")
+    ka.update(a_id, peer_id=b_id)
+    _accept(ka, ka.id, a_id)
+    _accept(kbk, kbk.id, b_id)
     mt_a, mt_b = MemoryTransport.pair()
     engine._test_transport_inject[a_id] = mt_a
     engine._test_transport_inject[b_id] = mt_b
@@ -137,9 +138,8 @@ async def test_reentrant_forward_completes_instead_of_deadlocking(two_kernels):
     `kernel.send` and never reads A's reply. Served as a task it just works."""
     ka, kbk = two_kernels
     a_id, b_id = await _wire_pair(ka, kbk)
-    # The probe is a CHILD of the bridge, so the structural baseline covers its
-    # own call back through the bridge; the call INTO it comes from kernel A, so
-    # it accepts A's agents by their qualified id.
+    # The probe is a CHILD of the bridge, wired to call back through it; the
+    # call INTO it is the bridge's own send, so it accepts the bridge.
     probe = (
         await kbk.send(
             [
@@ -155,7 +155,8 @@ async def test_reentrant_forward_completes_instead_of_deadlocking(two_kernels):
             ]
         )
     )[0]["result"]["id"]
-    _accept(kbk, probe, "guid-a|*")
+    _accept(kbk, probe, b_id)  # the call INTO it is the bridge's own send
+    wire(kbk, probe, b_id)  # its call back through the bridge, both ends
 
     out = await asyncio.wait_for(
         ka.send(
@@ -217,7 +218,7 @@ async def test_ws_transport_skips_malformed_frames_and_keeps_reading():
         "[1]",  # well-formed JSON, not an envelope
         good,
     ]
-    t = _ws.WSTransport(_FakeWS(frames), sealed=False)
+    t = _ws.WSTransport(_FakeWS(frames))
     frame = await asyncio.wait_for(t.recv(), timeout=2.0)
     assert frame == {"type": "reply", "id": "1", "data": {"ok": True}}
 
@@ -238,9 +239,8 @@ async def test_a_mistyped_answer_id_is_skipped_while_a_forward_waits(two_kernels
     inbound call is served."""
     ka, _ = two_kernels
     ka.update(ka.id, guid="guid-a")
-    _accept(ka, ka.id, "guid-b|*")
     a_id = await _open_bridge(ka, "peer")
-    ka.update(a_id, peer_guid="guid-b")
+    _accept(ka, ka.id, a_id)
     mine, peer = MemoryTransport.pair()
     engine._test_transport_inject[a_id] = mine
     r = (await ka.send([{"target": a_id, "payload": {"type": "boot"}}]))[0]["result"]
@@ -270,7 +270,6 @@ async def test_a_mistyped_answer_id_is_skipped_while_a_forward_waits(two_kernels
             "id": "in-1",
             "target": "kernel_state",
             "payload": {"type": "reflect", "tree": "none"},
-            "caller": "guid-b|ai",
         }
     )
     reply = await asyncio.wait_for(peer.recv(), 2.0)

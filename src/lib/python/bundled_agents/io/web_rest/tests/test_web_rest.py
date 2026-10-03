@@ -15,6 +15,7 @@ from web_rest.tools import (
     _reflect,
     route_endpoints,
 )
+from _testkit import wire
 
 
 async def test_reflect_describes_surface(seeded_kernel):
@@ -45,6 +46,7 @@ async def test_route_endpoints_covers_every_declared_path(seeded_kernel):
     """The other half: `web` gets the callables in-process, keyed by the paths
     `get_routes` declared — one endpoint per declared route, no more."""
     seeded_kernel.create("web_rest.tools", id="rest_hook")
+    wire(seeded_kernel, "rest_hook", "kernel_state")
     declared = {
         s["path"] for s in (await _get_routes("rest_hook", {}, seeded_kernel))["routes"]
     }
@@ -60,6 +62,7 @@ def test_post_endpoint_mountable_on_fastapi(seeded_kernel):
     seeded_kernel.create(
         "web_rest.tools", id="rest_xyz", ingress_rule="allow_all_ingress"
     )
+    wire(seeded_kernel, "rest_xyz", "kernel_state")
     app = FastAPI()
     app.add_api_route(
         "/rest_xyz/{target_id}",
@@ -81,6 +84,7 @@ def test_post_endpoint_rejects_non_object_body(seeded_kernel):
     seeded_kernel.create(
         "web_rest.tools", id="rest_xyz", ingress_rule="allow_all_ingress"
     )
+    wire(seeded_kernel, "rest_xyz", "kernel_state")
     app = FastAPI()
     app.add_api_route(
         "/rest_xyz/{target_id}",
@@ -99,6 +103,7 @@ def test_post_endpoint_rejects_bad_json(seeded_kernel):
     seeded_kernel.create(
         "web_rest.tools", id="rest_xyz", ingress_rule="allow_all_ingress"
     )
+    wire(seeded_kernel, "rest_xyz", "kernel_state")
     app = FastAPI()
     app.add_api_route(
         "/rest_xyz/{target_id}",
@@ -123,6 +128,7 @@ def test_get_reflect_root_returns_tree(seeded_kernel):
     seeded_kernel.create(
         "web_rest.tools", id="rest_xyz", ingress_rule="allow_all_ingress"
     )
+    wire(seeded_kernel, "rest_xyz", "kernel_state")
     app = FastAPI()
     app.add_api_route(
         "/rest_xyz/_reflect",
@@ -146,6 +152,7 @@ def test_get_reflect_target_returns_agent_reflect(seeded_kernel):
     seeded_kernel.create(
         "web_rest.tools", id="rest_xyz", ingress_rule="allow_all_ingress"
     )
+    wire(seeded_kernel, "rest_xyz", "kernel_state")
     app = FastAPI()
     app.add_api_route(
         "/rest_xyz/_reflect/{target_id}",
@@ -167,6 +174,7 @@ def test_get_reflect_target_returns_error_for_missing_agent(seeded_kernel):
     seeded_kernel.create(
         "web_rest.tools", id="rest_xyz", ingress_rule="allow_all_ingress"
     )
+    wire(seeded_kernel, "rest_xyz", "kernel_state")
     app = FastAPI()
     app.add_api_route(
         "/rest_xyz/_reflect/{target_id}",
@@ -186,6 +194,7 @@ def test_get_reflect_readme_query_flag(seeded_kernel):
     seeded_kernel.create(
         "web_rest.tools", id="rest_xyz", ingress_rule="allow_all_ingress"
     )
+    wire(seeded_kernel, "rest_xyz", "kernel_state")
     app = FastAPI()
     app.add_api_route(
         "/rest_xyz/_reflect/{target_id}",
@@ -210,6 +219,7 @@ def test_sealed_rest_leg_denies_and_teaches(seeded_kernel):
     seeded_kernel.create(
         "web_rest.tools", id="sealed_rest", ingress_rule="deny_ingress"
     )
+    wire(seeded_kernel, "sealed_rest", "kernel_state")
     app = FastAPI()
     app.add_api_route(
         "/sealed_rest/{target_id}",
@@ -229,6 +239,7 @@ def test_password_rest_leg_checks_header(seeded_kernel, monkeypatch):
     seeded_kernel.create(
         "web_rest.tools", id="pw_rest", ingress_rule="password_ingress"
     )
+    wire(seeded_kernel, "pw_rest", "kernel_state")
     app = FastAPI()
     app.add_api_route(
         "/pw_rest/{target_id}",
@@ -256,6 +267,7 @@ async def test_reflect_surfaces_rest_leg_posture(seeded_kernel):
     seeded_kernel.create(
         "web_rest.tools", id="sealed_rest2", ingress_rule="deny_ingress"
     )
+    wire(seeded_kernel, "sealed_rest2", "kernel_state")
     r = await _reflect("sealed_rest2", {}, seeded_kernel)
     assert r["sealed"] is True
     assert r["ingress_rule"] == "deny_ingress"
@@ -268,6 +280,7 @@ def test_post_endpoint_rejects_a_non_finite_number(seeded_kernel):
     seeded_kernel.create(
         "web_rest.tools", id="rest_nan", ingress_rule="allow_all_ingress"
     )
+    wire(seeded_kernel, "rest_nan", "kernel_state")
     app = FastAPI()
     app.add_api_route(
         "/rest_nan/{target_id}",
@@ -291,6 +304,7 @@ def test_post_endpoint_rejects_a_too_deep_body(seeded_kernel):
     seeded_kernel.create(
         "web_rest.tools", id="rest_deep", ingress_rule="allow_all_ingress"
     )
+    wire(seeded_kernel, "rest_deep", "kernel_state")
     app = FastAPI()
     app.add_api_route(
         "/rest_deep/{target_id}",

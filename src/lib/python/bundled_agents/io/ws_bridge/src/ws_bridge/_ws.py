@@ -7,8 +7,6 @@ frames (`call`/`reply`/`watch`/`event`). The dispatch engine + verbs live in
 reflect dressing. It spawns nothing: a tunnel to a remote host is an
 `exec_bridge` job (`ssh -N -L …` under an operator's allowlist) or devops —
 the bridge then dials its local end like any other `ws://host:port`.
-
-A leg dialed to a NON-LOOPBACK host is SEALED for secrets (`SECRET_SEALED`).
 """
 
 from __future__ import annotations
@@ -18,52 +16,27 @@ from typing import Any
 
 from io_bridge import ConnectionClosed, _BaseTransport, decode_frame, encode_frame
 from io_bridge import _BridgeState
-from kernel._refusal import UNAUTHORIZED, refusal
 
 logger = logging.getLogger(__name__)
 
 SENTENCE = "Cross-kernel comms bridge — WS-only, asymmetric (no peer bridge needed); weak proxy."
-
-#: The record `host` values that name THIS machine — a leg dialed to one of them
-#: (an ssh tunnel's local end included) may carry a secret. Exact strings.
-LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "[::1]"})
-
-# THE WS SEAL (owner, 2026-10-03, audit S8). `ws://` carries every frame in clear,
-# and a forward's secret values ride its frame verbatim (the far kernel needs
-# them), so a leg dialed to a non-loopback host refuses any call carrying secret
-# marks, in both directions: outbound in `tools._forward`, inbound in
-# `WSTransport.recv`. A loopback leg (an ssh tunnel's local end) is not sealed.
-# One text for both.
-SECRET_SEALED = (
-    "ws_bridge: a call carrying secret marks may not cross a ws:// leg to a "
-    "non-loopback host — ws:// carries every frame in clear"
-)
-SECRET_SEALED_HINT = "dial a loopback host (an ssh tunnel's local end) to send a secret"
-
-
-def secret_sealed() -> dict:
-    """The ws seal's refusal — outbound to the local caller, inbound as the reply
-    to the far caller."""
-    return refusal(UNAUTHORIZED, SECRET_SEALED, hint=SECRET_SEALED_HINT)
 
 
 class WSTransport(_BaseTransport):
     """websockets client connection wrapper. Frames serialize via the shared
     `io_bridge` codec: a frame carrying raw `bytes` (a `read_stream` chunk) goes as a
     BINARY WS frame `[len|header|body]` — no base64; a plain frame goes as a TEXT WS
-    frame (UTF-8 JSON). web_ws on the far side decodes both via the same codec.
-    `sealed`: dialed to a non-loopback host — the ws seal holds (`SECRET_SEALED`)."""
+    frame (UTF-8 JSON). web_ws on the far side decodes both via the same codec."""
 
-    def __init__(self, ws: Any, *, sealed: bool) -> None:
+    def __init__(self, ws: Any) -> None:
         self._ws = ws
-        self.sealed = sealed
 
     @classmethod
-    async def connect(cls, url: str, *, sealed: bool) -> "WSTransport":
+    async def connect(cls, url: str) -> "WSTransport":
         import websockets
 
         ws = await websockets.connect(url, max_size=2**24)
-        return cls(ws, sealed=sealed)
+        return cls(ws)
 
     @property
     def closed(self) -> bool:
@@ -105,23 +78,6 @@ class WSTransport(_BaseTransport):
             if not isinstance(frame, dict):
                 logger.warning("ws_bridge: skipping non-object frame")
                 continue
-            if self.sealed and frame.get("type") == "call" and "secret" in frame:
-                # THE WS SEAL, inbound: the frame already crossed the network in
-                # clear, and nothing here dispatches it — the far caller is
-                # answered with the seal's refusal.
-                # TODO(ws seal): wss:// (TLS) is the later path — a TLS leg
-                # carries secrets to any host, and this seal lifts for it.
-                try:
-                    await self.send(
-                        {
-                            "type": "reply",
-                            "id": frame.get("id"),
-                            "data": secret_sealed(),
-                        }
-                    )
-                except ConnectionClosed:
-                    pass  # the socket dropped; the next recv reports it
-                continue
             return frame
 
     async def close(self) -> None:
@@ -152,7 +108,7 @@ async def build_transport(
         if not host:
             raise ValueError("ws transport requires host (nothing is guessed)")
         url = f"ws://{host}:{int(port)}/{peer_id}/ws"
-        return await WSTransport.connect(url, sealed=host not in LOOPBACK_HOSTS)
+        return await WSTransport.connect(url)
 
     raise ValueError(f"unknown transport {kind!r}")
 

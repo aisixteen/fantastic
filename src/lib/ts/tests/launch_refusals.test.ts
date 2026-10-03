@@ -93,16 +93,12 @@ test("an item with several faults reports the first in python's check order", as
   const k = kernel();
   const cases: [unknown, Outcome][] = [
     // target, then payload, then timeout, then payload.type, then id, then
-    // retries, then secret — and every one of them before the target is resolved
+    // retries — and every one of them before the target is resolved
     [{ target: "", payload: null, timeout: -1 }, missingArg("target")],
     [{ target: "a", payload: {}, timeout: -1 }, badArg("timeout", "send: timeout must be a positive number of seconds, got -1")],
     [{ target: "a", payload: { type: 5 }, id: 1.5 }, badArg("payload.type", "send: payload.type must be a non-empty string, got int")],
     [{ target: "a", payload: { type: "go" }, id: 1.5, retries: -1 }, badArg("id", "send: id must be a name (non-empty string) or a message id (int), got 1.5")],
-    [{ target: "a", payload: { type: "go" }, retries: -1, secret: [] }, badArg("retries", "send: retries must be a non-negative int, got -1")],
-    [
-      { target: "nobody", payload: { type: "go" }, secret: ["payload.nope"] },
-      failed({ error: "send: secret path 'payload.nope' names nothing in the payload", reason: "bad_arg", arg: "secret" }),
-    ],
+    [{ target: "a", payload: { type: "go" }, retries: -1 }, badArg("retries", "send: retries must be a non-negative int, got -1")],
     [{ target: "nobody", payload: { type: "go" }, retries: -1 }, badArg("retries", "send: retries must be a non-negative int, got -1")],
   ];
   for (const [item, want] of cases) assert.deepEqual(await one(k, item), want, JSON.stringify(item));
@@ -146,27 +142,6 @@ test("an unknown target with no bridge: the unknown_agent outcome, whole", async
   }));
 });
 
-test("a call from ANOTHER kernel to an id this kernel lacks is unknown here, never forwarded", async () => {
-  const k = kernel();
-  const forwarded: string[] = [];
-  k.bridge = {
-    forward: (t) => { forwarded.push(t); return Promise.resolve({ ok: "host" }); },
-    forwardBinary: (t) => { forwarded.push(t); return Promise.resolve({ ok: "host" }); },
-    emitRemote: () => {},
-    watchRemote: () => {},
-    unwatchRemote: () => {},
-    onLifecycle: () => () => {},
-    subscribeState: () => () => {},
-  };
-  const out = (await k.foreignView("g9|scout").send([{ target: "file_x", payload: { type: "list" } }]))[0]!;
-  assert.deepEqual(out, failed({
-    error: "no agent 'file_x'",
-    reason: "unknown_agent",
-    agent_count: 3,
-    agents: ["a", "b", "kernel_state"] as Json,
-  }));
-  assert.deepEqual(forwarded, []);
-});
 
 test("send of anything but a LIST throws python's TypeError — before any item is looked at", async () => {
   const k = kernel();

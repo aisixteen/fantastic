@@ -6,13 +6,10 @@ The broader class: in ambient-authority frameworks ANY hop that reaches the
 runtime reaches it with the runtime's full authority.
 
 Here `sender=None` (operator) exists ONLY in-process. A wire frame dispatches
-AS ITS LEG AGENT (pinned by C21), the leg is a gated agent like any other, and
-privileged verbs (create/update/delete of OTHERS) are never covered by the
-structural baseline (`$parent: "*"`) — only a grant that NAMES the verb, or a `*`
-under a NAMED id (the operator's own statement: whoever writes it owns it). So
-the same envelope that the operator runs freely dies over the wire on a leg
-holding the baseline plus a named verb list, and the refusal names the LEG. C21
-transport symmetry extends this pin to every leg.
+AS ITS LEG AGENT (pinned by C21), the leg is a gated agent like any other: a
+mutator needs both halves of the leg→root edge, and even then it acts on the
+LEG's own children only. So the same envelope that the operator runs freely dies
+over the wire, and the refusal names the LEG.
 """
 
 from __future__ import annotations
@@ -30,21 +27,21 @@ def _wire(kernel, can_call):
     # `port`: the authority the web's Host guard admits (audit W-2).
     kernel.create(None, id="adv4_web", port=8088)
     app = make_app("adv4_web", kernel)
-    # a leg under the root: the baseline `$parent: "*"` reaches the root, plus
-    # whatever named grant the case adds
+    # a leg under the root, its edge to the root granted on both ends
     kernel.create(
         "web_ws.tools",
         id="adv4_leg",
         ingress_rule="allow_all_ingress",
         can_call=can_call,
     )
+    kernel.ctx.update(kernel.id, callable_by={"$self": "*", "adv4_leg": "*"})
     app.add_api_websocket_route("/{host_id}/ws", _make_endpoint("adv4_leg", kernel))
     return app
 
 
 @pytest.fixture
 def wired(seeded_kernel):
-    # named verbs on the kernel, none of them privileged
+    # named verbs on the kernel, no mutator among them
     app = _wire(seeded_kernel, {"kernel_state": ["reflect", "list_agents"]})
     with TestClient(app, headers={"host": "127.0.0.1:8088"}) as c:
         yield seeded_kernel, c
@@ -109,13 +106,18 @@ def test_update_and_delete_are_walled_the_same_way(wired):
     assert dele.get("reason") == "unauthorized", dele
 
 
-def test_a_named_wildcard_is_the_operators_own_statement(seeded_kernel):
-    """`*` under a NAMED id covers privileged verbs — whoever wrote it owns it.
-    The frame still runs AS the leg: the mint is the leg's act, not the operator's."""
+def test_a_wildcard_grant_mints_only_under_the_leg_itself(seeded_kernel):
+    """`*` covers every verb — `create_agent` included. The frame still runs AS
+    the leg: it mints under the LEG (its own child), never elsewhere."""
     app = _wire(seeded_kernel, {"kernel_state": "*"})
     with TestClient(app, headers={"host": "127.0.0.1:8088"}) as client:
         with client.websocket_connect("/kernel_state/ws") as ws:
-            data = _ws_call(
+            other = _ws_call(
                 ws, "m2", "kernel_state", dict(_MINT, parent_id="kernel_state")
             )
+            data = _ws_call(ws, "m3", "kernel_state", dict(_MINT, parent_id="adv4_leg"))
+    assert other.get("side") == "mutator", other
+    assert other["error"] == (
+        "adv4_leg may only create_agent its own children — kernel_state is not one"
+    ), other
     assert data.get("id") == "adv4_minted", data

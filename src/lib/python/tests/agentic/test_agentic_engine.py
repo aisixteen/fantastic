@@ -187,7 +187,7 @@ async def test_reach_makes_the_driver_an_agent_and_returns_what_it_gets(seeded_k
 
 async def test_a_bare_send_is_an_operator_send_and_proves_nothing(seeded_kernel):
     """Why `reach` exists at all. The same call without a sender is the ORIGIN
-    root of trust and passes ungated — a probe that forgot `sender_context`
+    root of trust and passes ungated — a probe that forgot `as_agent`
     would report every edge in every config as usable and never go red."""
     a = await _mk(seeded_kernel)
     b = await _mk(seeded_kernel)

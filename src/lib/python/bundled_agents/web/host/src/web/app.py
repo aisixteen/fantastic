@@ -28,7 +28,6 @@ import mimetypes
 from importlib import resources
 
 from fastapi import FastAPI
-from kernel import sender_context
 from fastapi.responses import Response, StreamingResponse
 
 
@@ -38,6 +37,9 @@ from fastapi.responses import Response, StreamingResponse
 DEFAULT_HOST = "127.0.0.1"
 
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+#: One `read_stream` chunk of the file route.
+FILE_CHUNK = 262144
 
 
 def own_origins(rec: dict) -> set[str]:
@@ -171,16 +173,38 @@ def make_app(web_agent_id: str, kernel) -> FastAPI:
     async def favicon_asset():
         return Response(_favicon_bytes, media_type="image/png")
 
+    async def _fetch(agent_id: str, path: str, offset: int):
+        """One chunk, read BY THE WEB HOST: the request is handed to it as
+        `fetch_file` (this route is the transport — the operator), and its handler
+        sends `read_stream` as itself."""
+        return (
+            await kernel.send(
+                [
+                    {
+                        "target": web_agent_id,
+                        "payload": {
+                            "type": "fetch_file",
+                            "agent_id": agent_id,
+                            "path": path,
+                            "offset": offset,
+                            "length": FILE_CHUNK,
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
+
     @app.get("/{agent_id}/file/{path:path}")
     async def agent_file(agent_id: str, path: str):
         """Static-file proxy: any agent answering the SOURCE stream verb
         `read_stream{path,offset,length}` becomes an HTTP file server. file_bridge
         is the canonical implementer. URL convention:
         `<img src="/<file_bridge>/file/imgs/foo.png">` works without registration.
-        The serving ALLOWANCE is BOTH of the agent's gates. The read is dispatched
-        under `sender_context(web_agent_id)` — never as the OPERATOR, which would hand
-        the browser the origin root of trust with `callable_by` never consulted — so
-        a browser fetch is an ordinary agent send FROM the web host: the served
+        The serving ALLOWANCE is BOTH of the agent's gates. The request is handed
+        to the web host (`fetch_file`, as the transport — the operator) and the
+        HOST reads each chunk AS ITSELF — never the operator, which would hand the
+        browser the origin root of trust with `callable_by` never consulted — so a
+        browser fetch is an ordinary agent send FROM the web host: the served
         agent's `ingress_rule` gates the io leg AND its `callable_by` decides whether
         `web` may call it at all.
 
@@ -201,22 +225,7 @@ def make_app(web_agent_id: str, kernel) -> FastAPI:
         if not kernel.get(agent_id):
             return Response(status_code=404)
         # Streaming path: read_stream chunk 0 doubles as the gate + size probe.
-        with sender_context(web_agent_id):
-            first = (
-                await kernel.send(
-                    [
-                        {
-                            "target": agent_id,
-                            "payload": {
-                                "type": "read_stream",
-                                "path": path,
-                                "offset": 0,
-                                "length": 262144,
-                            },
-                        }
-                    ]
-                )
-            )[0]["result"]
+        first = await _fetch(agent_id, path, 0)
         if isinstance(first, dict) and isinstance(
             first.get("bytes"), (bytes, bytearray)
         ):
@@ -229,25 +238,7 @@ def make_app(web_agent_id: str, kernel) -> FastAPI:
                     yield bytes(chunk["bytes"])
                     if chunk.get("eof"):
                         break
-                    # The generator is iterated by StreamingResponse AFTER the
-                    # handler returned, so it re-enters the context per chunk
-                    # rather than relying on the handler's still being active.
-                    with sender_context(web_agent_id):
-                        chunk = (
-                            await kernel.send(
-                                [
-                                    {
-                                        "target": agent_id,
-                                        "payload": {
-                                            "type": "read_stream",
-                                            "path": path,
-                                            "offset": chunk["next_offset"],
-                                            "length": 262144,
-                                        },
-                                    }
-                                ]
-                            )
-                        )[0]["result"]
+                    chunk = await _fetch(agent_id, path, chunk["next_offset"])
                     if not isinstance(chunk, dict) or not isinstance(
                         chunk.get("bytes"), (bytes, bytearray)
                     ):

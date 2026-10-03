@@ -19,6 +19,10 @@ Verbs:
                    into the ledger like any other. The live endpoint callable
                    is handed to the parent in-process through the module hook
                    `route_endpoints(agent)` below — never through a reply.
+  inbound_call / inbound_emit / inbound_watch / inbound_state_subscribe
+                -> the INBOUND half (`io_bridge._inbound`): the socket loop hands
+                   each admitted frame to this leg as one of these, and the leg
+                   performs it AS ITSELF — gated as the leg.
 """
 
 from __future__ import annotations
@@ -26,7 +30,13 @@ from __future__ import annotations
 from fastapi import WebSocket
 
 from io_bridge import describe as _describe
-from io_bridge import unknown_ingress_refusal
+from io_bridge import (
+    inbound_call,
+    inbound_emit,
+    inbound_state_subscribe,
+    inbound_watch,
+    unknown_ingress_refusal,
+)
 from web_ws._proxy import run as _proxy_run
 from kernel._refusal import UNHANDLED, refusal
 
@@ -37,9 +47,8 @@ from kernel._refusal import UNHANDLED, refusal
 def _make_endpoint(self_id: str, kernel):
     async def _ws_endpoint(websocket: WebSocket, host_id: str):
         await websocket.accept()
-        # `web_agent_id` is the surface's own id (this web_ws instance).
-        # The proxy uses it to tag external traffic via _current_sender,
-        # so telemetry rays originate from the surface's sprite.
+        # `web_agent_id` is the surface's own id (this web_ws instance): every
+        # admitted frame is handed to it, and it acts as itself.
         await _proxy_run(websocket, kernel, host_id, self_id)
 
     return _ws_endpoint
@@ -97,6 +106,10 @@ VERBS = {
     "reflect": _reflect,
     "boot": _boot,
     "get_routes": _get_routes,
+    "inbound_call": inbound_call,
+    "inbound_emit": inbound_emit,
+    "inbound_watch": inbound_watch,
+    "inbound_state_subscribe": inbound_state_subscribe,
 }
 
 

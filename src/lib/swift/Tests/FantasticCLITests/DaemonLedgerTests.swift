@@ -132,25 +132,31 @@
                     "ingress_rule=allow_all_ingress",
                     // BOTH SIDES, granted from above: the leg's `can_call`
                     // alone is half the gate.
-                    "callable_by={\"rest\": \"*\", \"$self\": \"*\", \"$parent\": \"*\", \"$children\": \"*\"}",
+                    "callable_by={\"rest\": \"*\"}",
                 ],
                 [
                     "kernel", "create_agent", "parent_id=kernel_state",
                     "handler_module=web.tools", "id=web", "port=\(port)",
+                    // the host reads its leg's routes: an explicit edge
+                    "can_call={\"rest\": \"*\"}",
                 ],
                 [
                     "kernel", "create_agent", "parent_id=web",
                     "handler_module=web_rest.tools", "id=rest",
                     "ingress_rule=allow_all_ingress",
                     "can_call={\"store\": \"*\", \"kernel_state\": [\"ledger\"]}",
+                    "callable_by={\"web\": \"*\"}",
+                ],
+                [
+                    "kernel", "update_agent", "id=kernel_state",
+                    "callable_by={\"rest\": [\"ledger\"]}",
                 ],
             ]
             if memory {
                 steps += [
                     [
                         "kernel", "create_agent", "parent_id=kernel_state",
-                        "handler_module=ram_store.tools", "id=memory", "operator=true",
-                        "admins=[\"kernel\"]",
+                        "handler_module=ram_store.tools", "id=memory",
                     ],
                     ["kernel", "update_agent", "id=kernel_state", "memory_store_id=memory"],
                 ]
@@ -319,7 +325,7 @@
                 ],
                 [
                     "kernel", "create_agent", "parent_id=kernel_state",
-                    "handler_module=ram_store.tools", "id=memory", "operator=true",
+                    "handler_module=ram_store.tools", "id=memory",
                 ],
                 ["kernel", "update_agent", "id=kernel_state", "memory_store_id=memory"],
             ] {

@@ -25,9 +25,6 @@ Verbs:
   delete path        -> {path, deleted: true}            (refused if readonly)
   rename old_path new_path -> {old_path, new_path}        (refused if readonly)
   mkdir  path        -> {path, created: true}            (refused if readonly)
-  allow    path      -> {path, allowed: true, count}    (expose one path)
-  disallow path      -> {path, allowed: false, count}   (hide it again)
-  allowed  limit? after? -> {paths, next, total}
 
 THE TEXT VERBS are this bridge's own: a caller edits with ITS OWN grants on the
 bridge. `write`/`edit` commit through `fs.write_bytes` (a tmp sibling + atomic
@@ -42,9 +39,9 @@ directory (`.` exposes the whole root). No list, or an empty one, exposes
 NOTHING. Every path verb (`list`, `read_stream`, `write_stream`, `delete`,
 `rename`, `mkdir`, and `pump` through them) sees only exposed paths; anything
 else is `not_found` whether or not it exists, so nothing leaks. `list` also shows
-the directories on the way to an exposed path. `allow`/`disallow` edit the list
-one path at a time (gated like any verb); it is record state — settable at
-`create_agent`, persisted by the loader. Writes are still governed by `readonly`.
+the directories on the way to an exposed path. The list is record state — set at
+`create_agent` or by `update_agent`, persisted by the loader. Writes are still
+governed by `readonly`.
 """
 
 from __future__ import annotations
@@ -52,19 +49,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import posixpath
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager
 
 from file_bridge import fs
 from io_bridge import describe as _describe
 from io_bridge import gate_inbound, resolve_ingress, unknown_ingress_refusal
 from io_bridge._base import parse_spec
-from kernel import (
-    current_origin,
-    current_remote_caller,
-    operator_context,
-    remote_caller_context,
-    sender_context,
-)
 from kernel._refusal import (
     NOT_FOUND,
     TRANSPORT_ERROR,
@@ -177,7 +167,8 @@ def _unexposed(verb: str, path: str) -> dict:
     return refusal(
         NOT_FOUND,
         f"{verb}: {path!r} is not exposed by this bridge",
-        hint="expose it first — `allow {path}` (whoever holds that grant)",
+        hint="expose it first — add it to the bridge's `allow` record field "
+        "(update_agent)",
         path=path,
     )
 
@@ -501,24 +492,6 @@ def _one_file(a, b) -> bool:
     return n not in (None, ".") and n == _norm(b)
 
 
-@contextmanager
-def _as_caller():
-    """Run the enclosed sends AS THIS DISPATCH'S CALLER: the operator stays the
-    operator; a local agent is itself; a foreign `<guid>|<agent>` is the same pair
-    its bridge leg relayed (the leg as sender, the foreign id judged by the
-    target's `callable_by`)."""
-    origin, remote = current_origin(), current_remote_caller()
-    if origin is None:
-        with operator_context():
-            yield
-    elif remote is not None:
-        with sender_context(origin), remote_caller_context(origin, remote):
-            yield
-    else:
-        with sender_context(origin):
-            yield
-
-
 async def _pump(id, payload, kernel):
     """The PUMP — a server-side stream copy SOURCE→SINK, chunk by chunk, in ONE call.
     (vs a consumer driving each read/write over the wire). Storage-agnostic:
@@ -527,9 +500,10 @@ async def _pump(id, payload, kernel):
 
     args: source:str? (provider id, default self) + source_path:str (req) + sink:str?
     (provider id, default self) + sink_path:str? (default = source_path) +
-    chunk:int=65536. BOTH ENDS RUN AS YOU: `read_stream` on the source and
-    `write_stream` on the sink go out under the caller's identity, so you need your
-    own grants on both (this bridge is no deputy). Each end SELF-gates + SELF-clamps
+    chunk:int=65536. BOTH ENDS RUN AS THIS BRIDGE: `read_stream` on the source and
+    `write_stream` on the sink are this bridge's own sends, so the bridge needs the
+    grants on both — a caller holding `pump` on it borrows exactly that reach, which
+    is what granting `pump` means. Each end SELF-gates + SELF-clamps
     (the pump only coordinates — it never reads/writes bytes itself, so a sealed end
     refuses it). A pump ONTO ITS OWN SOURCE (the sink is the source and sink_path
     names the same file) is refused. Returns {source, sink, bytes, chunks}."""
@@ -553,15 +527,13 @@ async def _pump(id, payload, kernel):
         )
     offset, first, chunks = 0, True, 0
 
-    async def as_caller(item: dict):
-        # AS THE CALLER (audit AV-7, 2026-10-03): sent from this dispatch, both
-        # ends judged THIS BRIDGE — a client holding only `pump` copied a file it
-        # could never read and overwrote one it could never write.
-        with _as_caller():
-            return (await kernel.send([item]))[0]["result"]
+    async def own_send(item: dict):
+        # Sent from this dispatch: identity comes only from dispatch, so both ends
+        # are THIS BRIDGE's sends, gated as it.
+        return (await kernel.send([item]))[0]["result"]
 
     while True:
-        r = await as_caller(
+        r = await own_send(
             {
                 "target": src,
                 "payload": {
@@ -576,7 +548,7 @@ async def _pump(id, payload, kernel):
             r.get("bytes"), (bytes, bytearray)
         ):
             return refusal(TRANSPORT_ERROR, f"pump: read from {src!r} failed: {r}")
-        w = await as_caller(
+        w = await own_send(
             {
                 "target": sink,
                 "payload": {
@@ -1019,69 +991,6 @@ async def on_delete(agent) -> None:
         del slots[k]
 
 
-# ─── the allow list (what this bridge exposes) ──────────────────
-
-
-async def _allow_verb(id, payload, kernel):
-    """args: path:str (req — a file, or a directory exposing everything under it; `.` = the whole root). Adds it to the `allow` list (idempotent). Returns {path, allowed:true, count}."""
-    rec = kernel.get(id) or {}
-    raw, err = _path_arg("allow", payload)
-    if err:
-        return err
-    if not raw:
-        return missing("allow", "path")
-    path = _norm(raw)
-    if path is None:
-        return bad("allow", "path", "a path relative to the bridge's root")
-    try:
-        fs.resolve(_root(kernel, rec), path)  # THE CLAMP: nothing outside the root
-    except ValueError as e:
-        return bad("allow", "path", f"a path inside the root ({e})")
-    allow = _allow(rec)
-    if path not in allow:
-        allow = [*allow, path]
-        kernel.update(id, allow=allow)
-    return {"path": path, "allowed": True, "count": len(allow)}
-
-
-async def _disallow_verb(id, payload, kernel):
-    """args: path:str (req — an entry of the `allow` list). Removes it. Returns {path, allowed:false, count}."""
-    rec = kernel.get(id) or {}
-    raw, err = _path_arg("disallow", payload)
-    if err:
-        return err
-    if not raw:
-        return missing("disallow", "path")
-    path = _norm(raw)
-    allow = _allow(rec)
-    if path is None or path not in allow:
-        return refusal(
-            NOT_FOUND, f"disallow: {raw!r} is not in the allow list", path=raw
-        )
-    allow = [s for s in allow if s != path]
-    kernel.update(id, allow=allow)
-    return {"path": path, "allowed": False, "count": len(allow)}
-
-
-async def _allowed_verb(id, payload, kernel):
-    """args: limit:int?, after:str? (the last path of the previous page). The `allow` list in path order. Returns {paths, next, total}."""
-    rec = kernel.get(id) or {}
-    paths = sorted(_allow(rec))
-    after = payload.get("after")
-    if isinstance(after, str) and after:
-        paths = [p for p in paths if p > after]
-    total = len(paths)
-    limit, err = _int_arg("allowed", payload, "limit", 0, 0)
-    if err:
-        return err
-    page = paths[:limit] if limit else paths
-    return {
-        "paths": page,
-        "next": page[-1] if limit and total > len(page) else None,
-        "total": total,
-    }
-
-
 # ─── dispatch ───────────────────────────────────────────────────
 
 
@@ -1100,9 +1009,6 @@ VERBS = {
     "delete": _delete,
     "rename": _rename,
     "mkdir": _mkdir,
-    "allow": _allow_verb,
-    "disallow": _disallow_verb,
-    "allowed": _allowed_verb,
 }
 
 UNGATED = {"reflect"}  # discovery must work on a sealed bridge

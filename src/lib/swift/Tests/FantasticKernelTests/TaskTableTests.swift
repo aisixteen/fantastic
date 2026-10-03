@@ -99,7 +99,7 @@ private struct SlowBundle: AgentBundle {
             try? await Task.sleep(nanoseconds: 30_000_000_000)
             return r
         // An AGENT cancelling another agent's work: discover via `ps`, then
-        // `cancel`. Plain verbs — no privileged surface, no bundle coupling.
+        // `cancel`. Plain verbs — no special surface, no bundle coupling.
         case "kill":
             let victim = payload["victim"].asString ?? ""
             let table = await kernel.send([
@@ -361,14 +361,13 @@ struct TaskTableCancelTests {
     @Test func agentCancelsAnotherAgentsTask() async throws {
         // `cancel` is a PLAIN VERB, so an agent wields it: the killer agent's own
         // handler discovers the victim's task through `ps` and sends `cancel`. No
-        // UI, no privileged caller — the capability is in the substrate.
+        // UI, no special caller — the capability is in the substrate.
         let sh = Shared()
         let kernel = makeSlowKernel(sh)
         let victim = await makeAgent(kernel, "slow_victim")
-        // `ps` and `cancel` are privileged: the baseline does not reach them.
-        let killer = await makeAgent(
-            kernel, "slow_killer",
-            canCall: .object(["kernel_state": .array([.string("ps"), .string("cancel")])]))
+        // Explicit grants on both ends: the killer → the root, `ps` and `cancel`.
+        let killer = await makeAgent(kernel, "slow_killer")
+        wire(kernel, "slow_killer", "kernel_state", ["ps", "cancel"])
 
         let caller = spawnCaller(kernel, victim, .object(["type": .string("slow")]))
         defer { caller.cancel() }
@@ -523,7 +522,7 @@ struct TaskTableCancelTests {
         let createDoc = try #require(kv["create_agent"].asString)
         #expect(
             createDoc.contains("parent_id:str REQUIRED"),
-            "placement is the fact a caller needs first: \(createDoc)")
+            "where the agent sits is the fact a caller needs first: \(createDoc)")
         let updateDoc = try #require(kv["update_agent"].asString)
         #expect(
             updateDoc.contains("REPLACED, NOT MERGED"),
@@ -564,9 +563,9 @@ struct TaskTableCancelTests {
     // VERBATIM, `create_agent`'s `'kernel_state'` top-level token included — the
     // root-id rename landed with C12.
     static let pythonVerbDocs: [(String, String)] = [
-        ("create_agent", "args: handler_module:str, parent_id:str REQUIRED, id:str?, **meta. Creates a CHILD OF `parent_id` — your own id grows your own subtree (no grant needed); 'kernel_state' for top-level. No default parent."),
-        ("update_agent", "args: id:str, **meta. EVERY FIELD YOU NAME IS REPLACED, NOT MERGED (a field you do not name is untouched), so a dict field must be sent WHOLE — `can_call`/`callable_by` included: restate every key you want to keep, the baseline `$self`/`$parent`/`$children` among them, or the keys you omit are GONE. Granting one edge reads like a PATCH and behaves like a PUT."),
-        ("delete_agent", "args: id:str. CASCADES — deletes that agent AND ITS WHOLE SUBTREE, deepest first; refuses if any descendant carries `delete_lock`."),
+        ("create_agent", "args: handler_module:str, parent_id:str REQUIRED, id:str?, **meta. Creates a CHILD OF `parent_id` — an agent names its own id (it creates only its own children); 'kernel_state' for top-level. No default parent."),
+        ("update_agent", "args: id:str, **meta. EVERY FIELD YOU NAME IS REPLACED, NOT MERGED (a field you do not name is untouched), so a dict field must be sent WHOLE — `can_call`/`callable_by` included: restate every key you want to keep, the baseline `$self` among them, or the keys you omit are GONE. Granting one edge reads like a PATCH and behaves like a PUT. An agent updates only its own children."),
+        ("delete_agent", "args: id:str. CASCADES — deletes that agent AND ITS WHOLE SUBTREE, deepest first; refuses if any descendant carries `delete_lock`. An agent deletes only its own children."),
         ("list_agents", "No args. Every agent's record, flat. Paged."),
         ("ps", "No args. The live kernel-wide TASK TABLE — {tasks:[{id, agent, parent, verb, started_at}]}, one row per in-flight dispatch. Paged."),
         ("ledger", "No args. EVERY execution and what it became — named under its id, unnamed under its minted pid — {executions:[{id, target, status, attempts, retries, named, outcome?, acked?}]}, paged, scoped to what YOU originated; read from the kernel's memory store plus what is not yet flushed. `outcome` keeps the RESULT only for a named call; a dead letter keeps its error; anything else is {status, bytes} — the reply itself went to its caller. Failed/timed_out/cancelled rows are the dead-letter queue (announced by the `on_deadletter` event): inspect, retry with a NEW id if you choose, then `ack_deadletter` it — nothing is retried silently."),

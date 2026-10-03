@@ -47,7 +47,7 @@ struct SendValidationTests {
         let kernel = freshKernel()
         await create(kernel, "a")
         await create(kernel, "b")  // no edge a→b: the gate WOULD refuse
-        let out = await KernelTaskLocals.$currentSender.withValue(AgentId("a")) {
+        let out = await KernelTaskLocals.$sender.withValue(AgentId("a")) {
             await kernel.send([Item(AgentId("b"), .object([:]))])[0]
         }
         #expect(out.pid == nil, "\(out.result.serialize())")

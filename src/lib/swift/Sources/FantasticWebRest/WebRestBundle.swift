@@ -9,10 +9,7 @@
 //
 //   POST /<self_id>/<target_id>           body={type:verb,...} → JSON reply
 //                                         headers: X-Fantastic-Auth (credential),
-//                                         X-Fantastic-Execution-Id (the item `id`),
-//                                         X-Fantastic-Secret (the item `secret`, a
-//                                         JSON array of marks — dotted strings
-//                                         and/or arrays of steps)
+//                                         X-Fantastic-Execution-Id (the item `id`)
 //   GET  /<self_id>/_reflect              → reflect `kernel`
 //   GET  /<self_id>/_reflect/<target_id>  → reflect one agent
 //
@@ -20,6 +17,11 @@
 // are namespaced by the agent's own id, so multiple web_rest instances
 // coexist. Opt-in: create with
 //   <web_id> create_agent handler_module=web_rest.tools
+//
+// IDENTITY: the HTTP server is the TRANSPORT — a request runs outside every
+// dispatch, so what it sends is the operator's. It sends nothing onward itself:
+// every admitted request is handed to this leg as `inbound_call`
+// (`Inbound.handIn`), and the leg performs it AS ITSELF — gated as the leg.
 
 import FantasticIoBridge
 import FantasticJSON
@@ -45,12 +47,29 @@ public final class WebRestBundle: AgentBundle, WebRouteEndpoints, @unchecked Sen
         IngressRules.unknownRefusal(meta)
     }
 
+    /// The INBOUND verbs ride the binary channel too: a handed-in call may carry
+    /// a request body, and its reply's chunk comes back raw.
+    public func handleBinary(
+        agentId: AgentId, header: JSON, body: Blob?, kernel: Kernel
+    ) async throws -> (JSON?, Blob?) {
+        if Inbound.handles(header["type"].asString ?? "") {
+            return await Inbound.handle(
+                agentId: agentId, payload: header, body: body, rawReply: true, kernel: kernel)
+        }
+        return (try await handle(agentId: agentId, payload: header, kernel: kernel), nil)
+    }
+
     public func handle(
         agentId: AgentId,
         payload: JSON,
         kernel: Kernel
     ) async throws -> JSON? {
         let type = payload["type"]
+        if Inbound.handles(type.asString ?? "") {
+            return await Inbound.handle(
+                agentId: agentId, payload: payload, body: nil, rawReply: false, kernel: kernel
+            ).0
+        }
         switch type.asString {
         case "reflect":
             let me = agentId.value
@@ -206,35 +225,26 @@ public final class WebRestBundle: AgentBundle, WebRouteEndpoints, @unchecked Sen
         // reads. With it, ensure-semantics reach the wire: an unknown id
         // dispatches, an in-flight id JOINS, and a settled id returns the
         // recorded outcome rather than running the verb twice.
-        var item = Item(AgentId(target), payload)
+        var item: OrderedDictionary<String, JSON> = [
+            "target": .string(target), "payload": payload,
+        ]
         if let execId = headers["x-fantastic-execution-id"].asString, !execId.isEmpty {
-            item.id = execId
+            item["id"] = .string(execId)
         }
-        // SECRET MARKS: this kernel records the call as shown, exactly as for a
-        // local caller; a malformed mark is the kernel's own refusal.
-        if let raw = headers.asObject?[Self.secretHeader] {
-            guard let marks = try? JSON.parseStrict(raw.asString ?? "") else {
-                return (
-                    Self.jsonResponse(
-                        400,
-                        .object(["error": .string("web_rest: X-Fantastic-Secret is not valid JSON")])
-                    ), nil
-                )
-            }
-            item.secret = marks
-        }
+        // HANDED TO THIS LEG (`inbound_call`), which sends it as itself — an HTTP
+        // caller has no agent identity of its own.
+        //
         // EVERY CALL MAY BE ANSWERED WITH RAW BYTES, whatever its verb (A13.1):
         // python's reply dict holds them and `_first_bytes_field` finds them,
-        // with no list of verbs. This leg carries the reply's body
-        // (`rawReply`), and answers octet exactly when the reply holds one.
-        // There is NO request body: a JSON body cannot hold one, so
-        // `write_stream` with a JSON-string `bytes` reaches file_bridge as a
-        // header `bytes` key and is refused `missing_arg` (A13.19), which is
-        // python's answer too.
-        item.rawReply = true
-        let out = await KernelTaskLocals.$currentSender.withValue(legId) {
-            await kernel.send([item])[0]
-        }
+        // with no list of verbs. The hand-in carries the reply's body back
+        // (the binary channel with no request body), and this leg answers octet
+        // exactly when the reply holds one. There is NO request body: a JSON
+        // body cannot hold one, so `write_stream` with a JSON-string `bytes`
+        // reaches file_bridge as a header `bytes` key and is refused
+        // `missing_arg` (A13.19), which is python's answer too.
+        let out = await Inbound.handIn(
+            kernel, legId: legId,
+            .object(["type": .string("inbound_call"), "item": .object(item)]))
         if case .null = out.result { return (Self.noContent, nil) }
         // The host turns a CHUNK — a 0-byte one included — into the octet reply;
         // a refusal carries none and stays JSON. The octet reply's header is the
@@ -251,20 +261,6 @@ public final class WebRestBundle: AgentBundle, WebRouteEndpoints, @unchecked Sen
         return (Self.jsonResponse(200, out.result), nil)
     }
 
-    /// The item's `secret` marks (`Secret`) ride `X-Fantastic-Secret` (the host
-    /// lowercases every header) — dispatch metadata about the call, like the
-    /// execution id, never part of the payload. The value is a JSON ARRAY of
-    /// marks, each a dotted string (`"payload.key"`) or an array of steps
-    /// (`["payload", "a.b"]` — a key holding a dot), the SAME value a ws/bridge
-    /// `call` frame carries in its `secret` field: one parser (the strict wire
-    /// parse), and the kernel's own check judges it. Not comma-separated — a path
-    /// step is a payload key, and a key may hold a comma; a JSON string escapes
-    /// any character into the ASCII a header value is safe in; and a wrong shape
-    /// (a bare string, `[]`, a number) reaches the kernel's refusal verbatim
-    /// instead of being re-invented by a splitter. Python
-    /// `web_rest._SECRET_HEADER`.
-    static let secretHeader = "x-fantastic-secret"
-
     /// python `_make_reflect_root` / `_make_reflect_get`.
     private func reflectEndpoint(
         legId: AgentId, target: String, request: JSON, kernel: Kernel
@@ -276,9 +272,13 @@ public final class WebRestBundle: AgentBundle, WebRouteEndpoints, @unchecked Sen
         {
             return Self.jsonResponse(403, denied)
         }
-        let reply = await KernelTaskLocals.$currentSender.withValue(legId) {
-            await kernel.send([Item(AgentId(target), payload)])[0].result
-        }
+        let reply = await Inbound.handIn(
+            kernel, legId: legId,
+            .object([
+                "type": .string("inbound_call"),
+                "item": .object(["target": .string(target), "payload": payload]),
+            ])
+        ).result
         if case .null = reply { return Self.notFound }
         return Self.jsonResponse(200, reply)
     }
@@ -328,6 +328,7 @@ public final class WebRestBundle: AgentBundle, WebRouteEndpoints, @unchecked Sen
             "No-op. The parent `web` agent calls `get_routes` on this bundle during its own boot and mounts the HTTP endpoint onto its FastAPI app."
         ),
         "get_routes": .string("Declares this surface's HTTP routes. No args. Returns"),
+        "inbound_call": Inbound.verbDocs["inbound_call"]!,
     ]
 
     /// python `PB/io/web_rest/src/web_rest/readme.md`, byte for byte.
@@ -347,21 +348,13 @@ public final class WebRestBundle: AgentBundle, WebRouteEndpoints, @unchecked Sen
         Name an execution with **`X-Fantastic-Execution-Id`** — same id twice returns the
         first outcome instead of running the verb again (dispatch metadata on the
         carrier, never in the body).
-        Mark secret values with **`X-Fantastic-Secret`** — a JSON array of marks, the
-        item's `secret`: dotted strings (`["payload.fields"]`, `["result"]`) and/or arrays
-        of steps for a key holding a dot (`[["payload","a.b"]]`): the reply is real, every
-        record of the call shows `<secret>`. Not JSON → `400`; a bad mark → the kernel's
-        `bad_arg` refusal.
-        **One leg is one principal** (audit S6, 2026-10-03): every request admitted to this
-        leg is dispatched AS the leg, so grants, a credential_store's `readers`,
-        `X-Fantastic-Execution-Id` names and a secret-marked execution's join (the real
-        outcome goes to its original caller — the leg) see ONE caller. Everyone admitted to
-        one leg is one principal — one tenant per leg.
+        **One leg is one principal**: every admitted request is handed to this leg
+        (`inbound_call`), which sends it AS ITSELF — its `can_call` and the target's
+        `callable_by` decide, and `X-Fantastic-Execution-Id` names are one caller's.
+        Everyone admitted to one leg is one tenant.
         ```
         curl -X POST -H 'content-type: application/json' \\
-          -H 'X-Fantastic-Secret: ["payload.fields"]' \\
-          -d '{"type":"set","ref":"openai/main","fields":{"api_key":"…"}}' \\
-          http://<host>/<id>/<creds_id>
+          -d '{"type":"reflect"}' http://<host>/<id>/<target_id>
         ```
 
         """

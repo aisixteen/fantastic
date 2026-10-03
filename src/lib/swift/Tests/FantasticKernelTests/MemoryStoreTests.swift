@@ -86,7 +86,7 @@ private func call(
 ) async -> Outcome {
     let item = Item(AgentId(target), payload, id: id)
     if let sender {
-        return await KernelTaskLocals.$currentSender.withValue(AgentId(sender)) {
+        return await KernelTaskLocals.$sender.withValue(AgentId(sender)) {
             await k.send([item])[0]
         }
     }
@@ -106,7 +106,7 @@ private func mk(_ k: Kernel, _ id: String = "probe", _ meta: OrderedDictionary<S
         "type": .string("create_agent"), "parent_id": .string("kernel_state"),
         "id": .string(id), "handler_module": .string("mem_probe.tools"),
         "callable_by": .object([
-            "$parent": .string("*"), "rest": .string("*"), "caller": .string("*"),
+            "rest": .string("*"), "caller": .string("*"),
         ]),
     ]
     for (kk, v) in meta { p[kk] = v }
@@ -115,13 +115,12 @@ private func mk(_ k: Kernel, _ id: String = "probe", _ meta: OrderedDictionary<S
 }
 
 /// A ram_store `memory` under the root, named by the root; the kernel started.
-private func withStore(_ k: Kernel, operator op: Bool = true, start: Bool = true) async {
+private func withStore(_ k: Kernel, start: Bool = true) async {
     let r = await call(
         k, "kernel_state",
         .object([
             "type": .string("create_agent"), "parent_id": .string("kernel_state"),
             "id": .string("memory"), "handler_module": .string("ram_store.tools"),
-            "operator": .bool(op), "admins": .array([.string("kernel")]),
         ])
     ).result
     #expect(r["id"].asString == "memory", "\(r.serialize())")
@@ -244,15 +243,6 @@ struct MemoryStoreTests {
             "\(out.serialize())")
     }
 
-    @Test func kernelStartRefusesAStoreThatDoesNotServeTheOperator() async {
-        let k = makeKernel(MemProbe())
-        await withStore(k, operator: false, start: false)
-        let out = await k.start(bootAll: false)
-        #expect(out["reason"].asString == "unauthorized", "\(out.serialize())")
-        #expect(out["hint"].asString?.contains("operator") == true)
-        #expect(!k.started)
-    }
-
     @Test func kernelStartBootsTheStoreFirstThenEveryone() async {
         let k = makeKernel(MemProbe())
         await mk(k)
@@ -309,7 +299,7 @@ struct MemoryStoreTests {
         let after = await call(k, "memory", verb("dump")).result["tables"]
         let n = before["rows"].asArray?.count ?? 0
         #expect(Array((after["rows"].asArray ?? []).prefix(n)) == (before["rows"].asArray ?? []))
-        #expect(after["fold_refs"] == before["fold_refs"] && after["grants"] == before["grants"])
+        #expect(after["fold_refs"] == before["fold_refs"])
     }
 
     @Test func aSettleKeepsTheBodyOnlyWhenNamedOrTheErrorWhenDead() async {
@@ -387,6 +377,7 @@ struct MemoryStoreTests {
                     "kernel_state": .array([.string("ledger"), .string("ack_deadletter")]),
                 ])
             ])
+        wire(k, "caller", "kernel_state", ["ledger", "ack_deadletter"])
         await withStore(k)
         let mine = await call(k, "probe", verb("work"), id: "mine-1", as: "caller")
         let other = await call(k, "probe", verb("work"))
@@ -458,6 +449,7 @@ struct MemoryStoreTests {
                     "kernel_state": .array([.string("ledger"), .string("ack_deadletter")]),
                 ])
             ])
+        wire(k, "caller", "kernel_state", ["ledger", "ack_deadletter"])
         await withStore(k)
         let inbox = k.ensureInbox(AgentId("caller"))
         let out = await call(k, "probe", verb("fail"), as: "caller")

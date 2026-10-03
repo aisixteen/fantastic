@@ -146,7 +146,7 @@ struct RootGuardTests {
                     ROOT_ID: .array([.string("persist_blob")])
                 ]),
             ]))
-        let denied = await KernelTaskLocals.$currentSender.withValue(AgentId("leaf")) {
+        let denied = await KernelTaskLocals.$sender.withValue(AgentId("leaf")) {
             await kernel.send([
                 Item(
                     AgentId(ROOT_ID),

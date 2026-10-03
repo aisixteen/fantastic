@@ -21,58 +21,22 @@ import OrderedCollections
 private let reservedBlobNames: Set<String> = [RECORD_FILE, "readme.md"]
 
 extension Kernel {
-    /// A store I/O send made as the KERNEL'S OWN BOOKKEEPING.
-    ///
-    /// Two locals are cleared, and both matter:
-    /// - `currentSender` = nil says the KERNEL is acting, not the agent that
-    ///   asked — so the write never runs against that agent's grant.
-    /// - `currentKilled` = nil says this is not part of the CALLER'S killed
-    ///   subtree. Without it, cancelling a pass silently swallowed a record the
-    ///   kernel had already committed to writing, and the history read back
-    ///   EMPTY — a cancel must not corrupt what was already durable.
+    /// The kernel's BOOKKEEPING CALL to the store a sidecar persists through —
+    /// a plain call into the store's handler (`storeCall`), never a send: the
+    /// blob verbs are the loader's own, already gated where they were called.
     func storeBookkeeping(_ store: AgentId, _ payload: JSON) async -> JSON {
-        await asBookkeeping { await self.send([Item(store, payload)])[0].result }
+        await storeCall(store, payload).0
     }
 
     /// The BINARY bookkeeping edge: a `write_stream`/`read_stream` to the store
-    /// over the raw-bytes channel (never base64), under operator authority. The
-    /// file_bridge string `read`/`write` verbs are GONE — a blob rides the stream
-    /// verbs like any other file (mirrors python `persist_blob`/`load_blob`).
-    ///
-    /// THROUGH THE BATCH (C47): ONE binary item, so the blob verbs, the message
-    /// log are ledger executions with call, task and settle rows — python's `persist_blob` is a plain `kernel.send([...])` and leaves
-    /// exactly those. `sendWithBinary` minted none of them.
-    ///
-    /// `body` is the request's chunk (the payload's `bytes`, a `write_stream`);
-    /// `nil` asks for the reply's chunk raw (a `read_stream`). The chunk comes
-    /// back when the reply holds it at `bytes` — python reads `reply["bytes"]`.
+    /// over the raw-bytes channel (never base64). `body` is the request's chunk
+    /// (the payload's `bytes`); `nil` asks for the reply's chunk raw. The chunk
+    /// comes back when the reply holds it at `bytes` — python reads
+    /// `reply["bytes"]`.
     func storeBookkeepingBinary(_ store: AgentId, _ header: JSON, _ body: Data?) async
         -> (JSON, Data?)
     {
-        await asBookkeeping {
-            let item = Item(
-                store, header, binary: body.map { Blob("bytes", $0) }, rawReply: body == nil)
-            let out = await self.send([item])[0]
-            return (out.result, bodyAt(out.body, "bytes"))
-        }
-    }
-
-    /// Run `body` as the KERNEL'S OWN BOOKKEEPING — the ONE definition of that
-    /// scope, public because callers OUTSIDE the substrate (the AI core's
-    /// `save_history`) do bookkeeping too.
-    ///
-    /// It exists as one function because it was written twice and drifted:
-    /// `storeBookkeeping` cleared both locals, `save_history` cleared only the
-    /// sender, and the second one was a live data-loss bug (measured 2026-08-27:
-    /// cancelling a pass mid-stream swallowed the user row the backend had
-    /// already committed, and the chat read back EMPTY). Two copies of a rule is
-    /// one copy that will be missed on the next fix.
-    public func asBookkeeping<T: Sendable>(_ body: @Sendable () async -> T) async -> T {
-        await KernelTaskLocals.$currentKilled.withValue(nil) {
-            await KernelTaskLocals.$currentSender.withValue(nil) {
-                await body()
-            }
-        }
+        await storeCallBinary(store, header, body)
     }
 
     /// Validate a blob filename: one bare segment, not kernel-managed, no escape
@@ -119,12 +83,10 @@ extension Kernel {
     /// bounds who can REACH the verb; it says nothing about which namespace they
     /// may NAME.
     ///
-    /// An OPERATOR send (origin nil: the loader's own flush, an agent persisting
-    /// itself under operator authority, the CLI) is the bookkeeping this verb
-    /// exists for and stays ungated — an agent cannot forge it. An AGENT may only
-    /// name ITSELF.
-    static func guardBlobOwner(_ aid: String) -> String? {
-        guard let caller = KernelTaskLocals.currentOrigin else { return nil }
+    /// An OPERATOR send (origin nil: the CLI, a test driver) stays ungated — an
+    /// agent cannot forge it. An AGENT may only name ITSELF.
+    static func guardBlobOwner(_ aid: String, caller: AgentId?) -> String? {
+        guard let caller else { return nil }
         if caller.value == aid { return nil }
         return
             "\(pyRepr(caller.value)) may not use another agent's namespace \(pyRepr(aid)) —"
@@ -139,7 +101,7 @@ extension Kernel {
     /// BARE `{error}` (plus `reason` on the owner denial) — these are the
     /// loader's own replies, not kernel refusals, so they carry no code and no
     /// `side`.
-    private func resolveBlob(_ verb: String, _ payload: JSON) -> (
+    private func resolveBlob(_ verb: String, _ payload: JSON, caller: AgentId?) -> (
         ok: (store: AgentId, name: String, path: String)?, refusal: JSON?
     ) {
         guard let aid = payload["agent_id"].asString, !aid.isEmpty else {
@@ -151,7 +113,7 @@ extension Kernel {
                 nil, .object(["error": .string("\(verb): \(checked.error ?? "bad name")")])
             )
         }
-        if let why = Kernel.guardBlobOwner(aid) {
+        if let why = Kernel.guardBlobOwner(aid, caller: caller) {
             return (
                 nil,
                 .object([
@@ -184,9 +146,42 @@ extension Kernel {
         return storeReldir(storeRoot: rootAgent.rootPath, agentRoot: dir)
     }
 
-    /// `persist_blob` — whole-file write of one sidecar.
+    /// AN AGENT PERSISTING ITS OWN SIDECAR — a plain kernel function, no send
+    /// (the kernel's persistence bookkeeping): the namespace is the agent whose
+    /// handler (or spawned task) runs this, so it can name no other. Outside
+    /// every dispatch there is no agent to persist for — refused.
+    public func persistOwnBlob(name: String, content: String) async -> JSON {
+        guard let me = KernelTaskLocals.currentSender else {
+            return .object(["error": .string("persist_blob: no agent is running this — an agent persists its own sidecar")])
+        }
+        return await persistBlob(
+            .object([
+                "type": .string("persist_blob"), "agent_id": .string(me.value),
+                "name": .string(name), "content": .string(content),
+            ]), caller: me)
+    }
+
+    /// `loadOwnBlob` — `persistOwnBlob`'s read: one of the running agent's own
+    /// sidecars.
+    public func loadOwnBlob(name: String) async -> JSON {
+        guard let me = KernelTaskLocals.currentSender else {
+            return .object(["error": .string("load_blob: no agent is running this — an agent loads its own sidecar")])
+        }
+        return await loadBlob(
+            .object([
+                "type": .string("load_blob"), "agent_id": .string(me.value),
+                "name": .string(name),
+            ]), caller: me)
+    }
+
+    /// `persist_blob` — whole-file write of one sidecar. The verb path: the
+    /// caller is the dispatch's origin.
     public func persistBlob(_ payload: JSON) async -> JSON {
-        let r = resolveBlob("persist_blob", payload)
+        await persistBlob(payload, caller: KernelTaskLocals.currentOrigin)
+    }
+
+    private func persistBlob(_ payload: JSON, caller: AgentId?) async -> JSON {
+        let r = resolveBlob("persist_blob", payload, caller: caller)
         // CONTENT IS CHECKED BETWEEN THE OWNER GUARD AND THE STORE LOOKUP in
         // python, so a contentless call with no store wired says `content (str)
         // required`, not `no store wired`. `resolveBlob` ends at the store, so
@@ -205,8 +200,8 @@ extension Kernel {
         guard let content else {
             return .object(["error": .string("persist_blob: content (str) required")])
         }
-        // Operator authority: the loader writing to its OWN discovered store is
-        // persistence bookkeeping, not the loader reaching out as an agent.
+        // The loader writing to its OWN discovered store is persistence
+        // bookkeeping, a plain call into the store, not the loader reaching out.
         let (reply, _) = await storeBookkeepingBinary(
             ok.store,
             .object([
@@ -235,7 +230,11 @@ extension Kernel {
     /// empty rather than erroring, because "nothing saved yet" is the normal
     /// first state.
     public func loadBlob(_ payload: JSON) async -> JSON {
-        let r = resolveBlob("load_blob", payload)
+        await loadBlob(payload, caller: KernelTaskLocals.currentOrigin)
+    }
+
+    private func loadBlob(_ payload: JSON, caller: AgentId?) async -> JSON {
+        let r = resolveBlob("load_blob", payload, caller: caller)
         guard let ok = r.ok else { return r.refusal ?? .null }
         var chunks = Data()
         var offset = 0

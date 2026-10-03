@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import types
 from kernel import register_unlisted
+from _testkit import wire
 
 # ─── a test bundle: real handler_module, registered unlisted ───
 #
@@ -53,7 +54,7 @@ async def _slow_handler(id, payload, kernel):
         )[0]["result"]
     if verb == "kill":
         # An AGENT cancelling another agent's work: discover via `ps`, then
-        # `cancel`. Plain verbs — no privileged surface, no bundle coupling.
+        # `cancel`. Plain verbs — no special surface, no bundle coupling.
         table = (await kernel.send([{"target": "kernel", "payload": {"type": "ps"}}]))[
             0
         ]["result"]
@@ -265,14 +266,15 @@ async def test_cancel_unknown_or_finished_task_is_honest(seeded_kernel):
 
 async def test_agent_cancels_another_agents_task(seeded_kernel):
     """An agent wields `cancel`: the killer agent's own handler discovers the
-    victim's task through `ps` and sends `cancel`. Both are PRIVILEGED — the
-    baseline `$parent: "*"` does not reach them — so the killer holds a grant that
-    names them on the root."""
+    victim's task through `ps` and sends `cancel`. Both are kernel verbs answered by
+    the root, so the killer holds a grant naming them on the root, and the root's
+    `callable_by` names the killer."""
     _hook_calls.clear()
     victim = await _mk(seeded_kernel, "slow_victim")
     killer = await _mk(
         seeded_kernel, "slow_killer", can_call={"kernel_state": ["ps", "cancel"]}
     )
+    wire(seeded_kernel, killer, "kernel_state", ["ps", "cancel"])
 
     caller = asyncio.create_task(
         seeded_kernel.send([{"target": victim, "payload": {"type": "slow"}}])
@@ -316,6 +318,7 @@ async def test_script_agent_cancels_another_agents_task(seeded_kernel):
         )
     )[0]["result"]
     runner = rec["id"]
+    wire(seeded_kernel, runner, "kernel_state", ["ps", "cancel"])
 
     caller = asyncio.create_task(
         seeded_kernel.send([{"target": victim, "payload": {"type": "slow"}}])

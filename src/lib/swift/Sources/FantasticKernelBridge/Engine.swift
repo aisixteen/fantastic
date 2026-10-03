@@ -436,25 +436,12 @@ extension KernelBridgeBundle {
             // FORWARDED, not re-worded — the rule's own reason and repair, so a
             // peer hitting a sealed leg learns how to open it.
             reply = denial.asRefusal
-        } else if let bad = checkCaller(
-            pin: kernel.agent(agentId)?.metaValue(forKey: "peer_guid")?.asString,
-            frame["caller"])
-        {
-            // THE QUALIFIED CALLER IS CHECKED ON INGRESS, before the kernel sees
-            // the frame: from the ONE pinned peer, or refused.
-            reply = bad
-        } else if kernel.agent(agentId)?.metaValue(forKey: "peer_guid")?.asString
-            == localGuid(kernel)
-        {
-            reply = .object([
-                "error": .string("bridge: this leg's peer_guid is THIS kernel's own guid — refused"),
-                "reason": .string("unauthorized"),
-                "hint": .string("pin the PEER kernel's guid"),
-            ])
         } else {
-            // UNDER THE LEG'S OWN IDENTITY: a peer frame reaching `kernel.send`
-            // with a nil sender would be an OPERATOR call and the two-sided gate
-            // would bound nothing.
+            // AS THE LEG: the read loop is a task this leg's `boot` spawned, so
+            // this task is the leg's too — the inbound call is sent as the leg and
+            // gated as the leg (its `can_call`, the target's `callable_by`).
+            // Whoever called on the other kernel is that kernel's business; here
+            // the caller is the leg.
             let targetId = AgentId(target.asString ?? "")
             // ONE ITEM, text or binary: a binary frame's body sits at
             // `["payload", …steps]` (the frame's `_binary_path`) and rides the item's
@@ -463,11 +450,6 @@ extension KernelBridgeBundle {
             // outcome instead of running again. A body the frame put anywhere else
             // is not in the payload python's decoder hands the kernel.
             var built = Item.fromFrame(targetId, inner, frameId: frame["id"].asString)
-            // SECRET MARKS cross the bridge verbatim (`Secret`): this kernel
-            // records the call as shown — its call/settle rows, ledger, state
-            // stream — and its own check refuses a malformed mark before anything
-            // dispatches. Python `if "secret" in frame: item["secret"] = …`.
-            if let marks = frame.asObject?["secret"] { built.secret = marks }
             if isBinary {
                 let (p, binary) = Codec.callPayload(frame, body: body)
                 built.payload = pyTruthy(p) ? p : .object([:])
@@ -477,23 +459,8 @@ extension KernelBridgeBundle {
             // (python's reply dict holds them; no list of verbs): a call with no
             // request body still carries its reply's body back.
             if built.binary == nil { built.rawReply = true }
-            let item = built
-            // THE QUALIFIED CALLER rides into the dispatch: the gate checks the
-            // target's `callable_by` against `<peer guid>|<remote agent>` (never
-            // the leg), and a memory store keys what it writes by it. Python
-            // `remote_caller_context(kernel.id, caller)`.
-            let caller: String? = pyTruthy(frame["caller"]) ? frame["caller"].asString : nil
-            let run: @Sendable () async -> (JSON, Blob?) = {
-                let out = await kernel.send([item])[0]
-                return (out.result, out.body)
-            }
-            (reply, replyBody) = await KernelTaskLocals.$currentSender.withValue(agentId) {
-                if let caller {
-                    return await KernelTaskLocals.withRemoteCaller(
-                        leg: agentId, address: caller, run)
-                }
-                return await run()
-            }
+            let out = await kernel.send([built])[0]
+            (reply, replyBody) = (out.result, out.body)
         }
         let out: JSON = .object([
             "type": .string("reply"), "id": frame["id"], "data": reply,
@@ -509,68 +476,6 @@ extension KernelBridgeBundle {
         }
         let at = replyBody.nested(in: "data")
         try? await transport.sendBinary(header: Codec.binaryHead(out, at), body: at.bytes)
-    }
-
-    /// This kernel's own instance guid (the root record's `guid`), or `nil`
-    /// before the root minted one. Python `_local_guid`.
-    func localGuid(_ kernel: Kernel) -> String? {
-        guard let g = kernel.root?.metaValue(forKey: "guid")?.asString, !g.isEmpty else {
-            return nil
-        }
-        return g
-    }
-
-    /// INGRESS CHECK on a frame's qualified `caller`, before the kernel sees it.
-    /// Every inbound call names its sender as `<guid>|<agent id>`, and the guid
-    /// must be the ONE peer this leg is pinned to (`peer_guid` on the record): a
-    /// peer cannot pose as a third kernel's agent. No pin, no inbound call.
-    /// Python `_check_caller`.
-    public func checkCaller(pin: String?, _ caller: JSON) -> JSON? {
-        let parts = caller.asString.map { $0.split(separator: "|", omittingEmptySubsequences: false) }
-        guard let parts, parts.count == 2, parts.allSatisfy({ !$0.isEmpty }) else {
-            return .object([
-                "error": .string(
-                    "bridge: an inbound call must name its caller as `<guid>|<agent id>`; got \(pyRepr(caller))"
-                ),
-                "reason": .string("unauthorized"),
-            ])
-        }
-        guard let pin, !pin.isEmpty else {
-            return .object([
-                "error": .string("bridge: this leg pins no peer, so it serves no inbound call"),
-                "reason": .string("unauthorized"),
-                "hint": .string(
-                    "update_agent <this leg> peer_guid=<the peer kernel's guid> (its root reflect shows `guid`)"
-                ),
-            ])
-        }
-        if String(parts[0]) != pin {
-            return .object([
-                "error": .string(
-                    "bridge: caller \(pyRepr(caller)) is not from the pinned peer \(pyRepr(.string(pin)))"),
-                "reason": .string("unauthorized"),
-            ])
-        }
-        return nil
-    }
-
-    /// WHO IS CALLING, QUALIFIED: `<this kernel's guid>|<the agent that asked>`
-    /// (`kernel` for the operator). The far side keys store rows by it. `nil`
-    /// before the root minted a guid. Python `_forward`.
-    func qualifiedCaller(_ kernel: Kernel) -> String? {
-        guard let g = localGuid(kernel) else { return nil }
-        return "\(g)|\(KernelTaskLocals.currentOrigin?.value ?? "kernel")"
-    }
-
-    /// Put this `forward` call's own marks (`KernelTaskLocals.currentSecret`),
-    /// re-rooted by `forwardedSecret`, on the outbound frame — only when any
-    /// survive. Python `_forward`'s `frame["secret"] = secret`. A binary
-    /// `forward`'s body sits INSIDE the forwarded payload (`payload.payload.<path>`,
-    /// where python's dict holds it), so its mark re-roots like any other field:
-    /// `payload.payload.bytes` rides as the far item's `payload.bytes`.
-    private func stampForwardedSecret(_ frame: inout JSON) {
-        let secret = forwardedSecret(KernelTaskLocals.currentSecret)
-        if !secret.isEmpty { frame["secret"] = .array(secret) }
     }
 
     // MARK: - shared verbs
@@ -609,10 +514,6 @@ extension KernelBridgeBundle {
         var frame: JSON = .object([
             "type": .string("call"), "id": .string(corr), "target": target, "payload": inner,
         ])
-        if let caller = qualifiedCaller(kernel) { frame["caller"] = .string(caller) }
-        // The caller's `secret` marks on THIS call, re-rooted at the forwarded
-        // item, so the far kernel masks its records of the call as this one does.
-        stampForwardedSecret(&frame)
         // Stamp this leg's EGRESS credential on the ENVELOPE (never the payload).
         if let token = egress.credential() { frame["auth_token"] = .string(token) }
         let slot = expect(st: st, corr: corr)
@@ -680,8 +581,6 @@ extension KernelBridgeBundle {
         var frame: JSON = .object([
             "type": .string("call"), "id": .string(corr), "target": target, "payload": inner,
         ])
-        if let caller = qualifiedCaller(kernel) { frame["caller"] = .string(caller) }
-        stampForwardedSecret(&frame)
         if let token = egress.credential() { frame["auth_token"] = .string(token) }
         let slot = expect(st: st, corr: corr)
         do {
@@ -761,45 +660,6 @@ extension KernelBridgeBundle {
         out[replyKey] = .string(target)
         return out
     }
-}
-
-/// The `forward` call's own `secret` marks, RE-ROOTED at the item the far
-/// kernel dispatches — so both kernels mask the same values.
-///
-/// The local item is `{target: <bridge>, payload: {type: forward, target,
-/// payload: <inner>}}`; the far item is `{target, payload: <inner>}`. A mark
-/// under the inner payload drops ONE `payload` step, in the spelling it came in:
-/// dotted `payload.payload.<f…>` → `payload.<f…>` (and `payload.payload` →
-/// `payload`), an array `["payload", "payload", <step>…]` → `["payload",
-/// <step>…]` (and `["payload", "payload"]` → `["payload"]`) — a mark left naming
-/// no field is the far kernel's refusal like any bad mark. A `result` mark
-/// (`result[.<f…>]`, `["result", <step>…]`) is the same reply on both kernels,
-/// carried as is. A mark on the forward verb's own fields (`payload.target`,
-/// `["payload", "timeout"]`) names nothing on the far item and stays on this
-/// kernel's record only. The marks were already checked by this kernel; the far
-/// kernel's own `secret` check judges the re-rooted ones before it dispatches
-/// anything. Python `io_bridge.forwarded_secret`.
-public func forwardedSecret(_ marks: [JSON]) -> [JSON] {
-    var out: [JSON] = []
-    for m in marks {
-        switch m {
-        case .array(let p):
-            if p.first == .string("result") {
-                out.append(m)
-            } else if p.count >= 2, p[0] == .string("payload"), p[1] == .string("payload") {
-                out.append(.array(Array(p.dropFirst())))
-            }
-        case .string(let p):
-            if p == "result" || p.hasPrefix("result.") {
-                out.append(m)
-            } else if p == "payload.payload" || p.hasPrefix("payload.payload.") {
-                out.append(.string(String(p.dropFirst("payload.".count))))
-            }
-        default:
-            break
-        }
-    }
-    return out
 }
 
 /// Carries the read loop's join continuation.

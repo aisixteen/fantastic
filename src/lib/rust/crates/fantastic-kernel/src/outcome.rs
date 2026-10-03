@@ -243,13 +243,6 @@ pub struct Item {
     /// The RAW `retries`, forwarded untouched (C38) for the same reason.
     /// Set, this SUPERSEDES the typed `retries` above.
     pub raw_retries: Option<Value>,
-    /// SECRET marks (`[mark, …]`, see [`crate::secret`]): dotted strings —
-    /// `payload.<field…>` or `result[.<field…>]` — and/or arrays of steps —
-    /// `["payload", <step>, …]` or `["result", <step>…]`. The target gets the real
-    /// payload and the caller the real reply; every record and mirror of the call shows `<secret>`. RAW, so
-    /// the kernel validates the shape and refuses a malformed mark `bad_arg`
-    /// before anything runs.
-    pub secret: Option<Value>,
 }
 
 impl Item {
@@ -266,7 +259,6 @@ impl Item {
             raw_id: None,
             raw_timeout: None,
             raw_retries: None,
-            secret: None,
         }
     }
 
@@ -336,15 +328,6 @@ impl Item {
     #[must_use]
     pub fn with_raw_retries(mut self, v: Value) -> Self {
         self.raw_retries = Some(v);
-        self
-    }
-
-    /// Mark SECRET values on this item (`["payload.key"]`, `["result"]`,
-    /// `[["payload", "a.b"]]`, …) — see [`Item::secret`]. Validated by the
-    /// kernel, never here.
-    #[must_use]
-    pub fn with_secret(mut self, marks: Value) -> Self {
-        self.secret = Some(marks);
         self
     }
 

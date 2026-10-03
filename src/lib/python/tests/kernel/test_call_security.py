@@ -2,33 +2,33 @@
 
 The model is **fully-gated, two-sided, from-above-only**:
 
-- An AGENT-originated send (driven here via `sender_context(<id>)`) is checked
+- An AGENT-originated send (driven here via `as_agent(kernel, <id>)` — the test standing in for that agent's handler) is checked
   TWICE: **egress** (the sender's `can_call` allows the target+verb) AND
   **ingress** (the target's `callable_by` accepts the sender+verb). The gate
   NEVER branches on a verb name — `reflect` included, nothing exempt.
 - An OPERATOR send (no `_current_sender` — the CLI / bootstrap / loader-at-boot /
   a test driver calling `kernel.send` directly) is the ORIGIN root of trust and
   passes ungated.
-- Authority flows from ABOVE only: an agent can never raise its own
-  `can_call`/`callable_by`, and a parent may delegate only a SUBSET of its own
-  reach.
+- The mutators act on the sender's own children only, so an agent can never
+  raise its own `can_call`/`callable_by`.
 
-Every agent carries the structural baseline `{$self:*, $parent:*, $children:*}`
-on BOTH fields — reach/accept your own subtree and your creator. A LATERAL edge
-between two siblings needs BOTH an explicit `can_call` on the caller and an
-explicit `callable_by` on the callee.
+Every agent carries the baseline `{$self:*}` on BOTH fields — nothing else. Any
+other edge (parent, child, sibling, the root) needs BOTH an explicit `can_call`
+on the caller and an explicit `callable_by` on the callee.
 """
 
 from __future__ import annotations
 
 
-from kernel import sender_context
+from _testkit import as_agent
+
+from _testkit import wire
 
 
 async def _mk(kernel, **meta) -> str:
     """Create a plain file_bridge child of root (opened so its OWN ingress gate
     never masks the call gate we're testing), returning its id. Created as
-    operator → carries the stamped structural baseline on both fields."""
+    operator → carries the stamped baseline on both fields."""
     payload = {
         "type": "create_agent",
         "parent_id": kernel.id,
@@ -46,7 +46,7 @@ async def _mk(kernel, **meta) -> str:
 
 
 async def test_operator_send_is_ungated(seeded_kernel):
-    # No sender_context → operator → anything passes, including mutation.
+    # No as_agent → operator → anything passes, including mutation.
     a = await _mk(seeded_kernel)
     r = (
         await seeded_kernel.send(
@@ -59,7 +59,7 @@ async def test_operator_send_is_ungated(seeded_kernel):
 async def test_agent_send_to_ungranted_peer_is_denied(seeded_kernel):
     a = await _mk(seeded_kernel)
     b = await _mk(seeded_kernel)
-    with sender_context(a):
+    with as_agent(seeded_kernel, a):
         r = (
             await seeded_kernel.send(
                 [{"target": b, "payload": {"type": "list", "path": ""}}]
@@ -70,33 +70,33 @@ async def test_agent_send_to_ungranted_peer_is_denied(seeded_kernel):
     assert r.get("hint")  # the denial teaches how to open it — from above
 
 
-# ─── the structural baseline (both fields) ──────────────────────
+# ─── the baseline (both fields): `$self` only ───────────────────
 
 
-async def test_agent_may_call_self_and_parent_by_default(seeded_kernel):
+async def test_agent_may_call_only_itself_by_default(seeded_kernel):
     a = await _mk(seeded_kernel)
-    with sender_context(a):
+    with as_agent(seeded_kernel, a):
         # $self — a's can_call($self) + a's callable_by($self)
         r_self = (
             await seeded_kernel.send(
                 [{"target": a, "payload": {"type": "list", "path": ""}}]
             )
         )[0]["result"]
-        # $parent is the root: a's can_call($parent) + root's callable_by($children)
+        # its parent (the root) is NOT in the baseline
         r_parent = (
             await seeded_kernel.send(
                 [{"target": seeded_kernel.id, "payload": {"type": "list_agents"}}]
             )
         )[0]["result"]
     assert r_self.get("reason") != "unauthorized"
-    assert r_parent.get("reason") != "unauthorized"
+    assert r_parent.get("reason") == "unauthorized" and r_parent["side"] == "egress"
 
 
 async def test_reflect_is_gated_like_any_verb(seeded_kernel):
     # NOTHING is exempt — reflecting an ungranted lateral peer is denied.
     a = await _mk(seeded_kernel)
     b = await _mk(seeded_kernel)
-    with sender_context(a):
+    with as_agent(seeded_kernel, a):
         denied = (
             await seeded_kernel.send([{"target": b, "payload": {"type": "reflect"}}])
         )[0]["result"]
@@ -117,7 +117,7 @@ async def test_reflect_is_gated_like_any_verb(seeded_kernel):
             ]
         )
     )[0]["result"]
-    with sender_context(a2):
+    with as_agent(seeded_kernel, a2):
         ok = (
             await seeded_kernel.send([{"target": b, "payload": {"type": "reflect"}}])
         )[0]["result"]
@@ -131,7 +131,7 @@ async def test_lateral_edge_needs_both_egress_and_ingress(seeded_kernel):
     b = await _mk(seeded_kernel)
     # a is granted `list` on b (egress) — but b does not accept a (ingress).
     a = await _mk(seeded_kernel, can_call={b: ["list"]})
-    with sender_context(a):
+    with as_agent(seeded_kernel, a):
         r = (
             await seeded_kernel.send(
                 [{"target": b, "payload": {"type": "list", "path": ""}}]
@@ -155,7 +155,7 @@ async def test_lateral_edge_needs_both_egress_and_ingress(seeded_kernel):
             ]
         )
     )[0]["result"]
-    with sender_context(a):
+    with as_agent(seeded_kernel, a):
         ok = (
             await seeded_kernel.send(
                 [{"target": b, "payload": {"type": "list", "path": ""}}]
@@ -170,14 +170,13 @@ async def test_lateral_edge_needs_both_egress_and_ingress(seeded_kernel):
     assert no.get("reason") == "unauthorized"  # only `list` was granted, both ends
 
 
-# ─── privileged verbs ───────────────────────────────────────────
+# ─── mutators ───────────────────────────────────────────────────
 
 
 async def test_agent_cannot_create_agent_even_on_its_parent(seeded_kernel):
-    # A depth-1 agent's $parent IS the root, and its default grant is "*" — but
-    # create_agent is PRIVILEGED, so the wildcard does not cover it.
+    # The baseline reaches nothing but the agent itself.
     a = await _mk(seeded_kernel)
-    with sender_context(a):
+    with as_agent(seeded_kernel, a):
         r = (
             await seeded_kernel.send(
                 [
@@ -197,10 +196,10 @@ async def test_agent_cannot_create_agent_even_on_its_parent(seeded_kernel):
 
 
 async def test_explicit_kernel_grant_lets_an_agent_create(seeded_kernel):
-    # Grant a the privileged verb explicitly → it can mutate through the root.
-    # (Ingress: the root accepts a via its $children baseline.)
+    # Grant `create_agent` on BOTH ends of a → root → it creates its own child.
     a = await _mk(seeded_kernel, can_call={seeded_kernel.id: ["create_agent"]})
-    with sender_context(a):
+    wire(seeded_kernel, a, seeded_kernel.id, ["create_agent"])
+    with as_agent(seeded_kernel, a):
         r = (
             await seeded_kernel.send(
                 [
@@ -208,7 +207,7 @@ async def test_explicit_kernel_grant_lets_an_agent_create(seeded_kernel):
                         "target": "kernel",
                         "payload": {
                             "type": "create_agent",
-                            "parent_id": seeded_kernel.id,
+                            "parent_id": a,
                             "handler_module": "file_bridge.tools",
                             "allow": ["."],
                         },
@@ -223,10 +222,11 @@ async def test_explicit_kernel_grant_lets_an_agent_create(seeded_kernel):
 
 
 async def test_agent_cannot_raise_its_own_authority(seeded_kernel):
-    # update_agent on self, editing own can_call → self-grant, denied.
-    a = await _mk(seeded_kernel, can_call={seeded_kernel.id: ["update_agent"]})
+    # update_agent on self, editing own can_call → not its own child, denied.
+    a = await _mk(seeded_kernel)
+    wire(seeded_kernel, a, seeded_kernel.id, ["update_agent"])
     b = await _mk(seeded_kernel)
-    with sender_context(a):
+    with as_agent(seeded_kernel, a):
         r = (
             await seeded_kernel.send(
                 [
@@ -242,18 +242,14 @@ async def test_agent_cannot_raise_its_own_authority(seeded_kernel):
             )
         )[0]["result"]
     assert r.get("reason") == "unauthorized"
-    assert r.get("side") == "self-grant"
+    assert r.get("side") == "mutator"
 
 
-async def test_parent_confers_only_a_subset_it_holds(seeded_kernel):
-    peer = await _mk(seeded_kernel)
-    # granter can reach `peer` for `list`, and may create/update through root.
-    granter = await _mk(
-        seeded_kernel,
-        can_call={peer: ["list"], seeded_kernel.id: ["create_agent", "update_agent"]},
-    )
-    with sender_context(granter):
-        # Confer a SUBSET it holds (peer:list) onto a new child → allowed.
+async def test_a_parent_writes_any_grant_on_its_own_child(seeded_kernel):
+    # Grants come from above: a parent writes any grant on a child it creates.
+    granter = await _mk(seeded_kernel)
+    wire(seeded_kernel, granter, seeded_kernel.id, ["create_agent"])
+    with as_agent(seeded_kernel, granter):
         ok = (
             await seeded_kernel.send(
                 [
@@ -261,57 +257,11 @@ async def test_parent_confers_only_a_subset_it_holds(seeded_kernel):
                         "target": seeded_kernel.id,
                         "payload": {
                             "type": "create_agent",
-                            "parent_id": seeded_kernel.id,
-                            "handler_module": "file_bridge.tools",
-                            "allow": ["."],
-                            "can_call": {peer: ["list"]},
-                        },
-                    }
-                ]
-            )
-        )[0]["result"]
-        # Confer MORE than it holds (peer:mkdir) → refused as over-delegation.
-        no = (
-            await seeded_kernel.send(
-                [
-                    {
-                        "target": seeded_kernel.id,
-                        "payload": {
-                            "type": "create_agent",
-                            "parent_id": seeded_kernel.id,
-                            "handler_module": "file_bridge.tools",
-                            "allow": ["."],
-                            "can_call": {peer: ["mkdir"]},
-                        },
-                    }
-                ]
-            )
-        )[0]["result"]
-    assert ok.get("reason") != "unauthorized" and "id" in ok
-    assert no.get("reason") == "unauthorized"
-    assert no.get("side") == "delegation"
-    # The refusal names WHY the granter does not hold `peer`: not its child (and
-    # whose child it is), not in its can_call — the one-line diagnosis that used to
-    # cost twenty messages of delete+recreate (measured 2026-09-02).
-    assert "not your child" in no["error"] and no.get("parent") == seeded_kernel.id, no
-
-
-async def test_callable_by_is_freely_conferrable(seeded_kernel):
-    # Ingress grants no reach on their own, so a granter may confer any
-    # `callable_by` (even one it could not itself satisfy).
-    granter = await _mk(seeded_kernel, can_call={seeded_kernel.id: ["create_agent"]})
-    with sender_context(granter):
-        ok = (
-            await seeded_kernel.send(
-                [
-                    {
-                        "target": seeded_kernel.id,
-                        "payload": {
-                            "type": "create_agent",
-                            "parent_id": seeded_kernel.id,
+                            "parent_id": granter,
                             "handler_module": "file_bridge.tools",
                             "allow": ["."],
                             "callable_by": {"anyone_at_all": ["list"]},
+                            "can_call": {"anything": "*"},
                         },
                     }
                 ]
@@ -321,7 +271,7 @@ async def test_callable_by_is_freely_conferrable(seeded_kernel):
 
 
 async def test_operator_conferral_is_unbounded(seeded_kernel):
-    # The operator (no sender_context) may confer any can_call — from above.
+    # The operator (no as_agent) may write any can_call — from above.
     peer = await _mk(seeded_kernel)
     rec = (
         await seeded_kernel.send(
@@ -384,78 +334,3 @@ async def test_create_agent_refuses_a_non_dict_grant(kernel):
         )
     )[0]["result"]
     assert r.get("error") and "grant MAP" in r["error"], r
-
-
-async def test_delegating_on_an_agent_that_does_not_exist_names_that(seeded_kernel):
-    """THE BATCH TRAP: `[create X, grant peer→X]` in ONE send. Items launch
-    concurrently, so X is not an agent yet when the grant's gate runs. The refusal
-    must say "no such agent" and point at the next batch — "you don't hold X" is
-    false and sent a builder into a 382-second deliberation (measured 2026-09-02,
-    E30 subai:python). The same grant in the NEXT send passes."""
-    root = seeded_kernel.id
-    # The peer's record is the OPERAND of the grant (AV-1): the granter names it
-    # with `update_agent`, and the peer accepts the granter's edit.
-    peer = await _mk(
-        seeded_kernel,
-        id="peer_dg",
-        callable_by={
-            "$self": "*",
-            "$parent": "*",
-            "$children": "*",
-            "granter_dg": ["update_agent"],
-        },
-    )
-    await _mk(
-        seeded_kernel,
-        id="granter_dg",
-        can_call={
-            "$self": "*",
-            "$parent": "*",
-            "$children": "*",
-            root: ["*", "create_agent", "update_agent"],
-            "peer_dg": ["update_agent"],
-        },
-    )
-    with sender_context("granter_dg"):
-        batch = await seeded_kernel.send(
-            [
-                {
-                    "target": root,
-                    "payload": {
-                        "type": "create_agent",
-                        "parent_id": "granter_dg",
-                        "id": "kid_dg",
-                        "handler_module": "file_bridge.tools",
-                        "allow": ["."],
-                    },
-                },
-                {
-                    "target": root,
-                    "payload": {
-                        "type": "update_agent",
-                        "id": peer,
-                        "can_call": {"kid_dg": "*"},
-                    },
-                },
-            ]
-        )
-        no = batch[1]["result"]
-        assert no.get("reason") == "unauthorized" and no.get("side") == "delegation"
-        assert no.get("missing") == "kid_dg", no
-        assert "no such agent" in no["error"] and "next" in no["error"], no
-        # Next batch: kid_dg exists and is the granter's child → the grant passes.
-        ok = (
-            await seeded_kernel.send(
-                [
-                    {
-                        "target": root,
-                        "payload": {
-                            "type": "update_agent",
-                            "id": peer,
-                            "can_call": {"kid_dg": "*"},
-                        },
-                    }
-                ]
-            )
-        )[0]["result"]
-    assert ok.get("updated") is True, ok

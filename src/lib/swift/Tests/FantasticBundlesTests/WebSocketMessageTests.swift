@@ -302,6 +302,7 @@ private func wsKernel() async throws -> Kernel {
                 "callable_by": ["$self": "*", "$parent": "*", "$children": "*", "web_ws": "*"],
             ])
     ])
+    wire(k, "web", "web_ws")
     _ = await k.send([Item("web", ["type": "mount", "child_id": "web_ws"])])
     return k
 }

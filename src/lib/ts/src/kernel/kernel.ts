@@ -14,11 +14,10 @@ import { KernelStore } from "./kernel_store.ts";
 import { runBatch } from "./batch.ts";
 import { nowSeconds } from "./timers.ts";
 import type { Item, Outcome } from "./outcome.ts";
+import { errorShaped } from "./outcome.ts";
 import { BAD_ARG, LOCKED, UNHANDLED, refusal, unknown } from "./refusal.ts";
 import { answerKernelVerb, isKernelVerb } from "./kernel_verbs.ts";
-import { authorizeCall, authorizeHeritable, denial } from "./authz.ts";
-import { check as checkSecret } from "./secret.ts";
-import type { Mark } from "./secret.ts";
+import { authorizeCall, denial } from "./authz.ts";
 
 /**
  * The bridge transport (P2). The pure core depends only on this interface, so
@@ -26,22 +25,11 @@ import type { Mark } from "./secret.ts";
  * injects the real WS one. Non-local sends + remote watches go through here.
  */
 export interface Bridge {
-  /** `caller` is the QUALIFIED sender `<this kernel's guid>|<agent id>` (`kernel`
-   *  for the operator), stamped on the call frame when this kernel has a guid —
-   *  a far side keys what the call writes by it. `secret` is the item's marks as
-   *  given (`secret.ts` — dotted strings and/or arrays of steps; none when the
-   *  item marked none), rooted at the item exactly as the far kernel's item is
-   *  rooted: the transport puts them on the call frame verbatim — only when there
-   *  are some — so the FAR kernel masks its own records of the call too (python
-   *  `PeerRoute.call`). */
-  forward(target: string, payload: Payload, caller?: string, secret?: readonly Mark[]): Promise<Json>;
+  /** Call `target` on the host. The host judges the call as the leg this kernel
+   *  is connected through — the frame names no caller. */
+  forward(target: string, payload: Payload): Promise<Json>;
   /** like forward, but the payload may carry a binary blob (Uint8Array). */
-  forwardBinary(
-    target: string,
-    payload: Record<string, unknown>,
-    caller?: string,
-    secret?: readonly Mark[],
-  ): Promise<Json>;
+  forwardBinary(target: string, payload: Record<string, unknown>): Promise<Json>;
   emitRemote(target: string, payload: Payload): void;
   watchRemote(src: string): void;
   unwatchRemote(src: string): void;
@@ -79,17 +67,18 @@ export class Kernel {
   /** Per-kernel RAM a bundle keeps for itself (never persisted) — e.g. an AI
    *  agent's head cache. Keyed by the bundle; shared by every view. */
   readonly bundleMem: Map<string, unknown> = new Map();
-  /** The unscoped kernel every view descends from. */
-  readonly base: Kernel;
 
   /**
    * The id that ORIGINATED the dispatch now running, or null for an operator.
    *
-   * The browser has no `AsyncLocalStorage` and a module-global would leak
-   * across every await, so this is not ambient state: `scopedFor` returns a
-   * prototype-linked VIEW of this kernel carrying the origin, and a handler is
-   * handed that view as its `kernel`. A handler therefore cannot forge an
-   * origin — it never names one, it just sends.
+   * IDENTITY COMES ONLY FROM DISPATCH. The browser has no `AsyncLocalStorage`
+   * and a module-global would leak across every await, so this is not ambient
+   * state: when the kernel runs an agent's handler it hands it a
+   * prototype-linked VIEW of this kernel carrying that agent as the origin, and
+   * the sends made through that view (and through anything the handler starts
+   * with it) are the agent's. There is no API to send as anyone else: code that
+   * runs outside every dispatch — the app, a transport's frame handler, a test
+   * driver — holds the kernel itself and sends as the operator.
    */
   readonly currentOrigin: string | null = null;
   /** The task id of the dispatch now running — a nested send parents to it. */
@@ -103,27 +92,17 @@ export class Kernel {
    */
   readonly currentTaskRow: TaskRow | null = null;
   /**
-   * WHO CALLED the dispatch now running (null = the operator). A handler's own
-   * sends are attributed to itself (`currentOrigin`), so without this it could
-   * not tell whose request it is serving — which a verb whose PAYLOAD names a
-   * resource needs: a memory store keys every row by its writer.
+   * WHO CALLED the dispatch now running (null = the operator, or the kernel's
+   * own bookkeeping). A handler's own sends are attributed to itself
+   * (`currentOrigin`), so without this it could not tell whose request it is
+   * serving — which a verb whose PAYLOAD names a resource needs: a memory store
+   * keys every row by its writer.
    */
   readonly currentCaller: string | null = null;
   /**
-   * THE SECRET MARKS of the call the dispatch now running serves — the `secret`
-   * its caller marked on the batch item, exactly as given and in order: each a
-   * dotted string (`payload.<field…>` / `result[.<field…>]`) or an array of steps
-   * (`["payload", <step>, …]` / `["result", <step>…]`), `secret.ts`; empty when
-   * none were marked (python `current_secret()`). Stamped on the dispatch's view
-   * like `currentCaller`, so the handler's own sends never inherit it. A bundle
-   * that must only ever be called WITH a mark (a credential store) reads it and
-   * refuses an unmarked call.
-   */
-  readonly currentSecret: readonly Mark[] = [];
-  /**
-   * The kernel's OWN traffic — the `shutdown` verbs of a stop, the flush, prune
-   * and reads of its memory store. It passes the drain (python's
-   * `shutdown_context` + registered-task rule).
+   * The SHUTDOWN of a stop (python `shutdown_context`): set on the view a
+   * `shutdown` bookkeeping call runs under, so what that handler sends passes
+   * the drain. Inherited by the dispatches those sends start.
    */
   readonly kernelTraffic: boolean = false;
 
@@ -144,7 +123,6 @@ export class Kernel {
   private readonly stateSubscribers: Set<(e: StateEvent) => void> = new Set();
 
   constructor() {
-    this.base = this;
     this.store = new KernelStore(this);
   }
 
@@ -356,68 +334,16 @@ export class Kernel {
       : targetId;
   }
 
-  /** A view of this kernel whose sends are attributed to `agentId`. Shares all
+  /** The view `agentId`'s handler runs under — the ONLY place an origin is
+   *  made: its sends are the agent's, parented to `taskId`, and `caller` is who
+   *  asked (null: the operator, or the kernel's own bookkeeping). Shares all
    *  state by prototype — the ledger, the table and the tree are the SAME
    *  objects, only the origin differs. */
-  scopedFor(agentId: string, taskId: number | null): Kernel {
+  private viewFor(agentId: string, taskId: number | null, caller: string | null): Kernel {
     const view = Object.create(this) as Kernel;
     Object.defineProperty(view, "currentOrigin", { value: agentId, enumerable: true });
-    setTask(view, taskId, this.tasks);
-    return view;
-  }
-
-  /** The view a dispatch runs under: its sends are the target's, parented to
-   *  its task, and it knows who called it and which marks that caller put on
-   *  its item — stamped on EVERY dispatch view, so a nested dispatch never reads
-   *  its caller's marks through the prototype chain. */
-  private dispatchView(targetId: string, taskId: number, caller: string | null, secret: readonly Mark[]): Kernel {
-    const view = this.scopedFor(targetId, taskId);
     Object.defineProperty(view, "currentCaller", { value: caller, enumerable: true });
-    // frozen all the way down: no handler can rewrite the marks it was handed
-    const marks = secret.map((m) => (typeof m === "string" ? m : Object.freeze([...m])));
-    Object.defineProperty(view, "currentSecret", { value: Object.freeze(marks), enumerable: true });
-    return view;
-  }
-
-  /** A caller on ANOTHER KERNEL — `<guid>|<agent>` — as the origin of sends:
-   *  gated at INGRESS only (see `ingressGate`), and the target sees it as its
-   *  `currentCaller`. */
-  isForeign(origin: string | null): boolean {
-    if (origin === null || !origin.includes("|")) return false;
-    const own = this.guid;
-    return own === null || !origin.startsWith(`${own}|`);
-  }
-
-  /** The view a call from another kernel runs under (the web ws bridge answering
-   *  a host's `call` frame). */
-  foreignView(caller: string): Kernel {
-    return this.scopedFor(caller, null);
-  }
-
-  /** An OPERATOR view (no origin) that stays inside the task now running
-   *  (python `operator_context()`: the sender goes, `_current_task` stays) — so
-   *  what the kernel sends on a verb's behalf (`kernel_start`'s boots) parents to
-   *  that verb's task. */
-  operatorView(): Kernel {
-    const view = Object.create(this.base) as Kernel;
-    Object.defineProperty(view, "currentTask", { value: this.currentTask, enumerable: true });
-    Object.defineProperty(view, "currentTaskRow", { value: this.currentTaskRow, enumerable: true });
-    return view;
-  }
-
-  /** An operator view running AS task `taskId` (a spawned service loop's own
-   *  task — the flusher's). */
-  taskView(taskId: number): Kernel {
-    const view = Object.create(this.base) as Kernel;
     setTask(view, taskId, this.tasks);
-    return view;
-  }
-
-  /** The kernel's own traffic: operator sends that pass the drain, parented to
-   *  the task now running (none for the base kernel). */
-  kernelView(): Kernel {
-    const view = this.operatorView();
-    Object.defineProperty(view, "kernelTraffic", { value: true, enumerable: true });
     return view;
   }
 
@@ -438,13 +364,6 @@ export class Kernel {
     return this.store.mintId();
   }
 
-  /** `<guid>|<the id that is sending>` (`kernel` for the operator) — what a
-   *  bridge frame carries so the far side knows who is calling. */
-  qualifiedCaller(): string | undefined {
-    const g = this.guid;
-    return g === null ? undefined : `${g}|${this.currentOrigin ?? "kernel"}`;
-  }
-
   private ensureGuid(): void {
     if (this.rootId === null || this.guid !== null) return;
     this.updateMeta(this.rootId, { guid: mintGuid() });
@@ -455,61 +374,33 @@ export class Kernel {
    *
    * BOTH ends must grant it: the sender's `can_call` (egress) and the target's
    * `callable_by` (ingress). `side` on the refusal says which end refused, so a
-   * caller can tell "I may not call" from "they do not accept me" — the two
-   * have different fixes and only the operator can apply either.
+   * caller can tell "I may not call" from "they do not accept me". A kernel
+   * verb the root answers takes the SAME two-sided check against the root —
+   * there is no ingress skip.
    */
   gate(senderId: string, verb: string, targetId: string): Payload | null {
-    const target = this.agents.get(targetId);
-    const egress = this.egressGate(senderId, verb, targetId);
-    if (egress !== null) return egress;
-    // INGRESS DOES NOT APPLY TO A KERNEL VERB (python `_gate`, rust `gate.rs`).
-    // `callable_by` answers "do I accept being acted upon by you" — and for
-    // `ps`/`cancel`/`ledger` and friends the root is not what is acted upon: it
-    // is the control surface, the operand rides in the payload (`task_id`,
-    // `id`). Asking the root to accept each caller would make the operator edit
-    // the ROOT's record for every agent that needs the task table. So egress is
-    // the whole check: an agent granted `<root>:[ps, cancel]` can watch and kill
-    // ANY task — the per-victim granularity is gone, knowingly.
-    if (target !== undefined && target.parentId === null && isKernelVerb(verb)) return null;
-    return this.ingressGate(senderId, verb, targetId);
+    return this.egressGate(senderId, verb, targetId) ?? this.ingressGate(senderId, verb, targetId);
   }
 
   /**
    * The INGRESS half alone — does `targetId` accept `senderId` for `verb`? Its
-   * `callable_by`, tokens relative to the target. It is the WHOLE local check
-   * for a call that arrived from ANOTHER KERNEL (`senderId` is the qualified
-   * `<guid>|<agent>`): that kernel already judged whether its agent may send
-   * (its `can_call`), and the caller has no record here to hold a grant.
+   * `callable_by`, tokens relative to the target. A sender is always a LOCAL
+   * agent, so a `<guid>|…` key there never matches.
    */
   ingressGate(senderId: string, verb: string, targetId: string): Payload | null {
     const target = this.agents.get(targetId);
-    if (target !== undefined) {
-      const ok = authorizeCall(
-        target.meta["callable_by"] as Payload | undefined,
-        verb,
-        senderId,
-        {
-          holderId: target.id,
-          holderParent: target.parentId,
-          holderChildren: new Set(target.children.keys()),
-          loaderId: this.rootId,
-          // INGRESS: the privileged escalation is already blocked at egress, so
-          // a callee's `$children:"*"` ("I trust my own subtree") legitimately
-          // accepts a privileged verb.
-          enforcePrivileged: false,
-          inSubtree: (otherId, x) => this.inSubtree(otherId, x),
-        },
-      );
-      if (!ok) return denial("ingress", senderId, targetId, verb, this.isForeign(senderId));
-    }
-    return null;
+    if (target === undefined) return null;
+    const ok = authorizeCall(target.meta["callable_by"] as Payload | undefined, verb, senderId, {
+      holderId: target.id,
+      holderParent: target.parentId,
+      holderChildren: new Set(target.children.keys()),
+    });
+    return ok ? null : denial("ingress", senderId, targetId, verb);
   }
 
   /**
    * The EGRESS half alone — may the SENDER call `targetId` with `verb`? Its
-   * `can_call`, tokens relative to the sender (`$self`/`$parent`/`$children`/
-   * `$loader`), privileged verbs never under a wildcard (python
-   * `authorize_call`, `enforce_privileged=True`).
+   * `can_call`, tokens relative to the sender (`$self`/`$parent`/`$children`).
    *
    * It is the WHOLE local check for a HOST-BOUND send: the target lives on the
    * host, so its `callable_by` is the host's to apply to the arriving call — but
@@ -523,49 +414,12 @@ export class Kernel {
    */
   egressGate(senderId: string, verb: string, targetId: string): Payload | null {
     const sender = this.agents.get(senderId);
-    const ok = authorizeCall(
-      sender?.meta["can_call"] as Payload | undefined,
-      verb,
-      targetId,
-      {
-        holderId: senderId,
-        holderParent: sender?.parentId ?? null,
-        holderChildren: new Set(sender?.children.keys() ?? []),
-        loaderId: this.rootId,
-      },
-    );
-    if (ok) return null;
-    // A HERITABLE entry on an ANCESTOR covers its descendants (never its holder):
-    // walk parent → root, live tree, at call time.
-    if (sender !== undefined && authorizeHeritable(this.ancestorGrants(sender.parentId), verb, targetId, this.rootId)) {
-      return null;
-    }
-    return denial("egress", senderId, targetId, verb);
-  }
-
-  /** The `can_call` maps of `parentId` and every agent above it, parent first. */
-  private *ancestorGrants(parentId: string | null): Generator<Payload | undefined> {
-    const seen = new Set<string>();
-    let id = parentId;
-    while (id !== null && !seen.has(id)) {
-      seen.add(id);
-      const a = this.agents.get(id);
-      if (a === undefined) return;
-      yield a.meta["can_call"] as Payload | undefined;
-      id = a.parentId;
-    }
-  }
-
-  /** `$subtree:<x>`: is `otherId` `x` itself or a LIVE descendant of it? */
-  private inSubtree(otherId: string, x: string): boolean {
-    const seen = new Set<string>();
-    let a = this.agents.get(otherId);
-    while (a !== undefined && !seen.has(a.id)) {
-      if (a.id === x) return true;
-      seen.add(a.id);
-      a = a.parentId === null ? undefined : this.agents.get(a.parentId);
-    }
-    return false;
+    const ok = authorizeCall(sender?.meta["can_call"] as Payload | undefined, verb, targetId, {
+      holderId: senderId,
+      holderParent: sender?.parentId ?? null,
+      holderChildren: new Set(sender?.children.keys() ?? []),
+    });
+    return ok ? null : denial("egress", senderId, targetId, verb);
   }
 
   /** Resolve a SEND target (python `_launch`): the reserved `"kernel"` address,
@@ -606,45 +460,68 @@ export class Kernel {
    * Dispatch ONE resolved call — the inside of an execution, after validation,
    * the ledger and the task row. Local agent → run here; unknown target →
    * forward over the bridge to the host.
-   *
-   * `reflect` is answered uniformly by the KERNEL for every local agent, never
-   * by the handler, so it cannot drift bundle by bundle.
-   *
-   * `shown` is the payload as the mirrors may see it (an item's `secret` marks,
-   * `secret.ts`); the handler gets `payload`. `secret` is those marks as the item
-   * gave them — a host-bound call carries them on its frame, a local handler
-   * reads them as `currentSecret`.
    */
-  async dispatch(
-    targetId: string,
-    payload: Payload,
-    taskId: number,
-    shown?: Payload,
-    secret: readonly Mark[] = [],
-  ): Promise<Json> {
+  async dispatch(targetId: string, payload: Payload, taskId: number): Promise<Json> {
     const id = this.resolve(targetId);
     const target = this.agents.get(id);
-    const verb = str(payload, "type");
-
     if (target === undefined) {
       // FEDERATION: not ours, so it belongs to the host. `launch` already
-      // refused the no-bridge case, so a bridge is present here. The item's
-      // `secret` marks ride along: this kernel already records the call as
-      // shown, and the host must too — its rows, ledger and state stream are
-      // records of the SAME call (python `RemoteTarget`).
-      return (this.bridge as Bridge).forward(id, payload, this.qualifiedCaller(), secret);
+      // refused the no-bridge case, so a bridge is present here.
+      return (this.bridge as Bridge).forward(id, payload);
     }
+    // `this` is the CALLER's view; the handler runs under the target's own.
+    return this.run(target, payload, this.viewFor(target.id, taskId, this.currentOrigin));
+  }
+
+  /**
+   * ONE KERNEL BOOKKEEPING CALL — the kernel runs `agentId`'s handler DIRECTLY
+   * (python `Kernel.bookkeeping`): a boot at `kernel_start`, a `shutdown` at a
+   * stop, a read or write of the kernel's ledger in its memory store. A plain
+   * call, not a send — no gate, no task row, no call row — so it is the same
+   * whoever's dispatch asked for it (the operator, or the root answering a
+   * kernel verb). The handler runs as the agent (its sends are its own) with no
+   * caller: the kernel asked — inside `task` (default: the task now running; the
+   * flusher passes its own). `shutdown` marks the view as the stop's own
+   * traffic, so what the handler sends passes the drain.
+   *
+   * Answers the outcome shape a caller branches on — `{status, result}`: a throw
+   * is `failed`, a refusal `errored`, anything else `completed`.
+   */
+  async bookkeeping(
+    agentId: string,
+    payload: Payload,
+    opts: { shutdown?: boolean; task?: number | null } = {},
+  ): Promise<{ status: Outcome["status"]; result: Json }> {
+    const target = this.agents.get(agentId);
+    if (target === undefined) return { status: "failed", result: unknown(agentId, [...this.agents.keys()]) };
+    const view = this.viewFor(target.id, opts.task !== undefined ? opts.task : this.currentTask, null);
+    if (opts.shutdown === true) Object.defineProperty(view, "kernelTraffic", { value: true, enumerable: true });
+    try {
+      const result = await this.run(target, payload, view);
+      return { status: errorShaped(result) ? "errored" : "completed", result };
+    } catch (err) {
+      const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+      return { status: "failed", result: { error: msg, raised: true } };
+    }
+  }
+
+  /**
+   * Run one LOCAL agent for `payload` under `view` (the agent's own): the
+   * payload is mirrored, then answered — `reflect` by the KERNEL for every
+   * agent (so it cannot drift bundle by bundle), a kernel verb by the root,
+   * anything else by the handler.
+   */
+  private run(target: Agent, payload: Payload, view: Kernel): Json | Promise<Json> {
+    const id = target.id;
+    const verb = str(payload, "type");
     // EVERY DISPATCH IS MIRRORED (python `_fanout(kind="send")`): the payload
     // lands in the target's own inbox and in every watcher's — which is what a
-    // `watch` subscribes to, and why it is gated like a call. A mirror is a
-    // record: it carries the SHOWN payload.
-    this.fanout(id, shown ?? payload);
+    // `watch` subscribes to, and why it is gated like a call.
+    this.fanout(id, payload);
     if (verb === "reflect") {
       const identity = reflectIdentity(target, this.rootId);
       return applyReflectFlags(this, target, payload, identity);
     }
-    // `this` is the CALLER's view; the dispatch runs under the target's own.
-    const view = this.dispatchView(target.id, taskId, this.currentOrigin, secret);
     // Kernel verbs act on the TABLE, the LEDGER and the LIFECYCLE, so they are
     // the root's to answer and the named agent is the operand — refused HERE, in
     // the handler, not in the gate.
@@ -652,8 +529,8 @@ export class Kernel {
     // THE ROOT'S BOOT MINTS THE GUID every memory-store key carries.
     if (verb === "boot" && id === this.rootId) this.ensureGuid();
     if (target.handler !== null) {
-      // The handler receives a SCOPED kernel: its own nested sends are
-      // attributed to it, and parent to this task so a cancel reaches them.
+      // The handler receives its own view: its nested sends are attributed to
+      // it, and parent to this task so a cancel reaches them.
       return target.handler(target.id, payload, view);
     }
     if (verb === "boot" || verb === "shutdown" || verb === "") {
@@ -689,41 +566,27 @@ export class Kernel {
     this.bridge?.emitRemote(this.resolve(targetId), payload);
   }
 
-  /** Call a REMOTE host agent with a binary-bearing payload (e.g. paste_image).
-   *  `secret` — marks, as on a batch item — rides the call frame. */
-  forwardBinary(targetId: string, payload: Record<string, unknown>, secret?: Mark[]): Promise<Json> {
+  /** Call a REMOTE host agent with a binary-bearing payload (e.g. paste_image). */
+  forwardBinary(targetId: string, payload: Record<string, unknown>): Promise<Json> {
     if (this.bridge === null) {
       return Promise.resolve({ error: `no bridge to forward to '${targetId}'` });
     }
     const id = this.resolve(targetId);
-    const checked = this.hostBound(id, payload, secret);
-    if ("refused" in checked) return Promise.resolve(checked.refused);
-    return this.bridge.forwardBinary(id, payload, this.qualifiedCaller(), checked.secret);
+    const denied = this.hostBound(id, payload);
+    if (denied !== null) return Promise.resolve(denied);
+    return this.bridge.forwardBinary(id, payload);
   }
 
   /**
-   * The checks a host-bound call passes before the bridge sees a byte: its
-   * `secret` marks are validated exactly as a batch item's (`secret.ts` — a
-   * malformed or typo'd mark is refused `bad_arg`, so the value it meant to hide
-   * never leaves), then an AGENT's own EGRESS gate (the operator, with no origin,
-   * is the root of trust). Answers the refusal, or the marks for the frame.
-   *
-   * These calls bypass the batch, so this kernel keeps no record of them to
-   * mask: the marks matter on the frame, where the host records the call.
+   * The check a host-bound call passes before the bridge sees a byte: an
+   * AGENT's own EGRESS gate (the operator, with no origin, is the root of
+   * trust). These calls bypass the batch, so this kernel keeps no record of
+   * them. Answers the refusal, or null.
    */
-  private hostBound(
-    targetId: string,
-    payload: Record<string, unknown>,
-    secret: Mark[] | undefined,
-  ): { refused: Payload } | { secret: readonly Mark[] } {
-    const [marks, bad] = checkSecret({ secret }, payload as Payload);
-    if (bad !== null) return { refused: bad };
-    if (this.currentOrigin !== null) {
-      const verb = typeof payload["type"] === "string" ? payload["type"] : "";
-      const denied = this.egressGate(this.currentOrigin, verb, targetId);
-      if (denied !== null) return { refused: denied };
-    }
-    return { secret: marks !== null ? marks.paths : [] };
+  private hostBound(targetId: string, payload: Record<string, unknown>): Payload | null {
+    if (this.currentOrigin === null) return null;
+    const verb = typeof payload["type"] === "string" ? payload["type"] : "";
+    return this.egressGate(this.currentOrigin, verb, targetId);
   }
 
   /** Call the HOST directly over the bridge, bypassing LOCAL resolution. The
@@ -731,15 +594,14 @@ export class Kernel {
    *  plain `send("kernel", …)` would dispatch locally; this forwards the
    *  LITERAL target so the HOST resolves `"kernel"` to ITS OWN root
    *  (`kernel_state` on python, `core` on rust/swift). Used to create host peers +
-   *  read the host bundle catalog without the frontend naming a host id.
-   *  `secret` — marks, as on a batch item — rides the call frame. */
-  callHost(target: string, payload: Payload, secret?: Mark[]): Promise<Json> {
+   *  read the host bundle catalog without the frontend naming a host id. */
+  callHost(target: string, payload: Payload): Promise<Json> {
     if (this.bridge === null) {
       return Promise.resolve({ error: `no bridge to reach host '${target}'` });
     }
-    const checked = this.hostBound(target, payload, secret);
-    if ("refused" in checked) return Promise.resolve(checked.refused);
-    return this.bridge.forward(target, payload, this.qualifiedCaller(), checked.secret);
+    const denied = this.hostBound(target, payload);
+    if (denied !== null) return Promise.resolve(denied);
+    return this.bridge.forward(target, payload);
   }
 
   /** connect/disconnect notifications for a remote endpoint's socket. */
@@ -784,8 +646,8 @@ export class Kernel {
   /** Deliver an event to an agent's inbox and to everyone watching it.
    *  GATED LIKE A SEND when an agent emits onto ANOTHER agent (audit
    *  2026-09-28, a16): the emitter's `can_call` and the target's `callable_by`
-   *  must both allow verb `emit`. Not privileged — the baseline keeps emits to
-   *  self, parent and children. A denied emit is dropped; an emit has no reply. */
+   *  must both allow verb `emit`. A denied emit is dropped; an emit has no
+   *  reply. */
   emit(targetId: string, payload: Payload): void {
     const id = this.resolve(targetId);
     if (this.currentOrigin !== null && this.currentOrigin !== id) {
@@ -825,7 +687,7 @@ export class Kernel {
     }
   }
 
-  /** Watch `src` on behalf of `watcher`. If `src` is remote, ask the bridge. */
+  /** Subscribe `watcher` to `src`'s inbox. If `src` is remote, ask the bridge. */
   watch(srcId: string, watcherId: string): Payload | null {
     const id = this.resolve(srcId);
     // #39 — THE READ SIDE OF THE GATE. A watcher receives its target's raw

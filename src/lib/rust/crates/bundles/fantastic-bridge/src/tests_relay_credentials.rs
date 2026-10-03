@@ -86,7 +86,7 @@ async fn relay_kernel(tmp: &TempDir) -> (Arc<Kernel>, String, Dials, String) {
         json!({"type": "create_agent", "parent_id": "kernel_state",
                "handler_module": fantastic_credential_store::HANDLER_MODULE, "id": "creds",
                "backend": "keychain",
-               "refs": {RELAY_REF: {"host": host, "readers": [leg]}},
+               "refs": {RELAY_REF: {"host": host}},
                "callable_by": {leg.as_str(): ["get"]}}),
     )
     .await;
@@ -126,15 +126,13 @@ async fn the_password_is_read_from_the_store_and_never_recorded() {
         dials.lock().unwrap().last().cloned(),
         Some(("/A".to_string(), PW.to_string()))
     );
-    // no record, listing, ledger or row of the tree carries it
+    // no record, listing or ledger of the tree carries it
     let rec = k.agents.get(&AgentId::from(leg.as_str())).unwrap().record();
     assert!(!format!("{rec:?}").contains(PW));
     let listed = ask(&k, "kernel", json!({"type": "list_agents"})).await;
     assert!(!listed.to_string().contains(PW), "{listed}");
     let ledger = ask(&k, "kernel", json!({"type": "ledger"})).await;
     assert!(!ledger.to_string().contains(PW), "{ledger}");
-    let rows: Vec<Value> = k.rows.all().into_iter().map(Value::Object).collect();
-    assert!(!Value::Array(rows).to_string().contains(PW));
     ask(&k, &leg, json!({"type": "reconnect"})).await;
 }
 

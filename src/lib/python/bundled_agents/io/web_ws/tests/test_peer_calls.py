@@ -86,11 +86,11 @@ async def test_hello_makes_the_page_an_address_and_a_call_round_trips(seeded_ker
             )
         )
         call = await ws.next("call")
-        assert (call["target"], call["payload"], call["caller"]) == (
+        assert (call["target"], call["payload"]) == (
             "canvas",
             {"type": "around", "radius": 2},
-            f"{HOST}|kernel",
         ), call
+        assert "caller" not in call, call
         ws.push({"type": "reply", "id": call["id"], "data": {"cells": ["a"]}})
         out = (await asyncio.wait_for(send, 3))[0]
         assert out["status"] == "completed" and out["result"] == {"cells": ["a"]}, out
@@ -188,7 +188,7 @@ async def test_two_tabs_of_one_identity_are_one_principal(seeded_kernel):
         )
         c1, c2 = await ws.next("call"), await ws2.next("call")
         for c in (c1, c2):
-            assert (c["target"], c["caller"]) == ("canvas", f"{HOST}|kernel"), c
+            assert c["target"] == "canvas" and "caller" not in c, c
         ws2.push({"type": "reply", "id": c2["id"], "data": {"tab": 2}})
         out = (await asyncio.wait_for(send, 3))[0]
         assert out["result"] == {"tab": 2}, out
@@ -231,15 +231,13 @@ async def test_a_call_racing_the_disconnect_settles_instead_of_hanging(seeded_ke
     [route] = k.ctx.peers[PAGE]  # resolved BEFORE the close, used after it
     ws.close()
     await asyncio.wait_for(task, 3)
-    out = await asyncio.wait_for(
-        route.call("canvas", {"type": "around"}, f"{HOST}|kernel", ()), 3
-    )
+    out = await asyncio.wait_for(route.call("canvas", {"type": "around"}), 3)
     assert out["reason"] == "transport_error", out
 
 
 async def test_an_emit_to_a_peer_guid_reaches_every_tab(seeded_kernel):
     """Owner, 2026-10-03: an emit on `<guid>|<agent>` goes to EVERY live tab of
-    that guid as an `emit` frame — `caller` only when an agent emitted it."""
+    that guid as an `emit` frame."""
     k = seeded_kernel
     ws, task = await _open(k)
     ws2 = _FakeSocket()

@@ -1122,7 +1122,6 @@ fn name_memory_store(dir: &std::path::Path) {
             "parent_id=kernel",
             "handler_module=ram_store.tools",
             "id=memory",
-            "operator=true",
         ],
     );
     assert!(
@@ -1249,11 +1248,13 @@ fn a_daemon_with_a_store_stops_cleanly_and_releases_its_lock() {
             "handler_module=web.tools",
             "id=web",
             &port_kv,
+            // the host pulls its legs' routes: an explicit edge, both ends
+            "can_call={\"$children\": [\"get_routes\"]}",
         ],
     );
     // The relay dispatches into the kernel AS ITSELF: `ingress_rule` says who
     // may call IN, `can_call` says where into the kernel it may land, and
-    // root's own `callable_by` must name the grandchild ($children does not).
+    // root's own `callable_by` must name the grandchild.
     run_cli(
         tmp.path(),
         &[
@@ -1264,6 +1265,7 @@ fn a_daemon_with_a_store_stops_cleanly_and_releases_its_lock() {
             "id=rest",
             "ingress_rule=allow_all_ingress",
             "can_call={\"kernel_state\": \"*\"}",
+            "callable_by={\"$parent\": [\"get_routes\"]}",
         ],
     );
     run_cli(
@@ -1272,7 +1274,7 @@ fn a_daemon_with_a_store_stops_cleanly_and_releases_its_lock() {
             "kernel_state",
             "update_agent",
             "id=kernel_state",
-            "callable_by={\"$self\": \"*\", \"$parent\": \"*\", \"$children\": \"*\", \"rest\": \"*\"}",
+            "callable_by={\"$self\": \"*\", \"rest\": \"*\"}",
         ],
     );
 

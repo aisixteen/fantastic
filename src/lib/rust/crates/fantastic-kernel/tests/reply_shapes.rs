@@ -307,7 +307,7 @@ async fn record_parent_id_is_last() {
         }),
     )
     .await;
-    // `can_call`/`callable_by` are the stamped structural baseline; they land in
+    // `can_call`/`callable_by` are the stamped `$self` baseline; they land in
     // meta ahead of the authored keys.
     let keys: Vec<&str> = created
         .as_object()

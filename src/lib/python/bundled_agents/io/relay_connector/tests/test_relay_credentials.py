@@ -64,7 +64,7 @@ def relay_kernel(tmp_path, monkeypatch):
         "credential_store.tools",
         id="creds",
         file=str(tmp_path / "creds.yaml"),
-        refs={"relay/group": {"host": "relay:9443", "readers": ["rl"]}},
+        refs={"relay/group": {"host": "relay:9443"}},
         callable_by={"rl": ["get"]},
     )
     assert made.get("id") == "creds", made

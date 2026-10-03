@@ -211,13 +211,11 @@ async def mem(kernel):
     kernel.create(
         "ram_store.tools",
         id="mem",
-        operator=True,
-        admins=["kernel"],
         callable_by={"owner": "*"},
     )
-    from kernel import sender_context
+    from _testkit import as_agent
 
-    with sender_context("owner"):
+    with as_agent(kernel, "owner"):
         out = (
             await kernel.send(
                 [
@@ -236,9 +234,9 @@ async def mem(kernel):
 
 
 async def _read(k, **q) -> list:
-    from kernel import sender_context
+    from _testkit import as_agent
 
-    with sender_context("owner"):
+    with as_agent(k, "owner"):
         r = (await k.send([{"target": "mem", "payload": {"type": "read", **q}}]))[0][
             "result"
         ]
@@ -256,10 +254,10 @@ async def test_ram_store_id_forms(mem):
 
 
 async def test_ram_store_append_refuses_a_string_row_id(mem):
-    from kernel import sender_context
+    from _testkit import as_agent
 
     for rid in ("4", " 4", True, 0):
-        with sender_context("owner"):
+        with as_agent(mem, "owner"):
             r = (
                 await mem.send(
                     [

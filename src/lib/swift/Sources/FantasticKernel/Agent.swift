@@ -62,11 +62,11 @@ public final class Agent: @unchecked Sendable {
         self.id = id
         self.handlerModule = handlerModule
         self.parentId = parentId
-        // Structural authority baseline, stamped + MERGED on BOTH fields for EVERY
+        // The authority baseline, stamped + MERGED on BOTH fields for EVERY
         // agent that passes through here — the seeded root, a created child, a
         // disk-loaded record alike (one funnel, so nothing lacks it). `can_call`
         // (who I may call) and `callable_by` (who may call me) both start as
-        // {$self:*, $parent:*, $children:*}. It MERGES UNDER any explicit grant
+        // {$self:*} — nothing else. It MERGES UNDER any explicit grant
         // already in `meta` (idempotent on reload). Deny-all governs every edge NOT
         // in the merged grant.
         var stamped = meta
@@ -86,7 +86,7 @@ public final class Agent: @unchecked Sendable {
     }
 
     /// The target ONE send resolved `<guid>|<agent id>` to on a connected peer.
-    /// No structural baseline: it is nobody's parent or child here, and its
+    /// No baseline: it is nobody's parent or child here, and its
     /// `callable_by` is python's empty map — whether it accepts a call is decided
     /// on its own kernel.
     init(remote qualified: AgentId, _ ref: RemoteRef) {

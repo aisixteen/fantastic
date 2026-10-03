@@ -25,6 +25,12 @@ the dispatching agent. ContextVars are task-local in asyncio, so
 concurrent handlers don't trample each other. `_current_task` mirrors
 it exactly, carrying the CURRENT TASK ID — that is how a nested send
 learns which task is its parent.
+
+IDENTITY COMES ONLY FROM DISPATCH (owner 2026-10-04): the kernel sets
+`_current_sender` when it runs an agent's code — its handler (`Agent._dispatch`)
+or one of its hooks (`on_cancel`, `on_delete`) — and nowhere else. The sends that
+code makes, and the tasks it spawns, are that agent's. A send made outside every
+dispatch is the operator's. There is no switch to send "as" anyone else.
 """
 
 from __future__ import annotations
@@ -48,7 +54,6 @@ from kernel._refusal import (
     UNKNOWN_AGENT,
     refusal,
 )
-from kernel import _secret
 from kernel._state import CURRENT_VERSION, validate_records
 
 if TYPE_CHECKING:
@@ -58,7 +63,8 @@ if TYPE_CHECKING:
 # Contextvar set during a handler's dispatch so that nested send/emit
 # calls — which fire FROM INSIDE the handler — know who's calling.
 # Surfaces in state events as `sender`. None when send/emit is invoked
-# from outside any handler (the WS proxy, `fantastic call`, REPL).
+# from outside any dispatch (`fantastic call`, the REPL, a transport handing an
+# inbound frame to its leg) — the operator.
 _current_sender: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "_current_sender", default=None
 )
@@ -118,8 +124,8 @@ _state_quiet: contextvars.ContextVar[bool] = contextvars.ContextVar(
 # but every agent an operator creates at the root IS a direct child.
 #
 # `None` means OPERATOR ORIGIN, which an agent cannot forge: the CLI, the cold
-# bootstrap, a loader at boot, or a verb completing its own side effect under
-# `operator_context`.
+# bootstrap, a transport handing an inbound frame to its leg, or the kernel
+# running a handler for its own bookkeeping (`Agent._kernel_run`).
 _current_origin: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "_current_origin", default=None
 )
@@ -135,60 +141,11 @@ def current_origin() -> str | None:
     return _current_origin.get()
 
 
-# THE QUALIFIED REMOTE CALLER. A call that crossed a bridge arrives carrying its
-# sender's address `<remote kernel guid>|<remote agent id>` on the frame. The inbound
-# leg dispatches it under `remote_caller_context(leg_id, address)`; the dispatch that
-# `send` launches (origin == that leg) reads the address through
-# `current_remote_caller()`. `Agent._dispatch_task` consumes the pair, so a send the
-# handler itself makes does NOT inherit a caller it never had — its own writes are
-# keyed under its own id.
-_remote_caller: contextvars.ContextVar[tuple[str, str] | None] = contextvars.ContextVar(
-    "_remote_caller", default=None
-)
-_current_remote: contextvars.ContextVar[str | None] = contextvars.ContextVar(
-    "_current_remote", default=None
-)
-
-
-@contextlib.contextmanager
-def remote_caller_context(leg_id: str, address: str):
-    """Mark the enclosed sends as a bridge leg relaying `address`'s call."""
-    token = _remote_caller.set((leg_id, address))
-    try:
-        yield
-    finally:
-        _remote_caller.reset(token)
-
-
-# THE SECRET MARKS of the call this dispatch serves — the `secret` its caller
-# marked on the batch item (`kernel/_secret.py`). Set per dispatch task, so a
-# handler's own sends never inherit it. A bundle that must only ever be called
-# WITH a mark (a credential store) reads it and refuses an unmarked call.
-_current_secret: contextvars.ContextVar[tuple[str | list, ...]] = (
-    contextvars.ContextVar("_current_secret", default=())
-)
-
-
-def current_secret() -> tuple[str | list, ...]:
-    """The marks the caller put on the item that started this dispatch, exactly as
-    given and in order — each a dotted string (`payload.<field…>` /
-    `result[.<field…>]`) or an array of steps (`["payload", <step>, …]` /
-    `["result", <step>…]`, a list) — or () when none were marked."""
-    return _current_secret.get()
-
-
-def current_remote_caller() -> str | None:
-    """The qualified `<guid>|<agent id>` of a caller on ANOTHER kernel, when this
-    dispatch was relayed by a bridge leg that carried it; None otherwise."""
-    return _current_remote.get()
-
-
 def current_task() -> int | None:
     """The TASK id of the dispatch running right now — the MESSAGE id of the call
     that started it (an int from the one counter) — or None outside any dispatch.
 
-    The PUBLIC, non-underscore read of `_current_task` — the twin of
-    `sender_context`/`_current_sender`. A bundle that must know WHICH task it
+    The PUBLIC, non-underscore read of `_current_task`. A bundle that must know WHICH task it
     IS reads it here: an AI backend stamps it on its in-flight entry so its
     `on_cancel` hook can tell "the kernel is killing MY generation" from "the
     kernel is killing some other dispatch on the same agent" (a `history`, a
@@ -240,37 +197,6 @@ def page(items: list, payload: dict, *, key=None) -> tuple[list, str | None]:
     head = list(items[:limit])
     nxt = str(ident(head[-1])) if head and len(items) > limit else None
     return head, nxt
-
-
-@contextlib.contextmanager
-def operator_context():
-    """Run the enclosed sends with OPERATOR authority (`_current_sender` = None
-    → the call gate skips them). This is NOT a privilege escalation for agent
-    code: it is used only by the substrate to complete the side effects of an
-    ALREADY-AUTHORIZED privileged verb — e.g. `create_agent` booting the child
-    it was just authorized to make. The kernel initializing the tree it was told
-    to build acts as the operator, not as the agent that asked."""
-    token = _current_sender.set(None)
-    try:
-        yield
-    finally:
-        _current_sender.reset(token)
-
-
-@contextlib.contextmanager
-def sender_context(sender_id: str):
-    """Attribute nested send/emit to `sender_id` for the duration of the
-    block. A web/REST surface — which dispatches browser-originated traffic
-    from OUTSIDE any handler — uses this to tag external calls with its own
-    agent id so telemetry rays originate from its sprite. Mirrors the
-    substrate's per-dispatch tagging in `Agent._dispatch`. This is the
-    PUBLIC, non-underscore entry point bundles bind to; `_current_sender`
-    itself stays a kernel internal."""
-    token = _current_sender.set(sender_id)
-    try:
-        yield
-    finally:
-        _current_sender.reset(token)
 
 
 # ─── dispatch outcomes ──────────────────────────────────────────
@@ -404,20 +330,15 @@ BUNDLE_ENTRY_GROUP = "fantastic.bundles"
 @dataclass(eq=False)
 class PeerRoute:
     """How a connected PEER KERNEL is reached: `via` names the transport agent
-    carrying it (reported by the root reflect), `call(agent_id, payload, caller,
-    secret)` delivers ONE call to that kernel's `agent_id` as `caller` (`<this
-    guid>|<sender>`) and returns the peer's reply — or a refusal when the
-    connection ends first. `secret` is the item's marks as given (`kernel/_secret`
-    — dotted strings and/or arrays of steps, `()` when none), rooted at the item
-    exactly as the peer's item is rooted, so the transport puts them on the call
-    frame verbatim and the PEER masks its own records of the call too.
-    `emit(agent_id, payload, caller)` drops ONE event into that kernel's
-    `agent_id` (no reply) — `caller` is `<this guid>|<sender>` when an agent
-    emitted it, `None` for an operator emit."""
+    carrying it (reported by the root reflect), `call(agent_id, payload)` delivers
+    ONE call to that kernel's `agent_id` and returns the peer's reply — or a
+    refusal when the connection ends first. `emit(agent_id, payload)` drops ONE
+    event into that kernel's `agent_id` (no reply). The peer judges what arrives
+    as the transport leg that serves it there — a caller is always local."""
 
     via: str
-    call: Callable[[str, dict, str, tuple], Any]
-    emit: Callable[[str, dict, "str | None"], Any]
+    call: Callable[[str, dict], Any]
+    emit: Callable[[str, dict], Any]
 
 
 @dataclass
@@ -468,7 +389,7 @@ class Kernel:
 
     # The tree root — set when the first parent-less, non-ephemeral Agent
     # registers (the root loader in main.py). All `Kernel.create/list/...`
-    # delegations route through it.
+    # calls route through it.
     root: "Agent | None" = field(default=None)
 
     # Set once `shutdown()` has walked the tree, so signal handlers
@@ -572,10 +493,6 @@ class Kernel:
     _flush_wake: "asyncio.Event | None" = None
     _flush_lock: "asyncio.Lock | None" = None
     _flusher_task_id: int | None = None
-    # The flush rows this kernel wrote (by id), and the calls that carried them:
-    # those calls' own rows are ALREADY RECORDED — the flush row is their record.
-    _own_flushes: set[int] = field(default_factory=set)
-    _own_flush_calls: dict[int, int] = field(default_factory=dict)  # call id → flush id
     # How many `call` rows the store holds for the kernel (counted as flushed, re-read
     # at every prune) — what the retention window is measured against.
     _stored_calls: int = 0
@@ -656,24 +573,6 @@ class Kernel:
         """The message id a caller's name stands for, while its execution is held."""
         return self.names.get(name)
 
-    def carried_secret(self, item_id: object) -> bool:
-        """Did the execution a batch item's `id` names — resolved as `send`
-        resolves it: an int is a message id, a string a caller's NAME — carry
-        `secret` marks? False when it names no execution held in RAM (the send
-        itself answers that id; one replayed from the store answers a refusal,
-        never a value). Asked by ai_core before it dispatches a model-parsed call
-        that would JOIN an execution: a model never receives a secret."""
-        if isinstance(item_id, bool):
-            return False
-        if isinstance(item_id, int):
-            eid: int | None = item_id
-        elif isinstance(item_id, str):
-            eid = self.resolve_name(item_id)
-        else:
-            return False
-        exe = self.executions.get(eid) if eid is not None else None
-        return exe is not None and exe.get("secret") is not None
-
     def ledger_put(self, exec_id: int, row: dict) -> None:
         """Insert one execution's PROCESS state, then enforce the ring."""
         self.executions[exec_id] = row
@@ -736,7 +635,7 @@ class Kernel:
                 hint=(
                     "a memory store is needed — create a ram_store and name it in "
                     f"memory_store_id if you have none: `create_agent parent_id={root.id} "
-                    "handler_module=ram_store.tools id=memory operator=true`, then "
+                    "handler_module=ram_store.tools id=memory`, then "
                     f"`update_agent id={root.id} memory_store_id=memory`"
                 ),
                 arg="memory_store_id",
@@ -747,30 +646,23 @@ class Kernel:
                 sid, hint="the root's `memory_store_id` names no agent in this tree"
             )
         booted: list[str] = []
-        with operator_context():
-            for a in (root, store):
-                out = (
-                    await self.send([{"target": a.id, "payload": {"type": "boot"}}])
-                )[0]
-                if out["status"] != COMPLETED:
-                    return refusal(
-                        UNHANDLED,
-                        f"kernel_start: boot of {a.id!r} did not complete "
-                        f"({out['status']}): {out['result']}",
-                    )
-                booted.append(a.id)
-            probe = (
-                await self.send(
-                    [{"target": store.id, "payload": {"type": "read", "limit": 1}}]
+        for a in (root, store):
+            out = await self.bookkeeping(a, {"type": "boot"})
+            if out["status"] != COMPLETED:
+                return refusal(
+                    UNHANDLED,
+                    f"kernel_start: boot of {a.id!r} did not complete "
+                    f"({out['status']}): {out['result']}",
                 )
-            )[0]["result"]
+            booted.append(a.id)
+        probe = (await self.bookkeeping(store, {"type": "read", "limit": 1}))["result"]
         if isinstance(probe, dict) and probe.get("error"):
             return refusal(
                 UNAUTHORIZED,
                 f"kernel_start: the memory store {store.id!r} refuses the kernel: "
                 f"{probe.get('error')}",
                 hint=probe.get("hint")
-                or f"the store must serve the operator: update_agent id={store.id} operator=true",
+                or f"the store must answer the operator's `read` — check {store.id}",
             )
         # The reserved id bound goes to the loader now (the root is booted, so its
         # record writer is listening): a crash from here on skips ids, never reuses.
@@ -787,13 +679,8 @@ class Kernel:
             for a in list(self.agents.values()):
                 if a.id in (root.id, store.id):
                     continue
-                with operator_context():
-                    out = (
-                        await self.send([{"target": a.id, "payload": {"type": "boot"}}])
-                    )[0]
-                if out["status"] == COMPLETED and not (
-                    isinstance(out["result"], dict) and out["result"].get("error")
-                ):
+                out = await self.bookkeeping(a, {"type": "boot"})
+                if out["status"] == COMPLETED:
                     booted.append(a.id)
                 else:
                     print(
@@ -801,6 +688,27 @@ class Kernel:
                         file=sys.stderr,
                     )
         return {"started": True, "store": store.id, "booted": booted}
+
+    async def bookkeeping(self, agent: "Agent", payload: dict) -> dict:
+        """ONE KERNEL BOOKKEEPING CALL — the kernel runs `agent`'s handler DIRECTLY
+        (`Agent._kernel_run`): a boot at `kernel_start`, a `shutdown` at a stop, a
+        read or write of the kernel's ledger in its memory store. A plain call, not
+        a send — no gate, no task row, no call row — so it is the same whoever's
+        dispatch asked for it (the operator, or the root answering a kernel verb).
+        The handler runs as `agent`, with no origin: the kernel asked.
+
+        Answers the outcome shape a caller branches on — `{status, result}`: a
+        raise is `failed`, a refusal `errored`, anything else `completed`."""
+        try:
+            res = await agent._kernel_run(payload)
+        except Exception as e:  # noqa: BLE001 — a handler raise is a RESULT
+            return {
+                "status": FAILED,
+                "result": {"error": f"{type(e).__name__}: {e}", "raised": True},
+            }
+        if isinstance(res, dict) and res.get("error"):
+            return {"status": ERRORED, "result": res}
+        return {"status": COMPLETED, "result": res}
 
     async def _flusher(self) -> None:
         """The flush loop: wake on a new row, let a burst settle, write a batch."""
@@ -811,59 +719,22 @@ class Kernel:
             self._flush_wake.clear()
             await self.flush_executions()
 
-    def _is_own_flush_row(self, row: dict) -> bool:
-        """A row the kernel's own flush produced — ALREADY RECORDED by its flush row.
-
-        A flush is a `send` to the store, so it mints a `call` row and a `settle`
-        row like every send; writing those would mint two more on the next flush,
-        forever. The flush therefore describes ITSELF: it mints one id and appends a
-        `flush` row inside the very batch it writes. The call that carried that batch
-        names the flush row in its payload — the store already holds the record of
-        this execution — so its call and settle rows are not written again. This is
-        dedup by execution (the store proves it), not a blind spot: every OTHER call
-        to the store, the kernel's own reads included, is recorded like any call."""
-        if row.get("kind") == "call" and row.get("agent") == self.store_id:
-            payload = row.get("payload") or {}
-            if payload.get("type") == "append":
-                for r in payload.get("rows") or ():
-                    if (
-                        isinstance(r, dict)
-                        and r.get("kind") == "flush"
-                        and r.get("id") in self._own_flushes
-                    ):
-                        self._own_flush_calls[row["id"]] = r["id"]
-                        return True
-        if row.get("kind") == "settle" and row.get("parent") in self._own_flush_calls:
-            return True
-        return False
-
     async def flush_executions(self) -> dict:
         """Write every execution row still in RAM to the memory store, as ONE batch
         closed by a self-describing `flush` row; on success the rows leave RAM and a
         settled execution whose settle row landed leaves `executions` (the store is
         its record now). All or nothing: a refused batch stays in RAM for the next
-        flush, and the refused flush is itself a dead letter.
+        flush, and the refusal is said on stderr.
 
-        EDGE (recorded, not resolved): the write can LAND while its reply is lost
-        (a timeout). The store then holds the flush row as `done` while RAM saw the
-        flush call fail — that call is a dead letter in RAM (the ledger shows it,
-        `on_deadletter` announced it), and its own rows are not re-flushed because
-        the store already recorded them. RAM and store disagree about THAT flush
-        only; the admin reconciles."""
+        The write is KERNEL BOOKKEEPING (`bookkeeping`): the kernel runs the store's
+        `append` directly — not a send, so the flush mints no call or settle row of
+        its own, and the `flush` row is its whole record."""
         if self.store_id is None or self._flush_lock is None:
             return {"flushed": 0}
+        store = self.agents.get(self.store_id)
+        if store is None:
+            return {"flushed": 0, "error": self.unknown_agent(self.store_id)}
         async with self._flush_lock:
-            own = [rid for rid, r in self.rows.items() if self._is_own_flush_row(r)]
-            for rid in own:
-                r = self.rows.pop(rid)
-                if r.get("kind") == "settle":
-                    # The flush call ended: its bookkeeping goes. A flush that did
-                    # not complete stays in `executions` — a dead letter in RAM.
-                    fid = self._own_flush_calls.pop(r.get("parent"), None)
-                    self._own_flushes.discard(fid)
-                    status = (r.get("outcome") or {}).get("status")
-                    if status == COMPLETED:
-                        self._forget_execution(r["parent"])
             ids = sorted(self.rows)
             if not ids:
                 return {"flushed": 0}
@@ -872,7 +743,6 @@ class Kernel:
             quiet = _state_quiet.set(True)
             try:
                 fid = self.mint_id()
-                self._own_flushes.add(fid)
                 batch_kinds = {i: self.rows[i].get("kind") for i in ids}
                 batch = [_store_safe(self.rows[i]) for i in ids]
                 batch.append(
@@ -884,17 +754,7 @@ class Kernel:
                         "ts": time.time(),
                     }
                 )
-                with operator_context():
-                    out = (
-                        await self.send(
-                            [
-                                {
-                                    "target": self.store_id,
-                                    "payload": {"type": "append", "rows": batch},
-                                }
-                            ]
-                        )
-                    )[0]
+                out = await self.bookkeeping(store, {"type": "append", "rows": batch})
             finally:
                 _state_quiet.reset(quiet)
             res = out["result"]
@@ -979,17 +839,12 @@ class Kernel:
                 doomed.add(r["id"])
             elif r.get("kind") == "task" and floor is not None and r["id"] < floor:
                 doomed.add(r["id"])
-        with operator_context():
-            out = (
-                await self.send(
-                    [
-                        {
-                            "target": self.store_id,
-                            "payload": {"type": "prune", "ids": sorted(doomed)},
-                        }
-                    ]
-                )
-            )[0]["result"]
+        store = self.agents.get(self.store_id)
+        if store is None:
+            return 0
+        out = (await self.bookkeeping(store, {"type": "prune", "ids": sorted(doomed)}))[
+            "result"
+        ]
         if isinstance(out, dict) and out.get("error"):
             print(
                 f"  [kernel] prune of the kernel's store failed: {out}", file=sys.stderr
@@ -999,17 +854,18 @@ class Kernel:
         return len(gone)
 
     async def _store_read(self, payload: dict) -> list[dict]:
-        """Every row of the kernel's own key matching `payload`, all pages."""
+        """Every row of the kernel's own key matching `payload`, all pages — read
+        as kernel bookkeeping (no origin: the store answers the kernel's key)."""
         out: list[dict] = []
         after = None
+        store = self.agents.get(self.store_id) if self.store_id is not None else None
+        if store is None:
+            raise RuntimeError(f"kernel: memory store {self.store_id!r} is gone")
         while True:
             q = {"type": "read", **payload, "limit": 1000}
             if after is not None:
                 q["after"] = after
-            with operator_context():
-                res = (await self.send([{"target": self.store_id, "payload": q}]))[0][
-                    "result"
-                ]
+            res = (await self.bookkeeping(store, q))["result"]
             if not isinstance(res, dict) or res.get("error"):
                 raise RuntimeError(f"kernel: memory store read failed: {res}")
             out.extend(res.get("rows") or [])
@@ -1073,8 +929,7 @@ class Kernel:
             if x.get("name"):
                 e["name"] = x["name"]
             if x["fut"].done():
-                # a call with `secret` paths reads back AS SHOWN (`_stamp_call`)
-                res = x.get("shown_out") or x["fut"].result()
+                res = x["fut"].result()
                 e["status"] = res["status"]
                 # THE SAME SHAPE flushed or not: what the settle row keeps.
                 e["outcome"] = {
@@ -1131,32 +986,6 @@ class Kernel:
             oc = st.get("outcome") or {}
             attempts = st.get("attempts") or call.get("attempts") or 1
             fut = loop.create_future()
-            if call.get("secret"):
-                # ITS RECORD HOLDS PLACEHOLDERS: answering a re-send from it would
-                # hand back `<secret>` as if it were the value. Refused, loud.
-                fut.set_result(
-                    {
-                        "pid": call["id"],
-                        "status": FAILED,
-                        "result": _secret.replay_refused(key),
-                        "attempts": attempts,
-                    }
-                )
-                self.ledger_put(
-                    call["id"],
-                    {
-                        "target": call.get("agent"),
-                        "fut": fut,
-                        "payload": call.get("payload"),
-                        "timeout": None,
-                        "retries": call.get("retries", 0),
-                        "attempts": attempts,
-                        "named": bool(call.get("named")),
-                        "name": call.get("name"),
-                        "caller": call.get("caller"),
-                    },
-                )
-                continue
             # A NAMED call's settle kept its result; an unnamed one (joined by its
             # int id) kept only what `stored_outcome` keeps — and says so.
             result = (
@@ -1547,7 +1376,8 @@ class Kernel:
 
         1. DRAIN: new roots are refused; sends with a live parent task still pass.
         2. `shutdown` VERB: every agent whose bundle advertises it is told, all at
-           once, under `shutdown_context()`, bounded. For an AI it is a message ("the
+           once, under `shutdown_context()`, bounded — kernel bookkeeping, the
+           handler run directly (`bookkeeping`). For an AI it is a message ("the
            kernel is stopping; persist what matters, then done"); its tools work.
         3. QUIET: wait for the in-flight DISPATCHES to settle (persister loops
            marked `keepalive` and `spawn_task` service loops excepted), bounded;
@@ -1560,20 +1390,19 @@ class Kernel:
         shut: list[str] = []
         targets = [a for a in list(self.agents.values()) if a.advertises("shutdown")]
         if targets and self.root is not None:
-            with shutdown_context(), operator_context():
-                outs = await self.root.send(
-                    [
-                        {
-                            "target": a.id,
-                            "payload": {"type": "shutdown"},
-                            "timeout": self.SHUTDOWN_VERB_TIMEOUT,
-                        }
-                        for a in targets
-                    ]
-                )
-            shut = [
-                a.id for a, o in zip(targets, outs) if o.get("status") == "completed"
-            ]
+
+            async def tell(a: "Agent") -> dict:
+                try:
+                    return await asyncio.wait_for(
+                        self.bookkeeping(a, {"type": "shutdown"}),
+                        self.SHUTDOWN_VERB_TIMEOUT,
+                    )
+                except asyncio.TimeoutError:
+                    return {"status": TIMED_OUT}
+
+            with shutdown_context():
+                outs = await asyncio.gather(*(tell(a) for a in targets))
+            shut = [a.id for a, o in zip(targets, outs) if o["status"] == COMPLETED]
         # The dispatch running THIS verb is in the table too; it is not pending work.
         me = _current_task.get()
 
@@ -1604,8 +1433,7 @@ class Kernel:
             e = self.tasks.get(tid)
             if e is None or e.get("parent") is not None:
                 continue  # roots only: the subtree dies with its root
-            with operator_context():
-                out = await self.cancel_task(tid)
+            out = await self.cancel_task(tid)
             cancelled += out.get("killed", [])
         # EVERY CALL SETTLES before this returns. A killed dispatch's batch records
         # its `cancelled` outcome (and its settle row) a few loop turns after the

@@ -8,7 +8,7 @@ use crate::constants::MAX_CALL_DEPTH;
 use crate::context::{budget as agent_budget, output_reserve, resolve_context_window};
 use crate::events::emit_status;
 use crate::helpers::{agent_meta, mint_send_id, now_secs, safe_client, DEFAULT_CLIENT_ID};
-use crate::memory::{load_history, MemResult, MemoryStoreError};
+use crate::memory::{load_history, MemResult};
 use crate::projection::{derive_reaction, round3, TRIGGER};
 use crate::provider::Provider;
 use crate::state::{state_for, status_snapshot, CurrentEntry, QueuedEntry};
@@ -47,12 +47,10 @@ pub fn reflect_verbs() -> Value {
         "status": "args: client_id:str? — when provided, returns a privacy-filtered snapshot: full text only for this client's queue entries / current generation; other clients collapse to `others_pending` (an integer count). Without client_id the snapshot redacts text everywhere. Used by chat UIs to rebuild queued/in-flight state on page reload (and for headless polling). Returns {source, client_id, generating, current:{phase, send_id, started_at, elapsed, is_mine, text?, text_so_far?, last_tool?}|null, mine_pending:[{send_id,text,queued_at}], others_pending:int}.",
         "context_status": "No args. The context-budget posture + the last overflow projection + the model's",
         "recall": "args: query?:str (case-insensitive substring over the serialized turn — matches tool args/replies too), limit?:int (default 20, max 100), before?:int (store index — page backward). Pages turns back from the DURABLE store (the FULL conversation, never trimmed — so anything compaction dropped is one call away). Read-only. A page always fits INLINE (the cap); trimmed from the oldest end when it would not, with the index to continue from. Returns {messages:[{index,role,content}], total, truncated, note?}.",
-        "grep": "args: query:str (req — case-insensitive substring), ids:list[int]? (row ids / pids / fold ids to search; a fold id searches its members), limit:int? (matches, default: as many as fit inline), width:int? (chars of each matched line returned, from its start; default 200 — raise it when the value you need sits deep in a long line). Finds the LINE that mentions something ANYWHERE in your memory — every row you ever wrote or received (behind every clear, inside every fold), the rows other agents SHARED with you, and the reply bodies still held in memory this run. Returns {matches:[{id, line, text}], total, truncated}.",
+        "grep": "args: query:str (req — case-insensitive substring), ids:list[int]? (row ids / pids / fold ids to search; a fold id searches its members), limit:int? (matches, default: as many as fit inline), width:int? (chars of each matched line returned, from its start; default 200 — raise it when the value you need sits deep in a long line). Finds the LINE that mentions something ANYWHERE in your memory — every row you ever wrote or received (behind every clear, inside every fold), and the reply bodies still held in memory this run. Returns {matches:[{id, line, text}], total, truncated}.",
         "context_recall": "args: dry:bool? (mechanical fit only — no model call). Rebuild this agent's VIEW from its store: fit the head to the budget at digest resolution, then ask the model which rows it wants in full, persist the id list, log the decision as a row, and drop RAM scratch. Runs on boot, after a fold batch, or on request. Returns {kept, expanded, dropped, budget, why, degraded}.",
         "context_clear": "args: why:str? — start a NEW THREAD on the same store: a CLEAR-FOLD — one row whose members are every row since the previous clear (no summary) — and the model's view begins at its `[cleared <id> · N rows]` line. Nothing is deleted or forgotten: grep, recall and `history {fold: <id>}` reach every member. Empties the persisted view and drops RAM scratch (projection, fold counters, pending recall). Returns {cleared:id, rows:N}.",
-        "fork_from": "args: owner:str (req), grant:int (req — the grant `owner` gave you), message:str (req — the task this fork starts on), client_id:str?. Makes THIS agent a fork of `owner`'s thread: the granted rows become read-only context in your view — read back under the grant every turn, so a revoked grant fails your next turn — followed by the framing line and `message`, and the turn STARTS AT ONCE. Returns {forked:true, fork:<row id>, rows:N}.",
-        "request_share": "args: row:int (req), why:str?. Asks THIS agent — the OWNER of `row` — to share it with the caller. The owner's model decides: it calls its store's `share`, or declines. Arrives as a turn; returns {requested:true} at once.",
-        "watch": "args: body:bool? (default false), watcher:str? (operator only — an inbox id to deliver to). Announce every row this agent appends to YOUR inbox as {type:'row', source, row:{id, kind, role, bytes}} — content-free; with body:true the row's `content` too, but only for rows a live grant from this agent gives you (share). Needs a registered inbox. Returns {watching:true, watcher, body}.",
+        "watch": "args: body:bool? (default false), watcher:str? (operator only — an inbox id to deliver to). Announce every row this agent appends to YOUR inbox as {type:'row', source, row:{id, kind, role, bytes}} — content-free; with body:true the row's `content` too. Needs a registered inbox. Returns {watching:true, watcher, body}.",
         "unwatch": "args: watcher:str? (operator only). Stop announcing rows to you. Returns {watching:false}.",
         "boot": "LAZY: never touches the memory store. Checks the record names one (fail loud otherwise), starts a new incarnation, and marks the view for rebuilding — the first turn reads the head from the store and runs `context_recall`.",
     })
@@ -1087,9 +1085,6 @@ pub async fn watch(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) ->
     }
     let body = payload.get("body").is_some_and(py_truthy);
     crate::memory::add_watcher(agent_id, kernel, &watcher, body);
-    if body {
-        crate::memory::my_grants(agent_id, kernel).await?; // warm: the body check reads the cache
-    }
     Ok(json!({"watching": true, "watcher": watcher, "body": body}))
 }
 
@@ -1103,156 +1098,6 @@ pub fn unwatch(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Val
         crate::memory::remove_watcher(agent_id, kernel, w);
     }
     json!({"watching": false, "watcher": watcher})
-}
-
-fn missing_arg(verb: &str, arg: &str, what: &str) -> Value {
-    json!({
-        "error": format!("{verb}: `{arg}` {what}"),
-        "reason": "missing_arg",
-        "arg": arg,
-    })
-}
-
-/// `fork_from` — makes THIS agent a fork of `owner`'s thread: the granted rows
-/// become read-only context in its view — read back under the grant every turn,
-/// so a revoked grant fails the next turn — followed by the framing line and
-/// `message`, and the turn STARTS AT ONCE. Python `_fork_from`.
-///
-/// THE OWNER IS THE GRANT'S, NOT THE CALLER'S WORD: the label every shared row
-/// renders under (`[shared from <owner>]`) must name who really gave the grant.
-pub async fn fork_from(
-    agent_id: &AgentId,
-    payload: &Value,
-    kernel: &Arc<Kernel>,
-) -> MemResult<Value> {
-    let owner = payload.get("owner").and_then(Value::as_str).map(py_strip);
-    let message = payload.get("message").and_then(Value::as_str);
-    let Some(owner) = owner.filter(|o| !o.is_empty()) else {
-        return Ok(missing_arg("fork_from", "owner", "is required"));
-    };
-    let Some(message) = message.filter(|m| !py_strip(m).is_empty()) else {
-        return Ok(missing_arg("fork_from", "message", "is required"));
-    };
-    let Some(grant) = payload.get("grant").and_then(crate::retrieval::as_id) else {
-        return Ok(missing_arg("fork_from", "grant", "(an int) is required"));
-    };
-    let not_found =
-        |e: MemoryStoreError| json!({"error": e.0, "reason": "not_found", "arg": "grant"});
-    let given = match crate::memory::store_call(
-        agent_id,
-        kernel,
-        json!({"type": "grants", "side": "received"}),
-    )
-    .await
-    {
-        Ok(g) => g,
-        Err(e) => return Ok(not_found(e)),
-    };
-    let g = given
-        .get("grants")
-        .and_then(Value::as_array)
-        .and_then(|a| {
-            a.iter()
-                .find(|x| x.get("grant").and_then(Value::as_i64) == Some(grant))
-        })
-        .cloned();
-    let Some(g) = g else {
-        return Ok(json!({
-            "error": format!("fork_from: no grant {grant} was given to you"),
-            "reason": "not_found",
-            "arg": "grant",
-        }));
-    };
-    if g.get("owner").and_then(Value::as_str) != Some(owner) {
-        return Ok(json!({
-            "error": format!(
-                "fork_from: grant {grant} was given by {}, not {owner}",
-                g.get("owner").map_or_else(|| "None".to_string(), py_str)
-            ),
-            "reason": "bad_arg",
-            "arg": "owner",
-        }));
-    }
-    let res =
-        match crate::memory::store_call(agent_id, kernel, json!({"type": "read", "grant": grant}))
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => return Ok(not_found(e)),
-        };
-    let shared: Vec<Value> = res
-        .get("rows")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let as_of = shared
-        .iter()
-        .map(|r| r.get("id").and_then(Value::as_i64).unwrap_or(0))
-        .max()
-        .unwrap_or(0);
-    let rid = kernel.mint_id();
-    crate::memory::save_history(
-        agent_id,
-        kernel,
-        &[json!({
-            "role": "user",
-            "id": rid,
-            "parent": Value::Null,
-            "kind": "fork",
-            "owner": owner,
-            "grant": grant,
-            "as_of": as_of,
-            "content": format!(
-                "[fork of {owner} · grant {grant} · as of row {as_of} · {} rows shared read-only]",
-                shared.len()
-            ),
-        })],
-    )
-    .await?;
-    let client_id = safe_client(
-        payload
-            .get("client_id")
-            .and_then(Value::as_str)
-            .filter(|c| !c.is_empty())
-            .unwrap_or(DEFAULT_CLIENT_ID),
-    );
-    let text = format!(
-        "{}\n\n{message}",
-        crate::memory::fork_framing(owner, &json!(as_of))
-    );
-    crate::route::deliver_soon(kernel, agent_id.as_str(), &text, &client_id, None);
-    Ok(json!({"forked": true, "fork": rid, "rows": shared.len()}))
-}
-
-/// `request_share` — asks THIS agent, the OWNER of `row`, to share it with the
-/// caller. The owner's model decides: it calls its store's `share`, or declines.
-/// Arrives as a turn; returns `{requested:true}` at once. Python `_request_share`.
-pub fn request_share(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
-    let Some(row) = payload.get("row").and_then(crate::retrieval::as_id) else {
-        return missing_arg("request_share", "row", "(an int) is required");
-    };
-    let caller = fantastic_kernel::current_origin().map_or_else(|| "kernel".to_string(), |c| c.0);
-    let raw = payload
-        .get("why")
-        .filter(|w| py_truthy(w))
-        .map(py_str)
-        .unwrap_or_default();
-    let why: String = fantastic_bundle::py_split_whitespace(&raw)
-        .join(" ")
-        .chars()
-        .take(300)
-        .collect();
-    let store = agent_meta(agent_id, kernel)
-        .get("memory_store_id")
-        .map_or_else(|| "None".to_string(), py_str);
-    let text = format!(
-        "[request_share from {caller} · row {row}] {why}\n{caller} asks you to share row {row} of \
-         YOUR conversation. To share it: send your memory store `{store}` <type>share</type> \
-         <with>{caller}</with> <scope><row>{row}</row></scope> <why>…</why>, then tell {caller} \
-         the grant id. To decline, tell {caller} so."
-    );
-    crate::route::deliver_soon(kernel, agent_id.as_str(), &text, DEFAULT_CLIENT_ID, None);
-    json!({"requested": true, "owner": agent_id.as_str(), "row": row})
 }
 
 /// EVERY VERB AN ai_core BACKEND ANSWERS the same way — python `build()`'s one
@@ -1315,8 +1160,6 @@ where
             crate::retrieval::context_clear(agent_id, payload, kernel, cfg.model_window).await?
         }
         // CONTEXT BY GRANT: start from another agent's shared rows; ask an owner.
-        "fork_from" => fork_from(agent_id, payload, kernel).await?,
-        "request_share" => request_share(agent_id, payload, kernel),
         // THE ROW EVENT: this agent announces its own rows to its watchers.
         "watch" => watch(agent_id, payload, kernel).await?,
         "unwatch" => unwatch(agent_id, payload, kernel),

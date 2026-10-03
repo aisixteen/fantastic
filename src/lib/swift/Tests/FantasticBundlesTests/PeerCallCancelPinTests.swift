@@ -33,6 +33,7 @@ private func webKernel() async throws -> Kernel {
                 "ingress_rule": .string("allow_all_ingress"),
             ]))
     ])[0].result
+    wire(k, "web", "leg")
     _ = await k.send([
         Item(AgentId("web"), .object(["type": .string("mount"), "child_id": .string("leg")]))
     ])[0].result
@@ -90,7 +91,7 @@ struct PeerCallCancelPinTests {
 
         // cancelled WHILE waiting on the page
         let waiting = Task {
-            await route.call("canvas", around, caller: "\(HOST)|kernel", secret: [], body: nil)
+            await route.call("canvas", around, body: nil)
         }
         let first = try await next(ws, "call")
         #expect(first["id"].asString == "h1", "\(first.serialize())")
@@ -109,13 +110,13 @@ struct PeerCallCancelPinTests {
         // cancelled BEFORE it parks: settles at once, its frame never goes out
         let early = Task { () -> (JSON, Blob?) in
             while !Task.isCancelled { await Task.yield() }
-            return await route.call("canvas", around, caller: "\(HOST)|kernel", secret: [], body: nil)
+            return await route.call("canvas", around, body: nil)
         }
         early.cancel()
         #expect((await early.value).0.serialize() == #"{"cancelled":true}"#)
 
         // the connection still serves calls; the abandoned id was not reused
-        let live = Task { await route.call("canvas", around, caller: "\(HOST)|kernel", secret: [], body: nil) }
+        let live = Task { await route.call("canvas", around, body: nil) }
         let third = try await next(ws, "call")
         #expect(third["id"].asString == "h3", "\(third.serialize())")
         try await push(

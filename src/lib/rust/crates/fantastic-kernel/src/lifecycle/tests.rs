@@ -1,6 +1,7 @@
 //! Unit tests for [`crate::lifecycle`].
 
 use super::*;
+use crate::outcome::Item;
 use async_trait::async_trait;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -352,9 +353,10 @@ async fn agent_created_reaches_a_parent_at_any_depth() {
         create("kv4_b", "kv4_by_operator").await["id"],
         "kv4_by_operator"
     );
-    // baseline only: placement under itself
+    // an explicit grant on the root, both ends; the children-only rule passes
+    crate::test_support::wire(&kernel, "kv4_b", "kernel_state", json!(["create_agent"]));
     let by_self =
-        crate::send::with_sender(AgentId::from("kv4_b"), create("kv4_b", "kv4_by_self")).await;
+        crate::test_support::as_agent(AgentId::from("kv4_b"), create("kv4_b", "kv4_by_self")).await;
     assert_eq!(by_self["id"], "kv4_by_self", "{by_self}");
     let mut created = Vec::new();
     while let Some(item) = rx.try_recv() {
@@ -598,10 +600,11 @@ async fn create_refusal_precedence_matches_python() {
     assert_eq!(r["reason"], "bad_arg");
 }
 
-/// `$subtree:` and heritable entries are judged at WRITE time — python
-/// `_bad_grant_shape`, text for text.
+/// An unknown grant key, and a value that is not `"*"` or a list of strings, are
+/// refused at WRITE time — python `_bad_grant_shape`, text for text, the legal
+/// keys named per field (a peer address is a `can_call` key only).
 #[tokio::test]
-async fn subtree_and_heritable_shapes_are_refused_at_write_time() {
+async fn unknown_grant_keys_and_bad_values_are_refused_at_write_time() {
     let tmp = tempfile::TempDir::new().unwrap();
     let kernel = mk_rooted(&tmp);
     let r = kernel
@@ -614,51 +617,34 @@ async fn subtree_and_heritable_shapes_are_refused_at_write_time() {
         .remove(0)
         .result;
     assert!(r.get("error").is_none(), "{r}");
-    let heritable = json!({"verbs": ["list"], "for": "descendants"});
+    let key = |field: &str, k: &str| {
+        format!(
+            "{field}['{k}'] is not a grant key — legal keys: {}",
+            crate::authz::legal_keys(field)
+        )
+    };
     let cases = [
         (
-            json!({"can_call": {"$subtree:hub": ["list"]}}),
-            "can_call['$subtree:hub']: `$subtree:` is callable_by-only — it names who \
-             may call you, never whom you may call",
+            json!({"can_call": {"$loader": "*"}}),
+            key("can_call", "$loader"),
         ),
         (
-            json!({"callable_by": {"$subtree:": ["list"]}}),
-            "callable_by['$subtree:']: `$subtree:` names one LOCAL agent id \
-             (`$subtree:<id>`, no `|`)",
+            json!({"callable_by": {"$subtree:hub": ["list"]}}),
+            key("callable_by", "$subtree:hub"),
+        ),
+        (json!({"can_call": {"*": "*"}}), key("can_call", "*")),
+        (json!({"can_call": {"g1|": "*"}}), key("can_call", "g1|")),
+        (
+            json!({"callable_by": {"g1|ai": "*"}}),
+            key("callable_by", "g1|ai"),
         ),
         (
-            json!({"callable_by": {"$subtree:g1|x": ["list"]}}),
-            "callable_by['$subtree:g1|x']: `$subtree:` names one LOCAL agent id \
-             (`$subtree:<id>`, no `|`)",
-        ),
-        (
-            json!({"callable_by": {"hub": heritable}}),
-            "callable_by['hub']: a heritable entry {\"verbs\": [...], \"for\": \
-             \"descendants\"} is can_call-only",
-        ),
-        (
-            json!({"can_call": {"$parent": heritable}}),
-            "can_call['$parent']: a heritable entry names a literal target id, never a token",
-        ),
-        (
-            json!({"can_call": {"served": {"verbs": ["list"], "for": "siblings"}}}),
-            "can_call['served'] must be exactly {\"verbs\": [\"<verb>\", …], \
-             \"for\": \"descendants\"}",
-        ),
-        (
-            json!({"can_call": {"served": {"verbs": [], "for": "descendants"}}}),
-            "can_call['served'] must be exactly {\"verbs\": [\"<verb>\", …], \
-             \"for\": \"descendants\"}",
-        ),
-        (
-            json!({"can_call": {"served": {"verbs": ["list"], "for": "descendants", "x": 1}}}),
-            "can_call['served'] must be exactly {\"verbs\": [\"<verb>\", …], \
-             \"for\": \"descendants\"}",
+            json!({"can_call": {"served": {"verbs": ["list"]}}}),
+            "can_call['served'] must be \"*\" or a list of verb strings".to_string(),
         ),
         (
             json!({"can_call": {"served": 7}}),
-            "can_call['served'] must be \"*\", a list of verb strings, or (can_call) \
-             {\"verbs\": [...], \"for\": \"descendants\"}",
+            "can_call['served'] must be \"*\" or a list of verb strings".to_string(),
         ),
     ];
     for (patch, want) in cases {
@@ -674,49 +660,6 @@ async fn subtree_and_heritable_shapes_are_refused_at_write_time() {
         assert_eq!(r["reason"], "invalid_meta", "{patch}: {r}");
         assert_eq!(r["error"], want, "{patch}");
     }
-}
-
-/// A heritable value is a MAP grant value: it is stored as written and the
-/// record view shows it verbatim; `$subtree:<id>` in callable_by likewise.
-#[tokio::test]
-async fn a_heritable_grant_is_stored_and_reflected_verbatim() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let kernel = mk_rooted(&tmp);
-    let can = json!({"$self": "*", "served": {"verbs": ["list", "allow"], "for": "descendants"}});
-    let by = json!({"$subtree:hub": ["list"]});
-    let r = kernel
-        .send(vec![Item::new(
-            AgentId::from("kernel"),
-            json!({"type":"create_agent","handler_module":"counting.tools",
-                   "parent_id":"kernel","id":"hub","can_call": can, "callable_by": by}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    assert!(r.get("error").is_none(), "{r}");
-    let hub = kernel
-        .agents
-        .get(&AgentId::from("hub"))
-        .map(|e| Arc::clone(&e))
-        .unwrap();
-    let meta = hub.meta.read().unwrap().clone();
-    // the baseline keys are filled in beside what was written
-    assert_eq!(meta["can_call"]["served"], can["served"]);
-    assert_eq!(meta["callable_by"]["$subtree:hub"], by["$subtree:hub"]);
-    let listed = kernel
-        .send(vec![Item::new(
-            AgentId::from("kernel"),
-            json!({"type": "list_agents"}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    let rec = listed["agents"]
-        .as_array()
-        .and_then(|a| a.iter().find(|r| r["id"] == "hub"))
-        .unwrap_or_else(|| panic!("hub not listed: {listed}"));
-    assert_eq!(rec["can_call"], meta["can_call"], "{rec}");
-    assert_eq!(rec["callable_by"], meta["callable_by"], "{rec}");
 }
 
 #[tokio::test]

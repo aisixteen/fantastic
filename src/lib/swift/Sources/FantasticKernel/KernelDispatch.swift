@@ -71,12 +71,87 @@ extension Kernel {
             extra: [("verb", .string(verb))])
     }
 
-    /// Send WITH explicit sender attribution. State events tag this
-    /// dispatch as originating from `senderId`. Used by web_ws.
-    public func sendAs(sender: AgentId, target: AgentId, payload: JSON) async -> JSON {
-        await KernelTaskLocals.$currentSender.withValue(sender) {
-            await send([Item(target, payload)])[0].result
+    /// THE KERNEL RUNNING AN AGENT'S HANDLER ITSELF — its own bookkeeping: the
+    /// cold boot, booting the child `create_agent` just made, the `shutdown`
+    /// verb at a graceful stop, the flush to its memory store, persistence
+    /// through the loader. A PLAIN FUNCTION CALL into the agent's handler, not a
+    /// send: no gate, no call row, no task row, no fanout. The handler runs AS
+    /// ITSELF — identity comes only from the kernel running a handler, so the
+    /// sends it makes and the tasks it spawns are that agent's — with no caller
+    /// (`currentOrigin` nil: the kernel asked). A throw settles `failed`, a
+    /// refusal `errored`.
+    func runHandler(_ target: Agent, _ payload: JSON) async -> (JSON, Status) {
+        let (reply, raised) = await asHandler(target) {
+            await self.dispatch(target: target, payload: payload)
         }
+        return (reply, Kernel.handlerStatus(reply, raised: raised))
+    }
+
+    /// ONE KERNEL BOOKKEEPING CALL — python `Kernel.bookkeeping`: the kernel runs
+    /// `agent`'s handler DIRECTLY (`runHandler`) — a boot, a loader hydrating the
+    /// roster it was told to build (the root's kernel verbs), a store read or
+    /// write. A plain call, not a send — no gate, no task row, no call row — so
+    /// it is the same whoever's dispatch asked for it. The handler runs as
+    /// `agent`, with no origin: the kernel asked. A raise is `failed`, a refusal
+    /// `errored`, anything else `completed`.
+    public func bookkeeping(_ agent: Agent, _ payload: JSON) async -> (result: JSON, status: Status) {
+        let (reply, status) = await runHandler(agent, payload)
+        return (reply, status)
+    }
+
+    /// `runHandler` over the BINARY channel: `body` the request's chunk at its
+    /// payload path (a `write_stream`), or `nil` to have the reply's chunk come
+    /// back raw (a `read_stream`).
+    func runHandlerBinary(_ target: Agent, _ header: JSON, _ body: Blob?) async
+        -> (JSON, Blob?, Status)
+    {
+        var head = header
+        if let b = body { try? pyDelPath(&head, parts: b.parts) }
+        let handlerHeader = head
+        let (reply, chunk, raised) = await asHandler(target) {
+            await self.dispatchBinary(target: target, header: handlerHeader, body: body)
+        }
+        let r = reply ?? .null
+        return (r, chunk, Kernel.handlerStatus(r, raised: raised))
+    }
+
+    /// THE KERNEL RUNNING AN AGENT'S OWN CODE — python `Agent._as_self()`: the
+    /// enclosed sends (and the tasks they spawn) are `id`'s, exactly as inside its
+    /// dispatch. Internal: the kernel's hooks (`onDelete`, `onCancel`, the
+    /// shutdown hooks, `runHandler`) and the test driver use it; no bundle can.
+    func asSelf<T>(_ id: AgentId?, _ body: () async throws -> T) async rethrows -> T {
+        try await KernelTaskLocals.$sender.withValue(id) { try await body() }
+    }
+
+    /// `asSelf` for a synchronous body (`watch`, `emitItem`).
+    func asSelfNow<T>(_ id: AgentId?, _ body: () throws -> T) rethrows -> T {
+        try KernelTaskLocals.$sender.withValue(id) { try body() }
+    }
+
+    /// The scope a handler the kernel runs directly executes in: the agent is
+    /// the sender, the kernel the (absent) caller, no batch turnstile, no
+    /// inherited kill — a bookkeeping write a cancel must not swallow.
+    private func asHandler<T: Sendable>(_ target: Agent, _ body: @Sendable () async -> T)
+        async -> T
+    {
+        await asSelf(target.id) {
+            await KernelTaskLocals.$origin.withValue(nil) {
+                await KernelTaskLocals.$currentKilled.withValue(nil) {
+                    await KernelTaskLocals.$onFanout.withValue(nil) {
+                        await KernelTaskLocals.$onBatchLaunched.withValue(nil) {
+                            await body()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// A handler run's status, decided by how it ended: a throw is `failed`, a
+    /// truthy `error` `errored`, anything else `completed`.
+    static func handlerStatus(_ reply: JSON, raised: Bool) -> Status {
+        if raised { return .failed }
+        return pyTruthy(reply["error"]) ? .errored : .completed
     }
 
     /// Fire an event into `targetId`'s inbox without dispatching. Publishes a
@@ -98,8 +173,8 @@ extension Kernel {
     ///
     /// GATED LIKE A SEND when the emitter is another agent (audit 2026-09-28,
     /// a16): the emitter's `can_call` and the target's `callable_by` must both
-    /// allow verb `emit`. Not privileged — the baseline keeps emits to self,
-    /// parent and children. A denied emit is dropped; an emit has no reply.
+    /// grant verb `emit`. The baseline keeps emits to self; any other edge is an
+    /// explicit grant. A denied emit is dropped; an emit has no reply.
     ///
     /// SYNCHRONOUS: an emit is a fanout and nothing else, so a leg can deliver
     /// it in the order its frames arrived — python awaits `kernel.emit` inline
@@ -120,7 +195,7 @@ extension Kernel {
             return
         }
         if let r = target.remote {
-            emitPeer(r, item: item, origin: orig)
+            emitPeer(r, item: item)
             return
         }
         fanout(target, "emit", item)
@@ -163,10 +238,7 @@ extension Kernel {
         // identity and would otherwise never report its authority, so an agent
         // could not read what it may call or who may call it — only discover it
         // by trying. Same two keys the distilled tree nodes carry.
-        // `holds_secrets` rides the same way: a SECRET HOLDER (a credential_store
-        // stamps it; an operator may set it on any agent) says so on its reflect,
-        // because ai_core refuses every model-parsed call that names it.
-        for k in ["can_call", "callable_by", "holds_secrets"] where obj[k] == nil {
+        for k in ["can_call", "callable_by"] where obj[k] == nil {
             if let v = target.metaValue(forKey: k) { obj[k] = v }
         }
 
@@ -233,7 +305,7 @@ extension Kernel {
             // mode?, children}`, each sentence ASKED FROM THE AGENT ITSELF.
             // `detail:full` keeps the wiring node.
             if payload["detail"].asString == "full" {
-                obj["tree"] = treeNode(target, may: { self.mayReflect($0) })
+                obj["tree"] = treeNode(target)
             } else {
                 switch await roster(target) {
                 case .node(let node): obj["tree"] = node
@@ -300,16 +372,6 @@ extension Kernel {
         return nil
     }
 
-    /// May the agent now running (the caller) `reflect` `a`? The one per-node
-    /// gate both tree views apply (`roster`, and `treeNode` under
-    /// `detail:"full"`); an operator (no sender) may reflect everything
-    /// (python `_may_reflect`).
-    func mayReflect(_ a: Agent) -> Bool {
-        KernelTaskLocals.currentSender.map {
-            gate(sender: $0, verb: "reflect", target: a, payload: .object([:])) == nil
-        } ?? true
-    }
-
     /// `{id, sentence?, description?, mode?, children:[...]}` — the tree,
     /// carrying what each agent is FOR instead of how it is wired (python
     /// `_roster`).
@@ -321,30 +383,25 @@ extension Kernel {
     /// flags, so a roster never recurses into rosters); a bare node answers its
     /// identity directly.
     ///
-    /// GATED PER NODE. `reflect` is not exempt from the call gate anywhere
-    /// else, and this walk dispatched it directly — so any caller allowed to
-    /// reflect ONE agent read every descendant's `sentence`/`description`
-    /// through the tree. A denied node keeps only its `id` and `children` (the
-    /// SHAPE is already public through `tree=ids`) and is not dispatched at all,
-    /// so its watchers see nothing either. An operator (no sender) sees all.
+    /// NOT gated per node: a reflect that passes the gate returns the tree
+    /// whole.
     ///
     /// `.failure` carries a node's RAISED reflect: python's exception
     /// propagates out of `_roster` and fails the whole reflect.
     func roster(_ a: Agent) async -> RosterResult {
-        let mayReflect = mayReflect(a)
-        var raw: JSON = .object([:])
-        if a.handlerModule != nil && mayReflect {
+        var raw: JSON
+        if a.handlerModule != nil {
             let (reply, status) = await internalDispatch(a, .object(["type": .string("reflect")]))
             if status == .failed { return .raised(reply) }
             raw = reply
-        } else if mayReflect {
+        } else {
             raw = reflectIdentity(a)
         }
         var node: OrderedDictionary<String, JSON> = ["id": .string(a.id.value)]
         if pyTruthy(raw["sentence"]) { node["sentence"] = raw["sentence"] }
         // Operator-set purpose. More specific than the bundle sentence when
         // present ("the prod deploy key" vs "a yaml store").
-        if mayReflect, let d = a.descriptionMeta { node["description"] = .string(d) }
+        if let d = a.descriptionMeta { node["description"] = .string(d) }
         // Purpose comes from the agent's REFLECT, not its record: much of what
         // an agent is FOR lives in its reflect, not as a record field.
         for k in Kernel.purposeKeys {
@@ -605,14 +662,12 @@ extension Kernel {
     /// COMPLETES — `cancelTask` no-ops on a finished id.
     func runDispatchOutcome(
         target: Agent, payload: JSON, verb: String, taskOut: TaskIdBox?,
-        timeout: Deadline?, taskId: TaskId, binary: Blob?, rawReply: Bool,
-        shown: ShownPayload?, secretPaths: [JSON]
+        timeout: Deadline?, taskId: TaskId, binary: Blob?, rawReply: Bool
     ) async -> (JSON, Status, Blob?) {
         guard let deadline = timeout else {
             let end = await runDispatch(
                 target: target, payload: payload, verb: verb, taskOut: taskOut,
-                taskId: taskId, binary: binary, rawReply: rawReply, shown: shown,
-                secretPaths: secretPaths)
+                taskId: taskId, binary: binary, rawReply: rawReply)
             let (reply, status) = classify(end)
             return (reply, status, end.body)
         }
@@ -634,7 +689,7 @@ extension Kernel {
         // channel" for a call that was correct (e2e `E10_dialog:swift`).
         let end = await runDispatch(
             target: target, payload: payload, verb: verb, taskOut: taskOut, taskId: taskId,
-            binary: binary, rawReply: rawReply, shown: shown, secretPaths: secretPaths)
+            binary: binary, rawReply: rawReply)
         killer.cancel()
         if end.stopped && fired.isSet {
             // Python `_agent.py`: `f"send: {d.target.id} {d.payload['type']!r} "
@@ -677,8 +732,7 @@ extension Kernel {
         _ = try? rowsPut(target.id, row)
         let end = await runDispatch(
             target: target, payload: payload, verb: payload["type"].asString ?? "",
-            taskOut: nil, taskId: TaskId(pid), binary: nil, rawReply: false, shown: nil,
-            secretPaths: [])
+            taskOut: nil, taskId: TaskId(pid), binary: nil, rawReply: false)
         return classify(end)
     }
 
@@ -718,14 +772,9 @@ extension Kernel {
     /// pass it, which the compiler accepted. Every caller now states the channel:
     /// `binary` (a request body at its payload path) or `rawReply` (the binary
     /// channel with no request body — a raw read) or neither (the text channel).
-    /// `shown` likewise: the payload as the mirrors may see it (an item's
-    /// `secret` paths), published by the fanout while the handler gets `payload`;
-    /// `secretPaths` the item's marks, scoped into the handler as
-    /// `currentSecret` (python `_dispatch_task` sets `_current_secret`).
     private func runDispatch(
         target: Agent, payload: JSON, verb: String, taskOut: TaskIdBox?,
-        taskId: TaskId?, binary: Blob?, rawReply: Bool, shown: ShownPayload?,
-        secretPaths: [JSON]
+        taskId: TaskId?, binary: Blob?, rawReply: Bool
     ) async -> DispatchEnd {
         // (A killed sender never reaches here: `launch` settles it `cancelled`
         // before an id is minted.)
@@ -776,17 +825,13 @@ extension Kernel {
             }
         }
         if local {
-            // SHOWN when the item marked `secret` paths — every mirror, the state
-            // stream's payload and summary included, carries the placeholder (a
-            // body the secret marks never leaves the handler's side). A REQUEST
-            // BODY rides at ITS path — where python's own payload dict holds it —
-            // so a watcher receives the body, not a header with a hole where it
-            // was. A call that only READS a raw chunk carries none: its payload is
-            // a plain dict, a text frame.
+            // A REQUEST BODY rides at ITS path — where python's own payload dict
+            // holds it — so a watcher receives the body, not a header with a hole
+            // where it was. A call that only READS a raw chunk carries none: its
+            // payload is a plain dict, a text frame.
             fanout(
                 target, "send",
-                shown?.inboxItem
-                    ?? binary.map { Kernel.binaryItem(payload, $0) } ?? .text(payload))
+                binary.map { Kernel.binaryItem(payload, $0) } ?? .text(payload))
         }
         // The BINARY channel whenever bytes travel either way: a request body
         // goes in, or the reply's chunk comes back raw. A request body IS the
@@ -803,65 +848,29 @@ extension Kernel {
         // caller's batch may start.
         KernelTaskLocals.onFanout?()
 
-        // A BRIDGE LEG RELAYING A REMOTE CALLER marked its send; the address
-        // belongs to THIS dispatch only when the leg itself is its caller.
-        // Consumed here, so the handler's own sends carry no remote caller.
-        // Python `Agent._dispatch_task`.
-        let rc = KernelTaskLocals.remoteCaller
-        let remote: String? = (rc != nil && rc!.leg == origin) ? rc!.address : nil
-
         let box = DispatchBox()
         let extras = DispatchExtras()
         let work = Task {
+            // THE ONE PLACE A SEND TAKES AN IDENTITY: inside the dispatch the
+            // target is the sender, so everything its handler sends (and every
+            // task it spawns) is the target's.
             let reply = await KernelTaskLocals.$onBatchLaunched.withValue(nil) {
                 await KernelTaskLocals.$onFanout.withValue(nil) {
-                await KernelTaskLocals.$remoteCaller.withValue(nil) {
-                await KernelTaskLocals.$currentRemote.withValue(remote) {
-                // the caller's `secret` marks, for THIS dispatch only — every
-                // nested dispatch scopes its own item's marks here
-                await KernelTaskLocals.$currentSecret.withValue(secretPaths) {
-            await KernelTaskLocals.$currentOrigin.withValue(origin) {
-                await KernelTaskLocals.$currentSender.withValue(target.id) {
-                await KernelTaskLocals.$currentTask.withValue(taskId) {
-                await KernelTaskLocals.$ownTask.withValue(taskId) {
-                    await KernelTaskLocals.$currentKilled.withValue(handle.killed) {
-                            // A blob rides the BINARY channel under this same
-                            // row/ledger/timeout, and THE REPLY BODY COMES BACK
-                            // WITH IT (C37): the batch is the carrier for the
-                            // `bytes` value python's reply dict holds natively.
-                            await {
-                                // ANOTHER KERNEL'S AGENT: the call goes to its
-                                // peer's route, bytes and all; no handler runs
-                                // here. Its reply is the peer's answer — a
-                                // relayed `raised` is data, not a raise here.
-                                if let r = target.remote {
-                                    let (reply, b) = await self.callPeer(
-                                        r, qualified: target.id, payload: handlerPayload,
-                                        origin: origin, secret: secretPaths, body: binary)
-                                    extras.body = b
-                                    return reply
+                    await KernelTaskLocals.$origin.withValue(origin) {
+                        await KernelTaskLocals.$sender.withValue(target.id) {
+                            await KernelTaskLocals.$currentTask.withValue(taskId) {
+                                await KernelTaskLocals.$ownTask.withValue(taskId) {
+                                    await KernelTaskLocals.$currentKilled.withValue(handle.killed) {
+                                        await self.dispatchBody(
+                                            target: target, payload: payload,
+                                            handlerPayload: handlerPayload, binary: binary,
+                                            binaryChannel: binaryChannel, extras: extras)
+                                    }
                                 }
-                                if binaryChannel {
-                                    let (r, b, raised) = await self.dispatchBinary(
-                                        target: target, header: handlerPayload, body: binary)
-                                    extras.body = b
-                                    extras.raised = raised
-                                    return r ?? .null
-                                }
-                                let (r, raised) = await self.dispatch(
-                                    target: target, payload: payload)
-                                extras.raised = raised
-                                return r
-                            }()
+                            }
                         }
                     }
                 }
-                }
-            }
-                }
-            }
-            }
-            }
             }
             box.resolve(reply)
         }
@@ -885,6 +894,35 @@ extension Kernel {
         // — and a stopped dispatch carries no chunk.
         guard let outcome else { return DispatchEnd(reply: .null, stopped: true) }
         return DispatchEnd(reply: outcome, body: extras.body, raised: extras.raised)
+    }
+
+    /// What a dispatch task runs, inside its scopes. A blob rides the BINARY
+    /// channel under this same row/ledger/timeout, and THE REPLY BODY COMES BACK
+    /// WITH IT (C37): the batch is the carrier for the `bytes` value python's
+    /// reply dict holds natively.
+    private func dispatchBody(
+        target: Agent, payload: JSON, handlerPayload: JSON, binary: Blob?,
+        binaryChannel: Bool, extras: DispatchExtras
+    ) async -> JSON {
+        // ANOTHER KERNEL'S AGENT: the call goes to its peer's route, bytes and
+        // all; no handler runs here. Its reply is the peer's answer — a relayed
+        // `raised` is data, not a raise here.
+        if let r = target.remote {
+            let (reply, b) = await callPeer(
+                r, qualified: target.id, payload: handlerPayload, body: binary)
+            extras.body = b
+            return reply
+        }
+        if binaryChannel {
+            let (r, b, raised) = await dispatchBinary(
+                target: target, header: handlerPayload, body: binary)
+            extras.body = b
+            extras.raised = raised
+            return r ?? .null
+        }
+        let (r, raised) = await dispatch(target: target, payload: payload)
+        extras.raised = raised
+        return r
     }
 
     /// One handler run: the reply, and whether the handler RAISED (python's
@@ -1028,25 +1066,16 @@ func summarize(_ payload: JSON, body: Blob? = nil) -> String {
 }
 
 extension Kernel {
-    /// The two-sided call gate for an agent-originated send. Returns the error
-    /// `JSON` if the send is refused, else `nil`. Checks egress (the sender's
-    /// `can_call`) then ingress (the target's `callable_by`), both via the one
-    /// `authorizeCall` engine, then the authority-conferral rules (no self-raise;
-    /// delegate only a subset). A holder with no record → empty grant → deny-all.
     /// May `origin` receive the outcome of an execution that ran `verb` on
     /// `target`? A denial, or nil.
     ///
     /// Joining hands back ANOTHER caller's result verbatim, so it is equivalent
-    /// to having made that call. Asking the gate about the joiner's own payload
-    /// instead — a different verb, whose reply it never gets — authorizes the
-    /// wrong operation. An OPERATOR joiner (no origin) is ungated, as everywhere.
+    /// to having made that call: the gate re-judges the ORIGINAL verb for the
+    /// joiner. An OPERATOR joiner (no origin) is ungated, as everywhere.
     func joinDenial(origin: AgentId?, payload: JSON?, target: Agent) -> JSON? {
         guard let joiner = origin else { return nil }
-        // THE EXECUTION'S OWN PAYLOAD, not a synthesized `{type:<verb>}`. The
-        // gate reads arguments as well as the verb — `create_agent`'s
-        // `parent_id` IS the placement it authorizes — so a joiner rebuilt from
-        // the verb alone was asked a different question than the call it is
-        // about to be handed. A rehydrated row has no payload: python's
+        // THE EXECUTION'S OWN PAYLOAD, not a synthesized `{type:<verb>}`. A
+        // rehydrated row has no payload: python's
         // `(entry.get("payload") or {}).get("type")` is then `None` and the gate
         // runs on an empty call. Python `_agent.py:786-793`.
         let orig = payload ?? .object([:])
@@ -1061,227 +1090,38 @@ extension Kernel {
         return s == "kernel" ? root : agent(AgentId(s))
     }
 
-    /// Is `otherId` X or a live descendant of X? The `$subtree:<X>` resolver, asked
-    /// at call time so an agent spawned after the grant is covered.
-    public func inSubtree(_ otherId: String, of x: String) -> Bool {
-        var node = agent(AgentId(otherId))
-        while let n = node {
-            if n.id.value == x { return true }
-            node = n.parentId.flatMap { agent($0) }
-        }
-        return false
-    }
-
-    /// May `sender` call `targetId` through a HERITABLE `can_call` entry one of its
-    /// ANCESTORS holds? Nearest ancestor first; the sender's own entries never count
-    /// (a heritable entry does not reach for its holder).
-    public func heritableEgress(sender: AgentId, verb: String, targetId: String) -> Bool {
-        var grants: [JSON] = []
-        var node = agent(sender)?.parentId.flatMap { agent($0) }
-        while let n = node {
-            grants.append(n.metaValue(forKey: "can_call") ?? .null)
-            node = n.parentId.flatMap { agent($0) }
-        }
-        return authorizeHeritable(
-            ancestorGrants: grants, verb: verb, targetId: targetId, loaderId: root?.id.value
-        ).allowed
-    }
-
-    /// Two-sided gate on the PLACEMENT TARGET of `create_agent`. Returns a
-    /// refusal, or `nil` when the sender may create under `parent`.
+    /// The two-sided call gate for an agent-originated send. Returns the error
+    /// `JSON` if the send is refused, else `nil`.
     ///
-    /// Placing inside your OWN subtree is baseline (no grant). Anywhere else
-    /// needs egress on the parent (explicitly named — `create_agent` is
-    /// privileged, so a wildcard never covers it) AND the parent's own
-    /// `callable_by` accepting the sender — judged as the qualified
-    /// `<guid>|<agent>` when a bridge leg relays a foreign caller.
-    ///
-    /// A RELAYED caller owns no subtree here: the leg's subtree is the leg's, not
-    /// its peer's, so the baseline never applies on the leg's behalf (audit
-    /// 2026-10-03, G-1) — it takes the path any other placement takes.
-    func gatePlacement(
-        sender: AgentId, sCan: JSON, sParent: String?, sKids: Set<String>,
-        loaderId: String?, parent: Agent
-    ) -> JSON? {
-        let rc = KernelTaskLocals.remoteCaller
-        let inSender = (rc != nil && rc!.leg == sender) ? rc!.address : sender.value
-        // a relayed caller owns no subtree here — no baseline walk
-        var node: Agent? = inSender == sender.value ? parent : nil
-        while let n = node {
-            if n.id == sender { return nil }  // your own subtree — baseline
-            node = n.parentId.flatMap { agent($0) }
-        }
-        let d = authorizeCall(
-            grant: sCan, verb: "create_agent", otherId: parent.id.value,
-            holderId: sender.value, parentId: sParent, childIds: sKids, loaderId: loaderId,
-            enforcePrivileged: true)
-        if !d.allowed
-            && !heritableEgress(sender: sender, verb: "create_agent", targetId: parent.id.value)
-        {
-            return .object([
-                "error": .string("\(sender.value) may not create under \(parent.id.value)"),
-                "reason": .string("unauthorized"), "hint": .string(d.hint),
-                "side": .string("egress"),
-            ])
-        }
-        let tCall = parent.metaValue(forKey: "callable_by") ?? .null
-        let di = authorizeCall(
-            grant: tCall, verb: "create_agent", otherId: inSender,
-            holderId: parent.id.value, parentId: parent.parentId?.value,
-            childIds: Set(parent.childIds().map { $0.value }), loaderId: loaderId,
-            enforcePrivileged: false, inSubtree: { self.inSubtree($0, of: $1) })
-        if !di.allowed {
-            return .object([
-                "error": .string(
-                    "\(parent.id.value) does not accept a child from \(inSender)"),
-                "reason": .string("unauthorized"), "hint": .string(di.hint),
-                "side": .string("ingress"),
-            ])
-        }
-        return nil
-    }
-
-    /// Two-sided gate on the OPERAND of `update_agent` / `delete_agent` (the record
-    /// `payload.id` names). Returns a refusal, or `nil` when the sender may act on
-    /// `operand`.
-    ///
-    /// Inside your OWN subtree (yourself included) it is baseline (no grant).
-    /// Anywhere else needs egress NAMING the operand with the verb
-    /// (`namesOperand`: a literal `<id>: ["<verb>"]`, never a wildcard or a token;
-    /// or a heritable entry for that id naming the verb) AND the operand's own
-    /// `callable_by` accepting the sender — judged as the qualified
-    /// `<guid>|<agent>` when a bridge leg relays a foreign caller. That caller
-    /// owns no subtree here, the leg's own record included (G-1, as
-    /// `gatePlacement`). Python `Agent._gate_operand`.
-    func gateOperand(
-        sender: AgentId, verb: String, sCan: JSON, loaderId: String?, operand: Agent
-    ) -> JSON? {
-        let rc = KernelTaskLocals.remoteCaller
-        let inSender = (rc != nil && rc!.leg == sender) ? rc!.address : sender.value
-        // a relayed caller owns no subtree here — no baseline walk
-        var node: Agent? = inSender == sender.value ? operand : nil
-        while let n = node {
-            if n.id == sender { return nil }  // your own subtree — baseline
-            node = n.parentId.flatMap { agent($0) }
-        }
-        let oid = operand.id.value
-        if !namesOperand(sCan, verb: verb, operandId: oid)
-            && !heritableEgress(sender: sender, verb: verb, targetId: oid)
-        {
-            return .object([
-                "error": .string("\(sender.value) may not \(verb) \(oid)"),
-                "reason": .string("unauthorized"),
-                "hint": .string(
-                    "\(oid) is outside your subtree: your can_call must name it with the "
-                        + "verb — {'\(oid)': ['\(verb)']}, never a wildcard — and its "
-                        + "callable_by must accept you"),
-                "side": .string("egress"),
-            ])
-        }
-        let di = authorizeCall(
-            grant: operand.metaValue(forKey: "callable_by") ?? .null, verb: verb,
-            otherId: inSender, holderId: oid, parentId: operand.parentId?.value,
-            childIds: Set(operand.childIds().map { $0.value }), loaderId: loaderId,
-            enforcePrivileged: false, inSubtree: { self.inSubtree($0, of: $1) })
-        if !di.allowed {
-            return .object([
-                "error": .string("\(oid) does not accept \(pyRepr(verb)) from \(inSender)"),
-                "reason": .string("unauthorized"), "hint": .string(fromAbove),
-                "side": .string("ingress"),
-            ])
-        }
-        return nil
-    }
-
+    /// Egress (the sender's `can_call` grants `(target, verb)`) AND ingress (the
+    /// target's `callable_by` grants `(sender, verb)`) — every target, the root
+    /// included: a kernel verb takes the same two-sided check against the root.
+    /// The sender is always a LOCAL agent — a call a bridge leg serves is judged
+    /// as the leg. Then the MUTATORS' children-only rule. A sender with no record
+    /// → empty grant → deny-all.
     func gate(sender: AgentId, verb: String, target: Agent, payload: JSON) -> JSON? {
-        let loaderId = root?.id.value
         let senderAgent = agent(sender)
         let sCan = senderAgent?.metaValue(forKey: "can_call") ?? .null
         let sParent = senderAgent?.parentId?.value
         let sKids = Set(senderAgent?.childIds().map { $0.value } ?? [])
 
-        // A target on ANOTHER KERNEL — FIRST, before anything below reads the
-        // payload as an operand of THIS tree (a `create_agent` sent to
-        // `<guid>|kernel` places nothing here; resolving its `parent_id` locally
-        // would judge the wrong operand, and a sender placing under its own
-        // subtree would pass with no grant on the peer at all). Egress is the
-        // whole check here — the sender's `can_call` must name `<guid>|<agent>` or
-        // `<guid>|*`. Whether that agent accepts the call is its OWN kernel's
-        // decision (its `callable_by`, against the qualified `<this
-        // guid>|<sender>`), made where the agent lives.
-        if let remote = target.remote {
-            let d = authorizeCall(
-                grant: sCan, verb: verb, otherId: target.id.value,
-                holderId: sender.value, parentId: sParent, childIds: sKids, loaderId: loaderId,
-                enforcePrivileged: true)
-            if d.allowed || heritableEgress(sender: sender, verb: verb, targetId: target.id.value) {
-                return nil
-            }
-            return .object([
-                "error": .string(
-                    "\(sender.value) may not call \(pyRepr(verb)) on \(target.id.value)"),
-                "reason": .string("unauthorized"),
-                "hint": .string(
-                    "\(target.id.value) is an agent on the connected kernel \(remote.guid): "
-                        + "name it in can_call — {\(pyRepr(target.id.value)): [...]} or "
-                        + "{'\(remote.guid)|*': [...]}"),
-                "side": .string("egress"),
-            ])
-        }
-
-        // PLACEMENT IS THE OPERAND. `create_agent` is answered by the root, but
-        // the agent it ACTS UPON is the parent named in `parent_id` — so that is
-        // what the gate asks about, on both sides. Gating the root instead made
-        // one grant (`<root>:[create_agent]`, the ordinary "may author tools"
-        // wiring) a key to the whole tree: the holder could plant a child under
-        // ANY agent and inherit `$parent:*` reach into it (measured 2026-09-02).
-        //
-        // FORKING YOUR OWN SUBTREE IS BASELINE — placing under yourself or a
-        // descendant needs no grant at all, which is what makes self-extension
-        // work with zero wiring at any depth.
-        if verb == "create_agent", let parent = resolveAgent(payload["parent_id"]) {
-            if let denial = gatePlacement(
-                sender: sender, sCan: sCan, sParent: sParent, sKids: sKids,
-                loaderId: loaderId, parent: parent)
-            {
-                return denial
-            }
-            return checkConferral(
-                sender: sender, sCan: sCan, sParent: sParent, sKids: sKids,
-                loaderId: loaderId, payload: payload)
-        }
-        // An unknown parent falls through to the ordinary path; the verb itself
-        // answers `unknown_agent`.
-
-        // THE RECORD IS THE OPERAND — the same rule for `update_agent` /
-        // `delete_agent`. Gating the root made one grant
-        // (`<root>:[update_agent, delete_agent]`, the builder wiring) a key to
-        // every record — rewrite a credential store's refs, open a sealed leg,
-        // clear a delete_lock and delete — while an agent could not edit its OWN
-        // child without that tree-wide grant (audit 2026-10-03, AV-1).
-        if recordOperandVerbs.contains(verb) && target.parentId == nil {
-            if let oid = payload["id"].asString, let operand = agent(AgentId(oid)) {
-                if let denial = gateOperand(
-                    sender: sender, verb: verb, sCan: sCan, loaderId: loaderId, operand: operand)
-                {
-                    return denial
-                }
-                if verb == "update_agent" {
-                    return checkConferral(
-                        sender: sender, sCan: sCan, sParent: sParent, sKids: sKids,
-                        loaderId: loaderId, payload: payload)
-                }
-                return nil
-            }
-            // No such record: the ordinary path; the verb answers `unknown_agent`.
-        }
-
         // Egress — may the SENDER call the target?
         let d = authorizeCall(
             grant: sCan, verb: verb, otherId: target.id.value,
-            holderId: sender.value, parentId: sParent, childIds: sKids, loaderId: loaderId,
-            enforcePrivileged: true)
-        if !d.allowed && !heritableEgress(sender: sender, verb: verb, targetId: target.id.value) {
+            holderId: sender.value, parentId: sParent, childIds: sKids)
+        if !d.allowed {
+            if let remote = target.remote {
+                return .object([
+                    "error": .string(
+                        "\(sender.value) may not call \(pyRepr(verb)) on \(target.id.value)"),
+                    "reason": .string("unauthorized"),
+                    "hint": .string(
+                        "\(target.id.value) is an agent on the connected kernel \(remote.guid): "
+                            + "name it in can_call — {\(pyRepr(target.id.value)): [...]} or "
+                            + "{'\(remote.guid)|*': [...]}"),
+                    "side": .string("egress"),
+                ])
+            }
             return .object([
                 "error": .string(
                     "\(sender.value) may not call \(pyRepr(verb)) on \(target.id.value)"),
@@ -1289,266 +1129,53 @@ extension Kernel {
                 "side": .string("egress"),
             ])
         }
+        // A target on ANOTHER KERNEL: egress is the whole check here. Whether
+        // that agent accepts the call is its OWN kernel's decision, made where
+        // the agent lives.
+        if target.remote != nil { return nil }
 
-        // INGRESS IS NOT CHECKED FOR A KERNEL VERB AT THE ROOT. `callable_by`
-        // answers "do I accept being acted upon", and the root is not what is
-        // acted upon — the operand is in the payload. Requiring it would make
-        // the operator edit the ROOT's record for every agent that wants to read
-        // the task table. Consequence accepted: an agent granted
-        // `<root>:[ps,cancel]` can kill ANY task; the per-victim edge a manifest
-        // could grant before is GONE. The tree mutators are the exception:
-        // whenever their operand names an agent they were judged ON THAT AGENT
-        // above (`gatePlacement` / `gateOperand`); only an unknown operand gets
-        // here.
-        //
-        // A FOREIGN caller a bridge leg relays is the exception to the exception:
-        // the leg's `can_call` is the leg's reach, not its peer's, so the root's
-        // `callable_by` must ALSO accept the caller as `<guid>|<agent>` or
-        // `<guid>|*` — it takes the ingress check below (audit 2026-10-03, AV-3).
-        // Local callers are unchanged.
-        let rc = KernelTaskLocals.remoteCaller
-        let foreign = (rc != nil && rc!.leg == sender) ? rc!.address : nil
-        if Kernel.isSystemVerb(verb) && target.parentId == nil && foreign == nil {
-            // ...but CONFERRAL still applies. `update_agent` is a system verb
-            // whose target is ALWAYS the root, so returning nil flat made
-            // `checkConferral` unreachable for the exact case it guards: any
-            // agent holding `<root>:update_agent` could rewrite its OWN
-            // can_call and grant itself egress to the whole tree — the
-            // deny-all gate defeated from below. Python runs the check on this
-            // path (`_agent.py`, `verb in _SYSTEM_VERBS and target.parent is
-            // None`); swift did not. Skipping INGRESS here is deliberate and
-            // unchanged — skipping conferral was not.
-            if verb == "create_agent" || verb == "update_agent" {
-                return checkConferral(
-                    sender: sender, sCan: sCan, sParent: sParent, sKids: sKids,
-                    loaderId: loaderId, payload: payload)
-            }
-            return nil
-        }
-
-        // Ingress — does the TARGET accept the sender? (tokens relative to target;
-        // privileged-no-wildcard is egress-only, so enforcePrivileged: false.)
-        // A bridge leg relaying a FOREIGN caller is judged by that caller's
-        // qualified `<guid>|<agent>`, never by the leg: the target names who on the
-        // other kernel it accepts, and the baseline tokens never match a foreign id.
-        let inSender = foreign ?? sender.value
-        let tCall = target.metaValue(forKey: "callable_by") ?? .null
-        let tParent = target.parentId?.value
-        let tKids = Set(target.childIds().map { $0.value })
+        // Ingress — does the TARGET accept the sender? (tokens relative to the
+        // target).
         let di = authorizeCall(
-            grant: tCall, verb: verb, otherId: inSender,
-            holderId: target.id.value, parentId: tParent, childIds: tKids, loaderId: loaderId,
-            enforcePrivileged: false, inSubtree: { self.inSubtree($0, of: $1) })
+            grant: target.metaValue(forKey: "callable_by") ?? .null, verb: verb,
+            otherId: sender.value, holderId: target.id.value, parentId: target.parentId?.value,
+            childIds: Set(target.childIds().map { $0.value }))
         if !di.allowed {
-            let hint: String
-            if let f = foreign {
-                let guid = String(f.split(separator: "|").first ?? "")
-                hint =
-                    "a foreign caller is accepted only by name: callable_by {\(pyRepr(f)): [...]} "
-                    + "or {\(pyRepr(guid + "|*")): [...]} on \(target.id.value)"
-            } else {
-                hint = di.hint
-            }
             return .object([
                 "error": .string(
-                    "\(target.id.value) does not accept \(pyRepr(verb)) from \(inSender)"),
-                "reason": .string("unauthorized"), "hint": .string(hint),
+                    "\(target.id.value) does not accept \(pyRepr(verb)) from \(sender.value)"),
+                "reason": .string("unauthorized"), "hint": .string(di.hint),
                 "side": .string("ingress"),
             ])
         }
 
-        // Authority conferral — no self-raise, delegate only a subset you hold.
-        if verb == "create_agent" || verb == "update_agent" {
-            return checkConferral(
-                sender: sender, sCan: sCan, sParent: sParent, sKids: sKids,
-                loaderId: loaderId, payload: payload)
+        // MUTATORS answered by the root: the operand must be a DIRECT CHILD of
+        // the sender.
+        if mutatorVerbs.contains(verb) && target.parentId == nil {
+            return mutatorDenial(sender: sender, verb: verb, payload: payload)
         }
         return nil
     }
 
-    /// A heritable entry is conferred only by an agent whose OWN `can_call` holds the
-    /// same entry, and only a subset of its verbs (`*` needs `*`; a named verb needs
-    /// the name, or `*` when the verb is not privileged).
-    private func heritableConferral(
-        sender: AgentId, sCan: JSON, key: String, want: [String]
-    ) -> JSON? {
-        let have = heritableVerbs(sCan[key]) ?? []
-        for v in want {
-            let covered =
-                have.contains(v)
-                || (v != "*" && have.contains("*") && !privilegedVerbs.contains(v))
-            if !covered {
-                return .object([
-                    "error": .string(
-                        "\(sender.value) cannot confer a heritable \(pyRepr(v)) on \(key): you "
-                            + "do not hold that heritable entry — only the operator, or a "
-                            + "holder of the same entry, confers one (a subset of it)"),
-                    "reason": .string("unauthorized"), "side": .string("delegation"),
-                    "hint": .string(fromAbove),
-                ])
-            }
+    /// The MUTATOR rule: `create_agent`'s `parent_id` is the sender;
+    /// `update_agent` / `delete_agent`'s `id` names an agent whose parent is the
+    /// sender (an unknown id is not one). A MISSING or non-string operand is not
+    /// judged here: the verb's own missing/shape refusal answers it. Refusal, or
+    /// nil.
+    private func mutatorDenial(sender: AgentId, verb: String, payload: JSON) -> JSON? {
+        let field = verb == "create_agent" ? "parent_id" : "id"
+        guard let oid = payload[field].asString, !oid.isEmpty else { return nil }
+        let owned: Bool
+        if verb == "create_agent" {
+            owned = oid == sender.value
+        } else {
+            owned = agent(AgentId(oid))?.parentId == sender
         }
-        return nil
-    }
-
-    /// Only the OPERATOR lowers a secret holder's mark. An agent's `update_agent`
-    /// naming `holds_secrets` with any value but `true` on an agent whose record
-    /// says `holds_secrets: true` is refused — else a model granted `update_agent`
-    /// could unmark a credential_store and then call it. Setting `true` (on a
-    /// holder or not) passes: protection may be added from anywhere. Judged on
-    /// the record the verb would patch, before the write-time shape check, so a
-    /// non-operator's malformed value on a holder gets THIS refusal. The operator
-    /// (`sender` nil) never reaches here. Python `Agent._check_holder_mark`.
-    private func checkHolderMark(sender: AgentId, payload: JSON) -> JSON? {
-        guard payload["type"].asString == "update_agent", case .object(let obj) = payload,
-            let value = obj[holdsSecretsField]
-        else { return nil }
-        if value == .bool(true) { return nil }
-        guard let edited = obj["id"]?.asString,
-            agent(AgentId(edited))?.metaValue(forKey: holdsSecretsField) == .bool(true)
-        else { return nil }
+        if owned { return nil }
         return .object([
-            "error": .string(
-                "\(sender.value) may not clear holds_secrets on \(edited): it holds "
-                    + "secrets, and only the operator lowers that mark"),
-            "reason": .string("unauthorized"), "side": .string(holderMarkSide),
-            "hint": .string(holderMarkHint),
+            "error": .string("\(sender.value) may only \(verb) its own children — \(oid) is not one"),
+            "reason": .string("unauthorized"), "side": .string("mutator"),
         ])
-    }
-
-    /// Authority flows from ABOVE only: an agent may not raise its OWN authority
-    /// fields, and may confer on another only a SUBSET of its own `can_call`.
-    /// Nor may it lower a secret holder's mark (`checkHolderMark`, judged first).
-    private func checkConferral(
-        sender: AgentId, sCan: JSON, sParent: String?, sKids: Set<String>,
-        loaderId: String?, payload: JSON
-    ) -> JSON? {
-        if let held = checkHolderMark(sender: sender, payload: payload) { return held }
-        guard case .object(let obj) = payload,
-            obj["can_call"] != nil || obj["callable_by"] != nil
-        else { return nil }
-        let verb = payload["type"].asString ?? ""
-        let edited = payload["id"].asString
-        // Self-raise: never edit your own authority fields.
-        if verb == "update_agent" && edited == sender.value {
-            return .object([
-                "error": .string("\(sender.value) may not edit its own can_call/callable_by"),
-                "reason": .string("unauthorized"), "side": .string("self-grant"),
-                "hint": .string(fromAbove),
-            ])
-        }
-        // Subset: every LATERAL edge in the conferred `can_call` must be one the
-        // granter itself holds (structural tokens free; `callable_by` is unbounded).
-        if case .object(let conferred) = payload["can_call"] {
-            for (key, verbs) in conferred {
-                var isMap = false
-                if case .object = verbs { isMap = true }
-                let probeKey: String
-                switch key {
-                // Relative to the HOLDER — no lateral reach.
-                case "$self", "$parent", "$children":
-                    continue
-                // A heritable entry is conferred only by a holder of the SAME entry
-                // (subset). A malformed one, and a `$subtree:` key (which is
-                // callable_by-only), are refused by the write-time shape check with
-                // the shape's own words.
-                case let k where isMap || k.hasPrefix(subtreePrefix):
-                    if let want = heritableVerbs(verbs), !k.hasPrefix("$"),
-                        let denied = heritableConferral(
-                            sender: sender, sCan: sCan, key: k, want: want)
-                    {
-                        return denied
-                    }
-                    continue
-                // NOT relative: `$loader` resolves to the ROOT for whoever holds
-                // it, so conferring it hands over real reach on the kernel's
-                // control surface (ps, cancel, ledger, shutdown_kernel).
-                // Subset-probe it like any lateral edge — skipping it let a
-                // grandchild grant its own child root reach it did not hold
-                // (measured 2026-09-02).
-                case "$loader":
-                    guard let r = loaderId else { continue }
-                    probeKey = r
-                default:
-                    if key.hasPrefix("$") {
-                        return .object([
-                            "error": .string(
-                                "\(sender.value) cannot confer \(pyRepr(key)): not a structural "
-                                    + "token — $self, $parent, $children and $loader are "
-                                    + "the only ones"),
-                            "reason": .string("bad_arg"), "arg": .string("can_call"),
-                            "side": .string("delegation"), "hint": .string(fromAbove),
-                        ])
-                    }
-                    probeKey = key
-                }
-                // Conferring "*" (or a list with it) requires the granter to hold
-                // "*" on that target; a concrete list requires each verb. C21:
-                // python `probe = need if (need and "*" not in need) else ["*"]`
-                // — an EMPTY list is falsy, so it probes `*` too, same as "*"
-                // itself; this used to leave `probe` empty for `[]`, so the
-                // loop below never ran and an empty verb list passed with no
-                // check at all.
-                var probe: [String] = ["*"]
-                if case .array(let vs) = verbs, !vs.isEmpty,
-                    !vs.contains(where: { $0.asString == "*" })
-                {
-                    probe = vs.compactMap { $0.asString }
-                }
-                for v in probe {
-                    let ok = authorizeCall(
-                        grant: sCan, verb: v, otherId: probeKey, holderId: sender.value,
-                        parentId: sParent, childIds: sKids, loaderId: loaderId
-                    ).allowed
-                    if !ok {
-                        if key == "$loader" {
-                            return .object([
-                                "error": .string(
-                                    "\(sender.value) cannot delegate \(pyRepr(v)) on $loader: it "
-                                        + "resolves to \(probeKey), which you do not hold — "
-                                        + "$loader is real reach on the kernel's control "
-                                        + "surface, not a structural token"),
-                                "reason": .string("unauthorized"),
-                                "side": .string("delegation"), "hint": .string(fromAbove),
-                            ])
-                        }
-                        // Name the TRUE reason. A target that is not an agent at all
-                        // is almost always one created in the SAME batch — items
-                        // launch concurrently, so it is not there yet when this gate
-                        // runs. "you don't hold it" sent a builder into a 382-second
-                        // deliberation (measured 2026-09-02).
-                        if agent(AgentId(key)) == nil {
-                            return .object([
-                                "error": .string(
-                                    "\(sender.value) cannot delegate \(pyRepr(v)) on \(key): no such "
-                                        + "agent — calls of one batch run concurrently, so an "
-                                        + "agent created in this batch does not exist yet; "
-                                        + "create in one batch, grant in the next"),
-                                "reason": .string("unauthorized"), "side": .string("delegation"),
-                                "missing": .string(key),
-                                "hint": .string(fromAbove),
-                            ])
-                        }
-                        // The target exists but the granter does not hold it. Say WHY
-                        // in one line — the usual cause is a specialist created under
-                        // the root instead of under the granter, and "you don't hold
-                        // it" hid that for twenty passes (2026-09-02).
-                        let pid = agent(AgentId(key))?.parentId?.value
-                        return .object([
-                            "error": .string(
-                                "\(sender.value) cannot delegate \(pyRepr(v)) on \(key): \(key) is not "
-                                    + "your child (its parent is \(pid ?? "None")) and not in your "
-                                    + "can_call — you may only confer can_call you already hold; "
-                                    + "create the agents you will wire as YOUR children"),
-                            "reason": .string("unauthorized"), "side": .string("delegation"),
-                            "parent": pid.map { .string($0) } ?? .null,
-                            "hint": .string(fromAbove),
-                        ])
-                    }
-                }
-            }
-        }
-        return nil
     }
 }
 

@@ -632,7 +632,7 @@ impl<'a> Places<'a> {
 /// The payload's `parent_id` places only a record that exists in neither.
 /// The ROOT loader's tree is the one this kernel HYDRATES at boot, so only the
 /// operator (its own flush, the CLI, boot) writes it. An agent's record changes
-/// through `update_agent`, where the conferral rule runs — a record written here
+/// through `update_agent`, where the gate's children-only rule runs — a record written here
 /// by an agent would be hydrated with whatever grants it named (audit
 /// 2026-09-28, a15). A session loader (a remote's sub-namespace, never hydrated
 /// here) keeps serving its remote. Python `_guard_own_tree`.

@@ -15,12 +15,13 @@ through a JSON round-trip (what every wire does anyway) and compared PAIRWISE �
 per-case expectations catch a wrong answer, the pairwise diff catches a
 transport quietly answering differently.
 
-Attribution differs BY DESIGN — in-proc is the operator; the ws engine, rest
-and exec each dispatch AS THEIR LEG AGENT (the first run of this suite proved
-it: the ws leg was assumed operator and the diff said otherwise). So the
-fixture grants every leg the same reach — including the EXPLICIT `create_agent`
-naming a privileged verb needs (a bare "*" deliberately does not cover it) —
-and cases avoid asserting on the gate itself (the authz suites' job). What
+Attribution differs BY DESIGN — in-proc is the operator; the ws engine, the
+relay, rest and exec each dispatch AS THEIR LEG AGENT (identity comes only from
+dispatch: a leg's read loop, its inbound verbs and its job relay are its own).
+So the fixture grants every leg the same reach, both halves (the probe's and the
+root's `callable_by` name every leg), and cases avoid asserting on the gate
+itself (the authz suites' job). The tree mutators are not in the corpus: they act on the
+sender's own children only, so their answer depends on the principal. What
 must be identical is the REPLY.
 
 Rust and swift join by reading the same YAML once #29 lands there; this file is
@@ -41,7 +42,6 @@ from _testkit import boot_root
 from _testkit_relay import _pair as relay_pair
 from io_bridge import MemoryTransport
 from io_bridge import _engine
-from relay_connector._relay import secret_sealed
 from web_rest.tools import _make_post_endpoint
 from kernel import register_unlisted
 
@@ -66,34 +66,6 @@ def _subst_root(v):
 
 
 CASES = [_subst_root(c) for c in _DOC["cases"]]
-
-# A case may carry `secret` — the batch item's marks, beside `payload`. Each leg
-# puts it where ITS wire carries it: the item (in-proc), the `X-Fantastic-Secret`
-# header (rest), the guest frame's own `secret` (exec guest, through the
-# connector's `kernel.send(target, payload, secret=…)`), the outer `forward` call
-# re-rooted one level up (ws bridge, relay). A wire that does not carry them
-# skips those cases BY NAME, with the reason:
-NO_SECRET_WIRE = {
-    "relay-tunnel": (
-        "SEALED (owner, 2026-10-02): relayd records the frames it routes unmasked, "
-        "so a relay leg refuses every call carrying secret marks — `_leg_relay` "
-        "asserts that refusal instead"
-    ),
-}
-
-
-def _outer_secret(marks: list) -> list:
-    """A case's marks on the OUTER `forward` call: the inverse of the bridge's
-    re-rooting, in each mark's own spelling (`payload.<f>` → `payload.payload.<f>`,
-    `["payload", <s>…]` → `["payload", "payload", <s>…]`; a `result` mark as is)."""
-    out: list = []
-    for p in marks:
-        if isinstance(p, list):
-            out.append(p if p[:1] == ["result"] else ["payload", *p])
-        else:
-            out.append(p if p.split(".")[0] == "result" else f"payload.{p}")
-    return out
-
 
 # ─── the probe bundle: deterministic, storeless ──────────────────
 
@@ -147,16 +119,8 @@ async def wired(tmp_path, monkeypatch):
     ka = boot_root()  # scratch kernel: the ws bridge's CALLING side
     monkeypatch.chdir(b_dir)
     kb = boot_root()  # THE target kernel — every transport dispatches here
-    # Instance guids: a bridge stamps `<guid>|<agent>` on every outbound call, and
-    # the serving legs on B are PINNED to A's.
     ka.update(ka.id, guid="c21-a")
     kb.update(kb.id, guid="c21-b")
-    # B's root accepts A's agents by their foreign id (a reflect of the root is not
-    # a kernel verb, so its `callable_by` is asked)
-    kb.update(
-        kb.id,
-        callable_by={**kb.ctx.agents[kb.id]._meta["callable_by"], "c21-a|*": "*"},
-    )
 
     async def send1(k, t, p):
         return (await k.send([{"target": t, "payload": p}]))[0]["result"]
@@ -183,28 +147,9 @@ async def wired(tmp_path, monkeypatch):
             "handler_module": "ws_bridge.tools",
             "transport": "memory",
             "peer_id": rec_a["id"],
-            "peer_guid": "c21-a",
             "ingress_rule": "allow_all_ingress",
             # The serving leg DISPATCHES AS ITSELF — same reach as every other leg.
-            "can_call": {
-                # `update_agent` acts on the probe's RECORD: named on the operand,
-                # a wildcard never covers it (AV-1)
-                "c21_probe": ["*", "update_agent"],
-                "kernel_state": [
-                    "create_agent",
-                    "update_agent",
-                    # `delete_agent` is PRIVILEGED, so a wildcard never covers
-                    # it — the corpus' `delete-unknown` case is a kernel verb
-                    # like any other and every attributed leg must be able to
-                    # reach it, or the legs answer `unauthorized` where the
-                    # in-proc operator answers `unknown_agent`.
-                    "delete_agent",
-                    "list_agents",
-                    "reflect",
-                    # `ledger` is privileged too: the baseline no longer reaches it
-                    "ledger",
-                ],
-            },
+            "can_call": {"c21_probe": "*", "kernel_state": "*"},
         },
     )
     ka.update(rec_a["id"], peer_id=rec_b["id"])
@@ -224,25 +169,7 @@ async def wired(tmp_path, monkeypatch):
             "handler_module": "web_rest.tools",
             "id": "c21_rest",
             "ingress_rule": "allow_all_ingress",
-            "can_call": {
-                # `update_agent` acts on the probe's RECORD: named on the operand,
-                # a wildcard never covers it (AV-1)
-                "c21_probe": ["*", "update_agent"],
-                "kernel_state": [
-                    "create_agent",
-                    "update_agent",
-                    # `delete_agent` is PRIVILEGED, so a wildcard never covers
-                    # it — the corpus' `delete-unknown` case is a kernel verb
-                    # like any other and every attributed leg must be able to
-                    # reach it, or the legs answer `unauthorized` where the
-                    # in-proc operator answers `unknown_agent`.
-                    "delete_agent",
-                    "list_agents",
-                    "reflect",
-                    # `ledger` is privileged too: the baseline no longer reaches it
-                    "ledger",
-                ],
-            },
+            "can_call": {"c21_probe": "*", "kernel_state": "*"},
         },
     )
 
@@ -257,25 +184,7 @@ async def wired(tmp_path, monkeypatch):
             "id": "c21_exec",
             "ingress_rule": "allow_all_ingress",
             **__import__("_testkit").py_runner_meta(),
-            "can_call": {
-                # `update_agent` acts on the probe's RECORD: named on the operand,
-                # a wildcard never covers it (AV-1)
-                "c21_probe": ["*", "update_agent"],
-                "kernel_state": [
-                    "create_agent",
-                    "update_agent",
-                    # `delete_agent` is PRIVILEGED, so a wildcard never covers
-                    # it — the corpus' `delete-unknown` case is a kernel verb
-                    # like any other and every attributed leg must be able to
-                    # reach it, or the legs answer `unauthorized` where the
-                    # in-proc operator answers `unknown_agent`.
-                    "delete_agent",
-                    "list_agents",
-                    "reflect",
-                    # `ledger` is privileged too: the baseline no longer reaches it
-                    "ledger",
-                ],
-            },
+            "can_call": {"c21_probe": "*", "kernel_state": "*"},
         },
     )
 
@@ -304,27 +213,8 @@ async def wired(tmp_path, monkeypatch):
             "relay_url": "ws://relay",
             "guid": "B",
             "partner_guid": "A",
-            "peer_guid": "c21-a",
             "ingress_rule": "allow_all_ingress",
-            "can_call": {
-                # `update_agent` acts on the probe's RECORD: named on the operand,
-                # a wildcard never covers it (AV-1)
-                "c21_probe": ["*", "update_agent"],
-                "kernel_state": [
-                    "create_agent",
-                    "update_agent",
-                    # `delete_agent` is PRIVILEGED, so a wildcard never covers
-                    # it — the corpus' `delete-unknown` case is a kernel verb
-                    # like any other and every attributed leg must be able to
-                    # reach it, or the legs answer `unauthorized` where the
-                    # in-proc operator answers `unknown_agent`.
-                    "delete_agent",
-                    "list_agents",
-                    "reflect",
-                    # `ledger` is privileged too: the baseline no longer reaches it
-                    "ledger",
-                ],
-            },
+            "can_call": {"c21_probe": "*", "kernel_state": "*"},
         },
     )
     rt_a, rt_b = relay_pair("A", "B")
@@ -345,13 +235,25 @@ async def wired(tmp_path, monkeypatch):
             "callable_by": {
                 rest["id"]: "*",
                 xrec["id"]: "*",
-                # the bridge legs relay A's agents — accepted by their FOREIGN id,
-                # never by the leg
-                "c21-a|*": "*",
+                # the bridge legs serve A's calls AS THEMSELVES
+                rec_b["id"]: "*",
+                rel_b["id"]: "*",
             },
         },
     )
 
+    # B's root accepts every attributed leg (the kernel verbs take the two-sided
+    # check against the root, as any call does)
+    kb.update(
+        kb.id,
+        callable_by={
+            **kb.ctx.agents[kb.id]._meta["callable_by"],
+            rest["id"]: "*",
+            xrec["id"]: "*",
+            rec_b["id"]: "*",
+            rel_b["id"]: "*",
+        },
+    )
     return ka, kb, rec_a["id"], rel_a["id"]
 
 
@@ -362,8 +264,6 @@ async def _leg_inproc(ka, kb, bridge_a, relay_a):
     out = []
     for c in CASES:
         item = {"target": c["target"], "payload": c["payload"]}
-        if "secret" in c:
-            item["secret"] = c["secret"]
         o = (await kb.send([item]))[0]
         out.append(_norm(o["result"]))
     return out
@@ -380,8 +280,6 @@ async def _forward_leg(ka, leg_id):
                 "payload": c["payload"],
             },
         }
-        if "secret" in c:
-            item["secret"] = _outer_secret(c["secret"])
         r = (await ka.send([item]))[0]["result"]
         out.append(_norm(r))
     return out
@@ -405,23 +303,15 @@ async def _leg_rest(ka, kb, bridge_a, relay_a):
         transport=httpx.ASGITransport(app=app), base_url="http://c21"
     ) as client:
         for c in CASES:
-            headers = (
-                {"X-Fantastic-Secret": json.dumps(c["secret"])} if "secret" in c else {}
-            )
-            r = await client.post(
-                f"/c21_rest/{c['target']}", json=c["payload"], headers=headers
-            )
+            r = await client.post(f"/c21_rest/{c['target']}", json=c["payload"])
             out.append(_norm(r.json()))
     return out
 
 
 async def _leg_exec(ka, kb, bridge_a, relay_a):
-    def mark(c):
-        return f", secret={c['secret']!r}" if "secret" in c else ""
-
     lines = "\n".join(
         f"print(__import__('json').dumps(kernel.send("
-        f"{c['target']!r}, {c['payload']!r}{mark(c)}), default=str), flush=True)"
+        f"{c['target']!r}, {c['payload']!r}), default=str), flush=True)"
         for c in CASES
     )
     r = (
@@ -457,12 +347,7 @@ async def _leg_exec(ka, kb, bridge_a, relay_a):
 
 
 async def _leg_relay(ka, kb, bridge_a, relay_a):
-    out = await _forward_leg(ka, relay_a)
-    for i, c in enumerate(CASES):
-        if "secret" in c:  # NO_SECRET_WIRE: the seal's refusal, exactly
-            assert out[i] == _norm(secret_sealed()), (c["name"], out[i])
-            out[i] = None
-    return out
+    return await _forward_leg(ka, relay_a)
 
 
 LEGS = {
@@ -482,7 +367,7 @@ async def test_every_transport_gives_the_same_reply(wired):
     ref_name = "in-proc"
     for i, case in enumerate(CASES):
         ref = replies[ref_name][i]
-        legs = [n for n in LEGS if not ("secret" in case and n in NO_SECRET_WIRE)]
+        legs = list(LEGS)
         # per-case expectations — a wrong answer fails even if every transport
         # agrees on it
         for name in legs:

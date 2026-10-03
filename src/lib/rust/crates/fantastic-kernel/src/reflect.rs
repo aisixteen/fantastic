@@ -311,18 +311,6 @@ fn sentence_for(target: &Arc<Agent>) -> &'static str {
     }
 }
 
-/// May the agent now running (the caller) `reflect` `a`? The one per-node gate
-/// both tree views apply ([`roster`], and [`tree_node`] under `detail:"full"`);
-/// an operator may reflect everything (python `_may_reflect`).
-fn may_reflect(kernel: &Arc<Kernel>, a: &Arc<Agent>) -> bool {
-    match crate::send::current_sender() {
-        None => true,
-        Some(sender) => kernel
-            .gate(&sender, "reflect", a, &Value::Object(Map::new()))
-            .is_none(),
-    }
-}
-
 /// `{id, sentence?, description?, mode?, children:[...]}` — the tree, carrying
 /// what each agent is FOR instead of how it is wired (python `_roster`).
 ///
@@ -331,10 +319,7 @@ fn may_reflect(kernel: &Arc<Kernel>, a: &Arc<Agent>) -> bool {
 /// watcher echo — but no reflect flags, so a roster never recurses into
 /// rosters); a bare node answers its identity directly.
 ///
-/// GATED PER NODE. A caller allowed to reflect ONE agent must not read every
-/// descendant's `sentence`/`description` through the tree. A denied node keeps
-/// its `id` and `children` (the shape is public through `tree=ids`) and is not
-/// dispatched at all. An operator sees everything.
+/// A reflect that passed the gate returns the tree WHOLE — no per-node hiding.
 ///
 /// `Err` carries a node's RAISED reflect: python's exception propagates out of
 /// `_roster` and fails the whole reflect.
@@ -343,8 +328,7 @@ fn roster(
     a: Arc<Agent>,
 ) -> Pin<Box<dyn Future<Output = Result<Value, Value>> + Send>> {
     Box::pin(async move {
-        let may_reflect = may_reflect(&kernel, &a);
-        let raw = if a.handler_module.is_some() && may_reflect {
+        let raw = if a.handler_module.is_some() {
             let (reply, status) = kernel
                 .internal_dispatch(&a, &json!({"type": "reflect"}))
                 .await;
@@ -352,10 +336,8 @@ fn roster(
                 return Err(reply);
             }
             reply
-        } else if may_reflect {
-            reflect_identity(&a)
         } else {
-            Value::Object(Map::new())
+            reflect_identity(&a)
         };
         let mut node = Map::new();
         node.insert("id".to_string(), json!(a.id.0));
@@ -366,10 +348,8 @@ fn roster(
             node.insert("sentence".to_string(), sentence.clone());
         }
         // Operator-set purpose — more specific than the bundle sentence.
-        if may_reflect {
-            if let Some(d) = a.description() {
-                node.insert("description".to_string(), json!(d));
-            }
+        if let Some(d) = a.description() {
+            node.insert("description".to_string(), json!(d));
         }
         for k in PURPOSE_KEYS {
             if let Some(v) = raw.get(k).filter(|v| !v.is_null()) {
@@ -422,12 +402,8 @@ pub async fn apply_reflect_flags(
     // identity and would otherwise never report its authority, so an agent
     // could not read what it may call or who may call it — only discover it by
     // trying. Same two keys the distilled tree nodes carry.
-    //
-    // `holds_secrets` rides the same way: a SECRET HOLDER (a credential_store
-    // stamps it; an operator may set it on any agent) says so on its reflect,
-    // because ai_core refuses every model-parsed call that names it.
     if let Ok(meta) = target.meta.read() {
-        for k in ["can_call", "callable_by", "holds_secrets"] {
+        for k in ["can_call", "callable_by"] {
             if let Some(v) = meta.get(k) {
                 obj.entry(k.to_string()).or_insert_with(|| v.clone());
             }
@@ -567,7 +543,7 @@ pub async fn apply_reflect_flags(
     Ok(())
 }
 
-/// `tree=all`: the wiring tree under `detail:full`, the gated roster otherwise.
+/// `tree=all`: the wiring tree under `detail:full`, the roster otherwise.
 async fn insert_tree(
     kernel: &Arc<Kernel>,
     target: &Arc<Agent>,
@@ -575,7 +551,7 @@ async fn insert_tree(
     obj: &mut Map<String, Value>,
 ) -> Result<(), Value> {
     let tree = if full {
-        tree_node(target, &|a: &Arc<Agent>| may_reflect(kernel, a))
+        tree_node(target)
     } else {
         roster(Arc::clone(kernel), Arc::clone(target)).await?
     };
@@ -588,24 +564,13 @@ async fn insert_tree(
 /// children:[...]}` dict — the `detail:full` wiring tree (python `_tree`),
 /// children in creation order.
 ///
-/// GATED PER NODE, as the roster is: `may` answers whether the caller may
-/// `reflect` a node. The wiring view carries every node's `description` and
-/// grant maps, so a caller allowed to reflect ONE agent read its whole subtree's
-/// through `detail:"full"` — a depth-2 agent its siblings', through its own
-/// parent (audit 2026-10-03, KV-3). A denied node keeps its `id` and `children`
-/// (the shape is public through `tree=ids`) and nothing else.
-pub fn tree_node(target: &Arc<Agent>, may: &dyn Fn(&Arc<Agent>) -> bool) -> Value {
+/// A reflect that passed the gate returns it WHOLE — no per-node hiding.
+pub fn tree_node(target: &Arc<Agent>) -> Value {
     let mut obj = Map::new();
     obj.insert("id".to_string(), json!(target.id.0));
-    if may(target) {
-        tree_fields(target, &mut obj);
-    }
+    tree_fields(target, &mut obj);
     // CREATION ORDER, not sorted: python walks `_children`, a plain dict.
-    let children: Vec<Value> = target
-        .children_snapshot()
-        .iter()
-        .map(|c| tree_node(c, may))
-        .collect();
+    let children: Vec<Value> = target.children_snapshot().iter().map(tree_node).collect();
     obj.insert("children".to_string(), Value::Array(children));
     Value::Object(obj)
 }

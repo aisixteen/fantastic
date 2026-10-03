@@ -7,7 +7,7 @@
 //! The twin of python `kernel_state/tests/test_nested_records.py`.
 
 use super::*;
-use fantastic_kernel::with_sender;
+use fantastic_kernel::test_support::as_agent;
 
 /// A stand-in for the legs (python uses `file_bridge` agents): it only has to
 /// exist and boot.
@@ -52,7 +52,7 @@ async fn call(k: &Arc<Kernel>, target: &str, payload: Value) -> Value {
 }
 
 async fn call_as(k: &Arc<Kernel>, who: &str, target: &str, payload: Value) -> Value {
-    with_sender(
+    as_agent(
         AgentId::from(who),
         k.send(vec![Item::new(AgentId::from(target), payload)]),
     )
@@ -66,14 +66,15 @@ async fn call_as(k: &Arc<Kernel>, who: &str, target: &str, payload: Value) -> Va
 async fn setup(k: &Arc<Kernel>, tmp: &TempDir) {
     let root = k.root().expect("root").id.0.clone();
     for rec in [
-        // the loader's record verbs are privileged: the owning leg names them
+        // the baseline is `$self` alone: the owning leg names the loader's verbs
         json!({"id": "wws", "handler_module": LEG, "parent_id": root,
                "can_call": {"web_loader": ["persist_record", "forget_record", "load_tree"]}}),
         json!({"id": "rest_leg", "handler_module": LEG, "parent_id": root,
                "can_call": {"web_loader": "*"}}),
         json!({"id": "web_loader", "handler_module": HANDLER_MODULE, "parent_id": "wws",
                "root": web_root(tmp).to_string_lossy(), "watch": false,
-               "callable_by": {"rest_leg": "*"}}),
+               "callable_by": {"rest_leg": "*",
+                               "wws": ["persist_record", "forget_record", "load_tree"]}}),
     ] {
         let mut p = json!({"type": "create_agent"});
         for (key, v) in rec.as_object().unwrap() {

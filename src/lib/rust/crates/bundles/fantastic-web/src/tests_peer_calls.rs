@@ -99,14 +99,12 @@ async fn hello_makes_the_page_an_address_and_a_call_round_trips() {
     let send = send_to_page(&kernel, json!({"type": "around", "radius": 2}));
     let call = next_of(&mut ws, "call").await;
     assert_eq!(
-        (&call["target"], &call["payload"], &call["caller"]),
-        (
-            &json!("canvas"),
-            &json!({"type": "around", "radius": 2}),
-            &json!(format!("{HOST}|kernel"))
-        ),
+        (&call["target"], &call["payload"]),
+        (&json!("canvas"), &json!({"type": "around", "radius": 2})),
         "{call}"
     );
+    // the page judges it as the leg that serves it there: no caller rides
+    assert!(call.get("caller").is_none(), "{call}");
     push(
         &mut ws,
         json!({"type": "reply", "id": call["id"], "data": {"cells": ["a"]}}),
@@ -210,7 +208,7 @@ async fn two_tabs_of_one_identity_are_one_principal() {
     let c2 = next_of(&mut ws2, "call").await;
     for c in [&c1, &c2] {
         assert_eq!(c["target"], "canvas", "{c}");
-        assert_eq!(c["caller"], json!(format!("{HOST}|kernel")), "{c}");
+        assert!(c.get("caller").is_none(), "{c}");
     }
     push(
         &mut ws2,
@@ -259,8 +257,8 @@ async fn two_tabs(tmp: &TempDir, web_id: &str) -> (Arc<Kernel>, TestWs, TestWs, 
 }
 
 /// Owner, 2026-10-03: an emit to `<guid>|<agent>` reaches EVERY live tab of the
-/// guid as `{type:"emit", target, payload}` — plus `caller` when an agent
-/// emitted (granted `emit` on the peer), none for an operator emit.
+/// guid as `{type:"emit", target, payload}` — from an operator, or from an agent
+/// granted `emit` on the peer; no caller rides either way.
 #[tokio::test]
 async fn an_emit_to_the_identity_reaches_every_tab() {
     let tmp = TempDir::new().unwrap();
@@ -285,14 +283,16 @@ async fn an_emit_to_the_identity_reaches_every_tab() {
             "can_call".to_string(),
             json!({format!("{PAGE}|*"): ["emit"]}),
         );
-    fantastic_kernel::send::with_sender(AgentId::from(leg.as_str()), async {
+    fantastic_kernel::test_support::as_agent(AgentId::from(leg.as_str()), async {
         kernel.emit(&target, json!({"type": "ping", "n": 2})).await;
     })
     .await;
     for tab in [&mut ws, &mut ws2] {
         let e = next_of(tab, "emit").await;
-        assert_eq!(e["payload"]["n"], 2, "{e}");
-        assert_eq!(e["caller"], json!(format!("{HOST}|{leg}")), "{e}");
+        assert_eq!(
+            e,
+            json!({"type": "emit", "target": "canvas", "payload": {"type": "ping", "n": 2}})
+        );
     }
     stop(&kernel, "web_peer_emit").await;
 }

@@ -76,7 +76,7 @@ public enum AIFoldStrategy {
     /// Lines the RUNTIME wrote into a user turn — never the user's own words.
     static let RUNTIME_PREFIXES = [
         "[reply to ", "[no call", "[context-notice", "[fold ", "[recall", "[late reply",
-        "[cleared ", "[fork of ",
+        "[cleared ",
     ]
 
     private static func findAll(_ rx: NSRegularExpression, _ text: String) -> [String] {

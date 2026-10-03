@@ -47,7 +47,7 @@ import yaml
 
 from kernel_state import yaml_io
 
-from kernel import CURRENT_VERSION, operator_context
+from kernel import CURRENT_VERSION
 from kernel._bundles import bundle_package
 from kernel import current_origin
 from kernel._refusal import UNAUTHORIZED, UNHANDLED, guard_agent_id, missing, refusal
@@ -362,6 +362,19 @@ def _check_store_allow(agent) -> None:
         )
 
 
+async def _store_call(agent, store_id: str, payload: dict):
+    """ONE CALL TO THE LOADER'S OWN STORE — persistence bookkeeping, so the kernel
+    runs the store's handler DIRECTLY (`Kernel.bookkeeping`): not a gated send,
+    never judged against the loader's own grant (the bootstrap root carries none),
+    the same from the persister loop, a blob verb or a one-shot. The store's own
+    leg gate (its `ingress_rule`, its `allow`) still judges every call, inside its
+    handler. A store that is gone answers its unknown-agent refusal."""
+    store = agent.ctx.agents.get(store_id)
+    if store is None:
+        return agent.ctx.unknown_agent(store_id)
+    return (await agent.ctx.bookkeeping(store, payload))["result"]
+
+
 async def _persist_via_store(
     agent, store_id: str, abs_path: Path, record: dict
 ) -> None:
@@ -370,7 +383,6 @@ async def _persist_via_store(
     kernel-managed keys, write back — so sidecar fields survive. If the provider
     refuses (sealed, unexposed), the write doesn't land — NO fallback — and the
     refusal is LOUD (`_persist_failed`)."""
-    kernel = agent.ctx
     reldir = _store_reldir(agent, abs_path)
     af = f"{reldir}/{_RECORD_FILE}" if reldir else _RECORD_FILE
     existing: dict = {}
@@ -380,20 +392,15 @@ async def _persist_via_store(
     buf = bytearray()
     offset = 0
     while True:
-        got = (
-            await kernel.send(
-                [
-                    {
-                        "target": store_id,
-                        "payload": {
-                            "type": "read_stream",
-                            "path": af,
-                            "offset": offset,
-                        },
-                    }
-                ]
-            )
-        )[0]["result"]
+        got = await _store_call(
+            agent,
+            store_id,
+            {
+                "type": "read_stream",
+                "path": af,
+                "offset": offset,
+            },
+        )
         if not (
             isinstance(got, dict) and isinstance(got.get("bytes"), (bytes, bytearray))
         ):
@@ -419,39 +426,29 @@ async def _persist_via_store(
     # parents, so the failure modes are "the old record survives" or "the new one
     # is complete", never a torn file.
     tmp = f"{af}.tmp.{secrets.token_hex(4)}"
-    w = (
-        await kernel.send(
-            [
-                {
-                    "target": store_id,
-                    "payload": {
-                        "type": "write_stream",
-                        "path": tmp,
-                        "bytes": body,
-                        "truncate": True,
-                    },
-                }
-            ]
-        )
-    )[0]["result"]
+    w = await _store_call(
+        agent,
+        store_id,
+        {
+            "type": "write_stream",
+            "path": tmp,
+            "bytes": body,
+            "truncate": True,
+        },
+    )
     if not isinstance(w, dict) or w.get("error"):
         # Leave the previous record untouched; a debris tmp is visible in `list`.
         _persist_failed(agent, store_id, af, w)
         return
-    mv = (
-        await kernel.send(
-            [
-                {
-                    "target": store_id,
-                    "payload": {
-                        "type": "rename",
-                        "old_path": tmp,
-                        "new_path": af,
-                    },
-                }
-            ]
-        )
-    )[0]["result"]
+    mv = await _store_call(
+        agent,
+        store_id,
+        {
+            "type": "rename",
+            "old_path": tmp,
+            "new_path": af,
+        },
+    )
     if not isinstance(mv, dict) or mv.get("error"):
         _persist_failed(agent, store_id, af, mv)
         return
@@ -486,29 +483,19 @@ async def _seed_doc_via_store(agent, store_id: str, src, path: str) -> None:
     2026-10-03, ARCH2-9)."""
     if not src.is_file():
         return
-    kernel = agent.ctx
-    got = (
-        await kernel.send(
-            [{"target": store_id, "payload": {"type": "read_stream", "path": path}}]
-        )
-    )[0]["result"]
+    got = await _store_call(agent, store_id, {"type": "read_stream", "path": path})
     if isinstance(got, dict) and isinstance(got.get("bytes"), (bytes, bytearray)):
         return
-    w = (
-        await kernel.send(
-            [
-                {
-                    "target": store_id,
-                    "payload": {
-                        "type": "write_stream",
-                        "path": path,
-                        "bytes": src.read_text(encoding="utf-8").encode("utf-8"),
-                        "truncate": True,
-                    },
-                }
-            ]
-        )
-    )[0]["result"]
+    w = await _store_call(
+        agent,
+        store_id,
+        {
+            "type": "write_stream",
+            "path": path,
+            "bytes": src.read_text(encoding="utf-8").encode("utf-8"),
+            "truncate": True,
+        },
+    )
     if not isinstance(w, dict) or w.get("error"):
         _persist_failed(agent, store_id, path, w)
 
@@ -533,16 +520,9 @@ async def _forget_via_store(agent, store_id: str, abs_path: Path) -> None:
     reldir = _store_reldir(agent, abs_path)
     if not reldir:
         return  # never remove the root
-    out = (
-        await agent.ctx.send(
-            [
-                {
-                    "target": store_id,
-                    "payload": {"type": "delete", "path": reldir, "recursive": True},
-                }
-            ]
-        )
-    )[0]["result"]
+    out = await _store_call(
+        agent, store_id, {"type": "delete", "path": reldir, "recursive": True}
+    )
     if isinstance(out, dict) and out.get("error"):
         _persist_failed(agent, store_id, reldir, out)
 
@@ -632,18 +612,15 @@ class _FlushLoop:
             forget = dict(self._forget)
             self._forget.clear()
             # The loader streaming the live tree to its OWN store is persistence
-            # bookkeeping — it runs with operator authority (like persist_blob), not
+            # bookkeeping — each store call runs directly (`_store_call`), never
             # against the root's own grant (the bootstrap root carries none).
-            with operator_context():
-                for aid in persist_ids:
-                    a = self.kernel.get_agent(aid)
-                    if a is None or type(a).ephemeral:
-                        continue
-                    await _persist_via_store(
-                        self.agent, store_id, a._root_path, a.record
-                    )
-                for path in forget.values():
-                    await _forget_via_store(self.agent, store_id, path)
+            for aid in persist_ids:
+                a = self.kernel.get_agent(aid)
+                if a is None or type(a).ephemeral:
+                    continue
+                await _persist_via_store(self.agent, store_id, a._root_path, a.record)
+            for path in forget.values():
+                await _forget_via_store(self.agent, store_id, path)
 
     async def stop(self) -> None:
         if self._unsub is not None:
@@ -1035,10 +1012,10 @@ def _guard_blob_owner(aid: str) -> str | None:
     an operator creates at the root is a direct child. Position bounds who can
     reach the verb; it says nothing about which namespace they may name.
 
-    An OPERATOR send (`sender` is None: the loader's own flush, a bundle
-    persisting itself under `operator_context`, the CLI) is the bookkeeping this
-    verb exists for and stays ungated — that is the origin root of trust, and an
-    agent cannot forge it. An AGENT may only name ITSELF.
+    An OPERATOR send (no origin: the CLI, a test driver) stays ungated — that is
+    the origin root of trust, and an agent cannot forge it. An AGENT may only name
+    ITSELF. (A bundle persisting its OWN sidecar calls `persist_blob`/`load_blob`
+    directly — bookkeeping, not this verb.)
     """
     caller = current_origin()
     if caller is None or caller == aid:
@@ -1048,6 +1025,99 @@ def _guard_blob_owner(aid: str) -> str | None:
         " an agent's blob verbs are scoped to itself; only an operator may name"
         " a namespace it does not own"
     )
+
+
+async def persist_blob(agent, aid: str, name: str, content: str) -> dict:
+    """Persist agent `aid`'s sidecar `name` THROUGH the loader `agent`'s
+    discovered store — a whole-file write at `agents/<aid>/<name>`. The DIRECT
+    function behind the `persist_blob` verb: a bundle persisting its own sidecar
+    (the `scheduler`) calls it as a plain function — persistence through the loader
+    is bookkeeping, never a gated send. No store wired ⇒ error (NO RAM fallback)."""
+    if err := _guard_blob_name(name):
+        return {"error": f"persist_blob: {err}"}
+    store_id = _find_store(agent)
+    if store_id is None:
+        return {"error": "persist_blob: no store wired — persistence not available"}
+    reldir = _blob_reldir(agent, aid)
+    path = f"{reldir}/{name}" if reldir else name
+    reply = await _store_call(
+        agent,
+        store_id,
+        {
+            "type": "write_stream",
+            "path": path,
+            "bytes": content.encode("utf-8"),
+            "truncate": True,
+        },
+    )
+    if isinstance(reply, dict) and reply.get("error"):
+        out = {"error": f"persist_blob: {reply['error']}"}
+        if reply.get("reason"):
+            out["reason"] = reply["reason"]
+        if reply.get("hint"):
+            out["hint"] = reply["hint"]
+        return out
+    return {
+        "ok": True,
+        "name": name,
+        "size": reply.get("size") if isinstance(reply, dict) else None,
+    }
+
+
+async def load_blob(agent, aid: str, name: str) -> dict:
+    """Read agent `aid`'s sidecar `name` THROUGH the loader `agent`'s discovered
+    store — the DIRECT function behind the `load_blob` verb (see `persist_blob`).
+    Returns {name, content:str|null} — null when the file is absent."""
+    if err := _guard_blob_name(name):
+        return {"error": f"load_blob: {err}"}
+    store_id = _find_store(agent)
+    if store_id is None:
+        return {"error": "load_blob: no store wired — persistence not available"}
+    reldir = _blob_reldir(agent, aid)
+    path = f"{reldir}/{name}" if reldir else name
+    # PUMP TO EOF. `read_stream` is a CHUNK verb — `file_bridge` caps a chunk at
+    # 65536 bytes — so a single call returns a PREFIX of any larger sidecar, and
+    # this used to return that prefix as if it were the file. Measured: a 100_000
+    # byte `state.yaml` round-tripped as 65_536 bytes, silently, with no error on
+    # any channel. A memory agent's whole point is that what it wrote is what it
+    # reads back, so a truncating read is data loss dressed as a successful load.
+    chunks: list[bytes] = []
+    offset = 0
+    while True:
+        reply = await _store_call(
+            agent,
+            store_id,
+            {"type": "read_stream", "path": path, "offset": offset},
+        )
+        if not isinstance(reply, dict) or not isinstance(
+            reply.get("bytes"), (bytes, bytearray)
+        ):
+            break
+        chunks.append(bytes(reply["bytes"]))
+        if reply.get("eof"):
+            return _decoded_blob(name, b"".join(chunks))
+        nxt = reply.get("next_offset")
+        if not isinstance(nxt, int) or nxt <= offset:
+            # No forward progress: stop rather than spin. Returning what we have
+            # would be the truncation this loop exists to prevent, so say so.
+            return {
+                "error": f"load_blob: {name} stalled at offset {offset}"
+                " — the store returned no forward progress",
+                "name": name,
+                "content": None,
+            }
+        offset = nxt
+    if chunks:
+        return _decoded_blob(name, b"".join(chunks))
+    if isinstance(reply, dict) and reply.get("reason") == "unauthorized":
+        out = {
+            "error": f"load_blob: {reply.get('error', 'unauthorized')}",
+            "reason": "unauthorized",
+        }
+        if reply.get("hint"):
+            out["hint"] = reply["hint"]
+        return out
+    return {"name": name, "content": None}  # absent → empty (NOT an error)
 
 
 async def _persist_blob(id, payload, agent):
@@ -1067,42 +1137,7 @@ async def _persist_blob(id, payload, agent):
         return {"error": f"persist_blob: {err}", "reason": "unauthorized"}
     if not isinstance(content, str):
         return {"error": "persist_blob: content (str) required"}
-    store_id = _find_store(agent)
-    if store_id is None:
-        return {"error": "persist_blob: no store wired — persistence not available"}
-    reldir = _blob_reldir(agent, aid)
-    path = f"{reldir}/{name}" if reldir else name
-    # The loader writing to its OWN discovered store is persistence bookkeeping —
-    # a side effect of this already-authorized verb, not the loader reaching out
-    # as an agent — so it runs with operator authority (like create_agent's boot).
-    with operator_context():
-        reply = (
-            await agent.ctx.send(
-                [
-                    {
-                        "target": store_id,
-                        "payload": {
-                            "type": "write_stream",
-                            "path": path,
-                            "bytes": content.encode("utf-8"),
-                            "truncate": True,
-                        },
-                    }
-                ]
-            )
-        )[0]["result"]
-    if isinstance(reply, dict) and reply.get("error"):
-        out = {"error": f"persist_blob: {reply['error']}"}
-        if reply.get("reason"):
-            out["reason"] = reply["reason"]
-        if reply.get("hint"):
-            out["hint"] = reply["hint"]
-        return out
-    return {
-        "ok": True,
-        "name": name,
-        "size": reply.get("size") if isinstance(reply, dict) else None,
-    }
+    return await persist_blob(agent, aid, name, content)
 
 
 async def _load_blob(id, payload, agent):
@@ -1118,65 +1153,7 @@ async def _load_blob(id, payload, agent):
         return {"error": f"load_blob: {err}"}
     if err := _guard_blob_owner(aid):
         return {"error": f"load_blob: {err}", "reason": "unauthorized"}
-    store_id = _find_store(agent)
-    if store_id is None:
-        return {"error": "load_blob: no store wired — persistence not available"}
-    reldir = _blob_reldir(agent, aid)
-    path = f"{reldir}/{name}" if reldir else name
-    # PUMP TO EOF. `read_stream` is a CHUNK verb — `file_bridge` caps a chunk at
-    # 65536 bytes — so a single call returns a PREFIX of any larger sidecar, and
-    # this used to return that prefix as if it were the file. Measured: a 100_000
-    # byte `state.yaml` round-tripped as 65_536 bytes, silently, with no error on
-    # any channel. A memory agent's whole point is that what it wrote is what it
-    # reads back, so a truncating read is data loss dressed as a successful load.
-    chunks: list[bytes] = []
-    offset = 0
-    with operator_context():  # loader reading its own store — see _persist_blob
-        while True:
-            reply = (
-                await agent.ctx.send(
-                    [
-                        {
-                            "target": store_id,
-                            "payload": {
-                                "type": "read_stream",
-                                "path": path,
-                                "offset": offset,
-                            },
-                        }
-                    ]
-                )
-            )[0]["result"]
-            if not isinstance(reply, dict) or not isinstance(
-                reply.get("bytes"), (bytes, bytearray)
-            ):
-                break
-            chunks.append(bytes(reply["bytes"]))
-            if reply.get("eof"):
-                return _decoded_blob(name, b"".join(chunks))
-            nxt = reply.get("next_offset")
-            if not isinstance(nxt, int) or nxt <= offset:
-                # No forward progress: stop rather than spin. Returning what we
-                # have would be the truncation this loop exists to prevent, so
-                # say so instead.
-                return {
-                    "error": f"load_blob: {name} stalled at offset {offset}"
-                    " — the store returned no forward progress",
-                    "name": name,
-                    "content": None,
-                }
-            offset = nxt
-    if chunks:
-        return _decoded_blob(name, b"".join(chunks))
-    if isinstance(reply, dict) and reply.get("reason") == "unauthorized":
-        out = {
-            "error": f"load_blob: {reply.get('error', 'unauthorized')}",
-            "reason": "unauthorized",
-        }
-        if reply.get("hint"):
-            out["hint"] = reply["hint"]
-        return out
-    return {"name": name, "content": None}  # absent → empty (NOT an error)
+    return await load_blob(agent, aid, name)
 
 
 async def flush_pending(agent):

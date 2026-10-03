@@ -8,8 +8,8 @@
 
 use crate::agent::AgentId;
 use crate::outcome::{Item, Status};
-use crate::send::with_sender;
 use crate::tasks::tests::{mk_agent, mk_agent_grant, mk_kernel, Shared};
+use crate::test_support::as_agent;
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
@@ -285,7 +285,7 @@ async fn the_ledger_verb_is_scoped_to_what_you_originated() {
     // read the result BODIES of agents it holds no edge to.
     let sh = Arc::new(Shared::default());
     let kernel = mk_kernel(Arc::clone(&sh));
-    // `ledger` is privileged: the baseline does not reach it, so it is named.
+    // the baseline (`$self`) does not reach the root, so `ledger` is named.
     let a = crate::tasks::tests::mk_agent_grant(
         &kernel,
         "l_scope",
@@ -310,7 +310,7 @@ async fn the_ledger_verb_is_scoped_to_what_you_originated() {
     let mine = mine["id"].as_i64().unwrap();
 
     // An AGENT reading the ledger sees only its own origins — not this one.
-    let seen = crate::send::with_sender(AgentId::from("l_scope"), async {
+    let seen = crate::test_support::as_agent(AgentId::from("l_scope"), async {
         kernel
             .send(vec![Item::new(
                 AgentId::from("kernel"),
@@ -444,7 +444,7 @@ async fn joining_is_gated_on_the_verb_that_execution_ran() {
         .await;
 
     let k = Arc::clone(&kernel);
-    let a = with_sender(AgentId::from("alice"), async move {
+    let a = as_agent(AgentId::from("alice"), async move {
         k.send(vec![Item {
             target: AgentId::from("vault"),
             payload: json!({"type": "work"}),
@@ -455,7 +455,6 @@ async fn joining_is_gated_on_the_verb_that_execution_ran() {
             raw_id: None,
             raw_timeout: None,
             raw_retries: None,
-            secret: None,
         }])
         .await
         .remove(0)
@@ -467,7 +466,7 @@ async fn joining_is_gated_on_the_verb_that_execution_ran() {
     assert_eq!(a.status, Status::Errored, "{a:?}");
 
     let k = Arc::clone(&kernel);
-    let b = with_sender(AgentId::from("bob"), async move {
+    let b = as_agent(AgentId::from("bob"), async move {
         k.send(vec![Item {
             target: AgentId::from("vault"),
             payload: json!({"type": "ping"}),
@@ -478,7 +477,6 @@ async fn joining_is_gated_on_the_verb_that_execution_ran() {
             raw_id: None,
             raw_timeout: None,
             raw_retries: None,
-            secret: None,
         }])
         .await
         .remove(0)
@@ -491,7 +489,7 @@ async fn joining_is_gated_on_the_verb_that_execution_ran() {
 
     // An AUTHORIZED re-sender still dedups — the fix must not cost ensure-semantics.
     let k = Arc::clone(&kernel);
-    let again = with_sender(AgentId::from("alice"), async move {
+    let again = as_agent(AgentId::from("alice"), async move {
         k.send(vec![Item {
             target: AgentId::from("vault"),
             payload: json!({"type": "work"}),
@@ -502,7 +500,6 @@ async fn joining_is_gated_on_the_verb_that_execution_ran() {
             raw_id: None,
             raw_timeout: None,
             raw_retries: None,
-            secret: None,
         }])
         .await
         .remove(0)
@@ -563,7 +560,7 @@ async fn a_send_issued_from_a_spawned_fork_is_in_the_operators_ledger() {
     // The fork acts as `a`, the way route_reply acts as its agent.
     let k = Arc::clone(&kernel);
     let peer = b.clone();
-    let tid = with_sender(a.clone(), async {
+    let tid = as_agent(a.clone(), async {
         kernel.spawn_task(&a, "route_reply", async move {
             let _ = k.send(vec![Item::new(peer, json!({"type": "fast"}))]).await;
         })
@@ -608,7 +605,7 @@ async fn the_ledger_view_is_caller_scoped() {
 
     let k = Arc::clone(&kernel);
     let peer = b.clone();
-    with_sender(a.clone(), async move {
+    as_agent(a.clone(), async move {
         let _ = k.send(vec![Item::new(peer, json!({"type": "fast"}))]).await;
     })
     .await;
@@ -644,38 +641,30 @@ async fn the_ledger_view_is_caller_scoped() {
 /// denial runs the gate with it — not with a synthesised `{"type": verb}`.
 ///
 /// `create_agent` is the case that proves it: its gate reads `parent_id` for the
-/// PLACEMENT check and the grant maps for CONFERRAL. Asked about a payload with
-/// neither, the gate answers a different question than the call did — and the
-/// joiner would receive a record for a subtree it may not plant in.
+/// children-only rule. Asked about a payload without it, the gate answers a
+/// different question than the call did — and the joiner would receive a record
+/// for a child it may not create.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_joiner_is_gated_with_the_executions_original_payload() {
     let sh = Arc::new(Shared::default());
     let kernel = mk_kernel(Arc::clone(&sh));
-    // `alice` may create under the root; `bob` may only create under itself
-    // (the structural baseline every agent has), which is exactly what the
-    // placement check reads out of the ORIGINAL `parent_id`.
-    for (who, grant) in [
-        ("alice", json!({"kernel_state": ["create_agent"]})),
-        ("bob", json!({})),
-    ] {
-        let _ = kernel
-            .send(vec![Item::new(
-                AgentId::from("kernel_state"),
-                json!({
-                    "type": "create_agent", "parent_id": "kernel",
-                    "handler_module": "slow.tools", "id": who,
-                    "can_call": grant,
-                }),
-            )])
-            .await;
+    // Both may `create_agent` on the root, and each only under ITSELF — which is
+    // exactly what the mutator check reads out of the ORIGINAL `parent_id`.
+    for who in ["alice", "bob"] {
+        crate::tasks::tests::mk_agent_grant(
+            &kernel,
+            who,
+            json!({"kernel_state": ["create_agent"]}),
+        )
+        .await;
     }
     let payload = json!({
-        "type": "create_agent", "parent_id": "kernel_state",
+        "type": "create_agent", "parent_id": "alice",
         "handler_module": "slow.tools", "id": "planted",
     });
     let k = Arc::clone(&kernel);
     let p = payload.clone();
-    let made = with_sender(AgentId::from("alice"), async move {
+    let made = as_agent(AgentId::from("alice"), async move {
         k.send(vec![Item {
             target: AgentId::from("kernel_state"),
             payload: p,
@@ -686,7 +675,6 @@ async fn a_joiner_is_gated_with_the_executions_original_payload() {
             raw_id: None,
             raw_timeout: None,
             raw_retries: None,
-            secret: None,
         }])
         .await
         .remove(0)
@@ -695,9 +683,9 @@ async fn a_joiner_is_gated_with_the_executions_original_payload() {
     assert_eq!(made.status, Status::Completed, "{made:?}");
 
     // bob joins the SAME id. The gate is asked about the create it would be
-    // handed — placement on `kernel_state` — and refuses.
+    // handed — a child of `alice` — and refuses.
     let k = Arc::clone(&kernel);
-    let joined = with_sender(AgentId::from("bob"), async move {
+    let joined = as_agent(AgentId::from("bob"), async move {
         k.send(vec![Item {
             target: AgentId::from("kernel_state"),
             payload: json!({"type": "create_agent", "parent_id": "bob",
@@ -709,7 +697,6 @@ async fn a_joiner_is_gated_with_the_executions_original_payload() {
             raw_id: None,
             raw_timeout: None,
             raw_retries: None,
-            secret: None,
         }])
         .await
         .remove(0)
@@ -721,7 +708,7 @@ async fn a_joiner_is_gated_with_the_executions_original_payload() {
         joined.result["error"]
             .as_str()
             .unwrap_or_default()
-            .contains("kernel_state"),
+            .contains("bob may only create_agent its own children — alice is not one"),
         "the denial must name the ORIGINAL placement: {joined:?}"
     );
 }

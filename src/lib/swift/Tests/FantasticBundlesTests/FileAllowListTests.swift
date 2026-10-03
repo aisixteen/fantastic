@@ -92,32 +92,26 @@ struct FileAllowListTests {
         #expect(await read(k2, "secret.txt")["size"] == 8)
     }
 
-    @Test func allowDisallowAndAllowedEditTheRecordOnePathAtATime() async {
+    /// `allow` is a RECORD FIELD, set at create or by `update_agent` (which
+    /// replaces the whole list) — there is no allow/disallow/allowed verb.
+    @Test func theListIsARecordFieldUpdateAgentReplacesIt() async {
         let (k, dir) = await site(allow: [])
         defer { try? FileManager.default.removeItem(at: dir) }
-        #expect(
-            await call(k, ["type": "allow", "path": "docs/a.pdf"])
-                == .object(["path": "docs/a.pdf", "allowed": true, "count": 1]))
-        #expect(await call(k, ["type": "allow", "path": "./docs//a.pdf"])["count"] == 1)
-        _ = await call(k, ["type": "allow", "path": "docs/b.pdf"])
-        #expect(k.agent(AgentId("fs"))?.metaValue(forKey: "allow") == ["docs/a.pdf", "docs/b.pdf"])
-        #expect(await read(k, "docs/b.pdf")["size"] == 6)
-        #expect(
-            await call(k, ["type": "allowed", "limit": 1])
-                == .object(["paths": ["docs/a.pdf"], "next": "docs/a.pdf", "total": 2]))
-        let rest = await call(k, ["type": "allowed", "after": "docs/a.pdf"])
-        #expect(rest["paths"] == ["docs/b.pdf"] && rest["next"] == .null)
-        #expect(await call(k, ["type": "disallow", "path": "docs/b.pdf"])["count"] == 1)
         #expect(await read(k, "docs/b.pdf")["reason"] == "not_found")
-        #expect(await call(k, ["type": "disallow", "path": "nope"])["reason"] == "not_found")
+        let up = await k.send([
+            Item("kernel", ["type": "update_agent", "id": "fs", "allow": ["docs/a.pdf", "docs/b.pdf"]])
+        ])[0].result
+        #expect(up["updated"] == true, "\(up.serialize())")
+        #expect(await read(k, "docs/b.pdf")["size"] == 6)
+        for verb in ["allow", "disallow", "allowed"] {
+            let r = await call(k, ["type": .string(verb), "path": "docs/a.pdf"])
+            #expect(r["reason"] == "unhandled", "\(verb): \(r.serialize())")
+        }
     }
 
-    @Test func nothingOutsideTheRootCanBeAllowedOrRead() async {
+    @Test func nothingOutsideTheRootCanBeRead() async {
         let (k, dir) = await site(allow: ["."])
         defer { try? FileManager.default.removeItem(at: dir) }
-        for bad in ["../x", "docs/../../x", "/etc/hosts"] {
-            #expect(await call(k, ["type": "allow", "path": .string(bad)])["reason"] == "bad_arg", "\(bad)")
-        }
         let r = await read(k, "../../etc/passwd")
         #expect((r["error"].asString ?? "").contains("escape"), "the clamp answers first: \(r)")
     }
@@ -184,30 +178,6 @@ struct FileAllowListTests {
     }
 
     // ─── granted allow, web serving, posture, running dir (audit d6/d7/d10/c6) ──
-
-    /// d6 — `allow` is PRIVILEGED (a12): a NAMED grant reaches it; a `*` that the
-    /// bridge's `callable_by` does not accept does not.
-    @Test func anAgentGrantedAllowPublishesAFile() async {
-        let (k, dir) = await site(allow: [])
-        defer { try? FileManager.default.removeItem(at: dir) }
-        k.update(AgentId("fs"), ["callable_by": ["ai": ["allow", "disallow", "allowed"]]])
-        k.register(
-            Agent(
-                id: "ai", handlerModule: nil, parentId: "kernel_state",
-                meta: ["can_call": ["fs": ["allow", "disallow", "allowed"]]]))
-        k.register(
-            Agent(
-                id: "stranger", handlerModule: nil, parentId: "kernel_state",
-                meta: ["can_call": ["fs": "*"]]))
-        let r = await KernelTaskLocals.$currentSender.withValue(AgentId("ai")) {
-            await call(k, ["type": "allow", "path": "docs/a.pdf"])
-        }
-        #expect(r["allowed"] == true, "\(r.serialize())")
-        let s = await KernelTaskLocals.$currentSender.withValue(AgentId("stranger")) {
-            await call(k, ["type": "allow", "path": "."])
-        }
-        #expect(s["reason"] == "unauthorized", "\(s.serialize())")
-    }
 
     /// d6 — the web serves only what the list exposes (the file proxy runs AS
     /// `web`, so the bridge's own `callable_by` and `allow` both decide).

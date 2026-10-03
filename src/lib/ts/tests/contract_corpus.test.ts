@@ -19,8 +19,10 @@
 //                record to a host-side store over the bridge, a NEW kernel reads
 //                them back with `loadTree` and `load`s them.
 //   dehydrate  — one root reflect (`detail: full`, `tree: all`), flattened.
-//   reach      — a send from `kernel.scopedFor(sender)`, which the call gate sees
-//                as that agent; `operator` is a bare send (ungated).
+//   reach      — a send made INSIDE the sender's own dispatch (`sendAs`: the
+//                operator calls the sender, whose handler makes the send), which
+//                the call gate sees as that agent; `operator` is a bare send
+//                (ungated).
 //   denied / denial_side — `reason: unauthorized` / its `side`.
 //
 // STAND-IN BUNDLES. The configs name host bundles (`file_bridge`, `text_file`,
@@ -58,6 +60,7 @@ import { pyRepr } from "../src/kernel/pyjson.ts";
 import { MISSING_ARG, NOT_FOUND, UNHANDLED, refusal } from "../src/kernel/refusal.ts";
 import { ProxyLoader } from "../src/bundles/loader/proxy_loader.ts";
 import { parseYaml } from "./contract_yaml.ts";
+import { sendAs } from "./kit.ts";
 
 const CONTRACT = fileURLToPath(new URL("../../../../contract/", import.meta.url));
 
@@ -116,7 +119,7 @@ const STEP_VERBS = new Set([
 ]);
 const STEP_META = new Set(["expect", "because", "name"]);
 // `mentions` / `absent`: a string ANYWHERE / NOWHERE in the reply (bytes read as
-// utf-8) — what a secret mark is asserted with (python `_engine._flat_text`).
+// utf-8) (python `_engine._flat_text`).
 const MATCHERS = new Set(["allow", "side", "reason", "status", "contains", "not_contains", "error_contains", "mentions", "absent"]);
 const HYDRATIONS = new Set(["ok", "refused_at_write", "boot_error"]);
 const MINTED_ID = /^[A-Za-z0-9_.]+_[0-9a-f]{6}$/;
@@ -483,7 +486,7 @@ function decodeBytesFields(p: Obj): Payload {
 }
 
 async function reachOutcome(k: Kernel, sender: string, target: string, payload: Obj): Promise<Outcome> {
-  return (await k.scopedFor(sender, null).send([{ target, payload: decodeBytesFields(payload) }]))[0]!;
+  return (await sendAs(k, sender, [{ target, payload: decodeBytesFields(payload) }]))[0]!;
 }
 
 async function reach(k: Kernel, sender: string, target: string, payload: Obj): Promise<Obj> {
@@ -596,7 +599,6 @@ const SKIP_SPECS: { [spec: string]: string } = {
   engine_smoke_unreadable_manifest: `${LOADER}: the refused_at_write verdict is static_loader's validate_meta reading the manifest path, so PC-5 is its whole contract`,
   exec_shell: "(c) exec_bridge — the process edge is a host bundle; this kernel spawns no processes, so every EXS requirement is the hosts'",
   credential_store: "credential_store is a host bundle (py/rs/sw) — it keeps values in a 0600 file, the OS keychain or the environment, none of which a browser kernel has; CRED-1..5 are the hosts'",
-  secret: "agentic corpus is py/rs/sw — the spec proves SEC-1..4 through the host file_bridge's `read`/`write` (the bytes land, are read back, and the ledger shows `<secret>`), verbs the file_bridge stand-in does not answer; this kernel's batch-send side of SEC-1..4 is pinned by tests/secret.test.ts",
 };
 
 /** Steps skipped by spec + 1-based number. `name` pins WHICH step was meant: if
@@ -606,8 +608,8 @@ const SKIP_STEPS: { [spec: string]: { [n: number]: { name: string; why: string }
     28: { name: "but the runtime-only edge is NOT — the manifest never declared it", why: `${LOADER}: re-applying the manifest over the hydrated record at boot is static_loader's; here a runtime grant is a persisted record and survives a reboot by design` },
   },
   lifecycle: {
-    14: { name: "the operator deletes it — the grant is deliberately left standing", why: CRUD },
-    15: { name: "so the refusal is about NON-EXISTENCE, not about authority", why: dep(14) },
+    15: { name: "the operator deletes it — the grant is deliberately left standing", why: CRUD },
+    16: { name: "so the refusal is about NON-EXISTENCE, not about authority", why: dep(15) },
   },
   namespacing: {
     1: { name: "a wing reaches its own memory, and the write actually lands", why: `${IO} (what text_file writes, through its leg's root)` },
@@ -650,30 +652,6 @@ const SKIP_STEPS: { [spec: string]: { [n: number]: { name: string; why: string }
     21: { name: "a near-miss rule name is refused AT THE WRITE, leaving the leg as it was", why: CRUD },
     22: { name: "so the leg it named is still sealed", why: IO },
   },
-  subtree_grants: {
-    1: { name: "the owner carries a heritable egress entry on `served`", why: CRUD },
-    2: { name: "a child spawned under the owner", why: CRUD },
-    3: { name: "a descendant reaches the target — heritable egress + $subtree ingress", why: dep(2) },
-    4: { name: "the holder of the heritable entry is NOT covered by it", why: dep(1) },
-    5: { name: "a verb the heritable entry does not name dies at egress", why: dep(2) },
-    6: { name: "a NAMED privileged verb crosses both forms", why: dep(2) },
-    7: { name: "a non-privileged named verb crosses too", why: dep(2) },
-    8: { name: "a grandchild spawned after every grant was written", why: CRUD },
-    9: { name: "is covered by both forms with no record edit", why: dep(8) },
-    11: { name: "an owner whose heritable entry is `*`", why: CRUD },
-    12: { name: "", why: CRUD },
-    13: { name: "`*` covers an ordinary verb", why: dep(12) },
-    14: { name: "`*` does not cover a privileged verb", why: dep(12) },
-    15: { name: "a holder of the entry confers a subset of it to its own child", why: CRUD },
-    16: { name: "an agent that only BENEFITS from the entry cannot confer it", why: CRUD },
-    17: { name: "a holder cannot confer MORE than it holds", why: CRUD },
-    18: { name: "`$subtree:` is callable_by-only", why: CRUD },
-    19: { name: "`$subtree:` needs an id", why: CRUD },
-    20: { name: "`$subtree:` names a LOCAL id", why: CRUD },
-    21: { name: "a heritable entry is `for: descendants`, nothing else", why: CRUD },
-    22: { name: "a heritable entry names a literal target, not a token", why: CRUD },
-    23: { name: "a heritable entry is can_call-only", why: CRUD },
-  },
 };
 
 // ─── core: PC-1..PC-5 ──────────────────────────────────────────────────────
@@ -712,7 +690,11 @@ async function coreBefore(h: Hydration): Promise<void> {
   check("PC-3", denied(r), `${sender} could create_agent on the root: ${JSON.stringify(r)}`);
   check("PC-3", sideOf(r) === "egress", `expected an egress refusal, got ${JSON.stringify(r)}`);
   check("PC-3", isDeepStrictEqual([...h.k.agents.keys()].sort(), before), "a refused create changed the roster");
-  skip("PC-3", `${cfg.name}: the self-grant probe (update_agent on its own can_call → side self-grant)`, CRUD);
+  // an agent editing its OWN can_call: refused at egress ungranted (this kernel
+  // answers no update_agent; python's mutator rule refuses it where it does)
+  const self = await reach(h.k, sender, ROOT_ID, { type: "update_agent", id: sender, can_call: { [ROOT_ID]: ["create_agent"] } });
+  check("PC-3", denied(self), `${sender} raised its own authority: ${JSON.stringify(self)}`);
+  check("PC-3", sideOf(self) === "egress" || sideOf(self) === "mutator", `expected an egress or mutator refusal, got ${JSON.stringify(self)}`);
   const r2 = await reach(h.k, sender, ROOT_ID, { type: "create_agent", handler_module: "file_bridge.tools", id: "smuggled" });
   check("PC-3", denied(r2), `the roster opened after all: ${JSON.stringify(r2)}`);
 }
@@ -788,7 +770,6 @@ async function runSteps(h0: Hydration): Promise<void> {
         const item: Item = { target: String(args["to"]), payload: decodeBytesFields((args["send"] ?? {}) as Obj) };
         // the batch item's own fields, beside the payload
         if ("id" in args) item.id = args["id"] as string | number;
-        if ("secret" in args) item.secret = args["secret"] as string[];
         outcome = (await h.k.send([item]))[0]!;
         reply = isObj(outcome.result) ? outcome.result : {};
         break;
@@ -796,7 +777,7 @@ async function runSteps(h0: Hydration): Promise<void> {
       case "grant":
       case "revoke": {
         // sugar over the operator's write, MERGED — a bare write would drop the
-        // structural baseline the kernel stamped (update REPLACES a field)
+        // `$self` baseline the kernel stamped (update REPLACES a field)
         const agent = h.k.get(String(args["agent"]));
         assert.ok(agent !== undefined, `#${s.n}: no agent ${String(args["agent"])}`);
         const field = String(args["field"]);
@@ -898,16 +879,8 @@ async function sweepUndeclared(h: Hydration, s: Step, payloadFor: (v: string) =>
   const universe = [ROOT_ID, ...h.cfg.loaders.map((l) => l.id), ...rosterIds(h.cfg)];
   const missing = universe.filter((u) => !d.ids.includes(u));
   if (missing.length > 0) throw new StepFailure(`#${s.n}: sweep universe is not running: ${missing}`);
-  const inU = new Set(universe);
+  // the baseline is `{$self: "*"}` alone: every other open edge is declared
   const structural = new Set(universe.map((a) => `${a}|${a}`));
-  for (const [parent, kids] of d.children) {
-    for (const kid of kids) {
-      if (inU.has(parent) && inU.has(kid)) {
-        structural.add(`${parent}|${kid}`);
-        structural.add(`${kid}|${parent}`);
-      }
-    }
-  }
   for (const verb of ((s.args["verbs"] ?? ["reflect"]) as string[])) {
     const declaredOpen = new Set(
       prior
@@ -986,11 +959,11 @@ for (const f of SPECS) {
 // What this kernel is expected to prove, decided up front: a requirement moving
 // between these sets is a change someone has to look at, not a silent drift.
 const EXPECTED = {
-  covered: ["PC-1", "PC-2", "C14", "C16", "TSG-1", "TSG-2", "TSG-3", "TSG-4", "TSG-5", "SUB-2"],
+  covered: ["PC-1", "PC-2", "PC-3", "C14", "C16", "TSG-1", "TSG-2", "TSG-3", "TSG-4", "TSG-5"],
   // C18: only its PRECONDITIONS run here (the roster is live, the neighbour's
   // edge works) — the cascade itself is `delete_agent`, which this kernel lacks.
-  partial: ["PC-3", "PC-4", "C15", "C18", "C20", "TSG-6"],
-  notApplicable: ["PC-5", "C17", "C23", "SUB-1", "SUB-3", "SUB-4", "SUB-5", "SUB-6", "EXS-1", "EXS-2", "EXS-3", "EXS-4", "EXS-5", "SEC-1", "SEC-2", "SEC-3", "SEC-4", "CRED-1", "CRED-2", "CRED-3", "CRED-4", "CRED-5"],
+  partial: ["PC-4", "C15", "C18", "C20", "TSG-6"],
+  notApplicable: ["PC-5", "C17", "C23", "EXS-1", "EXS-2", "EXS-3", "EXS-4", "EXS-5", "CRED-1", "CRED-2", "CRED-3", "CRED-4", "CRED-5"],
   // Registry rows whose evidence is NOT in the data corpus: the registry itself
   // points at host test files (C1, C24) or at conformance/cases.json (C21, which
   // `c21_conformance.test.ts` replays against this kernel).

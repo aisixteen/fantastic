@@ -272,7 +272,6 @@ async def test_a_literal_key_crosses_a_ws_bridge_forward_both_ways(two):
 
 async def test_a_literal_key_crosses_a_relay_forward_both_ways(two):
     ka, kb = two
-    kb.create("binpath_echo.tools", id="echo", callable_by={"A-g|*": "*"})
     a = await _op(
         ka,
         "kernel",
@@ -297,12 +296,13 @@ async def test_a_literal_key_crosses_a_relay_forward_both_ways(two):
             "relay_url": "ws://relay",
             "guid": "RB",
             "partner_guid": "RA",
-            "peer_guid": "A-g",
             "ingress_rule": "allow_all_ingress",
             "can_call": {"echo": "*"},
         },
     )
     a_id, b_id = a["result"]["id"], b["result"]["id"]
+    # the tunneled call is B's leg's own send
+    kb.create("binpath_echo.tools", id="echo", callable_by={b_id: "*"})
     ta, tb = relay_pair("RA", "RB")
     _test_transport_inject[a_id] = ta
     _test_transport_inject[b_id] = tb
@@ -340,12 +340,11 @@ async def test_web_rest_literal_binding_stays_literal_across_a_bridge(two):
             "handler_module": "ws_bridge.tools",
             "transport": "memory",
             "peer_id": kh.id,
-            "peer_guid": "A-g",
             "ingress_rule": "allow_all_ingress",
             "can_call": {"echo": "*"},
         },
     )
-    kp.create("binpath_echo.tools", id="echo", callable_by={"A-g|h_rest": "*"})
+    kp.create("binpath_echo.tools", id="echo", callable_by={p["result"]["id"]: "*"})
     mt_h, mt_p = MemoryTransport.pair()
     _test_transport_inject[p["result"]["id"]] = mt_p
     sock = _WsEnd(mt_h)

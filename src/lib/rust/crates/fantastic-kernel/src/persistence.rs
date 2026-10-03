@@ -61,10 +61,9 @@ pub fn record_map(rec: &AgentRecord) -> Value {
 ///
 /// Every persistence byte — the record merge read, the record write, the readme
 /// probe and seed, the blob verbs — crosses [`store_read`] or [`store_write`],
-/// each a `kernel.send` of ONE item under OPERATOR authority. So each is a
-/// ledger execution with a call row, a task row in `ps`, a settle row and a
-/// timeout, exactly like python's `kernel_state`, which does all of this with
-/// `kernel.send([...])`.
+/// each ONE call of the provider's handler as KERNEL BOOKKEEPING
+/// ([`Kernel::bookkeeping`]): no gate, no call row, the handler run as the
+/// provider with no origin.
 ///
 /// THE SHAPE IS PYTHON'S. A read sends no bytes — its row is the plain payload
 /// and a watcher gets a text frame; only its REPLY carries a raw chunk. A write
@@ -72,9 +71,8 @@ pub fn record_map(rec: &AgentRecord) -> Value {
 /// (`{type, path, bytes, truncate}`), so the row reads `bytes: {len: N}` in that
 /// position.
 ///
-/// Operator authority: the substrate reading and writing its OWN store is
-/// persistence bookkeeping, not an agent reaching out — it never runs against a
-/// grant.
+/// The substrate reading and writing its OWN store is persistence bookkeeping,
+/// not an agent reaching out — it never runs against a grant.
 ///
 /// `Box::pin` breaks the async TYPE-recursion cycle: a persist (reached from
 /// `send`'s dispatch) sends to the provider, whose dispatch could re-enter
@@ -103,10 +101,20 @@ pub(crate) async fn store_write(
     .0
 }
 
+/// ONE call to the persistence provider — KERNEL BOOKKEEPING: the provider's
+/// handler runs directly ([`Kernel::bookkeeping`]), not through a gated send. A
+/// provider no longer in the tree answers the unknown-agent refusal.
 async fn store_send(kernel: &Arc<Kernel>, item: Item) -> (Value, Option<Vec<u8>>) {
-    let out = Box::pin(crate::send::with_operator(kernel.send(vec![item])))
-        .await
-        .remove(0);
+    let Some(store) = kernel.agents.get(&item.target).map(|e| Arc::clone(&e)) else {
+        return (
+            crate::refusal::unknown_agent(
+                item.target.as_str(),
+                kernel.agents.iter().map(|e| e.key().0.clone()).collect(),
+            ),
+            None,
+        );
+    };
+    let out = Box::pin(kernel.bookkeeping(&store, item.payload, item.binary)).await;
     // a store's chunk is the reply's `bytes` — one anywhere else is not a chunk
     (out.result, out.body.and_then(|b| b.into_at("bytes")))
 }
@@ -511,13 +519,15 @@ pub async fn persist(kernel: &Arc<Kernel>, loader: &Agent, agent: &Agent) -> Ker
     }
     // `rename` is a TEXT-channel verb (`fantastic-file`'s stream verbs live on
     // the text channel; no blob rides this call) — the leg's one atomic op.
-    let moved = Box::pin(crate::send::with_operator(kernel.send(vec![Item::new(
-        store_id.clone(),
-        serde_json::json!({"type": "rename", "old_path": tmp, "new_path": af}),
-    )])))
+    let moved = store_send(
+        kernel,
+        Item::new(
+            store_id.clone(),
+            serde_json::json!({"type": "rename", "old_path": tmp, "new_path": af}),
+        ),
+    )
     .await
-    .remove(0)
-    .result;
+    .0;
     if write_failed(&moved) {
         persist_failed(kernel, &loader.id, &store_id, &af, &moved);
         return Ok(false);
@@ -627,16 +637,18 @@ pub async fn forget_path(kernel: &Arc<Kernel>, loader: &Agent, agent_root: &Path
     if reldir.is_empty() {
         return; // never remove the root
     }
-    let out = Box::pin(crate::send::with_operator(kernel.send(vec![Item::new(
-        store_id.clone(),
-        // `recursive` is REQUIRED: an agent's dir holds `agent.yaml` (and any
-        // sidecars), and a bare `delete` on a populated dir refuses — py parity
-        // (`kernel_state._forget_via_store` has always passed it).
-        serde_json::json!({"type": "delete", "path": reldir, "recursive": true}),
-    )])))
+    let out = store_send(
+        kernel,
+        Item::new(
+            store_id.clone(),
+            // `recursive` is REQUIRED: an agent's dir holds `agent.yaml` (and any
+            // sidecars), and a bare `delete` on a populated dir refuses — py parity
+            // (`kernel_state._forget_via_store` has always passed it).
+            serde_json::json!({"type": "delete", "path": reldir, "recursive": true}),
+        ),
+    )
     .await
-    .remove(0)
-    .result;
+    .0;
     if out
         .as_object()
         .is_some_and(|o| o.get("error").is_some_and(fantastic_bundle::py_truthy))

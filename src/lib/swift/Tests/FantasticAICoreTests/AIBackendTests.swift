@@ -57,7 +57,7 @@ struct AIBackendTests {
         #expect(
             r["verbs"].asObject?.keys.elementsEqual([
                 "reflect", "send", "inquiry", "history", "status", "context_status", "recall",
-                "grep", "context_recall", "context_clear", "fork_from", "request_share", "watch",
+                "grep", "context_recall", "context_clear", "watch",
                 "unwatch", "boot",
             ]) == true, "\(r["verbs"])")
         #expect(

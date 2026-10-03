@@ -103,9 +103,6 @@ export function kernelVerbsView(full: boolean): Payload {
  *             any other present value (`none`, null, …) omits it; `ids` pages.
  *   bundles = all | ids (default none) — the catalog, paged (`bundles_next`)
  *   readme  = true (the agent's readme, or null) | "index" | "<key>"
- *
- * `kernel` is the CALLER's view: the distilled roster is gated per node on its
- * `currentOrigin`, exactly as python gates on `_current_sender`.
  */
 export function applyReflectFlags(
   kernel: Kernel,
@@ -153,7 +150,7 @@ export function applyReflectFlags(
 
   const tree = "tree" in payload ? payload["tree"] : "all";
   if (tree === "all") {
-    obj["tree"] = full ? treeNode(target, (a) => mayReflect(kernel, a)) : roster(kernel, target);
+    obj["tree"] = full ? treeNode(target) : roster(kernel, target);
   } else if (tree === "ids") {
     // The FLAT id index is the one tree shape that is a plain list, so it is the
     // one that pages; the nested tree is never sliced (a page of it would be a
@@ -190,25 +187,14 @@ export function applyReflectFlags(
   return obj;
 }
 
-/** python `_may_reflect`: may the caller now running `reflect` `a`? The one
- *  per-node gate both tree views apply (`roster`, and `treeNode` under
- *  `detail:"full"`); an operator (no origin) may reflect everything. */
-function mayReflect(kernel: Kernel, a: Agent): boolean {
-  const sender = kernel.currentOrigin;
-  return sender === null || kernel.gate(sender, "reflect", a.id) === null;
-}
-
 /** python `_roster`: `{id, sentence?, description?, mode?, children}` — the tree
- *  carrying what each agent is FOR. GATED PER NODE: a caller allowed to reflect
- *  one agent must not read every descendant's sentence through the tree; a
- *  denied node keeps its `id` and `children` (the shape is public through
- *  `tree:"ids"`). An operator (no origin) sees everything. */
+ *  carrying what each agent is FOR. A reflect that passed the gate returns the
+ *  tree whole. */
 function roster(kernel: Kernel, a: Agent): Payload {
-  const may = mayReflect(kernel, a);
-  const raw: Payload = may ? reflectIdentity(a, kernel.rootId) : {};
+  const raw = reflectIdentity(a, kernel.rootId);
   const node: Payload = { id: a.id };
   if (raw["sentence"]) node["sentence"] = raw["sentence"];
-  if (may && a.description !== null) node["description"] = a.description;
+  if (a.description !== null) node["description"] = a.description;
   for (const k of PURPOSE_KEYS) {
     const v = raw[k];
     if (v !== undefined && v !== null) node[k] = v;
@@ -218,14 +204,8 @@ function roster(kernel: Kernel, a: Agent): Payload {
 }
 
 /** python `_tree(details=False)`: the WIRING view, `detail:"full"` only —
- *  children in creation order, like python's dict walk. GATED PER NODE, as the
- *  roster is: the view carries every node's `description` and grant maps, so a
- *  caller allowed to reflect ONE agent read its whole subtree's — a depth-2
- *  agent its siblings', through its own parent (audit 2026-10-03, KV-3). A node
- *  `may` refuses keeps its `id` and `children` and nothing else. */
-function treeNode(agent: Agent, may: (a: Agent) => boolean): Payload {
-  const children = (): Payload[] => [...agent.children.values()].map((c) => treeNode(c, may));
-  if (!may(agent)) return { id: agent.id, children: children() };
+ *  children in creation order, like python's dict walk. Whole, as the roster. */
+function treeNode(agent: Agent): Payload {
   const obj: Payload = {
     id: agent.id,
     parent_id: agent.parentId,
@@ -237,7 +217,7 @@ function treeNode(agent: Agent, may: (a: Agent) => boolean): Payload {
     const v = agent.meta[k];
     if (v !== undefined) obj[k] = v;
   }
-  obj["children"] = children();
+  obj["children"] = [...agent.children.values()].map(treeNode);
   return obj;
 }
 

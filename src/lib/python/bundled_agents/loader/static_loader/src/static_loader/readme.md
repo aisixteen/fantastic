@@ -11,12 +11,12 @@ fantastic init static_loader ./fantastic.yaml
 
 That seeds a `static_loader` agent (record field `manifest: ./fantastic.yaml`)
 under the root and boots it. On `boot` the loader reads the manifest and creates
-each declared agent as a child of itself — under `operator_context()`, so the
-hydration is the operator's authority at boot, not standing power the loader
-holds. That pass runs only on the kernel's own boot (the cold boot, or
-`create_agent` booting the loader it just made): a `boot` an agent sends is
-refused (`reason: unauthorized`), so reaching the loader never
-re-runs the manifest with operator authority.
+each declared agent as a child of itself — kernel bookkeeping: each create is a
+direct call of the kernel's own `create_agent`, never a gated send and never
+standing power the loader holds. That pass runs only on the kernel's own boot (the
+cold boot, or `create_agent` booting the loader it just made): a `boot` an agent
+sends is refused (`reason: unauthorized`), so reaching the loader never re-runs
+the manifest.
 
 Manifest:
 
@@ -31,10 +31,10 @@ agents:
       memory: [set, read]
 ```
 
-Every declared agent gets the Unix baseline grant
-(`$self`/`$parent`/`$children`/`$loader`) plus whatever `can_call` the manifest
-names. After boot the roster is **closed**: an agent is deny-all and cannot
-`create_agent`, so the manifest is the whole roster. Every entry MUST carry an
+Every declared agent gets the baseline grant (`$self`) plus whatever `can_call` /
+`callable_by` the manifest names. After boot the roster is **closed**: an agent is
+deny-all, creates only its own children and only when granted `create_agent` on
+both ends, so the manifest is the whole roster. Every entry MUST carry an
 explicit `id` — boot is idempotent by id (a reboot re-reads the manifest and
 RE-APPLIES the declared fields over an existing agent), so the manifest and the
 persisted tree never duplicate. An entry with no `id` is refused loud

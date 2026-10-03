@@ -1,6 +1,7 @@
-// Pure unit tests for the call-security grant engine — mirror of the python
-// `tests/test_grants.py` and rust `authz/tests.rs`. Deny-all is the law; a grant
-// on the sender opens it.
+// The MINIMAL call gate (owner decision 2026-10-03) — mirror of the python
+// `tests/kernel/test_minimal_gate.py`. Unit tests of the one matching engine, then
+// the kernel gate: two-sided allow/deny, `"*"` covers create_agent, the mutators'
+// children-only rule (local and relayed), and the write-time grant-key check.
 
 import FantasticJSON
 import OrderedCollections
@@ -8,302 +9,252 @@ import Testing
 
 @testable import FantasticKernel
 
-// holder "worker", parent "boss", one child "kid", loader "root". Egress posture.
+// holder "worker", parent "boss", one child "kid".
 private func auth(_ grant: JSON, _ verb: String, _ other: String) -> Decision {
     authorizeCall(
         grant: grant, verb: verb, otherId: other,
-        holderId: "worker", parentId: "boss", childIds: ["kid"], loaderId: "root")
-}
-
-// Ingress posture — privileged-no-wildcard is NOT enforced.
-private func authIngress(_ grant: JSON, _ verb: String, _ other: String) -> Decision {
-    authorizeCall(
-        grant: grant, verb: verb, otherId: other,
-        holderId: "worker", parentId: "boss", childIds: ["kid"], loaderId: "root",
-        enforcePrivileged: false)
+        holderId: "worker", parentId: "boss", childIds: ["kid"])
 }
 
 @Test func absentGrantDeniesEverything() {
     let d = auth(.null, "send", "peer")
     #expect(!d.allowed)
-    #expect(!d.hint.isEmpty)  // a denial always teaches (from above)
+    #expect(!d.hint.isEmpty)
 }
 
 @Test func emptyGrantDenies() {
     #expect(!auth(.object([:]), "send", "peer").allowed)
 }
 
-@Test func selfTokenResolvesToSenderId() {
-    let g: JSON = .object(["$self": .string("*")])
-    #expect(auth(g, "ping", "worker").allowed)
-    #expect(!auth(g, "ping", "boss").allowed)
+@Test func selfParentChildrenResolveRelativeToTheHolder() {
+    #expect(auth(["$self": "*"], "ping", "worker").allowed)
+    #expect(!auth(["$self": "*"], "ping", "boss").allowed)
+    #expect(auth(["$parent": "*"], "ping", "boss").allowed)
+    #expect(!auth(["$parent": "*"], "ping", "worker").allowed)
+    #expect(auth(["$children": "*"], "ping", "kid").allowed)
+    #expect(!auth(["$children": "*"], "ping", "stranger").allowed)
 }
 
-@Test func parentTokenResolvesToParentId() {
-    let g: JSON = .object(["$parent": .string("*")])
-    #expect(auth(g, "ping", "boss").allowed)
-    #expect(!auth(g, "ping", "worker").allowed)
+@Test func removedTokensMatchNothing() {
+    #expect(!auth(["$loader": "*"], "ping", "root").allowed)
+    #expect(!auth(["$subtree:boss": "*"], "ping", "boss").allowed)
 }
 
-@Test func childrenTokenMatchesOnlyDirectChildren() {
-    let g: JSON = .object(["$children": .string("*")])
-    #expect(auth(g, "ping", "kid").allowed)
-    #expect(!auth(g, "ping", "stranger").allowed)
-}
-
-@Test func loaderTokenResolvesToPassedLoaderId() {
-    let g: JSON = .object(["$loader": .string("*")])
-    #expect(auth(g, "load", "root").allowed)
-    #expect(!auth(g, "load", "boss").allowed)
-}
-
-@Test func baselineReachesSelfParentAndChildren() {
-    for g in [defaultCanCall(), defaultCallableBy()] {
-        #expect(auth(g, "send", "worker").allowed)  // $self
-        #expect(auth(g, "send", "boss").allowed)  // $parent
-        #expect(auth(g, "send", "kid").allowed)  // $children
-        #expect(!auth(g, "send", "stranger").allowed)
+@Test func starCoversEveryVerbIncludingTheMutators() {
+    for verb in ["ping", "create_agent", "update_agent", "delete_agent", "state_subscribe",
+        "kernel_stop", "ps", "cancel", "ledger", "stop", "boot", "watch"]
+    {
+        #expect(auth(["kernel_state": "*"], verb, "kernel_state").allowed, "\(verb)")
+        #expect(auth(["$parent": "*"], verb, "boss").allowed, "\(verb)")
     }
 }
 
-@Test func ingressWildcardAcceptsPrivilegedVerbs() {
-    // enforcePrivileged: false (ingress) — a callee's $children:* legitimately
-    // accepts a privileged verb; escalation is blocked at egress.
-    let g: JSON = .object(["$children": .string("*")])
-    #expect(!auth(g, "create_agent", "kid").allowed)  // egress default
-    #expect(authIngress(g, "create_agent", "kid").allowed)  // ingress
+@Test func aVerbListGrantsExactlyThose() {
+    let g: JSON = ["peer": ["ping", "read"]]
+    #expect(auth(g, "ping", "peer").allowed)
+    #expect(auth(g, "read", "peer").allowed)
+    #expect(!auth(g, "write", "peer").allowed)
+    #expect(auth(["peer": ["*"]], "anything", "peer").allowed)
 }
 
-@Test func literalTargetWildcardVerb() {
-    let g: JSON = .object(["memory": .string("*")])
-    #expect(auth(g, "set", "memory").allowed)
-    #expect(auth(g, "read", "memory").allowed)
-    #expect(!auth(g, "set", "other").allowed)
+@Test func foreignKeysMatchOnlyTheirKernel() {
+    #expect(auth(["g2|scout": "*"], "ping", "g2|scout").allowed)
+    #expect(!auth(["g2|scout": "*"], "ping", "g3|scout").allowed)
+    #expect(auth(["g2|*": ["ping"]], "ping", "g2|any").allowed)
+    #expect(!auth(["g2|*": ["ping"]], "ping", "g3|any").allowed)
 }
 
-@Test func perVerbListGrantsExactlyThose() {
-    let g: JSON = .object(["memory": .array([.string("read")])])
-    #expect(auth(g, "read", "memory").allowed)
-    #expect(!auth(g, "set", "memory").allowed)
+@Test func theBaselineIsSelfOnly() {
+    #expect(defaultCanCall() == ["$self": "*"])
+    #expect(defaultCallableBy() == ["$self": "*"])
 }
 
-@Test func verbWildcardInsideList() {
-    let g: JSON = .object(["memory": .array([.string("*")])])
-    #expect(auth(g, "anything", "memory").allowed)
-}
-
-@Test func createAgentDeniedUnderDefaultGrant() {
-    // create_agent on the parent (not self) is privileged → wildcard doesn't cover it.
-    let g = defaultCanCall()
-    #expect(!auth(g, "create_agent", "boss").allowed)
-}
-
-@Test func forkIntoOwnSubtreeIsNotPrivileged() {
-    // create_agent on $self (adding a child to your OWN subtree) is baseline.
-    let g: JSON = .object(["$self": .string("*")])
-    #expect(auth(g, "create_agent", "worker").allowed)
-    #expect(!auth(g, "create_agent", "boss").allowed)
-}
-
-@Test func explicitKernelGrantOpensMutation() {
-    let g: JSON = .object(["root": .array([.string("create_agent")])])
-    #expect(auth(g, "create_agent", "root").allowed)
-    #expect(!auth(g, "delete_agent", "root").allowed)
-}
-
-// ─── the READ side of the gate: watch + the state stream ────────────
-
-@Test func anUngrantedAgentCannotWatchAnother() async {
-    // A watcher receives its target's raw inbound payloads VERBATIM — the model
-    // prompt, the document body, whatever was sent. So an ungated `watch` is a
-    // read side-channel around `callable_by`: an agent that may not CALL an
-    // agent could still read everything sent TO it.
-    //
-    // Found 2026-08-27 in a production audit: a browser leg granted exactly
-    // `assistant:[send]` could mirror ANY agent's inbox in its session and read
-    // the packed confidential context out of the model's prompt.
-    let kernel = Kernel(storage: .inMemory, bundles: BundleRegistry())
-    let root = Agent(id: "kernel_state", handlerModule: nil, parentId: nil)
-    kernel.register(root)
-    kernel.setRoot(root)
-    let secret = Agent(id: "secret", handlerModule: nil, parentId: nil)
-    kernel.register(secret)
-
-    let denial = KernelTaskLocals.$currentSender.withValue(AgentId("nosy")) {
-        kernel.watch(src: AgentId("secret"), watcher: AgentId("nosy"))
-    }
-    #expect(denial != nil, "an ungranted watch was allowed")
-    #expect(denial?["reason"].asString == "unauthorized")
-    // ...and nothing was registered, so no payload can ever reach it.
-    #expect(!secret.watcherIds().contains(AgentId("nosy")))
-}
-
-@Test func anOperatorWatchStaysUngated() {
-    // `currentSender` nil is the origin root of trust — the bootstrap wiring a
-    // renderer, a test driver. Same rule as send.
-    let kernel = Kernel(storage: .inMemory, bundles: BundleRegistry())
-    let src = Agent(id: "src", handlerModule: nil, parentId: nil)
-    kernel.register(src)
-        // The watcher REGISTERS FIRST: `watch` mirrors into an inbox, it does
-        // not create one for the caller.
-        _ = kernel.ensureInbox(AgentId("cli"))
-    #expect(kernel.watch(src: AgentId("src"), watcher: AgentId("cli")) == nil)
-    #expect(src.watcherIds().contains(AgentId("cli")))
-}
-
-@Test func theStateStreamIsNotCoveredByTheBaseline() {
-    // The broadest read the kernel offers. The structural baseline grants
-    // `$parent: "*"`, so WITHOUT `state_subscribe` being privileged every direct
-    // child of the root could tap the whole stream while holding no grant that
-    // names it. A `*` under the root's NAMED id is the operator's own statement
-    // and covers it (audit 2026-09-28: whoever writes a `*` owns it).
-    let kernel = Kernel(storage: .inMemory, bundles: BundleRegistry())
-    // Two-sided: the root's `callable_by` names `named` too — a structural
-    // `$children: "*"` would not carry a privileged verb on either side.
-    var rootMeta: OrderedDictionary<String, JSON> = [:]
-    rootMeta["callable_by"] = .object(["named": .string("*")])
-    let root = Agent(id: "kernel_state", handlerModule: nil, parentId: nil, meta: rootMeta)
-    kernel.register(root)
-    kernel.setRoot(root)
-    let leaf = Agent(id: "leaf", handlerModule: nil, parentId: AgentId("kernel_state"))
-    kernel.register(leaf)
-    let denial = KernelTaskLocals.$currentSender.withValue(AgentId("leaf")) {
-        kernel.authorizeStateSubscribe(AgentId("leaf"))
-    }
-    #expect(denial != nil, "the baseline covered the whole state stream")
-    #expect(denial?["reason"].asString == "unauthorized")
-    var meta: OrderedDictionary<String, JSON> = [:]
-    meta["can_call"] = .object(["kernel_state": .string("*")])
-    let named = Agent(
-        id: "named", handlerModule: nil, parentId: AgentId("kernel_state"), meta: meta)
-    kernel.register(named)
-    #expect(
-        KernelTaskLocals.$currentSender.withValue(AgentId("named")) {
-            kernel.authorizeStateSubscribe(AgentId("named"))
-        } == nil, "a named `*` is the operator's own statement")
-    // An OPERATOR tap is ungated.
-    #expect(kernel.authorizeStateSubscribe(AgentId("cli")) == nil)
-}
-
-/// Measured 2026-09-28: `$parent: "*"` let every direct child of the root stop the
-/// kernel, kill ANY task and read the whole ledger. A structural token's wildcard
-/// covers none of them; a grant that names the verb does.
-@Test func theBaselineNeverReachesTheKernelControls() {
-    for verb in [
-        "kernel_stop", "kernel_start", "shutdown_agents", "ps", "cancel", "ledger",
-        "ack_deadletter", "persist_record", "forget_record", "load_tree",
-    ] {
-        #expect(!auth(defaultCanCall(), verb, "boss").allowed, "\(verb)")
-        #expect(auth(.object(["boss": .array([.string(verb)])]), verb, "boss").allowed, "\(verb)")
-    }
-}
-
-/// Measured 2026-10-03 (audit BV-1): a web_ws/web_rest leg's `$parent:*` let any
-/// client it admitted `stop` its web host for every client, or `unmount` a sealed
-/// sibling's routes. By verb name, whatever the bundle: a structural token's
-/// wildcard covers none of them; a NAMED verb or a NAMED id's `*` does.
-@Test func theBaselineNeverReachesAnAgentsLifecycleOrRoutes() {
-    for verb in ["stop", "mount", "unmount", "boot"] {
-        #expect(privilegedVerbs.contains(verb), "\(verb)")
-        #expect(!auth(defaultCanCall(), verb, "boss").allowed, "\(verb)")
-        #expect(!auth(defaultCanCall(), verb, "kid").allowed, "\(verb)")
-        let named: JSON = .object(["$parent": .array([.string(verb)])])
-        #expect(auth(named, verb, "boss").allowed, "\(verb)")
-        #expect(auth(.object(["boss": .string("*")]), verb, "boss").allowed, "\(verb)")
-        // ingress: a callee's `$children:*` still accepts it
-        #expect(authIngress(.object(["$children": .string("*")]), verb, "kid").allowed, "\(verb)")
-    }
-    #expect(privilegedVerbs.count == 20)
-}
-
-/// Audit 2026-10-03 (KV-2): `watch` whose src is the ROOT (`loaderId`) needs a
-/// NAMED grant; every other `watch` is an ordinary verb.
-@Test func watchingTheRootLosesAStructuralWildcard() {
-    // holder "worker", child of the root "boss"
-    func onRoot(_ g: JSON, _ other: String) -> Bool {
-        authorizeCall(
-            grant: g, verb: "watch", otherId: other,
-            holderId: "worker", parentId: "boss", childIds: ["kid"], loaderId: "boss"
-        ).allowed
-    }
-    #expect(!onRoot(defaultCanCall(), "boss"))
-    #expect(onRoot(.object(["boss": .array([.string("watch")])]), "boss"))
-    #expect(onRoot(.object(["boss": .string("*")]), "boss"))
-    #expect(onRoot(.object(["$parent": .array([.string("watch")])]), "boss"))
-    #expect(onRoot(defaultCanCall(), "kid"))
-    #expect(auth(defaultCanCall(), "watch", "boss").allowed)  // "boss" is not the root here
-}
-
-/// py `test_watch_gate.py::test_watching_the_root_needs_a_named_grant` — measured
-/// before the fix (audit 2026-10-03, KV-2): every direct child of the root watched
-/// the root inbox on the baseline `$parent:*` alone and read every kernel verb's
-/// payload, other agents' `persist_blob` contents included.
-@Test func watchingTheRootNeedsANamedGrant() {
-    let kernel = Kernel(storage: .inMemory, bundles: BundleRegistry())
-    var rootMeta: OrderedDictionary<String, JSON> = [:]
-    rootMeta["callable_by"] = defaultCallableBy()
-    let root = Agent(id: "kernel_state", handlerModule: nil, parentId: nil, meta: rootMeta)
-    kernel.register(root)
-    kernel.setRoot(root)
-    func watchAs(_ grant: JSON, _ src: String) -> JSON? {
-        var meta: OrderedDictionary<String, JSON> = [:]
-        meta["can_call"] = grant
-        let nosy = Agent(
-            id: "nosy", handlerModule: nil, parentId: AgentId("kernel_state"), meta: meta)
-        kernel.register(nosy)
-        root.insertChild(nosy)
-        _ = kernel.ensureInbox(AgentId("nosy"))
-        return KernelTaskLocals.$currentSender.withValue(AgentId("nosy")) {
-            kernel.watch(src: AgentId(src), watcher: AgentId("nosy"))
+@Test func grantKeysAreChecked() {
+    for field in ["can_call", "callable_by"] {
+        for good in ["peer", "$self", "$parent", "$children"] {
+            #expect(isGrantKey(field, good), "\(field) \(good)")
+        }
+        for bad in ["", "*", "$loader", "$subtree:x", "$foo", "|x", "g2|", "a|b|c"] {
+            #expect(!isGrantKey(field, bad), "\(field) \(bad)")
         }
     }
-    let denial = watchAs(defaultCanCall(), "kernel_state")
-    #expect(denial?["reason"].asString == "unauthorized")
-    #expect(denial?["side"].asString == "egress")
-    #expect(denial?["error"].asString == "nosy may not call 'watch' on kernel_state")
-    #expect(!root.watcherIds().contains(AgentId("nosy")))
-    let spelled: JSON = .object([
-        "$self": .string("*"), "$parent": .array([.string("*")]), "$children": .string("*"),
-    ])
-    #expect(watchAs(spelled, "kernel_state") != nil)
-    for named: JSON in [
-        .object(["$self": .string("*"), "kernel_state": .array([.string("watch")])]),
-        .object(["$self": .string("*"), "kernel_state": .string("*")]),
-        .object(["$self": .string("*"), "$parent": .array([.string("watch")])]),
-    ] {
-        #expect(watchAs(named, "kernel_state") == nil, "\(named.serialize())")
-    }
-    // every other watch is unchanged: the baseline still watches its own child
-    var kidMeta: OrderedDictionary<String, JSON> = [:]
-    kidMeta["callable_by"] = defaultCallableBy()
-    let kid = Agent(id: "nosy_kid", handlerModule: nil, parentId: AgentId("nosy"), meta: kidMeta)
-    kernel.register(kid)
-    var nosyMeta: OrderedDictionary<String, JSON> = [:]
-    nosyMeta["can_call"] = defaultCanCall()
-    let nosy = Agent(
-        id: "nosy", handlerModule: nil, parentId: AgentId("kernel_state"), meta: nosyMeta)
-    nosy.insertChild(kid)
-    kernel.register(nosy)
-    let ok = KernelTaskLocals.$currentSender.withValue(AgentId("nosy")) {
-        kernel.watch(src: AgentId("nosy_kid"), watcher: AgentId("nosy"))
-    }
-    #expect(ok == nil)
-}
-
-/// `*` under a NAMED id covers everything, privileged verbs included.
-@Test func aNamedWildcardCoversPrivilegedVerbs() {
-    let g: JSON = .object(["root": .string("*")])
-    for verb in ["create_agent", "delete_agent", "kernel_stop", "cancel", "allow"] {
-        #expect(auth(g, verb, "root").allowed, "\(verb)")
+    // A peer kernel's agent is an OUTBOUND address: `can_call` only — a caller is
+    // always local, so in `callable_by` it could never match.
+    for peer in ["g2|scout", "g2|*"] {
+        #expect(isGrantKey("can_call", peer), "\(peer)")
+        #expect(!isGrantKey("callable_by", peer), "\(peer)")
     }
 }
 
-/// A foreign caller is named `<guid>|<agent>`, or every agent of that one kernel
-/// with `<guid>|*`; the structural tokens never match it.
-@Test func aForeignCallerMatchesOnlyByName() {
-    #expect(authIngress(.object(["g1|ai": .string("*")]), "read", "g1|ai").allowed)
-    #expect(!authIngress(.object(["g1|ai": .string("*")]), "read", "g1|other").allowed)
-    #expect(authIngress(.object(["g1|*": .string("*")]), "read", "g1|anyone").allowed)
-    #expect(!authIngress(.object(["g1|*": .string("*")]), "read", "g2|anyone").allowed)
-    #expect(!authIngress(defaultCallableBy(), "read", "boss|x").allowed)
+// MARK: - the kernel gate
+
+private struct Noop: AgentBundle {
+    let name = "noop"
+    func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? {
+        .object(["ok": .bool(true)])
+    }
+}
+
+/// root `kernel_state` accepting `a` (`*`); `a` may call the root and `b`
+/// (`*`); `b` accepts `a` for `ping` only; `kid` is `a`'s child; `other` is a
+/// child of the root.
+private func gated() async -> Kernel {
+    let r = BundleRegistry()
+    r.register("noop.tools", Noop())
+    let k = Kernel(storage: .inMemory, bundles: r)
+    let root = Agent(
+        id: "kernel_state", handlerModule: nil, parentId: nil,
+        meta: ["guid": "g1", "callable_by": ["a": "*"]])
+    k.register(root)
+    k.setRoot(root)
+    func seed(_ id: String, _ parent: String, _ extra: OrderedDictionary<String, JSON> = [:]) async
+    {
+        var p: OrderedDictionary<String, JSON> = [
+            "type": "create_agent", "parent_id": .string(parent), "id": .string(id),
+            "handler_module": "noop.tools",
+        ]
+        for (key, v) in extra { p[key] = v }
+        _ = await k.send([Item("kernel", .object(p))])[0].result
+    }
+    await seed("a", "kernel_state", ["can_call": ["kernel_state": "*", "b": "*"]])
+    await seed("b", "kernel_state", ["callable_by": ["a": ["ping"]]])
+    await seed("kid", "a")
+    await seed("other", "kernel_state")
+    return k
+}
+
+private func call(_ k: Kernel, as sender: String, _ target: String, _ p: JSON) async -> JSON {
+    await KernelTaskLocals.$sender.withValue(AgentId(sender)) {
+        await k.send([Item(AgentId(target), p)])[0].result
+    }
+}
+
+@Suite("minimal gate — the kernel")
+struct MinimalGateTests {
+
+    @Test func twoSidedAllowAndDeny() async {
+        let k = await gated()
+        // both ends grant it
+        #expect(await call(k, as: "a", "b", ["type": "ping"])["ok"] == true)
+        // egress grants it, ingress does not
+        let ingress = await call(k, as: "a", "b", ["type": "write"])
+        #expect(ingress["side"] == "ingress")
+        #expect(ingress["error"] == "b does not accept 'write' from a")
+        // ingress would, egress does not
+        let egress = await call(k, as: "kid", "b", ["type": "ping"])
+        #expect(egress["side"] == "egress")
+        #expect(egress["error"] == "kid may not call 'ping' on b")
+    }
+
+    /// No baseline beyond `$self`: a child reaches neither its parent
+    /// nor the root without a grant, and the root takes the same two-sided check.
+    @Test func noParentBaselineAndTheRootIsGatedBothWays() async {
+        let k = await gated()
+        #expect(await call(k, as: "kid", "a", ["type": "ping"])["side"] == "egress")
+        let r = await call(
+            k, as: "other", "kernel", ["type": "list_agents"])
+        #expect(r["side"] == "egress")
+        // egress on the root but no ingress — refused at the root
+        k.update(AgentId("other"), ["can_call": ["$self": "*", "kernel_state": "*"]])
+        let r2 = await call(k, as: "other", "kernel", ["type": "list_agents"])
+        #expect(r2["side"] == "ingress")
+        #expect(r2["error"] == "kernel_state does not accept 'list_agents' from other")
+    }
+
+    @Test func starCoversCreateAgent() async {
+        let k = await gated()
+        let r = await call(
+            k, as: "a", "kernel",
+            ["type": "create_agent", "parent_id": "a", "id": "made", "handler_module": "noop.tools"])
+        #expect(r["error"] == .null, "\(r)")
+        #expect(k.agent(AgentId("made"))?.parentId == AgentId("a"))
+    }
+
+    @Test func mutatorsActOnTheSendersOwnChildrenOnly() async {
+        let k = await gated()
+        let create = await call(
+            k, as: "a", "kernel",
+            ["type": "create_agent", "parent_id": "b", "id": "x", "handler_module": "noop.tools"])
+        #expect(
+            create.serialize()
+                == #"{"error":"a may only create_agent its own children — b is not one","reason":"unauthorized","side":"mutator"}"#
+        )
+        #expect(k.agent(AgentId("x")) == nil)
+        let update = await call(
+            k, as: "a", "kernel", ["type": "update_agent", "id": "other", "description": "x"])
+        #expect(update["error"] == "a may only update_agent its own children — other is not one")
+        #expect(update["side"] == "mutator")
+        let delete = await call(k, as: "a", "kernel", ["type": "delete_agent", "id": "a"])
+        #expect(delete["error"] == "a may only delete_agent its own children — a is not one")
+        // its own child passes
+        let ok = await call(
+            k, as: "a", "kernel", ["type": "update_agent", "id": "kid", "description": "mine"])
+        #expect(ok["updated"] == true, "\(ok)")
+        let gone = await call(k, as: "a", "kernel", ["type": "delete_agent", "id": "kid"])
+        #expect(gone["error"] == .null, "\(gone)")
+        #expect(k.agent(AgentId("kid")) == nil)
+    }
+
+    @Test func anUnknownGrantKeyIsRefusedAtTheWrite() async {
+        let k = await gated()
+        for bad in ["$loader", "$subtree:a", "*"] {
+            let r = await k.send([
+                Item(
+                    "kernel",
+                    [
+                        "type": "update_agent", "id": "b",
+                        "callable_by": .object([bad: "*"]),
+                    ])
+            ])[0].result
+            #expect(r["reason"] == "invalid_meta", "\(bad): \(r)")
+            #expect(
+                r["error"].asString
+                    == "callable_by[\(pyRepr(bad))] is not a grant key — legal keys: an agent id, "
+                    + "$self, $parent, $children", "\(r)")
+        }
+        // a peer kernel's agent is never a caller here: refused in callable_by,
+        // accepted in can_call (an outbound address)
+        let peerIn = await k.send([
+            Item("kernel", ["type": "update_agent", "id": "b", "callable_by": ["g2|scout": "*"]])
+        ])[0].result
+        #expect(peerIn["reason"] == "invalid_meta", "\(peerIn)")
+        let peerOut = await k.send([
+            Item("kernel", ["type": "update_agent", "id": "b", "can_call": ["g2|scout": "*"]])
+        ])[0].result
+        #expect(peerOut["updated"] == true, "\(peerOut)")
+        let oldShape = await k.send([
+            Item(
+                "kernel",
+                ["type": "update_agent", "id": "a", "can_call": ["b": ["verbs": ["ping"], "for": "descendants"]]])
+        ])[0].result
+        #expect(oldShape["reason"] == "invalid_meta")
+        #expect(oldShape["error"].asString?.contains(#"must be "*" or a list of verb strings"#) == true)
+    }
+
+    @Test func anOperatorIsUngated() async {
+        let k = await gated()
+        let r = await k.send([
+            Item("kernel", ["type": "create_agent", "parent_id": "b", "id": "op", "handler_module": "noop.tools"])
+        ])[0].result
+        #expect(r["error"] == .null, "\(r)")
+    }
+
+    @Test func aWatchIsGatedLikeASend() async {
+        let k = await gated()
+        _ = k.ensureInbox(AgentId("kid"))
+        let denied = KernelTaskLocals.$sender.withValue(AgentId("kid")) {
+            k.watch(src: AgentId("b"), watcher: AgentId("kid"))
+        }
+        #expect(denied?["reason"] == "unauthorized")
+        _ = k.ensureInbox(AgentId("a"))
+        // a may watch the root: a's can_call names it with "*", the root accepts a
+        let ok = KernelTaskLocals.$sender.withValue(AgentId("a")) {
+            k.watch(src: AgentId("kernel_state"), watcher: AgentId("a"))
+        }
+        #expect(ok == nil)
+        #expect(
+            KernelTaskLocals.$sender.withValue(AgentId("a")) {
+                k.authorizeStateSubscribe(AgentId("a"))
+            } == nil)
+    }
 }

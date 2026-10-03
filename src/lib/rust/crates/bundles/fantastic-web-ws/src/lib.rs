@@ -8,6 +8,9 @@
 //! - `reflect` — identity + the URL pattern this surface mounts + leg posture
 //! - `boot` — no-op; the parent web agent owns the route
 //! - `get_routes` — declares `{routes:[{kind:"websocket", path:"/{host_id}/ws"}]}`
+//! - `inbound_call` / `inbound_emit` / `inbound_watch` / `inbound_state_subscribe`
+//!   — the INBOUND half (`fantastic_io_bridge::inbound`): the socket loop hands
+//!   each admitted frame to this leg, which acts AS ITSELF, gated as the leg
 
 #![deny(missing_docs)]
 
@@ -55,6 +58,24 @@ impl Bundle for WebWsBundle {
             meta,
             &fantastic_io_bridge::authorizer::ingress::REGISTRY,
         )
+    }
+
+    /// The INBOUND verbs (`fantastic_io_bridge::inbound`) first — an admitted
+    /// frame the transport hands in, sent onward as this leg, a raw body riding
+    /// either way — then this leg's own verbs.
+    async fn handle_binary(
+        &self,
+        agent_id: &AgentId,
+        header: Value,
+        body: Option<fantastic_kernel::Blob>,
+        kernel: &Arc<Kernel>,
+    ) -> Result<(Reply, Option<fantastic_kernel::Blob>), BundleError> {
+        if let Some((v, b)) =
+            fantastic_io_bridge::inbound::handle(agent_id, &header, body, kernel).await
+        {
+            return Ok((Some(v), b));
+        }
+        Ok((self.handle(agent_id, &header, kernel).await?, None))
     }
 
     async fn handle(
@@ -110,14 +131,17 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
             out.insert(k.clone(), v.clone());
         }
     }
-    out.insert(
-        "verbs".into(),
-        json!({
-            "reflect": "Identity + the URL pattern this surface mounts + this leg's auth posture",
-            "boot": "No-op. The parent `web` agent calls `get_routes` on this bundle during its own boot and mounts the WS endpoint onto its FastAPI app.",
-            "get_routes": "Declares this surface's HTTP/WS route mounts. No args. Returns",
-        }),
-    );
+    let mut verbs = json!({
+        "reflect": "Identity + the URL pattern this surface mounts + this leg's auth posture",
+        "boot": "No-op. The parent `web` agent calls `get_routes` on this bundle during its own boot and mounts the WS endpoint onto its FastAPI app.",
+        "get_routes": "Declares this surface's HTTP/WS route mounts. No args. Returns",
+    });
+    if let Some(m) = verbs.as_object_mut() {
+        for (verb, doc) in fantastic_io_bridge::inbound::verb_docs() {
+            m.insert(verb.to_string(), json!(doc));
+        }
+    }
+    out.insert("verbs".into(), verbs);
     Value::Object(out)
 }
 

@@ -920,9 +920,6 @@ fn reflect_verbs_are_python_docstring_first_lines() {
             "delete",
             "rename",
             "mkdir",
-            "allow",
-            "disallow",
-            "allowed",
         ]
     );
     assert_eq!(verbs["boot"], "No-op. Returns None.");
@@ -1321,52 +1318,9 @@ async fn a_directory_exposes_everything_under_it_and_dot_the_whole_root() {
 }
 
 #[tokio::test]
-async fn allow_disallow_and_allowed_edit_the_record_one_path_at_a_time() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let k = bridge(&tmp, Some(json!([]))).await;
-    assert_eq!(
-        call(&k, json!({"type": "allow", "path": "docs/a.pdf"})).await,
-        json!({"path": "docs/a.pdf", "allowed": true, "count": 1})
-    );
-    let r = call(&k, json!({"type": "allow", "path": "./docs//a.pdf"})).await;
-    assert_eq!(r["count"], 1, "idempotent, normalised: {r}");
-    call(&k, json!({"type": "allow", "path": "docs/b.pdf"})).await;
-    let rec = k
-        .agents
-        .get(&AgentId::from("fb"))
-        .unwrap()
-        .meta
-        .read()
-        .unwrap()
-        .clone();
-    assert_eq!(rec["allow"], json!(["docs/a.pdf", "docs/b.pdf"]));
-    assert_eq!(read(&k, "docs/b.pdf").await["size"], 6);
-    assert_eq!(
-        call(&k, json!({"type": "allowed", "limit": 1})).await,
-        json!({"paths": ["docs/a.pdf"], "next": "docs/a.pdf", "total": 2})
-    );
-    let rest = call(&k, json!({"type": "allowed", "after": "docs/a.pdf"})).await;
-    assert_eq!(rest["paths"], json!(["docs/b.pdf"]));
-    assert_eq!(rest["next"], Value::Null);
-    assert_eq!(
-        call(&k, json!({"type": "disallow", "path": "docs/b.pdf"})).await["count"],
-        1
-    );
-    assert_eq!(read(&k, "docs/b.pdf").await["reason"], "not_found");
-    assert_eq!(
-        call(&k, json!({"type": "disallow", "path": "nope"})).await["reason"],
-        "not_found"
-    );
-}
-
-#[tokio::test]
-async fn nothing_outside_the_root_can_be_allowed_or_read() {
+async fn nothing_outside_the_root_can_be_read() {
     let tmp = tempfile::TempDir::new().unwrap();
     let k = bridge(&tmp, Some(json!(["."]))).await;
-    for bad in ["../x", "docs/../../x", "/etc/hosts"] {
-        let r = call(&k, json!({"type": "allow", "path": bad})).await;
-        assert_eq!(r["reason"], "bad_arg", "{bad}: {r}");
-    }
     let r = read(&k, "../../etc/passwd").await;
     assert!(
         r["error"].as_str().unwrap().contains("escape"),
@@ -1420,53 +1374,6 @@ async fn writes_stay_inside_the_list_and_readonly_still_holds() {
         call(&k, json!({"type": "mkdir", "path": "docs/sub"})).await["created"],
         true
     );
-}
-
-async fn call_as(kernel: &Arc<Kernel>, sender: &str, payload: Value) -> Value {
-    let k = Arc::clone(kernel);
-    fantastic_kernel::send::with_sender(AgentId::from(sender), async move {
-        k.send(vec![Item::new(AgentId::from("fb"), payload)])
-            .await
-            .remove(0)
-            .result
-    })
-    .await
-}
-
-/// A handler-less agent under the root holding `can_call` — python
-/// `kernel.create(None, id=…, can_call=…)`.
-fn bare(kernel: &Arc<Kernel>, id: &str, can_call: Value) {
-    let mut meta = JsonMap::new();
-    meta.insert("can_call".into(), can_call);
-    kernel.register(Agent::new(
-        AgentId::from(id),
-        None,
-        Some(AgentId::from("kernel_state")),
-        meta,
-        PathBuf::new(),
-        true,
-    ));
-}
-
-/// Python `test_an_agent_granted_allow_publishes_a_file`: the exposure verbs are
-/// PRIVILEGED — an agent granted them by name publishes a file; one holding only
-/// a `*` on the bridge is refused at the gate.
-#[tokio::test]
-async fn an_agent_granted_allow_publishes_a_file() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    site(&tmp);
-    let k = mk_kernel_with(
-        &tmp,
-        json!({"ingress_rule": "allow_all_ingress", "allow": [],
-               "callable_by": {"ai": ["allow", "disallow", "allowed"]}}),
-    )
-    .await;
-    bare(&k, "ai", json!({"fb": ["allow", "disallow", "allowed"]}));
-    let r = call_as(&k, "ai", json!({"type": "allow", "path": "docs/a.pdf"})).await;
-    assert_eq!(r["allowed"], true, "{r}");
-    bare(&k, "stranger", json!({"fb": "*"}));
-    let r = call_as(&k, "stranger", json!({"type": "allow", "path": "."})).await;
-    assert_eq!(r["reason"], "unauthorized", "{r}");
 }
 
 // ─── symlinks: BOTH ends must be exposed (audit 2026-09-28) ──────────────────

@@ -32,32 +32,23 @@ pub type PeerReply = (Value, Option<Blob>);
 /// The future a route returns for one call.
 pub type PeerCallFuture = Pin<Box<dyn Future<Output = PeerReply> + Send>>;
 
-/// `call(agent_id, payload, caller, secret, body)` — deliver ONE call to the
-/// peer's `agent_id` as `caller` (`<this guid>|<sender>`), with the item's
-/// `secret` marks ([`crate::secret`], empty when none) and the raw request body
-/// at its payload path when the call carries one.
-type PeerCallFn =
-    dyn Fn(String, Value, String, Vec<Value>, Option<Blob>) -> PeerCallFuture + Send + Sync;
+/// `call(agent_id, payload, body)` — deliver ONE call to the peer's `agent_id`,
+/// with the raw request body at its payload path when the call carries one. The
+/// peer judges what arrives as the transport leg that serves it there — a caller
+/// is always local.
+type PeerCallFn = dyn Fn(String, Value, Option<Blob>) -> PeerCallFuture + Send + Sync;
 
 /// The future a route returns for one emit — it settles once the frame is handed
 /// to the transport (an emit has no reply).
 pub type PeerEmitFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 
-/// `emit(agent_id, payload, caller, body)` — deliver ONE emit to the peer's
-/// `agent_id`; `caller` is `<this guid>|<sender>` when an agent emitted, `None`
-/// for an operator emit, and the raw body rides at its payload path.
-type PeerEmitFn =
-    dyn Fn(String, Value, Option<String>, Option<Blob>) -> PeerEmitFuture + Send + Sync;
+/// `emit(agent_id, payload, body)` — deliver ONE emit to the peer's `agent_id`;
+/// the raw body rides at its payload path.
+type PeerEmitFn = dyn Fn(String, Value, Option<Blob>) -> PeerEmitFuture + Send + Sync;
 
 /// How a connected PEER KERNEL is reached. `via` names the transport agent
 /// carrying it (the root reflect reports it); the call delivers one call and
 /// resolves with the peer's reply — or a refusal when the connection ends first.
-///
-/// `secret` is the item's marks as given ([`crate::secret`] — dotted strings
-/// and/or arrays of steps, empty when none), rooted at the item exactly as the
-/// peer's item is rooted, so the transport puts them on the call frame verbatim
-/// and the PEER masks its own records of the call too (python
-/// `PeerRoute.call(agent_id, payload, caller, secret)`).
 ///
 /// Held as an `Arc`: a route is compared by IDENTITY (python `is`), so a
 /// connection unregisters its own route and no other.
@@ -73,14 +64,8 @@ impl PeerRoute {
     /// delivers.
     pub fn new<F, E>(via: impl Into<String>, call: F, emit: E) -> Arc<Self>
     where
-        F: Fn(String, Value, String, Vec<Value>, Option<Blob>) -> PeerCallFuture
-            + Send
-            + Sync
-            + 'static,
-        E: Fn(String, Value, Option<String>, Option<Blob>) -> PeerEmitFuture
-            + Send
-            + Sync
-            + 'static,
+        F: Fn(String, Value, Option<Blob>) -> PeerCallFuture + Send + Sync + 'static,
+        E: Fn(String, Value, Option<Blob>) -> PeerEmitFuture + Send + Sync + 'static,
     {
         Arc::new(Self {
             via: via.into(),
@@ -90,26 +75,13 @@ impl PeerRoute {
     }
 
     /// Deliver one emit through this route.
-    pub fn emit(
-        &self,
-        agent_id: String,
-        payload: Value,
-        caller: Option<String>,
-        body: Option<Blob>,
-    ) -> PeerEmitFuture {
-        (self.emit)(agent_id, payload, caller, body)
+    pub fn emit(&self, agent_id: String, payload: Value, body: Option<Blob>) -> PeerEmitFuture {
+        (self.emit)(agent_id, payload, body)
     }
 
     /// Deliver one call through this route.
-    pub fn call(
-        &self,
-        agent_id: String,
-        payload: Value,
-        caller: String,
-        secret: Vec<Value>,
-        body: Option<Blob>,
-    ) -> PeerCallFuture {
-        (self.call)(agent_id, payload, caller, secret, body)
+    pub fn call(&self, agent_id: String, payload: Value, body: Option<Blob>) -> PeerCallFuture {
+        (self.call)(agent_id, payload, body)
     }
 }
 
@@ -117,9 +89,7 @@ impl PeerRoute {
 /// `RemoteTarget`. Carried on an unregistered [`Agent`] so the send pipeline
 /// treats it like any target (a ledger row, a task-table row, a settled outcome),
 /// except that its dispatch hands the call to the peer's route instead of a
-/// handler here, carrying the caller as `<this guid>|<sender>` so the peer's gate
-/// can judge it, and the item's `secret` marks so the peer masks its records as
-/// this kernel does.
+/// handler here. The peer judges the call as the leg that serves it there.
 pub(crate) struct RemoteRef {
     /// The peer kernel's guid.
     pub(crate) guid: String,
@@ -231,47 +201,13 @@ impl Kernel {
 }
 
 /// The dispatch of a call to a remote target: hand it to EVERY live route of the
-/// peer (each tab of one identity), carrying the caller as `<this guid>|<sender>`
-/// so the peer's gate can judge it, and the item's `secret` marks so the peer
-/// masks its records too; the first reply settles it and the other calls are
-/// dropped. Python `RemoteTarget._dispatch_task`.
-pub(crate) async fn call_peer(
-    kernel: &Kernel,
-    remote: &RemoteRef,
-    qualified: &AgentId,
-    payload: Value,
-    body: Option<Blob>,
-) -> PeerReply {
-    let Some(own) = kernel.own_guid() else {
-        // The peer judges the caller by `<guid>|<agent>`; with no guid of our own
-        // there is nothing honest to put on the frame.
-        return (
-            crate::refusal::refusal(
-                crate::refusal::UNHANDLED,
-                format!(
-                    "send: this kernel has no guid yet (its root has not booted), so a \
-                     call to {qualified} cannot say who is calling"
-                ),
-            ),
-            None,
-        );
-    };
-    let origin = crate::send::current_origin();
-    let caller = format!("{own}|{}", origin.as_ref().map_or("kernel", |o| o.as_str()));
-    // The item's `secret` marks ride along — this runs inside the dispatch's own
-    // scope, so they are exactly the marks of THIS call. This kernel already
-    // records the call as shown, and the peer must too: its call/settle rows,
-    // ledger and state stream are records of the SAME call.
-    let secret = crate::send::current_secret();
-    let calls = remote.routes.iter().map(|r| {
-        r.call(
-            remote.agent_id.clone(),
-            payload.clone(),
-            caller.clone(),
-            secret.clone(),
-            body.clone(),
-        )
-    });
+/// peer (each tab of one identity); the first reply settles it and the other
+/// calls are dropped. Python `RemoteTarget._dispatch_task`.
+pub(crate) async fn call_peer(remote: &RemoteRef, payload: Value, body: Option<Blob>) -> PeerReply {
+    let calls = remote
+        .routes
+        .iter()
+        .map(|r| r.call(remote.agent_id.clone(), payload.clone(), body.clone()));
     // The losers are DROPPED with `select_all`'s rest — their routes forget them.
     // TODO (owner, open): first-reply-wins hides tab DESYNC — if the tabs of one
     // identity diverge, the other replies are dropped unseen. Must be solved
@@ -281,11 +217,9 @@ pub(crate) async fn call_peer(
 }
 
 /// An emit to a remote target: hand it to EVERY live route of the peer (each tab
-/// of one identity) — `caller` is `<this guid>|<sender>` when an agent emitted,
-/// none for an operator emit. GATED LIKE A SEND when an agent emits: its
-/// `can_call` must grant `emit` on `<guid>|<agent>` (egress; the page gates its
-/// own agent). A refused emit is dropped — an emit has no reply. Python
-/// `Agent.emit` on a qualified `<guid>|x`.
+/// of one identity). GATED LIKE A SEND when an agent emits: its `can_call` must
+/// grant `emit` on `<guid>|<agent>` (egress; the peer gates its own agents). A
+/// refused emit is dropped — an emit has no reply. Python `Agent._emit_remote`.
 pub(crate) async fn emit_peer(
     kernel: &Arc<Kernel>,
     target: &Arc<Agent>,
@@ -294,23 +228,14 @@ pub(crate) async fn emit_peer(
     let Some(remote) = target.remote.as_ref() else {
         return;
     };
-    let caller = match crate::send::current_sender() {
-        None => None,
-        Some(sender) => {
-            if kernel
-                .gate(&sender, "emit", target, &item.payload)
-                .is_some()
-            {
-                return;
-            }
-            // the peer judges the emitter by `<guid>|<agent>`: with no guid of
-            // our own there is nothing honest to put on the frame
-            let Some(own) = kernel.own_guid() else {
-                return;
-            };
-            Some(format!("{own}|{sender}"))
+    if let Some(sender) = crate::send::current_sender() {
+        if kernel
+            .gate(&sender, "emit", target, &item.payload)
+            .is_some()
+        {
+            return;
         }
-    };
+    }
     // TODO (owner, open): DESYNC between the tabs of one identity is envisioned
     // and unsolved — each tab gets this emit, nothing reconciles tabs that have
     // diverged. Think later.
@@ -318,7 +243,6 @@ pub(crate) async fn emit_peer(
         r.emit(
             remote.agent_id.clone(),
             item.payload.clone(),
-            caller.clone(),
             item.body.clone(),
         )
         .await;

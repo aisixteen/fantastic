@@ -49,7 +49,7 @@ async fn started() -> Arc<Kernel> {
         "kernel",
         json!({
             "type": "create_agent", "parent_id": root_id(&k), "id": "memory",
-            "handler_module": "ram_store.tools", "operator": true, "admins": ["kernel"],
+            "handler_module": "ram_store.tools",
         }),
     )
     .await
@@ -160,9 +160,10 @@ async fn an_id_block_reserved_inside_the_flush_is_quiet() {
     let woken = Arc::new(AtomicBool::new(false));
     let token = tap(&k, &seen, &woken);
     call(&k, "kernel", json!({"type": "list_agents"})).await;
-    // the flush mints its flush row id at the last id of the block; the call it
-    // sends crosses the bound inside the silent flush
-    while k.rows.next_id() < k.rows.id_reserved() - 1 {
+    // the block is spent: the flush row's id — the flush's one mint (its store
+    // write is bookkeeping, no call row) — crosses the bound inside the silent
+    // flush
+    while k.rows.next_id() < k.rows.id_reserved() {
         k.mint_id();
     }
     seen.lock().unwrap().clear();

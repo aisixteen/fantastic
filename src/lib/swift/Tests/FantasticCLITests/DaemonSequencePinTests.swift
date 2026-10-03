@@ -155,8 +155,7 @@
             ],
             [
                 "kernel", "create_agent", "parent_id=kernel_state",
-                "handler_module=ram_store.tools", "id=memory", "operator=true",
-                #"admins=["kernel"]"#,
+                "handler_module=ram_store.tools", "id=memory",
             ],
             ["kernel", "update_agent", "id=kernel_state", "memory_store_id=memory"],
         ] {

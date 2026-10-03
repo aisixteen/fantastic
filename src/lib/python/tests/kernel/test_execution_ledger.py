@@ -549,7 +549,7 @@ async def test_ledger_view_is_origin_scoped(seeded_kernel):
     """The ledger carries RESULT BODIES — an unscoped read is a side-channel
     around `callable_by`. An agent sees only what IT originated; the operator
     sees everything."""
-    from kernel._kernel import sender_context
+    from _testkit import as_agent
 
     a = await _mk(seeded_kernel, "lp_scope")
     b = await _mk(seeded_kernel, "lp_spy")
@@ -561,13 +561,7 @@ async def test_ledger_view_is_origin_scoped(seeded_kernel):
                 "payload": {
                     "type": "update_agent",
                     "id": b,
-                    "can_call": {
-                        "$self": "*",
-                        "$parent": "*",
-                        "$children": "*",
-                        "kernel_state": ["ledger"],
-                        a: "*",
-                    },
+                    "can_call": {"$self": "*", "kernel_state": ["ledger"], a: "*"},
                 },
             },
             {
@@ -575,12 +569,15 @@ async def test_ledger_view_is_origin_scoped(seeded_kernel):
                 "payload": {
                     "type": "update_agent",
                     "id": a,
-                    "callable_by": {
-                        "$self": "*",
-                        "$parent": "*",
-                        "$children": "*",
-                        b: "*",
-                    },
+                    "callable_by": {"$self": "*", b: "*"},
+                },
+            },
+            {
+                "target": "kernel",
+                "payload": {
+                    "type": "update_agent",
+                    "id": "kernel_state",
+                    "callable_by": {"$self": "*", b: ["ledger"]},
                 },
             },
         ]
@@ -590,7 +587,7 @@ async def test_ledger_view_is_origin_scoped(seeded_kernel):
         [{"target": a, "payload": {"type": "work"}, "id": "op_secret"}]
     )
     # spy-run work — what the spy MAY see
-    with sender_context(b):
+    with as_agent(seeded_kernel, b):
         await seeded_kernel.send(
             [{"target": a, "payload": {"type": "work"}, "id": "spy_own"}]
         )
@@ -631,8 +628,6 @@ async def _boot_with_store(tmp_path, monkeypatch):
                     "parent_id": k.id,
                     "handler_module": "ram_store.tools",
                     "id": "memory",
-                    "operator": True,
-                    "admins": ["kernel"],
                 },
             }
         ]
@@ -952,7 +947,7 @@ async def test_joining_is_authorized_against_the_verb_that_execution_ran(
     It checked the joiner's own payload verb, then the JOIN handed back the
     ORIGINAL call's outcome — a reply for a verb the joiner never had authorized.
     Measured 2026-08-28: `agent_b`, granted only `safe_verb` on a target, reused
-    an id `agent_a` had used for `create_privileged` and received agent_a's
+    an id `agent_a` had used for `create_sensitive` and received agent_a's
     secret verbatim. The handler ran once (dedup was correct); the RESULT crossed
     an authorization boundary.
 
@@ -962,22 +957,22 @@ async def test_joining_is_authorized_against_the_verb_that_execution_ran(
 
     Joining is equivalent to having made that call, so that is what is asked.
     """
-    from kernel._kernel import sender_context
+    from _testkit import as_agent
 
     k = seeded_kernel
     await _mk(k, "vault")
     k.ctx.agents["vault"]._meta["callable_by"] = {
-        "alice": ["privileged"],
+        "alice": ["sensitive"],
         "bob": ["harmless"],
     }
-    for who, grant in (("alice", ["privileged"]), ("bob", ["harmless"])):
+    for who, grant in (("alice", ["sensitive"]), ("bob", ["harmless"])):
         await _mk(k, who)
         k.ctx.agents[who]._meta["can_call"] = {"vault": grant}
 
-    with sender_context("alice"):
+    with as_agent(seeded_kernel, "alice"):
         a = (
             await k.send(
-                [{"target": "vault", "id": "job1", "payload": {"type": "privileged"}}]
+                [{"target": "vault", "id": "job1", "payload": {"type": "sensitive"}}]
             )
         )[0]
     # `errored`: the vault HANDLER ran and answered "unknown verb". A semantic
@@ -985,7 +980,7 @@ async def test_joining_is_authorized_against_the_verb_that_execution_ran(
     # what makes the join below the thing under test.
     assert a["status"] == "errored", a
 
-    with sender_context("bob"):
+    with as_agent(seeded_kernel, "bob"):
         b = (
             await k.send(
                 [{"target": "vault", "id": "job1", "payload": {"type": "harmless"}}]
@@ -995,10 +990,10 @@ async def test_joining_is_authorized_against_the_verb_that_execution_ran(
     assert b["result"].get("reason") == "unauthorized", b["result"]
 
     # An AUTHORIZED re-sender still dedups — the fix must not cost ensure-semantics.
-    with sender_context("alice"):
+    with as_agent(seeded_kernel, "alice"):
         again = (
             await k.send(
-                [{"target": "vault", "id": "job1", "payload": {"type": "privileged"}}]
+                [{"target": "vault", "id": "job1", "payload": {"type": "sensitive"}}]
             )
         )[0]
     assert again["result"] == a["result"], "the recorded outcome stopped being returned"

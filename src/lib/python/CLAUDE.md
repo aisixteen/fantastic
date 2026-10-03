@@ -2,7 +2,7 @@
 
 A medium that unifies humans and AIs into a single workspace. Recursive
 `Agent` class + a `Kernel` shared-context object, one primitive — the ARRAY-ONLY
-batch send `send([{target, payload, timeout?, id?, retries?, secret?}, ...]) -> [{pid, status, result}]`
+batch send `send([{target, payload, timeout?, id?, retries?}, ...]) -> [{pid, status, result}]`
 (single call = `(await send([{...}]))[0]`; statuses
 `completed|errored|failed|cancelled|timed_out`; concurrent dispatch, input order
 preserved; timeout per item, NEVER defaulted by the kernel, enforced through
@@ -47,7 +47,7 @@ answers `{type:"reflect"}` — the universal discovery verb.
 │   CALL GATE — two-sided deny-all `Agent.send` (kernel/_authz.py): an     │
 │   AGENT send needs the sender's `can_call` (egress) AND the target's     │
 │   `callable_by` (ingress) — reflect included; OPERATOR (sender=None)      │
-│   ungated. Authority descends only (no self-raise).                      │
+│   ungated. Baseline {$self:*}; mutators act on own children only.        │
 │   Persistence DECOUPLED — `kernel_state` (root) is a weak-bound STREAM      │
 │   CONSUMER: it auto-persists records THROUGH a `file_bridge` provider's     │
 │   write_stream (ephemeral `kernel_store`); cold read stays direct.          │
@@ -197,8 +197,8 @@ server, so a LARGE file pipes out chunk-by-chunk;
 the **allowance is the served agent's own gate** (a sealed `file_bridge` denies →
 `404`), path clamped to its root, and only what the bridge's `allow` list exposes is
 served (anything else → `404`). The PUMP (`file_bridge.pump`) is the server-side
-SOURCE→SINK copy; both ends run AS THE PUMP'S CALLER (audit AV-7) — the caller needs
-its own `read_stream` grant on the source and `write_stream` on the sink.
+SOURCE→SINK copy; both ends run AS THE FILE_BRIDGE (its own sends) — the bridge
+needs `read_stream` on the source and `write_stream` on the sink, both ends granted.
 
 The bootstrap wires the stdout renderer (Cli) when stdin is a tty —
 ephemeral, never persisted.
@@ -246,22 +246,22 @@ the frontend's `proxy_loader`. See "Two kernels" in the root readme.
 | bundle | role |
 |---|---|
 | `kernel_state` | the ROOT agent (`id="kernel_state"`) AND the persistence/hydration root: owns `.fantastic/`; answers `load_tree` / `persist_record` / `forget_record`; auto-persists the live tree by subscribing to the kernel state stream (debounced flush). A `root` meta lets a non-root instance serve a sub-namespace (the host-side of the frontend's `web/<session>/`). Kernel verbs are answered HERE, at the root, and nowhere else; the bootstrap wires Cli when `stdin.isatty()`. |
-| `static_loader` | a DECLARATIVE roster loader (`loader/static_loader`). Reads a `fantastic.yaml` manifest (`manifest` field) and at `boot` hydrates the declared agents as OPERATOR (`operator_context` + normal `create_agent`), as its own children — each carrying the baseline grant + the manifest's explicit `can_call`. The kernel never parses YAML; this bundle owns the format (mirror of `kernel_state` owning the `.fantastic` layout). That pass runs only on the kernel's own boot (origin none: the cold boot, `create_agent` booting the loader); an agent-sent `boot` is refused — `{reason:"unauthorized", booted:false}`, "static_loader: an agent-sent boot is refused — the roster is hydrated with operator authority, so only the kernel's own boot (cold boot, create_agent) runs it" (audit G-2/BV-2). After boot the roster is CLOSED by deny-all (an agent can't `create_agent`), so the manifest IS the roster. Idempotent by id (a reboot re-reads + skips existing). Seed with `fantastic init static_loader ./fantastic.yaml`. |
+| `static_loader` | a DECLARATIVE roster loader (`loader/static_loader`). Reads a `fantastic.yaml` manifest (`manifest` field) and at `boot` hydrates the declared agents — kernel bookkeeping: each a direct call of the kernel's own `create_agent` (`Kernel.bookkeeping` on the root), never a gated send — as its own children — each carrying the baseline grant + the manifest's explicit `can_call`. The kernel never parses YAML; this bundle owns the format (mirror of `kernel_state` owning the `.fantastic` layout). That pass runs only on the kernel's own boot (origin none: the cold boot, `create_agent` booting the loader); an agent-sent `boot` is refused — `{reason:"unauthorized", booted:false}`, "static_loader: an agent-sent boot is refused — hydrating the roster is the kernel's own bookkeeping, so only the kernel's own boot (cold boot, create_agent) runs it". After boot the roster is CLOSED by deny-all (an agent creates only its OWN children, and only when the root's `callable_by` and its own `can_call` grant `create_agent`), so the manifest IS the roster. Idempotent by id (a reboot re-reads + skips existing). Seed with `fantastic init static_loader ./fantastic.yaml`. |
 | `cli` | singleton child of root; renders token/done/say/error events to stdout |
 | `web` | uvicorn HTTP host. Renders nothing of its own (an undeclared `/` is a 404) — bakes in only `/<id>/file/<path>` (the `read_stream` file proxy) and the favicon. Call surfaces (WS, REST) live in sibling sub-agents: they DECLARE routes via the duck-typed `get_routes` verb (pure JSON data — `{kind, method?, path}`, so the reply renders over REST and persists in the ledger) and hand over the live endpoint per path through the duck-typed `route_endpoints(agent)` module hook (discovered like `on_delete`); a leg declaring a route without the hook fails web boot. Binds `host` (record meta; absent ⇒ `127.0.0.1`, set `0.0.0.0` explicitly to publish); refuses EVERY request (GET and the websocket upgrade included) whose `Host` is not its own authority — `<host>:<port>`, plus `localhost`/`127.0.0.1`/`[::1]` on that port when bound loopback; a `0.0.0.0` bind answers only `0.0.0.0:<port>`, so port maps / LAN / tunnel names are refused (403, logged; audit W-2, the DNS-rebinding read); refuses websocket upgrades and non-GET/HEAD/OPTIONS requests from a browser `Origin` that is neither its own nor listed in `allowed_origins` (403, logged; no Origin ⇒ allowed). The TS frontend kernel brings its own typed WS bridge (`ts/`) — no transport script is injected here. |
 | `web_ws` | WebSocket verb-invocation surface — the **ws INBOUND derivation of `io_bridge`**. Child of a `web` agent. Mounts `/<host_id>/ws` on its parent web's FastAPI app. Gates every inbound frame at the shared `gate_inbound` choke point with the leg's own `ingress_rule` (credential on the frame envelope `auth_token`); `egress_rule`/`auth` per leg as on a bridge. **SEALED BY DEFAULT** — a freshly-created `web_ws` with no rule denies (a browser can't connect until opened); open it consciously (see "Run"). Opt-in: `create_agent handler_module=web_ws.tools parent_id=<web> ingress_rule=allow_all_ingress`. |
-| `web_rest` | REST diagnostic surface — the **http INBOUND derivation of `io_bridge`**. Child of a `web` agent. Mounts `POST /<self_id>/<target_id>` body=payload → kernel.send → JSON reply (+ `GET /_reflect` shortcuts). Gates each request via the leg's `ingress_rule` at `gate_inbound` — FIRST, on the target and credential alone, before one body byte is read; an admitted body is read up to 16 MiB (`MAX_BODY` = io_bridge `MAX_FRAME`), larger → `413` (audit IO-4); the credential rides the **`X-Fantastic-Auth` header** (http carrier, not the envelope); the item's `id` rides `X-Fantastic-Execution-Id` and its `secret` marks `X-Fantastic-Secret` (a JSON array of marks — dotted strings and/or arrays of steps). **SEALED BY DEFAULT** — absent rule ⇒ deny (`403 {reason:"unauthorized"}`); open with `ingress_rule=allow_all_ingress`/`password`. Multiple instances coexist with different ids. Opt-in. |
-| `io/file_bridge` | filesystem-as-agent — text documents (`read` line-numbered + `version`, atomic `write`, SEARCH/REPLACE `edit` as a transaction over files, `append`, `if_match` guard, `undo` — one RAM slot per path, lost on restart), streams (`read_stream`, `write_stream`, `pump`), `list`, `delete`, `rename`, `mkdir` — the **fs edge of the io family**: crossing kernel↔disk is gated like any io_bridge leg (same `ingress_rule`/`egress_rule`/`auth` fields + registries), **SEALED BY DEFAULT** (absent rule ⇒ every verb except `reflect` denies `{reason:"unauthorized"}`; open with `ingress_rule=allow_all_ingress`), bound by the **running-dir law**: root + every path are clamped inside the dir the kernel runs in (`../`, `~`, absolute escapes, outward symlinks refuse), and **DENY-ALL AT THE PATH LEVEL**: the record's `allow` list names what it exposes (a file, or everything under a directory; `.` = the whole root) — no list exposes NOTHING; every path verb sees only exposed paths, anything else is `not_found` whether or not it exists; set at create or one path at a time with `allow`/`disallow` (gated verbs), paged by `allowed`; `readonly` still governs writes |
-| `io/exec_bridge` | commands-as-agents (`start`, `status`, `stop`, `interrupt`, `clear`, `boot`) — the **process edge of the io family**: crossing kernel↔subprocess is gated like any io_bridge leg (same `ingress_rule`/`egress_rule`/`auth` fields + registries), **SEALED BY DEFAULT** (absent rule ⇒ every verb except `reflect` denies `{reason:"unauthorized"}`; open with `ingress_rule=allow_all_ingress`), and bound by a **regex command ALLOWLIST**: `allowed` on the record is a list of regexes, and `start {command, args}` refuses unless the shell-joined line fullmatches one — enforced through `proc`, the ONE process surface, exactly as `fs` is the one opener. No per-call override, no default, no PATH fallback; an empty `allowed` runs nothing. WHERE and WITH WHAT a command runs is the record's too: `cwd` (REQUIRED — a leg without one runs nothing), `env` (operator extras), `inherit_env` (which kernel env vars pass through — none by default, `["*"]` = all); a per-call `env`/`cwd` is refused; a bare `command` is found on the CHILD's `PATH` only (none → refused naming `PATH`). **A terminal is a PTY JOB**: `start {command, args, pty:{cols,rows}}` runs the command on a pseudo-terminal behind the same gate (with no `command`, the CHILD's own `$SHELL` from `inherit_env`/`env`, permitted by the record's `shell: true|"login"` as exactly `$SHELL` / `$SHELL -l`); it streams `output {job_id, data}` (incremental UTF-8) and is driven with `write` (keystrokes, full + serialized — bracketed-paste-safe), `resize`, `ack` (VSCode flow control: pause past 100K unacked chars, resume under 5K), `output {job_id}` (the 256 KiB ring, for re-attach) and `paste_image` (image → scratch file → path typed, for a CLI like `claude` in a browser xterm) — each a gated verb, so a viewer can be read-only. A job records its `starter` (the caller of `start`; null = operator) and the DRIVE verbs (`write`/`resize`/`paste_image`/`stop`/`interrupt`/`clear`) refuse a job another caller started — "exec_bridge: job <id> is not yours — only the caller that started it (or the operator) may <verb> it" — while the reads (`status`/`output`/`ack`) stay grant-gated so a read-only viewer still re-attaches (audit AV-8); the owner-inbox relay drops a drive verb only when its `job_id` names ANOTHER job — another job's keystrokes, pastes and drive calls never reach a running program's `on_message`, while a drive verb with no `job_id` (the bulk `stop`/`interrupt`/`clear`) or naming this job is forwarded (audit BV-9, `DRIVE_VERBS`). Nothing respawns a terminal: `boot` starts nothing; a client that attaches finds no live job and `start`s one itself. It is a GENERAL-PURPOSE COMMAND runner. A durable program is a FILE some process (or a `write_stream`) put on disk; running it is `command` + `args` like anything else, so the job table / output pump / connector relay / fd passing / task-table rows / mail contract are all language-blind. A spawned program speaks the kernel over the inherited `FANTASTIC_CTRL_FD` (`[4-byte BE len | JSON]`); to get a `kernel` global it includes the reference wire client (`exec_bridge/_connector.py`, `CONNECTOR_SRC`) in its own source — the bridge prepends nothing. A call is `{op:"send", rid, target, payload, secret?}` (`kernel.send(target, payload=None, secret=None)`; `secret` on the frame only when given and non-empty), and the relay copies `secret` onto the dispatched item as sent — a program marks a credential read like any caller, the records show `<secret>`, and the program holds the real value (printing it lands in the job output, its own leak). Any verb the bundle does not own is MAIL for the running program (`{queued:true}`); jobs are kernel TASKS — a job's `job_id` IS its task id, an int from the one counter (`ps` lists it, `cancel task_id=<job_id>` kills it; `on_cancel` SIGKILLs the real process; a string id is refused, never coerced); `boot` is a no-op (nothing auto-restarts — a command is started by a caller, not the record). NOT a sandbox: an allowlisted command is a NAMED command, with all of that command's reach. |
-| `scheduler` | recurring tasks; its schedules persist through the loader (`persist_blob`/`load_blob`). **A schedule fires AS ITS CREATOR** (audit AV-6): `schedule` records the caller as `owner` (local id; foreign `<guid>|<agent>` + `via` leg; `null` = operator) and each fire runs under it (`sender_context` / `remote_caller_context` / `operator_context`), one batch per owner, concurrent — the scheduler is no deputy; `list`/`history`/`tick_now`/`unschedule`/`pause`·`resume {schedule_id}` see the caller's own schedules only (operator: all). **Cutting a peer off includes unscheduling its schedules** (owner 2026-10-03, audit BV-10): a foreign owner's fire runs as `<guid>|<agent>` and never passes the `via` leg, so sealing that leg or re-pinning its `peer_guid` does not stop it. `schedule` refuses a call carrying ANY secret mark (audit S5, as the relay seal) — a schedule keeps its payload and every fire re-sends it unmarked |
-| `memory/ram_store` | the MEMORY STORE in RAM (ephemeral — gone with the process), with the topology of a SQL store: rows, fold refs, grants (cascade on prune), a text index. Multi-tenant: every row under `<guid>|<agent id>`; a caller reads/writes only its own key plus what a grant covers. Verbs `append`/`read`/`search`/`prune` (own rows), `share`/`unshare`/`grants` (a grant covers `head_until`/`range`/`fold`/`row` of YOUR rows only, `frozen` or `live`), `inject`/`dump` (the whole tables — for record `admins` only; mock rehydration). Serves the operator only with `operator: true`. The root's `memory_store_id` and every AI agent's name one. |
+| `web_rest` | REST diagnostic surface — the **http INBOUND derivation of `io_bridge`**. Child of a `web` agent. Mounts `POST /<self_id>/<target_id>` body=payload → kernel.send → JSON reply (+ `GET /_reflect` shortcuts). Gates each request via the leg's `ingress_rule` at `gate_inbound` — FIRST, on the target and credential alone, before one body byte is read; an admitted body is read up to 16 MiB (`MAX_BODY` = io_bridge `MAX_FRAME`), larger → `413` (audit IO-4); the credential rides the **`X-Fantastic-Auth` header** (http carrier, not the envelope); the item's `id` rides `X-Fantastic-Execution-Id`. An admitted request is handed to the leg (`inbound_call`, as the transport — the operator) and the leg sends it AS ITSELF. **SEALED BY DEFAULT** — absent rule ⇒ deny (`403 {reason:"unauthorized"}`); open with `ingress_rule=allow_all_ingress`/`password`. Multiple instances coexist with different ids. Opt-in. |
+| `io/file_bridge` | filesystem-as-agent — text documents (`read` line-numbered + `version`, atomic `write`, SEARCH/REPLACE `edit` as a transaction over files, `append`, `if_match` guard, `undo` — one RAM slot per path, lost on restart), streams (`read_stream`, `write_stream`, `pump`), `list`, `delete`, `rename`, `mkdir` — the **fs edge of the io family**: crossing kernel↔disk is gated like any io_bridge leg (same `ingress_rule`/`egress_rule`/`auth` fields + registries), **SEALED BY DEFAULT** (absent rule ⇒ every verb except `reflect` denies `{reason:"unauthorized"}`; open with `ingress_rule=allow_all_ingress`), bound by the **running-dir law**: root + every path are clamped inside the dir the kernel runs in (`../`, `~`, absolute escapes, outward symlinks refuse), and **DENY-ALL AT THE PATH LEVEL**: the record's `allow` list names what it exposes (a file, or everything under a directory; `.` = the whole root) — no list exposes NOTHING; every path verb sees only exposed paths, anything else is `not_found` whether or not it exists; set at create or by `update_agent` (a record field); `readonly` still governs writes |
+| `io/exec_bridge` | commands-as-agents (`start`, `status`, `stop`, `interrupt`, `clear`, `boot`) — the **process edge of the io family**: crossing kernel↔subprocess is gated like any io_bridge leg (same `ingress_rule`/`egress_rule`/`auth` fields + registries), **SEALED BY DEFAULT** (absent rule ⇒ every verb except `reflect` denies `{reason:"unauthorized"}`; open with `ingress_rule=allow_all_ingress`), and bound by a **regex command ALLOWLIST**: `allowed` on the record is a list of regexes, and `start {command, args}` refuses unless the shell-joined line fullmatches one — enforced through `proc`, the ONE process surface, exactly as `fs` is the one opener. No per-call override, no default, no PATH fallback; an empty `allowed` runs nothing. WHERE and WITH WHAT a command runs is the record's too: `cwd` (REQUIRED — a leg without one runs nothing), `env` (operator extras), `inherit_env` (which kernel env vars pass through — none by default, `["*"]` = all); a per-call `env`/`cwd` is refused; a bare `command` is found on the CHILD's `PATH` only (none → refused naming `PATH`). **A terminal is a PTY JOB**: `start {command, args, pty:{cols,rows}}` runs the command on a pseudo-terminal behind the same gate (with no `command`, the CHILD's own `$SHELL` from `inherit_env`/`env`, permitted by the record's `shell: true|"login"` as exactly `$SHELL` / `$SHELL -l`); it streams `output {job_id, data}` (incremental UTF-8) and is driven with `write` (keystrokes, full + serialized — bracketed-paste-safe), `resize`, `ack` (VSCode flow control: pause past 100K unacked chars, resume under 5K), `output {job_id}` (the 256 KiB ring, for re-attach) and `paste_image` (image → scratch file → path typed, for a CLI like `claude` in a browser xterm) — each a gated verb, so a viewer can be read-only. Any caller the gate admits drives any job of the agent; the owner-inbox relay drops a drive verb only when its `job_id` names ANOTHER job — another job's keystrokes, pastes and drive calls never reach a running program's `on_message`, while a drive verb with no `job_id` (the bulk `stop`/`interrupt`/`clear`) or naming this job is forwarded (audit BV-9, `DRIVE_VERBS`). Nothing respawns a terminal: `boot` starts nothing; a client that attaches finds no live job and `start`s one itself. It is a GENERAL-PURPOSE COMMAND runner. A durable program is a FILE some process (or a `write_stream`) put on disk; running it is `command` + `args` like anything else, so the job table / output pump / connector relay / fd passing / task-table rows / mail contract are all language-blind. A spawned program speaks the kernel over the inherited `FANTASTIC_CTRL_FD` (`[4-byte BE len | JSON]`); to get a `kernel` global it includes the reference wire client (`exec_bridge/_connector.py`, `CONNECTOR_SRC`) in its own source — the bridge prepends nothing. A call is `{op:"send", rid, target, payload}` (`kernel.send(target, payload=None)`); the relay is a task the runner's `start` spawned, so a program's sends are the RUNNER's, gated as it. Any verb the bundle does not own is MAIL for the running program (`{queued:true}`); jobs are kernel TASKS — a job's `job_id` IS its task id, an int from the one counter (`ps` lists it, `cancel task_id=<job_id>` kills it; `on_cancel` SIGKILLs the real process; a string id is refused, never coerced); `boot` is a no-op (nothing auto-restarts — a command is started by a caller, not the record). NOT a sandbox: an allowlisted command is a NAMED command, with all of that command's reach. |
+| `scheduler` | recurring tasks; its schedules persist through the loader (`persist_blob`/`load_blob`). **A schedule fires AS THE SCHEDULER** — one batch under its own id, so the scheduler's `can_call` and each target's `callable_by` decide; `list`/`history`/`tick_now`/`unschedule`/`pause`·`resume {schedule_id}` see every schedule. The tick loop is a task the scheduler's `boot` spawned, so its fires are the scheduler's own sends; its sidecars persist by DIRECT calls of the loader's `persist_blob`/`load_blob` functions (bookkeeping, not a send) |
+| `memory/ram_store` | the MEMORY STORE in RAM (ephemeral — gone with the process), with the topology of a SQL store: rows, fold refs (cascade on prune), a text index. Multi-tenant: every row under `<guid>|<agent id>` (the operator: `<guid>|kernel`); a caller reads/writes only its own key. Verbs `append`/`read`/`search`/`prune` (own rows), `inject`/`dump` (the whole tables — plain verbs the gate decides; mock rehydration). The root's `memory_store_id` and every AI agent's name one. |
 | `ai/ollama/ollama_backend` | local LLM agent (ollama); per-client chat threads, FIFO lock, menu cache; RAW prompt-and-parse tool-calling — the `<call name=…>` TAG grammar with one child tag per argument and a verbatim `<bytes>` body, NO JSON on the model path (see `ai_core.tool_parse`) |
 | `ai/responses/responses_backend` (`responses_backend.tools`) | LLM agent over the OpenAI **Responses API** (`POST …/v1/responses`) — OpenAI, Ollama ≥ 0.13.4, or a proxy in front of an open-weights model. `endpoint` (the full URL), `model` and `credentials` (the key's `credential_store` ref) REQUIRED on the record, nothing guessed. Stateless (`store:false`, the whole conversation as typed `input` items, the system block as `instructions`). Reads BOTH channels — `reasoning_text`/`reasoning_summary_text` deltas wrapped in `<think>`, `output_text` deltas as output; a native `function_call` item is a loud error. A `max_output_tokens` cut (`response.incomplete`) fails a main turn and is an answer (`last_stop_reason:"max_tokens"`) on a bounded side call. Kept SEPARATE from the Chat-Completions backend (`vllm_backend`): a different request shape and event stream |
 | `ai/vllm/vllm_backend` (`vllm_backend.tools`) | LLM agent talking to a **vLLM** server DIRECTLY (`POST {endpoint}/chat/completions`, no proxy). REQUIRED on the record, refused AT THE WRITE when any is missing: `endpoint`, `model`, `max_tokens`, `kv_slots`, `kv_overflow`. Reads the thought channel (`reasoning_content`/`reasoning` → `<think>`), merges every system message into one at index 0 (Qwen's template refuses others), treats a stream ending without `finish_reason` as vLLM dying (an error), a `length` finish as a cut. Sampling defaults where the record sets none: temperature 0.2, top_p 0.8, top_k 20, reasoning_effort medium (`low`\|`medium`\|`xhigh`), thinking_token_budget 16000 (must stay below `max_tokens` — refused at write; a main turn sends an explicit budget as set, the default as `min(16000, max_tokens//2)`; a bounded side call (a fold summary) gets `min(budget, its max_tokens//2)`; under 256 NO budget is sent — a starved thought ends in an empty answer). **KV-cache session table**: ONE per endpoint, shared by every vllm_backend agent in the kernel — `kv_slots` live conversations (identity = system text + first user turn, i.e. the cached prefix), `kv_overflow` `evict` (LRU rotates out) or `reject` (newcomer refused with a retry time), `kv_ttl` 1800 s; bookkeeping only (vLLM owns the cache), shown in reflect `kv`. Timeouts connect 5 s / read 900 s; each failure says what it means (refused = vLLM still loading, connect timeout = instance stopped, 401/403 = name the key in `credentials`). **Key**: the record's optional `credentials` ref, read per request and sent as `Authorization: Bearer` — absent sends no header, so a keyless local vLLM works. Run the server WITHOUT a tool parser |
-| `security/credential_store` | SECRETS BY REF — a credential is a ref (`openai/main`) holding named fields, bound to ONE host. Verbs `set {ref, fields}` (call with `secret: ['payload.fields']`; takes NO host — a `host` on the call is refused, "credential_store set: takes no host — a ref's host is its declaration, written by update_agent on this store's refs"), `get {ref, host?}` (call with `secret: ['result']`; `host` refuses a ref bound elsewhere), `list` (metadata only), `forget {ref}` (drops the VALUE and its field names; the declaration stays; refused on the read-only `env` backend); an unmarked set/get is refused. Backends (`backend`): `file` (default) — an ABSOLUTE path, `~/.fantastic/credentials/<id>.yaml` unless `file` names another (`/…` or `~…`; a relative one is refused at the write: "file='<p>' must be an absolute path (starting with / or ~) — a relative path is refused"), written 0600, read only if a regular file owned by this user with no group/other bits — judged on the ONE open it is read from (`fs.read_private`: `O_NOFOLLOW`, then `fstat` of that descriptor; audit F5); `keychain` — the OS keychain, chosen explicitly (`keyring`), items under `keychain_namespace` (default `fantastic`; macOS's item "service"); `env` — read-only, `refs.<ref>.env` maps fields to variables. The bound host is stored WITH the value (audit S3): the file entry and the keychain item are `{host, fields}`, the host written by `set` from the declaration; a `get` whose declaration names another host than the stored one is refused, and so is a stored value with no host — a store elsewhere declaring the same id and ref reads nothing (`env` keeps no value at rest). A ref is DECLARED (and undeclared) only by `update_agent` on the store's record — `refs: {<ref>: {host, readers, writers, fields?/env?}}`, `host` required (readers/writers: ids, `$subtree:<id>`, `<guid>\|<agent>`); the declaration is the operator's alone (audit AV-4/AV-5): `set` stores a value for a declared ref (writers) under the DECLARED host and never creates one — an undeclared ref is "no such ref", the operator included; `forget` (writers) never touches the declaration; `get` needs a reader; a caller with no grant gets "no such ref". The record holds the host and field NAMES, never a value. Every AI backend reads its key here: `credentials: {store, ref}` on its record, read AS the agent before each request (`ai_core/credentials.py`) — nothing reads a key from the environment. A **secret holder**: the store stamps `holds_secrets: true` on its own record at boot and `validate_meta` refuses any other value ("holds_secrets must be true — a credential_store always holds secrets" — what `null`, the kernel-legal clear, gets; a malformed value gets the kernel's shape refusal first), so the AI's MODEL can never call it (ai_core refuses) while its backend reads the key; only the operator may lower the mark (the kernel gate, `side:"secret-holder"`). |
+| `security/credential_store` | SECRETS BY REF — a credential is a ref (`openai/main`) holding named fields, bound to ONE host. Verbs `set {ref, fields}` (takes NO host — a `host` on the call is refused, "credential_store set: takes no host — a ref's host is its declaration, written by update_agent on this store's refs"), `get {ref, host?}` (`host` refuses a ref bound elsewhere), `list` (metadata only), `forget {ref}` (drops the VALUE and its field names; the declaration stays; refused on the read-only `env` backend). A `set` payload and a `get` reply are recorded like any call's, in clear (owner 2026-10-04). Backends (`backend`): `file` (default) — an ABSOLUTE path, `~/.fantastic/credentials/<id>.yaml` unless `file` names another (`/…` or `~…`; a relative one is refused at the write: "file='<p>' must be an absolute path (starting with / or ~) — a relative path is refused"), written 0600, read only if a regular file owned by this user with no group/other bits — judged on the ONE open it is read from (`fs.read_private`: `O_NOFOLLOW`, then `fstat` of that descriptor; audit F5); `keychain` — the OS keychain, chosen explicitly (`keyring`), items under `keychain_namespace` (default `fantastic`; macOS's item "service"); `env` — read-only, `refs.<ref>.env` maps fields to variables. The bound host is stored WITH the value (audit S3): the file entry and the keychain item are `{host, fields}`, the host written by `set` from the declaration; a `get` whose declaration names another host than the stored one is refused, and so is a stored value with no host — a store elsewhere declaring the same id and ref reads nothing (`env` keeps no value at rest). A ref is DECLARED (and undeclared) only by `update_agent` on the store's record — `refs: {<ref>: {host, fields?/env?}}`, `host` required (audit AV-4/AV-5): `set` stores a value for a declared ref under the DECLARED host and never creates one — an undeclared ref is "no such ref", the operator included; `forget` never touches the declaration. There are no per-ref access lists: any caller the gate admits may `set`/`get`/`forget` a declared ref. The record holds the host and field NAMES, never a value. Every AI backend reads its key here: `credentials: {store, ref}` on its record, read AS the agent before each request (`ai_core/credentials.py` — the request runs in the agent's own turn) — nothing reads a key from the environment. |
 | `io/io_bridge` | the **IO base — pure shared library, NOT a registered bundle/agent** (no entry point, never instantiated). Holds the channel model (`direction · modality · transport · rule · extractor`), the `ingress_rules`/`egress_rules` registries, the transport-agnostic bridge engine (read loop, the 6 verbs, lifecycle, `make_verbs` factory), the unified `gate_inbound`/`stamp_egress` choke point, and the in-process `MemoryTransport`. Every derivation (`ws_bridge`/`relay_connector`/`web_ws`/`web_rest`/`file_bridge`) **imports** from it and reuses `rule.authorize`. IO legs are **SEALED BY DEFAULT** (`resolve_ingress({})` ⇒ `DenyInbound`); the open interior is unaffected. EVERY leg — the engine's wire bridges included — resolves its `ingress_rule`/`egress_rule`/`auth` off the LIVE record per frame (never a boot-time copy), so a seal or an opening by `update_agent` holds from the next frame and `reflect` always shows what the gate enforces (audit ARCH-2). A `forward`'s frame id is `<leg id>-<boot nonce>-<n>` (12 hex, minted at every boot): the receiver names the execution by it, so a restarted sender never joins an execution it already settled (audit IO-5). A denied client is taught by the denial's `hint` (the inline recipe — `update_agent <id> ingress_rule=allow_all_ingress`) and `reflect readme=true` on the **sealed agent itself** (each derivation ships its own short readme). |
-| `io/ws_bridge` | cross-kernel comms — a thin **WS-only, asymmetric** transport **derivation of `io_bridge`** A bridge agent opens a WS to the remote's `web_ws` surface and ships raw `{type:"call", target, payload}` frames; the remote dispatches `kernel.send` exactly like a browser frame and replies over the same socket — **no peer bridge needed**. Transports: memory (test backbone) / ws (`host` explicit) — it spawns nothing; an ssh tunnel is an `exec_bridge` job or devops. A ws leg to a non-loopback host is SEALED for secret marks (see "Secret values on a call"). Streaming via `watch_remote` (`{type:"watch", src}` out, `{type:"event", src, payload}` back, re-emitted on the bridge's own inbox as payload + `src` ONLY for a subscribed `src` — nothing flows before `watch_remote` or after `unwatch_remote`). **Foreign callers**: a leg serving inbound calls (paired transport, relay) PINS one peer kernel (`peer_guid`); every inbound frame names its caller `<guid>|<agent>` (a caller from any other guid, or no pin, is refused), and the call is gated as THAT foreign id — the target's `callable_by` must name `<guid>|<agent>` or `<guid>|*`; accepting the leg is not accepting its peer. All transports are **weak binding** — addressed by URL + path only; no shared Python types with the remote kernel. Weak proxy: local→local stays direct. **Authorization**: two symmetric typed per-leg rules (enforced on the receiver) — `ingress_rule` (inbound FILTER, gated at the shared `gate_inbound` choke point) + `egress_rule` (outbound DECORATOR, stamps a credential on the frame envelope); `auth` is a shorthand for both. **SEALED BY DEFAULT** — absent rule ⇒ `deny_inbound` (reply `{reason:"unauthorized"}`); open consciously with `ingress_rule=allow_all_ingress`/`password` (kernel-GROUP shared secret from an env var). Resolved by name from the `io_bridge.ingress_rules` / `egress_rules` registries; shared with relay_connector. |
-| `io/relay_connector` | cross-kernel comms through a **relay-KERNEL router** (`../fantastic_relay`). Same verbs/frames as `ws_bridge` (both ride the shared `io/io_bridge` engine). A connector dials the relay at `ws://<host>/<guid>` (subprotocol `fantastic.relay.v1`, group password in the `X-Fantastic-Auth` header, checked once at the WS upgrade — the password lives in a `credential_store`, NEVER on the record: `credentials: {store, ref}`, read before every dial AS the connector, field `password`, `secret: ['result']`, pinned to the relay URL's host, as an AI backend reads its key; no `credentials` ⇒ boot fails loud) and reaches a partner kernel by its `partner_guid`; the relay routes by `target` and delivers peer→peer ONE-WAY as `{type:"event", source, payload}`. The connector **TUNNELS** the bridge frames inside relay `{type:"send", target:partner, payload:<frame>}` (out) / unwraps partner `event.payload` (in), so forward/reply correlation + symmetric serving work UNCHANGED — both peers run a connector. Raw `read_stream` chunks ride as native binary WS frames (no base64; the relay forwards the frame kind). **No certs / mTLS / token-issuer** — the relay auths the connection via the header password and routes by GUID. Self-healing: auto-connect + auto-reconnect (`reconnect` meta, default 10s; `0`=one-shot), `keepalive` every `heartbeat`s (default 30), `reflect.connected`=live socket. Directory passthrough (the relay's own `relay` agent, `target:"relay"`): `list_peers` → `{peers:[{guid,status,last_seen,since}]}`, `watch_directory`/`unwatch_directory` re-emit `peer_joined`/`peer_left`/`peer_evicted`/`peer_status` on the connector's inbox. All three host runtimes (python/rust/swift) interop any-to-any — proven by `integration_tests/relay_e2e` against a live `relayd`. Our own `guid` (the WS path) **auto-mints on first boot if absent and persists** into the record (explicit `guid` wins, a minted one is never regenerated — stable across reboots); `partner_guid` stays explicit (discovered via the partner's `reflect`/`list_peers`). **Directory typing (kernelgroup):** a connector advertises an opaque **attrs blob** to the relay on connect (re-announced each reconnect) — well-known keys `role` (`manager`\|`kernel`, default kernel), `owner_guid` (managing peer, null=standalone), `exposes` (control-surface list); the relay stores + reflects it (into `list_peers` entries' `attrs` + a `peer_updated` event) and NEVER interprets it. `set_identity` (verb: optional role/owner_guid/exposes, merged) updates live + persists. reach ≠ control — driving another manager's kernel is a plain `forward` to that manager. Record fields: `relay_url` · `guid` (auto-minted if absent) · `partner_guid` · `credentials` ({store, ref} — the relay password, X-Fantastic-Auth) · `heartbeat` · `reconnect` · `role` · `owner_guid` · `exposes`; `transport="relay"`. Per-leg `ingress_rule`/`egress_rule` (or the `auth` shorthand) gate the **tunneled** calls and are INDEPENDENT of the relay connection auth — directional/hub-spoke topology + kernel-group `password` membership (shared secret from env); IO legs are **SEALED BY DEFAULT** (absent rule ⇒ `deny_inbound`), opened consciously (`ingress_rule=allow_all_ingress`/`password`). |
+| `io/ws_bridge` | cross-kernel comms — a thin **WS-only, asymmetric** transport **derivation of `io_bridge`** A bridge agent opens a WS to the remote's `web_ws` surface and ships raw `{type:"call", target, payload}` frames; the remote dispatches `kernel.send` exactly like a browser frame and replies over the same socket — **no peer bridge needed**. Transports: memory (test backbone) / ws (`host` explicit) — it spawns nothing; an ssh tunnel is an `exec_bridge` job or devops. Streaming via `watch_remote` (`{type:"watch", src}` out, `{type:"event", src, payload}` back, re-emitted on the bridge's own inbox as payload + `src` ONLY for a subscribed `src` — nothing flows before `watch_remote` or after `unwatch_remote`). **Inbound calls are the LEG's**: a leg serving inbound calls (paired transport, relay) sends each one AS ITSELF (its read loop is a task its `boot` spawned) — the leg's `can_call` and the target's `callable_by` decide; whoever called on the far kernel is not an identity here. All transports are **weak binding** — addressed by URL + path only; no shared Python types with the remote kernel. Weak proxy: local→local stays direct. **Authorization**: two symmetric typed per-leg rules (enforced on the receiver) — `ingress_rule` (inbound FILTER, gated at the shared `gate_inbound` choke point) + `egress_rule` (outbound DECORATOR, stamps a credential on the frame envelope); `auth` is a shorthand for both. **SEALED BY DEFAULT** — absent rule ⇒ `deny_inbound` (reply `{reason:"unauthorized"}`); open consciously with `ingress_rule=allow_all_ingress`/`password` (kernel-GROUP shared secret from an env var). Resolved by name from the `io_bridge.ingress_rules` / `egress_rules` registries; shared with relay_connector. |
+| `io/relay_connector` | cross-kernel comms through a **relay-KERNEL router** (`../fantastic_relay`). Same verbs/frames as `ws_bridge` (both ride the shared `io/io_bridge` engine). A connector dials the relay at `ws://<host>/<guid>` (subprotocol `fantastic.relay.v1`, group password in the `X-Fantastic-Auth` header, checked once at the WS upgrade — the password lives in a `credential_store`, NEVER on the record: `credentials: {store, ref}`, read before every dial AS the connector (the dial runs in its dispatch or a task it spawned), field `password`, pinned to the relay URL's host, as an AI backend reads its key; no `credentials` ⇒ boot fails loud) and reaches a partner kernel by its `partner_guid`; the relay routes by `target` and delivers peer→peer ONE-WAY as `{type:"event", source, payload}`. The connector **TUNNELS** the bridge frames inside relay `{type:"send", target:partner, payload:<frame>}` (out) / unwraps partner `event.payload` (in), so forward/reply correlation + symmetric serving work UNCHANGED — both peers run a connector. Raw `read_stream` chunks ride as native binary WS frames (no base64; the relay forwards the frame kind). **No certs / mTLS / token-issuer** — the relay auths the connection via the header password and routes by GUID. Self-healing: auto-connect + auto-reconnect (`reconnect` meta, default 10s; `0`=one-shot), `keepalive` every `heartbeat`s (default 30), `reflect.connected`=live socket. Directory passthrough (the relay's own `relay` agent, `target:"relay"`): `list_peers` → `{peers:[{guid,status,last_seen,since}]}`, `watch_directory`/`unwatch_directory` re-emit `peer_joined`/`peer_left`/`peer_evicted`/`peer_status` on the connector's inbox. All three host runtimes (python/rust/swift) interop any-to-any — proven by `integration_tests/relay_e2e` against a live `relayd`. Our own `guid` (the WS path) **auto-mints on first boot if absent and persists** into the record (explicit `guid` wins, a minted one is never regenerated — stable across reboots); `partner_guid` stays explicit (discovered via the partner's `reflect`/`list_peers`). **Directory typing (kernelgroup):** a connector advertises an opaque **attrs blob** to the relay on connect (re-announced each reconnect) — well-known keys `role` (`manager`\|`kernel`, default kernel), `owner_guid` (managing peer, null=standalone), `exposes` (control-surface list); the relay stores + reflects it (into `list_peers` entries' `attrs` + a `peer_updated` event) and NEVER interprets it. `set_identity` (verb: optional role/owner_guid/exposes, merged) updates live + persists. reach ≠ control — driving another manager's kernel is a plain `forward` to that manager. Record fields: `relay_url` · `guid` (auto-minted if absent) · `partner_guid` · `credentials` ({store, ref} — the relay password, X-Fantastic-Auth) · `heartbeat` · `reconnect` · `role` · `owner_guid` · `exposes`; `transport="relay"`. Per-leg `ingress_rule`/`egress_rule` (or the `auth` shorthand) gate the **tunneled** calls and are INDEPENDENT of the relay connection auth — directional/hub-spoke topology + kernel-group `password` membership (shared secret from env); IO legs are **SEALED BY DEFAULT** (absent rule ⇒ `deny_inbound`), opened consciously (`ingress_rule=allow_all_ingress`/`password`). |
 
 **View bundles live in the FRONTEND kernel (`ts/`), not here.** The
 canvas compositor and its view/content agents are `*.ts` bundles that
@@ -316,9 +316,8 @@ they did not register.
   (what that bridge exposes under its root), `file_bridge_id`
   (what a consumer persists THROUGH) — so the whole IO landscape (which
   legs are open vs sealed, what's wired to what) is readable from ONE root
-  reflect, no per-agent round-trips. The `detail:"full"` wiring tree is GATED PER
-  NODE exactly as the distilled roster is: a node the caller may not `reflect`
-  keeps only `id` + `children` (owner 2026-10-03, audit KV-3; `_may_reflect`).
+  reflect, no per-agent round-trips. A reflect that passes the gate returns the
+  tree whole (roster and `detail:"full"`).
   The **ROOT** reflect additionally carries `runtime` — a stable lowercase
   enum (`python` | `rust` | `swift` | `ts`) naming the kernel's runtime, so
   a client gates runtime-specific UI from one round-trip. Same field name +
@@ -347,8 +346,8 @@ they did not register.
   and discovered by `reflect` to `<guid>|kernel`. The KERNEL routes it (`ctx.peers`,
   registered by the transport that holds the connection — the leg only carries
   frames): the sender's `can_call` must name `<guid>|<agent>` or `<guid>|*` (egress
-  is the whole host-side check), the peer's own gate judges the caller as
-  `<this guid>|<sender>`; `<own guid>|x` is the local `x`; a guid not connected is an
+  is the whole host-side check), the peer's own gate judges the call as the leg
+  that serves it there; `<own guid>|x` is the local `x`; a guid not connected is an
   unknown agent; a disconnect mid-call settles the call as a `transport_error`.
   **A guid holds a SET of live routes** (owner, 2026-10-03 — the tabs of one identity
   are one principal): a second `hello` with a live guid ADDS a route, a disconnect
@@ -422,125 +421,6 @@ they did not register.
   model that never reflects the root never learns they exist). Bundles that fork work
   OUTLIVING a dispatch (an `exec_bridge` job) register it with
   `kernel.ctx.spawn_task(...)`, so `ps` sees it and `cancel` reaches it.
-- **Secret values on a call** (`kernel/_secret.py`, owner 2026-10-01): the
-  CALLER marks `secret: [mark, …]` on a batch item. A mark is a DOTTED STRING
-  (`payload.<field…>` or `result[.<field…>]`, split on its dots; at a list a digits
-  step is an index) or — owner 2026-10-03, and one list may mix them — an ARRAY OF
-  STEPS with `_binary_path`'s step rules (`["payload", <step>, …]` /
-  `["result", <step>…]`: a string step is an object key taken literally, so
-  `["payload", "a.b"]` marks the key `"a.b"`; a non-negative int step is a list
-  index); `current_secret()` hands a handler the marks as given. A malformed array
-  is refused: `[]` ("path [] has no steps"), a step neither a string nor a
-  non-negative int, a first step not `payload` (with a step after it) / `result`,
-  `["payload", "type"]`, a payload path naming nothing. The target gets the real payload and the caller the real
-  reply; every record and mirror shows `<secret>` — call/settle rows (so the memory
-  store), `ledger` read-back, the state stream's `payload`+`summary`, inbox and
-  watcher mirrors, and error texts (secret values are scrubbed out of any string; a
-  dict key or a number whose text EQUALS one is the placeholder too — owner-approved
-  2026-10-03, audit S7).
-  `payload.type` can never be hidden; a mark on a `create_agent`/`update_agent`
-  payload field is refused — the kernel writes those into the agent's record (its
-  `agent_created`/`agent_updated` events, `agent.yaml`): "a record field cannot be
-  secret — use a credential_store ref" (owner-approved 2026-10-03, audit S2); a
-  payload mark naming nothing is refused; a named
-  secret call replays only from RAM — from the store it is refused, loud. Masking
-  is not isolation: secrets go to bundles that keep them, never to AI agents.
-  **A JOIN of a secret-marked execution** (owner-approved 2026-10-03, audit F1): the
-  REAL outcome goes to the execution's ORIGINAL caller only — the identity that
-  opened it (`_caller_identity`: the sending agent; the operator, no sender; the
-  qualified `<guid>|<agent>` when a bridge leg relays a foreign caller). Any other
-  joiner — operator included — gets it AS SHOWN (`_secret.shown_outcome`, what the
-  ledger reads back): the gate re-checks the joiner on the original VERB, but a
-  handler that answers by WHO asks (a credential_store's per-ref `readers`) never
-  runs for a joiner. An unmarked execution joins unchanged. On `web_rest`/`web_ws`
-  every client admitted to a leg is dispatched AS the leg, so the leg is the
-  original caller and any of its clients joining gets the real outcome: everyone
-  admitted to one leg is one principal — one tenant per leg (owner 2026-10-03,
-  audit S6). **A JOIN of a caller-scoped kernel verb** (`ledger`, `ack_deadletter` —
-  their answer is the sender's own view; owner-approved 2026-10-03, audit KV-1) by any
-  caller but the one that sent it — the operator included — is refused, `bad_arg`
-  `arg:"id"`, "send: id <id> names another caller's <verb> execution — …"; a new
-  caller-scoped verb joins `_CALLER_SCOPED_VERBS`; cross-caller joins of every other
-  verb stay open by design.
-  **The marks cross every bridge** (owner 2026-10-02): a ws / bridge `call` frame
-  carries them as `secret: [marks]` beside `payload` (`{type:"call", id, target,
-  payload, caller?, secret?}`), web_rest as the `X-Fantastic-Secret` header (a JSON
-  array whose elements are dotted strings and/or arrays of steps — the same value,
-  one parser), and the RECEIVING kernel dispatches the item
-  with them verbatim (web_ws `_on_call`, the io_bridge engine's inbound call), so
-  its call/settle rows, ledger, state stream and memory store show `<secret>` as
-  the caller's do; a malformed mark is its own `_secret.check` refusal, before
-  dispatch. Outbound, a `<guid>|<agent>` send hands its marks to the peer route
-  (`PeerRoute.call(agent_id, payload, caller, secret)`, put on the frame verbatim);
-  `forward` re-roots ITS OWN call's marks (`io_bridge.forwarded_secret`), each in
-  the spelling it came in: `payload.payload.<f…>` → `payload.<f…>` and
-  `["payload","payload",<s>…]` → `["payload",<s>…]`, `result[.<f…>]` /
-  `["result",<s>…]` as is, marks on forward's own fields stay local. The reply
-  carries the real result back.
-  The GUEST WIRE carries them too: an exec_bridge program's `{op:"send", rid,
-  target, payload, secret?}` (connector `kernel.send(target, payload=None,
-  secret=None)`, marks of either spelling passed as given) — the relay copies
-  `secret` onto the dispatched item as sent; the
-  program is the receiver of the real values (what it prints is job output).
-  **Except a RELAY leg — sealed** (owner 2026-10-02): relayd dispatches tunneled
-  frames into its own kernel and records them unmasked, so `relay_connector` refuses
-  any call carrying marks — outbound (`forward` with any mark) and inbound (a
-  tunneled `call` frame naming `secret`, answered and never dispatched) —
-  `{reason:"unauthorized"}`, "relay_connector: a call carrying secret marks may not
-  cross a relay leg — the relay records every frame it routes, unmasked". TODO at
-  both seals: relayd re-roots the inner frame's marks onto its delivery item
-  (`payload.<f>` → `payload.payload.payload.<f>`) and reply frames get a way to
-  carry result marks.
-  **The scheduler is sealed too** (owner 2026-10-03, audit S5): a schedule keeps its
-  payload in its sidecar and every fire re-sends it as a fresh call with no marks,
-  so `schedule` refuses a call carrying ANY mark — `{reason:"unauthorized"}`,
-  "scheduler: a call carrying secret marks may not be scheduled — a schedule keeps
-  its payload and every fire re-sends it unmarked".
-  **And a ws_bridge leg to a NON-LOOPBACK host — sealed** (owner 2026-10-03, audit
-  S8): `ws://` carries every frame in clear, so a leg whose `host` is not
-  `localhost`/`127.0.0.1`/`[::1]` (an ssh tunnel's local end is loopback) refuses
-  the same two ways, `{reason:"unauthorized"}`, "ws_bridge: a call carrying secret
-  marks may not cross a ws:// leg to a non-loopback host — ws:// carries every frame
-  in clear". wss:// (TLS) is the later path.
-  **A MODEL NEVER RECEIVES A SECRET** (owner 2026-10-02): `holds_secrets: true` on a
-  record makes that agent unreachable from a model turn. `ai_core.core._route_reply`
-  — the one place a model-parsed call is dispatched (one call, a batch, a `to`
-  fan-out, a call beside `await`) — asks `ai_core.credentials.secret_holder_refusal`
-  for each call's target AND `reply_to`; a holder is refused before anything is
-  sent, `{reason:"unauthorized", agent}`, "<id> holds secrets — a secret holder
-  answers backends, never a model turn; this call was not dispatched", delivered to
-  the model itself. Each address is resolved first as the kernel's `send` resolves
-  it (`credentials._local_record`): `<this kernel's guid>|<holder>` IS the holder and
-  is refused; a connected peer's `<guid>|<agent>` has no record here and is not
-  judged (its own kernel's AI layer guards it). The backend's own key read (`credentials.key_reader`) calls the kernel
-  directly and is untouched. **Nor does a model JOIN a secret** (owner-approved
-  2026-10-03, audit F2): a model call whose `<exec_id>` names an execution that
-  carried `secret` marks — `Kernel.carried_secret(id)`, the id resolved as `send`
-  resolves it (int = message id, string = name, held in RAM) — is refused the same
-  way before anything is sent (`credentials.secret_join_refusal`),
-  `{reason:"unauthorized", exec_id}`, "exec_id <id> names an execution that carried
-  secret values — a model never joins one; this call was not dispatched". A model
-  cannot mark a call, so such an execution is its backend's key read (the SAME
-  caller — the kernel would hand back the real reply) or another caller's; this is
-  what guards a store on a CONNECTED PEER, whose `<guid>|creds` the holder check
-  cannot judge but whose key read is a LOCAL execution. Every `credential_store` stamps it on itself; an
-  operator may set it on any agent; the reflect of a holder shows `holds_secrets`.
-  **The kernel owns the field** (`kernel/_agent.py`, owner 2026-10-02): its SHAPE
-  is judged at the write on every agent (`_bad_holder_mark`, create_agent and
-  update_agent, after the grant shape) — only `true` or `null`, anything else
-  `{reason:"invalid_meta"}`, "holds_secrets must be exactly true (this agent holds
-  secrets) or null (the operator clears the mark) — got <type>" (`bool`, `str`,
-  `int`, …); and ONLY THE OPERATOR LOWERS IT (`_check_holder_mark`, in the gate,
-  before the shape check): an agent's `update_agent` writing anything but `true`
-  into `holds_secrets` on an agent whose record says `true` is refused,
-  `{reason:"unauthorized", side:"secret-holder"}`, "<sender> may not clear
-  holds_secrets on <id>: it holds secrets, and only the operator lowers that
-  mark" — so a model granted `update_agent` cannot unmark a store and then call
-  it. An agent may still mark (`true`). **The clear is `holds_secrets: null`**
-  (operator): update_agent REPLACES a named field, so the record carries `null` —
-  not a holder, as `delete_lock: null` lifts a lock. Order: gate → kernel shape →
-  the bundle's `validate_meta`; a `credential_store` refuses `null` on itself (its
-  own text), every other bad value gets the kernel's.
 - **A backend KIND's record schema** (`ai_core/schema.py`): each AI backend
   module publishes `RECORD_SCHEMA` — its own fields, then the ones every ai_core
   agent takes (`memory_store_id` required; `context_window`, `output_reserve`,
@@ -583,102 +463,69 @@ they did not register.
   `interrupt` on `exec_bridge` is a DIFFERENT thing — SIGINT to one of ITS
   jobs by `job_id`, the signal-precise twin of `stop`'s SIGKILL; not a call
   cancellation.) Pure-async bundles need nothing.
-- **The CALL GATE — fully-gated, two-sided, from-above-only.** Every
-  `Agent.send` passes a gate in `kernel/_authz.py` (`authorize_call` → the one
-  `Decision`; io_bridge imports that type UP — the kernel owns it). The trust
-  boundary is WHO ORIGINATED the send (`_current_sender`):
-  - **Operator send** — `sender is None` (the CLI, the cold bootstrap, a loader
-    hydrating at boot, a test driver, or a verb completing its own side effect
-    under `operator_context`). The origin root of trust → **ungated**; it never
-    reaches the gate.
-  - **Agent send** — `sender` is set. Checked TWICE: **egress** — the SENDER's
-    `can_call` must allow `(target, verb)` — AND **ingress** — the TARGET's
-    `callable_by` must allow `(sender, verb)`. An edge exists only if BOTH ends
-    grant it. A denial names the `side` (`egress`|`ingress`). Both fields are grant
-    maps of the same shape, `{ id|token : ["<verb>", …] | "*" }`.
-  The gate NEVER branches on a verb name — **nothing is exempt, `reflect` included**
-  (gating reflect closes lateral discovery; an operator-conferred toolset that
-  needs to see peers must grant `reflect` on them). Relative tokens resolve at the
-  gate relative to the grant's HOLDER: `$self`, `$parent`, `$children` (direct
-  children — set membership), `$loader` (the persistence root; rarely named, NOT in
-  the baseline), `$subtree:<X>` (ingress only — see "Subtree grants" below). The
-  **structural baseline** the kernel stamps + MERGES on every
-  agent (root, created, disk-loaded alike, in `Agent.__init__`), on BOTH fields, is
-  `{$self:*, $parent:*, $children:*}` — reach/accept your own subtree and your
-  creator. An explicit grant in the create payload ADDS edges on top (merge, never
-  replace). **PRIVILEGED verbs** (`_authz.PRIVILEGED_VERBS`, 20: the tree mutators
-  `create_agent`/`delete_agent`/`update_agent`, `state_subscribe`, `allow`/`disallow`,
-  the root's `kernel_start`/`kernel_stop`/`shutdown_agents`/`ps`/`cancel`/`ledger`/
-  `ack_deadletter`, the loader's `persist_record`/`forget_record`/`load_tree`, and —
-  by verb name, whatever the bundle (owner 2026-10-03, audit BV-1) —
-  `stop`/`mount`/`unmount`/`boot`) are never covered by a wildcard under a
-  STRUCTURAL token — a named verb, or a NAMED id's `*`, covers one — EXCEPT when the
-  other end is the holder itself (forking your OWN subtree is baseline). This is an
-  EGRESS rule (it constrains who may REACH a mutation); on ingress a `$children:*`
-  callee legitimately accepts a privileged verb, since egress already guards
-  escalation. **`watch` whose src is the ROOT** is held to the same rule (owner
-  2026-10-03, audit KV-2 — the root's inbox carries every kernel verb's payload,
-  `persist_blob` contents included): `can_call {<root>: ["watch"]}`, the root's id
-  with `*`, or `$parent: ["watch"]`; `$parent: "*"` never covers it. Every other
-  `watch` is an ordinary verb. **Kernel verbs at the root** (`list_agents`, `ps`,
-  `cancel`, `ledger`, …) are judged on egress alone — except for a FOREIGN caller a
-  bridge leg relays: the root's `callable_by` must ALSO accept its `<guid>|<agent>`
-  or `<guid>|*`, refused `side:"ingress"`, "<root> does not accept '<verb>' from
-  <guid>|<agent>" (owner 2026-10-03, audit AV-3).
-  **The tree mutators are gated on their OPERAND**, never on the root that merely
-  answers them: `create_agent` on its `parent_id` (`_gate_placement`),
-  `update_agent`/`delete_agent` on the record `payload.id` names (`_gate_operand`,
-  owner-approved 2026-10-03, audit AV-1 — one `<root>:[update_agent,delete_agent]`
-  grant used to rewrite or delete ANY record). Inside the sender's own subtree
-  (itself included) it is baseline — never for a foreign caller a bridge leg
-  relays: it owns no subtree here, so under the leg (the leg's record included)
-  it takes the path below, egress on the leg's `can_call`, ingress as its
-  `<guid>|<agent>` (audit G-1). Anywhere else BOTH: the sender's `can_call`
-  NAMES the operand with the verb — a literal `{<id>: ["update_agent"]}`; `<id>:
-  "*"`, `["*"]`, a structural token and `<guid>|*` never cover it; a heritable
-  entry for that id naming the verb does (`names_operand` / `_heritable_egress`) —
-  refused `side:"egress"`, "<sender> may not <verb> <id>", hint "<id> is outside
-  your subtree: your can_call must name it with the verb — {'<id>': ['<verb>']},
-  never a wildcard — and its callable_by must accept you"; AND the operand's
-  `callable_by` (`create_agent`: the parent's) accepts the sender (a relayed
-  foreign caller as its `<guid>|<agent>`) — refused `side:"ingress"`, "<id> does
-  not accept '<verb>' from <sender>" ("<parent> does not accept a child from
-  <sender>"). The self-grant, delegation and holder-mark rules then apply as before.
-  So `<root>:[update_agent]` edits the ROOT record only; an id naming no agent
-  takes the root path and the verb answers `unknown_agent`.
-  **Authority flows from ABOVE only:** grants are set by the creator/operator at
-  `create_agent`, or a parent DELEGATES a subset of its OWN `can_call` to a
-  descendant (`callable_by` is freely conferrable — ingress grants no reach). An
-  agent can NEVER raise its own authority — an `update_agent` on itself editing
-  `can_call`/`callable_by` is REFUSED (`side:"self-grant"`); over-delegating more
-  `can_call` than the granter holds is refused (`side:"delegation"`); lowering a
-  secret holder's `holds_secrets` is the operator's alone (`side:"secret-holder"`).
-  **Subtree grants** — for agents spawned DYNAMICALLY under one owner (a web leg's
-  terminals and AIs), resolved against the LIVE tree at call time:
-  - **`$subtree:<X>`** (`callable_by` ONLY) accepts X and every live descendant of
-    X. A local id only: a foreign `<guid>|<agent>` caller never matches, an empty
-    or `|`-qualified X is refused at write time, an absent X matches nothing.
-  - **Heritable `can_call` entry** `{<literal target id>: {"verbs": [...], "for":
-    "descendants"}}` never grants its HOLDER; when a sender's own `can_call`
-    refuses, egress walks the sender's ancestors (nearest first) and the first
-    heritable entry for that target that covers the verb allows. Applies to every
-    gated path (`_gate`, `_gate_placement`, watch/emit/state_subscribe, web's
-    `_browser_reachable`).
-  Both are structural for PRIVILEGED verbs: a named verb covers one, `*` never does
-  on egress. Only the operator, or a holder of the SAME heritable entry, confers
-  one — a subset of it (`*` needs `*`; a named verb needs the name, or `*` for a
-  non-privileged verb); anyone else is refused `side:"delegation"`. Wrong shapes
-  are refused at write time as `invalid_meta`.
-  **Persist is processed from ABOVE** (NOT a verb exemption): a consumer's
-  `persist_blob`/`load_blob` to the loader, and `create_agent`'s child-boot, run
-  under `operator_context()` — bookkeeping, ungated by ORIGIN.
+- **The CALL GATE — minimal, two-sided, explicit grants only** (owner decision
+  2026-10-03). Every `Agent.send` passes a gate in `kernel/_authz.py`
+  (`authorize_call` → the one `Decision`; io_bridge imports that type UP — the
+  kernel owns it). The trust boundary is WHO ORIGINATED the send (`_current_sender`).
+  **Identity comes ONLY from dispatch** (owner 2026-10-04): the kernel sets it when it
+  runs an agent's code — its handler, or its `on_cancel`/`on_delete` hook — and the
+  sends that code makes (and the tasks it spawns) are that agent's. There is no switch
+  to send as anyone else.
+  - **Operator send** — `sender is None`: a send made outside every dispatch (the
+    CLI, the cold bootstrap, a test driver, a transport handing an inbound frame to
+    its leg). The origin root of trust → **ungated**.
+  - **Agent send** — passes iff the SENDER's `can_call` grants `(target, verb)`
+    (**egress**) AND the TARGET's `callable_by` grants `(sender, verb)` (**ingress**).
+    A denial names the `side` (`egress`|`ingress`), egress first.
+  **Two record fields only**, `can_call` and `callable_by`, each
+  `{key: "*" | ["<verb>", …]}`. A key is a literal agent id, `$self`, `$parent`,
+  `$children` (DIRECT children); `can_call` also takes `<guid>|<agent>` or `<guid>|*`
+  (an OUTBOUND peer address — a caller is always local, so such a key in
+  `callable_by` could never match and is refused). Tokens resolve relative to the
+  grant's HOLDER. Any other key, or a value that is not `"*"` or a list of strings, is
+  refused at the write, `invalid_meta`: "callable_by['<key>'] is not a grant key —
+  legal keys: an agent id, $self, $parent, $children" / "can_call['<key>'] is not a
+  grant key — legal keys: an agent id, $self, $parent, $children, <guid>|<agent> or
+  <guid>|*" / "<field>['<key>'] must be "*" or a list of verb strings". A denial's
+  hint: "grants come from above — the agent's parent (update_agent on its direct
+  child) or the operator writes can_call and callable_by; an agent never raises its
+  own". **`"*"` covers EVERY verb** — there is no
+  verb list the gate consults. The gate never branches on a verb name: `reflect`, `watch`,
+  `emit`, `state_subscribe` are verbs like any other.
+  **Baseline:** `{"$self": "*"}` on BOTH fields, stamped + merged on every agent —
+  nothing else. Every other edge is an explicit grant.
+  **Kernel verbs answered by the root** (`create_agent`, `ps`, `cancel`, `ledger`,
+  `list_agents`, …) take the SAME two-sided check against the root — the root's
+  `callable_by` must accept the caller.
+  **MUTATORS** (`create_agent`, `update_agent`, `delete_agent`), after the gate on
+  the root: the operand must be a DIRECT CHILD of the sender — `create_agent`'s
+  `parent_id` is the sender; `update_agent`/`delete_agent`'s `id` names an agent
+  whose parent is the sender. Otherwise `{reason:"unauthorized", side:"mutator"}`,
+  "<sender> may only <verb> its own children — <id> is not one" (`<id>` = the
+  `parent_id` for `create_agent`; an `id` naming no agent included). A missing or
+  non-string operand gets the verb's own `missing_arg` refusal, before this rule. So
+  no agent can raise its own authority — its record is its parent's to write.
+  **A join** of an execution re-gates the joiner on the ORIGINAL verb; **a reflect**
+  that passes the gate returns the tree whole (roster and `detail:"full"`).
+  **Kernel bookkeeping is a direct call, never a gated send** (`Kernel.bookkeeping`
+  → `Agent._kernel_run`: the agent's handler runs as itself, no origin, no gate, no
+  ledger row): `create_agent` booting its child and putting `agent_created` on the
+  parent's inbox, `kernel_start`'s boots, the `shutdown` of a stop, the kernel's
+  ledger reads/writes in its memory store, the loader's writes to its own store,
+  `static_loader` hydrating its roster, a bundle persisting its sidecar through the
+  loader's `persist_blob`/`load_blob` functions.
   **Wiring pairs with granting on BOTH ends** — an operator who wires an egress (a
-  scheduler `target` — the edge is the schedule CREATOR's, as a fire runs as its
-  creator; an AI's `cli`/peer listener, an AI's `memory_store_id`)
+  scheduler `target` — a fire runs as the scheduler; an AI's `cli`/peer listener, an AI's `memory_store_id`)
   grants that edge in the caller's `can_call` AND opens the callee's
   `callable_by`. An INBOUND relay (`web_ws`/`web_rest`/`ws_bridge`/`relay_connector`)
   composes the gates: `ingress_rule` says WHO may call in, its own `can_call` says
   WHERE those calls land, and the local target's `callable_by` must accept the relay.
+  The transport never sends onward itself: `web_ws`/`web_rest` hand each admitted
+  frame to the leg (`inbound_call`/`inbound_emit`/`inbound_watch`/
+  `inbound_state_subscribe`, as the operator) and the leg performs it as itself; a
+  wire bridge's read loop is a task its `boot` spawned, so it is the leg already.
+  The `web` host's file route hands each fetch to the host (`fetch_file`), which
+  reads as `web`.
 - **`on_delete` cascade hook** — substrate calls `await
   agent.on_delete()` depth-first during cascade-delete BEFORE
   detaching the record from `kernel.agents` and the parent's
@@ -694,8 +541,8 @@ they did not register.
   on mode. Use for stateless renderers / debuggers / dispatchers.
 - **State-event `sender` + `summary`** — every `send`/`emit` state
   event carries `sender` (the dispatching agent's id, set via a
-  task-local contextvar around handler dispatch; the host's WS/REST
-  surface tags external traffic with the surface agent's own id) and
+  task-local contextvar around handler dispatch; external traffic on the
+  host's WS/REST legs is sent by the leg itself, so it carries the leg's id) and
   `summary` (a JSON-stringified, bytes-stripped, max-160-char view
   of the payload). A frontend telemetry view uses both to draw
   sender→receiver wires + a last-N message log. The kernel's own LEDGER

@@ -13,7 +13,7 @@ import FantasticCredentialStore
 import FantasticExecBridge
 import FantasticFile
 import FantasticJSON
-import FantasticKernel
+@testable import FantasticKernel
 import FantasticStaticLoader
 import Foundation
 import OrderedCollections
@@ -271,14 +271,13 @@ private func operatorSend(_ k: Kernel, _ target: String, _ payload: JSON) async 
 }
 
 /// The `operator` STEP: an operator send whose batch item may carry its own
-/// fields beside the payload — `id` and `secret` (python `run_steps`: `for k in
-/// ("id", "secret"): item[k] = args[k]`). Returns the reply AND the outcome, the
-/// one a `status` matcher reads.
+/// `id` beside the payload (python `run_steps`: `if "id" in args: item["id"] =
+/// args["id"]`). Returns the reply AND the outcome, the one a `status` matcher
+/// reads.
 private func operatorStep(_ k: Kernel, _ args: JSON) async -> (JSON, Outcome) {
     var fields = ItemFields()
     if let o = args.asObject {
         fields.id = o["id"]
-        fields.secret = o["secret"]
     }
     return await dispatchCorpusOutcome(
         k, sender: nil, target: args["to"].asString ?? "", payload: args["send"], fields: fields)
@@ -288,12 +287,10 @@ private func operatorStep(_ k: Kernel, _ args: JSON) async -> (JSON, Outcome) {
 /// names them (an absent key never reaches the item).
 private struct ItemFields {
     var id: JSON? = nil
-    var secret: JSON? = nil
 
     func apply(_ item: Item) -> Item {
         var it = item
         if let id { it.rawId = id }
-        if let secret { it.secret = secret }
         return it
     }
 }
@@ -318,7 +315,7 @@ private func dispatchCorpus(_ k: Kernel, sender: AgentId?, target: String, paylo
 private func dispatchCorpusOutcome(
     _ k: Kernel, sender: AgentId?, target: String, payload: JSON, fields: ItemFields
 ) async -> (JSON, Outcome) {
-    await KernelTaskLocals.$currentSender.withValue(sender) {
+    await KernelTaskLocals.$sender.withValue(sender) {
         // Any payload carrying `bytes_utf8` rides the BINARY channel — the
         // file_bridge's text verbs (write/edit/append) alongside write_stream.
         // Mirror of the rust runner's dispatch.
@@ -460,7 +457,7 @@ private func matchStep(
             fail("\(path) does not contain \(want.serialize())")
         }
     }
-    // a string ANYWHERE / NOWHERE in the reply — what a secret mark is asserted
+    // a string ANYWHERE / NOWHERE in the reply (bytes read as utf-8) — what a
     // with: the value is somewhere in a real answer, nowhere in a record
     if expect.asObject?["mentions"] != nil || expect.asObject?["absent"] != nil {
         let flat = flatText(reply)
@@ -500,7 +497,7 @@ private func pyEq(_ a: JSON, _ b: JSON) -> Bool {
 ///
 /// Sugar, not a shortcut: `update_agent` REPLACES a field rather than merging it
 /// (#6), so a spec that hand-wrote the payload would restate the whole map every
-/// time and would silently drop the structural baseline off the live record.
+/// time and would silently drop every other grant off the live record.
 private func grantStep(_ h: Hydration, _ args: JSON, remove: Bool) async -> JSON {
     let agentId = args["agent"].asString ?? ""
     let field = args["field"].asString ?? ""
@@ -728,16 +725,16 @@ private func coreTheRosterIsClosedAfterBoot(_ h: Hydration, _ sc: Scenario, _ pi
     check(&pinned, "PC-3", denied(r), "\(sender) could create_agent on the root: \(r.serialize())")
     check(&pinned, "PC-3", denialSide(r) == "egress", "expected an egress refusal, got \(r.serialize())")
     check(&pinned, "PC-3", dehydrate(h.kernel).ids == before, "a refused create changed the roster: \(before) → \(dehydrate(h.kernel).ids)")
-    let s = await reach(h.kernel, sender, sender, .object([
+    let s = await reach(h.kernel, sender, ROOT, .object([
         "type": .string("update_agent"), "id": .string(sender),
         "can_call": .object([ROOT: .array([.string("create_agent")])]),
     ]))
     check(&pinned, "PC-3", denied(s), "\(sender) raised its own authority: \(s.serialize())")
-    check(&pinned, "PC-3", denialSide(s) == "self-grant", "expected a self-grant refusal, got \(s.serialize())")
+    check(&pinned, "PC-3", ["egress", "mutator"].contains(denialSide(s) ?? ""), "expected an egress or mutator refusal, got \(s.serialize())")
     let r2 = await reach(h.kernel, sender, ROOT, .object([
         "type": .string("create_agent"), "handler_module": .string("file_bridge.tools"), "allow": ["."], "id": .string("smuggled"),
     ]))
-    check(&pinned, "PC-3", denied(r2), "the self-grant took effect after all: \(r2.serialize())")
+    check(&pinned, "PC-3", denied(r2), "the raised grant took effect after all: \(r2.serialize())")
 }
 
 // PC-4 · a reboot rehydrates the same tree, once
@@ -847,17 +844,11 @@ private func runSteps(_ h0: Hydration, _ sc: Scenario, _ pinned: inout [String: 
             reply = .object(["swept": .bool(true)])
         } else if case .object = step["sweep_undeclared"] {
             // The whole roster, every ordered pair. The reachable set must be
-            // EXACTLY the structural baseline plus what the spec declared open
-            // BEFORE this point — nothing rides along.
+            // EXACTLY the baseline (`$self` — each agent to itself) plus what the
+            // spec declared open BEFORE this point — nothing rides along.
             let a = step["sweep_undeclared"]
-            let (ids, children) = dehydrate(h.kernel)
-            var structural = Set(ids.map { Pair($0, $0) })
-            for (parent, kids) in children {
-                for kid in kids where ids.contains(kid) && ids.contains(parent) {
-                    structural.insert(Pair(parent, kid))
-                    structural.insert(Pair(kid, parent))
-                }
-            }
+            let (ids, _) = dehydrate(h.kernel)
+            let structural = Set(ids.map { Pair($0, $0) })
             for verbJ in a["verbs"].asArray ?? [.string("reflect")] {
                 let verb = verbJ.asString ?? "reflect"
                 var declared = Set<Pair>()
@@ -897,7 +888,7 @@ private func runSteps(_ h0: Hydration, _ sc: Scenario, _ pinned: inout [String: 
             let k = h.kernel
             let (from, to, send) = (a["from"].asString ?? "", a["to"].asString ?? "", a["send"])
             tasks[a["name"].asString ?? ""] = Task {
-                await KernelTaskLocals.$currentSender.withValue(AgentId(from)) {
+                await KernelTaskLocals.$sender.withValue(AgentId(from)) {
                     let out = await k.send([Item(AgentId(to), send)])[0]
                     return JSON.object([
                         "pid": out.pid.map { JSON.integer($0.value) } ?? .null,

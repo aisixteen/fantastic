@@ -10,7 +10,9 @@ from __future__ import annotations
 import pytest
 
 from cli import Cli
-from kernel import Kernel, operator_context
+from kernel import Kernel
+
+from _testkit import as_agent
 
 
 # ─── a1 — save() emitted a document its own load() refused ──────
@@ -369,13 +371,10 @@ async def test_a_large_memory_survives_the_agent_that_owns_it(kernel):
 
 async def test_an_agent_cannot_write_another_agents_namespace(kernel):
     """§10.3 leak site 2. `persist_blob` names its namespace in the PAYLOAD
-    (`agent_id`), and the loader services it under `operator_context()` — so if
-    an agent can reach the loader at all, it can ASK for any sidecar it likes.
-
-    The defence is POSITION, not a check of the claimed id: the root accepts
-    `$children`, and a grandchild is not one. This pins that the defence holds
-    for the id a caller supplies, because the alternative is one agent
-    overwriting another's memory through a verb that looks like bookkeeping.
+    (`agent_id`), and the loader writes its own store as bookkeeping — so if an
+    agent can reach the loader at all, it can ASK for any sidecar it likes. The
+    loader's owner guard (`current_origin`) refuses a namespace that is not the
+    caller's; this pins it for the id a caller supplies.
     """
     (
         await kernel.send(
@@ -428,10 +427,7 @@ async def test_an_agent_cannot_write_another_agents_namespace(kernel):
             ]
         )
     )[0]["result"]
-    from kernel import _current_sender
-
-    token = _current_sender.set("thief")
-    try:
+    with as_agent(kernel, "thief"):
         r = (
             await kernel.ctx.agents["thief"].send(
                 [
@@ -447,8 +443,6 @@ async def test_an_agent_cannot_write_another_agents_namespace(kernel):
                 ]
             )
         )[0]["result"]
-    finally:
-        _current_sender.reset(token)
     # Whether it is refused at the gate or accepted, the SEND must not be a
     # silent success that wrote someone else's namespace.
     if "error" not in r:
@@ -471,46 +465,36 @@ async def test_an_agent_cannot_write_another_agents_namespace(kernel):
         )
 
 
-def test_operator_context_escalations_are_fixed_and_self_scoped():
-    """The doc's load-bearing security claim is that an agent physically cannot
-    produce `sender=None` (§7.3). That holds only while every place the
-    SUBSTRATE enters `operator_context()` on a caller's behalf sends something
-    FIXED — a hardcoded target and verb, scoped to the caller itself.
-
-    `scheduler._file_read` / `._file_write` — the remaining canonical
-    operator-context users — send to the LOADER by its literal id with a literal
-    blob verb; the sidecar name comes from internal callers' constants, never a
-    caller payload. This test reads the source and fails if a caller-controlled
-    target, verb or path appears inside an escalation, because that is the
-    shape that turns bookkeeping into a confused deputy.
-    """
+def test_sidecar_persistence_is_a_direct_loader_call():
+    """A bundle persisting its OWN sidecar through the loader is bookkeeping: a
+    DIRECT call of the loader's `persist_blob`/`load_blob` functions, never a send
+    and never an identity switch (owner 2026-10-04). The namespace is the
+    scheduler's own id — never read from a caller's payload."""
     import inspect
 
     from scheduler import tools as sch
 
-    for fn, verb in (
-        (sch._file_read, '"load_blob"'),
-        (sch._file_write, '"persist_blob"'),
+    for fn, call in (
+        (sch._file_read, "load_blob(loader, sid, name)"),
+        (sch._file_write, "persist_blob(loader, sid, name, content)"),
     ):
         src = inspect.getsource(fn)
-        assert "operator_context()" in src
-        # target: the loader, by literal id — never payload-derived.
-        assert '"kernel_state"' in src, (
-            f"{fn.__name__}: target is not the literal loader id"
-        )
+        assert call in src, f"{fn.__name__}: not a direct loader call"
+        assert ".send(" not in src, f"{fn.__name__}: persistence must not be a send"
         assert "payload.get" not in src and "payload[" not in src, (
-            f"{fn.__name__}: escalation must not read a caller payload"
+            f"{fn.__name__}: must not read a caller payload"
         )
-        assert verb in src, f"{fn.__name__}: verb is not literal"
 
 
 async def test_a_bare_test_driver_is_an_operator_and_that_is_deliberate(kernel):
     """Stated because it makes half this suite look easier than it is: outside a
     dispatch `_current_sender` is None, so a test driver is an OPERATOR and
-    skips the call gate entirely. Every negative authz test therefore has to set
-    a sender explicitly — a test that forgets passes for the wrong reason."""
+    skips the call gate entirely. Every negative authz test therefore stands in
+    for an agent's handler explicitly (`as_agent`) — a test that forgets passes
+    for the wrong reason."""
     from kernel import _current_sender
 
     assert _current_sender.get() is None
-    with operator_context():
-        assert _current_sender.get() is None
+    with as_agent(kernel, kernel.id):
+        assert _current_sender.get() == kernel.id
+    assert _current_sender.get() is None

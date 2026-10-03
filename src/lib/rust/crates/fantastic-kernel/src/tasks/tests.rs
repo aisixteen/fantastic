@@ -183,7 +183,7 @@ impl Bundle for SlowBundle {
                 r
             }
             // An AGENT cancelling another agent's work: discover via `ps`, then
-            // `cancel`. Plain verbs — no privileged surface, no bundle coupling.
+            // `cancel`. Plain verbs — no bundle coupling.
             "kill" => {
                 let victim = payload.get("victim").and_then(Value::as_str).unwrap_or("");
                 let table = kernel
@@ -278,10 +278,13 @@ pub(crate) async fn mk_agent(kernel: &Arc<Kernel>, id: &str) -> AgentId {
 
 /// Create a slow agent with an explicit `can_call` grant. Two-sided deny-all: a
 /// `chain` send to a SIBLING is lateral egress, so the chain tests grant that edge.
+/// A slow agent whose `can_call` is `can_call` — and, both ends being explicit,
+/// every live agent that grant names accepts it back (its `callable_by` names
+/// `id` with the same verbs).
 pub(crate) async fn mk_agent_grant(kernel: &Arc<Kernel>, id: &str, can_call: Value) -> AgentId {
     let mut payload = json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "slow.tools", "id": id});
     if !can_call.is_null() {
-        payload["can_call"] = can_call;
+        payload["can_call"] = can_call.clone();
     }
     let r = kernel
         .send(vec![Item::new(AgentId::from("kernel_state"), payload)])
@@ -289,6 +292,13 @@ pub(crate) async fn mk_agent_grant(kernel: &Arc<Kernel>, id: &str, can_call: Val
         .remove(0)
         .result;
     assert_eq!(r["id"], json!(id), "create_agent failed: {r}");
+    if let Some(map) = can_call.as_object() {
+        for (k, v) in map {
+            if !k.starts_with('$') && kernel.resolve_target(k).is_some() {
+                crate::test_support::grant(kernel, k, "callable_by", id, v.clone());
+            }
+        }
+    }
     AgentId::from(id)
 }
 
@@ -555,9 +565,8 @@ async fn cancel_unknown_or_finished_task_is_honest() {
 #[tokio::test]
 async fn agent_cancels_another_agents_task() {
     // An agent wields `cancel`: the killer agent's own handler discovers the
-    // victim's task through `ps` and sends `cancel`. Both are PRIVILEGED — the
-    // baseline `$parent: "*"` does not reach them — so the killer holds a grant
-    // that names them on the root.
+    // victim's task through `ps` and sends `cancel`. The baseline (`$self`) does
+    // not reach the root, so the killer holds a grant that names them there.
     let sh = Arc::new(Shared::default());
     let kernel = mk_kernel(Arc::clone(&sh));
     let victim = mk_agent(&kernel, "slow_victim").await;
@@ -867,7 +876,7 @@ async fn shutdown_agents_tells_every_agent_and_then_refuses_new_roots() {
     // send, not an operator one: the operator's control surface is how the stop
     // is watched and finished, so it is never what the drain closes.
     let peer = mk_agent(&kernel, "sd_peer").await;
-    let out = crate::send::with_sender(
+    let out = crate::test_support::as_agent(
         AgentId::from("kernel_state"),
         kernel.send(vec![Item::new(peer, json!({"type": "chain"}))]),
     )
@@ -885,10 +894,10 @@ async fn shutdown_agents_tells_every_agent_and_then_refuses_new_roots() {
 
 #[tokio::test]
 async fn the_shutdown_agents_verb_tells_a_grandchild() {
-    // python sends `shutdown` under `operator_context()`: ungated, so every
+    // Telling is kernel bookkeeping (the handler run directly, ungated), so every
     // advertising agent is told at ANY depth. Through the kernel verb the
-    // dispatch runs AS THE ROOT, whose baseline grant reaches only its own
-    // children — gated, a grandchild was refused and never told.
+    // dispatch runs AS THE ROOT, whose grant reaches no one — gated, a
+    // grandchild would be refused and never told.
     let kernel = mk_kernel(Arc::new(Shared::default()));
     let p = mk_agent(&kernel, "sd_parent").await;
     let r = kernel
@@ -1107,8 +1116,9 @@ async fn spawn_task_writes_a_task_row() {
         .iter()
         .filter_map(|r| r.get("kind").and_then(Value::as_str))
         .collect();
-    // `boot` (the child's own first dispatch), the `fork` call, then the fork.
-    assert_eq!(kinds, vec!["call", "call", "task"]);
+    // the `fork` call, then the fork — the child's `boot` is kernel bookkeeping
+    // (run directly, no call row).
+    assert_eq!(kinds, vec!["call", "task"]);
 }
 
 /// D5 — a task whose parent has already ended keeps NAMING it.

@@ -9,7 +9,8 @@
 //! equality.
 
 use fantastic_file::FileBundle;
-use fantastic_kernel::{with_operator, with_sender, Agent, AgentId, Item, Kernel, Outcome};
+use fantastic_kernel::test_support::as_agent;
+use fantastic_kernel::{Agent, AgentId, Item, Kernel, Outcome};
 use fantastic_static_loader::{StaticLoaderBundle, HANDLER_MODULE};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
@@ -268,32 +269,28 @@ async fn hydrate(sc: &Scenario) -> Hydration {
 async fn reach(kernel: &Arc<Kernel>, sender: &str, target: &str, payload: Value) -> Value {
     let k = Arc::clone(kernel);
     let t = target.to_string();
-    with_sender(AgentId::from(sender), async move {
+    as_agent(AgentId::from(sender), async move {
         dispatch(&k, &t, payload).await
     })
     .await
 }
 
+/// An OPERATOR send: made outside every dispatch, so it carries no sender.
 async fn operator(kernel: &Arc<Kernel>, target: &str, payload: Value) -> Value {
-    let k = Arc::clone(kernel);
-    let t = target.to_string();
-    with_operator(async move { dispatch(&k, &t, payload).await }).await
+    dispatch(kernel, target, payload).await
 }
 
-/// The `operator` STEP: the batch item's own fields (`id`, `secret`) ride beside
-/// the payload, and the whole outcome comes back — `status` lives only there.
-/// Python `run_steps`' operator branch.
+/// The `operator` STEP: the batch item's own `id` rides beside the payload, and
+/// the whole outcome comes back — `status` lives only there. Python
+/// `run_steps`' operator branch.
 async fn operator_item(kernel: &Arc<Kernel>, args: &Value) -> Outcome {
-    let k = Arc::clone(kernel);
     let target = args["to"].as_str().unwrap().to_string();
     let payload = args.get("send").cloned().unwrap_or(json!({}));
     let mut fields = Map::new();
-    for key in ["id", "secret"] {
-        if let Some(v) = args.get(key) {
-            fields.insert(key.to_string(), v.clone());
-        }
+    if let Some(v) = args.get("id") {
+        fields.insert("id".to_string(), v.clone());
     }
-    with_operator(async move { dispatch_item(&k, &target, payload, &fields).await }).await
+    dispatch_item(kernel, &target, payload, &fields).await
 }
 
 /// One dispatch, CHANNEL CHOSEN BY VERB. The stream verbs
@@ -303,13 +300,14 @@ async fn operator_item(kernel: &Arc<Kernel>, args: &Value) -> Outcome {
 /// its returned blob back into `bytes` (utf-8) so the `contains:{bytes:…}`
 /// matcher sees streamed content — the mirror of python `_engine`'s
 /// `_decode_bytes_fields` + its bytes-path decode. Runs under whatever
-/// sender/operator context the caller set, so the send gate applies.
+/// identity the caller runs under (an agent's, or none: the operator), so the
+/// send gate applies.
 async fn dispatch(k: &Arc<Kernel>, target: &str, payload: Value) -> Value {
     dispatch_item(k, target, payload, &Map::new()).await.result
 }
 
-/// [`dispatch`] with the item's own fields (`id`, `secret` — what an `operator`
-/// step may set beside the payload), answering the whole outcome. A returned
+/// [`dispatch`] with the item's own fields (`id` — what an `operator` step may
+/// set beside the payload), answering the whole outcome. A returned
 /// blob is folded into the result's `bytes` (utf-8).
 async fn dispatch_item(
     k: &Arc<Kernel>,
@@ -333,9 +331,6 @@ async fn dispatch_item(
     // kernel validates them exactly as it validates any caller's.
     if let Some(id) = fields.get("id") {
         item = item.with_raw_id(id.clone());
-    }
-    if let Some(secret) = fields.get("secret") {
-        item = item.with_secret(secret.clone());
     }
     let mut out = k.send(vec![item]).await.remove(0);
     if let Some(body) = out.body.take() {
@@ -497,8 +492,7 @@ fn match_step(name: &str, expect: &Value, reply: &Value, status: Option<&str>) {
             }
         }
     }
-    // a string ANYWHERE / NOWHERE in the reply — what a secret mark is asserted
-    // with: the value is somewhere in a real answer, nowhere in a record
+    // a string ANYWHERE / NOWHERE in the reply
     if expect.get("mentions").is_some() || expect.get("absent").is_some() {
         let flat = flat_text(reply);
         if let Some(want) = expect.get("mentions").and_then(Value::as_str) {
@@ -525,7 +519,7 @@ fn match_step(name: &str, expect: &Value, reply: &Value, status: Option<&str>) {
 ///
 /// Sugar, not a shortcut: `update_agent` REPLACES a field rather than merging it
 /// (#6), so a spec that hand-wrote the payload would restate the whole map every
-/// time and would silently drop the structural baseline off the live record.
+/// time and would silently drop the `$self` baseline off the live record.
 async fn grant_step(h: &Hydration, args: &Value, remove: bool) -> Value {
     let agent_id = args["agent"].as_str().unwrap();
     let field = args["field"].as_str().unwrap();
@@ -743,18 +737,12 @@ async fn run_steps(h: &Hydration, sc: &Scenario, pinned: &mut BTreeMap<String, u
             json!({"swept": true})
         } else if let Some(a) = step.get("sweep_undeclared") {
             // The whole roster, every ordered pair. The reachable set must be
-            // EXACTLY the structural baseline plus what the spec declared open
-            // BEFORE this point — nothing rides along.
-            let (ids, children) = dehydrate(&h.kernel);
+            // EXACTLY the baseline (`$self`, each agent to itself) plus what the
+            // spec declared open BEFORE this point — nothing rides along.
+            let (ids, _) = dehydrate(&h.kernel);
             let universe: Vec<String> = ids.clone();
-            let mut structural: std::collections::BTreeSet<(String, String)> =
+            let structural: std::collections::BTreeSet<(String, String)> =
                 universe.iter().map(|a| (a.clone(), a.clone())).collect();
-            for (parent, kids) in &children {
-                for kid in kids {
-                    structural.insert((parent.clone(), kid.clone()));
-                    structural.insert((kid.clone(), parent.clone()));
-                }
-            }
             for verb in a["verbs"].as_array().cloned().unwrap_or_default() {
                 let verb = verb.as_str().unwrap_or("reflect");
                 let declared: std::collections::BTreeSet<(String, String)> = steps[..idx]
@@ -808,7 +796,7 @@ async fn run_steps(h: &Hydration, sc: &Scenario, pinned: &mut BTreeMap<String, u
             );
             let send = a["send"].clone();
             let handle = tokio::spawn(async move {
-                with_sender(AgentId::from(from.as_str()), async move {
+                as_agent(AgentId::from(from.as_str()), async move {
                     let out = k
                         .send(vec![Item::new(AgentId::from(to.as_str()), send)])
                         .await

@@ -57,7 +57,7 @@ async fn create_bridge(kernel: &Arc<Kernel>, id: &str, peer_id: &str, transport:
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
-                "handler_module": WS_HANDLER_MODULE,
+                "handler_module": WS_HANDLER_MODULE, "can_call": {"$parent": "*", "$children": "*"},
                 "id": id,
                 "peer_id": peer_id,
                 "transport": transport,
@@ -71,12 +71,10 @@ async fn create_bridge(kernel: &Arc<Kernel>, id: &str, peer_id: &str, transport:
 
 /// Open ONE edge, both ends, as an operator would when wiring a bridge.
 ///
-/// An inbound bridge frame now dispatches AS THE LEG — the read loop runs under
-/// `with_sender(<bridge id>)`, closing the gate bypass where a peer's frame
-/// reached `Kernel::launch` with no sender and ran as the OPERATOR. So a bridge
-/// serving calls onto a SIBLING needs the egress grant on itself and the ingress
-/// grant on the target; the structural baseline covers only its own subtree and
-/// its parent.
+/// An inbound bridge frame dispatches AS THE LEG — the read loop is a task the
+/// leg's own `boot` spawned, so its sends are the leg's. A bridge serving calls
+/// onto another agent needs the egress grant on itself and the ingress grant on
+/// the target; the baseline is `$self` alone.
 async fn grant_edge(kernel: &Arc<Kernel>, from: &str, to: &str) {
     let _ = kernel
         .send(vec![Item::new(
@@ -103,27 +101,6 @@ fn patch(kernel: &Arc<Kernel>, id: &str, key: &str, value: Value) {
     let mut m = Map::new();
     m.insert(key.to_string(), value);
     kernel.update(&AgentId::from(id), m);
-}
-
-/// Open `id`'s `callable_by` to a FOREIGN caller (`<guid>|*` or `<guid>|<agent>`):
-/// an inbound bridge call is judged by its qualified id, never by the leg that
-/// relays it.
-fn accept(kernel: &Arc<Kernel>, id: &str, foreign: &str) {
-    let agent = kernel
-        .agents
-        .get(&AgentId::from(id))
-        .map(|e| Arc::clone(&e))
-        .expect("agent");
-    let mut cb = agent
-        .meta
-        .read()
-        .unwrap()
-        .get("callable_by")
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
-    cb.insert(foreign.to_string(), json!("*"));
-    patch(kernel, id, "callable_by", Value::Object(cb));
 }
 
 /// The ref every relay leg's password sits at, in its own store.
@@ -161,7 +138,7 @@ pub(super) async fn relay_password(
             json!({"type": "create_agent", "parent_id": root,
                    "handler_module": fantastic_credential_store::HANDLER_MODULE, "id": store,
                    "backend": "keychain",
-                   "refs": {RELAY_REF: {"host": host, "readers": [leg]}},
+                   "refs": {RELAY_REF: {"host": host}},
                    "callable_by": {leg: ["get"]}}),
         )])
         .await
@@ -178,8 +155,7 @@ pub(super) async fn set_relay_password(k: &Arc<Kernel>, store: &str, pw: &str) {
         .send(vec![Item::new(
             AgentId::from(store),
             json!({"type": "set", "ref": RELAY_REF, "fields": {"password": pw}}),
-        )
-        .with_secret(json!(["payload.fields"]))])
+        )])
         .await
         .remove(0)
         .result;
@@ -376,8 +352,6 @@ async fn forward_round_trip_over_memory() {
     // B serves the inbound call onto the file agent — a SIBLING, so the leg's
     // egress is explicit, and the file agent accepts A's agents BY NAME.
     grant_edge(&kernel, &b_id, &file_id).await;
-    patch(&kernel, &b_id, "peer_guid", json!("guid-a"));
-    accept(&kernel, &file_id, "guid-a|*");
     inject_pair(&AgentId::from(a_id.as_str()), &AgentId::from(b_id.as_str()));
     let _ = ka
         .send(vec![Item::new(
@@ -641,7 +615,7 @@ async fn ws_boot_fails_cleanly_on_unreachable_host() {
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
-                "handler_module": WS_HANDLER_MODULE,
+                "handler_module": WS_HANDLER_MODULE, "can_call": {"$parent": "*", "$children": "*"},
                 "id": bid,
                 "peer_id": "peer_x",
                 "transport": "ws",
@@ -883,7 +857,7 @@ async fn create_bridge_with_auth(kernel: &Arc<Kernel>, id: &str, peer_id: &str, 
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
-                "handler_module": WS_HANDLER_MODULE,
+                "handler_module": WS_HANDLER_MODULE, "can_call": {"$parent": "*", "$children": "*"},
                 "id": id,
                 "peer_id": peer_id,
                 "transport": "memory",
@@ -972,10 +946,8 @@ async fn binary_call_round_trips_raw_bytes_over_the_bridge() {
         .result;
     let bid = id_for("brg_bin", &tmp);
     create_bridge_with_auth(&kernel, &bid, "stand_in", "allow_all").await;
+    // the leg serves the inbound calls AS ITSELF: `fb` accepts the leg
     grant_edge(&kernel, &bid, "fb").await;
-    // the leg serves the ONE pinned peer; `fb` accepts that peer's agents by name
-    patch(&kernel, &bid, "peer_guid", json!("peer-g"));
-    accept(&kernel, "fb", "peer-g|*");
     let peer = inject_one(&AgentId::from(bid.as_str()));
     let _ = kernel
         .send(vec![Item::new(
@@ -992,7 +964,7 @@ async fn binary_call_round_trips_raw_bytes_over_the_bridge() {
     // write_stream via a binary inbound call: the body at `["payload", "bytes"]`.
     let at_bytes = || vec![Step::from("payload"), Step::from("bytes")];
     peer.send_binary(
-        json!({"type":"call","id":"w1","target":"fb","caller":"peer-g|probe",
+        json!({"type":"call","id":"w1","target":"fb",
                "payload":{"type":"write_stream","path":"blob.bin","truncate":true,"bytes":null}}),
         Blob::new(at_bytes(), payload.clone()),
     )
@@ -1004,12 +976,10 @@ async fn binary_call_round_trips_raw_bytes_over_the_bridge() {
 
     // read_stream (a stream verb, so the binary channel even from a text
     // frame) → the reply is a BINARY frame, its body at `["data", "bytes"]`.
-    peer.send_frame(
-        json!({"type":"call","id":"r1","target":"fb","caller":"peer-g|probe",
-                           "payload":{"type":"read_stream","path":"blob.bin"}}),
-    )
-    .await
-    .unwrap();
+    peer.send_frame(json!({"type":"call","id":"r1","target":"fb",
+                           "payload":{"type":"read_stream","path":"blob.bin"}}))
+        .await
+        .unwrap();
     match peer.recv_frame().await.expect("read reply") {
         crate::transport::Frame::Binary(header, body) => {
             assert_eq!(header["id"], "r1");
@@ -1028,7 +998,7 @@ async fn binary_call_round_trips_raw_bytes_over_the_bridge() {
     // id replayed (a reconnect re-sending its queue) joins the recorded outcome
     // and writes nothing — python `_engine` sets `item["id"]` for every call.
     peer.send_binary(
-        json!({"type":"call","id":"w1","target":"fb","caller":"peer-g|probe",
+        json!({"type":"call","id":"w1","target":"fb",
                "payload":{"type":"write_stream","path":"blob.bin","truncate":true,"bytes":null}}),
         Blob::new(at_bytes(), b"other".to_vec()),
     )
@@ -1083,7 +1053,7 @@ async fn deny_inbound_default_refuses_inbound_call() {
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
-                "handler_module": WS_HANDLER_MODULE,
+                "handler_module": WS_HANDLER_MODULE, "can_call": {"$parent": "*", "$children": "*"},
                 "id": bid,
                 "peer_id": "stand_in",
                 "transport": "memory",
@@ -1151,18 +1121,18 @@ async fn password_gate_checks_inbound_and_presents_on_forward() {
             json!({
                 "type": "create_agent",
                 "parent_id": "kernel",
-                "handler_module": WS_HANDLER_MODULE,
+                "handler_module": WS_HANDLER_MODULE, "can_call": {"$parent": "*", "$children": "*"},
                 "id": bid,
                 "peer_id": "stand_in",
                 "transport": "memory",
                 "auth": {"type": "password", "env": env},
-                "peer_guid": "peer-g",
             }),
         )])
         .await
         .remove(0)
         .result;
-    accept(&kernel, "kernel_state", "peer-g|*");
+    // the leg serves the inbound calls AS ITSELF: the root accepts the leg
+    grant_edge(&kernel, &bid, "kernel_state").await;
     let peer = inject_one(&AgentId::from(bid.as_str()));
     let _ = kernel
         .send(vec![Item::new(
@@ -1186,7 +1156,7 @@ async fn password_gate_checks_inbound_and_presents_on_forward() {
 
     // (1) inbound call WITH the matching envelope token dispatches.
     peer.send_frame(json!({
-        "type": "call", "id": "ok", "target": "kernel_state", "caller": "peer-g|probe",
+        "type": "call", "id": "ok", "target": "kernel_state",
         "payload": {"type": "reflect"}, "auth_token": "s3cret",
     }))
     .await
@@ -1199,7 +1169,7 @@ async fn password_gate_checks_inbound_and_presents_on_forward() {
 
     // (2) inbound call with a WRONG token is refused unauthorized.
     peer.send_frame(json!({
-        "type": "call", "id": "bad", "target": "kernel_state", "caller": "peer-g|probe",
+        "type": "call", "id": "bad", "target": "kernel_state",
         "payload": {"type": "reflect"}, "auth_token": "WRONG",
     }))
     .await
@@ -1266,7 +1236,7 @@ async fn asymmetric_ingress_egress_via_engine() {
             json!({
                 "type": "create_agent",
                 "parent_id": "kernel",
-                "handler_module": WS_HANDLER_MODULE,
+                "handler_module": WS_HANDLER_MODULE, "can_call": {"$parent": "*", "$children": "*"},
                 "id": bid,
                 "peer_id": "stand_in",
                 "transport": "memory",
@@ -1396,7 +1366,7 @@ impl Bundle for BouncerBundle {
 #[tokio::test]
 async fn a_reentrant_forward_completes_instead_of_deadlocking() {
     // TWO kernels: A forwards to B's probe; the probe forwards straight back to A
-    // over the SAME bridge. Each leg serves only its pinned peer.
+    // over the SAME bridge. Each leg serves what arrives AS ITSELF.
     let tmp = TempDir::new().unwrap();
     let tmp_b = TempDir::new().unwrap();
     let ka = mk_kernel_guid(&tmp, "guid-a").await;
@@ -1421,8 +1391,6 @@ async fn a_reentrant_forward_completes_instead_of_deadlocking() {
     let probe = id_for("bouncer", &tmp);
     create_bridge(&ka, &a_id, &b_id, "memory").await;
     create_bridge(&kb, &b_id, &a_id, "memory").await;
-    patch(&ka, &a_id, "peer_guid", json!("guid-b"));
-    patch(&kb, &b_id, "peer_guid", json!("guid-a"));
     let _ = kb
         .send(vec![Item::new(
             AgentId::from("kernel_state"),
@@ -1432,12 +1400,11 @@ async fn a_reentrant_forward_completes_instead_of_deadlocking() {
         .await
         .remove(0)
         .result;
-    // B may reach the probe; the probe may reach B to forward back; the probe
-    // accepts A's agents, and A's root accepts B's — each BY NAME.
+    // B's leg may reach the probe; the probe may reach B to forward back; A's
+    // leg serves the bounce AS ITSELF, so A's root accepts A's leg.
     grant_edge(&kb, &b_id, &probe).await;
     grant_edge(&kb, &probe, &b_id).await;
-    accept(&kb, &probe, "guid-a|*");
-    accept(&ka, "kernel_state", "guid-b|*");
+    grant_edge(&ka, &a_id, "kernel_state").await;
     inject_pair(&AgentId::from(a_id.as_str()), &AgentId::from(b_id.as_str()));
     for (k, id) in [(&ka, &a_id), (&kb, &b_id)] {
         let _ = k
@@ -1479,7 +1446,7 @@ async fn an_inbound_call_is_gated_as_the_leg_not_the_operator() {
     let tmp = TempDir::new().unwrap();
     let kernel = mk_kernel(&tmp).await;
     let bid = id_for("brg_ident", &tmp);
-    // A SIBLING of the leg: no structural baseline token reaches it, so the only
+    // A SIBLING of the leg: the `$self` baseline does not reach it, so the only
     // way the call lands is an explicit grant — or a bypassed gate.
     let target = id_for("ff_ident", &tmp);
     let _ = kernel
@@ -1493,7 +1460,6 @@ async fn an_inbound_call_is_gated_as_the_leg_not_the_operator() {
         .remove(0)
         .result;
     create_bridge(&kernel, &bid, "stand_in", "memory").await;
-    patch(&kernel, &bid, "peer_guid", json!("peer-g"));
     let peer = inject_one(&AgentId::from(bid.as_str()));
     let _ = kernel
         .send(vec![Item::new(
@@ -1504,12 +1470,9 @@ async fn an_inbound_call_is_gated_as_the_leg_not_the_operator() {
         .remove(0)
         .result;
 
-    peer.send_frame(
-        json!({"type":"call","id":"i1","target":target,"caller":"peer-g|ai",
-                          "payload":{"type":"reflect"}}),
-    )
-    .await
-    .unwrap();
+    peer.send_frame(json!({"type":"call","id":"i1","target":target,"payload":{"type":"reflect"}}))
+        .await
+        .unwrap();
     let reply = peer.recv_frame().await.expect("reply").into_value();
     assert_eq!(reply["id"], "i1");
     assert_eq!(
@@ -1522,49 +1485,14 @@ async fn an_inbound_call_is_gated_as_the_leg_not_the_operator() {
         "the record leaked past the gate: {reply}"
     );
 
-    // Granting the LEG the edge is not enough: a relayed call is judged on
-    // ingress by its FOREIGN caller, never by the leg (audit 2026-09-28).
+    // Granting the LEG the edge — both ends — is what opens it: a call a leg
+    // serves is the LEG's, whoever called on the other kernel.
     grant_edge(&kernel, &bid, &target).await;
-    peer.send_frame(
-        json!({"type":"call","id":"i2","target":target,"caller":"peer-g|ai",
-                          "payload":{"type":"reflect"}}),
-    )
-    .await
-    .unwrap();
-    let no = peer.recv_frame().await.expect("reply").into_value();
-    assert_eq!(no["data"]["side"], "ingress", "{no}");
-    assert!(
-        no["data"]["error"]
-            .as_str()
-            .unwrap_or("")
-            .contains("peer-g|ai"),
-        "the refusal names the foreign caller: {no}"
-    );
-    // The target names the foreign agent: the call dispatches.
-    accept(&kernel, &target, "peer-g|ai");
-    peer.send_frame(
-        json!({"type":"call","id":"i3","target":target,"caller":"peer-g|ai",
-                          "payload":{"type":"reflect"}}),
-    )
-    .await
-    .unwrap();
+    peer.send_frame(json!({"type":"call","id":"i2","target":target,"payload":{"type":"reflect"}}))
+        .await
+        .unwrap();
     let ok = peer.recv_frame().await.expect("reply").into_value();
     assert_eq!(ok["data"]["id"], target, "granted edge refused: {ok}");
-    // A caller from any other kernel never reaches the gate.
-    peer.send_frame(
-        json!({"type":"call","id":"i4","target":target,"caller":"third-g|ai",
-                          "payload":{"type":"reflect"}}),
-    )
-    .await
-    .unwrap();
-    let third = peer.recv_frame().await.expect("reply").into_value();
-    assert!(
-        third["data"]["error"]
-            .as_str()
-            .unwrap_or("")
-            .contains("pinned peer"),
-        "{third}"
-    );
 
     let _ = kernel
         .send(vec![Item::new(
@@ -1759,7 +1687,7 @@ async fn reflect_key_order_per_family() {
         .unwrap()
         .keys()
         .map(String::as_str)
-        .take(14)
+        .take(13)
         .collect();
     assert_eq!(
         keys,
@@ -1772,7 +1700,6 @@ async fn reflect_key_order_per_family() {
             "ingress_rule",
             "egress_rule",
             "sealed",
-            "peer_guid",
             "host",
             "peer_id",
             "port",
@@ -1805,7 +1732,7 @@ async fn reflect_key_order_per_family() {
         .unwrap()
         .keys()
         .map(String::as_str)
-        .take(18)
+        .take(17)
         .collect();
     assert_eq!(
         keys,
@@ -1818,7 +1745,6 @@ async fn reflect_key_order_per_family() {
             "ingress_rule",
             "egress_rule",
             "sealed",
-            "peer_guid",
             "relay_url",
             "guid",
             "partner_guid",
@@ -2327,7 +2253,7 @@ async fn a_malformed_frame_is_skipped_and_the_reader_survives() {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     });
 
-    let t = transport::ws::WsTransport::connect(&format!("ws://127.0.0.1:{port}/peer/ws"), false)
+    let t = transport::ws::WsTransport::connect(&format!("ws://127.0.0.1:{port}/peer/ws"))
         .await
         .expect("connect to the local ws server");
     let frame = tokio::time::timeout(std::time::Duration::from_secs(5), t.recv_frame())
@@ -2549,9 +2475,8 @@ async fn a_binary_non_forward_verb_is_answered_by_the_text_dispatch() {
 
 /// A binary `forward` ships ONE binary `call` frame — the body raw beside the
 /// header at the path it had inside the forwarded payload (`_binary_path:
-/// ["payload", "bytes"]`, `bytes: null` in python's position), the qualified
-/// caller — and a binary reply's body comes back as the reply body, at its slot
-/// of the reply.
+/// ["payload", "bytes"]`, `bytes: null` in python's position) — and a binary
+/// reply's body comes back as the reply body, at its slot of the reply.
 #[tokio::test]
 async fn a_binary_forward_ships_raw_bytes_and_returns_the_reply_body() {
     let tmp = TempDir::new().unwrap();
@@ -2589,8 +2514,7 @@ async fn a_binary_forward_ships_raw_bytes_and_returns_the_reply_body() {
     assert_eq!(
         header,
         json!({"type": "call", "id": corr, "target": "far_fb",
-               "payload": {"type": "write_stream", "path": "x.bin", "bytes": null},
-               "caller": "g-local|kernel"})
+               "payload": {"type": "write_stream", "path": "x.bin", "bytes": null}})
     );
     // on the wire the codec names the slot last, as a list of steps
     let wire = fantastic_io_bridge::codec::encode_binary_frame(&header, &body.path, &body.bytes);
@@ -2605,7 +2529,7 @@ async fn a_binary_forward_ships_raw_bytes_and_returns_the_reply_body() {
         .collect();
     assert_eq!(
         keys,
-        vec!["type", "id", "target", "payload", "caller", "_binary_path"]
+        vec!["type", "id", "target", "payload", "_binary_path"]
     );
     peer.send_binary(
         json!({"type": "reply", "id": corr, "data": {"eof": true, "bytes": null}}),
@@ -2669,8 +2593,7 @@ async fn a_binary_forward_before_boot_is_not_connected() {
 }
 
 /// STEP-4 PIN (2026-10-01): the two bundle shells differ ONLY in family, name
-/// and readme — the same `peer_guid` write check, the same binary routing, the
-/// same delete teardown.
+/// and readme — the same binary routing, the same delete teardown.
 #[tokio::test]
 async fn both_family_shells_share_one_behaviour() {
     use fantastic_kernel::bundle::Bundle;
@@ -2684,23 +2607,6 @@ async fn both_family_shells_share_one_behaviour() {
         (WS_HANDLER_MODULE, "s4_fam_ws"),
         (RELAY_HANDLER_MODULE, "s4_fam_rl"),
     ] {
-        // a `peer_guid` with a `|` is refused at the write, naming the field
-        let bad = id_for(&format!("{tag}_bad"), &tmp);
-        let r = kernel
-            .send(vec![Item::new(
-                AgentId::from("kernel_state"),
-                json!({"type": "create_agent", "parent_id": "kernel", "handler_module": hm,
-                       "id": bad, "transport": "memory", "peer_guid": "a|b"}),
-            )])
-            .await
-            .remove(0)
-            .result;
-        assert_eq!(r["reason"], json!("invalid_meta"), "{hm}: {r}");
-        assert_eq!(
-            r["error"],
-            json!("bridge: peer_guid must be one kernel guid (a non-empty string without `|`); got 'a|b'"),
-            "{hm}"
-        );
         // binary: a non-forward verb is the text dispatch; forward before boot
         // is not connected
         let id = id_for(tag, &tmp);
@@ -2762,8 +2668,8 @@ mod relay_credentials;
 
 /// Audit W-8 — a bridge leg makes the one write-time check every leg makes
 /// (python `io_bridge._engine.validate_meta` → `unknown_ingress_refusal`): an
-/// unknown name or a malformed spec is refused with the wire legal values, after
-/// `peer_guid`; a rule it implements is not. Both bundles, the same text.
+/// unknown name or a malformed spec is refused with the wire legal values; a rule
+/// it implements is not. Both bundles, the same text.
 #[test]
 fn validate_meta_refuses_an_unknown_or_malformed_ingress_rule() {
     let legs: [&dyn Bundle; 2] = [&WsBridgeBundle, &RelayConnectorBundle];
@@ -2813,7 +2719,7 @@ async fn a_malformed_rule_on_the_record_denies_in_python_s_words() {
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
-                "handler_module": WS_HANDLER_MODULE,
+                "handler_module": WS_HANDLER_MODULE, "can_call": {"$parent": "*", "$children": "*"},
                 "id": bid,
                 "peer_id": "stand_in",
                 "transport": "memory",

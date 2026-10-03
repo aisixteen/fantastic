@@ -1,42 +1,29 @@
-//! The PUMP runs both ends AS ITS CALLER — the bridge is no deputy. The twin of
-//! python `file_bridge/tests/test_pump_identity.py`.
+//! The PUMP runs both ends AS THE FILE_BRIDGE itself (owner 2026-10-04) — the
+//! twin of python `file_bridge/tests/test_pump_identity.py`.
 //!
-//! Audit AV-7 (2026-10-03): `pump` sent its `read_stream` and `write_stream` from
-//! inside its own dispatch, so the far ends judged THE BRIDGE, never the caller.
-//! A client allowed only `pump` on F copied a private G's file into F and read it
-//! there, and the reverse pump overwrote G. Now both ends run as the pump's
-//! caller: the caller needs its own grants on the source and on the sink (the
-//! operator, as ever, is ungated).
+//! Identity comes only from dispatch: `pump` sends its `read_stream` and
+//! `write_stream` from inside its own dispatch, so both far ends judge THE BRIDGE
+//! — its `can_call` must reach them and their `callable_by` must accept it. A
+//! caller's own grants on the ends play no part: granting `pump` on a bridge
+//! lends exactly the reach that bridge has.
 
 use super::*;
 use fantastic_kernel::{Agent, Item};
 use serde_json::json;
 
-const PRIVATE: &[u8] = b"PRIVATE-G-DATA";
+const DATA: &[u8] = b"G-DATA";
 
 async fn op(k: &Arc<Kernel>, target: &str, payload: Value, as_: Option<&str>) -> Value {
     let item = Item::new(AgentId::from(target), payload);
     match as_ {
         None => k.send(vec![item]).await.remove(0).result,
         Some(who) => {
-            fantastic_kernel::send::with_sender(AgentId::from(who), k.send(vec![item]))
+            fantastic_kernel::test_support::as_agent(AgentId::from(who), k.send(vec![item]))
                 .await
                 .remove(0)
                 .result
         }
     }
-}
-
-/// A raw chunk to `target` as the operator.
-async fn put(k: &Arc<Kernel>, target: &str, path: &str, data: &[u8]) -> Value {
-    k.send(vec![Item::new(
-        AgentId::from(target),
-        json!({"type": "write_stream", "path": path, "bytes": null, "truncate": true}),
-    )
-    .with_binary_key("bytes", data.to_vec())])
-        .await
-        .remove(0)
-        .result
 }
 
 async fn bridge(k: &Arc<Kernel>, tmp: &tempfile::TempDir, id: &str, meta: Value) {
@@ -53,8 +40,9 @@ async fn bridge(k: &Arc<Kernel>, tmp: &tempfile::TempDir, id: &str, meta: Value)
     assert_eq!(r["id"], id, "{r}");
 }
 
-/// G is private to F; F answers C's `pump` and `read`; C reaches nothing else.
-async fn wire(tmp: &tempfile::TempDir) -> Arc<Kernel> {
+/// G holds a file; C may call F's `pump` and `read_stream`; F reaches G only when
+/// `f_reaches_g` — both halves of the F→G edge.
+async fn wire(tmp: &tempfile::TempDir, f_reaches_g: bool) -> Arc<Kernel> {
     let mut kernel = Kernel::new();
     kernel
         .bundles
@@ -70,19 +58,20 @@ async fn wire(tmp: &tempfile::TempDir) -> Arc<Kernel> {
     );
     k.register(Arc::clone(&root));
     k.set_root(Arc::clone(&root));
-    bridge(
-        &k,
-        tmp,
-        "g",
-        json!({"callable_by": {"f": ["read_stream", "write_stream"]}}),
-    )
-    .await;
+    let (g_cb, f_cc) = if f_reaches_g {
+        (
+            json!({"f": ["read_stream", "write_stream"]}),
+            json!({"g": ["read_stream", "write_stream"]}),
+        )
+    } else {
+        (json!({}), json!({}))
+    };
+    bridge(&k, tmp, "g", json!({ "callable_by": g_cb })).await;
     bridge(
         &k,
         tmp,
         "f",
-        json!({"can_call": {"g": ["read_stream", "write_stream"]},
-               "callable_by": {"c": ["pump", "read", "read_stream", "write_stream"]}}),
+        json!({"can_call": f_cc, "callable_by": {"c": ["pump", "read_stream"]}}),
     )
     .await;
     k.register(Agent::new(
@@ -96,8 +85,16 @@ async fn wire(tmp: &tempfile::TempDir) -> Arc<Kernel> {
         PathBuf::new(),
         false,
     ));
-    let w = put(&k, "g", "secret.txt", PRIVATE).await;
-    assert_eq!(w["written"], PRIVATE.len(), "{w}");
+    let w = k
+        .send(vec![Item::new(
+            AgentId::from("g"),
+            json!({"type": "write_stream", "path": "data.txt", "bytes": null, "truncate": true}),
+        )
+        .with_binary_key("bytes", DATA.to_vec())])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(w["written"], DATA.len(), "{w}");
     k
 }
 
@@ -110,13 +107,14 @@ async fn pump(k: &Arc<Kernel>, as_: &str, args: Value) -> Value {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_pump_caller_cannot_read_an_end_it_cannot_reach() {
+async fn a_pump_reads_and_writes_as_the_bridge() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let k = wire(&tmp).await;
+    let k = wire(&tmp, true).await;
+    // C reaches G not at all — the pump's ends are F's sends, not C's
     let direct = op(
         &k,
         "g",
-        json!({"type": "read_stream", "path": "secret.txt"}),
+        json!({"type": "read_stream", "path": "data.txt"}),
         Some("c"),
     )
     .await;
@@ -124,81 +122,32 @@ async fn a_pump_caller_cannot_read_an_end_it_cannot_reach() {
     let out = pump(
         &k,
         "c",
-        json!({"source": "g", "source_path": "secret.txt", "sink_path": "loot.txt"}),
+        json!({"source": "g", "source_path": "data.txt", "sink_path": "copy.txt"}),
+    )
+    .await;
+    assert_eq!(out["bytes"], DATA.len(), "{out}");
+    assert_eq!(
+        std::fs::read(tmp.path().join("f").join("copy.txt")).unwrap(),
+        DATA
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pump_cannot_reach_an_end_the_bridge_cannot() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = wire(&tmp, false).await;
+    let out = pump(
+        &k,
+        "c",
+        json!({"source": "g", "source_path": "data.txt", "sink_path": "copy.txt"}),
     )
     .await;
     assert_eq!(out["reason"], "transport_error", "{out}");
     let err = out["error"].as_str().unwrap();
     assert!(err.starts_with("pump: read from 'g' failed: {"), "{out}");
-    assert!(err.contains("c may not call 'read_stream' on g"), "{out}");
+    assert!(err.contains("f may not call 'read_stream' on g"), "{out}");
     assert!(
-        !tmp.path().join("f").join("loot.txt").exists(),
+        !tmp.path().join("f").join("copy.txt").exists(),
         "nothing was copied"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_pump_caller_cannot_write_an_end_it_cannot_reach() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let k = wire(&tmp).await;
-    let w = put(&k, "f", "mine.txt", b"OVERWRITTEN").await;
-    assert!(w.get("error").is_none(), "{w}");
-    let out = pump(
-        &k,
-        "c",
-        json!({"source_path": "mine.txt", "sink": "g", "sink_path": "secret.txt"}),
-    )
-    .await;
-    assert_eq!(out["reason"], "transport_error", "{out}");
-    assert!(
-        out["error"]
-            .as_str()
-            .unwrap()
-            .starts_with("pump: write to 'g' failed: {"),
-        "{out}"
-    );
-    assert_eq!(
-        std::fs::read(tmp.path().join("g").join("secret.txt")).unwrap(),
-        PRIVATE
-    );
-}
-
-/// Granted on both ends ITSELF, the caller pumps — the bridge's own reach is not
-/// what lets it.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_pump_runs_with_the_callers_own_grants() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let k = wire(&tmp).await;
-    let mut patch = Map::new();
-    patch.insert("can_call".into(), json!({"f": "*", "g": ["read_stream"]}));
-    k.update(&AgentId::from("c"), patch);
-    let mut cb = k
-        .agents
-        .get(&AgentId::from("g"))
-        .unwrap()
-        .meta
-        .read()
-        .unwrap()
-        .get("callable_by")
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
-    cb.insert("c".into(), json!(["read_stream"]));
-    let mut patch = Map::new();
-    patch.insert("callable_by".into(), Value::Object(cb));
-    k.update(&AgentId::from("g"), patch);
-    let out = pump(
-        &k,
-        "c",
-        json!({"source": "g", "source_path": "secret.txt", "sink_path": "copy.txt"}),
-    )
-    .await;
-    assert_eq!(
-        out,
-        json!({"source": "secret.txt", "sink": "copy.txt", "bytes": PRIVATE.len(), "chunks": 1})
-    );
-    assert_eq!(
-        std::fs::read(tmp.path().join("f").join("copy.txt")).unwrap(),
-        PRIVATE
     );
 }

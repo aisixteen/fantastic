@@ -17,13 +17,20 @@ import OrderedCollections
 
 // ── Current sender task-local ─────────────────────────────────────
 
-/// Task-local that names the agent currently dispatching. Read by
-/// `Kernel.send` to attribute state events; written by `send_json_as`
-/// + by `Kernel.send` itself before invoking the bundle handler
-/// (so nested sends attribute to their target). Mirrors Rust's
-/// `CURRENT_SENDER` task-local.
+/// The kernel's task-locals. IDENTITY COMES ONLY FROM DISPATCH (owner
+/// 2026-10-04): the kernel sets the sender when it runs an agent's handler, so
+/// the sends inside it — and every task it spawns, which inherits the
+/// task-locals — are that agent's. There is no way to send "as" someone else:
+/// the storage is internal to this module and only `runDispatch` /
+/// `runHandler` / the agent hooks write it. Outside every dispatch it is nil:
+/// the OPERATOR (the CLI, the cold bootstrap, a transport handing an inbound
+/// frame to its leg), the origin root of trust.
 public enum KernelTaskLocals {
-    @TaskLocal public static var currentSender: AgentId? = nil
+    @TaskLocal static var sender: AgentId? = nil
+
+    /// The agent whose handler (or spawned task) is running right now; nil for
+    /// the operator. Read-only outside the kernel module.
+    public static var currentSender: AgentId? { sender }
 
     /// The id of the TASK whose dispatch is running right now — the task-table
     /// twin of `currentSender`. Stamped INSIDE the spawned dispatch (an
@@ -46,8 +53,10 @@ public enum KernelTaskLocals {
     ///
     /// Read it when a verb's payload names a resource the caller might not own.
     /// Do NOT use it for `(sender, target, verb)` decisions — that is the gate's
-    /// job, it runs first, and duplicating it here would be a second truth.
-    @TaskLocal public static var currentOrigin: AgentId? = nil
+    /// job, it runs first, and duplicating it here would be a second truth. Set
+    /// only by the kernel's dispatch (internal storage), like the sender.
+    @TaskLocal static var origin: AgentId? = nil
+    public static var currentOrigin: AgentId? { origin }
 
     /// "My own task is inside a subtree the kernel is killing." Set by
     /// `Kernel.cancelTask` on every marked row BEFORE any task is stopped, so a
@@ -82,31 +91,6 @@ public enum KernelTaskLocals {
         await $inShutdown.withValue(true) { await body() }
     }
 
-    /// THE QUALIFIED REMOTE CALLER, as a bridge leg marked it: a call that
-    /// crossed a bridge arrives carrying its sender's address `<remote kernel
-    /// guid>|<remote agent id>` on the frame, and the inbound leg dispatches it
-    /// under `withRemoteCaller(leg:address:)`. The dispatch that `send` launches
-    /// CONSUMES the pair (python `_dispatch_task`): when the leg itself is that
-    /// dispatch's caller, the address becomes `currentRemote`; a send the handler
-    /// makes itself carries no remote caller — its own writes are keyed under its
-    /// own id. Python `_remote_caller` / `_current_remote`.
-    @TaskLocal public static var remoteCaller: RemoteCaller? = nil
-
-    /// The qualified `<guid>|<agent id>` of a caller on ANOTHER kernel, when this
-    /// dispatch was relayed by a bridge leg that carried it; `nil` otherwise.
-    /// Python `current_remote_caller()`.
-    @TaskLocal public static var currentRemote: String? = nil
-
-    /// THE SECRET MARKS of the call this dispatch serves — the `secret` its
-    /// caller marked on the batch item (`Secret`), exactly as given and in order:
-    /// each a dotted string (`payload.<field…>` / `result[.<field…>]`) or an
-    /// array of steps (`["payload", <step>, …]` / `["result", <step>…]`); empty
-    /// when none were marked. Set per dispatch task, so a handler's own sends
-    /// never inherit it. A bundle that must only ever be called WITH a mark (a
-    /// credential store) reads it and refuses an unmarked call. Python
-    /// `current_secret()`.
-    @TaskLocal public static var currentSecret: [JSON] = []
-
     /// Called once a batch item's dispatch has FANNED OUT (its `send` reached the
     /// target's watchers) — the turnstile `send` uses to start the items of one
     /// batch in INPUT ORDER. Python creates the dispatch tasks in order and each
@@ -124,36 +108,6 @@ public enum KernelTaskLocals {
     /// its dispatches before the `send` that spawned it hands its reply back).
     /// Cleared for every handler, like `onFanout`.
     @TaskLocal public static var onBatchLaunched: (@Sendable () -> Void)? = nil
-
-    /// WHO a call is, for the one rule that compares two calls' callers (a join
-    /// of a secret-marked execution): the sending agent's id; the qualified
-    /// `<guid>|<agent>` when a bridge leg relays a foreign caller (`remoteCaller`
-    /// names the leg that is sending); `nil` for the operator. Python
-    /// `_caller_identity()`.
-    static func callerIdentity() -> String? {
-        guard let sender = currentSender else { return nil }
-        if let rc = remoteCaller, rc.leg == sender { return rc.address }
-        return sender.value
-    }
-
-    /// Mark the enclosed sends as `leg` relaying `address`'s call. Python
-    /// `remote_caller_context(leg_id, address)`.
-    public static func withRemoteCaller<T>(
-        leg: AgentId, address: String, _ body: () async -> T
-    ) async -> T {
-        await $remoteCaller.withValue(RemoteCaller(leg: leg, address: address)) { await body() }
-    }
-}
-
-/// A bridge leg relaying a remote caller: the leg's own id and the caller's
-/// qualified address.
-public struct RemoteCaller: Sendable, Equatable {
-    public let leg: AgentId
-    public let address: String
-    public init(leg: AgentId, address: String) {
-        self.leg = leg
-        self.address = address
-    }
 }
 
 /// The tree root's id — python's `kernel_state`, which IS the root and carries
@@ -253,24 +207,6 @@ public final class Kernel: @unchecked Sendable {
     /// projection over both. See `Ledger.swift`, `KernelStore.swift`.
     public let ledger = ExecutionLedger()
 
-    /// Did the execution a batch item's `id` names — resolved as `send` resolves
-    /// it: an int is a message id, a string a caller's NAME — carry `secret`
-    /// marks? False when it names no execution held in RAM (the send itself
-    /// answers that id; one replayed from the store answers a refusal, never a
-    /// value). Asked by ai_core before it dispatches a model-parsed call that
-    /// would JOIN an execution: a model never receives a secret. Python
-    /// `Kernel.carried_secret`.
-    public func carriedSecret(_ itemId: JSON) -> Bool {
-        let eid: Int64?
-        switch itemId {
-        case .integer(let n): eid = n
-        case .string(let s): eid = ledger.resolveName(s)
-        default: return false
-        }
-        guard let eid else { return false }
-        return ledger.secret(eid) != nil
-    }
-
     /// THE ONE COUNTER. Every id in the kernel — a call (one per batch item), a
     /// forked task, a settle, a conversation row an AI agent writes to its store
     /// — is the next value of this int64. Kernel-wide and monotonic.
@@ -295,10 +231,6 @@ public final class Kernel: @unchecked Sendable {
     var _started = false
     var _flushWake: AsyncStream<Void>.Continuation? = nil
     var _flusherTaskId: TaskId? = nil
-    /// The flush rows this kernel wrote (by id), and the calls that carried them:
-    /// those calls' own rows are ALREADY RECORDED — the flush row is their record.
-    var _ownFlushes: Set<Int64> = []
-    var _ownFlushCalls: [Int64: Int64] = [:]
     /// How many `call` rows the store holds for the kernel (counted as flushed,
     /// re-read at every prune) — what the retention window is measured against.
     var _storedCalls = 0
@@ -517,8 +449,8 @@ public final class Kernel: @unchecked Sendable {
     /// the packed confidential context out of the model's prompt. The `call`
     /// path went through the two-sided gate; this one never did.
     ///
-    /// An OPERATOR watch (`currentSender` is nil) is the origin root of trust
-    /// and stays ungated, as with send.
+    /// An OPERATOR watch (`currentSender` is nil — made outside every
+    /// dispatch) is the origin root of trust and stays ungated, as with send.
     @discardableResult
     public func watch(src: AgentId, watcher: AgentId) -> JSON? {
         guard let srcAgent = agent(src) else { return nil }
@@ -551,8 +483,8 @@ public final class Kernel: @unchecked Sendable {
     ///
     /// The stream carries every send's sender, target, verb and payload summary
     /// for every agent in the tree, so subscribing is the broadest read the
-    /// kernel offers. It is gated on the ROOT, and `state_subscribe` is a
-    /// privileged verb so a wildcard never covers it: the edge must be named.
+    /// kernel offers. It is gated on the ROOT like any send: the watcher's
+    /// `can_call` and the root's `callable_by` must both grant `state_subscribe`.
     ///
     /// An ingress rule answers "may this client reach this leg"; it says nothing
     /// about what the client may then READ.

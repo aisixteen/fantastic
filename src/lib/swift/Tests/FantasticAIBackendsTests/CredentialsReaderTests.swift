@@ -2,13 +2,13 @@
 // Twin of python `ai_core/tests/test_credentials.py`.
 //
 // Against a real `credential_store` (file backend under a temp dir): the reader
-// asks AS the agent, pinned to the endpoint's host, the answer marked secret;
-// nothing is cached, so a rotated key is used by the next request; no value lands
-// in the ledger. Never the real keychain or home.
+// asks AS the agent, pinned to the endpoint's host; nothing is cached, so a
+// rotated key is used by the next request; no value lands in the ledger (an
+// unnamed call's settle keeps a digest). Never the real keychain or home.
 
 import FantasticAICore
 import FantasticJSON
-import FantasticKernel
+@testable import FantasticKernel
 import FantasticRamStore
 import Foundation
 import OrderedCollections
@@ -21,19 +21,16 @@ private let EP = "https://api.example.com/v1/responses"
 private let KEY = "sk-live-0123456789"
 private let KEY2 = "sk-rotated-9876543210"
 
-private func send(_ k: Kernel, _ target: String, _ payload: OrderedDictionary<String, JSON>, secret: JSON? = nil)
+private func send(_ k: Kernel, _ target: String, _ payload: OrderedDictionary<String, JSON>)
     async -> Outcome
 {
-    var it = Item(AgentId(target), .object(payload))
-    it.secret = secret
-    return await k.send([it])[0]
+    await k.send([Item(AgentId(target), .object(payload))])[0]
 }
 
 private func storeSet(_ k: Kernel, _ ref: String, _ value: String) async {
     let out = await send(
         k, "creds",
-        ["type": "set", "ref": .string(ref), "fields": ["api_key": .string(value)]],
-        secret: ["payload.fields"])
+        ["type": "set", "ref": .string(ref), "fields": ["api_key": .string(value)]])
     #expect(out.status == .completed && out.result["stored"] == true, "\(out.asJSON.serialize())")
 }
 
@@ -44,8 +41,9 @@ private func create(_ k: Kernel, _ fields: OrderedDictionary<String, JSON>) asyn
 }
 
 /// Python `_mk`: a store with the ref `main` (bound to `host`, read by
-/// `readers`) and a responses agent `ai` whose record names it.
-private func mk(readers: [String] = ["ai"], host: String = "api.example.com") async -> (Kernel, URL) {
+/// whoever `accept` names in its `callable_by`) and a responses agent `ai`
+/// whose record names it.
+private func mk(accept: [String] = ["ai"], host: String = "api.example.com") async -> (Kernel, URL) {
     let r = BundleRegistry()
     r.register(CredentialStoreBundle.handlerModule, CredentialStoreBundle(keychain: NoKeychain()))
     r.register(HANDLER_MODULE, ResponsesBundle())
@@ -58,15 +56,15 @@ private func mk(readers: [String] = ["ai"], host: String = "api.example.com") as
     let dir = FileManager.default.temporaryDirectory
         .appendingPathComponent("cred-ai-\(UUID().uuidString.prefix(8))")
     _ = await create(k, [
-        "handler_module": .string(RamStoreBundle.handlerModule), "id": "memory", "operator": true,
-        "admins": ["kernel"], "callable_by": ["ai": "*"],
+        "handler_module": .string(RamStoreBundle.handlerModule), "id": "memory",
+        "callable_by": ["ai": "*"],
     ])
     _ = await create(k, [
         "handler_module": .string(CredentialStoreBundle.handlerModule), "id": "creds",
         "file": .string(dir.appendingPathComponent("creds.yaml").path),
         // declared
-        "refs": ["main": ["host": .string(host), "readers": .array(readers.map { .string($0) })]],
-        "callable_by": ["ai": "*"],
+        "refs": ["main": ["host": .string(host)]],
+        "callable_by": .object(OrderedDictionary(uniqueKeysWithValues: accept.map { ($0, JSON.string("*")) })),
     ])
     await storeSet(k, "main", KEY)
     let rec = await create(k, [
@@ -115,18 +113,18 @@ struct CredentialsReaderTests {
         }
     }
 
-    @Test func anAgentTheRefDoesNotNameReadsNothing() async throws {
-        let (k, dir) = await mk(readers: ["someone_else"])
+    @Test func anAgentTheStoreDoesNotAcceptReadsNothing() async throws {
+        let (k, dir) = await mk(accept: ["someone_else"])
         defer { try? FileManager.default.removeItem(at: dir) }
         let read = keyReader(AgentId("ai"), k, backend: "responses_backend", required: true)
         do {
-            _ = try await read(EP)
+            // the agent's own turn, which the test stands in for (python `as_agent`)
+            _ = try await KernelTaskLocals.$sender.withValue(AgentId("ai")) { try await read(EP) }
             Issue.record("a stranger must read nothing")
         } catch {
             #expect(
-                pyErrorText(error)
-                    == "responses_backend: credentials creds/main: credential_store: no such "
-                    + "ref 'main'")
+                pyErrorText(error).contains("creds does not accept 'get' from ai"),
+                "\(pyErrorText(error))")
         }
     }
 
@@ -149,14 +147,13 @@ struct CredentialsReaderTests {
     // ─── what one read COSTS in ids (parity, 2026-10-01) ───────────────────
     //
     // A read is ONE send: a call row and a settle row — 2 ids, the same as any
-    // unmarked send (a `secret` mark mints nothing of its own) — and, once the
-    // kernel's flusher writes them to its memory store, that flush's own 3 (the
-    // flush row, the append call, its settle). Measured on python (read-only
-    // script, a started kernel on a ram_store): one read = 2 ids, 5 with its
-    // flush; 20 reads back to back = 43. Pinned here so a swift read can never
-    // mint more than python's.
+    // other send — and, once the
+    // kernel's flusher writes them to its memory store, that flush's own ONE (the
+    // flush row: the flush is the kernel's own call into the store, not a send,
+    // so it mints no call or settle row of its own). Pinned here so a swift read
+    // can never mint more than python's.
 
-    @Test func aReadMintsTheCallAndTheSettleOnlyLikeAnyUnmarkedSend() async throws {
+    @Test func aReadMintsTheCallAndTheSettleOnlyLikeAnyOtherSend() async throws {
         let (k, dir) = await mk()
         defer { try? FileManager.default.removeItem(at: dir) }
         let read = keyReader(AgentId("ai"), k, backend: "responses_backend", required: true)
@@ -164,13 +161,13 @@ struct CredentialsReaderTests {
         #expect(try await read(EP) == KEY)
         #expect(k.nextId - n0 == 2, "a credential read is one call and one settle")
         n0 = k.nextId
-        _ = await KernelTaskLocals.$currentSender.withValue(AgentId("ai")) {
+        _ = await KernelTaskLocals.$sender.withValue(AgentId("ai")) {
             await k.send([Item("creds", ["type": "list"])])[0]
         }
-        #expect(k.nextId - n0 == 2, "the same as an unmarked send")
+        #expect(k.nextId - n0 == 2, "the same as any other send")
     }
 
-    @Test func aReadAndItsFlushCostPythonsFive() async throws {
+    @Test func aReadAndItsFlushCostThree() async throws {
         let (k, dir) = await mk()
         defer { try? FileManager.default.removeItem(at: dir) }
         k.update(AgentId("kernel_state"), ["memory_store_id": "memory"])
@@ -182,9 +179,9 @@ struct CredentialsReaderTests {
         #expect(try await read(EP) == KEY)
         #expect(k.nextId - n0 == 2)
         // the debounced flush (0.15 s) — waited for, bounded, never assumed
-        for _ in 0..<50 where k.nextId - n0 < 5 { try await Task.sleep(nanoseconds: 100_000_000) }
+        for _ in 0..<50 where k.nextId - n0 < 3 { try await Task.sleep(nanoseconds: 100_000_000) }
         await quiet(k)
-        #expect(k.nextId - n0 == 5, "call + settle, then the flush row, its append call and settle")
+        #expect(k.nextId - n0 == 3, "call + settle, then the flush row")
     }
 
     /// Until the id counter has not moved for half a second (bounded at 10 s).
@@ -213,12 +210,11 @@ struct CredentialsReaderTests {
         }
         // declared first — a set never creates a ref
         var refs = k.agent(AgentId("creds"))?.meta["refs"]?.asObject ?? [:]
-        refs["tok"] = ["host": "api.example.com", "readers": ["ai"]]
+        refs["tok"] = ["host": "api.example.com"]
         k.update(AgentId("creds"), ["refs": .object(refs)])
         let out = await send(
             k, "creds",
-            ["type": "set", "ref": "tok", "fields": ["token": "t"]],
-            secret: ["payload.fields"])
+            ["type": "set", "ref": "tok", "fields": ["token": "t"]])
         #expect(out.status == .completed, "\(out.asJSON.serialize())")
         k.update(AgentId("ai"), ["credentials": ["store": "creds", "ref": "tok"]])
         do {
@@ -262,11 +258,5 @@ struct CredentialsReaderTests {
         }
         await storeSet(k, "main", "sk a\tb")
         #expect(try await read(EP) == "sk a\tb")
-    }
-
-    @Test func withoutKeyScrubsEveryOccurrence() {
-        #expect(withoutKey("a sk-1 b sk-1", "sk-1") == "a <secret> b <secret>")
-        #expect(withoutKey("a sk-1", nil) == "a sk-1")
-        #expect(withoutKey("a sk-1", "") == "a sk-1")
     }
 }

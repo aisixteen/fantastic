@@ -179,7 +179,7 @@ async fn blob_verbs_pass_root_ingress() {
             )])
             .await;
     }
-    let denial = fantastic_kernel::with_sender(AgentId::from("leaf"), async {
+    let denial = fantastic_kernel::test_support::as_agent(AgentId::from("leaf"), async {
         kernel
             .send(vec![Item::new(
                 AgentId::from("kernel"),

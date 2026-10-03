@@ -394,11 +394,18 @@ async fn the_root_loader_refuses_record_verbs_from_an_agent() {
         .remove(0)
         .result;
     assert_eq!(made["id"], json!("someone"), "{made}");
+    fantastic_kernel::test_support::grant(
+        &kernel,
+        root.as_str(),
+        "callable_by",
+        "someone",
+        json!(["persist_record", "forget_record"]),
+    );
     for payload in [
         json!({"type": "persist_record", "record": {"id": "noted", "parent_id": "kernel_state"}}),
         json!({"type": "forget_record", "id": "noted"}),
     ] {
-        let out = fantastic_kernel::send::with_sender(AgentId::from("someone"), {
+        let out = fantastic_kernel::test_support::as_agent(AgentId::from("someone"), {
             let kernel = Arc::clone(&kernel);
             let root = root.clone();
             async move {
@@ -891,7 +898,15 @@ async fn a_session_loader_never_writes_through_the_roots_store() {
         .result;
     assert_eq!(r["ok"], true, "{r}");
     // One record write per created agent — the session loader's writer found
-    // no store of its own and wrote nothing.
+    // no store of its own and wrote nothing. A store write is kernel bookkeeping
+    // (no call row), so it is counted off the store's traffic events.
+    let seen: Arc<std::sync::Mutex<Vec<Value>>> = Arc::default();
+    let sink = Arc::clone(&seen);
+    kernel.add_state_subscriber(Arc::new(move |ev: &Value, _body| {
+        if ev["agent_id"] == "store" && ev["kind"] == "send" {
+            sink.lock().unwrap().push(ev["payload"].clone());
+        }
+    }));
     let r = kernel
         .send(vec![Item::new(
             root.clone(),
@@ -903,12 +918,13 @@ async fn a_session_loader_never_writes_through_the_roots_store() {
         .result;
     assert_eq!(r["id"], "plain", "{r}");
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    let writes = fantastic_kernel::test_support::rows_about(&kernel, &AgentId::from("store"))
-        .into_iter()
-        .filter(|row| {
-            row.get("kind") == Some(&json!("call"))
-                && row["payload"]["type"] == "write_stream"
-                && row["payload"]["path"]
+    let writes = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|p| {
+            p["type"] == "write_stream"
+                && p["path"]
                     .as_str()
                     .is_some_and(|p| p.starts_with("agents/plain/agent.yaml.tmp."))
         })

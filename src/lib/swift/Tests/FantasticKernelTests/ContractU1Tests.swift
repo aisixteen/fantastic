@@ -82,7 +82,7 @@ struct ContractU1Tests {
         let leaf = await mk(k, "leaf", parent: "mid")
         #expect(
             leaf["parent_id"].asString == "mid",
-            "the field that expresses placement must actually place it")
+            "the field that names the parent must actually place it")
     }
 
     @Test func anAgentCanReadItsOwnAuthority() async {

@@ -87,11 +87,11 @@ async fn stage(tmp: &TempDir, port: u16, web: &str) -> Arc<Kernel> {
                          ws_leg.as_str(): "*", rest_leg.as_str(): "*"});
     for item in [
         json!({"type": "create_agent", "parent_id": "kernel",
-               "handler_module": HANDLER_MODULE, "id": web, "port": port}),
-        json!({"type": "create_agent", "parent_id": web, "handler_module": "web_ws.tools",
+               "handler_module": HANDLER_MODULE, "callable_by": {"$children": ["watch"]}, "can_call": {"$children": ["get_routes"]}, "id": web, "port": port}),
+        json!({"type": "create_agent", "parent_id": web, "handler_module": "web_ws.tools", "callable_by": {"$parent": ["get_routes"]},
                "id": ws_leg, "ingress_rule": "allow_all_ingress",
-               "can_call": {"term": "*", "cap": "*"}}),
-        json!({"type": "create_agent", "parent_id": web, "handler_module": "web_rest.tools",
+               "can_call": {"$parent": ["watch"], "term": "*", "cap": "*"}}),
+        json!({"type": "create_agent", "parent_id": web, "handler_module": "web_rest.tools", "callable_by": {"$parent": ["get_routes"]},
                "id": rest_leg, "ingress_rule": "allow_all_ingress",
                "can_call": {"term": "*", "cap": "*"}}),
         json!({"type": "create_agent", "parent_id": "kernel",
@@ -159,12 +159,11 @@ async fn paste_image_reads_its_body_at_data_over_ws_and_rest() {
     let port = free_port();
     let web = "web_bp_paste";
     let kernel = stage(&tmp, port, web).await;
-    // A job is DRIVEN by the caller that started it (audit AV-8): each leg pastes
-    // into a terminal it started.
+    // Each leg pastes into a terminal it started itself.
     let start_as = |leg: String| {
         let k = Arc::clone(&kernel);
         async move {
-            let started = fantastic_kernel::send::with_sender(
+            let started = fantastic_kernel::test_support::as_agent(
                 AgentId::from(leg.as_str()),
                 k.send(vec![Item::new(
                     AgentId::from("term"),

@@ -140,7 +140,7 @@ struct WebBundleTests {
         #expect(r["routes"].asObject?.keys.first == "GET /<agent_id>/file/<path>", "\(r)")
         #expect(
             (r["verbs"].asObject ?? [:]).keys.map { String($0) }
-                == ["reflect", "boot", "stop", "mount", "unmount"])
+                == ["reflect", "boot", "stop", "mount", "unmount", "fetch_file"])
     }
 
     /// A11.26 — the ws leg's reflect: `[id, sentence, path_pattern, <describe>,
@@ -254,6 +254,7 @@ struct WebBundleTests {
                 "type": .string("create_agent"), "parent_id": .string("web"),
                 "handler_module": .string("web_rest.tools"), "id": .string("rest"),
             ]))
+        wire(kernel, "web", "rest")
         let mounted = await call(
             kernel, "web", .object(["type": .string("mount"), "child_id": .string("rest")]))
         #expect(
@@ -339,6 +340,7 @@ struct WebBundleTests {
                 "handler_module": .string("mount_order_probe.tools"), "id": .string("probe"),
             ]))
         defer { Task { _ = await call(kernel, "web", .object(["type": .string("stop")])) } }
+        wire(kernel, "web", "probe")  // the host reads its child's routes
         let boot = await call(kernel, "web", .object(["type": .string("boot")]))
         #expect(boot["surfaces"].asArray?.compactMap { $0.asString } == ["probe"], "\(boot)")
         #expect(probe.sawListener() == false, "get_routes ran after the port was accepting")
@@ -466,10 +468,9 @@ struct WebBundleTests {
                 .asArray?.isEmpty == true)
     }
 
-    /// The same three gates, opened by the SUBTREE forms: the web's ancestor holds a
-    /// heritable `read_stream` entry on the served agent, and that agent accepts
-    /// `$subtree:web`. Neither side names the web by id in a plain grant.
-    @Test func browserReachableHonoursHeritableAndSubtreeGrants() async throws {
+    /// `browser_reachable` asks the REAL gate both ways: the web's `can_call`
+    /// and the bridge's `callable_by` must both grant `read_stream`.
+    @Test func browserReachableNeedsBothEnds() async throws {
         let kernel = try await startWebKernel()
         defer { Task { _ = await call(kernel, "web", .object(["type": .string("stop")])) } }
         let rel = "fantastic-reach-\(UUID().uuidString)"
@@ -484,38 +485,16 @@ struct WebBundleTests {
                 "handler_module": .string("file_bridge.tools"), "allow": ["."],
                 "id": .string("files"), "root": .string(rel),
                 "ingress_rule": .string("allow_all_ingress"),
-                "callable_by": .object(["$subtree:web": ["read_stream"]]),
+                "callable_by": .object(["web": ["read_stream"]]),
             ]))
         // Ingress + leg open, no egress yet: not reachable.
         #expect(
             await call(kernel, "web", .object(["type": .string("reflect")]))["browser_reachable"]
                 .asArray?.isEmpty == true)
-        let heritable: JSON = .object([
-            "files": .object(["verbs": ["read_stream"], "for": .string("descendants")])
-        ])
-        let up = await call(
-            kernel, "kernel_state",
-            .object([
-                "type": .string("update_agent"), "id": .string("kernel_state"),
-                "can_call": heritable,
-            ]))
-        #expect(up["updated"].asBool == true, "\(up.serialize())")
+        kernel.update(AgentId("web"), ["can_call": ["$self": "*", "files": ["read_stream"]]])
         let opened = await call(kernel, "web", .object(["type": .string("reflect")]))
         #expect(
             opened["browser_reachable"].asArray?.compactMap { $0.asString } == ["files"],
             "\(opened["browser_reachable"])")
-        // The heritable entry on the web ITSELF reaches nothing.
-        _ = await call(
-            kernel, "kernel_state",
-            .object([
-                "type": .string("update_agent"), "id": .string("kernel_state"),
-                "can_call": .object(["files": .array([])]),
-            ]))
-        _ = await call(
-            kernel, "kernel_state",
-            .object(["type": .string("update_agent"), "id": .string("web"), "can_call": heritable]))
-        #expect(
-            await call(kernel, "web", .object(["type": .string("reflect")]))["browser_reachable"]
-                .asArray?.isEmpty == true)
     }
 }

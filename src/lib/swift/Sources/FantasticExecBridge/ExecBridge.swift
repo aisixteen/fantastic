@@ -240,12 +240,6 @@
         /// (`command`/`args`/`cwd`) is recorded so `status` can report WHAT ran.
         private struct Job {
             let agent: AgentId
-            /// WHO started it — the calling agent, a foreign caller's
-            /// `<guid>|<agent>`, or nil for the operator. The verbs that DRIVE a
-            /// job (write, resize, paste_image, stop, interrupt, clear) answer this
-            /// caller and the operator only; the READ verbs (status, output, ack)
-            /// stay gated by grants alone (audit AV-8, 2026-10-03).
-            let starter: String?
             let child: Child
             var relay: Relay?
             let command: String
@@ -335,11 +329,8 @@
                             + "frames; a payload carrying a bytes value rides the binary channel raw: "
                             + "`write_stream` puts its chunk in `bytes`, `read_stream` passes `bytes: b''` "
                             + "and gets its chunk back raw in the reply's `bytes`) and "
-                            + "exposes `kernel.send(target, payload, secret=None) -> reply` (raises if "
-                            + "the relay could not deliver; `secret` marks values the kernel must not "
-                            + "record — `['payload.<field>']`, `['result']`, `[['payload', 'a.b']]` "
-                            + "for a key holding a dot — and the reply still "
-                            + "carries them to you, so never print one: that is the job output), "
+                            + "exposes `kernel.send(target, payload) -> reply` (raises if "
+                            + "the relay could not deliver), "
                             + "`kernel.emit(payload)`, `kernel.watch(src, cb)`, `kernel.on_message(cb)`, "
                             + "`kernel.self_id`. Arguments arrive as ARGV, like any command — there is "
                             + "no `kernel.args`. One frame caps at 16 MiB; move more than that with "
@@ -588,11 +579,9 @@
             }
             let relay = Relay(
                 fd: ctrlFd, owner: agentId, jobId: jobId, kernel: kernel)
-            // WHO started it — its job verbs answer this caller (and the operator).
-            let starter = Self.caller()
             lock.withLock {
                 jobs[jobId] = Job(
-                    agent: agentId, starter: starter, child: child,
+                    agent: agentId, child: child,
                     relay: relay, command: command, args: args, cwd: cwd,
                     startedAt: Date().timeIntervalSince1970, counter: counter, pty: pty)
             }
@@ -742,33 +731,8 @@
         /// A refusal carried through a `Result`.
         struct RefusalJSON: Error { let json: JSON }
 
-        /// THIS dispatch's caller: the calling agent's id, a foreign caller's
-        /// `<guid>|<agent>` (relayed by a bridge leg), or nil for the operator.
-        /// Python `_caller`.
-        static func caller() -> String? {
-            KernelTaskLocals.currentRemote ?? KernelTaskLocals.currentOrigin?.value
-        }
-
-        /// Whether THIS dispatch's caller drives `job`: its starter, or the
-        /// operator. Python `_yours`.
-        private func yours(_ job: Job) -> Bool {
-            guard let caller = Self.caller() else { return true }
-            return job.starter == caller
-        }
-
-        /// Python `_not_yours`.
-        private func notYours(_ verb: String, _ jid: TaskId) -> JSON {
-            Refusal.make(
-                Refusal.unauthorized,
-                "exec_bridge: job \(jid.value) is not yours — only the caller that started it "
-                    + "(or the operator) may \(verb) it",
-                extra: [("job_id", .integer(jid.value))])
-        }
-
-        /// A live PTY job this agent owns — and, for a verb that DRIVES it, one
-        /// this caller started (or the operator) — or the refusal (python
-        /// `_pty_job`).
-        private func ptyJob(_ verb: String, _ agentId: AgentId, _ payload: JSON, drive: Bool)
+        /// A live PTY job this agent owns, or the refusal (python `_pty_job`).
+        private func ptyJob(_ verb: String, _ agentId: AgentId, _ payload: JSON)
             -> Result<PtyJob, RefusalJSON>
         {
             let jid: TaskId
@@ -778,7 +742,6 @@
             }
             let found = lock.withLock { jobs[jid].flatMap { $0.agent == agentId ? $0 : nil } }
             guard let job = found else { return .failure(RefusalJSON(json: noJob(jid))) }
-            if drive && !yours(job) { return .failure(RefusalJSON(json: notYours(verb, jid))) }
             guard let pty = job.pty else {
                 return .failure(
                     RefusalJSON(json: Refusal.bad(verb, "job_id", "a PTY job (started with `pty`)")))
@@ -817,7 +780,7 @@
 
         private func writeReply(_ agentId: AgentId, _ payload: JSON) async -> JSON {
             let pty: PtyJob
-            switch ptyJob("write", agentId, payload, drive: true) {
+            switch ptyJob("write", agentId, payload) {
             case .failure(let r): return r.json
             case .success(let p): pty = p
             }
@@ -835,7 +798,7 @@
 
         private func resizeReply(_ agentId: AgentId, _ payload: JSON) -> JSON {
             let pty: PtyJob
-            switch ptyJob("resize", agentId, payload, drive: true) {
+            switch ptyJob("resize", agentId, payload) {
             case .failure(let r): return r.json
             case .success(let p): pty = p
             }
@@ -858,7 +821,7 @@
 
         private func ackReply(_ agentId: AgentId, _ payload: JSON) -> JSON {
             let pty: PtyJob
-            switch ptyJob("ack", agentId, payload, drive: false) {
+            switch ptyJob("ack", agentId, payload) {
             case .failure(let r): return r.json
             case .success(let p): pty = p
             }
@@ -907,7 +870,7 @@
         /// channel (or with a body under another key) there is none to paste. The
         /// job is checked first, as python's handler does.
         private func pasteImageText(_ agentId: AgentId, _ payload: JSON) -> JSON {
-            switch ptyJob("paste_image", agentId, payload, drive: true) {
+            switch ptyJob("paste_image", agentId, payload) {
             case .failure(let r): return r.json
             case .success: return Refusal.bad("paste_image", "data", "raw bytes")
             }
@@ -916,7 +879,7 @@
         /// `paste_image` — the BINARY channel: the body at `data` IS the image.
         private func pasteImageReply(_ agentId: AgentId, _ header: JSON, _ data: Data) async -> JSON {
             let pty: PtyJob
-            switch ptyJob("paste_image", agentId, header, drive: true) {
+            switch ptyJob("paste_image", agentId, header) {
             case .failure(let r): return r.json
             case .success(let p): pty = p
             }
@@ -1099,7 +1062,6 @@
             case .success(let j): want = j
             }
             if let jid = want, let job = lock.withLock({ jobs[jid] }), job.agent == agentId {
-                if !yours(job) { return notYours("clear", jid) }
                 if job.status == "running" || job.status == "stopping" {
                     return Refusal.bad(
                         "clear", "job_id",
@@ -1108,7 +1070,7 @@
             }
             let doomed: [TaskId] = lock.withLock {
                 jobs.filter { (id, j) in
-                    j.agent == agentId && yours(j) && (want.map { $0 == id } ?? true)
+                    j.agent == agentId && (want.map { $0 == id } ?? true)
                         && j.status != "running" && j.status != "stopping"
                 }.map { $0.key }
             }
@@ -1128,13 +1090,10 @@
         /// …and the guard that decides. A `job_id` naming nothing used to answer
         /// `{killed:0}` / `{interrupted:0}` — the same reply as "it had already
         /// exited", so a typo read as success. `nil` = no job named ("every job").
-        ///
-        /// A job another caller started is the `unauthorized` refusal instead
-        /// (python `_no_job`, audit AV-8).
+        /// Python `_no_job`.
         private func noSuchJob(_ verb: String, _ agentId: AgentId, _ want: TaskId?) -> JSON? {
             guard let want else { return nil }
             let job = lock.withLock { jobs[want].flatMap { $0.agent == agentId ? $0 : nil } }
-            if let job, !yours(job) { return notYours(verb, want) }
             let known = job != nil
             // NOT a ternary: `JSON` is `ExpressibleByNilLiteral`, so
             // `known ? nil : noJob(want)` unifies BOTH branches at `JSON` and the
@@ -1151,7 +1110,7 @@
             return lock.withLock {
                 var n = 0
                 for (id, var j) in jobs {
-                    if j.agent != agentId || !yours(j) || (want.map { $0 != id } ?? false) {
+                    if j.agent != agentId || (want.map { $0 != id } ?? false) {
                         continue
                     }
                     if !j.child.isAlive { continue }  // already gone — never pretend
@@ -1419,12 +1378,7 @@
               resumes under 5K), `output(job_id, max_bytes?)` (the 256 KiB ring — replay it when you
               re-attach) and `paste_image(job_id, data, mime)` (saves the image, types its path).
               Each is a gated verb: a viewer granted only `status`/`output`/`ack` cannot type.
-              **A job is DRIVEN only by the caller that started it** (its `starter`; the operator
-              drives every job): `write`/`resize`/`paste_image`/`stop`/`interrupt`/`clear` naming a
-              job another caller started are refused — `{reason:"unauthorized", job_id}`,
-              "exec_bridge: job <id> is not yours — only the caller that started it (or the
-              operator) may <verb> it". The reads — `status`, `output`, `ack` — stay gated by grants
-              alone, so a read-only viewer re-attaches to a job someone else started. A running
+              Any caller the gate admits drives any job of this agent. A running
               program's `on_message` never gets a drive verb whose `job_id` names another job —
               another job's keystrokes, pastes and drive calls never reach it; a bulk call (no
               `job_id`) does.
@@ -1437,7 +1391,7 @@
               stopping the kernel does the same. A process that leaves the session on purpose
               (`setsid`) escapes — containment beyond that is the OS's ·
               `interrupt(job_id?)` SIGINT · `clear(job_id?)` forget finished rows. Omit `job_id` and
-              it applies to all YOUR jobs on this agent (the operator: all of them).
+              it applies to every job on this agent.
             - `boot` — no-op. Nothing auto-restarts: a command is started by a caller, not by the record.
 
             Every running job IS a row in the kernel TASK TABLE: its `job_id` is that row's id (an int
@@ -1534,15 +1488,11 @@
             steps from the frame root, a key as a string (taken literally: `["payload", "a.b"]` is
             the key `"a.b"`, never `a` → `b`), a list index as an int — so a `read_stream` chunk or
             a `write_stream` payload crosses raw (never base64). Child → parent, the six
-            ops: `{op:"send", rid, target, payload, secret?}` · `{op:"emit", target?, payload}` ·
+            ops: `{op:"send", rid, target, payload}` · `{op:"emit", target?, payload}` ·
             `{op:"watch", src}` · `{op:"unwatch", src}` · `{op:"onmessage"}` · `{op:"offmessage"}`.
             Parent → child: `{op:"reply", rid, data}` · `{op:"event", src, payload}` ·
             `{op:"inbox", payload}`. `rid` correlates a `send` with its `reply`; the parent echoes it
-            back untouched. `secret` is the call's marks — `["payload.<field>", …]`, `["result"]`,
-            `["result.<field>"]`, or an array of steps `[["payload", "a.b"]]` (a key holding a
-            dot) — put on the dispatched call as sent (absent when the program marks
-            nothing): every record of the call shows `<secret>`, and a bad mark comes back as the
-            kernel's refusal in `data`. ONE FRAME CAPS AT 16 MiB in every runtime — over it the length prefix is a
+            back untouched. ONE FRAME CAPS AT 16 MiB in every runtime — over it the length prefix is a
             wire violation and the relay closes the socket, so move bulk with `write_stream` chunks
             (the reference client raises rather than writing such a frame). **EOF on the fd means the kernel is GONE** — exit, or become an orphan
             nothing can reach. Traffic goes child → spawner → kernel only: a job never dials a host and
@@ -1554,7 +1504,6 @@
 
             ```python
             kernel.send(target, payload) -> reply      # request/reply to any agent by id
-            kernel.send(target, payload, secret=[...]) # …with the call's secret marks
             kernel.emit(payload)                       # fire-and-forget on YOUR OWN agent
             kernel.reflect(target="kernel")
             off = kernel.watch(src, cb)                # PUSH: cb(payload) per event from src
@@ -1565,14 +1514,6 @@
             So a job is a first-class routine: read memory anywhere, call an AI, spawn another job, push
             to any peer — all by id. A step written as a program and a step written as an LLM call are
             substitutable.
-
-            **Secrets on the guest wire.** A program marks a call's secret values exactly as any
-            caller does: `kernel.send("creds", {"type": "get", "ref": "openai/main"},
-            secret=["result"])` reads a credential, `secret=["payload.fields"]` stores one. The
-            kernel records `<secret>` in the call's rows, ledger, state stream and memory store; the
-            reply carries the real values to the program. From there the PROGRAM is the receiver and
-            holds them — whatever it prints lands in the job output (`status`, `progress`,
-            `job_done`), its own leak, not masked.
 
             ## Not a sandbox
 
@@ -1627,7 +1568,7 @@
                         "{type:'output', job_id, data} — a PTY job's output chunk (UTF-8)"),
                 ]),
                 "wire": .string(
-                    "A program speaks the kernel over the inherited fd FANTASTIC_CTRL_FD, a BIDIRECTIONAL socket (one end of a socketpair): frame is [4-byte BE length | kind | rest], both directions — kind T: a JSON envelope; kind B: [4-byte BE H | H-byte JSON header | raw body], the header's `_binary_path` naming where the body belongs as a list of steps from the frame root — a key as a string (taken literally: ['payload', 'a.b'] is the key 'a.b'), a list index as an int (a stream chunk rides raw, never base64). To CALL another agent: write {op:'send', rid:<your id>, target, payload, secret?} and the reply COMES BACK on the SAME fd as {op:'reply', rid:<same id>, data} — the fd is not one-way. It is not inline, though: read frames in a loop and skip any whose rid isn't yours (event/inbox frames can arrive first) until you see your reply. `secret` is the call's marks ['payload.<field>' | 'result' | 'result.<field>' | ['payload', <key>, …] — an array of steps, a key taken literally]: every record of the call shows <secret>, the reply carries the real values to you — print one and it is in the job output. ops: send/emit/reflect/watch/on_message. A command that never reads the fd runs exactly like any OS process."
+                    "A program speaks the kernel over the inherited fd FANTASTIC_CTRL_FD, a BIDIRECTIONAL socket (one end of a socketpair): frame is [4-byte BE length | kind | rest], both directions — kind T: a JSON envelope; kind B: [4-byte BE H | H-byte JSON header | raw body], the header's `_binary_path` naming where the body belongs as a list of steps from the frame root — a key as a string (taken literally: ['payload', 'a.b'] is the key 'a.b'), a list index as an int (a stream chunk rides raw, never base64). To CALL another agent: write {op:'send', rid:<your id>, target, payload} and the reply COMES BACK on the SAME fd as {op:'reply', rid:<same id>, data} — the fd is not one-way. It is not inline, though: read frames in a loop and skip any whose rid isn't yours (event/inbox frames can arrive first) until you see your reply. ops: send/emit/reflect/watch/on_message. A command that never reads the fd runs exactly like any OS process."
                 ),
                 "inbox": .string(
                     "Any verb NOT listed in `verbs` is MAIL for the running program, delivered to its on_message and ACKed {queued:true}. With no live job it is an error — a script that only defines something exits before its first message arrives."

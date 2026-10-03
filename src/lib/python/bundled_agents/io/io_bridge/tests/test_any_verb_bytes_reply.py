@@ -364,12 +364,13 @@ async def test_d_a_peer_bridge_engine_answers_a_text_call_with_bytes(two):
             "handler_module": "ws_bridge.tools",
             "transport": "memory",
             "peer_id": kh.id,
-            "peer_guid": "A-g",
             "ingress_rule": "allow_all_ingress",
             "can_call": {"probe": "*"},
         },
     )
-    kp.create("anyverb_bytes_probe.tools", id="probe", callable_by={"A-g|h_rest": "*"})
+    kp.create(
+        "anyverb_bytes_probe.tools", id="probe", callable_by={p["result"]["id"]: "*"}
+    )
     mt_h, mt_p = MemoryTransport.pair()
     _test_transport_inject[p["result"]["id"]] = mt_p
     sock = _WsEnd(mt_h)

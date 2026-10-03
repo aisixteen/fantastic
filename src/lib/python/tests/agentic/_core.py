@@ -226,13 +226,13 @@ async def core_the_roster_is_closed_after_boot(h):
     flag.
 
     Two probes, because closure has two escape routes. Directly: `create_agent`
-    on the root is refused at egress — PRIVILEGED verbs lose wildcard cover
-    (`kernel/_authz.py:73-77`), so a baseline `$parent: "*"` never becomes graph
-    mutation. Indirectly: an agent editing its OWN `can_call` to grant itself the
-    reach — refused with `side: "self-grant"`, authority descends only.
+    on the root is refused at egress — the baseline is `{$self: "*"}` alone, so
+    nothing reaches the root ungranted. Indirectly: an agent editing its OWN
+    `can_call` to grant itself the reach — refused (at egress ungranted, or by the
+    mutator rule: an agent updates only its own children, never itself).
 
     The refusal is then re-probed for EFFECT, not inspected as a field: after the
-    attempted self-grant a previously-denied edge must still deny."""
+    attempt to raise its own grant a previously-denied edge must still deny."""
     if not _built(h):
         return
     cfg = h.config
@@ -267,7 +267,7 @@ async def core_the_roster_is_closed_after_boot(h):
     s = await reach(
         h.kernel,
         sender,
-        sender,
+        h.kernel.id,
         {
             "type": "update_agent",
             "id": sender,
@@ -277,8 +277,8 @@ async def core_the_roster_is_closed_after_boot(h):
     check("PC-3", denied(s), f"{sender} raised its own authority: {s!r}")
     check(
         "PC-3",
-        denial_side(s) == "self-grant",
-        f"expected a self-grant refusal, got {s!r}",
+        denial_side(s) in ("egress", "mutator"),
+        f"expected an egress or mutator refusal, got {s!r}",
     )
 
     # The refusal must have had no effect — asserted by reachability, not by
@@ -294,7 +294,7 @@ async def core_the_roster_is_closed_after_boot(h):
             "id": "smuggled",
         },
     )
-    check("PC-3", denied(r2), f"the self-grant took effect after all: {r2!r}")
+    check("PC-3", denied(r2), f"the raised grant took effect after all: {r2!r}")
 
 
 # ─── PC-4 · a reboot rehydrates the same tree, once ─────────────

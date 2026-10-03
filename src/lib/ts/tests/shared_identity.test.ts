@@ -66,7 +66,6 @@ function tab(name: string) {
     new Agent({
       id: "x",
       parentId: ROOT,
-      meta: { callable_by: { "h0|*": ["ping"] } },
       handler: (_id, payload) => ({ tab: name, type: payload["type"] ?? null }),
     }),
   );
@@ -103,7 +102,7 @@ test("the host's call reaches each tab on its own socket; a closed tab leaves th
   const b = tab("b");
   await until(() => (a.sock()?.frames("hello").length ?? 0) > 0 && (b.sock()?.frames("hello").length ?? 0) > 0);
   // the host's fan-out: one call frame per live route of the guid
-  const call = { type: "call", id: "h1", target: "x", payload: { type: "ping" }, caller: "h0|kernel" };
+  const call = { type: "call", id: "h1", target: "x", payload: { type: "ping" } };
   a.sock().deliver(call);
   b.sock().deliver(call);
   await until(() => a.sock().reply("h1") !== undefined && b.sock().reply("h1") !== undefined);
@@ -117,19 +116,18 @@ test("the host's call reaches each tab on its own socket; a closed tab leaves th
   b.bridge.close();
 });
 
-test("the tree guid is the tab's only own form: caller, local resolution, foreign callers", async () => {
+test("the tree guid is the tab's only own form: local resolution, a host call addressed by it", async () => {
   const { k, bridge, sock } = tab("a");
-  assert.equal(k.qualifiedCaller(), `${TREE}|kernel`);
-  void k.send([{ target: "host_agent", payload: { type: "list" } }]).catch(() => undefined);
-  await until(() => (sock()?.frames("call").length ?? 0) === 1);
-  assert.equal(sock().frames("call")[0]!["caller"], `${TREE}|kernel`);
-  assert.equal(k.isForeign(`${TREE}|x`), false);
-  assert.equal(k.isForeign("tab-a|x"), true);
   assert.equal(k.ownQualified(`${TREE}|x`), "x");
   assert.equal(k.ownQualified("tab-a|x"), null);
-  // a host call claiming the tree guid would borrow a local agent's grants
-  sock().deliver({ type: "call", id: "h1", target: "x", payload: { type: "ping" }, caller: `${TREE}|view` });
+  await until(() => (sock()?.frames("hello").length ?? 0) > 0);
+  // the host addresses the agent by the tree guid; the call names no caller
+  sock().deliver({ type: "call", id: "h1", target: `${TREE}|x`, payload: { type: "ping" } });
   await until(() => sock().reply("h1") !== undefined);
-  assert.equal((sock().reply("h1")!["data"] as Record<string, unknown>)["reason"], "bad_arg");
+  assert.deepEqual(sock().reply("h1")!["data"], { tab: "a", type: "ping" });
+  // a per-tab qualifier names nothing here
+  sock().deliver({ type: "call", id: "h2", target: "tab-a|x", payload: { type: "ping" } });
+  await until(() => sock().reply("h2") !== undefined);
+  assert.equal((sock().reply("h2")!["data"] as Record<string, unknown>)["reason"], "unknown_agent");
   bridge.close();
 });

@@ -28,8 +28,6 @@ import { isKernelVerb } from "./kernel_verbs.ts";
 import { applyReflectFlags, reflectIdentity } from "./reflect.ts";
 import { pyRepr, pyTypeNameAt } from "./pyjson.ts";
 import { timers } from "./timers.ts";
-import type { Mark, Secret } from "./secret.ts";
-import { check as checkSecret, shownOutcome, shownPayload } from "./secret.ts";
 
 /** An item that reached the ledger and now needs settling. */
 interface Launched {
@@ -39,19 +37,9 @@ interface Launched {
   exec?: Exec;
   target?: string;
   payload?: Payload;
-  /** The payload AS SHOWN when the item marked `secret` paths (`secret.ts`):
-   *  what the fanout mirrors on every attempt; the handler gets `payload`. */
-  shown?: Payload;
-  /** The item's `secret` marks as given — a host-bound dispatch puts them on its
-   *  call frame, so the host masks its records of the call too. */
-  secretPaths?: readonly Mark[];
   timeout?: number | undefined;
   /** True when this item JOINED an existing execution instead of starting one. */
   joined?: boolean;
-  /** A JOINER that is not the execution's original caller, of an execution whose
-   *  item marked `secret`: its outcome is handed over AS SHOWN, masked with these
-   *  marks (`shownOutcome`) — never the real values. */
-  shownToJoiner?: Secret;
   /** The `kernel` reflect FAST PATH (python `_launch`): a pure identity read —
    *  no dispatch, no task row. Unnamed it has no pid, no rows and no ledger
    *  entry at all; named it is ledgered (dedup + join) but still has no task. */
@@ -60,23 +48,6 @@ interface Launched {
 
 function isPlainObject(v: unknown): v is Payload {
   return v !== null && typeof v === "object" && !Array.isArray(v);
-}
-
-/** The kernel verbs whose answer is scoped to the caller that sends them
- *  (`ledger`, `ack_deadletter`: the executions THAT caller originated). A join of
- *  one by any other caller is refused (`launch`'s join branch); a new
- *  caller-scoped verb joins this set. Python `_CALLER_SCOPED_VERBS`. */
-const CALLER_SCOPED_VERBS: ReadonlySet<string> = new Set(["ledger", "ack_deadletter"]);
-
-/** The answer to joining another caller's execution of a caller-scoped verb, in
- *  python's words (`_foreign_scoped_join`): the caller's raw id as given. */
-function foreignScopedJoin(execId: unknown, verb: string): Payload {
-  return refusal(
-    BAD_ARG,
-    `send: id ${pyRepr(execId)} names another caller's ${verb} execution — ${verb} answers only ` +
-      `the caller that sent it, so it cannot be joined; make your own ${verb} call under a new id`,
-    { extra: { arg: "id" } },
-  );
 }
 
 /**
@@ -176,12 +147,6 @@ export function launch(k: Kernel, index: number, item: Item): Launched {
       ),
     };
   }
-  // SECRET marks (`secret.ts`): validated with the item's other own fields;
-  // `shown` is what every record and mirror of this call carries.
-  const [secret, badSecret] = checkSecret(item, payload);
-  if (badSecret !== null) return { index, settled: refused(badSecret) };
-  const shown = secret !== null ? shownPayload(payload, secret) : undefined;
-
   // A DYING TASK REGISTERS NO NEW WORK. `cancel` marks the whole subtree before
   // anything settles, and JS cannot abort a handler — so a killed handler runs
   // on, and what it sends from then on would start fresh work that outlives the
@@ -192,10 +157,10 @@ export function launch(k: Kernel, index: number, item: Item): Launched {
   }
 
   // WHILE DRAINING, NO NEW ROOTS. A send from inside live work (a parent task in
-  // the table — including an agent's own `shutdown` dispatch using its tools)
-  // passes; the kernel's own traffic passes; the root's control surface (kernel
-  // verbs + reflect) stays open so an operator can watch and finish the stop;
-  // everything else is a new root and is refused before it costs an id.
+  // the table) passes; what a `shutdown` the stop runs sends passes (its view is
+  // marked `kernelTraffic`); the root's control surface (kernel verbs + reflect)
+  // stays open so an operator can watch and finish the stop; everything else is
+  // a new root and is refused before it costs an id.
   const resolvedId = k.resolveId(targetId);
   if (k.store.draining && !k.kernelTraffic) {
     const toRoot = targetId === "kernel" || (k.rootId !== null && targetId === k.rootId);
@@ -219,22 +184,14 @@ export function launch(k: Kernel, index: number, item: Item): Launched {
     return { index, settled: refused(unknown(targetId, [...k.agents.keys()])) };
   }
 
-  // ── CALL GATE — fully gated, two-sided, from above ───────────────
+  // ── CALL GATE — two-sided, explicit grants only ───────────────────
   // An OPERATOR send (no origin) is the root of trust and never reaches here.
   // Every AGENT send — ANY verb, `reflect` included — needs BOTH ends. A
   // HOST-BOUND send (no local target: it will be forwarded) passes the SENDER's
   // half here, before the bridge sees it; the target's half is the host's, on
   // the call as it arrives there.
   const origin = k.currentOrigin;
-  if (origin !== null && k.isForeign(origin)) {
-    // A CALL FROM ANOTHER KERNEL reaches THIS kernel's agents only — never
-    // through to the host again — and only the target's half is judged here.
-    if (target === undefined) {
-      return { index, settled: refused(unknown(targetId, [...k.agents.keys()])) };
-    }
-    const d = k.ingressGate(origin, verb, resolvedId);
-    if (d !== null) return { index, settled: refused(d) };
-  } else if (origin !== null) {
+  if (origin !== null) {
     const d = target !== undefined ? k.gate(origin, verb, resolvedId) : k.egressGate(origin, verb, resolvedId);
     if (d !== null) return { index, settled: refused(d) };
   }
@@ -256,45 +213,15 @@ export function launch(k: Kernel, index: number, item: Item): Launched {
       // to whoever ran it, so handing it back is equivalent to having made THAT
       // call — the gate must be asked that question, not about the verb this
       // caller happened to send. Measured in python 2026-08-28: a caller granted
-      // only a harmless verb reused another's id and received its secret
+      // only a harmless verb reused another's id and received its result
       // verbatim. An OPERATOR joiner is ungated, as everywhere.
-      // A caller on ANOTHER KERNEL is judged by the target's half alone, as at
-      // launch above — it has no record here to hold a grant.
       if (origin !== null) {
-        const d = k.isForeign(origin)
-          ? k.ingressGate(origin, existing.verb, resolvedId)
-          : k.gate(origin, existing.verb, resolvedId);
+        const d = k.gate(origin, existing.verb, resolvedId);
         if (d !== null) return { index, settled: refused(d) };
       }
-      // A CALLER-SCOPED VERB'S ANSWER IS ITS CALLER'S VIEW, NOT A FACT
-      // (owner-approved 2026-10-03, audit KV-1). `ledger` and `ack_deadletter`
-      // answer from WHO sends them — the executions that caller originated
-      // (`existing.caller`); a join never re-runs the handler, so the joiner would
-      // be handed the original caller's view. Measured in python: `B`, granted
-      // `ledger`, joined `A`'s named ledger read and got A's rows (and the
-      // operator's unscoped read by its int pid: every caller's). So a join by any
-      // caller other than the one that sent it is REFUSED — the operator included,
-      // whose own read is unscoped anyway. Any NEW caller-scoped verb joins
-      // `CALLER_SCOPED_VERBS`. Cross-caller joins of every OTHER verb stay open by
-      // design: one execution under one id is the once-only contract (a wire frame
-      // id IS the execution id), the gate above asks the joiner the original
-      // call's question, and a secret-marked outcome goes over as shown (below).
-      if (CALLER_SCOPED_VERBS.has(existing.verb) && origin !== existing.caller) {
-        return { index, settled: refused(foreignScopedJoin(execId, existing.verb)) };
-      }
-      // A SECRET-MARKED EXECUTION'S REAL OUTCOME IS ITS CALLER'S ALONE. The gate
-      // above judges the VERB; a handler whose answer depends on WHO asks (a
-      // credential_store's per-ref `readers`) and the caller's own `secret` marks
-      // never run for a joiner. Measured in python 2026-10-03 (audit F1): `eve`,
-      // granted `get` on a store but no reader of the ref, joined `alice`'s
-      // marked `get` by its pid and received the key. So a joiner that is not the
-      // identity which opened the execution (`caller`: the agent, the operator —
-      // null — or a foreign `<guid>|<agent>`) gets the outcome AS SHOWN — what
-      // the ledger reads back. Unmarked executions are unchanged.
-      const hide = existing.secret !== null && origin !== existing.caller ? existing.secret : undefined;
       // JOIN — settled or in flight, the ledger entry carries the ONE true
       // outcome and no second execution ever starts.
-      return { index, exec: existing, joined: true, timeout, shownToJoiner: hide };
+      return { index, exec: existing, joined: true, timeout };
     }
   }
 
@@ -309,17 +236,15 @@ export function launch(k: Kernel, index: number, item: Item): Launched {
   // NEW: the message id is minted like any other; a name is a field on it.
   // UNNAMED work is ledgered too, under its minted id: one id space, one engine.
   const pid = k.mintId();
-  const exec = openExecution(k, pid, resolvedId, verb, payload, timeout, retries, name, secret, shown);
-  const secretPaths = secret !== null ? secret.paths : [];
-  return { index, exec, target: resolvedId, payload, shown, secretPaths, timeout, identityRead };
+  const exec = openExecution(k, pid, resolvedId, verb, payload, timeout, retries, name);
+  return { index, exec, target: resolvedId, payload, timeout, identityRead };
 }
 
 /**
  * Open one execution under a pre-minted id: the CALL ROW (what outlives RAM, once
  * flushed) and the process side (the ledger entry). EVERY SEND IS A MESSAGE: the
  * row names the call — who asked whom what, from which task — and carries the
- * dispatch payload verbatim (AS SHOWN when the item marked `secret` paths), the
- * retry budget and the deadline. The caller field is `caller` (the id that
+ * dispatch payload verbatim, the retry budget and the deadline. The caller field is `caller` (the id that
  * originated it; null = operator).
  */
 function openExecution(
@@ -331,8 +256,6 @@ function openExecution(
   timeout: number | undefined,
   retries: number,
   name: string | null,
-  secret: Secret | null,
-  shown: Payload | undefined,
 ): Exec {
   const row: Payload & { kind: string; id: number } = {
     id: pid,
@@ -340,23 +263,15 @@ function openExecution(
     verb,
     parent: k.currentTask,
     caller: k.currentOrigin,
-    // SHOWN, never the secret values — the row is what the store keeps.
-    payload: shown ?? payload,
+    payload,
     named: name !== null,
     retries,
     attempts: 1,
     timeout: timeout ?? null,
   };
   if (name !== null) row["name"] = name;
-  // the MARKS are not secret (as given — dotted strings and/or arrays of steps):
-  // they say this record cannot answer a replay
-  if (secret !== null) row["secret"] = secret.paths;
   k.store.put(target, row);
-  return k.ledger.open({
-    id: pid, target, verb, payload: shown ?? payload, timeout, retries, name, caller: k.currentOrigin,
-    // RAM only: what `KernelStore.settle` masks the outcome with.
-    secret,
-  });
+  return k.ledger.open({ id: pid, target, verb, payload, timeout, retries, name, caller: k.currentOrigin });
 }
 
 /** Await one launched item to its final outcome, applying the retry budget. */
@@ -385,9 +300,9 @@ export async function settle(k: Kernel, l: Launched): Promise<Outcome> {
           ),
         });
       }
-      return named(shownTo(l, raced));
+      return named(raced);
     }
-    return named(shownTo(l, await exec.promise));
+    return named(await exec.promise);
   }
 
   if (l.identityRead === true) {
@@ -419,12 +334,6 @@ export async function settle(k: Kernel, l: Launched): Promise<Outcome> {
 
 const TIMED_OUT = Symbol("timed_out");
 const CANCELLED = Symbol("cancelled");
-
-/** A joined outcome as THIS joiner receives it: the real one, or — a joiner that
- *  did not open a secret-marked execution — as shown. */
-function shownTo(l: Launched, out: Outcome): Outcome {
-  return l.shownToJoiner !== undefined ? shownOutcome(out, l.shownToJoiner) : out;
-}
 
 /** The root's identity reflect, decorated for the CALLER (`k` — its roster is
  *  gated on the caller's origin). */
@@ -459,7 +368,7 @@ async function runOnce(k: Kernel, l: Launched, pid: number, attempt: number): Pr
   const killed = new Promise<typeof CANCELLED>((res) => {
     task.onCancel.push(() => res(CANCELLED));
   });
-  const run = k.dispatch(target, payload, pid, l.shown, l.secretPaths);
+  const run = k.dispatch(target, payload, pid);
   run.catch(() => undefined); // a late failure after a cancel has no reader
   try {
     const raced = Promise.race([run, killed]);
@@ -510,7 +419,7 @@ export async function runBatch(k: Kernel, items: Item[]): Promise<Outcome[]> {
     k.store.storeId !== null &&
     items.some((it) => isPlainObject(it as unknown) && it.id !== undefined && it.id !== null)
   ) {
-    await k.store.recall(items, k);
+    await k.store.recall(items, k.currentTask);
   }
   const launched = items.map((it, i) => launch(k, i, it));
   return Promise.all(launched.map((l) => settle(k, l)));

@@ -13,9 +13,7 @@
 //! mirrors the Python kernel_bridge):
 //!
 //! ```text
-//! outbound  {type:"call",  id:corr, target, payload, caller, secret?}
-//!                                     — `secret` = the item's marks
-//!                                     (`fantastic_kernel::secret`)
+//! outbound  {type:"call",  id:corr, target, payload}
 //! outbound  {type:"watch", src} / {type:"unwatch", src}
 //! inbound   {type:"reply", id, data}
 //! inbound   {type:"error", id, error}
@@ -135,13 +133,6 @@ pub trait BridgeTransport: Send + Sync {
     /// idempotency and every forward/watch pre-check read it. Every transport
     /// answers it itself.
     fn closed(&self) -> bool;
-
-    /// The ws seal: this transport refuses every call carrying secret marks (a
-    /// `ws://` socket to a non-loopback host — python `WSTransport.sealed`). Only
-    /// ws_bridge's `forward` reads it.
-    fn seals_secrets(&self) -> bool {
-        false
-    }
 
     /// The relay leg's `is_live` — a usable socket exists RIGHT NOW (not closed,
     /// not mid-reconnect). Only `relay_connector`'s reflect reads it.

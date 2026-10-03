@@ -4,7 +4,7 @@
 
 import FantasticFile
 import FantasticJSON
-import FantasticKernel
+@testable import FantasticKernel
 import FantasticKernelState
 import Foundation
 import OrderedCollections
@@ -133,12 +133,13 @@ struct RootLoaderOwnTreeTests {
                 ])
         ])[0].result
         #expect(made["id"] == "someone", "\(made.serialize())")
+        wire(kernel, "someone", "kernel_state", ["persist_record", "forget_record"])
         let payloads: [JSON] = [
             ["type": "persist_record", "record": ["id": "noted", "parent_id": "kernel_state"]],
             ["type": "forget_record", "id": "noted"],
         ]
         for payload in payloads {
-            let out = await KernelTaskLocals.$currentSender.withValue(AgentId("someone")) {
+            let out = await KernelTaskLocals.$sender.withValue(AgentId("someone")) {
                 await kernel.send([Item("kernel_state", payload)])[0].result
             }
             #expect(out["reason"] == "unauthorized", "\(out.serialize())")
@@ -179,12 +180,6 @@ struct RecordWritesThroughStoreTests {
         let after = try String(contentsOf: file, encoding: .utf8)
         #expect(after.contains("sidecar: \(pad)"), "the unknown key was dropped on the merge")
         #expect(after.contains("x: 1"))
-        // Each page names its offset, as python's merge read does.
-        let offsets = k.rows.all().filter {
-            $0["agent"]?.asString == "store" && $0["verb"]?.asString == "read_stream"
-                && $0["payload"]?["path"].asString == "agents/big/agent.yaml"
-        }.compactMap { $0["payload"]?["offset"].asInt }
-        #expect(offsets.contains(0) && offsets.contains(65536), "\(offsets)")
         await k.shutdown()
     }
 

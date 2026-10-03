@@ -16,7 +16,9 @@ from __future__ import annotations
 import asyncio
 import types
 
-from kernel import sender_context, register_unlisted
+from kernel import register_unlisted
+
+from _testkit import as_agent
 
 _started: dict = {}
 
@@ -258,7 +260,7 @@ async def test_the_full_detail_tree_node_shape(seeded_kernel):
     root = r["tree"]
     assert list(root)[:4] == ["id", "parent_id", "handler_module", "display_name"]
     node = next(c for c in root["children"] if c["id"] == "fbn")
-    base = {"$self": "*", "$parent": "*", "$children": "*"}
+    base = {"$self": "*"}
     assert node == {
         "id": "fbn",
         "parent_id": "kernel_state",
@@ -290,6 +292,6 @@ async def test_an_agent_reflect_through_the_gate_still_reads_the_module(seeded_k
     k = seeded_kernel
     k.create("hook_pin_refl.tools", id="hr", callable_by={"asker": ["reflect"]})
     k.create(None, id="asker", can_call={"hr": ["reflect"]})
-    with sender_context("asker"):
+    with as_agent(seeded_kernel, "asker"):
         r = (await _call(k, "hr", {"type": "reflect"}))["result"]
     assert r["sentence"] == "hook probe" and "kernel_verbs" in r

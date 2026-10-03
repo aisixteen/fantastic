@@ -176,17 +176,12 @@ struct BlobChannelTests {
         #expect(inert["cancelled"].asBool == true, "a killed subtree must dispatch nothing")
         #expect(!files.paths.contains("agents/desk/killed.txt"))
 
-        // Same killed scope, but entered as BOOKKEEPING: the write lands.
+        // Same killed scope, but through the kernel's OWN persistence function
+        // (`persistOwnBlob` — a plain call into the store, not a send): the
+        // write lands.
         let saved = await KernelTaskLocals.$currentKilled.withValue(killed) {
-            await k.asBookkeeping {
-                await k.send([
-                    Item(
-                        AgentId("kernel"),
-                        .object([
-                            "type": .string("persist_blob"), "agent_id": .string("desk"),
-                            "name": .string("committed.txt"), "content": .string("durable"),
-                        ]))
-                ])[0].result
+            await k.asSelf(AgentId("desk")) {
+                await k.persistOwnBlob(name: "committed.txt", content: "durable")
             }
         }
         #expect(saved["ok"].asBool == true, "\(saved)")
@@ -217,7 +212,7 @@ struct BlobChannelTests {
         // state.yaml, and the victim read the forgery back as its own memory.
         let files = Files()
         let k = await makeKernel(files)
-        let forged = await KernelTaskLocals.$currentOrigin.withValue(AgentId("attacker")) {
+        let forged = await KernelTaskLocals.$origin.withValue(AgentId("attacker")) {
             await k.persistBlob(
                 .object([
                     "agent_id": .string("desk"), "name": .string("state.yaml"),
@@ -297,7 +292,7 @@ struct BlobChannelTests {
         ])
         #expect(noContent == .object(["error": .string("persist_blob: content (str) required")]))
         // The owner denial: python's repr on BOTH ids, `reason`, and no `side`.
-        let forged = await KernelTaskLocals.$currentOrigin.withValue(AgentId("attacker")) {
+        let forged = await KernelTaskLocals.$origin.withValue(AgentId("attacker")) {
             await k.persistBlob(
                 .object([
                     "agent_id": .string("desk"), "name": .string("s.yaml"),
@@ -314,14 +309,12 @@ struct BlobChannelTests {
         #expect(forged["code"] == .null, "python's loader refusal carries no code")
     }
 
-    /// C47 — PERSISTENCE IO RIDES THE BATCH. Every store byte (a blob write, a
-    /// blob read, the record write) is a `kernel.send` of ONE binary item under
-    /// operator authority, so each leaves a CALL ROW on the store and a SETTLE
-    /// row on the root — exactly what python's `kernel_state` leaves, because it
-    /// does all of this with `kernel.send([...])`. `sendWithBinary` minted none
-    /// of it, so the substrate's own writes were the one class of work the
-    /// message log could not see.
-    @Test func storeWritesAreLedgerExecutions() async {
+    /// PERSISTENCE IO IS THE KERNEL'S OWN BOOKKEEPING (owner 2026-10-04): every
+    /// store byte (a blob write, a blob read, the record write) is a PLAIN CALL
+    /// into the store's handler (`storeCall`) — not a gated send, so it leaves no
+    /// call row on the store and no settle row. The `persist_blob` call that
+    /// asked for it is the record. Python `Kernel.bookkeeping`.
+    @Test func storeWritesAreTheKernelsOwnCalls() async {
         let files = Files()
         let k = await makeKernel(files)
         let w = await k.send([
@@ -333,20 +326,8 @@ struct BlobChannelTests {
                 ]))
         ])[0].result
         #expect(w["ok"].asBool == true, "\(w)")
-        // THE EXECUTION ROWS still in RAM (this kernel was never started, so
-        // nothing flushed them) — the store's own call rows.
-        let rows: JSON = .object([
-            "rows": .array(k.rows.all().filter { $0["agent"]?.asString == "store" }.map { .object($0) })
-        ])
-        let calls = (rows["rows"].asArray ?? []).filter { $0["kind"].asString == "call" }
-        #expect(
-            calls.contains { $0["verb"].asString == "write_stream" },
-            "the blob write left no call row: \(rows.serialize())")
-        #expect(
-            calls.allSatisfy { $0["outcome"]["status"].asString != nil },
-            "a store call never settled: \(rows.serialize())")
-        // The READ half too.
-        _ = await k.send([
+        #expect(files.paths.contains("agents/desk/rows.yaml"), "\(files.paths)")
+        let r = await k.send([
             Item(
                 AgentId("kernel"),
                 .object([
@@ -354,20 +335,10 @@ struct BlobChannelTests {
                     "name": .string("rows.yaml"),
                 ]))
         ])[0].result
-        let after: JSON = .object([
-            "rows": .array(k.rows.all().filter { $0["agent"]?.asString == "store" }.map { .object($0) })
-        ])
-        #expect(
-            (after["rows"].asArray ?? []).contains {
-                $0["kind"].asString == "call" && $0["verb"].asString == "read_stream"
-            }, "the blob read left no call row: \(after.serialize())")
-        // …and the OPERATOR is the sender: a store write never runs against the
-        // asking agent's grant.
-        #expect(
-            (after["rows"].asArray ?? [])
-                .filter { $0["kind"].asString == "call" && $0["verb"].asString == "write_stream" }
-                .allSatisfy { $0["caller"].isNull },
-            "a store write carried an agent caller: \(after.serialize())")
+        #expect(r["content"] == .string("a: 1\n"), "\(r)")
+        // No call row on the store: the kernel called its handler directly.
+        let storeRows = k.rows.all().filter { $0["agent"]?.asString == "store" }
+        #expect(storeRows.isEmpty, "\(storeRows)")
     }
 
     /// C79 — the AgentBundle DEFAULT `handleBinary` dispatches the HEADER

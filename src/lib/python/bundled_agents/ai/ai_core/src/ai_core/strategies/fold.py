@@ -90,7 +90,6 @@ _RUNTIME = (
     "[recall",
     "[late reply",
     "[cleared ",
-    "[fork of ",
 )
 
 

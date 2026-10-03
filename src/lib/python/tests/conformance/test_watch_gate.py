@@ -20,7 +20,9 @@ import types
 
 import pytest
 
-from kernel import sender_context, register_unlisted
+from kernel import register_unlisted
+
+from _testkit import as_agent
 
 _mod = types.ModuleType("watch_probe.tools")
 
@@ -68,7 +70,7 @@ async def wired(seeded_kernel):
 
 
 async def test_an_ungranted_agent_cannot_watch_another(wired):
-    with sender_context("nosy"):
+    with as_agent(wired, "nosy"):
         wired.ctx.ensure_inbox("nosy")  # a watcher registers first
         denial = wired.watch("secret", "nosy")
     assert denial is not None, "an ungranted watch was allowed — read side-channel"
@@ -113,7 +115,7 @@ async def test_an_explicit_watch_grant_is_honoured(wired):
             }
         ]
     )
-    with sender_context("nosy"):
+    with as_agent(wired, "nosy"):
         wired.ctx.ensure_inbox("nosy")  # a watcher registers first
         denial = wired.watch("secret", "nosy")
     assert denial is None, denial
@@ -146,62 +148,37 @@ async def _set_can_call(kernel, agent_id, grant):
     assert out["result"].get("updated") is True, out
 
 
-async def test_watching_the_root_needs_a_named_grant(wired):
-    """Measured before the fix (audit 2026-10-03, KV-2): every direct child of the
-    root watched the root inbox on the baseline `$parent:*` alone and read every
-    kernel verb's payload — other agents' `persist_blob` contents included."""
+async def test_watching_the_root_takes_both_halves(wired):
+    """`watch` is a verb like any other: the watcher's `can_call` names the root
+    and the root's `callable_by` names the watcher."""
     wired.ctx.ensure_inbox("nosy")
-    with sender_context("nosy"):
+    with as_agent(wired, "nosy"):
         denial = wired.watch(wired.id, "nosy")
     assert denial is not None, "the baseline watched the root"
     assert denial["reason"] == "unauthorized" and denial["side"] == "egress", denial
     assert denial["error"] == f"nosy may not call 'watch' on {wired.id}", denial
+    await _set_can_call(wired, "nosy", {"$self": "*", wired.id: ["watch"]})
+    with as_agent(wired, "nosy"):
+        denial = wired.watch(wired.id, "nosy")
+    assert denial is not None and denial["side"] == "ingress", denial
     assert "nosy" not in wired._watcher_ids
-    base = {"$self": "*", "$parent": "*", "$children": "*"}
-    # a structural wildcard spelled out is still a structural wildcard
-    await _set_can_call(wired, "nosy", {**base, "$parent": ["*"]})
-    with sender_context("nosy"):
-        assert wired.watch(wired.id, "nosy") is not None
-    # a NAMED grant covers it: the root's id with the verb, or with `*`
-    for grant in ({wired.id: ["watch"]}, {wired.id: "*"}, {"$parent": ["watch"]}):
-        await _set_can_call(wired, "nosy", {**base, **grant})
-        with sender_context("nosy"):
-            assert wired.watch(wired.id, "nosy") is None, grant
-        wired.unwatch(wired.id, "nosy")
-    # every other watch is unchanged: the baseline still watches its own child
-    await _mk(wired, "nosy_kid", parent_id="nosy")
-    await _set_can_call(wired, "nosy", base)
-    with sender_context("nosy"):
-        assert wired.watch("nosy_kid", "nosy") is None
+    wired.ctx.update(wired.id, callable_by={"$self": "*", "$children": ["watch"]})
+    with as_agent(wired, "nosy"):
+        assert wired.watch(wired.id, "nosy") is None
+    wired.unwatch(wired.id, "nosy")
 
 
 async def test_the_state_stream_needs_an_explicit_edge_on_the_root(wired):
     # The broadest read the kernel offers: every send's sender, target, verb and
     # payload summary, for every agent. An open ingress rule says a client may
     # REACH the leg; it says nothing about what it may then READ.
-    with sender_context("nosy"):
+    with as_agent(wired, "nosy"):
         denial = wired.authorize_state_subscribe("nosy")
     assert denial is not None, "the whole state stream was readable ungranted"
     assert denial["reason"] == "unauthorized"
-
-    await wired.send(
-        [
-            {
-                "target": "kernel",
-                "payload": {
-                    "type": "update_agent",
-                    "id": "nosy",
-                    "can_call": {
-                        "$self": "*",
-                        "$parent": "*",
-                        "$children": "*",
-                        wired.id: ["state_subscribe"],
-                    },
-                },
-            }
-        ]
-    )
-    with sender_context("nosy"):
+    await _set_can_call(wired, "nosy", {"$self": "*", wired.id: ["state_subscribe"]})
+    wired.ctx.update(wired.id, callable_by={"$self": "*", "nosy": ["state_subscribe"]})
+    with as_agent(wired, "nosy"):
         assert wired.authorize_state_subscribe("nosy") is None
 
 
@@ -214,7 +191,7 @@ async def test_an_operator_may_tap_the_state_stream(wired):
 # The kernel holds no conversation, so there is no row event on the state stream.
 # An AI agent announces every row it appends to whoever `watch`es IT — gated by that
 # agent's own `callable_by` — as a content-free digest; a `body:true` watcher gets
-# the content only for rows a live grant from the agent gives it.
+# the content too.
 
 
 async def _ai_with_watcher(kernel):
@@ -240,7 +217,7 @@ async def test_an_ai_agent_announces_its_rows_to_its_watchers_as_digests(wired):
     from ai_core import core
 
     inbox = await _ai_with_watcher(wired)
-    with sender_context("viewer"):
+    with as_agent(wired, "viewer"):
         out = (await wired.send([{"target": "talker", "payload": {"type": "watch"}}]))[
             0
         ]
@@ -253,42 +230,20 @@ async def test_an_ai_agent_announces_its_rows_to_its_watchers_as_digests(wired):
     assert ev["row"]["bytes"] == 24 and "content" not in ev["row"], "a digest only"
 
 
-async def test_row_bodies_reach_only_a_watcher_the_agent_granted(wired):
+async def test_a_body_watcher_gets_the_content(wired):
     from ai_core import core
 
     inbox = await _ai_with_watcher(wired)
-    with sender_context("viewer"):
+    with as_agent(wired, "viewer"):
         await wired.send(
             [{"target": "talker", "payload": {"type": "watch", "body": True}}]
         )
     await core._save_history("talker", wired, [{"role": "user", "content": "first"}])
-    assert "content" not in inbox.get_nowait()["row"], "no grant, no body"
-    # the agent shares its head with the viewer (a live grant) — bodies flow
-    with sender_context("talker"):
-        g = (
-            await wired.send(
-                [
-                    {
-                        "target": "memory",
-                        "payload": {
-                            "type": "share",
-                            "with": "viewer",
-                            "scope": {"head_until": 10**9},
-                            "mode": "live",
-                        },
-                    }
-                ]
-            )
-        )[0]["result"]
-    assert g.get("grant"), g
-    core._mem(wired)["grants"].pop("talker", None)
-    await core._my_grants("talker", wired)
-    await core._save_history("talker", wired, [{"role": "user", "content": "second"}])
-    assert inbox.get_nowait()["row"]["content"] == "second"
+    assert inbox.get_nowait()["row"]["content"] == "first"
     # an ungated watcher is refused by the agent's own gate
     wired.create(None, id="stranger", can_call={"talker": "*"})
     wired.ctx.ensure_inbox("stranger")
-    with sender_context("stranger"):
+    with as_agent(wired, "stranger"):
         out = (await wired.send([{"target": "talker", "payload": {"type": "watch"}}]))[
             0
         ]

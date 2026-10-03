@@ -19,8 +19,8 @@ expect:
   reboot: true
   steps:
     # ── EXS-1 · no command on a PTY → the child's $SHELL, reported resolved ──
-    # Sent AS the loader (the leg's parent, so the structural baseline opens the
-    # call gate): the caller names no shell and needs to know none.
+    # Sent AS the loader (the leg's parent; both halves of that edge are granted
+    # explicitly): the caller names no shell and needs to know none.
     - name: a PTY start without a command runs the shell the record passes down
       reach: {from: static_loader, to: shell_term, send: {type: start, pty: {cols: 80, rows: 24}}}
       expect: {allow: true, contains: {status: running, pty: true}}

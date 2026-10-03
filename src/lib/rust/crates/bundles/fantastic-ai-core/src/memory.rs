@@ -68,14 +68,13 @@ impl From<MemoryStoreError> for fantastic_kernel::bundle::BundleError {
 pub type MemResult<T> = Result<T, MemoryStoreError>;
 
 /// This bundle's RAM for ONE kernel — the head caches, the bodies held this run,
-/// the cached grants, the row watchers — kept ON the kernel's context, so two
+/// the row watchers — kept ON the kernel's context, so two
 /// kernels in one process never share them. Python `_mem(kernel)`.
 #[derive(Default)]
 pub struct Mem {
     pub(crate) heads: Mutex<HashMap<String, Vec<Value>>>,
     /// `agent → [(pid, body)]`, in the order the bodies arrived (python's dict).
     pub(crate) bodies: Mutex<HashMap<String, Vec<(i64, String)>>>,
-    pub(crate) grants: Mutex<HashMap<String, Vec<Value>>>,
     /// `agent → [(watcher id, wants bodies)]`, in registration order.
     pub(crate) watchers: Mutex<HashMap<String, Vec<(String, bool)>>>,
 }
@@ -100,11 +99,11 @@ pub fn store_of(self_id: &AgentId, kernel: &Kernel) -> MemResult<AgentId> {
     }
 }
 
-/// ONE gated send to this agent's memory store, as this agent. A refusal or a
-/// failed dispatch is a [`MemoryStoreError`] — the turn fails fast.
-///
-/// AS ITSELF, always: the store keys a row by its writer, and this is this
-/// agent's own memory — even when the code runs outside its own dispatch.
+/// ONE gated send to this agent's memory store, as this agent — it runs in the
+/// agent's own code (its dispatch, a task that dispatch spawned, or one of its
+/// hooks), so the send is the agent's. A refusal or a failed dispatch is a
+/// [`MemoryStoreError`] — the turn fails fast. The store keys a row by its
+/// writer: this agent's own memory.
 pub async fn store_call(
     self_id: &AgentId,
     kernel: &Arc<Kernel>,
@@ -114,12 +113,10 @@ pub async fn store_call(
     let verb = payload
         .get("type")
         .map_or_else(|| "None".to_string(), py_str);
-    let out = fantastic_kernel::with_sender(
-        self_id.clone(),
-        kernel.send(vec![Item::new(sid.clone(), payload)]),
-    )
-    .await
-    .remove(0);
+    let out = kernel
+        .send(vec![Item::new(sid.clone(), payload)])
+        .await
+        .remove(0);
     let res = out.result;
     let refused = res.get("error").is_some_and(py_truthy);
     if !out.status.is_completed_or(refused) {
@@ -266,9 +263,6 @@ pub async fn refresh_head(self_id: &AgentId, kernel: &Arc<Kernel>) -> MemResult<
 /// A CLEAR IS A BOUNDARY, NOT A DELETION (`context_clear`): the head starts at the
 /// LAST `clear` row. `behind = true` (recall, grep, `history {fold}` — the verbs
 /// that reach what is not in view) reads the WHOLE conversation from the store.
-///
-/// A `fork` row (`fork_from`) stands where another owner's granted rows are READ
-/// back each time, under the grant — so a revoked grant fails this read.
 pub async fn load_history(
     self_id: &AgentId,
     kernel: &Arc<Kernel>,
@@ -293,9 +287,6 @@ pub async fn load_history(
                 .is_some_and(|role| TURN_ROLES.contains(&role))
         })
         .collect();
-    if rows.iter().any(|r| kind_of(r) == Some("fork")) {
-        return expand_forks(self_id, kernel, rows).await;
-    }
     Ok(rows)
 }
 
@@ -360,25 +351,23 @@ pub async fn save_history(
     Ok(ids)
 }
 
-/// Drop a deleted agent's head, bodies, grants and watchers on this kernel
+/// Drop a deleted agent's head, bodies and watchers on this kernel
 /// ([`crate::verbs::on_delete`]).
 pub fn forget(self_id: &AgentId, kernel: &Kernel) {
     let m = mem(kernel);
     m.heads.lock().expect("heads poisoned").remove(&self_id.0);
     m.bodies.lock().expect("bodies poisoned").remove(&self_id.0);
-    m.grants.lock().expect("grants poisoned").remove(&self_id.0);
     m.watchers
         .lock()
         .expect("watchers poisoned")
         .remove(&self_id.0);
 }
 
-/// Drop this agent's head cache and cached grants — a new incarnation reads its
+/// Drop this agent's head cache — a new incarnation reads its
 /// store afresh (`boot`). Bodies are this run's only and stay.
 pub fn forget_head(self_id: &AgentId, kernel: &Kernel) {
     let m = mem(kernel);
     m.heads.lock().expect("heads poisoned").remove(&self_id.0);
-    m.grants.lock().expect("grants poisoned").remove(&self_id.0);
 }
 
 /// A reply too big to hand the model as a turn: kept IN RAM under its pid (never
@@ -450,120 +439,10 @@ pub async fn load_view(
     Ok(None)
 }
 
-// ─── sharing: fork rows, grants, and the row event ───────────────────
-//
-// CONTEXT IS SHARED BY GRANT, IN THE STORE. A model shares a scope of its OWN rows
-// with another agent by calling its store's `share` (an explicit choice, recorded);
-// the reader starts from it with `fork_from`, which appends ONE `fork` row naming
-// the grant. That row is rendered, every time the conversation is read, as the
-// owner's rows READ BACK UNDER THE GRANT — quoted, attributed, read-only, never the
-// reader's own turns. A revoked or pruned grant fails that read: fail fast.
-
-/// The constant framing line a fork's kickstart opens with.
-pub const FORK_FRAMING: &str = "Above is {owner}'s thread as of row {as_of}, shared read-only. \
-This is a fork: you are a new agent, not {owner}.";
-
-/// [`FORK_FRAMING`] filled in.
-#[must_use]
-pub fn fork_framing(owner: &str, as_of: &Value) -> String {
-    FORK_FRAMING
-        .replace("{owner}", owner)
-        .replace("{as_of}", &py_str(as_of))
-}
-
-fn content_text(r: &Value) -> String {
-    match r.get("content") {
-        Some(Value::String(s)) => s.clone(),
-        Some(other) => py_json_dumps(other, true, None),
-        None => "null".to_string(),
-    }
-}
-
-/// The owner's granted rows as ONE quoted block. A row that is itself a `fork` in
-/// the owner's thread came from a THIRD agent's grant the reader does not hold: it
-/// stands as a stub in its place — position kept, no content. Python
-/// `_render_shared`.
-#[must_use]
-pub fn render_shared(owner: &str, as_of: &Value, rows: &[Value]) -> String {
-    let mut lines = vec![format!(
-        "[shared from {owner} · read-only · as of row {}]",
-        py_str(as_of)
-    )];
-    for r in rows {
-        match kind_of(r) {
-            Some("view") => continue,
-            Some("fork") => {
-                // THE THIRD OWNER'S OWN ROW ID — the newest row it shared
-                // (`as_of`), not the fork row's id in the middle owner's thread:
-                // `request_share {row}` goes to that owner, and it can only share
-                // a row that is its own.
-                lines.push(format!(
-                    "[row {} · owner {} · not shared with you]",
-                    r.get("as_of").map_or_else(|| "None".to_string(), py_str),
-                    r.get("owner").map_or_else(|| "None".to_string(), py_str),
-                ));
-                continue;
-            }
-            _ => {}
-        }
-        let role = r
-            .get("role")
-            .filter(|v| py_truthy(v))
-            .map_or_else(|| "user".to_string(), py_str);
-        lines.push(format!(
-            "({role} · row {}) {}",
-            r.get("id").map_or_else(|| "None".to_string(), py_str),
-            content_text(r)
-        ));
-    }
-    lines.push(format!("[end of {owner}'s shared rows]"));
-    lines.join("\n")
-}
-
-async fn expand_forks(
-    self_id: &AgentId,
-    kernel: &Arc<Kernel>,
-    rows: Vec<Value>,
-) -> MemResult<Vec<Value>> {
-    let mut out = Vec::with_capacity(rows.len());
-    for r in rows {
-        if kind_of(&r) != Some("fork") {
-            out.push(r);
-            continue;
-        }
-        let grant = r.get("grant").cloned().unwrap_or(Value::Null);
-        let res = store_call(self_id, kernel, json!({"type": "read", "grant": grant})).await?;
-        let shared: Vec<Value> = res
-            .get("rows")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let content = r
-            .get("content")
-            .filter(|c| py_truthy(c))
-            .map(py_str)
-            .unwrap_or_default();
-        let head = content.split('\n').next().unwrap_or("").to_string();
-        let owner = r.get("owner").map_or_else(|| "None".to_string(), py_str);
-        let as_of = r.get("as_of").cloned().unwrap_or(Value::Null);
-        let mut m = r.as_object().cloned().unwrap_or_default();
-        m.insert(
-            "content".to_string(),
-            Value::from(format!(
-                "{head}\n{}",
-                render_shared(&owner, &as_of, &shared)
-            )),
-        );
-        out.push(Value::Object(m));
-    }
-    Ok(out)
-}
-
 // ROW EVENT WATCHERS — the kernel holds no rows, so this agent announces its own:
 // `watchers[agent] = [(watcher id, wants bodies)]`, registered by the `watch` verb
 // (the agent's own gate decides who may call it); a watcher whose inbox is gone is
-// dropped. The grants this agent GAVE are cached in `grants`, write-through:
-// refreshed after the model calls its store's `share`/`unshare`.
+// dropped.
 
 /// A content-free digest of one row — `{id, kind, role, bytes}`. Python
 /// `_row_digest`.
@@ -592,81 +471,6 @@ pub fn row_digest(row: &Value) -> Value {
     Value::Object(d)
 }
 
-/// The grants this agent GAVE, cached (write-through). Python `_my_grants`.
-pub async fn my_grants(self_id: &AgentId, kernel: &Arc<Kernel>) -> MemResult<Vec<Value>> {
-    let m = mem(kernel);
-    if let Some(g) = m.grants.lock().expect("grants poisoned").get(&self_id.0) {
-        return Ok(g.clone());
-    }
-    let res = store_call(self_id, kernel, json!({"type": "grants", "side": "given"})).await?;
-    let g: Vec<Value> = res
-        .get("grants")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    m.grants
-        .lock()
-        .expect("grants poisoned")
-        .insert(self_id.0.clone(), g.clone());
-    Ok(g)
-}
-
-/// Drop the cached grants (a `share`/`unshare` this turn changed them).
-pub fn forget_grants(self_id: &AgentId, kernel: &Kernel) {
-    mem(kernel)
-        .grants
-        .lock()
-        .expect("grants poisoned")
-        .remove(&self_id.0);
-}
-
-/// Does grant `g` cover row `rid`? Python `_grant_covers`.
-#[must_use]
-pub fn grant_covers(g: &Value, rid: i64, head: &[Value]) -> bool {
-    let scope = g.get("scope").cloned().unwrap_or(Value::Null);
-    let live = g.get("mode").and_then(Value::as_str) == Some("live");
-    if !live {
-        if let Some(as_of) = g.get("as_of").and_then(Value::as_i64) {
-            if rid > as_of {
-                return false;
-            }
-        }
-    }
-    if let Some(r) = scope.get("row") {
-        return r.as_i64() == Some(rid);
-    }
-    if let Some(r) = scope.get("range") {
-        let lo = r.get("from").and_then(Value::as_i64).unwrap_or(i64::MAX);
-        let hi = r.get("to").and_then(Value::as_i64).unwrap_or(i64::MIN);
-        return rid >= lo && (live || rid <= hi);
-    }
-    if let Some(n) = scope.get("head_until") {
-        return live || n.as_i64().is_some_and(|n| rid <= n);
-    }
-    if let Some(f) = scope.get("fold").and_then(Value::as_i64) {
-        let by_id: HashMap<i64, &Value> = head
-            .iter()
-            .filter_map(|r| r.get("id").and_then(Value::as_i64).map(|i| (i, r)))
-            .collect();
-        let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
-        let mut stack = vec![f];
-        while let Some(x) = stack.pop() {
-            if !seen.insert(x) {
-                continue;
-            }
-            if let Some(refs) = by_id
-                .get(&x)
-                .and_then(|r| r.get("refs"))
-                .and_then(Value::as_array)
-            {
-                stack.extend(refs.iter().filter_map(Value::as_i64));
-            }
-        }
-        return seen.contains(&rid);
-    }
-    false
-}
-
 /// Register `watcher` for this agent's row events. Python `_watch`'s bookkeeping.
 pub fn add_watcher(self_id: &AgentId, kernel: &Kernel, watcher: &str, body: bool) {
     let m = mem(kernel);
@@ -688,9 +492,7 @@ pub fn remove_watcher(self_id: &AgentId, kernel: &Kernel, watcher: &str) {
 }
 
 /// Put the row event in every watcher's inbox: a content-free digest, plus the
-/// content for a `body:true` watcher that holds a live grant covering the row (the
-/// grant check uses the cached grants — see [`my_grants`]). Python
-/// `_announce_row`.
+/// content for a `body:true` watcher. Python `_announce_row`.
 pub fn announce_row(self_id: &AgentId, kernel: &Arc<Kernel>, row: &Value) {
     let m = mem(kernel);
     let list = match m
@@ -702,21 +504,6 @@ pub fn announce_row(self_id: &AgentId, kernel: &Arc<Kernel>, row: &Value) {
         Some(l) if !l.is_empty() => l.clone(),
         _ => return,
     };
-    let grants = m
-        .grants
-        .lock()
-        .expect("grants poisoned")
-        .get(&self_id.0)
-        .cloned()
-        .unwrap_or_default();
-    let head = m
-        .heads
-        .lock()
-        .expect("heads poisoned")
-        .get(&self_id.0)
-        .cloned()
-        .unwrap_or_default();
-    let rid = row.get("id").and_then(Value::as_i64).unwrap_or(0);
     let mut gone: Vec<String> = Vec::new();
     for (wid, body) in list {
         let Some(q) = kernel
@@ -728,12 +515,7 @@ pub fn announce_row(self_id: &AgentId, kernel: &Arc<Kernel>, row: &Value) {
             continue;
         };
         let mut digest = row_digest(row);
-        if body
-            && grants.iter().any(|g| {
-                g.get("reader").and_then(Value::as_str) == Some(wid.as_str())
-                    && grant_covers(g, rid, &head)
-            })
-        {
+        if body {
             if let Some(d) = digest.as_object_mut() {
                 d.insert(
                     "content".to_string(),

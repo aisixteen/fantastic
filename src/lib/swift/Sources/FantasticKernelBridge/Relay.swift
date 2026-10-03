@@ -6,9 +6,9 @@
 // a fixed `partner` GUID. The password is a SECRET and lives only in a
 // credential_store (audit IO-7/F4, 2026-10-03): the record names it —
 // `credentials: {store, ref}` — and before EVERY dial the connector reads the
-// ref's `password` field as itself, the answer marked `secret: ['result']`,
-// pinned to the relay URL's host, exactly as an AI backend reads its key
-// (`FantasticAICore/Credentials`). Nothing is cached: a rotated password is used
+// ref's `password` field as itself (the dial runs in its own dispatch, or a task
+// it spawned), pinned to the relay URL's host, exactly as an AI backend reads its
+// key (`FantasticAICore/Credentials`). Nothing is cached: a rotated password is used
 // by the next dial. The relay routes by `target` and delivers peer→peer
 // ONE-WAY as `{type:"event", source, payload}` — there is NO relay-level reply
 // correlation for peer→peer.
@@ -69,10 +69,11 @@ public func relayCredentialsShapeError(_ v: JSON) -> String? {
 }
 
 /// The `read() -> password` a dial awaits — every dial, nothing cached. Asks the
-/// store named by the record's `credentials` AS THIS CONNECTOR for the ref's
-/// `password`, the answer marked secret (it lands in no row, ledger or stream)
-/// and pinned to the relay URL's host (the store refuses a ref bound elsewhere).
-/// Throws `RelayCredentialError` on any refusal or a missing field. Python
+/// store named by the record's `credentials` for the ref's `password`, pinned to
+/// the relay URL's host (the store refuses a ref bound elsewhere). A dial runs in
+/// this connector's dispatch (`boot`) or a task it spawned (the reconnect loop),
+/// so the read is the connector's own send, gated as it. Throws
+/// `RelayCredentialError` on any refusal or a missing field. Python
 /// `password_reader`.
 public func relayPasswordReader(_ selfId: AgentId, _ kernel: Kernel, relayURL: String)
     -> RelayPasswordReader
@@ -85,13 +86,11 @@ public func relayPasswordReader(_ selfId: AgentId, _ kernel: Kernel, relayURL: S
         }
         let store = cred["store"].asString ?? ""
         let ref = cred["ref"].asString ?? ""
-        var item = Item(
-            AgentId(store),
-            .object(["type": "get", "ref": .string(ref), "host": .string(relayURL)]))
-        item.secret = ["result"]
-        let out = await KernelTaskLocals.$currentSender.withValue(selfId) {
-            await kernel.send([item])[0]
-        }
+        let out = await kernel.send([
+            Item(
+                AgentId(store),
+                .object(["type": "get", "ref": .string(ref), "host": .string(relayURL)]))
+        ])[0]
         let res = out.result
         if out.status != .completed || res.asObject == nil || pyTruthy(res["error"]) {
             let err = res.asObject != nil ? pyStr(res["error"]) : out.status.rawValue
@@ -104,25 +103,6 @@ public func relayPasswordReader(_ selfId: AgentId, _ kernel: Kernel, relayURL: S
         }
         return pw
     }
-}
-
-// THE RELAY SEAL (owner, 2026-10-02). relayd dispatches every tunneled frame into
-// its own kernel and records it UNMASKED, so a secret that crossed a relay leg
-// would sit in the relay's ledger in full. Until relayd masks what it records, a
-// relay leg refuses any call carrying secret marks, in both directions: outbound
-// in `KernelBridgeBundle.handle`/`handleBinary` (`forward`), inbound in
-// `RelayTransport.recv`. ws_bridge (direct WS) is sealed only to a non-loopback
-// host (its own seal, `WS_SECRET_SEALED`). One text for both.
-// Python `_relay.SECRET_SEALED` / `SECRET_SEALED_HINT` / `secret_sealed`.
-public let SECRET_SEALED =
-    "relay_connector: a call carrying secret marks may not cross a relay leg — "
-    + "the relay records every frame it routes, unmasked"
-public let SECRET_SEALED_HINT = "reach that kernel over a direct ws_bridge leg to send a secret"
-
-/// The relay seal's refusal — outbound to the local caller, inbound as the reply
-/// to the far caller.
-public func secretSealed() -> JSON {
-    Refusal.make(Refusal.unauthorized, SECRET_SEALED, hint: SECRET_SEALED_HINT)
 }
 
 public let DEFAULT_HEARTBEAT = 30.0
@@ -401,29 +381,6 @@ public actor RelayTransport: BridgeTransport {
                     )
                 }
                 guard source == partner else { continue }
-                if payload["type"].asString == "call", payload.asObject?["secret"] != nil {
-                    // THE RELAY SEAL, inbound: the frame already crossed the relay,
-                    // and nothing here dispatches it — the far caller is answered
-                    // with the seal's refusal.
-                    // TODO(relay seal): lift once relayd masks what it records.
-                    // The fix is in relayd (../fantastic_relay): when it dispatches
-                    // a tunneled frame into its own kernel, re-root the inner
-                    // frame's `secret` onto its delivery item (`payload.<f>` ->
-                    // `payload.payload.payload.<f>`), so its rows, ledger and state
-                    // stream show `<secret>`; and decide how REPLY frames carry
-                    // result marks — a `reply` names no marks today, so the relay
-                    // would record a secret result in full.
-                    do {
-                        try await send(
-                            .object([
-                                "type": .string("reply"), "id": payload["id"],
-                                "data": secretSealed(),
-                            ]))
-                    } catch is ConnectionClosed {
-                        // the socket dropped; the loop re-dials
-                    }
-                    continue
-                }
                 // The tunnelled frame's OWN `_binary_path`: `sendBinary` lifted
                 // it to `["payload", …steps]` on the envelope, so it comes back
                 // down — python's `decode_frame` places the body inside the inner

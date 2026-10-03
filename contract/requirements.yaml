@@ -80,24 +80,6 @@ requirements:
   - id: TSG-6
     level: MUST
     title: "opening one half never silently closes another"
-  - id: SUB-1
-    level: MUST
-    title: "`$subtree:X` in callable_by accepts X and every LIVE descendant of X, resolved at call time"
-  - id: SUB-2
-    level: MUST
-    title: "`$subtree:X` accepts nobody outside X's subtree"
-  - id: SUB-3
-    level: MUST
-    title: "a heritable can_call entry reaches for the holder's DESCENDANTS, never for the holder itself"
-  - id: SUB-4
-    level: MUST
-    title: "a NAMED verb under `$subtree`/a heritable entry covers a privileged verb; `*` never does on egress"
-  - id: SUB-5
-    level: MUST
-    title: "only the operator, or a holder of the same heritable entry, confers one (subset)"
-  - id: SUB-6
-    level: MUST
-    title: "`$subtree:` is callable_by-only and well-formed, a heritable entry is well-formed — refused at write time"
   - id: EXS-1
     level: MUST
     title: "an exec_bridge PTY `start` with no `command` runs the CHILD's own `$SHELL` and reports the resolved command"
@@ -113,27 +95,15 @@ requirements:
   - id: EXS-5
     level: MUST
     title: "`shell` is refused at write time unless true, false or \"login\""
-  - id: SEC-1
-    level: MUST
-    title: "a payload field marked secret reaches the target with its real value"
-  - id: SEC-2
-    level: MUST
-    title: "no record of a secret call (ledger read-back included) carries the value; `<secret>` stands in"
-  - id: SEC-3
-    level: MUST
-    title: "a result marked secret reaches the caller for real and is recorded as `<secret>`"
-  - id: SEC-4
-    level: MUST
-    title: "a malformed secret mark is refused bad_arg before dispatch; payload.type can never be hidden"
   - id: CRED-1
     level: MUST
-    title: "a credential is stored only from a call that marks its values secret, and no record of that call carries them"
+    title: "`set` stores a value for a DECLARED ref under its declared host and answers the field names"
   - id: CRED-2
     level: MUST
-    title: "a credential is read only by a call that marks the answer secret, which is recorded as `<secret>`"
+    title: "`get` answers the stored value of a declared ref"
   - id: CRED-3
     level: MUST
-    title: "a ref answers only the agents its grant names — to anyone else it does not exist — and a listing shows metadata, never a value"
+    title: "the call gate alone decides who reaches a ref — no per-ref access lists — and a listing shows metadata, never a value"
   - id: CRED-4
     level: MUST
     title: "a ref is bound to the host of its declaration — `set` takes no host — and a read pinned to a host is refused unless the ref is bound to that host"

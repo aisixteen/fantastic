@@ -59,8 +59,6 @@ async def _root_with_store(monkeypatch, tmp_path):
             "parent_id": k.id,
             "handler_module": "ram_store.tools",
             "id": "memory",
-            "operator": True,
-            "admins": ["kernel"],
         },
         {
             "type": "create_agent",
@@ -85,26 +83,18 @@ async def _inject(k, rows: list[dict], **extra) -> dict:
 
 
 async def test_broken_tables_are_refused_loud_and_change_nothing(tmp_path, monkeypatch):
-    """A duplicate key or a grant anchored on nothing is refused whole — the store
+    """A duplicate key or a fold naming a missing row is refused whole — the store
     never half-loads, never repairs."""
     k = await _root_with_store(monkeypatch, tmp_path)
     ok = await _inject(k, [{"id": 1, "kind": "call"}])
-    assert ok == {"rows": 1, "grants": 0}
+    assert ok == {"rows": 1}
     dup = await _inject(k, [{"id": 5, "kind": "call"}, {"id": 5, "kind": "settle"}])
     assert dup["reason"] == "exists"
+    owner = f"{k.record['guid']}|kernel"
     dangling = await _inject(
         k,
         [{"id": 7, "kind": "call"}],
-        grants=[
-            {
-                "grant": 1,
-                "owner": "x|y",
-                "reader": "x|z",
-                "scope": {"row": 99},
-                "mode": "frozen",
-                "anchor": 99,
-            }
-        ],
+        fold_refs=[{"owner": owner, "fold": 7, "members": [99]}],
     )
     assert dangling["reason"] == "bad_arg"
     dump = (await k.send([{"target": "memory", "payload": {"type": "dump"}}]))[0][
@@ -151,7 +141,7 @@ async def test_hostile_rows_come_back_as_data_and_never_execute(tmp_path, monkey
             },
         ],
     )
-    assert out == {"rows": 2, "grants": 0}, out
+    assert out == {"rows": 2}, out
     started = await k.ctx.start(boot_all=False)
     assert started.get("started"), started
 

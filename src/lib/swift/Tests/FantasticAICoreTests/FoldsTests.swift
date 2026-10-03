@@ -3,12 +3,12 @@
 // descent away. Twins of python `ai_core/tests/test_folds.py`, case for case.
 
 import FantasticJSON
-import FantasticKernel
 import Foundation
 import OrderedCollections
 import Testing
 
 @testable import FantasticAICore
+@testable import FantasticKernel
 
 /// One agent id per suite: the stripped set `fold` hands to `strip` is
 /// process-global, keyed by agent, and suites run in parallel.
@@ -19,7 +19,10 @@ private let AI = "ai_f"
 /// refs name rows it does not hold, as sqlite's FK would).
 private func fold(_ body: [JSON], _ c: ProjectionCtx) async throws -> AIProjection {
     if let k = c.kernel { appendRows(c.selfId, kernel: k, body.filter { rowId($0) != nil }) }
-    return try await AIStrategies.getStrategy("fold")!(body, [], .object([:]), c)
+    // the projection runs in the agent's own turn: its store calls are the agent's
+    return try await KernelTaskLocals.$sender.withValue(c.selfId) {
+        try await AIStrategies.getStrategy("fold")!(body, [], .object([:]), c)
+    }
 }
 
 private func viewIds(_ view: [JSON]) -> [Int64?] { view.map(rowId) }

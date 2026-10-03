@@ -244,9 +244,25 @@ extension Kernel {
     /// Seconds of quiet before a batch is written (python `FLUSH_DEBOUNCE`).
     static let flushDebounceNanos: UInt64 = 150_000_000
 
-    /// The operator's own send — the kernel's bookkeeping traffic, ungated.
-    func operatorSend(_ items: [Item]) async -> [Outcome] {
-        await KernelTaskLocals.$currentSender.withValue(nil) { await self.send(items) }
+    /// THE KERNEL'S OWN CALL to its memory store — bookkeeping, a plain call
+    /// into the store's handler (`runHandler`), never a send: no gate, no rows
+    /// (the store keys the kernel's rows as the operator's, `<guid>|kernel`). A
+    /// store no longer in the tree is a refusal.
+    func storeCall(_ store: AgentId, _ payload: JSON) async -> (JSON, Status) {
+        guard let a = agent(store) else {
+            return (Refusal.unknown(store.value, live: allAgents().map { $0.id.value }), .errored)
+        }
+        return await runHandler(a, payload)
+    }
+
+    /// `storeCall` over the BINARY channel: `body` the request's chunk at
+    /// `bytes`, or `nil` to have the reply's chunk at `bytes` come back raw.
+    func storeCallBinary(_ store: AgentId, _ header: JSON, _ body: Data?) async -> (JSON, Data?) {
+        guard let a = agent(store) else {
+            return (Refusal.unknown(store.value, live: allAgents().map { $0.id.value }), nil)
+        }
+        let (reply, chunk, _) = await runHandlerBinary(a, header, body.map { Blob("bytes", $0) })
+        return (reply, bodyAt(chunk, "bytes"))
     }
 
     // MARK: - kernel_start
@@ -284,7 +300,7 @@ extension Kernel {
                     + "memory store and will not start without one",
                 hint: "a memory store is needed — create a ram_store and name it in "
                     + "memory_store_id if you have none: `create_agent parent_id=\(root.id.value) "
-                    + "handler_module=ram_store.tools id=memory operator=true`, then "
+                    + "handler_module=ram_store.tools id=memory`, then "
                     + "`update_agent id=\(root.id.value) memory_store_id=memory`",
                 extra: [("arg", .string("memory_store_id"))])
         }
@@ -300,22 +316,21 @@ extension Kernel {
         }
         var booted: [String] = []
         for a in [root, store] {
-            let out = await operatorSend([Item(a.id, .object(["type": .string("boot")]))])[0]
-            if out.status != .completed {
+            let (reply, status) = await runHandler(a, .object(["type": .string("boot")]))
+            if status != .completed {
                 return Refusal.make(
                     Refusal.unhandled,
                     "kernel_start: boot of \(pyRepr(a.id.value)) did not complete "
-                        + "(\(out.status.rawValue)): \(pyStr(out.result))")
+                        + "(\(status.rawValue)): \(pyStr(reply))")
             }
             booted.append(a.id.value)
         }
-        let probe = await operatorSend([
-            Item(store.id, .object(["type": .string("read"), "limit": .integer(1)]))
-        ])[0].result
+        let (probe, _) = await runHandler(
+            store, .object(["type": .string("read"), "limit": .integer(1)]))
         if case .object(let p) = probe, pyTruthy(p["error"] ?? .null) {
             let hint: String =
                 (p["hint"].flatMap { pyTruthy($0) ? pyStr($0) : nil })
-                ?? "the store must serve the operator: update_agent id=\(store.id.value) operator=true"
+                ?? "the store must answer the operator's `read` — check \(store.id.value)"
             return Refusal.make(
                 Refusal.unauthorized,
                 "kernel_start: the memory store \(pyRepr(store.id.value)) refuses the kernel: "
@@ -346,13 +361,13 @@ extension Kernel {
         wakeUp.yield()
         if bootAll {
             for a in allAgents() where a.id != root.id && a.id != store.id {
-                let out = await operatorSend([Item(a.id, .object(["type": .string("boot")]))])[0]
-                if out.status == .completed && !pyTruthy(out.result["error"]) {
+                let (reply, status) = await runHandler(a, .object(["type": .string("boot")]))
+                if status == .completed {
                     booted.append(a.id.value)
                 } else {
                     RuntimeLog.warn(
-                        "  [kernel] boot \(pyRepr(a.id.value)): \(out.status.rawValue) "
-                            + pyStr(out.result))
+                        "  [kernel] boot \(pyRepr(a.id.value)): \(status.rawValue) "
+                            + pyStr(reply))
                 }
             }
         }
@@ -378,50 +393,15 @@ extension Kernel {
 
     // MARK: - the flush
 
-    /// A row the kernel's own flush produced — ALREADY RECORDED by its flush row.
-    ///
-    /// A flush is a `send` to the store, so it mints a `call` row and a `settle`
-    /// row like every send; writing those would mint two more on the next flush,
-    /// forever. The flush therefore describes ITSELF: it mints one id and appends a
-    /// `flush` row inside the very batch it writes. The call that carried that
-    /// batch names the flush row in its payload — the store already holds the
-    /// record of this execution — so its call and settle rows are not written
-    /// again. This is dedup by execution (the store proves it), not a blind spot:
-    /// every OTHER call to the store, the kernel's own reads included, is recorded
-    /// like any call. Called with `storeLock` NOT held.
-    private func isOwnFlushRow(_ row: Row, store: AgentId) -> Bool {
-        let kind = row["kind"]?.asString
-        if kind == "call", row["agent"]?.asString == store.value,
-            let payload = row["payload"], payload["type"].asString == "append"
-        {
-            for r in payload["rows"].asArray ?? [] {
-                guard r["kind"].asString == "flush", let fid = r["id"].asInt else { continue }
-                let mine: Bool = storeLock.withLock {
-                    let mine = _ownFlushes.contains(fid)
-                    if mine, let cid = row["id"]?.asInt { _ownFlushCalls[cid] = fid }
-                    return mine
-                }
-                if mine { return true }
-            }
-        }
-        if kind == "settle", let parent = row["parent"]?.asInt {
-            return storeLock.withLock { _ownFlushCalls[parent] != nil }
-        }
-        return false
-    }
-
     /// Write every execution row still in RAM to the memory store, as ONE batch
     /// closed by a self-describing `flush` row; on success the rows leave RAM and
     /// a settled execution whose settle row landed leaves the ledger (the store is
     /// its record now). All or nothing: a refused batch stays in RAM for the next
-    /// flush, and the refused flush is itself a dead letter.
+    /// flush, and the refusal is said on stderr.
     ///
-    /// EDGE (recorded, not resolved): the write can LAND while its reply is lost
-    /// (a timeout). The store then holds the flush row as `done` while RAM saw the
-    /// flush call fail — that call is a dead letter in RAM (the ledger shows it,
-    /// `on_deadletter` announced it), and its own rows are not re-flushed because
-    /// the store already recorded them. RAM and store disagree about THAT flush
-    /// only; the admin reconciles.
+    /// The flush is the kernel's OWN call into the store (`storeCall`), not a
+    /// send: it mints no execution of its own, so nothing about the flush needs
+    /// flushing in turn. The `flush` row in the batch is its record.
     @discardableResult
     public func flushExecutions() async -> JSON {
         guard let store = storeId else { return .object(["flushed": .integer(0)]) }
@@ -446,47 +426,34 @@ extension Kernel {
 
     /// The flush body, with the flush mutex held. `(early reply, flushed, fid)`.
     private func flushLocked(_ store: AgentId) async -> (JSON?, Int, Int64) {
-        // THE PREVIOUS FLUSHES' OWN ROWS leave RAM unwritten — already recorded.
-        for id in rows.ids() {
-            guard let r = rows.getOne(id), isOwnFlushRow(r, store: store) else { continue }
-            rows.remove(id)
-            if r["kind"]?.asString == "settle", let parent = r["parent"]?.asInt {
-                // The flush call ended: its bookkeeping goes. A flush that did
-                // not complete stays in the ledger — a dead letter in RAM.
-                storeLock.withLock {
-                    if let f = _ownFlushCalls.removeValue(forKey: parent) { _ownFlushes.remove(f) }
-                }
-                if r["outcome"]?["status"].asString == "completed" { ledger.forget(parent) }
-            }
-        }
         let ids = rows.ids()
         if ids.isEmpty { return (.object(["flushed": .integer(0)]), 0, 0) }
-        let fid = mintId()
-        _ = storeLock.withLock { _ownFlushes.insert(fid) }
-        var kinds: [Int64: String] = [:]
-        var batch: [JSON] = []
-        for i in ids {
-            guard let r = rows.getOne(i) else { continue }
-            kinds[i] = r["kind"]?.asString ?? ""
-            batch.append(.object(r))
+        // Nothing of this flush is published — its own id mint (and an id-block
+        // reservation it crosses) included (audit CLI-B).
+        let (fid, kinds, result, status) = await KernelTaskLocals.$stateQuiet.withValue(true) {
+            let fid = mintId()
+            var kinds: [Int64: String] = [:]
+            var batch: [JSON] = []
+            for i in ids {
+                guard let r = rows.getOne(i) else { continue }
+                kinds[i] = r["kind"]?.asString ?? ""
+                batch.append(.object(r))
+            }
+            batch.append(
+                .object([
+                    "id": .integer(fid), "kind": .string("flush"),
+                    "covers": .array(ids.map { .integer($0) }), "status": .string("done"),
+                    "ts": .double(Date().timeIntervalSince1970),
+                ]))
+            let (result, status) = await storeCall(
+                store, .object(["type": .string("append"), "rows": .array(batch)]))
+            return (fid, kinds, result, status)
         }
-        batch.append(
-            .object([
-                "id": .integer(fid), "kind": .string("flush"),
-                "covers": .array(ids.map { .integer($0) }), "status": .string("done"),
-                "ts": .double(Date().timeIntervalSince1970),
-            ]))
-        // nothing of this send is published on the state stream (audit CLI-B)
-        let out = await KernelTaskLocals.$stateQuiet.withValue(true) {
-            await operatorSend([
-                Item(store, .object(["type": .string("append"), "rows": .array(batch)]))
-            ])
-        }[0]
-        if out.status != .completed || pyTruthy(out.result["error"]) {
+        if status != .completed {
             RuntimeLog.warn(
                 "  [kernel] flush of \(ids.count) execution row(s) to \(pyRepr(store.value)) "
-                    + "failed: \(out.status.rawValue) \(pyStr(out.result))")
-            return (.object(["flushed": .integer(0), "error": out.result]), 0, fid)
+                    + "failed: \(status.rawValue) \(pyStr(result))")
+            return (.object(["flushed": .integer(0), "error": result]), 0, fid)
         }
         for i in ids {
             guard let r = rows.remove(i) else { continue }
@@ -582,14 +549,12 @@ extension Kernel {
                 doomed.insert(rid)
             }
         }
-        let out = await operatorSend([
-            Item(
-                store,
-                .object([
-                    "type": .string("prune"),
-                    "ids": .array(doomed.sorted().map { .integer($0) }),
-                ]))
-        ])[0].result
+        let (out, _) = await storeCall(
+            store,
+            .object([
+                "type": .string("prune"),
+                "ids": .array(doomed.sorted().map { .integer($0) }),
+            ]))
         if pyTruthy(out["error"]) {
             RuntimeLog.warn("  [kernel] prune of the kernel's store failed: \(pyStr(out))")
             return 0
@@ -613,7 +578,7 @@ extension Kernel {
             for (k, v) in payload { q[k] = v }
             q["limit"] = .integer(1000)
             if after != .null { q["after"] = after }
-            let res = await operatorSend([Item(store, .object(q))])[0].result
+            let (res, _) = await storeCall(store, .object(q))
             guard case .object(let r) = res, !pyTruthy(r["error"] ?? .null) else {
                 throw PyError("RuntimeError", "kernel: memory store read failed: \(pyStr(res))")
             }
@@ -687,10 +652,9 @@ extension Kernel {
             ]
             if let n = x.name { e["name"] = .string(n) }
             if let res = x.outcome {
-                // a call with `secret` paths reads back AS SHOWN (`recordSettle`)
                 let status = res.status.rawValue
-                let result = x.shown?.result ?? res.result
-                let body = x.shown.map { $0.body } ?? res.body
+                let result = res.result
+                let body = res.body
                 e["status"] = .string(status)
                 // THE SAME SHAPE flushed or not: what the settle row keeps —
                 // rendered `_json_safe`, as python's in-RAM branch is, so a
@@ -758,23 +722,6 @@ extension Kernel {
             let attempts = UInt32(
                 clamping: (st["attempts"].flatMap { pyTruthy($0) ? $0.asInt : nil })
                     ?? (call["attempts"].flatMap { pyTruthy($0) ? $0.asInt : nil }) ?? 1)
-            if pyTruthy(call["secret"] ?? .null) {
-                // ITS RECORD HOLDS PLACEHOLDERS: answering a re-send from it would
-                // hand back `<secret>` as if it were the value. Refused, loud.
-                ledger.putSettled(
-                    cid,
-                    target: AgentId(call["agent"]?.asString ?? ""),
-                    payload: call["payload"],
-                    retries: UInt32(clamping: call["retries"]?.asInt ?? 0),
-                    attempts: attempts,
-                    name: call["name"]?.asString,
-                    caller: call["caller"]?.asString.map { AgentId($0) },
-                    outcome: Outcome(
-                        pid: TaskId(cid), status: .failed,
-                        result: Secret.replayRefused(w.isName ? .string(w.name) : .integer(w.id)),
-                        attempts: attempts))
-                continue
-            }
             // A NAMED call's settle kept its result; an unnamed one (joined by its
             // int id) kept only what `storedOutcome` keeps — and says so.
             let result: JSON

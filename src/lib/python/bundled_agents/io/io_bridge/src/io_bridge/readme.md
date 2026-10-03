@@ -41,27 +41,12 @@ the leg AND names the mistake, rather than looking like an ordinary seal. That
 failure was real: `auth: silent` used to seal every inbound call while reporting
 only a bare unknown name.
 
-## Secret marks cross the wire
-A call frame is `{type:"call", id, target, payload, caller?, secret?}`. `secret` is
-the batch item's marks — dotted strings (`payload.<field…>` / `result[.<field…>]`)
-and/or arrays of steps (`["payload", "a.b"]`: a string step a literal key, an int
-step a list index) — carried verbatim: the receiving kernel dispatches the item WITH them, so its call/settle
-rows, ledger, state stream and memory store show `<secret>` exactly as the caller's
-do, and a malformed mark is its own refusal, before dispatch. The reply carries the
-real result back. No leg, transport or codec logs or keeps a frame. EXCEPT a relay:
-`relay_connector` is SEALED for marks (relayd records what it routes unmasked) — it
-refuses a marked `forward` and answers a marked inbound `call` with a refusal.
-
-`forward` takes the marks from ITS OWN call and re-roots them at the forwarded item,
-each in the spelling it came in: `payload.payload.<f…>` → `payload.<f…>`,
-`["payload","payload",<step>…]` → `["payload",<step>…]`, `result[.<f…>]` /
-`["result",<step>…]` as is; a mark on forward's own fields (`payload.target`,
-`payload.timeout`) stays on this kernel's record.
-```
-send([{target:"<bridge>", payload:{type:"forward", target:"creds",
-       payload:{type:"set", ref, fields:{api_key:"…"}}},
-       secret:["payload.payload.fields"]}])
-```
+## Who is calling
+A call frame is `{type:"call", id, target, payload}`. The leg that serves it calls
+AS ITSELF: an admitted inbound frame is handed to the leg (`web_ws`/`web_rest`: its
+`inbound_*` verbs; a wire bridge: its read loop, a task its `boot` spawned), so the
+leg's `can_call` and the target's `callable_by` decide — whoever is on the far end
+is not an identity here. Everyone admitted to one leg is one principal.
 
 ## Derivations (the actual agents)
 `ws_bridge` · `relay_connector` · `web_ws` · `web_rest` · `file_bridge` ·

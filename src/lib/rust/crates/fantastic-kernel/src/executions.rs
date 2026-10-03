@@ -1,9 +1,9 @@
 //! THE KERNEL'S MEMORY STORE — start, flush, read back.
 //!
 //! A rule-for-rule port of python `kernel/_kernel.py` (`start`, `_flusher`,
-//! `_is_own_flush_row`, `flush_executions`, `prune_executions`, `_store_read`,
-//! `ledger_entries`, `recall_executions`, `announce_deadletter`, `mint_id`,
-//! `rows_put`), which is canonical.
+//! `flush_executions`, `prune_executions`, `_store_read`, `ledger_entries`,
+//! `recall_executions`, `announce_deadletter`, `mint_id`, `rows_put`), which is
+//! canonical.
 //!
 //! The kernel keeps NO conversation and writes NO tape. Its EXECUTION rows (`call`,
 //! `settle`, `task`, `ack`) live in RAM ([`crate::rows::RowStore`]) until the
@@ -11,7 +11,8 @@
 //! drops them; `ledger`, dead letters, `ack_deadletter` and named-call dedup read
 //! the store back. `kernel_start` refuses to run without a store — no built-in
 //! default. The kernel knows nothing about stores beyond their verbs (`read`,
-//! `append`, `prune`): a store is an ordinary agent, reached by ordinary sends.
+//! `append`, `prune`): a store is an ordinary agent, whose handler the kernel
+//! runs as BOOKKEEPING ([`Kernel::bookkeeping`]) — no gate, no call row.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
@@ -39,11 +40,6 @@ struct Inner {
     store_id: Option<AgentId>,
     started: bool,
     flusher_task: Option<TaskId>,
-    /// The flush rows this kernel wrote (by id), and the calls that carried
-    /// them: those calls' own rows are ALREADY RECORDED — the flush row is their
-    /// record.
-    own_flushes: HashSet<i64>,
-    own_flush_calls: HashMap<i64, i64>,
     /// How many `call` rows the store holds for the kernel (counted as flushed,
     /// re-read at every prune) — what the retention window is measured against.
     stored_calls: usize,
@@ -150,21 +146,10 @@ impl Kernel {
         self.ledger.set_cap(cap);
     }
 
-    /// One send as the OPERATOR — the kernel doing its own bookkeeping.
-    ///
-    /// BOXED: `send` reaches the store through here (named-call recall reads it
-    /// before launching), and the store reply comes back through `send`, so the
-    /// future is recursive in terms of itself.
-    fn operator_send(
-        self: &Arc<Self>,
-        target: &AgentId,
-        payload: Value,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Outcome> + Send>> {
-        let k = Arc::clone(self);
-        let item = Item::new(target.clone(), payload);
-        Box::pin(crate::send::with_operator(async move {
-            k.send(vec![item]).await.remove(0)
-        }))
+    /// The live agent `id` names, for a bookkeeping call — `None` once it left
+    /// the tree.
+    fn live(&self, id: &AgentId) -> Option<Arc<crate::agent::Agent>> {
+        self.agents.get(id).map(|e| Arc::clone(&e))
     }
 
     /// THE START SEQUENCE — the `kernel_start` verb, and what the daemon runs.
@@ -214,7 +199,7 @@ impl Kernel {
                 Value::String(format!(
                     "a memory store is needed — create a ram_store and name it in \
                      memory_store_id if you have none: `create_agent parent_id={} \
-                     handler_module=ram_store.tools id=memory operator=true`, then \
+                     handler_module=ram_store.tools id=memory`, then \
                      `update_agent id={} memory_store_id=memory`",
                     root.id, root.id
                 )),
@@ -240,7 +225,7 @@ impl Kernel {
         };
         let mut booted: Vec<String> = Vec::new();
         for a in [&root, &store] {
-            let out = self.operator_send(&a.id, json!({"type": "boot"})).await;
+            let out = self.bookkeeping(a, json!({"type": "boot"}), None).await;
             if out.status != Status::Completed {
                 return crate::refusal::refusal(
                     crate::refusal::UNHANDLED,
@@ -255,7 +240,7 @@ impl Kernel {
             booted.push(a.id.0.clone());
         }
         let probe = self
-            .operator_send(&store.id, json!({"type": "read", "limit": 1}))
+            .bookkeeping(&store, json!({"type": "read", "limit": 1}), None)
             .await
             .result;
         if let Some(err) = probe.get("error").filter(|e| py_truthy(e)) {
@@ -265,7 +250,7 @@ impl Kernel {
                 .map(py_str)
                 .unwrap_or_else(|| {
                     format!(
-                        "the store must serve the operator: update_agent id={} operator=true",
+                        "the store must answer the operator's `read` — check {}",
                         store.id
                     )
                 });
@@ -302,9 +287,9 @@ impl Kernel {
                 if id == root.id || id == store.id {
                     continue;
                 }
-                let out = self.operator_send(&id, json!({"type": "boot"})).await;
-                let refused = out.result.get("error").is_some_and(py_truthy);
-                if out.status == Status::Completed && !refused {
+                let Some(a) = self.live(&id) else { continue };
+                let out = self.bookkeeping(&a, json!({"type": "boot"}), None).await;
+                if out.status == Status::Completed {
                     booted.push(id.0.clone());
                 } else {
                     eprintln!(
@@ -328,100 +313,33 @@ impl Kernel {
         }
     }
 
-    /// A row the kernel's own flush produced — ALREADY RECORDED by its flush row.
-    ///
-    /// A flush is a `send` to the store, so it mints a `call` row and a `settle`
-    /// row like every send; writing those would mint two more on the next flush,
-    /// forever. The flush therefore describes ITSELF: it mints one id and appends
-    /// a `flush` row inside the very batch it writes. The call that carried that
-    /// batch names the flush row in its payload — the store already holds the
-    /// record of this execution — so its call and settle rows are not written
-    /// again. This is dedup by execution (the store proves it), not a blind spot:
-    /// every OTHER call to the store, the kernel's own reads included, is recorded
-    /// like any call.
-    fn is_own_flush_row(&self, st: &mut Inner, row: &Row) -> bool {
-        let kind = kind_of(row);
-        let store = st.store_id.as_ref().map(|s| s.0.as_str());
-        if kind == Some("call") && row.get("agent").and_then(Value::as_str) == store {
-            let payload = row.get("payload");
-            if payload.and_then(|p| p.get("type")).and_then(Value::as_str) == Some("append") {
-                if let Some(rows) = payload
-                    .and_then(|p| p.get("rows"))
-                    .and_then(Value::as_array)
-                {
-                    for r in rows {
-                        if r.get("kind").and_then(Value::as_str) != Some("flush") {
-                            continue;
-                        }
-                        let Some(fid) = r.get("id").and_then(Value::as_i64) else {
-                            continue;
-                        };
-                        if st.own_flushes.contains(&fid) {
-                            if let Some(cid) = row.get("id").and_then(Value::as_i64) {
-                                st.own_flush_calls.insert(cid, fid);
-                            }
-                            return true;
-                        }
-                    }
-                }
-            }
-        }
-        if kind == Some("settle") {
-            if let Some(p) = row.get("parent").and_then(Value::as_i64) {
-                return st.own_flush_calls.contains_key(&p);
-            }
-        }
-        false
-    }
-
     /// Write every execution row still in RAM to the memory store, as ONE batch
     /// closed by a self-describing `flush` row; on success the rows leave RAM and a
     /// settled execution whose settle row landed leaves the ledger (the store is
     /// its record now). All or nothing: a refused batch stays in RAM for the next
-    /// flush, and the refused flush is itself a dead letter.
+    /// flush, and the refusal is said on stderr.
     ///
-    /// EDGE (recorded, not resolved): the write can LAND while its reply is lost
-    /// (a timeout). The store then holds the flush row as `done` while RAM saw the
-    /// flush call fail — that call is a dead letter in RAM (the ledger shows it,
-    /// `on_deadletter` announced it), and its own rows are not re-flushed because
-    /// the store already recorded them. RAM and store disagree about THAT flush
-    /// only; the admin reconciles.
+    /// The write is KERNEL BOOKKEEPING ([`Kernel::bookkeeping`]): the kernel runs
+    /// the store's `append` directly — not a send, so the flush mints no call or
+    /// settle row of its own, and the `flush` row is its whole record.
     pub async fn flush_executions(self: &Arc<Self>) -> Value {
         let Some(store_id) = self.store_id() else {
             return json!({"flushed": 0});
         };
+        let Some(store) = self.live(&store_id) else {
+            return json!({"flushed": 0, "error": crate::refusal::unknown_agent(
+                store_id.as_str(),
+                self.agents.iter().map(|e| e.key().0.clone()).collect(),
+            )});
+        };
         let guard = self.exec.lock.lock().await;
-        // The PREVIOUS flush's own call + settle: already recorded by its flush row.
-        {
-            let mut st = self.exec.lock();
-            for rid in self.rows.ids() {
-                let Some(row) = self.rows.get_one(rid) else {
-                    continue;
-                };
-                if !self.is_own_flush_row(&mut st, &row) {
-                    continue;
-                }
-                self.rows.remove(rid);
-                if kind_of(&row) == Some("settle") {
-                    // The flush call ended: its bookkeeping goes. A flush that did
-                    // not complete stays in the ledger — a dead letter in RAM.
-                    if let Some(parent) = row.get("parent").and_then(Value::as_i64) {
-                        if let Some(fid) = st.own_flush_calls.remove(&parent) {
-                            st.own_flushes.remove(&fid);
-                        }
-                        if status_of(&row) == Some("completed") {
-                            self.ledger.forget(parent);
-                        }
-                    }
-                }
-            }
-        }
         let ids = self.rows.ids();
         if ids.is_empty() {
             return json!({"flushed": 0});
         }
-        let fid = self.mint_id();
-        self.exec.lock().own_flushes.insert(fid);
+        // Nothing of this flush is published — its own id mint (and an id-block
+        // reservation it crosses) included (audit CLI-B).
+        let fid = crate::send::STATE_QUIET.sync_scope(true, || self.mint_id());
         let mut kinds: HashMap<i64, Option<String>> = HashMap::new();
         let mut batch: Vec<Value> = Vec::with_capacity(ids.len() + 1);
         for i in &ids {
@@ -443,9 +361,9 @@ impl Kernel {
         let mut payload = Map::new();
         payload.insert("type".to_string(), Value::from("append"));
         payload.insert("rows".to_string(), Value::Array(batch));
-        // nothing of this send is published on the state stream (audit CLI-B)
-        let send = self.operator_send(&store_id, Value::Object(payload));
-        let out = crate::send::STATE_QUIET.scope(true, send).await;
+        // nothing of this write is published on the state stream (audit CLI-B)
+        let write = self.bookkeeping(&store, Value::Object(payload), None);
+        let out = crate::send::STATE_QUIET.scope(true, write).await;
         let refused = out.result.get("error").is_some_and(py_truthy);
         if out.status != Status::Completed || refused {
             eprintln!(
@@ -605,8 +523,11 @@ impl Kernel {
         }
         let mut ids: Vec<i64> = doomed.into_iter().collect();
         ids.sort_unstable();
+        let Some(store) = self.live(&store_id) else {
+            return 0;
+        };
         let out = self
-            .operator_send(&store_id, json!({"type": "prune", "ids": ids}))
+            .bookkeeping(&store, json!({"type": "prune", "ids": ids}), None)
             .await
             .result;
         if out.get("error").is_some_and(py_truthy) {
@@ -621,13 +542,20 @@ impl Kernel {
         gone.len()
     }
 
-    /// Every row of the kernel's own key matching `payload`, all pages.
+    /// Every row of the kernel's own key matching `payload`, all pages — read
+    /// as kernel bookkeeping (no origin: the store answers the kernel's key).
     pub(crate) async fn store_read(
         self: &Arc<Self>,
         payload: Map<String, Value>,
     ) -> Result<Vec<Row>, String> {
         let Some(store_id) = self.store_id() else {
             return Ok(Vec::new());
+        };
+        let Some(store) = self.live(&store_id) else {
+            return Err(format!(
+                "kernel: memory store {} is gone",
+                py_repr(&store_id.0)
+            ));
         };
         let mut out: Vec<Row> = Vec::new();
         let mut after: Option<Value> = None;
@@ -641,7 +569,10 @@ impl Kernel {
             if let Some(a) = &after {
                 q.insert("after".to_string(), a.clone());
             }
-            let res = self.operator_send(&store_id, Value::Object(q)).await.result;
+            let res = self
+                .bookkeeping(&store, Value::Object(q), None)
+                .await
+                .result;
             let ok = res.is_object() && !res.get("error").is_some_and(py_truthy);
             if !ok {
                 return Err(format!(
@@ -831,17 +762,6 @@ impl Kernel {
                 .or_else(|| call.get("attempts").filter(|a| py_truthy(a)))
                 .and_then(Value::as_u64)
                 .unwrap_or(1) as u32;
-            if call.get("secret").is_some_and(py_truthy) {
-                // ITS RECORD HOLDS PLACEHOLDERS: answering a re-send from it would
-                // hand back `<secret>` as if it were the value. Refused, loud.
-                let key = match &w {
-                    Want::Name(n) => Value::from(n.as_str()),
-                    Want::Id(i) => Value::from(*i),
-                };
-                self.ledger
-                    .put_refused(cid, call, crate::secret::replay_refused(&key), attempts);
-                continue;
-            }
             self.ledger.put_settled(cid, call, &oc, attempts);
         }
         Ok(())
@@ -891,6 +811,7 @@ impl Kernel {
                 &src,
                 "emit",
                 &crate::inbox::InboxItem::text(Value::Object(entry)),
+                crate::send::current_sender().as_ref(),
             )
             .await;
         }

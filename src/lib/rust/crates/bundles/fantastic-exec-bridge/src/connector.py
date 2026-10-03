@@ -146,20 +146,13 @@ try:
         # any runtime ever set the env var one would have ridden in.
         self_id = _o.environ.get("FANTASTIC_SELF_ID")
 
-        def send(self, target, payload=None, secret=None):
+        def send(self, target, payload=None):
             with _wlock:
                 _rid[0] += 1
                 r = str(_rid[0])
             q = _q.Queue()
             _pending[r] = q
             f = {"op": "send", "rid": r, "target": target, "payload": payload or {}}
-            if secret:
-                # The call's SECRET marks (`payload.<field>`, `result[.<field>]`, or
-                # an array of steps `["payload", "a.b"]`), passed as given:
-                # the kernel shows `<secret>` in every record of the call, and the
-                # reply still carries the real values — to THIS program, which
-                # holds them from here on (print one and it is in the job output).
-                f["secret"] = secret
             try:
                 _frame(f)
             except Exception:

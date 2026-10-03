@@ -39,8 +39,8 @@ into it; the running artifact is a function of its *descriptance*, not its code.
   flushes its execution rows (`call`/`settle`/`ack`/`flush`) there, and
   `ledger`, dead letters (`on_deadletter`, `ack_deadletter`) and named-call
   dedup read them back. Each AI agent names its own store for its
-  conversation; context moves between agents only by GRANT (`share` in the
-  store → `fork_from` on the reader). Lifecycle verbs: `kernel_start`,
+  conversation; context moves between agents in the text of a call. Lifecycle
+  verbs: `kernel_start`,
   `shutdown_agents`, `kernel_stop`. See `reflect kernel readme=memory`.
 - **send** — the one primitive. `kernel.send(target_id, payload) →
   reply | None` (from outside any handler) or `agent.send(...)`
@@ -210,9 +210,7 @@ curl http://localhost:8888/<id>/file/<path>            # octet proxy → the age
 # WS (when web_ws is mounted)
 # open ws://host/<id>/ws and send
 #   {"type":"call","target":"<id>","payload":{...},"id":"<corr>"}
-# mark secret values on the call: add "secret":["payload.<field>"|"result[.<field>]"]
-# — or an array of steps for a key holding a dot: "secret":[["payload","a.b"]]
-# (REST: the X-Fantastic-Secret header, a JSON array) — every record shows <secret>
+# the leg admits the frame and sends it AS ITSELF (its can_call, the target's callable_by)
 
 # REST (when web_rest is mounted; <rest_id> is the agent's id)
 curl -X POST -H 'content-type: application/json' \

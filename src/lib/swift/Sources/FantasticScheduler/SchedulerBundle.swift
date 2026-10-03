@@ -7,31 +7,23 @@
 // the agent's own agent.yaml — one store, no `.fantastic/.fantastic/…` nest):
 //
 //   - `schedules.yaml` — `[{id, target, payload, interval_seconds, next_run,
-//                          paused, run_count, created_at, owner, via?, timeout?}, …]`
+//                          paused, run_count, created_at, timeout?}, …]`
 //   - `schedule_events.yaml`  — append-only, one event per fire, ring-trimmed to HISTORY_MAX.
 //
 // `boot` never needs a store; a WRITE failfasts (`scheduler.<verb>: …`) only
 // when the loader has no store — reads are empty until then. A tick collects
 // every DUE schedule, bumps `run_count`/`next_run`, persists FIRST (a crash
 // inside the fire window cannot re-fire on reboot), then fires them all — ONE
-// `kernel.send([...])` batch per owner, the batches concurrent, so one hung
-// target never blocks the others. `timeout` is the schedule's own per-fire bound in seconds; absent =
+// `kernel.send([...])` batch, the items concurrent, so one hung target never
+// blocks the others. `timeout` is the schedule's own per-fire bound in seconds; absent =
 // wait forever (the kernel never defaults it). One `{type:"schedule_fired", …}`
 // per outcome goes to the scheduler's OWN inbox only — the target receives the
 // payload, which is the tick.
 //
-// A SCHEDULE FIRES AS ITS CREATOR (audit AV-6, 2026-10-03). `schedule` records
-// WHO asked — `owner`: the calling agent's id, a foreign caller's `<guid>|<agent>`
-// (with `via`, the bridge leg that relayed it), or null for the operator — and
-// every fire goes out under that identity (`currentSender`; the remote caller
-// pair for a foreign owner; no sender for null). So a schedule can do only what
-// its creator could: the gate judges the creator's `can_call` and the target's
-// `callable_by` for the creator, never the scheduler's. The scheduler is no
-// deputy — and a caller lists, ticks, pauses, resumes, unschedules and reads the
-// history of its OWN schedules only (the operator: all; another's schedule is
-// "not found"). The `owner` key must be PRESENT (audit ARCH2-4): a schedule whose
-// key is absent, or neither null nor a string, does not fire — the fire is
-// refused and its `schedule_fired` event's `error` names why.
+// A SCHEDULE FIRES AS THE SCHEDULER ITSELF: every fire goes out under the
+// scheduler's own id, so the gate judges the scheduler's `can_call` and the
+// target's `callable_by` for the scheduler. `list`, `history`, `tick_now`,
+// `unschedule` and `pause`/`resume` see every schedule.
 
 import FantasticJSON
 import FantasticKernel
@@ -51,18 +43,6 @@ public let DEFAULT_TICK_SEC = 1.0
 public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
     public let name = "scheduler"
 
-    // THE SCHEDULER SEAL (owner 2026-10-03, audit S5) — as the relay seal: a
-    // schedule keeps its payload in the sidecar and every fire re-sends it as a
-    // fresh call carrying no marks, so its rows, the state stream and the memory
-    // store would all hold the value in clear. A `schedule` call carrying ANY
-    // secret mark is refused.
-
-    /// The seal's refusal text — python `SECRET_REFUSED`, byte for byte.
-    public static let SECRET_REFUSED =
-        "scheduler: a call carrying secret marks may not be scheduled — a schedule "
-        + "keeps its payload and every fire re-sends it unmarked"
-    /// Its hint — python `SECRET_REFUSED_HINT`.
-    public static let SECRET_REFUSED_HINT = "send a secret-bearing call yourself, marked, each time"
     public var verbs: [String] { Array(Self.verbDocs.keys) }
 
     /// python's module-level `VERBS` — ONE table: reflect renders it and
@@ -70,13 +50,13 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
     static let verbDocs: OrderedDictionary<String, JSON> = [
         "reflect": .string("Identity + tick state. No args."),
         "boot": .string("Idempotent. Starts the tick loop; persistence is THROUGH the loader."),
-        "schedule": .string("args: target:str, payload:{type:..,...}, interval_seconds:int (default 60), timeout:number? (seconds per fire; absent = wait forever). Every fire runs AS YOU (the schedule's `owner`) — it can reach only what you can. Returns {schedule_id, schedule}. Persisted THROUGH the loader; failfast if no store wired."),
-        "unschedule": .string("args: schedule_id:str (req — one of YOUR schedules). Returns {removed:bool, schedule_id}."),
-        "list": .string("No args. Returns {schedules: [<schedule record>, ...]} — YOUR schedules (the operator: all)."),
-        "pause": .string("args: schedule_id:str?. With id pauses one of YOUR schedules; without, pauses the whole scheduler."),
-        "resume": .string("args: schedule_id:str?. With id resumes one of YOUR schedules; without, resumes the whole scheduler."),
-        "tick_now": .string("args: schedule_id:str (req — one of YOUR schedules). Bumps run_count, persists, then fires that schedule immediately, as its owner. Returns {fired:true, schedule_id}."),
-        "history": .string("args: limit:int? (1..500, default 100), schedule_id:str?. Returns {history:[event,...], count} — the fires of YOUR schedules (the operator: all)."),
+        "schedule": .string("args: target:str, payload:{type:..,...}, interval_seconds:int (default 60), timeout:number? (seconds per fire; absent = wait forever). Every fire runs AS THE SCHEDULER — it reaches what the scheduler's can_call grants. Returns {schedule_id, schedule}. Persisted THROUGH the loader; failfast if no store wired."),
+        "unschedule": .string("args: schedule_id:str (req). Returns {removed:bool, schedule_id}."),
+        "list": .string("No args. Returns {schedules: [<schedule record>, ...]} — every schedule."),
+        "pause": .string("args: schedule_id:str?. With id pauses one schedule; without, pauses the whole scheduler."),
+        "resume": .string("args: schedule_id:str?. With id resumes one schedule; without, resumes the whole scheduler."),
+        "tick_now": .string("args: schedule_id:str (req). Bumps run_count, persists, then fires that schedule immediately, as the scheduler. Returns {fired:true, schedule_id}."),
+        "history": .string("args: limit:int? (1..500, default 100), schedule_id:str?. Returns {history:[event,...], count} — every schedule's fires."),
     ]
 
     public init() {}
@@ -109,24 +89,11 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
         # scheduler — recurring tasks
         Verbs: schedule, unschedule, list, pause, resume, tick_now, history. Persistence (schedules.yaml, schedule_events.yaml) is automatic THROUGH the loader (`kernel_state`) — nothing to wire; a write failfasts only when no store is wired at the root.
 
-        **A schedule fires AS ITS CREATOR** — never as the scheduler. `schedule` records the
-        caller as the schedule's `owner` (a local agent id; a foreign `<guid>|<agent>` with
-        `via`, the bridge leg that relayed it; `null` for the operator) and every fire runs
-        under that identity, so the gate judges the creator's `can_call` and the target's
-        `callable_by` for the creator: a schedule reaches only what its creator could. Wire
-        the creator → target edge (and the target's `callable_by` for the creator), not the
-        scheduler's. `list`, `history`, `tick_now`, `unschedule` and `pause`/`resume
-        {schedule_id}` act on the caller's OWN schedules (the operator: all) — another's
-        schedule is not found. `schedule_fired` events carry `owner`.
-
-        **Cutting a peer off includes unscheduling its schedules.** A foreign caller's
-        schedule fires as its `<guid>|<agent>` and never passes the leg that relayed it, so
-        sealing that leg or re-pinning its `peer_guid` does not stop it — `unschedule` it too
-        (the operator's `list` shows every owner's schedules).
-
-        **A call carrying secret marks is not scheduled** — `schedule` refuses it
-        (`reason: unauthorized`): a schedule keeps its payload and every fire re-sends it
-        unmarked. Send a secret-bearing call yourself, marked, each time.
+        **A schedule fires AS THE SCHEDULER.** Every fire goes out under the scheduler's
+        own id, so the gate judges the scheduler's `can_call` and the target's
+        `callable_by` for the scheduler: wire the scheduler → target edge. `list`,
+        `history`, `tick_now`, `unschedule` and `pause`/`resume {schedule_id}` see every
+        schedule.
 
         """
     }
@@ -222,17 +189,9 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
     /// Read one of THIS agent's own sidecars through the kernel. The loader owns
     /// the path; this bundle names only a filename. No store / missing ⇒ nil.
     private func fileRead(_ agentId: AgentId, _ kernel: Kernel, _ name: String) async -> String? {
-        let r = await KernelTaskLocals.$currentSender.withValue(nil) {
-            await kernel.send([
-                Item(
-                    AgentId("kernel"),
-                    .object([
-                        "type": .string("load_blob"),
-                        "agent_id": .string(agentId.value),
-                        "name": .string(name),
-                    ]))
-            ])[0].result
-        }
+        // The kernel's own persistence function — the namespace is the agent
+        // running this (the scheduler, in its handler or its tick task).
+        let r = await kernel.loadOwnBlob(name: name)
         return r["content"].asString
     }
 
@@ -241,18 +200,7 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
     private func fileWrite(
         _ agentId: AgentId, _ kernel: Kernel, _ name: String, _ content: String
     ) async -> JSON? {
-        let r = await KernelTaskLocals.$currentSender.withValue(nil) {
-            await kernel.send([
-                Item(
-                    AgentId("kernel"),
-                    .object([
-                        "type": .string("persist_blob"),
-                        "agent_id": .string(agentId.value),
-                        "name": .string(name),
-                        "content": .string(content),
-                    ]))
-            ])[0].result
-        }
+        let r = await kernel.persistOwnBlob(name: name, content: content)
         guard let err = r["error"].asString else { return nil }
         var e: JSON = .object(["error": .string(err)])
         if let reason = r["reason"].asString { e["reason"] = .string(reason) }
@@ -319,60 +267,6 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
         return docs.compactMap { $0.asObject }
     }
 
-    // ── who scheduled it (the identity a schedule fires under) ──
-
-    /// `(owner, via)` of THIS dispatch's caller: a local agent → `(id, nil)`; a
-    /// foreign caller relayed by a bridge leg → (`<guid>|<agent>`, the leg); the
-    /// operator → `(nil, nil)`. Python `_caller`.
-    private func caller() -> (owner: String?, via: String?) {
-        if let remote = KernelTaskLocals.currentRemote {
-            return (remote, KernelTaskLocals.currentOrigin?.value)
-        }
-        return (KernelTaskLocals.currentOrigin?.value, nil)
-    }
-
-    /// Whether THIS dispatch's caller owns `sch` (a schedule or a fire event) —
-    /// the operator owns them all. Python `_mine`.
-    private func mine(_ sch: JSON) -> Bool {
-        guard let owner = caller().owner else { return true }
-        return sch["owner"] == .string(owner)
-    }
-
-    /// Why `sch` may not fire, or nil. Python `_owner_refusal`: the `owner` key
-    /// must be PRESENT — null is the operator, a string an agent (`<guid>|<agent>`
-    /// with `via`). An ABSENT key (audit ARCH2-4) or any other value names nobody,
-    /// and reading it as null would fire it with the operator's ungated authority
-    /// — so it does not fire.
-    static func ownerRefusal(_ sch: JSON) -> String? {
-        let problem: String
-        switch sch.asObject?["owner"] {
-        case nil: problem = "the schedule's owner key is absent"
-        case .null?, .string?: return nil
-        case _?: problem = "the schedule's owner is not null or a string"
-        }
-        return "scheduler: not fired — \(problem); a schedule fires only as its recorded owner (null = the operator, a string = an agent)"
-    }
-
-    /// `kernel.send(items)` under the schedule owner's identity — task-local, so
-    /// batches for different owners run side by side. Python `_send_as`.
-    private func sendAs(_ kernel: Kernel, owner: String?, via: String?, _ items: [Item]) async
-        -> [Outcome]
-    {
-        guard let owner else {
-            return await KernelTaskLocals.$currentSender.withValue(nil) { await kernel.send(items) }
-        }
-        if let via {
-            return await KernelTaskLocals.$currentSender.withValue(AgentId(via)) {
-                await KernelTaskLocals.withRemoteCaller(leg: AgentId(via), address: owner) {
-                    await kernel.send(items)
-                }
-            }
-        }
-        return await KernelTaskLocals.$currentSender.withValue(AgentId(owner)) {
-            await kernel.send(items)
-        }
-    }
-
     // ── tick loop ───────────────────────────────────────────────
 
     /// python `_tick_sec`: the record's sweep interval when it is a POSITIVE
@@ -432,42 +326,22 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
             AgentId(sch["target"].asString ?? ""), payload, timeout: sch["timeout"].asDouble)
     }
 
-    /// Fire every due schedule AS ITS OWNER — one batch send per owner, the
-    /// batches concurrent, no head-of-line blocking — then record one
-    /// `schedule_fired` per outcome. A schedule with no valid `owner` is refused
-    /// (`ownerRefusal`): nothing is sent, and its event carries the refusal.
+    /// Fire every due schedule AS THE SCHEDULER — ONE batch send, the items
+    /// concurrent, no head-of-line blocking — then record one `schedule_fired`
+    /// per outcome.
     private func fireMany(_ agentId: AgentId, _ due: [JSON], _ kernel: Kernel) async {
         let ts = nowSecs()
-        let refused = due.map(Self.ownerRefusal)
-        // groups by (owner, via), in first-seen order — python's dict
-        struct Key: Hashable {
-            let owner: String?
-            let via: String?
-        }
-        var groups: OrderedDictionary<Key, [Int]> = [:]
-        for (i, sch) in due.enumerated() where refused[i] == nil {
-            groups[Key(owner: sch["owner"].asString, via: sch["via"].asString), default: []].append(i)
-        }
-        var outcomes = [Outcome?](repeating: nil, count: due.count)
-        await withTaskGroup(of: (Key, [Outcome]).self) { group in
-            for (key, idxs) in groups {
-                group.addTask {
-                    (key, await self.sendAs(kernel, owner: key.owner, via: key.via, idxs.map { self.fireItem(due[$0]) }))
-                }
-            }
-            for await (key, outs) in group {
-                for (i, out) in zip(groups[key] ?? [], outs) { outcomes[i] = out }
-            }
-        }
+        let items = due.map { self.fireItem($0) }
+        // The scheduler's own handler or tick task — its sends are its own.
+        let outs = await kernel.send(items)
+        let outcomes: [Outcome?] = due.indices.map { $0 < outs.count ? outs[$0] : nil }
         let durationMs = Int64((nowSecs() - ts) * 1000)
         for (i, sch) in due.enumerated() {
             let target = sch["target"].asString ?? ""
             let payload = sch.asObject?["payload"] ?? .object([:])
             var error: JSON = .null
             var result: JSON = .null
-            if let why = refused[i] {
-                error = .string(why)
-            } else if let out = outcomes[i] {
+            if let out = outcomes[i] {
                 if out.status == .completed {
                     // COMPLETED means completed. A reply that happens to carry an
                     // `error` key is still the target's ANSWER — python puts it in
@@ -487,7 +361,6 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
                 "type": .string("schedule_fired"),
                 "schedule_id": .string(sch["id"].asString ?? ""),
                 "scheduler_id": .string(agentId.value),
-                "owner": sch["owner"],
                 "target": .string(target),
                 "payload": payload,
                 "result": result,
@@ -534,7 +407,7 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
             "verbs": .object(Self.verbDocs),
             "emits": .object([
                 "schedule_fired": .string(
-                    "{type:'schedule_fired', schedule_id, scheduler_id, owner, target, payload, result, error, ts, duration_ms} — emitted on the scheduler's OWN inbox after every fire (never the target's — the payload send is the tick); `owner` is who the fire ran as"
+                    "{type:'schedule_fired', schedule_id, scheduler_id, target, payload, result, error, ts, duration_ms} — emitted on the scheduler's OWN inbox after every fire (never the target's — the payload send is the tick)"
                 )
             ]),
         ])
@@ -586,13 +459,9 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
     }
 
     private func scheduleReply(_ agentId: AgentId, payload: JSON, kernel: Kernel) async -> JSON {
-        // PYTHON'S ORDER, and it is observable: the scheduler seal (any secret mark)
-        // → payload shape → interval_seconds → target → payload.type → timeout. A
-        // call with two faults must name the same one python names.
-        if !KernelTaskLocals.currentSecret.isEmpty {
-            return Refusal.make(
-                Refusal.unauthorized, Self.SECRET_REFUSED, hint: Self.SECRET_REFUSED_HINT)
-        }
+        // PYTHON'S ORDER, and it is observable: payload shape → interval_seconds
+        // → target → payload.type → timeout. A call with two faults must name the
+        // same one python names.
         var schedPayload = payload.asObject?["payload"] ?? .object([:])
         if schedPayload.isNull { schedPayload = .object([:]) }
         guard schedPayload.asObject != nil else {
@@ -627,7 +496,6 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
             }
             timeout = raw
         }
-        let (owner, via) = caller()
         let now = nowSecs()
         var sch: JSON = .object([
             "id": .string(mintId()),
@@ -638,10 +506,7 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
             "next_run": .double(now + Double(interval)),
             "run_count": .integer(0),
             "paused": .bool(false),
-            // WHO asked — every fire runs as them (null = the operator).
-            "owner": owner.map { .string($0) } ?? .null,
         ])
-        if let via { sch["via"] = .string(via) }
         if !timeout.isNull { sch["timeout"] = timeout }
         var schedules = await loadSchedules(agentId, kernel)
         schedules.append(sch)
@@ -663,7 +528,7 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
         }
         var schedules = await loadSchedules(agentId, kernel)
         let before = schedules.count
-        schedules.removeAll { $0["id"] == sid && mine($0) }
+        schedules.removeAll { $0["id"] == sid }
         let removed = schedules.count < before
         // RAM FIRST, unconditionally (python assigns `_cache[id]` before it looks at
         // `removed`), so a failed write still forgets the schedule.
@@ -678,7 +543,7 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
 
     private func listReply(_ agentId: AgentId, kernel: Kernel) async -> JSON {
         .object([
-            "schedules": .array(await loadSchedules(agentId, kernel).filter(mine)),
+            "schedules": .array(await loadSchedules(agentId, kernel)),
             // HOW TO GET THIS AGAIN — python `_list`'s `origin`.
             "origin": .string("\(agentId.value) list — re-send; changes as schedules change"),
         ])
@@ -702,7 +567,7 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
         if pyTruthy(sid) {
             var schedules = await loadSchedules(agentId, kernel)
             var touched = 0
-            for i in schedules.indices where schedules[i]["id"] == sid && mine(schedules[i]) {
+            for i in schedules.indices where schedules[i]["id"] == sid {
                 schedules[i]["paused"] = .bool(paused)
                 touched += 1
             }
@@ -734,7 +599,7 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
             return .object(["error": .string("tick_now: schedule_id required")])
         }
         var schedules = await loadSchedules(agentId, kernel)
-        guard let i = schedules.firstIndex(where: { $0["id"] == sid && mine($0) }) else {
+        guard let i = schedules.firstIndex(where: { $0["id"] == sid }) else {
             return .object(["error": .string("schedule \(pyRepr(sid)) not found")])
         }
         // Same order as the tick: bump → persist → fire.
@@ -748,9 +613,6 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
             return persistErr("tick_now", err)
         }
         await fireMany(agentId, [schedules[i]], kernel)
-        if let why = Self.ownerRefusal(schedules[i]) {
-            return .object(["error": .string(why)])
-        }
         return .object(["fired": .bool(true), "schedule_id": sid])
     }
 
@@ -758,9 +620,8 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
         let (rawLimit, limitBad) = intArg(payload, "limit", 100, "history", 1)
         if let limitBad { return limitBad }
         let limit = min(500, Int(rawLimit))
-        // YOUR fires first, then the newest `limit` of them.
-        var entries = Array(
-            await readHistory(agentId, kernel, 2 * HISTORY_MAX).filter(mine).suffix(limit))
+        // The newest `limit` fires.
+        var entries = Array(await readHistory(agentId, kernel, 2 * HISTORY_MAX).suffix(limit))
         let sid = payload["schedule_id"]
         if pyTruthy(sid) {
             entries = entries.filter { $0["schedule_id"] == sid }

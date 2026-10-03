@@ -221,7 +221,8 @@ def test_exec_drain_rows_are_filed_under_the_owner():
 def test_web_serve_task_detaches_from_the_boot_dispatch():
     import web.tools as w
 
-    assert "_current_task.set(None)" in Path(w.__file__).read_text()
+    # an EMPTY context: no task parent (and, a transport, no identity)
+    assert "context=contextvars.Context()" in Path(w.__file__).read_text()
 
 
 async def test_a_long_line_does_not_end_the_pipe(seeded_kernel):

@@ -51,6 +51,32 @@ fn mk_kernel(tmp: &TempDir, register_ws: bool, register_rest: bool) -> Arc<Kerne
     kernel
 }
 
+/// The ROOT accepts every verb from `ids` — the operator widens its
+/// `callable_by` (kernel verbs at the root take the two-sided gate too).
+async fn accept_on_root(kernel: &Arc<Kernel>, ids: &[&str]) {
+    let root = kernel.root().expect("a root");
+    let mut grant = root
+        .meta
+        .read()
+        .expect("meta")
+        .get("callable_by")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    for id in ids {
+        grant.insert((*id).to_string(), json!("*"));
+    }
+    let r = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type": "update_agent", "id": root.id.as_str(), "callable_by": grant}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(r.get("error").is_none(), "accept_on_root: {r}");
+}
+
 /// Wait briefly for the bound listener to start accepting. Reduces
 /// flake on slow CI machines without padding fast runs.
 async fn wait_until_port_accepts(port: u16) {
@@ -79,7 +105,7 @@ async fn web_alone_has_no_ws_endpoint() {
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
-                "handler_module": HANDLER_MODULE,
+                "handler_module": HANDLER_MODULE, "callable_by": {"$children": ["watch"]}, "can_call": {"$children": ["get_routes"]},
                 "id": web_id,
                 "port": port,
             }),
@@ -142,7 +168,7 @@ async fn web_with_ws_child_serves_ws() {
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
-                "handler_module": HANDLER_MODULE,
+                "handler_module": HANDLER_MODULE, "callable_by": {"$children": ["watch"]}, "can_call": {"$children": ["get_routes"]},
                 "id": web_id,
                 "port": port,
             }),
@@ -155,19 +181,20 @@ async fn web_with_ws_child_serves_ws() {
             AgentId::from("kernel"),
             json!({
                 "type": "create_agent", "parent_id": web_id,
-                "handler_module": "web_ws.tools",
+                "handler_module": "web_ws.tools", "callable_by": {"$parent": ["get_routes"]},
                 "id": "wws_child",
                 // C40 — a WS frame runs as the LEG, and a leg with no
                 // `ingress_rule` is SEALED. An open face says so.
                 "ingress_rule": "allow_all_ingress",
                 // A grant map is keyed by a LITERAL id or a `$token` — `"*"` is
                 // never a key, only a verb wildcard.
-                "can_call": {"kernel_state": "*"},
+                "can_call": {"$parent": ["watch"], "kernel_state": "*"},
             }),
         )])
         .await
         .remove(0)
         .result;
+    accept_on_root(&kernel, &["wws_child"]).await;
     let boot_reply = kernel
         .send(vec![Item::new(
             AgentId::from(web_id),
@@ -227,7 +254,7 @@ async fn web_with_rest_child_serves_rest() {
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
-                "handler_module": HANDLER_MODULE,
+                "handler_module": HANDLER_MODULE, "callable_by": {"$children": ["watch"]}, "can_call": {"$children": ["get_routes"]},
                 "id": web_id,
                 "port": port,
             }),
@@ -241,7 +268,7 @@ async fn web_with_rest_child_serves_rest() {
             json!({
                 "type": "create_agent",
                 "parent_id": web_id,
-                "handler_module": "web_rest.tools",
+                "handler_module": "web_rest.tools", "callable_by": {"$parent": ["get_routes"]},
                 "id": rest_id,
                 // Deny-all: an inbound relay dispatches browser calls into the
                 // kernel AS ITSELF — ingress_rule says WHO may call in, can_call
@@ -255,9 +282,9 @@ async fn web_with_rest_child_serves_rest() {
         .await
         .remove(0)
         .result;
-    // Two-sided deny-all: the relay dispatches into root AS ITSELF, but it is
-    // root's GRANDCHILD (child of `web`), so $children:* does not cover it — open
-    // root's ingress for the relay (merged with the structural baseline).
+    // Two-sided deny-all: the relay dispatches into root AS ITSELF, and the root's
+    // baseline is `$self` alone — open root's ingress for the relay (merged with
+    // that baseline).
     let _ = kernel
         .send(vec![Item::new(
             AgentId::from("kernel_state"),
@@ -329,7 +356,7 @@ async fn stage_web_with_ws_leg(
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
-                "handler_module": HANDLER_MODULE,
+                "handler_module": HANDLER_MODULE, "callable_by": {"$children": "*"}, "can_call": {"$children": ["get_routes"]},
                 "id": web_id,
                 "port": port,
             }),
@@ -340,7 +367,7 @@ async fn stage_web_with_ws_leg(
     let mut ws_rec = json!({
         "type": "create_agent",
         "parent_id": web_id,
-        "handler_module": "web_ws.tools",
+        "handler_module": "web_ws.tools", "can_call": {"$parent": ["watch"]}, "callable_by": {"$parent": ["get_routes"]},
         "id": format!("{web_id}_ws"),
     });
     if open_leg {
@@ -349,13 +376,16 @@ async fn stage_web_with_ws_leg(
         // grant as well as an open ingress rule — the two gates are independent
         // and both have to be wired by an operator. A grant map is keyed by a
         // LITERAL id, never `"*"`.
-        ws_rec["can_call"] = json!({"kernel_state": "*"});
+        ws_rec["can_call"] = json!({"kernel_state": "*", "$parent": "*"});
     }
     let _ = kernel
         .send(vec![Item::new(AgentId::from("kernel"), ws_rec)])
         .await
         .remove(0)
         .result;
+    if open_leg {
+        accept_on_root(&kernel, &[&format!("{web_id}_ws")]).await;
+    }
     let r = kernel
         .send(vec![Item::new(
             AgentId::from(web_id),
@@ -738,7 +768,7 @@ async fn open_leg_autowatches_and_calls_run_as_the_leg() {
             AgentId::from("kernel"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
-                "handler_module": "web_ws.tools", "id": "private_one",
+                "handler_module": "web_ws.tools", "can_call": {"$parent": ["watch"]}, "id": "private_one",
                 "callable_by": {},
             }),
         )])
@@ -883,7 +913,7 @@ async fn web_rest_octet_leg_edit_and_read_stream() {
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
-                "handler_module": HANDLER_MODULE, "id": web_id, "port": port,
+                "handler_module": HANDLER_MODULE, "callable_by": {"$children": ["watch"]}, "can_call": {"$children": ["get_routes"]}, "id": web_id, "port": port,
             }),
         )])
         .await
@@ -911,7 +941,7 @@ async fn web_rest_octet_leg_edit_and_read_stream() {
             AgentId::from("kernel"),
             json!({
                 "type": "create_agent", "parent_id": web_id,
-                "handler_module": "web_rest.tools", "id": rest_id,
+                "handler_module": "web_rest.tools", "callable_by": {"$parent": ["get_routes"]}, "id": rest_id,
                 "ingress_rule": "allow_all_ingress",
                 "can_call": { fb_id: "*" },
             }),
@@ -1019,7 +1049,7 @@ async fn web_rest_octet_leg_edit_and_read_stream() {
 /// A SEALED REST leg answers 403 with the repair — it does not serve, and it does
 /// not blame the wrong side.
 ///
-/// The rust POST/GET handlers dispatched straight into `with_sender(owner)` with
+/// The rust POST/GET handlers dispatched straight into `as_agent(owner)` with
 /// no ingress check, so a leg carrying NO `ingress_rule` — sealed by default
 /// everywhere else in the io family — served unauthenticated requests. Where a
 /// call did fail it failed on EGRESS and named a false cause ("wr_sealed may not
@@ -1036,7 +1066,7 @@ async fn sealed_rest_leg_answers_403_and_teaches_the_repair() {
         .send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel",
-                   "handler_module": HANDLER_MODULE, "id": web_id, "port": port}),
+                   "handler_module": HANDLER_MODULE, "callable_by": {"$children": ["watch"]}, "can_call": {"$children": ["get_routes"]}, "id": web_id, "port": port}),
         )])
         .await
         .remove(0)
@@ -1047,7 +1077,7 @@ async fn sealed_rest_leg_answers_403_and_teaches_the_repair() {
         .send(vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "create_agent", "parent_id": web_id,
-                   "handler_module": "web_rest.tools", "id": rest_id,
+                   "handler_module": "web_rest.tools", "callable_by": {"$parent": ["get_routes"]}, "id": rest_id,
                    "can_call": {"kernel_state": "*"}}),
         )])
         .await
@@ -1132,7 +1162,7 @@ async fn open_rest_leg_dispatches_including_the_reflect_routes() {
         .send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel",
-                   "handler_module": HANDLER_MODULE, "id": web_id, "port": port}),
+                   "handler_module": HANDLER_MODULE, "callable_by": {"$children": ["watch"]}, "can_call": {"$children": ["get_routes"]}, "id": web_id, "port": port}),
         )])
         .await
         .remove(0)
@@ -1141,7 +1171,7 @@ async fn open_rest_leg_dispatches_including_the_reflect_routes() {
         .send(vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "create_agent", "parent_id": web_id,
-                   "handler_module": "web_rest.tools", "id": rest_id,
+                   "handler_module": "web_rest.tools", "callable_by": {"$parent": ["get_routes"]}, "id": rest_id,
                    "ingress_rule": "allow_all_ingress",
                    "can_call": {"kernel_state": "*", "kernel": "*"}}),
         )])
@@ -1280,14 +1310,14 @@ async fn stage_host(
 
     for item in [
         json!({"type": "create_agent", "parent_id": "kernel",
-               "handler_module": HANDLER_MODULE, "id": web_id, "port": port}),
+               "handler_module": HANDLER_MODULE, "callable_by": {"$children": ["watch"]}, "can_call": {"$children": ["get_routes"]}, "id": web_id, "port": port}),
         json!({"type": "create_agent", "parent_id": "kernel_state",
                "handler_module": "file_bridge.tools", "allow": ["."], "id": fb_id, "root": "served",
                "ingress_rule": "allow_all_ingress",
                "callable_by": {"$self": "*", "$parent": "*", "$children": "*",
                                rest_id: "*", web_id: "*"}}),
         json!({"type": "create_agent", "parent_id": web_id,
-               "handler_module": "web_rest.tools", "id": rest_id,
+               "handler_module": "web_rest.tools", "callable_by": {"$parent": ["get_routes"]}, "id": rest_id,
                "ingress_rule": "allow_all_ingress",
                "can_call": {"kernel_state": "*", "kernel": "*", fb_id: "*"}}),
         json!({"type": "update_agent", "id": "kernel_state", "callable_by": {
@@ -1957,7 +1987,7 @@ async fn reflect_sentence_and_verbs_match_python() {
             .keys()
             .map(String::as_str)
             .collect::<Vec<_>>(),
-        vec!["reflect", "boot", "stop", "mount", "unmount"]
+        vec!["reflect", "boot", "stop", "mount", "unmount", "fetch_file"]
     );
     assert_eq!(
         obj["verbs"]["reflect"],
@@ -2006,7 +2036,7 @@ async fn boot_and_stop_replies_match_python() {
         .send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel",
-                   "handler_module": HANDLER_MODULE, "id": "web_noport"}),
+                   "handler_module": HANDLER_MODULE, "callable_by": {"$children": ["watch"]}, "can_call": {"$children": ["get_routes"]}, "id": "web_noport"}),
         )])
         .await
         .remove(0)
@@ -2136,7 +2166,7 @@ async fn a_child_created_after_boot_mounts_only_through_mount() {
     let kernel = mk_kernel(&tmp, true, false);
     let web_id = "web_hot";
     for item in [json!({"type": "create_agent", "parent_id": "kernel",
-               "handler_module": HANDLER_MODULE, "id": web_id, "port": port})]
+               "handler_module": HANDLER_MODULE, "callable_by": {"$children": ["watch"]}, "can_call": {"$children": ["get_routes"]}, "id": web_id, "port": port})]
     {
         let _ = kernel
             .send(vec![Item::new(AgentId::from("kernel_state"), item)])
@@ -2179,7 +2209,7 @@ async fn a_child_created_after_boot_mounts_only_through_mount() {
         .send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": web_id,
-                   "handler_module": "web_ws.tools", "id": "ws_hot",
+                   "handler_module": "web_ws.tools", "can_call": {"$parent": ["watch"]}, "callable_by": {"$parent": ["get_routes"]}, "id": "ws_hot",
                    "ingress_rule": "allow_all_ingress"}),
         )])
         .await
@@ -2259,7 +2289,7 @@ async fn boot_announces_say_to_cli() {
                "handler_module": "cli_probe.tools", "id": "cli",
                "callable_by": {"$self": "*", "$parent": "*", "$children": "*", "web_say": "*"}}),
         json!({"type": "create_agent", "parent_id": "kernel",
-               "handler_module": HANDLER_MODULE, "id": "web_say", "port": port,
+               "handler_module": HANDLER_MODULE, "callable_by": {"$children": ["watch"]}, "id": "web_say", "port": port,
                "can_call": {"$self": "*", "$parent": "*", "$children": "*", "cli": "*"}}),
     ] {
         let reply = kernel
@@ -2314,7 +2344,7 @@ async fn boot_announces_the_bound_host() {
                "handler_module": "cli_probe.tools", "id": "cli",
                "callable_by": {"$self": "*", "$parent": "*", "$children": "*", "web_host": "*"}}),
         json!({"type": "create_agent", "parent_id": "kernel",
-               "handler_module": HANDLER_MODULE, "id": "web_host", "port": port,
+               "handler_module": HANDLER_MODULE, "callable_by": {"$children": ["watch"]}, "id": "web_host", "port": port,
                "host": "localhost",
                "can_call": {"$self": "*", "$parent": "*", "$children": "*", "cli": "*"}}),
     ] {
@@ -2374,47 +2404,6 @@ impl fantastic_kernel::bundle::Bundle for SayProbe {
     }
 }
 
-/// A11.21 (D6) — a REST-originated dispatch runs inside the boot dispatch's
-/// task scope, so python's uvicorn-task parentage is reproduced at the source.
-///
-/// RESIDUAL: the observable `parent` still differs. python reports the boot pid
-/// even after that task is gone (§8 "Dangling REST parent pid", measured 7);
-/// rust's `TaskTable::register_marked` DROPS a parent that has left the table,
-/// so a request arriving after boot returned reports `parent: null`. Carrying a
-/// dead pid is a kernel-table change, not a web one.
-#[tokio::test]
-async fn ingress_dispatch_parent_matches_python() {
-    let kernel = Arc::new(Kernel::new());
-    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-    let boot = kernel.spawn_task(&AgentId::from("web_p"), "boot", async move {
-        let _ = rx.await;
-    });
-    let state = AppState {
-        kernel: Arc::clone(&kernel),
-        web_agent_id: AgentId::from("web_p"),
-        boot_task: Some(boot),
-    };
-    let seen = state
-        .scoped(async { fantastic_kernel::current_task() })
-        .await;
-    assert_eq!(
-        seen,
-        Some(boot),
-        "a request handler runs under the boot task"
-    );
-    // While the boot task lives, work forked from a request names it as parent.
-    let forked = state
-        .scoped(async { kernel.spawn_task(&AgentId::from("web_p"), "ws_call", async {}) })
-        .await;
-    let rows = kernel.tasks.rows();
-    let row = rows
-        .iter()
-        .find(|r| r["id"] == json!(forked.0))
-        .expect("the forked task is in ps");
-    assert_eq!(row["parent"], json!(boot.0), "rows: {rows:?}");
-    let _ = tx.send(());
-}
-
 /// A13.16 — a client Close is ECHOED with its payload. Rust used to break the
 /// loop and abort the send task before the queued reply flushed, so the client
 /// saw `1006` (abnormal) instead of the code it sent.
@@ -2430,9 +2419,9 @@ async fn client_close_is_echoed_with_its_code() {
     let web_id = "web_close";
     for item in [
         json!({"type": "create_agent", "parent_id": "kernel",
-               "handler_module": HANDLER_MODULE, "id": web_id, "port": port}),
+               "handler_module": HANDLER_MODULE, "callable_by": {"$children": ["watch"]}, "can_call": {"$children": ["get_routes"]}, "id": web_id, "port": port}),
         json!({"type": "create_agent", "parent_id": web_id,
-               "handler_module": "web_ws.tools", "id": "ws_close",
+               "handler_module": "web_ws.tools", "can_call": {"$parent": ["watch"]}, "callable_by": {"$parent": ["get_routes"]}, "id": "ws_close",
                "ingress_rule": "allow_all_ingress"}),
     ] {
         let _ = kernel
@@ -2821,17 +2810,15 @@ async fn the_web_serves_only_what_the_list_exposes() {
     std::fs::write(served.join("docs/a.pdf"), b"%PDF-a").unwrap();
     std::fs::write(served.join("docs/b.pdf"), b"%PDF-b").unwrap();
     std::fs::write(served.join("secret.txt"), b"private\n").unwrap();
-    for payload in [
-        json!({"type": "disallow", "path": "."}),
-        json!({"type": "allow", "path": "docs/a.pdf"}),
-    ] {
-        let r = kernel
-            .send(vec![Item::new(AgentId::from("fb_al"), payload)])
-            .await
-            .remove(0)
-            .result;
-        assert!(r.get("error").is_none(), "{r}");
-    }
+    let r = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type": "update_agent", "id": "fb_al", "allow": ["docs/a.pdf"]}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(r.get("error").is_none(), "{r}");
     let client = reqwest::Client::new();
     let ok = client
         .get(format!("http://127.0.0.1:{port}/fb_al/file/docs/a.pdf"))
@@ -3219,11 +3206,6 @@ mod ws_deflate;
 #[path = "tests_ws_message_cap.rs"]
 mod ws_message_cap;
 
-/// Secret marks cross the web legs (python
-/// `io_bridge/tests/test_secret_across_bridges.py`, web half).
-#[path = "tests_secret.rs"]
-mod secret_across;
-
 /// `_binary_path` as a list of steps across the web legs (python
 /// `io_bridge/tests/test_binary_path_steps.py`, web half).
 #[path = "tests_binary_steps.rs"]
@@ -3304,7 +3286,7 @@ async fn the_file_proxy_reads_on_until_a_truthy_eof() {
     kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     for item in [
-        json!({"type": "create_agent", "parent_id": "kernel", "handler_module": HANDLER_MODULE,
+        json!({"type": "create_agent", "parent_id": "kernel", "handler_module": HANDLER_MODULE, "callable_by": {"$children": ["watch"]},
                "id": "web_odd", "port": port,
                "can_call": {"$self": "*", "$parent": "*", "$children": "*",
                             "chunked": "*", "broken": "*"}}),
@@ -3409,7 +3391,7 @@ async fn deleting_one_web_agent_frees_only_its_own_listener() {
         .send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel",
-                   "handler_module": HANDLER_MODULE, "id": "web_s4b", "port": pb}),
+                   "handler_module": HANDLER_MODULE, "callable_by": {"$children": ["watch"]}, "can_call": {"$children": ["get_routes"]}, "id": "web_s4b", "port": pb}),
         )])
         .await
         .remove(0)

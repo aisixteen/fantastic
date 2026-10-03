@@ -191,15 +191,15 @@ struct KernelEmitTests {
                 id: "em_target", handlerModule: nil, parentId: "kernel_state",
                 meta: ["callable_by": ["em_open": ["emit"], "em_closed": ["emit"]]]))
         let inbox = kernel.ensureInbox("em_target")
-        await KernelTaskLocals.$currentSender.withValue(AgentId("em_closed")) {
+        await KernelTaskLocals.$sender.withValue(AgentId("em_closed")) {
             await kernel.emit("em_target", ["type": "poke", "n": 1])
         }
         #expect(inbox.tryTake() == nil, "an emit with no egress grant must be dropped")
-        await KernelTaskLocals.$currentSender.withValue(AgentId("em_open")) {
+        await KernelTaskLocals.$sender.withValue(AgentId("em_open")) {
             await kernel.emit("em_target", ["type": "poke", "n": 2])
         }
         #expect(inbox.tryTake()?.payload == ["type": "poke", "n": 2])
-        await KernelTaskLocals.$currentSender.withValue(AgentId("em_target")) {
+        await KernelTaskLocals.$sender.withValue(AgentId("em_target")) {
             await kernel.emit("em_target", ["type": "self", "n": 3])
         }
         #expect(inbox.tryTake()?.payload["n"] == 3)
@@ -296,9 +296,9 @@ struct KernelSubscribeTests {
         let kernel = makeKernel()
         // Seed a real `ui` agent as a CHILD of the root: every verb is gated now
         // (reflect included), so only a PERMITTED send fires the state event whose
-        // sender attribution is under test. A child reflecting its parent is covered
-        // by the structural baseline on both ends — no explicit grant needed.
-        _ = await kernel.send([Item("kernel_state", ["type": "create_agent", "parent_id": "kernel_state", "handler_module": "echo.tools", "id": "ui"])])[0].result
+        // sender attribution is under test. Explicit grants on both ends.
+        _ = await kernel.send([Item("kernel_state", ["type": "create_agent", "parent_id": "kernel_state", "handler_module": "echo.tools", "id": "ui", "can_call": ["kernel_state": ["reflect"]]])])[0].result
+        kernel.update(AgentId("kernel_state"), ["callable_by": ["ui": ["reflect"]]])
         let cap = EventCapture()
         _ = kernel.subscribe(cap.handler())
         _ = await kernel.sendAs(
@@ -511,10 +511,12 @@ struct SystemVerbTests {
         }
         #expect(await create("kernel", "kv4_a")["id"].asString == "kv4_a")
         #expect(await create("kv4_a", "kv4_b")["id"].asString == "kv4_b")  // depth 2
+        kernel.update(AgentId("kv4_b"), ["can_call": ["$self": "*", "kernel_state": "*"]])
+        kernel.update(AgentId("kernel_state"), ["callable_by": ["kv4_b": "*"]])
         let inbox = kernel.ensureInbox("kv4_b")
         #expect(await create("kv4_b", "kv4_by_operator")["id"].asString == "kv4_by_operator")
-        // baseline only: placement under itself
-        let bySelf = await KernelTaskLocals.$currentSender.withValue(AgentId("kv4_b")) {
+        // explicit grants: the new agent sits under itself
+        let bySelf = await KernelTaskLocals.$sender.withValue(AgentId("kv4_b")) {
             await create("kv4_b", "kv4_by_self")
         }
         #expect(bySelf["id"].asString == "kv4_by_self", "\(bySelf)")

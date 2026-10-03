@@ -29,8 +29,7 @@ What is vLLM-specific here, and why each piece exists (measured by the
   through `key` — the record's `credentials` ref in a credential store
   (`ai_core/credentials.py`), never the environment or the record; a record with
   no `credentials` sends no header at all, so a local vLLM started without
-  `--api-key` keeps working. A 401 or 403 says to name `credentials`. Every
-  error text this provider raises has the key scrubbed out (`without_key`).
+  `--api-key` keeps working. A 401 or 403 says to name `credentials`.
 """
 
 from __future__ import annotations
@@ -44,7 +43,6 @@ from collections.abc import AsyncIterator
 
 import httpx
 from ai_core.core import THINK_CLOSE, THINK_OPEN
-from ai_core.credentials import without_key
 
 log = logging.getLogger(__name__)
 
@@ -345,10 +343,7 @@ class VllmProvider:
                 ) as resp,
             ):
                 if resp.status_code >= 400:
-                    # scrubbed BEFORE the cut, so a key the cut splits cannot survive
-                    detail = without_key(
-                        (await resp.aread()).decode("utf-8", "replace"), key
-                    )[:500]
+                    detail = (await resp.aread()).decode("utf-8", "replace")[:500]
                     why = (
                         " — the door wants a key: name it in `credentials` "
                         "({store, ref})"
@@ -419,15 +414,6 @@ class VllmProvider:
                 f"vllm_backend: {self._endpoint} dropped the stream mid-answer — "
                 "vLLM died or restarted; this turn is NOT complete"
             ) from e
-        except Exception as e:
-            # ANY other failure's text may quote the key (h11 quotes the header it
-            # refused): it leaves scrubbed, its chain cut so no traceback prints it.
-            shown = without_key(str(e), key)
-            if shown != str(e):
-                raise RuntimeError(
-                    f"vllm_backend: {type(e).__name__}: {shown}"
-                ) from None
-            raise
         if thinking:
             yield THINK_CLOSE
         if not saw_finish:

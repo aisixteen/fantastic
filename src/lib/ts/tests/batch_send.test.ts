@@ -134,7 +134,7 @@ test("a handler that answers with a truthy `error` settles errored, reply verbat
     vault: async (p) => (p["type"] === "open" ? { ok: true } : { error: "unknown verb", reason: "unhandled" }),
   });
   const [no, yes] = await k.send([
-    { target: "vault", payload: { type: "privileged" } },
+    { target: "vault", payload: { type: "seal" } },
     { target: "vault", payload: { type: "open" } },
   ]);
   assert.equal(no!.status, "errored");

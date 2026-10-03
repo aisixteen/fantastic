@@ -40,8 +40,7 @@ from io_bridge._base import Action, Decision, EgressRule, IngressRule, describe
 from io_bridge.channel import CredentialExtractor, EnvelopeExtractor
 from io_bridge.ingress_rules import resolve_ingress, unknown_ingress_refusal
 from io_bridge.egress_rules import resolve_egress
-from kernel import current_origin, current_secret, remote_caller_context
-from kernel._refusal import NOT_CONNECTED, UNAUTHORIZED, refusal
+from kernel._refusal import NOT_CONNECTED, refusal
 
 DEFAULT_FORWARD_TIMEOUT = 30.0
 
@@ -156,83 +155,9 @@ def _next_corr(st: _BridgeState) -> str:
     return f"{st.corr_prefix}-{st.corr_counter}"
 
 
-def _local_guid(kernel: Any) -> str | None:
-    root = getattr(getattr(kernel, "ctx", None), "root", None)
-    return (root.record.get("guid") if root is not None else None) or None
-
-
-def _check_caller(rec: dict, caller: Any) -> dict | None:
-    """INGRESS CHECK on a frame's qualified `caller`, before the kernel sees it.
-    Every inbound call names its sender as `<guid>|<agent id>`, and the guid must
-    be the ONE peer this leg is pinned to (`peer_guid` on the record): a peer
-    cannot pose as a third kernel's agent. No pin, no inbound call."""
-    if (
-        not isinstance(caller, str)
-        or caller.count("|") != 1
-        or not all(caller.split("|"))
-    ):
-        return refusal(
-            UNAUTHORIZED,
-            f"bridge: an inbound call must name its caller as `<guid>|<agent id>`; "
-            f"got {caller!r}",
-        )
-    pin = rec.get("peer_guid")
-    if not pin:
-        return refusal(
-            UNAUTHORIZED,
-            "bridge: this leg pins no peer, so it serves no inbound call",
-            hint="update_agent <this leg> peer_guid=<the peer kernel's guid> "
-            "(its root reflect shows `guid`)",
-        )
-    if caller.split("|")[0] != pin:
-        return refusal(
-            UNAUTHORIZED,
-            f"bridge: caller {caller!r} is not from the pinned peer {pin!r}",
-        )
-    return None
-
-
-def forwarded_secret(marks) -> list:
-    """The `forward` call's own `secret` marks, RE-ROOTED at the item the far
-    kernel dispatches — so both kernels mask the same values.
-
-    The local item is `{target: <bridge>, payload: {type: forward, target, payload:
-    <inner>}}`; the far item is `{target, payload: <inner>}`. A mark under the
-    inner payload drops ONE `payload` step, in the spelling it came in: dotted
-    `payload.payload.<f…>` → `payload.<f…>` (and `payload.payload` → `payload`),
-    an array `["payload", "payload", <step>…]` → `["payload", <step>…]` (and
-    `["payload", "payload"]` → `["payload"]`) — a mark left naming no field is
-    the far kernel's refusal like any bad mark. A `result` mark (`result[.<f…>]`,
-    `["result", <step>…]`) is the same reply on both kernels, carried as is. A mark
-    on the forward verb's own fields (`payload.target`, `["payload", "timeout"]`)
-    names nothing on the far item and stays on this kernel's record only. The marks
-    were already checked by this kernel; the far kernel's own `secret` check judges
-    the re-rooted ones before it dispatches anything."""
-    out: list = []
-    for p in marks:
-        if isinstance(p, list):
-            if p[:1] == ["result"]:
-                out.append(list(p))
-            elif p[:2] == ["payload", "payload"]:
-                out.append(p[1:])
-        elif p == "result" or p.startswith("result."):
-            out.append(p)
-        elif p == "payload.payload" or p.startswith("payload.payload."):
-            out.append(p[len("payload.") :])
-    return out
-
-
 def validate_meta(meta: dict, record: dict) -> str | None:
-    """Write-time check of `peer_guid`: one kernel guid (a non-empty string, no
-    `|`), then the leg's `ingress_rule` (`unknown_ingress_refusal`). Re-exported
-    by every bridge bundle. (This kernel's OWN guid is refused where the kernel
-    is in hand — at serve.)"""
-    pin = meta.get("peer_guid")
-    if pin is not None and (not isinstance(pin, str) or not pin or "|" in pin):
-        return (
-            f"bridge: peer_guid must be one kernel guid (a non-empty string "
-            f"without `|`); got {pin!r}"
-        )
+    """Write-time check of the leg's `ingress_rule` (`unknown_ingress_refusal`).
+    Re-exported by every bridge bundle."""
     return unknown_ingress_refusal(meta)
 
 
@@ -247,8 +172,10 @@ async def _serve_inbound_call(
     round trip deadlocks until the 30s forward timeout. One task per call keeps
     the loop free to read; `st.pending_calls` holds them so teardown can cancel.
 
-    The task inherits the read loop's context, so `_current_sender` is still the
-    BRIDGE AGENT — an inbound frame is gated as the leg, never as the operator.
+    The read loop is a task this leg's `boot` spawned, so this task is the
+    leg's too: the inbound call is sent AS THE LEG and gated as the leg — its
+    `can_call` and the target's `callable_by` decide. Whoever called on the other
+    kernel is that kernel's business; here the caller is the leg.
     """
     target = frame.get("target")
     payload = frame.get("payload") or {}
@@ -281,27 +208,7 @@ async def _serve_inbound_call(
         fid = frame.get("id")
         if isinstance(fid, str) and fid:
             item["id"] = fid
-        # SECRET MARKS cross the bridge verbatim (`kernel/_secret`): this kernel
-        # records the call as shown — its call/settle rows, ledger, state stream —
-        # and its own check refuses a malformed mark before anything dispatches.
-        if "secret" in frame:
-            item["secret"] = frame["secret"]
-        caller = frame.get("caller")
-        bad_caller = _check_caller(rec, caller)
-        if bad_caller is None and caller.split("|")[0] == _local_guid(kernel):
-            bad_caller = refusal(
-                UNAUTHORIZED,
-                "bridge: this leg's peer_guid is THIS kernel's own guid — refused",
-                hint="pin the PEER kernel's guid",
-            )
-        if bad_caller is not None:
-            reply = bad_caller
-        else:
-            # THE QUALIFIED CALLER rides into the dispatch: the gate checks the
-            # target's `callable_by` against `<peer guid>|<remote agent>` (never
-            # the leg), and a memory store keys what it writes by it.
-            with remote_caller_context(kernel.id, caller):
-                reply = (await kernel.send([item]))[0]["result"]
+        reply = (await kernel.send([item]))[0]["result"]
     try:
         await transport.send({"type": "reply", "id": frame.get("id"), "data": reply})
     except ConnectionClosed:
@@ -311,9 +218,9 @@ async def _serve_inbound_call(
 async def _read_loop(id: str, kernel: Any) -> None:
     """Long-lived consumer of the transport. Frame shapes:
 
-      - inbound `call` — `{type:'call', id, target, payload, caller, secret?}`:
-        dispatch via `kernel.send([{"target", "payload", "id", "secret"}])` (the
-        frame's `secret` marks carried verbatim), reply `{type:'reply', id, data}`. (For a
+      - inbound `call` — `{type:'call', id, target, payload}`: dispatch via
+        `kernel.send([{"target", "payload", "id"}])` AS THE LEG, reply
+        `{type:'reply', id, data}`. (For a
         pure-client WS bridge this never fires — its peer is `web_ws`; for paired
         transports — MemoryTransport tests, the relay — it carries the callee role.)
       - inbound `reply` — resolve the pending Future for `id`.
@@ -487,7 +394,7 @@ async def boot(
 
 
 async def _forward(id, payload, kernel):
-    """args: target:str (req — id on the REMOTE kernel) + payload:dict (req — the call to run there; payload is ITSELF a verb frame and MUST carry its own "type") + timeout:float? (default 30s). Example: {"type":"forward","target":"src","payload":{"type":"read_stream","path":"data.bin","offset":0}}. Ships a raw `{type:'call', id, target, payload, caller, secret?}` frame over the transport, awaits the matching reply, returns the unwrapped data. SECRET values: mark them on YOUR call to this verb — `payload.payload.<field>` / `result[.<field>]`, or as arrays of steps `["payload","payload",<key>…]` / `["result",…]` (a key holding a dot) — and they ride as `payload.<field>` / `result[.<field>]` (`["payload",<key>…]` / `["result",…]`), so both kernels record `<secret>`. Local→local stays direct kernel.send (this verb is only for cross-kernel). Multi-hop loop detection is the caller's responsibility — the bridge ships whatever it's given."""
+    """args: target:str (req — id on the REMOTE kernel) + payload:dict (req — the call to run there; payload is ITSELF a verb frame and MUST carry its own "type") + timeout:float? (default 30s). Example: {"type":"forward","target":"src","payload":{"type":"read_stream","path":"data.bin","offset":0}}. Ships a raw `{type:'call', id, target, payload}` frame over the transport, awaits the matching reply, returns the unwrapped data. The far kernel judges the call as the leg that serves it there. Local→local stays direct kernel.send (this verb is only for cross-kernel). Multi-hop loop detection is the caller's responsibility — the bridge ships whatever it's given."""
     target = payload.get("target")
     inner = payload.get("payload")
     if not target or not isinstance(inner, dict):
@@ -511,16 +418,6 @@ async def _forward(id, payload, kernel):
     st.pending[corr] = fut
 
     frame = {"type": "call", "id": corr, "target": target, "payload": inner}
-    # WHO IS CALLING, QUALIFIED: `<this kernel's guid>|<the agent that asked>`
-    # (`kernel` for the operator). The far side keys store rows by it.
-    guid = _local_guid(kernel)
-    if guid:
-        frame["caller"] = f"{guid}|{current_origin() or 'kernel'}"
-    # The caller's `secret` marks on THIS call, re-rooted at the forwarded item,
-    # so the far kernel masks its records of the call as this one does.
-    secret = forwarded_secret(current_secret())
-    if secret:
-        frame["secret"] = secret
     # Stamp this leg's EGRESS credential on the envelope via the shared decorator.
     frame = stamp_egress(egress, frame)
     try:
@@ -619,9 +516,6 @@ def make_verbs(
             # so a bridge never reports a rule its gate resolves differently (an
             # `auth: allow_all_ingress` stem read as open while the gate denied).
             **describe(rec),
-            # The ONE peer kernel whose agents this leg serves (`<peer_guid>|<agent>`);
-            # null = no pin, no inbound call.
-            "peer_guid": rec.get("peer_guid"),
         }
         out.update(reflect_fields(rec, st))
         out["verbs"] = {

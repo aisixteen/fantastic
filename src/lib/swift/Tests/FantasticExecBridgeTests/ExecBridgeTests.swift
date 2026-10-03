@@ -14,7 +14,7 @@
 
     import FantasticIoBridge
     import FantasticJSON
-    import FantasticKernel
+    @testable import FantasticKernel
     import Foundation
     import OrderedCollections
     import Testing
@@ -411,9 +411,12 @@
         var fds: [Int32] = [0, 0]
         precondition(socketpair(AF_UNIX, SOCK_STREAM, 0, &fds) == 0, "socketpair")
         let relay = Relay(fd: fds[0], owner: owner, jobId: jobId, kernel: kernel)
-        // A4.34 — the relay IS a kernel task; drive it the way `start` does.
-        _ = kernel.spawnTask(agent: owner, verb: "relay") { [relay] in
-            await relay.run(taskId: KernelTaskLocals.currentTask)
+        // A4.34 — the relay IS a kernel task; drive it the way `start` does:
+        // spawned from the owner's own handler, so it runs AS the owner.
+        _ = kernel.asSelfNow(owner) {
+            kernel.spawnTask(agent: owner, verb: "relay") { [relay] in
+                await relay.run(taskId: KernelTaskLocals.currentTask)
+            }
         }
         _ = fcntl(fds[1], F_SETFL, O_NONBLOCK)  // so a test can never block on read
         return (fds[1], relay)
@@ -852,6 +855,7 @@
             guard let py = py3() else { return }
             let kernel = freshKernel()
             let a = await createPy(kernel, id: "dur_send")
+            wire(kernel, "dur_send", "kernel_state", ["reflect"])
             let stream = kernel.ensureInbox(a)
             _ = await kernel.send([Item(a, pyStart(
                 py, "r = kernel.send('kernel_state', {'type': 'reflect'})\nprint('GOT', r.get('id'))",
@@ -878,12 +882,13 @@
         /// gated by its grants — a sibling the runner holds no `can_call` for refuses
         /// (`unauthorized`). Before 2026-09-01 the relay forwarded with NO sender —
         /// operator, ungated — and a spawned program could reach any agent
-        /// (measured live: E30 subai, "privileged as the root").
+        /// (measured live: E30 subai, "as the root").
         @Test func theProgramIsGatedAsItsRunnerNotAsTheOperator() async throws {
             guard let py = py3() else { return }
             let kernel = freshKernel()
             let a = await createPy(kernel, id: "dur_gate")
             _ = await createPy(kernel, id: "sib")  // sibling: no edge from `a`
+            wire(kernel, "dur_gate", "kernel_state", ["reflect"])  // the one granted edge
             let stream = kernel.ensureInbox(a)
             _ = await kernel.send([Item(a, pyStart(
                 py,
@@ -893,7 +898,7 @@
             let events = await drainUntil(stream) { $0["type"].asString == "job_done" }
             let out = events.first { $0["type"].asString == "job_done" }?["stdout"].asString ?? ""
             #expect(out.contains("SIB unauthorized"), "the sibling must refuse: \(out)")
-            #expect(out.contains("CORE kernel_state"), "the parent (baseline edge) still answers: \(out)")
+            #expect(out.contains("CORE kernel_state"), "the granted edge still answers: \(out)")
         }
 
         /// PROGRESS IS LIVE. The pump used to buffer both pipes to EOF and emit every
@@ -1884,7 +1889,7 @@
     }
 
 
-    // ─── secret marks on the guest wire ──────────────────────────────
+    // ─── the guest wire, read and written by hand ───────────────────
 
     /// Read exactly `n` bytes off a blocking fd, BOUNDED by `poll`: `nil` on EOF
     /// or after `timeout` seconds.
@@ -1928,114 +1933,6 @@
                 if w <= 0 { return }
                 off += w
             }
-        }
-    }
-
-    @Suite("exec_bridge guest wire — secret marks")
-    struct ExecBridgeGuestSecretTests {
-
-        /// `kernel.send(target, payload=None, secret=None)`: the frame carries
-        /// `"secret": [...]` exactly as given, and no `secret` key at all when the
-        /// program marks nothing (None or an empty list). Python
-        /// `test_the_connector_puts_secret_on_the_frame_only_when_given`.
-        @Test func theConnectorPutsSecretOnTheFrameOnlyWhenGiven() async throws {
-            guard let py = py3() else { print("skipping: no python3"); return }
-            let code = CONNECTOR_SRC + """
-                kernel.send('x', {'type': 'y', 'k': 'v'}, secret=['payload.k', 'result'])
-                kernel.send('x', {'type': 'y'})
-                kernel.send('x', {'type': 'y'}, secret=[])
-                kernel.send('x', {'type': 'y', 'a.b': 'v'}, secret=[['payload', 'a.b'], 'result', ['result', 'items', 0]])
-                print('DONE')
-
-                """
-            let s = try Spawn.job(argv: [py, "-u", "-c", code], selfId: "runner", env: [:], cwd: ".")
-            defer { close(s.ctrlFd) }
-            var frames: [JSON] = []
-            for _ in 0..<4 {
-                let (kind, rest) = try #require(readGuestFrame(s.ctrlFd), "a frame from the program")
-                #expect(kind == UInt8(ascii: "T"))
-                let m = try JSON.parseStrict(String(decoding: rest, as: UTF8.self))
-                frames.append(m)
-                writeGuestFrame(s.ctrlFd, ["op": "reply", "rid": m["rid"], "data": .object([:])])
-            }
-            let out = String(decoding: s.stdout.readDataToEndOfFile(), as: UTF8.self)
-            _ = await s.child.wait()
-            #expect(out.contains("DONE"), "\(out)")
-            #expect(
-                frames == [
-                    [
-                        "op": "send", "rid": "1", "target": "x", "payload": ["type": "y", "k": "v"],
-                        "secret": ["payload.k", "result"],
-                    ],
-                    ["op": "send", "rid": "2", "target": "x", "payload": ["type": "y"]],
-                    ["op": "send", "rid": "3", "target": "x", "payload": ["type": "y"]],
-                    [
-                        "op": "send", "rid": "4", "target": "x", "payload": ["type": "y", "a.b": "v"],
-                        "secret": [["payload", "a.b"], "result", ["result", "items", 0]],
-                    ],
-                ], "\(frames.map { $0.serialize() })")
-        }
-
-        /// The relay copies `secret` onto the item as sent: the kernel checks it (a
-        /// mark naming nothing is ITS refusal, in the reply) and records the call
-        /// masked. Python `test_the_relay_puts_the_frames_secret_on_the_dispatched_item`.
-        @Test func theRelayPutsTheFramesSecretOnTheDispatchedItem() async throws {
-            let kernel = freshKernel()
-            let runner = await createPy(kernel, id: "runner", meta: ["can_call": ["probe": "*"]])
-            _ = await createPy(kernel, id: "probe", meta: ["callable_by": ["runner": "*"]])
-            let (fd, relay) = wire(kernel, owner: runner, jobId: TaskId(9101))
-            defer {
-                relay.stop()
-                close(fd)
-            }
-            wireWrite(
-                fd,
-                [
-                    "op": "send", "rid": "1", "target": "probe",
-                    "payload": ["type": "status", "note": "hush-0451"], "secret": ["payload.note"],
-                ])
-            let rep = try #require(await wireRead(fd), "no reply came back")
-            #expect(rep["op"] == "reply" && rep["rid"] == "1", "\(rep.serialize())")
-            #expect(rep["data"].asObject?["jobs"] != nil, "\(rep.serialize())")
-            let rows = kernel.rows.all().filter {
-                $0["kind"]?.asString == "call" && $0["agent"]?.asString == "probe"
-                    && $0["caller"]?.asString == "runner"
-            }
-            #expect(rows.map { $0["secret"] ?? .null } == [["payload.note"]], "\(rows)")
-            #expect(rows.first?["payload"]?["note"] == .string(Secret.placeholder), "\(rows)")
-            #expect(
-                !JSON.array(kernel.rows.all().map { JSON.object($0) }).serialize()
-                    .contains("hush-0451"))
-            wireWrite(
-                fd,
-                [
-                    "op": "send", "rid": "2", "target": "probe", "payload": ["type": "status"],
-                    "secret": ["payload.nope"],
-                ])
-            let bad = try #require(await wireRead(fd), "no reply came back")
-            #expect(bad["rid"] == "2", "\(bad.serialize())")
-            #expect(
-                bad["data"]["reason"] == "bad_arg" && bad["data"]["arg"] == "secret",
-                "\(bad.serialize())")
-            // an ARRAY mark rides as given: the literal key "a.b" is masked
-            wireWrite(
-                fd,
-                [
-                    "op": "send", "rid": "3", "target": "probe",
-                    "payload": ["type": "status", "a.b": "hush-dotted-0452"],
-                    "secret": [["payload", "a.b"]],
-                ])
-            let arr = try #require(await wireRead(fd), "no reply came back")
-            #expect(
-                arr["rid"] == "3" && arr["data"].asObject?["jobs"] != nil, "\(arr.serialize())")
-            let dotted = kernel.rows.all().filter {
-                $0["kind"]?.asString == "call" && $0["secret"] == [["payload", "a.b"]]
-            }
-            #expect(dotted.count == 1, "\(dotted)")
-            #expect(dotted.first?["payload"]?["a.b"] == .string(Secret.placeholder), "\(dotted)")
-            #expect(
-                !JSON.array(kernel.rows.all().map { JSON.object($0) }).serialize()
-                    .contains("hush-dotted-0452"))
         }
     }
 

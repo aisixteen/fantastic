@@ -10,8 +10,12 @@
 // settle row landed leaves the ledger's RAM table: `ledger`, dead letters,
 // `ack_deadletter` and named-call dedup READ THE STORE back.
 //
-// Every piece of state here is shared by reference: a handler's scoped kernel
-// view (`Object.create(kernel)`) reaches THIS object through its prototype, so a
+// Every read and write of the store is KERNEL BOOKKEEPING (`Kernel.bookkeeping`):
+// the kernel runs the store's handler directly — not a send, so it mints no call
+// or settle row of its own, whoever's dispatch asked for it.
+//
+// Every piece of state here is shared by reference: a handler's kernel view
+// (`Object.create(kernel)`) reaches THIS object through its prototype, so a
 // counter bumped through any view is the one counter. (Assigning a scalar on a
 // view would shadow it on that view alone — which is why none lives on Kernel.)
 
@@ -22,8 +26,6 @@ import { DEAD_STATUSES } from "./outcome.ts";
 import type { Exec } from "./ledger.ts";
 import { storeSafe, storedOutcome } from "./ledger.ts";
 import { nowSeconds, timers } from "./timers.ts";
-import { pyTruthy } from "./pyjson.ts";
-import { replayRefused, shownOutcome } from "./secret.ts";
 
 /** One execution row, as RAM and the store hold it. */
 export type Row = Payload & { id: number; kind: string };
@@ -49,7 +51,8 @@ function warn(msg: string): void {
 }
 
 export class KernelStore {
-  /** The BASE kernel (never a scoped view): the store's own sends go out from it. */
+  /** The BASE kernel (never an agent's view): the store is read and written
+   *  through its bookkeeping. */
   private readonly k: Kernel;
 
   // ── THE ONE COUNTER ──────────────────────────────────────────────────
@@ -93,13 +96,9 @@ export class KernelStore {
   private flushChain: Promise<unknown> = Promise.resolve();
   /** THE FLUSHER'S TASK (python `spawn_task(root, "flush_executions",
    *  keepalive=True)`): a row in the task table from `kernel_start` on, so `ps`
-   *  shows it — a kernel service task, which `cancel` refuses (`isService`);
-   *  every write it makes parents to it. null = not started, or stopped. */
+   *  shows it — a kernel service task, which `cancel` refuses (`isService`).
+   *  null = not started, or stopped. */
   flusherTask: number | null = null;
-  // The flush rows this kernel wrote (by id), and the calls that carried them:
-  // those calls' own rows are ALREADY RECORDED — the flush row is their record.
-  private readonly ownFlushes = new Set<number>();
-  private readonly ownFlushCalls = new Map<number, number>(); // call id → flush id
   /** How many `call` rows the store holds for the kernel (re-read at every
    *  prune) — what the retention window is measured against. */
   storedCalls = 0;
@@ -227,13 +226,6 @@ export class KernelStore {
   settle(e: Exec, out: Outcome): void {
     if (e.settled) return;
     this.k.ledger.settle(e, out);
-    // A call with `secret` paths is RECORDED as shown: its result fields and
-    // every secret value in its text → placeholder. The caller already holds
-    // the real outcome; the ledger reads back `shownOut`.
-    if (e.secret !== null) {
-      out = shownOutcome(out, e.secret);
-      e.shownOut = out;
-    }
     const call = this.rows.get(e.id);
     if (call !== undefined) {
       // the live call row, while it is still in RAM
@@ -285,7 +277,7 @@ export class KernelStore {
     const tid = this.flusherTask;
     this.flushTimer = timers().setTimeout(() => {
       this.flushTimer = null;
-      if (this.flusherTask === tid) void this.flush(this.k.taskView(tid));
+      if (this.flusherTask === tid) void this.flush(tid);
     }, FLUSH_DEBOUNCE_MS);
   }
 
@@ -296,85 +288,34 @@ export class KernelStore {
   }
 
   /**
-   * A row the kernel's own flush produced — ALREADY RECORDED by its flush row.
-   *
-   * THE LOOP a flush must not create: a flush is a `send` to the store, so it
-   * mints a `call` row and a `settle` row like every send; writing those would
-   * mint two more on the next flush, forever. The flush therefore DESCRIBES
-   * ITSELF: it mints one id and appends a `flush` row inside the very batch it
-   * writes. The call that carried that batch names the flush row in its payload
-   * — the store already holds the record of this execution — so its call and
-   * settle rows are not written again. This is dedup BY EXECUTION (the store
-   * proves it), not a blind spot: every OTHER call to the store, the kernel's
-   * own reads included, is recorded like any call.
-   *
-   * Rows are walked in insertion order, so a flush's call row is always seen
-   * (and remembered) before its settle row.
-   */
-  private isOwnFlushRow(row: Row): boolean {
-    if (row.kind === "call" && row["agent"] === this.storeId) {
-      const payload = row["payload"];
-      if (payload !== null && typeof payload === "object" && !Array.isArray(payload) &&
-        payload["type"] === "append" && Array.isArray(payload["rows"])) {
-        for (const r of payload["rows"]) {
-          if (r !== null && typeof r === "object" && !Array.isArray(r) &&
-            r["kind"] === "flush" && typeof r["id"] === "number" && this.ownFlushes.has(r["id"])) {
-            this.ownFlushCalls.set(row.id, r["id"]);
-            return true;
-          }
-        }
-      }
-    }
-    return row.kind === "settle" && this.ownFlushCalls.has(row["parent"] as number);
-  }
-
-  /**
    * Write every execution row still in RAM to the memory store, as ONE batch
    * closed by a self-describing `flush` row; on success the rows leave RAM and a
    * settled execution whose settle row landed leaves the ledger's RAM table (the
    * store is its record now). All or nothing: a refused batch stays in RAM for
-   * the next flush, and the refused flush is itself a dead letter.
+   * the next flush, and the refusal is said on the console.
    *
-   * EDGE (recorded, not resolved): the write can LAND while its reply is lost.
-   * The store then holds the flush row as `done` while RAM saw the flush call
-   * fail — that call is a dead letter in RAM (the ledger shows it,
-   * `on_deadletter` announced it), and its own rows are not re-flushed because
-   * the store already recorded them. RAM and store disagree about THAT flush
-   * only; the admin reconciles.
+   * The write is KERNEL BOOKKEEPING: the kernel runs the store's `append`
+   * directly — not a send, so the flush mints no call or settle row of its own,
+   * and the `flush` row is its whole record.
    *
    * One flush at a time (a promise chain is the lock); the retention prune runs
-   * after it, outside the chain, as in python. `via` is the kernel view whose
-   * task the store calls parent to: the flusher's own task, or none for the
-   * stop's final flush.
+   * after it, outside the chain, as in python. `task` is the task the store's
+   * handler runs inside: the flusher's own, or none for a direct flush.
    */
-  async flush(via: Kernel = this.k): Promise<Payload> {
-    const run = this.flushChain.then(() => this.flushOnce(via));
+  async flush(task: number | null = null): Promise<Payload> {
+    const run = this.flushChain.then(() => this.flushOnce(task));
     this.flushChain = run.catch(() => undefined);
     const out = await run;
     // Only after a batch LANDED (python's early returns skip the prune too).
     const cap = this.k.ledger.cap;
     if (cap !== null && out["flush"] !== undefined && this.storedCalls > cap) {
-      out["pruned"] = await this.prune(via);
+      out["pruned"] = await this.prune(task);
     }
     return out;
   }
 
-  private async flushOnce(via: Kernel): Promise<Payload> {
+  private async flushOnce(task: number | null): Promise<Payload> {
     if (this.storeId === null) return { flushed: 0 };
-    const own = [...this.rows.values()].filter((r) => this.isOwnFlushRow(r));
-    for (const r of own) {
-      this.rows.delete(r.id);
-      if (r.kind === "settle") {
-        // The flush call ended: its bookkeeping goes. A flush that did not
-        // complete stays in the ledger — a dead letter in RAM.
-        const parent = r["parent"] as number;
-        const fid = this.ownFlushCalls.get(parent);
-        this.ownFlushCalls.delete(parent);
-        if (fid !== undefined) this.ownFlushes.delete(fid);
-        const oc = r["outcome"] as Payload | undefined;
-        if (oc?.["status"] === "completed") this.k.ledger.forget(parent);
-      }
-    }
     const ids = [...this.rows.keys()].sort((a, b) => a - b);
     if (ids.length === 0) return { flushed: 0 };
     // Nothing of this flush is published — its own id mints (and an id-block
@@ -385,13 +326,10 @@ export class KernelStore {
     let out;
     try {
       fid = this.mintId();
-      this.ownFlushes.add(fid);
       kinds = new Map(ids.map((i) => [i, this.rows.get(i)!.kind]));
       const batch: Json[] = ids.map((i) => storeSafe(this.rows.get(i)));
       batch.push({ id: fid, kind: "flush", covers: ids, status: "done", ts: nowSeconds() });
-      out = (await via.kernelView().send([
-        { target: this.storeId, payload: { type: "append", rows: batch } },
-      ]))[0]!;
+      out = await this.k.bookkeeping(this.storeId, { type: "append", rows: batch }, { task });
     } finally {
       this.flushing--;
     }
@@ -424,8 +362,15 @@ export class KernelStore {
    * never pruned. HYSTERESIS: down to 90% of the window, so a full store is not
    * re-read and re-pruned on every flush. Returns how many executions went.
    */
-  async prune(via: Kernel = this.k): Promise<number> {
-    const rows = await this.read({}, via);
+  async prune(task: number | null = null): Promise<number> {
+    let rows: Row[];
+    try {
+      rows = await this.read({}, task);
+    } catch (e) {
+      // never thrown into the flush loop: a store read that fails prunes nothing
+      warn(`  [kernel] prune of the kernel's store failed: ${e instanceof Error ? e.message : String(e)}`);
+      return 0;
+    }
     const calls = rows.filter((r) => r.kind === "call" && !r["internal"]);
     const settles = new Map<unknown, Row>();
     const acked = new Set<unknown>();
@@ -469,9 +414,11 @@ export class KernelStore {
         doomed.add(r.id);
       }
     }
-    const out = (await via.kernelView().send([
-      { target: this.storeId as string, payload: { type: "prune", ids: [...doomed].sort((a, b) => a - b) } },
-    ]))[0]!.result;
+    const out = (await this.k.bookkeeping(
+      this.storeId as string,
+      { type: "prune", ids: [...doomed].sort((a, b) => a - b) },
+      { task },
+    )).result;
     if (isErr(out)) {
       warn(`  [kernel] prune of the kernel's store failed: ${JSON.stringify(out)}`);
       return 0;
@@ -480,18 +427,17 @@ export class KernelStore {
     return gone.size;
   }
 
-  /** Every row of the kernel's own key matching `payload`, all pages. A store
-   *  that refuses or is unreachable fails fast. The reads are calls made inside
-   *  `via`'s task (a `ledger` verb's, a send's recall), parented to it. */
-  async read(payload: Payload, via: Kernel = this.k): Promise<Row[]> {
+  /** Every row of the kernel's own key matching `payload`, all pages — read as
+   *  kernel bookkeeping (no caller: the store answers the kernel's key), inside
+   *  `task` (a `ledger` verb's, a send's recall). A store that refuses or is
+   *  unreachable fails fast. */
+  async read(payload: Payload, task: number | null = null): Promise<Row[]> {
     const out: Row[] = [];
     let after: Json | undefined;
     for (;;) {
       const q: Payload = { type: "read", ...payload, limit: 1000 };
       if (after !== undefined && after !== null) q["after"] = after;
-      const res = (await via.kernelView().send([
-        { target: this.storeId as string, payload: q },
-      ]))[0]!.result;
+      const res = (await this.k.bookkeeping(this.storeId as string, q, { task })).result;
       if (res === null || typeof res !== "object" || Array.isArray(res) || isErr(res)) {
         throw new Error(`kernel: memory store read failed: ${JSON.stringify(res)}`);
       }
@@ -507,11 +453,11 @@ export class KernelStore {
    * entry carries its originator as `_caller` for the verb to scope by. The SAME
    * outcome shape flushed or not: what the settle row keeps.
    */
-  async ledgerEntries(via: Kernel = this.k): Promise<Entry[]> {
+  async ledgerEntries(task: number | null = null): Promise<Entry[]> {
     const entries = new Map<number, Entry>();
     const acked = new Set<number>();
     let rows: Row[] = [];
-    if (this.storeId !== null) rows = await this.read({ kinds: ["call", "settle", "ack"] }, via);
+    if (this.storeId !== null) rows = await this.read({ kinds: ["call", "settle", "ack"] }, task);
     rows = rows.concat(
       [...this.rows.values()].filter((r) => r.kind === "call" || r.kind === "settle" || r.kind === "ack"),
     );
@@ -553,8 +499,7 @@ export class KernelStore {
       };
       if (x.name !== null) e["name"] = x.name;
       if (x.settled && x.outcome !== null) {
-        // a call with `secret` paths reads back AS SHOWN (`settle`)
-        const res = x.shownOut ?? x.outcome;
+        const res = x.outcome;
         e["status"] = res.status;
         e["outcome"] = {
           pid: eid,
@@ -580,10 +525,9 @@ export class KernelStore {
    * NAME not held in RAM, or an int id not in the table. A settled one comes back
    * holding its recorded outcome (dedup survives the flush and a restart); one
    * with no settle row was in flight when the process stopped and rebuilds
-   * nothing — re-sending runs it. One whose call row carries `secret` comes back
-   * FAILED with `replayRefused`, never with its placeholders.
+   * nothing — re-sending runs it.
    */
-  async recall(items: readonly unknown[], via: Kernel = this.k): Promise<void> {
+  async recall(items: readonly unknown[], task: number | null = null): Promise<void> {
     const wanted: ["name" | "id", string | number][] = [];
     const ledger = this.k.ledger;
     for (const it of items) {
@@ -597,34 +541,27 @@ export class KernelStore {
         kind === "name"
           ? { kinds: ["call"], match: { name: key } }
           : { kinds: ["call"], ids: [key] },
-        via,
+        task,
       );
       const call = calls[calls.length - 1];
       if (call === undefined) continue;
-      const settles = await this.read({ kinds: ["settle"], match: { parent: call.id } }, via);
+      const settles = await this.read({ kinds: ["settle"], match: { parent: call.id } }, task);
       const st = settles[settles.length - 1];
       if (st === undefined) continue;
       const oc = (st["outcome"] as Payload | undefined) ?? {};
       const attempts =
         (st["attempts"] as number | undefined) || (call["attempts"] as number | undefined) || 1;
-      let out: Outcome;
-      if (pyTruthy(call["secret"])) {
-        // ITS RECORD HOLDS PLACEHOLDERS: answering a re-send from it would hand
-        // back `<secret>` as if it were the value. Refused, loud.
-        out = { pid: call.id, status: "failed", result: replayRefused(key), attempts };
-      } else {
-        // A NAMED call's settle kept its result; an unnamed one (joined by its
-        // int id) kept only what `storedOutcome` keeps — and says so.
-        const result: Json = "result" in oc
-          ? (oc["result"] as Json)
-          : Object.fromEntries(Object.entries(oc).filter(([k]) => k !== "status"));
-        out = {
-          pid: call.id,
-          status: oc["status"] as Outcome["status"],
-          result,
-          attempts,
-        };
-      }
+      // A NAMED call's settle kept its result; an unnamed one (joined by its
+      // int id) kept only what `storedOutcome` keeps — and says so.
+      const result: Json = "result" in oc
+        ? (oc["result"] as Json)
+        : Object.fromEntries(Object.entries(oc).filter(([k]) => k !== "status"));
+      const out: Outcome = {
+        pid: call.id,
+        status: oc["status"] as Outcome["status"],
+        result,
+        attempts,
+      };
       const payload = call["payload"];
       ledger.put({
         id: call.id,
@@ -640,8 +577,6 @@ export class KernelStore {
         settled: true,
         outcome: out,
         acked: false,
-        secret: null,
-        shownOut: null,
         promise: Promise.resolve(out),
         resolve: () => undefined,
       });

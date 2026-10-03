@@ -360,39 +360,4 @@ struct BridgeEnginePinTests {
         #expect(late.1 == 0)
         await teardown(kernel)
     }
-
-    /// A leg pinned to THIS kernel's own guid refuses every inbound call — the
-    /// refusal travels back to the caller as the reply's `data`.
-    @Test func aLegPinnedToItsOwnKernelRefusesInboundCalls() async throws {
-        let (kernel, bundle) = await guidLegKernel([
-            "peer_guid": "g1", "ingress_rule": "allow_all_ingress",
-        ])
-        let call: JSON = .object([
-            "type": .string("event"), "source": .string("B"),
-            "payload": .object([
-                "type": .string("call"), "id": .string("c1"), "target": .string("kernel_state"),
-                "payload": .object(["type": .string("reflect")]), "caller": .string("g1|someone"),
-            ]),
-        ])
-        let wire = DirectoryWire(script: [.text(call.serialize())])
-        await boot(kernel, bundle, wire)
-        var reply: JSON? = nil
-        let end = Date().addingTimeInterval(3)
-        while reply == nil && Date() < end {
-            for s in await wire.sent {
-                if let env = try? JSON.parse(s), env["payload"]["type"].asString == "reply" {
-                    reply = env
-                }
-            }
-            if reply == nil { try await Task.sleep(nanoseconds: 20_000_000) }
-        }
-        #expect(
-            reply?["type"].asString == "send" && reply?["target"].asString == "B",
-            "\(String(describing: reply))")
-        #expect(
-            reply?["payload"].serialize()
-                == #"{"type":"reply","id":"c1","data":{"error":"bridge: this leg's peer_guid is THIS kernel's own guid — refused","#
-                + #""reason":"unauthorized","hint":"pin the PEER kernel's guid"}}"#)
-        await teardown(kernel)
-    }
 }

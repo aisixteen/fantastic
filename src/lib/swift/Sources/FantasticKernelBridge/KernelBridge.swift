@@ -54,15 +54,10 @@ public enum BridgeFamily: Sendable {
     }
 
     /// Python's reflect `verbs` — the first doc line of each, verbatim, in order.
-    /// Each family's `forward` is its bundle's sealed wrapper, whose doc is the
-    /// engine's plus `BridgeDocs.relaySealedForward` / `BridgeDocs.wsSealedForward`.
     var verbs: JSON {
         var out: OrderedDictionary<String, JSON> = [:]
         for name in verbNames {
-            var doc = BridgeDocs.first[name] ?? ""
-            if self == .relay && name == "forward" { doc += BridgeDocs.relaySealedForward }
-            if self == .ws && name == "forward" { doc += BridgeDocs.wsSealedForward }
-            out[name] = .string(doc)
+            out[name] = .string(BridgeDocs.first[name] ?? "")
         }
         return .object(out)
     }
@@ -78,7 +73,7 @@ enum BridgeDocs {
         "reconnect":
             "No args. Teardown + boot — explicit because we don't auto-reconnect on transport failure (keeps real network problems visible to operators / telemetry).",
         "forward":
-            "args: target:str (req — id on the REMOTE kernel) + payload:dict (req — the call to run there; payload is ITSELF a verb frame and MUST carry its own \"type\") + timeout:float? (default 30s). Example: {\"type\":\"forward\",\"target\":\"src\",\"payload\":{\"type\":\"read_stream\",\"path\":\"data.bin\",\"offset\":0}}. Ships a raw `{type:'call', id, target, payload, caller, secret?}` frame over the transport, awaits the matching reply, returns the unwrapped data. SECRET values: mark them on YOUR call to this verb — `payload.payload.<field>` / `result[.<field>]`, or as arrays of steps `[\"payload\",\"payload\",<key>…]` / `[\"result\",…]` (a key holding a dot) — and they ride as `payload.<field>` / `result[.<field>]` (`[\"payload\",<key>…]` / `[\"result\",…]`), so both kernels record `<secret>`. Local→local stays direct kernel.send (this verb is only for cross-kernel). Multi-hop loop detection is the caller's responsibility — the bridge ships whatever it's given.",
+            "args: target:str (req — id on the REMOTE kernel) + payload:dict (req — the call to run there; payload is ITSELF a verb frame and MUST carry its own \"type\") + timeout:float? (default 30s). Example: {\"type\":\"forward\",\"target\":\"src\",\"payload\":{\"type\":\"read_stream\",\"path\":\"data.bin\",\"offset\":0}}. Ships a raw `{type:'call', id, target, payload}` frame over the transport, awaits the matching reply, returns the unwrapped data. The far kernel judges the call as the leg that serves it there. Local→local stays direct kernel.send (this verb is only for cross-kernel). Multi-hop loop detection is the caller's responsibility — the bridge ships whatever it's given.",
         "watch_remote":
             "args: target:str (req — id on the REMOTE kernel to watch). Sends `{type:'watch', src:<target>}` over the transport and subscribes this leg to `target`. Subsequent `{type:'event', src, payload}` frames whose `src` is subscribed are re-emitted on THIS bridge agent's inbox as the payload plus `src`; an event for anything not subscribed is dropped. Local watchers subscribe to the bridge with `kernel.watch(<bridge_id>, ...)`. Idempotent (web_ws de-dups via its own `watching` set).",
         "unwatch_remote":
@@ -91,18 +86,6 @@ enum BridgeDocs {
         "set_identity":
             "Advertise/update this peer's DIRECTORY identity — the typed attrs the relay",
     ]
-
-    /// What relay_connector appends to the engine's `forward` doc (python
-    /// `relay_connector/tools.py`, `_forward.__doc__`).
-    static let relaySealedForward =
-        " SEALED for secrets: a call carrying any secret mark is refused — the relay "
-        + "records every frame it routes, unmasked."
-
-    /// What ws_bridge appends to the engine's `forward` doc (python
-    /// `ws_bridge/tools.py`, `_forward.__doc__`).
-    static let wsSealedForward =
-        " SEALED for secrets to a non-loopback host: a call carrying any secret mark "
-        + "is refused — ws:// carries every frame in clear."
 
     /// Python `io_bridge.dispatch`'s teaching hint on an unknown type.
     static let envelopeHint =
@@ -169,10 +152,9 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
         family == .ws ? Self.wsReadme : Self.relayReadme
     }
 
-    /// Write-time check of `peer_guid`: one kernel guid (a non-empty string, no
-    /// `|`), then the leg's `ingress_rule` (`IngressRules.unknownRefusal`, the one
-    /// write-time check every leg makes). This kernel's OWN guid is refused where
-    /// the kernel is in hand — at serve. Python `io_bridge._engine.validate_meta`.
+    /// Write-time check of the leg's `ingress_rule` (`IngressRules.unknownRefusal`,
+    /// the one write-time check every leg makes). Python
+    /// `io_bridge._engine.validate_meta`.
     ///
     /// A relay leg also refuses, first, a malformed `credentials` ({store, ref})
     /// — the relay password lives in a credential_store (audit IO-7/F4,
@@ -186,11 +168,6 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
             {
                 return bad
             }
-        }
-        if let pin = meta["peer_guid"], pin != .null,
-            !(pin.asString.map { !$0.isEmpty && !$0.contains("|") } ?? false)
-        {
-            return "bridge: peer_guid must be one kernel guid (a non-empty string without `|`); got \(pyRepr(pin))"
         }
         return IngressRules.unknownRefusal(meta)
     }
@@ -216,8 +193,6 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
             await teardown(agentId)
             return await bootLeg(agentId: agentId, kernel: kernel)
         case "forward":
-            if let sealed = relaySeal() { return sealed }
-            if let sealed = wsSeal(agentId) { return sealed }
             return try await forwardVerb(agentId: agentId, payload: payload, kernel: kernel)
         case "watch_remote":
             return await watchVerb(
@@ -269,45 +244,8 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
         guard header["type"].asString == "forward" else {
             return (try await handle(agentId: agentId, payload: header, kernel: kernel), nil)
         }
-        // A binary `forward` is the same outbound call path python's one
-        // `_forward` covers — sealed the same way.
-        if let sealed = relaySeal() { return (sealed, nil) }
-        if let sealed = wsSeal(agentId) { return (sealed, nil) }
         return try await binaryForwardVerb(
             agentId: agentId, header: header, body: body, kernel: kernel)
-    }
-
-    /// THE RELAY SEAL, outbound (python `relay_connector/tools.py` `_forward`): a
-    /// `forward` whose own call carries ANY secret mark is refused before a frame is
-    /// built. `forward` is the one outbound call path a relay leg has — no relay leg
-    /// registers a `PeerRoute`, so a `<guid>|<agent>` send never rides one (only
-    /// web_ws registers peers). nil on a ws_bridge leg, or with no mark.
-    ///
-    /// TODO(relay seal): lift once relayd masks what it records. The fix is in
-    /// relayd (../fantastic_relay): when it dispatches a tunneled frame into its own
-    /// kernel, re-root the inner frame's `secret` onto its delivery item
-    /// (`payload.<f>` -> `payload.payload.payload.<f>`), so its rows, ledger and
-    /// state stream show `<secret>`; and decide how REPLY frames carry result marks
-    /// — a `reply` names no marks today, so a `result` mark would still leave the
-    /// value in the relay's record of the reply.
-    private func relaySeal() -> JSON? {
-        guard family == .relay, !KernelTaskLocals.currentSecret.isEmpty else { return nil }
-        return secretSealed()
-    }
-
-    /// THE WS SEAL, outbound (python `ws_bridge/tools.py` `_forward`): a `forward`
-    /// whose own call carries ANY secret mark, on a leg dialed to a non-loopback
-    /// host, is refused before a frame is built. `forward` is the one outbound call
-    /// path a ws leg has — no ws leg registers a `PeerRoute` (only web_ws registers
-    /// peers). nil on a relay leg, a loopback leg, or with no mark.
-    ///
-    /// TODO(ws seal): wss:// (TLS) is the later path — a TLS leg carries secrets to
-    /// any host, and this seal lifts for it.
-    private func wsSeal(_ agentId: AgentId) -> JSON? {
-        guard family == .ws, !KernelTaskLocals.currentSecret.isEmpty,
-            let ws = existingState(agentId)?.transport as? WSTransport, ws.sealed
-        else { return nil }
-        return wsSecretSealed()
     }
 
     // MARK: - reflect
@@ -338,9 +276,6 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
         // differently (an `auth: allow_all_ingress` stem read as open while the
         // gate denied).
         for (key, value) in describe(meta) { out[key] = value }
-        // The ONE peer kernel whose agents this leg serves (`<peer_guid>|<agent>`);
-        // null = no pin, no inbound call.
-        out["peer_guid"] = meta["peer_guid"] ?? .null
         switch family {
         case .ws:
             out["host"] = meta["host"] ?? .null
@@ -448,22 +383,7 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
         Transports: `ws` (default) · `memory` (test). No tunnel is spawned here — an ssh tunnel is an `exec_bridge` job or devops; dial its local end.
         Emits: `bridge_up` · `bridge_down` · remote events for a `watch_remote` subscription only (payload + `src`); anything unsubscribed is dropped.
 
-        Secret values: mark your `forward` call — `secret: ["payload.payload.<field>"]` /
-        `["result"]`, or an array of steps `[["payload","payload","a.b"]]` — and the frame
-        carries them as `payload.<field>` / `result` / `["payload","a.b"]`, so the far
-        kernel records `<secret>` too (see `io_bridge`). An inbound frame's `secret` is
-        dispatched verbatim.
-
-        **SEALED for secrets to a non-loopback host** (owner, 2026-10-03): `ws://` carries
-        every frame in clear, so on a leg whose `host` is not `localhost` / `127.0.0.1` /
-        `[::1]` a `forward` call carrying ANY `secret` mark is refused before a frame leaves,
-        and an inbound `call` frame that names `secret` is answered with the same refusal and
-        never dispatched: `{reason:"unauthorized", error:"ws_bridge: a call carrying secret
-        marks may not cross a ws:// leg to a non-loopback host — ws:// carries every frame in
-        clear", hint:"dial a loopback host (an ssh tunnel's local end) to send a secret"}`.
-        Unmarked calls cross as before. wss:// (TLS) is the later path.
-
-        Inbound calls (a paired transport) are served only from the ONE pinned peer: set `peer_guid` (the peer kernel's guid). Every frame names its caller `<guid>|<agent>`, and the target's `callable_by` must name it (or `<guid>|*`) — accepting this leg is not accepting its peer.
+        Inbound calls (a paired transport) are served AS THIS LEG: its `can_call` and the target's `callable_by` decide.
 
         Frame ids are `<leg id>-<boot nonce>-<n>` — fresh per boot, so a restarted sender never names an execution the peer already settled.
 
@@ -477,11 +397,12 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
 
         **The password lives in a credential_store, never on the record** (audit IO-7/F4,
         2026-10-03): name it with `credentials: {store, ref}`; before EVERY dial the
-        connector reads the ref's `password` field AS ITSELF (`get {ref, host:<relay_url>}`,
-        marked `secret: ['result']`), pinned to the relay URL's host, exactly as an AI
+        connector reads the ref's `password` field AS ITSELF (`get {ref, host:<relay_url>}`
+        — the dial runs in its own dispatch or a task it spawned), pinned to the relay
+        URL's host, exactly as an AI
         backend reads its key — nothing cached, a rotated password is used by the next
         dial. Wire it on both ends: the connector's `can_call` names the store (`get`), the
-        store's `callable_by` and the ref's `readers` name the connector, and the ref's
+        store's `callable_by` names the connector, and the ref's
         declared `host` is the relay's `host[:port]`. No `credentials` ⇒ boot fails loud
         ("relay_connector: no `credentials` on <id> — name the relay password's credential
         store and ref (update_agent <id> credentials={store: <id>, ref: <ref>}; the ref's
@@ -491,18 +412,6 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
         as `ws_bridge` (both ride the shared `io_bridge` engine) — `forward`,
         `watch_remote`/`unwatch_remote` work identically; replies and binary
         `read_stream` chunks are tunneled over the relay.
-
-        **SEALED for secret values** (owner, 2026-10-02): the relay daemon dispatches every
-        tunneled frame into its own kernel and records it UNMASKED, so a secret may not cross
-        a relay leg. A `forward` call carrying ANY `secret` mark is refused before a frame
-        leaves, and a tunneled `call` frame that names `secret` is answered with the same
-        refusal and never dispatched: `{reason:"unauthorized", error:"relay_connector: a call
-        carrying secret marks may not cross a relay leg — the relay records every frame it
-        routes, unmasked", hint:"reach that kernel over a direct ws_bridge leg to send a
-        secret"}`. Unmarked calls cross as before. A direct `ws_bridge` leg to a loopback
-        host carries marks.
-        Lifted once relayd re-roots a tunneled frame's marks onto its own delivery item and
-        reply frames carry result marks.
 
         **Sealed by default** — open the inbound leg: `update_agent <id> ingress_rule=allow_all_ingress`
         (or `password` for the group token). The bridge-leg `ingress_rule`/`egress_rule`
@@ -552,15 +461,12 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
 
         Record fields: `relay_url` · `guid` (auto-minted if absent) · `partner_guid` (peer to
         reach) · `credentials` ({store, ref} — the relay password) · `heartbeat` (s, default 30) ·
-        `reconnect` (s, default 10) · `role` · `owner_guid` · `exposes` · `peer_guid`.
+        `reconnect` (s, default 10) · `role` · `owner_guid` · `exposes`.
         Transport: `relay`.
 
-        **Inbound calls are served only from the ONE pinned peer**: `peer_guid` is the partner
-        KERNEL's instance guid (its root reflect's `guid` — not the leg's path `guid`). Every
-        tunneled call names its caller `<guid>|<agent>`; a caller from any other guid, or a leg
-        with no pin, is refused. The call is then gated AS that foreign id: the target's
-        `callable_by` must name `<guid>|<agent>` or `<guid>|*` — accepting this leg is not
-        accepting its peer. Remote events re-emit only for a `watch_remote` subscription.
+        **Inbound calls are served AS THIS LEG**: a tunneled call is sent by the connector
+        itself (its read loop), so its `can_call` and the target's `callable_by` decide.
+        Remote events re-emit only for a `watch_remote` subscription.
 
         """
 }

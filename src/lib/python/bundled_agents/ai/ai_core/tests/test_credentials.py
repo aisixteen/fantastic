@@ -6,6 +6,8 @@ so a rotated key is used by the next request; no value lands in the ledger."""
 
 from __future__ import annotations
 
+from _testkit import as_agent
+
 import pytest
 from _testkit import ensure_memory
 
@@ -35,14 +37,14 @@ async def _store_set(k, ref, value):
     assert out["status"] == "completed" and out["result"].get("stored"), out
 
 
-async def _mk(k, tmp_path, *, readers=("ai",), host="api.example.com"):
+async def _mk(k, tmp_path, *, accept=("ai",), host="api.example.com"):
     k.ctx.update(k.id, guid="g1")
     k.create(
         "credential_store.tools",
         id="creds",
         file=str(tmp_path / "creds.yaml"),
-        refs={"main": {"host": host, "readers": list(readers)}},  # declared
-        callable_by={"ai": "*"},
+        refs={"main": {"host": host}},  # declared
+        callable_by={a: "*" for a in accept},
     )
     await _store_set(k, "main", KEY)
     rec = k.create(
@@ -80,15 +82,15 @@ async def test_a_key_bound_to_another_host_is_refused(seeded_kernel, tmp_path):
     assert "bound to host 'api.example.com'" in str(e.value), e.value
 
 
-async def test_an_agent_the_ref_does_not_name_reads_nothing(seeded_kernel, tmp_path):
-    k = await _mk(seeded_kernel, tmp_path, readers=("someone_else",))
+async def test_an_agent_the_store_does_not_accept_reads_nothing(
+    seeded_kernel, tmp_path
+):
+    k = await _mk(seeded_kernel, tmp_path, accept=("someone_else",))
     read = key_reader("ai", k, "responses_backend", required=True)
-    with pytest.raises(CredentialError) as e:
+    # the read runs in the agent's own turn — the test stands in for it
+    with pytest.raises(CredentialError) as e, as_agent(k, "ai"):
         await read(EP)
-    assert str(e.value) == (
-        "responses_backend: credentials creds/main: credential_store: no such "
-        "ref 'main'"
-    )
+    assert "creds does not accept 'get' from ai" in str(e.value), e.value
 
 
 async def test_no_credentials_is_no_key_or_a_loud_refusal(seeded_kernel):

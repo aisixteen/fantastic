@@ -381,10 +381,9 @@ struct DrainTests {
             ("quiet_probe.tools", QuietProbe(log: quiet)),
         ])
         for i in 0..<5 { _ = await create(kernel, "q\(i)", "quiet_probe.tools") }
-        // `ps` is privileged: the baseline `$parent` does not reach it — named.
-        let a = await create(
-            kernel, "sp_a", "shut_probe.tools",
-            canCall: .object(["$parent": .string("*"), "kernel_state": .array([.string("ps")])]))
+        // `ps` on the root: an explicit edge on both ends.
+        let a = await create(kernel, "sp_a", "shut_probe.tools")
+        wire(kernel, "sp_a", "kernel_state", ["ps"])
         kernel.quietTimeout = 0.3
         let before = allRows(kernel).count
         let out = await send(kernel, "kernel", "shutdown_agents").result
@@ -397,10 +396,11 @@ struct DrainTests {
         let rows = allRows(kernel)
         let seenVerbs = rows.compactMap { $0["verb"]?.asString }
         #expect(!seenVerbs.contains("reflect"), "not one reflect row: \(seenVerbs)")
-        // The ONLY rows the verb writes are its own dispatch, the `shutdown`
-        // send to the single advertiser, and the nested `ps` that handler makes.
+        // The ONLY rows the verb writes are its own dispatch and the nested `ps`
+        // the advertiser's handler makes: the `shutdown` itself is the kernel's
+        // own call into that handler, not a send (`runHandler`).
         let wrote = rows.suffix(rows.count - before).compactMap { $0["verb"]?.asString }
-        #expect(wrote.sorted() == ["ps", "shutdown", "shutdown_agents"], "\(wrote)")
+        #expect(wrote.sorted() == ["ps", "shutdown_agents"], "\(wrote)")
         kernel.setDraining(false)
     }
 
@@ -479,7 +479,7 @@ struct DrainTests {
             ], rootHandler: ROOT_HANDLER_MODULE)
         _ = await create(kernel, "w", "walk.tools")
         _ = await create(
-            kernel, "memory", "ram_store.tools", meta: ["operator": .bool(true)])
+            kernel, "memory", "ram_store.tools")
         kernel.update(AgentId(ROOT_ID), ["memory_store_id": .string("memory")])
         let started = await kernel.start(bootAll: false)
         #expect(started["started"].asBool == true, "\(started.serialize())")

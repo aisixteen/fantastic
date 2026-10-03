@@ -41,7 +41,6 @@ pub mod reflect;
 pub mod refusal;
 pub mod rows;
 pub mod scalar;
-pub mod secret;
 pub mod send;
 pub mod state;
 pub mod storage;
@@ -53,7 +52,7 @@ pub mod test_support;
 
 pub use agent::{Agent, AgentId, AgentRecord, RESERVED_RECORD_KEYS};
 pub use authz::{
-    authorize_call, default_callable_by, default_can_call, Decision, FROM_ABOVE, PRIVILEGED_VERBS,
+    authorize_call, default_callable_by, default_can_call, Decision, FROM_ABOVE, MUTATORS,
 };
 pub use bundle::{Bundle, BundleRegistry, Reply};
 pub use errors::{KernelError, KernelResult};
@@ -64,10 +63,7 @@ pub use peers::{PeerCallFuture, PeerEmitFuture, PeerReply, PeerRoute};
 pub use refusal::{bad, missing, not_here, refusal, refusal_hint, unknown_agent};
 pub use rows::{Row, RowStore, RowTail};
 pub use scalar::{coerce_scalar, py_strip};
-pub use send::{
-    current_origin, current_remote_caller, current_secret, current_sender, with_operator,
-    with_remote_caller, with_sender, CURRENT_ORIGIN, CURRENT_SENDER,
-};
+pub use send::{current_origin, current_sender};
 pub use state::{KernelState, CURRENT_VERSION};
 pub use storage::StorageMode;
-pub use tasks::{current_killed, current_task, TaskId, TaskTable, CURRENT_TASK};
+pub use tasks::{current_killed, current_task, spawn_inherit, TaskId, TaskTable, CURRENT_TASK};

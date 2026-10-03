@@ -12,8 +12,8 @@ import Foundation
 import Testing
 
 /// One kernel carrying all four fixtures, plus whatever extra agents a test
-/// seeds. Children of `core`, so the structural baseline (`$parent: "*"`) lets a
-/// probe reach the root for a non-privileged verb and nothing else.
+/// seeds. Children of the root; every edge a probe uses is an explicit grant
+/// (the baseline is `{$self: "*"}` alone).
 private func probeKernel(_ agents: [JSON] = []) async -> Kernel {
     let r = BundleRegistry()
     r.register(DISPENSER_MODULE, DispenserProbe())
@@ -213,20 +213,20 @@ struct ScenarioProbesTests {
             none.asObject?.keys.elementsEqual(["answer", "request_id", "inquiries", "granted"])
                 == true, "\(none)")
 
-        // One grant that goes through: `$parent: "*"` covers a non-privileged
-        // verb on the root. A non-dict entry is skipped without counting.
+        // One grant that goes through: an explicit edge to the root. A non-dict
+        // entry is skipped without counting.
         let k2 = await probeKernel([
             [
                 "id": "user", "handler_module": .string(USER_MODULE), "answer": "ok",
                 "grants": [["type": "list_agents"] as JSON, "not-a-dict"],
             ]
         ])
+        wire(k2, "user", "kernel_state")
         let one = await send(k2, "user", ["type": "inquiry", "text": "go?", "request_id": "r7"])
         #expect(one["granted"].asInt == 1, "\(one.serialize())")
         #expect(one["request_id"].asString == "r7")
 
-        // A REFUSED grant answers the refusal instead: `update_agent` is
-        // privileged, so the structural wildcard never covers it.
+        // A REFUSED grant answers the refusal instead: no edge to the root.
         let k3 = await probeKernel([
             [
                 "id": "user", "handler_module": .string(USER_MODULE), "answer": "ok",

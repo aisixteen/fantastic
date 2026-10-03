@@ -30,7 +30,8 @@
 //! | `delete` | `path`, `recursive?`       | `{path, deleted: true}`               |
 //! | `rename` | `old_path`, `new_path`     | `{old_path, new_path}`                |
 //! | `mkdir`  | `path`                     | `{path, created: true}`               |
-//! | `allow` / `disallow` / `allowed` | `path` / `path` / `limit?, after?` | edit / page the `allow` list |
+//!
+//! The `allow` list is a RECORD field: set at create, changed by `update_agent`.
 //!
 //! The text verbs are this bridge's own (see [`text`]): a caller edits with ITS
 //! OWN grants. Raw bytes move over the stream verbs, never base64.
@@ -59,7 +60,7 @@ pub const README: &str = include_str!("readme.md");
 
 /// The verb table, in python's `VERBS` order — reflect's `verbs` map, the
 /// unknown-verb refusal and the gate all read it.
-const VERBS: [(&str, &str); 17] = [
+const VERBS: [(&str, &str); 14] = [
     (
         "reflect",
         "Identity + filesystem root + readonly flag + auth posture (ingress/egress/sealed/see). No args.",
@@ -112,18 +113,6 @@ const VERBS: [(&str, &str); 17] = [
     (
         "mkdir",
         "args: path:str (req). Returns {path, created:true}. Recursive (parents ok). Refused if readonly.",
-    ),
-    (
-        "allow",
-        "args: path:str (req — a file, or a directory exposing everything under it; `.` = the whole root). Adds it to the `allow` list (idempotent). Returns {path, allowed:true, count}.",
-    ),
-    (
-        "disallow",
-        "args: path:str (req — an entry of the `allow` list). Removes it. Returns {path, allowed:false, count}.",
-    ),
-    (
-        "allowed",
-        "args: limit:int?, after:str? (the last path of the previous page). The `allow` list in path order. Returns {paths, next, total}.",
     ),
 ];
 
@@ -252,10 +241,6 @@ impl Bundle for FileBundle {
             // The PUMP coordinates a SOURCE→SINK copy by id; it never touches
             // bytes/root itself, so it rides without a clamp.
             "pump" => pump_reply(agent_id, payload, kernel).await,
-            "allow" | "disallow" | "allowed" => {
-                let root = clamp_root(&meta, &base);
-                allow_verb(verb, agent_id, &root, payload, kernel)
-            }
             other => {
                 // THE RUNNING-DIR LAW. The clamp is resolved here but applied
                 // AFTER each verb's argument checks — python reaches `fs` only
@@ -661,33 +646,13 @@ fn write_stream_reply(
     }
 }
 
-/// Send `item` AS THIS DISPATCH'S CALLER: the operator stays the operator; a
-/// local agent is itself; a foreign `<guid>|<agent>` is the same pair its bridge
-/// leg relayed (the leg as sender, the foreign id judged by the target's
-/// `callable_by`). Python `_as_caller`.
-async fn send_as_caller(kernel: &Arc<Kernel>, item: Item) -> fantastic_kernel::Outcome {
-    use fantastic_kernel::send::{with_operator, with_remote_caller, with_sender};
-    let send = kernel.send(vec![item]);
-    let mut out = match (
-        fantastic_kernel::current_origin(),
-        fantastic_kernel::current_remote_caller(),
-    ) {
-        (None, _) => with_operator(send).await,
-        (Some(origin), Some(remote)) => {
-            with_sender(origin.clone(), with_remote_caller(origin, remote, send)).await
-        }
-        (Some(origin), None) => with_sender(origin, send).await,
-    };
-    out.remove(0)
-}
-
 /// The PUMP — a server-side SOURCE→SINK copy, chunk by chunk, in ONE call.
 /// Storage-agnostic: both ends are bound BY ID + the duck-typed stream verbs, so
 /// a `network_bridge` SOURCE pumps to a `file_bridge` SINK the same as fs→fs.
-/// BOTH ENDS RUN AS THE CALLER: `read_stream` on the source and `write_stream` on
-/// the sink go out under the caller's identity ([`send_as_caller`]), so the
-/// caller needs its own grants on both (this bridge is no deputy). Each end
-/// SELF-gates + SELF-clamps — the pump only coordinates, never touching bytes, so
+/// BOTH ENDS RUN AS THIS BRIDGE: `read_stream` on the source and `write_stream`
+/// on the sink are sent from this bridge's own dispatch, so they are its sends —
+/// the bridge's `can_call` and each end's `callable_by` decide (its own `$self`
+/// baseline covers a pump within itself). Each end SELF-gates + SELF-clamps — the pump only coordinates, never touching bytes, so
 /// a sealed end refuses it. A pump ONTO ITS OWN SOURCE (the sink is the source and
 /// `sink_path` names the same file) is refused. Mirrors py `_pump`.
 async fn pump_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
@@ -724,18 +689,15 @@ async fn pump_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -
     loop {
         // TWO ORDINARY SENDS, python's: each end is a batch item (pid, rows,
         // `ps` row), the read taking its chunk back raw, the write carrying it at
-        // `bytes` in python's key order. AS THE CALLER (audit AV-7, 2026-10-03):
-        // sent from this dispatch, both ends judged THIS BRIDGE — a client holding
-        // only `pump` copied a file it could never read and overwrote one it could
-        // never write.
-        let read = send_as_caller(
-            kernel,
-            Item::new(
+        // `bytes` in python's key order. Sent from this dispatch, so both are THIS
+        // BRIDGE's sends, gated as the bridge.
+        let read = kernel
+            .send(vec![Item::new(
                 src_id.clone(),
                 json!({"type": "read_stream", "path": spath, "offset": offset, "length": chunk}),
-            ),
-        )
-        .await;
+            )])
+            .await
+            .remove(0);
         let (rmeta, body) = (read.result, read.body);
         // python tests the reply for a `bytes` chunk (`isinstance(r["bytes"],
         // bytes)`); on this channel the chunk rides the body, so the carrier
@@ -754,16 +716,15 @@ async fn pump_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -
                 ),
             );
         };
-        let wmeta = send_as_caller(
-            kernel,
-            Item::new(
+        let wmeta = kernel
+            .send(vec![Item::new(
                 sink_id.clone(),
                 json!({"type": "write_stream", "path": dpath, "bytes": null, "offset": offset, "truncate": first}),
             )
-            .with_binary_key("bytes", body),
-        )
-        .await
-        .result;
+            .with_binary_key("bytes", body)])
+            .await
+            .remove(0)
+            .result;
         if !wmeta.is_object() || py_truthy(wmeta.get("error").unwrap_or(&Value::Null)) {
             return rf::refusal(
                 rf::TRANSPORT_ERROR,
@@ -1000,110 +961,6 @@ fn keep_exposed(out: &mut Value, allow: &[String], root: &Result<PathBuf, String
             (exposed(allow, p) && lands_exposed(r, allow, p))
                 || (f.get("type") == Some(&json!("dir")) && leads_to(allow, p))
         });
-    }
-}
-
-/// One edit of an `allow` list at a time: the read of the live record and its
-/// update happen under this lock, so two concurrent `allow`/`disallow` calls
-/// cannot both derive from one snapshot and lose an entry (audit d3).
-static ALLOW_EDIT: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// `allow` / `disallow` / `allowed` — edit and read the list one path at a time.
-/// The list is record state: edited through `Kernel::update`, persisted by the
-/// loader like any record field.
-fn allow_verb(
-    verb: &str,
-    agent_id: &AgentId,
-    root: &Result<PathBuf, String>,
-    payload: &Value,
-    kernel: &Arc<Kernel>,
-) -> Value {
-    let _one = ALLOW_EDIT
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let meta = match kernel.agents.get(agent_id) {
-        Some(a) => a.meta.read().expect("meta poisoned").clone(),
-        None => return json!({"error": format!("no agent {agent_id}")}),
-    };
-    let mut allow = allow_list(&meta);
-    let save = |list: &[String]| {
-        let mut patch = Map::new();
-        patch.insert("allow".to_string(), json!(list));
-        kernel.update(agent_id, patch);
-    };
-    match verb {
-        "allow" => {
-            let raw = match path_arg("allow", payload, "path") {
-                Ok(p) => p,
-                Err(e) => return e,
-            };
-            if raw.is_empty() {
-                return rf::missing("allow", "path");
-            }
-            let Some(path) = norm(raw) else {
-                return rf::bad("allow", "path", "a path relative to the bridge's root");
-            };
-            let resolved = match root {
-                Ok(r) => fs::resolve(r, &path),
-                Err(e) => Err(e.clone()),
-            };
-            if let Err(e) = resolved {
-                return rf::bad("allow", "path", &format!("a path inside the root ({e})"));
-            }
-            if !allow.contains(&path) {
-                allow.push(path.clone());
-                save(&allow);
-            }
-            json!({"path": path, "allowed": true, "count": allow.len()})
-        }
-        "disallow" => {
-            let raw = match path_arg("disallow", payload, "path") {
-                Ok(p) => p,
-                Err(e) => return e,
-            };
-            if raw.is_empty() {
-                return rf::missing("disallow", "path");
-            }
-            match norm(raw).filter(|p| allow.contains(p)) {
-                Some(path) => {
-                    allow.retain(|s| *s != path);
-                    save(&allow);
-                    json!({"path": path, "allowed": false, "count": allow.len()})
-                }
-                None => {
-                    let mut v = rf::refusal(
-                        rf::NOT_FOUND,
-                        format!("disallow: {} is not in the allow list", py_repr(raw)),
-                    );
-                    rf::with(&mut v, "path", json!(raw));
-                    v
-                }
-            }
-        }
-        _ => {
-            allow.sort();
-            if let Some(after) = payload
-                .get("after")
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-            {
-                allow.retain(|p| p.as_str() > after);
-            }
-            let total = allow.len();
-            let limit = match int_arg("allowed", payload, "limit", 0, 0) {
-                Ok(n) => n as usize,
-                Err(e) => return e,
-            };
-            let page: Vec<String> = if limit > 0 {
-                allow.into_iter().take(limit).collect()
-            } else {
-                allow
-            };
-            let next = (limit > 0 && total > page.len())
-                .then(|| page.last().cloned())
-                .flatten();
-            json!({"paths": page, "next": next, "total": total})
-        }
     }
 }
 

@@ -34,10 +34,9 @@
 //! Matches Python ws_bridge + fantastic-web WS server:
 //!
 //! ```text
-//! outbound  {type:"call",  id:corr, target, payload, caller, secret?}
-//!                                        — `secret` = the forward call's own marks
-//!                                        re-rooted at the forwarded item
-//!                                        ([`forwarded_secret`])
+//! outbound  {type:"call",  id:corr, target, payload}
+//!                                        — the far kernel judges it as the leg
+//!                                        that serves it there
 //! outbound  {type:"watch", src:target}  / {type:"unwatch", src:target}
 //! inbound   {type:"reply", id, data}     — read loop routes to pending oneshot
 //! inbound   {type:"error", id, error}    — read loop fails the pending oneshot
@@ -55,12 +54,10 @@
 //! record per frame — never cached at boot — so what `reflect` reports is what the
 //! gate enforces the moment `update_agent` writes it (audit ARCH-2, 2026-10-03).
 //!
-//! A RELAY leg is SEALED for secret marks (owner, 2026-10-02): relayd records the
-//! frames it routes unmasked, so `relay_connector` refuses a `forward` carrying any
-//! mark and answers a tunneled `call` frame naming `secret` with the same refusal
-//! ([`transport::relay::secret_sealed`]). A WS leg dialed to a NON-LOOPBACK host
-//! is sealed the same way (owner, 2026-10-03, audit S8): `ws://` carries every
-//! frame in clear ([`transport::ws::secret_sealed`]).
+//! IDENTITY: an inbound `call` frame is served by the read loop — a task this
+//! leg's own `boot` spawned — so it is sent AS THE LEG and gated as the leg (its
+//! `can_call`, the target's `callable_by`). Whoever called on the other kernel is
+//! that kernel's business; here the caller is the leg.
 
 #![deny(missing_docs)]
 
@@ -129,22 +126,12 @@ impl Family {
             "reflect": "Identity + transport + connectivity. No args.",
             "boot": "No args. Reads `transport` (kind) + transport-specific fields off the agent record, builds the transport, spawns the read loop, emits `bridge_up`. Idempotent: re-booting a connected bridge is a no-op.",
             "reconnect": "No args. Teardown + boot — explicit because we don't auto-reconnect on transport failure (keeps real network problems visible to operators / telemetry).",
-            "forward": "args: target:str (req — id on the REMOTE kernel) + payload:dict (req — the call to run there; payload is ITSELF a verb frame and MUST carry its own \"type\") + timeout:float? (default 30s). Example: {\"type\":\"forward\",\"target\":\"src\",\"payload\":{\"type\":\"read_stream\",\"path\":\"data.bin\",\"offset\":0}}. Ships a raw `{type:'call', id, target, payload, caller, secret?}` frame over the transport, awaits the matching reply, returns the unwrapped data. SECRET values: mark them on YOUR call to this verb — `payload.payload.<field>` / `result[.<field>]`, or as arrays of steps `[\"payload\",\"payload\",<key>…]` / `[\"result\",…]` (a key holding a dot) — and they ride as `payload.<field>` / `result[.<field>]` (`[\"payload\",<key>…]` / `[\"result\",…]`), so both kernels record `<secret>`. Local→local stays direct kernel.send (this verb is only for cross-kernel). Multi-hop loop detection is the caller's responsibility — the bridge ships whatever it's given.",
+            "forward": "args: target:str (req — id on the REMOTE kernel) + payload:dict (req — the call to run there; payload is ITSELF a verb frame and MUST carry its own \"type\") + timeout:float? (default 30s). Example: {\"type\":\"forward\",\"target\":\"src\",\"payload\":{\"type\":\"read_stream\",\"path\":\"data.bin\",\"offset\":0}}. Ships a raw `{type:'call', id, target, payload}` frame over the transport, awaits the matching reply, returns the unwrapped data. The far kernel judges the call as the leg that serves it there. Local→local stays direct kernel.send (this verb is only for cross-kernel). Multi-hop loop detection is the caller's responsibility — the bridge ships whatever it's given.",
             "watch_remote": "args: target:str (req — id on the REMOTE kernel to watch). Sends `{type:'watch', src:<target>}` over the transport and subscribes this leg to `target`. Subsequent `{type:'event', src, payload}` frames whose `src` is subscribed are re-emitted on THIS bridge agent's inbox as the payload plus `src`; an event for anything not subscribed is dropped. Local watchers subscribe to the bridge with `kernel.watch(<bridge_id>, ...)`. Idempotent (web_ws de-dups via its own `watching` set).",
             "unwatch_remote": "args: target:str (req — id previously passed to watch_remote). Unsubscribes this leg from `target` (events for it are dropped from now on) and sends `{type:'unwatch', src:<target>}` so the remote stops emitting them.",
         });
-        if self == Family::Ws {
-            // python appends to ws_bridge's `forward` docstring.
-            if let Some(Value::String(doc)) = v.get_mut("forward") {
-                doc.push_str(WS_FORWARD_SEALED);
-            }
-        }
         if self == Family::Relay {
             if let Some(o) = v.as_object_mut() {
-                // python appends to the relay's `forward` docstring.
-                if let Some(Value::String(doc)) = o.get_mut("forward") {
-                    doc.push_str(RELAY_FORWARD_SEALED);
-                }
                 o.insert(
                     "list_peers".into(),
                     json!("No args (optional timeout). One-shot snapshot of the relay directory:"),
@@ -160,16 +147,6 @@ impl Family {
         v
     }
 }
-
-/// What the relay derivation appends to `forward`'s doc — python
-/// `relay_connector.tools._forward.__doc__`'s tail.
-const RELAY_FORWARD_SEALED: &str = " SEALED for secrets: a call carrying any secret mark is \
-                                    refused — the relay records every frame it routes, unmasked.";
-
-/// What the ws derivation appends to `forward`'s doc — python
-/// `ws_bridge.tools._forward.__doc__`'s tail.
-const WS_FORWARD_SEALED: &str = " SEALED for secrets to a non-loopback host: a call carrying \
-                                 any secret mark is refused — ws:// carries every frame in clear.";
 
 /// `ws_bridge`'s readme.md, auto-seeded into the agent's dir on creation.
 pub const WS_README: &str = include_str!("readme_ws.md");
@@ -288,36 +265,6 @@ async fn verb_reply(
         _ => unknown_type(verb_value),
     };
     Ok(Some(reply))
-}
-
-/// THE RELAY SEAL, outbound: a `forward` whose own call carries ANY secret mark is
-/// refused before a frame is built (python `relay_connector.tools._forward`).
-/// `forward` is the one outbound call path a relay leg has — no relay leg
-/// registers a `PeerRoute`, so a `<guid>|<agent>` send never rides one (only
-/// web_ws registers peers).
-// TODO(relay seal): lift once relayd masks what it records. The fix is in relayd
-// (../fantastic_relay): when it dispatches a tunneled frame into its own kernel,
-// re-root the inner frame's `secret` onto its delivery item (`payload.<f>` ->
-// `payload.payload.payload.<f>`), so its rows, ledger and state stream show
-// `<secret>`; and decide how REPLY frames carry result marks — a `reply` names no
-// marks today, so a `result` mark would still leave the value in the relay's
-// record of the reply.
-fn relay_sealed() -> bool {
-    !fantastic_kernel::current_secret().is_empty()
-}
-
-/// THE WS SEAL, outbound: a `forward` whose own call carries ANY secret mark, on a
-/// leg dialed to a non-loopback host, is refused before a frame is built (python
-/// `ws_bridge.tools._forward`). `forward` is the one outbound call path a ws leg
-/// has — no ws leg registers a `PeerRoute` (only web_ws registers peers).
-// TODO(ws seal): wss:// (TLS) is the later path — a TLS leg carries secrets to any
-// host, and this seal lifts for it.
-fn ws_sealed(agent_id: &AgentId) -> bool {
-    !fantastic_kernel::current_secret().is_empty()
-        && BRIDGES
-            .lock()
-            .get(agent_id)
-            .is_some_and(|s| s.transport.seals_secrets())
 }
 
 /// python `dispatch`'s miss branch — the commonest slip is a frame with no
@@ -472,12 +419,6 @@ async fn dispatch(
         let reply = verb_reply(family, agent_id, &header, kernel).await?;
         return Ok((reply, None));
     }
-    if family == Family::Relay && relay_sealed() {
-        return Ok((Some(transport::relay::secret_sealed()), None));
-    }
-    if family == Family::Ws && ws_sealed(agent_id) {
-        return Ok((Some(transport::ws::secret_sealed()), None));
-    }
     let target = header
         .get("target")
         .and_then(Value::as_str)
@@ -593,9 +534,9 @@ impl Bundle for RelayConnectorBundle {
     ) -> Result<(), BundleError> {
         self.on_delete(agent_id, kernel).await
     }
-    /// The record's own fields, refused at the write: `peer_guid` (the bridge's
-    /// check) and `credentials` ({store, ref}) — the relay password lives in a
-    /// credential_store (audit IO-7/F4, 2026-10-03).
+    /// The record's own fields, refused at the write: `credentials` ({store,
+    /// ref}) — the relay password lives in a credential_store (audit IO-7/F4,
+    /// 2026-10-03) — then the leg's `ingress_rule`.
     /// Python `relay_connector.tools.validate_meta`.
     fn validate_meta(
         &self,
@@ -641,17 +582,19 @@ fn credentials_shape_error(v: &Value) -> Option<String> {
 }
 
 /// The async `read() -> password` a dial awaits — every dial, nothing cached.
-/// Asks the store named by the record's `credentials` AS THIS CONNECTOR for the
-/// ref's `password`, the answer marked secret (it lands in no row, ledger or
-/// stream) and pinned to the relay URL's host (the store refuses a ref bound
-/// elsewhere). `Err` names the store and the ref on any refusal or a missing
-/// field (python's `CredentialError`). Python `password_reader`.
+/// Asks the store named by the record's `credentials` for the ref's `password`,
+/// pinned to the relay URL's host (the store refuses a ref bound elsewhere). The
+/// dial runs in this connector's dispatch (`boot`) or a task it spawned (the
+/// reconnect supervisor), so the read is the connector's own send, gated as it.
+/// `Err` names the store and the ref on any refusal or a missing field
+/// (python's `CredentialError`). Python `password_reader`.
 fn password_reader(
     self_id: &AgentId,
     kernel: &Arc<Kernel>,
     relay_url: &str,
 ) -> transport::relay::PasswordReader {
     let (id, kernel, url) = (self_id.clone(), Arc::clone(kernel), relay_url.to_string());
+    // `id` reads the record's `credentials`; the read itself is the connector's.
     Arc::new(move || {
         let (id, kernel, url) = (id.clone(), Arc::clone(&kernel), url.clone());
         Box::pin(async move {
@@ -663,11 +606,8 @@ fn password_reader(
             let item = Item::new(
                 AgentId::from(store.as_str()),
                 json!({"type": "get", "ref": r, "host": url}),
-            )
-            .with_secret(json!(["result"]));
-            let out = fantastic_kernel::send::with_sender(id.clone(), kernel.send(vec![item]))
-                .await
-                .remove(0);
+            );
+            let out = kernel.send(vec![item]).await.remove(0);
             let res = &out.result;
             let refused = res
                 .as_object()
@@ -817,12 +757,6 @@ fn reflect_reply(family: Family, agent_id: &AgentId, kernel: &Kernel) -> Value {
             out.insert(k.clone(), v.clone());
         }
     }
-    // The ONE peer kernel whose agents this leg serves (`<peer_guid>|<agent>`);
-    // null = no pin, no inbound call.
-    out.insert(
-        "peer_guid".into(),
-        meta_value(agent_id, kernel, "peer_guid").unwrap_or(Value::Null),
-    );
     // The family's own `reflect_fields` — python's `out.update(...)`, so these
     // land after the shared block, in their own order.
     match family {
@@ -987,7 +921,7 @@ async fn build_ws_transport(
             _ => return Err("ws transport requires host (nothing is guessed)".to_string()),
         };
         let url = format!("ws://{host}:{port}/{peer_id}/ws");
-        return WsTransport::connect(&url, transport::ws::host_is_sealed(&host))
+        return WsTransport::connect(&url)
             .await
             .map(|t| t as Arc<dyn BridgeTransport>)
             .map_err(|e| transport_error_text(&e));
@@ -1185,25 +1119,14 @@ async fn forward_core(
         let _ = b.place(&mut inner, Value::Null);
     }
     // Raw call frame straight to the remote's web_ws — no `forward`
-    // envelope, no peer_id addressing (asymmetric; matches the canonical Python kernel).
+    // envelope, no peer_id addressing (asymmetric; matches the canonical Python
+    // kernel). The far kernel judges it as the leg that serves it there.
     let mut frame = json!({
         "type": "call",
         "id": corr,
         "target": target,
         "payload": inner,
     });
-    // WHO IS CALLING, QUALIFIED: `<this kernel's guid>|<the agent that asked>`
-    // (`kernel` for the operator). The far side keys store rows by it.
-    if let Some(guid) = local_guid(kernel) {
-        let who = fantastic_kernel::current_origin().map_or_else(|| "kernel".to_string(), |o| o.0);
-        frame["caller"] = json!(format!("{guid}|{who}"));
-    }
-    // The caller's `secret` marks on THIS call, re-rooted at the forwarded item,
-    // so the far kernel masks its records of the call as this one does.
-    let secret = forwarded_secret(&fantastic_kernel::current_secret());
-    if !secret.is_empty() {
-        frame["secret"] = json!(secret);
-    }
     // Stamp this leg's EGRESS credential on the envelope, if its rule presents one
     // (password ⇒ the group token; silent ⇒ None ⇒ no field, wire unchanged). The
     // dispatched `payload` stays clean — the target never sees the token.
@@ -1251,50 +1174,6 @@ async fn forward_core(
         .expect("pending poisoned")
         .remove(&corr);
     (json!({ "error": err }), None)
-}
-
-/// The `forward` call's own `secret` marks, RE-ROOTED at the item the far
-/// kernel dispatches — so both kernels mask the same values. Python
-/// `io_bridge.forwarded_secret`.
-///
-/// The local item is `{target: <bridge>, payload: {type: forward, target, payload:
-/// <inner>}}`; the far item is `{target, payload: <inner>}`. A mark under the
-/// inner payload drops ONE `payload` step, in the spelling it came in: dotted
-/// `payload.payload.<f…>` → `payload.<f…>` (and `payload.payload` → `payload`),
-/// an array `["payload", "payload", <step>…]` → `["payload", <step>…]` (and
-/// `["payload", "payload"]` → `["payload"]`) — a mark left naming no field is
-/// the far kernel's refusal like any bad mark. A `result` mark (`result[.<f…>]`,
-/// `["result", <step>…]`) is the same reply on both kernels, carried as is. A mark
-/// on the forward verb's own fields (`payload.target`, `["payload", "timeout"]`)
-/// names nothing on the far item and stays on this kernel's record only. The marks
-/// were already checked by this kernel; the far kernel's own `secret` check judges
-/// the re-rooted ones before it dispatches anything.
-#[must_use]
-pub fn forwarded_secret(marks: &[Value]) -> Vec<Value> {
-    marks
-        .iter()
-        .filter_map(|p| match p {
-            Value::Array(steps) => {
-                if steps.first().is_some_and(|s| s == "result") {
-                    Some(p.clone())
-                } else if steps.len() >= 2 && steps[0] == "payload" && steps[1] == "payload" {
-                    Some(Value::Array(steps[1..].to_vec()))
-                } else {
-                    None
-                }
-            }
-            Value::String(s) => {
-                if s == "result" || s.starts_with("result.") {
-                    Some(p.clone())
-                } else if s == "payload.payload" || s.starts_with("payload.payload.") {
-                    Some(Value::String(s["payload.".len()..].to_string()))
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        })
-        .collect()
 }
 
 /// `watch_remote` / `unwatch_remote`: send `{type:"watch"|"unwatch",
@@ -1365,9 +1244,9 @@ fn deny_reply(denial: &authorizer::Denial) -> Value {
     out
 }
 
-/// Serve ONE inbound `call` frame — `{type:'call', id, target, payload, caller,
-/// secret?}` — and ship its reply `{type:'reply', id, data}`. The frame's
-/// `secret` marks ride onto the dispatched item verbatim.
+/// Serve ONE inbound `call` frame — `{type:'call', id, target, payload}` — and
+/// ship its reply `{type:'reply', id, data}`. Sent AS THE LEG `leg`: this runs in
+/// a task the leg's own read loop spawned, so the gate judges the leg.
 ///
 /// Run as its own task (see the read loop): the local handler may itself
 /// `forward` back over this same bridge, and a read loop parked inside
@@ -1378,6 +1257,7 @@ fn deny_reply(denial: &authorizer::Denial) -> Value {
 /// memory-paired tests and the symmetric relay legs, where two in-process bridges
 /// shake hands (each read loop plays the `web_ws._on_call` role).
 async fn serve_inbound_call(
+    leg: AgentId,
     state: Arc<BridgeState>,
     kernel: Arc<Kernel>,
     frame: Value,
@@ -1399,7 +1279,6 @@ async fn serve_inbound_call(
     // LIVE record, per frame, as every web/file/exec leg does — decides whether
     // this inbound call dispatches locally; on deny we reply {error,
     // reason:"unauthorized"} (fail-fast, not a silent drop).
-    let leg = fantastic_kernel::current_sender().unwrap_or_else(|| AgentId::from(""));
     let verb = inner.get("type").and_then(Value::as_str).unwrap_or("");
     let decision = authorizer::ingress::resolve(rule_spec(&leg, &kernel, "ingress_rule").as_ref())
         .authorize(&Action {
@@ -1409,28 +1288,10 @@ async fn serve_inbound_call(
             // the `auth_token` rides the frame envelope, not the payload
             token: frame.get("auth_token").and_then(Value::as_str),
         });
-    // THE QUALIFIED CALLER, checked on INGRESS before the kernel sees it: from
-    // the ONE pinned peer, and never this kernel's own guid.
-    let caller = frame.get("caller").cloned().filter(|c| !c.is_null());
-    let pin = meta_string(&leg, &kernel, "peer_guid");
-    let bad_caller = check_caller(pin.as_deref(), caller.as_ref()).or_else(|| {
-        (pin.is_some() && pin == local_guid(&kernel)).then(|| {
-            refusal_hint(
-                fantastic_kernel::refusal::UNAUTHORIZED,
-                "bridge: this leg's peer_guid is THIS kernel's own guid — refused",
-                "pin the PEER kernel's guid",
-            )
-        })
-    });
     if let Decision::Deny(denial) = decision {
         let _ = state
             .transport
             .send_frame(json!({"type":"reply","id":corr_id,"data":deny_reply(&denial)}))
-            .await;
-    } else if let Some(bad) = bad_caller {
-        let _ = state
-            .transport
-            .send_frame(json!({"type":"reply","id":corr_id,"data":bad}))
             .await;
     } else {
         // THE FRAME ID IS THE EXECUTION ID. The correlator a peer already sends
@@ -1442,30 +1303,13 @@ async fn serve_inbound_call(
         // channel, at that path of the payload. A body the frame put anywhere else
         // is not in the payload python's decoder hands the kernel.
         let mut item = Item::from_frame(AgentId::from(target.as_str()), inner, corr_id.as_str());
-        // SECRET MARKS cross the bridge verbatim (`fantastic_kernel::secret`):
-        // this kernel records the call as shown — its call/settle rows, ledger,
-        // state stream — and its own check refuses a malformed mark before
-        // anything dispatches.
-        if let Some(marks) = frame.get("secret") {
-            item = item.with_secret(marks.clone());
-        }
         // Whatever frame asked — text or binary — the reply carries a body
         // whenever the verb answered one: python's reply dict holds bytes at a
         // key, and the frame kind follows from that alone.
         if let Some(b) = body.and_then(|b| b.under("payload")) {
             item = item.with_binary(b.path, b.bytes);
         }
-        let send = kernel.send(vec![item]);
-        let out = match caller.as_ref().and_then(Value::as_str) {
-            // THE QUALIFIED CALLER rides into the dispatch: the gate checks the
-            // target's `callable_by` against `<peer guid>|<remote agent>` (never
-            // the leg), and a memory store keys what it writes by it.
-            Some(c) if !c.is_empty() => {
-                fantastic_kernel::with_remote_caller(leg.clone(), c.to_string(), send).await
-            }
-            _ => send.await,
-        }
-        .remove(0);
+        let out = kernel.send(vec![item]).await.remove(0);
         match out.body {
             None => {
                 let _ = state
@@ -1487,77 +1331,16 @@ async fn serve_inbound_call(
     }
 }
 
-/// This kernel's instance guid — the root record's `guid`, once the root loader
-/// minted it.
-fn local_guid(kernel: &Arc<Kernel>) -> Option<String> {
-    kernel.root().and_then(|r| {
-        r.meta
-            .read()
-            .ok()
-            .and_then(|m| m.get("guid").and_then(Value::as_str).map(str::to_string))
-            .filter(|g| !g.is_empty())
-    })
-}
-
-/// INGRESS CHECK on a frame's qualified `caller`, before the kernel sees it.
-/// Every inbound call names its sender as `<guid>|<agent id>`, and the guid must
-/// be the ONE peer this leg is pinned to (`peer_guid` on the record): a peer
-/// cannot pose as a third kernel's agent. No pin, no inbound call. Python
-/// `io_bridge._engine._check_caller`.
-pub fn check_caller(pin: Option<&str>, caller: Option<&Value>) -> Option<Value> {
-    let text = caller.and_then(Value::as_str).filter(|c| {
-        let parts: Vec<&str> = c.split('|').collect();
-        parts.len() == 2 && parts.iter().all(|p| !p.is_empty())
-    });
-    let Some(text) = text else {
-        return Some(fantastic_kernel::refusal::refusal(
-            fantastic_kernel::refusal::UNAUTHORIZED,
-            format!(
-                "bridge: an inbound call must name its caller as `<guid>|<agent id>`; got {}",
-                caller.map_or_else(|| "None".to_string(), py_repr_value)
-            ),
-        ));
-    };
-    let Some(pin) = pin.filter(|p| !p.is_empty()) else {
-        return Some(refusal_hint(
-            fantastic_kernel::refusal::UNAUTHORIZED,
-            "bridge: this leg pins no peer, so it serves no inbound call",
-            "update_agent <this leg> peer_guid=<the peer kernel's guid> (its root reflect shows `guid`)",
-        ));
-    };
-    if text.split('|').next() != Some(pin) {
-        return Some(fantastic_kernel::refusal::refusal(
-            fantastic_kernel::refusal::UNAUTHORIZED,
-            format!(
-                "bridge: caller {} is not from the pinned peer {}",
-                py_repr(text),
-                py_repr(pin)
-            ),
-        ));
-    }
-    None
-}
-
-/// Write-time check of `peer_guid`: one kernel guid (a non-empty string, no
-/// `|`), then the leg's `ingress_rule` (`ingress::unknown_refusal`, the one
-/// write-time check every leg makes). Python `io_bridge._engine.validate_meta`.
-/// This kernel's OWN guid is refused where the kernel is in hand — at serve.
+/// Write-time check of the leg's `ingress_rule` (`ingress::unknown_refusal`, the
+/// one write-time check every leg makes). Python `io_bridge._engine.validate_meta`.
 fn validate_bridge_meta(meta: &Map<String, Value>) -> Option<String> {
-    match meta.get("peer_guid") {
-        None | Some(Value::Null) => None,
-        Some(Value::String(p)) if !p.is_empty() && !p.contains('|') => None,
-        Some(other) => Some(format!(
-            "bridge: peer_guid must be one kernel guid (a non-empty string without `|`); got {}",
-            py_repr_value(other)
-        )),
-    }
-    .or_else(|| authorizer::ingress::unknown_refusal(meta, &authorizer::ingress::REGISTRY))
+    authorizer::ingress::unknown_refusal(meta, &authorizer::ingress::REGISTRY)
 }
 
 async fn read_loop(agent_id: AgentId, state: Arc<BridgeState>, kernel: Arc<Kernel>) {
     // In-flight inbound dispatches — one task per `call` frame, aborted together
     // when the loop exits so nothing keeps running into a dead transport.
-    let mut calls: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+    let mut calls: Vec<tokio::task::JoinHandle<()>> = Vec::new();
     loop {
         let frame = match state.transport.recv_frame().await {
             Ok(f) => f,
@@ -1578,15 +1361,19 @@ async fn read_loop(agent_id: AgentId, state: Arc<BridgeState>, kernel: Arc<Kerne
                 // the loop inside `kernel.send`, so a handler that forwarded back
                 // over THIS bridge could never have its reply read — the round
                 // trip deadlocked until the 30s forward timeout. One task per
-                // call, each re-scoped to the leg's identity (a spawned task does
-                // not inherit `CURRENT_SENDER`), all aborted when the loop exits.
+                // call, each carrying THIS loop's identity — the leg's, since its
+                // own `boot` spawned the loop (`spawn_inherit`) — all aborted when
+                // the loop exits.
                 let call_state = Arc::clone(&state);
                 let call_kernel = Arc::clone(&kernel);
-                let call_sender = agent_id.clone();
-                calls.spawn(fantastic_kernel::send::with_sender(
-                    call_sender,
-                    serve_inbound_call(call_state, call_kernel, frame, body),
-                ));
+                calls.retain(|h| !h.is_finished());
+                calls.push(fantastic_kernel::spawn_inherit(serve_inbound_call(
+                    agent_id.clone(),
+                    call_state,
+                    call_kernel,
+                    frame,
+                    body,
+                )));
             }
             "event" => {
                 // The `watch_remote` RETURN half: re-emitted on the bridge's OWN
@@ -1658,7 +1445,9 @@ async fn read_loop(agent_id: AgentId, state: Arc<BridgeState>, kernel: Arc<Kerne
     // Read loop exit — the transport is gone, so every in-flight inbound dispatch
     // has nowhere to send its reply. Abort them, then emit bridge_down + fail
     // every pending oneshot.
-    calls.abort_all();
+    for h in &calls {
+        h.abort();
+    }
     emit_bridge_down(&agent_id, &state, &kernel).await;
     let drained: Vec<PendingReply> = {
         let mut p = state.pending.lock().expect("pending poisoned");
@@ -1725,18 +1514,6 @@ mod tests_ws_wire;
 #[cfg(test)]
 #[path = "tests_ws_message_cap.rs"]
 mod tests_ws_message_cap;
-
-/// S8 (audit 2026-10-03): a ws leg to a non-loopback host is sealed for secret
-/// marks (python `ws_bridge/tests/test_ws_seal.py`).
-#[cfg(test)]
-#[path = "tests_ws_seal.rs"]
-mod tests_ws_seal;
-
-/// Secret marks cross the bridge (python
-/// `io_bridge/tests/test_secret_across_bridges.py`, bridge half).
-#[cfg(test)]
-#[path = "tests_secret.rs"]
-mod secret_across;
 
 /// `_binary_path` as a list of steps across a bridge (python
 /// `io_bridge/tests/test_binary_path_steps.py`, bridge half).
