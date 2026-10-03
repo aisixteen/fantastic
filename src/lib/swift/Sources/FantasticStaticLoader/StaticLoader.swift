@@ -8,6 +8,12 @@
 // the manifest names. The kernel knows nothing about YAML; this bundle owns the
 // format.
 //
+// The pass runs ONLY on the kernel's own boot — origin none: the cold boot, or
+// `create_agent` booting the loader it just made. An agent-sent `boot` is
+// refused (audit G-2/BV-2): any agent that reaches the loader (every roster
+// agent, by the baseline `$parent`) could otherwise re-run the manifest with
+// operator authority — restore a revoked grant, re-create a deleted agent.
+//
 // After boot the roster is CLOSED: deny-all means a roster agent cannot
 // `create_agent`, so the manifest IS the roster. Idempotent by id (a reboot
 // re-reads the manifest and RE-APPLIES the declared fields over an existing
@@ -24,6 +30,17 @@ import Yams
 
 /// python's `MANIFEST_FIELD`.
 let MANIFEST_FIELD = "manifest"
+
+/// The one text an agent-sent `boot` is refused with — python `BOOT_REFUSED`,
+/// byte for byte.
+public let BOOT_REFUSED =
+    "static_loader: an agent-sent boot is refused — the roster is hydrated with "
+    + "operator authority, so only the kernel's own boot (cold boot, create_agent) "
+    + "runs it"
+/// Its hint — python `BOOT_REFUSED_HINT`.
+public let BOOT_REFUSED_HINT =
+    "change an agent's record with update_agent (the conferral rule applies "
+    + "there); the operator re-boots the loader"
 
 public struct StaticLoaderBundle: AgentBundle {
     /// The `handler_module` value that routes to this bundle.
@@ -135,6 +152,12 @@ public struct StaticLoaderBundle: AgentBundle {
     // MARK: - boot: hydrate the declared roster as operator
 
     private func boot(agentId: AgentId, agent: Agent, kernel: Kernel) async -> JSON {
+        // The pass below runs as the OPERATOR, so the one who asks for it must be
+        // the operator: the cold boot, `create_agent` booting this loader, the
+        // CLI. A caller's boot is not that — refused before the manifest is read.
+        if KernelTaskLocals.currentOrigin != nil {
+            return Refusal.make(Refusal.unauthorized, BOOT_REFUSED, hint: BOOT_REFUSED_HINT)
+        }
         let (agents, err) = loadManifest(agent, kernel)
         if let err {
             return .object(["error": .string(err), "booted": .bool(false)])
@@ -314,7 +337,10 @@ public struct StaticLoaderBundle: AgentBundle {
         under the root and boots it. On `boot` the loader reads the manifest and creates
         each declared agent as a child of itself — under `operator_context()`, so the
         hydration is the operator's authority at boot, not standing power the loader
-        holds.
+        holds. That pass runs only on the kernel's own boot (the cold boot, or
+        `create_agent` booting the loader it just made): a `boot` an agent sends is
+        refused (`reason: unauthorized`), so reaching the loader never
+        re-runs the manifest with operator authority.
 
         Manifest:
 

@@ -11,10 +11,8 @@
 //! Mirrors python `ai_core/core.py` `_grep` / `_context_clear` / `_context_recall`.
 
 use crate::assembly::default_system_content;
-use crate::context::{
-    budget as agent_budget, estimate_one, fit_reply, inline_cap, BUDGET_FLOOR,
-    NOTICE_ENVELOPE_RESERVE,
-};
+use crate::constants::{BUDGET_FLOOR, NOTICE_ENVELOPE_RESERVE};
+use crate::context::{budget as agent_budget, estimate_one, fit_reply, inline_cap};
 use crate::folds::{expand_ids, quoted_title, render as fold_render, row_content, row_id};
 use crate::helpers::agent_meta;
 use crate::history_view::{parse_reply_tag, reply_blocks};

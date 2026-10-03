@@ -3,7 +3,12 @@
 The relay is itself a kernel: each connection is a `peer_proxy` agent addressed
 by a GUID. We dial `ws://<host>/<guid>` with the group password in the
 `X-Fantastic-Auth` header (checked ONCE at the WS upgrade) and the
-`fantastic.relay.v1` subprotocol. The relay routes by `target`: a frame to a
+`fantastic.relay.v1` subprotocol. The password is a SECRET and lives only in a
+credential_store (audit IO-7/F4, 2026-10-03): the record names it —
+`credentials: {store, ref}` — and before EVERY dial the connector reads the ref's
+`password` field as itself, the answer marked `secret: ['result']`, pinned to the
+relay URL's host, exactly as an AI backend reads its key (`ai_core/credentials`).
+Nothing is cached: a rotated password is used by the next dial. The relay routes by `target`: a frame to a
 peer GUID arrives on that peer's socket as `{type:"event", source:<our guid>,
 payload}` — **one-way**. There is NO relay-level reply correlation for
 peer→peer (a `call` to a peer returns only the relay's delivery ack).
@@ -44,6 +49,7 @@ from io_bridge import (
     decode_frame,
     encode_frame,
 )
+from kernel import sender_context
 from kernel._refusal import UNAUTHORIZED, refusal
 
 SUBPROTOCOL = "fantastic.relay.v1"
@@ -53,7 +59,8 @@ SUBPROTOCOL = "fantastic.relay.v1"
 # would sit in the relay's ledger in full. Until relayd masks what it records, a
 # relay leg refuses any call carrying secret marks, in both directions: outbound
 # in `tools._forward`, inbound in `RelayTransport.recv`. ws_bridge (direct WS) is
-# not sealed. One text for both.
+# sealed only to a non-loopback host (its own seal, `ws_bridge._ws`). One text for
+# both.
 SECRET_SEALED = (
     "relay_connector: a call carrying secret marks may not cross a relay leg — "
     "the relay records every frame it routes, unmasked"
@@ -71,6 +78,11 @@ DEFAULT_HEARTBEAT = 30.0
 DEFAULT_RECONNECT = 10.0
 MAX_FRAME = 2**24
 
+#: The relay's own directory agent: a directory request is addressed `target` to
+#: it, and a directory event reaches the engine as an `event` frame from `src` it —
+#: so `watch_directory` subscribes the leg to it like any watched agent.
+DIRECTORY_SRC = "relay"
+
 SENTENCE = (
     "Cross-kernel comms through a relay-kernel router — dial-out WS, "
     "group-password auth (X-Fantastic-Auth), GUID-routed; symmetric RPC "
@@ -79,20 +91,92 @@ SENTENCE = (
 
 # An async dialer: `() -> ws`. Returns a connected websockets client (or raises).
 Dialer = Callable[[], Awaitable[Any]]
+# The relay password, read at dial time: `() -> str` (raises naming store + ref).
+PasswordReader = Callable[[], Awaitable[str]]
+
+#: The credential field that holds the relay group password.
+FIELD = "password"
 
 
-def _default_dialer(relay_url: str, guid: str, token: str) -> Dialer:
+class CredentialError(RuntimeError):
+    """The relay password could not be read — the dial fails, naming the store
+    and the ref."""
+
+
+def credentials_shape_error(v) -> str | None:
+    """Why a `credentials` value is malformed, or None: a map of exactly a
+    non-empty `store` id and a non-empty `ref` (ai_core's shape, its texts)."""
+    if not isinstance(v, dict) or set(v) != {"store", "ref"}:
+        return "credentials must be {store: <credential_store id>, ref: <ref>}"
+    for k in ("store", "ref"):
+        if not isinstance(v[k], str) or not v[k].strip():
+            return f"credentials.{k} must be a non-empty string"
+    return None
+
+
+def password_reader(self_id: str, kernel: Any, relay_url: str) -> PasswordReader:
+    """The async `read() -> password` a dial awaits — every dial, nothing cached.
+    Asks the store named by the record's `credentials` AS THIS CONNECTOR for the
+    ref's `password`, the answer marked secret (it lands in no row, ledger or
+    stream) and pinned to the relay URL's host (the store refuses a ref bound
+    elsewhere). Raises `CredentialError` on any refusal or a missing field."""
+
+    async def read() -> str:
+        cred = (kernel.get(self_id) or {}).get("credentials")
+        bad = credentials_shape_error(cred)
+        if bad:
+            raise CredentialError(f"relay_connector: {bad}")
+        store, ref = cred["store"], cred["ref"]
+        with sender_context(self_id):
+            out = (
+                await kernel.send(
+                    [
+                        {
+                            "target": store,
+                            "payload": {"type": "get", "ref": ref, "host": relay_url},
+                            "secret": ["result"],
+                        }
+                    ]
+                )
+            )[0]
+        res = out.get("result")
+        if (
+            out.get("status") != "completed"
+            or not isinstance(res, dict)
+            or res.get("error")
+        ):
+            err = res.get("error") if isinstance(res, dict) else out.get("status")
+            raise CredentialError(f"relay_connector: credentials {store}/{ref}: {err}")
+        pw = (res.get("fields") or {}).get(FIELD)
+        if not isinstance(pw, str) or not pw:
+            raise CredentialError(
+                f"relay_connector: credential {ref!r} in {store!r} has no {FIELD!r} "
+                "field"
+            )
+        return pw
+
+    return read
+
+
+async def _open_ws(url: str, headers: dict) -> Any:
+    """THE network dial — the one place a relay socket opens."""
+    import websockets
+
+    return await websockets.connect(
+        url,
+        subprotocols=[SUBPROTOCOL],
+        additional_headers=headers,
+        max_size=MAX_FRAME,
+    )
+
+
+def _default_dialer(relay_url: str, guid: str, password: PasswordReader) -> Dialer:
     url = f"{relay_url.rstrip('/')}/{guid}"
 
     async def dial() -> Any:
-        import websockets
-
-        return await websockets.connect(
-            url,
-            subprotocols=[SUBPROTOCOL],
-            additional_headers={"X-Fantastic-Auth": token},
-            max_size=MAX_FRAME,
-        )
+        # Read at USE time, every (re)dial: a rotated password reaches the relay
+        # on the next connect, and no copy outlives this call.
+        return await _open_ws(url, {"X-Fantastic-Auth": await password()})
 
     return dial
 
@@ -101,7 +185,8 @@ class RelayTransport(_BaseTransport):
     """Tunnels io_bridge frames over a (self-healing) relay-kernel connection to
     one `partner`. `send`/`recv` wrap/unwrap the relay envelope; `recv` re-dials
     on a drop with the `reconnect` backoff. Only `{type:"event", source:<partner>}`
-    is a tunnel delivery — directory events / relay acks / other peers are skipped."""
+    is a tunnel delivery; a directory event surfaces as an `event` frame from
+    `src:"relay"`; relay acks resolve directory requests; other peers are skipped."""
 
     def __init__(
         self,
@@ -143,7 +228,7 @@ class RelayTransport(_BaseTransport):
         cls,
         relay_url: str,
         guid: str,
-        token: str,
+        password: PasswordReader,
         partner_guid: str,
         heartbeat: float = DEFAULT_HEARTBEAT,
         reconnect: float = DEFAULT_RECONNECT,
@@ -151,7 +236,7 @@ class RelayTransport(_BaseTransport):
         dialer: Dialer | None = None,
         spawn: Any = None,
     ) -> "RelayTransport":
-        dialer = dialer or _default_dialer(relay_url, guid, token)
+        dialer = dialer or _default_dialer(relay_url, guid, password)
         t = cls(
             dialer=dialer,
             partner_guid=partner_guid,
@@ -348,11 +433,19 @@ class RelayTransport(_BaseTransport):
                 msg = decode_frame(raw)
             except Exception:
                 continue
+            # A non-object frame, like an undecodable one, is skipped: raising
+            # here ended the engine read loop with the leg still `connected`.
+            if not isinstance(msg, dict):
+                continue
             mtype = msg.get("type")
             # Relay-LEVEL reply (a directory `list_peers`/`watch` ack) — resolve
             # the pending request; never surfaces to the engine's bridge path.
+            # Only a STRING id names a request of ours.
             if mtype == "reply":
-                fut = self._relay_pending.pop(msg.get("id"), None)
+                rid = msg.get("id")
+                if not isinstance(rid, str):
+                    continue
+                fut = self._relay_pending.pop(rid, None)
                 if fut is not None and not fut.done():
                     fut.set_result(msg.get("data") or {})
                 continue
@@ -362,10 +455,12 @@ class RelayTransport(_BaseTransport):
                 if not isinstance(payload, dict):
                     continue
                 # A DIRECTORY event (source="relay") — surface it as a bridge
-                # `event` so the engine re-emits it on this connector's inbox
-                # (kernel.watch(<connector>) sees peer_joined|left|evicted|peer_status).
-                if source == "relay":
-                    return {"type": "event", "payload": payload}
+                # `event` from the directory, which the engine re-emits on this
+                # connector's inbox while `watch_directory` holds it in the leg's
+                # `watching` (kernel.watch(<connector>) sees
+                # peer_joined|left|evicted|peer_status, `src:"relay"`).
+                if source == DIRECTORY_SRC:
+                    return {"type": "event", "src": DIRECTORY_SRC, "payload": payload}
                 # A tunnel delivery FROM our partner — the inner bridge frame.
                 if source == self._partner:
                     if payload.get("type") == "call" and "secret" in payload:
@@ -463,16 +558,27 @@ async def build_transport(
     kind: str, rec: dict, kernel: Any, st: _BridgeState
 ) -> _BaseTransport:
     """Build a relay transport from the agent record. Required: `relay_url`
-    (ws://host:port), `partner_guid` (the peer to reach). `guid` (our id — the WS
-    path) is auto-minted on first boot if absent and PERSISTED into the record, so
-    every later hydration re-dials the SAME path; an explicit `guid` always wins.
-    Optional: `relay_token` (X-Fantastic-Auth; default ""), `heartbeat` (s, default
-    30; 0 off), `reconnect` (s before each re-dial, default 10; 0 = one-shot — boot
-    fails if the relay is down)."""
+    (ws://host:port), `partner_guid` (the peer to reach), `credentials` ({store,
+    ref} — the relay password's credential_store ref, field `password`, bound to
+    the relay's host; read before every dial). `guid` (our id — the WS path) is
+    auto-minted on first boot if absent and PERSISTED into the record, so every
+    later hydration re-dials the SAME path; an explicit `guid` always wins.
+    Optional: `heartbeat` (s, default 30; 0 off), `reconnect` (s before each
+    re-dial, default 10; 0 = one-shot — boot fails if the relay is down)."""
     relay_url = rec.get("relay_url")
     partner_guid = rec.get("partner_guid")
     if not relay_url or not partner_guid:
         raise ValueError("relay_connector requires relay_url, partner_guid")
+    cred = rec.get("credentials")
+    if cred is None:
+        raise ValueError(
+            f"relay_connector: no `credentials` on {rec['id']} — name the relay "
+            f"password's credential store and ref (update_agent {rec['id']} "
+            "credentials={store: <id>, ref: <ref>}; the ref's field `password`, "
+            "bound to the relay's host)"
+        )
+    if bad := credentials_shape_error(cred):
+        raise ValueError(f"relay_connector: {bad}")
     guid = rec.get("guid")
     if not guid:
         # Mint our own relay identity ONCE and persist it into the record. The seal:
@@ -484,13 +590,12 @@ async def build_transport(
     role = rec.get("role")
     if role is not None and role not in ROLES:
         raise ValueError(f"relay_connector role must be one of {ROLES}, got {role!r}")
-    token = rec.get("relay_token") or ""
     heartbeat = float(rec.get("heartbeat", DEFAULT_HEARTBEAT))
     reconnect = float(rec.get("reconnect", DEFAULT_RECONNECT))
     return await RelayTransport.connect(
         str(relay_url),
         str(guid),
-        str(token),
+        password_reader(rec["id"], kernel, str(relay_url)),
         str(partner_guid),
         heartbeat=heartbeat,
         reconnect=reconnect,

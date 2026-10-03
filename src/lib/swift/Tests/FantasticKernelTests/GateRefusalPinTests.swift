@@ -110,6 +110,33 @@ struct GateRefusalPinTests {
         )
     }
 
+    /// A relayed FOREIGN caller owns no subtree here (audit 2026-10-03, G-1):
+    /// placing under the leg or its child takes the path any other placement
+    /// takes — the leg's egress, then the parent's ingress against
+    /// `<guid>|<agent>`.
+    @Test func placementForARelayedCallerJudgesTheQualifiedId() async {
+        let k = await gatedKernel()
+        func create(_ parent: String) async -> String {
+            await KernelTaskLocals.withRemoteCaller(leg: AgentId("a"), address: "g2|scout") {
+                await call(
+                    k, as: "a", "kernel",
+                    [
+                        "type": "create_agent", "parent_id": .string(parent), "id": "x3",
+                        "handler_module": "noop.tools",
+                    ])
+            }
+        }
+        #expect(
+            await create("kid")
+                == #"{"error":"a may not create under kid","reason":"unauthorized","hint":"\#(FROM_ABOVE)","side":"egress"}"#
+        )
+        #expect(
+            await create("a")
+                == #"{"error":"a does not accept a child from g2|scout","reason":"unauthorized","hint":"\#(FROM_ABOVE)","side":"ingress"}"#
+        )
+        #expect(k.agent(AgentId("x3")) == nil)
+    }
+
     @Test func conferralDenials() async {
         let k = await gatedKernel()
         #expect(
@@ -163,8 +190,10 @@ struct GateRefusalPinTests {
     /// hint names the two can_call spellings that would reach it.
     @Test func aRemoteTargetIsAnEgressDenialNamingThePeer() async {
         let k = await gatedKernel()
-        let route = PeerRoute(via: "leg") { _, _, _, _, _ in (.object(["ok": true]), nil) }
-        #expect(k.registerPeer("g9", route) == nil)
+        let route = PeerRoute(via: "leg") { _, _, _, _, _ in (.object(["ok": true]), nil) } emit: {
+            _, _, _, _ in
+        }
+        k.registerPeer("g9", route)
         #expect(
             await call(k, as: "lonely", "g9|canvas", ["type": "ping"])
                 == #"{"error":"lonely may not call 'ping' on g9|canvas","reason":"unauthorized","#

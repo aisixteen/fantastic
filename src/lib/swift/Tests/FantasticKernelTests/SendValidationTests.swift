@@ -59,9 +59,38 @@ struct SendValidationTests {
     @Test func nonStringTypeIsBadArg() async {
         let kernel = freshKernel()
         await create(kernel, "a")
-        for bad: JSON in [.array([.string("x")]), .integer(7), .string(""), .null] {
+        // A non-string is named by its TYPE, never echoed — python's
+        // `type(verb).__name__` (audit 2026-10-03, W-11).
+        let cases: [(JSON, String)] = [
+            (.array([.string("x")]), "list"), (.integer(7), "int"), (.double(1.5), "float"),
+            (.object(["a": .integer(1)]), "dict"), (.string(""), "''"), (.null, "NoneType"),
+        ]
+        for (bad, got) in cases {
             let out = await kernel.send([Item(AgentId("a"), .object(["type": bad]))])[0]
             #expect(out.result["reason"].asString == "bad_arg", "\(bad): \(out.result.serialize())")
+            #expect(out.result["arg"].asString == "payload.type")
+            #expect(
+                out.result["error"].asString
+                    == "send: payload.type must be a non-empty string, got \(got)")
+        }
+    }
+
+    /// A RAW BODY sent AS `type` (the octet REST leg's `X-Fantastic-Bytes-Field:
+    /// type`, a binary frame's `_binary_path: [payload, type]`) is python's
+    /// `bytes` there: named by its type, never echoed — python's repr of it made
+    /// a 1 MiB body a 5 MiB refusal (audit 2026-10-03, W-11).
+    @Test func aBodySentAsTypeIsRefusedByItsType() async {
+        let kernel = freshKernel()
+        await create(kernel, "a")
+        for payload: JSON in [.object(["type": .null]), .object([:])] {
+            var item = Item(AgentId("a"), payload)
+            item.binary = Blob("type", Data(count: 4096))
+            let out = await kernel.send([item])[0]
+            #expect(
+                out.result["error"].asString
+                    == "send: payload.type must be a non-empty string, got bytes",
+                "\(out.result.serialize())")
+            #expect(out.result["reason"].asString == "bad_arg")
             #expect(out.result["arg"].asString == "payload.type")
         }
     }

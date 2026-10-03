@@ -4,8 +4,8 @@
 //! change here is a change to measured behaviour, so re-measure before moving one.
 //! Mirrors python `ai_core/constants.py`, section for section.
 //!
-//! The modules that use these re-export them by name (`crate::context::BUDGET_FLOOR`,
-//! `crate::strategies::fold::KEEP_TAIL`, `fantastic_ai_core::SEND_TIMEOUT_SECS`, …),
+//! The modules that use these re-export them by name
+//! (`crate::strategies::fold::KEEP_TAIL`, `fantastic_ai_core::SEND_TIMEOUT_SECS`, …),
 //! so every existing path keeps working. Nothing here may depend on another
 //! ai-core module.
 

@@ -174,7 +174,8 @@ try:
             _pending[r] = q
             f = {"op": "send", "rid": r, "target": target, "payload": payload or {}}
             if secret:
-                # The call's SECRET marks (`payload.<field>`, `result[.<field>]`):
+                # The call's SECRET marks (`payload.<field>`, `result[.<field>]`, or
+                # an array of steps `["payload", "a.b"]`), passed as given:
                 # the kernel shows `<secret>` in every record of the call, and the
                 # reply still carries the real values — to THIS program, which
                 # holds them from here on (print one and it is in the job output).

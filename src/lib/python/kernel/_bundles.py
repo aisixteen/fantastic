@@ -1,9 +1,9 @@
-"""Bundle discovery via entry points.
+"""Bundle discovery via entry points — and THE ONE WAY a handler module is reached.
 
 `fantastic.bundles` — every installed bundle (name → handler module).
 Used by the REPL `add <name>` flow to resolve a human-typed bundle name
-to its dotted module path. Substrate doesn't
-care which bundles exist; this is purely for the lookup convenience.
+to its dotted module path, and by `import_handler`, which loads a record's
+`handler_module` ONLY when the catalog (or `register_unlisted`) names it.
 
 A bundle is anything with a `handler(id, payload, agent)` callable in
 its declared module. Construction is explicit (e.g. `Cli(kernel,
@@ -12,9 +12,73 @@ parent=kernel_state)`); the substrate never instantiates a bundle by name.
 
 from __future__ import annotations
 
+import importlib
+import sys
 from importlib.metadata import entry_points
+from types import ModuleType
 
 from kernel._kernel import BUNDLE_ENTRY_GROUP, Kernel
+
+#: Test/probe bundles that DISPATCH but are not installed (`register_unlisted`).
+_UNLISTED: dict[str, ModuleType] = {}
+#: Handler modules the entry-point catalog has named, and names it did not. A name
+#: never seen re-scans once (a bundle installed while the process runs resolves on
+#: its first lookup); a known miss does not — a record of another runtime (`*.ts`)
+#: is looked up on every call and every reflect node, and a scan costs ~1.4 ms.
+_CATALOG: set[str] = set()
+_MISSING: set[str] = set()
+
+
+def register_unlisted(handler_module: str, module: ModuleType) -> None:
+    """Register a bundle that DISPATCHES but is not installable — a test or probe
+    module with no `fantastic.bundles` entry point (the pytest fixtures, the e2e
+    scenario probes). It never appears in the `bundles` catalog. Mirror of rust's
+    `BundleRegistry::register_unlisted` / swift's `registerUnlisted`: the same
+    name, the same meaning, process-wide as python's catalog is."""
+    _UNLISTED[handler_module] = module
+
+
+def import_handler(handler_module: str) -> ModuleType:
+    """The module a record's `handler_module` names — resolved ONLY from the
+    `fantastic.bundles` catalog plus `register_unlisted`, never from all of
+    `sys.path`.
+
+    Importing any name on `sys.path` ran that module's top-level code on a
+    grant-less `create_agent` (audit 2026-10-03, ARCH2-1): an agent could name
+    `unittest.__main__` and exit the process, or a module it had written itself.
+    A name outside the catalog is, to this kernel, a module that does not exist:
+    `ModuleNotFoundError: No module named '<top-level package>'` — rust's and
+    swift's text for an unregistered name, so every runtime says one thing."""
+    mod = _UNLISTED.get(handler_module)
+    if mod is not None:
+        return mod
+    if not _in_catalog(handler_module):
+        top = handler_module.split(".")[0]
+        raise ModuleNotFoundError(f"No module named {top!r}", name=top)
+    return importlib.import_module(handler_module)
+
+
+def _in_catalog(handler_module: str) -> bool:
+    """Does the `fantastic.bundles` catalog name `handler_module`?"""
+    if handler_module not in _CATALOG:
+        if handler_module not in _MISSING:
+            _CATALOG.update(ep.value for ep in entry_points(group=BUNDLE_ENTRY_GROUP))
+        if handler_module not in _CATALOG:
+            _MISSING.add(handler_module)
+            return False
+    return True
+
+
+def bundle_package(handler_module: str) -> str | None:
+    """The top-level package a bundle's shipped files (`readme.md`, `docs/`) are
+    read from — for a CATALOG bundle, or a `register_unlisted` one whose package
+    is already imported — else None: reading a package's resources imports its
+    `__init__`, so a name outside the catalog is never imported to read nothing
+    (audit 2026-10-03, ARCH2-1)."""
+    top = handler_module.split(".")[0]
+    if handler_module in _UNLISTED:
+        return top if top in sys.modules else None
+    return top if _in_catalog(handler_module) else None
 
 
 def _find_bundle_module(name: str, ctx: Kernel | None = None) -> str | None:

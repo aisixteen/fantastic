@@ -57,7 +57,9 @@ async def _settle(fp, want, timeout=5.0):
     await asyncio.sleep(0.15)
 
 
-async def test_silent_chain_turns_are_nudged_until_a_call_or_done(seeded_kernel):
+async def test_silent_chain_turns_are_nudged_until_a_call_or_done(
+    seeded_kernel, fake_providers
+):
     """The model is QUERIED UNTIL IT CALLS. A second silent turn used to end the
     chain silently (measured 2026-09-01, E30 subai: two prose turns and the run
     read as finished with the task untouched)."""
@@ -77,7 +79,7 @@ async def test_silent_chain_turns_are_nudged_until_a_call_or_done(seeded_kernel)
         context_window=32768,
         **memory_meta(seeded_kernel, aid, {"cli": "*"}),
     )
-    core._providers[aid] = fp
+    fake_providers[aid] = fp
     try:
         fp.turns[0] = _call({"type": "reflect"}).replace('"echo"', '"kernel"')
         await seeded_kernel.send(
@@ -90,10 +92,10 @@ async def test_silent_chain_turns_are_nudged_until_a_call_or_done(seeded_kernel)
         await asyncio.sleep(0.3)
         assert fp.calls == 5  # done ended it; nothing reminds after done
     finally:
-        core._providers.pop(aid, None)
+        fake_providers.pop(aid, None)
 
 
-async def test_done_call_ends_the_chain_without_a_nudge(seeded_kernel):
+async def test_done_call_ends_the_chain_without_a_nudge(seeded_kernel, fake_providers):
     fp = _Script(
         [
             _call({"type": "reflect"}).replace('"echo"', '"kernel"'),
@@ -107,7 +109,7 @@ async def test_done_call_ends_the_chain_without_a_nudge(seeded_kernel):
         context_window=32768,
         **memory_meta(seeded_kernel, aid, {"cli": "*"}),
     )
-    core._providers[aid] = fp
+    fake_providers[aid] = fp
     try:
         await seeded_kernel.send(
             [{"target": aid, "payload": {"type": "send", "text": "go"}}]
@@ -119,10 +121,10 @@ async def test_done_call_ends_the_chain_without_a_nudge(seeded_kernel):
             fp.incoming
         )
     finally:
-        core._providers.pop(aid, None)
+        fake_providers.pop(aid, None)
 
 
-async def test_a_first_turn_with_no_call_is_nudged_too(seeded_kernel):
+async def test_a_first_turn_with_no_call_is_nudged_too(seeded_kernel, fake_providers):
     fp = _Script(["just an answer, no calls", DONE])
     aid = "nd_c"
     seeded_kernel.create(
@@ -131,7 +133,7 @@ async def test_a_first_turn_with_no_call_is_nudged_too(seeded_kernel):
         context_window=32768,
         **memory_meta(seeded_kernel, aid, {"cli": "*"}),
     )
-    core._providers[aid] = fp
+    fake_providers[aid] = fp
     try:
         await seeded_kernel.send(
             [{"target": aid, "payload": {"type": "send", "text": "hi"}}]
@@ -140,7 +142,7 @@ async def test_a_first_turn_with_no_call_is_nudged_too(seeded_kernel):
         assert fp.calls == 2, fp.incoming
         assert "[no call was dispatched]" in fp.incoming[-1]
     finally:
-        core._providers.pop(aid, None)
+        fake_providers.pop(aid, None)
 
 
 # THE QUESTION-TURN EXEMPTION IS GONE. `test_a_question_turn_is_never_nudged`
@@ -155,6 +157,7 @@ async def test_a_first_turn_with_no_call_is_nudged_too(seeded_kernel):
 
 async def test_await_with_nothing_in_flight_is_refused_and_told_what_to_do(
     seeded_kernel,
+    fake_providers,
 ):
     fp = _Script(['waiting <call name="await"></call>', DONE])
     aid = "nd_aw"
@@ -164,7 +167,7 @@ async def test_await_with_nothing_in_flight_is_refused_and_told_what_to_do(
         context_window=32768,
         **memory_meta(seeded_kernel, aid, {"cli": "*"}),
     )
-    core._providers[aid] = fp
+    fake_providers[aid] = fp
     try:
         await seeded_kernel.send(
             [{"target": aid, "payload": {"type": "send", "text": "hi"}}]
@@ -174,11 +177,12 @@ async def test_await_with_nothing_in_flight_is_refused_and_told_what_to_do(
         assert "[await refused]" in fp.incoming[-1]
         assert "nothing of yours is in flight" in fp.incoming[-1]
     finally:
-        core._providers.pop(aid, None)
+        fake_providers.pop(aid, None)
 
 
 async def test_await_with_a_message_queued_stops_quietly_and_the_queue_wakes_it(
     seeded_kernel,
+    fake_providers,
 ):
     """The honest wait: something is queued for the agent, so `await` ends the turn
     with no nudge and no refusal; the queued message is the next turn."""
@@ -190,7 +194,7 @@ async def test_await_with_a_message_queued_stops_quietly_and_the_queue_wakes_it(
         context_window=32768,
         **memory_meta(seeded_kernel, aid, {"cli": "*"}),
     )
-    core._providers[aid] = fp
+    fake_providers[aid] = fp
     try:
         first = asyncio.create_task(
             seeded_kernel.send(
@@ -210,10 +214,10 @@ async def test_await_with_a_message_queued_stops_quietly_and_the_queue_wakes_it(
         assert not any("[no call was dispatched]" in m for m in fp.incoming)
         assert fp.incoming[-1].endswith("two")
     finally:
-        core._providers.pop(aid, None)
+        fake_providers.pop(aid, None)
 
 
-async def test_a_dead_turn_is_discarded_and_rerolled(seeded_kernel):
+async def test_a_dead_turn_is_discarded_and_rerolled(seeded_kernel, fake_providers):
     """A turn that is ONLY thinking did not answer: it is never stored and never
     counts as completed — it is rerolled by the no-call reminder, told why
     (measured on vLLM 2026-09-30: an 8-token thinking budget, then a clean
@@ -226,7 +230,7 @@ async def test_a_dead_turn_is_discarded_and_rerolled(seeded_kernel):
         context_window=32768,
         **memory_meta(seeded_kernel, aid, {"cli": "*"}),
     )
-    core._providers[aid] = fp
+    fake_providers[aid] = fp
     try:
         out = (
             await seeded_kernel.send(
@@ -248,10 +252,12 @@ async def test_a_dead_turn_is_discarded_and_rerolled(seeded_kernel):
             for m in fp.seen[1]
         ), fp.seen[1]
     finally:
-        core._providers.pop(aid, None)
+        fake_providers.pop(aid, None)
 
 
-async def test_a_chain_gives_up_after_max_silent_turns(seeded_kernel, monkeypatch):
+async def test_a_chain_gives_up_after_max_silent_turns(
+    seeded_kernel, monkeypatch, fake_providers
+):
     """Silent turns in a row are bounded: at MAX_SILENT_TURNS the chain stops
     reminding and tells its caller the model could not answer."""
     monkeypatch.setattr(core, "MAX_SILENT_TURNS", 3)
@@ -271,7 +277,7 @@ async def test_a_chain_gives_up_after_max_silent_turns(seeded_kernel, monkeypatc
     )
     seeded_kernel.ctx.ensure_inbox("watch_gu")
     seeded_kernel.watch(aid, "watch_gu")
-    core._providers[aid] = fp
+    fake_providers[aid] = fp
     try:
         # a browser-style client: its events land on the agent's own inbox,
         # where a watcher sees them (`cli` events go to the terminal instead)
@@ -295,4 +301,4 @@ async def test_a_chain_gives_up_after_max_silent_turns(seeded_kernel, monkeypatc
         assert reasons and reasons[-1][0] == "gave_up", reasons
         assert "Reiterate the inquiry" in reasons[-1][1]["detail"]["error"], reasons
     finally:
-        core._providers.pop(aid, None)
+        fake_providers.pop(aid, None)

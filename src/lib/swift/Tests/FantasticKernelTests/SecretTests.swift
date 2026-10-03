@@ -2,8 +2,8 @@
 // paths on the batch item; the target gets the real payload and the caller the
 // real reply, while every record and mirror of the call shows `<secret>`.
 //
-// Twin of python `tests/kernel/test_secret.py` (the first seven tests), plus the
-// swift carrier: a binary item's blob and a binary reply's body ride BESIDE the
+// Twin of python `tests/kernel/test_secret.py` (the first seven tests and the four
+// array-of-steps mark tests, owner 2026-10-03), plus the swift carrier: a binary item's blob and a binary reply's body ride BESIDE the
 // JSON here, so `payload.bytes` / `result.bytes` must reach them where python's
 // dict holds them.
 
@@ -17,6 +17,7 @@ import Testing
 @testable import FantasticRamStore
 
 private let KEY = "sk-live-0123456789abcdef"
+private let KEY2 = "sk-live-dotted-key-5a5a5a5a"
 private let ISSUED = "tok-issued-fedcba9876543210"
 private let PLACEHOLDER = Secret.placeholder
 
@@ -47,16 +48,22 @@ private final class SecretProbe: AgentBundle, @unchecked Sendable {
             return .object(["key": .string(ISSUED), "note": .string("issued")])
         case "fail":
             throw PyError("RuntimeError", "rejected key \(payload["key"].asString ?? "")")
+        case "hold":
+            return .object(["ok": .bool(true)])
+        case "issue_dotted":
+            return [
+                "a.b": .string(ISSUED), "a": ["b": "nested-plain"], "items": ["x", .string(ISSUED)],
+            ]
         case "marks":
             // what THIS dispatch's caller marked (python `current_secret()`)
-            return .object(["marks": .array(KernelTaskLocals.currentSecret.map { .string($0) })])
+            return .object(["marks": .array(KernelTaskLocals.currentSecret)])
         case "nest":
             // the handler's OWN send (unmarked) sees none of its caller's marks
             let inner = await KernelTaskLocals.$currentSender.withValue(nil) {
                 await kernel.send([Item(agentId, .object(["type": .string("marks")]))])[0]
             }
             return .object([
-                "outer": .array(KernelTaskLocals.currentSecret.map { .string($0) }),
+                "outer": .array(KernelTaskLocals.currentSecret),
                 "inner": inner.result["marks"],
             ])
         default:
@@ -66,7 +73,7 @@ private final class SecretProbe: AgentBundle, @unchecked Sendable {
 
     /// The swift carrier: `keep` stores the blob, `give` answers with a body.
     func handleBinary(agentId: AgentId, header: JSON, body: Blob?, kernel: Kernel) async throws
-        -> (JSON?, Data?)
+        -> (JSON?, Blob?)
     {
         // the chunk is the payload's `bytes` — python's `payload.get("bytes", b"")`
         let blob = bodyAt(body, "bytes") ?? Data()
@@ -78,7 +85,7 @@ private final class SecretProbe: AgentBundle, @unchecked Sendable {
             }
             return (.object(["kept": .integer(Int64(blob.count))]), nil)
         case "give":
-            return (.object(["note": .string("given")]), Data(ISSUED.utf8))
+            return (.object(["note": .string("given")]), Blob("bytes", Data(ISSUED.utf8)))
         default:
             return (try await handle(agentId: agentId, payload: header, kernel: kernel), nil)
         }
@@ -170,7 +177,10 @@ struct SecretTests {
                 "send: secret path 'payload.nope' names nothing in the payload"
             ),
             (paths("payload..key"), "send: secret path 'payload..key' has an empty step"),
-            (.array([.integer(5)]), "send: secret path must be a non-empty string, got 5"),
+            (
+                .array([.integer(5)]),
+                "send: secret path must be a dotted string or an array of steps, got 5"
+            ),
             (paths(""), "send: secret path must be a non-empty string, got ''"),
             (paths("result."), "send: secret path 'result.' has an empty step"),
             (
@@ -382,6 +392,209 @@ struct SecretTests {
         #expect(probe.got.count == 1, "the refused replay must not run the handler")
     }
 
+    /// Python `test_a_short_secret_never_mangles_the_kernels_own_words`: only the
+    /// RESULT is scrubbed — a one-letter secret must not rewrite the recorded
+    /// `status` ("completed" contains an "e").
+    @Test func aShortSecretNeverManglesTheKernelsOwnWords() async {
+        let k = makeKernel(SecretProbe())
+        let a = await mk(k)
+        let out = await k.send([
+            item(
+                a, ["type": .string("set_key"), "key": .string("e")],
+                secret: paths("payload.key"), id: "short-1")
+        ])[0]
+        #expect(out.status == .completed, "\(out.asJSON.serialize())")
+        let mine = await ledger(k).first { $0["name"].asString == "short-1" }
+        #expect(
+            mine?["status"].asString == "completed"
+                && mine?["outcome"]["status"].asString == "completed",
+            "\(mine?.serialize() ?? "nil")")
+    }
+
+    // ─── a mark as an ARRAY OF STEPS (owner, 2026-10-03) ────────────────────
+
+    /// `["payload", "a.b"]` is the key `"a.b"`, taken literally; the dotted
+    /// string `payload.a.b` keeps meaning `a` → `b`.
+    @Test func anArrayMarkMasksALiteralDottedKeyAndADottedOneDoesNot() async {
+        let probe = SecretProbe()
+        let k = makeKernel(probe)
+        let a = await mk(k)
+        let events = Events()
+        k.subscribe { ev, _ in events.add(ev) }
+        let sent: JSON = ["type": "hold", "a.b": .string(KEY), "a": ["b": "nested-plain"]]
+        let out = await k.send([
+            item(a, sent.asObject!, secret: [["payload", "a.b"]])
+        ])[0]
+        #expect(out.status == .completed && out.result == ["ok": true], "\(out.asJSON.serialize())")
+        #expect(probe.got == [sent], "the target gets the real payload")
+        let row = k.rows.getOne(out.pid!.value)
+        #expect(
+            row?["payload"]
+                == ["type": "hold", "a.b": .string(PLACEHOLDER), "a": ["b": "nested-plain"]],
+            "\(row.map { JSON.object($0).serialize() } ?? "nil")")
+        #expect(row?["secret"] == [["payload", "a.b"]])
+        let sends = events.all.filter {
+            $0["kind"].asString == "send" && $0["agent_id"].asString == a.value
+        }
+        #expect(
+            !sends.isEmpty && !sends.contains { mentions($0, KEY) },
+            "\(sends.map { $0.serialize() })")
+        #expect(!mentions(.array(await ledger(k)), KEY))
+        // the dotted spelling of the same text is the NESTED path
+        let dotted = await k.send([
+            item(
+                a, ["type": "hold", "a.b": "literal-plain", "a": ["b": .string(KEY)]],
+                secret: paths("payload.a.b"))
+        ])[0]
+        #expect(
+            k.rows.getOne(dotted.pid!.value)?["payload"]
+                == ["type": "hold", "a.b": "literal-plain", "a": ["b": .string(PLACEHOLDER)]])
+    }
+
+    /// Both spellings in one list: every payload and result mark masks, the call
+    /// row records the marks as given, and the handler reads them back as given.
+    @Test func aMixedListOfStringAndArrayMarks() async {
+        let probe = SecretProbe()
+        let k = makeKernel(probe)
+        let a = await mk(k)
+        let marks: JSON = [
+            "payload.key", ["payload", "a.b"], ["result", "a.b"], ["result", "items", 1],
+        ]
+        // named: the settle keeps the whole result
+        let out = await k.send([
+            item(
+                a, ["type": "issue_dotted", "key": .string(KEY), "a.b": .string(KEY2)],
+                secret: marks, id: "mixed-1")
+        ])[0]
+        #expect(
+            out.result
+                == ["a.b": .string(ISSUED), "a": ["b": "nested-plain"], "items": ["x", .string(ISSUED)]],
+            "the caller holds the real reply")
+        let row = k.rows.getOne(out.pid!.value)
+        #expect(row?["secret"] == marks, "\(row.map { JSON.object($0).serialize() } ?? "nil")")
+        #expect(
+            row?["payload"]
+                == ["type": "issue_dotted", "key": .string(PLACEHOLDER), "a.b": .string(PLACEHOLDER)],
+            "\(row.map { JSON.object($0).serialize() } ?? "nil")")
+        let led = await ledger(k)
+        #expect(
+            ![KEY, KEY2, ISSUED].contains { mentions(.array(led), $0) },
+            "\(JSON.array(led).serialize())")
+        let mine = led.first { $0["name"].asString == "mixed-1" }
+        #expect(
+            mine?["outcome"]["result"]
+                == [
+                    "a.b": .string(PLACEHOLDER), "a": ["b": "nested-plain"],
+                    "items": ["x", .string(PLACEHOLDER)],
+                ], "\(mine?.serialize() ?? "nil")")
+        // `currentSecret` is the marks exactly as given, an array as an array
+        let got = await k.send([
+            item(a, ["type": "marks", "key": .string(KEY), "a.b": .string(KEY2)], secret: marks)
+        ])[0]
+        #expect(got.result == ["marks": marks], "\(got.asJSON.serialize())")
+    }
+
+    @Test func arrayStepsAreExactAnIntIndexesAListAStringNamesAKey() async {
+        let probe = SecretProbe()
+        let k = makeKernel(probe)
+        let a = await mk(k)
+        let payload: OrderedDictionary<String, JSON> = [
+            "type": "hold", "items": [.string(KEY), "plain"], "m": ["0": .string(KEY2)],
+        ]
+        func shown(_ key: String, _ v: JSON) -> JSON {
+            var p = payload
+            p[key] = v
+            return .object(p)
+        }
+        let cases: [(JSON, JSON)] = [
+            ([["payload", "items", 0]], shown("items", [.string(PLACEHOLDER), "plain"])),
+            ([["payload", "m", "0"]], shown("m", ["0": .string(PLACEHOLDER)])),
+            (paths("payload.items.0"), shown("items", [.string(PLACEHOLDER), "plain"])),
+        ]
+        for (secret, want) in cases {
+            let out = await k.send([item(a, payload, secret: secret)])[0]
+            #expect(out.status == .completed, "\(secret.serialize()) \(out.asJSON.serialize())")
+            #expect(k.rows.getOne(out.pid!.value)?["payload"] == want, "\(secret.serialize())")
+        }
+        // a string step is never an index, an int step never a key
+        for (secret, repr) in [
+            ([["payload", "items", "0"]] as JSON, "['payload', 'items', '0']"),
+            ([["payload", "m", 0]] as JSON, "['payload', 'm', 0]"),
+        ] {
+            let out = await k.send([item(a, payload, secret: secret)])[0]
+            #expect(
+                out.result["error"].asString
+                    == "send: secret path \(repr) names nothing in the payload",
+                "\(out.asJSON.serialize())")
+        }
+    }
+
+    /// The array refusals, and the dotted-string ones byte for byte unchanged.
+    @Test func eachMalformedMarkIsRefusedWithItsOwnText() async {
+        let probe = SecretProbe()
+        let k = makeKernel(probe)
+        let a = await mk(k)
+        let step =
+            "is neither a string (an object key) nor a non-negative integer (a list index)"
+        let root = "must start with 'payload' and a step under it, or with 'result'"
+        let cases: [(JSON, String)] = [
+            ([[]], "path [] has no steps"),
+            ([["payload", true]], "path ['payload', True] step True \(step)"),
+            ([["payload", 1.5]], "path ['payload', 1.5] step 1.5 \(step)"),
+            ([["payload", nil]], "path ['payload', None] step None \(step)"),
+            ([["payload", -1]], "path ['payload', -1] step -1 \(step)"),
+            ([["payload", ["a"]]], "path ['payload', ['a']] step ['a'] \(step)"),
+            ([["key"]], "path ['key'] \(root)"),
+            ([[0, "key"]], "path [0, 'key'] \(root)"),
+            ([["payload"]], "path ['payload'] \(root)"),
+            (
+                [["payload", "type"]],
+                "cannot hide payload.type — the verb is how every row is read"
+            ),
+            ([["payload", "nope"]], "path ['payload', 'nope'] names nothing in the payload"),
+            (
+                [["payload", "a", "b"]],
+                "path ['payload', 'a', 'b'] names nothing in the payload"
+            ),
+            (
+                ["payload.key", ["payload", "nope"]],
+                "path ['payload', 'nope'] names nothing in the payload"
+            ),
+            ([5], "path must be a dotted string or an array of steps, got 5"),
+            (
+                [["payload": "key"]],
+                "path must be a dotted string or an array of steps, got {'payload': 'key'}"
+            ),
+            // the dotted-string texts, unchanged
+            ("payload.key", "must be a non-empty list of paths, got 'payload.key'"),
+            ([], "must be a non-empty list of paths, got []"),
+            ([""], "path must be a non-empty string, got ''"),
+            (["payload..key"], "path 'payload..key' has an empty step"),
+            (["key"], "path 'key' must start with 'payload.' or be 'result[.…]'"),
+            (["payload"], "path 'payload' must start with 'payload.' or be 'result[.…]'"),
+            (
+                ["payload.type"],
+                "cannot hide payload.type — the verb is how every row is read"
+            ),
+            (["payload.a.b"], "path 'payload.a.b' names nothing in the payload"),
+        ]
+        #expect(cases.count == 23)
+        for (secret, text) in cases {
+            let out = await k.send([
+                item(
+                    a, ["type": "set_key", "key": .string(KEY), "a.b": .string(KEY2)],
+                    secret: secret)
+            ])[0]
+            #expect(
+                out.status == .failed && out.pid == nil,
+                "\(secret.serialize()) \(out.asJSON.serialize())")
+            #expect(
+                out.result == ["error": .string("send: secret \(text)"), "reason": "bad_arg", "arg": "secret"],
+                "\(secret.serialize()) \(out.result.serialize())")
+        }
+        #expect(probe.got.isEmpty, "a refused item must not reach the handler")
+    }
+
     // ─── the swift carrier: raw bytes beside the JSON ───────────────────────
 
     @Test func aSecretBlobReachesTheTargetAndIsRecordedAsThePlaceholder() async {
@@ -421,7 +634,7 @@ struct SecretTests {
                 a, ["type": .string("give")], secret: paths("result.bytes"), id: "give-1",
                 rawReply: true)
         ])[0]
-        #expect(out.body == Data(ISSUED.utf8), "the caller gets the real body")
+        #expect(out.body == Blob("bytes", Data(ISSUED.utf8)), "the caller gets the real body")
         let mine = await ledger(k).first { $0["name"].asString == "give-1" }
         #expect(
             mine?["outcome"]["result"]

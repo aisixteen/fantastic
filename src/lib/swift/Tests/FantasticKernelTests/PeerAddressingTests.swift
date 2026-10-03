@@ -42,15 +42,15 @@ private func mkKernel(guid: String?) -> Kernel {
 private final class Calls: @unchecked Sendable {
     private let lock = NSLock()
     private var items: [(String, JSON, String)] = []
-    private var marks: [[String]] = []
-    func add(_ c: (String, JSON, String), _ secret: [String]) {
+    private var marks: [[JSON]] = []
+    func add(_ c: (String, JSON, String), _ secret: [JSON]) {
         lock.withLock {
             items.append(c)
             marks.append(secret)
         }
     }
     var all: [(String, JSON, String)] { lock.withLock { items } }
-    var secrets: [[String]] { lock.withLock { marks } }
+    var secrets: [[JSON]] { lock.withLock { marks } }
 }
 
 /// A fake route that records every call and answers `reply` (or `{ok: agent}`).
@@ -58,14 +58,66 @@ private func route(_ via: String, _ calls: Calls, reply: JSON? = nil) -> PeerRou
     PeerRoute(via: via) { agentId, payload, caller, secret, _ in
         calls.add((agentId, payload, caller), secret)
         return (reply ?? .object(["ok": .string(agentId)]), nil)
+    } emit: { agentId, payload, caller, _ in
+        calls.add(("emit:\(agentId)", payload, caller ?? ""), [])
     }
 }
 
 @discardableResult
 private func connect(_ k: Kernel, _ calls: Calls, reply: JSON? = nil) -> PeerRoute {
     let r = route("leg", calls, reply: reply)
-    #expect(k.registerPeer(PAGE, r) == nil)
+    k.registerPeer(PAGE, r)
     return r
+}
+
+/// One TAB of the identity PAGE: its route records the call as `<name>:<agent>`
+/// and answers when `answer` is called — or `{cancelled}` when its call is
+/// cancelled first (`cancelled` says so).
+private final class Tab: @unchecked Sendable {
+    private let lock = NSLock()
+    private var reply: JSON?
+    private var waiter: CheckedContinuation<JSON, Never>?
+    private var wasCancelled = false
+    var cancelled: Bool { lock.withLock { wasCancelled } }
+
+    func answer(_ r: JSON) {
+        let w: CheckedContinuation<JSON, Never>? = lock.withLock {
+            if let w = waiter {
+                waiter = nil
+                return w
+            }
+            reply = r
+            return nil
+        }
+        w?.resume(returning: r)
+    }
+
+    func route(_ name: String, _ calls: Calls) -> PeerRoute {
+        PeerRoute(via: "leg_\(name)") { agentId, payload, caller, secret, _ in
+            calls.add(("\(name):\(agentId)", payload, caller), secret)
+            let r = await withTaskCancellationHandler {
+                await withCheckedContinuation { (c: CheckedContinuation<JSON, Never>) in
+                    let ready: JSON? = self.lock.withLock {
+                        if let r = self.reply { return r }
+                        if self.wasCancelled { return .object(["cancelled": .bool(true)]) }
+                        self.waiter = c
+                        return nil
+                    }
+                    if let ready { c.resume(returning: ready) }
+                }
+            } onCancel: {
+                let w: CheckedContinuation<JSON, Never>? = self.lock.withLock {
+                    self.wasCancelled = true
+                    defer { self.waiter = nil }
+                    return self.waiter
+                }
+                w?.resume(returning: .object(["cancelled": .bool(true)]))
+            }
+            return (r, nil)
+        } emit: { agentId, payload, caller, _ in
+            calls.add(("\(name):emit:\(agentId)", payload, caller ?? ""), [])
+        }
+    }
 }
 
 private func send(_ k: Kernel, _ target: String, _ payload: JSON, as sender: String? = nil) async
@@ -110,7 +162,7 @@ struct PeerAddressingTests {
         #expect(calls.all.first?.2 == "\(HOST)|kernel")
     }
 
-    /// The route gets the item's `secret` paths verbatim (rooted at the item, as
+    /// The route gets the item's `secret` marks verbatim (rooted at the item, as
     /// the peer's item is), so the PEER masks its records; this kernel masks its
     /// own.
     @Test func theItemsSecretMarksRideToThePeer() async {
@@ -136,6 +188,18 @@ struct PeerAddressingTests {
         // an unmarked call hands the route no marks
         _ = await send(k, "\(PAGE)|creds", type("reflect"))
         #expect(calls.secrets.last == [], "\(calls.secrets)")
+        // an ARRAY of steps rides as given — an array, beside a dotted string
+        var dotted = Item(
+            AgentId("\(PAGE)|creds"),
+            .object(["type": .string("set"), "fields": .object(["a.b": .string(key)])]))
+        dotted.secret = [["payload", "fields", "a.b"], "result"]
+        let got = await k.send([dotted])[0]
+        #expect(got.status == .completed, "\(got.result.serialize())")
+        #expect(calls.secrets.last == [["payload", "fields", "a.b"], "result"], "\(calls.secrets)")
+        #expect(
+            k.rows.getOne(got.pid!.value)?["payload"]?["fields"]
+                == .object(["a.b": .string(Secret.placeholder)]),
+            "\(k.rows.getOne(got.pid!.value).map { JSON.object($0).serialize() } ?? "nil")")
     }
 
     @Test func anAgentNeedsTheQualifiedTargetInItsCanCall() async {
@@ -197,21 +261,86 @@ struct PeerAddressingTests {
         #expect(after.result["peers"] == .array([]), "\(after.result.serialize())")
     }
 
-    @Test func oneGuidOneLiveRoute() async {
+    /// The tabs of one identity are ONE principal (owner, 2026-10-03): a second
+    /// route for a live guid is ADDED, and a disconnect removes only its own.
+    @Test func oneGuidHoldsASetOfLiveRoutes() async {
         let k = mkKernel(guid: HOST)
         let calls = Calls()
         let first = connect(k, calls)
         let other = route("leg2", calls)
-        let refused = k.registerPeer(PAGE, other)
+        k.registerPeer(PAGE, other)
+        k.registerPeer(PAGE, other)  // the same route twice stays one
         #expect(
-            refused?["error"].asString?.contains("already connected via leg") == true,
-            "\(refused?.serialize() ?? "nil")")
-        #expect(refused?["arg"].asString == "guid")
-        // only the registered route may unregister it
+            k.peerRows()
+                == .array([
+                    .object(["guid": .string(PAGE), "via": .string("leg")]),
+                    .object(["guid": .string(PAGE), "via": .string("leg2")]),
+                ]))
         k.unregisterPeer(PAGE, other)
-        #expect(k.peer(PAGE) != nil)
+        let left = k.peerRoutes(PAGE)
+        #expect(left.count == 1 && left[0] === first)
         k.unregisterPeer(PAGE, first)
-        #expect(k.peer(PAGE) == nil)
+        #expect(k.peerRoutes(PAGE).isEmpty)
+        #expect(k.peerRows() == .array([]))
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func aCallReachesEveryTabAndSettlesWithTheFirstReply() async {
+        let k = mkKernel(guid: HOST)
+        let calls = Calls()
+        let a = Tab(), b = Tab()
+        k.registerPeer(PAGE, a.route("a", calls))
+        k.registerPeer(PAGE, b.route("b", calls))
+        let send = Task { await send(k, "\(PAGE)|canvas", type("around")) }
+        while calls.all.count < 2 { await Task.yield() }
+        let seen = calls.all.sorted { $0.0 < $1.0 }
+        #expect(seen.map(\.0) == ["a:canvas", "b:canvas"])
+        #expect(seen.allSatisfy { $0.1 == type("around") && $0.2 == "\(HOST)|kernel" })
+        b.answer(.object(["from": .string("b")]))
+        let out = await send.value
+        #expect(out.status == .completed, "\(out.result.serialize())")
+        #expect(out.result == .object(["from": .string("b")]))
+        // the slower tab's call is cancelled, not left waiting
+        #expect(a.cancelled)
+    }
+
+    /// MULTI-TAB EMIT: an emit to `<guid>|<agent>` reaches EVERY live tab of the
+    /// identity — an operator emit with no caller, an agent's as `<host>|<agent>`
+    /// once its `can_call` names the target.
+    @Test func anEmitReachesEveryTabOfTheIdentity() async {
+        let k = mkKernel(guid: HOST)
+        let calls = Calls()
+        let a = Tab(), b = Tab()
+        k.registerPeer(PAGE, a.route("a", calls))
+        k.registerPeer(PAGE, b.route("b", calls))
+        await k.emit(AgentId("\(PAGE)|canvas"), type("tick"))
+        #expect(calls.all.map(\.0) == ["a:emit:canvas", "b:emit:canvas"])
+        #expect(calls.all.allSatisfy { $0.1 == type("tick") && $0.2 == "" })
+        await create(k, "lonely")
+        await create(k, "speaker", canCall: .object(["\(PAGE)|canvas": verbs("emit")]))
+        await KernelTaskLocals.$currentSender.withValue(AgentId("lonely")) {
+            await k.emit(AgentId("\(PAGE)|canvas"), type("denied"))
+        }
+        await KernelTaskLocals.$currentSender.withValue(AgentId("speaker")) {
+            await k.emit(AgentId("\(PAGE)|canvas"), type("said"))
+        }
+        let rest = Array(calls.all.dropFirst(2))
+        #expect(rest.map(\.0) == ["a:emit:canvas", "b:emit:canvas"])
+        #expect(rest.allSatisfy { $0.1 == type("said") && $0.2 == "\(HOST)|speaker" })
+    }
+
+    @Test func aDisconnectedTabLeavesTheIdentityRoutable() async {
+        let k = mkKernel(guid: HOST)
+        let calls = Calls()
+        let a = Tab(), b = Tab()
+        let gone = a.route("a", calls)
+        k.registerPeer(PAGE, gone)
+        k.registerPeer(PAGE, b.route("b", calls))
+        b.answer(.object(["from": .string("b")]))
+        k.unregisterPeer(PAGE, gone)
+        let out = await send(k, "\(PAGE)|canvas", type("around"))
+        #expect(out.result == .object(["from": .string("b")]), "\(out.result.serialize())")
+        #expect(calls.all.map(\.0) == ["b:canvas"])
     }
 
     @Test func aKernelWithNoGuidCannotSayWhoIsCalling() async {

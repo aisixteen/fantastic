@@ -18,6 +18,7 @@ import pytest
 
 from _testkit_relay import FakeRelayHub
 from kernel._refusal import NOT_CONNECTED
+from io_bridge import _engine
 from relay_connector import tools as rc
 from relay_connector._relay import RelayTransport
 
@@ -91,20 +92,20 @@ async def test_one_shot_leg_still_fails_loud_when_the_socket_dies_on_open():
 async def test_every_not_connected_refusal_shares_one_reason_code(verb, tmp_path):
     """One precondition (no transport) ⇒ one machine-readable code, whichever
     verb hit it — plus the hint that repairs it."""
-    rc._bridges.clear()
+    _engine._bridges.clear()
     payload = {"type": verb}
     if verb == "forward":
         payload = {"type": "forward", "target": "x", "payload": {"type": "reflect"}}
     out = await rc.handler("relay_probe", payload, kernel=None)
     assert out["reason"] == NOT_CONNECTED, out
     assert out["hint"] == "call boot first", out
-    rc._bridges.clear()
+    _engine._bridges.clear()
 
 
 @pytest.mark.parametrize("verb", ["watch_remote", "unwatch_remote"])
 async def test_engine_watch_verbs_share_the_code_too(verb):
-    rc._bridges.clear()
+    _engine._bridges.clear()
     out = await rc.handler("relay_probe", {"type": verb, "target": "x"}, kernel=None)
     assert out["reason"] == NOT_CONNECTED, out
     assert out["hint"] == "call boot first", out
-    rc._bridges.clear()
+    _engine._bridges.clear()

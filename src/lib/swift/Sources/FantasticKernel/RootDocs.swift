@@ -105,8 +105,9 @@ public enum RootDocs {
 
     /// Seed `<workdir>/.fantastic/docs/<key>.md` from [`all`] — nested keys land
     /// in nested dirs — copy-if-missing (preserves operator edits). Called at
-    /// boot beside `RootReadme.seed`.
-    public static func seed(workdir: URL) {
+    /// boot beside `RootReadme.seed`. A failed write THROWS, as python's seed
+    /// raises (audit 2026-10-03, ARCH2-9).
+    public static func seed(workdir: URL) throws {
         let dir =
             workdir
             .appendingPathComponent(".fantastic")
@@ -115,9 +116,9 @@ public enum RootDocs {
         for (key, body) in all {
             let dest = dir.appendingPathComponent("\(key).md")
             if fm.fileExists(atPath: dest.path) { continue }
-            try? fm.createDirectory(
+            try fm.createDirectory(
                 at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try? body.write(to: dest, atomically: true, encoding: .utf8)
+            try body.write(to: dest, atomically: true, encoding: .utf8)
         }
     }
 }

@@ -115,10 +115,10 @@ impl Bundle for FakeStore {
     }
     async fn handle_binary(
         &self,
-        _id: &AgentId,
+        id: &AgentId,
         header: Value,
         body: Option<fantastic_kernel::Blob>,
-        _kernel: &Arc<Kernel>,
+        kernel: &Arc<Kernel>,
     ) -> Result<(Reply, Option<fantastic_kernel::Blob>), Box<dyn std::error::Error + Send + Sync>>
     {
         let blob: Vec<u8> = body.map(|b| b.bytes).unwrap_or_default();
@@ -140,10 +140,9 @@ impl Bundle for FakeStore {
                 std::fs::write(&target, &blob).ok();
                 Ok((Some(json!({"written": blob.len()})), None))
             }
-            other => Ok((
-                Some(json!({"error": format!("FakeStore: {other:?}")})),
-                None,
-            )),
+            // every other verb is the JSON half — the kernel dispatches
+            // EVERY call here
+            _ => Ok((self.handle(id, &header, kernel).await?, None)),
         }
     }
 }
@@ -543,10 +542,10 @@ impl Bundle for TruncatingStore {
     }
     async fn handle_binary(
         &self,
-        _id: &AgentId,
+        id: &AgentId,
         header: Value,
         body: Option<fantastic_kernel::Blob>,
-        _kernel: &Arc<Kernel>,
+        kernel: &Arc<Kernel>,
     ) -> Result<(Reply, Option<fantastic_kernel::Blob>), Box<dyn std::error::Error + Send + Sync>>
     {
         let blob: Vec<u8> = body.map(|b| b.bytes).unwrap_or_default();
@@ -577,10 +576,9 @@ impl Bundle for TruncatingStore {
                 std::fs::write(&target, &blob).ok();
                 Ok((Some(json!({"written": blob.len()})), None))
             }
-            other => Ok((
-                Some(json!({"error": format!("TruncatingStore: {other:?}")})),
-                None,
-            )),
+            // every other verb is the JSON half — the kernel dispatches
+            // EVERY call here
+            _ => Ok((self.handle(id, &header, kernel).await?, None)),
         }
     }
 }
@@ -866,5 +864,89 @@ async fn a_failed_record_write_seeds_no_readme() {
     assert!(
         !paths.iter().any(|p| p.ends_with("readme.md")),
         "a failed write still seeded the readme: {paths:?}"
+    );
+}
+
+/// [`FakeStore`] that refuses a `write_stream` of any `readme.md` — the record
+/// lands, its readme does not.
+struct ReadmeRefusingStore(FakeStore);
+
+#[async_trait]
+impl Bundle for ReadmeRefusingStore {
+    fn name(&self) -> &str {
+        self.0.name()
+    }
+    async fn handle(
+        &self,
+        id: &AgentId,
+        payload: &Value,
+        kernel: &Arc<Kernel>,
+    ) -> Result<Reply, Box<dyn std::error::Error + Send + Sync>> {
+        self.0.handle(id, payload, kernel).await
+    }
+    async fn handle_binary(
+        &self,
+        id: &AgentId,
+        header: Value,
+        body: Option<fantastic_kernel::Blob>,
+        kernel: &Arc<Kernel>,
+    ) -> Result<(Reply, Option<fantastic_kernel::Blob>), Box<dyn std::error::Error + Send + Sync>>
+    {
+        let path = header.get("path").and_then(Value::as_str).unwrap_or("");
+        if header["type"] == "write_stream" && path.ends_with("readme.md") {
+            return Ok((
+                Some(json!({"error": "disk full", "reason": "bad_arg"})),
+                None,
+            ));
+        }
+        self.0.handle_binary(id, header, body, kernel).await
+    }
+}
+
+/// A refused SEED write is LOUD — stderr and `persistence.error` — as a refused
+/// record write is (python `_seed_doc_via_store` → `_persist_failed`). Its reply
+/// used to be dropped, so a readme that never landed was invisible (audit
+/// 2026-10-03, ARCH2-9).
+#[tokio::test]
+async fn a_refused_seed_write_is_loud() {
+    let tmp = fresh_workdir();
+    let store_root = tmp.path();
+    let mut kernel = Kernel::with_storage(StorageMode::Disk(store_root.to_path_buf()));
+    let mut reg = BundleRegistry::new();
+    reg.register("readme_bundle.tools", ReadmeBundle);
+    reg.register(
+        "file_bridge.tools",
+        ReadmeRefusingStore(FakeStore {
+            root: store_root.to_path_buf(),
+        }),
+    );
+    fantastic_kernel::test_support::register_root_loader(&mut reg);
+    kernel.bundles = reg;
+    let kernel = Arc::new(kernel);
+    let root = Agent::new(
+        AgentId::from("kernel_state"),
+        Some("kernel_state.tools".to_string()),
+        None,
+        Map::new(),
+        store_root.to_path_buf(),
+        false,
+    );
+    kernel.register(Arc::clone(&root));
+    kernel.set_root(Arc::clone(&root));
+    fantastic_kernel::test_support::boot_root(&kernel).await;
+    wire_store(&kernel, store_root).await;
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel_state"),
+            json!({"type": "create_agent", "parent_id": "kernel",
+                   "handler_module": "readme_bundle.tools", "id": "doc"}),
+        )])
+        .await;
+    fantastic_kernel::test_support::settle_records().await;
+    assert!(store_root.join("agents/doc/agent.yaml").exists());
+    assert!(!store_root.join("agents/doc/readme.md").exists());
+    assert_eq!(
+        fantastic_kernel::persistence::persist_error(&kernel),
+        Some(json!({"store": "store", "path": "agents/doc/readme.md", "error": "disk full"})),
     );
 }

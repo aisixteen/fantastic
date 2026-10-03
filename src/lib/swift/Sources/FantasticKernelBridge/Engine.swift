@@ -12,8 +12,15 @@
 // (`bridge.forward: send failed: <message>`), because that is the one string
 // python writes and a transport-flavoured wording diverges on every leg.
 //
-// Reply correlation: `corr_id = "<bridge_id>-<n>"` — namespaced per agent, so
-// two legs in one kernel cannot collide, and the frame `id` echoes it.
+// Reply correlation: `corr_id = "<bridge_id>-<boot nonce>-<n>"` — the bridge id
+// keeps bridges apart, the nonce (minted at every boot) keeps BOOTS apart, and
+// the frame `id` echoes it so logs correlate across hops. The frame id NAMES the
+// execution on the receiver, so an id reused by a restarted sender would join a
+// settled execution there and never run (audit IO-5, 2026-10-03).
+//
+// A leg's rules (`ingress_rule`/`egress_rule`/`auth`) are read off the LIVE
+// record per frame — never cached at boot — so what `reflect` reports is what the
+// gate enforces the moment `update_agent` writes it (audit ARCH-2, 2026-10-03).
 
 import FantasticIoBridge
 import FantasticJSON
@@ -48,13 +55,13 @@ public protocol BridgeTransport: Sendable {
     func close() async
 }
 
-/// How a pending forward settled: the remote's `data` (with the reply's chunk
-/// when it ARRIVED as a binary frame — a 0-byte chunk included, C37; `nil` for a
-/// text reply), or the engine's own `ConnectionError` text (python `bridge
-/// transport closed` / `bridge shut down`), which the verb renders as
-/// `bridge.forward: <text>`.
+/// How a pending forward settled: the remote's `data` (with the reply's chunk at
+/// its slot of that `data` when it ARRIVED as a binary frame — a 0-byte chunk
+/// included, C37; `nil` for a text reply), or the engine's own `ConnectionError`
+/// text (python `bridge transport closed` / `bridge shut down`), which the verb
+/// renders as `bridge.forward: <text>`.
 enum PendingOutcome: Sendable {
-    case data(JSON, Data?)
+    case data(JSON, Blob?)
     case closed(String)
 }
 
@@ -74,13 +81,12 @@ final class BridgeState: @unchecked Sendable {
     /// `event` frame is re-emitted only when its `src` is here — nothing flows
     /// until subscribed, and nothing after an unwatch.
     private var watching: Set<String> = []
-    /// Per-leg rules, symmetric and independent. Sealed inbound, silent
-    /// outbound — boot ALWAYS overwrites them from the record.
-    var ingress: IngressRule = IngressRules.DenyInbound()
-    var egress: EgressRule = EgressRules.Silent()
     weak var kernel: Kernel?
 
     private var pending: [String: @Sendable (PendingOutcome?) -> Void] = [:]
+    /// `<bridge id>-<nonce>`, minted at every boot, and the count under it: the
+    /// frame ids of this boot's forwards (`nextCorr`).
+    private var corrPrefix = ""
     private var corrCounter: Int = 0
     /// In-flight INBOUND dispatches (one task per `call` frame), so the read
     /// loop keeps reading and teardown can cancel them.
@@ -99,13 +105,34 @@ final class BridgeState: @unchecked Sendable {
         return pending.count
     }
 
+    /// Python `_new_corr_prefix`: `<bridge id>-<12 hex>`, a fresh nonce per
+    /// BOOT (ts's `mintPrefix` width). The counter under it restarts at every
+    /// boot, so without the nonce a restarted sender's `<leg>-1` named an
+    /// execution the receiver had already settled — the new call was joined to
+    /// it and never ran (audit IO-5).
+    static func newCorrPrefix(_ id: AgentId) -> String {
+        var nonce = ""
+        for _ in 0..<6 { nonce += String(format: "%02x", UInt8.random(in: 0...255)) }
+        return "\(id.value)-\(nonce)"
+    }
+
+    /// A boot's correlator: a fresh prefix, the counter back at 0.
+    func resetCorr(_ id: AgentId) {
+        lock.withLock {
+            corrPrefix = Self.newCorrPrefix(id)
+            corrCounter = 0
+        }
+    }
+
     /// Python `_next_corr`: DASH, not colon — a ":" would land in the
     /// kernel-minted pid namespace and be refused on the serving side.
-    func nextCorr(_ id: AgentId) -> String {
+    /// Bridge-minted correlators are caller-chosen ids like any other — fresh
+    /// per forward AND per boot, so each forward is its own intent.
+    func nextCorr() -> String {
         lock.lock()
         defer { lock.unlock() }
         corrCounter += 1
-        return "\(id.value)-\(corrCounter)"
+        return "\(corrPrefix)-\(corrCounter)"
     }
 
     func park(_ corr: String, _ resume: @escaping @Sendable (PendingOutcome?) -> Void) {
@@ -224,8 +251,11 @@ extension KernelBridgeBundle {
     // MARK: - boot / teardown
 
     /// Python `io_bridge.boot`: idempotency, the `memory` test kind, the
-    /// `build_transport` seam for everything else, then the common tail —
-    /// resolve the leg's rules, spawn the read loop, emit `bridge_up`.
+    /// `build_transport` seam for everything else, then the common tail — mint
+    /// this boot's correlator nonce, spawn the read loop, emit `bridge_up`. The
+    /// leg's rules are NOT cached here: the gate and `forward` read them off the
+    /// live record per frame; boot only refuses an egress rule the registry does
+    /// not know, before dialing.
     func bootLeg(agentId: AgentId, kernel: Kernel) async -> JSON {
         let st = state(agentId)
         st.kernel = kernel
@@ -235,6 +265,11 @@ extension KernelBridgeBundle {
             ])
         }
         let meta = kernel.agent(agentId)?.meta ?? [:]
+        do {
+            _ = try resolveEgress(egressRule: meta["egress_rule"], auth: meta["auth"])
+        } catch {
+            return .object(["error": .string("bridge: bad auth rule: \(error)")])
+        }
         let kindValue = meta["transport"] ?? .null
         let kind = pyTruthy(kindValue) ? pyStr(kindValue) : "ws"
         let transport: any BridgeTransport
@@ -261,15 +296,7 @@ extension KernelBridgeBundle {
         }
         st.transport = transport
         st.transportKind = kind
-        do {
-            st.ingress = try resolveIngress(
-                ingressRule: meta["ingress_rule"], auth: meta["auth"])
-            st.egress = try resolveEgress(egressRule: meta["egress_rule"], auth: meta["auth"])
-        } catch {
-            // A bad rule must not leave the just-built transport open.
-            await teardown(agentId)
-            return .object(["error": .string("bridge: bad auth rule: \(error)")])
-        }
+        st.resetCorr(agentId)
         // REGISTERED: the read loop outlives this `boot` dispatch and re-emits
         // every inbound frame for the life of the leg.
         st.loopStarted()
@@ -301,8 +328,6 @@ extension KernelBridgeBundle {
         st.cleanup = nil
         st.extra = [:]
         st.clearWatching()
-        st.ingress = IngressRules.DenyInbound()
-        st.egress = EgressRules.Silent()
     }
 
     // MARK: - read loop
@@ -336,8 +361,14 @@ extension KernelBridgeBundle {
             case "reply":
                 if let corr = frame["id"].asString, let resume = st.take(corr) {
                     // THE CARRIER, not the length: a binary reply holds a chunk
-                    // (an empty one included), a text reply holds none.
-                    resume(.data(frame["data"], isBinary ? body : nil))
+                    // (an empty one included), a text reply holds none. The chunk
+                    // keeps its slot in the reply (`["data", …p]` on the frame is
+                    // `p` in `data`); a body the frame put outside `data` is not
+                    // part of the reply.
+                    resume(
+                        .data(
+                            frame["data"],
+                            isBinary ? Codec.bodyUnder("data", frame, body: body) : nil))
                 }
             case "error":
                 if let corr = frame["id"].asString, let resume = st.take(corr) {
@@ -391,12 +422,16 @@ extension KernelBridgeBundle {
         let addr =
             pyTruthy(target)
             ? pyStr(target) : (pyTruthy(frame["src"]) ? pyStr(frame["src"]) : "")
-        let decision = st.ingress.authorize(
+        // The leg's INGRESS rule — read off the LIVE record, per frame, as every
+        // web/file/exec leg does (audit ARCH-2). An unresolvable rule seals.
+        let meta = kernel.agent(agentId)?.meta ?? [:]
+        let ingress = resolveIngress(ingressRule: meta["ingress_rule"], auth: meta["auth"])
+        let decision = ingress.authorize(
             AuthAction(
                 kind: "call", target: addr, verb: inner["type"].asString ?? "",
                 token: frame["auth_token"].asString))
         var reply: JSON
-        var replyBody: Data? = nil
+        var replyBody: Blob? = nil
         if case .deny(let denial) = decision {
             // FORWARDED, not re-worded — the rule's own reason and repair, so a
             // peer hitting a sealed leg learns how to open it.
@@ -438,20 +473,17 @@ extension KernelBridgeBundle {
                 built.payload = pyTruthy(p) ? p : .object([:])
                 built.binary = binary
             }
-            // A stream verb rides the binary channel even with no body: python's
-            // `read_stream` reply holds real bytes whatever frame asked for it.
-            if built.binary == nil,
-                Codec.binaryEdgeVerbs.contains(built.payload["type"].asString ?? "")
-            {
-                built.rawReply = true
-            }
+            // ANY verb's reply may hold raw bytes, whatever frame asked for it
+            // (python's reply dict holds them; no list of verbs): a call with no
+            // request body still carries its reply's body back.
+            if built.binary == nil { built.rawReply = true }
             let item = built
             // THE QUALIFIED CALLER rides into the dispatch: the gate checks the
             // target's `callable_by` against `<peer guid>|<remote agent>` (never
             // the leg), and a memory store keys what it writes by it. Python
             // `remote_caller_context(kernel.id, caller)`.
             let caller: String? = pyTruthy(frame["caller"]) ? frame["caller"].asString : nil
-            let run: @Sendable () async -> (JSON, Data?) = {
+            let run: @Sendable () async -> (JSON, Blob?) = {
                 let out = await kernel.send([item])[0]
                 return (out.result, out.body)
             }
@@ -463,18 +495,20 @@ extension KernelBridgeBundle {
                 return await run()
             }
         }
-        var out: JSON = .object([
+        let out: JSON = .object([
             "type": .string("reply"), "id": frame["id"], "data": reply,
         ])
         // THE CARRIER picks the frame kind, never the body's length: a 0-byte
-        // chunk is still a chunk (C37). The peer went away mid-dispatch; the
-        // read loop already knows.
+        // chunk is still a chunk (C37). The chunk rides raw at `["data", …its
+        // slot]` (`["data", "bytes"]` for a `read_stream` chunk, `["data", "x.y"]`
+        // for a reply key `"x.y"`). The peer went away mid-dispatch; the read
+        // loop already knows.
         guard let replyBody else {
             try? await transport.send(out)
             return
         }
-        out["_binary_path"] = Codec.binaryPath(["data", "bytes"])
-        try? await transport.sendBinary(header: out, body: replyBody)
+        let at = replyBody.nested(in: "data")
+        try? await transport.sendBinary(header: Codec.binaryHead(out, at), body: at.bytes)
     }
 
     /// This kernel's own instance guid (the root record's `guid`), or `nil`
@@ -536,10 +570,18 @@ extension KernelBridgeBundle {
     /// `payload.payload.bytes` rides as the far item's `payload.bytes`.
     private func stampForwardedSecret(_ frame: inout JSON) {
         let secret = forwardedSecret(KernelTaskLocals.currentSecret)
-        if !secret.isEmpty { frame["secret"] = .array(secret.map { .string($0) }) }
+        if !secret.isEmpty { frame["secret"] = .array(secret) }
     }
 
     // MARK: - shared verbs
+
+    /// The leg's EGRESS rule as its record says NOW (python
+    /// `resolve_egress(kernel.get(id))` per forward). Throws for a rule the
+    /// registry does not know.
+    private func liveEgress(_ agentId: AgentId, _ kernel: Kernel) throws -> EgressRule {
+        let meta = kernel.agent(agentId)?.meta ?? [:]
+        return try resolveEgress(egressRule: meta["egress_rule"], auth: meta["auth"])
+    }
 
     /// Python `_forward`.
     func forwardVerb(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON {
@@ -556,7 +598,14 @@ extension KernelBridgeBundle {
             return Refusal.make(
                 Refusal.notConnected, "bridge.forward: not connected", hint: "call boot first")
         }
-        let corr = st.nextCorr(agentId)
+        // The leg's EGRESS rule, off the live record per forward (never a
+        // boot-time copy): an operator's `update_agent egress_rule=…` stamps the
+        // next frame (audit ARCH-2).
+        let egress: EgressRule
+        do { egress = try liveEgress(agentId, kernel) } catch {
+            return .object(["error": .string("bridge: bad auth rule: \(error)")])
+        }
+        let corr = st.nextCorr()
         var frame: JSON = .object([
             "type": .string("call"), "id": .string(corr), "target": target, "payload": inner,
         ])
@@ -565,7 +614,7 @@ extension KernelBridgeBundle {
         // item, so the far kernel masks its records of the call as this one does.
         stampForwardedSecret(&frame)
         // Stamp this leg's EGRESS credential on the ENVELOPE (never the payload).
-        if let token = st.egress.credential() { frame["auth_token"] = .string(token) }
+        if let token = egress.credential() { frame["auth_token"] = .string(token) }
         let slot = expect(st: st, corr: corr)
         do {
             try await transport.send(frame)
@@ -591,11 +640,12 @@ extension KernelBridgeBundle {
     /// holds the bytes there); the bridge ships a binary `call` frame with the body
     /// at `["payload", …steps]`, or a TEXT one when the call carries no body (a raw
     /// read). A body anywhere else is not part of the forwarded call, exactly as
-    /// python's inner payload would not hold it. The reply's chunk comes back
-    /// when the remote answered a binary frame — `nil` for a text reply (C37).
+    /// python's inner payload would not hold it. The reply's chunk comes back at
+    /// its slot of the reply when the remote answered a binary frame — `nil` for a
+    /// text reply (C37).
     func binaryForwardVerb(
         agentId: AgentId, header: JSON, body: Blob?, kernel: Kernel
-    ) async throws -> (JSON, Data?) {
+    ) async throws -> (JSON, Blob?) {
         let target = header["target"]
         guard pyTruthy(target), case .object = header["payload"] else {
             return (
@@ -622,13 +672,17 @@ extension KernelBridgeBundle {
         // admitted the path at launch.
         var inner = header["payload"]
         if let carried { try? pySetPath(&inner, parts: carried.parts, .null) }
-        let corr = st.nextCorr(agentId)
+        let egress: EgressRule
+        do { egress = try liveEgress(agentId, kernel) } catch {
+            return (.object(["error": .string("bridge: bad auth rule: \(error)")]), nil)
+        }
+        let corr = st.nextCorr()
         var frame: JSON = .object([
             "type": .string("call"), "id": .string(corr), "target": target, "payload": inner,
         ])
         if let caller = qualifiedCaller(kernel) { frame["caller"] = .string(caller) }
         stampForwardedSecret(&frame)
-        if let token = st.egress.credential() { frame["auth_token"] = .string(token) }
+        if let token = egress.credential() { frame["auth_token"] = .string(token) }
         let slot = expect(st: st, corr: corr)
         do {
             if let carried {
@@ -714,20 +768,35 @@ extension KernelBridgeBundle {
 ///
 /// The local item is `{target: <bridge>, payload: {type: forward, target,
 /// payload: <inner>}}`; the far item is `{target, payload: <inner>}`. A mark
-/// under the inner payload drops ONE `payload.` (`payload.payload.<f…>` →
-/// `payload.<f…>`, and `payload.payload` → `payload`, which the far kernel
-/// refuses like any bad mark); a `result[.<f…>]` mark is the same reply on both
-/// kernels, carried as is. A mark on the forward verb's own fields
-/// (`payload.target`, `payload.timeout`) names nothing on the far item and stays
-/// on this kernel's record only. Validation is the FAR kernel's own `secret`
-/// check, before it dispatches anything. Python `io_bridge.forwarded_secret`.
-public func forwardedSecret(_ paths: [String]) -> [String] {
-    var out: [String] = []
-    for p in paths {
-        if p == "result" || p.hasPrefix("result.") {
-            out.append(p)
-        } else if p == "payload.payload" || p.hasPrefix("payload.payload.") {
-            out.append(String(p.dropFirst("payload.".count)))
+/// under the inner payload drops ONE `payload` step, in the spelling it came in:
+/// dotted `payload.payload.<f…>` → `payload.<f…>` (and `payload.payload` →
+/// `payload`), an array `["payload", "payload", <step>…]` → `["payload",
+/// <step>…]` (and `["payload", "payload"]` → `["payload"]`) — a mark left naming
+/// no field is the far kernel's refusal like any bad mark. A `result` mark
+/// (`result[.<f…>]`, `["result", <step>…]`) is the same reply on both kernels,
+/// carried as is. A mark on the forward verb's own fields (`payload.target`,
+/// `["payload", "timeout"]`) names nothing on the far item and stays on this
+/// kernel's record only. The marks were already checked by this kernel; the far
+/// kernel's own `secret` check judges the re-rooted ones before it dispatches
+/// anything. Python `io_bridge.forwarded_secret`.
+public func forwardedSecret(_ marks: [JSON]) -> [JSON] {
+    var out: [JSON] = []
+    for m in marks {
+        switch m {
+        case .array(let p):
+            if p.first == .string("result") {
+                out.append(m)
+            } else if p.count >= 2, p[0] == .string("payload"), p[1] == .string("payload") {
+                out.append(.array(Array(p.dropFirst())))
+            }
+        case .string(let p):
+            if p == "result" || p.hasPrefix("result.") {
+                out.append(m)
+            } else if p == "payload.payload" || p.hasPrefix("payload.payload.") {
+                out.append(.string(String(p.dropFirst("payload.".count))))
+            }
+        default:
+            break
         }
     }
     return out

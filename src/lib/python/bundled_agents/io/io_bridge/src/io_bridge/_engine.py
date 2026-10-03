@@ -17,21 +17,29 @@ A bundle's `tools.py` is then ~15 lines:
     async def on_delete(agent): return await on_delete(agent)
     readme = README
 
-Reply correlation: `corr_id = f"{bridge_id}:{counter}"` — namespacing eliminates
-collisions across bridges; the frame `id` echoes it so logs correlate across hops.
+Reply correlation: `corr_id = f"{bridge_id}-{boot nonce}-{counter}"` — the bridge
+id keeps bridges apart, the nonce (minted at every boot) keeps BOOTS apart, and the
+frame `id` echoes it so logs correlate across hops. The frame id NAMES the execution
+on the receiver, so an id reused by a restarted sender would join a settled
+execution there and never run (audit IO-5, 2026-10-03).
+
+A leg's rules (`ingress_rule`/`egress_rule`/`auth`) are read off the LIVE record per
+frame — never cached at boot — so what `reflect` reports is what the gate enforces
+the moment `update_agent` writes it (audit ARCH-2, 2026-10-03).
 """
 
 from __future__ import annotations
 
 import asyncio
+import secrets
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
 from io_bridge._transport import ConnectionClosed, _BaseTransport
 from io_bridge._base import Action, Decision, EgressRule, IngressRule, describe
 from io_bridge.channel import CredentialExtractor, EnvelopeExtractor
-from io_bridge.ingress_rules import DenyInbound, resolve_ingress
-from io_bridge.egress_rules import Silent, resolve_egress
+from io_bridge.ingress_rules import resolve_ingress, unknown_ingress_refusal
+from io_bridge.egress_rules import resolve_egress
 from kernel import current_origin, current_secret, remote_caller_context
 from kernel._refusal import NOT_CONNECTED, UNAUTHORIZED, refusal
 
@@ -92,6 +100,9 @@ class _BridgeState:
     # In-flight INBOUND dispatches (one task per `call` frame). Held so the read
     # loop can keep reading while a handler runs, and so teardown can cancel them.
     pending_calls: set[asyncio.Task] = field(default_factory=set)
+    # `<bridge id>-<nonce>`, minted at every boot, and the count under it: the
+    # frame ids of this boot's forwards (`_next_corr`).
+    corr_prefix: str = ""
     corr_counter: int = 0
     # Optional transport-specific teardown the bundle registers in build_transport.
     # AWAITED by the engine on teardown — anything blocking belongs on a thread,
@@ -100,12 +111,6 @@ class _BridgeState:
     # Bundle-specific reflect/diagnostic state. The engine only clears it on
     # teardown; the bundle's `reflect_fields` reads it.
     extra: dict = field(default_factory=dict)
-    # Per-leg auth rules (symmetric, independent). The read loop consults `ingress`
-    # before dispatching an inbound `call`; `forward` stamps `egress.credential()`
-    # on the outbound envelope. Defaults: DenyInbound (sealed) inbound, Silent
-    # outbound — but boot ALWAYS overwrites these from the record (resolve_ingress/egress).
-    ingress: IngressRule = field(default_factory=DenyInbound)
-    egress: EgressRule = field(default_factory=Silent)
     # The remote agents this leg SUBSCRIBED to (`watch_remote`). An inbound
     # `event` frame is re-emitted only when its `src` is here — nothing flows
     # until subscribed, and nothing after an unwatch.
@@ -133,13 +138,22 @@ def _state(id: str) -> _BridgeState:
     return s
 
 
-def _next_corr(id: str, st: _BridgeState) -> str:
+def _new_corr_prefix(id: str) -> str:
+    """`<bridge id>-<12 hex>`: a fresh nonce per BOOT (ts's `mintPrefix` width).
+    The counter under it restarts at every boot, so without the nonce a
+    restarted sender's `<leg>-1` named an execution the receiver had already
+    settled — the new call was joined to it and never ran (audit IO-5)."""
+    return f"{id}-{secrets.token_hex(6)}"
+
+
+def _next_corr(st: _BridgeState) -> str:
     st.corr_counter += 1
     # DASH, not colon (kept): the wire's frame id is the execution's NAME; a ":"
     # here would land in the kernel-minted pid namespace and be refused on
     # the serving side. Bridge-minted correlators are caller-chosen ids like
-    # any other — fresh per forward, so each forward is its own intent.
-    return f"{id}-{st.corr_counter}"
+    # any other — fresh per forward AND per boot, so each forward is its own
+    # intent.
+    return f"{st.corr_prefix}-{st.corr_counter}"
 
 
 def _local_guid(kernel: Any) -> str | None:
@@ -178,22 +192,30 @@ def _check_caller(rec: dict, caller: Any) -> dict | None:
     return None
 
 
-def forwarded_secret(paths) -> list[str]:
+def forwarded_secret(marks) -> list:
     """The `forward` call's own `secret` marks, RE-ROOTED at the item the far
     kernel dispatches — so both kernels mask the same values.
 
     The local item is `{target: <bridge>, payload: {type: forward, target, payload:
     <inner>}}`; the far item is `{target, payload: <inner>}`. A mark under the
-    inner payload drops ONE `payload.` (`payload.payload.<f…>` → `payload.<f…>`,
-    and `payload.payload` → `payload`, which the far kernel refuses like any bad
-    mark); a `result[.<f…>]` mark is the same reply on both kernels, carried as
-    is. A mark on the forward verb's own fields (`payload.target`,
-    `payload.timeout`) names nothing on the far item and stays on this kernel's
-    record only. Validation is the FAR kernel's own `secret` check, before it
-    dispatches anything."""
-    out: list[str] = []
-    for p in paths:
-        if p == "result" or p.startswith("result."):
+    inner payload drops ONE `payload` step, in the spelling it came in: dotted
+    `payload.payload.<f…>` → `payload.<f…>` (and `payload.payload` → `payload`),
+    an array `["payload", "payload", <step>…]` → `["payload", <step>…]` (and
+    `["payload", "payload"]` → `["payload"]`) — a mark left naming no field is
+    the far kernel's refusal like any bad mark. A `result` mark (`result[.<f…>]`,
+    `["result", <step>…]`) is the same reply on both kernels, carried as is. A mark
+    on the forward verb's own fields (`payload.target`, `["payload", "timeout"]`)
+    names nothing on the far item and stays on this kernel's record only. The marks
+    were already checked by this kernel; the far kernel's own `secret` check judges
+    the re-rooted ones before it dispatches anything."""
+    out: list = []
+    for p in marks:
+        if isinstance(p, list):
+            if p[:1] == ["result"]:
+                out.append(list(p))
+            elif p[:2] == ["payload", "payload"]:
+                out.append(p[1:])
+        elif p == "result" or p.startswith("result."):
             out.append(p)
         elif p == "payload.payload" or p.startswith("payload.payload."):
             out.append(p[len("payload.") :])
@@ -202,17 +224,16 @@ def forwarded_secret(paths) -> list[str]:
 
 def validate_meta(meta: dict, record: dict) -> str | None:
     """Write-time check of `peer_guid`: one kernel guid (a non-empty string, no
-    `|`). Re-exported by every bridge bundle. (This kernel's OWN guid is refused
-    where the kernel is in hand — at serve.)"""
-    if "peer_guid" not in meta or meta["peer_guid"] is None:
-        return None
-    pin = meta["peer_guid"]
-    if not isinstance(pin, str) or not pin or "|" in pin:
+    `|`), then the leg's `ingress_rule` (`unknown_ingress_refusal`). Re-exported
+    by every bridge bundle. (This kernel's OWN guid is refused where the kernel
+    is in hand — at serve.)"""
+    pin = meta.get("peer_guid")
+    if pin is not None and (not isinstance(pin, str) or not pin or "|" in pin):
         return (
             f"bridge: peer_guid must be one kernel guid (a non-empty string "
             f"without `|`); got {pin!r}"
         )
-    return None
+    return unknown_ingress_refusal(meta)
 
 
 async def _serve_inbound_call(
@@ -231,11 +252,13 @@ async def _serve_inbound_call(
     """
     target = frame.get("target")
     payload = frame.get("payload") or {}
+    rec = kernel.get(kernel.id) or {}
     # AUTH GATE — the single shared choke point (`gate_inbound`, also used by the
-    # web inbound legs). The leg's INGRESS rule decides whether the peer may run
+    # web inbound legs). The leg's INGRESS rule — read off the LIVE record, per
+    # frame, as every web/file/exec leg does — decides whether the peer may run
     # this inbound call locally; a denial still gets a `reply` (echoing the
     # corr-id) so the caller resolves cleanly.
-    decision = gate_inbound(st.ingress, "call", frame)
+    decision = gate_inbound(resolve_ingress(rec), "call", frame)
     if not decision.allowed:
         # Teaching denial — mirror the web inbound legs so discovery-through-
         # denial works over bridge legs too (reason + hint + see).
@@ -264,7 +287,6 @@ async def _serve_inbound_call(
         if "secret" in frame:
             item["secret"] = frame["secret"]
         caller = frame.get("caller")
-        rec = kernel.get(kernel.id) or {}
         bad_caller = _check_caller(rec, caller)
         if bad_caller is None and caller.split("|")[0] == _local_guid(kernel):
             bad_caller = refusal(
@@ -320,18 +342,23 @@ async def _read_loop(id: str, kernel: Any) -> None:
                 )
                 st.pending_calls.add(t)
                 t.add_done_callback(st.pending_calls.discard)
-            elif ftype == "reply":
-                fut = st.pending.pop(frame.get("id"), None)
+            elif ftype in ("reply", "error"):
+                # Only a STRING id names one of our forwards (rust/swift skip the
+                # rest). A list id was hashed by `pending.pop` and its TypeError
+                # ended this loop while `reflect` still read `connected:true`.
+                fid = frame.get("id")
+                fut = st.pending.pop(fid, None) if isinstance(fid, str) else None
                 if fut is not None and not fut.done():
-                    fut.set_result(frame.get("data"))
-            elif ftype == "error":
-                fut = st.pending.pop(frame.get("id"), None)
-                if fut is not None and not fut.done():
-                    fut.set_result({"error": f"remote error: {frame.get('error')}"})
+                    fut.set_result(
+                        frame.get("data")
+                        if ftype == "reply"
+                        else {"error": f"remote error: {frame.get('error')}"}
+                    )
             elif ftype == "event":
                 # The `watch_remote` RETURN half: re-emitted on the bridge's OWN inbox
                 # for local watchers ONLY when its `src` is a remote agent this leg
-                # subscribed to. An event nobody asked for is dropped.
+                # subscribed to (a relay leg's `watch_directory` subscribes its
+                # directory, `src:"relay"`). An event nobody asked for is dropped.
                 src = frame.get("src")
                 payload = frame.get("payload")
                 if (
@@ -396,8 +423,6 @@ async def _teardown(id: str) -> None:
     st.cleanup = None
     st.extra.clear()
     st.watching.clear()
-    st.ingress = DenyInbound()
-    st.egress = Silent()
 
 
 async def on_delete(agent: Any) -> None:
@@ -413,12 +438,18 @@ async def boot(
     build_transport: BuildTransport,
 ):
     """Shared boot: idempotency + the `memory` test kind + the `build_transport`
-    seam for every other kind, then the common tail (resolve the leg's ingress +
-    egress rules, spawn read loop, emit `bridge_up`)."""
+    seam for every other kind, then the common tail (mint this boot's correlator
+    nonce, spawn read loop, emit `bridge_up`). The leg's rules are NOT cached here:
+    the gate and `forward` read them off the live record per frame; boot only
+    refuses an egress rule the registry does not know, before dialing."""
     rec = kernel.get(id) or {}
     st = _state(id)
     if st.transport is not None and not st.transport.closed:
         return {"already": True, "transport": st.transport_kind}
+    try:
+        resolve_egress(rec)
+    except ValueError as e:
+        return {"error": f"bridge: bad auth rule: {e}"}
 
     kind = rec.get("transport") or "ws"
     transport: _BaseTransport
@@ -442,13 +473,7 @@ async def boot(
 
     st.transport = transport
     st.transport_kind = kind
-    try:
-        st.ingress = resolve_ingress(rec)
-        st.egress = resolve_egress(rec)
-    except Exception as e:
-        # A bad rule must not leave the just-built transport leaked/open.
-        await _teardown(id)
-        return {"error": f"bridge: bad auth rule: {e}"}
+    st.corr_prefix, st.corr_counter = _new_corr_prefix(id), 0
     # REGISTERED: the read loop outlives this `boot` dispatch and re-emits
     # every inbound frame for the life of the leg.
     st.read_task = kernel.ctx.tasks[
@@ -462,7 +487,7 @@ async def boot(
 
 
 async def _forward(id, payload, kernel):
-    """args: target:str (req — id on the REMOTE kernel) + payload:dict (req — the call to run there; payload is ITSELF a verb frame and MUST carry its own "type") + timeout:float? (default 30s). Example: {"type":"forward","target":"src","payload":{"type":"read_stream","path":"data.bin","offset":0}}. Ships a raw `{type:'call', id, target, payload, caller, secret?}` frame over the transport, awaits the matching reply, returns the unwrapped data. SECRET values: mark them on YOUR call to this verb — `payload.payload.<field>` / `result[.<field>]` — and they ride as `payload.<field>` / `result[.<field>]`, so both kernels record `<secret>`. Local→local stays direct kernel.send (this verb is only for cross-kernel). Multi-hop loop detection is the caller's responsibility — the bridge ships whatever it's given."""
+    """args: target:str (req — id on the REMOTE kernel) + payload:dict (req — the call to run there; payload is ITSELF a verb frame and MUST carry its own "type") + timeout:float? (default 30s). Example: {"type":"forward","target":"src","payload":{"type":"read_stream","path":"data.bin","offset":0}}. Ships a raw `{type:'call', id, target, payload, caller, secret?}` frame over the transport, awaits the matching reply, returns the unwrapped data. SECRET values: mark them on YOUR call to this verb — `payload.payload.<field>` / `result[.<field>]`, or as arrays of steps `["payload","payload",<key>…]` / `["result",…]` (a key holding a dot) — and they ride as `payload.<field>` / `result[.<field>]` (`["payload",<key>…]` / `["result",…]`), so both kernels record `<secret>`. Local→local stays direct kernel.send (this verb is only for cross-kernel). Multi-hop loop detection is the caller's responsibility — the bridge ships whatever it's given."""
     target = payload.get("target")
     inner = payload.get("payload")
     if not target or not isinstance(inner, dict):
@@ -475,7 +500,13 @@ async def _forward(id, payload, kernel):
             NOT_CONNECTED, "bridge.forward: not connected", hint="call boot first"
         )
 
-    corr = _next_corr(id, st)
+    # The leg's EGRESS rule, off the live record per forward (never a boot-time
+    # copy): an operator's `update_agent egress_rule=…` stamps the next frame.
+    try:
+        egress = resolve_egress(kernel.get(id) or {})
+    except ValueError as e:
+        return {"error": f"bridge: bad auth rule: {e}"}
+    corr = _next_corr(st)
     fut: asyncio.Future = asyncio.get_event_loop().create_future()
     st.pending[corr] = fut
 
@@ -491,7 +522,7 @@ async def _forward(id, payload, kernel):
     if secret:
         frame["secret"] = secret
     # Stamp this leg's EGRESS credential on the envelope via the shared decorator.
-    frame = stamp_egress(st.egress, frame)
+    frame = stamp_egress(egress, frame)
     try:
         await st.transport.send(frame)
     except ConnectionClosed as e:

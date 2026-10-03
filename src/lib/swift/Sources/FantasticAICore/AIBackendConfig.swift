@@ -38,8 +38,9 @@ public struct AIBackendConfig: Sendable {
     /// the order the backend lists them — python `cfg.reflect_extra`, whose
     /// `out.update(extra)` appends new keys and leaves an existing key in place.
     /// ORDERED, because reflect is read as a LINE by the model. Receives the
-    /// agent so it can read meta. Pure function — no side effects.
-    public var reflectExtra: @Sendable (Agent) -> OrderedDictionary<String, JSON>
+    /// agent so it can read meta, and its kernel (python's `(id, kernel)`) so a
+    /// side table keyed per kernel can be read. Pure function — no side effects.
+    public var reflectExtra: @Sendable (Agent, Kernel) -> OrderedDictionary<String, JSON>
 
     /// Build the provider for one send — python `make_provider(id, kernel) ->
     /// Provider`, inside the turn. THROWS when the record lacks a connector field
@@ -54,8 +55,8 @@ public struct AIBackendConfig: Sendable {
         sentence: String,
         sendTimeout: Double = AIConstants.SEND_TIMEOUT,
         modelWindow: Int64 = AIConstants.DEFAULT_CONTEXT_WINDOW,
-        reflectExtra: @escaping @Sendable (Agent) -> OrderedDictionary<String, JSON> = {
-            _ in [:]
+        reflectExtra: @escaping @Sendable (Agent, Kernel) -> OrderedDictionary<String, JSON> = {
+            _, _ in [:]
         },
         makeProvider:
             @escaping @Sendable (Agent, String, Kernel) async throws -> any AIProvider

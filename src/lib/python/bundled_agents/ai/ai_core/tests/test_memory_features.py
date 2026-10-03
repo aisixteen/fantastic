@@ -47,13 +47,13 @@ async def test_the_endpoints_count_calibrates_the_estimate():
     core._calib.pop("ai", None)
 
 
-async def test_a_turn_records_what_the_endpoint_reported():
+async def test_a_turn_records_what_the_endpoint_reported(fake_providers):
     k = FakeCtx({"context_window": 32000, "output_reserve": 0})
-    core._providers["ai"] = _Reporting(777)
+    fake_providers["ai"] = _Reporting(777)
     try:
         await core._run("ai", "hello", k, "cli", _cfg())
     finally:
-        core._providers.pop("ai", None)
+        fake_providers.pop("ai", None)
     assert core._reported["ai"] == 777 and core._calib["ai"] > 0
     st = await core._context_status("ai", {}, k)
     assert st["reported_prompt_tokens"] == 777 and st["trigger"] == 0.8
@@ -66,7 +66,6 @@ def _cfg():
         sentence="s",
         make_provider=lambda *a: None,
         name="fake",
-        module_name="fake.tools",
     )
 
 
@@ -325,7 +324,9 @@ async def test_a_note_the_agent_appends_itself_is_memory_not_a_turn(seeded_kerne
     assert all(r.get("role") for r in behind)
 
 
-async def test_a_turns_rows_are_minted_when_appended_so_id_order_is_append_order():
+async def test_a_turns_rows_are_minted_when_appended_so_id_order_is_append_order(
+    fake_providers,
+):
     """A row saved MID-TURN (the projection's fold or view) must not end up behind the
     turn's own rows in id order: the store returns id order, the cache append order."""
     k = FakeCtx({"context_window": 32000, "output_reserve": 0})
@@ -337,11 +338,11 @@ async def test_a_turns_rows_are_minted_when_appended_so_id_order_is_append_order
             await core._save_history("ai", k, [{"role": "user", "content": "mid"}])
             yield 'ok <call name="done"></call>'
 
-    core._providers["ai"] = _MidTurnWriter()
+    fake_providers["ai"] = _MidTurnWriter()
     try:
         await core._run("ai", "hello", k, "cli", _cfg())
     finally:
-        core._providers.pop("ai", None)
+        fake_providers.pop("ai", None)
     hist = await core._load_history("ai", k)
     ids = [r["id"] for r in hist]
     assert ids == sorted(ids), f"append order diverged from id order: {ids}"

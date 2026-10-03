@@ -227,8 +227,24 @@ public struct CliBundle: AgentBundle {
 
     // ─── stdout ─────────────────────────────────────────────────
 
+    /// THE one write to the terminal — python `_write`: every line this sink
+    /// prints goes through `terminalSafe`.
     static func write(_ s: String) {
-        FileHandle.standardOutput.write(s.data(using: .utf8) ?? Data())
+        FileHandle.standardOutput.write(terminalSafe(s).data(using: .utf8) ?? Data())
+    }
+
+    /// `text` without its C0/C1 control characters (and DEL), newline and tab
+    /// kept — python's `_CONTROL`: what a terminal INTERPRETS instead of printing
+    /// (an OSC title or clipboard write, a cursor move, a line erase). Agent and
+    /// model text reaches this sink from callers it does not know (audit BV-11).
+    /// Judged per scalar, so a `\r\n` pair loses its `\r` and keeps its `\n`.
+    static func terminalSafe(_ text: String) -> String {
+        var out = String.UnicodeScalarView()
+        for u in text.unicodeScalars
+        where u == "\n" || u == "\t" || u.properties.generalCategory != .control {
+            out.append(u)
+        }
+        return String(out)
     }
 
     // ─── help (python's `cli/help.md`, verbatim) ────────────────

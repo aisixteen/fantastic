@@ -35,14 +35,14 @@
 //!   `credentials`.
 
 use async_trait::async_trait;
-use fantastic_ai_core::credentials::{key_reader, KeySource};
+use fantastic_ai_core::credentials::{key_reader, without_key, KeySource};
 use fantastic_ai_core::provider::{
     Provider, ProviderError, ProviderEvent, ProviderReport, ProviderStream, ReportCell,
     Unconfigured,
 };
 use fantastic_ai_core::schema::{self, Field};
 use fantastic_ai_core::think::{decode_openai_delta, ThinkWrap};
-use fantastic_ai_core::{agent_loop::BackendConfig, helpers, state, verbs};
+use fantastic_ai_core::{agent_loop::BackendConfig, helpers, verbs};
 use fantastic_bundle::{py_float, py_int, py_repr_value, py_str, py_truthy};
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
 use fantastic_kernel::{AgentId, Kernel, TaskId};
@@ -321,9 +321,9 @@ fn py_g(x: f64) -> String {
 // ─── the thinking budget a pass SENT, per agent ─────────────────────────────
 
 /// What the last pass of each agent actually sent as `thinking_token_budget`
-/// (python keeps it on its cached provider as `last_thinking_budget`). The
-/// provider is rebuilt per call here, so it lives beside the tables, keyed by
-/// agent id, and reflect reads it back.
+/// (python `vllm_backend.provider.last_budgets`). The provider is rebuilt per
+/// call, so it lives beside the tables, keyed by agent id, and reflect reads it
+/// back.
 fn last_budgets() -> &'static Mutex<HashMap<String, Option<i64>>> {
     static LAST: OnceLock<Mutex<HashMap<String, Option<i64>>>> = OnceLock::new();
     LAST.get_or_init(|| Mutex::new(HashMap::new()))
@@ -525,17 +525,22 @@ impl Provider for VllmProvider {
             .map_err(|e| ProviderError::raised(format!("{NAME}: http client: {e}")))?;
         // THE KEY, read before EACH request (python `await self._key(...)`):
         // none on the record ⇒ no `Authorization` header at all.
-        let key = self.key.key(&self.endpoint).await?;
+        let key = self
+            .key
+            .key(&self.endpoint)
+            .await?
+            .filter(|k| !k.is_empty());
         let mut req = client
             .post(format!("{}/chat/completions", self.endpoint))
             .json(&body);
-        if let Some(key) = key.filter(|k| !k.is_empty()) {
+        if let Some(key) = &key {
             req = req.bearer_auth(key);
         }
         let resp = req.send().await.map_err(|e| self.connection_error(&e))?;
         let status = resp.status();
         if status.as_u16() >= 400 {
-            let detail = resp.text().await.unwrap_or_default();
+            // scrubbed BEFORE the cut, so a key the cut splits cannot survive
+            let detail = without_key(&resp.text().await.unwrap_or_default(), key.as_deref());
             let detail: String = detail.chars().take(500).collect();
             let why = if matches!(status.as_u16(), 401 | 403) {
                 " — the door wants a key: name it in `credentials` ({store, ref})".to_string()
@@ -1126,12 +1131,8 @@ impl Bundle for VllmBundle {
         })))
     }
 
-    async fn on_delete(
-        &self,
-        agent_id: &AgentId,
-        _kernel: &Arc<Kernel>,
-    ) -> Result<(), BundleError> {
-        state::drop_state(agent_id);
+    async fn on_delete(&self, agent_id: &AgentId, kernel: &Arc<Kernel>) -> Result<(), BundleError> {
+        verbs::on_delete(agent_id, kernel);
         last_budgets()
             .lock()
             .expect("vllm budgets poisoned")

@@ -197,28 +197,6 @@ enum AIFolds {
         return out
     }
 
-    /// The foldable PREFIX of an open chain: everything but the last `keepTail`
-    /// rows, cut back so it ends on a reply (never between a call and its
-    /// answer). A superlong chain never closes, so this is how it still folds.
-    /// Python `closed_prefix`.
-    static func closedPrefix(_ rows: [JSON], _ chain: [Int], keepTail: Int) -> [Int] {
-        if chain.count <= keepTail + 1 { return [] }
-        var span = Array(chain[..<(chain.count - keepTail)])
-        while let last = span.last, rowRole(rows[last]) == "assistant" {
-            span.removeLast()
-        }
-        return span.count >= 2 ? span : []
-    }
-
-    /// Fraction of the view's bytes that are fold rows — the trigger for folding
-    /// folds. Python `fold_share`.
-    static func foldShare(_ view: [JSON]) -> Double {
-        var total = view.reduce(0) { $0 + pyLen(rowContent($1)) }
-        if total == 0 { total = 1 }
-        let folded = view.filter(isFold).reduce(0) { $0 + pyLen(rowContent($1)) }
-        return Double(folded) / Double(total)
-    }
-
     /// 1 for a fold of rows, 2 for a fold of folds, and so on. Python `level`.
     static func level(_ rows: [JSON], _ foldRow: JSON) -> Int64 {
         var byId: [Int64: JSON] = [:]

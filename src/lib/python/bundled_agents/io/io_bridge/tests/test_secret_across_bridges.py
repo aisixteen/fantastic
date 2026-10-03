@@ -27,7 +27,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import sys
 import types
 
 import httpx
@@ -50,8 +49,10 @@ from kernel._secret import PLACEHOLDER
 from relay_connector._relay import SECRET_SEALED, SECRET_SEALED_HINT
 from web_rest.tools import _make_post_endpoint
 from web_ws._proxy import run as ws_run
+from kernel import register_unlisted
 
 KEY = "sk-cross-0123456789abcdef"
+KEY2 = "sk-cross-dotted-key-77aa77aa"
 ISSUED = "tok-cross-issued-fedcba98"
 
 # ─── the probe the far kernel serves ─────────────────────────────────────────
@@ -68,13 +69,15 @@ async def _vault(id, payload, kernel):
         return {"ok": True, "len": len(payload["key"])}
     if verb == "issue":
         return {"key": ISSUED, "note": "issued"}
+    if verb == "issue_dotted":
+        return {"a.b": ISSUED, "a": {"b": "nested-plain"}}
     return {"error": f"unknown verb {verb!r}"}
 
 
 _mod = types.ModuleType("xsecret_probe.tools")
 _mod.handler = _vault
 _mod.VERBS = {}
-sys.modules["xsecret_probe.tools"] = _mod
+register_unlisted("xsecret_probe.tools", _mod)
 
 
 # ─── two kernels, each keeping every record ──────────────────────────────────
@@ -279,6 +282,26 @@ def test_forward_re_roots_the_marks_at_the_forwarded_item():
         )
     ) == ["payload.key", "payload.fields.api_key", "result", "result.key", "payload"]
     assert forwarded_secret(()) == []
+    # an ARRAY of steps re-roots as an array: one `payload` step dropped
+    assert forwarded_secret(
+        (
+            ["payload", "payload", "a.b"],
+            ["payload", "payload", "items", 0],
+            ["result"],
+            ["result", "a.b"],
+            ["payload", "target"],
+            ["payload", "timeout"],
+            ["payload", "payload"],
+            "payload.payload.key",
+        )
+    ) == [
+        ["payload", "a.b"],
+        ["payload", "items", 0],
+        ["result"],
+        ["result", "a.b"],
+        ["payload"],
+        "payload.key",
+    ]
 
 
 # ─── (a) a payload mark across a bridge ──────────────────────────────────────
@@ -416,6 +439,56 @@ async def test_without_a_mark_the_receiving_settle_keeps_the_value(two):
     assert _settle_of(rb, row["id"])["outcome"]["result"]["key"] == ISSUED
 
 
+# ─── (b2) an ARRAY mark (a literal dotted key) across a bridge ───────────────
+
+
+async def test_an_array_mark_masks_a_literal_dotted_key_across_a_ws_bridge(two):
+    """`["payload", "payload", "a.b"]` on the forward rides as `["payload", "a.b"]`:
+    the far kernel masks the KEY `"a.b"` (not `a` → `b`), and records the marks as
+    the frame carried them — arrays and strings side by side."""
+    ka, kb = two
+    _vault_on(kb, "A-g|*")
+    a_leg = await _bridge_pair(ka, kb, "ws_bridge.tools")
+    sent = {
+        "type": "issue_dotted",
+        "key": KEY,
+        "a.b": KEY2,
+        "a": {"b": "nested-plain"},
+    }
+    out = await _op(
+        ka,
+        a_leg,
+        {"type": "forward", "target": "vault", "payload": sent},
+        secret=[
+            "payload.payload.key",
+            ["payload", "payload", "a.b"],
+            ["result", "a.b"],
+        ],
+    )
+    assert _got == [sent], _got
+    assert out["result"] == {"a.b": ISSUED, "a": {"b": "nested-plain"}}, out
+    rb = await _records(kb)
+    row = _call_row(rb, "vault", "issue_dotted")
+    assert row["secret"] == ["payload.key", ["payload", "a.b"], ["result", "a.b"]]
+    assert row["payload"] == {
+        "type": "issue_dotted",
+        "key": PLACEHOLDER,
+        "a.b": PLACEHOLDER,
+        "a": {"b": "nested-plain"},
+    }, row
+    # the frame id names the far execution: its settle keeps the whole result
+    assert _settle_of(rb, row["id"])["outcome"]["result"] == {
+        "a.b": PLACEHOLDER,
+        "a": {"b": "nested-plain"},
+    }
+    _assert_kept_out(kb, rb, KEY, KEY2, ISSUED)
+    ra = await _records(ka)
+    fwd = _call_row(ra, a_leg, "forward")
+    assert fwd["payload"]["payload"]["a.b"] == PLACEHOLDER, fwd
+    assert fwd["payload"]["payload"]["a"] == {"b": "nested-plain"}, fwd
+    _assert_kept_out(ka, ra, KEY, KEY2, ISSUED)
+
+
 # ─── (c) a malformed mark is refused before dispatch ─────────────────────────
 
 _BAD = [
@@ -424,6 +497,13 @@ _BAD = [
     (["payload.nope"], "names nothing in the payload"),
     (["payload.type"], "cannot hide payload.type"),
     (["payload"], "must start with 'payload.'"),
+    # arrays of steps
+    ([[]], "path [] has no steps"),
+    ([["payload", True]], "step True is neither a string"),
+    ([["nope", "key"]], "must start with 'payload' and a step under it"),
+    ([["payload", "type"]], "cannot hide payload.type"),
+    ([["payload", "nope"]], "path ['payload', 'nope'] names nothing in the payload"),
+    (["payload.key", ["payload", "k.x"]], "names nothing in the payload"),
 ]
 
 
@@ -507,6 +587,8 @@ async def test_a_malformed_mark_on_a_web_ws_frame_is_refused_before_dispatch(two
     [
         (["payload.payload"], "must start with 'payload.'"),
         (["payload.payload.type"], "cannot hide payload.type"),
+        ([["payload", "payload"]], "must start with 'payload' and a step under it"),
+        ([["payload", "payload", "type"]], "cannot hide payload.type"),
     ],
 )
 async def test_a_forward_mark_that_maps_to_nothing_valid_is_the_far_kernels_refusal(
@@ -565,6 +647,29 @@ async def test_web_rest_carries_the_marks_in_a_header(two, capsys, caplog):
             },
         )
         assert r.json() == {"key": ISSUED, "note": "issued"}, r.text
+        # an element may be an ARRAY of steps: the key "a.b", taken literally
+        r = await c.post(
+            "/b_rest/vault",
+            json={"type": "issue_dotted", "a.b": KEY2, "a": {"b": "nested-plain"}},
+            headers={
+                "X-Fantastic-Secret": json.dumps(
+                    [["payload", "a.b"], ["result", "a.b"]]
+                ),
+                "X-Fantastic-Execution-Id": "issue-rest-2",
+            },
+        )
+        assert r.json() == {"a.b": ISSUED, "a": {"b": "nested-plain"}}, r.text
+        # a malformed array is the kernel's own refusal, in its words
+        r = await c.post(
+            "/b_rest/vault",
+            json={"type": "set_key", "key": KEY},
+            headers={"X-Fantastic-Secret": '[["payload", "a.b"]]'},
+        )
+        assert r.json() == {
+            "error": "send: secret path ['payload', 'a.b'] names nothing in the payload",
+            "reason": "bad_arg",
+            "arg": "secret",
+        }, r.text
         # a header that is not JSON is the leg's own 400 — nothing dispatched
         r = await c.post(
             "/b_rest/vault",
@@ -581,13 +686,28 @@ async def test_web_rest_carries_the_marks_in_a_header(two, capsys, caplog):
         )
         body = r.json()
         assert (body["reason"], body["arg"]) == ("bad_arg", "secret"), body
-    assert _got == [{"type": "set_key", "key": KEY}, {"type": "issue"}], _got
+    assert _got == [
+        {"type": "set_key", "key": KEY},
+        {"type": "issue"},
+        {"type": "issue_dotted", "a.b": KEY2, "a": {"b": "nested-plain"}},
+    ], _got
     rb = await _records(kb)
     assert _call_row(rb, "vault", "set_key")["payload"]["key"] == PLACEHOLDER
     issue = _call_row(rb, "vault", "issue")
     assert _settle_of(rb, issue["id"])["outcome"]["result"]["key"] == PLACEHOLDER
-    _assert_kept_out(kb, rb, KEY, ISSUED)
-    _assert_not_printed(capsys, caplog, KEY, ISSUED)
+    dotted = _call_row(rb, "vault", "issue_dotted")
+    assert dotted["secret"] == [["payload", "a.b"], ["result", "a.b"]], dotted
+    assert dotted["payload"] == {
+        "type": "issue_dotted",
+        "a.b": PLACEHOLDER,
+        "a": {"b": "nested-plain"},
+    }, dotted
+    assert _settle_of(rb, dotted["id"])["outcome"]["result"] == {
+        "a.b": PLACEHOLDER,
+        "a": {"b": "nested-plain"},
+    }
+    _assert_kept_out(kb, rb, KEY, KEY2, ISSUED)
+    _assert_not_printed(capsys, caplog, KEY, KEY2, ISSUED)
 
 
 # ─── (e) <guid>|creds from another kernel ────────────────────────────────────
@@ -596,7 +716,8 @@ async def test_web_rest_carries_the_marks_in_a_header(two, capsys, caplog):
 async def _page_peer(kh, kp, creds_file):
     """H serves a web_ws leg; P is a kernel connected to it (its bridge leg is
     the socket's far end) and says `hello` — from then on H reaches P's agents as
-    `P-g|<agent>`. P serves a credential_store that H may create refs in."""
+    `P-g|<agent>`. P serves a credential_store whose one ref, `openai/main`, H
+    may write and read."""
     kh.create("web_ws.tools", id="h_ws", ingress_rule="allow_all_ingress")
     p = await _op(
         kp,
@@ -616,7 +737,13 @@ async def _page_peer(kh, kp, creds_file):
         "credential_store.tools",
         id="p_creds",
         file=str(creds_file),
-        creators=["H-g|kernel"],
+        refs={
+            "openai/main": {
+                "host": "api.openai.com",
+                "readers": ["H-g|kernel"],
+                "writers": ["H-g|kernel"],
+            }
+        },
         callable_by={"H-g|kernel": "*"},
     )
     assert made.get("id") == "p_creds", made
@@ -654,7 +781,6 @@ async def test_a_guid_qualified_credential_set_and_get_cross_with_their_marks(
             {
                 "type": "set",
                 "ref": "openai/main",
-                "host": "https://api.openai.com/v1",
                 "fields": {"api_key": KEY},
             },
             secret=["payload.fields"],
@@ -690,7 +816,6 @@ async def test_a_guid_qualified_credential_set_and_get_cross_with_their_marks(
             {
                 "type": "set",
                 "ref": "openai/main",
-                "host": "api.openai.com",
                 "fields": {"api_key": "sk-unmarked-x"},
             },
         )
@@ -748,7 +873,13 @@ _SEALED = {"error": SECRET_SEALED, "reason": "unauthorized", "hint": SECRET_SEAL
 
 
 @pytest.mark.parametrize(
-    "secret", [["payload.payload.key"], ["result"], ["payload.timeout"]]
+    "secret",
+    [
+        ["payload.payload.key"],
+        ["result"],
+        ["payload.timeout"],
+        [["payload", "payload", "key"]],
+    ],
 )
 async def test_the_relay_refuses_a_marked_forward_before_a_frame_leaves(two, secret):
     """Outbound: ANY mark on the forward call — one that would cross, a result

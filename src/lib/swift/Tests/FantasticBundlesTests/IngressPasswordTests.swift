@@ -38,4 +38,35 @@ struct IngressPasswordTests {
             return
         }
     }
+
+    /// IO-6 (audit 2026-10-03): the compare is over UTF-8 BYTES — python now does
+    /// what this rule always did (on `str` python raised TypeError for any
+    /// non-ASCII text). Any token is a plain answer, and a non-ASCII group token
+    /// admits its own holders. (A lone surrogate, python's fourth case, is not a
+    /// Swift `String`.)
+    @Test func passwordRuleComparesUTF8BytesSoAnyTokenIsAPlainAnswer() {
+        let env = "FANTASTIC_GROUP_TOKEN_PW_UNIT_UTF8"
+        setenv(env, "s3cret", 1)
+        defer { unsetenv(env) }
+        let rule = IngressRules.Password(tokenEnv: env)
+        func call(_ token: String) -> AuthDecision {
+            rule.authorize(AuthAction(kind: "call", target: "t", verb: "reflect", token: token))
+        }
+        for odd in ["é", "s3cr€t", "été"] {
+            guard case .deny(let d) = call(odd) else {
+                Issue.record("\(odd) must be denied")
+                continue
+            }
+            #expect(d.reason == "invalid or missing group token", "\(odd)")
+        }
+        setenv(env, "päss-wört", 1)
+        guard case .allow = call("päss-wört") else {
+            Issue.record("a non-ASCII group token must admit its holder")
+            return
+        }
+        guard case .deny = call("pass-wort") else {
+            Issue.record("a near miss must be denied")
+            return
+        }
+    }
 }

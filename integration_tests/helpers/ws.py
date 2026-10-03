@@ -55,6 +55,7 @@ async def ws_call(
     *,
     host: str = "127.0.0.1",
     timeout: float = 10.0,
+    secret: list | None = None,
     **args: Any,
 ) -> dict[str, Any]:
     """Open a one-shot WS to `ws://{host}:{port}/{agent_id}/ws`, send a
@@ -64,6 +65,10 @@ async def ws_call(
     Note `agent_id` (not `target`) so callers can pass `target=...`
     as a verb arg (e.g. `bridge.forward(target=..., payload=...)`)
     without colliding with this helper's first parameter.
+
+    `secret` is the call's SECRET MARKS (`["payload.fields"]`, `["result"]`),
+    carried on the frame's own `secret` key — the kernel records the marked
+    values as `<secret>`; a credential_store `set`/`get` is refused unmarked.
 
     Drops the WS after the round-trip. Not appropriate for streaming
     consumers — use `ws_session` (below) when you need to drain
@@ -77,6 +82,8 @@ async def ws_call(
         "payload": payload,
         "id": corr_id,
     }
+    if secret is not None:
+        frame["secret"] = secret
     url = f"ws://{host}:{port}/{agent_id}/ws"
 
     async with websockets.connect(url, open_timeout=timeout) as ws:

@@ -10,12 +10,16 @@ replies, and a model reads the text to repair its call.
 
 from __future__ import annotations
 
-import sys
 import types
 
-from kernel import remote_caller_context, sender_context
+from kernel import remote_caller_context, sender_context, register_unlisted
 from kernel._authz import _FROM_ABOVE
 from kernel._kernel import PeerRoute
+
+
+async def _no_emit(agent_id, payload, caller):  # these routes carry no events
+    raise AssertionError("unexpected emit")
+
 
 _mod = types.ModuleType("gate_pin_probe.tools")
 
@@ -31,7 +35,7 @@ async def _handler(id, payload, kernel):
 
 _mod.handler = _handler
 _mod.VERBS = {}
-sys.modules["gate_pin_probe.tools"] = _mod
+register_unlisted("gate_pin_probe.tools", _mod)
 
 MOD = "gate_pin_probe.tools"
 
@@ -119,7 +123,10 @@ async def test_a_remote_target_is_egress_only_with_its_qualified_hint(seeded_ker
     async def call(agent_id, payload, caller, secret):
         return {"remote": agent_id}
 
-    assert k.ctx.register_peer("g1", PeerRoute(via="leg", call=call)) is None
+    assert (
+        k.ctx.register_peer("g1", PeerRoute(via="leg", call=call, emit=_no_emit))
+        is None
+    )
     _mk(k, "a")
     r = (await _as(k, "a", "g1|canvas", {"type": "around"}))["result"]
     assert r == {
@@ -188,6 +195,48 @@ async def test_placement_under_your_own_subtree_needs_no_grant(seeded_kernel):
             {"type": "create_agent", "parent_id": parent, "handler_module": MOD},
         )
         assert out["status"] == "completed" and "id" in out["result"], out
+
+
+async def test_placement_for_a_relayed_caller_is_exact(seeded_kernel):
+    """A foreign caller a bridge leg relays owns no subtree here (audit G-1):
+    placing under the leg or its child takes the path any other placement takes
+    — the leg's egress, then the parent's ingress against `<guid>|<agent>`."""
+    k = seeded_kernel
+    _mk(k, "leg")
+    _mk(k, "kid", parent="leg")
+
+    def create(parent):
+        return {"type": "create_agent", "parent_id": parent, "handler_module": MOD}
+
+    with remote_caller_context("leg", "g9|scout"):
+        r = (await _as(k, "leg", "kernel", create("kid")))["result"]
+    assert r == {
+        "error": "leg may not create under kid",
+        "reason": "unauthorized",
+        "hint": _FROM_ABOVE,
+        "side": "egress",
+    }
+    with remote_caller_context("leg", "g9|scout"):
+        r = (await _as(k, "leg", "kernel", create("leg")))["result"]
+    assert r == {
+        "error": "leg does not accept a child from g9|scout",
+        "reason": "unauthorized",
+        "hint": _FROM_ABOVE,
+        "side": "ingress",
+    }
+    # the parent naming the peer opens it
+    k.ctx.update(
+        "leg",
+        callable_by={
+            "$self": "*",
+            "$parent": "*",
+            "$children": "*",
+            "g9|scout": ["create_agent"],
+        },
+    )
+    with remote_caller_context("leg", "g9|scout"):
+        out = await _as(k, "leg", "kernel", create("leg"))
+    assert out["status"] == "completed" and "id" in out["result"], out
 
 
 # ─── conferral: authority flows from above only ──────────────────────────────

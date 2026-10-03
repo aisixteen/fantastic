@@ -41,6 +41,9 @@ public final class RecordWriter: @unchecked Sendable {
     private var task: TaskId?
     private let wake: AsyncStream<Void>
     private let wakeUp: AsyncStream<Void>.Continuation
+    /// A drain is running (`flush`), and the flushes waiting their turn, FIFO.
+    private var draining = false
+    private var drainWaiters: [CheckedContinuation<Void, Never>] = []
 
     init(kernel: Kernel) {
         self.kernel = kernel
@@ -53,6 +56,33 @@ public final class RecordWriter: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return body()
+    }
+
+    /// Take the drain, or wait for the one running to hand it over.
+    private func acquireDrain() async {
+        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+            let now: Bool = withLock {
+                if !draining {
+                    draining = true
+                    return true
+                }
+                drainWaiters.append(c)
+                return false
+            }
+            if now { c.resume() }
+        }
+    }
+
+    /// Hand the drain to the next waiting flush, or free it.
+    private func releaseDrain() {
+        let next: CheckedContinuation<Void, Never>? = withLock {
+            if drainWaiters.isEmpty {
+                draining = false
+                return nil
+            }
+            return drainWaiters.removeFirst()
+        }
+        next?.resume()
     }
 
     func start(loader: AgentId) {
@@ -103,7 +133,17 @@ public final class RecordWriter: @unchecked Sendable {
     /// NO PROVIDER ⇒ THE DIRTY SET SURVIVES. Python returns BEFORE clearing the
     /// queues when no store is wired, so everything created before the store
     /// exists lands the moment one is.
+    ///
+    /// ONE DRAIN AT A TIME. When it returns, every write that was dirty when it
+    /// was called has LANDED — also the ones the debounced loop took first. It
+    /// used to return at once when the loop held them, with their writes still in
+    /// flight: `flushRecords` came back before the record and its readme were on
+    /// disk (measured: a 152–160 ms gap between `create_agent` and `flushRecords`,
+    /// just past the debounce, left `agent.yaml`, `readme.md` and `docs/`
+    /// unwritten when it returned).
     public func flush() async {
+        await acquireDrain()
+        defer { releaseDrain() }
         guard kernel.findStore() != nil else { return }
         let (ids, gone): ([AgentId], [(AgentId, URL)]) = withLock {
             let p = persist

@@ -304,7 +304,7 @@ test("send validation: python's texts, and null read the way python reads None",
   assert.equal((await r(7))["error"], "send: item must be a dict");
   assert.equal(
     (await r({ target: "a", payload: { type: 5 } }))["error"],
-    "send: payload.type must be a non-empty string, got 5",
+    "send: payload.type must be a non-empty string, got int",
   );
   assert.equal((await r({ target: "a", payload: { type: "go" }, id: "" }))["error"], "send: id must be a non-empty name");
   assert.equal(

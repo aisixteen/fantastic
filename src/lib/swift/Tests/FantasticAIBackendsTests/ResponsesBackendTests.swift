@@ -70,6 +70,34 @@ private func firstError(_ p: ResponsesProvider) async -> String {
 @Suite("Responses backend")
 struct ResponsesBackendTests {
 
+    /// Audit S1: the client's refusal of a header value QUOTES the key — it
+    /// leaves as a fixed text, rust's; an error body or an error event echoing the
+    /// key leaves with the key as `<secret>`.
+    @Test func theKeyNeverLeavesInAnErrorText() async {
+        let echo = StubHTTP.Reply(
+            status: 401, headers: [("Content-Type", "application/json")],
+            body: "invalid key: Bearer sk-test-fixture")
+        let event = StubHTTP.Reply.sse(
+            "data: {\"type\":\"error\",\"message\":\"bad key sk-test-fixture\"}\n\n")
+        let stub = StubHTTP([echo, event])
+        defer { stub.stop() }
+        let ep = "http://127.0.0.1:\(stub.port)/v1/responses"
+        // refused BEFORE any connection: nothing listens on port 1
+        let refused = await firstError(
+            provider(
+                endpoint: "http://127.0.0.1:1/v1/responses", key: fixedKey("sk-test-fixture\n")))
+        #expect(
+            refused == "RuntimeError: api_key has illegal header chars: failed to parse header value",
+            "\(refused)")
+        let echoed = await firstError(provider(endpoint: ep, key: fixedKey("sk-test-fixture")))
+        #expect(echoed == "RuntimeError: responses 401: invalid key: Bearer <secret>", "\(echoed)")
+        let streamed = await firstError(provider(endpoint: ep, key: fixedKey("sk-test-fixture")))
+        #expect(
+            streamed
+                == "RuntimeError: responses stream error: {'type': 'error', 'message': 'bad key <secret>'}",
+            "\(streamed)")
+    }
+
     @Test func readmeIsPythonVerbatim() throws {
         let py = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent()

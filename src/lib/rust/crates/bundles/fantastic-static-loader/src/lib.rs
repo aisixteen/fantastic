@@ -7,6 +7,12 @@
 //! grant plus any explicit `can_call` the manifest names. The kernel knows
 //! nothing about YAML; this bundle owns the format.
 //!
+//! The pass runs ONLY on the kernel's own boot — origin none: the cold boot, or
+//! `create_agent` booting the loader it just made. An agent-sent `boot` is
+//! refused (audit G-2/BV-2): any agent that reaches the loader (every roster
+//! agent, by the baseline `$parent`) could otherwise re-run the manifest with
+//! operator authority — restore a revoked grant, re-create a deleted agent.
+//!
 //! After boot the roster is CLOSED: deny-all means a roster agent cannot
 //! `create_agent`, so the manifest IS the roster. Idempotent by id (a reboot
 //! re-reads the manifest and RE-APPLIES the declared fields over an existing
@@ -18,7 +24,7 @@ use async_trait::async_trait;
 use fantastic_bundle::{py_repr, py_repr_value, py_str, py_truthy};
 use fantastic_file::fs;
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
-use fantastic_kernel::refusal::{refusal, UNHANDLED};
+use fantastic_kernel::refusal::{refusal, refusal_hint, UNAUTHORIZED, UNHANDLED};
 use fantastic_kernel::{with_operator, yaml_io, Agent, AgentId, Item, Kernel};
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
@@ -30,6 +36,17 @@ const README: &str = include_str!("readme.md");
 
 /// Record field naming the manifest path.
 const MANIFEST_FIELD: &str = "manifest";
+
+/// The one text an agent-sent `boot` is refused with — python `BOOT_REFUSED`,
+/// byte for byte.
+pub const BOOT_REFUSED: &str = "static_loader: an agent-sent boot is refused — the roster \
+                                is hydrated with operator authority, so only the kernel's \
+                                own boot (cold boot, create_agent) runs it";
+
+/// Its hint — python `BOOT_REFUSED_HINT`.
+pub const BOOT_REFUSED_HINT: &str = "change an agent's record with update_agent (the \
+                                     conferral rule applies there); the operator re-boots \
+                                     the loader";
 
 /// The declarative roster loader bundle.
 pub struct StaticLoaderBundle;
@@ -93,6 +110,12 @@ fn load_manifest(agent: &Agent, base: &std::path::Path) -> Result<Vec<Value>, St
 }
 
 async fn boot(agent: &Arc<Agent>, kernel: &Arc<Kernel>) -> Value {
+    // The pass below runs as the OPERATOR, so the one who asks for it must be the
+    // operator: the cold boot, `create_agent` booting this loader, the CLI. A
+    // caller's boot is not that — refused before the manifest is read.
+    if fantastic_kernel::current_origin().is_some() {
+        return refusal_hint(UNAUTHORIZED, BOOT_REFUSED, BOOT_REFUSED_HINT);
+    }
     let agents = match kernel
         .workdir()
         .and_then(|base| load_manifest(agent, &base))

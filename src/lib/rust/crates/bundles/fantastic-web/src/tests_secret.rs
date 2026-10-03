@@ -2,7 +2,8 @@
 //!
 //! The twin of python `io_bridge/tests/test_secret_across_bridges.py`, web half:
 //! web_ws puts an inbound frame's `secret` on the dispatched item verbatim,
-//! web_rest reads it from `X-Fantastic-Secret` (a JSON array), and a
+//! web_rest reads it from `X-Fantastic-Secret` (a JSON array of marks — dotted
+//! strings and/or arrays of steps), and a
 //! `<guid>|<agent>` send from the host puts its item's marks on the call frame
 //! to the peer. The bridge legs (ws_bridge / relay_connector) are in
 //! `fantastic-bridge`'s `tests_secret.rs`.
@@ -23,6 +24,7 @@ use std::sync::Mutex;
 use tokio_tungstenite::tungstenite::Message as TMessage;
 
 const KEY: &str = "sk-cross-0123456789abcdef";
+const KEY2: &str = "sk-cross-dotted-key-77aa77aa";
 const ISSUED: &str = "tok-cross-issued-fedcba98";
 
 /// Set in the child run of [`nothing_on_the_way_prints_a_value`].
@@ -58,6 +60,7 @@ impl Bundle for Vault {
                 json!({"ok": true, "len": payload["key"].as_str().map_or(0, |k| k.chars().count())})
             }
             "issue" => json!({"key": ISSUED, "note": "issued"}),
+            "issue_dotted" => json!({"a.b": ISSUED, "a": {"b": "nested-plain"}}),
             other => json!({"error": format!("unknown verb '{other}'")}),
         }))
     }
@@ -361,6 +364,22 @@ async fn a_malformed_mark_on_a_web_ws_frame_is_refused_before_dispatch() {
         (json!(["payload.nope"]), "names nothing in the payload"),
         (json!(["payload.type"]), "cannot hide payload.type"),
         (json!(["payload"]), "must start with 'payload.'"),
+        // arrays of steps
+        (json!([[]]), "path [] has no steps"),
+        (json!([["payload", true]]), "step True is neither a string"),
+        (
+            json!([["nope", "key"]]),
+            "must start with 'payload' and a step under it",
+        ),
+        (json!([["payload", "type"]]), "cannot hide payload.type"),
+        (
+            json!([["payload", "nope"]]),
+            "path ['payload', 'nope'] names nothing in the payload",
+        ),
+        (
+            json!(["payload.key", ["payload", "k.x"]]),
+            "names nothing in the payload",
+        ),
     ]
     .into_iter()
     .enumerate()
@@ -427,6 +446,38 @@ async fn web_rest_carries_the_marks_in_a_header() {
         r.json::<Value>().await.unwrap(),
         json!({"key": ISSUED, "note": "issued"})
     );
+    // an element may be an ARRAY of steps: the key "a.b", taken literally
+    let r = client
+        .post(&url)
+        .json(&json!({"type": "issue_dotted", "a.b": KEY2, "a": {"b": "nested-plain"}}))
+        .header(
+            "X-Fantastic-Secret",
+            json!([["payload", "a.b"], ["result", "a.b"]]).to_string(),
+        )
+        .header("X-Fantastic-Execution-Id", "issue-rest-2")
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(
+        r.json::<Value>().await.unwrap(),
+        json!({"a.b": ISSUED, "a": {"b": "nested-plain"}})
+    );
+    // a malformed array is the kernel's own refusal, in its words
+    let r = client
+        .post(&url)
+        .json(&json!({"type": "set_key", "key": KEY}))
+        .header("X-Fantastic-Secret", r#"[["payload", "a.b"]]"#)
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(
+        r.json::<Value>().await.unwrap(),
+        json!({
+            "error": "send: secret path ['payload', 'a.b'] names nothing in the payload",
+            "reason": "bad_arg",
+            "arg": "secret",
+        })
+    );
     // a header that is not JSON is the leg's own 400 — nothing dispatched
     let r = client
         .post(&url)
@@ -458,7 +509,8 @@ async fn web_rest_carries_the_marks_in_a_header() {
         *got.lock().unwrap(),
         vec![
             json!({"type": "set_key", "key": KEY}),
-            json!({"type": "issue"})
+            json!({"type": "issue"}),
+            json!({"type": "issue_dotted", "a.b": KEY2, "a": {"b": "nested-plain"}}),
         ]
     );
     let rb = records(&kb).await;
@@ -471,7 +523,22 @@ async fn web_rest_carries_the_marks_in_a_header() {
         settle_of(&rb, &issue["id"])["outcome"]["result"]["key"],
         json!(PLACEHOLDER)
     );
-    assert_kept_out("B", &rb, &[KEY, ISSUED]);
+    let dotted = call_row(&rb, "vault", "issue_dotted");
+    assert_eq!(
+        dotted["secret"],
+        json!([["payload", "a.b"], ["result", "a.b"]]),
+        "{dotted}"
+    );
+    assert_eq!(
+        dotted["payload"],
+        json!({"type": "issue_dotted", "a.b": PLACEHOLDER, "a": {"b": "nested-plain"}}),
+        "{dotted}"
+    );
+    assert_eq!(
+        settle_of(&rb, &dotted["id"])["outcome"]["result"],
+        json!({"a.b": PLACEHOLDER, "a": {"b": "nested-plain"}})
+    );
+    assert_kept_out("B", &rb, &[KEY, KEY2, ISSUED]);
     stop(&kb.k, &b_web).await;
 }
 
@@ -566,7 +633,10 @@ async fn a_guid_qualified_credential_set_and_get_cross_with_their_marks() {
     let made = create(
         &kp.k,
         json!({"handler_module": fantastic_credential_store::HANDLER_MODULE, "id": "p_creds",
-               "file": creds_file.to_string_lossy(), "creators": ["H-g|kernel"],
+               "file": creds_file.to_string_lossy(),
+               "refs": {"openai/main": {"host": "api.openai.com",
+                                        "readers": ["H-g|kernel"],
+                                        "writers": ["H-g|kernel"]}},
                "callable_by": {"H-g|kernel": "*"}}),
     )
     .await;
@@ -575,13 +645,12 @@ async fn a_guid_qualified_credential_set_and_get_cross_with_their_marks() {
     let booted = op(&kp.k, &p_leg, json!({"type": "boot"})).await.result;
     assert_eq!(booted["booted"], json!(true), "{booted}");
     let wire = page_socket(port, &h_web, half).await;
-    until("P is H's peer", || kh.k.peer("P-g").is_some()).await;
+    until("P is H's peer", || !kh.k.peer_routes("P-g").is_empty()).await;
 
     let put = op_marked(
         &kh.k,
         "P-g|p_creds",
-        json!({"type": "set", "ref": "openai/main", "host": "https://api.openai.com/v1",
-               "fields": {"api_key": KEY}}),
+        json!({"type": "set", "ref": "openai/main", "fields": {"api_key": KEY}}),
         json!(["payload.fields"]),
     )
     .await;
@@ -636,8 +705,7 @@ async fn a_guid_qualified_credential_set_and_get_cross_with_their_marks() {
     let bare = op(
         &kh.k,
         "P-g|p_creds",
-        json!({"type": "set", "ref": "openai/main", "host": "api.openai.com",
-               "fields": {"api_key": "sk-unmarked-x"}}),
+        json!({"type": "set", "ref": "openai/main", "fields": {"api_key": "sk-unmarked-x"}}),
     )
     .await;
     assert_eq!(bare.result["arg"], json!("secret"), "{:?}", bare.result);
@@ -669,7 +737,7 @@ fn nothing_on_the_way_prints_a_value() {
         printed.contains("a_guid_qualified_credential_set_and_get_cross_with_their_marks"),
         "the child ran nothing:\n{printed}"
     );
-    for v in [KEY, ISSUED] {
+    for v in [KEY, KEY2, ISSUED] {
         assert!(!printed.contains(v), "{v:?} printed:\n{printed}");
     }
 }

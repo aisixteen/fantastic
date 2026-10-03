@@ -4,180 +4,52 @@
 //! This module is the ONLY place this runtime opens a path that came from a
 //! caller. The running-dir law lives here (a `root` is clamped to the running
 //! dir; a `path` is clamped to that root — `../`, absolute paths and outward
-//! symlinks all refuse), so the clamp is **unbypassable**: nothing reads or
-//! writes outside its allowed root by going around it, because there is no other
-//! disk code to go around to. The cold bring-up read `static_loader` does before
-//! any file_bridge agent exists is not exempt — it calls [`resolve`] here, as
-//! python's `static_loader` imports `file_bridge.fs`.
+//! symlinks all refuse), so the clamp is **unbypassable** for every path a caller
+//! names: nothing reads or writes one outside its allowed root by going around
+//! this module. The cold bring-up read `static_loader` does before any
+//! file_bridge agent exists is not exempt — it calls [`resolve`] here, as
+//! python's `static_loader` imports `file_bridge.fs`. Nor is `credential_store`'s
+//! `file` backend — secrets at an ABSOLUTE path outside the running dir by
+//! design, written 0600 ([`write_bytes`]) and read through ONE `O_NOFOLLOW` open
+//! judged on its own descriptor ([`read_private`]).
+//!
+//! The ONLY disk code outside this module (none of it opens a caller-named path):
+//! - the substrate crate `fantastic-kernel`, which cannot depend on a bundle:
+//!   `bootstrap.rs` (creates `.fantastic`, reads the root record, writes the
+//!   virgin seed's root record), `persistence.rs` (`walk_tree` — the cold tree
+//!   read, also behind a loader's `disk_parents`; `read_record_at` /
+//!   `write_record_at`), `lock.rs` (`lock.yaml`) and `reflect.rs` (an agent's own
+//!   `readme.md` and `docs/` topic tree, read back for reflect);
+//! - [`fantastic_bundle::realpath`] — the ONE copy of python's `os.path.realpath`,
+//!   shared by this module's clamp and the kernel's cold walk (`persistence.rs`
+//!   `clamp`): `lstat` + `readlink` per component, and `getcwd` for a relative
+//!   path — metadata only, it opens nothing;
+//! - `fantastic_core::seed_root_readme` — the cold copy-if-missing seed of
+//!   `.fantastic/readme.md` + `docs/` at a virgin bootstrap — and the
+//!   `fantastic-cli` binary's `.env` read (`load_dotenv`);
+//! - `fantastic-exec-bridge`'s process plumbing: `spawn::all_pids` lists `/proc`
+//!   (Linux) for a job's session members; `spawn::resolve` probes the child's
+//!   `PATH` dirs for a bare command (`is_file` + `access` — metadata only; the OS
+//!   opens what it execs); `pty::mkdtemp` creates a PTY job's paste scratch dir
+//!   in the system temp dir — the image itself is written through here;
+//! - `fantastic-file`'s `list`, which stats the entries [`list_dir`] returned —
+//!   paths this module already clamped.
 //!
 //! Resolution is python's: `pathlib.Path.resolve(strict=False)`, i.e.
-//! `os.path.realpath` — every existing component's symlink is FOLLOWED, a
-//! missing tail is kept literal, and `..` is applied after the follow. A lexical
-//! compare would admit an outward symlink the OS then follows at open time.
+//! `os.path.realpath` ([`fantastic_bundle::realpath`]) — every existing
+//! component's symlink is FOLLOWED, a missing tail is kept literal, and `..` is
+//! applied after the follow. A lexical compare would admit an outward symlink the
+//! OS then follows at open time.
 //!
 //! Every function takes `(root, path)`: `root` is the clamp boundary, `path` is
 //! relative to it. Errors are the text python's `ValueError`/`OSError` carry, so
 //! a caller renders `str(e)` by forwarding the string.
 
-use std::collections::HashMap;
-use std::ffi::{OsStr, OsString};
-use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use fantastic_bundle::{io_error_str, os_error_str2, py_repr, utf8_decode_error_str};
-
-/// python `os.path.realpath(p, strict=False)` — the canonical path, with every
-/// symlink it can follow followed and a missing tail normalized, never raising.
-#[must_use]
-pub fn realpath(p: &Path) -> PathBuf {
-    let mut seen: HashMap<Vec<u8>, Option<Vec<u8>>> = HashMap::new();
-    let (path, _ok) = join_realpath(Vec::new(), p.as_os_str().as_bytes().to_vec(), &mut seen);
-    abspath(path)
-}
-
-/// python `posixpath._joinrealpath` — returns `(path, ok)`; `ok` is false when a
-/// symlink loop stopped the walk, and the caller keeps the rest unresolved.
-fn join_realpath(
-    mut path: Vec<u8>,
-    mut rest: Vec<u8>,
-    seen: &mut HashMap<Vec<u8>, Option<Vec<u8>>>,
-) -> (Vec<u8>, bool) {
-    if rest.first() == Some(&b'/') {
-        rest.remove(0);
-        path = b"/".to_vec();
-    }
-    while !rest.is_empty() {
-        let (name, tail) = partition(&rest, b'/');
-        rest = tail;
-        if name.is_empty() || name == b"." {
-            continue;
-        }
-        if name == b".." {
-            if path.is_empty() {
-                path = b"..".to_vec();
-            } else {
-                let (head, last) = split(&path);
-                path = head;
-                if last == b".." {
-                    path = join(&join(&path, b".."), b"..");
-                }
-            }
-            continue;
-        }
-        let newpath = join(&path, &name);
-        let is_link = std::fs::symlink_metadata(bytes_path(&newpath))
-            .map(|m| m.file_type().is_symlink())
-            .unwrap_or(false);
-        if !is_link {
-            path = newpath;
-            continue;
-        }
-        match seen.get(&newpath) {
-            Some(Some(resolved)) => {
-                path = resolved.clone();
-                continue;
-            }
-            // Seen but unresolved ⇒ a symlink loop: python returns the already
-            // resolved part joined with the rest, unresolved.
-            Some(None) => return (join(&newpath, &rest), false),
-            None => {}
-        }
-        let Ok(link) = std::fs::read_link(bytes_path(&newpath)) else {
-            path = newpath;
-            continue;
-        };
-        seen.insert(newpath.clone(), None);
-        let (walked, ok) = join_realpath(path, link.into_os_string().into_vec(), seen);
-        path = walked;
-        if !ok {
-            return (join(&path, &rest), false);
-        }
-        seen.insert(newpath, Some(path.clone()));
-    }
-    (path, true)
-}
-
-/// python `posixpath.abspath` — absolutize against the process cwd, then
-/// `normpath`.
-fn abspath(path: Vec<u8>) -> PathBuf {
-    let path = if path.first() == Some(&b'/') {
-        path
-    } else {
-        let cwd = std::env::current_dir().unwrap_or_default();
-        join(cwd.as_os_str().as_bytes(), &path)
-    };
-    bytes_path(&normpath(&path))
-}
-
-/// python `posixpath.normpath` — fold `//`, `.` and `..` lexically.
-fn normpath(path: &[u8]) -> Vec<u8> {
-    if path.is_empty() {
-        return b".".to_vec();
-    }
-    // POSIX allows one or two leading slashes and treats three or more as one.
-    let leading = if path.starts_with(b"//") && !path.starts_with(b"///") {
-        2
-    } else {
-        usize::from(path.starts_with(b"/"))
-    };
-    let mut comps: Vec<&[u8]> = Vec::new();
-    for comp in path.split(|b| *b == b'/') {
-        if comp.is_empty() || comp == b"." {
-            continue;
-        }
-        if comp != b".." || (leading == 0 && comps.is_empty()) || comps.last() == Some(&&b".."[..])
-        {
-            comps.push(comp);
-        } else if !comps.is_empty() {
-            comps.pop();
-        }
-    }
-    let mut out = b"/".repeat(leading);
-    out.extend_from_slice(&comps.join(&b'/'));
-    if out.is_empty() {
-        b".".to_vec()
-    } else {
-        out
-    }
-}
-
-/// python `posixpath.join(a, b)`.
-fn join(a: &[u8], b: &[u8]) -> Vec<u8> {
-    if b.first() == Some(&b'/') {
-        return b.to_vec();
-    }
-    let mut out = a.to_vec();
-    if !out.is_empty() && out.last() != Some(&b'/') {
-        out.push(b'/');
-    }
-    out.extend_from_slice(b);
-    out
-}
-
-/// python `posixpath.split(p)`.
-fn split(p: &[u8]) -> (Vec<u8>, Vec<u8>) {
-    let i = p.iter().rposition(|b| *b == b'/').map_or(0, |i| i + 1);
-    let (head, tail) = p.split_at(i);
-    let mut head = head.to_vec();
-    if !head.is_empty() && !head.iter().all(|b| *b == b'/') {
-        while head.last() == Some(&b'/') {
-            head.pop();
-        }
-    }
-    (head, tail.to_vec())
-}
-
-/// python `str.partition(sep)` over bytes, returning `(before, after)`.
-fn partition(s: &[u8], sep: u8) -> (Vec<u8>, Vec<u8>) {
-    match s.iter().position(|b| *b == sep) {
-        Some(i) => (s[..i].to_vec(), s[i + 1..].to_vec()),
-        None => (s.to_vec(), Vec::new()),
-    }
-}
-
-fn bytes_path(b: &[u8]) -> PathBuf {
-    PathBuf::from(OsString::from_vec(b.to_vec()))
-}
+use fantastic_bundle::{io_error_str, os_error_str2, py_repr, realpath, utf8_decode_error_str};
 
 /// python `fs.resolve_root` — clamp `root` to the running dir `base` (the
 /// kernel's [`fantastic_kernel::Kernel::workdir`], python's `fs.Root.base` — the
@@ -185,15 +57,16 @@ fn bytes_path(b: &[u8]) -> PathBuf {
 /// allowed only if it lies inside `base`; `..`/symlink escapes refuse.
 ///
 /// # Errors
-/// `fs: root '<raw>' escapes the running dir` — python's `ValueError` text.
+/// `fs: root '<raw>' escapes the running dir` — python's `ValueError` text; the
+/// cwd's `OSError` text when a relative path cannot absolutize ([`realpath`]).
 pub fn resolve_root(root: &str, base: &Path) -> Result<PathBuf, String> {
-    let base = realpath(base);
+    let base = realpath(base)?;
     let joined = if root.starts_with('/') {
         PathBuf::from(root)
     } else {
         base.join(root)
     };
-    let resolved = realpath(&joined);
+    let resolved = realpath(&joined)?;
     if !resolved.starts_with(&base) {
         return Err(format!(
             "fs: root {} escapes the running dir",
@@ -208,9 +81,10 @@ pub fn resolve_root(root: &str, base: &Path) -> Result<PathBuf, String> {
 /// dangling or not.
 ///
 /// # Errors
-/// `fs: path '<path>' escapes root` — python's `ValueError` text.
+/// `fs: path '<path>' escapes root` — python's `ValueError` text; the cwd's
+/// `OSError` text when a relative root cannot absolutize ([`realpath`]).
 pub fn resolve(root: &Path, path: &str) -> Result<PathBuf, String> {
-    let root_p = realpath(root);
+    let root_p = realpath(root)?;
     if path.starts_with('/') {
         // An absolute path is a hard escape — refused, never silently re-rooted
         // (a stripped slash would serve `/etc/passwd` as `root/etc/passwd`).
@@ -219,7 +93,7 @@ pub fn resolve(root: &Path, path: &str) -> Result<PathBuf, String> {
     let target = if path.is_empty() {
         root_p.clone()
     } else {
-        realpath(&root_p.join(path))
+        realpath(&root_p.join(path))?
     };
     if !target.starts_with(&root_p) {
         return Err(format!("fs: path {} escapes root", py_repr(path)));
@@ -404,15 +278,91 @@ fn write_new_with_mode(tmp: &Path, data: &[u8], mode: u32) -> Result<(), String>
     f.write_all(data).map_err(|e| io_error_str(&e, tmp))
 }
 
-/// python `fs.lstat` — the entry's OWN metadata (a symlink is not followed), for
-/// a caller that must check what a path IS (type, owner, permission bits) before
-/// trusting it.
+/// What [`read_private`] refused, nothing read: the entry it found is not a
+/// private file. `mode` (its permission bits) and `uid` (its owner) say what it
+/// IS, for the caller's own refusal text. Python `fs.NotPrivate`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotPrivate {
+    /// The leaf that was opened (or the symlink standing in its place).
+    pub path: PathBuf,
+    /// Its permission bits (`S_IMODE`).
+    pub mode: u32,
+    /// Its owner.
+    pub uid: u32,
+}
+
+impl std::fmt::Display for NotPrivate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "fs: {} is not a private file (mode 0o{:o}, uid {}) — refused, nothing read",
+            self.path.display(),
+            self.mode,
+            self.uid
+        )
+    }
+}
+
+/// Why [`read_private`] read nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrivateReadError {
+    /// The entry is not a private file — python's `NotPrivate(PermissionError)`.
+    NotPrivate(NotPrivate),
+    /// The clamp's text, or python's `OSError` text (`FileNotFoundError` when
+    /// absent).
+    Os(String),
+}
+
+/// python `fs.read_private` — read a PRIVATE file (a regular file owned by this
+/// user with no group/other permission bits) through ONE open. `O_NOFOLLOW`
+/// refuses a symlink in the leaf's place, and the OPEN DESCRIPTOR is what is
+/// judged (`fstat`) and read, so nothing can swap the file between the check
+/// and the read (audit F5, 2026-10-03: an `lstat` of the path and then a read of
+/// the path again was a window). `O_NONBLOCK` so a FIFO planted there cannot
+/// hang the open — it is judged and refused like any other non-regular entry.
 ///
 /// # Errors
-/// The clamp's text, or python's `OSError` text.
-pub fn lstat(root: &Path, path: &str) -> Result<std::fs::Metadata, String> {
-    let leaf = lexical_leaf(root, path)?;
-    std::fs::symlink_metadata(&leaf).map_err(|e| io_error_str(&e, &leaf))
+/// [`PrivateReadError::NotPrivate`] (nothing read) when the entry is not
+/// private; [`PrivateReadError::Os`] when it is absent or unreadable.
+pub fn read_private(root: &Path, path: &str) -> Result<Vec<u8>, PrivateReadError> {
+    use std::io::Read;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let leaf = lexical_leaf(root, path).map_err(PrivateReadError::Os)?;
+    let opened = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(&leaf);
+    let mut f = match opened {
+        Ok(f) => f,
+        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
+            // the symlink itself, named in the refusal — never read
+            let st = std::fs::symlink_metadata(&leaf)
+                .map_err(|e| PrivateReadError::Os(io_error_str(&e, &leaf)))?;
+            return Err(PrivateReadError::NotPrivate(NotPrivate {
+                path: leaf,
+                mode: st.mode() & 0o7777,
+                uid: st.uid(),
+            }));
+        }
+        Err(e) => return Err(PrivateReadError::Os(io_error_str(&e, &leaf))),
+    };
+    let st = f
+        .metadata()
+        .map_err(|e| PrivateReadError::Os(io_error_str(&e, &leaf)))?;
+    let mode = st.mode() & 0o7777;
+    // SAFETY: `getuid` has no preconditions and cannot fail.
+    let me = unsafe { libc::getuid() };
+    if !st.file_type().is_file() || st.uid() != me || mode & 0o077 != 0 {
+        return Err(PrivateReadError::NotPrivate(NotPrivate {
+            path: leaf,
+            mode,
+            uid: st.uid(),
+        }));
+    }
+    let mut out = Vec::new();
+    f.read_to_end(&mut out)
+        .map_err(|e| PrivateReadError::Os(io_error_str(&e, &leaf)))?;
+    Ok(out)
 }
 
 /// python `fs.list_dir` — the dir's entries as resolved paths, sorted by name

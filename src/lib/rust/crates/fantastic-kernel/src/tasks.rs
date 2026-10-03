@@ -398,11 +398,28 @@ impl TaskTable {
             .map(|e| e.agent.clone())
     }
 
+    /// The verb of `id` when it is a KERNEL SERVICE TASK — a keepalive loop
+    /// the ROOT owns (`root`): the execution flusher, the record persister.
+    /// `cancel` never kills one (audit KV-5, owner 2026-10-03): killing it
+    /// stopped ledger durability and record persistence until the process
+    /// restarted, and nothing restarted it. It stays listed in `ps`; the
+    /// kernel's own stop ends it. Python `Kernel.is_service_task`.
+    fn service_verb(&self, id: &TaskId, root: &AgentId) -> Option<String> {
+        let inner = self.inner.lock().expect("task table poisoned");
+        inner
+            .tasks
+            .get(id)
+            .filter(|e| is_service(e, Some(root)))
+            .map(|e| e.verb.clone())
+    }
+
     /// Phase ① of `cancel`: `id` + every descendant, POST-ORDER (leaves
     /// first — the kill order of a process group), with every one of them
     /// MARKED killed before the caller runs a single hook or stops a single
-    /// task. `None` if `id` isn't in the table.
-    fn begin_cancel(&self, id: &TaskId) -> Option<Vec<TaskId>> {
+    /// task. `None` if `id` isn't in the table. A kernel service task below
+    /// `id` (a flusher started by a `kernel_start` some agent's dispatch sent)
+    /// is not part of the group: it and its own work are left out.
+    fn begin_cancel(&self, id: &TaskId, root: Option<&AgentId>) -> Option<Vec<TaskId>> {
         let inner = self.inner.lock().expect("task table poisoned");
         if !inner.tasks.contains_key(id) {
             return None;
@@ -410,7 +427,9 @@ impl TaskTable {
         let mut kids: HashMap<&TaskId, Vec<&TaskId>> = HashMap::new();
         for (tid, e) in inner.tasks.iter() {
             if let Some(p) = e.parent.as_ref() {
-                kids.entry(p).or_default().push(tid);
+                if !is_service(e, root) {
+                    kids.entry(p).or_default().push(tid);
+                }
             }
         }
         // Deterministic order among siblings (oldest first).
@@ -442,6 +461,11 @@ impl TaskTable {
         }
         killed
     }
+}
+
+/// Is `e` a kernel service task — a keepalive loop the root owns?
+fn is_service(e: &TaskEntry, root: Option<&AgentId>) -> bool {
+    e.keepalive && root == Some(&e.agent)
 }
 
 /// Post-order DFS of the task tree.
@@ -550,6 +574,9 @@ impl Kernel {
         let sender = crate::send::current_sender();
         let origin = crate::send::current_origin();
         let remote = crate::send::current_remote_caller();
+        // A fork started inside the kernel's own ledger flush is silent too
+        // (python copies `_state_quiet` into every task).
+        let quiet = crate::send::state_quiet();
         let guard = ForgetOnDrop {
             kernel: Arc::clone(self),
             id: task_id,
@@ -557,27 +584,26 @@ impl Kernel {
         let tid = task_id;
         tokio::spawn(async move {
             let _guard = guard;
-            CURRENT_TASK
-                .scope(
-                    tid,
-                    CURRENT_KILLED.scope(
-                        killed,
-                        crate::send::CURRENT_SENDER.scope(
-                            sender,
-                            crate::send::CURRENT_ORIGIN.scope(
-                                origin,
-                                crate::send::CURRENT_REMOTE.scope(remote, async move {
-                                    tokio::select! {
-                                        biased;
-                                        _ = cancel.notified() => {}
-                                        _ = work => {}
-                                    }
-                                }),
-                            ),
+            let scoped = CURRENT_TASK.scope(
+                tid,
+                CURRENT_KILLED.scope(
+                    killed,
+                    crate::send::CURRENT_SENDER.scope(
+                        sender,
+                        crate::send::CURRENT_ORIGIN.scope(
+                            origin,
+                            crate::send::CURRENT_REMOTE.scope(remote, async move {
+                                tokio::select! {
+                                    biased;
+                                    _ = cancel.notified() => {}
+                                    _ = work => {}
+                                }
+                            }),
                         ),
                     ),
-                )
-                .await;
+                ),
+            );
+            crate::send::STATE_QUIET.scope(quiet, scoped).await;
         });
         task_id
     }
@@ -593,9 +619,27 @@ impl Kernel {
     ///
     /// Returns `{cancelled, killed:[task_id]}`. An unknown or already-finished
     /// id is not in the table → `{"cancelled": false, "killed": []}`: cancel
-    /// fails honestly, it never pretends.
+    /// fails honestly, it never pretends. A kernel service task
+    /// ([`TaskTable::service_verb`]) is refused, and left alive.
+    ///
+    /// Every hook runs AS ITS OWN AGENT (audit G-3) — see the loop below.
     pub async fn cancel_task(self: &Arc<Self>, task_id: &TaskId) -> Value {
-        let Some(ids) = self.tasks.begin_cancel(task_id) else {
+        let root = self.root().map(|r| r.id.clone());
+        if let Some(verb) = root
+            .as_ref()
+            .and_then(|r| self.tasks.service_verb(task_id, r))
+        {
+            let mut r = crate::refusal::refusal_hint(
+                crate::refusal::BAD_ARG,
+                format!(
+                    "cancel: task {task_id} ({verb}) is a kernel service task — not cancellable"
+                ),
+                "it runs for the life of the kernel and stays listed in ps; kernel_stop ends it",
+            );
+            crate::refusal::with(&mut r, "arg", json!("task_id"));
+            return r;
+        }
+        let Some(ids) = self.tasks.begin_cancel(task_id, root.as_ref()) else {
             return json!({"cancelled": false, "killed": []});
         };
         // ① SIGTERM — hooks first, subtree-wide, while everything is still alive.
@@ -616,7 +660,16 @@ impl Kernel {
             // not refusable. C87: python's exact stdout line (`_agent.py:2858-
             // 2859`, `print(f"  [cancel] {self.id} bundle on_cancel raised:
             // {e}")`).
-            if let Err(e) = bundle.on_cancel(&agent.id, tid, self).await {
+            //
+            // AS THE AGENT ITSELF, on every path that kills the task — the
+            // `cancel` verb (inside the root's dispatch), an item's own deadline,
+            // `shutdown_agents` (audit G-3, owner 2026-10-03): an emit on its own
+            // inbox is ungated, every other send is gated as this agent. The verb
+            // path used to run it as the ROOT, so a non-top-level agent's
+            // own-inbox emit (ai_core's final `status done`) was gated root →
+            // agent and dropped; the deadline path ran it as the operator.
+            let hook = bundle.on_cancel(&agent.id, tid, self);
+            if let Err(e) = crate::send::with_sender(agent.id.clone(), hook).await {
                 println!("  [cancel] {} bundle on_cancel raised: {e}", agent.id.0);
             }
         }
@@ -628,3 +681,6 @@ impl Kernel {
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+#[cfg(test)]
+mod hook_identity_tests;

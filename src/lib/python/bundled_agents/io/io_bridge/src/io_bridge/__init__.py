@@ -27,7 +27,12 @@ from io_bridge.channel import (
     Transport,
 )
 from io_bridge.egress_rules import Silent, resolve_egress
-from io_bridge.ingress_rules import AllowAll, DenyInbound, resolve_ingress
+from io_bridge.ingress_rules import (
+    AllowAll,
+    DenyInbound,
+    resolve_ingress,
+    unknown_ingress_refusal,
+)
 from io_bridge._engine import (
     BuildTransport,
     _BridgeState,
@@ -46,6 +51,7 @@ from io_bridge._engine import (
 )
 from io_bridge._transport import ConnectionClosed, MemoryTransport, _BaseTransport
 from io_bridge._codec import (
+    MAX_FRAME,
     decode_frame,
     encode_frame,
     find_bytes_path,
@@ -74,6 +80,7 @@ __all__ = [
     # resolution + the non-colliding default rules (Password lives per-package)
     "resolve_ingress",
     "resolve_egress",
+    "unknown_ingress_refusal",
     "AllowAll",
     "DenyInbound",
     "Silent",
@@ -97,6 +104,7 @@ __all__ = [
     "_BaseTransport",
     "ConnectionClosed",
     # binary-safe frame codec (shared by every transport)
+    "MAX_FRAME",
     "encode_frame",
     "decode_frame",
     "find_bytes_path",

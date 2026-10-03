@@ -27,6 +27,32 @@ public struct BridgeConfigError: Error, CustomStringConvertible, Sendable {
 /// Python `_ws.TUNNEL_READY_TIMEOUT`.
 let TUNNEL_READY_TIMEOUT = 5.0
 
+/// The record `host` values that name THIS machine — a leg dialed to one of them
+/// (an ssh tunnel's local end included) may carry a secret. Exact strings. Python
+/// `_ws.LOOPBACK_HOSTS`.
+public let LOOPBACK_HOSTS: Set<String> = ["localhost", "127.0.0.1", "[::1]"]
+
+// THE WS SEAL (owner, 2026-10-03, audit S8). `ws://` carries every frame in clear,
+// and a forward's secret values ride its frame verbatim (the far kernel needs
+// them), so a leg dialed to a non-loopback host refuses any call carrying secret
+// marks, in both directions: outbound in `KernelBridgeBundle.handle`/
+// `handleBinary` (`forward`), inbound in `WSTransport.recv`. A loopback leg (an
+// ssh tunnel's local end) is not sealed. One text for both. Python
+// `_ws.SECRET_SEALED` / `SECRET_SEALED_HINT` / `secret_sealed`.
+public let WS_SECRET_SEALED =
+    "ws_bridge: a call carrying secret marks may not cross a ws:// leg to a "
+    + "non-loopback host — ws:// carries every frame in clear"
+public let WS_SECRET_SEALED_HINT = "dial a loopback host (an ssh tunnel's local end) to send a secret"
+
+/// The ws seal's refusal — outbound to the local caller, inbound as the reply to
+/// the far caller.
+public func wsSecretSealed() -> JSON {
+    Refusal.make(Refusal.unauthorized, WS_SECRET_SEALED, hint: WS_SECRET_SEALED_HINT)
+}
+
+/// Whether a leg dialed to `host` is sealed — python `host not in LOOPBACK_HOSTS`.
+public func wsHostIsSealed(_ host: String) -> Bool { !LOOPBACK_HOSTS.contains(host) }
+
 // MARK: - WS transport
 
 /// Python `WSTransport`: a websockets client wrapper. A frame carrying raw
@@ -37,26 +63,55 @@ public actor WSTransport: BridgeTransport {
     /// python constructs `WSTransport(ws)` around whatever object speaks
     /// send/recv/close, which is how its resilience tests feed it frames.
     private let client: any RelayWire
+    /// The socket is down: the peer closed it or it dropped (a receive or a send
+    /// failed), or this side closed it.
+    private var closedFlag = false
+    /// Dialed to a non-loopback host — the ws seal holds (`WS_SECRET_SEALED`).
+    public nonisolated let sealed: Bool
 
-    public init(client: any RelayWire) { self.client = client }
+    public init(client: any RelayWire, sealed: Bool) {
+        self.client = client
+        self.sealed = sealed
+    }
 
     /// Dial, or raise with the dial's own text (the engine prefixes it).
-    static func connect(url: URL) async throws -> WSTransport {
+    static func connect(url: URL, sealed: Bool) async throws -> WSTransport {
         do {
-            return WSTransport(client: try await NIOWebSocketClient.connect(url: url))
+            return WSTransport(
+                client: try await NIOWebSocketClient.connect(url: url), sealed: sealed)
         } catch {
             throw ConnectionClosed("\(error)")
         }
     }
 
-    /// Python `getattr(self._ws, "closed", False)` — websockets 16 exposes no
-    /// `closed`, so a ws leg never reports one (§7, measured).
-    public func isClosed() async -> Bool { false }
+    /// THE WS SEAL, inbound: a `call` frame naming `secret` on a sealed leg already
+    /// crossed the network in clear, and nothing here dispatches it — the far
+    /// caller is answered with the seal's refusal. True when it was answered.
+    // TODO(ws seal): wss:// (TLS) is the later path — a TLS leg carries secrets to
+    // any host, and this seal lifts for it.
+    private func answeredSealed(_ frame: JSON) async -> Bool {
+        guard sealed, frame["type"].asString == "call", frame.asObject?["secret"] != nil else {
+            return false
+        }
+        do {
+            try await send(
+                .object(["type": .string("reply"), "id": frame["id"], "data": wsSecretSealed()]))
+        } catch {
+            // the socket dropped; the next receive reports it
+        }
+        return true
+    }
+
+    /// Python `WSTransport.closed` — the socket's state (`CLOSING`/`CLOSED`), so
+    /// a leg whose remote dropped reflects `connected:false` and `boot` dials
+    /// again.
+    public func isClosed() async -> Bool { closedFlag }
 
     public func send(_ frame: JSON) async throws {
         do {
             try await client.send(.text(Codec.encodeText(frame)))
         } catch {
+            closedFlag = true
             throw ConnectionClosed("\(error)")
         }
     }
@@ -66,6 +121,7 @@ public actor WSTransport: BridgeTransport {
             try await client.send(
                 .binary([UInt8](Codec.encodeBinaryFrame(header: header, body: body))))
         } catch {
+            closedFlag = true
             throw ConnectionClosed("\(error)")
         }
     }
@@ -82,6 +138,7 @@ public actor WSTransport: BridgeTransport {
             do {
                 msg = try await client.receive()
             } catch {
+                closedFlag = true
                 throw ConnectionClosed("\(error)")
             }
             switch msg {
@@ -97,6 +154,7 @@ public actor WSTransport: BridgeTransport {
                     RuntimeLog.warn("ws_bridge: skipping non-object frame")
                     continue
                 }
+                if await answeredSealed(frame) { continue }
                 return (frame, Data(), false)
             case .binary(let bytes):
                 let d = Data(bytes)
@@ -112,192 +170,109 @@ public actor WSTransport: BridgeTransport {
                     RuntimeLog.warn("ws_bridge: skipping non-object frame")
                     continue
                 }
+                if await answeredSealed(header) { continue }
                 return (header, body, true)
             }
         }
     }
 
-    public func close() async { await client.close() }
+    public func close() async {
+        closedFlag = true
+        await client.close()
+    }
 }
 
 // MARK: - memory transport
 
-/// Python's `memory` transport: the paired test backbone, no socket. This end
-/// SERVES a second in-process kernel — a `call` frame is dispatched there and
-/// its `reply` queued back, a `watch` subscribes and queues `event` frames — so
-/// a test drives the engine's real frame path (correlation, the gate, binary
-/// bodies) rather than a shortcut around it.
+/// Python `MemoryTransport`: an in-process pipe, one half of a peered pair — what
+/// one half sends, the other receives. It CARRIES frames and nothing else: each
+/// half is driven by a bridge leg's engine, so the far kernel serves an inbound
+/// `call` through its own leg — the ingress rule, the peer pin, the caller judged
+/// as its `<guid>|<agent>` — never as the operator (audit G-4, 2026-10-03).
 public final class MemoryTransport: BridgeTransport, @unchecked Sendable {
-    private weak var remote: Kernel?
-    private let lock = NSLock()
-    private var queue: [(JSON, Data, Bool)] = []
-    private var waiter: (@Sendable ((JSON, Data, Bool)?) -> Void)?
-    private var closedFlag = false
-    private var watchers: [AgentId: (watcher: AgentId, drain: Task<Void, Never>)] = [:]
+    private let pipe: MemoryPipe
+    /// This half receives on `pipe.queues[side]` and sends to the other.
+    private let side: Int
 
-    public init(remote: Kernel) { self.remote = remote }
-
-    /// `NSLock` is unavailable from an async context, so every critical section
-    /// here is a synchronous closure.
-    private func withLock<T>(_ body: () -> T) -> T {
-        lock.lock()
-        defer { lock.unlock() }
-        return body()
+    private init(_ pipe: MemoryPipe, _ side: Int) {
+        self.pipe = pipe
+        self.side = side
     }
 
-    public func isClosed() async -> Bool { withLock { closedFlag } }
-
-    public func send(_ frame: JSON) async throws {
-        if await isClosed() { throw ConnectionClosed("memory transport closed") }
-        switch frame["type"].asString {
-        case "call":
-            guard let remote else { throw ConnectionClosed("remote kernel gone") }
-            var item = Item(AgentId(frame["target"].asString ?? ""), frame["payload"])
-            // the frame's `secret` marks, verbatim — what the remote's inbound leg
-            // does with them (`Secret`)
-            if let marks = frame.asObject?["secret"] { item.secret = marks }
-            // A stream verb rides the binary channel even from a text frame, as
-            // the remote's web_ws leg routes it (`Codec.binaryEdgeVerbs`): a
-            // `read_stream` reply is raw bytes whatever frame asked for it.
-            if Codec.binaryEdgeVerbs.contains(frame["payload"]["type"].asString ?? "") {
-                item.rawReply = true
-            }
-            let call = item
-            // OPERATOR on the remote: the local sender means nothing in the
-            // remote's grant space, and admission was already gated by this
-            // leg's own ingress rule.
-            let out1 = await KernelTaskLocals.$currentSender.withValue(nil) {
-                await remote.send([call])[0]
-            }
-            pushReply(frame["id"], out1)
-        case "watch":
-            await startWatch(AgentId(frame["src"].asString ?? ""))
-        case "unwatch":
-            await stopWatch(AgentId(frame["src"].asString ?? ""))
-        default:
-            break
-        }
+    /// Python `MemoryTransport.pair()`: A's `send` reaches B's `recv` and vice
+    /// versa.
+    public static func pair() -> (MemoryTransport, MemoryTransport) {
+        let pipe = MemoryPipe()
+        return (MemoryTransport(pipe, 0), MemoryTransport(pipe, 1))
     }
+
+    /// Either half closing closes the pair.
+    public func isClosed() async -> Bool { pipe.withLock { pipe.isClosed } }
+
+    public func send(_ frame: JSON) async throws { try deliver((frame, Data(), false)) }
 
     public func sendBinary(header: JSON, body: Data) async throws {
-        if await isClosed() { throw ConnectionClosed("memory transport closed") }
-        guard let remote, header["type"].asString == "call" else { return }
-        let target = AgentId(header["target"].asString ?? "")
-        // THROUGH THE BATCH, like the text call above: the body rides the
-        // item's binary channel AT ITS PATH in the payload, so the call is an
-        // execution with its rows.
-        let (payload, binary) = Codec.callPayload(header, body: body)
-        var item = Item(target, payload, binary: binary)
-        if binary == nil, Codec.binaryEdgeVerbs.contains(payload["type"].asString ?? "") {
-            item.rawReply = true
-        }
-        if let marks = header.asObject?["secret"] { item.secret = marks }
-        let call = item
-        let out1 = await KernelTaskLocals.$currentSender.withValue(nil) {
-            await remote.send([call])[0]
-        }
-        pushReply(header["id"], out1)
+        try deliver((header, body, true))
     }
 
-    /// The remote's answer as the frame web_ws writes: THE CARRIER, not the
-    /// length, picks the kind — a reply holding a chunk (a 0-byte one included,
-    /// C37) is a binary frame at `["data", "bytes"]`, any other a text frame.
-    private func pushReply(_ id: JSON, _ out1: Outcome) {
-        var out: JSON = .object(["type": .string("reply"), "id": id, "data": out1.result])
-        guard let body = out1.body else {
-            push((out, Data(), false))
-            return
+    private func deliver(_ frame: (JSON, Data, Bool)) throws {
+        let peer = 1 - side
+        let waiter: (@Sendable ((JSON, Data, Bool)?) -> Void)? = try pipe.withLock {
+            if pipe.isClosed { throw ConnectionClosed("MemoryTransport closed") }
+            if let w = pipe.waiters[peer] {
+                pipe.waiters[peer] = nil
+                return w
+            }
+            pipe.queues[peer].append(frame)
+            return nil
         }
-        out["_binary_path"] = Codec.binaryPath(["data", "bytes"])
-        push((out, body, true))
+        waiter?(frame)
     }
 
+    /// The next frame; one that arrived before a close is still delivered.
     public func recv() async throws -> (frame: JSON, body: Data, isBinary: Bool) {
         let next: (JSON, Data, Bool)? = await withCheckedContinuation {
             (c: CheckedContinuation<(JSON, Data, Bool)?, Never>) in
             let box = MemoryWaiter(c)
-            lock.lock()
-            if closedFlag {
-                lock.unlock()
-                box.finish(nil)
-                return
+            let ready: (JSON, Data, Bool)?? = pipe.withLock {
+                if !pipe.queues[side].isEmpty { return .some(pipe.queues[side].removeFirst()) }
+                if pipe.isClosed { return .some(nil) }
+                pipe.waiters[side] = { box.finish($0) }
+                return nil
             }
-            if !queue.isEmpty {
-                let head = queue.removeFirst()
-                lock.unlock()
-                box.finish(head)
-                return
-            }
-            waiter = { box.finish($0) }
-            lock.unlock()
+            if let ready { box.finish(ready) }
         }
-        guard let next else { throw ConnectionClosed("memory transport closed") }
+        guard let next else { throw ConnectionClosed("MemoryTransport closed") }
         return next
     }
 
+    /// Closes BOTH halves: a reader parked on either wakes with the close.
     public func close() async {
-        let (w, live) = withLock {
-            closedFlag = true
-            let w = waiter
-            waiter = nil
-            let live = watchers
-            watchers = [:]
-            return (w, live)
+        let parked = pipe.withLock {
+            pipe.closed[side] = true
+            let w = pipe.waiters
+            pipe.waiters = [nil, nil]
+            return w
         }
-        for (_, entry) in live { entry.drain.cancel() }
-        w?(nil)
+        for w in parked { w?(nil) }
     }
+}
 
-    private func push(_ pair: (JSON, Data, Bool)) {
+/// The two queues, the two parked readers and the two close flags a memory pair
+/// shares — behind one lock.
+private final class MemoryPipe: @unchecked Sendable {
+    private let lock = NSLock()
+    var queues: [[(JSON, Data, Bool)]] = [[], []]
+    var waiters: [(@Sendable ((JSON, Data, Bool)?) -> Void)?] = [nil, nil]
+    var closed = [false, false]
+    var isClosed: Bool { closed[0] || closed[1] }
+
+    /// `NSLock` is unavailable from an async context, so every critical section
+    /// here is a synchronous closure.
+    func withLock<T>(_ body: () throws -> T) rethrows -> T {
         lock.lock()
-        if let w = waiter {
-            waiter = nil
-            lock.unlock()
-            w(pair)
-            return
-        }
-        queue.append(pair)
-        lock.unlock()
-    }
-
-    private func startWatch(_ target: AgentId) async {
-        guard let remote else { return }
-        if withLock({ watchers[target] != nil }) { return }
-        let watcherId = AgentId("inmem_relay_\(UUID().uuidString.prefix(8))_\(target.value)")
-        // THE READER REGISTERS FIRST: `watch` refuses a watcher with no inbox.
-        let stream = remote.ensureInbox(watcherId)
-        KernelTaskLocals.$currentSender.withValue(nil) {
-            remote.watch(src: target, watcher: watcherId)
-        }
-        let drain = Task { [weak self] in
-            for await item in stream {
-                if Task.isCancelled { return }
-                // THE ONE CODEC: a payload that carried bytes crosses as a binary
-                // frame, `_binary_path` naming where they belong under `payload`.
-                // A header with a hole where the body was is not the event python
-                // mirrors to a watcher.
-                var frame: JSON = .object([
-                    "type": .string("event"), "src": .string(target.value),
-                    "payload": item.payload,
-                ])
-                guard let body = item.body else {
-                    self?.push((frame, Data(), false))
-                    continue
-                }
-                if case .object(var o) = frame {
-                    o["_binary_path"] = Codec.payloadPath(body.parts)
-                    frame = .object(o)
-                }
-                self?.push((frame, body.bytes, true))
-            }
-        }
-        withLock { watchers[target] = (watcherId, drain) }
-    }
-
-    private func stopWatch(_ target: AgentId) async {
-        guard let entry = withLock({ watchers.removeValue(forKey: target) }) else { return }
-        entry.drain.cancel()
-        remote?.unwatch(src: target, watcher: entry.watcher)
+        defer { lock.unlock() }
+        return try body()
     }
 }
 
@@ -348,7 +323,7 @@ extension KernelBridgeBundle {
             guard let url = URL(string: "ws://\(host):\(port)/\(peerId)/ws") else {
                 throw BridgeConfigError("ws transport: malformed url")
             }
-            return try await WSTransport.connect(url: url)
+            return try await WSTransport.connect(url: url, sealed: wsHostIsSealed(host))
         }
         throw BridgeConfigError("unknown transport \(pyRepr(kind))")
     }

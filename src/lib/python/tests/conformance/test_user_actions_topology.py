@@ -24,15 +24,14 @@ from __future__ import annotations
 from _testkit import memory_meta
 import asyncio
 import json
-import sys
 import types
 
 import pytest
 from fastapi.testclient import TestClient
 
-from ai_core import core
 from web.app import make_app
 from web_ws.tools import _make_endpoint
+from kernel import register_unlisted
 
 # ─── the action agent: a REAL side effect + the push-only return lane ───
 
@@ -75,7 +74,7 @@ async def _pa_handler(id, payload, kernel):
 
 _pa.handler = _pa_handler
 _pa.VERBS = {}
-sys.modules["purchase_probe.tools"] = _pa
+register_unlisted("purchase_probe.tools", _pa)
 
 
 class _Mind:
@@ -129,6 +128,8 @@ class _RogueMind:
 @pytest.fixture
 def wired(seeded_kernel, store_agent):
     _bought.clear()
+    # `port`: the authority the web's Host guard admits (audit W-2).
+    seeded_kernel.create(None, id="test_web", port=8088)
     app = make_app("test_web", seeded_kernel)
     # ONE endpoint. Lanes are grants: dialog (ai:[send]) + click (ua_buy:[buy]).
     seeded_kernel.create(
@@ -156,7 +157,7 @@ def wired(seeded_kernel, store_agent):
         **memory_meta(seeded_kernel, "ua_ai", {"cli": "*"}),
         callable_by={"ua_leg": ["send"], "ua_buy": ["send"]},
     )
-    with TestClient(app) as c:
+    with TestClient(app, headers={"host": "127.0.0.1:8088"}) as c:
         yield seeded_kernel, c
 
 
@@ -171,9 +172,11 @@ def _ws_call(ws, cid, target, payload):
     raise AssertionError(f"no reply for {cid}")
 
 
-def test_c3_approve_the_click_executes_and_the_result_reaches_the_dialog(wired):
+def test_c3_approve_the_click_executes_and_the_result_reaches_the_dialog(
+    wired, fake_providers
+):
     kernel, client = wired
-    core._providers["ua_ai"] = mind = _Mind()
+    fake_providers["ua_ai"] = mind = _Mind()
     try:
         with client.websocket_connect("/kernel_state/ws") as ws:
             # dialog lane: the model can only PROPOSE
@@ -193,16 +196,16 @@ def test_c3_approve_the_click_executes_and_the_result_reaches_the_dialog(wired):
             assert data.get("bought") == "rocket", data
             assert _bought == [{"item": "rocket"}]
     finally:
-        core._providers.pop("ua_ai", None)
+        fake_providers.pop("ua_ai", None)
     # the push lane delivered the outcome INTO the dialog (purchase → ai)
     assert any("[purchase result]" in json.dumps(req) for req in mind.requests), (
         "the result never reached the model's dialog"
     )
 
 
-def test_c3_reject_the_wall_refusal_is_model_visible(wired):
+def test_c3_reject_the_wall_refusal_is_model_visible(wired, fake_providers):
     kernel, client = wired
-    core._providers["ua_ai"] = _RogueMind()
+    fake_providers["ua_ai"] = _RogueMind()
     try:
         with client.websocket_connect("/kernel_state/ws") as ws:
             _ws_call(
@@ -239,7 +242,7 @@ def test_c3_reject_the_wall_refusal_is_model_visible(wired):
         assert "unauthorized" in joined, "the refusal never reached the dialog"
         assert "may not call" in joined
     finally:
-        core._providers.pop("ua_ai", None)
+        fake_providers.pop("ua_ai", None)
 
 
 def test_toctou_double_click_buys_exactly_once(wired):

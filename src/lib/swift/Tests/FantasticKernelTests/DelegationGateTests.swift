@@ -30,9 +30,15 @@ struct DelegationGateTests {
         kernel.register(root)
         kernel.setRoot(root)
 
+        // The peer's record is the OPERAND of the grant (AV-1): the granter names it
+        // with `update_agent`, and the peer accepts the granter's edit.
         let peer = await kernel.send([Item(AgentId("kernel_state"), .object([
             "type": .string("create_agent"), "parent_id": .string("kernel_state"),
             "id": .string("peer"), "handler_module": .string("noop.tools"),
+            "callable_by": .object([
+                "$self": .string("*"), "$parent": .string("*"), "$children": .string("*"),
+                "granter": .array([.string("update_agent")]),
+            ]),
         ]))])[0].result
         #expect(peer["id"].asString == "peer", "\(peer.serialize())")
         let granter = await kernel.send([Item(AgentId("kernel_state"), .object([
@@ -41,6 +47,7 @@ struct DelegationGateTests {
             "can_call": .object([
                 "$self": .string("*"), "$parent": .string("*"), "$children": .string("*"),
                 "kernel_state": .array([.string("*"), .string("create_agent"), .string("update_agent")]),
+                "peer": .array([.string("update_agent")]),
             ]),
         ]))])[0].result
         #expect(granter["id"].asString == "granter", "\(granter.serialize())")

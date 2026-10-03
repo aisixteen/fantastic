@@ -97,6 +97,7 @@ enum AISideTables {
             AIMemory.forget(kernel)
             AICalibration.forget(kernel)
             AISilentStreaks.forget(kernel)
+            AIStripStrategy.forget(kernel)
         }
     }
 }
@@ -176,12 +177,12 @@ extension AIBackend {
     }
 
     /// RAM is scratch, reconstructible by definition; the store is never cleared.
-    private func dropScratch(_ key: String) {
+    private func dropScratch(_ key: String, _ kernel: Kernel) {
         projectionLock.lock()
         projectionCache[key] = nil
         compactionMark[key] = nil
         projectionLock.unlock()
-        AIStripStrategy.forget(key)
+        AIStripStrategy.forget(kernel, key)
     }
 
     // MARK: - the clear
@@ -228,7 +229,7 @@ extension AIBackend {
         // The persisted view names rows behind the clear — empty it, so the view is
         // the store from the clear on. RAM is scratch; the store is never cleared.
         try await saveView(key, kernel, ids: [], budget: AIContext.budget(agent, modelWindow: config.modelWindow), why: "cleared")
-        dropScratch(key)
+        dropScratch(key, kernel)
         forgetClearState(key)
         return .object(["cleared": .integer(rid), "rows": .integer(Int64(members.count))])
     }
@@ -442,7 +443,7 @@ extension AIBackend {
                         "[recall \(rid) · kept \(ids.count) rows, \(expand.count) in full] \(why)\(liveTxt)"),
                 ])
             ])
-        dropScratch(key)
+        dropScratch(key, kernel)
         return .object([
             "kept": .integer(Int64(ids.count)),
             "expanded": .integer(Int64(expand.count)),

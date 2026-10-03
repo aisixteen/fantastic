@@ -58,7 +58,8 @@ into it; the running artifact is a function of its *descriptance*, not its code.
   `pump {source, source_path, sink, sink_path?, chunk?} → {bytes, chunks}`
   (the **PUMP** — a server-side SOURCE→SINK copy that only coordinates and
   never touches the bytes, so fs→fs, `network_bridge`→`file_bridge`,
-  anywhere→anywhere copy identically; each end self-gates/clamps). A consumer
+  anywhere→anywhere copy identically; each end self-gates/clamps, and both run
+  AS THE PUMP'S CALLER — its own grants on both ends). A consumer
   is storage-agnostic — it pulls/pushes by id. `file_bridge` is the reference
   SOURCE+SINK; the served `/<id>/file/<path>` octet route is read_stream-only.
 - **Cascade delete** — `delete_agent` walks the subtree depth-first
@@ -210,6 +211,7 @@ curl http://localhost:8888/<id>/file/<path>            # octet proxy → the age
 # open ws://host/<id>/ws and send
 #   {"type":"call","target":"<id>","payload":{...},"id":"<corr>"}
 # mark secret values on the call: add "secret":["payload.<field>"|"result[.<field>]"]
+# — or an array of steps for a key holding a dot: "secret":[["payload","a.b"]]
 # (REST: the X-Fantastic-Secret header, a JSON array) — every record shows <secret>
 
 # REST (when web_rest is mounted; <rest_id> is the agent's id)
@@ -242,7 +244,9 @@ plugins.
 Add a bundle by dropping its package under `bundled_agents/` (or
 `installed_agents/`) and running `uv sync` — its entry point registers on
 the next start, and you can `create_agent parent_id=<owner> handler_module=<bundle>.tools`
-from any agent (creates as a child of that agent).
+from any agent (creates as a child of that agent). A `handler_module` resolves
+only from that catalog (plus `register_unlisted` for a test/probe module); a name
+outside it is never imported, even when it is on `sys.path`.
 
 ## Tests
 
@@ -282,7 +286,7 @@ uv run pytest -n auto
 │   ├── _agent.py                            # Agent (recursive) + ephemeral flag + on_delete hook
 │   ├── _kernel.py                           # Kernel ctx + tree-mgmt API (create/delete/update/list/send)
 │   ├── modes/                               # dispatch_argv + one-shots (reflect/call) + default (boot + REPL)
-│   ├── _bundles.py                          # entry-point discovery (`fantastic.bundles`)
+│   ├── _bundles.py                          # entry-point discovery (`fantastic.bundles`) + catalog-only `import_handler`
 │   ├── _lock.py                             # serve lock (.fantastic/lock.yaml)
 │   └── _env.py                              # .env autoloader
 ├── pyproject.toml                            # workspace + bundle deps

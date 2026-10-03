@@ -408,3 +408,21 @@ async fn python_raise_paths_raise_here_too() {
         Some(Value::Null)
     );
 }
+
+/// Audit BV-11 — every line this sink prints loses its C0/C1 control characters
+/// (and DEL), newline and tab kept: an escape sequence in agent or model text was
+/// INTERPRETED by the operator's terminal (a title, a clipboard write, a rewritten
+/// line). The same strings as python's `test_agent_text_reaches_the_terminal_…`.
+#[test]
+fn terminal_safe_strips_control_characters_but_newline_and_tab() {
+    // An OSC window title (BEL-terminated), an erase-line CSI, a C1 CSI, a
+    // carriage return, DEL and NUL — plus the two kept: newline and tab.
+    let hostile = "a\x1b]0;TEST-VALUE-TITLE\x07b\x1b[2Kc\u{9b}31md\re\x7ff\x00g\th\ni";
+    assert_eq!(
+        terminal_safe(hostile),
+        "a]0;TEST-VALUE-TITLEb[2Kc31mdefg\th\ni"
+    );
+    // printable text, non-ASCII included, passes untouched
+    let plain = "  [src] ⟲ context compacted (π, 3 dropped) — ok";
+    assert_eq!(terminal_safe(plain), plain);
+}

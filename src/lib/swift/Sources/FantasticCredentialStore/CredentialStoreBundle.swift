@@ -11,32 +11,45 @@
 // restart is ever needed.
 //
 // WHERE THE VALUES LIVE — `backend` on the record, one of:
-//   * `file` (the default): a YAML file in the user's home,
-//     `~/.fantastic/credentials/<store id>.yaml` unless `file` names another path
-//     (a RELATIVE `file` is clamped under the kernel's running dir). It is written
-//     0600 and READ ONLY IF it is a regular file owned by this user with no
-//     group/other bits — anything else is refused, loud. The bytes are the
-//     kernel's YAML writer (`YamlIO`) over `{refs: {ref: {field: value}}}`, keys
+//   * `file` (the default): a YAML file at an ABSOLUTE path —
+//     `~/.fantastic/credentials/<store id>.yaml` unless `file` names another one
+//     (`/…` or `~…`; a relative path is refused at the write). It is written 0600
+//     and READ ONLY IF it is a regular file owned by this user with no group/other
+//     bits — anything else is refused, loud. The bytes are the kernel's YAML
+//     writer (`YamlIO`) over `{refs: {ref: {host, fields: {field: value}}}}`, keys
 //     sorted, so either runtime reads the other's file.
-//   * `keychain`: the OS keychain (`KeychainStore`), one item per ref — service
-//     `keychain_service` (default `fantastic`), account `<store id>/<ref>`. The
-//     explicit choice for the strongest at-rest protection.
+//   * `keychain`: the OS keychain (`KeychainStore`), one item per ref, under the
+//     namespace `keychain_namespace` (default `fantastic` — macOS calls it the
+//     item's "service"), account `<store id>/<ref>`, `{host, fields}` as a JSON
+//     object. The explicit choice for the strongest at-rest protection.
 //   * `env`: read-only; each ref maps its fields to environment variables
 //     (`refs: {ref: {host, env: {api_key: VAR}}}`), for a container or CI.
 //
-// WHO MAY DO WHAT — per ref, on the store's own record (the OPERATOR manages it
-// with `update_agent`): `refs: {<ref>: {readers: [...], writers: [...], host,
-// fields}}`. An entry is a local agent id, `$subtree:<id>` (that agent and every
-// live descendant), or a qualified `<guid>|<agent>` caller on another kernel. The
-// operator may do everything. An agent listed in `creators` may create a NEW ref,
-// which it then reads and writes. A caller with no grant on a ref is answered "no
-// such ref" — never told the ref exists.
+// THE HOST IS STORED WITH THE VALUE (audit S3, 2026-10-03): `set` writes the ref's
+// declared host beside its fields — the file entry and the keychain item are
+// `{host, fields}` — and `get` refuses a value whose stored host is not the one its
+// declaration names, or that carries none: a store elsewhere declaring the same id
+// and ref with another host reads nothing. The `env` backend keeps no value at rest.
+//
+// A REF IS DECLARED ONLY BY `update_agent` on the store's own record — the
+// kernel's privileged verb, granted explicitly, is the one path:
+// `refs: {<ref>: {host, readers: [...], writers: [...], fields?/env?}}` (it
+// replaces the whole map). `set` stores a value for a DECLARED ref and never
+// creates one: an undeclared ref answers "no such ref", to the operator too. `set`
+// needs the caller in `writers`, `get` in `readers`; an entry is a local agent id,
+// `$subtree:<id>` (that agent and every live descendant), or a qualified
+// `<guid>|<agent>` caller on another kernel. The operator passes every reader and
+// writer check. A caller with no grant on a ref is answered "no such ref" — never
+// told the ref exists.
 //
 // NO VALUE IS EVER RECORDED. `set` must be called with `secret:
 // ['payload.fields']` and `get` with `secret: ['result']` (`Secret`, read here as
 // `KernelTaskLocals.currentSecret`): the call is refused otherwise, because the
-// value would land in the ledger, the memory store and the state stream. The
-// record holds only metadata — the host and the field NAMES.
+// value would land in the ledger, the memory store and the state stream. Either
+// spelling of a mark counts (`['payload', 'fields']` is `payload.fields`), as does
+// marking every field one by one; a field name holding a dot is marked only as an
+// array (`['result', 'fields', 'a.b']`). The record holds only metadata — the host
+// and the field NAMES.
 //
 // The kernel's call gate still decides who may reach this agent at all.
 //
@@ -61,7 +74,7 @@ import OrderedCollections
 let NAME = "credential_store"
 let BACKENDS = ["file", "keychain", "env"]
 let DEFAULT_DIR = "~/.fantastic/credentials"
-let KEYCHAIN_SERVICE = "fantastic"
+let KEYCHAIN_NAMESPACE = "fantastic"
 let SUBTREE = "$subtree:"
 /// The record field every store carries as `true` — read by ai_core, which refuses
 /// a model-parsed call to an agent so marked. Python `HOLDS_SECRETS`.
@@ -133,15 +146,15 @@ public final class CredentialStoreBundle: AgentBundle, @unchecked Sendable {
                 return "backend=\(pyRepr(b)) is not one of \(BACKENDS.joined(separator: ", "))"
             }
         }
-        for k in ["file", "keychain_service"] {
+        for k in ["file", "keychain_namespace"] {
             if let v = given(k) {
                 guard case .string(let s) = v, !pyStrip(s).isEmpty else {
                     return "\(k) must be a non-empty string"
                 }
             }
         }
-        if let c = given("creators"), !nonEmptyStrings(c) {
-            return "creators must be a list of agent ids"
+        if case .string(let p) = given("file"), let why = relativeFile(p) {
+            return why
         }
         if let refs = given("refs") {
             guard case .object(let map) = refs else {
@@ -159,7 +172,11 @@ public final class CredentialStoreBundle: AgentBundle, @unchecked Sendable {
                 }
                 // python's urlsplit RAISES here for an unbalanced IPv6 bracket;
                 // a `validateMeta` cannot raise, so that host is refused as blank
-                if let h = entry["host"], h != .null, (try? hostOf(h)) == nil {
+                guard let h = entry["host"], h != .null else {
+                    return "refs[\(pyRepr(ref))].host is required — the one host this ref's value "
+                        + "may be sent to"
+                }
+                if (try? hostOf(h)) == nil {
                     return "refs[\(pyRepr(ref))].host must be a non-empty host"
                 }
                 if let env = entry["env"], env != .null {
@@ -185,13 +202,13 @@ public final class CredentialStoreBundle: AgentBundle, @unchecked Sendable {
         "boot":
             "Stamps `holds_secrets: true` on this store's record (no model turn may reach it); values are read from the backend when asked for.",
         "set":
-            "args: ref:str, host:str (where the value may be sent), fields:{name: value} (req). Store or rotate a credential. Call it with secret: ['payload.fields']. Returns {ref, host, fields:[names], stored}.",
+            "args: ref:str, fields:{name: value} (req). Store or rotate the value of a DECLARED ref — its host is the declaration's (refs are declared by update_agent on this store's record; set never creates one and takes no host). Call it with secret: ['payload.fields']. Returns {ref, host, fields:[names], stored}.",
         "get":
             "args: ref:str (req), host:str? (where you will send it — refused unless the ref is bound to it). The credential: {ref, host, fields:{name: value}}. Call it with secret: ['result']; send the value ONLY to `host`.",
         "list":
             "No args. The refs YOU may read or write — metadata only: {refs:[{ref, host, fields:[names], read, write}]}. Never a value.",
         "forget":
-            "args: ref:str (req). Drop a credential — its value and its grants. Writers and the operator only. Returns {forgotten, ref}.",
+            "args: ref:str (req). Drop a ref's VALUE from the backend; its declaration (host, readers, writers) stays — update_agent alone undeclares a ref. Writers and the operator only. Returns {forgotten, ref}.",
     ]
 
     /// THE PYTHON FILE, BYTE FOR BYTE (`credential_store/readme.md`).
@@ -205,26 +222,53 @@ public final class CredentialStoreBundle: AgentBundle, @unchecked Sendable {
 
         | verb | what |
         |---|---|
-        | `set {ref, host, fields}` | store or rotate; call with `secret: ['payload.fields']` |
-        | `get {ref, host?}` | `{ref, host, fields}`; call with `secret: ['result']`; `host` refuses a ref bound elsewhere |
+        | `set {ref, fields}` | store or rotate the value of a DECLARED ref (writers); call with `secret: ['payload.fields']`; takes no `host` — the declaration's is the binding |
+        | `get {ref, host?}` | `{ref, host, fields}` (readers); call with `secret: ['result']`; `host` refuses a ref bound elsewhere |
         | `list` | the refs YOU may read or write: metadata, never a value |
-        | `forget {ref}` | drop the value and its grants (writers only) |
+        | `forget {ref}` | drop the VALUE (writers only); the declaration stays |
 
-        **Backends** (`backend` on the record): `file` (default) — one YAML file,
-        `~/.fantastic/credentials/<id>.yaml` unless `file` names another path, written
+        **Backends** (`backend` on the record): `file` (default) — one YAML file at an
+        ABSOLUTE path, `~/.fantastic/credentials/<id>.yaml` unless `file` names another
+        (`/…` or `~…`; a relative path is refused at the write: "file='creds.yaml' must be
+        an absolute path (starting with / or ~) — a relative path is refused"), written
         0600 and read only if it is a regular file owned by this user with no group/other
-        bits; `keychain` — the OS keychain, one item per ref (service `keychain_service`,
-        default `fantastic`; account `<id>/<ref>`); `env` — read-only, each ref maps fields
-        to variables: `refs: {<ref>: {host, env: {api_key: VAR}}}`.
+        bits — judged on the one open it is read from (`O_NOFOLLOW`, then `fstat` of that
+        descriptor), so nothing can swap it between the check and the read; `keychain` — the OS keychain, one item per ref under the namespace
+        `keychain_namespace` (default `fantastic` — macOS calls it the item's "service";
+        account `<id>/<ref>`); `env` — read-only, each ref maps fields to variables:
+        `refs: {<ref>: {host, env: {api_key: VAR}}}`.
 
-        **Grants, per ref**, on the store's record (the operator edits them with
-        `update_agent`): `refs: {<ref>: {readers: [...], writers: [...], host, fields}}`. An
-        entry is an agent id, `$subtree:<id>`, or a `<guid>|<agent>` caller on another
-        kernel. An agent in `creators` may make a NEW ref, which it then reads and writes. A
-        caller with no grant is answered "no such ref". The operator may do everything.
+        **The host is stored with the value**: the file entry and the keychain item are
+        `{host, fields}`, the host written by `set` from the ref's declaration. A `get`
+        whose declaration names another host than the stored one is refused with the
+        same answer as a `get {ref, host}` naming another host
+        ("credential_store: ref '<ref>' is bound to host '<declared>', not '<stored>' —
+        refused, nothing read", `reason: bad_arg`, `arg: host`), and so is a stored value
+        carrying no host (`… not None — …`) — a writer sets the value again. A store elsewhere declaring the same id and ref with
+        another host reads nothing. `env` keeps no value at rest.
+
+        **A ref is declared ONLY by `update_agent`** on the store's own record — the kernel's
+        privileged verb, granted explicitly, is the one path:
+        `refs: {<ref>: {host, readers: [...], writers: [...], fields?/env?}}` (it replaces
+        the whole `refs` map — write every ref you keep; `host` is required: "refs['<ref>'].host
+        is required — the one host this ref's value may be sent to"). The declaration is the
+        operator's alone: `set` never creates a ref (an undeclared one answers "no such ref",
+        the operator included) and takes no host ("credential_store set: takes no host — a
+        ref's host is its declaration, written by update_agent on this store's refs");
+        `forget` drops the value and keeps the declaration (host, readers, writers) — only
+        `update_agent` undeclares. On the `env` backend `forget` is refused like `set`
+        ("credential_store forget: the env backend is read-only — unset the environment
+        variable its ref names"). A ref's `fields` are its stored value's names: `set`
+        writes them, `forget` drops them.
+        `set`/`forget` need the caller in `writers`, `get` in `readers`; an entry is an agent id,
+        `$subtree:<id>`, or a `<guid>|<agent>` caller on another kernel. A caller with no
+        grant is answered "no such ref". The operator passes every reader and writer check.
 
         **No value is ever recorded.** An unmarked `set`/`get` is refused: the value would
-        land in the ledger, the memory store and the state stream. The record holds the
+        land in the ledger, the memory store and the state stream. Either spelling of a mark
+        counts (`['payload', 'fields']` is `payload.fields`), as does marking every field;
+        a field name holding a dot is marked only as an array (`['result', 'fields', 'a.b']`
+        — `result.fields.a.b` is `a` → `b`). The record holds the
         host and the field NAMES only. The kernel's call gate still decides who may reach
         this agent at all. Never give a credential to an AI agent's prompt — give it to a
         bundle that sends it (an AI backend reads its own key this way).
@@ -247,9 +291,27 @@ public final class CredentialStoreBundle: AgentBundle, @unchecked Sendable {
 
         **Not over a relay, yet.** A `relay_connector` leg refuses every call carrying
         secret marks (the relay records the frames it routes unmasked), so a remote
-        `set`/`get` goes over a direct `ws_bridge` leg.
+        `set`/`get` goes over a direct `ws_bridge` leg to a loopback host (an ssh tunnel's
+        local end) — a `ws://` leg to any other host refuses secret marks too.
 
         """#
+}
+
+/// Python `_names`: whether one secret mark names exactly `steps` — a dotted
+/// string by its dots, an array of steps step for step (`Secret`). A field name
+/// holding a dot is named only by an array: `result.fields.a.b` is `a` → `b`,
+/// never the field `a.b`, so it would not mask it.
+private func namesSteps(_ mark: JSON, _ steps: [String]) -> Bool {
+    switch mark {
+    case .string(let s):
+        // python `mark.split(".")` — on the code point, never a grapheme
+        return s.unicodeScalars.split(separator: ".", omittingEmptySubsequences: false)
+            .map { String(String.UnicodeScalarView($0)) } == steps
+    case .array(let a):
+        return a == steps.map { JSON.string($0) }
+    default:
+        return false
+    }
 }
 
 // MARK: - one verb's view of the store
@@ -296,12 +358,12 @@ private struct Ctx {
         return false
     }
 
-    /// Python `_marked`: whether the caller marked `prefix` (or every
-    /// `prefix.<name>`) secret.
-    func marked(_ prefix: String, _ names: [String]) -> Bool {
-        let paths = KernelTaskLocals.currentSecret
-        return paths.contains(prefix)
-            || (!names.isEmpty && names.allSatisfy { paths.contains("\(prefix).\($0)") })
+    /// Python `_marked`: whether the caller marked `prefix` (or every `prefix` +
+    /// `<name>`) secret, in either spelling of a mark.
+    func marked(_ prefix: [String], _ names: [String]) -> Bool {
+        let marks = KernelTaskLocals.currentSecret
+        func has(_ steps: [String]) -> Bool { marks.contains { namesSteps($0, steps) } }
+        return has(prefix) || (!names.isEmpty && names.allSatisfy { has(prefix + [$0]) })
     }
 
     func noSuchRef(_ ref: String) -> JSON {
@@ -350,8 +412,13 @@ private struct Ctx {
         guard case .string(let ref) = payload["ref"], !pyStrip(ref).isEmpty else {
             return Refusal.missing("\(NAME) set", "ref")
         }
-        guard let host = try hostOf(payload["host"]) else {
-            return Refusal.missing("\(NAME) set", "host")
+        if case .object(let o) = payload, o["host"] != nil {
+            // the binding is the declaration's alone (audit AV-4)
+            return Refusal.make(
+                Refusal.badArg,
+                "\(NAME) set: takes no host — a ref's host is its declaration, written "
+                    + "by update_agent on this store's refs",
+                extra: [("arg", .string("host"))])
         }
         let fields: OrderedDictionary<String, JSON>
         if case .object(let f) = payload["fields"], !f.isEmpty,
@@ -365,7 +432,7 @@ private struct Ctx {
                 extra: [("arg", .string("fields"))])
         }
         let names = pySorted(Array(fields.keys))
-        if !marked("payload.fields", Array(fields.keys)) {
+        if !marked(["payload", "fields"], Array(fields.keys)) {
             return Refusal.make(
                 Refusal.badArg,
                 "\(NAME) set: mark the values secret — secret: ['payload.fields'] — or "
@@ -381,30 +448,25 @@ private struct Ctx {
         }
         let caller = caller
         var all = refs
-        var entry: OrderedDictionary<String, JSON>
-        if let existing = all[ref] {
-            entry = existing.asObject ?? [:]
-            if !covers(existing["writers"], caller) {
-                return covers(existing["readers"], caller)
-                    ? Refusal.make(
-                        Refusal.unauthorized,
-                        "\(NAME): \(caller ?? "None") may read \(pyRepr(ref)) but not write it",
-                        extra: [("arg", .string("ref"))])
-                    : noSuchRef(ref)
-            }
-        } else {
-            let creators = pyTruthy(meta("creators")) ? meta("creators") : .array([])
-            if caller != nil && !covers(creators, caller) { return noSuchRef(ref) }
-            let owner: [JSON] = caller.map { [.string($0)] } ?? []
-            entry = ["readers": .array(owner), "writers": .array(owner)]
+        // declared by update_agent alone — set never makes one
+        guard let existing = all[ref] else { return noSuchRef(ref) }
+        if !covers(existing["writers"], caller) {
+            return covers(existing["readers"], caller)
+                ? Refusal.make(
+                    Refusal.unauthorized,
+                    "\(NAME): \(caller ?? "None") may read \(pyRepr(ref)) but not write it",
+                    extra: [("arg", .string("ref"))])
+                : noSuchRef(ref)
         }
-        try backend().put(ref, fields)
-        entry["host"] = .string(host)
-        entry["fields"] = .array(names.map { .string($0) })
+        var entry = existing.asObject ?? [:]
+        // the declared host is stored WITH the value (audit S3)
+        try backend().put(ref, try hostOf(existing["host"]), fields)
+        entry["fields"] = .array(names.map { .string($0) })  // the value's NAMES, never a value
         all[ref] = .object(entry)
         kernel.update(agent.id, ["refs": .object(all)])
         return .object([
-            "ref": .string(ref), "host": .string(host),
+            "ref": .string(ref),
+            "host": (try hostOf(existing["host"])).map { .string($0) } ?? .null,
             "fields": .array(names.map { .string($0) }), "stored": .bool(true),
         ])
     }
@@ -425,29 +487,35 @@ private struct Ctx {
                 refused = want != bound
             }
             if refused {
-                return Refusal.make(
-                    Refusal.badArg,
-                    "\(NAME): ref \(pyRepr(ref)) is bound to host \(pyRepr(entry["host"])), not "
-                        + "\(want.map { pyRepr($0) } ?? "None") — refused, nothing read",
-                    extra: [("arg", .string("host"))])
+                return hostMismatch(ref, entry["host"] ?? .null, want.map { .string($0) } ?? .null)
             }
         }
-        // `entry.get("fields") or list((entry.get("env") or {}).keys())`
-        let names: [String] =
-            pyTruthy(entry["fields"])
-            ? (entry["fields"].asArray ?? []).map { pyStr($0) }
-            : Array((entry["env"].asObject ?? [:]).keys)
-        if !(marked("result", []) || marked("result.fields", names)) {
+        let store = try backend()
+        var stored = try store.get(ref)
+        if let s = stored, !s.isEmpty, !(store is EnvBackend) {
+            // THE HOST AT REST (audit S3): a value is read only for the host it was
+            // stored with — the declaration of a store elsewhere sharing this id and
+            // ref names its own host, and reads nothing.
+            if let bad = try hostAtRest(ref, s["host"] ?? .null, try hostOf(entry["host"])) {
+                return bad
+            }
+            stored = s["fields"]?.asObject
+        }
+        guard let fields = stored, !fields.isEmpty else {
+            return Refusal.make(
+                Refusal.notFound, "\(NAME): ref \(pyRepr(ref)) has no value in the backend",
+                extra: [("arg", .string("ref"))])
+        }
+        // The marks are judged against the field names the backend RETURNED, never
+        // the declared ones: a declaration can name fewer than the backend holds (an
+        // `env` map wider than `fields`, a re-declared ref, a hand-edited file), and
+        // a returned field no mark covers would be recorded in plain (audit BV-6/S4).
+        if !(marked(["result"], []) || marked(["result", "fields"], Array(fields.keys))) {
             return Refusal.make(
                 Refusal.badArg,
                 "\(NAME) get: mark the answer secret — secret: ['result'] — or the value "
                     + "would be recorded in the ledger, the memory store and the state stream",
                 extra: [("arg", .string("secret"))])
-        }
-        guard let fields = try backend().get(ref), !fields.isEmpty else {
-            return Refusal.make(
-                Refusal.notFound, "\(NAME): ref \(pyRepr(ref)) has no value in the backend",
-                extra: [("arg", .string("ref"))])
         }
         return .object([
             "ref": .string(ref),
@@ -487,13 +555,24 @@ private struct Ctx {
         guard case .string(let ref) = payload["ref"], !pyStrip(ref).isEmpty else {
             return Refusal.missing("\(NAME) forget", "ref")
         }
+        if backendName == "env" {
+            return Refusal.make(
+                Refusal.badArg,
+                "\(NAME) forget: the env backend is read-only — unset the environment "
+                    + "variable its ref names",
+                extra: [("arg", .string("backend"))])
+        }
         var all = refs
         guard let entry = all[ref], covers(entry["writers"], caller) else {
             return noSuchRef(ref)
         }
-        if backendName != "env" { try backend().drop(ref) }
-        all.removeValue(forKey: ref)
-        kernel.update(agent.id, ["refs": .object(all)])
+        try backend().drop(ref)
+        // the value's names go with the value (audit AV-5); the declaration stays
+        if case .object(var kept) = entry, kept["fields"] != nil {
+            kept.removeValue(forKey: "fields")
+            all[ref] = .object(kept)
+            kernel.update(agent.id, ["refs": .object(all)])
+        }
         return .object(["forgotten": .bool(true), "ref": .string(ref)])
     }
 }
@@ -501,18 +580,44 @@ private struct Ctx {
 // MARK: - where the values live
 
 private protocol CredentialBackend {
+    /// The value at rest — `{host, fields}`; the env backend's fields alone.
     func get(_ ref: String) throws(PyError) -> OrderedDictionary<String, JSON>?
-    func put(_ ref: String, _ fields: OrderedDictionary<String, JSON>) throws(PyError)
+    /// Store `fields` WITH `host` (audit S3).
+    func put(_ ref: String, _ host: String?, _ fields: OrderedDictionary<String, JSON>) throws(PyError)
     func drop(_ ref: String) throws(PyError)
 }
 
-/// The default backend: one YAML document of `{refs: {ref: {field: value}}}`.
+/// The value at rest, `{host, fields}` — python's `{"host": host, "fields": fields}`.
+private func atRest(_ host: String?, _ fields: OrderedDictionary<String, JSON>) -> JSON {
+    .object(["host": host.map { .string($0) } ?? .null, "fields": .object(fields)])
+}
+
+/// THE host-mismatch refusal: the ref is bound to `bound`, not `other`. One shape
+/// for a `get {ref, host}` naming another host and a value stored for another host
+/// — or for none (audit S3). Python `_host_mismatch`.
+private func hostMismatch(_ ref: String, _ bound: JSON, _ other: JSON) -> JSON {
+    Refusal.make(
+        Refusal.badArg,
+        "\(NAME): ref \(pyRepr(ref)) is bound to host \(pyRepr(bound)), not \(pyRepr(other)) — "
+            + "refused, nothing read",
+        extra: [("arg", .string("host"))])
+}
+
+/// The refusal for a stored value whose host is not the declared one — or that
+/// carries none (audit S3) — or nil. Python `_host_at_rest`.
+private func hostAtRest(_ ref: String, _ stored: JSON, _ declared: String?) throws(PyError) -> JSON? {
+    let at = try hostOf(stored)
+    if let at, at == declared { return nil }
+    return hostMismatch(ref, declared.map { .string($0) } ?? .null, at.map { .string($0) } ?? .null)
+}
+
+/// The default backend: one YAML document of
+/// `{refs: {ref: {host, fields: {field: value}}}}`, at an absolute path.
 private struct FileBackend: CredentialBackend {
-    /// The clamp base: the running dir for a RELATIVE `file`, the file's own
-    /// directory for an absolute or `~` one (python's `external=True` surface —
-    /// the path is still clamped within it).
+    /// The clamp base: the file's own directory (python's `external=True`
+    /// surface — the path is still clamped within it).
     let base: String
-    /// The directory, relative to `base` (`.` for an absolute `file`).
+    /// The directory the file sits in — `base` itself.
     let root: String
     let name: String
     /// The record's `file` as written — what the refusal names.
@@ -525,47 +630,37 @@ private struct FileBackend: CredentialBackend {
 
     init(ctx: Ctx) throws(PyError) {
         let p = Self.shown(ctx)
+        if let why = relativeFile(p) {  // a record written past `validateMeta`
+            throw PyError("ValueError", "\(NAME): \(why)")
+        }
+        let full = try PurePath(p).expandUser()
+        base = full.parent
+        root = full.parent
+        name = full.name
         shown = p
-        let parts = PurePath(p)
-        if p.hasPrefix("~") || p.hasPrefix("/") {
-            let full = try parts.expandUser()
-            base = full.parent
-            root = full.parent
-            name = full.name
-        } else {  // relative: under the kernel's running dir, clamped
-            guard let workdir = ctx.kernel.workdir?.path else {
-                throw PyError("RuntimeError", "kernel has no root — no running dir to clamp disk to")
-            }
-            base = workdir
-            root = parts.parent
-            name = parts.name
-        }
-    }
-
-    /// Python `_check`: a regular file owned by this user, no group/other bits.
-    private func check() throws(PyError) {
-        let st: stat
-        do { st = try fsLstat(root, name, base: base) } catch { throw raised(error) }
-        let mode = Int(st.st_mode) & 0o7777
-        let isRegular = (st.st_mode & S_IFMT) == S_IFREG
-        if !isRegular || st.st_uid != getuid() || mode & 0o077 != 0 {
-            throw PyError(
-                "PermissionError",
-                "\(NAME): credential file \(shown) must be a regular file owned by this user "
-                    + "with mode 0600 (is 0o\(String(mode, radix: 8)), uid \(st.st_uid)) — "
-                    + "refused, nothing read")
-        }
     }
 
     func load() throws(PyError) -> OrderedDictionary<String, JSON> {
         let present: Bool
         do { present = try fsExists(root, name, base: base) } catch { throw raised(error) }
         if !present { return [:] }
-        try check()
-        let text: String
-        do { text = try fsReadText(root, name, base: base) } catch { throw raised(error) }
+        // ONE open, judged on its own descriptor (`fsReadPrivate`): checking the
+        // path and then reading the path again was a window a swapped leaf
+        // slipped through (audit F5, 2026-10-03).
+        let raw: Data
+        do { raw = try fsReadPrivate(root, name, base: base) } catch {
+            if let p = error.notPrivate {
+                throw PyError(
+                    "PermissionError",
+                    "\(NAME): credential file \(shown) must be a regular file owned by this user "
+                        + "with mode 0600 (is 0o\(String(p.mode, radix: 8)), uid \(p.uid)) — "
+                        + "refused, nothing read")
+            }
+            throw raised(error)
+        }
+        if let bad = pyUtf8DecodeError(raw) { throw PyError("UnicodeDecodeError", bad) }
         let doc: JSON
-        do { doc = try YamlIO.load(text) } catch {
+        do { doc = try YamlIO.load(String(decoding: raw, as: UTF8.self)) } catch {
             throw PyError("YAMLError", "\(error)")
         }
         return doc["refs"].asObject ?? [:]
@@ -583,9 +678,9 @@ private struct FileBackend: CredentialBackend {
         } catch { throw raised(error) }
     }
 
-    func put(_ ref: String, _ fields: OrderedDictionary<String, JSON>) throws(PyError) {
+    func put(_ ref: String, _ host: String?, _ fields: OrderedDictionary<String, JSON>) throws(PyError) {
         var refs = try load()
-        refs[ref] = .object(fields)
+        refs[ref] = atRest(host, fields)
         try save(refs)
     }
 
@@ -595,16 +690,18 @@ private struct FileBackend: CredentialBackend {
     }
 }
 
-/// The OS keychain: one item per ref, the fields as a JSON object.
+/// The OS keychain: one item per ref, `{host, fields}` as a JSON object.
 private struct KeychainBackend: CredentialBackend {
     let keychain: any KeychainStore
-    let service: String
+    /// `keychain_namespace` — the keychain's own word for it is the item's
+    /// "service", which is what `KeychainStore` names it.
+    let namespace: String
     let prefix: String
 
     init(ctx: Ctx) {
         keychain = ctx.keychain
-        let s = ctx.meta("keychain_service")
-        service = pyTruthy(s) ? pyStr(s) : KEYCHAIN_SERVICE
+        let s = ctx.meta("keychain_namespace")
+        namespace = pyTruthy(s) ? pyStr(s) : KEYCHAIN_NAMESPACE
         prefix = "\(ctx.id)/"
     }
 
@@ -615,28 +712,29 @@ private struct KeychainBackend: CredentialBackend {
     }
 
     func get(_ ref: String) throws(PyError) -> OrderedDictionary<String, JSON>? {
-        guard let raw = try call({ try keychain.get(service: service, account: prefix + ref) })
+        guard let raw = try call({ try keychain.get(service: namespace, account: prefix + ref) })
         else { return nil }
         let v: JSON
         do { v = try JSON.parse(raw) } catch { throw PyError("JSONDecodeError", "\(error)") }
         return v.asObject
     }
 
-    func put(_ ref: String, _ fields: OrderedDictionary<String, JSON>) throws(PyError) {
-        // `json.dumps(fields)` — python's separators and ASCII escapes
-        let value = pyJsonDumps(.object(fields))
-        try call { try keychain.set(service: service, account: prefix + ref, value: value) }
+    func put(_ ref: String, _ host: String?, _ fields: OrderedDictionary<String, JSON>) throws(PyError) {
+        // `json.dumps({"host": host, "fields": fields})` — python's separators and
+        // ASCII escapes
+        let value = pyJsonDumps(atRest(host, fields))
+        try call { try keychain.set(service: namespace, account: prefix + ref, value: value) }
     }
 
     func drop(_ ref: String) throws(PyError) {
-        if try call({ try keychain.get(service: service, account: prefix + ref) }) != nil {
-            try call { try keychain.delete(service: service, account: prefix + ref) }
+        if try call({ try keychain.get(service: namespace, account: prefix + ref) }) != nil {
+            try call { try keychain.delete(service: namespace, account: prefix + ref) }
         }
     }
 }
 
 /// Read-only: each ref's fields come from the environment variables its record
-/// entry names (`env: {field: VAR}`).
+/// entry names (`env: {field: VAR}`). No value at rest, so no host at rest.
 private struct EnvBackend: CredentialBackend {
     let ctx: Ctx
 
@@ -659,7 +757,7 @@ private struct EnvBackend: CredentialBackend {
         return out
     }
 
-    func put(_ ref: String, _ fields: OrderedDictionary<String, JSON>) throws(PyError) {
+    func put(_ ref: String, _ host: String?, _ fields: OrderedDictionary<String, JSON>) throws(PyError) {
         // unreachable: `set` refuses the env backend before it gets here
         throw PyError("RuntimeError", "\(NAME): the env backend is read-only")
     }
@@ -668,6 +766,13 @@ private struct EnvBackend: CredentialBackend {
 }
 
 // MARK: - helpers
+
+/// The refusal for a `file` that is not absolute (`/…` or `~…`), or nil. Python
+/// `_relative_file`.
+func relativeFile(_ p: String) -> String? {
+    if p.hasPrefix("/") || p.hasPrefix("~") { return nil }
+    return "file=\(pyRepr(p)) must be an absolute path (starting with / or ~) — a relative path is refused"
+}
 
 /// python's raise for an `fs` failure, as the kernel settles it: the clamp's
 /// refusals are `ValueError`s, an OS failure the matching `OSError` subclass.

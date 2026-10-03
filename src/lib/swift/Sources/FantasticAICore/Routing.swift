@@ -281,6 +281,14 @@ enum AISilentStreaks {
         caps.removeValue(forKey: kernel.serial)
         lock.unlock()
     }
+
+    /// Drop every chain of a deleted agent, whichever client it ran for
+    /// (`AIBackend.onDelete`).
+    static func forget(_ kernel: Kernel, agent: String) {
+        lock.lock()
+        table[kernel.serial] = table[kernel.serial]?.filter { $0.key.agent != agent }
+        lock.unlock()
+    }
 }
 
 /// What `await` is told when there is nothing to wait for. DELIVERED TO SELF, as
@@ -301,6 +309,9 @@ actor InFlightTurns {
     }
 
     func count(_ agent: String) -> Int { counts[agent] ?? 0 }
+
+    /// Drop a deleted agent's count (`AIBackend.onDelete`).
+    func forget(_ agent: String) { counts[agent] = nil }
 }
 
 let inFlightTurns = InFlightTurns()
@@ -542,6 +553,11 @@ func routeReply(
         // key read (`keyReader`) never passes through here. Python `_route_reply`.
         var held = secretHolderRefusal(kernel, target)
         if held == nil, let replyTo { held = secretHolderRefusal(kernel, replyTo) }
+        // Nor does it JOIN an execution that carried secrets (audit F2): a join
+        // hands back that execution's outcome, so `<exec_id>` = the backend's own
+        // key read was the key — even from a store on a connected peer, which the
+        // holder check above cannot see.
+        if held == nil, let execId = args["exec_id"] { held = secretJoinRefusal(kernel, execId) }
         if let held {
             // python `payload.get("type", "?") if isinstance(payload, dict) else "-"`
             let verb: String

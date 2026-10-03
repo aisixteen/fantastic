@@ -364,6 +364,30 @@ fn the_root_readme_and_docs_are_seeded_only_with_the_root_record() {
     );
 }
 
+/// A failed cold seed FAILS the invocation, as python's `write_record` raises.
+/// The result was dropped (`let _ =`), so a doc tree that never landed was
+/// invisible and the verb answered as if all was well (audit 2026-10-03,
+/// ARCH2-9).
+#[test]
+fn a_failed_cold_seed_fails_the_invocation() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let fdir = tmp.path().join(".fantastic");
+    std::fs::create_dir_all(&fdir).unwrap();
+    std::fs::write(fdir.join("docs"), "a FILE where the docs dir goes").unwrap();
+    let out = Command::new(fantastic_bin())
+        .args(["kernel", "list_agents"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("run fantastic over a blocked docs dir");
+    assert!(
+        !out.status.success(),
+        "a seed that could not land must fail: stdout={}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.starts_with("[kernel] "), "{err}");
+}
+
 /// WARM SEED — every DRAINED root record write re-seeds `readme.md` AND the
 /// `docs/` tree THROUGH the store, not only the cold bootstrap (python
 /// `_persist_via_store` -> `_seed_readme_via_store`). Measured against python
@@ -783,22 +807,13 @@ fn ledger_cap_flag_is_stripped_and_applied() {
 
 /// A14.7 — a one-shot refuses a LIVE lock with python's `[call] …` line on
 /// stderr, prints nothing on stdout and exits 1. `reflect` is unaffected: it
-/// never takes the lock.
+/// never takes the lock. LIVE = the flock is held: this test process takes the
+/// daemon's own lock.
 #[test]
 fn one_shot_refuses_a_live_lock_with_python_text() {
     let tmp = tempfile::TempDir::new().unwrap();
-    std::fs::create_dir_all(tmp.path().join(".fantastic")).unwrap();
-    // A process that is definitely alive for the length of this test.
-    let mut holder = Command::new("/bin/sleep")
-        .arg("30")
-        .spawn()
-        .expect("spawn the lock holder");
-    let pid = holder.id();
-    std::fs::write(
-        tmp.path().join(".fantastic/lock.yaml"),
-        format!("{{\"pid\": {pid}}}"),
-    )
-    .unwrap();
+    fantastic_kernel::lock::acquire(tmp.path()).expect("hold the workdir lock");
+    let pid = std::process::id();
     let out = Command::new(fantastic_bin())
         .args(["kernel_state", "reflect"])
         .current_dir(tmp.path())
@@ -821,8 +836,64 @@ fn one_shot_refuses_a_live_lock_with_python_text() {
         .output()
         .unwrap();
     assert!(ok.status.success(), "reflect is lock-free");
-    let _ = holder.kill();
-    let _ = holder.wait();
+    fantastic_kernel::lock::release(tmp.path()).unwrap();
+}
+
+/// Owner 2026-10-03 — a one-shot probes the OS lock, not the pid: a lock file
+/// naming a LIVE pid that holds no flock (a dead holder's file, its pid reused)
+/// is stale and taken over — `call` and `init` both run, and release it.
+#[test]
+fn one_shots_take_over_a_lock_whose_pid_holds_no_flock() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir_all(tmp.path().join(".fantastic")).unwrap();
+    let mut alive = Command::new("/bin/sleep")
+        .arg("30")
+        .spawn()
+        .expect("spawn a live pid");
+    let pid = alive.id();
+    let stale = || {
+        std::fs::write(
+            tmp.path().join(".fantastic/lock.yaml"),
+            format!("pid: {pid}\n"),
+        )
+        .unwrap();
+    };
+    stale();
+    let out = Command::new(fantastic_bin())
+        .args(["kernel", "list_agents"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("run a one-shot over a stale lock");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("\"agents\""));
+    assert!(
+        !tmp.path().join(".fantastic/lock.yaml").exists(),
+        "released"
+    );
+    stale();
+    std::fs::write(tmp.path().join("fantastic.yaml"), "agents: []\n").unwrap();
+    let out = Command::new(fantastic_bin())
+        .args(["init", "static_loader", "./fantastic.yaml"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("run init over a stale lock");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !tmp.path().join(".fantastic/lock.yaml").exists(),
+        "released"
+    );
+    let _ = alive.kill();
+    let _ = alive.wait();
 }
 
 /// C12 + C14: a virgin dir's root IS the `kernel_state` loader, and the daemon
@@ -925,17 +996,8 @@ fn init_with_one_arg_prints_usage_exit_2() {
 #[test]
 fn init_refuses_a_live_lock_with_python_text() {
     let tmp = tempfile::TempDir::new().unwrap();
-    std::fs::create_dir_all(tmp.path().join(".fantastic")).unwrap();
-    let mut holder = Command::new("/bin/sleep")
-        .arg("30")
-        .spawn()
-        .expect("spawn the lock holder");
-    let pid = holder.id();
-    std::fs::write(
-        tmp.path().join(".fantastic/lock.yaml"),
-        format!("{{\"pid\": {pid}}}"),
-    )
-    .unwrap();
+    fantastic_kernel::lock::acquire(tmp.path()).expect("hold the workdir lock");
+    let pid = std::process::id();
     let out = Command::new(fantastic_bin())
         .args(["init", "static_loader", "./fantastic.yaml"])
         .current_dir(tmp.path())
@@ -947,8 +1009,7 @@ fn init_refuses_a_live_lock_with_python_text() {
         String::from_utf8_lossy(&out.stderr),
         format!("[init] another fantastic owns this dir (pid={pid}). Stop it first.\n"),
     );
-    let _ = holder.kill();
-    let _ = holder.wait();
+    fantastic_kernel::lock::release(tmp.path()).unwrap();
 }
 
 /// D7 — a CLI kv argument python coerces to a non-finite float or an int wider

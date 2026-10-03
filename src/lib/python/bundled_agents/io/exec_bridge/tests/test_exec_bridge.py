@@ -552,6 +552,8 @@ def test_the_connector_puts_secret_on_the_frame_only_when_given():
         "kernel.send('x', {'type': 'y', 'k': 'v'}, secret=['payload.k', 'result'])\n"
         "kernel.send('x', {'type': 'y'})\n"
         "kernel.send('x', {'type': 'y'}, secret=[])\n"
+        "kernel.send('x', {'type': 'y', 'a.b': 'v'}, secret=[['payload', 'a.b'], "
+        "'result', ['result', 'items', 0]])\n"
         "print('DONE')\n"
     )
     parent, child_end = socket.socketpair()
@@ -565,7 +567,7 @@ def test_the_connector_puts_secret_on_the_frame_only_when_given():
     child_end.close()
     parent.settimeout(10)
     frames = []
-    for _ in range(3):
+    for _ in range(4):
         (n,) = struct.unpack(">I", parent.recv(4))
         body = b""
         while len(body) < n:
@@ -588,6 +590,13 @@ def test_the_connector_puts_secret_on_the_frame_only_when_given():
         },
         {"op": "send", "rid": "2", "target": "x", "payload": {"type": "y"}},
         {"op": "send", "rid": "3", "target": "x", "payload": {"type": "y"}},
+        {
+            "op": "send",
+            "rid": "4",
+            "target": "x",
+            "payload": {"type": "y", "a.b": "v"},
+            "secret": [["payload", "a.b"], "result", ["result", "items", 0]],
+        },
     ], frames
 
 
@@ -634,6 +643,27 @@ async def test_the_relay_puts_the_frames_secret_on_the_dispatched_item(seeded_ke
     bad = await _wire_read(child)
     assert bad["rid"] == "2", bad
     assert (bad["data"]["reason"], bad["data"]["arg"]) == ("bad_arg", "secret"), bad
+    # an ARRAY mark rides as given: the literal key "a.b" is masked
+    await _wire_write(
+        child,
+        {
+            "op": "send",
+            "rid": "3",
+            "target": "probe",
+            "payload": {"type": "status", "a.b": "hush-dotted-0452"},
+            "secret": [["payload", "a.b"]],
+        },
+    )
+    rep = await _wire_read(child)
+    assert rep["rid"] == "3" and "jobs" in rep["data"], rep
+    dotted = [
+        r
+        for r in k.ctx.rows.values()
+        if r.get("kind") == "call" and r.get("secret") == [["payload", "a.b"]]
+    ]
+    assert len(dotted) == 1, dotted
+    assert dotted[0]["payload"]["a.b"] == "<secret>", dotted
+    assert "hush-dotted-0452" not in repr(list(k.ctx.rows.values()))
     child.close()
     await asyncio.wait_for(task, 5)
 
@@ -642,7 +672,7 @@ _CREDS_CHILD = (
     "import json, secrets\n"
     "key = 'sk-guest-' + secrets.token_hex(16)\n"
     "s = kernel.send('creds', {'type': 'set', 'ref': 'guest', "
-    "'host': 'api.example.com', 'fields': {'api_key': key}}, "
+    "'fields': {'api_key': key}}, "
     "secret=['payload.fields'])\n"
     "g = kernel.send('creds', {'type': 'get', 'ref': 'guest'}, secret=['result'])\n"
     "u = kernel.send('creds', {'type': 'get', 'ref': 'guest'})\n"
@@ -672,7 +702,13 @@ async def test_a_program_marks_a_credential_store_set_and_get(seeded_kernel, tmp
                         "handler_module": "credential_store.tools",
                         "id": "creds",
                         "file": str(tmp_path / "creds.yaml"),
-                        "creators": ["runner"],
+                        "refs": {
+                            "guest": {
+                                "host": "api.example.com",
+                                "readers": ["runner"],
+                                "writers": ["runner"],
+                            }
+                        },
                         "callable_by": {"runner": "*"},
                     },
                 }
@@ -693,9 +729,10 @@ async def test_a_program_marks_a_credential_store_set_and_get(seeded_kernel, tmp
         "match": True,
         "unmarked": ["bad_arg", "secret"],
     }, row
-    key = yaml.safe_load((tmp_path / "creds.yaml").read_text())["refs"]["guest"][
-        "api_key"
-    ]
+    stored = yaml.safe_load((tmp_path / "creds.yaml").read_text())["refs"]["guest"]
+    # the value at rest carries the ref's declared host (audit S3)
+    assert stored["host"] == "api.example.com", stored
+    key = stored["fields"]["api_key"]
     assert key.startswith("sk-guest-"), key
     calls = {
         r["verb"]: r
@@ -1052,3 +1089,153 @@ async def test_a_second_onmessage_supersedes_without_being_evicted(seeded_kernel
     await asyncio.wait_for(t2, 5)
     assert "runner" not in ebt._owner_inbox
     assert "_xbself_j2" not in k.ctx.inboxes
+
+
+async def test_the_inbox_relays_a_drive_verb_only_for_its_own_job(seeded_kernel):
+    """Audit BV-9: the fanout mirrors every payload sent to the leg into the
+    owner inbox, so a program started by one caller saw another caller's `write`
+    keystrokes (unechoed input included), paste bytes and drive calls aimed at
+    that caller's job. A drive verb (`DRIVE_VERBS`) is dropped only when its
+    `job_id` names ANOTHER job: no `job_id` (the bulk forms), this job's id, or a
+    non-int id (no job's) is forwarded; other mail is unchanged."""
+    k = seeded_kernel
+    await _mk(k, allowed=["x"])
+    child, task = await _wire(k, job_id=7)
+    await _wire_write(child, {"op": "onmessage"})
+    await _until(lambda: "_xbself_7" in k.ctx.inboxes, what="owner proxy")
+    for p in (
+        {"type": "write", "job_id": 8, "data": "TEST-VALUE-KEYS\n"},
+        {"type": "resize", "job_id": 8, "cols": 10, "rows": 5},
+        {"type": "paste_image", "job_id": 8, "bytes": "TEST-VALUE-PNG"},
+        {"type": "stop", "job_id": 8},
+        {"type": "interrupt", "job_id": 8},
+        {"type": "clear", "job_id": 8},
+        # forwarded: the bulk forms (no job_id), a string id (no job's), job 7's own
+        {"type": "stop"},
+        {"type": "interrupt"},
+        {"type": "clear"},
+        {"type": "write", "job_id": "8", "data": "str"},
+        {"type": "write", "job_id": 7, "data": "own"},
+        {"type": "mail", "n": 1},
+    ):
+        await k.send([{"target": "runner", "payload": p}])
+    # the first frames down the fd: the forwarded ones, in order
+    for want in (
+        {"type": "stop"},
+        {"type": "interrupt"},
+        {"type": "clear"},
+        {"type": "write", "job_id": "8", "data": "str"},
+        {"type": "write", "job_id": 7, "data": "own"},
+        {"type": "mail", "n": 1},
+    ):
+        assert await _wire_read(child) == {"op": "inbox", "payload": want}
+    child.close()
+    await asyncio.wait_for(task, 5)
+
+
+# ─── audit round 2: clear, the sealed inbox, malformed ctrl-fd frames ───────
+
+
+async def test_a_named_clear_refuses_a_running_job(seeded_kernel):
+    """Audit BV-5: `clear {job_id}` dropped a RUNNING row, and the row is the only
+    handle stop, cancel, delete and shutdown kill a process through — the process
+    outlived all four. A named job follows the bulk form's rule."""
+    import exec_bridge.tools as ebt
+
+    await _mk(seeded_kernel, allowed=[r"sleep .*"])
+    r = await _start(seeded_kernel, "runner", "sleep", ["30"])
+    jid = r["job_id"]
+
+    async def clear():
+        return (
+            await seeded_kernel.send(
+                [{"target": "runner", "payload": {"type": "clear", "job_id": jid}}]
+            )
+        )[0]["result"]
+
+    assert await clear() == {
+        "error": f"clear: job_id must be a finished job (job {jid} is running — "
+        "`stop` it, then clear)",
+        "reason": "bad_arg",
+        "arg": "job_id",
+    }
+    assert jid in ebt._jobs
+    await seeded_kernel.send(
+        [{"target": "runner", "payload": {"type": "stop", "job_id": jid}}]
+    )
+    await _until(lambda: ebt._jobs[jid]["status"] == "stopped", what="reaped")
+    assert await clear() == {"cleared": 1}
+    assert jid not in ebt._jobs
+
+
+async def test_a_sealed_leg_refuses_mail_and_relays_nothing(seeded_kernel):
+    """Audit BV-8: the seal covers every verb but `reflect` — mail included. The
+    substrate's fanout reaches the program's on_message proxy BEFORE the handler,
+    so the relay's framer drops what the gate refuses: a sealed leg's program
+    receives nothing, and receives again once the leg is reopened."""
+    k = seeded_kernel
+    await _mk(k, allowed=["x"])
+    child, task = await _wire(k, job_id="js")
+    await _wire_write(child, {"op": "onmessage"})
+    await _until(lambda: "_xbself_js" in k.ctx.inboxes, what="owner proxy")
+    up = await k.send(
+        [
+            {
+                "target": k.id,
+                "payload": {
+                    "type": "update_agent",
+                    "id": "runner",
+                    "ingress_rule": "deny_ingress",
+                },
+            }
+        ]
+    )
+    assert up[0]["status"] == "completed", up
+    for p in ({"type": "status"}, {"type": "probe_mail", "x": "TEST-VALUE-MAIL"}):
+        out = (await k.send([{"target": "runner", "payload": p}]))[0]["result"]
+        assert out["reason"] == "unauthorized", (p, out)
+    await k.send(
+        [
+            {
+                "target": k.id,
+                "payload": {
+                    "type": "update_agent",
+                    "id": "runner",
+                    "ingress_rule": "allow_all_ingress",
+                },
+            }
+        ]
+    )
+    await k.send([{"target": "runner", "payload": {"type": "after"}}])
+    # the first frame down the fd is the mail sent AFTER the reopen
+    assert await _wire_read(child) == {"op": "inbox", "payload": {"type": "after"}}
+    child.close()
+    await asyncio.wait_for(task, 5)
+
+
+async def test_a_malformed_ctrl_frame_is_skipped_never_fatal(seeded_kernel):
+    """Audit W-9: JSON that is no envelope (`T[1]`), or a `src` that is no string,
+    ended the relay task (AttributeError / unhashable TypeError) and with it the
+    job's connector. Each is skipped; the next call is answered."""
+    k = seeded_kernel
+    await _mk(k, allowed=["x"])
+    child, task = await _wire(k, job_id="jw9")
+    for junk in (
+        [1],
+        "str",
+        {"op": "watch", "src": ["x"]},
+        {"op": "watch", "src": {"a": 1}},
+        {"op": "unwatch", "src": ["x"]},
+        {"op": "unwatch", "src": {"a": 1}},
+    ):
+        await _wire_write(child, junk)
+    await _wire_write(
+        child,
+        {"op": "send", "rid": "r1", "target": "runner", "payload": {"type": "status"}},
+    )
+    reply = await _wire_read(child)
+    assert reply["op"] == "reply" and reply["rid"] == "r1", reply
+    assert "jobs" in reply["data"], reply
+    assert not task.done()
+    child.close()
+    await asyncio.wait_for(task, 5)

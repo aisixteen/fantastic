@@ -4,7 +4,8 @@
 //! passes `DEFAULT_CONTEXT_WINDOW`; a backend that can read its model's real
 //! window (foundation_models_backend) passes that. Swift `AIBackendConfig.modelWindow`.
 
-use crate::context::{budget, inline_cap, resolve_context_window, DEFAULT_CONTEXT_WINDOW};
+use crate::constants::DEFAULT_CONTEXT_WINDOW;
+use crate::context::{budget, inline_cap, resolve_context_window};
 use crate::provider::{Provider, ProviderError, ProviderStream};
 use async_trait::async_trait;
 use serde_json::{json, Map, Value};

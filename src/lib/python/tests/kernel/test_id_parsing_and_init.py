@@ -11,16 +11,16 @@
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import json
 import os
-import sys
 import types
 
 import pytest
 import yaml
 from _testkit import memory_meta
 
-from kernel import dispatch_argv
+from kernel import dispatch_argv, register_unlisted
 
 ARABIC = str.maketrans("0123456789", "٠١٢٣٤٥٦٧٨٩")
 
@@ -49,7 +49,7 @@ async def _handler(id, payload, kernel):
 _mod = types.ModuleType("id_probe.tools")
 _mod.handler = _handler
 _mod.VERBS = {}
-sys.modules["id_probe.tools"] = _mod
+register_unlisted("id_probe.tools", _mod)
 
 
 async def _call(k, target, payload) -> dict:
@@ -310,19 +310,53 @@ async def test_init_seeds_and_boots_a_loader_and_prints_its_record(
     assert again["reason"] == "exists", again
 
 
-async def test_init_refuses_while_another_fantastic_owns_the_dir(
-    kernel, tmp_path, capsys
-):
+def _held_lock(tmp_path, pid: int) -> int:
+    """`lock.yaml` naming `pid`, its flock HELD on a descriptor of its own — what
+    a live daemon's lock is. The caller closes the descriptor."""
+    d = tmp_path / ".fantastic"
+    d.mkdir(exist_ok=True)
+    (d / "lock.yaml").write_text(yaml.safe_dump({"pid": pid}))
+    fd = os.open(d / "lock.yaml", os.O_RDONLY)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    return fd
+
+
+def _stale_lock(tmp_path) -> None:
+    """`lock.yaml` naming a LIVE pid (this test's parent) that holds no flock — a
+    dead holder's file whose pid was reused."""
     d = tmp_path / ".fantastic"
     d.mkdir(exist_ok=True)
     (d / "lock.yaml").write_text(yaml.safe_dump({"pid": os.getppid()}))
-    with pytest.raises(SystemExit) as e:
-        await dispatch_argv(kernel.ctx, ["init", "static_loader", "./x.yaml"])
+
+
+async def test_init_refuses_while_another_fantastic_owns_the_dir(
+    kernel, tmp_path, capsys
+):
+    fd = _held_lock(tmp_path, os.getppid())
+    try:
+        with pytest.raises(SystemExit) as e:
+            await dispatch_argv(kernel.ctx, ["init", "static_loader", "./x.yaml"])
+    finally:
+        os.close(fd)
     assert e.value.code == 1
     assert capsys.readouterr().err == (
         f"[init] another fantastic owns this dir (pid={os.getppid()}). Stop it first.\n"
     )
     assert "static_loader" not in kernel.ctx.agents
+
+
+async def test_one_shots_probe_the_flock_not_the_pid(kernel, tmp_path, capsys):
+    """Owner 2026-10-03: a one-shot takes the daemon's own flock. A lock file
+    naming a live pid that holds no flock is stale — taken over, not refused."""
+    path = _manifest(tmp_path)
+    _stale_lock(tmp_path)
+    assert await dispatch_argv(kernel.ctx, ["init", "static_loader", path]) is None
+    assert json.loads(capsys.readouterr().out)["id"] == "static_loader"
+    assert not (tmp_path / ".fantastic" / "lock.yaml").exists()
+    _stale_lock(tmp_path)
+    assert await dispatch_argv(kernel.ctx, ["kernel", "list_agents"]) is None
+    assert json.loads(capsys.readouterr().out)["agents"]
+    assert not (tmp_path / ".fantastic" / "lock.yaml").exists()
 
 
 async def test_init_usage(kernel, capsys):
@@ -338,11 +372,12 @@ async def test_init_usage(kernel, capsys):
 async def test_call_refuses_while_another_fantastic_owns_the_dir(
     kernel, tmp_path, capsys
 ):
-    d = tmp_path / ".fantastic"
-    d.mkdir(exist_ok=True)
-    (d / "lock.yaml").write_text(yaml.safe_dump({"pid": os.getppid()}))
-    with pytest.raises(SystemExit) as e:
-        await dispatch_argv(kernel.ctx, ["kernel", "ps"])
+    fd = _held_lock(tmp_path, os.getppid())
+    try:
+        with pytest.raises(SystemExit) as e:
+            await dispatch_argv(kernel.ctx, ["kernel", "ps"])
+    finally:
+        os.close(fd)
     assert e.value.code == 1
     assert capsys.readouterr().err == (
         f"[call] another fantastic owns this dir (pid={os.getppid()}). Stop it, or "

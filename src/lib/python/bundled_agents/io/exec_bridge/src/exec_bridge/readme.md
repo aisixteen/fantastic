@@ -36,6 +36,15 @@ absolute path; with no `PATH` the start is refused naming it.
   resumes under 5K), `output(job_id, max_bytes?)` (the 256 KiB ring — replay it when you
   re-attach) and `paste_image(job_id, data, mime)` (saves the image, types its path).
   Each is a gated verb: a viewer granted only `status`/`output`/`ack` cannot type.
+  **A job is DRIVEN only by the caller that started it** (its `starter`; the operator
+  drives every job): `write`/`resize`/`paste_image`/`stop`/`interrupt`/`clear` naming a
+  job another caller started are refused — `{reason:"unauthorized", job_id}`,
+  "exec_bridge: job <id> is not yours — only the caller that started it (or the
+  operator) may <verb> it". The reads — `status`, `output`, `ack` — stay gated by grants
+  alone, so a read-only viewer re-attaches to a job someone else started. A running
+  program's `on_message` never gets a drive verb whose `job_id` names another job —
+  another job's keystrokes, pastes and drive calls never reach it; a bulk call (no
+  `job_id`) does.
   Nothing respawns a terminal — `boot` starts nothing; a client that attaches and finds no
   live PTY job `start`s one.
 - `status(job_id?)` → `{jobs:[…]}` — one job with its full stdout/stderr (a PTY job: its
@@ -45,7 +54,7 @@ absolute path; with no `PATH` the start is refused naming it.
   stopping the kernel does the same. A process that leaves the session on purpose
   (`setsid`) escapes — containment beyond that is the OS's ·
   `interrupt(job_id?)` SIGINT · `clear(job_id?)` forget finished rows. Omit `job_id` and
-  it applies to all of this agent's jobs.
+  it applies to all YOUR jobs on this agent (the operator: all of them).
 - `boot` — no-op. Nothing auto-restarts: a command is started by a caller, not by the record.
 
 Every running job IS a row in the kernel TASK TABLE: its `job_id` is that row's id (an int
@@ -147,7 +156,8 @@ ops: `{op:"send", rid, target, payload, secret?}` · `{op:"emit", target?, paylo
 Parent → child: `{op:"reply", rid, data}` · `{op:"event", src, payload}` ·
 `{op:"inbox", payload}`. `rid` correlates a `send` with its `reply`; the parent echoes it
 back untouched. `secret` is the call's marks — `["payload.<field>", …]`, `["result"]`,
-`["result.<field>"]` — put on the dispatched call as sent (absent when the program marks
+`["result.<field>"]`, or an array of steps `[["payload", "a.b"]]` (a key holding a
+dot) — put on the dispatched call as sent (absent when the program marks
 nothing): every record of the call shows `<secret>`, and a bad mark comes back as the
 kernel's refusal in `data`. ONE FRAME CAPS AT 16 MiB in every runtime — over it the length prefix is a
 wire violation and the relay closes the socket, so move bulk with `write_stream` chunks

@@ -212,18 +212,17 @@ pub struct Item {
     /// Optional RAW request body AND WHERE IT SITS in the payload — python's
     /// payload dict holding a `bytes` value at that path (`data` for
     /// `exec_bridge.paste_image`, `bytes` for `file_bridge.write_stream`).
-    /// Present ⇒ the item rides the BINARY channel (`Bundle::handle_binary`)
-    /// instead of the text one, under the same task row, ledger id, timeout and
-    /// retries as any other item. Never base64: the bytes travel beside the JSON
-    /// header, not inside it. A payload may name the slot (`null` there) to keep
-    /// python's key order on the call row and the watcher frame; the handler
-    /// gets the header without it.
+    /// The handler gets it beside the header (`Bundle::handle_binary`, the ONE
+    /// dispatch every item takes), under the same task row, ledger id, timeout
+    /// and retries as any other item. Never base64: the bytes travel beside the
+    /// JSON header, not inside it. A payload may name the slot (`null` there) to
+    /// keep python's key order on the call row and the watcher frame; the
+    /// handler gets the header without it.
+    ///
+    /// A REPLY body needs no request body and nothing declared: any verb may
+    /// answer one ([`Outcome::body`]), as any python handler may return a dict
+    /// holding bytes.
     pub binary: Option<Blob>,
-    /// The caller reads the reply's chunk RAW ([`Outcome::body`]) — the item
-    /// rides the binary channel with no request body. Python's reply dict holds
-    /// `bytes` natively; a request that sends none (`read_stream`) is a plain
-    /// dict on the call row and a text frame to a watcher.
-    pub raw_reply: bool,
     /// The RAW (tag-typed) `exec_id`, when a caller is forwarding a value it
     /// did not itself parse — a model's `<exec_id>` argument, or a wire
     /// frame's `id` field (C38). An untyped [`Value`] the KERNEL validates
@@ -244,9 +243,10 @@ pub struct Item {
     /// The RAW `retries`, forwarded untouched (C38) for the same reason.
     /// Set, this SUPERSEDES the typed `retries` above.
     pub raw_retries: Option<Value>,
-    /// SECRET paths (`[path, …]`, see [`crate::secret`]): `payload.<field…>` or
-    /// `result[.<field…>]`. The target gets the real payload and the caller the
-    /// real reply; every record and mirror of the call shows `<secret>`. RAW, so
+    /// SECRET marks (`[mark, …]`, see [`crate::secret`]): dotted strings —
+    /// `payload.<field…>` or `result[.<field…>]` — and/or arrays of steps —
+    /// `["payload", <step>, …]` or `["result", <step>…]`. The target gets the real
+    /// payload and the caller the real reply; every record and mirror of the call shows `<secret>`. RAW, so
     /// the kernel validates the shape and refuses a malformed mark `bad_arg`
     /// before anything runs.
     pub secret: Option<Value>,
@@ -263,7 +263,6 @@ impl Item {
             timeout: None,
             retries: None,
             binary: None,
-            raw_reply: false,
             raw_id: None,
             raw_timeout: None,
             raw_retries: None,
@@ -273,10 +272,10 @@ impl Item {
 
     /// Carry a RAW request body at `path` of the payload (its steps, relative to
     /// the payload: python's `set_path`, a binary frame's `_binary_path` below
-    /// `payload`) — the item dispatches through the binary channel, as an
-    /// ordinary execution of the batch (pid, call/settle rows, `ps` row, timeout,
-    /// dedup, `<guid>|agent` routing). There is no second send path for bytes. A
-    /// path that names no slot of the payload is refused before anything runs.
+    /// `payload`) — the handler gets it beside the header, as an ordinary
+    /// execution of the batch (pid, call/settle rows, `ps` row, timeout, dedup,
+    /// `<guid>|agent` routing). There is no second send path for bytes. A path
+    /// that names no slot of the payload is refused before anything runs.
     #[must_use]
     pub fn with_binary(mut self, path: Vec<Step>, bytes: Vec<u8>) -> Self {
         self.binary = Some(Blob::new(path, bytes));
@@ -290,14 +289,6 @@ impl Item {
     #[must_use]
     pub fn with_binary_key(mut self, key: impl Into<String>, bytes: Vec<u8>) -> Self {
         self.binary = Some(Blob::key(key, bytes));
-        self
-    }
-
-    /// Take the reply's chunk RAW ([`Outcome::body`]) without sending one — a
-    /// `read_stream`. See [`Item::raw_reply`].
-    #[must_use]
-    pub fn with_raw_reply(mut self) -> Self {
-        self.raw_reply = true;
         self
     }
 
@@ -348,11 +339,12 @@ impl Item {
         self
     }
 
-    /// Mark SECRET paths on this item (`["payload.key"]`, `["result"]`, …) —
-    /// see [`Item::secret`]. Validated by the kernel, never here.
+    /// Mark SECRET values on this item (`["payload.key"]`, `["result"]`,
+    /// `[["payload", "a.b"]]`, …) — see [`Item::secret`]. Validated by the
+    /// kernel, never here.
     #[must_use]
-    pub fn with_secret(mut self, paths: Value) -> Self {
-        self.secret = Some(paths);
+    pub fn with_secret(mut self, marks: Value) -> Self {
+        self.secret = Some(marks);
         self
     }
 
@@ -390,10 +382,10 @@ pub struct Outcome {
     /// distinction, exactly as python's `isinstance(reply["bytes"], bytes)`
     /// does; testing `is_empty()` instead served an empty file as JSON.
     ///
-    /// Only a binary item can set it (`Item::with_binary` /
-    /// `Item::with_raw_reply`): a bundle's `handle_binary` returns it at its
-    /// slot of the reply (`["bytes"]` for a `read_stream` chunk); a PEER's reply
-    /// keeps the slot its frame named (`["data", "x.y"]` is the reply key
+    /// ANY item can carry one back — no verb list, no flag on the call: a
+    /// bundle's `handle_binary` returns it at its slot of the reply (`["bytes"]`
+    /// for a `read_stream` chunk, `["chunk"]` for a bundle's own verb); a PEER's
+    /// reply keeps the slot its frame named (`["data", "x.y"]` is the reply key
     /// `"x.y"`). The path is relative to `result`.
     pub body: Option<Blob>,
 }

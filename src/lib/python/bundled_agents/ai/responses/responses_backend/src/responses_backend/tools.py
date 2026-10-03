@@ -4,11 +4,10 @@ A THIN binding over `ai_core` (see ollama_backend.tools for the pattern): this
 module supplies the ResponsesProvider builder + the backend's identity, and
 `ai_core.build()` returns the `(VERBS, handler)` bound to it. ALL shared machinery
 (queue / FIFO lock, prompt assembly, the ONE-PASS `_run`, context management, the
-verb bodies) lives in `ai_core.core`. State dicts + the patchable `SEND_TIMEOUT` /
-`MAX_CALL_DEPTH` are re-exported from `ai_core.core` so the monkeypatch seams keep
-working on the shared path — and so is `on_cancel`, the shared bundle CANCEL hook
-the substrate discovers on this module (an in-flight `send` is a kernel TASK,
-killed with the universal `ps` → `cancel` system verbs).
+verb bodies) lives in `ai_core.core`. `on_cancel` and `on_delete` are re-exported
+from `ai_core` — the shared bundle CANCEL and DELETE hooks the substrate discovers
+on this module (an in-flight `send` is a kernel TASK, killed with the universal
+`ps` → `cancel` system verbs).
 
 Distinct from `vllm_backend` on purpose: that one speaks OpenAI Chat Completions
 (`/chat/completions`), this one the Responses wire (`/responses`) — a different
@@ -17,20 +16,9 @@ request shape and a different event stream.
 
 from __future__ import annotations
 
-from ai_core import build, required_meta
+from ai_core import build, on_cancel, on_delete, required_meta  # noqa: F401 — the hooks
 from ai_core.credentials import key_reader
 from ai_core.schema import credentials_field, field, schema, validate
-from ai_core.core import (  # noqa: F401 — re-exported test seams + the cancel hook
-    DEFAULT_CLIENT_ID,
-    MAX_CALL_DEPTH,
-    SEND_TIMEOUT,
-    _assemble,
-    _current,
-    _locks,
-    _providers,
-    _queue,
-    on_cancel,
-)
 
 from responses_backend.provider import MAX_TOKENS
 
@@ -86,7 +74,6 @@ def _build():
         sentence="OpenAI Responses-API LLM agent (raw prompt-and-parse tool-calling).",
         make_provider=make_provider,
         name=NAME,
-        module_name=__name__,
     )
 
 

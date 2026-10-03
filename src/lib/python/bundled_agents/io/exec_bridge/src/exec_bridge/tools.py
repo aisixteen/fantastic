@@ -57,9 +57,10 @@ import time
 from exec_bridge import proc
 from file_bridge import fs
 from io_bridge import decode_frame, describe as _describe, encode_frame
-from io_bridge import gate_inbound, resolve_ingress
+from io_bridge import gate_inbound, resolve_ingress, unknown_ingress_refusal
 from io_bridge import loads as strict_loads
 from io_bridge._base import parse_spec
+from kernel import current_origin, current_remote_caller
 from kernel._refusal import (
     MISSING_ARG,
     NOT_FOUND,
@@ -76,11 +77,26 @@ from kernel._refusal import (
 # relay closes the socket, and the connector refuses to write such a frame at all.
 MAX_FRAME = 16 * 1024 * 1024
 
-# job_id (the job's kernel TASK id, an int) -> {owner, proc, status, started_at,
-#            exit_code, lines, last_line, stdout, stderr, task, ctrl_sock, ctrl_task}.
+# job_id (the job's kernel TASK id, an int) -> {owner, starter, proc, status,
+#            started_at, exit_code, lines, last_line, stdout, stderr, task, ctrl_sock,
+#            ctrl_task}.
 # status: running|stopping|done|failed|stopped. Module-global (shared across
-# exec_bridge agents); every op filters by owner.
+# exec_bridge agents); every op filters by owner (the agent). The verbs that DRIVE a
+# job — write, resize, paste_image, stop, interrupt, clear — also filter by starter
+# (the caller that ran `start`, null for the operator): from any other caller they
+# are refused, and the operator drives every job (audit AV-8, 2026-10-03). The
+# READ verbs — status, output, ack — stay gated by grants alone: a read-only viewer
+# (granted status/output/ack, never `start`) is by construction not the starter.
 _jobs: dict[int, dict] = {}
+
+# The verbs that DRIVE one job. A running program's owner-inbox relay
+# (`on_message`) forwards one of these only when its `job_id` names THAT program's
+# own job (audit BV-9): the fanout mirrors every payload sent to the leg, so a
+# program started by one caller saw another caller's keystrokes, paste bytes and
+# drive calls aimed at that caller's job.
+DRIVE_VERBS = frozenset(
+    {"write", "resize", "paste_image", "stop", "interrupt", "clear"}
+)
 
 # The single job currently subscribed to each OWNER agent's inbox (on_message).
 # owner_id -> {"job_id", "proxy", "task"}. Many jobs can run in parallel on one agent,
@@ -99,6 +115,27 @@ def _alive(job: dict) -> bool:
     legitimately wants the label, because it decides what is finished enough to forget.
     """
     return job["proc"].returncode is None
+
+
+def _caller() -> str | None:
+    """THIS dispatch's caller: the calling agent's id, a foreign caller's
+    `<guid>|<agent>` (relayed by a bridge leg), or None for the operator."""
+    return current_remote_caller() or current_origin()
+
+
+def _yours(job: dict) -> bool:
+    """Whether THIS dispatch's caller drives `job`: its starter, or the operator."""
+    caller = _caller()
+    return caller is None or job.get("starter") == caller
+
+
+def _not_yours(verb: str, jid: int) -> dict:
+    return refusal(
+        UNAUTHORIZED,
+        f"exec_bridge: job {jid} is not yours — only the caller that started it "
+        f"(or the operator) may {verb} it",
+        job_id=jid,
+    )
 
 
 def _has_running_job(owner_id: str) -> bool:
@@ -182,17 +219,34 @@ async def _pump(owner, ready, process, kernel):
 # ─── connector relay (spawner side of the control fd) ───────────
 
 
-def _inbox_framer(payload):
-    """on_message framer: forward traffic on the owner agent, minus the job's own
-    telemetry (its progress/job_started/job_done emits echo back via the owner)."""
-    if isinstance(payload, dict) and payload.get("type") in (
-        "progress",
-        "output",
-        "job_started",
-        "job_done",
-    ):
-        return None
-    return {"op": "inbox", "payload": payload}
+def _inbox_framer(owner_id, job_id, kernel):
+    """on_message framer for job `job_id`: forward traffic on the owner agent, minus
+    the job's own telemetry (its progress/job_started/job_done emits echo back via
+    the owner), minus a drive verb addressed to ANOTHER job (`DRIVE_VERBS`, audit
+    BV-9) — and nothing the leg's gate refuses. The substrate's fanout mirrors every
+    payload to the owner's watchers BEFORE any handler runs, so a sealed leg
+    whose handler refused the call still had it delivered here (audit BV-8)."""
+
+    def frame(payload):
+        if isinstance(payload, dict) and payload.get("type") in (
+            "progress",
+            "output",
+            "job_started",
+            "job_done",
+        ):
+            return None
+        if isinstance(payload, dict) and payload.get("type") in DRIVE_VERBS:
+            jid = payload.get("job_id")
+            # Dropped ONLY when it names ANOTHER job — an int, exactly as `_job_arg`
+            # reads it. No `job_id` (the bulk stop/interrupt/clear), this job's id,
+            # or a bool/string (no job's id) is forwarded.
+            if isinstance(jid, int) and not isinstance(jid, bool) and jid != job_id:
+                return None
+        if _gate(owner_id, payload, kernel) is not None:
+            return None
+        return {"op": "inbox", "payload": payload}
+
+    return frame
 
 
 def _unframe(body: bytes) -> dict:
@@ -290,6 +344,8 @@ async def _serve_ctrl(parent_sock, owner_id, job_id, kernel):
                 m = _unframe(body)
             except (UnicodeDecodeError, ValueError, KeyError, IndexError, struct.error):
                 continue  # a malformed frame skips the frame, never the connection
+            if not isinstance(m, dict):
+                continue  # so does valid JSON that is no envelope (`T[1]`, audit W-9)
             op = m.get("op")
             if op == "send":
                 # A target fault settles as a failed outcome (error in result);
@@ -311,7 +367,9 @@ async def _serve_ctrl(parent_sock, owner_id, job_id, kernel):
                     pass
             elif op == "watch":
                 src = m.get("src")
-                if src and src not in subs:
+                # An agent id is a string; any other `src` names nothing to watch
+                # (a list used to raise out of `in subs` and end the relay).
+                if isinstance(src, str) and src and src not in subs:
                     proxy = f"_xbw_{job_id}_{src}"
                     # REGISTER THE READER FIRST. `watch` refuses a watcher
                     # with no inbox, and the drain task below is what reads
@@ -348,9 +406,10 @@ async def _serve_ctrl(parent_sock, owner_id, job_id, kernel):
                     ]["_task"]
                     subs[src] = (proxy, t)
             elif op == "unwatch":
-                ent = subs.pop(m.get("src"), None)
+                src = m.get("src")
+                ent = subs.pop(src, None) if isinstance(src, str) else None
                 if ent:
-                    release(m.get("src"), *ent)
+                    release(src, *ent)
             elif op == "onmessage":
                 if self_sub[0] is None:
                     # Exactly ONE job per owner receives the owner inbox. If another job
@@ -370,7 +429,9 @@ async def _serve_ctrl(parent_sock, owner_id, job_id, kernel):
                         continue
                     t = kernel.ctx.tasks[
                         kernel.ctx.spawn_task(
-                            owner_id, "inbox_drain", drain(proxy, _inbox_framer)
+                            owner_id,
+                            "inbox_drain",
+                            drain(proxy, _inbox_framer(owner_id, job_id, kernel)),
                         )
                     ]["_task"]
                     self_sub[0] = (proxy, t)
@@ -558,14 +619,17 @@ def _job_arg(verb: str, payload: dict, *, required: bool):
     return jid, None
 
 
-def _pty_job(verb: str, id: str, payload: dict):
-    """`(job, None)` for a live PTY job this agent owns, or `(None, refusal)`."""
+def _pty_job(verb: str, id: str, payload: dict, *, drive: bool):
+    """`(job, None)` for a live PTY job this agent owns — and, for a verb that
+    DRIVES it, one this caller started (or the operator) — or `(None, refusal)`."""
     jid, err = _job_arg(verb, payload, required=True)
     if err:
         return None, err
     job = _jobs.get(jid)
     if job is None or job.get("owner") != id:
         return None, refusal(NOT_FOUND, f"exec_bridge: no job {jid!r}", job_id=jid)
+    if drive and not _yours(job):
+        return None, _not_yours(verb, jid)
     if job.get("pty") is None:
         return None, bad(verb, "job_id", "a PTY job (started with `pty`)")
     if not _alive(job) or job["pty"]["eof"]:
@@ -834,6 +898,8 @@ async def _start(id, payload, kernel):
 
     job = {
         "owner": id,
+        # WHO started it — its job verbs answer this caller (and the operator) only.
+        "starter": _caller(),
         "proc": process,
         # The exact invocation, so `status` can report WHAT ran — a caller that
         # wants to re-run a job re-issues these verbatim rather than reconstructing
@@ -950,27 +1016,32 @@ async def _status(id, payload, kernel):
     }
 
 
-def _no_job(id: str, jid) -> dict | None:
-    """The `not_found` refusal for a named job this agent does not own, or None.
+def _no_job(verb: str, id: str, jid) -> dict | None:
+    """The `not_found` refusal for a named job this agent does not own — or the
+    `unauthorized` one for a job another caller started — or None.
 
     A job_id naming nothing used to answer `{killed:0}` / `{interrupted:0}` — the
     same reply as "it had already exited", so a typo read as success."""
-    if jid is not None and (jid not in _jobs or _jobs[jid].get("owner") != id):
+    if jid is None:
+        return None
+    if jid not in _jobs or _jobs[jid].get("owner") != id:
         return refusal(NOT_FOUND, f"exec_bridge: no job {jid!r}", job_id=jid)
+    if not _yours(_jobs[jid]):
+        return _not_yours(verb, jid)
     return None
 
 
 async def _stop(id, payload, kernel):
-    """args: job_id:int? — SIGKILL one job (its whole session: the command and everything it launched) or ALL of this agent's running jobs.
+    """args: job_id:int? — SIGKILL one of YOUR jobs (its whole session: the command and everything it launched) or ALL your running jobs on this agent (the operator: all).
     Returns {killed:int}."""
     jid, err = _job_arg("stop", payload, required=False)
     if err:
         return err
-    if gone := _no_job(id, jid):
+    if gone := _no_job("stop", id, jid):
         return gone
     n = 0
     for k, v in _jobs.items():
-        if v.get("owner") != id or (jid is not None and k != jid):
+        if v.get("owner") != id or not _yours(v) or (jid is not None and k != jid):
             continue
         if _alive(v):
             v["status"] = "stopping"
@@ -980,16 +1051,16 @@ async def _stop(id, payload, kernel):
 
 
 async def _interrupt(id, payload, kernel):
-    """args: job_id:int? — SIGINT one job or ALL of this agent's running jobs.
+    """args: job_id:int? — SIGINT one of YOUR jobs or ALL your running jobs on this agent (the operator: all).
     Returns {interrupted:int}."""
     jid, err = _job_arg("interrupt", payload, required=False)
     if err:
         return err
-    if gone := _no_job(id, jid):
+    if gone := _no_job("interrupt", id, jid):
         return gone
     n = 0
     for k, v in _jobs.items():
-        if v.get("owner") != id or (jid is not None and k != jid):
+        if v.get("owner") != id or not _yours(v) or (jid is not None and k != jid):
             continue
         if _alive(v):
             try:
@@ -1001,20 +1072,33 @@ async def _interrupt(id, payload, kernel):
 
 
 async def _clear(id, payload, kernel):
-    """args: job_id:int? — drop finished jobs (one, or all non-running) from the RAM
-    table. Returns {cleared:int}."""
+    """args: job_id:int? — drop YOUR finished jobs (one, or all non-running; the operator: all) from the RAM
+    table. A named job still running or stopping is refused — `stop` it first.
+    Returns {cleared:int}."""
     jid, err = _job_arg("clear", payload, required=False)
     if err:
         return err
+    if jid is not None and jid in _jobs and _jobs[jid].get("owner") == id:
+        if not _yours(_jobs[jid]):
+            return _not_yours("clear", jid)
+        # A NAMED job follows the bulk form's rule (audit BV-5): a row still
+        # running or stopping is the only handle stop, cancel, delete and
+        # shutdown kill its process through — forgotten, it outlived them all.
+        if (status := _jobs[jid]["status"]) in ("running", "stopping"):
+            return bad(
+                "clear",
+                "job_id",
+                f"a finished job (job {jid} is {status} — `stop` it, then clear)",
+            )
     # The one caller that WANTS the status label, not process liveness: it is deciding
     # what is finished enough to forget.
     targets = [
         k
         for k, v in _jobs.items()
         if v.get("owner") == id
-        and (
-            k == jid if jid is not None else v["status"] not in ("running", "stopping")
-        )
+        and _yours(v)
+        and (jid is None or k == jid)
+        and v["status"] not in ("running", "stopping")
     ]
     for k in targets:
         _jobs.pop(k, None)
@@ -1023,7 +1107,7 @@ async def _clear(id, payload, kernel):
 
 async def _write(id, payload, kernel):
     """args: job_id:int (req), data:str (req). Keystrokes/paste into a PTY job, written IN FULL and serialized per job (a bracketed paste is never truncated or interleaved). Returns {written:int}."""
-    job, err = _pty_job("write", id, payload)
+    job, err = _pty_job("write", id, payload, drive=True)
     if err:
         return err
     data = payload.get("data")
@@ -1040,7 +1124,7 @@ async def _write(id, payload, kernel):
 
 async def _resize(id, payload, kernel):
     """args: job_id:int (req), cols:int (req), rows:int (req). Sets a PTY job's window size (the tty sends SIGWINCH, so a TUI redraws). Returns {resized:true, cols, rows}."""
-    job, err = _pty_job("resize", id, payload)
+    job, err = _pty_job("resize", id, payload, drive=True)
     if err:
         return err
     dims, err = _dims("resize", payload)
@@ -1057,7 +1141,7 @@ async def _resize(id, payload, kernel):
 
 async def _ack(id, payload, kernel):
     """args: job_id:int (req), chars:int (req). Flow control from a streaming consumer (an xterm acks each `output` chunk after parsing it): the reader pauses past 100K unacked chars and resumes under 5K. Returns {unacked:int, paused:bool}."""
-    job, err = _pty_job("ack", id, payload)
+    job, err = _pty_job("ack", id, payload, drive=False)
     if err:
         return err
     chars = payload.get("chars")
@@ -1101,7 +1185,7 @@ async def _output(id, payload, kernel):
 
 async def _paste_image(id, payload, kernel):
     """args: job_id:int (req), data:bytes (req), mime:str (req — image/png|jpeg|gif|webp). Saves a pasted image to a per-job scratch file and types its path into the PTY (a drag-drop — a program like claude in a browser xterm cannot reach the browser clipboard). Returns {path:str, bytes:int}."""
-    job, err = _pty_job("paste_image", id, payload)
+    job, err = _pty_job("paste_image", id, payload, drive=True)
     if err:
         return err
     data = payload.get("data")
@@ -1176,7 +1260,8 @@ async def _reflect(id, payload, kernel):
             "is not one-way. It is not inline, though: read frames in a loop and skip "
             "any whose rid isn't yours (event/inbox frames can arrive first) until "
             "you see your reply. `secret` is the call's marks ['payload.<field>' | "
-            "'result' | 'result.<field>']: every record of the call shows <secret>, "
+            "'result' | 'result.<field>' | ['payload', <key>, …] — an array of steps, "
+            "a key taken literally]: every record of the call shows <secret>, "
             "the reply carries the real values to you — print one and it is in the "
             "job output. ops: send/emit/reflect/watch/on_message. A command "
             "that never reads the fd runs exactly like any OS process."
@@ -1221,7 +1306,8 @@ async def _connector(id, payload, kernel):
             "and gets its chunk back raw in the reply's `bytes`) and "
             "exposes `kernel.send(target, payload, secret=None) -> reply` (raises if "
             "the relay could not deliver; `secret` marks values the kernel must not "
-            "record — `['payload.<field>']`, `['result']` — and the reply still "
+            "record — `['payload.<field>']`, `['result']`, `[['payload', 'a.b']]` "
+            "for a key holding a dot — and the reply still "
             "carries them to you, so never print one: that is the job output), "
             "`kernel.emit(payload)`, `kernel.watch(src, cb)`, `kernel.on_message(cb)`, "
             "`kernel.self_id`. Arguments arrive as ARGV, like any command — there is "
@@ -1260,13 +1346,8 @@ def validate_meta(meta: dict, record: dict) -> str | None:
     """
     merged = {**record, **meta}
     del merged  # kept for symmetry with other bundles; nothing merged-scoped left
-    if "ingress_rule" in meta:
-        spec = meta["ingress_rule"]
-        if getattr(resolve_ingress({"ingress_rule": spec}), "unknown", None):
-            return (
-                f"ingress_rule={spec!r} is not a rule this bundle implements — "
-                "legal values: allow_all_ingress, deny_ingress"
-            )
+    if bad := unknown_ingress_refusal(meta, ("allow_all_ingress", "deny_ingress")):
+        return bad
     # `password_ingress` is meaningless on an in-process leg: the token is read
     # off a WIRE ENVELOPE and the process edge has none — no frame ever presents
     # one, so the rule could only refuse, or (the ports, until 2026-09-02) be
@@ -1325,8 +1406,35 @@ def validate_meta(meta: dict, record: dict) -> str | None:
     return None
 
 
+def _gate(id: str, payload, kernel) -> dict | None:
+    """THE LEG'S GATE on one payload — the process edge, gated like any io_bridge
+    leg (sealed by default), off the LIVE record: None when its `ingress_rule`
+    admits it, else the refusal. `kind="spawn"` because that is what is being
+    authorized; no rule inspects `Action.kind`, so a new kind costs nothing and
+    the audit trail stays honest. The handler asks it for every verb but the
+    UNGATED ones, mail included; the inbox relay asks it for every payload."""
+    decision = gate_inbound(
+        resolve_ingress(kernel.get(id) or {}),
+        "spawn",
+        {"target": id, "payload": payload},
+    )
+    if decision.allowed:
+        return None
+    out = {"error": decision.reason, "reason": "unauthorized"}
+    if decision.hint:
+        out["hint"] = decision.hint
+    if decision.see:
+        out["see"] = decision.see
+    return out
+
+
 async def handler(id: str, payload: dict, kernel) -> dict | None:
     t = payload.get("type")
+    # AUTH GATE — every verb but `reflect`/`connector`, MAIL INCLUDED: a sealed leg
+    # delivers nothing to its program (audit BV-8; the relay's framer refuses the
+    # same payloads, since the fanout reaches it before this handler runs).
+    if t not in UNGATED and (out := _gate(id, payload, kernel)):
+        return out
     fn = VERBS.get(t)
     if fn is None:
         # Addressable inbox: any verb this bundle doesn't own is delivered to the running
@@ -1338,22 +1446,6 @@ async def handler(id: str, payload: dict, kernel) -> dict | None:
         return {
             "error": f"exec_bridge: unknown type {t!r} (no running job to receive it)"
         }
-    if t not in UNGATED:
-        # AUTH GATE — the process edge, gated like any io_bridge leg (sealed by default).
-        # `kind="spawn"` because that is what is being authorized; no rule inspects
-        # `Action.kind`, so a new kind costs nothing and the audit trail stays honest.
-        decision = gate_inbound(
-            resolve_ingress(kernel.get(id) or {}),
-            "spawn",
-            {"target": id, "payload": payload},
-        )
-        if not decision.allowed:
-            out = {"error": decision.reason, "reason": "unauthorized"}
-            if decision.hint:
-                out["hint"] = decision.hint
-            if decision.see:
-                out["see"] = decision.see
-            return out
     return await fn(id, payload, kernel)
 
 

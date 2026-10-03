@@ -4,15 +4,11 @@
 //! WRONG tokenizer for gemma/nemotron). Plus window/budget resolution off
 //! the agent record meta. Mirrors the Python `ai_core/context.py`.
 
+use crate::constants::{
+    BUDGET_FLOOR, CHARS_PER_TOKEN, DEFAULT_OUTPUT_RESERVE, RECENT_N, RECENT_N_RANGE,
+};
 use fantastic_bundle::{py_int, py_json_dumps, py_strip};
 use serde_json::{json, Map, Value};
-
-// The tunables live in [`crate::constants`]; re-exported here so every
-// `crate::context::…` path keeps working.
-pub use crate::constants::{
-    BUDGET_FLOOR, CHARS_PER_TOKEN, DEFAULT_CONTEXT_WINDOW, DEFAULT_OUTPUT_RESERVE,
-    NOTICE_ENVELOPE_RESERVE, RECENT_N, RECENT_N_RANGE,
-};
 
 /// Rough token estimate for ONE message — counts the SERIALIZED form, because
 /// role + content + the JSON envelope all consume real context.
@@ -64,7 +60,8 @@ fn as_pos_int(v: Option<&Value>) -> Option<i64> {
 /// `context_window` (the explicit per-agent override — works on any
 /// backend incl. vllm/responses which have no `num_ctx`) → `num_ctx`
 /// (ollama's real knob) → `model_window`, THE BACKEND'S OWN window
-/// ([`crate::agent_loop::BackendConfig::model_window`]): [`DEFAULT_CONTEXT_WINDOW`]
+/// ([`crate::agent_loop::BackendConfig::model_window`]):
+/// [`crate::constants::DEFAULT_CONTEXT_WINDOW`]
 /// for a server whose window the kernel cannot know, the model's real window
 /// where the backend can read it (foundation_models_backend: the SDK's
 /// `contextSize`). Named at every call — a backend's window is never assumed.

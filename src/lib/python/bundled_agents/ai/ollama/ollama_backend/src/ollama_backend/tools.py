@@ -7,36 +7,18 @@ lock, prompt assembly, the ONE-PASS `_run`, context management, the verb
 bodies) lives in `ai_core.core`. There is NO agentic loop — tool dispatch
 is the caller's job (an authored agent); this backend does one provider pass per send.
 
-The state dicts (`_providers`, `_queue`, `_current`, `_locks`) and the
-patchable `SEND_TIMEOUT` / `MAX_CALL_DEPTH` constants are RE-EXPORTED from
-`ai_core.core` here so the existing tests' monkeypatch seams
-(`ollama_backend.tools._providers[id] = fake`,
-`monkeypatch.setattr(..., "SEND_TIMEOUT", 0.05)`, calls to `_assemble`)
-keep working unchanged on the shared core path. The re-exported dicts are
-the SAME objects `ai_core.core` mutates.
-
-`on_cancel` is re-exported the same way — that module-level name IS the
-bundle's cancel hook (the substrate discovers it here, exactly like
-`on_delete`), so this backend inherits ai_core's shared implementation
-without restating it. There is no `interrupt` verb: an in-flight `send` is
-a kernel TASK, killed with the universal `ps` → `cancel` system verbs.
+`on_cancel` and `on_delete` are re-exported from `ai_core` — those
+module-level names ARE the bundle's cancel and delete hooks (the substrate
+discovers them here), so this backend inherits ai_core's shared
+implementation without restating it. There is no `interrupt` verb: an
+in-flight `send` is a kernel TASK, killed with the universal `ps` → `cancel`
+system verbs.
 """
 
 from __future__ import annotations
 
-from ai_core import build, required_meta
+from ai_core import build, on_cancel, on_delete, required_meta  # noqa: F401 — the hooks
 from ai_core.schema import field, schema, validate
-from ai_core.core import (  # noqa: F401 — re-exported test seams + the cancel hook
-    DEFAULT_CLIENT_ID,
-    MAX_CALL_DEPTH,
-    SEND_TIMEOUT,
-    _assemble,
-    _current,
-    _locks,
-    _providers,
-    _queue,
-    on_cancel,
-)
 
 from ollama_backend.provider import DEFAULT_TEMPERATURE
 
@@ -109,7 +91,6 @@ def _build():
         sentence="Ollama-backed LLM agent (raw prompt-and-parse tool-calling).",
         make_provider=make_provider,
         name=NAME,
-        module_name=__name__,
         reflect_extra=_reflect_extra,
     )
 

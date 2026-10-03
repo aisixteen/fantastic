@@ -236,13 +236,72 @@ struct RelayDirectoryPinTests {
         let first = try await t.recv()
         #expect(
             first.frame.serialize()
-                == #"{"type":"event","payload":{"type":"peer_joined","guid":"C"}}"#)
+                == #"{"type":"event","src":"relay","payload":{"type":"peer_joined","guid":"C"}}"#)
         #expect(first.isBinary == false && first.body.isEmpty)
         let second = try await t.recv()
         #expect(second.frame.serialize() == #"{"type":"reply","id":"x-1","data":{}}"#)
         await t.close()
         await #expect(throws: (any Error).self) { _ = try await t.recv() }
     }
+
+    /// THROUGH THE ENGINE (audit W-10, 2026-10-03): the directory event reached
+    /// the read loop with no `src`, and the engine re-emits only a subscribed
+    /// `src` — so `watch_directory` delivered nothing. Now the leg subscribes to
+    /// the directory (`src:"relay"`): nothing flows before `watch_directory` or
+    /// after `unwatch_directory`, and in between every `peer_*` event lands on
+    /// the connector's inbox. Python
+    /// `test_watch_directory_re_emits_directory_events_on_the_connector_inbox`.
+    @Test(.timeLimit(.minutes(1)))
+    func watchDirectoryReEmitsDirectoryEventsOnTheConnectorInbox() async throws {
+        let (kernel, bundle) = await legKernel()
+        let wire = DirectoryWire(answer: ["ok": true])
+        await boot(kernel, bundle, wire)
+        let watcher = AgentId("dir_watcher")
+        let inbox = kernel.ensureInbox(watcher)
+        kernel.watch(src: "brA", watcher: watcher)
+        let seen = SeenEvents()
+        let reader = Task {
+            for await ev in inbox where (ev.payload["type"].asString ?? "").hasPrefix("peer_") {
+                seen.add(ev.payload.serialize())
+            }
+        }
+        func directory(_ payload: JSON) async {
+            await wire.deliver(
+                .text(
+                    JSON.object([
+                        "type": .string("event"), "source": .string("relay"), "payload": payload,
+                    ]).serialize()))
+            try? await Task.sleep(nanoseconds: 150_000_000)
+        }
+
+        await directory(["type": "peer_left", "guid": "X"])
+        #expect(seen.all == [], "an event before the subscription leaked")
+
+        #expect(await verb(kernel, ["type": "watch_directory"]) == #"{"ok":true}"#)
+        await directory(["type": "peer_joined", "guid": "C"])
+        await directory(["type": "peer_status", "guid": "C", "status": "red"])
+        #expect(
+            seen.all == [
+                #"{"type":"peer_joined","guid":"C","src":"relay"}"#,
+                #"{"type":"peer_status","guid":"C","status":"red","src":"relay"}"#,
+            ])
+
+        #expect(
+            await verb(kernel, ["type": "unwatch_directory"])
+                == #"{"ok":true,"unwatched":"relay"}"#)
+        await directory(["type": "peer_evicted", "guid": "C"])
+        #expect(seen.all.count == 2, "an event after the unsubscribe leaked: \(seen.all)")
+        reader.cancel()
+        await teardown(kernel)
+    }
+}
+
+/// The directory events a watcher of the leg saw, in order.
+private final class SeenEvents: @unchecked Sendable {
+    private let lock = NSLock()
+    private var items: [String] = []
+    func add(_ s: String) { lock.withLock { items.append(s) } }
+    var all: [String] { lock.withLock { items } }
 }
 
 /// A kernel whose root carries guid `g1` and ONE relay leg `brA` with the given
@@ -270,7 +329,7 @@ private func binaryForward(_ kernel: Kernel, _ header: JSON) async -> (String, I
     // the binary channel with no request body: the forward's own refusals, before
     // any frame is built
     let out = await kernel.send([Item("brA", header, rawReply: true)])[0]
-    return (out.result.serialize(), out.body?.count ?? 0)
+    return (out.result.serialize(), out.body?.bytes.count ?? 0)
 }
 
 @Suite("bridge engine — binary forward and inbound refusals")

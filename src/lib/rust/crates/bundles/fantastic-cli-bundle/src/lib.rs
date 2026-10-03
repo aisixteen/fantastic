@@ -153,6 +153,22 @@ fn write_type_error(v: &Value) -> BundleError {
     )
 }
 
+/// `text` without its C0/C1 control characters (and DEL), newline and tab kept —
+/// python's `_CONTROL`: what a terminal INTERPRETS instead of printing (an OSC
+/// title or clipboard write, a cursor move, a line erase). Agent and model text
+/// reaches this sink from callers it does not know (audit BV-11).
+fn terminal_safe(text: &str) -> String {
+    text.chars()
+        .filter(|&c| c == '\n' || c == '\t' || !c.is_control())
+        .collect()
+}
+
+/// THE one write to the terminal — python `_write`: every line this sink prints
+/// goes through [`terminal_safe`].
+fn write(text: &str) {
+    print!("{}", terminal_safe(text));
+}
+
 /// python `_status` — one line, or `None` for the silent phases.
 fn render_status(payload: &Value) -> Result<Option<String>, BundleError> {
     let phase = payload.get("phase").and_then(Value::as_str).unwrap_or("");
@@ -295,32 +311,35 @@ impl Bundle for CliBundle {
                     Some(Value::String(s)) => s.as_str(),
                     Some(other) => return Err(write_type_error(other)),
                 };
-                print!("{text}");
+                write(text);
                 let _ = std::io::stdout().flush();
             }
-            "done" => println!(),
-            "say" => println!(
-                "{}{}",
+            "done" => write("\n"),
+            "say" => write(&format!(
+                "{}{}\n",
                 say_prefix(&get_or_blank(payload, "source")),
                 py_str(&get_or_blank(payload, "text"))
-            ),
-            "error" => println!("  ERROR: {}", py_str(&get_or_blank(payload, "text"))),
+            )),
+            "error" => write(&format!(
+                "  ERROR: {}\n",
+                py_str(&get_or_blank(payload, "text"))
+            )),
             "status" => {
                 if let Some(line) = render_status(payload)? {
-                    println!("{line}");
+                    write(&format!("{line}\n"));
                 }
             }
             "context" => {
                 if let Some(line) = render_context(payload)? {
-                    println!("{line}");
+                    write(&format!("{line}\n"));
                 }
             }
             "intro_booting" => {
                 for line in intro_booting_lines(kernel) {
-                    println!("{line}");
+                    write(&format!("{line}\n"));
                 }
             }
-            "booted" => println!("{BOOTED_LINE}"),
+            "booted" => write(&format!("{BOOTED_LINE}\n")),
             // A sink drops what it does not render — see the module note.
             // `boot` and `shutdown` land here too, exactly as on python.
             _ => {}

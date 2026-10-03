@@ -116,7 +116,7 @@ struct PeerCallsTests {
         let k = try await webKernel()
         let ws = socket(k)
         try await push(ws, hello(PAGE))
-        try await until("peer registered") { k.peer(PAGE) != nil }
+        try await until("peer registered") { !k.peerRoutes(PAGE).isEmpty }
         #expect(
             k.peerRows() == .array([.object(["guid": .string(PAGE), "via": .string("leg")])]))
         let payload: JSON = .object(["type": .string("around"), "radius": .integer(2)])
@@ -143,7 +143,7 @@ struct PeerCallsTests {
         let k = try await webKernel()
         let ws = socket(k)
         try await push(ws, hello(PAGE))
-        try await until("peer registered") { k.peer(PAGE) != nil }
+        try await until("peer registered") { !k.peerRoutes(PAGE).isEmpty }
         let send = sendToPage(k, around())
         let (call, _) = try await next(ws, "call")
         let refusal: JSON = .object([
@@ -162,7 +162,7 @@ struct PeerCallsTests {
         let k = try await webKernel()
         let ws = socket(k)
         try await push(ws, hello(PAGE))
-        try await until("peer registered") { k.peer(PAGE) != nil }
+        try await until("peer registered") { !k.peerRoutes(PAGE).isEmpty }
         let send = sendToPage(k, around())
         _ = try await next(ws, "call")
         ws.cancel(with: .normalClosure, reason: nil)
@@ -171,36 +171,115 @@ struct PeerCallsTests {
         #expect(
             out.result["error"].asString?.contains("disconnected before answering") == true,
             "\(out.result.serialize())")
-        try await until("peer dropped") { k.peer(PAGE) == nil }
+        try await until("peer dropped") { k.peerRoutes(PAGE).isEmpty }
         let gone = await sendToPage(k, around()).value
         #expect(gone.result["reason"].asString == "unknown_agent", "\(gone.result.serialize())")
         await stop(k)
     }
 
     @Test(.timeLimit(.minutes(1)))
-    func oneGuidPerConnectionAndPerKernel() async throws {
+    func oneGuidPerConnection() async throws {
         let k = try await webKernel()
         let ws = socket(k)
-        let ws2 = socket(k)
         try await push(ws, hello(PAGE))
-        try await until("peer registered") { k.peer(PAGE) != nil }
+        try await until("peer registered") { !k.peerRoutes(PAGE).isEmpty }
         // the same connection cannot become someone else
         try await push(ws, hello("other"))
         let (err, _) = try await next(ws, "error")
         #expect(err["arg"].asString == "guid", "\(err.serialize())")
         #expect(err["error"].asString?.contains(PAGE) == true, "\(err.serialize())")
-        // another connection cannot take a guid that is live
-        try await push(ws2, hello(PAGE))
-        let (err2, _) = try await next(ws2, "error")
-        #expect(
-            err2["error"].asString?.contains("already connected via leg") == true,
-            "\(err2.serialize())")
         // and a malformed guid is refused
-        try await push(ws2, hello("a|b"))
-        let (err3, _) = try await next(ws2, "error")
+        try await push(ws, hello("a|b"))
+        let (err3, _) = try await next(ws, "error")
         #expect(err3["arg"].asString == "guid", "\(err3.serialize())")
         ws.cancel(with: .normalClosure, reason: nil)
+        await stop(k)
+    }
+
+    /// Owner, 2026-10-03: every tab says hello with the identity's guid; the host
+    /// calls ALL of them, the first reply settles, the other is dropped; a closed
+    /// tab leaves the guid routable through the other.
+    @Test(.timeLimit(.minutes(1)))
+    func twoTabsOfOneIdentityAreOnePrincipal() async throws {
+        let k = try await webKernel()
+        let ws = socket(k)
+        let ws2 = socket(k)
+        try await push(ws, hello(PAGE))
+        try await push(ws2, hello(PAGE))
+        try await until("both tabs registered") { k.peerRoutes(PAGE).count == 2 }
+        let row: JSON = .object(["guid": .string(PAGE), "via": .string("leg")])
+        #expect(k.peerRows() == .array([row, row]))
+        let send = sendToPage(k, around())
+        let (c1, _) = try await next(ws, "call")
+        let (c2, _) = try await next(ws2, "call")
+        for c in [c1, c2] {
+            #expect(c["target"].asString == "canvas", "\(c.serialize())")
+            #expect(c["caller"].asString == "\(HOST)|kernel", "\(c.serialize())")
+        }
+        try await push(
+            ws2,
+            .object([
+                "type": .string("reply"), "id": c2["id"], "data": .object(["tab": .integer(2)]),
+            ]))
+        let out = await send.value
+        #expect(out.result == .object(["tab": .integer(2)]), "\(out.result.serialize())")
+        // dropped: nothing waits on it any more
+        try await push(
+            ws,
+            .object([
+                "type": .string("reply"), "id": c1["id"], "data": .object(["tab": .integer(1)]),
+            ]))
+        // one tab closes: the identity stays an address through the other
+        ws.cancel(with: .normalClosure, reason: nil)
+        try await until("one tab left") { k.peerRoutes(PAGE).count == 1 }
+        let again = sendToPage(k, around())
+        let (c3, _) = try await next(ws2, "call")
+        try await push(
+            ws2,
+            .object([
+                "type": .string("reply"), "id": c3["id"],
+                "data": .object(["tab": .integer(2), "n": .integer(2)]),
+            ]))
+        let out2 = await again.value
+        #expect(
+            out2.result == .object(["tab": .integer(2), "n": .integer(2)]),
+            "\(out2.result.serialize())")
         ws2.cancel(with: .normalClosure, reason: nil)
+        try await until("no tab left") { k.peerRoutes(PAGE).isEmpty }
+        await stop(k)
+    }
+
+    /// MULTI-TAB IDENTITY over the wire: a host emit to `<guid>|<agent>` is an
+    /// `emit` frame on EVERY tab of that guid, and the reply one tab's call got is
+    /// a `reply_mirror` on the other.
+    @Test(.timeLimit(.minutes(1)))
+    func everyTabGetsTheEmitAndASiblingsReplyMirrored() async throws {
+        let k = try await webKernel()
+        let ws = socket(k)
+        let ws2 = socket(k)
+        try await push(ws, hello(PAGE))
+        try await push(ws2, hello(PAGE))
+        try await until("both tabs registered") { k.peerRoutes(PAGE).count == 2 }
+        await k.emit(AgentId("\(PAGE)|canvas"), .object(["type": .string("tick")]))
+        let want: JSON = .object([
+            "type": .string("emit"), "target": .string("canvas"),
+            "payload": .object(["type": .string("tick")]),
+        ])
+        #expect(try await next(ws, "emit").0 == want)
+        #expect(try await next(ws2, "emit").0 == want)
+        try await push(
+            ws,
+            .object([
+                "type": .string("call"), "target": .string("web"), "id": .string("m1"),
+                "payload": .object(["type": .string("reflect")]),
+            ]))
+        let (reply, _) = try await next(ws, "reply")
+        let (mirror, _) = try await next(ws2, "reply_mirror")
+        #expect(mirror["id"] == .string("m1"), "\(mirror.serialize())")
+        #expect(mirror["data"] == reply["data"], "\(mirror.serialize())")
+        ws.cancel(with: .normalClosure, reason: nil)
+        ws2.cancel(with: .normalClosure, reason: nil)
+        try await until("no tab left") { k.peerRoutes(PAGE).isEmpty }
         await stop(k)
     }
 
@@ -210,7 +289,7 @@ struct PeerCallsTests {
         let ws = socket(k)
         try await push(ws, hello(PAGE))
         try await Task.sleep(nanoseconds: 200_000_000)
-        #expect(k.peer(PAGE) == nil)
+        #expect(k.peerRoutes(PAGE).isEmpty)
         ws.cancel(with: .normalClosure, reason: nil)
         await stop(k)
     }
@@ -220,10 +299,10 @@ struct PeerCallsTests {
         let k = try await webKernel()
         let ws = socket(k)
         try await push(ws, hello(PAGE))
-        try await until("peer registered") { k.peer(PAGE) != nil }
-        let route = try #require(k.peer(PAGE))  // resolved BEFORE the close, used after it
+        try await until("peer registered") { !k.peerRoutes(PAGE).isEmpty }
+        let route = try #require(k.peerRoutes(PAGE).first)  // resolved BEFORE the close, used after it
         ws.cancel(with: .normalClosure, reason: nil)
-        try await until("peer dropped") { k.peer(PAGE) == nil }
+        try await until("peer dropped") { k.peerRoutes(PAGE).isEmpty }
         let (out, _) = await route.call(
             "canvas", around(), caller: "\(HOST)|kernel", secret: [], body: nil)
         #expect(out["reason"].asString == "transport_error", "\(out.serialize())")
@@ -237,7 +316,7 @@ struct PeerCallsTests {
         let k = try await webKernel()
         let ws = socket(k)
         try await push(ws, hello(PAGE))
-        try await until("peer registered") { k.peer(PAGE) != nil }
+        try await until("peer registered") { !k.peerRoutes(PAGE).isEmpty }
         let send = sendToPage(
             k, .object(["type": .string("write_stream")]),
             binary: Blob("bytes", Data([0, 1, 2, 255])))
@@ -251,18 +330,18 @@ struct PeerCallsTests {
         try await ws.send(.data(Codec.encodeBinaryFrame(header: head, body: Data([9, 8]))))
         let out = await send.value
         #expect(out.status == .completed, "\(out.result.serialize())")
-        #expect(out.body == Data([9, 8]))
+        #expect(out.body == Blob("bytes", Data([9, 8])))
         ws.cancel(with: .normalClosure, reason: nil)
         await stop(k)
     }
 
     /// web_rest's `X-Fantastic-Bytes-Field: a.b` binds the LITERAL key `"a.b"`,
     /// and it stays literal on its way to a peer: the call frame names it
-    /// `["payload", "a.b"]`, beside a nested `a` → `b` left as sent, and the
-    /// page's chunk comes back as the octet body. Python
-    /// `test_web_rest_literal_binding_stays_literal_across_a_bridge` (d). Swift's
-    /// reply carrier holds a chunk at the reply's `bytes` only, so the page answers
-    /// at `["data", "bytes"]` (python's echo answers at `["data", "x.y"]`).
+    /// `["payload", "a.b"]`, beside a nested `a` → `b` left as sent. The page
+    /// answers with its chunk at the LITERAL reply key `x.y` (`["data", "x.y"]`),
+    /// and it comes back as the octet body with `X-Fantastic-Bytes-Field: x.y` and
+    /// the reply WITHOUT that key on `X-Fantastic-Payload`. Python
+    /// `test_web_rest_literal_binding_stays_literal_across_a_bridge` (d).
     @Test(.timeLimit(.minutes(1)))
     func aRestLiteralBindingStaysLiteralToAPeer() async throws {
         let k = try await webKernel()
@@ -282,7 +361,7 @@ struct PeerCallsTests {
         ])[0].result
         let ws = socket(k)
         try await push(ws, hello(PAGE))
-        try await until("peer registered") { k.peer(PAGE) != nil }
+        try await until("peer registered") { !k.peerRoutes(PAGE).isEmpty }
         let raw = Data([0x00]) + Data("raw".utf8) + Data([0xFF])
         var req = URLRequest(
             url: URL(string: "http://127.0.0.1:\(k.httpPort())/rest/\(PAGE)%7Ccanvas")!)
@@ -317,15 +396,15 @@ struct PeerCallsTests {
             "type": .string("reply"), "id": call["id"],
             "data": .object([
                 "keys": .array(["a", "a.b", "type"].map { .string($0) }),
-                "x": .object(["y": .string("kept")]),
+                "x.y": .null, "x": .object(["y": .string("kept")]),
             ]),
-            "_binary_path": ["data", "bytes"],
+            "_binary_path": ["data", "x.y"],
         ])
         try await ws.send(.data(Codec.encodeBinaryFrame(header: head, body: Data("back".utf8))))
         let (status, chunk, field, rest) = try await post.value
         #expect(status == 200, "\(String(decoding: chunk, as: UTF8.self))")
         #expect(chunk == Data("back".utf8))
-        #expect(field == "bytes")
+        #expect(field == "x.y", "the reply's first top-level bytes field")
         #expect(
             try JSON.parse(rest ?? "")
                 == .object([

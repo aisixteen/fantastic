@@ -56,11 +56,18 @@ impl Bundle for BinEcho {
     }
     async fn handle_binary(
         &self,
-        _id: &AgentId,
+        id: &AgentId,
         header: Value,
         body: Option<Blob>,
-        _kernel: &Arc<Kernel>,
+        kernel: &Arc<Kernel>,
     ) -> Result<(Reply, Option<Blob>), BundleError> {
+        // the kernel dispatches EVERY call here — lifecycle verbs are not a take
+        if matches!(
+            header["type"].as_str(),
+            Some("boot" | "shutdown" | "reflect")
+        ) {
+            return Ok((self.handle(id, &header, kernel).await?, None));
+        }
         // python `sorted(payload)` — the header's keys and the body's own key
         let mut keys: Vec<String> = header
             .as_object()
@@ -99,12 +106,12 @@ fn assert_got_sent(got: &Got) {
 
 /// A unique tag per test — the web listeners and the bridge state are
 /// process-wide, keyed by agent id.
-fn tag() -> String {
+pub(super) fn tag() -> String {
     static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     format!("bp{}", N.fetch_add(1, std::sync::atomic::Ordering::SeqCst))
 }
 
-async fn op(k: &Arc<Kernel>, target: &str, payload: Value) -> Outcome {
+pub(super) async fn op(k: &Arc<Kernel>, target: &str, payload: Value) -> Outcome {
     k.send(vec![Item::new(AgentId::from(target), payload)])
         .await
         .remove(0)
@@ -121,7 +128,7 @@ fn patch_root(k: &Arc<Kernel>, key: &str, value: Value) {
 }
 
 /// `create_agent` under the root (or `parent_id` when the record names one).
-async fn create(k: &Arc<Kernel>, rec: Value) -> Value {
+pub(super) async fn create(k: &Arc<Kernel>, rec: Value) -> Value {
     let mut full = json!({"type": "create_agent", "parent_id": root_id(k)});
     for (key, v) in rec.as_object().cloned().unwrap_or_default() {
         full[key] = v;
@@ -132,6 +139,15 @@ async fn create(k: &Arc<Kernel>, rec: Value) -> Value {
 /// A booted, started root with `guid`, the memory store it keeps its rows in,
 /// every leg this file drives, and the probe.
 async fn kernel(guid: &str, got: &Got) -> Arc<Kernel> {
+    kernel_with(guid, "binpath_echo.tools", BinEcho(Arc::clone(got))).await
+}
+
+/// [`kernel`] with any probe bundle registered under `probe_module`.
+pub(super) async fn kernel_with<B: Bundle + 'static>(
+    guid: &str,
+    probe_module: &str,
+    probe: B,
+) -> Arc<Kernel> {
     let mut reg = BundleRegistry::new();
     register_root_loader(&mut reg);
     reg.register(
@@ -145,7 +161,7 @@ async fn kernel(guid: &str, got: &Got) -> Arc<Kernel> {
         fantastic_bridge::WS_HANDLER_MODULE,
         fantastic_bridge::WsBridgeBundle,
     );
-    reg.register("binpath_echo.tools", BinEcho(Arc::clone(got)));
+    reg.register(probe_module, probe);
     let k = bootstrap(reg, BootstrapOptions::in_memory())
         .expect("boot")
         .kernel;
@@ -164,7 +180,7 @@ async fn kernel(guid: &str, got: &Got) -> Arc<Kernel> {
 }
 
 /// A `web` on a free port with the given child legs, booted and accepting.
-async fn serve(k: &Arc<Kernel>, web_id: &str, legs: &[Value]) -> u16 {
+pub(super) async fn serve(k: &Arc<Kernel>, web_id: &str, legs: &[Value]) -> u16 {
     let port = free_port();
     let made = create(
         k,
@@ -184,7 +200,7 @@ async fn serve(k: &Arc<Kernel>, web_id: &str, legs: &[Value]) -> u16 {
     port
 }
 
-async fn until(what: &str, pred: impl Fn() -> bool) {
+pub(super) async fn until(what: &str, pred: impl Fn() -> bool) {
     let end = tokio::time::Instant::now() + Duration::from_secs(3);
     while !pred() {
         assert!(tokio::time::Instant::now() < end, "{what}: not reached");
@@ -387,7 +403,7 @@ async fn web_rest_literal_binding_stays_literal_across_a_bridge() {
     let booted = op(&kp, &p_leg, json!({"type": "boot"})).await.result;
     assert_eq!(booted["booted"], json!(true), "{booted}");
     let heads = ws_end(port, &h_web, half, Some("P-g")).await;
-    until("P is H's peer", || kh.peer("P-g").is_some()).await;
+    until("P is H's peer", || !kh.peer_routes("P-g").is_empty()).await;
 
     let r = reqwest::Client::new()
         .post(format!("http://127.0.0.1:{port}/{h_rest}/P-g|echo"))

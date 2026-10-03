@@ -7,6 +7,8 @@
 // the io_bridge readme) instead of dead-ending. Discovery-through-denial is the
 // design.
 
+import FantasticJSON
+
 extension IngressRules {
     /// Refuse every inbound `call` (the peer can't `call`/`reflect` us). Inbound
     /// `watch`/`unwatch` are already ignored by the dispatcher ⇒ denied-by-omission.
@@ -37,11 +39,14 @@ extension IngressRules {
             // hint says how to open it, and the unknown-rule variant appends the
             // legal names — so a caller that followed a wrong name is handed the
             // right ones instead of the same wall twice.
-            if let name = unknown {
+            // The name is python's `{unknown!r}` — a malformed spec's name is its
+            // repr, quotes and all — and an EMPTY name is python-falsy: a plain seal.
+            if let unknown, !unknown.isEmpty {
+                let name = pyRepr(unknown)
                 return .deny(
                     Denial(
-                        "edge sealed — unknown ingress rule '\(name)'",
-                        hint: Self.openIt + ". '\(name)' is not an INGRESS rule name — "
+                        "edge sealed — unknown ingress rule \(name)",
+                        hint: Self.openIt + ". \(name) is not an INGRESS rule name — "
                             + "the legal values are allow_all_ingress, deny_ingress, "
                             + "password_ingress (names are manifold-scoped: an egress "
                             + "name here is a typo, not a policy)"))

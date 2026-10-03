@@ -18,22 +18,28 @@ import type { Item, Outcome } from "../src/kernel/outcome.ts";
 import { startKernel } from "../src/kernel/lifecycle.ts";
 import { registerRamStore } from "../src/bundles/memory/ram_store.ts";
 import { PLACEHOLDER, check, replayRefused, shownOutcome, shownPayload } from "../src/kernel/secret.ts";
+import type { Mark } from "../src/kernel/secret.ts";
+import { pyRepr } from "../src/kernel/pyjson.ts";
 
 const ROOT = "kernel_state";
 const KEY = "sk-live-0123456789abcdef";
+const KEY2 = "sk-live-dotted-key-5a5a5a5a";
 const ISSUED = "tok-issued-fedcba9876543210";
 
 const got: Payload[] = [];
 
 function kernel(): Kernel {
   const k = new Kernel();
-  k.registerBundle("secret_probe.ts", async (_id, payload) => {
+  k.registerBundle("secret_probe.ts", async (_id, payload, view) => {
     const verb = payload["type"];
     if (verb === "boot" || verb === "shutdown") return null;
     got.push(payload);
     if (verb === "set_key") return { ok: true, len: String(payload["key"]).length };
     if (verb === "issue") return { key: ISSUED, note: "issued" };
     if (verb === "fail") throw new Error(`rejected key ${String(payload["key"])}`);
+    if (verb === "hold") return { ok: true };
+    if (verb === "marks") return { marks: [...view.currentSecret] as Json };
+    if (verb === "issue_dotted") return { "a.b": ISSUED, a: { b: "nested-plain" }, items: ["x", ISSUED] };
     return { error: `unknown verb ${String(verb)}` };
   });
   registerRamStore(k);
@@ -215,6 +221,21 @@ test("the store never holds the value and a replay is refused", async () => {
   assert.equal(got.length, 1, "the refused replay must not run the handler");
 });
 
+test("a short secret never mangles the kernel's own words", async () => {
+  // python `test_a_short_secret_never_mangles_the_kernels_own_words`: only the
+  // RESULT is scrubbed — a one-letter secret must not rewrite the recorded
+  // `status` ("completed" contains an "e").
+  const k = kernel();
+  const a = mk(k);
+  const out = await call(k, a, { type: "set_key", key: "e" }, { id: "short-1", secret: ["payload.key"] });
+  assert.equal(out.status, "completed");
+  const mine = (await ledger(k)).find((e) => e["name"] === "short-1")!;
+  assert.ok(
+    mine["status"] === "completed" && (mine["outcome"] as Payload)["status"] === "completed",
+    JSON.stringify(mine),
+  );
+});
+
 // ─── python's texts, byte for byte ───────────────────────────────────────────
 
 test("refusal texts and masks are python's, byte for byte", () => {
@@ -236,7 +257,7 @@ test("refusal texts and masks are python's, byte for byte", () => {
     [["payload.nope"], bad("send: secret path 'payload.nope' names nothing in the payload")],
     [["payload..key"], bad("send: secret path 'payload..key' has an empty step")],
     [[""], bad("send: secret path must be a non-empty string, got ''")],
-    [[3], bad("send: secret path must be a non-empty string, got 3")],
+    [[3], bad("send: secret path must be a dotted string or an array of steps, got 3")],
     [{ a: 1 }, bad("send: secret must be a non-empty list of paths, got {'a': 1}")],
   ];
   for (const [secret, want] of cases) {
@@ -270,4 +291,133 @@ test("refusal texts and masks are python's, byte for byte", () => {
   const tail = " carried secrets — its record holds <secret> placeholders, not values, so it cannot be answered from the record; send again under a new id";
   assert.deepEqual(replayRefused("key-1"), { error: `send: execution 'key-1'${tail}`, reason: "bad_arg", arg: "id" });
   assert.deepEqual(replayRefused(42), { error: `send: execution 42${tail}`, reason: "bad_arg", arg: "id" });
+});
+
+// ─── a mark as an ARRAY OF STEPS (owner, 2026-10-03) ─────────────────────────
+
+test("an array mark masks a literal dotted key and a dotted one does not", async () => {
+  // `["payload", "a.b"]` is the key `"a.b"`, taken literally; the dotted string
+  // `payload.a.b` keeps meaning `a` → `b`.
+  const k = kernel();
+  const a = mk(k);
+  const own: Payload[] = [];
+  k.onInbox(a, (p) => own.push(p));
+  got.length = 0;
+  const sent: Payload = { type: "hold", "a.b": KEY, a: { b: "nested-plain" } };
+  const out = await call(k, a, sent, { secret: [["payload", "a.b"]] });
+  assert.ok(out.status === "completed", JSON.stringify(out));
+  assert.deepEqual(out.result, { ok: true });
+  assert.deepEqual(got, [sent], "the target gets the real payload");
+  const row = k.store.rows.get(out.pid as number)!;
+  assert.deepEqual(row["payload"], { type: "hold", "a.b": PLACEHOLDER, a: { b: "nested-plain" } });
+  assert.deepEqual(row["secret"], [["payload", "a.b"]]);
+  // the dispatch mirror on the target's own inbox (this kernel's `send` record)
+  assert.ok(own.length > 0 && !own.some((m) => mentions(m, KEY)), JSON.stringify(own));
+  assert.ok(!mentions(await ledger(k), KEY));
+  // the dotted spelling of the same text is the NESTED path
+  const nested = await call(k, a, { type: "hold", "a.b": "literal-plain", a: { b: KEY } }, { secret: ["payload.a.b"] });
+  assert.deepEqual(k.store.rows.get(nested.pid as number)!["payload"], {
+    type: "hold",
+    "a.b": "literal-plain",
+    a: { b: PLACEHOLDER },
+  });
+});
+
+test("a mixed list of string and array marks", async () => {
+  // Both spellings in one list: every payload and result mark masks, the call row
+  // records the marks as given, and the handler reads them back as given.
+  const k = kernel();
+  const a = mk(k);
+  const marks: Mark[] = ["payload.key", ["payload", "a.b"], ["result", "a.b"], ["result", "items", 1]];
+  const out = await call(
+    k,
+    a,
+    { type: "issue_dotted", key: KEY, "a.b": KEY2 },
+    { id: "mixed-1", secret: marks }, // named: the settle keeps the whole result
+  );
+  assert.deepEqual(
+    out.result,
+    { "a.b": ISSUED, a: { b: "nested-plain" }, items: ["x", ISSUED] },
+    "the caller holds the real reply",
+  );
+  const row = k.store.rows.get(out.pid as number)!;
+  assert.deepEqual(row["secret"], marks);
+  assert.deepEqual(row["payload"], { type: "issue_dotted", key: PLACEHOLDER, "a.b": PLACEHOLDER });
+  const led = await ledger(k);
+  assert.ok(![KEY, KEY2, ISSUED].some((v) => mentions(led, v)), JSON.stringify(led));
+  const mine = led.find((e) => e["name"] === "mixed-1")!;
+  assert.deepEqual((mine["outcome"] as Payload)["result"], {
+    "a.b": PLACEHOLDER,
+    a: { b: "nested-plain" },
+    items: ["x", PLACEHOLDER],
+  });
+  // `currentSecret` is the marks exactly as given, an array as an array
+  const got2 = await call(k, a, { type: "marks", key: KEY, "a.b": KEY2 }, { secret: marks });
+  assert.deepEqual(got2.result, { marks: marks as Json });
+});
+
+test("array steps are exact: an int indexes a list, a string names a key", async () => {
+  const k = kernel();
+  const a = mk(k);
+  const payload: Payload = { type: "hold", items: [KEY, "plain"], m: { "0": KEY2 } };
+  const cases: [Mark[], Payload][] = [
+    [[["payload", "items", 0]], { ...payload, items: [PLACEHOLDER, "plain"] }],
+    [[["payload", "m", "0"]], { ...payload, m: { "0": PLACEHOLDER } }],
+    [["payload.items.0"], { ...payload, items: [PLACEHOLDER, "plain"] }],
+  ];
+  for (const [secret, shown] of cases) {
+    const out = await call(k, a, payload, { secret });
+    assert.equal(out.status, "completed", JSON.stringify([secret, out]));
+    assert.deepEqual(k.store.rows.get(out.pid as number)!["payload"], shown, JSON.stringify(secret));
+  }
+  // a string step is never an index, an int step never a key
+  for (const secret of [[["payload", "items", "0"]], [["payload", "m", 0]]] as Mark[][]) {
+    const out = await call(k, a, payload, { secret });
+    assert.equal(
+      (out.result as Payload)["error"],
+      `send: secret path ${pyRepr(secret[0])} names nothing in the payload`,
+      JSON.stringify(out),
+    );
+  }
+});
+
+test("each malformed mark is refused with its own text", async () => {
+  // The array refusals, and the dotted-string ones byte for byte unchanged.
+  const k = kernel();
+  const a = mk(k);
+  got.length = 0;
+  const step = "is neither a string (an object key) nor a non-negative integer (a list index)";
+  const root = "must start with 'payload' and a step under it, or with 'result'";
+  const cases: [unknown, string][] = [
+    [[[]], "path [] has no steps"],
+    [[["payload", true]], `path ['payload', True] step True ${step}`],
+    [[["payload", 1.5]], `path ['payload', 1.5] step 1.5 ${step}`],
+    [[["payload", null]], `path ['payload', None] step None ${step}`],
+    [[["payload", -1]], `path ['payload', -1] step -1 ${step}`],
+    [[["payload", ["a"]]], `path ['payload', ['a']] step ['a'] ${step}`],
+    [[["key"]], `path ['key'] ${root}`],
+    [[[0, "key"]], `path [0, 'key'] ${root}`],
+    [[["payload"]], `path ['payload'] ${root}`],
+    [[["payload", "type"]], "cannot hide payload.type — the verb is how every row is read"],
+    [[["payload", "nope"]], "path ['payload', 'nope'] names nothing in the payload"],
+    [[["payload", "a", "b"]], "path ['payload', 'a', 'b'] names nothing in the payload"],
+    [["payload.key", ["payload", "nope"]], "path ['payload', 'nope'] names nothing in the payload"],
+    [[5], "path must be a dotted string or an array of steps, got 5"],
+    [[{ payload: "key" }], "path must be a dotted string or an array of steps, got {'payload': 'key'}"],
+    // the dotted-string texts, unchanged
+    ["payload.key", "must be a non-empty list of paths, got 'payload.key'"],
+    [[], "must be a non-empty list of paths, got []"],
+    [[""], "path must be a non-empty string, got ''"],
+    [["payload..key"], "path 'payload..key' has an empty step"],
+    [["key"], "path 'key' must start with 'payload.' or be 'result[.…]'"],
+    [["payload"], "path 'payload' must start with 'payload.' or be 'result[.…]'"],
+    [["payload.type"], "cannot hide payload.type — the verb is how every row is read"],
+    [["payload.a.b"], "path 'payload.a.b' names nothing in the payload"],
+  ];
+  for (const [secret, text] of cases) {
+    const out = await call(k, a, { type: "set_key", key: KEY, "a.b": KEY2 }, { secret: secret as Mark[] });
+    assert.ok(out.status === "failed" && out.pid === null, JSON.stringify([secret, out]));
+    assert.deepEqual(out.result, { error: `send: secret ${text}`, reason: "bad_arg", arg: "secret" }, JSON.stringify(secret));
+  }
+  assert.deepEqual(got, [], "a refused item must not reach the handler");
 });

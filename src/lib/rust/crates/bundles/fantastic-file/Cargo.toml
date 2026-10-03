@@ -17,6 +17,8 @@ async-trait = { workspace = true }
 sha2 = "0.10"
 # the per-document edit locks.
 tokio = { workspace = true }
+# `read_private`'s one open: O_NOFOLLOW | O_NONBLOCK, ELOOP, getuid.
+libc = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

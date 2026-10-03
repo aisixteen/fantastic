@@ -367,7 +367,9 @@ struct VllmStreamPinTests {
             model: "q", key: fixedKey(nil), maxTokens: 8000, kvSlots: 7, kvOverflow: "evict", kvTtl: KV_TTL,
             sampling: SAMPLING_DEFAULTS, explicitBudget: false,
             connectTimeout: CONNECT_TIMEOUT, readTimeout: READ_TIMEOUT,
-            agentKey: UUID().uuidString, clock: { ProcessInfo.processInfo.systemUptime })
+            agentKey: UUID().uuidString,
+            kernelSerial: Kernel(storage: .inMemory, bundles: BundleRegistry()).serial,
+            clock: { ProcessInfo.processInfo.systemUptime })
         let (text, error) = await drain(p.chat(messages: oneUser))
         #expect(text == "a")
         #expect((error as? PyError)?.type == "JSONDecodeError", "\(String(describing: error))")

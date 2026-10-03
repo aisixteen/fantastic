@@ -306,4 +306,21 @@ struct CliBundleTests {
         #expect(readme.hasPrefix("# cli — stdout renderer\n"))
         #expect(readme.contains("A DUMB SINK for the PTY intro too"))
     }
+
+    /// Audit BV-11 — every line this sink prints loses its C0/C1 control
+    /// characters (and DEL), newline and tab kept: an escape sequence in agent or
+    /// model text was INTERPRETED by the operator's terminal (a title, a clipboard
+    /// write, a rewritten line). The same strings as python's
+    /// `test_agent_text_reaches_the_terminal_without_control_characters`.
+    @Test func terminalSafeStripsControlCharactersButNewlineAndTab() {
+        // An OSC window title (BEL-terminated), an erase-line CSI, a C1 CSI, a
+        // carriage return, DEL and NUL — plus the two kept: newline and tab.
+        let hostile = "a\u{1B}]0;TEST-VALUE-TITLE\u{07}b\u{1B}[2Kc\u{9B}31md\re\u{7F}f\u{00}g\th\ni"
+        #expect(CliBundle.terminalSafe(hostile) == "a]0;TEST-VALUE-TITLEb[2Kc31mdefg\th\ni")
+        // a CRLF pair (one Character in swift) keeps its newline
+        #expect(CliBundle.terminalSafe("x\r\ny") == "x\ny")
+        // printable text, non-ASCII included, passes untouched
+        let plain = "  [src] ⟲ context compacted (π, 3 dropped) — ok"
+        #expect(CliBundle.terminalSafe(plain) == plain)
+    }
 }

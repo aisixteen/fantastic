@@ -228,10 +228,10 @@ public final class TaskIdBox: @unchecked Sendable {
 /// before it resolves its `DispatchBox` and read only after that box has been
 /// awaited, so the box's own lock orders the two.
 ///
-/// `body == nil` after a dispatch means the verb returned NO chunk; `.some(d)`
-/// means it returned one, `d` possibly empty.
+/// `body == nil` after a dispatch means the verb returned NO chunk; `.some(b)`
+/// means it returned one at its slot of the reply, `b.bytes` possibly empty.
 final class DispatchExtras: @unchecked Sendable {
-    var body: Data?
+    var body: Blob?
     var raised = false
     init() {}
 }
@@ -241,7 +241,7 @@ final class DispatchExtras: @unchecked Sendable {
 /// read from HERE, never from the reply's own keys.
 struct DispatchEnd {
     var reply: JSON
-    var body: Data? = nil
+    var body: Blob? = nil
     var raised = false
     var stopped = false
 }
@@ -379,17 +379,37 @@ public final class TaskTable: @unchecked Sendable {
         return tasks[id]?.agent
     }
 
+    /// The verb of `id` when it is a KERNEL SERVICE TASK — a keepalive loop the
+    /// ROOT owns (`root`): the execution flusher, the record persister. `cancel`
+    /// never kills one (audit KV-5, owner 2026-10-03): killing it stopped ledger
+    /// durability and record persistence until the process restarted, and
+    /// nothing restarted it. It stays listed in `ps`; the kernel's own stop ends
+    /// it. Python `Kernel.is_service_task`.
+    func serviceVerb(_ id: TaskId, root: AgentId) -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let e = tasks[id], Self.isService(e, root: root) else { return nil }
+        return e.verb
+    }
+
+    /// Is `e` a kernel service task — a keepalive loop the root owns?
+    private static func isService(_ e: TaskEntry, root: AgentId?) -> Bool {
+        e.keepalive && e.agent == root
+    }
+
     /// Phase ① of `cancel`: `id` + every descendant, POST-ORDER (leaves first —
     /// the kill order of a process group), with every one of them MARKED killed
     /// before the caller runs a single hook or stops a single task. `nil` if
-    /// `id` isn't in the table.
-    func beginCancel(_ id: TaskId) -> [TaskId]? {
+    /// `id` isn't in the table. A kernel service task below `id` (a flusher
+    /// started by a `kernel_start` some agent's dispatch sent) is not part of
+    /// the group: it and its own work are left out.
+    func beginCancel(_ id: TaskId, root: AgentId?) -> [TaskId]? {
         lock.lock()
         defer { lock.unlock() }
         guard tasks[id] != nil else { return nil }
         var kids: [TaskId: [TaskId]] = [:]
         for (tid, e) in tasks {
-            if let p = e.parent {
+            if let p = e.parent, !Self.isService(e, root: root) {
                 kids[p, default: []].append(tid)
             }
         }
@@ -513,9 +533,18 @@ extension Kernel {
     ///
     /// Returns `{cancelled, killed:[task_id]}`. An unknown or already-finished
     /// id is not in the table → `{"cancelled": false, "killed": []}`: cancel
-    /// fails honestly, it never pretends.
+    /// fails honestly, it never pretends. A kernel service task
+    /// (`TaskTable.serviceVerb`) is refused, and left alive.
     public func cancelTask(_ taskId: TaskId) async -> JSON {
-        guard let ids = tasks.beginCancel(taskId) else {
+        let rootId = root?.id
+        if let rootId, let verb = tasks.serviceVerb(taskId, root: rootId) {
+            return Refusal.make(
+                Refusal.badArg,
+                "cancel: task \(taskId.value) (\(verb)) is a kernel service task — not cancellable",
+                hint: "it runs for the life of the kernel and stays listed in ps; kernel_stop ends it",
+                extra: [("arg", .string("task_id"))])
+        }
+        guard let ids = tasks.beginCancel(taskId, root: rootId) else {
             return .object(["cancelled": .bool(false), "killed": .array([])])
         }
         // ① SIGTERM — hooks first, subtree-wide, while everything is still alive.
@@ -529,8 +558,18 @@ extension Kernel {
             // not refusable — but python still SAYS so (C87), stdout, no
             // `flush=True` on its own print either:
             // `print(f"  [cancel] {self.id} bundle on_cancel raised: {e}")`.
+            //
+            // AS THE AGENT ITSELF, on every path that kills the task — the
+            // `cancel` verb (inside the root's dispatch), an item's own deadline,
+            // `shutdownAgents` (audit G-3, owner 2026-10-03): an emit on its own
+            // inbox is ungated, every other send is gated as this agent. The verb
+            // path used to run it as the ROOT, so a non-top-level agent's
+            // own-inbox emit (ai_core's final `status done`) was gated root →
+            // agent and dropped; the deadline path ran it as the operator.
             do {
-                try await bundle.onCancel(agentId: agentId, taskId: tid, kernel: self)
+                try await KernelTaskLocals.$currentSender.withValue(agentId) {
+                    try await bundle.onCancel(agentId: agentId, taskId: tid, kernel: self)
+                }
             } catch {
                 RuntimeLog.out(
                     "  [cancel] \(agentId.value) bundle on_cancel raised: \(pyErrorText(error))")

@@ -72,11 +72,13 @@ from kernel._authz import (
     DEFAULT_CALLABLE_BY,
     DEFAULT_CAN_CALL,
     PRIVILEGED_VERBS,
+    RECORD_OPERAND_VERBS,
     SUBTREE_PREFIX,
     _FROM_ABOVE,
     authorize_call,
     authorize_heritable,
     is_heritable,
+    names_operand,
 )
 from kernel._kernel import (
     BUNDLE_ENTRY_GROUP,
@@ -97,9 +99,11 @@ from kernel._kernel import (
     _summarize_payload,
     operator_context,
     outcome,
+    sender_context,
     stored_outcome,
     page,
 )
+from kernel._bundles import import_handler
 
 
 # System verbs answered natively by every Agent for its own children.
@@ -268,6 +272,11 @@ def _as_id(x) -> int | None:
     return None
 
 
+class _Exited(Exception):
+    """A dispatch's `SystemExit`, carried out of its task as an ordinary raise
+    (`Agent._dispatch_task`); the settle reports the SystemExit itself."""
+
+
 @dataclass
 class _Dispatched:
     """One launched batch item awaiting settle. `pid is None` marks the
@@ -293,8 +302,43 @@ class _Dispatched:
     # The payload AS SHOWN when the item marked `secret` paths (`kernel/_secret`):
     # what the fanout publishes on every attempt; the handler gets `payload`.
     shown: dict | None = None
-    # The item's `secret` paths, readable by the handler as `current_secret()`.
+    # The item's `secret` marks as given, readable by the handler as
+    # `current_secret()`.
     secret_paths: tuple = ()
+    # A JOINER that is not the execution's original caller, of an execution
+    # whose item marked `secret`: its outcome is handed over AS SHOWN, masked
+    # with these marks (`_secret.shown_outcome`) — never the real values.
+    shown_to_joiner: "_secret.Secret | None" = None
+
+
+def _caller_identity() -> str | None:
+    """WHO a call is, for the one rule that compares two calls' callers (a join of
+    a secret-marked execution): the sending agent's id; the qualified
+    `<guid>|<agent>` when a bridge leg relays a foreign caller (`_remote_caller`
+    names the leg that is sending); None for the operator."""
+    sender = _current_sender.get()
+    rc = _remote_caller.get()
+    if sender is not None and rc is not None and rc[0] == sender:
+        return rc[1]
+    return sender
+
+
+# The kernel verbs whose answer is scoped to the caller that sends them (`ledger`,
+# `ack_deadletter`: the executions THAT caller originated). A join of one by any
+# other caller is refused (`_foreign_scoped_join`); a new caller-scoped verb joins
+# this set.
+_CALLER_SCOPED_VERBS = frozenset({"ledger", "ack_deadletter"})
+
+
+def _foreign_scoped_join(exec_id, verb: str) -> dict:
+    """The answer to joining another caller's execution of a caller-scoped verb."""
+    return refusal(
+        BAD_ARG,
+        f"send: id {exec_id!r} names another caller's {verb} execution — {verb} "
+        "answers only the caller that sent it, so it cannot be joined; make your "
+        f"own {verb} call under a new id",
+        arg="id",
+    )
 
 
 class RemoteTarget:
@@ -302,20 +346,24 @@ class RemoteTarget:
     2026-09-30): addressed `<guid>|<agent id>`, never registered in this tree.
     The send pipeline treats it like any target — a ledger row, a task-table
     row, a settled outcome — except that its dispatch hands the call to the
-    peer's route instead of a handler here, carrying the caller as
+    peer's routes instead of a handler here, carrying the caller as
     `<this guid>|<sender>` so the peer's gate can judge it, and the item's
     `secret` marks so the peer masks its records as this kernel does. The
-    transport that route rides only carries frames.
+    transport a route rides only carries frames.
+
+    `routes` are the guid's live routes when the send resolved it — every tab of
+    one identity (owner, 2026-10-03): the call goes to ALL of them and settles
+    with the FIRST reply.
     """
 
     parent = None
 
-    def __init__(self, qualified: str, guid: str, agent_id: str, route, via_agent):
+    def __init__(self, qualified: str, guid: str, agent_id: str, routes, via_agent):
         self.id = qualified
         self.guid = guid
         self.agent_id = agent_id
-        self.route = route
-        self._via = via_agent  # the local agent whose kernel holds the route
+        self.routes = tuple(routes)
+        self._via = via_agent  # the local agent whose kernel holds the routes
         self._children: dict = {}
         self._meta: dict = {"callable_by": {}}
         self.handler_module = None
@@ -341,12 +389,20 @@ class RemoteTarget:
         # The item's `secret` marks ride along: this kernel already records the
         # call as shown, and the peer must too — its call/settle rows, ledger and
         # state stream are records of the SAME call.
-        return await self.route.call(
-            self.agent_id,
-            payload,
-            f"{own}|{origin if origin else 'kernel'}",
-            secret_paths,
-        )
+        caller = f"{own}|{origin if origin else 'kernel'}"
+        calls = [
+            asyncio.ensure_future(r.call(self.agent_id, payload, caller, secret_paths))
+            for r in self.routes
+        ]
+        try:
+            done, _ = await asyncio.wait(calls, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for c in calls:  # the losers — and every one when this call is stopped
+                c.cancel()
+        # TODO (owner, open): first-reply-wins hides tab DESYNC — if the tabs of
+        # one identity diverge, the other replies are dropped unseen. Must be
+        # solved (later).
+        return next(c for c in calls if c in done).result()
 
 
 class Agent:
@@ -665,7 +721,7 @@ class Agent:
         before the abort — a bare task.cancel() would orphan the OS resources
         those hooks release.
 
-        Statuses: completed | failed | cancelled | timed_out — see the
+        Statuses: completed | errored | failed | cancelled | timed_out — see the
         outcome vocabulary in `_kernel.py`. `pid is None` ⟺ the item never
         reached the task table (refusal, malformed item, kernel-reflect fast
         path). Nothing raises out of `send` except CancelledError (the caller
@@ -736,12 +792,16 @@ class Agent:
             return outcome(None, FAILED, missing("send", "payload.type"))
         verb = payload.get("type")
         if not isinstance(verb, str) or not verb:
+            # A non-string is named by its TYPE, never echoed: the octet REST leg
+            # and a binary WS frame can put a whole body here, and its repr made
+            # a 16 MiB body cost ~80 MiB of refusal text (audit 2026-10-03, W-11).
+            got = repr(verb) if isinstance(verb, str) else type(verb).__name__
             return outcome(
                 None,
                 FAILED,
                 refusal(
                     BAD_ARG,
-                    f"send: payload.type must be a non-empty string, got {verb!r}",
+                    f"send: payload.type must be a non-empty string, got {got}",
                     arg="payload.type",
                 ),
             )
@@ -891,13 +951,50 @@ class Agent:
                 #
                 # An OPERATOR joiner (sender None) is ungated here as everywhere.
                 joiner = _current_sender.get()
+                orig_verb = (entry.get("payload") or {}).get("type")
                 if joiner is not None:
-                    orig_verb = (entry.get("payload") or {}).get("type")
                     denial = self._gate(
                         joiner, orig_verb, target, entry.get("payload") or {}
                     )
                     if denial is not None:
                         return outcome(None, FAILED, denial)
+                # A CALLER-SCOPED VERB'S ANSWER IS ITS CALLER'S VIEW, NOT A FACT
+                # (owner-approved 2026-10-03, audit KV-1). `ledger` and
+                # `ack_deadletter` answer from WHO sends them — the executions
+                # that caller originated (`_current_origin`, recorded here as the
+                # entry's `caller`); a join never re-runs the handler, so the
+                # joiner would be handed the original caller's view. Measured:
+                # `B`, granted `ledger`, joined `A`'s named ledger read and got
+                # A's rows (and the operator's unscoped read by its int pid:
+                # every caller's). So a join by any caller other than the one that
+                # sent it is REFUSED — the operator included, whose own read is
+                # unscoped anyway. Any NEW caller-scoped verb joins
+                # `_CALLER_SCOPED_VERBS`. Cross-caller joins of every OTHER verb
+                # stay open by design: one execution under one id is the
+                # once-only contract (a wire frame id IS the execution id), the
+                # gate above asks the joiner the original call's question, and a
+                # secret-marked outcome goes over as shown (below).
+                if orig_verb in _CALLER_SCOPED_VERBS and joiner != entry.get("caller"):
+                    return outcome(
+                        None, FAILED, _foreign_scoped_join(exec_id, orig_verb)
+                    )
+                # A SECRET-MARKED EXECUTION'S REAL OUTCOME IS ITS CALLER'S ALONE.
+                # The gate above judges the VERB; a handler whose answer depends
+                # on WHO asks (a credential_store's per-ref `readers`) and the
+                # caller's own `secret` marks never run for a joiner. Measured
+                # 2026-10-03 (audit F1): `eve`, granted `get` on a store but no
+                # reader of the ref, joined `alice`'s marked `get` by its pid and
+                # received the key. So a joiner that is not the identity which
+                # opened the execution (`_caller_identity`: the agent, the
+                # operator, or a relayed `<guid>|<agent>`) gets the outcome AS
+                # SHOWN — what the ledger reads back. Unmarked executions are
+                # unchanged.
+                mark = entry.get("secret")
+                hide = (
+                    mark
+                    if mark is not None and _caller_identity() != entry.get("origin")
+                    else None
+                )
                 dispatched.append(
                     _Dispatched(
                         index,
@@ -909,6 +1006,7 @@ class Agent:
                         exec_fut=entry["fut"],
                         joined=True,
                         name=entry.get("name"),
+                        shown_to_joiner=hide,
                     )
                 )
                 return None
@@ -1066,7 +1164,8 @@ class Agent:
         if name is not None:
             row["name"] = name
         if secret is not None:
-            # the PATHS are not secret: they say this record cannot answer a replay
+            # the MARKS are not secret (as given — dotted strings and/or arrays of
+            # steps): they say this record cannot answer a replay
             row["secret"] = secret.paths
         self.ctx.rows_put(target.id, row)
         # The side entry is the WHOLE engine: dedup and join key on it, retry
@@ -1086,6 +1185,9 @@ class Agent:
                 "caller": caller,
                 # RAM only: what `_stamp_call` masks the outcome with.
                 "secret": secret,
+                # RAM only: the identity a joiner must BE to receive the real
+                # outcome of a secret-marked execution (`_caller_identity`).
+                "origin": _caller_identity(),
             },
         )
         return fut, None
@@ -1180,6 +1282,8 @@ class Agent:
                 if cur is not None and cur.cancelling() > 0:
                     raise  # we were killed; the execution is not ours to kill
                 return outcome(d.pid, CANCELLED, {"cancelled": True})
+            if d.shown_to_joiner is not None:
+                return _secret.shown_outcome(dict(recorded), d.shown_to_joiner)
             return dict(recorded)
         try:
             if d.timeout is not None:
@@ -1189,13 +1293,9 @@ class Agent:
                         # THE FRONT DOOR. `cancel_task` kills the SUBTREE and
                         # runs every bundle's `on_cancel` first (exec_bridge
                         # SIGKILLs its OS child) — a bare task.cancel() here
-                        # would orphan them. `operator_context` because the
-                        # kernel enforcing the caller's own deadline is
-                        # bookkeeping, and it keeps an on_cancel hook's own
-                        # sends (ai_core emits status via send("cli", ...))
-                        # from being gated as the batch caller.
-                        with operator_context():
-                            await self.ctx.cancel_task(d.pid)
+                        # would orphan them. Each hook runs as its own agent
+                        # (`Agent.on_cancel`), never as the batch caller.
+                        await self.ctx.cancel_task(d.pid)
                     else:
                         # pid-less identity read: nothing real to release
                         d.task.cancel()
@@ -1255,12 +1355,13 @@ class Agent:
                 return self._record(d, outcome(d.pid, CANCELLED, {"cancelled": True}))
             raise
         except Exception as e:  # noqa: BLE001 — a handler raise is a RESULT
+            raised = e.__cause__ if isinstance(e, _Exited) else e
             return self._record(
                 d,
                 outcome(
                     d.pid,
                     FAILED,
-                    {"error": f"{type(e).__name__}: {e}", "raised": True},
+                    {"error": f"{type(raised).__name__}: {raised}", "raised": True},
                 ),
             )
 
@@ -1350,7 +1451,7 @@ class Agent:
         if not self.handler_module:
             return False
         try:
-            mod = importlib.import_module(self.handler_module)
+            mod = import_handler(self.handler_module)
         except Exception:  # noqa: BLE001 — an unimportable bundle advertises nothing
             return False
         verbs = getattr(mod, "VERBS", None)
@@ -1361,7 +1462,7 @@ class Agent:
         if not self.handler_module:
             return None
         try:
-            mod = importlib.import_module(self.handler_module)
+            mod = import_handler(self.handler_module)
         except Exception:  # noqa: BLE001
             return None
         fn = getattr(mod, name, None)
@@ -1400,7 +1501,10 @@ class Agent:
         while node is not None:
             grants.append((self.ctx.get(node.id) or {}).get("can_call") or {})
             node = node.parent
-        return authorize_heritable(grants, verb, target_id).allowed
+        root = self._root()
+        return authorize_heritable(
+            grants, verb, target_id, root.id if root is not None else None
+        ).allowed
 
     def _gate_placement(self, sender_id, s_can, s_parent, s_kids, root_id, parent):
         """Two-sided gate on the PLACEMENT TARGET of `create_agent`. Returns a
@@ -1409,8 +1513,16 @@ class Agent:
         Placing inside your OWN subtree is baseline (no grant). Anywhere else
         needs egress on the parent (explicitly named — `create_agent` is
         privileged, so a wildcard never covers it) AND the parent's own
-        `callable_by` accepting the sender."""
-        node = parent
+        `callable_by` accepting the sender — judged as the qualified
+        `<guid>|<agent>` when a bridge leg relays a foreign caller.
+
+        A RELAYED caller owns no subtree here: the leg's subtree is the leg's,
+        not its peer's, so the baseline never applies on the leg's behalf
+        (audit 2026-10-03, G-1) — it takes the path any other placement takes."""
+        rc = _remote_caller.get()
+        in_sender = rc[1] if rc is not None and rc[0] == sender_id else sender_id
+        # a relayed caller owns no subtree here — no baseline walk
+        node = parent if in_sender == sender_id else None
         while node is not None:
             if node.id == sender_id:
                 return None  # your own subtree — baseline
@@ -1437,7 +1549,7 @@ class Agent:
         di = authorize_call(
             parent._meta.get("callable_by") or {},
             "create_agent",
-            sender_id,
+            in_sender,
             holder_id=parent.id,
             holder_parent=parent.parent.id if parent.parent is not None else None,
             holder_children=frozenset(parent._children),
@@ -1448,7 +1560,61 @@ class Agent:
         if not di.allowed:
             return refusal(
                 UNAUTHORIZED,
-                f"{parent.id} does not accept a child from {sender_id}",
+                f"{parent.id} does not accept a child from {in_sender}",
+                hint=_FROM_ABOVE,
+                side="ingress",
+            )
+        return None
+
+    def _gate_operand(self, sender_id, verb, s_can, root_id, operand):
+        """Two-sided gate on the OPERAND of `update_agent` / `delete_agent` (the
+        record `payload.id` names). Returns a refusal, or None when the sender
+        may act on `operand`.
+
+        Inside your OWN subtree (yourself included) it is baseline (no grant).
+        Anywhere else needs egress NAMING the operand with the verb
+        (`names_operand`: a literal `<id>: ["<verb>"]`, never a wildcard or a
+        token; or a heritable entry for that id naming the verb) AND the
+        operand's own `callable_by` accepting the sender — judged as the
+        qualified `<guid>|<agent>` when a bridge leg relays a foreign caller.
+        That caller owns no subtree here, the leg's own record included (G-1,
+        as `_gate_placement`)."""
+        rc = _remote_caller.get()
+        in_sender = rc[1] if rc is not None and rc[0] == sender_id else sender_id
+        # a relayed caller owns no subtree here — no baseline walk
+        node = operand if in_sender == sender_id else None
+        while node is not None:
+            if node.id == sender_id:
+                return None  # your own subtree — baseline
+            node = node.parent
+        if not names_operand(s_can, verb, operand.id) and not self._heritable_egress(
+            sender_id, verb, operand.id
+        ):
+            return refusal(
+                UNAUTHORIZED,
+                f"{sender_id} may not {verb} {operand.id}",
+                hint=(
+                    f"{operand.id} is outside your subtree: your can_call must name "
+                    f"it with the verb — {{'{operand.id}': ['{verb}']}}, never a "
+                    "wildcard — and its callable_by must accept you"
+                ),
+                side="egress",
+            )
+        di = authorize_call(
+            operand._meta.get("callable_by") or {},
+            verb,
+            in_sender,
+            holder_id=operand.id,
+            holder_parent=operand.parent.id if operand.parent is not None else None,
+            holder_children=frozenset(operand._children),
+            loader_id=root_id,
+            enforce_privileged=False,
+            in_subtree=self._in_subtree,
+        )
+        if not di.allowed:
+            return refusal(
+                UNAUTHORIZED,
+                f"{operand.id} does not accept {verb!r} from {in_sender}",
                 hint=_FROM_ABOVE,
                 side="ingress",
             )
@@ -1457,7 +1623,7 @@ class Agent:
     def _qualified_target(self, target_id: str) -> "Agent | RemoteTarget | None":
         """`<guid>|<agent id>`: this kernel's own guid names a LOCAL agent; the
         guid of a CONNECTED PEER names an agent there (a `RemoteTarget` the send
-        hands to that peer's route); anything else names nothing."""
+        hands to that peer's live routes); anything else names nothing."""
         guid, bar, agent_id = target_id.partition("|")
         if not bar or not guid or not agent_id or "|" in agent_id:
             return None
@@ -1465,8 +1631,8 @@ class Agent:
             return (
                 self._root() if agent_id == "kernel" else self.ctx.agents.get(agent_id)
             )
-        route = self.ctx.peers.get(guid)
-        return RemoteTarget(target_id, guid, agent_id, route, self) if route else None
+        routes = self.ctx.peers.get(guid)
+        return RemoteTarget(target_id, guid, agent_id, routes, self) if routes else None
 
     def _gate(self, sender_id: str, verb: str, target: "Agent", payload: dict):
         """The two-sided call gate. Returns an error dict if the send is refused,
@@ -1531,6 +1697,25 @@ class Agent:
                 )
             # An unknown parent falls through to the ordinary path; the verb
             # itself answers `unknown_agent`.
+        # THE RECORD IS THE OPERAND — the same rule for `update_agent` /
+        # `delete_agent`. Gating the root made one grant
+        # (`<root>:[update_agent, delete_agent]`, the builder wiring) a key to
+        # every record — rewrite a credential store's refs, open a sealed leg,
+        # clear a delete_lock and delete — while an agent could not edit its OWN
+        # child without that tree-wide grant (audit 2026-10-03, AV-1).
+        if verb in RECORD_OPERAND_VERBS and target.parent is None:
+            oid = payload.get("id")
+            operand = self.ctx.agents.get(oid) if isinstance(oid, str) else None
+            if operand is not None:
+                denial = self._gate_operand(sender_id, verb, s_can, root_id, operand)
+                if denial is not None:
+                    return denial
+                if verb == "update_agent":
+                    return self._check_conferral(
+                        sender_id, s_can, s_parent, s_kids, root_id, payload
+                    )
+                return None
+            # No such record: the ordinary path; the verb answers `unknown_agent`.
         # Egress — may the SENDER call the target?
         d = authorize_call(
             s_can,
@@ -1558,10 +1743,20 @@ class Agent:
         # task table, and would answer a question about the wrong agent.
         #
         # So egress is the whole check here, which is the decision on record:
-        # placement is ungated, `can_call` decides. An agent granted
-        # `kernel_state: [ps, cancel]` can watch and kill ANY task — that
-        # granularity was the price of moving these verbs to the root.
-        if verb in _SYSTEM_VERBS and target.parent is None:
+        # `can_call` decides. An agent granted `kernel_state: [ps, cancel]` can
+        # watch and kill ANY task — that granularity was the price of moving these
+        # verbs to the root. The tree mutators are the exception: whenever their
+        # operand names an agent they were judged ON THAT AGENT above
+        # (`_gate_placement` / `_gate_operand`); only an unknown operand gets here.
+        #
+        # A FOREIGN caller a bridge leg relays is the exception to the exception:
+        # the leg's `can_call` is the leg's reach, not its peer's, so the root's
+        # `callable_by` must ALSO accept the caller as `<guid>|<agent>` or
+        # `<guid>|*` — it takes the ingress check below (audit 2026-10-03, AV-3).
+        # Local callers are unchanged.
+        rc = _remote_caller.get()
+        in_sender = rc[1] if rc is not None and rc[0] == sender_id else sender_id
+        if verb in _SYSTEM_VERBS and target.parent is None and in_sender == sender_id:
             if verb in ("create_agent", "update_agent"):
                 return self._check_conferral(
                     sender_id, s_can, s_parent, s_kids, root_id, payload
@@ -1571,8 +1766,6 @@ class Agent:
         # A bridge leg relaying a FOREIGN caller is judged by that caller's
         # qualified `<guid>|<agent>`, never by the leg: the target names who on the
         # other kernel it accepts, and the baseline tokens never match a foreign id.
-        rc = _remote_caller.get()
-        in_sender = rc[1] if rc is not None and rc[0] == sender_id else sender_id
         t_call = target._meta.get("callable_by") or {}
         t_parent = target.parent.id if target.parent is not None else None
         t_kids = frozenset(target._children)
@@ -1867,6 +2060,13 @@ class Agent:
         "for it only when you need to see how agents are plumbed, not to find one."
     )
 
+    def _may_reflect(self, a) -> bool:
+        """May the agent now running (the caller) `reflect` `a`? The one per-node
+        gate both tree views apply (`_roster`, and `_tree` under `detail:"full"`).
+        An operator (`sender` None) may reflect everything."""
+        sender = _current_sender.get()
+        return sender is None or self._gate(sender, "reflect", a, {}) is None
+
     async def _roster(self, a) -> dict:
         """`{id, sentence, mode?, children:[...]}` — the tree, but carrying what
         each agent is FOR instead of how it is wired.
@@ -1891,8 +2091,7 @@ class Agent:
         # `id` and `children` (the SHAPE is already public through `tree=ids`)
         # and nothing the agent says about itself. An operator (`sender` None)
         # sees everything, as everywhere else.
-        sender = _current_sender.get()
-        may_reflect = sender is None or self._gate(sender, "reflect", a, {}) is None
+        may_reflect = self._may_reflect(a)
         if a.handler_module and may_reflect:
             raw = await self._run_dispatch(a, {"type": "reflect"})
         elif may_reflect:
@@ -2040,15 +2239,19 @@ class Agent:
             # to bundle logic — e.g. `persistence: {provider}` (which file_bridge the
             # loader auto-persists THROUGH, or null = RAM). No bundle import: if the
             # module exposes `reflect_root_extra(agent) -> dict`, merge it.
+            # A hook that RAISES fails the reflect: swallowed, it dropped
+            # `persistence` and `guid` — what an operator reads to learn whether
+            # state persists — with nothing to say so (audit 2026-10-03, ARCH2-9).
             if target.handler_module:
-                try:
-                    extra = importlib.import_module(
-                        target.handler_module
-                    ).reflect_root_extra(target, full=full)
+                hook = getattr(
+                    import_handler(target.handler_module),
+                    "reflect_root_extra",
+                    None,
+                )
+                if hook is not None:
+                    extra = hook(target, full=full)
                     if isinstance(extra, dict):
                         reply.update(extra)
-                except Exception:
-                    pass
         # NOTE: the identity fields (`parent_id`, `handler_module`, `guid`,
         # `version`, `display_name`) are NOT trimmed in distilled. Dropping them
         # was tried: it saves ~50 tok of a ~600 tok payload and breaks 10 tests,
@@ -2058,7 +2261,9 @@ class Agent:
         tree = payload.get("tree", "all")
         if tree == "all":
             reply["tree"] = (
-                target._tree(depth=None, details=False, current_depth=0)
+                target._tree(
+                    depth=None, details=False, current_depth=0, may=self._may_reflect
+                )
                 if full
                 else await self._roster(target)
             )
@@ -2138,7 +2343,16 @@ class Agent:
         open ws leg used to drop events on any inbox, an AI's input stream
         included (audit 2026-09-28). Emitting on your OWN inbox — how every
         bundle publishes its events — and an operator emit are ungated. A
-        refused emit is dropped: an emit has no reply channel."""
+        refused emit is dropped: an emit has no reply channel.
+
+        `<guid>|<agent>` naming a CONNECTED PEER reaches EVERY live route of that
+        guid (every tab of one identity, owner 2026-10-03), gated like a send to
+        it (verb `emit`, egress only — the peer gates its own agents)."""
+        if "|" in target_id:
+            remote = self._qualified_target(target_id)
+            if isinstance(remote, RemoteTarget):
+                await self._emit_remote(remote, payload)
+                return
         target = self.ctx.agents.get(target_id)
         if target is None:
             return
@@ -2147,6 +2361,25 @@ class Agent:
             if self._gate(sender, "emit", target, payload) is not None:
                 return
         target._fanout(payload, kind="emit")
+
+    async def _emit_remote(self, remote: "RemoteTarget", payload: dict) -> None:
+        """Hand one emit to every live route of a peer guid, carrying the caller
+        as `<this guid>|<sender>` when an agent emitted it. A refused emit, or an
+        agent's emit before this kernel has a guid to name it by, is dropped."""
+        sender = _current_sender.get()
+        caller = None
+        if sender is not None:
+            if self._gate(sender, "emit", remote, payload) is not None:
+                return
+            own = self._root()._meta.get("guid")
+            if not own:
+                return
+            caller = f"{own}|{sender}"
+        # TODO (owner, open): DESYNC between the tabs of one identity is envisioned
+        # and unsolved — each tab gets the event, nothing reconciles what they do
+        # with it. Think later.
+        for route in remote.routes:
+            await route.emit(remote.agent_id, payload, caller)
 
     def watch(self, src_id: str, tgt_id: str) -> dict | None:
         """Mirror src_id's incoming traffic into tgt_id's inbox. Returns a
@@ -2164,7 +2397,11 @@ class Agent:
         `call` path went through the two-sided gate; this one never did.
 
         The verb checked is `watch`, so an operator grants it exactly like any
-        other edge (`callable_by: {viewer: ["watch"]}`). An OPERATOR watch
+        other edge (`callable_by: {viewer: ["watch"]}`). Watching the ROOT needs
+        an explicit NAMED grant — `can_call: {<root>: ["watch"]}` (or the root's
+        id with `*`); a structural wildcard (`$parent: "*"`) never covers it,
+        because the root's inbox carries every kernel verb's payload (audit
+        2026-10-03, KV-2; `authorize_call`). An OPERATOR watch
         (`sender=None` — the bootstrap wiring a renderer, a test) is the origin
         root of trust and stays ungated, as with send."""
         src = self.ctx.agents.get(src_id)
@@ -2388,7 +2625,15 @@ class Agent:
         rc = _remote_caller.get()
         _remote_caller.set(None)
         _current_remote.set(rc[1] if rc is not None and rc[0] == origin else None)
-        return await self._dispatch(payload, shown)
+        try:
+            return await self._dispatch(payload, shown)
+        except SystemExit as e:
+            # A SystemExit out of an asyncio task stops the EVENT LOOP — the whole
+            # kernel, for one handler (or one handler module's import-time code,
+            # reached by any `create_agent` under yourself) that called sys.exit
+            # (audit 2026-10-03, ARCH2-1). Here it is a raise like any other: THIS
+            # call settles failed, the loop runs on.
+            raise _Exited() from e
 
     async def _dispatch(self, payload: dict, shown: dict | None = None) -> dict | None:
         """Resolve verb → native or handler_module. `shown` is the payload as the
@@ -2451,7 +2696,7 @@ class Agent:
                     verb=verb,
                 )
             try:
-                mod = importlib.import_module(self.handler_module)
+                mod = import_handler(self.handler_module)
             except Exception as e:
                 # NOT a create-time refusal: this kernel legitimately holds
                 # records whose bundle belongs to ANOTHER runtime (the browser's
@@ -2755,7 +3000,7 @@ class Agent:
         if not handler_module:
             return None
         try:
-            validate = importlib.import_module(handler_module).validate_meta
+            validate = import_handler(handler_module).validate_meta
         except (ImportError, AttributeError):
             return None
         return validate(meta, record or {})
@@ -2885,6 +3130,14 @@ class Agent:
                     "absent — root_path/ctx/parent name substrate wiring the "
                     "record may not carry",
                 )
+        # `children_dir` BECOMES A DIRECTORY (`<agent>/<children_dir>/<child>`),
+        # so it is one safe segment, exactly as an id is.
+        if "children_dir" in payload and (
+            bad_cd := guard_agent_id(
+                "create_agent", payload["children_dir"], arg="children_dir"
+            )
+        ):
+            return bad_cd
         # A handler_module this runtime cannot import is NOT refused: the host
         # legitimately holds records for agents of ANOTHER kernel (the browser's
         # `*.ts` bundles persist back here through `proxy_loader`), and a bundle
@@ -2927,9 +3180,14 @@ class Agent:
         # Lifecycle event on self's inbox.
         # On the PARENT's inbox, not the root's: whoever watches an agent for new
         # children still sees them arrive. Addressing used to make these the same.
-        await parent.emit(
-            parent.id, {"type": "agent_created", "id": rec["id"], "agent": rec}
-        )
+        # BOOKKEEPING FROM ABOVE, like the boot: emitted as the root, the gate
+        # judged root→parent, and the root's `$children` baseline reaches depth 1
+        # only — a parent any deeper never got its event, operator creates
+        # included, and nothing said so (audit 2026-10-03, KV-4).
+        with operator_context():
+            await parent.emit(
+                parent.id, {"type": "agent_created", "id": rec["id"], "agent": rec}
+            )
         return rec
 
     async def _verb_update_agent(self, payload: dict) -> dict:
@@ -2982,6 +3240,13 @@ class Agent:
                     "root_path/ctx/parent name substrate wiring the record "
                     "may not carry",
                 )
+        # `children_dir` BECOMES A DIRECTORY — one safe segment, as at create.
+        if "children_dir" in payload and (
+            bad_cd := guard_agent_id(
+                "update_agent", payload["children_dir"], arg="children_dir"
+            )
+        ):
+            return bad_cd
         meta = {
             k: v for k, v in payload.items() if k not in ("type", "id", "parent_id")
         }
@@ -3084,13 +3349,17 @@ class Agent:
 
         Bundles port their teardown logic into a module-level
         `on_delete(agent)` function in their tools.py — substrate looks
-        it up and invokes it."""
+        it up and invokes it.
+
+        The hook runs AS THIS AGENT (its own id is the sender), whoever asked
+        for the delete — like `on_cancel` (audit G-3)."""
         if self.handler_module:
             try:
-                mod = importlib.import_module(self.handler_module)
+                mod = import_handler(self.handler_module)
                 fn = getattr(mod, "on_delete", None)
                 if fn is not None:
-                    await fn(self)
+                    with sender_context(self.id):
+                        await fn(self)
             except Exception as e:
                 print(f"  [cascade] {self.id} bundle on_delete raised: {e}")
 
@@ -3107,14 +3376,24 @@ class Agent:
         Default: if `handler_module` exposes `async def on_cancel(id, task_id,
         kernel)`, call it. Optional — a pure-async bundle needs nothing (same
         discovery + optionality as the `on_delete` cascade hook). A hook that
-        raises is logged and the abort still happens: cancel is not refusable."""
+        raises is logged and the abort still happens: cancel is not refusable.
+
+        THE HOOK RUNS AS THIS AGENT — its own id is the sender — on every path
+        that kills the task: the `cancel` verb, an item's own deadline,
+        `shutdown_agents` (audit G-3). An emit on its own inbox is then ungated
+        and every other send is gated as this agent. The verb path used to run
+        it as the ROOT (whose dispatch it sits in): a non-top-level agent's
+        own-inbox emit — ai_core's final `status done` to a browser client —
+        was gated root → agent and dropped; the deadline path ran it as the
+        operator."""
         if not self.handler_module:
             return
         try:
-            mod = importlib.import_module(self.handler_module)
+            mod = import_handler(self.handler_module)
             fn = getattr(mod, "on_cancel", None)
             if fn is not None:
-                await fn(self.id, task_id, self)
+                with sender_context(self.id):
+                    await fn(self.id, task_id, self)
         except Exception as e:
             print(f"  [cancel] {self.id} bundle on_cancel raised: {e}")
 
@@ -3143,7 +3422,7 @@ class Agent:
         if not self.handler_module:
             return
         try:
-            mod = importlib.import_module(self.handler_module)
+            mod = import_handler(self.handler_module)
         except Exception as e:
             print(
                 f"  [shutdown] {self.id} import {self.handler_module!r} raised: {e}",
@@ -3219,7 +3498,7 @@ class Agent:
         node.update(self._meta)
         if self.handler_module:
             try:
-                mod = importlib.import_module(self.handler_module)
+                mod = import_handler(self.handler_module)
                 verbs_dict = getattr(mod, "VERBS", None)
                 if isinstance(verbs_dict, dict):
                     node["verbs"] = {
@@ -3231,11 +3510,29 @@ class Agent:
         node["in_flight"] = self._in_flight
         return node
 
-    def _tree(self, *, depth: int | None, details: bool, current_depth: int) -> dict:
-        node = self._node_summary(details=details)
+    def _tree(
+        self,
+        *,
+        depth: int | None,
+        details: bool,
+        current_depth: int,
+        may: Callable[["Agent"], bool],
+    ) -> dict:
+        # GATED PER NODE, as the roster is. The wiring view carries every node's
+        # `description` and grant maps, so a caller allowed to reflect ONE agent
+        # read its whole subtree's through `detail:"full"` — a depth-2 agent its
+        # siblings', through its own parent (audit 2026-10-03, KV-3). A denied
+        # node keeps its `id` and `children` (the shape is public through
+        # `tree=ids`) and nothing else.
+        node = self._node_summary(details=details) if may(self) else {"id": self.id}
         if depth is None or current_depth < depth:
             node["children"] = [
-                c._tree(depth=depth, details=details, current_depth=current_depth + 1)
+                c._tree(
+                    depth=depth,
+                    details=details,
+                    current_depth=current_depth + 1,
+                    may=may,
+                )
                 for c in self._children.values()
             ]
         else:

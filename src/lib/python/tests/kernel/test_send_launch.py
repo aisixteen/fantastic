@@ -11,10 +11,9 @@ and the order the checks run in (the first failing check is the one reported).
 from __future__ import annotations
 
 import asyncio
-import sys
 import types
 
-from kernel import sender_context
+from kernel import sender_context, register_unlisted
 
 _reached: list = []
 _go: dict = {}
@@ -40,7 +39,7 @@ async def _handler(id, payload, kernel):
 _mod = types.ModuleType("launch_probe.tools")
 _mod.handler = _handler
 _mod.VERBS = {}
-sys.modules["launch_probe.tools"] = _mod
+register_unlisted("launch_probe.tools", _mod)
 
 
 def _mk(k, aid: str, **meta) -> str:
@@ -116,12 +115,20 @@ async def test_a_missing_and_a_bad_verb(seeded_kernel):
         "reason": "missing_arg",
         "arg": "payload.type",
     }
-    for verb in ("", None, 3):
+    # A non-string is named by its TYPE, never echoed — a body sent as `type`
+    # came back whole in the refusal, 5x its size (audit 2026-10-03, W-11).
+    for verb, got in (
+        ("", "''"),
+        (None, "NoneType"),
+        (3, "int"),
+        (["go"], "list"),
+        (b"\x00" * 4096, "bytes"),
+    ):
         r = _refused(
             await _one(seeded_kernel, {"target": "kernel", "payload": {"type": verb}})
         )
         assert r == {
-            "error": f"send: payload.type must be a non-empty string, got {verb!r}",
+            "error": f"send: payload.type must be a non-empty string, got {got}",
             "reason": "bad_arg",
             "arg": "payload.type",
         }, verb

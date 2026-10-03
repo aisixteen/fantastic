@@ -106,3 +106,27 @@ def test_only_values_every_runtime_can_hold():
     # the int64 edges and a PAIRED surrogate (one real character) are fine
     assert loads("[9223372036854775807, -9223372036854775808]") == [2**63 - 1, -(2**63)]
     assert loads('{"s": "\\ud83d\\ude00"}') == {"s": "\U0001f600"}
+
+
+#: Deeper than python's json scanner can enter (it charges each `[`/`{` against
+#: `sys.getrecursionlimit()`, 1000) — the depth no caller's stack can reach.
+_DEEP = 100_000
+
+
+def test_a_too_deep_document_is_a_json_decode_error():
+    """A document nested past what the json scanner can enter is malformed input
+    like any other: `loads` refuses it as a `JSONDecodeError` (it raised a bare
+    `RecursionError`, which every caller's "not valid JSON" path missed — web_rest
+    answered 500), and `decode_frame` as its one `ValueError`, text or binary."""
+    from io_bridge import loads
+
+    for deep in ("[" * _DEEP + "]" * _DEEP, '{"a":' * _DEEP + "1" + "}" * _DEEP):
+        with pytest.raises(json.JSONDecodeError):
+            loads(deep)
+        with pytest.raises(json.JSONDecodeError):
+            loads(deep.encode())
+        with pytest.raises(ValueError, match="bad text frame"):
+            decode_frame(deep)
+        head = deep.encode()
+        with pytest.raises(ValueError, match="bad binary frame header"):
+            decode_frame(struct.pack(">I", len(head)) + head + b"body")

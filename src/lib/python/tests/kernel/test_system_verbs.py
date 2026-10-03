@@ -101,6 +101,47 @@ async def test_create_agent_emits_agent_created(seeded_kernel):
     assert "agent_created" in types
 
 
+async def test_agent_created_reaches_a_parent_at_any_depth(seeded_kernel):
+    """The event lands on the PARENT's inbox at every depth (audit 2026-10-03,
+    KV-4). It was emitted as the root, so the gate judged root→parent, and the
+    root's `$children` baseline reaches depth 1 only: a parent two levels down
+    never got it — an operator create included, an agent creating under
+    itself too — and nothing reported the drop."""
+    from kernel import sender_context
+
+    k = seeded_kernel
+    k.create(None, id="kv4_a")
+    k.ctx.agents["kv4_a"].create(None, id="kv4_b")  # depth 2
+    q = k.ctx.ensure_inbox("kv4_b")
+
+    async def create_under_b(cid: str) -> dict:
+        return (
+            await k.send(
+                [
+                    {
+                        "target": "kernel",
+                        "payload": {
+                            "type": "create_agent",
+                            "parent_id": "kv4_b",
+                            "handler_module": "file_bridge.tools",
+                            "allow": ["."],
+                            "id": cid,
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
+
+    assert (await create_under_b("kv4_by_operator"))["id"] == "kv4_by_operator"
+    with sender_context("kv4_b"):  # baseline only: placement under itself
+        assert (await create_under_b("kv4_by_self"))["id"] == "kv4_by_self"
+    got = []
+    while not q.empty():
+        got.append(q.get_nowait())
+    created = [e["id"] for e in got if e.get("type") == "agent_created"]
+    assert created == ["kv4_by_operator", "kv4_by_self"], got
+
+
 async def test_delete_agent(seeded_kernel):
     rec = (
         await seeded_kernel.send(

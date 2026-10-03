@@ -15,16 +15,20 @@ from web_ws.tools import _make_endpoint
 
 @pytest.fixture
 def client(seeded_kernel):
+    # The web host's record: its port is the authority the Host guard admits
+    # (audit W-2) — the client names it on every request, the upgrade included.
+    seeded_kernel.create(None, id="test_web", port=8088)
     app = make_app("test_web", seeded_kernel)
     # Sealed by default ⇒ open the leg so inbound frames dispatch (mirrors
     # test_gate.py::test_open_leg_dispatches).
     # Deny-all: opening the leg (ingress_rule) says WHO may call in; the surface's
-    # can_call says WHERE those calls may land. `fb_ws` is the read_stream target.
+    # can_call says WHERE those calls may land. `fb_ws` is the read_stream target;
+    # the connect-time auto-watch of the root needs its NAMED grant (audit KV-2).
     seeded_kernel.create(
         "web_ws.tools",
         id="test_web_ws",
         ingress_rule="allow_all_ingress",
-        can_call={"fb_ws": "*"},
+        can_call={"fb_ws": "*", "kernel_state": ["watch"]},
     )
     # Mount what web_ws.get_routes would publish — lets the proxy
     # tests use client.websocket_connect("/kernel_state/ws") without spinning
@@ -32,7 +36,7 @@ def client(seeded_kernel):
     app.add_api_websocket_route(
         "/{host_id}/ws", _make_endpoint("test_web_ws", seeded_kernel)
     )
-    with TestClient(app) as c:
+    with TestClient(app, headers={"host": "127.0.0.1:8088"}) as c:
         yield c
 
 
@@ -264,6 +268,13 @@ def _read_until_type(ws, ftype, max_frames=10):
         ("text", "{not json"),  # unparseable text frame
         ("text", "[1]"),  # valid JSON, not an envelope
         ("text", "7"),  # ditto
+        # nested past what the json scanner can enter (a RecursionError, not a
+        # JSONDecodeError) — a bad frame like any other, text or binary header
+        ("text", "[" * 100_000 + "]" * 100_000),
+        (
+            "bytes",
+            struct.pack(">I", 200_000) + b"[" * 100_000 + b"]" * 100_000 + b"x",
+        ),
     ],
 )
 def test_malformed_frame_answers_an_error_and_the_socket_survives(client, send, raw):
@@ -291,4 +302,36 @@ def test_malformed_frame_answers_an_error_and_the_socket_survives(client, send, 
             )
         )
         msg = _read_until_reply(ws, "after-bad")
+        assert msg["data"]["id"] == "kernel_state"
+
+
+@pytest.mark.parametrize(
+    "frame",
+    [
+        {"type": ["x"]},
+        {"type": "reply", "id": ["x"], "data": {}},
+        {"type": "error", "id": {"a": 1}, "data": {}},
+        {"type": "unwatch", "src": ["x"]},
+        {"type": "watch", "src": {"a": 1}},
+        {"type": "emit", "target": ["x"], "payload": {"type": "marker"}},
+    ],
+)
+def test_a_mistyped_name_field_is_skipped_and_the_socket_survives(client, frame):
+    """`type`/`target`/`src`/an answer's `id` are NAMES — a list or object there
+    was hashed (the handler table, `src in watching`, `out_calls.get`, the
+    kernel's agent table) and the TypeError ended the socket. Read as `""` (as
+    rust and swift do), the frame is dropped and the next call is served."""
+    with client.websocket_connect("/kernel_state/ws") as ws:
+        ws.send_text(json.dumps(frame))
+        ws.send_text(
+            json.dumps(
+                {
+                    "type": "call",
+                    "target": "kernel_state",
+                    "payload": {"type": "reflect", "tree": "none"},
+                    "id": "after-mistyped",
+                }
+            )
+        )
+        msg = _read_until_reply(ws, "after-mistyped")
         assert msg["data"]["id"] == "kernel_state"

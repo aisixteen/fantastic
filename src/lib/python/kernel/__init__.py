@@ -23,7 +23,7 @@ imports from this package.
 from __future__ import annotations
 
 from kernel._agent import Agent
-from kernel._bundles import _find_bundle_module
+from kernel._bundles import _find_bundle_module, register_unlisted
 from kernel._env import _load_dotenv
 from kernel.modes import dispatch_argv
 from kernel._kernel import (
@@ -45,7 +45,7 @@ from kernel._state import CURRENT_VERSION
 from kernel._lock import (
     LOCK_FILE,
     FantasticLock,
-    _pid_alive,
+    LockHeld,
     _read_lock,
     acquire_lock,
     release_lock,
@@ -73,13 +73,14 @@ __all__ = [
     "LOCK_FILE",
     "FantasticLock",
     "acquire_lock",
-    "_pid_alive",
+    "LockHeld",
     "_read_lock",
     "release_lock",
     # Env
     "_load_dotenv",
     # Bundles
     "_find_bundle_module",
+    "register_unlisted",
     # CLI modes
     "dispatch_argv",
 ]

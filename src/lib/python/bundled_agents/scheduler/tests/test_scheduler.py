@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import yaml
 import asyncio
-import sys
 import time
 import types
+from kernel import register_unlisted
 
 
 async def _make_scheduler(kernel):
@@ -388,7 +388,7 @@ async def _probe_handler(id, payload, kernel):
 
 _probe.handler = _probe_handler
 _probe.VERBS = {}
-sys.modules["sched_probe.tools"] = _probe
+register_unlisted("sched_probe.tools", _probe)
 
 
 async def _make_probed_scheduler(kernel, sched_id: str, probes: list[str]):
@@ -683,3 +683,42 @@ async def test_pause_and_resume_the_whole_scheduler(seeded_kernel, store_agent):
     assert seeded_kernel.ctx.get(sid)["paused"] is True
     assert await call({"type": "resume"}) == {"resumed": True, "scheduler_id": sid}
     assert seeded_kernel.ctx.get(sid)["paused"] is False
+
+
+async def test_a_schedule_carrying_secret_marks_is_refused(
+    seeded_kernel, store_agent, tmp_path
+):
+    """Audit S5: the scheduler re-sends the payload as a fresh, UNMARKED call on
+    every fire, and keeps it in its sidecar — a marked value landed in clear in
+    the fire's rows, the state stream and the portable workdir. As the relay
+    seal: a `schedule` call carrying ANY mark is refused, and nothing is kept."""
+    sid = await _make_scheduler(seeded_kernel)
+    for marks in (["payload.payload.key"], ["result"]):
+        r = (
+            await seeded_kernel.send(
+                [
+                    {
+                        "target": sid,
+                        "payload": {
+                            "type": "schedule",
+                            "target": "cli",
+                            "payload": {"type": "set_key", "key": "TEST-VALUE-50"},
+                            "interval_seconds": 60,
+                        },
+                        "secret": marks,
+                    }
+                ]
+            )
+        )[0]["result"]
+        assert r == {
+            "error": "scheduler: a call carrying secret marks may not be scheduled — "
+            "a schedule keeps its payload and every fire re-sends it unmarked",
+            "reason": "unauthorized",
+            "hint": "send a secret-bearing call yourself, marked, each time",
+        }, (marks, r)
+    listed = (await seeded_kernel.send([{"target": sid, "payload": {"type": "list"}}]))[
+        0
+    ]["result"]
+    assert listed["schedules"] == []
+    sidecar = tmp_path / ".fantastic" / "agents" / sid / "schedules.yaml"
+    assert not sidecar.exists() or "TEST-VALUE-50" not in sidecar.read_text()

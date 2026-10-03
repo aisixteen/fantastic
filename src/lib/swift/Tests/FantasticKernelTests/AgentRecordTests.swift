@@ -223,7 +223,7 @@ private struct RecordStore: AgentBundle {
     }
     func handleBinary(
         agentId: AgentId, header: JSON, body: Blob?, kernel: Kernel
-    ) async throws -> (JSON?, Data?) {
+    ) async throws -> (JSON?, Blob?) {
         // the chunk is the payload's `bytes` — python's `payload.get("bytes", b"")`
         let blob = bodyAt(body, "bytes") ?? Data()
         let path = header["path"].asString ?? ""
@@ -240,7 +240,7 @@ private struct RecordStore: AgentBundle {
                 .object([
                     "eof": .bool(true), "size": .integer(Int64(data.count)),
                     "next_offset": .integer(Int64(data.count)),
-                ]), data
+                ]), Blob("bytes", data)
             )
         default:
             return (.object(["error": .string("unknown verb")]), nil)

@@ -18,6 +18,7 @@ use fantastic_ram_store::RamStoreBundle;
 use serde_json::{json, Map, Value};
 
 const KEY: &str = "sk-live-0123456789abcdef";
+const KEY2: &str = "sk-live-dotted-key-5a5a5a5a";
 const ISSUED: &str = "tok-issued-fedcba9876543210";
 
 /// What the probe's handler was handed, in order.
@@ -49,6 +50,10 @@ impl Bundle for Probe {
                 Ok(Some(json!({"ok": true, "len": n})))
             }
             "issue" => Ok(Some(json!({"key": ISSUED, "note": "issued"}))),
+            "hold" => Ok(Some(json!({"ok": true}))),
+            "issue_dotted" => Ok(Some(
+                json!({"a.b": ISSUED, "a": {"b": "nested-plain"}, "items": ["x", ISSUED]}),
+            )),
             // The caller's marks as the handler reads them, and as a send the
             // handler makes itself reads them (it never inherits them).
             "marks" => Ok(Some(json!({"paths": fantastic_kernel::current_secret()}))),
@@ -540,4 +545,295 @@ async fn the_handler_reads_its_callers_marks_and_its_own_sends_inherit_none() {
     );
     // outside any dispatch there are none
     assert!(fantastic_kernel::current_secret().is_empty());
+}
+
+// ─── a mark as an ARRAY OF STEPS (owner, 2026-10-03) ─────────────────────────
+
+fn call_row(k: &Arc<Kernel>, out: &Outcome) -> Value {
+    Value::Object(
+        k.rows
+            .get_one(out.pid.expect("a pid").get())
+            .expect("the call row"),
+    )
+}
+
+/// `["payload", "a.b"]` is the key `"a.b"`, taken literally; the dotted string
+/// `payload.a.b` keeps meaning `a` → `b`.
+#[tokio::test]
+async fn an_array_mark_masks_a_literal_dotted_key_and_a_dotted_one_does_not() {
+    let (k, got) = seeded();
+    let a = mk(&k).await;
+    let events: Arc<Mutex<Vec<Value>>> = Arc::default();
+    let tap = Arc::clone(&events);
+    k.add_state_subscriber(Arc::new(move |evt: &Value, _body| {
+        tap.lock().unwrap().push(evt.clone());
+    }));
+    got.lock().unwrap().clear();
+    let sent = json!({"type": "hold", "a.b": KEY, "a": {"b": "nested-plain"}});
+    let out = send(
+        &k,
+        secret_item(&a, sent.clone(), json!([["payload", "a.b"]])),
+    )
+    .await;
+    assert!(
+        out.status.as_str() == "completed" && out.result == json!({"ok": true}),
+        "{out:?}"
+    );
+    assert_eq!(
+        *got.lock().unwrap(),
+        vec![sent],
+        "the target gets the real payload"
+    );
+    let row = call_row(&k, &out);
+    assert_eq!(
+        row["payload"],
+        json!({"type": "hold", "a.b": PLACEHOLDER, "a": {"b": "nested-plain"}}),
+        "{row}"
+    );
+    assert_eq!(row["secret"], json!([["payload", "a.b"]]), "{row}");
+    let sends: Vec<Value> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| e["kind"] == json!("send") && e["agent_id"] == json!(a.0))
+        .cloned()
+        .collect();
+    assert!(
+        !sends.is_empty() && !sends.iter().any(|e| mentions(e, KEY)),
+        "{sends:?}"
+    );
+    assert!(!mentions(&ledger(&k).await, KEY));
+    // the dotted spelling of the same text is the NESTED path
+    let out = send(
+        &k,
+        secret_item(
+            &a,
+            json!({"type": "hold", "a.b": "literal-plain", "a": {"b": KEY}}),
+            json!(["payload.a.b"]),
+        ),
+    )
+    .await;
+    assert_eq!(
+        call_row(&k, &out)["payload"],
+        json!({"type": "hold", "a.b": "literal-plain", "a": {"b": PLACEHOLDER}})
+    );
+}
+
+/// Both spellings in one list: every payload and result mark masks, the call row
+/// records the marks as given, and the handler reads them back as given.
+#[tokio::test]
+async fn a_mixed_list_of_string_and_array_marks() {
+    let (k, _got) = seeded();
+    let a = mk(&k).await;
+    let marks = json!([
+        "payload.key",
+        ["payload", "a.b"],
+        ["result", "a.b"],
+        ["result", "items", 1]
+    ]);
+    let out = send(
+        &k,
+        secret_item(
+            &a,
+            json!({"type": "issue_dotted", "key": KEY, "a.b": KEY2}),
+            marks.clone(),
+        )
+        // named: the settle keeps the whole result
+        .with_id("mixed-1"),
+    )
+    .await;
+    assert_eq!(
+        out.result,
+        json!({"a.b": ISSUED, "a": {"b": "nested-plain"}, "items": ["x", ISSUED]}),
+        "the caller holds the real reply"
+    );
+    let row = call_row(&k, &out);
+    assert_eq!(row["secret"], marks, "{row}");
+    assert_eq!(
+        row["payload"],
+        json!({"type": "issue_dotted", "key": PLACEHOLDER, "a.b": PLACEHOLDER}),
+        "{row}"
+    );
+    let led = ledger(&k).await;
+    for v in [KEY, KEY2, ISSUED] {
+        assert!(!mentions(&led, v), "{v}: {led}");
+    }
+    let mine = led
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["name"] == json!("mixed-1"))
+        .expect("the named execution");
+    assert_eq!(
+        mine["outcome"]["result"],
+        json!({"a.b": PLACEHOLDER, "a": {"b": "nested-plain"}, "items": ["x", PLACEHOLDER]}),
+        "{mine}"
+    );
+    // `current_secret()` is the marks exactly as given, an array as an array
+    let got = send(
+        &k,
+        secret_item(
+            &a,
+            json!({"type": "marks", "key": KEY, "a.b": KEY2}),
+            marks.clone(),
+        ),
+    )
+    .await;
+    assert_eq!(got.result, json!({"paths": marks}), "{got:?}");
+}
+
+#[tokio::test]
+async fn array_steps_are_exact_an_int_indexes_a_list_a_string_names_a_key() {
+    let (k, _got) = seeded();
+    let a = mk(&k).await;
+    let payload = json!({"type": "hold", "items": [KEY, "plain"], "m": {"0": KEY2}});
+    let with = |field: &str, v: Value| {
+        let mut p = payload.clone();
+        p[field] = v;
+        p
+    };
+    for (secret, shown) in [
+        (
+            json!([["payload", "items", 0]]),
+            with("items", json!([PLACEHOLDER, "plain"])),
+        ),
+        (
+            json!([["payload", "m", "0"]]),
+            with("m", json!({"0": PLACEHOLDER})),
+        ),
+        (
+            json!(["payload.items.0"]),
+            with("items", json!([PLACEHOLDER, "plain"])),
+        ),
+    ] {
+        let out = send(&k, secret_item(&a, payload.clone(), secret.clone())).await;
+        assert_eq!(out.status.as_str(), "completed", "{secret}: {out:?}");
+        assert_eq!(call_row(&k, &out)["payload"], shown, "{secret}");
+    }
+    // a string step is never an index, an int step never a key
+    for secret in [
+        json!([["payload", "items", "0"]]),
+        json!([["payload", "m", 0]]),
+    ] {
+        let out = send(&k, secret_item(&a, payload.clone(), secret.clone())).await;
+        assert_eq!(
+            out.result["error"],
+            json!(format!(
+                "send: secret path {} names nothing in the payload",
+                fantastic_bundle::py_repr_value(&secret[0])
+            )),
+            "{out:?}"
+        );
+    }
+}
+
+/// The array refusals, and the dotted-string ones byte for byte unchanged.
+#[tokio::test]
+async fn each_malformed_mark_is_refused_with_its_own_text() {
+    let (k, got) = seeded();
+    let a = mk(&k).await;
+    got.lock().unwrap().clear();
+    let step = "is neither a string (an object key) nor a non-negative integer (a list index)";
+    let root = "must start with 'payload' and a step under it, or with 'result'";
+    let hide = "cannot hide payload.type — the verb is how every row is read";
+    for (secret, text) in [
+        (json!([[]]), "path [] has no steps".to_string()),
+        (
+            json!([["payload", true]]),
+            format!("path ['payload', True] step True {step}"),
+        ),
+        (
+            json!([["payload", 1.5]]),
+            format!("path ['payload', 1.5] step 1.5 {step}"),
+        ),
+        (
+            json!([["payload", null]]),
+            format!("path ['payload', None] step None {step}"),
+        ),
+        (
+            json!([["payload", -1]]),
+            format!("path ['payload', -1] step -1 {step}"),
+        ),
+        (
+            json!([["payload", ["a"]]]),
+            format!("path ['payload', ['a']] step ['a'] {step}"),
+        ),
+        (json!([["key"]]), format!("path ['key'] {root}")),
+        (json!([[0, "key"]]), format!("path [0, 'key'] {root}")),
+        (json!([["payload"]]), format!("path ['payload'] {root}")),
+        (json!([["payload", "type"]]), hide.to_string()),
+        (
+            json!([["payload", "nope"]]),
+            "path ['payload', 'nope'] names nothing in the payload".to_string(),
+        ),
+        (
+            json!([["payload", "a", "b"]]),
+            "path ['payload', 'a', 'b'] names nothing in the payload".to_string(),
+        ),
+        (
+            json!(["payload.key", ["payload", "nope"]]),
+            "path ['payload', 'nope'] names nothing in the payload".to_string(),
+        ),
+        (
+            json!([5]),
+            "path must be a dotted string or an array of steps, got 5".to_string(),
+        ),
+        (
+            json!([{"payload": "key"}]),
+            "path must be a dotted string or an array of steps, got {'payload': 'key'}".to_string(),
+        ),
+        // the dotted-string texts, unchanged
+        (
+            json!("payload.key"),
+            "must be a non-empty list of paths, got 'payload.key'".to_string(),
+        ),
+        (
+            json!([]),
+            "must be a non-empty list of paths, got []".to_string(),
+        ),
+        (
+            json!([""]),
+            "path must be a non-empty string, got ''".to_string(),
+        ),
+        (
+            json!(["payload..key"]),
+            "path 'payload..key' has an empty step".to_string(),
+        ),
+        (
+            json!(["key"]),
+            "path 'key' must start with 'payload.' or be 'result[.…]'".to_string(),
+        ),
+        (
+            json!(["payload"]),
+            "path 'payload' must start with 'payload.' or be 'result[.…]'".to_string(),
+        ),
+        (json!(["payload.type"]), hide.to_string()),
+        (
+            json!(["payload.a.b"]),
+            "path 'payload.a.b' names nothing in the payload".to_string(),
+        ),
+    ] {
+        let out = send(
+            &k,
+            secret_item(
+                &a,
+                json!({"type": "set_key", "key": KEY, "a.b": KEY2}),
+                secret.clone(),
+            ),
+        )
+        .await;
+        assert!(
+            out.status.as_str() == "failed" && out.pid.is_none(),
+            "{secret}: {out:?}"
+        );
+        assert_eq!(
+            out.result,
+            json!({"error": format!("send: secret {text}"), "reason": "bad_arg", "arg": "secret"}),
+            "{secret}"
+        );
+    }
+    assert!(
+        got.lock().unwrap().is_empty(),
+        "a refused item must not reach the handler"
+    );
 }

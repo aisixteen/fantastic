@@ -113,4 +113,12 @@ enum AIRunStates {
         states.removeValue(forKey: kernel.serial)
         lock.unlock()
     }
+
+    /// Drop a deleted agent's state — its FIFO lock, queue and in-flight entry
+    /// (`AIBackend.onDelete`).
+    static func forget(_ kernel: Kernel, _ id: String) {
+        lock.lock()
+        states[kernel.serial]?.removeValue(forKey: id)
+        lock.unlock()
+    }
 }

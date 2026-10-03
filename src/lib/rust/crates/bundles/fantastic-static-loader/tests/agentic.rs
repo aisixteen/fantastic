@@ -52,6 +52,30 @@ fn subst_root(v: &Value) -> Value {
     }
 }
 
+/// `$workdir` in a loader's `manifest` — a string VALUE that is `$workdir` or
+/// starts with `$workdir/` — means the kernel's running dir, ABSOLUTE (the test's
+/// own tmp dir). It is how a config names an absolute path that is still the
+/// test's: a credential_store's `file` is refused relative, and the user's home is
+/// never touched. Substituted when the manifest is written — the one moment the
+/// dir is known; keys and `manifest_text` are left as written. Python
+/// `_subst_workdir`.
+const WORKDIR: &str = "$workdir";
+
+fn subst_workdir(v: &Value, cwd: &Path) -> Value {
+    match v {
+        Value::String(s) if s == WORKDIR || s.starts_with(&format!("{WORKDIR}/")) => {
+            json!(format!("{}{}", cwd.display(), &s[WORKDIR.len()..]))
+        }
+        Value::Array(a) => Value::Array(a.iter().map(|x| subst_workdir(x, cwd)).collect()),
+        Value::Object(o) => Value::Object(
+            o.iter()
+                .map(|(k, x)| (k.clone(), subst_workdir(x, cwd)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
 struct Scenario {
     name: String,
     spec: Value,
@@ -193,7 +217,8 @@ async fn hydrate(sc: &Scenario) -> Hydration {
         let file = loader["file"].as_str().unwrap_or("fantastic.yaml");
         let path = fixture.path().join(file);
         if let Some(manifest) = loader.get("manifest") {
-            std::fs::write(&path, serde_yaml::to_string(manifest).unwrap()).unwrap();
+            let manifest = subst_workdir(manifest, &std::env::current_dir().unwrap());
+            std::fs::write(&path, serde_yaml::to_string(&manifest).unwrap()).unwrap();
         } else if let Some(text) = loader.get("manifest_text").and_then(Value::as_str) {
             std::fs::write(&path, text).unwrap();
         }
@@ -292,27 +317,17 @@ async fn dispatch_item(
     mut payload: Value,
     fields: &Map<String, Value>,
 ) -> Outcome {
-    // Binary channel when the payload carries content (`bytes_utf8` — the
-    // file_bridge text verbs: write/edit/append) or is a stream verb; the
-    // mirror of python, where real bytes ride the payload in-process.
-    let is_stream = matches!(
-        payload.get("type").and_then(Value::as_str),
-        Some("read_stream" | "write_stream")
-    ) || payload.get("bytes_utf8").is_some();
-    let blob = if is_stream {
-        payload
-            .as_object_mut()
-            .and_then(|o| o.remove("bytes_utf8"))
-            .and_then(|v| v.as_str().map(|s| s.as_bytes().to_vec()))
-    } else {
-        None
-    };
+    // A request body when the payload carries content (`bytes_utf8` — the
+    // file_bridge text verbs: write/edit/append, and `write_stream`); the mirror
+    // of python, where real bytes ride the payload in-process. Any reply body
+    // comes back with nothing declared.
+    let blob = payload
+        .as_object_mut()
+        .and_then(|o| o.remove("bytes_utf8"))
+        .and_then(|v| v.as_str().map(|s| s.as_bytes().to_vec()));
     let mut item = Item::new(AgentId::from(target), payload);
-    if is_stream {
-        item = match blob {
-            Some(b) => item.with_binary_key("bytes", b),
-            None => item.with_raw_reply(),
-        };
+    if let Some(b) = blob {
+        item = item.with_binary_key("bytes", b);
     }
     // The batch item's own fields, beside the payload — forwarded RAW, so the
     // kernel validates them exactly as it validates any caller's.

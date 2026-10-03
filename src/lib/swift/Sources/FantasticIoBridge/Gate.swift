@@ -33,14 +33,9 @@ public func gateWebLeg(
     kernel: Kernel, legId: AgentId, kind: String, target: String, verb: String, token: String?
 ) -> JSON? {
     let leg = kernel.agent(legId)
-    let rule: IngressRule
-    do {
-        rule = try resolveIngress(
-            ingressRule: leg?.metaValue(forKey: "ingress_rule"),
-            auth: leg?.metaValue(forKey: "auth"))
-    } catch {
-        return .object(["error": .string("\(error)")])
-    }
+    let rule = resolveIngress(
+        ingressRule: leg?.metaValue(forKey: "ingress_rule"),
+        auth: leg?.metaValue(forKey: "auth"))
     let action = AuthAction(
         kind: kind, target: target, verb: kind == "call" ? verb : kind, token: token)
     // FORWARDED, not re-worded. The rule states the reason AND the repair; a web
@@ -67,12 +62,7 @@ public func gateVerb(
     verb: String
 ) -> JSON? {
     if verb == "reflect" { return nil }
-    let rule: IngressRule
-    do {
-        rule = try resolveIngress(ingressRule: ingressRule, auth: auth)
-    } catch {
-        return .object(["error": .string("\(error)")])
-    }
+    let rule = resolveIngress(ingressRule: ingressRule, auth: auth)
     let action = AuthAction(kind: "call", target: agentId, verb: verb, token: authToken)
     // FORWARDED, not re-worded. This hint was hardcoded to say "the fs edge" for
     // whichever leg called `gateVerb` — a web leg's denial claimed a filesystem

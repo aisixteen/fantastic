@@ -30,7 +30,6 @@ def _cfg():
         sentence="s",
         make_provider=lambda *a: None,
         name="fake",
-        module_name="fake",
     )
 
 
@@ -43,7 +42,6 @@ def setup_function(_):
     _stripped.clear()
     core._projection.clear()
     core._compaction_mark.clear()
-    core._providers.pop("ai", None)
 
 
 async def _seed(k, rows):
@@ -190,7 +188,9 @@ async def test_recall_mechanical_fit_is_under_budget_and_persists_a_view_and_a_r
     assert r2["kept"] >= r["kept"] - 1
 
 
-async def test_recall_asks_the_model_and_expands_only_what_fits(monkeypatch):
+async def test_recall_asks_the_model_and_expands_only_what_fits(
+    monkeypatch, fake_providers
+):
     k = _K()
     a = _chain("a", 12)
     await _seed(k, [_row("user", "GOAL", "user:goal")] + a)
@@ -212,8 +212,8 @@ async def test_recall_asks_the_model_and_expands_only_what_fits(monkeypatch):
             want = [i for i in head_ids if i in reply_ids][-2:] + [999999999]
             yield json.dumps({"expand": want, "why": "the last two replies matter"})
 
-    core._providers["ai"] = _P()
-    r = await _context_recall("ai", {}, k)
+    fake_providers["ai"] = _P()
+    r = await _context_recall("ai", {}, k, _cfg())
     assert r["degraded"] is False and r["why"] == "the last two replies matter"
     v = await _load_view("ai", k)
     reply_ids = {r["id"] for r in a if str(r["content"]).startswith("[reply to ")}

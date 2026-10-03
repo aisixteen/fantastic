@@ -25,6 +25,13 @@ import FantasticJSON
 import FantasticKernel
 import Foundation
 
+/// THE ONE FRAME CAP every wire leg holds: 16 MiB — a WS frame (`ws_bridge`'s
+/// max frame, the relay's `MAX_FRAME`, the web host's websocket `maxFrameSize`
+/// under `web_ws`), an exec_bridge control-fd frame, and a web_rest request body
+/// (the http face of the same envelope). Larger data moves in chunks
+/// (`write_stream`). Python `io_bridge.MAX_FRAME`.
+public let MAX_FRAME = 16 * 1024 * 1024
+
 public enum Codec {
     /// python `encode_frame`'s TEXT half — `json.dumps(envelope, default=str)`,
     /// i.e. `', '`/`': '` separators and `ensure_ascii=True`. Every
@@ -53,19 +60,6 @@ public enum Codec {
         public init(_ message: String) { self.message = message }
         public var description: String { message }
     }
-
-    /// The verbs whose call rides the kernel's BINARY channel even when the frame
-    /// carrying it holds no bytes, chosen STATICALLY by verb (A11.9/A13.1) — on
-    /// every leg that turns a wire call into a kernel send (web_ws, web_rest's JSON
-    /// leg, the bridge's inbound calls), so every client gets the same answer.
-    ///
-    /// Python needs no such list: its reply dict simply holds a `bytes` value and
-    /// `encode_frame` finds it. A `JSON` cannot, so the carrier is the item's
-    /// binary channel and the decision has to be made from the verb: a
-    /// `read_stream` reply is raw bytes whatever leg asked, and a `write_stream`
-    /// whose `bytes` is a JSON value is `missing_arg` with nothing written. Rust
-    /// `codec::BINARY_EDGE_VERBS`.
-    public static let binaryEdgeVerbs: Set<String> = ["read_stream", "write_stream"]
 
     /// `_binary_path` as the wire spells it: the steps from the envelope root, a
     /// JSON array — a key as a string, a list index as an integer.
@@ -113,9 +107,32 @@ public enum Codec {
     /// decoded (`decodeBinaryFrame`) or built here, so a slot it cannot place
     /// does not reach this.
     public static func payloadBody(_ header: JSON, body: Data) -> Blob? {
-        guard let steps = try? bodySlot(header), steps.count > 1, steps[0] == "payload"
-        else { return nil }
-        return Blob(parts: Array(steps.dropFirst()), body)
+        bodyUnder("payload", header, body: body)
+    }
+
+    /// The body as the frame's `key` holds it — `payload` for a call or an
+    /// event, `data` for a reply: `Blob` at its steps INSIDE that value when the
+    /// header's `_binary_path` names a slot under it, else `nil` (a body the
+    /// frame put anywhere else is not part of that value). `["data", "x.y"]` is
+    /// the reply key `"x.y"`, never `x` → `y`.
+    public static func bodyUnder(_ key: String, _ header: JSON, body: Data) -> Blob? {
+        guard let steps = try? bodySlot(header) else { return nil }
+        return Blob(parts: steps, body).under(key)
+    }
+
+    /// A frame that carries `body` at its slot (`body.parts`, from the envelope
+    /// root): `null` put in that slot of `envelope` in python's position —
+    /// appended when the envelope did not name it — and `_binary_path` naming
+    /// it. What every leg sends as `[4B len | header | body.bytes]`.
+    public static func binaryHead(_ envelope: JSON, _ body: Blob) -> JSON {
+        var head = envelope
+        // admitted where it was made: the slot is one of the envelope's
+        try? pySetPath(&head, parts: body.parts, .null)
+        if case .object(var o) = head {
+            o["_binary_path"] = binaryPath(body.parts)
+            head = .object(o)
+        }
+        return head
     }
 
     /// python `decode_frame`'s placement of a binary call's body, in swift's

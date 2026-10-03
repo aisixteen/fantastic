@@ -35,46 +35,60 @@ public enum AIStripStrategy {
     /// process-lifetime — the same standing as the projection cache: a strip is
     /// a VIEW decision, the durable store is untouched, so losing this on restart
     /// costs one re-strip and nothing else. Python `_stripped`.
+    ///
+    /// KEYED BY KERNEL, like `AIRunStates`: python's `_stripped` is a module dict
+    /// in a one-kernel-per-process runtime, while swift hosts many kernels at
+    /// once, and two kernels with an agent of the same id must not share one
+    /// stripped set. `nil` is a projection run with no kernel behind it.
     private static let lock = NSLock()
-    nonisolated(unsafe) private static var stripped: [String: Set<String>] = [:]
+    nonisolated(unsafe) private static var stripped: [UInt64?: [String: Set<String>]] = [:]
 
     /// Forget an agent's stripped set — `context_recall` drops RAM scratch the
     /// way python's `_strip_state.pop` does; tests clear it between cases.
-    static func forget(_ selfId: String) {
+    static func forget(_ kernel: Kernel?, _ selfId: String) {
         lock.lock()
-        stripped[selfId] = nil
+        stripped[kernel?.serial]?[selfId] = nil
+        lock.unlock()
+    }
+
+    /// Drop a dead kernel's whole sub-table — see `AISideTables`.
+    static func forget(_ kernel: Kernel) {
+        lock.lock()
+        stripped.removeValue(forKey: kernel.serial)
         lock.unlock()
     }
 
     /// TEST SEAM: is there a stripped set for this agent at all?
-    static func has(_ selfId: String) -> Bool {
+    static func has(_ kernel: Kernel?, _ selfId: String) -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        return stripped[selfId] != nil
+        return stripped[kernel?.serial]?[selfId] != nil
     }
 
     /// TEST SEAM: seed an agent's stripped set directly.
-    static func set(_ selfId: String, _ pids: Set<String>) {
+    static func set(_ kernel: Kernel?, _ selfId: String, _ pids: Set<String>) {
         lock.lock()
-        stripped[selfId] = pids
+        stripped[kernel?.serial, default: [:]][selfId] = pids
         lock.unlock()
     }
 
     /// The agent's stripped set, if one exists. SYNCHRONOUS: `NSLock` is
     /// unavailable from an async context, so the strategy reads through this.
-    private static func stored(_ selfId: String) -> Set<String>? {
+    private static func stored(_ kernel: Kernel?, _ selfId: String) -> Set<String>? {
         lock.lock()
         defer { lock.unlock() }
-        return stripped[selfId]
+        return stripped[kernel?.serial]?[selfId]
     }
 
     /// python's `_stripped.setdefault(self_id, seed)`: keep what is there, else
     /// store `seed`; answer what is stored.
-    private static func setDefault(_ selfId: String, _ seed: Set<String>) -> Set<String> {
+    private static func setDefault(
+        _ kernel: Kernel?, _ selfId: String, _ seed: Set<String>
+    ) -> Set<String> {
         lock.lock()
         defer { lock.unlock() }
-        if let d = stripped[selfId] { return d }
-        stripped[selfId] = seed
+        if let d = stripped[kernel?.serial]?[selfId] { return d }
+        stripped[kernel?.serial, default: [:]][selfId] = seed
         return seed
     }
 
@@ -150,10 +164,10 @@ public enum AIStripStrategy {
         }
         let key = ctx.selfId.value
         var done: Set<String>
-        if let s = stored(key) {
+        if let s = stored(ctx.kernel, key) {
             done = s
         } else {
-            done = setDefault(key, try await seed(ctx, body))
+            done = setDefault(ctx.kernel, key, try await seed(ctx, body))
         }
         let budget = ctx.budget - AIConstants.NOTICE_ENVELOPE_RESERVE
         var (rendered, n, saved) = render(body, done)
@@ -168,7 +182,7 @@ public enum AIStripStrategy {
                 }
                 (rendered, n, saved) = render(body, done)
             }
-            set(key, done)
+            set(ctx.kernel, key, done)
         }
         var cut = false
         if AIContext.estimateTokens(rendered) > budget {

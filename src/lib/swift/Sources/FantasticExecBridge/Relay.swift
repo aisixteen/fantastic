@@ -63,26 +63,48 @@
         /// the connector refuses to write such a frame in the first place.
         private static let maxFrame = 16 * 1024 * 1024
 
+        /// The verbs that DRIVE one job — python `DRIVE_VERBS`. The owner-inbox
+        /// relay drops one of these whose `job_id` names ANOTHER job (audit BV-9);
+        /// one with no `job_id` (bulk) or naming this job passes. The fanout mirrors
+        /// every payload sent to the leg,
+        /// so a program started by one caller saw another caller's keystrokes,
+        /// paste bytes and drive calls aimed at that caller's job.
+        static let driveVerbs: Set<String> = [
+            "write", "resize", "paste_image", "stop", "interrupt", "clear",
+        ]
+
         /// Exactly ONE job per owner receives the owner's inbox — a restarted durable
         /// tool whose predecessor lingers would otherwise handle every send twice.
         /// Guarded by its own lock, which is the "external synchronization mechanism"
         /// swift's concurrency checker asks about — every access below goes through it.
+        ///
+        /// KEYED BY KERNEL, then owner (audit ARCH2-5): swift hosts several kernels
+        /// in one process (every test does), and the entry's task and proxy ids are
+        /// that kernel's own. Keyed by the bare owner id, kernel B's `onmessage` took
+        /// kernel A's entry for the same id and cancelled B's task that happened to
+        /// carry A's number, orphaning A's drain. `Kernel.serial`, as the AI side
+        /// tables key theirs; a kernel's sub-table goes with its last entry.
         private final class OwnerInboxTable: @unchecked Sendable {
+            typealias Entry = (jobId: TaskId, proxy: AgentId, task: TaskId)
             private let lock = NSLock()
-            private var map: [String: (jobId: TaskId, proxy: AgentId, task: TaskId)] = [:]
-            func take(_ owner: String) -> (jobId: TaskId, proxy: AgentId, task: TaskId)? {
-                lock.withLock { map.removeValue(forKey: owner) }
+            private var map: [UInt64: [String: Entry]] = [:]
+            func take(_ kernel: Kernel, _ owner: String) -> Entry? {
+                lock.withLock { remove(kernel.serial, owner) }
             }
-            func takeIfOwned(_ owner: String, by jobId: TaskId)
-                -> (jobId: TaskId, proxy: AgentId, task: TaskId)?
-            {
+            func takeIfOwned(_ kernel: Kernel, _ owner: String, by jobId: TaskId) -> Entry? {
                 lock.withLock {
-                    guard map[owner]?.jobId == jobId else { return nil }
-                    return map.removeValue(forKey: owner)
+                    guard map[kernel.serial]?[owner]?.jobId == jobId else { return nil }
+                    return remove(kernel.serial, owner)
                 }
             }
-            func put(_ owner: String, _ e: (jobId: TaskId, proxy: AgentId, task: TaskId)) {
-                lock.withLock { map[owner] = e }
+            func put(_ kernel: Kernel, _ owner: String, _ e: Entry) {
+                lock.withLock { map[kernel.serial, default: [:]][owner] = e }
+            }
+            /// Under `lock`.
+            private func remove(_ serial: UInt64, _ owner: String) -> Entry? {
+                let e = map[serial]?.removeValue(forKey: owner)
+                if map[serial]?.isEmpty == true { map.removeValue(forKey: serial) }
+                return e
             }
         }
         private static let ownerInbox = OwnerInboxTable()
@@ -301,6 +323,11 @@
                     item.payload = pyTruthy(p) ? p : .object([:])
                     item.binary = binary
                 }
+                // ANY verb's reply may hold raw bytes, whatever frame asked for
+                // it (python's relay `encode_frame`s the reply dict; no list of
+                // verbs): a call with no request body still carries its reply's
+                // body back, and the reply below goes out kind B exactly then.
+                if item.binary == nil { item.rawReply = true }
                 let sent = item
                 let out = await KernelTaskLocals.$currentTask.withValue(relayTask) {
                     await KernelTaskLocals.$currentSender.withValue(owner) {
@@ -309,26 +336,37 @@
                 }
                 let rid = m["rid"]
                 await onQueue { [weak self] in
-                    var env: JSON = .object([
+                    let env: JSON = .object([
                         "op": .string("reply"), "rid": rid, "data": out.result,
                     ])
                     // THE CARRIER decides the frame kind, never the body's
-                    // length: a 0-byte chunk is still a chunk (C37). The reply
-                    // already holds `bytes: null` where python's holds the chunk.
+                    // length: a 0-byte chunk is still a chunk (C37). The chunk
+                    // rides at `["data", …its slot]` — `null` there in python's
+                    // position — so it lands in the program where the reply holds
+                    // it (`r['bytes']` for a `read_stream`, `r['x.y']` for a
+                    // reply key `"x.y"`).
                     guard let body = out.body else {
                         self?.push(env)
                         return
                     }
-                    env["_binary_path"] = Codec.binaryPath(["data", "bytes"])
-                    self?.pushBinary(header: env, body: body)
+                    let at = body.nested(in: "data")
+                    self?.pushBinary(header: Codec.binaryHead(env, at), body: at.bytes)
                 }
             case "emit":
                 // A program emits on its OWNER agent — the one it runs as (python
-                // `kernel.emit(owner_id, m.get("payload") or {})`).
+                // `kernel.emit(owner_id, m.get("payload") or {})`, `m` DECODED). A
+                // kind-B frame's bytes sit IN that payload at their `_binary_path`
+                // (`["payload", …steps]`), so the emit carries them there — the
+                // inbox item holds them beside the JSON, `null` in their slot — and
+                // a watcher receives the payload WHOLE. A body the frame put
+                // outside `payload` is not part of what python emits.
                 let payload = pyTruthy(m["payload"]) ? m["payload"] : .object([:])
+                let item: InboxItem =
+                    blob.flatMap { Codec.payloadBody(m, body: $0) }.map { .binary(payload, $0) }
+                    ?? .text(payload)
                 KernelTaskLocals.$currentTask.withValue(relayTask) {
                     KernelTaskLocals.$currentSender.withValue(owner) {
-                        kernel.emitItem(owner, .text(payload))
+                        kernel.emitItem(owner, item)
                     }
                 }
             default:
@@ -397,6 +435,7 @@
                 supersedePredecessor(kernel)
                 let proxy = AgentId("_xbself_\(jobId)")
                 let o = owner
+                let job = jobId.value
                 let stream = kernel.ensureInbox(proxy)
                 let denial = KernelTaskLocals.$currentSender.withValue(o) {
                     kernel.watch(src: o, watcher: proxy)
@@ -410,14 +449,33 @@
                     return
                 }
                 let t = KernelTaskLocals.$currentTask.withValue(taskId) {
-                    kernel.spawnTask(agent: o, verb: "inbox_drain") { [weak self] in
+                    kernel.spawnTask(agent: o, verb: "inbox_drain") { [weak self, weak kernel] in
                         for await p in stream {
                             // The job's own telemetry echoes back through the owner's
                             // fanout; drop it so a tool does not receive its own
                             // progress/job_started/job_done as inbox mail.
-                            switch p.payload["type"].asString {
+                            let verb = p.payload["type"].asString
+                            switch verb {
                             case "progress", "output", "job_started", "job_done": continue
                             default: break
+                            }
+                            // …a drive verb addressed to ANOTHER job (audit BV-9) —
+                            // an int naming a job other than THIS one; one with no
+                            // `job_id` (bulk) or naming this job is forwarded…
+                            if let verb, Self.driveVerbs.contains(verb),
+                                case .integer(let n) = p.payload["job_id"], n != job
+                            {
+                                continue
+                            }
+                            // …and whatever the leg's gate refuses (python
+                            // `_inbox_framer`, audit BV-8): the fanout mirrors every
+                            // payload here BEFORE any handler runs, so a sealed leg
+                            // whose handler refused the call still had it delivered.
+                            // An unknown or malformed rule resolves to
+                            // `DenyInbound(unknown:)`, which refuses every payload.
+                            guard let kernel else { return }
+                            if ExecBridgeBundle.gate(o, verb: verb ?? "", kernel: kernel) != nil {
+                                continue
                             }
                             self?.queue.async {
                                 self?.pushItem(
@@ -427,7 +485,7 @@
                     }
                 }
                 selfProxy = proxy
-                Self.ownerInbox.put(owner.value, (jobId, proxy, t))
+                Self.ownerInbox.put(kernel, owner.value, (jobId, proxy, t))
             case "offmessage":
                 selfProxy = nil
                 releaseOwnerInbox(kernel)
@@ -436,11 +494,11 @@
             }
         }
 
-        /// Unhook whichever job currently holds the owner's inbox, whoever owns it.
-        /// The handle lives in the static table precisely so a supersede can reach a
-        /// predecessor served by a DIFFERENT relay.
+        /// Unhook whichever job currently holds the owner's inbox IN THIS KERNEL,
+        /// whoever owns it. The handle lives in the static table precisely so a
+        /// supersede can reach a predecessor served by a DIFFERENT relay.
         private func supersedePredecessor(_ kernel: Kernel) {
-            guard let prev = Self.ownerInbox.take(owner.value) else { return }
+            guard let prev = Self.ownerInbox.take(kernel, owner.value) else { return }
             let o = owner
             Task { _ = await kernel.cancelTask(prev.task) }
             Task { await kernel.unwatch(src: o, watcher: prev.proxy) }
@@ -450,7 +508,9 @@
         /// Give up the owner's inbox — but ONLY if it still names this job. A superseded
         /// predecessor tearing down late must not unhook its replacement.
         private func releaseOwnerInbox(_ kernel: Kernel) {
-            guard let mine = Self.ownerInbox.takeIfOwned(owner.value, by: jobId) else { return }
+            guard let mine = Self.ownerInbox.takeIfOwned(kernel, owner.value, by: jobId) else {
+                return
+            }
             let o = owner
             Task { _ = await kernel.cancelTask(mine.task) }
             Task { await kernel.unwatch(src: o, watcher: mine.proxy) }

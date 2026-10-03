@@ -1,7 +1,8 @@
 """The `slow` role — work that is still IN FLIGHT when the kernel stops, work that
 FAILS, work that just runs, and work that takes a stated time (`sleep`, the slow
-verb the parity AI paths time out on). TEST-ONLY: importable through `e2e/probes`
-alone; the compiled kernels carry a twin behind their scenario-probe gate."""
+verb the parity AI paths time out on). TEST-ONLY: registered by
+`e2e/probes/scenario_probes.py` alone; the compiled kernels carry a twin behind
+their scenario-probe gate."""
 
 from __future__ import annotations
 

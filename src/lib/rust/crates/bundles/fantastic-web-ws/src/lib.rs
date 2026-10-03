@@ -43,6 +43,20 @@ impl Bundle for WebWsBundle {
         Some(README)
     }
 
+    /// The leg's `ingress_rule`, refused at the WRITE when no rule implements it
+    /// — the one check every leg makes (python `validate_meta` →
+    /// `io_bridge.unknown_ingress_refusal`).
+    fn validate_meta(
+        &self,
+        meta: &Map<String, Value>,
+        _record: &Map<String, Value>,
+    ) -> Option<String> {
+        fantastic_io_bridge::authorizer::ingress::unknown_refusal(
+            meta,
+            &fantastic_io_bridge::authorizer::ingress::REGISTRY,
+        )
+    }
+
     async fn handle(
         &self,
         agent_id: &AgentId,

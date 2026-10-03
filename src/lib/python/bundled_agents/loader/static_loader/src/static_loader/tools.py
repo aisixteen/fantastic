@@ -11,7 +11,13 @@ so every one carries the Unix baseline grant plus any explicit `can_call` the
 manifest names. That whole pass runs under `operator_context()` — the loader
 hydrating the roster it was told to build is the operator's authority at boot,
 exactly as `create_agent` boots the child it just made. It is NOT standing power:
-the loader's OWN record carries no special grant. After boot the roster is
+the loader's OWN record carries no special grant. And it runs ONLY on the
+kernel's own boot — origin none: the cold boot, or `create_agent` booting the
+loader it just made. An agent-sent `boot` is refused (audit G-2/BV-2): any agent
+that reaches the loader (every roster agent, by the baseline `$parent`) could
+otherwise re-run the manifest with operator authority — restore a grant the
+operator revoked, re-create an agent the operator deleted, or apply whatever the
+manifest file says at that moment. After boot the roster is
 deny-all like everything else — an agent cannot `create_agent` — so the set of
 agents is FIXED by the manifest. That is the whole point: declare the roster,
 and mutation is closed by the transport's default, not by a mode flag.
@@ -40,11 +46,22 @@ from __future__ import annotations
 import yaml
 from file_bridge import fs
 
-from kernel import operator_context
+from kernel import current_origin, operator_context
 from kernel._authz import DEFAULT_CALLABLE_BY, DEFAULT_CAN_CALL
-from kernel._refusal import UNHANDLED, refusal
+from kernel._refusal import UNAUTHORIZED, UNHANDLED, refusal
 
 MANIFEST_FIELD = "manifest"
+
+# The one text an agent-sent `boot` is refused with — rust/swift byte for byte.
+BOOT_REFUSED = (
+    "static_loader: an agent-sent boot is refused — the roster is hydrated with "
+    "operator authority, so only the kernel's own boot (cold boot, create_agent) "
+    "runs it"
+)
+BOOT_REFUSED_HINT = (
+    "change an agent's record with update_agent (the conferral rule applies "
+    "there); the operator re-boots the loader"
+)
 
 
 def _load_manifest(agent) -> tuple[list[dict], str | None]:
@@ -94,7 +111,14 @@ async def _boot(id, payload, agent):
     `handler_module` cannot change under a live agent (its in-process state
     belongs to the old bundle); that entry fails loud. Every spec MUST carry an
     explicit id — an id-less entry is refused, because it can only ever be
-    created anew. Returns `created` (new this boot) + `reapplied`."""
+    created anew. Returns `created` (new this boot) + `reapplied`.
+
+    The kernel's own boot only (origin none); an agent-sent boot is refused."""
+    if current_origin() is not None:
+        # The pass below runs as the OPERATOR, so the one who asks for it must be
+        # the operator: the cold boot, `create_agent` booting this loader, the
+        # CLI. A caller's boot is not that — refused before the manifest is read.
+        return refusal(UNAUTHORIZED, BOOT_REFUSED, hint=BOOT_REFUSED_HINT)
     agents, err = _load_manifest(agent)
     if err:
         return {"error": err, "booted": False}

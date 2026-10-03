@@ -154,6 +154,48 @@ struct RosterGateTests {
         #expect(openly?["description"].asString == "the thing nobody may read")
     }
 
+    /// py `test_reflect_roster_gate.py::test_the_full_tree_applies_the_same_per_node_gate`
+    /// — measured before the fix (audit 2026-10-03, KV-3): a depth-2 agent refused
+    /// `reflect` on its sibling read that sibling's description and grants by
+    /// reflecting its own parent with `detail:"full"`. A denied node keeps `id` +
+    /// `children`.
+    @Test func theFullTreeAppliesTheSamePerNodeGate() async {
+        let k = makeKernel()
+        await mk(k, "rgf_parent", meta: [("description", .string("the parent"))])
+        await mk(
+            k, "rgf_sibling",
+            meta: [
+                ("parent_id", .string("rgf_parent")),
+                ("description", .string("the prod deploy key")),
+                ("can_call", grant(["rgf_peer": .string("*")])),
+            ])
+        await mk(
+            k, "rgf_kid",
+            meta: [("parent_id", .string("rgf_sibling")), ("description", .string("deeper"))])
+        await mk(k, "rgf_reader", meta: [("parent_id", .string("rgf_parent"))])
+        let direct = await k.sendAs(
+            sender: AgentId("rgf_reader"), target: AgentId("rgf_sibling"),
+            payload: .object(["type": .string("reflect")]))
+        #expect(direct["reason"].asString == "unauthorized")
+        let full: JSON = .object(["type": .string("reflect"), "detail": .string("full")])
+        let r = await k.sendAs(
+            sender: AgentId("rgf_reader"), target: AgentId("rgf_parent"), payload: full)
+        #expect(r["tree"]["description"].asString == "the parent")
+        let kids = r["tree"]["children"].asArray ?? []
+        let sib = kids.first { $0["id"].asString == "rgf_sibling" }
+        #expect(sib?.asObject.map { Array($0.keys) } == ["id", "children"])
+        let deeper = sib?["children"].asArray?.first
+        #expect(deeper?["id"].asString == "rgf_kid")
+        #expect(deeper?.asObject.map { Array($0.keys) } == ["id", "children"])
+        let reader = kids.first { $0["id"].asString == "rgf_reader" }
+        #expect(reader?["handler_module"].asString == "roster_probe.tools")
+        // The operator sees everything, as everywhere else.
+        let op = await k.send([Item(AgentId("rgf_parent"), full)])[0].result
+        let opSib = op["tree"]["children"].asArray?.first { $0["id"].asString == "rgf_sibling" }
+        #expect(opSib?["description"].asString == "the prod deploy key")
+        #expect(opSib?["can_call"]["rgf_peer"].asString == "*")
+    }
+
     // ── it is a REAL dispatch ───────────────────────────────────
 
     @Test func distilledTreeReflectEchoesToNodeWatchers() async {

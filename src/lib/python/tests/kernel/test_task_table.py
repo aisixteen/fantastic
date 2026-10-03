@@ -14,14 +14,14 @@ a property of the one primitive, not a UI feature bolted onto one bundle.
 from __future__ import annotations
 
 import asyncio
-import sys
 import types
+from kernel import register_unlisted
 
-# ─── a test bundle: real handler_module, resolved through sys.modules ───
+# ─── a test bundle: real handler_module, registered unlisted ───
 #
-# `Agent._dispatch` resolves the handler with `importlib.import_module`, which
-# returns a module already in `sys.modules` — so a module object built here IS
-# a bundle as far as the substrate is concerned. It gives us the two things the
+# `Agent._dispatch` resolves the handler with `import_handler`, which answers a
+# module `register_unlisted` named — so a module object built here IS a bundle
+# as far as the substrate is concerned. It gives us the two things the
 # real bundles have and the task table needs: a handler that STAYS in flight,
 # and the optional `on_cancel` teardown hook.
 
@@ -90,7 +90,7 @@ _mod = types.ModuleType("slow_agent.tools")
 _mod.handler = _slow_handler
 _mod.on_cancel = _slow_on_cancel
 _mod.VERBS = {}
-sys.modules["slow_agent.tools"] = _mod
+register_unlisted("slow_agent.tools", _mod)
 
 SLOW = "slow_agent.tools"
 

@@ -11,6 +11,7 @@ write-time refusal texts, and the reflected rule names.
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -79,10 +80,8 @@ async def test_exec_bridge_sealed_refusal_is_exact(seeded_kernel):
     # reflect AND connector stay UNGATED on a sealed leg
     assert (await _call(k, "ex", {"type": "reflect"}))["sealed"] is True
     assert "howto" in await _call(k, "ex", {"type": "connector"})
-    # a verb the bundle does not own is mail — answered BEFORE the gate
-    assert await _call(k, "ex", {"type": "mail"}) == {
-        "error": "exec_bridge: unknown type 'mail' (no running job to receive it)"
-    }
+    # a verb the bundle does not own is mail — gated like every other verb
+    assert await _call(k, "ex", {"type": "mail"}) == SEALED
 
 
 async def test_an_unknown_auth_stem_seals_and_names_itself(seeded_kernel):
@@ -114,11 +113,16 @@ def test_web_ws_sealed_reply_is_exact(seeded_kernel):
     from web_ws.tools import _make_endpoint
 
     seeded_kernel.create("web_ws.tools", id="ws_sealed")
+    # `port`: the authority the web's Host guard admits (audit W-2).
+    seeded_kernel.create(None, id="test_web", port=8088)
     app = make_app("test_web", seeded_kernel)
     app.add_api_websocket_route(
         "/{host_id}/ws", _make_endpoint("ws_sealed", seeded_kernel)
     )
-    with TestClient(app) as c, c.websocket_connect("/kernel_state/ws") as ws:
+    with (
+        TestClient(app, headers={"host": "127.0.0.1:8088"}) as c,
+        c.websocket_connect("/kernel_state/ws") as ws,
+    ):
         ws.send_text(
             json.dumps(
                 {
@@ -190,24 +194,92 @@ async def test_password_is_refused_on_an_in_process_leg(
         ), r
 
 
+_IN_PROCESS = "allow_all_ingress, deny_ingress"
+_WIRE = "allow_all_ingress, deny_ingress, password_ingress"
+
+
+@pytest.mark.parametrize(
+    "module, extra, legal",
+    [
+        ("file_bridge.tools", {"allow": ["."]}, _IN_PROCESS),
+        ("exec_bridge.tools", {"allowed": ["x"], "cwd": "."}, _IN_PROCESS),
+        ("ws_bridge.tools", {"transport": "memory"}, _WIRE),
+        ("relay_connector.tools", {"transport": "memory"}, _WIRE),
+        ("web_rest.tools", {}, _WIRE),
+        ("web_ws.tools", {}, _WIRE),
+    ],
+)
+@pytest.mark.parametrize(
+    "spec",
+    [
+        "open_sesame",
+        7,
+        ["allow_all_ingress"],
+        {"type": ["x"]},
+        {"type": "password_ingress", "env": 7},
+    ],
+)
+async def test_every_leg_refuses_an_unknown_or_malformed_rule_at_the_write(
+    seeded_kernel, module, extra, legal, spec
+):
+    """ONE check (`unknown_ingress_refusal`) on every leg. The wire legs had
+    none: `ingress_rule=7` was accepted with a record, and every later frame
+    raised (web_rest 500, a bridge call with no reply)."""
+    r = await _create(seeded_kernel, handler_module=module, ingress_rule=spec, **extra)
+    assert r["reason"] == "invalid_meta", r
+    assert r["error"].endswith(
+        f"ingress_rule={spec!r} is not a rule this bundle implements — "
+        f"legal values: {legal}"
+    ), r
+
+
 @pytest.mark.parametrize(
     "module, extra",
     [
-        ("file_bridge.tools", {"allow": ["."]}),
-        ("exec_bridge.tools", {"allowed": ["x"], "cwd": "."}),
+        ("ws_bridge.tools", {"transport": "memory"}),
+        ("relay_connector.tools", {"transport": "memory"}),
+        ("web_rest.tools", {}),
+        ("web_ws.tools", {}),
     ],
 )
-async def test_an_unknown_ingress_rule_is_refused_at_the_write(
-    seeded_kernel, module, extra
-):
-    r = await _create(
-        seeded_kernel, handler_module=module, ingress_rule="open_sesame", **extra
+async def test_a_wire_leg_takes_every_rule_it_implements(seeded_kernel, module, extra):
+    for spec in (
+        "allow_all_ingress",
+        "deny_ingress",
+        "password_ingress",
+        {"type": "password_ingress", "env": "GROUP_TOKEN"},
+    ):
+        r = await _create(
+            seeded_kernel, handler_module=module, ingress_rule=spec, **extra
+        )
+        assert "error" not in r, (spec, r)
+
+
+async def test_a_malformed_rule_on_a_bridge_record_denies_the_call(seeded_kernel):
+    """A record can still carry one (written below the verbs, or by hand on
+    disk): the inbound call is ANSWERED with the seal's denial — it used to
+    raise in the call task and the peer waited out its timeout."""
+    from io_bridge import MemoryTransport, _test_transport_inject
+
+    k = seeded_kernel
+    k.update(k.id, guid="guid-a")
+    k.create("ws_bridge.tools", id="br", transport="memory", peer_guid="guid-b")
+    k.update("br", ingress_rule=7)
+    mine, peer = MemoryTransport.pair()
+    _test_transport_inject["br"] = mine
+    assert (await _call(k, "br", {"type": "boot"})).get("booted") is True
+    await peer.send(
+        {
+            "type": "call",
+            "id": "in-1",
+            "target": k.id,
+            "payload": {"type": "reflect"},
+            "caller": "guid-b|ai",
+        }
     )
-    assert r["reason"] == "invalid_meta", r
-    assert r["error"].endswith(
-        "ingress_rule='open_sesame' is not a rule this bundle implements — "
-        "legal values: allow_all_ingress, deny_ingress"
-    ), r
+    reply = await asyncio.wait_for(peer.recv(), 2.0)
+    assert reply == {"type": "reply", "id": "in-1", "data": _unknown("7")}
+    await _call(k, "kernel", {"type": "delete_agent", "id": "br"})
 
 
 # ─── reflected rule names ────────────────────────────────────────────────────
@@ -311,8 +383,8 @@ _COUNT: dict = {}
 
 
 def _count_mod():
-    import sys
     import types
+    from kernel import register_unlisted
 
     mod = types.ModuleType("leg_count_probe.tools")
 
@@ -329,7 +401,7 @@ def _count_mod():
 
     mod.handler = handler
     mod.VERBS = {}
-    sys.modules["leg_count_probe.tools"] = mod
+    register_unlisted("leg_count_probe.tools", mod)
 
 
 def _rest_app(kernel, leg: str):

@@ -331,3 +331,73 @@ async def test_a_refused_create_and_a_refused_reapply_are_named(seeded_kernel):
     Path("sl_ok.yaml").write_text(ok)
     r = (await k.send([{"target": "sl_ok", "payload": {"type": "boot"}}]))[0]["result"]
     assert r == {"booted": True, "created": [], "reapplied": ["fb_r"]}
+
+
+# ─── who may boot: the kernel's own boot only (audit G-2/BV-2) ───────────────
+
+
+async def test_an_agent_sent_boot_is_refused_and_re_runs_nothing(seeded_kernel):
+    """The roster pass runs AS OPERATOR, so only the kernel's own boot (origin
+    none) may start it. Measured by the audit: a roster agent whose grant the
+    operator had revoked sent `boot` to its loader and got the grant back, and a
+    deleted roster agent came back. The edge is NAMED here on both ends, so the
+    refusal is the loader's own, whatever the gate makes of `boot`."""
+    k = seeded_kernel
+    manifest = MANIFEST.replace(
+        "      memory: [write, read]\n",
+        "      memory: [write, read]\n      static_loader: [boot]\n",
+    )
+    Path("fantastic.yaml").write_text(manifest)
+    rec = (
+        await k.send(
+            [
+                {
+                    "target": "kernel",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": "kernel_state",
+                        "handler_module": "static_loader.tools",
+                        "id": "static_loader",
+                        "manifest": "fantastic.yaml",
+                        "callable_by": {"worker": ["boot"]},
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
+    assert rec.get("id") == "static_loader", rec
+    # The operator revokes worker's lateral edge and deletes `memory`.
+    for p in (
+        {
+            "type": "update_agent",
+            "id": "worker",
+            "can_call": {
+                "$self": "*",
+                "$parent": "*",
+                "$children": "*",
+                "static_loader": ["boot"],
+            },
+        },
+        {"type": "delete_agent", "id": "memory"},
+    ):
+        r = (await k.send([{"target": "kernel", "payload": p}]))[0]["result"]
+        assert not r.get("error"), r
+    with sender_context("worker"):
+        r = (await k.send([{"target": "static_loader", "payload": {"type": "boot"}}]))[
+            0
+        ]["result"]
+    assert r == {
+        "error": "static_loader: an agent-sent boot is refused — the roster is "
+        "hydrated with operator authority, so only the kernel's own boot (cold "
+        "boot, create_agent) runs it",
+        "reason": "unauthorized",
+        "hint": "change an agent's record with update_agent (the conferral rule "
+        "applies there); the operator re-boots the loader",
+    }
+    assert "memory" not in k.ctx.agents
+    assert "memory" not in k.ctx.get("worker")["can_call"]
+    # The operator's boot is the kernel's own: it re-runs the manifest.
+    r = (await k.send([{"target": "static_loader", "payload": {"type": "boot"}}]))[0][
+        "result"
+    ]
+    assert r == {"booted": True, "created": ["memory"], "reapplied": ["worker"]}, r

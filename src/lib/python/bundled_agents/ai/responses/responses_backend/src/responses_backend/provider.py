@@ -13,7 +13,8 @@ Internally translates to the Responses wire shape: the system message becomes
 `output_text` for the assistant). Stateless: `store:false`, the whole conversation
 in `input` every pass — the conversation is ai_core's, kept in its memory store,
 never the endpoint's. The key is read before each request through `key` — the
-record's `credentials` ref in a credential store (`ai_core/credentials.py`).
+record's `credentials` ref in a credential store (`ai_core/credentials.py`) — and
+scrubbed out of every error text this provider raises (`without_key`).
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ import os
 from typing import AsyncIterator
 
 from ai_core.core import THINK_CLOSE, THINK_OPEN
+from ai_core.credentials import without_key
 
 # EDGE TRANSPORT FAILURES — not answers, and not statements about the request.
 # A 4xx, or any 5xx carrying a JSON body, is the endpoint DELIBERATELY answering:
@@ -162,8 +164,9 @@ class ResponsesProvider:
         if instructions:
             body["instructions"] = instructions
         body.update(self._sampling)
+        key = await self._key(self._endpoint)
         headers = {
-            "authorization": f"Bearer {await self._key(self._endpoint)}",
+            "authorization": f"Bearer {key}",
             "content-type": "application/json",
         }
 
@@ -181,145 +184,164 @@ class ResponsesProvider:
         # NO READ CLOCK ON THE STREAM — the turn's one bound is ai_core's send
         # timeout; a queued turn is not a dead one. Connect stays finite.
         timeout = httpx.Timeout(None, connect=15.0)
-        async with httpx.AsyncClient(
-            timeout=timeout, transport=self._transport
-        ) as client:
-            attempt = 0
-            while True:
-                async with client.stream(
-                    "POST", self._endpoint, json=body, headers=headers
-                ) as resp:
-                    if resp.status_code >= 400:
-                        detail = (await resp.aread()).decode("utf-8", "replace")
-                        ctype = resp.headers.get("content-type", "")
-                        if not (
-                            resp.status_code in TRANSPORT_CODES
-                            and "json" not in ctype.lower()
-                            and attempt < RETRIES
-                        ):
-                            raise RuntimeError(
-                                f"responses {resp.status_code}: {detail}"
+        try:
+            async with httpx.AsyncClient(
+                timeout=timeout, transport=self._transport
+            ) as client:
+                attempt = 0
+                while True:
+                    async with client.stream(
+                        "POST", self._endpoint, json=body, headers=headers
+                    ) as resp:
+                        if resp.status_code >= 400:
+                            # an endpoint may echo the request: scrubbed here
+                            detail = without_key(
+                                (await resp.aread()).decode("utf-8", "replace"), key
                             )
-                        attempt += 1
-                        print(
-                            f"[responses] {resp.status_code} "
-                            f"({ctype or 'no content-type'}) — transport error, "
-                            f"retry {attempt}/{RETRIES}",
-                            flush=True,
-                        )
-                    else:
-                        # The terminal response object (`completed` / `incomplete`)
-                        # — None until one arrives. A stream that ends without one
-                        # did not finish.
-                        final: dict | None = None
-                        thinking = False
-                        # What the stream actually CONTAINED — the output item types.
-                        # The one fact that tells "the model wrote a native call"
-                        # from "the connection died before any content".
-                        kinds: list[str] = []
-                        async for line in resp.aiter_lines():
-                            if not line.startswith("data:"):
-                                continue
-                            data = line[len("data:") :].strip()
-                            if not data:
-                                continue
-                            try:
-                                evt = json.loads(data)
-                            except json.JSONDecodeError:
-                                continue
-                            etype = evt.get("type")
-                            if etype in _REASONING_DELTAS:
-                                # A REASONING MODEL SPLITS ITS OUTPUT. Reading the output
-                                # deltas alone returns a turn spent thinking as an EMPTY
-                                # completion, and a `<call>` written mid-thought is lost.
-                                # WRAPPED once (see `ai_core.core.without_thinking`):
-                                # parsed for calls, stripped before the turn is persisted.
-                                think = evt.get("delta") or ""
-                                if think:
-                                    if not thinking:
-                                        thinking = True
-                                        yield THINK_OPEN
-                                    yield think
-                            elif etype in _TEXT_DELTAS:
-                                txt = evt.get("delta") or ""
-                                if txt:
-                                    if thinking:
-                                        thinking = False
-                                        yield THINK_CLOSE
-                                    yield txt
-                            elif etype == "response.output_item.added":
-                                item = evt.get("item") or {}
-                                kinds.append(item.get("type"))
-                                if item.get("type") == "function_call":
-                                    # A NATIVE tool call — JSON arguments this kernel
-                                    # does not read. A silent drop would end the turn
-                                    # looking finished with the call lost.
-                                    raise RuntimeError(
-                                        "responses stream carried a native function_call "
-                                        f"item ({item.get('name')!r}): the model wrote a "
-                                        "JSON tool call, which this kernel does not parse "
-                                        "— calls are `<call name=…>` text"
-                                    )
-                            elif etype in ("response.completed", "response.incomplete"):
-                                final = evt.get("response") or {}
-                                # PROVIDER-REPORTED USAGE — what the window really held.
-                                u = final.get("usage") or {}
-                                self.last_prompt_tokens = (
-                                    int(u.get("input_tokens") or 0) or None
+                            ctype = resp.headers.get("content-type", "")
+                            if not (
+                                resp.status_code in TRANSPORT_CODES
+                                and "json" not in ctype.lower()
+                                and attempt < RETRIES
+                            ):
+                                raise RuntimeError(
+                                    f"responses {resp.status_code}: {detail}"
                                 )
-                            elif etype == "response.failed":
-                                err = (evt.get("response") or {}).get("error")
-                                raise RuntimeError(f"responses stream failed: {err}")
-                            elif etype == "error":
-                                raise RuntimeError(f"responses stream error: {evt}")
-                            # created / in_progress / *.done / content_part.*: ignored
-                        # A turn spent ENTIRELY reasoning ends inside the think block —
-                        # close it so the marker pair is always balanced for the parser.
-                        if thinking:
-                            thinking = False
-                            yield THINK_CLOSE
-                        status = (final or {}).get("status")
-                        reason = ((final or {}).get("incomplete_details") or {}).get(
-                            "reason"
-                        )
-                        if wire:
+                            attempt += 1
                             print(
-                                f"[wire] <- status={status!r} reason={reason!r} "
-                                f"items={kinds!r}",
+                                f"[responses] {resp.status_code} "
+                                f"({ctype or 'no content-type'}) — transport error, "
+                                f"retry {attempt}/{RETRIES}",
                                 flush=True,
                             )
-                        self.last_stop_reason = (
-                            "max_tokens"
-                            if reason == "max_output_tokens"
-                            else (reason or status)
-                        )
-                        # A BOUNDED SIDE CALL that stopped at its bound is an ANSWER,
-                        # not a fault: the caller asked for at most `max_tokens` and
-                        # reads `last_stop_reason`.
-                        if (
-                            max_tokens is not None
-                            and self.last_stop_reason == "max_tokens"
-                        ):
-                            return
-                        # A turn that did not COMPLETE did not finish — say so, loudly.
-                        # A cut returned as if finished parses as a truncated envelope
-                        # and the chain dies downstream with the cause hidden.
-                        if status != "completed":
-                            raise RuntimeError(
-                                "responses stream ended without completing: "
-                                f"status={status!r} reason={reason!r} items={kinds!r}"
-                                + (
-                                    " (no terminal event — connection cut mid-stream)"
-                                    if final is None
-                                    else ""
+                        else:
+                            # The terminal response object (`completed` / `incomplete`)
+                            # — None until one arrives. A stream that ends without one
+                            # did not finish.
+                            final: dict | None = None
+                            thinking = False
+                            # What the stream actually CONTAINED — the output item types.
+                            # The one fact that tells "the model wrote a native call"
+                            # from "the connection died before any content".
+                            kinds: list[str] = []
+                            async for line in resp.aiter_lines():
+                                if not line.startswith("data:"):
+                                    continue
+                                data = line[len("data:") :].strip()
+                                if not data:
+                                    continue
+                                try:
+                                    evt = json.loads(data)
+                                except json.JSONDecodeError:
+                                    continue
+                                etype = evt.get("type")
+                                if etype in _REASONING_DELTAS:
+                                    # A REASONING MODEL SPLITS ITS OUTPUT. Reading the output
+                                    # deltas alone returns a turn spent thinking as an EMPTY
+                                    # completion, and a `<call>` written mid-thought is lost.
+                                    # WRAPPED once (see `ai_core.core.without_thinking`):
+                                    # parsed for calls, stripped before the turn is persisted.
+                                    think = evt.get("delta") or ""
+                                    if think:
+                                        if not thinking:
+                                            thinking = True
+                                            yield THINK_OPEN
+                                        yield think
+                                elif etype in _TEXT_DELTAS:
+                                    txt = evt.get("delta") or ""
+                                    if txt:
+                                        if thinking:
+                                            thinking = False
+                                            yield THINK_CLOSE
+                                        yield txt
+                                elif etype == "response.output_item.added":
+                                    item = evt.get("item") or {}
+                                    kinds.append(item.get("type"))
+                                    if item.get("type") == "function_call":
+                                        # A NATIVE tool call — JSON arguments this kernel
+                                        # does not read. A silent drop would end the turn
+                                        # looking finished with the call lost.
+                                        raise RuntimeError(
+                                            "responses stream carried a native function_call "
+                                            f"item ({item.get('name')!r}): the model wrote a "
+                                            "JSON tool call, which this kernel does not parse "
+                                            "— calls are `<call name=…>` text"
+                                        )
+                                elif etype in (
+                                    "response.completed",
+                                    "response.incomplete",
+                                ):
+                                    final = evt.get("response") or {}
+                                    # PROVIDER-REPORTED USAGE — what the window really held.
+                                    u = final.get("usage") or {}
+                                    self.last_prompt_tokens = (
+                                        int(u.get("input_tokens") or 0) or None
+                                    )
+                                elif etype == "response.failed":
+                                    err = (evt.get("response") or {}).get("error")
+                                    raise RuntimeError(
+                                        "responses stream failed: "
+                                        + without_key(str(err), key)
+                                    )
+                                elif etype == "error":
+                                    raise RuntimeError(
+                                        "responses stream error: "
+                                        + without_key(str(evt), key)
+                                    )
+                                # created / in_progress / *.done / content_part.*: ignored
+                            # A turn spent ENTIRELY reasoning ends inside the think block —
+                            # close it so the marker pair is always balanced for the parser.
+                            if thinking:
+                                thinking = False
+                                yield THINK_CLOSE
+                            status = (final or {}).get("status")
+                            reason = (
+                                (final or {}).get("incomplete_details") or {}
+                            ).get("reason")
+                            if wire:
+                                print(
+                                    f"[wire] <- status={status!r} reason={reason!r} "
+                                    f"items={kinds!r}",
+                                    flush=True,
                                 )
+                            self.last_stop_reason = (
+                                "max_tokens"
+                                if reason == "max_output_tokens"
+                                else (reason or status)
                             )
-                        return
-                await asyncio.sleep(BACKOFF * attempt)
+                            # A BOUNDED SIDE CALL that stopped at its bound is an ANSWER,
+                            # not a fault: the caller asked for at most `max_tokens` and
+                            # reads `last_stop_reason`.
+                            if (
+                                max_tokens is not None
+                                and self.last_stop_reason == "max_tokens"
+                            ):
+                                return
+                            # A turn that did not COMPLETE did not finish — say so, loudly.
+                            # A cut returned as if finished parses as a truncated envelope
+                            # and the chain dies downstream with the cause hidden.
+                            if status != "completed":
+                                raise RuntimeError(
+                                    "responses stream ended without completing: "
+                                    f"status={status!r} reason={reason!r} items={kinds!r}"
+                                    + (
+                                        " (no terminal event — connection cut mid-stream)"
+                                        if final is None
+                                        else ""
+                                    )
+                                )
+                            return
+                    await asyncio.sleep(BACKOFF * attempt)
+        except Exception as e:
+            # ANY other failure's text may quote the key (h11 quotes the header it
+            # refused): it leaves scrubbed, its chain cut so no traceback prints it.
+            shown = without_key(str(e), key)
+            if shown != str(e):
+                raise RuntimeError(
+                    f"responses_backend: {type(e).__name__}: {shown}"
+                ) from None
+            raise
 
     @property
     def model(self) -> str:
         return self._model
-
-    def stop(self) -> None:
-        pass

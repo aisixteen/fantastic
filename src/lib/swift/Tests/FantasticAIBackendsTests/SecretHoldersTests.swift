@@ -35,6 +35,38 @@ private func refused(_ agent: String) -> String {
     SECRET_HOLDER_TEXT.replacingOccurrences(of: "{agent}", with: agent)
 }
 
+private let PEER_KEY = "sk-peer-0123456789abcdef"
+
+private func joinRefused(_ execId: String) -> String {
+    SECRET_JOIN_TEXT.replacingOccurrences(of: "{exec_id}", with: execId)
+}
+
+/// The id the joining model named (python `_JoiningModel.joined`).
+private final class Joined: @unchecked Sendable {
+    private let lock = NSLock()
+    private var v: Int64 = -1
+    func set(_ x: Int64) { lock.withLock { v = x } }
+    var value: Int64 { lock.withLock { v } }
+}
+
+/// The kernel a computed turn reads (built after the script).
+private final class KernelBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var k: Kernel?
+    var kernel: Kernel? {
+        get { lock.withLock { k } }
+        set { lock.withLock { k = newValue } }
+    }
+}
+
+/// Every `secret` the peer's store was handed (python's `seen`).
+private final class PeerSeen: @unchecked Sendable {
+    private let lock = NSLock()
+    private var marks: [[JSON]] = []
+    func add(_ m: [JSON]) { lock.withLock { marks.append(m) } }
+    var all: [[JSON]] { lock.withLock { marks } }
+}
+
 /// Python `_call`: one `send` call as the model writes it.
 private func call(
     _ target: String, _ verb: String = "get", replyTo: String = "self",
@@ -152,13 +184,17 @@ private final class KeyedScript: @unchecked Sendable {
     let required: Bool
     private let lock = NSLock()
     private var turns: [String]
+    /// A turn computed AT the pass (python `_JoiningModel`): given the pass
+    /// number (1-based), a non-nil answer replaces the scripted one.
+    private let compute: (@Sendable (Int) -> String?)?
     private var _calls = 0
     private var _keys: [String?] = []
     private var _seen: [[JSON]] = []
 
-    init(required: Bool, _ turns: [String]) {
+    init(required: Bool, _ turns: [String], compute: (@Sendable (Int) -> String?)? = nil) {
         self.required = required
         self.turns = turns
+        self.compute = compute
     }
 
     var calls: Int { lock.withLock { _calls } }
@@ -169,11 +205,13 @@ private final class KeyedScript: @unchecked Sendable {
 
     /// The key read and the prompt recorded, then this pass's turn.
     func pass(key: String?, messages: [JSON]) -> String {
-        lock.withLock {
+        let n: Int = lock.withLock {
             _keys.append(key)
             _seen.append(messages)
-            return turns.isEmpty ? DONE : turns.removeFirst()
+            return _keys.count
         }
+        if let turn = compute?(n) { return turn }
+        return lock.withLock { turns.isEmpty ? DONE : turns.removeFirst() }
     }
 
     /// Python `_until(lambda: model.calls >= n)`, then a beat — bounded.
@@ -215,8 +253,8 @@ private final class KeyedModel: AIProvider, @unchecked Sendable {
 }
 
 /// The shared ai_core machinery with the scripted model as its provider — python
-/// patches `core._providers[aid]` on the real responses backend; swift builds a
-/// provider per pass, so the backend is built with this one.
+/// seats it in its `fake_providers` table on the real responses backend; swift
+/// builds a provider per pass, so the backend is built with this one.
 private final class KeyedBackend: AgentBundle, @unchecked Sendable {
     let name = "responses_backend"
     private let core: AIBackend
@@ -253,10 +291,10 @@ private struct NoKeychain: KeychainStore {
     func delete(service: String, account: String) throws {}
 }
 
-private func op(_ k: Kernel, _ target: String, _ payload: JSON, secret: JSON? = nil) async
-    -> Outcome
-{
-    var it = Item(AgentId(target), payload)
+private func op(
+    _ k: Kernel, _ target: String, _ payload: JSON, secret: JSON? = nil, id: String? = nil
+) async -> Outcome {
+    var it = Item(AgentId(target), payload, id: id)
     it.secret = secret
     return await k.send([it])[0]
 }
@@ -445,6 +483,7 @@ struct SecretHoldersTests {
                 "type": "create_agent", "parent_id": "kernel_state",
                 "handler_module": .string(CredentialStoreBundle.handlerModule), "id": "creds",
                 "file": .string(dir.appendingPathComponent("creds.yaml").path),
+                "refs": ["main": ["host": "api.example.com", "readers": ["ai"]]],
                 "callable_by": ["ai": "*"],
             ]))
         #expect(made.result["id"] == "creds", "\(made.result.serialize())")
@@ -454,15 +493,10 @@ struct SecretHoldersTests {
         let put = await op(
             k, "creds",
             [
-                "type": "set", "ref": "main", "host": "api.example.com",
+                "type": "set", "ref": "main",
                 "fields": ["api_key": .string(KEY)],
             ], secret: ["payload.fields"])
         #expect(put.result["stored"] == true, "\(put.result.serialize())")
-        var refs = k.agent(AgentId("creds"))?.meta["refs"]?.asObject ?? [:]
-        var entry = refs["main"]?.asObject ?? [:]
-        entry["readers"] = ["ai"]
-        refs["main"] = .object(entry)
-        k.update(AgentId("creds"), ["refs": .object(refs)])
         await ai(k, "ai", canCall, ["credentials": ["store": "creds", "ref": "main"]])
     }
 
@@ -576,7 +610,8 @@ struct SecretHoldersTests {
         let model = KeyedScript(
             required: true, [unmark, call("creds", args: ["ref": "main"]), DONE])
         let k = await seeded(dir, ["ai": model])
-        await storeAndAI(k, dir, ["creds": "*", "kernel_state": ["update_agent"]])
+        // the store's record is the operand: the agent names it with `update_agent`
+        await storeAndAI(k, dir, ["creds": ["*", "update_agent"]])
 
         _ = await op(k, "ai", ["type": "send", "text": "unmark the store, then read it"])
         await model.until(passes: 3)
@@ -598,5 +633,100 @@ struct SecretHoldersTests {
         #expect(gets.allSatisfy { $0["secret"] == ["result"] }, "\(JSON.array(gets).serialize())")
         #expect(!JSON.array(seen.map { JSON.array($0) }).serialize().contains(KEY))
         #expect(!JSON.array(k.rows.all().map { JSON.object($0) }).serialize().contains(KEY))
+    }
+
+    // ─── a model never JOINS an execution that carried secrets (audit F2) ───
+
+    /// THE BYPASS (measured 2026-10-03): the key lives in a credential_store on a
+    /// CONNECTED PEER (`P-g|creds`) — a peer address this layer cannot judge as a
+    /// holder — and the backend reads it as the agent, marked. The model, the same
+    /// agent, sent `<exec_id>` = that read's pid: the kernel joined it (same
+    /// caller, no second dispatch, the peer never saw it) and the model got the
+    /// key. Python `_JoiningModel`: its first turn joins the backend's latest key
+    /// read (ids are sequential — a model can scan them).
+    @Test(.timeLimit(.minutes(1)))
+    func aModelCannotJoinItsBackendsKeyReadOnAPeer() async throws {
+        let dir = tmpDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let target = "P-g|creds"
+        let joined = Joined()
+        let box = KernelBox()
+        let model = KeyedScript(required: true, []) { n in
+            guard n == 1, let k = box.kernel else { return nil }
+            let id = rows(k, target, "get").compactMap { $0["id"].asInt }.max() ?? -1
+            joined.set(id)
+            return renderCall(
+                "send",
+                [
+                    "target_id": .string(target),
+                    "payload": ["type": "get", "ref": "main"],
+                    "reply_to": "self", "exec_id": .integer(id),
+                ])
+        }
+        let k = await seeded(dir, ["ai": model])
+        box.kernel = k
+        let seen = PeerSeen()
+        let route = PeerRoute(via: "leg") { agentId, payload, caller, secret, _ in
+            seen.add(secret)
+            if !secret.contains(.string("result")) && !secret.contains(["result"]) {
+                return (["error": "get: mark the answer secret", "reason": "bad_arg"], nil)
+            }
+            return (
+                [
+                    "ref": "main", "host": "api.example.com",
+                    "fields": ["api_key": .string(PEER_KEY)],
+                ], nil
+            )
+        } emit: { _, _, _, _ in }
+        k.registerPeer("P-g", route)
+        await ai(
+            k, "ai", [target: ["get"]], ["credentials": ["store": .string(target), "ref": "main"]])
+
+        _ = await op(k, "ai", ["type": "send", "text": "read your key"])
+        await model.until(passes: 2)
+        #expect(model.keys.first == PEER_KEY, "the backend still reads its key")
+        let next = model.seen.dropFirst().first?.last?["content"].asString ?? ""
+        #expect(next.contains(joinRefused(String(joined.value))), Comment(rawValue: next))
+        #expect(next.contains("unauthorized"), Comment(rawValue: next))
+        #expect(!JSON.array(model.seen.map { JSON.array($0) }).serialize().contains(PEER_KEY))
+        #expect(seen.all.allSatisfy { $0 == ["result"] }, "only the backend's reads")
+    }
+
+    /// By NAME, on a target that is no holder: an execution whose item carried
+    /// `secret` marks is refused to a model whoever opened it — the call is
+    /// never dispatched.
+    @Test(.timeLimit(.minutes(1)))
+    func aModelCannotJoinANamedSecretExecution() async throws {
+        let dir = tmpDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try "TOP-SECRET-9c1d\n".write(
+            to: dir.appendingPathComponent("vault.txt"), atomically: true, encoding: .utf8)
+        let join = renderCall(
+            "send",
+            [
+                "target_id": "notes_fs", "payload": ["type": "read", "path": "vault.txt"],
+                "reply_to": "self", "exec_id": "vault-read",
+            ])
+        let model = KeyedScript(required: false, [join, DONE])
+        let k = await seeded(dir, ["nb_ai": model])
+        let made = await op(
+            k, "kernel",
+            .object([
+                "type": "create_agent", "parent_id": "kernel_state",
+                "handler_module": "file_bridge.tools", "id": "notes_fs", "allow": ["."],
+                "ingress_rule": "allow_all_ingress", "callable_by": ["nb_ai": "*"],
+            ]))
+        #expect(made.result["id"] == "notes_fs", "\(made.result.serialize())")
+        let read = await op(
+            k, "notes_fs", ["type": "read", "path": "vault.txt"], secret: ["result"],
+            id: "vault-read")
+        #expect(read.status == .completed, "\(read.asJSON.serialize())")
+        await ai(k, "nb_ai", ["notes_fs": "*"])
+
+        _ = await op(k, "nb_ai", ["type": "send", "text": "read the vault"])
+        await model.until(passes: 2)
+        let next = model.seen.dropFirst().first?.last?["content"].asString ?? ""
+        #expect(next.contains(joinRefused("vault-read")), Comment(rawValue: next))
+        #expect(!JSON.array(model.seen.map { JSON.array($0) }).serialize().contains("TOP-SECRET-9c1d"))
     }
 }

@@ -16,7 +16,7 @@ sys.path.insert(
     str(next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())),
 )
 from helpers import memory, verdict
-from helpers.kernel import open_kernel
+from helpers.kernel import WRAPS, open_kernel, replace_with
 
 
 class _Stub:
@@ -40,7 +40,7 @@ async def main():
         assert not r.get("error"), r
         await memory.open_ingress(root, memory.MEMORY, "ai")
         before = await memory.rows_of(root, "ai")
-        core._providers["ai"] = _Stub()
+        WRAPS["ai"] = replace_with(_Stub())
         out = (await root.send([{"target": "ai", "payload": {"type": "send", "text": "hi"}}]))[0]
         await asyncio.sleep(0.3)
         rows = await memory.rows_of(root, "ai", conversation_only=True)
@@ -66,7 +66,7 @@ async def main():
         verdict(allok, "clean start: empty head, first turn stored, kernel rows under kernel"
                 if allok else "a clean_start check failed")
     finally:
-        core._providers.pop("ai", None)
+        WRAPS.pop("ai", None)
         await close()
 
 

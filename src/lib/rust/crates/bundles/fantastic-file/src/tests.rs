@@ -11,7 +11,7 @@ fn fb() -> AgentId {
 }
 
 fn at(root: &Path) -> Result<PathBuf, String> {
-    Ok(fs::realpath(root))
+    fantastic_bundle::realpath(root)
 }
 
 #[test]
@@ -36,7 +36,7 @@ fn resolve_refuses_escape() {
 fn resolve_keeps_subpath() {
     let tmp = tempfile::TempDir::new().unwrap();
     let p = fs::resolve(tmp.path(), "sub/inner.txt").unwrap();
-    assert!(p.starts_with(fs::realpath(tmp.path())));
+    assert!(p.starts_with(fantastic_bundle::realpath(tmp.path()).unwrap()));
     assert!(p.ends_with("sub/inner.txt"));
 }
 
@@ -47,13 +47,7 @@ fn resolve_refuses_absolute_path() {
     let err = fs::resolve(tmp.path(), "/etc/passwd").unwrap_err();
     assert_eq!(err, "fs: path '/etc/passwd' escapes root");
     // The agent layer answers the same shape with `bad_arg` BEFORE reaching fs.
-    let r = read_stream_reply(
-        &fb(),
-        &at(tmp.path()),
-        &json!({"path": "/etc/passwd"}),
-        true,
-    )
-    .0;
+    let r = read_stream_reply(&fb(), &at(tmp.path()), &json!({"path": "/etc/passwd"})).0;
     assert_eq!(r["reason"], "bad_arg");
     assert_eq!(r["arg"], "path");
 }
@@ -85,23 +79,53 @@ fn an_atomic_write_with_a_mode_creates_exactly_those_bits() {
     );
 }
 
+/// F5 (audit 2026-10-03): `read_private` opens ONCE (`O_NOFOLLOW`) and judges
+/// the open descriptor — regular, this user's, no group/other bits — before
+/// reading it, so no swap can land between the check and the read. A symlink in
+/// the leaf's place, a widened mode and a FIFO are refused (`NotPrivate`,
+/// nothing read); an absent file is python's `FileNotFoundError` text. Python
+/// `test_read_private_judges_the_open_descriptor_it_reads`.
 #[test]
-fn lstat_reports_the_entry_itself_never_its_target() {
+fn read_private_judges_the_open_descriptor_it_reads() {
+    use std::os::unix::fs::PermissionsExt;
     let tmp = tempfile::TempDir::new().unwrap();
-    std::fs::write(tmp.path().join("real"), b"x").unwrap();
-    std::os::unix::fs::symlink(tmp.path().join("real"), tmp.path().join("link")).unwrap();
-    assert!(fs::lstat(tmp.path(), "real").unwrap().file_type().is_file());
-    assert!(fs::lstat(tmp.path(), "link")
-        .unwrap()
-        .file_type()
-        .is_symlink());
-    assert!(fs::lstat(tmp.path(), "missing")
-        .unwrap_err()
-        .starts_with("[Errno 2] No such file or directory: "));
-    assert_eq!(
-        fs::lstat(tmp.path(), "../out").unwrap_err(),
-        "fs: path '..' escapes root"
-    );
+    let secret = tmp.path().join("s.yaml");
+    std::fs::write(&secret, b"k: v\n").unwrap();
+    let chmod = |m: u32| {
+        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(m)).unwrap();
+    };
+    chmod(0o600);
+    assert_eq!(fs::read_private(tmp.path(), "s.yaml").unwrap(), b"k: v\n");
+    chmod(0o644);
+    // SAFETY: `getuid` has no preconditions and cannot fail.
+    let me = unsafe { libc::getuid() };
+    match fs::read_private(tmp.path(), "s.yaml") {
+        Err(fs::PrivateReadError::NotPrivate(np)) => assert_eq!((np.mode, np.uid), (0o644, me)),
+        other => panic!("a widened mode is refused: {other:?}"),
+    }
+    chmod(0o600);
+    std::os::unix::fs::symlink(&secret, tmp.path().join("link.yaml")).unwrap();
+    assert!(matches!(
+        fs::read_private(tmp.path(), "link.yaml"),
+        Err(fs::PrivateReadError::NotPrivate(_))
+    ));
+    let pipe = std::ffi::CString::new(tmp.path().join("pipe").to_str().unwrap()).unwrap();
+    // SAFETY: a valid NUL-terminated path; mkfifo has no other preconditions.
+    assert_eq!(unsafe { libc::mkfifo(pipe.as_ptr(), 0o600) }, 0);
+    // judged, never a hang on the open
+    assert!(matches!(
+        fs::read_private(tmp.path(), "pipe"),
+        Err(fs::PrivateReadError::NotPrivate(_))
+    ));
+    match fs::read_private(tmp.path(), "absent.yaml") {
+        Err(fs::PrivateReadError::Os(e)) => {
+            assert!(
+                e.starts_with("[Errno 2] No such file or directory: "),
+                "{e}"
+            );
+        }
+        other => panic!("an absent file: {other:?}"),
+    }
 }
 
 #[test]
@@ -109,7 +133,7 @@ fn resolve_dot_dot_after_descent_is_ok() {
     // a/b/.. resolves to root/a — still inside.
     let tmp = tempfile::TempDir::new().unwrap();
     let p = fs::resolve(tmp.path(), "a/b/../leaf.txt").unwrap();
-    assert!(p.starts_with(fs::realpath(tmp.path())));
+    assert!(p.starts_with(fantastic_bundle::realpath(tmp.path()).unwrap()));
 }
 
 #[test]
@@ -129,7 +153,7 @@ fn write_stream_then_read_stream_round_trips_raw_bytes() {
     assert_eq!(w["size"], payload.len());
     assert!(w.get("error").is_none(), "{w}");
     // SOURCE: read it all back off the binary channel.
-    let (meta, body) = read_stream_reply(&fb(), &root, &json!({"path": "blob.bin"}), false);
+    let (meta, body) = read_stream_reply(&fb(), &root, &json!({"path": "blob.bin"}));
     assert!(meta.get("error").is_none(), "{meta}");
     assert_eq!(
         body,
@@ -157,7 +181,6 @@ fn read_stream_chunks_with_offset_and_eof() {
         &fb(),
         &root,
         &json!({"path": "big.bin", "offset": 0, "length": 100}),
-        false,
     );
     let b1 = b1.expect("a chunk came back");
     assert_eq!(b1.len(), 100);
@@ -168,7 +191,6 @@ fn read_stream_chunks_with_offset_and_eof() {
         &fb(),
         &root,
         &json!({"path": "big.bin", "offset": 100, "length": 1000}),
-        false,
     );
     let b2 = b2.expect("a chunk came back");
     assert_eq!(b2.len(), 156);
@@ -191,7 +213,7 @@ fn write_stream_appends_when_offset_omitted() {
     let w = write_stream_reply(&root, &json!({"path": "a.bin"}), Some(b"BBBB"), false);
     assert_eq!(w["offset"], 4); // appended at end
     assert_eq!(w["size"], 8);
-    let (_m, body) = read_stream_reply(&fb(), &root, &json!({"path": "a.bin"}), false);
+    let (_m, body) = read_stream_reply(&fb(), &root, &json!({"path": "a.bin"}));
     assert_eq!(body, Some(b"AAAABBBB".to_vec()));
 }
 
@@ -254,7 +276,12 @@ fn tilde_root_is_literal_not_home() {
     // A2.17 — python's `fs` never expands `~`; the name is a directory.
     let base = tempfile::TempDir::new().unwrap();
     let resolved = fs::resolve_root("~/projects", base.path()).unwrap();
-    assert_eq!(resolved, fs::realpath(base.path()).join("~/projects"));
+    assert_eq!(
+        resolved,
+        fantastic_bundle::realpath(base.path())
+            .unwrap()
+            .join("~/projects")
+    );
 }
 
 #[test]
@@ -352,7 +379,7 @@ fn negative_offset_and_zero_length_are_refused_not_fatal() {
         ("write_stream", json!({"path": "a.txt", "offset": -5})),
     ] {
         let r = if verb == "read_stream" {
-            read_stream_reply(&fb(), &root, &header, true).0
+            read_stream_reply(&fb(), &root, &header).0
         } else {
             write_stream_reply(&root, &header, Some(b"z"), false)
         };
@@ -364,46 +391,22 @@ fn negative_offset_and_zero_length_are_refused_not_fatal() {
         &fb(),
         &root,
         &json!({"path": "a.txt", "offset": 1, "length": 1}),
-        false,
     );
     assert_eq!(b, Some(b"b".to_vec()));
     assert_eq!(m["next_offset"], 2);
 }
 
 #[test]
-fn text_read_stream_reply_key_order() {
+fn read_stream_reply_key_order() {
     // A2.6 — python's key order, measured: path, offset, bytes, next_offset,
     // eof, size, origin (how to get these bytes again — what a caller's memory
-    // keeps instead of the body). The binary channel carries the chunk in the
-    // body instead.
+    // keeps instead of the body). A11.9 — `bytes` is nulled IN PLACE: python's
+    // codec lifts the value onto the wire and leaves a `null` behind, so every
+    // reader gets the same dict shape; the chunk is the reply body beside it.
     let tmp = tempfile::TempDir::new().unwrap();
     let root = at(&served(&tmp));
     std::fs::write(served(&tmp).join("a.txt"), b"abc").unwrap();
-    let (m, _) = read_stream_reply(&fb(), &root, &json!({"path": "a.txt"}), true);
-    let keys: Vec<&str> = m.as_object().unwrap().keys().map(String::as_str).collect();
-    assert_eq!(
-        keys,
-        [
-            "path",
-            "offset",
-            "bytes",
-            "next_offset",
-            "eof",
-            "size",
-            "origin"
-        ]
-    );
-    assert_eq!(m["bytes"], "abc");
-    assert_eq!(
-        m["origin"],
-        "fb a.txt bytes 0-3 of 3 — read_stream {path: a.txt, offset: 0, length: 3}"
-    );
-    // A11.9 — the BINARY channel keeps the same dict, `bytes` nulled IN PLACE:
-    // python's codec lifts the value onto the wire and leaves a `null` behind,
-    // so the two channels hand a reader the same shape. Omitting the key gave
-    // the browser a different dict per channel, and the WS layer had nothing to
-    // pick the frame kind from.
-    let (m, body) = read_stream_reply(&fb(), &root, &json!({"path": "a.txt"}), false);
+    let (m, body) = read_stream_reply(&fb(), &root, &json!({"path": "a.txt"}));
     let keys: Vec<&str> = m.as_object().unwrap().keys().map(String::as_str).collect();
     assert_eq!(
         keys,
@@ -419,6 +422,10 @@ fn text_read_stream_reply_key_order() {
     );
     assert_eq!(m["bytes"], Value::Null);
     assert_eq!(body, Some(b"abc".to_vec()));
+    assert_eq!(
+        m["origin"],
+        "fb a.txt bytes 0-3 of 3 — read_stream {path: a.txt, offset: 0, length: 3}"
+    );
 }
 
 #[test]
@@ -431,16 +438,10 @@ fn huge_length_reads_only_what_exists() {
         &fb(),
         &root,
         &json!({"path": "a.txt", "length": 1_000_000_000_000_000u64}),
-        false,
     );
     assert_eq!(b, Some(b"abc".to_vec()), "{m}");
     assert_eq!(m["eof"], true);
-    let (m, b) = read_stream_reply(
-        &fb(),
-        &root,
-        &json!({"path": "a.txt", "length": i64::MAX}),
-        false,
-    );
+    let (m, b) = read_stream_reply(&fb(), &root, &json!({"path": "a.txt", "length": i64::MAX}));
     assert_eq!(b, Some(b"abc".to_vec()), "{m}");
 }
 
@@ -454,7 +455,7 @@ fn an_in_root_symlink_pointing_outside_refuses() {
     std::os::unix::fs::symlink(&outside, root.join("docs")).unwrap();
     let r = at(&root);
     // The lexical form is in-root; the canonical form is not.
-    let (m, b) = read_stream_reply(&fb(), &r, &json!({"path": "docs/secret.txt"}), false);
+    let (m, b) = read_stream_reply(&fb(), &r, &json!({"path": "docs/secret.txt"}));
     assert_eq!(m["reason"], "transport_error", "{m}");
     assert_eq!(m["error"], "fs: path 'docs/secret.txt' escapes root");
     assert_eq!(b, None);
@@ -466,7 +467,7 @@ fn an_in_root_symlink_pointing_outside_refuses() {
     // An in-root symlink still serves.
     std::fs::write(root.join("real.txt"), b"r").unwrap();
     std::os::unix::fs::symlink(root.join("real.txt"), root.join("alias.txt")).unwrap();
-    let (m, b) = read_stream_reply(&fb(), &r, &json!({"path": "alias.txt"}), false);
+    let (m, b) = read_stream_reply(&fb(), &r, &json!({"path": "alias.txt"}));
     assert!(m.get("error").is_none(), "{m}");
     assert_eq!(b, Some(b"r".to_vec()));
 }
@@ -486,7 +487,7 @@ fn dangling_symlink_pointing_outside_root_refuses() {
     assert_eq!(w["reason"], "transport_error", "{w}");
     assert_eq!(w["error"], "fs: path 'dangling' escapes root");
     assert!(!outside.join("gone.txt").exists());
-    let (m, _) = read_stream_reply(&fb(), &r, &json!({"path": "dangling"}), false);
+    let (m, _) = read_stream_reply(&fb(), &r, &json!({"path": "dangling"}));
     assert_eq!(m["error"], "fs: path 'dangling' escapes root", "{m}");
     // A dangling link pointing INSIDE the root is still a deletable name.
     std::os::unix::fs::symlink(root.join("gone.txt"), root.join("inside")).unwrap();
@@ -541,7 +542,7 @@ fn os_error_text_is_python_oserror_str() {
     std::fs::write(root.join("src/a.txt"), b"x").unwrap();
     std::fs::write(root.join("f.txt"), b"x").unwrap();
     let r = at(&root);
-    let full = fs::realpath(&root);
+    let full = fantastic_bundle::realpath(&root).unwrap();
     let reply = delete_reply(&r, &json!({"path": "src"}), false);
     assert_eq!(
         reply["error"],
@@ -648,7 +649,7 @@ fn absolute_path_is_refused_with_bad_arg() {
     std::fs::write(root.join("README.md"), b"r").unwrap();
     let r = at(&root);
     let replies = [
-        read_stream_reply(&fb(), &r, &json!({"path": "/README.md"}), true).0,
+        read_stream_reply(&fb(), &r, &json!({"path": "/README.md"})).0,
         write_stream_reply(&r, &json!({"path": "/x"}), Some(b"b"), false),
         list_reply(&fb(), &r, &json!({"path": "/"})),
         delete_reply(&r, &json!({"path": "/README.md"}), false),
@@ -691,7 +692,7 @@ fn refusal_texts_use_python_repr() {
     assert_eq!(reply["reason"], "not_found");
     let reply = delete_reply(&r, &json!({"path": "nope"}), false);
     assert_eq!(reply["error"], "path 'nope' does not exist");
-    let (reply, _) = read_stream_reply(&fb(), &r, &json!({"path": "nope"}), true);
+    let (reply, _) = read_stream_reply(&fb(), &r, &json!({"path": "nope"}));
     assert_eq!(reply["error"], "file 'nope' not found");
     assert_eq!(reply["reason"], "not_found");
     // a path holding a quote quotes python's way
@@ -882,7 +883,10 @@ async fn reflect_key_order_matches_python() {
     );
     assert_eq!(
         r["root"],
-        json!(fs::realpath(&served).display().to_string())
+        json!(fantastic_bundle::realpath(&served)
+            .unwrap()
+            .display()
+            .to_string())
     );
     assert_eq!(r["ingress_rule"], "allow_all_ingress");
     assert_eq!(r["egress_rule"], "silent_egress");
@@ -961,7 +965,10 @@ async fn reflect_root_is_resolved_absolute_path() {
     );
     assert_eq!(
         r["root"],
-        json!(fs::realpath(tmp.path()).display().to_string())
+        json!(fantastic_bundle::realpath(tmp.path())
+            .unwrap()
+            .display()
+            .to_string())
     );
     assert!(r.get("root_error").is_none());
 }
@@ -1136,7 +1143,7 @@ async fn pump_falsy_args_fall_back_like_python() {
     let kernel = mk_kernel(&tmp).await;
     std::fs::write(served.join("src.txt"), b"hello pump").unwrap();
     // Every falsy argument falls back: source/sink to THIS agent, `sink_path` to
-    // `source_path` — so this pumps the file onto itself in one chunk.
+    // `source_path` — a pump onto its own source.
     let r = call(
         &kernel,
         json!({"type": "pump", "source": "", "sink": null, "source_path": "src.txt",
@@ -1144,25 +1151,11 @@ async fn pump_falsy_args_fall_back_like_python() {
     )
     .await;
     assert_eq!(r["reason"], "bad_arg", "a chunk floor of 1: {r}");
-    let r = call(
-        &kernel,
-        json!({"type": "pump", "source": "", "sink": null, "source_path": "src.txt",
-               "sink_path": ""}),
-    )
-    .await;
-    assert_eq!(
-        r,
-        json!({"source": "src.txt", "sink": "src.txt", "bytes": 10, "chunks": 1}),
-        "{r}"
-    );
-    assert_eq!(
-        std::fs::read(served.join("src.txt")).unwrap(),
-        b"hello pump"
-    );
     // A real copy, chunk by chunk, to another path.
     let r = call(
         &kernel,
-        json!({"type": "pump", "path": "src.txt", "sink_path": "copy.txt", "chunk": 4}),
+        json!({"type": "pump", "source": "", "sink": null, "source_path": "src.txt",
+               "sink_path": "copy.txt", "chunk": 4}),
     )
     .await;
     assert_eq!(
@@ -1174,11 +1167,11 @@ async fn pump_falsy_args_fall_back_like_python() {
         std::fs::read(served.join("copy.txt")).unwrap(),
         b"hello pump"
     );
-    // `path` stands in for `source_path`, and a failed read names the SOURCE
-    // with python's repr and prints the reply as python prints a dict.
+    // A failed read names the SOURCE with python's repr and prints the reply as
+    // python prints a dict.
     let r = call(
         &kernel,
-        json!({"type": "pump", "source": "nobody", "path": "src.txt"}),
+        json!({"type": "pump", "source": "nobody", "source_path": "src.txt"}),
     )
     .await;
     assert_eq!(r["reason"], "transport_error", "{r}");
@@ -1189,6 +1182,65 @@ async fn pump_falsy_args_fall_back_like_python() {
             .starts_with("pump: read from 'nobody' failed: {'error':"),
         "{r}"
     );
+}
+
+/// Audit BV-7 — python `test_a_pump_onto_its_own_source_is_refused`. With only
+/// `source_path`, sink and sink_path default to the source, and the first write's
+/// `truncate` cut the file the next read comes from — 200 KiB became 64 KiB under
+/// a success reply. Refused, the path judged normalised (`./x` is `x`); the file
+/// is untouched.
+#[tokio::test]
+async fn a_pump_onto_its_own_source_is_refused() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let served = served(&tmp);
+    let kernel = mk_kernel(&tmp).await;
+    let data: Vec<u8> = (0..800).flat_map(|_| 0u8..=255).collect();
+    std::fs::write(served.join("self.bin"), &data).unwrap();
+    for extra in [
+        json!({}),
+        json!({"sink_path": "self.bin"}),
+        json!({"sink_path": "./self.bin"}),
+        json!({"sink": "fb", "sink_path": "sub/../self.bin"}),
+    ] {
+        let mut p = json!({"type": "pump", "source_path": "self.bin"});
+        for (k, v) in extra.as_object().unwrap() {
+            p[k] = v.clone();
+        }
+        let out = call(&kernel, p).await;
+        assert_eq!(
+            serde_json::to_string(&out).unwrap(),
+            "{\"error\":\"pump: sink_path must be another file than source_path when the \
+             sink is the source — a pump onto its own source truncates it after the first \
+             chunk\",\"reason\":\"bad_arg\",\"arg\":\"sink_path\"}",
+            "{extra}"
+        );
+    }
+    assert_eq!(std::fs::read(served.join("self.bin")).unwrap(), data);
+}
+
+/// ARCH2-8 — `path` is no alias for `source_path`: the verb doc lists only
+/// `source_path`, so a `path` names nothing and the read end refuses the empty
+/// source.
+#[tokio::test]
+async fn pump_takes_source_path_only() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let served = served(&tmp);
+    let kernel = mk_kernel(&tmp).await;
+    std::fs::write(served.join("a.txt"), b"hello").unwrap();
+    let out = call(
+        &kernel,
+        json!({"type": "pump", "path": "a.txt", "sink_path": "b.txt"}),
+    )
+    .await;
+    assert_eq!(out["reason"], "transport_error", "{out}");
+    assert!(
+        out["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("pump: read from 'fb' failed: {"),
+        "{out}"
+    );
+    assert!(!served.join("b.txt").exists());
 }
 
 // ─── the allow list — python `file_bridge/tests/test_allow_list.py` ───────────
@@ -1521,7 +1573,7 @@ async fn pump_ends_are_ordinary_executions_in_python_shape() {
     std::fs::write(served.join("src.txt"), b"hello").unwrap();
     let r = call(
         &kernel,
-        json!({"type": "pump", "path": "src.txt", "sink_path": "copy.txt"}),
+        json!({"type": "pump", "source_path": "src.txt", "sink_path": "copy.txt"}),
     )
     .await;
     assert_eq!(r["chunks"], 1, "{r}");

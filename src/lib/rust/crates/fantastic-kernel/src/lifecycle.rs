@@ -252,6 +252,18 @@ pub(crate) async fn create_from_payload(
             );
         }
     }
+    // `children_dir` BECOMES A DIRECTORY (`<agent>/<children_dir>/<child>`), so
+    // it is one safe segment, exactly as an id is. A non-string is judged as ""
+    // — python refuses it as "a non-empty string" too.
+    if let Some(cd) = payload.get("children_dir") {
+        if let Some(r) = crate::refusal::guard_agent_id_as(
+            "create_agent",
+            "children_dir",
+            cd.as_str().unwrap_or(""),
+        ) {
+            return r;
+        }
+    }
 
     // Compose meta from the remaining payload fields. No per-field check here:
     // an unknown handler_module is not refused (see above), and reserved keys
@@ -386,16 +398,19 @@ pub(crate) async fn create_from_payload(
     // Emit `agent_created` lifecycle event on the parent's inbox so
     // watchers (canvas frame chrome) refresh without polling. Mirrors
     // Python's `await self.emit(self.id, {type:"agent_created", ...})`.
-    kernel
-        .emit(
-            &parent.id,
-            crate::jsonsafe::obj([
-                ("type", Value::from("agent_created")),
-                ("id", Value::from(new_id.0.clone())),
-                ("agent", rec_value.clone()),
-            ]),
-        )
-        .await;
+    // BOOKKEEPING FROM ABOVE, like the boot: emitted as the root, the gate
+    // judged root→parent, and the root's `$children` baseline reaches depth 1
+    // only — a parent any deeper never got its event, operator creates
+    // included, and nothing said so (audit 2026-10-03, KV-4).
+    crate::send::with_operator(kernel.emit(
+        &parent.id,
+        crate::jsonsafe::obj([
+            ("type", Value::from("agent_created")),
+            ("id", Value::from(new_id.0.clone())),
+            ("agent", rec_value.clone()),
+        ]),
+    ))
+    .await;
     rec_value
 }
 
@@ -514,10 +529,12 @@ pub async fn cascade_delete(kernel: &Arc<Kernel>, target: &Arc<Agent>) {
     // on_delete hook. C87: python's exact stdout line (`_agent.py:2835`,
     // `print(f"  [cascade] {self.id} bundle on_delete raised: {e}")`) — a
     // hook that raises is logged and the cascade still continues; delete is
-    // not refusable.
+    // not refusable. The hook runs AS THE AGENT ITSELF (its own id is the
+    // sender), whoever asked for the delete — like `on_cancel` (audit G-3).
     if let Some(hm) = target.handler_module.as_deref() {
         if let Some(bundle) = kernel.bundles.get(hm) {
-            if let Err(e) = bundle.on_delete(&target.id, kernel).await {
+            let hook = bundle.on_delete(&target.id, kernel);
+            if let Err(e) = crate::send::with_sender(target.id.clone(), hook).await {
                 println!("  [cascade] {} bundle on_delete raised: {e}", target.id.0);
             }
         }

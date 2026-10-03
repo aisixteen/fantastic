@@ -36,6 +36,28 @@ use tokio::sync::watch;
 /// a long-lived kernel cannot grow without limit.
 pub const DEFAULT_LEDGER_CAP: usize = 1_000_000;
 
+/// The kernel verbs whose answer is scoped to the caller that sends them
+/// (`ledger`, `ack_deadletter`: the executions THAT caller originated). A join of
+/// one by any other caller is refused ([`Ledger::open`]); a new caller-scoped verb
+/// joins this set. Python `_CALLER_SCOPED_VERBS`.
+pub const CALLER_SCOPED_VERBS: [&str; 2] = ["ledger", "ack_deadletter"];
+
+/// The answer to joining another caller's execution of a caller-scoped verb,
+/// in python's words (`_foreign_scoped_join`): the caller's raw id as given.
+fn foreign_scoped_join(caller_id: &Value, verb: &str) -> Value {
+    let mut r = crate::refusal::refusal(
+        crate::refusal::BAD_ARG,
+        format!(
+            "send: id {} names another caller's {verb} execution — {verb} answers \
+             only the caller that sent it, so it cannot be joined; make your own \
+             {verb} call under a new id",
+            fantastic_bundle::py_repr_value(caller_id),
+        ),
+    );
+    crate::refusal::with(&mut r, "arg", json!("id"));
+    r
+}
+
 /// One execution and what it became.
 struct Row {
     target: AgentId,
@@ -64,9 +86,15 @@ struct Row {
     /// The item's SECRET paths (RAM only — [`crate::secret`]): what the settle
     /// masks the recorded outcome with.
     secret: Option<Arc<crate::secret::Secret>>,
+    /// The IDENTITY that opened it (RAM only): the sending agent, the qualified
+    /// `<guid>|<agent>` a bridge leg relayed, or `None` for the operator — what a
+    /// joiner must BE to receive the real outcome of a secret-marked execution.
+    /// Python `entry["origin"]` (`_caller_identity`).
+    origin: Option<String>,
     /// The outcome AS SHOWN, for a call with `secret` paths — what the settle
-    /// row records and the `ledger` read-back answers. Joiners and re-senders in
-    /// RAM still get the real [`Row::outcome`]. Python `shown_out`.
+    /// row records and the `ledger` read-back answers. Its original caller
+    /// joining in RAM still gets the real [`Row::outcome`]; any other joiner the
+    /// shown one ([`Opened`]'s mask). Python `shown_out`.
     shown: Option<Outcome>,
     /// How joiners wait. `watch` (not `Notify`) because it carries the value and
     /// cannot miss an edge: a joiner that subscribes after the settle still
@@ -75,13 +103,32 @@ struct Row {
 }
 
 /// What [`Ledger::open`] decided for one item.
+///
+/// A join carries the ORIGINAL call's payload (what the joiner is authorized
+/// against), its MASK: the execution's secret marks when it carried some and
+/// the joiner is not the identity that opened it — the outcome is then handed
+/// over AS SHOWN ([`crate::secret::shown_outcome`]), never the real values;
+/// `None` for an unmarked execution, and for its original caller — and its
+/// FOREIGN refusal: `Some` when the execution ran a caller-scoped verb
+/// ([`CALLER_SCOPED_VERBS`]) and the joiner is not the caller that sent it. The
+/// caller answers it once the gate has passed the joiner.
 pub enum Opened {
     /// A new execution: dispatch it, then call [`Ledger::settle`].
     Fresh,
     /// Someone else is running this id — await their outcome, run nothing.
-    Join(watch::Receiver<Option<Outcome>>, Value),
+    Join(
+        watch::Receiver<Option<Outcome>>,
+        Value,
+        Option<Arc<crate::secret::Secret>>,
+        Option<Box<Value>>,
+    ),
     /// Already settled: this IS the answer, the handler must not run again.
-    Settled(Box<Outcome>, Value),
+    Settled(
+        Box<Outcome>,
+        Value,
+        Option<Arc<crate::secret::Secret>>,
+        Option<Box<Value>>,
+    ),
     /// The id is unusable — the refusal to hand back verbatim.
     Refused(Box<Value>),
 }
@@ -132,6 +179,12 @@ impl Ledger {
     /// refusal in python's exact words; `name` is `Some` only for the
     /// string-name case (only a named row is a dedup contract, and the ring
     /// evicts the unnamed first).
+    ///
+    /// `identity` is WHO this call is (the sending agent, a relayed
+    /// `<guid>|<agent>`, `None` for the operator): a fresh row keeps it as its
+    /// origin, a join compares it with the origin. `secret` is the item's marks,
+    /// kept beside a FRESH row in the same step that claims it — a concurrent
+    /// joiner never sees a marked execution without its marks.
     #[allow(clippy::too_many_arguments)]
     pub fn open(
         &self,
@@ -142,6 +195,8 @@ impl Ledger {
         retries: u32,
         name: Option<&str>,
         caller: Option<AgentId>,
+        identity: Option<String>,
+        secret: Option<crate::secret::Secret>,
     ) -> Opened {
         let mut g = self.inner.lock().expect("ledger poisoned");
 
@@ -169,11 +224,40 @@ impl Ledger {
                 crate::refusal::with(&mut r, "arg", json!("id"));
                 return Opened::Refused(Box::new(r));
             }
+            // A SECRET-MARKED EXECUTION'S REAL OUTCOME IS ITS CALLER'S ALONE
+            // (audit 2026-10-03, F1): any other identity joins it AS SHOWN.
+            let mask = row
+                .secret
+                .as_ref()
+                .filter(|_| row.origin != identity)
+                .map(Arc::clone);
+            // A CALLER-SCOPED VERB'S ANSWER IS ITS CALLER'S VIEW, NOT A FACT
+            // (owner-approved 2026-10-03, audit KV-1). `ledger` and
+            // `ack_deadletter` answer from WHO sends them — the executions that
+            // caller originated (`Row::caller`); a join never re-runs the
+            // handler, so the joiner would be handed the original caller's view.
+            // Measured: `B`, granted `ledger`, joined `A`'s named ledger read and
+            // got A's rows (and the operator's unscoped read by its int pid:
+            // every caller's). So a join by any caller other than the one that
+            // sent it is REFUSED — the operator included, whose own read is
+            // unscoped anyway. Any NEW caller-scoped verb joins
+            // `CALLER_SCOPED_VERBS`. Cross-caller joins of every OTHER verb stay
+            // open by design: one execution under one id is the once-only
+            // contract (a wire frame id IS the execution id), the gate asks the
+            // joiner the original call's question, and a secret-marked outcome
+            // goes over as shown (`mask`). Python `_agent.py` (the join branch).
+            let foreign = row
+                .payload
+                .get("type")
+                .and_then(Value::as_str)
+                .filter(|v| CALLER_SCOPED_VERBS.contains(v))
+                .filter(|_| row.caller != caller)
+                .map(|v| Box::new(foreign_scoped_join(caller_id, v)));
             return match &row.outcome {
                 // The joiner is authorized against THIS row's verb by the
                 // caller — hand it out with the decision.
-                Some(o) => Opened::Settled(Box::new(o.clone()), row.payload.clone()),
-                None => Opened::Join(row.tx.subscribe(), row.payload.clone()),
+                Some(o) => Opened::Settled(Box::new(o.clone()), row.payload.clone(), mask, foreign),
+                None => Opened::Join(row.tx.subscribe(), row.payload.clone(), mask, foreign),
             };
         }
 
@@ -195,7 +279,8 @@ impl Ledger {
                 caller,
                 acked: false,
                 outcome: None,
-                secret: None,
+                secret: secret.map(Arc::new),
+                origin: identity,
                 shown: None,
                 tx,
             },
@@ -205,19 +290,17 @@ impl Ledger {
         Opened::Fresh
     }
 
-    /// Keep a FRESH execution's secret paths beside it — python `_ledger_open`'s
-    /// `"secret": secret`, RAM only. The settle masks the recorded outcome with
-    /// them ([`Self::settle`]).
-    pub(crate) fn keep_secret(&self, exec_id: i64, secret: crate::secret::Secret) {
-        if let Some(r) = self
-            .inner
+    /// Did the execution held under `exec_id` carry `secret` marks? False when no
+    /// row is held in RAM, or when one replayed from the store holds it (that
+    /// answers a refusal, never a value). Python `exe.get("secret") is not None`.
+    #[must_use]
+    pub fn carried_secret(&self, exec_id: i64) -> bool {
+        self.inner
             .lock()
             .expect("ledger poisoned")
             .rows
-            .get_mut(&exec_id)
-        {
-            r.secret = Some(Arc::new(secret));
-        }
+            .get(&exec_id)
+            .is_some_and(|r| r.secret.is_some())
     }
 
     /// The outcome AS RECORDED for a call with secret paths, once settled — what
@@ -520,6 +603,7 @@ impl Ledger {
                 acked: false,
                 outcome: Some(out),
                 secret: None,
+                origin: None,
                 shown: None,
                 tx,
             },

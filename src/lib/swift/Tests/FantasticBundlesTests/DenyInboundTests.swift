@@ -70,4 +70,57 @@ struct DenyInboundTests {
         #expect(d.hint.contains("'allow_all' is not an INGRESS rule name"))
         #expect(d.hint.contains("allow_all_ingress, deny_ingress, password_ingress"))
     }
+
+    /// Audit W-8 — a MALFORMED spec (not a string or an object, or a `type`/`env`
+    /// that is not a string) is named by its python repr — a name no registry
+    /// holds — so ingress seals on it, egress refuses it, reflect reports it, in
+    /// python's words. It threw `unsupported rule spec`, read a non-string `type`
+    /// as no rule, and a non-string `env` as the DEFAULT token variable.
+    @Test func aMalformedSpecIsNamedByItsPythonRepr() {
+        let cases: [(JSON, String)] = [
+            (.integer(7), "7"),
+            (.array([.string("allow_all_ingress")]), "['allow_all_ingress']"),
+            (.object(["type": .array([.string("x")])]), "{'type': ['x']}"),
+            (.object(["type": .object(["a": .integer(1)])]), "{'type': {'a': 1}}"),
+            (
+                .object(["type": .string("password_ingress"), "env": .integer(7)]),
+                "{'type': 'password_ingress', 'env': 7}"
+            ),
+        ]
+        for (spec, name) in cases {
+            #expect(IngressRules.unknown(spec) == name)
+            guard
+                case .deny(let d) = IngressRules.resolve(spec).authorize(
+                    AuthAction(kind: "call", target: "t", verb: "reflect", token: "x"))
+            else {
+                Issue.record("a malformed rule must never allow: \(name)")
+                continue
+            }
+            #expect(d.reason == "edge sealed — unknown ingress rule \(pyRepr(name))")
+            #expect(d.hint.contains("\(pyRepr(name)) is not an INGRESS rule name"))
+            do {
+                _ = try EgressRules.resolve(spec)
+                Issue.record("egress must refuse a malformed spec: \(name)")
+            } catch {
+                #expect("\(error)" == "unknown egress rule type \(pyRepr(name))")
+            }
+            #expect(describe(["ingress_rule": spec])["ingress_rule"] == .string(name))
+            #expect(
+                IngressRules.unknownRefusal(["ingress_rule": spec])
+                    == "ingress_rule=\(pyRepr(spec)) is not a rule this bundle implements — "
+                    + "legal values: allow_all_ingress, deny_ingress, password_ingress")
+        }
+        // null inside a spec is ABSENT, as it is for the whole spec; an empty name
+        // is a plain seal (python-falsy).
+        #expect(IngressRules.unknown(.object(["type": .null])) == nil)
+        let pw = IngressRules.resolve(
+            .object(["type": .string("password_ingress"), "env": .null]))
+        #expect(pw is IngressRules.Password)
+        guard case .deny(let plain) = IngressRules.DenyInbound(unknown: "").authorize(act("call"))
+        else {
+            Issue.record("an empty rule name must never allow")
+            return
+        }
+        #expect(plain.reason == "edge sealed by policy")
+    }
 }

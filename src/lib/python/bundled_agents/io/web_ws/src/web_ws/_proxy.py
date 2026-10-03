@@ -5,8 +5,9 @@ Two on-the-wire formats, picked automatically by payload content:
   TEXT FRAMES (JSON, default):
     C->S {type:"call",   target, payload, id, secret?}
                                                   -> kernel.send -> reply
-                                                     (`secret` = the item's marked
-                                                     paths, `kernel/_secret`)
+                                                     (`secret` = the item's marks —
+                                                     dotted strings and/or arrays
+                                                     of steps, `kernel/_secret`)
     C->S {type:"emit",   target, payload}         -> kernel.emit (no reply)
     C->S {type:"watch",  src}                     -> mirror src's inbox into ours
     C->S {type:"unwatch", src}
@@ -15,6 +16,11 @@ Two on-the-wire formats, picked automatically by payload content:
     S->C {type:"event",  src, payload}            -> an event from a watched agent
                                                      (`src` = the name the client watched)
     S->C {type:"event",  payload}                 -> an event emitted to THIS connection
+    S->C {type:"emit",   target, payload, caller?} -> the host emitting on a page
+                                                     agent (`<guid>|<agent>`: every
+                                                     tab of that guid)
+    S->C {type:"reply_mirror", id, data}          -> a reply another tab of THIS
+                                                     connection's hello guid got
 
   BINARY FRAMES (when payload contains a `bytes` value anywhere):
     [4-byte BE uint32 H | H-byte JSON envelope | M-byte raw blob]
@@ -53,8 +59,24 @@ from io_bridge import (
 logger = logging.getLogger(__name__)
 
 
+# hello guid → its live connections, per kernel: (id(kernel.ctx), guid) →
+# {client_id: that connection's `_send_envelope`}. Every reply a leg answers to
+# one tab of an identity is mirrored to the others (owner, 2026-10-03).
+_TABS: dict[tuple[int, str], dict] = {}
+
+
 def _make_client_id() -> str:
     return f"_ws_{secrets.token_hex(3)}"
+
+
+def _name(frame: dict, key: str) -> str:
+    """A frame field the proxy USES as a name (`type`, `target`, `src`, an answer's
+    `id`): the field when it is a string, else `""` — as rust and swift read it. A
+    list or object here was hashed (`src in watching`, `out_calls.get(id)`, the
+    handler table, the kernel's agent table) and its TypeError ended the socket,
+    every in-flight call on it included (audit W-9, 2026-10-03)."""
+    v = frame.get(key)
+    return v if isinstance(v, str) else ""
 
 
 # ─── binary frame codec ─────────────────────────────────────────
@@ -173,7 +195,7 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
     # own id) — it is gated as that agent and every external call/emit
     # originates from it.
     async def _on_call(frame):
-        target = frame.get("target", "")
+        target = _name(frame, "target")
         payload = frame.get("payload", {})
         fid = frame.get("id", "")
         decision = _gate("call", frame)
@@ -185,7 +207,7 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
                 data["hint"] = decision.hint
             if decision.see:
                 data["see"] = decision.see
-            await _send_envelope({"type": "reply", "id": fid, "data": data})
+            await _answer(fid, data)
             return
         # A handler raise settles as a failed outcome (`{"error": ..., "raised":
         # True}` in result) — send never leaks it, so the old except net is dead.
@@ -205,13 +227,28 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
             item["secret"] = frame["secret"]
         with sender_context(web_agent_id):
             reply = (await kernel.send([item]))[0]["result"]
-        await _send_envelope({"type": "reply", "id": fid, "data": reply})
+        await _answer(fid, reply)
+
+    async def _answer(fid, data) -> None:
+        """Reply to THIS connection, then mirror the reply to every OTHER live
+        connection that said hello with this one's guid."""
+        await _send_envelope({"type": "reply", "id": fid, "data": data})
+        if peer["guid"] is None:
+            return
+        # TODO (owner, open): DESYNC between the tabs of one identity is envisioned
+        # and unsolved — a mirror shows the reply, it does not reconcile state the
+        # other tabs built differently. Think later.
+        mirror = {"type": "reply_mirror", "id": fid, "data": data}
+        tabs = _TABS.get((id(kernel.ctx), peer["guid"]), {})
+        for cid, send in list(tabs.items()):
+            if cid != client_id:
+                await send(mirror)
 
     async def _on_emit(frame):
         if not _gate("emit", frame).allowed:
             return
         with sender_context(web_agent_id):
-            await kernel.emit(frame.get("target", ""), frame.get("payload", {}))
+            await kernel.emit(_name(frame, "target"), frame.get("payload", {}))
 
     async def _watch(src: str, frame_id: str) -> None:
         """THE ONE WATCH PATH — the connect-time auto-watch and an explicit
@@ -268,10 +305,10 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
     async def _on_watch(frame):
         if not _gate("watch", frame).allowed:
             return
-        await _watch(frame.get("src", ""), frame.get("id", ""))
+        await _watch(_name(frame, "src"), frame.get("id", ""))
 
     async def _on_unwatch(frame):
-        src = frame.get("src", "")
+        src = _name(frame, "src")
         if src in watching:
             _drop_watch(src)
 
@@ -293,8 +330,12 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
         # on the ROOT exactly as a kernel verb is — the leg needs an explicit
         # `state_subscribe` edge, not merely an open ingress rule. An ingress
         # rule answers "may this client reach this leg"; it says nothing about
-        # what the client may then READ.
-        denial = kernel.authorize_state_subscribe(web_agent_id)
+        # what the client may then READ. UNDER THE LEG'S OWN IDENTITY, like every
+        # other handler here: with no sender the kernel reads an OPERATOR and the
+        # gate never runs — a refactor of the ambient context (or a transport that
+        # sets none) would turn the stream into an open tap (audit ARCH2-7).
+        with sender_context(web_agent_id):
+            denial = kernel.authorize_state_subscribe(web_agent_id)
         if denial is not None:
             await _send_envelope({"type": "error", "id": frame.get("id", ""), **denial})
             return
@@ -344,7 +385,8 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
     # every such call rides THIS socket as an outbound `call` frame, answered by
     # an inbound `reply`/`error` with the same id. This leg only carries the
     # frames — the host kernel routes and gates, the page kernel gates its own
-    # agents. One guid per connection, pinned by the first hello.
+    # agents. One guid per connection, pinned by the first hello; many connections
+    # per guid (every tab of one identity).
     peer: dict = {"guid": None, "route": None, "closed": False}
     out_calls: dict[str, asyncio.Future] = {}
     out_seq = [0]
@@ -380,6 +422,12 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
         finally:
             out_calls.pop(fid, None)
 
+    async def _emit_page(agent_id: str, payload: dict, caller: str | None) -> None:
+        frame = {"type": "emit", "target": agent_id, "payload": payload}
+        if caller is not None:
+            frame["caller"] = caller
+        await _send_envelope(frame)
+
     async def _on_hello(frame):
         guid = frame.get("guid")
         if not isinstance(guid, str) or not guid or "|" in guid:
@@ -411,17 +459,17 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
                     }
                 )
             return
-        route = PeerRoute(via=web_agent_id, call=_call_page)
-        taken = kernel.ctx.register_peer(guid, route)
-        if taken is not None:
-            await _send_envelope({"type": "error", "id": frame.get("id", ""), **taken})
-            return
+        # A guid already live on another connection is another tab of that
+        # identity: this route JOINS it (one principal, kernel `register_peer`).
+        route = PeerRoute(via=web_agent_id, call=_call_page, emit=_emit_page)
+        kernel.ctx.register_peer(guid, route)
         peer["guid"], peer["route"] = guid, route
+        _TABS.setdefault((id(kernel.ctx), guid), {})[client_id] = _send_envelope
 
     def _on_answer(frame):
         """An inbound `reply`/`error` answers one of OUR outbound calls — its
         data is that call's outcome (a page-side refusal included)."""
-        fut = out_calls.get(frame.get("id", ""))
+        fut = out_calls.get(_name(frame, "id"))
         if fut is not None and not fut.done():
             data = frame.get("data")
             fut.set_result(data if isinstance(data, dict) else {"result": data})
@@ -475,7 +523,7 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
                     }
                 )
                 continue
-            ftype = frame.get("type")
+            ftype = _name(frame, "type")
             if ftype == "call":
                 # REGISTERED: `_on_call` DISPATCHES — it is real work, and a
                 # bare task left it out of `ps` and running under whatever
@@ -500,6 +548,11 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
         peer["closed"] = True
         if peer["route"] is not None:
             kernel.ctx.unregister_peer(peer["guid"], peer["route"])
+            key = (id(kernel.ctx), peer["guid"])
+            tabs = _TABS.get(key, {})
+            tabs.pop(client_id, None)
+            if not tabs:
+                _TABS.pop(key, None)
         for fut in list(out_calls.values()):
             if not fut.done():
                 fut.set_result(

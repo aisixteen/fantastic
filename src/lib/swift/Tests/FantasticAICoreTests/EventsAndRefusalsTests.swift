@@ -411,8 +411,9 @@ struct EventsAndRefusalsTests {
         // kernel refuses the send first — so python's `{t!r}` of a number is a
         // branch nothing can observe.
         let numeric = await kernel.send([Item(id, .object(["type": .integer(5)]))])[0].result
-        // C30: python's `got {verb!r}` tail.
-        #expect(numeric["error"].asString == "send: payload.type must be a non-empty string, got 5")
+        // C30: python's tail names a non-string by its TYPE, never its repr
+        // (audit 2026-10-03, W-11).
+        #expect(numeric["error"].asString == "send: payload.type must be a non-empty string, got int")
     }
 
     // ── B3.2: the inquiry placeholder ────────────────────────────────────

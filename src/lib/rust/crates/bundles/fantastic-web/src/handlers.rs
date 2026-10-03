@@ -32,16 +32,61 @@ const AUTH_HEADER: &str = "x-fantastic-auth";
 const PAYLOAD_HEADER: &str = "x-fantastic-payload";
 /// Header naming the one bytes-valued field on an octet request/reply.
 const BYTES_FIELD_HEADER: &str = "x-fantastic-bytes-field";
-/// SECRET MARKS: the item's `secret` paths (`fantastic_kernel::secret`) ride
+/// SECRET MARKS: the item's `secret` marks (`fantastic_kernel::secret`) ride
 /// `X-Fantastic-Secret` — dispatch metadata about the call, like the execution
-/// id, never part of the payload. The value is a JSON ARRAY of paths, the SAME
-/// value a ws/bridge `call` frame carries in its `secret` field: one parser (the
-/// strict wire `loads`), and the kernel's own check judges it. Not
-/// comma-separated — a path step is a payload key, and a key may hold a comma; a
-/// JSON string escapes any character into the ASCII a header value is safe in;
-/// and a wrong shape (a bare string, `[]`, a number) reaches the kernel's refusal
-/// verbatim instead of being re-invented by a splitter. Python `_SECRET_HEADER`.
+/// id, never part of the payload. The value is a JSON ARRAY of marks, each a
+/// dotted string (`"payload.key"`) or an array of steps (`["payload", "a.b"]` — a
+/// key holding a dot), the SAME value a ws/bridge `call` frame carries in its
+/// `secret` field: one parser (the strict wire `loads`), and the kernel's own
+/// check judges it. Not comma-separated — a path step is a payload key, and a key
+/// may hold a comma; a JSON string escapes any character into the ASCII a header
+/// value is safe in; and a wrong shape (a bare string, `[]`, a number) reaches the
+/// kernel's refusal verbatim instead of being re-invented by a splitter. Python
+/// `_SECRET_HEADER`.
 const SECRET_HEADER: &str = "x-fantastic-secret";
+
+/// The most body bytes a rest leg reads from one request: io_bridge's one frame
+/// cap. Python `web_rest.MAX_BODY`.
+pub(crate) const MAX_BODY: usize = fantastic_io_bridge::codec::MAX_FRAME;
+
+/// The ws leg's socket: a MESSAGE, like a frame, is at most io_bridge's one frame
+/// cap (audit W-3). tungstenite's default message cap is 64 MiB, so a message
+/// fragmented into frames under the frame cap was buffered and parsed at four
+/// times what python's server (uvicorn's `ws_max_size`) allows.
+pub(crate) fn ws_config() -> tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+    tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+        max_message_size: Some(fantastic_io_bridge::codec::MAX_FRAME),
+        max_frame_size: Some(fantastic_io_bridge::codec::MAX_FRAME),
+        ..Default::default()
+    }
+}
+
+/// The request body — at most `limit` bytes, read chunk by chunk; `None` when it
+/// is larger, with nothing past the bound read (a `declared` Content-Length over
+/// it is refused before one byte). A stream that fails mid-read is an empty body,
+/// as the unbounded read before it answered. Python `_read_body`.
+pub(crate) async fn read_capped(
+    body: Body,
+    declared: Option<u64>,
+    limit: usize,
+) -> Option<Vec<u8>> {
+    use futures_util::StreamExt;
+    if declared.is_some_and(|n| n > limit as u64) {
+        return None;
+    }
+    let mut buf = Vec::new();
+    let mut stream = body.into_data_stream();
+    while let Some(chunk) = stream.next().await {
+        let Ok(chunk) = chunk else {
+            return Some(Vec::new());
+        };
+        buf.extend_from_slice(&chunk);
+        if buf.len() > limit {
+            return None;
+        }
+    }
+    Some(buf)
+}
 
 /// One chunk of the file proxy, python's `length: 262144`.
 const CHUNK: u64 = 262_144;
@@ -107,10 +152,6 @@ async fn run(
         Handler::RestPost(owner) => {
             let target = caps.first().cloned().unwrap_or_default();
             let (parts, body) = req.into_parts();
-            let body = match axum::body::to_bytes(body, usize::MAX).await {
-                Ok(b) => b.to_vec(),
-                Err(_) => Vec::new(),
-            };
             let st = state.clone();
             state
                 .scoped(rest_post(st, owner, target, parts.headers, body))
@@ -246,8 +287,7 @@ async fn read_chunk(
     let item = Item::new(
         target.clone(),
         json!({"type": "read_stream", "path": path, "offset": offset, "length": CHUNK}),
-    )
-    .with_raw_reply();
+    );
     let out = fantastic_kernel::send::with_sender(sender.clone(), async move {
         kernel2.send(vec![item]).await.remove(0)
     })
@@ -260,12 +300,38 @@ async fn read_chunk(
 // ─── `POST /<rest_id>/{target_id}` ──────────────────────────────────
 
 /// python `_rest_call` — the REST verb channel, JSON leg and octet leg.
+/// python `_too_large` — the 413 for a body past [`MAX_BODY`].
+fn too_large() -> Response {
+    let mut r = fantastic_kernel::refusal::refusal(
+        fantastic_kernel::refusal::TRANSPORT_ERROR,
+        format!(
+            "web_rest: the request body exceeds {MAX_BODY} bytes — the one frame cap every \
+             wire leg holds (io_bridge MAX_FRAME); send larger data in chunks (write_stream)"
+        ),
+    );
+    fantastic_kernel::refusal::with(&mut r, "limit", json!(MAX_BODY));
+    routes::respond(
+        StatusCode::PAYLOAD_TOO_LARGE,
+        &[],
+        Some("application/json"),
+        r.to_string().into_bytes(),
+    )
+}
+
+/// GATE FIRST, THEN THE BODY (audit IO-4, 2026-10-03). A POST is judged by the
+/// leg's ingress rule on what the request says up front — its target and its
+/// `X-Fantastic-Auth` credential — and only an admitted request's body is read,
+/// at most [`MAX_BODY`] bytes (io_bridge's `MAX_FRAME`); a larger body is refused
+/// 413, loud, with nothing past the bound read (a declared `Content-Length` over
+/// it is refused unread). Reading and parsing the whole body before the gate let
+/// a client the leg was about to refuse make the kernel buffer any amount of
+/// data. Python `_rest_call`.
 async fn rest_post(
     state: AppState,
     owner: AgentId,
     target_id: String,
     headers: HeaderMap,
-    body: Vec<u8>,
+    body: Body,
 ) -> Response {
     let target = AgentId::from(target_id.as_str());
     let header_str =
@@ -273,6 +339,19 @@ async fn rest_post(
     let exec_id = header_str(EXEC_ID_HEADER).filter(|v| !v.is_empty());
     let content_type = header_str(header::CONTENT_TYPE.as_str()).unwrap_or_default();
     let auth_token = header_str(AUTH_HEADER);
+    // THE GATE FIRST, on what the request says before its body: the target and
+    // the `X-Fantastic-Auth` credential. A refused client's body is never read.
+    if let Some(denial) = rest_gate(&state, &owner, &target_id, "", auth_token.as_deref()) {
+        return denial;
+    }
+    // python `declared.isdigit()` — a Content-Length that is not plain digits
+    // declares nothing
+    let declared = header_str(header::CONTENT_LENGTH.as_str())
+        .filter(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
+        .and_then(|v| v.parse::<u64>().ok().or(Some(u64::MAX)));
+    let Some(body) = read_capped(body, declared, MAX_BODY).await else {
+        return too_large();
+    };
     // SECRET MARKS: this kernel records the call as shown, exactly as for a local
     // caller; a malformed mark is the kernel's own refusal. Read AFTER the gate
     // (a sealed leg still answers 403 first) — python reads it where it builds
@@ -331,10 +410,6 @@ async fn rest_post(
             .unwrap_or_else(|| "bytes".to_string());
         obj.insert(field.clone(), Value::Null);
         let payload = Value::Object(obj);
-        let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
-        if let Some(denial) = rest_gate(&state, &owner, &target_id, verb, auth_token.as_deref()) {
-            return denial;
-        }
         let Ok(secret) = secret_marks() else {
             return not_json();
         };
@@ -392,10 +467,6 @@ async fn rest_post(
             "web_rest: body must be a JSON object",
         );
     }
-    let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
-    if let Some(denial) = rest_gate(&state, &owner, &target_id, verb, auth_token.as_deref()) {
-        return denial;
-    }
     let Ok(secret) = secret_marks() else {
         return not_json();
     };
@@ -407,18 +478,6 @@ async fn rest_post(
         }
         if let Some(marks) = secret {
             item = item.with_secret(marks);
-        }
-        // A BINARY-EDGE VERB RIDES THE BINARY CHANNEL even on the JSON leg
-        // (A13.1): python's `read_stream` reply holds real bytes whatever leg
-        // asked for it, and a `write_stream` whose `bytes` is a JSON string is
-        // `missing_arg` with nothing written. Routing it here gives both.
-        let binary_edge = item
-            .payload
-            .get("type")
-            .and_then(Value::as_str)
-            .is_some_and(|v| fantastic_io_bridge::codec::BINARY_EDGE_VERBS.contains(&v));
-        if binary_edge {
-            item = item.with_raw_reply();
         }
         kernel.send(vec![item]).await.remove(0)
     })
@@ -654,7 +713,7 @@ fn rest_gate(
     verb: &str,
     token: Option<&str>,
 ) -> Option<Response> {
-    use fantastic_io_bridge::authorizer::{ingress, manifold_spec, Action, Decision, Denial};
+    use fantastic_io_bridge::authorizer::{ingress, manifold_spec, Action, Decision};
 
     let (primary, auth) = match state.kernel.agents.get(owner).map(|e| Arc::clone(&e)) {
         Some(a) => {
@@ -665,16 +724,12 @@ fn rest_gate(
         None => (None, None),
     };
     let spec = manifold_spec(primary.as_ref(), auth.as_ref(), "_ingress");
-    let decision = match ingress::resolve(spec.as_ref()) {
-        Ok(rule) => rule.authorize(&Action {
-            kind: "call",
-            target,
-            verb,
-            token,
-        }),
-        // A spec that will not parse is not an authorization.
-        Err(e) => Decision::Deny(Denial::new(format!("web_rest: bad ingress rule: {e}"))),
-    };
+    let decision = ingress::resolve(spec.as_ref()).authorize(&Action {
+        kind: "call",
+        target,
+        verb,
+        token,
+    });
     match decision {
         Decision::Allow => None,
         Decision::Deny(denial) => {
@@ -759,7 +814,7 @@ async fn ws_upgrade(
         let socket = tokio_tungstenite::WebSocketStream::from_raw_socket(
             io,
             tokio_tungstenite::tungstenite::protocol::Role::Server,
-            None,
+            Some(ws_config()),
         )
         .await;
         ws::ws_loop(state, socket, host, leg).await;

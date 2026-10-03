@@ -15,8 +15,8 @@ hostile rows → they come back as DATA — listable, joinable, never executed.
 
 from __future__ import annotations
 
-import sys
 import types
+from kernel import register_unlisted
 
 _runs: list[str] = []
 
@@ -37,7 +37,7 @@ async def _handler(id, payload, kernel):
 
 _mod.handler = _handler
 _mod.VERBS = {}
-sys.modules["adv5_probe.tools"] = _mod
+register_unlisted("adv5_probe.tools", _mod)
 
 
 async def _root_with_store(monkeypatch, tmp_path):

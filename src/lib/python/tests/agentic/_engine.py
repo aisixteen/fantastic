@@ -641,6 +641,27 @@ class Hydration:
         return self
 
 
+# `$workdir` in a loader's `manifest` — a string VALUE that is `$workdir` or starts
+# with `$workdir/` — means the kernel's running dir, ABSOLUTE (the test's own tmp
+# dir). It is how a config names an absolute path that is still the test's: a
+# credential_store's `file` is refused relative, and the user's home is never
+# touched. Substituted when the manifest is written — the one moment the dir is
+# known; keys and `manifest_text` are left as written.
+WORKDIR = "$workdir"
+
+
+def _subst_workdir(value, cwd: Path):
+    if isinstance(value, str):
+        if value == WORKDIR or value.startswith(WORKDIR + "/"):
+            return str(cwd) + value[len(WORKDIR) :]
+        return value
+    if isinstance(value, dict):
+        return {k: _subst_workdir(v, cwd) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_subst_workdir(v, cwd) for v in value]
+    return value
+
+
 def _write_manifests(cfg: Config, cwd: Path) -> None:
     """Materialize each loader's manifest in the cwd.
 
@@ -654,7 +675,7 @@ def _write_manifests(cfg: Config, cwd: Path) -> None:
         text = (
             ln.manifest_text
             if ln.manifest_text is not None
-            else yaml.safe_dump(ln.manifest, sort_keys=False)
+            else yaml.safe_dump(_subst_workdir(ln.manifest, cwd), sort_keys=False)
         )
         (cwd / ln.file).write_text(text)
 

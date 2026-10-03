@@ -50,7 +50,7 @@ public protocol AgentBundle: Sendable {
     ) async throws -> JSON?
 
     /// Dispatch a binary-framed verb. The binary channel is **symmetric**: a
-    /// request carries `(header, body)` and the reply carries `(JSON?, Data?)` —
+    /// request carries `(header, body)` and the reply carries `(JSON?, Blob?)` —
     /// raw bytes flow in BOTH directions, never base64 (mirrors py/rust's
     /// `read_stream`/`write_stream`/`paste_image`, where the bytes are a native
     /// `bytes` value in the dict). `header` is the payload with NOTHING at the
@@ -60,12 +60,22 @@ public protocol AgentBundle: Sendable {
     /// placed under another key is not its body. `nil` = the binary channel with
     /// no request body (a raw read: `read_stream`).
     ///
-    /// The reply body is OPTIONAL and the distinction is load-bearing (C37):
-    /// `nil` = the verb returned NO chunk (a `write_stream` status, a refusal);
-    /// `.some(d)` = it returned one, `d` possibly EMPTY (a 0-byte read of an
-    /// empty file). Every wire leg picks its response shape from that, exactly
-    /// as python's `isinstance(reply["bytes"], bytes)` does — testing
-    /// `isEmpty` instead served an empty file as JSON.
+    /// The reply body is a `Blob?` — the chunk AND ITS SLOT in the reply, as
+    /// python's reply dict holds a bytes value at a key: a `read_stream` chunk is
+    /// `Blob("bytes", …)`, a bridge relaying a peer's reply keeps the slot the
+    /// peer's frame named (`["x.y"]` is the reply key `"x.y"`, never `x` → `y`).
+    /// It is OPTIONAL and the distinction is load-bearing (C37): `nil` = the verb
+    /// returned NO chunk (a `write_stream` status, a refusal); `.some(b)` = it
+    /// returned one, `b.bytes` possibly EMPTY (a 0-byte read of an empty file).
+    /// Every wire leg picks its response shape from that, exactly as python's
+    /// `isinstance(reply["bytes"], bytes)` does — testing `isEmpty` instead
+    /// served an empty file as JSON. Rust `Bundle::handle_binary`.
+    ///
+    /// ANY VERB MAY ANSWER WITH A BODY. Every wire leg (web_ws, web_rest, a
+    /// bridge serving an inbound call, the exec relay) dispatches its calls HERE —
+    /// a text frame with `body: nil` (`Item.rawReply`) — and answers binary
+    /// exactly when the reply carries a body. There is no list of binary verbs
+    /// and nothing to declare: a bundle that answers bytes returns them here.
     ///
     /// Default: dispatch the HEADER through the text `handle` (C79) — python
     /// has no separate binary channel at all, so a bundle without a binary edge
@@ -76,7 +86,7 @@ public protocol AgentBundle: Sendable {
         header: JSON,
         body: Blob?,
         kernel: Kernel
-    ) async throws -> (JSON?, Data?)
+    ) async throws -> (JSON?, Blob?)
 
     /// Refuse an `update_agent` patch this bundle cannot honour. Called by the
     /// substrate BEFORE the record changes; a returned string REFUSES the patch.
@@ -177,7 +187,7 @@ extension AgentBundle {
         header: JSON,
         body: Blob?,
         kernel: Kernel
-    ) async throws -> (JSON?, Data?) {
+    ) async throws -> (JSON?, Blob?) {
         // C79: THE HEADER IS THE PAYLOAD. Python has one dispatch — a REST octet
         // POST of `{type:"say"}` to the cli agent reaches `handle` and answers
         // 204; swift refused it with "no binary edge", which is a channel this

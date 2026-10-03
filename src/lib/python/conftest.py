@@ -43,6 +43,22 @@ def kernel(tmp_path, monkeypatch):
 
 
 @pytest.fixture
+def fake_providers(monkeypatch):
+    """The provider each AI agent's turn gets, by agent id. ai_core builds one per
+    turn from the live record (`ai_core.core._build_provider`); a test seats its
+    fake here instead. An id with no fake fails its turn loud (KeyError)."""
+    from ai_core import core
+
+    table: dict = {}
+
+    async def build(self_id, kernel, cfg):
+        return table[self_id]
+
+    monkeypatch.setattr(core, "_build_provider", build)
+    return table
+
+
+@pytest.fixture
 async def seeded_kernel(kernel):
     """Root Agent with a `cli` renderer attached (ephemeral, not
     persisted)."""

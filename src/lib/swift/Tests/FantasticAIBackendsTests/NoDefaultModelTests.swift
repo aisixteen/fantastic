@@ -58,7 +58,8 @@ struct NoDefaultModelTests {
     @Test("ollama reflect extras match python")
     func reflectExtrasMatchPython() {
         let cfg = OllamaBackendBundle().core.config
-        let bare = cfg.reflectExtra(agent([:]))
+        let kernel = Kernel(storage: .inMemory, bundles: BundleRegistry())
+        let bare = cfg.reflectExtra(agent([:]), kernel)
         #expect(Array(bare.keys) == ["temperature", "num_ctx", "num_predict", "think"])
         #expect(bare["temperature"] == .double(0.3))
         #expect(bare["num_ctx"] == .null && bare["num_predict"] == .null && bare["think"] == .null)
@@ -66,7 +67,7 @@ struct NoDefaultModelTests {
             agent([
                 "temperature": .double(0.7), "num_ctx": .integer(4096),
                 "num_predict": .integer(64), "think": .bool(false),
-            ]))
+            ]), kernel)
         #expect(set["temperature"] == .double(0.7))
         #expect(set["num_ctx"] == .integer(4096))
         #expect(set["num_predict"] == .integer(64))

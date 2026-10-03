@@ -127,7 +127,7 @@ func matchTemplate(_ template: [PathSegment], _ segments: [String]) -> [String: 
     return i == segments.count ? params : nil
 }
 
-// MARK: - host bind + Origin guard (python `web/app.py` — 2026-09-24)
+// MARK: - host bind + Host/Origin guard (python `web/app.py` — 2026-09-24, W-2)
 
 /// The web host binds LOOPBACK unless its record names a `host` — a closed default,
 /// overridable by whoever creates the kernel (create_agent meta, a roster yaml,
@@ -153,6 +153,21 @@ public func webOwnOrigins(_ rec: JSON) -> Set<String> {
         out.formUnion([
             "http://127.0.0.1:\(port)", "http://localhost:\(port)", "http://[::1]:\(port)",
         ])
+    }
+    return out
+}
+
+/// python `own_authorities(rec)`: the Host values that ARE this web host —
+/// `<host>:<port>` (an IPv6 literal in brackets), plus the three loopback spellings
+/// when it binds loopback. Nothing else — a container port map, a LAN name, a
+/// tunnel name are other authorities and are refused; a `0.0.0.0` bind answers
+/// only `0.0.0.0:<port>`.
+public func webOwnAuthorities(_ rec: JSON) -> Set<String> {
+    let host = webHost(rec)
+    let port = pyStr(rec["port"])
+    var out: Set<String> = [host.contains(":") ? "[\(host)]:\(port)" : "\(host):\(port)"]
+    if ["127.0.0.1", "localhost", "::1"].contains(host) {
+        out.formUnion(["127.0.0.1:\(port)", "localhost:\(port)", "[::1]:\(port)"])
     }
     return out
 }
@@ -223,6 +238,10 @@ public final class WebServer: @unchecked Sendable {
     /// The port `rec.port` named — python binds exactly this, never a hint, and
     /// never a 16-bit truncation of it: a port outside 0-65535 fails the bind.
     public let port: Int
+    /// The bind address, read off the record when the server is BUILT (python
+    /// `_spawn` puts it in uvicorn's config) — what `start` binds and what the
+    /// boot announcement names.
+    public let host: String
     private let lock = NSLock()
     private var channel: Channel?
     /// The task the `boot` verb ran under. Every request runs as its CHILD, so
@@ -246,6 +265,9 @@ public final class WebServer: @unchecked Sendable {
         self.kernel = kernel
         self.agentId = agentId
         self.port = port
+        // LOOPBACK unless the record names a host (`host: "0.0.0.0"` to publish).
+        self.host = webHost(
+            .object(["host": kernel.agent(agentId)?.metaValue(forKey: "host") ?? .null]))
     }
 
     /// Mount `specs` as the owner's routes — python's
@@ -355,8 +377,7 @@ public final class WebServer: @unchecked Sendable {
         }
         // `.wait()` blocks the calling thread (WebBundle.boot's task thread,
         // never an event-loop thread) until the bind resolves or throws.
-        // LOOPBACK unless the record names a host (`host: "0.0.0.0"` to publish).
-        let bound = try bootstrap.bind(host: webHost(record()), port: port).wait()
+        let bound = try bootstrap.bind(host: host, port: port).wait()
         lock.lock()
         channel = bound
         lock.unlock()
@@ -391,6 +412,15 @@ public final class WebServer: @unchecked Sendable {
         ])
     }
 
+    /// python `_OriginGuard`, the HOST half (audit W-2): EVERY request — any
+    /// method, the websocket upgrade included — whose `Host` is not one of
+    /// `webOwnAuthorities` is refused. A DNS-rebinding page sends a same-origin GET
+    /// with no `Origin`; its `Host` still names the attacker's domain. `true` =
+    /// refused.
+    func hostRefused(_ host: String) -> Bool {
+        !webOwnAuthorities(record()).contains(host)
+    }
+
     /// python `_OriginGuard`: a websocket upgrade, or an HTTP request that is not
     /// GET/HEAD/OPTIONS, from a FOREIGN browser origin is refused. `true` = refused.
     func originRefused(websocket: Bool, method: String, origin: String?) -> Bool {
@@ -412,8 +442,11 @@ public final class WebServer: @unchecked Sendable {
                 guard let self = self else {
                     return channel.eventLoop.makeSucceededFuture(nil)
                 }
-                // A foreign origin never upgrades: the request falls through to
-                // the HTTP dispatch, which logs it and answers the 403.
+                // A foreign host or origin never upgrades: the request falls
+                // through to the HTTP dispatch, which logs it and answers the 403.
+                if self.hostRefused(head.headers["host"].first ?? "") {
+                    return channel.eventLoop.makeSucceededFuture(nil)
+                }
                 let origin = head.headers["origin"].first.flatMap { $0.isEmpty ? nil : $0 }
                 if self.originRefused(websocket: true, method: "GET", origin: origin) {
                     return channel.eventLoop.makeSucceededFuture(nil)
@@ -440,16 +473,26 @@ public final class WebServer: @unchecked Sendable {
                 else {
                     return channel.eventLoop.makeSucceededVoidFuture()
                 }
+                let handler = endpoint(
+                    WebSocketUpgrade(
+                        params: params,
+                        // The same boot pid an HTTP request task is parented
+                        // to: python serves BOTH under `CURRENT_TASK.scope`
+                        // (A11.31).
+                        bootParent: self.requestParent))
+                // WHOLE, VALID MESSAGES ONLY (audit W-4): fragments reassembled
+                // up to the one frame cap, then `WebSocketMessageGuard`; then
                 // THE ROUTE'S OWN ENDPOINT — whatever the leg handed over for
                 // this path (web_ws: its proxy, bound to the captured host_id).
-                return channel.pipeline.addHandler(
-                    endpoint(
-                        WebSocketUpgrade(
-                            params: params,
-                            // The same boot pid an HTTP request task is parented
-                            // to: python serves BOTH under `CURRENT_TASK.scope`
-                            // (A11.31).
-                            bootParent: self.requestParent)))
+                return channel.eventLoop.makeCompletedFuture {
+                    try channel.pipeline.syncOperations.addHandler(
+                        NIOWebSocketFrameAggregator(
+                            minNonFinalFragmentSize: 0,
+                            maxAccumulatedFrameCount: Int.max,
+                            maxAccumulatedFrameSize: MAX_FRAME))
+                    try channel.pipeline.syncOperations.addHandler(WebSocketMessageGuard())
+                    try channel.pipeline.syncOperations.addHandler(handler)
+                }
             })
         let httpHandler = HTTPDispatchHandler(server: self)
         let upgradeConfig: NIOHTTPServerUpgradeConfiguration = (
@@ -476,38 +519,68 @@ public final class WebServer: @unchecked Sendable {
     /// the web boot dispatch has ended, so a pid parented to it was dangling.
     var requestParent: TaskId? { nil }
 
-    func handle(request: HTTPRequest) async -> HTTPResponse {
+    /// What a request's HEAD alone decides — the origin guard, the route, a 405,
+    /// a 307, a 404 — before one body byte is read: an answer, or the route to
+    /// serve. `handle` serves what it resolves; `preflight` runs it on the head.
+    enum Resolution {
+        case respond(HTTPResponse)
+        case serve(Route, params: [String: String], query: [String: String], pathOnly: String)
+    }
+
+    func resolve(method: String, path: String, headers: [String: String]) -> Resolution {
         // THE QUERY IS STRIPPED AND THE PATH PERCENT-DECODED ONCE, BEFORE
         // MATCHING (A13.10) — uvicorn hands the app a decoded, query-less path.
-        let (_, query) = splitQuery(request.path)
-        let pathOnly = decodePath(request.path)
-        // THE ORIGIN GUARD, in front of every route (python `_OriginGuard`).
+        let (_, query) = splitQuery(path)
+        let pathOnly = decodePath(path)
+        // THE HOST + ORIGIN GUARD, in front of every route (python `_OriginGuard`).
+        var host = ""
         var origin: String?
         var websocket = false
-        for (k, v) in request.headers {
+        for (k, v) in headers {
             switch k.lowercased() {
+            case "host": host = v
             case "origin": origin = v.isEmpty ? nil : v
             case "upgrade": websocket = websocket || v.lowercased() == "websocket"
             default: break
             }
         }
-        if originRefused(websocket: websocket, method: request.method, origin: origin) {
-            let kind = websocket ? "websocket" : "http"
+        let kind = websocket ? "websocket" : "http"
+        // A websocket is refused on the handshake (python closes 1008 before
+        // accept ⇒ uvicorn answers 403, no body); HTTP gets the coded 403.
+        func refuse(_ error: String, _ hint: String) -> Resolution {
+            if websocket {
+                return .respond(HTTPResponse(status: 403, contentType: nil, body: Data()))
+            }
+            let body: JSON = .object([
+                "error": .string(error),
+                "reason": .string("unauthorized"),
+                "hint": .string(hint),
+            ])
+            return .respond(
+                HTTPResponse(
+                    status: 403, contentType: "application/json",
+                    body: Data(pyJsonDumps(body).utf8)))
+        }
+        if hostRefused(host) {
+            let shown = pyRepr(.string(host))
+            FileHandle.standardOutput.write(
+                Data(
+                    "  [web] \(agentId.value): refused \(kind) \(pathOnly) for foreign host \(shown)\n"
+                        .utf8))
+            return refuse(
+                "host \(shown) is not this server's own authority",
+                "address the host by its bound host:port (a loopback bind also answers "
+                    + "localhost, 127.0.0.1 and [::1] on that port)")
+        }
+        if originRefused(websocket: websocket, method: method, origin: origin) {
             let shown = pyRepr(origin.map { JSON.string($0) } ?? .null)
             FileHandle.standardOutput.write(
                 Data(
                     "  [web] \(agentId.value): refused \(kind) \(pathOnly) from foreign origin \(shown)\n"
                         .utf8))
-            // A websocket is refused on the handshake (python closes 1008 before
-            // accept ⇒ uvicorn answers 403, no body).
-            if websocket { return HTTPResponse(status: 403, contentType: nil, body: Data()) }
-            let body: JSON = .object([
-                "error": .string("origin \(shown) is not allowed on this host"),
-                "reason": .string("unauthorized"),
-                "hint": .string("add it to the web record's allowed_origins"),
-            ])
-            return HTTPResponse(
-                status: 403, contentType: "application/json", body: Data(pyJsonDumps(body).utf8))
+            return refuse(
+                "origin \(shown) is not allowed on this host",
+                "add it to the web record's allowed_origins")
         }
         let segments = rawSegments(pathOnly)
         let table = routeTable()
@@ -517,19 +590,19 @@ public final class WebServer: @unchecked Sendable {
         var partial: Route?
         for route in table where route.kind == .http {
             guard let params = matchTemplate(route.template, segments) else { continue }
-            if route.methods == nil || route.methods!.contains(request.method) {
-                return await serve(
-                    route: route, params: params, query: query, pathOnly: pathOnly,
-                    request: request)
+            if route.methods == nil || route.methods!.contains(method) {
+                return .serve(route, params: params, query: query, pathOnly: pathOnly)
             }
             if partial == nil { partial = route }
         }
         if let partial = partial {
             let allow = (partial.methods ?? []).sorted().joined(separator: ", ")
-            return HTTPResponse(
-                status: 405, contentType: "application/json",
-                body: Data(JSON.object(["detail": .string("Method Not Allowed")]).serialize().utf8),
-                extraHeaders: [("allow", allow)])
+            return .respond(
+                HTTPResponse(
+                    status: 405, contentType: "application/json",
+                    body: Data(
+                        JSON.object(["detail": .string("Method Not Allowed")]).serialize().utf8),
+                    extraHeaders: [("allow", allow)]))
         }
         // `redirect_slashes`: toggle the trailing slash and, if ANY route
         // matches the toggled path (method ignored), answer 307.
@@ -541,18 +614,98 @@ public final class WebServer: @unchecked Sendable {
                 $0.kind == .http && matchTemplate($0.template, toggledSegments) != nil
             }) {
                 var host = "127.0.0.1:\(port)"
-                for (k, v) in request.headers where k.lowercased() == "host" { host = v }
-                let q = request.path.firstIndex(of: "?").map { String(request.path[$0...]) } ?? ""
-                return HTTPResponse(
-                    status: 307, contentType: nil, body: Data(),
-                    extraHeaders: [("location", "http://\(host)\(toggled)\(q)")])
+                for (k, v) in headers where k.lowercased() == "host" { host = v }
+                let q = path.firstIndex(of: "?").map { String(path[$0...]) } ?? ""
+                return .respond(
+                    HTTPResponse(
+                        status: 307, contentType: nil, body: Data(),
+                        extraHeaders: [("location", "http://\(host)\(toggled)\(q)")]))
             }
         }
         // FastAPI's 404 handler — `{"detail":"Not Found"}`, 22 bytes.
-        return HTTPResponse(
-            status: 404, contentType: "application/json",
-            body: Data(JSON.object(["detail": .string("Not Found")]).serialize().utf8))
+        return .respond(
+            HTTPResponse(
+                status: 404, contentType: "application/json",
+                body: Data(JSON.object(["detail": .string("Not Found")]).serialize().utf8)))
     }
+
+    func handle(request: HTTPRequest) async -> HTTPResponse {
+        switch resolve(method: request.method, path: request.path, headers: request.headers) {
+        case .respond(let r): return r
+        case .serve(let route, let params, let query, let pathOnly):
+            return await serve(
+                route: route, params: params, query: query, pathOnly: pathOnly, request: request)
+        }
+    }
+
+    /// What the host does with a request's BODY, decided on its head.
+    enum Preflight {
+        /// Answer now; the body is never buffered (its bytes are drained unread).
+        case respond(HTTPResponse)
+        /// Read the body — at most `limit` bytes (past it: 413).
+        case read(limit: Int)
+        /// Serve the route without a body: its bytes are drained unread.
+        case drain
+    }
+
+    /// THE GATE FIRST, THEN THE BODY (audit IO-4, 2026-10-03; python
+    /// `web_rest._rest_call`). A web_rest POST is judged by the leg's ingress
+    /// rule on what the request says up front — its target and its
+    /// `X-Fantastic-Auth` credential (the rule sees `kind: call`, verb `""`) —
+    /// and only an admitted request's body is read, at most `restBodyLimit`
+    /// bytes (io_bridge's `MAX_FRAME`); a larger one is refused 413 (a declared
+    /// `Content-Length` over it unread). Buffering and parsing the whole body
+    /// before the gate let a client the leg was about to refuse make the kernel
+    /// hold any amount of data. Everything the head alone answers (origin guard,
+    /// 404/405/307) is answered here too, with nothing read.
+    ///
+    /// NO OTHER ROUTE READS A BODY (audit W-1, 2026-10-03): the favicon, the file
+    /// proxy and web_rest's GET `_reflect` routes are served on the head, and
+    /// whatever body a client sends them is drained unread — python and rust never
+    /// read it either. Buffering it unbounded let any client that reaches the
+    /// port grow the kernel until it was killed.
+    func preflight(_ head: HTTPRequestHead) -> Preflight {
+        var headers: [String: String] = [:]
+        for (name, value) in head.headers { headers[name] = value }
+        let method = head.method.rawValue
+        switch resolve(method: method, path: head.uri, headers: headers) {
+        case .respond(let r):
+            return .respond(r)
+        case .serve(let route, let params, _, _):
+            guard method == "POST", case .leg(let spec) = route.target,
+                case .http = spec.endpoint
+            else { return .drain }
+            var lower: [String: String] = [:]
+            for (k, v) in headers { lower[k.lowercased()] = latin1(v) }
+            if let denied = gateWebLeg(
+                kernel: kernel, legId: spec.ownerId, kind: "call",
+                target: params["target_id"] ?? "", verb: "", token: lower["x-fantastic-auth"])
+            {
+                return .respond(jsonHTTP(403, denied))
+            }
+            if let declared = lower["content-length"], !declared.isEmpty,
+                declared.allSatisfy({ $0.isASCII && $0.isNumber }),
+                (Int(declared) ?? Int.max) > Self.restBodyLimit
+            {
+                return .respond(Self.restTooLarge)
+            }
+            return .read(limit: Self.restBodyLimit)
+        }
+    }
+
+    /// The 413 a web_rest body over `restBodyLimit` gets. Python `_too_large`.
+    static let restTooLarge = HTTPResponse(
+        status: 413, contentType: "application/json",
+        body: Data(
+            JSON.object([
+                "error": .string(
+                    "web_rest: the request body exceeds \(restBodyLimit) bytes — the one frame "
+                        + "cap every wire leg holds (io_bridge MAX_FRAME); send larger data in "
+                        + "chunks (write_stream)"),
+                "reason": .string("transport_error"),
+                "limit": .integer(Int64(restBodyLimit)),
+            ]).serialize().utf8))
+
 
     private func serve(
         route: Route, params: [String: String], query: [String: String], pathOnly: String,
@@ -590,7 +743,8 @@ public final class WebServer: @unchecked Sendable {
                         ]), rawReply: true)
                 ])[0]
             }
-            return (out.result, out.body)
+            // python `isinstance(first["bytes"], bytes)`: the chunk at `bytes`
+            return (out.result, bodyAt(out.body, "bytes"))
         }
         let (meta, body) = await readChunk(0)
         // THE SOURCE TEST IS THE CARRIER, python's `isinstance(first["bytes"],
@@ -645,10 +799,14 @@ public final class WebServer: @unchecked Sendable {
 
     // MARK: - leg routes
 
+    /// The most body bytes a web_rest request may carry: io_bridge's one frame
+    /// cap. Python `web_rest.MAX_BODY`.
+    static let restBodyLimit = MAX_FRAME
+
     static let octetType = "application/octet-stream"
     static let payloadHeader = "x-fantastic-payload"
     static let bytesFieldHeader = "x-fantastic-bytes-field"
-    /// The item's `secret` paths, a JSON array — the octet twin of
+    /// The item's `secret` marks, a JSON array — the octet twin of
     /// `WebRestBundle.secretHeader` (python `web_rest._SECRET_HEADER`, read by the
     /// one `_rest_call` both legs share).
     static let secretHeader = "x-fantastic-secret"
@@ -701,13 +859,11 @@ public final class WebServer: @unchecked Sendable {
             return jsonHTTP(
                 500, .object(["error": .string("no http endpoint for \(spec.path)")]))
         }
-        let (reply, chunk) = await endpoint(routeRequest)
+        let (reply, octet) = await endpoint(routeRequest)
         let status = Int(reply["status"].asInt ?? 200)
         // ONE DECISION, shared with the octet leg: a reply that HOLDS a chunk is
         // octet, whatever its length (A13.1).
-        if let chunk {
-            return Self.octetReply(chunk, payloadHeader: reply["payload_header"].asString ?? "{}")
-        }
+        if let octet { return Self.octetReply(octet) }
         guard let contentType = reply["content_type"].asString else {
             return HTTPResponse(status: status, contentType: nil, body: Data())
         }
@@ -721,10 +877,10 @@ public final class WebServer: @unchecked Sendable {
     /// separators, not the compact ones the JSON body uses), and the field it
     /// came out of on `X-Fantastic-Bytes-Field`. An EMPTY chunk is still octet —
     /// content-length 0, not a JSON body.
-    static func octetReply(_ chunk: Data, payloadHeader header: String) -> HTTPResponse {
+    static func octetReply(_ octet: OctetReply) -> HTTPResponse {
         HTTPResponse(
-            status: 200, contentType: octetType, body: chunk,
-            extraHeaders: [(payloadHeader, header), (bytesFieldHeader, "bytes")])
+            status: 200, contentType: octetType, body: octet.bytes,
+            extraHeaders: [(payloadHeader, octet.payloadHeader), (bytesFieldHeader, octet.field)])
     }
 
     /// The BINARY leg of a `.http` (web_rest) route — python's octet branch of
@@ -765,14 +921,9 @@ public final class WebServer: @unchecked Sendable {
         let field = named.isEmpty ? "bytes" : named
         payload[field] = .null
 
-        // GATE — same io_bridge inbound gate as the JSON path; credential on
-        // X-Fantastic-Auth. The web_rest leg is the route's owner.
-        if let denied = gateWebLeg(
-            kernel: kernel, legId: owner, kind: "call", target: target,
-            verb: payload["type"]?.asString ?? "", token: headers["x-fantastic-auth"])
-        {
-            return jsonHTTP(403, denied)
-        }
+        // GATED BEFORE THE BODY WAS READ (audit IO-4): `preflight` ran the leg's
+        // ingress rule on the head — target + X-Fantastic-Auth — exactly as for
+        // the JSON leg; only an admitted request reaches here.
 
         // THROUGH THE BATCH (A13.3/C37): ONE binary item, so the octet leg
         // NAMES its execution like the JSON leg — a repeated
@@ -804,17 +955,14 @@ public final class WebServer: @unchecked Sendable {
         }
         // python answers 204 for a null reply BEFORE it looks for bytes.
         if out.result.isNull { return HTTPResponse(status: 204, contentType: nil, body: Data()) }
-        // THE SAME ONE DECISION as the JSON leg: octet iff the verb returned a
-        // CHUNK. `!outBody.isEmpty` served an empty file as JSON.
+        // THE SAME ONE DECISION as the JSON leg (`RestOctet.split`): octet iff
+        // the verb returned a CHUNK at a top-level key, the reply WITHOUT that
+        // key as the header. `!outBody.isEmpty` served an empty file as JSON.
         if let chunk = out.body {
-            // python sends the reply WITHOUT its bytes field as the header —
-            // that field's value is the body.
-            var rest = out.result
-            if case .object(var o) = rest {
-                o.removeValue(forKey: "bytes")
-                rest = .object(o)
+            guard let octet = RestOctet.split(out.result, chunk) else {
+                return jsonHTTP(500, RestOctet.noJSONForm)
             }
-            return Self.octetReply(chunk, payloadHeader: pyJsonDumps(rest))
+            return Self.octetReply(octet)
         }
         return jsonHTTP(200, out.result)
     }
@@ -904,21 +1052,67 @@ final class HTTPDispatchHandler: ChannelInboundHandler, RemovableChannelHandler,
     private let server: WebServer
     private var head: HTTPRequestHead?
     private var bodyBuffer: ByteBuffer?
+    /// The most body bytes this request may buffer (`WebServer.preflight`);
+    /// `nil` = its route reads no body, so every byte of it is drained unread.
+    private var bodyLimit: Int?
+    /// The request was ANSWERED on its head (or past its bound): the rest of its
+    /// body is drained unread, never buffered.
+    private var answered = false
 
     init(server: WebServer) { self.server = server }
+
+    /// h11 `_keep_alive`, which uvicorn serves behind: a `Connection: close`
+    /// token closes, and an HTTP/1.0 peer ALWAYS closes (h11 deliberately does
+    /// not support 1.0 keep-alive, where NIO's `isKeepAlive` honours
+    /// `Connection: keep-alive` on 1.0).
+    private static func keepAlive(_ h: HTTPRequestHead) -> Bool {
+        let closeToken = h.headers["connection"].contains {
+            $0.split(separator: ",").contains { t in
+                t.trimmingCharacters(in: .whitespaces).lowercased() == "close"
+            }
+        }
+        return !closeToken && (h.version.major, h.version.minor) >= (1, 1)
+    }
+
+    /// Answer the request NOW — before its body has arrived (audit IO-4). The
+    /// pipeline keeps reading the body to its end, which `channelRead` drains.
+    private func answerEarly(
+        context: ChannelHandlerContext, head h: HTTPRequestHead, _ response: HTTPResponse
+    ) {
+        answered = true
+        bodyBuffer = nil
+        writeResponse(context: context, response: response, keepAlive: Self.keepAlive(h))
+    }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         switch unwrapInboundIn(data) {
         case .head(let h):
             head = h
             bodyBuffer = nil
+            bodyLimit = nil
+            answered = false
+            switch server.preflight(h) {
+            case .respond(let response): answerEarly(context: context, head: h, response)
+            case .read(let limit): bodyLimit = limit
+            case .drain: break
+            }
         case .body(var chunk):
+            if answered { return }  // drained unread
+            guard let limit = bodyLimit else { return }  // no body read: drained unread
             if bodyBuffer == nil {
                 bodyBuffer = chunk
             } else {
                 bodyBuffer!.writeBuffer(&chunk)
             }
+            if let h = head, bodyBuffer!.readableBytes > limit {
+                answerEarly(context: context, head: h, WebServer.restTooLarge)
+            }
         case .end:
+            if answered {
+                head = nil
+                answered = false
+                return
+            }
             guard let h = head else { return }
             let bodyData: Data? = bodyBuffer.flatMap {
                 $0.getData(at: $0.readerIndex, length: $0.readableBytes)
@@ -933,17 +1127,7 @@ final class HTTPDispatchHandler: ChannelInboundHandler, RemovableChannelHandler,
             let server = self.server
             let bound = NIOLoopBound((context, self), eventLoop: context.eventLoop)
             let eventLoop = context.eventLoop
-            // h11 `_keep_alive`, which uvicorn serves behind: a `Connection:
-            // close` token closes, and an HTTP/1.0 peer ALWAYS closes (h11
-            // deliberately does not support 1.0 keep-alive, where NIO's
-            // `isKeepAlive` honours `Connection: keep-alive` on 1.0).
-            let closeToken = h.headers["connection"].contains {
-                $0.split(separator: ",").contains { t in
-                    t.trimmingCharacters(in: .whitespaces).lowercased() == "close"
-                }
-            }
-            let keepAlive =
-                !closeToken && (h.version.major, h.version.minor) >= (1, 1)
+            let keepAlive = Self.keepAlive(h)
             // The web boot pid parents every request task: python serves under
             // `CURRENT_TASK.scope`, so a REST-originated dispatch is a CHILD of
             // the boot task, not a root.

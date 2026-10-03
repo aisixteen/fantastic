@@ -46,6 +46,39 @@ func makeKernelWithAll(
     return kernel
 }
 
+/// Python `_wire_memory_pair`: leg `br` on `k1` (guid `guid-a`) and a SERVING leg
+/// `br_peer` on `k2` (guid `guid-b`, opened, pinned to `guid-a`), joined by a
+/// memory pair and booted; `k2`'s root accepts `guid-a`'s agents. A forward from
+/// `br` is served by `br_peer` — gated, pinned, the target judging the caller as
+/// `guid-a|<agent>` — never by `k2`'s operator.
+func wireMemoryPair(_ k1: Kernel, _ k2: Kernel) async {
+    let b1 = KernelBridgeBundle()
+    k1.bundles.register("ws_bridge.tools", b1)
+    let b2 = KernelBridgeBundle()
+    k2.bundles.register("ws_bridge.tools", b2)
+    k1.update(AgentId(ROOT_ID), ["guid": "guid-a"])
+    k2.update(AgentId(ROOT_ID), ["guid": "guid-b"])
+    var cb = k2.agent(AgentId(ROOT_ID))?.meta["callable_by"]?.asObject ?? [:]
+    cb["guid-a|*"] = "*"
+    k2.update(AgentId(ROOT_ID), ["callable_by": .object(cb)])
+    _ = await k1.send([Item("kernel_state", [
+            "type": "create_agent", "parent_id": "kernel_state", "handler_module": "ws_bridge.tools",
+            "id": "br", "transport": "memory", "peer_guid": "guid-b",
+        ])])[0].result
+    _ = await k2.send([Item("kernel_state", [
+            "type": "create_agent", "parent_id": "kernel_state", "handler_module": "ws_bridge.tools",
+            "id": "br_peer", "transport": "memory", "peer_guid": "guid-a",
+            "ingress_rule": "allow_all_ingress",
+        ])])[0].result
+    let (t1, t2) = MemoryTransport.pair()
+    b1.injectTransport(agentId: "br", transport: t1)
+    b2.injectTransport(agentId: "br_peer", transport: t2)
+    for (k, id) in [(k1, "br"), (k2, "br_peer")] {
+        let r = await k.send([Item(AgentId(id), ["type": "boot"])])[0].result
+        #expect(r["booted"] == true, "\(r.serialize())")
+    }
+}
+
 /// A disk-mode kernel rooted at `workdir/.fantastic`, with the full registry —
 /// for the persistence-inversion test (records persist THROUGH a file_bridge).
 func makeDiskKernel(workdir: URL) -> Kernel {
@@ -156,7 +189,7 @@ struct BundleSmokeTests {
                 rawReply: true)
         ])[0]
         let (m, body) = (read.result, read.body)
-        #expect(body == payload, "bytes must round-trip verbatim")
+        #expect(body == Blob("bytes", payload), "bytes must round-trip verbatim, at `bytes`")
         #expect(m["eof"].asBool == true)
         #expect(m["size"].asInt == Int64(payload.count))
     }
@@ -537,14 +570,9 @@ struct BundleSmokeTests {
     @Test func kernelBridgeForwardInMemory() async {
         let kernel1 = makeKernelWithAll()
         let kernel2 = makeKernelWithAll()
-        // Wire bridge from kernel1 → kernel2.
-        let bridge = KernelBridgeBundle()
-        kernel1.bundles.register("ws_bridge.tools", bridge)
-        _ = await kernel1.send([Item("kernel_state", ["type": "create_agent", "parent_id": "kernel_state", "handler_module": "ws_bridge.tools", "id": "br", "transport": "memory"])])[0].result
-        // python's `memory` seam: inject the transport, then BOOT — the engine
-        // pops it and runs its read loop over it.
-        bridge.injectMemoryTransport(agentId: "br", remote: kernel2)
-        _ = await kernel1.send([Item("br", ["type": "boot"])])[0].result
+        // Wire bridge from kernel1 → kernel2: python's `memory` seam injects each
+        // half of a pair, then BOOTS — kernel2's leg serves the forward.
+        await wireMemoryPair(kernel1, kernel2)
         let reply = await kernel1.send([Item("br", [
                 "type": "forward",
                 "target": "kernel_state",
@@ -560,20 +588,18 @@ struct BundleSmokeTests {
         // (in-memory) bridge to a remote file_bridge; raw bytes both ways.
         let kernel1 = makeKernelWithAll()
         let kernel2 = makeKernelWithAll()
-        let bridge = KernelBridgeBundle()
-        kernel1.bundles.register("ws_bridge.tools", bridge)
-        _ = await kernel1.send([Item("kernel_state", ["type": "create_agent", "parent_id": "kernel_state", "handler_module": "ws_bridge.tools", "id": "br", "transport": "memory"])])[0].result
-        bridge.injectMemoryTransport(agentId: "br", remote: kernel2)
-        _ = await kernel1.send([Item("br", ["type": "boot"])])[0].result
-        // kernel2: an OPEN file_bridge in a cwd-relative dir.
+        await wireMemoryPair(kernel1, kernel2)
+        // kernel2: an OPEN file_bridge in a cwd-relative dir, under the serving
+        // leg, accepting kernel1's agents.
         let fm = FileManager.default
         let rel = "fantastic-brstream-\(UUID().uuidString)"
         let dir = URL(fileURLWithPath: fm.currentDirectoryPath).appendingPathComponent(rel)
         try fm.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? fm.removeItem(at: dir) }
         _ = await kernel2.send([Item("kernel_state", [
-                "type": "create_agent", "parent_id": "kernel_state", "handler_module": "file_bridge.tools", "allow": ["."], "id": "fs",
+                "type": "create_agent", "parent_id": "br_peer", "handler_module": "file_bridge.tools", "allow": ["."], "id": "fs",
                 "root": .string(rel), "ingress_rule": "allow_all_ingress",
+                "callable_by": ["guid-a|*": "*"],
             ])])[0].result
         let payload = Data([0x00, 0xFF, 0xCA, 0xFE, 0xBA, 0xBE, 0x10, 0x80])
         // forward write_stream (binary) → kernel2.fs
@@ -600,7 +626,9 @@ struct BundleSmokeTests {
                     ]),
                 ]), rawReply: true)
         ])[0].body
-        #expect(body == payload, "raw bytes must round-trip cross-kernel over the bridge")
+        #expect(
+            body == Blob("bytes", payload),
+            "raw bytes must round-trip cross-kernel over the bridge, at the reply's `bytes`")
     }
 
     @Test func wsBinaryForwardStreamsRawBytesOverWire() async throws {
@@ -691,25 +719,28 @@ struct BundleSmokeTests {
                     ]),
                 ]), rawReply: true)
         ])[0].body
-        #expect(body == payload, "raw bytes must round-trip over the WS wire")
+        #expect(
+            body == Blob("bytes", payload),
+            "raw bytes must round-trip over the WS wire, at the reply's `bytes`")
     }
 
-    @Test func kernelBridgeWatchRemoteReEmitsOnLocalInbox() async {
-        // Two kernels in process. A's bridge subscribes to B.core's
-        // emits via watch_remote. We trigger an emit on B.core, then
-        // verify the payload arrives on A's bridge inbox via a
-        // synthetic watcher.
+    @Test func kernelBridgeWatchRemoteReEmitsOnLocalInbox() async throws {
+        // A's bridge subscribes to a remote agent's emits via watch_remote: the
+        // `watch` frame crosses the memory pair, and the remote's `event` frame
+        // for that agent re-emits on A's bridge inbox, `src` added (python
+        // `test_event_frame_re_emits_on_bridge_inbox_only_when_subscribed`).
         let kernelA = makeKernelWithAll()
-        let kernelB = makeKernelWithAll()
         let bridge = KernelBridgeBundle()
         kernelA.bundles.register("ws_bridge.tools", bridge)
         _ = await kernelA.send([Item("kernel_state", ["type": "create_agent", "parent_id": "kernel_state", "handler_module": "ws_bridge.tools", "id": "br", "transport": "memory"])])[0].result
-        bridge.injectMemoryTransport(agentId: "br", remote: kernelB)
+        let (mine, peer) = MemoryTransport.pair()
+        bridge.injectTransport(agentId: "br", transport: mine)
         _ = await kernelA.send([Item("br", ["type": "boot"])])[0].result
 
         // Subscribe via the bridge: A.br.watch_remote(target=core)
         let w = await kernelA.send([Item("br", ["type": "watch_remote", "target": "kernel_state"])])[0].result
         #expect(w["ok"].asBool == true)
+        #expect(try await peer.recv().frame == ["type": "watch", "src": "kernel_state"])
 
         // Synthetic local watcher of the bridge agent's inbox. Every
         // re-emitted event lands here.
@@ -719,13 +750,9 @@ struct BundleSmokeTests {
         let inbox = kernelA.ensureInbox(watcherId)
         kernelA.watch(src: "br", watcher: watcherId)
 
-        // Trigger an emit on B.core. The substrate's `emit` fans out
-        // to watcher inboxes — our synthetic in-memory relay drains
-        // the watcher inbox and re-emits on A.br, which fans out to
-        // the local watcher.
-        await kernelB.emit(
-            "kernel_state",
-            ["type": "token", "text": "hi"])
+        // The remote's event for the watched agent.
+        try await peer.send(
+            ["type": "event", "src": "kernel_state", "payload": ["type": "token", "text": "hi"]])
 
         // Wait for the event with a short timeout.
         let event = await withTaskGroup(of: JSON?.self) { group in
@@ -745,6 +772,7 @@ struct BundleSmokeTests {
         }
         #expect(event != nil, "expected re-emitted token event on bridge inbox")
         #expect(event?["text"].asString == "hi")
+        #expect(event?["src"].asString == "kernel_state")
 
         _ = await kernelA.send([Item("br", ["type": "unwatch_remote", "target": "kernel_state"])])[0].result
     }
@@ -928,12 +956,12 @@ struct SchedulerParityTests {
         let r = await ask(kernel, "s_emits", ["type": "reflect"])
         #expect(
             r["emits"]["schedule_fired"].asString
-                == "{type:'schedule_fired', schedule_id, scheduler_id, target, payload, result, error, ts, duration_ms} — emitted on the scheduler's OWN inbox after every fire (never the target's — the payload send is the tick)",
+                == "{type:'schedule_fired', schedule_id, scheduler_id, owner, target, payload, result, error, ts, duration_ms} — emitted on the scheduler's OWN inbox after every fire (never the target's — the payload send is the tick); `owner` is who the fire ran as",
             "\(r["emits"].serialize())")
     }
 
-    /// A5.2 — the readme IS python's `readme.md`: two lines and the trailing
-    /// newline, not a swift paraphrase.
+    /// A5.2 — the readme IS python's `readme.md`, byte for byte, not a swift
+    /// paraphrase.
     @Test func schedulerReadmeIsPythonVerbatim() throws {
         #expect(SchedulerBundle().readme == (try pythonSchedulerReadme()))
     }
@@ -1014,6 +1042,40 @@ struct SchedulerParityTests {
         // A truthy non-string target is STORED VERBATIM, python-style.
         let e = await addSchedule(kernel, target: .integer(7), payload: ["type": "hit"])
         #expect(e["schedule"]["target"] == .integer(7), "\(e.serialize())")
+    }
+
+    /// Audit S5 (python `test_a_schedule_carrying_secret_marks_is_refused`) — the
+    /// scheduler re-sends the payload as a fresh, UNMARKED call on every fire, and
+    /// keeps it in its sidecar: a marked value landed in clear in the fire's rows,
+    /// the state stream and the portable workdir. As the relay seal: a `schedule`
+    /// call carrying ANY mark is refused, and nothing is kept.
+    @Test func aScheduleCarryingSecretMarksIsRefused() async throws {
+        let (kernel, dir) = try await schedulerOnAStore("schedsecret")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        for marks: JSON in [["payload.payload.key"], ["result"]] {
+            var it = Item(
+                AgentId("sched"),
+                [
+                    "type": "schedule", "target": "kernel_state", "interval_seconds": 60,
+                    "payload": ["type": "set_key", "key": "TEST-VALUE-50"] as JSON,
+                ])
+            it.secret = marks
+            let r = await kernel.send([it])[0].result
+            #expect(
+                r
+                    == .object([
+                        "error": .string(
+                            "scheduler: a call carrying secret marks may not be scheduled — "
+                                + "a schedule keeps its payload and every fire re-sends it unmarked"),
+                        "reason": "unauthorized",
+                        "hint": "send a secret-bearing call yourself, marked, each time",
+                    ]), "\(marks.serialize()) → \(r.serialize())")
+        }
+        let listed = await ask(kernel, "sched", ["type": "list"])
+        #expect(listed["schedules"] == .array([]), "\(listed.serialize())")
+        let sidecar = dir.appendingPathComponent("agents/sched/schedules.yaml")
+        let raw = (try? String(contentsOf: sidecar, encoding: .utf8)) ?? ""
+        #expect(!raw.contains("TEST-VALUE-50"), "kept on disk: \(raw)")
     }
 
     /// A5.6 — `timeout` is stored AS SENT: an int `5` stays an int, in the reply

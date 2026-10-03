@@ -271,14 +271,11 @@ impl Bundle for ExecBridgeBundle {
         // a falsy spec and a type-less object both seal silently, and
         // `password_ingress` resolves fine here — it is the stem check below that
         // refuses it on this edge.
-        if let Some(spec) = meta.get("ingress_rule") {
-            if fantastic_io_bridge::authorizer::ingress::unknown(Some(spec)).is_some() {
-                return Some(format!(
-                    "ingress_rule={} is not a rule this bundle implements — \
-                     legal values: allow_all_ingress, deny_ingress",
-                    py_repr_value(spec)
-                ));
-            }
+        if let Some(bad) = fantastic_io_bridge::authorizer::ingress::unknown_refusal(
+            meta,
+            &["allow_all_ingress", "deny_ingress"],
+        ) {
+            return Some(bad);
         }
         // `password_ingress` is meaningless on an in-process leg: the token is
         // read off a WIRE ENVELOPE and the process edge has none — no frame ever
@@ -378,27 +375,14 @@ impl Bundle for ExecBridgeBundle {
         let verb = raw_type.as_str().unwrap_or("");
         // AUTH GATE — the process edge, gated like any io_bridge leg (SEALED by
         // default). `reflect` and `connector` are UNGATED: discovery must work on a
-        // sealed bridge. Mail (the unknown-verb branch below) is deliberately not
-        // gated, matching py: the substrate's fanout already delivered the payload;
-        // this only ACKs.
+        // sealed bridge. Every other type is gated, MAIL INCLUDED (python `handler`,
+        // audit BV-8): a sealed leg delivers nothing to its program — the relay's
+        // inbox drain refuses the same payloads, since the substrate's fanout
+        // reaches it before this handler runs.
         //
-        // `shutdown` is NOT in this set and NOT a verb (A4.3): python's VERBS has no
-        // such key, so it is MAIL like any other unowned type.
-        let owned = matches!(
-            verb,
-            "start"
-                | "boot"
-                | "status"
-                | "clear"
-                | "interrupt"
-                | "stop"
-                | "write"
-                | "resize"
-                | "ack"
-                | "output"
-                | "paste_image"
-        );
-        if owned {
+        // `shutdown` is NOT a verb (A4.3): python's VERBS has no such key, so it is
+        // MAIL like any other unowned type.
+        if !matches!(verb, "reflect" | "connector") {
             let meta = snapshot_meta(agent_id, kernel);
             if let Some(denied) = gate(&meta, agent_id, verb) {
                 return Ok(Some(denied));
@@ -431,7 +415,8 @@ impl Bundle for ExecBridgeBundle {
                           and gets its chunk back raw in the reply's `bytes`) and \
                           exposes `kernel.send(target, payload, secret=None) -> reply` (raises if \
                           the relay could not deliver; `secret` marks values the kernel must not \
-                          record — `['payload.<field>']`, `['result']` — and the reply still \
+                          record — `['payload.<field>']`, `['result']`, `[['payload', 'a.b']]` \
+                          for a key holding a dot — and the reply still \
                           carries them to you, so never print one: that is the job output), \
                           `kernel.emit(payload)`, `kernel.watch(src, cb)`, `kernel.on_message(cb)`, \
                           `kernel.self_id`. Arguments arrive as ARGV, like any command — there is \
@@ -458,10 +443,10 @@ impl Bundle for ExecBridgeBundle {
         Ok(Some(reply))
     }
 
-    /// The BINARY channel: `paste_image` reads ITS key — the body at `data`
-    /// (python's `payload.get("data")` is the bytes). A body under any other key
-    /// is not the image: python's `data` is then absent, `bad_arg` "raw bytes".
-    /// Every other verb takes the text path.
+    /// The kernel's dispatch, every verb: `paste_image` reads ITS key — the
+    /// request body at `data` (python's `payload.get("data")` is the bytes). A
+    /// body under any other key, or none, is not the image: python's `data` is
+    /// then absent, `bad_arg` "raw bytes". Every other verb takes `handle`.
     async fn handle_binary(
         &self,
         agent_id: &AgentId,
@@ -550,10 +535,7 @@ fn gate(meta: &Map<String, Value>, agent_id: &AgentId, verb: &str) -> Option<Val
         meta.get("auth"),
         "_ingress",
     );
-    let rule = match fantastic_io_bridge::authorizer::ingress::resolve(spec.as_ref()) {
-        Ok(r) => r,
-        Err(e) => return Some(json!({"error": e})),
-    };
+    let rule = fantastic_io_bridge::authorizer::ingress::resolve(spec.as_ref());
     let action = fantastic_io_bridge::authorizer::Action {
         kind: "spawn",
         target: agent_id.0.as_str(),
@@ -622,9 +604,9 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
         "verbs": {
             "start": "args: command:str (req — on a PTY start, absent = the child's $SHELL), args:list[str]? (argv, default []), pty:{cols,rows}? (run on a terminal). The FULL line (command + args) must fullmatch one of the `allowed` regexes, or be the shell line the record's `shell` permits.",
             "status": "args: job_id:int? — one job (with full stdout/stderr), or all of this agent's jobs (summary). A job's id is its kernel task id: `ps` lists it, `cancel task_id=` kills it. Returns {jobs:[…]}.",
-            "stop": "args: job_id:int? — SIGKILL one job (its whole session: the command and everything it launched) or ALL of this agent's running jobs.",
-            "interrupt": "args: job_id:int? — SIGINT one job or ALL of this agent's running jobs.",
-            "clear": "args: job_id:int? — drop finished jobs (one, or all non-running) from the RAM",
+            "stop": "args: job_id:int? — SIGKILL one of YOUR jobs (its whole session: the command and everything it launched) or ALL your running jobs on this agent (the operator: all).",
+            "interrupt": "args: job_id:int? — SIGINT one of YOUR jobs or ALL your running jobs on this agent (the operator: all).",
+            "clear": "args: job_id:int? — drop YOUR finished jobs (one, or all non-running; the operator: all) from the RAM",
             "write": "args: job_id:int (req), data:str (req). Keystrokes/paste into a PTY job, written IN FULL and serialized per job (a bracketed paste is never truncated or interleaved). Returns {written:int}.",
             "resize": "args: job_id:int (req), cols:int (req), rows:int (req). Sets a PTY job's window size (the tty sends SIGWINCH, so a TUI redraws). Returns {resized:true, cols, rows}.",
             "ack": "args: job_id:int (req), chars:int (req). Flow control from a streaming consumer (an xterm acks each `output` chunk after parsing it): the reader pauses past 100K unacked chars and resumes under 5K. Returns {unacked:int, paused:bool}.",
@@ -640,7 +622,7 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
             "job_done": "{type:'job_done', job_id, exit_code, ok, stdout?, stderr?} — a PTY job carries no stdout/stderr split",
             "output": "{type:'output', job_id, data} — a PTY job's output chunk (UTF-8)",
         },
-        "wire": "A program speaks the kernel over the inherited fd FANTASTIC_CTRL_FD, a BIDIRECTIONAL socket (one end of a socketpair): frame is [4-byte BE length | kind | rest], both directions — kind T: a JSON envelope; kind B: [4-byte BE H | H-byte JSON header | raw body], the header's `_binary_path` naming where the body belongs as a list of steps from the frame root — a key as a string (taken literally: ['payload', 'a.b'] is the key 'a.b'), a list index as an int (a stream chunk rides raw, never base64). To CALL another agent: write {op:'send', rid:<your id>, target, payload, secret?} and the reply COMES BACK on the SAME fd as {op:'reply', rid:<same id>, data} — the fd is not one-way. It is not inline, though: read frames in a loop and skip any whose rid isn't yours (event/inbox frames can arrive first) until you see your reply. `secret` is the call's marks ['payload.<field>' | 'result' | 'result.<field>']: every record of the call shows <secret>, the reply carries the real values to you — print one and it is in the job output. ops: send/emit/reflect/watch/on_message. A command that never reads the fd runs exactly like any OS process.",
+        "wire": "A program speaks the kernel over the inherited fd FANTASTIC_CTRL_FD, a BIDIRECTIONAL socket (one end of a socketpair): frame is [4-byte BE length | kind | rest], both directions — kind T: a JSON envelope; kind B: [4-byte BE H | H-byte JSON header | raw body], the header's `_binary_path` naming where the body belongs as a list of steps from the frame root — a key as a string (taken literally: ['payload', 'a.b'] is the key 'a.b'), a list index as an int (a stream chunk rides raw, never base64). To CALL another agent: write {op:'send', rid:<your id>, target, payload, secret?} and the reply COMES BACK on the SAME fd as {op:'reply', rid:<same id>, data} — the fd is not one-way. It is not inline, though: read frames in a loop and skip any whose rid isn't yours (event/inbox frames can arrive first) until you see your reply. `secret` is the call's marks ['payload.<field>' | 'result' | 'result.<field>' | ['payload', <key>, …] — an array of steps, a key taken literally]: every record of the call shows <secret>, the reply carries the real values to you — print one and it is in the job output. ops: send/emit/reflect/watch/on_message. A command that never reads the fd runs exactly like any OS process.",
         "inbox": "Any verb NOT listed in `verbs` is MAIL for the running program, delivered to its on_message and ACKed {queued:true}. With no live job it is an error — a script that only defines something exits before its first message arrives.",
         "tasks": "Every running job IS a row in the kernel TASK TABLE: its `job_id` is that row's id (an int), listed by the universal `ps`. `cancel task_id=<job_id>` kills it — the OS subprocess is SIGKILLed by this bundle's `on_cancel` hook before the kernel aborts the task, so nothing is orphaned.",
         "authoring": "A general-purpose command runner: <type>start</type> <command>…</command> <args><item>…</item></args>, gated by the `allowed` regexes on the full command line.",
@@ -664,11 +646,44 @@ pub mod relay;
 pub mod spawn;
 
 #[cfg(test)]
+mod job_starter_tests;
+#[cfg(test)]
 mod pty_tests;
 #[cfg(test)]
 mod shell_tests;
 #[cfg(test)]
 mod tests;
+
+/// THIS dispatch's caller: the calling agent's id, a foreign caller's
+/// `<guid>|<agent>` (relayed by a bridge leg), or `None` for the operator. Python
+/// `_caller`.
+pub(crate) fn caller() -> Option<String> {
+    fantastic_kernel::current_remote_caller()
+        .or_else(|| fantastic_kernel::current_origin().map(|o| o.0))
+}
+
+/// Whether THIS dispatch's caller drives `job`: its starter, or the operator.
+/// Python `_yours`.
+pub(crate) fn yours(job: &jobs::Job) -> bool {
+    match caller() {
+        None => true,
+        Some(c) => job.starter.as_deref() == Some(c.as_str()),
+    }
+}
+
+/// The refusal for a job another caller started — python `_not_yours`.
+pub(crate) fn not_yours(verb: &str, jid: &JobRef) -> Value {
+    let mut v = refusal(
+        UNAUTHORIZED,
+        format!(
+            "exec_bridge: job {} is not yours — only the caller that started it (or the \
+             operator) may {verb} it",
+            py_str(&jid.raw)
+        ),
+    );
+    with(&mut v, "job_id", jid.raw.clone());
+    v
+}
 
 /// `interrupt` / `stop` — signal this agent's jobs, or one named job.
 ///
@@ -678,7 +693,7 @@ fn signal_jobs(agent_id: &AgentId, want: Option<&JobRef>, sig: nix::sys::signal:
     let mut g = jobs::jobs();
     let mut n = 0u64;
     for ((_, id), j) in g.iter_mut() {
-        if &j.owner != agent_id || want.is_some_and(|w| w.id != Some(*id)) {
+        if &j.owner != agent_id || !yours(j) || want.is_some_and(|w| w.id != Some(*id)) {
             continue;
         }
         if !jobs::alive(j) {
@@ -697,19 +712,21 @@ fn signal_jobs(agent_id: &AgentId, want: Option<&JobRef>, sig: nix::sys::signal:
     n
 }
 
-/// The `not_found` refusal for a named job this agent does not own, or `None`.
+/// The `not_found` refusal for a named job this agent does not own — or the
+/// `unauthorized` one for a job another caller started — or `None`.
 ///
 /// A `job_id` naming nothing used to answer `{killed:0}`/`{interrupted:0}` — the
 /// same reply as "it had already exited", so a typo read as success. `status`
 /// answered a bare `{error}` with no code at all, and a caller branching on
 /// `reason == "not_found"` (what the corpus and the e2e scenarios pin) never
 /// matched on this runtime.
-fn no_job(agent_id: &AgentId, want: Option<&JobRef>) -> Option<Value> {
+fn no_job(verb: &str, agent_id: &AgentId, want: Option<&JobRef>) -> Option<Value> {
     let jid = want?;
-    if jid.find(&jobs::jobs(), agent_id).is_some() {
-        return None;
+    match jid.find(&jobs::jobs(), agent_id) {
+        None => Some(no_such_job(jid)),
+        Some(j) if !yours(j) => Some(not_yours(verb, jid)),
+        Some(_) => None,
     }
-    Some(no_such_job(jid))
 }
 
 /// A job named by a caller (python `_job_arg`'s result): the value AS SENT — every
@@ -793,7 +810,7 @@ fn interrupt_reply(agent_id: &AgentId, payload: &Value) -> Value {
         Ok(w) => w,
         Err(e) => return e,
     };
-    no_job(agent_id, want.as_ref()).unwrap_or_else(|| {
+    no_job("interrupt", agent_id, want.as_ref()).unwrap_or_else(|| {
         json!({"interrupted": signal_jobs(agent_id, want.as_ref(), nix::sys::signal::Signal::SIGINT)})
     })
 }
@@ -803,7 +820,7 @@ fn stop_reply(agent_id: &AgentId, payload: &Value) -> Value {
         Ok(w) => w,
         Err(e) => return e,
     };
-    no_job(agent_id, want.as_ref()).unwrap_or_else(|| {
+    no_job("stop", agent_id, want.as_ref()).unwrap_or_else(|| {
         json!({"killed": signal_jobs(agent_id, want.as_ref(), nix::sys::signal::Signal::SIGKILL)})
     })
 }
@@ -1063,6 +1080,8 @@ async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
         (agent_id.clone(), job_id),
         jobs::Job {
             owner: agent_id.clone(),
+            // WHO started it — its job verbs answer this caller (and the operator)
+            starter: caller(),
             pid,
             ctrl: ctrl_task,
             stop,
@@ -1175,27 +1194,45 @@ fn status_reply(agent_id: &AgentId, payload: &Value) -> Value {
     }
 }
 
-/// `clear` — forget rows of this agent.
+/// `clear` — forget this agent's FINISHED rows: one named job, or every one.
 ///
-/// NAMED, it drops that job whatever its status (A4.22): python's filter is
-/// `k == jid if jid else v["status"] not in ("running", "stopping")`, so the status
-/// label only decides which jobs a BARE `clear` sweeps. `clear` is also the one
-/// caller that wants the label rather than process liveness — it is deciding what is
-/// finished enough to forget.
+/// A NAMED job follows the bare form's rule (python `_clear`, audit BV-5): a row
+/// still `running` or `stopping` is refused. That row is the only handle `stop`,
+/// `cancel`, `delete` and shutdown kill its process through — dropped, the process
+/// outlived all four. `clear` is also the one caller that wants the label rather
+/// than process liveness — it is deciding what is finished enough to forget.
 fn clear_reply(agent_id: &AgentId, payload: &Value) -> Value {
     let want = match job_arg("clear", payload, false) {
         Ok(w) => w,
         Err(e) => return e,
     };
     let mut g = jobs::jobs();
+    if let Some(jid) = &want {
+        if let Some(j) = jid.find(&g, agent_id) {
+            if !yours(j) {
+                return not_yours("clear", jid);
+            }
+            if j.status == "running" || j.status == "stopping" {
+                return bad(
+                    "clear",
+                    "job_id",
+                    &format!(
+                        "a finished job (job {} is {} — `stop` it, then clear)",
+                        py_str(&jid.raw),
+                        j.status
+                    ),
+                );
+            }
+        }
+    }
     let doomed: Vec<jobs::JobKey> = g
         .iter()
         .filter(|((_, id), j)| {
             &j.owner == agent_id
-                && match &want {
-                    Some(w) => w.id == Some(*id),
-                    None => j.status != "running" && j.status != "stopping",
-                }
+                && yours(j)
+                && want.as_ref().is_none_or(|w| w.id == Some(*id))
+                && j.status != "running"
+                && j.status != "stopping"
         })
         .map(|(key, _)| key.clone())
         .collect();

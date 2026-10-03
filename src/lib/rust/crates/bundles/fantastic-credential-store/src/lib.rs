@@ -12,33 +12,53 @@
 //! restart is ever needed.
 //!
 //! WHERE THE VALUES LIVE — `backend` on the record, one of:
-//!   * `file` (the default): a YAML file in the user's home,
-//!     `~/.fantastic/credentials/<store id>.yaml` unless `file` names another
-//!     path (a RELATIVE one is clamped under the kernel's running dir). It is
-//!     written 0600 and READ ONLY IF it is a regular file owned by this user with
-//!     no group/other bits — anything else is refused, loud. The document is
-//!     `{refs: {ref: {field: value}}}`, keys sorted, block style, written through
-//!     the kernel's own YAML writer so python reads it and it reads python's.
-//!   * `keychain`: the OS keychain ([`keychain::OsKeychain`]), one item per ref —
-//!     service `keychain_service` (default `fantastic`), account
-//!     `<store id>/<ref>`, the fields as a JSON object. A platform with no
-//!     keychain in this runtime fails loud naming it.
+//!   * `file` (the default): a YAML file at an ABSOLUTE path —
+//!     `~/.fantastic/credentials/<store id>.yaml` unless `file` names another one
+//!     (`/…` or `~…`; a relative path is refused at the write, and at use when a
+//!     record carries one past the write). It is written 0600 and READ ONLY IF it
+//!     is a regular file owned by this user with no group/other bits — anything
+//!     else is refused, loud. It is judged on the ONE open it is read from
+//!     ([`fs::read_private`]: `O_NOFOLLOW`, then `fstat` of that descriptor), so no
+//!     swap can land between the check and the read. The document is
+//!     `{refs: {ref: {host, fields: {field: value}}}}`, keys
+//!     sorted, block style, written through the kernel's own YAML writer so python
+//!     reads it and it reads python's.
+//!   * `keychain`: the OS keychain ([`keychain::OsKeychain`]), one item per ref,
+//!     under the namespace `keychain_namespace` (default `fantastic` — macOS calls
+//!     it the item's "service"), account `<store id>/<ref>`, `{host, fields}` as a
+//!     JSON object. A platform with no keychain in this runtime fails loud naming it.
 //!   * `env`: read-only; each ref maps its fields to environment variables
 //!     (`refs: {ref: {host, env: {api_key: VAR}}}`), for a container or CI.
 //!
-//! WHO MAY DO WHAT — per ref, on the store's own record (the OPERATOR manages it
-//! with `update_agent`): `refs: {<ref>: {readers: [...], writers: [...], host,
-//! fields}}`. An entry is a local agent id, `$subtree:<id>` (that agent and every
-//! live descendant), or a qualified `<guid>|<agent>` caller on another kernel.
-//! The operator may do everything. An agent listed in `creators` may create a NEW
-//! ref, which it then reads and writes. A caller with no grant on a ref is
-//! answered "no such ref" — never told the ref exists.
+//! THE HOST IS STORED WITH THE VALUE (audit S3, 2026-10-03): `set` writes the ref's
+//! declared host beside its fields — the file entry and the keychain item are
+//! `{host, fields}` — and `get` refuses a value whose stored host is not the one its
+//! declaration names, or that carries none: a store elsewhere declaring the same id
+//! and ref with another host reads nothing. The `env` backend keeps no value at rest.
+//!
+//! A REF IS DECLARED ONLY BY `update_agent` on the store's own record — the
+//! kernel's privileged verb, granted explicitly, is the one path:
+//! `refs: {<ref>: {host, readers: [...], writers: [...], fields?/env?}}` (it
+//! replaces the whole map; `host` is required — the binding). The DECLARATION is
+//! the operator's and only `update_agent` writes or removes it (audit AV-4/AV-5,
+//! 2026-10-03): `set` stores the value of a DECLARED ref, never creates one and
+//! takes no `host` (an undeclared ref answers "no such ref", to the operator too;
+//! a `host` on the call is refused); `forget` drops the value and keeps the
+//! declaration. `set`/`forget` need the caller in `writers`, `get` in `readers`;
+//! an entry is a local agent id, `$subtree:<id>` (that agent and every live
+//! descendant), or a qualified `<guid>|<agent>` caller on another kernel. The
+//! operator passes every reader and writer check. A caller with no grant on a ref
+//! is answered "no such ref" — never told the ref exists. `fields` on a ref are
+//! the stored value's NAMES: `set` writes them, `forget` drops them.
 //!
 //! NO VALUE IS EVER RECORDED. `set` must be called with `secret:
 //! ['payload.fields']` and `get` with `secret: ['result']`
 //! ([`fantastic_kernel::secret`]): the call is refused otherwise, because the
-//! value would land in the ledger, the memory store and the state stream. The
-//! record holds only metadata — the host and the field NAMES.
+//! value would land in the ledger, the memory store and the state stream. Either
+//! spelling of a mark counts (`['payload', 'fields']` is `payload.fields`), as
+//! does marking every field one by one; a field name holding a dot is marked only
+//! as an array (`['result', 'fields', 'a.b']`). The record holds only metadata —
+//! the host and the field NAMES.
 //!
 //! The kernel's call gate still decides who may reach this agent at all.
 //!
@@ -85,7 +105,7 @@ const BACKENDS: [&str; 3] = ["file", "keychain", "env"];
 /// refuses a model-parsed call to an agent so marked.
 pub const HOLDS_SECRETS: &str = "holds_secrets";
 const DEFAULT_DIR: &str = "~/.fantastic/credentials";
-const KEYCHAIN_SERVICE: &str = "fantastic";
+const KEYCHAIN_NAMESPACE: &str = "fantastic";
 const SUBTREE: &str = "$subtree:";
 
 /// What `reflect` says this agent IS — python's `sentence`, verbatim.
@@ -106,9 +126,10 @@ const VERBS: [(&str, &str); 6] = [
     ),
     (
         "set",
-        "args: ref:str, host:str (where the value may be sent), fields:{name: value} (req). \
-         Store or rotate a credential. Call it with secret: ['payload.fields']. Returns \
-         {ref, host, fields:[names], stored}.",
+        "args: ref:str, fields:{name: value} (req). Store or rotate the value of a DECLARED \
+         ref — its host is the declaration's (refs are declared by update_agent on this \
+         store's record; set never creates one and takes no host). Call it with secret: \
+         ['payload.fields']. Returns {ref, host, fields:[names], stored}.",
     ),
     (
         "get",
@@ -123,7 +144,8 @@ const VERBS: [(&str, &str); 6] = [
     ),
     (
         "forget",
-        "args: ref:str (req). Drop a credential — its value and its grants. Writers and the \
+        "args: ref:str (req). Drop a ref's VALUE from the backend; its declaration (host, \
+         readers, writers) stays — update_agent alone undeclares a ref. Writers and the \
          operator only. Returns {forgotten, ref}.",
     ),
 ];
@@ -267,14 +289,32 @@ fn host(h: Option<&Value>) -> Option<String> {
     (!s.is_empty()).then_some(s)
 }
 
-/// Whether the caller marked `prefix` (or every `prefix.<name>`) secret.
-fn marked(prefix: &str, names: &[String]) -> bool {
-    let paths = fantastic_kernel::current_secret();
-    paths.iter().any(|p| p == prefix)
-        || (!names.is_empty()
-            && names
-                .iter()
-                .all(|n| paths.iter().any(|p| *p == format!("{prefix}.{n}"))))
+/// Whether one secret mark names exactly `steps` — a dotted string by its dots,
+/// an array of steps step for step ([`fantastic_kernel::secret`]). A field name
+/// holding a dot is named only by an array: `result.fields.a.b` is `a` → `b`,
+/// never the field `a.b`, so it would not mask it. Python `_names`.
+fn mark_names(mark: &Value, steps: &[&str]) -> bool {
+    match mark {
+        Value::String(m) => m.split('.').eq(steps.iter().copied()),
+        Value::Array(m) => {
+            m.len() == steps.len() && m.iter().zip(steps).all(|(a, b)| a.as_str() == Some(*b))
+        }
+        _ => false,
+    }
+}
+
+/// Whether the caller marked `prefix` (or every `prefix` + `<name>`) secret, in
+/// either spelling of a mark. Python `_marked`.
+fn marked(prefix: &[&str], field_names: &[String]) -> bool {
+    let marks = fantastic_kernel::current_secret();
+    let has = |steps: &[&str]| marks.iter().any(|m| mark_names(m, steps));
+    has(prefix)
+        || (!field_names.is_empty()
+            && field_names.iter().all(|n| {
+                let mut steps = prefix.to_vec();
+                steps.push(n.as_str());
+                has(&steps)
+            }))
 }
 
 /// The record's `backend`, python `agent.record.get("backend") or "file"`.
@@ -387,67 +427,100 @@ fn sorted(v: &Value) -> Value {
     }
 }
 
-/// The default backend: one YAML document of `{refs: {ref: {field: value}}}`.
+/// THE host-mismatch refusal: the ref is bound to `bound`, not `other`. One shape
+/// for a `get {ref, host}` naming another host and a value stored for another
+/// host — or for none (audit S3). Python `_host_mismatch`.
+fn host_mismatch(r: &str, bound: &Value, other: Option<&str>) -> Value {
+    let mut out = refusal(
+        BAD_ARG,
+        format!(
+            "{NAME}: ref {} is bound to host {}, not {} — refused, nothing read",
+            py_repr(r),
+            py_repr_value(bound),
+            other.map_or_else(|| "None".to_string(), py_repr)
+        ),
+    );
+    with(&mut out, "arg", json!("host"));
+    out
+}
+
+/// The refusal for a stored value whose host is not the declared one — or that
+/// carries none (audit S3) — or `None`. Python `_host_at_rest`.
+fn host_at_rest(r: &str, stored: Option<&Value>, declared: Option<String>) -> Option<Value> {
+    let at_rest = host(stored);
+    if at_rest.is_some() && at_rest == declared {
+        return None;
+    }
+    let bound = declared.map_or(Value::Null, Value::String);
+    Some(host_mismatch(r, &bound, at_rest.as_deref()))
+}
+
+/// The refusal for a `file` that is not absolute (`/…` or `~…`), or `None`.
+/// Python `_relative_file`.
+fn relative_file(p: &str) -> Option<String> {
+    if p.starts_with('/') || p.starts_with('~') {
+        return None;
+    }
+    Some(format!(
+        "file={} must be an absolute path (starting with / or ~) — a relative path is refused",
+        py_repr(p)
+    ))
+}
+
+/// The default backend: one YAML document of
+/// `{refs: {ref: {host, fields: {field: value}}}}`, at an absolute path.
 struct FileBackend {
-    /// The base the name is clamped within: the running-dir clamp already
-    /// applied for a relative `file`, or the external base an absolute/`~` one
-    /// names.
+    /// The directory the absolute (or `~`-expanded) `file` names.
     base: PathBuf,
     name: String,
     shown: String,
 }
 
 impl FileBackend {
-    fn new(kernel: &Kernel, id: &AgentId, rec: &Map<String, Value>) -> Result<Self, BundleError> {
+    fn new(id: &AgentId, rec: &Map<String, Value>) -> Result<Self, BundleError> {
         let p = match rec.get("file") {
             Some(v) if py_truthy(v) => py_str(v),
             _ => format!("{DEFAULT_DIR}/{}.yaml", id.0),
         };
-        if p.starts_with('~') || p.starts_with('/') {
-            let (parent, name) = split_path(&expanduser(&p)?);
-            return Ok(Self {
-                base: PathBuf::from(parent),
-                name,
-                shown: p,
-            });
+        if let Some(why) = relative_file(&p) {
+            // a record written past `validate_meta`
+            return Err(raise("ValueError", format!("{NAME}: {why}")));
         }
-        // relative: under the kernel's running dir, clamped
-        let (parent, name) = split_path(&p);
-        let workdir = kernel.workdir().map_err(|e| raise("RuntimeError", e))?;
-        let base = fs::resolve_root(&parent, &workdir).map_err(raise_fs)?;
+        let (parent, name) = split_path(&expanduser(&p)?);
         Ok(Self {
-            base,
+            base: PathBuf::from(parent),
             name,
             shown: p,
         })
-    }
-
-    fn check(&self) -> Result<(), BundleError> {
-        use std::os::unix::fs::MetadataExt;
-        let st = fs::lstat(&self.base, &self.name).map_err(raise_fs)?;
-        let mode = st.mode() & 0o7777;
-        // SAFETY: `getuid` has no preconditions and cannot fail.
-        let me = unsafe { libc::getuid() };
-        if !st.file_type().is_file() || st.uid() != me || mode & 0o077 != 0 {
-            return Err(raise(
-                "PermissionError",
-                format!(
-                    "{NAME}: credential file {} must be a regular file owned by this user with \
-                     mode 0600 (is 0o{mode:o}, uid {}) — refused, nothing read",
-                    self.shown,
-                    st.uid()
-                ),
-            ));
-        }
-        Ok(())
     }
 
     fn load(&self) -> Result<Map<String, Value>, BundleError> {
         if !fs::exists(&self.base, &self.name).map_err(raise_fs)? {
             return Ok(Map::new());
         }
-        self.check()?;
-        let text = fs::read_text(&self.base, &self.name).map_err(raise_fs)?;
+        // ONE open, judged on its own descriptor (`fs::read_private`): checking the
+        // path and then reading the path again was a window a swapped leaf slipped
+        // through (audit F5, 2026-10-03).
+        let raw = match fs::read_private(&self.base, &self.name) {
+            Ok(raw) => raw,
+            Err(fs::PrivateReadError::NotPrivate(np)) => {
+                return Err(raise(
+                    "PermissionError",
+                    format!(
+                        "{NAME}: credential file {} must be a regular file owned by this user \
+                         with mode 0600 (is 0o{:o}, uid {}) — refused, nothing read",
+                        self.shown, np.mode, np.uid
+                    ),
+                ));
+            }
+            Err(fs::PrivateReadError::Os(e)) => return Err(raise_fs(e)),
+        };
+        let text = String::from_utf8(raw).map_err(|e| {
+            raise_fs(fantastic_bundle::utf8_decode_error_str(
+                e.as_bytes(),
+                &e.utf8_error(),
+            ))
+        })?;
         let doc = fantastic_kernel::yaml_io::load(&text).map_err(|e| raise("YAMLError", e))?;
         Ok(doc
             .as_object()
@@ -457,6 +530,7 @@ impl FileBackend {
             .unwrap_or_default())
     }
 
+    /// The ref's entry at rest, `{host, fields}`.
     fn get(&self, r: &str) -> Result<Option<Map<String, Value>>, BundleError> {
         Ok(self.load()?.get(r).and_then(Value::as_object).cloned())
     }
@@ -469,9 +543,9 @@ impl FileBackend {
             .map_err(raise_fs)
     }
 
-    fn put(&self, r: &str, fields: Map<String, Value>) -> Result<(), BundleError> {
+    fn put(&self, r: &str, at_rest: Value) -> Result<(), BundleError> {
         let mut refs = self.load()?;
-        refs.insert(r.to_string(), Value::Object(fields));
+        refs.insert(r.to_string(), at_rest);
         self.save(refs)
     }
 
@@ -485,10 +559,12 @@ impl FileBackend {
     }
 }
 
-/// The OS keychain: one item per ref, the fields as a JSON object.
+/// The OS keychain: one item per ref, `{host, fields}` as a JSON object.
 struct KeychainBackend {
     kc: Arc<dyn Keychain>,
-    service: String,
+    /// The record's `keychain_namespace` — the keychain's own word for it is the
+    /// item's "service".
+    namespace: String,
     prefix: String,
 }
 
@@ -503,22 +579,23 @@ fn raise_keychain(e: String) -> BundleError {
 
 impl KeychainBackend {
     fn new(kc: Arc<dyn Keychain>, id: &AgentId, rec: &Map<String, Value>) -> Self {
-        let service = match rec.get("keychain_service") {
+        let namespace = match rec.get("keychain_namespace") {
             Some(v) if py_truthy(v) => py_str(v),
-            _ => KEYCHAIN_SERVICE.to_string(),
+            _ => KEYCHAIN_NAMESPACE.to_string(),
         };
         Self {
             kc,
-            service,
+            namespace,
             prefix: format!("{}/", id.0),
         }
     }
 
+    /// The ref's item, `{host, fields}`.
     fn get(&self, r: &str) -> Result<Option<Map<String, Value>>, BundleError> {
         let account = format!("{}{r}", self.prefix);
         let Some(raw) = self
             .kc
-            .get_password(&self.service, &account)
+            .get_password(&self.namespace, &account)
             .map_err(raise_keychain)?
         else {
             return Ok(None);
@@ -527,13 +604,13 @@ impl KeychainBackend {
         Ok(v.as_object().cloned())
     }
 
-    fn put(&self, r: &str, fields: Map<String, Value>) -> Result<(), BundleError> {
+    fn put(&self, r: &str, at_rest: Value) -> Result<(), BundleError> {
         let account = format!("{}{r}", self.prefix);
         self.kc
             .set_password(
-                &self.service,
+                &self.namespace,
                 &account,
-                &py_json_dumps(&Value::Object(fields), true, None),
+                &py_json_dumps(&at_rest, true, None),
             )
             .map_err(raise_keychain)
     }
@@ -542,12 +619,12 @@ impl KeychainBackend {
         let account = format!("{}{r}", self.prefix);
         if self
             .kc
-            .get_password(&self.service, &account)
+            .get_password(&self.namespace, &account)
             .map_err(raise_keychain)?
             .is_some()
         {
             self.kc
-                .delete_password(&self.service, &account)
+                .delete_password(&self.namespace, &account)
                 .map_err(raise_keychain)?;
         }
         Ok(())
@@ -555,7 +632,7 @@ impl KeychainBackend {
 }
 
 /// Read-only: each ref's fields come from the environment variables its record
-/// entry names (`env: {field: VAR}`).
+/// entry names (`env: {field: VAR}`). No value at rest, so no host at rest.
 fn env_get(rec: &Map<String, Value>, r: &str) -> Result<Option<Map<String, Value>>, BundleError> {
     let refs = refs_of(rec);
     let names = refs
@@ -604,10 +681,18 @@ impl Backend {
         }
     }
 
-    fn put(&self, r: &str, fields: Map<String, Value>) -> Result<(), BundleError> {
+    /// Store `fields` WITH `host` (audit S3): the value at rest is
+    /// `{host, fields}` — python's `put(ref, host, fields)`.
+    fn put(
+        &self,
+        r: &str,
+        host: Option<String>,
+        fields: Map<String, Value>,
+    ) -> Result<(), BundleError> {
+        let at_rest = json!({"host": host, "fields": fields});
         match self {
-            Self::File(b) => b.put(r, fields),
-            Self::Keychain(b) => b.put(r, fields),
+            Self::File(b) => b.put(r, at_rest),
+            Self::Keychain(b) => b.put(r, at_rest),
             // python's `_Env` has no `put`; `set` refuses the env backend first.
             Self::Env(_) => Err(raise(
                 "AttributeError",
@@ -659,14 +744,9 @@ impl CredentialStoreBundle {
         }
     }
 
-    fn backend(
-        &self,
-        kernel: &Kernel,
-        id: &AgentId,
-        rec: &Map<String, Value>,
-    ) -> Result<Backend, BundleError> {
+    fn backend(&self, id: &AgentId, rec: &Map<String, Value>) -> Result<Backend, BundleError> {
         match backend_kind(rec).as_str() {
-            "file" => Ok(Backend::File(FileBackend::new(kernel, id, rec)?)),
+            "file" => Ok(Backend::File(FileBackend::new(id, rec)?)),
             "keychain" => Ok(Backend::Keychain(KeychainBackend::new(
                 Arc::clone(&self.keychain),
                 id,
@@ -707,9 +787,18 @@ impl CredentialStoreBundle {
         else {
             return Ok(missing(&format!("{NAME} set"), "ref"));
         };
-        let Some(h) = host(payload.get("host")) else {
-            return Ok(missing(&format!("{NAME} set"), "host"));
-        };
+        if payload.get("host").is_some() {
+            // the binding is the declaration's alone (audit AV-4)
+            let mut out = refusal(
+                BAD_ARG,
+                format!(
+                    "{NAME} set: takes no host — a ref's host is its declaration, written by \
+                     update_agent on this store's refs"
+                ),
+            );
+            with(&mut out, "arg", json!("host"));
+            return Ok(out);
+        }
         let fields = payload
             .get("fields")
             .and_then(Value::as_object)
@@ -727,7 +816,7 @@ impl CredentialStoreBundle {
             return Ok(out);
         };
         let names: Vec<String> = fields.keys().cloned().collect();
-        if !marked("payload.fields", &names) {
+        if !marked(&["payload", "fields"], &names) {
             let mut out = refusal(
                 BAD_ARG,
                 format!(
@@ -752,42 +841,31 @@ impl CredentialStoreBundle {
         }
         let who = caller();
         let mut refs = refs_of(&rec);
-        let entry = match refs.get(r).filter(|v| !v.is_null()) {
-            None => {
-                if who.is_some() && !covers(kernel, rec.get("creators"), who.as_deref()) {
-                    return Ok(no_such_ref(r));
-                }
-                let owner: Vec<Value> = who.iter().map(|c| json!(c)).collect();
-                let mut e = Map::new();
-                e.insert("readers".into(), Value::Array(owner.clone()));
-                e.insert("writers".into(), Value::Array(owner));
-                e
-            }
-            Some(existing) => {
-                let e = entry_map(existing);
-                if !covers(kernel, e.get("writers"), who.as_deref()) {
-                    if covers(kernel, e.get("readers"), who.as_deref()) {
-                        let mut out = refusal(
-                            UNAUTHORIZED,
-                            format!(
-                                "{NAME}: {} may read {} but not write it",
-                                who.as_deref().unwrap_or("None"),
-                                py_repr(r)
-                            ),
-                        );
-                        with(&mut out, "arg", json!("ref"));
-                        return Ok(out);
-                    }
-                    return Ok(no_such_ref(r));
-                }
-                e
-            }
+        // declared by update_agent alone — set never makes one
+        let Some(mut entry) = refs.get(r).filter(|v| !v.is_null()).map(entry_map) else {
+            return Ok(no_such_ref(r));
         };
-        self.backend(kernel, id, &rec)?.put(r, fields)?;
+        if !covers(kernel, entry.get("writers"), who.as_deref()) {
+            if covers(kernel, entry.get("readers"), who.as_deref()) {
+                let mut out = refusal(
+                    UNAUTHORIZED,
+                    format!(
+                        "{NAME}: {} may read {} but not write it",
+                        who.as_deref().unwrap_or("None"),
+                        py_repr(r)
+                    ),
+                );
+                with(&mut out, "arg", json!("ref"));
+                return Ok(out);
+            }
+            return Ok(no_such_ref(r));
+        }
+        let h = host(entry.get("host"));
+        // the declared host is stored WITH the value (audit S3)
+        self.backend(id, &rec)?.put(r, h.clone(), fields)?;
         let mut sorted_names = names;
         sorted_names.sort();
-        let mut entry = entry;
-        entry.insert("host".into(), json!(h));
+        // the value's NAMES, never a value
         entry.insert("fields".into(), json!(sorted_names));
         refs.insert(r.to_string(), Value::Object(entry));
         let mut patch = Map::new();
@@ -818,31 +896,40 @@ impl CredentialStoreBundle {
         if payload.get("host").is_some_and(|v| !v.is_null()) {
             let want = host(payload.get("host"));
             if want.is_none() || want != host(entry.get("host")) {
-                let mut out = refusal(
-                    BAD_ARG,
-                    format!(
-                        "{NAME}: ref {} is bound to host {}, not {} — refused, nothing read",
-                        py_repr(r),
-                        py_repr_value(entry.get("host").unwrap_or(&Value::Null)),
-                        want.as_deref().map_or_else(|| "None".to_string(), py_repr)
-                    ),
-                );
-                with(&mut out, "arg", json!("host"));
-                return Ok(out);
+                return Ok(host_mismatch(
+                    r,
+                    entry.get("host").unwrap_or(&Value::Null),
+                    want.as_deref(),
+                ));
             }
         }
-        let names: Vec<String> = match entry.get("fields") {
-            Some(v) if py_truthy(v) => v
-                .as_array()
-                .map(|a| a.iter().map(py_str).collect())
-                .unwrap_or_default(),
-            _ => entry
-                .get("env")
-                .and_then(Value::as_object)
-                .map(|m| m.keys().cloned().collect())
-                .unwrap_or_default(),
+        let backend = self.backend(id, &rec)?;
+        let mut fields = backend.get(r)?;
+        if let Some(stored) = fields.as_ref().filter(|f| !f.is_empty()) {
+            if !matches!(backend, Backend::Env(_)) {
+                // THE HOST AT REST (audit S3): a value is read only for the host it
+                // was stored with — the declaration of a store elsewhere sharing
+                // this id and ref names its own host, and reads nothing.
+                if let Some(bad) = host_at_rest(r, stored.get("host"), host(entry.get("host"))) {
+                    return Ok(bad);
+                }
+                fields = stored.get("fields").and_then(Value::as_object).cloned();
+            }
+        }
+        let Some(fields) = fields.filter(|f| !f.is_empty()) else {
+            let mut out = refusal(
+                NOT_FOUND,
+                format!("{NAME}: ref {} has no value in the backend", py_repr(r)),
+            );
+            with(&mut out, "arg", json!("ref"));
+            return Ok(out);
         };
-        if !(marked("result", &[]) || marked("result.fields", &names)) {
+        // The marks are judged against the field names the backend RETURNED, never
+        // the declared ones: a declaration can name fewer than the backend holds (an
+        // `env` map wider than `fields`, a re-declared ref, a hand-edited file), and
+        // a returned field no mark covers would be recorded in plain (audit BV-6/S4).
+        let names: Vec<String> = fields.keys().cloned().collect();
+        if !(marked(&["result"], &[]) || marked(&["result", "fields"], &names)) {
             let mut out = refusal(
                 BAD_ARG,
                 format!(
@@ -853,15 +940,6 @@ impl CredentialStoreBundle {
             with(&mut out, "arg", json!("secret"));
             return Ok(out);
         }
-        let fields = self.backend(kernel, id, &rec)?.get(r)?;
-        let Some(fields) = fields.filter(|f| !f.is_empty()) else {
-            let mut out = refusal(
-                NOT_FOUND,
-                format!("{NAME}: ref {} has no value in the backend", py_repr(r)),
-            );
-            with(&mut out, "arg", json!("ref"));
-            return Ok(out);
-        };
         Ok(json!({"ref": r, "host": host(entry.get("host")), "fields": fields}))
     }
 
@@ -918,23 +996,35 @@ impl CredentialStoreBundle {
             return Ok(missing(&format!("{NAME} forget"), "ref"));
         };
         let rec = record(kernel, id);
+        if backend_kind(&rec) == "env" {
+            let mut out = refusal(
+                BAD_ARG,
+                format!(
+                    "{NAME} forget: the env backend is read-only — unset the environment \
+                     variable its ref names"
+                ),
+            );
+            with(&mut out, "arg", json!("backend"));
+            return Ok(out);
+        }
         let mut refs = refs_of(&rec);
         let who = caller();
-        let writable = refs
+        let Some(mut entry) = refs
             .get(r)
             .filter(|v| !v.is_null())
             .map(entry_map)
-            .is_some_and(|e| covers(kernel, e.get("writers"), who.as_deref()));
-        if !writable {
+            .filter(|e| covers(kernel, e.get("writers"), who.as_deref()))
+        else {
             return Ok(no_such_ref(r));
+        };
+        self.backend(id, &rec)?.drop_ref(r)?;
+        // the value's names go with the value (audit AV-5); the declaration stays
+        if entry.shift_remove("fields").is_some() {
+            refs.insert(r.to_string(), Value::Object(entry));
+            let mut patch = Map::new();
+            patch.insert("refs".into(), Value::Object(refs));
+            kernel.update(id, patch);
         }
-        if backend_kind(&rec) != "env" {
-            self.backend(kernel, id, &rec)?.drop_ref(r)?;
-        }
-        refs.shift_remove(r);
-        let mut patch = Map::new();
-        patch.insert("refs".into(), Value::Object(refs));
-        kernel.update(id, patch);
         Ok(json!({"forgotten": true, "ref": r}))
     }
 }
@@ -984,17 +1074,19 @@ impl Bundle for CredentialStoreBundle {
                 ));
             }
         }
-        for k in ["file", "keychain_service"] {
+        for k in ["file", "keychain_namespace"] {
             if let Some(v) = meta.get(k).filter(|v| !v.is_null()) {
                 if !v.as_str().is_some_and(|s| !py_strip(s).is_empty()) {
                     return Some(format!("{k} must be a non-empty string"));
                 }
             }
         }
-        if let Some(c) = meta.get("creators").filter(|v| !v.is_null()) {
-            if !is_str_list(c) {
-                return Some("creators must be a list of agent ids".to_string());
-            }
+        if let Some(why) = meta
+            .get("file")
+            .and_then(Value::as_str)
+            .and_then(relative_file)
+        {
+            return Some(why);
         }
         let refs = meta.get("refs").filter(|v| !v.is_null())?;
         let Some(refs) = refs.as_object() else {
@@ -1016,7 +1108,13 @@ impl Bundle for CredentialStoreBundle {
                     }
                 }
             }
-            if e.get("host").is_some_and(|v| !v.is_null()) && host(e.get("host")).is_none() {
+            if !e.get("host").is_some_and(|v| !v.is_null()) {
+                return Some(format!(
+                    "{}.host is required — the one host this ref's value may be sent to",
+                    ref_label(r)
+                ));
+            }
+            if host(e.get("host")).is_none() {
                 return Some(format!("{}.host must be a non-empty host", ref_label(r)));
             }
             if let Some(env) = e.get("env").filter(|v| !v.is_null()) {

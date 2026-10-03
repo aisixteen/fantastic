@@ -20,7 +20,15 @@ from typing import Callable
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from relay_harness import Relay, require_relay  # noqa: E402
+from relay_harness import (  # noqa: E402
+    CREDS,
+    LEG,
+    Relay,
+    relay_credentials,
+    require_relay,
+    seed_relay_creds,
+    set_relay_password,
+)
 
 from helpers.kernel_proc import KernelProc  # noqa: E402
 from helpers.seeding import seed_web, seed_web_ws  # noqa: E402
@@ -60,20 +68,22 @@ def _relay_meta(
     guid: str,
     partner_guid: str,
     relay_url: str,
-    relay_token: str,
     auth: str | None = None,
 ) -> dict:
-    """The relay_connector agent record. `relay_token` is the relay CONNECTION
-    password (X-Fantastic-Auth); the per-leg `auth`/`ingress_rule`/`egress_rule`
-    gate the tunneled bridge calls and are INDEPENDENT of it."""
+    """The relay_connector agent record. The relay CONNECTION password
+    (X-Fantastic-Auth) is never on it: `credentials` names the kernel's store and
+    ref (`seed_relay_creds`), and `can_call` lets the leg `get` it before each dial.
+    The per-leg `auth`/`ingress_rule`/`egress_rule` gate the tunneled bridge calls
+    and are INDEPENDENT of it."""
     meta = {
         "handler_module": handler_module,
-        "id": "cb",
+        "id": LEG,
         "transport": "relay",
         "relay_url": relay_url,
         "guid": guid,
         "partner_guid": partner_guid,
-        "relay_token": relay_token,
+        "credentials": relay_credentials(),
+        "can_call": {CREDS: ["get"]},
         "heartbeat": 0,
     }
     # IO legs SEAL by default (absent rule ⇒ deny_inbound); a leg that must answer
@@ -104,6 +114,7 @@ async def _spawn_pair(
     parity_tmp: Callable[[str], Path],
     free_port: Callable[[], int],
     tag: str,
+    relay: Relay,
     *,
     env_a: dict | None = None,
     env_b: dict | None = None,
@@ -120,6 +131,7 @@ async def _spawn_pair(
     for binary, wd, port in [(bin_a, wd_a, port_a), (bin_b, wd_b, port_b)]:
         seed_web(binary, wd, port)
         seed_web_ws(binary, wd)
+        seed_relay_creds(binary, wd, relay)
     spawned: list[KernelProc] = []
     kp_a = bin_a.start_daemon(wd_a, port_a, label=rt_a, extra_env=env_a)
     spawned.append(kp_a)
@@ -127,6 +139,7 @@ async def _spawn_pair(
     kp_b = bin_b.start_daemon(wd_b, port_b, label=rt_b, extra_env=env_b)
     spawned.append(kp_b)
     await kp_b.wait_ready()
+    await asyncio.gather(set_relay_password(kp_a, relay), set_relay_password(kp_b, relay))
     return kp_a, kp_b, (bin_a, wd_a), (bin_b, wd_b), spawned
 
 
@@ -151,7 +164,7 @@ async def test_relay_any_to_any(
     relay = Relay(require_relay(), free_port()).start()
     try:
         kp_a, kp_b, _, _, spawned = await _spawn_pair(
-            rt_a, rt_b, request, parity_tmp, free_port, f"relay_{rt_a}_{rt_b}"
+            rt_a, rt_b, request, parity_tmp, free_port, f"relay_{rt_a}_{rt_b}", relay
         )
         try:
             created = await asyncio.gather(
@@ -163,7 +176,6 @@ async def test_relay_any_to_any(
                         guid="A",
                         partner_guid="B",
                         relay_url=relay.url,
-                        relay_token=relay.password,
                         auth="deny_inbound",
                     ),
                 ),
@@ -175,7 +187,6 @@ async def test_relay_any_to_any(
                         guid="B",
                         partner_guid="A",
                         relay_url=relay.url,
-                        relay_token=relay.password,
                         auth="allow_all",
                     ),
                 ),
@@ -216,7 +227,6 @@ async def _drive_password(
                 guid="A",
                 partner_guid="B",
                 relay_url=relay.url,
-                relay_token=relay.password,
                 auth="password",
             ),
         ),
@@ -228,7 +238,6 @@ async def _drive_password(
                 guid="B",
                 partner_guid="A",
                 relay_url=relay.url,
-                relay_token=relay.password,
                 auth="password",
             ),
         ),
@@ -269,6 +278,7 @@ async def test_relay_password_group_member(
             parity_tmp,
             free_port,
             f"relaypw_{rt_a}_{rt_b}",
+            relay,
             env_a=env,
             env_b=env,
         )
@@ -304,6 +314,7 @@ async def test_relay_password_rejects_outsider(
             parity_tmp,
             free_port,
             f"relaypwx_{rt_a}_{rt_b}",
+            relay,
             env_a={"FANTASTIC_GROUP_TOKEN": "grp-A"},
             env_b={"FANTASTIC_GROUP_TOKEN": "grp-B"},
         )
@@ -339,6 +350,7 @@ async def test_relay_asymmetric_rules(rt_a: str, rt_b: str, request, parity_tmp,
             parity_tmp,
             free_port,
             f"relayasym_{rt_a}_{rt_b}",
+            relay,
             env_a=env,
             env_b=env,
         )
@@ -348,7 +360,6 @@ async def test_relay_asymmetric_rules(rt_a: str, rt_b: str, request, parity_tmp,
                 guid="A",
                 partner_guid="B",
                 relay_url=relay.url,
-                relay_token=relay.password,
             )
             meta_a["ingress_rule"] = "deny_inbound"
             meta_a["egress_rule"] = "password"
@@ -362,7 +373,6 @@ async def test_relay_asymmetric_rules(rt_a: str, rt_b: str, request, parity_tmp,
                         guid="B",
                         partner_guid="A",
                         relay_url=relay.url,
-                        relay_token=relay.password,
                         auth="password",
                     ),
                 ),
@@ -401,7 +411,7 @@ async def test_relay_directory(rt, request, parity_tmp, free_port) -> None:
     relay = Relay(require_relay(), free_port()).start()
     try:
         kp_a, kp_b, _, _, spawned = await _spawn_pair(
-            rt, rt, request, parity_tmp, free_port, f"relay_dir_{rt}"
+            rt, rt, request, parity_tmp, free_port, f"relay_dir_{rt}", relay
         )
         try:
             created = await asyncio.gather(
@@ -413,7 +423,6 @@ async def test_relay_directory(rt, request, parity_tmp, free_port) -> None:
                         guid="A",
                         partner_guid="B",
                         relay_url=relay.url,
-                        relay_token=relay.password,
                         auth="allow_all",
                     ),
                 ),
@@ -425,7 +434,6 @@ async def test_relay_directory(rt, request, parity_tmp, free_port) -> None:
                         guid="B",
                         partner_guid="A",
                         relay_url=relay.url,
-                        relay_token=relay.password,
                         auth="allow_all",
                     ),
                 ),
@@ -469,7 +477,7 @@ async def test_relay_kernelgroup_typing(rt, request, parity_tmp, free_port) -> N
     relay = Relay(require_relay(), free_port()).start()
     try:
         kp_a, kp_b, _, _, spawned = await _spawn_pair(
-            rt, rt, request, parity_tmp, free_port, f"relay_kg_{rt}"
+            rt, rt, request, parity_tmp, free_port, f"relay_kg_{rt}", relay
         )
         try:
             mgr = _relay_meta(
@@ -477,7 +485,6 @@ async def test_relay_kernelgroup_typing(rt, request, parity_tmp, free_port) -> N
                 guid="A",
                 partner_guid="B",
                 relay_url=relay.url,
-                relay_token=relay.password,
                 auth="allow_all",
             )
             mgr["role"] = "manager"  # A is a manager-peer
@@ -486,7 +493,6 @@ async def test_relay_kernelgroup_typing(rt, request, parity_tmp, free_port) -> N
                 guid="B",
                 partner_guid="A",
                 relay_url=relay.url,
-                relay_token=relay.password,
                 auth="allow_all",
             )
             owned["owner_guid"] = "A"  # B is a kernel owned by manager A
@@ -535,7 +541,7 @@ async def test_relay_reconnects_after_relay_restart(request, parity_tmp, free_po
     spawned: list[KernelProc] = []
     try:
         kp_a, kp_b, _, _, spawned = await _spawn_pair(
-            "python", "python", request, parity_tmp, free_port, "relay_reconnect"
+            "python", "python", request, parity_tmp, free_port, "relay_reconnect", relay
         )
 
         def meta(guid, partner, auth):
@@ -544,7 +550,6 @@ async def test_relay_reconnects_after_relay_restart(request, parity_tmp, free_po
                 guid=guid,
                 partner_guid=partner,
                 relay_url=relay.url,
-                relay_token=relay.password,
                 auth=auth,
             )
             m["reconnect"] = 1  # fast backoff for the test

@@ -97,6 +97,7 @@ class _Blocked:
 
 async def test_a_send_cancelled_while_queued_leaves_no_phantom_queue_entry(
     seeded_kernel,
+    fake_providers,
 ):
     aid = "cid_queue"
     seeded_kernel.create(
@@ -106,7 +107,7 @@ async def test_a_send_cancelled_while_queued_leaves_no_phantom_queue_entry(
         **memory_meta(seeded_kernel, aid, {"cli": "*"}),
     )
     blocked = _Blocked()
-    core._providers[aid] = blocked
+    fake_providers[aid] = blocked
     holder = asyncio.create_task(
         seeded_kernel.send(
             [{"target": aid, "payload": {"type": "send", "text": "first"}}]
@@ -153,5 +154,5 @@ async def test_a_send_cancelled_while_queued_leaves_no_phantom_queue_entry(
             await asyncio.wait_for(holder, 5)
         except (TimeoutError, asyncio.CancelledError):
             holder.cancel()
-        core._providers.pop(aid, None)
+        fake_providers.pop(aid, None)
         await asyncio.sleep(0.1)

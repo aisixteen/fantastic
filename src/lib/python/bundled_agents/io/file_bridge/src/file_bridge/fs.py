@@ -1,20 +1,21 @@
 """fs — THE single clamped disk surface for the whole kernel.
 
-This module is the ONLY place that calls `open()`/reads/writes the filesystem. The
+This module is the ONLY place that opens an arbitrary path to read or write it. The
 running-dir law lives here (a `root` is clamped to the kernel's running dir — the dir
 holding its root's `.fantastic`, `Kernel.workdir`; a `path` is clamped to that root —
 `../`, `~`, absolute paths, outward symlinks all refuse), so the clamp is
-**unbypassable**: nothing can read or write outside its allowed root by going around
-it, because there is no other disk code to go around to.
+**unbypassable** for every path a caller names: nothing reads or writes one outside its
+allowed root by going around this module. The disk code that does not come through here
+is enumerated below — none of it opens a caller-named path.
 
 Who imports `fs` is DELIBERATELY narrow — the END STATE is the `file_bridge` AGENT (the
 gate) + the cold bootstrap ONLY; every other bundle does disk IO by `send`ing verbs to a
 gated file_bridge agent (addressed by id, opened on demand), so the
 deny-all gate is unbypassable too — not just the clamp. `scheduler` / `ai_core` already
-route this way (no `fs` import). `kernel_state` (boot-read), and
-`exec_bridge` (a PTY job's pasted-image scratch dir, OUTSIDE the running dir) still import `fs` for
-now — the latter pending agent-routing once file_bridge agents accept an explicit
-external root.
+route this way (no `fs` import). `kernel_state` (boot-read), `static_loader` (its
+manifest), `exec_bridge` (a PTY job's pasted-image scratch dir, OUTSIDE the running dir)
+and `credential_store` (its `file` backend — secrets at an absolute path OUTSIDE the
+running dir by design, written 0600, read through `read_private`) import `fs` directly.
 
 Two surfaces, ONE per call site (never tried in sequence — not a fallback):
   - **clamped** (default) — `root` is a `Root`: the configured root string + the running
@@ -25,7 +26,8 @@ Two surfaces, ONE per call site (never tried in sequence — not a fallback):
   - **external** (`external=True`) — `root` is an operator/peer-chosen base that may live
     ANYWHERE; `path` is still clamped within it (can't escape the base via `..`). This is
     for surfaces that legitimately operate OUTSIDE the running dir BY DESIGN: an
-    `exec_bridge` PTY job writing a pasted clipboard image into a system temp scratch dir. The
+    `exec_bridge` PTY job writing a pasted clipboard image into a system temp scratch dir;
+    a `credential_store` keeping its secrets file at an absolute path. The
     running-dir law does NOT apply (the base isn't the kernel's own state) — but the open()
     still funnels through here, so there is still exactly one disk module.
 
@@ -35,13 +37,22 @@ that would be a fallback, which this kernel refuses.
 
 The ONLY disk code outside this module is:
   - the substrate's fixed-path bootstrap (`kernel/_lock.py` lock.yaml, `_env` cwd/.env,
-    `Agent._read_readme` reading an agent's own `readme.md` back for reflect) — the
+    `Agent._read_readme` reading an agent's own `readme.md` back for reflect, and
+    `Agent._readme_index`/`_readme_view` reading its `docs/` topic tree) — the
     substrate is decoupled from bundles BY DESIGN (it sends verbs, never imports one), so
     it cannot import `fs`; these are fixed-relative reads of the kernel's own tree (within
     the running dir), read-mostly.
   - reads of a bundle's OWN baked-in package resources via `importlib.resources` (the
     installed wheel, e.g. a seeded `readme.md` / `help.md` / `index.html` / favicon) — a
     resource lookup in the package, not an arbitrary filesystem path.
+  - `exec_bridge`'s process plumbing: `proc._all_pids` lists `/proc` (Linux) to find a
+    job's session members; `proc.resolve` probes the child's `PATH` dirs for a bare
+    command (`os.path.isfile` + `os.access` — metadata only; the OS opens what it
+    execs); `tools._paste_image` creates a PTY job's paste scratch dir in the system
+    temp dir (`tempfile.mkdtemp`) — the image itself is written into it through here
+    (`external=True`).
+  - the `file_bridge` agent's `list`, which stats the entries `list_dir` returned
+    (`is_dir`, `stat().st_size`) — paths this module already clamped.
 Everything that takes an arbitrary path comes through here.
 
 Every function takes `(root, path)`: `root` is the clamp boundary (a `Root`), `path` is
@@ -51,7 +62,9 @@ surface described above.
 
 from __future__ import annotations
 
+import errno
 import os
+import stat
 from pathlib import Path
 from typing import NamedTuple
 
@@ -205,19 +218,48 @@ def write_text(
     )
 
 
-def lstat(root, path, *, external: bool = False) -> os.stat_result:
-    """The entry's OWN stat (a symlink is not followed) — for a caller that must
-    check what a path IS (type, owner, permission bits) before trusting it."""
-    return _lexical_leaf(root, path, external=external).lstat()
+class NotPrivate(PermissionError):
+    """What `read_private` refused, nothing read: the entry it found is not a
+    private file. `mode` (its permission bits) and `uid` (its owner) say what it
+    IS, for the caller's own refusal text."""
+
+    def __init__(self, path: Path, mode: int, uid: int):
+        self.mode, self.uid = mode, uid
+        super().__init__(
+            f"fs: {path} is not a private file (mode {oct(mode)}, uid {uid}) — "
+            "refused, nothing read"
+        )
 
 
-def open_append(root, path, *, external: bool = False):
-    """Open `path` for unbuffered binary APPEND, creating parent dirs. Returns the raw
-    file object — for handing a long-lived sink (a subprocess's stdout/stderr log) to
-    `subprocess.Popen`. The CALLER owns closing it."""
-    target = resolve(root, path, external=external)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    return target.open("ab", buffering=0)
+def read_private(root, path, *, external: bool = False) -> bytes:
+    """Read a PRIVATE file — a regular file owned by this user with no group/other
+    permission bits — through ONE open. `O_NOFOLLOW` refuses a symlink in the
+    leaf's place, and the OPEN DESCRIPTOR is what is judged (`fstat`) and read,
+    so nothing can swap the file between the check and the read (audit F5,
+    2026-10-03: an `lstat` of the path and then a read of the path again was a
+    window). `O_NONBLOCK` so a FIFO planted there cannot hang the open — it is
+    judged and refused like any other non-regular entry. Raises `NotPrivate`
+    (nothing read) when the entry is not private; `FileNotFoundError` when absent."""
+    leaf = _lexical_leaf(root, path, external=external)
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+    try:
+        fd = os.open(leaf, flags)
+    except OSError as e:
+        if e.errno != errno.ELOOP:
+            raise
+        st = leaf.lstat()  # the symlink itself, named in the refusal — never read
+        raise NotPrivate(leaf, stat.S_IMODE(st.st_mode), st.st_uid) from None
+    try:
+        st = os.fstat(fd)
+        mode = stat.S_IMODE(st.st_mode)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or mode & 0o077:
+            raise NotPrivate(leaf, mode, st.st_uid)
+        chunks = []
+        while chunk := os.read(fd, 1 << 16):
+            chunks.append(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
 
 
 # ─── chunked / streaming (the stream-verb backing) ──────────────

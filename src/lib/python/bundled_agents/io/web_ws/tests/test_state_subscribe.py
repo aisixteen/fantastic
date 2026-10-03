@@ -19,6 +19,9 @@ from web_ws.tools import _make_endpoint
 
 @pytest.fixture
 def client(seeded_kernel):
+    # The web host's record: its port is the authority the Host guard admits
+    # (audit W-2) — the client names it on every request, the upgrade included.
+    seeded_kernel.create(None, id="test_web", port=8088)
     app = make_app("test_web", seeded_kernel)
     # Sealed by default ⇒ open the leg so state_subscribe/call frames dispatch
     # (a sealed leg would deny them, and the snapshot/event frames would never flow).
@@ -28,12 +31,13 @@ def client(seeded_kernel):
         ingress_rule="allow_all_ingress",
         # Deny-all: the surface relays browser create/delete to kernel_state —
         # privileged verbs, so an explicit grant (ingress opens WHO; this opens WHAT).
-        can_call={"kernel_state": ["create_agent", "delete_agent"]},
+        # The state stream is a kernel-wide read, gated on the root the same way.
+        can_call={"kernel_state": ["create_agent", "delete_agent", "state_subscribe"]},
     )
     app.add_api_websocket_route(
         "/{host_id}/ws", _make_endpoint("test_web_ws", seeded_kernel)
     )
-    with TestClient(app) as c:
+    with TestClient(app, headers={"host": "127.0.0.1:8088"}) as c:
         yield c
 
 
@@ -118,6 +122,8 @@ def test_state_event_lifecycle_removed(client, seeded_kernel):
         ws.send_text(json.dumps({"type": "state_subscribe"}))
         _drain_until(ws, lambda m: m.get("type") == "state_snapshot")
         # Create then delete in sequence; expect 'added' then 'removed'.
+        # Created under the LEG itself: `delete_agent` is gated on its operand,
+        # and an agent the leg made under itself is its own to delete (AV-1).
         ws.send_text(
             json.dumps(
                 {
@@ -125,7 +131,7 @@ def test_state_event_lifecycle_removed(client, seeded_kernel):
                     "target": "kernel_state",
                     "payload": {
                         "type": "create_agent",
-                        "parent_id": "kernel_state",
+                        "parent_id": "test_web_ws",
                         "handler_module": "file_bridge.tools",
                         "allow": ["."],
                     },
@@ -195,6 +201,9 @@ def test_state_unsubscribe_stops_frames(client, seeded_kernel):
 def test_ws_close_unsubscribes_state_callback(seeded_kernel):
     """When the WS closes, the proxy's finally block unregisters every
     state subscriber tied to that connection."""
+    # The web host's record: its port is the authority the Host guard admits
+    # (audit W-2) — the client names it on every request, the upgrade included.
+    seeded_kernel.create(None, id="test_web", port=8088)
     app = make_app("test_web", seeded_kernel)
     # Sealed by default ⇒ open the leg so state_subscribe dispatches.
     seeded_kernel.create(
@@ -203,13 +212,14 @@ def test_ws_close_unsubscribes_state_callback(seeded_kernel):
         ingress_rule="allow_all_ingress",
         # Deny-all: the surface relays browser create/delete to kernel_state —
         # privileged verbs, so an explicit grant (ingress opens WHO; this opens WHAT).
-        can_call={"kernel_state": ["create_agent", "delete_agent"]},
+        # The state stream is a kernel-wide read, gated on the root the same way.
+        can_call={"kernel_state": ["create_agent", "delete_agent", "state_subscribe"]},
     )
     app.add_api_websocket_route(
         "/{host_id}/ws", _make_endpoint("test_web_ws", seeded_kernel)
     )
     pre = len(seeded_kernel.ctx.state_subscribers)
-    with TestClient(app) as c:
+    with TestClient(app, headers={"host": "127.0.0.1:8088"}) as c:
         with c.websocket_connect("/kernel_state/ws") as ws:
             ws.send_text(json.dumps({"type": "state_subscribe"}))
             _drain_until(ws, lambda m: m.get("type") == "state_snapshot")
@@ -244,3 +254,38 @@ def test_state_event_carries_display_name_when_present(client, seeded_kernel):
             lambda m: m.get("type") == "state_event" and m.get("kind") == "added",
         )
         assert added["name"] == "my-store"
+
+
+def test_state_subscribe_without_the_grant_is_refused(seeded_kernel):
+    """The leg is gated as ITSELF, never as the operator: an open ingress rule
+    and grants for other verbs do not buy the kernel-wide stream. The refusal
+    is an error frame, no snapshot follows, and no subscriber is registered.
+    (The handler ran with no sender, so the kernel read an operator and served
+    the snapshot; only the ambient context of a production serve gated it.)"""
+    # The web host's record: its port is the authority the Host guard admits
+    # (audit W-2) — the client names it on every request, the upgrade included.
+    seeded_kernel.create(None, id="test_web", port=8088)
+    app = make_app("test_web", seeded_kernel)
+    seeded_kernel.create(
+        "web_ws.tools",
+        id="test_web_ws",
+        ingress_rule="allow_all_ingress",
+        # the connect-time auto-watch of the root needs its NAMED grant (audit
+        # KV-2), so its refusal is not the error frame read below
+        can_call={"kernel_state": ["create_agent", "delete_agent", "watch"]},
+    )
+    app.add_api_websocket_route(
+        "/{host_id}/ws", _make_endpoint("test_web_ws", seeded_kernel)
+    )
+    pre = len(seeded_kernel.ctx.state_subscribers)
+    with TestClient(app, headers={"host": "127.0.0.1:8088"}) as c:
+        with c.websocket_connect("/kernel_state/ws") as ws:
+            ws.send_text(json.dumps({"type": "state_subscribe", "id": "s1"}))
+            msg = _drain_until(
+                ws, lambda m: m.get("type") in ("error", "state_snapshot")
+            )
+            assert msg["type"] == "error", msg
+            assert msg["id"] == "s1"
+            assert msg["reason"] == "unauthorized"
+            assert "state_subscribe" in msg["error"]
+            assert len(seeded_kernel.ctx.state_subscribers) == pre

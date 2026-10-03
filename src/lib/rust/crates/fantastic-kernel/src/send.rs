@@ -19,7 +19,8 @@
 //!
 //! ### Watcher fanout
 //!
-//! Every dispatch — text or binary — runs [`Kernel::fanout`] BEFORE its handler:
+//! Every dispatch — with a request body or without — runs [`Kernel::fanout`]
+//! BEFORE its handler:
 //! the raw payload onto the target's OWN inbox and each watcher's, plus the state
 //! event `{agent_id, kind:"send", backlog, sender, summary, payload}` for the
 //! target and for every watcher that is a real agent. `emit` does the same with
@@ -138,19 +139,21 @@ pub fn current_remote_caller() -> Option<String> {
 }
 
 tokio::task_local! {
-    /// THE SECRET PATHS of the call this dispatch serves — the `secret` its
+    /// THE SECRET MARKS of the call this dispatch serves — the `secret` its
     /// caller marked on the batch item ([`crate::secret`]). Set per dispatch
     /// task, so a handler's own sends never inherit it. A bundle that must only
     /// ever be called WITH a mark (a credential store) reads it and refuses an
     /// unmarked call. Python `_current_secret`.
-    static CURRENT_SECRET: Vec<String>;
+    static CURRENT_SECRET: Vec<Value>;
 }
 
-/// The paths the caller marked `secret` on the item that started this dispatch
-/// (`payload.<field…>` / `result[.<field…>]`), or empty when none were marked.
-/// Python `current_secret()`.
+/// The marks the caller put on the item that started this dispatch, exactly as
+/// given and in order — each a dotted string (`payload.<field…>` /
+/// `result[.<field…>]`) or an array of steps (`["payload", <step>, …]` /
+/// `["result", <step>…]`) — or empty when none were marked. Python
+/// `current_secret()`.
 #[must_use]
-pub fn current_secret() -> Vec<String> {
+pub fn current_secret() -> Vec<Value> {
     CURRENT_SECRET.try_with(Clone::clone).unwrap_or_default()
 }
 
@@ -174,6 +177,22 @@ where
     F: std::future::Future<Output = T>,
 {
     IN_SHUTDOWN.scope(true, fut).await
+}
+
+tokio::task_local! {
+    /// THE LEDGER FLUSH IS SILENT on the state stream (owner 2026-10-03, audit
+    /// CLI-B). The kernel's own flush `send` — and every send, emit and state
+    /// event inside its execution (the store's dispatch, its drain) — publishes
+    /// nothing: a subscriber woken by the flush (a long-poll `events` waiter)
+    /// made a call, the call made rows, the rows made the next flush, forever,
+    /// filling the store. The rows stay recorded by the flush row. Carried into
+    /// the dispatch and the forks the flush starts. Python `_state_quiet`.
+    pub(crate) static STATE_QUIET: bool;
+}
+
+/// Is this inside the kernel's own ledger flush?
+pub(crate) fn state_quiet() -> bool {
+    STATE_QUIET.try_with(|v| *v).unwrap_or(false)
 }
 
 /// Run `fut` with `sender` set as `CURRENT_SENDER` for its duration.
@@ -230,9 +249,8 @@ fn verb_of(payload: &Value) -> &str {
     payload.get("type").and_then(Value::as_str).unwrap_or("")
 }
 
-/// `agent <id!r> has no handler_module; cannot answer verb <verb!r>` —
-/// SHARED by the text and binary dispatch paths (C34): python has one
-/// dispatch path for both channels, so both answer the identical refusal.
+/// `agent <id!r> has no handler_module; cannot answer verb <verb!r>` — the
+/// one dispatch's refusal (C34), with or without a request body.
 fn no_handler_module_refusal(id: &str, verb: &str) -> Value {
     let mut r = crate::refusal::refusal(
         crate::refusal::UNHANDLED,
@@ -257,8 +275,8 @@ pub(crate) fn no_module_named(hm: &str) -> String {
 }
 
 /// `agent <id!r>: handler_module <hm!r> cannot be imported in this runtime:
-/// ModuleNotFoundError: <message>` — SHARED by the text and binary dispatch
-/// paths (C34/C24), python's text verbatim.
+/// ModuleNotFoundError: <message>` — the one dispatch's refusal (C34/C24),
+/// python's text verbatim.
 fn not_installed_refusal(id: &str, hm: &str, verb: &str) -> Value {
     let mut r = crate::refusal::refusal(
         crate::refusal::UNHANDLED,
@@ -276,8 +294,9 @@ fn not_installed_refusal(id: &str, hm: &str, verb: &str) -> Value {
 
 /// `<verb>: <arg> must be <want>, got <repr>` — python's fuller `bad()` form
 /// that also echoes the received value: `refusal(BAD_ARG, f"...got
-/// {v!r}", arg=arg)`. C30/C38's `timeout`/`payload.type`/`retries` refusals
-/// need the RAW value in the message; the shared `refusal::bad` omits the
+/// {v!r}", arg=arg)`. C30/C38's `timeout`/`retries` refusals need the RAW
+/// value in the message (`payload.type` names only a non-string's TYPE —
+/// see `launch`); the shared `refusal::bad` omits the
 /// `got` clause because most call sites never have it to hand.
 fn bad_got(verb: &str, arg: &str, want: &str, got: &Value) -> Value {
     let mut r = crate::refusal::refusal(
@@ -430,15 +449,13 @@ struct Dispatch {
     /// A RAW request body and the payload path it sits at (python's payload
     /// dict holding bytes there).
     binary: Option<crate::outcome::Blob>,
-    /// The reply's chunk comes back raw (see [`Item::with_raw_reply`]).
-    raw_reply: bool,
     /// The payload AS SHOWN when the item marked `secret` paths
     /// ([`crate::secret`]): what the fanout publishes on EVERY attempt, while the
     /// handler gets `payload`. Python `_Dispatched.shown`.
     shown: Option<crate::secret::Shown>,
-    /// The item's `secret` paths, readable by the handler as
+    /// The item's `secret` marks as given, readable by the handler as
     /// [`current_secret`]. Python `_Dispatched.secret_paths`.
-    secret_paths: Vec<String>,
+    secret_paths: Vec<Value>,
     /// A caller-NAMED `kernel` reflect — python's flags-done fast path: the
     /// FIRST attempt is a bare identity read with the flags applied (no task
     /// row, no fanout, no `_in_flight`, and no enforced deadline: `cancel_task`
@@ -457,6 +474,10 @@ struct Joiner {
     /// joiner's own dispatch, which never gets one. Needed only to render
     /// the joiner-timeout refusal's `task_id` + pid-in-prose (C31).
     exec_id: i64,
+    /// The joined execution's secret marks, when it carried some and this
+    /// joiner is not the identity that opened it: its outcome is handed over AS
+    /// SHOWN. Python `_Dispatched.shown_to_joiner`.
+    mask: Option<Arc<crate::secret::Secret>>,
 }
 
 impl Kernel {
@@ -594,6 +615,23 @@ impl Kernel {
         }
     }
 
+    /// Did the execution a batch item's `id` names — resolved as `send` resolves
+    /// it: an int is a message id, a string a caller's NAME — carry `secret`
+    /// marks? False when it names no execution held in RAM (the send itself
+    /// answers that id; one replayed from the store answers a refusal, never a
+    /// value), and for a bool or any other shape. Asked by ai_core before it
+    /// dispatches a model-parsed call that would JOIN an execution: a model never
+    /// receives a secret. Python `Kernel.carried_secret`.
+    #[must_use]
+    pub fn carried_secret(&self, item_id: &Value) -> bool {
+        let exec_id = match item_id {
+            Value::Number(n) => n.as_i64(),
+            Value::String(s) => self.ledger.resolve_name(s),
+            _ => None,
+        };
+        exec_id.is_some_and(|id| self.ledger.carried_secret(id))
+    }
+
     /// One item's SYNCHRONOUS half: validate, resolve, gate. Python
     /// `Agent._launch` (`kernel/_agent.py:601-732`) — C30's check order:
     /// target → payload dict → timeout → payload.type → id → retries → secret
@@ -635,21 +673,37 @@ impl Kernel {
         // Validated for EVERY send (operator included) BEFORE the gate, so a
         // typeless payload is a coded refusal, never an `unhandled` from the
         // target (measured 2026-09-02).
-        let Some(type_v) = item.payload.get("type") else {
-            return Launched::Settled(Outcome::refused(crate::refusal::missing(
-                "send",
-                "payload.type",
-            )));
-        };
-        let verb = match type_v.as_str() {
-            Some(s) if !s.is_empty() => s.to_string(),
-            _ => {
-                return Launched::Settled(Outcome::refused(bad_got(
+        // A RAW BODY at `type` is python's `bytes` value there.
+        let body_at_type = item.binary.as_ref().is_some_and(|b| b.at("type").is_some());
+        let type_v = match item.payload.get("type") {
+            Some(v) => v,
+            None if body_at_type => &Value::Null,
+            None => {
+                return Launched::Settled(Outcome::refused(crate::refusal::missing(
                     "send",
                     "payload.type",
-                    "a non-empty string",
-                    type_v,
-                )))
+                )));
+            }
+        };
+        let verb = match type_v.as_str() {
+            Some(s) if !s.is_empty() && !body_at_type => s.to_string(),
+            _ => {
+                // A non-string is named by its TYPE, never echoed: the octet REST
+                // leg and a binary WS frame can put a whole body here (audit
+                // 2026-10-03, W-11) — python's `type(verb).__name__`.
+                let got = if body_at_type {
+                    "bytes".to_string()
+                } else if type_v.is_string() {
+                    fantastic_bundle::py_repr_value(type_v)
+                } else {
+                    fantastic_bundle::py_type_name(type_v).to_string()
+                };
+                let mut r = crate::refusal::refusal(
+                    crate::refusal::BAD_ARG,
+                    format!("send: payload.type must be a non-empty string, got {got}"),
+                );
+                crate::refusal::with(&mut r, "arg", json!("payload.type"));
+                return Launched::Settled(Outcome::refused(r));
             }
         };
         // 5. id — a NAME (non-empty string) opens-or-joins by name; an int
@@ -736,6 +790,14 @@ impl Kernel {
         }
 
         let caller = current_sender();
+        // WHO this call is, for the one rule that compares two calls' callers (a
+        // join of a secret-marked execution): the sending agent's id; the
+        // qualified `<guid>|<agent>` when a bridge leg relays a foreign caller
+        // (the leg is the sender); `None` for the operator. Python
+        // `_caller_identity`.
+        let identity = caller
+            .as_ref()
+            .map(|s| relayed_caller(s).unwrap_or_else(|| s.0.clone()));
 
         // C88: the UNNAMED `kernel` reflect fast path. python checks the
         // LITERAL reserved address the caller sent (`target_id == "kernel"`,
@@ -773,6 +835,8 @@ impl Kernel {
             Some(s) if s.body_hidden => None,
             _ => item.binary.as_ref(),
         };
+        // The marks are not secret (as given): the call row below records them.
+        let marks = secret.as_ref().map(|s| s.paths.clone());
         match self.ledger.open(
             exec_id,
             &caller_id,
@@ -781,6 +845,8 @@ impl Kernel {
             retries,
             name.as_deref(),
             caller.clone(),
+            identity,
+            secret,
         ) {
             crate::ledger::Opened::Refused(r) => {
                 self.tasks.forget(&task_id);
@@ -789,7 +855,7 @@ impl Kernel {
             // ALREADY SETTLED — the recorded outcome IS the answer, and the
             // handler must not run a second time. This is idempotency and
             // once-only execution in one field.
-            crate::ledger::Opened::Settled(o, orig_payload) => {
+            crate::ledger::Opened::Settled(o, orig_payload, mask, foreign) => {
                 self.tasks.forget(&task_id);
                 // AUTHORIZED AGAINST THE EXECUTION IT JOINS. The recorded
                 // outcome belongs to whoever ran it, so handing it back is
@@ -800,19 +866,41 @@ impl Kernel {
                 if let Some(d) = self.join_denial(&caller, &orig_payload, &target) {
                     return Launched::Settled(Outcome::refused(d));
                 }
-                return Launched::Settled(*o);
+                // A CALLER-SCOPED VERB (`ledger`, `ack_deadletter`) answers its
+                // own caller's view: a foreign join is refused, after the gate
+                // (why, and which joins stay open: `Ledger::open`, audit KV-1).
+                if let Some(r) = foreign {
+                    return Launched::Settled(Outcome::refused(*r));
+                }
+                // A SECRET-MARKED EXECUTION'S REAL OUTCOME IS ITS CALLER'S ALONE.
+                // The gate above judges the VERB; a handler whose answer depends
+                // on WHO asks (a credential_store's per-ref `readers`) and the
+                // caller's own `secret` marks never run for a joiner. Measured
+                // 2026-10-03 (audit F1): `eve`, granted `get` on a store but no
+                // reader of the ref, joined `alice`'s marked `get` by its pid and
+                // received the key. So a joiner that is not the identity which
+                // opened the execution gets the outcome AS SHOWN — what the
+                // ledger reads back. Unmarked executions are unchanged.
+                return Launched::Settled(match mask {
+                    Some(s) => crate::secret::shown_outcome(&o, &s),
+                    None => *o,
+                });
             }
             // IN FLIGHT — join it. A joiner's own `timeout` bounds only ITS
             // wait: it does not own the execution and must not kill it.
-            crate::ledger::Opened::Join(rx, orig_payload) => {
+            crate::ledger::Opened::Join(rx, orig_payload, mask, foreign) => {
                 self.tasks.forget(&task_id);
                 if let Some(d) = self.join_denial(&caller, &orig_payload, &target) {
                     return Launched::Settled(Outcome::refused(d));
+                }
+                if let Some(r) = foreign {
+                    return Launched::Settled(Outcome::refused(*r));
                 }
                 return Launched::Joining(Box::new(Joiner {
                     rx,
                     timeout,
                     exec_id,
+                    mask,
                 }));
             }
             crate::ledger::Opened::Fresh => {
@@ -859,15 +947,11 @@ impl Kernel {
                 if let Some(n) = name.as_deref() {
                     row.insert("name".to_string(), Value::from(n));
                 }
-                if let Some(s) = secret {
-                    // the PATHS are not secret: they say this record cannot
-                    // answer a replay
-                    row.insert(
-                        "secret".to_string(),
-                        Value::Array(s.paths.iter().cloned().map(Value::String).collect()),
-                    );
-                    // RAM only: what the settle masks the outcome with.
-                    self.ledger.keep_secret(exec_id, s);
+                if let Some(m) = marks {
+                    // the MARKS are not secret (as given — dotted strings and/or
+                    // arrays of steps): they say this record cannot answer a
+                    // replay
+                    row.insert("secret".to_string(), Value::Array(m));
                 }
                 let _ = self.rows_put(&target.id, row);
             }
@@ -881,7 +965,6 @@ impl Kernel {
             exec_id,
             task_id,
             binary: item.binary,
-            raw_reply: item.raw_reply,
             shown,
             secret_paths,
             // A JOIN never reaches here; a fresh NAMED `kernel` reflect does.
@@ -945,7 +1028,6 @@ impl Kernel {
             exec_id,
             task_id,
             binary,
-            raw_reply,
             shown,
             secret_paths,
             named_fast_reflect,
@@ -995,7 +1077,6 @@ impl Kernel {
                     timeout.clone(),
                     next_pid,
                     binary.clone(),
-                    raw_reply,
                     shown.as_ref(),
                     &secret_paths,
                 )
@@ -1087,7 +1168,6 @@ impl Kernel {
                 None,
                 TaskId(pid),
                 None,
-                false,
                 None,
                 &[],
             )
@@ -1165,10 +1245,14 @@ impl Kernel {
     /// `timed_out` and the execution KEEPS RUNNING, because a joiner does not
     /// own it and killing another caller's work would be a surprise.
     async fn join_execution(self: &Arc<Self>, mut j: Joiner) -> Outcome {
+        let mask = j.mask.take();
         let wait = async {
             loop {
                 if let Some(o) = j.rx.borrow_and_update().clone() {
-                    return o;
+                    return match &mask {
+                        Some(s) => crate::secret::shown_outcome(&o, s),
+                        None => o,
+                    };
                 }
                 if j.rx.changed().await.is_err() {
                     // The owner's row was evicted mid-flight — nothing to join.
@@ -1235,9 +1319,9 @@ impl Kernel {
     ///     lands — the flag (set for the WHOLE subtree before anything is
     ///     stopped) closes that window.
     // One attempt needs the target, the payload, the verb, the pid-out slot, the
-    // deadline, the task id, (since the binary channel joined the batch) the
-    // blob and whether the reply's chunk comes back raw, and (since secret
-    // paths) the payload as the mirrors may see it plus the paths the handler
+    // deadline, the task id, (since raw bodies joined the batch) the request
+    // body, and (since secret paths) the payload as the mirrors may see it plus
+    // the paths the handler
     // reads back. Bundling them into a struct would only move the same ten
     // fields.
     #[allow(clippy::too_many_arguments)]
@@ -1250,9 +1334,8 @@ impl Kernel {
         timeout: Option<Deadline>,
         task_id: TaskId,
         binary: Option<crate::outcome::Blob>,
-        raw_reply: bool,
         shown: Option<&crate::secret::Shown>,
-        secret_paths: &[String],
+        secret_paths: &[Value],
     ) -> (Value, Status, Option<crate::outcome::Blob>) {
         // The pid was minted in the SYNCHRONOUS launch phase and IS the ledger
         // key — minting a second one here would split the two apart, so the row
@@ -1313,27 +1396,18 @@ impl Kernel {
             };
             self.fanout(target, "send", &item).await;
         }
-        // The BINARY channel whenever bytes travel either way: a request body
-        // goes in, or the reply's chunk comes back raw. A request body IS the
-        // payload's value at its path (python's `payload[field] = body` /
-        // `set_path` overwrites the slot), so the header the handler gets holds
-        // nothing there — a caller names the slot only to keep python's key
-        // order on the row and the watcher frame.
-        //
-        // `channel`: `None` = the text channel; `Some(None)` = the binary channel
-        // with no request body (a raw read); `Some(Some(blob))` = a body at its
-        // path.
-        let (payload_for_handler, channel) = match binary {
-            Some(b) => {
-                let mut head = payload.clone();
-                // a payload that only NAMED the slot holds `null` there; one that
-                // did not leaves nothing to take
-                let _ = b.take(&mut head);
-                (head, Some(Some(b)))
-            }
-            None if raw_reply => (payload.clone(), Some(None)),
-            None => (payload.clone(), None),
-        };
+        // ONE DISPATCH, whatever the call carries — python's one `handle`. A
+        // request body IS the payload's value at its path (python's
+        // `payload[field] = body` / `set_path` overwrites the slot), so the
+        // header the handler gets holds nothing there — a caller names the slot
+        // only to keep python's key order on the row and the watcher frame. Any
+        // handler may answer a reply body; nothing about the call decides that.
+        let mut payload_for_handler = payload.clone();
+        if let Some(b) = &binary {
+            // a payload that only NAMED the slot holds `null` there; one that
+            // did not leaves nothing to take
+            let _ = b.take(&mut payload_for_handler);
+        }
 
         let join = {
             let kernel = Arc::clone(self);
@@ -1358,8 +1432,11 @@ impl Kernel {
             // The caller's `secret` marks, for THIS dispatch only — a spawned
             // task owns its scope, so the handler's own sends do not inherit them.
             let secret = secret_paths.to_vec();
+            // Inside the kernel's own ledger flush, the dispatch it starts is
+            // silent too (python copies `_state_quiet` into the task).
+            let quiet = state_quiet();
             tokio::spawn(async move {
-                CURRENT_SECRET.scope(secret, CURRENT_REMOTE.scope(remote, CURRENT_ORIGIN
+                STATE_QUIET.scope(quiet, CURRENT_SECRET.scope(secret, CURRENT_REMOTE.scope(remote, CURRENT_ORIGIN
                     .scope(
                         origin,
                         CURRENT_SENDER.scope(
@@ -1372,13 +1449,12 @@ impl Kernel {
                                         // Stopped: DROP the dispatch future — the
                                         // abort half of `cancel`.
                                         _ = cancel.notified() => None,
-                                        // A blob rides the BINARY channel under
-                                        // this same row/ledger/timeout, and the
-                                        // REPLY BODY comes back with it (C37):
-                                        // the batch IS the carrier for bytes, so
-                                        // a `read_stream` through `send` returns
-                                        // its chunk the way python's reply dict
-                                        // holds one.
+                                        // A request body rides under this same
+                                        // row/ledger/timeout, and ANY REPLY BODY
+                                        // comes back with it (C37): the batch IS
+                                        // the carrier for bytes, so any verb
+                                        // through `send` returns its chunk the
+                                        // way python's reply dict holds one.
                                         v = async {
                                             // ANOTHER KERNEL'S AGENT: the call
                                             // goes to its peer's route, bytes
@@ -1388,24 +1464,17 @@ impl Kernel {
                                             // relayed verbatim: never a raise here.
                                             if let Some(remote) = tgt.remote.as_ref() {
                                                 return Ok(crate::peers::call_peer(
-                                                    &kernel, remote, &tgt.id, payload, channel.flatten(),
+                                                    &kernel, remote, &tgt.id, payload, binary,
                                                 )
                                                 .await);
                                             }
-                                            match channel {
-                                                Some(body) => {
-                                                    dispatch_binary(Arc::clone(&kernel), tgt, payload, body).await
-                                                }
-                                                None => dispatch(kernel, tgt, payload)
-                                                    .await
-                                                    .map(|v| (v, None)),
-                                            }
+                                            dispatch(kernel, tgt, payload, binary).await
                                         } => Some(v),
                                     }
                                 }),
                             ),
                         ),
-                    )))
+                    ))))
                     .await
             })
         };
@@ -1423,10 +1492,8 @@ impl Kernel {
         // THE ITEM'S OWN DEADLINE. Expiry kills through the FRONT DOOR
         // (`cancel_task`) so every bundle's `on_cancel` hook runs BEFORE the
         // abort — dropping the future would strand the OS resources those hooks
-        // release (a subprocess, a PTY, a socket). The hook's own sends run
-        // under OPERATOR authority: it is the kernel closing out work it was
-        // told to kill, not the batch caller reaching out, so a gated caller
-        // never makes an `on_cancel` fail.
+        // release (a subprocess, a PTY, a socket). Each hook runs as its own
+        // agent (`cancel_task`), never as the batch caller.
         //
         // The race is reported honestly: a handler that finishes during the
         // grace window COMPLETES — `cancel_task` no-ops on a finished id and
@@ -1438,9 +1505,7 @@ impl Kernel {
                 match tokio::time::timeout(dur, &mut Box::pin(&mut { join })).await {
                     Ok(j) => j,
                     Err(_) => {
-                        let k = Arc::clone(self);
-                        let tid = task_id;
-                        with_operator(async move { k.cancel_task(&tid).await }).await;
+                        self.cancel_task(&task_id).await;
                         // PYTHON'S PROSE, verbatim (C31): target id RAW, verb
                         // `py_repr`-quoted, the timeout as given, plus `task_id`.
                         let r = own_deadline_refusal(&target.id, verb, &d, json!(task_id.0));
@@ -1513,8 +1578,17 @@ impl Kernel {
     /// a16): the emitter's `can_call` and the target's `callable_by` must both
     /// allow verb `emit`. Not privileged — the baseline keeps emits to self,
     /// parent and children. A denied emit is dropped; an emit has no reply.
+    ///
+    /// A QUALIFIED `<guid>|<agent>` OF A CONNECTED PEER goes to every live route
+    /// of that guid ([`crate::peers::emit_peer`]) — every tab of one identity.
     pub async fn emit_item(self: &Arc<Self>, target_id: &AgentId, item: crate::inbox::InboxItem) {
         let Some(target) = self.agents.get(target_id).map(|e| Arc::clone(&e)) else {
+            if let Some(remote) = self
+                .qualified_target(target_id.as_str())
+                .filter(|a| a.is_remote())
+            {
+                crate::peers::emit_peer(self, &remote, item).await;
+            }
             return;
         };
         if let Some(orig) = current_sender() {
@@ -1751,7 +1825,13 @@ impl Drop for DispatchGuard {
     }
 }
 
-/// Resolve verb → system handler or bundle handler.
+/// Resolve verb → system handler or bundle handler — THE ONE DISPATCH every
+/// call takes, a request body or not (python `_agent.py`'s one `handle`).
+///
+/// The bundle is reached through [`crate::bundle::Bundle::handle_binary`], so
+/// ANY verb may answer a raw reply body beside its JSON — python's reply dict
+/// holding `bytes` at a key. There is no verb list and no flag on the call: a
+/// leg answers binary exactly when the outcome carries a body.
 ///
 /// BOXED, not `async fn`, and deliberately so: the dispatch path recurses
 /// (`send` → dispatch → `create_agent` → `send` → …), and since `send` now
@@ -1761,12 +1841,19 @@ impl Drop for DispatchGuard {
 /// recursion point cuts the cycle.
 ///
 /// `Err` is a RAISE (python's handler exception, settled `failed`); `Ok` is a
-/// reply, whatever it carries.
+/// reply, whatever it carries, with the reply body at its slot.
+#[allow(clippy::type_complexity)] // the Pin<Box<dyn Future>> IS the point (see above).
 fn dispatch(
     kernel: Arc<Kernel>,
     target: Arc<Agent>,
     payload: Value,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, Value>> + Send>> {
+    body: Option<crate::outcome::Blob>,
+) -> std::pin::Pin<
+    Box<
+        dyn std::future::Future<Output = Result<(Value, Option<crate::outcome::Blob>), Value>>
+            + Send,
+    >,
+> {
     Box::pin(async move {
         let verb = verb_of(&payload);
         if is_kernel_verb(verb) {
@@ -1780,9 +1867,11 @@ fn dispatch(
             // Refused HERE, in the handler — not at the call gate — so probes
             // asserting a denial `side` for a non-root privileged send stay valid.
             if target.parent_id.is_some() {
-                return Ok(crate::refusal::not_here(verb, target.id.as_str()));
+                return Ok((crate::refusal::not_here(verb, target.id.as_str()), None));
             }
-            return handle_kernel_verb(&kernel, &target, verb, &payload).await;
+            return handle_kernel_verb(&kernel, &target, verb, &payload)
+                .await
+                .map(|v| (v, None));
         }
         // THE TREE ROOT ANSWERS `reflect` WITH THE SUBSTRATE IDENTITY even when
         // it carries a handler_module (the root loader): its persistence verbs
@@ -1791,32 +1880,41 @@ fn dispatch(
         // `kernel` address. Python `_agent.py`: `if verb == "reflect" and
         // self.parent is None`.
         if verb == "reflect" && target.parent_id.is_none() {
-            return Ok(crate::reflect::reflect_identity(&target));
+            return Ok((crate::reflect::reflect_identity(&target), None));
         }
         // No handler_module → only system verbs answerable.
         let Some(hm) = target.handler_module.as_deref() else {
             // Universal answers for bare agents.
-            return Ok(match verb {
-                "boot" | "shutdown" => Value::Null,
-                "reflect" => crate::reflect::reflect_identity(&target),
-                // CODED, not a bare error. A reason-less `{error}` is decorated
-                // by `apply_reflect_flags` into something that reads like a
-                // healthy reflect (kernel_verbs, tree, more) with a stray error
-                // field — the caller cannot tell a refusal from an answer
-                // (measured 2026-09-02).
-                _ => no_handler_module_refusal(&target.id.0, verb),
-            });
+            return Ok((
+                match verb {
+                    "boot" | "shutdown" => Value::Null,
+                    "reflect" => crate::reflect::reflect_identity(&target),
+                    // CODED, not a bare error. A reason-less `{error}` is
+                    // decorated by `apply_reflect_flags` into something that
+                    // reads like a healthy reflect (kernel_verbs, tree, more)
+                    // with a stray error field — the caller cannot tell a
+                    // refusal from an answer (measured 2026-09-02).
+                    _ => no_handler_module_refusal(&target.id.0, verb),
+                },
+                None,
+            ));
         };
         let Some(bundle) = kernel.bundles.get(hm) else {
             // NOT a create-time refusal: this kernel legitimately holds records
             // whose bundle belongs to ANOTHER runtime (the browser's `*.ts`
             // agents persist here), or is installed later. The call simply
             // cannot be answered HERE, and says so with a code.
-            return Ok(not_installed_refusal(&target.id.0, hm, verb));
+            return Ok((not_installed_refusal(&target.id.0, hm, verb), None));
         };
-        match bundle.handle(&target.id, &payload, &kernel).await {
-            Ok(Some(v)) => Ok(v),
-            Ok(None) => Ok(Value::Null),
+        // The reply body comes back AT ITS SLOT of the reply: `bytes` for a
+        // `read_stream`, a bundle's own key for its own verb, the peer's own key
+        // for a bridge relaying a peer's reply.
+        match bundle
+            .handle_binary(&target.id, payload, body, &kernel)
+            .await
+        {
+            Ok((Some(v), body)) => Ok((v, body)),
+            Ok((None, body)) => Ok((Value::Null, body)),
             // A BUNDLE ERROR IS A TERMINAL FAILURE, marked `raised` exactly as
             // a panic is — python settles a handler raise as `failed`
             // (`_agent.py`: "a handler raise settles as `failed`"). Without the
@@ -1836,8 +1934,8 @@ fn dispatch(
 /// A payload or a result AS THE TAPE RECORDS IT — verbatim, except for the ONE
 /// reduction.
 ///
-/// XML text cannot carry raw bytes and base64 is banned, so the binary channel's
-/// body is written as its LENGTH at the path it rides on — where python's own
+/// XML text cannot carry raw bytes and base64 is banned, so a raw body is
+/// written as its LENGTH at the path it rides on — where python's own
 /// payload dict holds it, which python's `plain()` writes as `{len: N}` in place.
 /// Everything else — all text, all JSON — is untouched. Durable bytes live behind
 /// `file_bridge`, the one disk surface; the tape records that N of them passed,
@@ -1850,77 +1948,6 @@ fn taped_payload(value: &Value, body: Option<&crate::outcome::Blob>) -> Value {
     // admitted at launch: the path names a slot of the payload
     let _ = body.place(&mut out, json!({"len": body.bytes.len()}));
     out
-}
-
-/// Binary-frame dispatch: route to the target bundle's `handle_binary`.
-///
-/// PYTHON RUNS ONE DISPATCH PATH FOR BOTH CHANNELS — there is no separate
-/// binary refusal text in `_agent.py`; a binary send hits the exact same
-/// "no handler_module" / "cannot be imported" refusals `dispatch` (above)
-/// answers, `verb` key included, and a bundle error settles `raised:true`
-/// the same way (C34). This used to carry its own, different wording, so a
-/// caller reading `reason`/`error` from a binary refusal saw a shape the text
-/// channel never produced.
-/// BOXED like [`dispatch`], and for the same reason: this path now reaches the
-/// kernel verbs, so `create_agent` → `send` → dispatch closes the recursion and
-/// auto-trait inference can no longer prove the future `Send` in terms of itself.
-#[allow(clippy::type_complexity)] // the Pin<Box<dyn Future>> IS the point (see above).
-fn dispatch_binary(
-    kernel: Arc<Kernel>,
-    target: Arc<Agent>,
-    header: Value,
-    body: Option<crate::outcome::Blob>,
-) -> std::pin::Pin<
-    Box<
-        dyn std::future::Future<Output = Result<(Value, Option<crate::outcome::Blob>), Value>>
-            + Send,
-    >,
-> {
-    Box::pin(async move {
-        let verb = verb_of(&header);
-        // PYTHON HAS NO SECOND HANDLER for a payload that carries bytes: the
-        // kernel-verb branch, the root-`reflect` branch and the bare-agent answers
-        // all sit in `_agent.py`'s ONE `handle`, above the bundle. Missing here, an
-        // octet POST of `{"type":"reflect"}` to the ROOT was answered by the loader
-        // bundle, so one verb described the disk root on the binary leg and the
-        // kernel on the text leg.
-        if is_kernel_verb(verb) {
-            if target.parent_id.is_some() {
-                return Ok((crate::refusal::not_here(verb, target.id.as_str()), None));
-            }
-            return handle_kernel_verb(&kernel, &target, verb, &header)
-                .await
-                .map(|v| (v, None));
-        }
-        if verb == "reflect" && target.parent_id.is_none() {
-            return Ok((crate::reflect::reflect_identity(&target), None));
-        }
-        let Some(hm) = target.handler_module.as_deref() else {
-            return Ok((
-                match verb {
-                    "boot" | "shutdown" => Value::Null,
-                    "reflect" => crate::reflect::reflect_identity(&target),
-                    _ => no_handler_module_refusal(&target.id.0, verb),
-                },
-                None,
-            ));
-        };
-        let Some(bundle) = kernel.bundles.get(hm) else {
-            return Ok((not_installed_refusal(&target.id.0, hm, verb), None));
-        };
-        // The reply chunk comes back AT ITS SLOT of the reply
-        // (`Bundle::handle_binary`): `bytes` for a `read_stream`, the peer's own
-        // key for a bridge relaying a peer's reply.
-        match bundle
-            .handle_binary(&target.id, header, body, &kernel)
-            .await
-        {
-            Ok((Some(v), body)) => Ok((v, body)),
-            Ok((None, body)) => Ok((Value::Null, body)),
-            // A RAISE, same shape as the text channel's bundle error.
-            Err(e) => Err(json!({ "error": e.to_string(), "raised": true })),
-        }
-    })
 }
 
 /// Substrate verbs answered natively on every agent — explicitly

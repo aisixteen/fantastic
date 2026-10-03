@@ -29,7 +29,8 @@ What is vLLM-specific here, and why each piece exists (measured by the
   through `key` — the record's `credentials` ref in a credential store
   (`ai_core/credentials.py`), never the environment or the record; a record with
   no `credentials` sends no header at all, so a local vLLM started without
-  `--api-key` keeps working. A 401 or 403 says to name `credentials`.
+  `--api-key` keeps working. A 401 or 403 says to name `credentials`. Every
+  error text this provider raises has the key scrubbed out (`without_key`).
 """
 
 from __future__ import annotations
@@ -43,6 +44,7 @@ from collections.abc import AsyncIterator
 
 import httpx
 from ai_core.core import THINK_CLOSE, THINK_OPEN
+from ai_core.credentials import without_key
 
 log = logging.getLogger(__name__)
 
@@ -173,6 +175,12 @@ def table_for(endpoint: str) -> SessionTable:
     return _tables.setdefault(endpoint.rstrip("/"), SessionTable())
 
 
+# agent id -> the `thinking_token_budget` its last pass actually SENT (None: no
+# budget). Reflect reports it; the provider is built per turn, so it lives here,
+# beside the tables — dropped by the bundle's `on_delete`.
+last_budgets: dict[str, int | None] = {}
+
+
 def conversation_key(messages: list[dict]) -> str:
     """A conversation's identity: its system text + first user turn.
 
@@ -204,13 +212,11 @@ class VllmProvider:
     #: The prompt size vLLM REPORTED for the last pass; ai_core calibrates with it.
     last_prompt_tokens: int | None = None
     last_stop_reason: str | None = None
-    #: The thinking budget the last pass actually SENT — surfaced in reflect, so
-    #: a caller debugging a cut can see what the adapted default became.
-    last_thinking_budget: int | None = None
 
     def __init__(
         self,
         *,
+        agent_id: str,
         endpoint: str,
         model: str,
         key,
@@ -225,6 +231,9 @@ class VllmProvider:
         transport: httpx.AsyncBaseTransport | None = None,
         clock=time.monotonic,
     ):
+        # whose `last_budgets` entry a pass writes — surfaced in reflect, so a
+        # caller debugging a cut can see what the adapted default became
+        self._agent_id = agent_id
         self._endpoint = endpoint.rstrip("/")
         self._model = model
         # `async key(endpoint) -> str | None`, awaited before EACH request; None =
@@ -241,18 +250,6 @@ class VllmProvider:
         self._timeouts = (float(connect_timeout), float(read_timeout))
         self._transport = transport
         self._clock = clock
-        self._client = None
-
-    def _get_client(self):
-        if self._client is None:
-            connect, read = self._timeouts
-            self._client = httpx.AsyncClient(
-                base_url=self._endpoint,
-                # After connect, one socket deadline covers reads AND writes.
-                timeout=httpx.Timeout(read, connect=connect),
-                transport=self._transport,
-            )
-        return self._client
 
     def _budget_for(self, call_max: int, *, side_call: bool) -> int | None:
         """The `thinking_token_budget` to send on a call bounded by `call_max`
@@ -307,7 +304,7 @@ class VllmProvider:
             if self._sampling.get(key) is not None:
                 body[key] = self._sampling[key]
         budget = self._budget_for(call_max, side_call=side_call)
-        self.last_thinking_budget = budget
+        last_budgets[self._agent_id] = budget
         if budget is not None:
             body["thinking_token_budget"] = budget
         return body
@@ -330,15 +327,28 @@ class VllmProvider:
 
         thinking = False
         saw_finish = False
-        client = self._get_client()
         key = await self._key(self._endpoint)
         headers = {"Authorization": f"Bearer {key}"} if key else {}
+        connect, read = self._timeouts
         try:
-            async with client.stream(
-                "POST", "/chat/completions", json=body, headers=headers
-            ) as resp:
+            # ONE client per call: the provider is built per turn, and a client
+            # kept on it would hold its sockets past the turn. After connect, one
+            # socket deadline covers reads AND writes.
+            async with (
+                httpx.AsyncClient(
+                    base_url=self._endpoint,
+                    timeout=httpx.Timeout(read, connect=connect),
+                    transport=self._transport,
+                ) as client,
+                client.stream(
+                    "POST", "/chat/completions", json=body, headers=headers
+                ) as resp,
+            ):
                 if resp.status_code >= 400:
-                    detail = (await resp.aread()).decode("utf-8", "replace")[:500]
+                    # scrubbed BEFORE the cut, so a key the cut splits cannot survive
+                    detail = without_key(
+                        (await resp.aread()).decode("utf-8", "replace"), key
+                    )[:500]
                     why = (
                         " — the door wants a key: name it in `credentials` "
                         "({store, ref})"
@@ -409,6 +419,15 @@ class VllmProvider:
                 f"vllm_backend: {self._endpoint} dropped the stream mid-answer — "
                 "vLLM died or restarted; this turn is NOT complete"
             ) from e
+        except Exception as e:
+            # ANY other failure's text may quote the key (h11 quotes the header it
+            # refused): it leaves scrubbed, its chain cut so no traceback prints it.
+            shown = without_key(str(e), key)
+            if shown != str(e):
+                raise RuntimeError(
+                    f"vllm_backend: {type(e).__name__}: {shown}"
+                ) from None
+            raise
         if thinking:
             yield THINK_CLOSE
         if not saw_finish:
@@ -433,11 +452,3 @@ class VllmProvider:
     @property
     def model(self) -> str:
         return self._model
-
-    async def aclose(self) -> None:
-        if self._client is not None:
-            await self._client.aclose()
-            self._client = None
-
-    def stop(self) -> None:
-        self._client = None

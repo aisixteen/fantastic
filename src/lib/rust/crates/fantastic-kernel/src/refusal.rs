@@ -155,13 +155,22 @@ pub fn with(target: &mut Value, key: &str, value: Value) {
 /// nothing validated the id.
 #[must_use]
 pub fn guard_agent_id(verb: &str, agent_id: &str) -> Option<Value> {
+    guard_agent_id_as(verb, "id", agent_id)
+}
+
+/// [`guard_agent_id`] for a field that is not an id but BECOMES A DIRECTORY too
+/// — python `guard_agent_id(verb, value, arg=…)`: a record's `children_dir`
+/// (`<agent>/<children_dir>/<child>`), which `create_agent` / `update_agent`
+/// hold to the same rule. `arg` names the field in the refusal.
+#[must_use]
+pub fn guard_agent_id_as(verb: &str, arg: &str, agent_id: &str) -> Option<Value> {
     if agent_id.is_empty() {
-        return Some(bad(verb, "id", "a non-empty string"));
+        return Some(bad(verb, arg, "a non-empty string"));
     }
     if agent_id.contains('/') || agent_id.contains('\\') {
         return Some(bad(
             verb,
-            "id",
+            arg,
             &format!(
                 "a single path segment (no separators); got {}",
                 py_repr(agent_id)
@@ -171,7 +180,7 @@ pub fn guard_agent_id(verb: &str, agent_id: &str) -> Option<Value> {
     if agent_id == "." || agent_id == ".." || agent_id.contains("..") {
         return Some(bad(
             verb,
-            "id",
+            arg,
             &format!(
                 "a name that is not a path traversal; got {}",
                 py_repr(agent_id)
@@ -181,7 +190,7 @@ pub fn guard_agent_id(verb: &str, agent_id: &str) -> Option<Value> {
     if agent_id.starts_with('.') {
         return Some(bad(
             verb,
-            "id",
+            arg,
             &format!("a name that is not hidden; got {}", py_repr(agent_id)),
         ));
     }
@@ -190,7 +199,7 @@ pub fn guard_agent_id(verb: &str, agent_id: &str) -> Option<Value> {
         // would read as one. Names are words.
         return Some(bad(
             verb,
-            "id",
+            arg,
             &format!(
                 "a name, not a number (message ids are ints); got {}",
                 py_repr(agent_id)
@@ -202,7 +211,7 @@ pub fn guard_agent_id(verb: &str, agent_id: &str) -> Option<Value> {
         // carries one, so a gate can tell local from foreign by the id alone.
         return Some(bad(
             verb,
-            "id",
+            arg,
             &format!(
                 "a local name without `|` (it marks a foreign `guid|agent`); got {}",
                 py_repr(agent_id)
@@ -215,7 +224,7 @@ pub fn guard_agent_id(verb: &str, agent_id: &str) -> Option<Value> {
         // the operator to every store (measured in python 2026-09-28).
         return Some(bad(
             verb,
-            "id",
+            arg,
             &format!("a name other than the reserved {}", py_repr(RESERVED_ID)),
         ));
     }

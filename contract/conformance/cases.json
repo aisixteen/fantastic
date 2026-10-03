@@ -215,6 +215,50 @@
         "arg": "secret"
       },
       "note": "The RECEIVING kernel's own `secret` check refuses the mark before anything is dispatched, in the same words on every transport. It is the proof the marks crossed: a leg that dropped them would answer {poked: 1}."
+    },
+    {
+      "name": "secret-array-mark-literal-key",
+      "target": "c21_probe",
+      "payload": {
+        "type": "poke",
+        "value": "c21-secret-value",
+        "a.b": "c21-dotted-key"
+      },
+      "secret": [
+        [
+          "payload",
+          "a.b"
+        ],
+        "payload.value"
+      ],
+      "expect": {
+        "poked": "c21-secret-value"
+      },
+      "note": "A mark may be an ARRAY OF STEPS (owner, 2026-10-03), the step rules of `_binary_path`: a string step is an object key taken literally, so `[\"payload\", \"a.b\"]` names the key `\"a.b\"`; one list may mix it with dotted strings. Every transport carries the array as given (a `forward` drops one `payload` step: `[\"payload\", \"payload\", \"a.b\"]` -> `[\"payload\", \"a.b\"]`), and the receiving kernel accepts it — a leg that turned it into the dotted `payload.a.b` would be refused (no nested `a`)."
+    },
+    {
+      "name": "secret-array-mark-crosses-as-steps",
+      "target": "c21_probe",
+      "payload": {
+        "type": "poke",
+        "value": 1,
+        "a.b": "c21-dotted-key"
+      },
+      "secret": [
+        [
+          "payload",
+          "a.b"
+        ],
+        [
+          "payload",
+          "type"
+        ]
+      ],
+      "expect": {
+        "reason": "bad_arg",
+        "arg": "secret"
+      },
+      "note": "The receiving kernel judges the marks in order: the literal key `a.b` passes, then `[\"payload\", \"type\"]` is refused (\"cannot hide payload.type\"). A leg that dropped array marks would answer {poked: 1}; one that flattened them to dotted strings would be refused for `payload.a.b` naming nothing — a different reply, caught pairwise."
     }
   ]
 }

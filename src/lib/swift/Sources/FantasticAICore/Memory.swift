@@ -78,6 +78,17 @@ enum AIMemory {
         states.removeValue(forKey: kernel.serial)
         lock.unlock()
     }
+
+    /// Drop a deleted agent's head, bodies, grants and watchers in this kernel
+    /// (`AIBackend.onDelete`).
+    static func forget(_ kernel: Kernel, _ id: String) {
+        of(kernel).with { m in
+            m.heads[id] = nil
+            m.bodies[id] = nil
+            m.grants[id] = nil
+            m.watchers[id] = nil
+        }
+    }
 }
 
 /// The store holds this agent's conversation AND its view rows. The CONVERSATION a

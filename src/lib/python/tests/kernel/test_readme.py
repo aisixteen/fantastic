@@ -42,9 +42,9 @@ async def test_seed_readme_copy_if_missing(kernel):
 
 
 async def test_seed_readme_degrades_quietly(kernel):
-    """Readme seeding must never crash a persist — a bad/absent package
-    resource is swallowed. Here scheduler DOES ship one (happy path);
-    the broad `except` in `_seed_readme` covers the absent case."""
+    """An absent package resource seeds nothing and never crashes a persist.
+    Here scheduler DOES ship one (happy path); the package lookup in
+    `_seed_readme` covers the absent case (a failed WRITE raises)."""
     kernel.create("scheduler.tools", id="sch")
     persist(kernel)
     readme = Path(kernel.ctx.agents["sch"]._root_path) / "readme.md"

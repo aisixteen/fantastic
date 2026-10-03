@@ -164,8 +164,9 @@ async def test_writes_stay_inside_the_list_and_readonly_still_holds(kernel):
 async def test_the_web_serves_only_what_the_list_exposes(kernel):
     _tree()
     _bridge(kernel, allow=["docs/a.pdf"], callable_by={"web": ["read_stream"]})
-    kernel.create(None, id="web", can_call={"fb": ["read_stream"]})
-    with TestClient(make_app("web", kernel)) as c:
+    # `port`: the authority the web's Host guard admits (audit W-2).
+    kernel.create(None, id="web", port=8088, can_call={"fb": ["read_stream"]})
+    with TestClient(make_app("web", kernel), base_url="http://127.0.0.1:8088") as c:
         r = c.get("/fb/file/docs/a.pdf")
         assert r.status_code == 200 and r.content == b"%PDF-a"
         assert c.get("/fb/file/docs/b.pdf").status_code == 404

@@ -2,7 +2,7 @@
 // python `io_bridge/tests/test_secret_across_bridges.py` + the peer-route case of
 // `tests/kernel/test_peer_addressing.py`.
 //
-// A batch item's `secret` paths (`src/kernel/secret.ts`) used to stop at the edge
+// A batch item's `secret` marks (`src/kernel/secret.ts`) used to stop at the edge
 // of the kernel that held them: a call frame carried no marks, so the RECEIVING
 // kernel recorded the value verbatim. Now the marks ride the call:
 //
@@ -36,9 +36,11 @@ import type { Item, Outcome } from "../src/kernel/outcome.ts";
 import { startKernel } from "../src/kernel/lifecycle.ts";
 import { registerRamStore } from "../src/bundles/memory/ram_store.ts";
 import { PLACEHOLDER } from "../src/kernel/secret.ts";
+import type { Mark } from "../src/kernel/secret.ts";
 
 const ROOT = "kernel_state";
 const KEY = "sk-cross-0123456789abcdef";
+const KEY2 = "sk-cross-dotted-key-77aa77aa";
 const ISSUED = "tok-cross-issued-fedcba98";
 
 // ─── the probe the far kernel serves ─────────────────────────────────────────
@@ -52,6 +54,7 @@ async function vault(_id: string, payload: Payload): Promise<Json> {
   if (verb === "set_key") return { ok: true, len: String(payload["key"]).length };
   if (verb === "issue") return { key: ISSUED, note: "issued" };
   if (verb === "refuse_issue") throw new Error(`issued ${ISSUED} but refused it`);
+  if (verb === "issue_dotted") return { "a.b": ISSUED, a: { b: "nested-plain" } };
   return { error: `unknown verb ${String(verb)}` };
 }
 
@@ -297,6 +300,43 @@ test("without a mark the receiving kernel keeps the value — what the marks pre
   close();
 });
 
+// ─── (b2) an ARRAY mark (a literal dotted key) across the bridge ─────────────
+
+test("an array mark masks a literal dotted key across the bridge, on both kernels", async () => {
+  // python `test_an_array_mark_masks_a_literal_dotted_key_across_a_ws_bridge`, as a
+  // host-bound send (this kernel has no `forward`, so no re-rooting): the frame
+  // carries the marks as given — arrays and strings side by side — and the far
+  // kernel masks the KEY `"a.b"` (not `a` → `b`).
+  const { ka, kb, sa, ea, eb, close } = await linked();
+  vaultOn(kb);
+  const sent: Payload = { type: "issue_dotted", key: KEY, "a.b": KEY2, a: { b: "nested-plain" } };
+  const marks: Mark[] = ["payload.key", ["payload", "a.b"], ["result", "a.b"]];
+  const out = await op(ka, "vault", sent, { secret: marks });
+  assert.deepEqual(got, [sent]);
+  assert.deepEqual(out.result, { "a.b": ISSUED, a: { b: "nested-plain" } }, JSON.stringify(out));
+  assert.deepEqual(sa.calls().map((f) => f["secret"]), [marks]);
+  // what B keeps of the outcome (the ledger reads back exactly this)
+  const shown = [...kb.ledger.executions.values()].filter((e) => e.target === "vault").map((e) => e.shownOut?.result);
+  assert.deepEqual(shown, [{ "a.b": PLACEHOLDER, a: { b: "nested-plain" } }]);
+  const rb = await records(kb, eb);
+  const row = callRow(rb, "vault", "issue_dotted");
+  assert.deepEqual(row["secret"], marks);
+  assert.deepEqual(row["payload"], {
+    type: "issue_dotted",
+    key: PLACEHOLDER,
+    "a.b": PLACEHOLDER,
+    a: { b: "nested-plain" },
+  });
+  assertKeptOut("B", rb, KEY, KEY2, ISSUED);
+  const ra = await records(ka, ea);
+  const mine = callRow(ra, "vault", "issue_dotted");
+  assert.deepEqual(mine["secret"], marks);
+  assert.equal((mine["payload"] as Payload)["a.b"], PLACEHOLDER);
+  assert.deepEqual((mine["payload"] as Payload)["a"], { b: "nested-plain" });
+  assertKeptOut("A", ra, KEY, KEY2, ISSUED);
+  close();
+});
+
 // ─── (c) a malformed mark on an inbound frame is refused before dispatch ─────
 
 const BAD: [unknown, string][] = [
@@ -305,6 +345,13 @@ const BAD: [unknown, string][] = [
   [["payload.nope"], "names nothing in the payload"],
   [["payload.type"], "cannot hide payload.type"],
   [["payload"], "must start with 'payload.'"],
+  // arrays of steps
+  [[[]], "path [] has no steps"],
+  [[["payload", true]], "step True is neither a string"],
+  [[["nope", "key"]], "must start with 'payload' and a step under it"],
+  [[["payload", "type"]], "cannot hide payload.type"],
+  [[["payload", "nope"]], "path ['payload', 'nope'] names nothing in the payload"],
+  [["payload.key", ["payload", "k.x"]], "names nothing in the payload"],
 ];
 
 test("a malformed mark on an inbound call frame is this kernel's refusal, before dispatch", async () => {
@@ -335,6 +382,52 @@ test("a malformed mark on an inbound call frame is this kernel's refusal, before
   assert.deepEqual(sock!.replyTo("good")!["data"], { ok: true, len: KEY.length });
   assert.deepEqual(got, [{ type: "set_key", key: KEY }]);
   assertKeptOut("B", await records(kb, eb), KEY);
+  bridge.close();
+});
+
+test("a float step on an inbound call frame is refused with python's text", async () => {
+  // python's `json.loads` reads `1.0`, `1e0`, `1e20`, `-0.0` as a FLOAT, and a
+  // float step is not a list index. JS holds them as integers; the strict wire
+  // loads keeps their spelling (`pyjson.ts`). Texts printed by python 2026-10-03.
+  got.length = 0;
+  const kb = await kernel("B-g");
+  vaultOn(kb, { "h0|*": "*" });
+  let sock: Sock | null = null;
+  const bridge = new WsBridge(kb, { origin: "ws://host", controlEndpoint: "web_loader", makeSocket: (u) => (sock = new Sock(u)) });
+  bridge.announce();
+  await until(() => sock !== null && sock.wire.some((f) => f["type"] === "hello"));
+  const frame = (id: string, step: string): string =>
+    `{"type": "call", "id": "${id}", "target": "vault", "caller": "h0|kernel", ` +
+    `"payload": {"type": "set_key", "key": "${KEY}", "items": ["a", "b"]}, "secret": [["payload", "items", ${step}]]}`;
+  const why = "is neither a string (an object key) nor a non-negative integer (a list index)";
+  const cases: [string, string][] = [
+    ["1.0", `path ['payload', 'items', 1.0] step 1.0 ${why}`],
+    ["1e0", `path ['payload', 'items', 1.0] step 1.0 ${why}`],
+    ["1E0", `path ['payload', 'items', 1.0] step 1.0 ${why}`],
+    ["10e-1", `path ['payload', 'items', 1.0] step 1.0 ${why}`],
+    ["2.50e1", `path ['payload', 'items', 25.0] step 25.0 ${why}`],
+    ["1e15", `path ['payload', 'items', 1000000000000000.0] step 1000000000000000.0 ${why}`],
+    ["1e16", `path ['payload', 'items', 1e+16] step 1e+16 ${why}`],
+    ["1e20", `path ['payload', 'items', 1e+20] step 1e+20 ${why}`],
+    ["0.0", `path ['payload', 'items', 0.0] step 0.0 ${why}`],
+    ["-0.0", `path ['payload', 'items', -0.0] step -0.0 ${why}`],
+    ["-1.0", `path ['payload', 'items', -1.0] step -1.0 ${why}`],
+  ];
+  for (const [n, [step, text]] of cases.entries()) {
+    const id = `float-${n}`;
+    sock!.onmessage?.({ data: frame(id, step) });
+    await until(() => sock!.replyTo(id) !== undefined);
+    assert.deepEqual(sock!.replyTo(id)!["data"], { error: `send: secret ${text}`, reason: "bad_arg", arg: "secret" }, step);
+  }
+  assert.deepEqual(got, [], "a refused item must not reach the handler");
+  // `1` and `-0` are integers in python too: the mark is taken
+  for (const step of ["1", "-0"]) {
+    const id = `int-${step}`;
+    sock!.onmessage?.({ data: frame(id, step) });
+    await until(() => sock!.replyTo(id) !== undefined);
+    assert.deepEqual(sock!.replyTo(id)!["data"], { ok: true, len: KEY.length }, step);
+  }
+  assert.equal(got.length, 2);
   bridge.close();
 });
 

@@ -19,7 +19,20 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
+
+# C0 and C1 control characters (with DEL), minus newline and tab: what a terminal
+# INTERPRETS instead of printing — an OSC title or clipboard write, a cursor move,
+# a line erase. Agent and model text reaches this sink from callers it does not
+# know, so it never reaches the terminal with them (audit BV-11).
+_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def _write(text) -> None:
+    """THE one write to the terminal, its control characters stripped. A non-str
+    reaches `write` as is, so it raises exactly what `sys.stdout.write` raises."""
+    sys.stdout.write(_CONTROL.sub("", text) if isinstance(text, str) else text)
 
 
 # ─── verbs ──────────────────────────────────────────────────────
@@ -39,14 +52,14 @@ async def _reflect(id, payload, kernel):
 
 async def _token(id, payload, kernel):
     """args: text:str. Writes to stdout (no newline). Returns None."""
-    sys.stdout.write(payload.get("text", ""))
+    _write(payload.get("text", ""))
     sys.stdout.flush()
     return None
 
 
 async def _done(id, payload, kernel):
     """args: none. Emits a single newline; closes a token-stream cleanly. Returns None."""
-    print()
+    _write("\n")
     return None
 
 
@@ -55,13 +68,13 @@ async def _say(id, payload, kernel):
     text = payload.get("text", "")
     src = payload.get("source", "")
     prefix = f"  [{src}] " if src else "  "
-    print(f"{prefix}{text}")
+    _write(f"{prefix}{text}\n")
     return None
 
 
 async def _error(id, payload, kernel):
     """args: text:str. Prints `  ERROR: text` on its own line. Returns None."""
-    print(f"  ERROR: {payload.get('text', '')}")
+    _write(f"  ERROR: {payload.get('text', '')}\n")
     return None
 
 
@@ -73,9 +86,9 @@ async def _status(id, payload, kernel):
     prefix = f"  [{src}]" if src else " "
     if phase == "queued":
         ahead = detail.get("ahead", 0)
-        print(f"{prefix} queued ({ahead} ahead)")
+        _write(f"{prefix} queued ({ahead} ahead)\n")
     elif phase == "thinking":
-        print(f"{prefix} thinking…")
+        _write(f"{prefix} thinking…\n")
     elif phase == "tool_calling":
         tool = detail.get("tool") or {}
         verb = tool.get("verb", "")
@@ -83,12 +96,12 @@ async def _status(id, payload, kernel):
         if "reply_preview" in tool:
             # exit
             preview = tool.get("reply_preview", "")
-            print(f"{prefix} ← {verb}({target})  {preview}")
+            _write(f"{prefix} ← {verb}({target})  {preview}\n")
         else:
             # entry — args summary on the line
             args = tool.get("args") or {}
             args_str = json.dumps(args, default=str)
-            print(f"{prefix} → {verb}({target})  {args_str}")
+            _write(f"{prefix} → {verb}({target})  {args_str}\n")
     # `streaming` and `done` are silent — handled by other verbs.
     return None
 
@@ -104,11 +117,11 @@ async def _context(id, payload, kernel):
     if phase == "compacted":
         strat = detail.get("strategy", "?")
         dropped = detail.get("dropped_messages", 0)
-        print(
-            f"{prefix} ⟲ context compacted ({strat}, {dropped} dropped; recall to page back)"
+        _write(
+            f"{prefix} ⟲ context compacted ({strat}, {dropped} dropped; recall to page back)\n"
         )
     elif phase == "too_small":
-        print(f"{prefix} ✗ context too small — {detail.get('hint', '')}")
+        _write(f"{prefix} ✗ context too small — {detail.get('hint', '')}\n")
     return None
 
 
@@ -131,20 +144,20 @@ def _identity(ctx) -> str:
 async def _intro_booting(id, payload, kernel):
     """First PTY push, BEFORE boot. Identity + the pull/push control-plane map — port-independent, so it prints instantly. No args. Returns None."""
     ctx = kernel.ctx
-    print(f"[fantastic] {_identity(ctx)} — booting…")
-    print(
+    _write(f"[fantastic] {_identity(ctx)} — booting…\n")
+    _write(
         '  one envelope: send(<id>, {"type":"<verb>", …})'
-        "   ·   kernel = root   ·   full map: reflect readme=true"
+        "   ·   kernel = root   ·   full map: reflect readme=true\n"
     )
-    print(
-        "  PULL  ask → reply        REST POST /<rest>/<id>        ·  this REPL: @<id> <verb> k=v"
+    _write(
+        "  PULL  ask → reply        REST POST /<rest>/<id>        ·  this REPL: @<id> <verb> k=v\n"
     )
-    print(
-        "  PUSH  async stream/emit  WS /<id>/ws : watch{src} · emit{target,payload} · state_subscribe"
+    _write(
+        "  PUSH  async stream/emit  WS /<id>/ws : watch{src} · emit{target,payload} · state_subscribe\n"
     )
-    print(
+    _write(
         "  REACH one call by id, any unit: "
-        "compute(exec_bridge) · infer(ai) · memory(file_bridge) · shell(exec_bridge pty)"
+        "compute(exec_bridge) · infer(ai) · memory(file_bridge) · shell(exec_bridge pty)\n"
     )
     return None
 
@@ -157,7 +170,9 @@ async def _booted(id, payload, kernel):
     coordinates therefore arrive between `intro_booting` and here, or — if no
     renderer / a race — they are in the map above + `reflect readme=true`.
     No args. Returns None."""
-    print("[kernel] up — all booted. attach via the map above, or reflect readme=true")
+    _write(
+        "[kernel] up — all booted. attach via the map above, or reflect readme=true\n"
+    )
     return None
 
 

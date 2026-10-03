@@ -65,6 +65,14 @@ enum AICalibration {
             reported.removeValue(forKey: kernel.serial)
         }
     }
+
+    /// Drop a deleted agent's ratio and report (`AIBackend.onDelete`).
+    static func forget(_ kernel: Kernel, _ id: String) {
+        lock.withLock {
+            calib[kernel.serial]?.removeValue(forKey: id)
+            reported[kernel.serial]?.removeValue(forKey: id)
+        }
+    }
 }
 
 /// `round(x, 3)` as python renders it — the calibration a status reports.

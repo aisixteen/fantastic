@@ -21,8 +21,8 @@ THE ONE REMAINING LIMIT, stated rather than worked around:
 Fixtures are NOT bespoke: `memory` is the shipped `file_bridge` and `compute`
 the shipped `exec_bridge` on every runtime. The three stateful roles come from
 a TEST-ONLY probe bundle that a default build does not carry — a rust feature,
-a swift define, and a `PYTHONPATH` entry. A role with no implementation is
-REFUSED by name, never approximated.
+a swift define, and a launcher that registers them (`probes/scenario_probes.py`).
+A role with no implementation is REFUSED by name, never approximated.
 """
 
 from __future__ import annotations
@@ -81,13 +81,12 @@ def _bytes_field(d: dict):
 #: actually writes into `.fantastic/agent.yaml` or every grant misses.
 RUNTIMES = {
     "python": {
-        "cmd": ["src/lib/python/.venv/bin/python", "src/lib/python/main.py"],
+        # The probes are REGISTERED (`register_unlisted`) ONLY by this launcher,
+        # which then runs `main.py`'s own entry. A production python kernel never
+        # runs it, so `dispenser_probe.tools` does not resolve and the role cannot
+        # be played — the same gate the compiled runtimes get from a build flag.
+        "cmd": ["src/lib/python/.venv/bin/python", "e2e/probes/scenario_probes.py"],
         "root_id": "kernel_state",
-        # The probe packages are importable ONLY through this entry. A
-        # production python kernel never has it set, so `dispenser_probe.tools`
-        # does not resolve and the role cannot be played — the same gate the
-        # compiled runtimes get from a build flag, in python's own mechanism.
-        "env": {"PYTHONPATH": "e2e/probes"},
     },
     "rust": {
         "cmd": ["src/lib/rust/target/debug/fantastic_kernel"],

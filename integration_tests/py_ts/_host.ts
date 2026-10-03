@@ -70,12 +70,15 @@ function containerRunArgs(name: string, port: number, tmp: string): string[] {
   ];
   // Forward LLM keys for the (opt-in, paid) live-LLM tests.
   const env = envFromDotenv();
-  // Forward ONLY the selected backend's secret (no vLLM key into an ollama
-  // run) — same no-leak guarantee as daemonEnv(), for the container target.
+  // Forward ONLY the selected backend's secret (no vLLM key into an ollama run,
+  // none at all with LLM_BACKEND unset) — same no-leak guarantee as daemonEnv(),
+  // for the container target.
   const forward =
-    LLM_BACKEND === "ollama"
-      ? ["OLLAMA_HOST"]
-      : ["VLLM_API_KEY", "OLLAMA_HOST"];
+    LLM_BACKEND === "vllm"
+      ? ["VLLM_API_KEY", "OLLAMA_HOST"]
+      : LLM_BACKEND === "ollama"
+        ? ["OLLAMA_HOST"]
+        : [];
   for (const k of forward) {
     if (env[k]) args.push("-e", `${k}=${env[k]}`);
   }
@@ -268,18 +271,35 @@ export function recordField(file: string, key: string): string | undefined {
   return v.replace(/^(['"])(.*)\1$/, "$2");
 }
 
-// ─── LLM backend selection — ONE env switch (`LLM_BACKEND`) so every live-LLM
-//     itest runs against either a vLLM server or a local ollama model (parity).
-//     The in-kernel AI agent is created identically via `bootHost({ llm })`; only
-//     the bundle/record differ, so the whole suite is reused verbatim, no fork. ───
-export const LLM_BACKEND = (process.env.LLM_BACKEND ?? "vllm").toLowerCase();
+// ─── LLM backend selection — ONE env switch (`LLM_BACKEND`: `vllm` | `ollama`,
+//     NO default) so every live-LLM itest runs against either a vLLM server or a
+//     local ollama model (parity). Unset, every live-LLM test SKIPS, naming the
+//     variable (`LLM_SKIP`); any other value fails at import. The in-kernel AI
+//     agent is created identically via `bootHost({ llm })`; only the bundle/record
+//     differ, so the whole suite is reused verbatim, no fork. ───
+const LLM_RAW = (process.env.LLM_BACKEND ?? "").trim().toLowerCase();
+if (LLM_RAW !== "" && LLM_RAW !== "vllm" && LLM_RAW !== "ollama") {
+  throw new Error(
+    `LLM_BACKEND=${JSON.stringify(process.env.LLM_BACKEND)} is not vllm or ollama — set one, or unset it to skip the live-LLM tests`,
+  );
+}
+export const LLM_BACKEND: "vllm" | "ollama" | undefined =
+  LLM_RAW === "" ? undefined : (LLM_RAW as "vllm" | "ollama");
+
+/** Why a live-LLM test skips: `LLM_BACKEND` unset (named), or the selected
+ *  backend unreachable. */
+export const LLM_SKIP =
+  LLM_BACKEND === undefined
+    ? "LLM_BACKEND is unset — set it to vllm or ollama to run the live-LLM tests"
+    : `${LLM_BACKEND} backend unreachable (key/server/model)`;
 
 /** The vLLM record fields that have NO default anywhere — the backend refuses a
  *  record without them, so an unset one skips the live tests (`llmReachable`). */
 const VLLM_REQUIRED = ["VLLM_ENDPOINT", "FANTASTIC_AI_MODEL", "VLLM_KV_SLOTS", "VLLM_KV_OVERFLOW"];
 
-/** The active LLM agent config for `bootHost({ llm })`, chosen by `LLM_BACKEND`.
- *  `vllm` (default) → vllm_backend: the server's `/v1` URL (`VLLM_ENDPOINT`), the
+/** The active LLM agent config for `bootHost({ llm })`, chosen by `LLM_BACKEND`;
+ *  undefined while it is unset (every live-LLM test skips).
+ *  `vllm` → vllm_backend: the server's `/v1` URL (`VLLM_ENDPOINT`), the
  *  served model (`FANTASTIC_AI_MODEL`) and the KV session table's size and policy
  *  (`VLLM_KV_SLOTS`, `VLLM_KV_OVERFLOW`) — all required, nothing guessed; a turn's
  *  `max_tokens` is the e2e suite's one budget (65536, `MAX_TOKENS` overrides).
@@ -287,7 +307,7 @@ const VLLM_REQUIRED = ["VLLM_ENDPOINT", "FANTASTIC_AI_MODEL", "VLLM_KV_SLOTS", "
  *  256K) — proven to fit RAM on the 32GB box (resident KV is usage-based, ~8GB at
  *  low fill), not an invented cap. Override the model/ctx via env for a
  *  different model. */
-export const ACTIVE_LLM: NonNullable<BootOptions["llm"]> =
+export const ACTIVE_LLM: BootOptions["llm"] =
   LLM_BACKEND === "ollama"
     ? {
         bundle: "ollama_backend.tools",
@@ -295,14 +315,16 @@ export const ACTIVE_LLM: NonNullable<BootOptions["llm"]> =
         num_ctx: Number(process.env.OLLAMA_NUM_CTX ?? 262144),
         endpoint: process.env.OLLAMA_ENDPOINT, // unset → ollama_backend default :11434
       }
-    : {
-        bundle: "vllm_backend.tools",
-        model: process.env.FANTASTIC_AI_MODEL,
-        endpoint: process.env.VLLM_ENDPOINT,
-        max_tokens: Number(process.env.MAX_TOKENS ?? 65536),
-        kv_slots: process.env.VLLM_KV_SLOTS ? Number(process.env.VLLM_KV_SLOTS) : undefined,
-        kv_overflow: process.env.VLLM_KV_OVERFLOW,
-      };
+    : LLM_BACKEND === "vllm"
+      ? {
+          bundle: "vllm_backend.tools",
+          model: process.env.FANTASTIC_AI_MODEL,
+          endpoint: process.env.VLLM_ENDPOINT,
+          max_tokens: Number(process.env.MAX_TOKENS ?? 65536),
+          kv_slots: process.env.VLLM_KV_SLOTS ? Number(process.env.VLLM_KV_SLOTS) : undefined,
+          kv_overflow: process.env.VLLM_KV_OVERFLOW,
+        }
+      : undefined;
 
 /** The keyed bundles: the env var their key is read from — by the `creds` STORE.
  *  A bundle in OPTIONAL_KEY is wired to the store only when its variable is set:
@@ -320,11 +342,14 @@ function keyVarFor(bundle: string): string | undefined {
   return OPTIONAL_KEY.has(bundle) && !dotenvKey(v) ? undefined : v;
 }
 
-/** Is the active backend reachable? (skip — never hang/fail — when not.) ollama:
- *  the server answers `/api/tags` AND has the model pulled. vllm: every required
- *  variable is set AND the server's `/models` lists the model (with the key as a
- *  Bearer header when `VLLM_API_KEY` is set). */
+/** Is the active backend reachable? (skip — never hang/fail — when not; the reason
+ *  is `LLM_SKIP`.) `LLM_BACKEND` unset: no. ollama: the server answers `/api/tags`
+ *  AND has the model pulled. vllm: every required variable is set AND the server's
+ *  `/models` lists the model (with the key as a Bearer header when `VLLM_API_KEY`
+ *  is set). */
 export async function llmReachable(): Promise<boolean> {
+  const llm = ACTIVE_LLM;
+  if (llm === undefined) return false;
   if (LLM_BACKEND === "ollama") {
     const raw = process.env.OLLAMA_HOST ?? "127.0.0.1:11434";
     const base = raw.startsWith("http") ? raw : `http://${raw}`;
@@ -332,7 +357,7 @@ export async function llmReachable(): Promise<boolean> {
       const r = await fetch(`${base}/api/tags`, { signal: AbortSignal.timeout(3000) });
       if (!r.ok) return false;
       const j = (await r.json()) as { models?: { name?: string }[] };
-      const want = ACTIVE_LLM.model ?? "";
+      const want = llm.model ?? "";
       return (j.models ?? []).some(
         (m) => m.name === want || (m.name ?? "").startsWith(`${want.split(":")[0]}:`),
       );
@@ -343,25 +368,26 @@ export async function llmReachable(): Promise<boolean> {
   if (VLLM_REQUIRED.some((v) => !process.env[v])) return false;
   const key = dotenvKey("VLLM_API_KEY");
   try {
-    const r = await fetch(`${(ACTIVE_LLM.endpoint as string).replace(/\/+$/, "")}/models`, {
+    const r = await fetch(`${(llm.endpoint as string).replace(/\/+$/, "")}/models`, {
       headers: key ? { Authorization: `Bearer ${key}` } : {},
       signal: AbortSignal.timeout(3000),
     });
     if (!r.ok) return false;
     const j = (await r.json()) as { data?: { id?: string }[] };
-    return (j.data ?? []).some((m) => m.id === ACTIVE_LLM.model);
+    return (j.data ?? []).some((m) => m.id === llm.model);
   } catch {
     return false;
   }
 }
 
 /** The daemon's env: process env + repo `.env`, but with the NON-selected
- *  backend's secret STRIPPED. An `LLM_BACKEND=ollama` run therefore carries NO
- *  VLLM_API_KEY — any stray keyed `vllm_backend` agent fails loudly instead of
- *  silently "leaking" the vLLM server into the ollama comparison. */
+ *  backend's secret STRIPPED. Only an `LLM_BACKEND=vllm` run carries
+ *  VLLM_API_KEY — in an ollama run (or with LLM_BACKEND unset) any stray keyed
+ *  `vllm_backend` agent fails loudly instead of silently "leaking" the vLLM
+ *  server into the comparison. */
 function daemonEnv(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env, ...envFromDotenv() };
-  if (LLM_BACKEND === "ollama") {
+  if (LLM_BACKEND !== "vllm") {
     delete env.VLLM_API_KEY;
   }
   return env;

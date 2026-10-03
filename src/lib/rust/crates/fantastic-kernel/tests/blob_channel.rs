@@ -9,7 +9,9 @@
 //! `fantastic-file` bundle cannot be a dev-dep here without a cycle).
 
 use async_trait::async_trait;
-use fantastic_kernel::{Agent, AgentId, Bundle, BundleRegistry, Item, Kernel, Reply, StorageMode};
+use fantastic_kernel::{
+    Agent, AgentId, Bundle, BundleRegistry, Item, Kernel, Reply, Status, StorageMode,
+};
 use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -56,10 +58,10 @@ impl Bundle for FakeStore {
     }
     async fn handle_binary(
         &self,
-        _id: &AgentId,
+        id: &AgentId,
         header: Value,
         body: Option<fantastic_kernel::Blob>,
-        _kernel: &Arc<Kernel>,
+        kernel: &Arc<Kernel>,
     ) -> Result<(Reply, Option<fantastic_kernel::Blob>), Box<dyn std::error::Error + Send + Sync>>
     {
         let blob: Vec<u8> = body.map(|b| b.bytes).unwrap_or_default();
@@ -84,10 +86,9 @@ impl Bundle for FakeStore {
                     None,
                 )),
             },
-            other => Ok((
-                Some(json!({"error": format!("FakeStore: {other:?}")})),
-                None,
-            )),
+            // every other verb is the JSON half — the kernel dispatches
+            // EVERY call here
+            _ => Ok((self.handle(id, &header, kernel).await?, None)),
         }
     }
 }
@@ -234,4 +235,39 @@ async fn an_agent_cannot_write_another_agents_namespace() {
         !store.join("agents").join(DESK).join("state.yaml").exists(),
         "the forged sidecar was written"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_walk_that_escapes_the_root_raises_the_blob_verb() {
+    // ARCH2-6 outcome parity. A namespace that is not live is placed by walking
+    // the loader's persisted tree; python's walk (`_blob_reldir` → `_resolve_path`
+    // → `_disk_parents` → `_walk`) has no `try`, so an entry linked outside the
+    // root RAISES and the verb settles `failed` — not a `completed` reply.
+    let tmp = TempDir::new().unwrap();
+    let store = tmp.path().join(".fantastic");
+    let kernel = kernel_at(&store);
+    wire(&kernel, &store, "desk_blob_escape").await;
+    std::fs::create_dir_all(tmp.path().join("outside")).unwrap();
+    std::fs::write(tmp.path().join("outside/agent.yaml"), "id: probe_out\n").unwrap();
+    std::fs::create_dir_all(store.join("agents")).unwrap();
+    std::os::unix::fs::symlink(tmp.path().join("outside"), store.join("agents/evil")).unwrap();
+
+    for payload in [
+        json!({"type": "persist_blob", "agent_id": "ghost", "name": "s.yaml", "content": "x"}),
+        json!({"type": "load_blob", "agent_id": "ghost", "name": "s.yaml"}),
+    ] {
+        let out = kernel
+            .send(vec![Item::new(AgentId::from("kernel"), payload)])
+            .await
+            .remove(0);
+        assert_eq!(out.status, Status::Failed, "{}", out.result);
+        assert_eq!(
+            out.result,
+            json!({
+                "error": "ValueError: fs: path 'agents/evil/agent.yaml' escapes root",
+                "raised": true,
+            }),
+        );
+    }
+    assert!(!tmp.path().join("outside/s.yaml").exists());
 }

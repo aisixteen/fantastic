@@ -39,9 +39,10 @@ function head(buf: ArrayBuffer): Record<string, unknown> {
   return JSON.parse(split(buf)[0]) as Record<string, unknown>;
 }
 
-/** A binary frame as a peer would send it: `[BE uint32 | head JSON | body]`. */
-function binaryFrame(h: object, body: number[] = [1, 2]): ArrayBuffer {
-  const t = new TextEncoder().encode(JSON.stringify(h));
+/** A binary frame as a peer would send it: `[BE uint32 | head JSON | body]`. A
+ *  head given as TEXT is sent as spelled (`1.0`, which `JSON.stringify` cannot write). */
+function binaryFrame(h: object | string, body: number[] = [1, 2]): ArrayBuffer {
+  const t = new TextEncoder().encode(typeof h === "string" ? h : JSON.stringify(h));
   const buf = new Uint8Array(4 + t.length + body.length);
   new DataView(buf.buffer).setUint32(0, t.length, false);
   buf.set(t, 4);
@@ -139,6 +140,29 @@ test("a malformed _binary_path off the wire is one Error with python's text", ()
     assert.deepEqual([...(out.a[at] as Uint8Array)], [1, 2]);
     assert.equal(out.a.length, 3);
     assert.deepEqual(Object.keys(out.a).length, out.a.length);
+  }
+  // A FLOAT step: python's `json.loads` reads `1.0`, `1e0`, `1e20`, `-0.0` as a
+  // float, never an index. JS holds them as integers; the strict wire loads
+  // keeps their spelling (`pyjson.ts`), so the same texts come back. `-0` and `1`
+  // are integers in python too, and place the body.
+  const floats: [string, string][] = [
+    ['["a", 1.0]', "['a', 1.0]: step 1.0 at a list is not a non-negative integer index"],
+    ['["a", 1e0]', "['a', 1.0]: step 1.0 at a list is not a non-negative integer index"],
+    ['["a", 1E0]', "['a', 1.0]: step 1.0 at a list is not a non-negative integer index"],
+    ['["a", 1e20]', "['a', 1e+20]: step 1e+20 at a list is not a non-negative integer index"],
+    ['["a", -0.0]', "['a', -0.0]: step -0.0 at a list is not a non-negative integer index"],
+    ['["a", -1.0]', "['a', -1.0]: step -1.0 at a list is not a non-negative integer index"],
+    ['["o", 1.0]', "['o', 1.0]: step 1.0 at an object is not a string key"],
+    ['["n", 1.0]', "['n', 1.0]: step 1.0 goes into a number, not a container"],
+  ];
+  for (const [path, tail] of floats) {
+    assert.throws(() => decodeFrame(binaryFrame(`{"a": [0, 0, 0], "o": {"x": 0}, "n": 5, "_binary_path": ${path}}`)), {
+      message: `bad _binary_path ${tail}`,
+    });
+  }
+  for (const [path, at] of [['["a", -0]', 0], ['["a", 1]', 1]] as [string, number][]) {
+    const out = decodeFrame(binaryFrame(`{"a": [0, 0, 0], "_binary_path": ${path}}`)) as { a: unknown[] };
+    assert.ok(out.a[at] instanceof Uint8Array, path);
   }
   // `__proto__` is an ordinary OWN key, read and set as python reads and sets it
   const proto = decodeFrame(binaryFrame({ ["__proto__"]: { x: 1 }, _binary_path: ["__proto__", "y"] }));

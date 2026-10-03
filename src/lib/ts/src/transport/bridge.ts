@@ -1,6 +1,7 @@
 import type { Bridge, Kernel } from "../kernel/kernel.ts";
 import type { Json, Payload } from "../kernel/json.ts";
 import type { Item } from "../kernel/outcome.ts";
+import type { Mark } from "../kernel/secret.ts";
 import { encodeFrame, decodeFrame } from "./frame.ts";
 import type { Envelope } from "./frame.ts";
 
@@ -10,12 +11,14 @@ import type { Envelope } from "./frame.ts";
 // dialect.
 //
 // A call frame is `{type:"call", target, payload, id, caller?, secret?}` in BOTH
-// directions. `secret` is the batch item's marked paths (`kernel/secret.ts`),
-// carried verbatim: a host-bound send puts its item's marks on the frame (only
-// when it marked some — never `[]`), and a host's call is dispatched here WITH
-// the frame's marks, so whichever kernel receives the call records `<secret>`
-// exactly as the caller does. The reply carries the real result back. Nothing
-// here logs or keeps a frame.
+// directions. `secret` is the batch item's marks — dotted strings
+// (`payload.<field…>` / `result[.<field…>]`) and/or arrays of steps
+// (`["payload", "a.b"]`: a string step a literal key, an int step a list index),
+// `kernel/secret.ts` — carried verbatim: a host-bound send puts its item's marks
+// on the frame (only when it marked some — never `[]`), and a host's call is
+// dispatched here WITH the frame's marks, so whichever kernel receives the call
+// records `<secret>` exactly as the caller does. The reply carries the real
+// result back. Nothing here logs or keeps a frame.
 //
 // FEDERATION ROUTING. The `event` frame carries no source id (the proxy mirrors
 // every watched inbox into one undifferentiated stream). So instead of one
@@ -95,8 +98,14 @@ class Conn {
   // THE PEER ROLE (cross-kernel addressing, owner 2026-09-30): the conn that says
   // `hello {guid}` becomes this kernel's address on the host — the host's calls to
   // `<guid>|<agent>` arrive on it as `call` frames and are answered by `reply`.
+  // The guid is the tree's: every tab of one identity says hello with it, and the
+  // host holds them as ONE principal (a call goes to all, the first reply wins).
   private peerGuid: (() => string | null) | null = null;
   private onCall: ((frame: Envelope) => void) | null = null;
+  // the host EMITTING on one of this kernel's agents, and a reply another tab of
+  // this identity got (`reply_mirror`) — both only on the peer conn
+  private onPeerEmit: ((frame: Envelope) => void) | null = null;
+  private onMirror: ((frame: Envelope) => void) | null = null;
   private ready!: Promise<void>;
   private resolveReady: (() => void) | null = null;
 
@@ -194,6 +203,11 @@ class Conn {
     } else if (type === "call") {
       // a HOST calling one of THIS kernel's agents (only on the peer conn)
       this.onCall?.(msg);
+    } else if (type === "emit") {
+      this.onPeerEmit?.(msg);
+    } else if (type === "reply_mirror") {
+      // never resolves a pending call: the call was another tab's
+      this.onMirror?.(msg);
     } else if (type === "event") {
       const payload = msg["payload"];
       if (payload !== null && typeof payload === "object") {
@@ -221,7 +235,7 @@ class Conn {
     envelopePayload: Envelope,
     target: string,
     caller?: string,
-    secret?: readonly string[],
+    secret?: readonly Mark[],
   ): Promise<Json> {
     await this.ready;
     if (!this.connected || this.ws === null) throw new Error("disconnected");
@@ -258,9 +272,16 @@ class Conn {
 
   /** Make this conn the kernel's peer address: say `hello` whenever there is a
    *  guid to say, and hand inbound `call` frames to `onCall`. */
-  asPeer(guid: () => string | null, onCall: (frame: Envelope) => void): void {
+  asPeer(
+    guid: () => string | null,
+    onCall: (frame: Envelope) => void,
+    onEmit: (frame: Envelope) => void,
+    onMirror: (frame: Envelope) => void,
+  ): void {
     this.peerGuid = guid;
     this.onCall = onCall;
+    this.onPeerEmit = onEmit;
+    this.onMirror = onMirror;
     this.announce();
   }
 
@@ -378,6 +399,16 @@ export class WsBridge implements Bridge {
         conn.asPeer(
           () => this.kernel.guid,
           (frame) => void this.answerCall(conn, frame),
+          (frame) => this.deliverEmit(frame),
+          (frame) =>
+            // TODO (owner, open): DESYNC between the tabs of one identity is
+            // envisioned and unsolved — the mirror shows another tab's reply, it
+            // reconciles nothing. Think later.
+            this.kernel.emit(conn.endpoint, {
+              type: "reply_mirror",
+              id: (frame["id"] ?? null) as Json,
+              data: (frame["data"] ?? null) as Json,
+            }),
         );
       }
     }
@@ -420,9 +451,42 @@ export class WsBridge implements Bridge {
     // records the call as shown, exactly as for a local caller — its own check
     // refuses a malformed mark (any JSON value the frame carried) before
     // anything is dispatched (python web_ws `_on_call`, io_bridge's inbound call).
-    if (Object.hasOwn(frame, "secret")) item.secret = frame["secret"] as string[];
+    if (Object.hasOwn(frame, "secret")) item.secret = frame["secret"] as Mark[];
     const [out] = await this.kernel.foreignView(caller).send([item]);
     conn.answer(id, (out?.result ?? null) as Json);
+  }
+
+  /**
+   * The HOST emitting on `frame.target` of THIS kernel — every tab of this
+   * identity gets it (owner, 2026-10-03). Gated exactly like a host call: the
+   * target's `callable_by` against the qualified `frame.caller`, verb =
+   * `payload.type`, and only this kernel's own agents. A frame with no `caller`
+   * is the host's operator (python `Agent.emit` with no sender). A refused or
+   * malformed frame is dropped — an emit has no reply.
+   */
+  private deliverEmit(frame: Envelope): void {
+    const caller = frame["caller"];
+    const target = frame["target"];
+    const payload = frame["payload"];
+    if (
+      typeof target !== "string" ||
+      payload === null ||
+      typeof payload !== "object" ||
+      Array.isArray(payload) ||
+      typeof (payload as Payload)["type"] !== "string" ||
+      (caller !== undefined && (typeof caller !== "string" || !this.kernel.isForeign(caller)))
+    ) {
+      warn("ws_bridge: dropping malformed emit frame");
+      return;
+    }
+    // TODO (owner, open): DESYNC between the tabs of one identity is envisioned
+    // and unsolved — each tab gets the event, nothing reconciles what they do
+    // with it. Think later.
+    const id = this.kernel.resolveId(target);
+    if (!this.kernel.agents.has(id)) return;
+    const verb = (payload as Payload)["type"] as string;
+    if (caller !== undefined && this.kernel.ingressGate(caller as string, verb, id) !== null) return;
+    this.kernel.emit(id, payload as Payload);
   }
 
   /** Make this kernel addressable from the host now: open the control socket
@@ -432,15 +496,15 @@ export class WsBridge implements Bridge {
   }
 
   /** Forward a call to `target`: its own socket if watched, else the control one.
-   *  `secret` — the item's marked paths — rides the frame when there are some. */
-  forward(target: string, payload: Payload, caller?: string, secret?: readonly string[]): Promise<Json> {
+   *  `secret` — the item's marks — rides the frame when there are some. */
+  forward(target: string, payload: Payload, caller?: string, secret?: readonly Mark[]): Promise<Json> {
     const conn = this.conns.get(target) ?? this.connFor(this.controlEndpoint);
     return conn.call(payload, target, caller, secret);
   }
 
   /** Forward a call whose payload carries a binary blob (e.g. paste_image);
    *  `secret` rides the frame's JSON head as on `forward`. */
-  forwardBinary(target: string, payload: Envelope, caller?: string, secret?: readonly string[]): Promise<Json> {
+  forwardBinary(target: string, payload: Envelope, caller?: string, secret?: readonly Mark[]): Promise<Json> {
     const conn = this.conns.get(target) ?? this.connFor(this.controlEndpoint);
     return conn.call(payload, target, caller, secret);
   }

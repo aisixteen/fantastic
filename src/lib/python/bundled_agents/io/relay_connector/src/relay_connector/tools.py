@@ -1,7 +1,8 @@
 """relay_connector — cross-kernel agent comms through a relay-KERNEL router.
 
 A connector agent on kernel A dials the relay (`../fantastic_relay`) at
-`ws://<host>/<guid>` (group password in `X-Fantastic-Auth`, `fantastic.relay.v1`
+`ws://<host>/<guid>` (group password in `X-Fantastic-Auth` — read from a
+credential_store before every dial, never kept on the record — `fantastic.relay.v1`
 subprotocol) and reaches a partner kernel B — which runs its OWN connector — by
 B's GUID. A local agent reaches a remote agent exactly as with `ws_bridge`:
 
@@ -22,8 +23,9 @@ streaming all work UNCHANGED — the engine is the same machine `ws_bridge` uses
 This bundle is THIN: the transport-agnostic engine (read loop, the 6 verbs,
 lifecycle, reply correlation, the ingress/egress gate) lives in `io_bridge`; here
 we supply only the relay transport builder (`_relay.build_transport`) + reflect
-dressing. Record fields: `relay_url` · `guid` · `partner_guid` · `relay_token`
-(X-Fantastic-Auth) · `heartbeat`. Per-leg `ingress_rule`/`egress_rule`/`auth`
+dressing. Record fields: `relay_url` · `guid` · `partner_guid` · `credentials`
+({store, ref} — the relay password, field `password`, bound to the relay's host)
+· `heartbeat`. Per-leg `ingress_rule`/`egress_rule`/`auth`
 gate the tunneled bridge calls (sealed by default), independent of the relay's
 own connection auth.
 
@@ -32,28 +34,33 @@ Transport: `relay`.
 
 from __future__ import annotations
 
-from io_bridge import dispatch, make_verbs
+from io_bridge import _state, dispatch, make_verbs
 from io_bridge import on_delete as _engine_on_delete
+from io_bridge import validate_meta as _bridge_validate_meta
 from kernel import current_secret
-from io_bridge import validate_meta  # noqa: F401  (the `peer_guid` write check)
-
-# Re-exported so the bundle's tests can inject a transport / inspect engine state
-# via `relay_connector.tools.<name>` (the engine lives in io_bridge now).
-from io_bridge import (  # noqa: F401
-    _bridges,
-    _next_corr,
-    _state,
-    _test_transport_inject,
-)
 from kernel._refusal import NOT_CONNECTED, bad, refusal
 from relay_connector._relay import (
+    DIRECTORY_SRC,
     ROLES,
     SENTENCE,
     _identity_from_record,
     build_transport,
+    credentials_shape_error,
     reflect_fields,
     secret_sealed,
 )
+
+
+def validate_meta(meta: dict, record: dict) -> str | None:
+    """The record's own fields, refused at the write: `peer_guid` (the bridge's
+    check) and `credentials` ({store, ref}) — the relay password lives in a
+    credential_store (audit IO-7/F4, 2026-10-03)."""
+    if meta.get("credentials") is not None and (
+        bad := credentials_shape_error(meta["credentials"])
+    ):
+        return bad
+    return _bridge_validate_meta(meta, record)
+
 
 VERBS = make_verbs(
     build_transport=build_transport,
@@ -119,12 +126,20 @@ async def _watch_directory(id, payload, kernel):
             "relay_connector.watch_directory: not connected",
             hint="call boot first",
         )
-    return await st.transport.watch_directory()
+    # The leg SUBSCRIBES to the directory as `watch_remote` does to a remote
+    # agent — before asking: the read loop may hand the engine an event that
+    # follows the relay's ack before this verb resumes. A refusal withdraws it.
+    st.watching.add(DIRECTORY_SRC)
+    out = await st.transport.watch_directory()
+    if out.get("error"):
+        st.watching.discard(DIRECTORY_SRC)
+    return out
 
 
 async def _unwatch_directory(id, payload, kernel):
     """No args. Stop the directory subscription started by `watch_directory`."""
     st = _state(id)
+    st.watching.discard(DIRECTORY_SRC)
     if st.transport is None or st.transport.closed:
         return {"ok": True}
     return await st.transport.unwatch_directory()

@@ -332,7 +332,7 @@ private struct WriterStore: AgentBundle {
         return .object(["ok": .bool(true)])
     }
     func handleBinary(agentId: AgentId, header: JSON, body: Blob?, kernel: Kernel) async throws
-        -> (JSON?, Data?)
+        -> (JSON?, Blob?)
     {
         // the chunk is the payload's `bytes` — python's `payload.get("bytes", b"")`
         let blob = bodyAt(body, "bytes") ?? Data()
@@ -351,7 +351,7 @@ private struct WriterStore: AgentBundle {
                     nil
                 )
             }
-            return (.object(["eof": .bool(true)]), Data(body.utf8))
+            return (.object(["eof": .bool(true)]), Blob("bytes", Data(body.utf8)))
         default:
             return (.object(["error": .string("unknown verb")]), nil)
         }

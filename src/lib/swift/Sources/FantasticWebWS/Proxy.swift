@@ -10,7 +10,8 @@
 //
 // Frame protocol (matches python `PB/io/web_ws/src/web_ws/_proxy.py::run`):
 //   client → server : {"type":"call",   "target":"<id>", "payload":{...}, "id":"<id>", "secret":[..]?}
-//                     (`secret` = the item's marked paths, `Secret`)
+//                     (`secret` = the item's marks — dotted strings and/or
+//                     arrays of steps, `Secret`)
 //   client → server : {"type":"emit",   "target":"<id>", "payload":{...}}
 //   client → server : {"type":"watch",  "src":"<id>"}
 //   client → server : {"type":"unwatch","src":"<id>"}
@@ -24,6 +25,10 @@
 //   client → server : {"type":"hello",  "guid":"<page kernel guid>"}   (the page as a peer)
 //   server → client : {"type":"call",   "id":"h<n>", "target", "payload", "caller", "secret"?}
 //   client → server : {"type":"reply"|"error", "id":"h<n>", "data":{...}}
+//   server → client : {"type":"emit",   "target", "payload", "caller"?}  (a host emit to
+//                     `<guid>|<agent>` — to EVERY live connection of that guid)
+//   server → client : {"type":"reply_mirror", "id", "data"}  (the reply a SIBLING
+//                     connection of this hello guid got — never a call of this one)
 //
 // **THE PAGE AS A PEER KERNEL** (owner, 2026-09-30). A client that is itself a
 // kernel says `hello {guid}`; this leg then registers that guid with the host
@@ -233,6 +238,7 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
         let guid = pinned?.guid
         if let p = pinned {
             kernel.unregisterPeer(p.guid, p.route)
+            Tabs.shared.leave(tabKey(p.guid), ObjectIdentifier(self))
             pinned = nil
         }
         peerCalls.close(guid: guid)
@@ -288,7 +294,7 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
         case .pong:
             awaitingPong = false
         case .continuation:
-            break  // fragmentation not used by the JS client
+            break  // never arrives: the host reassembles fragments (`WebSocketMessageGuard`)
         default:
             break
         }
@@ -303,23 +309,17 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
     }
 
     /// A decoded inbound frame: the envelope, plus the raw body when the frame
-    /// carried one under its `payload` or at `["data", "bytes"]`.
+    /// carried one under its `payload` or its `data`.
     private struct Inbound {
         let envelope: JSON
         /// `.some` when `_binary_path` named a slot under the frame's `payload` —
         /// the body AT its steps in the payload (`Item.binary` carries both).
         let body: Blob?
-        /// `.some` only when `_binary_path` named an ANSWER's
-        /// `["data", "bytes"]` — a page replying to one of the host's calls with
-        /// raw bytes, which is where python's `find_bytes_path` puts a reply's
-        /// chunk.
-        var replyBody: Data? = nil
+        /// `.some` when `_binary_path` named a slot under an ANSWER's `data` — a
+        /// page replying to one of the host's calls with raw bytes, AT its steps
+        /// in the reply (`["data", "x.y"]` is the reply key `"x.y"`).
+        var replyBody: Blob? = nil
     }
-
-    /// Where a binary reply's chunk sits in the reply ENVELOPE — python's
-    /// `find_bytes_path` walks `{type:reply, id, data:{…bytes…}}` and finds
-    /// exactly this.
-    private static let replyBinaryPath: [PathStep] = ["data", "bytes"]
 
     /// python `decode_inbound` + `isinstance(frame, dict)`: parse a text frame
     /// as JSON or a binary frame as `[4B len | header | body]`, pop
@@ -356,15 +356,14 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
             return Inbound(envelope: envelope, body: nil)
         }
         // A body under the frame's `payload` reaches the handler AT ITS STEPS
-        // there (`Item.binary` carries both). An answer's `["data", "bytes"]` is
-        // the body of a reply to the host's own call. Any other placeable path
-        // keeps its `null` and the body is dropped.
-        if path.count > 1, path[0] == "payload" {
-            return Inbound(
-                envelope: envelope, body: Blob(parts: Array(path.dropFirst()), body))
+        // there (`Item.binary` carries both). A body under an answer's `data` is
+        // the chunk of a reply to the host's own call, at its slot of that reply.
+        // Any other placeable path keeps its `null` and the body is dropped.
+        let blob = Blob(parts: path, body)
+        if let inPayload = blob.under("payload") {
+            return Inbound(envelope: envelope, body: inPayload)
         }
-        return Inbound(
-            envelope: envelope, body: nil, replyBody: path == replyBinaryPath ? body : nil)
+        return Inbound(envelope: envelope, body: nil, replyBody: blob.under("data"))
     }
 
     /// python `bad("frame", "frame", "a well-formed call/emit/watch envelope")`
@@ -542,6 +541,10 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
             guard self.inbox != nil else { return }
             let readers = self.readers
             let outLock = self.outLock
+            // The identity this connection said hello as — its sibling tabs see
+            // the reply as a `reply_mirror`.
+            let tabs = pinned.map { tabKey($0.guid) }
+            let me = ObjectIdentifier(self)
             trackCall(channel: channel) {
                 // THE FRAME ID IS THE EXECUTION ID. One id space: the same id
                 // arriving twice — a double-click, a second tab, a reconnect
@@ -554,25 +557,24 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
                 // kernel's own check refuses a malformed mark before anything is
                 // dispatched. Python `if "secret" in frame: item["secret"] = …`.
                 if let marks = frame.asObject?["secret"] { item.secret = marks }
-                // A binary-edge verb rides the BINARY channel even when the
-                // client sent a text frame: that is the only way the bundle
-                // returns (or receives) a raw chunk (A11.9/A13.1).
-                let verb = payload["type"].asString ?? ""
-                if body != nil || Codec.binaryEdgeVerbs.contains(verb) {
-                    // ONLY A BINARY FRAME OVERWRITES THE KEY. python's
-                    // `payload[field] = body` runs where a body EXISTS; a TEXT
-                    // frame's `bytes` reaches the target as the JSON value the
-                    // client sent, and `write_stream` answers `missing_arg` for
-                    // it (an ABSENT key stays an empty chunk) (A13.19). The
-                    // decode left `null` in the slot python's `set_path` fills —
-                    // kept, so the call row and the watcher frame keep python's
-                    // key order; the kernel hands the handler a header with
-                    // nothing there.
-                    if let body {
-                        item.binary = body
-                    } else {
-                        item.rawReply = true
-                    }
+                // EVERY CALL MAY BE ANSWERED WITH RAW BYTES, whatever its verb:
+                // python's reply dict holds them and `encode_frame` finds them,
+                // with no list of verbs. A text frame is a call with no request
+                // body whose reply body this leg carries (`rawReply`); the reply
+                // goes out binary exactly when it holds one.
+                //
+                // ONLY A BINARY FRAME OVERWRITES THE KEY. python's
+                // `payload[field] = body` runs where a body EXISTS; a TEXT
+                // frame's `bytes` reaches the target as the JSON value the
+                // client sent, and `write_stream` answers `missing_arg` for it
+                // (an ABSENT key stays an empty chunk) (A13.19). The decode left
+                // `null` in the slot python's `set_path` fills — kept, so the
+                // call row and the watcher frame keep python's key order; the
+                // kernel hands the handler a header with nothing there.
+                if let body {
+                    item.binary = body
+                } else {
+                    item.rawReply = true
                 }
                 let out = await kernel.send([item])[0]
                 // Verb-level errors travel inside `data.error` (python's wire
@@ -591,8 +593,17 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
                         Self.flushEvents(inbox: rInbox, channel: channel, src: src)
                     }
                     Self.sendEnvelope(
-                        channel: channel, envelope: env, body: out.body,
-                        path: Self.replyBinaryPath)
+                        channel: channel, envelope: env, body: out.body?.nested(in: "data"))
+                }
+                // REPLY MIRRORING: every OTHER live connection of this hello guid
+                // gets the reply too — the tabs of one identity are one principal.
+                // After this connection's lock is released: one lock at a time.
+                // TODO (owner, open): DESYNC between the tabs of one identity is
+                // envisioned and unsolved — a mirror is not a merge; think later.
+                if let tabs {
+                    for mirror in Tabs.shared.siblings(tabs, except: me) {
+                        mirror(fid, out.result, out.body)
+                    }
                 }
             }
         case "emit":
@@ -691,8 +702,8 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
                 }
                 outLock.sync {
                     Self.sendEnvelope(
-                        channel: channel, envelope: .object(out), body: body?.bytes,
-                        path: ["payload"] + (body?.parts ?? []))
+                        channel: channel, envelope: .object(out),
+                        body: body?.nested(in: "payload"))
                 }
             }
             stateTokens.append(token)
@@ -714,8 +725,9 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
     /// `hello {guid}` — make this connection the page kernel's address. Python
     /// `_on_hello`: the guid is checked first (a malformed one is answered even on
     /// a sealed leg), then the leg's gate (a sealed leg carries no peer, and says
-    /// nothing — the calls it refuses teach), then the pin, then the kernel's own
-    /// one-route-per-guid rule. Runs on the event loop.
+    /// nothing — the calls it refuses teach), then the pin. A guid already live on
+    /// another connection is another tab of that identity: this route JOINS it
+    /// (one principal, kernel `registerPeer`). Runs on the event loop.
     private func hello(
         _ frame: JSON, frameId: JSON, token: String?, addr: String, channel: Channel
     ) {
@@ -742,16 +754,28 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
         }
         let calls = peerCalls
         let outLock = self.outLock
-        let route = PeerRoute(via: legId.value) { agentId, payload, caller, secret, body in
-            await calls.call(
-                guid: guid, agentId: agentId, payload: payload, caller: caller, secret: secret,
-                body: body, channel: channel, outLock: outLock)
-        }
-        if let taken = kernel.registerPeer(guid, route) {
-            answerError(taken, frameId: frameId, channel: channel)
-            return
-        }
+        let route = PeerRoute(
+            via: legId.value,
+            call: { agentId, payload, caller, secret, body in
+                await calls.call(
+                    guid: guid, agentId: agentId, payload: payload, caller: caller,
+                    secret: secret, body: body, channel: channel, outLock: outLock)
+            },
+            emit: { agentId, payload, caller, body in
+                calls.emit(
+                    agentId: agentId, payload: payload, caller: caller, body: body,
+                    channel: channel, outLock: outLock)
+            })
+        kernel.registerPeer(guid, route)
         pinned = (guid, route)
+        Tabs.shared.join(tabKey(guid), ObjectIdentifier(self)) { id, data, body in
+            calls.mirror(id: id, data: data, body: body, channel: channel, outLock: outLock)
+        }
+    }
+
+    /// This leg's tab table key for `guid`.
+    private func tabKey(_ guid: String) -> Tabs.Key {
+        Tabs.Key(kernel: ObjectIdentifier(kernel), leg: legId.value, guid: guid)
     }
 
     /// python `{"type": "error", "id": frame.get("id", ""), **refusal}`.
@@ -806,23 +830,21 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
     }
 
     /// Send one server→client envelope, picking the frame kind from the
-    /// CARRIER (C37/A11.9): a reply that HOLDS a chunk — a 0-byte one included —
-    /// is a binary frame whose head keeps `bytes: null` in its python position
-    /// and names it in `_binary_path`. Testing the body's LENGTH instead served
-    /// an empty file as JSON.
-    static func sendEnvelope(
-        channel: Channel, envelope: JSON, body: Data?, path: [PathStep]
-    ) {
+    /// CARRIER (C37/A11.9): an envelope that HOLDS a chunk — a 0-byte one
+    /// included — is a binary frame whose head keeps `null` at the chunk's slot
+    /// (`body.parts`, from the envelope root: `["data", "x.y"]` for a reply's
+    /// chunk at the reply key `"x.y"`) in its python position — appended when the
+    /// envelope did not name it — and names it in `_binary_path`. Testing the
+    /// body's LENGTH instead served an empty file as JSON.
+    static func sendEnvelope(channel: Channel, envelope: JSON, body: Blob?) {
         guard let body else {
             writeText(channel: channel, text: Codec.encodeText(envelope))
             return
         }
-        var head = envelope
-        if case .object(var o) = head {
-            o["_binary_path"] = Codec.binaryPath(path)
-            head = .object(o)
-        }
-        writeBinary(channel: channel, bytes: Codec.encodeBinaryFrame(header: head, body: body))
+        writeBinary(
+            channel: channel,
+            bytes: Codec.encodeBinaryFrame(
+                header: Codec.binaryHead(envelope, body), body: body.bytes))
     }
 
     static func writeText(channel: Channel, text: String) {
@@ -895,7 +917,7 @@ final class PeerCalls: @unchecked Sendable {
     /// The last frame id handed out — ids are `h1`, `h2`, … per connection.
     private var seq = 0
     /// Frame id → the waiting call.
-    private var waiting: [String: CheckedContinuation<(JSON, Data?), Never>] = [:]
+    private var waiting: [String: CheckedContinuation<(JSON, Blob?), Never>] = [:]
     /// Ids whose caller gave up (its timeout or `cancel`) before the call was
     /// parked — the park then settles at once instead of waiting forever.
     private var abandoned: Set<String> = []
@@ -917,9 +939,9 @@ final class PeerCalls: @unchecked Sendable {
     /// `secret` is the item's marks, on the frame only when there are any, so the
     /// PAGE kernel masks its records of this call too.
     func call(
-        guid: String, agentId: String, payload: JSON, caller: String, secret: [String],
+        guid: String, agentId: String, payload: JSON, caller: String, secret: [JSON],
         body: Blob?, channel: Channel, outLock: OutboundLock
-    ) async -> (JSON, Data?) {
+    ) async -> (JSON, Blob?) {
         let fid: String? = lock.withLock {
             // A call that resolved this route just as the socket closed must not
             // wait on an answer the teardown has already swept — it settles now,
@@ -939,11 +961,11 @@ final class PeerCalls: @unchecked Sendable {
             "payload": p, "caller": .string(caller),
         ])
         // the item's marks, so the PAGE kernel masks its records of this call too
-        if !secret.isEmpty { envelope["secret"] = .array(secret.map { .string($0) }) }
+        if !secret.isEmpty { envelope["secret"] = .array(secret) }
         let frame = envelope
         return await withTaskCancellationHandler {
-            await withCheckedContinuation { (cont: CheckedContinuation<(JSON, Data?), Never>) in
-                let settled: (JSON, Data?)? = lock.withLock {
+            await withCheckedContinuation { (cont: CheckedContinuation<(JSON, Blob?), Never>) in
+                let settled: (JSON, Blob?)? = lock.withLock {
                     if gone { return (Self.disconnected(guid), nil) }
                     if abandoned.remove(fid) != nil {
                         return (.object(["cancelled": .bool(true)]), nil)
@@ -957,14 +979,13 @@ final class PeerCalls: @unchecked Sendable {
                 }
                 outLock.sync {
                     WebSocketProxyHandler.sendEnvelope(
-                        channel: channel, envelope: frame, body: body?.bytes,
-                        path: ["payload"] + (body?.parts ?? []))
+                        channel: channel, envelope: frame, body: body?.nested(in: "payload"))
                 }
             }
         } onCancel: {
             // The caller gave up (its deadline, a `cancel`): take the entry back
             // out — python's `finally: out_calls.pop(fid, None)`.
-            let cont: CheckedContinuation<(JSON, Data?), Never>? = lock.withLock {
+            let cont: CheckedContinuation<(JSON, Blob?), Never>? = lock.withLock {
                 if let c = waiting.removeValue(forKey: fid) { return c }
                 abandoned.insert(fid)
                 return nil
@@ -973,11 +994,43 @@ final class PeerCalls: @unchecked Sendable {
         }
     }
 
+    /// ONE host emit into the page: `{type:"emit", target, payload, caller?}`
+    /// (`caller` = `<host guid>|<sender>` when an agent emitted it). A body rides
+    /// the binary channel at `payload.<its path>`, its slot `null` in the head as
+    /// the kernel's item already holds it. A gone socket drops it — an emit has
+    /// no reply.
+    func emit(
+        agentId: String, payload: JSON, caller: String?, body: Blob?, channel: Channel,
+        outLock: OutboundLock
+    ) {
+        if lock.withLock({ gone }) || !channel.isActive { return }
+        var envelope: JSON = .object([
+            "type": .string("emit"), "target": .string(agentId), "payload": payload,
+        ])
+        if let caller { envelope["caller"] = .string(caller) }
+        let frame = envelope
+        outLock.sync {
+            WebSocketProxyHandler.sendEnvelope(
+                channel: channel, envelope: frame, body: body?.nested(in: "payload"))
+        }
+    }
+
+    /// `{type:"reply_mirror", id, data}` — the reply a sibling connection of
+    /// this hello guid got for its call `id`, its chunk at its slot of `data`.
+    func mirror(id: JSON, data: JSON, body: Blob?, channel: Channel, outLock: OutboundLock) {
+        if lock.withLock({ gone }) || !channel.isActive { return }
+        let frame: JSON = .object(["type": .string("reply_mirror"), "id": id, "data": data])
+        outLock.sync {
+            WebSocketProxyHandler.sendEnvelope(
+                channel: channel, envelope: frame, body: body?.nested(in: "data"))
+        }
+    }
+
     /// An inbound `reply`/`error` answers one of OUR outbound calls — its `data`
     /// is that call's outcome (a page-side refusal included), a non-object
-    /// wrapped as `{result}`. An id we are not waiting on is ignored. Python
-    /// `_on_answer`.
-    func answer(_ frame: JSON, body: Data?) {
+    /// wrapped as `{result}`; its chunk, when it carried one, at its slot of
+    /// that `data`. An id we are not waiting on is ignored. Python `_on_answer`.
+    func answer(_ frame: JSON, body: Blob?) {
         guard let fid = frame.asObject?["id"]?.asString else { return }
         guard let cont = lock.withLock({ waiting.removeValue(forKey: fid) }) else { return }
         let data: JSON
@@ -992,12 +1045,48 @@ final class PeerCalls: @unchecked Sendable {
     /// The socket is gone: every call still waiting settles with the reason, and
     /// every later call settles at once. Idempotent.
     func close(guid: String?) {
-        let pending: [CheckedContinuation<(JSON, Data?), Never>] = lock.withLock {
+        let pending: [CheckedContinuation<(JSON, Blob?), Never>] = lock.withLock {
             gone = true
             let all = Array(waiting.values)
             waiting.removeAll()
             return all
         }
         for c in pending { c.resume(returning: (Self.disconnected(guid), nil)) }
+    }
+}
+
+/// The live connections of each hello guid on ONE leg — the tabs of one
+/// identity, so a reply to one is mirrored to the others. Keyed by the kernel and
+/// the leg too: two kernels in one process, or two legs, never share tabs.
+/// Joined at hello, left at teardown.
+final class Tabs: @unchecked Sendable {
+    static let shared = Tabs()
+
+    struct Key: Hashable {
+        let kernel: ObjectIdentifier
+        let leg: String
+        let guid: String
+    }
+
+    /// Writes one `reply_mirror` (frame id, reply data, reply chunk) on a tab.
+    typealias Mirror = @Sendable (JSON, JSON, Blob?) -> Void
+
+    private let lock = NSLock()
+    private var table: [Key: [(ObjectIdentifier, Mirror)]] = [:]
+
+    func join(_ key: Key, _ conn: ObjectIdentifier, _ mirror: @escaping Mirror) {
+        lock.withLock { table[key, default: []].append((conn, mirror)) }
+    }
+
+    func leave(_ key: Key, _ conn: ObjectIdentifier) {
+        lock.withLock {
+            let rest = (table[key] ?? []).filter { $0.0 != conn }
+            table[key] = rest.isEmpty ? nil : rest
+        }
+    }
+
+    /// Every live tab of `key` but `conn`.
+    func siblings(_ key: Key, except conn: ObjectIdentifier) -> [Mirror] {
+        lock.withLock { (table[key] ?? []).filter { $0.0 != conn }.map { $0.1 } }
     }
 }

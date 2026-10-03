@@ -17,8 +17,9 @@ ts, the minifier) is off. One recipe, so the two cannot drift.
 
 The scenario PROBE switches are the only other divergence, and they are additive
 and deliberately NOT in a release — a shipped kernel cannot play `dispenser`.
-Each runtime declares its own in `PROBE_ENV`, except python's, which rides the
-env at RUN time.
+Each runtime declares its own in `PROBE_ENV`, except python's, which is the
+launcher it RUNS (`e2e/probes/scenario_probes.py`: the probes registered, then
+the packaged `main.py`'s own entry).
 
 Artifacts land under `e2e/dist/<runtime>/`, rebuilt only when a source file is
 newer than the tarball — a no-op run costs a stat walk, not a toolchain call.
@@ -45,8 +46,8 @@ WATCH = {
 }
 
 #: The scenario-probe switches. Additive and deliberately NOT in a release: a
-#: shipped kernel cannot play `dispenser`. Python's rides the env at RUN time
-#: (see the driver's `env`), so it has no build switch here.
+#: shipped kernel cannot play `dispenser`. Python's is the launcher it RUNS
+#: (see the driver's `cmd`), so it has no build switch here.
 PROBE_ENV = {
     "rust": {"FANTASTIC_BUILD_FEATURES": "scenario-probes"},
     "swift": {"FANTASTIC_BUILD_SWIFTC": "-DSCENARIO_PROBES"},
@@ -143,8 +144,10 @@ def stage(repo: Path, name: str, spec: dict) -> dict:
 def _point_at(repo: Path, name: str, spec: dict, dist: Path) -> dict:
     spec = dict(spec)
     if name == "python":
+        # The PACKAGED venv runs the repo's probe launcher; its `import main`
+        # resolves to the packaged `main.py` (the venv's editable install).
         py = dist / "src/lib/python"
-        spec["cmd"] = [str(py / ".venv/bin/python"), str(py / "main.py")]
+        spec["cmd"] = [str(py / ".venv/bin/python"), str(repo / "e2e/probes/scenario_probes.py")]
     else:
         spec["cmd"] = [str(dist / "fantastic_kernel")]
     return spec

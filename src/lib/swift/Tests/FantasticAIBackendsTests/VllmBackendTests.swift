@@ -53,6 +53,7 @@ private func provider(
     sampling: OrderedDictionary<String, JSON> = SAMPLING_DEFAULTS,
     explicitBudget: Bool = false,
     agentKey: String = UUID().uuidString,
+    kernelSerial: UInt64 = providerKernel.serial,
     key: @escaping KeyReader = fixedKey(nil)
 ) -> VllmProvider {
     VllmProvider(
@@ -60,8 +61,13 @@ private func provider(
         kvSlots: kvSlots, kvOverflow: kvOverflow, kvTtl: KV_TTL,
         sampling: sampling, explicitBudget: explicitBudget,
         connectTimeout: CONNECT_TIMEOUT, readTimeout: READ_TIMEOUT,
-        agentKey: agentKey, clock: { ProcessInfo.processInfo.systemUptime })
+        agentKey: agentKey, kernelSerial: kernelSerial,
+        clock: { ProcessInfo.processInfo.systemUptime })
 }
+
+/// The kernel a bare provider's tables belong to — the provider tests drive the
+/// wire, not a kernel; one kernel serial keys their session tables.
+private let providerKernel = Kernel(storage: .inMemory, bundles: BundleRegistry())
 
 private let oneUser: [JSON] = [.object(["role": "user", "content": "hi"])]
 
@@ -189,6 +195,27 @@ struct VllmBackendTests {
                 + "name it in `credentials` ({store, ref}): unauthorized", "\(error ?? "nil")")
     }
 
+    /// Audit S1: the client's refusal of a header value QUOTES the key — it
+    /// leaves as a fixed text, rust's; an error body echoing the key leaves with
+    /// the key as `<secret>`.
+    @Test func theKeyNeverLeavesInAnErrorText() async {
+        // refused BEFORE any connection: nothing listens on port 1
+        let (_, refused) = await drain(
+            provider(endpoint(port: 1), key: fixedKey("sk-test-fixture\n")))
+        #expect(
+            refused == "RuntimeError: api_key has illegal header chars: failed to parse header value",
+            "\(refused ?? "nil")")
+        let stub = StubHTTP([.init(status: 401, body: "invalid key: Bearer sk-test-fixture")])
+        defer { stub.stop() }
+        let ep = endpoint(port: stub.port)
+        let (_, echoed) = await drain(provider(ep, key: fixedKey("sk-test-fixture")))
+        #expect(
+            echoed
+                == "RuntimeError: vllm_backend: \(ep) answered HTTP 401 — the door wants a key: "
+                + "name it in `credentials` ({store, ref}): invalid key: Bearer <secret>",
+            "\(echoed ?? "nil")")
+    }
+
     /// No `key_var`: the key is an optional `credentials` field (a store ref).
     @Test func theSchemaTakesOptionalCredentials() {
         #expect(VllmBundle.RECORD_SCHEMA.asObject?["key_var"] == nil)
@@ -288,7 +315,7 @@ struct VllmBackendTests {
         #expect(try body(stub, 0)["thinking_token_budget"] == 4000)
         #expect(try body(stub, 1)["thinking_token_budget"] == 1000)
         #expect(try body(stub, 2).asObject?["thinking_token_budget"] == nil)
-        #expect(VllmLastBudget.get(key) == nil)
+        #expect(VllmLastBudget.get(providerKernel.serial, key) == nil)
     }
 
     @Test func anExplicitBudgetRulesTheTurnAndHalvesOnASideCall() async throws {
@@ -427,7 +454,7 @@ struct VllmBackendTests {
         func first(_ meta: OrderedDictionary<String, JSON>) -> String {
             let a = Agent(id: AgentId("v"), handlerModule: nil, parentId: nil, meta: meta)
             do {
-                _ = try VllmBundle.makeProvider(a, key: fixedKey(nil))
+                _ = try VllmBundle.makeProvider(a, kernel: providerKernel, key: fixedKey(nil))
                 return ""
             } catch {
                 return "\(error)"
@@ -499,6 +526,42 @@ struct VllmBackendTests {
                     "slots": 7, "overflow": "evict", "ttl": .double(1800.0), "live": 0,
                     "conversations": .array([]), "evicted": 0, "rejected": 0,
                 ]), "\(out["kv"])")
+    }
+}
+
+/// Audit ARCH2-5: the KV session table and the last-budget entry are keyed by
+/// kernel. Two kernels in one process with an agent of the same id on the same
+/// endpoint keep apart, and a kernel's teardown drops its rows.
+@Suite("vLLM side tables — keyed by kernel")
+struct VllmSideTablePinTests {
+    @Test func twoKernelsOnOneEndpointShareNoTableAndTeardownDropsTheirRows() async throws {
+        VllmSideTables.installTeardownHook()
+        func bare() -> Kernel {
+            let k = Kernel(storage: .inMemory, bundles: BundleRegistry())
+            let root = Agent(id: AgentId("kernel_state"), handlerModule: nil, parentId: nil)
+            k.register(root)
+            k.setRoot(root)
+            return k
+        }
+        let a = bare()
+        let b = bare()
+        let endpoint = "http://vllm.test/\(UUID().uuidString.prefix(8))/v1"
+        _ = try VllmTables.table(a.serial, for: endpoint).admit(
+            "conv", slots: 1, overflow: "reject", ttl: 1800, now: 0)
+        #expect(VllmTables.table(a.serial, for: endpoint).view()["live"] == 1)
+        #expect(VllmTables.table(b.serial, for: endpoint).view()["live"] == 0)
+        // kernel b's own conversation is admitted: a's live slot is not b's
+        #expect(
+            try VllmTables.table(b.serial, for: endpoint).admit(
+                "other", slots: 1, overflow: "reject", ttl: 1800, now: 0) == nil)
+        VllmLastBudget.set(a.serial, "v1", 4000)
+        #expect(VllmLastBudget.get(a.serial, "v1") == 4000)
+        #expect(VllmLastBudget.get(b.serial, "v1") == nil)
+        await a.shutdown()
+        #expect(VllmLastBudget.get(a.serial, "v1") == nil)
+        #expect(VllmTables.table(a.serial, for: endpoint).view()["live"] == 0)
+        #expect(VllmTables.table(b.serial, for: endpoint).view()["live"] == 1)
+        await b.shutdown()
     }
 }
 

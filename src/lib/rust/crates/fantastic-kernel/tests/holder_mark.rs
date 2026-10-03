@@ -45,8 +45,15 @@ impl Bundle for Probe {
     }
 }
 
+/// AN AGENT EDITS A RECORD IT NAMES (AV-1): `update_agent` is gated on its
+/// operand — egress naming it with the verb, and the operand's ingress accepting
+/// the editor.
 fn updater() -> Value {
-    json!({"kernel_state": ["update_agent"]})
+    json!({"vault": ["update_agent"], "plain": ["update_agent"]})
+}
+
+fn accepts_a() -> Value {
+    json!({"a": ["update_agent"]})
 }
 
 fn unmark(sender: &str, target: &str) -> Value {
@@ -162,7 +169,12 @@ fn update(id: &str, field: &str, v: Value) -> Value {
 #[tokio::test]
 async fn an_agent_cannot_clear_the_mark_on_a_holder() {
     let (_t, k) = mk();
-    create(&k, "vault", json!({"holds_secrets": true})).await;
+    create(
+        &k,
+        "vault",
+        json!({"holds_secrets": true, "callable_by": accepts_a()}),
+    )
+    .await;
     create(&k, "a", json!({"can_call": updater()})).await;
     let mut values = vec![Value::Null];
     values.extend(bad().into_iter().map(|(v, _)| v));
@@ -184,7 +196,12 @@ async fn an_agent_cannot_clear_the_mark_on_a_holder() {
 #[tokio::test]
 async fn the_refusal_wins_over_every_other_field_in_the_patch() {
     let (_t, k) = mk();
-    create(&k, "vault", json!({"holds_secrets": true})).await;
+    create(
+        &k,
+        "vault",
+        json!({"holds_secrets": true, "callable_by": accepts_a()}),
+    )
+    .await;
     create(&k, "a", json!({"can_call": updater()})).await;
     let r = as_agent(
         &k,
@@ -219,8 +236,13 @@ async fn a_holder_cannot_clear_its_own_mark() {
 #[tokio::test]
 async fn an_agent_may_mark_but_never_unmark() {
     let (_t, k) = mk();
-    create(&k, "plain", json!({})).await;
-    create(&k, "vault", json!({"holds_secrets": true})).await;
+    create(&k, "plain", json!({"callable_by": accepts_a()})).await;
+    create(
+        &k,
+        "vault",
+        json!({"holds_secrets": true, "callable_by": accepts_a()}),
+    )
+    .await;
     create(&k, "a", json!({"can_call": updater()})).await;
     for target in ["plain", "vault"] {
         let out = as_agent(&k, "a", update(target, "holds_secrets", json!(true))).await;
@@ -244,7 +266,7 @@ async fn an_agent_may_mark_but_never_unmark() {
 #[tokio::test]
 async fn null_on_an_unmarked_agent_is_not_a_clear() {
     let (_t, k) = mk();
-    create(&k, "plain", json!({})).await;
+    create(&k, "plain", json!({"callable_by": accepts_a()})).await;
     create(&k, "a", json!({"can_call": updater()})).await;
     let out = as_agent(&k, "a", update("plain", "holds_secrets", Value::Null)).await;
     assert_eq!(out.result["updated"], json!(true), "{}", out.result);
@@ -255,8 +277,13 @@ async fn null_on_an_unmarked_agent_is_not_a_clear() {
 #[tokio::test]
 async fn the_gate_judges_before_the_shape() {
     let (_t, k) = mk();
-    create(&k, "plain", json!({})).await;
-    create(&k, "vault", json!({"holds_secrets": true})).await;
+    create(&k, "plain", json!({"callable_by": accepts_a()})).await;
+    create(
+        &k,
+        "vault",
+        json!({"holds_secrets": true, "callable_by": accepts_a()}),
+    )
+    .await;
     create(&k, "a", json!({"can_call": updater()})).await;
     let on_holder = as_agent(&k, "a", update("vault", "holds_secrets", json!("yes")))
         .await
@@ -276,7 +303,12 @@ async fn the_gate_judges_before_the_shape() {
 #[tokio::test]
 async fn the_operator_clears_the_mark_with_null() {
     let (_t, k) = mk();
-    create(&k, "vault", json!({"holds_secrets": true})).await;
+    create(
+        &k,
+        "vault",
+        json!({"holds_secrets": true, "callable_by": accepts_a()}),
+    )
+    .await;
     let out = op(&k, update("vault", "holds_secrets", Value::Null)).await;
     assert_eq!(out["updated"], json!(true), "{out}");
     assert_eq!(
@@ -296,7 +328,7 @@ async fn the_operator_clears_the_mark_with_null() {
 #[tokio::test]
 async fn every_non_true_value_is_refused_at_update() {
     let (_t, k) = mk();
-    create(&k, "plain", json!({})).await;
+    create(&k, "plain", json!({"callable_by": accepts_a()})).await;
     for (v, got) in bad() {
         let r = op(&k, update("plain", "holds_secrets", v.clone())).await;
         assert_eq!(

@@ -11,9 +11,18 @@
 //!
 //! - `POST /<self_id>/{target_id}` body=payload → kernel.send → JSON;
 //!   headers `X-Fantastic-Auth` (credential), `X-Fantastic-Execution-Id` (the
-//!   item `id`), `X-Fantastic-Secret` (the item `secret`, a JSON array of paths)
+//!   item `id`), `X-Fantastic-Secret` (the item `secret`, a JSON array of marks —
+//!   dotted strings and/or arrays of steps)
 //! - `GET  /<self_id>/_reflect` → kernel.reflect (root tree)
 //! - `GET  /<self_id>/_reflect/{target_id}` → reflect on a specific agent
+//!
+//! GATE FIRST, THEN THE BODY (audit IO-4, 2026-10-03). A POST is judged by the
+//! leg's ingress rule on what the request says up front — its target and its
+//! `X-Fantastic-Auth` credential — and only an admitted request's body is read,
+//! at most 16 MiB (io_bridge's `MAX_FRAME`, the one frame cap every wire leg
+//! holds); a larger body is refused 413, loud, with nothing past the bound read (a
+//! declared `Content-Length` over it is refused unread). Implemented by the
+//! parent web's router (`fantastic-web`'s `rest_post`).
 //!
 //! Verbs:
 //! - `reflect` — identity + URL patterns + curl examples + leg posture
@@ -47,6 +56,20 @@ impl Bundle for WebRestBundle {
 
     fn readme(&self) -> Option<&'static str> {
         Some(README)
+    }
+
+    /// The leg's `ingress_rule`, refused at the WRITE when no rule implements it
+    /// — the one check every leg makes (python `validate_meta` →
+    /// `io_bridge.unknown_ingress_refusal`).
+    fn validate_meta(
+        &self,
+        meta: &Map<String, Value>,
+        _record: &Map<String, Value>,
+    ) -> Option<String> {
+        fantastic_io_bridge::authorizer::ingress::unknown_refusal(
+            meta,
+            &fantastic_io_bridge::authorizer::ingress::REGISTRY,
+        )
     }
 
     async fn handle(

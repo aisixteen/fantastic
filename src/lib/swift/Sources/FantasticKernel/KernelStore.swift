@@ -125,7 +125,11 @@ extension Kernel {
         }
         counterLock.unlock()
         if let reserved, started, let r = root {
-            update(r.id, ["next_id": .integer(reserved)])
+            // The reservation reaches the loader through its `updated` event —
+            // except inside the kernel's own flush (`stateQuiet`), where NOTHING
+            // publishes (CLI-B): the record holds the bound, the next published
+            // update carries it.
+            _ = update(r.id, ["next_id": .integer(reserved)])
         }
         return n
     }
@@ -177,25 +181,36 @@ extension Kernel {
     }
 
     /// python `_json_safe` of a reply whose raw bytes ride beside it (the
-    /// outcome's body): the chunk reads `<bytes:N>`, the telemetry rule. What
-    /// the in-RAM `ledger` shows of a NAMED result before its settle row
-    /// flushes as `{len: N}`.
-    public static func jsonSafeValue(_ value: JSON, bytes: Int?) -> JSON {
-        guard let n = bytes, case .object(var map) = value else { return value }
-        map["bytes"] = .string("<bytes:\(n)>")
-        return .object(map)
+    /// outcome's body): the chunk reads `<bytes:N>` AT ITS SLOT, the telemetry
+    /// rule. What the in-RAM `ledger` shows of a NAMED result before its settle
+    /// row flushes as `{len: N}`.
+    public static func jsonSafeValue(_ value: JSON, body: Blob?) -> JSON {
+        withBody(value, body, .string("<bytes:\(body?.bytes.count ?? 0)>"))
     }
 
     /// A row value with RAW BYTES reduced to their LENGTH — THE ONE REDUCTION.
-    /// A store holds no raw bytes and base64 is banned, so a `read_stream` chunk
-    /// in a result is recorded as `{"len": N}` — python reduces the `bytes` value
-    /// it holds INSIDE the dict (`_store_safe`); swift carries those bytes on the
-    /// binary side channel (`Outcome.body`) and puts the same `bytes` key back
-    /// here. A call's PAYLOAD body sits at its own path: `tapedPayload`.
-    public static func storeValue(_ value: JSON, bytes: Int?) -> JSON {
-        guard let n = bytes, case .object(var map) = value else { return value }
-        map["bytes"] = .object(["len": .integer(Int64(n))])
-        return .object(map)
+    /// A store holds no raw bytes and base64 is banned, so a reply's chunk is
+    /// recorded as `{"len": N}` AT ITS SLOT — python reduces the bytes value it
+    /// holds INSIDE the dict (`_store_safe`); swift carries those bytes on the
+    /// binary side channel (`Outcome.body`) and puts the length back where they
+    /// sat. A call's PAYLOAD body sits at its own path: `tapedPayload`.
+    public static func storeValue(_ value: JSON, body: Blob?) -> JSON {
+        withBody(value, body, .object(["len": .integer(Int64(body?.bytes.count ?? 0))]))
+    }
+
+    /// `value` with `stand` written at the body's slot — kept in place when the
+    /// reply names it, appended when it does not (python's dict assignment). No
+    /// body ⇒ the value verbatim; a slot the value cannot hold (a non-object
+    /// reply) is not written. Rust `jsonsafe::with_body`.
+    private static func withBody(_ value: JSON, _ body: Blob?, _ stand: JSON) -> JSON {
+        guard let body else { return value }
+        var out = value
+        do {
+            try pySetPath(&out, parts: body.parts, stand)
+        } catch {
+            return value
+        }
+        return out
     }
 
     /// `storeValue` for a call's PAYLOAD: its request body (`Item.binary`) is
@@ -461,9 +476,12 @@ extension Kernel {
                 "covers": .array(ids.map { .integer($0) }), "status": .string("done"),
                 "ts": .double(Date().timeIntervalSince1970),
             ]))
-        let out = await operatorSend([
-            Item(store, .object(["type": .string("append"), "rows": .array(batch)]))
-        ])[0]
+        // nothing of this send is published on the state stream (audit CLI-B)
+        let out = await KernelTaskLocals.$stateQuiet.withValue(true) {
+            await operatorSend([
+                Item(store, .object(["type": .string("append"), "rows": .array(batch)]))
+            ])
+        }[0]
         if out.status != .completed || pyTruthy(out.result["error"]) {
             RuntimeLog.warn(
                 "  [kernel] flush of \(ids.count) execution row(s) to \(pyRepr(store.value)) "
@@ -670,7 +688,7 @@ extension Kernel {
             if let n = x.name { e["name"] = .string(n) }
             if let res = x.outcome {
                 // a call with `secret` paths reads back AS SHOWN (`recordSettle`)
-                let status = x.shown?.status ?? res.status.rawValue
+                let status = res.status.rawValue
                 let result = x.shown?.result ?? res.result
                 let body = x.shown.map { $0.body } ?? res.body
                 e["status"] = .string(status)
@@ -682,8 +700,8 @@ extension Kernel {
                 for (k, v) in storedOutcome(
                     status: status,
                     result: x.named
-                        ? Kernel.jsonSafeValue(result, bytes: body?.count)
-                        : Kernel.storeValue(result, bytes: body?.count),
+                        ? Kernel.jsonSafeValue(result, body: body)
+                        : Kernel.storeValue(result, body: body),
                     named: x.named)
                 {
                     o[k] = v

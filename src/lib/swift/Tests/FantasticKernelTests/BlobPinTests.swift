@@ -22,11 +22,11 @@ private final class ScriptedStore: AgentBundle, @unchecked Sendable {
     let name = "file_bridge"
     private let lock = NSLock()
     private var files: [String: Data] = [:]
-    private var reads: [(JSON, Data?)]
+    private var reads: [(JSON, Blob?)]
     private let write: JSON?
     private(set) var offsets: [Int64] = []
 
-    init(reads: [(JSON, Data?)] = [], write: JSON? = nil) {
+    init(reads: [(JSON, Blob?)] = [], write: JSON? = nil) {
         self.reads = reads
         self.write = write
     }
@@ -36,7 +36,7 @@ private final class ScriptedStore: AgentBundle, @unchecked Sendable {
     }
 
     func handleBinary(agentId: AgentId, header: JSON, body: Blob?, kernel: Kernel) async throws
-        -> (JSON?, Data?)
+        -> (JSON?, Blob?)
     {
         // the chunk is the payload's `bytes` — python's `payload.get("bytes", b"")`
         let blob = bodyAt(body, "bytes") ?? Data()
@@ -63,7 +63,7 @@ private final class ScriptedStore: AgentBundle, @unchecked Sendable {
                 .object([
                     "eof": .bool(true), "size": .integer(Int64(d.count)),
                     "next_offset": .integer(Int64(d.count)),
-                ]), d
+                ]), Blob("bytes", d)
             )
         default:
             return (.object(["error": .string("unknown verb")]), nil)
@@ -127,10 +127,10 @@ private func persist(_ k: Kernel, _ content: String?) async -> String {
     return await k.send([Item(AgentId("kernel"), .object(p))])[0].result.serialize()
 }
 
-private func chunk(eof: Bool, next: Int64?, _ bytes: [UInt8]) -> (JSON, Data?) {
+private func chunk(eof: Bool, next: Int64?, _ bytes: [UInt8]) -> (JSON, Blob?) {
     var h: OrderedDictionary<String, JSON> = ["eof": .bool(eof)]
     if let next { h["next_offset"] = .integer(next) }
-    return (.object(h), Data(bytes))
+    return (.object(h), Blob("bytes", Data(bytes)))
 }
 
 @Suite("Blob channel — failure replies")

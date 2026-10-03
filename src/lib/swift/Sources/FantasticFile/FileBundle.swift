@@ -166,13 +166,12 @@ public struct FileBundle: AgentBundle {
                     + "directory exposing everything under it; `.` = the whole root)"
             }
         }
-        if let spec = meta["ingress_rule"], let rule = try? IngressRules.resolve(spec),
-            let deny = rule as? IngressRules.DenyInbound, deny.unknown != nil
+        // The SPEC as written, python's `{spec!r}` — naming the resolved rule
+        // instead hid the typo the operator has to find.
+        if let bad = IngressRules.unknownRefusal(
+            meta, legal: ["allow_all_ingress", "deny_ingress"])
         {
-            // The SPEC as written, python's `{spec!r}` — naming the resolved rule
-            // instead hid the typo the operator has to find.
-            return "ingress_rule=\(pyRepr(spec)) is not a rule this bundle implements — "
-                + "legal values: allow_all_ingress, deny_ingress"
+            return bad
         }
         return passwordRefusal(meta, edge: "fs edge")
     }
@@ -295,7 +294,7 @@ public struct FileBundle: AgentBundle {
     /// unused).
     public func handleBinary(
         agentId: AgentId, header: JSON, body: Blob?, kernel: Kernel
-    ) async throws -> (JSON?, Data?) {
+    ) async throws -> (JSON?, Blob?) {
         let verb = header["type"].asString ?? ""
         let chunk = bodyAt(body, "bytes")
         guard verb == "read_stream" || verb == "write_stream" || Self.textBodyVerbs.contains(verb)
@@ -340,7 +339,8 @@ public struct FileBundle: AgentBundle {
             guard case .object(let o) = reply, !pyTruthy(o["error"] ?? .null) else {
                 return (reply, nil)
             }
-            return (reply, chunk)
+            // the chunk sits at the reply's `bytes` key, as python's does
+            return (reply, Blob("bytes", chunk))
         }
         if pyTruthy(agent.metaValue(forKey: "readonly") ?? .null) {
             return (readonlyRefusal(), nil)
@@ -652,19 +652,35 @@ public struct FileBundle: AgentBundle {
     /// Storage-agnostic: both ends are bound BY ID + the duck-typed stream verbs
     /// over the binary channel, so a `network_bridge` SOURCE pumps to a
     /// `file_bridge` SINK the same as fs→fs. Each end SELF-gates + SELF-clamps.
+    ///
+    /// BOTH ENDS RUN AS THE CALLER (audit AV-7, 2026-10-03): sent from this
+    /// dispatch, both ends judged THIS BRIDGE — a client holding only `pump`
+    /// copied a file it could never read and overwrote one it could never write.
+    /// `read_stream` on the source and `write_stream` on the sink now go out under
+    /// the caller's identity (`asCaller`), so the caller needs its own grants on
+    /// both. A pump ONTO ITS OWN SOURCE (the sink is the source and `sink_path`
+    /// names the same file) is refused.
     private func pump(agent: Agent, payload: JSON, kernel: Kernel) async -> JSON {
         let selfId = JSON.string(agent.id.value)
         // python's `or` fallbacks: a FALSY value takes the default, whatever
         // its type (`""`, `0`, `[]` all fall through).
         let src = pyTruthy(payload["source"]) ? payload["source"] : selfId
         let sink = pyTruthy(payload["sink"]) ? payload["sink"] : selfId
-        let spath =
-            pyTruthy(payload["source_path"])
-            ? payload["source_path"] : (pyTruthy(payload["path"]) ? payload["path"] : .string(""))
+        let spath = pyTruthy(payload["source_path"]) ? payload["source_path"] : .string("")
         let dpath = pyTruthy(payload["sink_path"]) ? payload["sink_path"] : spath
         let length: Int64
         do { length = try intArg("pump", payload, "chunk", default: 65536, minimum: 1) } catch {
             return error.json
+        }
+        if src == sink && pumpOneFile(spath, dpath) {
+            // The first write's `truncate` empties the file the next read comes
+            // from: everything past the first chunk was lost under a success reply
+            // — the bare `{source_path}` form did it, sink and sink_path defaulted
+            // (python `_pump`, audit BV-7).
+            return Refusal.bad(
+                "pump", "sink_path",
+                "another file than source_path when the sink is the source — a pump "
+                    + "onto its own source truncates it after the first chunk")
         }
         var offset: Int64 = 0
         var first = true
@@ -674,30 +690,29 @@ public struct FileBundle: AgentBundle {
             // through `kernel.send`, so each one has its call row, settle row,
             // `ps` row and ledger id. The binary item is the carrier for the raw
             // chunk python's dicts hold natively.
-            let read = await kernel.send([
-                Item(
-                    AgentId(pyStr(src)),
-                    .object([
-                        "type": .string("read_stream"), "path": spath,
-                        "offset": .integer(offset), "length": .integer(length),
-                    ]), rawReply: true)
-            ])[0]
+            let readItem = Item(
+                AgentId(pyStr(src)),
+                .object([
+                    "type": .string("read_stream"), "path": spath,
+                    "offset": .integer(offset), "length": .integer(length),
+                ]), rawReply: true)
+            let read = await asCaller { await kernel.send([readItem])[0] }
             let rmeta = read.result
             // python: the reply must be a dict carrying a `bytes` chunk. The
-            // chunk is the outcome's BODY, so no body is the same refusal.
-            guard case .object = rmeta, let body = read.body else {
+            // chunk is the outcome's BODY at `bytes`, so no body there is the
+            // same refusal.
+            guard case .object = rmeta, let body = bodyAt(read.body, "bytes") else {
                 return Refusal.make(
                     Refusal.transportError,
                     "pump: read from \(pyRepr(src)) failed: \(pyStr(rmeta))")
             }
-            let wmeta = await kernel.send([
-                Item(
-                    AgentId(pyStr(sink)),
-                    .object([
-                        "type": .string("write_stream"), "path": dpath,
-                        "offset": .integer(offset), "truncate": .bool(first),
-                    ]), binary: Blob("bytes", body))
-            ])[0].result
+            let writeItem = Item(
+                AgentId(pyStr(sink)),
+                .object([
+                    "type": .string("write_stream"), "path": dpath,
+                    "offset": .integer(offset), "truncate": .bool(first),
+                ]), binary: Blob("bytes", body))
+            let wmeta = await asCaller { await kernel.send([writeItem])[0].result }
             guard case .object(let wo) = wmeta, !pyTruthy(wo["error"] ?? .null) else {
                 return Refusal.make(
                     Refusal.transportError,
@@ -722,6 +737,24 @@ public struct FileBundle: AgentBundle {
             "source": spath, "sink": dpath,
             "bytes": .integer(offset), "chunks": .integer(chunks),
         ])
+    }
+
+    /// Run `body`'s sends AS THIS DISPATCH'S CALLER: the operator stays the
+    /// operator; a local agent is itself; a foreign `<guid>|<agent>` is the same
+    /// pair its bridge leg relayed (the leg as sender, the foreign id judged by
+    /// the target's `callable_by`). Python `_as_caller`.
+    private func asCaller<T: Sendable>(_ body: () async -> T) async -> T {
+        guard let origin = KernelTaskLocals.currentOrigin else {
+            return await KernelTaskLocals.$currentSender.withValue(nil) { await body() }
+        }
+        if let remote = KernelTaskLocals.currentRemote {
+            return await KernelTaskLocals.$currentSender.withValue(origin) {
+                await KernelTaskLocals.withRemoteCaller(leg: origin, address: remote) {
+                    await body()
+                }
+            }
+        }
+        return await KernelTaskLocals.$currentSender.withValue(origin) { await body() }
     }
 
     // MARK: - The allow list (what this bridge exposes)
@@ -897,7 +930,7 @@ public struct FileBundle: AgentBundle {
         **Streams** (the SOURCE/SINK protocol — file_bridge is the fs implementor):
         - `read_stream(path, offset=0, length=65536)` → `{bytes, next_offset, eof, size}` — `bytes` is the RAW chunk (rides the transport as raw bytes — web_ws / bridge binary frame, never base64); pull chunks until `eof` (stateless cursor).
         - `write_stream(path, bytes, offset?, truncate?)` → push RAW chunks (`bytes` = one raw chunk; append by default; `truncate:true` on the first to start fresh). Text files use the whole-file `write`.
-        - `pump(source?, source_path, sink?, sink_path?, chunk=65536)` → server-side SOURCE→SINK copy in ONE call (vs driving each chunk over the wire). Both ends bound by id + the stream verbs, each SELF-gating — so any provider (a `network_bridge` SOURCE, a `file_bridge` SINK) composes. Omitted `source`/`sink` = this bridge.
+        - `pump(source?, source_path, sink?, sink_path?, chunk=65536)` → server-side SOURCE→SINK copy in ONE call (vs driving each chunk over the wire). Both ends bound by id + the stream verbs, each SELF-gating — so any provider (a `network_bridge` SOURCE, a `file_bridge` SINK) composes. Omitted `source`/`sink` = this bridge. **Both ends run AS YOU** (the pump's caller), never as this bridge: you need your own `read_stream` grant on the source and `write_stream` on the sink — `pump` alone reaches nothing this bridge can reach and you cannot.
         **Text documents** (any format — the bridge imposes none):
         - `read(path, offset=0, limit=200)` → a line-numbered page `{lines:[{n,text}], total, eof, version}`; refuses binary.
         - `write(path, bytes, if_match?)` → atomic whole-document write; `append(path, bytes)` → one chunk at the end.
@@ -936,6 +969,17 @@ func allowNorm(_ path: String) -> String? {
         }
     }
     return parts.isEmpty ? "." : parts.joined(separator: "/")
+}
+
+/// Do two pump paths name ONE file — equal once normalised (`./x` is `x`)?
+/// python `_one_file`: only a root-relative path to something inside the root is
+/// judged; anything else (absent, not a string, absolute, climbing out, the root
+/// itself) is its end's to refuse.
+func pumpOneFile(_ a: JSON, _ b: JSON) -> Bool {
+    guard let a = a.asString, let b = b.asString, let n = allowNorm(a), n != "." else {
+        return false
+    }
+    return n == allowNorm(b)
 }
 
 /// Is `path` exposed — a listed path, or under a listed directory?

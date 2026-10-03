@@ -78,6 +78,14 @@ expect:
       side: ingress                # only meaningful on a denial
 ```
 
+**Placeholders.** `$root` — a whole string, key or value, anywhere — is THIS
+runtime's root id. `$workdir` — a string VALUE in a loader's `manifest` that is
+`$workdir` or starts with `$workdir/` — is the kernel's running dir, ABSOLUTE (the
+test's own tmp dir), substituted when the runner writes the manifest; keys and
+`manifest_text` are written verbatim. It names an absolute path that is still the
+test's: `file: $workdir/creds.yaml` (a credential_store refuses a relative `file`,
+and a test never touches the user's home).
+
 ## `requirements:` names what THIS file adds
 
 The five core ids (`PC-1`…`PC-5`) are pinned by `test_manifest_contract.py` on
@@ -194,11 +202,14 @@ against its spec in `../specs/`.
 | `namespacing.yaml` | C20 — a child's state belongs to its POSITION in the tree |
 | `subtree_grants.yaml` | SUB-1…SUB-6 — `$subtree:<X>` accepts X's live subtree at call time; a heritable `can_call` entry reaches for X's descendants, never X; only a holder confers one |
 | `exec_shell.yaml` | EXS-1…EXS-5 — a PTY `start` with no `command` runs the child's own `$SHELL` (autodiscovered from `inherit_env`/`env`, no fallback); the record's `shell` permits exactly `$SHELL` / `$SHELL -l` |
+| `credential_store.yaml` | CRED-1…CRED-5 — a value moves only under a secret mark; a ref answers only its grant; the host is the declaration's (`set` takes none) and a pinned host must match; forget drops the value and keeps the declaration, and `set` never declares a ref |
 
 `lifecycle.yaml` names one non-shipped bundle, `lifecycle_probe.tools`, which
-lives at `tests/agentic/lifecycle_probe/` — a real package on the suite's own
-`sys.path`, because the manifest's `handler_module` has to resolve inside
-`Kernel.load` at reboot as well as at dispatch.
+lives at `tests/agentic/lifecycle_probe/` and is registered UNLISTED by the
+suite's conftest (python resolves a `handler_module` only from the bundle catalog
+plus `register_unlisted`, as rust and swift resolve only what they registered),
+because the manifest's `handler_module` has to resolve inside `Kernel.load` at
+reboot as well as at dispatch.
 
 ### What a validator may assert
 

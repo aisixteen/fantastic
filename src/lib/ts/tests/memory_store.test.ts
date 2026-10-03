@@ -456,6 +456,29 @@ test("the id counter reserves blocks in the root record", async () => {
   assert.ok(k2.mintId() >= next, "a reload resumes past the reserved block");
 });
 
+for (const headroom of [0, 1]) {
+  test(`an id block reserved inside the flush publishes nothing (CLI-B, headroom ${headroom})`, async () => {
+    const { k } = kernel();
+    await withStore(k);
+    mk(k);
+    await k.store.flush();
+    await call(k, "probe", { type: "work" }); // rows to flush
+    const seen: Payload[] = [];
+    const unsub = k.addStateSubscriber((e) => seen.push(e as unknown as Payload));
+    try {
+      k.store.idReserved = k.store.nextId + headroom; // the flush's own mints cross the bound
+      const before = k.store.idReserved;
+      const out = await k.store.flush();
+      assert.ok((out["flushed"] as number) > 0, JSON.stringify(out));
+      assert.ok(k.store.idReserved > before);
+      assert.deepEqual(seen, []);
+      assert.equal(k.get(ROOT)!.meta["next_id"], k.store.idReserved, "the record holds the bound");
+    } finally {
+      unsub();
+    }
+  });
+}
+
 test("an unstarted kernel keeps its rows bounded by the ledger's ring", async () => {
   const { k } = kernel();
   mk(k);
@@ -515,15 +538,49 @@ test("the flusher's writes parent to it; a `ledger` verb's store reads parent to
   assert.equal(k.tasks.has(fid), false);
 });
 
-test("cancelling the flusher task stops the flushing", async () => {
+// owner 2026-10-03 (audit KV-5): `cancel` refuses the kernel's own service tasks
+test("cancel refuses the flusher; ps still lists it and it keeps flushing", async () => {
   const { k } = kernel();
   mk(k);
   await withStore(k);
   const fid = k.store.flusherTask as number;
-  const out = await res(k, "kernel", { type: "cancel", task_id: fid });
-  assert.deepEqual(out, { cancelled: true, killed: [fid] });
-  assert.equal(k.tasks.has(fid), false);
+  const out = await call(k, "kernel", { type: "cancel", task_id: fid });
+  assert.equal(out.status, "errored");
+  assert.deepEqual(out.result, {
+    error: `cancel: task ${fid} (flush_executions) is a kernel service task — not cancellable`,
+    reason: "bad_arg",
+    hint: "it runs for the life of the kernel and stays listed in ps; kernel_stop ends it",
+    arg: "task_id",
+  });
+  const ps = (await res(k, "kernel", { type: "ps" }))["tasks"] as Payload[];
+  assert.ok(ps.some((t) => t["id"] === fid), "still listed");
   const w = await call(k, "probe", { type: "work" });
   await sleep(250);
-  assert.equal(k.store.rows.has(w.pid as number), true, "a cancelled flusher still flushed");
+  assert.equal(k.store.rows.has(w.pid as number), false, "the flusher kept writing");
+});
+
+// owner 2026-10-03 (audit CLI-B): the kernel's own ledger flush publishes
+// NOTHING on the state stream — a long-poll waiter is not woken; an id block
+// reserved inside the flush is quiet too
+test("the ledger flush publishes nothing on the state stream", async () => {
+  const { k } = kernel();
+  mk(k);
+  await withStore(k);
+  await k.store.flush(); // start from an empty RAM
+  const seen: Payload[] = [];
+  const off = k.addStateSubscriber((e) => seen.push(e as unknown as Payload));
+  await call(k, "kernel", { type: "list_agents" }); // rows to flush
+  seen.length = 0;
+  const out = await k.store.flush();
+  assert.ok((out["flushed"] as number) > 0, JSON.stringify(out));
+  assert.deepEqual(seen, [], "a flush wakes no waiter");
+  await call(k, "kernel", { type: "list_agents" });
+  // the flush's own call + settle ids cross the bound inside the flush
+  while (k.store.nextId < k.store.idReserved - 1) k.store.mintId();
+  const before = k.store.idReserved;
+  await k.store.flush();
+  assert.ok(k.store.idReserved > before);
+  assert.deepEqual(seen, [], "the reservation inside the flush is quiet");
+  assert.equal(k.get(ROOT)!.meta["next_id"], k.store.idReserved, "the record holds the bound");
+  off();
 });

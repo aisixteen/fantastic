@@ -55,7 +55,8 @@ pub(crate) fn publish_state_to(
     body: Option<&crate::outcome::Blob>,
 ) {
     let subs = subs.read().expect("state subs poisoned");
-    if subs.is_empty() {
+    // Nothing inside the kernel's own ledger flush is published (audit CLI-B).
+    if subs.is_empty() || crate::send::state_quiet() {
         return;
     }
     let mut stamped = match event {
@@ -177,11 +178,12 @@ pub struct Kernel {
     /// `ctx._ai_memory` attribute: two kernels in one process (tests, a
     /// multi-kernel host) never share it. See [`Self::extension`].
     extensions: DashMap<&'static str, Arc<dyn std::any::Any + Send + Sync>>,
-    /// CONNECTED PEER KERNELS — guid → the route to it (owner, 2026-09-30). An
-    /// agent on another kernel is addressed `<guid>|<agent id>`; when that guid is
-    /// here, `send` hands the call to its route and the reply is the call's
-    /// ordinary outcome. A TRANSPORT registers the peer it is connected to and
-    /// unregisters it when the connection ends. See [`crate::peers`].
+    /// CONNECTED PEER KERNELS — guid → the LIVE routes to it (owner, 2026-09-30;
+    /// a set per guid, 2026-10-03: the tabs of one identity are one principal).
+    /// An agent on another kernel is addressed `<guid>|<agent id>`; when that guid
+    /// is here, `send` hands the call to its routes and the first reply is the
+    /// call's ordinary outcome. A TRANSPORT registers the peer it is connected to
+    /// and unregisters it when the connection ends. See [`crate::peers`].
     pub(crate) peers: crate::peers::PeerTable,
     /// The on-disk children-container dir name — `<agent>/<children_dir>/<child>`
     /// for EVERY agent of this tree. The root record declares it (a
@@ -354,6 +356,16 @@ impl Kernel {
     /// Forget it (the writer stopped).
     pub fn clear_record_writer(&self) {
         *self.record_writer.lock().expect("writer poisoned") = None;
+    }
+
+    /// Queue a record for the root loader's writer with NO state event — the
+    /// id-block reservation inside the silent ledger flush (audit CLI-B). A no-op
+    /// when no loader has booted.
+    pub(crate) fn mark_record_dirty(&self, id: &AgentId) {
+        let w = self.record_writer.lock().expect("writer poisoned").clone();
+        if let Some(w) = w {
+            w.mark_dirty(self, id);
+        }
     }
 
     /// Drain the record writer's dirty set NOW — python's `aflush`. A no-op

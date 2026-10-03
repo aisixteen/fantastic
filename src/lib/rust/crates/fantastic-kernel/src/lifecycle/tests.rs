@@ -322,6 +322,52 @@ async fn create_agent_demands_a_parent_and_resolves_it_like_a_target() {
     );
 }
 
+/// The `agent_created` event lands on the PARENT's inbox at every depth (audit
+/// 2026-10-03, KV-4). It was emitted as the root, so the gate judged
+/// root→parent, and the root's `$children` baseline reaches depth 1 only: a
+/// parent two levels down never got it — an operator create included, an
+/// agent creating under itself too — and nothing reported the drop.
+#[tokio::test]
+async fn agent_created_reaches_a_parent_at_any_depth() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let kernel = mk_rooted(&tmp);
+    let create = |parent: &'static str, id: &'static str| {
+        let kernel = Arc::clone(&kernel);
+        async move {
+            kernel
+                .send(vec![Item::new(
+                    AgentId::from("kernel"),
+                    json!({"type": "create_agent", "parent_id": parent,
+                           "handler_module": "counting.tools", "id": id}),
+                )])
+                .await
+                .remove(0)
+                .result
+        }
+    };
+    assert_eq!(create("kernel", "kv4_a").await["id"], "kv4_a");
+    assert_eq!(create("kv4_a", "kv4_b").await["id"], "kv4_b"); // depth 2
+    let mut rx = kernel.ensure_inbox(&AgentId::from("kv4_b"));
+    assert_eq!(
+        create("kv4_b", "kv4_by_operator").await["id"],
+        "kv4_by_operator"
+    );
+    // baseline only: placement under itself
+    let by_self =
+        crate::send::with_sender(AgentId::from("kv4_b"), create("kv4_b", "kv4_by_self")).await;
+    assert_eq!(by_self["id"], "kv4_by_self", "{by_self}");
+    let mut created = Vec::new();
+    while let Some(item) = rx.try_recv() {
+        if item.payload["type"] == "agent_created" {
+            created.push(item.payload["id"].clone());
+        }
+    }
+    assert_eq!(
+        created,
+        vec![json!("kv4_by_operator"), json!("kv4_by_self")]
+    );
+}
+
 /// C57: `create_agent` branches on the boot OUTCOME STATUS. A handler that
 /// RAISED settles `failed` and is the one case python prints, on stdout, with
 /// the result's `str()`; a boot that merely answered `{error:…}` (`errored`) or

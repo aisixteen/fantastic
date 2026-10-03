@@ -47,6 +47,93 @@ fn acquire_refuses_when_live_pid_holds() {
 }
 
 #[test]
+fn a_live_pid_without_the_flock_is_taken_over() {
+    // The pid in the file is for the message, never the decision: a file naming
+    // a live pid that holds no flock (its holder is gone, the pid reused) is
+    // taken over.
+    let tmp = TempDir::new().unwrap();
+    let lock_path = tmp.path().join(crate::persistence::LOCK_PATH);
+    std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+    std::fs::write(&lock_path, format!("pid: {}\n", std::process::id())).unwrap();
+    acquire(tmp.path()).unwrap();
+    let raw = std::fs::read_to_string(&lock_path).unwrap();
+    assert_eq!(raw, format!("pid: {}\n", std::process::id()));
+    release(tmp.path()).unwrap();
+}
+
+#[test]
+fn acquire_leaves_no_staged_file() {
+    let tmp = TempDir::new().unwrap();
+    let names = || {
+        let mut v: Vec<String> = std::fs::read_dir(tmp.path().join(".fantastic"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    };
+    acquire(tmp.path()).unwrap();
+    assert_eq!(names(), ["lock.yaml"]);
+    assert!(acquire(tmp.path()).is_err());
+    assert_eq!(names(), ["lock.yaml"]);
+    release(tmp.path()).unwrap();
+}
+
+#[test]
+fn release_lets_the_next_acquire_in() {
+    let tmp = TempDir::new().unwrap();
+    acquire(tmp.path()).unwrap();
+    release(tmp.path()).unwrap();
+    acquire(tmp.path()).unwrap();
+    release(tmp.path()).unwrap();
+}
+
+#[test]
+fn two_racing_acquisitions_exactly_one_wins() {
+    // ARCH2-3: the lock used to be read-then-write, so two acquisitions racing
+    // in one dir BOTH took it. Each racer opens its own descriptor, and flock
+    // excludes descriptors of one process as it excludes processes — so every
+    // round, on a fresh dir and over a dead holder's lock alike, exactly one
+    // wins and the other is refused. On a fresh dir the refusal names the
+    // winner's pid; over a dead lock it may name the dead pid (the winner
+    // holds the dead file while it replaces it).
+    for planted in [None, Some("pid: 4294967294\n")] {
+        for _ in 0..20 {
+            let tmp = TempDir::new().unwrap();
+            if let Some(body) = planted {
+                let lock_path = tmp.path().join(crate::persistence::LOCK_PATH);
+                std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+                std::fs::write(&lock_path, body).unwrap();
+            }
+            let gate = std::sync::Barrier::new(2);
+            let results: Vec<KernelResult<PathBuf>> = std::thread::scope(|s| {
+                let racers: Vec<_> = (0..2)
+                    .map(|_| {
+                        s.spawn(|| {
+                            gate.wait();
+                            acquire(tmp.path())
+                        })
+                    })
+                    .collect();
+                racers.into_iter().map(|r| r.join().unwrap()).collect()
+            });
+            let won = results.iter().filter(|r| r.is_ok()).count();
+            assert_eq!(won, 1, "{results:?}");
+            for r in &results {
+                if let Err(e) = r {
+                    assert!(
+                        matches!(e, KernelError::LockHeld { pid }
+                            if planted.is_some() || *pid == std::process::id()),
+                        "{e:?}"
+                    );
+                }
+            }
+            release(tmp.path()).unwrap();
+        }
+    }
+}
+
+#[test]
 fn acquire_overwrites_stale_lock() {
     let tmp = TempDir::new().unwrap();
     // Plant a stale lock with a clearly-dead PID.

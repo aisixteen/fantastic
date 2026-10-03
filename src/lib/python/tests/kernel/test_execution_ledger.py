@@ -20,8 +20,8 @@ Exemplars this transfers from: `dbos/tests/test_singleexec.py` (best in corpus),
 from __future__ import annotations
 
 import asyncio
-import sys
 import types
+from kernel import register_unlisted
 
 _runs: list[str] = []
 _gate = {}
@@ -65,7 +65,7 @@ async def _handler(id, payload, kernel):
 
 _mod.handler = _handler
 _mod.VERBS = {}
-sys.modules["ledger_probe.tools"] = _mod
+register_unlisted("ledger_probe.tools", _mod)
 
 
 async def _mk(kernel, agent_id="lp"):

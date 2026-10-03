@@ -23,5 +23,8 @@ fantastic-file = { path = "../fantastic-file" }
 # The memory store each test kernel flushes into — the secret tests read every
 # record a kernel keeps, the store's included.
 fantastic-ram-store = { path = "../fantastic-ram-store" }
+# The relay password a relay leg reads before every dial (audit IO-7): a
+# credential_store on its in-memory keychain double.
+fantastic-credential-store = { path = "../fantastic-credential-store" }
 tempfile = "3"
 tokio = { workspace = true, features = ["test-util", "macros"] }

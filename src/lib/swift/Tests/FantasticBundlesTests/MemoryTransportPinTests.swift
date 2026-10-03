@@ -1,10 +1,15 @@
 // The in-process `memory` bridge transport, pinned at its own surface.
 //
-// It is one of the hand-written waiter tables (a single parked `recv`, a FIFO
-// of frames that arrived first, a close that releases the parked reader). Its
+// Python `MemoryTransport.pair()`: two halves, what one sends the other receives.
+// It is one of the hand-written waiter tables (a parked `recv` per half, a FIFO
+// of frames that arrived first, a close that releases the parked readers). Its
 // promises: a frame that lands before `recv` waits is delivered, in arrival
-// order; a parked `recv` wakes on the next frame; `close` wakes a parked `recv`
-// with the closed error and every later `send`/`recv` fails the same way.
+// order; a parked `recv` wakes on the next frame; a frame sent before a close is
+// still delivered; `close` on either half wakes a parked `recv` on both with the
+// closed error, and every later `send`/`recv` fails the same way.
+//
+// It CARRIES frames and serves nothing: the far kernel answers a `call` through
+// its own leg (audit G-4, 2026-10-03) — `aServingLegGatesWhatCrossesTheMemoryPair`.
 
 import FantasticIoBridge
 import FantasticJSON
@@ -13,31 +18,6 @@ import FantasticKernelBridge
 import Foundation
 import Testing
 
-private struct Echo: AgentBundle {
-    let name = "echo"
-    func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? {
-        .object(["echoed": payload])
-    }
-}
-
-private func remoteKernel() async -> Kernel {
-    let r = BundleRegistry()
-    r.register("echo.tools", Echo())
-    let k = Kernel(storage: .inMemory, bundles: r)
-    let root = Agent(id: "kernel_state", handlerModule: nil, parentId: nil)
-    k.register(root)
-    k.setRoot(root)
-    _ = await k.send([
-        Item(
-            "kernel_state",
-            .object([
-                "type": "create_agent", "parent_id": "kernel_state", "handler_module": "echo.tools",
-                "id": "echo",
-            ]))
-    ])[0].result
-    return k
-}
-
 private func call(_ id: String, _ n: Int) -> JSON {
     .object([
         "type": .string("call"), "id": .string(id), "target": .string("echo"),
@@ -45,75 +25,181 @@ private func call(_ id: String, _ n: Int) -> JSON {
     ])
 }
 
+private struct Echo: AgentBundle {
+    let name = "echo"
+    func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? {
+        .object(["echoed": payload])
+    }
+}
+
+/// A kernel (guid `guid`) carrying a ws_bridge bundle — handed back so a test
+/// injects transports — and the `echo` bundle.
+private func bridgeKernel(guid: String) -> (Kernel, KernelBridgeBundle) {
+    let ws = KernelBridgeBundle(family: .ws)
+    let r = BundleRegistry()
+    r.register("ws_bridge.tools", ws)
+    r.register("echo.tools", Echo())
+    let k = Kernel(storage: .inMemory, bundles: r)
+    let root = Agent(id: AgentId("kernel_state"), handlerModule: nil, parentId: nil)
+    k.register(root)
+    k.setRoot(root)
+    k.update(root.id, ["guid": .string(guid)])
+    return (k, ws)
+}
+
+private func op(_ k: Kernel, _ target: String, _ payload: JSON) async -> JSON {
+    await k.send([Item(AgentId(target), payload)])[0].result
+}
+
 @Suite("memory bridge transport")
 struct MemoryTransportPinTests {
 
     @Test func framesThatArriveFirstAreDeliveredInOrder() async throws {
-        let remote = await remoteKernel()
-        let t = MemoryTransport(remote: remote)
-        try await t.send(call("c1", 1))
-        try await t.send(call("c2", 2))
-        let a = try await t.recv()
-        let b = try await t.recv()
-        #expect(
-            a.frame.serialize()
-                == #"{"type":"reply","id":"c1","data":{"echoed":{"type":"ping","n":1}}}"#)
-        #expect(
-            b.frame.serialize()
-                == #"{"type":"reply","id":"c2","data":{"echoed":{"type":"ping","n":2}}}"#)
-        #expect(!a.isBinary && a.body.isEmpty)
-        await t.close()
+        let (a, b) = MemoryTransport.pair()
+        try await a.send(call("c1", 1))
+        try await a.send(call("c2", 2))
+        let first = try await b.recv()
+        let second = try await b.recv()
+        #expect(first.frame == call("c1", 1))
+        #expect(second.frame == call("c2", 2))
+        #expect(!first.isBinary && first.body.isEmpty)
+        await a.close()
     }
 
     @Test func aParkedRecvWakesOnTheNextFrame() async throws {
-        let remote = await remoteKernel()
-        let t = MemoryTransport(remote: remote)
-        let parked = Task { try await t.recv() }
+        let (a, b) = MemoryTransport.pair()
+        let parked = Task { try await b.recv() }
         try await Task.sleep(nanoseconds: 30_000_000)
-        try await t.send(call("c3", 3))
+        try await a.send(call("c3", 3))
         let got = try await parked.value
         #expect(got.frame["id"] == "c3")
-        await t.close()
+        await a.close()
     }
 
-    @Test func closeWakesAParkedRecvAndFailsEverythingAfter() async throws {
-        let remote = await remoteKernel()
-        let t = MemoryTransport(remote: remote)
-        let parked = Task { () -> String in
-            do {
-                _ = try await t.recv()
-                return "returned a frame"
-            } catch {
-                return "\(error)"
+    @Test func aBinaryFrameCrossesAsBinary() async throws {
+        let (a, b) = MemoryTransport.pair()
+        let head: JSON = [
+            "type": "reply", "id": "e1", "data": ["seq": 3, "chunk": .null],
+            "_binary_path": ["data", "chunk"],
+        ]
+        try await a.sendBinary(header: head, body: Data([0x00, 0xFF, 0x0A]))
+        let r = try await b.recv()
+        #expect(r.isBinary)
+        #expect(r.frame == head)
+        #expect(r.body == Data([0x00, 0xFF, 0x0A]))
+        await a.close()
+    }
+
+    @Test func closeWakesBothHalvesAndFailsEverythingAfter() async throws {
+        let (a, b) = MemoryTransport.pair()
+        func parkedRecv(_ t: MemoryTransport) -> Task<String, Never> {
+            Task {
+                do {
+                    _ = try await t.recv()
+                    return "returned a frame"
+                } catch {
+                    return "\(error)"
+                }
             }
         }
+        let onA = parkedRecv(a)
+        let onB = parkedRecv(b)
         try await Task.sleep(nanoseconds: 30_000_000)
-        await t.close()
-        #expect(await parked.value == "memory transport closed")
-        #expect(await t.isClosed())
-        await #expect(throws: (any Error).self) { try await t.send(call("c4", 4)) }
-        await #expect(throws: (any Error).self) {
-            try await t.sendBinary(header: call("c5", 5), body: Data([1]))
+        await a.close()
+        #expect(await onA.value == "MemoryTransport closed")
+        #expect(await onB.value == "MemoryTransport closed")
+        for t in [a, b] {
+            #expect(await t.isClosed())
+            await #expect(throws: (any Error).self) { try await t.send(call("c4", 4)) }
+            await #expect(throws: (any Error).self) {
+                try await t.sendBinary(header: call("c5", 5), body: Data([1]))
+            }
+            await #expect(throws: (any Error).self) { _ = try await t.recv() }
         }
-        await #expect(throws: (any Error).self) { _ = try await t.recv() }
     }
 
-    /// A watched agent's events cross as `event` frames naming their `src`;
-    /// after `unwatch` nothing more crosses.
-    @Test func watchRelaysEventsUntilUnwatched() async throws {
-        let remote = await remoteKernel()
-        let t = MemoryTransport(remote: remote)
-        try await t.send(.object(["type": .string("watch"), "src": .string("echo")]))
-        await remote.emit(AgentId("echo"), .object(["type": .string("tick"), "n": .integer(1)]))
-        let ev = try await t.recv()
+    @Test func aFrameSentBeforeTheCloseIsStillDelivered() async throws {
+        let (a, b) = MemoryTransport.pair()
+        try await a.send(call("c6", 6))
+        await a.close()
+        #expect(try await b.recv().frame["id"] == "c6")
+        await #expect(throws: (any Error).self) { _ = try await b.recv() }
+    }
+
+    /// THE FAR LEG SERVES (audit G-4): the memory pair carries a forward to a
+    /// SERVING leg on the far kernel, which gates it as python's `_serve_inbound_call`
+    /// does — its ingress rule, its peer pin, and the target judged against the
+    /// caller's `<guid>|<agent>`. Before, the swift memory transport dispatched on
+    /// the far kernel itself, as the operator: none of the three held.
+    @Test(.timeLimit(.minutes(1)))
+    func aServingLegGatesWhatCrossesTheMemoryPair() async throws {
+        let (ka, wsA) = bridgeKernel(guid: "guid-a")
+        let (kb, wsB) = bridgeKernel(guid: "guid-b")
+        let aLeg = await op(
+            ka, "kernel",
+            [
+                "type": "create_agent", "parent_id": "kernel_state",
+                "handler_module": "ws_bridge.tools", "id": "a_leg", "transport": "memory",
+                "peer_guid": "guid-b",
+            ])["id"]
+        #expect(aLeg == "a_leg")
+        let bLeg = await op(
+            kb, "kernel",
+            [
+                "type": "create_agent", "parent_id": "kernel_state",
+                "handler_module": "ws_bridge.tools", "id": "b_leg", "transport": "memory",
+                "peer_guid": "guid-a",
+            ])["id"]
+        #expect(bLeg == "b_leg")
+        let echo = await op(
+            kb, "kernel",
+            [
+                "type": "create_agent", "parent_id": "b_leg", "handler_module": "echo.tools",
+                "id": "echo",
+            ])["id"]
+        #expect(echo == "echo")
+        let (ta, tb) = MemoryTransport.pair()
+        wsA.injectTransport(agentId: AgentId("a_leg"), transport: ta)
+        wsB.injectTransport(agentId: AgentId("b_leg"), transport: tb)
+        for (k, id) in [(ka, "a_leg"), (kb, "b_leg")] {
+            let r = await op(k, id, ["type": "boot"])
+            #expect(r["booted"] == true, "\(r.serialize())")
+        }
+        func forward() async -> JSON {
+            await op(
+                ka, "a_leg", ["type": "forward", "target": "echo", "payload": ["type": "ping"]])
+        }
+
+        // 1. the serving leg is SEALED by default: nothing runs on kb
+        let sealed = await forward()
+        #expect(sealed["error"] == "edge sealed by policy", "\(sealed.serialize())")
+        #expect(sealed["reason"] == "unauthorized")
+
+        // 2. opened — the target judges the FOREIGN caller, never the leg
+        _ = await op(
+            kb, "kernel",
+            ["type": "update_agent", "id": "b_leg", "ingress_rule": "allow_all_ingress"])
+        let foreign = await forward()
         #expect(
-            ev.frame.serialize()
-                == #"{"type":"event","src":"echo","payload":{"type":"tick","n":1}}"#)
-        try await t.send(.object(["type": .string("unwatch"), "src": .string("echo")]))
-        await remote.emit(AgentId("echo"), .object(["type": .string("tick"), "n": .integer(2)]))
-        try await t.send(call("c6", 6))
-        let next = try await t.recv()
-        #expect(next.frame["id"] == "c6", "an unwatched event crossed: \(next.frame.serialize())")
-        await t.close()
+            foreign["error"] == "echo does not accept 'ping' from guid-a|kernel",
+            "\(foreign.serialize())")
+        #expect(foreign["reason"] == "unauthorized")
+
+        // 3. pinned to ANOTHER kernel — a caller from guid-a is refused at the pin
+        _ = await op(
+            kb, "kernel", ["type": "update_agent", "id": "echo", "callable_by": ["guid-a|*": "*"]])
+        _ = await op(kb, "kernel", ["type": "update_agent", "id": "b_leg", "peer_guid": "guid-x"])
+        let pinned = await forward()
+        #expect(
+            pinned
+                == [
+                    "error": "bridge: caller 'guid-a|kernel' is not from the pinned peer 'guid-x'",
+                    "reason": "unauthorized",
+                ],
+            "\(pinned.serialize())")
+
+        // 4. pinned to guid-a, `echo` accepting `guid-a|*`: the call runs on kb
+        _ = await op(kb, "kernel", ["type": "update_agent", "id": "b_leg", "peer_guid": "guid-a"])
+        #expect(await forward() == ["echoed": ["type": "ping"]])
     }
 }

@@ -54,9 +54,9 @@ private func contents(_ rows: [JSON]) -> [String] { rows.map { $0["content"].asS
 @Suite("strip: bodies go, titles stay", .serialized)
 struct StripTests {
     init() {
-        AIStripStrategy.forget(AI)
-        AIStripStrategy.forget(AI + "_a")
-        AIStripStrategy.forget(AI + "_b")
+        AIStripStrategy.forget(nil, AI)
+        AIStripStrategy.forget(nil, AI + "_a")
+        AIStripStrategy.forget(nil, AI + "_b")
     }
 
     @Test func underBudgetNothingIsStripped() async throws {

@@ -25,8 +25,8 @@ public final class BundleRegistry: @unchecked Sendable {
     }
 
     /// Install a bundle that DISPATCHES but is not installable — python's
-    /// importable module with no `fantastic.bundles` entry point (the e2e
-    /// scenario probes). It never appears in the `bundles` catalog.
+    /// `register_unlisted`: a module with no `fantastic.bundles` entry point
+    /// (the e2e scenario probes). It never appears in the `bundles` catalog.
     public func registerUnlisted(_ handlerModule: String, _ bundle: any AgentBundle) {
         lock.lock()
         defer { lock.unlock() }
@@ -41,32 +41,18 @@ public final class BundleRegistry: @unchecked Sendable {
         return map[handlerModule]
     }
 
-    /// Python `importlib.import_module(handlerModule)` against this registry:
-    /// `nil` when the import resolves (a registered module, or a package —
-    /// a dotted prefix of one), else the `ModuleNotFoundError` text. The
-    /// import walks the dotted prefixes and names the FIRST one that does not
-    /// resolve (`absent_bundle.tools` → `No module named 'absent_bundle'`);
-    /// a child of a plain module adds `; '<parent>' is not a package`.
+    /// Python's `import_handler(handlerModule)` against this registry: `nil`
+    /// when a bundle is registered under `handlerModule`, else the
+    /// `ModuleNotFoundError` text. Python resolves a handler_module ONLY from its
+    /// bundle catalog plus `register_unlisted` (audit 2026-10-03, ARCH2-1), and
+    /// names the TOP-LEVEL package of any other name — `absent_bundle.tools`,
+    /// `file_bridge.nope` and the bare package `file_bridge` alike → `No module
+    /// named '<top>'` (rust's `no_module_named`).
     public func moduleNotFound(_ handlerModule: String) -> String? {
-        lock.lock()
-        let keys = Array(map.keys)
-        lock.unlock()
-        func isPackage(_ name: String) -> Bool {
-            keys.contains { $0.hasPrefix(name + ".") }
-        }
-        let parts = handlerModule.split(separator: ".", omittingEmptySubsequences: false)
-        var parent: String?
-        for i in 1...parts.count {
-            let name = parts[0..<i].joined(separator: ".")
-            if let p = parent, !isPackage(p) {
-                return "No module named \(pyRepr(name)); \(pyRepr(p)) is not a package"
-            }
-            if !keys.contains(name) && !isPackage(name) {
-                return "No module named \(pyRepr(name))"
-            }
-            parent = name
-        }
-        return nil
+        if get(handlerModule) != nil { return nil }
+        let top = handlerModule.split(separator: ".", omittingEmptySubsequences: false)
+            .first.map(String.init) ?? handlerModule
+        return "No module named \(pyRepr(top))"
     }
 
     /// All registered handler_module → bundle pairs (snapshot).

@@ -1,7 +1,20 @@
 # relay_connector — relay-kernel router bridge
 
 Dial a relay-KERNEL (`../fantastic_relay`) at `ws://<host>/<guid>` with the group
-password in `X-Fantastic-Auth` and subprotocol `fantastic.relay.v1`. Reach a
+password in `X-Fantastic-Auth` and subprotocol `fantastic.relay.v1`.
+
+**The password lives in a credential_store, never on the record** (audit IO-7/F4,
+2026-10-03): name it with `credentials: {store, ref}`; before EVERY dial the
+connector reads the ref's `password` field AS ITSELF (`get {ref, host:<relay_url>}`,
+marked `secret: ['result']`), pinned to the relay URL's host, exactly as an AI
+backend reads its key — nothing cached, a rotated password is used by the next
+dial. Wire it on both ends: the connector's `can_call` names the store (`get`), the
+store's `callable_by` and the ref's `readers` name the connector, and the ref's
+declared `host` is the relay's `host[:port]`. No `credentials` ⇒ boot fails loud
+("relay_connector: no `credentials` on <id> — name the relay password's credential
+store and ref (update_agent <id> credentials={store: <id>, ref: <ref>}; the ref's
+field `password`, bound to the relay's host)"); a store refusal fails the dial
+naming `credentials <store>/<ref>`. Reach a
 partner kernel by its GUID; the relay routes by `target`. Same verbs/auth surface
 as `ws_bridge` (both ride the shared `io_bridge` engine) — `forward`,
 `watch_remote`/`unwatch_remote` work identically; replies and binary
@@ -14,7 +27,8 @@ leaves, and a tunneled `call` frame that names `secret` is answered with the sam
 refusal and never dispatched: `{reason:"unauthorized", error:"relay_connector: a call
 carrying secret marks may not cross a relay leg — the relay records every frame it
 routes, unmasked", hint:"reach that kernel over a direct ws_bridge leg to send a
-secret"}`. Unmarked calls cross as before. A direct `ws_bridge` leg carries marks.
+secret"}`. Unmarked calls cross as before. A direct `ws_bridge` leg to a loopback
+host carries marks.
 Lifted once relayd re-roots a tunneled frame's marks onto its own delivery item and
 reply frames carry result marks.
 
@@ -65,7 +79,7 @@ manager is a plain `forward` to that manager (gated by ingress, as always). A pl
 peer (no typed keys) advertises nothing — identical to an un-typed leg.
 
 Record fields: `relay_url` · `guid` (auto-minted if absent) · `partner_guid` (peer to
-reach) · `relay_token` (X-Fantastic-Auth) · `heartbeat` (s, default 30) ·
+reach) · `credentials` ({store, ref} — the relay password) · `heartbeat` (s, default 30) ·
 `reconnect` (s, default 10) · `role` · `owner_guid` · `exposes` · `peer_guid`.
 Transport: `relay`.
 

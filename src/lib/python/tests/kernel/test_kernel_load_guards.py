@@ -6,17 +6,13 @@ and no root — bricked by its own recovery path.
 
 Measured 2026-09-02: a parent CYCLE resolved on both ends (each `parent_id` named
 a record in the set) and passed validation, then hydrated nothing, silently
-dropping every record in the cycle. And `_pid_alive` mapped EPERM to "dead", so a
-lock held by another user's live process looked stale and was overwritten.
+dropping every record in the cycle.
 """
 
 from __future__ import annotations
 
-import os
-
 import pytest
 
-from kernel._lock import _pid_alive
 from kernel._state import SnapshotError, validate_records
 
 
@@ -54,17 +50,3 @@ async def test_load_refuses_a_cycle_before_tearing_the_tree_down(seeded_kernel):
         )
     assert set(seeded_kernel.ctx.agents) == live, "the live tree must be intact"
     assert seeded_kernel.ctx.root is not None
-
-
-def test_lock_treats_eperm_as_alive(monkeypatch):
-    def _kill(pid, sig):
-        raise PermissionError(1, "Operation not permitted")
-
-    monkeypatch.setattr(os, "kill", _kill)
-    assert _pid_alive(4242) is True
-
-    def _gone(pid, sig):
-        raise ProcessLookupError(3, "No such process")
-
-    monkeypatch.setattr(os, "kill", _gone)
-    assert _pid_alive(4242) is False

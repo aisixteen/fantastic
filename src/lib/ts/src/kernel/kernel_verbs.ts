@@ -23,6 +23,7 @@ import { BAD_ARG, NOT_FOUND, NOT_HERE, missing, refusal } from "./refusal.ts";
 import { pyRepr } from "./pyjson.ts";
 import { page } from "./paging.ts";
 import { shutdownAgents, startKernel, stopKernel } from "./lifecycle.ts";
+import { isService } from "./tasks.ts";
 import { timers } from "./timers.ts";
 
 export const KERNEL_VERBS = [
@@ -119,7 +120,17 @@ export async function answerKernelVerb(
     // A row already killed is on its way out — not in the table, as python sees it.
     const row = k.tasks.get(taskId);
     if (row === undefined || row.killed) return { cancelled: false, killed: [] };
-    return { cancelled: true, killed: k.tasks.cancel(taskId) };
+    if (isService(row, k.rootId)) {
+      return refusal(
+        BAD_ARG,
+        `cancel: task ${taskId} (${row.verb}) is a kernel service task — not cancellable`,
+        {
+          hint: "it runs for the life of the kernel and stays listed in ps; kernel_stop ends it",
+          extra: { arg: "task_id" },
+        },
+      );
+    }
+    return { cancelled: true, killed: k.tasks.cancel(taskId, k.rootId) };
   }
 
   if (verb === "ledger") {

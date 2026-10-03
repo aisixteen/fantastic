@@ -154,6 +154,13 @@ fantastic web   create_agent handler_module=web_ws.tools id=web_ws
 fantastic web   create_agent handler_module=web_rest.tools id=rest
 ```
 
+**Host guard (audit W-2, owner-accepted):** the web host answers only the `Host` it
+binds — `<host>:<port>`, plus `localhost`/`127.0.0.1`/`[::1]` on a loopback bind. On
+this `host=0.0.0.0` bind only `Host: 0.0.0.0:8088` passes: a port-mapped name
+(`-p 8088:8088` reached as `localhost:8088` / `127.0.0.1:8088`, the `curl` below
+included), a LAN name or a tunnel name is refused — 403 on HTTP, a refused websocket
+upgrade.
+
 Read the kernel's runtime in one round-trip (send the JSON content-type — rust's
 REST surface requires it): `curl -s -X POST -H 'Content-Type: application/json'
 http://127.0.0.1:8088/rest/kernel -d '{"type":"reflect"}'` →

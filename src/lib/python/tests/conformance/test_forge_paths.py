@@ -18,10 +18,10 @@ and land with contract 27.
 
 from __future__ import annotations
 
-import sys
 import types
 
 from kernel._kernel import current_origin, sender_context
+from kernel import register_unlisted
 
 # ─── a recorder bundle: every invocation logs WHO the kernel says it was ───
 
@@ -47,7 +47,7 @@ async def _rec_handler(id, payload, kernel):
 
 _rec.handler = _rec_handler
 _rec.VERBS = {}
-sys.modules["forge_recorder.tools"] = _rec
+register_unlisted("forge_recorder.tools", _rec)
 
 
 async def _mk(kernel, agent_id, **meta):

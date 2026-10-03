@@ -14,6 +14,7 @@ import { Kernel } from "../src/kernel/kernel.ts";
 import { Agent } from "../src/kernel/agent.ts";
 import type { Json, Payload } from "../src/kernel/json.ts";
 import type { Outcome } from "../src/kernel/outcome.ts";
+import { strictLoads } from "../src/kernel/pyjson.ts";
 
 function kernel(): Kernel {
   const k = new Kernel();
@@ -54,8 +55,15 @@ test("every item-shape refusal: the whole outcome, python's text, reason and arg
     [{ target: "a", payload: {} }, missingArg("payload.type")],
     [{ target: "a", payload: { x: 1 } }, missingArg("payload.type")],
     [{ target: "a", payload: { type: "" } }, badArg("payload.type", "send: payload.type must be a non-empty string, got ''")],
-    [{ target: "a", payload: { type: null } }, badArg("payload.type", "send: payload.type must be a non-empty string, got None")],
-    [{ target: "a", payload: { type: ["go"] } }, badArg("payload.type", "send: payload.type must be a non-empty string, got ['go']")],
+    // a non-string is named by its python TYPE, never echoed (W-11)
+    [{ target: "a", payload: { type: null } }, badArg("payload.type", "send: payload.type must be a non-empty string, got NoneType")],
+    [{ target: "a", payload: { type: ["go"] } }, badArg("payload.type", "send: payload.type must be a non-empty string, got list")],
+    [{ target: "a", payload: { type: 5 } }, badArg("payload.type", "send: payload.type must be a non-empty string, got int")],
+    [{ target: "a", payload: { type: 1.5 } }, badArg("payload.type", "send: payload.type must be a non-empty string, got float")],
+    [{ target: "a", payload: strictLoads('{"type": 5.0}') }, badArg("payload.type", "send: payload.type must be a non-empty string, got float")],
+    [{ target: "a", payload: { type: true } }, badArg("payload.type", "send: payload.type must be a non-empty string, got bool")],
+    [{ target: "a", payload: { type: { v: 1 } } }, badArg("payload.type", "send: payload.type must be a non-empty string, got dict")],
+    [{ target: "a", payload: { type: new Uint8Array(4096) } }, badArg("payload.type", "send: payload.type must be a non-empty string, got bytes")],
     [{ target: "a", payload: go, id: 1.5 }, badArg("id", "send: id must be a name (non-empty string) or a message id (int), got 1.5")],
     [{ target: "a", payload: go, id: true }, badArg("id", "send: id must be a name (non-empty string) or a message id (int), got True")],
     [{ target: "a", payload: go, id: [] }, badArg("id", "send: id must be a name (non-empty string) or a message id (int), got []")],
@@ -88,7 +96,7 @@ test("an item with several faults reports the first in python's check order", as
     // retries, then secret — and every one of them before the target is resolved
     [{ target: "", payload: null, timeout: -1 }, missingArg("target")],
     [{ target: "a", payload: {}, timeout: -1 }, badArg("timeout", "send: timeout must be a positive number of seconds, got -1")],
-    [{ target: "a", payload: { type: 5 }, id: 1.5 }, badArg("payload.type", "send: payload.type must be a non-empty string, got 5")],
+    [{ target: "a", payload: { type: 5 }, id: 1.5 }, badArg("payload.type", "send: payload.type must be a non-empty string, got int")],
     [{ target: "a", payload: { type: "go" }, id: 1.5, retries: -1 }, badArg("id", "send: id must be a name (non-empty string) or a message id (int), got 1.5")],
     [{ target: "a", payload: { type: "go" }, retries: -1, secret: [] }, badArg("retries", "send: retries must be a non-negative int, got -1")],
     [

@@ -118,17 +118,35 @@ refused. A memory store here keys what such a caller writes by its qualified
 address, verbatim. Locally, `<this kernel's guid>|<agent id>` names the local
 agent too (`<guid>|kernel` the root).
 
-**Secret marks cross the bridge.** A batch item's `secret` paths (`payload.<field…>`
-/ `result[.<field…>]`, `src/kernel/secret.ts`) ride its call frame as `secret`, in
-both directions: a host-bound send puts them on the frame it sends (only when the
-item marked some), and a host's `call` frame is dispatched here with its `secret`
+**The tabs of one identity are one principal** (owner, 2026-10-03). Every tab of
+every browser hydrates the same tree and so says hello with the SAME guid — there is
+no per-tab guid. The host holds each such connection as one more live route of that
+guid: a host call to `<guid>|<agent>` reaches every tab and settles with the first
+reply (the others are dropped); a closed tab leaves the guid reachable through the
+rest.
+
+**Secret marks cross the bridge.** A batch item's `secret` marks
+(`src/kernel/secret.ts`) — dotted strings (`payload.<field…>` / `result[.<field…>]`)
+and/or arrays of steps (`["payload", "a.b"]`: a string step a literal key, an int
+step a list index) — ride its call frame as `secret`, in both directions: a
+host-bound send puts them on the frame it sends as given (only when the item
+marked some), and a host's `call` frame is dispatched here with its `secret`
 verbatim — so whichever kernel receives the call records `<secret>` (call/settle
 rows, ledger, memory store, inbox and watcher mirrors) exactly as the caller does,
 and a malformed mark is the receiving kernel's own `bad_arg` refusal, before
 dispatch. The reply carries the real result back.
 
+**A JOIN of a secret-marked execution** (audit F1, 2026-10-03): the REAL outcome
+goes to the execution's ORIGINAL caller only — the identity that opened it (its
+`caller`: the sending agent; the operator, null; a caller on another kernel by its
+`<guid>|<agent>`). Any other joiner — operator included — gets it AS SHOWN
+(`shownOutcome`, what the `ledger` reads back): the gate re-checks the joiner on
+the original VERB (a foreign joiner on the target's `callable_by`, as at launch),
+but a handler that answers by WHO asks never runs for a joiner. An unmarked
+execution joins unchanged.
+
 **A handler reads its call's marks** as `kernel.currentSecret` on the view it is
-handed (python `kernel.current_secret()`): the paths as the caller gave them —
+handed (python `kernel.current_secret()`): the marks as the caller gave them —
 a local item's, or a host call frame's — frozen, `[]` when none were marked.
 Stamped per dispatch like `currentCaller`, so the handler's own sends never
 inherit them. A bundle that must only be called WITH a mark refuses an unmarked

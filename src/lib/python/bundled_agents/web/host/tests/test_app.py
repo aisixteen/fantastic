@@ -7,6 +7,10 @@ from fastapi.testclient import TestClient
 
 from web.app import make_app
 
+#: The web host's own authority (`127.0.0.1:<port>` on the loopback default) — any
+#: other Host is refused (audit W-2), TestClient's `testserver` included.
+OWN = "http://127.0.0.1:8088"
+
 
 @pytest.fixture
 async def web_agent(seeded_kernel):
@@ -26,6 +30,18 @@ async def web_agent(seeded_kernel):
                         "id": "test_web",
                         "handler_module": "web.tools",
                     },
+                }
+            ]
+        )
+    )[0]["result"]
+    # The port the Host guard names (audit W-2) — set AFTER create, so the create's
+    # boot binds nothing; the TestClient addresses `OWN`, this host's own authority.
+    (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": seeded_kernel.id,
+                    "payload": {"type": "update_agent", "id": rec["id"], "port": 8088},
                 }
             ]
         )
@@ -84,9 +100,9 @@ async def served_bridge(seeded_kernel, web_agent):
 
 
 @pytest.fixture
-def client(seeded_kernel):
-    app = make_app("test_web", seeded_kernel)
-    with TestClient(app) as c:
+def client(seeded_kernel, web_agent):
+    app = make_app(web_agent, seeded_kernel)
+    with TestClient(app, base_url=OWN) as c:
         yield c, seeded_kernel
 
 
@@ -123,7 +139,7 @@ async def test_file_proxy_serves_text(
     p = tmp_path / "hello.txt"
     p.write_text("hi from file")
     app = make_app(web_agent, seeded_kernel)
-    with TestClient(app) as c:
+    with TestClient(app, base_url=OWN) as c:
         r = c.get(f"/{served_bridge}/file/hello.txt")
         assert r.status_code == 200
         assert r.text == "hi from file"
@@ -137,7 +153,7 @@ async def test_file_proxy_serves_image_bytes(
     img_bytes = b"\x89PNG\r\n\x1a\n" + b"FAKEDATA"
     (tmp_path / "img.png").write_bytes(img_bytes)
     app = make_app(web_agent, seeded_kernel)
-    with TestClient(app) as c:
+    with TestClient(app, base_url=OWN) as c:
         r = c.get(f"/{served_bridge}/file/img.png")
         assert r.status_code == 200
         assert r.headers["content-type"] == "image/png"
@@ -153,7 +169,7 @@ async def test_file_proxy_serves_pdf_bytes(
     pdf = b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\nbody\n%%EOF\n"
     (tmp_path / "doc.pdf").write_bytes(pdf)
     app = make_app(web_agent, seeded_kernel)
-    with TestClient(app) as c:
+    with TestClient(app, base_url=OWN) as c:
         r = c.get(f"/{served_bridge}/file/doc.pdf")
         assert r.status_code == 200
         assert r.headers["content-type"] == "application/pdf"
@@ -162,7 +178,7 @@ async def test_file_proxy_serves_pdf_bytes(
 
 async def test_file_proxy_404_for_missing_path(seeded_kernel, served_bridge, web_agent):
     app = make_app(web_agent, seeded_kernel)
-    with TestClient(app) as c:
+    with TestClient(app, base_url=OWN) as c:
         r = c.get(f"/{served_bridge}/file/nope.txt")
         assert r.status_code == 404
 
@@ -172,14 +188,14 @@ async def test_file_proxy_404_for_path_traversal(
 ):
     """file_bridge agent's path-safety bubbles up as `error` → route returns 404."""
     app = make_app(web_agent, seeded_kernel)
-    with TestClient(app) as c:
+    with TestClient(app, base_url=OWN) as c:
         r = c.get(f"/{served_bridge}/file/../../etc/passwd")
         assert r.status_code == 404
 
 
 async def test_file_proxy_404_for_missing_agent(seeded_kernel, web_agent):
     app = make_app(web_agent, seeded_kernel)
-    with TestClient(app) as c:
+    with TestClient(app, base_url=OWN) as c:
         r = c.get("/nonexistent_xxx/file/anything.txt")
         assert r.status_code == 404
 
@@ -192,7 +208,7 @@ async def test_file_proxy_streams_large_file(
     blob = bytes(range(256)) * 3000  # 768000 bytes — several chunks
     (tmp_path / "big.bin").write_bytes(blob)
     app = make_app(web_agent, seeded_kernel)
-    with TestClient(app) as c:
+    with TestClient(app, base_url=OWN) as c:
         r = c.get(f"/{served_bridge}/file/big.bin")
     assert r.status_code == 200
     assert r.content == blob
@@ -226,7 +242,7 @@ async def test_file_proxy_sealed_agent_404(
     )[0]["result"]
     (tmp_path / "secret.txt").write_text("nope")
     app = make_app(web_agent, seeded_kernel)
-    with TestClient(app) as c:
+    with TestClient(app, base_url=OWN) as c:
         r = c.get("/sealed_fb/file/secret.txt")
     assert r.status_code == 404
     assert b"nope" not in r.content
@@ -278,7 +294,7 @@ async def test_private_but_internally_readable_is_expressible(
     await _grant_serving(seeded_kernel, web_agent, "transcripts")  # egress granted…
 
     app = make_app(web_agent, seeded_kernel)
-    with TestClient(app) as c:
+    with TestClient(app, base_url=OWN) as c:
         r = c.get("/transcripts/file/chat.txt")
     assert r.status_code == 404, "the browser must NOT be served"
     assert b"private chat history" not in r.content
@@ -325,7 +341,7 @@ async def test_gate_denial_404_carries_the_hint_but_a_missing_file_does_not(
     await _grant_serving(seeded_kernel, web_agent, "ungranted")
 
     app = make_app(web_agent, seeded_kernel)
-    with TestClient(app) as c:
+    with TestClient(app, base_url=OWN) as c:
         denied = c.get("/ungranted/file/site.css")
         # The missing-file half must go through a GRANTED bridge, or it is just a
         # second gate denial and proves nothing about existence leaking.
@@ -382,7 +398,7 @@ async def test_browser_reachable_tracks_the_property_not_any_single_field(
             )["browser_reachable"]
         )
         app = make_app(web_agent, seeded_kernel)
-        with TestClient(app) as c:
+        with TestClient(app, base_url=OWN) as c:
             served = c.get("/g/file/f.txt").status_code == 200
         assert listed == served, (
             f"browser_reachable said {listed}, a real GET said {served} — the "

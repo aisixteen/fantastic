@@ -14,7 +14,7 @@ extension Kernel {
     /// no separate binary dispatch at all, a binary frame runs through the
     /// same `_dispatch` resolution the text channel does.
     func dispatchBinary(target: Agent, header: JSON, body: Blob?) async -> (
-        JSON?, Data?, raised: Bool
+        JSON?, Blob?, raised: Bool
     ) {
         let verb = header["type"].asString ?? ""
         // THE BYTES DO NOT CHANGE WHO ANSWERS. In python a payload carrying
@@ -104,11 +104,23 @@ extension Kernel {
     /// SYNCHRONOUS: an emit is a fanout and nothing else, so a leg can deliver
     /// it in the order its frames arrived — python awaits `kernel.emit` inline
     /// before it reads the next frame.
+    ///
+    /// `<guid>|<agent>` of a CONNECTED PEER reaches EVERY live route of that
+    /// guid (each tab of one identity), gated on the egress side like a send to
+    /// it (`emitPeer`).
     public func emitItem(_ targetId: AgentId, _ item: InboxItem) {
-        guard let target = agent(targetId) else { return }
-        if let orig = KernelTaskLocals.currentSender, orig != target.id,
+        guard
+            let target = agent(targetId)
+                ?? qualifiedTarget(targetId.value).flatMap({ $0.isRemote ? $0 : nil })
+        else { return }
+        let orig = KernelTaskLocals.currentSender
+        if let orig, orig != target.id,
             gate(sender: orig, verb: "emit", target: target, payload: item.payload) != nil
         {
+            return
+        }
+        if let r = target.remote {
+            emitPeer(r, item: item, origin: orig)
             return
         }
         fanout(target, "emit", item)
@@ -200,14 +212,13 @@ extension Kernel {
                         for (k, v) in extra { obj[k] = v }
                     }
                 } catch {
-                    // THE HOOK IS BEST EFFORT. Python wraps the whole duck-typed
-                    // call in a bare `except Exception: pass` (`_agent.py`), so a
-                    // root whose frame cannot be built contributes NOTHING and the
-                    // reflect answers without it — measured on a `docs/` holding a
-                    // non-UTF-8 file: `detail=full` on the root drops
-                    // `persistence`/`readmes`/`docs`/`self_extension` and still
-                    // returns the tree. C60's raise is the `readme=<key>` path,
-                    // which is not this one.
+                    // A HOOK THAT RAISES FAILS THE REFLECT (python `_agent.py`
+                    // calls the duck-typed hook bare). Swallowed, it dropped
+                    // `persistence` and `guid` — what an operator reads to learn
+                    // whether state persists — with nothing to say so (audit
+                    // 2026-10-03, ARCH2-9).
+                    reply = .object(obj)
+                    return .object(["error": .string(error.description), "raised": .bool(true)])
                 }
             }
         }
@@ -222,7 +233,7 @@ extension Kernel {
             // mode?, children}`, each sentence ASKED FROM THE AGENT ITSELF.
             // `detail:full` keeps the wiring node.
             if payload["detail"].asString == "full" {
-                obj["tree"] = treeNode(target)
+                obj["tree"] = treeNode(target, may: { self.mayReflect($0) })
             } else {
                 switch await roster(target) {
                 case .node(let node): obj["tree"] = node
@@ -289,6 +300,16 @@ extension Kernel {
         return nil
     }
 
+    /// May the agent now running (the caller) `reflect` `a`? The one per-node
+    /// gate both tree views apply (`roster`, and `treeNode` under
+    /// `detail:"full"`); an operator (no sender) may reflect everything
+    /// (python `_may_reflect`).
+    func mayReflect(_ a: Agent) -> Bool {
+        KernelTaskLocals.currentSender.map {
+            gate(sender: $0, verb: "reflect", target: a, payload: .object([:])) == nil
+        } ?? true
+    }
+
     /// `{id, sentence?, description?, mode?, children:[...]}` — the tree,
     /// carrying what each agent is FOR instead of how it is wired (python
     /// `_roster`).
@@ -310,10 +331,7 @@ extension Kernel {
     /// `.failure` carries a node's RAISED reflect: python's exception
     /// propagates out of `_roster` and fails the whole reflect.
     func roster(_ a: Agent) async -> RosterResult {
-        let mayReflect =
-            KernelTaskLocals.currentSender.map {
-                gate(sender: $0, verb: "reflect", target: a, payload: .object([:])) == nil
-            } ?? true
+        let mayReflect = mayReflect(a)
         var raw: JSON = .object([:])
         if a.handlerModule != nil && mayReflect {
             let (reply, status) = await internalDispatch(a, .object(["type": .string("reflect")]))
@@ -588,8 +606,8 @@ extension Kernel {
     func runDispatchOutcome(
         target: Agent, payload: JSON, verb: String, taskOut: TaskIdBox?,
         timeout: Deadline?, taskId: TaskId, binary: Blob?, rawReply: Bool,
-        shown: ShownPayload?, secretPaths: [String]
-    ) async -> (JSON, Status, Data?) {
+        shown: ShownPayload?, secretPaths: [JSON]
+    ) async -> (JSON, Status, Blob?) {
         guard let deadline = timeout else {
             let end = await runDispatch(
                 target: target, payload: payload, verb: verb, taskOut: taskOut,
@@ -605,12 +623,9 @@ extension Kernel {
             try? await Task.sleep(nanoseconds: UInt64(deadline.seconds * 1_000_000_000))
             guard let self, !Task.isCancelled else { return }
             fired.set()
-            // Operator authority: the kernel closing out work it was told to
-            // kill, not the batch caller reaching out — so a gated caller never
-            // makes an `onCancel` fail.
-            _ = await KernelTaskLocals.$currentSender.withValue(nil) {
-                await self.cancelTask(taskId)
-            }
+            // Each `onCancel` hook runs as its own agent (`cancelTask`), never as
+            // the batch caller.
+            _ = await self.cancelTask(taskId)
         }
         // The BLOB rides the timed branch too. It did not until 2026-09-03:
         // routing stamps the layer's deadline on EVERY item, so every model-issued
@@ -710,7 +725,7 @@ extension Kernel {
     private func runDispatch(
         target: Agent, payload: JSON, verb: String, taskOut: TaskIdBox?,
         taskId: TaskId?, binary: Blob?, rawReply: Bool, shown: ShownPayload?,
-        secretPaths: [String]
+        secretPaths: [JSON]
     ) async -> DispatchEnd {
         // (A killed sender never reaches here: `launch` settles it `cancelled`
         // before an id is minted.)
@@ -1067,7 +1082,9 @@ extension Kernel {
             grants.append(n.metaValue(forKey: "can_call") ?? .null)
             node = n.parentId.flatMap { agent($0) }
         }
-        return authorizeHeritable(ancestorGrants: grants, verb: verb, targetId: targetId).allowed
+        return authorizeHeritable(
+            ancestorGrants: grants, verb: verb, targetId: targetId, loaderId: root?.id.value
+        ).allowed
     }
 
     /// Two-sided gate on the PLACEMENT TARGET of `create_agent`. Returns a
@@ -1076,12 +1093,20 @@ extension Kernel {
     /// Placing inside your OWN subtree is baseline (no grant). Anywhere else
     /// needs egress on the parent (explicitly named — `create_agent` is
     /// privileged, so a wildcard never covers it) AND the parent's own
-    /// `callable_by` accepting the sender.
+    /// `callable_by` accepting the sender — judged as the qualified
+    /// `<guid>|<agent>` when a bridge leg relays a foreign caller.
+    ///
+    /// A RELAYED caller owns no subtree here: the leg's subtree is the leg's, not
+    /// its peer's, so the baseline never applies on the leg's behalf (audit
+    /// 2026-10-03, G-1) — it takes the path any other placement takes.
     func gatePlacement(
         sender: AgentId, sCan: JSON, sParent: String?, sKids: Set<String>,
         loaderId: String?, parent: Agent
     ) -> JSON? {
-        var node: Agent? = parent
+        let rc = KernelTaskLocals.remoteCaller
+        let inSender = (rc != nil && rc!.leg == sender) ? rc!.address : sender.value
+        // a relayed caller owns no subtree here — no baseline walk
+        var node: Agent? = inSender == sender.value ? parent : nil
         while let n = node {
             if n.id == sender { return nil }  // your own subtree — baseline
             node = n.parentId.flatMap { agent($0) }
@@ -1101,15 +1126,67 @@ extension Kernel {
         }
         let tCall = parent.metaValue(forKey: "callable_by") ?? .null
         let di = authorizeCall(
-            grant: tCall, verb: "create_agent", otherId: sender.value,
+            grant: tCall, verb: "create_agent", otherId: inSender,
             holderId: parent.id.value, parentId: parent.parentId?.value,
             childIds: Set(parent.childIds().map { $0.value }), loaderId: loaderId,
             enforcePrivileged: false, inSubtree: { self.inSubtree($0, of: $1) })
         if !di.allowed {
             return .object([
                 "error": .string(
-                    "\(parent.id.value) does not accept a child from \(sender.value)"),
+                    "\(parent.id.value) does not accept a child from \(inSender)"),
                 "reason": .string("unauthorized"), "hint": .string(di.hint),
+                "side": .string("ingress"),
+            ])
+        }
+        return nil
+    }
+
+    /// Two-sided gate on the OPERAND of `update_agent` / `delete_agent` (the record
+    /// `payload.id` names). Returns a refusal, or `nil` when the sender may act on
+    /// `operand`.
+    ///
+    /// Inside your OWN subtree (yourself included) it is baseline (no grant).
+    /// Anywhere else needs egress NAMING the operand with the verb
+    /// (`namesOperand`: a literal `<id>: ["<verb>"]`, never a wildcard or a token;
+    /// or a heritable entry for that id naming the verb) AND the operand's own
+    /// `callable_by` accepting the sender — judged as the qualified
+    /// `<guid>|<agent>` when a bridge leg relays a foreign caller. That caller
+    /// owns no subtree here, the leg's own record included (G-1, as
+    /// `gatePlacement`). Python `Agent._gate_operand`.
+    func gateOperand(
+        sender: AgentId, verb: String, sCan: JSON, loaderId: String?, operand: Agent
+    ) -> JSON? {
+        let rc = KernelTaskLocals.remoteCaller
+        let inSender = (rc != nil && rc!.leg == sender) ? rc!.address : sender.value
+        // a relayed caller owns no subtree here — no baseline walk
+        var node: Agent? = inSender == sender.value ? operand : nil
+        while let n = node {
+            if n.id == sender { return nil }  // your own subtree — baseline
+            node = n.parentId.flatMap { agent($0) }
+        }
+        let oid = operand.id.value
+        if !namesOperand(sCan, verb: verb, operandId: oid)
+            && !heritableEgress(sender: sender, verb: verb, targetId: oid)
+        {
+            return .object([
+                "error": .string("\(sender.value) may not \(verb) \(oid)"),
+                "reason": .string("unauthorized"),
+                "hint": .string(
+                    "\(oid) is outside your subtree: your can_call must name it with the "
+                        + "verb — {'\(oid)': ['\(verb)']}, never a wildcard — and its "
+                        + "callable_by must accept you"),
+                "side": .string("egress"),
+            ])
+        }
+        let di = authorizeCall(
+            grant: operand.metaValue(forKey: "callable_by") ?? .null, verb: verb,
+            otherId: inSender, holderId: oid, parentId: operand.parentId?.value,
+            childIds: Set(operand.childIds().map { $0.value }), loaderId: loaderId,
+            enforcePrivileged: false, inSubtree: { self.inSubtree($0, of: $1) })
+        if !di.allowed {
+            return .object([
+                "error": .string("\(oid) does not accept \(pyRepr(verb)) from \(inSender)"),
+                "reason": .string("unauthorized"), "hint": .string(fromAbove),
                 "side": .string("ingress"),
             ])
         }
@@ -1176,6 +1253,29 @@ extension Kernel {
         // An unknown parent falls through to the ordinary path; the verb itself
         // answers `unknown_agent`.
 
+        // THE RECORD IS THE OPERAND — the same rule for `update_agent` /
+        // `delete_agent`. Gating the root made one grant
+        // (`<root>:[update_agent, delete_agent]`, the builder wiring) a key to
+        // every record — rewrite a credential store's refs, open a sealed leg,
+        // clear a delete_lock and delete — while an agent could not edit its OWN
+        // child without that tree-wide grant (audit 2026-10-03, AV-1).
+        if recordOperandVerbs.contains(verb) && target.parentId == nil {
+            if let oid = payload["id"].asString, let operand = agent(AgentId(oid)) {
+                if let denial = gateOperand(
+                    sender: sender, verb: verb, sCan: sCan, loaderId: loaderId, operand: operand)
+                {
+                    return denial
+                }
+                if verb == "update_agent" {
+                    return checkConferral(
+                        sender: sender, sCan: sCan, sParent: sParent, sKids: sKids,
+                        loaderId: loaderId, payload: payload)
+                }
+                return nil
+            }
+            // No such record: the ordinary path; the verb answers `unknown_agent`.
+        }
+
         // Egress — may the SENDER call the target?
         let d = authorizeCall(
             grant: sCan, verb: verb, otherId: target.id.value,
@@ -1196,8 +1296,19 @@ extension Kernel {
         // the operator edit the ROOT's record for every agent that wants to read
         // the task table. Consequence accepted: an agent granted
         // `<root>:[ps,cancel]` can kill ANY task; the per-victim edge a manifest
-        // could grant before is GONE.
-        if Kernel.isSystemVerb(verb) && target.parentId == nil {
+        // could grant before is GONE. The tree mutators are the exception:
+        // whenever their operand names an agent they were judged ON THAT AGENT
+        // above (`gatePlacement` / `gateOperand`); only an unknown operand gets
+        // here.
+        //
+        // A FOREIGN caller a bridge leg relays is the exception to the exception:
+        // the leg's `can_call` is the leg's reach, not its peer's, so the root's
+        // `callable_by` must ALSO accept the caller as `<guid>|<agent>` or
+        // `<guid>|*` — it takes the ingress check below (audit 2026-10-03, AV-3).
+        // Local callers are unchanged.
+        let rc = KernelTaskLocals.remoteCaller
+        let foreign = (rc != nil && rc!.leg == sender) ? rc!.address : nil
+        if Kernel.isSystemVerb(verb) && target.parentId == nil && foreign == nil {
             // ...but CONFERRAL still applies. `update_agent` is a system verb
             // whose target is ALWAYS the root, so returning nil flat made
             // `checkConferral` unreachable for the exact case it guards: any
@@ -1220,8 +1331,6 @@ extension Kernel {
         // A bridge leg relaying a FOREIGN caller is judged by that caller's
         // qualified `<guid>|<agent>`, never by the leg: the target names who on the
         // other kernel it accepts, and the baseline tokens never match a foreign id.
-        let rc = KernelTaskLocals.remoteCaller
-        let foreign = (rc != nil && rc!.leg == sender) ? rc!.address : nil
         let inSender = foreign ?? sender.value
         let tCall = target.metaValue(forKey: "callable_by") ?? .null
         let tParent = target.parentId?.value

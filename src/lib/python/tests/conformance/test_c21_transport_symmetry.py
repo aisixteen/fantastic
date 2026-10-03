@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sys
 import types
 from pathlib import Path
 
@@ -41,10 +40,10 @@ from fastapi import FastAPI
 from _testkit import boot_root
 from _testkit_relay import _pair as relay_pair
 from io_bridge import MemoryTransport
-from relay_connector import tools as rc
+from io_bridge import _engine
 from relay_connector._relay import secret_sealed
-from ws_bridge import tools as wb
 from web_rest.tools import _make_post_endpoint
+from kernel import register_unlisted
 
 # THE SHARED CORPUS, at the repo root — rust, swift and ts drivers read this
 # same file. It is JSON so every runtime parses it with what it already has (the
@@ -83,10 +82,17 @@ NO_SECRET_WIRE = {
 }
 
 
-def _outer_secret(paths: list[str]) -> list[str]:
+def _outer_secret(marks: list) -> list:
     """A case's marks on the OUTER `forward` call: the inverse of the bridge's
-    re-rooting (`payload.<f>` → `payload.payload.<f>`; `result[.<f>]` as is)."""
-    return [p if p.split(".")[0] == "result" else f"payload.{p}" for p in paths]
+    re-rooting, in each mark's own spelling (`payload.<f>` → `payload.payload.<f>`,
+    `["payload", <s>…]` → `["payload", "payload", <s>…]`; a `result` mark as is)."""
+    out: list = []
+    for p in marks:
+        if isinstance(p, list):
+            out.append(p if p[:1] == ["result"] else ["payload", *p])
+        else:
+            out.append(p if p.split(".")[0] == "result" else f"payload.{p}")
+    return out
 
 
 # ─── the probe bundle: deterministic, storeless ──────────────────
@@ -113,7 +119,7 @@ async def _echo_handler(id, payload, kernel):
 
 _echo.handler = _echo_handler
 _echo.VERBS = {}
-sys.modules["c21_echo.tools"] = _echo
+register_unlisted("c21_echo.tools", _echo)
 
 
 def _norm(reply):
@@ -181,7 +187,9 @@ async def wired(tmp_path, monkeypatch):
             "ingress_rule": "allow_all_ingress",
             # The serving leg DISPATCHES AS ITSELF — same reach as every other leg.
             "can_call": {
-                "c21_probe": "*",
+                # `update_agent` acts on the probe's RECORD: named on the operand,
+                # a wildcard never covers it (AV-1)
+                "c21_probe": ["*", "update_agent"],
                 "kernel_state": [
                     "create_agent",
                     "update_agent",
@@ -201,8 +209,8 @@ async def wired(tmp_path, monkeypatch):
     )
     ka.update(rec_a["id"], peer_id=rec_b["id"])
     mt_a, mt_b = MemoryTransport.pair()
-    wb._test_transport_inject[rec_a["id"]] = mt_a
-    wb._test_transport_inject[rec_b["id"]] = mt_b
+    _engine._test_transport_inject[rec_a["id"]] = mt_a
+    _engine._test_transport_inject[rec_b["id"]] = mt_b
     assert (await send1(ka, rec_a["id"], {"type": "boot"})).get("booted") is True
     assert (await send1(kb, rec_b["id"], {"type": "boot"})).get("booted") is True
 
@@ -217,7 +225,9 @@ async def wired(tmp_path, monkeypatch):
             "id": "c21_rest",
             "ingress_rule": "allow_all_ingress",
             "can_call": {
-                "c21_probe": "*",
+                # `update_agent` acts on the probe's RECORD: named on the operand,
+                # a wildcard never covers it (AV-1)
+                "c21_probe": ["*", "update_agent"],
                 "kernel_state": [
                     "create_agent",
                     "update_agent",
@@ -248,7 +258,9 @@ async def wired(tmp_path, monkeypatch):
             "ingress_rule": "allow_all_ingress",
             **__import__("_testkit").py_runner_meta(),
             "can_call": {
-                "c21_probe": "*",
+                # `update_agent` acts on the probe's RECORD: named on the operand,
+                # a wildcard never covers it (AV-1)
+                "c21_probe": ["*", "update_agent"],
                 "kernel_state": [
                     "create_agent",
                     "update_agent",
@@ -295,7 +307,9 @@ async def wired(tmp_path, monkeypatch):
             "peer_guid": "c21-a",
             "ingress_rule": "allow_all_ingress",
             "can_call": {
-                "c21_probe": "*",
+                # `update_agent` acts on the probe's RECORD: named on the operand,
+                # a wildcard never covers it (AV-1)
+                "c21_probe": ["*", "update_agent"],
                 "kernel_state": [
                     "create_agent",
                     "update_agent",
@@ -314,8 +328,8 @@ async def wired(tmp_path, monkeypatch):
         },
     )
     rt_a, rt_b = relay_pair("A", "B")
-    rc._test_transport_inject[rel_a["id"]] = rt_a
-    rc._test_transport_inject[rel_b["id"]] = rt_b
+    _engine._test_transport_inject[rel_a["id"]] = rt_a
+    _engine._test_transport_inject[rel_b["id"]] = rt_b
     assert (await send1(ka, rel_a["id"], {"type": "boot"})).get("booted") is True
     assert (await send1(kb, rel_b["id"], {"type": "boot"})).get("booted") is True
 

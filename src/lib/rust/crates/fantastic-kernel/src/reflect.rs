@@ -311,6 +311,18 @@ fn sentence_for(target: &Arc<Agent>) -> &'static str {
     }
 }
 
+/// May the agent now running (the caller) `reflect` `a`? The one per-node gate
+/// both tree views apply ([`roster`], and [`tree_node`] under `detail:"full"`);
+/// an operator may reflect everything (python `_may_reflect`).
+fn may_reflect(kernel: &Arc<Kernel>, a: &Arc<Agent>) -> bool {
+    match crate::send::current_sender() {
+        None => true,
+        Some(sender) => kernel
+            .gate(&sender, "reflect", a, &Value::Object(Map::new()))
+            .is_none(),
+    }
+}
+
 /// `{id, sentence?, description?, mode?, children:[...]}` — the tree, carrying
 /// what each agent is FOR instead of how it is wired (python `_roster`).
 ///
@@ -331,12 +343,7 @@ fn roster(
     a: Arc<Agent>,
 ) -> Pin<Box<dyn Future<Output = Result<Value, Value>> + Send>> {
     Box::pin(async move {
-        let may_reflect = match crate::send::current_sender() {
-            None => true,
-            Some(sender) => kernel
-                .gate(&sender, "reflect", &a, &Value::Object(Map::new()))
-                .is_none(),
-        };
+        let may_reflect = may_reflect(&kernel, &a);
         let raw = if a.handler_module.is_some() && may_reflect {
             let (reply, status) = kernel
                 .internal_dispatch(&a, &json!({"type": "reflect"}))
@@ -462,15 +469,17 @@ pub async fn apply_reflect_flags(
         // `persistence: {provider}`, the instance `guid`, the doc-tree frame
         // and the `self_extension` shape. No bundle import here: the registry
         // already holds it, and a root whose bundle is not installed in this
-        // runtime simply contributes nothing.
-        if let Some(extra) = target
+        // runtime simply contributes nothing. A hook that RAISES fails the
+        // reflect (audit 2026-10-03, ARCH2-9).
+        if let Some(bundle) = target
             .handler_module
             .as_deref()
             .and_then(|hm| kernel.bundles.get(hm))
-            .and_then(|b| b.reflect_root_extra(target, full, kernel))
         {
-            for (k, v) in extra {
-                obj.insert(k, v);
+            if let Some(extra) = bundle.reflect_root_extra(target, full, kernel)? {
+                for (k, v) in extra {
+                    obj.insert(k, v);
+                }
             }
         }
     }
@@ -566,7 +575,7 @@ async fn insert_tree(
     obj: &mut Map<String, Value>,
 ) -> Result<(), Value> {
     let tree = if full {
-        tree_node(target)
+        tree_node(target, &|a: &Arc<Agent>| may_reflect(kernel, a))
     } else {
         roster(Arc::clone(kernel), Arc::clone(target)).await?
     };
@@ -578,9 +587,31 @@ async fn insert_tree(
 /// `{id, parent_id, handler_module, display_name, description?, ...posture,
 /// children:[...]}` dict — the `detail:full` wiring tree (python `_tree`),
 /// children in creation order.
-pub fn tree_node(target: &Agent) -> Value {
+///
+/// GATED PER NODE, as the roster is: `may` answers whether the caller may
+/// `reflect` a node. The wiring view carries every node's `description` and
+/// grant maps, so a caller allowed to reflect ONE agent read its whole subtree's
+/// through `detail:"full"` — a depth-2 agent its siblings', through its own
+/// parent (audit 2026-10-03, KV-3). A denied node keeps its `id` and `children`
+/// (the shape is public through `tree=ids`) and nothing else.
+pub fn tree_node(target: &Arc<Agent>, may: &dyn Fn(&Arc<Agent>) -> bool) -> Value {
     let mut obj = Map::new();
     obj.insert("id".to_string(), json!(target.id.0));
+    if may(target) {
+        tree_fields(target, &mut obj);
+    }
+    // CREATION ORDER, not sorted: python walks `_children`, a plain dict.
+    let children: Vec<Value> = target
+        .children_snapshot()
+        .iter()
+        .map(|c| tree_node(c, may))
+        .collect();
+    obj.insert("children".to_string(), Value::Array(children));
+    Value::Object(obj)
+}
+
+/// One reflectable node's fields after its `id` (python `_node_summary`).
+fn tree_fields(target: &Agent, obj: &mut Map<String, Value>) {
     if let Some(p) = target.parent_id.as_ref() {
         obj.insert("parent_id".to_string(), json!(p.0));
     } else {
@@ -621,14 +652,6 @@ pub fn tree_node(target: &Agent) -> Value {
             }
         }
     }
-    // CREATION ORDER, not sorted: python walks `_children`, a plain dict.
-    let children: Vec<Value> = target
-        .children_snapshot()
-        .iter()
-        .map(|c| tree_node(c))
-        .collect();
-    obj.insert("children".to_string(), Value::Array(children));
-    Value::Object(obj)
 }
 
 /// Flat id index of an agent + all descendants (DFS, self first, children in

@@ -2,7 +2,8 @@
 (on_delete / on_cancel / on_shutdown / reflect_root_extra / flush_pending), the
 VERBS table — and what each does when the module is missing, half-built or raises.
 
-Each of these is a hand-rolled `importlib.import_module(handler_module)` today.
+Each of these reaches the module through `import_handler(handler_module)` — the
+bundle catalog plus `register_unlisted`, never all of `sys.path`.
 Routing them through one `module_hook` (reduction candidate E) must keep every
 failure mode below: a raising hook never aborts the walk it is part of, each logs
 its own line (stdout for cascade/cancel, stderr for shutdown), an unimportable
@@ -13,18 +14,15 @@ tree keeps its node shape.
 from __future__ import annotations
 
 import asyncio
-import sys
 import types
 
-import pytest
-
-from kernel import sender_context
+from kernel import sender_context, register_unlisted
 
 _started: dict = {}
 
 
 def _bundle(name: str, *, handler=True, **hooks) -> types.ModuleType:
-    """Plant a fake bundle module in sys.modules under `name`."""
+    """Register a fake bundle module under `name` (`register_unlisted`)."""
     mod = types.ModuleType(name)
     mod.VERBS = {}
     if handler:
@@ -43,7 +41,7 @@ def _bundle(name: str, *, handler=True, **hooks) -> types.ModuleType:
         mod.handler = _handler
     for k, v in hooks.items():
         setattr(mod, k, v)
-    sys.modules[name] = mod
+    register_unlisted(name, mod)
     return mod
 
 
@@ -223,18 +221,25 @@ async def test_an_unimportable_bundle_is_not_told_to_shut_down(seeded_kernel):
 # ─── reflect's module reads ──────────────────────────────────────────────────
 
 
-async def test_a_raising_reflect_root_extra_is_swallowed(seeded_kernel, monkeypatch):
+async def test_a_raising_reflect_root_extra_fails_the_reflect(
+    seeded_kernel, monkeypatch
+):
+    """The loader's `reflect_root_extra` is the ONLY source of `persistence` and
+    `guid` on the root reflect. A raise inside it was swallowed and the reflect
+    answered without them — an operator read "no persistence" and nothing said
+    why (audit 2026-10-03, ARCH2-9). The raise fails the reflect now."""
     import kernel_state.tools as ks
 
     def _raise(agent, full=False):
         raise RuntimeError("extra broke")
 
     base = (await _call(seeded_kernel, "kernel", {"type": "reflect"}))["result"]
-    assert "persistence" in base
+    assert "persistence" in base and "guid" in base
     monkeypatch.setattr(ks, "reflect_root_extra", _raise)
-    r = (await _call(seeded_kernel, "kernel", {"type": "reflect"}))["result"]
-    assert "persistence" not in r and "error" not in r
-    assert r["runtime"] == "python" and r["id"] == seeded_kernel.id
+    for target in ("kernel", seeded_kernel.id):
+        out = await _call(seeded_kernel, target, {"type": "reflect"})
+        assert out["status"] == "failed", out
+        assert out["result"] == {"error": "RuntimeError: extra broke", "raised": True}
 
 
 async def test_the_full_detail_tree_node_shape(seeded_kernel):
@@ -288,11 +293,3 @@ async def test_an_agent_reflect_through_the_gate_still_reads_the_module(seeded_k
     with sender_context("asker"):
         r = (await _call(k, "hr", {"type": "reflect"}))["result"]
     assert r["sentence"] == "hook probe" and "kernel_verbs" in r
-
-
-@pytest.fixture(autouse=True)
-def _drop_stub_modules():
-    yield
-    for name in list(sys.modules):
-        if name.startswith("hook_pin_"):
-            sys.modules.pop(name, None)

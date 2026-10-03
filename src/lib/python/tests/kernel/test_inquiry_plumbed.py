@@ -24,19 +24,18 @@ the wiring a unit exercises is the wiring an e2e run exercises.
 from __future__ import annotations
 
 import asyncio
-import sys
 import types
 
 import pytest
 
-import ollama_backend.tools as ot
 from _testkit import memory_meta
+from kernel import register_unlisted
 
 # ─── the `user` agent: the human as an ordinary bundle ──────────
 #
-# Built as a module object in `sys.modules`, which IS a bundle as far as the
-# substrate is concerned (`Agent._dispatch` resolves handlers with
-# `importlib.import_module`). Same idiom as `test_task_table`'s slow bundle.
+# Built as a module object and registered with `register_unlisted`, which IS a
+# bundle as far as the substrate is concerned (`Agent._dispatch` resolves
+# handlers with `import_handler`). Same idiom as `test_task_table`'s slow bundle.
 
 #: agent id → inquiries this agent really received. THE SCORE.
 _RECEIVED: dict[str, int] = {}
@@ -123,7 +122,7 @@ async def _user_handler(id, payload, kernel):
 
 _user_mod = types.ModuleType("user_agent.tools")
 _user_mod.handler = _user_handler
-sys.modules["user_agent.tools"] = _user_mod
+register_unlisted("user_agent.tools", _user_mod)
 
 
 # ─── a scripted model ───────────────────────────────────────────
@@ -165,9 +164,12 @@ def _ask(text: str, *, kind: str = "text", **extra) -> str:
 DONE = '<call name="done"></call>'
 
 
-async def _wire(kernel, script: _Script, *, answer: str, ai_id: str = "asker"):
+async def _wire(
+    kernel, script: _Script, *, answer: str, providers: dict, ai_id: str = "asker"
+):
     """A `user` the operator has told what to say, and an AI granted the edge to
-    ask it. Two-sided deny-all: the asker's egress AND the human's ingress."""
+    ask it (its turns played by `script`, seated in `providers`). Two-sided
+    deny-all: the asker's egress AND the human's ingress."""
     await kernel.send(
         [
             {
@@ -203,7 +205,7 @@ async def _wire(kernel, script: _Script, *, answer: str, ai_id: str = "asker"):
             ]
         )
     )[0]["result"]
-    ot._providers[ai_id] = script
+    providers[ai_id] = script
     return r["id"]
 
 
@@ -216,13 +218,17 @@ async def _tally(kernel, uid: str = "user") -> dict:
 # ─── the tests ──────────────────────────────────────────────────
 
 
-async def test_an_inquiry_is_a_call_and_the_answer_is_its_reply(seeded_kernel):
+async def test_an_inquiry_is_a_call_and_the_answer_is_its_reply(
+    seeded_kernel, fake_providers
+):
     """THE WHOLE CONTRACT IN ONE MESSAGE PAIR. The model asks; the human's answer
     comes back as that call's reply, tagged like any other; the model reads it
     and finishes. Scored on the human's own count, which only its handler can
     raise."""
     script = _Script([_ask("Proceed?", kind="confirm"), "understood " + DONE])
-    aid = await _wire(seeded_kernel, script, answer="yes, proceed")
+    aid = await _wire(
+        seeded_kernel, script, answer="yes, proceed", providers=fake_providers
+    )
     try:
         await seeded_kernel.send(
             [{"target": aid, "payload": {"type": "send", "text": "set it up"}}]
@@ -238,11 +244,12 @@ async def test_an_inquiry_is_a_call_and_the_answer_is_its_reply(seeded_kernel):
         assert " user inquiry" in second, second
         assert "yes, proceed" in second, second
     finally:
-        ot._providers.pop(aid, None)
+        fake_providers.pop(aid, None)
 
 
 async def test_a_message_that_only_talks_about_asking_never_reaches_the_human(
     seeded_kernel,
+    fake_providers,
 ):
     """THE REASON THE SCORE IS THE HUMAN'S TALLY AND NOT THE PROSE. A model can
     say it asked. The desk's count is the only thing it cannot fake — and the
@@ -250,7 +257,7 @@ async def test_a_message_that_only_talks_about_asking_never_reaches_the_human(
     script = _Script(
         ["I should ask the user whether to proceed.", "asking now " + DONE]
     )
-    aid = await _wire(seeded_kernel, script, answer="yes")
+    aid = await _wire(seeded_kernel, script, answer="yes", providers=fake_providers)
     try:
         await seeded_kernel.send(
             [{"target": aid, "payload": {"type": "send", "text": "set it up"}}]
@@ -261,10 +268,12 @@ async def test_a_message_that_only_talks_about_asking_never_reaches_the_human(
         assert script.calls == 2, "a call-less message must be told to try again"
         assert "[no call was dispatched]" in script.incoming(1)
     finally:
-        ot._providers.pop(aid, None)
+        fake_providers.pop(aid, None)
 
 
-async def test_a_proposal_is_held_by_the_human_not_run_by_the_sender(seeded_kernel):
+async def test_a_proposal_is_held_by_the_human_not_run_by_the_sender(
+    seeded_kernel, fake_providers
+):
     """AN `action` IS A PROPOSAL, not an act. A sender that may not perform
     something hands it over — "buy this, if you agree" — and the human HOLDS it.
     Read back off the call the desk really received, never off the model's
@@ -279,7 +288,9 @@ async def test_a_proposal_is_held_by_the_human_not_run_by_the_sender(seeded_kern
             "held " + DONE,
         ]
     )
-    aid = await _wire(seeded_kernel, script, answer="go ahead")
+    aid = await _wire(
+        seeded_kernel, script, answer="go ahead", providers=fake_providers
+    )
     try:
         await seeded_kernel.send(
             [{"target": aid, "payload": {"type": "send", "text": "restock"}}]
@@ -290,17 +301,18 @@ async def test_a_proposal_is_held_by_the_human_not_run_by_the_sender(seeded_kern
         assert tally["inquiries"] == 1, tally
         assert tally["proposals"] == [{"verb": "purchase", "sku": "SKU-9"}], tally
     finally:
-        ot._providers.pop(aid, None)
+        fake_providers.pop(aid, None)
 
 
 async def test_an_unwired_human_fails_loud_instead_of_inventing_consent(
     seeded_kernel,
+    fake_providers,
 ):
     """NO DEFAULT. A `user` with no `answer` on its record does not invent one —
     the model reads a refusal it can act on, and the tally stays at zero because
     nothing was answered."""
     script = _Script([_ask("Proceed?"), "noted " + DONE])
-    aid = await _wire(seeded_kernel, script, answer="")
+    aid = await _wire(seeded_kernel, script, answer="", providers=fake_providers)
     try:
         await seeded_kernel.send(
             [{"target": aid, "payload": {"type": "send", "text": "set it up"}}]
@@ -311,10 +323,12 @@ async def test_an_unwired_human_fails_loud_instead_of_inventing_consent(
         second = script.incoming(1)
         assert "not_connected" in second or "no `answer`" in second, second
     finally:
-        ot._providers.pop(aid, None)
+        fake_providers.pop(aid, None)
 
 
-async def test_the_gate_stands_between_a_model_and_a_person(seeded_kernel):
+async def test_the_gate_stands_between_a_model_and_a_person(
+    seeded_kernel, fake_providers
+):
     """A HUMAN IS GATED LIKE ANY AGENT. An asker with no edge to `user` is
     refused, reads why, and the desk is never touched."""
     script = _Script([_ask("Proceed?"), "refused " + DONE])
@@ -353,7 +367,7 @@ async def test_the_gate_stands_between_a_model_and_a_person(seeded_kernel):
         )
     )[0]["result"]
     aid = r["id"]
-    ot._providers[aid] = script
+    fake_providers[aid] = script
     try:
         await seeded_kernel.send(
             [{"target": aid, "payload": {"type": "send", "text": "set it up"}}]
@@ -363,4 +377,4 @@ async def test_the_gate_stands_between_a_model_and_a_person(seeded_kernel):
         assert (await _tally(seeded_kernel))["inquiries"] == 0
         assert "unauthorized" in script.incoming(1), script.incoming(1)
     finally:
-        ot._providers.pop(aid, None)
+        fake_providers.pop(aid, None)

@@ -4,11 +4,15 @@
 //!
 //! An agent on another kernel is addressed `<guid>|<agent id>` and called with an
 //! ordinary `send`. When that guid is registered here, the send hands the call to
-//! its route and the peer's reply is the call's ordinary outcome. A TRANSPORT
+//! its routes and the peer's reply is the call's ordinary outcome. A TRANSPORT
 //! registers the peer it is connected to (the web ws leg, when a page says
 //! `hello`) and unregisters it when the connection ends — the transport only
 //! carries frames; addressing is the kernel's. A guid that is not here is an
 //! unknown target like any other.
+//!
+//! A SET PER GUID (owner, 2026-10-03): the tabs of one identity are ONE principal
+//! — every tab says hello with the identity's guid, each is a live route of it, a
+//! call to `<guid>|x` goes to all of them and settles with the first reply.
 
 use crate::agent::{Agent, AgentId};
 use crate::kernel::Kernel;
@@ -33,30 +37,47 @@ pub type PeerCallFuture = Pin<Box<dyn Future<Output = PeerReply> + Send>>;
 /// `secret` marks ([`crate::secret`], empty when none) and the raw request body
 /// at its payload path when the call carries one.
 type PeerCallFn =
-    dyn Fn(String, Value, String, Vec<String>, Option<Blob>) -> PeerCallFuture + Send + Sync;
+    dyn Fn(String, Value, String, Vec<Value>, Option<Blob>) -> PeerCallFuture + Send + Sync;
+
+/// The future a route returns for one emit — it settles once the frame is handed
+/// to the transport (an emit has no reply).
+pub type PeerEmitFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
+
+/// `emit(agent_id, payload, caller, body)` — deliver ONE emit to the peer's
+/// `agent_id`; `caller` is `<this guid>|<sender>` when an agent emitted, `None`
+/// for an operator emit, and the raw body rides at its payload path.
+type PeerEmitFn =
+    dyn Fn(String, Value, Option<String>, Option<Blob>) -> PeerEmitFuture + Send + Sync;
 
 /// How a connected PEER KERNEL is reached. `via` names the transport agent
 /// carrying it (the root reflect reports it); the call delivers one call and
 /// resolves with the peer's reply — or a refusal when the connection ends first.
 ///
-/// `secret` is the item's marked paths, rooted at the item exactly as the peer's
-/// item is rooted, so the transport puts them on the call frame verbatim and the
-/// PEER masks its own records of the call too (python `PeerRoute.call(agent_id,
-/// payload, caller, secret)`).
+/// `secret` is the item's marks as given ([`crate::secret`] — dotted strings
+/// and/or arrays of steps, empty when none), rooted at the item exactly as the
+/// peer's item is rooted, so the transport puts them on the call frame verbatim
+/// and the PEER masks its own records of the call too (python
+/// `PeerRoute.call(agent_id, payload, caller, secret)`).
 ///
-/// Held as an `Arc`: a route is compared by IDENTITY (python `is`), so only the
-/// connection that registered a guid can unregister it.
+/// Held as an `Arc`: a route is compared by IDENTITY (python `is`), so a
+/// connection unregisters its own route and no other.
 pub struct PeerRoute {
     /// The transport agent carrying this peer.
     pub via: String,
     call: Box<PeerCallFn>,
+    emit: Box<PeerEmitFn>,
 }
 
 impl PeerRoute {
-    /// A route through `via` whose calls `call` delivers.
-    pub fn new<F>(via: impl Into<String>, call: F) -> Arc<Self>
+    /// A route through `via` whose calls `call` delivers and whose emits `emit`
+    /// delivers.
+    pub fn new<F, E>(via: impl Into<String>, call: F, emit: E) -> Arc<Self>
     where
-        F: Fn(String, Value, String, Vec<String>, Option<Blob>) -> PeerCallFuture
+        F: Fn(String, Value, String, Vec<Value>, Option<Blob>) -> PeerCallFuture
+            + Send
+            + Sync
+            + 'static,
+        E: Fn(String, Value, Option<String>, Option<Blob>) -> PeerEmitFuture
             + Send
             + Sync
             + 'static,
@@ -64,7 +85,19 @@ impl PeerRoute {
         Arc::new(Self {
             via: via.into(),
             call: Box::new(call),
+            emit: Box::new(emit),
         })
+    }
+
+    /// Deliver one emit through this route.
+    pub fn emit(
+        &self,
+        agent_id: String,
+        payload: Value,
+        caller: Option<String>,
+        body: Option<Blob>,
+    ) -> PeerEmitFuture {
+        (self.emit)(agent_id, payload, caller, body)
     }
 
     /// Deliver one call through this route.
@@ -73,7 +106,7 @@ impl PeerRoute {
         agent_id: String,
         payload: Value,
         caller: String,
-        secret: Vec<String>,
+        secret: Vec<Value>,
         body: Option<Blob>,
     ) -> PeerCallFuture {
         (self.call)(agent_id, payload, caller, secret, body)
@@ -92,64 +125,60 @@ pub(crate) struct RemoteRef {
     pub(crate) guid: String,
     /// The agent's id on that kernel.
     pub(crate) agent_id: String,
-    /// The route the send hands the call to.
-    pub(crate) route: Arc<PeerRoute>,
+    /// The guid's live routes when the send resolved it — every tab of one
+    /// identity: the call goes to ALL of them and settles with the first reply.
+    pub(crate) routes: Vec<Arc<PeerRoute>>,
 }
 
-/// The kernel's peer table — guid → route, SORTED so `peer_rows` reads in
-/// python's `sorted(self.peers.items())` order.
-pub(crate) type PeerTable = std::sync::Mutex<BTreeMap<String, Arc<PeerRoute>>>;
+/// The kernel's peer table — guid → its live routes in registration order,
+/// SORTED by guid so `peer_rows` reads in python's `sorted(self.peers.items())`
+/// order.
+pub(crate) type PeerTable = std::sync::Mutex<BTreeMap<String, Vec<Arc<PeerRoute>>>>;
 
 impl Kernel {
-    fn peer_table(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, Arc<PeerRoute>>> {
+    fn peer_table(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, Vec<Arc<PeerRoute>>>> {
         self.peers.lock().expect("peers lock poisoned")
     }
 
-    /// Make `<guid>|<agent>` reachable through `route`. Refused (the refusal
-    /// returned) when that guid is already connected through ANOTHER route —
-    /// re-pointing a live address silently would hand one kernel's calls to
-    /// another; the second connection is told so instead.
-    pub fn register_peer(&self, guid: &str, route: &Arc<PeerRoute>) -> Option<Value> {
+    /// Make `<guid>|<agent>` reachable through `route` — ADDED to the guid's live
+    /// routes: another connection saying hello with a live guid is another tab of
+    /// that identity, one principal with the rest. A route already there stays
+    /// one.
+    pub fn register_peer(&self, guid: &str, route: &Arc<PeerRoute>) {
         let mut table = self.peer_table();
-        if let Some(held) = table.get(guid) {
-            if !Arc::ptr_eq(held, route) {
-                let mut r = crate::refusal::refusal(
-                    crate::refusal::BAD_ARG,
-                    format!(
-                        "peer {guid} is already connected via {} — one kernel, one live \
-                         route; close the other connection first",
-                        held.via
-                    ),
-                );
-                crate::refusal::with(&mut r, "arg", json!("guid"));
-                return Some(r);
-            }
+        let routes = table.entry(guid.to_string()).or_default();
+        if !routes.iter().any(|r| Arc::ptr_eq(r, route)) {
+            routes.push(Arc::clone(route));
         }
-        table.insert(guid.to_string(), Arc::clone(route));
-        None
     }
 
-    /// Forget `guid` — only if `route` is still the one registered.
+    /// Forget `route` — that one connection. The guid stays reachable through its
+    /// other live routes, and stops being an address with its last.
     pub fn unregister_peer(&self, guid: &str, route: &Arc<PeerRoute>) {
         let mut table = self.peer_table();
-        if table.get(guid).is_some_and(|held| Arc::ptr_eq(held, route)) {
-            table.remove(guid);
+        if let Some(routes) = table.get_mut(guid) {
+            routes.retain(|r| !Arc::ptr_eq(r, route));
+            if routes.is_empty() {
+                table.remove(guid);
+            }
         }
     }
 
-    /// The route `guid` is connected through, if it is connected.
+    /// The live routes `guid` is connected through — empty when it is not
+    /// connected.
     #[must_use]
-    pub fn peer(&self, guid: &str) -> Option<Arc<PeerRoute>> {
-        self.peer_table().get(guid).cloned()
+    pub fn peer_routes(&self, guid: &str) -> Vec<Arc<PeerRoute>> {
+        self.peer_table().get(guid).cloned().unwrap_or_default()
     }
 
-    /// The connected peer kernels, for the root reflect: `[{guid, via}]`.
+    /// The connected peer kernels, for the root reflect: `[{guid, via}]` — one row
+    /// per live route, so a guid connected twice shows twice.
     #[must_use]
     pub fn peer_rows(&self) -> Value {
         Value::Array(
             self.peer_table()
                 .iter()
-                .map(|(g, r)| json!({"guid": g, "via": r.via}))
+                .flat_map(|(g, rs)| rs.iter().map(move |r| json!({"guid": g, "via": r.via})))
                 .collect(),
         )
     }
@@ -186,22 +215,26 @@ impl Kernel {
                     .map(|e| Arc::clone(&e))
             };
         }
-        let route = self.peer(guid)?;
+        let routes = self.peer_routes(guid);
+        if routes.is_empty() {
+            return None;
+        }
         Some(Agent::remote(
             AgentId::from(target_id),
             RemoteRef {
                 guid: guid.to_string(),
                 agent_id: agent_id.to_string(),
-                route,
+                routes,
             },
         ))
     }
 }
 
-/// The dispatch of a call to a remote target: hand it to the peer's route,
-/// carrying the caller as `<this guid>|<sender>` so the peer's gate can judge it,
-/// and the item's `secret` marks so the peer masks its records too. Python
-/// `RemoteTarget._dispatch_task`.
+/// The dispatch of a call to a remote target: hand it to EVERY live route of the
+/// peer (each tab of one identity), carrying the caller as `<this guid>|<sender>`
+/// so the peer's gate can judge it, and the item's `secret` marks so the peer
+/// masks its records too; the first reply settles it and the other calls are
+/// dropped. Python `RemoteTarget._dispatch_task`.
 pub(crate) async fn call_peer(
     kernel: &Kernel,
     remote: &RemoteRef,
@@ -230,10 +263,66 @@ pub(crate) async fn call_peer(
     // records the call as shown, and the peer must too: its call/settle rows,
     // ledger and state stream are records of the SAME call.
     let secret = crate::send::current_secret();
-    remote
-        .route
-        .call(remote.agent_id.clone(), payload, caller, secret, body)
-        .await
+    let calls = remote.routes.iter().map(|r| {
+        r.call(
+            remote.agent_id.clone(),
+            payload.clone(),
+            caller.clone(),
+            secret.clone(),
+            body.clone(),
+        )
+    });
+    // The losers are DROPPED with `select_all`'s rest — their routes forget them.
+    // TODO (owner, open): first-reply-wins hides tab DESYNC — if the tabs of one
+    // identity diverge, the other replies are dropped unseen. Must be solved
+    // (later).
+    let (first, _, _rest) = futures_util::future::select_all(calls).await;
+    first
+}
+
+/// An emit to a remote target: hand it to EVERY live route of the peer (each tab
+/// of one identity) — `caller` is `<this guid>|<sender>` when an agent emitted,
+/// none for an operator emit. GATED LIKE A SEND when an agent emits: its
+/// `can_call` must grant `emit` on `<guid>|<agent>` (egress; the page gates its
+/// own agent). A refused emit is dropped — an emit has no reply. Python
+/// `Agent.emit` on a qualified `<guid>|x`.
+pub(crate) async fn emit_peer(
+    kernel: &Arc<Kernel>,
+    target: &Arc<Agent>,
+    item: crate::inbox::InboxItem,
+) {
+    let Some(remote) = target.remote.as_ref() else {
+        return;
+    };
+    let caller = match crate::send::current_sender() {
+        None => None,
+        Some(sender) => {
+            if kernel
+                .gate(&sender, "emit", target, &item.payload)
+                .is_some()
+            {
+                return;
+            }
+            // the peer judges the emitter by `<guid>|<agent>`: with no guid of
+            // our own there is nothing honest to put on the frame
+            let Some(own) = kernel.own_guid() else {
+                return;
+            };
+            Some(format!("{own}|{sender}"))
+        }
+    };
+    // TODO (owner, open): DESYNC between the tabs of one identity is envisioned
+    // and unsolved — each tab gets this emit, nothing reconciles tabs that have
+    // diverged. Think later.
+    for r in &remote.routes {
+        r.emit(
+            remote.agent_id.clone(),
+            item.payload.clone(),
+            caller.clone(),
+            item.body.clone(),
+        )
+        .await;
+    }
 }
 
 /// A remote target's meta — python's `{"callable_by": {}}`: it accepts nothing

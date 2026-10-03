@@ -349,12 +349,12 @@ extension LedgerTests {
                 nil
             }
             func handleBinary(agentId: AgentId, header: JSON, body: Blob?, kernel: Kernel)
-                async throws -> (JSON?, Data?)
+                async throws -> (JSON?, Blob?)
             {
                 let head: JSON = .object([
                     "path": .string("x"), "bytes": .null, "eof": .bool(true),
                 ])
-                return (head, Data([1, 2, 3]))
+                return (head, Blob("bytes", Data([1, 2, 3])))
             }
         }
         let reg = BundleRegistry()
@@ -374,7 +374,7 @@ extension LedgerTests {
         let out = await k.send([
             Item(AgentId("ch"), .object(["type": .string("read_stream")]), id: "rd", rawReply: true)
         ])[0]
-        #expect(out.body == Data([1, 2, 3]))
+        #expect(out.body == Blob("bytes", Data([1, 2, 3])))
         let ledger = await k.send([
             Item(AgentId("kernel"), .object(["type": .string("ledger")]))
         ])[0].result

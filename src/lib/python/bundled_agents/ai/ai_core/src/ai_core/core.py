@@ -3,13 +3,12 @@ vllm backends.
 
 Two layers:
 
-  1. MODULE-GLOBAL STATE, keyed by agent id. The provider cache, per-backend
-     FIFO locks, and the queue / current-entry status state. These are keyed
-     by the agent's id, so three backends loaded into ONE kernel share these
-     dicts SAFELY — an ollama agent's id never collides with a vllm
-     agent's id. A bundle's tests patch them as
-     `<bundle>.tools._providers[id] = fake`, so each bundle re-exports the
-     SAME dict objects (see `build()`'s note).
+  1. MODULE-GLOBAL STATE, keyed by agent id. The per-backend FIFO locks and
+     the queue / current-entry status state. These are keyed by the agent's
+     id, so three backends loaded into ONE kernel share these dicts SAFELY —
+     an ollama agent's id never collides with a vllm agent's id. `on_delete`
+     drops an agent's rows. The PROVIDER is not state: it is built per turn
+     from the live record (`_build_provider`), as rust and swift build it.
 
      There is NO backend-private task table: a `send` IS a kernel task (one
      `ps` row, `"<agent>:<n>"`), the generation runs INLINE in that dispatch,
@@ -24,9 +23,8 @@ Two layers:
      their own provider and never clobber each other. Tool-calling is uniform + RAW for all of them
      (owned by this base class via `tool_parse`, not any native provider API).
 
-`SEND_TIMEOUT` is read LIVE off the calling bundle module (each bundle
-re-exports it) so a test's `monkeypatch.setattr("<bundle>.tools.SEND_TIMEOUT",
-0.05)` is honoured on this shared path.
+`SEND_TIMEOUT` is read LIVE off this module, so a test's
+`monkeypatch.setattr(core, "SEND_TIMEOUT", 0.05)` is honoured.
 
 AI backlog (TODO):
   1. Multi-modal binary frames — image/audio payloads have no defined
@@ -41,7 +39,6 @@ import inspect
 import json
 import re
 import secrets
-import sys
 import time
 import traceback
 from collections.abc import Awaitable, Callable
@@ -57,7 +54,7 @@ from ai_core.context import (
     output_reserve,
     resolve_context_window,
 )
-from ai_core.credentials import secret_holder_refusal
+from ai_core.credentials import secret_holder_refusal, secret_join_refusal
 from ai_core.folds import expand_ids as expand_fold_ids
 from ai_core.strategies import DEFAULT_STRATEGY, get_strategy, strategy_names
 from ai_core.strategies.base import NOTICE_ENVELOPE_RESERVE
@@ -89,7 +86,6 @@ from ai_core.constants import (  # noqa: F401 — re-exported seams
 
 # ─── shared module-global state (keyed by agent id) ─────────────
 
-_providers: dict = {}
 _locks: dict[str, asyncio.Lock] = {}
 
 # Structural state for the `status` verb + status events. One channel,
@@ -147,25 +143,13 @@ _reported: dict[str, int] = {}
 
 @dataclass
 class Backend:
-    """Per-backend config bound into the verb closures by `build()`.
-
-    `module_name` is the importable name of the calling bundle's tools
-    module (e.g. `"ollama_backend.tools"`). It is used to read the LIVE
-    `SEND_TIMEOUT` off that module so a test monkeypatch on the bundle
-    is honoured here.
-    """
+    """Per-backend config bound into the verb closures by `build()`."""
 
     sentence: str
     make_provider: Callable[[str, Any], Any]  # (id, kernel) -> Provider; sync OR async
     name: str  # error-message prefix, e.g. "ollama_backend"
-    module_name: str
     extra_verbs: dict = field(default_factory=dict)
     reflect_extra: Callable[[str, Any], Awaitable[dict] | dict] | None = None
-
-    @property
-    def send_timeout(self) -> float:
-        mod = sys.modules.get(self.module_name)
-        return getattr(mod, "SEND_TIMEOUT", SEND_TIMEOUT) if mod else SEND_TIMEOUT
 
 
 # ─── status state helpers ───────────────────────────────────────
@@ -827,16 +811,16 @@ def required_meta(rec: dict, key: str, backend: str) -> str:
     return v
 
 
-async def _get_provider(self_id: str, kernel, cfg: Backend):
-    """Return the cached provider for `self_id`, building it via the
-    backend's `make_provider` (sync OR async) on cache miss. A record missing
-    what the provider needs raises, naming the field."""
-    if self_id in _providers:
-        return _providers[self_id]
+async def _build_provider(self_id: str, kernel, cfg: Backend):
+    """The provider for ONE turn, built from the LIVE record by the backend's
+    `make_provider` (sync OR async). Never cached (audit ARCH2-2): a provider
+    captures endpoint, model and sampling when it is built, so a cached one kept
+    posting to an endpoint `update_agent` had moved the agent away from, and a
+    deleted id re-created later inherited it. Rust and swift build per call too. A
+    record missing what the provider needs raises, naming the field."""
     prov = cfg.make_provider(self_id, kernel)
     if inspect.isawaitable(prov):
         prov = await prov
-    _providers[self_id] = prov
     return prov
 
 
@@ -1095,7 +1079,7 @@ again — it is cheap and always current, and re-reading beats guessing.
 # `while(true)`. Deciding how much thinking is allowed is not this module's call.
 #
 # Detached is the one hard requirement: `_lock_for` is a plain non-reentrant asyncio.Lock,
-# so awaiting a self-addressed send from inside the holder deadlocks until `send_timeout`.
+# so awaiting a self-addressed send from inside the holder deadlocks until `SEND_TIMEOUT`.
 # Spawned, it queues behind the current turn.
 
 
@@ -1705,6 +1689,12 @@ async def _route_reply(
         held = secret_holder_refusal(kernel, target)
         if held is None and reply_to:
             held = secret_holder_refusal(kernel, reply_to)
+        # Nor does it JOIN an execution that carried secrets (audit F2): a join
+        # hands back that execution's outcome, so `<exec_id>` = the backend's own
+        # key read was the key — even from a store on a connected peer, which the
+        # holder check above cannot see.
+        if held is None and "exec_id" in args:
+            held = secret_join_refusal(kernel, args.get("exec_id"))
         if held is not None:
             payload = args.get("payload")
             verb = payload.get("type", "?") if isinstance(payload, dict) else "-"
@@ -2431,7 +2421,7 @@ async def _run(
     cfg: Backend,
     system_prompt: str | None = None,
 ) -> dict:
-    provider = await _get_provider(self_id, kernel, cfg)
+    provider = await _build_provider(self_id, kernel, cfg)
     if self_id in _recall_due:
         _recall_due.discard(self_id)
         await _context_recall(self_id, {}, kernel, cfg)
@@ -2812,7 +2802,7 @@ def _make_send(cfg: Backend):
                 # substrate resolves the blocked caller's `send` to
                 # `{"cancelled": True}`. Closing the turn out for the CLIENT is the
                 # one thing the abort cannot do — that is `on_cancel`'s job.
-                async with asyncio.timeout(cfg.send_timeout):
+                async with asyncio.timeout(SEND_TIMEOUT):
                     reply = await _run(
                         id,
                         text,
@@ -2824,7 +2814,7 @@ def _make_send(cfg: Backend):
             except TimeoutError:
                 await _emit_status(kernel, id, client_id, "done", reason="timeout")
                 return {
-                    "error": f"send: timeout after {cfg.send_timeout}s",
+                    "error": f"send: timeout after {SEND_TIMEOUT}s",
                     "client_id": client_id,
                 }
             except MemoryStoreError as e:
@@ -2858,7 +2848,7 @@ def _make_send(cfg: Backend):
         # OUTSIDE the lock — released by now, so a self-addressed follow-up can
         # acquire it. Detached (`spawn_task`) so THIS dispatch returns to its caller
         # immediately: awaiting a self-addressed send here would block on a lock we
-        # just held and deadlock until `send_timeout`. The task row makes the chain
+        # just held and deadlock until `SEND_TIMEOUT`. The task row makes the chain
         # visible in `ps` and reachable by `cancel`.
         if isinstance(reply, dict) and not reply.get("error"):
             coro = _route_reply(
@@ -2871,7 +2861,7 @@ def _make_send(cfg: Backend):
                 # The AI layer's per-tool-call deadline. The kernel defaults
                 # nothing; this is where a default belongs — the same knob
                 # that bounds a generation bounds a call to one.
-                cfg.send_timeout,
+                SEND_TIMEOUT,
                 # The text this turn ANSWERED — what tells routing whether
                 # this was a chain turn (a delivered reply) or a chat turn.
                 text,
@@ -2992,6 +2982,41 @@ async def on_cancel(id, task_id, kernel):
         send_id=entry.get("send_id"),
         started_at=entry.get("started_at"),
     )
+
+
+async def on_delete(agent) -> None:
+    """The `on_delete` bundle hook, SHARED by every backend (each re-exports it,
+    like `on_cancel`; vllm wraps it to drop its own table too). Drops every row
+    this module keeps for the deleted id, so an id re-created later starts clean
+    and nothing leaks (audit ARCH2-2): the FIFO lock and queue, the in-flight
+    entry, the projection and its marks, the fold and recall counters, the
+    calibration, the silent streaks, the strip set, and this kernel's head,
+    bodies, grants and watchers.
+
+    NOT `_incarnation`: it stays monotonic across a re-create, so a reply to a
+    call the deleted agent made never becomes a live turn of the new one."""
+    from ai_core.strategies.strip import _stripped
+
+    id = agent.id
+    for table in (
+        _locks,
+        _queue,
+        _current,
+        _projection,
+        _compaction_mark,
+        _view_source,
+        _folds_since,
+        _calib,
+        _reported,
+        _inflight,
+        _stripped,
+    ):
+        table.pop(id, None)
+    _recall_due.discard(id)
+    for chain in [c for c in _silent if c[0] == id]:
+        del _silent[chain]
+    for table in _mem(agent).values():
+        table.pop(id, None)
 
 
 async def _status(id, payload, kernel):
@@ -3334,10 +3359,10 @@ async def _context_recall(id, payload, kernel, cfg: Backend | None = None):
     head = sorted(picked)
     # 2. ONE MODEL CALL — the model chooses expansions; a bad answer changes nothing.
     why, degraded, expand = "mechanical fit", True, set()
-    provider = _providers.get(id)
-    if provider is None and cfg is not None and not payload.get("dry"):
+    provider = None
+    if cfg is not None and not payload.get("dry"):
         try:
-            provider = await _get_provider(id, kernel, cfg)
+            provider = await _build_provider(id, kernel, cfg)
         except Exception:
             provider = None
     if provider is not None and not payload.get("dry"):
@@ -3692,7 +3717,6 @@ def build(
     sentence: str,
     make_provider: Callable[[str, Any], Any],
     name: str,
-    module_name: str,
     extra_verbs: dict | None = None,
     reflect_extra: Callable | None = None,
 ) -> tuple[dict, Callable]:
@@ -3700,24 +3724,22 @@ def build(
 
     The verb closures capture the returned `Backend`, so the per-backend
     config (sentence, provider builder, error prefix) is
-    isolated; the module-global STATE (`_providers`, `_queue`, `_current`,
-    `_locks`) is shared and keyed by agent id, so multiple backends
-    coexist in one kernel.
+    isolated; the module-global STATE (`_queue`, `_current`, `_locks`, …) is
+    shared and keyed by agent id, so multiple backends coexist in one kernel.
 
     There is no `interrupt` verb: an in-flight `send` is a KERNEL task, killed
     with the universal `ps` → `cancel` system verbs. The turn-closing half is
-    the module-level `on_cancel` hook above — each backend re-exports it from
-    its `tools` module so the substrate discovers it, exactly as `reflect_extra`
-    / `make_provider` compose the rest of the shared machinery.
+    the module-level `on_cancel` hook above, and the teardown of a deleted id
+    is `on_delete` — each backend re-exports both from its `tools` module so
+    the substrate discovers them, exactly as `reflect_extra` / `make_provider`
+    compose the rest of the shared machinery.
 
     Args:
       sentence: the agent's one-line self-description (reflect `sentence`).
       make_provider: fn(id, kernel) -> Provider. May be sync OR
-        async (awaited if a coroutine). Called only on a `_providers`
-        cache miss — tests pre-seed `_providers[id]` to bypass it.
+        async (awaited if a coroutine). Called for EVERY turn
+        (`_build_provider`) — the record is read live, never cached.
       name: error-message prefix (e.g. "ollama_backend").
-      module_name: the calling bundle's tools module name (e.g.
-        "ollama_backend.tools"), used to read the LIVE SEND_TIMEOUT off it.
       extra_verbs: extra {verb_name: async fn(id, payload, kernel)} merged
         into VERBS. No bundle uses it today — the key-storage verbs it
         carried are gone (keys come from the environment).
@@ -3728,7 +3750,6 @@ def build(
         sentence=sentence,
         make_provider=make_provider,
         name=name,
-        module_name=module_name,
         extra_verbs=extra_verbs or {},
         reflect_extra=reflect_extra,
     )

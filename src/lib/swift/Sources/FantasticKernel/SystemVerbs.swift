@@ -392,6 +392,15 @@ extension Kernel {
                     "absent — root_path/ctx/parent name substrate wiring the "
                         + "record may not carry")
             }
+            // `children_dir` BECOMES A DIRECTORY (`<agent>/<children_dir>/<child>`),
+            // so it is one safe segment, exactly as an id is. A non-string is
+            // judged as "" — python refuses it as "a non-empty string" too.
+            if let cd = dict["children_dir"],
+                let bad = Refusal.guardAgentId(
+                    "create_agent", cd.asString ?? "", arg: "children_dir")
+            {
+                return bad
+            }
         }
 
         // Compose meta from extra payload fields.
@@ -496,13 +505,19 @@ extension Kernel {
         }
 
         // agent_created lifecycle event on the parent's inbox.
-        await emit(
-            parent.id,
-            .object([
-                "type": .string("agent_created"),
-                "id": .string(newAgent.id.value),
-                "agent": recordJson,
-            ]))
+        // BOOKKEEPING FROM ABOVE, like the boot: emitted as the root, the gate
+        // judged root→parent, and the root's `$children` baseline reaches depth 1
+        // only — a parent any deeper never got its event, operator creates
+        // included, and nothing said so (audit 2026-10-03, KV-4).
+        await KernelTaskLocals.$currentSender.withValue(nil) {
+            await emit(
+                parent.id,
+                .object([
+                    "type": .string("agent_created"),
+                    "id": .string(newAgent.id.value),
+                    "agent": recordJson,
+                ]))
+        }
 
         return recordJson
     }
@@ -588,10 +603,13 @@ extension Kernel {
         }
         // Fire bundle.on_delete hook (best-effort) — a hook that raises is
         // SAID, as python's `Agent.on_delete` prints it (stdout), and the
-        // cascade goes on.
+        // cascade goes on. The hook runs AS THE AGENT ITSELF (its own id is the
+        // sender), whoever asked for the delete — like `onCancel` (audit G-3).
         if let hm = target.handlerModule, let bundle = bundles.get(hm) {
             do {
-                try await bundle.onDelete(agentId: target.id, kernel: self)
+                try await KernelTaskLocals.$currentSender.withValue(target.id) {
+                    try await bundle.onDelete(agentId: target.id, kernel: self)
+                }
             } catch {
                 RuntimeLog.out(
                     "  [cascade] \(target.id.value) bundle on_delete raised: \(pyErrorText(error))")
@@ -643,6 +661,13 @@ extension Kernel {
                     "absent — handler_module is fixed at create_agent, and "
                         + "root_path/ctx/parent name substrate wiring the record "
                         + "may not carry")
+            }
+            // `children_dir` BECOMES A DIRECTORY — one safe segment, as at create.
+            if let cd = dict["children_dir"],
+                let bad = Refusal.guardAgentId(
+                    "update_agent", cd.asString ?? "", arg: "children_dir")
+            {
+                return bad
             }
         }
         // Patch = every field except type + id + parent_id.
@@ -789,12 +814,24 @@ extension Kernel {
             : "Bare agent (no handler_module) — answers substrate verbs only."
     }
 
-    /// Nested distilled subtree `{id, parent_id, handler_module,
-    /// display_name, description?, children}` (the `tree=all` shape;
-    /// children sorted by id).
-    func treeNode(_ agent: Agent) -> JSON {
+    /// Nested wiring subtree `{id, parent_id, handler_module, display_name,
+    /// description?, ...posture, children}` (the `detail:"full"` tree; children
+    /// in creation order).
+    ///
+    /// GATED PER NODE, as the roster is: `may` answers whether the caller may
+    /// `reflect` a node. The wiring view carries every node's `description` and
+    /// grant maps, so a caller allowed to reflect ONE agent read its whole
+    /// subtree's through `detail:"full"` — a depth-2 agent its siblings', through
+    /// its own parent (audit 2026-10-03, KV-3). A denied node keeps its `id` and
+    /// `children` (the shape is public through `tree=ids`) and nothing else.
+    func treeNode(_ agent: Agent, may: (Agent) -> Bool) -> JSON {
         var obj: OrderedDictionary<String, JSON> = [:]
         obj["id"] = .string(agent.id.value)
+        let kids = agent.childIds().compactMap { self.agent($0) }
+        guard may(agent) else {
+            obj["children"] = .array(kids.map { treeNode($0, may: may) })
+            return .object(obj)
+        }
         obj["parent_id"] = agent.parentId.map { .string($0.value) } ?? .null
         obj["handler_module"] = agent.handlerModule.map { .string($0) } ?? .null
         obj["display_name"] = .string(displayNameOrId(agent))
@@ -809,8 +846,7 @@ extension Kernel {
                 obj[key] = v
             }
         }
-        let kids = agent.childIds().compactMap { self.agent($0) }
-        obj["children"] = .array(kids.map { treeNode($0) })
+        obj["children"] = .array(kids.map { treeNode($0, may: may) })
         return .object(obj)
     }
 
@@ -826,7 +862,7 @@ extension Kernel {
     /// The INSTALLABLE-bundle catalog as `(name, handlerModule)` pairs, sorted
     /// by name — python's entry-point scan. The `bundles=all`/`bundles=ids`
     /// source; a test-registered fixture (`registerUnlisted`) is not in it,
-    /// exactly as an importable module with no entry point is not in python's.
+    /// exactly as a `register_unlisted` module is not in python's.
     func availableBundles() -> [(name: String, handlerModule: String)] {
         bundles.catalog()
             .map { (handlerModule, bundle) in (bundle.name, handlerModule) }

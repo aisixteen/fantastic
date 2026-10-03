@@ -18,7 +18,6 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
-from ai_core import core
 from web.app import make_app
 from web_ws.tools import _make_endpoint
 
@@ -32,7 +31,9 @@ class _ChunkProvider:
 
 
 @pytest.fixture
-def wired(seeded_kernel, store_agent):
+def wired(seeded_kernel, store_agent, fake_providers):
+    # `port`: the authority the web's Host guard admits (audit W-2).
+    seeded_kernel.create(None, id="test_web", port=8088)
     app = make_app("test_web", seeded_kernel)
     seeded_kernel.create(
         "web_ws.tools",
@@ -50,12 +51,9 @@ def wired(seeded_kernel, store_agent):
         **memory_meta(seeded_kernel, "c24_ai", {"cli": "*"}),
         callable_by={"c24_ws_leg": "*"},
     )
-    core._providers["c24_ai"] = _ChunkProvider()
-    try:
-        with TestClient(app) as c:
-            yield c
-    finally:
-        core._providers.pop("c24_ai", None)
+    fake_providers["c24_ai"] = _ChunkProvider()
+    with TestClient(app, headers={"host": "127.0.0.1:8088"}) as c:
+        yield c
 
 
 def test_token_stream_order_and_terminal_across_ws(wired):

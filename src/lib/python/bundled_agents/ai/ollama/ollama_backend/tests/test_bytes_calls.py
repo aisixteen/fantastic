@@ -1,8 +1,9 @@
-from ai_core import core as ot
 from test_send_to import _FakeProvider, _make_ollama, _until_calls  # noqa
 
 
-async def test_a_bytes_call_does_not_break_the_turn(seeded_kernel, store_agent):
+async def test_a_bytes_call_does_not_break_the_turn(
+    seeded_kernel, store_agent, fake_providers
+):
     oid = await _make_ollama(
         seeded_kernel, grants={store_agent: ["write_stream", "read_stream"]}
     )
@@ -11,7 +12,7 @@ async def test_a_bytes_call_does_not_break_the_turn(seeded_kernel, store_agent):
         '<path>p.py</path><truncate>true</truncate><bytes>print("hi")\n</bytes></call>'
     )
     fp = _FakeProvider([[call], ['<call name="done"></call>']])
-    ot._providers[oid] = fp
+    fake_providers[oid] = fp
     try:
         r = (
             await seeded_kernel.send(
@@ -24,10 +25,12 @@ async def test_a_bytes_call_does_not_break_the_turn(seeded_kernel, store_agent):
             fp.requests[1]
         )[-600:]
     finally:
-        ot._providers.pop(oid, None)
+        fake_providers.pop(oid, None)
 
 
-async def test_a_read_stream_reply_with_bytes_renders(seeded_kernel, store_agent):
+async def test_a_read_stream_reply_with_bytes_renders(
+    seeded_kernel, store_agent, fake_providers
+):
     oid = await _make_ollama(
         seeded_kernel, grants={store_agent: ["write_stream", "read_stream"]}
     )
@@ -40,7 +43,7 @@ async def test_a_read_stream_reply_with_bytes_renders(seeded_kernel, store_agent
         "<path>q.txt</path><offset>0</offset></call>"
     )
     fp = _FakeProvider([[w], [r], ['<call name="done"></call>']])
-    ot._providers[oid] = fp
+    fake_providers[oid] = fp
     try:
         await seeded_kernel.send(
             [{"target": oid, "payload": {"type": "send", "text": "go"}}]
@@ -50,11 +53,11 @@ async def test_a_read_stream_reply_with_bytes_renders(seeded_kernel, store_agent
         print("TURN3:", t3[-700:])
         assert "hello bytes" in t3, t3[-700:]
     finally:
-        ot._providers.pop(oid, None)
+        fake_providers.pop(oid, None)
 
 
 async def test_a_message_from_another_agent_opens_with_the_kernel_vouched_header(
-    seeded_kernel, store_agent
+    seeded_kernel, store_agent, fake_providers
 ):
     """The receiver sees WHO sent it, to WHOM, and under which number — from the
     dispatch context, not the sender's prose."""
@@ -78,7 +81,7 @@ async def test_a_message_from_another_agent_opens_with_the_kernel_vouched_header
         ]
     )
     fp = _FakeProvider([['<call name="done"></call>']])
-    ot._providers[oid] = fp
+    fake_providers[oid] = fp
     token = _current_sender.set("solver_1")
     try:
         out = await seeded_kernel.send(
@@ -102,4 +105,4 @@ async def test_a_message_from_another_agent_opens_with_the_kernel_vouched_header
         ), incoming[:200]
     finally:
         _current_sender.reset(token)
-        ot._providers.pop(oid, None)
+        fake_providers.pop(oid, None)

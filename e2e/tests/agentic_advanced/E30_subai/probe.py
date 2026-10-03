@@ -66,7 +66,7 @@ from helpers import (
     distinct_calls,
     verdict,
 )
-from helpers.kernel import open_kernel
+from helpers.kernel import WRAPS, open_kernel, wrap_with
 from helpers.rows import rows_for
 
 # The probe runs in a fresh tmpdir, and the `.env` autoloader reads CWD — so a key in
@@ -936,12 +936,10 @@ async def run(
 
         _errtask = asyncio.create_task(_wire_errspy())
     else:
-        import importlib
-
-        # the plug names its own bundle — no per-backend import branch
-        bt = importlib.import_module(_resolve_backend(BACKEND).handler_module)
-        spy_obj = Spy(bt.make_provider(aid, root))
-        core._providers[aid] = spy_obj
+        # NO CONNECT-TIME BUILD: `inner` is the provider ai_core builds for each
+        # turn (`wrap_with` seats it), so nothing is built before the first turn.
+        spy_obj = Spy(None)
+        WRAPS[aid] = wrap_with(spy_obj)
 
     total = sum(READINGS.values())
     brain_backend = brain_backend or BACKEND

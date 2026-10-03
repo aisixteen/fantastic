@@ -110,6 +110,9 @@ async def _seed(kernel) -> None:
             ingress_rule="allow_all_ingress",
             can_call={"sealed": "*", "kernel_state": "*"},
         )
+    # The web host the ws leg is mounted on: its `port` is the authority the Host
+    # guard admits (audit W-2), named by the ws client on its upgrade.
+    kernel.create(None, id="test_web", port=8088)
 
 
 # ─── the four modes ─────────────────────────────────────────────
@@ -133,7 +136,10 @@ async def _via_web_rest(kernel, target, payload):
 async def _via_web_ws(kernel, target, payload):
     app = make_app("test_web", kernel)
     app.add_api_websocket_route("/{host_id}/ws", _make_endpoint("ws_leg", kernel))
-    with TestClient(app) as c, c.websocket_connect("/kernel_state/ws") as ws:
+    with (
+        TestClient(app, headers={"host": "127.0.0.1:8088"}) as c,
+        c.websocket_connect("/kernel_state/ws") as ws,
+    ):
         ws.send_text(
             json.dumps(
                 {"type": "call", "target": target, "payload": payload, "id": "1"}

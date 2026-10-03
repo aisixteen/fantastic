@@ -152,6 +152,11 @@ public final class ResponsesBundle: AgentBundle, @unchecked Sendable {
         await core.onCancel(agentId: agentId, taskId: taskId, kernel: kernel)
     }
 
+    /// The shared delete hook: the deleted id's AI-core rows go with it.
+    public func onDelete(agentId: AgentId, kernel: Kernel) async throws {
+        await core.onDelete(agentId: agentId, kernel: kernel)
+    }
+
     /// python `int(rec.get("max_tokens") or MAX_TOKENS)` — absent, null or 0 is the
     /// default.
     static func maxTokens(_ raw: JSON?) -> Int64 {
@@ -297,7 +302,9 @@ struct ResponsesProvider: AIProvider {
                         let code = Int(response.status.code)
                         if code >= 400 {
                             let collected = try? await response.body.collect(upTo: 1 << 20)
-                            let detail = collected.map { String(buffer: $0) } ?? ""
+                            // an endpoint may echo the request: the key leaves scrubbed
+                            let detail = withoutKey(
+                                collected.map { String(buffer: $0) } ?? "", apiKey)
                             let ctype = response.headers.first(name: "content-type") ?? ""
                             if !(Self.transportCodes.contains(code)
                                 && !ctype.lowercased().contains("json")
@@ -319,7 +326,8 @@ struct ResponsesProvider: AIProvider {
                                 if let n = d.promptTokens { usage?.lastPromptTokens = n }
                                 for token in d.tokens { continuation.yield(.token(token)) }
                                 if let err = d.error {
-                                    continuation.finish(throwing: PyError("RuntimeError", err))
+                                    continuation.finish(
+                                        throwing: PyError("RuntimeError", withoutKey(err, apiKey)))
                                     return
                                 }
                                 if d.done { break }
@@ -341,6 +349,13 @@ struct ResponsesProvider: AIProvider {
                             continuation.finish()
                             return
                         }
+                    } catch let e as HTTPClientError
+                        where e.shortDescription == "Invalid header field values"
+                    {
+                        // The client refused a header value and its error QUOTES it —
+                        // the key. A fixed text instead, rust's (audit S1).
+                        continuation.finish(throwing: PyError("RuntimeError", ILLEGAL_HEADER_TEXT))
+                        return
                     } catch {
                         continuation.finish(throwing: error)
                         return

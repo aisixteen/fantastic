@@ -136,7 +136,7 @@ requirements:
     title: "a ref answers only the agents its grant names — to anyone else it does not exist — and a listing shows metadata, never a value"
   - id: CRED-4
     level: MUST
-    title: "a read pinned to a host is refused unless the ref is bound to that host"
+    title: "a ref is bound to the host of its declaration — `set` takes no host — and a read pinned to a host is refused unless the ref is bound to that host"
   - id: CRED-5
     level: MUST
-    title: "forget drops the value and the ref"
+    title: "forget drops the value and keeps the declaration; only update_agent declares or undeclares a ref"

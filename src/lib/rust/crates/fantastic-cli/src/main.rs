@@ -24,7 +24,7 @@
 
 use fantastic_bundle::{is_space, py_int, py_json_dumps};
 use fantastic_kernel::bootstrap::{self, BootedKernel, BootstrapOptions, DEFAULT_ROOT_ID};
-use fantastic_kernel::{lock, AgentId, BundleRegistry, Item};
+use fantastic_kernel::{lock, AgentId, BundleRegistry, Item, KernelError};
 use serde_json::{json, Map, Value};
 use std::path::Path;
 use std::process::ExitCode;
@@ -71,9 +71,9 @@ fn register_default_bundles() -> BundleRegistry {
     // in process. A compiled kernel can only run what is compiled in, and the
     // e2e driver reaches this binary over REST, so without these three the
     // scenarios naming them are SKIPPED. Behind a feature: a default build has
-    // none of it. UNLISTED: python imports these from `e2e/probes` with no
-    // `fantastic.bundles` entry point, so they dispatch but never appear in the
-    // `bundles` catalog.
+    // none of it. UNLISTED: python registers these from `e2e/probes` with
+    // `register_unlisted` (no `fantastic.bundles` entry point), so they dispatch
+    // but never appear in the `bundles` catalog.
     #[cfg(feature = "scenario-probes")]
     {
         use fantastic_scenario_probes as probes;
@@ -179,6 +179,29 @@ async fn main() -> ExitCode {
             eprintln!("[kernel] {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// A one-shot's bootstrap (`call`, `init`): the disk kernel WITH the workdir lock
+/// — the daemon's own flock, taken by the bootstrap. A live holder is `Ok(None)`
+/// after `refusal(pid)` (the pid its file names) went to stderr, and the caller
+/// exits with status 1. There is no pid pre-check: a lock file naming a pid that
+/// is alive but holds no flock (a reused pid) is stale, and taken over (owner,
+/// 2026-10-03). Python `modes/dispatch.py:_lock_or_exit`.
+fn one_shot_bootstrap(
+    workdir: &Path,
+    refusal: impl FnOnce(u32) -> String,
+) -> Result<Option<BootedKernel>, Box<dyn std::error::Error>> {
+    match bootstrap::bootstrap(
+        register_default_bundles(),
+        BootstrapOptions::daemon(workdir),
+    ) {
+        Ok(booted) => Ok(Some(booted)),
+        Err(KernelError::LockHeld { pid }) => {
+            eprintln!("{}", refusal(pid));
+            Ok(None)
+        }
+        Err(e) => Err(e.into()),
     }
 }
 
@@ -341,7 +364,9 @@ async fn dispatch(
     // `.fantastic/agent.yaml` gets NOTHING — rust used to write the readme and
     // the whole docs tree on every invocation (measured 2026-09-20). A missing
     // OR unparseable record reseeds, as `bootstrap`'s own `seeded` does.
-    // Best-effort: if the workdir can't be written to, the verb may still work.
+    // A failed seed write FAILS the invocation, as python's `write_record`
+    // raises: it was ignored, so a doc tree that never landed was invisible
+    // (audit 2026-10-03, ARCH2-9).
     if fantastic_kernel::persistence::read_record_at(
         &workdir.join(fantastic_kernel::persistence::ROOT_RECORD_PATH),
     )
@@ -349,7 +374,7 @@ async fn dispatch(
     .flatten()
     .is_none()
     {
-        let _ = fantastic_core::seed_root_readme(&workdir);
+        fantastic_core::seed_root_readme(&workdir)?;
     }
 
     // Mode 1: `help` / `-h` / `--help` as the FIRST word — later words are
@@ -428,21 +453,16 @@ async fn dispatch(
             booted.kernel.shutdown().await;
             return Ok(ExitCode::from(2));
         }
-        // The lock is probed BEFORE the bootstrap that would take it — same
-        // shape as A14.7's `call` probe, `[init]`-prefixed.
-        if let Some(pid) = lock::current_holder(&workdir).ok().flatten() {
-            if lock::pid_alive(pid) {
-                eprintln!(
-                    "[init] another fantastic owns this dir (pid={pid}). \
-                     Stop it first."
-                );
-                return Ok(ExitCode::from(1));
-            }
-        }
         let loader_name = rest[0].clone();
         let manifest = rest[1].clone();
-        let opts = BootstrapOptions::daemon(&workdir);
-        let booted = bootstrap::bootstrap(register_default_bundles(), opts)?;
+        // THE DAEMON'S OWN LOCK — the flock the bootstrap takes; a live holder
+        // refuses with `init`'s line (see [`one_shot_bootstrap`]).
+        let Some(booted) = one_shot_bootstrap(&workdir, |pid| {
+            format!("[init] another fantastic owns this dir (pid={pid}). Stop it first.")
+        })?
+        else {
+            return Ok(ExitCode::from(1));
+        };
         apply_ledger_cap(&booted, cap);
         let root_id = booted.kernel.root().expect("root").id.clone();
         // Boot the root loader so the new record subscribes + persists.
@@ -484,20 +504,6 @@ async fn dispatch(
     // Mode 3: `<id> <verb> [k=v ...]`. `boot` is an agent id like any other
     // (A14.11) — python routes `boot x` here, it never means "daemon".
     if args.len() >= 2 {
-        // A14.7 — the lock is probed BEFORE the bootstrap that would take it, so
-        // the refusal is python's line rather than the kernel's LockHeld text. A
-        // malformed lock.yaml reads as "nobody holds it", as python's `_read_lock`
-        // does.
-        if let Some(pid) = lock::current_holder(&workdir).ok().flatten() {
-            if lock::pid_alive(pid) {
-                eprintln!(
-                    "[call] another fantastic owns this dir (pid={pid}). \
-                     Stop it, or forward your call over the WS bridge \
-                     (see ws_bridge bundle)."
-                );
-                return Ok(ExitCode::from(1));
-            }
-        }
         let id = args[0].clone();
         let verb = args[1].clone();
         let mut payload = Map::new();
@@ -507,8 +513,18 @@ async fn dispatch(
                 payload.insert(k.to_string(), parse_kv(v));
             }
         }
-        let opts = BootstrapOptions::daemon(&workdir);
-        let booted = bootstrap::bootstrap(register_default_bundles(), opts)?;
+        // A14.7 — THE DAEMON'S OWN LOCK, the flock the bootstrap takes; a live
+        // holder refuses with python's `[call]` line, not the kernel's LockHeld
+        // text (see [`one_shot_bootstrap`]).
+        let Some(booted) = one_shot_bootstrap(&workdir, |pid| {
+            format!(
+                "[call] another fantastic owns this dir (pid={pid}). Stop it, or forward \
+                 your call over the WS bridge (see ws_bridge bundle)."
+            )
+        })?
+        else {
+            return Ok(ExitCode::from(1));
+        };
         apply_ledger_cap(&booted, cap);
         // BOOT THE ROOT LOADER so this call's mutations (create/update/delete)
         // subscribe and persist. The debounce never ticks before we exit, so
@@ -790,9 +806,10 @@ mod stop_signal_tests {
     }
 }
 
-/// C10 — the `bundles` catalog lists INSTALLABLE bundles only. python imports the
-/// e2e probes from `e2e/probes` with no `fantastic.bundles` entry point, so they
-/// dispatch but never reach `reflect bundles=ids`.
+/// C10 — the `bundles` catalog lists INSTALLABLE bundles only. python registers
+/// the e2e probes from `e2e/probes` with `register_unlisted` (no
+/// `fantastic.bundles` entry point), so they dispatch but never reach
+/// `reflect bundles=ids`.
 #[cfg(all(test, feature = "scenario-probes"))]
 mod catalog_tests {
     use super::register_default_bundles;

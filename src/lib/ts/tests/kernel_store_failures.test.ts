@@ -54,13 +54,15 @@ function kernel(rootModule: string | null = null): { k: Kernel; spy: Spy; boots:
   return { k, spy, boots };
 }
 
-/** Started, with the background flusher cancelled: every flush below is the test's. */
+/** Started, with the background flusher switched off: every flush below is the
+ *  test's. (`cancel` refuses the flusher — a kernel service task — so the test
+ *  drops its row and its handle itself.) */
 async function started(k: Kernel): Promise<void> {
   const out = (await startKernel(k, false)) as Payload;
   assert.equal(out["started"], true, JSON.stringify(out));
   const fid = k.store.flusherTask as number;
-  const c = (await k.send([{ target: "kernel", payload: { type: "cancel", task_id: fid } }]))[0]!;
-  assert.deepEqual(c.result, { cancelled: true, killed: [fid] });
+  k.store.flusherTask = null;
+  k.tasks.done(fid);
 }
 
 async function say(k: Kernel, id: string, reply: Json): Promise<Outcome> {

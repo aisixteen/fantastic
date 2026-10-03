@@ -4,12 +4,13 @@ real reply, while every record and mirror of the call shows `<secret>`."""
 
 from __future__ import annotations
 
-import sys
 import types
 
+from kernel import current_secret, register_unlisted
 from kernel._secret import PLACEHOLDER
 
 KEY = "sk-live-0123456789abcdef"
+KEY2 = "sk-live-dotted-key-5a5a5a5a"
 ISSUED = "tok-issued-fedcba9876543210"
 
 _got: list[dict] = []
@@ -26,13 +27,19 @@ async def _probe(id, payload, kernel):
         return {"key": ISSUED, "note": "issued"}
     if verb == "fail":
         raise RuntimeError(f"rejected key {payload['key']}")
+    if verb == "hold":
+        return {"ok": True}
+    if verb == "marks":
+        return {"marks": list(current_secret())}
+    if verb == "issue_dotted":
+        return {"a.b": ISSUED, "a": {"b": "nested-plain"}, "items": ["x", ISSUED]}
     return {"error": f"unknown verb {verb!r}"}
 
 
 _mod = types.ModuleType("secret_probe.tools")
 _mod.handler = _probe
 _mod.VERBS = {}
-sys.modules["secret_probe.tools"] = _mod
+register_unlisted("secret_probe.tools", _mod)
 
 
 async def _mk(k, aid="vault") -> str:
@@ -339,3 +346,208 @@ async def test_a_short_secret_never_mangles_the_kernels_own_words(seeded_kernel)
     assert out["status"] == "completed"
     mine = next(e for e in await _ledger(k) if e.get("name") == "short-1")
     assert mine["status"] == "completed" and mine["outcome"]["status"] == "completed"
+
+
+# ─── a mark as an ARRAY OF STEPS (owner, 2026-10-03) ─────────────────────────
+
+
+async def test_an_array_mark_masks_a_literal_dotted_key_and_a_dotted_one_does_not(
+    seeded_kernel,
+):
+    """`["payload", "a.b"]` is the key `"a.b"`, taken literally; the dotted string
+    `payload.a.b` keeps meaning `a` → `b`."""
+    k = seeded_kernel
+    a = await _mk(k)
+    events: list[dict] = []
+    k.ctx.add_state_subscriber(events.append)
+    _got.clear()
+    sent = {"type": "hold", "a.b": KEY, "a": {"b": "nested-plain"}}
+    out = (
+        await k.send([{"target": a, "payload": sent, "secret": [["payload", "a.b"]]}])
+    )[0]
+    assert out["status"] == "completed" and out["result"] == {"ok": True}, out
+    assert _got == [sent], "the target gets the real payload"
+    row = _call_row(k, out["pid"])
+    assert row["payload"] == {
+        "type": "hold",
+        "a.b": PLACEHOLDER,
+        "a": {"b": "nested-plain"},
+    }, row
+    assert row["secret"] == [["payload", "a.b"]], row
+    sends = [e for e in events if e.get("kind") == "send" and e.get("agent_id") == a]
+    assert sends and not any(_mentions(e, KEY) for e in sends), sends
+    assert not _mentions(await _ledger(k), KEY)
+    # the dotted spelling of the same text is the NESTED path
+    out = (
+        await k.send(
+            [
+                {
+                    "target": a,
+                    "payload": {
+                        "type": "hold",
+                        "a.b": "literal-plain",
+                        "a": {"b": KEY},
+                    },
+                    "secret": ["payload.a.b"],
+                }
+            ]
+        )
+    )[0]
+    assert _call_row(k, out["pid"])["payload"] == {
+        "type": "hold",
+        "a.b": "literal-plain",
+        "a": {"b": PLACEHOLDER},
+    }
+
+
+async def test_a_mixed_list_of_string_and_array_marks(seeded_kernel):
+    """Both spellings in one list: every payload and result mark masks, the call
+    row records the marks as given, and the handler reads them back as given."""
+    k = seeded_kernel
+    a = await _mk(k)
+    marks = [
+        "payload.key",
+        ["payload", "a.b"],
+        ["result", "a.b"],
+        ["result", "items", 1],
+    ]
+    out = (
+        await k.send(
+            [
+                {
+                    "target": a,
+                    "payload": {"type": "issue_dotted", "key": KEY, "a.b": KEY2},
+                    "id": "mixed-1",  # named: the settle keeps the whole result
+                    "secret": marks,
+                }
+            ]
+        )
+    )[0]
+    assert out["result"] == {
+        "a.b": ISSUED,
+        "a": {"b": "nested-plain"},
+        "items": ["x", ISSUED],
+    }, "the caller holds the real reply"
+    row = _call_row(k, out["pid"])
+    assert row["secret"] == marks, row
+    assert row["payload"] == {
+        "type": "issue_dotted",
+        "key": PLACEHOLDER,
+        "a.b": PLACEHOLDER,
+    }, row
+    led = await _ledger(k)
+    assert not any(_mentions(led, v) for v in (KEY, KEY2, ISSUED)), led
+    mine = next(e for e in led if e.get("name") == "mixed-1")
+    assert mine["outcome"]["result"] == {
+        "a.b": PLACEHOLDER,
+        "a": {"b": "nested-plain"},
+        "items": ["x", PLACEHOLDER],
+    }, mine
+    # `current_secret()` is the marks exactly as given, an array as a list
+    got = (
+        await k.send(
+            [
+                {
+                    "target": a,
+                    "payload": {"type": "marks", "key": KEY, "a.b": KEY2},
+                    "secret": marks,
+                }
+            ]
+        )
+    )[0]
+    assert got["result"] == {"marks": marks}, got
+
+
+async def test_array_steps_are_exact_an_int_indexes_a_list_a_string_names_a_key(
+    seeded_kernel,
+):
+    k = seeded_kernel
+    a = await _mk(k)
+    payload = {"type": "hold", "items": [KEY, "plain"], "m": {"0": KEY2}}
+    for secret, shown in (
+        ([["payload", "items", 0]], {**payload, "items": [PLACEHOLDER, "plain"]}),
+        ([["payload", "m", "0"]], {**payload, "m": {"0": PLACEHOLDER}}),
+        (["payload.items.0"], {**payload, "items": [PLACEHOLDER, "plain"]}),
+    ):
+        out = (await k.send([{"target": a, "payload": payload, "secret": secret}]))[0]
+        assert out["status"] == "completed", (secret, out)
+        assert _call_row(k, out["pid"])["payload"] == shown, secret
+    # a string step is never an index, an int step never a key
+    for secret in ([["payload", "items", "0"]], [["payload", "m", 0]]):
+        out = (await k.send([{"target": a, "payload": payload, "secret": secret}]))[0]
+        assert out["result"]["error"] == (
+            f"send: secret path {secret[0]!r} names nothing in the payload"
+        ), out
+
+
+async def test_each_malformed_mark_is_refused_with_its_own_text(seeded_kernel):
+    """The array refusals, and the dotted-string ones byte for byte unchanged."""
+    k = seeded_kernel
+    a = await _mk(k)
+    _got.clear()
+    step = (
+        "is neither a string (an object key) nor a non-negative integer (a list index)"
+    )
+    root = "must start with 'payload' and a step under it, or with 'result'"
+    for secret, text in (
+        ([[]], "path [] has no steps"),
+        ([["payload", True]], f"path ['payload', True] step True {step}"),
+        ([["payload", 1.5]], f"path ['payload', 1.5] step 1.5 {step}"),
+        ([["payload", None]], f"path ['payload', None] step None {step}"),
+        ([["payload", -1]], f"path ['payload', -1] step -1 {step}"),
+        ([["payload", ["a"]]], f"path ['payload', ['a']] step ['a'] {step}"),
+        ([["key"]], f"path ['key'] {root}"),
+        ([[0, "key"]], f"path [0, 'key'] {root}"),
+        ([["payload"]], f"path ['payload'] {root}"),
+        (
+            [["payload", "type"]],
+            "cannot hide payload.type — the verb is how every row is read",
+        ),
+        (
+            [["payload", "nope"]],
+            "path ['payload', 'nope'] names nothing in the payload",
+        ),
+        (
+            [["payload", "a", "b"]],
+            "path ['payload', 'a', 'b'] names nothing in the payload",
+        ),
+        (
+            ["payload.key", ["payload", "nope"]],
+            "path ['payload', 'nope'] names nothing in the payload",
+        ),
+        ([5], "path must be a dotted string or an array of steps, got 5"),
+        (
+            [{"payload": "key"}],
+            "path must be a dotted string or an array of steps, got {'payload': 'key'}",
+        ),
+        # the dotted-string texts, unchanged
+        ("payload.key", "must be a non-empty list of paths, got 'payload.key'"),
+        ([], "must be a non-empty list of paths, got []"),
+        ([""], "path must be a non-empty string, got ''"),
+        (["payload..key"], "path 'payload..key' has an empty step"),
+        (["key"], "path 'key' must start with 'payload.' or be 'result[.…]'"),
+        (["payload"], "path 'payload' must start with 'payload.' or be 'result[.…]'"),
+        (
+            ["payload.type"],
+            "cannot hide payload.type — the verb is how every row is read",
+        ),
+        (["payload.a.b"], "path 'payload.a.b' names nothing in the payload"),
+    ):
+        out = (
+            await k.send(
+                [
+                    {
+                        "target": a,
+                        "payload": {"type": "set_key", "key": KEY, "a.b": KEY2},
+                        "secret": secret,
+                    }
+                ]
+            )
+        )[0]
+        assert out["status"] == "failed" and out["pid"] is None, (secret, out)
+        assert out["result"] == {
+            "error": f"send: secret {text}",
+            "reason": "bad_arg",
+            "arg": "secret",
+        }, (secret, out["result"])
+    assert _got == [], "a refused item must not reach the handler"

@@ -237,3 +237,62 @@ async fn an_unknown_structural_token_is_refused() {
     assert_eq!(r["side"], "delegation", "{r}");
     assert!(r["error"].as_str().unwrap().contains("$everything"), "{r}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn placement_for_a_relayed_caller_is_judged_as_anywhere_else() {
+    // A foreign caller a bridge leg relays owns no subtree here (audit
+    // 2026-10-03, G-1): placing under the leg or its child takes the path any
+    // other placement takes — the leg's egress, then the parent's ingress
+    // against `<guid>|<agent>`.
+    let (_t, kernel) = mk();
+    seed(&kernel, "leg", "kernel_state", json!({})).await;
+    seed(&kernel, "kid", "leg", json!({})).await;
+    let relayed = |parent: &'static str, id: &'static str| {
+        let kernel = Arc::clone(&kernel);
+        async move {
+            let p = json!({"type": "create_agent", "parent_id": parent, "id": id,
+                           "handler_module": "noop.tools"});
+            fantastic_kernel::send::with_sender(
+                AgentId::from("leg"),
+                fantastic_kernel::send::with_remote_caller(
+                    AgentId::from("leg"),
+                    "g9|scout".to_string(),
+                    async move {
+                        kernel
+                            .send(vec![Item::new(AgentId::from("kernel"), p)])
+                            .await
+                            .remove(0)
+                            .result
+                    },
+                ),
+            )
+            .await
+        }
+    };
+    let r = relayed("kid", "mole").await;
+    assert_eq!(
+        r,
+        json!({"error": "leg may not create under kid", "reason": "unauthorized",
+               "hint": fantastic_kernel::authz::FROM_ABOVE, "side": "egress"}),
+        "{r}"
+    );
+    let r = relayed("leg", "mole").await;
+    assert_eq!(
+        r,
+        json!({"error": "leg does not accept a child from g9|scout", "reason": "unauthorized",
+               "hint": fantastic_kernel::authz::FROM_ABOVE, "side": "ingress"}),
+        "{r}"
+    );
+    assert!(!kernel.agents.contains_key(&AgentId::from("mole")));
+    // the parent naming the peer opens it
+    kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type": "update_agent", "id": "leg",
+                   "callable_by": {"$self": "*", "$parent": "*", "$children": "*",
+                                   "g9|scout": ["create_agent"]}}),
+        )])
+        .await;
+    let ok = relayed("leg", "planted").await;
+    assert_eq!(ok["id"], "planted", "{ok}");
+}

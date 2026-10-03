@@ -43,6 +43,7 @@ from io_bridge import (
 )
 from web_rest.tools import _make_post_endpoint
 from web_ws._proxy import run as ws_run
+from kernel import register_unlisted
 
 # ─── the far kernel's probe ──────────────────────────────────────────────────
 
@@ -66,7 +67,7 @@ async def _echo(id, payload, kernel):
 _mod = types.ModuleType("binpath_echo.tools")
 _mod.handler = _echo
 _mod.VERBS = {}
-sys.modules["binpath_echo.tools"] = _mod
+register_unlisted("binpath_echo.tools", _mod)
 
 SENT = {"type": "take", "a": {"b": "kept"}, "a.b": b"\x00raw\xff"}
 BACK = {"keys": ["a", "a.b", "type"], "x.y": b"\x00raw\xff", "x": {"y": "kept"}}

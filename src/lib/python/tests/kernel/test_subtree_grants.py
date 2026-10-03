@@ -95,15 +95,33 @@ def test_a_heritable_entry_never_grants_its_holder():
 
 def test_authorize_heritable_named_and_wildcard():
     named = [{"served": {"verbs": ["list", "allow"], "for": "descendants"}}]
-    assert authorize_heritable(named, "list", "served").allowed
-    assert authorize_heritable(named, "allow", "served").allowed  # named privileged
-    assert not authorize_heritable(named, "mkdir", "served").allowed
-    assert not authorize_heritable(named, "list", "other").allowed
+    assert authorize_heritable(named, "list", "served", "root").allowed
+    assert authorize_heritable(
+        named, "allow", "served", "root"
+    ).allowed  # named privileged
+    assert not authorize_heritable(named, "mkdir", "served", "root").allowed
+    assert not authorize_heritable(named, "list", "other", "root").allowed
     wild = [{"served": {"verbs": ["*"], "for": "descendants"}}]
-    assert authorize_heritable(wild, "list", "served").allowed
-    assert not authorize_heritable(wild, "allow", "served").allowed  # `*` ≠ privileged
+    assert authorize_heritable(wild, "list", "served", "root").allowed
+    assert not authorize_heritable(
+        wild, "allow", "served", "root"
+    ).allowed  # `*` ≠ privileged
     # a plain entry in an ancestor is NOT heritable
-    assert not authorize_heritable([{"served": ["list"]}], "list", "served").allowed
+    assert not authorize_heritable(
+        [{"served": ["list"]}], "list", "served", "root"
+    ).allowed
+
+
+def test_a_heritable_wildcard_on_the_root_does_not_cover_watch():
+    """KV-2: `{<root>: {verbs:["*"], for:"descendants"}}` covers ordinary verbs on
+    the root, never `watch` (as a structural wildcard); a NAMED `watch` does."""
+    wild = [{"root": {"verbs": ["*"], "for": "descendants"}}]
+    assert authorize_heritable(wild, "list_agents", "root", "root").allowed
+    assert not authorize_heritable(wild, "watch", "root", "root").allowed
+    named = [{"root": {"verbs": ["watch"], "for": "descendants"}}]
+    assert authorize_heritable(named, "watch", "root", "root").allowed
+    other = [{"x": {"verbs": ["*"], "for": "descendants"}}]
+    assert authorize_heritable(other, "watch", "x", "root").allowed
 
 
 # ─── the live gate ──────────────────────────────────────────────

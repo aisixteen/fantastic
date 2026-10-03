@@ -61,6 +61,15 @@ public enum KernelTaskLocals {
     /// refuse as new work. Python `_in_shutdown` / `shutdown_context()`.
     @TaskLocal public static var inShutdown: Bool = false
 
+    /// THE LEDGER FLUSH IS SILENT on the state stream (owner 2026-10-03, audit
+    /// CLI-B). The kernel's own flush `send` — and every send, emit and state
+    /// event inside its execution (the store's dispatch, its drain) — publishes
+    /// nothing: a subscriber woken by the flush (a long-poll `events` waiter)
+    /// made a call, the call made rows, the rows made the next flush, forever,
+    /// filling the store. The rows stay recorded by the flush row. Inherited by
+    /// every `Task {}` the flush starts, like python's `_state_quiet` contextvar.
+    @TaskLocal static var stateQuiet: Bool = false
+
     /// The row THIS Swift task runs under — stamped only by the table's own
     /// runners (`spawnTask`, `runDispatch`), never inherited as a parent link
     /// the way `currentTask` may be. `TaskTable.isRegistered` reads it: python
@@ -88,13 +97,15 @@ public enum KernelTaskLocals {
     /// Python `current_remote_caller()`.
     @TaskLocal public static var currentRemote: String? = nil
 
-    /// THE SECRET PATHS of the call this dispatch serves — the `secret` its
-    /// caller marked on the batch item (`Secret`), as given
-    /// (`payload.<field…>` / `result[.<field…>]`); empty when none were marked.
-    /// Set per dispatch task, so a handler's own sends never inherit it. A bundle
-    /// that must only ever be called WITH a mark (a credential store) reads it
-    /// and refuses an unmarked call. Python `current_secret()`.
-    @TaskLocal public static var currentSecret: [String] = []
+    /// THE SECRET MARKS of the call this dispatch serves — the `secret` its
+    /// caller marked on the batch item (`Secret`), exactly as given and in order:
+    /// each a dotted string (`payload.<field…>` / `result[.<field…>]`) or an
+    /// array of steps (`["payload", <step>, …]` / `["result", <step>…]`); empty
+    /// when none were marked. Set per dispatch task, so a handler's own sends
+    /// never inherit it. A bundle that must only ever be called WITH a mark (a
+    /// credential store) reads it and refuses an unmarked call. Python
+    /// `current_secret()`.
+    @TaskLocal public static var currentSecret: [JSON] = []
 
     /// Called once a batch item's dispatch has FANNED OUT (its `send` reached the
     /// target's watchers) — the turnstile `send` uses to start the items of one
@@ -113,6 +124,17 @@ public enum KernelTaskLocals {
     /// its dispatches before the `send` that spawned it hands its reply back).
     /// Cleared for every handler, like `onFanout`.
     @TaskLocal public static var onBatchLaunched: (@Sendable () -> Void)? = nil
+
+    /// WHO a call is, for the one rule that compares two calls' callers (a join
+    /// of a secret-marked execution): the sending agent's id; the qualified
+    /// `<guid>|<agent>` when a bridge leg relays a foreign caller (`remoteCaller`
+    /// names the leg that is sending); `nil` for the operator. Python
+    /// `_caller_identity()`.
+    static func callerIdentity() -> String? {
+        guard let sender = currentSender else { return nil }
+        if let rc = remoteCaller, rc.leg == sender { return rc.address }
+        return sender.value
+    }
 
     /// Mark the enclosed sends as `leg` relaying `address`'s call. Python
     /// `remote_caller_context(leg_id, address)`.
@@ -231,6 +253,24 @@ public final class Kernel: @unchecked Sendable {
     /// projection over both. See `Ledger.swift`, `KernelStore.swift`.
     public let ledger = ExecutionLedger()
 
+    /// Did the execution a batch item's `id` names — resolved as `send` resolves
+    /// it: an int is a message id, a string a caller's NAME — carry `secret`
+    /// marks? False when it names no execution held in RAM (the send itself
+    /// answers that id; one replayed from the store answers a refusal, never a
+    /// value). Asked by ai_core before it dispatches a model-parsed call that
+    /// would JOIN an execution: a model never receives a secret. Python
+    /// `Kernel.carried_secret`.
+    public func carriedSecret(_ itemId: JSON) -> Bool {
+        let eid: Int64?
+        switch itemId {
+        case .integer(let n): eid = n
+        case .string(let s): eid = ledger.resolveName(s)
+        default: return false
+        }
+        guard let eid else { return false }
+        return ledger.secret(eid) != nil
+    }
+
     /// THE ONE COUNTER. Every id in the kernel — a call (one per batch item), a
     /// forked task, a settle, a conversation row an AI agent writes to its store
     /// — is the next value of this int64. Kernel-wide and monotonic.
@@ -283,15 +323,17 @@ public final class Kernel: @unchecked Sendable {
     /// `k.QUIET_TIMEOUT`; the constant is `Kernel.QUIET_TIMEOUT`.
     var quietTimeout: Double = Kernel.QUIET_TIMEOUT
 
-    /// CONNECTED PEER KERNELS — guid → the route to it (owner, 2026-09-30). An
-    /// agent on another kernel is addressed `<guid>|<agent id>`; when that guid is
-    /// here, `send` hands the call to its route and the reply is the call's
-    /// ordinary outcome. A TRANSPORT registers the peer it is connected to (the web
-    /// ws leg when a page says `hello`) and unregisters it when the connection ends
-    /// — the transport only carries frames; addressing is the kernel's. A guid that
-    /// is not here is an unknown target like any other. See `Peers.swift`.
+    /// CONNECTED PEER KERNELS — guid → the LIVE routes to it (owner, 2026-09-30;
+    /// a set per guid, 2026-10-03: the tabs of one identity are one principal).
+    /// An agent on another kernel is addressed `<guid>|<agent id>`; when that guid
+    /// is here, `send` hands the call to its routes and the first reply is the
+    /// call's ordinary outcome. A TRANSPORT registers the peer it is connected to
+    /// (the web ws leg when a page says `hello`) and unregisters it when the
+    /// connection ends — the transport only carries frames; addressing is the
+    /// kernel's. A guid that is not here is an unknown target like any other. See
+    /// `Peers.swift`.
     let peersLock = NSLock()
-    var _peers: [String: PeerRoute] = [:]
+    var _peers: [String: [PeerRoute]] = [:]
 
     public init(
         storage: StorageMode = .inMemory,
@@ -628,7 +670,8 @@ public final class Kernel: @unchecked Sendable {
         subscriberLock.lock()
         let subs = _subscribers
         subscriberLock.unlock()
-        if subs.isEmpty { return }
+        // Nothing inside the kernel's own ledger flush is published (audit CLI-B).
+        if subs.isEmpty || KernelTaskLocals.stateQuiet { return }
         var stamped = event
         if case .object(var o) = event {
             o["ts"] = .double(Date().timeIntervalSince1970)

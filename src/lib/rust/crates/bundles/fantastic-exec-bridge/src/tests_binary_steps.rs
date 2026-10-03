@@ -42,11 +42,18 @@ impl Bundle for BinEcho {
     }
     async fn handle_binary(
         &self,
-        _id: &AgentId,
+        id: &AgentId,
         header: Value,
         body: Option<Blob>,
-        _kernel: &Arc<Kernel>,
+        kernel: &Arc<Kernel>,
     ) -> Result<(Reply, Option<Blob>), BundleError> {
+        // the kernel dispatches EVERY call here — lifecycle verbs are not a take
+        if matches!(
+            header["type"].as_str(),
+            Some("boot" | "shutdown" | "reflect")
+        ) {
+            return Ok((self.handle(id, &header, kernel).await?, None));
+        }
         let mut keys: Vec<String> = header
             .as_object()
             .map(|m| m.keys().cloned().collect())

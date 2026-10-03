@@ -84,11 +84,7 @@ pub(crate) async fn store_read(
     store_id: &AgentId,
     payload: Value,
 ) -> (Value, Option<Vec<u8>>) {
-    store_send(
-        kernel,
-        Item::new(store_id.clone(), payload).with_raw_reply(),
-    )
-    .await
+    store_send(kernel, Item::new(store_id.clone(), payload)).await
 }
 
 /// The write half of [`store_read`]: `payload` names the `bytes` slot (null) in
@@ -556,10 +552,24 @@ pub async fn seed_readme(
         format!("{reldir}/")
     };
     if let Some(readme) = readme {
-        seed_doc(kernel, &store_id, &format!("{prefix}readme.md"), readme).await;
+        seed_doc(
+            kernel,
+            &loader.id,
+            &store_id,
+            &format!("{prefix}readme.md"),
+            readme,
+        )
+        .await;
     }
     for (key, body) in docs {
-        seed_doc(kernel, &store_id, &format!("{prefix}docs/{key}.md"), body).await;
+        seed_doc(
+            kernel,
+            &loader.id,
+            &store_id,
+            &format!("{prefix}docs/{key}.md"),
+            body,
+        )
+        .await;
     }
     Ok(())
 }
@@ -567,18 +577,29 @@ pub async fn seed_readme(
 /// One sidecar doc THROUGH the provider, copy-if-missing — python
 /// `_seed_doc_via_store`. Already present is ANY successful reply, zero bytes
 /// included (C45); only an ERROR reply (missing file, refused…) means "not
-/// there, seed it." A refused WRITE simply doesn't land — no fallback.
-async fn seed_doc(kernel: &Arc<Kernel>, store_id: &AgentId, path: &str, body: &str) {
+/// there, seed it." A refused WRITE doesn't land — no fallback — and is LOUD
+/// (`persist_failed`), as a record write is: its reply used to be dropped, so a
+/// doc that never landed was invisible (audit 2026-10-03, ARCH2-9).
+async fn seed_doc(
+    kernel: &Arc<Kernel>,
+    loader: &AgentId,
+    store_id: &AgentId,
+    path: &str,
+    body: &str,
+) {
     if read_stream_once(kernel, store_id, path).await.is_some() {
         return;
     }
-    store_write(
+    let written = store_write(
         kernel,
         store_id,
         serde_json::json!({"type": "write_stream", "path": path, "bytes": null, "truncate": true}),
         body.as_bytes().to_vec(),
     )
     .await;
+    if write_failed(&written) {
+        persist_failed(kernel, loader, store_id, path, &written);
+    }
 }
 
 /// Remove an agent's dir THROUGH the discovered provider (the `delete` verb is
@@ -624,38 +645,85 @@ pub async fn forget_path(kernel: &Arc<Kernel>, loader: &Agent, agent_root: &Path
     }
 }
 
+/// python `fs.resolve(root, rel)` for the tree walks: `rel` resolved under the
+/// resolved `root` ([`fantastic_bundle::realpath`] — `..` and every symlink,
+/// dangling or not, followed). Python's walk opens only through `file_bridge.fs`,
+/// so a path that lands outside refuses — loud — with `fs`'s own text: an
+/// escaping `children_dir`, or an entry (or its `agent.yaml`) linked outside.
+///
+/// # Errors
+/// `fs: path '<rel>' escapes root` — python's `ValueError` text; the cwd's
+/// `OSError` text when a relative root cannot absolutize
+/// ([`fantastic_bundle::realpath`]).
+pub(crate) fn clamp(root: &Path, rel: &str) -> Result<PathBuf, String> {
+    let escapes = || format!("fs: path {} escapes root", fantastic_bundle::py_repr(rel));
+    let root_p = fantastic_bundle::realpath(root)?;
+    if rel.starts_with('/') {
+        return Err(escapes());
+    }
+    let target = if rel.is_empty() {
+        root_p.clone()
+    } else {
+        fantastic_bundle::realpath(&root_p.join(rel))?
+    };
+    if !target.starts_with(&root_p) {
+        return Err(escapes());
+    }
+    Ok(target)
+}
+
+/// python `_read_record` under the clamp: one `agent.yaml` (`rel` under `root`)
+/// → its mapping, `None` when absent, unreadable or not a mapping. The clamp is
+/// OUTSIDE python's `try`, so a path that escapes refuses.
+///
+/// # Errors
+/// [`clamp`]'s text.
+pub(crate) fn read_record_clamped(
+    root: &Path,
+    rel: &str,
+) -> Result<Option<Map<String, Value>>, String> {
+    let path = clamp(root, rel)?;
+    Ok(fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| parse_record(&raw)))
+}
+
 /// python `_walk`: the records under `rel_dir`, depth-first in name order, each
-/// `parent_id` set from its DISK POSITION; corrupt siblings skip.
+/// `parent_id` set from its DISK POSITION; corrupt siblings skip. Every path is
+/// [`clamp`]ed under `root_dir` exactly where python's `fs` clamps it.
+///
+/// # Errors
+/// [`clamp`]'s text, for the first path that escapes `root_dir`.
 pub(crate) fn walk_tree(
     root_dir: &Path,
     rel_dir: &str,
     parent_id: &Value,
     out: &mut Vec<Value>,
     cdir: &str,
-) {
-    let abs = root_dir.join(rel_dir);
+) -> Result<(), String> {
+    let abs = clamp(root_dir, rel_dir)?;
     if !abs.is_dir() {
-        return;
+        return Ok(());
     }
-    let Ok(rd) = fs::read_dir(&abs) else { return };
-    let mut entries: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
-    entries.sort();
-    for entry in entries {
-        let Some(name) = entry.file_name().and_then(|n| n.to_str()) else {
+    let Ok(rd) = fs::read_dir(&abs) else {
+        return Ok(());
+    };
+    let mut names: Vec<std::ffi::OsString> = rd.flatten().map(|e| e.file_name()).collect();
+    names.sort();
+    for name in names {
+        let Some(name) = name.to_str() else {
             continue;
         };
         let rel = format!("{rel_dir}/{name}");
-        let Ok(raw) = fs::read_to_string(root_dir.join(&rel).join(RECORD_FILE)) else {
-            continue;
-        };
-        let Some(mut rec) = parse_record(&raw) else {
-            continue; // corrupt sibling → skip
+        let Some(mut rec) = read_record_clamped(root_dir, &format!("{rel}/{RECORD_FILE}"))? else {
+            continue; // absent or corrupt sibling → skip
         };
         rec.insert("parent_id".to_string(), parent_id.clone());
         let id = rec.get("id").cloned().unwrap_or(Value::Null);
         out.push(Value::Object(rec));
-        walk_tree(root_dir, &format!("{rel}/{cdir}"), &id, out, cdir);
+        walk_tree(root_dir, &format!("{rel}/{cdir}"), &id, out, cdir)?;
     }
+    Ok(())
 }
 
 /// A loader's PERSISTED records → `{id: parent_id}`, the parent taken from DISK
@@ -664,12 +732,14 @@ pub(crate) fn walk_tree(
 /// A record the host never runs — a federated kernel's, sent through a bridge —
 /// exists only here, so a walk that stops at the live tree loses every record
 /// nested under it. Python `kernel_state.tools._disk_parents`.
-#[must_use]
+///
+/// # Errors
+/// [`clamp`]'s text — the walk refuses where python's does.
 pub fn disk_parents(
     root_dir: &Path,
     children_dir: &str,
     loader_id: &str,
-) -> std::collections::HashMap<String, Option<String>> {
+) -> Result<std::collections::HashMap<String, Option<String>>, String> {
     let mut out = Vec::new();
     walk_tree(
         root_dir,
@@ -677,8 +747,9 @@ pub fn disk_parents(
         &Value::from(loader_id),
         &mut out,
         children_dir,
-    );
-    out.into_iter()
+    )?;
+    Ok(out
+        .into_iter()
         .filter_map(|r| {
             let id = r.get("id")?.as_str()?.to_string();
             let parent = r
@@ -687,7 +758,7 @@ pub fn disk_parents(
                 .map(str::to_string);
             Some((id, parent))
         })
-        .collect()
+        .collect())
 }
 
 /// WHERE A RECORD REALLY IS, for one loader: the LIVE tree first, then the
@@ -723,17 +794,25 @@ impl<'a> RecordPlaces<'a> {
     /// `(known, parent)` for one id: the live tree, then the loader's persisted
     /// records. Unknown in both ⇒ `(false, None)` — the caller decides; nothing is
     /// guessed.
-    pub fn locate(&mut self, node: &str) -> (bool, Option<String>) {
+    ///
+    /// # Errors
+    /// [`disk_parents`]' clamp text.
+    pub fn locate(&mut self, node: &str) -> Result<(bool, Option<String>), String> {
         if let Some(live) = self.kernel.agents.get(&AgentId::from(node)) {
-            return (true, live.parent_id.as_ref().map(|p| p.0.clone()));
+            return Ok((true, live.parent_id.as_ref().map(|p| p.0.clone())));
         }
-        let disk = self.disk.get_or_insert_with(|| {
-            disk_parents(&self.root_dir, &self.children_dir, &self.loader_id)
-        });
-        match disk.get(node) {
+        if self.disk.is_none() {
+            self.disk = Some(disk_parents(
+                &self.root_dir,
+                &self.children_dir,
+                &self.loader_id,
+            )?);
+        }
+        let disk = self.disk.as_ref().expect("filled above");
+        Ok(match disk.get(node) {
             Some(parent) => (true, parent.clone()),
             None => (false, None),
-        }
+        })
     }
 
     /// A record's on-disk dir under the loader's root, by walking its parent
@@ -741,9 +820,12 @@ impl<'a> RecordPlaces<'a> {
     /// under a federated record lands where it belongs. A record that already
     /// exists keeps ITS position; `payload_parent` places only a NEW one. Python
     /// `kernel_state.tools._resolve_path`.
-    pub fn resolve(&mut self, id: &str, payload_parent: Option<&str>) -> PathBuf {
+    ///
+    /// # Errors
+    /// [`disk_parents`]' clamp text.
+    pub fn resolve(&mut self, id: &str, payload_parent: Option<&str>) -> Result<PathBuf, String> {
         let mut parts: Vec<String> = vec![id.to_string()];
-        let (known, mut pid) = self.locate(id);
+        let (known, mut pid) = self.locate(id)?;
         if !known {
             pid = payload_parent.map(str::to_string);
         }
@@ -753,13 +835,13 @@ impl<'a> RecordPlaces<'a> {
                 break;
             }
             parts.push(p.clone());
-            pid = self.locate(&p).1;
+            pid = self.locate(&p)?.1;
         }
         let mut path = self.root_dir.clone();
         for part in parts.iter().rev() {
             path = path.join(&self.children_dir).join(part);
         }
-        path
+        Ok(path)
     }
 }
 
@@ -838,6 +920,9 @@ struct Dirty {
 pub struct PersistWriter {
     loader: AgentId,
     dirty: Arc<std::sync::Mutex<Dirty>>,
+    /// ONE DRAIN AT A TIME: the debounced loop and every [`Self::flush`] hold
+    /// it for a whole drain, and a flush waits its turn (FIFO).
+    drain: Arc<tokio::sync::Mutex<()>>,
     wake: Arc<tokio::sync::Notify>,
     token: crate::kernel::SubscriberToken,
     task: crate::tasks::TaskId,
@@ -846,8 +931,28 @@ pub struct PersistWriter {
 impl PersistWriter {
     /// Drain the dirty queues once — the test seam AND the loop's body
     /// (python `aflush`).
+    ///
+    /// When it returns, every write that was dirty when it was called has
+    /// LANDED — also the ones the debounced loop took first. It used to return
+    /// at once when the loop held them, with their writes still in flight: the
+    /// caller found neither the record nor its readme on disk (measured with a
+    /// store holding the loop's write: 5/5 runs returned early).
     pub async fn flush(&self, kernel: &Arc<Kernel>) {
-        flush_records(kernel, &self.loader, &self.dirty).await;
+        flush_records(kernel, &self.loader, &self.dirty, &self.drain).await;
+    }
+
+    /// Mark one record dirty with NO state event and wake the writer — the
+    /// root's id-block reservation inside the silent ledger flush (audit CLI-B).
+    pub(crate) fn mark_dirty(&self, kernel: &Kernel, id: &AgentId) {
+        if mark_persist(kernel, &self.dirty, id) {
+            self.wake.notify_one();
+        }
+    }
+
+    /// The ids queued for the next write — a test seam.
+    #[cfg(test)]
+    pub(crate) fn pending(&self) -> Vec<AgentId> {
+        self.dirty.lock().expect("dirty poisoned").persist.clone()
     }
 
     /// Unsubscribe and stop the task. NO FINAL FLUSH HERE: `stop` runs
@@ -863,6 +968,24 @@ impl PersistWriter {
         self.wake.notify_waiters();
         kernel.tasks.forget(&self.task);
     }
+}
+
+/// Queue one live, non-ephemeral record for the writer — what an `added` /
+/// `updated` event does. `false` when there is nothing to write.
+fn mark_persist(kernel: &Kernel, dirty: &std::sync::Mutex<Dirty>, aid: &AgentId) -> bool {
+    let Some(agent) = kernel.agents.get(aid).map(|e| Arc::clone(&e)) else {
+        return false;
+    };
+    if agent.ephemeral {
+        return false;
+    }
+    let mut d = dirty.lock().expect("dirty poisoned");
+    d.paths.insert(aid.clone(), agent.root_path.clone());
+    d.forget.retain(|(i, _)| i != aid);
+    if !d.persist.contains(aid) {
+        d.persist.push(aid.clone());
+    }
+    true
 }
 
 /// Subscribe the loader to the kernel state stream and start the debounced
@@ -881,6 +1004,7 @@ pub fn install_persist_writer(kernel: &Arc<Kernel>, loader_id: &AgentId) -> Pers
         }
     }
     let wake = Arc::new(tokio::sync::Notify::new());
+    let drain = Arc::new(tokio::sync::Mutex::new(()));
     let k_sub = Arc::clone(kernel);
     let d_sub = Arc::clone(&dirty);
     let w_sub = Arc::clone(&wake);
@@ -892,22 +1016,14 @@ pub fn install_persist_writer(kernel: &Arc<Kernel>, loader_id: &AgentId) -> Pers
             return;
         }
         let aid = AgentId::from(aid);
-        let mut d = d_sub.lock().expect("dirty poisoned");
         match evt.get("kind").and_then(Value::as_str) {
             Some("added") | Some("updated") => {
-                let Some(agent) = k_sub.agents.get(&aid).map(|e| Arc::clone(&e)) else {
+                if !mark_persist(&k_sub, &d_sub, &aid) {
                     return;
-                };
-                if agent.ephemeral {
-                    return;
-                }
-                d.paths.insert(aid.clone(), agent.root_path.clone());
-                d.forget.retain(|(i, _)| i != &aid);
-                if !d.persist.contains(&aid) {
-                    d.persist.push(aid);
                 }
             }
             Some("removed") => {
+                let mut d = d_sub.lock().expect("dirty poisoned");
                 let Some(path) = d.paths.remove(&aid) else {
                     return;
                 };
@@ -916,23 +1032,24 @@ pub fn install_persist_writer(kernel: &Arc<Kernel>, loader_id: &AgentId) -> Pers
             }
             _ => return,
         }
-        drop(d);
         w_sub.notify_one();
     }));
     let k_run = Arc::clone(kernel);
     let d_run = Arc::clone(&dirty);
     let w_run = Arc::clone(&wake);
+    let dr_run = Arc::clone(&drain);
     let l_run = loader_id.clone();
     let task = kernel.spawn_keepalive_task(loader_id, "persist_writer", async move {
         loop {
             w_run.notified().await;
             tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-            flush_records(&k_run, &l_run, &d_run).await;
+            flush_records(&k_run, &l_run, &d_run, &dr_run).await;
         }
     });
     let writer = PersistWriter {
         loader: loader_id.clone(),
         dirty,
+        drain,
         wake,
         token,
         task,
@@ -952,7 +1069,11 @@ async fn flush_records(
     kernel: &Arc<Kernel>,
     loader_id: &AgentId,
     dirty: &Arc<std::sync::Mutex<Dirty>>,
+    drain: &tokio::sync::Mutex<()>,
 ) {
+    // ONE DRAIN AT A TIME, held across the writes: a drain that took the queues
+    // is finished before the next one looks at them.
+    let _drain = drain.lock().await;
     // THE LOADER'S OWN STORE (python `_find_store(self.agent)`). NO PROVIDER ⇒
     // the queues stay queued (python returns before clearing).
     let Some(loader) = kernel.agents.get(loader_id).map(|e| Arc::clone(&e)) else {

@@ -31,7 +31,7 @@
 //! INBOUND check lives in [`crate::verbs::send`], before the lock.
 
 use crate::constants::MAX_SILENT_TURNS;
-use crate::credentials::secret_holder_refusal;
+use crate::credentials::{secret_holder_refusal, secret_join_refusal};
 use crate::events::emit_status;
 use crate::helpers::mint_batch_token;
 use crate::history_view::REFLECT_NUDGE;
@@ -47,7 +47,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 /// ROUTING TURNS with a live batch, per agent — the first summand of `await`'s
 /// `pending`. It counts TURNS, not calls: what the model is waiting for is a
 /// batch's answer, and a batch is answered whole.
-fn inflight() -> &'static Mutex<HashMap<String, u64>> {
+pub(crate) fn inflight() -> &'static Mutex<HashMap<String, u64>> {
     static INFLIGHT: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
     INFLIGHT.get_or_init(|| Mutex::new(HashMap::new()))
 }
@@ -251,6 +251,21 @@ pub(crate) async fn deliver(
     }
 }
 
+/// The reply a model reads: the outcome's result with its raw reply body — any
+/// verb may answer one — decoded utf-8 (replace) AT ITS SLOT, python's
+/// `render_reply` (`bytes are decoded utf-8 (replace)`) over a reply dict that
+/// holds the bytes there. A `read_stream` chunk reads as its text in `bytes`.
+fn reply_as_text(out: &fantastic_kernel::Outcome) -> std::borrow::Cow<'_, Value> {
+    let Some(b) = &out.body else {
+        return std::borrow::Cow::Borrowed(&out.result);
+    };
+    let mut shown = out.result.clone();
+    let text = Value::String(String::from_utf8_lossy(&b.bytes).into_owned());
+    // a slot the result cannot hold (a non-object reply) leaves it as it is
+    let _ = b.place(&mut shown, text);
+    std::borrow::Cow::Owned(shown)
+}
+
 /// The args echoed back with an error, minus `payload` — python's
 /// `{k: v for k, v in args.items() if k != "payload"}`. Shows the model the
 /// ROUTING it wrote, which is the part that was wrong, without re-quoting a
@@ -411,9 +426,22 @@ fn you_sent(args: &Map<String, Value>) -> Value {
 /// THE SILENT STREAK per chain `(agent id, client id)`: turns in a row that
 /// dispatched nothing. Any call — `done` and `await` included — ends it; at
 /// [`MAX_SILENT_TURNS`] the chain gives up. Python `_silent`.
-fn silent() -> &'static Mutex<HashMap<(String, String), usize>> {
+pub(crate) fn silent() -> &'static Mutex<HashMap<(String, String), usize>> {
     static SILENT: OnceLock<Mutex<HashMap<(String, String), usize>>> = OnceLock::new();
     SILENT.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Drop a deleted agent's routing count and every silent streak of its chains
+/// ([`crate::verbs::on_delete`]).
+pub(crate) fn forget(self_id: &str) {
+    inflight()
+        .lock()
+        .expect("inflight poisoned")
+        .remove(self_id);
+    silent()
+        .lock()
+        .expect("silent poisoned")
+        .retain(|chain, _| chain.0 != self_id);
 }
 
 /// What a caller is told when a chain gives up ([`MAX_SILENT_TURNS`] silent
@@ -663,11 +691,20 @@ async fn route_reply_gated(
         // goes to SELF, so the model reads it whatever `reply_to` said. The
         // backend's own key read (`credentials::KeyReader`) never passes through
         // here.
-        let held = secret_holder_refusal(&kernel, target).or_else(|| {
-            reply_to
-                .as_deref()
-                .and_then(|rt| secret_holder_refusal(&kernel, rt))
-        });
+        let held = secret_holder_refusal(&kernel, target)
+            .or_else(|| {
+                reply_to
+                    .as_deref()
+                    .and_then(|rt| secret_holder_refusal(&kernel, rt))
+            })
+            // Nor does it JOIN an execution that carried secrets (audit F2): a
+            // join hands back that execution's outcome, so `<exec_id>` = the
+            // backend's own key read was the key — even from a store on a
+            // connected peer, which the holder check above cannot see.
+            .or_else(|| {
+                args.get("exec_id")
+                    .and_then(|id| secret_join_refusal(&kernel, id))
+            });
         if let Some(held) = held {
             // python `payload.get("type", "?") if isinstance(payload, dict) else "-"`
             let verb = match args.get("payload") {
@@ -847,7 +884,7 @@ async fn route_reply_gated(
                         .pid
                         .map(|t| t.0.to_string())
                         .unwrap_or_else(|| "-".to_string());
-                    let mut body = crate::tool_parse::render_reply(&out.result);
+                    let mut body = crate::tool_parse::render_reply(&reply_as_text(out));
                     // Only reflect bodies are dropped later, so only they carry
                     // the distillation notice.
                     if u.verb == "reflect" {
@@ -1226,5 +1263,42 @@ mod tests {
         );
         assert_eq!(f(json!({"target_id": 7, "target": "b"})), None);
         assert_eq!(f(json!({"reply_to": "self"})), None);
+    }
+
+    /// python `render_reply`: a reply dict holding bytes renders them decoded
+    /// utf-8 (replace) AT THEIR KEY — any verb's, `read_stream`'s `bytes`
+    /// included; a reply with no body renders as it is.
+    #[test]
+    fn a_reply_body_reads_as_utf8_text_at_its_slot() {
+        use fantastic_kernel::outcome::{Outcome, Status};
+        use fantastic_kernel::{Blob, Step};
+        let read = Outcome::new(
+            None,
+            Status::Completed,
+            json!({"path": "a.txt", "offset": 0, "bytes": null, "eof": true}),
+        )
+        .with_body(Some(Blob::key(
+            "bytes",
+            b"line one\nline \xff two".to_vec(),
+        )));
+        assert_eq!(
+            crate::tool_parse::render_reply(&reply_as_text(&read)),
+            "<path>a.txt</path>\n<offset>0</offset>\n<bytes>\nline one\nline \u{fffd} two\n</bytes>\n<eof>true</eof>"
+        );
+        let nested = Outcome::new(
+            None,
+            Status::Completed,
+            json!({"seq": 3, "out": {"chunk": null}}),
+        )
+        .with_body(Some(Blob::new(
+            vec![Step::from("out"), Step::from("chunk")],
+            b"red".to_vec(),
+        )));
+        assert_eq!(
+            *reply_as_text(&nested),
+            json!({"seq": 3, "out": {"chunk": "red"}})
+        );
+        let plain = Outcome::new(None, Status::Completed, json!({"seq": 3}));
+        assert_eq!(*reply_as_text(&plain), json!({"seq": 3}));
     }
 }

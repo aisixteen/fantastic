@@ -27,11 +27,14 @@ private final class EchoBundle: AgentBundle {
 }
 
 /// The far kernel's probe for a binary forward (python `_echo` in
-/// `test_binary_path_steps.py`): answers the payload's keys — the body's own
-/// top-level key among them — where the body sat and the nested `a`, and hands
-/// the body back as the reply's chunk.
-private final class BytesEcho: AgentBundle {
+/// `test_binary_path_steps.py`): keeps the header and where the body sat, answers
+/// the payload's keys — the body's own top-level key among them — and hands the
+/// body at `a.b` back at the LITERAL reply key `x.y`, beside a nested `x` → `y`.
+private final class BytesEcho: AgentBundle, @unchecked Sendable {
     let name = "bytes_echo"
+    private let lock = NSLock()
+    private var got: [JSON] = []
+    var seen: [JSON] { lock.withLock { got } }
     func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? {
         switch payload["type"].asString ?? "" {
         case "boot", "shutdown": return nil
@@ -39,16 +42,18 @@ private final class BytesEcho: AgentBundle {
         }
     }
     func handleBinary(agentId: AgentId, header: JSON, body: Blob?, kernel: Kernel) async throws
-        -> (JSON?, Data?)
+        -> (JSON?, Blob?)
     {
+        lock.withLock {
+            got.append([
+                "header": header, "at": body.map { Codec.binaryPath($0.parts) } ?? .null,
+            ])
+        }
         var keys = header.asObject.map { Array($0.keys) } ?? []
         if let body, body.parts.count == 1, case .key(let k) = body.parts[0] { keys.append(k) }
         return (
-            .object([
-                "keys": .array(keys.sorted().map { .string($0) }),
-                "at": body.map { Codec.binaryPath($0.parts) } ?? .null,
-                "a": header["a"],
-            ]), body?.bytes
+            .object(["keys": .array(keys.sorted().map { .string($0) }), "x.y": .null, "x": ["y": "kept"]]),
+            Blob("x.y", bodyAt(body, "a.b") ?? Data())
         )
     }
 }
@@ -291,10 +296,11 @@ private func forward(_ kernel: Kernel, _ leg: String, target: String, payload: J
 
 /// A `forward` on the binary channel: `blob` is the forwarded call's chunk, INSIDE
 /// its payload (`payload.payload.bytes`, where python's dict holds it); `nil` asks
-/// for the reply's chunk raw (a `read_stream`).
+/// for the reply's chunk raw (a `read_stream`). The reply's chunk comes back at
+/// its slot of the reply.
 private func binaryForward(
     _ kernel: Kernel, _ leg: String, target: String, payload: JSON, blob: Data?
-) async -> (JSON, Data?) {
+) async -> (JSON, Blob?) {
     let out = await kernel.send([
         Item(
             AgentId(leg),
@@ -387,7 +393,9 @@ struct RelayTransportTests {
             let (_, body) = await binaryForward(
                 kernelA, "brA", target: "fs",
                 payload: ["type": "read_stream", "path": "blob.bin"], blob: nil)
-            #expect(body == payload, "raw bytes must round-trip over the relay tunnel")
+            #expect(
+                body == Blob("bytes", payload),
+                "raw bytes must round-trip over the relay tunnel, at the reply's `bytes`")
             // EACH INBOUND BINARY CALL IS AN EXECUTION, named by its frame id —
             // python sends it through `kernel.send` with `item["id"] = fid`, so a
             // replayed frame joins the recorded outcome instead of running again.
@@ -405,19 +413,20 @@ struct RelayTransportTests {
         }
     }
 
-    /// A LITERAL dotted key crosses a relay `forward`: the tunnel nests the call
-    /// inside a relay send, so the body rides at `["payload", "payload", "a.b"]`,
-    /// and the far echo finds it at the key `"a.b"` beside a nested `a` → `b` left
-    /// as sent. Its chunk comes back at `["payload", "data", "bytes"]` — swift's
-    /// reply carrier holds a chunk at the reply's `bytes` only. Python
-    /// `test_a_literal_key_crosses_a_relay_forward_both_ways` (c).
+    /// A LITERAL dotted key crosses a relay `forward`, BOTH WAYS: the tunnel nests
+    /// the call inside a relay send, so the body rides at `["payload", "payload",
+    /// "a.b"]`, and the far echo finds it at the key `"a.b"` beside a nested `a` →
+    /// `b` left as sent. Its chunk comes back at the LITERAL reply key `x.y` —
+    /// `["payload", "data", "x.y"]` in the tunnel — and out of the forward at
+    /// `["x.y"]`. Python `test_a_literal_key_crosses_a_relay_forward_both_ways` (c).
     @Test func aLiteralKeyCrossesARelayForward() async throws {
         try await withDeadline(15) {
             let open: JSON = .string("allow_all_ingress")
             let (kernelA, bundleA) = await makeKernel(
                 withEcho: false, leg: "brA", ingress: open, guid: "gA", peerGuid: "gB")
             let registry = BundleRegistry()
-            registry.register("bytes_echo.tools", BytesEcho())
+            let echo = BytesEcho()
+            registry.register("bytes_echo.tools", echo)
             let bundleB = KernelBridgeBundle(family: .relay)
             registry.register("relay_connector.tools", bundleB)
             let kernelB = rootedKernel(registry, guid: "gB")
@@ -444,13 +453,18 @@ struct RelayTransportTests {
             ])[0]
             #expect(out.status == .completed, "\(out.result.serialize())")
             #expect(
-                out.result == ["keys": ["a", "a.b", "type"], "at": ["a.b"], "a": ["b": "kept"]],
+                echo.seen == [["header": ["type": "take", "a": ["b": "kept"]], "at": ["a.b"]]],
+                "the body reached the far handler at the literal key, the nested twin as sent")
+            #expect(
+                out.result.serialize()
+                    == #"{"keys":["a","a.b","type"],"x.y":null,"x":{"y":"kept"}}"#,
                 "\(out.result.serialize())")
-            #expect(out.body == raw)
+            #expect(
+                out.body == Blob(parts: ["x.y"], raw), "the reply's literal key came back as one key")
             let heads = await hub.binaryHeads
             #expect(
                 heads.map { $0["_binary_path"] }
-                    == [["payload", "payload", "a.b"], ["payload", "data", "bytes"]],
+                    == [["payload", "payload", "a.b"], ["payload", "data", "x.y"]],
                 "\(JSON.array(heads).serialize())")
             // the null sits at the literal key of the tunnelled call; the nested
             // twin is untouched
@@ -519,7 +533,7 @@ struct RelayTransportTests {
     /// report `allow_all_ingress` / sealed:false, an open door its gate never
     /// opened. Python `test_a_bridge_reflects_exactly_what_its_gate_enforces`.
     @Test func aBridgeReflectsExactlyWhatItsGateEnforces() async throws {
-        let rule = try resolveIngress(ingressRule: nil, auth: .string("allow_all_ingress"))
+        let rule = resolveIngress(ingressRule: nil, auth: .string("allow_all_ingress"))
         let deny = try #require(rule as? IngressRules.DenyInbound)
         #expect(deny.unknown == "allow_all_ingress_ingress")
         let (kernel, _) = await makeKernel(withEcho: false)
@@ -735,7 +749,9 @@ struct RelayTransportTests {
             .result
     }
 
-    /// A7.27 — the correlator is namespaced by agent id (`<bridge_id>-<n>`).
+    /// A7.27 — the correlator is namespaced by agent id AND boot
+    /// (`<bridge_id>-<12 hex boot nonce>-<n>`, audit IO-5): never `:`, the
+    /// kernel-minted namespace.
     @Test func corrIdsAreNamespacedByAgentId() async throws {
         let (kernel, bundle) = await makeKernel(withEcho: false, leg: "brA")
         let hub = MemoryRelayHub()
@@ -753,7 +769,8 @@ struct RelayTransportTests {
             Issue.record("expected a text relay envelope")
             return
         }
-        #expect(env["payload"]["id"].asString == "brA-1", "\(s)")
+        let id = env["payload"]["id"].asString ?? ""
+        #expect(id.range(of: "^brA-[0-9a-f]{12}-1$", options: .regularExpression) != nil, "\(s)")
         _ = await kernel.send([Item("kernel_state", ["type": "delete_agent", "id": "brA"])])[0]
             .result
     }
@@ -1014,7 +1031,7 @@ struct ManifoldScopedRuleNameTests {
     /// It still DENIES — an unresolvable rule is not an authorization — but it now names
     /// the manifold mistake instead of looking like an ordinary seal.
     @Test func anEgressNameInIngressRuleIsLoudNotSilent() throws {
-        let sealed = try IngressRules.resolve(.string("silent_egress"))
+        let sealed = IngressRules.resolve(.string("silent_egress"))
         let d = sealed.authorize(
             AuthAction(kind: "call", target: "t", verb: "read", token: nil))
         guard case .deny(let denial) = d else {
@@ -1039,7 +1056,7 @@ struct ManifoldScopedRuleNameTests {
         }
         // And the stems that DO span both manifolds still work from one field.
         for stem in ["password", "allow_all"] {
-            _ = try IngressRules.resolve(manifoldSpec(nil, .string(stem), "_ingress"))
+            #expect(IngressRules.unknown(manifoldSpec(nil, .string(stem), "_ingress")) == nil)
         }
     }
 }
@@ -1098,7 +1115,7 @@ struct RelaySelfHealTests {
     @Test func reDialHappensBeforeTheBackoffSleep() async throws {
         let script = DialScript(failures: 1)
         let transport = try await RelayTransport.connect(
-            relayURL: URL(string: "ws://127.0.0.1:1")!, guid: "A", token: "",
+            relayURL: URL(string: "ws://127.0.0.1:1")!, guid: "A", password: { "" },
             partnerGuid: "B", heartbeat: 0, reconnect: 30,
             dialer: { try await script.dial() })
         // The eager dial failed, so the leg booted with NO socket (python:
@@ -1112,7 +1129,9 @@ struct RelaySelfHealTests {
     }
 }
 
-@Suite("ws_bridge frame resilience")
+// `.serialized`: both tests count the PROCESS-WIDE `ws_bridge: skipping` lines
+// (`RuntimeLog.capture` sees every concurrent writer).
+@Suite("ws_bridge frame resilience", .serialized)
 struct WSFrameResilienceTests {
 
     /// Python `test_ws_transport_skips_malformed_frames_and_keeps_reading`: five
@@ -1130,7 +1149,7 @@ struct WSFrameResilienceTests {
                 .text("{not json"),  // bad text frame
                 .text("[1]"),  // well-formed JSON, not an envelope
                 .text(good),
-            ]))
+            ]), sealed: false)
 
         var frame: JSON = .null
         let lines = await RuntimeLog.capture {
@@ -1151,5 +1170,33 @@ struct WSFrameResilienceTests {
         #expect(skips[2].hasPrefix("ws_bridge: skipping malformed frame: bad binary frame header:"))
         #expect(skips[3].hasPrefix("ws_bridge: skipping malformed frame: bad text frame:"))
         #expect(skips[4] == "ws_bridge: skipping non-object frame\n")
+    }
+
+    /// IO-3 — a peer's 100k-deep frame (text, and a binary header) used to
+    /// overflow the reader's stack in the JSON scanner and kill the kernel. Now
+    /// each is python's malformed frame — refused past the json recursion limit,
+    /// skipped and named — and the next frame is read.
+    @Test func hundredThousandNestedFrameIsSkippedAndReaderSurvives() async throws {
+        let deep = String(repeating: "[", count: 100_000) + String(repeating: "]", count: 100_000)
+        let transport = WSTransport(
+            client: ScriptedWire([
+                .text(deep),
+                .binary(binaryFrame(headerLen: UInt32(deep.utf8.count), Array(deep.utf8))),
+                .text(#"{"type": "reply", "id": "1", "data": {"ok": true}}"#),
+            ]), sealed: false)
+        var frame: JSON = .null
+        let lines = await RuntimeLog.capture {
+            frame = try! await withDeadline(5) { try await transport.recv().frame }
+        }
+        #expect(frame["id"].asString == "1")
+        let skips = lines.filter { $0.hasPrefix("ws_bridge: skipping") }
+        #expect(skips.count == 2)
+        let why = "maximum recursion depth exceeded while decoding a JSON array from a unicode string"
+        #expect(skips.first?.hasPrefix("ws_bridge: skipping malformed frame: bad text frame:") == true)
+        #expect(skips.first?.contains(why) == true, "\(skips)")
+        #expect(
+            skips.last?.hasPrefix("ws_bridge: skipping malformed frame: bad binary frame header:")
+                == true)
+        #expect(skips.last?.contains(why) == true, "\(skips)")
     }
 }

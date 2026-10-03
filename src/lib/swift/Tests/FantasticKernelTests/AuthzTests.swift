@@ -198,6 +198,98 @@ private func authIngress(_ grant: JSON, _ verb: String, _ other: String) -> Deci
     }
 }
 
+/// Measured 2026-10-03 (audit BV-1): a web_ws/web_rest leg's `$parent:*` let any
+/// client it admitted `stop` its web host for every client, or `unmount` a sealed
+/// sibling's routes. By verb name, whatever the bundle: a structural token's
+/// wildcard covers none of them; a NAMED verb or a NAMED id's `*` does.
+@Test func theBaselineNeverReachesAnAgentsLifecycleOrRoutes() {
+    for verb in ["stop", "mount", "unmount", "boot"] {
+        #expect(privilegedVerbs.contains(verb), "\(verb)")
+        #expect(!auth(defaultCanCall(), verb, "boss").allowed, "\(verb)")
+        #expect(!auth(defaultCanCall(), verb, "kid").allowed, "\(verb)")
+        let named: JSON = .object(["$parent": .array([.string(verb)])])
+        #expect(auth(named, verb, "boss").allowed, "\(verb)")
+        #expect(auth(.object(["boss": .string("*")]), verb, "boss").allowed, "\(verb)")
+        // ingress: a callee's `$children:*` still accepts it
+        #expect(authIngress(.object(["$children": .string("*")]), verb, "kid").allowed, "\(verb)")
+    }
+    #expect(privilegedVerbs.count == 20)
+}
+
+/// Audit 2026-10-03 (KV-2): `watch` whose src is the ROOT (`loaderId`) needs a
+/// NAMED grant; every other `watch` is an ordinary verb.
+@Test func watchingTheRootLosesAStructuralWildcard() {
+    // holder "worker", child of the root "boss"
+    func onRoot(_ g: JSON, _ other: String) -> Bool {
+        authorizeCall(
+            grant: g, verb: "watch", otherId: other,
+            holderId: "worker", parentId: "boss", childIds: ["kid"], loaderId: "boss"
+        ).allowed
+    }
+    #expect(!onRoot(defaultCanCall(), "boss"))
+    #expect(onRoot(.object(["boss": .array([.string("watch")])]), "boss"))
+    #expect(onRoot(.object(["boss": .string("*")]), "boss"))
+    #expect(onRoot(.object(["$parent": .array([.string("watch")])]), "boss"))
+    #expect(onRoot(defaultCanCall(), "kid"))
+    #expect(auth(defaultCanCall(), "watch", "boss").allowed)  // "boss" is not the root here
+}
+
+/// py `test_watch_gate.py::test_watching_the_root_needs_a_named_grant` — measured
+/// before the fix (audit 2026-10-03, KV-2): every direct child of the root watched
+/// the root inbox on the baseline `$parent:*` alone and read every kernel verb's
+/// payload, other agents' `persist_blob` contents included.
+@Test func watchingTheRootNeedsANamedGrant() {
+    let kernel = Kernel(storage: .inMemory, bundles: BundleRegistry())
+    var rootMeta: OrderedDictionary<String, JSON> = [:]
+    rootMeta["callable_by"] = defaultCallableBy()
+    let root = Agent(id: "kernel_state", handlerModule: nil, parentId: nil, meta: rootMeta)
+    kernel.register(root)
+    kernel.setRoot(root)
+    func watchAs(_ grant: JSON, _ src: String) -> JSON? {
+        var meta: OrderedDictionary<String, JSON> = [:]
+        meta["can_call"] = grant
+        let nosy = Agent(
+            id: "nosy", handlerModule: nil, parentId: AgentId("kernel_state"), meta: meta)
+        kernel.register(nosy)
+        root.insertChild(nosy)
+        _ = kernel.ensureInbox(AgentId("nosy"))
+        return KernelTaskLocals.$currentSender.withValue(AgentId("nosy")) {
+            kernel.watch(src: AgentId(src), watcher: AgentId("nosy"))
+        }
+    }
+    let denial = watchAs(defaultCanCall(), "kernel_state")
+    #expect(denial?["reason"].asString == "unauthorized")
+    #expect(denial?["side"].asString == "egress")
+    #expect(denial?["error"].asString == "nosy may not call 'watch' on kernel_state")
+    #expect(!root.watcherIds().contains(AgentId("nosy")))
+    let spelled: JSON = .object([
+        "$self": .string("*"), "$parent": .array([.string("*")]), "$children": .string("*"),
+    ])
+    #expect(watchAs(spelled, "kernel_state") != nil)
+    for named: JSON in [
+        .object(["$self": .string("*"), "kernel_state": .array([.string("watch")])]),
+        .object(["$self": .string("*"), "kernel_state": .string("*")]),
+        .object(["$self": .string("*"), "$parent": .array([.string("watch")])]),
+    ] {
+        #expect(watchAs(named, "kernel_state") == nil, "\(named.serialize())")
+    }
+    // every other watch is unchanged: the baseline still watches its own child
+    var kidMeta: OrderedDictionary<String, JSON> = [:]
+    kidMeta["callable_by"] = defaultCallableBy()
+    let kid = Agent(id: "nosy_kid", handlerModule: nil, parentId: AgentId("nosy"), meta: kidMeta)
+    kernel.register(kid)
+    var nosyMeta: OrderedDictionary<String, JSON> = [:]
+    nosyMeta["can_call"] = defaultCanCall()
+    let nosy = Agent(
+        id: "nosy", handlerModule: nil, parentId: AgentId("kernel_state"), meta: nosyMeta)
+    nosy.insertChild(kid)
+    kernel.register(nosy)
+    let ok = KernelTaskLocals.$currentSender.withValue(AgentId("nosy")) {
+        kernel.watch(src: AgentId("nosy_kid"), watcher: AgentId("nosy"))
+    }
+    #expect(ok == nil)
+}
+
 /// `*` under a NAMED id covers everything, privileged verbs included.
 @Test func aNamedWildcardCoversPrivilegedVerbs() {
     let g: JSON = .object(["root": .string("*")])

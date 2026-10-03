@@ -154,24 +154,6 @@ def expand_ids(rows: list[dict], ids: list[str]) -> list[str]:
     return out
 
 
-def closed_prefix(rows: list[dict], chain: list[int], keep_tail: int) -> list[int]:
-    """The foldable PREFIX of an open chain: everything but the last `keep_tail` rows,
-    cut back so it ends on a reply (never between a call and its answer). A superlong
-    chain never closes, so this is how it still folds — covers (1) of the edge cases."""
-    if len(chain) <= keep_tail + 1:
-        return []
-    span = chain[: len(chain) - keep_tail]
-    while span and rows[span[-1]].get("role") == "assistant":
-        span = span[:-1]
-    return span if len(span) >= 2 else []
-
-
-def fold_share(view: list[dict]) -> float:
-    """Fraction of the view's bytes that are fold rows — the trigger for folding folds."""
-    total = sum(len(str(r.get("content", ""))) for r in view) or 1
-    return sum(len(str(r.get("content", ""))) for r in view if is_fold(r)) / total
-
-
 def level(rows: list[dict], fold_row: dict) -> int:
     """1 for a fold of rows, 2 for a fold of folds, and so on."""
     by_id = {r.get("id"): r for r in rows if r.get("id")}

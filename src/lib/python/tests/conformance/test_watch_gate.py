@@ -16,12 +16,11 @@ data has to be gated on the data, not merely on reachability.
 
 from __future__ import annotations
 
-import sys
 import types
 
 import pytest
 
-from kernel import sender_context
+from kernel import sender_context, register_unlisted
 
 _mod = types.ModuleType("watch_probe.tools")
 
@@ -37,7 +36,7 @@ async def _handler(id, payload, kernel):
 
 _mod.handler = _handler
 _mod.VERBS = {}
-sys.modules["watch_probe.tools"] = _mod
+register_unlisted("watch_probe.tools", _mod)
 
 
 async def _mk(kernel, agent_id, **meta):
@@ -127,6 +126,53 @@ async def test_an_operator_watch_stays_ungated(wired):
     wired.ctx.ensure_inbox("cli")
     assert wired.watch("secret", "cli") is None
     assert "cli" in wired.ctx.agents["secret"]._watcher_ids
+
+
+async def _set_can_call(kernel, agent_id, grant):
+    out = (
+        await kernel.send(
+            [
+                {
+                    "target": "kernel",
+                    "payload": {
+                        "type": "update_agent",
+                        "id": agent_id,
+                        "can_call": grant,
+                    },
+                }
+            ]
+        )
+    )[0]
+    assert out["result"].get("updated") is True, out
+
+
+async def test_watching_the_root_needs_a_named_grant(wired):
+    """Measured before the fix (audit 2026-10-03, KV-2): every direct child of the
+    root watched the root inbox on the baseline `$parent:*` alone and read every
+    kernel verb's payload — other agents' `persist_blob` contents included."""
+    wired.ctx.ensure_inbox("nosy")
+    with sender_context("nosy"):
+        denial = wired.watch(wired.id, "nosy")
+    assert denial is not None, "the baseline watched the root"
+    assert denial["reason"] == "unauthorized" and denial["side"] == "egress", denial
+    assert denial["error"] == f"nosy may not call 'watch' on {wired.id}", denial
+    assert "nosy" not in wired._watcher_ids
+    base = {"$self": "*", "$parent": "*", "$children": "*"}
+    # a structural wildcard spelled out is still a structural wildcard
+    await _set_can_call(wired, "nosy", {**base, "$parent": ["*"]})
+    with sender_context("nosy"):
+        assert wired.watch(wired.id, "nosy") is not None
+    # a NAMED grant covers it: the root's id with the verb, or with `*`
+    for grant in ({wired.id: ["watch"]}, {wired.id: "*"}, {"$parent": ["watch"]}):
+        await _set_can_call(wired, "nosy", {**base, **grant})
+        with sender_context("nosy"):
+            assert wired.watch(wired.id, "nosy") is None, grant
+        wired.unwatch(wired.id, "nosy")
+    # every other watch is unchanged: the baseline still watches its own child
+    await _mk(wired, "nosy_kid", parent_id="nosy")
+    await _set_can_call(wired, "nosy", base)
+    with sender_context("nosy"):
+        assert wired.watch("nosy_kid", "nosy") is None
 
 
 async def test_the_state_stream_needs_an_explicit_edge_on_the_root(wired):

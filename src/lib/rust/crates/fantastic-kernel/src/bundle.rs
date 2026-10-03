@@ -9,10 +9,12 @@
 //!
 //! ## Contract
 //!
-//! Every bundle implements [`Bundle`]. The substrate calls `handle`
-//! for any verb the Agent's system-verb table doesn't claim. Bundle
-//! authors return `None` to mean "no reply" (fire-and-forget — the
-//! Python equivalent is returning `None` from the handler).
+//! Every bundle implements [`Bundle`]. The substrate calls
+//! [`Bundle::handle_binary`] — whose default is `handle` — for any verb the
+//! Agent's system-verb table doesn't claim; a bundle whose replies never hold
+//! raw bytes implements `handle` alone. Bundle authors return `None` to mean
+//! "no reply" (fire-and-forget — the Python equivalent is returning `None`
+//! from the handler).
 //!
 //! Lifecycle hooks:
 //! - `on_delete` fires depth-first during cascade-delete BEFORE the
@@ -50,8 +52,9 @@ pub trait Bundle: Send + Sync {
     /// `handler_module` (e.g. `"file_bridge.tools"`, `"web.tools"`).
     fn name(&self) -> &str;
 
-    /// Dispatch a verb. `payload["type"]` names the verb. Substrate
-    /// guarantees `payload` is an `Object` shape.
+    /// Dispatch a verb whose reply is JSON alone — the default
+    /// [`Self::handle_binary`] calls it. `payload["type"]` names the verb.
+    /// Substrate guarantees `payload` is an `Object` shape.
     ///
     /// `kernel` is passed so the handler can `kernel.send(...)` to
     /// other agents or read shared state. Avoids storing back-refs
@@ -111,38 +114,38 @@ pub trait Bundle: Send + Sync {
         None
     }
 
-    /// Dispatch a binary-framed verb. The binary channel is **symmetric**:
-    /// a request carries `(header, body)` and the reply carries
-    /// `(Reply, body)` — raw bytes flow in BOTH directions, never base64
-    /// (mirrors Python's `read_stream`/`write_stream`/`paste_image`, where the
-    /// bytes are a native `bytes` value in the dict). `header` is the payload
-    /// with NOTHING at the body's path (python holds the bytes there); `body` is
-    /// the raw request body AT ITS PATH ([`crate::outcome::Blob`]) — a handler
-    /// reads ITS OWN key with [`crate::outcome::Blob::at`], exactly as python's
-    /// reads `payload.get("data")` / `payload.get("bytes")`, so a body placed
-    /// under another key is not its body. `None` = the binary channel with no
-    /// request body (a raw read: `read_stream`).
+    /// THE DISPATCH — the kernel calls this for EVERY call, a request body or
+    /// not; python's one `handle`, whose reply dict may hold `bytes` at any key.
+    /// Raw bytes flow in BOTH directions, never base64. `header` is the payload
+    /// with NOTHING at the request body's path (python holds the bytes there);
+    /// `body` is the raw request body AT ITS PATH ([`crate::outcome::Blob`]) — a
+    /// handler reads ITS OWN key with [`crate::outcome::Blob::at`], exactly as
+    /// python's reads `payload.get("data")` / `payload.get("bytes")`, so a body
+    /// placed under another key is not its body. `None` = the call carried no
+    /// request body (a plain text call: `read_stream`, `events`, …).
     ///
     /// The reply body is an `Option<Blob>` — the chunk AND ITS SLOT in the
     /// reply, as python's reply dict holds a `bytes` value at a key: a
-    /// `read_stream` chunk is `Blob::key("bytes", …)`, a bridge relaying a
+    /// `read_stream` chunk is `Blob::key("bytes", …)`, a bundle's own verb puts
+    /// its chunk at its own key (`Blob::key("chunk", …)`), a bridge relaying a
     /// peer's reply keeps the slot the peer's frame named (`["x.y"]` is the
-    /// reply key `"x.y"`, never `x` → `y`). `Some` means the verb RETURNED A
-    /// CHUNK and `None` means it returned none, so a 0-byte chunk (an empty
-    /// file read) stays distinguishable from `write_stream`'s bodiless status
-    /// reply. Python has the distinction for free — `isinstance(reply["bytes"],
-    /// bytes)` — and every wire leg branches on it (the REST octet decision,
-    /// the WS binary-frame decision, the file proxy's "is this a SOURCE"
-    /// probe), which is why an `is_empty()` test served an empty file as JSON
-    /// and a denial as a 200.
+    /// reply key `"x.y"`, never `x` → `y`). ANY verb may return one — nothing is
+    /// declared, no verb list exists — and every wire leg answers binary exactly
+    /// when it is `Some` (the REST octet reply, the WS binary frame, a bridge's
+    /// binary reply frame). `Some` means the verb RETURNED A CHUNK and `None`
+    /// means it returned none, so a 0-byte chunk (an empty file read) stays
+    /// distinguishable from `write_stream`'s bodiless status reply. Python has
+    /// the distinction for free — `isinstance(reply["bytes"], bytes)` — which is
+    /// why an `is_empty()` test served an empty file as JSON and a denial as a
+    /// 200.
     ///
-    /// Default impl: a bundle with no binary surface gets its JSON `header`
-    /// dispatched through [`Self::handle`] and the raw body is DROPPED —
-    /// never base64-encoded onto the payload. base64 on the wire is banned
-    /// (pure streams): raw bytes ride the binary carrier only, and a bundle
-    /// that actually wants them overrides this method
-    /// (`file_bridge.read_stream`/`write_stream`,
-    /// `exec_bridge.paste_image`). Returns NO reply body.
+    /// Default impl: a bundle whose verbs never carry bytes gets its JSON
+    /// `header` dispatched through [`Self::handle`] and a request body is
+    /// DROPPED — never base64-encoded onto the payload. A bundle that takes or
+    /// answers raw bytes overrides this method and answers EVERY verb here
+    /// (`file_bridge.read_stream`/`write_stream`, `exec_bridge.paste_image`, a
+    /// bridge's `forward`), routing the rest to its own `handle`. Returns NO
+    /// reply body.
     async fn handle_binary(
         &self,
         agent_id: &AgentId,
@@ -227,14 +230,20 @@ pub trait Bundle: Send + Sync {
     /// The root's handler_module (the loader) contributes root-only fields the
     /// substrate cannot compute without coupling to bundle logic —
     /// `persistence: {provider}`, the instance `guid`, the doc-tree frame and
-    /// the `self_extension` shape. A bundle with nothing to add returns `None`.
+    /// the `self_extension` shape. A bundle with nothing to add returns
+    /// `Ok(None)`.
+    ///
+    /// `Err` = the hook RAISED — the raised reply (`{"error": "<Class>:
+    /// <message>", "raised": true}`), which fails the whole reflect, as python's
+    /// bare hook call does. Swallowed, it dropped `persistence` and `guid` with
+    /// nothing to say so (audit 2026-10-03, ARCH2-9).
     fn reflect_root_extra(
         &self,
         _agent: &Arc<crate::agent::Agent>,
         _full: bool,
         _kernel: &Arc<Kernel>,
-    ) -> Option<Map<String, Value>> {
-        None
+    ) -> Result<Option<Map<String, Value>>, Value> {
+        Ok(None)
     }
 }
 
@@ -246,9 +255,10 @@ pub trait Bundle: Send + Sync {
 ///
 /// TWO KINDS OF ENTRY, as python has two: an INSTALLED bundle (python's
 /// `fantastic.bundles` entry point) dispatches AND is listed in the reflect
-/// catalog; an UNLISTED one (python's importable module with no entry point —
-/// the e2e scenario probes) dispatches only. The catalog tells a caller what it
-/// may `create_agent` from, so a test fixture must not appear in it.
+/// catalog; an UNLISTED one (python's `register_unlisted` — a module with no
+/// entry point, the e2e scenario probes) dispatches only. The catalog tells a
+/// caller what it may `create_agent` from, so a test fixture must not appear in
+/// it.
 #[derive(Default)]
 pub struct BundleRegistry {
     by_handler: HashMap<String, Arc<dyn Bundle>>,
@@ -274,8 +284,8 @@ impl BundleRegistry {
     }
 
     /// Register a bundle that DISPATCHES but is not installable — python's
-    /// importable module without a `fantastic.bundles` entry point (the e2e
-    /// scenario probes). It never appears in the `bundles` catalog.
+    /// `register_unlisted`: a module without a `fantastic.bundles` entry point
+    /// (the e2e scenario probes). It never appears in the `bundles` catalog.
     pub fn register_unlisted<B: Bundle + 'static>(&mut self, handler_module: &str, bundle: B) {
         self.unlisted.insert(handler_module.to_string());
         self.by_handler

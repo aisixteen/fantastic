@@ -174,7 +174,6 @@ let package = Package(
                 "FantasticKernel", "FantasticJSON",
                 .product(name: "OrderedCollections", package: "swift-collections"),
                 .product(name: "Yams", package: "Yams"),
-                "FantasticExecBridge",
                 // The running-dir clamp: `fs` is the one disk surface, and the
                 // cold manifest read is not exempt (python and rust do the same).
                 "FantasticFile",

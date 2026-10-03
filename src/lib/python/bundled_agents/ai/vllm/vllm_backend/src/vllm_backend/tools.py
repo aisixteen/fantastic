@@ -12,27 +12,16 @@ failure shapes and — the reason this bundle
 exists — a KV-cache session table (`kv_slots` + `kv_overflow`) shared per
 endpoint. See `provider.py` for what each is and why.
 
-The ai_core state dicts and seams are RE-EXPORTED here so the monkeypatch seams
-the other backends' tests use work identically, and `on_cancel` is re-exported
-because that module-level name IS the bundle's cancel hook.
+`on_cancel` is re-exported from `ai_core` because that module-level name IS the
+bundle's cancel hook; `on_delete` is ai_core's, plus this backend's own table.
 """
 
 from __future__ import annotations
 
-from ai_core import build, required_meta
+from ai_core import build, on_cancel, required_meta  # noqa: F401 — the cancel hook
+from ai_core import on_delete as _core_on_delete
 from ai_core.credentials import key_reader
 from ai_core.schema import credentials_field, field, schema, validate
-from ai_core.core import (  # noqa: F401 — re-exported test seams + the cancel hook
-    DEFAULT_CLIENT_ID,
-    MAX_CALL_DEPTH,
-    SEND_TIMEOUT,
-    _assemble,
-    _current,
-    _locks,
-    _providers,
-    _queue,
-    on_cancel,
-)
 
 from vllm_backend.provider import (
     CONNECT_TIMEOUT,
@@ -42,6 +31,7 @@ from vllm_backend.provider import (
     READ_TIMEOUT,
     REASONING_EFFORTS,
     SAMPLING_DEFAULTS,
+    last_budgets,
     table_for,
 )
 
@@ -87,6 +77,7 @@ def make_provider(id, kernel):
             "(refuse the newcomer) (update_agent <id> kv_overflow=…)"
         )
     return VllmProvider(
+        agent_id=id,
         endpoint=required_meta(rec, "endpoint", NAME),
         model=required_meta(rec, "model", NAME),
         key=key_reader(id, kernel, NAME, required=False),
@@ -108,12 +99,11 @@ async def _reflect_extra(id, kernel):
     rec = kernel.get(id) or {}
     sampling, explicit = _sampling(rec)
     endpoint = rec.get("endpoint")
-    provider = _providers.get(id)
     return {
         "sampling": sampling,
         "thinking_token_budget_source": "record" if explicit else "default",
         # what the last pass actually SENT (the default adapts to small calls)
-        "last_thinking_budget": getattr(provider, "last_thinking_budget", None),
+        "last_thinking_budget": last_budgets.get(id),
         "max_tokens": rec.get("max_tokens"),
         "timeouts": {
             "connect": float(rec.get("connect_timeout") or CONNECT_TIMEOUT),
@@ -277,6 +267,13 @@ def validate_meta(meta: dict, record: dict) -> str | None:
     return validate(RECORD_SCHEMA, NAME, meta, record)
 
 
+async def on_delete(agent) -> None:
+    """The bundle's delete hook: ai_core's (every row it keeps for the id), then
+    this backend's own — the agent's last-sent thinking budget."""
+    await _core_on_delete(agent)
+    last_budgets.pop(agent.id, None)
+
+
 def _build():
     return build(
         sentence=(
@@ -285,7 +282,6 @@ def _build():
         ),
         make_provider=make_provider,
         name=NAME,
-        module_name=__name__,
         reflect_extra=_reflect_extra,
     )
 

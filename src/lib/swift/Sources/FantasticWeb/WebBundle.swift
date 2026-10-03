@@ -272,9 +272,11 @@ public final class WebBundle: AgentBundle, @unchecked Sendable {
         // Announce OURSELVES to the cli renderer (the boot-event convention):
         // the web host owns its port, so it tells the terminal where to attach —
         // the renderer never reaches in for it. No cli (non-tty) ⇒ nobody is
-        // told; the bound port is on this agent's reflect.
+        // told; the bound port is on this agent's reflect. The URL names the
+        // BOUND host — a host bound to a LAN address does not answer at
+        // 127.0.0.1 (audit ARCH2-10).
         let line =
-            "listening on http://127.0.0.1:\(handle.port)/"
+            "listening on http://\(handle.host):\(handle.port)/"
             + " · rest/ws are children (reflect kernel for ids)"
         _ = await kernel.send([
             Item(
@@ -327,10 +329,7 @@ public final class WebBundle: AgentBundle, @unchecked Sendable {
                 childIds: Set(agent.childIds().map { $0.value }), loaderId: nil,
                 inSubtree: { kernel.inSubtree($0, of: $1) })
             if !ingress.allowed { continue }
-            guard
-                let rule = try? resolveIngress(
-                    ingressRule: meta["ingress_rule"], auth: meta["auth"])
-            else { continue }
+            let rule = resolveIngress(ingressRule: meta["ingress_rule"], auth: meta["auth"])
             let action = AuthAction(
                 kind: "call", target: agent.id.value, verb: "read_stream", token: nil)
             if case .deny = gateInbound(rule: rule, action: action) { continue }
@@ -359,7 +358,7 @@ public final class WebBundle: AgentBundle, @unchecked Sendable {
     /// python `PB/web/host/src/web/readme.md`, byte for byte.
     static let readmeText = """
         # web — uvicorn HTTP host
-        Renders nothing of its own (an undeclared `/` is a 404): it serves `/<id>/file/<path>` (the `read_stream` file proxy) and the favicon (`/_assets/favicon.png`). Frontend panels live in an app on the TS kernel. Verb-invocation surfaces are sub-agents (web_ws, web_rest): they DECLARE routes via the duck-typed `get_routes` verb (pure data — `{kind, method?, path}`) and hand the live endpoint for each path to this host through the duck-typed `route_endpoints(agent)` module hook. A leg declaring a route without that hook fails web boot. `port` field on the record is where it binds; `host` is the bind address — absent ⇒ `127.0.0.1` (loopback), set `0.0.0.0` explicitly to publish (a container). Websocket upgrades and non-GET/HEAD/OPTIONS requests from a browser `Origin` that is not this host's own (`http://<host>:<port>`, both loopback spellings when loopback) nor listed in the record's `allowed_origins` (exact strings) are refused — 403 / refused upgrade, logged. No Origin header (CLI, curl, a bridge) passes; the leg's `ingress_rule` still gates it. Both fields are ordinary record meta: create_agent, a roster yaml, update_agent.
+        Renders nothing of its own (an undeclared `/` is a 404): it serves `/<id>/file/<path>` (the `read_stream` file proxy) and the favicon (`/_assets/favicon.png`). Frontend panels live in an app on the TS kernel. Verb-invocation surfaces are sub-agents (web_ws, web_rest): they DECLARE routes via the duck-typed `get_routes` verb (pure data — `{kind, method?, path}`) and hand the live endpoint for each path to this host through the duck-typed `route_endpoints(agent)` module hook. A leg declaring a route without that hook fails web boot. `port` field on the record is where it binds; `host` is the bind address — absent ⇒ `127.0.0.1` (loopback), set `0.0.0.0` explicitly to publish (a container). EVERY request — GET/HEAD/OPTIONS, unsafe methods and the websocket upgrade — whose `Host` header is not this host's own authority (`<host>:<port>`, plus `localhost`/`127.0.0.1`/`[::1]` on that port when the bind is loopback) is refused — 403 / refused upgrade, logged; a `0.0.0.0` bind answers only `Host: 0.0.0.0:<port>`, so a container port map, a LAN name or a tunnel name is refused (a DNS-rebinding page names its own domain in Host). Websocket upgrades and non-GET/HEAD/OPTIONS requests from a browser `Origin` that is not this host's own (`http://<host>:<port>`, both loopback spellings when loopback) nor listed in the record's `allowed_origins` (exact strings) are refused — 403 / refused upgrade, logged. No Origin header (CLI, curl, a bridge) passes; the leg's `ingress_rule` still gates it. Both fields are ordinary record meta: create_agent, a roster yaml, update_agent.
 
         """
 }

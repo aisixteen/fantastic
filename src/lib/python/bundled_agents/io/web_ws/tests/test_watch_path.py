@@ -21,9 +21,12 @@ PY = sys.executable
 
 
 def _client(kernel, leg_id):
+    # The web host's record: its port is the authority the Host guard admits
+    # (audit W-2) — the client names it on every request, the upgrade included.
+    kernel.get("test_web") or kernel.create(None, id="test_web", port=8088)
     app = make_app("test_web", kernel)
     app.add_api_websocket_route("/{host_id}/ws", _make_endpoint(leg_id, kernel))
-    return TestClient(app)
+    return TestClient(app, headers={"host": "127.0.0.1:8088"})
 
 
 def _until(ws, call_id, n=40):
