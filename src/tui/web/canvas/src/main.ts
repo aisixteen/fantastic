@@ -1,13 +1,12 @@
-import { Agent, boot } from "./lib.ts";
-import type { Kernel } from "./lib.ts";
+import { Agent, Kernel, ProxyLoader, WsBridge, registerRamStore } from "./lib.ts";
+import { GATEWAY, UserBridge, pageVerbs, readToken, writeToken, writesPage } from "./user_bridge.ts";
 import { registerGlAgent } from "./bundles/gl_agent/gl_agent.ts";
 import { registerHtmlAgent } from "./bundles/html_agent/html_agent.ts";
 import { mountCanvas } from "./bundles/canvas/canvas.ts";
 import { registerCanvas } from "./bundles/canvas/canvas_agent.ts";
 import { registerBackground } from "./bundles/canvas/background_agent.ts";
 
-// The canvas page. The frontend kernel boots as a PEER of the host (the library's
-// `boot`): it dials the host's `web_loader` (by id) over the bridge (a host-side
+// The canvas page. The frontend kernel boots as a PEER of the host: it dials the host's `web_loader` (by id) over the bridge (a host-side
 // `kernel_state` rooted at `.fantastic/web/`, which the operator created — no
 // automation), hydrates its OWN agent tree from there (`load_tree`), and
 // persists every local change back (`proxy_loader`). The canvas renders the
@@ -26,7 +25,7 @@ const origin =
 function register(kernel: Kernel): void {
   registerGlAgent(kernel);
   registerHtmlAgent(kernel);
-  registerCanvas(kernel); // the compositor root: rendered; `around`
+  registerCanvas(kernel); // the compositor root and its control plane
   registerBackground(kernel); // its singleton, delete-locked background (set_bg/clear_bg/get_bg)
   // View bundles that front a host backend are real frontend agents too — a
   // no-op handler makes their records load-able; the ViewBundle renders them.
@@ -71,7 +70,35 @@ function seed(kernel: Kernel): void {
   );
 }
 
-const { kernel, loader } = await boot({ origin, loader: LOADER, register, seed });
+// THE BOOT, the library's `boot` composed here with one change: every host call
+// goes through the USERS GATEWAY as this tab's user (`user_bridge.ts`).
+const kernel = new Kernel();
+registerRamStore(kernel);
+register(kernel);
+const inner = new WsBridge(kernel, { origin, controlEndpoint: GATEWAY });
+const tab = crypto.randomUUID().replace(/-/g, "");
+// the token is read ONCE, at load: a token typed in another tab takes effect here
+// on this tab's next load, never mid-session
+const token = readToken();
+const bridge = new UserBridge(kernel, inner, { loader: LOADER, token: () => token, tab });
+
+// WHO THIS TAB IS: the gateway says which user its token is (no token: the
+// host's tokenless default). Refused → ask for a token, and nothing else runs.
+const me = (await kernel.callHost(GATEWAY, { type: "reflect" })) as Record<string, unknown>;
+if (typeof me["as"] !== "string") {
+  const why = (me["as_error"] as Record<string, unknown> | undefined)?.["error"] ?? me["error"] ?? "no answer";
+  askToken(String(why));
+  await new Promise(() => {}); // the form reloads the page
+}
+
+const loader = new ProxyLoader(kernel, LOADER);
+kernel.persistenceProvider = LOADER;
+const records = await loader.loadTree();
+if (records.length > 0) kernel.load(records);
+else seed(kernel);
+inner.announce();
+loader.start();
+bridge.start();
 
 // THE ROOT'S BOOT MINTS THE GUID (once; it persists with the root record) — the
 // canvas's identity as a PEER kernel: the bridge says `hello {guid}` with it, and
@@ -91,10 +118,41 @@ async function legOf(): Promise<string | undefined> {
   return typeof leg === "string" && leg !== "" ? leg : undefined;
 }
 
+/** Whether this tab's user may write page agent `id` (its page grants). */
+const canCall = (me["can_call"] ?? {}) as Record<string, unknown>;
+function writable(id: string): boolean {
+  const guid = kernel.guid ?? "";
+  const up: string[] = [];
+  let cur = kernel.get(id)?.parentId ?? null;
+  while (cur !== null && !up.includes(cur)) {
+    up.push(cur);
+    cur = kernel.get(cur)?.parentId ?? null;
+  }
+  return writesPage(pageVerbs(canCall, guid, id, up));
+}
+
 await mountCanvas({
   kernel,
   mount: document.body,
   selfId: kernel.rootId ?? "canvas",
   leg: await legOf(),
   flush: () => loader.flush(),
+  writable,
 });
+
+/** The token form: shown when the host refuses this tab. The token goes to
+ *  browser storage only, then the page reloads. */
+function askToken(why: string): void {
+  const box = document.createElement("form");
+  box.className = "token-ask";
+  box.innerHTML = `<p class="why"></p><input type="password" autocomplete="off" placeholder="token"><button>open</button>`;
+  (box.querySelector(".why") as HTMLElement).textContent = `This canvas wants a token — ${why}.`;
+  box.style.cssText = "position:fixed;inset:0;display:grid;place-content:center;gap:10px;font:14px system-ui;color:#cde;background:#0b0b10";
+  box.addEventListener("submit", (e) => {
+    e.preventDefault();
+    writeToken((box.querySelector("input") as HTMLInputElement).value.trim());
+    location.reload();
+  });
+  document.body.replaceChildren(box);
+  (box.querySelector("input") as HTMLInputElement).focus();
+}

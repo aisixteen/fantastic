@@ -1,35 +1,20 @@
 # THE SCENARIO — data, one copy. No model: the actor is a scripted keyboard in a
 # pseudo-terminal (the shell's own PTY rig, src/tui/e2e/screenshot.rs), and
 # every key and every expected frame is written below. What is measured is the
-# `fantastic` SHELL BINARY: the explicit init gate, the blueprint, the live
-# tree, the clean exit, and rehydration.
+# `fantastic` SHELL BINARY: init on launch, the blueprint, the live tree, the
+# clean exit, and rehydration.
 #
 # Runs are sequential processes over ONE temp directory.
 
 id: tui
-title: fantastic — the shell's init gate, blueprint and rehydration, keyboard-driven
+title: fantastic — the shell's init on launch, blueprint and rehydration, keyboard-driven
 runtimes: [tui]
 costs: free
 
 screen: {rows: 40, cols: 120}
 
 runs:
-  # ── 1 · the intro, then leave WITHOUT a key: nothing may be written ────────
-  - name: attract-leave
-    script: |
-      wait 1500
-      shot attract
-      key ctrl-c
-      wait 150
-      key ctrl-c
-      exit 5000
-    frames:
-      attract: {contains_block_title: true}
-    after_exit:
-      exit_code: 0
-      dir_untouched: true
-
-  # ── 2 · a key: init from the blueprint, the live tree, a clean exit ────────
+  # ── 1 · launch: a fresh directory is seeded, the live tree, a clean exit ──
   - name: init
     script: |
       wait 1200
@@ -58,7 +43,7 @@ runs:
         - .fantastic/memory.db
       files_absent: [.fantastic/agents/mcp/agent.yaml, .fantastic/messages.yaml, .fantastic/ledger.json]
 
-  # ── 3 · the same directory: no intro, straight to the tree, log grows ──────
+  # ── 2 · the same directory: no intro, straight to the tree, log grows ──────
   #       …and an agent with no view of its own opens in the DEFAULT view
   - name: rehydrate
     script: |
@@ -87,7 +72,7 @@ runs:
       lock_released: true
       rows_grew: true
 
-  # ── 4 · the Activity page: every open question to the human, none here ─────
+  # ── 3 · the Activity page: every open question to the human, none here ─────
   - name: activity
     script: |
       wait 2500
@@ -107,7 +92,7 @@ runs:
       exit_code: 0
       lock_released: true
 
-  # ── 5 · the in-app terminal: `t` opens $SHELL below the page as an agent,
+  # ── 4 · the in-app terminal: `t` opens $SHELL below the page as an agent,
   #       typed keys reach it, Esc hands the keyboard back, `t` closes it ─────
   - name: terminal
     script: |
@@ -136,7 +121,7 @@ runs:
       lock_released: true
       files_absent: [.fantastic/agents/set_of_agents/agents/term/agent.yaml]
 
-  # ── 6 · the sidebar's three views: v flat, < rail, > back ─────────────────
+  # ── 5 · the sidebar's three views: v flat, < rail, > back ─────────────────
   - name: sidebar
     script: |
       wait 2500
@@ -167,7 +152,7 @@ runs:
       exit_code: 0
       lock_released: true
 
-  # ── 7 · the set-up page: four fields, no defaults, nothing written unasked.
+  # ── 6 · the set-up page: four fields, no defaults, nothing written unasked.
   #       This build links no ai backend, so the page says so and a write is
   #       refused in place, naming what is missing.
   - name: setup
@@ -197,7 +182,7 @@ runs:
       exit_code: 0
       lock_released: true
 
-  # ── 8 · the mouse: a click on a sidebar row selects and opens it ──────────
+  # ── 7 · the mouse: a click on a sidebar row selects and opens it ──────────
   #       (the tree box's border is row 0; row 3 is the third entry, fs_loader)
   - name: mouse
     script: |

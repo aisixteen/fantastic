@@ -19,6 +19,7 @@ export type Pick =
   | { kind: "stream" }
   | { kind: "setup" }
   | { kind: "canvas" }
+  | { kind: "demo" }
   | { kind: "chat"; id: string; name: string };
 
 export interface Presets {
@@ -29,7 +30,7 @@ export interface Presets {
 }
 
 export type Section = "do" | "ai" | "chats";
-export type Icon = "ask" | "terminal" | "html" | "stream" | "agent" | "template" | "chat" | "canvas";
+export type Icon = "ask" | "terminal" | "html" | "stream" | "agent" | "template" | "chat" | "canvas" | "demo";
 
 export interface Tile {
   icon: Icon;
@@ -48,6 +49,7 @@ const KINDS: Array<[string, Pick, Icon]> = [
   ["stream", { kind: "stream" }, "stream"],
   ["canvas", { kind: "canvas" }, "canvas"],
   ["agent", { kind: "setup" }, "agent"],
+  ["demo", { kind: "demo" }, "demo"],
 ];
 
 /** The tiles for what is typed, in order (sections in order). Pure. */
@@ -103,6 +105,7 @@ const PATH: Record<Icon, string> = {
   agent: '<circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1"/>',
   template: '<path d="M12 3l1.8 4.7L18.5 9.5l-4.7 1.8L12 16l-1.8-4.7L5.5 9.5l4.7-1.8z"/><rect x="15" y="15" width="6" height="6" rx="1.5"/>',
   canvas: '<rect x="3" y="3" width="18" height="18" rx="3"/><rect x="7" y="7" width="6" height="5" rx="1"/><rect x="11" y="13" width="6" height="4" rx="1"/>',
+  demo: '<circle cx="12" cy="12" r="9"/><path d="M10 8.5v7l6-3.5z"/>',
   chat: '<path d="M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v8a2.5 2.5 0 0 1-2.5 2.5H10l-4.5 4v-4H6.5A2.5 2.5 0 0 1 4 13.5z"/>',
 };
 export function iconSvg(icon: Icon): string {

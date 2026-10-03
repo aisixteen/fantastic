@@ -15,8 +15,9 @@
 //!
 //! The store comes FIRST (an AI's boot checks the store it names) and is the
 //! subtree's ROOT: deleting it deletes the AI with it — the cell's ✕. The view
-//! calls the AI as the leg, so the AI accepts exactly the chat verbs from it,
-//! and the leg is granted them BY NAME (two levels down is past `$children`).
+//! calls the AI as `user` (a tab with no token, through the users gateway), so
+//! the AI accepts the chat verbs from it and `user` is granted them BY NAME,
+//! at once — `kern/reach` widens them to every verb afterwards, asynchronously.
 //!
 //! Verbs: `presets` (template names, their backend and model, and the default),
 //! `spawn {template?, stamp?, peer_grants?}` (the named template, else the
@@ -56,7 +57,9 @@ pub const HANDLER_MODULE: &str = "ai_cells.tools";
 /// The agent's id (created by `fantastic canvas`, under the canvas's leg).
 pub const AI_CELLS_ID: &str = "ai_cells";
 
-/// What the leg (so the cell's view) may call on a spawned AI.
+/// Who the cell's view calls the AI as: a tokenless tab's user.
+const CHAT_USER: &str = fantastic_canvas_users::DEFAULT_USER;
+/// What the cell's view may call on a spawned AI.
 pub const CHAT_VERBS: [&str; 5] = ["send", "history", "status", "watch", "reflect"];
 
 /// A template-record field the dialog snapshot never carries (identity, wiring,
@@ -186,7 +189,7 @@ impl AiCellsBundle {
         spec.insert("id".into(), json!(ai));
         spec.insert("memory_store_id".into(), json!(store));
         spec.insert("template".into(), json!(name));
-        spec.insert("callable_by".into(), json!({ leg.as_str(): CHAT_VERBS }));
+        spec.insert("callable_by".into(), json!({ CHAT_USER: CHAT_VERBS }));
         let mut cc = peer;
         cc.insert(store.clone(), json!("*"));
         spec.insert("can_call".into(), Value::Object(cc));
@@ -204,21 +207,11 @@ impl AiCellsBundle {
             let _ = host.operator("kernel", json!({"type": "delete_agent", "id": store})).await;
             return refuse("bad_arg", format!("spawn: {e}"), "");
         }
-        // 3 · the leg reaches the AI BY NAME: it sits two levels down (under its
-        // store), past what the leg's structural `$children` covers. Grants for
-        // cells that are gone are pruned here, so they never pile up.
-        let mut cc: Map<String, Value> = host
-            .kernel
-            .agents
-            .get(&AgentId::from(leg.as_str()))
-            .and_then(|a| a.value().record().meta.get("can_call").and_then(Value::as_object).cloned())
-            .unwrap_or_default();
-        cc.retain(|k, _| !k.starts_with("ai_") || k == AI_CELLS_ID || host.kernel.agents.contains_key(&AgentId::from(k.as_str())));
-        cc.insert(ai.clone(), json!(CHAT_VERBS));
-        let r = host.operator("kernel", json!({"type": "update_agent", "id": leg, "can_call": cc})).await.result;
-        if let Some(e) = r.get("error").and_then(Value::as_str) {
+        // 3 · `user` reaches the AI BY NAME, at once. Grants for cells that are
+        // gone are pruned here, so they never pile up.
+        if let Err(e) = Self::grant_user(host, &ai).await {
             let _ = host.operator("kernel", json!({"type": "delete_agent", "id": store})).await;
-            return refuse("bad_arg", format!("spawn: granting the leg the cell's chat: {e}"), "");
+            return refuse("bad_arg", format!("spawn: {e}"), "");
         }
         json!({"id": ai, "root": store, "template": name, "handler_module": t.handler(), "model": t.model()})
     }
@@ -243,16 +236,17 @@ impl AiCellsBundle {
         }
     }
 
-    /// Grant the leg the chat verbs on `ai` by name, pruning grants of gone cells.
-    async fn grant_leg(host: &Host, leg: &str, ai: &str) -> Result<(), String> {
-        let mut cc: Map<String, Value> = Self::meta_of(host, leg)
+    /// Grant `user` the chat verbs on `ai` by name (a wider grant `kern/reach`
+    /// wrote is kept), pruning grants of gone cells.
+    async fn grant_user(host: &Host, ai: &str) -> Result<(), String> {
+        let mut cc: Map<String, Value> = Self::meta_of(host, CHAT_USER)
             .and_then(|m| m.get("can_call").and_then(Value::as_object).cloned())
             .unwrap_or_default();
         cc.retain(|k, _| !k.starts_with("ai_") || k == AI_CELLS_ID || host.kernel.agents.contains_key(&AgentId::from(k.as_str())));
-        cc.insert(ai.to_string(), json!(CHAT_VERBS));
-        let r = host.operator("kernel", json!({"type": "update_agent", "id": leg, "can_call": cc})).await.result;
+        cc.entry(ai.to_string()).or_insert(json!(CHAT_VERBS));
+        let r = host.operator("kernel", json!({"type": "update_agent", "id": CHAT_USER, "can_call": cc})).await.result;
         match r.get("error").and_then(Value::as_str) {
-            Some(e) => Err(format!("granting the leg the cell's chat: {e}")),
+            Some(e) => Err(format!("granting `{CHAT_USER}` the cell's chat: {e}")),
             None => Ok(()),
         }
     }
@@ -382,7 +376,7 @@ impl AiCellsBundle {
         spec.insert("parent_id".into(), json!(leg));
         spec.insert("id".into(), json!(ai));
         spec.insert("memory_store_id".into(), json!(to));
-        spec.insert("callable_by".into(), json!({ leg.as_str(): CHAT_VERBS }));
+        spec.insert("callable_by".into(), json!({ CHAT_USER: CHAT_VERBS }));
         let mut cc = peer;
         cc.insert(to.clone(), json!("*"));
         spec.insert("can_call".into(), Value::Object(cc));
@@ -398,7 +392,7 @@ impl AiCellsBundle {
         if let Err(e) = crate::kern::keys::wire_record(host, &ai, &named).await {
             return refuse("bad_arg", format!("reopen: {e}"), "");
         }
-        if let Err(e) = Self::grant_leg(host, &leg, &ai).await {
+        if let Err(e) = Self::grant_user(host, &ai).await {
             return refuse("bad_arg", e, "");
         }
         json!({"id": ai, "root": ai, "template": d.get("template"), "name": d.get("name"), "shared": false})

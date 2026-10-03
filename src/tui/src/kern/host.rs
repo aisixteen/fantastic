@@ -106,6 +106,9 @@ fn registry() -> BundleRegistry {
     // THE CANVAS'S ACTIVITY: open questions to the human, read as the operator
     // (`kern/activity`) — the page never reads a memory store.
     reg.register(crate::kern::activity::HANDLER_MODULE, crate::kern::activity::ActivityBundle);
+    // THE CANVAS'S USERS: the gateway every tab calls, and the user records.
+    reg.register(fantastic_canvas_users::HANDLER_MODULE, fantastic_canvas_users::CanvasUsersBundle::default());
+    reg.register(fantastic_canvas_users::USER_MODULE, fantastic_canvas_users::CanvasUserBundle);
     // KEYS: the credential store (`kern/keys`) — every provider key, by ref.
     reg.register(fantastic_credential_store::HANDLER_MODULE, fantastic_credential_store::CredentialStoreBundle::default());
     // Apple's on-device model: linked by `--features foundation-models`.

@@ -145,6 +145,11 @@ SCENARIO_RUNNERS = {
         "cmd": ["uv", "run", "python", "-u", str(E2E / "runners/canvas.py")],
         "cwd": "pyroot",
     },
+    # THE CANVAS'S USERS: one host, a headless Chrome per identity (E21). No model.
+    "canvas_users": {
+        "cmd": ["uv", "run", "python", "-u", str(E2E / "runners/canvas_users.py")],
+        "cwd": "pyroot",
+    },
 }
 
 

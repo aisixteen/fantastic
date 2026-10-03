@@ -3,6 +3,9 @@
 // first slice is the DOM compositor only). Injected by mountCanvas().
 
 export const CANVAS_CSS = `
+  /* a canvas this tab's user may not write: its editing controls are gone */
+  body.ro .agent-frame .close, body.ro .agent-frame .lock, body.ro .agent-frame .resize-handle,
+  body.ro .setup-link, body.ro .chat-view .c-row, body.ro .chat-view .c-main, body.ro .chat-view .c-keep { display: none !important; }
   html, body { margin: 0; padding: 0; height: 100%; background: #06060c; color: #aaa; font-family: system-ui, sans-serif; overflow: hidden; }
   #bg { position: fixed; inset: 0; width: 100vw; height: 100vh; z-index: 0; pointer-events: none; display: block; }
   #canvas { position: relative; width: 100%; height: 100vh; overflow: hidden; z-index: 1; }
@@ -82,7 +85,7 @@ export const CANVAS_CSS = `
   #chats li { display: flex; gap: 8px; padding: 4px 14px; cursor: pointer; }
   #chats li:hover { background: rgba(183,140,255,0.16); }
   #chats li .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  #chats li.kept .dot { color: #7ee2a8; } #chats li.eph { opacity: 0.7; }
+  #chats li.kept .dot { color: #7ee2a8; } #chats li.main .dot { color: #ffd36b; } #chats li.eph { opacity: 0.7; }
   #chats li .ct { color: rgba(220,230,245,0.45); }
   #chats .chats-new { padding: 6px 14px 2px; color: #b78cff; cursor: pointer; }
   #chats .chats-list { max-height: 28vh; }

@@ -2,18 +2,22 @@
 //! the MCP leg too, 2026-10-01: "* grants … it can shape grants later"; the
 //! kernel: grants only, no kernel change).
 //!
-//! The human's surfaces that are not the in-proc operator — the canvas's socket
-//! leg (`canvas_ws`) and the MCP leg (`mcp`, a coding CLI) — reach every agent
-//! the way the shell does. The shell is the operator (ungated); a leg is not, so
-//! THIS CLI — the in-proc operator — writes BOTH edges for every agent:
+//! The human's surfaces that are not the in-proc operator reach every agent the
+//! way the shell does: the MCP leg (`mcp`, a coding CLI), `user` — the shell's
+//! own identity, which a canvas tab acts as through the users gateway when it
+//! has no token (owner, 2026-10-03) — and every AI CELL under the canvas leg
+//! (the canvas's control plane, owner 2026-09-30). The canvas leg itself
+//! reaches only the gateway (`kern/web`). The shell is the operator (ungated);
+//! these are not, so THIS CLI — the in-proc operator — writes BOTH edges for
+//! every agent:
 //!
-//! - the agent's `callable_by` accepts `$subtree:<leg>` with [`VERBS`] — the leg
-//!   AND everything under it;
-//! - the leg's `can_call` names the agent with the same list, and so does every
-//!   AI CELL under the canvas leg (the canvas's control plane, owner
-//!   2026-09-30) — a heritable entry cannot serve both the leg and its
-//!   descendants, so each holder carries its own (no `*` id key exists by
-//!   design: each target, by id, `kernel` included).
+//! - the agent's `callable_by` accepts `$subtree:<leg>` for each leg (the leg
+//!   AND everything under it — the AI cells under the canvas leg) and `user`,
+//!   with [`verbs`];
+//! - each HOLDER's `can_call` names the agent with the same list — a heritable
+//!   entry cannot serve both the leg and its descendants, so each holder
+//!   carries its own (no `*` id key exists by design: each target, by id,
+//!   `kernel` included).
 //!
 //! `*` never covers a PRIVILEGED verb, so each one is named. Done for every agent
 //! when a leg is set up, and again for each agent the state stream reports
@@ -31,29 +35,19 @@ use crate::kern::host::Host;
 /// The canvas leg's id.
 pub const CANVAS_LEG: &str = crate::kern::web::CANVAS_WS_ID;
 
-/// Every leg that gets the reach, when it exists.
+/// Every leg whose subtree the targets accept, when it exists.
 pub const LEGS: [&str; 2] = [CANVAS_LEG, crate::mcp::LEG];
+/// The legs that HOLD the reach themselves (the canvas leg reaches only the
+/// users gateway).
+pub const HOLDING_LEGS: [&str; 1] = [crate::mcp::LEG];
+/// The shell's own identity: a canvas tab with no token acts as it.
+pub const DEFAULT_USER: &str = fantastic_canvas_users::DEFAULT_USER;
 
-/// Every verb: `*`, and each privileged verb by name.
-pub const VERBS: [&str; 17] = [
-    "*",
-    "create_agent",
-    "delete_agent",
-    "update_agent",
-    "state_subscribe",
-    "allow",
-    "disallow",
-    "ps",
-    "cancel",
-    "ledger",
-    "ack_deadletter",
-    "kernel_start",
-    "kernel_stop",
-    "shutdown_agents",
-    "persist_record",
-    "forget_record",
-    "load_tree",
-];
+/// Every verb: `*`, and each privileged verb by name (a `*` never covers one) —
+/// the kernel's own list, so a verb the lib makes privileged is covered here too.
+pub fn verbs() -> Vec<&'static str> {
+    std::iter::once("*").chain(fantastic_kernel::authz::PRIVILEGED_VERBS).collect()
+}
 
 fn exists(h: &Host, id: &str) -> bool {
     h.kernel.agents.contains_key(&fantastic_kernel::AgentId::from(id))
@@ -72,8 +66,8 @@ fn legs(h: &Host) -> Vec<&'static str> {
     LEGS.into_iter().filter(|l| exists(h, l)).collect()
 }
 
-/// The HOLDERS of the reach: each present leg, and every AI agent under the
-/// canvas leg (an agent that names a memory store — `ai_cells` spawns them as
+/// The HOLDERS of the reach: each present holding leg, `user`, and every AI
+/// agent under the canvas leg (an agent that names a memory store — `ai_cells` spawns them as
 /// the leg's descendants).
 fn holders(h: &Host) -> Vec<String> {
     let under_canvas = |id: &str| -> bool {
@@ -86,7 +80,10 @@ fn holders(h: &Host) -> Vec<String> {
         }
         false
     };
-    let mut v: Vec<String> = legs(h).into_iter().map(String::from).collect();
+    let mut v: Vec<String> = HOLDING_LEGS.into_iter().filter(|l| exists(h, l)).map(String::from).collect();
+    if exists(h, DEFAULT_USER) {
+        v.push(DEFAULT_USER.to_string());
+    }
     v.extend(
         h.kernel
             .agents
@@ -99,12 +96,15 @@ fn holders(h: &Host) -> Vec<String> {
 }
 
 /// Grant every holder every verb on `ids` — both edges: each target's
-/// `callable_by` accepts `$subtree:<leg>` for each present leg, and each
+/// `callable_by` accepts `$subtree:<leg>` for each present leg and `user`, and each
 /// holder's `can_call` names the target (and `kernel`). One write per changed
 /// record.
 pub async fn grant(h: &Host, ids: &[String]) -> Result<(), String> {
-    let all = json!(VERBS);
-    let subs: Vec<String> = legs(h).into_iter().map(|l| format!("$subtree:{l}")).collect();
+    let all = json!(verbs());
+    let mut subs: Vec<String> = legs(h).into_iter().map(|l| format!("$subtree:{l}")).collect();
+    if exists(h, DEFAULT_USER) {
+        subs.push(DEFAULT_USER.to_string());
+    }
     for id in ids {
         if !exists(h, id) {
             continue;

@@ -27,8 +27,8 @@ use serde_json::{json, Value};
 
 use crate::{private, read_private, write_private};
 
-/// The keychain service the SECURE mode's items live under.
-pub const KEYCHAIN_SERVICE: &str = "aisixteen.fantastic-tui";
+/// The keychain namespace the SECURE mode's items live under.
+pub const KEYCHAIN_NAMESPACE: &str = "aisixteen.fantastic-tui";
 
 /// The two modes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,7 +59,7 @@ impl Mode {
     pub fn store(self, home: &std::path::Path) -> Value {
         match self {
             Mode::Plain => json!({"backend": "file", "file": home.join(CREDENTIALS).display().to_string()}),
-            Mode::Secure => json!({"backend": "keychain", "keychain_service": KEYCHAIN_SERVICE}),
+            Mode::Secure => json!({"backend": "keychain", "keychain_namespace": KEYCHAIN_NAMESPACE}),
         }
     }
 }
@@ -117,7 +117,7 @@ impl Secrets {
         match mode {
             None => "not chosen — pick plain or secure before storing a key".to_string(),
             Some(Mode::Plain) => format!("plain text in {home}/{CREDENTIALS} (0600)"),
-            Some(Mode::Secure) => format!("the keychain (service {KEYCHAIN_SERVICE}, one item per key)"),
+            Some(Mode::Secure) => format!("the keychain (namespace {KEYCHAIN_NAMESPACE}, one item per key)"),
         }
     }
 

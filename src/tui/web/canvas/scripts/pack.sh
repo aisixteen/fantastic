@@ -16,12 +16,16 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 APP=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 cd "$APP"
 
+# the demo page first: the bundle carries it (`bundle.ts`, the `demo` kind)
+sh ../../demo/web/scripts/pack.sh >/dev/null
+
 ZIP="dist/canvas.zip"
 sh ../../../lib/ts/scripts/pack.sh src/bundle.ts "$ZIP" readme.md \
   --alias:three=./src/vendor/three.module.js \
   --alias:@xterm/xterm=./src/vendor/xterm.js \
   --alias:@xterm/addon-fit=./src/vendor/addon-fit.js \
-  --loader:.css=text
+  --loader:.css=text \
+  --loader:.html=text
 
 BUNDLE="dist/pack/bundle.min.js"
 

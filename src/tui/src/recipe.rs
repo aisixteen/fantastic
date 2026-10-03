@@ -58,7 +58,7 @@ pub fn parse(args: &[String]) -> Result<Opts, String> {
             "ai" => push(&mut o.recipes, Recipe::Ai),
             other => {
                 return Err(format!(
-                    "unknown `{other}` — run `fantastic [--headless] [--port N] [canvas] [ai]`, or `fantastic mcp`"
+                    "unknown `{other}` — run `fantastic [--headless] [--port N] [canvas] [ai]`, `fantastic mcp`, `fantastic send <item>` or `fantastic readme [key]`"
                 ))
             }
         }

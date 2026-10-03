@@ -91,7 +91,11 @@ Start with `reflect` and no arguments — it returns the kernel's own primer: th
 \n\
 AN AI IS OPTIONAL. Nothing is configured by default and the kernel works without one: you can be the brain yourself, driving agents, terminals and the canvas through send. The human works from the terminal UI (`fantastic`) or the browser canvas (`fantastic canvas`); the canvas and the terminal UI both open shell terminals, where a coding CLI like you can run too.\n\
 \n\
-SETTING UP AN AI is the human's: never pick a backend, model, host or port yourself — ASK the human which they want. Never ask for, read, print or store an API key: the human enters it in the set-up surface — the canvas's ⚙ AI set-up, or the terminal UI's set-up page — which keeps it in the user's key store.";
+SETTING UP AN AI is the human's: never pick a backend, model, host or port yourself — ASK the human which they want.\n\
+\n\
+KEYS live in the kernel's credential store, the `credentials` agent (it exists once the human chose where keys are kept, plain or secure): a key is a ref `<provider>/<host>` bound to its endpoint's host, read by the AI agent's backend at use time. ASK the human how the key gets there: they type it in a set-up surface (the canvas's ⚙ AI set-up, the terminal UI's set-up page), or you store it from a shell with `fantastic send`, the value written as `$env:NAME` — resolved only by that shell and marked secret on the call:\n\
+\x20\x20KEY=$(op read op://vault/openai/key) fantastic send '{\"target\":\"credentials\",\"payload\":{\"type\":\"set\",\"ref\":\"responses/api.openai.com\",\"fields\":{\"api_key\":\"$env:KEY\"}}}'\n\
+`set` only stores a value for a DECLARED ref: a new one is declared first with update_agent on `credentials`, its `refs` map ({<ref>: {host, readers, writers}} — the host lives only there; written WHOLE — keep every ref already there), naming your leg in its `writers`. Never print, echo or write a key value anywhere; any value you send yourself carries a `secret` mark on its item.";
 
 /// What `fantastic mcp` prints to stderr on start, for a coding CLI that ran it
 /// in a shell to learn what it is: the onboarding above, and how to register
@@ -106,6 +110,10 @@ Register it ONCE as a stdio MCP server — command `fantastic`, args [\"mcp\"] �
 \x20\x20VS Code:     .vscode/mcp.json       {\"servers\": {\"fantastic\": {\"type\": \"stdio\", \"command\": \"fantastic\", \"args\": [\"mcp\"]}}}\n\
 The server must start in the project directory.\n\
 \n";
+
+/// Said before [`INSTRUCTIONS`] wherever a human or a shell reads them: they
+/// are addressed to a connected client.
+pub const LEAD_IN: &str = "What a connected MCP client is told (its `initialize` instructions):\n\n";
 
 const REFLECT_DESC: &str = "Ask the kernel what exists. With NO arguments: the kernel's own primer — `tree` (every agent id), `bundles` (what it can run) and `readme` (an index of docs). With `target`: that agent describes itself — its sentence, its verbs and their args. Extra arguments are passed through to the reflect, e.g. readme=\"agents\" to read one doc of the index. Reflect before you send: verbs are discovered here, never guessed.";
 
@@ -252,7 +260,8 @@ pub fn tools() -> Vec<Value> {
                                     "required": ["type"],
                                     "additionalProperties": true
                                 },
-                                "timeout": {"type": "number", "description": "Seconds. CANCELS the item when it expires."}
+                                "timeout": {"type": "number", "description": "Seconds. CANCELS the item when it expires."},
+                                "secret": {"type": "array", "description": "SECRET marks: `payload.<field>` (or a list of steps) for a value the target gets but no record, ledger row, reflect or stream ever shows."}
                             },
                             "required": ["target", "payload"]
                         }
@@ -318,6 +327,8 @@ fn send_items(args: &Value) -> Result<Vec<Item>, String> {
         }
         let mut item = Item::new(AgentId::from(target), payload.clone());
         item.timeout = it.get("timeout").and_then(Value::as_f64);
+        // the marks go to the kernel RAW: it validates them and refuses a bad one
+        item.secret = it.get("secret").cloned();
         out.push(item);
     }
     Ok(out)
@@ -328,12 +339,24 @@ fn send_items(args: &Value) -> Result<Vec<Item>, String> {
 fn settled(tool: &str, outs: &[Outcome]) -> Value {
     let rows: Vec<Value> = outs
         .iter()
-        .map(|o| json!({"pid": o.pid.map(|p| p.get()), "status": o.status.as_str(), "result": o.result}))
+        .map(|o| json!({"pid": o.pid.map(|p| p.get()), "status": o.status.as_str(), "result": shown(o)}))
         .collect();
     let all_failed = !outs.is_empty() && outs.iter().all(|o| o.status != Status::Completed);
     // reflect is one item: hand back its result bare, which is what a client reads.
     let body = if tool == "reflect" && rows.len() == 1 { rows[0]["result"].clone() } else { json!(rows) };
     text_result(&body, all_failed)
+}
+
+/// The result a client reads: a raw reply body (any verb may answer one) decoded
+/// utf-8 (replace) AT ITS SLOT — what ai_core shows a model (`reply_as_text`).
+/// A `read_stream` chunk reads as its text in `bytes`.
+fn shown(o: &Outcome) -> Value {
+    let mut v = o.result.clone();
+    if let Some(b) = &o.body {
+        // a slot the result cannot hold (a non-object reply) leaves it as it is
+        let _ = b.place(&mut v, Value::String(String::from_utf8_lossy(&b.bytes).into_owned()));
+    }
+    v
 }
 
 fn text_result(v: &Value, is_error: bool) -> Value {
@@ -393,5 +416,13 @@ mod tests {
             send_items(&json!({"items": [{"target": "exec", "payload": {"type": "start"}, "timeout": 5}]}))
                 .unwrap();
         assert_eq!(items[0].timeout, Some(5.0));
+    }
+
+    #[test]
+    fn send_carries_the_item_secret_marks_through() {
+        let items = send_items(&json!({"items": [{"target": "setup", "payload": {"type": "store_key", "secret": "k"},
+                                                  "secret": ["payload.secret"]}]}))
+        .unwrap();
+        assert_eq!(items[0].secret, Some(json!(["payload.secret"])));
     }
 }

@@ -10,12 +10,19 @@
 //!         ├── ai_cells    ai_cells.tools  spawns AI cells from the user's templates
 //!         ├── activity    activity.tools  the open questions to the human, for the sidebar
 //!         └── <backends>                  one per view the canvas spawns
+//! set_of_agents
+//! └── users       canvas_users.tools  THE USERS GATEWAY: every tab's host call
+//!     └── <user>  canvas_user.tools   a user: its token hash and its every right
 //! ```
+//!
+//! THE LEG REACHES ONLY THE GATEWAY (owner, 2026-10-03): a tab's every host
+//! call is `users.forward` with its token, and the gateway acts as the user that
+//! token is — no token = `user`, the shell's own identity, god mode by grants
+//! (`kern/reach`), until `user` carries a `token_sha256`.
 //!
 //! THE CANVAS (design 33) replaced the browser View of the terminal shell
 //! (owner, 2026-09-30): its page is served by `canvas_page` through `web`'s
-//! `/file/` route; the page speaks through `canvas_ws`, which reaches EVERY
-//! agent — god mode, by grants both sides (`kern/reach`).
+//! `/file/` route; the page speaks through `canvas_ws` to the users gateway.
 //!
 //! `port` is CREATION-ONLY, like the `mcp` leg's flags: the first `fantastic
 //! canvas` needs `--port N`, and later runs read it from `web`'s record.
@@ -29,8 +36,9 @@ pub const CANVAS_PAGE_ID: &str = "canvas_page";
 pub const CANVAS_WS_ID: &str = "canvas_ws";
 /// The canvas page addresses its loader by this id (`src/tui/web/canvas`).
 pub const CANVAS_LOADER_ID: &str = "web_loader";
-/// The root verbs the canvas's leg names explicitly (a `*` never covers them).
-const CANVAS_ROOT_VERBS: [&str; 3] = ["*", "create_agent", "delete_agent"];
+/// The users gateway, under `set_of_agents`.
+pub const USERS_ID: &str = "users";
+const SET_OF_AGENTS: &str = "set_of_agents";
 
 fn err_of(r: &fantastic_kernel::Outcome) -> Option<String> {
     r.result.get("error").and_then(Value::as_str).map(str::to_string)
@@ -46,10 +54,6 @@ fn meta(h: &Host, id: &str) -> Map<String, Value> {
         .get(&fantastic_kernel::AgentId::from(id))
         .map(|a| a.value().record().meta.clone())
         .unwrap_or_default()
-}
-
-async fn merge(h: &Host, id: &str, field: &str, add: &str) -> Result<(), String> {
-    merge_verbs(h, id, field, add, json!("*")).await
 }
 
 async fn merge_verbs(h: &Host, id: &str, field: &str, add: &str, verbs: Value) -> Result<(), String> {
@@ -121,11 +125,22 @@ pub async fn ensure(h: &Host, port: Option<u16>) -> Result<Urls, String> {
         create(h, json!({"parent_id": CANVAS_WS_ID, "id": crate::kern::activity::ACTIVITY_ID,
             "handler_module": crate::kern::activity::HANDLER_MODULE})).await?;
     }
-    merge(h, CANVAS_WS_ID, "can_call", CANVAS_LOADER_ID).await?;
-    merge_verbs(h, CANVAS_WS_ID, "can_call", &root, json!(CANVAS_ROOT_VERBS)).await?;
-    merge_verbs(h, &root, "callable_by", CANVAS_WS_ID, json!(CANVAS_ROOT_VERBS)).await?;
+    // THE USERS GATEWAY: the leg's one reach.
+    let gw_verbs = json!(fantastic_canvas_users::VERBS);
+    if !exists(h, USERS_ID) {
+        create(h, json!({"parent_id": SET_OF_AGENTS, "id": USERS_ID, "handler_module": fantastic_canvas_users::HANDLER_MODULE,
+            "page_loader": CANVAS_LOADER_ID})).await?;
+    }
+    merge_verbs(h, USERS_ID, "callable_by", CANVAS_WS_ID, gw_verbs.clone()).await?;
+    // the leg's can_call IS the gateway, nothing else (the record is rewritten whole)
+    let r = h.operator("kernel", json!({"type": "update_agent", "id": CANVAS_WS_ID, "can_call": {USERS_ID: gw_verbs}})).await;
+    if let Some(e) = err_of(&r) {
+        return Err(format!("could not narrow `{CANVAS_WS_ID}` to the gateway: {e}"));
+    }
+    // the tokenless default: every page agent of every tree
+    merge_verbs(h, crate::kern::reach::DEFAULT_USER, "can_call", "*|*", json!(["*"])).await?;
 
-    let mut boots = vec![CANVAS_PAGE_ID, CANVAS_WS_ID, CANVAS_LOADER_ID, crate::kern::ai_cells::AI_CELLS_ID, crate::kern::activity::ACTIVITY_ID];
+    let mut boots = vec![CANVAS_PAGE_ID, CANVAS_WS_ID, CANVAS_LOADER_ID, crate::kern::ai_cells::AI_CELLS_ID, crate::kern::activity::ACTIVITY_ID, USERS_ID];
     if fresh_host {
         boots.push(WEB_ID); // its boot mounts every child, then listens
     }
@@ -142,7 +157,7 @@ pub async fn ensure(h: &Host, port: Option<u16>) -> Result<Urls, String> {
             return Err(format!("could not mount `{CANVAS_WS_ID}`: {e}"));
         }
     }
-    // GOD MODE, by grants: the canvas leg reaches every agent, both edges (`kern/reach`).
+    // GOD MODE, by grants: `user` and the AI cells reach every agent, both edges (`kern/reach`).
     crate::kern::reach::start(h).await?;
     Ok(Urls {
         canvas: format!("http://127.0.0.1:{port}/{CANVAS_PAGE_ID}/file/index.html"),
