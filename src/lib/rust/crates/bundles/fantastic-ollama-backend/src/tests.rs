@@ -854,3 +854,37 @@ async fn every_pass_opens_its_own_connection() {
     );
     assert_eq!(log.conns(), heads.len(), "no pooled connection is reused");
 }
+
+/// The record's `system_prompt` is refused AT THE WRITE unless it is a non-blank
+/// string; null clears it. Python `ai_core/schema.py:validate`.
+#[tokio::test]
+async fn a_bad_system_prompt_is_refused_at_the_write() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "sp", "http://127.0.0.1:1").await;
+    let write = |v: Value| {
+        let kernel = Arc::clone(&kernel);
+        let id = backend.as_str().to_string();
+        async move {
+            kernel
+                .send(vec![Item::new(
+                    AgentId::from("kernel_state"),
+                    json!({"type": "update_agent", "id": id, "system_prompt": v}),
+                )])
+                .await
+                .remove(0)
+                .result
+        }
+    };
+    for bad in [json!(""), json!("   "), json!(7), json!(["x"])] {
+        let r = write(bad.clone()).await;
+        assert_eq!(
+            r["error"],
+            json!(fantastic_ai_core::schema::SYSTEM_PROMPT_REFUSAL),
+            "{bad}: {r}"
+        );
+    }
+    let r = write(json!("be terse")).await;
+    assert!(r.get("error").is_none(), "{r}");
+    let r = write(Value::Null).await;
+    assert!(r.get("error").is_none(), "{r}");
+}

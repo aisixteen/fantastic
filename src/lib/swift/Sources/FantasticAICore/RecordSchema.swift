@@ -13,8 +13,9 @@
 //
 // ONE TRUTH. The same schema is what the backend's `validateMeta` enforces AT THE
 // WRITE (`validate`): every required field is refused at `create_agent` /
-// `update_agent` when absent, an `enum` field outside its values is refused, and a
-// `credentials` value that is not `{store, ref}` is refused — so the page and the kernel cannot disagree about what a record needs. A field's
+// `update_agent` when absent, an `enum` field outside its values is refused, a
+// `credentials` value that is not `{store, ref}` is refused, and a `system_prompt`
+// that is not a non-blank string is refused (null clears it) — so the page and the kernel cannot disagree about what a record needs. A field's
 // other checks (a positive int, a budget below `max_tokens`) stay in the
 // backend's own `validateMeta`, beside this one.
 //
@@ -81,7 +82,27 @@ public enum RecordSchema {
                 "recent turns a compaction keeps verbatim "
                     + "(\(AIConstants.RECENT_N_RANGE.0)–\(AIConstants.RECENT_N_RANGE.1))",
                 default: .integer(AIConstants.RECENT_N)),
+            field("system_prompt", "str", SYSTEM_PROMPT_HINT),
         ]
+    }
+
+    /// The `system_prompt` field's hint. Python `AI_FIELDS`.
+    public static let SYSTEM_PROMPT_HINT =
+        "a system block that REPLACES the default one on every turn of this agent "
+        + "(a per-call `system_prompt` beats it for that delivery); null = the default"
+
+    /// The refusal for a `system_prompt` the record cannot use. Python
+    /// `SYSTEM_PROMPT_REFUSAL`.
+    public static let SYSTEM_PROMPT_REFUSAL =
+        "system_prompt must be a non-empty string (it replaces the default system "
+        + "block on every turn) — null clears it"
+
+    /// The record's own `system_prompt` — a non-blank string (python
+    /// `str.strip()`), else nil (the default block). Precedence at a turn: the
+    /// per-call argument > this > the default block.
+    public static func recordSystemPrompt(_ v: JSON?) -> String? {
+        guard case .string(let s)? = v, !pyStrip(s).isEmpty else { return nil }
+        return s
     }
 
     /// The `credentials` field of a backend that sends a key. Python
@@ -123,7 +144,8 @@ public enum RecordSchema {
 
     /// THE WRITE-TIME CHECK the schema implies, on the MERGED record: an `enum`
     /// field the write names must be one of its values, a `credentials` field it
-    /// names must be `{store, ref}`, and every required field must be present. Every missing field is named at once, each with its hint,
+    /// names must be `{store, ref}`, a `system_prompt` it names a non-empty string
+    /// (or null), and every required field must be present. Every missing field is named at once, each with its hint,
     /// so one retry fixes the record. Python `validate`, its texts byte for byte.
     public static func validate(
         _ schema: JSON, backend: String,
@@ -142,6 +164,12 @@ public enum RecordSchema {
             if f["type"].asString == "credentials", let bad = credentialsShapeError(v) {
                 return bad
             }
+        }
+        // `system_prompt` (every AI-core agent's): a non-blank string, or null to
+        // clear it — never a blank or a non-string, which would read as "the
+        // default" without saying so.
+        if let v = meta["system_prompt"], v != .null, recordSystemPrompt(v) == nil {
+            return SYSTEM_PROMPT_REFUSAL
         }
         var merged = record
         for (k, v) in meta { merged[k] = v }

@@ -5486,3 +5486,7 @@ async fn history_by_fold_parses_the_id_and_refuses_in_pythons_words() {
         )
     );
 }
+
+/// The record's `system_prompt` — its own file, over this harness.
+#[path = "tests_system_prompt.rs"]
+mod system_prompt;

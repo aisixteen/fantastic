@@ -22,7 +22,9 @@
 //! backend's own `validate_meta`, beside this one.
 //!
 //! A backend's schema is its own fields followed by [`ai_fields`] — the ones every
-//! ai_core agent takes.
+//! ai_core agent takes. One of them, `system_prompt`, is checked here too: named on
+//! a write it must be a non-empty string (`null` clears it — the default block
+//! again).
 //!
 //! [`Bundle::record_schema`]: fantastic_kernel::bundle::Bundle::record_schema
 
@@ -170,7 +172,29 @@ pub fn ai_fields_with_window(context_window: i64) -> Vec<Field> {
             format!("recent turns a compaction keeps verbatim ({lo}–{hi})"),
         )
         .default(json!(RECENT_N)),
+        Field::new("system_prompt", "str", SYSTEM_PROMPT_HINT),
     ]
+}
+
+/// The `system_prompt` field's hint. Python `AI_FIELDS`.
+pub const SYSTEM_PROMPT_HINT: &str = "a system block that REPLACES the default one on every \
+     turn of this agent (a per-call `system_prompt` beats it for that delivery); null = the \
+     default";
+
+/// The refusal for a `system_prompt` the record cannot use. Python
+/// `SYSTEM_PROMPT_REFUSAL`.
+pub const SYSTEM_PROMPT_REFUSAL: &str = "system_prompt must be a non-empty string (it \
+     replaces the default system block on every turn) — null clears it";
+
+/// The record's own `system_prompt`, read from its meta — a non-blank string
+/// (python `str.strip()`), else `None` (the default block). Precedence at a turn:
+/// the per-call argument > this > the default block.
+#[must_use]
+pub fn record_system_prompt(meta: &Map<String, Value>) -> Option<String> {
+    meta.get("system_prompt")
+        .and_then(Value::as_str)
+        .filter(|s| !py_strip(s).is_empty())
+        .map(str::to_string)
 }
 
 /// The `credentials` field of a backend that sends a key. Python
@@ -253,8 +277,9 @@ fn present(f: &Value, v: Option<&Value>) -> bool {
 
 /// THE WRITE-TIME CHECK the schema implies, on the MERGED record — python
 /// `validate(sch, backend, meta, record)`: an `enum` field the write names must be
-/// one of its values, a `credentials` field must be `{store, ref}`, and every
-/// required field must be present. Every missing field is named at once, each
+/// one of its values, a `credentials` field must be `{store, ref}`, a
+/// `system_prompt` it names a non-empty string (or null), and every required field
+/// must be present. Every missing field is named at once, each
 /// with its hint, so one retry fixes the record.
 #[must_use]
 pub fn validate(
@@ -288,6 +313,13 @@ pub fn validate(
                 py_repr_value(v),
                 legal.join(", ")
             ));
+        }
+    }
+    // `system_prompt` (every ai_core agent's): named on a write it is a non-blank
+    // string, or null to clear it.
+    if let Some(v) = meta.get("system_prompt").filter(|v| !v.is_null()) {
+        if !v.as_str().is_some_and(|s| !py_strip(s).is_empty()) {
+            return Some(SYSTEM_PROMPT_REFUSAL.to_string());
         }
     }
     let mut merged = record.clone();
@@ -353,7 +385,8 @@ mod tests {
                 "context_window",
                 "output_reserve",
                 "context_strategy",
-                "recent_n"
+                "recent_n",
+                "system_prompt"
             ]
         );
         // no `key_var`: a key is never read from the environment — a backend
@@ -411,6 +444,65 @@ mod tests {
             validate(&sample(), "x", &obj(json!({"mode": null})), &rec),
             None
         );
+    }
+
+    #[test]
+    fn a_system_prompt_is_a_non_blank_string_or_null() {
+        let sch = sample();
+        let rec = obj(json!({"endpoint": "http://h", "memory_store_id": "m"}));
+        assert_eq!(
+            sch["fields"][7].to_string(),
+            json!({"name": "system_prompt", "type": "str", "required": false,
+                   "hint": SYSTEM_PROMPT_HINT})
+            .to_string()
+        );
+        // python's words, byte for byte
+        assert_eq!(
+            SYSTEM_PROMPT_HINT,
+            "a system block that REPLACES the default one on every turn of this agent \
+             (a per-call `system_prompt` beats it for that delivery); null = the default"
+        );
+        assert_eq!(
+            SYSTEM_PROMPT_REFUSAL,
+            "system_prompt must be a non-empty string (it replaces the default system \
+             block on every turn) — null clears it"
+        );
+        for bad in [
+            json!(""),
+            json!("  \n"),
+            json!(5),
+            json!(["x"]),
+            json!({"a": 1}),
+        ] {
+            assert_eq!(
+                validate(&sch, "x", &obj(json!({ "system_prompt": bad })), &rec).as_deref(),
+                Some(SYSTEM_PROMPT_REFUSAL),
+                "{bad}"
+            );
+        }
+        // null clears it; a real string is taken as it is
+        assert_eq!(
+            validate(&sch, "x", &obj(json!({"system_prompt": null})), &rec),
+            None
+        );
+        assert_eq!(
+            validate(&sch, "x", &obj(json!({"system_prompt": "be terse"})), &rec),
+            None
+        );
+        // the record reader: a non-blank string, else the default block
+        assert_eq!(
+            record_system_prompt(&obj(json!({"system_prompt": "be terse"}))).as_deref(),
+            Some("be terse")
+        );
+        assert_eq!(
+            record_system_prompt(&obj(json!({"system_prompt": " "}))),
+            None
+        );
+        assert_eq!(
+            record_system_prompt(&obj(json!({"system_prompt": null}))),
+            None
+        );
+        assert_eq!(record_system_prompt(&Map::new()), None);
     }
 
     #[test]

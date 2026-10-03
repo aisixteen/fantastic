@@ -33,7 +33,11 @@ agent's row events (a digest; bodies only for a watcher the rows are shared with
 and returns `{response, final}`. A first-class peer of `exec_bridge`: a
 scheduler, a host job, a peer kernel, or a routine can call it by id. Optional
 `system_prompt:str` REPLACES the default system block (the caller supplies its own
-role / tool convention / whatever menu it built). There is no caller-supplied history: a one-off completion is a disposable agent with its own store; context for another agent travels in the text, or by grant (`share` → `fork_from`).
+role / tool convention / whatever menu it built).
+The record's own `system_prompt` (a non-empty string; `null` clears it) replaces
+the default block on EVERY turn of this agent — a main turn, a nudge, a turn a reply
+wakes — read live each turn; a per-call `system_prompt` beats it for that delivery.
+There is no caller-supplied history: a one-off completion is a disposable agent with its own store; context for another agent travels in the text, or by grant (`share` → `fork_from`).
 
 ## Recursion guard
 A `send` carrying a reserved `_call_stack` that already contains this agent (a

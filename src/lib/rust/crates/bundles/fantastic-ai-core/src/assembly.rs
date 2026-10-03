@@ -347,7 +347,8 @@ pub async fn default_system_content(self_id: &AgentId, kernel: &Arc<Kernel>) -> 
 /// Build the per-turn message list: system block + the MODEL VIEW of the
 /// persisted history + the user turn. A caller-supplied `system_prompt` REPLACES
 /// the default system block (a caller that wants a different role, or a different
-/// convention, owns it whole); the default is a lean primer + self-identity +
+/// convention, owns it whole); absent that, the record's own `system_prompt` does;
+/// the default is a lean primer + self-identity +
 /// [`SEND_TO_HOWTO`] + [`CONTEXT_HOWTO`] + [`MEMORY_HOWTO`], and NO agent menu.
 ///
 /// The conversation is ALWAYS this agent's own (its memory store): there is no
@@ -366,9 +367,19 @@ pub async fn assemble_messages(
     _client_id: &str,
     system_prompt: Option<&str>,
 ) -> Result<(Vec<Value>, usize), crate::memory::MemoryStoreError> {
+    // PRECEDENCE: the per-call argument (this delivery) > the record's own
+    // `system_prompt` (read LIVE, so an `update_agent` lands on the next turn) >
+    // the default block. Every turn passes here — a main turn, a self-delivery, a
+    // turn woken by a reply.
     let system_content = match system_prompt {
         Some(s) if !s.trim().is_empty() => s.to_string(),
-        _ => default_system_content(self_id, kernel).await,
+        _ => {
+            match crate::schema::record_system_prompt(&crate::helpers::agent_meta(self_id, kernel))
+            {
+                Some(s) => s,
+                None => default_system_content(self_id, kernel).await,
+            }
+        }
     };
     let mut messages = vec![json!({"role": "system", "content": system_content})];
     // A trimmed VIEW, not a rewrite of the store: stale whole-state reads deduped,

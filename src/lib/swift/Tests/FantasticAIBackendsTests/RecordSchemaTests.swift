@@ -113,6 +113,57 @@ private struct Plain: AgentBundle {
         #expect(r["id"] == "a4", "\(r)")
     }
 
+    /// `system_prompt` (every AI agent's, owner 2026-10-03): an optional `str` in
+    /// the shared fields, refused AT THE WRITE unless a non-blank string; null
+    /// clears it. Python's texts.
+    @Test func aRecordSystemPromptIsAnOptionalStrRefusedAtTheWriteUnlessNonBlank() async {
+        let refusal =
+            "system_prompt must be a non-empty string (it replaces the default system "
+            + "block on every turn) — null clears it"
+        let hint =
+            "a system block that REPLACES the default one on every turn of this agent (a "
+            + "per-call `system_prompt` beats it for that delivery); null = the default"
+        let field = (OllamaBackendBundle().recordSchema?["fields"].asArray ?? [])
+            .first { $0["name"] == "system_prompt" }
+        #expect(
+            field
+                == .object([
+                    "name": "system_prompt", "type": "str", "required": false,
+                    "hint": .string(hint),
+                ]), "\(field ?? .null)")
+        let full: OrderedDictionary<String, JSON> = [
+            "endpoint": "http://h", "model": "m", "memory_store_id": "memory",
+        ]
+        let b = OllamaBackendBundle()
+        for bad: JSON in ["", "  \n\t", 42, .bool(true), ["x"], ["a": "b"]] {
+            #expect(b.validateMeta(["system_prompt": bad], record: full) == refusal, "\(bad)")
+        }
+        #expect(b.validateMeta(["system_prompt": "You are a terse reviewer."], record: full) == nil)
+        #expect(b.validateMeta(["system_prompt": .null], record: full) == nil, "null clears it")
+        // at the kernel's write: create refused, a good update lands, a bad one refused
+        let k = kernel()
+        let create: OrderedDictionary<String, JSON> = [
+            "type": "create_agent", "parent_id": "kernel_state", "id": "o1",
+            "handler_module": "ollama_backend.tools", "endpoint": "http://h", "model": "m",
+            "memory_store_id": "memory", "system_prompt": " ",
+        ]
+        var r = await k.send([Item(AgentId("kernel_state"), .object(create))])[0].result
+        #expect(r["reason"] == "invalid_meta" && r["error"].asString == refusal, "\(r)")
+        var ok = create
+        ok["system_prompt"] = "ROLE"
+        r = await k.send([Item(AgentId("kernel_state"), .object(ok))])[0].result
+        #expect(r["id"] == "o1", "\(r)")
+        r = await k.send([
+            Item(AgentId("kernel_state"), ["type": "update_agent", "id": "o1", "system_prompt": 7])
+        ])[0].result
+        #expect(r["reason"] == "invalid_meta" && r["error"].asString == refusal, "\(r)")
+        #expect(k.agent(AgentId("o1"))?.metaValue(forKey: "system_prompt") == "ROLE")
+        r = await k.send([
+            Item(AgentId("kernel_state"), ["type": "update_agent", "id": "o1", "system_prompt": .null])
+        ])[0].result
+        #expect(r["error"].isNull, "\(r)")
+    }
+
     /// The refusal texts are python's, byte for byte.
     @Test func theRefusalTextsArePythons() {
         #expect(

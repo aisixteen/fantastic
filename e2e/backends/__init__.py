@@ -212,8 +212,24 @@ class _FoundationModels(Backend):
         return meta
 
 
+#: THE FM SYSTEM BLOCK — the record's `system_prompt`, which replaces the default
+#: block on every turn. The on-device window is 4096 tokens and the default block
+#: measured 6748 (d5489b5b): every turn was refused `context_insufficient` before
+#: the model ran. The file keeps the default block's essentials only — the call
+#: grammar, replies, await/done, reflect. It names no agent id: `record()` is not
+#: told which agent it builds.
+FM_SYSTEM_PROMPT = os.path.join(os.path.dirname(__file__), "foundation_models.prompt.md")
+
+
 def _foundation_models() -> Backend:
-    return _FoundationModels(name="foundation_models", handler_module="foundation_models_backend.tools", model="")
+    with open(FM_SYSTEM_PROMPT, encoding="utf-8") as f:
+        prompt = f.read()
+    return _FoundationModels(
+        name="foundation_models",
+        handler_module="foundation_models_backend.tools",
+        model="",
+        extra={"system_prompt": prompt},
+    )
 
 
 REGISTRY = {

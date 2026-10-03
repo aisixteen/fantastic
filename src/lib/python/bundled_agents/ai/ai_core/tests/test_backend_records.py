@@ -35,6 +35,7 @@ _AI_TAIL = [
         ["compact", "truncate", "strip", "fold"],
     ),
     ("recent_n", "int", False, 6, None),
+    ("system_prompt", "str", False, None, None),
 ]
 
 #: (name, type, required, default-or-None, enum-or-None) per field, in order.

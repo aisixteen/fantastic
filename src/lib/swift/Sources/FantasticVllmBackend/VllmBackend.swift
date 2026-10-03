@@ -921,6 +921,10 @@ extension VllmBundle {
         (looping, then sub-word garbage) — `no_repeat_ngram_size: 3` with
         `repetition_penalty: 1.05` is the measured fix for a repeating thought.
 
+        The record's own `system_prompt` (a non-empty string; `null` clears it) replaces
+        the default block on EVERY turn of this agent — a main turn, a nudge, a turn a reply
+        wakes — read live each turn; a per-call `system_prompt` beats it for that delivery.
+
         ## The KV-cache session table
 
         vLLM's prefix cache makes a warm conversation answer several times faster; past the
