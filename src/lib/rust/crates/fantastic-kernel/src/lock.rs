@@ -18,8 +18,8 @@
 //!
 //! The one-shot CLI paths (`call`, `init`) take this same flock through the
 //! bootstrap and refuse on [`KernelError::LockHeld`] — they never judge a pid
-//! alive (owner, 2026-10-03). [`pid_alive`] / [`current_holder`] stay for
-//! callers that look for a running daemon to ATTACH to.
+//! alive (owner, 2026-10-03). A caller that looks for a running daemon to
+//! ATTACH to asks [`held`] — the same flock, probed, never taken.
 
 use crate::errors::{KernelError, KernelResult};
 use serde::{Deserialize, Serialize};
@@ -205,6 +205,47 @@ pub fn release(workdir: &Path) -> KernelResult<()> {
     }
     drop(held);
     Ok(())
+}
+
+/// Is the workdir lock HELD — the attach probe (owner, 2026-10-03)? `Some(pid)`
+/// while a live process holds the flock on `lock.yaml` (the pid read from the
+/// file, for the message); `None` when nobody holds it — no file, or a file a
+/// dead holder left, whatever pid it names (a reused pid is not a holder).
+///
+/// The decision is the flock, exactly as [`acquire`] judges it: a SHARED
+/// non-blocking flock on its own descriptor, dropped before returning. It
+/// conflicts with the holder's exclusive one; for the instant it is granted, a
+/// racing [`acquire`] reads the file held and is refused — the probe never takes
+/// a lock it keeps. This process's own lock reads as held.
+pub fn held(workdir: &Path) -> KernelResult<Option<u32>> {
+    let path = workdir.join(super::persistence::LOCK_PATH);
+    let io = |e: std::io::Error| KernelError::LockIo {
+        path: path.clone(),
+        source: e,
+    };
+    let mut cur = match File::open(&path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(io(e)),
+    };
+    match flock(&cur, libc::LOCK_SH | libc::LOCK_NB) {
+        Ok(()) => Ok(None), // granted: nobody holds it; closing `cur` drops it
+        Err(e) if e.kind() == ErrorKind::WouldBlock => {
+            let mut raw = Vec::new();
+            cur.read_to_end(&mut raw).map_err(io)?;
+            let lock = std::str::from_utf8(&raw)
+                .ok()
+                .and_then(parse_lock)
+                .ok_or_else(|| {
+                    io(std::io::Error::new(
+                        ErrorKind::InvalidData,
+                        "lock.yaml malformed",
+                    ))
+                })?;
+            Ok(Some(lock.pid))
+        }
+        Err(e) => Err(io(e)),
+    }
 }
 
 /// Read the pid currently in the lock file, if any. Used by callers

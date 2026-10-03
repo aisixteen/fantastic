@@ -161,3 +161,24 @@ def test_the_refusal_text_is_exact():
         "system_prompt must be a non-empty string (it replaces the default system "
         "block on every turn) — null clears it"
     )
+
+
+async def test_recall_sizes_the_block_the_turn_uses(seeded_kernel, fake_providers):
+    """`context_recall` budgets the body against the system block the turn will
+    actually carry — a short record prompt leaves more room than the default block."""
+    k = seeded_kernel
+    _ai(k, "sp_rc_default")
+    _ai(k, "sp_rc_short", system_prompt="R")
+    budgets = {}
+    for aid in ("sp_rc_default", "sp_rc_short"):
+        fp = fake_providers[aid] = _Fake([DONE])
+        await _send(k, aid)
+        await _until(fp, 1)
+        out = (
+            await k.send(
+                [{"target": aid, "payload": {"type": "context_recall", "dry": True}}]
+            )
+        )[0]
+        assert out["status"] == "completed", out
+        budgets[aid] = out["result"]["budget"]
+    assert budgets["sp_rc_short"] > budgets["sp_rc_default"], budgets

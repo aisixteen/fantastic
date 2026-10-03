@@ -1924,8 +1924,8 @@ async def _route_reply(
 
 
 async def _default_system_content(self_id: str, kernel) -> str:
-    """The deterministic substrate prompt — rebuilt every turn from the live tree. Shared
-    by `_assemble` and `context_recall` (which needs its size to know the body budget)."""
+    """The deterministic substrate prompt — rebuilt every turn from the live tree. The
+    default `_system_content` falls to when no `system_prompt` replaces it."""
     primer = (
         await kernel.send(
             [
@@ -1962,6 +1962,28 @@ async def _default_system_content(self_id: str, kernel) -> str:
     return "\n\n".join(blocks)
 
 
+async def _system_content(
+    self_id: str, kernel, system_prompt: str | None = None
+) -> str:
+    """THE system block a turn uses — the one choice `_assemble` builds the turn on
+    and `_context_recall` sizes the body budget against, so the two never drift.
+
+    PRECEDENCE (owner, 2026-10-03): the per-call argument (that delivery) > the
+    record's `system_prompt` field, read LIVE so an `update_agent` lands on the next
+    turn — a main turn, a nudge and a reply-woken turn alike > the default block."""
+    rec_prompt = (kernel.get(self_id) or {}).get("system_prompt")
+    if isinstance(system_prompt, str) and system_prompt.strip():
+        return system_prompt
+    if isinstance(rec_prompt, str) and rec_prompt.strip():
+        return rec_prompt
+    # The DEFAULT system block is deliberately lean: a tree id-index + bundle
+    # catalog primer, self-identity, and the context-window howto (context IS
+    # the backend's — see `_CONTEXT_HOWTO`). NO agent menu, NO tool howto — this
+    # backend does not run a tool loop; a caller that wants tool-calling supplies
+    # its own `system_prompt` teaching its convention + whatever menu it built.
+    return await _default_system_content(self_id, kernel)
+
+
 async def _assemble(
     self_id: str,
     user_text: str,
@@ -1983,22 +2005,7 @@ async def _assemble(
     a store index; `_project_context` needs the store one to mark where this turn's
     reaction will land. Returning it here is the only place both numbers are in
     hand at once."""
-    # PRECEDENCE (owner, 2026-10-03): the per-call argument (that delivery) > the
-    # record's `system_prompt` field, read LIVE here so an `update_agent` lands on
-    # the next turn — a main turn, a nudge and a reply-woken turn alike, since every
-    # one is assembled here > the default block.
-    rec_prompt = (kernel.get(self_id) or {}).get("system_prompt")
-    if isinstance(system_prompt, str) and system_prompt.strip():
-        sys_content = system_prompt
-    elif isinstance(rec_prompt, str) and rec_prompt.strip():
-        sys_content = rec_prompt
-    else:
-        # The DEFAULT system block is deliberately lean: a tree id-index + bundle
-        # catalog primer, self-identity, and the context-window howto (context IS
-        # the backend's — see `_CONTEXT_HOWTO`). NO agent menu, NO tool howto — this
-        # backend does not run a tool loop; a caller that wants tool-calling supplies
-        # its own `system_prompt` teaching its convention + whatever menu it built.
-        sys_content = await _default_system_content(self_id, kernel)
+    sys_content = await _system_content(self_id, kernel, system_prompt)
     # System block is rebuilt on EVERY user turn; chat.json holds only
     # the user/assistant turns. The howto is not persisted — it always
     # reflects the latest state at send-time.
@@ -2432,7 +2439,7 @@ async def _run(
     provider = await _build_provider(self_id, kernel, cfg)
     if self_id in _recall_due:
         _recall_due.discard(self_id)
-        await _context_recall(self_id, {}, kernel, cfg)
+        await _context_recall(self_id, {}, kernel, cfg, system_prompt)
     messages, store_len = await _assemble(
         self_id, user_text, kernel, client_id, system_prompt
     )
@@ -3312,7 +3319,9 @@ sentence why. Reply JSON only:
 {lines}"""
 
 
-async def _context_recall(id, payload, kernel, cfg: Backend | None = None):
+async def _context_recall(
+    id, payload, kernel, cfg: Backend | None = None, system_prompt: str | None = None
+):
     """args: dry:bool? (mechanical fit only — no model call). Rebuild this agent's VIEW from its store: fit the head to the budget at digest resolution, then ask the model which rows it wants in full, persist the id list, log the decision as a row, and drop RAM scratch. Runs on boot, after a fold batch, or on request. Returns {kept, expanded, dropped, budget, why, degraded}."""
     from ai_core.folds import render as fold_render
     from ai_core.strategies.strip import LOW as _LOW, _stripped as _strip_state
@@ -3327,8 +3336,10 @@ async def _context_recall(id, payload, kernel, cfg: Backend | None = None):
             "why": "empty store",
             "degraded": False,
         }
+    # The block the turn will actually use (`_system_content`), not the default one:
+    # a record or per-call `system_prompt` changes how much room the body gets.
     sys_tokens = estimate_one(
-        {"role": "system", "content": await _default_system_content(id, kernel)}
+        {"role": "system", "content": await _system_content(id, kernel, system_prompt)}
     )
     body_budget = max(BUDGET_FLOOR, budget(rec) - sys_tokens - NOTICE_ENVELOPE_RESERVE)
     target = int(body_budget * _LOW)

@@ -64,9 +64,6 @@ from helpers import (
 )
 from helpers.kernel import open_kernel
 
-# The plug, resolved once (see e2e/backends): which model, reached how.
-BK = _resolve_backend()
-BACKEND, MODEL = BK.name, BK.model
 CTX = int(os.environ.get("CTX", "262144"))
 IDLE = float(os.environ.get("IDLE", "240"))
 # A CEILING. Without one these harnesses end only on IDLE: runs have reached turn
@@ -397,6 +394,10 @@ async def run(
     the point: two copies of the scoring would let the arms diverge silently, which is
     the failure mode the emergence README already records twice.
     """
+    # The plug (see e2e/backends): which model, reached how. Resolved HERE, not at
+    # import — the free selftest imports this module for its fixture and scoring
+    # and reaches no model, so it must never need BACKEND.
+    bk = _resolve_backend()
     # WHICH KERNEL is a plug (`RUNTIME=python|rust|swift`), exactly as the
     # model is a plug in `backends/`. In process for python; spawned and driven
     # over REST otherwise. `core` is None on the wire and the connector reads
@@ -557,7 +558,7 @@ async def run(
     # their own copy of all that, and every copy was behind the others.
     watch = Watch()
     conn = await connect(
-        root, core, BK, can_call=CAN_CALL, limits=LIM, watch=watch, record=EXTRA,
+        root, core, bk, can_call=CAN_CALL, limits=LIM, watch=watch, record=EXTRA,
         # The other half of the gate: these two are SIBLINGS, so without it the
         # human's task is refused at ingress and the chain never starts.
         callable_by={"user": "*"},
@@ -567,7 +568,7 @@ async def run(
 
     total = sum(READINGS.values())
     print("=" * (W + 4))
-    print(f"  {MODEL}  ·  {banner}")
+    print(f"  {bk.model}  ·  {banner}")
     print(f"  {len(READINGS)} readings, minted at test time.  true total = {total}")
     print("=" * (W + 4))
 

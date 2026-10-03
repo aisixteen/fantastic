@@ -825,7 +825,8 @@ public final class AIBackend: @unchecked Sendable {
         // turn is assembled over the head the recall chose — python `_recall_due`.
         if takeRecallDue(agentId.value) {
             _ = try await contextRecall(
-                agent: agent, payload: .object([:]), kernel: kernel, provider: provider)
+                agent: agent, payload: .object([:]), kernel: kernel, provider: provider,
+                systemPrompt: systemPrompt)
         }
         // The message list UNDER the FIFO lock (we hold it here), so serialized
         // sends can't race load→save: the system block rebuilt from the live
@@ -1128,6 +1129,21 @@ public final class AIBackend: @unchecked Sendable {
     /// is still appended. NO agent menu, and no STRATEGY — the two how-tos state
     /// mechanisms only, which `promptStatesTheMechanismNotAStrategy` pins.
     /// Mirrors Rust `assemble_messages` / Python `_assemble`.
+    /// THE system block a turn uses — the one choice `assemble` builds the turn on
+    /// and `contextRecall` sizes the body budget against, so the two never drift.
+    /// PRECEDENCE: the per-call argument (this delivery) > the record's own
+    /// `system_prompt` (read LIVE, so an `update_agent` lands on the next turn — a
+    /// main turn, a self-delivery, a turn woken by a reply) > the default block.
+    /// Python `_system_content`.
+    func systemContent(agent: Agent, systemPrompt: String?, kernel: Kernel) async -> String {
+        let perCall = systemPrompt.flatMap { pyStrip($0).isEmpty ? nil : $0 }
+        return await assembleSystemPrompt(
+            agent: agent,
+            systemPrompt: perCall
+                ?? RecordSchema.recordSystemPrompt(agent.metaValue(forKey: "system_prompt")),
+            kernel: kernel)
+    }
+
     func assembleSystemPrompt(agent: Agent, systemPrompt: String?, kernel: Kernel) async -> String {
         var blocks: [String]
         if let override = systemPrompt,
@@ -1191,16 +1207,7 @@ public final class AIBackend: @unchecked Sendable {
     func assemble(
         agent: Agent, userText: String, systemPrompt: String?, kernel: Kernel
     ) async throws -> ([JSON], Int) {
-        // PRECEDENCE: the per-call argument (this delivery) > the record's own
-        // `system_prompt` (read LIVE, so an `update_agent` lands on the next turn)
-        // > the default block. Every turn passes here — a main turn, a
-        // self-delivery, a turn woken by a reply.
-        let perCall = systemPrompt.flatMap { pyStrip($0).isEmpty ? nil : $0 }
-        let sysContent = await assembleSystemPrompt(
-            agent: agent,
-            systemPrompt: perCall
-                ?? RecordSchema.recordSystemPrompt(agent.metaValue(forKey: "system_prompt")),
-            kernel: kernel)
+        let sysContent = await systemContent(agent: agent, systemPrompt: systemPrompt, kernel: kernel)
         // The system block is rebuilt on EVERY user turn; the store holds only the
         // user/assistant turns. The howto is not persisted — it always reflects
         // the latest state at send-time.

@@ -1442,7 +1442,8 @@ fn the_catalog_carries_the_on_device_backend() {
             "context_window",
             "output_reserve",
             "context_strategy",
-            "recent_n"
+            "recent_n",
+            "system_prompt"
         ]
     );
     let window = fields[3]["default"].as_i64().expect("an int window");

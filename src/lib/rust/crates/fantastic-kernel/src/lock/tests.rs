@@ -206,3 +206,32 @@ fn current_holder_returns_pid() {
     let pid = current_holder(tmp.path()).unwrap().expect("locked");
     assert_eq!(pid, std::process::id());
 }
+
+#[test]
+fn held_names_the_holder_while_the_flock_is_held() {
+    let tmp = TempDir::new().unwrap();
+    assert_eq!(held(tmp.path()).unwrap(), None, "no lock file");
+    acquire(tmp.path()).unwrap();
+    assert_eq!(held(tmp.path()).unwrap(), Some(std::process::id()));
+    // the probe took nothing: the holder still holds, a second acquire is refused
+    assert!(matches!(
+        acquire(tmp.path()).unwrap_err(),
+        KernelError::LockHeld { .. }
+    ));
+    release(tmp.path()).unwrap();
+    assert_eq!(held(tmp.path()).unwrap(), None, "after release");
+}
+
+#[test]
+fn held_is_none_for_a_live_pid_without_the_flock() {
+    // A file a dead holder left, naming a pid that is alive (reused): not held.
+    let tmp = TempDir::new().unwrap();
+    let lock_path = tmp.path().join(crate::persistence::LOCK_PATH);
+    std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+    std::fs::write(&lock_path, format!("pid: {}\n", std::process::id())).unwrap();
+    assert!(pid_alive(std::process::id()));
+    assert_eq!(held(tmp.path()).unwrap(), None);
+    // and the probe left it takeable
+    acquire(tmp.path()).unwrap();
+    release(tmp.path()).unwrap();
+}

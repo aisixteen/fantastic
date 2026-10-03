@@ -1300,8 +1300,15 @@ where
         // Rebuild the view from the store: on boot, after folds, on request.
         "context_recall" => {
             let p = provider_for(DEFAULT_CLIENT_ID);
-            crate::retrieval::context_recall(agent_id, payload, kernel, Some(&p), cfg.model_window)
-                .await?
+            crate::retrieval::context_recall(
+                agent_id,
+                payload,
+                kernel,
+                Some(&p),
+                cfg.model_window,
+                None,
+            )
+            .await?
         }
         // A new thread on the same store: the view starts here, nothing is deleted.
         "context_clear" => {
