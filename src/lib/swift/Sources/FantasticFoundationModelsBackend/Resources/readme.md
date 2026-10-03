@@ -52,6 +52,10 @@ and returns `{response, final}`. Optional `system_prompt:str` REPLACES the defau
 system block. A first-class peer of every other AI backend: a scheduler, a host
 job, a peer kernel or a routine calls it by id.
 
+The record's own `system_prompt` (a non-empty string; `null` clears it) replaces
+the default block on EVERY turn of this agent — a main turn, a nudge, a turn a reply
+wakes — read live each turn; a per-call `system_prompt` beats it for that delivery.
+
 ## Failures, in words
 
 - `the on-device model is unavailable: <reason>` — see Availability

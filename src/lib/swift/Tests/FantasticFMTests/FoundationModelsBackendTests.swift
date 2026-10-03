@@ -75,7 +75,7 @@ struct FoundationModelsBackendTests {
             fields.compactMap { $0["name"].asString }
                 == [
                     "temperature", "max_tokens", "memory_store_id", "context_window",
-                    "output_reserve", "context_strategy", "recent_n",
+                    "output_reserve", "context_strategy", "recent_n", "system_prompt",
                 ])
         let by = Dictionary(uniqueKeysWithValues: fields.map { ($0["name"].asString!, $0) })
         // the window is the MODEL'S, read from the engine — not the kernel's 128k

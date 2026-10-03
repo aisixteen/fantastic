@@ -1178,7 +1178,8 @@ public final class AIBackend: @unchecked Sendable {
 
     /// Build the message list: the system block, the MODEL VIEW of the store,
     /// the live user turn. A caller-supplied `systemPrompt` REPLACES the
-    /// deterministic substrate prompt. The conversation is ALWAYS this agent's
+    /// deterministic substrate prompt; absent that, the record's own
+    /// `system_prompt` does. The conversation is ALWAYS this agent's
     /// own (its memory store): there is no caller-supplied history — a one-off
     /// completion is a disposable agent with its own store; context for another
     /// agent travels in the text, or by grant (`share` → `fork_from`).
@@ -1190,8 +1191,16 @@ public final class AIBackend: @unchecked Sendable {
     func assemble(
         agent: Agent, userText: String, systemPrompt: String?, kernel: Kernel
     ) async throws -> ([JSON], Int) {
+        // PRECEDENCE: the per-call argument (this delivery) > the record's own
+        // `system_prompt` (read LIVE, so an `update_agent` lands on the next turn)
+        // > the default block. Every turn passes here — a main turn, a
+        // self-delivery, a turn woken by a reply.
+        let perCall = systemPrompt.flatMap { pyStrip($0).isEmpty ? nil : $0 }
         let sysContent = await assembleSystemPrompt(
-            agent: agent, systemPrompt: systemPrompt, kernel: kernel)
+            agent: agent,
+            systemPrompt: perCall
+                ?? RecordSchema.recordSystemPrompt(agent.metaValue(forKey: "system_prompt")),
+            kernel: kernel)
         // The system block is rebuilt on EVERY user turn; the store holds only the
         // user/assistant turns. The howto is not persisted — it always reflects
         // the latest state at send-time.

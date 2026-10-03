@@ -1970,7 +1970,8 @@ async def _assemble(
     system_prompt: str | None = None,
 ) -> tuple[list[dict], int]:
     """Build the message list. A caller-supplied `system_prompt` REPLACES the
-    deterministic substrate prompt — the generic 'caller controls context' door:
+    deterministic substrate prompt — absent, the record's own `system_prompt`
+    field replaces it — the generic 'caller controls context' door:
     a state agent or a python routine reads a stored prompt and passes it here, so
     the AI needs NO yaml-specific code. The conversation is ALWAYS this agent's own
     (its memory store): there is no caller-supplied history — a one-off completion
@@ -1982,8 +1983,15 @@ async def _assemble(
     a store index; `_project_context` needs the store one to mark where this turn's
     reaction will land. Returning it here is the only place both numbers are in
     hand at once."""
+    # PRECEDENCE (owner, 2026-10-03): the per-call argument (that delivery) > the
+    # record's `system_prompt` field, read LIVE here so an `update_agent` lands on
+    # the next turn — a main turn, a nudge and a reply-woken turn alike, since every
+    # one is assembled here > the default block.
+    rec_prompt = (kernel.get(self_id) or {}).get("system_prompt")
     if isinstance(system_prompt, str) and system_prompt.strip():
         sys_content = system_prompt
+    elif isinstance(rec_prompt, str) and rec_prompt.strip():
+        sys_content = rec_prompt
     else:
         # The DEFAULT system block is deliberately lean: a tree id-index + bundle
         # catalog primer, self-identity, and the context-window howto (context IS
