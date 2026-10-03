@@ -12,6 +12,8 @@ from io_bridge import decode_frame, encode_frame
 from web.app import make_app
 from web_ws.tools import _make_endpoint
 
+from _testkit import wire
+
 
 @pytest.fixture
 def client(seeded_kernel):
@@ -22,14 +24,16 @@ def client(seeded_kernel):
     # Sealed by default ⇒ open the leg so inbound frames dispatch (mirrors
     # test_gate.py::test_open_leg_dispatches).
     # Deny-all: opening the leg (ingress_rule) says WHO may call in; the surface's
-    # can_call says WHERE those calls may land. `fb_ws` is the read_stream target;
-    # the connect-time auto-watch of the root needs its NAMED grant (audit KV-2).
+    # can_call says WHERE those calls may land. `fb_ws` is the read_stream target.
     seeded_kernel.create(
         "web_ws.tools",
         id="test_web_ws",
         ingress_rule="allow_all_ingress",
-        can_call={"fb_ws": "*", "kernel_state": ["watch"]},
+        can_call={"fb_ws": "*"},
     )
+    # The leg's calls land on the root (reflect, list_agents, the connect-time
+    # watch): an explicit edge on both ends.
+    wire(seeded_kernel, "test_web_ws", "kernel_state")
     # Mount what web_ws.get_routes would publish — lets the proxy
     # tests use client.websocket_connect("/kernel_state/ws") without spinning
     # up a real `web` agent + child registration cycle.

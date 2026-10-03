@@ -83,6 +83,7 @@ private func create(_ k: Kernel, _ id: String, _ module: String) async {
         ])
     ).result
     #expect(out["id"].asString == id, "\(out.serialize())")
+    wire(k, "web", id)  // the host reads its leg's routes
 }
 
 /// A booted web host with the catch-all web_ws leg `a_ws` mounted BEFORE the
@@ -94,6 +95,7 @@ private func catchAllFirst() async throws -> Kernel {
     await create(k, "a_ws", "web_ws.tools")
     await create(k, "z_literal", "literal_leg.tools")
     for id in ["a_ws", "z_literal"] {
+        wire(k, "web", id)
         _ = await send(k, "web", .object(["type": .string("mount"), "child_id": .string(id)]))
     }
     return k
@@ -144,6 +146,7 @@ struct WebRouteOrderTests {
         _ = await send(
             k, "web", .object(["type": .string("unmount"), "child_id": .string("z_literal")]))
         #expect(resolved() == AgentId("a_ws"), "the pattern serves it while the literal is gone")
+        wire(k, "web", "z_literal")
         _ = await send(
             k, "web", .object(["type": .string("mount"), "child_id": .string("z_literal")]))
         #expect(resolved() == AgentId("z_literal"))
@@ -169,6 +172,7 @@ struct WebRouteOrderTests {
         }
         let first = paths()
         #expect(!first.isEmpty)
+        wire(k, "web", "z_literal")
         _ = await send(
             k, "web", .object(["type": .string("mount"), "child_id": .string("z_literal")]))
         #expect(paths() == first, "\(paths())")

@@ -86,7 +86,7 @@ test("boot: a persisted tree is hydrated, and the app's bundles run its records"
     { id: "web_loader", handler_module: "kernel_state.tools" }, // the host anchor
     { id: "app", handler_module: "app_root.ts", parent_id: "web_loader" },
     { id: "note", handler_module: "note.ts", parent_id: "app", text: "hi" },
-    { id: "mem", handler_module: "ram_store.ts", parent_id: "app", operator: true },
+    { id: "mem", handler_module: "ram_store.ts", parent_id: "app" },
   ]);
   const { kernel, loader } = await boot({
     origin: "ws://host",

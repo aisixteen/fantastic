@@ -139,7 +139,7 @@ export async function answerKernelVerb(
     // IT originated; the operator sees all. The kernel scopes — no caller ever
     // touches the store's `kernel` key.
     const viewer = k.currentCaller;
-    const entries = await k.store.ledgerEntries(k);
+    const entries = await k.store.ledgerEntries(k.currentTask);
     const rows: Payload[] = [];
     for (const e of entries) {
       if (viewer !== null && e._caller !== viewer) continue;
@@ -156,7 +156,7 @@ export async function answerKernelVerb(
       return missing("ack_deadletter", "id");
     }
     const viewer = k.currentCaller;
-    const entries = await k.store.ledgerEntries(k);
+    const entries = await k.store.ledgerEntries(k.currentTask);
     const eid = asId(raw);
     const hit = entries.find((e) =>
       eid !== null ? e.id === eid : e["name"] === raw,
@@ -182,10 +182,9 @@ export async function answerKernelVerb(
     return { acked: true, id: hit.id };
   }
 
-  // The kernel's own sends on a verb's behalf parent to that verb's task.
-  if (verb === "kernel_start") return startKernel(k.operatorView(), true);
+  if (verb === "kernel_start") return startKernel(k, true);
 
-  if (verb === "shutdown_agents") return shutdownAgents(k.operatorView(), k.currentTask);
+  if (verb === "shutdown_agents") return shutdownAgents(k, k.currentTask);
 
   // `kernel_stop` — acknowledged FIRST; the graceful stop runs after the reply
   // is on its way (python defers the exit the same way).
@@ -193,7 +192,7 @@ export async function answerKernelVerb(
   if (s.stopping === null) {
     s.stopping = new Promise((res) => {
       timers().setTimeout(() => {
-        void stopKernel(k.base).then(res);
+        void stopKernel(k).then(res);
       }, 100);
     });
   }

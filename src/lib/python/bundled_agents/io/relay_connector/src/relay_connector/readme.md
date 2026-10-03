@@ -5,11 +5,12 @@ password in `X-Fantastic-Auth` and subprotocol `fantastic.relay.v1`.
 
 **The password lives in a credential_store, never on the record** (audit IO-7/F4,
 2026-10-03): name it with `credentials: {store, ref}`; before EVERY dial the
-connector reads the ref's `password` field AS ITSELF (`get {ref, host:<relay_url>}`,
-marked `secret: ['result']`), pinned to the relay URL's host, exactly as an AI
+connector reads the ref's `password` field AS ITSELF (`get {ref, host:<relay_url>}`
+— the dial runs in its own dispatch or a task it spawned), pinned to the relay
+URL's host, exactly as an AI
 backend reads its key — nothing cached, a rotated password is used by the next
 dial. Wire it on both ends: the connector's `can_call` names the store (`get`), the
-store's `callable_by` and the ref's `readers` name the connector, and the ref's
+store's `callable_by` names the connector, and the ref's
 declared `host` is the relay's `host[:port]`. No `credentials` ⇒ boot fails loud
 ("relay_connector: no `credentials` on <id> — name the relay password's credential
 store and ref (update_agent <id> credentials={store: <id>, ref: <ref>}; the ref's
@@ -19,18 +20,6 @@ partner kernel by its GUID; the relay routes by `target`. Same verbs/auth surfac
 as `ws_bridge` (both ride the shared `io_bridge` engine) — `forward`,
 `watch_remote`/`unwatch_remote` work identically; replies and binary
 `read_stream` chunks are tunneled over the relay.
-
-**SEALED for secret values** (owner, 2026-10-02): the relay daemon dispatches every
-tunneled frame into its own kernel and records it UNMASKED, so a secret may not cross
-a relay leg. A `forward` call carrying ANY `secret` mark is refused before a frame
-leaves, and a tunneled `call` frame that names `secret` is answered with the same
-refusal and never dispatched: `{reason:"unauthorized", error:"relay_connector: a call
-carrying secret marks may not cross a relay leg — the relay records every frame it
-routes, unmasked", hint:"reach that kernel over a direct ws_bridge leg to send a
-secret"}`. Unmarked calls cross as before. A direct `ws_bridge` leg to a loopback
-host carries marks.
-Lifted once relayd re-roots a tunneled frame's marks onto its own delivery item and
-reply frames carry result marks.
 
 **Sealed by default** — open the inbound leg: `update_agent <id> ingress_rule=allow_all_ingress`
 (or `password` for the group token). The bridge-leg `ingress_rule`/`egress_rule`
@@ -80,12 +69,9 @@ peer (no typed keys) advertises nothing — identical to an un-typed leg.
 
 Record fields: `relay_url` · `guid` (auto-minted if absent) · `partner_guid` (peer to
 reach) · `credentials` ({store, ref} — the relay password) · `heartbeat` (s, default 30) ·
-`reconnect` (s, default 10) · `role` · `owner_guid` · `exposes` · `peer_guid`.
+`reconnect` (s, default 10) · `role` · `owner_guid` · `exposes`.
 Transport: `relay`.
 
-**Inbound calls are served only from the ONE pinned peer**: `peer_guid` is the partner
-KERNEL's instance guid (its root reflect's `guid` — not the leg's path `guid`). Every
-tunneled call names its caller `<guid>|<agent>`; a caller from any other guid, or a leg
-with no pin, is refused. The call is then gated AS that foreign id: the target's
-`callable_by` must name `<guid>|<agent>` or `<guid>|*` — accepting this leg is not
-accepting its peer. Remote events re-emit only for a `watch_remote` subscription.
+**Inbound calls are served AS THIS LEG**: a tunneled call is sent by the connector
+itself (its read loop), so its `can_call` and the target's `callable_by` decide.
+Remote events re-emit only for a `watch_remote` subscription.

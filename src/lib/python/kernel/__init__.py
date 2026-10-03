@@ -33,13 +33,8 @@ from kernel._kernel import (
     _current_sender,
     _summarize_payload,
     current_origin,
-    current_remote_caller,
-    current_secret,
     current_task,
-    remote_caller_context,
-    operator_context,
     page,
-    sender_context,
 )
 from kernel._state import CURRENT_VERSION
 from kernel._lock import (
@@ -59,13 +54,8 @@ __all__ = [
     "INBOX_BOUND",
     "BUNDLE_ENTRY_GROUP",
     "CURRENT_VERSION",
-    "sender_context",
-    "operator_context",
     "page",
     "current_origin",
-    "current_remote_caller",
-    "current_secret",
-    "remote_caller_context",
     "current_task",
     "_current_sender",
     "_summarize_payload",

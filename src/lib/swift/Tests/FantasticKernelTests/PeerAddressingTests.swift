@@ -37,29 +37,24 @@ private func mkKernel(guid: String?) -> Kernel {
     return kernel
 }
 
-/// Every call a fake route delivered: `(agent id, payload, caller)`, and the
-/// `secret` marks each one carried.
+/// Every call a fake route delivered: `(agent id, payload)`. A frame names no
+/// caller: the peer judges what arrives as the leg that serves it there.
 private final class Calls: @unchecked Sendable {
     private let lock = NSLock()
-    private var items: [(String, JSON, String)] = []
-    private var marks: [[JSON]] = []
-    func add(_ c: (String, JSON, String), _ secret: [JSON]) {
-        lock.withLock {
-            items.append(c)
-            marks.append(secret)
-        }
+    private var items: [(String, JSON)] = []
+    func add(_ c: (String, JSON)) {
+        lock.withLock { items.append(c) }
     }
-    var all: [(String, JSON, String)] { lock.withLock { items } }
-    var secrets: [[JSON]] { lock.withLock { marks } }
+    var all: [(String, JSON)] { lock.withLock { items } }
 }
 
 /// A fake route that records every call and answers `reply` (or `{ok: agent}`).
 private func route(_ via: String, _ calls: Calls, reply: JSON? = nil) -> PeerRoute {
-    PeerRoute(via: via) { agentId, payload, caller, secret, _ in
-        calls.add((agentId, payload, caller), secret)
+    PeerRoute(via: via) { agentId, payload, _ in
+        calls.add((agentId, payload))
         return (reply ?? .object(["ok": .string(agentId)]), nil)
-    } emit: { agentId, payload, caller, _ in
-        calls.add(("emit:\(agentId)", payload, caller ?? ""), [])
+    } emit: { agentId, payload, _ in
+        calls.add(("emit:\(agentId)", payload))
     }
 }
 
@@ -93,8 +88,8 @@ private final class Tab: @unchecked Sendable {
     }
 
     func route(_ name: String, _ calls: Calls) -> PeerRoute {
-        PeerRoute(via: "leg_\(name)") { agentId, payload, caller, secret, _ in
-            calls.add(("\(name):\(agentId)", payload, caller), secret)
+        PeerRoute(via: "leg_\(name)") { agentId, payload, _ in
+            calls.add(("\(name):\(agentId)", payload))
             let r = await withTaskCancellationHandler {
                 await withCheckedContinuation { (c: CheckedContinuation<JSON, Never>) in
                     let ready: JSON? = self.lock.withLock {
@@ -114,8 +109,8 @@ private final class Tab: @unchecked Sendable {
                 w?.resume(returning: .object(["cancelled": .bool(true)]))
             }
             return (r, nil)
-        } emit: { agentId, payload, caller, _ in
-            calls.add(("\(name):emit:\(agentId)", payload, caller ?? ""), [])
+        } emit: { agentId, payload, _ in
+            calls.add(("\(name):emit:\(agentId)", payload))
         }
     }
 }
@@ -125,7 +120,7 @@ private func send(_ k: Kernel, _ target: String, _ payload: JSON, as sender: Str
 {
     let items = [Item(AgentId(target), payload)]
     guard let sender else { return await k.send(items)[0] }
-    return await KernelTaskLocals.$currentSender.withValue(AgentId(sender)) {
+    return await KernelTaskLocals.$sender.withValue(AgentId(sender)) {
         await k.send(items)[0]
     }
 }
@@ -146,7 +141,7 @@ private func type(_ verb: String) -> JSON { .object(["type": .string(verb)]) }
 
 @Suite("cross-kernel addressing")
 struct PeerAddressingTests {
-    @Test func anOperatorSendReachesThePeerAgentAsThisKernel() async {
+    @Test func anOperatorSendReachesThePeerAgent() async {
         let k = mkKernel(guid: HOST)
         let calls = Calls()
         connect(k, calls, reply: .object(["cells": .array([.integer(1), .integer(2)])]))
@@ -159,47 +154,6 @@ struct PeerAddressingTests {
         #expect(calls.all.count == 1)
         #expect(calls.all.first?.0 == "canvas")
         #expect(calls.all.first?.1 == payload)
-        #expect(calls.all.first?.2 == "\(HOST)|kernel")
-    }
-
-    /// The route gets the item's `secret` marks verbatim (rooted at the item, as
-    /// the peer's item is), so the PEER masks its records; this kernel masks its
-    /// own.
-    @Test func theItemsSecretMarksRideToThePeer() async {
-        let k = mkKernel(guid: HOST)
-        let calls = Calls()
-        connect(k, calls, reply: .object(["ok": .bool(true)]))
-        let key = "sk-peer-0123456789"
-        let payload: JSON = .object([
-            "type": .string("set"), "fields": .object(["api_key": .string(key)]),
-        ])
-        var item = Item(AgentId("\(PAGE)|creds"), payload)
-        item.secret = .array([.string("payload.fields"), .string("result")])
-        let out = await k.send([item])[0]
-        #expect(out.status == .completed, "\(out.result.serialize())")
-        #expect(calls.all.count == 1)
-        #expect(calls.all.first?.0 == "creds")
-        #expect(calls.all.first?.1 == payload)
-        #expect(calls.all.first?.2 == "\(HOST)|kernel")
-        #expect(calls.secrets == [["payload.fields", "result"]], "\(calls.secrets)")
-        #expect(
-            k.rows.getOne(out.pid!.value)?["payload"]?["fields"] == .string(Secret.placeholder),
-            "\(k.rows.getOne(out.pid!.value).map { JSON.object($0).serialize() } ?? "nil")")
-        // an unmarked call hands the route no marks
-        _ = await send(k, "\(PAGE)|creds", type("reflect"))
-        #expect(calls.secrets.last == [], "\(calls.secrets)")
-        // an ARRAY of steps rides as given — an array, beside a dotted string
-        var dotted = Item(
-            AgentId("\(PAGE)|creds"),
-            .object(["type": .string("set"), "fields": .object(["a.b": .string(key)])]))
-        dotted.secret = [["payload", "fields", "a.b"], "result"]
-        let got = await k.send([dotted])[0]
-        #expect(got.status == .completed, "\(got.result.serialize())")
-        #expect(calls.secrets.last == [["payload", "fields", "a.b"], "result"], "\(calls.secrets)")
-        #expect(
-            k.rows.getOne(got.pid!.value)?["payload"]?["fields"]
-                == .object(["a.b": .string(Secret.placeholder)]),
-            "\(k.rows.getOne(got.pid!.value).map { JSON.object($0).serialize() } ?? "nil")")
     }
 
     @Test func anAgentNeedsTheQualifiedTargetInItsCanCall() async {
@@ -220,7 +174,7 @@ struct PeerAddressingTests {
             let ok = await send(k, canvas, type("around"), as: sender)
             #expect(ok.status == .completed, "\(sender): \(ok.result.serialize())")
         }
-        #expect(calls.all.map { $0.2 } == ["\(HOST)|named", "\(HOST)|wild"])
+        #expect(calls.all.map { $0.0 } == ["canvas", "canvas"])
         // a verb the grant does not name is refused at egress too
         let denied = await send(k, canvas, type("clear"), as: "named")
         #expect(denied.result["side"].asString == "egress", "\(denied.result.serialize())")
@@ -295,7 +249,7 @@ struct PeerAddressingTests {
         while calls.all.count < 2 { await Task.yield() }
         let seen = calls.all.sorted { $0.0 < $1.0 }
         #expect(seen.map(\.0) == ["a:canvas", "b:canvas"])
-        #expect(seen.allSatisfy { $0.1 == type("around") && $0.2 == "\(HOST)|kernel" })
+        #expect(seen.allSatisfy { $0.1 == type("around") })
         b.answer(.object(["from": .string("b")]))
         let out = await send.value
         #expect(out.status == .completed, "\(out.result.serialize())")
@@ -305,8 +259,8 @@ struct PeerAddressingTests {
     }
 
     /// MULTI-TAB EMIT: an emit to `<guid>|<agent>` reaches EVERY live tab of the
-    /// identity — an operator emit with no caller, an agent's as `<host>|<agent>`
-    /// once its `can_call` names the target.
+    /// identity — an operator emit, and an agent's once its `can_call` names the
+    /// target.
     @Test func anEmitReachesEveryTabOfTheIdentity() async {
         let k = mkKernel(guid: HOST)
         let calls = Calls()
@@ -315,18 +269,18 @@ struct PeerAddressingTests {
         k.registerPeer(PAGE, b.route("b", calls))
         await k.emit(AgentId("\(PAGE)|canvas"), type("tick"))
         #expect(calls.all.map(\.0) == ["a:emit:canvas", "b:emit:canvas"])
-        #expect(calls.all.allSatisfy { $0.1 == type("tick") && $0.2 == "" })
+        #expect(calls.all.allSatisfy { $0.1 == type("tick") })
         await create(k, "lonely")
         await create(k, "speaker", canCall: .object(["\(PAGE)|canvas": verbs("emit")]))
-        await KernelTaskLocals.$currentSender.withValue(AgentId("lonely")) {
+        await KernelTaskLocals.$sender.withValue(AgentId("lonely")) {
             await k.emit(AgentId("\(PAGE)|canvas"), type("denied"))
         }
-        await KernelTaskLocals.$currentSender.withValue(AgentId("speaker")) {
+        await KernelTaskLocals.$sender.withValue(AgentId("speaker")) {
             await k.emit(AgentId("\(PAGE)|canvas"), type("said"))
         }
         let rest = Array(calls.all.dropFirst(2))
         #expect(rest.map(\.0) == ["a:emit:canvas", "b:emit:canvas"])
-        #expect(rest.allSatisfy { $0.1 == type("said") && $0.2 == "\(HOST)|speaker" })
+        #expect(rest.allSatisfy { $0.1 == type("said") })
     }
 
     @Test func aDisconnectedTabLeavesTheIdentityRoutable() async {
@@ -343,15 +297,15 @@ struct PeerAddressingTests {
         #expect(calls.all.map(\.0) == ["b:canvas"])
     }
 
-    @Test func aKernelWithNoGuidCannotSayWhoIsCalling() async {
+    /// The frame names no caller: the peer judges the call as the leg that
+    /// serves it there, so this kernel's own guid is not part of the call.
+    @Test func aCallToAPeerNeedsNoGuidOfThisKernel() async {
         let k = mkKernel(guid: nil)
         let calls = Calls()
         connect(k, calls)
         let out = await send(k, "\(PAGE)|canvas", type("around"))
-        #expect(
-            out.result["error"].asString?.contains("no guid yet") == true,
-            "\(out.result.serialize())")
-        #expect(calls.all.isEmpty)
+        #expect(out.status == .completed, "\(out.result.serialize())")
+        #expect(calls.all.count == 1 && calls.all[0].0 == "canvas" && calls.all[0].1 == type("around"))
     }
 
     /// Discovery by reflect: the peer's reply comes back as it answered it — it
@@ -373,7 +327,7 @@ struct PeerAddressingTests {
 
     /// `create_agent` sent to `<guid>|kernel` places nothing in THIS tree: it is
     /// an ordinary call to the peer, gated on egress like any other — the local
-    /// placement rule (a child of yourself is baseline) must not wave it through.
+    /// mutator rule (a child of yourself) must not wave it through.
     @Test func aCreateOnAPeerIsGatedOnThePeerTarget() async {
         let k = mkKernel(guid: HOST)
         let calls = Calls()

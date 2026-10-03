@@ -79,7 +79,7 @@ async fn next_frame(t: &dyn BridgeTransport) -> Result<Frame, TransportError> {
 async fn the_ws_transport_bounds_a_fragmented_message_by_the_one_frame_cap() {
     // under the cap: reassembled, delivered whole
     let (port, server) = peer_sending(of_len(reply, 4096), false).await;
-    let t = WsTransport::connect(&format!("ws://127.0.0.1:{port}/peer/ws"), false)
+    let t = WsTransport::connect(&format!("ws://127.0.0.1:{port}/peer/ws"))
         .await
         .expect("connect");
     let f = next_frame(t.as_ref())
@@ -91,7 +91,7 @@ async fn the_ws_transport_bounds_a_fragmented_message_by_the_one_frame_cap() {
 
     // one byte over: the reader ends on the cap, nothing is delivered
     let (port, server) = peer_sending(of_len(reply, MAX_FRAME + 1), false).await;
-    let t = WsTransport::connect(&format!("ws://127.0.0.1:{port}/peer/ws"), false)
+    let t = WsTransport::connect(&format!("ws://127.0.0.1:{port}/peer/ws"))
         .await
         .expect("connect");
     match next_frame(t.as_ref()).await {

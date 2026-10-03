@@ -7,12 +7,15 @@
 loaders:
   - id: static_loader
     file: fantastic.yaml
+    meta:
+      can_call: {$children: "*"}
     manifest:
       agents:
         # The child's env carries SHELL and the record permits it, bare.
         - id: shell_term
           handler_module: exec_bridge.tools
           ingress_rule: allow_all_ingress
+          callable_by: {$parent: "*"}
           cwd: "."
           env: {SHELL: /bin/sh}
           shell: true

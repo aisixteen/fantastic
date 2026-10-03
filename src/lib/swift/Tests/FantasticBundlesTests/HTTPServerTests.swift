@@ -52,6 +52,7 @@ struct HTTPServerTests {
                     "callable_by": grants,
                 ]))
         ])[0].result
+        wire(kernel, "web", restId)
         _ = await kernel.send([
             Item(
                 AgentId("web"),
@@ -288,11 +289,15 @@ struct HTTPServerTests {
         req.httpBody = Data("{\"type\":\"whoami\"}".utf8)
         let (data, _) = try await URLSession(configuration: .ephemeral).data(for: req)
         let reply = try JSON.parse(data)
-        // NO parent (python clears `_current_task` for a REST task, 2026-09-20):
-        // the boot dispatch that used to hand its pid down has long settled, so
-        // the table held a DANGLING parent.
-        #expect(reply["parent"].isNull, "REST dispatch is parented: \(reply)")
-        #expect(reply["ps_parent"].isNull, "ps holds a parent for the request: \(reply)")
+        // The request is HANDED to the leg (`inbound_call` — a root: the server
+        // runs outside every dispatch, python clears `_current_task` for a REST
+        // task), and the leg's onward call to the probe is that hand-in's CHILD:
+        // a LIVE parent, never the long-settled boot pid (a DANGLING parent).
+        let parent = try #require(reply["parent"].asInt, "\(reply)")
+        #expect(reply["ps_parent"] == reply["parent"], "\(reply)")
+        #expect(
+            kernel.ledger.entry(parent)?.target == AgentId(restId),
+            "the parent is the hand-in to the leg: \(reply)")
 
         // An in-process call from the operator IS a root, so the assertion
         // above is about the request path, not about every dispatch.

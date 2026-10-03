@@ -18,18 +18,24 @@ Verbs:
   stop      -> cancel uvicorn task
   mount     -> (re)mount a child's routes (idempotent)
   unmount   -> remove a child's routes from the live app
+  fetch_file -> one `read_stream` chunk of an agent's file, read AS THIS HOST —
+               the file route hands each browser fetch here
+
+IDENTITY: the uvicorn server is the TRANSPORT — its loop runs outside every
+dispatch (an empty context), so a request is the operator. The file route never
+reads as anyone itself: it hands the fetch to this host (`fetch_file`), and the
+host reads as itself, gated as `web`.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 from typing import Any
 
 import uvicorn
 from fastapi import FastAPI
-
-from kernel._kernel import _current_sender, _current_task
 
 from .app import DEFAULT_HOST, extra_origins, make_app, own_origins
 
@@ -184,15 +190,6 @@ def _start_serving(agent_id: str, handle: _ServerHandle) -> None:
     port = handle.port
 
     async def _safe_serve():
-        # NOT a child of the boot dispatch: this task outlives it, and every
-        # request task uvicorn creates inherits the context here. Left as it
-        # was, each REST-ingress task named a parent pid that had ended
-        # (measured 2026-09-16: `parent: 7`, no such row).
-        _current_task.set(None)
-        # The request tasks run AS THIS HOST, stated here rather than inherited
-        # from whoever dispatched `boot` (audit 2026-09-28, d9). Every route that
-        # sends also wraps its send in `sender_context`.
-        _current_sender.set(agent_id)
         # uvicorn calls sys.exit(1) on bind failure (e.g. port already
         # in use). SystemExit out of an asyncio task aborts the whole
         # event loop — taking the kernel down with one bad webapp.
@@ -211,7 +208,13 @@ def _start_serving(agent_id: str, handle: _ServerHandle) -> None:
         finally:
             _servers.pop(agent_id, None)
 
-    handle.task = asyncio.create_task(_safe_serve())
+    # THE SERVER IS A TRANSPORT, NOT A DISPATCH. Its task starts from an EMPTY
+    # context, and every request task uvicorn creates inherits that: no task
+    # parent (it outlives the boot that started it — a request task naming the
+    # ended boot pid was measured 2026-09-16), and no identity. A request is the
+    # outside world — the operator — handing a frame to a leg; the leg acts as
+    # itself.
+    handle.task = asyncio.create_task(_safe_serve(), context=contextvars.Context())
 
 
 async def _stop_uvicorn(agent_id: str) -> bool:
@@ -272,8 +275,7 @@ def _browser_reachable(web_id: str, kernel) -> list[str]:
             holder_parent=web.record.get("parent_id"),
             holder_children=frozenset(getattr(web, "_children", {}) or {}),
         )
-        # the heritable half — an ancestor's `{aid: {verbs, for: descendants}}`
-        if not egress.allowed and not web._heritable_egress(web_id, "read_stream", aid):
+        if not egress.allowed:
             continue
         ingress = authorize_call(
             rec.get("callable_by"),
@@ -282,7 +284,6 @@ def _browser_reachable(web_id: str, kernel) -> list[str]:
             holder_id=aid,
             holder_parent=rec.get("parent_id"),
             holder_children=frozenset(getattr(agent, "_children", {}) or {}),
-            in_subtree=web._in_subtree,
         )
         if not ingress.allowed:
             continue
@@ -402,6 +403,28 @@ async def _mount(id, payload, kernel):
     }
 
 
+async def _fetch_file(id, payload, kernel):
+    """args: agent_id:str (req), path:str (req), offset:int (req), length:int (req). One `read_stream` chunk of `path` on `agent_id`, read AS THIS HOST — the file route hands every browser fetch here, so the served agent's gates judge `web`. Returns that agent's reply."""
+    agent_id = payload.get("agent_id")
+    if not isinstance(agent_id, str) or not agent_id:
+        return {"error": "web.fetch_file: agent_id required"}
+    return (
+        await kernel.send(
+            [
+                {
+                    "target": agent_id,
+                    "payload": {
+                        "type": "read_stream",
+                        "path": payload.get("path"),
+                        "offset": payload.get("offset"),
+                        "length": payload.get("length"),
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
+
+
 async def _unmount(id, payload, kernel):
     """args: child_id:str (req). Removes every route belonging to the named child from the live app."""
     child_id = payload.get("child_id")
@@ -423,6 +446,7 @@ VERBS = {
     "stop": _stop,
     "mount": _mount,
     "unmount": _unmount,
+    "fetch_file": _fetch_file,
 }
 
 

@@ -1,12 +1,9 @@
 // The TREE WALKS the kernel does: rebuilding a tree from records in any order,
-// the parent chain a heritable grant is read up, the `$subtree:<id>` membership a
-// callable_by entry tests, and the id guard every loaded record passes.
+// and the id guard every loaded record passes.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Kernel } from "../src/kernel/kernel.ts";
-import { Agent } from "../src/kernel/agent.ts";
-import type { Payload } from "../src/kernel/json.ts";
 import { validateRecords, SnapshotError } from "../src/kernel/state.ts";
 import type { AgentRecord } from "../src/kernel/state.ts";
 
@@ -37,55 +34,6 @@ test("load rebuilds the same tree from records listed children-first, depth-firs
     ["a", "b", "c1", "c2", "d", "e"],
     "save is id-sorted whatever the load order",
   );
-});
-
-test("a heritable grant is read up the WHOLE live parent chain; $subtree covers every depth", async () => {
-  const k = new Kernel();
-  k.setRoot(new Agent({ id: "kernel_state" }));
-  k.registerBundle("probe.tools", () => ({ ok: true }));
-  k.register(
-    new Agent({
-      id: "served",
-      parentId: "kernel_state",
-      handlerModule: "probe.tools",
-      meta: { callable_by: { "$subtree:hub": ["list"] } },
-    }),
-  );
-  k.register(
-    new Agent({
-      id: "hub",
-      parentId: "kernel_state",
-      handlerModule: "probe.tools",
-      meta: { can_call: { served: { verbs: ["list"], for: "descendants" } } },
-    }),
-  );
-  let parent = "hub";
-  for (const id of ["l1", "l2", "l3", "l4"]) {
-    k.register(new Agent({ id, parentId: parent, handlerModule: "probe.tools" }));
-    parent = id;
-  }
-  const send = async (from: string): Promise<Payload> => {
-    const [out] = await k.scopedFor(from, null).send([{ target: "served", payload: { type: "list" } }]);
-    return out!.status === "completed" ? { ok: true } : (out!.result as Payload);
-  };
-  for (const id of ["l1", "l2", "l3", "l4"]) assert.deepEqual(await send(id), { ok: true }, id);
-  // the chain is LIVE: removing l2 takes l3 and l4 with it
-  k.remove("l2");
-  assert.equal(k.get("l3"), undefined, "the cascade took l3");
-  assert.equal(k.get("l4"), undefined, "the cascade took l4");
-  // an agent whose parent is not in the tree reads no ancestor at all
-  k.register(new Agent({ id: "stray", parentId: "ghost", handlerModule: "probe.tools" }));
-  assert.equal((await send("stray"))["side"], "egress");
-  // a grant on an ancestor TWO levels up, not on the parent, still covers
-  k.register(new Agent({ id: "m1", parentId: "l1", handlerModule: "probe.tools" }));
-  k.register(new Agent({ id: "m2", parentId: "m1", handlerModule: "probe.tools" }));
-  assert.deepEqual(await send("m2"), { ok: true });
-  // the ingress half alone: $subtree:hub admits hub's descendants and hub itself, nobody else
-  assert.equal(k.ingressGate("m2", "list", "served"), null);
-  assert.equal(k.ingressGate("hub", "list", "served"), null);
-  assert.equal(k.ingressGate("stray", "list", "served")?.["side"], "ingress");
-  k.register(new Agent({ id: "outsider", parentId: "kernel_state", handlerModule: "probe.tools" }));
-  assert.equal(k.ingressGate("outsider", "list", "served")?.["side"], "ingress");
 });
 
 test("validateRecords refuses a traversal id and a hidden id with python's text", () => {

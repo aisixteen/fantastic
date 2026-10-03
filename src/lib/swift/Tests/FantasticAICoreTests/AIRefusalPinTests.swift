@@ -4,12 +4,11 @@
 // several put their machine fields in an order `make` would not (`arg` right
 // after `reason`, `request_id` last, no `hint`). Folding them into one helper
 // is only safe where the bytes stay the same, so every one is pinned here:
-// `fork_from`, `request_share`, `watch`/`unwatch` (python `ai_core/core.py`
-// `_fork_from`, `_request_share`, `_watch`, `_unwatch`), the `inquiry` open and
+// `watch`/`unwatch` (python `ai_core/core.py` `_watch`, `_unwatch`), the `inquiry` open and
 // close, `history {fold}`, and the memory-store fail-fast on `send`.
 
 import FantasticJSON
-import FantasticKernel
+@testable import FantasticKernel
 import Foundation
 import OrderedCollections
 import Testing
@@ -22,7 +21,7 @@ private func send(_ k: Kernel, _ target: String, _ payload: JSON, as sender: Str
 {
     let item = Item(AgentId(target), payload)
     if let sender {
-        return await KernelTaskLocals.$currentSender.withValue(AgentId(sender)) {
+        return await KernelTaskLocals.$sender.withValue(AgentId(sender)) {
             await k.send([item])[0].result.serialize()
         }
     }
@@ -39,59 +38,6 @@ private func pair() async -> Kernel {
 
 @Suite("AI core — hand-built refusal bodies")
 struct AIRefusalPinTests {
-
-    @Test func forkFromRefusals() async throws {
-        let k = await pair()
-        func fork(_ extra: OrderedDictionary<String, JSON>) async -> String {
-            var p: OrderedDictionary<String, JSON> = ["type": "fork_from"]
-            for (key, v) in extra { p[key] = v }
-            return await send(k, "bob", .object(p))
-        }
-        let noOwner =
-            #"{"error":"fork_from: `owner` is required","reason":"missing_arg","arg":"owner"}"#
-        #expect(await fork(["message": "go", "grant": 1]) == noOwner)
-        #expect(await fork(["owner": "  ", "message": "go", "grant": 1]) == noOwner)
-        #expect(await fork(["owner": 5, "message": "go", "grant": 1]) == noOwner)
-        #expect(
-            await fork(["owner": "alice", "grant": 1])
-                == #"{"error":"fork_from: `message` is required","reason":"missing_arg","arg":"message"}"#
-        )
-        let noGrant =
-            #"{"error":"fork_from: `grant` (an int) is required","reason":"missing_arg","arg":"grant"}"#
-        #expect(await fork(["owner": "alice", "message": "go"]) == noGrant)
-        #expect(await fork(["owner": "alice", "message": "go", "grant": "x"]) == noGrant)
-        #expect(await fork(["owner": "alice", "message": "go", "grant": 0]) == noGrant)
-        #expect(
-            await fork(["owner": "alice", "message": "go", "grant": 99999])
-                == #"{"error":"fork_from: no grant 99999 was given to you","reason":"not_found","arg":"grant"}"#
-        )
-
-        try await saveHistory(
-            "alice", k, [.object(["role": .string("user"), "content": .string("x")])])
-        let g = await KernelTaskLocals.$currentSender.withValue(AgentId("alice")) {
-            await k.send([
-                Item(
-                    AgentId("memory"),
-                    .object([
-                        "type": .string("share"), "with": .string("bob"),
-                        "scope": .object(["head_until": .integer(1_000_000_000)]),
-                    ]))
-            ])[0].result
-        }
-        let gid = g["grant"].asInt ?? -1
-        #expect(
-            await fork(["owner": "mallory", "message": "go", "grant": .integer(gid)])
-                == #"{"error":"fork_from: grant \#(gid) was given by alice, not mallory","reason":"bad_arg","arg":"owner"}"#
-        )
-    }
-
-    @Test func requestShareNeedsARowId() async {
-        let k = await pair()
-        let want =
-            #"{"error":"request_share: `row` (an int) is required","reason":"missing_arg","arg":"row"}"#
-        #expect(await send(k, "alice", ["type": "request_share"], as: "bob") == want)
-        #expect(await send(k, "alice", ["type": "request_share", "row": "x"], as: "bob") == want)
-    }
 
     @Test func watchAndUnwatchReplies() async {
         let k = await pair()

@@ -60,7 +60,7 @@ from file_bridge import fs
 from kernel_state.tools import read_tree
 
 from _testkit import boot_root, persist
-from kernel import sender_context
+from _testkit import as_agent
 
 # THE SHARED CORPUS, at the repo root. The rust and swift runners read these
 # same files: a scenario is DATA, and the runner is the only per-runtime part.
@@ -235,9 +235,7 @@ _EXPECT_MATCHERS = frozenset(
         "contains",
         "not_contains",
         "error_contains",
-        # a string ANYWHERE / NOWHERE in the reply (bytes read as utf-8) — what a
-        # secret mark is asserted with: the value is somewhere in a real answer,
-        # nowhere in a record
+        # a string ANYWHERE / NOWHERE in the reply (bytes read as utf-8)
         "mentions",
         "absent",
     }
@@ -855,7 +853,7 @@ async def reach(kernel, sender: str, target: str, payload: dict) -> dict:
     Every claim this suite makes about wiring goes through here. Outside a
     dispatch `_current_sender` is None, which makes a bare `kernel.send` an
     OPERATOR send — ungated, and therefore worthless as evidence about an
-    agent's reach. `sender_context` is what turns the driver into an agent
+    agent's reach. `as_agent` (the test standing in for the agent's handler) is what turns the driver into an agent
     (the gate in `Agent._launch`); the block wraps ONLY the send under test, so
     setup keeps operator authority.
 
@@ -863,7 +861,7 @@ async def reach(kernel, sender: str, target: str, payload: dict) -> dict:
     are always dicts, so `.get("reason")` stays the one question a caller asks.
     """
     payload = _decode_bytes_fields(payload)
-    with sender_context(sender):
+    with as_agent(kernel, sender):
         reply = (await kernel.send([{"target": target, "payload": payload}]))[0][
             "result"
         ]
@@ -879,7 +877,7 @@ def denied(reply: dict) -> bool:
 
 def denial_side(reply: dict) -> str | None:
     """Which half refused: `egress` (the sender may not call) / `ingress` (the
-    target does not accept) / `self-grant` / `delegation` / `secret-holder`. This
+    target does not accept) / `mutator`. This
     field is the evidence that the gate is two-sided at all."""
     return reply.get("side") if isinstance(reply, dict) else None
 
@@ -1050,7 +1048,7 @@ async def _grant_step(h: "Hydration", step: Step, remove: bool) -> dict:
 
     Sugar, not a shortcut: `update_agent` REPLACES a field rather than merging
     it (#6), so a spec that hand-wrote the payload would have to restate the
-    whole grant map every time and would silently drop the structural baseline.
+    whole grant map every time and would silently drop every other grant.
     The runner reads the live map, edits one entry, and writes it back whole.
     """
     agent_id = step.args["agent"]
@@ -1097,7 +1095,7 @@ async def run_steps(h: "Hydration", steps: tuple[Step, ...]) -> "Hydration":
             reply = await reach(h.kernel, args["from"], args["to"], args["send"])
 
         elif step.kind == "operator":
-            # OPERATOR authority: no `sender_context`, so the gate is not
+            # OPERATOR authority: no `as_agent`, so the gate is not
             # consulted. This is setup and side-effect READS — never evidence
             # about an agent's reach, which is what `reach` is for.
             item = {
@@ -1105,9 +1103,8 @@ async def run_steps(h: "Hydration", steps: tuple[Step, ...]) -> "Hydration":
                 "payload": _decode_bytes_fields(args.get("send") or {}),
             }
             # the batch item's own fields, beside the payload
-            for k in ("id", "secret"):
-                if k in args:
-                    item[k] = args[k]
+            if "id" in args:
+                item["id"] = args["id"]
             out = (await h.kernel.ctx.send([item]))[0]
             outcome = out
             reply = out["result"] if isinstance(out["result"], dict) else {}
@@ -1218,7 +1215,7 @@ async def run_steps(h: "Hydration", steps: tuple[Step, ...]) -> "Hydration":
 async def reach_outcome(kernel, sender: str, target: str, payload: dict) -> dict:
     """`reach`, but returning the whole OUTCOME rather than just the result —
     `start`/`collect` assert on `status`, which only the outcome carries."""
-    with sender_context(sender):
+    with as_agent(kernel, sender):
         return (
             await kernel.send(
                 [{"target": target, "payload": _decode_bytes_fields(payload)}]
@@ -1261,15 +1258,9 @@ def _declared_verbs(spec: dict, field_: str, other: str) -> set[str]:
 
 
 def _structural_pairs(children: dict, universe: set[str]) -> set:
-    """The edges the kernel stamps and nobody declares: `$self`, `$parent`,
-    `$children` — each agent, plus each parent↔child pair, both directions.
-    Derived from the RUNNING tree, which PC-1 already reconciled."""
-    pairs = {(a, a) for a in universe}
-    for parent, kids in children.items():
-        for kid in kids:
-            if parent in universe and kid in universe:
-                pairs |= {(parent, kid), (kid, parent)}
-    return pairs
+    """The edges the kernel stamps and nobody declares: the baseline is
+    `{$self: "*"}` alone, so each agent to itself — parentage grants nothing."""
+    return {(a, a) for a in universe}
 
 
 async def _sweep_reconcile(h, step: Step, payload_for) -> None:
@@ -1316,13 +1307,13 @@ async def _sweep_reconcile(h, step: Step, payload_for) -> None:
 
 async def _sweep_undeclared(h, step: Step, payload_for, prior=()) -> None:
     """The whole roster, every ordered pair, every named verb. The reachable set
-    must be EXACTLY the structural baseline plus the spec's own allowed reaches
-    — nothing rides along.
+    must be EXACTLY the baseline (each agent to itself) plus the spec's own
+    allowed reaches — nothing rides along.
 
     Two properties fall out that no single probe shows: co-residency grants
     nothing (siblings on one loader are not reachable unless both halves name
-    it), and authority is not transitive (`$children` is direct children, a set
-    membership, not a subtree).
+    it), and neither does parentage (a loader and its roster reach each other
+    only through a grant).
     """
     d = await dehydrate(h.kernel)
     universe = [h.kernel.id, *h.config.loader_ids, *h.config.roster_ids]

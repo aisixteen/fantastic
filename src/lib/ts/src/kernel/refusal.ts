@@ -109,9 +109,8 @@ export const RESERVED_ID = "kernel";
  * Returns a refusal, or null when the id is fine.
  *
  * An id becomes a directory on the host (the loader persists each record under
- * it), a `|` marks a FOREIGN `<guid>|<agent>` (a local id never carries one, so
- * the gate tells local from foreign by the id alone), an all-digit id reads as a
- * message id, and `kernel` is the operator.
+ * it), a `|` marks a peer address `<guid>|<agent>` (a local id never carries
+ * one), an all-digit id reads as a message id, and `kernel` is the operator.
  */
 export function guardAgentId(verb: string, agentId: unknown): Payload | null {
   if (typeof agentId !== "string" || agentId === "") return bad(verb, "id", "a non-empty string");

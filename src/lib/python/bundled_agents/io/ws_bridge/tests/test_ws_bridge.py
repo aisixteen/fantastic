@@ -55,13 +55,12 @@ def two_kernels(tmp_path, monkeypatch):
     _engine._test_transport_inject.clear()
 
 
-def _accept(kernel, agent_id: str, foreign: str) -> None:
-    """Open `agent_id`'s `callable_by` to a FOREIGN caller (`<guid>|*` or
-    `<guid>|<agent>`): an inbound bridge call is judged by its qualified id,
-    never by the leg that relays it."""
+def _accept(kernel, agent_id: str, leg: str) -> None:
+    """Open `agent_id`'s `callable_by` to a bridge LEG: an inbound bridge call is
+    the leg's own send, judged as the leg."""
     agent = kernel.ctx.agents[agent_id]
     cb = dict(agent._meta.get("callable_by") or {})
-    cb[foreign] = "*"
+    cb[leg] = "*"
     kernel.update(agent_id, callable_by=cb)
 
 
@@ -75,6 +74,7 @@ async def _make_bridge(kernel, peer_id: str, transport: str = "memory") -> str:
                         "type": "create_agent",
                         "parent_id": "kernel_state",
                         "handler_module": "ws_bridge.tools",
+                        "can_call": {"$children": "*", "kernel_state": "*"},
                         "transport": transport,
                         "peer_id": peer_id,
                     },
@@ -96,12 +96,8 @@ async def _wire_memory_pair(ka, kb_kern):
     "inbound call dispatcher" role that `web_ws._on_call` plays over
     a real WS.
     """
-    # Each kernel's instance guid — what a bridge stamps on its outbound frames
-    # and what the peer's leg is PINNED to.
     ka.update(ka.id, guid="guid-a")
     kb_kern.update(kb_kern.id, guid="guid-b")
-    _accept(ka, ka.id, "guid-b|*")
-    _accept(kb_kern, kb_kern.id, "guid-a|*")
     # Allocate ids first so each can know its peer.
     rec_a = (
         await ka.send(
@@ -112,9 +108,9 @@ async def _wire_memory_pair(ka, kb_kern):
                         "type": "create_agent",
                         "parent_id": "kernel_state",
                         "handler_module": "ws_bridge.tools",
+                        "can_call": {"$children": "*", "kernel_state": "*"},
                         "transport": "memory",
                         "peer_id": "PLACEHOLDER",
-                        "peer_guid": "guid-b",
                     },
                 }
             ]
@@ -130,13 +126,12 @@ async def _wire_memory_pair(ka, kb_kern):
                         "type": "create_agent",
                         "parent_id": "kernel_state",
                         "handler_module": "ws_bridge.tools",
+                        "can_call": {"$children": "*", "kernel_state": "*"},
                         "transport": "memory",
                         "peer_id": a_id,
                         # B is the SERVING leg: its read_loop dispatches the call A forwards.
-                        # Sealed-by-default ⇒ open it explicitly so inbound dispatch is permitted,
-                        # and PIN the one peer whose agents it serves.
+                        # Sealed-by-default ⇒ open it explicitly so inbound dispatch is permitted.
                         "ingress_rule": "allow_all_ingress",
-                        "peer_guid": "guid-a",
                     },
                 }
             ]
@@ -145,6 +140,9 @@ async def _wire_memory_pair(ka, kb_kern):
     b_id = rec_b["id"]
     # Patch a_id's record with the real peer_id now that we know it.
     ka.update(a_id, peer_id=b_id)
+    # An inbound call is the serving LEG's own send: each root accepts its leg.
+    _accept(ka, ka.id, a_id)
+    _accept(kb_kern, kb_kern.id, b_id)
 
     mt_a, mt_b = MemoryTransport.pair()
     _engine._test_transport_inject[a_id] = mt_a
@@ -308,6 +306,7 @@ async def test_inbound_call_to_unknown_target_replies_error(two_kernels):
                         "type": "create_agent",
                         "parent_id": "kernel_state",
                         "handler_module": "ws_bridge.tools",
+                        "can_call": {"$children": "*", "kernel_state": "*"},
                         "transport": "memory",
                         "peer_id": "test_peer",
                     },
@@ -324,7 +323,6 @@ async def test_inbound_call_to_unknown_target_replies_error(two_kernels):
     frame = {
         "type": "call",
         "id": "test_corr",
-        "caller": "test-peer-g|probe",
         "target": "no_such_agent_xyz",
         "payload": {"type": "reflect"},
     }
@@ -343,11 +341,10 @@ async def _boot_solo_bridge(kernel, *, auth=None):
         "type": "create_agent",
         "parent_id": kernel.id,
         "handler_module": "ws_bridge.tools",
+        "can_call": {"$children": "*", "kernel_state": "*"},
         "transport": "memory",
         "peer_id": "test_peer",
-        "peer_guid": "test-peer-g",
     }
-    _accept(kernel, kernel.id, "test-peer-g|*")
     if auth is not None:
         # `auth` used to be a shorthand for both legs. It is gone — say which leg.
         # Rule names are MANIFOLD-SCOPED, so the same policy is a different name on
@@ -368,6 +365,7 @@ async def _boot_solo_bridge(kernel, *, auth=None):
         "result"
     ]
     a_id = rec["id"]
+    _accept(kernel, kernel.id, a_id)  # the inbound call is the leg's own send
     mt_a, mt_test = MemoryTransport.pair()
     _engine._test_transport_inject[a_id] = mt_a
     r = (await kernel.send([{"target": a_id, "payload": {"type": "boot"}}]))[0][
@@ -388,7 +386,6 @@ async def test_deny_inbound_refuses_inbound_call(two_kernels):
         {
             "type": "call",
             "id": "c1",
-            "caller": "test-peer-g|probe",
             "target": "kernel_state",
             "payload": {"type": "reflect"},
         }
@@ -408,7 +405,6 @@ async def test_deny_inbound_default_refuses_inbound_call(two_kernels):
         {
             "type": "call",
             "id": "c1",
-            "caller": "test-peer-g|probe",
             "target": "kernel_state",
             "payload": {"type": "reflect"},
         }
@@ -432,7 +428,6 @@ async def test_password_dispatches_inbound_call_with_valid_token(
         {
             "type": "call",
             "id": "c1",
-            "caller": "test-peer-g|probe",
             "target": "kernel_state",
             "payload": {"type": "reflect"},
             "auth_token": "s3cret",  # rides the frame envelope, not the payload
@@ -453,7 +448,6 @@ async def test_password_refuses_inbound_call_with_wrong_token(two_kernels, monke
         {
             "type": "call",
             "id": "c1",
-            "caller": "test-peer-g|probe",
             "target": "kernel_state",
             "payload": {"type": "reflect"},
             "auth_token": "WRONG",
@@ -537,6 +531,7 @@ async def test_inbound_error_frame_fails_forward_promptly(two_kernels):
                         "type": "create_agent",
                         "parent_id": "kernel_state",
                         "handler_module": "ws_bridge.tools",
+                        "can_call": {"$children": "*", "kernel_state": "*"},
                         "transport": "memory",
                         "peer_id": "stand_in",
                     },
@@ -617,6 +612,7 @@ async def test_watch_remote_sends_watch_frame(two_kernels):
                         "type": "create_agent",
                         "parent_id": "kernel_state",
                         "handler_module": "ws_bridge.tools",
+                        "can_call": {"$children": "*", "kernel_state": "*"},
                         "transport": "memory",
                         "peer_id": "stand_in",
                     },
@@ -662,6 +658,7 @@ async def test_event_frame_re_emits_on_bridge_inbox_only_when_subscribed(two_ker
                         "type": "create_agent",
                         "parent_id": "kernel_state",
                         "handler_module": "ws_bridge.tools",
+                        "can_call": {"$children": "*", "kernel_state": "*"},
                         "transport": "memory",
                         "peer_id": "stand_in",
                     },
@@ -760,11 +757,11 @@ async def test_forward_read_stream_cursor_round_trips(two_kernels):
             ]
         )
     )[0]["result"]
-    # Two-sided deny-all: `fb` must ACCEPT the FOREIGN caller the bridge relays —
-    # judged by its qualified `<guid>|<agent>`, never by the leg.
+    # Two-sided deny-all: `fb` must ACCEPT the serving leg — the inbound call is
+    # the leg's own send.
     fb_agent = kb_kern.ctx.agents.get(fb)
     cb = dict(fb_agent._meta.get("callable_by") or {})
-    cb["guid-a|*"] = "*"
+    cb[b_id] = "*"
     (
         await kb_kern.send(
             [
@@ -842,6 +839,7 @@ async def test_unwatch_remote_sends_unwatch_frame(two_kernels):
                         "type": "create_agent",
                         "parent_id": "kernel_state",
                         "handler_module": "ws_bridge.tools",
+                        "can_call": {"$children": "*", "kernel_state": "*"},
                         "transport": "memory",
                         "peer_id": "stand_in",
                     },

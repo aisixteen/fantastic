@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from kernel import sender_context
+from _testkit import as_agent
 
 ROOT = ".fantastic/web"
 
@@ -25,7 +25,6 @@ async def _setup(k):
             "handler_module": "file_bridge.tools",
             "allow": ["."],
             "parent_id": k.id,
-            # the loader's record verbs are privileged: the owning leg names them
             "can_call": {
                 "web_loader": ["persist_record", "forget_record", "load_tree"]
             },
@@ -43,7 +42,7 @@ async def _setup(k):
             "parent_id": "wws",
             "root": ROOT,
             "watch": False,
-            "callable_by": {"rest_leg": "*"},
+            "callable_by": {"rest_leg": "*", "wws": "*"},
         },
     ):
         out = await _call(k, k.id, {"type": "create_agent", **rec})
@@ -51,7 +50,7 @@ async def _setup(k):
 
 
 async def _persist(k, who, rid, parent):
-    with sender_context(who):
+    with as_agent(k, who):
         return await _call(
             k,
             "web_loader",
@@ -82,7 +81,7 @@ async def test_a_sibling_may_not_touch_the_nested_records(seeded_kernel):
     await _persist(k, "wws", "terminal_view", "canvas")
     r = await _persist(k, "rest_leg", "sneak", "terminal_view")
     assert r.get("reason") == "unauthorized", r
-    with sender_context("rest_leg"):
+    with as_agent(seeded_kernel, "rest_leg"):
         r = await _call(
             k,
             "web_loader",
@@ -112,7 +111,7 @@ async def test_forget_record_removes_a_nested_record_where_it_is(seeded_kernel):
     await _persist(k, "wws", "canvas", "web_loader")
     await _persist(k, "wws", "terminal_view", "canvas")
     await _persist(k, "wws", "deep", "terminal_view")
-    with sender_context("wws"):
+    with as_agent(seeded_kernel, "wws"):
         r = await _call(k, "web_loader", {"type": "forget_record", "id": "deep"})
     assert r == {"ok": True}, r
     assert not Path(ROOT, "agents/canvas/agents/terminal_view/agents/deep").exists()

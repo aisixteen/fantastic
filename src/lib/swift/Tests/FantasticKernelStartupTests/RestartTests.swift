@@ -49,7 +49,6 @@ struct RestartTests {
             let mem = await send(k, "kernel_state", .object([
                 "type": .string("create_agent"), "parent_id": .string("kernel_state"),
                 "handler_module": .string("ram_store.tools"), "id": .string("memory"),
-                "operator": .bool(true), "admins": .array([.string("kernel")]),
             ])).result
             #expect(mem["error"].isNull, "\(mem.serialize())")
             let ex = await send(k, "kernel_state", .object([

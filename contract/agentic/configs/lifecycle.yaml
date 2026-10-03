@@ -32,9 +32,10 @@ loaders:
 
         # The agent-origin caller. `ps`/`cancel` are KERNEL verbs — they read and
         # act on the kernel-wide task table, so the ROOT answers them and the task
-        # names its own agent in the pid. They are still not exempt from the gate,
-        # but the edge that grants them is `warden -> kernel_state`, and it covers
-        # EVERY task at once. Until 2026-08-24 they were answered by every agent
+        # names its own agent in the pid. They are not exempt from the gate: the
+        # edge that grants them is `warden -> kernel_state` (both halves — the
+        # root's `callable_by` is granted by the spec, the root being no roster
+        # agent), and it covers EVERY task at once. Until 2026-08-24 they were answered by every agent
         # and this manifest could grant "warden may watch and kill SLOWBOT" as a
         # per-victim edge; that granularity is gone, knowingly.
         - id: warden

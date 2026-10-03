@@ -36,6 +36,9 @@ private func webKernel(ingress: String = "allow_all_ingress") async throws -> Ke
             ]))
     ])[0].result
     #expect(out["id"].asString == "leg", "\(out.serialize())")
+    wire(k, "web", "leg")
+    // the connect-time auto-watch on the web agent: an explicit edge
+    wire(k, "leg", "web", ["watch"])
     _ = await k.send([
         Item(AgentId("web"), .object(["type": .string("mount"), "child_id": .string("leg")]))
     ])[0].result
@@ -46,7 +49,7 @@ private func stop(_ k: Kernel) async {
     _ = await k.send([Item(AgentId("web"), .object(["type": .string("stop")]))])[0].result
 }
 
-/// A socket on the WEB agent — the leg's own parent, which its baseline lets it
+/// A socket on the WEB agent — the leg's own parent, which it is granted to
 /// watch, so the connect-time auto-watch adds no error frame to the stream.
 private func socket(_ k: Kernel) -> URLSessionWebSocketTask {
     let task = URLSession(configuration: .ephemeral)
@@ -124,7 +127,7 @@ struct PeerCallsTests {
         let (call, _) = try await next(ws, "call")
         #expect(call["target"].asString == "canvas", "\(call.serialize())")
         #expect(call["payload"] == payload, "\(call.serialize())")
-        #expect(call["caller"].asString == "\(HOST)|kernel", "\(call.serialize())")
+        #expect(call.asObject?["caller"] == nil, "\(call.serialize())")
         try await push(
             ws,
             .object([
@@ -214,7 +217,7 @@ struct PeerCallsTests {
         let (c2, _) = try await next(ws2, "call")
         for c in [c1, c2] {
             #expect(c["target"].asString == "canvas", "\(c.serialize())")
-            #expect(c["caller"].asString == "\(HOST)|kernel", "\(c.serialize())")
+            #expect(c.asObject?["caller"] == nil, "\(c.serialize())")
         }
         try await push(
             ws2,
@@ -304,7 +307,7 @@ struct PeerCallsTests {
         ws.cancel(with: .normalClosure, reason: nil)
         try await until("peer dropped") { k.peerRoutes(PAGE).isEmpty }
         let (out, _) = await route.call(
-            "canvas", around(), caller: "\(HOST)|kernel", secret: [], body: nil)
+            "canvas", around(), body: nil)
         #expect(out["reason"].asString == "transport_error", "\(out.serialize())")
         await stop(k)
     }
@@ -356,6 +359,7 @@ struct PeerCallsTests {
                 ]))
         ])[0].result
         #expect(made["id"].asString == "rest", "\(made.serialize())")
+        wire(k, "web", "rest")
         _ = await k.send([
             Item(AgentId("web"), .object(["type": .string("mount"), "child_id": .string("rest")]))
         ])[0].result
@@ -390,7 +394,7 @@ struct PeerCallsTests {
                     "type": .string("take"), "a": .object(["b": .string("kept")]), "a.b": .null,
                 ]),
             "\(call.serialize())")
-        #expect(call["caller"].asString == "\(HOST)|rest", "\(call.serialize())")
+        #expect(call.asObject?["caller"] == nil, "\(call.serialize())")
         #expect(body == raw)
         let head: JSON = .object([
             "type": .string("reply"), "id": call["id"],

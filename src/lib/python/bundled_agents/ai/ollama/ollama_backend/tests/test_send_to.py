@@ -88,7 +88,7 @@ async def _make_ollama(kernel, grants=None):
 
 async def _accept(kernel, target: str, caller: str, verbs="*") -> None:
     """Open the callee's ingress so a granted egress actually lands — merges,
-    keeping the callee's structural baseline `callable_by`."""
+    keeping the rest of the callee's `callable_by`."""
     tgt = kernel.ctx.agents.get(target)
     cb = dict(tgt._meta.get("callable_by") or {}) if tgt is not None else {}
     cb[caller] = verbs

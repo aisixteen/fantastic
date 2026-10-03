@@ -26,37 +26,21 @@ declared host beside its fields — the file entry and the keychain item are
 declaration names, or that carries none: a store elsewhere declaring the same id
 and ref with another host reads nothing. The `env` backend keeps no value at rest.
 
-A REF IS DECLARED ONLY BY `update_agent` on the store's own record — the kernel's
-privileged verb, granted explicitly, is the one path:
-`refs: {<ref>: {host, readers: [...], writers: [...], fields?/env?}}` (it replaces
-the whole map; `host` is required — the binding). The DECLARATION is the
-operator's and only `update_agent` writes or removes it (audit AV-4/AV-5,
-2026-10-03): `set` stores the value of a DECLARED ref, never creates one and takes
-no `host` (an undeclared ref answers "no such ref", to the operator too; a `host`
-on the call is refused); `forget` drops the value and keeps the declaration.
-`set`/`forget` need the caller in `writers`, `get` in `readers`; an entry is a
-local agent id, `$subtree:<id>` (that agent and every live descendant), or a
-qualified `<guid>|<agent>` caller on another kernel. The operator passes every
-reader and writer check. A caller with no grant on a ref is answered "no such
-ref" — never told the ref exists. `fields` on a ref are the stored value's NAMES:
-`set` writes them, `forget` drops them.
+A REF IS DECLARED ONLY BY `update_agent` on the store's own record (the operator,
+or the store's parent): `refs: {<ref>: {host, fields?/env?}}` (it replaces the
+whole map; `host` is required — the binding). Only `update_agent` writes or
+removes a declaration (audit AV-4/AV-5, 2026-10-03): `set` stores the value of a
+DECLARED ref, never creates one and takes no `host` (an undeclared ref answers "no
+such ref"; a `host` on the call is refused); `forget` drops the value and keeps the
+declaration. `fields` on a ref are the stored value's NAMES: `set` writes them,
+`forget` drops them.
 
-NO VALUE IS EVER RECORDED. `set` must be called with `secret: ['payload.fields']`
-and `get` with `secret: ['result']` (`kernel/_secret.py`): the call is refused
-otherwise, because the value would land in the ledger, the memory store and the
-state stream. Either spelling of a mark counts (`['payload', 'fields']` is
-`payload.fields`), as does marking every field one by one; a field name holding a
-dot is marked only as an array (`['result', 'fields', 'a.b']`). The record holds
-only metadata — the host and the field NAMES.
+THE RECORD holds only metadata — the host and the field NAMES. The CALL carries
+the value: a `set` payload and a `get` reply are recorded like any call's (the
+ledger, the memory store, the state stream), in clear (owner, 2026-10-04).
 
-The kernel's call gate still decides who may reach this agent at all.
-
-A SECRET HOLDER, NEVER A MODEL'S TOOL (owner, 2026-10-02): the store stamps
-`holds_secrets: true` on its own record at boot, and `validate_meta` refuses any
-other value. ai_core refuses every model-parsed call that names an agent so
-marked, so an AI agent's backend reads its key here while its model cannot. The
-kernel judges first — its shape check refuses anything but `true`/`null` on every
-agent, so this text answers `null`; its gate lets only the operator lower a mark.
+WHO MAY CALL is the kernel's call gate alone: any caller it admits may
+`set`/`get`/`forget` a declared ref — there are no per-ref access lists.
 """
 
 from __future__ import annotations
@@ -68,11 +52,9 @@ from urllib.parse import urlsplit
 
 from file_bridge import fs
 from kernel_state import yaml_io
-from kernel import current_origin, current_remote_caller, current_secret
 from kernel._refusal import (
     BAD_ARG,
     NOT_FOUND,
-    UNAUTHORIZED,
     UNHANDLED,
     missing,
     refusal,
@@ -80,40 +62,8 @@ from kernel._refusal import (
 
 NAME = "credential_store"
 BACKENDS = ("file", "keychain", "env")
-#: The record field every store carries as `true` — read by ai_core, which refuses
-#: a model-parsed call to an agent so marked.
-HOLDS_SECRETS = "holds_secrets"
 DEFAULT_DIR = "~/.fantastic/credentials"
 KEYCHAIN_NAMESPACE = "fantastic"
-SUBTREE = "$subtree:"
-
-
-# ─── who is calling, and what they may do ──────────────────────────
-
-
-def _caller() -> str | None:
-    """The calling agent's id — qualified `<guid>|<agent>` when it is on another
-    kernel — or None for the operator."""
-    return current_remote_caller() or current_origin()
-
-
-def _covers(agent, entries, caller: str | None) -> bool:
-    """Whether a readers/writers list names `caller`. The operator always passes."""
-    if caller is None:
-        return True
-    for e in entries or []:
-        if not isinstance(e, str):
-            continue
-        if e == caller:
-            return True
-        if e.startswith(SUBTREE) and "|" not in caller:
-            root = e[len(SUBTREE) :]
-            a = agent.ctx.agents.get(caller)
-            while a is not None:
-                if a.id == root:
-                    return True
-                a = a.parent
-    return False
 
 
 def _refs(agent) -> dict:
@@ -134,27 +84,6 @@ def _host(h) -> str | None:
     if "://" in h:
         h = urlsplit(h).netloc
     return h.lower() or None
-
-
-def _names(mark, steps: list[str]) -> bool:
-    """Whether one secret mark names exactly `steps` — a dotted string by its
-    dots, an array of steps step for step (`kernel/_secret`). A field name holding
-    a dot is named only by an array: `result.fields.a.b` is `a` → `b`, never the
-    field `a.b`, so it would not mask it."""
-    if isinstance(mark, str):
-        return mark.split(".") == steps
-    return isinstance(mark, list) and mark == steps
-
-
-def _marked(prefix: list[str], names) -> bool:
-    """Whether the caller marked `prefix` (or every `prefix` + `<name>`) secret, in
-    either spelling of a mark."""
-    marks = current_secret()
-
-    def has(steps: list[str]) -> bool:
-        return any(_names(m, steps) for m in marks)
-
-    return has(prefix) or (bool(names) and all(has([*prefix, n]) for n in names))
 
 
 # ─── where the values live ───────────────────────────────────────
@@ -316,8 +245,7 @@ async def _reflect(id, payload, agent):
     backend = agent.record.get("backend") or "file"
     out = {
         "id": id,
-        "sentence": "Credential store — secrets by ref, each bound to one host, read "
-        "only with a secret mark, behind per-ref read/write grants.",
+        "sentence": "Credential store — secrets by ref, each bound to one host.",
         "backend": backend,
         "refs": len(_refs(agent)),
         "verbs": {
@@ -330,14 +258,12 @@ async def _reflect(id, payload, agent):
 
 
 async def _boot(id, payload, agent):
-    """Stamps `holds_secrets: true` on this store's record (no model turn may reach it); values are read from the backend when asked for."""
-    if agent.record.get(HOLDS_SECRETS) is not True:
-        agent.ctx.update(id, **{HOLDS_SECRETS: True})
+    """No-op: values are read from the backend when asked for."""
     return None
 
 
 async def _set(id, payload, agent):
-    """args: ref:str, fields:{name: value} (req). Store or rotate the value of a DECLARED ref — its host is the declaration's (refs are declared by update_agent on this store's record; set never creates one and takes no host). Call it with secret: ['payload.fields']. Returns {ref, host, fields:[names], stored}."""
+    """args: ref:str, fields:{name: value} (req). Store or rotate the value of a DECLARED ref — its host is the declaration's (refs are declared by update_agent on this store's record; set never creates one and takes no host). Returns {ref, host, fields:[names], stored}."""
     ref, fields = payload.get("ref"), payload.get("fields")
     if not isinstance(ref, str) or not ref.strip():
         return missing(f"{NAME} set", "ref")
@@ -361,13 +287,6 @@ async def _set(id, payload, agent):
             f"{NAME} set: fields must be a non-empty map of field name to string value",
             arg="fields",
         )
-    if not _marked(["payload", "fields"], list(fields)):
-        return refusal(
-            BAD_ARG,
-            f"{NAME} set: mark the values secret — secret: ['payload.fields'] — or "
-            "they would be recorded in the ledger, the memory store and the state stream",
-            arg="secret",
-        )
     if (agent.record.get("backend") or "file") == "env":
         return refusal(
             BAD_ARG,
@@ -375,21 +294,10 @@ async def _set(id, payload, agent):
             "and name it in the ref's `env`",
             arg="backend",
         )
-    caller = _caller()
     refs = _refs(agent)
     entry = refs.get(ref)
     if entry is None:  # declared by update_agent alone — set never makes one
         return _no_such_ref(ref)
-    if not _covers(agent, entry.get("writers"), caller):
-        return (
-            refusal(
-                UNAUTHORIZED,
-                f"{NAME}: {caller} may read {ref!r} but not write it",
-                arg="ref",
-            )
-            if _covers(agent, entry.get("readers"), caller)
-            else _no_such_ref(ref)
-        )
     # the declared host is stored WITH the value (audit S3)
     _backend(agent).put(ref, _host(entry.get("host")), dict(fields))
     refs[ref] = {**entry, "fields": sorted(fields)}  # the value's NAMES, never a value
@@ -403,12 +311,12 @@ async def _set(id, payload, agent):
 
 
 async def _get(id, payload, agent):
-    """args: ref:str (req), host:str? (where you will send it — refused unless the ref is bound to it). The credential: {ref, host, fields:{name: value}}. Call it with secret: ['result']; send the value ONLY to `host`."""
+    """args: ref:str (req), host:str? (where you will send it — refused unless the ref is bound to it). The credential: {ref, host, fields:{name: value}}. Send the value ONLY to `host`."""
     ref = payload.get("ref")
     if not isinstance(ref, str) or not ref.strip():
         return missing(f"{NAME} get", "ref")
     entry = _refs(agent).get(ref)
-    if entry is None or not _covers(agent, entry.get("readers"), _caller()):
+    if entry is None:
         return _no_such_ref(ref)
     if payload.get("host") is not None:
         want = _host(payload.get("host"))
@@ -427,45 +335,24 @@ async def _get(id, payload, agent):
         return refusal(
             NOT_FOUND, f"{NAME}: ref {ref!r} has no value in the backend", arg="ref"
         )
-    # The marks are judged against the field names the backend RETURNED, never the
-    # declared ones: a declaration can name fewer than the backend holds (an `env`
-    # map wider than `fields`, a re-declared ref, a hand-edited file), and a
-    # returned field no mark covers would be recorded in plain (audit BV-6/S4).
-    if not (_marked(["result"], None) or _marked(["result", "fields"], list(fields))):
-        return refusal(
-            BAD_ARG,
-            f"{NAME} get: mark the answer secret — secret: ['result'] — or the value "
-            "would be recorded in the ledger, the memory store and the state stream",
-            arg="secret",
-        )
     return {"ref": ref, "host": _host(entry.get("host")), "fields": fields}
 
 
 async def _list(id, payload, agent):
-    """No args. The refs YOU may read or write — metadata only: {refs:[{ref, host, fields:[names], read, write}]}. Never a value."""
-    caller = _caller()
-    out = []
-    for ref, entry in sorted(_refs(agent).items()):
-        r = _covers(agent, entry.get("readers"), caller)
-        w = _covers(agent, entry.get("writers"), caller)
-        if not (r or w):
-            continue
-        row = {
+    """No args. The declared refs — metadata only: {refs:[{ref, host, fields:[names]}]}. Never a value."""
+    out = [
+        {
             "ref": ref,
             "host": _host(entry.get("host")),
             "fields": entry.get("fields") or sorted((entry.get("env") or {})),
-            "read": r,
-            "write": w,
         }
-        if caller is None:
-            row["readers"] = entry.get("readers") or []
-            row["writers"] = entry.get("writers") or []
-        out.append(row)
+        for ref, entry in sorted(_refs(agent).items())
+    ]
     return {"refs": out}
 
 
 async def _forget(id, payload, agent):
-    """args: ref:str (req). Drop a ref's VALUE from the backend; its declaration (host, readers, writers) stays — update_agent alone undeclares a ref. Writers and the operator only. Returns {forgotten, ref}."""
+    """args: ref:str (req). Drop a ref's VALUE from the backend; its declaration (host) stays — update_agent alone undeclares a ref. Returns {forgotten, ref}."""
     ref = payload.get("ref")
     if not isinstance(ref, str) or not ref.strip():
         return missing(f"{NAME} forget", "ref")
@@ -478,7 +365,7 @@ async def _forget(id, payload, agent):
         )
     refs = _refs(agent)
     entry = refs.get(ref)
-    if entry is None or not _covers(agent, entry.get("writers"), _caller()):
+    if entry is None:
         return _no_such_ref(ref)
     _backend(agent).drop(ref)
     if "fields" in entry:  # the value's names go with the value (audit AV-5)
@@ -499,8 +386,6 @@ VERBS = {
 
 def validate_meta(meta: dict, record: dict) -> str | None:
     """The record's own fields, refused at the write when malformed."""
-    if HOLDS_SECRETS in meta and meta[HOLDS_SECRETS] is not True:
-        return "holds_secrets must be true — a credential_store always holds secrets"
     b = meta.get("backend")
     if b is not None and b not in BACKENDS:
         return f"backend={b!r} is not one of {', '.join(BACKENDS)}"
@@ -516,18 +401,17 @@ def validate_meta(meta: dict, record: dict) -> str | None:
     refs = meta.get("refs")
     if refs is not None:
         if not isinstance(refs, dict):
-            return "refs must be a map of ref to {readers, writers, host, fields, env}"
+            return "refs must be a map of ref to {host, fields, env}"
         for ref, e in refs.items():
             if not isinstance(ref, str) or not ref.strip():
                 return "a ref must be a non-empty string"
             if not isinstance(e, dict):
                 return f"refs[{ref!r}] must be a map"
-            for k in ("readers", "writers", "fields"):
-                v = e.get(k)
-                if v is not None and not (
-                    isinstance(v, list) and all(isinstance(x, str) and x for x in v)
-                ):
-                    return f"refs[{ref!r}].{k} must be a list of strings"
+            v = e.get("fields")
+            if v is not None and not (
+                isinstance(v, list) and all(isinstance(x, str) and x for x in v)
+            ):
+                return f"refs[{ref!r}].fields must be a list of strings"
             if e.get("host") is None:
                 return (
                     f"refs[{ref!r}].host is required — the one host this ref's value "

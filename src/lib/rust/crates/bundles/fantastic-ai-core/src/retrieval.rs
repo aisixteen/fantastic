@@ -62,9 +62,8 @@ fn bad_arg(msg: &str, arg: &str) -> Value {
 }
 
 /// `grep`: find the LINE that mentions something ANYWHERE in memory — every row
-/// this agent ever wrote or received (behind every clear, inside every fold), the
-/// rows other agents SHARED with it, and the reply bodies still held in memory
-/// this run. Python `_grep`.
+/// this agent ever wrote or received (behind every clear, inside every fold), and
+/// the reply bodies still held in memory this run. Python `_grep`.
 ///
 /// args: `query` (req — case-insensitive substring), `ids?` (row ids / pids / fold
 /// ids to search; a fold id searches its members), `limit?`, `width?` (chars of
@@ -206,47 +205,6 @@ pub async fn grep(
             &mut matches,
             &mut total,
         );
-    }
-    // ROWS SHARED WITH YOU — every fork row's grant, searched under that grant.
-    if ids.is_none() {
-        for r in head(agent_id, kernel).await? {
-            if r.get("kind").and_then(Value::as_str) != Some("fork") {
-                continue;
-            }
-            let Some(grant) = r.get("grant").filter(|g| !g.is_null()) else {
-                continue;
-            };
-            let res = store_call(
-                agent_id,
-                kernel,
-                json!({"type": "search", "query": q, "grant": grant, "limit": 1000, "width": width}),
-            )
-            .await?;
-            let owner = r.get("owner").map_or_else(|| "None".to_string(), py_str);
-            for m in res
-                .get("matches")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default()
-            {
-                let text = m
-                    .get("text")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
-                let rid = format!(
-                    "{owner}:{}",
-                    m.get("id").map_or_else(|| "None".to_string(), py_str)
-                );
-                take(
-                    json!(rid),
-                    m.get("line").cloned().unwrap_or(json!(0)),
-                    &text,
-                    &mut matches,
-                    &mut total,
-                );
-            }
-        }
     }
     let (kept, cut) = fit_reply(
         &matches,

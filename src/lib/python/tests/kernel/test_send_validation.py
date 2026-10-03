@@ -7,7 +7,7 @@ refusal; a non-string `type` raised out of `send` (HTTP 500 on web_rest)."""
 
 from __future__ import annotations
 
-from kernel import sender_context
+from _testkit import as_agent
 
 
 async def _mk(kernel, agent_id, **meta):
@@ -43,7 +43,7 @@ async def test_bad_retries_on_unnamed_item_runs_nothing(seeded_kernel):
 async def test_missing_type_is_missing_arg_before_the_gate(seeded_kernel):
     a = await _mk(seeded_kernel, "sv_a")
     b = await _mk(seeded_kernel, "sv_b")  # no edge a→b: the gate WOULD refuse
-    with sender_context(a):
+    with as_agent(seeded_kernel, a):
         out = (await seeded_kernel.send([{"target": b, "payload": {}}]))[0]
     r = out["result"]
     assert out["status"] == "failed" and out["pid"] is None

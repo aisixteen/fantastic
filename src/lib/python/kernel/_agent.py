@@ -39,6 +39,7 @@ and call `agent.send`, `agent.emit`, `agent.get`, `agent.update`,
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib
 import os
 import secrets
@@ -49,7 +50,6 @@ from typing import Any, Callable
 
 from dataclasses import dataclass
 
-from kernel import _secret
 from kernel._refusal import (
     BAD_ARG,
     DRAINING,
@@ -71,14 +71,10 @@ from kernel._state import RESERVED_RECORD_KEYS
 from kernel._authz import (
     DEFAULT_CALLABLE_BY,
     DEFAULT_CAN_CALL,
-    PRIVILEGED_VERBS,
-    RECORD_OPERAND_VERBS,
-    SUBTREE_PREFIX,
+    LEGAL_GRANT_KEYS,
     _FROM_ABOVE,
     authorize_call,
-    authorize_heritable,
-    is_heritable,
-    names_operand,
+    bad_grant_key,
 )
 from kernel._kernel import (
     BUNDLE_ENTRY_GROUP,
@@ -91,15 +87,10 @@ from kernel._kernel import (
     Kernel,
     TIMED_OUT,
     _current_origin,
-    _current_secret,
-    _current_remote,
     _current_sender,
     _current_task,
-    _remote_caller,
     _summarize_payload,
-    operator_context,
     outcome,
-    sender_context,
     stored_outcome,
     page,
 )
@@ -138,6 +129,11 @@ _SYSTEM_VERBS = frozenset(
     }
 )
 
+# The TREE MUTATORS: after the two-sided gate on the root, the operand must be a
+# DIRECT CHILD of the sender (`create_agent`'s `parent_id` is the sender;
+# `update_agent`/`delete_agent`'s `id` names an agent whose parent is the sender).
+_MUTATORS = frozenset({"create_agent", "update_agent", "delete_agent"})
+
 # One line per system verb — the honest reflect surface. Bundle verbs are
 # derived from their VERBS docstrings; these are the substrate's own, so they
 # appear in no bundle's map and are advertised here (root reflect).
@@ -166,20 +162,21 @@ _SYSTEM_VERB_DOCS = {
     # finishing with `agents_created: []`.
     "create_agent": (
         "args: handler_module:str, parent_id:str REQUIRED, id:str?, **meta. "
-        "Creates a CHILD OF `parent_id` — your own id grows your own subtree "
-        "(no grant needed); 'kernel_state' for top-level. No default parent."
+        "Creates a CHILD OF `parent_id` — an agent names its own id (it creates "
+        "only its own children); 'kernel_state' for top-level. No default parent."
     ),
     "update_agent": (
         "args: id:str, **meta. EVERY FIELD YOU NAME IS REPLACED, NOT MERGED "
         "(a field you do not name is untouched), so a dict field must be sent "
         "WHOLE — `can_call`/`callable_by` included: restate every key you want "
-        "to keep, the baseline `$self`/`$parent`/`$children` among them, or the "
-        "keys you omit are GONE. Granting one edge reads like a PATCH and "
-        "behaves like a PUT."
+        "to keep, the baseline `$self` among them, or the keys you omit are GONE. "
+        "Granting one edge reads like a PATCH and behaves like a PUT. An agent "
+        "updates only its own children."
     ),
     "delete_agent": (
         "args: id:str. CASCADES — deletes that agent AND ITS WHOLE SUBTREE, "
-        "deepest first; refuses if any descendant carries `delete_lock`."
+        "deepest first; refuses if any descendant carries `delete_lock`. An "
+        "agent deletes only its own children."
     ),
     "list_agents": "No args. Every agent's record, flat. Paged.",
     "ps": (
@@ -228,23 +225,6 @@ _SYSTEM_VERB_DOCS = {
         "shut down, exit. Under env:'container', the container."
     ),
 }
-
-# THE SECRET-HOLDER MARK (owner 2026-10-02). `holds_secrets: true` on a record makes
-# that agent unreachable from a model turn (ai_core refuses the call). The kernel
-# owns two rules about the field itself, at the write:
-#   - its SHAPE (`_bad_holder_mark`): exactly `true`, or `null` — anything else is
-#     `invalid_meta`, on every agent, at create_agent and update_agent alike;
-#   - who LOWERS it (`_check_holder_mark`, in the gate): on an agent whose record
-#     says `true`, only the operator may write anything else.
-# `null` IS THE CLEAR. update_agent REPLACES a named field, so `holds_secrets: null`
-# leaves a record whose value is `null` — not a holder, since only exactly `true`
-# marks one — the same way `delete_lock: null` lifts a lock.
-HOLDS_SECRETS = "holds_secrets"
-HOLDER_MARK_SIDE = "secret-holder"
-HOLDER_MARK_HINT = (
-    "only the operator clears it (update_agent holds_secrets=null); an agent may "
-    "mark a holder, never unmark one"
-)
 
 
 def _json_safe(o):
@@ -299,46 +279,6 @@ class _Dispatched:
     flags_done: bool = False
     # The caller's NAME for this execution (its item `id`), echoed on the outcome.
     name: str | None = None
-    # The payload AS SHOWN when the item marked `secret` paths (`kernel/_secret`):
-    # what the fanout publishes on every attempt; the handler gets `payload`.
-    shown: dict | None = None
-    # The item's `secret` marks as given, readable by the handler as
-    # `current_secret()`.
-    secret_paths: tuple = ()
-    # A JOINER that is not the execution's original caller, of an execution
-    # whose item marked `secret`: its outcome is handed over AS SHOWN, masked
-    # with these marks (`_secret.shown_outcome`) — never the real values.
-    shown_to_joiner: "_secret.Secret | None" = None
-
-
-def _caller_identity() -> str | None:
-    """WHO a call is, for the one rule that compares two calls' callers (a join of
-    a secret-marked execution): the sending agent's id; the qualified
-    `<guid>|<agent>` when a bridge leg relays a foreign caller (`_remote_caller`
-    names the leg that is sending); None for the operator."""
-    sender = _current_sender.get()
-    rc = _remote_caller.get()
-    if sender is not None and rc is not None and rc[0] == sender:
-        return rc[1]
-    return sender
-
-
-# The kernel verbs whose answer is scoped to the caller that sends them (`ledger`,
-# `ack_deadletter`: the executions THAT caller originated). A join of one by any
-# other caller is refused (`_foreign_scoped_join`); a new caller-scoped verb joins
-# this set.
-_CALLER_SCOPED_VERBS = frozenset({"ledger", "ack_deadletter"})
-
-
-def _foreign_scoped_join(exec_id, verb: str) -> dict:
-    """The answer to joining another caller's execution of a caller-scoped verb."""
-    return refusal(
-        BAD_ARG,
-        f"send: id {exec_id!r} names another caller's {verb} execution — {verb} "
-        "answers only the caller that sent it, so it cannot be joined; make your "
-        f"own {verb} call under a new id",
-        arg="id",
-    )
 
 
 class RemoteTarget:
@@ -346,10 +286,8 @@ class RemoteTarget:
     2026-09-30): addressed `<guid>|<agent id>`, never registered in this tree.
     The send pipeline treats it like any target — a ledger row, a task-table
     row, a settled outcome — except that its dispatch hands the call to the
-    peer's routes instead of a handler here, carrying the caller as
-    `<this guid>|<sender>` so the peer's gate can judge it, and the item's
-    `secret` marks so the peer masks its records as this kernel does. The
-    transport a route rides only carries frames.
+    peer's routes instead of a handler here. The transport a route rides only
+    carries frames; the peer judges the call as the leg that serves it there.
 
     `routes` are the guid's live routes when the send resolved it — every tab of
     one identity (owner, 2026-10-03): the call goes to ALL of them and settles
@@ -368,31 +306,10 @@ class RemoteTarget:
         self._meta: dict = {"callable_by": {}}
         self.handler_module = None
 
-    async def _dispatch_task(
-        self,
-        task_id,
-        payload: dict,
-        origin: str | None = None,
-        shown=None,
-        secret_paths: tuple = (),
-    ):
+    async def _dispatch_task(self, task_id, payload: dict, origin: str | None = None):
         _current_task.set(task_id)
-        own = self._via._root()._meta.get("guid")
-        if not own:
-            # The peer judges the caller by `<guid>|<agent>`; with no guid of our
-            # own there is nothing honest to put on the frame.
-            return refusal(
-                UNHANDLED,
-                f"send: this kernel has no guid yet (its root has not booted), so a "
-                f"call to {self.id} cannot say who is calling",
-            )
-        # The item's `secret` marks ride along: this kernel already records the
-        # call as shown, and the peer must too — its call/settle rows, ledger and
-        # state stream are records of the SAME call.
-        caller = f"{own}|{origin if origin else 'kernel'}"
         calls = [
-            asyncio.ensure_future(r.call(self.agent_id, payload, caller, secret_paths))
-            for r in self.routes
+            asyncio.ensure_future(r.call(self.agent_id, payload)) for r in self.routes
         ]
         try:
             done, _ = await asyncio.wait(calls, return_when=asyncio.FIRST_COMPLETED)
@@ -853,13 +770,6 @@ class Agent:
         bad_retries = self._check_retries(item)
         if bad_retries is not None:
             return bad_retries
-        # SECRET paths (`kernel/_secret`): validated with the item's other own
-        # fields; `shown` is what every record and mirror of this call carries.
-        secret, bad_secret = _secret.check(item, payload)
-        if bad_secret is not None:
-            return outcome(None, FAILED, bad_secret)
-        shown = _secret.shown_payload(payload, secret) if secret is not None else None
-        secret_paths = tuple(secret.paths) if secret is not None else ()
         # A DYING TASK REGISTERS NO NEW WORK. `cancel_task` marks the whole
         # subtree before it aborts anything, because `on_cancel` hooks await —
         # so a doomed handler gets scheduling passes on its way out, and what it
@@ -898,11 +808,11 @@ class Agent:
         if target is None:
             return outcome(None, FAILED, self.ctx.unknown_agent(target_id))
         # ── CALL GATE — fully-gated, two-sided, from-above ──────────────
-        # Operator sends (`_current_sender` is None: CLI / cold bootstrap /
-        # loader-at-boot / test driver, or a verb running under
-        # `operator_context`) are the ORIGIN root of trust and pass ungated. Every
-        # AGENT-originated send — ANY verb, `reflect` included, nothing exempt —
-        # needs BOTH the sender's `can_call` (egress) AND the target's
+        # Operator sends (`_current_sender` is None: made outside every dispatch —
+        # the CLI, the cold bootstrap, a test driver, a transport handing an
+        # inbound frame to its leg) are the ORIGIN root of trust and pass ungated.
+        # Every AGENT-originated send — ANY verb, `reflect` included, nothing
+        # exempt — needs BOTH the sender's `can_call` (egress) AND the target's
         # `callable_by` (ingress) to grant the edge.
         sender_id = _current_sender.get()
         if sender_id is not None:
@@ -942,7 +852,7 @@ class Agent:
                 #
                 # Measured 2026-08-28: `agent_b`, granted only `safe_verb` on a
                 # target, reused an id `agent_a` had used for
-                # `create_privileged` and received agent_a's secret verbatim.
+                # a sensitive verb and received agent_a's result verbatim.
                 # Its own gate check passed — on `safe_verb`, a verb whose reply
                 # it never got. Same class as the read side-channel #36 closed
                 # by origin-scoping the `ledger` VERB; this is the same leak
@@ -958,43 +868,6 @@ class Agent:
                     )
                     if denial is not None:
                         return outcome(None, FAILED, denial)
-                # A CALLER-SCOPED VERB'S ANSWER IS ITS CALLER'S VIEW, NOT A FACT
-                # (owner-approved 2026-10-03, audit KV-1). `ledger` and
-                # `ack_deadletter` answer from WHO sends them — the executions
-                # that caller originated (`_current_origin`, recorded here as the
-                # entry's `caller`); a join never re-runs the handler, so the
-                # joiner would be handed the original caller's view. Measured:
-                # `B`, granted `ledger`, joined `A`'s named ledger read and got
-                # A's rows (and the operator's unscoped read by its int pid:
-                # every caller's). So a join by any caller other than the one that
-                # sent it is REFUSED — the operator included, whose own read is
-                # unscoped anyway. Any NEW caller-scoped verb joins
-                # `_CALLER_SCOPED_VERBS`. Cross-caller joins of every OTHER verb
-                # stay open by design: one execution under one id is the
-                # once-only contract (a wire frame id IS the execution id), the
-                # gate above asks the joiner the original call's question, and a
-                # secret-marked outcome goes over as shown (below).
-                if orig_verb in _CALLER_SCOPED_VERBS and joiner != entry.get("caller"):
-                    return outcome(
-                        None, FAILED, _foreign_scoped_join(exec_id, orig_verb)
-                    )
-                # A SECRET-MARKED EXECUTION'S REAL OUTCOME IS ITS CALLER'S ALONE.
-                # The gate above judges the VERB; a handler whose answer depends
-                # on WHO asks (a credential_store's per-ref `readers`) and the
-                # caller's own `secret` marks never run for a joiner. Measured
-                # 2026-10-03 (audit F1): `eve`, granted `get` on a store but no
-                # reader of the ref, joined `alice`'s marked `get` by its pid and
-                # received the key. So a joiner that is not the identity which
-                # opened the execution (`_caller_identity`: the agent, the
-                # operator, or a relayed `<guid>|<agent>`) gets the outcome AS
-                # SHOWN — what the ledger reads back. Unmarked executions are
-                # unchanged.
-                mark = entry.get("secret")
-                hide = (
-                    mark
-                    if mark is not None and _caller_identity() != entry.get("origin")
-                    else None
-                )
                 dispatched.append(
                     _Dispatched(
                         index,
@@ -1006,7 +879,6 @@ class Agent:
                         exec_fut=entry["fut"],
                         joined=True,
                         name=entry.get("name"),
-                        shown_to_joiner=hide,
                     )
                 )
                 return None
@@ -1014,14 +886,7 @@ class Agent:
             # is a field on it.
             exec_id = self.ctx.mint_id()
             fut, bad = self._ledger_open(
-                exec_id,
-                target,
-                payload,
-                timeout,
-                item,
-                name=name,
-                secret=secret,
-                shown=shown,
+                exec_id, target, payload, timeout, item, name=name
             )
             if bad is not None:
                 return bad
@@ -1045,14 +910,10 @@ class Agent:
                         exec_fut=fut,
                         flags_done=True,
                         name=name,
-                        # its RETRY is a real dispatch: it fans out what is shown
-                        shown=shown,
                     )
                 )
                 return None
-            pid, task = self._spawn_dispatch(
-                target, payload, task_id=exec_id, shown=shown, secret_paths=secret_paths
-            )
+            pid, task = self._spawn_dispatch(target, payload, task_id=exec_id)
             dispatched.append(
                 _Dispatched(
                     index,
@@ -1063,8 +924,6 @@ class Agent:
                     payload,
                     exec_fut=fut,
                     name=name,
-                    shown=shown,
-                    secret_paths=secret_paths,
                 )
             )
             return None
@@ -1080,26 +939,12 @@ class Agent:
         # The row opens BEFORE the spawn: `retries` was validated up front, so
         # nothing here can refuse after work has started.
         pid = self.ctx.mint_id()
-        fut, bad = self._ledger_open(
-            pid, target, payload, timeout, item, name=None, secret=secret, shown=shown
-        )
+        fut, bad = self._ledger_open(pid, target, payload, timeout, item, name=None)
         if bad is not None:
             return bad
-        pid, task = self._spawn_dispatch(
-            target, payload, task_id=pid, shown=shown, secret_paths=secret_paths
-        )
+        pid, task = self._spawn_dispatch(target, payload, task_id=pid)
         dispatched.append(
-            _Dispatched(
-                index,
-                pid,
-                task,
-                timeout,
-                target,
-                payload,
-                exec_fut=fut,
-                shown=shown,
-                secret_paths=secret_paths,
-            )
+            _Dispatched(index, pid, task, timeout, target, payload, exec_fut=fut)
         )
         return None
 
@@ -1120,18 +965,7 @@ class Agent:
             )
         return None
 
-    def _ledger_open(
-        self,
-        exec_id: int,
-        target,
-        payload,
-        timeout,
-        item,
-        *,
-        name,
-        secret: "_secret.Secret | None" = None,
-        shown: dict | None = None,
-    ):
+    def _ledger_open(self, exec_id: int, target, payload, timeout, item, *, name):
         """Open one execution under a pre-minted id: the CALL ROW in the message
         store (what outlives the process) and the process side (`executions`).
         `retries` already validated. Returns (fut, refusal?)."""
@@ -1154,8 +988,7 @@ class Agent:
             "verb": payload.get("type"),
             "parent": _current_task.get(),
             "caller": caller,
-            # SHOWN, never the secret values — the row is what the store keeps.
-            "payload": shown if shown is not None else payload,
+            "payload": payload,
             "named": name is not None,
             "retries": retries,
             "attempts": 1,
@@ -1163,10 +996,6 @@ class Agent:
         }
         if name is not None:
             row["name"] = name
-        if secret is not None:
-            # the MARKS are not secret (as given — dotted strings and/or arrays of
-            # steps): they say this record cannot answer a replay
-            row["secret"] = secret.paths
         self.ctx.rows_put(target.id, row)
         # The side entry is the WHOLE engine: dedup and join key on it, retry
         # re-issues against it, dead-letter is reading it. `attempts` counts real
@@ -1176,30 +1005,19 @@ class Agent:
             {
                 "target": target.id,
                 "fut": fut,
-                "payload": shown if shown is not None else payload,
+                "payload": payload,
                 "timeout": timeout,
                 "retries": retries,
                 "attempts": 1,
                 "named": name is not None,
                 "name": name,
                 "caller": caller,
-                # RAM only: what `_stamp_call` masks the outcome with.
-                "secret": secret,
-                # RAM only: the identity a joiner must BE to receive the real
-                # outcome of a secret-marked execution (`_caller_identity`).
-                "origin": _caller_identity(),
             },
         )
         return fut, None
 
     def _spawn_dispatch(
-        self,
-        target: "Agent",
-        payload: dict,
-        *,
-        task_id: int,
-        shown: dict | None = None,
-        secret_paths: tuple = (),
+        self, target: "Agent", payload: dict, *, task_id: int
     ) -> tuple[int, "asyncio.Task"]:
         """Start ONE dispatch as a registered asyncio.Task — the unit of the task
         table — under the message id its call row was opened with. Tasks never
@@ -1210,7 +1028,7 @@ class Agent:
         # target's own id — this is the same value the gate just authorized.
         origin = _current_sender.get()
         task = asyncio.create_task(
-            target._dispatch_task(task_id, payload, origin, shown, secret_paths),
+            target._dispatch_task(task_id, payload, origin),
             name=f"fantastic:{task_id}",
         )
         ctx.register_task(
@@ -1247,13 +1065,7 @@ class Agent:
             # forget_task has already dropped the previous attempt's row, so the
             # SAME task id is free to register again — one id, one `cancel`
             # handle, attempt after attempt.
-            _pid, task = self._spawn_dispatch(
-                d.target,
-                d.payload,
-                task_id=d.pid,
-                shown=d.shown,
-                secret_paths=d.secret_paths,
-            )
+            _pid, task = self._spawn_dispatch(d.target, d.payload, task_id=d.pid)
             d.task = task
 
     async def _settle_once(self, d: "_Dispatched") -> dict:
@@ -1282,8 +1094,6 @@ class Agent:
                 if cur is not None and cur.cancelling() > 0:
                     raise  # we were killed; the execution is not ours to kill
                 return outcome(d.pid, CANCELLED, {"cancelled": True})
-            if d.shown_to_joiner is not None:
-                return _secret.shown_outcome(dict(recorded), d.shown_to_joiner)
             return dict(recorded)
         try:
             if d.timeout is not None:
@@ -1413,13 +1223,6 @@ class Agent:
             return
         row = self.ctx.rows.get(pid)
         exe = self.ctx.executions.get(pid)
-        # A call with `secret` paths is RECORDED as shown: its result fields and
-        # every secret value in its text → placeholder. The caller already holds
-        # the real outcome; the ledger reads back `shown_out`.
-        secret = (exe or {}).get("secret")
-        if secret is not None:
-            out = _secret.shown_outcome(out, secret)
-            exe["shown_out"] = out
         res = out.get("result")
         stamp = {"status": out.get("status")}
         if isinstance(res, dict) and res.get("error"):
@@ -1468,10 +1271,6 @@ class Agent:
         fn = getattr(mod, name, None)
         return fn if callable(fn) else None
 
-    def _loader_id(self) -> str | None:
-        """The id `$loader` resolves to in a grant — the persistence root."""
-        return self._root().id
-
     def _resolve_agent(self, agent_id: object) -> "Agent | None":
         """Resolve an id the way `send` does — the reserved `kernel` address or a literal id.
         None when it names no live agent."""
@@ -1480,145 +1279,6 @@ class Agent:
         if agent_id == "kernel":
             return self._root()
         return self.ctx.agents.get(agent_id)
-
-    def _in_subtree(self, other_id: str, x: str) -> bool:
-        """Is `other_id` X or a live descendant of X? The `$subtree:<X>` resolver,
-        asked at call time so an agent spawned after the grant is covered."""
-        node = self.ctx.agents.get(other_id)
-        while node is not None:
-            if node.id == x:
-                return True
-            node = node.parent
-        return False
-
-    def _heritable_egress(self, sender_id: str, verb: str, target_id: str) -> bool:
-        """May `sender_id` call `target_id` through a HERITABLE `can_call` entry one
-        of its ANCESTORS holds? Nearest ancestor first; the sender's own entries
-        never count (a heritable entry does not reach for its holder)."""
-        sender = self.ctx.agents.get(sender_id)
-        node = sender.parent if sender is not None else None
-        grants = []
-        while node is not None:
-            grants.append((self.ctx.get(node.id) or {}).get("can_call") or {})
-            node = node.parent
-        root = self._root()
-        return authorize_heritable(
-            grants, verb, target_id, root.id if root is not None else None
-        ).allowed
-
-    def _gate_placement(self, sender_id, s_can, s_parent, s_kids, root_id, parent):
-        """Two-sided gate on the PLACEMENT TARGET of `create_agent`. Returns a
-        refusal, or None when the sender may create under `parent`.
-
-        Placing inside your OWN subtree is baseline (no grant). Anywhere else
-        needs egress on the parent (explicitly named — `create_agent` is
-        privileged, so a wildcard never covers it) AND the parent's own
-        `callable_by` accepting the sender — judged as the qualified
-        `<guid>|<agent>` when a bridge leg relays a foreign caller.
-
-        A RELAYED caller owns no subtree here: the leg's subtree is the leg's,
-        not its peer's, so the baseline never applies on the leg's behalf
-        (audit 2026-10-03, G-1) — it takes the path any other placement takes."""
-        rc = _remote_caller.get()
-        in_sender = rc[1] if rc is not None and rc[0] == sender_id else sender_id
-        # a relayed caller owns no subtree here — no baseline walk
-        node = parent if in_sender == sender_id else None
-        while node is not None:
-            if node.id == sender_id:
-                return None  # your own subtree — baseline
-            node = node.parent
-        d = authorize_call(
-            s_can,
-            "create_agent",
-            parent.id,
-            enforce_privileged=True,
-            holder_id=sender_id,
-            holder_parent=s_parent,
-            holder_children=s_kids,
-            loader_id=root_id,
-        )
-        if not d.allowed and not self._heritable_egress(
-            sender_id, "create_agent", parent.id
-        ):
-            return refusal(
-                UNAUTHORIZED,
-                f"{sender_id} may not create under {parent.id}",
-                hint=_FROM_ABOVE,
-                side="egress",
-            )
-        di = authorize_call(
-            parent._meta.get("callable_by") or {},
-            "create_agent",
-            in_sender,
-            holder_id=parent.id,
-            holder_parent=parent.parent.id if parent.parent is not None else None,
-            holder_children=frozenset(parent._children),
-            loader_id=root_id,
-            enforce_privileged=False,
-            in_subtree=self._in_subtree,
-        )
-        if not di.allowed:
-            return refusal(
-                UNAUTHORIZED,
-                f"{parent.id} does not accept a child from {in_sender}",
-                hint=_FROM_ABOVE,
-                side="ingress",
-            )
-        return None
-
-    def _gate_operand(self, sender_id, verb, s_can, root_id, operand):
-        """Two-sided gate on the OPERAND of `update_agent` / `delete_agent` (the
-        record `payload.id` names). Returns a refusal, or None when the sender
-        may act on `operand`.
-
-        Inside your OWN subtree (yourself included) it is baseline (no grant).
-        Anywhere else needs egress NAMING the operand with the verb
-        (`names_operand`: a literal `<id>: ["<verb>"]`, never a wildcard or a
-        token; or a heritable entry for that id naming the verb) AND the
-        operand's own `callable_by` accepting the sender — judged as the
-        qualified `<guid>|<agent>` when a bridge leg relays a foreign caller.
-        That caller owns no subtree here, the leg's own record included (G-1,
-        as `_gate_placement`)."""
-        rc = _remote_caller.get()
-        in_sender = rc[1] if rc is not None and rc[0] == sender_id else sender_id
-        # a relayed caller owns no subtree here — no baseline walk
-        node = operand if in_sender == sender_id else None
-        while node is not None:
-            if node.id == sender_id:
-                return None  # your own subtree — baseline
-            node = node.parent
-        if not names_operand(s_can, verb, operand.id) and not self._heritable_egress(
-            sender_id, verb, operand.id
-        ):
-            return refusal(
-                UNAUTHORIZED,
-                f"{sender_id} may not {verb} {operand.id}",
-                hint=(
-                    f"{operand.id} is outside your subtree: your can_call must name "
-                    f"it with the verb — {{'{operand.id}': ['{verb}']}}, never a "
-                    "wildcard — and its callable_by must accept you"
-                ),
-                side="egress",
-            )
-        di = authorize_call(
-            operand._meta.get("callable_by") or {},
-            verb,
-            in_sender,
-            holder_id=operand.id,
-            holder_parent=operand.parent.id if operand.parent is not None else None,
-            holder_children=frozenset(operand._children),
-            loader_id=root_id,
-            enforce_privileged=False,
-            in_subtree=self._in_subtree,
-        )
-        if not di.allowed:
-            return refusal(
-                UNAUTHORIZED,
-                f"{operand.id} does not accept {verb!r} from {in_sender}",
-                hint=_FROM_ABOVE,
-                side="ingress",
-            )
-        return None
 
     def _qualified_target(self, target_id: str) -> "Agent | RemoteTarget | None":
         """`<guid>|<agent id>`: this kernel's own guid names a LOCAL agent; the
@@ -1636,33 +1296,33 @@ class Agent:
 
     def _gate(self, sender_id: str, verb: str, target: "Agent", payload: dict):
         """The two-sided call gate. Returns an error dict if the send is refused,
-        else None. Checks egress (sender's `can_call`) then ingress (target's
-        `callable_by`), both via the one `authorize_call` engine, then the
-        authority-conferral rules (no self-raise; delegate only a subset)."""
-        root_id = self._root().id
+        else None.
+
+        EGRESS — the sender's `can_call` must grant `(target, verb)` — AND INGRESS
+        — the target's `callable_by` must grant `(sender, verb)`, both via the one
+        `authorize_call` engine. `"*"` covers every verb. A kernel verb answered by
+        the root takes the same check against the root. Then the MUTATORS: the
+        operand must be a DIRECT CHILD of the sender. The sender is always a local
+        agent — a call a bridge leg serves is that leg's."""
         sender = self.ctx.agents.get(sender_id)
         sender_rec = self.ctx.get(sender_id) or {"id": sender_id}
         s_can = sender_rec.get("can_call") or {}
         s_parent = sender_rec.get("parent_id")
         s_kids = frozenset(sender._children) if sender is not None else frozenset()
-        # A target on ANOTHER KERNEL — FIRST, before anything below reads the
-        # payload as an operand of THIS tree (a `create_agent` sent to
-        # `<guid>|kernel` places nothing here). Egress is the whole check here — the sender's
-        # `can_call` must name `<guid>|<agent>` or `<guid>|*`. Whether that agent
-        # accepts the call is its OWN kernel's decision (its `callable_by`, against
-        # the qualified `<this guid>|<sender>`), made where the agent lives.
+        # Egress — may the SENDER call the target? A target on ANOTHER KERNEL is
+        # named `<guid>|<agent>`; whether that agent accepts the call is its OWN
+        # kernel's decision, made where the agent lives — egress is the whole
+        # check here.
+        d = authorize_call(
+            s_can,
+            verb,
+            target.id,
+            holder_id=sender_id,
+            holder_parent=s_parent,
+            holder_children=s_kids,
+        )
         if isinstance(target, RemoteTarget):
-            d = authorize_call(
-                s_can,
-                verb,
-                target.id,
-                enforce_privileged=True,
-                holder_id=sender_id,
-                holder_parent=s_parent,
-                holder_children=s_kids,
-                loader_id=root_id,
-            )
-            if d.allowed or self._heritable_egress(sender_id, verb, target.id):
+            if d.allowed:
                 return None
             return refusal(
                 UNAUTHORIZED,
@@ -1674,310 +1334,55 @@ class Agent:
                 ),
                 side="egress",
             )
-        # PLACEMENT IS THE OPERAND. `create_agent` is answered by the root, but
-        # the agent it ACTS UPON is the parent named in `parent_id` — so that is
-        # what the gate asks about, on both sides. Gating the root instead made
-        # one grant (`<root>:[create_agent]`, the ordinary "may author tools"
-        # wiring) a key to the whole tree: the holder could plant a child under
-        # ANY agent and inherit `$parent:*` reach into it (measured 2026-09-02).
-        #
-        # FORKING YOUR OWN SUBTREE IS BASELINE — placing under yourself or a
-        # descendant needs no grant at all, which is what makes self-extension
-        # work with zero wiring at any depth.
-        if verb == "create_agent":
-            parent = self._resolve_agent(payload.get("parent_id"))
-            if parent is not None:
-                denial = self._gate_placement(
-                    sender_id, s_can, s_parent, s_kids, root_id, parent
-                )
-                if denial is not None:
-                    return denial
-                return self._check_conferral(
-                    sender_id, s_can, s_parent, s_kids, root_id, payload
-                )
-            # An unknown parent falls through to the ordinary path; the verb
-            # itself answers `unknown_agent`.
-        # THE RECORD IS THE OPERAND — the same rule for `update_agent` /
-        # `delete_agent`. Gating the root made one grant
-        # (`<root>:[update_agent, delete_agent]`, the builder wiring) a key to
-        # every record — rewrite a credential store's refs, open a sealed leg,
-        # clear a delete_lock and delete — while an agent could not edit its OWN
-        # child without that tree-wide grant (audit 2026-10-03, AV-1).
-        if verb in RECORD_OPERAND_VERBS and target.parent is None:
-            oid = payload.get("id")
-            operand = self.ctx.agents.get(oid) if isinstance(oid, str) else None
-            if operand is not None:
-                denial = self._gate_operand(sender_id, verb, s_can, root_id, operand)
-                if denial is not None:
-                    return denial
-                if verb == "update_agent":
-                    return self._check_conferral(
-                        sender_id, s_can, s_parent, s_kids, root_id, payload
-                    )
-                return None
-            # No such record: the ordinary path; the verb answers `unknown_agent`.
-        # Egress — may the SENDER call the target?
-        d = authorize_call(
-            s_can,
-            verb,
-            target.id,
-            enforce_privileged=True,
-            holder_id=sender_id,
-            holder_parent=s_parent,
-            holder_children=s_kids,
-            loader_id=root_id,
-        )
-        if not d.allowed and not self._heritable_egress(sender_id, verb, target.id):
+        if not d.allowed:
             return refusal(
                 UNAUTHORIZED,
                 f"{sender_id} may not call {verb!r} on {target.id}",
                 hint=_FROM_ABOVE,
                 side="egress",
             )
-        # INGRESS DOES NOT APPLY TO A KERNEL VERB. `callable_by` answers "do I
-        # accept being acted upon by you" — and for `create_agent`/`ps`/`cancel`
-        # and friends the root is not what is acted upon. It is the control
-        # surface; the operand rides in the payload (`parent_id`, `id`,
-        # `task_id`). Asking the root to accept each caller would make the
-        # operator edit the ROOT's record for every agent that needs to read the
-        # task table, and would answer a question about the wrong agent.
-        #
-        # So egress is the whole check here, which is the decision on record:
-        # `can_call` decides. An agent granted `kernel_state: [ps, cancel]` can
-        # watch and kill ANY task — that granularity was the price of moving these
-        # verbs to the root. The tree mutators are the exception: whenever their
-        # operand names an agent they were judged ON THAT AGENT above
-        # (`_gate_placement` / `_gate_operand`); only an unknown operand gets here.
-        #
-        # A FOREIGN caller a bridge leg relays is the exception to the exception:
-        # the leg's `can_call` is the leg's reach, not its peer's, so the root's
-        # `callable_by` must ALSO accept the caller as `<guid>|<agent>` or
-        # `<guid>|*` — it takes the ingress check below (audit 2026-10-03, AV-3).
-        # Local callers are unchanged.
-        rc = _remote_caller.get()
-        in_sender = rc[1] if rc is not None and rc[0] == sender_id else sender_id
-        if verb in _SYSTEM_VERBS and target.parent is None and in_sender == sender_id:
-            if verb in ("create_agent", "update_agent"):
-                return self._check_conferral(
-                    sender_id, s_can, s_parent, s_kids, root_id, payload
-                )
-            return None
         # Ingress — does the TARGET accept the sender? (tokens relative to target)
-        # A bridge leg relaying a FOREIGN caller is judged by that caller's
-        # qualified `<guid>|<agent>`, never by the leg: the target names who on the
-        # other kernel it accepts, and the baseline tokens never match a foreign id.
-        t_call = target._meta.get("callable_by") or {}
-        t_parent = target.parent.id if target.parent is not None else None
-        t_kids = frozenset(target._children)
         di = authorize_call(
-            t_call,
+            target._meta.get("callable_by") or {},
             verb,
-            in_sender,
+            sender_id,
             holder_id=target.id,
-            holder_parent=t_parent,
-            holder_children=t_kids,
-            loader_id=root_id,
-            enforce_privileged=False,
-            in_subtree=self._in_subtree,
+            holder_parent=target.parent.id if target.parent is not None else None,
+            holder_children=frozenset(target._children),
         )
         if not di.allowed:
             return refusal(
                 UNAUTHORIZED,
-                f"{target.id} does not accept {verb!r} from {in_sender}",
-                hint=(
-                    f"a foreign caller is accepted only by name: callable_by "
-                    f"{{{in_sender!r}: [...]}} or {{'{in_sender.split('|')[0]}|*': "
-                    f"[...]}} on {target.id}"
-                    if in_sender != sender_id
-                    else _FROM_ABOVE
-                ),
+                f"{target.id} does not accept {verb!r} from {sender_id}",
+                hint=_FROM_ABOVE,
                 side="ingress",
             )
-        # Authority conferral — no self-raise, delegate only a subset you hold.
-        if verb in ("create_agent", "update_agent"):
-            return self._check_conferral(
-                sender_id, s_can, s_parent, s_kids, root_id, payload
-            )
-        return None
-
-    @staticmethod
-    def _heritable_conferral(sender_id, s_can, key, want):
-        """A heritable entry is conferred only by an agent whose OWN `can_call`
-        holds the same entry, and only a subset of its verbs (`*` needs `*`; a
-        named verb needs the name, or `*` when the verb is not privileged)."""
-        held = s_can.get(key) if isinstance(s_can, dict) else None
-        have = held["verbs"] if is_heritable(held) else []
-        for v in want:
-            covered = v in have or (
-                v != "*" and "*" in have and v not in PRIVILEGED_VERBS
-            )
-            if not covered:
-                return {
-                    "error": (
-                        f"{sender_id} cannot confer a heritable {v!r} on {key}: you "
-                        "do not hold that heritable entry — only the operator, or a "
-                        "holder of the same entry, confers one (a subset of it)"
-                    ),
-                    "reason": "unauthorized",
-                    "side": "delegation",
-                    "hint": _FROM_ABOVE,
-                }
-        return None
-
-    def _check_holder_mark(self, sender_id: str, payload: dict) -> dict | None:
-        """Only the OPERATOR lowers a secret holder's mark. An agent's
-        `update_agent` naming `holds_secrets` with any value but `true` on an agent
-        whose record says `holds_secrets: true` is refused — else a model granted
-        `update_agent` could unmark a credential_store and then call it. Setting
-        `true` (on a holder or not) passes: protection may be added from anywhere.
-        Judged on the record the verb would patch (`ctx.agents[id]`), before the
-        write-time shape check, so a non-operator's malformed value on a holder
-        gets THIS refusal. The operator (`sender is None`) never reaches here."""
-        if payload.get("type") != "update_agent" or HOLDS_SECRETS not in payload:
-            return None
-        if payload[HOLDS_SECRETS] is True:
-            return None
-        edited = payload.get("id")
-        target = self.ctx.agents.get(edited) if isinstance(edited, str) else None
-        if target is None or target._meta.get(HOLDS_SECRETS) is not True:
-            return None
-        return {
-            "error": (
-                f"{sender_id} may not clear holds_secrets on {edited}: it holds "
-                "secrets, and only the operator lowers that mark"
-            ),
-            "reason": UNAUTHORIZED,
-            "side": HOLDER_MARK_SIDE,
-            "hint": HOLDER_MARK_HINT,
-        }
-
-    def _check_conferral(self, sender_id, s_can, s_parent, s_kids, root_id, payload):
-        """Authority flows from ABOVE only: an agent may not raise its OWN
-        authority, and may confer on another only a SUBSET of its own `can_call`.
-        Nor may it lower a secret holder's mark (`_check_holder_mark`, judged
-        first). Operator conferral (`sender is None`) never reaches here."""
-        if not isinstance(payload, dict):
-            return None
-        if (held := self._check_holder_mark(sender_id, payload)) is not None:
-            return held
-        if "can_call" not in payload and "callable_by" not in payload:
-            return None
-        edited = payload.get("id")
-        # Self-raise: never edit your own authority fields.
-        if payload.get("type") == "update_agent" and edited == sender_id:
-            return {
-                "error": f"{sender_id} may not edit its own can_call/callable_by",
-                "reason": "unauthorized",
-                "side": "self-grant",
-                "hint": _FROM_ABOVE,
-            }
-        # Subset: every LATERAL edge in the conferred `can_call` must be one the
-        # granter itself holds (structural tokens are free; `callable_by` grants no
-        # reach, so it is unbounded).
-        conferred = payload.get("can_call")
-        if isinstance(conferred, dict):
-            for key, verbs in conferred.items():
-                if key in ("$self", "$parent", "$children"):
-                    continue  # relative to the HOLDER — no lateral reach
-                if isinstance(verbs, dict) or key.startswith(SUBTREE_PREFIX):
-                    # A heritable entry is conferred only by a holder of the SAME
-                    # entry (subset). A malformed one, and a `$subtree:` key (which
-                    # is callable_by-only), are refused by the write-time shape
-                    # check with the shape's own words.
-                    if is_heritable(verbs) and not key.startswith("$"):
-                        if (
-                            denied := self._heritable_conferral(
-                                sender_id, s_can, key, verbs["verbs"]
-                            )
-                        ) is not None:
-                            return denied
-                    continue
-                if key == "$loader":
-                    # NOT relative: `$loader` resolves to the ROOT for whoever
-                    # holds it, so conferring it hands over real reach on the
-                    # kernel's control surface (ps, cancel, ledger,
-                    # shutdown_kernel). Subset-probe it like any lateral edge —
-                    # skipping it let a grandchild grant its own child root
-                    # reach it did not hold (measured 2026-09-02).
-                    probe_key = root_id
-                elif key.startswith("$"):
-                    return {
-                        "error": (
-                            f"{sender_id} cannot confer {key!r}: not a structural "
-                            "token — $self, $parent, $children and $loader are the "
-                            "only ones"
-                        ),
-                        "reason": "bad_arg",
-                        "arg": "can_call",
-                        "side": "delegation",
-                        "hint": _FROM_ABOVE,
-                    }
-                else:
-                    probe_key = key
-                need = list(verbs) if isinstance(verbs, (list, tuple)) else None
-                # Conferring `"*"` (or a list containing it) requires the granter
-                # to hold `"*"` on that target; a concrete list requires each verb.
-                probe = need if (need and "*" not in need) else ["*"]
-                for v in probe:
-                    ok = authorize_call(
-                        s_can,
-                        v,
-                        probe_key,
-                        holder_id=sender_id,
-                        holder_parent=s_parent,
-                        holder_children=s_kids,
-                        loader_id=root_id,
-                    ).allowed
-                    if not ok:
-                        if key == "$loader":
-                            return {
-                                "error": (
-                                    f"{sender_id} cannot delegate {v!r} on $loader: "
-                                    f"it resolves to {root_id}, which you do not "
-                                    "hold — $loader is real reach on the kernel's "
-                                    "control surface, not a structural token"
-                                ),
-                                "reason": "unauthorized",
-                                "side": "delegation",
-                                "hint": _FROM_ABOVE,
-                            }
-                        # Name the TRUE reason. A target that is not an agent at
-                        # all is almost always one created in the SAME batch —
-                        # items launch concurrently, so it is not there yet when
-                        # this gate runs. "you don't hold it" sent a builder
-                        # into a 382-second deliberation (measured 2026-09-02).
-                        if self.ctx.agents.get(key) is None:
-                            return {
-                                "error": (
-                                    f"{sender_id} cannot delegate {v!r} on {key}: "
-                                    "no such agent — calls of one batch run "
-                                    "concurrently, so an agent created in this "
-                                    "batch does not exist yet; create in one batch, "
-                                    "grant in the next"
-                                ),
-                                "reason": "unauthorized",
-                                "side": "delegation",
-                                "missing": key,
-                                "hint": _FROM_ABOVE,
-                            }
-                        # The target exists but the granter does not hold it. Say
-                        # WHY in one line — the usual cause is a specialist created
-                        # under the root instead of under the granter, and "you
-                        # don't hold it" hid that for twenty messages (2026-09-02).
-                        held_parent = self.ctx.agents[key].parent
-                        pid = held_parent.id if held_parent is not None else None
-                        return {
-                            "error": (
-                                f"{sender_id} cannot delegate {v!r} on {key}: {key} is "
-                                f"not your child (its parent is {pid}) and not in your "
-                                "can_call — you may only confer can_call you already "
-                                "hold; create the agents you will wire as YOUR children"
-                            ),
-                            "reason": "unauthorized",
-                            "side": "delegation",
-                            "parent": pid,
-                            "hint": _FROM_ABOVE,
-                        }
+        # MUTATORS act on the sender's OWN CHILDREN only — `create_agent` places
+        # under the sender, `update_agent`/`delete_agent` name a direct child. A
+        # missing or non-string operand is not judged here: the verb answers it
+        # with its own missing/shape refusal. An id naming no agent is not the
+        # sender's child, so it gets the mutator text like any other stranger.
+        if verb in _MUTATORS and target.parent is None:
+            key = "parent_id" if verb == "create_agent" else "id"
+            operand = payload.get(key) if isinstance(payload, dict) else None
+            if not isinstance(operand, str) or not operand:
+                return None
+            if verb == "create_agent":
+                owned = operand == sender_id
+            else:
+                node = self.ctx.agents.get(operand)
+                owned = (
+                    node is not None
+                    and node.parent is not None
+                    and node.parent.id == sender_id
+                )
+            if not owned:
+                return refusal(
+                    UNAUTHORIZED,
+                    f"{sender_id} may only {verb} its own children — {operand} is "
+                    "not one",
+                    side="mutator",
+                )
         return None
 
     async def _run_dispatch(self, target: "Agent", payload: dict) -> dict | None:
@@ -2060,13 +1465,6 @@ class Agent:
         "for it only when you need to see how agents are plumbed, not to find one."
     )
 
-    def _may_reflect(self, a) -> bool:
-        """May the agent now running (the caller) `reflect` `a`? The one per-node
-        gate both tree views apply (`_roster`, and `_tree` under `detail:"full"`).
-        An operator (`sender` None) may reflect everything."""
-        sender = _current_sender.get()
-        return sender is None or self._gate(sender, "reflect", a, {}) is None
-
     async def _roster(self, a) -> dict:
         """`{id, sentence, mode?, children:[...]}` — the tree, but carrying what
         each agent is FOR instead of how it is wired.
@@ -2083,21 +1481,10 @@ class Agent:
         `_apply_reflect_flags`, so building a roster cannot recurse into
         building rosters.
         """
-        # THE ROSTER IS GATED, one node at a time. `reflect` is not exempt from
-        # the call gate anywhere else, but this walk dispatched it directly, so
-        # any caller allowed to reflect ONE agent read every descendant's
-        # `sentence` and `description` through the tree — lateral discovery the
-        # gate exists to close (measured 2026-09-02). A denied node keeps its
-        # `id` and `children` (the SHAPE is already public through `tree=ids`)
-        # and nothing the agent says about itself. An operator (`sender` None)
-        # sees everything, as everywhere else.
-        may_reflect = self._may_reflect(a)
-        if a.handler_module and may_reflect:
+        if a.handler_module:
             raw = await self._run_dispatch(a, {"type": "reflect"})
-        elif may_reflect:
-            raw = a._reflect_identity()
         else:
-            raw = {}
+            raw = a._reflect_identity()
         raw = raw if isinstance(raw, dict) else {}
         node: dict[str, Any] = {"id": a.id}
         if raw.get("sentence"):
@@ -2105,7 +1492,7 @@ class Agent:
         # Operator-set purpose. More specific than the bundle sentence when
         # present ("the prod deploy key" vs "a yaml store"), so it belongs
         # in the router's view above all else.
-        if a.description is not None and may_reflect:
+        if a.description is not None:
             node["description"] = a.description
         # Purpose comes from the agent's REFLECT, not its record: much of what an
         # agent is FOR lives in its reflect (its `sentence`, its verbs), not as a
@@ -2160,10 +1547,7 @@ class Agent:
         # reply and knows nothing of the substrate's gate fields, so they are added
         # here — the same way `description` is. Absent means "baseline only", which
         # is what the kernel stamps; it never means "unknown".
-        # `holds_secrets` rides the same way: a SECRET HOLDER (a credential_store
-        # stamps it; an operator may set it on any agent) says so on its reflect,
-        # because ai_core refuses every model-parsed call that names it.
-        for _gate in ("can_call", "callable_by", "holds_secrets"):
+        for _gate in ("can_call", "callable_by"):
             if _gate in target._meta and _gate not in reply:
                 reply[_gate] = target._meta[_gate]
         # Kernel runtime identity + deployment context — surfaced on the ROOT
@@ -2261,9 +1645,7 @@ class Agent:
         tree = payload.get("tree", "all")
         if tree == "all":
             reply["tree"] = (
-                target._tree(
-                    depth=None, details=False, current_depth=0, may=self._may_reflect
-                )
+                target._tree(depth=None, details=False, current_depth=0)
                 if full
                 else await self._roster(target)
             )
@@ -2363,23 +1745,17 @@ class Agent:
         target._fanout(payload, kind="emit")
 
     async def _emit_remote(self, remote: "RemoteTarget", payload: dict) -> None:
-        """Hand one emit to every live route of a peer guid, carrying the caller
-        as `<this guid>|<sender>` when an agent emitted it. A refused emit, or an
-        agent's emit before this kernel has a guid to name it by, is dropped."""
+        """Hand one emit to every live route of a peer guid. A refused emit is
+        dropped."""
         sender = _current_sender.get()
-        caller = None
         if sender is not None:
             if self._gate(sender, "emit", remote, payload) is not None:
                 return
-            own = self._root()._meta.get("guid")
-            if not own:
-                return
-            caller = f"{own}|{sender}"
         # TODO (owner, open): DESYNC between the tabs of one identity is envisioned
         # and unsolved — each tab gets the event, nothing reconciles what they do
         # with it. Think later.
         for route in remote.routes:
-            await route.emit(remote.agent_id, payload, caller)
+            await route.emit(remote.agent_id, payload)
 
     def watch(self, src_id: str, tgt_id: str) -> dict | None:
         """Mirror src_id's incoming traffic into tgt_id's inbox. Returns a
@@ -2397,11 +1773,7 @@ class Agent:
         `call` path went through the two-sided gate; this one never did.
 
         The verb checked is `watch`, so an operator grants it exactly like any
-        other edge (`callable_by: {viewer: ["watch"]}`). Watching the ROOT needs
-        an explicit NAMED grant — `can_call: {<root>: ["watch"]}` (or the root's
-        id with `*`); a structural wildcard (`$parent: "*"`) never covers it,
-        because the root's inbox carries every kernel verb's payload (audit
-        2026-10-03, KV-2; `authorize_call`). An OPERATOR watch
+        other edge (`callable_by: {viewer: ["watch"]}`). An OPERATOR watch
         (`sender=None` — the bootstrap wiring a renderer, a test) is the origin
         root of trust and stays ungated, as with send."""
         src = self.ctx.agents.get(src_id)
@@ -2599,12 +1971,7 @@ class Agent:
     # ─── dispatch (internal) ───────────────────────────────────
 
     async def _dispatch_task(
-        self,
-        task_id: str,
-        payload: dict,
-        origin: str | None = None,
-        shown: dict | None = None,
-        secret_paths: tuple = (),
+        self, task_id: str, payload: dict, origin: str | None = None
     ) -> dict | None:
         """The body of a registered task: stamp `_current_task` so nested sends
         become CHILDREN of this task, then dispatch. The contextvar is set (not
@@ -2616,17 +1983,8 @@ class Agent:
         # PAYLOAD names a resource can tell whose it is. `_current_sender` is
         # about to become this agent's own id, which is why this is separate.
         _current_origin.set(origin)
-        # the caller's `secret` marks, for THIS dispatch only (a task owns a copy
-        # of the context, so the handler's own sends do not inherit them)
-        _current_secret.set(secret_paths)
-        # A bridge leg relaying a remote caller marked its send; the address belongs
-        # to THIS dispatch only when the leg itself is its origin. Consumed here, so
-        # the handler's own sends carry no remote caller.
-        rc = _remote_caller.get()
-        _remote_caller.set(None)
-        _current_remote.set(rc[1] if rc is not None and rc[0] == origin else None)
         try:
-            return await self._dispatch(payload, shown)
+            return await self._dispatch(payload)
         except SystemExit as e:
             # A SystemExit out of an asyncio task stops the EVENT LOOP — the whole
             # kernel, for one handler (or one handler module's import-time code,
@@ -2635,12 +1993,37 @@ class Agent:
             # call settles failed, the loop runs on.
             raise _Exited() from e
 
-    async def _dispatch(self, payload: dict, shown: dict | None = None) -> dict | None:
-        """Resolve verb → native or handler_module. `shown` is the payload as the
-        mirrors may see it (an item's `secret` paths); the handler gets `payload`."""
+    @contextlib.contextmanager
+    def _as_self(self):
+        """THE DISPATCH IDENTITY — the kernel running this agent's code: its
+        handler (`_dispatch`) and its hooks (`on_cancel`, `on_delete`). Every send
+        made inside, and every task spawned inside, is this agent's. It is the one
+        place an identity is set; the kernel sets it only when it runs an agent's
+        own code."""
+        token = _current_sender.set(self.id)
+        try:
+            yield
+        finally:
+            _current_sender.reset(token)
+
+    async def _kernel_run(self, payload: dict) -> dict | None:
+        """THE KERNEL RUNS THIS AGENT'S HANDLER for its own bookkeeping — the boot
+        at `create_agent` and `kernel_start`, the `shutdown` of a stop, the reads
+        and writes of the kernel's ledger in its memory store (`Kernel.bookkeeping`).
+        A plain call, not a send: no gate, no task row, no call row. The handler
+        runs as this agent (its sends and spawned tasks are its own) with NO
+        origin — no caller asked; the kernel did. A raise propagates."""
+        token = _current_origin.set(None)
+        try:
+            return await self._dispatch(payload)
+        finally:
+            _current_origin.reset(token)
+
+    async def _dispatch(self, payload: dict) -> dict | None:
+        """Resolve verb → native or handler_module, run as this agent."""
         verb = payload.get("type")
         self._in_flight += 1
-        self._fanout(shown if shown is not None else payload, kind="send")
+        self._fanout(payload, kind="send")
         token = _current_sender.set(self.id)
         try:
             if verb in _SYSTEM_VERBS:
@@ -2657,7 +2040,7 @@ class Agent:
                 #
                 # Refused HERE, in the handler, not in the call gate — the gate
                 # runs long before this and several probes assert a specific
-                # denial `side` for a non-root privileged send. `shutdown_kernel`
+                # denial `side` for a kernel verb sent to a non-root agent. `shutdown_kernel`
                 # already refused this way; this generalises it to all seven.
                 if self.parent is not None:
                     return refusal(
@@ -3026,64 +2409,17 @@ class Agent:
                     f"bare value"
                 )
             for k, v in g.items():
-                if not isinstance(k, str):
-                    return f"{field} keys must be strings — got {k!r}"
-                if k.startswith(SUBTREE_PREFIX):
-                    x = k[len(SUBTREE_PREFIX) :]
-                    if field != "callable_by":
-                        return (
-                            f"{field}[{k!r}]: `$subtree:` is callable_by-only — it "
-                            "names who may call you, never whom you may call"
-                        )
-                    if not x or "|" in x:
-                        return (
-                            f"{field}[{k!r}]: `$subtree:` names one LOCAL agent id "
-                            "(`$subtree:<id>`, no `|`)"
-                        )
-                if isinstance(v, dict):
-                    if field != "can_call":
-                        return (
-                            f"{field}[{k!r}]: a heritable entry "
-                            '{"verbs": [...], "for": "descendants"} is can_call-only'
-                        )
-                    if k.startswith("$"):
-                        return (
-                            f"{field}[{k!r}]: a heritable entry names a literal "
-                            "target id, never a token"
-                        )
-                    if not is_heritable(v):
-                        return (
-                            f"{field}[{k!r}] must be exactly "
-                            '{"verbs": ["<verb>", …], "for": "descendants"}'
-                        )
-                    continue
+                if bad_grant_key(field, k):
+                    return (
+                        f"{field}[{k!r}] is not a grant key — legal keys: "
+                        f"{LEGAL_GRANT_KEYS[field]}"
+                    )
                 if not (
                     v == "*"
                     or (isinstance(v, list) and all(isinstance(x, str) for x in v))
                 ):
-                    return (
-                        f'{field}[{k!r}] must be "*", a list of verb strings, or '
-                        '(can_call) {"verbs": [...], "for": "descendants"}'
-                    )
+                    return f'{field}[{k!r}] must be "*" or a list of verb strings'
         return None
-
-    @staticmethod
-    def _bad_holder_mark(meta: dict) -> str | None:
-        """`holds_secrets`'s SHAPE, judged at WRITE time on every agent: exactly
-        `true` marks a holder, `null` is the operator's clear — nothing else is a
-        value the record may carry (`false`, `"yes"`, `1` read as a mark to one
-        reader and as none to another). Runs after the grant shape and BEFORE the
-        bundle's own `validate_meta`, so for a credential_store a malformed value
-        gets this text and `null` gets the store's."""
-        if HOLDS_SECRETS not in meta:
-            return None
-        v = meta[HOLDS_SECRETS]
-        if v is True or v is None:
-            return None
-        return (
-            "holds_secrets must be exactly true (this agent holds secrets) or null "
-            f"(the operator clears the mark) — got {type(v).__name__}"
-        )
 
     async def _verb_create_agent(self, payload: dict) -> dict:
         """args: handler_module, parent_id (REQUIRED), id?, **meta.
@@ -3158,36 +2494,28 @@ class Agent:
         # that boots, half-works, and fails three calls later somewhere else.
         # No record exists yet, so the merged view IS the patch — a create that
         # omits a field its handler requires genuinely cannot run and is refused here.
-        if why := self._bad_grant_shape(meta) or self._bad_holder_mark(meta):
+        if why := self._bad_grant_shape(meta):
             return refusal(INVALID_META, why)
         if why := self._refuse_meta(handler_module, meta, {}):
             return refusal(INVALID_META, why)
         rec = parent.create(handler_module, id=payload.get("id"), **meta)
         if "error" in rec:
             return rec
-        # Boot via kernel routing. This send is a SIDE EFFECT of the already-
-        # authorized create_agent — the kernel initializing the child it was
-        # told to make, not the parent reaching out — so it runs with operator
-        # authority (ungated), never against the parent's own grant.
-        with operator_context():
-            boot = (
-                await self.send([{"target": rec["id"], "payload": {"type": "boot"}}])
-            )[0]
+        # BOOT — kernel bookkeeping: the kernel initializing the child it was told
+        # to make, not the parent reaching out. The child's handler runs directly
+        # (`Kernel.bookkeeping`), as the child, with no origin — never through a
+        # gated send, never against the parent's own grant.
+        boot = await self.ctx.bookkeeping(self.ctx.agents[rec["id"]], {"type": "boot"})
         if boot["status"] == FAILED:
-            # A handler raise settles as a failed outcome now — send never
-            # leaks it. Surfaced, not fatal: the agent exists, its boot broke.
+            # Surfaced, not fatal: the agent exists, its boot broke.
             print(f"  [create_agent] {rec['id']} boot failed: {boot['result']}")
-        # Lifecycle event on self's inbox.
-        # On the PARENT's inbox, not the root's: whoever watches an agent for new
-        # children still sees them arrive. Addressing used to make these the same.
-        # BOOKKEEPING FROM ABOVE, like the boot: emitted as the root, the gate
-        # judged root→parent, and the root's `$children` baseline reaches depth 1
-        # only — a parent any deeper never got its event, operator creates
-        # included, and nothing said so (audit 2026-10-03, KV-4).
-        with operator_context():
-            await parent.emit(
-                parent.id, {"type": "agent_created", "id": rec["id"], "agent": rec}
-            )
+        # Lifecycle event on the PARENT's inbox, not the root's: whoever watches an
+        # agent for new children still sees them arrive. Kernel bookkeeping too —
+        # put on the parent's inbox and mirrored to its watchers directly
+        # (`_fanout`), never a gated emit (audit 2026-10-03, KV-4).
+        parent._fanout(
+            {"type": "agent_created", "id": rec["id"], "agent": rec}, kind="emit"
+        )
         return rec
 
     async def _verb_update_agent(self, payload: dict) -> dict:
@@ -3198,10 +2526,9 @@ class Agent:
         combined — send it WHOLE.
 
         The trap: granting one edge reads like a PATCH
-        (`callable_by={"web":["read_stream"]}`) and behaves like a PUT — the
-        structural baseline `{$self,$parent,$children}` is stamped once in
-        `Agent.__init__` and nothing re-merges it here, so that call silently
-        severs the agent from its own parent and children and still answers
+        (`callable_by={"web":["read_stream"]}`) and behaves like a PUT — every
+        other grant in the field (the `{$self: "*"}` baseline stamped in
+        `Agent.__init__` included) is dropped, and the call still answers
         `{"updated": true}`. Send the map WHOLE.
 
         Measured 2026-08-24 (`live_subai`, the model): the model reasoned the
@@ -3214,10 +2541,6 @@ class Agent:
         NOT refused when the baseline is absent: dropping a grant is a legitimate
         thing for an operator to express, and a wrong grant is recoverable with
         another `update_agent`. Documented, not gated.
-
-        `holds_secrets` is the exception that IS gated: only `true` or `null` is
-        written (`_bad_holder_mark`), and on a holder only the operator writes
-        `null` — its clear (`_check_holder_mark`, in the gate).
         """
         target_id = payload.get("id")
         if not isinstance(target_id, str) or not target_id:
@@ -3265,7 +2588,7 @@ class Agent:
         # that agent failed. Accepting a value you cannot honour, and reporting
         # success, is the worst of both — the caller believes a security control is
         # in place that is not. Same discovery + optionality as `on_delete`.
-        if why := self._bad_grant_shape(meta) or self._bad_holder_mark(meta):
+        if why := self._bad_grant_shape(meta):
             return refusal(INVALID_META, why, id=target_id)
         if why := self._refuse_meta(target.handler_module, meta, target.record):
             return refusal(INVALID_META, why, id=target_id)
@@ -3358,7 +2681,7 @@ class Agent:
                 mod = import_handler(self.handler_module)
                 fn = getattr(mod, "on_delete", None)
                 if fn is not None:
-                    with sender_context(self.id):
+                    with self._as_self():
                         await fn(self)
             except Exception as e:
                 print(f"  [cascade] {self.id} bundle on_delete raised: {e}")
@@ -3392,7 +2715,7 @@ class Agent:
             mod = import_handler(self.handler_module)
             fn = getattr(mod, "on_cancel", None)
             if fn is not None:
-                with sender_context(self.id):
+                with self._as_self():
                     await fn(self.id, task_id, self)
         except Exception as e:
             print(f"  [cancel] {self.id} bundle on_cancel raised: {e}")
@@ -3516,22 +2839,15 @@ class Agent:
         depth: int | None,
         details: bool,
         current_depth: int,
-        may: Callable[["Agent"], bool],
     ) -> dict:
-        # GATED PER NODE, as the roster is. The wiring view carries every node's
-        # `description` and grant maps, so a caller allowed to reflect ONE agent
-        # read its whole subtree's through `detail:"full"` — a depth-2 agent its
-        # siblings', through its own parent (audit 2026-10-03, KV-3). A denied
-        # node keeps its `id` and `children` (the shape is public through
-        # `tree=ids`) and nothing else.
-        node = self._node_summary(details=details) if may(self) else {"id": self.id}
+        # A reflect that passes the gate returns the tree whole.
+        node = self._node_summary(details=details)
         if depth is None or current_depth < depth:
             node["children"] = [
                 c._tree(
                     depth=depth,
                     details=details,
                     current_depth=current_depth + 1,
-                    may=may,
                 )
                 for c in self._children.values()
             ]

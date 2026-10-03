@@ -113,6 +113,7 @@ struct WebOriginGuardTests {
                     "web_ws": .string("*"),
                 ]),
             ]))
+        wire(kernel, "web", "web_ws")
         _ = await call(kernel, "web", .object(["type": .string("mount"), "child_id": .string("web_ws")]))
         // Read PER REQUEST: the edit applies without a restart.
         _ = await call(
@@ -227,6 +228,7 @@ struct WebOriginGuardTests {
                 "handler_module": .string("web_ws.tools"), "id": .string("web_ws"),
                 "ingress_rule": .string("allow_all_ingress"),
             ]))
+        wire(kernel, "web", "web_ws")
         _ = await call(
             kernel, "web", .object(["type": .string("mount"), "child_id": .string("web_ws")]))
         func upgrade(_ host: String) throws -> String {

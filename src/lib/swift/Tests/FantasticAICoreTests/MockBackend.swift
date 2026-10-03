@@ -449,7 +449,7 @@ func bootMockKernel(
     registry.register("ram_store.tools", RamStoreBundle())
     let kernel = Kernel(storage: .inMemory, bundles: registry)
     // A REAL root path, so `findStore` has something to match the store's own
-    // `root` against — that match is how the loader owns sidecar placement.
+    // `root` against — that match is how the loader owns where a sidecar lands.
     let storeRoot = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("fantastic-mock-\(UUID().uuidString)")
         .appendingPathComponent(".fantastic")
@@ -474,7 +474,7 @@ func bootMockKernel(
             "handler_module": .string("file_bridge.tools"), "allow": ["."],
             // `findStore` matches a file_bridge whose `root` resolves to the
             // root agent's own dir — that is how the loader owns sidecar
-            // placement, and the stand-in must satisfy the same rule.
+            // location, and the stand-in must satisfy the same rule.
             "root": .string(storeRoot.path),
             "id": .string("store"),
             "callable_by": acceptJSON,
@@ -486,8 +486,6 @@ func bootMockKernel(
             "parent_id": .string("kernel_state"),
             "handler_module": .string("ram_store.tools"),
             "id": .string("memory"),
-            "operator": .bool(true),
-            "admins": .array([.string("kernel")]),
             "callable_by": acceptJSON,
         ]))])[0].result
     _ = await kernel.send([Item(AgentId("kernel_state"), .object([

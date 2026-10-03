@@ -809,6 +809,7 @@ async fn the_program_can_send_to_another_agent_and_read_the_reply() {
     };
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
+    fantastic_kernel::test_support::wire(&kernel, a.as_str(), "kernel_state", json!(["reflect"]));
     let mut rx = inbox(&kernel, &a);
     let _ = kernel
         .send(vec![Item::new(
@@ -897,7 +898,7 @@ async fn an_unknown_verb_without_a_job_errors_loudly() {
 /// gated by its grants. A sibling the runner holds no `can_call` for must refuse
 /// (`unauthorized`). Before 2026-09-01 the relay forwarded with NO sender —
 /// operator, ungated — and a spawned program could reach any agent (measured
-/// live: E30 subai:rust, "privileged as the root").
+/// live: E30 subai:rust).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_program_is_gated_as_its_runner_not_as_the_operator() {
     let Some(py) = find_real_python() else {
@@ -905,7 +906,9 @@ async fn the_program_is_gated_as_its_runner_not_as_the_operator() {
     };
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
-    // a SIBLING runner under the root — no edge from `a` to it (baseline only)
+    // the root: an explicit edge, both ends
+    fantastic_kernel::test_support::wire(&kernel, a.as_str(), "kernel_state", json!(["reflect"]));
+    // a SIBLING runner under the root — no edge from `a` to it
     let _ = kernel
         .send(vec![Item::new(
             AgentId::from("kernel_state"),
@@ -940,7 +943,7 @@ async fn the_program_is_gated_as_its_runner_not_as_the_operator() {
     );
     assert!(
         out.contains("CORE kernel_state"),
-        "the parent (baseline edge) still answers: {done}"
+        "the root (an explicit edge) still answers: {done}"
     );
 }
 
@@ -1280,7 +1283,7 @@ fn wire(
     let (parent, child) = tokio::net::UnixStream::pair().expect("socketpair");
     let (rd, wr) = parent.into_split();
     let stop = Arc::new(tokio::sync::Notify::new());
-    let relay = tokio::spawn(fantastic_kernel::send::with_sender(
+    let relay = tokio::spawn(fantastic_kernel::test_support::as_agent(
         owner.clone(),
         crate::relay::serve(
             rd,
@@ -1823,7 +1826,7 @@ async fn reflect_verbs_are_python_first_docstring_lines() {
     );
     assert_eq!(
         verbs["clear"],
-        "args: job_id:int? — drop YOUR finished jobs (one, or all non-running; the operator: all) from the RAM"
+        "args: job_id:int? — drop finished jobs (one, or all non-running) from the RAM"
     );
     assert_eq!(
         verbs["boot"],
@@ -2780,10 +2783,6 @@ async fn arg_refusals_are_byte_exact_in_key_order() {
         )
     );
 }
-
-// Secret marks on the guest wire — python `test_exec_bridge.py`'s twins.
-#[path = "tests_secret.rs"]
-mod tests_secret;
 
 // `_binary_path` as a list of steps on the guest wire — python
 // `test_binary_path_steps.py` (e)'s twins.

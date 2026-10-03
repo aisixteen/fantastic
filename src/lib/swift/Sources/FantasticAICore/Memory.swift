@@ -2,9 +2,8 @@
 //
 // Port of python `ai_core/core.py` (canonical): `_mem`, `MemoryStoreError`,
 // `_store_of`, `_store_call`, `_head`, `_refresh_head`, `_load_history`,
-// `_save_history`, `_store_reply`, `_load_reply`, `FORK_FRAMING`,
-// `_render_shared`, `_expand_forks`, `_row_digest`, `_my_grants`,
-// `_grant_covers`, `_announce_row`, `_save_view`, `_load_view`.
+// `_save_history`, `_store_reply`, `_load_reply`, `_row_digest`,
+// `_announce_row`, `_save_view`, `_load_view`.
 //
 // An AI agent's conversation lives in the MEMORY STORE its record names
 // (`memory_store_id`) — a separate agent (`ram_store`, or a durable one) that keys
@@ -41,13 +40,12 @@ public struct MemoryStoreError: Error, CustomStringConvertible, Sendable {
 }
 
 /// This bundle's RAM for ONE kernel — the head caches, the bodies held this run,
-/// the cached grants, the row watchers — keyed by kernel, so two kernels in one
+/// the row watchers — keyed by kernel, so two kernels in one
 /// process never share them. Python `_mem(kernel)`.
 final class AIMemoryState: @unchecked Sendable {
     let lock = NSLock()
     var heads: [String: [JSON]] = [:]
     var bodies: [String: OrderedDictionary<Int64, String>] = [:]
-    var grants: [String: [JSON]] = [:]
     /// agent → (watcher id → wants bodies), in registration order.
     var watchers: [String: OrderedDictionary<String, Bool>] = [:]
 
@@ -79,13 +77,12 @@ enum AIMemory {
         lock.unlock()
     }
 
-    /// Drop a deleted agent's head, bodies, grants and watchers in this kernel
+    /// Drop a deleted agent's head, bodies and watchers in this kernel
     /// (`AIBackend.onDelete`).
     static func forget(_ kernel: Kernel, _ id: String) {
         of(kernel).with { m in
             m.heads[id] = nil
             m.bodies[id] = nil
-            m.grants[id] = nil
             m.watchers[id] = nil
         }
     }
@@ -112,18 +109,16 @@ func storeOf(_ selfId: String, _ kernel: Kernel) throws -> String {
     return s
 }
 
-/// ONE gated send to this agent's memory store, AS THIS AGENT — the store keys a
-/// row by its writer, and this is this agent's own memory, even when the code runs
-/// outside its own dispatch. A refusal or a failed dispatch is a
-/// `MemoryStoreError` — the turn fails fast. Python `_store_call`.
+/// ONE gated send to this agent's memory store, as this agent — this code runs in
+/// its own dispatch or a task it spawned, so the send is its own (the store keys
+/// a row by its writer). A refusal or a failed dispatch is a `MemoryStoreError` —
+/// the turn fails fast. Python `_store_call`.
 @discardableResult
 func storeCall(
     _ selfId: String, _ kernel: Kernel, _ payload: OrderedDictionary<String, JSON>
 ) async throws -> JSON {
     let sid = try storeOf(selfId, kernel)
-    let out = await KernelTaskLocals.$currentSender.withValue(AgentId(selfId)) {
-        await kernel.send([Item(AgentId(sid), .object(payload))])[0]
-    }
+    let out = await kernel.send([Item(AgentId(sid), .object(payload))])[0]
     let res = out.result
     if out.status != .completed || (res.asObject != nil && pyTruthy(res["error"])) {
         let err: String = res.asObject != nil ? pyStr(res["error"]) : out.status.rawValue
@@ -195,9 +190,7 @@ func refreshHead(_ selfId: String, _ kernel: Kernel) async throws -> [JSON] {
 /// `append`s to its own store without one (a note to itself) is memory, not a
 /// turn: it stays in the store, `grep` finds it, the view never renders it.
 ///
-/// A `fork` row (`fork_from`) stands where another owner's granted rows are READ
-/// back each time, under the grant — so a revoked grant fails this read. Python
-/// `_load_history`.
+/// Python `_load_history`.
 func loadHistory(_ selfId: String, _ kernel: Kernel, behind: Bool = false) async throws -> [JSON] {
     var rows: [JSON]
     if behind {
@@ -211,9 +204,6 @@ func loadHistory(_ selfId: String, _ kernel: Kernel, behind: Bool = false) async
         if let kind, BOOKKEEPING.contains(kind) { return false }
         guard let role = r["role"].asString else { return false }
         return TURN_ROLES.contains(role)
-    }
-    if rows.contains(where: { $0["kind"].asString == "fork" }) {
-        rows = try await expandForks(selfId, kernel, rows)
     }
     return rows
 }
@@ -261,71 +251,7 @@ func heldBodies(_ selfId: String, _ kernel: Kernel) -> OrderedDictionary<Int64, 
     AIMemory.of(kernel).with { $0.bodies[selfId] ?? [:] }
 }
 
-// ─── sharing: fork rows, grants, and the row event ───────────────────────
-//
-// CONTEXT IS SHARED BY GRANT, IN THE STORE. A model shares a scope of its OWN rows
-// with another agent by calling its store's `share` (an explicit choice,
-// recorded); the reader starts from it with `fork_from`, which appends ONE `fork`
-// row naming the grant. That row is rendered, every time the conversation is
-// read, as the owner's rows READ BACK UNDER THE GRANT — quoted, attributed,
-// read-only, never the reader's own turns. A revoked or pruned grant fails that
-// read: fail fast.
-
-/// Python `FORK_FRAMING`.
-func forkFraming(owner: String, asOf: String) -> String {
-    "Above is \(owner)'s thread as of row \(asOf), shared read-only. This is a fork: "
-        + "you are a new agent, not \(owner)."
-}
-
-/// The owner's granted rows as ONE quoted block. A row that is itself a `fork` in
-/// the owner's thread came from a THIRD agent's grant the reader does not hold:
-/// it stands as a stub in its place — position kept, no content. Python
-/// `_render_shared`.
-func renderShared(owner: String, asOf: JSON, rows: [JSON]) -> String {
-    var lines = ["[shared from \(owner) \u{b7} read-only \u{b7} as of row \(pyStr(asOf))]"]
-    for r in rows {
-        if r["kind"].asString == "view" { continue }
-        if r["kind"].asString == "fork" {
-            // THE THIRD OWNER'S OWN ROW ID — the newest row it shared (`as_of`),
-            // not the fork row's id in the middle owner's thread: `request_share
-            // {row}` goes to that owner, and it can only share a row that is its
-            // own.
-            lines.append(
-                "[row \(pyStr(r["as_of"])) \u{b7} owner \(pyStr(r["owner"])) \u{b7} not shared with you]")
-            continue
-        }
-        let c = r["content"]
-        let text = c.asString ?? pyJsonDumps(c)
-        let role = pyTruthy(r["role"]) ? pyStr(r["role"]) : "user"
-        lines.append("(\(role) \u{b7} row \(pyStr(r["id"]))) \(text)")
-    }
-    lines.append("[end of \(owner)'s shared rows]")
-    return lines.joined(separator: "\n")
-}
-
-/// Every `fork` row read back under its grant. Python `_expand_forks`.
-func expandForks(_ selfId: String, _ kernel: Kernel, _ rows: [JSON]) async throws -> [JSON] {
-    var out: [JSON] = []
-    for r in rows {
-        guard r["kind"].asString == "fork" else {
-            out.append(r)
-            continue
-        }
-        let res = try await storeCall(
-            selfId, kernel, ["type": .string("read"), "grant": r["grant"]])
-        let shared = res["rows"].asArray ?? []
-        let content = pyTruthy(r["content"]) ? pyStr(r["content"]) : ""
-        let head = content.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
-            .first.map(String.init) ?? ""
-        out.append(
-            withField(
-                r, "content",
-                .string(
-                    head + "\n"
-                        + renderShared(owner: pyStr(r["owner"]), asOf: r["as_of"], rows: shared))))
-    }
-    return out
-}
+// ─── the row event ───────────────────────────────────────────────
 
 /// ROW EVENT digest — content-free. Python `_row_digest`.
 func memoryRowDigest(_ row: JSON) -> OrderedDictionary<String, JSON> {
@@ -339,60 +265,12 @@ func memoryRowDigest(_ row: JSON) -> OrderedDictionary<String, JSON> {
     ]
 }
 
-/// The grants this agent GAVE, cached write-through (refreshed after the model
-/// calls its store's `share`/`unshare`). Python `_my_grants`.
-@discardableResult
-func myGrants(_ selfId: String, _ kernel: Kernel) async throws -> [JSON] {
-    let mem = AIMemory.of(kernel)
-    if let g = mem.with({ $0.grants[selfId] }) { return g }
-    let res = try await storeCall(
-        selfId, kernel, ["type": .string("grants"), "side": .string("given")])
-    let g = res["grants"].asArray ?? []
-    mem.with { $0.grants[selfId] = g }
-    return g
-}
-
-/// Drop the cached grants — the next body event re-reads them.
-func forgetGrants(_ selfId: String, _ kernel: Kernel) {
-    _ = AIMemory.of(kernel).with { $0.grants.removeValue(forKey: selfId) }
-}
-
-/// Does grant `g` cover row `rid`? Python `_grant_covers`.
-func grantCovers(_ g: JSON, _ rid: Int64, _ head: [JSON]) -> Bool {
-    let scope = g["scope"]
-    let live = g["mode"].asString == "live"
-    if !live, let asOf = g["as_of"].asInt, rid > asOf { return false }
-    guard let sc = scope.asObject else { return false }
-    if sc["row"] != nil { return rid == scope["row"].asInt }
-    if sc["range"] != nil {
-        return rid >= (scope["range"]["from"].asInt ?? 0)
-            && (live || rid <= (scope["range"]["to"].asInt ?? 0))
-    }
-    if sc["head_until"] != nil { return live || rid <= (scope["head_until"].asInt ?? 0) }
-    if sc["fold"] != nil {
-        var byId: [Int64: JSON] = [:]
-        for r in head { if let id = rowId(r) { byId[id] = r } }
-        var seen: Set<Int64> = []
-        var stack = [scope["fold"].asInt ?? 0]
-        while let x = stack.popLast() {
-            if seen.contains(x) { continue }
-            seen.insert(x)
-            stack.append(contentsOf: (byId[x]?["refs"].asArray ?? []).compactMap { $0.asInt })
-        }
-        return seen.contains(rid)
-    }
-    return false
-}
-
 /// Put the row event in every watcher's inbox: a content-free digest, plus the
-/// content for a `body:true` watcher that holds a live grant covering the row
-/// (the grant check uses the cached grants — see `myGrants`). A watcher whose
-/// inbox is gone is dropped. Python `_announce_row`.
+/// content for a `body:true` watcher. A watcher whose inbox is gone is dropped.
+/// Python `_announce_row`.
 func announceRow(_ selfId: String, _ kernel: Kernel, _ row: JSON) {
     let mem = AIMemory.of(kernel)
-    let (ws, grants, head) = mem.with { m in
-        (m.watchers[selfId] ?? [:], m.grants[selfId] ?? [], m.heads[selfId] ?? [])
-    }
+    let ws = mem.with { $0.watchers[selfId] ?? [:] }
     if ws.isEmpty { return }
     for (wid, body) in ws {
         guard kernel.hasInbox(AgentId(wid)) else {
@@ -400,11 +278,7 @@ func announceRow(_ selfId: String, _ kernel: Kernel, _ row: JSON) {
             continue
         }
         var digest = memoryRowDigest(row)
-        if body, let rid = rowId(row),
-            grants.contains(where: { $0["reader"].asString == wid && grantCovers($0, rid, head) })
-        {
-            digest["content"] = row["content"]
-        }
+        if body { digest["content"] = row["content"] }
         let ev: JSON = .object([
             "type": .string("row"), "source": .string(selfId), "row": .object(digest),
         ])
@@ -427,7 +301,6 @@ func setWatcher(_ selfId: String, _ kernel: Kernel, _ watcher: String, body: Boo
 func forgetHead(_ selfId: String, _ kernel: Kernel) {
     AIMemory.of(kernel).with { m in
         m.heads.removeValue(forKey: selfId)
-        m.grants.removeValue(forKey: selfId)
     }
 }
 

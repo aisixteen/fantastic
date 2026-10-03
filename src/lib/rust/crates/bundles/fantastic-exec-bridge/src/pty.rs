@@ -245,18 +245,14 @@ async fn write_all(pty: &Pty, data: &[u8]) -> std::io::Result<usize> {
     Ok(written)
 }
 
-/// `(pty, None)` for a live PTY job this agent owns — and, for a verb that
-/// DRIVES it (`drive`), one this caller started (or the operator) — or the
-/// refusal (python `_pty_job`).
-fn pty_job(verb: &str, owner: &AgentId, payload: &Value, drive: bool) -> Result<Arc<Pty>, Value> {
+/// `(pty, None)` for a live PTY job this agent owns, or the refusal (python
+/// `_pty_job`).
+fn pty_job(verb: &str, owner: &AgentId, payload: &Value) -> Result<Arc<Pty>, Value> {
     let jid = crate::require_job(verb, payload)?;
     let g = jobs::jobs();
     let Some(job) = jid.find(&g, owner) else {
         return Err(crate::no_such_job(&jid));
     };
-    if drive && !crate::yours(job) {
-        return Err(crate::not_yours(verb, &jid));
-    }
     let Some(pty) = job.pty.clone() else {
         return Err(bad(verb, "job_id", "a PTY job (started with `pty`)"));
     };
@@ -292,7 +288,7 @@ pub fn dims(verb: &str, raw: &Value) -> Result<(u16, u16), Value> {
 
 /// `write {job_id, data}` — keystrokes / paste.
 pub async fn write_reply(owner: &AgentId, payload: &Value) -> Value {
-    let pty = match pty_job("write", owner, payload, true) {
+    let pty = match pty_job("write", owner, payload) {
         Ok(p) => p,
         Err(e) => return e,
     };
@@ -308,7 +304,7 @@ pub async fn write_reply(owner: &AgentId, payload: &Value) -> Value {
 
 /// `resize {job_id, cols, rows}`.
 pub fn resize_reply(owner: &AgentId, payload: &Value) -> Value {
-    let pty = match pty_job("resize", owner, payload, true) {
+    let pty = match pty_job("resize", owner, payload) {
         Ok(p) => p,
         Err(e) => return e,
     };
@@ -329,7 +325,7 @@ pub fn resize_reply(owner: &AgentId, payload: &Value) -> Value {
 
 /// `ack {job_id, chars}` — flow control.
 pub fn ack_reply(owner: &AgentId, payload: &Value) -> Value {
-    let pty = match pty_job("ack", owner, payload, false) {
+    let pty = match pty_job("ack", owner, payload) {
         Ok(p) => p,
         Err(e) => return e,
     };
@@ -395,7 +391,7 @@ pub fn output_reply(owner: &AgentId, payload: &Value) -> Value {
 /// `paste_image` on the TEXT channel: there are no bytes to paste — the job is
 /// checked first, as python's handler does, then `data` refuses.
 pub fn paste_image_text(owner: &AgentId, payload: &Value) -> Value {
-    match pty_job("paste_image", owner, payload, true) {
+    match pty_job("paste_image", owner, payload) {
         Ok(_) => bad("paste_image", "data", "raw bytes"),
         Err(e) => e,
     }
@@ -403,7 +399,7 @@ pub fn paste_image_text(owner: &AgentId, payload: &Value) -> Value {
 
 /// `paste_image {job_id, data:bytes, mime}` — the BINARY channel: `data` IS the blob.
 pub async fn paste_image_reply(owner: &AgentId, header: &Value, data: &[u8]) -> Value {
-    let pty = match pty_job("paste_image", owner, header, true) {
+    let pty = match pty_job("paste_image", owner, header) {
         Ok(p) => p,
         Err(e) => return e,
     };

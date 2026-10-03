@@ -3,12 +3,38 @@
 // `ai_core/tests/test_view_recall.py`, case for case.
 
 import FantasticJSON
-import FantasticKernel
 import Foundation
 import OrderedCollections
 import Testing
 
 @testable import FantasticAICore
+@testable import FantasticKernel
+
+// THE AGENT'S OWN TURN, which these tests stand in for (python `as_agent`): the
+// memory store keys a row by its writer, so every self-read and self-write runs
+// as the agent.
+
+private func loadHistory(_ selfId: String, _ kernel: Kernel, behind: Bool = false) async throws
+    -> [JSON]
+{
+    try await KernelTaskLocals.$sender.withValue(AgentId(selfId)) {
+        try await FantasticAICore.loadHistory(selfId, kernel, behind: behind)
+    }
+}
+
+private func saveView(_ selfId: String, _ kernel: Kernel, ids: [JSON], budget: Int64, why: String)
+    async throws
+{
+    try await KernelTaskLocals.$sender.withValue(AgentId(selfId)) {
+        try await FantasticAICore.saveView(selfId, kernel, ids: ids, budget: budget, why: why)
+    }
+}
+
+private func loadView(_ selfId: String, _ kernel: Kernel) async throws -> JSON? {
+    try await KernelTaskLocals.$sender.withValue(AgentId(selfId)) {
+        try await FantasticAICore.loadView(selfId, kernel)
+    }
+}
 
 /// One agent id per suite: the stripped set and the incarnation table are
 /// process-global, keyed by agent, and suites run in parallel.
@@ -128,8 +154,8 @@ struct ViewRecallTests {
         let v = try #require(try await loadView(agent.id.value, kernel))
         #expect(v["ids"] == .array(ids) && v["why"].asString == "test")
 
-        let (msgs, n) = try await backend.assemble(
-            agent: agent, userText: "live", systemPrompt: "sys", kernel: kernel)
+        let (msgs, n) = try await KernelTaskLocals.$sender.withValue(agent.id) { try await backend.assemble(
+            agent: agent, userText: "live", systemPrompt: "sys", kernel: kernel) }
         #expect(n == a.count)
         let body = Array(msgs[1..<(msgs.count - 1)])
         // the array, in order, then every row appended after its newest member
@@ -147,8 +173,8 @@ struct ViewRecallTests {
             agent.id.value, kernel,
             ids: [.object(["id": .string("gone:0000"), "res": .string("full")])], budget: 1,
             why: "x")
-        let (msgs, _) = try await backend.assemble(
-            agent: agent, userText: "live", systemPrompt: "sys", kernel: kernel)
+        let (msgs, _) = try await KernelTaskLocals.$sender.withValue(agent.id) { try await backend.assemble(
+            agent: agent, userText: "live", systemPrompt: "sys", kernel: kernel) }
         #expect(msgs.count == 1 + a.count + 1)
         #expect(backend.getViewSource(AI)?.hasPrefix("store") == true)
     }
@@ -178,8 +204,8 @@ struct ViewRecallTests {
         let goal = f.row("user", "GOAL", "user:goal")
         let a = f.chain("a", 20)
         f.seed([goal] + a)
-        let r = try await backend.contextRecall(
-            agent: agent, payload: dry(), kernel: kernel, provider: nil)
+        let r = try await KernelTaskLocals.$sender.withValue(agent.id) { try await backend.contextRecall(
+            agent: agent, payload: dry(), kernel: kernel, provider: nil) }
         #expect(r["degraded"].asBool == true && (r["kept"].asInt ?? 0) >= 1)
         let v = try #require(try await loadView(agent.id.value, kernel))
         #expect(
@@ -189,8 +215,8 @@ struct ViewRecallTests {
         let rec = rows.filter { $0["kind"].asString == "recall" }
         #expect(rec.count == 1 && (rec.first?["content"].asString ?? "").contains("[recall "))
         // a second recall is deterministic on the same store (modulo its own new row)
-        let r2 = try await backend.contextRecall(
-            agent: agent, payload: dry(), kernel: kernel, provider: nil)
+        let r2 = try await KernelTaskLocals.$sender.withValue(agent.id) { try await backend.contextRecall(
+            agent: agent, payload: dry(), kernel: kernel, provider: nil) }
         #expect((r2["kept"].asInt ?? 0) >= (r["kept"].asInt ?? 0) - 1)
     }
 
@@ -214,8 +240,8 @@ struct ViewRecallTests {
                 "why": .string("the last two replies matter"),
             ]).serialize()
         }
-        let r = try await backend.contextRecall(
-            agent: agent, payload: .object([:]), kernel: kernel, provider: provider)
+        let r = try await KernelTaskLocals.$sender.withValue(agent.id) { try await backend.contextRecall(
+            agent: agent, payload: .object([:]), kernel: kernel, provider: provider) }
         #expect(r["degraded"].asBool == false && r["why"].asString == "the last two replies matter")
         let v = try #require(try await loadView(agent.id.value, kernel))
         let fullReplies = (v["ids"].asArray ?? []).filter {
@@ -233,8 +259,8 @@ struct ViewRecallTests {
         backend.setMark(AI, index: 3, client: "cli")
         AIStripStrategy.set(kernel, AI, ["n:1"])
         let before = try await loadHistory(agent.id.value, kernel).count
-        _ = try await backend.contextRecall(
-            agent: agent, payload: dry(), kernel: kernel, provider: nil)
+        _ = try await KernelTaskLocals.$sender.withValue(agent.id) { try await backend.contextRecall(
+            agent: agent, payload: dry(), kernel: kernel, provider: nil) }
         #expect(backend.getProjection(AI) == .null)
         #expect(markOf(backend, AI) == nil)
         #expect(!AIStripStrategy.has(kernel, AI))
@@ -277,9 +303,9 @@ struct ViewRecallTests {
             + [f.row("user", "now?", nil)]
         // the conversation the projection folds is the agent's store
         f.seed(Array(body.dropFirst()))
-        let out = try await backend.projectContext(
+        let out = try await KernelTaskLocals.$sender.withValue(agent.id) { try await backend.projectContext(
             provider: MockProvider(), agent: agent, clientId: "cli", messages: body,
-            storeLen: body.count - 1, kernel: kernel)
+            storeLen: body.count - 1, kernel: kernel) }
         guard case .projected = out else {
             Issue.record("the projection must fire, not failfast")
             return
@@ -364,8 +390,8 @@ struct ViewRecallTests {
             f.row("user", "[reply to notes:new · notes read]\nfiller_9 body", "ai:new2", "ai:new1"),
         ]
         f.seed(later)
-        let (msgs, _) = try await backend.assemble(
-            agent: agent, userText: "live", systemPrompt: "sys", kernel: kernel)
+        let (msgs, _) = try await KernelTaskLocals.$sender.withValue(agent.id) { try await backend.assemble(
+            agent: agent, userText: "live", systemPrompt: "sys", kernel: kernel) }
         let ids = msgs[1..<(msgs.count - 1)].map { $0["id"] }
         #expect(Array(ids.prefix(2)) == [a[0]["id"], a[2]["id"]], "the array first")
         #expect(
@@ -379,8 +405,8 @@ struct ViewRecallTests {
         f.seed(
             [f.row("user", "TASK 0: first", "user:t0")] + f.chain("a", 2)
                 + [f.row("user", "TASK 1: latest work", "user:t1")])
-        _ = try await backend.contextRecall(
-            agent: agent, payload: dry(), kernel: kernel, provider: nil)
+        _ = try await KernelTaskLocals.$sender.withValue(agent.id) { try await backend.contextRecall(
+            agent: agent, payload: dry(), kernel: kernel, provider: nil) }
         let rec = try #require(
             try await loadHistory(agent.id.value, kernel).last {
                 $0["kind"].asString == "recall"
@@ -401,8 +427,8 @@ struct ViewRecallTests {
         let rows = [t0] + a + [t1] + b
         f.seed(rows)
         f.seed([f.fold([f.id("user:t1")] + f.ids(b), "task 1 folded", "body", false)])
-        _ = try await backend.contextRecall(
-            agent: agent, payload: dry(), kernel: kernel, provider: nil)
+        _ = try await KernelTaskLocals.$sender.withValue(agent.id) { try await backend.contextRecall(
+            agent: agent, payload: dry(), kernel: kernel, provider: nil) }
         let rec = try #require(
             try await loadHistory(agent.id.value, kernel).last {
                 $0["kind"].asString == "recall"
@@ -524,8 +550,8 @@ struct ViewRecallTests {
         ] {
             let (kernel, agent, f, backend) = await boot(meta: meta)
             f.seed([f.row("user", "GOAL", "user:goal")])
-            let r = try await backend.contextRecall(
-                agent: agent, payload: dry(), kernel: kernel, provider: nil)
+            let r = try await KernelTaskLocals.$sender.withValue(agent.id) { try await backend.contextRecall(
+                agent: agent, payload: dry(), kernel: kernel, provider: nil) }
             budgets.append(r["budget"].asInt ?? -1)
         }
         #expect(budgets[1] > budgets[0], "\(budgets)")
@@ -540,9 +566,9 @@ struct ViewRecallTests {
             asked.bump()
             return #"{"expand": [], "why": "asked"}"#
         }
-        let r = try await backend.contextRecall(
+        let r = try await KernelTaskLocals.$sender.withValue(agent.id) { try await backend.contextRecall(
             agent: agent, payload: .object(["dry": .integer(1)]), kernel: kernel,
-            provider: provider)
+            provider: provider) }
         #expect(asked.count == 0, "dry:1 must make no model call")
         #expect(r["degraded"] == .bool(true) && r["why"].asString == "mechanical fit")
     }
@@ -552,26 +578,26 @@ struct ViewRecallTests {
         // An EMPTY answer is NO answer: degraded stays true.
         let (k1, a1, f1, b1) = await boot()
         f1.seed([f1.row("user", "GOAL", "user:goal")] + f1.chain("a", 6, big: false))
-        let empty = try await b1.contextRecall(
+        let empty = try await KernelTaskLocals.$sender.withValue(a1.id) { try await b1.contextRecall(
             agent: a1, payload: .object([:]), kernel: k1,
-            provider: ComputedProvider { _ in "{}" })
+            provider: ComputedProvider { _ in "{}" }) }
         #expect(empty["degraded"] == .bool(true) && empty["why"].asString == "mechanical fit")
 
         // `why: 0` is FALSY — it reads `chosen`, not `0`.
         let (k2, a2, f2, b2) = await boot()
         f2.seed([f2.row("user", "GOAL", "user:goal")] + f2.chain("a", 6, big: false))
-        let zero = try await b2.contextRecall(
+        let zero = try await KernelTaskLocals.$sender.withValue(a2.id) { try await b2.contextRecall(
             agent: a2, payload: .object([:]), kernel: k2,
-            provider: ComputedProvider { _ in #"{"expand": [], "why": 0}"# })
+            provider: ComputedProvider { _ in #"{"expand": [], "why": 0}"# }) }
         #expect(zero["why"].asString == "chosen", "\(zero.serialize())")
         #expect(zero["degraded"] == .bool(false))
 
         // A non-string `why` is its python `str`.
         let (k3, a3, f3, b3) = await boot()
         f3.seed([f3.row("user", "GOAL", "user:goal")] + f3.chain("a", 6, big: false))
-        let listy = try await b3.contextRecall(
+        let listy = try await KernelTaskLocals.$sender.withValue(a3.id) { try await b3.contextRecall(
             agent: a3, payload: .object([:]), kernel: k3,
-            provider: ComputedProvider { _ in #"{"expand": [], "why": ["a"]}"# })
+            provider: ComputedProvider { _ in #"{"expand": [], "why": ["a"]}"# }) }
         #expect(listy["why"].asString == "['a']", "\(listy.serialize())")
     }
 
@@ -582,18 +608,18 @@ struct ViewRecallTests {
         f1.seed([f1.row("user", "GOAL", "user:goal")] + f1.chain("a", 6, big: false))
         // A string is one candidate — "12" is no head id, so the answer still
         // counts (degraded false) and nothing is expanded.
-        let chars = try await b1.contextRecall(
+        let chars = try await KernelTaskLocals.$sender.withValue(a1.id) { try await b1.contextRecall(
             agent: a1, payload: .object([:]), kernel: k1,
-            provider: ComputedProvider { _ in #"{"expand": "12", "why": "w"}"# })
+            provider: ComputedProvider { _ in #"{"expand": "12", "why": "w"}"# }) }
         #expect(chars["degraded"] == .bool(false) && chars["expanded"].asInt == 0)
 
         // A truthy int is wrapped: one candidate, and the recall completes.
         let (k2, a2, f2, b2) = await boot()
         f2.seed([f2.row("user", "GOAL", "user:goal")] + f2.chain("a", 6, big: false))
         let before = try await loadHistory(a2.id.value, k2).count
-        let num = try await b2.contextRecall(
+        let num = try await KernelTaskLocals.$sender.withValue(a2.id) { try await b2.contextRecall(
             agent: a2, payload: .object([:]), kernel: k2,
-            provider: ComputedProvider { _ in #"{"expand": 5, "why": "w"}"# })
+            provider: ComputedProvider { _ in #"{"expand": 5, "why": "w"}"# }) }
         #expect(num["degraded"] == .bool(false), "\(num.serialize())")
         let after = try await loadHistory(a2.id.value, k2).count
         #expect(after == before + 1, "the recall row is written")
@@ -617,9 +643,9 @@ struct ViewRecallTests {
         // The projection REFUSES by name rather than silently running compact.
         f.seed([f.row("user", "GOAL", "user:goal")] + f.chain("a", 20))
         let big = (0..<40).map { plainTurn("user", "\(BIG) \($0)") }
-        let outcome = try await backend.projectContext(
+        let outcome = try await KernelTaskLocals.$sender.withValue(agent.id) { try await backend.projectContext(
             provider: MockProvider(), agent: agent, clientId: "c",
-            messages: [plainTurn("system", "sys")] + big, storeLen: big.count, kernel: kernel)
+            messages: [plainTurn("system", "sys")] + big, storeLen: big.count, kernel: kernel) }
         guard case .failed(let err) = outcome else {
             Issue.record("the projection ran compact instead of refusing")
             return
@@ -643,8 +669,8 @@ struct ViewRecallTests {
             f.row("assistant", "noted", "ai:1"),
         ])
         #expect(try await loadHistory(agent.id.value, kernel).count == 2)
-        let out = try await backend.contextClear(
-            agent: agent, payload: .object(["why": .string("fresh start")]), kernel: kernel)
+        let out = try await KernelTaskLocals.$sender.withValue(agent.id) { try await backend.contextClear(
+            agent: agent, payload: .object(["why": .string("fresh start")]), kernel: kernel) }
         #expect(out["rows"].asInt == 2)
         let hist = try await loadHistory(agent.id.value, kernel)
         #expect(hist.count == 1 && hist[0]["kind"].asString == "clear")
@@ -657,8 +683,8 @@ struct ViewRecallTests {
         #expect(!JSON.array(hist).serialize().contains("HALCYON"))
         // behind the boundary, everything is still there
         #expect(try await loadHistory(agent.id.value, kernel, behind: true).count == 3)
-        let r = try await backend.recallVerb(
-            agent: agent, payload: .object(["query": .string("codename")]), kernel: kernel)
+        let r = try await KernelTaskLocals.$sender.withValue(agent.id) { try await backend.recallVerb(
+            agent: agent, payload: .object(["query": .string("codename")]), kernel: kernel) }
         #expect(r["total"].asInt == 1)
         // the persisted view is emptied, so assembly renders the store from the clear on
         let cleared = try #require(try await loadView(agent.id.value, kernel))

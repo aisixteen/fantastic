@@ -215,7 +215,7 @@ async fn an_agent_cannot_write_another_agents_namespace() {
     let kernel = kernel_at(&store);
     wire(&kernel, &store, DESK).await;
 
-    let forged = fantastic_kernel::send::with_sender(AgentId::from("attacker"), async {
+    let forged = fantastic_kernel::test_support::as_agent(AgentId::from("attacker"), async {
         kernel
             .send(vec![Item::new(
                 AgentId::from("kernel"),

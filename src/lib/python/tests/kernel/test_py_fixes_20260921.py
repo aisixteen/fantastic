@@ -35,8 +35,6 @@ async def _start_with_store(k):
                     "parent_id": k.id,
                     "id": "memory",
                     "handler_module": "ram_store.tools",
-                    "operator": True,
-                    "admins": ["kernel"],
                 },
             }
         ]
@@ -102,7 +100,6 @@ def test_a_one_shot_is_fast_and_clean(tmp_path):
                 "id": "memory",
                 "handler_module": "ram_store.tools",
                 "parent_id": "kernel_state",
-                "operator": True,
             }
         )
     )
@@ -171,7 +168,7 @@ def test_a_daemon_releases_its_lock_well_inside_the_stop_window(tmp_path):
             }
         )
     )
-    _record(d, "memory", handler_module="ram_store.tools", operator=True)
+    _record(d, "memory", handler_module="ram_store.tools")
     _record(
         d,
         "store",

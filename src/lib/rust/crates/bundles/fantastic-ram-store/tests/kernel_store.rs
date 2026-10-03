@@ -15,8 +15,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use fantastic_kernel::bootstrap::{bootstrap, BootstrapOptions};
 use fantastic_kernel::bundle::{Bundle, BundleError, BundleRegistry, Reply};
+use fantastic_kernel::test_support::as_agent;
 use fantastic_kernel::test_support::register_root_loader;
-use fantastic_kernel::{with_sender, AgentId, Item, Kernel, Outcome};
+use fantastic_kernel::{AgentId, Item, Kernel, Outcome};
 use fantastic_ram_store::RamStoreBundle;
 use serde_json::{json, Map, Value};
 
@@ -127,17 +128,25 @@ async fn mk(k: &Arc<Kernel>, aid: &str, extra: Value) -> String {
     }
     let r = call(k, "kernel", p).await.result;
     assert_eq!(r["id"], json!(aid), "{r}");
+    // both ends explicit: every live agent the grant names accepts `aid` back
+    if let Some(cc) = extra.get("can_call").and_then(Value::as_object) {
+        for (key, verbs) in cc {
+            if !key.starts_with('$') && k.resolve_target(key).is_some() {
+                fantastic_kernel::test_support::grant(k, key, "callable_by", aid, verbs.clone());
+            }
+        }
+    }
     aid.to_string()
 }
 
 /// A ram_store `memory` under the root, named by the root; the kernel started.
-async fn with_store(k: &Arc<Kernel>, operator: bool, start: bool) {
+async fn with_store(k: &Arc<Kernel>, start: bool) {
     let r = call(
         k,
         "kernel",
         json!({
             "type": "create_agent", "parent_id": root_id(k), "id": "memory",
-            "handler_module": "ram_store.tools", "operator": operator, "admins": ["kernel"],
+            "handler_module": "ram_store.tools",
         }),
     )
     .await
@@ -196,20 +205,10 @@ async fn kernel_start_fails_loud_without_a_store() {
 }
 
 #[tokio::test]
-async fn kernel_start_refuses_a_store_that_does_not_serve_the_operator() {
-    let (k, _) = seeded();
-    with_store(&k, false, false).await;
-    let out = k.start(false).await;
-    assert_eq!(out["reason"], json!("unauthorized"), "{out}");
-    assert!(out["hint"].as_str().unwrap().contains("operator"));
-    assert!(!k.started());
-}
-
-#[tokio::test]
 async fn kernel_start_boots_the_store_first_then_everyone() {
     let (k, _) = seeded();
     mk(&k, "probe", json!({})).await;
-    with_store(&k, true, false).await;
+    with_store(&k, false).await;
     let out = call(&k, "kernel", json!({"type": "kernel_start"}))
         .await
         .result;
@@ -230,7 +229,7 @@ async fn kernel_start_boots_the_store_first_then_everyone() {
 async fn execution_rows_flush_into_the_store_and_leave_ram() {
     let (k, _) = seeded();
     mk(&k, "probe", json!({})).await;
-    with_store(&k, true, true).await;
+    with_store(&k, true).await;
     let out = call(&k, "probe", json!({"type": "work"})).await;
     let id = pid(&out);
     k.flush_executions().await;
@@ -261,7 +260,7 @@ async fn execution_rows_flush_into_the_store_and_leave_ram() {
 async fn stored_rows_keep_none_and_reduce_bytes_to_a_length() {
     let (k, _) = seeded();
     mk(&k, "probe", json!({})).await;
-    with_store(&k, true, true).await;
+    with_store(&k, true).await;
     let out = k
         .send(vec![Item::new(
             AgentId::from("probe"),
@@ -286,14 +285,13 @@ async fn stored_rows_keep_none_and_reduce_bytes_to_a_length() {
         before["rows"].as_array().unwrap()[..]
     );
     assert_eq!(after["fold_refs"], before["fold_refs"]);
-    assert_eq!(after["grants"], before["grants"]);
 }
 
 #[tokio::test]
 async fn a_settle_keeps_the_body_only_when_named_or_the_error_when_dead() {
     let (k, _) = seeded();
     mk(&k, "probe", json!({})).await;
-    with_store(&k, true, true).await;
+    with_store(&k, true).await;
     let named = call_named(&k, "probe", json!({"type": "work"}), "n-1").await;
     let plain = call(&k, "probe", json!({"type": "work"})).await;
     let dead = call(&k, "probe", json!({"type": "fail"})).await;
@@ -325,7 +323,7 @@ async fn repeated_ledger_calls_grow_the_store_linearly() {
     // Measured before the fix: ~6x per `ledger` call (2 KB → 14.8 MB in five).
     let (k, _) = seeded();
     mk(&k, "probe", json!({})).await;
-    with_store(&k, true, true).await;
+    with_store(&k, true).await;
     async fn size(k: &Arc<Kernel>) -> usize {
         k.flush_executions().await;
         serde_json::to_string(&dump(k).await).unwrap().len()
@@ -347,7 +345,7 @@ async fn repeated_ledger_calls_grow_the_store_linearly() {
 async fn the_flush_records_itself_and_never_loops() {
     let (k, _) = seeded();
     mk(&k, "probe", json!({})).await;
-    with_store(&k, true, true).await;
+    with_store(&k, true).await;
     call(&k, "probe", json!({"type": "work"})).await;
     tokio::time::sleep(Duration::from_millis(600)).await; // the debounce, several times over
     let n1 = kernel_rows(&k).await.len();
@@ -388,9 +386,9 @@ async fn ledger_is_a_projection_of_store_and_ram_scoped_to_the_caller() {
         json!({"can_call": {"probe": "*", root_id(&k): ["ledger", "ack_deadletter"]}}),
     )
     .await;
-    with_store(&k, true, true).await;
+    with_store(&k, true).await;
     let kk = Arc::clone(&k);
-    let mine = with_sender(AgentId::from("caller"), async move {
+    let mine = as_agent(AgentId::from("caller"), async move {
         call_named(&kk, "probe", json!({"type": "work"}), "mine-1").await
     })
     .await;
@@ -432,7 +430,7 @@ async fn ledger_is_a_projection_of_store_and_ram_scoped_to_the_caller() {
         "RAM overlay"
     );
     let kk = Arc::clone(&k);
-    let scoped = with_sender(AgentId::from("caller"), async move {
+    let scoped = as_agent(AgentId::from("caller"), async move {
         call(&kk, "kernel", json!({"type": "ledger"})).await.result
     })
     .await;
@@ -453,7 +451,7 @@ async fn ledger_is_a_projection_of_store_and_ram_scoped_to_the_caller() {
 async fn named_dedup_survives_the_flush() {
     let (k, state) = seeded();
     mk(&k, "probe", json!({})).await;
-    with_store(&k, true, true).await;
+    with_store(&k, true).await;
     let first = call_named(&k, "probe", json!({"type": "count"}), "job-1").await;
     k.flush_executions().await;
     assert!(
@@ -479,7 +477,7 @@ async fn named_dedup_survives_a_restart_on_the_same_store() {
         .kernel;
     call(&k, &root_id(&k), json!({"type": "boot"})).await; // mints the guid
     mk(&k, "probe", json!({})).await;
-    with_store(&k, true, true).await;
+    with_store(&k, true).await;
     call_named(&k, "probe", json!({"type": "count"}), "nightly").await;
     k.flush_executions().await;
     let tables = dump(&k).await;
@@ -518,12 +516,12 @@ async fn a_dead_letter_is_announced_listed_and_acked() {
         json!({"can_call": {"probe": "*", root_id(&k): ["ledger", "ack_deadletter"]}}),
     )
     .await;
-    with_store(&k, true, true).await;
+    with_store(&k, true).await;
     let mut inbox = k.ensure_inbox(&AgentId::from("caller"));
     let as_caller = |p: Value, target: &'static str| {
         let kk = Arc::clone(&k);
         async move {
-            with_sender(AgentId::from("caller"), async move {
+            as_agent(AgentId::from("caller"), async move {
                 call(&kk, target, p).await
             })
             .await
@@ -581,7 +579,7 @@ async fn a_dead_letter_is_announced_listed_and_acked() {
 async fn a_graceful_stop_lands_in_flight_work_as_cancelled_dead_letters() {
     let (k, state) = seeded();
     mk(&k, "probe", json!({})).await;
-    with_store(&k, true, true).await;
+    with_store(&k, true).await;
     // shorten nothing: the quiet window is the kernel's; a slow task is cancelled
     let kk = Arc::clone(&k);
     let slow = tokio::spawn(async move { call(&kk, "probe", json!({"type": "slow"})).await });
@@ -627,7 +625,7 @@ async fn the_kernels_store_is_pruned_to_its_window() {
     // an unacked dead letter survive.
     let (k, _) = seeded();
     mk(&k, "probe", json!({})).await;
-    with_store(&k, true, true).await;
+    with_store(&k, true).await;
     let named = call_named(&k, "probe", json!({"type": "work"}), "keep-me").await;
     let dead = call(&k, "probe", json!({"type": "fail"})).await;
     for _ in 0..40 {
@@ -724,7 +722,7 @@ async fn a_failed_store_read_in_the_prune_prunes_nothing_and_the_flusher_lives()
         "kernel",
         json!({
             "type": "create_agent", "parent_id": root_id(&k), "id": "memory",
-            "handler_module": "flaky_store.tools", "operator": true, "admins": ["kernel"],
+            "handler_module": "flaky_store.tools",
         }),
     )
     .await
@@ -781,7 +779,7 @@ async fn the_id_counter_reserves_blocks_in_the_root_record() {
         "load never edits a record"
     );
     call(&k, &root_id(&k), json!({"type": "boot"})).await;
-    with_store(&k, true, true).await;
+    with_store(&k, true).await;
     let n = k.mint_id();
     let bound = root.meta.read().unwrap()["next_id"]
         .as_i64()

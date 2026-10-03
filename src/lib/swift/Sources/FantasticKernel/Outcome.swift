@@ -117,8 +117,7 @@ public func bodyAt(_ body: Blob?, _ key: String) -> Data? {
 ///
 /// `id` NAMES the execution (ensure-semantics — see the ledger); `timeout` is
 /// seconds and the kernel NEVER defaults it (absent = wait forever); `retries`
-/// is a caller-declared budget the kernel never defaults either; `secret` marks
-/// the values no record of the call may carry.
+/// is a caller-declared budget the kernel never defaults either.
 public struct Item: Sendable {
     /// Who to call. `"kernel"` is the reserved address of the root.
     public var target: AgentId
@@ -173,14 +172,6 @@ public struct Item: Sendable {
     /// The RAW `retries`, forwarded untouched (C38) for the same reason. Set,
     /// this SUPERSEDES the typed `retries` above.
     public var rawRetries: JSON?
-    /// SECRET marks (`Secret`), RAW: `[mark, …]`, each a dotted string
-    /// (`payload.<field…>` or `result[.<field…>]`) or an array of steps
-    /// (`["payload", <step>, …]` / `["result", <step>…]`). The target gets the
-    /// real payload and the caller the real reply; every record and mirror of the
-    /// call shows `<secret>`. The
-    /// kernel validates it at launch (python `kernel/_secret.check`); absent or
-    /// null = nothing secret.
-    public var secret: JSON?
 
     /// A plain item: call `target` with `payload`, wait forever, no retries.
     public init(

@@ -181,8 +181,6 @@ async def test_a_non_utf8_sidecar_is_refused_not_mangled(seeded_kernel, store_ag
     """`errors="replace"` turned a binary sidecar into U+FFFD mojibake and
     returned it as `content`, so a caller could not tell a corrupt read from a
     real one — and writing that back would have destroyed the file."""
-    from kernel import operator_context
-
     rec = (
         await seeded_kernel.send(
             [
@@ -200,22 +198,21 @@ async def test_a_non_utf8_sidecar_is_refused_not_mangled(seeded_kernel, store_ag
         )
     )[0]["result"]
     assert rec.get("id") == "blob_bin_owner", rec
-    with operator_context():
-        w = (
-            await seeded_kernel.send(
-                [
-                    {
-                        "target": store_agent,
-                        "payload": {
-                            "type": "write_stream",
-                            "path": "agents/blob_bin_owner/binary.bin",
-                            "bytes": b"\xff\xfe\x00\x01",
-                            "truncate": True,
-                        },
-                    }
-                ]
-            )
-        )[0]["result"]
+    w = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": store_agent,
+                    "payload": {
+                        "type": "write_stream",
+                        "path": "agents/blob_bin_owner/binary.bin",
+                        "bytes": b"\xff\xfe\x00\x01",
+                        "truncate": True,
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     assert w.get("written") == 4, w
     r = (
         await seeded_kernel.send(
@@ -241,7 +238,7 @@ async def test_persist_record_refuses_a_siblings_namespace(seeded_kernel):
     sibling's record and not its OWN (audit 2026-09-28, a15: a record an agent
     persisted there came back at the next boot with whatever grants it named).
     An agent's record changes through `update_agent`, where conferral runs."""
-    from kernel import sender_context
+    from _testkit import as_agent
 
     async def _mk(agent_id):
         rec = (
@@ -255,8 +252,7 @@ async def test_persist_record_refuses_a_siblings_namespace(seeded_kernel):
                             "id": agent_id,
                             "handler_module": "file_bridge.tools",
                             "allow": ["."],
-                            # `persist_record` is privileged: the baseline never
-                            # reaches it, so the grant is named — and the LOADER's
+                            # the grant is named on both ends — the LOADER's
                             # owner guard is what this test is about.
                             "can_call": {seeded_kernel.id: ["persist_record"]},
                         },
@@ -265,11 +261,15 @@ async def test_persist_record_refuses_a_siblings_namespace(seeded_kernel):
             )
         )[0]["result"]
         assert rec.get("id") == agent_id, rec
+        cb = dict(seeded_kernel._meta.get("callable_by") or {})
+        seeded_kernel.ctx.update(
+            seeded_kernel.id, callable_by={**cb, agent_id: ["persist_record"]}
+        )
         return agent_id
 
     attacker = await _mk("ro_attacker")
     victim = await _mk("ro_victim")
-    with sender_context(attacker):
+    with as_agent(seeded_kernel, attacker):
         r = (
             await seeded_kernel.send(
                 [
@@ -304,7 +304,7 @@ async def test_persist_record_refuses_a_siblings_namespace(seeded_kernel):
 
 async def test_forget_record_refuses_a_siblings_namespace(seeded_kernel):
     """`forget_record` ends in an rmtree, so the same guard has to hold there."""
-    from kernel import sender_context
+    from _testkit import as_agent
 
     for aid in ("ro_f_attacker", "ro_f_victim"):
         await seeded_kernel.send(
@@ -323,7 +323,11 @@ async def test_forget_record_refuses_a_siblings_namespace(seeded_kernel):
                 }
             ]
         )
-    with sender_context("ro_f_attacker"):
+    seeded_kernel.ctx.update(
+        seeded_kernel.id,
+        callable_by={"$self": "*", "ro_f_attacker": ["forget_record"]},
+    )
+    with as_agent(seeded_kernel, "ro_f_attacker"):
         r = (
             await seeded_kernel.send(
                 [

@@ -15,6 +15,8 @@ from fastapi.testclient import TestClient
 from web.app import make_app
 from web_ws.tools import _make_endpoint, handler
 
+from _testkit import wire
+
 
 def _client(kernel, leg_id):
     # The web host's record: its port is the authority the Host guard admits
@@ -22,6 +24,7 @@ def _client(kernel, leg_id):
     kernel.get("test_web") or kernel.create(None, id="test_web", port=8088)
     app = make_app("test_web", kernel)
     app.add_api_websocket_route("/{host_id}/ws", _make_endpoint(leg_id, kernel))
+    wire(kernel, leg_id, "kernel_state")  # the leg's calls land on the root
     return TestClient(app, headers={"host": "127.0.0.1:8088"})
 
 
@@ -143,12 +146,17 @@ async def test_reflect_surfaces_leg_posture(seeded_kernel):
 
 
 def _watch_spy(kernel, monkeypatch):
-    """Record every `kernel.watch(src, ...)` the proxy makes, while still doing it."""
+    """Record every `watch(src, ...)` made — the leg makes it (`inbound_watch`), on
+    its own Agent — while still doing it."""
     calls: list[str] = []
-    orig = kernel.watch
-    monkeypatch.setattr(
-        kernel, "watch", lambda src, cid: (calls.append(src), orig(src, cid))[1]
-    )
+    cls = type(kernel)
+    orig = cls.watch
+
+    def spy(self, src, cid):
+        calls.append(src)
+        return orig(self, src, cid)
+
+    monkeypatch.setattr(cls, "watch", spy)
     return calls
 
 

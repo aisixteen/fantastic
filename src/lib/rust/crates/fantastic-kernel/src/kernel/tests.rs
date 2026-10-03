@@ -731,11 +731,11 @@ async fn a_bundle_that_declares_shutdown_is_still_the_one_told() {
     let reply = kernel.shutdown_agents().await;
 
     assert_eq!(reply["shut"], json!(["node"]));
-    // The `shutdown` verb IS a dispatch and keeps its row; only the discovery
-    // read is silent, so exactly one row was added.
+    // Telling it is KERNEL BOOKKEEPING — the handler run directly, not a send —
+    // so neither the discovery read nor the `shutdown` itself writes a row.
     assert_eq!(
         rows_about(&kernel, "node"),
-        before_rows + 1,
-        "the shutdown call itself is a call like any other"
+        before_rows,
+        "the shutdown is the kernel's bookkeeping, not a call"
     );
 }

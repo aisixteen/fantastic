@@ -106,8 +106,7 @@ fn render_for_model(messages: &[Value]) -> Vec<Value> {
 ///
 /// The conversation is ALWAYS this agent's own (its memory store): there is no
 /// caller-supplied history — a one-off completion is a disposable agent with its
-/// own store; context for another agent travels in the text, or by grant
-/// (`share` → `fork_from`).
+/// own store; context for another agent travels in the text.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_generation(
     provider: &Arc<dyn Provider>,

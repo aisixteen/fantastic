@@ -43,7 +43,7 @@ async def _call(k, target, payload) -> dict:
 
 def _with_store(k, sid: str = "memory") -> None:
     k.ctx.update(k.id, guid="test-guid")
-    k.create("ram_store.tools", id=sid, operator=True, admins=["kernel"])
+    k.create("ram_store.tools", id=sid)
     k.ctx.update(k.id, memory_store_id=sid)
 
 
@@ -102,7 +102,7 @@ async def test_kernel_start_without_a_store_texts(seeded_kernel):
         "hint": (
             "a memory store is needed — create a ram_store and name it in "
             "memory_store_id if you have none: `create_agent parent_id=kernel_state "
-            "handler_module=ram_store.tools id=memory operator=true`, then "
+            "handler_module=ram_store.tools id=memory`, then "
             "`update_agent id=kernel_state memory_store_id=memory`"
         ),
         "arg": "memory_store_id",
@@ -127,10 +127,24 @@ async def test_kernel_start_refuses_a_store_whose_boot_fails(seeded_kernel):
     assert k.ctx.started is False
 
 
+_shy = types.ModuleType("shy_store_probe.tools")
+
+
+async def _shy_handler(id, payload, kernel):
+    if payload.get("type") == "read":
+        return {"error": "shy: not serving", "reason": "unauthorized"}
+    return None
+
+
+_shy.handler = _shy_handler
+_shy.VERBS = {}
+register_unlisted("shy_store_probe.tools", _shy)
+
+
 async def test_kernel_start_names_a_store_that_refuses_the_kernel(seeded_kernel):
     k = seeded_kernel
     k.ctx.update(k.id, guid="test-guid")
-    k.create("ram_store.tools", id="shy", operator=False)
+    k.create("shy_store_probe.tools", id="shy")
     k.ctx.update(k.id, memory_store_id="shy")
     r = (await _call(k, "kernel", {"type": "kernel_start"}))["result"]
     assert r["reason"] == "unauthorized", r
@@ -212,7 +226,7 @@ async def test_the_default_mode_fails_loud_when_the_kernel_cannot_start(
         "memory store and will not start without one\n"
         "  hint: a memory store is needed — create a ram_store and name it in "
         "memory_store_id if you have none: `create_agent parent_id=kernel_state "
-        "handler_module=ram_store.tools id=memory operator=true`, then "
+        "handler_module=ram_store.tools id=memory`, then "
         "`update_agent id=kernel_state memory_store_id=memory`"
     )
     # the lock was taken for the attempt and released with it

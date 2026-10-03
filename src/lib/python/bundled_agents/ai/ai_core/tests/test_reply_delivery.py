@@ -44,11 +44,6 @@ class _Kernel:
     def get(self, _id):
         return {}
 
-    def carried_secret(self, _item_id):
-        """No execution here carried `secret` marks (ai_core asks before a
-        model's `<exec_id>` joins one)."""
-        return False
-
     def spawn_task(self, _agent_id, _verb, coro):
         """Deliveries are FORKED through the kernel (ai_core has one path, no
         unregistered fallback) — run the work as a task, like the kernel does."""

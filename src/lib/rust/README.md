@@ -63,8 +63,26 @@ THE KERNEL KEEPS NO CONVERSATION. Every message is a row in a MEMORY STORE agent
 the same verbs). The root names it in `memory_store_id` and `kernel_start`
 refuses without one; the kernel flushes its execution rows (call/settle/ack/
 flush) there, and `ledger`, dead letters (`on_deadletter`, `ack_deadletter`) and
-named-call dedup read them back. Each AI agent names its own store; context moves
-between agents only by grant (`share` → `fork_from`). Lifecycle verbs:
+named-call dedup read them back. Each AI agent names its own store and reads and
+writes only its own rows; context for another agent travels in the text.
+
+THE CALL GATE is minimal, two-sided and explicit (owner decision 2026-10-03).
+Every record carries `can_call` (egress) and `callable_by` (ingress), each
+`{key: "*" | [verb, ...]}`; a key is an agent id, `$self`, `$parent` or
+`$children` (direct children) — `can_call` also takes an outbound peer address
+`<guid>|<agent>` or `<guid>|*` — anything else is refused `invalid_meta` at the
+write. The baseline stamped on every agent is `{"$self": "*"}` on both fields,
+nothing else. An agent send passes iff the sender's `can_call` grants (target,
+verb) AND the target's `callable_by` grants (sender, verb); `"*"` covers every
+verb. Kernel verbs answered by the root take the same check against the root.
+The mutators (`create_agent`, `update_agent`, `delete_agent`) then act only on
+the sender's own DIRECT children. IDENTITY COMES ONLY FROM DISPATCH (owner
+2026-10-04): the sends an agent's handler makes, and the tasks it spawns, are
+that agent's; a send made outside every dispatch is the operator's and is
+ungated. A wire leg (web_ws, web_rest, a bridge) never sends as anyone else: it
+hands an admitted frame to itself (`inbound_call`, …) and sends onward AS THE
+LEG. The kernel's own bookkeeping (a child's boot, `shutdown`, the ledger flush,
+a write through the loader) runs the handler directly, ungated. Lifecycle verbs:
 `kernel_start`, `shutdown_agents`, `kernel_stop`. Manual: `reflect kernel
 readme=memory`. A static `readme-contract` lint
 (`integration_tests/decoupling/test_readme_contract.py`) scans every host
@@ -175,15 +193,15 @@ Bundles that compile under either tier:
 | crate                          | role |
 |--------------------------------|------|
 | `fantastic-core`               | the `kernel_state.tools` root loader (id="kernel_state") — records, blobs, the record-owner guard |
-| `fantastic-ram-store`          | the MEMORY STORE in RAM — every message (AI conversations, the kernel's execution rows), fold refs, grants, search, inject/dump |
-| `fantastic-credential-store`   | SECRETS BY REF — a ref holds named fields bound to ONE host; `set`/`get` only with a `secret` mark, per-ref readers/writers, "no such ref" to strangers; a ref is DECLARED only by `update_agent` on the store's `refs` — `set` stores a declared ref's value, takes no `host` and never creates one; `forget` drops the value and keeps the declaration; the file is read through ONE `O_NOFOLLOW` open judged on its own descriptor; backends `file` (0600 YAML at an ABSOLUTE path — a relative `file` is refused; python's bytes), `keychain` (the OS keychain, items under `keychain_namespace`), `env` (read-only). Every AI backend reads its key here before each request (`credentials: {store, ref}`); stamps `holds_secrets: true` on itself at boot, so ai-core refuses every model-parsed call that names it; the kernel judges the field first on every agent — exactly `true` or `null` (the operator's clear) at the write, and only the operator lowers a holder's mark (`side: "secret-holder"`) |
-| `fantastic-static-loader`      | declarative YAML roster loader — hydrates the declared agents as operator at boot |
+| `fantastic-ram-store`          | the MEMORY STORE in RAM — every message (AI conversations, the kernel's execution rows), fold refs, search, inject/dump; a caller reads and writes only its own rows |
+| `fantastic-credential-store`   | SECRETS BY REF — a ref holds named fields bound to ONE host; whoever the call gate admits may `set`/`get`/`forget` a declared ref (values ride the call in clear — owner 2026-10-04); a ref is DECLARED only by `update_agent` on the store's `refs` — `set` stores a declared ref's value, takes no `host` and never creates one; `forget` drops the value and keeps the declaration; the file is read through ONE `O_NOFOLLOW` open judged on its own descriptor; backends `file` (0600 YAML at an ABSOLUTE path — a relative `file` is refused; python's bytes), `keychain` (the OS keychain, items under `keychain_namespace`), `env` (read-only). Every AI backend reads its key here before each request (`credentials: {store, ref}`) |
+| `fantastic-static-loader`      | declarative YAML roster loader — hydrates the declared agents at boot as kernel bookkeeping (the root's `create_agent` run directly) |
 | `fantastic-file`               | filesystem-as-agent (the fs edge of the io family; sealed by default, deny-all `allow` list) + the text verbs — read/write/edit/append/undo, version/if_match |
-| `fantastic-web`                | axum HTTP host — rendering routes; mounts child call surfaces |
-| `fantastic-web-ws`             | WS verb channel (mounted onto a parent web); sealed by default; a `call` frame's `secret` marks ride onto the dispatched item |
-| `fantastic-web-rest`           | REST verb channel (mounted onto a parent web); sealed by default; the gate runs BEFORE the body is read, and a body past 16 MiB (io_bridge `MAX_FRAME`) is a 413; `X-Fantastic-Secret` (a JSON array) carries the item's `secret` marks |
-| `fantastic-scheduler`          | recurring tasks on a tokio tick; a schedule fires AS ITS CREATOR (`owner`), and a caller sees and drives only its own schedules |
-| `fantastic-bridge`             | cross-kernel bridge — WS-only, asymmetric (memory / WS); `forward` re-roots its call's `secret` marks onto the frame, an inbound frame's marks ride onto the dispatched item; a `relay_connector` leg is SEALED for marks (relayd records what it routes unmasked) — a marked `forward` and a marked inbound `call` are refused; a leg's rules are read off its record per frame; frame ids are `<leg>-<boot nonce>-<n>`; a relay leg reads its password from a credential_store ref (`credentials: {store, ref}`) before every dial |
+| `fantastic-web`                | axum HTTP host — rendering routes; mounts child call surfaces; the file route hands each fetch to the host (`fetch_file`), which reads AS ITSELF |
+| `fantastic-web-ws`             | WS verb channel (mounted onto a parent web); sealed by default; an admitted frame is handed to the leg (`inbound_call`/`inbound_emit`/`inbound_watch`/`inbound_state_subscribe`) and sent onward AS THE LEG |
+| `fantastic-web-rest`           | REST verb channel (mounted onto a parent web); sealed by default; the gate runs BEFORE the body is read, and a body past 16 MiB (io_bridge `MAX_FRAME`) is a 413; an admitted call is handed to the leg (`inbound_call`) and sent onward AS THE LEG |
+| `fantastic-scheduler`          | recurring tasks on a tokio tick; a schedule fires AS THE SCHEDULER (its `can_call` decides), and every caller the gate admits sees and drives every schedule |
+| `fantastic-bridge`             | cross-kernel bridge — WS-only, asymmetric (memory / WS); an inbound `call` frame is served AS THE LEG (its `can_call`, the target's `callable_by`); a leg's rules are read off its record per frame; frame ids are `<leg>-<boot nonce>-<n>`; a relay leg reads its password from a credential_store ref (`credentials: {store, ref}`) before every dial |
 | `fantastic-ollama-backend`     | local LLM via ollama |
 | `fantastic-responses-backend`  | the OpenAI Responses API |
 | `fantastic-vllm-backend`       | a vLLM server, directly (OpenAI chat wire) — KV-cache session table per endpoint |
@@ -194,13 +212,13 @@ Full-tier-only bundles (subprocess; excluded from the embedded slice):
 
 | crate                          | role |
 |--------------------------------|------|
-| `fantastic-exec-bridge`        | the process edge — a general-purpose command runner, sealed, gated by a regex allowlist; a terminal is a PTY job (flow control, UTF-8 incremental decode, image-paste); a job is driven (`write`/`resize`/`paste_image`/`stop`/`interrupt`/`clear`) only by the caller that started it, or the operator |
+| `fantastic-exec-bridge`        | the process edge — a general-purpose command runner, sealed, gated by a regex allowlist; a terminal is a PTY job (flow control, UTF-8 incremental decode, image-paste); any caller the gate admits drives a job |
 
 Internal / test crates:
 
 | crate                          | role |
 |--------------------------------|------|
-| `fantastic-ai-core`            | shared LLM-agent machinery behind a `Provider` seam — memory-store conversation, `<call>` tag grammar, compaction (folds), grants; the AI backends bind to it |
+| `fantastic-ai-core`            | shared LLM-agent machinery behind a `Provider` seam — memory-store conversation, `<call>` tag grammar, compaction (folds); the AI backends bind to it |
 | `fantastic-scenario-probes`    | TEST-ONLY fixture agents the shared e2e scenarios name (behind a feature) |
 
 ## Workspace layout

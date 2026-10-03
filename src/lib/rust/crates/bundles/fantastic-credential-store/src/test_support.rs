@@ -2,7 +2,7 @@
 //! of python `ai_core/tests/test_credentials.py`'s `_mk`. Composed the way an
 //! operator would: one FILE-backed store under the root (its file in the test's
 //! temp dir — never the user's home), the ref DECLARED by `update_agent` with its
-//! `readers` naming the agent, the value stored by a MARKED `set` (which never
+//! its `host`, the value stored by a MARKED `set` (which never
 //! declares a ref), and the store's `callable_by` opening for the agent. The
 //! agent's own record then names `credentials: {store, ref}` and `can_call`s the
 //! store ([`credentials_meta`]).
@@ -63,10 +63,9 @@ pub async fn ensure_store(kernel: &Arc<Kernel>, dir: &Path, reader: &str) -> Age
 }
 
 /// Store (or rotate) `key` as the `api_key` of `ref_`, bound to `endpoint`'s
-/// host and readable by `reader` — the operator DECLARES the ref with
-/// `update_agent` (its `readers` naming `reader`; the refs already there ride
-/// along, since it replaces the map), then stores the value with a `set` marked
-/// secret.
+/// host, the store reachable by `reader` — the operator DECLARES the ref with
+/// `update_agent` (the refs already there ride along, since it replaces the map),
+/// then stores the value with a `set`.
 ///
 /// # Panics
 /// When the store refuses the declaration or the write.
@@ -80,10 +79,7 @@ pub async fn set_key(
 ) {
     let store = ensure_store(kernel, dir, reader).await;
     let mut refs = meta_map(kernel, &store, "refs");
-    refs.insert(
-        ref_.to_string(),
-        json!({"host": endpoint, "readers": [reader]}),
-    );
+    refs.insert(ref_.to_string(), json!({"host": endpoint}));
     let declared = kernel
         .send(vec![Item::new(
             AgentId::from("kernel"),
@@ -97,8 +93,7 @@ pub async fn set_key(
         .send(vec![Item::new(
             store.clone(),
             json!({"type": "set", "ref": ref_, "fields": {"api_key": key}}),
-        )
-        .with_secret(json!(["payload.fields"]))])
+        )])
         .await
         .remove(0);
     assert_eq!(out.result["stored"], json!(true), "set_key: {}", out.result);

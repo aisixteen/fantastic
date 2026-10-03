@@ -9,10 +9,9 @@
 // watched events back. Cross-platform (Linux too).
 //
 // Frame protocol (matches python `PB/io/web_ws/src/web_ws/_proxy.py::run`):
-//   client → server : {"type":"call",   "target":"<id>", "payload":{...}, "id":"<id>", "secret":[..]?}
-//                     (`secret` = the item's marks — dotted strings and/or
-//                     arrays of steps, `Secret`)
-//   client → server : {"type":"emit",   "target":"<id>", "payload":{...}}
+//   client → server : {"type":"call",   "target":"<id>", "payload":{...}, "id":"<id>"}
+//                     (the leg sends it → reply)
+//   client → server : {"type":"emit",   "target":"<id>", "payload":{...}}  (the leg emits it)
 //   client → server : {"type":"watch",  "src":"<id>"}
 //   client → server : {"type":"unwatch","src":"<id>"}
 //   client → server : {"type":"state_subscribe"|"state_unsubscribe"}
@@ -23,9 +22,9 @@
 //                     {"type":"event",  "payload":{...}}   (emitted to this connection)
 //   server → client : {"type":"state_snapshot"|"state_event", ...}
 //   client → server : {"type":"hello",  "guid":"<page kernel guid>"}   (the page as a peer)
-//   server → client : {"type":"call",   "id":"h<n>", "target", "payload", "caller", "secret"?}
+//   server → client : {"type":"call",   "id":"h<n>", "target", "payload"}
 //   client → server : {"type":"reply"|"error", "id":"h<n>", "data":{...}}
-//   server → client : {"type":"emit",   "target", "payload", "caller"?}  (a host emit to
+//   server → client : {"type":"emit",   "target", "payload"}  (a host emit to
 //                     `<guid>|<agent>` — to EVERY live connection of that guid)
 //   server → client : {"type":"reply_mirror", "id", "data"}  (the reply a SIBLING
 //                     connection of this hello guid got — never a call of this one)
@@ -57,6 +56,14 @@
 // **A FRAME IS AN INPUT, NOT A CONTRACT (A11.7).** An undecodable text or binary
 // frame is answered with ONE error frame, BEFORE any gate, and the socket is
 // KEPT with every in-flight call on it.
+//
+// **IDENTITY: THIS HANDLER IS THE TRANSPORT** (owner 2026-10-04). Its frame lane
+// runs outside every dispatch, so what it sends is the operator's. It sends
+// nothing onward itself: every admitted frame is handed to the leg
+// (`Inbound.handIn` → the leg's `inbound_*` verbs), and the leg performs it as
+// itself — gated as the leg. The lane is python's read loop: frames are handled
+// one at a time, in arrival order; an emit, a watch and a state subscription are
+// awaited before the next frame is read, a call is spawned and runs on.
 
 import FantasticIoBridge
 import FantasticJSON
@@ -112,10 +119,18 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
     /// issued from inside this lock; the critical sections only enqueue, so the
     /// loop never blocks on real IO.
     private let outLock = OutboundLock()
+    /// The connection's FRAME LANE — python's read loop: every inbound frame is
+    /// handled here, one at a time, in arrival order, outside every dispatch.
+    private let lane = FrameLane()
+    /// Guards the connection state below: the lane and the event loop (teardown)
+    /// both touch it.
+    private let state = NSLock()
+    /// Set by `teardown`: a watch or a subscription that completes after the
+    /// socket is gone gives itself back instead of registering.
+    private var closed = false
     /// The name the client watched → the RESOLVED agent id actually watched.
     /// Only a watch that REALLY registered is recorded (see `watchPath`).
-    /// Mutated ONLY on the event loop (handlerAdded / channelRead / teardown all
-    /// run there).
+    /// Guarded by `state`.
     private var watching: OrderedDictionary<String, WatchEntry> = [:]
     /// EVERY READER THIS SOCKET DRAINS — its own inbox (events emitted to the
     /// connection, no `src`) and ONE PER WATCH (so each mirrored event goes out
@@ -127,11 +142,10 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
     /// frame. A bare `Task` was in no `ps` row and no `cancel` reached it.
     private var drainTask: TaskId?
     /// In-flight inbound `call` dispatches — kernel task ids, cancelled through
-    /// the table on disconnect. Mutated ONLY on the event loop (channelRead +
-    /// the completion hop).
+    /// the table on disconnect. Guarded by `state`.
     private var callTasks: [TaskId: Bool] = [:]
     /// State-stream subscriptions opened by `state_subscribe` frames on THIS
-    /// socket; dropped on `state_unsubscribe` and on close.
+    /// socket; dropped on `state_unsubscribe` and on close. Guarded by `state`.
     private var stateTokens: [SubscriberToken] = []
     /// uvicorn's keepalive: ping every `ping_interval`, close 1011 when no pong
     /// arrives within `ping_timeout` (both 20 s, `uvicorn/config.py:191-192`).
@@ -140,7 +154,7 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
     private var keepalive: RepeatedTask?
     private var awaitingPong = false
     /// THE PEER HALF: the guid the first accepted `hello` pinned and the route
-    /// registered for it. Mutated ONLY on the event loop (hello + teardown).
+    /// registered for it. Guarded by `state`.
     private var pinned: (guid: String, route: PeerRoute)?
     /// The calls the host made INTO the page, waiting for their answers —
     /// shared with the route, which runs on kernel tasks, hence its own lock.
@@ -163,6 +177,10 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
         let inbox = kernel.ensureInbox(clientId)
         self.inbox = inbox
         readers.add(nil, inbox)
+        // The frame lane, outside every dispatch (a NIO event loop carries no
+        // task-local), parented to the web boot pid like every task of this
+        // socket.
+        lane.start(parent: bootParent)
         // THE CONNECT-TIME AUTO-WATCH IS GATED (C41). Only mirror the host's
         // inbox when THIS leg's rule admits an inbound `watch` with NO
         // credential (an open `allow_all` leg). On a sealed or credentialed leg
@@ -175,7 +193,10 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
             kernel: kernel, legId: legId, kind: "watch", target: hostId, verb: "watch",
             token: nil) == nil
         {
-            watchPath(hostId, frameId: .string(""), channel: channel)
+            let hostId = self.hostId
+            lane.enqueue { [self] in
+                await self.watchPath(hostId, frameId: .string(""), channel: channel)
+            }
         }
         // Drain the inbox → `{type:"event", payload}` text frames. REGISTERED as
         // the kernel task `ws_drain` on the HOST agent (python
@@ -232,14 +253,29 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
     private func teardown() {
         keepalive?.cancel()
         keepalive = nil
+        lane.finish()
         // The page is gone: it is no longer an address, and every call still
         // waiting on it settles NOW with the reason — never a hang, never a retry.
         // Idempotent: `channelInactive` and `handlerRemoved` both land here.
-        let guid = pinned?.guid
-        if let p = pinned {
+        let (p, calls, watched, tokens): (
+            (guid: String, route: PeerRoute)?, [TaskId], [(String, WatchEntry)],
+            [SubscriberToken]
+        ) = state.withLock {
+            closed = true
+            let p = pinned
+            pinned = nil
+            let calls = Array(callTasks.keys)
+            callTasks.removeAll()
+            let watched = Array(watching).map { ($0.key, $0.value) }
+            watching.removeAll()
+            let tokens = stateTokens
+            stateTokens.removeAll()
+            return (p, calls, watched, tokens)
+        }
+        let guid = p?.guid
+        if let p {
             kernel.unregisterPeer(p.guid, p.route)
             Tabs.shared.leave(tabKey(p.guid), ObjectIdentifier(self))
-            pinned = nil
         }
         peerCalls.close(guid: guid)
         // python's `finally`, in its order: cancel the in-flight calls, unwatch
@@ -249,14 +285,8 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
         // as for any cancel. A `call` can run for minutes (an LLM stream);
         // untracked, a client that closed its tab left it generating — billing
         // tokens — into a dead channel.
-        let calls = Array(callTasks.keys)
-        callTasks.removeAll()
         let drain = drainTask
         drainTask = nil
-        let watched = Array(watching)
-        watching.removeAll()
-        let tokens = stateTokens
-        stateTokens.removeAll()
         for t in tokens { kernel.unsubscribe(t) }
         for (src, entry) in watched { dropWatch(src, entry) }
         let kernel = self.kernel
@@ -273,11 +303,12 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
         let channel = context.channel
         switch frame.opcode {
         case .text:
-            handleFrame(.text(String(buffer: frame.unmaskedData)), channel: channel)
+            let raw = InboundRaw.text(String(buffer: frame.unmaskedData))
+            lane.enqueue { [self] in await self.handleFrame(raw, channel: channel) }
         case .binary:
             var payload = frame.unmaskedData
             let bytes = payload.readData(length: payload.readableBytes) ?? Data()
-            handleFrame(.binary(bytes), channel: channel)
+            lane.enqueue { [self] in await self.handleFrame(.binary(bytes), channel: channel) }
         case .ping:
             let pong = WebSocketFrame(fin: true, opcode: .pong, data: frame.unmaskedData)
             outLock.sync { context.writeAndFlush(self.wrapOutboundOut(pong), promise: nil) }
@@ -303,14 +334,14 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
     // MARK: - frame dispatch
 
     /// A raw inbound WS message, before decoding.
-    enum InboundRaw {
+    enum InboundRaw: Sendable {
         case text(String)
         case binary(Data)
     }
 
     /// A decoded inbound frame: the envelope, plus the raw body when the frame
     /// carried one under its `payload` or its `data`.
-    private struct Inbound {
+    private struct DecodedFrame {
         let envelope: JSON
         /// `.some` when `_binary_path` named a slot under the frame's `payload` —
         /// the body AT its steps in the payload (`Item.binary` carries both).
@@ -325,7 +356,7 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
     /// as JSON or a binary frame as `[4B len | header | body]`, pop
     /// `_binary_path` and place the body there. `nil` is the ONE
     /// malformed-frame answer (A11.7/A13.15).
-    private static func decodeInbound(_ raw: InboundRaw) -> Inbound? {
+    private static func decodeInbound(_ raw: InboundRaw) -> DecodedFrame? {
         let b: Data
         switch raw {
         case .text(let t):
@@ -333,7 +364,7 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
             // `decode_frame` on a str): a `_binary_path` in it is an inert key,
             // never a slot to null or a body to place.
             guard let parsed = try? JSON.parseStrict(t), case .object = parsed else { return nil }
-            return Inbound(envelope: parsed, body: nil)
+            return DecodedFrame(envelope: parsed, body: nil)
         case .binary(let bytes):
             b = bytes
         }
@@ -353,7 +384,7 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
         guard let path = placed else {
             // No path ⇒ a plain envelope; a body that came with one is dropped,
             // exactly as python drops it (nothing names where it would go).
-            return Inbound(envelope: envelope, body: nil)
+            return DecodedFrame(envelope: envelope, body: nil)
         }
         // A body under the frame's `payload` reaches the handler AT ITS STEPS
         // there (`Item.binary` carries both). A body under an answer's `data` is
@@ -361,9 +392,9 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
         // Any other placeable path keeps its `null` and the body is dropped.
         let blob = Blob(parts: path, body)
         if let inPayload = blob.under("payload") {
-            return Inbound(envelope: envelope, body: inPayload)
+            return DecodedFrame(envelope: envelope, body: inPayload)
         }
-        return Inbound(envelope: envelope, body: nil, replyBody: blob.under("data"))
+        return DecodedFrame(envelope: envelope, body: nil, replyBody: blob.under("data"))
     }
 
     /// python `bad("frame", "frame", "a well-formed call/emit/watch envelope")`
@@ -380,8 +411,6 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
         return .object(out)
     }
 
-    /// python `{"type": "error", "id": <frame id or "">, **denial}` — the
-    /// denial's own keys are FLATTENED onto the frame, not wrapped in `data`.
     /// THE ONE WATCH PATH — the connect-time auto-watch and an explicit `watch`
     /// frame both come here. FAIL LOUD: a name that resolves to no agent, or a
     /// gate refusal, is answered with an `error` frame and NOT recorded as
@@ -391,15 +420,13 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
     /// skipped as a duplicate.)
     ///
     /// The name resolves the way `send` resolves a target (`kernel` or a literal
-    /// id). UNDER THE LEG'S OWN IDENTITY, so the kernel's gate
-    /// sees a real caller: without it `currentSender` is nil, the kernel reads the
-    /// watch as an OPERATOR's, and the two-sided gate never runs — which is
-    /// exactly how a leg granted only `assistant:[send]` could mirror any agent's
-    /// inbox and read the model's prompt out of it. THE LEG, not the host agent:
-    /// the ingress rule and the `can_call` grants both hang off the `web_ws`
-    /// record. Python `_proxy._watch`. Runs on the event loop.
-    private func watchPath(_ src: String, frameId: JSON, channel: Channel) {
-        if src.isEmpty || watching[src] != nil { return }
+    /// id). THE LEG WATCHES (`inbound_watch`), so the kernel's gate sees a real
+    /// caller — an ungated watch is how a leg granted only `assistant:[send]`
+    /// could mirror any agent's inbox and read the model's prompt out of it. THE
+    /// LEG, not the host agent: the ingress rule and the `can_call` grants both
+    /// hang off the `web_ws` record. Python `_proxy._watch`. Runs on the lane.
+    private func watchPath(_ src: String, frameId: JSON, channel: Channel) async {
+        if src.isEmpty || state.withLock({ watching[src] != nil }) { return }
         guard let target = kernel.resolveAgent(src) else {
             let r = Refusal.make(
                 Refusal.unknownAgent,
@@ -414,14 +441,18 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
         // THIS WATCH'S OWN READER — registered before the watch asks for one.
         let reader = AgentId("\(clientId.value)>\(target.id.value)")
         let rInbox = kernel.ensureInbox(reader)
-        let denial = KernelTaskLocals.$currentSender.withValue(legId) {
-            kernel.watch(src: target.id, watcher: reader)
-        }
-        if let d = denial {
+        let out = await Inbound.handIn(
+            kernel, legId: legId,
+            .object([
+                "type": .string("inbound_watch"), "src": .string(target.id.value),
+                "reader": .string(reader.value),
+            ]))
+        if pyTruthy(out.result["error"]) {
             kernel.removeInbox(reader)
             outLock.sync {
                 Self.writeText(
-                    channel: channel, text: Codec.encodeText(Self.errorFrame(id: frameId, denial: d)))
+                    channel: channel,
+                    text: Codec.encodeText(Self.errorFrame(id: frameId, denial: out.result)))
             }
             return
         }
@@ -434,8 +465,19 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
                 }
             }
         }
-        readers.add(src, rInbox)
-        watching[src] = WatchEntry(target: target.id, reader: reader, task: task)
+        let entry = WatchEntry(target: target.id, reader: reader, task: task)
+        // The socket may have closed while the leg was asked: then the watch is
+        // given straight back instead of registered.
+        let kept: Bool = state.withLock {
+            if closed { return false }
+            watching[src] = entry
+            return true
+        }
+        if kept {
+            readers.add(src, rInbox)
+        } else {
+            dropWatch(src, entry)
+        }
     }
 
     /// Give a watch back: unwatch, stop its drain, DROP ITS INBOX, forget the reader.
@@ -457,19 +499,11 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
         return .object(out)
     }
 
-    /// Spawn one inbound dispatch as a REGISTERED kernel task on the HOST agent,
-    /// under the LEG'S OWN IDENTITY.
-    ///
-    /// Two things used to be missing. (1) `Task { ... }` does not inherit a
-    /// task-local, so `KernelTaskLocals.currentSender` was nil inside and
-    /// `BatchSend.launch` skipped the two-sided gate entirely — every browser
-    /// call ran as the OPERATOR, bounded only by the leg's ingress rule. (2) the
-    /// task was invisible to `ps` and unreachable by `cancel`. Both are closed
-    /// by going through here; callers never build a bare `Task`.
-    ///
-    /// Must be called ON the event loop (channelRead is).
+    /// Spawn one inbound call as a REGISTERED kernel task on the HOST agent, so
+    /// it is in `ps` and reachable by `cancel` (callers never build a bare
+    /// `Task`). Spawned from the lane — outside every dispatch, so its hand-in to
+    /// the leg is the operator's and the leg's onward call is the leg's.
     private func trackCall(channel: Channel, _ body: @escaping @Sendable () async -> Void) {
-        let legId = self.legId
         // The id is only known AFTER `spawnTask` returns, and the closure needs
         // it to drop its own entry — so it travels through a holder rather than
         // a `var` the concurrent closure would capture.
@@ -477,28 +511,21 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
         // Under the web boot pid, like `ws_drain` and every REST request task.
         let id = KernelTaskLocals.$currentTask.withValue(bootParent) {
             kernel.spawnTask(agent: AgentId(hostId), verb: "ws_call") { [weak self] in
-                await KernelTaskLocals.$currentSender.withValue(legId) {
-                    await body()
-                }
-                // Rebind before the hop: a captured `weak var self` is a mutable
-                // capture, which is not Sendable. The handler itself is
-                // (unchecked).
-                let handler = self
-                let done = slot.value
-                channel.eventLoop.execute {
-                    if let done { handler?.callTasks[done] = nil }
+                await body()
+                if let handler = self, let done = slot.value {
+                    handler.state.withLock { _ = handler.callTasks.removeValue(forKey: done) }
                 }
             }
         }
         slot.value = id
-        callTasks[id] = true
+        state.withLock { callTasks[id] = true }
     }
 
     /// The ONE inbound path — text and binary frames decode the same way and
-    /// route by `type` the same way (A13.15). A binary `call` rides
-    /// `kernel.send` with the body as the item's binary — the one send, with
-    /// its ledger, dedup and reflect flags.
-    private func handleFrame(_ raw: InboundRaw, channel: Channel) {
+    /// route by `type` the same way (A13.15). A binary `call` is handed to the
+    /// leg with the body at its slot of the item's payload — the one send, with
+    /// its ledger, dedup and reflect flags. Runs on the lane.
+    private func handleFrame(_ raw: InboundRaw, channel: Channel) async {
         guard let inbound = Self.decodeInbound(raw) else {
             outLock.sync {
                 Self.writeText(channel: channel, text: Codec.encodeText(Self.frameErrorFrame()))
@@ -543,25 +570,24 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
             let outLock = self.outLock
             // The identity this connection said hello as — its sibling tabs see
             // the reply as a `reply_mirror`.
-            let tabs = pinned.map { tabKey($0.guid) }
+            let tabs = state.withLock { pinned.map { tabKey($0.guid) } }
             let me = ObjectIdentifier(self)
             trackCall(channel: channel) {
                 // THE FRAME ID IS THE EXECUTION ID. One id space: the same id
                 // arriving twice — a double-click, a second tab, a reconnect
                 // replaying its queue — is ONE intent, deduped and joined by the
                 // ledger instead of running the side effect twice.
-                var item = Item(AgentId(target), payload)
-                if let s = fid.asString, !s.isEmpty { item.id = s }
-                // SECRET MARKS cross the leg verbatim (`Secret`): this kernel
-                // records the call as shown, exactly as for a local caller — the
-                // kernel's own check refuses a malformed mark before anything is
-                // dispatched. Python `if "secret" in frame: item["secret"] = …`.
-                if let marks = frame.asObject?["secret"] { item.secret = marks }
+                var item: OrderedDictionary<String, JSON> = [
+                    "target": .string(target), "payload": payload,
+                ]
+                if let s = fid.asString, !s.isEmpty { item["id"] = .string(s) }
+                // HANDED TO THE LEG (`inbound_call`), which sends it AS ITSELF.
+                //
                 // EVERY CALL MAY BE ANSWERED WITH RAW BYTES, whatever its verb:
                 // python's reply dict holds them and `encode_frame` finds them,
                 // with no list of verbs. A text frame is a call with no request
-                // body whose reply body this leg carries (`rawReply`); the reply
-                // goes out binary exactly when it holds one.
+                // body whose reply body comes back raw; the reply goes out binary
+                // exactly when it holds one.
                 //
                 // ONLY A BINARY FRAME OVERWRITES THE KEY. python's
                 // `payload[field] = body` runs where a body EXISTS; a TEXT
@@ -569,14 +595,13 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
                 // client sent, and `write_stream` answers `missing_arg` for it
                 // (an ABSENT key stays an empty chunk) (A13.19). The decode left
                 // `null` in the slot python's `set_path` fills — kept, so the
-                // call row and the watcher frame keep python's key order; the
-                // kernel hands the handler a header with nothing there.
-                if let body {
-                    item.binary = body
-                } else {
-                    item.rawReply = true
-                }
-                let out = await kernel.send([item])[0]
+                // call row and the watcher frame keep python's key order.
+                let out = await Inbound.handIn(
+                    kernel, legId: legId,
+                    .object(["type": .string("inbound_call"), "item": .object(item)]),
+                    binary: body.map {
+                        Blob(parts: [.key("item"), .key("payload")] + $0.parts, $0.bytes)
+                    })
                 // Verb-level errors travel inside `data.error` (python's wire
                 // shape); a `type:"error"` frame is reserved for out-of-band
                 // failures.
@@ -613,19 +638,21 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
             {
                 return  // a denied emit is DROPPED, never answered
             }
-            // The body rides at ITS path; the decode already left `null` in that
-            // slot of `payload`, in python's position.
-            let item: InboxItem =
-                inbound.body.map { .binary(payload, $0) } ?? .text(payload)
-            // INLINE, before the next frame is read: python awaits
-            // `kernel.emit` in the read loop, so two emits — or an emit and the
-            // call after it — reach their watchers in the order they were sent.
-            // A detached Task per emit had no order at all. Same identity
-            // discipline as `call` — an emit with a nil sender is an OPERATOR
-            // emit.
-            KernelTaskLocals.$currentSender.withValue(legId) {
-                kernel.emitItem(AgentId(target), item)
-            }
+            // An emit has no reply channel: a malformed one is dropped.
+            guard !target.isEmpty, case .object = payload else { return }
+            // HANDED TO THE LEG (`inbound_emit`), which emits it AS ITSELF. The
+            // body rides at ITS path; the decode already left `null` in that slot
+            // of `payload`, in python's position. AWAITED before the next frame
+            // is read: python awaits the hand-in in the read loop, so two emits —
+            // or an emit and the call after it — reach their watchers in the
+            // order they were sent.
+            _ = await Inbound.handIn(
+                kernel, legId: legId,
+                .object([
+                    "type": .string("inbound_emit"), "target": .string(target),
+                    "payload": payload,
+                ]),
+                binary: inbound.body.map { $0.nested(in: "payload") })
         case "watch":
             if gateWebLeg(
                 kernel: kernel, legId: legId, kind: "watch", target: addr, verb: "watch",
@@ -633,12 +660,12 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
             {
                 return
             }
-            watchPath(frame["src"].asString ?? "", frameId: fid, channel: channel)
+            await watchPath(frame["src"].asString ?? "", frameId: fid, channel: channel)
         case "unwatch":
             // NO GATE — python gates the four inbound actions and leaves
             // `unwatch` (a client giving something up) ungated.
             guard let src = frame["src"].asString, !src.isEmpty else { return }
-            if let entry = watching.removeValue(forKey: src) {
+            if let entry = state.withLock({ watching.removeValue(forKey: src) }) {
                 dropWatch(src, entry)
             }
         case "state_subscribe":
@@ -652,15 +679,16 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
             // The state stream is a KERNEL-WIDE read: every send's sender,
             // target, verb and payload summary, for every agent in the tree. So
             // it is gated on the ROOT — an ingress rule answers "may this client
-            // reach this leg", never "what may it READ".
-            let denial = KernelTaskLocals.$currentSender.withValue(legId) {
-                kernel.authorizeStateSubscribe(legId)
-            }
-            if let d = denial {
+            // reach this leg", never "what may it READ". THE LEG ASKS
+            // (`inbound_state_subscribe`) — the lane's own context is the
+            // operator's, which the gate never judges (audit ARCH2-7).
+            let asked = await Inbound.handIn(
+                kernel, legId: legId, .object(["type": .string("inbound_state_subscribe")]))
+            if pyTruthy(asked.result["error"]) {
                 outLock.sync {
                     Self.writeText(
                         channel: channel,
-                        text: Codec.encodeText(Self.errorFrame(id: fid, denial: d)))
+                        text: Codec.encodeText(Self.errorFrame(id: fid, denial: asked.result)))
                 }
                 return
             }
@@ -706,10 +734,19 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
                         body: body?.nested(in: "payload"))
                 }
             }
-            stateTokens.append(token)
+            // A socket that closed meanwhile drops the tap at once.
+            let kept: Bool = state.withLock {
+                if closed { return false }
+                stateTokens.append(token)
+                return true
+            }
+            if !kept { kernel.unsubscribe(token) }
         case "state_unsubscribe":
-            let tokens = stateTokens
-            stateTokens.removeAll()
+            let tokens: [SubscriberToken] = state.withLock {
+                let t = stateTokens
+                stateTokens.removeAll()
+                return t
+            }
             for t in tokens { kernel.unsubscribe(t) }
         case "hello":
             hello(frame, frameId: fid, token: token, addr: addr, channel: channel)
@@ -727,7 +764,7 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
     /// a sealed leg), then the leg's gate (a sealed leg carries no peer, and says
     /// nothing — the calls it refuses teach), then the pin. A guid already live on
     /// another connection is another tab of that identity: this route JOINS it
-    /// (one principal, kernel `registerPeer`). Runs on the event loop.
+    /// (one principal, kernel `registerPeer`). Runs on the lane.
     private func hello(
         _ frame: JSON, frameId: JSON, token: String?, addr: String, channel: Channel
     ) {
@@ -743,7 +780,7 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
         {
             return
         }
-        if let pinned {
+        if let pinned = state.withLock({ self.pinned }) {
             if pinned.guid != guid {
                 answerError(
                     Refusal.bad(
@@ -756,18 +793,18 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
         let outLock = self.outLock
         let route = PeerRoute(
             via: legId.value,
-            call: { agentId, payload, caller, secret, body in
+            call: { agentId, payload, body in
                 await calls.call(
-                    guid: guid, agentId: agentId, payload: payload, caller: caller,
-                    secret: secret, body: body, channel: channel, outLock: outLock)
-            },
-            emit: { agentId, payload, caller, body in
-                calls.emit(
-                    agentId: agentId, payload: payload, caller: caller, body: body,
+                    guid: guid, agentId: agentId, payload: payload, body: body,
                     channel: channel, outLock: outLock)
+            },
+            emit: { agentId, payload, body in
+                calls.emit(
+                    agentId: agentId, payload: payload, body: body, channel: channel,
+                    outLock: outLock)
             })
         kernel.registerPeer(guid, route)
-        pinned = (guid, route)
+        state.withLock { pinned = (guid, route) }
         Tabs.shared.join(tabKey(guid), ObjectIdentifier(self)) { id, data, body in
             calls.mirror(id: id, data: data, body: body, channel: channel, outLock: outLock)
         }
@@ -932,15 +969,13 @@ final class PeerCalls: @unchecked Sendable {
             "the page \(guid ?? "None") disconnected before answering")
     }
 
-    /// ONE call into the page: an outbound `{type:"call", id, target, payload,
-    /// caller, secret?}` frame, resolved by the inbound answer carrying the same
-    /// id. A body rides the binary channel at `payload.<its path>` — where
-    /// python's payload dict holds it and where the page's decoder puts it back.
-    /// `secret` is the item's marks, on the frame only when there are any, so the
-    /// PAGE kernel masks its records of this call too.
+    /// ONE call into the page: an outbound `{type:"call", id, target, payload}`
+    /// frame, resolved by the inbound answer carrying the same id. A body rides
+    /// the binary channel at `payload.<its path>` — where python's payload dict
+    /// holds it and where the page's decoder puts it back.
     func call(
-        guid: String, agentId: String, payload: JSON, caller: String, secret: [JSON],
-        body: Blob?, channel: Channel, outLock: OutboundLock
+        guid: String, agentId: String, payload: JSON, body: Blob?, channel: Channel,
+        outLock: OutboundLock
     ) async -> (JSON, Blob?) {
         let fid: String? = lock.withLock {
             // A call that resolved this route just as the socket closed must not
@@ -956,13 +991,10 @@ final class PeerCalls: @unchecked Sendable {
         // admitted the path at launch.
         var p = payload
         if let body { try? pySetPath(&p, parts: body.parts, .null) }
-        var envelope: JSON = .object([
+        let frame: JSON = .object([
             "type": .string("call"), "id": .string(fid), "target": .string(agentId),
-            "payload": p, "caller": .string(caller),
+            "payload": p,
         ])
-        // the item's marks, so the PAGE kernel masks its records of this call too
-        if !secret.isEmpty { envelope["secret"] = .array(secret) }
-        let frame = envelope
         return await withTaskCancellationHandler {
             await withCheckedContinuation { (cont: CheckedContinuation<(JSON, Blob?), Never>) in
                 let settled: (JSON, Blob?)? = lock.withLock {
@@ -994,21 +1026,17 @@ final class PeerCalls: @unchecked Sendable {
         }
     }
 
-    /// ONE host emit into the page: `{type:"emit", target, payload, caller?}`
-    /// (`caller` = `<host guid>|<sender>` when an agent emitted it). A body rides
-    /// the binary channel at `payload.<its path>`, its slot `null` in the head as
-    /// the kernel's item already holds it. A gone socket drops it — an emit has
-    /// no reply.
+    /// ONE host emit into the page: `{type:"emit", target, payload}`. A body
+    /// rides the binary channel at `payload.<its path>`, its slot `null` in the
+    /// head as the kernel's item already holds it. A gone socket drops it — an
+    /// emit has no reply.
     func emit(
-        agentId: String, payload: JSON, caller: String?, body: Blob?, channel: Channel,
-        outLock: OutboundLock
+        agentId: String, payload: JSON, body: Blob?, channel: Channel, outLock: OutboundLock
     ) {
         if lock.withLock({ gone }) || !channel.isActive { return }
-        var envelope: JSON = .object([
+        let frame: JSON = .object([
             "type": .string("emit"), "target": .string(agentId), "payload": payload,
         ])
-        if let caller { envelope["caller"] = .string(caller) }
-        let frame = envelope
         outLock.sync {
             WebSocketProxyHandler.sendEnvelope(
                 channel: channel, envelope: frame, body: body?.nested(in: "payload"))
@@ -1089,4 +1117,33 @@ final class Tabs: @unchecked Sendable {
     func siblings(_ key: Key, except conn: ObjectIdentifier) -> [Mirror] {
         lock.withLock { (table[key] ?? []).filter { $0.0 != conn }.map { $0.1 } }
     }
+}
+
+/// ONE connection's FRAME LANE — python's websocket read loop. Inbound frames are
+/// handled one at a time, in arrival order, by one task that runs OUTSIDE every
+/// dispatch (it is started from the event loop, which carries no task-local), so
+/// what it hands to the leg is the operator's. `finish` ends it after the jobs
+/// already queued.
+final class FrameLane: @unchecked Sendable {
+    typealias Job = @Sendable () async -> Void
+    private let jobs: AsyncStream<Job>
+    private let feed: AsyncStream<Job>.Continuation
+
+    init() {
+        (jobs, feed) = AsyncStream<Job>.makeStream()
+    }
+
+    /// Start the lane's one task, parented to `parent` in the task table.
+    func start(parent: TaskId?) {
+        let jobs = self.jobs
+        Task {
+            await KernelTaskLocals.$currentTask.withValue(parent) {
+                for await job in jobs { await job() }
+            }
+        }
+    }
+
+    func enqueue(_ job: @escaping Job) { feed.yield(job) }
+
+    func finish() { feed.finish() }
 }

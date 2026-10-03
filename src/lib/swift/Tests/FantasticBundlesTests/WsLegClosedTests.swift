@@ -46,7 +46,7 @@ struct WsLegClosedTests {
 
     @Test func closedFollowsTheSocket() async {
         let wire = DroppingWire()
-        let t = WSTransport(client: wire, sealed: false)
+        let t = WSTransport(client: wire)
         #expect(await t.isClosed() == false)
         let reader = Task { () -> String in
             do {
@@ -84,7 +84,7 @@ struct WsLegClosedTests {
         }
 
         let first = DroppingWire()
-        bridge.injectTransport(agentId: AgentId("w_leg"), transport: WSTransport(client: first, sealed: false))
+        bridge.injectTransport(agentId: AgentId("w_leg"), transport: WSTransport(client: first))
         #expect(await call(["type": "boot"]) == ["booted": true, "transport": "memory"])
         #expect(await call(["type": "boot"]) == ["already": true, "transport": "memory"])
         #expect(await call(["type": "reflect"])["connected"] == true)
@@ -103,7 +103,7 @@ struct WsLegClosedTests {
 
         // boot DIALS AGAIN — no `{already:true}` for a dead socket.
         let second = DroppingWire()
-        bridge.injectTransport(agentId: AgentId("w_leg"), transport: WSTransport(client: second, sealed: false))
+        bridge.injectTransport(agentId: AgentId("w_leg"), transport: WSTransport(client: second))
         #expect(await call(["type": "boot"]) == ["booted": true, "transport": "memory"])
         #expect(await call(["type": "reflect"])["connected"] == true)
 

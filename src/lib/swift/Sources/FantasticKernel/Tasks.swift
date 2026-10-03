@@ -567,7 +567,7 @@ extension Kernel {
             // own-inbox emit (ai_core's final `status done`) was gated root →
             // agent and dropped; the deadline path ran it as the operator.
             do {
-                try await KernelTaskLocals.$currentSender.withValue(agentId) {
+                try await asSelf(agentId) {
                     try await bundle.onCancel(agentId: agentId, taskId: tid, kernel: self)
                 }
             } catch {

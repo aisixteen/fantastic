@@ -29,7 +29,6 @@ func wiredKernel(
     k.composeEphemeralChild(
         id: AgentId("memory"), handlerModule: "ram_store.tools", parent: root,
         meta: [
-            "operator": .bool(true), "admins": .array([.string("kernel")]),
             "callable_by": .object([agent: .string("*")]),
         ])
     var m: OrderedDictionary<String, JSON> = [

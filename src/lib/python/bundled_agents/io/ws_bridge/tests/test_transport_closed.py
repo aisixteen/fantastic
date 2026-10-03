@@ -39,7 +39,7 @@ async def test_closed_follows_the_socket():
     remote = _Remote()
     async with websockets.serve(remote.handler, "127.0.0.1", 0) as server:
         port = server.sockets[0].getsockname()[1]
-        t = await WSTransport.connect(f"ws://127.0.0.1:{port}/peer/ws", sealed=False)
+        t = await WSTransport.connect(f"ws://127.0.0.1:{port}/peer/ws")
         await asyncio.wait_for(remote.accepted.wait(), 2)
         assert t.closed is False
         await remote.drop(0)

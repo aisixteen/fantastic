@@ -18,6 +18,7 @@ import type { WebSocketLike } from "../src/transport/bridge.ts";
 import { encodeFrame, decodeFrame } from "../src/transport/frame.ts";
 import type { Envelope } from "../src/transport/frame.ts";
 import type { Json, Payload } from "../src/kernel/json.ts";
+import { as } from "./kit.ts";
 
 const ROOT = "kernel_state";
 
@@ -114,9 +115,8 @@ test("forwardBinary goes out as ONE binary call frame and resolves its reply; `k
   const sock = fk.of(ROOT)[0]!;
   const call = sock.frames("call")[0]!;
   assert.equal(sock.binary[sock.sent.indexOf(call)], true, "a payload carrying bytes rides a binary frame");
-  assert.deepEqual(Object.keys(call), ["type", "target", "payload", "id", "caller"]);
+  assert.deepEqual(Object.keys(call), ["type", "target", "payload", "id"]);
   assert.equal(call["target"], "pty1");
-  assert.equal(call["caller"], "g1|kernel");
   const payload = call["payload"] as Record<string, unknown>;
   assert.equal(payload["type"], "paste_image");
   assert.equal(payload["name"], "a.png");
@@ -141,9 +141,8 @@ test("with no bridge: forwardBinary and callHost answer an error naming the targ
   assert.deepEqual(await k.callHost("kernel", { type: "reflect" }), { error: "no bridge to reach host 'kernel'" });
   // the missing bridge is reported before the sender's grant is looked at
   k.register(new Agent({ id: "view", parentId: ROOT }));
-  const asView = k.scopedFor("view", null);
-  assert.deepEqual(await asView.forwardBinary("pty1", { type: "paste_image" }), { error: "no bridge to forward to 'pty1'" });
-  assert.deepEqual(await asView.callHost("h", { type: "x" }), { error: "no bridge to reach host 'h'" });
+  assert.deepEqual(await as(k, "view", (v) => v.forwardBinary("pty1", { type: "paste_image" })), { error: "no bridge to forward to 'pty1'" });
+  assert.deepEqual(await as(k, "view", (v) => v.callHost("h", { type: "x" })), { error: "no bridge to reach host 'h'" });
   assert.doesNotThrow(() => k.emitRemote("pty1", { type: "reload_html" }));
   const offL = k.onLifecycle("pty1", () => assert.fail("no bridge, no lifecycle"));
   const offS = k.subscribeState(() => assert.fail("no bridge, no state"));
@@ -369,22 +368,26 @@ test("the default socket factory dials the global WebSocket at <origin>/<endpoin
 
 test("a host call answered by this kernel: the reply carries the outcome's result, a refusal included", async () => {
   const { k, bridge, fk } = wired("p1");
-  k.registerBundle("echo.ts", (_id, payload) => ({ echoed: payload["v"] ?? null }));
-  k.register(new Agent({ id: "canvas", parentId: ROOT, handlerModule: "echo.ts", meta: { callable_by: { "h0|*": ["echo"] } } }));
+  k.registerBundle("echo.ts", (_id, payload) =>
+    payload["type"] === "echo" ? { echoed: payload["v"] ?? null } : { error: "echo: no", reason: "unhandled" });
+  k.register(new Agent({ id: "canvas", parentId: ROOT, handlerModule: "echo.ts" }));
   bridge.announce();
   await until(() => fk.of(ROOT)[0]?.frames("hello").length === 1);
   const sock = fk.of(ROOT)[0]!;
   const replyTo = (id: string): Envelope | undefined => sock.frames("reply").find((f) => f["id"] === id);
-  sock.deliver({ type: "call", id: "h1", target: "canvas", payload: { type: "echo", v: 3 }, caller: "h0|cell" });
-  sock.deliver({ type: "call", id: "h2", target: "canvas", payload: [1], caller: "h0|cell" });
-  sock.deliver({ type: "call", target: "canvas", payload: { type: "echo" }, caller: 5 });
-  sock.deliver({ type: "call", id: "h4", target: "canvas", payload: { type: "nope" }, caller: "h0|cell" });
+  sock.deliver({ type: "call", id: "h1", target: "canvas", payload: { type: "echo", v: 3 } });
+  sock.deliver({ type: "call", id: "h2", target: "canvas", payload: [1] });
+  sock.deliver({ type: "call", payload: { type: "echo" } });
+  sock.deliver({ type: "call", id: "h4", target: "canvas", payload: { type: "nope" } });
   await until(() => replyTo("h1") !== undefined && replyTo("h2") !== undefined && replyTo("") !== undefined && replyTo("h4") !== undefined);
   assert.deepEqual(replyTo("h1"), { type: "reply", id: "h1", data: { echoed: 3 } });
-  const bad = { error: "call: needs caller `<guid>|<agent>` of ANOTHER kernel, a target id and an object payload", reason: "bad_arg", arg: "caller" };
-  assert.deepEqual(replyTo("h2")!["data"], bad);
-  assert.deepEqual(replyTo("")!["data"], bad, "a call frame without an id is answered under id ''");
-  assert.equal(((replyTo("h4")!["data"]) as Payload)["side"], "ingress");
+  assert.deepEqual(replyTo("h2")!["data"], { error: "call: needs a target id and an object payload", reason: "bad_arg", arg: "payload" });
+  assert.deepEqual(
+    replyTo("")!["data"],
+    { error: "call: needs a target id and an object payload", reason: "bad_arg", arg: "target" },
+    "a call frame without an id is answered under id ''",
+  );
+  assert.deepEqual(replyTo("h4")!["data"], { error: "echo: no", reason: "unhandled" });
   bridge.close();
 });
 

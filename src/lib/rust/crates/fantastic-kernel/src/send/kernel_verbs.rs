@@ -59,16 +59,17 @@ pub fn kernel_verb_docs() -> Value {
     // map in this order, only the distilled view sorts.
     json!({
         "create_agent": "args: handler_module:str, parent_id:str REQUIRED, id:str?, **meta. \
-    Creates a CHILD OF `parent_id` — your own id grows your own subtree \
-    (no grant needed); 'kernel_state' for top-level. No default parent.",
+    Creates a CHILD OF `parent_id` — an agent names its own id (it creates \
+    only its own children); 'kernel_state' for top-level. No default parent.",
         "update_agent": "args: id:str, **meta. EVERY FIELD YOU NAME IS REPLACED, NOT MERGED \
     (a field you do not name is untouched), so a dict field must be sent \
     WHOLE — `can_call`/`callable_by` included: restate every key you want \
-    to keep, the baseline `$self`/`$parent`/`$children` among them, or the \
-    keys you omit are GONE. Granting one edge reads like a PATCH and \
-    behaves like a PUT.",
+    to keep, the baseline `$self` among them, or the keys you omit are GONE. \
+    Granting one edge reads like a PATCH and behaves like a PUT. An agent \
+    updates only its own children.",
         "delete_agent": "args: id:str. CASCADES — deletes that agent AND ITS WHOLE SUBTREE, \
-    deepest first; refuses if any descendant carries `delete_lock`.",
+    deepest first; refuses if any descendant carries `delete_lock`. An \
+    agent deletes only its own children.",
         "list_agents": "No args. Every agent's record, flat. Paged.",
         "ps": "No args. The live kernel-wide TASK TABLE — {tasks:[{id, agent, parent, \
     verb, started_at}]}, one row per in-flight dispatch. Paged.",
@@ -261,7 +262,7 @@ pub(super) async fn handle_kernel_verb(
         // THE START SEQUENCE — see `Kernel::start`. Idempotent.
         "kernel_start" => kernel.start(true).await,
         "shutdown_agents" => {
-            // Privileged: root control surface only, gated on rootness like
+            // Root control surface only, gated on rootness like
             // `kernel_stop` so it holds whether the verb was addressed to
             // the literal root id or via the reserved `kernel` address.
             if target.parent_id.is_some() {
@@ -273,7 +274,7 @@ pub(super) async fn handle_kernel_verb(
             kernel.shutdown_agents().await
         }
         "kernel_stop" => {
-            // Privileged: root control surface only. Gate on rootness
+            // Root control surface only. Gate on rootness
             // (parent_id is None) so it holds whether the verb was
             // addressed to the literal root id or via the reserved `kernel` address —
             // never an arbitrary child agent.
@@ -370,12 +371,7 @@ async fn update_from_payload(kernel: &Arc<Kernel>, caller: &Arc<Agent>, payload:
     // Grant-map SHAPE, judged here at write time — the gate only judges edges
     // (py-canonical, 2026-09-01: `can_call:"*"` accepted as a bare string left
     // a silently-dead grant; refuse loud at the point of the mistake).
-    // `holds_secrets` is the exception that IS gated: only `true` or `null` is
-    // written (`bad_holder_mark`), and on a holder only the operator writes
-    // `null` — its clear (`check_holder_mark`, in the gate).
-    if let Some(why) = crate::lifecycle::bad_grant_shape(&patch)
-        .or_else(|| crate::lifecycle::bad_holder_mark(&patch))
-    {
+    if let Some(why) = crate::lifecycle::bad_grant_shape(&patch) {
         let mut r = crate::refusal::refusal(crate::refusal::INVALID_META, &why);
         crate::refusal::with(&mut r, "id", json!(id));
         return r;

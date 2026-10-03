@@ -136,12 +136,7 @@ async fn the_shared_c21_corpus_holds_on_this_runtime() {
         let name = c["name"].as_str().unwrap_or("<unnamed>");
         let target = c["target"].as_str().expect("case has no target");
         let payload = c["payload"].clone();
-        // A case may carry `secret` — the batch item's marks, beside `payload`.
-        // This driver's one leg is in-proc, so they go on the item.
-        let mut item = Item::new(AgentId::from(target), payload);
-        if let Some(marks) = c.get("secret") {
-            item = item.with_secret(marks.clone());
-        }
+        let item = Item::new(AgentId::from(target), payload);
         let reply = kernel.send(vec![item]).await.remove(0).result;
 
         if let Some(expect) = c.get("expect") {

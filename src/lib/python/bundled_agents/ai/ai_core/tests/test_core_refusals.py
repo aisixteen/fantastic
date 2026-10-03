@@ -18,7 +18,8 @@ from _testkit import memory_meta
 
 from ai_core import core
 from ai_core.tool_parse import render_call
-from kernel import sender_context, register_unlisted
+from kernel import register_unlisted
+from _testkit import as_agent
 
 NAME = "ollama_backend"
 
@@ -68,7 +69,7 @@ def _seat_fakes(fake_providers, monkeypatch):
 async def _call(k, target, payload, as_=None) -> dict:
     if as_ is None:
         return (await k.send([{"target": target, "payload": payload}]))[0]["result"]
-    with sender_context(as_):
+    with as_agent(k, as_):
         return (await k.send([{"target": target, "payload": payload}]))[0]["result"]
 
 
@@ -219,36 +220,6 @@ async def test_grep_and_history_bad_args(seeded_kernel):
     }
 
 
-async def test_fork_from_and_request_share_missing_args(seeded_kernel):
-    k = seeded_kernel
-    _ai(k, "kp_f")
-    base = {"type": "fork_from", "owner": "x", "grant": 1, "message": "go"}
-    for name in ("owner", "message"):
-        r = await _call(k, "kp_f", {**base, name: " "})
-        assert r == {
-            "error": f"fork_from: `{name}` is required",
-            "reason": "missing_arg",
-            "arg": name,
-        }
-    for g in (None, "x", True, 0):
-        assert await _call(k, "kp_f", {**base, "grant": g}) == {
-            "error": "fork_from: `grant` (an int) is required",
-            "reason": "missing_arg",
-            "arg": "grant",
-        }, g
-    assert await _call(k, "kp_f", {**base, "grant": 424242}) == {
-        "error": "fork_from: no grant 424242 was given to you",
-        "reason": "not_found",
-        "arg": "grant",
-    }
-    for row in (None, "a", False):
-        assert await _call(k, "kp_f", {"type": "request_share", "row": row}) == {
-            "error": "request_share: `row` (an int) is required",
-            "reason": "missing_arg",
-            "arg": "row",
-        }
-
-
 async def test_watch_refusals(seeded_kernel):
     k = seeded_kernel
     _ai(k, "kp_w", callable_by={"viewer": ["watch", "unwatch"]})
@@ -343,121 +314,6 @@ async def test_an_over_cap_reply_with_an_origin_uses_it(seeded_kernel):
     _ai(k, "kp_oo", can_call={"big": "*"})
     text = await _turn_reply(k, "kp_oo", {"type": "fetch", "with_origin": True})
     assert "origin: big file.txt lines 1-3000 v7. To find a line" in text, text
-
-
-# ─── row events: a body only under a grant that covers the row ───────────────
-
-
-async def _rows_seen(k, aid: str, share: dict, contents: list[str]) -> list:
-    """`viewer` watches `aid` with body:true under the grant `share`; `aid` then
-    appends `contents`. Returns, per row, whether its event carried the content."""
-    k.create(None, id="viewer", can_call={aid: ["watch"], "memory": "*"})
-    cb = dict(k.ctx.agents["memory"]._meta["callable_by"])
-    k.ctx.update("memory", callable_by={**cb, "viewer": "*"})
-    inbox = k.ctx.ensure_inbox("viewer")
-    if share:
-        g = await _call(
-            k, "memory", {"type": "share", "with": "viewer", **share}, as_=aid
-        )
-        assert g.get("grant"), g
-    await _call(k, aid, {"type": "watch", "body": True}, as_="viewer")
-    out = []
-    for c in contents:
-        await core._save_history(aid, k, [{"role": "user", "content": c}])
-        ev = inbox.get_nowait()
-        assert ev["type"] == "row" and ev["source"] == aid
-        out.append(ev["row"].get("content"))
-    return out
-
-
-async def _seed(k, aid: str, n: int) -> list[int]:
-    await core._save_history(
-        aid, k, [{"role": "user", "content": f"old {i}"} for i in range(n)]
-    )
-    rows = (await _call(k, "memory", {"type": "read"}, as_=aid))["rows"]
-    return [r["id"] for r in rows]
-
-
-async def test_a_frozen_head_grant_covers_only_rows_up_to_its_head(seeded_kernel):
-    k = seeded_kernel
-    _ai(k, "kp_fz", callable_by={"viewer": ["watch"]})
-    ids = await _seed(k, "kp_fz", 2)
-    got = await _rows_seen(
-        k, "kp_fz", {"scope": {"head_until": ids[-1]}, "mode": "frozen"}, ["new"]
-    )
-    assert got == [None]  # a row past a frozen head carries no body
-
-
-async def test_a_live_head_grant_covers_new_rows(seeded_kernel):
-    k = seeded_kernel
-    _ai(k, "kp_lv", callable_by={"viewer": ["watch"]})
-    ids = await _seed(k, "kp_lv", 1)
-    got = await _rows_seen(
-        k, "kp_lv", {"scope": {"head_until": ids[-1]}, "mode": "live"}, ["new1", "new2"]
-    )
-    assert got == ["new1", "new2"]
-
-
-async def test_a_row_grant_never_covers_a_new_row(seeded_kernel):
-    k = seeded_kernel
-    _ai(k, "kp_rw", callable_by={"viewer": ["watch"]})
-    ids = await _seed(k, "kp_rw", 1)
-    got = await _rows_seen(
-        k, "kp_rw", {"scope": {"row": ids[0]}, "mode": "live"}, ["n"]
-    )
-    assert got == [None]
-
-
-async def test_no_grant_no_body(seeded_kernel):
-    k = seeded_kernel
-    _ai(k, "kp_ng", callable_by={"viewer": ["watch"]})
-    assert await _rows_seen(k, "kp_ng", {}, ["n"]) == [None]
-
-
-async def test_a_range_grant_covers_new_rows_only_when_live(seeded_kernel):
-    k = seeded_kernel
-    _ai(k, "kp_rg", callable_by={"viewer": ["watch"]})
-    ids = await _seed(k, "kp_rg", 2)
-    got = await _rows_seen(
-        k,
-        "kp_rg",
-        {"scope": {"range": {"from": ids[0], "to": ids[1]}}, "mode": "live"},
-        ["n1"],
-    )
-    assert got == ["n1"]
-
-
-async def test_a_frozen_range_grant_stops_at_its_end(seeded_kernel):
-    k = seeded_kernel
-    _ai(k, "kp_fr", callable_by={"viewer": ["watch"]})
-    ids = await _seed(k, "kp_fr", 2)
-    got = await _rows_seen(
-        k,
-        "kp_fr",
-        {"scope": {"range": {"from": ids[0], "to": ids[1]}}, "mode": "frozen"},
-        ["n1"],
-    )
-    assert got == [None]
-
-
-async def test_a_fold_grant_covers_only_the_folds_closure(seeded_kernel):
-    k = seeded_kernel
-    _ai(k, "kp_fd", callable_by={"viewer": ["watch"]})
-    ids = await _seed(k, "kp_fd", 2)
-    fold = await _call(
-        k,
-        "memory",
-        {
-            "type": "append",
-            "rows": [{"kind": "fold", "refs": ids, "title": "t", "content": "s"}],
-        },
-        as_="kp_fd",
-    )
-    assert fold.get("ids"), fold
-    got = await _rows_seen(
-        k, "kp_fd", {"scope": {"fold": fold["ids"][0]}, "mode": "live"}, ["n1"]
-    )
-    assert got == [None]  # a new row is not a member of the fold
 
 
 # ─── route_reply's own error units (a call it could not dispatch) ────────────

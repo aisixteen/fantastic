@@ -110,6 +110,9 @@ async def _seed(kernel) -> None:
             ingress_rule="allow_all_ingress",
             can_call={"sealed": "*", "kernel_state": "*"},
         )
+    kernel.ctx.update(
+        "kernel_state", callable_by={"$self": "*", "rest_leg": "*", "ws_leg": "*"}
+    )
     # The web host the ws leg is mounted on: its `port` is the authority the Host
     # guard admits (audit W-2), named by the ws client on its upgrade.
     kernel.create(None, id="test_web", port=8088)

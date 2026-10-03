@@ -36,12 +36,7 @@ absolute path; with no `PATH` the start is refused naming it.
   resumes under 5K), `output(job_id, max_bytes?)` (the 256 KiB ring — replay it when you
   re-attach) and `paste_image(job_id, data, mime)` (saves the image, types its path).
   Each is a gated verb: a viewer granted only `status`/`output`/`ack` cannot type.
-  **A job is DRIVEN only by the caller that started it** (its `starter`; the operator
-  drives every job): `write`/`resize`/`paste_image`/`stop`/`interrupt`/`clear` naming a
-  job another caller started are refused — `{reason:"unauthorized", job_id}`,
-  "exec_bridge: job <id> is not yours — only the caller that started it (or the
-  operator) may <verb> it". The reads — `status`, `output`, `ack` — stay gated by grants
-  alone, so a read-only viewer re-attaches to a job someone else started. A running
+  Any caller the gate admits drives any job of this agent. A running
   program's `on_message` never gets a drive verb whose `job_id` names another job —
   another job's keystrokes, pastes and drive calls never reach it; a bulk call (no
   `job_id`) does.
@@ -54,7 +49,7 @@ absolute path; with no `PATH` the start is refused naming it.
   stopping the kernel does the same. A process that leaves the session on purpose
   (`setsid`) escapes — containment beyond that is the OS's ·
   `interrupt(job_id?)` SIGINT · `clear(job_id?)` forget finished rows. Omit `job_id` and
-  it applies to all YOUR jobs on this agent (the operator: all of them).
+  it applies to every job on this agent.
 - `boot` — no-op. Nothing auto-restarts: a command is started by a caller, not by the record.
 
 Every running job IS a row in the kernel TASK TABLE: its `job_id` is that row's id (an int
@@ -151,15 +146,11 @@ body]`, the header's `_binary_path` naming where the body belongs — a JSON arr
 steps from the frame root, a key as a string (taken literally: `["payload", "a.b"]` is
 the key `"a.b"`, never `a` → `b`), a list index as an int — so a `read_stream` chunk or
 a `write_stream` payload crosses raw (never base64). Child → parent, the six
-ops: `{op:"send", rid, target, payload, secret?}` · `{op:"emit", target?, payload}` ·
+ops: `{op:"send", rid, target, payload}` · `{op:"emit", target?, payload}` ·
 `{op:"watch", src}` · `{op:"unwatch", src}` · `{op:"onmessage"}` · `{op:"offmessage"}`.
 Parent → child: `{op:"reply", rid, data}` · `{op:"event", src, payload}` ·
 `{op:"inbox", payload}`. `rid` correlates a `send` with its `reply`; the parent echoes it
-back untouched. `secret` is the call's marks — `["payload.<field>", …]`, `["result"]`,
-`["result.<field>"]`, or an array of steps `[["payload", "a.b"]]` (a key holding a
-dot) — put on the dispatched call as sent (absent when the program marks
-nothing): every record of the call shows `<secret>`, and a bad mark comes back as the
-kernel's refusal in `data`. ONE FRAME CAPS AT 16 MiB in every runtime — over it the length prefix is a
+back untouched. ONE FRAME CAPS AT 16 MiB in every runtime — over it the length prefix is a
 wire violation and the relay closes the socket, so move bulk with `write_stream` chunks
 (the reference client raises rather than writing such a frame). **EOF on the fd means the kernel is GONE** — exit, or become an orphan
 nothing can reach. Traffic goes child → spawner → kernel only: a job never dials a host and
@@ -171,7 +162,6 @@ library the program bundles, not something the bridge prepends. It exposes:
 
 ```python
 kernel.send(target, payload) -> reply      # request/reply to any agent by id
-kernel.send(target, payload, secret=[...]) # …with the call's secret marks
 kernel.emit(payload)                       # fire-and-forget on YOUR OWN agent
 kernel.reflect(target="kernel")
 off = kernel.watch(src, cb)                # PUSH: cb(payload) per event from src
@@ -182,14 +172,6 @@ kernel.self_id                             # your agent id (arguments are ARGV)
 So a job is a first-class routine: read memory anywhere, call an AI, spawn another job, push
 to any peer — all by id. A step written as a program and a step written as an LLM call are
 substitutable.
-
-**Secrets on the guest wire.** A program marks a call's secret values exactly as any
-caller does: `kernel.send("creds", {"type": "get", "ref": "openai/main"},
-secret=["result"])` reads a credential, `secret=["payload.fields"]` stores one. The
-kernel records `<secret>` in the call's rows, ledger, state stream and memory store; the
-reply carries the real values to the program. From there the PROGRAM is the receiver and
-holds them — whatever it prints lands in the job output (`status`, `progress`,
-`job_done`), its own leak, not masked.
 
 ## Not a sandbox
 

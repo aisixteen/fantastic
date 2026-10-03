@@ -11,6 +11,10 @@
 // Opt-in: a `web` agent serves WS only when a `web_ws` child exists —
 // exactly like Python. Create one with:
 //   <web_id> create_agent handler_module=web_ws.tools
+//
+// inbound_call / inbound_emit / inbound_watch / inbound_state_subscribe — the
+// INBOUND half (`Inbound`): the socket's frame lane hands each admitted frame to
+// this leg as one of these, and the leg performs it AS ITSELF — gated as the leg.
 
 import FantasticIoBridge
 import FantasticJSON
@@ -51,12 +55,29 @@ public final class WebWSBundle: AgentBundle, WebRouteEndpoints, @unchecked Senda
         IngressRules.unknownRefusal(meta)
     }
 
+    /// The INBOUND verbs ride the binary channel too: a handed-in call or emit
+    /// may carry a request body, and a call's reply chunk comes back raw.
+    public func handleBinary(
+        agentId: AgentId, header: JSON, body: Blob?, kernel: Kernel
+    ) async throws -> (JSON?, Blob?) {
+        if Inbound.handles(header["type"].asString ?? "") {
+            return await Inbound.handle(
+                agentId: agentId, payload: header, body: body, rawReply: true, kernel: kernel)
+        }
+        return (try await handle(agentId: agentId, payload: header, kernel: kernel), nil)
+    }
+
     public func handle(
         agentId: AgentId,
         payload: JSON,
         kernel: Kernel
     ) async throws -> JSON? {
         let type = payload["type"]
+        if Inbound.handles(type.asString ?? "") {
+            return await Inbound.handle(
+                agentId: agentId, payload: payload, body: nil, rawReply: false, kernel: kernel
+            ).0
+        }
         switch type.asString {
         case "reflect":
             // python `_reflect` key order: id, sentence, path_pattern,
@@ -108,6 +129,10 @@ public final class WebWSBundle: AgentBundle, WebRouteEndpoints, @unchecked Senda
             "No-op. The parent `web` agent calls `get_routes` on this bundle during its own boot and mounts the WS endpoint onto its FastAPI app."
         ),
         "get_routes": .string("Declares this surface's HTTP/WS route mounts. No args. Returns"),
+        "inbound_call": Inbound.verbDocs["inbound_call"]!,
+        "inbound_emit": Inbound.verbDocs["inbound_emit"]!,
+        "inbound_watch": Inbound.verbDocs["inbound_watch"]!,
+        "inbound_state_subscribe": Inbound.verbDocs["inbound_state_subscribe"]!,
     ]
 
     /// python `PB/io/web_ws/src/web_ws/readme.md`, byte for byte.
@@ -124,31 +149,24 @@ public final class WebWSBundle: AgentBundle, WebRouteEndpoints, @unchecked Senda
         JSON array, a key as a string (taken literally: `["payload","a.b"]` is the key `"a.b"`),
         a list index as an int (`["payload","items",0,"data"]`).
 
-        `{type:"call", target, payload, id?, secret?}` — `secret` is the item's marks
-        (`["payload.key"]`, `["result"]`, an array of steps `[["payload","a.b"]]`): the call
-        is dispatched with them, so this kernel
-        records `<secret>` for those values exactly as for a local caller; a malformed mark is
-        the kernel's own `bad_arg` refusal, before dispatch. The reply is the real result.
+        `{type:"call", target, payload, id?}` — the reply is the call's result.
 
-        **One leg is one principal** (audit S6, 2026-10-03): every connection admitted to this
-        leg is dispatched AS the leg, so grants, a credential_store's `readers`, execution
-        names and a secret-marked execution's join (the real outcome goes to its original
-        caller — the leg) see ONE caller. Everyone admitted to one leg is one principal — one
-        tenant per leg.
+        **One leg is one principal**: every admitted frame (call, emit, watch,
+        state_subscribe) is handed to this leg (its `inbound_*` verbs), which performs it AS
+        ITSELF — its `can_call` and the target's `callable_by` decide, and execution names
+        are one caller's. Everyone admitted to one leg is one tenant.
 
         **The page as a peer kernel.** A client that is itself a kernel (the browser's ts
         kernel) sends `{type:"hello", guid}`; this leg then registers that guid with the host
         kernel, which routes `send`s to `<guid>|<agent>` over this socket as
-        `{type:"call", id, target, payload, caller}` frames — answered by
+        `{type:"call", id, target, payload}` frames — answered by
         `{type:"reply"|"error", id, data}`. One guid per connection (pinned by the first
         hello); a sealed leg carries no peer. **The tabs of one identity are one principal**
         (owner, 2026-10-03): a guid already live on another connection is another tab of it,
         and this connection joins it — a host call to `<guid>|<agent>` goes to EVERY live
         connection of that guid and settles with the first reply (the others are dropped); a
-        host emit on `<guid>|<agent>` goes to every one as `{type:"emit", target, payload, caller?}`,
-        and a reply this leg sends one tab is mirrored to the others as `{type:"reply_mirror", id, data}`. A
-        host call marked `secret` carries its paths on that frame (`secret`), so the
-        page kernel masks its records of it too. When a socket closes, that connection stops
+        host emit on `<guid>|<agent>` goes to every one as `{type:"emit", target, payload}`,
+        and a reply this leg sends one tab is mirrored to the others as `{type:"reply_mirror", id, data}`. When a socket closes, that connection stops
         being a route (the guid stays an address while another connection holds it) and every
         call still waiting on it settles as a `transport_error`. This leg only carries the frames: the
         host kernel routes and gates the sender, the page kernel gates its own agents.

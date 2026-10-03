@@ -156,43 +156,22 @@ extension Kernel {
         }.joined()
     }
 
-    /// Read a store-relative path's text content through the provider (`nil` on
-    /// any error / missing file).
-    /// A store I/O send made with OPERATOR authority — the substrate persisting to
-    /// its OWN discovered store is bookkeeping (like create_agent's child boot),
-    /// not an agent reaching out, so it never runs against a grant.
+    /// ONE STORE IO — the kernel persisting its OWN records through its OWN
+    /// discovered store is bookkeeping: a plain call into the store's handler
+    /// (`storeCall` / `storeCallBinary`), never a send against a grant.
     private func storeSend(_ storeId: AgentId, _ payload: JSON) async -> JSON {
-        await KernelTaskLocals.$currentSender.withValue(nil) {
-            await send([Item(storeId, payload)])[0].result
-        }
+        await storeCall(storeId, payload).0
     }
 
-    /// ONE STORE IO, THROUGH THE BATCH (C47).
-    ///
-    /// Every persistence byte — the record merge read, the record write, the
-    /// readme probe and seed — crosses this function, and it is a `send` of ONE
-    /// BINARY ITEM under operator authority. So each is a ledger execution with
-    /// a call row, a `ps` row, a settle row and a timeout, exactly like python's
-    /// `kernel_state`, which does all of this with `kernel.send([...])`.
-    /// `sendWithBinary` minted none of it, so the substrate's own writes were
-    /// the one class of work the message log could not see.
-    ///
-    /// Operator authority: the substrate reading and writing its OWN store is
-    /// persistence bookkeeping, not an agent reaching out — it never runs
-    /// against a grant.
-    ///
-    /// `body` is the request's chunk (the payload's `bytes`, a `write_stream`);
-    /// `nil` asks for the reply's chunk raw (a `read_stream`). The chunk comes
-    /// back when the reply holds it at `bytes` — python reads `reply["bytes"]`.
+    /// The binary half: `body` is the request's chunk (the payload's `bytes`, a
+    /// `write_stream`); `nil` asks for the reply's chunk raw (a `read_stream`).
+    /// The chunk comes back when the reply holds it at `bytes` — python reads
+    /// `reply["bytes"]`.
     private func storeSendBinary(_ storeId: AgentId, _ header: JSON, _ body: Data?) async
         -> (JSON, Data?)
     {
-        await KernelTaskLocals.$currentSender.withValue(nil) {
-            let item = Item(
-                storeId, header, binary: body.map { Blob("bytes", $0) }, rawReply: body == nil)
-            let out = await send([item])[0]
-            return (out.result, bodyAt(out.body, "bytes"))
-        }
+        let (reply, chunk) = await storeCallBinary(storeId, header, body)
+        return (reply, chunk)
     }
 
     /// The WHOLE existing record, paged to EOF — python `_persist_via_store`'s

@@ -65,10 +65,10 @@ fn guard_name(name: Option<&str>) -> Result<&str, String> {
 /// an operator creates at the root is a direct child. Position bounds who can
 /// REACH the verb; it says nothing about which namespace they may NAME.
 ///
-/// An OPERATOR send (origin `None`: the loader's own flush, an agent persisting
-/// itself under operator authority, the CLI) is the bookkeeping this verb exists
-/// for and stays ungated — that is the origin root of trust, and an agent cannot
-/// forge it. An AGENT may only name ITSELF.
+/// No origin (the kernel's own bookkeeping — a sidecar written through the
+/// loader, the loader's own flush — or the CLI) is what this verb exists for and
+/// stays ungated: that is the origin root of trust, and an agent cannot forge it.
+/// An AGENT may only name ITSELF.
 fn guard_owner(aid: &str) -> Result<(), String> {
     match crate::send::current_origin() {
         None => Ok(()),
@@ -196,7 +196,7 @@ pub async fn persist_blob(
     };
     // The loader writing to its OWN discovered store is persistence bookkeeping —
     // a side effect of this already-authorized verb, not the loader reaching out
-    // as an agent — so it runs with operator authority, like create_agent's boot.
+    // as an agent — so the store's handler runs directly, like create_agent's boot.
     let reply = super::store_write(
         kernel,
         &store,

@@ -3,12 +3,8 @@
 Two on-the-wire formats, picked automatically by payload content:
 
   TEXT FRAMES (JSON, default):
-    C->S {type:"call",   target, payload, id, secret?}
-                                                  -> kernel.send -> reply
-                                                     (`secret` = the item's marks —
-                                                     dotted strings and/or arrays
-                                                     of steps, `kernel/_secret`)
-    C->S {type:"emit",   target, payload}         -> kernel.emit (no reply)
+    C->S {type:"call",   target, payload, id}     -> the leg sends it -> reply
+    C->S {type:"emit",   target, payload}         -> the leg emits it (no reply)
     C->S {type:"watch",  src}                     -> mirror src's inbox into ours
     C->S {type:"unwatch", src}
     S->C {type:"reply",  id, data}                -> reply for a prior call
@@ -16,7 +12,7 @@ Two on-the-wire formats, picked automatically by payload content:
     S->C {type:"event",  src, payload}            -> an event from a watched agent
                                                      (`src` = the name the client watched)
     S->C {type:"event",  payload}                 -> an event emitted to THIS connection
-    S->C {type:"emit",   target, payload, caller?} -> the host emitting on a page
+    S->C {type:"emit",   target, payload}         -> the host emitting on a page
                                                      agent (`<guid>|<agent>`: every
                                                      tab of that guid)
     S->C {type:"reply_mirror", id, data}          -> a reply another tab of THIS
@@ -35,6 +31,11 @@ Two on-the-wire formats, picked automatically by payload content:
 The binary path eliminates base64 + JSON encoding for byte-heavy
 payloads (audio, image, etc.). It's transparent to bundle handlers —
 they receive `bytes` regardless of which wire format was used.
+
+IDENTITY: this loop is the TRANSPORT — it runs outside every dispatch, so what
+it sends is the operator's. It sends nothing onward itself: every admitted frame
+is handed to the leg (`io_bridge.hand_in` → the leg's `inbound_*` verbs), and the
+leg performs it as itself — gated as the leg.
 """
 
 from __future__ import annotations
@@ -45,7 +46,6 @@ from starlette.websockets import WebSocketState
 import logging
 import secrets
 
-from kernel import sender_context
 from kernel._kernel import PeerRoute
 from kernel._refusal import TRANSPORT_ERROR, UNKNOWN_AGENT, bad, refusal
 
@@ -53,6 +53,7 @@ from io_bridge import (
     decode_frame,
     encode_frame,
     gate_inbound,
+    hand_in,
     resolve_ingress,
 )
 
@@ -95,10 +96,9 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
     every connection auto-watches that id so the browser sees its
     inbox events without an explicit `watch` frame.
 
-    `web_agent_id` is THIS webapp's own agent id — used as the
-    `_current_sender` for browser-driven calls/emits so telemetry
-    rays originate visually from the webapp sprite (browsers don't
-    have agent identity of their own).
+    `web_agent_id` is THIS leg's own agent id — every admitted frame is
+    handed to it (`hand_in`) and it acts as itself: browsers have no agent
+    identity of their own.
     """
     """Drive one WebSocket connection."""
     client_id = _make_client_id()
@@ -191,9 +191,9 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
 
     # ─── inbound frame handlers ─────────────────────────────────
     # Browser-originated traffic has no agent identity of its own: every
-    # dispatch is tagged, explicitly, with `web_agent_id` (this surface's
-    # own id) — it is gated as that agent and every external call/emit
-    # originates from it.
+    # admitted frame is handed to the leg (`web_agent_id`), whose handler
+    # performs it — gated as that agent; every external call/emit originates
+    # from it.
     async def _on_call(frame):
         target = _name(frame, "target")
         payload = frame.get("payload", {})
@@ -220,13 +220,9 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
         item = {"target": target, "payload": payload}
         if isinstance(fid, str) and fid:
             item["id"] = fid
-        # SECRET MARKS cross the leg verbatim (`kernel/_secret`): this kernel
-        # records the call as shown, exactly as for a local caller — the kernel's
-        # own check refuses a malformed mark before anything is dispatched.
-        if "secret" in frame:
-            item["secret"] = frame["secret"]
-        with sender_context(web_agent_id):
-            reply = (await kernel.send([item]))[0]["result"]
+        reply = await hand_in(
+            kernel, web_agent_id, {"type": "inbound_call", "item": item}
+        )
         await _answer(fid, reply)
 
     async def _answer(fid, data) -> None:
@@ -247,8 +243,14 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
     async def _on_emit(frame):
         if not _gate("emit", frame).allowed:
             return
-        with sender_context(web_agent_id):
-            await kernel.emit(_name(frame, "target"), frame.get("payload", {}))
+        target, inner = _name(frame, "target"), frame.get("payload", {})
+        if not target or not isinstance(inner, dict):
+            return  # an emit has no reply channel; a malformed one is dropped
+        await hand_in(
+            kernel,
+            web_agent_id,
+            {"type": "inbound_emit", "target": target, "payload": inner},
+        )
 
     async def _watch(src: str, frame_id: str) -> None:
         """THE ONE WATCH PATH — the connect-time auto-watch and an explicit
@@ -260,11 +262,9 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
         skipped as a duplicate: measured, a page got zero events.)
 
         The name resolves the way `send` resolves a target (`kernel` or a literal
-        id). UNDER THE LEG'S OWN IDENTITY, so the kernel's gate
-        sees a real caller: without it `_current_sender` is None, the kernel reads
-        the watch as an OPERATOR's, and the two-sided gate never runs — which is
-        exactly how a leg granted only `assistant:[send]` could mirror any
-        agent's inbox and read the model's prompt out of it."""
+        id). THE LEG WATCHES (`inbound_watch`), so the kernel's gate sees a real
+        caller — an ungated watch is how a leg granted only `assistant:[send]`
+        could mirror any agent's inbox and read the model's prompt out of it."""
         if not src or src in watching:
             return
         target = kernel._resolve_agent(src)
@@ -283,8 +283,12 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
             return
         reader = f"{client_id}>{target.id}"
         kernel.ctx.ensure_inbox(reader)
-        with sender_context(web_agent_id):
-            denial = kernel.watch(target.id, reader)
+        out = await hand_in(
+            kernel,
+            web_agent_id,
+            {"type": "inbound_watch", "src": target.id, "reader": reader},
+        )
+        denial = out if isinstance(out, dict) and out.get("error") else None
         if denial is not None:
             kernel.ctx.inboxes.pop(reader, None)
             await _send_envelope({"type": "error", "id": frame_id, **denial})
@@ -330,12 +334,11 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
         # on the ROOT exactly as a kernel verb is — the leg needs an explicit
         # `state_subscribe` edge, not merely an open ingress rule. An ingress
         # rule answers "may this client reach this leg"; it says nothing about
-        # what the client may then READ. UNDER THE LEG'S OWN IDENTITY, like every
-        # other handler here: with no sender the kernel reads an OPERATOR and the
-        # gate never runs — a refactor of the ambient context (or a transport that
-        # sets none) would turn the stream into an open tap (audit ARCH2-7).
-        with sender_context(web_agent_id):
-            denial = kernel.authorize_state_subscribe(web_agent_id)
+        # what the client may then READ. THE LEG ASKS (`inbound_state_subscribe`),
+        # like every other handler here — the transport's own context is the
+        # operator's, which the gate never judges (audit ARCH2-7).
+        out = await hand_in(kernel, web_agent_id, {"type": "inbound_state_subscribe"})
+        denial = out if isinstance(out, dict) and out.get("error") else None
         if denial is not None:
             await _send_envelope({"type": "error", "id": frame.get("id", ""), **denial})
             return
@@ -391,9 +394,7 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
     out_calls: dict[str, asyncio.Future] = {}
     out_seq = [0]
 
-    async def _call_page(
-        agent_id: str, payload: dict, caller: str, secret: tuple
-    ) -> dict:
+    async def _call_page(agent_id: str, payload: dict) -> dict:
         # A call that resolved this route just as the socket closed must not wait
         # on a future the teardown has already swept — it settles now, the same
         # way the teardown settles the ones already waiting.
@@ -406,27 +407,15 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
         fid = f"h{out_seq[0]}"
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
         out_calls[fid] = fut
-        frame = {
-            "type": "call",
-            "id": fid,
-            "target": agent_id,
-            "payload": payload,
-            "caller": caller,
-        }
-        # the item's marks, so the PAGE kernel masks its records of this call too
-        if secret:
-            frame["secret"] = list(secret)
+        frame = {"type": "call", "id": fid, "target": agent_id, "payload": payload}
         try:
             await _send_envelope(frame)
             return await fut
         finally:
             out_calls.pop(fid, None)
 
-    async def _emit_page(agent_id: str, payload: dict, caller: str | None) -> None:
-        frame = {"type": "emit", "target": agent_id, "payload": payload}
-        if caller is not None:
-            frame["caller"] = caller
-        await _send_envelope(frame)
+    async def _emit_page(agent_id: str, payload: dict) -> None:
+        await _send_envelope({"type": "emit", "target": agent_id, "payload": payload})
 
     async def _on_hello(frame):
         guid = frame.get("guid")

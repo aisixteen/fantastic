@@ -4,7 +4,8 @@
 use super::*;
 use async_trait::async_trait;
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
-use fantastic_kernel::{with_sender, Agent, AgentRecord, Item};
+use fantastic_kernel::test_support::as_agent;
+use fantastic_kernel::{Agent, AgentRecord, Item};
 use serde_json::{json, Map};
 
 /// A trivial roster agent — answers boot/reflect, nothing else.
@@ -131,9 +132,12 @@ async fn roster_is_hydrated_as_children_of_the_loader() {
 async fn declared_agents_carry_baseline_plus_explicit_grants() {
     let (kernel, _fixture) = boot_with_manifest(MANIFEST).await;
     let can = record(&kernel, "worker").meta["can_call"].clone();
+    // the baseline is `$self` alone — every other edge is explicit
     assert_eq!(can["$self"], json!("*"));
-    assert_eq!(can["$parent"], json!("*"));
-    assert_eq!(can["$children"], json!("*"));
+    assert!(
+        can.get("$parent").is_none() && can.get("$children").is_none(),
+        "{can}"
+    );
     assert_eq!(can["memory"], json!(["set", "read"]));
     // memory got the baseline with no explicit can_call in the manifest.
     assert_eq!(
@@ -145,7 +149,7 @@ async fn declared_agents_carry_baseline_plus_explicit_grants() {
 #[tokio::test]
 async fn roster_is_closed_a_child_cannot_create_more() {
     let (kernel, _fixture) = boot_with_manifest(MANIFEST).await;
-    let r = with_sender(
+    let r = as_agent(
         AgentId::from("worker"),
         kernel.send(vec![Item::new(
             AgentId::from("kernel_state"),
@@ -561,7 +565,7 @@ fn reflect_verbs_are_python_docstrings() {
         reflect_reply(&agent)["verbs"],
         json!({
             "reflect": "The loader's posture: what manifest it hydrates, and that it IS a loader",
-            "boot": "Hydrate the declared roster as OPERATOR.",
+            "boot": "Hydrate the declared roster — kernel bookkeeping at boot.",
         })
     );
 }
@@ -700,7 +704,7 @@ async fn unknown_type_wire_shape_is_byte_exact() {
     );
 }
 
-/// Audit G-2/BV-2 — the roster pass runs AS OPERATOR, so only the kernel's own
+/// Audit G-2/BV-2 — the roster pass is kernel bookkeeping (ungated), so only the kernel's own
 /// boot (origin none) may start it. A roster agent whose grant the operator
 /// revoked sent `boot` to its loader and got the grant back; a deleted roster
 /// agent came back. The edge is NAMED on both ends, so the refusal is the
@@ -740,7 +744,7 @@ async fn an_agent_sent_boot_is_refused_and_re_runs_nothing() {
             .result;
         assert!(r.get("error").is_none(), "{r}");
     }
-    let r = with_sender(
+    let r = as_agent(
         AgentId::from("worker"),
         kernel.send(vec![Item::new(
             AgentId::from("static_loader"),
@@ -753,12 +757,12 @@ async fn an_agent_sent_boot_is_refused_and_re_runs_nothing() {
     assert_eq!(
         r,
         json!({
-            "error": "static_loader: an agent-sent boot is refused — the roster is \
-                      hydrated with operator authority, so only the kernel's own boot \
-                      (cold boot, create_agent) runs it",
+            "error": "static_loader: an agent-sent boot is refused — hydrating the \
+                      roster is the kernel's own bookkeeping, so only the kernel's own \
+                      boot (cold boot, create_agent) runs it",
             "reason": "unauthorized",
-            "hint": "change an agent's record with update_agent (the conferral rule \
-                     applies there); the operator re-boots the loader",
+            "hint": "change an agent's record with update_agent (its parent writes \
+                     it); the operator re-boots the loader",
         })
     );
     assert!(!kernel.agents.contains_key(&AgentId::from("memory")));

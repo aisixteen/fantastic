@@ -151,23 +151,6 @@ extension AIBackend {
         for m in res["matches"].asArray ?? [] {
             take(m["id"], m["line"] == .null ? .integer(0) : m["line"], m["text"].asString ?? "")
         }
-        // ROWS SHARED WITH YOU — every fork row's grant, searched under that grant.
-        if ids == nil {
-            for r in try await loadHead(id, kernel)
-            where r["kind"].asString == "fork" && r["grant"] != .null {
-                let shared = try await storeCall(
-                    id, kernel,
-                    [
-                        "type": .string("search"), "query": .string(qText), "grant": r["grant"],
-                        "limit": .integer(1000), "width": .integer(Int64(width)),
-                    ])
-                for m in shared["matches"].asArray ?? [] {
-                    take(
-                        .string("\(pyStr(r["owner"])):\(pyStr(m["id"]))"),
-                        m["line"] == .null ? .integer(0) : m["line"], m["text"].asString ?? "")
-                }
-            }
-        }
         let (kept, cut) = AIContext.fitReply(
             matches, capTokens: AIContext.inlineCap(agent, modelWindow: config.modelWindow), limit: limit)
         let more = cut || total > kept.count

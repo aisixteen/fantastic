@@ -20,14 +20,11 @@ import Foundation
 import OrderedCollections
 
 /// How a connected PEER KERNEL is reached. `via` names the transport agent
-/// carrying it (the root reflect reports it); `call(agentId, payload, caller,
-/// secret, body)` delivers ONE call to that kernel's `agentId` as `caller`
-/// (`<this guid>|<sender>`) and returns the peer's reply — or a refusal when the
-/// connection ends first. `secret` is the item's marks as given (`Secret` —
-/// dotted strings and/or arrays of steps, `[]` when none), rooted at the item
-/// exactly as the peer's item is rooted, so the transport puts them on the call
-/// frame verbatim and the PEER masks its own records of the call too. Python `PeerRoute.call(agent_id, payload, caller,
-/// secret)`.
+/// carrying it (the root reflect reports it); `call(agentId, payload, body)`
+/// delivers ONE call to that kernel's `agentId` and returns the peer's reply —
+/// or a refusal when the connection ends first. The peer judges what arrives as
+/// the transport leg that serves it there — a caller is always local. Python
+/// `PeerRoute.call(agent_id, payload)`.
 ///
 /// A CLASS, compared by IDENTITY (python `is`): a connection unregisters its own
 /// route and no other. The request body rides beside the JSON
@@ -35,20 +32,19 @@ import OrderedCollections
 /// payload dict simply holds the bytes there; the reply's chunk rides beside the
 /// reply at ITS slot of the reply (`Blob`), where the peer's frame put it.
 ///
-/// `emit(agentId, payload, caller, body)` delivers ONE event to that kernel's
-/// `agentId` — `caller` is `<this guid>|<sender>` when an agent emitted it, `nil`
-/// for an operator emit. SYNCHRONOUS like the kernel's own emit (a fanout, no
-/// reply), so a transport puts emits on its wire in the order they were made.
+/// `emit(agentId, payload, body)` delivers ONE event to that kernel's `agentId`.
+/// SYNCHRONOUS like the kernel's own emit (a fanout, no reply), so a transport
+/// puts emits on its wire in the order they were made.
 public final class PeerRoute: @unchecked Sendable {
     /// The transport agent carrying this peer.
     public let via: String
-    private let deliver: @Sendable (String, JSON, String, [JSON], Blob?) async -> (JSON, Blob?)
-    private let deliverEmit: @Sendable (String, JSON, String?, Blob?) -> Void
+    private let deliver: @Sendable (String, JSON, Blob?) async -> (JSON, Blob?)
+    private let deliverEmit: @Sendable (String, JSON, Blob?) -> Void
 
     public init(
         via: String,
-        call: @escaping @Sendable (String, JSON, String, [JSON], Blob?) async -> (JSON, Blob?),
-        emit: @escaping @Sendable (String, JSON, String?, Blob?) -> Void
+        call: @escaping @Sendable (String, JSON, Blob?) async -> (JSON, Blob?),
+        emit: @escaping @Sendable (String, JSON, Blob?) -> Void
     ) {
         self.via = via
         self.deliver = call
@@ -56,15 +52,13 @@ public final class PeerRoute: @unchecked Sendable {
     }
 
     /// Deliver one event through this route.
-    public func emit(_ agentId: String, _ payload: JSON, caller: String?, body: Blob?) {
-        deliverEmit(agentId, payload, caller, body)
+    public func emit(_ agentId: String, _ payload: JSON, body: Blob?) {
+        deliverEmit(agentId, payload, body)
     }
 
     /// Deliver one call through this route.
-    public func call(
-        _ agentId: String, _ payload: JSON, caller: String, secret: [JSON], body: Blob?
-    ) async -> (JSON, Blob?) {
-        await deliver(agentId, payload, caller, secret, body)
+    public func call(_ agentId: String, _ payload: JSON, body: Blob?) async -> (JSON, Blob?) {
+        await deliver(agentId, payload, body)
     }
 }
 
@@ -151,36 +145,14 @@ extension Kernel {
     }
 
     /// The dispatch of a call to a remote target: hand it to EVERY live route of
-    /// the peer (each tab of one identity), carrying the caller as `<this
-    /// guid>|<sender>` so the peer's gate can judge it, and the item's `secret`
-    /// marks so the peer masks its records as this kernel does; the first reply
-    /// settles it and the other calls are cancelled. Python
-    /// `RemoteTarget._dispatch_task`.
-    func callPeer(
-        _ remote: RemoteRef, qualified: AgentId, payload: JSON, origin: AgentId?,
-        secret: [JSON], body: Blob?
-    ) async -> (JSON, Blob?) {
-        guard let own = ownGuid() else {
-            // The peer judges the caller by `<guid>|<agent>`; with no guid of our
-            // own there is nothing honest to put on the frame.
-            return (
-                Refusal.make(
-                    Refusal.unhandled,
-                    "send: this kernel has no guid yet (its root has not booted), so a "
-                        + "call to \(qualified.value) cannot say who is calling"),
-                nil
-            )
-        }
-        // The item's `secret` marks ride along: this kernel already records the
-        // call as shown, and the peer must too — its call/settle rows, ledger and
-        // state stream are records of the SAME call.
-        let caller = "\(own)|\(origin?.value ?? "kernel")"
-        return await withTaskGroup(of: (JSON, Blob?).self) { group in
+    /// the peer (each tab of one identity); the first reply settles it and the
+    /// other calls are cancelled. Python `RemoteTarget._dispatch_task`.
+    func callPeer(_ remote: RemoteRef, qualified: AgentId, payload: JSON, body: Blob?) async
+        -> (JSON, Blob?)
+    {
+        await withTaskGroup(of: (JSON, Blob?).self) { group in
             for route in remote.routes {
-                group.addTask {
-                    await route.call(
-                        remote.agentId, payload, caller: caller, secret: secret, body: body)
-                }
+                group.addTask { await route.call(remote.agentId, payload, body: body) }
             }
             // TODO (owner, open): first-reply-wins hides tab DESYNC — if the tabs
             // of one identity diverge, the other replies are dropped unseen. Must
@@ -192,21 +164,13 @@ extension Kernel {
     }
 
     /// The dispatch of an EMIT to a remote target: the event goes to EVERY live
-    /// route of the peer (each tab of one identity), carrying `<this
-    /// guid>|<sender>` as its caller when an agent emitted it. An agent's emit
-    /// from a kernel with no guid yet is dropped — nothing honest to put on the
-    /// frame, and an emit has no reply to refuse on.
+    /// route of the peer (each tab of one identity).
     ///
     /// TODO (owner, open): DESYNC between the tabs of one identity is envisioned
     /// and unsolved — each tab applies the event on its own; think later.
-    func emitPeer(_ remote: RemoteRef, item: InboxItem, origin: AgentId?) {
-        var caller: String? = nil
-        if let origin {
-            guard let own = ownGuid() else { return }
-            caller = "\(own)|\(origin.value)"
-        }
+    func emitPeer(_ remote: RemoteRef, item: InboxItem) {
         for route in remote.routes {
-            route.emit(remote.agentId, item.payload, caller: caller, body: item.body)
+            route.emit(remote.agentId, item.payload, body: item.body)
         }
     }
 }

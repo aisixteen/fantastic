@@ -36,38 +36,24 @@
 //! declaration names, or that carries none: a store elsewhere declaring the same id
 //! and ref with another host reads nothing. The `env` backend keeps no value at rest.
 //!
-//! A REF IS DECLARED ONLY BY `update_agent` on the store's own record — the
-//! kernel's privileged verb, granted explicitly, is the one path:
-//! `refs: {<ref>: {host, readers: [...], writers: [...], fields?/env?}}` (it
+//! A REF IS DECLARED ONLY BY `update_agent` on the store's own record — by the
+//! store's parent or the operator, the one path:
+//! `refs: {<ref>: {host, fields?/env?}}` (it
 //! replaces the whole map; `host` is required — the binding). The DECLARATION is
 //! the operator's and only `update_agent` writes or removes it (audit AV-4/AV-5,
 //! 2026-10-03): `set` stores the value of a DECLARED ref, never creates one and
 //! takes no `host` (an undeclared ref answers "no such ref", to the operator too;
 //! a `host` on the call is refused); `forget` drops the value and keeps the
-//! declaration. `set`/`forget` need the caller in `writers`, `get` in `readers`;
-//! an entry is a local agent id, `$subtree:<id>` (that agent and every live
-//! descendant), or a qualified `<guid>|<agent>` caller on another kernel. The
-//! operator passes every reader and writer check. A caller with no grant on a ref
-//! is answered "no such ref" — never told the ref exists. `fields` on a ref are
-//! the stored value's NAMES: `set` writes them, `forget` drops them.
+//! declaration. Any caller the kernel's call gate admits may `set`, `get` and
+//! `forget` a declared ref — there are no per-ref access lists. `fields` on a ref
+//! are the stored value's NAMES: `set` writes them, `forget` drops them.
 //!
-//! NO VALUE IS EVER RECORDED. `set` must be called with `secret:
-//! ['payload.fields']` and `get` with `secret: ['result']`
-//! ([`fantastic_kernel::secret`]): the call is refused otherwise, because the
-//! value would land in the ledger, the memory store and the state stream. Either
-//! spelling of a mark counts (`['payload', 'fields']` is `payload.fields`), as
-//! does marking every field one by one; a field name holding a dot is marked only
-//! as an array (`['result', 'fields', 'a.b']`). The record holds only metadata —
-//! the host and the field NAMES.
+//! THE RECORD holds only metadata — the host and the field NAMES. The CALL
+//! carries the value: a `set` payload and a `get` reply are recorded like any
+//! call's (the ledger, the memory store, the state stream), in clear (owner,
+//! 2026-10-04).
 //!
-//! The kernel's call gate still decides who may reach this agent at all.
-//!
-//! A SECRET HOLDER, NEVER A MODEL'S TOOL (owner, 2026-10-02): the store stamps
-//! `holds_secrets: true` on its own record at boot, and `validate_meta` refuses any
-//! other value. ai_core refuses every model-parsed call that names an agent so
-//! marked, so an AI agent's backend reads its key here while its model cannot. The
-//! kernel judges first — its shape check refuses anything but `true`/`null` on every
-//! agent, so this text answers `null`; its gate lets only the operator lower a mark.
+//! WHO MAY CALL is the kernel's call gate alone.
 //!
 //! A python RAISE is a bundle error rendered `"<Class>: <message>"`, which the
 //! kernel settles `failed` with `raised: true` — exactly the record python's
@@ -85,9 +71,7 @@ use async_trait::async_trait;
 use fantastic_bundle::{py_json_dumps, py_repr, py_repr_value, py_str, py_strip, py_truthy};
 use fantastic_file::fs;
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
-use fantastic_kernel::refusal::{
-    missing, refusal, with, BAD_ARG, NOT_FOUND, UNAUTHORIZED, UNHANDLED,
-};
+use fantastic_kernel::refusal::{missing, refusal, with, BAD_ARG, NOT_FOUND, UNHANDLED};
 use fantastic_kernel::{AgentId, Kernel};
 use serde_json::{json, Map, Value};
 
@@ -101,16 +85,11 @@ pub const README: &str = include_str!("readme.md");
 
 const NAME: &str = "credential_store";
 const BACKENDS: [&str; 3] = ["file", "keychain", "env"];
-/// The record field every store carries as `true` — read by ai_core, which
-/// refuses a model-parsed call to an agent so marked.
-pub const HOLDS_SECRETS: &str = "holds_secrets";
 const DEFAULT_DIR: &str = "~/.fantastic/credentials";
 const KEYCHAIN_NAMESPACE: &str = "fantastic";
-const SUBTREE: &str = "$subtree:";
 
 /// What `reflect` says this agent IS — python's `sentence`, verbatim.
-pub const SENTENCE: &str = "Credential store — secrets by ref, each bound to one host, read only \
-                            with a secret mark, behind per-ref read/write grants.";
+pub const SENTENCE: &str = "Credential store — secrets by ref, each bound to one host.";
 
 /// Each verb's doc line — the FIRST line of python's docstring, in `VERBS` order.
 const VERBS: [(&str, &str); 6] = [
@@ -121,32 +100,30 @@ const VERBS: [(&str, &str); 6] = [
     ),
     (
         "boot",
-        "Stamps `holds_secrets: true` on this store's record (no model turn may reach it); \
-         values are read from the backend when asked for.",
+        "No-op: values are read from the backend when asked for.",
     ),
     (
         "set",
         "args: ref:str, fields:{name: value} (req). Store or rotate the value of a DECLARED \
          ref — its host is the declaration's (refs are declared by update_agent on this \
-         store's record; set never creates one and takes no host). Call it with secret: \
-         ['payload.fields']. Returns {ref, host, fields:[names], stored}.",
+         store's record; set never creates one and takes no host). Returns {ref, host, \
+         fields:[names], stored}.",
     ),
     (
         "get",
         "args: ref:str (req), host:str? (where you will send it — refused unless the ref is \
-         bound to it). The credential: {ref, host, fields:{name: value}}. Call it with \
-         secret: ['result']; send the value ONLY to `host`.",
+         bound to it). The credential: {ref, host, fields:{name: value}}. Send the value \
+         ONLY to `host`.",
     ),
     (
         "list",
-        "No args. The refs YOU may read or write — metadata only: {refs:[{ref, host, \
-         fields:[names], read, write}]}. Never a value.",
+        "No args. The declared refs — metadata only: {refs:[{ref, host, fields:[names]}]}. \
+         Never a value.",
     ),
     (
         "forget",
-        "args: ref:str (req). Drop a ref's VALUE from the backend; its declaration (host, \
-         readers, writers) stays — update_agent alone undeclares a ref. Writers and the \
-         operator only. Returns {forgotten, ref}.",
+        "args: ref:str (req). Drop a ref's VALUE from the backend; its declaration (host) \
+         stays — update_agent alone undeclares a ref. Returns {forgotten, ref}.",
     ),
 ];
 
@@ -170,49 +147,6 @@ fn raise_fs(msg: String) -> BundleError {
             .map_or("ValueError", fantastic_bundle::os_error_class)
     };
     raise(class, msg)
-}
-
-// ─── who is calling, and what they may do ──────────────────────────
-
-/// The calling agent's id — qualified `<guid>|<agent>` when it is on another
-/// kernel — or `None` for the operator.
-fn caller() -> Option<String> {
-    fantastic_kernel::current_remote_caller()
-        .or_else(|| fantastic_kernel::current_origin().map(|a| a.0))
-}
-
-/// Whether a readers/writers list names `caller`. The operator always passes.
-fn covers(kernel: &Kernel, entries: Option<&Value>, caller: Option<&str>) -> bool {
-    let Some(caller) = caller else {
-        return true;
-    };
-    let Some(list) = entries.and_then(Value::as_array) else {
-        return false;
-    };
-    for e in list.iter().filter_map(Value::as_str) {
-        if e == caller {
-            return true;
-        }
-        if let Some(root) = e.strip_prefix(SUBTREE) {
-            if caller.contains('|') {
-                continue;
-            }
-            let mut at = kernel
-                .agents
-                .get(&AgentId::from(caller))
-                .map(|a| Arc::clone(&a));
-            while let Some(a) = at {
-                if a.id.as_str() == root {
-                    return true;
-                }
-                at = a
-                    .parent_id
-                    .as_ref()
-                    .and_then(|p| kernel.agents.get(p).map(|x| Arc::clone(&x)));
-            }
-        }
-    }
-    false
 }
 
 fn record(kernel: &Kernel, id: &AgentId) -> Map<String, Value> {
@@ -287,34 +221,6 @@ fn host(h: Option<&Value>) -> Option<String> {
     };
     let s = s.to_lowercase();
     (!s.is_empty()).then_some(s)
-}
-
-/// Whether one secret mark names exactly `steps` — a dotted string by its dots,
-/// an array of steps step for step ([`fantastic_kernel::secret`]). A field name
-/// holding a dot is named only by an array: `result.fields.a.b` is `a` → `b`,
-/// never the field `a.b`, so it would not mask it. Python `_names`.
-fn mark_names(mark: &Value, steps: &[&str]) -> bool {
-    match mark {
-        Value::String(m) => m.split('.').eq(steps.iter().copied()),
-        Value::Array(m) => {
-            m.len() == steps.len() && m.iter().zip(steps).all(|(a, b)| a.as_str() == Some(*b))
-        }
-        _ => false,
-    }
-}
-
-/// Whether the caller marked `prefix` (or every `prefix` + `<name>`) secret, in
-/// either spelling of a mark. Python `_marked`.
-fn marked(prefix: &[&str], field_names: &[String]) -> bool {
-    let marks = fantastic_kernel::current_secret();
-    let has = |steps: &[&str]| marks.iter().any(|m| mark_names(m, steps));
-    has(prefix)
-        || (!field_names.is_empty()
-            && field_names.iter().all(|n| {
-                let mut steps = prefix.to_vec();
-                steps.push(n.as_str());
-                has(&steps)
-            }))
 }
 
 /// The record's `backend`, python `agent.record.get("backend") or "file"`.
@@ -815,18 +721,6 @@ impl CredentialStoreBundle {
             with(&mut out, "arg", json!("fields"));
             return Ok(out);
         };
-        let names: Vec<String> = fields.keys().cloned().collect();
-        if !marked(&["payload", "fields"], &names) {
-            let mut out = refusal(
-                BAD_ARG,
-                format!(
-                    "{NAME} set: mark the values secret — secret: ['payload.fields'] — or they \
-                     would be recorded in the ledger, the memory store and the state stream"
-                ),
-            );
-            with(&mut out, "arg", json!("secret"));
-            return Ok(out);
-        }
         let rec = record(kernel, id);
         if backend_kind(&rec) == "env" {
             let mut out = refusal(
@@ -839,32 +733,16 @@ impl CredentialStoreBundle {
             with(&mut out, "arg", json!("backend"));
             return Ok(out);
         }
-        let who = caller();
         let mut refs = refs_of(&rec);
         // declared by update_agent alone — set never makes one
         let Some(mut entry) = refs.get(r).filter(|v| !v.is_null()).map(entry_map) else {
             return Ok(no_such_ref(r));
         };
-        if !covers(kernel, entry.get("writers"), who.as_deref()) {
-            if covers(kernel, entry.get("readers"), who.as_deref()) {
-                let mut out = refusal(
-                    UNAUTHORIZED,
-                    format!(
-                        "{NAME}: {} may read {} but not write it",
-                        who.as_deref().unwrap_or("None"),
-                        py_repr(r)
-                    ),
-                );
-                with(&mut out, "arg", json!("ref"));
-                return Ok(out);
-            }
-            return Ok(no_such_ref(r));
-        }
         let h = host(entry.get("host"));
         // the declared host is stored WITH the value (audit S3)
-        self.backend(id, &rec)?.put(r, h.clone(), fields)?;
-        let mut sorted_names = names;
+        let mut sorted_names: Vec<String> = fields.keys().cloned().collect();
         sorted_names.sort();
+        self.backend(id, &rec)?.put(r, h.clone(), fields)?;
         // the value's NAMES, never a value
         entry.insert("fields".into(), json!(sorted_names));
         refs.insert(r.to_string(), Value::Object(entry));
@@ -884,13 +762,7 @@ impl CredentialStoreBundle {
         };
         let rec = record(kernel, id);
         let refs = refs_of(&rec);
-        let who = caller();
-        let Some(entry) = refs
-            .get(r)
-            .filter(|v| !v.is_null())
-            .map(entry_map)
-            .filter(|e| covers(kernel, e.get("readers"), who.as_deref()))
-        else {
+        let Some(entry) = refs.get(r).filter(|v| !v.is_null()).map(entry_map) else {
             return Ok(no_such_ref(r));
         };
         if payload.get("host").is_some_and(|v| !v.is_null()) {
@@ -924,37 +796,15 @@ impl CredentialStoreBundle {
             with(&mut out, "arg", json!("ref"));
             return Ok(out);
         };
-        // The marks are judged against the field names the backend RETURNED, never
-        // the declared ones: a declaration can name fewer than the backend holds (an
-        // `env` map wider than `fields`, a re-declared ref, a hand-edited file), and
-        // a returned field no mark covers would be recorded in plain (audit BV-6/S4).
-        let names: Vec<String> = fields.keys().cloned().collect();
-        if !(marked(&["result"], &[]) || marked(&["result", "fields"], &names)) {
-            let mut out = refusal(
-                BAD_ARG,
-                format!(
-                    "{NAME} get: mark the answer secret — secret: ['result'] — or the value would \
-                     be recorded in the ledger, the memory store and the state stream"
-                ),
-            );
-            with(&mut out, "arg", json!("secret"));
-            return Ok(out);
-        }
         Ok(json!({"ref": r, "host": host(entry.get("host")), "fields": fields}))
     }
 
     fn list(id: &AgentId, kernel: &Kernel) -> Value {
-        let who = caller();
         let mut refs: Vec<(String, Value)> = refs_of(&record(kernel, id)).into_iter().collect();
         refs.sort_by(|a, b| a.0.cmp(&b.0));
         let mut out = Vec::new();
         for (r, entry) in refs {
             let entry = entry_map(&entry);
-            let can_read = covers(kernel, entry.get("readers"), who.as_deref());
-            let can_write = covers(kernel, entry.get("writers"), who.as_deref());
-            if !(can_read || can_write) {
-                continue;
-            }
             let fields = match entry.get("fields") {
                 Some(v) if py_truthy(v) => v.clone(),
                 _ => {
@@ -971,17 +821,6 @@ impl CredentialStoreBundle {
             row.insert("ref".into(), json!(r));
             row.insert("host".into(), json!(host(entry.get("host"))));
             row.insert("fields".into(), fields);
-            row.insert("read".into(), json!(can_read));
-            row.insert("write".into(), json!(can_write));
-            if who.is_none() {
-                for k in ["readers", "writers"] {
-                    let v = match entry.get(k) {
-                        Some(v) if py_truthy(v) => v.clone(),
-                        _ => json!([]),
-                    };
-                    row.insert(k.into(), v);
-                }
-            }
             out.push(Value::Object(row));
         }
         json!({"refs": out})
@@ -1008,13 +847,7 @@ impl CredentialStoreBundle {
             return Ok(out);
         }
         let mut refs = refs_of(&rec);
-        let who = caller();
-        let Some(mut entry) = refs
-            .get(r)
-            .filter(|v| !v.is_null())
-            .map(entry_map)
-            .filter(|e| covers(kernel, e.get("writers"), who.as_deref()))
-        else {
+        let Some(mut entry) = refs.get(r).filter(|v| !v.is_null()).map(entry_map) else {
             return Ok(no_such_ref(r));
         };
         self.backend(id, &rec)?.drop_ref(r)?;
@@ -1057,14 +890,6 @@ impl Bundle for CredentialStoreBundle {
         meta: &Map<String, Value>,
         _record: &Map<String, Value>,
     ) -> Option<String> {
-        if meta
-            .get(HOLDS_SECRETS)
-            .is_some_and(|v| v != &Value::Bool(true))
-        {
-            return Some(
-                "holds_secrets must be true — a credential_store always holds secrets".to_string(),
-            );
-        }
         if let Some(b) = meta.get("backend").filter(|v| !v.is_null()) {
             if !b.as_str().is_some_and(|s| BACKENDS.contains(&s)) {
                 return Some(format!(
@@ -1090,9 +915,7 @@ impl Bundle for CredentialStoreBundle {
         }
         let refs = meta.get("refs").filter(|v| !v.is_null())?;
         let Some(refs) = refs.as_object() else {
-            return Some(
-                "refs must be a map of ref to {readers, writers, host, fields, env}".into(),
-            );
+            return Some("refs must be a map of ref to {host, fields, env}".into());
         };
         for (r, e) in refs {
             if py_strip(r).is_empty() {
@@ -1101,11 +924,9 @@ impl Bundle for CredentialStoreBundle {
             let Some(e) = e.as_object() else {
                 return Some(format!("{} must be a map", ref_label(r)));
             };
-            for k in ["readers", "writers", "fields"] {
-                if let Some(v) = e.get(k).filter(|v| !v.is_null()) {
-                    if !is_str_list(v) {
-                        return Some(format!("{}.{k} must be a list of strings", ref_label(r)));
-                    }
+            if let Some(v) = e.get("fields").filter(|v| !v.is_null()) {
+                if !is_str_list(v) {
+                    return Some(format!("{}.fields must be a list of strings", ref_label(r)));
                 }
             }
             if !e.get("host").is_some_and(|v| !v.is_null()) {
@@ -1142,16 +963,8 @@ impl Bundle for CredentialStoreBundle {
         let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
         let out = match verb {
             "reflect" => Self::reflect(agent_id, &record(kernel, agent_id)),
-            // Stamps `holds_secrets: true` on this store's record (no model turn may
-            // reach it); values are read from the backend when asked for.
-            "boot" => {
-                if record(kernel, agent_id).get(HOLDS_SECRETS) != Some(&Value::Bool(true)) {
-                    let mut patch = Map::new();
-                    patch.insert(HOLDS_SECRETS.to_string(), Value::Bool(true));
-                    kernel.update(agent_id, patch);
-                }
-                return Ok(None);
-            }
+            // No-op: values are read from the backend when asked for.
+            "boot" => return Ok(None),
             "set" => {
                 let _one = self.writes.lock().unwrap_or_else(|p| p.into_inner());
                 self.set(agent_id, payload, kernel)?

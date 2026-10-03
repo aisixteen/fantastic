@@ -14,7 +14,6 @@
 
 use crate::agent::{Agent, AgentId};
 use crate::kernel::Kernel;
-use crate::outcome::Item;
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
 
@@ -69,13 +68,11 @@ pub fn mint_guid() -> String {
 /// Any extra fields become the new agent's meta.
 /// A grant map's SHAPE, judged at WRITE time — the gate only judges edges.
 ///
-/// `{id|token: "*" | [verbs]}`, plus the `callable_by`-only `$subtree:<local id>`
-/// key and the `can_call`-only heritable value `{"verbs": [...], "for":
-/// "descendants"}` under a literal id — anything else is refused here, so a
-/// record can never carry a grant the gate would have to guess on. Ported from python
-/// (measured 2026-09-01, E21_plan: `update_agent` accepted `can_call:"*"`, and
-/// the py gate crashed out of a web serve; the rust gate denies instead of
-/// crashing, but a silently-dead grant is still the wrong answer — refuse loud).
+/// `{key: "*" | [verbs]}`, a key being one of [`crate::authz::legal_keys`] —
+/// anything else is refused here, so a record can never carry a grant the gate
+/// would have to guess on. Ported from python (measured 2026-09-01, E21_plan:
+/// `update_agent` accepted `can_call:"*"`, and the py gate crashed out of a web
+/// serve; a silently-dead grant is the wrong answer — refuse loud).
 pub(crate) fn bad_grant_shape(meta: &Map<String, Value>) -> Option<String> {
     for field in ["can_call", "callable_by"] {
         let Some(g) = meta.get(field) else { continue };
@@ -91,90 +88,23 @@ pub(crate) fn bad_grant_shape(meta: &Map<String, Value>) -> Option<String> {
         };
         for (k, v) in map {
             let kr = fantastic_bundle::py_repr(k);
-            if let Some(x) = k.strip_prefix(crate::authz::SUBTREE_PREFIX) {
-                if field != "callable_by" {
-                    return Some(format!(
-                        "{field}[{kr}]: `$subtree:` is callable_by-only — it names who \
-                         may call you, never whom you may call"
-                    ));
-                }
-                if x.is_empty() || x.contains('|') {
-                    return Some(format!(
-                        "{field}[{kr}]: `$subtree:` names one LOCAL agent id \
-                         (`$subtree:<id>`, no `|`)"
-                    ));
-                }
-            }
-            if v.is_object() {
-                if field != "can_call" {
-                    return Some(format!(
-                        "{field}[{kr}]: a heritable entry {{\"verbs\": [...], \"for\": \
-                         \"descendants\"}} is can_call-only"
-                    ));
-                }
-                if k.starts_with('$') {
-                    return Some(format!(
-                        "{field}[{kr}]: a heritable entry names a literal target id, \
-                         never a token"
-                    ));
-                }
-                if !crate::authz::is_heritable(v) {
-                    return Some(format!(
-                        "{field}[{kr}] must be exactly {{\"verbs\": [\"<verb>\", …], \
-                         \"for\": \"descendants\"}}"
-                    ));
-                }
-                continue;
+            if !crate::authz::is_grant_key(field, k) {
+                return Some(format!(
+                    "{field}[{kr}] is not a grant key — legal keys: {}",
+                    crate::authz::legal_keys(field)
+                ));
             }
             let ok = v.as_str() == Some("*")
                 || v.as_array()
                     .is_some_and(|a| a.iter().all(|x| x.is_string()));
             if !ok {
                 return Some(format!(
-                    "{field}[{kr}] must be \"*\", a list of verb strings, or (can_call) \
-                     {{\"verbs\": [...], \"for\": \"descendants\"}}"
+                    "{field}[{kr}] must be \"*\" or a list of verb strings"
                 ));
             }
         }
     }
     None
-}
-
-// THE SECRET-HOLDER MARK (owner 2026-10-02). `holds_secrets: true` on a record makes
-// that agent unreachable from a model turn (ai_core refuses the call). The kernel
-// owns two rules about the field itself, at the write:
-//   - its SHAPE ([`bad_holder_mark`]): exactly `true`, or `null` — anything else is
-//     `invalid_meta`, on every agent, at create_agent and update_agent alike;
-//   - who LOWERS it (`check_holder_mark`, in the gate): on an agent whose record
-//     says `true`, only the operator may write anything else.
-// `null` IS THE CLEAR. update_agent REPLACES a named field, so `holds_secrets: null`
-// leaves a record whose value is `null` — not a holder, since only exactly `true`
-// marks one — the same way `delete_lock: null` lifts a lock. Python `_agent.py`.
-
-/// The record field that marks a secret holder.
-pub(crate) const HOLDS_SECRETS: &str = "holds_secrets";
-/// The `side` of the gate's refusal to lower a holder's mark.
-pub(crate) const HOLDER_MARK_SIDE: &str = "secret-holder";
-/// The `hint` of the gate's refusal to lower a holder's mark.
-pub(crate) const HOLDER_MARK_HINT: &str = "only the operator clears it (update_agent \
-     holds_secrets=null); an agent may mark a holder, never unmark one";
-
-/// `holds_secrets`'s SHAPE, judged at WRITE time on every agent — python
-/// `_bad_holder_mark`: exactly `true` marks a holder, `null` is the operator's
-/// clear — nothing else is a value the record may carry (`false`, `"yes"`, `1`
-/// read as a mark to one reader and as none to another). Runs after the grant
-/// shape and BEFORE the bundle's own `validate_meta`, so for a credential_store a
-/// malformed value gets this text and `null` gets the store's.
-pub(crate) fn bad_holder_mark(meta: &Map<String, Value>) -> Option<String> {
-    let v = meta.get(HOLDS_SECRETS)?;
-    if matches!(v, Value::Bool(true) | Value::Null) {
-        return None;
-    }
-    Some(format!(
-        "holds_secrets must be exactly true (this agent holds secrets) or null \
-         (the operator clears the mark) — got {}",
-        fantastic_bundle::py_type_name(v)
-    ))
 }
 
 pub(crate) async fn create_from_payload(
@@ -287,7 +217,7 @@ pub(crate) async fn create_from_payload(
     // used to bypass it, so `create_agent ingress_rule=bogus` was ACCEPTED here
     // and REFUSED one update later — two answers for one field). Record is empty
     // at create: the merged view IS the patch.
-    if let Some(why) = bad_grant_shape(&meta).or_else(|| bad_holder_mark(&meta)) {
+    if let Some(why) = bad_grant_shape(&meta) {
         return crate::refusal::refusal(crate::refusal::INVALID_META, &why);
     }
     if let Some(bundle) = kernel.bundles.get(hm) {
@@ -363,25 +293,16 @@ pub(crate) async fn create_from_payload(
     kernel.publish_state(&event);
 
     let rec_value = crate::jsonsafe::record_value(&new_agent.record());
-    // Fire the new agent's `boot` hook (Python does the same — bundles
-    // may auto-spawn paired agents here). Failures
-    // are logged but don't abort the create — matches Python.
+    // BOOT — kernel bookkeeping: the kernel initializing the child it was told to
+    // make, not the parent reaching out. The child's handler runs directly
+    // ([`Kernel::bookkeeping`]), as the child, with no origin — never through a
+    // gated send, never against the parent's own grant. Failures are logged but
+    // don't abort the create — matches Python.
     //
-    // Wrap in Box::pin because boot may call create_agent recursively
-    // (a boot hook may create a child agent); the resulting
-    // async future is recursive and Rust requires explicit indirection.
-    let new_id = new_agent.id.clone();
-    let kernel_for_boot = Arc::clone(kernel);
-    // Operator authority: booting the child is a side effect of the already-
-    // authorized create_agent (the kernel initializing what it was told to make),
-    // not the parent reaching out — so it never runs against the parent's grant.
-    let boot = Box::pin(crate::send::with_operator(async move {
-        kernel_for_boot
-            .send(vec![Item::new(new_id.clone(), json!({"type": "boot"}))])
-            .await
-            .remove(0)
-    }))
-    .await;
+    // Wrap in Box::pin because boot may call create_agent recursively (a boot
+    // hook may create a child agent); the resulting async future is recursive
+    // and Rust requires explicit indirection.
+    let boot = Box::pin(kernel.bookkeeping(&new_agent, json!({"type": "boot"}), None)).await;
     let new_id = new_agent.id.clone();
     // BRANCH ON THE OUTCOME STATUS, not on the reply shape. A handler that
     // RAISED settles `failed` and is the one case python prints — on stdout,
@@ -395,22 +316,23 @@ pub(crate) async fn create_from_payload(
             fantastic_bundle::py_str(&boot.result)
         );
     }
-    // Emit `agent_created` lifecycle event on the parent's inbox so
-    // watchers (canvas frame chrome) refresh without polling. Mirrors
-    // Python's `await self.emit(self.id, {type:"agent_created", ...})`.
-    // BOOKKEEPING FROM ABOVE, like the boot: emitted as the root, the gate
-    // judged root→parent, and the root's `$children` baseline reaches depth 1
-    // only — a parent any deeper never got its event, operator creates
-    // included, and nothing said so (audit 2026-10-03, KV-4).
-    crate::send::with_operator(kernel.emit(
-        &parent.id,
-        crate::jsonsafe::obj([
-            ("type", Value::from("agent_created")),
-            ("id", Value::from(new_id.0.clone())),
-            ("agent", rec_value.clone()),
-        ]),
-    ))
-    .await;
+    // Lifecycle event on the PARENT's inbox, not the root's: whoever watches an
+    // agent for new children still sees them arrive. Kernel bookkeeping too —
+    // put on the parent's inbox and mirrored to its watchers directly (the
+    // fanout), never a gated emit (audit 2026-10-03, KV-4). Python
+    // `parent._fanout(..., kind="emit")`.
+    kernel
+        .fanout(
+            parent,
+            "emit",
+            &crate::inbox::InboxItem::text(crate::jsonsafe::obj([
+                ("type", Value::from("agent_created")),
+                ("id", Value::from(new_id.0.clone())),
+                ("agent", rec_value.clone()),
+            ])),
+            crate::send::current_sender().as_ref(),
+        )
+        .await;
     rec_value
 }
 
@@ -529,12 +451,13 @@ pub async fn cascade_delete(kernel: &Arc<Kernel>, target: &Arc<Agent>) {
     // on_delete hook. C87: python's exact stdout line (`_agent.py:2835`,
     // `print(f"  [cascade] {self.id} bundle on_delete raised: {e}")`) — a
     // hook that raises is logged and the cascade still continues; delete is
-    // not refusable. The hook runs AS THE AGENT ITSELF (its own id is the
-    // sender), whoever asked for the delete — like `on_cancel` (audit G-3).
+    // not refusable. The hook is the agent's own code, so the kernel runs it AS
+    // THE AGENT (its own id is the sender), whoever asked for the delete — like
+    // `on_cancel` (audit G-3).
     if let Some(hm) = target.handler_module.as_deref() {
         if let Some(bundle) = kernel.bundles.get(hm) {
             let hook = bundle.on_delete(&target.id, kernel);
-            if let Err(e) = crate::send::with_sender(target.id.clone(), hook).await {
+            if let Err(e) = crate::send::as_agent(&target.id, hook).await {
                 println!("  [cascade] {} bundle on_delete raised: {e}", target.id.0);
             }
         }

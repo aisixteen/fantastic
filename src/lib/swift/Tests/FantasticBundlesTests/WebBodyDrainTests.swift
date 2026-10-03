@@ -40,6 +40,7 @@ private func mountRestLeg(_ k: Kernel) async {
                 "callable_by": ["$self": "*", "$parent": "*", "$children": "*", "rr": "*"],
             ])
     ])
+    wire(k, "web", "rr")
     _ = await k.send([Item("web", ["type": "mount", "child_id": "rr"])])
 }
 

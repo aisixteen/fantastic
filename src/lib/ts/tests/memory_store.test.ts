@@ -15,6 +15,7 @@ import type { Item, Outcome } from "../src/kernel/outcome.ts";
 import { startKernel, stopKernel } from "../src/kernel/lifecycle.ts";
 import { ID_BLOCK } from "../src/kernel/kernel_store.ts";
 import { registerRamStore } from "../src/bundles/memory/ram_store.ts";
+import { sendAs } from "./kit.ts";
 
 const ROOT = "kernel_state";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -71,18 +72,18 @@ function kernel(): { k: Kernel; p: Probe } {
   const k = new Kernel();
   const p = probeBundle(k);
   registerRamStore(k);
-  k.setRoot(new Agent({ id: ROOT }));
+  // the root accepts `caller`'s ledger reads and acks — both ends name them
+  k.setRoot(new Agent({ id: ROOT, meta: { callable_by: { caller: ["ledger", "ack_deadletter"] } } }));
   return { k, p };
 }
 
 /** A ram_store `memory` under the root, named by the root; the kernel started. */
-async function withStore(k: Kernel, opts: { operator?: boolean; start?: boolean } = {}): Promise<void> {
+async function withStore(k: Kernel, opts: { start?: boolean } = {}): Promise<void> {
   k.register(
     new Agent({
       id: "memory",
       parentId: ROOT,
       handlerModule: "ram_store.ts",
-      meta: { operator: opts.operator ?? true, admins: ["kernel"] },
     }),
   );
   k.updateMeta(ROOT, { memory_store_id: "memory" });
@@ -100,24 +101,31 @@ async function res(k: Kernel, target: string, payload: Payload): Promise<Payload
   return (await call(k, target, payload)).result as Payload;
 }
 
+/** The kernel's own rows in the store — read as kernel bookkeeping, so it works
+ *  while the kernel drains, and records nothing. */
 async function kernelRows(k: Kernel): Promise<Payload[]> {
-  const tables = (await res(k, "memory", { type: "dump" }))["tables"] as Payload;
+  const tables = ((await k.bookkeeping("memory", { type: "dump" })).result as Payload)["tables"] as Payload;
   const rows = tables["rows"] as { owner: string; row: Payload }[];
   return rows.filter((r) => r.owner === `${k.guid}|kernel`).map((r) => r.row);
 }
 
 // ── the drain and the agents half of a stop ─────────────────────────────
 
-test("draining refuses new roots but not the kernel's own traffic", async () => {
+test("draining refuses new roots but not the kernel's own bookkeeping", async () => {
   const { k } = kernel();
-  const a = mk(k);
+  const a = mk(k, "probe", { can_call: { [ROOT]: ["ps"] } });
+  k.updateMeta(ROOT, { callable_by: { probe: ["ps"] } });
   k.store.draining = true;
   const out = await call(k, a, { type: "work" });
   assert.equal(out.status, "failed");
   assert.equal((out.result as Payload)["reason"], "draining");
   assert.equal(out.pid, null, "a refused root costs no id");
-  const own = (await k.kernelView().send([{ target: a, payload: { type: "work" } }]))[0]!;
-  assert.equal(own.status, "completed");
+  // kernel bookkeeping is a plain call into the handler — no send, no drain
+  const own = await k.bookkeeping(a, { type: "work" });
+  assert.deepEqual(own, { status: "completed", result: { ok: true } });
+  // a `shutdown` the kernel runs may still use its tools
+  const shut = await k.bookkeeping(a, { type: "shutdown" }, { shutdown: true });
+  assert.deepEqual(shut.result, { wrapped: true, tools_ok: true });
   // the root's control surface stays open
   const ps = await call(k, "kernel", { type: "ps" });
   assert.equal(ps.status, "completed");
@@ -149,15 +157,6 @@ test("kernel_start fails loud without a store, naming what to create", async () 
   assert.equal(out["reason"], "missing_arg");
   assert.equal(out["arg"], "memory_store_id");
   assert.match(String(out["hint"]), /create a ram_store and name it in memory_store_id/);
-  assert.equal(k.store.started, false);
-});
-
-test("kernel_start refuses a store that does not serve the operator", async () => {
-  const { k } = kernel();
-  await withStore(k, { operator: false, start: false });
-  const out = (await startKernel(k, false)) as Payload;
-  assert.equal(out["reason"], "unauthorized");
-  assert.match(String(out["hint"]), /operator/);
   assert.equal(k.store.started, false);
 });
 
@@ -224,7 +223,6 @@ test("stored rows keep null and reduce bytes to a length; dump → inject round-
   const bRows = before["rows"] as Json[];
   assert.deepEqual((after["rows"] as Json[]).slice(0, bRows.length), bRows);
   assert.deepEqual(after["fold_refs"], before["fold_refs"]);
-  assert.deepEqual(after["grants"], before["grants"]);
 });
 
 test("a settle keeps the body only when named, the error when dead, else {status, bytes}", async () => {
@@ -292,10 +290,10 @@ test("the flush records itself and never loops", async () => {
 test("ledger is a projection of store + RAM, scoped to the caller", async () => {
   const { k, p } = kernel();
   mk(k);
-  // `ledger` and `ack_deadletter` are PRIVILEGED: the root must be named.
+  // `ledger` and `ack_deadletter` at the root: both ends name them.
   mk(k, "caller", { can_call: { probe: "*", [ROOT]: ["ledger", "ack_deadletter"] } });
   await withStore(k);
-  const asCaller = k.scopedFor("caller", null);
+  const asCaller = { send: (items: Item[]) => sendAs(k, "caller", items) };
   const mine = (await asCaller.send([{ target: "probe", payload: { type: "work" }, id: "mine-1" }]))[0]!;
   const other = await call(k, "probe", { type: "work" });
   await k.store.flush();
@@ -355,12 +353,12 @@ test("named dedup survives a restart on the same store (dump → new kernel → 
 test("a dead letter is announced, listed and acked", async () => {
   const { k } = kernel();
   mk(k);
-  // `ledger` and `ack_deadletter` are PRIVILEGED: the root must be named.
+  // `ledger` and `ack_deadletter` at the root: both ends name them.
   mk(k, "caller", { can_call: { probe: "*", [ROOT]: ["ledger", "ack_deadletter"] } });
   await withStore(k);
   const inbox: Payload[] = [];
   k.onInbox("caller", (e) => inbox.push(e));
-  const asCaller = k.scopedFor("caller", null);
+  const asCaller = { send: (items: Item[]) => sendAs(k, "caller", items) };
   const out = (await asCaller.send([{ target: "probe", payload: { type: "fail" } }]))[0]!;
   assert.equal(out.status, "failed");
   const ev = inbox.find((e) => e["type"] === "on_deadletter")!;
@@ -378,7 +376,8 @@ test("a dead letter is announced, listed and acked", async () => {
   assert.equal(refused["reason"], "bad_arg", "only a dead letter is acked");
   // another agent cannot ack mine — even holding the named grant
   k.updateMeta("probe", { can_call: { [ROOT]: ["ack_deadletter"] } });
-  const nosy = (await k.scopedFor("probe", null).send([{ target: "kernel", payload: { type: "ack_deadletter", id: out.pid } }]))[0]!.result as Payload;
+  k.updateMeta(ROOT, { callable_by: { caller: ["ledger", "ack_deadletter"], probe: ["ack_deadletter"] } });
+  const nosy = (await sendAs(k, "probe", [{ target: "kernel", payload: { type: "ack_deadletter", id: out.pid } }]))[0]!.result as Payload;
   assert.equal(nosy["reason"], "not_found");
   await k.store.flush();
   const led2 = await res(k, "kernel", { type: "ledger" });
@@ -397,9 +396,9 @@ test("a graceful stop lands in-flight work as a cancelled dead letter", async ()
   await stopKernel(k);
   assert.equal((await slow)[0]!.status, "cancelled");
   assert.equal(k.store.stopped, true);
-  // a stopped kernel refuses new roots; the store is read as the kernel's own traffic
+  // a stopped kernel refuses new roots; the store is read as kernel bookkeeping
   assert.equal((await res(k, "memory", { type: "dump" }))["reason"], "draining");
-  const rows = await kernelRows(k.kernelView());
+  const rows = await kernelRows(k);
   const settle = rows.find((r) => r["kind"] === "settle" && r["parent"] === pid)!;
   assert.equal((settle["outcome"] as Payload)["status"], "cancelled", "a dead letter, flushed");
 });
@@ -456,7 +455,9 @@ test("the id counter reserves blocks in the root record", async () => {
   assert.ok(k2.mintId() >= next, "a reload resumes past the reserved block");
 });
 
-for (const headroom of [0, 1]) {
+// The flush mints exactly ONE id (its `flush` row): with no headroom left, that
+// mint reserves the next block inside the flush.
+for (const headroom of [0]) {
   test(`an id block reserved inside the flush publishes nothing (CLI-B, headroom ${headroom})`, async () => {
     const { k } = kernel();
     await withStore(k);
@@ -490,12 +491,12 @@ test("an unstarted kernel keeps its rows bounded by the ledger's ring", async ()
 });
 
 
-// ── the flusher is a task; the kernel's own calls parent to their task ───
+// ── the flusher is a task; the kernel's bookkeeping runs inside its task ──
 // python `Kernel.start`: `spawn_task(root, "flush_executions", keepalive=True)`
-// — a `task` row, a live `ps` row from then on, its writes parented to it — and
-// the start's boots and probe run inside the `kernel_start` verb's task.
+// — a `task` row, a live `ps` row from then on — and the start's boots and probe
+// are BOOKKEEPING: the handlers run directly, recorded as no call.
 
-test("kernel_start spawns the flusher as a task and parents its boots to the verb", async () => {
+test("kernel_start spawns the flusher as a task; its boots are bookkeeping, not calls", async () => {
   const { k } = kernel();
   mk(k);
   await withStore(k, { start: false });
@@ -509,27 +510,26 @@ test("kernel_start spawns the flusher as a task and parents its boots to the ver
   // adopted: its parent (the finished kernel_start) handed it up to the operator
   assert.equal(flusher!["parent"], null);
   await k.store.flush();
-  const rows = await kernelRows(k.kernelView());
+  const rows = await kernelRows(k);
   const task = rows.find((r) => r["id"] === flusher!["id"])!;
   assert.deepEqual([task["kind"], task["verb"], task["parent"]], ["task", "flush_executions", startPid]);
   const boots = rows.filter((r) => r["kind"] === "call" && (r["payload"] as Payload)["type"] === "boot");
-  assert.ok(boots.length >= 3, JSON.stringify(boots));
-  assert.ok(boots.every((r) => r["parent"] === startPid), "a boot was not parented to kernel_start");
+  assert.deepEqual(boots, [], "a boot the kernel runs is bookkeeping, recorded as no call");
 });
 
-test("the flusher's writes parent to it; a `ledger` verb's store reads parent to the verb", async () => {
+test("a `ledger` verb's store reads are bookkeeping — no call row; a stop ends the flusher last", async () => {
   const { k } = kernel();
   mk(k);
   await withStore(k);
   const fid = k.store.flusherTask as number;
   await call(k, "probe", { type: "work" });
-  await sleep(250); // the debounce fires: the flusher writes, then reads nothing
+  await sleep(250); // the debounce fires: the flusher writes
   const led = await call(k, "kernel", { type: "ledger" });
+  assert.equal(led.status, "completed");
   const reads = [...k.store.rows.values()].filter(
-    (r) => r.kind === "call" && r["agent"] === "memory" && (r["payload"] as Payload)["type"] === "read",
+    (r) => r.kind === "call" && r["agent"] === "memory",
   );
-  assert.ok(reads.length > 0);
-  assert.ok(reads.every((r) => r["parent"] === led.pid), JSON.stringify(reads.map((r) => r["parent"])));
+  assert.deepEqual(reads, [], "the kernel's own store traffic mints no call row");
   // a stop neither waits for the flusher nor cancels it: it ends it last
   const out = await res(k, "kernel", { type: "shutdown_agents" });
   assert.deepEqual(out["cancelled"], []);
@@ -575,8 +575,8 @@ test("the ledger flush publishes nothing on the state stream", async () => {
   assert.ok((out["flushed"] as number) > 0, JSON.stringify(out));
   assert.deepEqual(seen, [], "a flush wakes no waiter");
   await call(k, "kernel", { type: "list_agents" });
-  // the flush's own call + settle ids cross the bound inside the flush
-  while (k.store.nextId < k.store.idReserved - 1) k.store.mintId();
+  // the flush's own id crosses the bound inside the flush
+  while (k.store.nextId < k.store.idReserved) k.store.mintId();
   const before = k.store.idReserved;
   await k.store.flush();
   assert.ok(k.store.idReserved > before);

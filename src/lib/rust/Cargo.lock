@@ -512,6 +512,7 @@ name = "fantastic-io-bridge"
 version = "0.1.0"
 dependencies = [
  "fantastic-bundle",
+ "fantastic-kernel",
  "flate2",
  "httparse",
  "serde_json",

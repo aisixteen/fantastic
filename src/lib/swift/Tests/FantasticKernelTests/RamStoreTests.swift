@@ -1,4 +1,4 @@
-// ram_store: tenancy by caller, grants + FK cascade, search, inject/dump.
+// ram_store: tenancy by caller, fold refs + FK cascade, search, inject/dump.
 //
 // Callers act through `currentSender` (a real agent send, gated both ways); the
 // operator is a bare `kernel.send`. The root's guid is set by hand — the root is
@@ -17,7 +17,7 @@ import Testing
 private func call(_ k: Kernel, _ payload: JSON, as sender: String? = nil) async -> JSON {
     let item = Item(AgentId("mem"), payload)
     if let sender {
-        return await KernelTaskLocals.$currentSender.withValue(AgentId(sender)) {
+        return await KernelTaskLocals.$sender.withValue(AgentId(sender)) {
             await k.send([item])[0].result
         }
     }
@@ -60,12 +60,9 @@ private func store() async -> Kernel {
             .object([
                 "type": .string("create_agent"), "parent_id": .string("kernel_state"),
                 "id": .string("mem"), "handler_module": .string("ram_store.tools"),
-                "operator": .bool(true), "admins": .array([.string("kernel")]),
                 "callable_by": .object([
                     "alice": .string("*"), "bob": .string("*"), "carol": .string("*"),
                     "leg": .string("*"),
-                    // a relayed call is gated AS the foreign caller: named
-                    "g2|scout": .string("*"),
                 ]),
             ]))
     ])[0].result
@@ -100,11 +97,11 @@ struct RamStoreTests {
 
     @Test func ownerIsNeverAWritableField() async {
         let k = await store()
-        var out = await call(
+        // `owner` is no argument: the rows land under the CALLER's key
+        _ = await call(
             k, p("append", ["owner": .string("bob"), "rows": .array([row(5)])]), as: "alice")
-        #expect(out["reason"].asString == "unauthorized")
-        out = await call(k, p("read", ["owner": .string("bob")]), as: "alice")
-        #expect(out["reason"].asString == "unauthorized")
+        #expect(ids(await call(k, p("read"), as: "alice")) == [5])
+        #expect(ids(await call(k, p("read", ["owner": .string("alice")]), as: "bob")) == [])
     }
 
     @Test func missingIdTakesTheKernelsNext() async {
@@ -114,27 +111,13 @@ struct RamStoreTests {
         #expect((out["ids"][0].asInt ?? 0) >= before)
     }
 
-    @Test func operatorNeedsExplicitService() async {
+    @Test func theOperatorIsServedAsKernel() async {
         let k = await store()
-        k.update(AgentId("mem"), ["operator": .bool(false)])
-        let out = await call(k, p("read"))
-        #expect(out["reason"].asString == "unauthorized")
-        k.update(AgentId("mem"), ["operator": .bool(true)])
         _ = await call(k, p("append", ["rows": .array([row(7, ["kind": .string("call")])])]))
         let got = await call(k, p("read", ["kinds": .array([.string("call")])]))
         #expect(ids(got) == [7])
         // the operator's rows are its own key — alice sees none of them
         #expect((await call(k, p("read"), as: "alice"))["rows"] == .array([]))
-    }
-
-    @Test func adminMayNameAnOwner() async {
-        let k = await store()
-        _ = await append(k, "alice", [row(1, ["content": .string("a")])])
-        let got = await call(k, p("read", ["owner": .string("alice")]))
-        #expect(ids(got) == [1])
-        let out = await call(
-            k, p("append", ["owner": .string("alice"), "rows": .array([row(2)])]))
-        #expect(out["ids"] == .array([.integer(2)]))
     }
 
     @Test func refsMustNameOwnRows() async {
@@ -151,102 +134,15 @@ struct RamStoreTests {
         #expect(out["ids"] == .array([.integer(1), .integer(2), .integer(3)]))
     }
 
-    @Test func shareReadAndZeroTolerance() async {
-        let k = await store()
-        _ = await append(k, "alice", [1, 2, 3].map { row($0, ["content": .string("a\($0)")]) })
-        _ = await append(k, "bob", [row(50, ["content": .string("b")])])
-        let g = await call(
-            k,
-            p("share", [
-                "with": .string("bob"), "scope": .object(["head_until": .integer(2)]),
-                "why": .string("context"),
-            ]), as: "alice")
-        #expect(g["created"].asBool == true && g["anchor"].asInt == 1, "\(g.serialize())")
-        let got = await call(k, p("read", ["grant": g["grant"]]), as: "bob")
-        #expect(ids(got) == [1, 2])
-        // carol holds no grant
-        var out = await call(k, p("read", ["grant": g["grant"]]), as: "carol")
-        #expect(out["reason"].asString == "unauthorized")
-        // bob cannot share alice's rows — not under his key
-        out = await call(
-            k, p("share", ["with": .string("carol"), "scope": .object(["row": .integer(1)])]),
-            as: "bob")
-        #expect(out["reason"].asString == "not_found")
-        // an identical share is the same grant
-        let again = await call(
-            k, p("share", ["with": .string("bob"), "scope": .object(["head_until": .integer(2)])]),
-            as: "alice")
-        #expect(again["grant"] == g["grant"] && again["created"].asBool == false)
-    }
-
-    @Test func frozenStopsLiveFollows() async {
-        let k = await store()
-        _ = await append(k, "alice", [row(1), row(2)])
-        let frozen = await call(
-            k, p("share", ["with": .string("bob"), "scope": .object(["head_until": .integer(2)])]),
-            as: "alice")
-        let live = await call(
-            k,
-            p("share", [
-                "with": .string("bob"), "scope": .object(["head_until": .integer(2)]),
-                "mode": .string("live"),
-            ]), as: "alice")
-        _ = await append(k, "alice", [row(3)])
-        let f = await call(k, p("read", ["grant": frozen["grant"]]), as: "bob")
-        let lv = await call(k, p("read", ["grant": live["grant"]]), as: "bob")
-        #expect(ids(f) == [1, 2])
-        #expect(ids(lv) == [1, 2, 3])
-    }
-
-    @Test func foldScopeReachesMembers() async {
-        let k = await store()
-        _ = await append(
-            k, "alice",
-            [
-                row(1), row(2),
-                row(3, ["kind": .string("fold"), "refs": .array([.integer(1), .integer(2)])]),
-                row(4),
-            ])
-        let g = await call(
-            k, p("share", ["with": .string("bob"), "scope": .object(["fold": .integer(3)])]),
-            as: "alice")
-        let got = await call(k, p("read", ["grant": g["grant"]]), as: "bob")
-        #expect(ids(got) == [1, 2, 3])
-        #expect(got["rows"][2]["refs"] == .array([.integer(1), .integer(2)]))
-    }
-
-    @Test func pruneCascadesToGrantsAndFoldRefs() async {
+    @Test func pruneCascadesToFoldRefs() async {
         let k = await store()
         _ = await append(
             k, "alice",
             [row(1), row(2), row(3, ["kind": .string("fold"), "refs": .array([.integer(1), .integer(2)])])])
-        let g = await call(
-            k, p("share", ["with": .string("bob"), "scope": .object(["head_until": .integer(3)])]),
-            as: "alice")
         let out = await call(k, p("prune", ["before_id": .integer(2)]), as: "alice")
-        #expect(out == .object(["pruned": .integer(1), "grants_removed": .integer(1)]))
-        let gone = await call(k, p("read", ["grant": g["grant"]]), as: "bob")
-        #expect(gone["reason"].asString == "not_found")
+        #expect(out == .object(["pruned": .integer(1)]))
         let fold = await call(k, p("read", ["ids": .array([.integer(3)])]), as: "alice")
         #expect(fold["rows"][0]["refs"] == .array([.integer(2)]))
-        let listed = await call(k, p("grants", ["side": .string("given")]), as: "alice")
-        #expect(listed["grants"] == .array([]))
-    }
-
-    @Test func unshareAndGrantsListing() async {
-        let k = await store()
-        _ = await append(k, "alice", [row(1)])
-        let g = await call(
-            k, p("share", ["with": .string("bob"), "scope": .object(["row": .integer(1)])]),
-            as: "alice")
-        let rec = await call(k, p("grants", ["side": .string("received")]), as: "bob")
-        #expect((rec["grants"].asArray ?? []).map { $0["owner"] } == [.string("alice")])
-        var out = await call(k, p("unshare", ["grant": g["grant"]]), as: "bob")
-        #expect(out["reason"].asString == "unauthorized")
-        out = await call(k, p("unshare", ["grant": g["grant"]]), as: "alice")
-        #expect(out["unshared"].asBool == true)
-        out = await call(k, p("read", ["grant": g["grant"]]), as: "bob")
-        #expect(out["reason"].asString == "not_found")
     }
 
     @Test func searchLinesAndFoldDescent() async {
@@ -306,39 +202,21 @@ struct RamStoreTests {
         _ = await append(
             k, "alice",
             [row(1), row(2), row(3, ["kind": .string("fold"), "refs": .array([.integer(1), .integer(2)])])])
-        _ = await call(
-            k, p("share", ["with": .string("bob"), "scope": .object(["fold": .integer(3)])]),
-            as: "alice")
-        // only admins
-        #expect((await call(k, p("dump"), as: "alice"))["reason"].asString == "unauthorized")
+        // a plain verb — the gate alone decides who may call it
+        #expect((await call(k, p("dump"), as: "alice"))["tables"] != .null)
         let tables = (await call(k, p("dump")))["tables"]
         _ = await call(k, p("prune", ["before_id": .integer(99)]), as: "alice")
         #expect((await call(k, p("read"), as: "alice"))["rows"] == .array([]))
         let out = await call(k, p("inject", ["tables": tables]))
-        #expect(out == .object(["rows": .integer(3), "grants": .integer(1)]))
+        #expect(out == .object(["rows": .integer(3)]))
         #expect((await call(k, p("dump")))["tables"] == tables)
         // a broken FK is refused and nothing changes
         var bad = tables.asObject ?? [:]
-        var g0 = tables["grants"][0].asObject ?? [:]
-        g0["anchor"] = .integer(999)
-        bad["grants"] = .array([.object(g0)])
+        var f0 = tables["fold_refs"][0].asObject ?? [:]
+        f0["members"] = .array([.integer(999)])
+        bad["fold_refs"] = .array([.object(f0)])
         #expect((await call(k, p("inject", ["tables": .object(bad)])))["reason"].asString == "bad_arg")
         #expect((await call(k, p("dump")))["tables"] == tables)
-    }
-
-    @Test func remoteCallerIsKeyedByItsQualifiedAddress() async {
-        let k = await store()
-        let out = await KernelTaskLocals.withRemoteCaller(leg: AgentId("leg"), address: "g2|scout") {
-            await call(k, p("append", ["rows": .array([row(1)])]), as: "leg")
-        }
-        #expect(out["ids"] == .array([.integer(1)]), "\(out.serialize())")
-        var tables = (await call(k, p("dump")))["tables"]
-        #expect((tables["rows"].asArray ?? []).map { $0["owner"] } == [.string("g2|scout")])
-        // the leg's own writes stay the leg's
-        _ = await call(k, p("append", ["rows": .array([row(2)])]), as: "leg")
-        tables = (await call(k, p("dump")))["tables"]
-        let owners = (tables["rows"].asArray ?? []).compactMap { $0["owner"].asString }.sorted()
-        #expect(owners == ["g1|leg", "g2|scout"])
     }
 
     @Test func theReadmeIsPythonVerbatim() throws {
@@ -398,7 +276,7 @@ struct RamStoreTests {
         #expect(ids(left) == [1, 3], "\(left.serialize())")
 
         _ = await append(k, "alice", [row(4)])  // no kind
-        let raised = await KernelTaskLocals.$currentSender.withValue(AgentId("alice")) {
+        let raised = await KernelTaskLocals.$sender.withValue(AgentId("alice")) {
             await k.send([Item(AgentId("mem"), p("prune", ["before_id": 10, "keep": "fold"]))])[0]
         }
         #expect(raised.status == .failed, "\(raised.result.serialize())")
@@ -407,7 +285,7 @@ struct RamStoreTests {
                 == "TypeError: 'in <string>' requires string as left operand, not NoneType",
             "\(raised.result.serialize())")
         #expect(ids(await call(k, p("read"), as: "alice")) == [1, 3, 4], "nothing was deleted")
-        let notIterable = await KernelTaskLocals.$currentSender.withValue(AgentId("alice")) {
+        let notIterable = await KernelTaskLocals.$sender.withValue(AgentId("alice")) {
             await k.send([Item(AgentId("mem"), p("prune", ["before_id": 10, "keep": 5]))])[0]
         }
         #expect(
@@ -416,11 +294,4 @@ struct RamStoreTests {
             "\(notIterable.result.serialize())")
     }
 
-    @Test func metaIsValidated() {
-        let b = RamStoreBundle()
-        #expect(b.validateMeta(["operator": .string("yes")], record: [:]) != nil)
-        #expect(b.validateMeta(["admins": .array([.integer(1)])], record: [:]) != nil)
-        #expect(b.validateMeta(["admins": .string("kernel")], record: [:]) == nil)
-        #expect(b.validateMeta(["operator": .bool(true), "admins": .array([.string("kernel")])], record: [:]) == nil)
-    }
 }

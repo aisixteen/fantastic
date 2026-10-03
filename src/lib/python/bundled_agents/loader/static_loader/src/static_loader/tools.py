@@ -5,20 +5,20 @@ The industry locks agents to a configurable roster. This closes that: a
 The kernel knows NOTHING about YAML — this bundle owns the format (mirror of how
 `kernel_state` owns the on-disk `.fantastic` format).
 
-How it hydrates, and why it needs no god-mode. At `boot` the loader reads its
-manifest and creates each declared agent through the NORMAL `create_agent` path,
-so every one carries the Unix baseline grant plus any explicit `can_call` the
-manifest names. That whole pass runs under `operator_context()` — the loader
-hydrating the roster it was told to build is the operator's authority at boot,
-exactly as `create_agent` boots the child it just made. It is NOT standing power:
-the loader's OWN record carries no special grant. And it runs ONLY on the
-kernel's own boot — origin none: the cold boot, or `create_agent` booting the
-loader it just made. An agent-sent `boot` is refused (audit G-2/BV-2): any agent
-that reaches the loader (every roster agent, by the baseline `$parent`) could
-otherwise re-run the manifest with operator authority — restore a grant the
+How it hydrates, and why it needs no standing power. At `boot` the loader reads
+its manifest and creates each declared agent through the kernel's own
+`create_agent` implementation, so every one carries the baseline grant plus any
+explicit grant the manifest names. Hydrating the roster at boot is KERNEL
+BOOKKEEPING, like `create_agent` booting the child it just made: each create /
+re-apply is a direct call of the kernel verb (`Kernel.bookkeeping` on the root),
+never a gated send. The loader's OWN record carries no special grant. And the
+pass runs ONLY on the kernel's own boot — origin none: the cold boot, or
+`create_agent` booting the loader it just made. An agent-sent `boot` is refused:
+any agent granted a reach to the loader could otherwise re-run the manifest — restore a grant the
 operator revoked, re-create an agent the operator deleted, or apply whatever the
 manifest file says at that moment. After boot the roster is
-deny-all like everything else — an agent cannot `create_agent` — so the set of
+deny-all like everything else — an agent creates only its own children, and
+only when granted — so the set of
 agents is FIXED by the manifest. That is the whole point: declare the roster,
 and mutation is closed by the transport's default, not by a mode flag.
 
@@ -35,10 +35,8 @@ Manifest shape (`fantastic.yaml`):
         can_call:                      # the EGRESS half
           memory: [write, read]
 
-    Nothing is auto-granted: a manifest entry gets the structural baseline
-    ({$self,$parent,$children}) and exactly what it declares. An agent that keeps
-    its own sidecar (an AI's chat, the scheduler's schedules) declares
-    `can_call: {$loader: [persist_blob, load_blob]}` itself.
+    Nothing is auto-granted: a manifest entry gets the baseline ({$self}) and
+    exactly what it declares.
 """
 
 from __future__ import annotations
@@ -46,7 +44,7 @@ from __future__ import annotations
 import yaml
 from file_bridge import fs
 
-from kernel import current_origin, operator_context
+from kernel import current_origin
 from kernel._authz import DEFAULT_CALLABLE_BY, DEFAULT_CAN_CALL
 from kernel._refusal import UNAUTHORIZED, UNHANDLED, refusal
 
@@ -54,13 +52,13 @@ MANIFEST_FIELD = "manifest"
 
 # The one text an agent-sent `boot` is refused with — rust/swift byte for byte.
 BOOT_REFUSED = (
-    "static_loader: an agent-sent boot is refused — the roster is hydrated with "
-    "operator authority, so only the kernel's own boot (cold boot, create_agent) "
-    "runs it"
+    "static_loader: an agent-sent boot is refused — hydrating the roster is the "
+    "kernel's own bookkeeping, so only the kernel's own boot (cold boot, "
+    "create_agent) runs it"
 )
 BOOT_REFUSED_HINT = (
-    "change an agent's record with update_agent (the conferral rule applies "
-    "there); the operator re-boots the loader"
+    "change an agent's record with update_agent (its parent writes it); the "
+    "operator re-boots the loader"
 )
 
 
@@ -102,7 +100,7 @@ def validate_meta(meta: dict, record: dict) -> str | None:
 
 
 async def _boot(id, payload, agent):
-    """Hydrate the declared roster as OPERATOR.
+    """Hydrate the declared roster — kernel bookkeeping at boot.
 
     THE MANIFEST IS TRUTH; a store is only a MEDIUM (disk, RAM, cloud, an API).
     Idempotent by id — an entry whose agent already exists is never duplicated —
@@ -115,132 +113,115 @@ async def _boot(id, payload, agent):
 
     The kernel's own boot only (origin none); an agent-sent boot is refused."""
     if current_origin() is not None:
-        # The pass below runs as the OPERATOR, so the one who asks for it must be
-        # the operator: the cold boot, `create_agent` booting this loader, the
-        # CLI. A caller's boot is not that — refused before the manifest is read.
+        # The pass below calls the kernel's verbs directly, so the one who asks
+        # for it must be the kernel or the operator: the cold boot, `create_agent`
+        # booting this loader, the CLI. A caller's boot is not that — refused
+        # before the manifest is read.
         return refusal(UNAUTHORIZED, BOOT_REFUSED, hint=BOOT_REFUSED_HINT)
     agents, err = _load_manifest(agent)
     if err:
         return {"error": err, "booted": False}
     created: list[str] = []
     reapplied: list[str] = []
-    with operator_context():
-        for spec in agents:
-            if not isinstance(spec, dict) or not spec.get("handler_module"):
+    root = agent.ctx.root
+
+    async def kernel_verb(p: dict):
+        # A DIRECT call of the kernel verb (its root implementation) — roster
+        # hydration is kernel bookkeeping, never a gated send.
+        return (await agent.ctx.bookkeeping(root, p))["result"]
+
+    for spec in agents:
+        if not isinstance(spec, dict) or not spec.get("handler_module"):
+            return {
+                "error": f"static_loader: each roster entry needs a handler_module: {spec!r}",
+                "booted": False,
+            }
+        aid = spec.get("id")
+        # An id-less entry cannot be idempotent: the roster is keyed by id,
+        # so nothing matches the agent the LAST boot minted and this boot
+        # mints a SECOND one (`file_bridge_ab12cd`, then `file_bridge_ef34ab`),
+        # which the flush persists — the roster grows by one agent per
+        # restart and the operator is never told. The manifest is truth, so
+        # it must name its agents.
+        if not isinstance(aid, str) or not aid:
+            return {
+                "error": f"static_loader: roster entry needs an explicit id: {spec!r}",
+                "booted": False,
+            }
+        live = agent.ctx.agents.get(aid)
+        if live is not None:
+            # THE MANIFEST IS TRUTH; a store is only a MEDIUM (disk, RAM,
+            # cloud, an API). So an id that already exists is RE-APPLIED from
+            # the manifest, never skipped: editing a grant in the yaml used
+            # to change nothing at all, because the hydrated record silently
+            # won and the operator got no word about it.
+            declared = {
+                k: v
+                for k, v in spec.items()
+                if k not in ("id", "handler_module", "parent_id")
+            }
+            # `update_agent` REPLACES a named field, so a bare re-apply of
+            # `can_call` would delete the baseline the kernel stamps at
+            # create ($self). Merge over the baseline, exactly as
+            # `create_agent` does.
+            for field, base in (
+                ("can_call", DEFAULT_CAN_CALL),
+                ("callable_by", DEFAULT_CALLABLE_BY),
+            ):
+                if isinstance(declared.get(field), dict):
+                    declared[field] = {**base, **declared[field]}
+            if live.handler_module != spec["handler_module"]:
+                # A bundle cannot be swapped under a live agent (its
+                # in-process state belongs to the old one); the manifest is
+                # asking for a different agent under a used name.
                 return {
-                    "error": f"static_loader: each roster entry needs a handler_module: {spec!r}",
+                    "error": (
+                        f"static_loader: {aid!r} exists as "
+                        f"{live.handler_module!r} but the manifest declares "
+                        f"{spec['handler_module']!r} — a handler_module is "
+                        "fixed at create; delete the agent to re-declare it"
+                    ),
                     "booted": False,
                 }
-            aid = spec.get("id")
-            # An id-less entry cannot be idempotent: the roster is keyed by id,
-            # so nothing matches the agent the LAST boot minted and this boot
-            # mints a SECOND one (`file_bridge_ab12cd`, then `file_bridge_ef34ab`),
-            # which the flush persists — the roster grows by one agent per
-            # restart and the operator is never told. The manifest is truth, so
-            # it must name its agents.
-            if not isinstance(aid, str) or not aid:
-                return {
-                    "error": f"static_loader: roster entry needs an explicit id: {spec!r}",
-                    "booted": False,
-                }
-            live = agent.ctx.agents.get(aid)
-            if live is not None:
-                # THE MANIFEST IS TRUTH; a store is only a MEDIUM (disk, RAM,
-                # cloud, an API). So an id that already exists is RE-APPLIED from
-                # the manifest, never skipped: editing a grant in the yaml used
-                # to change nothing at all, because the hydrated record silently
-                # won and the operator got no word about it.
-                declared = {
-                    k: v
-                    for k, v in spec.items()
-                    if k not in ("id", "handler_module", "parent_id")
-                }
-                # `update_agent` REPLACES a named field, so a bare re-apply of
-                # `can_call` would delete the structural baseline the kernel
-                # stamps at create ($self/$parent/$children) and sever the agent
-                # from its own parent and children. Merge over the baseline,
-                # exactly as `create_agent` does.
-                for field, base in (
-                    ("can_call", DEFAULT_CAN_CALL),
-                    ("callable_by", DEFAULT_CALLABLE_BY),
-                ):
-                    if isinstance(declared.get(field), dict):
-                        declared[field] = {**base, **declared[field]}
-                if live.handler_module != spec["handler_module"]:
-                    # A bundle cannot be swapped under a live agent (its
-                    # in-process state belongs to the old one); the manifest is
-                    # asking for a different agent under a used name.
+            if declared:
+                r = await kernel_verb({"type": "update_agent", "id": aid, **declared})
+                if isinstance(r, dict) and r.get("error"):
                     return {
-                        "error": (
-                            f"static_loader: {aid!r} exists as "
-                            f"{live.handler_module!r} but the manifest declares "
-                            f"{spec['handler_module']!r} — a handler_module is "
-                            "fixed at create; delete the agent to re-declare it"
-                        ),
+                        "error": f"static_loader: re-applying {aid!r}: {r['error']}",
                         "booted": False,
                     }
-                if declared:
-                    r = (
-                        await agent.send(
-                            [
-                                {
-                                    "target": "kernel",
-                                    "payload": {
-                                        "type": "update_agent",
-                                        "id": aid,
-                                        **declared,
-                                    },
-                                }
-                            ]
-                        )
-                    )[0]["result"]
-                    if isinstance(r, dict) and r.get("error"):
-                        return {
-                            "error": f"static_loader: re-applying {aid!r}: {r['error']}",
-                            "booted": False,
-                        }
-                reapplied.append(aid)
-                continue
-            # `parent_id` = THIS loader → the declared agent becomes the loader's
-            # child ($parent = the loader), exactly as addressing the loader used to
-            # do. Baseline grant is stamped + the manifest's explicit `can_call`
-            # merges on top; the child boots inside create_agent. The verb itself is
-            # kernel-owned, so it goes to `kernel` and names its operand.
-            rec = (
-                await agent.send(
-                    [
-                        {
-                            "target": "kernel",
-                            "payload": {
-                                "type": "create_agent",
-                                **spec,
-                                # AFTER the spread, not before. A manifest entry
-                                # carrying its own `parent_id` used to win and
-                                # place the agent somewhere else entirely —
-                                # measured 2026-08-28: an entry naming the root
-                                # landed as the ROOT's child, not the loader's,
-                                # silently breaking the "roster is the loader's
-                                # subtree" guarantee this docstring states and
-                                # that owned-subtree delete depends on.
-                                "parent_id": agent.id,
-                            },
-                        }
-                    ]
-                )
-            )[0]["result"]
-            if isinstance(rec, dict) and rec.get("id"):
-                created.append(rec["id"])
-            else:
-                return {
-                    "error": f"static_loader: create failed for {spec!r}: {rec}",
-                    "booted": False,
-                }
+            reapplied.append(aid)
+            continue
+        # `parent_id` = THIS loader → the declared agent becomes the loader's
+        # child ($parent = the loader). Baseline grant is stamped + the
+        # manifest's explicit grants merge on top; the child boots inside
+        # create_agent.
+        rec = await kernel_verb(
+            {
+                "type": "create_agent",
+                **spec,
+                # AFTER the spread, not before. A manifest entry carrying its
+                # own `parent_id` used to win and place the agent somewhere
+                # else entirely — measured 2026-08-28: an entry naming the
+                # root landed as the ROOT's child, not the loader's, silently
+                # breaking the "roster is the loader's subtree" guarantee this
+                # docstring states and that owned-subtree delete depends on.
+                "parent_id": agent.id,
+            }
+        )
+        if isinstance(rec, dict) and rec.get("id"):
+            created.append(rec["id"])
+        else:
+            return {
+                "error": f"static_loader: create failed for {spec!r}: {rec}",
+                "booted": False,
+            }
     return {"booted": True, "created": created, "reapplied": reapplied}
 
 
 async def _reflect(id, payload, agent):
     """The loader's posture: what manifest it hydrates, and that it IS a loader
-    (so `$loader`-style discovery + a client both see the declarative root)."""
+    (so a client sees the declarative root)."""
     return {
         "id": id,
         "sentence": "declarative YAML roster loader",

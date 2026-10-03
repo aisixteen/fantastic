@@ -11,8 +11,8 @@
 //!
 //! - `POST /<self_id>/{target_id}` body=payload → kernel.send → JSON;
 //!   headers `X-Fantastic-Auth` (credential), `X-Fantastic-Execution-Id` (the
-//!   item `id`), `X-Fantastic-Secret` (the item `secret`, a JSON array of marks —
-//!   dotted strings and/or arrays of steps)
+//!   item `id`); handed to this leg (`inbound_call`), which sends it onward AS
+//!   ITSELF
 //! - `GET  /<self_id>/_reflect` → kernel.reflect (root tree)
 //! - `GET  /<self_id>/_reflect/{target_id}` → reflect on a specific agent
 //!
@@ -70,6 +70,28 @@ impl Bundle for WebRestBundle {
             meta,
             &fantastic_io_bridge::authorizer::ingress::REGISTRY,
         )
+    }
+
+    /// `inbound_call` (`fantastic_io_bridge::inbound`) first — an admitted
+    /// request the HTTP server hands in, sent onward as this leg, a raw body
+    /// riding either way — then this leg's own verbs. A REST leg carries calls
+    /// only: python's `VERBS` holds `inbound_call` and none of the other inbound
+    /// verbs.
+    async fn handle_binary(
+        &self,
+        agent_id: &AgentId,
+        header: Value,
+        body: Option<fantastic_kernel::Blob>,
+        kernel: &Arc<Kernel>,
+    ) -> Result<(Reply, Option<fantastic_kernel::Blob>), BundleError> {
+        if header.get("type").and_then(Value::as_str) == Some("inbound_call") {
+            if let Some((v, b)) =
+                fantastic_io_bridge::inbound::handle(agent_id, &header, body, kernel).await
+            {
+                return Ok((Some(v), b));
+            }
+        }
+        Ok((self.handle(agent_id, &header, kernel).await?, None))
     }
 
     async fn handle(
@@ -146,14 +168,19 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
             out.insert(k.clone(), v.clone());
         }
     }
-    out.insert(
-        "verbs".into(),
-        json!({
-            "reflect": "Identity + URL patterns + curl examples + this leg's auth posture",
-            "boot": "No-op. The parent `web` agent calls `get_routes` on this bundle during its own boot and mounts the HTTP endpoint onto its FastAPI app.",
-            "get_routes": "Declares this surface's HTTP routes. No args. Returns",
-        }),
-    );
+    let mut verbs = json!({
+        "reflect": "Identity + URL patterns + curl examples + this leg's auth posture",
+        "boot": "No-op. The parent `web` agent calls `get_routes` on this bundle during its own boot and mounts the HTTP endpoint onto its FastAPI app.",
+        "get_routes": "Declares this surface's HTTP routes. No args. Returns",
+    });
+    if let Some(m) = verbs.as_object_mut() {
+        for (verb, doc) in fantastic_io_bridge::inbound::verb_docs() {
+            if verb == "inbound_call" {
+                m.insert(verb.to_string(), json!(doc));
+            }
+        }
+    }
+    out.insert("verbs".into(), verbs);
     Value::Object(out)
 }
 

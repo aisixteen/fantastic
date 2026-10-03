@@ -117,13 +117,10 @@ def guard_agent_id(verb: str, agent_id: object, arg: str = "id") -> dict | None:
     (`_resolve_path`), so an id carrying `..` or a separator walks out of the
     store and the write, or the `rmtree`, lands wherever it pointed.
 
-    Measured 2026-08-28: an agent holding NO explicit grant at all — only the
-    structural baseline, which lets any child call its own parent — sent
-    `{"type": "forget_record", "id": "../../important_project_dir"}` to the root
-    loader and recursively deleted a directory OUTSIDE the store entirely. The
-    call gate was not bypassed; it correctly allowed a child to call its parent,
-    and `forget_record` is correctly not a privileged verb. Nothing validated
-    the id.
+    Measured 2026-08-28: an agent the call gate admitted to the root loader
+    sent `{"type": "forget_record", "id": "../../important_project_dir"}` and
+    recursively deleted a directory OUTSIDE the store entirely. The call gate
+    was not bypassed; nothing validated the id.
 
     The same discipline already existed one screen away for blob filenames
     (`_guard_blob_name`) and simply was never applied to ids. It is enforced HERE

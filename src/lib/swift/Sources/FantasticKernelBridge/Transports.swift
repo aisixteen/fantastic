@@ -27,32 +27,6 @@ public struct BridgeConfigError: Error, CustomStringConvertible, Sendable {
 /// Python `_ws.TUNNEL_READY_TIMEOUT`.
 let TUNNEL_READY_TIMEOUT = 5.0
 
-/// The record `host` values that name THIS machine — a leg dialed to one of them
-/// (an ssh tunnel's local end included) may carry a secret. Exact strings. Python
-/// `_ws.LOOPBACK_HOSTS`.
-public let LOOPBACK_HOSTS: Set<String> = ["localhost", "127.0.0.1", "[::1]"]
-
-// THE WS SEAL (owner, 2026-10-03, audit S8). `ws://` carries every frame in clear,
-// and a forward's secret values ride its frame verbatim (the far kernel needs
-// them), so a leg dialed to a non-loopback host refuses any call carrying secret
-// marks, in both directions: outbound in `KernelBridgeBundle.handle`/
-// `handleBinary` (`forward`), inbound in `WSTransport.recv`. A loopback leg (an
-// ssh tunnel's local end) is not sealed. One text for both. Python
-// `_ws.SECRET_SEALED` / `SECRET_SEALED_HINT` / `secret_sealed`.
-public let WS_SECRET_SEALED =
-    "ws_bridge: a call carrying secret marks may not cross a ws:// leg to a "
-    + "non-loopback host — ws:// carries every frame in clear"
-public let WS_SECRET_SEALED_HINT = "dial a loopback host (an ssh tunnel's local end) to send a secret"
-
-/// The ws seal's refusal — outbound to the local caller, inbound as the reply to
-/// the far caller.
-public func wsSecretSealed() -> JSON {
-    Refusal.make(Refusal.unauthorized, WS_SECRET_SEALED, hint: WS_SECRET_SEALED_HINT)
-}
-
-/// Whether a leg dialed to `host` is sealed — python `host not in LOOPBACK_HOSTS`.
-public func wsHostIsSealed(_ host: String) -> Bool { !LOOPBACK_HOSTS.contains(host) }
-
 // MARK: - WS transport
 
 /// Python `WSTransport`: a websockets client wrapper. A frame carrying raw
@@ -66,40 +40,18 @@ public actor WSTransport: BridgeTransport {
     /// The socket is down: the peer closed it or it dropped (a receive or a send
     /// failed), or this side closed it.
     private var closedFlag = false
-    /// Dialed to a non-loopback host — the ws seal holds (`WS_SECRET_SEALED`).
-    public nonisolated let sealed: Bool
 
-    public init(client: any RelayWire, sealed: Bool) {
+    public init(client: any RelayWire) {
         self.client = client
-        self.sealed = sealed
     }
 
     /// Dial, or raise with the dial's own text (the engine prefixes it).
-    static func connect(url: URL, sealed: Bool) async throws -> WSTransport {
+    static func connect(url: URL) async throws -> WSTransport {
         do {
-            return WSTransport(
-                client: try await NIOWebSocketClient.connect(url: url), sealed: sealed)
+            return WSTransport(client: try await NIOWebSocketClient.connect(url: url))
         } catch {
             throw ConnectionClosed("\(error)")
         }
-    }
-
-    /// THE WS SEAL, inbound: a `call` frame naming `secret` on a sealed leg already
-    /// crossed the network in clear, and nothing here dispatches it — the far
-    /// caller is answered with the seal's refusal. True when it was answered.
-    // TODO(ws seal): wss:// (TLS) is the later path — a TLS leg carries secrets to
-    // any host, and this seal lifts for it.
-    private func answeredSealed(_ frame: JSON) async -> Bool {
-        guard sealed, frame["type"].asString == "call", frame.asObject?["secret"] != nil else {
-            return false
-        }
-        do {
-            try await send(
-                .object(["type": .string("reply"), "id": frame["id"], "data": wsSecretSealed()]))
-        } catch {
-            // the socket dropped; the next receive reports it
-        }
-        return true
     }
 
     /// Python `WSTransport.closed` — the socket's state (`CLOSING`/`CLOSED`), so
@@ -154,7 +106,6 @@ public actor WSTransport: BridgeTransport {
                     RuntimeLog.warn("ws_bridge: skipping non-object frame")
                     continue
                 }
-                if await answeredSealed(frame) { continue }
                 return (frame, Data(), false)
             case .binary(let bytes):
                 let d = Data(bytes)
@@ -170,7 +121,6 @@ public actor WSTransport: BridgeTransport {
                     RuntimeLog.warn("ws_bridge: skipping non-object frame")
                     continue
                 }
-                if await answeredSealed(header) { continue }
                 return (header, body, true)
             }
         }
@@ -187,8 +137,8 @@ public actor WSTransport: BridgeTransport {
 /// Python `MemoryTransport`: an in-process pipe, one half of a peered pair — what
 /// one half sends, the other receives. It CARRIES frames and nothing else: each
 /// half is driven by a bridge leg's engine, so the far kernel serves an inbound
-/// `call` through its own leg — the ingress rule, the peer pin, the caller judged
-/// as its `<guid>|<agent>` — never as the operator (audit G-4, 2026-10-03).
+/// `call` through its own leg — the ingress rule, then the leg's own send, gated
+/// as the leg — never as the operator (audit G-4, 2026-10-03).
 public final class MemoryTransport: BridgeTransport, @unchecked Sendable {
     private let pipe: MemoryPipe
     /// This half receives on `pipe.queues[side]` and sends to the other.
@@ -323,7 +273,7 @@ extension KernelBridgeBundle {
             guard let url = URL(string: "ws://\(host):\(port)/\(peerId)/ws") else {
                 throw BridgeConfigError("ws transport: malformed url")
             }
-            return try await WSTransport.connect(url: url, sealed: wsHostIsSealed(host))
+            return try await WSTransport.connect(url: url)
         }
         throw BridgeConfigError("unknown transport \(pyRepr(kind))")
     }

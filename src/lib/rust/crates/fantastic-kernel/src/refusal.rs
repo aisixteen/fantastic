@@ -148,11 +148,9 @@ pub fn with(target: &mut Value, key: &str, value: Value) {
 /// carrying `..` or a separator walks out of the store and the write, or the
 /// recursive delete, lands wherever it pointed.
 ///
-/// Measured in python 2026-08-28: an agent holding NO explicit grant — only the
-/// structural baseline, which lets any child call its parent — sent
-/// `forget_record` with `id: "../../x"` to the root loader and recursively
-/// deleted a directory OUTSIDE the store. The call gate was not bypassed;
-/// nothing validated the id.
+/// Measured in python 2026-08-28: an agent the gate admitted to the root loader
+/// sent `forget_record` with `id: "../../x"` and recursively deleted a directory
+/// OUTSIDE the store. The call gate was not bypassed; nothing validated the id.
 #[must_use]
 pub fn guard_agent_id(verb: &str, agent_id: &str) -> Option<Value> {
     guard_agent_id_as(verb, "id", agent_id)

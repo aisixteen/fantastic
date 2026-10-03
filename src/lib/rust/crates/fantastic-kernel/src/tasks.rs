@@ -108,6 +108,26 @@ pub fn current_killed() -> bool {
         .unwrap_or(false)
 }
 
+/// Spawn `work` DETACHED — no task-table row — carrying the identity of the code
+/// that spawned it: a task an agent's code spawns is that agent's (python's
+/// `asyncio.create_task`, which copies the context). `tokio::spawn` alone drops
+/// every task-local, so a send the work made would arrive as the OPERATOR. Not a
+/// switch: the identity is the spawner's own, read here. Use
+/// [`Kernel::spawn_task`] for work that belongs in `ps`.
+pub fn spawn_inherit<F>(work: F) -> tokio::task::JoinHandle<F::Output>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    let sender = crate::send::current_sender();
+    let origin = crate::send::current_origin();
+    let quiet = crate::send::state_quiet();
+    tokio::spawn(crate::send::STATE_QUIET.scope(
+        quiet,
+        crate::send::CURRENT_SENDER.scope(sender, crate::send::CURRENT_ORIGIN.scope(origin, work)),
+    ))
+}
+
 /// Seconds since the epoch — the `started_at` clock (Python's `time.time()`).
 fn now_secs() -> f64 {
     SystemTime::now()
@@ -565,15 +585,12 @@ impl Kernel {
 
         let cancel = handle.cancel_signal();
         let killed = handle.killed_flag();
-        // A FORK ACTS AS WHOEVER FORKED IT. `tokio::spawn` inherits no
-        // task-locals, so the identity the gate reads was dropped at the spawn
-        // and every send the fork made arrived as OPERATOR — ungated, and
-        // attributed to nobody in the row. Bundles papered over it by wrapping
-        // the future in `with_sender` by hand at each site, which is a rule
-        // that has to be remembered rather than one that holds.
+        // A FORK ACTS AS WHOEVER FORKED IT — a task an agent's code spawns is
+        // that agent's. `tokio::spawn` inherits no task-locals, so the identity
+        // the gate reads would be dropped at the spawn and every send the fork
+        // made would arrive as OPERATOR — ungated, and attributed to nobody.
         let sender = crate::send::current_sender();
         let origin = crate::send::current_origin();
-        let remote = crate::send::current_remote_caller();
         // A fork started inside the kernel's own ledger flush is silent too
         // (python copies `_state_quiet` into every task).
         let quiet = crate::send::state_quiet();
@@ -590,16 +607,13 @@ impl Kernel {
                     killed,
                     crate::send::CURRENT_SENDER.scope(
                         sender,
-                        crate::send::CURRENT_ORIGIN.scope(
-                            origin,
-                            crate::send::CURRENT_REMOTE.scope(remote, async move {
-                                tokio::select! {
-                                    biased;
-                                    _ = cancel.notified() => {}
-                                    _ = work => {}
-                                }
-                            }),
-                        ),
+                        crate::send::CURRENT_ORIGIN.scope(origin, async move {
+                            tokio::select! {
+                                biased;
+                                _ = cancel.notified() => {}
+                                _ = work => {}
+                            }
+                        }),
                     ),
                 ),
             );
@@ -669,7 +683,7 @@ impl Kernel {
             // own-inbox emit (ai_core's final `status done`) was gated root →
             // agent and dropped; the deadline path ran it as the operator.
             let hook = bundle.on_cancel(&agent.id, tid, self);
-            if let Err(e) = crate::send::with_sender(agent.id.clone(), hook).await {
+            if let Err(e) = crate::send::as_agent(&agent.id, hook).await {
                 println!("  [cancel] {} bundle on_cancel raised: {e}", agent.id.0);
             }
         }

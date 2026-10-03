@@ -25,7 +25,7 @@ expect:
     - name: a wing reaches its own memory, and the write actually lands
       reach: {from: wing_a, to: notes_a, send: {type: write, path: room.txt, bytes_utf8: a}}
       expect: {allow: true, contains: {path: room.txt}}
-    - name: a wing reaches its own file space on the structural baseline
+    - name: a wing reaches its own file space through its granted children edge
       reach: {from: wing_b, to: space_b, send: {type: write_stream, path: note.txt, bytes_utf8: "from b", truncate: true}}
       expect: {allow: true}
     - name: a wing may not reach the other wing's memory

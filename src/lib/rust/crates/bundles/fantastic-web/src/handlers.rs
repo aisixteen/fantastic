@@ -32,18 +32,6 @@ const AUTH_HEADER: &str = "x-fantastic-auth";
 const PAYLOAD_HEADER: &str = "x-fantastic-payload";
 /// Header naming the one bytes-valued field on an octet request/reply.
 const BYTES_FIELD_HEADER: &str = "x-fantastic-bytes-field";
-/// SECRET MARKS: the item's `secret` marks (`fantastic_kernel::secret`) ride
-/// `X-Fantastic-Secret` — dispatch metadata about the call, like the execution
-/// id, never part of the payload. The value is a JSON ARRAY of marks, each a
-/// dotted string (`"payload.key"`) or an array of steps (`["payload", "a.b"]` — a
-/// key holding a dot), the SAME value a ws/bridge `call` frame carries in its
-/// `secret` field: one parser (the strict wire `loads`), and the kernel's own
-/// check judges it. Not comma-separated — a path step is a payload key, and a key
-/// may hold a comma; a JSON string escapes any character into the ASCII a header
-/// value is safe in; and a wrong shape (a bare string, `[]`, a number) reaches the
-/// kernel's refusal verbatim instead of being re-invented by a splitter. Python
-/// `_SECRET_HEADER`.
-const SECRET_HEADER: &str = "x-fantastic-secret";
 
 /// The most body bytes a rest leg reads from one request: io_bridge's one frame
 /// cap. Python `web_rest.MAX_BODY`.
@@ -146,37 +134,21 @@ async fn run(
         Handler::FileProxy => {
             let agent_id = caps.first().cloned().unwrap_or_default();
             let path = caps.get(1).cloned().unwrap_or_default();
-            let st = state.clone();
-            state.scoped(file_proxy(st, agent_id, path)).await
+            file_proxy(state, agent_id, path).await
         }
         Handler::RestPost(owner) => {
             let target = caps.first().cloned().unwrap_or_default();
             let (parts, body) = req.into_parts();
-            let st = state.clone();
-            state
-                .scoped(rest_post(st, owner, target, parts.headers, body))
-                .await
+            rest_post(state, owner, target, parts.headers, body).await
         }
         Handler::RestReflectRoot(owner) => {
-            let st = state.clone();
             let q = query.to_string();
-            state
-                .scoped(rest_reflect(
-                    st,
-                    owner,
-                    "kernel".to_string(),
-                    q,
-                    req.headers().clone(),
-                ))
-                .await
+            rest_reflect(state, owner, "kernel".to_string(), q, req.headers().clone()).await
         }
         Handler::RestReflectTarget(owner) => {
             let target = caps.first().cloned().unwrap_or_default();
-            let st = state.clone();
             let q = query.to_string();
-            state
-                .scoped(rest_reflect(st, owner, target, q, req.headers().clone()))
-                .await
+            rest_reflect(state, owner, target, q, req.headers().clone()).await
         }
         Handler::Ws(leg) => ws_upgrade(state, leg, caps, req).await,
     }
@@ -185,18 +157,20 @@ async fn run(
 // ─── `GET /{agent_id}/file/{path:path}` ─────────────────────────────
 
 /// python `agent_file` — any agent answering `read_stream{path,offset,length}`
-/// becomes an HTTP file server. The read is dispatched AS THIS WEB AGENT, so
-/// the served agent's `callable_by` AND its io leg decide; anything that does
-/// not answer with a chunk is a 404, and only an `unauthorized` denial carries
-/// a body (a missing file must not leak its absence).
+/// becomes an HTTP file server. The request is handed to the web host
+/// (`fetch_file` — this route is the transport, the operator) and the HOST reads
+/// each chunk AS ITSELF, so the served agent's `callable_by` AND its io leg
+/// judge `web`; anything that does not answer with a chunk is a 404, and only an
+/// `unauthorized` denial carries a body (a missing file must not leak its
+/// absence).
 async fn file_proxy(state: AppState, agent_id: String, path: String) -> Response {
     let target = AgentId::from(agent_id.as_str());
     if !state.kernel.agents.contains_key(&target) {
         return routes::respond(StatusCode::NOT_FOUND, &[], None, Vec::new());
     }
-    let sender = state.web_agent_id.clone();
+    let web = state.web_agent_id.clone();
     let kernel = Arc::clone(&state.kernel);
-    let (meta, first) = read_chunk(&kernel, &sender, &target, &path, json!(0)).await;
+    let (meta, first) = read_chunk(&kernel, &web, &target, &path, json!(0)).await;
     // PYTHON'S TEST IS THE CHUNK, not the absence of an error:
     // `isinstance(first.get("bytes"), (bytes, bytearray))`. Anything that did
     // not answer with a chunk — a denial, a missing file, an agent that is not
@@ -231,12 +205,12 @@ async fn file_proxy(state: AppState, agent_id: String, path: String) -> Response
     // at `chunk["next_offset"]` — a chunk without one raises KeyError, which
     // aborts the body mid-stream.
     let stream = futures_util::stream::unfold(
-        (Some(Step::Yield(meta, first)), kernel, target, path, sender),
-        move |(step, kernel, target, path, sender)| async move {
+        (Some(Step::Yield(meta, first)), kernel, target, path, web),
+        move |(step, kernel, target, path, web)| async move {
             match step? {
                 Step::Yield(m, buf) => Some((
                     Ok::<Vec<u8>, std::io::Error>(buf),
-                    (Some(Step::Next(m)), kernel, target, path, sender),
+                    (Some(Step::Next(m)), kernel, target, path, web),
                 )),
                 Step::Next(m) => {
                     if fantastic_bundle::py_truthy(m.get("eof").unwrap_or(&Value::Null)) {
@@ -245,18 +219,14 @@ async fn file_proxy(state: AppState, agent_id: String, path: String) -> Response
                     let Some(n) = m.get("next_offset").cloned() else {
                         return Some((
                             Err(std::io::Error::other("KeyError: 'next_offset'")),
-                            (None, kernel, target, path, sender),
+                            (None, kernel, target, path, web),
                         ));
                     };
-                    // The generator is iterated AFTER the handler returned, so it
-                    // re-enters the sender context per chunk (python does the
-                    // same). python breaks on anything that is not a chunk.
-                    let (m2, body) = read_chunk(&kernel, &sender, &target, &path, n).await;
+                    // Every chunk is handed to the host the same way; python
+                    // breaks on anything that is not a chunk.
+                    let (m2, body) = read_chunk(&kernel, &web, &target, &path, n).await;
                     let body = body?;
-                    Some((
-                        Ok(body),
-                        (Some(Step::Next(m2)), kernel, target, path, sender),
-                    ))
+                    Some((Ok(body), (Some(Step::Next(m2)), kernel, target, path, web)))
                 }
             }
         },
@@ -271,27 +241,29 @@ enum Step {
     Next(Value),
 }
 
-/// ONE file-proxy chunk, THROUGH THE BATCH and as the web agent (C37/C40):
-/// python dispatches `kernel.send([{target, payload}])` under
-/// `sender_context(web_agent_id)`, so the served agent's `callable_by` AND its
-/// io leg both decide — an ordinary execution of the batch, taking its chunk back
-/// raw.
+/// ONE file-proxy chunk, THROUGH THE BATCH (C37/C40): python `_fetch` hands
+/// `fetch_file` to the web host — this route is the transport, so the hand-in
+/// is the operator's — and the host's handler sends `read_stream` as itself, so
+/// the served agent's `callable_by` AND its io leg judge `web`. The chunk comes
+/// back raw.
 async fn read_chunk(
     kernel: &Arc<fantastic_kernel::Kernel>,
-    sender: &AgentId,
+    web: &AgentId,
     target: &AgentId,
     path: &str,
     offset: Value,
 ) -> (Value, Option<Vec<u8>>) {
-    let kernel2 = Arc::clone(kernel);
     let item = Item::new(
-        target.clone(),
-        json!({"type": "read_stream", "path": path, "offset": offset, "length": CHUNK}),
+        web.clone(),
+        json!({
+            "type": "fetch_file",
+            "agent_id": target.as_str(),
+            "path": path,
+            "offset": offset,
+            "length": CHUNK,
+        }),
     );
-    let out = fantastic_kernel::send::with_sender(sender.clone(), async move {
-        kernel2.send(vec![item]).await.remove(0)
-    })
-    .await;
+    let out = kernel.send(vec![item]).await.remove(0);
     // python takes the chunk at the reply's `bytes` key; one anywhere else is
     // not a chunk
     (out.result, out.body.and_then(|b| b.into_at("bytes")))
@@ -352,22 +324,6 @@ async fn rest_post(
     let Some(body) = read_capped(body, declared, MAX_BODY).await else {
         return too_large();
     };
-    // SECRET MARKS: this kernel records the call as shown, exactly as for a local
-    // caller; a malformed mark is the kernel's own refusal. Read AFTER the gate
-    // (a sealed leg still answers 403 first) — python reads it where it builds
-    // the item. `Err` = the header is not JSON (STRICT, D13: python
-    // `strict_loads`).
-    let secret_marks = || -> Result<Option<Value>, String> {
-        header_str(SECRET_HEADER)
-            .map(|raw| fantastic_io_bridge::codec::loads(&raw))
-            .transpose()
-    };
-    let not_json = || {
-        json_error(
-            StatusCode::BAD_REQUEST,
-            "web_rest: X-Fantastic-Secret is not valid JSON",
-        )
-    };
 
     if content_type.starts_with(OCTET_CT) {
         // python `json.loads(headers.get(...) or "{}")` — an EMPTY header value
@@ -410,24 +366,25 @@ async fn rest_post(
             .unwrap_or_else(|| "bytes".to_string());
         obj.insert(field.clone(), Value::Null);
         let payload = Value::Object(obj);
-        let Ok(secret) = secret_marks() else {
-            return not_json();
-        };
         // THROUGH THE BATCH, with the header's execution id NAMING the execution
         // (A13.3): python builds `{target, payload+bytes}`, sets `item["id"]`
-        // from `X-Fantastic-Execution-Id` and calls `kernel.send([item])`, so a
+        // from `X-Fantastic-Execution-Id`, and HANDS it to this leg
+        // (`inbound_call`), whose handler sends it onward as the leg — so a
         // repeated id on the same target REPLAYS instead of re-running.
-        let kernel = Arc::clone(&state.kernel);
-        let out = fantastic_kernel::send::with_sender(owner.clone(), async move {
-            let mut item = Item::new(target, payload).with_binary_key(field, body);
-            if let Some(id) = exec_id {
-                item = item.with_id(id);
-            }
-            if let Some(marks) = secret {
-                item = item.with_secret(marks);
-            }
-            kernel.send(vec![item]).await.remove(0)
-        })
+        let body = fantastic_kernel::Blob::new(
+            vec![
+                fantastic_kernel::Step::Key("item".into()),
+                fantastic_kernel::Step::Key("payload".into()),
+                fantastic_kernel::Step::Key(field),
+            ],
+            body,
+        );
+        let out = fantastic_io_bridge::inbound::hand_in(
+            &state.kernel,
+            &owner,
+            inbound_call(&target, payload, exec_id),
+            Some(body),
+        )
         .await;
         return octet_or_json(out.result, out.body);
     }
@@ -467,22 +424,26 @@ async fn rest_post(
             "web_rest: body must be a JSON object",
         );
     }
-    let Ok(secret) = secret_marks() else {
-        return not_json();
-    };
-    let kernel = Arc::clone(&state.kernel);
-    let out = fantastic_kernel::send::with_sender(owner.clone(), async move {
-        let mut item = Item::new(target.clone(), payload);
-        if let Some(id) = exec_id {
-            item = item.with_id(id);
-        }
-        if let Some(marks) = secret {
-            item = item.with_secret(marks);
-        }
-        kernel.send(vec![item]).await.remove(0)
-    })
+    let out = fantastic_io_bridge::inbound::hand_in(
+        &state.kernel,
+        &owner,
+        inbound_call(&target, payload, exec_id),
+        None,
+    )
     .await;
     octet_or_json(out.result, out.body)
+}
+
+/// The hand-in of one admitted REST call: `{type: inbound_call, item: {target,
+/// payload, id?}}` — the leg's handler sends the item onward AS THE LEG.
+fn inbound_call(target: &AgentId, payload: Value, exec_id: Option<String>) -> Value {
+    let mut item = serde_json::Map::new();
+    item.insert("target".into(), json!(target.as_str()));
+    item.insert("payload".into(), payload);
+    if let Some(id) = exec_id {
+        item.insert("id".into(), json!(id));
+    }
+    json!({"type": "inbound_call", "item": Value::Object(item)})
 }
 
 /// The ONE reply-shape decision, shared by both REST legs — python's
@@ -559,15 +520,14 @@ async fn rest_reflect(
         return denial;
     }
     let target = AgentId::from(target_id.as_str());
-    let kernel = Arc::clone(&state.kernel);
-    let reply = fantastic_kernel::send::with_sender(owner.clone(), async move {
-        kernel
-            .send(vec![Item::new(target, payload)])
-            .await
-            .remove(0)
-            .result
-    })
-    .await;
+    let reply = fantastic_io_bridge::inbound::hand_in(
+        &state.kernel,
+        &owner,
+        inbound_call(&target, payload, None),
+        None,
+    )
+    .await
+    .result;
     if reply.is_null() {
         return routes::respond(StatusCode::NOT_FOUND, &[], None, Vec::new());
     }

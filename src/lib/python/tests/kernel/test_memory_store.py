@@ -14,8 +14,10 @@ from pathlib import Path
 import yaml
 
 from _testkit import boot_root, persist
-from kernel import sender_context, register_unlisted
+from kernel import register_unlisted
+from _testkit import as_agent
 from kernel._kernel import shutdown_context
+from _testkit import wire
 
 # ── a probe bundle: advertises `shutdown`, can hold, fail, and count ───────────
 _shut_calls: list[str] = []
@@ -68,7 +70,7 @@ async def _mk(root, aid="probe", **meta):
                 "parent_id": root.id,
                 "id": aid,
                 "handler_module": "mem_probe.tools",
-                "callable_by": {"$parent": "*", "rest": "*", "caller": "*"},
+                "callable_by": {"rest": "*", "caller": "*"},
                 **meta,
             },
         )
@@ -77,7 +79,7 @@ async def _mk(root, aid="probe", **meta):
     return aid
 
 
-async def _with_store(root, *, operator=True, start=True):
+async def _with_store(root, *, start=True):
     """A ram_store `memory` under the root, named by the root; the kernel started."""
     r = (
         await _call(
@@ -88,8 +90,6 @@ async def _with_store(root, *, operator=True, start=True):
                 "parent_id": root.id,
                 "id": "memory",
                 "handler_module": "ram_store.tools",
-                "operator": operator,
-                "admins": ["kernel"],
             },
         )
     )["result"]
@@ -186,15 +186,6 @@ async def test_kernel_start_fails_loud_without_a_store(seeded_kernel):
     assert seeded_kernel.ctx.started is False
 
 
-async def test_kernel_start_refuses_a_store_that_does_not_serve_the_operator(
-    seeded_kernel,
-):
-    await _with_store(seeded_kernel, operator=False, start=False)
-    out = await seeded_kernel.ctx.start(boot_all=False)
-    assert out["reason"] == "unauthorized" and "operator" in out["hint"], out
-    assert seeded_kernel.ctx.started is False
-
-
 async def test_kernel_start_boots_the_store_first_then_everyone(seeded_kernel):
     await _mk(seeded_kernel)
     await _with_store(seeded_kernel, start=False)
@@ -246,10 +237,7 @@ async def test_stored_rows_keep_none_and_reduce_bytes_to_a_length(seeded_kernel)
     after = (await _call(seeded_kernel, "memory", {"type": "dump"}))["result"]["tables"]
     # the flusher may land this test's own dump/inject calls in between — appended after
     assert after["rows"][: len(before["rows"])] == before["rows"]
-    assert (
-        after["fold_refs"] == before["fold_refs"]
-        and after["grants"] == before["grants"]
-    )
+    assert after["fold_refs"] == before["fold_refs"]
 
 
 async def test_a_settle_keeps_the_body_only_when_named_or_the_error_when_dead(
@@ -325,8 +313,9 @@ async def test_ledger_is_a_projection_of_store_and_ram_scoped_to_the_caller(
         "caller",
         can_call={"probe": "*", seeded_kernel.id: ["ledger", "ack_deadletter"]},
     )
+    wire(seeded_kernel, "caller", seeded_kernel.id, ["ledger", "ack_deadletter"])
     await _with_store(seeded_kernel)
-    with sender_context("caller"):
+    with as_agent(seeded_kernel, "caller"):
         mine = await _call(seeded_kernel, "probe", {"type": "work"}, id="mine-1")
     other = await _call(seeded_kernel, "probe", {"type": "work"})
     await seeded_kernel.ctx.flush_executions()
@@ -341,7 +330,7 @@ async def test_ledger_is_a_projection_of_store_and_ram_scoped_to_the_caller(
     assert "result" not in by[other["pid"]]["outcome"], "unnamed: a digest"
     assert by[other["pid"]]["outcome"]["bytes"] == len('{"ok": true}')
     assert any(e["status"] == "in_flight" for e in led["executions"]), "RAM overlay"
-    with sender_context("caller"):
+    with as_agent(seeded_kernel, "caller"):
         scoped = (await _call(seeded_kernel, "kernel", {"type": "ledger"}))["result"]
     ids = {e["id"] for e in scoped["executions"]}
     assert mine["pid"] in ids and other["pid"] not in ids
@@ -392,15 +381,16 @@ async def test_a_dead_letter_is_announced_listed_and_acked(seeded_kernel):
         "caller",
         can_call={"probe": "*", seeded_kernel.id: ["ledger", "ack_deadletter"]},
     )
+    wire(seeded_kernel, "caller", seeded_kernel.id, ["ledger", "ack_deadletter"])
     await _with_store(seeded_kernel)
     inbox = seeded_kernel.ctx.ensure_inbox("caller")
-    with sender_context("caller"):
+    with as_agent(seeded_kernel, "caller"):
         out = await _call(seeded_kernel, "probe", {"type": "fail"})
     assert out["status"] == "failed"
     ev = inbox.get_nowait()
     assert ev["type"] == "on_deadletter" and ev["id"] == out["pid"], ev
     await seeded_kernel.ctx.flush_executions()
-    with sender_context("caller"):
+    with as_agent(seeded_kernel, "caller"):
         led = (await _call(seeded_kernel, "kernel", {"type": "ledger"}))["result"]
         entry = next(e for e in led["executions"] if e["id"] == out["pid"])
         assert entry["status"] == "failed" and not entry.get("acked")

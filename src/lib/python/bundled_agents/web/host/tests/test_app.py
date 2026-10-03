@@ -14,8 +14,8 @@ OWN = "http://127.0.0.1:8088"
 
 @pytest.fixture
 async def web_agent(seeded_kernel):
-    """A REAL web-host agent. The `/file/` route dispatches under this agent's id
-    (`sender_context`), so a browser fetch is an ordinary agent send and BOTH gates
+    """A REAL web-host agent. The `/file/` route hands each fetch to this agent
+    (`fetch_file`), which reads as itself, so a browser fetch is an ordinary agent send and BOTH gates
     apply. It therefore needs egress (`can_call`) on whatever it serves, exactly
     like any other caller — the browser inherits the web host's authority, not the
     operator's."""

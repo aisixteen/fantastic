@@ -21,8 +21,8 @@ const KEY2: &str = "sk-ant-rotated-9876543210";
 
 /// A kernel with a guid, the credential store, and agent `ai` whose record names
 /// `credentials: {store: creds, ref: claude}` — the ref bound to
-/// `api.example.com` and readable by `readers`.
-async fn mk(tmp: &tempfile::TempDir, readers: &[&str]) -> Arc<Kernel> {
+/// `api.example.com`.
+async fn mk(tmp: &tempfile::TempDir) -> Arc<Kernel> {
     let mut kernel = Kernel::new();
     kernel
         .bundles
@@ -43,12 +43,6 @@ async fn mk(tmp: &tempfile::TempDir, readers: &[&str]) -> Arc<Kernel> {
     kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     creds::set_key(&kernel, tmp.path(), "ai", "claude", "api.example.com", KEY).await;
-    let store = AgentId::from(creds::STORE);
-    let mut refs = kernel.agents.get(&store).unwrap().meta.read().unwrap()["refs"].clone();
-    refs["claude"]["readers"] = json!(readers);
-    let mut patch = Map::new();
-    patch.insert("refs".into(), refs);
-    kernel.update(&store, patch);
     let mut meta = Map::new();
     creds::add_credentials(&mut meta, "claude");
     kernel.register(Agent::new(
@@ -65,7 +59,7 @@ async fn mk(tmp: &tempfile::TempDir, readers: &[&str]) -> Arc<Kernel> {
 #[tokio::test]
 async fn the_reader_reads_the_key_per_request_and_records_none() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let k = mk(&tmp, &["ai"]).await;
+    let k = mk(&tmp).await;
     let read = key_reader(&AgentId::from("ai"), &k, "responses_backend", true);
     assert_eq!(read.read(EP).await, Ok(Some(KEY.to_string())));
     // rotate
@@ -90,7 +84,7 @@ async fn the_reader_reads_the_key_per_request_and_records_none() {
 #[tokio::test]
 async fn a_key_bound_to_another_host_is_refused() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let k = mk(&tmp, &["ai"]).await;
+    let k = mk(&tmp).await;
     let read = key_reader(&AgentId::from("ai"), &k, "responses_backend", true);
     let e = read
         .read("https://evil.example.net/v1/messages")
@@ -105,20 +99,9 @@ async fn a_key_bound_to_another_host_is_refused() {
 }
 
 #[tokio::test]
-async fn an_agent_the_ref_does_not_name_reads_nothing() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let k = mk(&tmp, &["someone_else"]).await;
-    let read = key_reader(&AgentId::from("ai"), &k, "responses_backend", true);
-    assert_eq!(
-        read.read(EP).await.unwrap_err().0,
-        "responses_backend: credentials creds/claude: credential_store: no such ref 'claude'"
-    );
-}
-
-#[tokio::test]
 async fn no_credentials_is_no_key_or_a_loud_refusal() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let k = mk(&tmp, &["ai"]).await;
+    let k = mk(&tmp).await;
     k.register(Agent::new(
         AgentId::from("bare"),
         None,
@@ -149,7 +132,7 @@ async fn no_credentials_is_no_key_or_a_loud_refusal() {
 #[tokio::test]
 async fn a_malformed_record_or_a_missing_field_is_named() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let k = mk(&tmp, &["ai"]).await;
+    let k = mk(&tmp).await;
     let ai = AgentId::from("ai");
     let set_cred = |v: Value| {
         let mut patch = Map::new();
@@ -172,7 +155,7 @@ async fn a_malformed_record_or_a_missing_field_is_named() {
     set_cred(json!({"store": "creds", "ref": "other"}));
     let store = AgentId::from(creds::STORE);
     let mut refs = k.agents.get(&store).unwrap().meta.read().unwrap()["refs"].clone();
-    refs["other"] = json!({"host": "api.example.com", "readers": ["ai"]});
+    refs["other"] = json!({"host": "api.example.com"});
     let declared = k
         .send(vec![Item::new(
             AgentId::from("kernel"),
@@ -186,8 +169,7 @@ async fn a_malformed_record_or_a_missing_field_is_named() {
         .send(vec![Item::new(
             store,
             json!({"type": "set", "ref": "other", "fields": {"token": "t"}}),
-        )
-        .with_secret(json!(["payload.fields"]))])
+        )])
         .await
         .remove(0);
     assert_eq!(out.result["stored"], json!(true), "{}", out.result);
@@ -208,7 +190,7 @@ async fn a_malformed_record_or_a_missing_field_is_named() {
 #[tokio::test]
 async fn a_key_that_is_not_a_legal_header_value_is_refused_by_its_ref() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let k = mk(&tmp, &["ai"]).await;
+    let k = mk(&tmp).await;
     let read = key_reader(&AgentId::from("ai"), &k, "responses_backend", true);
     for bad in [
         format!("{KEY}\n"),
@@ -233,15 +215,4 @@ async fn a_key_that_is_not_a_legal_header_value_is_refused_by_its_ref() {
     }
     creds::set_key(&k, tmp.path(), "ai", "claude", "api.example.com", "sk a\tb").await;
     assert_eq!(read.read(EP).await, Ok(Some("sk a\tb".to_string())));
-}
-
-#[test]
-fn without_key_scrubs_every_occurrence() {
-    use crate::credentials::without_key;
-    assert_eq!(
-        without_key("a sk-1 b sk-1", Some("sk-1")),
-        "a <secret> b <secret>"
-    );
-    assert_eq!(without_key("a sk-1", None), "a sk-1");
-    assert_eq!(without_key("a sk-1", Some("")), "a sk-1");
 }

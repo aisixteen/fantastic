@@ -2156,10 +2156,12 @@ async fn the_default_prompt_states_the_mechanism_not_a_strategy() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "rt_prompt").await;
     let state = crate::state::state_for(&backend);
-    let (messages, _store_len) =
-        crate::assembly::assemble_messages(&backend, &state, "hi", &kernel, "probe", None)
-            .await
-            .expect("store read");
+    let (messages, _store_len) = fantastic_kernel::test_support::as_agent(
+        backend.clone(),
+        crate::assembly::assemble_messages(&backend, &state, "hi", &kernel, "probe", None),
+    )
+    .await
+    .expect("store read");
     let sys_block = messages[0]["content"]
         .as_str()
         .expect("system content")
@@ -2898,11 +2900,14 @@ async fn delivery_is_a_deliver_reply_task_not_awaited() {
     assert_eq!(store[0]["id"], row["id"], "the task id is the row id");
     // …and it is the KERNEL's bookkeeping: the conversation never sees it.
     assert!(
-        crate::memory::load_history(&peer, &kernel, false)
-            .await
-            .expect("store read")
-            .iter()
-            .all(|r| r.get("verb") != Some(&json!("deliver_reply"))),
+        fantastic_kernel::test_support::as_agent(
+            peer.clone(),
+            crate::memory::load_history(&peer, &kernel, false)
+        )
+        .await
+        .expect("store read")
+        .iter()
+        .all(|r| r.get("verb") != Some(&json!("deliver_reply"))),
         "a delivery task reached the peer's conversation"
     );
 }
@@ -3057,13 +3062,18 @@ async fn the_compaction_cursor_is_the_store_length_not_the_view() {
         turn("user", fresh),
         turn("assistant", "noted again"),
     ];
-    crate::memory::save_history(&backend, &kernel, &turns)
-        .await
-        .expect("store append");
-    let (messages, store_len) =
-        crate::assembly::assemble_messages(&backend, &state, "hi", &kernel, "probe", None)
-            .await
-            .expect("store read");
+    fantastic_kernel::test_support::as_agent(
+        backend.clone(),
+        crate::memory::save_history(&backend, &kernel, &turns),
+    )
+    .await
+    .expect("store append");
+    let (messages, store_len) = fantastic_kernel::test_support::as_agent(
+        backend.clone(),
+        crate::assembly::assemble_messages(&backend, &state, "hi", &kernel, "probe", None),
+    )
+    .await
+    .expect("store read");
     assert_eq!(store_len, 4, "the STORE keeps every turn");
     assert!(
         messages.len() < 1 + store_len + 1,
@@ -3080,16 +3090,19 @@ async fn the_compaction_cursor_is_the_store_length_not_the_view() {
     let mut fat = vec![turn("system", "sys")];
     fat.extend(body(60, 8000));
     let n = fat.len();
-    let _ = crate::projection::project_context(
-        &provider,
-        &backend,
-        &state,
-        &kernel,
-        "probe",
-        "mock_backend",
-        crate::constants::DEFAULT_CONTEXT_WINDOW,
-        fat,
-        store_len,
+    let _ = fantastic_kernel::test_support::as_agent(
+        backend.clone(),
+        crate::projection::project_context(
+            &provider,
+            &backend,
+            &state,
+            &kernel,
+            "probe",
+            "mock_backend",
+            crate::constants::DEFAULT_CONTEXT_WINDOW,
+            fat,
+            store_len,
+        ),
     )
     .await
     .expect("the projection must fire, not failfast");
@@ -3607,9 +3620,12 @@ async fn the_cli_caller_round_trips_through_the_cli_agent() {
 /// minus its `view` rows (python `_fake.rows_of`). Read as the agent itself: the
 /// store keys every row by its writer.
 async fn conversation(kernel: &Arc<Kernel>, agent: &AgentId) -> Vec<Value> {
-    let res = crate::memory::store_call(agent, kernel, json!({"type": "read"}))
-        .await
-        .expect("store read");
+    let res = fantastic_kernel::test_support::as_agent(
+        agent.clone(),
+        crate::memory::store_call(agent, kernel, json!({"type": "read"})),
+    )
+    .await
+    .expect("store read");
     res.get("rows")
         .and_then(Value::as_array)
         .cloned()
@@ -3626,9 +3642,12 @@ async fn conversation(kernel: &Arc<Kernel>, agent: &AgentId) -> Vec<Value> {
 /// Plant a row in the agent's memory store AS the agent (write-through: the head
 /// cache takes it too when warm). Returns its id — minted when the row has none.
 async fn put_row(kernel: &Arc<Kernel>, agent: &AgentId, row: Value) -> i64 {
-    crate::memory::save_history(agent, kernel, &[row])
-        .await
-        .expect("row rejected")[0]
+    fantastic_kernel::test_support::as_agent(
+        agent.clone(),
+        crate::memory::save_history(agent, kernel, &[row]),
+    )
+    .await
+    .expect("row rejected")[0]
 }
 
 #[tokio::test]
@@ -3806,10 +3825,13 @@ async fn context_recall_fits_the_head_and_writes_the_view_it_chose() {
         "a dry recall is the mechanical fit, and says so: {r}"
     );
 
-    let view = crate::memory::load_view(&backend, &kernel)
-        .await
-        .expect("store read")
-        .expect("the view must be persisted");
+    let view = fantastic_kernel::test_support::as_agent(
+        backend.clone(),
+        crate::memory::load_view(&backend, &kernel),
+    )
+    .await
+    .expect("store read")
+    .expect("the view must be persisted");
     let ids = view.get("ids").and_then(Value::as_array).cloned().unwrap();
     assert_eq!(
         ids.len() as u64,
@@ -3825,9 +3847,12 @@ async fn context_recall_fits_the_head_and_writes_the_view_it_chose() {
     );
 
     // The decision is a ROW — the next reload reads why the last recall chose.
-    let rows = crate::memory::load_history(&backend, &kernel, false)
-        .await
-        .expect("store read");
+    let rows = fantastic_kernel::test_support::as_agent(
+        backend.clone(),
+        crate::memory::load_history(&backend, &kernel, false),
+    )
+    .await
+    .expect("store read");
     assert!(
         rows.iter()
             .any(|r| r.get("kind").and_then(Value::as_str) == Some("recall")),
@@ -3902,21 +3927,26 @@ async fn a_fold_projection_over_budget_writes_folds() {
         script: script_for(&backend),
     });
     let state = crate::state::state_for(&backend);
-    let (messages, store_len) =
-        crate::assembly::assemble_messages(&backend, &state, "next", &kernel, "cli", Some("sys"))
-            .await
-            .expect("store read");
+    let (messages, store_len) = fantastic_kernel::test_support::as_agent(
+        backend.clone(),
+        crate::assembly::assemble_messages(&backend, &state, "next", &kernel, "cli", Some("sys")),
+    )
+    .await
+    .expect("store read");
     let ids_in_body = messages.iter().filter(|m| m.get("id").is_some()).count();
-    let out = crate::projection::project_context(
-        &provider,
-        &backend,
-        &state,
-        &kernel,
-        "cli",
-        "mock",
-        crate::constants::DEFAULT_CONTEXT_WINDOW,
-        messages.clone(),
-        store_len,
+    let out = fantastic_kernel::test_support::as_agent(
+        backend.clone(),
+        crate::projection::project_context(
+            &provider,
+            &backend,
+            &state,
+            &kernel,
+            "cli",
+            "mock",
+            crate::constants::DEFAULT_CONTEXT_WINDOW,
+            messages.clone(),
+            store_len,
+        ),
     )
     .await;
     assert!(out.is_ok(), "{out:?}");
@@ -3978,31 +4008,40 @@ async fn successive_fold_projections_do_not_nest_into_a_chain() {
         let provider: Arc<dyn Provider> = Arc::new(MockProvider {
             script: script_for(&backend),
         });
-        let (messages, store_len) = crate::assembly::assemble_messages(
-            &backend,
-            &state,
-            "next",
-            &kernel,
-            "cli",
-            Some("sys"),
+        let (messages, store_len) = fantastic_kernel::test_support::as_agent(
+            backend.clone(),
+            crate::assembly::assemble_messages(
+                &backend,
+                &state,
+                "next",
+                &kernel,
+                "cli",
+                Some("sys"),
+            ),
         )
         .await
         .expect("store read");
-        let _ = crate::projection::project_context(
-            &provider,
-            &backend,
-            &state,
-            &kernel,
-            "cli",
-            "mock",
-            crate::constants::DEFAULT_CONTEXT_WINDOW,
-            messages,
-            store_len,
+        let _ = fantastic_kernel::test_support::as_agent(
+            backend.clone(),
+            crate::projection::project_context(
+                &provider,
+                &backend,
+                &state,
+                &kernel,
+                "cli",
+                "mock",
+                crate::constants::DEFAULT_CONTEXT_WINDOW,
+                messages,
+                store_len,
+            ),
         )
         .await;
-        let rows: Vec<Value> = crate::memory::load_history(&backend, &kernel, false)
-            .await
-            .expect("store read");
+        let rows: Vec<Value> = fantastic_kernel::test_support::as_agent(
+            backend.clone(),
+            crate::memory::load_history(&backend, &kernel, false),
+        )
+        .await
+        .expect("store read");
         let mut levels: Vec<i64> = rows
             .iter()
             .filter(|r| crate::folds::is_fold(r))
@@ -4067,8 +4106,6 @@ fn reflect_verbs_match_python_first_doc_lines() {
             "grep",
             "context_recall",
             "context_clear",
-            "fork_from",
-            "request_share",
             "watch",
             "unwatch",
             "boot",
@@ -4614,9 +4651,12 @@ async fn a_reply_in_flight_across_a_reboot_is_recorded_not_acted_on() {
     )
     .await;
     assert_eq!(s.passes_served(), 0, "no turn ran for the late reply");
-    let rows = crate::memory::load_history(&backend, &kernel, false)
-        .await
-        .expect("store read");
+    let rows = fantastic_kernel::test_support::as_agent(
+        backend.clone(),
+        crate::memory::load_history(&backend, &kernel, false),
+    )
+    .await
+    .expect("store read");
     let last = rows.last().expect("a row");
     assert_eq!(last["kind"], "late");
     assert_eq!(
@@ -4943,16 +4983,19 @@ async fn the_seam_keeps_the_goal_the_strategies_pinned() {
                 messages.push(json!({"role": role, "content": "z".repeat(400)}));
             }
             let len = messages.len() - 1;
-            let out = crate::projection::project_context(
-                &provider,
-                &backend,
-                &state,
-                &kernel,
-                "cli",
-                "mock",
-                crate::constants::DEFAULT_CONTEXT_WINDOW,
-                messages,
-                len,
+            let out = fantastic_kernel::test_support::as_agent(
+                backend.clone(),
+                crate::projection::project_context(
+                    &provider,
+                    &backend,
+                    &state,
+                    &kernel,
+                    "cli",
+                    "mock",
+                    crate::constants::DEFAULT_CONTEXT_WINDOW,
+                    messages,
+                    len,
+                ),
             )
             .await
             .expect("the projection must fit, not failfast");
@@ -4988,10 +5031,13 @@ async fn kernel_rows_and_role_less_notes_never_become_turns() {
     )
     .await;
     // the cache is warm, then a role-less note is appended straight to the store
-    let _ = crate::memory::load_history(&backend, &kernel, false)
-        .await
-        .expect("store read");
-    let out = fantastic_kernel::with_sender(
+    let _ = fantastic_kernel::test_support::as_agent(
+        backend.clone(),
+        crate::memory::load_history(&backend, &kernel, false),
+    )
+    .await
+    .expect("store read");
+    let out = fantastic_kernel::test_support::as_agent(
         backend.clone(),
         kernel.send(vec![Item::new(
             AgentId::from(MEMORY),
@@ -5018,9 +5064,12 @@ async fn kernel_rows_and_role_less_notes_never_become_turns() {
         )),
         "execution rows reached the agent's key: {stored:?}"
     );
-    let hist = crate::memory::load_history(&backend, &kernel, false)
-        .await
-        .expect("store read");
+    let hist = fantastic_kernel::test_support::as_agent(
+        backend.clone(),
+        crate::memory::load_history(&backend, &kernel, false),
+    )
+    .await
+    .expect("store read");
     assert_eq!(
         hist.iter()
             .map(|r| r["content"].clone())
@@ -5028,9 +5077,12 @@ async fn kernel_rows_and_role_less_notes_never_become_turns() {
         vec![json!("hello")],
         "only the turn is in the conversation"
     );
-    let behind = crate::memory::load_history(&backend, &kernel, true)
-        .await
-        .expect("store read");
+    let behind = fantastic_kernel::test_support::as_agent(
+        backend.clone(),
+        crate::memory::load_history(&backend, &kernel, true),
+    )
+    .await
+    .expect("store read");
     assert!(behind.iter().all(|r| r.get("role").is_some()));
     // …and grep still finds the note: it is memory.
     let g = kernel
@@ -5176,10 +5228,13 @@ async fn context_clear_starts_a_new_thread_without_deleting() {
     )
     .await;
     assert_eq!(
-        crate::memory::load_history(&backend, &kernel, false)
-            .await
-            .expect("store read")
-            .len(),
+        fantastic_kernel::test_support::as_agent(
+            backend.clone(),
+            crate::memory::load_history(&backend, &kernel, false)
+        )
+        .await
+        .expect("store read")
+        .len(),
         2
     );
 
@@ -5197,9 +5252,12 @@ async fn context_clear_starts_a_new_thread_without_deleting() {
         .and_then(Value::as_i64)
         .expect("the clear row's id");
 
-    let hist = crate::memory::load_history(&backend, &kernel, false)
-        .await
-        .expect("store read");
+    let hist = fantastic_kernel::test_support::as_agent(
+        backend.clone(),
+        crate::memory::load_history(&backend, &kernel, false),
+    )
+    .await
+    .expect("store read");
     assert_eq!(hist.len(), 1, "the view starts at the clear: {hist:?}");
     assert_eq!(hist[0].get("kind").and_then(Value::as_str), Some("clear"));
     let content = hist[0].get("content").and_then(Value::as_str).unwrap_or("");
@@ -5219,10 +5277,13 @@ async fn context_clear_starts_a_new_thread_without_deleting() {
 
     // behind the boundary, everything is still there
     assert_eq!(
-        crate::memory::load_history(&backend, &kernel, true)
-            .await
-            .expect("store read")
-            .len(),
+        fantastic_kernel::test_support::as_agent(
+            backend.clone(),
+            crate::memory::load_history(&backend, &kernel, true)
+        )
+        .await
+        .expect("store read")
+        .len(),
         3
     );
     let r = kernel
@@ -5245,10 +5306,13 @@ async fn context_clear_starts_a_new_thread_without_deleting() {
     assert_eq!(g.get("total").and_then(Value::as_i64), Some(1), "{g}");
 
     // the persisted view is emptied, so assembly renders the store from the clear on
-    let view = crate::memory::load_view(&backend, &kernel)
-        .await
-        .expect("store read")
-        .expect("the view must be persisted");
+    let view = fantastic_kernel::test_support::as_agent(
+        backend.clone(),
+        crate::memory::load_view(&backend, &kernel),
+    )
+    .await
+    .expect("store read")
+    .expect("the view must be persisted");
     assert!(
         view.get("ids")
             .and_then(Value::as_array)
@@ -5263,9 +5327,12 @@ async fn context_clear_starts_a_new_thread_without_deleting() {
         json!({"role": "user", "content": "hello again"}),
     )
     .await;
-    let hist = crate::memory::load_history(&backend, &kernel, false)
-        .await
-        .expect("store read");
+    let hist = fantastic_kernel::test_support::as_agent(
+        backend.clone(),
+        crate::memory::load_history(&backend, &kernel, false),
+    )
+    .await
+    .expect("store read");
     assert_eq!(
         hist.last()
             .and_then(|r| r.get("content"))
@@ -5277,10 +5344,6 @@ async fn context_clear_starts_a_new_thread_without_deleting() {
 /// The memory-store features (python `test_memory_features.py`), on this harness.
 #[path = "tests_memory.rs"]
 mod memory_features;
-
-/// A model never reaches a secret holder (python `test_secret_holders.py`).
-#[path = "tests_secret_holders.rs"]
-mod secret_holders;
 
 /// STEP-4 PIN (2026-10-01): per-agent backend state. Two agents never share a
 /// state slot; `drop_state` (every backend's `on_delete`) frees the slot so the
@@ -5362,7 +5425,6 @@ async fn delete_drops_every_row_but_the_incarnation() {
     let mem = crate::memory::mem(&kernel);
     mem.heads.lock().unwrap().insert(id.clone(), vec![]);
     mem.bodies.lock().unwrap().insert(id.clone(), vec![]);
-    mem.grants.lock().unwrap().insert(id.clone(), vec![]);
     mem.watchers.lock().unwrap().insert(id.clone(), vec![]);
     let incarnation = crate::state::incarnation(&backend);
     assert!(incarnation >= 1, "booted");
@@ -5388,7 +5450,6 @@ async fn delete_drops_every_row_but_the_incarnation() {
         .contains_key(&id));
     assert!(!mem.heads.lock().unwrap().contains_key(&id));
     assert!(!mem.bodies.lock().unwrap().contains_key(&id));
-    assert!(!mem.grants.lock().unwrap().contains_key(&id));
     assert!(!mem.watchers.lock().unwrap().contains_key(&id));
     assert_eq!(crate::state::incarnation(&backend), incarnation);
 

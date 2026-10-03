@@ -725,24 +725,24 @@ public final class WebServer: @unchecked Sendable {
 
     /// python `agent_file` — pipe the agent's `read_stream` SOURCE.
     ///
-    /// THROUGH THE BATCH, AS THE WEB AGENT (C41/C37). Python dispatches under
-    /// `sender_context(web_agent_id)`, so the target's `callable_by` decides
-    /// whether this route may read it at all; swift sent with NO sender, i.e. as
-    /// the OPERATOR, and `sendWithBinary` left no execution behind either.
+    /// READ BY THE WEB HOST (C41/C37): the request is handed to it as
+    /// `fetch_file` (this route is the transport — the operator), and its handler
+    /// sends `read_stream` AS ITSELF, so the target's `callable_by` decides whether
+    /// `web` may read it at all — never the operator, which would hand the browser
+    /// the origin root of trust.
     private func serveFileProxy(agentId: String, path: String) async -> HTTPResponse {
         guard kernel.agent(AgentId(agentId)) != nil else { return Self.emptyNotFound }
         let web = self.agentId
         @Sendable func readChunk(_ offset: Int) async -> (JSON, Data?) {
-            let out = await KernelTaskLocals.$currentSender.withValue(web) {
-                await kernel.send([
-                    Item(
-                        AgentId(agentId),
-                        .object([
-                            "type": .string("read_stream"), "path": .string(path),
-                            "offset": .integer(Int64(offset)), "length": .integer(262144),
-                        ]), rawReply: true)
-                ])[0]
-            }
+            let out = await kernel.send([
+                Item(
+                    web,
+                    .object([
+                        "type": .string("fetch_file"), "agent_id": .string(agentId),
+                        "path": .string(path), "offset": .integer(Int64(offset)),
+                        "length": .integer(262144),
+                    ]), rawReply: true)
+            ])[0]
             // python `isinstance(first["bytes"], bytes)`: the chunk at `bytes`
             return (out.result, bodyAt(out.body, "bytes"))
         }
@@ -806,10 +806,6 @@ public final class WebServer: @unchecked Sendable {
     static let octetType = "application/octet-stream"
     static let payloadHeader = "x-fantastic-payload"
     static let bytesFieldHeader = "x-fantastic-bytes-field"
-    /// The item's `secret` marks, a JSON array — the octet twin of
-    /// `WebRestBundle.secretHeader` (python `web_rest._SECRET_HEADER`, read by the
-    /// one `_rest_call` both legs share).
-    static let secretHeader = "x-fantastic-secret"
 
     /// Serve a matched leg route. The JSON leg is the endpoint the leg handed
     /// over for this path (python's mounted callable); the octet leg is the
@@ -934,25 +930,20 @@ public final class WebServer: @unchecked Sendable {
         // `file_bridge: unknown type ""` where python answers
         // `send: payload.type required`, and stuffed the header's `id` into the
         // verb payload the target reads.
-        var item = Item(
-            AgentId(target), .object(payload), binary: Blob(field, request.body ?? Data()))
+        // HANDED TO THE LEG (`inbound_call`, the transport's operator hand-in),
+        // which sends it AS ITSELF: the body rides the binary channel at its slot
+        // of the item's payload.
+        var item: OrderedDictionary<String, JSON> = [
+            "target": .string(target), "payload": .object(payload),
+        ]
         if let execId = headers["x-fantastic-execution-id"], !execId.isEmpty {
-            item.id = execId
+            item["id"] = .string(execId)
         }
-        // SECRET MARKS — the same header and the same 400 as the JSON leg: this
-        // kernel records the call as shown; a malformed mark is the kernel's own
-        // refusal.
-        if let raw = headers[Self.secretHeader] {
-            guard let marks = try? JSON.parseStrict(raw) else {
-                return jsonHTTP(
-                    400,
-                    .object(["error": .string("web_rest: X-Fantastic-Secret is not valid JSON")]))
-            }
-            item.secret = marks
-        }
-        let out = await KernelTaskLocals.$currentSender.withValue(owner) {
-            await kernel.send([item])[0]
-        }
+        let out = await Inbound.handIn(
+            kernel, legId: owner,
+            .object(["type": .string("inbound_call"), "item": .object(item)]),
+            binary: Blob(
+                parts: [.key("item"), .key("payload"), .key(field)], request.body ?? Data()))
         // python answers 204 for a null reply BEFORE it looks for bytes.
         if out.result.isNull { return HTTPResponse(status: 204, contentType: nil, body: Data()) }
         // THE SAME ONE DECISION as the JSON leg (`RestOctet.split`): octet iff

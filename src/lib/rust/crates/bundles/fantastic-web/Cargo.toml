@@ -39,9 +39,8 @@ fantastic-web-rest = { path = "../fantastic-web-rest" }
 fantastic-file = { path = "../fantastic-file" }
 # `paste_image` over the binary channel, end to end on both wire legs.
 fantastic-exec-bridge = { path = "../fantastic-exec-bridge" }
-# Secret marks across the legs: a ws_bridge dialing web_ws (and a page kernel's
-# bridge end), the memory store every record lands in, and a credential store
-# reached as `<guid>|creds`.
+# Calls across the legs: a ws_bridge dialing web_ws (and a page kernel's bridge
+# end), the memory store every record lands in, and a credential store.
 fantastic-bridge = { path = "../fantastic-bridge" }
 fantastic-ram-store = { path = "../fantastic-ram-store" }
 fantastic-credential-store = { path = "../fantastic-credential-store" }

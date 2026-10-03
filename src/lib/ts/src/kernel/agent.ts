@@ -49,12 +49,11 @@ export class Agent {
     this.sentence = init.sentence ?? null;
     this.verbs = init.verbs ?? null;
     this.meta = init.meta ?? {};
-    // Structural authority baseline, stamped + MERGED on BOTH fields for EVERY
-    // agent through this one constructor — seeded root, created child, or
-    // record loaded from the host alike, so nothing can lack it. Both start as
-    // {$self,$parent,$children}: reach and accept your own subtree and your
-    // creator. It merges UNDER any explicit grant (an explicit key wins, and
-    // the merge is idempotent on reload). Deny-all governs every other edge.
+    // The baseline, stamped + MERGED on BOTH fields for EVERY agent through this
+    // one constructor — seeded root, created child, or record loaded from the
+    // host alike, so nothing can lack it: {$self: "*"} and nothing else. It
+    // merges UNDER any explicit grant (an explicit key wins, and the merge is
+    // idempotent on reload). Every other edge is an explicit grant.
     for (const field of ["can_call", "callable_by"] as const) {
       const explicit = this.meta[field];
       this.meta[field] = {

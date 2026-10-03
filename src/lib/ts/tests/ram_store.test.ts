@@ -1,10 +1,9 @@
-// ram_store: tenancy by caller, grants + FK cascade, search, inject/dump.
+// ram_store: tenancy by caller, FK cascade, search, inject/dump.
 // Mirrors python bundled_agents/memory/ram_store/tests/test_ram_store.py.
 //
-// Callers act through `scopedFor` (a real agent send, gated both ways); the
-// operator is a bare `kernel.send`. The root's guid is set by hand — the root is
-// not booted here, and the store keys every row by it. A caller on ANOTHER
-// kernel arrives the way the bridge delivers a host's call: `foreignView`.
+// Callers act through their own dispatch (`sendAs`: a real agent send, gated
+// both ways); the operator is a bare `kernel.send`. The root's guid is set by
+// hand — the root is not booted here, and the store keys every row by it.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -12,6 +11,7 @@ import { Kernel } from "../src/kernel/kernel.ts";
 import { Agent } from "../src/kernel/agent.ts";
 import type { Json, Payload } from "../src/kernel/json.ts";
 import { registerRamStore } from "../src/bundles/memory/ram_store.ts";
+import { sendAs } from "./kit.ts";
 
 const ROOT = "kernel_state";
 
@@ -27,19 +27,15 @@ function store(): Kernel {
       id: "mem",
       parentId: ROOT,
       handlerModule: "ram_store.ts",
-      meta: {
-        operator: true,
-        admins: ["kernel"],
-        callable_by: { alice: "*", bob: "*", carol: "*" },
-      },
+      meta: { callable_by: { alice: "*", bob: "*", carol: "*" } },
     }),
   );
   return k;
 }
 
-async function call(k: Kernel, payload: Payload, as?: string): Promise<Payload> {
-  const via = as === undefined ? k : k.scopedFor(as, null);
-  return (await via.send([{ target: "mem", payload }]))[0]!.result as Payload;
+async function call(k: Kernel, payload: Payload, who?: string): Promise<Payload> {
+  const items = [{ target: "mem", payload }];
+  return (await (who === undefined ? k.send(items) : sendAs(k, who, items)))[0]!.result as Payload;
 }
 
 const append = (k: Kernel, who: string, rows: Json[]) => call(k, { type: "append", rows }, who);
@@ -59,10 +55,11 @@ test("rows are keyed by caller; a duplicate id is refused all or none", async ()
   assert.equal(((await call(k, { type: "read" }, "alice"))["rows"] as Json[]).length, 1);
 });
 
-test("owner is never a writable field", async () => {
+test("owner is never a writable field — an `owner` arg is not read", async () => {
   const k = store();
-  assert.equal((await call(k, { type: "append", owner: "bob", rows: [{ id: 5 }] }, "alice"))["reason"], "unauthorized");
-  assert.equal((await call(k, { type: "read", owner: "bob" }, "alice"))["reason"], "unauthorized");
+  assert.deepEqual((await call(k, { type: "append", owner: "bob", rows: [{ id: 5 }] }, "alice"))["ids"], [5]);
+  assert.deepEqual(ids(await call(k, { type: "read", owner: "bob" }, "alice")), [5]);
+  assert.deepEqual((await call(k, { type: "read" }, "bob"))["rows"], []);
 });
 
 test("a row without an id takes the kernel's next one", async () => {
@@ -74,21 +71,13 @@ test("a row without an id takes the kernel's next one", async () => {
   assert.equal((await append(k, "alice", [{ id: "7" }]))["reason"], "bad_arg");
 });
 
-test("the operator needs explicit service, and its rows are its own key", async () => {
+test("the operator is served as `kernel`, and its rows are its own key", async () => {
   const k = store();
-  k.updateMeta("mem", { operator: false });
-  assert.equal((await call(k, { type: "read" }))["reason"], "unauthorized");
-  k.updateMeta("mem", { operator: true });
   await call(k, { type: "append", rows: [{ id: 7, kind: "call" }] });
   assert.deepEqual(ids(await call(k, { type: "read", kinds: ["call"] })), [7]);
   assert.deepEqual((await call(k, { type: "read" }, "alice"))["rows"], []);
-});
-
-test("an admin may name an owner", async () => {
-  const k = store();
-  await append(k, "alice", [{ id: 1, content: "a" }]);
-  assert.deepEqual(ids(await call(k, { type: "read", owner: "alice" })), [1]);
-  assert.deepEqual((await call(k, { type: "append", owner: "alice", rows: [{ id: 2 }] }))["ids"], [2]);
+  const owners = (((await call(k, { type: "dump" }))["tables"] as Payload)["rows"] as Payload[]).map((r) => r["owner"]);
+  assert.deepEqual(owners, ["g1|kernel"]);
 });
 
 test("a store refuses when the kernel has no guid", async () => {
@@ -107,62 +96,14 @@ test("refs must name the owner's own rows", async () => {
   assert.deepEqual(out["ids"], [1, 2, 3]);
 });
 
-test("share, read under the grant, and zero tolerance", async () => {
-  const k = store();
-  await append(k, "alice", [1, 2, 3].map((i) => ({ id: i, content: `a${i}` })));
-  await append(k, "bob", [{ id: 50, content: "b" }]);
-  const g = await call(k, { type: "share", with: "bob", scope: { head_until: 2 }, why: "context" }, "alice");
-  assert.equal(g["created"], true);
-  assert.equal(g["anchor"], 1);
-  assert.deepEqual(ids(await call(k, { type: "read", grant: g["grant"] as number }, "bob")), [1, 2]);
-  assert.equal((await call(k, { type: "read", grant: g["grant"] as number }, "carol"))["reason"], "unauthorized");
-  // bob cannot share alice's rows — not under his key
-  assert.equal((await call(k, { type: "share", with: "carol", scope: { row: 1 } }, "bob"))["reason"], "not_found");
-  const again = await call(k, { type: "share", with: "bob", scope: { head_until: 2 } }, "alice");
-  assert.equal(again["grant"], g["grant"]);
-  assert.equal(again["created"], false);
-});
-
-test("frozen stops at its bound; live follows the head", async () => {
-  const k = store();
-  await append(k, "alice", [{ id: 1 }, { id: 2 }]);
-  const frozen = await call(k, { type: "share", with: "bob", scope: { head_until: 2 } }, "alice");
-  const live = await call(k, { type: "share", with: "bob", scope: { head_until: 2 }, mode: "live" }, "alice");
-  await append(k, "alice", [{ id: 3 }]);
-  assert.deepEqual(ids(await call(k, { type: "read", grant: frozen["grant"] as number }, "bob")), [1, 2]);
-  assert.deepEqual(ids(await call(k, { type: "read", grant: live["grant"] as number }, "bob")), [1, 2, 3]);
-});
-
-test("a fold scope reaches its members", async () => {
-  const k = store();
-  await append(k, "alice", [{ id: 1 }, { id: 2 }, { id: 3, kind: "fold", refs: [1, 2] }, { id: 4 }]);
-  const g = await call(k, { type: "share", with: "bob", scope: { fold: 3 } }, "alice");
-  const got = await call(k, { type: "read", grant: g["grant"] as number }, "bob");
-  assert.deepEqual(ids(got), [1, 2, 3]);
-  assert.deepEqual((got["rows"] as Payload[])[2]!["refs"], [1, 2]);
-});
-
-test("prune cascades to grants and fold refs", async () => {
+test("prune cascades to fold refs", async () => {
   const k = store();
   await append(k, "alice", [{ id: 1 }, { id: 2 }, { id: 3, kind: "fold", refs: [1, 2] }]);
-  const g = await call(k, { type: "share", with: "bob", scope: { head_until: 3 } }, "alice");
-  assert.deepEqual(await call(k, { type: "prune", before_id: 2 }, "alice"), { pruned: 1, grants_removed: 1 });
-  assert.equal((await call(k, { type: "read", grant: g["grant"] as number }, "bob"))["reason"], "not_found");
+  assert.deepEqual(await call(k, { type: "prune", before_id: 2 }, "alice"), { pruned: 1 });
   const fold = await call(k, { type: "read", ids: [3] }, "alice");
   assert.deepEqual((fold["rows"] as Payload[])[0]!["refs"], [2]);
-  assert.deepEqual((await call(k, { type: "grants", side: "given" }, "alice"))["grants"], []);
 });
 
-test("unshare and the grants listing", async () => {
-  const k = store();
-  await append(k, "alice", [{ id: 1 }]);
-  const g = await call(k, { type: "share", with: "bob", scope: { row: 1 } }, "alice");
-  const rec = await call(k, { type: "grants", side: "received" }, "bob");
-  assert.deepEqual((rec["grants"] as Payload[]).map((x) => x["owner"]), ["alice"]);
-  assert.equal((await call(k, { type: "unshare", grant: g["grant"] as number }, "bob"))["reason"], "unauthorized");
-  assert.equal((await call(k, { type: "unshare", grant: g["grant"] as number }, "alice"))["unshared"], true);
-  assert.equal((await call(k, { type: "read", grant: g["grant"] as number }, "bob"))["reason"], "not_found");
-});
 
 test("search finds lines and descends folds", async () => {
   const k = store();
@@ -197,14 +138,14 @@ test("read paging and selectors", async () => {
 test("dump → inject round-trips; a broken FK is refused and changes nothing", async () => {
   const k = store();
   await append(k, "alice", [{ id: 1 }, { id: 2 }, { id: 3, kind: "fold", refs: [1, 2] }]);
-  await call(k, { type: "share", with: "bob", scope: { fold: 3 } }, "alice");
-  assert.equal((await call(k, { type: "dump" }, "alice"))["reason"], "unauthorized", "only admins");
-  const tables = (await call(k, { type: "dump" }))["tables"] as Payload;
+  // inject / dump are plain verbs: a caller the gate admits sends them
+  const tables = (await call(k, { type: "dump" }, "alice"))["tables"] as Payload;
+  assert.deepEqual(Object.keys(tables), ["rows", "fold_refs"]);
   await call(k, { type: "prune", before_id: 99 }, "alice");
   assert.deepEqual((await call(k, { type: "read" }, "alice"))["rows"], []);
-  assert.deepEqual(await call(k, { type: "inject", tables }), { rows: 3, grants: 1 });
+  assert.deepEqual(await call(k, { type: "inject", tables }), { rows: 3 });
   assert.deepEqual((await call(k, { type: "dump" }))["tables"], tables);
-  const bad = { ...tables, grants: [{ ...((tables["grants"] as Payload[])[0] as Payload), anchor: 999 }] };
+  const bad = { ...tables, fold_refs: [{ owner: "g1|alice", fold: 3, members: [1, 999] }] };
   assert.equal((await call(k, { type: "inject", tables: bad }))["reason"], "bad_arg");
   assert.deepEqual((await call(k, { type: "dump" }))["tables"], tables);
 });
@@ -213,34 +154,8 @@ test("the store's verbs reach a reader through the bundle readme", async () => {
   const k = store();
   const r = (await k.send([{ target: "mem", payload: { type: "reflect", readme: true } }]))[0]!.result as Payload;
   assert.match(String(r["readme"]), /append: args: rows/);
-  assert.equal(r["operator"], true);
-  assert.deepEqual(r["admins"], ["kernel"]);
 });
 
-// python `test_remote_caller_is_keyed_by_its_qualified_address`: a host's call
-// relayed in over the bridge is keyed by ITS qualified address, verbatim — never
-// under this kernel's guid — and the local callers' rows stay theirs.
-test("a caller on another kernel is keyed by its qualified address", async () => {
-  const k = store();
-  const mem = k.get("mem")!;
-  mem.meta["callable_by"] = { ...(mem.meta["callable_by"] as Payload), "g2|scout": "*" };
-  const scout = k.foreignView("g2|scout");
-  const out = (await scout.send([{ target: "mem", payload: { type: "append", rows: [{ id: 1 }] } }]))[0]!;
-  assert.deepEqual((out.result as Payload)["ids"], [1]);
-  const owners = async (): Promise<Json[]> =>
-    ((((await call(k, { type: "dump" }))["tables"] as Payload)["rows"]) as Payload[]).map((r) => r["owner"]!).sort();
-  assert.deepEqual(await owners(), ["g2|scout"]);
-  await append(k, "alice", [{ id: 2 }]);
-  assert.deepEqual(await owners(), ["g1|alice", "g2|scout"]);
-  // a share NAMING the foreign reader is the key it reads under
-  const g = await call(k, { type: "share", with: "g2|scout", scope: { row: 2 } }, "alice");
-  const got = (await scout.send([{ target: "mem", payload: { type: "read", grant: g["grant"]! } }]))[0]!;
-  assert.deepEqual(ids(got.result as Payload), [2]);
-  // and it needs no guid of THIS kernel's: the qualified address is the key
-  k.updateMeta(ROOT, { guid: null });
-  const read = (await scout.send([{ target: "mem", payload: { type: "read" } }]))[0]!;
-  assert.deepEqual(ids(read.result as Payload), [1]);
-});
 
 // python `_text_of` / `str.splitlines()`: structured content is indexed as
 // `json.dumps` writes it (`", "` / `": "`), and every python line boundary splits.
@@ -258,36 +173,10 @@ test("search reads structured content and lines the way python does", async () =
   assert.deepEqual(s3["matches"], [{ id: 2, line: 4, text: "four" }]);
 });
 
-test("share: a falsy mode is the default; refusals quote as python does", async () => {
+test("an unknown verb is refused as python does", async () => {
   const k = store();
-  await append(k, "alice", [{ id: 1 }]);
-  const g = await call(k, { type: "share", with: "bob", scope: { row: 1 }, mode: "" }, "alice");
-  assert.equal(g["created"], true);
-  const listed = (await call(k, { type: "grants", side: "given" }, "alice"))["grants"] as Payload[];
-  assert.equal(listed[0]!["mode"], "frozen");
-  const bad = await call(k, { type: "share", with: "bob", scope: { row: 1 }, mode: "x" }, "alice");
-  assert.equal(bad["error"], "share: mode must be one of ('frozen', 'live')");
   const unk = await call(k, { type: "nope" }, "alice");
   assert.deepEqual(unk, { error: "ram_store: unknown type 'nope'", reason: "unhandled", verb: "nope" });
-});
-
-// python `_caller`: `not agent.record.get("operator")` — truthiness, not `=== true`;
-// the hint is python's text verbatim (python ram_store/tools.py `_caller`).
-test("the operator flag reads as python truthiness; the hint is python's", async () => {
-  const k = store();
-  for (const off of [false, 0, "", null, [], {}]) {
-    k.updateMeta("mem", { operator: off as Json });
-    assert.deepEqual(await call(k, { type: "read" }), {
-      error: "mem: the operator is not served here",
-      reason: "unauthorized",
-      hint: "update_agent id=mem operator=true to serve the operator (as 'kernel')",
-      side: "store",
-    });
-  }
-  for (const on of [true, 1, "yes", [0], { a: 1 }]) {
-    k.updateMeta("mem", { operator: on as Json });
-    assert.deepEqual((await call(k, { type: "read" }))["rows"], [], `operator=${JSON.stringify(on)} serves`);
-  }
 });
 
 // Measured from python's ram_store (a probe over the python kernel fixture,
@@ -311,13 +200,9 @@ test("refusals quote a caller's value as python repr does", async () => {
     (await append(k, "alice", [{ id: 21, refs: ["10"] }]))["error"],
     "append: row 21 refs rows that do not exist for this owner: ['10']",
   );
-  const grant = async (g: Json) => (await call(k, { type: "read", grant: g }, "alice"))["error"];
-  assert.equal(await grant("abc"), "read: grant 'abc' does not exist — revoked (unshare) or its rows were pruned");
-  assert.equal(await grant(99), "read: grant 99 does not exist — revoked (unshare) or its rows were pruned");
-  assert.equal(await grant(1.5), "read: grant 1.5 does not exist — revoked (unshare) or its rows were pruned");
   // python quotes the fold AFTER `_as_id`: a value that is no id reads `None`
   const fold = async (f: Json) =>
-    (await call(k, { type: "inject", tables: { rows: [], fold_refs: [{ owner: "g1|alice", fold: f, members: [] }], grants: [] } }))["error"];
+    (await call(k, { type: "inject", tables: { rows: [], fold_refs: [{ owner: "g1|alice", fold: f, members: [] }] } }))["error"];
   assert.equal(await fold("x"), "inject: fold_refs names no row None");
   assert.equal(await fold(9), "inject: fold_refs names no row 9");
   assert.equal(await fold(null), "inject: fold_refs names no row None");

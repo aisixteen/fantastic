@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { Kernel } from "../src/kernel/kernel.ts";
 import { Agent } from "../src/kernel/agent.ts";
 import type { Json, Payload } from "../src/kernel/json.ts";
+import { sendAs } from "./kit.ts";
 
 interface AgentSpec {
   id: string;
@@ -16,7 +17,7 @@ interface AgentSpec {
 }
 interface Case {
   name: string;
-  /** reflect AS this agent (gated — the roster hides what it may not reflect);
+  /** reflect AS this agent (gated like any send);
    *  absent = the operator */
   from?: string;
   target: string;
@@ -56,8 +57,8 @@ test("reflect matches the cross-language conformance fixture", async () => {
   const fx = JSON.parse(await readFile(fixtureUrl, "utf8")) as Fixture;
   const k = buildKernel(fx);
   for (const c of fx.cases) {
-    const view = c.from !== undefined ? k.scopedFor(c.from, null) : k;
-    const got = (await view.send([{ target: c.target, payload: c.payload }]))[0]!.result;
+    const items = [{ target: c.target, payload: c.payload }];
+    const got = (await (c.from !== undefined ? sendAs(k, c.from, items) : k.send(items)))[0]!.result;
     assert.deepEqual(got, c.expect, `case: ${c.name}`);
   }
 });

@@ -9,7 +9,6 @@
 
 import type { Json, Payload } from "./json.ts";
 import { pyTruthy } from "./pyjson.ts";
-import type { Mark } from "./secret.ts";
 
 /**
  * The terminal states of ONE batch item (python's outcome vocabulary):
@@ -49,17 +48,6 @@ export interface Item {
   timeout?: number;
   /** Re-dispatch budget for a terminal failure under the SAME id. */
   retries?: number;
-  /**
-   * SECRET VALUES (`secret.ts`): marks, each a dotted string — `payload.<field…>`
-   * or `result[.<field…>]` — or an array of steps — `["payload", <step>, …]` or
-   * `["result", <step>…]`, a string step an object key taken literally, a
-   * non-negative integer step a list index; one list may mix both. The target
-   * gets the real payload and the caller the real reply; every record and mirror
-   * of the call shows `<secret>`. `payload.type` can never be hidden. A
-   * host-bound item's marks ride its call frame (and a host's call frame brings
-   * its own), so the receiving kernel masks too.
-   */
-  secret?: Mark[];
 }
 
 export interface Outcome {

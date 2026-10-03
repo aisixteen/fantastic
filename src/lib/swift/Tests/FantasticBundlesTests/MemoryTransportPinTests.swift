@@ -127,10 +127,10 @@ struct MemoryTransportPinTests {
     }
 
     /// THE FAR LEG SERVES (audit G-4): the memory pair carries a forward to a
-    /// SERVING leg on the far kernel, which gates it as python's `_serve_inbound_call`
-    /// does — its ingress rule, its peer pin, and the target judged against the
-    /// caller's `<guid>|<agent>`. Before, the swift memory transport dispatched on
-    /// the far kernel itself, as the operator: none of the three held.
+    /// SERVING leg on the far kernel, which gates it as python's
+    /// `_serve_inbound_call` does — its ingress rule, then the leg's OWN send: a
+    /// call a bridge leg serves is judged as THE LEG (its `can_call`, the target's
+    /// `callable_by`), never as the far caller and never as the operator.
     @Test(.timeLimit(.minutes(1)))
     func aServingLegGatesWhatCrossesTheMemoryPair() async throws {
         let (ka, wsA) = bridgeKernel(guid: "guid-a")
@@ -140,7 +140,6 @@ struct MemoryTransportPinTests {
             [
                 "type": "create_agent", "parent_id": "kernel_state",
                 "handler_module": "ws_bridge.tools", "id": "a_leg", "transport": "memory",
-                "peer_guid": "guid-b",
             ])["id"]
         #expect(aLeg == "a_leg")
         let bLeg = await op(
@@ -148,7 +147,7 @@ struct MemoryTransportPinTests {
             [
                 "type": "create_agent", "parent_id": "kernel_state",
                 "handler_module": "ws_bridge.tools", "id": "b_leg", "transport": "memory",
-                "peer_guid": "guid-a",
+                "can_call": ["$children": "*"],
             ])["id"]
         #expect(bLeg == "b_leg")
         let echo = await op(
@@ -175,31 +174,24 @@ struct MemoryTransportPinTests {
         #expect(sealed["error"] == "edge sealed by policy", "\(sealed.serialize())")
         #expect(sealed["reason"] == "unauthorized")
 
-        // 2. opened — the target judges the FOREIGN caller, never the leg
+        // 2. opened — the target judges THE LEG
         _ = await op(
             kb, "kernel",
             ["type": "update_agent", "id": "b_leg", "ingress_rule": "allow_all_ingress"])
-        let foreign = await forward()
+        let refused = await forward()
         #expect(
-            foreign["error"] == "echo does not accept 'ping' from guid-a|kernel",
-            "\(foreign.serialize())")
-        #expect(foreign["reason"] == "unauthorized")
+            refused["error"] == "echo does not accept 'ping' from b_leg",
+            "\(refused.serialize())")
+        #expect(refused["reason"] == "unauthorized")
 
-        // 3. pinned to ANOTHER kernel — a caller from guid-a is refused at the pin
+        // 3. `echo` accepting the leg: the call runs on kb
         _ = await op(
-            kb, "kernel", ["type": "update_agent", "id": "echo", "callable_by": ["guid-a|*": "*"]])
-        _ = await op(kb, "kernel", ["type": "update_agent", "id": "b_leg", "peer_guid": "guid-x"])
-        let pinned = await forward()
-        #expect(
-            pinned
-                == [
-                    "error": "bridge: caller 'guid-a|kernel' is not from the pinned peer 'guid-x'",
-                    "reason": "unauthorized",
-                ],
-            "\(pinned.serialize())")
-
-        // 4. pinned to guid-a, `echo` accepting `guid-a|*`: the call runs on kb
-        _ = await op(kb, "kernel", ["type": "update_agent", "id": "b_leg", "peer_guid": "guid-a"])
+            kb, "kernel", ["type": "update_agent", "id": "echo", "callable_by": ["b_leg": "*"]])
         #expect(await forward() == ["echoed": ["type": "ping"]])
+
+        // 4. the leg's own can_call bounds what its peer reaches
+        _ = await op(kb, "kernel", ["type": "update_agent", "id": "b_leg", "can_call": ["$self": "*"]])
+        let egress = await forward()
+        #expect(egress["side"] == "egress", "\(egress.serialize())")
     }
 }

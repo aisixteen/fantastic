@@ -1,7 +1,7 @@
 // ram_store under CONCURRENT callers — a swift-only test (python's store runs on
 // one asyncio thread and needs no lock; swift dispatches on a thread pool).
 //
-// Many agents append / read / search / share / unshare on ONE ram_store while
+// Many agents append / read / search on ONE ram_store while
 // the operator dumps it and the kernel's FLUSHER appends (and, over a small
 // `ledger_cap`, prunes) its execution rows into it. Every verb must see a
 // consistent table: no crash, every append lands exactly once, every writer
@@ -23,7 +23,7 @@ private func obj(_ pairs: OrderedDictionary<String, JSON>) -> JSON { .object(pai
 
 private func send(_ k: Kernel, _ payload: JSON, as sender: String?) async -> Outcome {
     let item = Item(AgentId("memory"), payload)
-    return await KernelTaskLocals.$currentSender.withValue(sender.map { AgentId($0) }) {
+    return await KernelTaskLocals.$sender.withValue(sender.map { AgentId($0) }) {
         await k.send([item])[0]
     }
 }
@@ -53,7 +53,6 @@ private func stressKernel() async -> Kernel {
             obj([
                 "type": .string("create_agent"), "parent_id": .string("kernel_state"),
                 "id": .string("memory"), "handler_module": .string("ram_store.tools"),
-                "operator": .bool(true), "admins": .array([.string("kernel")]),
                 "callable_by": .object(callableBy),
             ]))
     ])[0].result
@@ -69,13 +68,12 @@ private func stressKernel() async -> Kernel {
 @Suite("ram_store — concurrent callers on one store")
 struct RamStoreConcurrencyTests {
     @Test(.timeLimit(.minutes(2)))
-    func concurrentAppendReadSearchShareDumpAndFlush() async {
+    func concurrentAppendReadSearchDumpAndFlush() async {
         let k = await stressKernel()
         let failures = await withTaskGroup(of: [String].self, returning: [String].self) { group in
             for w in 0..<WRITERS {
                 group.addTask {
                     let me = "w\(w)"
-                    let peer = "w\((w + 1) % WRITERS)"
                     var bad: [String] = []
                     for i in 0..<ROUNDS {
                         let app = await send(
@@ -107,28 +105,6 @@ struct RamStoreConcurrencyTests {
                                 as: me)
                             if pyTruthy(s.result["error"]) {
                                 bad.append("\(me) search \(i): \(s.result.serialize())")
-                            }
-                        }
-                        if i % 6 == 0 {
-                            let sh = await send(
-                                k,
-                                obj([
-                                    "type": .string("share"), "with": .string(peer),
-                                    "scope": obj(["head_until": .integer(1_000_000_000)]),
-                                ]), as: me)
-                            guard let gid = sh.result["grant"].asInt else {
-                                bad.append("\(me) share \(i): \(sh.result.serialize())")
-                                continue
-                            }
-                            let gv = await send(
-                                k, obj(["type": .string("grants"), "side": .string("given")]), as: me)
-                            if pyTruthy(gv.result["error"]) {
-                                bad.append("\(me) grants \(i): \(gv.result.serialize())")
-                            }
-                            let un = await send(
-                                k, obj(["type": .string("unshare"), "grant": .integer(gid)]), as: me)
-                            if un.result["unshared"].asBool != true {
-                                bad.append("\(me) unshare \(i): \(un.result.serialize())")
                             }
                         }
                     }

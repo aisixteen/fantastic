@@ -26,7 +26,7 @@
 #![deny(missing_docs)]
 
 use async_trait::async_trait;
-use fantastic_ai_core::credentials::{key_reader, without_key, KeySource};
+use fantastic_ai_core::credentials::{key_reader, KeySource};
 use fantastic_ai_core::provider::{
     Provider, ProviderError, ProviderEvent, ProviderReport, ProviderStream, ReportCell,
     Unconfigured,
@@ -309,8 +309,7 @@ impl Provider for ResponsesProvider {
                 .unwrap_or("")
                 .to_string();
             let detail = match resp.bytes().await {
-                // an endpoint may echo the request: the key leaves scrubbed
-                Ok(b) => without_key(&String::from_utf8_lossy(&b), Some(&key)),
+                Ok(b) => String::from_utf8_lossy(&b).into_owned(),
                 Err(e) => return Err(ProviderError::raised(format!("http: {}", error_chain(&e)))),
             };
             if !(TRANSPORT_CODES.contains(&code)
@@ -336,7 +335,6 @@ impl Provider for ResponsesProvider {
             resp,
             Arc::clone(&self.report),
             max_tokens.is_some(),
-            Some(key),
         ))
     }
 }
@@ -358,13 +356,10 @@ struct SseState {
     /// A BOUNDED side call (`max_tokens` given): stopping at the bound is an
     /// ANSWER, not a fault — the caller reads `stop_reason`.
     bounded: bool,
-    /// The key this request sent — scrubbed out of an error event's text, which
-    /// an endpoint may build from the request (python `without_key`).
-    key: Option<String>,
 }
 
 impl SseState {
-    fn new(report: ReportCell, bounded: bool, key: Option<String>) -> Self {
+    fn new(report: ReportCell, bounded: bool) -> Self {
         Self {
             buf: Vec::new(),
             final_response: None,
@@ -373,7 +368,6 @@ impl SseState {
             wrap: fantastic_ai_core::think::ThinkWrap::new(),
             report,
             bounded,
-            key,
         }
     }
 
@@ -508,16 +502,10 @@ fn decode_sse_line(st: &mut SseState, line: &str) -> Result<Vec<ProviderEvent>, 
                 .and_then(|r| r.get("error"))
                 .cloned()
                 .unwrap_or(Value::Null);
-            return Err(format!(
-                "responses stream failed: {}",
-                without_key(&py_str(&err), st.key.as_deref())
-            ));
+            return Err(format!("responses stream failed: {}", py_str(&err)));
         }
         "error" => {
-            return Err(format!(
-                "responses stream error: {}",
-                without_key(&py_str(&obj), st.key.as_deref())
-            ));
+            return Err(format!("responses stream error: {}", py_str(&obj)));
         }
         _ => {} // created / in_progress / *.done / content_part.* — ignored
     }
@@ -550,16 +538,11 @@ fn wire_reply_line(st: &SseState) -> String {
 
 /// The SSE body as a LIVE stream of events — one per delta, the terminality
 /// verdict last, so a cut completion fails loudly instead of reading as finished.
-fn consume_sse(
-    resp: reqwest::Response,
-    report: ReportCell,
-    bounded: bool,
-    key: Option<String>,
-) -> ProviderStream {
+fn consume_sse(resp: reqwest::Response, report: ReportCell, bounded: bool) -> ProviderStream {
     let inner = resp.bytes_stream();
     let init = (
         inner,
-        SseState::new(report, bounded, key),
+        SseState::new(report, bounded),
         VecDeque::new(),
         false,
     );

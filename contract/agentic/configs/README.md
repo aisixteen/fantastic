@@ -115,8 +115,8 @@ passes ungated, proving nothing) and asserts what the caller actually got:
 - `allow: false` → `reason == "unauthorized"`, a non-empty `hint`, and — when
   declared — `side` must match. `side` is the evidence the gate is two-sided at
   all: `egress` means the send never left the sender, `ingress` means the callee
-  refused it, `self-grant` / `delegation` mean authority was flowing the wrong
-  way.
+  refused it, `mutator` means a tree mutator named an operand that is not the
+  sender's own child.
 
 ## The three hydration verdicts
 
@@ -200,9 +200,8 @@ against its spec in `../specs/`.
 | `owned_subtree_delete.yaml` | C17, C18 — a delete consumes one loader's roster and spares its neighbour; a refused one mutates nothing |
 | `lifecycle.yaml` | C14…C16 — cancel stops the work, terminal states absorb, four failure classes stay four shapes |
 | `namespacing.yaml` | C20 — a child's state belongs to its POSITION in the tree |
-| `subtree_grants.yaml` | SUB-1…SUB-6 — `$subtree:<X>` accepts X's live subtree at call time; a heritable `can_call` entry reaches for X's descendants, never X; only a holder confers one |
 | `exec_shell.yaml` | EXS-1…EXS-5 — a PTY `start` with no `command` runs the child's own `$SHELL` (autodiscovered from `inherit_env`/`env`, no fallback); the record's `shell` permits exactly `$SHELL` / `$SHELL -l` |
-| `credential_store.yaml` | CRED-1…CRED-5 — a value moves only under a secret mark; a ref answers only its grant; the host is the declaration's (`set` takes none) and a pinned host must match; forget drops the value and keeps the declaration, and `set` never declares a ref |
+| `credential_store.yaml` | CRED-1…CRED-5 — `set` stores a declared ref's value and `get` answers it; the call gate alone decides who reaches a ref; the host is the declaration's (`set` takes none) and a pinned host must match; forget drops the value and keeps the declaration, and `set` never declares a ref |
 
 `lifecycle.yaml` names one non-shipped bundle, `lifecycle_probe.tools`, which
 lives at `tests/agentic/lifecycle_probe/` and is registered UNLISTED by the

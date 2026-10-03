@@ -23,6 +23,14 @@
 //! - `boot`    → `{running, surfaces}`. Idempotent; a missing `port` RAISES.
 //! - `stop`    → `{stopped}`
 //! - `mount` / `unmount` → (re)mount one child's declared routes
+//! - `fetch_file` → one `read_stream` chunk of an agent's file, read AS THIS HOST
+//!   — the file route hands each browser fetch here
+//!
+//! IDENTITY: the HTTP server is the TRANSPORT — its request tasks run outside
+//! every dispatch, so a request is the operator. The file route never reads as
+//! anyone itself: it hands the fetch to this host (`fetch_file`), and the host
+//! reads as itself, gated as `web`. The call legs hand their frames to THEIR leg
+//! the same way (`fantastic_io_bridge::inbound`).
 
 #![deny(missing_docs)]
 
@@ -39,7 +47,7 @@ use axum::http::Request;
 use axum::response::Response;
 use fantastic_bundle::{py_int, py_repr_value, py_truthy};
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
-use fantastic_kernel::{AgentId, Item, Kernel, TaskId};
+use fantastic_kernel::{AgentId, Item, Kernel};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::future::Future;
@@ -105,29 +113,8 @@ mod once_cell_lock {
 pub(crate) struct AppState {
     /// Reference to the live kernel so handlers can `kernel.send(...)`.
     pub kernel: Arc<Kernel>,
-    /// This web agent's id — the sender the file proxy dispatches as.
+    /// This web agent's id — the host the file route hands each fetch to.
     pub web_agent_id: AgentId,
-    /// The kernel task the `boot` dispatch ran as. python creates the uvicorn
-    /// serve task INSIDE the boot dispatch, so every request handler inherits
-    /// its `CURRENT_TASK` contextvar and a REST-ingress dispatch is parented to
-    /// the boot pid (`web/tools.py:162`; measured python parent 7 vs rust null).
-    pub boot_task: Option<TaskId>,
-}
-
-impl AppState {
-    /// Run `work` AS THIS HOST under the boot dispatch's task — python
-    /// `_safe_serve` sets `_current_sender` to the host's own id explicitly
-    /// rather than inheriting it from whoever dispatched `boot` (audit d9), and
-    /// clears `_current_task` to the boot pid's scope. A request never calls as
-    /// the operator. The REST/WS/file-proxy routes re-scope to their own leg id
-    /// inside.
-    pub(crate) async fn scoped<F: Future>(&self, work: F) -> F::Output {
-        let work = fantastic_kernel::send::with_sender(self.web_agent_id.clone(), work);
-        match self.boot_task {
-            Some(t) => fantastic_kernel::CURRENT_TASK.scope(t, work).await,
-            None => work.await,
-        }
-    }
 }
 
 /// The HTTP host bundle.
@@ -141,6 +128,22 @@ impl Bundle for WebBundle {
 
     fn readme(&self) -> Option<&'static str> {
         Some(README)
+    }
+
+    /// `fetch_file` answers a raw chunk beside its JSON; every other verb is
+    /// [`Bundle::handle`]'s.
+    async fn handle_binary(
+        &self,
+        agent_id: &AgentId,
+        header: Value,
+        _body: Option<fantastic_kernel::Blob>,
+        kernel: &Arc<Kernel>,
+    ) -> Result<(Reply, Option<fantastic_kernel::Blob>), BundleError> {
+        if header.get("type").and_then(Value::as_str) == Some("fetch_file") {
+            let (v, body) = fetch_file_reply(&header, kernel).await;
+            return Ok((Some(v), body));
+        }
+        Ok((self.handle(agent_id, &header, kernel).await?, None))
     }
 
     async fn handle(
@@ -250,6 +253,7 @@ async fn reflect_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
             "stop": "No args. Asks uvicorn to shut down; cancels its task. Returns {stopped:bool}.",
             "mount": "args: child_id:str (req). Pulls `get_routes` from the named child and (re)mounts its routes onto the live app. Idempotent — unmounts any prior routes for the child first.",
             "unmount": "args: child_id:str (req). Removes every route belonging to the named child from the live app.",
+            "fetch_file": "args: agent_id:str (req), path:str (req), offset:int (req), length:int (req). One `read_stream` chunk of `path` on `agent_id`, read AS THIS HOST — the file route hands every browser fetch here, so the served agent's gates judge `web`. Returns that agent's reply.",
         }),
     );
     Value::Object(out)
@@ -269,8 +273,7 @@ fn browser_reachable(web_id: &AgentId, kernel: &Kernel) -> Vec<String> {
     let web_children: std::collections::HashSet<String> =
         web.child_ids().into_iter().map(|c| c.0).collect();
     let mut out: Vec<String> = Vec::new();
-    // Snapshot first: the gates below read `kernel.agents` again (the subtree and
-    // heritable walks), which must not happen under a live map iteration.
+    // Snapshot first: the gates below must not run under a live map iteration.
     let agents: Vec<Arc<fantastic_kernel::Agent>> = kernel
         .agents
         .iter()
@@ -302,14 +305,8 @@ fn browser_reachable(web_id: &AgentId, kernel: &Kernel) -> Vec<String> {
             web_id.as_str(),
             web.parent_id.as_ref().map(|p| p.0.as_str()),
             &web_children,
-            None,
-            true,
-            None,
         );
-        // the heritable half — an ancestor's `{aid: {verbs, for: descendants}}`
-        if !egress.allowed
-            && !kernel.heritable_egress(web_id.as_str(), "read_stream", agent.id.as_str())
-        {
+        if !egress.allowed {
             continue;
         }
         let children: std::collections::HashSet<String> =
@@ -321,9 +318,6 @@ fn browser_reachable(web_id: &AgentId, kernel: &Kernel) -> Vec<String> {
             agent.id.as_str(),
             agent.parent_id.as_ref().map(|p| p.0.as_str()),
             &children,
-            None,
-            true,
-            Some(&|o: &str, x: &str| kernel.in_subtree(o, x)),
         );
         if !ingress.allowed {
             continue;
@@ -355,9 +349,6 @@ fn leg_admits(meta: &Map<String, Value>, target: &str, verb: &str) -> bool {
 /// THEN start serving, then announce the URL to `cli`.
 async fn boot_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Result<Value, BundleError> {
     let already = SERVERS.lock().contains_key(agent_id);
-    // NOT the boot dispatch: it ends, and a request parented to it named a dead
-    // pid (python detaches its serve task the same way, 2026-09-20).
-    let boot_task: Option<fantastic_kernel::TaskId> = None;
     if !already {
         // python `_spawn`: a falsy `port` RAISES — no default, no fallback.
         let Some(port) = read_port(agent_id, kernel) else {
@@ -388,7 +379,6 @@ Set port on create_agent or via update_agent."
     let state = AppState {
         kernel: Arc::clone(kernel),
         web_agent_id: agent_id.clone(),
-        boot_task,
     };
     // Mount all child surfaces BEFORE the listener starts accepting.
     let children: Vec<AgentId> = kernel
@@ -482,6 +472,37 @@ async fn stop_reply(agent_id: &AgentId) -> Value {
 }
 
 /// python `_mount` — pull `get_routes` from the named child and (re)mount it.
+/// python `_fetch_file` — one `read_stream` chunk of `path` on `agent_id`, sent
+/// from this host's own dispatch, so the read is THE HOST's: the served agent's
+/// `callable_by` and its io leg judge `web`. The reply comes back whole, its raw
+/// chunk at its slot.
+async fn fetch_file_reply(
+    payload: &Value,
+    kernel: &Arc<Kernel>,
+) -> (Value, Option<fantastic_kernel::Blob>) {
+    let Some(agent_id) = payload
+        .get("agent_id")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    else {
+        return (json!({"error": "web.fetch_file: agent_id required"}), None);
+    };
+    let field = |k: &str| payload.get(k).cloned().unwrap_or(Value::Null);
+    let out = kernel
+        .send(vec![Item::new(
+            AgentId::from(agent_id),
+            json!({
+                "type": "read_stream",
+                "path": field("path"),
+                "offset": field("offset"),
+                "length": field("length"),
+            }),
+        )])
+        .await
+        .remove(0);
+    (out.result, out.body)
+}
+
 async fn mount_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
     let Some(child) = child_arg(payload) else {
         return json!({"error": "web.mount: child_id required"});

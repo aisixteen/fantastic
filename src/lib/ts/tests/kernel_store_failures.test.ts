@@ -84,7 +84,7 @@ async function warns(fn: () => Promise<unknown>): Promise<string[]> {
 
 // ── the flush ──────────────────────────────────────────────────────────
 
-test("a refused flush keeps every row in RAM, logs it, and the next flush lands them — never its own rows", async () => {
+test("a refused flush keeps every row in RAM, logs it, and the next flush lands them — the flush is bookkeeping, no call row", async () => {
   const { k, spy } = kernel();
   k.register(new Agent({ id: "probe", parentId: ROOT, handlerModule: "probe.ts" }));
   await started(k);
@@ -103,19 +103,15 @@ test("a refused flush keeps every row in RAM, logs it, and the next flush lands 
     lines[0],
   );
   for (const id of pending) assert.ok(k.store.rows.has(id), `row ${id} left RAM on a refused flush`);
-  // the refused flush's own call row is bookkeeping of the flush itself
-  const ownCall = [...k.store.rows.values()].find(
-    (r) => r.kind === "call" && r["agent"] === "memory" && (r["payload"] as Payload)["type"] === "append",
-  )!;
-  assert.ok(ownCall !== undefined);
+  // the kernel ran the store's `append` directly — not a send: no call row of its own
+  assert.deepEqual([...k.store.rows.keys()].sort((a, b) => a - b), pending);
   delete spy.reply["append"];
   const second = await k.store.flush();
   assert.equal(typeof second["flush"], "number");
   for (const id of pending) assert.equal(k.store.rows.has(id), false, `row ${id} stayed after the flush landed`);
   const landed = spy.appended[1]!.map((r) => r["id"]);
-  for (const id of pending) assert.ok(landed.includes(id), `row ${id} never reached the store`);
-  assert.equal(landed.includes(ownCall.id), false, "a flush re-recorded the refused flush's own call row");
-  assert.equal(k.store.rows.has(ownCall.id), false, "the refused flush's own call row lingers in RAM");
+  assert.deepEqual(landed.filter((i) => i !== second["flush"]), pending, "the flush wrote exactly the pending rows and its own flush row");
+  assert.equal(k.store.rows.size, 0);
   k.store.halt();
 });
 
@@ -263,7 +259,7 @@ test("kernel_start: an agent whose boot errs or throws is left out of `booted` a
   k.store.halt();
 });
 
-test("a final flush that raises is logged, and the stop still completes", async () => {
+test("a final flush whose prune cannot read the store is logged, and the stop still completes", async () => {
   const { k, spy } = kernel();
   k.register(new Agent({ id: "probe", parentId: ROOT, handlerModule: "probe.ts" }));
   await started(k);
@@ -274,9 +270,11 @@ test("a final flush that raises is logged, and the stop still completes", async 
   const lines = await warns(() => stopKernel(k));
   assert.equal(k.store.stopped, true);
   assert.equal(k.store.flusherTask, null);
-  const raised = lines.filter((l) => l.includes("final flush raised"));
-  assert.equal(raised.length, 1, JSON.stringify(lines));
-  assert.ok(raised[0]!.includes("final flush raised: kernel: memory store read failed: "), raised[0]);
+  // the prune never raises into the flush (python `prune_executions`)
+  const failed = lines.filter((l) => l.includes("prune of the kernel's store failed"));
+  assert.equal(failed.length, 1, JSON.stringify(lines));
+  assert.ok(failed[0]!.startsWith("  [kernel] prune of the kernel's store failed: kernel: memory store read failed: "), failed[0]);
+  assert.deepEqual(lines.filter((l) => l.includes("final flush raised")), []);
   // stopped: a second stop is a no-op, and logs nothing
   assert.deepEqual(await warns(() => stopKernel(k)), []);
 });

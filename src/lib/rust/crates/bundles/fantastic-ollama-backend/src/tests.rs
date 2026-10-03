@@ -479,9 +479,12 @@ async fn history_persists_and_round_trips() {
 
     // The turns live in the agent's MEMORY STORE (`memory_store_id`) — agent id
     // IS conversation id; the kernel keeps no conversation.
-    let rows = fantastic_ai_core::memory::load_history(&backend, &kernel, true)
-        .await
-        .expect("store read");
+    let rows = fantastic_kernel::test_support::as_agent(
+        backend.clone(),
+        fantastic_ai_core::memory::load_history(&backend, &kernel, true),
+    )
+    .await
+    .expect("store read");
     assert_eq!(rows.len(), 2, "one row per message: {rows:#?}");
     assert_eq!(rows[0]["content"], "ping");
     assert_eq!(rows[1]["content"], "ack");

@@ -31,7 +31,6 @@
 //! INBOUND check lives in [`crate::verbs::send`], before the lock.
 
 use crate::constants::MAX_SILENT_TURNS;
-use crate::credentials::{secret_holder_refusal, secret_join_refusal};
 use crate::events::emit_status;
 use crate::helpers::mint_batch_token;
 use crate::history_view::REFLECT_NUDGE;
@@ -470,7 +469,9 @@ written out. If the task is unfinished, emit that call now. If it is finished, e
 the chain explicitly: <call name=\"done\"></call>";
 
 /// Honour where this pass's output goes — the DETACHED routing task. The
-/// model's calls are the agent's calls (gated via `with_sender`); `incoming`
+/// model's calls are the agent's calls: the task is one the agent's own
+/// dispatch spawned (`Kernel::spawn_task`), so every send in it is the agent's
+/// and is gated as the agent; `incoming`
 /// is the text this turn answered, which decides whether a silent chain turn
 /// earns the one no-call nudge.
 ///
@@ -495,30 +496,24 @@ pub async fn route_reply(
     message_id: Option<i64>,
     dead_turn: bool,
 ) {
-    // THE MODEL'S CALLS ARE THE AGENT'S CALLS — gated. This task is spawned
-    // detached, and a tokio spawn does NOT inherit the task-local sender
-    // (python's create_task copies contextvars, which is why python was gated
-    // and rust was not — measured 2026-09-01, E53_grant: a verb-scoped wall
-    // held on python/swift and was silently bypassed here). Re-enter the
-    // sender scope for the WHOLE routing pass: dispatches, the binary
-    // carrier, and reply deliveries all attribute to the AI agent.
-    let sid = self_id.clone();
-    fantastic_kernel::send::with_sender(sid, async move {
-        route_reply_gated(
-            self_id,
-            kernel,
-            text,
-            client_id,
-            send_to,
-            system_prompt,
-            incoming,
-            send_timeout,
-            model_window,
-            message_id,
-            dead_turn,
-        )
-        .await
-    })
+    // THE MODEL'S CALLS ARE THE AGENT'S CALLS — gated. The routing task is
+    // spawned by the agent's own dispatch through `Kernel::spawn_task`, which
+    // carries the dispatch identity into it (a bare tokio spawn would not —
+    // measured 2026-09-01, E53_grant): dispatches, the binary carrier, and reply
+    // deliveries all attribute to the AI agent.
+    route_reply_gated(
+        self_id,
+        kernel,
+        text,
+        client_id,
+        send_to,
+        system_prompt,
+        incoming,
+        send_timeout,
+        model_window,
+        message_id,
+        dead_turn,
+    )
     .await
 }
 
@@ -680,47 +675,6 @@ async fn route_reply_gated(
             }
             continue;
         };
-        // A MODEL NEVER REACHES A SECRET HOLDER (owner, 2026-10-02). This loop is
-        // the one place a model-parsed call becomes a dispatch — one call, a
-        // batch, a `to` fan-out (already one call per recipient here), a call
-        // beside `await` — so the refusal lives here and nowhere else. The
-        // target AND the `reply_to` are checked, each resolved as the kernel
-        // resolves it (`<this kernel's guid>|<holder>` IS the holder): a
-        // delivery to a holder is a dispatch on the model's behalf too. Refused
-        // calls are not dispatched and not counted in flight; the refusal always
-        // goes to SELF, so the model reads it whatever `reply_to` said. The
-        // backend's own key read (`credentials::KeyReader`) never passes through
-        // here.
-        let held = secret_holder_refusal(&kernel, target)
-            .or_else(|| {
-                reply_to
-                    .as_deref()
-                    .and_then(|rt| secret_holder_refusal(&kernel, rt))
-            })
-            // Nor does it JOIN an execution that carried secrets (audit F2): a
-            // join hands back that execution's outcome, so `<exec_id>` = the
-            // backend's own key read was the key — even from a store on a
-            // connected peer, which the holder check above cannot see.
-            .or_else(|| {
-                args.get("exec_id")
-                    .and_then(|id| secret_join_refusal(&kernel, id))
-            });
-        if let Some(held) = held {
-            // python `payload.get("type", "?") if isinstance(payload, dict) else "-"`
-            let verb = match args.get("payload") {
-                Some(Value::Object(p)) => p.get("type").map_or_else(|| "?".to_string(), py_str),
-                _ => "-".to_string(),
-            };
-            units.push(Unit {
-                dest: self_id.as_str().to_string(),
-                target: target.to_string(),
-                verb,
-                idx: None,
-                body: Some(crate::tool_parse::render_reply(&held)),
-                title: None,
-            });
-            continue;
-        }
         // AN EMPTY PAYLOAD IS NO PAYLOAD. The grammar always produces the key
         // (every child that is not routing IS the payload), so `{}` is exactly
         // what a send with no verb looks like — and dispatching it reaches the
@@ -857,22 +811,7 @@ async fn route_reply_gated(
     // model: "the reply queue is running ahead of me", then re-polled forever).
     // The PID is the same id `ps`/`cancel` use, so a reply names a row the
     // model can act on.
-    // THE GRANTS CACHE IS WRITE-THROUGH: a share/unshare this turn made on its own
-    // store changes who may read row bodies — reload before the next row event.
     let meta = crate::helpers::agent_meta(&self_id, &kernel);
-    let own_store = meta.get("memory_store_id").and_then(Value::as_str);
-    if payloads.iter().any(|(t, p)| {
-        Some(t.as_str()) == own_store
-            && matches!(
-                p.get("type").and_then(Value::as_str),
-                Some("share" | "unshare")
-            )
-    }) {
-        crate::memory::forget_grants(&self_id, &kernel);
-        // the next body event simply carries none if the store refuses — no grant
-        // is assumed
-        let _ = crate::memory::my_grants(&self_id, &kernel).await;
-    }
     let cap = crate::context::inline_cap(&meta, model_window);
     let blocks: Vec<Block> = units
         .into_iter()

@@ -11,8 +11,11 @@ from __future__ import annotations
 
 import types
 
-from kernel import Kernel, register_unlisted, sender_context
+from kernel import Kernel, register_unlisted
+
+from _testkit import as_agent
 from kernel._bundles import import_handler
+from _testkit import wire
 
 
 def _plant(tmp_path, monkeypatch, name: str):
@@ -36,8 +39,9 @@ async def test_a_module_on_sys_path_outside_the_catalog_never_runs(
     seeded_kernel, tmp_path, monkeypatch
 ):
     marker = _plant(tmp_path, monkeypatch, "arch21_sidefx")
-    seeded_kernel.create(None, id="arch21_maker")  # the structural baseline only
-    with sender_context("arch21_maker"):
+    seeded_kernel.create(None, id="arch21_maker")
+    wire(seeded_kernel, "arch21_maker", "kernel_state", ["create_agent"])
+    with as_agent(seeded_kernel, "arch21_maker"):
         made = await _one(
             seeded_kernel,
             "kernel",

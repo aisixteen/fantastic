@@ -261,20 +261,16 @@ pub async fn serve(
                     None => json!({}),
                 };
                 // RELAYED UNTOUCHED, as python's `_serve_ctrl` relays it: one
-                // `kernel.send([{target, payload, secret?}])`, no tag added, nothing
-                // refused here — the kernel's gate is the only judge.
+                // `kernel.send([{target, payload}])`, no tag added, nothing refused
+                // here — the kernel's gate is the only judge. This loop is a task
+                // the runner's own `start` spawned, so the send is THE RUNNER'S:
+                // gated as the runner.
                 // A kind-B frame (bytes alongside, `_binary_path` = `["payload", …]`)
                 // carries a request body: the SAME batch item on the binary
                 // channel, so it gets its pid, rows, `ps` row and deadline like any
                 // other call. Rust's `Value` cannot carry bytes, so the body rides
                 // beside the payload, at its path there.
                 let mut item = Item::new(AgentId::from(target), payload);
-                if let Some(marks) = m.get("secret") {
-                    // The program's SECRET marks ride onto the item as sent; the
-                    // kernel validates them (a bad mark is a refusal in the reply)
-                    // and masks every record of the call.
-                    item = item.with_secret(marks.clone());
-                }
                 if let Some(b) = payload_body(framed) {
                     item = item.with_binary(b.path, b.bytes);
                 }

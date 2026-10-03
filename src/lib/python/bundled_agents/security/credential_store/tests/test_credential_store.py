@@ -1,5 +1,5 @@
-"""credential_store: secrets by ref, bound to a host, read only with a secret mark,
-behind per-ref grants (owner, 2026-10-01). Tests never touch the real keychain or
+"""credential_store: secrets by ref, bound to a host, read by whoever the call gate
+admits (owner, 2026-10-01). Tests never touch the real keychain or
 home: the file backend writes under tmp_path, the keychain backend runs on an
 in-memory keyring."""
 
@@ -13,21 +13,17 @@ import keyring
 import pytest
 from keyring.backend import KeyringBackend
 
-from kernel import sender_context
+from _testkit import as_agent
 
 KEY = "sk-live-0123456789abcdef"
 KEY2 = "sk-live-rotated-fedcba98"
-MARK_SET = ["payload.fields"]
-MARK_GET = ["result"]
 
 
-async def _call(k, payload, *, as_=None, secret=None, target="creds"):
+async def _call(k, payload, *, as_=None, target="creds"):
     item = {"target": target, "payload": payload}
-    if secret is not None:
-        item["secret"] = secret
     if as_ is None:
         return (await k.send([item]))[0]
-    with sender_context(as_):
+    with as_agent(k, as_):
         return (await k.send([item]))[0]
 
 
@@ -72,8 +68,6 @@ async def _seed(k):
         {
             "openai/main": {
                 "host": "api.openai.com",
-                "readers": ["alice"],
-                "writers": ["bob"],
             }
         },
     )
@@ -84,7 +78,6 @@ async def _seed(k):
             "ref": "openai/main",
             "fields": {"api_key": KEY},
         },
-        secret=MARK_SET,
     )
     assert out["status"] == "completed", out
     return out
@@ -113,122 +106,32 @@ async def test_set_stores_the_value_0600_and_the_record_keeps_only_metadata(
     assert rec["refs"]["openai/main"]["fields"] == ["api_key"]
 
 
-async def test_values_move_only_with_a_secret_mark(seeded_kernel, tmp_path):
-    k = _mk(seeded_kernel, tmp_path)
-    unmarked = await _call(k, {"type": "set", "ref": "r", "fields": {"api_key": KEY}})
-    assert unmarked["result"]["reason"] == "bad_arg"
-    assert unmarked["result"]["arg"] == "secret"
-    assert not (tmp_path / "creds.yaml").exists(), "an unmarked set stores nothing"
-    await _seed(k)
-    unmarked_get = await _call(k, {"type": "get", "ref": "openai/main"})
-    assert unmarked_get["result"]["arg"] == "secret", unmarked_get
-    got = await _call(k, {"type": "get", "ref": "openai/main"}, secret=MARK_GET)
-    assert got["result"] == {
-        "ref": "openai/main",
-        "host": "api.openai.com",
-        "fields": {"api_key": KEY},
-    }
-    ledger = (await k.send([{"target": "kernel", "payload": {"type": "ledger"}}]))[0]
-    assert KEY not in repr(ledger), "the ledger must never hold the value"
-
-
-async def test_either_spelling_of_a_mark_counts(seeded_kernel, tmp_path):
-    """A mark may be a dotted string or an array of steps (`kernel/_secret`): the
-    store accepts either, alone or mixed. A field name holding a dot is named only
-    by an array — `result.fields.x.y` is `x` → `y`, which would not mask it."""
-    k = _mk(seeded_kernel, tmp_path)
-    await _declare(k, {"r1": {"host": "h"}, "r2": {"host": "h"}})
-    put = await _call(
-        k,
-        {"type": "set", "ref": "r1", "fields": {"api_key": KEY}},
-        secret=[["payload", "fields"]],
-    )
-    assert put["status"] == "completed", put
-    put = await _call(
-        k,
-        {
-            "type": "set",
-            "ref": "r2",
-            "fields": {"api_key": KEY, "x.y": KEY2},
-        },
-        secret=["payload.fields.api_key", ["payload", "fields", "x.y"]],
-    )
-    assert put["status"] == "completed", put
-    got = await _call(k, {"type": "get", "ref": "r1"}, secret=[["result"]])
-    assert got["result"]["fields"] == {"api_key": KEY}, got
-    got = await _call(
-        k,
-        {"type": "get", "ref": "r2"},
-        secret=[["result", "fields", "api_key"], ["result", "fields", "x.y"]],
-    )
-    assert got["result"]["fields"] == {"api_key": KEY, "x.y": KEY2}, got
-    # the dotted spelling of the dotted field name names `x` → `y`: refused
-    bare = await _call(
-        k,
-        {"type": "get", "ref": "r2"},
-        secret=["result.fields.api_key", "result.fields.x.y"],
-    )
-    assert (bare["result"]["reason"], bare["result"]["arg"]) == ("bad_arg", "secret")
-    ledger = (await k.send([{"target": "kernel", "payload": {"type": "ledger"}}]))[0]
-    assert KEY not in repr(ledger) and KEY2 not in repr(ledger), ledger
-
-
-async def test_readers_read_writers_rotate_strangers_see_nothing(
+async def test_any_admitted_caller_reads_and_rotates_a_stranger_is_gated(
     seeded_kernel, tmp_path
 ):
+    """No per-ref access lists: whoever the call gate admits may `get`/`set` a
+    declared ref; a caller the store's `callable_by` does not name never reaches
+    the handler."""
     k = _mk(seeded_kernel, tmp_path)
     await _seed(k)
-    # a reader reads
-    a = await _call(
-        k, {"type": "get", "ref": "openai/main"}, as_="alice", secret=MARK_GET
-    )
+    a = await _call(k, {"type": "get", "ref": "openai/main"}, as_="alice")
     assert a["result"]["fields"] == {"api_key": KEY}, a
-    # a reader may not write — told so, since it knows the ref
-    w = await _call(
-        k,
-        {
-            "type": "set",
-            "ref": "openai/main",
-            "fields": {"api_key": KEY2},
-        },
-        as_="alice",
-        secret=MARK_SET,
-    )
-    assert w["result"]["reason"] == "unauthorized", w
-    # a writer rotates; the reader's next read gets the new value
     r = await _call(
         k,
-        {
-            "type": "set",
-            "ref": "openai/main",
-            "fields": {"api_key": KEY2},
-        },
-        as_="bob",
-        secret=MARK_SET,
+        {"type": "set", "ref": "openai/main", "fields": {"api_key": KEY2}},
+        as_="alice",
     )
     assert r["result"]["stored"] is True, r
-    a2 = await _call(
-        k, {"type": "get", "ref": "openai/main"}, as_="alice", secret=MARK_GET
-    )
-    assert a2["result"]["fields"] == {"api_key": KEY2}
-    # a stranger is answered as if the ref did not exist
-    e = await _call(
-        k, {"type": "get", "ref": "openai/main"}, as_="eve", secret=MARK_GET
-    )
-    assert (
-        e["result"]["reason"] == "not_found" and "no such ref" in e["result"]["error"]
-    )
-    assert (await _call(k, {"type": "list"}, as_="eve"))["result"] == {"refs": []}
+    b = await _call(k, {"type": "get", "ref": "openai/main"}, as_="bob")
+    assert b["result"]["fields"] == {"api_key": KEY2}, b
+    k.create(None, id="mallory", can_call={"creds": "*"})
+    m = await _call(k, {"type": "get", "ref": "openai/main"}, as_="mallory")
+    assert m["result"]["reason"] == "unauthorized", m
+    assert m["result"]["side"] == "ingress", m
     # list is metadata only
     listed = (await _call(k, {"type": "list"}, as_="alice"))["result"]["refs"]
     assert listed == [
-        {
-            "ref": "openai/main",
-            "host": "api.openai.com",
-            "fields": ["api_key"],
-            "read": True,
-            "write": False,
-        }
+        {"ref": "openai/main", "host": "api.openai.com", "fields": ["api_key"]}
     ]
     assert KEY2 not in repr(listed)
 
@@ -242,7 +145,7 @@ async def test_set_never_creates_a_ref_update_agent_declares_it(
     k = _mk(seeded_kernel, tmp_path)
     put = {"type": "set", "ref": "mine", "fields": {"token": KEY}}
     for who in (None, "maker"):
-        nope = await _call(k, put, as_=who, secret=MARK_SET)
+        nope = await _call(k, put, as_=who)
         assert nope["result"] == {
             "error": "credential_store: no such ref 'mine'",
             "reason": "not_found",
@@ -250,33 +153,13 @@ async def test_set_never_creates_a_ref_update_agent_declares_it(
         }, (who, nope)
     assert "mine" not in (k.ctx.agents["creds"].record.get("refs") or {})
     assert not (tmp_path / "creds.yaml").exists(), "an undeclared set stores nothing"
-    await _declare(
-        k, {"mine": {"host": "x.example", "readers": ["maker"], "writers": ["maker"]}}
-    )
-    made = await _call(k, put, as_="maker", secret=MARK_SET)
+    await _declare(k, {"mine": {"host": "x.example"}})
+    made = await _call(k, put, as_="maker")
     assert made["result"]["stored"] is True, made
-    got = await _call(k, {"type": "get", "ref": "mine"}, as_="maker", secret=MARK_GET)
+    got = await _call(k, {"type": "get", "ref": "mine"}, as_="maker")
     assert got["result"]["fields"] == {"token": KEY}, got
-    # the grants the declaration named are the grants it keeps
-    entry = k.ctx.agents["creds"].record["refs"]["mine"]
-    assert entry["readers"] == ["maker"] and entry["writers"] == ["maker"], entry
-    nope = await _call(k, {**put, "ref": "theirs"}, as_="eve", secret=MARK_SET)
+    nope = await _call(k, {**put, "ref": "theirs"}, as_="eve")
     assert nope["result"]["reason"] == "not_found", nope
-
-
-async def test_a_subtree_grant_covers_descendants(seeded_kernel, tmp_path):
-    k = _mk(seeded_kernel, tmp_path)
-    await _seed(k)
-    k.ctx.agents["alice"].create(None, id="child", can_call={"creds": "*"})
-    cb = dict(k.ctx.agents["creds"].record["callable_by"])
-    cb["child"] = "*"
-    refs = k.ctx.agents["creds"].record["refs"]
-    refs["openai/main"]["readers"] = ["$subtree:alice"]
-    k.ctx.update("creds", refs=refs, callable_by=cb)
-    got = await _call(
-        k, {"type": "get", "ref": "openai/main"}, as_="child", secret=MARK_GET
-    )
-    assert got["result"]["fields"] == {"api_key": KEY}, got
 
 
 async def test_set_takes_no_host_the_declaration_is_the_binding(
@@ -298,7 +181,6 @@ async def test_set_takes_no_host_the_declaration_is_the_binding(
             "fields": {"api_key": KEY2},
         },
         as_="bob",
-        secret=MARK_SET,
     )
     assert rebind["result"] == {
         "error": "credential_store set: takes no host — a ref's host is its "
@@ -318,7 +200,6 @@ async def test_set_takes_no_host_the_declaration_is_the_binding(
             "host": "api.openai.com",
             "fields": {"api_key": KEY2},
         },
-        secret=MARK_SET,
     )
     assert op["result"]["arg"] == "host", op
     # a set with no host stores the value under the declared host
@@ -326,7 +207,6 @@ async def test_set_takes_no_host_the_declaration_is_the_binding(
         k,
         {"type": "set", "ref": "openai/main", "fields": {"api_key": KEY2}},
         as_="bob",
-        secret=MARK_SET,
     )
     assert ok["result"] == {
         "ref": "openai/main",
@@ -338,7 +218,6 @@ async def test_set_takes_no_host_the_declaration_is_the_binding(
         k,
         {"type": "get", "ref": "openai/main", "host": "https://api.openai.com/v1"},
         as_="alice",
-        secret=MARK_GET,
     )
     assert got["result"]["fields"] == {"api_key": KEY2}, got
 
@@ -355,7 +234,7 @@ async def test_a_ref_is_declared_with_its_host(seeded_kernel, tmp_path):
                     "payload": {
                         "type": "update_agent",
                         "id": "creds",
-                        "refs": {"nohost": {"readers": ["alice"]}},
+                        "refs": {"nohost": {}},
                     },
                 }
             ]
@@ -373,9 +252,9 @@ async def test_forget_drops_the_value_and_keeps_the_declaration(
     seeded_kernel, tmp_path
 ):
     """AV-5 (audit 2026-10-03): `forget` drops the VALUE — from the backend, with
-    its field names — and nothing else. The declaration (host, readers, writers)
-    is the operator's, written and removed by `update_agent` alone, so a writer
-    can no longer undeclare a ref nobody could then set again."""
+    its field names — and nothing else. The declaration (host) is written and
+    removed by `update_agent` alone, so a caller can never undeclare a ref nobody
+    could then set again."""
     k = _mk(seeded_kernel, tmp_path)
     await _seed(k)
     declared = dict(k.ctx.agents["creds"].record["refs"]["openai/main"])
@@ -383,15 +262,9 @@ async def test_forget_drops_the_value_and_keeps_the_declaration(
     assert out["result"] == {"forgotten": True, "ref": "openai/main"}
     assert KEY not in (tmp_path / "creds.yaml").read_text()
     entry = k.ctx.agents["creds"].record["refs"]["openai/main"]
-    assert entry == {
-        "host": declared["host"],
-        "readers": declared["readers"],
-        "writers": declared["writers"],
-    }, entry
+    assert entry == {"host": declared["host"]}, entry
     # a reader now finds the ref declared and empty
-    empty = await _call(
-        k, {"type": "get", "ref": "openai/main"}, as_="alice", secret=MARK_GET
-    )
+    empty = await _call(k, {"type": "get", "ref": "openai/main"}, as_="alice")
     assert empty["result"] == {
         "error": "credential_store: ref 'openai/main' has no value in the backend",
         "reason": "not_found",
@@ -402,15 +275,12 @@ async def test_forget_drops_the_value_and_keeps_the_declaration(
         k,
         {"type": "set", "ref": "openai/main", "fields": {"api_key": KEY2}},
         as_="bob",
-        secret=MARK_SET,
     )
     assert back["result"]["stored"] is True, back
-    got = await _call(
-        k, {"type": "get", "ref": "openai/main"}, as_="alice", secret=MARK_GET
-    )
+    got = await _call(k, {"type": "get", "ref": "openai/main"}, as_="alice")
     assert got["result"]["fields"] == {"api_key": KEY2}, got
-    # a stranger still sees no ref; undeclaring is update_agent's alone
-    nope = await _call(k, {"type": "forget", "ref": "openai/main"}, as_="eve")
+    # an undeclared ref is not found; undeclaring is update_agent's alone
+    nope = await _call(k, {"type": "forget", "ref": "never/declared"}, as_="eve")
     assert nope["result"]["reason"] == "not_found", nope
 
 
@@ -446,14 +316,14 @@ async def test_the_file_is_judged_on_the_one_open_it_is_read_from(
         return st
 
     monkeypatch.setattr(fs, "lstat", lstat_then_swap, raising=False)
-    got = await _call(k, {"type": "get", "ref": "openai/main"}, secret=MARK_GET)
+    got = await _call(k, {"type": "get", "ref": "openai/main"})
     assert "sk-PLANTED" not in repr(got), got
     # a symlink in the leaf's place is refused outright, nothing read
     monkeypatch.undo()
     if not leaf.is_symlink():
         leaf.unlink()
         leaf.symlink_to(planted)
-    out = await _call(k, {"type": "get", "ref": "openai/main"}, secret=MARK_GET)
+    out = await _call(k, {"type": "get", "ref": "openai/main"})
     assert out["status"] == "failed", out
     assert (
         "must be a regular file owned by this user with mode 0600"
@@ -485,7 +355,7 @@ async def test_a_file_others_can_read_is_refused_loud(seeded_kernel, tmp_path):
     k = _mk(seeded_kernel, tmp_path)
     await _seed(k)
     os.chmod(tmp_path / "creds.yaml", 0o644)
-    out = await _call(k, {"type": "get", "ref": "openai/main"}, secret=MARK_GET)
+    out = await _call(k, {"type": "get", "ref": "openai/main"})
     assert out["status"] == "failed", out
     assert "mode 0600" in out["result"]["error"] and "0o644" in out["result"]["error"]
 
@@ -535,7 +405,7 @@ async def test_the_keychain_backend_keeps_one_item_per_ref(
         "fields": {"api_key": KEY},
     }
     assert not (tmp_path / "creds.yaml").exists(), "no file is written"
-    got = await _call(k, {"type": "get", "ref": "openai/main"}, secret=MARK_GET)
+    got = await _call(k, {"type": "get", "ref": "openai/main"})
     assert got["result"]["fields"] == {"api_key": KEY}
     await _call(k, {"type": "forget", "ref": "openai/main"})
     assert mem_keyring.items == {}
@@ -553,14 +423,13 @@ async def test_the_env_backend_reads_named_variables_and_refuses_writes(
         backend="env",
         refs={
             "ci/key": {
-                "readers": ["alice"],
                 "host": "api.example",
                 "env": {"api_key": "CI_TEST_KEY"},
             }
         },
     )
     monkeypatch.setenv("CI_TEST_KEY", KEY)
-    got = await _call(k, {"type": "get", "ref": "ci/key"}, as_="alice", secret=MARK_GET)
+    got = await _call(k, {"type": "get", "ref": "ci/key"}, as_="alice")
     assert got["result"] == {
         "ref": "ci/key",
         "host": "api.example",
@@ -573,83 +442,13 @@ async def test_the_env_backend_reads_named_variables_and_refuses_writes(
             "ref": "ci/key",
             "fields": {"api_key": KEY2},
         },
-        secret=MARK_SET,
     )
     assert w["result"]["arg"] == "backend", w
     monkeypatch.delenv("CI_TEST_KEY")
-    gone = await _call(
-        k, {"type": "get", "ref": "ci/key"}, as_="alice", secret=MARK_GET
-    )
+    gone = await _call(k, {"type": "get", "ref": "ci/key"}, as_="alice")
     assert gone["status"] == "failed" and "$CI_TEST_KEY" in gone["result"]["error"], (
         gone
     )
-
-
-async def test_per_field_marks_must_cover_every_returned_field(
-    seeded_kernel, tmp_path, monkeypatch
-):
-    """Audit BV-6/S4: the marks are judged against the fields the backend RETURNS,
-    not the declared names. An `env` map wider than `fields`, or a value set
-    before a narrower re-declaration, returns a field no per-field mark covered —
-    refused, and nothing recorded holds either value."""
-    k = _mk(
-        seeded_kernel,
-        tmp_path,
-        backend="env",
-        refs={
-            "ci/key": {
-                "readers": ["alice"],
-                "host": "api.example",
-                "fields": ["api_key"],
-                "env": {"api_key": "CI_TEST_KEY", "extra": "CI_TEST_EXTRA"},
-            }
-        },
-    )
-    monkeypatch.setenv("CI_TEST_KEY", KEY)
-    monkeypatch.setenv("CI_TEST_EXTRA", KEY2)
-    one = await _call(
-        k,
-        {"type": "get", "ref": "ci/key"},
-        as_="alice",
-        secret=["result.fields.api_key"],
-    )
-    assert (one["result"]["reason"], one["result"]["arg"]) == ("bad_arg", "secret")
-    both = await _call(
-        k,
-        {"type": "get", "ref": "ci/key"},
-        as_="alice",
-        secret=["result.fields.api_key", "result.fields.extra"],
-    )
-    assert both["result"]["fields"] == {"api_key": KEY, "extra": KEY2}, both
-    await k.ctx.flush_executions()
-    ledger = (await k.send([{"target": "kernel", "payload": {"type": "ledger"}}]))[0]
-    assert KEY not in repr(ledger) and KEY2 not in repr(ledger), ledger
-
-
-async def test_per_field_marks_after_a_narrower_redeclaration(seeded_kernel, tmp_path):
-    """The file variant of BV-6: a writer stored {api_key, extra}; the operator then
-    re-declared the ref with fields [api_key]. A get marking only api_key is
-    refused — `extra` is still returned by the backend."""
-    k = _mk(seeded_kernel, tmp_path)
-    await _declare(k, {"r": {"host": "h", "readers": ["alice"]}})
-    put = await _call(
-        k,
-        {"type": "set", "ref": "r", "fields": {"api_key": KEY, "extra": KEY2}},
-        secret=MARK_SET,
-    )
-    assert put["status"] == "completed", put
-    entry = dict(k.ctx.agents["creds"].record["refs"]["r"])
-    await _declare(k, {"r": {**entry, "fields": ["api_key"]}})
-    one = await _call(
-        k,
-        {"type": "get", "ref": "r"},
-        as_="alice",
-        secret=["result.fields.api_key"],
-    )
-    assert (one["result"]["reason"], one["result"]["arg"]) == ("bad_arg", "secret")
-    await k.ctx.flush_executions()
-    ledger = (await k.send([{"target": "kernel", "payload": {"type": "ledger"}}]))[0]
-    assert KEY not in repr(ledger) and KEY2 not in repr(ledger), ledger
 
 
 async def test_a_bad_record_is_refused_at_the_write(seeded_kernel, tmp_path):
@@ -734,7 +533,6 @@ async def test_the_file_is_an_absolute_path_a_relative_one_is_refused(
     out = await _call(
         k,
         {"type": "set", "ref": "r", "fields": {"api_key": KEY}},
-        secret=MARK_SET,
         target="sneaky",
     )
     assert out["status"] == "failed", out
@@ -742,71 +540,6 @@ async def test_the_file_is_an_absolute_path_a_relative_one_is_refused(
         f"credential_store: {_relative('creds.yaml')}"
     ), out
     assert not (k.ctx.workdir / "creds.yaml").exists()
-
-
-HOLDS = "holds_secrets must be true — a credential_store always holds secrets"
-
-
-def _shape(got: str) -> str:
-    """The KERNEL's shape refusal — judged before the store's `validate_meta`."""
-    return (
-        "holds_secrets must be exactly true (this agent holds secrets) or null "
-        f"(the operator clears the mark) — got {got}"
-    )
-
-
-async def test_a_store_is_a_secret_holder_and_cannot_stop_being_one(
-    seeded_kernel, tmp_path
-):
-    """The store stamps `holds_secrets: true` on its own record at boot (ai_core
-    refuses every model-parsed call to an agent so marked), shows it on reflect,
-    and refuses any other value at the write — create and update alike.
-
-    Two checks judge the value, in a FIXED order: the kernel's shape check first
-    (anything but `true`/`null` is malformed on every agent — its text), then the
-    store's `validate_meta` (it refuses `null`, the operator's clear, on itself —
-    the store's text). So `null` gets HOLDS and every other value the kernel's."""
-    k = seeded_kernel
-
-    async def op(payload):
-        return (await k.send([{"target": "kernel", "payload": payload}]))[0]["result"]
-
-    made = await op(
-        {
-            "type": "create_agent",
-            "parent_id": k.id,
-            "handler_module": "credential_store.tools",
-            "id": "creds",
-            "file": str(tmp_path / "creds.yaml"),
-        }
-    )
-    assert made.get("id") == "creds", made
-    assert k.get("creds")["holds_secrets"] is True
-    shown = (await k.send([{"target": "creds", "payload": {"type": "reflect"}}]))[0]
-    assert shown["result"]["holds_secrets"] is True, shown
-    for bad, why in (
-        (None, HOLDS),
-        (False, _shape("bool")),
-        ("true", _shape("str")),
-        (1, _shape("int")),
-    ):
-        r = await op({"type": "update_agent", "id": "creds", "holds_secrets": bad})
-        assert r == {"error": why, "reason": "invalid_meta", "id": "creds"}, r
-    assert k.get("creds")["holds_secrets"] is True
-    ok = await op({"type": "update_agent", "id": "creds", "holds_secrets": True})
-    assert ok.get("updated") is True, ok
-    for bad, why in ((None, HOLDS), (False, _shape("bool"))):
-        r = await op(
-            {
-                "type": "create_agent",
-                "parent_id": k.id,
-                "handler_module": "credential_store.tools",
-                "id": "creds2",
-                "holds_secrets": bad,
-            }
-        )
-        assert r == {"error": why, "reason": "invalid_meta"}, r
-        assert "creds2" not in k.ctx.agents
 
 
 async def test_the_file_is_the_kernel_emitters_bytes_sorted(seeded_kernel, tmp_path):
@@ -823,7 +556,6 @@ async def test_the_file_is_the_kernel_emitters_bytes_sorted(seeded_kernel, tmp_p
         out = await _call(
             k,
             {"type": "set", "ref": ref, "fields": fields},
-            secret=MARK_SET,
         )
         assert out["result"]["stored"] is True, out
     assert (tmp_path / "creds.yaml").read_text() == (
@@ -864,7 +596,7 @@ async def test_a_redeclared_host_reads_nothing_until_the_value_is_set_again(
         {"type": "get", "ref": "openai/main"},
         {"type": "get", "ref": "openai/main", "host": "attacker.example"},
     ):
-        out = await _call(k, payload, as_="alice", secret=MARK_GET)
+        out = await _call(k, payload, as_="alice")
         assert out["result"] == _at_rest(
             "openai/main", "api.openai.com", "attacker.example"
         ), out
@@ -873,12 +605,9 @@ async def test_a_redeclared_host_reads_nothing_until_the_value_is_set_again(
         k,
         {"type": "set", "ref": "openai/main", "fields": {"api_key": KEY2}},
         as_="bob",
-        secret=MARK_SET,
     )
     assert back["result"]["host"] == "attacker.example", back
-    got = await _call(
-        k, {"type": "get", "ref": "openai/main"}, as_="alice", secret=MARK_GET
-    )
+    got = await _call(k, {"type": "get", "ref": "openai/main"}, as_="alice")
     assert got["result"] == {
         "ref": "openai/main",
         "host": "attacker.example",
@@ -900,7 +629,7 @@ async def test_another_store_sharing_the_file_reads_nothing_for_its_host(
         id="other",
         callable_by={"eve": "*"},
         file=str(tmp_path / "creds.yaml"),
-        refs={"openai/main": {"host": "blocked.invalid", "readers": ["eve"]}},
+        refs={"openai/main": {"host": "blocked.invalid"}},
     )
     assert rec.get("id") == "other", rec
     k.ctx.agents["eve"].record["can_call"]["other"] = "*"
@@ -908,7 +637,6 @@ async def test_another_store_sharing_the_file_reads_nothing_for_its_host(
         k,
         {"type": "get", "ref": "openai/main", "host": "blocked.invalid"},
         as_="eve",
-        secret=MARK_GET,
         target="other",
     )
     assert out["result"] == _at_rest(
@@ -924,7 +652,7 @@ async def test_a_stored_value_without_a_host_is_refused(
     """S3, no back-compat: a value at rest that carries no host — the old
     `{field: value}` shape, or a hand-written entry — is refused, nothing read."""
     k = _mk(seeded_kernel, tmp_path, backend=backend)
-    await _declare(k, {"openai/main": {"host": "api.openai.com", "readers": ["alice"]}})
+    await _declare(k, {"openai/main": {"host": "api.openai.com"}})
     if backend == "file":
         f = tmp_path / "creds.yaml"
         f.write_text(f"refs:\n  openai/main:\n    api_key: {KEY}\n")
@@ -933,8 +661,6 @@ async def test_a_stored_value_without_a_host_is_refused(
         mem_keyring.items[("fantastic", "creds/openai/main")] = json.dumps(
             {"api_key": KEY}
         )
-    out = await _call(
-        k, {"type": "get", "ref": "openai/main"}, as_="alice", secret=MARK_GET
-    )
+    out = await _call(k, {"type": "get", "ref": "openai/main"}, as_="alice")
     assert out["result"] == _NO_HOST, out
     assert KEY not in repr(out), out

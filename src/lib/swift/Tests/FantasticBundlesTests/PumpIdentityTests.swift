@@ -1,11 +1,10 @@
-// The PUMP runs both ends AS ITS CALLER — the bridge is no deputy.
+// The PUMP runs both ends AS THE FILE_BRIDGE itself (owner 2026-10-04).
 //
-// Audit AV-7 (2026-10-03): `pump` sent its `read_stream` and `write_stream` from
-// inside its own dispatch, so the far ends judged THE BRIDGE, never the caller. A
-// client allowed only `pump` on F copied a private G's file into F and read it
-// there, and the reverse pump overwrote G. Now both ends run as the pump's
-// caller: the caller needs its own grants on the source and on the sink (the
-// operator, as ever, is ungated).
+// Identity comes only from dispatch: `pump` sends its `read_stream` and
+// `write_stream` from inside its own dispatch, so both far ends judge THE BRIDGE —
+// its `can_call` must reach them and their `callable_by` must accept it. A
+// caller's own grants on the ends play no part: granting `pump` on a bridge lends
+// exactly the reach that bridge has.
 //
 // Twin of python `file_bridge/tests/test_pump_identity.py`.
 
@@ -16,14 +15,14 @@ import Testing
 
 @testable import FantasticKernel
 
-private let PRIVATE = Data("PRIVATE-G-DATA".utf8)
+private let DATA = Data("G-DATA".utf8)
 
 private func op(
     _ k: Kernel, _ target: String, _ payload: JSON, as sender: String? = nil, binary: Blob? = nil
 ) async -> Outcome {
     let item = Item(AgentId(target), payload, binary: binary)
     guard let sender else { return await k.send([item])[0] }
-    return await KernelTaskLocals.$currentSender.withValue(AgentId(sender)) {
+    return await KernelTaskLocals.$sender.withValue(AgentId(sender)) {
         await k.send([item])[0]
     }
 }
@@ -39,28 +38,30 @@ private func bridge(_ k: Kernel, _ id: String, _ meta: OrderedDictionary<String,
     #expect(out.result["id"].asString == id, "\(out.result.serialize())")
 }
 
-/// G is private to F; F answers C's `pump` and `read`; C reaches nothing else.
-/// Every file lives under a fresh running dir.
-private func wired() async -> (Kernel, URL) {
+/// G holds a file; C may call F's `pump` and `read`; F reaches G only when
+/// `fReachesG` — both halves of the F→G edge. Every file lives under a fresh
+/// running dir.
+private func wired(fReachesG: Bool) async -> (Kernel, URL) {
     let dir = FileManager.default.temporaryDirectory
         .appendingPathComponent("pump-\(UUID().uuidString.prefix(8))")
     try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     let k = makeKernelWithAll(rootPath: dir.appendingPathComponent(".fantastic"))
-    await bridge(k, "g", ["callable_by": ["f": ["read_stream", "write_stream"]]])
+    let edge: JSON = ["read_stream", "write_stream"]
+    await bridge(k, "g", ["callable_by": fReachesG ? .object(["f": edge]) : .object([:])])
     await bridge(
         k, "f",
         [
-            "can_call": ["g": ["read_stream", "write_stream"]],
-            "callable_by": ["c": ["pump", "read", "read_stream", "write_stream"]],
+            "can_call": fReachesG ? .object(["g": edge]) : .object([:]),
+            "callable_by": ["c": ["pump", "read", "read_stream"]],
         ])
     k.register(
         Agent(
             id: AgentId("c"), handlerModule: nil, parentId: AgentId("kernel_state"),
             meta: ["can_call": ["f": "*"]]))
     let w = await op(
-        k, "g", ["type": "write_stream", "path": "secret.txt", "truncate": true],
-        binary: Blob("bytes", PRIVATE))
-    #expect(w.result["written"] == .integer(Int64(PRIVATE.count)), "\(w.asJSON.serialize())")
+        k, "g", ["type": "write_stream", "path": "data.txt", "truncate": true],
+        binary: Blob("bytes", DATA))
+    #expect(w.result["written"] == .integer(Int64(DATA.count)), "\(w.asJSON.serialize())")
     return (k, dir)
 }
 
@@ -72,57 +73,32 @@ private func pump(_ k: Kernel, as sender: String, _ args: OrderedDictionary<Stri
     return await op(k, "f", .object(p), as: sender).result
 }
 
-@Suite("file_bridge pump — both ends run as its caller")
+@Suite("file_bridge pump — both ends run as the bridge")
 struct PumpIdentityTests {
 
-    @Test func aPumpCallerCannotReadAnEndItCannotReach() async throws {
-        let (k, dir) = await wired()
+    @Test func aPumpReadsAndWritesAsTheBridge() async throws {
+        let (k, dir) = await wired(fReachesG: true)
         defer { try? FileManager.default.removeItem(at: dir) }
-        let direct = await op(k, "g", ["type": "read_stream", "path": "secret.txt"], as: "c")
+        // C reaches G not at all — the pump's ends are F's sends, not C's
+        let direct = await op(k, "g", ["type": "read_stream", "path": "data.txt"], as: "c")
         #expect(direct.result["reason"] == "unauthorized", "\(direct.asJSON.serialize())")
         let out = await pump(
-            k, as: "c", ["source": "g", "source_path": "secret.txt", "sink_path": "loot.txt"])
+            k, as: "c", ["source": "g", "source_path": "data.txt", "sink_path": "copy.txt"])
+        #expect(out["bytes"] == .integer(Int64(DATA.count)), "\(out.serialize())")
+        #expect(try Data(contentsOf: dir.appendingPathComponent("f/copy.txt")) == DATA)
+    }
+
+    @Test func aPumpCannotReachAnEndTheBridgeCannot() async throws {
+        let (k, dir) = await wired(fReachesG: false)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let out = await pump(
+            k, as: "c", ["source": "g", "source_path": "data.txt", "sink_path": "copy.txt"])
         #expect(out["reason"] == "transport_error", "\(out.serialize())")
         let err = out["error"].asString ?? ""
         #expect(err.hasPrefix("pump: read from 'g' failed: {"), Comment(rawValue: err))
-        #expect(err.contains("c may not call 'read_stream' on g"), Comment(rawValue: err))
+        #expect(err.contains("f may not call 'read_stream' on g"), Comment(rawValue: err))
         #expect(
-            !FileManager.default.fileExists(atPath: dir.appendingPathComponent("f/loot.txt").path),
+            !FileManager.default.fileExists(atPath: dir.appendingPathComponent("f/copy.txt").path),
             "nothing was copied")
-    }
-
-    @Test func aPumpCallerCannotWriteAnEndItCannotReach() async throws {
-        let (k, dir) = await wired()
-        defer { try? FileManager.default.removeItem(at: dir) }
-        let w = await op(
-            k, "f", ["type": "write_stream", "path": "mine.txt", "truncate": true],
-            binary: Blob("bytes", Data("OVERWRITTEN".utf8)))
-        #expect(w.status == .completed, "\(w.asJSON.serialize())")
-        let out = await pump(
-            k, as: "c", ["source_path": "mine.txt", "sink": "g", "sink_path": "secret.txt"])
-        #expect(out["reason"] == "transport_error", "\(out.serialize())")
-        let err = out["error"].asString ?? ""
-        #expect(err.hasPrefix("pump: write to 'g' failed: {"), Comment(rawValue: err))
-        #expect(try Data(contentsOf: dir.appendingPathComponent("g/secret.txt")) == PRIVATE)
-    }
-
-    /// Granted on both ends ITSELF, the caller pumps — the bridge's own reach is
-    /// not what lets it.
-    @Test func aPumpRunsWithTheCallersOwnGrants() async throws {
-        let (k, dir) = await wired()
-        defer { try? FileManager.default.removeItem(at: dir) }
-        k.update(AgentId("c"), ["can_call": ["f": "*", "g": ["read_stream"]]])
-        var cb = k.agent(AgentId("g"))?.metaValue(forKey: "callable_by")?.asObject ?? [:]
-        cb["c"] = ["read_stream"]
-        k.update(AgentId("g"), ["callable_by": .object(cb)])
-        let out = await pump(
-            k, as: "c", ["source": "g", "source_path": "secret.txt", "sink_path": "copy.txt"])
-        #expect(
-            out
-                == [
-                    "source": "secret.txt", "sink": "copy.txt",
-                    "bytes": .integer(Int64(PRIVATE.count)), "chunks": 1,
-                ], "\(out.serialize())")
-        #expect(try Data(contentsOf: dir.appendingPathComponent("f/copy.txt")) == PRIVATE)
     }
 }

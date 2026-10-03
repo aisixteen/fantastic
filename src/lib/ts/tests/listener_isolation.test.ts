@@ -18,6 +18,7 @@ import type { WebSocketLike } from "../src/transport/bridge.ts";
 import { encodeFrame } from "../src/transport/frame.ts";
 import type { Payload } from "../src/kernel/json.ts";
 import type { StateEvent } from "../src/kernel/state.ts";
+import { kin } from "./kit.ts";
 
 const ROOT = "kernel_state";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -180,8 +181,8 @@ test("a throwing cancel hook does not stop the rest of the subtree: every task i
     }
     return new Promise<never>(() => undefined);
   });
-  k.register(new Agent({ id: "parent", parentId: ROOT, handlerModule: "holder.ts" }));
-  k.register(new Agent({ id: "child", parentId: "parent", handlerModule: "holder.ts" }));
+  k.register(new Agent({ id: "parent", parentId: ROOT, handlerModule: "holder.ts", meta: kin() }));
+  k.register(new Agent({ id: "child", parentId: "parent", handlerModule: "holder.ts", meta: kin() }));
   const held = k.send([{ target: "parent", payload: { type: "hold" } }]);
   while (running.size < 2) await sleep(1);
   const parentPid = k.tasks.ids().find((t) => k.tasks.get(t)!.agent === "parent")!;
@@ -206,8 +207,8 @@ test("cancel is idempotent: an unknown id kills nothing, and a row already kille
     if (id === "parent") await kernel.send([{ target: "child", payload: { type: "hold" } }]);
     return new Promise<never>(() => undefined);
   });
-  k.register(new Agent({ id: "parent", parentId: ROOT, handlerModule: "holder.ts" }));
-  k.register(new Agent({ id: "child", parentId: "parent", handlerModule: "holder.ts" }));
+  k.register(new Agent({ id: "parent", parentId: ROOT, handlerModule: "holder.ts", meta: kin() }));
+  k.register(new Agent({ id: "child", parentId: "parent", handlerModule: "holder.ts", meta: kin() }));
   const held = k.send([{ target: "parent", payload: { type: "hold" } }]);
   while (running.size < 2) await sleep(1);
   const parentPid = k.tasks.ids().find((t) => k.tasks.get(t)!.agent === "parent")!;

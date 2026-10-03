@@ -5,10 +5,9 @@
 //
 // A memory store keeps conversation rows for MANY owners (multi-tenant). Every
 // row is keyed by `(owner, id)`; the owner is never a field a caller writes — it
-// is WHO CALLED: `<kernel guid>|<caller agent id>` for a local caller, the
-// qualified address a bridge leg relays for a caller on another kernel, and
-// `<guid>|kernel` for the operator (`sender=None`). So a caller writes ONLY under
-// its own key, by construction.
+// is WHO CALLED: `<kernel guid>|<caller agent id>` (a call a bridge leg serves
+// is the leg's own), and `<guid>|kernel` for the operator (`sender=None`). So a
+// caller writes ONLY under its own key, by construction.
 //
 // THE TOPOLOGY IS SQLITE'S. The tables below are the ones a durable
 // `sqlite_store` keeps, with the same keys, the same uniqueness, the same indexes
@@ -19,19 +18,11 @@
 //   fold_refs  (owner, fold_id, member_id)         a fold's members, in order
 //              FK (owner, fold_id)   → rows ON DELETE CASCADE
 //              FK (owner, member_id) → rows ON DELETE CASCADE
-//   grants     PRIMARY KEY gid                     {owner, reader, scope, mode,
-//                                                   anchor, as_of, until, why, …}
-//              FK (owner, anchor) → rows ON DELETE CASCADE
-//              UNIQUE (owner, reader, scope, mode) an identical share is one grant
 //   text_idx   (owner, id) → lowercased text       the FTS5 counterpart; derived
 //
-// ACCESS, nothing implicit:
-//   - any caller: its OWN key (append / read / search / prune / share / unshare /
-//     grants), plus rows another owner GRANTED it (`read`/`search` with `grant`).
-//   - `operator: true` on the record serves the operator at all (as `kernel`).
-//   - `admins: [ids]` (`"kernel"` = the operator) may name another `owner` and may
-//     `inject` / `dump` the whole store.
-// The kernel's call gate still decides who may reach this agent at all.
+// ACCESS: a caller reads and writes only its OWN key (append / read / search /
+// prune); `inject` / `dump` are plain verbs. The kernel's call gate decides who
+// may reach this agent at all.
 //
 // Ids are the KERNEL's: a row carries the int the kernel minted, or none and this
 // store takes the next one from the kernel's counter — never an id of its own.
@@ -43,7 +34,7 @@
 // a verb body never interleaves with another. Swift dispatches on a thread pool:
 // the kernel's flusher appends while AI agents read and append their own rows. So
 // every verb body runs under the bundle's ONE lock (`RamStoreBundle.lock`), which
-// guards the slot map and every `Tables` in it — rows, order, fold refs, grants,
+// guards the slot map and every `Tables` in it — rows, order, fold refs,
 // the text index. No verb awaits, so the lock is never held across a suspension.
 
 import FantasticJSON
@@ -52,8 +43,6 @@ import Foundation
 import OrderedCollections
 
 let OPERATOR = "kernel"
-let MODES = ["frozen", "live"]
-let SCOPE_KINDS = ["head_until", "range", "fold", "row"]
 /// Kinds whose `refs` name members (the fold_refs table): a fold, a clear-fold.
 let REF_KINDS = ["fold", "clear"]
 
@@ -132,18 +121,6 @@ func textOf(_ row: Row) -> String {
     return text
 }
 
-/// `json.dumps(v, sort_keys=True)` — the grant uniqueness key.
-func canonical(_ v: JSON) -> String {
-    switch v {
-    case .object(let o):
-        return "{" + o.keys.sorted().map { pyRepr($0) + ":" + canonical(o[$0]!) }.joined(separator: ",") + "}"
-    case .array(let a):
-        return "[" + a.map(canonical).joined(separator: ",") + "]"
-    default:
-        return pyJsonDumps(v)
-    }
-}
-
 /// The store's tables — RAM dictionaries in sqlite's shape. NOT thread-safe on
 /// its own: touched only under `RamStoreBundle.lock` (or before it is published).
 final class Tables: @unchecked Sendable {
@@ -156,10 +133,6 @@ final class Tables: @unchecked Sendable {
     var order: [String: [Int64]] = [:]
     var foldRefs: [Key: [Int64]] = [:]
     var refByMember: [Key: Set<Int64>] = [:]
-    var grants: [Int64: Row] = [:]
-    var grantSeq: Int64 = 0
-    var grantByAnchor: [Key: Set<Int64>] = [:]
-    var grantKey: [String: Int64] = [:]
     var text: [Key: String] = [:]
 
     // ── rows ──
@@ -195,11 +168,10 @@ final class Tables: @unchecked Sendable {
     }
 
     /// DELETE FROM rows WHERE owner=? AND id IN doomed — with every cascade.
-    /// Returns (rows removed, grants removed).
-    func delete(_ owner: String, _ doomedIn: Set<Int64>) -> (Int, Int) {
+    /// Returns the rows removed.
+    func delete(_ owner: String, _ doomedIn: Set<Int64>) -> Int {
         let table = rows[owner] ?? [:]
         let doomed = doomedIn.filter { table[$0] != nil }
-        var grantsGone = 0
         for rid in doomed {
             rows[owner]?.removeValue(forKey: rid)
             let k = Key(owner: owner, id: rid)
@@ -215,47 +187,11 @@ final class Tables: @unchecked Sendable {
                 let fk = Key(owner: owner, id: f)
                 if let refs = foldRefs[fk] { foldRefs[fk] = refs.filter { $0 != rid } }
             }
-            // FK grants.anchor → rows: a grant anchored here is gone.
-            for gid in grantByAnchor.removeValue(forKey: k) ?? [] {
-                if dropGrant(gid) { grantsGone += 1 }
-            }
         }
         if !doomed.isEmpty {
             order[owner] = (order[owner] ?? []).filter { !doomed.contains($0) }
         }
-        return (doomed.count, grantsGone)
-    }
-
-    // ── grants ──
-    static func uniqueKey(_ g: Row) -> String {
-        [
-            g["owner"]?.asString ?? "", g["reader"]?.asString ?? "",
-            canonical(g["scope"] ?? .null), g["mode"]?.asString ?? "",
-        ].joined(separator: "\u{0}")
-    }
-
-    func addGrant(_ g: Row) -> (Int64, Bool) {
-        let key = Tables.uniqueKey(g)
-        if let gid = grantKey[key] { return (gid, false) }
-        grantSeq += 1
-        let gid = grantSeq
-        var stored = g
-        stored["grant"] = .integer(gid)
-        grants[gid] = stored
-        grantKey[key] = gid
-        let anchor = Key(owner: g["owner"]?.asString ?? "", id: g["anchor"]?.asInt ?? 0)
-        grantByAnchor[anchor, default: []].insert(gid)
-        return (gid, true)
-    }
-
-    @discardableResult
-    func dropGrant(_ gid: Int64) -> Bool {
-        guard let g = grants.removeValue(forKey: gid) else { return false }
-        grantKey.removeValue(forKey: Tables.uniqueKey(g))
-        let anchor = Key(owner: g["owner"]?.asString ?? "", id: g["anchor"]?.asInt ?? 0)
-        grantByAnchor[anchor]?.remove(gid)
-        if grantByAnchor[anchor]?.isEmpty == true { grantByAnchor.removeValue(forKey: anchor) }
-        return true
+        return doomed.count
     }
 
     // ── dump ──
@@ -275,10 +211,7 @@ final class Tables: @unchecked Sendable {
                     "members": .array((foldRefs[k] ?? []).map { .integer($0) }),
                 ])
             }
-        let grantsOut: [JSON] = grants.keys.sorted().map { .object(grants[$0]!) }
-        return .object([
-            "rows": .array(rowsOut), "fold_refs": .array(refsOut), "grants": .array(grantsOut),
-        ])
+        return .object(["rows": .array(rowsOut), "fold_refs": .array(refsOut)])
     }
 }
 
@@ -343,24 +276,6 @@ func loadTables(_ tables: JSON) -> Result<Tables, RefusalBody> {
             t.text[Tables.Key(owner: owner, id: fold)] = textOf(row).lowercased()
         }
     }
-    for g in tab["grants"]?.asArray ?? [] {
-        guard case .object(let gd) = g, let owner = gd["owner"]?.asString,
-            let anchor = gd["anchor"]?.asInt, t.has(owner, anchor)
-        else {
-            return bad("inject: a grant's anchor names no row")
-        }
-        guard let gid = asId(gd["grant"]) else {
-            return bad("inject: a grant needs an int `grant`")
-        }
-        var body = gd
-        body.removeValue(forKey: "grant")
-        var stored = body
-        stored["grant"] = .integer(gid)
-        t.grants[gid] = stored
-        t.grantKey[Tables.uniqueKey(body)] = gid
-        t.grantByAnchor[Tables.Key(owner: owner, id: anchor), default: []].insert(gid)
-        t.grantSeq = max(t.grantSeq, gid)
-    }
     return .success(t)
 }
 
@@ -423,7 +338,7 @@ public final class RamStoreBundle: AgentBundle, @unchecked Sendable {
     }
 
     /// Seed rows straight into one owner's table (ids given, minted when absent)
-    /// — the in-process twin of an admin `append {owner}` for a test harness.
+    /// — a test harness seeding another owner's rows in-process.
     func seedRows(_ agent: Agent, owner: String, _ rows: [JSON]) {
         lock.withLock {
             let t = tables(agent)
@@ -449,31 +364,8 @@ public final class RamStoreBundle: AgentBundle, @unchecked Sendable {
         return s
     }
 
-    /// An owner/reader NAME as a table key: a qualified `guid|id` verbatim, a bare
-    /// local id under this kernel's guid.
-    private func key(_ kernel: Kernel, _ name: JSON?) -> String? {
-        guard case .string(let raw)? = name else { return nil }
-        let n = pyStrip(raw)
-        if n.isEmpty { return nil }
-        if n.contains("|") { return n }
-        guard let g = guid(kernel) else { return nil }
-        return "\(g)|\(n)"
-    }
-
-    /// A key as a caller reads it: the bare id for this kernel, qualified
-    /// otherwise.
-    private func display(_ kernel: Kernel, _ key: String) -> String {
-        if let g = guid(kernel), key.hasPrefix(g + "|") {
-            return String(key.dropFirst(g.count + 1))
-        }
-        return key
-    }
-
     /// `(key, display)` for whoever is calling, or a refusal.
     private func caller(_ agent: Agent, _ kernel: Kernel) -> Result<(String, String), RefusalBody> {
-        if let remote = KernelTaskLocals.currentRemote, !remote.isEmpty {
-            return .success((remote, remote))
-        }
         guard let g = guid(kernel) else {
             return .failure(
                 RefusalBody(
@@ -483,64 +375,21 @@ public final class RamStoreBundle: AgentBundle, @unchecked Sendable {
                         hint: "boot the kernel root first (it mints the guid)")))
         }
         guard let origin = KernelTaskLocals.currentOrigin else {
-            if !pyTruthy(agent.metaValue(forKey: "operator") ?? .null) {
-                return .failure(
-                    RefusalBody(
-                        Refusal.make(
-                            Refusal.unauthorized,
-                            "\(agent.id.value): the operator is not served here",
-                            hint: "update_agent id=\(agent.id.value) operator=true to serve the "
-                                + "operator (as 'kernel')",
-                            extra: [("side", .string("store"))])))
-            }
             return .success(("\(g)|\(OPERATOR)", OPERATOR))
         }
         return .success(("\(g)|\(origin.value)", origin.value))
     }
 
-    private func isAdmin(_ agent: Agent, _ display: String) -> Bool {
-        switch agent.metaValue(forKey: "admins") {
-        case .string(let s)?: return s == display
-        case .array(let a)?: return a.contains(.string(display))
-        default: return false
-        }
-    }
+    // MARK: - who owns, folds
 
-    /// (owner key, caller key, caller display) for a verb that acts on ONE owner:
-    /// the caller's own key, or `owner` when the caller is an admin.
-    private func ownerFor(_ agent: Agent, _ kernel: Kernel, _ payload: JSON, _ verb: String)
-        -> Result<(String, String, String), RefusalBody>
-    {
-        let who: (String, String)
+    /// The caller's own key — the one owner every verb acts on.
+    private func ownKey(_ agent: Agent, _ kernel: Kernel) -> Result<String, RefusalBody> {
         switch caller(agent, kernel) {
         case .failure(let r): return .failure(r)
-        case .success(let w): who = w
+        case .success(let w): return .success(w.0)
         }
-        let (me, disp) = who
-        let name = payload["owner"]
-        if name == .null { return .success((me, me, disp)) }
-        guard let owner = key(kernel, name) else {
-            return .failure(
-                RefusalBody(
-                    Refusal.make(
-                        Refusal.badArg, "\(verb): `owner` must be an agent id",
-                        extra: [("arg", .string("owner"))])))
-        }
-        if owner != me && !isAdmin(agent, disp) {
-            return .failure(
-                RefusalBody(
-                    Refusal.make(
-                        Refusal.unauthorized,
-                        "\(verb): \(pyRepr(disp)) may act only on its own rows, not \(pyRepr(name))",
-                        hint: "a caller writes and reads its OWN key; another owner's rows are "
-                            + "reached through a grant it gives (`share`), or by an agent listed in "
-                            + "\(agent.id.value).admins",
-                        extra: [("side", .string("store"))])))
-        }
-        return .success((owner, me, disp))
     }
 
-    // MARK: - scopes
 
     private func foldClosure(_ t: Tables, _ owner: String, _ fold: Int64) -> Set<Int64> {
         var out: Set<Int64> = []
@@ -551,146 +400,6 @@ public final class RamStoreBundle: AgentBundle, @unchecked Sendable {
             stack.append(contentsOf: t.foldRefs[Tables.Key(owner: owner, id: x)] ?? [])
         }
         return out
-    }
-
-    /// The rows a grant reaches, as of its bound (frozen) or following the head
-    /// (live).
-    private func scopeIds(_ t: Tables, _ g: Row) -> Set<Int64> {
-        let owner = g["owner"]?.asString ?? ""
-        let scope = g["scope"] ?? .null
-        let live = g["mode"]?.asString == "live"
-        let ids = t.ids(owner)
-        let idSet = Set(ids)
-        var base: Set<Int64>
-        if let r = scope["row"].asInt, scope.asObject?["row"] != nil {
-            base = idSet.contains(r) ? [r] : []
-        } else if scope.asObject?["fold"] != nil {
-            base = foldClosure(t, owner, scope["fold"].asInt ?? 0).intersection(idSet)
-        } else if scope.asObject?["range"] != nil {
-            let lo = scope["range"]["from"].asInt ?? 0
-            let hi = scope["range"]["to"].asInt ?? 0
-            base = Set(ids.filter { $0 >= lo && (live || $0 <= hi) })
-        } else {
-            let n = scope["head_until"].asInt ?? 0
-            base = Set(ids.filter { live || $0 <= n })
-        }
-        if !live, let asOf = g["as_of"]?.asInt {
-            base = base.filter { $0 <= asOf }
-        }
-        return base
-    }
-
-    /// (normalised scope, anchor) — the anchor is the scope's LOWEST existing row,
-    /// so a prune that touches any part of the scope removes it (FK cascade).
-    private func parseScope(_ t: Tables, _ owner: String, _ scope: JSON)
-        -> Result<(JSON, Int64), RefusalBody>
-    {
-        func refuse(_ code: String, _ msg: String) -> Result<(JSON, Int64), RefusalBody> {
-            .failure(RefusalBody(Refusal.make(code, msg, extra: [("arg", .string("scope"))])))
-        }
-        guard case .object(let sc) = scope, sc.count == 1, let kind = sc.keys.first,
-            SCOPE_KINDS.contains(kind)
-        else {
-            return refuse(
-                Refusal.badArg,
-                "share: `scope` must be ONE of {head_until: <row>}, {range: {from, to}}, "
-                    + "{fold: <id>}, {row: <id>} — a descriptor, never a list of messages")
-        }
-        let val = sc[kind]!
-        let ids = t.ids(owner)
-        if kind == "range" {
-            guard case .object(let rv) = val else {
-                return refuse(Refusal.badArg, "share: range must be {from, to}")
-            }
-            guard let lo = asId(rv["from"]), let hi = asId(rv["to"]), lo <= hi else {
-                return refuse(Refusal.badArg, "share: range needs from <= to (row ids)")
-            }
-            let inside = ids.filter { lo <= $0 && $0 <= hi }
-            guard let first = inside.first else {
-                return refuse(Refusal.notFound, "share: none of YOUR rows lie in \(lo)..\(hi)")
-            }
-            return .success(
-                (.object(["range": .object(["from": .integer(lo), "to": .integer(hi)])]), first))
-        }
-        guard let rid = asId(val) else {
-            return refuse(Refusal.badArg, "share: \(kind) must be a row id")
-        }
-        if kind == "head_until" {
-            guard let first = ids.first, first <= rid else {
-                return refuse(Refusal.notFound, "share: you have no rows up to \(rid)")
-            }
-            return .success((.object(["head_until": .integer(rid)]), first))
-        }
-        guard t.has(owner, rid) else {
-            // ZERO TOLERANCE: a row that is not under YOUR key is not yours to
-            // share — a foreign row, or one shared WITH you, simply is not found.
-            return refuse(
-                Refusal.notFound,
-                "share: row \(rid) is not one of YOUR rows — only rows you own can be shared")
-        }
-        if kind == "fold" {
-            let k = t.rows[owner]?[rid]?["kind"]?.asString ?? ""
-            if !REF_KINDS.contains(k) {
-                return refuse(Refusal.badArg, "share: row \(rid) is not a fold")
-            }
-        }
-        return .success((.object([kind: .integer(rid)]), rid))
-    }
-
-    private func grantView(_ kernel: Kernel, _ g: Row) -> JSON {
-        .object([
-            "grant": g["grant"] ?? .null,
-            "owner": .string(display(kernel, g["owner"]?.asString ?? "")),
-            "reader": .string(display(kernel, g["reader"]?.asString ?? "")),
-            "scope": g["scope"] ?? .null,
-            "mode": g["mode"] ?? .null,
-            "as_of": g["as_of"] ?? .null,
-            "until": g["until"] ?? .null,
-            "why": g["why"] ?? .null,
-            "created_by": g["created_by"] ?? .null,
-            "ts": g["ts"] ?? .null,
-        ])
-    }
-
-    /// (owner key, allowed ids | nil = all, grant | nil) for a read-side verb:
-    /// `grant` reads another owner's scope; else the caller's own key (or
-    /// `owner`, admin).
-    private func readable(_ agent: Agent, _ kernel: Kernel, _ t: Tables, _ payload: JSON, _ verb: String)
-        -> Result<(String, Set<Int64>?, Row?), RefusalBody>
-    {
-        let gid = payload["grant"]
-        if gid == .null {
-            switch ownerFor(agent, kernel, payload, verb) {
-            case .failure(let r): return .failure(r)
-            case .success(let o): return .success((o.0, nil, nil))
-            }
-        }
-        let who: (String, String)
-        switch caller(agent, kernel) {
-        case .failure(let r): return .failure(r)
-        case .success(let w): who = w
-        }
-        let (me, disp) = who
-        guard let g = t.grants[asId(gid) ?? -1] else {
-            return .failure(
-                RefusalBody(
-                    Refusal.make(
-                        Refusal.notFound,
-                        "\(verb): grant \(pyRepr(gid)) does not exist — revoked (unshare) or its "
-                            + "rows were pruned",
-                        extra: [("arg", .string("grant"))])))
-        }
-        if g["reader"]?.asString != me && !isAdmin(agent, disp) {
-            return .failure(
-                RefusalBody(
-                    Refusal.make(
-                        Refusal.unauthorized,
-                        "\(verb): grant \(pyStr(gid)) was given to "
-                            + "\(pyRepr(display(kernel, g["reader"]?.asString ?? ""))), not "
-                            + "\(pyRepr(disp))",
-                        extra: [("side", .string("store"))])))
-        }
-        return .success((g["owner"]?.asString ?? "", scopeIds(t, g), g))
     }
 
     // MARK: - dispatch
@@ -714,12 +423,9 @@ public final class RamStoreBundle: AgentBundle, @unchecked Sendable {
         case "append": return unwrap(append(agent, kernel, payload))
         case "read": return unwrap(read(agent, kernel, payload))
         case "search": return unwrap(search(agent, kernel, payload))
-        case "share": return unwrap(share(agent, kernel, payload))
-        case "unshare": return unwrap(unshare(agent, kernel, payload))
-        case "grants": return unwrap(grantsVerb(agent, kernel, payload))
         case "prune": return unwrap(try prune(agent, kernel, payload))
-        case "inject": return unwrap(inject(agent, kernel, payload))
-        case "dump": return unwrap(dump(agent, kernel))
+        case "inject": return unwrap(inject(agent, payload))
+        case "dump": return .object(["tables": tables(agent).dump()])
         default:
             return Refusal.make(
                 Refusal.unhandled, "ram_store: unknown type \(pyRepr(t))", extra: [("verb", t)])
@@ -742,17 +448,11 @@ public final class RamStoreBundle: AgentBundle, @unchecked Sendable {
         return .object([
             "id": .string(agent.id.value),
             "sentence": .string(
-                "Memory store in RAM — rows per owner (the caller), folds, grants, "
+                "Memory store in RAM — rows per owner (the caller), folds, "
                     + "search; ephemeral: everything is lost when the process exits."),
             "durable": .bool(false),
             "owners": .integer(Int64(t.rows.values.filter { !$0.isEmpty }.count)),
             "rows": .integer(Int64(t.rows.values.reduce(0) { $0 + $1.count })),
-            "grants": .integer(Int64(t.grants.count)),
-            "operator": .bool(pyTruthy(agent.metaValue(forKey: "operator") ?? .null)),
-            "admins": {
-                let a = agent.metaValue(forKey: "admins") ?? .null
-                return pyTruthy(a) ? a : .array([])
-            }(),
             "optional_verbs": .array([.string("search")]),
             "verbs": .object(verbs),
         ])
@@ -760,9 +460,9 @@ public final class RamStoreBundle: AgentBundle, @unchecked Sendable {
 
     private func append(_ agent: Agent, _ kernel: Kernel, _ payload: JSON) -> Result<JSON, RefusalBody> {
         let owner: String
-        switch ownerFor(agent, kernel, payload, "append") {
+        switch ownKey(agent, kernel) {
         case .failure(let r): return .failure(r)
-        case .success(let o): owner = o.0
+        case .success(let o): owner = o
         }
         guard case .array(let list) = payload["rows"], !list.isEmpty,
             list.allSatisfy({ if case .object = $0 { return true } else { return false } })
@@ -837,13 +537,11 @@ public final class RamStoreBundle: AgentBundle, @unchecked Sendable {
     private func read(_ agent: Agent, _ kernel: Kernel, _ payload: JSON) -> Result<JSON, RefusalBody> {
         let t = tables(agent)
         let owner: String
-        let allowed: Set<Int64>?
-        switch readable(agent, kernel, t, payload, "read") {
+        switch ownKey(agent, kernel) {
         case .failure(let r): return .failure(r)
-        case .success(let r): (owner, allowed) = (r.0, r.1)
+        case .success(let o): owner = o
         }
         var ids = t.ids(owner)
-        if let allowed { ids = ids.filter { allowed.contains($0) } }
         let row = { (i: Int64) -> Row in t.rows[owner]?[i] ?? [:] }
         if case .string(let flk) = payload["from_last_kind"], !flk.isEmpty {
             if let last = ids.last(where: { row($0)["kind"]?.asString == flk }) {
@@ -889,13 +587,11 @@ public final class RamStoreBundle: AgentBundle, @unchecked Sendable {
         if q.isEmpty { return .failure(RefusalBody(Refusal.missing("search", "query"))) }
         let t = tables(agent)
         let owner: String
-        let allowed: Set<Int64>?
-        switch readable(agent, kernel, t, payload, "search") {
+        switch ownKey(agent, kernel) {
         case .failure(let r): return .failure(r)
-        case .success(let r): (owner, allowed) = (r.0, r.1)
+        case .success(let o): owner = o
         }
         var ids = t.ids(owner)
-        if let allowed { ids = ids.filter { allowed.contains($0) } }
         if case .array(let want) = payload["ids"], !want.isEmpty {
             var scope: Set<Int64> = []
             for x in want {
@@ -940,122 +636,13 @@ public final class RamStoreBundle: AgentBundle, @unchecked Sendable {
             ]))
     }
 
-    private func share(_ agent: Agent, _ kernel: Kernel, _ payload: JSON) -> Result<JSON, RefusalBody> {
-        let who: (String, String)
-        switch caller(agent, kernel) {
-        case .failure(let r): return .failure(r)
-        case .success(let w): who = w
-        }
-        let me = who.0
-        guard let reader = key(kernel, payload["with"]) else {
-            return .failure(RefusalBody(Refusal.missing("share", "with")))
-        }
-        if reader == me {
-            return .failure(
-                RefusalBody(
-                    Refusal.make(
-                        Refusal.badArg, "share: you already read your own rows",
-                        extra: [("arg", .string("with"))])))
-        }
-        let modeRaw = payload["mode"]
-        let mode = pyTruthy(modeRaw) ? modeRaw : .string("frozen")
-        guard let m = mode.asString, MODES.contains(m) else {
-            return .failure(
-                RefusalBody(
-                    Refusal.make(
-                        Refusal.badArg, "share: mode must be one of ('frozen', 'live')",
-                        extra: [("arg", .string("mode"))])))
-        }
-        let t = tables(agent)
-        let scope: JSON
-        let anchor: Int64
-        switch parseScope(t, me, payload["scope"]) {
-        case .failure(let r): return .failure(r)
-        case .success(let p): (scope, anchor) = p
-        }
-        let ids = t.ids(me)
-        let whyRaw = payload["why"]
-        let whyText = pySplitWhitespace(pyTruthy(whyRaw) ? pyStr(whyRaw) : "").joined(separator: " ")
-        let why = String(String.UnicodeScalarView(whyText.unicodeScalars.prefix(300)))
-        let grant: Row = [
-            "owner": .string(me),
-            "reader": .string(reader),
-            "scope": scope,
-            "mode": .string(m),
-            "anchor": .integer(anchor),
-            "as_of": (m == "frozen" && !ids.isEmpty) ? .integer(ids.last!) : .null,
-            "until": .null,  // reserved: a row limit / time bound — unused
-            "why": why.isEmpty ? .null : .string(why),
-            "created_by": KernelTaskLocals.currentTask.map { JSON.integer($0.value) } ?? .null,
-            "ts": .double(Date().timeIntervalSince1970),
-        ]
-        let (gid, created) = t.addGrant(grant)
-        let g = t.grants[gid] ?? [:]
-        return .success(
-            .object([
-                "grant": .integer(gid), "anchor": .integer(anchor), "as_of": g["as_of"] ?? .null,
-                "created": .bool(created),
-            ]))
-    }
-
-    private func unshare(_ agent: Agent, _ kernel: Kernel, _ payload: JSON) -> Result<JSON, RefusalBody> {
-        let who: (String, String)
-        switch caller(agent, kernel) {
-        case .failure(let r): return .failure(r)
-        case .success(let w): who = w
-        }
-        guard let gid = asId(payload["grant"]) else {
-            return .failure(RefusalBody(Refusal.missing("unshare", "grant")))
-        }
-        let t = tables(agent)
-        guard let g = t.grants[gid] else {
-            return .failure(
-                RefusalBody(
-                    Refusal.make(
-                        Refusal.notFound, "unshare: no grant \(gid)",
-                        extra: [("arg", .string("grant"))])))
-        }
-        if g["owner"]?.asString != who.0 && !isAdmin(agent, who.1) {
-            return .failure(
-                RefusalBody(
-                    Refusal.make(
-                        Refusal.unauthorized, "unshare: grant \(gid) is not yours to revoke",
-                        extra: [("side", .string("store"))])))
-        }
-        t.dropGrant(gid)
-        return .success(.object(["unshared": .bool(true), "grant": .integer(gid)]))
-    }
-
-    private func grantsVerb(_ agent: Agent, _ kernel: Kernel, _ payload: JSON) -> Result<JSON, RefusalBody> {
-        let who: (String, String)
-        switch caller(agent, kernel) {
-        case .failure(let r): return .failure(r)
-        case .success(let w): who = w
-        }
-        let side = payload["side"].asString
-        guard side == "given" || side == "received" else {
-            return .failure(
-                RefusalBody(
-                    Refusal.make(
-                        Refusal.badArg, "grants: side must be 'given' or 'received'",
-                        extra: [("arg", .string("side"))])))
-        }
-        let field = side == "given" ? "owner" : "reader"
-        let t = tables(agent)
-        let out: [JSON] = t.grants.keys.sorted().compactMap { gid in
-            guard let g = t.grants[gid], g[field]?.asString == who.0 else { return nil }
-            return grantView(kernel, g)
-        }
-        return .success(.object(["grants": .array(out)]))
-    }
-
     private func prune(_ agent: Agent, _ kernel: Kernel, _ payload: JSON) throws(PyError)
         -> Result<JSON, RefusalBody>
     {
         let owner: String
-        switch ownerFor(agent, kernel, payload, "prune") {
+        switch ownKey(agent, kernel) {
         case .failure(let r): return .failure(r)
-        case .success(let o): owner = o.0
+        case .success(let o): owner = o
         }
         let t = tables(agent)
         let before = asId(payload["before_id"])
@@ -1079,118 +666,56 @@ public final class RamStoreBundle: AgentBundle, @unchecked Sendable {
                 doomed.insert(i)
             }
         }
-        let (n, g) = t.delete(owner, doomed)
-        return .success(.object(["pruned": .integer(Int64(n)), "grants_removed": .integer(Int64(g))]))
+        let n = t.delete(owner, doomed)
+        return .success(.object(["pruned": .integer(Int64(n))]))
     }
 
-    private func inject(_ agent: Agent, _ kernel: Kernel, _ payload: JSON) -> Result<JSON, RefusalBody> {
-        let who: (String, String)
-        switch caller(agent, kernel) {
-        case .failure(let r): return .failure(r)
-        case .success(let w): who = w
-        }
-        guard isAdmin(agent, who.1) else {
-            return .failure(
-                RefusalBody(
-                    Refusal.make(
-                        Refusal.unauthorized,
-                        "inject: \(pyRepr(who.1)) is not an admin of \(agent.id.value)",
-                        extra: [("side", .string("store"))])))
-        }
+    private func inject(_ agent: Agent, _ payload: JSON) -> Result<JSON, RefusalBody> {
         switch loadTables(payload["tables"]) {
         case .failure(let r): return .failure(r)
         case .success(let t):
             replaceTables(agent, t)
             return .success(
-                .object([
-                    "rows": .integer(Int64(t.rows.values.reduce(0) { $0 + $1.count })),
-                    "grants": .integer(Int64(t.grants.count)),
-                ]))
+                .object(["rows": .integer(Int64(t.rows.values.reduce(0) { $0 + $1.count }))]))
         }
-    }
-
-    private func dump(_ agent: Agent, _ kernel: Kernel) -> Result<JSON, RefusalBody> {
-        let who: (String, String)
-        switch caller(agent, kernel) {
-        case .failure(let r): return .failure(r)
-        case .success(let w): who = w
-        }
-        guard isAdmin(agent, who.1) else {
-            return .failure(
-                RefusalBody(
-                    Refusal.make(
-                        Refusal.unauthorized,
-                        "dump: \(pyRepr(who.1)) is not an admin of \(agent.id.value)",
-                        extra: [("side", .string("store"))])))
-        }
-        return .success(.object(["tables": tables(agent).dump()]))
-    }
-
-    /// `operator` is a bool; `admins` a list of ids. Python `validate_meta`.
-    public func validateMeta(
-        _ meta: OrderedDictionary<String, JSON>, record: OrderedDictionary<String, JSON>
-    ) -> String? {
-        if let op = meta["operator"] {
-            if case .bool = op {} else { return "operator must be true or false" }
-        }
-        if let a = meta["admins"] {
-            if case .string = a { return nil }
-            guard case .array(let list) = a,
-                list.allSatisfy({ if case .string(let s) = $0 { return !s.isEmpty } else { return false } })
-            else {
-                return "admins must be a list of agent ids ('kernel' = the operator)"
-            }
-        }
-        return nil
     }
 
     // MARK: - verb docs + readme (python's, verbatim)
 
     static let VERBS: OrderedDictionary<String, String> = [
-        "reflect": "Identity + posture: how many owners/rows/grants, who is admin, whether the operator is served, which optional verbs exist. No args.",
+        "reflect": "Identity + posture: how many owners/rows, which optional verbs exist. No args.",
         "boot": "No-op — the tables start empty (RAM) or are filled by `inject`.",
-        "append": "args: rows:list[dict] (req), owner:str? (admins only). Appends rows under the CALLER's key, all or none. A row carries the kernel id it was minted with, or none and the next id is taken from the kernel's counter; `refs` must name rows of the same owner (this batch included). Returns {ids:[int], appended:int}.",
-        "read": "args: grant:int? (read another owner's scope), owner:str? (admins), after:int?, before:int?, limit:int?, order:'asc'|'desc'?, kinds:list?, match:dict? (exact field equality), ids:list?, from_last_kind:str? (start at the newest row of that kind). Rows whole, oldest first by default. Returns {rows, next, total}.",
-        "search": "args: query:str (req — case-insensitive substring), grant:int?, owner:str? (admins), ids:list? (rows to search; a fold id includes its members), limit:int? (default 100), width:int? (chars per line, default 200). Every matching LINE with its row id and line number. Returns {matches:[{id, line, text}], total, truncated}.",
-        "share": "args: with:str (req — the reader's agent id), scope:dict (req — ONE of {head_until:<row>}, {range:{from,to}}, {fold:<id>}, {row:<id>}), mode:'frozen'|'live'? (default frozen), why:str?. Grants `with` read access to that scope of YOUR rows — only rows you own (never a foreign row, never one shared with you). An identical share returns the existing grant. Returns {grant, anchor, as_of, created}.",
-        "unshare": "args: grant:int (req). Revokes a grant YOU gave (admins: any). The reader's next read under it fails. Returns {unshared:true, grant}.",
-        "grants": "args: side:'given'|'received' (req). The grants YOU gave, or the ones given TO you. Returns {grants:[{grant, owner, reader, scope, mode, as_of, until, why, created_by, ts}]}.",
-        "prune": "args: before_id:int? and/or ids:list? (req — one of them), keep:list? (kinds kept), owner:str? (admins). Deletes YOUR rows below `before_id` (or exactly `ids`) except kinds in `keep`; every fold ref and every grant anchored on a deleted row goes with it (FK cascade). Returns {pruned, grants_removed}.",
-        "inject": "args: tables:dict (req — a `dump`). ADMINS ONLY. Replaces the WHOLE store with the given tables, every key and FK checked; nothing changes on a refusal. Returns {rows, grants}.",
-        "dump": "No args. ADMINS ONLY. The whole store as tables — {rows:[{owner, row}], fold_refs:[{owner, fold, members}], grants:[…]} — exactly what `inject` takes back. Returns {tables}.",
+        "append": "args: rows:list[dict] (req). Appends rows under the CALLER's key, all or none. A row carries the kernel id it was minted with, or none and the next id is taken from the kernel's counter; `refs` must name rows of the same owner (this batch included). Returns {ids:[int], appended:int}.",
+        "read": "args: after:int?, before:int?, limit:int?, order:'asc'|'desc'?, kinds:list?, match:dict? (exact field equality), ids:list?, from_last_kind:str? (start at the newest row of that kind). Rows whole, oldest first by default. Returns {rows, next, total}.",
+        "search": "args: query:str (req — case-insensitive substring), ids:list? (rows to search; a fold id includes its members), limit:int? (default 100), width:int? (chars per line, default 200). Every matching LINE with its row id and line number. Returns {matches:[{id, line, text}], total, truncated}.",
+        "prune": "args: before_id:int? and/or ids:list? (req — one of them), keep:list? (kinds kept). Deletes YOUR rows below `before_id` (or exactly `ids`) except kinds in `keep`; every fold ref naming a deleted row goes with it (FK cascade). Returns {pruned}.",
+        "inject": "args: tables:dict (req — a `dump`). Replaces the WHOLE store with the given tables, every key and FK checked; nothing changes on a refusal. Returns {rows}.",
+        "dump": "No args. The whole store as tables — {rows:[{owner, row}], fold_refs:[{owner, fold, members}]} — exactly what `inject` takes back. Returns {tables}.",
     ]
 
     static let README = """
         # ram_store — memory in RAM
 
-        A MEMORY STORE agent: conversation rows for many owners, folds, grants, search.
+        A MEMORY STORE agent: conversation rows for many owners, folds, search.
         Everything it holds is lost when the process exits.
 
         **Owner = caller.** Every row is keyed by who wrote it — `<kernel guid>|<agent id>`,
-        the qualified address of a caller on another kernel, or `kernel` for the operator. A
-        caller writes and reads its OWN rows; there is no `owner` field to forge.
+        `<kernel guid>|kernel` for the operator and the kernel's own bookkeeping. A caller
+        writes and reads its OWN rows; there is no `owner` field to forge.
 
         | verb | what |
         |---|---|
         | `append {rows}` | add rows under your key, all or none; ids are the kernel's |
-        | `read {grant?, after?, limit?, kinds?, match?, from_last_kind?, order?}` | your rows, or a granted scope |
-        | `search {query, ids?, grant?}` | the LINES that mention something |
-        | `share {with, scope, mode?, why?}` | let `with` read a scope of YOUR rows |
-        | `unshare {grant}` · `grants {side}` | revoke · list given/received |
-        | `prune {before_id \\| ids, keep?}` | delete your rows; folds refs + grants on them go too |
-        | `inject {tables}` · `dump` | admins: replace / capture the whole store |
+        | `read {after?, limit?, kinds?, match?, from_last_kind?, order?}` | your rows |
+        | `search {query, ids?}` | the LINES that mention something |
+        | `prune {before_id \\| ids, keep?}` | delete your rows; fold refs on them go too |
+        | `inject {tables}` · `dump` | replace / capture the whole store |
 
-        A **scope** is a descriptor, never a list of messages: `{head_until: <row>}`,
-        `{range: {from, to}}`, `{fold: <id>}` (the fold and its members), `{row: <id>}`.
-        `frozen` (default) stops at the last row when shared; `live` follows your head.
+        **Access:** a caller reads and writes its own rows. Who may call any verb —
+        `inject`/`dump` included — is the kernel's call gate alone.
 
-        **Access, nothing implicit:** `operator: true` serves the operator (as `kernel`);
-        `admins: [ids]` (`kernel` = the operator) may name another `owner` and may
-        `inject`/`dump`. Everyone else: own rows + grants. The kernel's call gate still
-        decides who may reach this agent at all.
-
-        **Same tables as sqlite:** rows `(owner, id)`, fold_refs, grants (FK cascade on
-        their anchor row), a text index. A durable store answers the same verbs.
+        **Same tables as sqlite:** rows `(owner, id)`, fold_refs (FK cascade on their
+        rows), a text index. A durable store answers the same verbs.
 
         """
 }

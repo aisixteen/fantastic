@@ -1,5 +1,5 @@
-// credential_store: secrets by ref, bound to a host, read only with a secret mark,
-// behind per-ref grants (owner, 2026-10-01). Twin of python
+// credential_store: secrets by ref, bound to a host, read by whoever the call gate
+// admits (owner, 2026-10-01). Twin of python
 // `security/credential_store/tests/test_credential_store.py`, plus the swift pins
 // (the file's bytes, the host normalization, the readme).
 //
@@ -18,8 +18,6 @@ import Testing
 
 private let KEY = "sk-live-0123456789abcdef"
 private let KEY2 = "sk-live-rotated-fedcba98"
-private let MARK_SET: JSON = .array([.string("payload.fields")])
-private let MARK_GET: JSON = .array([.string("result")])
 
 /// An in-memory keychain — never the real one.
 final class MemKeychain: KeychainStore, @unchecked Sendable {
@@ -96,12 +94,11 @@ private func create(_ k: Kernel, _ fields: OrderedDictionary<String, JSON>) asyn
 /// Python `_call`: one item to the store, as the operator or AS an agent.
 private func call(
     _ k: Kernel, _ payload: OrderedDictionary<String, JSON>, as sender: String? = nil,
-    secret: JSON? = nil, target: String = "creds"
+    target: String = "creds"
 ) async -> Outcome {
-    var it = Item(AgentId(target), .object(payload))
-    it.secret = secret
+    let it = Item(AgentId(target), .object(payload))
     if let sender {
-        return await KernelTaskLocals.$currentSender.withValue(AgentId(sender)) {
+        return await KernelTaskLocals.$sender.withValue(AgentId(sender)) {
             await k.send([it])[0]
         }
     }
@@ -124,18 +121,17 @@ private func declare(_ k: Kernel, _ refs: OrderedDictionary<String, JSON>) async
     #expect(out["updated"] == .bool(true), "\(out.serialize())")
 }
 
-/// Python `_seed`: the operator declares `openai/main` (alice its reader, bob its
-/// writer), then stores its value.
+/// Python `_seed`: the operator declares `openai/main`, then stores its value.
 @discardableResult
 private func seed(_ k: Kernel) async -> Outcome {
     await declare(
-        k, ["openai/main": ["host": "api.openai.com", "readers": ["alice"], "writers": ["bob"]]])
+        k, ["openai/main": ["host": "api.openai.com"]])
     let out = await call(
         k,
         [
             "type": "set", "ref": "openai/main",
             "fields": ["api_key": .string(KEY)],
-        ], secret: MARK_SET)
+        ])
     #expect(out.status == .completed, "\(out.asJSON.serialize())")
     return out
 }
@@ -178,117 +174,33 @@ struct CredentialStoreTests {
         #expect(rec["refs"]["openai/main"]["fields"] == ["api_key"])
     }
 
-    @Test func valuesMoveOnlyWithASecretMark() async throws {
-        let f = await mk()
-        defer { try? FileManager.default.removeItem(at: f.dir) }
-        let unmarked = await call(
-            f.k, ["type": "set", "ref": "r", "fields": ["api_key": .string(KEY)]])
-        #expect(unmarked.result["reason"] == "bad_arg")
-        #expect(unmarked.result["arg"] == "secret")
-        #expect(
-            unmarked.result["error"]
-                == .string(
-                    "credential_store set: mark the values secret — secret: ['payload.fields'] — "
-                        + "or they would be recorded in the ledger, the memory store and the "
-                        + "state stream"))
-        #expect(!FileManager.default.fileExists(atPath: f.file.path), "an unmarked set stores nothing")
-        await seed(f.k)
-        let unmarkedGet = await call(f.k, ["type": "get", "ref": "openai/main"])
-        #expect(unmarkedGet.result["arg"] == "secret", "\(unmarkedGet.result.serialize())")
-        let got = await call(f.k, ["type": "get", "ref": "openai/main"], secret: MARK_GET)
-        #expect(
-            got.result
-                == .object([
-                    "ref": "openai/main", "host": "api.openai.com",
-                    "fields": ["api_key": .string(KEY)],
-                ]), "\(got.result.serialize())")
-        #expect(!(await ledger(f.k)).serialize().contains(KEY), "the ledger must never hold the value")
-    }
-
-    /// A mark may be a dotted string or an array of steps (`Secret`): the store
-    /// accepts either, alone or mixed. A field name holding a dot is named only by
-    /// an array — `result.fields.x.y` is `x` → `y`, which would not mask it.
-    @Test func eitherSpellingOfAMarkCounts() async throws {
-        let f = await mk()
-        defer { try? FileManager.default.removeItem(at: f.dir) }
-        await declare(f.k, ["r1": ["host": "h"], "r2": ["host": "h"]])
-        var put = await call(
-            f.k, ["type": "set", "ref": "r1", "fields": ["api_key": .string(KEY)]],
-            secret: [["payload", "fields"]])
-        #expect(put.status == .completed, "\(put.asJSON.serialize())")
-        put = await call(
-            f.k,
-            [
-                "type": "set", "ref": "r2",
-                "fields": ["api_key": .string(KEY), "x.y": .string(KEY2)],
-            ], secret: ["payload.fields.api_key", ["payload", "fields", "x.y"]])
-        #expect(put.status == .completed, "\(put.asJSON.serialize())")
-        var got = await call(f.k, ["type": "get", "ref": "r1"], secret: [["result"]])
-        #expect(got.result["fields"] == ["api_key": .string(KEY)], "\(got.asJSON.serialize())")
-        got = await call(
-            f.k, ["type": "get", "ref": "r2"],
-            secret: [["result", "fields", "api_key"], ["result", "fields", "x.y"]])
-        #expect(
-            got.result["fields"] == ["api_key": .string(KEY), "x.y": .string(KEY2)],
-            "\(got.asJSON.serialize())")
-        // the dotted spelling of the dotted field name names `x` → `y`: refused
-        let bare = await call(
-            f.k, ["type": "get", "ref": "r2"],
-            secret: ["result.fields.api_key", "result.fields.x.y"])
-        #expect(
-            bare.result["reason"] == "bad_arg" && bare.result["arg"] == "secret",
-            "\(bare.asJSON.serialize())")
-        let led = (await ledger(f.k)).serialize()
-        #expect(!led.contains(KEY) && !led.contains(KEY2), "\(led)")
-    }
-
-    @Test func readersReadWritersRotateStrangersSeeNothing() async throws {
+    /// No per-ref access lists: whoever the call gate admits may `get`/`set` a
+    /// declared ref; a caller the store's `callable_by` does not name never
+    /// reaches the handler.
+    @Test func anyAdmittedCallerReadsAndRotatesAStrangerIsGated() async throws {
         let f = await mk()
         defer { try? FileManager.default.removeItem(at: f.dir) }
         await seed(f.k)
-        // a reader reads
-        let a = await call(f.k, ["type": "get", "ref": "openai/main"], as: "alice", secret: MARK_GET)
+        let a = await call(f.k, ["type": "get", "ref": "openai/main"], as: "alice")
         #expect(a.result["fields"] == ["api_key": .string(KEY)], "\(a.result.serialize())")
-        // a reader may not write — told so, since it knows the ref
-        let rotate: OrderedDictionary<String, JSON> = [
-            "type": "set", "ref": "openai/main",
-            "fields": ["api_key": .string(KEY2)],
-        ]
-        let w = await call(f.k, rotate, as: "alice", secret: MARK_SET)
-        #expect(w.result["reason"] == "unauthorized", "\(w.result.serialize())")
-        #expect(
-            w.result["error"] == "credential_store: alice may read 'openai/main' but not write it")
-        // a writer rotates; the reader's next read gets the new value
-        let r = await call(f.k, rotate, as: "bob", secret: MARK_SET)
+        let r = await call(
+            f.k, ["type": "set", "ref": "openai/main", "fields": ["api_key": .string(KEY2)]],
+            as: "alice")
         #expect(r.result["stored"] == true, "\(r.result.serialize())")
-        let a2 = await call(f.k, ["type": "get", "ref": "openai/main"], as: "alice", secret: MARK_GET)
-        #expect(a2.result["fields"] == ["api_key": .string(KEY2)])
-        // a stranger is answered as if the ref did not exist
-        let e = await call(f.k, ["type": "get", "ref": "openai/main"], as: "eve", secret: MARK_GET)
-        #expect(
-            e.result
-                == .object([
-                    "error": "credential_store: no such ref 'openai/main'", "reason": "not_found",
-                    "arg": "ref",
-                ]), "\(e.result.serialize())")
-        #expect((await call(f.k, ["type": "list"], as: "eve")).result == ["refs": []])
+        let b = await call(f.k, ["type": "get", "ref": "openai/main"], as: "bob")
+        #expect(b.result["fields"] == ["api_key": .string(KEY2)], "\(b.result.serialize())")
+        bare(f.k, "mallory")
+        let m = await call(f.k, ["type": "get", "ref": "openai/main"], as: "mallory")
+        #expect(m.result["reason"] == "unauthorized", "\(m.result.serialize())")
+        #expect(m.result["side"] == "ingress", "\(m.result.serialize())")
         // list is metadata only
         let listed = (await call(f.k, ["type": "list"], as: "alice")).result["refs"]
         #expect(
             listed
                 == .array([
-                    .object([
-                        "ref": "openai/main", "host": "api.openai.com", "fields": ["api_key"],
-                        "read": true, "write": false,
-                    ])
+                    .object(["ref": "openai/main", "host": "api.openai.com", "fields": ["api_key"]])
                 ]), "\(listed.serialize())")
         #expect(!listed.serialize().contains(KEY2))
-        // the operator's listing names the grants too
-        let op = (await call(f.k, ["type": "list"])).result["refs"][0]
-        #expect(
-            op.asObject.map { Array($0.keys) }
-                == ["ref", "host", "fields", "read", "write", "readers", "writers"])
-        #expect(op["readers"] == ["alice"] && op["writers"] == ["bob"])
     }
 
     /// A ref is declared ONLY by `update_agent` on the store's `refs`. `set` on an
@@ -301,7 +213,7 @@ struct CredentialStoreTests {
             "type": "set", "ref": "mine", "fields": ["token": .string(KEY)],
         ]
         for who in [nil, "maker"] as [String?] {
-            let nope = await call(f.k, put, as: who, secret: MARK_SET)
+            let nope = await call(f.k, put, as: who)
             #expect(
                 nope.result
                     == .object([
@@ -312,41 +224,19 @@ struct CredentialStoreTests {
         #expect((record(f.k)["refs"]?.asObject ?? [:])["mine"] == nil)
         #expect(
             !FileManager.default.fileExists(atPath: f.file.path), "an undeclared set stores nothing")
-        await declare(
-            f.k, ["mine": ["host": "x.example", "readers": ["maker"], "writers": ["maker"]]])
-        let made = await call(f.k, put, as: "maker", secret: MARK_SET)
+        await declare(f.k, ["mine": ["host": "x.example"]])
+        let made = await call(f.k, put, as: "maker")
         #expect(made.result["stored"] == true, "\(made.result.serialize())")
-        let got = await call(f.k, ["type": "get", "ref": "mine"], as: "maker", secret: MARK_GET)
+        let got = await call(f.k, ["type": "get", "ref": "mine"], as: "maker")
         #expect(got.result["fields"] == ["token": .string(KEY)], "\(got.result.serialize())")
-        // the grants the declaration named are the grants it keeps
         let entry = record(f.k)["refs"]?["mine"] ?? .null
-        #expect(entry["readers"] == ["maker"] && entry["writers"] == ["maker"], "\(entry.serialize())")
         #expect(
-            entry.asObject.map { Array($0.keys) } == ["host", "readers", "writers", "fields"],
+            entry.asObject.map { Array($0.keys) } == ["host", "fields"],
             "a set keeps the declaration's keys in place and adds the field names")
         var theirs = put
         theirs["ref"] = "theirs"
-        let nope = await call(f.k, theirs, as: "eve", secret: MARK_SET)
+        let nope = await call(f.k, theirs, as: "eve")
         #expect(nope.result["reason"] == "not_found", "\(nope.result.serialize())")
-    }
-
-    @Test func aSubtreeGrantCoversDescendants() async throws {
-        let f = await mk()
-        defer { try? FileManager.default.removeItem(at: f.dir) }
-        await seed(f.k)
-        bare(f.k, "child", parent: "alice")
-        var cb = record(f.k)["callable_by"]?.asObject ?? [:]
-        cb["child"] = "*"
-        var refs = record(f.k)["refs"]?.asObject ?? [:]
-        var entry = refs["openai/main"]?.asObject ?? [:]
-        entry["readers"] = ["$subtree:alice"]
-        refs["openai/main"] = .object(entry)
-        f.k.update(AgentId("creds"), ["refs": .object(refs), "callable_by": .object(cb)])
-        let got = await call(f.k, ["type": "get", "ref": "openai/main"], as: "child", secret: MARK_GET)
-        #expect(got.result["fields"] == ["api_key": .string(KEY)], "\(got.result.serialize())")
-        // a sibling is not under alice
-        let e = await call(f.k, ["type": "get", "ref": "openai/main"], as: "eve", secret: MARK_GET)
-        #expect(e.result["reason"] == "not_found")
     }
 
     /// AV-4 (audit 2026-10-03): a ref's host is its DECLARATION — written by
@@ -363,7 +253,7 @@ struct CredentialStoreTests {
             [
                 "type": "set", "ref": "openai/main", "host": "attacker.example",
                 "fields": ["api_key": .string(KEY2)],
-            ], as: "bob", secret: MARK_SET)
+            ], as: "bob")
         #expect(
             rebind.result
                 == .object([
@@ -380,12 +270,12 @@ struct CredentialStoreTests {
             [
                 "type": "set", "ref": "openai/main", "host": "api.openai.com",
                 "fields": ["api_key": .string(KEY2)],
-            ], secret: MARK_SET)
+            ])
         #expect(op.result["arg"] == "host", "\(op.result.serialize())")
         // a set with no host stores the value under the declared host
         let ok = await call(
             f.k, ["type": "set", "ref": "openai/main", "fields": ["api_key": .string(KEY2)]],
-            as: "bob", secret: MARK_SET)
+            as: "bob")
         #expect(
             ok.result
                 == .object([
@@ -394,7 +284,7 @@ struct CredentialStoreTests {
                 ]), "\(ok.result.serialize())")
         let got = await call(
             f.k, ["type": "get", "ref": "openai/main", "host": "https://api.openai.com/v1"],
-            as: "alice", secret: MARK_GET)
+            as: "alice")
         #expect(got.result["fields"] == ["api_key": .string(KEY2)], "\(got.result.serialize())")
     }
 
@@ -408,7 +298,7 @@ struct CredentialStoreTests {
                 "kernel",
                 .object([
                     "type": "update_agent", "id": "creds",
-                    "refs": ["nohost": ["readers": ["alice"]]],
+                    "refs": ["nohost": .object([:])],
                 ]))
         ])[0].result
         #expect(
@@ -421,9 +311,9 @@ struct CredentialStoreTests {
     }
 
     /// AV-5 (audit 2026-10-03): `forget` drops the VALUE — from the backend, with
-    /// its field names — and nothing else. The declaration (host, readers,
-    /// writers) is the operator's, written and removed by `update_agent` alone, so
-    /// a writer can no longer undeclare a ref nobody could then set again.
+    /// its field names — and nothing else. The declaration (host) is written and
+    /// removed by `update_agent` alone, so a caller can never undeclare a ref
+    /// nobody could then set again.
     @Test func forgetDropsTheValueAndKeepsTheDeclaration() async throws {
         let f = await mk()
         defer { try? FileManager.default.removeItem(at: f.dir) }
@@ -435,14 +325,10 @@ struct CredentialStoreTests {
         #expect(mode(f.file) == 0o600, "a rewrite keeps the file 0600")
         let entry = record(f.k)["refs"]?["openai/main"] ?? .null
         #expect(
-            entry
-                == .object([
-                    "host": declared["host"], "readers": declared["readers"],
-                    "writers": declared["writers"],
-                ]), "\(entry.serialize())")
+            entry == .object(["host": declared["host"]]), "\(entry.serialize())")
         // a reader now finds the ref declared and empty
         let empty = await call(
-            f.k, ["type": "get", "ref": "openai/main"], as: "alice", secret: MARK_GET)
+            f.k, ["type": "get", "ref": "openai/main"], as: "alice")
         #expect(
             empty.result
                 == .object([
@@ -452,13 +338,13 @@ struct CredentialStoreTests {
         // its writer sets it again, and the reader reads the new value
         let back = await call(
             f.k, ["type": "set", "ref": "openai/main", "fields": ["api_key": .string(KEY2)]],
-            as: "bob", secret: MARK_SET)
+            as: "bob")
         #expect(back.result["stored"] == true, "\(back.asJSON.serialize())")
         let got = await call(
-            f.k, ["type": "get", "ref": "openai/main"], as: "alice", secret: MARK_GET)
+            f.k, ["type": "get", "ref": "openai/main"], as: "alice")
         #expect(got.result["fields"] == ["api_key": .string(KEY2)], "\(got.result.serialize())")
-        // a stranger still sees no ref; undeclaring is update_agent's alone
-        let nope = await call(f.k, ["type": "forget", "ref": "openai/main"], as: "eve")
+        // an undeclared ref is not found; undeclaring is update_agent's alone
+        let nope = await call(f.k, ["type": "forget", "ref": "never/declared"], as: "eve")
         #expect(nope.result["reason"] == "not_found", "\(nope.result.serialize())")
     }
 
@@ -478,7 +364,7 @@ struct CredentialStoreTests {
         chmod(planted.path, 0o600)
         try FileManager.default.removeItem(at: f.file)
         symlink(planted.path, f.file.path)
-        let out = await call(f.k, ["type": "get", "ref": "openai/main"], secret: MARK_GET)
+        let out = await call(f.k, ["type": "get", "ref": "openai/main"])
         #expect(out.status == .failed, "\(out.asJSON.serialize())")
         #expect(
             (out.result["error"].asString ?? "").contains(
@@ -512,7 +398,7 @@ struct CredentialStoreTests {
         defer { try? FileManager.default.removeItem(at: f.dir) }
         await seed(f.k)
         chmod(f.file.path, 0o644)
-        let out = await call(f.k, ["type": "get", "ref": "openai/main"], secret: MARK_GET)
+        let out = await call(f.k, ["type": "get", "ref": "openai/main"])
         #expect(out.status == .failed, "\(out.asJSON.serialize())")
         let err = out.result["error"].asString ?? ""
         #expect(err.contains("mode 0600") && err.contains("0o644"), "\(err)")
@@ -536,8 +422,7 @@ struct CredentialStoreTests {
             ("openai/main", ["api_key": JSON.string("sk-x")]),
         ] as [(String, OrderedDictionary<String, JSON>)] {
             let out = await call(
-                f.k, ["type": "set", "ref": .string(ref), "fields": .object(fields)],
-                secret: MARK_SET)
+                f.k, ["type": "set", "ref": .string(ref), "fields": .object(fields)])
             #expect(out.status == .completed, "\(out.asJSON.serialize())")
         }
         #expect(
@@ -546,7 +431,7 @@ struct CredentialStoreTests {
                 + "  z/ref:\n    fields:\n      api_key: \(KEY)\n      token: tok-1\n"
                 + "    host: h.example\n")
         // the reply names the fields sorted
-        let back = await call(f.k, ["type": "get", "ref": "z/ref"], secret: MARK_GET)
+        let back = await call(f.k, ["type": "get", "ref": "z/ref"])
         #expect(back.result["fields"].asObject.map { Array($0.keys) } == ["api_key", "token"])
         // forgetting both leaves python's empty map
         _ = await call(f.k, ["type": "forget", "ref": "z/ref"])
@@ -608,8 +493,7 @@ struct CredentialStoreTests {
                 parentId: AgentId("kernel_state"),
                 meta: ["file": "creds.yaml", "refs": ["r": ["host": "h"]]]))
         let out = await call(
-            k, ["type": "set", "ref": "r", "fields": ["api_key": .string(KEY)]],
-            secret: MARK_SET, target: "sneaky")
+            k, ["type": "set", "ref": "r", "fields": ["api_key": .string(KEY)]], target: "sneaky")
         #expect(out.status == .failed, "\(out.asJSON.serialize())")
         #expect(
             out.result["error"]
@@ -635,7 +519,7 @@ struct CredentialStoreTests {
                     #"{"host": "api.openai.com", "fields": {"api_key": "\#(KEY)"}}"#
             ])
         #expect(!FileManager.default.fileExists(atPath: f.file.path), "no file is written")
-        let got = await call(f.k, ["type": "get", "ref": "openai/main"], secret: MARK_GET)
+        let got = await call(f.k, ["type": "get", "ref": "openai/main"])
         #expect(got.result["fields"] == ["api_key": .string(KEY)])
         _ = await call(f.k, ["type": "forget", "ref": "openai/main"])
         #expect(ring.items.isEmpty)
@@ -664,15 +548,15 @@ struct CredentialStoreTests {
             "backend": "env",
             "refs": [
                 "ci/key": [
-                    "readers": ["alice"], "host": "api.example", "env": ["api_key": "PATH"],
+                    "host": "api.example", "env": ["api_key": "PATH"],
                 ],
                 "ci/gone": [
-                    "readers": ["alice"], "host": "api.example", "env": ["api_key": .string(unset)],
+                    "host": "api.example", "env": ["api_key": .string(unset)],
                 ],
             ],
         ])
         defer { try? FileManager.default.removeItem(at: f.dir) }
-        let got = await call(f.k, ["type": "get", "ref": "ci/key"], as: "alice", secret: MARK_GET)
+        let got = await call(f.k, ["type": "get", "ref": "ci/key"], as: "alice")
         #expect(
             got.result
                 == .object([
@@ -683,9 +567,9 @@ struct CredentialStoreTests {
             [
                 "type": "set", "ref": "ci/key",
                 "fields": ["api_key": .string(KEY2)],
-            ], secret: MARK_SET)
+            ])
         #expect(w.result["arg"] == "backend", "\(w.result.serialize())")
-        let gone = await call(f.k, ["type": "get", "ref": "ci/gone"], as: "alice", secret: MARK_GET)
+        let gone = await call(f.k, ["type": "get", "ref": "ci/gone"], as: "alice")
         #expect(gone.status == .failed, "\(gone.asJSON.serialize())")
         #expect(
             gone.result["error"]
@@ -695,63 +579,6 @@ struct CredentialStoreTests {
         // the listing shows the env field names
         let listed = (await call(f.k, ["type": "list"], as: "alice")).result["refs"]
         #expect(listed[0]["fields"] == ["api_key"])
-    }
-
-    /// Audit BV-6/S4: the marks are judged against the fields the backend RETURNS,
-    /// not the declared names. An `env` map wider than `fields` returns a field no
-    /// per-field mark covered — refused.
-    @Test func perFieldMarksMustCoverEveryReturnedField() async throws {
-        // variables the process already has — no `setenv` in a threaded test
-        let path = try #require(ProcessInfo.processInfo.environment["PATH"])
-        let home = try #require(ProcessInfo.processInfo.environment["HOME"])
-        let f = await mk([
-            "backend": "env",
-            "refs": [
-                "ci/key": [
-                    "readers": ["alice"], "host": "api.example", "fields": ["api_key"],
-                    "env": ["api_key": "PATH", "extra": "HOME"],
-                ]
-            ],
-        ])
-        defer { try? FileManager.default.removeItem(at: f.dir) }
-        let one = await call(
-            f.k, ["type": "get", "ref": "ci/key"], as: "alice",
-            secret: ["result.fields.api_key"])
-        #expect(
-            one.result["reason"] == "bad_arg" && one.result["arg"] == "secret",
-            "\(one.asJSON.serialize())")
-        let both = await call(
-            f.k, ["type": "get", "ref": "ci/key"], as: "alice",
-            secret: ["result.fields.api_key", "result.fields.extra"])
-        #expect(
-            both.result["fields"] == ["api_key": .string(path), "extra": .string(home)],
-            "\(both.asJSON.serialize())")
-    }
-
-    /// The file variant of BV-6: a writer stored {api_key, extra}; the operator then
-    /// re-declared the ref with fields [api_key]. A get marking only api_key is
-    /// refused — `extra` is still returned by the backend.
-    @Test func perFieldMarksAfterANarrowerRedeclaration() async throws {
-        let f = await mk()
-        defer { try? FileManager.default.removeItem(at: f.dir) }
-        await declare(f.k, ["r": ["host": "h", "readers": ["alice"]]])
-        let put = await call(
-            f.k,
-            [
-                "type": "set", "ref": "r",
-                "fields": ["api_key": .string(KEY), "extra": .string(KEY2)],
-            ], secret: MARK_SET)
-        #expect(put.status == .completed, "\(put.asJSON.serialize())")
-        var entry = record(f.k)["refs"]?["r"].asObject ?? [:]
-        entry["fields"] = ["api_key"]
-        await declare(f.k, ["r": .object(entry)])
-        let one = await call(
-            f.k, ["type": "get", "ref": "r"], as: "alice", secret: ["result.fields.api_key"])
-        #expect(
-            one.result["reason"] == "bad_arg" && one.result["arg"] == "secret",
-            "\(one.asJSON.serialize())")
-        let led = (await ledger(f.k)).serialize()
-        #expect(!led.contains(KEY) && !led.contains(KEY2), "\(led)")
     }
 
     @Test func aBadRecordIsRefusedAtTheWrite() async throws {
@@ -771,12 +598,12 @@ struct CredentialStoreTests {
             (["file": "creds.yaml"], relative("creds.yaml")),
             (["file": " /x.yaml"], relative(" /x.yaml")),
             (["keychain_namespace": 5], "keychain_namespace must be a non-empty string"),
-            (["refs": ["a", "b"]], "refs must be a map of ref to {readers, writers, host, fields, env}"),
+            (["refs": ["a", "b"]], "refs must be a map of ref to {host, fields, env}"),
             (["refs": [" ": [:]]], "a ref must be a non-empty string"),
             (["refs": ["r": "x"]], "refs['r'] must be a map"),
-            (["refs": ["r": ["readers": "alice"]]], "refs['r'].readers must be a list of strings"),
+            (["refs": ["r": ["fields": "api_key"]]], "refs['r'].fields must be a list of strings"),
             (["refs": ["r": ["host": "  "]]], "refs['r'].host must be a non-empty host"),
-            (["refs": ["r": ["readers": ["alice"]]]], "refs['r'].host is required — the one host this ref's value may be sent to"),
+            (["refs": ["r": .object([:])]], "refs['r'].host is required — the one host this ref's value may be sent to"),
             (["refs": ["r": ["host": "h", "env": ["api_key": ""]]]], "refs['r'].env must map field names to variable names"),
         ]
         for (meta, text) in cases {
@@ -785,63 +612,12 @@ struct CredentialStoreTests {
         #expect(b.validateMeta(["backend": .null, "refs": ["r": ["host": "https://h/x"]]], record: [:]) == nil)
     }
 
-    /// The store stamps `holds_secrets: true` on its own record at boot (ai_core
-    /// refuses every model-parsed call to an agent so marked), shows it on
-    /// reflect, and refuses any other value at the write — create and update
-    /// alike.
-    ///
-    /// Two checks judge the value, in a FIXED order: the kernel's shape check
-    /// first (anything but `true`/`null` is malformed on every agent — its text),
-    /// then the store's `validateMeta` (it refuses `null`, the operator's clear,
-    /// on itself — the store's text). So `null` gets `holds` and every other
-    /// value the kernel's.
-    @Test func aStoreIsASecretHolderAndCannotStopBeingOne() async throws {
-        let holds = "holds_secrets must be true — a credential_store always holds secrets"
-        func shape(_ got: String) -> String {
-            "holds_secrets must be exactly true (this agent holds secrets) or null "
-                + "(the operator clears the mark) — got \(got)"
-        }
-        let f = await mk()
-        defer { try? FileManager.default.removeItem(at: f.dir) }
-        #expect(record(f.k)["holds_secrets"] == .bool(true))
-        let shown = await call(f.k, ["type": "reflect"])
-        #expect(shown.result["holds_secrets"] == .bool(true), "\(shown.result.serialize())")
-        let cases: [(JSON, String)] = [
-            (.null, holds), (false, shape("bool")), ("true", shape("str")), (1, shape("int")),
-        ]
-        for (bad, why) in cases {
-            let r = await f.k.send([
-                Item("kernel", .object(["type": "update_agent", "id": "creds", "holds_secrets": bad]))
-            ])[0].result
-            #expect(
-                r == .object(["error": .string(why), "reason": "invalid_meta", "id": "creds"]),
-                "\(bad.serialize()): \(r.serialize())")
-        }
-        #expect(record(f.k)["holds_secrets"] == .bool(true))
-        let ok = await f.k.send([
-            Item("kernel", .object(["type": "update_agent", "id": "creds", "holds_secrets": true]))
-        ])[0].result
-        #expect(ok["updated"] == .bool(true), "\(ok.serialize())")
-        for (bad, why) in [(JSON.null, holds), (JSON.bool(false), shape("bool"))] {
-            let r = await create(
-                f.k,
-                [
-                    "parent_id": "kernel_state",
-                    "handler_module": .string(CredentialStoreBundle.handlerModule),
-                    "id": "creds2", "holds_secrets": bad,
-                ])
-            #expect(
-                r == .object(["error": .string(why), "reason": "invalid_meta"]), "\(r.serialize())")
-            #expect(f.k.agent(AgentId("creds2")) == nil)
-        }
-    }
-
     // ─── the verbs' own refusals ────────────────────────────────────────────
 
     @Test func theArgumentRefusalsArePythons() async throws {
         let f = await mk()
         defer { try? FileManager.default.removeItem(at: f.dir) }
-        let noRef = await call(f.k, ["type": "set", "fields": ["k": "v"]], secret: nil)
+        let noRef = await call(f.k, ["type": "set", "fields": ["k": "v"]])
         #expect(
             noRef.result
                 == .object([
@@ -866,8 +642,7 @@ struct CredentialStoreTests {
         // each field marked one by one is a mark too
         await declare(f.k, ["r": ["host": "h"]])
         let perField = await call(
-            f.k, ["type": "set", "ref": "r", "fields": ["a": "1", "b": "2"]],
-            secret: ["payload.fields.a", "payload.fields.b"])
+            f.k, ["type": "set", "ref": "r", "fields": ["a": "1", "b": "2"]])
         #expect(perField.result["stored"] == true, "\(perField.result.serialize())")
         let getNoRef = await call(f.k, ["type": "get"])
         #expect(getNoRef.result["error"] == "credential_store get: ref required")
@@ -882,7 +657,7 @@ struct CredentialStoreTests {
                 ]))
         // a field-level mark on the answer
         let fieldMark = await call(
-            f.k, ["type": "get", "ref": "r"], secret: ["result.fields"])
+            f.k, ["type": "get", "ref": "r"])
         #expect(fieldMark.result["fields"] == ["a": "1", "b": "2"], "\(fieldMark.result.serialize())")
     }
 
@@ -891,8 +666,7 @@ struct CredentialStoreTests {
         defer { try? FileManager.default.removeItem(at: f.dir) }
         await seed(f.k)
         let evil = await call(
-            f.k, ["type": "get", "ref": "openai/main", "host": "https://evil.example.net/v1"],
-            secret: MARK_GET)
+            f.k, ["type": "get", "ref": "openai/main", "host": "https://evil.example.net/v1"])
         #expect(
             evil.result
                 == .object([
@@ -902,8 +676,7 @@ struct CredentialStoreTests {
                     "reason": "bad_arg", "arg": "host",
                 ]), "\(evil.result.serialize())")
         let ok = await call(
-            f.k, ["type": "get", "ref": "openai/main", "host": "https://API.openai.com/v1/responses"],
-            secret: MARK_GET)
+            f.k, ["type": "get", "ref": "openai/main", "host": "https://API.openai.com/v1/responses"])
         #expect(ok.result["fields"] == ["api_key": .string(KEY)], "\(ok.result.serialize())")
     }
 
@@ -936,7 +709,7 @@ struct CredentialStoreTests {
             ["type": "get", "ref": "openai/main"],
             ["type": "get", "ref": "openai/main", "host": "attacker.example"],
         ] {
-            let out = await call(f.k, payload, as: "alice", secret: MARK_GET)
+            let out = await call(f.k, payload, as: "alice")
             #expect(
                 out.result == atRest("openai/main", "api.openai.com", "attacker.example"),
                 "\(out.result.serialize())")
@@ -944,9 +717,9 @@ struct CredentialStoreTests {
         }
         let back = await call(
             f.k, ["type": "set", "ref": "openai/main", "fields": ["api_key": .string(KEY2)]],
-            as: "bob", secret: MARK_SET)
+            as: "bob")
         #expect(back.result["host"] == "attacker.example", "\(back.result.serialize())")
-        let got = await call(f.k, ["type": "get", "ref": "openai/main"], as: "alice", secret: MARK_GET)
+        let got = await call(f.k, ["type": "get", "ref": "openai/main"], as: "alice")
         #expect(
             got.result
                 == .object([
@@ -968,12 +741,11 @@ struct CredentialStoreTests {
                 "parent_id": "kernel_state",
                 "handler_module": .string(CredentialStoreBundle.handlerModule), "id": "other",
                 "file": .string(f.file.path),
-                "refs": ["openai/main": ["host": "blocked.invalid", "readers": ["eve"]]],
+                "refs": ["openai/main": ["host": "blocked.invalid"]],
             ])
         #expect(made["id"] == "other", "\(made.serialize())")
         let out = await call(
-            f.k, ["type": "get", "ref": "openai/main", "host": "blocked.invalid"],
-            secret: MARK_GET, target: "other")
+            f.k, ["type": "get", "ref": "openai/main", "host": "blocked.invalid"], target: "other")
         #expect(
             out.result == atRest("openai/main", "api.openai.com", "blocked.invalid"),
             "\(out.result.serialize())")
@@ -987,7 +759,7 @@ struct CredentialStoreTests {
         let ring = MemKeychain()
         let f = await mk(keychain: ring, ["backend": .string(backend)])
         defer { try? FileManager.default.removeItem(at: f.dir) }
-        await declare(f.k, ["openai/main": ["host": "api.openai.com", "readers": ["alice"]]])
+        await declare(f.k, ["openai/main": ["host": "api.openai.com"]])
         if backend == "file" {
             try "refs:\n  openai/main:\n    api_key: \(KEY)\n".write(
                 to: f.file, atomically: true, encoding: .utf8)
@@ -996,7 +768,7 @@ struct CredentialStoreTests {
             try ring.set(
                 service: "fantastic", account: "creds/openai/main", value: #"{"api_key": "\#(KEY)"}"#)
         }
-        let out = await call(f.k, ["type": "get", "ref": "openai/main"], as: "alice", secret: MARK_GET)
+        let out = await call(f.k, ["type": "get", "ref": "openai/main"], as: "alice")
         #expect(
             out.result
                 == .object([

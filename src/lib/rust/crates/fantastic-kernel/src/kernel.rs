@@ -534,25 +534,35 @@ impl Kernel {
         }
         let mut shut: Vec<String> = Vec::new();
         if !targets.is_empty() {
-            {
-                let items: Vec<crate::Item> = targets
-                    .iter()
-                    .map(|id| {
-                        crate::Item::new(id.clone(), json!({"type": "shutdown"}))
-                            .with_timeout(SHUTDOWN_VERB_TIMEOUT)
-                    })
-                    .collect();
-                // EXEMPT FROM THE DRAIN GATE: this IS the shutdown. And UNGATED:
-                // python sends under `shutdown_context(), operator_context()`, so
-                // every advertising agent is told at any depth — reached through
-                // the kernel verb, the sender would otherwise be the ROOT, whose
-                // baseline grant does not reach a grandchild.
-                let outs =
-                    crate::send::with_shutdown(crate::send::with_operator(self.send(items))).await;
-                for (id, o) in targets.iter().zip(outs.iter()) {
-                    if o.status == crate::outcome::Status::Completed {
-                        shut.push(id.0.clone());
+            // KERNEL BOOKKEEPING: each agent's handler is run directly
+            // ([`Self::bookkeeping`]) — no gate, so every advertising agent is told
+            // at any depth, whoever's dispatch carries the stop — all at once,
+            // each bounded, and EXEMPT FROM THE DRAIN GATE: this IS the shutdown.
+            let tell = |id: &AgentId| {
+                let agent = self.agents.get(id).map(|e| Arc::clone(&e));
+                async move {
+                    let Some(agent) = agent else {
+                        return crate::outcome::Status::Failed;
+                    };
+                    let told = self.bookkeeping(&agent, json!({"type": "shutdown"}), None);
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs_f64(SHUTDOWN_VERB_TIMEOUT),
+                        told,
+                    )
+                    .await
+                    {
+                        Ok(o) => o.status,
+                        Err(_) => crate::outcome::Status::TimedOut,
                     }
+                }
+            };
+            let outs = crate::send::with_shutdown(futures_util::future::join_all(
+                targets.iter().map(tell),
+            ))
+            .await;
+            for (id, status) in targets.iter().zip(outs) {
+                if status == crate::outcome::Status::Completed {
+                    shut.push(id.0.clone());
                 }
             }
         }
@@ -572,7 +582,7 @@ impl Kernel {
             if !self.tasks.is_root(&tid) {
                 continue;
             }
-            let out = crate::send::with_operator(self.cancel_task(&tid)).await;
+            let out = self.cancel_task(&tid).await;
             if let Some(killed) = out.get("killed").and_then(Value::as_array) {
                 cancelled.extend(killed.iter().cloned());
             }

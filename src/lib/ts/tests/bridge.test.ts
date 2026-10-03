@@ -7,6 +7,7 @@ import type { WebSocketLike } from "../src/transport/bridge.ts";
 import { encodeFrame, decodeFrame } from "../src/transport/frame.ts";
 import type { Envelope } from "../src/transport/frame.ts";
 import type { Payload } from "../src/kernel/json.ts";
+import { as, sendAs } from "./kit.ts";
 
 // ─── frame codec ──────────────────────────────────────────────────────────
 
@@ -305,9 +306,7 @@ test("correlators stay unique across many calls on one socket", async () => {
   bridge.close();
 });
 
-test("a call frame carries the QUALIFIED caller once the kernel has a guid", async () => {
-  // `<this kernel's guid>|<the agent that asked>` (`kernel` for the operator):
-  // the far side keys what the call writes by it. No guid yet ⇒ no field.
+test("a call frame names no caller — the host judges it as the leg it arrived through", async () => {
   const fk = fakeFactory();
   const k = kernelWithRoot();
   const bridge = new WsBridge(k, {
@@ -318,21 +317,15 @@ test("a call frame carries the QUALIFIED caller once the kernel has a guid", asy
   void k.send([{ target: "file_x", payload: { type: "list" } }]).catch(() => undefined);
   await until(() => fk.forEndpoint("kernel_state")[0]?.lastCall() !== undefined);
   const sock = fk.forEndpoint("kernel_state")[0]!;
-  assert.equal(sock.lastCall()!["caller"], undefined, "no guid, no caller");
+  assert.deepEqual(Object.keys(sock.lastCall()!).sort(), ["id", "payload", "target", "type"]);
 
+  // with a guid, and from an AGENT (which passes its own egress gate first):
+  // still no caller on the frame
   k.updateMeta(k.rootId!, { guid: "g-local" });
-  void k.send([{ target: "file_x", payload: { type: "list", n: 2 } }]).catch(() => undefined);
-  await until(() => (sock.lastCall()!["payload"] as { n?: number }).n === 2);
-  assert.equal(sock.lastCall()!["caller"], "g-local|kernel");
-
-  // an AGENT's host-bound call: it passes its own egress gate first, so the
-  // sender is a real agent holding the edge
   k.register(new Agent({ id: "frontend", parentId: "kernel_state", meta: { can_call: { file_x: ["list"] } } }));
-  void k.scopedFor("frontend", null)
-    .send([{ target: "file_x", payload: { type: "list", n: 3 } }])
-    .catch(() => undefined);
+  void sendAs(k, "frontend", [{ target: "file_x", payload: { type: "list", n: 3 } }]).catch(() => undefined);
   await until(() => (sock.lastCall()!["payload"] as { n?: number }).n === 3);
-  assert.equal(sock.lastCall()!["caller"], "g-local|frontend");
+  assert.deepEqual(Object.keys(sock.lastCall()!).sort(), ["id", "payload", "target", "type"]);
   bridge.close();
 });
 
@@ -357,9 +350,9 @@ test("the state stream has no body option — row events are not on it", async (
 });
 
 // ─── host-bound sends pass the SENDER's half of the gate here ───────────────
-// python `authorize_call` (egress, `enforce_privileged=True`) decides whether an
-// agent may SEND; the target's `callable_by` lives on the host and is the host's
-// to apply. Refused locally means NOTHING reaches the transport.
+// python `authorize_call` (egress) decides whether an agent may SEND; the
+// target's `callable_by` lives on the host and is the host's to apply. Refused
+// locally means NOTHING reaches the transport.
 
 function hostKernel(): { k: Kernel; bridge: WsBridge; fk: ReturnType<typeof fakeFactory>; frames: () => Envelope[] } {
   const fk = fakeFactory();
@@ -372,8 +365,7 @@ function hostKernel(): { k: Kernel; bridge: WsBridge; fk: ReturnType<typeof fake
 test("an agent WITHOUT can_call on a host agent is refused locally — no frame reaches the bridge", async () => {
   const { k, bridge, frames } = hostKernel();
   k.register(new Agent({ id: "view", parentId: "kernel_state" }));
-  // `$parent: "*"` (the baseline) names the LOCAL root, never a host agent
-  const [out] = await k.scopedFor("view", null).send([{ target: "pty1", payload: { type: "write", data: "ls" } }]);
+  const [out] = await sendAs(k, "view", [{ target: "pty1", payload: { type: "write", data: "ls" } }]);
   assert.equal(out!.status, "failed");
   assert.equal((out!.result as Payload)["reason"], "unauthorized");
   assert.equal((out!.result as Payload)["side"], "egress");
@@ -383,38 +375,38 @@ test("an agent WITHOUT can_call on a host agent is refused locally — no frame 
   bridge.close();
 });
 
-test("WITH the grant the call is forwarded, carrying the agent as its caller", async () => {
+test("WITH the grant the call is forwarded", async () => {
   const { k, bridge, fk } = hostKernel();
   k.updateMeta(k.rootId!, { guid: "g1" });
   k.register(new Agent({ id: "view", parentId: "kernel_state", meta: { can_call: { pty1: ["write"] } } }));
-  const p = k.scopedFor("view", null).send([{ target: "pty1", payload: { type: "write", data: "ls" } }]);
+  const p = sendAs(k, "view", [{ target: "pty1", payload: { type: "write", data: "ls" } }]);
   await until(() => fk.forEndpoint("kernel_state")[0]?.lastCall() !== undefined);
   const sock = fk.forEndpoint("kernel_state")[0]!;
   const call = sock.lastCall()!;
   assert.equal(call["target"], "pty1");
-  assert.equal(call["caller"], "g1|view");
+  assert.equal("caller" in call, false);
   sock.deliver({ type: "reply", id: call["id"], data: { ok: true } });
   const [out] = await p;
   assert.equal(out!.status, "completed");
   // the grant is per VERB: another verb to the same host agent is refused here
-  const [other] = await k.scopedFor("view", null).send([{ target: "pty1", payload: { type: "resize" } }]);
+  const [other] = await sendAs(k, "view", [{ target: "pty1", payload: { type: "resize" } }]);
   assert.equal((other!.result as Payload)["side"], "egress");
   bridge.close();
 });
 
-test("a privileged verb to a host agent crosses only on a NAMED grant (a12)", async () => {
+test("a tree verb to a host agent is gated like any verb — refused without the grant, forwarded with it", async () => {
   const { k, bridge, frames } = hostKernel();
   // no grant naming host_root: refused locally, nothing leaves the kernel
   k.register(new Agent({ id: "view", parentId: "kernel_state" }));
-  for (const verb of ["create_agent", "update_agent", "delete_agent", "state_subscribe", "allow", "disallow"]) {
-    const [out] = await k.scopedFor("view", null).send([{ target: "host_root", payload: { type: verb } }]);
+  for (const verb of ["create_agent", "update_agent", "delete_agent", "state_subscribe"]) {
+    const [out] = await sendAs(k, "view", [{ target: "host_root", payload: { type: verb } }]);
     assert.equal((out!.result as Payload)["side"], "egress", verb);
   }
   await new Promise((r) => setTimeout(r, 10));
-  assert.deepEqual(frames(), [], "no privileged call left the kernel");
-  // a NAMED id's `*` is the operator's own statement — it covers the verb
+  assert.deepEqual(frames(), [], "no refused call left the kernel");
+  // `*` covers every verb
   k.updateMeta("view", { can_call: { host_root: "*" } });
-  void k.scopedFor("view", null).send([{ target: "host_root", payload: { type: "delete_agent", id: "x" } }]).catch(() => undefined);
+  void sendAs(k, "view", [{ target: "host_root", payload: { type: "delete_agent", id: "x" } }]).catch(() => undefined);
   await until(() => frames().length === 1);
   assert.equal(frames()[0]!["target"], "host_root");
   bridge.close();
@@ -426,10 +418,9 @@ test("the operator forwards ungated; callHost and forwardBinary are host-bound s
   void k.callHost("kernel", { type: "reflect" }).catch(() => undefined);
   await until(() => frames().length === 2);
   k.register(new Agent({ id: "view", parentId: "kernel_state" }));
-  const asView = k.scopedFor("view", null);
-  const viaCallHost = await asView.callHost("kernel", { type: "create_agent", handler_module: "x.tools" });
+  const viaCallHost = await as(k, "view", (v) => v.callHost("kernel", { type: "create_agent", handler_module: "x.tools" }));
   assert.equal((viaCallHost as Payload)["side"], "egress");
-  const viaBinary = await asView.forwardBinary("pty1", { type: "paste_image", image: new Uint8Array([1]) });
+  const viaBinary = await as(k, "view", (v) => v.forwardBinary("pty1", { type: "paste_image", image: new Uint8Array([1]) }));
   assert.equal((viaBinary as Payload)["side"], "egress");
   await new Promise((r) => setTimeout(r, 10));
   assert.equal(frames().length, 2, "the refused agent calls never reached the bridge");
@@ -439,7 +430,10 @@ test("the operator forwards ungated; callHost and forwardBinary are host-bound s
 // ─── the PEER role: the host calling THIS kernel's agents ───────────────────
 // (cross-kernel addressing, owner 2026-09-30: the host addresses a page agent as
 // `<page guid>|<agent>`; the page kernel answers `call` frames on the conn that
-// said `hello`, gated by the target's `callable_by` against the qualified caller)
+// said `hello`). A call a bridge serves is judged as the LEG it arrived through:
+// this bridge is the kernel's own transport, not an agent, so it hands the call
+// in as the OPERATOR — the host's own `can_call` decided its agent may reach this
+// kernel. Only this kernel's own agents are reachable.
 
 function pageKernel(guid: string | null): Kernel {
   const k = new Kernel();
@@ -448,12 +442,10 @@ function pageKernel(guid: string | null): Kernel {
     new Agent({
       id: "canvas",
       parentId: "kernel_state",
-      meta: { callable_by: { "h0|*": ["around"] } },
       handler: (_id, payload) =>
         payload["type"] === "around" ? { cells: ["a", "b"], radius: payload["radius"] ?? null } : { error: "no" },
     }),
   );
-  k.register(new Agent({ id: "secret", parentId: "kernel_state", handler: () => ({ ok: true }) }));
   return k;
 }
 
@@ -476,7 +468,7 @@ test("the control socket says hello with the kernel's guid — on open, and when
   bridge.close();
 });
 
-test("a host call is answered by the page kernel, gated by the target's callable_by", async () => {
+test("a host call is answered by the page kernel as the operator; only its own agents are reachable", async () => {
   const fk = fakeFactory();
   const k = pageKernel("p1");
   const bridge = new WsBridge(k, { origin: "ws://host", controlEndpoint: "kernel_state", makeSocket: fk.factory });
@@ -484,35 +476,32 @@ test("a host call is answered by the page kernel, gated by the target's callable
   await until(() => fk.forEndpoint("kernel_state")[0]?.sent.some((f) => f["type"] === "hello") ?? false);
   const sock = fk.forEndpoint("kernel_state")[0]!;
 
-  // accepted: `h0|*` on canvas's callable_by names every agent of kernel h0
-  sock.deliver({ type: "call", id: "h1", target: "canvas", payload: { type: "around", radius: 3 }, caller: "h0|cell_7" });
+  sock.deliver({ type: "call", id: "h1", target: "canvas", payload: { type: "around", radius: 3 } });
   await until(() => repliesTo(sock, "h1") !== undefined);
   assert.deepEqual(repliesTo(sock, "h1")!["data"], { cells: ["a", "b"], radius: 3 });
+  // the call ran with no origin: the execution's caller is the operator
+  const led = [...k.ledger.executions.values()].find((e) => e.target === "canvas")!;
+  assert.equal(led.caller, null);
 
-  // a verb canvas does not accept from h0, and an agent that accepts nobody there
-  sock.deliver({ type: "call", id: "h2", target: "canvas", payload: { type: "clear" }, caller: "h0|cell_7" });
-  sock.deliver({ type: "call", id: "h3", target: "secret", payload: { type: "read" }, caller: "h0|cell_7" });
-  await until(() => repliesTo(sock, "h2") !== undefined && repliesTo(sock, "h3") !== undefined);
-  for (const id of ["h2", "h3"]) {
-    const d = repliesTo(sock, id)!["data"] as Payload;
-    assert.equal(d["reason"], "unauthorized", id);
-    assert.equal(d["side"], "ingress", id);
-  }
+  // a `caller` on the frame names nobody here — the handler's answer comes back
+  sock.deliver({ type: "call", id: "h2", target: "p1|canvas", payload: { type: "clear" }, caller: "h0|cell_7" });
+  await until(() => repliesTo(sock, "h2") !== undefined);
+  assert.deepEqual(repliesTo(sock, "h2")!["data"], { error: "no" });
 
   // only THIS kernel's agents are reachable — never through to the host again
-  sock.deliver({ type: "call", id: "h4", target: "file_x", payload: { type: "list" }, caller: "h0|cell_7" });
+  sock.deliver({ type: "call", id: "h4", target: "file_x", payload: { type: "list" } });
   await until(() => repliesTo(sock, "h4") !== undefined);
   assert.equal((repliesTo(sock, "h4")!["data"] as Payload)["reason"], "unknown_agent");
 
-  // a caller claiming THIS kernel's own guid would borrow a local agent's grants
-  sock.deliver({ type: "call", id: "h5", target: "canvas", payload: { type: "around" }, caller: "p1|canvas" });
+  // a frame with no target is refused, and the socket stays
+  sock.deliver({ type: "call", id: "h5", payload: { type: "around" } });
   await until(() => repliesTo(sock, "h5") !== undefined);
   assert.equal((repliesTo(sock, "h5")!["data"] as Payload)["reason"], "bad_arg");
   bridge.close();
 });
 
 // owner 2026-10-03: every emit and reply for an identity reaches all its tabs
-test("a host emit frame is delivered gated like a host call; refused or malformed ones are dropped", async () => {
+test("a host emit frame is delivered to this kernel's agent; malformed or unknown-target ones are dropped", async () => {
   const fk = fakeFactory();
   const k = pageKernel("p1");
   const bridge = new WsBridge(k, { origin: "ws://host", controlEndpoint: "kernel_state", makeSocket: fk.factory });
@@ -520,21 +509,16 @@ test("a host emit frame is delivered gated like a host call; refused or malforme
   await until(() => fk.forEndpoint("kernel_state")[0]?.sent.some((f) => f["type"] === "hello") ?? false);
   const sock = fk.forEndpoint("kernel_state")[0]!;
   const canvas: Payload[] = [];
-  const secret: Payload[] = [];
   k.onInbox("canvas", (pl) => canvas.push(pl));
-  k.onInbox("secret", (pl) => secret.push(pl));
 
-  sock.deliver({ type: "emit", target: "canvas", payload: { type: "around", n: 1 }, caller: "h0|cell_7" });
-  sock.deliver({ type: "emit", target: "canvas", payload: { type: "clear" }, caller: "h0|cell_7" }); // verb refused
-  sock.deliver({ type: "emit", target: "secret", payload: { type: "read" }, caller: "h0|cell_7" }); // accepts nobody
-  sock.deliver({ type: "emit", target: "canvas", payload: { type: "around" }, caller: "p1|canvas" }); // own guid
-  sock.deliver({ type: "emit", target: "canvas", payload: { n: 2 }, caller: "h0|cell_7" }); // no verb
-  sock.deliver({ type: "emit", target: "canvas", payload: { type: "around", n: 3 } }); // the host operator
+  sock.deliver({ type: "emit", target: "canvas", payload: { type: "around", n: 1 } });
+  sock.deliver({ type: "emit", target: "canvas", payload: { n: 2 } }); // no verb
+  sock.deliver({ type: "emit", target: "nobody", payload: { type: "around" } }); // not here
+  sock.deliver({ type: "emit", target: "p1|canvas", payload: { type: "around", n: 3 }, caller: "h0|cell_7" });
   assert.deepEqual(canvas, [{ type: "around", n: 1 }, { type: "around", n: 3 }]);
-  assert.deepEqual(secret, []);
 
   // the socket survived every dropped frame
-  sock.deliver({ type: "call", id: "h9", target: "canvas", payload: { type: "around" }, caller: "h0|cell_7" });
+  sock.deliver({ type: "call", id: "h9", target: "canvas", payload: { type: "around" } });
   await until(() => repliesTo(sock, "h9") !== undefined);
   bridge.close();
 });

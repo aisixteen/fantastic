@@ -13,7 +13,9 @@ from __future__ import annotations
 import asyncio
 import types
 
-from kernel import sender_context, register_unlisted
+from kernel import register_unlisted
+
+from _testkit import as_agent
 
 _reached: list = []
 _go: dict = {}
@@ -305,7 +307,7 @@ async def test_a_named_join_is_gated_on_the_original_verb(seeded_kernel):
     _mk(k, "svc", callable_by={"j": ["safe"]})
     _mk(k, "j", can_call={"svc": ["safe"]})
     await _one(k, {"target": "svc", "payload": {"type": "secret_verb"}, "id": "gj"})
-    with sender_context("j"):
+    with as_agent(seeded_kernel, "j"):
         r = _refused(
             await _one(k, {"target": "svc", "payload": {"type": "safe"}, "id": "gj"})
         )

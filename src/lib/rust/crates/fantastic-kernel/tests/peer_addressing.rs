@@ -61,32 +61,19 @@ fn kernel(tmp: &TempDir, guid: Option<&str>) -> Arc<Kernel> {
     kernel
 }
 
-type Calls = Arc<Mutex<Vec<(String, Value, String)>>>;
-
-/// The `secret` marks each call handed the route, in call order.
-type Marks = Arc<Mutex<Vec<Vec<Value>>>>;
+type Calls = Arc<Mutex<Vec<(String, Value)>>>;
 
 /// A fake route that records every call and answers `reply` (or `{ok: agent}`).
 fn route(via: &str, calls: &Calls, reply: Option<Value>) -> Arc<PeerRoute> {
-    route_marked(via, calls, reply, &Marks::default())
-}
-
-/// [`route`], also recording the `secret` marks of every call.
-fn route_marked(via: &str, calls: &Calls, reply: Option<Value>, marks: &Marks) -> Arc<PeerRoute> {
     let calls = Arc::clone(calls);
-    let marks = Arc::clone(marks);
     PeerRoute::new(
         via,
-        move |agent_id, payload, caller, secret, _body| {
-            calls
-                .lock()
-                .unwrap()
-                .push((agent_id.clone(), payload, caller));
-            marks.lock().unwrap().push(secret);
+        move |agent_id, payload, _body| {
+            calls.lock().unwrap().push((agent_id.clone(), payload));
             let r = reply.clone().unwrap_or_else(|| json!({"ok": agent_id}));
             Box::pin(async move { (r, None) })
         },
-        |_, _, _, _| Box::pin(async {}),
+        |_, _, _| Box::pin(async {}),
     )
 }
 
@@ -100,7 +87,7 @@ async fn send(k: &Arc<Kernel>, target: &str, payload: Value, as_: Option<&str>) 
     let item = vec![Item::new(AgentId::from(target), payload)];
     match as_ {
         None => k.send(item).await.remove(0),
-        Some(s) => fantastic_kernel::send::with_sender(AgentId::from(s), k.send(item))
+        Some(s) => fantastic_kernel::test_support::as_agent(AgentId::from(s), k.send(item))
             .await
             .remove(0),
     }
@@ -112,7 +99,7 @@ async fn create(k: &Arc<Kernel>, rec: Value) {
 }
 
 #[tokio::test]
-async fn an_operator_send_reaches_the_peer_agent_as_this_kernel() {
+async fn an_operator_send_reaches_the_peer_agent() {
     let tmp = TempDir::new().unwrap();
     let k = kernel(&tmp, Some(HOST));
     let calls = Calls::default();
@@ -123,73 +110,7 @@ async fn an_operator_send_reaches_the_peer_agent_as_this_kernel() {
     assert_eq!(out.result, json!({"cells": [1, 2]}));
     assert_eq!(
         *calls.lock().unwrap(),
-        vec![("canvas".to_string(), payload, format!("{HOST}|kernel"))]
-    );
-}
-
-/// The route gets the item's `secret` marks verbatim (rooted at the item, as the
-/// peer's item is), so the PEER masks its records; this kernel masks its own.
-#[tokio::test]
-async fn the_items_secret_marks_ride_to_the_peer() {
-    let tmp = TempDir::new().unwrap();
-    let k = kernel(&tmp, Some(HOST));
-    let calls = Calls::default();
-    let marks = Marks::default();
-    let r = route_marked("leg", &calls, Some(json!({"ok": true})), &marks);
-    k.register_peer(PAGE, &r);
-    let key = "sk-peer-0123456789";
-    let target = format!("{PAGE}|creds");
-    let out = k
-        .send(vec![Item::new(
-            AgentId::from(target.as_str()),
-            json!({"type": "set", "fields": {"api_key": key}}),
-        )
-        .with_secret(json!(["payload.fields", "result"]))])
-        .await
-        .remove(0);
-    assert_eq!(out.status.as_str(), "completed", "{:?}", out.result);
-    assert_eq!(
-        *calls.lock().unwrap(),
-        vec![(
-            "creds".to_string(),
-            json!({"type": "set", "fields": {"api_key": key}}),
-            format!("{HOST}|kernel")
-        )]
-    );
-    assert_eq!(
-        *marks.lock().unwrap(),
-        vec![vec![json!("payload.fields"), json!("result")]]
-    );
-    let row = k
-        .rows
-        .get_one(out.pid.unwrap().get())
-        .expect("the call row");
-    assert_eq!(row["payload"]["fields"], json!("<secret>"), "{row:?}");
-    // an unmarked call hands the route no marks
-    send(&k, &target, json!({"type": "reflect"}), None).await;
-    assert_eq!(marks.lock().unwrap().last(), Some(&Vec::new()));
-    // an ARRAY of steps rides as given — an array, beside a dotted string
-    let out = k
-        .send(vec![Item::new(
-            AgentId::from(target.as_str()),
-            json!({"type": "set", "fields": {"a.b": key}}),
-        )
-        .with_secret(json!([["payload", "fields", "a.b"], "result"]))])
-        .await
-        .remove(0);
-    assert_eq!(out.status.as_str(), "completed", "{:?}", out.result);
-    assert_eq!(
-        marks.lock().unwrap().last(),
-        Some(&vec![json!(["payload", "fields", "a.b"]), json!("result")])
-    );
-    let row = k
-        .rows
-        .get_one(out.pid.unwrap().get())
-        .expect("the call row");
-    assert_eq!(
-        row["payload"]["fields"],
-        json!({"a.b": "<secret>"}),
-        "{row:?}"
+        vec![("canvas".to_string(), payload)]
     );
 }
 
@@ -235,11 +156,7 @@ async fn an_agent_needs_the_qualified_target_in_its_can_call() {
         let ok = send(&k, &canvas, json!({"type": "around"}), Some(sender)).await;
         assert_eq!(ok.status.as_str(), "completed", "{sender}: {:?}", ok.result);
     }
-    let callers: Vec<String> = calls.lock().unwrap().iter().map(|c| c.2.clone()).collect();
-    assert_eq!(
-        callers,
-        vec![format!("{HOST}|named"), format!("{HOST}|wild")]
-    );
+    assert_eq!(calls.lock().unwrap().len(), 2);
     // a verb the grant does not name is refused at egress too
     let denied = send(&k, &canvas, json!({"type": "clear"}), Some("named")).await;
     assert_eq!(denied.result["side"], "egress", "{:?}", denied.result);
@@ -340,11 +257,11 @@ fn tab(
     let name = name.to_string();
     let r = PeerRoute::new(
         format!("leg_{name}"),
-        move |agent_id, payload, caller, _s, _b| {
+        move |agent_id, payload, _b| {
             calls
                 .lock()
                 .unwrap()
-                .push((format!("{name}:{agent_id}"), payload, caller));
+                .push((format!("{name}:{agent_id}"), payload));
             let rx = answer.lock().unwrap().take().expect("one call per tab");
             let flag = DropFlag(Arc::clone(&dropped));
             Box::pin(async move {
@@ -352,7 +269,7 @@ fn tab(
                 (rx.await.unwrap_or(Value::Null), None)
             })
         },
-        |_, _, _, _| Box::pin(async {}),
+        |_, _, _| Box::pin(async {}),
     );
     k.register_peer(PAGE, &r);
     r
@@ -386,16 +303,11 @@ async fn a_call_reaches_every_tab_and_settles_with_the_first_reply() {
     }
     let mut seen = calls.lock().unwrap().clone();
     seen.sort_by(|x, y| x.0.cmp(&y.0));
-    let caller = format!("{HOST}|kernel");
     assert_eq!(
         seen,
         vec![
-            (
-                "a:canvas".to_string(),
-                json!({"type": "around"}),
-                caller.clone()
-            ),
-            ("b:canvas".to_string(), json!({"type": "around"}), caller),
+            ("a:canvas".to_string(), json!({"type": "around"})),
+            ("b:canvas".to_string(), json!({"type": "around"})),
         ]
     );
     b_tx.send(json!({"from": "b"})).unwrap();
@@ -434,8 +346,11 @@ async fn a_disconnected_tab_leaves_the_identity_routable() {
     assert_eq!(who, vec!["b:canvas".to_string()]);
 }
 
+/// A call to a peer carries NO caller: the peer judges what arrives as the leg
+/// that serves it there, so this kernel's guid is not on the call — and a kernel
+/// whose root never minted one reaches the peer the same.
 #[tokio::test]
-async fn a_kernel_with_no_guid_cannot_say_who_is_calling() {
+async fn a_peer_call_names_no_caller() {
     let tmp = TempDir::new().unwrap();
     let k = kernel(&tmp, None);
     let calls = Calls::default();
@@ -447,15 +362,11 @@ async fn a_kernel_with_no_guid_cannot_say_who_is_calling() {
         None,
     )
     .await;
-    assert!(
-        out.result["error"]
-            .as_str()
-            .unwrap()
-            .contains("no guid yet"),
-        "{:?}",
-        out.result
+    assert_eq!(out.status.as_str(), "completed", "{:?}", out.result);
+    assert_eq!(
+        *calls.lock().unwrap(),
+        vec![("canvas".to_string(), json!({"type": "around"}))]
     );
-    assert!(calls.lock().unwrap().is_empty());
 }
 
 // ── rust-only pins (python diverges; see the port report) ───────────────

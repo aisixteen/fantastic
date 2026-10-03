@@ -199,14 +199,9 @@ public final class AIBackend: @unchecked Sendable {
         // A new thread on the same store: the view starts here, nothing is deleted.
         case "context_clear":
             return try await contextClear(agent: agent, payload: payload, kernel: kernel)
-        // CONTEXT BY GRANT: start from another agent's shared rows; ask an owner.
-        case "fork_from":
-            return try await forkFrom(agent: agent, payload: payload, kernel: kernel)
-        case "request_share":
-            return requestShare(agent: agent, payload: payload, kernel: kernel)
         // THE ROW EVENT: this agent announces its own rows to its watchers.
         case "watch":
-            return try await watchVerb(agent: agent, payload: payload, kernel: kernel)
+            return watchVerb(agent: agent, payload: payload, kernel: kernel)
         case "unwatch":
             return unwatchVerb(agent: agent, payload: payload, kernel: kernel)
         case "status":
@@ -258,7 +253,7 @@ public final class AIBackend: @unchecked Sendable {
     /// so an id re-created later starts clean and nothing leaks (audit ARCH2-2):
     /// the FIFO lock and queue, the in-flight entry, the projection and its
     /// marks, the fold and recall counters, the calibration, the silent streaks,
-    /// the strip set, and this kernel's head, bodies, grants and watchers.
+    /// the strip set, and this kernel's head, bodies and watchers.
     /// Python `on_delete`.
     ///
     /// NOT the incarnation: it stays monotonic across a re-create, so a reply to
@@ -347,9 +342,7 @@ public final class AIBackend: @unchecked Sendable {
         "grep": .string("args: query:str (req — case-insensitive substring), ids:list[int]? (row ids / pids / fold ids to search; a fold id searches its members), limit:int? (matches, default: as many as fit inline), width:int? (chars of each matched line returned, from its start; default 200 — raise it when the value you need sits deep in a long line). Finds the LINE that mentions something ANYWHERE in your memory — every row you ever wrote or received (behind every clear, inside every fold), the rows other agents SHARED with you, and the reply bodies still held in memory this run. Returns {matches:[{id, line, text}], total, truncated}."),
         "context_recall": .string("args: dry:bool? (mechanical fit only — no model call). Rebuild this agent's VIEW from its store: fit the head to the budget at digest resolution, then ask the model which rows it wants in full, persist the id list, log the decision as a row, and drop RAM scratch. Runs on boot, after a fold batch, or on request. Returns {kept, expanded, dropped, budget, why, degraded}."),
         "context_clear": .string("args: why:str? — start a NEW THREAD on the same store: a CLEAR-FOLD — one row whose members are every row since the previous clear (no summary) — and the model's view begins at its `[cleared <id> · N rows]` line. Nothing is deleted or forgotten: grep, recall and `history {fold: <id>}` reach every member. Empties the persisted view and drops RAM scratch (projection, fold counters, pending recall). Returns {cleared:id, rows:N}."),
-        "fork_from": .string("args: owner:str (req), grant:int (req — the grant `owner` gave you), message:str (req — the task this fork starts on), client_id:str?. Makes THIS agent a fork of `owner`'s thread: the granted rows become read-only context in your view — read back under the grant every turn, so a revoked grant fails your next turn — followed by the framing line and `message`, and the turn STARTS AT ONCE. Returns {forked:true, fork:<row id>, rows:N}."),
-        "request_share": .string("args: row:int (req), why:str?. Asks THIS agent — the OWNER of `row` — to share it with the caller. The owner's model decides: it calls its store's `share`, or declines. Arrives as a turn; returns {requested:true} at once."),
-        "watch": .string("args: body:bool? (default false), watcher:str? (operator only — an inbox id to deliver to). Announce every row this agent appends to YOUR inbox as {type:'row', source, row:{id, kind, role, bytes}} — content-free; with body:true the row's `content` too, but only for rows a live grant from this agent gives you (share). Needs a registered inbox. Returns {watching:true, watcher, body}."),
+        "watch": .string("args: body:bool? (default false), watcher:str? (operator only — an inbox id to deliver to). Announce every row this agent appends to YOUR inbox as {type:'row', source, row:{id, kind, role, bytes}} — content-free; with body:true the row's `content` too. Needs a registered inbox. Returns {watching:true, watcher, body}."),
         "unwatch": .string("args: watcher:str? (operator only). Stop announcing rows to you. Returns {watching:false}."),
         "boot": .string("LAZY: never touches the memory store. Checks the record names one (fail loud otherwise), starts a new incarnation, and marks the view for rebuilding — the first turn reads the head from the store and runs `context_recall`."),
     ]
@@ -1198,7 +1191,7 @@ public final class AIBackend: @unchecked Sendable {
     /// `system_prompt` does. The conversation is ALWAYS this agent's
     /// own (its memory store): there is no caller-supplied history — a one-off
     /// completion is a disposable agent with its own store; context for another
-    /// agent travels in the text, or by grant (`share` → `fork_from`).
+    /// agent travels in the text.
     ///
     /// Returns `(messages, storeLen)` — `storeLen` is how many turns the head held
     /// when this view was built. The view is deduped and trimmed, so its length

@@ -3,10 +3,8 @@
 // `tree=all` with `detail != full` answers `{id, sentence?, description?, mode?,
 // children}` — what each agent is FOR, not how it is wired. The sentence is
 // ASKED FROM THE AGENT ITSELF through a real internal dispatch, so it cannot
-// drift from what the agent says; and the walk is GATED one node at a time,
-// because dispatching reflect directly let any caller allowed to reflect ONE
-// agent read every descendant's sentence and description through the tree
-// (measured 2026-09-02).
+// drift from what the agent says. A reflect that passes the gate returns the
+// tree WHOLE — no per-node hiding (owner decision 2026-10-03, minimal gate).
 
 import FantasticJSON
 import Foundation
@@ -68,16 +66,6 @@ struct RosterGateTests {
         return r
     }
 
-    /// `$self` / `$parent` / `$children` restated, plus the named edges — an
-    /// explicit grant REPLACES the baseline, it does not merge with it.
-    private func grant(_ extra: [String: JSON]) -> JSON {
-        var o: OrderedDictionary<String, JSON> = [
-            "$self": .string("*"), "$parent": .string("*"), "$children": .string("*"),
-        ]
-        for (k, v) in extra { o[k] = v }
-        return .object(o)
-    }
-
     // ── shape ───────────────────────────────────────────────────
 
     @Test func distilledTreeCarriesPurposeNotWiring() async {
@@ -123,77 +111,30 @@ struct RosterGateTests {
 
     // ── the gate ────────────────────────────────────────────────
 
-    @Test func theRosterOmitsWhatTheCallerMayNotReflect() async {
+    /// The gate judges the reflect ONCE, on its target; past it the tree is
+    /// whole, the distilled roster and `detail:"full"` alike.
+    @Test func aReflectThatPassesTheGateReturnsTheTreeWhole() async {
         let k = makeKernel()
-        await mk(k, "caller", meta: [("can_call", grant(["open": .array([.string("reflect")])]))])
-        await mk(
-            k, "open",
-            meta: [("callable_by", grant(["caller": .array([.string("reflect")])]))])
-        await mk(k, "secret", meta: [("description", .string("the thing nobody may read"))])
-
+        await mk(k, "caller")
+        wire(k, "caller", "kernel_state", ["reflect"])
+        await mk(k, "secret", meta: [("description", .string("a description"))])
         let r = await k.sendAs(
             sender: AgentId("caller"), target: AgentId("kernel"),
             payload: .object(["type": .string("reflect")]))
-        let kids = r["tree"]["children"].asArray ?? []
-        #expect(kids.map { $0["id"].asString } == ["caller", "open", "secret"])
-
-        let open = kids.first { $0["id"].asString == "open" }
-        #expect(open?["sentence"].asString == "open is for testing.")
-
-        // DENIED: the SHAPE is already public through `tree=ids`, so the id and
-        // the children stay — and nothing the agent says about itself does.
-        let secret = kids.first { $0["id"].asString == "secret" }
-        #expect(secret?.asObject.map { Array($0.keys) } == ["id", "children"])
-        #expect(secret?["children"].asArray?.isEmpty == true)
-
-        // An OPERATOR (no sender) reads everything, as everywhere else.
-        let asOperator = await k.send([
-            Item(AgentId("kernel"), .object(["type": .string("reflect")]))
-        ])[0].result
-        let openly = asOperator["tree"]["children"].asArray?.first { $0["id"].asString == "secret" }
-        #expect(openly?["description"].asString == "the thing nobody may read")
-    }
-
-    /// py `test_reflect_roster_gate.py::test_the_full_tree_applies_the_same_per_node_gate`
-    /// — measured before the fix (audit 2026-10-03, KV-3): a depth-2 agent refused
-    /// `reflect` on its sibling read that sibling's description and grants by
-    /// reflecting its own parent with `detail:"full"`. A denied node keeps `id` +
-    /// `children`.
-    @Test func theFullTreeAppliesTheSamePerNodeGate() async {
-        let k = makeKernel()
-        await mk(k, "rgf_parent", meta: [("description", .string("the parent"))])
-        await mk(
-            k, "rgf_sibling",
-            meta: [
-                ("parent_id", .string("rgf_parent")),
-                ("description", .string("the prod deploy key")),
-                ("can_call", grant(["rgf_peer": .string("*")])),
-            ])
-        await mk(
-            k, "rgf_kid",
-            meta: [("parent_id", .string("rgf_sibling")), ("description", .string("deeper"))])
-        await mk(k, "rgf_reader", meta: [("parent_id", .string("rgf_parent"))])
-        let direct = await k.sendAs(
-            sender: AgentId("rgf_reader"), target: AgentId("rgf_sibling"),
+        let secret = (r["tree"]["children"].asArray ?? []).first { $0["id"].asString == "secret" }
+        #expect(secret?["description"].asString == "a description", "\(r.serialize())")
+        #expect(secret?["sentence"].asString == "secret is for testing.")
+        let full = await k.sendAs(
+            sender: AgentId("caller"), target: AgentId("kernel"),
+            payload: .object(["type": .string("reflect"), "detail": .string("full")]))
+        let fs = (full["tree"]["children"].asArray ?? []).first { $0["id"].asString == "secret" }
+        #expect(fs?["handler_module"].asString == "roster_probe.tools")
+        // a caller the gate refuses gets no tree at all
+        await mk(k, "stranger")
+        let denied = await k.sendAs(
+            sender: AgentId("stranger"), target: AgentId("kernel"),
             payload: .object(["type": .string("reflect")]))
-        #expect(direct["reason"].asString == "unauthorized")
-        let full: JSON = .object(["type": .string("reflect"), "detail": .string("full")])
-        let r = await k.sendAs(
-            sender: AgentId("rgf_reader"), target: AgentId("rgf_parent"), payload: full)
-        #expect(r["tree"]["description"].asString == "the parent")
-        let kids = r["tree"]["children"].asArray ?? []
-        let sib = kids.first { $0["id"].asString == "rgf_sibling" }
-        #expect(sib?.asObject.map { Array($0.keys) } == ["id", "children"])
-        let deeper = sib?["children"].asArray?.first
-        #expect(deeper?["id"].asString == "rgf_kid")
-        #expect(deeper?.asObject.map { Array($0.keys) } == ["id", "children"])
-        let reader = kids.first { $0["id"].asString == "rgf_reader" }
-        #expect(reader?["handler_module"].asString == "roster_probe.tools")
-        // The operator sees everything, as everywhere else.
-        let op = await k.send([Item(AgentId("rgf_parent"), full)])[0].result
-        let opSib = op["tree"]["children"].asArray?.first { $0["id"].asString == "rgf_sibling" }
-        #expect(opSib?["description"].asString == "the prod deploy key")
-        #expect(opSib?["can_call"]["rgf_peer"].asString == "*")
+        #expect(denied["reason"].asString == "unauthorized")
     }
 
     // ── it is a REAL dispatch ───────────────────────────────────
@@ -232,22 +173,6 @@ struct RosterGateTests {
         // It opens NO ledger execution, so nothing stamps or settles it.
         #expect(row["outcome"] == nil, "the kernel's own read never settles")
         #expect(row["name"] == nil)
-    }
-
-    @Test func aDeniedNodeIsNotDispatchedAtAll() async {
-        let k = makeKernel()
-        await mk(k, "caller", meta: [("can_call", grant([:]))])
-        await mk(k, "secret")
-
-        _ = await k.sendAs(
-            sender: AgentId("caller"), target: AgentId("kernel"),
-            payload: .object(["type": .string("reflect")]))
-        // Only its create-time `boot` row — no reflect call, internal or not.
-        let rows = k.rows.all().filter { $0["agent"]?.asString == "secret" }
-        #expect(
-            !rows.contains { $0["verb"]?.asString == "reflect" },
-            "a node the caller may not reflect is never called")
-        #expect(rows.allSatisfy { $0["internal"] == nil })
     }
 
     // ── a node that RAISES fails the whole reflect ──────────────

@@ -3,9 +3,13 @@
 //
 //   kernel_start    = the root record must name `memory_store_id` (fail loud
 //                     otherwise) → boot the root (it mints the guid every store
-//                     key carries) → boot THAT store → prove it serves the
-//                     operator → start flushing → boot everyone else, in
+//                     key carries) → boot THAT store → prove it answers the
+//                     kernel's `read` → start flushing → boot everyone else, in
 //                     registration order.
+//
+// Every boot, the probe and every `shutdown` is KERNEL BOOKKEEPING
+// (`Kernel.bookkeeping`): the kernel runs the agent's handler directly, not
+// through a send — the same whoever's dispatch asked for it.
 //   shutdown_agents = drain (new roots refused) → `shutdown` to every agent that
 //                     advertises it → quiet → cancel the rest → every call
 //                     settles (done, or cancelled ⇒ a dead letter).
@@ -17,7 +21,7 @@
 import type { Kernel } from "./kernel.ts";
 import type { Json, Payload } from "./json.ts";
 import { MISSING_ARG, UNAUTHORIZED, UNHANDLED, refusal, unknown } from "./refusal.ts";
-import { sleep } from "./timers.ts";
+import { sleep, timers } from "./timers.ts";
 
 function isErr(res: Json | undefined): res is Payload {
   return (
@@ -27,9 +31,8 @@ function isErr(res: Json | undefined): res is Payload {
 }
 
 /** THE START SEQUENCE — the `kernel_start` verb. Idempotent: a second call
- *  reports the store it is already writing to. `k` is an OPERATOR view inside
- *  the verb's task, so the boots and the probe parent to it, and so does the
- *  flusher the start spawns. */
+ *  reports the store it is already writing to. The flusher the start spawns is
+ *  a task under the verb's own (`k.currentTask`). */
 export async function startKernel(k: Kernel, bootAll: boolean): Promise<Json> {
   const s = k.store;
   if (s.started) return { started: true, already: true, store: s.storeId };
@@ -46,7 +49,7 @@ export async function startKernel(k: Kernel, bootAll: boolean): Promise<Json> {
         hint:
           "a memory store is needed — create a ram_store and name it in memory_store_id " +
           `if you have none: add a record {handler_module:'ram_store.ts', id:'memory', ` +
-          `parent_id:'${root.id}', operator:true, admins:['kernel']} to this frontend's ` +
+          `parent_id:'${root.id}'} to this frontend's ` +
           `tree (persist_record through the host loader), set memory_store_id='memory' on ` +
           `the root record '${root.id}', then reload and send kernel_start`,
         extra: { arg: "memory_store_id" },
@@ -61,7 +64,7 @@ export async function startKernel(k: Kernel, bootAll: boolean): Promise<Json> {
   }
   const booted: string[] = [];
   for (const a of [root, store]) {
-    const out = (await k.send([{ target: a.id, payload: { type: "boot" } }]))[0]!;
+    const out = await k.bookkeeping(a.id, { type: "boot" });
     if (out.status !== "completed") {
       return refusal(
         UNHANDLED,
@@ -70,11 +73,9 @@ export async function startKernel(k: Kernel, bootAll: boolean): Promise<Json> {
     }
     booted.push(a.id);
   }
-  // The store must serve the operator (the kernel writes as `kernel`) — probed
-  // now, refused now, never discovered on the first flush.
-  const probe = (await k.send([
-    { target: store.id, payload: { type: "read", limit: 1 } },
-  ]))[0]!.result;
+  // The store must answer the kernel's `read` (the kernel writes as `kernel`) —
+  // probed now, refused now, never discovered on the first flush.
+  const probe = (await k.bookkeeping(store.id, { type: "read", limit: 1 })).result;
   if (isErr(probe)) {
     return refusal(
       UNAUTHORIZED,
@@ -82,7 +83,7 @@ export async function startKernel(k: Kernel, bootAll: boolean): Promise<Json> {
       {
         hint: typeof probe["hint"] === "string"
           ? probe["hint"]
-          : `the store must serve the operator: set operator=true on '${store.id}'`,
+          : `the store must answer the operator's \`read\` — check ${store.id}`,
       },
     );
   }
@@ -93,8 +94,8 @@ export async function startKernel(k: Kernel, bootAll: boolean): Promise<Json> {
   if (bootAll) {
     for (const a of [...k.agents.values()]) {
       if (a.id === root.id || a.id === store.id) continue;
-      const out = (await k.send([{ target: a.id, payload: { type: "boot" } }]))[0]!;
-      if (out.status === "completed" && !isErr(out.result)) {
+      const out = await k.bookkeeping(a.id, { type: "boot" });
+      if (out.status === "completed") {
         booted.push(a.id);
       } else {
         (globalThis as { console?: { warn(m: string): void } }).console?.warn(
@@ -111,12 +112,14 @@ export async function startKernel(k: Kernel, bootAll: boolean): Promise<Json> {
  *
  * 1. DRAIN: new roots are refused; sends with a live parent task still pass.
  * 2. `shutdown` VERB: every agent that advertises it (its reflect `verbs`) is
- *    told, all at once, bounded, as the kernel's own traffic.
+ *    told, all at once, bounded — kernel bookkeeping, the handler run directly;
+ *    what it sends passes the drain.
  * 3. QUIET: wait for the in-flight dispatches to settle, bounded; the rest is
  *    cancelled (roots only — a subtree dies with its root).
  * 4. EVERY CALL SETTLES before this returns: a killed dispatch's batch records
  *    its `cancelled` outcome (and its settle row); bounded.
- * `me` is the task running this verb — it is not pending work.
+ * `me` is the task running this verb — it is not pending work, and the
+ * `shutdown` handlers run inside it (none for a stop).
  */
 export async function shutdownAgents(k: Kernel, me: number | null): Promise<Json> {
   const s = k.store;
@@ -126,14 +129,18 @@ export async function shutdownAgents(k: Kernel, me: number | null): Promise<Json
     (a) => a.verbs !== null && Object.prototype.hasOwnProperty.call(a.verbs, "shutdown"),
   );
   if (targets.length > 0 && k.rootId !== null) {
-    const outs = await k.kernelView().send(
-      targets.map((a) => ({
-        target: a.id,
-        payload: { type: "shutdown" },
-        timeout: s.shutdownVerbTimeout,
-      })),
-    );
-    shut = targets.filter((_a, i) => outs[i]?.status === "completed").map((a) => a.id);
+    const tell = (id: string): Promise<string> => {
+      const { setTimeout: set, clearTimeout: clear } = timers();
+      return new Promise((resolve) => {
+        const t = set(() => resolve("timed_out"), s.shutdownVerbTimeout * 1000);
+        void k.bookkeeping(id, { type: "shutdown" }, { shutdown: true, task: me }).then((out) => {
+          clear(t);
+          resolve(out.status);
+        });
+      });
+    };
+    const outs = await Promise.all(targets.map((a) => tell(a.id)));
+    shut = targets.filter((_a, i) => outs[i] === "completed").map((a) => a.id);
   }
   // The verb's own task is not pending work, and a KEEPALIVE loop (the flusher)
   // ends with the stop itself. A FORKED loop never settles on its own, so it is

@@ -12,7 +12,7 @@
 import FantasticExecBridge
 import FantasticIoBridge
 import FantasticJSON
-import FantasticKernel
+@testable import FantasticKernel
 import FantasticKernelBridge
 import FantasticWeb
 import FantasticWebRest
@@ -189,6 +189,7 @@ private func stage(_ dir: URL, echo: BytesEcho = BytesEcho()) async -> (Kernel, 
         #expect(made["error"].isNull, "stage: \(made.serialize())")
     }
     for leg in ["ws_leg", "rest_leg"] {
+        wire(k, "web", leg)
         _ = await k.send([
             Item(AgentId("web"), .object(["type": "mount", "child_id": .string(leg)]))
         ])
@@ -336,10 +337,10 @@ struct BinaryBodyPathTests {
         let dir = tmpDir()
         defer { try? FileManager.default.removeItem(at: dir) }
         let (k, port) = await stage(dir)
-        // A job is DRIVEN by the caller that started it (audit AV-8): each leg
-        // pastes into a terminal it started itself, as its wire calls run.
+        // Each leg pastes into a terminal it started itself, as its wire calls
+        // run (any caller the gate admits drives any job).
         func start(as leg: String) async -> JSON {
-            let started = await KernelTaskLocals.$currentSender.withValue(AgentId(leg)) {
+            let started = await KernelTaskLocals.$sender.withValue(AgentId(leg)) {
                 await k.send([
                     Item(
                         AgentId("term"),
@@ -532,7 +533,7 @@ struct BinaryBodyPathTests {
                 ])
         ])[0].result
         #expect(made["id"] == "a_leg", "\(made.serialize())")
-        bridge.injectTransport(agentId: AgentId("a_leg"), transport: WSTransport(client: wire, sealed: false))
+        bridge.injectTransport(agentId: AgentId("a_leg"), transport: WSTransport(client: wire))
         let booted = await ka.send([Item(AgentId("a_leg"), ["type": "boot"])])[0].result
         #expect(booted["booted"] == true, "\(booted.serialize())")
         let out = await ka.send([

@@ -9,6 +9,8 @@ description = "IO base — shared library (NOT a bundle): per-leg ingress/egress
 [dependencies]
 # python-format helpers (truthiness in `parse_spec`).
 fantastic-bundle = { path = "../fantastic-bundle" }
+# The inbound verbs of a wire leg (`inbound`) send onward through the kernel.
+fantastic-kernel = { path = "../fantastic-kernel" }
 serde_json = { workspace = true }
 # permessage-deflate on the WS legs (`ws_deflate`): the frame stream, zlib with
 # a negotiated window, the client handshake head.

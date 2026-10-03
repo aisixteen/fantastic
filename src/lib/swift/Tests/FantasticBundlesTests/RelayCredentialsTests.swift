@@ -5,9 +5,9 @@
 // cleartext in `.fantastic/agents/<id>/agent.yaml`. Owner rule: secrets live only
 // in a credential_store. The connector's record names WHERE the password lives —
 // `credentials: {store, ref}` — and before every dial it reads the ref's
-// `password` field AS ITSELF, the answer marked `secret: ['result']`, pinned to
-// the relay URL's host, exactly as an AI backend reads its key. `relay_token` is
-// gone.
+// `password` field AS ITSELF (the dial runs in its own dispatch, or a task it
+// spawned), pinned to the relay URL's host, exactly as an AI backend reads its
+// key. `relay_token` is gone.
 //
 // Python stubs the network dial (`_open_ws`) and records its headers; here a
 // loopback listener records the upgrade request the real dial sends, then hangs
@@ -109,12 +109,8 @@ private struct NoKeychain: KeychainStore {
     func delete(service: String, account: String) throws {}
 }
 
-private func op(_ k: Kernel, _ target: String, _ payload: JSON, secret: JSON? = nil) async
-    -> Outcome
-{
-    var it = Item(AgentId(target), payload)
-    it.secret = secret
-    return await k.send([it])[0]
+private func op(_ k: Kernel, _ target: String, _ payload: JSON) async -> Outcome {
+    await k.send([Item(AgentId(target), payload)])[0]
 }
 
 /// Python fixture `relay_kernel`: a credential store holding the relay password
@@ -138,7 +134,7 @@ private func relayKernel(host: String) async -> (Kernel, URL) {
             "type": "create_agent", "parent_id": "kernel_state",
             "handler_module": .string(CredentialStoreBundle.handlerModule), "id": "creds",
             "file": .string(dir.appendingPathComponent("creds.yaml").path),
-            "refs": ["relay/group": ["host": .string(host), "readers": ["rl"]]],
+            "refs": ["relay/group": ["host": .string(host)]],
             "callable_by": ["rl": ["get"]],
         ]))
     #expect(made.result["id"] == "creds", "\(made.result.serialize())")
@@ -148,8 +144,7 @@ private func relayKernel(host: String) async -> (Kernel, URL) {
 private func setPassword(_ k: Kernel, _ value: String) async {
     let out = await op(
         k, "creds",
-        ["type": "set", "ref": "relay/group", "fields": ["password": .string(value)]],
-        secret: ["payload.fields"])
+        ["type": "set", "ref": "relay/group", "fields": ["password": .string(value)]])
     #expect(out.result["stored"] == true, "\(out.asJSON.serialize())")
 }
 
@@ -192,7 +187,6 @@ struct RelayCredentialsTests {
         #expect(!listed.asJSON.serialize().contains(PW))
         let ledger = await op(k, "kernel", ["type": "ledger"])
         #expect(!ledger.asJSON.serialize().contains(PW))
-        #expect(!JSON.array(k.rows.all().map { JSON.object($0) }).serialize().contains(PW))
     }
 
     @Test(.timeLimit(.minutes(1)))

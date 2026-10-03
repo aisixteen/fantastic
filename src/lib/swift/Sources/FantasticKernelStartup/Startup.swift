@@ -194,8 +194,8 @@ public func startKernel(
         // EVERYTHING ELSE the root record carries — `callable_by`, `can_call`,
         // `guid`, and any operator-authored field. This used to read the file for
         // its `guid` ALONE and drop the rest, so a root whose record granted
-        // `callable_by: {rest: "*"}` came up with only the three `$` baseline
-        // tokens: the grant was on disk, ignored in memory, and every non-kernel
+        // `callable_by: {rest: "*"}` came up with only the `$self` baseline: the
+        // grant was on disk, ignored in memory, and every non-kernel
         // verb from that agent was refused at ingress (measured 2026-08-29).
         for (k, v) in obj where !["id", "handler_module", "parent_id"].contains(k) {
             rootMeta[k] = v
@@ -213,7 +213,7 @@ public func startKernel(
     kernel.setRoot(root)
 
     // THE VIRGIN SEED IS THE CONSTRUCTED ROOT, not a bare literal: the record on
-    // disk carries the structural grant baseline `Agent.init` stamps, in its
+    // disk carries the grant baseline `Agent.init` stamps, in its
     // order (`can_call, callable_by`), and the loader's `boot` appends `guid`
     // after them. COLD primitive — it runs before any provider exists.
     if seeded {

@@ -2,16 +2,16 @@
 //!
 //! Mirror of the python canonical `static_loader.tools`. A `fantastic.yaml`
 //! manifest declares the agents; on `boot` this loader reads it and hydrates
-//! them AS OPERATOR (via [`fantastic_kernel::with_operator`] + the normal
-//! `create_agent` path), as its own children — each carrying the Unix baseline
-//! grant plus any explicit `can_call` the manifest names. The kernel knows
-//! nothing about YAML; this bundle owns the format.
+//! them as KERNEL BOOKKEEPING — the root's `create_agent` / `update_agent` run
+//! directly ([`Kernel::bookkeeping`], no gate) — as its own children, each
+//! carrying the `$self` baseline grant plus any explicit grant the manifest
+//! names. The kernel knows nothing about YAML; this bundle owns the format.
 //!
 //! The pass runs ONLY on the kernel's own boot — origin none: the cold boot, or
 //! `create_agent` booting the loader it just made. An agent-sent `boot` is
-//! refused (audit G-2/BV-2): any agent that reaches the loader (every roster
-//! agent, by the baseline `$parent`) could otherwise re-run the manifest with
-//! operator authority — restore a revoked grant, re-create a deleted agent.
+//! refused (audit G-2/BV-2): any agent granted `boot` on the loader could
+//! otherwise re-run the manifest ungated — restore a revoked grant, re-create a
+//! deleted agent.
 //!
 //! After boot the roster is CLOSED: deny-all means a roster agent cannot
 //! `create_agent`, so the manifest IS the roster. Idempotent by id (a reboot
@@ -25,7 +25,7 @@ use fantastic_bundle::{py_repr, py_repr_value, py_str, py_truthy};
 use fantastic_file::fs;
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
 use fantastic_kernel::refusal::{refusal, refusal_hint, UNAUTHORIZED, UNHANDLED};
-use fantastic_kernel::{with_operator, yaml_io, Agent, AgentId, Item, Kernel};
+use fantastic_kernel::{yaml_io, Agent, AgentId, Kernel};
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
 
@@ -39,14 +39,13 @@ const MANIFEST_FIELD: &str = "manifest";
 
 /// The one text an agent-sent `boot` is refused with — python `BOOT_REFUSED`,
 /// byte for byte.
-pub const BOOT_REFUSED: &str = "static_loader: an agent-sent boot is refused — the roster \
-                                is hydrated with operator authority, so only the kernel's \
-                                own boot (cold boot, create_agent) runs it";
+pub const BOOT_REFUSED: &str = "static_loader: an agent-sent boot is refused — hydrating \
+                                the roster is the kernel's own bookkeeping, so only the \
+                                kernel's own boot (cold boot, create_agent) runs it";
 
 /// Its hint — python `BOOT_REFUSED_HINT`.
-pub const BOOT_REFUSED_HINT: &str = "change an agent's record with update_agent (the \
-                                     conferral rule applies there); the operator re-boots \
-                                     the loader";
+pub const BOOT_REFUSED_HINT: &str = "change an agent's record with update_agent (its \
+                                     parent writes it); the operator re-boots the loader";
 
 /// The declarative roster loader bundle.
 pub struct StaticLoaderBundle;
@@ -109,10 +108,20 @@ fn load_manifest(agent: &Agent, base: &std::path::Path) -> Result<Vec<Value>, St
     }
 }
 
+/// One tree verb of the hydration, run on the ROOT as kernel bookkeeping — the
+/// loader building the roster it was told to build, never through a gated send.
+async fn tree_verb(kernel: &Arc<Kernel>, payload: Value) -> Value {
+    let Some(root) = kernel.root() else {
+        return json!({"error": "static_loader: the kernel has no root"});
+    };
+    kernel.bookkeeping(&root, payload, None).await.result
+}
+
 async fn boot(agent: &Arc<Agent>, kernel: &Arc<Kernel>) -> Value {
-    // The pass below runs as the OPERATOR, so the one who asks for it must be the
-    // operator: the cold boot, `create_agent` booting this loader, the CLI. A
-    // caller's boot is not that — refused before the manifest is read.
+    // The pass below is kernel bookkeeping (ungated), so the one who asks for it
+    // must be the kernel or the operator: the cold boot, `create_agent` booting
+    // this loader, the CLI. A caller's boot is not that — refused before the
+    // manifest is read.
     if fantastic_kernel::current_origin().is_some() {
         return refusal_hint(UNAUTHORIZED, BOOT_REFUSED, BOOT_REFUSED_HINT);
     }
@@ -188,9 +197,8 @@ async fn boot(agent: &Arc<Agent>, kernel: &Arc<Kernel>) -> Value {
             patch.shift_remove("handler_module");
             patch.shift_remove("parent_id");
             // `update_agent` REPLACES a named field, so a bare re-apply of
-            // `can_call` would delete the structural baseline the kernel
-            // stamps at create and sever the agent from its own parent and
-            // children. Merge over the baseline, as `create_agent` does.
+            // `can_call` would delete the `$self` baseline the kernel stamps at
+            // create. Merge over the baseline, as `create_agent` does.
             for (field, base) in [
                 ("can_call", fantastic_kernel::authz::default_can_call()),
                 (
@@ -215,13 +223,7 @@ async fn boot(agent: &Arc<Agent>, kernel: &Arc<Kernel>) -> Value {
                 for (k, v) in patch {
                     call.insert(k, v);
                 }
-                let r = with_operator(kernel.send(vec![Item::new(
-                    AgentId::from("kernel"),
-                    Value::Object(call),
-                )]))
-                .await
-                .remove(0)
-                .result;
+                let r = tree_verb(kernel, Value::Object(call)).await;
                 // Only a TRUTHY error is a failure — python tests `r.get("error")`.
                 if let Some(e) = r.get("error").filter(|e| py_truthy(e)) {
                     return json!({
@@ -241,7 +243,7 @@ async fn boot(agent: &Arc<Agent>, kernel: &Arc<Kernel>) -> Value {
         // but placement is stated by `parent_id`, not by who is addressed:
         // `create_agent` is kernel-owned and answered by the ROOT alone. Baseline
         // grant is stamped + the manifest's explicit `can_call` merges on top;
-        // the child boots inside create_agent. Operator authority: the loader
+        // the child boots inside create_agent. Kernel bookkeeping: the loader
         // hydrating the roster it was told to build.
         // python: `{"type": "create_agent", **spec, "parent_id": agent.id}` — the
         // verb leads (a spec `type` key overrides its VALUE, in place) and
@@ -253,13 +255,7 @@ async fn boot(agent: &Arc<Agent>, kernel: &Arc<Kernel>) -> Value {
             payload.insert(k, v);
         }
         payload.insert("parent_id".to_string(), json!(agent.id.0));
-        let rec = with_operator(kernel.send(vec![Item::new(
-            AgentId::from("kernel"),
-            Value::Object(payload),
-        )]))
-        .await
-        .remove(0)
-        .result;
+        let rec = tree_verb(kernel, Value::Object(payload)).await;
         match rec.get("id").and_then(Value::as_str) {
             Some(id) => created.push(id.to_string()),
             None => {
@@ -292,7 +288,7 @@ fn reflect_reply(agent: &Agent) -> Value {
         // python's first docstring lines, in VERBS order.
         "verbs": {
             "reflect": "The loader's posture: what manifest it hydrates, and that it IS a loader",
-            "boot": "Hydrate the declared roster as OPERATOR.",
+            "boot": "Hydrate the declared roster — kernel bookkeeping at boot.",
         },
     })
 }

@@ -69,8 +69,6 @@ A door in front of vLLM may want one (`Authorization: Bearer <key>`). Name it wi
 and sent only to the ref's host. No `credentials` on the record, no header goes out,
 so a vLLM started without `--api-key` works as it is.
 
-**A model never reaches a secret holder.** A call the model emits whose target or `reply_to` is an agent with `holds_secrets: true` on its record (every `credential_store`; any agent the operator marks) is refused before anything is sent — `{reason:"unauthorized"}`, "`<id>` holds secrets — a secret holder answers backends, never a model turn; this call was not dispatched" — and the refusal comes back to the model itself. The backend's own key read goes to the store directly, never through the model's calls. The address is resolved the way the kernel resolves it, so `<this kernel's guid>|<agent>` is that local agent and is judged like the bare id; a connected peer's `<guid>|<agent>` lives on another kernel, its record is not here, so it is not judged here.
-
 ## Failures, in words
 
 - connection refused → vLLM is not listening yet (it loads for ~75 s after boot), or the tunnel is down

@@ -60,43 +60,22 @@ without any `code` field at all.
 
 Every agent is DENY-ALL on BOTH sides: who it may CALL (`can_call`, egress) and
 who may CALL IT (`callable_by`, ingress). An edge exists only when BOTH ends
-grant it. The free edges are structural — an agent reaches and is reached by
-itself, its parent (its creator), and its own children; everything else needs an
-explicit grant on each end. `reflect` included: a `send` to a leg you did not
-create comes back `{reason:'unauthorized'}`, and the reply's `side` says which
-end refused (`egress` = your reach, `ingress` = their acceptance) and `hint`
-names the fix.
+grant it. The one free edge is yourself (`{"$self": "*"}` on both fields);
+everything else — your parent, your children, the root's kernel verbs — needs an
+explicit grant on each end. A grant map is `{key: "*" | ["<verb>", …]}`, a key an
+agent id, `$self`, `$parent`, `$children`, `<guid>|<agent>` or `<guid>|*`; `"*"`
+covers every verb. `reflect` included: a `send` you were not granted comes back
+`{reason:'unauthorized'}`, and the reply's `side` says which end refused (`egress`
+= your reach, `ingress` = their acceptance) and `hint` names the fix.
 
-The one thing you CANNOT do is raise your OWN authority: editing your own
-`can_call`/`callable_by` is refused. The records in your own subtree are yours to
-edit. A record OUTSIDE it — a SIBLING that is not your child (`totals`,
-`readings`, `clock`) — is the OPERAND of `update_agent`, and is edited only when
-both ends say so: your `can_call` names that agent with the verb
-(`{totals: ['update_agent']}`; a wildcard never covers it) and its `callable_by`
-accepts you. A grant on the root/`kernel_state` edits the root's record, nothing
-else. Opening ingress grants no reach, so once the operator wired you that edge you
-may open the sibling to a worker: give the worker `can_call:{totals:[…]}` at
-`create_agent`, AND `update_agent id='totals'` to add the worker to
-`totals.callable_by` (send the WHOLE map — update replaces, not merges). Both ends
-granted, the edge exists. New reach for YOURSELF still comes only from your
-creator or the operator.
-
-**Agents you spawn later, under one owner, need no per-id grant** — two forms name
-a whole subtree, resolved against the LIVE tree at call time, so an agent created
-after the grant is covered:
-
-- **ingress `$subtree:<X>`** — in a target's `callable_by`, `{"$subtree:hub":
-  ["list"]}` accepts `hub` and every descendant of `hub`. `callable_by` only; a
-  local id only (a `<guid>|<agent>` caller never matches); an absent `hub` matches
-  nothing.
-- **egress, heritable** — in `hub`'s `can_call`, `{"served": {"verbs": ["list"],
-  "for": "descendants"}}` lets every descendant of `hub` call `served` — never `hub`
-  itself. A literal target id, never a token.
-
-Both count as structural for privileged verbs: a NAMED verb (`allow`) is covered,
-`*` never covers one on egress. Only the operator, or an agent holding the SAME
-heritable entry, confers one — and only a subset of it (`side:"delegation"`
-otherwise); an agent that merely benefits from it cannot pass it on.
+`create_agent`, `update_agent` and `delete_agent` act on your OWN CHILDREN only —
+`create_agent` with `parent_id` = you, `update_agent`/`delete_agent` naming an agent
+whose parent is you — and need `create_agent`/… granted on the root on both ends.
+Anything else is refused `side:"mutator"`, "<you> may only <verb> its own children —
+<id> is not one". So you cannot raise your own authority (your record is your
+parent's), and you wire YOUR children freely: give a child `can_call` and
+`callable_by` at `create_agent`, or rewrite them with `update_agent` (send the
+WHOLE map — update replaces, not merges).
 
 Reach everything by id. A denied send's `hint` and `side` are
 discovery-through-denial — the same way a sealed io leg's denial teaches
@@ -116,10 +95,9 @@ discovery-through-denial — the same way a sealed io leg's denial teaches
   is the runner, and the clock aims at it DIRECTLY —
   `<type>schedule</type> <target>runner</target> <payload><type>start</type><command>…</command><args><item>…</item></args></payload>`, gated by
   that runner's `allowed`. Point the clock at the runner and give the runner the
-  reach; do not build an inert parent to hold the job. A schedule fires AS ITS
-  CREATOR (whoever called `schedule`), never as the scheduler: the creator's
-  `can_call` must reach the runner and the runner's `callable_by` accept the
-  creator. (A model spent 26,000
+  reach; do not build an inert parent to hold the job. A schedule fires AS THE
+  SCHEDULER: the scheduler's `can_call` must reach the runner and the runner's
+  `callable_by` accept the scheduler. (A model spent 26,000
   characters of one message deriving this from silence — measured 2026-09-04.)
 
 - **A program's sends carry ITS RUNNER's identity** — the exec_bridge agent that
@@ -127,11 +105,11 @@ discovery-through-denial — the same way a sealed io leg's denial teaches
   its `callable_by`. Grant the runner, not the program. Persist results THROUGH the
   agent the task names (e.g. `totals`), never around it into the store underneath.
 - **Create the agents you will grant reach on as YOUR children** (`parent_id: <your
-  id>`). `$children` then covers them, so wiring `clock → your specialist` needs no
-  lateral grant. A specialist created under the root is NOT yours: you cannot confer
-  reach on it (refused: not your child, not in your can_call), and repairing that
-  costs a delete + recreate (measured 2026-09-02: twenty messages).
-- **A lateral edge is opened on the CALLEE, never on the caller.** To let `clock` call
-  your child, add `clock` to the child's `callable_by`. You never edit a peer's
-  `can_call` (you cannot, and you need not): `can_call` is yours to set only on your
-  own children, at create time. One `update_agent` on the callee ends the question.
+  id>`). Grants come from above: you write your direct children's records
+  (`update_agent`), so you can set their `can_call` and `callable_by`. A specialist
+  created under the root is NOT yours: you cannot edit its record (refused
+  `side:'mutator'` — not your child), and repairing that costs a delete + recreate
+  (measured 2026-09-02: twenty messages).
+- **An edge needs BOTH ends.** For `clock` to call your child, the child's
+  `callable_by` names `clock` AND `clock`'s `can_call` names the child — each written
+  by that agent's parent (or the operator). No agent ever raises its own.

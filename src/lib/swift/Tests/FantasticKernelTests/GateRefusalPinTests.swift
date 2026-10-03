@@ -1,11 +1,8 @@
 // The call gate's refusal bodies, byte for byte — key order included.
 //
-// The gate (`Kernel.gate`, `gatePlacement`, `checkConferral`,
-// `heritableConferral`) spells its refusals as literal dicts, and their key
-// orders differ: an egress/ingress/placement denial is `error, reason, hint,
-// side`; a conferral denial is `error, reason, side, [missing|parent|arg,]
-// hint`. Only the first matches `Refusal.make`'s order, so a sweep into the one
-// helper must keep every body below. Texts are python `kernel/_agent.py`'s.
+// The gate (`Kernel.gate`) spells its refusals as literal dicts: an
+// egress/ingress denial is `error, reason, hint, side`; a mutator denial is
+// `error, reason, side`. Texts are python `kernel/_agent.py`'s.
 
 import FantasticJSON
 import Foundation
@@ -22,22 +19,21 @@ private struct Noop: AgentBundle {
 }
 
 private let FROM_ABOVE =
-    "authority is granted from ABOVE — set at create_agent by your creator, or by the operator; "
-    + "a parent may delegate a subset of its own reach. You cannot grant it to yourself. Agents "
-    + "are deny-all by default (both to call and to be called)."
+    "grants come from above — the agent's parent (update_agent on its direct child) or the "
+    + "operator writes can_call and callable_by; an agent never raises its own"
 
-private let BASE: OrderedDictionary<String, JSON> = [
-    "$self": "*", "$parent": "*", "$children": "*",
-]
+private let BASE: OrderedDictionary<String, JSON> = ["$self": "*"]
 
-/// root `kernel_state` (guid g1); `a` (may call `b`, may create/update at the
-/// root) with a child `kid`; `b` (accepts nobody); `lonely` (structural tokens
-/// only); `placer` (may `create_agent` on `b`).
+/// root `kernel_state` (guid g1, accepts `a`); `a` (may call `b`, may
+/// create/update at the root) with a child `kid`; `b` (accepts nobody);
+/// `lonely` (the baseline only).
 private func gatedKernel() async -> Kernel {
     let r = BundleRegistry()
     r.register("noop.tools", Noop())
     let k = Kernel(storage: .inMemory, bundles: r)
-    let root = Agent(id: "kernel_state", handlerModule: nil, parentId: nil, meta: ["guid": "g1"])
+    let root = Agent(
+        id: "kernel_state", handlerModule: nil, parentId: nil,
+        meta: ["guid": "g1", "callable_by": ["a": "*"]])
     k.register(root)
     k.setRoot(root)
     func seed(_ id: String, _ parent: String, _ extra: OrderedDictionary<String, JSON> = [:]) async
@@ -55,22 +51,14 @@ private func gatedKernel() async -> Kernel {
     await seed("a", "kernel_state", ["can_call": .object(aCan)])
     await seed("b", "kernel_state")
     await seed("lonely", "kernel_state", ["can_call": .object(BASE)])
-    var placer = BASE
-    placer["b"] = .array(["create_agent"])
-    await seed("placer", "kernel_state", ["can_call": .object(placer)])
     await seed("kid", "a")
     return k
 }
 
 private func call(_ k: Kernel, as sender: String, _ target: String, _ p: JSON) async -> String {
-    await KernelTaskLocals.$currentSender.withValue(AgentId(sender)) {
+    await KernelTaskLocals.$sender.withValue(AgentId(sender)) {
         await k.send([Item(AgentId(target), p)])[0].result.serialize()
     }
-}
-
-private func grantToKid(_ k: Kernel, _ canCall: JSON) async -> String {
-    await call(
-        k, as: "a", "kernel", .object(["type": "update_agent", "id": "kid", "can_call": canCall]))
 }
 
 @Suite("call gate — refusal bodies")
@@ -88,101 +76,44 @@ struct GateRefusalPinTests {
         )
     }
 
-    @Test func placementDenialsJudgeTheParent() async {
+    @Test func mutatorDenials() async {
         let k = await gatedKernel()
         #expect(
             await call(
-                k, as: "lonely", "kernel",
+                k, as: "a", "kernel",
                 [
                     "type": "create_agent", "parent_id": "b", "id": "x1",
                     "handler_module": "noop.tools",
                 ])
-                == #"{"error":"lonely may not create under b","reason":"unauthorized","hint":"\#(FROM_ABOVE)","side":"egress"}"#
+                == #"{"error":"a may only create_agent its own children — b is not one","reason":"unauthorized","side":"mutator"}"#
         )
-        #expect(
-            await call(
-                k, as: "placer", "kernel",
-                [
-                    "type": "create_agent", "parent_id": "b", "id": "x2",
-                    "handler_module": "noop.tools",
-                ])
-                == #"{"error":"b does not accept a child from placer","reason":"unauthorized","hint":"\#(FROM_ABOVE)","side":"ingress"}"#
-        )
-    }
-
-    /// A relayed FOREIGN caller owns no subtree here (audit 2026-10-03, G-1):
-    /// placing under the leg or its child takes the path any other placement
-    /// takes — the leg's egress, then the parent's ingress against
-    /// `<guid>|<agent>`.
-    @Test func placementForARelayedCallerJudgesTheQualifiedId() async {
-        let k = await gatedKernel()
-        func create(_ parent: String) async -> String {
-            await KernelTaskLocals.withRemoteCaller(leg: AgentId("a"), address: "g2|scout") {
-                await call(
-                    k, as: "a", "kernel",
-                    [
-                        "type": "create_agent", "parent_id": .string(parent), "id": "x3",
-                        "handler_module": "noop.tools",
-                    ])
-            }
-        }
-        #expect(
-            await create("kid")
-                == #"{"error":"a may not create under kid","reason":"unauthorized","hint":"\#(FROM_ABOVE)","side":"egress"}"#
-        )
-        #expect(
-            await create("a")
-                == #"{"error":"a does not accept a child from g2|scout","reason":"unauthorized","hint":"\#(FROM_ABOVE)","side":"ingress"}"#
-        )
-        #expect(k.agent(AgentId("x3")) == nil)
-    }
-
-    @Test func conferralDenials() async {
-        let k = await gatedKernel()
         #expect(
             await call(
                 k, as: "a", "kernel", ["type": "update_agent", "id": "a", "can_call": ["b": "*"]])
-                == #"{"error":"a may not edit its own can_call/callable_by","reason":"unauthorized","side":"self-grant","hint":"\#(FROM_ABOVE)"}"#
+                == #"{"error":"a may only update_agent its own children — a is not one","reason":"unauthorized","side":"mutator"}"#
         )
+        // an unknown id is not a direct child either
         #expect(
-            await grantToKid(k, ["$foo": "*"])
-                == #"{"error":"a cannot confer '$foo': not a structural token — $self, $parent, $children and $loader are the only ones","#
-                + #""reason":"bad_arg","arg":"can_call","side":"delegation","hint":"\#(FROM_ABOVE)"}"#
+            await call(k, as: "a", "kernel", ["type": "update_agent", "id": "nobody"])
+                == #"{"error":"a may only update_agent its own children — nobody is not one","reason":"unauthorized","side":"mutator"}"#
         )
-        #expect(
-            await grantToKid(k, ["$loader": ["ps"]])
-                == #"{"error":"a cannot delegate 'ps' on $loader: it resolves to kernel_state, which you do not hold — $loader is real reach on the kernel's control surface, not a structural token","#
-                + #""reason":"unauthorized","side":"delegation","hint":"\#(FROM_ABOVE)"}"#)
-        #expect(
-            await grantToKid(k, ["ghost": "*"])
-                == #"{"error":"a cannot delegate '*' on ghost: no such agent — calls of one batch run concurrently, so an agent created in this batch does not exist yet; create in one batch, grant in the next","#
-                + #""reason":"unauthorized","side":"delegation","missing":"ghost","hint":"\#(FROM_ABOVE)"}"#
-        )
-        #expect(
-            await grantToKid(k, ["lonely": "*"])
-                == #"{"error":"a cannot delegate '*' on lonely: lonely is not your child (its parent is kernel_state) and not in your can_call — you may only confer can_call you already hold; create the agents you will wire as YOUR children","#
-                + #""reason":"unauthorized","side":"delegation","parent":"kernel_state","hint":"\#(FROM_ABOVE)"}"#
-        )
-        #expect(
-            await grantToKid(k, ["b": ["verbs": ["ping"], "for": "descendants"]])
-                == #"{"error":"a cannot confer a heritable 'ping' on b: you do not hold that heritable entry — only the operator, or a holder of the same entry, confers one (a subset of it)","#
-                + #""reason":"unauthorized","side":"delegation","hint":"\#(FROM_ABOVE)"}"#)
-        // a subset of what the granter holds passes
-        let ok = await grantToKid(k, ["b": ["ping"]])
-        #expect(ok.hasPrefix(#"{"updated":true,"id":"kid","#), "\(ok)")
     }
 
-    /// A relayed FOREIGN caller is judged by its qualified address, and the
-    /// hint names the two callable_by spellings that would accept it.
-    @Test func aForeignCallerIsNamedInTheIngressDenial() async {
+    /// A mutator with a MISSING or non-string operand gets that verb's own
+    /// missing/shape refusal — the mutator rule judges only a named operand.
+    @Test func aMissingOperandGetsTheVerbsOwnRefusal() async {
         let k = await gatedKernel()
-        let out = await KernelTaskLocals.withRemoteCaller(leg: AgentId("a"), address: "g2|scout") {
-            await call(k, as: "a", "b", ["type": "ping"])
-        }
         #expect(
-            out
-                == #"{"error":"b does not accept 'ping' from g2|scout","reason":"unauthorized","#
-                + #""hint":"a foreign caller is accepted only by name: callable_by {'g2|scout': [...]} or {'g2|*': [...]} on b","side":"ingress"}"#
+            await call(k, as: "a", "kernel", ["type": "create_agent", "handler_module": "noop.tools"])
+                == #"{"error":"create_agent: parent_id required","reason":"missing_arg","hint":"name the agent that will OWN the new one — your own id for a tool you keep, or the root ('kernel_state') for a top-level agent","arg":"parent_id"}"#
+        )
+        #expect(
+            await call(k, as: "a", "kernel", ["type": "update_agent", "description": "x"])
+                == #"{"error":"update_agent: id required","reason":"missing_arg","arg":"id"}"#
+        )
+        #expect(
+            await call(k, as: "a", "kernel", ["type": "update_agent", "id": 7, "description": "x"])
+                == #"{"error":"update_agent: id required","reason":"missing_arg","arg":"id"}"#
         )
     }
 
@@ -190,8 +121,8 @@ struct GateRefusalPinTests {
     /// hint names the two can_call spellings that would reach it.
     @Test func aRemoteTargetIsAnEgressDenialNamingThePeer() async {
         let k = await gatedKernel()
-        let route = PeerRoute(via: "leg") { _, _, _, _, _ in (.object(["ok": true]), nil) } emit: {
-            _, _, _, _ in
+        let route = PeerRoute(via: "leg") { _, _, _ in (.object(["ok": true]), nil) } emit: {
+            _, _, _ in
         }
         k.registerPeer("g9", route)
         #expect(

@@ -297,11 +297,6 @@ func vllmTransportError(
 ) -> Error {
     if error is CancellationError || error is PyError { return error }
     if let e = error as? HTTPClientError {
-        // The client refused a header value and its error QUOTES it — the key.
-        // A fixed text instead, rust's (audit S1).
-        if e.shortDescription == "Invalid header field values" {
-            return PyError("RuntimeError", ILLEGAL_HEADER_TEXT)
-        }
         if e == .connectTimeout {
             return PyError(
                 "RuntimeError",
@@ -512,10 +507,8 @@ struct VllmProvider: AIProvider {
         let code = Int(response.status.code)
         if code >= 400 {
             let collected = try? await response.body.collect(upTo: 1 << 20)
-            // python `.decode("utf-8", "replace")[:500]` — 500 CHARACTERS, the key
-            // scrubbed BEFORE the cut, so a key the cut splits cannot survive
-            let detail = String(
-                withoutKey(collected.map { String(buffer: $0) } ?? "", apiKey).prefix(500))
+            // python `.decode("utf-8", "replace")[:500]` — 500 CHARACTERS
+            let detail = String((collected.map { String(buffer: $0) } ?? "").prefix(500))
             let why =
                 code == 401 || code == 403
                 ? " — the door wants a key: name it in `credentials` ({store, ref})" : ""
@@ -959,8 +952,6 @@ extension VllmBundle {
         `credentials: {store, ref}` — a ref in a `credential_store`, read before each request
         and sent only to the ref's host. No `credentials` on the record, no header goes out,
         so a vLLM started without `--api-key` works as it is.
-
-        **A model never reaches a secret holder.** A call the model emits whose target or `reply_to` is an agent with `holds_secrets: true` on its record (every `credential_store`; any agent the operator marks) is refused before anything is sent — `{reason:"unauthorized"}`, "`<id>` holds secrets — a secret holder answers backends, never a model turn; this call was not dispatched" — and the refusal comes back to the model itself. The backend's own key read goes to the store directly, never through the model's calls. The address is resolved the way the kernel resolves it, so `<this kernel's guid>|<agent>` is that local agent and is judged like the bare id; a connected peer's `<guid>|<agent>` lives on another kernel, its record is not here, so it is not judged here.
 
         ## Failures, in words
 

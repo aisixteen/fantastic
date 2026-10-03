@@ -195,27 +195,6 @@ struct VllmBackendTests {
                 + "name it in `credentials` ({store, ref}): unauthorized", "\(error ?? "nil")")
     }
 
-    /// Audit S1: the client's refusal of a header value QUOTES the key — it
-    /// leaves as a fixed text, rust's; an error body echoing the key leaves with
-    /// the key as `<secret>`.
-    @Test func theKeyNeverLeavesInAnErrorText() async {
-        // refused BEFORE any connection: nothing listens on port 1
-        let (_, refused) = await drain(
-            provider(endpoint(port: 1), key: fixedKey("sk-test-fixture\n")))
-        #expect(
-            refused == "RuntimeError: api_key has illegal header chars: failed to parse header value",
-            "\(refused ?? "nil")")
-        let stub = StubHTTP([.init(status: 401, body: "invalid key: Bearer sk-test-fixture")])
-        defer { stub.stop() }
-        let ep = endpoint(port: stub.port)
-        let (_, echoed) = await drain(provider(ep, key: fixedKey("sk-test-fixture")))
-        #expect(
-            echoed
-                == "RuntimeError: vllm_backend: \(ep) answered HTTP 401 — the door wants a key: "
-                + "name it in `credentials` ({store, ref}): invalid key: Bearer <secret>",
-            "\(echoed ?? "nil")")
-    }
-
     /// No `key_var`: the key is an optional `credentials` field (a store ref).
     @Test func theSchemaTakesOptionalCredentials() {
         #expect(VllmBundle.RECORD_SCHEMA.asObject?["key_var"] == nil)

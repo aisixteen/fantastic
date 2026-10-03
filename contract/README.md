@@ -39,9 +39,9 @@ invisible behind the first.
 
 | verb | meaning |
 |---|---|
-| `reach {from,to,send}` | send AS an agent — GATED. The only evidence about reach. |
-| `operator {to,send,id?,secret?}` | send with operator authority — setup, and side-effect reads. Also the only way to ask about EXISTENCE, since target resolution runs before the gate. `id` and `secret` ride on the batch item, beside `payload`. |
-| `grant`/`revoke {agent,field,to,verbs}` | sugar over an operator `update_agent`. Merges, because `update_agent` REPLACES a field and a bare write would drop the structural baseline. |
+| `reach {from,to,send}` | send AS an agent — GATED. The only evidence about reach. The runner stands in for that agent's handler: identity comes only from dispatch, so the send is made where the agent's own code would make it (python: `Agent._as_self`, the dispatch identity). |
+| `operator {to,send,id?}` | send with operator authority — setup, and side-effect reads. Also the only way to ask about EXISTENCE, since target resolution runs before the gate. `id` rides on the batch item, beside `payload`. |
+| `grant`/`revoke {agent,field,to,verbs}` | sugar over an operator `update_agent`. Merges, because `update_agent` REPLACES a field and a bare write would drop every other grant. |
 | `reboot {}` | persist + rehydrate |
 | `assert_tree {same_as: before_reboot, disk: true}` | the dehydrated shape |
 | `start` / `await_task` / `collect` | fire a send WITHOUT awaiting it, wait for it in `ps`, then await and assert its Outcome. The cancel rows (C14–C16) need a dispatch that is still running. |

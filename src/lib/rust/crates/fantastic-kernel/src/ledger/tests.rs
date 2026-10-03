@@ -30,8 +30,6 @@ fn open(l: &Ledger, name: &str, target: &str, retries: u32) -> (i64, Opened) {
         retries,
         Some(name),
         None,
-        None,
-        None,
     );
     (id, opened)
 }
@@ -159,8 +157,6 @@ fn an_int_id_rebind_renders_bare_digits() {
         0,
         None,
         None,
-        None,
-        None,
     );
     match l.open(
         301,
@@ -168,8 +164,6 @@ fn an_int_id_rebind_renders_bare_digits() {
         &tid("elsewhere"),
         &json!({"type": "probe"}),
         0,
-        None,
-        None,
         None,
         None,
     ) {
@@ -216,8 +210,6 @@ fn the_view_is_caller_scoped() {
         0,
         Some("mine"),
         Some(tid("alice")),
-        None,
-        None,
     );
     let _ = l.open(
         102,
@@ -227,8 +219,6 @@ fn the_view_is_caller_scoped() {
         0,
         Some("yours"),
         Some(tid("bob")),
-        None,
-        None,
     );
     let _ = open(&l, "operators", "desk", 0).1;
 
@@ -263,8 +253,6 @@ fn the_ring_evicts_settled_unnamed_before_named_and_never_in_flight() {
             &tid("d"),
             &json!({"type": "probe"}),
             0,
-            None,
-            None,
             None,
             None,
         );
@@ -366,8 +354,6 @@ fn an_unnamed_settle_comes_back_as_what_it_kept() {
         &tid("desk"),
         &json!({"type": "probe"}),
         0,
-        None,
-        None,
         None,
         None,
     ) {
@@ -522,88 +508,4 @@ fn a_reply_with_a_binary_body_stays_whole_in_the_ledger() {
         }
         _ => panic!("expected the recalled outcome"),
     }
-}
-
-/// audit KV-1 (owner-approved 2026-10-03): a join of a caller-scoped verb's
-/// execution by any caller but the one that sent it carries the refusal — in
-/// flight, settled and recalled from the store alike; the original caller's join
-/// and every other verb's carry none.
-#[test]
-fn a_foreign_join_of_a_caller_scoped_verb_carries_the_refusal() {
-    let l = Ledger::default();
-    let led = json!({"type": "ledger"});
-    let open_as = |id: i64, name: &str, payload: &Value, caller: Option<&str>| {
-        l.open(
-            id,
-            &json!(name),
-            &tid("kernel_state"),
-            payload,
-            0,
-            Some(name),
-            caller.map(tid),
-            caller.map(str::to_string),
-            None,
-        )
-    };
-    let text = "send: id 'led-A' names another caller's ledger execution — ledger \
-                answers only the caller that sent it, so it cannot be joined; make \
-                your own ledger call under a new id";
-    let want = json!({"error": text, "reason": "bad_arg", "arg": "id"});
-    assert!(matches!(
-        open_as(601, "led-A", &led, Some("A")),
-        Opened::Fresh
-    ));
-    match open_as(601, "led-A", &led, Some("B")) {
-        Opened::Join(_, _, _, Some(r)) => assert_eq!(*r, want),
-        _ => panic!("B's in-flight join must carry the refusal"),
-    }
-    match open_as(601, "led-A", &led, None) {
-        Opened::Join(_, _, _, Some(_)) => {}
-        _ => panic!("the operator is a caller like any other here"),
-    }
-    assert!(matches!(
-        open_as(601, "led-A", &led, Some("A")),
-        Opened::Join(_, _, _, None)
-    ));
-    l.attempt(601);
-    l.settle(601, done("view"));
-    assert!(matches!(
-        open_as(601, "led-A", &led, Some("B")),
-        Opened::Settled(_, _, _, Some(_))
-    ));
-    // another verb: open by design
-    let ps = json!({"type": "ps"});
-    assert!(matches!(
-        open_as(602, "ps-A", &ps, Some("A")),
-        Opened::Fresh
-    ));
-    assert!(matches!(
-        open_as(602, "ps-A", &ps, Some("B")),
-        Opened::Join(_, _, _, None)
-    ));
-
-    // RECALLED from the store: the call row's `caller` still decides
-    let l2 = Ledger::default();
-    let mut row = call_row(603, "kernel_state", 0, Some("led-A"));
-    row.insert("payload".to_string(), led.clone());
-    row.insert("caller".to_string(), json!("A"));
-    assert!(l2.put_settled(603, &row, &settle_outcome("completed", json!({})), 1));
-    let reopen = |caller: Option<&str>| {
-        l2.open(
-            603,
-            &json!("led-A"),
-            &tid("kernel_state"),
-            &led,
-            0,
-            Some("led-A"),
-            caller.map(tid),
-            caller.map(str::to_string),
-            None,
-        )
-    };
-    assert!(matches!(
-        reopen(Some("B")),
-        Opened::Settled(_, _, _, Some(_))
-    ));
-    assert!(matches!(reopen(Some("A")), Opened::Settled(_, _, _, None)));
 }

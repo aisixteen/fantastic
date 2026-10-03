@@ -124,7 +124,7 @@ async fn the_client_offers_deflate_and_speaks_it_as_python_s_client_does() {
         write_frame(&mut sock, 0xc1, &wire).await;
         (head, got)
     });
-    let t = WsTransport::connect(&format!("ws://127.0.0.1:{port}/peer/ws"), false)
+    let t = WsTransport::connect(&format!("ws://127.0.0.1:{port}/peer/ws"))
         .await
         .expect("connect");
     t.send_frame(
@@ -163,7 +163,7 @@ async fn a_server_that_declines_gets_plain_frames() {
         handshake(&mut sock, None).await;
         read_frame(&mut sock).await
     });
-    let t = WsTransport::connect(&format!("ws://127.0.0.1:{port}/peer/ws"), false)
+    let t = WsTransport::connect(&format!("ws://127.0.0.1:{port}/peer/ws"))
         .await
         .expect("connect");
     t.send_frame(json!({"a": 1})).await.unwrap();
@@ -187,7 +187,7 @@ async fn a_send_after_the_peer_closed_reports_the_closing_handshake() {
         // the echo: the same code and reason
         read_frame(&mut sock).await
     });
-    let t = WsTransport::connect(&format!("ws://127.0.0.1:{port}/peer/ws"), false)
+    let t = WsTransport::connect(&format!("ws://127.0.0.1:{port}/peer/ws"))
         .await
         .expect("connect");
     match t.recv_frame().await {
@@ -221,7 +221,7 @@ async fn a_send_after_closing_reports_what_was_sent_then_received() {
         write_frame(&mut sock, b0, &payload).await;
         payload
     });
-    let t = WsTransport::connect(&format!("ws://127.0.0.1:{port}/peer/ws"), false)
+    let t = WsTransport::connect(&format!("ws://127.0.0.1:{port}/peer/ws"))
         .await
         .expect("connect");
     t.close().await;
@@ -252,7 +252,7 @@ async fn closed_follows_the_peer_s_close() {
         write_frame(&mut sock, 0x88, &1000u16.to_be_bytes()).await;
         read_frame(&mut sock).await
     });
-    let t = WsTransport::connect(&format!("ws://127.0.0.1:{port}/peer/ws"), false)
+    let t = WsTransport::connect(&format!("ws://127.0.0.1:{port}/peer/ws"))
         .await
         .expect("connect");
     assert!(!t.closed(), "an open socket is not closed");
@@ -278,7 +278,7 @@ async fn closed_follows_an_abrupt_drop() {
         wait.await.unwrap();
         drop(sock);
     });
-    let t = WsTransport::connect(&format!("ws://127.0.0.1:{port}/peer/ws"), false)
+    let t = WsTransport::connect(&format!("ws://127.0.0.1:{port}/peer/ws"))
         .await
         .expect("connect");
     assert!(!t.closed());

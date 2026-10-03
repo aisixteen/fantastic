@@ -25,7 +25,6 @@ import type { Json, Payload } from "./json.ts";
 import type { Outcome } from "./outcome.ts";
 import { DEAD_STATUSES } from "./outcome.ts";
 import { pyDumps } from "./pyjson.ts";
-import type { Secret } from "./secret.ts";
 
 export interface Exec {
   id: number;
@@ -34,28 +33,18 @@ export interface Exec {
    *  it must be authorized for THIS verb — not for whatever it happened to
    *  send. Kept on the entry because the entry outlives the dispatch. */
   verb: string;
-  /** The payload AS SHOWN — `<secret>` where the item marked `secret` paths. */
+  /** The dispatch payload, as the call row records it. */
   payload: Payload;
   timeout: number | undefined;
   retries: number;
   attempts: number;
   named: boolean;
   name: string | null;
-  /** The id that ORIGINATED this execution; null = operator; a caller on another
-   *  kernel by its `<guid>|<agent>`. Scopes `ledger`, and is the one identity a
-   *  join of a secret-marked execution hands the REAL outcome to (python's RAM
-   *  `origin`). */
+  /** The id that ORIGINATED this execution; null = operator. Scopes `ledger`. */
   caller: string | null;
   settled: boolean;
   outcome: Outcome | null;
   acked: boolean;
-  /** RAM only: the item's `secret` paths and the payload's secret values — what
-   *  `KernelStore.settle` masks the recorded outcome with. null = nothing secret. */
-  secret: Secret | null;
-  /** The outcome AS RECORDED when `secret` is set — what the `ledger` reads
-   *  back. The caller holds the real one (`outcome`), and so does a joiner that
-   *  IS the caller; any other joiner gets it as shown (`batch.ts`). */
-  shownOut: Outcome | null;
   /** Resolves with the ONE true outcome. Joiners await exactly this. */
   promise: Promise<Outcome>;
   resolve: (o: Outcome) => void;
@@ -70,7 +59,6 @@ export interface ExecInit {
   retries: number;
   name: string | null;
   caller: string | null;
-  secret: Secret | null;
 }
 
 export const DEFAULT_LEDGER_CAP = 1_000_000;
@@ -113,7 +101,6 @@ export class ExecutionLedger {
       settled: false,
       outcome: null,
       acked: false,
-      shownOut: null,
       promise,
       resolve,
     };

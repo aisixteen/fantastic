@@ -32,14 +32,14 @@ async fn host(
 ) -> Arc<Kernel> {
     let kernel = mk_kernel(tmp, false, true);
     let mut rest = json!({"type": "create_agent", "parent_id": web_id,
-                          "handler_module": "web_rest.tools", "id": leg,
+                          "handler_module": "web_rest.tools", "callable_by": {"$parent": ["get_routes"]}, "id": leg,
                           "can_call": {"kernel_state": "*"}});
     if let Some(rule) = ingress {
         rest["ingress_rule"] = rule;
     }
     for item in [
         json!({"type": "create_agent", "parent_id": "kernel",
-               "handler_module": HANDLER_MODULE, "id": web_id, "port": port}),
+               "handler_module": HANDLER_MODULE, "callable_by": {"$children": ["watch"]}, "can_call": {"$children": ["get_routes"]}, "id": web_id, "port": port}),
         rest,
         json!({"type": "update_agent", "id": "kernel_state", "callable_by": {
                "$self": "*", "$parent": "*", "$children": "*", leg: "*"}}),

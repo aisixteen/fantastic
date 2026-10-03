@@ -5,6 +5,8 @@
 loaders:
   - id: wing_a
     file: wing_a.yaml
+    meta:
+      can_call: {$children: "*"}
     manifest:
       agents:
         # The persistence provider, DISCOVERED by match: a file_bridge whose
@@ -12,6 +14,7 @@ loaders:
         # (kernel_state/tools.py `_find_store`, which walks the subtree).
         - id: store
           handler_module: file_bridge.tools
+          callable_by: {$parent: "*"}
           allow: ['.']
           root: .fantastic
           ingress_rule: allow_all_ingress
@@ -27,6 +30,7 @@ loaders:
         # the claimed id.
         - id: notes_a
           handler_module: file_bridge.tools
+          callable_by: {$parent: "*"}
           allow: ['.']
           root: notes/a
           ingress_rule: allow_all_ingress
@@ -34,6 +38,7 @@ loaders:
             $root: [persist_blob]
         - id: space_a
           handler_module: file_bridge.tools
+          callable_by: {$parent: "*"}
           allow: ['.']
           root: rooms/a
           ingress_rule: allow_all_ingress
@@ -43,15 +48,19 @@ loaders:
   # is refused by the sender's own egress — the roster IS the boundary.
   - id: wing_b
     file: wing_b.yaml
+    meta:
+      can_call: {$children: "*"}
     manifest:
       agents:
         - id: notes_b
           handler_module: file_bridge.tools
+          callable_by: {$parent: "*"}
           allow: ['.']
           root: notes/b
           ingress_rule: allow_all_ingress
         - id: space_b
           handler_module: file_bridge.tools
+          callable_by: {$parent: "*"}
           allow: ['.']
           root: rooms/b
           ingress_rule: allow_all_ingress

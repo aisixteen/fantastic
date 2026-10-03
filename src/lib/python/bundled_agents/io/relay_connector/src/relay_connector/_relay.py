@@ -6,8 +6,9 @@ by a GUID. We dial `ws://<host>/<guid>` with the group password in the
 `fantastic.relay.v1` subprotocol. The password is a SECRET and lives only in a
 credential_store (audit IO-7/F4, 2026-10-03): the record names it —
 `credentials: {store, ref}` — and before EVERY dial the connector reads the ref's
-`password` field as itself, the answer marked `secret: ['result']`, pinned to the
-relay URL's host, exactly as an AI backend reads its key (`ai_core/credentials`).
+`password` field as itself (the dial runs in its own dispatch, or a task it
+spawned), pinned to the relay URL's host, exactly as an AI backend reads its key
+(`ai_core/credentials`).
 Nothing is cached: a rotated password is used by the next dial. The relay routes by `target`: a frame to a
 peer GUID arrives on that peer's socket as `{type:"event", source:<our guid>,
 payload}` — **one-way**. There is NO relay-level reply correlation for
@@ -49,30 +50,8 @@ from io_bridge import (
     decode_frame,
     encode_frame,
 )
-from kernel import sender_context
-from kernel._refusal import UNAUTHORIZED, refusal
 
 SUBPROTOCOL = "fantastic.relay.v1"
-
-# THE RELAY SEAL (owner, 2026-10-02). relayd dispatches every tunneled frame into
-# its own kernel and records it UNMASKED, so a secret that crossed a relay leg
-# would sit in the relay's ledger in full. Until relayd masks what it records, a
-# relay leg refuses any call carrying secret marks, in both directions: outbound
-# in `tools._forward`, inbound in `RelayTransport.recv`. ws_bridge (direct WS) is
-# sealed only to a non-loopback host (its own seal, `ws_bridge._ws`). One text for
-# both.
-SECRET_SEALED = (
-    "relay_connector: a call carrying secret marks may not cross a relay leg — "
-    "the relay records every frame it routes, unmasked"
-)
-SECRET_SEALED_HINT = "reach that kernel over a direct ws_bridge leg to send a secret"
-
-
-def secret_sealed() -> dict:
-    """The relay seal's refusal — outbound to the local caller, inbound as the
-    reply to the far caller."""
-    return refusal(UNAUTHORIZED, SECRET_SEALED, hint=SECRET_SEALED_HINT)
-
 
 DEFAULT_HEARTBEAT = 30.0
 DEFAULT_RECONNECT = 10.0
@@ -116,10 +95,11 @@ def credentials_shape_error(v) -> str | None:
 
 def password_reader(self_id: str, kernel: Any, relay_url: str) -> PasswordReader:
     """The async `read() -> password` a dial awaits — every dial, nothing cached.
-    Asks the store named by the record's `credentials` AS THIS CONNECTOR for the
-    ref's `password`, the answer marked secret (it lands in no row, ledger or
-    stream) and pinned to the relay URL's host (the store refuses a ref bound
-    elsewhere). Raises `CredentialError` on any refusal or a missing field."""
+    Asks the store named by the record's `credentials` for the ref's `password`,
+    pinned to the relay URL's host (the store refuses a ref bound elsewhere). A
+    dial runs in this connector's dispatch (`boot`) or a task it spawned (the
+    reconnect loop), so the read is the connector's own send, gated as it.
+    Raises `CredentialError` on any refusal or a missing field."""
 
     async def read() -> str:
         cred = (kernel.get(self_id) or {}).get("credentials")
@@ -127,18 +107,16 @@ def password_reader(self_id: str, kernel: Any, relay_url: str) -> PasswordReader
         if bad:
             raise CredentialError(f"relay_connector: {bad}")
         store, ref = cred["store"], cred["ref"]
-        with sender_context(self_id):
-            out = (
-                await kernel.send(
-                    [
-                        {
-                            "target": store,
-                            "payload": {"type": "get", "ref": ref, "host": relay_url},
-                            "secret": ["result"],
-                        }
-                    ]
-                )
-            )[0]
+        out = (
+            await kernel.send(
+                [
+                    {
+                        "target": store,
+                        "payload": {"type": "get", "ref": ref, "host": relay_url},
+                    }
+                ]
+            )
+        )[0]
         res = out.get("result")
         if (
             out.get("status") != "completed"
@@ -463,30 +441,6 @@ class RelayTransport(_BaseTransport):
                     return {"type": "event", "src": DIRECTORY_SRC, "payload": payload}
                 # A tunnel delivery FROM our partner — the inner bridge frame.
                 if source == self._partner:
-                    if payload.get("type") == "call" and "secret" in payload:
-                        # THE RELAY SEAL, inbound: the frame already crossed the
-                        # relay, and nothing here dispatches it — the far caller is
-                        # answered with the seal's refusal.
-                        # TODO(relay seal): lift once relayd masks what it records.
-                        # The fix is in relayd (../fantastic_relay): when it
-                        # dispatches a tunneled frame into its own kernel, re-root
-                        # the inner frame's `secret` onto its delivery item
-                        # (`payload.<f>` -> `payload.payload.payload.<f>`), so its
-                        # rows, ledger and state stream show `<secret>`; and decide
-                        # how REPLY frames carry result marks — a `reply` names no
-                        # marks today, so the relay would record a secret result
-                        # in full.
-                        try:
-                            await self.send(
-                                {
-                                    "type": "reply",
-                                    "id": payload.get("id"),
-                                    "data": secret_sealed(),
-                                }
-                            )
-                        except ConnectionClosed:
-                            pass  # the socket dropped; the loop re-dials
-                        continue
                     return payload
             # any other peer / type → skip
         raise ConnectionClosed("relay_connector: closed")

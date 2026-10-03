@@ -1,8 +1,8 @@
 """file_bridge is DENY-ALL at the path level: the `allow` list on the record names
 what it exposes (a file, or everything under a directory; `.` = the whole root). No
 list exposes nothing. Every path verb sees only exposed paths; anything else is
-`not_found` whether or not it exists. `allow`/`disallow`/`allowed` edit and read the
-list one path at a time; it is record state, set at create or edited later."""
+`not_found` whether or not it exists. The list is record state, set at create or
+replaced by `update_agent`."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from kernel import sender_context
+from _testkit import as_agent
 from web.app import make_app
 
 
@@ -19,7 +19,7 @@ async def _call(kernel, payload, target="fb", as_=None):
         return (await kernel.send([{"target": target, "payload": payload}]))[0][
             "result"
         ]
-    with sender_context(as_):
+    with as_agent(kernel, as_):
         return (await kernel.send([{"target": target, "payload": payload}]))[0][
             "result"
         ]
@@ -86,39 +86,25 @@ async def test_a_directory_exposes_everything_under_it_and_dot_the_whole_root(ke
     assert (await _read(kernel, "secret.txt"))["bytes"] == b"private\n"
 
 
-async def test_allow_disallow_and_allowed_edit_the_record_one_path_at_a_time(kernel):
+async def test_the_list_is_a_record_field_update_agent_replaces(kernel):
     _tree()
     _bridge(kernel, allow=[])
-    assert await _call(kernel, {"type": "allow", "path": "docs/a.pdf"}) == {
-        "path": "docs/a.pdf",
-        "allowed": True,
-        "count": 1,
-    }
-    # idempotent, normalised
-    r = await _call(kernel, {"type": "allow", "path": "./docs//a.pdf"})
-    assert r["count"] == 1, r
-    await _call(kernel, {"type": "allow", "path": "docs/b.pdf"})
-    assert kernel.get("fb")["allow"] == ["docs/a.pdf", "docs/b.pdf"]
-    assert (await _read(kernel, "docs/b.pdf"))["bytes"] == b"%PDF-b"
-    page = await _call(kernel, {"type": "allowed", "limit": 1})
-    assert page == {"paths": ["docs/a.pdf"], "next": "docs/a.pdf", "total": 2}
-    rest = await _call(kernel, {"type": "allowed", "after": "docs/a.pdf"})
-    assert rest["paths"] == ["docs/b.pdf"] and rest["next"] is None
-    assert (await _call(kernel, {"type": "disallow", "path": "docs/b.pdf"}))[
-        "count"
-    ] == 1
-    assert (await _read(kernel, "docs/b.pdf"))["reason"] == "not_found"
-    assert (await _call(kernel, {"type": "disallow", "path": "nope"}))[
-        "reason"
-    ] == "not_found"
+    assert (await _read(kernel, "docs/a.pdf"))["reason"] == "not_found"
+    out = await _call(
+        kernel,
+        {"type": "update_agent", "id": "fb", "allow": ["docs/a.pdf"]},
+        target=kernel.id,
+    )
+    assert out.get("updated") is True, out
+    assert (await _read(kernel, "docs/a.pdf"))["bytes"] == b"%PDF-a"
+    for verb in ("allow", "disallow", "allowed"):
+        r = await _call(kernel, {"type": verb, "path": "docs/b.pdf"})
+        assert r["reason"] == "unhandled", (verb, r)
 
 
-async def test_nothing_outside_the_root_can_be_allowed_or_read(kernel):
+async def test_nothing_outside_the_root_can_be_read(kernel):
     _tree()
     _bridge(kernel, allow=["."])
-    for bad in ("../x", "docs/../../x", "/etc/hosts"):
-        r = await _call(kernel, {"type": "allow", "path": bad})
-        assert r["reason"] == "bad_arg", (bad, r)
     r = await _read(kernel, "../../etc/passwd")
     assert "escape" in r["error"], r  # the clamp answers first
 
@@ -165,24 +151,13 @@ async def test_the_web_serves_only_what_the_list_exposes(kernel):
     _tree()
     _bridge(kernel, allow=["docs/a.pdf"], callable_by={"web": ["read_stream"]})
     # `port`: the authority the web's Host guard admits (audit W-2).
-    kernel.create(None, id="web", port=8088, can_call={"fb": ["read_stream"]})
+    kernel.create("web.tools", id="web", port=8088, can_call={"fb": ["read_stream"]})
     with TestClient(make_app("web", kernel), base_url="http://127.0.0.1:8088") as c:
         r = c.get("/fb/file/docs/a.pdf")
         assert r.status_code == 200 and r.content == b"%PDF-a"
         assert c.get("/fb/file/docs/b.pdf").status_code == 404
         assert c.get("/fb/file/secret.txt").status_code == 404
         assert c.get("/fb/file/missing.txt").status_code == 404
-
-
-async def test_an_agent_granted_allow_publishes_a_file(kernel):
-    _tree()
-    _bridge(kernel, allow=[], callable_by={"ai": ["allow", "disallow", "allowed"]})
-    kernel.create(None, id="ai", can_call={"fb": ["allow", "disallow", "allowed"]})
-    r = await _call(kernel, {"type": "allow", "path": "docs/a.pdf"}, as_="ai")
-    assert r["allowed"] is True, r
-    kernel.create(None, id="stranger", can_call={"fb": "*"})
-    r = await _call(kernel, {"type": "allow", "path": "."}, as_="stranger")
-    assert r["reason"] == "unauthorized", r
 
 
 # ─── symlinks: BOTH ends must be exposed (audit 2026-09-28) ─────────────────

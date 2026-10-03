@@ -37,7 +37,6 @@ from __future__ import annotations
 from io_bridge import _state, dispatch, make_verbs
 from io_bridge import on_delete as _engine_on_delete
 from io_bridge import validate_meta as _bridge_validate_meta
-from kernel import current_secret
 from kernel._refusal import NOT_CONNECTED, bad, refusal
 from relay_connector._relay import (
     DIRECTORY_SRC,
@@ -47,14 +46,13 @@ from relay_connector._relay import (
     build_transport,
     credentials_shape_error,
     reflect_fields,
-    secret_sealed,
 )
 
 
 def validate_meta(meta: dict, record: dict) -> str | None:
-    """The record's own fields, refused at the write: `peer_guid` (the bridge's
-    check) and `credentials` ({store, ref}) — the relay password lives in a
-    credential_store (audit IO-7/F4, 2026-10-03)."""
+    """The record's own fields, refused at the write: `credentials` ({store, ref})
+    — the relay password lives in a credential_store (audit IO-7/F4, 2026-10-03)
+    — then the bridge's `ingress_rule` check."""
     if meta.get("credentials") is not None and (
         bad := credentials_shape_error(meta["credentials"])
     ):
@@ -68,34 +66,6 @@ VERBS = make_verbs(
     reflect_fields=reflect_fields,
     default_kind="relay",
 )
-
-_engine_forward = VERBS["forward"]
-
-
-async def _forward(id, payload, kernel):
-    # THE RELAY SEAL, outbound: a `forward` whose own call carries ANY secret mark
-    # is refused before a frame is built. `forward` is the one outbound call path a
-    # relay leg has — no relay leg registers a `PeerRoute`, so a `<guid>|<agent>`
-    # send never rides one (only web_ws registers peers).
-    # TODO(relay seal): lift once relayd masks what it records. The fix is in
-    # relayd (../fantastic_relay): when it dispatches a tunneled frame into its own
-    # kernel, re-root the inner frame's `secret` onto its delivery item
-    # (`payload.<f>` -> `payload.payload.payload.<f>`), so its rows, ledger and
-    # state stream show `<secret>`; and decide how REPLY frames carry result marks
-    # — a `reply` names no marks today, so a `result` mark would still leave the
-    # value in the relay's record of the reply.
-    if current_secret():
-        return secret_sealed()
-    return await _engine_forward(id, payload, kernel)
-
-
-_forward.__doc__ = (
-    (_engine_forward.__doc__ or "")
-    + " SEALED for secrets: a call carrying any secret mark is refused — the relay "
-    "records every frame it routes, unmasked."
-)
-VERBS["forward"] = _forward
-
 
 # ── directory surface (relay-specific; the relay's own `relay` agent) ──
 

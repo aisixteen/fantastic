@@ -276,3 +276,43 @@ pub fn rows_about(kernel: &Arc<Kernel>, agent: &AgentId) -> Vec<crate::rows::Row
         .filter(|r| r.get("agent").and_then(Value::as_str) == Some(agent.0.as_str()))
         .collect()
 }
+
+/// THE ONE GRANT HELPER for tests (minimal access model, 2026-10-03): the
+/// operator merges `key: verbs` into `holder`'s `field` (`can_call` or
+/// `callable_by`) — every other key kept. Grants are explicit; a test wires the
+/// edges it exercises, both ends, through this.
+pub fn grant(kernel: &Arc<Kernel>, holder: &str, field: &str, key: &str, verbs: Value) {
+    let agent = kernel
+        .resolve_target(holder)
+        .unwrap_or_else(|| panic!("grant: no agent {holder}"));
+    let mut g = agent
+        .meta
+        .read()
+        .expect("meta lock poisoned")
+        .get(field)
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    g.insert(key.to_string(), verbs);
+    let mut patch = serde_json::Map::new();
+    patch.insert(field.to_string(), Value::Object(g));
+    kernel.update(&agent.id, patch);
+}
+
+/// Both ends of one edge: `sender`'s `can_call` names `target` with `verbs`, and
+/// `target`'s `callable_by` names `sender` with the same.
+pub fn wire(kernel: &Arc<Kernel>, sender: &str, target: &str, verbs: Value) {
+    let t = kernel
+        .resolve_target(target)
+        .unwrap_or_else(|| panic!("wire: no agent {target}"));
+    grant(kernel, sender, "can_call", t.id.as_str(), verbs.clone());
+    grant(kernel, t.id.as_str(), "callable_by", sender, verbs);
+}
+
+/// The test standing in for `agent`'s HANDLER: the sends `work` makes are that
+/// agent's, exactly as when the kernel runs the agent's own code (the dispatch
+/// identity — the only identity there is). A send made outside it is the
+/// operator's. Python `_testkit.as_agent`. A test driver, never a product path.
+pub async fn as_agent<F: std::future::Future>(agent: impl Into<AgentId>, work: F) -> F::Output {
+    crate::send::as_agent(&agent.into(), work).await
+}

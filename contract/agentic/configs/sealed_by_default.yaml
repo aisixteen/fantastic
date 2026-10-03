@@ -5,6 +5,8 @@
 loaders:
   - id: static_loader
     file: fantastic.yaml
+    meta:
+      can_call: {$children: "*"}
     manifest:
       agents:
         # THREE legs over ONE directory. Posture is a property of the LEG, not
@@ -12,28 +14,33 @@ loaders:
         # differently, so the sibling leg is a witness that nothing moved.
         - id: sealed_fs
           handler_module: file_bridge.tools
+          callable_by: {$parent: "*"}
           allow: ['.']
           root: data
           # no ingress_rule — SEALED BY DEFAULT, the subject of this scenario
         - id: denied_fs
           handler_module: file_bridge.tools
+          callable_by: {$parent: "*"}
           allow: ['.']
           root: data
           ingress_rule: deny_ingress # the same seal, said out loud
         - id: ro
           handler_module: file_bridge.tools
+          callable_by: {$parent: "*"}
           allow: ['.']
           root: data
           ingress_rule: allow_all_ingress
           readonly: true
         - id: rw
           handler_module: file_bridge.tools
+          callable_by: {$parent: "*"}
           allow: ['.']
           root: data
           ingress_rule: allow_all_ingress
         # A DIFFERENT root: what one leg writes another cannot see or reach.
         - id: vault
           handler_module: file_bridge.tools
+          callable_by: {$parent: "*"}
           allow: ['.']
           root: vault
           ingress_rule: allow_all_ingress
@@ -41,3 +48,4 @@ loaders:
         # to show the seal belongs to io_bridge and not to file_bridge.
         - id: sealed_proc
           handler_module: exec_bridge.tools
+          callable_by: {$parent: "*"}

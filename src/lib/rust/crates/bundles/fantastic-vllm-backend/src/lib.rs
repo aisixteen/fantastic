@@ -35,7 +35,7 @@
 //!   `credentials`.
 
 use async_trait::async_trait;
-use fantastic_ai_core::credentials::{key_reader, without_key, KeySource};
+use fantastic_ai_core::credentials::{key_reader, KeySource};
 use fantastic_ai_core::provider::{
     Provider, ProviderError, ProviderEvent, ProviderReport, ProviderStream, ReportCell,
     Unconfigured,
@@ -539,9 +539,13 @@ impl Provider for VllmProvider {
         let resp = req.send().await.map_err(|e| self.connection_error(&e))?;
         let status = resp.status();
         if status.as_u16() >= 400 {
-            // scrubbed BEFORE the cut, so a key the cut splits cannot survive
-            let detail = without_key(&resp.text().await.unwrap_or_default(), key.as_deref());
-            let detail: String = detail.chars().take(500).collect();
+            let detail: String = resp
+                .text()
+                .await
+                .unwrap_or_default()
+                .chars()
+                .take(500)
+                .collect();
             let why = if matches!(status.as_u16(), 401 | 403) {
                 " — the door wants a key: name it in `credentials` ({store, ref})".to_string()
             } else {

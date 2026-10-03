@@ -2,17 +2,17 @@
 //
 // Mirror of the python canonical `static_loader.tools` (and rust
 // `fantastic-static-loader`). A `fantastic.yaml` manifest declares the agents;
-// on `boot` this loader reads it and hydrates them AS OPERATOR
-// (`$currentSender.withValue(nil)` + the normal `create_agent` path), as its own
-// children — each carrying the Unix baseline grant plus any explicit `can_call`
-// the manifest names. The kernel knows nothing about YAML; this bundle owns the
-// format.
+// on `boot` this loader reads it and hydrates them through the kernel's verbs
+// run DIRECTLY (`Kernel.bookkeeping` on the root — kernel bookkeeping at boot,
+// never a gated send), as its own children — each carrying the `$self` baseline
+// grant plus any explicit `can_call` the manifest names. The kernel knows
+// nothing about YAML; this bundle owns the format.
 //
 // The pass runs ONLY on the kernel's own boot — origin none: the cold boot, or
 // `create_agent` booting the loader it just made. An agent-sent `boot` is
-// refused (audit G-2/BV-2): any agent that reaches the loader (every roster
-// agent, by the baseline `$parent`) could otherwise re-run the manifest with
-// operator authority — restore a revoked grant, re-create a deleted agent.
+// refused (audit G-2/BV-2): any agent granted a reach to the loader could
+// otherwise re-run the manifest — restore a revoked grant, re-create a deleted
+// agent.
 //
 // After boot the roster is CLOSED: deny-all means a roster agent cannot
 // `create_agent`, so the manifest IS the roster. Idempotent by id (a reboot
@@ -34,13 +34,13 @@ let MANIFEST_FIELD = "manifest"
 /// The one text an agent-sent `boot` is refused with — python `BOOT_REFUSED`,
 /// byte for byte.
 public let BOOT_REFUSED =
-    "static_loader: an agent-sent boot is refused — the roster is hydrated with "
-    + "operator authority, so only the kernel's own boot (cold boot, create_agent) "
-    + "runs it"
+    "static_loader: an agent-sent boot is refused — hydrating the roster is the "
+    + "kernel's own bookkeeping, so only the kernel's own boot (cold boot, "
+    + "create_agent) runs it"
 /// Its hint — python `BOOT_REFUSED_HINT`.
 public let BOOT_REFUSED_HINT =
-    "change an agent's record with update_agent (the conferral rule applies "
-    + "there); the operator re-boots the loader"
+    "change an agent's record with update_agent (its parent writes it); the "
+    + "operator re-boots the loader"
 
 public struct StaticLoaderBundle: AgentBundle {
     /// The `handler_module` value that routes to this bundle.
@@ -54,7 +54,7 @@ public struct StaticLoaderBundle: AgentBundle {
     static let verbDocs: OrderedDictionary<String, JSON> = [
         "reflect": .string(
             "The loader's posture: what manifest it hydrates, and that it IS a loader"),
-        "boot": .string("Hydrate the declared roster as OPERATOR."),
+        "boot": .string("Hydrate the declared roster — kernel bookkeeping at boot."),
     ]
 
     public init() {}
@@ -149,18 +149,27 @@ public struct StaticLoaderBundle: AgentBundle {
         return (agents, nil)
     }
 
-    // MARK: - boot: hydrate the declared roster as operator
+    // MARK: - boot: hydrate the declared roster (kernel bookkeeping)
 
     private func boot(agentId: AgentId, agent: Agent, kernel: Kernel) async -> JSON {
-        // The pass below runs as the OPERATOR, so the one who asks for it must be
-        // the operator: the cold boot, `create_agent` booting this loader, the
-        // CLI. A caller's boot is not that — refused before the manifest is read.
+        // The pass below calls the kernel's verbs directly, so the one who asks
+        // for it must be the kernel or the operator: the cold boot, `create_agent`
+        // booting this loader, the CLI. A caller's boot is not that — refused
+        // before the manifest is read.
         if KernelTaskLocals.currentOrigin != nil {
             return Refusal.make(Refusal.unauthorized, BOOT_REFUSED, hint: BOOT_REFUSED_HINT)
         }
         let (agents, err) = loadManifest(agent, kernel)
         if let err {
             return .object(["error": .string(err), "booted": .bool(false)])
+        }
+        // A DIRECT call of the kernel verb (its root implementation) — roster
+        // hydration is kernel bookkeeping, never a gated send.
+        func kernelVerb(_ p: JSON) async -> JSON {
+            guard let root = kernel.root else {
+                return .object(["error": .string("kernel: no root agent registered")])
+            }
+            return await kernel.bookkeeping(root, p).result
         }
         var created: [JSON] = []
         var reapplied: [JSON] = []
@@ -195,9 +204,9 @@ public struct StaticLoaderBundle: AgentBundle {
                 declared["handler_module"] = nil
                 declared["parent_id"] = nil
                 // `update_agent` REPLACES a named field, so a bare re-apply of
-                // `can_call` would delete the structural baseline the kernel
-                // stamps at create and sever the agent from its own parent and
-                // children. Merge over the baseline, as `create_agent` does.
+                // `can_call` would delete the baseline the kernel stamps at
+                // create (`$self`). Merge over the baseline, as `create_agent`
+                // does.
                 for (field, baseline) in [
                     ("can_call", defaultCanCall()), ("callable_by", defaultCallableBy()),
                 ] {
@@ -229,9 +238,7 @@ public struct StaticLoaderBundle: AgentBundle {
                         "type": .string("update_agent"), "id": .string(id),
                     ]
                     for (k, v) in declared { patch[k] = v }
-                    let r = await KernelTaskLocals.$currentSender.withValue(nil) {
-                        await kernel.send([Item(AgentId("kernel"), .object(patch))])[0].result
-                    }
+                    let r = await kernelVerb(.object(patch))
                     // Only a TRUTHY `error` is a failure (python `r.get("error")`).
                     if pyTruthy(r["error"]) {
                         return .object([
@@ -245,20 +252,18 @@ public struct StaticLoaderBundle: AgentBundle {
                 continue
             }
             // The declared agent becomes THIS loader's child ($parent = the
-            // loader), but placement is stated by `parent_id`, not by who is
+            // loader), but where it sits is stated by `parent_id`, not by who is
             // addressed: `create_agent` is kernel-owned and answered by the ROOT
             // alone. Baseline grant is stamped + the manifest's explicit
             // `can_call` merges on top; the child boots inside create_agent.
-            // Operator authority: the loader hydrating the roster it was told to
-            // build. `**spec` sits BETWEEN `type` and `parent_id`, python's
-            // spread order: a spec `type` overrides the verb, a spec `parent_id`
-            // never overrides the placement.
+            // The kernel's own create function: the loader hydrating the roster
+            // it was told to build. `**spec` sits BETWEEN `type` and `parent_id`,
+            // python's spread order: a spec `type` overrides the verb, a spec
+            // `parent_id` never overrides where it sits.
             var payload: OrderedDictionary<String, JSON> = ["type": .string("create_agent")]
             for (k, v) in obj { payload[k] = v }
             payload["parent_id"] = .string(agentId.value)
-            let rec = await KernelTaskLocals.$currentSender.withValue(nil) {
-                await kernel.send([Item(AgentId("kernel"), .object(payload))])[0].result
-            }
+            let rec = await kernelVerb(.object(payload))
             if case .object = rec, let newId = rec["id"].asString, !newId.isEmpty {
                 created.append(.string(newId))
             } else {
@@ -335,12 +340,12 @@ public struct StaticLoaderBundle: AgentBundle {
 
         That seeds a `static_loader` agent (record field `manifest: ./fantastic.yaml`)
         under the root and boots it. On `boot` the loader reads the manifest and creates
-        each declared agent as a child of itself — under `operator_context()`, so the
-        hydration is the operator's authority at boot, not standing power the loader
-        holds. That pass runs only on the kernel's own boot (the cold boot, or
-        `create_agent` booting the loader it just made): a `boot` an agent sends is
-        refused (`reason: unauthorized`), so reaching the loader never
-        re-runs the manifest with operator authority.
+        each declared agent as a child of itself — kernel bookkeeping: each create is a
+        direct call of the kernel's own `create_agent`, never a gated send and never
+        standing power the loader holds. That pass runs only on the kernel's own boot (the
+        cold boot, or `create_agent` booting the loader it just made): a `boot` an agent
+        sends is refused (`reason: unauthorized`), so reaching the loader never re-runs
+        the manifest.
 
         Manifest:
 
@@ -355,10 +360,10 @@ public struct StaticLoaderBundle: AgentBundle {
               memory: [set, read]
         ```
 
-        Every declared agent gets the Unix baseline grant
-        (`$self`/`$parent`/`$children`/`$loader`) plus whatever `can_call` the manifest
-        names. After boot the roster is **closed**: an agent is deny-all and cannot
-        `create_agent`, so the manifest is the whole roster. Every entry MUST carry an
+        Every declared agent gets the baseline grant (`$self`) plus whatever `can_call` /
+        `callable_by` the manifest names. After boot the roster is **closed**: an agent is
+        deny-all, creates only its own children and only when granted `create_agent` on
+        both ends, so the manifest is the whole roster. Every entry MUST carry an
         explicit `id` — boot is idempotent by id (a reboot re-reads the manifest and
         RE-APPLIES the declared fields over an existing agent), so the manifest and the
         persisted tree never duplicate. An entry with no `id` is refused loud

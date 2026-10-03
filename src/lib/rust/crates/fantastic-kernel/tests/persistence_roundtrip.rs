@@ -744,18 +744,33 @@ async fn an_emptied_readme_is_not_reseeded() {
     );
 }
 
+/// Every payload the persistence provider `store` was handed — what its traffic
+/// events carry (a raw body's slot `null` in place). The store IO is kernel
+/// bookkeeping, so it writes no call rows; the fanout still announces it.
+fn store_payloads(kernel: &Arc<Kernel>) -> Arc<std::sync::Mutex<Vec<Value>>> {
+    let seen: Arc<std::sync::Mutex<Vec<Value>>> = Arc::default();
+    let sink = Arc::clone(&seen);
+    kernel.add_state_subscriber(Arc::new(move |ev: &Value, _body| {
+        if ev["agent_id"] == "store" && ev["kind"] == "send" {
+            sink.lock().unwrap().push(ev["payload"].clone());
+        }
+    }));
+    seen
+}
+
 /// python's `kernel_state` store calls are TEXT-channel dicts: a read is
 /// `{type: read_stream, path, offset}` with no `bytes` key, a write
-/// `{type: write_stream, path, bytes, truncate}` — and the call row reduces the
-/// chunk to `{len: N}` IN PLACE. Rust used to send every store IO as a binary
-/// item: a read's row carried `bytes: {len: 0}` and a write's `bytes` moved last.
+/// `{type: write_stream, path, bytes, truncate}` — the chunk at `bytes` IN PLACE.
+/// Rust used to send every store IO as a binary item: a read carried `bytes` and
+/// a write's `bytes` moved last.
 #[tokio::test]
-async fn store_call_rows_have_python_shape() {
+async fn store_calls_have_python_shape() {
     let tmp = fresh_workdir();
     let store_root = tmp.path();
     let kernel = kernel_at(store_root);
     fantastic_kernel::test_support::boot_root(&kernel).await;
     wire_store(&kernel, store_root).await;
+    let seen = store_payloads(&kernel);
     let _ = kernel
         .send(vec![Item::new(
             AgentId::from("kernel_state"),
@@ -764,12 +779,7 @@ async fn store_call_rows_have_python_shape() {
         )])
         .await;
     fantastic_kernel::test_support::settle_records().await;
-    let store_calls: Vec<Value> =
-        fantastic_kernel::test_support::rows_about(&kernel, &AgentId::from("store"))
-            .into_iter()
-            .filter(|r| r.get("kind") == Some(&json!("call")))
-            .map(|r| r["payload"].clone())
-            .collect();
+    let store_calls: Vec<Value> = seen.lock().unwrap().clone();
     let keys = |p: &Value| -> Vec<String> { p.as_object().unwrap().keys().cloned().collect() };
     let read = store_calls
         .iter()
@@ -790,10 +800,7 @@ async fn store_call_rows_have_python_shape() {
         ["type", "path", "bytes", "truncate"],
         "{write}"
     );
-    assert!(
-        write["bytes"]["len"].as_u64().is_some_and(|n| n > 0),
-        "{write}"
-    );
+    assert!(write["bytes"].is_null(), "{write}");
 }
 
 /// A store that answers every stream verb with a refusal — a sealed or
@@ -841,6 +848,7 @@ async fn a_failed_record_write_seeds_no_readme() {
     kernel.set_root(Arc::clone(&root));
     fantastic_kernel::test_support::boot_root(&kernel).await;
     wire_store(&kernel, store_root).await;
+    let seen = store_payloads(&kernel);
     let _ = kernel
         .send(vec![Item::new(
             AgentId::from("kernel_state"),
@@ -849,12 +857,12 @@ async fn a_failed_record_write_seeds_no_readme() {
         )])
         .await;
     fantastic_kernel::test_support::settle_records().await;
-    let paths: Vec<String> =
-        fantastic_kernel::test_support::rows_about(&kernel, &AgentId::from("store"))
-            .into_iter()
-            .filter(|r| r.get("kind") == Some(&json!("call")))
-            .filter_map(|r| r["payload"]["path"].as_str().map(str::to_string))
-            .collect();
+    let paths: Vec<String> = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|p| p["path"].as_str().map(str::to_string))
+        .collect();
     assert!(
         paths
             .iter()

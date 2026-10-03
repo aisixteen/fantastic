@@ -127,24 +127,17 @@ impl Drop for Forget {
     }
 }
 
-/// ONE call into the page: an outbound `{type:"call", id, target, payload,
-/// caller, secret?}` frame, resolved by the inbound answer carrying the same id.
-/// `secret` is the item's marks, verbatim (dotted strings and/or arrays of
-/// steps), so the PAGE kernel masks its records of this call too; it is on the
-/// frame only when the item marked something. A body
-/// rides the binary channel at `payload.<its path>` — where python's payload
-/// dict holds it and where the page's decoder puts it back.
-// One argument per python `_call_page` input (agent_id, payload, caller,
-// secret) plus the connection's own state and the raw body beside the payload.
-#[allow(clippy::too_many_arguments)]
+/// ONE call into the page: an outbound `{type:"call", id, target, payload}`
+/// frame, resolved by the inbound answer carrying the same id. The page judges
+/// it as the leg that serves it there. A body rides the binary channel at
+/// `payload.<its path>` — where python's payload dict holds it and where the
+/// page's decoder puts it back.
 async fn call_page(
     calls: Arc<Mutex<Calls>>,
     out: WeakSender<Out>,
     guid: String,
     agent_id: String,
     mut payload: Value,
-    caller: String,
-    secret: Vec<Value>,
     body: Option<fantastic_kernel::Blob>,
 ) -> PeerReply {
     let (fid, rx) = {
@@ -172,17 +165,12 @@ async fn call_page(
     if let Some(b) = &body {
         let _ = b.place(&mut payload, Value::Null);
     }
-    let mut envelope = json!({
+    let envelope = json!({
         "type": "call",
         "id": fid,
         "target": agent_id,
         "payload": payload,
-        "caller": caller,
     });
-    // the item's marks, so the PAGE kernel masks its records of this call too
-    if !secret.is_empty() {
-        envelope["secret"] = json!(secret);
-    }
     send_envelope(&out, envelope, body, INBOUND_PAYLOAD_KEY).await;
     drop(out);
     // The sender side is dropped only by the disconnect settle, which answers
@@ -190,15 +178,13 @@ async fn call_page(
     rx.await.unwrap_or_else(|_| (disconnected(&guid), None))
 }
 
-/// ONE emit into the page: an outbound `{type:"emit", target, payload,
-/// caller?}` frame — `caller` (`<this guid>|<sender>`) only when an agent
-/// emitted. The body rides the binary channel at `payload.<its path>`, as on a
-/// call. No answer: a gone socket drops it.
+/// ONE emit into the page: an outbound `{type:"emit", target, payload}` frame.
+/// The body rides the binary channel at `payload.<its path>`, as on a call. No
+/// answer: a gone socket drops it.
 async fn emit_page(
     out: WeakSender<Out>,
     agent_id: String,
     mut payload: Value,
-    caller: Option<String>,
     body: Option<fantastic_kernel::Blob>,
 ) {
     let Some(out) = out.upgrade() else {
@@ -207,10 +193,7 @@ async fn emit_page(
     if let Some(b) = &body {
         let _ = b.place(&mut payload, Value::Null);
     }
-    let mut envelope = json!({"type": "emit", "target": agent_id, "payload": payload});
-    if let Some(c) = caller {
-        envelope["caller"] = json!(c);
-    }
+    let envelope = json!({"type": "emit", "target": agent_id, "payload": payload});
     send_envelope(&out, envelope, body, INBOUND_PAYLOAD_KEY).await;
 }
 
@@ -283,26 +266,18 @@ impl PeerLink {
             let g = guid.to_string();
             PeerRoute::new(
                 leg.0.clone(),
-                move |agent_id, payload, caller, secret, body| {
+                move |agent_id, payload, body| {
                     Box::pin(call_page(
                         Arc::clone(&calls),
                         weak.clone(),
                         g.clone(),
                         agent_id,
                         payload,
-                        caller,
-                        secret,
                         body,
                     ))
                 },
-                move |agent_id, payload, caller, body| {
-                    Box::pin(emit_page(
-                        weak_emit.clone(),
-                        agent_id,
-                        payload,
-                        caller,
-                        body,
-                    ))
+                move |agent_id, payload, body| {
+                    Box::pin(emit_page(weak_emit.clone(), agent_id, payload, body))
                 },
             )
         };

@@ -1,7 +1,7 @@
-// The recursive walkers: the frame codec's binary path (find, clone, place), the
-// secret masks' copy and scrub, and how reflect quotes a readme key. Every
-// expectation whose text python also produces was measured on python
-// (io_bridge/_codec.py, kernel/_secret.py, `_readme_view`) on 2026-10-01.
+// The recursive walkers: the frame codec's binary path (find, clone, place), and
+// how reflect quotes a readme key. Every expectation whose text python also
+// produces was measured on python (io_bridge/_codec.py, `_readme_view`) on
+// 2026-10-01.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -10,7 +10,6 @@ import { Agent } from "../src/kernel/agent.ts";
 import type { Json, Payload } from "../src/kernel/json.ts";
 import { encodeFrame, decodeFrame } from "../src/transport/frame.ts";
 import type { Envelope } from "../src/transport/frame.ts";
-import { check, shownPayload } from "../src/kernel/secret.ts";
 import { pyDumps, pyRepr } from "../src/kernel/pyjson.ts";
 import { str } from "../src/kernel/json.ts";
 
@@ -85,36 +84,6 @@ test("decoding a binary frame: a missing key on the path, a non-object head, the
     assert.ok((err as Error).message.startsWith("bad binary frame header: "), String(err));
     return true;
   });
-});
-
-// ── secret: the copy and the scrub ─────────────────────────────────────
-
-test("secret masks: a dict's leaves are its values, bytes are shared and never scrubbed, a dead-end path names nothing", () => {
-  const blob = new TextEncoder().encode("k-uu-k");
-  const P = {
-    type: "login",
-    creds: { user: "uu", pass: "pp", n: 5, ok: true, none: null, f: 1.5 },
-    s: "str",
-    list: [1, "two"],
-    blob,
-  } as unknown as Payload;
-  const [s, r] = check({ secret: ["payload.creds"] }, P);
-  assert.equal(r, null);
-  assert.deepEqual(s!.values, ["uu", "pp", "5", "1.5"]);
-  const shown = shownPayload(P, s!);
-  assert.equal(shown["creds"], "<secret>");
-  assert.deepEqual(shown["list"], [1, "two"]);
-  assert.equal(shown["blob"] as unknown, blob, "bytes are shared, as python's deepcopy shares them");
-  assert.equal(new TextDecoder().decode(blob), "k-uu-k", "a secret value inside bytes is not scrubbed");
-  assert.deepEqual((P["creds"] as Payload)["user"], "uu", "the real payload is untouched");
-  assert.deepEqual(check({ secret: ["payload.list.1"] }, P)[0]!.values, ["two"]);
-  assert.deepEqual(check({ secret: ["payload.blob"] }, P)[0]!.values, ["b'k-uu-k'"]);
-  for (const p of ["payload.s.x", "payload.list.5", "payload.list.x"]) {
-    assert.deepEqual(check({ secret: [p] }, P), [
-      null,
-      { error: `send: secret path '${p}' names nothing in the payload`, reason: "bad_arg", arg: "secret" },
-    ]);
-  }
 });
 
 // ── reflect: readme keys and the bundle catalog ────────────────────────

@@ -17,19 +17,19 @@
 
 use super::*;
 
-/// One leg on a kernel (guid `local-g`), pinned to `peer-g`, its raw peer end in
-/// hand; `notes` (a child of the leg) accepts the foreign caller `peer-g|ai`.
+/// One leg on a kernel (guid `local-g`), its raw peer end in hand; `notes` (a
+/// child of the leg) accepts its parent — the leg, which serves every inbound
+/// call AS ITSELF.
 async fn leg(tmp: &TempDir, tag: &str) -> (Arc<Kernel>, String, Arc<dyn BridgeTransport>) {
     let kernel = mk_kernel_guid(tmp, "local-g").await;
     let bid = id_for(tag, tmp);
     create_bridge(&kernel, &bid, "stand_in", "memory").await;
-    patch(&kernel, &bid, "peer_guid", json!("peer-g"));
     let notes = ask(
         &kernel,
         "kernel_state",
         json!({"type": "create_agent", "parent_id": bid, "handler_module": "file_bridge.tools",
                "id": format!("notes_{bid}"), "root": tmp.path().to_string_lossy(),
-               "callable_by": {"peer-g|ai": "*"}}),
+               "callable_by": {"$parent": "*"}}),
     )
     .await;
     assert!(notes.get("error").is_none(), "{notes}");
@@ -41,8 +41,7 @@ async fn leg(tmp: &TempDir, tag: &str) -> (Arc<Kernel>, String, Arc<dyn BridgeTr
 
 async fn inbound(peer: &Arc<dyn BridgeTransport>, bid: &str, n: u32) -> Value {
     peer.send_frame(json!({"type": "call", "id": format!("peer-call-{n}"),
-                           "target": format!("notes_{bid}"), "payload": {"type": "reflect"},
-                           "caller": "peer-g|ai"}))
+                           "target": format!("notes_{bid}"), "payload": {"type": "reflect"}}))
         .await
         .unwrap();
     let reply = tokio::time::timeout(std::time::Duration::from_secs(2), peer.recv_frame())
@@ -219,16 +218,14 @@ async fn a_restarted_sender_never_joins_a_settled_execution() {
     let a_id = id_for("brg_restart_a", &ta);
     let b_id = id_for("brg_restart_b", &tb);
     create_bridge(&ka, &a_id, "stand_in", "memory").await;
-    patch(&ka, &a_id, "peer_guid", json!("guid-b"));
     create_bridge(&kb, &b_id, "stand_in", "memory").await;
-    patch(&kb, &b_id, "peer_guid", json!("guid-a"));
     let doc = format!("doc_{b_id}");
     let made = ask(
         &kb,
         "kernel_state",
         json!({"type": "create_agent", "parent_id": b_id, "handler_module": "file_bridge.tools",
                "id": doc, "allow": ["."], "root": tb.path().to_string_lossy(),
-               "ingress_rule": "allow_all_ingress", "callable_by": {"guid-a|*": "*"}}),
+               "ingress_rule": "allow_all_ingress", "callable_by": {"$parent": "*"}}),
     )
     .await;
     assert!(made.get("error").is_none(), "{made}");

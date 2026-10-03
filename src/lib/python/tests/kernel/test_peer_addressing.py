@@ -11,11 +11,11 @@ from __future__ import annotations
 
 import asyncio
 
-from kernel import sender_context
+from _testkit import as_agent
 from kernel._kernel import PeerRoute
 
 
-async def _no_emit(agent_id, payload, caller):  # these routes carry no events
+async def _no_emit(agent_id, payload):  # these routes carry no events
     raise AssertionError("unexpected emit")
 
 
@@ -23,12 +23,9 @@ HOST = "h0"  # this kernel's guid, set by hand: the root is not booted here
 PAGE = "g1"
 
 
-def _route(k, calls: list, reply=None, secrets: list | None = None):
-    secrets = [] if secrets is None else secrets
-
-    async def call(agent_id, payload, caller, secret):
-        calls.append((agent_id, payload, caller))
-        secrets.append(secret)
+def _route(k, calls: list, reply=None):
+    async def call(agent_id, payload):
+        calls.append((agent_id, payload))
         return reply if reply is not None else {"ok": agent_id}
 
     route = PeerRoute(via="leg", call=call, emit=_no_emit)
@@ -40,11 +37,11 @@ async def _send(k, target, payload, *, as_=None):
     items = [{"target": target, "payload": payload}]
     if as_ is None:
         return (await k.send(items))[0]
-    with sender_context(as_):
+    with as_agent(k, as_):
         return (await k.send(items))[0]
 
 
-async def test_an_operator_send_reaches_the_peer_agent_as_this_kernel(seeded_kernel):
+async def test_an_operator_send_reaches_the_peer_agent(seeded_kernel):
     k = seeded_kernel
     k._meta["guid"] = HOST
     calls: list = []
@@ -53,40 +50,7 @@ async def test_an_operator_send_reaches_the_peer_agent_as_this_kernel(seeded_ker
         k, f"{PAGE}|canvas", {"type": "around", "x": 1, "y": 2, "radius": 3}
     )
     assert out["status"] == "completed" and out["result"] == {"cells": [1, 2]}, out
-    assert calls == [
-        ("canvas", {"type": "around", "x": 1, "y": 2, "radius": 3}, f"{HOST}|kernel")
-    ]
-
-
-async def test_the_items_secret_marks_ride_to_the_peer(seeded_kernel):
-    """The route gets the item's `secret` paths verbatim (rooted at the item, as
-    the peer's item is), so the PEER masks its records; this kernel masks its own."""
-    k = seeded_kernel
-    k._meta["guid"] = HOST
-    calls: list = []
-    marks: list = []
-    _route(k, calls, reply={"ok": True}, secrets=marks)
-    key = "sk-peer-0123456789"
-    out = (
-        await k.send(
-            [
-                {
-                    "target": f"{PAGE}|creds",
-                    "payload": {"type": "set", "fields": {"api_key": key}},
-                    "secret": ["payload.fields", "result"],
-                }
-            ]
-        )
-    )[0]
-    assert out["status"] == "completed", out
-    assert calls == [
-        ("creds", {"type": "set", "fields": {"api_key": key}}, f"{HOST}|kernel")
-    ]
-    assert marks == [("payload.fields", "result")], marks
-    assert k.ctx.rows[out["pid"]]["payload"]["fields"] == "<secret>"
-    # an unmarked call hands the route no marks
-    await _send(k, f"{PAGE}|creds", {"type": "reflect"})
-    assert marks[-1] == (), marks
+    assert calls == [("canvas", {"type": "around", "x": 1, "y": 2, "radius": 3})]
 
 
 async def test_an_agent_needs_the_qualified_target_in_its_can_call(seeded_kernel):
@@ -112,7 +76,7 @@ async def test_an_agent_needs_the_qualified_target_in_its_can_call(seeded_kernel
     for sender in ("named", "wild"):
         ok = await _send(k, f"{PAGE}|canvas", {"type": "around"}, as_=sender)
         assert ok["status"] == "completed", (sender, ok)
-    assert [c[2] for c in calls] == [f"{HOST}|named", f"{HOST}|wild"]
+    assert len(calls) == 2, calls
     # a verb the grant does not name is refused at egress too
     denied = await _send(k, f"{PAGE}|canvas", {"type": "clear"}, as_="named")
     assert denied["result"]["side"] == "egress", denied
@@ -165,8 +129,8 @@ async def test_one_guid_holds_a_set_of_live_routes(seeded_kernel):
 def _tab(k, name: str, calls: list, answer: asyncio.Future) -> PeerRoute:
     """One TAB of the identity PAGE: records the call, answers when `answer` does."""
 
-    async def call(agent_id, payload, caller, secret):
-        calls.append((name, agent_id, payload, caller))
+    async def call(agent_id, payload):
+        calls.append((name, agent_id, payload))
         return await answer
 
     route = PeerRoute(via=f"leg_{name}", call=call, emit=_no_emit)
@@ -188,8 +152,8 @@ async def test_a_call_reaches_every_tab_and_settles_with_the_first_reply(
     while len(calls) < 2:
         await asyncio.sleep(0)
     assert sorted(calls) == [
-        ("a", "canvas", {"type": "around"}, f"{HOST}|kernel"),
-        ("b", "canvas", {"type": "around"}, f"{HOST}|kernel"),
+        ("a", "canvas", {"type": "around"}),
+        ("b", "canvas", {"type": "around"}),
     ], calls
     b.set_result({"from": "b"})
     out = await asyncio.wait_for(send, 3)
@@ -214,14 +178,16 @@ async def test_a_disconnected_tab_leaves_the_identity_routable(seeded_kernel):
     assert [c[0] for c in calls] == ["b"], calls
 
 
-async def test_a_kernel_with_no_guid_cannot_say_who_is_calling(seeded_kernel):
+async def test_a_call_to_a_peer_needs_no_guid_of_this_kernel(seeded_kernel):
+    """The frame names no caller: the peer judges the call as the leg that serves
+    it there, so this kernel's own guid is not part of the call."""
     k = seeded_kernel
     k._meta.pop("guid", None)
     calls: list = []
     _route(k, calls)
     out = await _send(k, f"{PAGE}|canvas", {"type": "around"})
-    assert "no guid yet" in (out["result"] or {}).get("error", ""), out
-    assert calls == []
+    assert out["status"] == "completed", out
+    assert calls == [("canvas", {"type": "around"})]
 
 
 async def test_a_reflect_of_a_peer_returns_that_kernels_own_answer(seeded_kernel):
@@ -240,7 +206,7 @@ async def test_a_reflect_of_a_peer_returns_that_kernels_own_answer(seeded_kernel
 async def test_a_create_on_a_peer_is_gated_on_the_peer_target(seeded_kernel):
     """`create_agent` sent to `<guid>|kernel` places nothing in THIS tree: it is an
     ordinary call to the peer, gated on egress like any other — the local
-    placement rule (a child of yourself is baseline) must not wave it through."""
+    mutator rule (a child of yourself) must not wave it through."""
     k = seeded_kernel
     k._meta["guid"] = HOST
     calls: list = []

@@ -32,10 +32,7 @@
 //!     (cli round-trip vs per-client inbox) + error-name prefix. The
 //!     [`Provider`] (built per agent by the backend) is the streaming seam. A
 //!     backend's KEY is read from a credential store before each request
-//!     ([`credentials`]) — never the environment, never the record. A MODEL never
-//!     reaches a secret holder: [`route`] refuses every model-parsed call whose
-//!     target or `reply_to` carries `holds_secrets: true` (every
-//!     `credential_store`; any agent the operator marks), before anything is sent.
+//!     ([`credentials`]) — never the environment, never the record.
 //!
 //! ## LLM backend contract (canonical reference)
 //!

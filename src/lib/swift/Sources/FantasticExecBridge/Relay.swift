@@ -177,6 +177,20 @@
 
         /// Run `body` on the relay's queue, which owns the socket and the
         /// subscription tables, and wait for it.
+        /// `body`'s value, computed on the queue.
+        private func onQueueValue<T: Sendable>(_ body: @escaping @Sendable () -> T?) async -> T? {
+            await withCheckedContinuation { (c: CheckedContinuation<T?, Never>) in
+                queue.async { c.resume(returning: body()) }
+            }
+        }
+
+        /// `onQueueValue` for a yes/no: false when the relay is gone.
+        private func onQueueValue(_ body: @escaping @Sendable () -> Bool?) async -> Bool {
+            await withCheckedContinuation { (c: CheckedContinuation<Bool, Never>) in
+                queue.async { c.resume(returning: body() ?? false) }
+            }
+        }
+
         private func onQueue(_ body: @escaping @Sendable () -> Void) async {
             await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
                 queue.async {
@@ -292,11 +306,10 @@
         private func serve(_ m: JSON, _ blob: Data?, relayTask: TaskId?) async {
             guard let op = m["op"].asString, let kernel else { return }
             // THE PROGRAM'S SENDS ARE THIS AGENT'S SENDS, UNDER THE RELAY'S TASK.
-            // The relay runs off a DispatchQueue, outside the handler's
-            // task-locals, so a forwarded send used to carry NO sender — the
-            // OPERATOR, ungated (measured live 2026-09-01: a spawned program
-            // reached any agent) — and no parent row. Python's relay is a
-            // registered task and inherits the owner's identity; re-enter both.
+            // This consumer is a task the owner's `start` spawned (the relay's
+            // kernel task), so it IS the owner — identity comes only from
+            // dispatch. Only the queue below carries no identity, so nothing is
+            // sent or watched from there.
             let owner = self.owner
             switch op {
             case "send":
@@ -306,11 +319,6 @@
                 // read `type` without raising.
                 var item = Item(
                     AgentId(target), pyTruthy(m["payload"]) ? m["payload"] : .object([:]))
-                // The program's SECRET marks ride onto the item as sent; the
-                // kernel validates them (a bad mark is a refusal in the reply)
-                // and masks every record of the call. Python `if "secret" in m:
-                // item["secret"] = m["secret"]`.
-                if let marks = m.asObject?["secret"] { item.secret = marks }
                 // A kind-B frame (bytes alongside, `_binary_path` = `["payload", …]`)
                 // carries its body on the item's BINARY channel, AT ITS PATH in the
                 // payload — `JSON` cannot hold bytes, so that is the only way a
@@ -330,9 +338,7 @@
                 if item.binary == nil { item.rawReply = true }
                 let sent = item
                 let out = await KernelTaskLocals.$currentTask.withValue(relayTask) {
-                    await KernelTaskLocals.$currentSender.withValue(owner) {
-                        await kernel.send([sent])[0]
-                    }
+                    await kernel.send([sent])[0]
                 }
                 let rid = m["rid"]
                 await onQueue { [weak self] in
@@ -365,41 +371,52 @@
                     blob.flatMap { Codec.payloadBody(m, body: $0) }.map { .binary(payload, $0) }
                     ?? .text(payload)
                 KernelTaskLocals.$currentTask.withValue(relayTask) {
-                    KernelTaskLocals.$currentSender.withValue(owner) {
-                        kernel.emitItem(owner, item)
-                    }
+                    kernel.emitItem(owner, item)
                 }
             default:
-                await onQueue { [weak self] in self?.subscription(op, m, kernel) }
+                // THE PROGRAM'S WATCH IS THIS AGENT'S WATCH, and THE KERNEL DECIDES:
+                // asked HERE, on the consumer — the owner — never on the queue,
+                // which carries no identity. THE READER REGISTERS FIRST: `watch`
+                // refuses a watcher with no inbox, and the drain task is what
+                // reads this one — so the stream is claimed before asking to be
+                // watched, and dropped again if the answer is no.
+                var asked: WatchAsk? = nil
+                if op == "watch", let src = m["src"].asString,
+                    await onQueueValue({ [weak self] in self?.subs[src] == nil })
+                {
+                    let proxy = AgentId("_xbw_\(jobId)_\(src)")
+                    _ = kernel.ensureInbox(proxy)
+                    asked = WatchAsk(
+                        proxy: proxy, denial: kernel.watch(src: AgentId(src), watcher: proxy))
+                } else if op == "onmessage",
+                    await onQueueValue({ [weak self] in self?.selfProxy == nil })
+                {
+                    supersedePredecessor(kernel)
+                    let proxy = AgentId("_xbself_\(jobId)")
+                    _ = kernel.ensureInbox(proxy)
+                    asked = WatchAsk(
+                        proxy: proxy, denial: kernel.watch(src: owner, watcher: proxy))
+                }
+                let ask = asked
+                await onQueue { [weak self] in self?.subscription(op, m, kernel, asked: ask) }
             }
         }
 
         /// The subscription ops — `watch`/`unwatch`/`onmessage`/`offmessage`.
-        /// Queue-confined: they own `subs` and `selfProxy`.
-        private func subscription(_ op: String, _ m: JSON, _ kernel: Kernel) {
+        /// Queue-confined: they own `subs` and `selfProxy`. A watch arrives
+        /// already ASKED (`asked`: the proxy reader and the kernel's answer, from
+        /// the consumer); nil when there was nothing to ask.
+        private func subscription(_ op: String, _ m: JSON, _ kernel: Kernel, asked: WatchAsk?) {
             switch op {
             case "watch":
-                guard let src = m["src"].asString, subs[src] == nil else { return }
                 // `_xb…`, not `_pyw…`: two spawner bundles in one kernel must not
                 // collide on a synthetic inbox id, and this one runs COMMANDS — the
                 // name has claimed "python" since before the runner was general.
-                let proxy = AgentId("_xbw_\(jobId)_\(src)")
-                let srcId = AgentId(src)
-                // THE PROGRAM'S WATCH IS THIS AGENT'S WATCH, and THE KERNEL DECIDES.
-                // Off the handler's task-local this relay watched as the OPERATOR —
-                // ungated, so a refusal was not merely discarded, it could never
-                // happen. Re-enter the owner's identity (as the `send` case does)
-                // and register NOTHING when the answer is no.
-                //
-                // THE READER REGISTERS FIRST: `watch` refuses a watcher with no
-                // inbox, and the drain task below is what reads this one — so
-                // claim the stream before asking to be watched, and drop it
-                // again if the answer is no.
+                guard let src = m["src"].asString, let asked, subs[src] == nil else { return }
+                let proxy = asked.proxy
                 let stream = kernel.ensureInbox(proxy)
-                let denial = KernelTaskLocals.$currentSender.withValue(owner) {
-                    kernel.watch(src: srcId, watcher: proxy)
-                }
-                if let denial {
+                // Register NOTHING when the answer is no.
+                if let denial = asked.denial {
                     kernel.removeInbox(proxy)
                     push(
                         .object([
@@ -431,16 +448,13 @@
                 Task { await kernel.unwatch(src: AgentId(src), watcher: sub.proxy) }
                 kernel.removeInbox(sub.proxy)  // the proxy row is OURS to release
             case "onmessage":
-                guard selfProxy == nil else { return }  // a second onmessage is a no-op
-                supersedePredecessor(kernel)
-                let proxy = AgentId("_xbself_\(jobId)")
+                // a second onmessage is a no-op
+                guard let asked, selfProxy == nil else { return }
+                let proxy = asked.proxy
                 let o = owner
                 let job = jobId.value
                 let stream = kernel.ensureInbox(proxy)
-                let denial = KernelTaskLocals.$currentSender.withValue(o) {
-                    kernel.watch(src: o, watcher: proxy)
-                }
-                if let denial {
+                if let denial = asked.denial {
                     kernel.removeInbox(proxy)
                     push(
                         .object([
@@ -543,4 +557,10 @@
             finished = true
         }
     }
+/// A program's watch as the consumer asked it: the proxy reader it registered
+/// and the kernel's answer (nil = granted).
+struct WatchAsk: Sendable {
+    let proxy: AgentId
+    let denial: JSON?
+}
 #endif

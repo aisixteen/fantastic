@@ -22,8 +22,8 @@ extension Kernel {
         // model asked "which target?" for 16 passes and finished with nothing
         // created.
         //
-        // Refused HERE, in the handler — not at the call gate — so probes
-        // asserting a denial `side` for a non-root privileged send stay valid.
+        // Refused HERE, in the handler — not at the call gate — so a send the
+        // gate admitted answers `not_here`, never a gate denial.
         if target.parentId != nil {
             // C32: EVERY system verb on a non-root — `shutdown_agents` and
             // `kernel_stop` included — answers the SAME generic
@@ -162,38 +162,34 @@ extension Kernel {
     static func kernelVerbDocs() -> JSON {
         .object([
             "create_agent": .string(
-                "args: handler_module:str, parent_id:str REQUIRED, id:str?, **meta. "
-                    + "Creates a CHILD OF `parent_id` — your own id grows your own subtree "
-                    + "(no grant needed); 'kernel_state' for top-level. No default parent."),
+                "args: handler_module:str, parent_id:str REQUIRED, id:str?, **meta. Creates "
+                    + "a CHILD OF `parent_id` — an agent names its own id (it creates only its "
+                    + "own children); 'kernel_state' for top-level. No default parent."),
             "update_agent": .string(
-                "args: id:str, **meta. EVERY FIELD YOU NAME IS REPLACED, NOT MERGED "
-                    + "(a field you do not name is untouched), so a dict field must be sent "
-                    + "WHOLE — `can_call`/`callable_by` included: restate every key you want "
-                    + "to keep, the baseline `$self`/`$parent`/`$children` among them, or the "
-                    + "keys you omit are GONE. Granting one edge reads like a PATCH and "
-                    + "behaves like a PUT."),
+                "args: id:str, **meta. EVERY FIELD YOU NAME IS REPLACED, NOT MERGED (a "
+                    + "field you do not name is untouched), so a dict field must be sent WHOLE — "
+                    + "`can_call`/`callable_by` included: restate every key you want to keep, the "
+                    + "baseline `$self` among them, or the keys you omit are GONE. Granting one "
+                    + "edge reads like a PATCH and behaves like a PUT. An agent updates only its "
+                    + "own children."),
             "delete_agent": .string(
-                "args: id:str. CASCADES — deletes that agent AND ITS WHOLE SUBTREE, "
-                    + "deepest first; refuses if any descendant carries `delete_lock`."),
+                "args: id:str. CASCADES — deletes that agent AND ITS WHOLE SUBTREE, deepest "
+                    + "first; refuses if any descendant carries `delete_lock`. An agent deletes "
+                    + "only its own children."),
             "list_agents": .string("No args. Every agent's record, flat. Paged."),
             "ps": .string(
                 "No args. The live kernel-wide TASK TABLE — {tasks:[{id, agent, parent, "
                     + "verb, started_at}]}, one row per in-flight dispatch. Paged."),
-            // EVERY execution, not just the named ones. Python's line said
-            // NAMED-only while the verb iterated the whole table, so a model
-            // reading the reflect expected its own handful of jobs and received
-            // every minted-pid row beside them — the doc contradicting the reply
-            // it had just been handed.
             "ledger": .string(
-                "No args. EVERY execution and what it became — named under its id, "
-                    + "unnamed under its minted pid — {executions:[{id, target, status, "
-                    + "attempts, retries, named, outcome?, acked?}]}, paged, scoped to what YOU "
-                    + "originated; read from the kernel's memory store plus what is not yet "
-                    + "flushed. `outcome` keeps the RESULT only for a named call; a dead letter "
-                    + "keeps its error; anything else is {status, bytes} — the reply itself went "
-                    + "to its caller. Failed/timed_out/cancelled rows are the dead-letter queue "
-                    + "(announced by the `on_deadletter` event): inspect, retry with a NEW id "
-                    + "if you choose, then `ack_deadletter` it — nothing is retried silently."),
+                "No args. EVERY execution and what it became — named under its id, unnamed "
+                    + "under its minted pid — {executions:[{id, target, status, attempts, "
+                    + "retries, named, outcome?, acked?}]}, paged, scoped to what YOU originated; "
+                    + "read from the kernel's memory store plus what is not yet flushed. "
+                    + "`outcome` keeps the RESULT only for a named call; a dead letter keeps its "
+                    + "error; anything else is {status, bytes} — the reply itself went to its "
+                    + "caller. Failed/timed_out/cancelled rows are the dead-letter queue "
+                    + "(announced by the `on_deadletter` event): inspect, retry with a NEW id if "
+                    + "you choose, then `ack_deadletter` it — nothing is retried silently."),
             "ack_deadletter": .string(
                 "args: id:int|str (req — an execution id, or its name). Acknowledges a DEAD "
                     + "LETTER (failed/timed_out/cancelled) you originated: recorded in the "
@@ -204,20 +200,17 @@ extension Kernel {
                     + "kernel's execution rows into it, then boots every other agent in "
                     + "registration order. Idempotent. Returns {started, store, booted:[ids]}."),
             "cancel": .string(
-                "args: task_id:str. Kills that task AND ITS SUBTREE — the id names its "
-                    + "own agent. Returns {cancelled:bool, killed:[…]}; the blocked caller's "
-                    + "batch item settles as status:'cancelled'. Unknown id ⇒ {cancelled:false}."
-            ),
+                "args: task_id:str. Kills that task AND ITS SUBTREE — the id names its own "
+                    + "agent. Returns {cancelled:bool, killed:[…]}; the blocked caller's batch "
+                    + "item settles as status:'cancelled'. Unknown id ⇒ {cancelled:false}."),
             "shutdown_agents": .string(
                 "No args. Stops the AGENTS, not the process: drains (new roots refused), "
                     + "sends `shutdown` to every agent advertising it, waits for in-flight work, "
-                    + "cancels the rest. Returns {drained, shut:[ids], cancelled:[ids]}."
-            ),
+                    + "cancels the rest. Returns {drained, shut:[ids], cancelled:[ids]}."),
             "kernel_stop": .string(
                 "No args. Stops the kernel PROCESS gracefully — drain, every call settles "
                     + "(done, or cancelled into the dead letters), the last rows flush, agents "
-                    + "shut down, exit. Under env:'container', the container."
-            ),
+                    + "shut down, exit. Under env:'container', the container."),
         ])
     }
 
@@ -288,10 +281,10 @@ extension Kernel {
     // ── create_agent ────────────────────────────────────────────
 
     /// A grant map's SHAPE, judged at WRITE time — the gate only judges edges.
-    /// `{id|token: "*" | [verbs]}`, plus the heritable `can_call` value
-    /// `{"verbs": [...], "for": "descendants"}` under a literal id and the
-    /// callable_by-only `$subtree:<local id>` key; anything else is refused so a record can
-    /// never carry a grant the gate silently denies on (py-canonical, 2026-09-01).
+    /// `{key: "*" | [verbs]}`, a key being an agent id, `$self`, `$parent`,
+    /// `$children` — and, in `can_call` only, `<guid>|<agent>` or `<guid>|*` (an
+    /// outbound peer address; a caller is always local); anything else is
+    /// refused so a record can never carry a grant the gate silently denies on.
     private func badGrantShape(_ meta: OrderedDictionary<String, JSON>) -> String? {
         for field in ["can_call", "callable_by"] {
             guard let g = meta[field] else { continue }
@@ -301,31 +294,9 @@ extension Kernel {
                     + "(e.g. {\"$self\": \"*\", \"ai\": \"*\"}), never a bare value"
             }
             for (k, v) in map {
-                if k.hasPrefix(subtreePrefix) {
-                    let x = k.dropFirst(subtreePrefix.count)
-                    if field != "callable_by" {
-                        return "\(field)[\(pyRepr(k))]: `$subtree:` is callable_by-only — it "
-                            + "names who may call you, never whom you may call"
-                    }
-                    if x.isEmpty || x.contains("|") {
-                        return "\(field)[\(pyRepr(k))]: `$subtree:` names one LOCAL agent id "
-                            + "(`$subtree:<id>`, no `|`)"
-                    }
-                }
-                if case .object = v {
-                    if field != "can_call" {
-                        return "\(field)[\(pyRepr(k))]: a heritable entry "
-                            + "{\"verbs\": [...], \"for\": \"descendants\"} is can_call-only"
-                    }
-                    if k.hasPrefix("$") {
-                        return "\(field)[\(pyRepr(k))]: a heritable entry names a literal "
-                            + "target id, never a token"
-                    }
-                    if heritableVerbs(v) == nil {
-                        return "\(field)[\(pyRepr(k))] must be exactly "
-                            + "{\"verbs\": [\"<verb>\", …], \"for\": \"descendants\"}"
-                    }
-                    continue
+                if !isGrantKey(field, k) {
+                    return "\(field)[\(pyRepr(k))] is not a grant key — legal keys: "
+                        + legalGrantKeys(field)
                 }
                 let ok: Bool
                 switch v {
@@ -334,25 +305,11 @@ extension Kernel {
                 default: ok = false
                 }
                 if !ok {
-                    return "\(field)[\(pyRepr(k))] must be \"*\", a list of verb strings, or "
-                        + "(can_call) {\"verbs\": [...], \"for\": \"descendants\"}"
+                    return "\(field)[\(pyRepr(k))] must be \"*\" or a list of verb strings"
                 }
             }
         }
         return nil
-    }
-
-    /// `holds_secrets`'s SHAPE, judged at WRITE time on every agent: exactly
-    /// `true` marks a holder, `null` is the operator's clear — nothing else is a
-    /// value the record may carry (`false`, `"yes"`, `1` read as a mark to one
-    /// reader and as none to another). Runs after the grant shape and BEFORE the
-    /// bundle's own `validateMeta`, so for a credential_store a malformed value
-    /// gets this text and `null` gets the store's. Python `Agent._bad_holder_mark`.
-    private func badHolderMark(_ meta: OrderedDictionary<String, JSON>) -> String? {
-        guard let v = meta[holdsSecretsField] else { return nil }
-        if v == .bool(true) || v == .null { return nil }
-        return "holds_secrets must be exactly true (this agent holds secrets) or null "
-            + "(the operator clears the mark) — got \(pyTypeName(v))"
     }
 
     func createFromPayload(payload: JSON) async -> JSON {
@@ -367,7 +324,7 @@ extension Kernel {
         // It used to be accepted and silently STRIPPED while the ADDRESSED agent
         // became the parent: `parent_id:"specialist"` produced `parent_id="core"`
         // with no error. The working mechanism was undiscoverable and the field
-        // that looked like it expressed placement did nothing.
+        // that looked like it named where the agent sits did nothing.
         guard let pid = payload["parent_id"].asString, !pid.isEmpty else {
             return Refusal.make(
                 Refusal.missingArg, "create_agent: parent_id required",
@@ -414,7 +371,7 @@ extension Kernel {
             }
         }
 
-        // The structural authority baseline ({$self,$parent,$children} on both
+        // The authority baseline ({$self:*} on both
         // `can_call` and `callable_by`) is stamped + merged uniformly in `Agent.init`
         // for EVERY agent — so it is NOT re-stamped here; an explicit grant in the
         // payload rides in `meta` and merges over the baseline at construction.
@@ -422,7 +379,7 @@ extension Kernel {
         // WRITE-TIME VALIDATION, same gate as update_agent (py-canonical: create
         // used to bypass it, so a record could be born with meta its own bundle
         // refuses). Record is empty at create: the merged view IS the patch.
-        if let why = badGrantShape(meta) ?? badHolderMark(meta) {
+        if let why = badGrantShape(meta) {
             return Refusal.make(Refusal.invalidMeta, why)
         }
         if let bundle = bundles.get(hm), let why = bundle.validateMeta(meta, record: [:]) {
@@ -485,39 +442,32 @@ extension Kernel {
 
         let recordJson = recordToJSON(newAgent.record())
 
-        // Fire `boot` on the new agent. Failures are logged via the
-        // reply but don't undo the create — matches Rust's behaviour.
-        // Operator authority: booting the child is a side effect of the already-
-        // authorized create_agent, not the parent reaching out — so it never runs
-        // against the parent's grant.
-        let bootOutcome = await KernelTaskLocals.$currentSender.withValue(nil) {
-            await send([Item(newAgent.id, .object(["type": .string("boot")]))])[0]
-        }
-        // BRANCH ON THE OUTCOME STATUS, not on the presence of an `error`: a
-        // handler that RAISED (`failed`) is a bug the operator must see; one
-        // that deliberately answered `{error}` (`errored`) is a refusal the
-        // create does not undo and does not narrate. Python
-        // `_agent.py:2663-2670` prints for the raise alone.
-        if bootOutcome.status == .failed {
+        // BOOT THE NEW AGENT — the kernel's own bookkeeping, a plain call into
+        // the child's handler (`runHandler`), never a send against the parent's
+        // grant: the kernel initializing the child it was told to make. The boot
+        // runs AS THE CHILD. Failures don't undo the create.
+        let (bootReply, bootStatus) = await runHandler(newAgent, .object(["type": .string("boot")]))
+        // BRANCH ON THE STATUS, not on the presence of an `error`: a handler
+        // that RAISED (`failed`) is a bug the operator must see; one that
+        // deliberately answered `{error}` (`errored`) is a refusal the create
+        // does not undo and does not narrate. Python `_agent.py` prints for the
+        // raise alone.
+        if bootStatus == .failed {
             printFlushed(
-                "  [create_agent] \(newAgent.id.value) boot failed: "
-                    + pyStr(bootOutcome.result))
+                "  [create_agent] \(newAgent.id.value) boot failed: " + pyStr(bootReply))
         }
 
-        // agent_created lifecycle event on the parent's inbox.
-        // BOOKKEEPING FROM ABOVE, like the boot: emitted as the root, the gate
-        // judged root→parent, and the root's `$children` baseline reaches depth 1
-        // only — a parent any deeper never got its event, operator creates
-        // included, and nothing said so (audit 2026-10-03, KV-4).
-        await KernelTaskLocals.$currentSender.withValue(nil) {
-            await emit(
-                parent.id,
+        // agent_created lifecycle event on the PARENT's inbox — bookkeeping, a
+        // plain fanout (no gate): whoever watches an agent for new children sees
+        // them arrive, at any depth (audit 2026-10-03, KV-4).
+        fanout(
+            parent, "emit",
+            .text(
                 .object([
                     "type": .string("agent_created"),
                     "id": .string(newAgent.id.value),
                     "agent": recordJson,
-                ]))
-        }
+                ])))
 
         return recordJson
     }
@@ -603,11 +553,11 @@ extension Kernel {
         }
         // Fire bundle.on_delete hook (best-effort) — a hook that raises is
         // SAID, as python's `Agent.on_delete` prints it (stdout), and the
-        // cascade goes on. The hook runs AS THE AGENT ITSELF (its own id is the
-        // sender), whoever asked for the delete — like `onCancel` (audit G-3).
+        // cascade goes on. The kernel runs the hook AS THE AGENT ITSELF (its own
+        // id is the sender), whoever asked for the delete — like `onCancel`.
         if let hm = target.handlerModule, let bundle = bundles.get(hm) {
             do {
-                try await KernelTaskLocals.$currentSender.withValue(target.id) {
+                try await asSelf(target.id) {
                     try await bundle.onDelete(agentId: target.id, kernel: self)
                 }
             } catch {
@@ -685,10 +635,7 @@ extension Kernel {
         // Grant-map SHAPE, judged here at write time — the gate only judges
         // edges (py-canonical, 2026-09-01: `can_call:"*"` accepted as a bare
         // string left a silently-dead grant; refuse loud at the mistake).
-        // `holds_secrets` is the field that IS gated: only `true` or `null` is
-        // written (`badHolderMark`), and on a holder only the operator writes
-        // `null` — its clear (`checkHolderMark`, in the gate).
-        if let why = badGrantShape(patch) ?? badHolderMark(patch) {
+        if let why = badGrantShape(patch) {
             return Refusal.make(Refusal.invalidMeta, why, extra: [("id", .string(idStr))])
         }
         // WRITE-TIME VALIDATION. Ask the target's bundle whether it can honour this
@@ -818,20 +765,11 @@ extension Kernel {
     /// description?, ...posture, children}` (the `detail:"full"` tree; children
     /// in creation order).
     ///
-    /// GATED PER NODE, as the roster is: `may` answers whether the caller may
-    /// `reflect` a node. The wiring view carries every node's `description` and
-    /// grant maps, so a caller allowed to reflect ONE agent read its whole
-    /// subtree's through `detail:"full"` — a depth-2 agent its siblings', through
-    /// its own parent (audit 2026-10-03, KV-3). A denied node keeps its `id` and
-    /// `children` (the shape is public through `tree=ids`) and nothing else.
-    func treeNode(_ agent: Agent, may: (Agent) -> Bool) -> JSON {
+    /// A reflect that passes the gate returns the tree whole.
+    func treeNode(_ agent: Agent) -> JSON {
         var obj: OrderedDictionary<String, JSON> = [:]
         obj["id"] = .string(agent.id.value)
         let kids = agent.childIds().compactMap { self.agent($0) }
-        guard may(agent) else {
-            obj["children"] = .array(kids.map { treeNode($0, may: may) })
-            return .object(obj)
-        }
         obj["parent_id"] = agent.parentId.map { .string($0.value) } ?? .null
         obj["handler_module"] = agent.handlerModule.map { .string($0) } ?? .null
         obj["display_name"] = .string(displayNameOrId(agent))
@@ -846,7 +784,7 @@ extension Kernel {
                 obj[key] = v
             }
         }
-        obj["children"] = .array(kids.map { treeNode($0, may: may) })
+        obj["children"] = .array(kids.map { treeNode($0) })
         return .object(obj)
     }
 

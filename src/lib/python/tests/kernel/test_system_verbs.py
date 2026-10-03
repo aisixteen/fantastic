@@ -107,11 +107,13 @@ async def test_agent_created_reaches_a_parent_at_any_depth(seeded_kernel):
     root's `$children` baseline reaches depth 1 only: a parent two levels down
     never got it — an operator create included, an agent creating under
     itself too — and nothing reported the drop."""
-    from kernel import sender_context
+    from _testkit import as_agent
 
     k = seeded_kernel
     k.create(None, id="kv4_a")
     k.ctx.agents["kv4_a"].create(None, id="kv4_b")  # depth 2
+    k.ctx.update("kv4_b", can_call={"$self": "*", k.id: ["create_agent"]})
+    k.ctx.update(k.id, callable_by={"$self": "*", "kv4_b": ["create_agent"]})
     q = k.ctx.ensure_inbox("kv4_b")
 
     async def create_under_b(cid: str) -> dict:
@@ -133,7 +135,7 @@ async def test_agent_created_reaches_a_parent_at_any_depth(seeded_kernel):
         )[0]["result"]
 
     assert (await create_under_b("kv4_by_operator"))["id"] == "kv4_by_operator"
-    with sender_context("kv4_b"):  # baseline only: placement under itself
+    with as_agent(k, "kv4_b"):  # granted create_agent: placement under itself
         assert (await create_under_b("kv4_by_self"))["id"] == "kv4_by_self"
     got = []
     while not q.empty():

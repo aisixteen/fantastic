@@ -38,8 +38,8 @@ fn kernel_managed_files_are_reserved() {
 
 #[tokio::test]
 async fn an_operator_may_name_any_namespace() {
-    // Origin `None` is the bookkeeping this verb exists for: the loader's own
-    // flush, an agent persisting itself under operator authority, the CLI.
+    // Origin `None` is the bookkeeping this verb exists for: a sidecar written
+    // through the loader as kernel bookkeeping, the loader's own flush, the CLI.
     assert!(guard_owner("anyone").is_ok());
 }
 

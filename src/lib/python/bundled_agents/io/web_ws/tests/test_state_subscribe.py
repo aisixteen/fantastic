@@ -16,6 +16,8 @@ from fastapi.testclient import TestClient
 from web.app import make_app
 from web_ws.tools import _make_endpoint
 
+from _testkit import wire
+
 
 @pytest.fixture
 def client(seeded_kernel):
@@ -29,11 +31,10 @@ def client(seeded_kernel):
         "web_ws.tools",
         id="test_web_ws",
         ingress_rule="allow_all_ingress",
-        # Deny-all: the surface relays browser create/delete to kernel_state —
-        # privileged verbs, so an explicit grant (ingress opens WHO; this opens WHAT).
-        # The state stream is a kernel-wide read, gated on the root the same way.
-        can_call={"kernel_state": ["create_agent", "delete_agent", "state_subscribe"]},
     )
+    # Deny-all: ingress opens WHO; the leg's edge to the root opens WHAT — the
+    # browser's create/delete and the kernel-wide state stream, on both ends.
+    wire(seeded_kernel, "test_web_ws", "kernel_state")
     app.add_api_websocket_route(
         "/{host_id}/ws", _make_endpoint("test_web_ws", seeded_kernel)
     )
@@ -101,7 +102,7 @@ def test_state_event_lifecycle_added(client, seeded_kernel):
                     "target": "kernel_state",
                     "payload": {
                         "type": "create_agent",
-                        "parent_id": "kernel_state",
+                        "parent_id": "test_web_ws",
                         "handler_module": "file_bridge.tools",
                         "allow": ["."],
                     },
@@ -123,7 +124,7 @@ def test_state_event_lifecycle_removed(client, seeded_kernel):
         _drain_until(ws, lambda m: m.get("type") == "state_snapshot")
         # Create then delete in sequence; expect 'added' then 'removed'.
         # Created under the LEG itself: `delete_agent` is gated on its operand,
-        # and an agent the leg made under itself is its own to delete (AV-1).
+        # and an agent the leg made under itself is its own to delete.
         ws.send_text(
             json.dumps(
                 {
@@ -210,11 +211,10 @@ def test_ws_close_unsubscribes_state_callback(seeded_kernel):
         "web_ws.tools",
         id="test_web_ws",
         ingress_rule="allow_all_ingress",
-        # Deny-all: the surface relays browser create/delete to kernel_state —
-        # privileged verbs, so an explicit grant (ingress opens WHO; this opens WHAT).
-        # The state stream is a kernel-wide read, gated on the root the same way.
-        can_call={"kernel_state": ["create_agent", "delete_agent", "state_subscribe"]},
     )
+    # Deny-all: ingress opens WHO; the leg's edge to the root opens WHAT — the
+    # browser's create/delete and the kernel-wide state stream, on both ends.
+    wire(seeded_kernel, "test_web_ws", "kernel_state")
     app.add_api_websocket_route(
         "/{host_id}/ws", _make_endpoint("test_web_ws", seeded_kernel)
     )
@@ -240,7 +240,7 @@ def test_state_event_carries_display_name_when_present(client, seeded_kernel):
                     "target": "kernel_state",
                     "payload": {
                         "type": "create_agent",
-                        "parent_id": "kernel_state",
+                        "parent_id": "test_web_ws",
                         "handler_module": "file_bridge.tools",
                         "allow": ["."],
                         "display_name": "my-store",
@@ -270,10 +270,10 @@ def test_state_subscribe_without_the_grant_is_refused(seeded_kernel):
         "web_ws.tools",
         id="test_web_ws",
         ingress_rule="allow_all_ingress",
-        # the connect-time auto-watch of the root needs its NAMED grant (audit
-        # KV-2), so its refusal is not the error frame read below
-        can_call={"kernel_state": ["create_agent", "delete_agent", "watch"]},
     )
+    # every verb on the root but the stream — the connect-time auto-watch is
+    # granted, so its refusal is not the error frame read below
+    wire(seeded_kernel, "test_web_ws", "kernel_state", ["create_agent", "watch"])
     app.add_api_websocket_route(
         "/{host_id}/ws", _make_endpoint("test_web_ws", seeded_kernel)
     )

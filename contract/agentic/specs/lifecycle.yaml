@@ -20,6 +20,11 @@ expect:
   reboot: true
   closed_roster_sender: warden
   steps:
+    # The kernel verbs take the two-sided check against the ROOT: the root's
+    # `callable_by` must name warden too. The root is not a roster agent, so the
+    # operator grants it here.
+    - name: the root accepts warden's kernel verbs
+      grant: {agent: $root, field: callable_by, to: warden, verbs: [ps, cancel]}
     - name: the task table is readable through a granted edge
       reach: {from: warden, to: $root, send: {type: ps}}
       expect: {allow: true}

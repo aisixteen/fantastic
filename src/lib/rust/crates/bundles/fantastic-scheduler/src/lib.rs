@@ -4,7 +4,7 @@
 //! via `load_blob`/`persist_blob` — nothing to wire; a write failfasts only when
 //! the loader has no store, reads are empty until then):
 //!
-//! - `schedules.yaml` — a YAML sequence of `{id, target, payload, interval_seconds, created_at, next_run, run_count, paused, owner, via?, timeout?}`
+//! - `schedules.yaml` — a YAML sequence of `{id, target, payload, interval_seconds, created_at, next_run, run_count, paused, timeout?}`
 //! - `schedule_events.yaml` — a YAML STREAM, one `---` document per `schedule_fired`
 //!   event, ring-trimmed to `HISTORY_MAX`.
 //!
@@ -22,24 +22,16 @@
 //! - `tick_now`     args `{schedule_id}`                       → fire immediately
 //! - `history`      args `{limit?, schedule_id?}`              → tail of schedule_events.yaml
 //!
-//! A SCHEDULE FIRES AS ITS CREATOR (audit AV-6, 2026-10-03). `schedule` records
-//! WHO asked — `owner`: the calling agent's id, a foreign caller's
-//! `<guid>|<agent>` (with `via`, the bridge leg that relayed it), or null for the
-//! operator — and every fire goes out under that identity (`with_sender`;
-//! `with_remote_caller` for a foreign owner; `with_operator` for null). So a
-//! schedule can do only what its creator could: the gate judges the creator's
-//! `can_call` and the target's `callable_by` for the creator, never the
-//! scheduler's. The scheduler is no deputy — and a caller lists, ticks, pauses,
-//! resumes, unschedules and reads the history of its OWN schedules only (the
-//! operator: all; another's schedule is "not found"). The `owner` key must be
-//! PRESENT (audit ARCH2-4): a schedule whose key is absent, or neither null nor a
-//! string, does not fire — the fire is refused and its `schedule_fired` event's
-//! `error` names why.
+//! A SCHEDULE FIRES AS THE SCHEDULER. The tick loop is a task the scheduler's own
+//! `boot` spawned, so every fire is the scheduler's send: the gate judges the
+//! scheduler's `can_call` and the target's `callable_by` for the scheduler. Every caller the gate admits
+//! sees, ticks, pauses, resumes and unschedules every schedule, and reads the
+//! whole history.
 //!
 //! A tick collects every DUE schedule, bumps `run_count`/`next_run`, persists
 //! FIRST (a crash inside the fire window cannot re-fire on reboot), then fires
-//! them all — ONE `kernel.send([...])` batch per owner, the batches concurrent, so
-//! one hung target never blocks the others. `timeout` is the schedule's own per-fire bound in
+//! them all in ONE `kernel.send([...])` batch — its items concurrent, so one hung
+//! target never blocks the others. `timeout` is the schedule's own per-fire bound in
 //! seconds; absent = wait forever (the kernel never defaults it). One
 //! `{type:"schedule_fired", ...}` per outcome goes to the scheduler's OWN inbox
 //! only — the target gets the payload, which is the tick.
@@ -71,19 +63,6 @@ pub const README: &str = include_str!("readme.md");
 /// Maximum history entries kept per scheduler (ring-trim threshold).
 /// Matches Python's `HISTORY_MAX`.
 pub const HISTORY_MAX: usize = 500;
-
-// THE SCHEDULER SEAL (owner 2026-10-03, audit S5) — as the relay seal: a schedule
-// keeps its payload in the sidecar and every fire re-sends it as a fresh call
-// carrying no marks, so its rows, the state stream and the memory store would all
-// hold the value in clear. A `schedule` call carrying ANY secret mark is refused.
-
-/// The seal's refusal text — python `SECRET_REFUSED`, byte for byte.
-pub const SECRET_REFUSED: &str = "scheduler: a call carrying secret marks may not be \
-                                  scheduled — a schedule keeps its payload and every fire \
-                                  re-sends it unmarked";
-
-/// Its hint — python `SECRET_REFUSED_HINT`.
-pub const SECRET_REFUSED_HINT: &str = "send a secret-bearing call yourself, marked, each time";
 
 /// Seconds between tick-loop sweeps when the record does not name one
 /// (python `DEFAULT_TICK_SEC`).
@@ -307,16 +286,35 @@ fn update_meta(agent_id: &AgentId, kernel: &Arc<Kernel>, key: &str, value: Value
 const SCHEDULES_BLOB: &str = "schedules.yaml";
 const HISTORY_BLOB: &str = "schedule_events.yaml";
 
+/// The root loader the sidecars persist through, or `None` when the root is not
+/// a `kernel_state` (then a write fails loud and a read is empty). Python
+/// `_loader`.
+fn loader(kernel: &Kernel) -> Option<Arc<fantastic_kernel::Agent>> {
+    kernel
+        .root()
+        .filter(|r| r.handler_module.as_deref() == Some("kernel_state.tools"))
+}
+
+/// ONE blob call to the root loader — persistence through the loader is KERNEL
+/// BOOKKEEPING ([`Kernel::bookkeeping`]): the loader's handler runs directly, never
+/// a gated send.
+async fn loader_call(
+    kernel: &Arc<Kernel>,
+    root: &Arc<fantastic_kernel::Agent>,
+    payload: Value,
+) -> Value {
+    kernel.bookkeeping(root, payload, None).await.result
+}
+
+/// Read a sidecar THROUGH the loader. Missing / no-store ⇒ `None` (reads lenient).
 async fn file_read(agent_id: &AgentId, kernel: &Arc<Kernel>, name: &str) -> Option<String> {
-    // Operator authority: reading our OWN sidecar is bookkeeping processed from
-    // above, not this agent reaching out.
-    let reply = fantastic_kernel::send::with_operator(kernel.send(vec![Item::new(
-        AgentId::from("kernel"),
+    let root = loader(kernel)?;
+    let reply = loader_call(
+        kernel,
+        &root,
         json!({"type": "load_blob", "agent_id": agent_id.0, "name": name}),
-    )]))
-    .await
-    .remove(0)
-    .result;
+    )
+    .await;
     reply
         .get("content")
         .and_then(Value::as_str)
@@ -343,18 +341,22 @@ async fn file_write(
     name: &str,
     content: &str,
 ) -> Result<(), PersistError> {
-    let reply = fantastic_kernel::send::with_operator(kernel.send(vec![Item::new(
-        AgentId::from("kernel"),
+    let Some(root) = loader(kernel) else {
+        return Err(
+            json!({"error": "scheduler: the root is not a kernel_state loader — no store"}),
+        );
+    };
+    let reply = loader_call(
+        kernel,
+        &root,
         json!({
             "type": "persist_blob",
             "agent_id": agent_id.0,
             "name": name,
             "content": content,
         }),
-    )]))
-    .await
-    .remove(0)
-    .result;
+    )
+    .await;
     if reply.get("error").and_then(Value::as_str).is_some() {
         let mut e = json!({"error": reply["error"]});
         if let Some(reason) = reply.get("reason") {
@@ -459,50 +461,6 @@ fn parse_events(raw: &str) -> Vec<Value> {
         .unwrap_or_default()
 }
 
-// ── who scheduled it (the identity a schedule fires under) ──────────
-
-/// `(owner, via)` of THIS dispatch's caller: a local agent → `(id, None)`; a
-/// foreign caller relayed by a bridge leg → (`<guid>|<agent>`, the leg); the
-/// operator → `(None, None)`. Python `_caller`.
-fn caller() -> Caller {
-    let origin = fantastic_kernel::current_origin().map(|o| o.0);
-    match fantastic_kernel::current_remote_caller() {
-        Some(remote) => (Some(remote), origin),
-        None => (origin, None),
-    }
-}
-
-/// Whether THIS dispatch's caller owns `sch` (a schedule or a fired event) — the
-/// operator owns them all. Python `_mine`.
-fn mine(sch: &Value) -> bool {
-    match caller().0 {
-        None => true,
-        Some(owner) => sch.get("owner").and_then(Value::as_str) == Some(owner.as_str()),
-    }
-}
-
-/// `kernel.send(items)` under a schedule owner's identity — task-local, so
-/// batches for different owners run side by side. Python `_send_as`.
-async fn send_as(
-    kernel: &Arc<Kernel>,
-    owner: Option<&str>,
-    via: Option<&str>,
-    items: Vec<Item>,
-) -> Vec<fantastic_kernel::Outcome> {
-    use fantastic_kernel::send::{with_operator, with_remote_caller, with_sender};
-    match (owner, via) {
-        (None, _) => with_operator(kernel.send(items)).await,
-        (Some(owner), Some(via)) => {
-            with_sender(
-                AgentId::from(via),
-                with_remote_caller(AgentId::from(via), owner.to_string(), kernel.send(items)),
-            )
-            .await
-        }
-        (Some(owner), None) => with_sender(AgentId::from(owner), kernel.send(items)).await,
-    }
-}
-
 // ── tick loop ───────────────────────────────────────────────────────
 
 async fn tick_loop(agent_id: AgentId, kernel: Arc<Kernel>) {
@@ -605,81 +563,24 @@ fn fire_outcome(status: Status, result: Value) -> (Value, Value) {
     (Value::Null, json!(format!("{status}: {}", py_str(&detail))))
 }
 
-/// Who a schedule fires as: `(owner, via)` — python's group key.
-type Caller = (Option<String>, Option<String>);
-
-/// A schedule's `owner` / `via`, as stored (`None` for null or absent).
-fn sched_str(sch: &Value, key: &str) -> Option<String> {
-    sch.get(key).and_then(Value::as_str).map(str::to_string)
-}
-
-/// Why `sch` may not fire, or `None`. Python `_owner_refusal`: the `owner` key
-/// must be PRESENT — null is the operator, a string an agent (`<guid>|<agent>`
-/// with `via`). An ABSENT key (audit ARCH2-4) or any other value names nobody,
-/// and reading it as null would fire it with the operator's ungated authority —
-/// so it does not fire.
-fn owner_refusal(sch: &Value) -> Option<String> {
-    let problem = match sch.get("owner") {
-        None => "the schedule's owner key is absent",
-        Some(Value::Null | Value::String(_)) => return None,
-        Some(_) => "the schedule's owner is not null or a string",
-    };
-    Some(format!(
-        "scheduler: not fired — {problem}; a schedule fires only as its recorded owner (null = the operator, a string = an agent)"
-    ))
-}
-
-/// Fire every due schedule AS ITS OWNER — one batch send per owner, the batches
+/// Fire every due schedule AS THE SCHEDULER — one batch send, its items
 /// concurrent, no head-of-line blocking — then record one `schedule_fired` per
-/// outcome. A schedule with no valid `owner` is refused (`owner_refusal`):
-/// nothing is sent, and its event carries the refusal.
+/// outcome.
 async fn fire_many(agent_id: &AgentId, kernel: &Arc<Kernel>, due: &[Value]) {
     let ts = now_secs();
-    let refused: Vec<Option<String>> = due.iter().map(owner_refusal).collect();
-    // python `groups.setdefault((owner, via), []).append(i)` — first-seen order
-    let mut groups: Vec<(Caller, Vec<usize>)> = Vec::new();
-    for (i, sch) in due.iter().enumerate() {
-        if refused[i].is_some() {
-            continue;
-        }
-        let key = (sched_str(sch, "owner"), sched_str(sch, "via"));
-        match groups.iter_mut().find(|(k, _)| *k == key) {
-            Some((_, idxs)) => idxs.push(i),
-            None => groups.push((key, vec![i])),
-        }
-    }
-    let batches = futures_util::future::join_all(groups.iter().map(|((owner, via), idxs)| {
-        send_as(
-            kernel,
-            owner.as_deref(),
-            via.as_deref(),
-            idxs.iter().map(|&i| fire_item(&due[i])).collect(),
-        )
-    }))
-    .await;
-    let mut outcomes: Vec<Option<fantastic_kernel::Outcome>> = vec![None; due.len()];
-    for ((_, idxs), outs) in groups.iter().zip(batches) {
-        for (&i, out) in idxs.iter().zip(outs) {
-            outcomes[i] = Some(out);
-        }
-    }
+    // AS THE SCHEDULER: this runs in its handler (`tick_now`) or in the tick
+    // loop its own `boot` spawned — identity comes from that dispatch.
+    let outcomes = kernel.send(due.iter().map(fire_item).collect()).await;
     let duration_ms = ((now_secs() - ts) * 1000.0) as i64;
-    for ((sch, out), why) in due.iter().zip(outcomes).zip(refused) {
+    for (sch, out) in due.iter().zip(outcomes) {
         let target = sched_target(sch);
         let payload = sched_payload(sch);
         let sched_id = sch.get("id").cloned().unwrap_or(Value::Null);
-        let (result, error) = match why {
-            Some(why) => (Value::Null, json!(why)),
-            None => {
-                let out = out.expect("one per item");
-                fire_outcome(out.status, out.result)
-            }
-        };
+        let (result, error) = fire_outcome(out.status, out.result);
         let event = json!({
             "type": "schedule_fired",
             "schedule_id": sched_id,
             "scheduler_id": agent_id.as_str(),
-            "owner": sch.get("owner").cloned().unwrap_or(Value::Null),
             "target": target,
             "payload": payload,
             "result": result,
@@ -743,16 +644,16 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
         "verbs": {
             "reflect": "Identity + tick state. No args.",
             "boot": "Idempotent. Starts the tick loop; persistence is THROUGH the loader.",
-            "schedule": "args: target:str, payload:{type:..,...}, interval_seconds:int (default 60), timeout:number? (seconds per fire; absent = wait forever). Every fire runs AS YOU (the schedule's `owner`) — it can reach only what you can. Returns {schedule_id, schedule}. Persisted THROUGH the loader; failfast if no store wired.",
-            "unschedule": "args: schedule_id:str (req — one of YOUR schedules). Returns {removed:bool, schedule_id}.",
-            "list": "No args. Returns {schedules: [<schedule record>, ...]} — YOUR schedules (the operator: all).",
-            "pause": "args: schedule_id:str?. With id pauses one of YOUR schedules; without, pauses the whole scheduler.",
-            "resume": "args: schedule_id:str?. With id resumes one of YOUR schedules; without, resumes the whole scheduler.",
-            "tick_now": "args: schedule_id:str (req — one of YOUR schedules). Bumps run_count, persists, then fires that schedule immediately, as its owner. Returns {fired:true, schedule_id}.",
-            "history": "args: limit:int? (1..500, default 100), schedule_id:str?. Returns {history:[event,...], count} — the fires of YOUR schedules (the operator: all).",
+            "schedule": "args: target:str, payload:{type:..,...}, interval_seconds:int (default 60), timeout:number? (seconds per fire; absent = wait forever). Every fire runs AS THE SCHEDULER — it reaches what the scheduler's can_call grants. Returns {schedule_id, schedule}. Persisted THROUGH the loader; failfast if no store wired.",
+            "unschedule": "args: schedule_id:str (req). Returns {removed:bool, schedule_id}.",
+            "list": "No args. Returns {schedules: [<schedule record>, ...]} — every schedule.",
+            "pause": "args: schedule_id:str?. With id pauses one schedule; without, pauses the whole scheduler.",
+            "resume": "args: schedule_id:str?. With id resumes one schedule; without, resumes the whole scheduler.",
+            "tick_now": "args: schedule_id:str (req). Bumps run_count, persists, then fires that schedule immediately, as the scheduler. Returns {fired:true, schedule_id}.",
+            "history": "args: limit:int? (1..500, default 100), schedule_id:str?. Returns {history:[event,...], count} — every schedule's fires.",
         },
         "emits": {
-            "schedule_fired": "{type:'schedule_fired', schedule_id, scheduler_id, owner, target, payload, result, error, ts, duration_ms} — emitted on the scheduler's OWN inbox after every fire (never the target's — the payload send is the tick); `owner` is who the fire ran as",
+            "schedule_fired": "{type:'schedule_fired', schedule_id, scheduler_id, target, payload, result, error, ts, duration_ms} — emitted on the scheduler's OWN inbox after every fire (never the target's — the payload send is the tick)",
         }
     })
 }
@@ -802,18 +703,10 @@ async fn shutdown_tick(agent_id: &AgentId, kernel: &Arc<Kernel>) {
     }
 }
 
-/// `schedule` — VALIDATION ORDER IS PART OF THE CONTRACT (A5.5): the scheduler
-/// seal (any secret mark), then the payload's shape, then `interval_seconds`, then
-/// the target, then `payload.type`, then `timeout`. A call with two faults is told
-/// about the FIRST one python names.
+/// `schedule` — VALIDATION ORDER IS PART OF THE CONTRACT (A5.5): the payload's
+/// shape, then `interval_seconds`, then the target, then `payload.type`, then
+/// `timeout`. A call with two faults is told about the FIRST one python names.
 async fn schedule_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
-    if !fantastic_kernel::current_secret().is_empty() {
-        return fantastic_kernel::refusal::refusal_hint(
-            fantastic_kernel::refusal::UNAUTHORIZED,
-            SECRET_REFUSED,
-            SECRET_REFUSED_HINT,
-        );
-    }
     let sched_payload = match payload.get("payload") {
         None | Some(Value::Null) => json!({}),
         Some(v) if v.is_object() => v.clone(),
@@ -841,7 +734,6 @@ async fn schedule_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel
         }
         Some(_) => return bad("schedule", "timeout", "a positive number of seconds"),
     };
-    let (owner, via) = caller();
     let now = now_secs();
     let mut sch = json!({
         "id": mint_id(),
@@ -852,12 +744,7 @@ async fn schedule_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel
         "next_run": now + interval as f64,
         "run_count": 0,
         "paused": false,
-        // WHO asked — every fire runs as them (null = the operator).
-        "owner": owner,
     });
-    if let Some(v) = via {
-        sch["via"] = json!(v);
-    }
     if let Some(t) = timeout {
         sch["timeout"] = t;
     }
@@ -901,7 +788,7 @@ async fn unschedule_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kern
     };
     let mut schedules = load_schedules(agent_id, kernel).await;
     let before = schedules.len();
-    schedules.retain(|s| !(is_sched(s, &sid) && mine(s)));
+    schedules.retain(|s| !is_sched(s, &sid));
     let removed = schedules.len() < before;
     if removed {
         if let Err(e) = save_schedules(agent_id, kernel, &schedules).await {
@@ -912,11 +799,7 @@ async fn unschedule_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kern
 }
 
 async fn list_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
-    let schedules: Vec<Value> = load_schedules(agent_id, kernel)
-        .await
-        .into_iter()
-        .filter(mine)
-        .collect();
+    let schedules: Vec<Value> = load_schedules(agent_id, kernel).await;
     json!({
         "schedules": schedules,
         "origin": format!("{agent_id} list — re-send; changes as schedules change"),
@@ -938,7 +821,7 @@ async fn set_paused(
         let mut schedules = load_schedules(agent_id, kernel).await;
         let mut touched = 0;
         for s in schedules.iter_mut() {
-            if is_sched(s, &sid) && mine(s) {
+            if is_sched(s, &sid) {
                 s["paused"] = json!(paused);
                 touched += 1;
             }
@@ -967,7 +850,7 @@ async fn tick_now_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel
         return json!({"error": "tick_now: schedule_id required"});
     };
     let mut schedules = load_schedules(agent_id, kernel).await;
-    let Some(idx) = schedules.iter().position(|s| is_sched(s, &sid) && mine(s)) else {
+    let Some(idx) = schedules.iter().position(|s| is_sched(s, &sid)) else {
         return json!({"error": format!("schedule {} not found", py_repr_value(&sid))});
     };
     // Same order as the tick: bump → persist → fire.
@@ -985,9 +868,6 @@ async fn tick_now_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel
     }
     let due = vec![schedules[idx].clone()];
     fire_many(agent_id, kernel, &due).await;
-    if let Some(why) = owner_refusal(&due[0]) {
-        return json!({"error": why});
-    }
     json!({"fired": true, "schedule_id": sid})
 }
 
@@ -996,12 +876,8 @@ async fn history_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>
         Ok(v) => v.min(500) as usize,
         Err(refusal) => return refusal,
     };
-    // YOUR fires first, then the newest `limit` of them.
-    let fires: Vec<Value> = read_history(agent_id, kernel, 2 * HISTORY_MAX)
-        .await
-        .into_iter()
-        .filter(mine)
-        .collect();
+    // every fire, then the newest `limit` of them.
+    let fires: Vec<Value> = read_history(agent_id, kernel, 2 * HISTORY_MAX).await;
     let from = fires.len().saturating_sub(limit);
     let mut entries = fires[from..].to_vec();
     if let Some(sid) = schedule_id(payload) {

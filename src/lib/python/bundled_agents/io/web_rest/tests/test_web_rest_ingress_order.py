@@ -20,6 +20,7 @@ from fastapi import FastAPI
 from io_bridge import MAX_FRAME
 from web_rest import tools as rest
 from web_rest.tools import _make_post_endpoint
+from _testkit import wire
 
 SEALED_ERROR = "edge sealed by policy"
 
@@ -80,6 +81,7 @@ JSON = {"content-type": "application/json"}
 
 async def test_a_sealed_leg_refuses_before_reading_the_body(seeded_kernel):
     seeded_kernel.create("web_rest.tools", id="rs")
+    wire(seeded_kernel, "rs", "kernel_state")
     app = _app(seeded_kernel, "rs")
     junk = [b"{not json at all " * 64] * 8
     status, body, read = await _post(app, "/rs/kernel_state", junk, JSON)
@@ -92,6 +94,7 @@ async def test_a_wrong_credential_is_refused_before_reading_the_body(
 ):
     monkeypatch.setenv("FANTASTIC_GROUP_TOKEN", "grp")
     seeded_kernel.create("web_rest.tools", id="pw", ingress_rule="password_ingress")
+    wire(seeded_kernel, "pw", "kernel_state")
     app = _app(seeded_kernel, "pw")
     body = [json.dumps({"type": "reflect"}).encode()]
     for token in (b"nope", "été".encode("latin-1"), "päss".encode()):
@@ -124,6 +127,7 @@ def _too_large(n: int) -> dict:
 async def test_a_declared_oversize_body_is_refused_unread(seeded_kernel, monkeypatch):
     monkeypatch.setattr(rest, "MAX_BODY", 64)
     seeded_kernel.create("web_rest.tools", id="ro", ingress_rule="allow_all_ingress")
+    wire(seeded_kernel, "ro", "kernel_state")
     app = _app(seeded_kernel, "ro")
     big = [b"x" * 65]
     status, out, read = await _post(
@@ -140,6 +144,7 @@ async def test_an_undeclared_oversize_body_stops_at_the_bound(
     refused — the rest is never asked for."""
     monkeypatch.setattr(rest, "MAX_BODY", 64)
     seeded_kernel.create("web_rest.tools", id="ro", ingress_rule="allow_all_ingress")
+    wire(seeded_kernel, "ro", "kernel_state")
     app = _app(seeded_kernel, "ro")
     chunks = [b"y" * 40] * 10
     status, out, read = await _post(app, "/ro/kernel_state", chunks, JSON)

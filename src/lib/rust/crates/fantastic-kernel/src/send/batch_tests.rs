@@ -603,6 +603,7 @@ async fn a_dead_letter_of_a_departed_caller_is_announced_on_the_root() {
         .remove(0)
         .result;
     assert_eq!(r["id"], "dl_child", "{r}");
+    crate::test_support::wire(&kernel, "dl_caller", "dl_child", json!("*"));
     let tap = AgentId::from("tap_deadletter");
     let mut rx = kernel.ensure_inbox(&tap);
     assert!(kernel
@@ -610,7 +611,7 @@ async fn a_dead_letter_of_a_departed_caller_is_announced_on_the_root() {
         .await
         .is_none());
     let k = Arc::clone(&kernel);
-    let call = tokio::spawn(crate::send::with_sender(a.clone(), async move {
+    let call = tokio::spawn(crate::test_support::as_agent(a.clone(), async move {
         k.send(vec![Item::new(
             AgentId::from("dl_child"),
             json!({"type": "slow"}),

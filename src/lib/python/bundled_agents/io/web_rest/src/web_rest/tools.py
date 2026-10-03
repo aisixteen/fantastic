@@ -10,10 +10,7 @@ Routes mounted on the parent web's FastAPI app:
     POST /<self_id>/<target_id>       body: JSON payload (must contain `type`)
                                       → JSON reply from kernel.send
                                       headers: X-Fantastic-Auth (credential),
-                                      X-Fantastic-Execution-Id (the item `id`),
-                                      X-Fantastic-Secret (the item `secret`, a
-                                      JSON array of marks — dotted strings
-                                      and/or arrays of steps)
+                                      X-Fantastic-Execution-Id (the item `id`)
     GET  /<self_id>/_reflect          → kernel.reflect (substrate primer)
     GET  /<self_id>/_reflect/<target> → reflect on a specific agent
 
@@ -34,6 +31,11 @@ read (a declared `Content-Length` over it is refused unread). Reading and parsin
 the whole body before the gate let a client the leg was about to refuse make the
 kernel buffer any amount of data.
 
+IDENTITY: the HTTP server is the TRANSPORT — a request runs outside every
+dispatch, so what it sends is the operator's. It sends nothing onward itself:
+every admitted request is handed to this leg as `inbound_call`
+(`io_bridge.hand_in`), and the leg performs it AS ITSELF — gated as the leg.
+
 Verbs:
   reflect       -> identity + URL patterns
   boot          -> no-op (web mounts the route by pulling get_routes)
@@ -43,6 +45,8 @@ Verbs:
                    endpoint callables are handed to the parent in-process
                    through the module hook `route_endpoints(agent)` below —
                    never through a reply.
+  inbound_call  -> the INBOUND half (`io_bridge._inbound`): a request handed in,
+                   sent onward AS THIS LEG.
 """
 
 from __future__ import annotations
@@ -52,11 +56,15 @@ import json
 from fastapi import Request
 from fastapi.responses import JSONResponse, Response
 
-from kernel import sender_context
-
 from io_bridge import MAX_FRAME
 from io_bridge import describe as _describe
-from io_bridge import gate_inbound, resolve_ingress, unknown_ingress_refusal
+from io_bridge import (
+    gate_inbound,
+    hand_in,
+    inbound_call,
+    resolve_ingress,
+    unknown_ingress_refusal,
+)
 from io_bridge import loads as strict_loads
 from kernel._refusal import TRANSPORT_ERROR, UNHANDLED, refusal
 
@@ -131,19 +139,6 @@ def _deny(decision) -> JSONResponse:
 _OCTET = "application/octet-stream"
 _PAYLOAD_HEADER = "x-fantastic-payload"
 _BYTES_FIELD_HEADER = "x-fantastic-bytes-field"
-
-# ─── secret marks ───────────────────────────────────────────────
-# The item's `secret` marks (`kernel/_secret`) ride `X-Fantastic-Secret` — dispatch
-# metadata about the call, like the execution id, never part of the payload. The
-# value is a JSON ARRAY of marks, each a dotted string (`"payload.key"`) or an
-# array of steps (`["payload", "a.b"]` — a key holding a dot), the SAME value a
-# ws/bridge `call` frame carries in its `secret` field: one parser (the strict wire
-# `loads`), and the kernel's own check judges it. Not comma-separated — a path
-# step is a payload key, and a key may hold a comma; a JSON string escapes any
-# character into the ASCII a header value is safe in; and a wrong shape (a bare
-# string, `[]`, a number) reaches the kernel's refusal verbatim instead of being
-# re-invented by a splitter.
-_SECRET_HEADER = "x-fantastic-secret"
 
 
 def _json_reply(reply) -> Response:
@@ -234,9 +229,8 @@ def _make_post_endpoint(self_id: str, kernel):
                 return JSONResponse(
                     {"error": "web_rest: body must be a JSON object"}, status_code=400
                 )
-        # Tag the dispatch with this surface's id so telemetry rays
-        # originate visually from this sprite. Without this an external
-        # HTTP caller has no agent context and rays drop.
+        # Handed to THIS LEG (`inbound_call`), which sends it as itself — an HTTP
+        # caller has no agent identity of its own.
         # NAMING an execution. The credential rides `X-Fantastic-Auth`; an
         # execution id rides its own header for the same reason — it is
         # dispatch metadata about the call, not part of the verb payload the
@@ -248,19 +242,7 @@ def _make_post_endpoint(self_id: str, kernel):
         exec_id = request.headers.get("X-Fantastic-Execution-Id")
         if exec_id:
             item["id"] = exec_id
-        # SECRET MARKS: this kernel records the call as shown, exactly as for a
-        # local caller; a malformed mark is the kernel's own refusal.
-        raw_secret = request.headers.get(_SECRET_HEADER)
-        if raw_secret is not None:
-            try:
-                item["secret"] = strict_loads(raw_secret)
-            except json.JSONDecodeError:
-                return JSONResponse(
-                    {"error": "web_rest: X-Fantastic-Secret is not valid JSON"},
-                    status_code=400,
-                )
-        with sender_context(self_id):
-            reply = (await kernel.send([item]))[0]["result"]
+        reply = await hand_in(kernel, self_id, {"type": "inbound_call", "item": item})
         if reply is None:
             return Response(status_code=204)
         # A reply that carries raw bytes (e.g. `read_stream`) goes back the same
@@ -309,10 +291,11 @@ def _make_reflect_get(self_id: str, kernel):
         decision = _gate(self_id, kernel, target_id, payload, request)
         if not decision.allowed:
             return _deny(decision)
-        with sender_context(self_id):
-            reply = (await kernel.send([{"target": target_id, "payload": payload}]))[0][
-                "result"
-            ]
+        reply = await hand_in(
+            kernel,
+            self_id,
+            {"type": "inbound_call", "item": {"target": target_id, "payload": payload}},
+        )
         if reply is None:
             return Response(status_code=404)
         return _json_reply(reply)
@@ -326,10 +309,11 @@ def _make_reflect_root(self_id: str, kernel):
         decision = _gate(self_id, kernel, "kernel", payload, request)
         if not decision.allowed:
             return _deny(decision)
-        with sender_context(self_id):
-            reply = (await kernel.send([{"target": "kernel", "payload": payload}]))[0][
-                "result"
-            ]
+        reply = await hand_in(
+            kernel,
+            self_id,
+            {"type": "inbound_call", "item": {"target": "kernel", "payload": payload}},
+        )
         if reply is None:
             return Response(status_code=404)
         return _json_reply(reply)
@@ -413,6 +397,7 @@ VERBS = {
     "reflect": _reflect,
     "boot": _boot,
     "get_routes": _get_routes,
+    "inbound_call": inbound_call,
 }
 
 

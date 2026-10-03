@@ -45,6 +45,7 @@ private func mountLeg(_ k: Kernel, grant: Bool) async {
             "id": .string("leg"), "ingress_rule": .string("allow_all_ingress"),
             "can_call": .object(canCall),
         ])
+    wire(k, "web", "leg")
     _ = await k.send([
         Item(AgentId("web"), .object(["type": .string("mount"), "child_id": .string("leg")]))
     ])[0].result

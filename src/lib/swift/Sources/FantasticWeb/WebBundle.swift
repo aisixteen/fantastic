@@ -13,6 +13,13 @@
 //   stop      -> stop the listener
 //   mount     -> (re)mount a child's routes (idempotent)
 //   unmount   -> remove a child's routes from the live router
+//   fetch_file -> one `read_stream` chunk of an agent's file, read AS THIS HOST —
+//                the file route hands each browser fetch here
+//
+// IDENTITY: the HTTP server is the TRANSPORT — its request tasks run outside
+// every dispatch, so a request is the operator. The file route never reads as
+// anyone itself: it hands the fetch to this host (`fetch_file`), and the host
+// reads as itself, gated as `web`.
 
 import FantasticIoBridge
 import FantasticJSON
@@ -138,6 +145,37 @@ public final class WebBundle: AgentBundle, @unchecked Sendable {
 
     public var readme: String? { Self.readmeText }
 
+    /// `fetch_file` answers with the chunk RAW, so it rides the binary channel;
+    /// every other verb answers the header as the text channel would.
+    public func handleBinary(
+        agentId: AgentId, header: JSON, body: Blob?, kernel: Kernel
+    ) async throws -> (JSON?, Blob?) {
+        if header["type"].asString == "fetch_file" {
+            return await fetchFile(header, kernel: kernel, raw: true)
+        }
+        return (try await handle(agentId: agentId, payload: header, kernel: kernel), nil)
+    }
+
+    /// python `_fetch_file` — one `read_stream` chunk of `path` on `agent_id`,
+    /// read AS THIS HOST (this handler's own send), so the served agent's gates
+    /// judge `web`. The chunk comes back raw on the binary channel.
+    private func fetchFile(_ payload: JSON, kernel: Kernel, raw: Bool) async -> (JSON?, Blob?) {
+        guard let agentId = payload["agent_id"].asString, !agentId.isEmpty else {
+            return (.object(["error": .string("web.fetch_file: agent_id required")]), nil)
+        }
+        let out = await kernel.send([
+            Item(
+                AgentId(agentId),
+                .object([
+                    "type": .string("read_stream"),
+                    "path": payload.asObject?["path"] ?? .null,
+                    "offset": payload.asObject?["offset"] ?? .null,
+                    "length": payload.asObject?["length"] ?? .null,
+                ]), rawReply: raw)
+        ])[0]
+        return (out.result, out.body)
+    }
+
     public func handle(
         agentId: AgentId,
         payload: JSON,
@@ -176,6 +214,8 @@ public final class WebBundle: AgentBundle, @unchecked Sendable {
             }
             server.unmountRoutes(for: AgentId(childId))
             return .object(["unmounted": .string(childId)])
+        case "fetch_file":
+            return await fetchFile(payload, kernel: kernel, raw: false).0
         default:
             // python `{"error": f"web: unknown type {t!r}"}` — a plain error dict,
             // not a coded refusal (web's handler predates the refusal table).
@@ -315,19 +355,12 @@ public final class WebBundle: AgentBundle, @unchecked Sendable {
             let egress = authorizeCall(
                 grant: web.metaValue(forKey: "can_call") ?? .null, verb: "read_stream",
                 otherId: agent.id.value, holderId: webId.value, parentId: web.parentId?.value,
-                childIds: Set(web.childIds().map { $0.value }), loaderId: nil)
-            // the heritable half — an ancestor's `{aid: {verbs, for: descendants}}`
-            if !egress.allowed
-                && !kernel.heritableEgress(
-                    sender: webId, verb: "read_stream", targetId: agent.id.value)
-            {
-                continue
-            }
+                childIds: Set(web.childIds().map { $0.value }))
+            if !egress.allowed { continue }
             let ingress = authorizeCall(
                 grant: meta["callable_by"] ?? .null, verb: "read_stream", otherId: webId.value,
                 holderId: agent.id.value, parentId: agent.parentId?.value,
-                childIds: Set(agent.childIds().map { $0.value }), loaderId: nil,
-                inSubtree: { kernel.inSubtree($0, of: $1) })
+                childIds: Set(agent.childIds().map { $0.value }))
             if !ingress.allowed { continue }
             let rule = resolveIngress(ingressRule: meta["ingress_rule"], auth: meta["auth"])
             let action = AuthAction(
@@ -352,6 +385,9 @@ public final class WebBundle: AgentBundle, @unchecked Sendable {
         ),
         "unmount": .string(
             "args: child_id:str (req). Removes every route belonging to the named child from the live app."
+        ),
+        "fetch_file": .string(
+            "args: agent_id:str (req), path:str (req), offset:int (req), length:int (req). One `read_stream` chunk of `path` on `agent_id`, read AS THIS HOST — the file route hands every browser fetch here, so the served agent's gates judge `web`. Returns that agent's reply."
         ),
     ]
 

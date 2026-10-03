@@ -1,7 +1,6 @@
 //! The memory-store era of ai_core: the calibrated compaction trigger, the
 //! repeat-read dedupe, the head cache that never diverges from the store, ids
-//! minted at append, and context by grant (`fork_from`, `request_share`, the row
-//! event). The twin of python `ai_core/tests/test_memory_features.py`; the fold
+//! minted at append, and the row event. The twin of python `ai_core/tests/test_memory_features.py`; the fold
 //! summary budget half lives in `strategies/fold.rs`'s tests.
 //!
 //! A child of `tests`, so it drives the same harness: a real `ram_store` named
@@ -9,7 +8,7 @@
 
 use super::*;
 use crate::provider::ProviderReport;
-use fantastic_kernel::with_sender;
+use fantastic_kernel::test_support::as_agent;
 
 async fn call(kernel: &Arc<Kernel>, target: &str, payload: Value) -> Value {
     kernel
@@ -20,7 +19,7 @@ async fn call(kernel: &Arc<Kernel>, target: &str, payload: Value) -> Value {
 }
 
 async fn call_as(kernel: &Arc<Kernel>, sender: &AgentId, target: &str, payload: Value) -> Value {
-    with_sender(
+    as_agent(
         sender.clone(),
         kernel.send(vec![Item::new(AgentId::from(target), payload)]),
     )
@@ -39,21 +38,6 @@ async fn set_meta(kernel: &Arc<Kernel>, id: &AgentId, fields: Value) {
 
 fn contents(rows: &[Value]) -> Vec<Value> {
     rows.iter().map(|r| r["content"].clone()).collect()
-}
-
-/// `alice` owns a row and shares her head with `bob` (her own store `share`).
-/// Returns the grant id.
-async fn alice_shares_with_bob(kernel: &Arc<Kernel>, alice: &AgentId, bob: &AgentId) -> i64 {
-    let g = call_as(
-        kernel,
-        alice,
-        MEMORY,
-        json!({"type": "share", "with": bob.as_str(), "scope": {"head_until": 1_000_000_000}}),
-    )
-    .await;
-    g["grant"]
-        .as_i64()
-        .unwrap_or_else(|| panic!("share refused: {g}"))
 }
 
 // ── the trigger, calibrated by provider-reported usage ─────────────────
@@ -190,218 +174,55 @@ fn a_repeated_body_is_a_stub_citing_the_first() {
     assert_eq!(out[3], hist[3]);
 }
 
-// ── context by grant: fork_from, request_share ─────────────────────────
-
-#[tokio::test]
-async fn fork_from_reads_the_owners_rows_under_the_grant() {
-    let tmp = TempDir::new().unwrap();
-    let (kernel, alice) = mk_kernel(&tmp, "fork").await;
-    let bob = add_peer(&kernel, &tmp, &alice).await;
-    // bob's first turn after boot rebuilds its view (`context_recall` asks the
-    // model which rows it wants whole), then runs the kickstart turn.
-    let s_bob = script(
-        &bob,
-        vec![
-            pass("{\"expand\": [], \"why\": \"fits\"}"),
-            pass("<call name=\"done\"></call>"),
-        ],
-        Duration::ZERO,
-    );
-    crate::memory::save_history(
-        &alice,
-        &kernel,
-        &[json!({"role": "user", "content": "the vault code is 4711"})],
-    )
-    .await
-    .expect("append");
-    let grant = alice_shares_with_bob(&kernel, &alice, &bob).await;
-
-    let out = call(
-        &kernel,
-        bob.as_str(),
-        json!({"type": "fork_from", "owner": alice.as_str(), "grant": grant,
-               "message": "what is the code?"}),
-    )
-    .await;
-    assert_eq!(out["forked"], json!(true), "{out}");
-    assert_eq!(out["rows"], json!(1), "{out}");
-    let hist = crate::memory::load_history(&bob, &kernel, false)
-        .await
-        .expect("store read");
-    let fork = hist
-        .iter()
-        .find(|r| r["kind"] == json!("fork"))
-        .expect("the fork row");
-    let text = fork["content"].as_str().unwrap();
-    assert!(
-        text.contains(&format!("[shared from {alice} · read-only")),
-        "{text}"
-    );
-    assert!(
-        text.contains("4711"),
-        "the owner's row, read back under the grant: {text}"
-    );
-
-    // the kickstart: a turn on bob, framed, ending in the message
-    assert!(
-        until_passes(&s_bob, 2).await,
-        "the fork never started a turn"
-    );
-    let msgs = s_bob.request_messages(1);
-    let last = msgs
-        .last()
-        .and_then(|m| m["content"].as_str())
-        .unwrap_or("");
-    assert!(
-        last.contains(&format!("you are a new agent, not {alice}")),
-        "{last}"
-    );
-    assert!(
-        last.ends_with("what is the code?"),
-        "the kickstart message: {last}"
-    );
-    assert!(
-        Value::Array(msgs.clone()).to_string().contains("4711"),
-        "the shared rows are in the fork's view"
-    );
-
-    // the owner revokes — the reader's next read fails fast
-    let r = call_as(
-        &kernel,
-        &alice,
-        MEMORY,
-        json!({"type": "unshare", "grant": grant}),
-    )
-    .await;
-    assert!(r.get("error").is_none(), "{r}");
-    let err = crate::memory::load_history(&bob, &kernel, false).await;
-    assert!(err.is_err(), "a revoked grant must fail the read: {err:?}");
-}
-
-#[tokio::test]
-async fn fork_from_refuses_an_owner_the_grant_does_not_name() {
-    let tmp = TempDir::new().unwrap();
-    let (kernel, alice) = mk_kernel(&tmp, "forkown").await;
-    let bob = add_peer(&kernel, &tmp, &alice).await;
-    crate::memory::save_history(
-        &alice,
-        &kernel,
-        &[json!({"role": "user", "content": "alice's row"})],
-    )
-    .await
-    .expect("append");
-    let grant = alice_shares_with_bob(&kernel, &alice, &bob).await;
-    let out = call(
-        &kernel,
-        bob.as_str(),
-        json!({"type": "fork_from", "owner": "mallory", "grant": grant, "message": "go"}),
-    )
-    .await;
-    assert_eq!(out["reason"], json!("bad_arg"), "{out}");
-    assert!(
-        out["error"]
-            .as_str()
-            .unwrap()
-            .contains(&format!("given by {alice}")),
-        "{out}"
-    );
-    let out = call(
-        &kernel,
-        bob.as_str(),
-        json!({"type": "fork_from", "owner": alice.as_str(), "grant": 99_999, "message": "go"}),
-    )
-    .await;
-    assert_eq!(out["reason"], json!("not_found"), "{out}");
-}
-
-#[tokio::test]
-async fn request_share_reaches_the_owners_model() {
-    let tmp = TempDir::new().unwrap();
-    let (kernel, alice) = mk_kernel(&tmp, "reqshare").await;
-    let bob = add_peer(&kernel, &tmp, &alice).await;
-    let s_alice = script(
-        &alice,
-        vec![pass("<call name=\"done\"></call>")],
-        Duration::ZERO,
-    );
-    let out = call_as(
-        &kernel,
-        &bob,
-        alice.as_str(),
-        json!({"type": "request_share", "row": 42, "why": "need it"}),
-    )
-    .await;
-    assert_eq!(
-        out,
-        json!({"requested": true, "owner": alice.as_str(), "row": 42})
-    );
-    assert!(
-        until_passes(&s_alice, 1).await,
-        "the owner's model never got the ask"
-    );
-    let turn = s_alice.request(0);
-    assert!(
-        turn.contains(&format!("[request_share from {bob} · row 42] need it")),
-        "{turn}"
-    );
-    assert!(turn.contains("<type>share</type>"), "{turn}");
-}
-
-#[test]
-fn a_shared_scope_shows_a_third_owners_row_as_a_stub() {
-    let rows = vec![
-        json!({"id": 1, "role": "user", "content": "mine"}),
-        json!({"id": 2, "role": "user", "kind": "fork", "owner": "carol", "as_of": 57,
-               "content": "[fork of carol]"}),
-    ];
-    let text = crate::memory::render_shared("alice", &json!(2), &rows);
-    assert!(text.contains("(user · row 1) mine"), "{text}");
-    // carol's OWN row id — the one `request_share` to carol can name
-    assert!(
-        text.contains("[row 57 · owner carol · not shared with you]"),
-        "{text}"
-    );
-}
-
-// ── the head cache never diverges from the store ───────────────────────
-
-/// The head is cached write-through, but the store is the truth: a row an admin
-/// appends under the agent's key after the cache is warm is in the next read.
 #[tokio::test]
 async fn a_row_another_writer_appends_reaches_the_next_head_read() {
     let tmp = TempDir::new().unwrap();
     let (kernel, alice) = mk_kernel(&tmp, "planted").await;
-    crate::memory::save_history(
-        &alice,
-        &kernel,
-        &[json!({"role": "user", "content": "first"})],
+    fantastic_kernel::test_support::as_agent(
+        alice.clone(),
+        crate::memory::save_history(
+            &alice,
+            &kernel,
+            &[json!({"role": "user", "content": "first"})],
+        ),
     )
     .await
     .expect("append");
-    let hist = crate::memory::load_history(&alice, &kernel, false)
-        .await
-        .expect("store read");
+    let hist = fantastic_kernel::test_support::as_agent(
+        alice.clone(),
+        crate::memory::load_history(&alice, &kernel, false),
+    )
+    .await
+    .expect("store read");
     assert_eq!(contents(&hist), vec![json!("first")]);
     let rid = kernel.mint_id();
-    // the operator (an admin of the store) plants a row under alice's key
-    let out = call(
+    // another writer under alice's key — a direct `append` sent as alice, beside
+    // the backend's own write-through
+    let out = call_as(
         &kernel,
+        &alice,
         MEMORY,
-        json!({"type": "append", "owner": alice.as_str(),
+        json!({"type": "append",
                "rows": [{"id": rid, "role": "user", "content": "planted"}]}),
     )
     .await;
     assert_eq!(out["ids"], json!([rid]), "{out}");
-    let hist = crate::memory::load_history(&alice, &kernel, false)
-        .await
-        .expect("store read");
+    let hist = fantastic_kernel::test_support::as_agent(
+        alice.clone(),
+        crate::memory::load_history(&alice, &kernel, false),
+    )
+    .await
+    .expect("store read");
     assert_eq!(contents(&hist), vec![json!("first"), json!("planted")]);
     // and read again: merged once, not twice
     assert_eq!(
-        crate::memory::load_history(&alice, &kernel, false)
-            .await
-            .expect("store read")
-            .len(),
+        fantastic_kernel::test_support::as_agent(
+            alice.clone(),
+            crate::memory::load_history(&alice, &kernel, false)
+        )
+        .await
+        .expect("store read")
+        .len(),
         2
     );
 }
@@ -420,10 +241,13 @@ impl Provider for MidTurnWriter {
         _messages: &[Value],
         _max_tokens: Option<i64>,
     ) -> Result<ProviderStream, ProviderError> {
-        crate::memory::save_history(
-            &self.agent,
-            &self.kernel,
-            &[json!({"role": "user", "content": "mid"})],
+        fantastic_kernel::test_support::as_agent(
+            self.agent.clone(),
+            crate::memory::save_history(
+                &self.agent,
+                &self.kernel,
+                &[json!({"role": "user", "content": "mid"})],
+            ),
         )
         .await
         .map_err(|e| ProviderError::raised(e.0))?;
@@ -457,9 +281,12 @@ async fn a_turns_rows_are_minted_when_appended_so_id_order_is_append_order() {
     .await
     .expect("send");
     assert!(out.get("error").is_none(), "{out}");
-    let hist = crate::memory::load_history(&ai, &kernel, false)
-        .await
-        .expect("store read");
+    let hist = fantastic_kernel::test_support::as_agent(
+        ai.clone(),
+        crate::memory::load_history(&ai, &kernel, false),
+    )
+    .await
+    .expect("store read");
     let ids: Vec<i64> = hist.iter().filter_map(|r| r["id"].as_i64()).collect();
     let mut sorted = ids.clone();
     sorted.sort_unstable();
@@ -470,7 +297,7 @@ async fn a_turns_rows_are_minted_when_appended_so_id_order_is_append_order() {
 // ── the row event ──────────────────────────────────────────────────────
 
 /// `watch` announces every row the agent appends to the watcher's inbox,
-/// content-free without a grant; `unwatch` stops it; a watcher with no inbox is
+/// content-free without `body`; `unwatch` stops it; a watcher with no inbox is
 /// refused.
 #[tokio::test]
 async fn watch_announces_each_appended_row_until_unwatch() {
@@ -495,10 +322,12 @@ async fn watch_announces_each_appended_row_until_unwatch() {
         w,
         json!({"watching": true, "watcher": "ui_probe", "body": false})
     );
-    let ids =
-        crate::memory::save_history(&ai, &kernel, &[json!({"role": "user", "content": "hello"})])
-            .await
-            .expect("append");
+    let ids = fantastic_kernel::test_support::as_agent(
+        ai.clone(),
+        crate::memory::save_history(&ai, &kernel, &[json!({"role": "user", "content": "hello"})]),
+    )
+    .await
+    .expect("append");
     let ev = rx.try_recv().expect("a row event").payload;
     assert_eq!(
         ev,
@@ -514,9 +343,12 @@ async fn watch_announces_each_appended_row_until_unwatch() {
     )
     .await;
     assert_eq!(u["watching"], json!(false), "{u}");
-    crate::memory::save_history(&ai, &kernel, &[json!({"role": "user", "content": "again"})])
-        .await
-        .expect("append");
+    fantastic_kernel::test_support::as_agent(
+        ai.clone(),
+        crate::memory::save_history(&ai, &kernel, &[json!({"role": "user", "content": "again"})]),
+    )
+    .await
+    .expect("append");
     assert!(rx.try_recv().is_none(), "no event after unwatch");
 }
 

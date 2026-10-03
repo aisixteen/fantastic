@@ -1,10 +1,9 @@
 """The memory-store era of ai_core: calibrated compaction trigger, repeat-read dedupe,
-fold summaries with a budget and a mechanical index, and context by grant
-(`fork_from`, `request_share`)."""
+fold summaries with a budget and a mechanical index, and the store as the truth
+for the head."""
 
 from __future__ import annotations
 
-import pytest
 
 from ai_core import core
 from ai_core.context import ProjectionCtx
@@ -12,7 +11,7 @@ import importlib
 
 from _fake import FakeCtx
 from _testkit import memory_meta
-from kernel import sender_context
+from _testkit import as_agent
 
 fold_mod = importlib.import_module("ai_core.strategies.fold")
 
@@ -154,7 +153,7 @@ def test_the_mechanical_index_keeps_files_ids_and_the_users_words():
     assert "[reply to" not in idx, "runtime lines are not the user's words"
 
 
-# ── context by grant: fork_from, request_share ─────────────────────────
+# ── the store is the truth ──────────────────────────────────────────────
 
 
 async def _pair(kernel):
@@ -169,132 +168,38 @@ async def _pair(kernel):
         )
 
 
-async def test_fork_from_reads_the_owners_rows_under_the_grant(seeded_kernel):
-    await _pair(seeded_kernel)
-    await core._save_history(
-        "alice", seeded_kernel, [{"role": "user", "content": "the vault code is 4711"}]
-    )
-    with sender_context("alice"):
-        g = (
-            await seeded_kernel.send(
-                [
-                    {
-                        "target": "memory",
-                        "payload": {
-                            "type": "share",
-                            "with": "bob",
-                            "scope": {"head_until": 10**9},
-                        },
-                    }
-                ]
-            )
-        )[0]["result"]
-    delivered: list = []
-    real = core._deliver_soon
-    core._deliver_soon = lambda k, t, text, c, s: delivered.append((t, text))
-    try:
-        out = await core._fork_from(
-            "bob",
-            {"owner": "alice", "grant": g["grant"], "message": "what is the code?"},
-            seeded_kernel,
-        )
-    finally:
-        core._deliver_soon = real
-    assert out["forked"] and out["rows"] == 1
-    hist = await core._load_history("bob", seeded_kernel)
-    fork = next(r for r in hist if r.get("kind") == "fork")
-    assert "[shared from alice · read-only" in fork["content"]
-    assert "4711" in fork["content"], "the owner's row, read back under the grant"
-    assert delivered and delivered[0][0] == "bob"
-    assert "you are a new agent, not alice" in delivered[0][1]
-    assert delivered[0][1].endswith("what is the code?"), "the kickstart message"
-    # the owner revokes — the reader's next read fails fast
-    with sender_context("alice"):
-        await seeded_kernel.send(
-            [{"target": "memory", "payload": {"type": "unshare", "grant": g["grant"]}}]
-        )
-    with pytest.raises(core.MemoryStoreError):
-        await core._load_history("bob", seeded_kernel)
-
-
-async def test_request_share_reaches_the_owners_model(seeded_kernel):
-    await _pair(seeded_kernel)
-    delivered: list = []
-    real = core._deliver_soon
-    core._deliver_soon = lambda k, t, text, c, s: delivered.append((t, text))
-    try:
-        with sender_context("bob"):
-            out = (
-                await seeded_kernel.send(
-                    [
-                        {
-                            "target": "alice",
-                            "payload": {
-                                "type": "request_share",
-                                "row": 42,
-                                "why": "need it",
-                            },
-                        }
-                    ]
-                )
-            )[0]["result"]
-    finally:
-        core._deliver_soon = real
-    assert out == {"requested": True, "owner": "alice", "row": 42}
-    assert delivered[0][0] == "alice"
-    assert "[request_share from bob · row 42] need it" in delivered[0][1]
-    assert "<type>share</type>" in delivered[0][1]
-
-
-async def test_a_shared_scope_shows_a_third_owners_row_as_a_stub():
-    rows = [
-        {"id": 1, "role": "user", "content": "mine"},
-        {
-            "id": 2,
-            "role": "user",
-            "kind": "fork",
-            "owner": "carol",
-            "as_of": 57,
-            "content": "[fork of carol]",
-        },
-    ]
-    text = core._render_shared("alice", 2, rows)
-    assert "(user · row 1) mine" in text
-    # carol's OWN row id — the one `request_share` to carol can name
-    assert "[row 57 · owner carol · not shared with you]" in text
-
-
-# ── the head cache never diverges from the store ───────────────────────
-
-
 async def test_a_row_another_writer_appends_reaches_the_next_head_read(seeded_kernel):
-    """The head is cached write-through, but the store is the truth: a row an admin
-    appends under the agent's key after the cache is warm is in the next read."""
+    """The head is cached write-through, but the store is the truth: a row
+    appended under the agent's key outside the cache (a program running as the
+    agent) after the cache is warm is in the next read."""
     await _pair(seeded_kernel)
-    await core._save_history(
-        "alice", seeded_kernel, [{"role": "user", "content": "first"}]
-    )
-    assert [r["content"] for r in await core._load_history("alice", seeded_kernel)] == [
-        "first"
-    ]
+    with as_agent(seeded_kernel, "alice"):
+        await core._save_history(
+            "alice", seeded_kernel, [{"role": "user", "content": "first"}]
+        )
+        assert [
+            r["content"] for r in await core._load_history("alice", seeded_kernel)
+        ] == ["first"]
     rid = seeded_kernel.ctx.mint_id()
-    out = await seeded_kernel.send(
-        [
-            {
-                "target": "memory",
-                "payload": {
-                    "type": "append",
-                    "owner": "alice",
-                    "rows": [{"id": rid, "role": "user", "content": "planted"}],
-                },
-            }
-        ]
-    )
+    with as_agent(seeded_kernel, "alice"):
+        out = await seeded_kernel.send(
+            [
+                {
+                    "target": "memory",
+                    "payload": {
+                        "type": "append",
+                        "rows": [{"id": rid, "role": "user", "content": "planted"}],
+                    },
+                }
+            ]
+        )
     assert out[0]["result"].get("ids") == [rid], out
-    hist = await core._load_history("alice", seeded_kernel)
-    assert [r["content"] for r in hist] == ["first", "planted"]
-    # and read again: merged once, not twice
-    assert len(await core._load_history("alice", seeded_kernel)) == 2
+    # the agent's own read — its turn, which the test stands in for
+    with as_agent(seeded_kernel, "alice"):
+        hist = await core._load_history("alice", seeded_kernel)
+        assert [r["content"] for r in hist] == ["first", "planted"]
+        # and read again: merged once, not twice
+        assert len(await core._load_history("alice", seeded_kernel)) == 2
 
 
 async def test_a_note_the_agent_appends_itself_is_memory_not_a_turn(seeded_kernel):
@@ -305,7 +210,7 @@ async def test_a_note_the_agent_appends_itself_is_memory_not_a_turn(seeded_kerne
         "alice", seeded_kernel, [{"role": "user", "content": "hi"}]
     )
     await core._load_history("alice", seeded_kernel)  # the cache is warm
-    with sender_context("alice"):
+    with as_agent(seeded_kernel, "alice"):
         out = await seeded_kernel.send(
             [
                 {
@@ -347,39 +252,6 @@ async def test_a_turns_rows_are_minted_when_appended_so_id_order_is_append_order
     ids = [r["id"] for r in hist]
     assert ids == sorted(ids), f"append order diverged from id order: {ids}"
     assert [r["content"] for r in hist][:2] == ["mid", "hello"]
-
-
-async def test_fork_from_refuses_an_owner_the_grant_does_not_name(seeded_kernel):
-    """The attribution label is the grant's owner, never the caller's word."""
-    await _pair(seeded_kernel)
-    await core._save_history(
-        "alice", seeded_kernel, [{"role": "user", "content": "alice's row"}]
-    )
-    with sender_context("alice"):
-        g = (
-            await seeded_kernel.send(
-                [
-                    {
-                        "target": "memory",
-                        "payload": {
-                            "type": "share",
-                            "with": "bob",
-                            "scope": {"head_until": 10**9},
-                        },
-                    }
-                ]
-            )
-        )[0]["result"]
-    out = await core._fork_from(
-        "bob",
-        {"owner": "mallory", "grant": g["grant"], "message": "go"},
-        seeded_kernel,
-    )
-    assert out.get("reason") == "bad_arg" and "given by alice" in out["error"]
-    out = await core._fork_from(
-        "bob", {"owner": "alice", "grant": 99999, "message": "go"}, seeded_kernel
-    )
-    assert out.get("reason") == "not_found"
 
 
 class _CutThenFit:

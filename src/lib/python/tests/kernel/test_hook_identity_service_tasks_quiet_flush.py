@@ -156,8 +156,6 @@ async def _started_kernel(root) -> None:
                 "parent_id": root.id,
                 "id": "memory",
                 "handler_module": "ram_store.tools",
-                "operator": True,
-                "admins": ["kernel"],
             },
         )
     )["result"]
@@ -261,7 +259,7 @@ async def test_the_ledger_flush_publishes_nothing_on_the_state_stream(seeded_ker
         unsub()
 
 
-@pytest.mark.parametrize("headroom", [0, 1])  # the flush row's id / the send's
+@pytest.mark.parametrize("headroom", [0])  # the flush row's id — its one mint
 async def test_an_id_block_reserved_inside_the_flush_publishes_nothing(
     seeded_kernel, headroom
 ):

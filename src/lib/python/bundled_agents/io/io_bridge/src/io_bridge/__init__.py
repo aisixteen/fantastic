@@ -42,12 +42,18 @@ from io_bridge._engine import (
     _test_transport_inject,
     boot,
     dispatch,
-    forwarded_secret,
     gate_inbound,
     make_verbs,
     on_delete,
     stamp_egress,
     validate_meta,
+)
+from io_bridge._inbound import (
+    hand_in,
+    inbound_call,
+    inbound_emit,
+    inbound_state_subscribe,
+    inbound_watch,
 )
 from io_bridge._transport import ConnectionClosed, MemoryTransport, _BaseTransport
 from io_bridge._codec import (
@@ -92,13 +98,18 @@ __all__ = [
     "on_delete",
     "gate_inbound",
     "stamp_egress",
-    "forwarded_secret",
     "BuildTransport",
     "_BridgeState",
     "_bridges",
     "_state",
     "_next_corr",
     "_test_transport_inject",
+    # the inbound verbs of a wire leg + the transport's one hand-in
+    "hand_in",
+    "inbound_call",
+    "inbound_emit",
+    "inbound_watch",
+    "inbound_state_subscribe",
     # transport contract + reference impl
     "MemoryTransport",
     "_BaseTransport",
