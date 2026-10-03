@@ -344,6 +344,29 @@ pub async fn default_system_content(self_id: &AgentId, kernel: &Arc<Kernel>) -> 
     blocks.join("\n\n")
 }
 
+/// THE system block a turn uses — the one choice `assemble_messages` builds the
+/// turn on and `context_recall` sizes the body budget against, so the two never
+/// drift (python `_system_content`). PRECEDENCE: the per-call argument (this
+/// delivery) > the record's own `system_prompt` (read LIVE, so an `update_agent`
+/// lands on the next turn — a main turn, a self-delivery, a turn woken by a
+/// reply) > the default block.
+pub async fn system_content(
+    self_id: &AgentId,
+    kernel: &Arc<Kernel>,
+    system_prompt: Option<&str>,
+) -> String {
+    match system_prompt {
+        Some(s) if !s.trim().is_empty() => s.to_string(),
+        _ => {
+            match crate::schema::record_system_prompt(&crate::helpers::agent_meta(self_id, kernel))
+            {
+                Some(s) => s,
+                None => default_system_content(self_id, kernel).await,
+            }
+        }
+    }
+}
+
 /// Build the per-turn message list: system block + the MODEL VIEW of the
 /// persisted history + the user turn. A caller-supplied `system_prompt` REPLACES
 /// the default system block (a caller that wants a different role, or a different
@@ -367,20 +390,7 @@ pub async fn assemble_messages(
     _client_id: &str,
     system_prompt: Option<&str>,
 ) -> Result<(Vec<Value>, usize), crate::memory::MemoryStoreError> {
-    // PRECEDENCE: the per-call argument (this delivery) > the record's own
-    // `system_prompt` (read LIVE, so an `update_agent` lands on the next turn) >
-    // the default block. Every turn passes here — a main turn, a self-delivery, a
-    // turn woken by a reply.
-    let system_content = match system_prompt {
-        Some(s) if !s.trim().is_empty() => s.to_string(),
-        _ => {
-            match crate::schema::record_system_prompt(&crate::helpers::agent_meta(self_id, kernel))
-            {
-                Some(s) => s,
-                None => default_system_content(self_id, kernel).await,
-            }
-        }
-    };
+    let system_content = system_content(self_id, kernel, system_prompt).await;
     let mut messages = vec![json!({"role": "system", "content": system_content})];
     // A trimmed VIEW, not a rewrite of the store: stale whole-state reads deduped,
     // identical bodies stubbed, and answered reflects reduced to a stub — the

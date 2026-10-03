@@ -265,7 +265,8 @@ extension AIBackend {
     /// after a fold batch, or on request. Returns {kept, expanded, dropped,
     /// budget, why, degraded}. Python `_context_recall`.
     func contextRecall(
-        agent: Agent, payload: JSON, kernel: Kernel, provider: (any AIProvider)?
+        agent: Agent, payload: JSON, kernel: Kernel, provider: (any AIProvider)?,
+        systemPrompt: String? = nil
     ) async throws -> JSON {
         let key = agent.id.value
         let rows = try await loadHistory(key, kernel)
@@ -275,11 +276,13 @@ extension AIBackend {
                 "why": .string("empty store"), "degraded": .bool(false),
             ])
         }
+        // The block the turn will actually use (`systemContent`), not the default
+        // one: a record or per-call `system_prompt` changes how much room the body gets.
         let sysTokens = AIContext.estimateOne(
             .object([
                 "role": .string("system"),
                 "content": .string(
-                    await assembleSystemPrompt(agent: agent, systemPrompt: nil, kernel: kernel)),
+                    await systemContent(agent: agent, systemPrompt: systemPrompt, kernel: kernel)),
             ]))
         let bodyBudget = max(
             AIConstants.BUDGET_FLOOR, AIContext.budget(agent, modelWindow: config.modelWindow) - sysTokens - AIConstants.NOTICE_ENVELOPE_RESERVE)

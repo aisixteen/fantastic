@@ -513,6 +513,24 @@ struct ViewRecallTests {
         #expect(miss["total"].asInt == 0, "\(miss.serialize())")
     }
 
+    // `contextRecall` budgets the body against the block the turn will carry — a
+    // short record `system_prompt` leaves more room than the default block (python
+    // `test_recall_sizes_the_block_the_turn_uses`).
+    @Test func recallSizesTheBlockTheTurnUses() async throws {
+        var budgets: [Int64] = []
+        for meta: OrderedDictionary<String, JSON> in [
+            ["output_reserve": .integer(0)],
+            ["output_reserve": .integer(0), "system_prompt": "R"],
+        ] {
+            let (kernel, agent, f, backend) = await boot(meta: meta)
+            f.seed([f.row("user", "GOAL", "user:goal")])
+            let r = try await backend.contextRecall(
+                agent: agent, payload: dry(), kernel: kernel, provider: nil)
+            budgets.append(r["budget"].asInt ?? -1)
+        }
+        #expect(budgets[1] > budgets[0], "\(budgets)")
+    }
+
     // B5.3: `dry` is python-truthy — `1` is dry and makes NO model call.
     @Test func dryIsPythonTruthy() async throws {
         let (kernel, agent, f, backend) = await boot()

@@ -135,6 +135,7 @@ pub async fn run_generation(
             kernel,
             Some(provider),
             cfg.model_window,
+            system_prompt.as_deref(),
         )
         .await?;
     }

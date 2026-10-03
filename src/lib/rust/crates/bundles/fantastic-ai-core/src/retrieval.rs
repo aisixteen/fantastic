@@ -10,7 +10,7 @@
 //!
 //! Mirrors python `ai_core/core.py` `_grep` / `_context_clear` / `_context_recall`.
 
-use crate::assembly::default_system_content;
+use crate::assembly::system_content;
 use crate::constants::{BUDGET_FLOOR, NOTICE_ENVELOPE_RESERVE};
 use crate::context::{budget as agent_budget, estimate_one, fit_reply, inline_cap};
 use crate::folds::{expand_ids, quoted_title, render as fold_render, row_content, row_id};
@@ -402,6 +402,7 @@ pub async fn context_recall(
     kernel: &Arc<Kernel>,
     provider: Option<&Arc<dyn Provider>>,
     model_window: i64,
+    system_prompt: Option<&str>,
 ) -> MemResult<Value> {
     let meta = agent_meta(agent_id, kernel);
     let rows = load_history(agent_id, kernel, false).await?;
@@ -410,9 +411,11 @@ pub async fn context_recall(
             json!({"kept": 0, "expanded": 0, "dropped": 0, "why": "empty store", "degraded": false}),
         );
     }
+    // The block the turn will actually use (`system_content`), not the default one:
+    // a record or per-call `system_prompt` changes how much room the body gets.
     let sys_tokens = estimate_one(&json!({
         "role": "system",
-        "content": default_system_content(agent_id, kernel).await,
+        "content": system_content(agent_id, kernel, system_prompt).await,
     }));
     let body_budget = (agent_budget(&meta, model_window) - sys_tokens - NOTICE_ENVELOPE_RESERVE)
         .max(BUDGET_FLOOR);

@@ -120,3 +120,34 @@ async fn an_update_agent_lands_on_the_next_turn_and_null_restores_the_default() 
         system_of(&s, 3)
     );
 }
+
+/// `context_recall` budgets the body against the block the turn will actually
+/// carry — a short record prompt leaves more room than the default block
+/// (python `test_recall_sizes_the_block_the_turn_uses`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recall_sizes_the_block_the_turn_uses() {
+    let tmp = TempDir::new().unwrap();
+    let mut budgets = Vec::new();
+    for (name, prompt) in [("rc_default", None), ("rc_short", Some("R"))] {
+        let (kernel, backend) = mk_kernel(&tmp, name).await;
+        if let Some(p) = prompt {
+            set_record_prompt(&kernel, &backend, json!(p)).await;
+        }
+        put_row(
+            &kernel,
+            &backend,
+            json!({"role": "user", "content": "THE GOAL"}),
+        )
+        .await;
+        let r = kernel
+            .send(vec![Item::new(
+                backend,
+                json!({"type": "context_recall", "dry": true}),
+            )])
+            .await
+            .remove(0)
+            .result;
+        budgets.push(r["budget"].as_i64().unwrap_or_else(|| panic!("{r:#?}")));
+    }
+    assert!(budgets[1] > budgets[0], "{budgets:?}");
+}
