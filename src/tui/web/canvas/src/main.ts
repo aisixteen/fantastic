@@ -1,5 +1,5 @@
 import { Agent, Kernel, ProxyLoader, WsBridge, registerRamStore } from "./lib.ts";
-import { GATEWAY, UserBridge, pageVerbs, readToken, writeToken, writesPage } from "./user_bridge.ts";
+import { GATEWAY, UserBridge, readToken, writeToken } from "./user_bridge.ts";
 import { registerGlAgent } from "./bundles/gl_agent/gl_agent.ts";
 import { registerHtmlAgent } from "./bundles/html_agent/html_agent.ts";
 import { mountCanvas } from "./bundles/canvas/canvas.ts";
@@ -65,29 +65,28 @@ function seed(kernel: Kernel): void {
     new Agent({
       id: "canvas",
       handlerModule: "canvas.ts",
-      sentence: "Canvas compositor — renders the frontend's own member tree.",
+      sentence: "The canvas — the page's root; its views are under it.",
     }),
   );
 }
 
 // THE BOOT, the library's `boot` composed here with one change: every host call
-// goes through the USERS GATEWAY as this tab's user (`user_bridge.ts`).
+// goes through `user` (`user_bridge.ts`).
 const kernel = new Kernel();
 registerRamStore(kernel);
 register(kernel);
 const inner = new WsBridge(kernel, { origin, controlEndpoint: GATEWAY });
-const tab = crypto.randomUUID().replace(/-/g, "");
 // the token is read ONCE, at load: a token typed in another tab takes effect here
 // on this tab's next load, never mid-session
 const token = readToken();
-const bridge = new UserBridge(kernel, inner, { loader: LOADER, token: () => token, tab });
+new UserBridge(kernel, inner, { token: () => token });
 
-// WHO THIS TAB IS: the gateway says which user its token is (no token: the
-// host's tokenless default). Refused → ask for a token, and nothing else runs.
-const me = (await kernel.callHost(GATEWAY, { type: "reflect" })) as Record<string, unknown>;
-if (typeof me["as"] !== "string") {
-  const why = (me["as_error"] as Record<string, unknown> | undefined)?.["error"] ?? me["error"] ?? "no answer";
-  askToken(String(why));
+// IS THIS TAB LET IN: `user.forward` to the host kernel's reflect — refused
+// only when `user` carries a token this tab does not give. Refused → ask for
+// a token, and nothing else runs.
+const me = (await kernel.callHost("kernel", { type: "reflect", tree: "none" } as never)) as Record<string, unknown>;
+if (me["reason"] === "unauthorized") {
+  askToken(String(me["error"] ?? "no answer"));
   await new Promise(() => {}); // the form reloads the page
 }
 
@@ -98,7 +97,6 @@ if (records.length > 0) kernel.load(records);
 else seed(kernel);
 inner.announce();
 loader.start();
-bridge.start();
 
 // THE ROOT'S BOOT MINTS THE GUID (once; it persists with the root record) — the
 // canvas's identity as a PEER kernel: the bridge says `hello {guid}` with it, and
@@ -106,38 +104,11 @@ bridge.start();
 // tree but boots no agent, so the page boots its own root.
 if (kernel.rootId !== null) await kernel.send([{ target: kernel.rootId, payload: { type: "boot" } }]);
 
-/** The socket LEG this page speaks through, in the host's own words: the
- *  parent of the loader's anchor (its own record, which `load_tree` returns
- *  first). Every backend the canvas spawns is the leg's child. */
-async function legOf(): Promise<string | undefined> {
-  const reply = (await kernel.send([{ target: LOADER, payload: { type: "load_tree" } }]))[0]!.result as {
-    records?: Array<Record<string, unknown>>;
-  };
-  const anchor = (reply.records ?? []).find((r) => r["id"] === LOADER);
-  const leg = anchor?.["parent_id"];
-  return typeof leg === "string" && leg !== "" ? leg : undefined;
-}
-
-/** Whether this tab's user may write page agent `id` (its page grants). */
-const canCall = (me["can_call"] ?? {}) as Record<string, unknown>;
-function writable(id: string): boolean {
-  const guid = kernel.guid ?? "";
-  const up: string[] = [];
-  let cur = kernel.get(id)?.parentId ?? null;
-  while (cur !== null && !up.includes(cur)) {
-    up.push(cur);
-    cur = kernel.get(cur)?.parentId ?? null;
-  }
-  return writesPage(pageVerbs(canCall, guid, id, up));
-}
-
 await mountCanvas({
   kernel,
   mount: document.body,
   selfId: kernel.rootId ?? "canvas",
-  leg: await legOf(),
   flush: () => loader.flush(),
-  writable,
 });
 
 /** The token form: shown when the host refuses this tab. The token goes to

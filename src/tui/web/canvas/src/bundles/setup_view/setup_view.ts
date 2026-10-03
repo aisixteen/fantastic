@@ -5,11 +5,11 @@ import type { ViewBundle, ViewContext, ViewHandle } from "../view.ts";
 // THE AI SET-UP, AS A CANVAS CELL — everything the terminal's set-up page does,
 // with its OWN state: list the backends, write an AI agent's record, choose where
 // keys are kept and store one, save / load / forget templates, set or clear the
-// default. ONE at a time on a canvas (opening it again moves to it).
+// default. ONE at a time on a view (opening it again moves to it).
 //
-// It fronts a `setup.tools` agent the canvas spawns under the leg for it — the
-// pair model: the view lands first, then the agent, then the bind; ✕ removes
-// both. The host sweeps a set-up agent left behind at boot, so after a restart
+// It fronts a `setup.tools` agent the canvas spawns in its view's backend
+// folder for it — the pair model: the cell lands first, then the agent, then
+// the bind; ✕ removes both. The host sweeps a set-up agent left behind at boot, so after a restart
 // the cell shows its backend lost and ⟳ respawns it. The cell persists nothing
 // of its own.
 
@@ -38,8 +38,6 @@ interface Template {
 }
 
 /** Every verb the cell calls on its set-up agent. */
-// `store_key` goes out with `secret: ["payload.secret"]`: the mark rides the
-// page→host frame, so neither kernel records the value (lib, 2026-10-02).
 const VERBS = ["backends", "write_ai", "key_mode", "set_key_mode", "store_key", "templates", "save_template", "forget_template", "prefer", "reflect"] as const;
 
 const CSS = `
@@ -286,8 +284,7 @@ export const setupView: ViewBundle = {
       const endpoint = inputs.get("endpoint")?.value.trim() ?? "";
       if (!endpoint) return say(false, "fill the endpoint first — a key is bound to its host");
       if (!secret.value) return say(false, "missing: key");
-      // MARKED SECRET: the value is in no row, ledger or stream, here or on the host
-      const r = await host.call(ctx.backend, { type: "store_key", module: handler.value, endpoint, secret: secret.value } as Payload, ["payload.secret"]);
+      const r = await host.call(ctx.backend, { type: "store_key", module: handler.value, endpoint, secret: secret.value } as Payload);
       secret.value = ""; // never kept on the page
       const e = errOf(r);
       say(!e, e ?? `key stored as \`${String((r as Rec)["stored"])}\` — live on the next call, no restart`);

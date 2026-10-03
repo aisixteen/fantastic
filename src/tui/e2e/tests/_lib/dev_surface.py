@@ -26,7 +26,7 @@ def exec_record(port: int) -> dict:
     return {
         "id": "dev",
         "handler_module": "exec_bridge.tools",
-        "parent_id": "canvas_ws",
+        "parent_id": "view_root",
         "allowed": [r"^sh build\.sh$", rf"^python3 -m http\.server {port} --directory dist$"],
         "cwd": ".",
         "inherit_env": ["*"],

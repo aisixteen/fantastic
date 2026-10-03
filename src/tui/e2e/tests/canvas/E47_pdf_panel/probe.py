@@ -22,16 +22,18 @@ def main() -> bool:
     for rel in ("docs/prd.pdf", "secret/plan.pdf"):
         (rig.proj / rel).parent.mkdir(parents=True, exist_ok=True)
         (rig.proj / rel).write_text(pdf)
-    files = {"id": "files", "handler_module": "file_bridge.tools", "parent_id": "web", "root": ".", "readonly": True,
-             "allow": ["docs/"], "ingress_rule": "allow_all_ingress"}
-    rig.init(host_agents=[("agents/web", files)])
+    # the canvas's one file leg, `static_files` (deny-all): expose docs/ only
+    rig.init()
+    rig.stop()
+    rig.patch_host_agent("static_files", {"allow": ["docs/"]})
+    rig.start()
     base = rig.url.split("/canvas_page/")[0]
 
     async def drive():
         from _lib.dev_surface import frame_urls
         async with rig.page() as pg:
             done, said = await ask(pg, 250, 300,
-                "Open the PRD in a panel next to you — it is docs/prd.pdf, served by the host's `files` agent.",
+                "Open the PRD in a panel next to you — it is docs/prd.pdf, served by the host's `static_files` agent.",
                 rig.limits["total_seconds"], rig.limits["quiet_seconds"])
             await asyncio.sleep(3)
             embeds = await pg.js("[...document.querySelectorAll('.agent-frame iframe')].flatMap(f=>{try{return [...f.contentDocument.querySelectorAll('iframe,embed,object')].map(e=>e.src||e.data||'')}catch(e){return []}})")

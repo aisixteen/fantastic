@@ -8,8 +8,9 @@
 //!   like any other agent.
 //! - [`McpCore`] is the PROTOCOL: one JSON-RPC message in, one reply out. Every
 //!   carrier (stdio now, HTTP later) calls it, and no carrier knows what MCP
-//!   means. It dispatches as the leg — `with_sender(leg)` — never as the
-//!   operator.
+//!   means. IDENTITY COMES ONLY FROM DISPATCH: a carrier runs outside every
+//!   dispatch, so it never sends onward itself — it hands each batch to the
+//!   leg's own `inbound_send`, whose sends are the leg's, never the operator's.
 //!
 //! The surface is deliberately two tools, `reflect` and `send`. There is no
 //! tool per agent or per verb: a client learns what exists by reflecting, the
@@ -32,8 +33,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use fantastic_kernel::{
-    bundle::BundleError, send::with_sender, AgentId, Bundle, Item, Kernel, Outcome, Reply, Status,
-    TaskId,
+    bundle::BundleError, AgentId, Bundle, Item, Kernel, Outcome, Reply, Status, TaskId,
 };
 use serde_json::{json, Map, Value};
 
@@ -60,17 +60,18 @@ impl Bundle for WebMcpBundle {
         &self,
         agent_id: &AgentId,
         payload: &Value,
-        _kernel: &Arc<Kernel>,
+        kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
         let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
         Ok(Some(match verb {
             "boot" | "shutdown" => Value::Null,
+            "inbound_send" => inbound_send(payload, kernel).await,
             "reflect" => json!({
                 "id": agent_id.as_str(),
                 "sentence": "An MCP leg: an external client (Claude Code, any MCP host) drives this kernel through me, with exactly my grants — never as the operator. My carrier speaks MCP; the verbs I dispatch are the kernel's own.",
                 "protocol": PROTOCOL_VERSION,
                 "tools": ["reflect", "send"],
-                "verbs": {},
+                "verbs": {"inbound_send": INBOUND_SEND_DOC},
             }),
             other => json!({
                 "error": format!("web_mcp: no verb `{other}` — this leg is driven by its carrier; reflect for what it is"),
@@ -80,12 +81,39 @@ impl Bundle for WebMcpBundle {
     }
 }
 
+/// `inbound_send`'s doc line.
+pub const INBOUND_SEND_DOC: &str = "args: items:[{target, payload, timeout?}] (req). Sends the batch onward AS THIS LEG and returns {outcomes:[{pid, status, result}]} — how the carrier's batch becomes the leg's own calls, gated as the leg.";
+
+/// `inbound_send {items}`: the batch, sent from inside the leg's own dispatch —
+/// so every item is the leg's call.
+async fn inbound_send(payload: &Value, kernel: &Arc<Kernel>) -> Value {
+    let items = match payload.get("items").and_then(Value::as_array) {
+        Some(list) => list
+            .iter()
+            .filter_map(|it| {
+                let target = it.get("target").and_then(Value::as_str)?;
+                let mut item = Item::new(AgentId::from(target), it.get("payload").cloned().unwrap_or(Value::Null));
+                item.timeout = it.get("timeout").and_then(Value::as_f64);
+                Some(item)
+            })
+            .collect::<Vec<_>>(),
+        None => return json!({"error": "inbound_send: `items` must be a list of {target, payload}", "reason": "bad_arg", "arg": "items"}),
+    };
+    let outs = Arc::clone(kernel).send(items).await;
+    json!({"outcomes": outs.iter().map(row).collect::<Vec<_>>()})
+}
+
+/// One settled item, as the send contract states it.
+fn row(o: &Outcome) -> Value {
+    json!({"pid": o.pid.map(|p| p.get()), "status": o.status.as_str(), "result": shown(o)})
+}
+
 // ── the protocol ────────────────────────────────────────────────────────────
 
 /// What a cold client is told in `initialize`. It is the whole onboarding: the
 /// client is never told what agents exist, only how to ask — and what the
 /// product is, what is optional, and what it must never touch.
-pub const INSTRUCTIONS: &str = "This server is a live Aisixteen Fantastic kernel running in this project directory: a tree of agents that all answer one verb, send. You are connected as the `mcp` agent, with god-mode grants on every agent (every verb, privileged ones included); the human can narrow them later with update_agent.\n\
+pub const INSTRUCTIONS: &str = "This server is a live Aisixteen Fantastic kernel running in this project directory: a tree of agents that all answer one verb, send. You are connected as the `mcp` agent, with god-mode grants on every agent (every verb); the human can narrow them later with update_agent.\n\
 \n\
 Start with `reflect` and no arguments — it returns the kernel's own primer: the agent tree, the bundles it can run, and a readme index you drill into with `reflect` + readme=<key>. Reflect an agent before you send to it: verbs are discovered, never guessed. Then act with `send`. A refusal is an ordinary result, not a failure of the tool.\n\
 \n\
@@ -93,9 +121,9 @@ AN AI IS OPTIONAL. Nothing is configured by default and the kernel works without
 \n\
 SETTING UP AN AI is the human's: never pick a backend, model, host or port yourself — ASK the human which they want.\n\
 \n\
-KEYS live in the kernel's credential store, the `credentials` agent (it exists once the human chose where keys are kept, plain or secure): a key is a ref `<provider>/<host>` bound to its endpoint's host, read by the AI agent's backend at use time. ASK the human how the key gets there: they type it in a set-up surface (the canvas's ⚙ AI set-up, the terminal UI's set-up page), or you store it from a shell with `fantastic send`, the value written as `$env:NAME` — resolved only by that shell and marked secret on the call:\n\
+KEYS live in the kernel's credential store, the `credentials` agent (it exists once the human chose where keys are kept, plain or secure): a key is a ref `<provider>/<host>` bound to its endpoint's host, read by the AI agent's backend at use time. ASK the human how the key gets there: they type it in a set-up surface (the canvas's ⚙ AI set-up, the terminal UI's set-up page), or you store it from a shell with `fantastic send`, the value written as `$env:NAME` — resolved only by that shell:\n\
 \x20\x20KEY=$(op read op://vault/openai/key) fantastic send '{\"target\":\"credentials\",\"payload\":{\"type\":\"set\",\"ref\":\"responses/api.openai.com\",\"fields\":{\"api_key\":\"$env:KEY\"}}}'\n\
-`set` only stores a value for a DECLARED ref: a new one is declared first with update_agent on `credentials`, its `refs` map ({<ref>: {host, readers, writers}} — the host lives only there; written WHOLE — keep every ref already there), naming your leg in its `writers`. Never print, echo or write a key value anywhere; any value you send yourself carries a `secret` mark on its item.";
+`set` only stores a value for a DECLARED ref: a new one is declared first with update_agent on `credentials`, its `refs` map ({<ref>: {host}} — the host lives only there; written WHOLE — keep every ref already there). Only the store's parent, `user`, may write that record: send it through `user` — {target: user, payload: {type: forward, target: kernel, payload: {type: update_agent, id: credentials, refs: {…}}}}. Never print, echo or write a key value anywhere.";
 
 /// What `fantastic mcp` prints to stderr on start, for a coding CLI that ran it
 /// in a shell to learn what it is: the onboarding above, and how to register
@@ -171,9 +199,7 @@ impl McpCore {
     /// Cancel a tool call by its task id — subtree-wide, as the operator would,
     /// because the client that asked for it has gone.
     pub async fn cancel(&self, task: &TaskId) -> Value {
-        let k = Arc::clone(&self.kernel);
-        let t = *task;
-        fantastic_kernel::send::with_operator(async move { k.cancel_task(&t).await }).await
+        Arc::clone(&self.kernel).cancel_task(task).await
     }
 
     fn initialize(&self) -> Value {
@@ -204,22 +230,28 @@ impl McpCore {
     }
 
     /// Run a batch as one kernel task owned by the leg, and answer its outcome
-    /// when it ends.
+    /// when it ends. The batch is handed to the leg's own `inbound_send`.
     async fn run<F>(&self, tool: &str, items: Vec<Item>, on_task: F) -> Value
     where
         F: FnOnce(TaskId) + Send,
     {
-        let (tx, rx) = tokio::sync::oneshot::channel::<Vec<Outcome>>();
+        let (tx, rx) = tokio::sync::oneshot::channel::<Outcome>();
         let k = Arc::clone(&self.kernel);
-        let leg = self.leg.clone();
+        let batch: Vec<Value> = items
+            .iter()
+            .map(|i| json!({"target": i.target.as_str(), "payload": i.payload, "timeout": i.timeout}))
+            .collect();
+        let hand_in = Item::new(self.leg.clone(), json!({"type": "inbound_send", "items": batch}));
         let task = self.kernel.spawn_task(&self.leg, tool, async move {
-            let out = with_sender(leg, async move { k.send(items).await }).await;
-            let _ = tx.send(out);
+            let _ = tx.send(k.send(vec![hand_in]).await.remove(0));
         });
         on_task(task);
 
         match rx.await {
-            Ok(outs) => settled(tool, &outs),
+            Ok(o) => match o.result.get("outcomes").and_then(Value::as_array) {
+                Some(rows) => settled(tool, rows),
+                None => tool_error(&format!("the leg did not take the batch: {}", o.result)),
+            },
             Err(_) => tool_error(&format!("task {} ended without an answer (cancelled)", task.get())),
         }
     }
@@ -260,8 +292,7 @@ pub fn tools() -> Vec<Value> {
                                     "required": ["type"],
                                     "additionalProperties": true
                                 },
-                                "timeout": {"type": "number", "description": "Seconds. CANCELS the item when it expires."},
-                                "secret": {"type": "array", "description": "SECRET marks: `payload.<field>` (or a list of steps) for a value the target gets but no record, ledger row, reflect or stream ever shows."}
+                                "timeout": {"type": "number", "description": "Seconds. CANCELS the item when it expires."}
                             },
                             "required": ["target", "payload"]
                         }
@@ -327,8 +358,6 @@ fn send_items(args: &Value) -> Result<Vec<Item>, String> {
         }
         let mut item = Item::new(AgentId::from(target), payload.clone());
         item.timeout = it.get("timeout").and_then(Value::as_f64);
-        // the marks go to the kernel RAW: it validates them and refuses a bad one
-        item.secret = it.get("secret").cloned();
         out.push(item);
     }
     Ok(out)
@@ -336,14 +365,11 @@ fn send_items(args: &Value) -> Result<Vec<Item>, String> {
 
 /// The settled batch, as the send contract states it. `isError` only when
 /// NOTHING in the batch completed: a mixed batch is data, not a tool failure.
-fn settled(tool: &str, outs: &[Outcome]) -> Value {
-    let rows: Vec<Value> = outs
-        .iter()
-        .map(|o| json!({"pid": o.pid.map(|p| p.get()), "status": o.status.as_str(), "result": shown(o)}))
-        .collect();
-    let all_failed = !outs.is_empty() && outs.iter().all(|o| o.status != Status::Completed);
+fn settled(tool: &str, rows: &[Value]) -> Value {
+    let done = Status::Completed.as_str();
+    let all_failed = !rows.is_empty() && rows.iter().all(|r| r["status"].as_str() != Some(done));
     // reflect is one item: hand back its result bare, which is what a client reads.
-    let body = if tool == "reflect" && rows.len() == 1 { rows[0]["result"].clone() } else { json!(rows) };
+    let body = if tool == "reflect" && rows.len() == 1 { rows[0]["result"].clone() } else { Value::Array(rows.to_vec()) };
     text_result(&body, all_failed)
 }
 
@@ -418,11 +444,4 @@ mod tests {
         assert_eq!(items[0].timeout, Some(5.0));
     }
 
-    #[test]
-    fn send_carries_the_item_secret_marks_through() {
-        let items = send_items(&json!({"items": [{"target": "setup", "payload": {"type": "store_key", "secret": "k"},
-                                                  "secret": ["payload.secret"]}]}))
-        .unwrap();
-        assert_eq!(items[0].secret, Some(json!(["payload.secret"])));
-    }
 }

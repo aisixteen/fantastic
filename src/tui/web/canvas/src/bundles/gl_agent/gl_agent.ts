@@ -1,4 +1,5 @@
 import { str } from "../../lib.ts";
+import { panelRelay } from "../panel_relay.ts";
 import type { Handler, Json } from "../../lib.ts";
 
 // gl_agent — a JS view-agent holding a MUTABLE GL source (THREE/GLSL text).
@@ -10,7 +11,10 @@ import type { Handler, Json } from "../../lib.ts";
 
 export const GL_AGENT = "gl_agent.ts";
 
-export const glAgent: Handler = (id, payload, kernel): Json => {
+export const glAgent: Handler = (id, payload, kernel): Json | Promise<Json> => {
+  // the GL source's own emits, as this agent (`panel_relay.ts`)
+  const relayed = panelRelay(kernel, payload);
+  if (relayed !== undefined) return relayed;
   const agent = kernel.get(id);
   switch (str(payload, "type")) {
     case "get_gl_view": {

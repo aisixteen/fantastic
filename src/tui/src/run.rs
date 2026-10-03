@@ -16,8 +16,8 @@ pub async fn main_loop(opts: Opts) -> Result<()> {
     let paths = Paths::here()?;
     // A KERNEL ALREADY RUNS HERE: this is a THIN CLIENT of its shell (`share`)
     // — the owner drives recipes, so a thin client takes none.
-    if let Ok(Some(pid)) = fantastic_kernel::lock::current_holder(&paths.cwd) {
-        if pid != std::process::id() && fantastic_kernel::lock::pid_alive(pid) {
+    if let Ok(Some(pid)) = fantastic_kernel::lock::held(&paths.cwd) {
+        if pid != std::process::id() {
             if opts.headless || !opts.recipes.is_empty() || opts.port.is_some() {
                 anyhow::bail!(
                     "a kernel runs in this directory (pid {pid}); recipes and flags belong to the process that owns it — run bare `fantastic` to attach as a thin client"

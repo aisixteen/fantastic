@@ -140,13 +140,13 @@ export async function createGlHost(opts: {
         onFrame: (cb: (time: number) => void) => void,
         cleanupArr: Array<() => void>,
       ) => void;
-      const asView = kernel.scopedFor(agentId, null);
       const t = {
         ...sourceT,
         agent_id: agentId,
+        // AS THE AGENT: through its own handler (`panel_relay.ts`) — gated by
+        // its `can_call`, dropped when denied
         emit: (target: string, payload: Record<string, unknown>): void => {
-          if (kernel.get(target) !== undefined) asView.emit(target, payload as Payload);
-          else asView.emitRemote(target, payload as Payload);
+          void kernel.send([{ target: agentId, payload: { type: "panel_emit", target, payload } as unknown as Payload }]);
         },
         onMessage: (cb: (payload: Payload) => void): (() => void) => {
           const off = kernel.onInbox(agentId, cb);

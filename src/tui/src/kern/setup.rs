@@ -9,17 +9,17 @@
 //! validates at the create — one truth — and its refusal names every missing
 //! field with its hint.
 //!
-//! Grants are two-sided and MERGED, never replaced: the human may call the new
-//! agent, the new agent may call each target it names, and each target's
-//! `callable_by` gains the new agent. Its conversation goes to the kernel's
-//! memory store (the root's `memory_store_id`), wired the same way both sides.
+//! The record is written AS `user`, its parent (grants come from above): the
+//! human may call it, it may call each target it names and the memory store
+//! (the root's `memory_store_id`, which admits it); `user`'s own side and each
+//! target's `callable_by` are `kern/reach`'s — an AI agent is a holder.
 
 use serde_json::{json, Map, Value};
 
 use crate::kern::host::Host;
 
-/// Where a new agent goes: beside the human's own agents.
-pub const PARENT: &str = "set_of_agents";
+/// Where a new agent goes: under the one user.
+pub const PARENT: &str = crate::env::HUMAN;
 
 /// Fields the WRITE sets itself — never asked for on the page. `credentials`
 /// names the key stored for the backend at its endpoint (`kern/keys`).
@@ -159,23 +159,7 @@ fn err_of(r: &fantastic_kernel::Outcome) -> Option<String> {
     })
 }
 
-fn grants(host: &Host, id: &str, field: &str) -> Map<String, Value> {
-    host.kernel
-        .agents
-        .get(&fantastic_kernel::AgentId::from(id))
-        .and_then(|a| a.value().record().meta.get(field).and_then(Value::as_object).cloned())
-        .unwrap_or_default()
-}
 
-async fn merge(host: &Host, id: &str, field: &str, add: &str) -> Result<(), String> {
-    let mut g = grants(host, id, field);
-    g.insert(add.into(), json!("*"));
-    let r = host.operator("kernel", json!({"type": "update_agent", "id": id, field: g})).await;
-    match err_of(&r) {
-        Some(e) => Err(format!("could not grant {id}.{field} += {add}: {e}")),
-        None => Ok(()),
-    }
-}
 
 /// Create, grant and boot. Returns where the record was written.
 pub async fn write(host: &Host, rec: &Record) -> Result<String, String> {
@@ -199,7 +183,7 @@ pub async fn write(host: &Host, rec: &Record) -> Result<String, String> {
     can_call.insert(store.clone(), json!("*"));
     let mut create = rec.fields.clone();
     crate::kern::keys::attach(host, &rec.handler, &mut create)?;
-    create.extend(
+    let mut create = { create.extend(
         json!({
             "type": "create_agent",
             "parent_id": PARENT,
@@ -212,20 +196,19 @@ pub async fn write(host: &Host, rec: &Record) -> Result<String, String> {
         .as_object()
         .cloned()
         .unwrap_or_default(),
-    );
+    ); create };
+    crate::kern::keys::grant_on_create(&mut create);
     let named: Map<String, Value> = create.get("credentials").map(|c| [("credentials".to_string(), c.clone())].into_iter().collect()).unwrap_or_default();
     let create = Value::Object(create);
-    let r = host.operator("kernel", create).await;
+    // created AS `user`, its parent; `user`'s own side, and each target's
+    // `callable_by`, are `kern/reach`'s (an AI agent is a holder)
+    let r = host.act("kernel", create).await;
     if let Some(e) = err_of(&r) {
         return Err(e);
     }
-    // its key, when it names one: the three grants it takes to read it
+    // its key, when it names one: the store's side of reading it
     crate::kern::keys::wire_record(host, id, &named).await?;
-    merge(host, &user, "can_call", id).await?;
-    for t in &rec.may_call {
-        merge(host, t, "callable_by", id).await?;
-    }
-    let r = host.operator(id, json!({"type": "boot"})).await;
+    let r = host.act(id, json!({"type": "boot"})).await;
     if let Some(e) = err_of(&r) {
         return Err(format!("`{id}` was written but did not boot: {e}"));
     }

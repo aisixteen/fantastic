@@ -6,10 +6,8 @@
 //!   loud and starts nothing.
 //! - `$env:NAME`: a string value that is exactly `$env:NAME`, anywhere in the
 //!   payload, is replaced by THIS shell's `NAME` — the only place one is ever
-//!   resolved (the kernel never reads its own env for it). Every replaced value
-//!   is marked secret on the item (`["payload", <step>…]`), so it lands in no
-//!   row, ledger, reflect or stream. A missing variable fails before anything
-//!   is sent.
+//!   resolved (the kernel never reads its own env for it). A missing variable
+//!   fails before anything is sent.
 //! - It prints the item's `{pid, status, result}`; the exit code is 0 when the
 //!   item completed, 1 otherwise.
 
@@ -43,8 +41,8 @@ pub fn main(argv: &[String]) -> ! {
             std::process::exit(2);
         }
     };
-    match fantastic_kernel::lock::current_holder(&paths.cwd) {
-        Ok(Some(pid)) if pid != std::process::id() && fantastic_kernel::lock::pid_alive(pid) => {}
+    match fantastic_kernel::lock::held(&paths.cwd) {
+        Ok(Some(pid)) if pid != std::process::id() => {}
         Ok(_) => {
             eprintln!("fantastic send: no kernel runs in this directory — start `fantastic` or `fantastic mcp` here first");
             std::process::exit(1);
@@ -74,8 +72,7 @@ pub fn main(argv: &[String]) -> ! {
     std::process::exit(code);
 }
 
-/// Parse the item, resolve every `$env:NAME` in its payload through `env`, and
-/// mark each resolved path secret (merged after any marks the item carries).
+/// Parse the item and resolve every `$env:NAME` in its payload through `env`.
 pub fn prepare(raw: &str, env: impl Fn(&str) -> Option<String>) -> Result<Value, String> {
     let mut item: Value = serde_json::from_str(raw).map_err(|e| format!("the item is not JSON: {e}"))?;
     let obj = item.as_object_mut().ok_or("the item must be one object {target, payload}")?;
@@ -83,27 +80,11 @@ pub fn prepare(raw: &str, env: impl Fn(&str) -> Option<String>) -> Result<Value,
         return Err("the item has no `target`".into());
     }
     let payload = obj.get_mut("payload").filter(|p| p.is_object()).ok_or("the item has no `payload` object")?;
-    let mut marks = Vec::new();
-    let mut steps = vec![json!("payload")];
-    resolve(payload, &mut steps, &env, &mut marks)?;
-    if !marks.is_empty() {
-        let mut all = match obj.remove("secret") {
-            None | Some(Value::Null) => Vec::new(),
-            Some(Value::Array(a)) => a,
-            Some(_) => return Err("`secret` must be a list of marks".into()),
-        };
-        all.extend(marks);
-        obj.insert("secret".into(), Value::Array(all));
-    }
+    resolve(payload, &env)?;
     Ok(item)
 }
 
-fn resolve(
-    v: &mut Value,
-    steps: &mut Vec<Value>,
-    env: &impl Fn(&str) -> Option<String>,
-    marks: &mut Vec<Value>,
-) -> Result<(), String> {
+fn resolve(v: &mut Value, env: &impl Fn(&str) -> Option<String>) -> Result<(), String> {
     match v {
         Value::String(s) => {
             if let Some(name) = s.strip_prefix(PREFIX) {
@@ -112,21 +93,16 @@ fn resolve(
                 }
                 let val = env(name).ok_or_else(|| format!("${name} is not set in this shell — nothing was sent"))?;
                 *v = Value::String(val);
-                marks.push(Value::Array(steps.clone()));
             }
         }
         Value::Object(m) => {
-            for (k, x) in m.iter_mut() {
-                steps.push(json!(k));
-                resolve(x, steps, env, marks)?;
-                steps.pop();
+            for x in m.values_mut() {
+                resolve(x, env)?;
             }
         }
         Value::Array(a) => {
-            for (i, x) in a.iter_mut().enumerate() {
-                steps.push(json!(i));
-                resolve(x, steps, env, marks)?;
-                steps.pop();
+            for x in a.iter_mut() {
+                resolve(x, env)?;
             }
         }
         _ => {}
@@ -184,21 +160,14 @@ mod tests {
     }
 
     #[test]
-    fn an_env_value_is_resolved_and_marked_secret() {
+    fn an_env_value_is_resolved() {
         let item = prepare(
-            r#"{"target":"credentials","payload":{"type":"set","ref":"r","fields":{"api_key":"$env:KEY"}}}"#,
+            r#"{"target":"credentials","payload":{"type":"set","ref":"r","fields":{"api_key":"$env:KEY"},"a":["$env:KEY"]}}"#,
             env,
         )
         .unwrap();
         assert_eq!(item["payload"]["fields"]["api_key"], "sk-123");
-        assert_eq!(item["secret"], json!([["payload", "fields", "api_key"]]));
-    }
-
-    #[test]
-    fn marks_the_item_carries_are_kept() {
-        let item =
-            prepare(r#"{"target":"t","payload":{"type":"v","a":["$env:KEY"]},"secret":["payload.b"]}"#, env).unwrap();
-        assert_eq!(item["secret"], json!(["payload.b", ["payload", "a", 0]]));
+        assert_eq!(item["payload"]["a"][0], "sk-123");
     }
 
     #[test]
@@ -211,7 +180,6 @@ mod tests {
     fn only_a_whole_value_is_resolved() {
         let item = prepare(r#"{"target":"t","payload":{"type":"v","k":"x $env:KEY"}}"#, env).unwrap();
         assert_eq!(item["payload"]["k"], "x $env:KEY");
-        assert!(item.get("secret").is_none());
     }
 
     #[test]

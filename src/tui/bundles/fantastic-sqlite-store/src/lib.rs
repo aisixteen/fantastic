@@ -13,13 +13,13 @@
 //!   fold_refs  PRIMARY KEY (owner, fold, pos)      a fold's members, in order
 //!              FK (owner, fold)   → ref_lists ON DELETE CASCADE
 //!              FK (owner, member) → rows      ON DELETE CASCADE
-//!   grants     PRIMARY KEY gid                     the grant dict (JSON)
-//!              UNIQUE (owner, reader, scope, mode) an identical share is one grant
-//!              FK (owner, anchor) → rows ON DELETE CASCADE
-//!              INDEX owner, INDEX reader
-//!   seq        the grant counter (never reuses a revoked id; `inject` resets it)
 //!   text_idx   FTS5 (trigram) over the lowercased text — the search index
 //! ```
+//!
+//! OWNER = CALLER: every row is keyed by who wrote it, `<kernel guid>|<agent id>`
+//! (`<kernel guid>|kernel` for the operator and the kernel's own bookkeeping); a
+//! caller reads and writes its own rows. Who may call any verb — `inject` /
+//! `dump` included — is the kernel's call gate alone.
 //!
 //! `ref_lists` exists because ram_store keeps a fold's refs list even after every
 //! member was pruned (`refs: []`); a bare member table could not say "empty list"
@@ -44,10 +44,10 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use fantastic_bundle::{py_json_dumps, py_repr, py_repr_value, py_split_whitespace, py_splitlines, py_str, py_strip, py_truthy};
+use fantastic_bundle::{py_json_dumps, py_repr_value, py_splitlines, py_str, py_strip, py_truthy};
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
 use fantastic_kernel::refusal::{
-    missing, refusal, refusal_hint, with, BAD_ARG, EXISTS, NOT_FOUND, UNAUTHORIZED, UNHANDLED,
+    missing, refusal, refusal_hint, with, BAD_ARG, EXISTS, NOT_FOUND, UNHANDLED,
 };
 use fantastic_kernel::{AgentId, Kernel};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -60,9 +60,6 @@ pub const HANDLER_MODULE: &str = "sqlite_store.tools";
 pub const README: &str = include_str!("readme.md");
 
 const OPERATOR: &str = "kernel";
-const MODES: [&str; 2] = ["frozen", "live"];
-const SCOPE_KINDS: [&str; 4] = ["head_until", "range", "fold", "row"];
-const REF_KINDS: [&str; 2] = ["fold", "clear"];
 
 type Row = Map<String, Value>;
 
@@ -84,15 +81,6 @@ CREATE TABLE IF NOT EXISTS fold_refs (
   FOREIGN KEY (owner, member) REFERENCES rows (owner, id) ON DELETE CASCADE
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS fold_refs_member ON fold_refs (owner, member);
-CREATE TABLE IF NOT EXISTS grants (
-  gid INTEGER PRIMARY KEY, owner TEXT NOT NULL, reader TEXT NOT NULL, scope_key TEXT NOT NULL,
-  mode TEXT NOT NULL, anchor INTEGER NOT NULL, doc TEXT NOT NULL,
-  UNIQUE (owner, reader, scope_key, mode),
-  FOREIGN KEY (owner, anchor) REFERENCES rows (owner, id) ON DELETE CASCADE
-);
-CREATE INDEX IF NOT EXISTS grants_owner ON grants (owner);
-CREATE INDEX IF NOT EXISTS grants_reader ON grants (reader);
-CREATE TABLE IF NOT EXISTS seq (name TEXT PRIMARY KEY, value INTEGER NOT NULL);
 CREATE VIRTUAL TABLE IF NOT EXISTS text_idx USING fts5 (
   owner UNINDEXED, id UNINDEXED, text, tokenize = 'trigram case_sensitive 1'
 );
@@ -129,26 +117,6 @@ fn text_of(row: &Row) -> String {
         Some(Value::String(t)) if !t.is_empty() => format!("{t}\n{text}"),
         _ => text,
     }
-}
-
-/// ram_store `scope_key`: `json.dumps(scope, sort_keys=True)`.
-fn scope_key(v: &Value) -> String {
-    fn sorted(v: &Value) -> Value {
-        match v {
-            Value::Object(m) => {
-                let mut keys: Vec<&String> = m.keys().collect();
-                keys.sort();
-                let mut out = Map::new();
-                for k in keys {
-                    out.insert(k.clone(), sorted(&m[k]));
-                }
-                Value::Object(out)
-            }
-            Value::Array(a) => Value::Array(a.iter().map(sorted).collect()),
-            other => other.clone(),
-        }
-    }
-    py_json_dumps(&sorted(v), true, None)
 }
 
 /// A GLOB pattern matching `q` as a substring (metacharacters bracketed).
@@ -339,87 +307,16 @@ impl Db<'_> {
         Ok(())
     }
 
-    fn grant(&self, gid: i64) -> rusqlite::Result<Option<Row>> {
-        self.0
-            .query_row("SELECT doc FROM grants WHERE gid = ?1", params![gid], |r| r.get::<_, String>(0))
-            .optional()
-            .map(|o| o.map(|t| doc(&t)))
-    }
-
-    fn grants_where(&self, field: &str, who: &str) -> rusqlite::Result<Vec<Row>> {
-        let sql = format!("SELECT doc FROM grants WHERE {field} = ?1 ORDER BY gid");
-        let mut st = self.0.prepare(&sql)?;
-        let out = st.query_map(params![who], |r| r.get::<_, String>(0))?.map(|x| x.map(|t| doc(&t))).collect();
-        out
-    }
-
-    fn seq(&self) -> rusqlite::Result<i64> {
-        Ok(self
-            .0
-            .query_row("SELECT value FROM seq WHERE name = 'grant'", [], |r| r.get::<_, i64>(0))
-            .optional()?
-            .unwrap_or(0))
-    }
-
-    fn set_seq(&self, v: i64) -> rusqlite::Result<()> {
-        self.0
-            .execute("INSERT OR REPLACE INTO seq (name, value) VALUES ('grant', ?1)", params![v])?;
-        Ok(())
-    }
-
-    /// ram_store `add_grant`: an identical (owner, reader, scope, mode) is the SAME
-    /// grant; otherwise the next id of a counter that never goes back.
-    fn add_grant(&self, mut g: Row) -> rusqlite::Result<(i64, bool)> {
-        let owner = g.get("owner").map(py_str).unwrap_or_default();
-        let reader = g.get("reader").map(py_str).unwrap_or_default();
-        let sk = scope_key(g.get("scope").unwrap_or(&Value::Null));
-        let mode = g.get("mode").map(py_str).unwrap_or_default();
-        let existing = self
-            .0
-            .query_row(
-                "SELECT gid FROM grants WHERE owner = ?1 AND reader = ?2 AND scope_key = ?3 AND mode = ?4",
-                params![owner, reader, sk, mode],
-                |r| r.get::<_, i64>(0),
-            )
-            .optional()?;
-        if let Some(gid) = existing {
-            return Ok((gid, false));
-        }
-        let gid = self.seq()? + 1;
-        self.set_seq(gid)?;
-        let anchor = g.get("anchor").and_then(Value::as_i64).unwrap_or(0);
-        g.insert("grant".to_string(), Value::from(gid));
-        self.0.execute(
-            "INSERT INTO grants (gid, owner, reader, scope_key, mode, anchor, doc) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![gid, owner, reader, sk, mode, anchor, to_text(&g)],
-        )?;
-        Ok((gid, true))
-    }
-
-    fn drop_grant(&self, gid: i64) -> rusqlite::Result<bool> {
-        Ok(self.0.execute("DELETE FROM grants WHERE gid = ?1", params![gid])? > 0)
-    }
-
-    /// ram_store `delete`: DELETE the rows; the FKs cascade to fold refs and
-    /// grants. Returns (rows removed, grants removed).
-    fn delete(&self, owner: &str, doomed: &HashSet<i64>) -> rusqlite::Result<(usize, usize)> {
+    /// ram_store `delete`: DELETE the rows; the FKs cascade to fold refs.
+    /// Returns the rows removed.
+    fn delete(&self, owner: &str, doomed: &HashSet<i64>) -> rusqlite::Result<usize> {
         let mut rows = 0usize;
-        let mut grants = 0usize;
         for rid in doomed {
-            let g: i64 = self.0.query_row(
-                "SELECT COUNT(*) FROM grants WHERE owner = ?1 AND anchor = ?2",
-                params![owner, rid],
-                |r| r.get(0),
-            )?;
-            let n = self
+            rows += self
                 .0
                 .execute("DELETE FROM rows WHERE owner = ?1 AND id = ?2", params![owner, rid])?;
-            if n > 0 {
-                rows += n;
-                grants += g as usize;
-            }
         }
-        Ok((rows, grants))
+        Ok(rows)
     }
 
     fn dump(&self) -> rusqlite::Result<Value> {
@@ -443,15 +340,9 @@ impl Db<'_> {
             let members = self.refs(&owner, fold)?.unwrap_or_default();
             fold_refs.push(json!({"owner": owner, "fold": fold, "members": members}));
         }
-        let mut st = self.0.prepare("SELECT doc FROM grants ORDER BY gid")?;
-        let grants: Vec<Value> = st
-            .query_map([], |r| r.get::<_, String>(0))?
-            .map(|x| x.map(|t| Value::Object(doc(&t))))
-            .collect::<rusqlite::Result<_>>()?;
         let mut out = Map::new();
         out.insert("rows".to_string(), Value::Array(rows));
         out.insert("fold_refs".to_string(), Value::Array(fold_refs));
-        out.insert("grants".to_string(), Value::Array(grants));
         Ok(Value::Object(out))
     }
 }
@@ -467,7 +358,6 @@ fn bad_tables(msg: &str) -> Value {
 struct Staged {
     rows: Vec<(String, Vec<Row>)>,
     fold_refs: Vec<(String, i64, Vec<i64>)>,
-    grants: Vec<(i64, Row)>,
 }
 
 fn stage_tables(tables: &Value) -> Result<Staged, Value> {
@@ -533,29 +423,7 @@ fn stage_tables(tables: &Value) -> Result<Staged, Value> {
         }
         fold_refs.push((owner, fold, members.iter().filter_map(as_id).collect()));
     }
-    let mut grants = Vec::new();
-    for g in tables.get("grants").and_then(Value::as_array).unwrap_or(&empty) {
-        let anchored = g.as_object().is_some_and(|m| {
-            let owner = m.get("owner").and_then(Value::as_str).unwrap_or("");
-            m.get("anchor").and_then(Value::as_i64).is_some_and(|a| has(owner, a))
-        });
-        if !anchored {
-            return Err(bad_tables("inject: a grant's anchor names no row"));
-        }
-        let Some(gid) = g.get("grant").and_then(as_id) else {
-            return Err(bad_tables("inject: a grant needs an int `grant`"));
-        };
-        let mut body: Row = g
-            .as_object()
-            .expect("checked")
-            .iter()
-            .filter(|(k, _)| k.as_str() != "grant")
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        body.insert("grant".to_string(), Value::from(gid));
-        grants.push((gid, body));
-    }
-    Ok(Staged { rows: by_owner, fold_refs, grants })
+    Ok(Staged { rows: by_owner, fold_refs })
 }
 
 // ─── who is calling (ram_store, rule for rule) ───────────────────────────────
@@ -570,26 +438,6 @@ fn guid(kernel: &Arc<Kernel>) -> Option<String> {
     })
 }
 
-fn key(kernel: &Arc<Kernel>, name: &Value) -> Option<String> {
-    let name = py_strip(name.as_str()?);
-    if name.is_empty() {
-        return None;
-    }
-    if name.contains('|') {
-        return Some(name.to_string());
-    }
-    guid(kernel).map(|g| format!("{g}|{name}"))
-}
-
-fn display(kernel: &Arc<Kernel>, key: &str) -> String {
-    if let Some(g) = guid(kernel) {
-        if let Some(rest) = key.strip_prefix(&format!("{g}|")) {
-            return rest.to_string();
-        }
-    }
-    key.to_string()
-}
-
 fn record(kernel: &Arc<Kernel>, id: &AgentId) -> Map<String, Value> {
     kernel
         .agents
@@ -598,10 +446,10 @@ fn record(kernel: &Arc<Kernel>, id: &AgentId) -> Map<String, Value> {
         .unwrap_or_default()
 }
 
-fn caller(kernel: &Arc<Kernel>, id: &AgentId) -> Result<(String, String), Value> {
-    if let Some(remote) = fantastic_kernel::current_remote_caller() {
-        return Ok((remote.clone(), remote));
-    }
+/// (key, display) for whoever is calling — the operator (and the kernel's own
+/// bookkeeping) as `kernel` — or a refusal. A caller is always local: a call a
+/// bridge leg serves is the leg's.
+fn caller(kernel: &Arc<Kernel>) -> Result<(String, String), Value> {
     let Some(g) = guid(kernel) else {
         return Err(refusal_hint(
             NOT_FOUND,
@@ -610,58 +458,12 @@ fn caller(kernel: &Arc<Kernel>, id: &AgentId) -> Result<(String, String), Value>
         ));
     };
     match fantastic_kernel::current_origin() {
-        None => {
-            if !record(kernel, id).get("operator").is_some_and(py_truthy) {
-                let mut r = refusal_hint(
-                    UNAUTHORIZED,
-                    format!("{}: the operator is not served here", id.0),
-                    format!("update_agent id={} operator=true to serve the operator (as 'kernel')", id.0),
-                );
-                with(&mut r, "side", json!("store"));
-                return Err(r);
-            }
-            Ok((format!("{g}|{OPERATOR}"), OPERATOR.to_string()))
-        }
+        None => Ok((format!("{g}|{OPERATOR}"), OPERATOR.to_string())),
         Some(origin) => Ok((format!("{g}|{}", origin.0), origin.0)),
     }
 }
 
-fn is_admin(kernel: &Arc<Kernel>, id: &AgentId, who: &str) -> bool {
-    match record(kernel, id).get("admins") {
-        Some(Value::String(s)) => s == who,
-        Some(Value::Array(a)) => a.iter().any(|x| x.as_str() == Some(who)),
-        _ => false,
-    }
-}
-
-fn owner_for(kernel: &Arc<Kernel>, id: &AgentId, payload: &Value, verb: &str) -> Result<(String, String, String), Value> {
-    let (me, who) = caller(kernel, id)?;
-    let Some(name) = payload.get("owner").filter(|v| !v.is_null()) else {
-        return Ok((me.clone(), me, who));
-    };
-    let Some(owner) = key(kernel, name) else {
-        let mut r = refusal(BAD_ARG, format!("{verb}: `owner` must be an agent id"));
-        with(&mut r, "arg", json!("owner"));
-        return Err(r);
-    };
-    if owner != me && !is_admin(kernel, id, &who) {
-        let mut r = refusal_hint(
-            UNAUTHORIZED,
-            format!("{verb}: {} may act only on its own rows, not {}", py_repr(&who), py_repr_value(name)),
-            format!(
-                "a caller writes and reads its OWN key; another owner's rows are \
-                 reached through a grant it gives (`share`), or by an agent listed in \
-                 {}.admins",
-                id.0
-            ),
-        );
-        with(&mut r, "side", json!("store"));
-        return Err(r);
-    }
-    Ok((owner, me, who))
-}
-
-// ─── scopes ──────────────────────────────────────────────────────────────────
+// ─── folds ───────────────────────────────────────────────────────────────────
 
 fn fold_closure(db: &Db<'_>, owner: &str, fold: i64) -> rusqlite::Result<HashSet<i64>> {
     let mut out: HashSet<i64> = HashSet::new();
@@ -677,169 +479,16 @@ fn fold_closure(db: &Db<'_>, owner: &str, fold: i64) -> rusqlite::Result<HashSet
     Ok(out)
 }
 
-fn scope_ids(db: &Db<'_>, g: &Row) -> rusqlite::Result<HashSet<i64>> {
-    let owner = g.get("owner").map(py_str).unwrap_or_default();
-    let scope = g.get("scope").cloned().unwrap_or(Value::Null);
-    let live = g.get("mode").and_then(Value::as_str) == Some("live");
-    let ids = db.ids(&owner)?;
-    let all: HashSet<i64> = ids.iter().copied().collect();
-    let mut base: HashSet<i64> = if let Some(r) = scope.get("row").and_then(Value::as_i64) {
-        [r].into_iter().filter(|x| all.contains(x)).collect()
-    } else if let Some(f) = scope.get("fold").and_then(Value::as_i64) {
-        fold_closure(db, &owner, f)?.into_iter().filter(|x| all.contains(x)).collect()
-    } else if let Some(r) = scope.get("range") {
-        let lo = r.get("from").and_then(Value::as_i64).unwrap_or(0);
-        let hi = r.get("to").and_then(Value::as_i64).unwrap_or(0);
-        ids.iter().copied().filter(|i| *i >= lo && (live || *i <= hi)).collect()
-    } else {
-        let n = scope.get("head_until").and_then(Value::as_i64).unwrap_or(0);
-        ids.iter().copied().filter(|i| live || *i <= n).collect()
-    };
-    if !live {
-        if let Some(as_of) = g.get("as_of").and_then(Value::as_i64) {
-            base.retain(|i| *i <= as_of);
-        }
-    }
-    Ok(base)
-}
-
-fn bad_scope(code: &str, msg: String) -> Value {
-    let mut r = refusal(code, msg);
-    with(&mut r, "arg", json!("scope"));
-    r
-}
-
-fn parse_scope(db: &Db<'_>, owner: &str, scope: &Value) -> Result<(Value, i64), Value> {
-    let one = scope
-        .as_object()
-        .filter(|m| m.len() == 1)
-        .and_then(|m| m.iter().next())
-        .filter(|(k, _)| SCOPE_KINDS.contains(&k.as_str()));
-    let Some((kind, val)) = one else {
-        return Err(bad_scope(
-            BAD_ARG,
-            "share: `scope` must be ONE of {head_until: <row>}, {range: {from, to}}, \
-             {fold: <id>}, {row: <id>} — a descriptor, never a list of messages"
-                .to_string(),
-        ));
-    };
-    let ids = db.ids(owner).map_err(db_err)?;
-    if kind == "range" {
-        let Some(r) = val.as_object() else {
-            return Err(bad_scope(BAD_ARG, "share: range must be {from, to}".to_string()));
-        };
-        let (Some(lo), Some(hi)) = (r.get("from").and_then(as_id), r.get("to").and_then(as_id)) else {
-            return Err(bad_scope(BAD_ARG, "share: range needs from <= to (row ids)".to_string()));
-        };
-        if lo > hi {
-            return Err(bad_scope(BAD_ARG, "share: range needs from <= to (row ids)".to_string()));
-        }
-        let Some(first) = ids.iter().copied().find(|i| lo <= *i && *i <= hi) else {
-            return Err(bad_scope(NOT_FOUND, format!("share: none of YOUR rows lie in {lo}..{hi}")));
-        };
-        return Ok((json!({"range": {"from": lo, "to": hi}}), first));
-    }
-    let Some(rid) = as_id(val) else {
-        return Err(bad_scope(BAD_ARG, format!("share: {kind} must be a row id")));
-    };
-    if kind == "head_until" {
-        return match ids.first() {
-            Some(first) if *first <= rid => Ok((json!({"head_until": rid}), *first)),
-            _ => Err(bad_scope(NOT_FOUND, format!("share: you have no rows up to {rid}"))),
-        };
-    }
-    if !db.has(owner, rid).map_err(db_err)? {
-        return Err(bad_scope(
-            NOT_FOUND,
-            format!("share: row {rid} is not one of YOUR rows — only rows you own can be shared"),
-        ));
-    }
-    if kind == "fold" {
-        let row = db.row(owner, rid).map_err(db_err)?;
-        let k = row.as_ref().and_then(|r| r.get("kind")).and_then(Value::as_str);
-        if !k.is_some_and(|k| REF_KINDS.contains(&k)) {
-            return Err(bad_scope(BAD_ARG, format!("share: row {rid} is not a fold")));
-        }
-    }
-    let mut out = Map::new();
-    out.insert(kind.clone(), Value::from(rid));
-    Ok((Value::Object(out), rid))
-}
-
-fn grant_view(kernel: &Arc<Kernel>, g: &Row) -> Value {
-    let get = |k: &str| g.get(k).cloned().unwrap_or(Value::Null);
-    let mut out = Map::new();
-    out.insert("grant".to_string(), get("grant"));
-    out.insert("owner".to_string(), Value::from(display(kernel, &g.get("owner").map(py_str).unwrap_or_default())));
-    out.insert("reader".to_string(), Value::from(display(kernel, &g.get("reader").map(py_str).unwrap_or_default())));
-    for k in ["scope", "mode", "as_of", "until", "why", "created_by", "ts"] {
-        out.insert(k.to_string(), get(k));
-    }
-    Value::Object(out)
-}
-
-fn readable(
-    kernel: &Arc<Kernel>,
-    id: &AgentId,
-    db: &Db<'_>,
-    payload: &Value,
-    verb: &str,
-) -> Result<(String, Option<HashSet<i64>>), Value> {
-    let Some(gid) = payload.get("grant").filter(|v| !v.is_null()) else {
-        let (owner, _, _) = owner_for(kernel, id, payload, verb)?;
-        return Ok((owner, None));
-    };
-    let (me, who) = caller(kernel, id)?;
-    let g = match as_id(gid) {
-        Some(n) => db.grant(n).map_err(db_err)?,
-        None => None,
-    };
-    let Some(g) = g else {
-        let mut r = refusal(
-            NOT_FOUND,
-            format!("{verb}: grant {} does not exist — revoked (unshare) or its rows were pruned", py_repr_value(gid)),
-        );
-        with(&mut r, "arg", json!("grant"));
-        return Err(r);
-    };
-    let reader = g.get("reader").map(py_str).unwrap_or_default();
-    if reader != me && !is_admin(kernel, id, &who) {
-        let mut r = refusal(
-            UNAUTHORIZED,
-            format!(
-                "{verb}: grant {} was given to {}, not {}",
-                py_str(gid),
-                py_repr(&display(kernel, &reader)),
-                py_repr(&who)
-            ),
-        );
-        with(&mut r, "side", json!("store"));
-        return Err(r);
-    }
-    let allowed = scope_ids(db, &g).map_err(db_err)?;
-    Ok((g.get("owner").map(py_str).unwrap_or_default(), Some(allowed)))
-}
-
-fn now_secs() -> f64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0)
-}
-
 /// ram_store's verb docs, word for word — the one on `boot` names the file.
-pub const VERB_DOCS: [(&str, &str); 11] = [
-    ("reflect", "Identity + posture: how many owners/rows/grants, who is admin, whether the operator is served, which optional verbs exist. No args."),
+pub const VERB_DOCS: [(&str, &str); 8] = [
+    ("reflect", "Identity + posture: how many owners/rows, which optional verbs exist. No args."),
     ("boot", "Opens (creating if absent) the SQLite file named by `path`; the tables survive the process."),
-    ("append", "args: rows:list[dict] (req), owner:str? (admins only). Appends rows under the CALLER's key, all or none. A row carries the kernel id it was minted with, or none and the next id is taken from the kernel's counter; `refs` must name rows of the same owner (this batch included). Returns {ids:[int], appended:int}."),
-    ("read", "args: grant:int? (read another owner's scope), owner:str? (admins), after:int?, before:int?, limit:int?, order:'asc'|'desc'?, kinds:list?, match:dict? (exact field equality), ids:list?, from_last_kind:str? (start at the newest row of that kind). Rows whole, oldest first by default. Returns {rows, next, total}."),
-    ("search", "args: query:str (req — case-insensitive substring), grant:int?, owner:str? (admins), ids:list? (rows to search; a fold id includes its members), limit:int? (default 100), width:int? (chars per line, default 200). Every matching LINE with its row id and line number. Returns {matches:[{id, line, text}], total, truncated}."),
-    ("share", "args: with:str (req — the reader's agent id), scope:dict (req — ONE of {head_until:<row>}, {range:{from,to}}, {fold:<id>}, {row:<id>}), mode:'frozen'|'live'? (default frozen), why:str?. Grants `with` read access to that scope of YOUR rows — only rows you own (never a foreign row, never one shared with you). An identical share returns the existing grant. Returns {grant, anchor, as_of, created}."),
-    ("unshare", "args: grant:int (req). Revokes a grant YOU gave (admins: any). The reader's next read under it fails. Returns {unshared:true, grant}."),
-    ("grants", "args: side:'given'|'received' (req). The grants YOU gave, or the ones given TO you. Returns {grants:[{grant, owner, reader, scope, mode, as_of, until, why, created_by, ts}]}."),
-    ("prune", "args: before_id:int? and/or ids:list? (req — one of them), keep:list? (kinds kept), owner:str? (admins). Deletes YOUR rows below `before_id` (or exactly `ids`) except kinds in `keep`; every fold ref and every grant anchored on a deleted row goes with it (FK cascade). Returns {pruned, grants_removed}."),
-    ("inject", "args: tables:dict (req — a `dump`). ADMINS ONLY. Replaces the WHOLE store with the given tables, every key and FK checked; nothing changes on a refusal. Returns {rows, grants}."),
-    ("dump", "No args. ADMINS ONLY. The whole store as tables — {rows:[{owner, row}], fold_refs:[{owner, fold, members}], grants:[…]} — exactly what `inject` takes back. Returns {tables}."),
+    ("append", "args: rows:list[dict] (req). Appends rows under the CALLER's key, all or none. A row carries the kernel id it was minted with, or none and the next id is taken from the kernel's counter; `refs` must name rows of the same owner (this batch included). Returns {ids:[int], appended:int}."),
+    ("read", "args: after:int?, before:int?, limit:int?, order:'asc'|'desc'?, kinds:list?, match:dict? (exact field equality), ids:list?, from_last_kind:str? (start at the newest row of that kind). Rows whole, oldest first by default. Returns {rows, next, total}."),
+    ("search", "args: query:str (req — case-insensitive substring), ids:list? (rows to search; a fold id includes its members), limit:int? (default 100), width:int? (chars per line, default 200). Every matching LINE with its row id and line number. Returns {matches:[{id, line, text}], total, truncated}."),
+    ("prune", "args: before_id:int? and/or ids:list? (req — one of them), keep:list? (kinds kept). Deletes YOUR rows below `before_id` (or exactly `ids`) except kinds in `keep`; every fold ref naming a deleted row goes with it (FK cascade). Returns {pruned}."),
+    ("inject", "args: tables:dict (req — a `dump`). Replaces the WHOLE store with the given tables, every key and FK checked; nothing changes on a refusal. Returns {rows}."),
+    ("dump", "No args. The whole store as tables — {rows:[{owner, row}], fold_refs:[{owner, fold, members}]} — exactly what `inject` takes back. Returns {tables}."),
 ];
 
 /// Why a record's `path` cannot name the file: it is required, relative, and
@@ -939,7 +588,6 @@ impl SqliteStoreBundle {
             Ok(json!([
                 q("SELECT COUNT(DISTINCT owner) FROM rows")?,
                 q("SELECT COUNT(*) FROM rows")?,
-                q("SELECT COUNT(*) FROM grants")?,
             ]))
         });
         let n = |i: usize| counts.get(i).cloned().unwrap_or(Value::Null);
@@ -952,7 +600,7 @@ impl SqliteStoreBundle {
         out.insert(
             "sentence".to_string(),
             Value::from(
-                "Memory store in SQLite — rows per owner (the caller), folds, grants, search; \
+                "Memory store in SQLite — rows per owner (the caller), folds, search; \
                  durable: one database file, the tables survive the process.",
             ),
         );
@@ -963,22 +611,16 @@ impl SqliteStoreBundle {
         );
         out.insert("owners".to_string(), n(0));
         out.insert("rows".to_string(), n(1));
-        out.insert("grants".to_string(), n(2));
         if counts.get("error").is_some() {
             out.insert("error".to_string(), counts.get("error").cloned().unwrap_or(Value::Null));
         }
-        out.insert("operator".to_string(), Value::Bool(rec.get("operator").is_some_and(py_truthy)));
-        out.insert(
-            "admins".to_string(),
-            rec.get("admins").filter(|a| py_truthy(a)).cloned().unwrap_or_else(|| json!([])),
-        );
         out.insert("optional_verbs".to_string(), json!(["search"]));
         out.insert("verbs".to_string(), Value::Object(verbs));
         Value::Object(out)
     }
 
     fn append(&self, id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
-        let (owner, _, _) = match owner_for(kernel, id, payload, "append") {
+        let (owner, _) = match caller(kernel) {
             Ok(o) => o,
             Err(r) => return r,
         };
@@ -1050,11 +692,8 @@ impl SqliteStoreBundle {
 
     fn read(&self, id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
         self.tx(id, kernel, |db| {
-            let (owner, allowed) = readable(kernel, id, db, payload, "read")?;
+            let (owner, _) = caller(kernel)?;
             let mut ids = db.ids(&owner).map_err(db_err)?;
-            if let Some(allowed) = &allowed {
-                ids.retain(|i| allowed.contains(i));
-            }
             let flk = payload.get("from_last_kind").and_then(Value::as_str).filter(|s| !s.is_empty());
             let after = payload.get("after").and_then(as_id);
             let before = payload.get("before").and_then(as_id);
@@ -1145,7 +784,8 @@ impl SqliteStoreBundle {
                 ids.retain(|i| *i < b);
             }
             let total = ids.len();
-            let limit = payload.get("limit").and_then(as_id);
+            // `ids[:limit] if limit else ids` — a `0` is falsy: no limit.
+            let limit = payload.get("limit").and_then(as_id).filter(|l| *l != 0);
             let page: Vec<i64> = match limit {
                 Some(l) => ids.iter().take(usize::try_from(l).unwrap_or(usize::MAX)).copied().collect(),
                 None => ids.clone(),
@@ -1170,11 +810,8 @@ impl SqliteStoreBundle {
             return missing("search", "query");
         }
         self.tx(id, kernel, |db| {
-            let (owner, allowed) = readable(kernel, id, db, payload, "search")?;
+            let (owner, _) = caller(kernel)?;
             let mut ids = db.ids(&owner).map_err(db_err)?;
-            if let Some(allowed) = &allowed {
-                ids.retain(|i| allowed.contains(i));
-            }
             if let Some(want) = payload.get("ids").and_then(Value::as_array).filter(|w| !w.is_empty()) {
                 let mut scope: HashSet<i64> = HashSet::new();
                 for x in want {
@@ -1197,8 +834,9 @@ impl SqliteStoreBundle {
                     .map_err(db_err)?;
                 found
             };
-            let limit = usize::try_from(payload.get("limit").and_then(as_id).unwrap_or(100)).unwrap_or(usize::MAX);
-            let width = usize::try_from(payload.get("width").and_then(as_id).unwrap_or(200)).unwrap_or(usize::MAX);
+            // `_as_id(limit) or 100` / `or 200`: a `0` falls back too.
+            let limit = usize::try_from(payload.get("limit").and_then(as_id).filter(|l| *l != 0).unwrap_or(100)).unwrap_or(usize::MAX);
+            let width = usize::try_from(payload.get("width").and_then(as_id).filter(|w| *w != 0).unwrap_or(200)).unwrap_or(usize::MAX);
             let mut matches: Vec<Value> = Vec::new();
             let mut total = 0usize;
             for i in &ids {
@@ -1222,105 +860,8 @@ impl SqliteStoreBundle {
         })
     }
 
-    fn share(&self, id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
-        let (me, _who) = match caller(kernel, id) {
-            Ok(c) => c,
-            Err(e) => return e,
-        };
-        let Some(reader) = payload.get("with").and_then(|w| key(kernel, w)) else {
-            return missing("share", "with");
-        };
-        if reader == me {
-            let mut r = refusal(BAD_ARG, "share: you already read your own rows");
-            with(&mut r, "arg", json!("with"));
-            return r;
-        }
-        let mode = payload.get("mode").filter(|m| py_truthy(m)).cloned().unwrap_or_else(|| json!("frozen"));
-        let Some(mode) = mode.as_str().filter(|m| MODES.contains(m)).map(str::to_string) else {
-            let mut r = refusal(BAD_ARG, "share: mode must be one of ('frozen', 'live')");
-            with(&mut r, "arg", json!("mode"));
-            return r;
-        };
-        let why_raw = payload.get("why").filter(|w| py_truthy(w)).map(py_str).unwrap_or_default();
-        let why: String = py_split_whitespace(&why_raw).join(" ").chars().take(300).collect();
-        self.tx(id, kernel, |db| {
-            let (scope, anchor) = parse_scope(db, &me, payload.get("scope").unwrap_or(&Value::Null))?;
-            let ids = db.ids(&me).map_err(db_err)?;
-            let as_of = match (mode.as_str(), ids.last()) {
-                ("frozen", Some(last)) => Value::from(*last),
-                _ => Value::Null,
-            };
-            let mut g = Map::new();
-            g.insert("owner".to_string(), Value::from(me.clone()));
-            g.insert("reader".to_string(), Value::from(reader.clone()));
-            g.insert("scope".to_string(), scope);
-            g.insert("mode".to_string(), Value::from(mode.clone()));
-            g.insert("anchor".to_string(), Value::from(anchor));
-            g.insert("as_of".to_string(), as_of);
-            g.insert("until".to_string(), Value::Null);
-            g.insert("why".to_string(), if why.is_empty() { Value::Null } else { Value::from(why.clone()) });
-            g.insert(
-                "created_by".to_string(),
-                fantastic_kernel::current_task().map_or(Value::Null, |t| Value::from(t.get())),
-            );
-            g.insert("ts".to_string(), Value::from(now_secs()));
-            let (gid, created) = db.add_grant(g).map_err(db_err)?;
-            let as_of = db
-                .grant(gid)
-                .map_err(db_err)?
-                .and_then(|g| g.get("as_of").cloned())
-                .unwrap_or(Value::Null);
-            Ok(json!({"grant": gid, "anchor": anchor, "as_of": as_of, "created": created}))
-        })
-    }
-
-    fn unshare(&self, id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
-        let (me, who) = match caller(kernel, id) {
-            Ok(c) => c,
-            Err(e) => return e,
-        };
-        let Some(gid) = payload.get("grant").and_then(as_id) else {
-            return missing("unshare", "grant");
-        };
-        let admin = is_admin(kernel, id, &who);
-        self.tx(id, kernel, |db| {
-            let Some(g) = db.grant(gid).map_err(db_err)? else {
-                let mut r = refusal(NOT_FOUND, format!("unshare: no grant {gid}"));
-                with(&mut r, "arg", json!("grant"));
-                return Err(r);
-            };
-            if g.get("owner").map(py_str).as_deref() != Some(me.as_str()) && !admin {
-                let mut r = refusal(UNAUTHORIZED, format!("unshare: grant {gid} is not yours to revoke"));
-                with(&mut r, "side", json!("store"));
-                return Err(r);
-            }
-            db.drop_grant(gid).map_err(db_err)?;
-            Ok(json!({"unshared": true, "grant": gid}))
-        })
-    }
-
-    fn grants(&self, id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
-        let (me, _) = match caller(kernel, id) {
-            Ok(c) => c,
-            Err(e) => return e,
-        };
-        let field = match payload.get("side").and_then(Value::as_str) {
-            Some("given") => "owner",
-            Some("received") => "reader",
-            _ => {
-                let mut r = refusal(BAD_ARG, "grants: side must be 'given' or 'received'");
-                with(&mut r, "arg", json!("side"));
-                return r;
-            }
-        };
-        self.tx(id, kernel, |db| {
-            let out: Vec<Value> = db.grants_where(field, &me).map_err(db_err)?.iter().map(|g| grant_view(kernel, g)).collect();
-            Ok(json!({"grants": out}))
-        })
-    }
-
     fn prune(&self, id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
-        let (owner, _, _) = match owner_for(kernel, id, payload, "prune") {
+        let (owner, _) = match caller(kernel) {
             Ok(o) => o,
             Err(r) => return r,
         };
@@ -1344,21 +885,12 @@ impl SqliteStoreBundle {
                     doomed.insert(i);
                 }
             }
-            let (n, g) = db.delete(&owner, &doomed).map_err(db_err)?;
-            Ok(json!({"pruned": n, "grants_removed": g}))
+            let n = db.delete(&owner, &doomed).map_err(db_err)?;
+            Ok(json!({"pruned": n}))
         })
     }
 
     fn inject(&self, id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
-        let (_, who) = match caller(kernel, id) {
-            Ok(c) => c,
-            Err(e) => return e,
-        };
-        if !is_admin(kernel, id, &who) {
-            let mut r = refusal(UNAUTHORIZED, format!("inject: {} is not an admin of {}", py_repr(&who), id.0));
-            with(&mut r, "side", json!("store"));
-            return r;
-        }
         let staged = match stage_tables(payload.get("tables").unwrap_or(&Value::Null)) {
             Ok(s) => s,
             Err(e) => return e,
@@ -1367,8 +899,7 @@ impl SqliteStoreBundle {
             // The WHOLE store is replaced, in this one transaction.
             db.0
                 .execute_batch(
-                    "DELETE FROM grants; DELETE FROM fold_refs; DELETE FROM ref_lists; \
-                     DELETE FROM rows; DELETE FROM text_idx; DELETE FROM seq;",
+                    "DELETE FROM fold_refs; DELETE FROM ref_lists; DELETE FROM rows; DELETE FROM text_idx;",
                 )
                 .map_err(db_err)?;
             let mut rows = 0usize;
@@ -1379,37 +910,11 @@ impl SqliteStoreBundle {
             for (owner, fold, members) in &staged.fold_refs {
                 db.set_refs(owner, *fold, members).map_err(db_err)?;
             }
-            let mut seq = 0i64;
-            for (gid, g) in &staged.grants {
-                let owner = g.get("owner").map(py_str).unwrap_or_default();
-                let reader = g.get("reader").map(py_str).unwrap_or_default();
-                let sk = scope_key(g.get("scope").unwrap_or(&Value::Null));
-                let mode = g.get("mode").map(py_str).unwrap_or_default();
-                let anchor = g.get("anchor").and_then(Value::as_i64).unwrap_or(0);
-                db.0
-                    .execute(
-                        "INSERT OR REPLACE INTO grants (gid, owner, reader, scope_key, mode, anchor, doc) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                        params![gid, owner, reader, sk, mode, anchor, to_text(g)],
-                    )
-                    .map_err(db_err)?;
-                seq = seq.max(*gid);
-            }
-            db.set_seq(seq).map_err(db_err)?;
-            let grants: i64 = db.0.query_row("SELECT COUNT(*) FROM grants", [], |r| r.get(0)).map_err(db_err)?;
-            Ok(json!({"rows": rows, "grants": grants}))
+            Ok(json!({"rows": rows}))
         })
     }
 
     fn dump(&self, id: &AgentId, kernel: &Arc<Kernel>) -> Value {
-        let (_, who) = match caller(kernel, id) {
-            Ok(c) => c,
-            Err(e) => return e,
-        };
-        if !is_admin(kernel, id, &who) {
-            let mut r = refusal(UNAUTHORIZED, format!("dump: {} is not an admin of {}", py_repr(&who), id.0));
-            with(&mut r, "side", json!("store"));
-            return r;
-        }
         self.tx(id, kernel, |db| Ok(json!({"tables": db.dump().map_err(db_err)?})))
     }
 }
@@ -1424,16 +929,8 @@ impl Bundle for SqliteStoreBundle {
         Some(README)
     }
 
-    /// ram_store's posture fields, plus `path` — required, relative, inside.
+    /// `path` — required, relative, inside.
     fn validate_meta(&self, meta: &Map<String, Value>, record: &Map<String, Value>) -> Option<String> {
-        if meta.get("operator").is_some_and(|v| !v.is_boolean()) {
-            return Some("operator must be true or false".to_string());
-        }
-        match meta.get("admins") {
-            None | Some(Value::String(_)) => {}
-            Some(Value::Array(a)) if a.iter().all(|x| x.as_str().is_some_and(|s| !s.is_empty())) => {}
-            Some(_) => return Some("admins must be a list of agent ids ('kernel' = the operator)".to_string()),
-        }
         let mut merged = record.clone();
         for (k, v) in meta {
             merged.insert(k.clone(), v.clone());
@@ -1454,9 +951,6 @@ impl Bundle for SqliteStoreBundle {
             "append" => self.append(agent_id, payload, kernel),
             "read" => self.read(agent_id, payload, kernel),
             "search" => self.search(agent_id, payload, kernel),
-            "share" => self.share(agent_id, payload, kernel),
-            "unshare" => self.unshare(agent_id, payload, kernel),
-            "grants" => self.grants(agent_id, payload, kernel),
             "prune" => self.prune(agent_id, payload, kernel),
             "inject" => self.inject(agent_id, payload, kernel),
             "dump" => self.dump(agent_id, kernel),

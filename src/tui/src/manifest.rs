@@ -2,7 +2,7 @@
 //!
 //! It is NOT where the specified set lives. A loader forces `parent_id` to itself
 //! on create and strips it on re-apply, so a manifest entry is ALWAYS a child of
-//! the loader; `set_of_agents` and its three agents are therefore records on disk
+//! the loader; `user` and the agents under it are therefore records on disk
 //! (see `boot::seed`). This file starts empty and grows when ui logic adds to it.
 //!
 //! Order is preserved on rewrite (`serde_yaml` over an index map), so an entry
@@ -18,7 +18,7 @@ pub const HEADER: &str = "\
 #
 # Every entry here becomes a CHILD OF fs_loader: the loader overwrites parent_id
 # with its own, so an entry cannot choose its parent. That is why the specified
-# set (exec, files, user under set_of_agents) lives on disk under
+# set (user, and memory, store, exec, files under it) lives on disk under
 # .fantastic/agents/ and not in this file.
 #
 # Each entry must carry an `id` and a `handler_module`; boot stops LOUD at the

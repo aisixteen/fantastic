@@ -1,5 +1,6 @@
 import { str } from "../../lib.ts";
 import { bodyText } from "../body_text.ts";
+import { panelRelay } from "../panel_relay.ts";
 import type { Handler, Json } from "../../lib.ts";
 
 // html_agent — a JS view-agent holding MUTABLE HTML content. Ported from the
@@ -11,7 +12,10 @@ import type { Handler, Json } from "../../lib.ts";
 
 export const HTML_AGENT = "html_agent.ts";
 
-export const htmlAgent: Handler = (id, payload, kernel): Json => {
+export const htmlAgent: Handler = (id, payload, kernel): Json | Promise<Json> => {
+  // the panel's own calls, as this agent (`panel_relay.ts`)
+  const relayed = panelRelay(kernel, payload);
+  if (relayed !== undefined) return relayed;
   const agent = kernel.get(id);
   const body = (): string => {
     const h = agent?.meta["html"];

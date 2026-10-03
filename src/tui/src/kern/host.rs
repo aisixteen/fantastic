@@ -17,16 +17,15 @@
 //! an agent's rows is therefore a `read` on the store, made as the operator — the
 //! store's admin.
 //!
-//! And one trap that costs a whole session if missed: an act goes out under
-//! `with_sender("user")`, and the gate resolves that id against LIVE AGENTS. If no
-//! `user` agent exists, the grant map is empty and every verb is refused on
-//! egress. The human's own agent is not decoration; it is the shell's authority.
+//! IDENTITY COMES ONLY FROM DISPATCH. A send this shell makes outside every
+//! handler is the operator's (ungated); an ACT by the human goes through
+//! `user.forward`, so it is `user`'s call, gated by `user`'s grants. A send made
+//! inside a bundle's handler is that agent's.
 
 use std::sync::Arc;
 
 use fantastic_kernel::{
     bootstrap::{self, BootstrapOptions},
-    send::with_sender,
     AgentId, BundleRegistry, Item, Kernel, Outcome,
 };
 use serde_json::{json, Value};
@@ -73,10 +72,7 @@ fn registry() -> BundleRegistry {
     );
     // THE HUMAN, as an agent. This is the id the terminal acts as, so every act
     // carries a ledger row naming a person instead of an operator injection.
-    reg.register(
-        fantastic_scenario_probes::USER_MODULE,
-        fantastic_scenario_probes::UserProbe::default(),
-    );
+    reg.register(fantastic_user::HANDLER_MODULE, fantastic_user::UserBundle::default());
     // THE MCP LEG — a bundle from outside the kernel tree. Registered so a
     // persisted `mcp` record hydrates into a live agent on every run; the
     // record itself is only ever created by `fantastic mcp`, never by the
@@ -99,16 +95,11 @@ fn registry() -> BundleRegistry {
     // THE BROWSER'S SET-UP PAGE, host side. Registered so the page can create
     // it; it exists only while that page is open (`kern/setup_agent`).
     reg.register(crate::kern::setup_agent::HANDLER_MODULE, crate::kern::setup_agent::SetupBundle);
-    // AI CELLS: the canvas's AI cells — each a RAM store with the AI under it,
-    // spawned from the user's templates by `ai_cells` (`kern/ai_cells`).
-    reg.register(fantastic_ram_store::HANDLER_MODULE, fantastic_ram_store::RamStoreBundle::default());
-    reg.register(crate::kern::ai_cells::HANDLER_MODULE, crate::kern::ai_cells::AiCellsBundle);
-    // THE CANVAS'S ACTIVITY: open questions to the human, read as the operator
-    // (`kern/activity`) — the page never reads a memory store.
-    reg.register(crate::kern::activity::HANDLER_MODULE, crate::kern::activity::ActivityBundle);
-    // THE CANVAS'S USERS: the gateway every tab calls, and the user records.
-    reg.register(fantastic_canvas_users::HANDLER_MODULE, fantastic_canvas_users::CanvasUsersBundle::default());
-    reg.register(fantastic_canvas_users::USER_MODULE, fantastic_canvas_users::CanvasUserBundle);
+    // THE CANVAS, host side: its node (`kern/canvas_node`), and its backend —
+    // one folder per page view, each creating and deleting its own children and
+    // spawning AI cells from the user's templates (`kern/backend`).
+    reg.register(crate::kern::canvas_node::HANDLER_MODULE, crate::kern::canvas_node::CanvasNodeBundle);
+    reg.register(crate::kern::backend::HANDLER_MODULE, crate::kern::backend::BackendBundle);
     // KEYS: the credential store (`kern/keys`) — every provider key, by ref.
     reg.register(fantastic_credential_store::HANDLER_MODULE, fantastic_credential_store::CredentialStoreBundle::default());
     // Apple's on-device model: linked by `--features foundation-models`.
@@ -161,7 +152,8 @@ impl Host {
             for (k, v) in patch {
                 p[k] = v;
             }
-            let r = fantastic_kernel::send::with_operator(kernel.send(vec![Item::new(AgentId::from("kernel"), p)]))
+            let r = kernel
+                .send(vec![Item::new(AgentId::from("kernel"), p)])
                 .await
                 .remove(0)
                 .result;
@@ -192,7 +184,8 @@ impl Host {
             if is_web && !serve_web {
                 continue;
             }
-            let reply = fantastic_kernel::send::with_operator(kernel.send(vec![Item::new(id.clone(), json!({"type": "boot"}))]))
+            let reply = kernel
+                .send(vec![Item::new(id.clone(), json!({"type": "boot"}))])
                 .await
                 .remove(0)
                 .result;
@@ -258,8 +251,9 @@ impl Host {
             .and_then(|a| a.value().record().meta.get("callable_by").and_then(Value::as_object).cloned())
             .ok_or_else(|| format!("the memory store `{store}` is not in the tree"))?;
         cb.insert(ai.into(), json!("*"));
+        // as `user`, the store's parent: grants come from above
         let r = self
-            .operator("kernel", json!({"type": "update_agent", "id": store, "callable_by": cb}))
+            .act("kernel", json!({"type": "update_agent", "id": store, "callable_by": cb}))
             .await
             .result;
         match r.get("error").and_then(Value::as_str) {
@@ -284,27 +278,24 @@ impl Host {
 
     // ── acting ───────────────────────────────────────────────────────────
 
-    /// Dispatch AS THE HUMAN. The scope holds across await points because it is a
-    /// task-local scope over the whole future, which is exactly what the gate
-    /// needs to see a `user -> <target>` call.
+    /// Dispatch AS THE HUMAN: `user.forward {target, payload}` — the send is
+    /// made inside `user`'s own handler, so it is `user`'s call, gated by its
+    /// grants. The outcome is the forwarded call's reply.
     pub async fn act(&self, target: &str, payload: Value) -> Outcome {
         let k = Arc::clone(&self.kernel);
-        let user = AgentId::from(self.cfg.user.as_str());
-        let item = Item::new(AgentId::from(target), payload);
-        with_sender(user, async move { k.send(vec![item]).await })
-            .await
-            .remove(0)
+        let item = Item::new(
+            AgentId::from(self.cfg.user.as_str()),
+            json!({"type": "forward", "target": target, "payload": payload}),
+        );
+        k.send(vec![item]).await.remove(0)
     }
 
-    /// Dispatch with no sender, which the kernel reads as OPERATOR and does not
-    /// gate. Used for exactly one thing: booting the roster, which is the shell's
-    /// own housekeeping and not an act by the human.
+    /// A plain send: outside every handler it is the OPERATOR's (ungated) — the
+    /// shell's own housekeeping; inside a bundle's handler it is that agent's.
     pub async fn operator(&self, target: &str, payload: Value) -> Outcome {
         let k = Arc::clone(&self.kernel);
         let item = Item::new(AgentId::from(target), payload);
-        fantastic_kernel::send::with_operator(async move { k.send(vec![item]).await })
-            .await
-            .remove(0)
+        k.send(vec![item]).await.remove(0)
     }
 
     /// An outcome as this shell reads it: the reply, or the refusal as data.
@@ -448,12 +439,11 @@ mod tests {
             "sqlite_store.tools",
             "user_home_store.tools",
             "setup.tools",
-            "ram_store.tools",
-            "ai_cells.tools",
-            "activity.tools",
+            "canvas.tools",
+            "backend.tools",
             "exec_bridge.tools",
             "static_loader.tools",
-            "user_probe.tools",
+            "user.tools",
             "web_mcp.tools",
             "web.tools",
             "canvas_page.tools",

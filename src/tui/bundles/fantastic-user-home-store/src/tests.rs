@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use fantastic_kernel::agent::Agent;
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
-use fantastic_kernel::{with_sender, AgentId, Item, Kernel};
+use fantastic_kernel::test_support::as_agent;
+use fantastic_kernel::{AgentId, Item, Kernel};
 use serde_json::{json, Map, Value};
 
 use super::*;
@@ -56,7 +57,7 @@ fn kernel(home: &Path) -> Arc<Kernel> {
 
 async fn call(k: &Arc<Kernel>, from: &str, p: Value) -> Value {
     let item = Item::new(AgentId::from("home"), p);
-    with_sender(AgentId::from(from), k.send(vec![item])).await.remove(0).result
+    as_agent(AgentId::from(from), k.send(vec![item])).await.remove(0).result
 }
 
 fn err(v: &Value) -> &str {

@@ -1,7 +1,7 @@
 //! `sqlite_store` as the KERNEL'S store: the root's `memory_store_id` names it,
 //! `kernel_start` boots it first, the flusher lands the execution rows in its
 //! file — and a NEW PROCESS over the same dir gets the ledger, named dedup, the
-//! dead letters, an AI agent's head (folds included) and the grants back with no
+//! dead letters and an AI agent's head (folds included) back with no
 //! `dump`/`inject`. Also: the prune cascade seen on disk, and many agents writing
 //! alongside the flusher.
 //!
@@ -19,7 +19,8 @@ use fantastic_ai_core::provider::{Provider, ProviderError, ProviderEvent, Provid
 use fantastic_kernel::bootstrap::{bootstrap, BootstrapOptions};
 use fantastic_kernel::bundle::{Bundle, BundleError, BundleRegistry, Reply};
 use fantastic_kernel::test_support::{register_fake_store, register_root_loader, wire_fake_store};
-use fantastic_kernel::{with_sender, AgentId, Item, Kernel, Outcome};
+use fantastic_kernel::test_support::as_agent;
+use fantastic_kernel::{AgentId, Item, Kernel, Outcome};
 use serde_json::{json, Map, Value};
 
 // ── a probe: counts per process, fails on purpose ─────────────────────────────
@@ -110,7 +111,7 @@ async fn call(k: &Arc<Kernel>, target: &str, payload: Value) -> Outcome {
 }
 
 async fn call_as(k: &Arc<Kernel>, who: &str, target: &str, payload: Value) -> Value {
-    with_sender(AgentId::from(who), k.send(vec![Item::new(AgentId::from(target), payload)]))
+    as_agent(AgentId::from(who), k.send(vec![Item::new(AgentId::from(target), payload)]))
         .await
         .remove(0)
         .result
@@ -150,7 +151,7 @@ async fn wire(k: &Arc<Kernel>, dir: &Path, probes: &[&str]) {
     }
     create(k, json!({
         "id": "memory", "handler_module": fantastic_sqlite_store::HANDLER_MODULE,
-        "path": "mem.db", "operator": true, "admins": ["kernel"], "callable_by": readers,
+        "path": "mem.db", "callable_by": readers,
     }))
     .await;
     let r = call(k, "kernel", json!({"type": "update_agent", "id": root_id(k), "memory_store_id": "memory"})).await;
@@ -227,13 +228,10 @@ async fn restart_child() {
         let cleared = call(&k, "ai", json!({"type": "context_clear", "why": "new thread"})).await.result;
         let fold = cleared["cleared"].as_i64().unwrap_or_else(|| panic!("no clear-fold: {cleared}"));
         let head = call(&k, "ai", json!({"type": "history"})).await.result;
-        // the AI shares its thread with the probe
-        let g = call_as(&k, "ai", "memory", json!({"type": "share", "with": "probe", "scope": {"fold": fold}})).await;
-        let grant = g["grant"].as_i64().unwrap_or_else(|| panic!("share refused: {g}"));
         k.shutdown().await;
         let f = json!({
             "guid": guid(&k), "named": pid(&named), "dead": pid(&dead), "fold": fold,
-            "grant": grant, "head": head["rows"], "pid": std::process::id(), "next_id": k.rows.next_id(),
+            "head": head["rows"], "pid": std::process::id(), "next_id": k.rows.next_id(),
         });
         std::fs::write(&facts, serde_json::to_vec(&f).unwrap()).unwrap();
     } else {
@@ -266,11 +264,6 @@ async fn restart_child() {
         let members = call(&k, "ai", json!({"type": "history", "fold": f["fold"]})).await.result;
         let text = serde_json::to_string(&members).unwrap();
         assert!(text.contains("remember the lighthouse"), "the fold's members are back: {members}");
-        // the grant: the probe still reads under it
-        let rec = call_as(&k, "probe", "memory", json!({"type": "grants", "side": "received"})).await;
-        assert_eq!(rec["grants"][0]["grant"], f["grant"], "{rec}");
-        let read = call_as(&k, "probe", "memory", json!({"type": "read", "grant": f["grant"]})).await;
-        assert!(serde_json::to_string(&read).unwrap().contains("remember the lighthouse"), "{read}");
         // the dead letter can be acked now, in the new process
         let acked = call(&k, "kernel", json!({"type": "ack_deadletter", "id": dead})).await.result;
         assert_eq!(acked, json!({"acked": true, "id": dead}));
@@ -282,22 +275,19 @@ async fn restart_child() {
 // ── the cascade, on disk ─────────────────────────────────────────────
 
 #[tokio::test]
-async fn pruning_the_anchor_drops_the_grant_in_the_file() {
+async fn pruning_a_member_drops_its_fold_ref_in_the_file() {
     let tmp = tempfile::TempDir::new().unwrap();
     let dir = tmp.path().to_path_buf();
-    let k = in_dir(&dir, &["alice", "bob"]).await;
-    let row = k.mint_id();
-    let r = call_as(&k, "alice", "memory", json!({"type": "append", "rows": [{"id": row, "content": "x"}]})).await;
+    let k = in_dir(&dir, &["alice"]).await;
+    let (a, b, fold) = (k.mint_id(), k.mint_id(), k.mint_id());
+    let r = call_as(&k, "alice", "memory", json!({"type": "append", "rows": [
+        {"id": a, "content": "x"}, {"id": b, "content": "y"}, {"id": fold, "kind": "fold", "refs": [a, b]}]})).await;
     assert!(r.get("reason").is_none(), "{r}");
-    let g = call_as(&k, "alice", "memory", json!({"type": "share", "with": "bob", "scope": {"row": row}})).await;
-    assert!(g["grant"].is_i64(), "{g}");
     let db = open_db(&dir);
-    assert_eq!(count(&db, "SELECT COUNT(*) FROM grants"), 1);
-    let pr = call_as(&k, "alice", "memory", json!({"type": "prune", "ids": [row]})).await;
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM fold_refs"), 2);
+    let pr = call_as(&k, "alice", "memory", json!({"type": "prune", "ids": [a]})).await;
     assert!(pr.get("reason").is_none(), "{pr}");
-    assert_eq!(count(&db, "SELECT COUNT(*) FROM grants"), 0, "the FK cascade took the grant");
-    let rec = call_as(&k, "bob", "memory", json!({"type": "read", "grant": g["grant"]})).await;
-    assert_eq!(rec["reason"], json!("not_found"), "{rec}");
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM fold_refs"), 1, "the FK cascade took the member's ref");
     k.shutdown().await;
 }
 

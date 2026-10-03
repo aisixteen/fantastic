@@ -9,7 +9,6 @@ use std::process::Command;
 /// seeds, which is what makes it a test of the contract rather than of the wiring.
 use fantastic_kernel::{
     bootstrap::{self, BootstrapOptions},
-    send::with_sender,
     AgentId, BundleRegistry, Item, Kernel,
 };
 use serde_json::{json, Value};
@@ -30,10 +29,7 @@ fn registry() -> BundleRegistry {
         fantastic_static_loader::HANDLER_MODULE,
         fantastic_static_loader::StaticLoaderBundle,
     );
-    reg.register(
-        fantastic_scenario_probes::USER_MODULE,
-        fantastic_scenario_probes::UserProbe::default(),
-    );
+    reg.register(fantastic_user::HANDLER_MODULE, fantastic_user::UserBundle::default());
     reg
 }
 
@@ -46,27 +42,32 @@ fn write(path: &std::path::Path, v: &Value) {
 /// this test pins. If the seed changes shape, this fails and says so.
 fn seed(dir: &std::path::Path) {
     let a = dir.join(".fantastic").join("agents");
-    let inset = a.join("set_of_agents").join("agents");
+    let under = a.join("user").join("agents");
     write(
-        &a.join("memory").join("agent.yaml"),
+        &a.join("user").join("agent.yaml"),
+        &json!({
+            "id":"user","handler_module":"user.tools",
+            "can_call":{"memory":"*","fs_loader":"*","exec":"*","files":"*",bootstrap::DEFAULT_ROOT_ID:"*"},
+            "callable_by":{"exec":"*","files":"*"}
+        }),
+    );
+    write(
+        &under.join("memory").join("agent.yaml"),
         &json!({
             "id":"memory","handler_module":"sqlite_store.tools",
-            "path":".fantastic/memory.db","operator":true,"admins":["kernel"]
+            "path":".fantastic/memory.db","operator":true,"admins":["kernel"],
+            "callable_by":{"user":"*"}
         }),
     );
     write(
-        &a.join("set_of_agents").join("agent.yaml"),
-        &json!({"id":"set_of_agents"}),
-    );
-    write(
-        &a.join("fs_loader").join("agent.yaml"),
+        &under.join("fs_loader").join("agent.yaml"),
         &json!({
             "id":"fs_loader","handler_module":"static_loader.tools",
-            "manifest":".fantastic/kernel.yaml"
+            "manifest":".fantastic/kernel.yaml","callable_by":{"user":"*"}
         }),
     );
     write(
-        &inset.join("exec").join("agent.yaml"),
+        &under.join("exec").join("agent.yaml"),
         &json!({
             "id":"exec","handler_module":"exec_bridge.tools",
             "allowed":[".*"],"cwd":dir.to_string_lossy(),"inherit_env":["PATH","HOME","LANG"],"ingress_rule":"allow_all_ingress",
@@ -74,35 +75,22 @@ fn seed(dir: &std::path::Path) {
         }),
     );
     write(
-        &inset.join("files").join("agent.yaml"),
+        &under.join("files").join("agent.yaml"),
         &json!({
             "id":"files","handler_module":"file_bridge.tools","root":".","allow":["."],
             "ingress_rule":"allow_all_ingress",
             "callable_by":{"user":"*","exec":"*"},"can_call":{"user":"*"}
         }),
     );
-    write(
-        &inset.join("user").join("agent.yaml"),
-        &json!({
-            "id":"user","handler_module":"user_probe.tools",
-            "can_call":{"exec":"*","files":"*","set_of_agents":"*","fs_loader":"*",bootstrap::DEFAULT_ROOT_ID:"*"},
-            "callable_by":{"exec":"*","files":"*"}
-        }),
-    );
     std::fs::write(dir.join(".fantastic").join("kernel.yaml"), "agents: []\n").unwrap();
 }
 
-/// Dispatch as the human, exactly as the shell does.
+/// Dispatch as the human, exactly as the shell does: `user.forward` — the send
+/// is made from inside `user`'s own handler, so it carries `user`.
 async fn act(kernel: &std::sync::Arc<Kernel>, target: &str, payload: Value) -> Value {
     let k = std::sync::Arc::clone(kernel);
-    let item = Item::new(AgentId::from(target), payload);
-    with_sender(
-        AgentId::from("user"),
-        async move { k.send(vec![item]).await },
-    )
-    .await
-    .remove(0)
-    .result
+    let item = Item::new(AgentId::from("user"), json!({"type":"forward","target":target,"payload":payload}));
+    k.send(vec![item]).await.remove(0).result
 }
 
 

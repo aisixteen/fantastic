@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from _lib.canvas_live import Rig, verdict, answer, ask, html_cell, http_get, in_frame, say, spot, wait_quiet  # noqa: E402,F401
+from _lib.canvas_live import FOLDER, Rig, verdict, answer, ask, html_cell, http_get, in_frame, say, spot, wait_quiet  # noqa: E402,F401
 
 def main() -> bool:
     rig = Rig(__file__)
@@ -20,10 +20,10 @@ def main() -> bool:
 
     (rig.proj / "site").mkdir()
     (rig.proj / "site" / "index.html").write_text("<p>E45-OK</p>")
-    svc = {"id": "svc", "handler_module": "exec_bridge.tools", "parent_id": "canvas_ws",
+    svc = {"id": "svc", "handler_module": "exec_bridge.tools", "parent_id": "view_root",
            "allowed": [r"^python3 -m http\.server [0-9]+ --directory site$"], "cwd": ".", "inherit_env": ["*"],
            "ingress_rule": "allow_all_ingress"}
-    rig.init(host_agents=[("agents/web/agents/canvas_ws", svc)])
+    rig.init(host_agents=[(FOLDER, svc)])
 
     async def drive():
         async with rig.page() as pg:

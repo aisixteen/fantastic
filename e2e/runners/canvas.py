@@ -1,14 +1,15 @@
 """Run the canvas scenario (E19) — a REAL headless Chrome over CDP, no model.
 
 The canvas is a thin web UI: the page holds no store and no AI, and its thin
-agents are records the host's ws loader (`web_loader`, under the socket leg
-`wws`, rooted at `.fantastic/web`) writes as folders under the canvas and hands
-back on boot. This runner:
+agents are records the host's page loader (`web_loader`, under the host's
+`canvas` node, rooted at `.fantastic/web`) writes as folders under the canvas
+and hands back on boot; a cell's backend is a child of its view's folder under
+`backend`. This runner:
 
 1. builds the product (`fantastic`, whose build packs the canvas app and embeds
    `canvas.zip` — the `canvas_page` agent serves it);
 2. runs `fantastic --headless canvas --port N` over a fresh directory (it inits
-   from the blueprint and creates the canvas's page, leg and loader);
+   from the blueprint and creates the canvas's page, leg, loader and backend);
 3. drives the page in headless Chrome (dblclick, typing, drag, close) and
    restarts the host between runs;
 4. checks every step on the page AND on disk.
@@ -118,20 +119,19 @@ class Host:
 
 
 async def host_call(port: int, target: str, payload: dict, token: str | None = None) -> dict:
-    """A host call the way a canvas tab makes one: through the users gateway,
-    which acts as the user the token is (no token: the tokenless default)."""
+    """A host call the way a canvas tab makes one: through `user` — `forward`
+    to `target`, or `user`'s own verb when `target` is `user` — with the token
+    when one is given."""
     import websockets
 
-    fwd = {"type": "forward", "target": target, "payload": payload}
+    body = dict(payload) if target == "user" else {"type": "forward", "target": target, "payload": payload}
     if token is not None:
-        fwd["token"] = token
-    frame = {"type": "call", "target": "users", "payload": fwd, "id": secrets.token_hex(6)}
-    if token is not None:
-        frame["secret"] = ["payload.token"]
-    async with websockets.connect(f"ws://127.0.0.1:{port}/users/ws", origin=f"http://127.0.0.1:{port}") as ws:
+        body["token"] = token
+    frame = {"type": "call", "target": "user", "payload": body, "id": secrets.token_hex(6)}
+    async with websockets.connect(f"ws://127.0.0.1:{port}/user/ws", origin=f"http://127.0.0.1:{port}") as ws:
         await ws.send(json.dumps(frame))
         # only the answer to THIS frame: a connect-time frame (the socket's
-        # refused auto-watch of the gateway) is not it
+        # refused auto-watch of `user`) is not it
         while True:
             m = json.loads(await asyncio.wait_for(ws.recv(), 10))
             if m.get("type") in ("reply", "error") and m.get("id") == frame["id"]:
@@ -200,9 +200,13 @@ def yaml_of(p: Path) -> dict:
     return yaml.safe_load(p.read_text()) or {}
 
 
+# the root view's records, under the page root `canvas`
+ROOT_VIEW = ".fantastic/web/agents/canvas/agents/view_root/agents"
+
+
 def members(cwd: Path) -> list[dict]:
-    """The canvas's cells — every child but its singleton background."""
-    d = cwd / ".fantastic/web/agents/canvas/agents"
+    """The root view's cells — every child but its singleton background."""
+    d = cwd / ROOT_VIEW
     every = []
     for f in sorted(d.glob("*/agent.yaml")) if d.is_dir() else []:
         # the loader may remove a folder between the listing and the read: a
@@ -214,15 +218,16 @@ def members(cwd: Path) -> list[dict]:
     return [m for m in every if m.get("handler_module") != "background.ts"]
 
 
-LEG = ".fantastic/agents/web/agents/canvas_ws"
+# the root view's backend folder on the host
+FOLDER = ".fantastic/agents/user/agents/web/agents/canvas_page/agents/canvas/agents/backend/agents/view_root"
 
 
 def group_ids(cwd: Path) -> list[str]:
-    """The page's backends: the leg's children that carry a `view_id`."""
-    d = cwd / LEG / "agents"
+    """The root view's backends: its folder's children that carry a `cell_id`."""
+    d = cwd / FOLDER / "agents"
     if not d.is_dir():
         return []
-    return sorted(r["id"] for f in d.glob("*/agent.yaml") if "view_id" in (r := yaml_of(f)))
+    return sorted(r["id"] for f in d.glob("*/agent.yaml") if "cell_id" in (r := yaml_of(f)))
 
 
 def host_record(cwd: Path, agent_id: str) -> Path | None:
@@ -266,7 +271,7 @@ async def restart(spec, page: Page, host: Host, cwd: Path, url: str, state: dict
             bad.append("no member folder to remove")
         else:
             state["orphan"] = ms[0].get("backend_id")
-            shutil.rmtree(cwd / ".fantastic/web/agents/canvas/agents" / ms[0]["_dir"])
+            shutil.rmtree(cwd / ROOT_VIEW / ms[0]["_dir"])
     elif offline is not None:
         raise SystemExit(f"unknown offline edit {offline!r}")
     # `--port` is CREATION-ONLY: a different one against the recorded `web` is
@@ -362,7 +367,7 @@ async def step(run: dict, page: Page, host: Host, cwd: Path, url: str, state: di
     if "canvas_members" in exp:
         n = exp["canvas_members"]
         if not wait_disk(lambda: len(members(cwd)) == n):
-            bad.append(f"{len(members(cwd))} members under the canvas, want {n}: {[m['_dir'] for m in members(cwd)]}")
+            bad.append(f"{len(members(cwd))} members under the root view, want {n}: {[m['_dir'] for m in members(cwd)]}")
     if "member" in exp:
         want = exp["member"]
         wait_disk(lambda: bool(members(cwd)) and all(members(cwd)[0].get(k) == v for k, v in want.items()))
@@ -383,25 +388,25 @@ async def step(run: dict, page: Page, host: Host, cwd: Path, url: str, state: di
         bid = m.get("backend_id")
         if not wait_disk(lambda: bid in group_ids(cwd)):
             where = host_record(cwd, bid)
-            bad.append(f"backend {bid} is not a child of the leg (record at {where})")
+            bad.append(f"backend {bid} is not a child of the root view's folder (record at {where})")
     if exp.get("backend_kept") and m is not None and m.get("backend_id") != (state.get("member") or {}).get("backend_id"):
         bad.append("the page reload changed the backend")
     if exp.get("view_bound") and m is not None:
         bid = m.get("backend_id")
         rec = host_record(cwd, bid) if bid else None
         b = yaml_of(rec) if rec is not None else {}
-        if b.get("view_id") != m.get("id") or b.get("canvas_id") != "canvas":
-            bad.append(f"backend {bid} carries view_id={b.get('view_id')!r} canvas_id={b.get('canvas_id')!r}, want {m.get('id')!r}/'canvas'")
-        # THE VIEW SENDS AS ITSELF: its own grant names its backend, and nothing else
+        if b.get("cell_id") != m.get("id"):
+            bad.append(f"backend {bid} carries cell_id={b.get('cell_id')!r}, want {m.get('id')!r}")
+        # the cell's own grant names its backend, and nothing else
         cc = m.get("can_call") or {}
         if list(cc) != [bid] or "write" not in (cc.get(bid) or []):
-            bad.append(f"view can_call {cc!r} does not grant exactly its backend {bid}")
+            bad.append(f"cell can_call {cc!r} does not grant exactly its backend {bid}")
     if exp.get("backend_changed") and m is not None and m.get("backend_id") == state.get("prev_backend"):
         bad.append(f"the respawn kept backend_id {m.get('backend_id')}")
     if "group_size" in exp:
         n = exp["group_size"]
         if not wait_disk(lambda: len(group_ids(cwd)) == n):
-            bad.append(f"{len(group_ids(cwd))} backends under the leg, want {n}: {group_ids(cwd)}")
+            bad.append(f"{len(group_ids(cwd))} backends in the root view's folder, want {n}: {group_ids(cwd)}")
     if "backend_record" in exp:
         bid = (state.get("member") or {}).get("backend_id")
         if not bid:
@@ -428,11 +433,11 @@ async def step(run: dict, page: Page, host: Host, cwd: Path, url: str, state: di
     if "load_tree" in exp:
         tree = dict(state.get("tree", []))
         want = exp["load_tree"]
-        if "canvas" in want and "canvas" not in tree:
-            bad.append(f"load_tree has no canvas: {state.get('tree')}")
-        if "canvas" in want and tree.get("background") != "canvas":
-            bad.append(f"load_tree has no background singleton under the canvas: {state.get('tree')}")
-        others = [i for i in tree if i not in ("canvas", "web_loader", "background")]
+        if "canvas" in want and ("canvas" not in tree or tree.get("view_root") != "canvas"):
+            bad.append(f"load_tree has no canvas with its root view: {state.get('tree')}")
+        if "canvas" in want and tree.get("background") != "view_root":
+            bad.append(f"load_tree has no background singleton under the root view: {state.get('tree')}")
+        others = [i for i in tree if i not in ("canvas", "view_root", "web_loader", "background")]
         if "member_parent" in want:
             if len(others) != 1 or tree[others[0]] != want["member_parent"]:
                 bad.append(f"load_tree members {[(i, tree[i]) for i in others]}, want one under {want['member_parent']}")

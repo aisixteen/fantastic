@@ -4,11 +4,12 @@
 # headless Chrome over CDP against the page it announces: a double click opens the action popup, `terminal` there spawns one,
 # keystrokes run in it, a drag moves it, a restart rehydrates it, the close
 # button removes it. Every step is checked ON DISK too: the canvas's thin agents
-# are folders under the canvas in the ws loader's store (`.fantastic/web`).
+# are folders under its root view in the page loader's store (`.fantastic/web`).
 #
 # The owner's design: the page holds no store and no AI; its thin agents are
-# records the ws loader (`web_loader`, under the socket leg `canvas_ws`) pumps to
-# folders under `agents/canvas/agents/`, and rehydrates on boot.
+# records the page loader (`web_loader`, under the host's `canvas` node) pumps to
+# folders under `agents/canvas/agents/view_root/agents/`, and rehydrates on boot;
+# a cell's backend is a child of its view's folder under the host's `backend`.
 
 id: canvas
 title: the canvas — thin agents saved through the ws loader, rehydrated on boot
@@ -22,12 +23,12 @@ runs:
   - name: first-load
     # the page seeds its root and the loader writes it under its own anchor
     expect:
-      page_contains: ["canvas · 0 dom"]   # the toolbar: the breadcrumb (the root canvas), then its counts
-      files_exist: [.fantastic/web/agent.yaml, .fantastic/web/agents/canvas/agent.yaml]
+      page_contains: ["view_root · 0 dom"]   # the toolbar: the breadcrumb (canvas ▸ the root view), then its counts
+      files_exist: [.fantastic/web/agent.yaml, .fantastic/web/agents/canvas/agent.yaml, .fantastic/web/agents/canvas/agents/view_root/agent.yaml]
       canvas_members: 0
       group_size: 0
 
-  # ── the pair: a double click spawns a backend (a child of the leg) + its view
+  # ── the pair: a double click spawns a backend (a child of the root view's folder) + its cell
   - name: spawn-terminal
     dblclick: {x: 500, y: 350}
     type: "echo hi-$((6*7))"
@@ -35,13 +36,13 @@ runs:
       xterm_contains: ["hi-42"]
       canvas_members: 1
       member: {handler_module: terminal_view.ts, owns_backend: true}
-      # a thin agent lives ONLY under the canvas — never a top-level loader record
+      # a thin agent lives ONLY under its view — never a top-level loader record
       not_top_level: true
       backend_in_group: true
       view_bound: true
       group_size: 1
 
-  # ── the leg lives its own life: the page leaving and coming back never
+  # ── the backend lives its own life: the page leaving and coming back never
   #    touches the backend behind it — the shell keeps its state
   - name: page-reload
     type: "export FC_MARK=7; echo set-$FC_MARK"
@@ -70,7 +71,7 @@ runs:
       # the headless stdout is the kernel's message stream, no escapes
       stream: true
       lock_released_between: true
-      load_tree: {canvas: null, member_parent: canvas}
+      load_tree: {canvas: null, member_parent: view_root}
       canvas_members: 1
       xterm_contains: ["again-42"]
       kept_position: true

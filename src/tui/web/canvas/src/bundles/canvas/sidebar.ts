@@ -1,19 +1,15 @@
 // THE CANVAS SIDEBAR (left edge, collapsible) — the CLI's sidebar, on the page.
 //
-//   ✉ activity  every OPEN question to the human (the host's `activity` agent
-//           answers; the page never reads rows) — a click goes to the asker —
-//           then ★ what reached a canvas's MAIN chat from anyone but the human
-//           (its audit trail; the main chat answers it itself).
-//   chats   kept dialogs (● — SQLite, the number of cells showing each) and this
-//           canvas's ephemeral cells (○ — RAM); `+ new chat here`. The viewed
-//           canvas's MAIN chat is pinned first, ★.
+//   chats   kept dialogs (● — SQLite, the number of cells showing each) and the
+//           page's ephemeral cells (○ — RAM); `+ new chat here`. The viewed
+//           view's MAIN chat is pinned first, ★.
 //   agents  a TREE per kernel the page sees: the host kernel (every agent
 //           `list_agents` shows) and the page's own kernel (the canvas and its
 //           views).
 //
-// A click on a PAGE agent VIEWS it (`viewer.ts`: a canvas → that canvas, any
+// A click on a PAGE agent VIEWS it (`viewer.ts`: a view → that view, any
 // other → it full); ⌘-click (Ctrl-click off macOS) FOCUSES it instead — its
-// canvas viewed, the cell centred and flashed. A host agent a cell shows: click
+// view viewed, the cell centred and flashed. A host agent a cell shows: click
 // views that cell, ⌘-click moves to it (again → the next such cell). A kept
 // chat with no cell open, or ⌥-click on it, opens it in a new cell. An agent
 // no cell shows OPENS in a new cell: an AI as a chat, anything else as its
@@ -26,15 +22,6 @@ export interface Dialog {
   id: string;
   name: string;
 }
-export interface Question {
-  /** `main`: a message that reached a main chat (its audit trail), not a question */
-  kind?: "main";
-  agent: string;
-  row: number;
-  from: string;
-  head: string;
-  ts: number;
-}
 export interface TreeNode {
   id: string;
   handler: string;
@@ -44,11 +31,11 @@ export interface TreeNode {
 
 export interface SidebarDeps {
   mount: HTMLElement;
-  /** kept dialogs, from ai_cells */
+  /** kept dialogs, from the host's `backend` */
   dialogs(): Promise<Dialog[]>;
-  /** this canvas's AI cell records */
+  /** the page's AI cell records */
   aiCells(): Rec[];
-  /** the backend of the VIEWED canvas's main chat (`main_ai_chat`), or null */
+  /** the backend of the VIEWED view's main chat (`main_ai_chat`), or null */
   mainChat(): string | null;
   /** every host agent (records with `parent_id`), paged to the end */
   hostAgents(): Promise<Rec[]>;
@@ -57,7 +44,7 @@ export interface SidebarDeps {
   /** the cells showing agent `id` (the cell itself, or cells fronting it) */
   cellsFor(id: string): string[];
   moveTo(viewId: string): void;
-  /** VIEW a page agent (`focus`: ⌘-click — focus it on its canvas instead) */
+  /** VIEW a page agent (`focus`: ⌘-click — focus it on its view instead) */
   view(id: string, focus: boolean): void;
   /** the page agent viewed now */
   viewed(): string;
@@ -65,8 +52,6 @@ export interface SidebarDeps {
   mac: boolean;
   /** open agent `id` in a new cell (`isAi`: a chat, else its reflect card) */
   open(id: string, isAi: boolean): void;
-  /** the open questions to the human */
-  activity(): Promise<Question[]>;
   reopen(d: Dialog): void;
   newChat(): void;
 }
@@ -114,15 +99,11 @@ export function createSidebar(d: SidebarDeps): { render(): Promise<void> } {
   const el = document.createElement("div");
   el.id = "chats";
   el.innerHTML =
-    `<div class="chats-head"><span>✉ activity <span class="act-n"></span></span><button class="chats-toggle" title="collapse">«</button></div>` +
-    `<ul class="act-list"></ul>` +
-    `<div class="chats-head"><span>chats</span></div>` +
+    `<div class="chats-head"><span>chats</span><button class="chats-toggle" title="collapse">«</button></div>` +
     `<ul class="chats-list"></ul><div class="chats-new">+ new chat here</div>` +
     `<div class="chats-head agents-head"><span>agents</span></div><ul class="agents-tree"></ul>`;
   d.mount.appendChild(el);
   const chatsList = el.querySelector(".chats-list") as HTMLElement;
-  const actList = el.querySelector(".act-list") as HTMLElement;
-  const actN = el.querySelector(".act-n") as HTMLElement;
   const tree = el.querySelector(".agents-tree") as HTMLElement;
   const toggle = el.querySelector(".chats-toggle") as HTMLElement;
   toggle.addEventListener("click", () => {
@@ -228,26 +209,6 @@ export function createSidebar(d: SidebarDeps): { render(): Promise<void> } {
     out.push(li);
   };
 
-  const renderActivity = async (): Promise<void> => {
-    const qs = await d.activity().catch(() => [] as Question[]);
-    const asks = qs.filter((q) => q.kind !== "main");
-    actN.textContent = asks.length > 0 ? String(asks.length) : "";
-    actList.replaceChildren(
-      ...qs.map((q) => {
-        const main = q.kind === "main";
-        const li = main
-          ? row("main", "★", `${q.from} → ${q.agent}: ${q.head}`, "", "a message to a canvas's main chat — it answers itself; click: open the chat")
-          : row("ask", "✉", `${q.from} → ${q.agent}: ${q.head}`, "", "go to the asker — answer there");
-        li.addEventListener("click", () => {
-          const cells = d.cellsFor(q.agent);
-          if (cells.length > 0) moveNext(q.agent, cells);
-          else d.open(q.agent, true);
-        });
-        return li;
-      }),
-    );
-  };
-
   const renderTree = async (): Promise<void> => {
     const out: HTMLElement[] = [];
     const hosts = forest(await d.hostAgents().catch(() => [] as Rec[]));
@@ -261,7 +222,7 @@ export function createSidebar(d: SidebarDeps): { render(): Promise<void> } {
 
   return {
     async render(): Promise<void> {
-      await Promise.all([renderActivity(), renderChats(), renderTree()]);
+      await Promise.all([renderChats(), renderTree()]);
     },
   };
 }

@@ -1,5 +1,5 @@
 import type { ViewBundle, ViewContext, ViewHandle } from "../view.ts";
-import type { Item, Payload } from "../../lib.ts";
+import type { Json, Payload } from "../../lib.ts";
 import { CONNECTOR_SRC } from "./connector.ts";
 
 // html_view — renders an html_agent's MUTABLE body (`meta.html`) as a FULLY
@@ -67,10 +67,11 @@ export const htmlView: ViewBundle = {
     // agent's. Relaying as the operator would have made the sandbox cosmetic:
     // null-origin in the browser, unlimited authority in the kernel.
     //
-    // The structural baseline still covers the useful cases (its own subtree and
-    // its creator); reaching anything else is an explicit grant on this agent's
-    // record, and a denial says which end refused and how to open it.
-    const asSelf = kernel.scopedFor(selfId, null);
+    // Every reach is an explicit grant on this agent's record, and a denial says
+    // which end refused and how to open it. The calls run through the agent's
+    // own handler (`panel_relay.ts`): identity comes only from dispatch.
+    const asSelf = async (verb: string, args: Record<string, unknown>): Promise<Json> =>
+      (await kernel.send([{ target: selfId, payload: { type: verb, ...args } as Payload }]))[0]!.result;
     const onMsg = (e: MessageEvent): void => {
       if (e.source !== iframe.contentWindow) return; // scope strictly to OUR iframe
       const m = e.data as {
@@ -80,21 +81,13 @@ export const htmlView: ViewBundle = {
         target?: string;
         src?: string;
         payload?: Payload;
-        /** `secret` paths the panel marked (`fantastic.send(t, p, secret)`) */
-        secret?: unknown;
       };
       if (m?.__ft !== true) return;
       switch (m.op) {
         case "send": {
-          // the panel's marks ride the item verbatim; the kernel refuses a
-          // malformed mark itself
-          const item: Item = { target: m.target ?? "", payload: m.payload ?? {} };
-          if (Object.hasOwn(m, "secret")) item.secret = m.secret as string[];
-          void asSelf
-            .send([item])
-            .then((outs) =>
-              toIframe({ op: "reply", rid: m.rid, data: outs[0]!.result }),
-            );
+          void asSelf("panel_send", { target: m.target ?? "", payload: m.payload ?? {} }).then((data) =>
+            toIframe({ op: "reply", rid: m.rid, data }),
+          );
           break;
         }
         case "emit":
@@ -114,15 +107,20 @@ export const htmlView: ViewBundle = {
             // BACK to the iframe — half-subscribing (refused upstream, inbox
             // listener attached anyway) would look like it worked and deliver
             // nothing, which is the worst of both.
-            const denied = asSelf.watch(src, selfId); // host srcs → bridge.watchRemote
-            if (denied !== null) {
-              toIframe({ op: "event", src, payload: denied });
-              break;
-            }
-            const off = kernel.onInbox(src, (p) => toIframe({ op: "event", src, payload: p }));
-            watchOffs.set(src, () => {
-              off();
-              kernel.unwatch(src, selfId);
+            // a placeholder while the gate answers: a second watch is not doubled
+            watchOffs.set(src, () => {});
+            void asSelf("panel_watch", { src, watcher: selfId }).then((denied) => {
+              // host srcs → bridge.watchRemote
+              if (denied !== null) {
+                watchOffs.delete(src);
+                toIframe({ op: "event", src, payload: denied as Payload });
+                return;
+              }
+              const off = kernel.onInbox(src, (p) => toIframe({ op: "event", src, payload: p }));
+              watchOffs.set(src, () => {
+                off();
+                kernel.unwatch(src, selfId);
+              });
             });
           }
           break;

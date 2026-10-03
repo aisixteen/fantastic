@@ -17,9 +17,7 @@
 //! - The refs (metadata only — host, field names) are also remembered in the
 //!   user's home, so every project's store knows the keys already stored there.
 
-use std::sync::Arc;
 
-use fantastic_kernel::{AgentId, Item};
 use fantastic_user_home_store::secrets::{Mode, Secrets};
 use serde_json::{json, Map, Value};
 
@@ -57,7 +55,7 @@ pub fn ref_for(module: &str, endpoint: &str) -> Result<String, String> {
 }
 
 fn store_meta(h: &Host) -> Option<Map<String, Value>> {
-    h.kernel.agents.get(&AgentId::from(STORE)).map(|a| a.value().record().meta.clone())
+    h.kernel.agents.get(&fantastic_kernel::AgentId::from(STORE)).map(|a| a.value().record().meta.clone())
 }
 
 fn refs_of(meta: &Map<String, Value>) -> Map<String, Value> {
@@ -87,11 +85,12 @@ pub async fn ensure_store(h: &Host) -> Result<(), String> {
         p.as_object_mut().expect("an object").extend(fields);
         p
     } else {
-        let mut p = json!({"type": "create_agent", "parent_id": h.root, "id": STORE, "handler_module": fantastic_credential_store::HANDLER_MODULE});
+        let mut p = json!({"type": "create_agent", "parent_id": crate::env::HUMAN, "id": STORE, "handler_module": fantastic_credential_store::HANDLER_MODULE});
         p.as_object_mut().expect("an object").extend(fields);
         p
     };
-    let r = h.operator("kernel", payload).await.result;
+    // as `user`, the store's parent: grants and refs come from above
+    let r = h.act("kernel", payload).await.result;
     match r.get("error").and_then(Value::as_str) {
         Some(e) => Err(format!("the credential store: {e}")),
         None => Ok(()),
@@ -118,7 +117,7 @@ pub async fn set_mode(h: &Host, m: Mode) -> Result<String, String> {
 }
 
 /// Declare ref `r` bound to `host` on the store's record, keeping every other
-/// ref (and this one's readers): `refs` is written whole.
+/// ref: `refs` is written whole, as `user` (the store's parent).
 async fn declare(h: &Host, r: &str, host: &str) -> Result<(), String> {
     let mut refs = store_meta(h).map(|m| refs_of(&m)).unwrap_or_default();
     let e = refs.entry(r.to_string()).or_insert_with(|| json!({}));
@@ -126,7 +125,7 @@ async fn declare(h: &Host, r: &str, host: &str) -> Result<(), String> {
         o.insert("host".into(), json!(host));
         o.entry("fields").or_insert(json!([FIELD]));
     }
-    let out = h.operator("kernel", json!({"type": "update_agent", "id": STORE, "refs": refs})).await.result;
+    let out = h.act("kernel", json!({"type": "update_agent", "id": STORE, "refs": refs})).await.result;
     match out.get("error").and_then(Value::as_str) {
         Some(e) => Err(format!("the key's ref {r} could not be declared: {e}")),
         None => Ok(()),
@@ -141,13 +140,7 @@ pub async fn store(h: &Host, module: &str, endpoint: &str, secret: &str) -> Resu
     ensure_store(h).await?;
     // the ref is DECLARED first, on the store's record (`set` never creates one)
     declare(h, &r, &host_of(endpoint).unwrap_or_default()).await?;
-    let item = Item::new(
-        AgentId::from(STORE),
-        json!({"type": "set", "ref": r, "fields": {FIELD: secret}}),
-    )
-    .with_secret(json!(["payload.fields"]));
-    let k = Arc::clone(&h.kernel);
-    let out = fantastic_kernel::send::with_operator(async move { k.send(vec![item]).await }).await.remove(0).result;
+    let out = h.act(STORE, json!({"type": "set", "ref": r, "fields": {FIELD: secret}})).await.result;
     if let Some(e) = out.get("error").and_then(Value::as_str) {
         return Err(format!("the key was not stored: {e}"));
     }
@@ -197,48 +190,42 @@ pub fn has(h: &Host, r: &str) -> bool {
     store_meta(h).is_some_and(|m| refs_of(&m).contains_key(r))
 }
 
-/// The three grants an AI agent needs to read ITS key `r`: its own `can_call`
-/// names the store [get], the store's `callable_by` names it [get], and the
-/// ref's `readers` name it. Merged, never replaced.
-pub async fn wire(h: &Host, ai: &str, r: &str) -> Result<(), String> {
+/// An AI agent reads ITS key with `get` on the store: its OWN side is written on
+/// its record at create ([`grant_on_create`]); the store's side — `callable_by`
+/// naming it — is written here, as `user` (the store's parent). Merged.
+pub async fn wire(h: &Host, ai: &str) -> Result<(), String> {
     let meta = store_meta(h).ok_or("no credential store — choose where keys are kept first")?;
-    let mut refs = refs_of(&meta);
-    let entry = refs.get_mut(r).and_then(Value::as_object_mut).ok_or_else(|| format!("no key stored under {r}"))?;
-    let readers = entry.entry("readers").or_insert(json!([]));
-    if let Some(a) = readers.as_array_mut() {
-        if !a.iter().any(|x| x == ai) {
-            a.push(json!(ai));
-        }
-    }
     let mut cb = meta.get("callable_by").and_then(Value::as_object).cloned().unwrap_or_default();
     cb.insert(ai.into(), json!(["get"]));
-    let mut cc = h
-        .kernel
-        .agents
-        .get(&AgentId::from(ai))
-        .and_then(|a| a.value().record().meta.get("can_call").and_then(Value::as_object).cloned())
-        .unwrap_or_default();
-    cc.insert(STORE.into(), json!(["get"]));
-    for p in [
-        json!({"type": "update_agent", "id": STORE, "refs": refs, "callable_by": cb}),
-        json!({"type": "update_agent", "id": ai, "can_call": cc}),
-    ] {
-        let r = h.operator("kernel", p).await.result;
-        if let Some(e) = r.get("error").and_then(Value::as_str) {
-            return Err(format!("could not grant {ai} its key: {e}"));
-        }
+    let r = h.act("kernel", json!({"type": "update_agent", "id": STORE, "callable_by": cb})).await.result;
+    match r.get("error").and_then(Value::as_str) {
+        Some(e) => Err(format!("could not grant {ai} its key: {e}")),
+        None => Ok(()),
     }
-    Ok(())
 }
 
-/// Wire `ai` to the key its record names, if it names one in this store.
+/// A create spec naming a key in this store: its `can_call` gains `get` on the
+/// store (the AI's own side of reading its key).
+pub fn grant_on_create(spec: &mut Map<String, Value>) {
+    let named = spec
+        .get("credentials")
+        .and_then(Value::as_object)
+        .is_some_and(|c| c.get("store").and_then(Value::as_str) == Some(STORE));
+    if !named {
+        return;
+    }
+    if let Some(Value::Object(cc)) = spec.get_mut("can_call") {
+        cc.insert(STORE.into(), json!(["get"]));
+    }
+}
+
+/// [`wire`], when `record` names a key in this store.
 pub async fn wire_record(h: &Host, ai: &str, record: &Map<String, Value>) -> Result<(), String> {
     let Some(c) = record.get("credentials").and_then(Value::as_object) else { return Ok(()) };
     if c.get("store").and_then(Value::as_str) != Some(STORE) {
         return Ok(());
     }
-    let r = c.get("ref").and_then(Value::as_str).unwrap_or("");
-    wire(h, ai, r).await
+    wire(h, ai).await
 }
 
 #[cfg(test)]

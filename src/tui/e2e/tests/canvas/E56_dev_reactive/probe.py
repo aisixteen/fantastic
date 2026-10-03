@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from _lib.canvas_live import Rig, verdict, answer, ask, html_cell, http_get, in_frame, say, spot, wait_quiet  # noqa: E402,F401
+from _lib.canvas_live import FOLDER, Rig, verdict, answer, ask, html_cell, http_get, in_frame, say, spot, wait_quiet  # noqa: E402,F401
 
 def surface(port: int) -> list[dict]:
     """The REFERENCE dev surface, wired by hand: what E55 asks an AI to build."""
@@ -48,7 +48,7 @@ def main() -> bool:
     rig.make_home(None)
     port = free_port()
     write_project(rig.proj)
-    rig.init(host_agents=[("agents/web/agents/canvas_ws", exec_record(port))])
+    rig.init(host_agents=[(FOLDER, exec_record(port))])
     rig.stop()
     rig.seed_cells(surface(port))
     rig.start()
