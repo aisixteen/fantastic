@@ -14,7 +14,8 @@ given**; the AI finds the page itself —
 - its OWN record's `can_call` names `<page guid>|canvas`, `<page guid>|background`
   and `<page guid>|*` (reflect);
 - the host root's reflect lists connected `peers: [{guid, via}]`, and
-  `reflect <guid>|kernel` returns the page's tree and verbs (`around` included).
+  `reflect <guid>|kernel` returns the page's tree and verbs; `around` is the
+  host's `users` gateway (from the page records), named in the page canvas's reflect.
 
 History: run 1 (2026-09-30, qwen3.8-27b) FAILED with the setup sent as
 `system_prompt` — which REPLACED ai_core's default block, so the model saw no
@@ -23,7 +24,7 @@ the turn.
 
 **PASS**: the AI calls `reflect` on an agent of the PAGE (`<page guid>|…`) at
 least once — it found the page and looked. **Reported, not asserted**: every
-call it made, in order (`→ target verb`); whether it called `around`; whether its
+call it made, in order (`→ target verb`); whether it called `users around`; whether its
 last answer names the terminal and html cells placed near it; the turns taken.
 
 Setup, all by the probe: the CLI binary built with the plug's backend feature;

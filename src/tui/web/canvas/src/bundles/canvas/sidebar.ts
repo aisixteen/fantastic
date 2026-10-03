@@ -1,9 +1,12 @@
 // THE CANVAS SIDEBAR (left edge, collapsible) — the CLI's sidebar, on the page.
 //
 //   ✉ activity  every OPEN question to the human (the host's `activity` agent
-//           answers; the page never reads rows) — a click goes to the asker.
+//           answers; the page never reads rows) — a click goes to the asker —
+//           then ★ what reached a canvas's MAIN chat from anyone but the human
+//           (its audit trail; the main chat answers it itself).
 //   chats   kept dialogs (● — SQLite, the number of cells showing each) and this
-//           canvas's ephemeral cells (○ — RAM); `+ new chat here`.
+//           canvas's ephemeral cells (○ — RAM); `+ new chat here`. The viewed
+//           canvas's MAIN chat is pinned first, ★.
 //   agents  a TREE per kernel the page sees: the host kernel (every agent
 //           `list_agents` shows) and the page's own kernel (the canvas and its
 //           views).
@@ -24,6 +27,8 @@ export interface Dialog {
   name: string;
 }
 export interface Question {
+  /** `main`: a message that reached a main chat (its audit trail), not a question */
+  kind?: "main";
   agent: string;
   row: number;
   from: string;
@@ -43,6 +48,8 @@ export interface SidebarDeps {
   dialogs(): Promise<Dialog[]>;
   /** this canvas's AI cell records */
   aiCells(): Rec[];
+  /** the backend of the VIEWED canvas's main chat (`main_ai_chat`), or null */
+  mainChat(): string | null;
   /** every host agent (records with `parent_id`), paged to the end */
   hostAgents(): Promise<Rec[]>;
   /** the page kernel's tree, rooted at the canvas */
@@ -152,6 +159,7 @@ export function createSidebar(d: SidebarDeps): { render(): Promise<void> } {
     for (const k of kept) {
       const n = cells.filter((c) => c["backend_id"] === k.id).length;
       const li = row("kept", "●", k.name, n > 0 ? String(n) : "", n > 0 ? "move to it · ⌥-click: open another cell" : "open in a new cell");
+      li.dataset["backend"] = k.id;
       li.addEventListener("click", (e) => {
         const showing = d.aiCells().filter((c) => c["backend_id"] === k.id).map((c) => String(c["id"]));
         if (showing.length > 0 && !e.altKey) moveNext(k.id, showing);
@@ -163,6 +171,16 @@ export function createSidebar(d: SidebarDeps): { render(): Promise<void> } {
       const li = row("eph", "○", String(c["backend_id"]), "1", "move to it");
       li.addEventListener("click", () => d.moveTo(String(c["id"])));
       items.push(li);
+    }
+    // the viewed canvas's main chat: pinned first, ★
+    const main = d.mainChat();
+    const at = main === null ? -1 : items.findIndex((li) => li.dataset["backend"] === main);
+    if (at >= 0) {
+      const [li] = items.splice(at, 1);
+      li!.classList.add("main");
+      (li!.children[0] as HTMLElement).textContent = "★";
+      li!.title = `this canvas's main chat · ${li!.title}`;
+      items.unshift(li!);
     }
     chatsList.replaceChildren(...items);
   };
@@ -212,10 +230,14 @@ export function createSidebar(d: SidebarDeps): { render(): Promise<void> } {
 
   const renderActivity = async (): Promise<void> => {
     const qs = await d.activity().catch(() => [] as Question[]);
-    actN.textContent = qs.length > 0 ? String(qs.length) : "";
+    const asks = qs.filter((q) => q.kind !== "main");
+    actN.textContent = asks.length > 0 ? String(asks.length) : "";
     actList.replaceChildren(
       ...qs.map((q) => {
-        const li = row("ask", "✉", `${q.from} → ${q.agent}: ${q.head}`, "", "go to the asker — answer there");
+        const main = q.kind === "main";
+        const li = main
+          ? row("main", "★", `${q.from} → ${q.agent}: ${q.head}`, "", "a message to a canvas's main chat — it answers itself; click: open the chat")
+          : row("ask", "✉", `${q.from} → ${q.agent}: ${q.head}`, "", "go to the asker — answer there");
         li.addEventListener("click", () => {
           const cells = d.cellsFor(q.agent);
           if (cells.length > 0) moveNext(q.agent, cells);

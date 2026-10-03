@@ -5,10 +5,12 @@ import { bodyText } from "../body_text.ts";
 import { aiView } from "../ai_view/ai_view.ts";
 import { htmlAgent } from "../html_agent/html_agent.ts";
 
-// THE CANVAS AGENT — the frontend root's own verbs: `around` (geometry, from
-// the rendered frames), and the CONTROL PLANE over its own cells (owner
+// THE CANVAS AGENT — the frontend root's own verbs: the CONTROL PLANE over its
+// own cells (owner
 // 2026-09-30: an AI cell is the canvas's control plane) — `place`, `move`,
-// `update`, `wire`, `remove`. The page kernel has no tree-CRUD verbs by design;
+// `update`, `wire`, `remove`. `around` is the HOST's (`users.around`, from the
+// page records — no tab needs to show the canvas). The page kernel has no
+// tree-CRUD verbs by design;
 // the canvas, which owns its members, answers these. The background is its own singleton child agent
 // (`background_agent.ts`).
 
@@ -43,7 +45,7 @@ export const CARD_HTML =
   "<span style='opacity:.6'>This card is the child's own: it rewrites it (set_html on the child canvas) as its control panel.</span></div>";
 
 /** Every canvas verb, for the grants that admit a caller. */
-export const CANVAS_VERBS = ["around", "place", "move", "update", "wire", "remove", "reflect", "get_html", "set_html"] as const;
+export const CANVAS_VERBS = ["place", "move", "update", "wire", "remove", "reflect", "get_html", "set_html"] as const;
 
 const num = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
 
@@ -59,44 +61,20 @@ function bodyOf(kind: string, payload: Payload): string | undefined | Record<str
   return { error: `canvas: the ${field} must be a string`, reason: "bad_arg", arg: "bytes", hint: "send the markup as <bytes>…</bytes> — verbatim, nothing escaped" };
 }
 
-/** One rendered member, in canvas (world) coordinates. */
-export interface Placed {
-  id: string;
-  kind: string;
-  title: string;
-  rect: { x: number; y: number; w: number; h: number };
-  backend_id?: string;
-}
-
-// THE GEOMETRY is the rendered canvas's: `canvas.ts` hands its frames here
-// once it is mounted. Before that there is nothing on it to be near.
-/** The rendered geometry of canvas `id`, or null when no page shows it now
- *  (only the VIEWED canvas mounts its cells). */
-let placed: ((canvas: string) => Placed[] | null) | null = null;
-export function setGeometry(fn: (canvas: string) => Placed[] | null): void {
-  placed = fn;
-}
-
-/** Distance from (x, y) to a rect's nearest edge — 0 inside it. */
-export function distance(x: number, y: number, r: Placed["rect"]): number {
-  const dx = Math.max(r.x - x, 0, x - (r.x + r.w));
-  const dy = Math.max(r.y - y, 0, y - (r.y + r.h));
-  return Math.round(Math.hypot(dx, dy));
-}
-
-/** `around {x, y, radius}` — the members within `radius` of the point, nearest
- *  first. GEOMETRY ONLY: reflect a member for anything more. */
-export function around(members: Placed[], x: number, y: number, radius: number): Array<Placed & { distance: number }> {
-  return members
-    .map((m) => ({ ...m, distance: distance(x, y, m.rect) }))
-    .filter((m) => m.distance <= radius)
-    .sort((a, b) => a.distance - b.distance || a.id.localeCompare(b.id));
-}
 
 export const CANVAS_README =
-  "Canvas compositor (frontend root). Renders the frontend's own member tree; mounts each member inline via its view bundle, or as an iframe for external content. Not a host client. Its BACKGROUND is its own singleton child agent, `background` (set_bg / clear_bg / get_bg there). `around {x:num, y:num, radius:num}` (all required; canvas coordinates, x grows right, y grows down) returns the members within `radius` of the point, nearest first: {members: [{id, kind, title, rect:{x,y,w,h}, distance, backend_id?}]} — geometry only; reflect a member for more. THE CONTROL PLANE over its cells: `place {kind: html|gl|terminal|chat|canvas, x, y, id?, width?, height?, display_name?, bytes? (the cell's body, VERBATIM: html for html, the GL source for gl, the CARD for a canvas), trusted?, backend_id? (terminal/chat: the host agent shown)}` → {placed}; a `canvas` is a CHILD CANVAS — a container with its own cells, verbs and background, nested under this one; on this canvas it shows its CARD, html the child owns: `get_html` / `set_html {bytes}` on the child canvas rewrite it (its control panel here); `move {id, x?, y?, width?, height?}`; `update {id, bytes? (the new body, verbatim), fields?: {display_name|trusted|readme|x|y|width|height}}` (a new html body reloads the panel); `update {id: <this canvas>, fields: {main_ai_chat: <a chat cell's id> | null}}` sets the canvas's MAIN chat — its one voice, named on its record (reflect the canvas to find it); `wire {sender, receiver, verbs}` (a grant between two cells, both sides — e.g. verbs [emit] lets the sender's panel emit to the receiver's); `remove {id}` (refused on a delete_lock, e.g. the background).";
+  "Canvas compositor (frontend root). Renders the frontend's own member tree; mounts each member inline via its view bundle, or as an iframe for external content. Not a host client. Its BACKGROUND is its own singleton child agent, `background` (set_bg / clear_bg / get_bg there). WHAT IS NEAR A POINT is the host's: `around {canvas?, x, y, radius}` on its `users` gateway (canvas coordinates, x grows right, y grows down) answers from the page records, nearest first — reflect a member for more. THE CONTROL PLANE over its cells: `place {kind: html|gl|terminal|chat|canvas, x, y, id?, width?, height?, display_name?, bytes? (the cell's body, VERBATIM: html for html, the GL source for gl, the CARD for a canvas), trusted?, backend_id? (terminal/chat: the host agent shown)}` → {placed}; a `canvas` is a CHILD CANVAS — a container with its own cells, verbs and background, nested under this one; with `template: <a template's name>` it comes WITH its main chat (a kept AI cell from that template, made main) → {placed, main_chat}; on this canvas it shows its CARD, html the child owns: `get_html` / `set_html {bytes}` on the child canvas rewrite it (its control panel here); `move {id, x?, y?, width?, height?}`; `update {id, bytes? (the new body, verbatim), fields?: {display_name|trusted|readme|x|y|width|height}}` (a new html body reloads the panel); `update {id: <this canvas>, fields: {main_ai_chat: <a chat cell's id> | null}}` sets the canvas's MAIN chat — its one voice, named on its record (reflect the canvas to find it); the main chat is delete-locked while main, and making another main (or null) unlocks it; `wire {sender, receiver, verbs}` (a grant between two cells, both sides — e.g. verbs [emit] lets the sender's panel emit to the receiver's); `remove {id}` (refused on a delete_lock, e.g. the background).";
 
-export const canvasAgent: Handler = (id, payload, kernel): Json => {
+// THE SCAFFOLD (specialist canvases, owner 2026-10-02/03): a child canvas placed
+// WITH a `template` comes with its MAIN chat — a kept AI cell from that
+// template, made main. The page (`canvas.ts`) hands the spawning here once it
+// is mounted; no default template: whoever scaffolds names it.
+let scaffold: ((canvas: string, template: string) => Promise<Json>) | null = null;
+export function setScaffold(fn: (canvas: string, template: string) => Promise<Json>): void {
+  scaffold = fn;
+}
+
+export const canvasAgent: Handler = (id, payload, kernel): Json | Promise<Json> => {
   switch (str(payload, "type")) {
     case "place": {
       const kind = str(payload, "kind");
@@ -106,6 +84,13 @@ export const canvasAgent: Handler = (id, payload, kernel): Json => {
       const backend = str(payload, "backend_id");
       if ((kind === "terminal" || kind === "chat") && !backend) {
         return { error: `canvas: place ${kind} needs backend_id — the host agent it shows`, reason: "bad_arg", arg: "backend_id" };
+      }
+      const template = payload["template"];
+      if (template !== undefined && (kind !== "canvas" || typeof template !== "string" || template === "")) {
+        return { error: "canvas: place — `template` (a template's name) is for kind canvas: its main chat", reason: "bad_arg", arg: "template" };
+      }
+      if (typeof template === "string" && scaffold === null) {
+        return { error: "canvas: place — this page cannot scaffold a main chat (no page is mounted)", reason: "not_found", arg: "template" };
       }
       const want = str(payload, "id");
       const aid = want || `${kind}_${Math.random().toString(16).slice(2, 10)}`;
@@ -117,11 +102,17 @@ export const canvasAgent: Handler = (id, payload, kernel): Json => {
       if (typeof body === "object") return body as unknown as Json;
       if (body !== undefined) meta[kind === "gl" ? "gl_source" : "html"] = body;
       if (kind === "canvas" && meta["html"] === undefined) meta["html"] = CARD_HTML;
+      // a cell carries its size from birth: the host answers `around` from the records
+      meta["width"] ??= kind === "canvas" ? 340 : 480;
+      meta["height"] ??= kind === "canvas" ? 220 : 320;
       if (backend) Object.assign(meta, { backend_id: backend, owns_backend: false });
       // the view's OWN declared grant onto the agent it shows
       if (kind === "terminal") meta["can_call"] = { ...terminalView.grants(backend) };
       if (kind === "chat") meta["can_call"] = { ...aiView.grants(backend) };
       kernel.register(new Agent({ id: aid, parentId: id, handlerModule: hm, meta: meta as Payload }));
+      if (typeof template === "string" && scaffold !== null) {
+        return scaffold(aid, template).then((main) => ({ placed: aid, kind, main_chat: main }) as unknown as Json);
+      }
       return { placed: aid, kind };
     }
     case "move": {
@@ -184,20 +175,6 @@ export const canvasAgent: Handler = (id, payload, kernel): Json => {
       }
       return out;
     }
-    case "around": {
-      const [x, y, radius] = [payload["x"], payload["y"], payload["radius"]];
-      const bad = (["x", "y", "radius"] as const).filter((k) => typeof payload[k] !== "number" || !Number.isFinite(payload[k] as number));
-      if (bad.length > 0 || (radius as number) <= 0) {
-        return {
-          error: `canvas: around needs x, y and radius as numbers (radius > 0)${bad.length ? ` — missing or not a number: ${bad.join(", ")}` : ""}`,
-          reason: "bad_arg",
-          arg: bad[0] ?? "radius",
-        };
-      }
-      const shown = placed === null ? null : placed(id);
-      if (shown === null) return { error: "canvas: around — this canvas is not rendered now (no page is viewing it)", reason: "not_found" };
-      return { members: around(shown, x as number, y as number, radius as number) } as unknown as Json;
-    }
     // THE CARD: this canvas's presence on its parent — html it owns and rewrites
     case "get_html":
     case "render_html":
@@ -228,6 +205,13 @@ function updateSelf(id: string, payload: Payload, kernel: Parameters<Handler>[2]
       return { error: `canvas: main_ai_chat must name a chat cell of this canvas, or null — ${JSON.stringify(main)} is none`, reason: "bad_arg", arg: "main_ai_chat" };
     }
   }
+  // THE MAIN CHAT IS DELETE-LOCKED while main: the previous one unlocked, the
+  // new one locked (`remove` refuses it until it is unmade main)
+  const prev = kernel.get(id)?.meta["main_ai_chat"];
+  if (typeof prev === "string" && prev !== main && kernel.get(prev) !== undefined) {
+    kernel.updateMeta(prev, { delete_lock: false } as unknown as Payload);
+  }
+  if (typeof main === "string") kernel.updateMeta(main, { delete_lock: true } as unknown as Payload);
   kernel.updateMeta(id, { main_ai_chat: main } as unknown as Payload);
   return { updated: id, fields: ["main_ai_chat"] };
 }

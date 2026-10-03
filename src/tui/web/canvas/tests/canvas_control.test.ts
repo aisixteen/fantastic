@@ -65,7 +65,7 @@ test("a body that arrives as RAW BYTES (the bridge's binary frame) is decoded as
   assert.equal(k.get("b")?.meta["html"], "<p>v2</p>");
 });
 
-test("the canvas names its MAIN chat through update on itself; it clears when that chat goes", async () => {
+test("the canvas names its MAIN chat through update on itself: locked while main, one per canvas, cleared when that chat goes", async () => {
   const k = page();
   k.registerBundle("ai_view.ts", () => null);
   await call(k, { type: "place", kind: "chat", id: "c", x: 0, y: 0, backend_id: "ai_1" });
@@ -75,12 +75,25 @@ test("the canvas names its MAIN chat through update on itself; it clears when th
   assert.equal((await call(k, { type: "update", id: "canvas", fields: { main_ai_chat: "h" } }))["arg"], "main_ai_chat", "only a chat cell");
   assert.equal((await call(k, { type: "update", id: "canvas", fields: { main_ai_chat: "nope" } }))["arg"], "main_ai_chat");
   assert.equal((await call(k, { type: "update", id: "canvas", fields: { x: 1 } }))["arg"], "fields", "nothing else on the canvas");
+  // while main it is delete-locked; another made main demotes and unlocks it
+  assert.equal(k.get("c")?.meta["delete_lock"], true);
+  assert.equal((await call(k, { type: "remove", id: "c" }))["reason"], "locked");
+  await call(k, { type: "place", kind: "chat", id: "c2", x: 0, y: 0, backend_id: "ai_2" });
+  await call(k, { type: "update", id: "canvas", fields: { main_ai_chat: "c2" } });
+  assert.equal(k.get("c")?.meta["delete_lock"], false);
+  assert.equal(k.get("c2")?.meta["delete_lock"], true);
+  // unmade main: unlocked, the canvas voiceless
+  assert.equal((await call(k, { type: "update", id: "canvas", fields: { main_ai_chat: null } }))["updated"], "canvas");
+  assert.equal(k.get("c2")?.meta["delete_lock"], false);
+  assert.equal(k.get("canvas")?.meta["main_ai_chat"], null);
+  // unlocked by hand while main and removed: the canvas has no voice
+  await call(k, { type: "update", id: "canvas", fields: { main_ai_chat: "c" } });
+  k.updateMeta("c", { delete_lock: false } as unknown as Payload);
   await call(k, { type: "remove", id: "c" });
   assert.equal(k.get("canvas")?.meta["main_ai_chat"], null, "its main chat gone, the canvas has no voice");
-  assert.equal((await call(k, { type: "update", id: "canvas", fields: { main_ai_chat: null } }))["updated"], "canvas");
 });
 
-test("place {kind: canvas} nests a CHILD CANVAS with its own card; the child rewrites the card; around answers only for the viewed canvas", async () => {
+test("place {kind: canvas} nests a CHILD CANVAS with its own card; the child rewrites the card", async () => {
   const k = page();
   const p = await call(k, { type: "place", kind: "canvas", id: "kid", x: 10, y: 10 });
   assert.equal(p["placed"], "kid");
@@ -95,8 +108,23 @@ test("place {kind: canvas} nests a CHILD CANVAS with its own card; the child rew
   assert.equal((await kid({ type: "set_html", bytes: "<b>sql: 3 queries</b>" }))["ok"], true);
   assert.equal((await kid({ type: "get_html" }))["html"], "<b>sql: 3 queries</b>");
   // geometry: only the canvas a page VIEWS is rendered
-  const { setGeometry } = await import("../src/bundles/canvas/canvas_agent.ts");
-  setGeometry((c) => (c === "canvas" ? [] : null));
-  assert.deepEqual((await call(k, { type: "around", x: 0, y: 0, radius: 10 }))["members"], []);
-  assert.equal((await kid({ type: "around", x: 0, y: 0, radius: 10 }))["reason"], "not_found", "not viewed, not rendered");
+});
+
+test("place {kind: canvas, template} scaffolds the child canvas WITH its main chat; template is for a canvas only", async () => {
+  const k = page();
+  k.registerBundle("ai_view.ts", () => null);
+  const { setScaffold } = await import("../src/bundles/canvas/canvas_agent.ts");
+  // the page's spawning, stood in for: a chat cell in the child, made main
+  setScaffold(async (canvas, template) => {
+    k.register(new Agent({ id: `chat_${template}`, parentId: canvas, handlerModule: "ai_view.ts", meta: { kept: true } }));
+    const [o] = await k.send([{ target: canvas, payload: { type: "update", id: canvas, fields: { main_ai_chat: `chat_${template}` } } as unknown as Payload }]);
+    return o!.result as never;
+  });
+  const r = await call(k, { type: "place", kind: "canvas", id: "spec", x: 0, y: 0, template: "sql" });
+  assert.equal(r["placed"], "spec");
+  assert.equal((r["main_chat"] as Payload)["updated"], "spec");
+  assert.equal(k.get("spec")?.meta["main_ai_chat"], "chat_sql", "the child's main chat is named on it");
+  assert.equal(k.get("chat_sql")?.meta["delete_lock"], true, "and locked while main");
+  assert.equal((await call(k, { type: "place", kind: "html", x: 0, y: 0, template: "sql" }))["arg"], "template", "a template is for kind canvas");
+  assert.equal((await call(k, { type: "place", kind: "canvas", x: 0, y: 0, template: "" }))["arg"], "template");
 });

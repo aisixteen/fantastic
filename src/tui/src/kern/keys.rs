@@ -7,8 +7,9 @@
 //!   key cannot be stored until one is.
 //! - A key is a REF, `<provider>/<host>` (`responses/api.openai.com`), bound to
 //!   the endpoint's host: the store refuses to hand it out for any other host.
-//!   Written by the operator with `secret: [payload.fields]` — the value lands
-//!   in no row, ledger or stream.
+//!   The ref is DECLARED on the store's record (`update_agent` on its `refs`),
+//!   then its value written by the operator with `secret: [payload.fields]` —
+//!   the value lands in no row, ledger or stream.
 //! - An AI agent NAMES its ref on its record (`credentials: {store, ref}`) and
 //!   its backend reads it before every request: a stored or rotated key is live
 //!   on the next call, with no restart. [`wire`] gives it the three grants that
@@ -69,7 +70,9 @@ fn refs_of(meta: &Map<String, Value>) -> Map<String, Value> {
 pub async fn ensure_store(h: &Host) -> Result<(), String> {
     let s = secrets();
     let Some(m) = s.mode()? else { return Ok(()) };
-    let mut fields = m.store(&s.home()?).as_object().cloned().unwrap_or_default();
+    // the store's `file` must be ABSOLUTE; a relative FANTASTIC_HOME is made so here
+    let home = std::path::absolute(s.home()?).map_err(|e| format!("the user's home: {e}"))?;
+    let mut fields = m.store(&home).as_object().cloned().unwrap_or_default();
     let mut refs = store_meta(h).map(|m| refs_of(&m)).unwrap_or_default();
     for (r, host) in s.refs()? {
         let e = refs.entry(r).or_insert_with(|| json!({}));
@@ -114,15 +117,33 @@ pub async fn set_mode(h: &Host, m: Mode) -> Result<String, String> {
     Ok(s.describe(Some(m)))
 }
 
+/// Declare ref `r` bound to `host` on the store's record, keeping every other
+/// ref (and this one's readers): `refs` is written whole.
+async fn declare(h: &Host, r: &str, host: &str) -> Result<(), String> {
+    let mut refs = store_meta(h).map(|m| refs_of(&m)).unwrap_or_default();
+    let e = refs.entry(r.to_string()).or_insert_with(|| json!({}));
+    if let Some(o) = e.as_object_mut() {
+        o.insert("host".into(), json!(host));
+        o.entry("fields").or_insert(json!([FIELD]));
+    }
+    let out = h.operator("kernel", json!({"type": "update_agent", "id": STORE, "refs": refs})).await.result;
+    match out.get("error").and_then(Value::as_str) {
+        Some(e) => Err(format!("the key's ref {r} could not be declared: {e}")),
+        None => Ok(()),
+    }
+}
+
 /// Store `secret` as the key for `module` at `endpoint`. Returns the ref.
 pub async fn store(h: &Host, module: &str, endpoint: &str, secret: &str) -> Result<String, String> {
     let s = secrets();
     let m = s.mode()?.ok_or("choose where keys are kept first — plain or secure")?;
     let r = ref_for(module, endpoint)?;
     ensure_store(h).await?;
+    // the ref is DECLARED first, on the store's record (`set` never creates one)
+    declare(h, &r, &host_of(endpoint).unwrap_or_default()).await?;
     let item = Item::new(
         AgentId::from(STORE),
-        json!({"type": "set", "ref": r, "host": endpoint, "fields": {FIELD: secret}}),
+        json!({"type": "set", "ref": r, "fields": {FIELD: secret}}),
     )
     .with_secret(json!(["payload.fields"]));
     let k = Arc::clone(&h.kernel);

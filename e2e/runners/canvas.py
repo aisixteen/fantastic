@@ -117,14 +117,24 @@ class Host:
         return code
 
 
-async def host_call(port: int, target: str, payload: dict) -> dict:
+async def host_call(port: int, target: str, payload: dict, token: str | None = None) -> dict:
+    """A host call the way a canvas tab makes one: through the users gateway,
+    which acts as the user the token is (no token: the tokenless default)."""
     import websockets
 
-    async with websockets.connect(f"ws://127.0.0.1:{port}/kernel/ws", origin=f"http://127.0.0.1:{port}") as ws:
-        await ws.send(json.dumps({"type": "call", "target": target, "payload": payload, "id": secrets.token_hex(6)}))
+    fwd = {"type": "forward", "target": target, "payload": payload}
+    if token is not None:
+        fwd["token"] = token
+    frame = {"type": "call", "target": "users", "payload": fwd, "id": secrets.token_hex(6)}
+    if token is not None:
+        frame["secret"] = ["payload.token"]
+    async with websockets.connect(f"ws://127.0.0.1:{port}/users/ws", origin=f"http://127.0.0.1:{port}") as ws:
+        await ws.send(json.dumps(frame))
+        # only the answer to THIS frame: a connect-time frame (the socket's
+        # refused auto-watch of the gateway) is not it
         while True:
             m = json.loads(await asyncio.wait_for(ws.recv(), 10))
-            if m.get("type") in ("reply", "error"):
+            if m.get("type") in ("reply", "error") and m.get("id") == frame["id"]:
                 return m.get("data", m)
 
 
@@ -193,7 +203,14 @@ def yaml_of(p: Path) -> dict:
 def members(cwd: Path) -> list[dict]:
     """The canvas's cells — every child but its singleton background."""
     d = cwd / ".fantastic/web/agents/canvas/agents"
-    every = [dict(yaml_of(f), _dir=f.parent.name) for f in sorted(d.glob("*/agent.yaml"))] if d.is_dir() else []
+    every = []
+    for f in sorted(d.glob("*/agent.yaml")) if d.is_dir() else []:
+        # the loader may remove a folder between the listing and the read: a
+        # record gone mid-check is simply not there
+        try:
+            every.append(dict(yaml_of(f), _dir=f.parent.name))
+        except FileNotFoundError:
+            pass
     return [m for m in every if m.get("handler_module") != "background.ts"]
 
 

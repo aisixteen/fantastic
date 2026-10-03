@@ -25,6 +25,7 @@ mod readme;
 mod recipe;
 mod run;
 mod seen;
+mod send;
 mod share;
 mod store;
 mod tags;
@@ -53,6 +54,12 @@ fn main() -> Result<()> {
     }
     if args.first().map(String::as_str) == Some("mcp") {
         mcp::main(&args[1..])
+    }
+    if args.first().map(String::as_str) == Some("readme") {
+        readme::main(&args[1..])
+    }
+    if args.first().map(String::as_str) == Some("send") {
+        send::main(&args[1..])
     }
     match recipe::parse(&args) {
         Ok(o) => shell(o),

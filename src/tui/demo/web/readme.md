@@ -30,9 +30,13 @@ module under `src/sections/` and place it in `src/sections/index.ts`. The tests
 check that every id resolves, every node fits both stages, and every flow
 travels a visible edge.
 
+## On the canvas
+
+The canvas's action popup has a `demo` kind: it places this page as an html
+cell. The canvas pack runs this pack first and embeds `dist/index.html`.
+
 ## Later
 
-The same page becomes the demo AGENT on the canvas (a kind in the action
-popup), with a GUIDE mode (macOS-Tips-like cards that point at the real UI and
-advance by watching the state stream) next to these animations; plan in
+A GUIDE mode (macOS-Tips-like cards that point at the real UI and advance by
+watching the state stream) next to these animations; plan in
 `tmp/readme_docs.md`.

@@ -660,6 +660,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "fantastic-bridge"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "fantastic-bundle",
+ "fantastic-io-bridge",
+ "fantastic-kernel",
+ "futures-util",
+ "libc",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+]
+
+[[package]]
 name = "fantastic-bundle"
 version = "0.1.0"
 dependencies = [
@@ -676,6 +691,19 @@ dependencies = [
  "serde_json",
  "tokio",
  "zip",
+]
+
+[[package]]
+name = "fantastic-canvas-users"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "fantastic-bridge",
+ "fantastic-kernel",
+ "serde_json",
+ "sha2",
+ "subtle",
+ "tokio",
 ]
 
 [[package]]
@@ -728,6 +756,7 @@ dependencies = [
  "fantastic-bundle",
  "fantastic-io-bridge",
  "fantastic-kernel",
+ "libc",
  "serde_json",
  "sha2",
  "tokio",
@@ -848,6 +877,7 @@ dependencies = [
  "async-trait",
  "crossterm 0.29.0",
  "fantastic-canvas-page",
+ "fantastic-canvas-users",
  "fantastic-core",
  "fantastic-credential-store",
  "fantastic-exec-bridge",

@@ -7,9 +7,14 @@
 // `vendor/*.js`; with no `--splitting` the dynamic imports inline into the one
 // file.
 //
-// This file is EXCLUDED from the tsconfig (the css import is esbuild-only);
+// This file is EXCLUDED from the tsconfig (the css and html imports are esbuild-only);
 // esbuild does not typecheck, so the untyped css default import is fine here.
 import xtermCss from "./vendor/xterm.css";
+// the demo page, packed first by ../scripts/pack.sh (one self-contained html)
+import demoHtml from "../../../demo/web/dist/index.html";
+import { setDemoHtml } from "./demo_page.ts";
+
+setDemoHtml(demoHtml);
 
 const style = document.createElement("style");
 style.dataset.fantasticVendor = "xterm";

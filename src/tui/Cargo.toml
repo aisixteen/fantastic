@@ -54,6 +54,7 @@ fantastic-scenario-probes = { path = "../lib/rust/crates/bundles/fantastic-scena
 # The MCP leg — a bundle built HERE, outside the kernel tree, against the
 # kernel's public API only. Compile-time linked; `src/lib` is not edited.
 fantastic-web-mcp = { path = "bundles/fantastic-web-mcp" }
+fantastic-canvas-users = { path = "bundles/fantastic-canvas-users" }
 fantastic-sqlite-store = { path = "bundles/fantastic-sqlite-store" }
 # THE USER'S TEMPLATES: named agent blueprints in the home config dir (FANTASTIC_HOME
 # or ~/.config/fantastic), owned by this binary — see kern/templates.

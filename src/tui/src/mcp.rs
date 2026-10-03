@@ -37,7 +37,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use fantastic_kernel::TaskId;
-use fantastic_web_mcp::{McpCore, HANDLER_MODULE, INSTRUCTIONS, SHAPE};
+use fantastic_web_mcp::{McpCore, HANDLER_MODULE, INSTRUCTIONS, LEAD_IN, SHAPE};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, OnceCell};
@@ -155,7 +155,7 @@ fn own(paths: Paths) -> ! {
 /// What a coding CLI that runs `fantastic mcp` in a shell reads on stderr: how
 /// to register it, then what a connected client is told in `initialize`.
 fn shape() -> String {
-    format!("{SHAPE}{INSTRUCTIONS}\n\n")
+    format!("{SHAPE}{LEAD_IN}{INSTRUCTIONS}\n\n")
 }
 
 /// Say a fatal reason where the MCP client logs it (the ORIGINAL stderr) and in

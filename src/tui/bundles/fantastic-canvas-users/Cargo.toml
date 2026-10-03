@@ -1,0 +1,20 @@
+[package]
+name = "fantastic-canvas-users"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+publish = false
+description = "The canvas's USERS: one gateway agent (`canvas_users.tools`) that resolves a token to a user agent and acts as it — forward, the page-loader relay filtered by the user's grants, a watch / state relay and the events pull every tab reads."
+
+# Outside `src/lib`, like the MCP leg: only the kernel's public surface.
+[dependencies]
+fantastic-kernel = { path = "../../../lib/rust/crates/fantastic-kernel" }
+fantastic-bridge = { path = "../../../lib/rust/crates/bundles/fantastic-bridge" }
+async-trait = "0.1"
+serde_json = "1"
+sha2 = "0.10"
+subtle = "2.6"
+tokio = { version = "1.40", features = ["sync", "time"] }
+
+[dev-dependencies]
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "sync", "time"] }

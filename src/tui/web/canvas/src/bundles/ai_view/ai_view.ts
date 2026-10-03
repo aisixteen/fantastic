@@ -53,6 +53,7 @@ const CHAT_CSS = `
   .chat-view .msg.tool { align-self: flex-start; font: 11px ui-monospace, SFMono-Regular, monospace; color: rgba(220,230,245,0.45); background: transparent; padding: 0 4px; }
   .chat-view .c-badge.kept { background:rgba(126,226,168,0.18); color:#7ee2a8; cursor:pointer; }
   .chat-view .c-keep { margin-left:6px; font-size:11px; padding:1px 10px; border-radius:999px; border:0; cursor:pointer; background:rgba(183,140,255,0.28); color:#fff; }
+  .chat-view .c-main.is-main { background:rgba(255,206,92,0.22); color:#ffd36b; }
   .chat-view .c-rename { font-size:11px; margin-left:8px; padding:1px 6px; border-radius:6px; border:0; background:rgba(255,255,255,0.12); color:#fff; width:140px; }
 `;
 
@@ -167,7 +168,8 @@ export const aiView: ViewBundle = {
   handles: ["ai_view.ts"],
   // Fronts a backend it never spawns; cancels a turn through the host root's
   // task table.
-  grants: (backend) => ({ [backend]: ["watch", "reflect", "history", "status", "send"], kernel: ["ps", "cancel"], ai_cells: ["keep", "rename"] }),
+  // `$parent: [update]`: [make main] names this cell on its canvas.
+  grants: (backend) => ({ [backend]: ["watch", "reflect", "history", "status", "send"], kernel: ["ps", "cancel"], ai_cells: ["keep", "rename"], $parent: ["update"] }),
 
   async mount(ctx: ViewContext): Promise<ViewHandle> {
     const { kernel, mount, selfId, backend, record } = ctx;
@@ -209,6 +211,7 @@ export const aiView: ViewBundle = {
     }
     const tpl = record && typeof record["template"] === "string" ? (record["template"] as string) : "";
     $<HTMLElement>(".c-agent").textContent = tpl ? `✦ ${tpl} · ${backend}` : `${selfId} (client ${clientId})`;
+    let unwatchMain = (): void => {};
     // THE DIALOG'S STORE, in the header: `○ ephemeral` (RAM — closing the
     // cell forgets it) with [keep], or `● kept · <name>` (the project's SQLite —
     // it outlives the cell; click the name to rename it).
@@ -230,15 +233,18 @@ export const aiView: ViewBundle = {
         badge.textContent = "○ ephemeral";
         badge.title = "this dialog lives in RAM: closing the cell forgets it";
       }
-      keepBtn.onclick = async (): Promise<void> => {
+      /** Keep the dialog; false (said in the dialog) when the host refused. */
+      const keep = async (): Promise<boolean> => {
         const r = (await host.callHost("ai_cells", { type: "keep", id: backend } as never)) as Dict;
         if (typeof r["error"] === "string") {
           addMsg("notice", `✕ ${r["error"]}`, dialogEl).classList.add("too-small");
-          return;
+          return false;
         }
         kernel.updateMeta(selfId, { kept: true, dialog_name: r["name"], owns_backend: false } as never);
         showKept(String(r["name"]));
+        return true;
       };
+      keepBtn.onclick = (): void => void keep();
       badge.onclick = (): void => {
         if (!badge.classList.contains("kept")) return;
         const input = document.createElement("input");
@@ -265,6 +271,35 @@ export const aiView: ViewBundle = {
       };
       $<HTMLElement>(".c-agent").after(badge);
       if (!badge.classList.contains("kept")) badge.after(keepBtn);
+
+      // THE CANVAS'S MAIN CHAT (its one voice): [make main] keeps the dialog
+      // first when it is ephemeral, then names this cell on its canvas — the
+      // canvas delete-locks it and demotes the previous main. `★ main`, clicked,
+      // unmakes it. The canvas record is the truth: every chat cell follows it.
+      const canvasId = kernel.get(selfId)?.parentId ?? null;
+      if (canvasId !== null) {
+        const mainBtn = document.createElement("button");
+        mainBtn.className = "c-keep c-main";
+        const setMain = async (to: string | null): Promise<void> => {
+          if (to !== null && !badge.classList.contains("kept") && !(await keep())) return;
+          const r = (await kernel.send([{ target: canvasId, payload: { type: "update", id: canvasId, fields: { main_ai_chat: to } } as never }]))[0]?.result as Dict | undefined;
+          if (r !== undefined && typeof r["error"] === "string") addMsg("notice", `✕ ${r["error"]}`, dialogEl).classList.add("too-small");
+        };
+        const showMain = (): void => {
+          const isMain = kernel.get(canvasId)?.meta["main_ai_chat"] === selfId;
+          mainBtn.classList.toggle("is-main", isMain);
+          mainBtn.textContent = isMain ? "★ main" : "make main";
+          mainBtn.title = isMain
+            ? "this canvas's main chat (delete-locked) — click to unmake it"
+            : "make this the canvas's main chat: kept, delete-locked, named on the canvas";
+          mainBtn.onclick = (): void => void setMain(isMain ? null : selfId);
+        };
+        showMain();
+        $<HTMLElement>(".c-header > span").append(mainBtn);
+        unwatchMain = kernel.addStateSubscriber((e) => {
+          if (e["agent_id"] === canvasId) showMain();
+        });
+      }
     }
     const upRefl = (await host.call(backend, { type: "reflect" })) as Dict;
     $<HTMLElement>(".c-model").textContent = s(upRefl, "model");
@@ -651,6 +686,7 @@ export const aiView: ViewBundle = {
     return {
       unmount(): void {
         offLifecycle();
+        unwatchMain();
         offQueued();
         offStatus();
         offToken();
