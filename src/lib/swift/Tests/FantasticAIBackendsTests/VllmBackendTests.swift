@@ -430,7 +430,9 @@ struct VllmBackendTests {
             "max_tokens": 65536,
         ]
         let err = VllmBundle().validateMeta(meta, record: [:]) ?? ""
-        #expect(err.contains("missing: kv_slots, kv_overflow, memory_store_id"), "\(err)")
+        #expect(
+            err.contains("missing: kv_slots, kv_overflow, memory_store_id, context_window"),
+            "\(err)")
         // each missing field is named WITH its hint, from the schema
         #expect(err.contains("kv_overflow = all slots live: evict"), "\(err)")
         // an update to a complete record is judged on the MERGED state
@@ -438,6 +440,7 @@ struct VllmBackendTests {
         full["kv_slots"] = 7
         full["kv_overflow"] = "evict"
         full["memory_store_id"] = "memory"
+        full["context_window"] = 262144
         #expect(VllmBundle().validateMeta(["seed": 3], record: full) == nil)
     }
 
@@ -445,7 +448,7 @@ struct VllmBackendTests {
         let meta: OrderedDictionary<String, JSON> = [
             "endpoint": "http://vllm.test/v1", "model": "qwen3.8-27b", "max_tokens": 8000,
             "kv_slots": 6, "kv_overflow": "evict", "thinking_token_budget": 4000,
-            "reasoning_effort": "xhigh", "memory_store_id": "memory",
+            "reasoning_effort": "xhigh", "memory_store_id": "memory", "context_window": 262144,
         ]
         #expect(VllmBundle().validateMeta(meta, record: [:]) == nil)
     }
@@ -513,7 +516,7 @@ struct VllmBackendTests {
                 "id": "v1",
                 "endpoint": .string("http://vllm.test/\(UUID().uuidString.prefix(8))/v1"),
                 "model": "qwen3.8-27b", "max_tokens": 8000, "kv_slots": 7, "kv_overflow": "evict",
-                "memory_store_id": "memory", "seed": 3,
+                "memory_store_id": "memory", "seed": 3, "context_window": 262144,
             ])
         #expect(r["id"] == "v1", "\(r)")
         let out = await k.send([Item(AgentId("v1"), ["type": "reflect"])])[0].result

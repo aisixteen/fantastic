@@ -131,6 +131,21 @@ public enum RecordSchema {
         return .object(["fields": .array(fields)])
     }
 
+    /// `schema` where this backend REQUIRES some shared fields — required, no
+    /// default (vllm_backend: `context_window`, the server's window, is never
+    /// guessed). Python `schema(backend_fields, require=…)`.
+    public static func schema(_ backendFields: [JSON], requiring require: [String]) -> JSON {
+        guard case .object(var top) = schema(backendFields), case .array(let fields)? = top["fields"]
+        else { return schema(backendFields) }
+        top["fields"] = .array(fields.map { f in
+            guard let n = f["name"].asString, require.contains(n), case .object(var o) = f else { return f }
+            o.removeValue(forKey: "default")
+            o["required"] = .bool(true)
+            return .object(o)
+        })
+        return .object(top)
+    }
+
     /// Whether a record NAMES this field in a usable form — a string must be
     /// non-blank, anything else non-null. Python `_present`.
     static func present(_ f: JSON, _ v: JSON?) -> Bool {

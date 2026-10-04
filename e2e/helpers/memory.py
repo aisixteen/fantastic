@@ -7,9 +7,9 @@ under the root, named by the root, and every AI agent the harness creates is wir
 to it: `memory_store_id`, `can_call` on the store, the store's `callable_by` for
 the agent. Explicit on both ends, as the design requires; nothing is defaulted.
 
-The harness reads and plants rows as a store ADMIN (`admins` on the store record:
-`kernel` = the operator in process, `rest`/`ws` = the driver's legs over the wire),
-naming the `owner` — which is exactly what an admin may do and nobody else may.
+A caller reads and appends only under its OWN key, so the harness reads another
+agent's rows from the store's `dump` (the whole tables), and plants them in process
+AS that agent (`_as_self`) and over the wire through `dump` → add → `inject`.
 
 A ram_store dies with its process. A restart test carries the tables across:
 `dump` before the stop, `inject` after the new kernel is up — what a durable store
@@ -86,17 +86,55 @@ def _owned_by(owner: Any, aid: str) -> bool:
 
 
 async def plant(root: Any, aid: str, rows: list[dict]) -> list[int]:
-    """Append rows to `aid`'s conversation AS `aid` — a caller appends only under its
-    own key. In-process only: the harness stands in for `aid`'s handler."""
-    ctx = getattr(root, "ctx", None)
-    if ctx is None:
-        raise AssertionError("memory.plant needs an in-process kernel")
-    with ctx.agents[aid]._as_self():
-        out = await root.send([{"target": MEMORY, "payload": {"type": "append", "rows": rows}}])
-    r = out[0].get("result") or {}
-    ids = r.get("ids")
-    if not isinstance(ids, list):
-        raise AssertionError(f"memory append({aid}) refused: {r}")
+    """Append rows to `aid`'s conversation. Returns the ids, in order.
+
+    IN PROCESS: AS `aid` (`_as_self`) — a caller appends only under its own key.
+    OVER THE WIRE the leg is not `aid`, so the tables are rewritten at setup (owner,
+    2026-10-04): the leg appends one throwaway row per id-less row under ITS OWN key
+    (the kernel stays the only allocator), then `dump` → those rows dropped, `rows`
+    added under `<guid>|<aid>` with the minted ids (a row's `refs` become its
+    `fold_refs`) → `inject`. The agent's in-memory head is not touched — plant before
+    its first turn, as in process."""
+    if getattr(root, "leg_id", None) is None:
+        with root.ctx.agents[aid]._as_self():
+            out = await root.send(
+                [{"target": MEMORY, "payload": {"type": "append", "rows": rows}}]
+            )
+        r = out[0].get("result") or {}
+        ids = r.get("ids")
+        if not isinstance(ids, list):
+            raise AssertionError(f"memory append({aid}) refused: {r}")
+        return ids
+    need = sum(1 for x in rows if x.get("id") is None)
+    minted: list[int] = []
+    if need:
+        r = await _store(root, {"type": "append", "rows": [{"kind": "_mint"}] * need})
+        minted = r.get("ids") if isinstance(r.get("ids"), list) else []
+        if len(minted) != need:
+            raise AssertionError(f"memory plant({aid}): minting {need} ids refused: {r}")
+    out = await root.send([{"target": "kernel", "payload": {"type": "reflect", "tree": "none"}}])
+    guid = (out[0].get("result") or {}).get("guid")
+    if not isinstance(guid, str) or not guid:
+        raise AssertionError(f"memory plant({aid}): the root reflect carries no guid: {out}")
+    tables = await dump(root)
+    leg_key, owner = f"{guid}|{root.leg_id}", f"{guid}|{aid}"
+    gone = set(minted)
+    tables["rows"] = [
+        x for x in tables.get("rows") or []
+        if not (x.get("owner") == leg_key and (x.get("row") or {}).get("id") in gone)
+    ]
+    fresh = iter(minted)
+    ids: list[int] = []
+    for x in rows:
+        row = {k: v for k, v in x.items() if k != "refs"}
+        row["id"] = row["id"] if row.get("id") is not None else next(fresh)
+        ids.append(row["id"])
+        tables["rows"].append({"owner": owner, "row": row})
+        if isinstance(x.get("refs"), list):
+            tables.setdefault("fold_refs", []).append(
+                {"owner": owner, "fold": row["id"], "members": list(x["refs"])}
+            )
+    await inject(root, tables)
     return ids
 
 

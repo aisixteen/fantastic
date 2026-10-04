@@ -969,6 +969,8 @@ pub async fn send(
     // Every closed call part `(stream_id, body)` — routing stamps each dispatched
     // message with the stream it was previewed as.
     let mut call_streams: Vec<(String, String)> = Vec::new();
+    // A pass the model stopped with a block open dispatches NOTHING.
+    let mut cut = false;
     // A DEAD turn (only thinking) is discarded unstored and routed as a silent
     // turn — the reminder rerolls it, told why.
     let mut dead_turn = false;
@@ -992,8 +994,10 @@ pub async fn send(
             text: final_text,
             message_id: tid,
             call_streams: streams,
+            cut: was_cut,
         })) => {
             message_id = Some(tid);
+            cut = was_cut;
             // `message_id` IS PART OF THE REPLY — python `_run`'s last statement.
             // Rust computed it (routing needs it to parent the next turn) and
             // then dropped it on the floor, so a caller could not name the row
@@ -1112,6 +1116,7 @@ pub async fn send(
                 message_id,
                 dead_turn,
                 call_streams,
+                cut,
             )
             .await;
         });

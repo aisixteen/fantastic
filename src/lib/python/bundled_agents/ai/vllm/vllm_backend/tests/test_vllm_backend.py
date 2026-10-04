@@ -175,7 +175,9 @@ async def test_a_cap_that_is_the_whole_window_sends_no_max_tokens():
     assert "max_tokens" not in sink[0]
     assert sink[1]["max_tokens"] == 2000
     sink.clear()
-    q = _provider(_transport(_sse(_delta(finish="stop")), sink), max_tokens=8000, window=262144)
+    q = _provider(
+        _transport(_sse(_delta(finish="stop")), sink), max_tokens=8000, window=262144
+    )
     await _drain(q)
     assert sink[0]["max_tokens"] == 8000  # a cap below the window is sent as set
 
@@ -309,11 +311,19 @@ def test_a_record_missing_required_fields_is_refused_at_the_write_naming_all():
     # what a model spawning a sub-AI wrote (E37): the fields it could see
     meta = {"endpoint": ENDPOINT, "model": "qwen3.8-27b", "max_tokens": 65536}
     err = validate_meta(meta, {})
-    assert err and "missing: kv_slots, kv_overflow, memory_store_id" in err, err
+    assert (
+        err and "missing: kv_slots, kv_overflow, memory_store_id, context_window" in err
+    ), err
     # each missing field is named WITH its hint, from the schema
     assert "kv_overflow = all slots live: evict" in err, err
     # an update to a complete record is judged on the MERGED state
-    full = {**meta, "kv_slots": 7, "kv_overflow": "evict", "memory_store_id": "memory"}
+    full = {
+        **meta,
+        "kv_slots": 7,
+        "kv_overflow": "evict",
+        "memory_store_id": "memory",
+        "context_window": 262144,
+    }
     assert validate_meta({"seed": 3}, full) is None
 
 
@@ -322,6 +332,7 @@ def test_a_consistent_write_passes():
         "endpoint": ENDPOINT,
         "model": "qwen3.8-27b",
         "max_tokens": 8000,
+        "context_window": 262144,
         "kv_slots": 6,
         "kv_overflow": "evict",
         "thinking_token_budget": 4000,
@@ -360,6 +371,7 @@ async def test_reflect_shows_the_effective_posture_and_the_shared_table(seeded_k
         endpoint=ENDPOINT,
         model="qwen3.8-27b",
         max_tokens=8000,
+        context_window=262144,
         kv_slots=7,
         kv_overflow="evict",
         memory_store_id="memory",

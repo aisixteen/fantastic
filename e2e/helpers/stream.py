@@ -15,8 +15,14 @@ message names it. In process it watches inboxes on the live kernel.
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any
+
+#: A call part that ENDED but whose final message has not arrived after this many
+#: seconds is FAILED (owner, 2026-10-04): only a successful generation dispatches,
+#: so a stream can end cleanly and still never become a message.
+SETTLE_SECONDS = 60.0
 
 _HEADER_STREAM = re.compile(r"· stream ([^\s\]·]+)")
 
@@ -31,6 +37,7 @@ class Draft:
     re: Any = None
     text: str = ""
     ended: bool = False
+    ended_at: float | None = None
     ok: bool | None = None
     aborted: str | None = None
     matched: bool = False
@@ -87,7 +94,7 @@ class StreamJunction:
         elif ev["type"] == "part_delta":
             d.text += ev.get("text", "")
         elif ev["type"] == "part_end":
-            d.ended, d.ok = True, ev.get("ok")
+            d.ended, d.ok, d.ended_at = True, ev.get("ok"), time.monotonic()
         elif ev["type"] == "part_abort":
             d.aborted = ev.get("reason") or "aborted"
 
@@ -102,6 +109,24 @@ class StreamJunction:
             d.matched = True
         return d
 
+    def failed(self, now: float | None = None) -> list[Draft]:
+        """Drafts that will never become a message: aborted, ended not ok, or a call
+        that ended and saw no final message within SETTLE_SECONDS."""
+        now = time.monotonic() if now is None else now
+        return [
+            d
+            for d in self.drafts.values()
+            if d.aborted is not None
+            or (d.ended and d.ok is False)
+            or (
+                d.kind == "call"
+                and d.ended
+                and not d.matched
+                and d.ended_at is not None
+                and now - d.ended_at > SETTLE_SECONDS
+            )
+        ]
+
     def summary(self) -> dict:
         ds = list(self.drafts.values())
         return {
@@ -112,4 +137,5 @@ class StreamJunction:
             "aborted": sum(d.aborted is not None for d in ds),
             "matched": sum(d.matched for d in ds),
             "open": sum(not d.ended and d.aborted is None for d in ds),
+            "failed": len(self.failed()),
         }

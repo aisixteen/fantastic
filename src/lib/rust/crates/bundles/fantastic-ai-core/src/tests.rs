@@ -2511,6 +2511,7 @@ async fn every_model_call_carries_the_layer_default_timeout() {
         None,
         false,
         Vec::new(),
+        false,
     )
     .await;
     assert!(
@@ -2568,6 +2569,7 @@ async fn a_malformed_timeout_arg_settles_the_kernels_refusal() {
         None,
         false,
         Vec::new(),
+        false,
     )
     .await;
     assert!(
@@ -3156,6 +3158,7 @@ async fn a_batch_of_calls_without_reply_to_all_come_back() {
         None,
         false,
         Vec::new(),
+        false,
     )
     .await;
     assert!(

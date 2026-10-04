@@ -38,6 +38,20 @@ _AI_TAIL = [
     ("system_prompt", "str", False, None, None),
 ]
 
+
+#: the backends that REQUIRE a shared field (set on the record, used as set —
+#: no default): vllm_backend's `context_window`, the server's window.
+_REQUIRED_SHARED = {"vllm_backend": ("context_window",)}
+
+
+def _tail(backend):
+    req = _REQUIRED_SHARED.get(backend, ())
+    return [
+        (n, ty, True, None, en) if n in req else (n, ty, r, d, en)
+        for (n, ty, r, d, en) in _AI_TAIL
+    ]
+
+
 #: (name, type, required, default-or-None, enum-or-None) per field, in order.
 SCHEMAS = {
     "ollama_backend": (
@@ -111,7 +125,7 @@ def test_each_backend_schema_is_exact(backend):
     # no `key_var`: a key is never read from the environment — a backend that
     # sends one has a `credentials` field
     assert list(sch) == ["fields"]
-    want = own + _AI_TAIL
+    want = own + _tail(backend)
     got = [
         (f["name"], f["type"], f["required"], f.get("default"), f.get("enum"))
         for f in sch["fields"]
@@ -163,7 +177,7 @@ def test_the_schema_builders_refuse_malformed_fields():
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_validate_meta_names_every_missing_required_field(backend):
     own = SCHEMAS[backend]
-    required = [n for (n, _t, req, _d, _e) in own + _AI_TAIL if req]
+    required = [n for (n, _t, req, _d, _e) in own + _tail(backend) if req]
     err = _tools(backend).validate_meta({}, {})
     assert err is not None
     assert err.startswith(
@@ -184,10 +198,11 @@ def test_validate_meta_judges_the_merged_record(backend):
         "max_tokens": 8000,
         "kv_slots": 2,
         "kv_overflow": "evict",
+        "context_window": 262144,
         "memory_store_id": "memory",
         "credentials": {"store": "creds", "ref": "r"},
     }
-    rec = {n: full[n] for (n, _t, req, _d, _e) in own + _AI_TAIL if req}
+    rec = {n: full[n] for (n, _t, req, _d, _e) in own + _tail(backend) if req}
     assert _tools(backend).validate_meta({}, rec) is None
     # a blank string is absent; None is absent
     blank = {**rec, "endpoint": "  "}
@@ -400,6 +415,7 @@ def test_vllm_make_provider_builds_the_effective_posture(monkeypatch):
         "endpoint": "http://e",
         "model": "m",
         "max_tokens": 8000,
+        "context_window": 262144,
         "kv_slots": 3,
         "kv_overflow": "reject",
     }
@@ -425,8 +441,8 @@ def test_vllm_make_provider_builds_the_effective_posture(monkeypatch):
         "endpoint": "http://e",
         "model": "m",
         "max_tokens": 8000,
-        # the record names no context_window → no whole-window rule
-        "window": None,
+        # the record's `context_window`, as set
+        "window": 262144,
         "kv_slots": 3,
         "kv_overflow": "reject",
         "kv_ttl": 1800.0,
@@ -453,6 +469,30 @@ def test_vllm_make_provider_builds_the_effective_posture(monkeypatch):
     assert (b["kv_ttl"], b["connect_timeout"], b["read_timeout"]) == (60.0, 2.0, 30.0)
 
 
+def test_vllm_window_is_the_records_context_window_as_set(monkeypatch):
+    """`context_window` is a REQUIRED property of a vllm record — the server's
+    window, set on the record and used as set (never a default); the whole-window
+    rule compares max_tokens with it."""
+    from vllm_backend.provider import VllmProvider
+    from vllm_backend.tools import make_provider
+
+    spy = _Spy(monkeypatch, VllmProvider)
+    base = {
+        "endpoint": "http://e",
+        "model": "m",
+        "max_tokens": 262144,
+        "kv_slots": 1,
+        "kv_overflow": "evict",
+    }
+    make_provider("v", _K({**base, "context_window": 262144}))
+    ((_, a),) = spy.calls
+    assert a["window"] == 262144
+    with pytest.raises(
+        ValueError, match="`context_window` is required on the agent record"
+    ):
+        make_provider("v", _K(base))
+
+
 @pytest.mark.parametrize(
     "rec, text",
     [
@@ -471,6 +511,7 @@ def test_vllm_make_provider_builds_the_effective_posture(monkeypatch):
                 "endpoint": "e",
                 "model": "m",
                 "max_tokens": 1,
+                "context_window": 1,
                 "kv_slots": True,
                 "kv_overflow": "evict",
             },
@@ -605,6 +646,7 @@ async def test_vllm_reflect_extras_with_every_knob_set(seeded_kernel):
         "v1",
         endpoint="http://vllm.pin/v1",
         max_tokens=8000,
+        context_window=262144,
         kv_slots=4,
         kv_overflow="reject",
         thinking_token_budget=3000,

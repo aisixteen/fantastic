@@ -114,13 +114,14 @@ def _remap_row(row: dict, seen: dict[int, int]) -> dict:
 
 async def plant_store(core, root, aid: str, rows: list[dict]) -> None:
     """Write a conversation FROM ABOVE before the agent exists (or beside it): rows into
-    the agent's MEMORY STORE under its id, as the store's admin. The agent need not
+    the agent's MEMORY STORE under its id (`memory.plant`). The agent need not
     exist yet — the store keys rows by owner, and rows outlive the agent. Reply BODIES
     are never persisted, so a planted history carries its replies inline.
 
     IN PROCESS the rows carry real ids (`root.ctx.mint_id`) and go down in one call.
     OVER THE WIRE the ids are PLACEHOLDERS (`WireCtx.mint_id`): the rows go one at a
-    time, in dependency order, WITHOUT ids — the store takes the kernel's next one —
+    time, in dependency order, WITHOUT ids — `memory.plant` takes the kernel's next
+    one —
     and every reference is remapped to the id just assigned. Every reference a planted
     history holds points BACKWARD, so one forward pass is enough."""
     if core is not None:

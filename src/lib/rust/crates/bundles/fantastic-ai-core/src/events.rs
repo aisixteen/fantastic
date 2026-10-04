@@ -92,8 +92,8 @@ pub async fn emit_status(
 ///
 /// A call part with an addressee goes to that inbox (each of `to`), as an emit —
 /// gated like any emit on another agent; a refused one is dropped. Prose, thought
-/// and calls without an addressee (done, await, inquiry_answer) go where the
-/// tokens go: the caller ([`to_caller`]).
+/// and calls without an addressee (done, await, inquiry_answer) go on the
+/// agent's own inbox, tagged with `client_id` (none for the terminal caller).
 pub struct PartPublisher {
     kernel: Arc<Kernel>,
     self_id: AgentId,
@@ -132,14 +132,17 @@ impl PartPublisher {
             (_, Some(t)) if !t.is_empty() => vec![t.clone()],
             _ => Vec::new(),
         };
+        // DELTAS ARE QUIET (owner, 2026-10-04): the addressee's inbox (and its
+        // watchers) only, never the state stream — a token-rate stream would flood
+        // every subscriber. `part_start`/`part_end`/`part_abort` stay on it.
+        let quiet = ev.get("type").and_then(Value::as_str) == Some("part_delta");
         if part.kind != PartKind::Call || addrs.is_empty() {
-            to_caller(
-                &self.kernel,
-                &self.self_id,
-                &self.client_id,
-                Value::Object(ev),
-            )
-            .await;
+            // The terminal renders tokens, not parts.
+            if self.client_id == crate::helpers::DEFAULT_CLIENT_ID {
+                return;
+            }
+            ev.insert("client_id".to_string(), json!(self.client_id));
+            self.emit(&self.self_id, Value::Object(ev), quiet).await;
             return;
         }
         for addr in addrs {
@@ -148,7 +151,15 @@ impl PartPublisher {
             } else {
                 AgentId::from(addr)
             };
-            self.kernel.emit(&target, Value::Object(ev.clone())).await;
+            self.emit(&target, Value::Object(ev.clone()), quiet).await;
+        }
+    }
+
+    async fn emit(&self, target: &AgentId, ev: Value, quiet: bool) {
+        if quiet {
+            self.kernel.emit_quiet(target, ev).await;
+        } else {
+            self.kernel.emit(target, ev).await;
         }
     }
 

@@ -710,7 +710,7 @@ public final class VllmBundle: AgentBundle, @unchecked Sendable {
             model: model,
             key: key,
             maxTokens: maxTokens,
-            window: agent.metaValue(forKey: "context_window")?.asInt.map(Int.init).flatMap { $0 > 0 ? $0 : nil },
+            window: try requiredInt(agent, "context_window"),
             kvSlots: kvSlots,
             kvOverflow: overflow,
             kvTtl: try seconds(agent, "kv_ttl", KV_TTL),
@@ -879,7 +879,10 @@ public final class VllmBundle: AgentBundle, @unchecked Sendable {
                 default: .double(READ_TIMEOUT)),
             // the door's key, when it wants one — absent = no Authorization header
             RecordSchema.credentialsField(required: false),
-        ])
+        ],
+        // the server's window, set on the record and used as set: the whole-window
+        // rule compares max_tokens with it (never a default)
+        requiring: ["context_window"])
 
     /// The fields a turn cannot run without — refused at the write when absent.
     /// The schema's required fields, not a second list. Python `REQUIRED`.
@@ -914,6 +917,10 @@ extension VllmBundle {
         - `kv_slots` — how many conversations may be LIVE on this endpoint at once
         - `kv_overflow` — what happens to the next one: `evict` (the least-recently-used
           conversation rotates out) or `reject` (the newcomer is refused with a retry time)
+        - `context_window` — the server's window (its `--max-model-len`), used exactly as
+          set. A main turn whose `max_tokens` reaches it sends NO `max_tokens`: the server
+          bounds the reply by what the prompt leaves (prompt + `max_tokens` past the window
+          is an HTTP 400). A bounded side call (a fold summary) keeps its own bound.
 
         Defaults, used only where the record sets nothing: `temperature` 0.2, `top_p` 0.8,
         `top_k` 20, `reasoning_effort` medium (`low`|`medium`|`xhigh`), `thinking_token_budget`
@@ -955,6 +962,30 @@ extension VllmBundle {
         fold summary) gets `min(budget, its max_tokens // 2)`; below 256 no budget is sent at all
         — a few tokens of thinking is no thinking, and a model starved of it stops with an
         empty answer. The value sent is `last_thinking_budget` in reflect.
+
+        ## Streaming parts — animation, never action
+        Your output streams as PARTS while you write it — `text`, `thinking`, `call` — each
+        `part_start {stream_id, source, kind, name?, target?, to?, re}` → `part_delta {text}`
+        (batched 50 ms) → `part_end {ok}` | `part_abort {reason}`. A call part goes to its
+        addressee's inbox (each of `to`) once `<target_id>`/`<to>` has closed; every other part
+        goes on your own id, tagged with the caller's `client_id`. Deltas ride inboxes only —
+        the state stream carries a part's start / end / abort, never a delta. Nothing
+        dispatches from a part: a call without its `</call>` is not a call, and ONLY A
+        SUCCESSFUL GENERATION DISPATCHES — a pass that stops with a block still open sends
+        nothing, its earlier closed calls included. The message a call becomes carries the
+        `stream_id` it streamed as (`· stream <id>` on the receiving header), so a consumer
+        settles its draft on it; a call part that ended and saw no such message within 60 s
+        is FAILED.
+
+        A receiver stops you with `stop {stream_id?}`: the provider stream closes and the open
+        parts abort. A CUT pass leaves a marker row on top of your context, never a half
+        answer: `[stopped by <receiver>]` or `[model stopped generating]` (`… while thinking`
+        when cut inside a thought), then the visible text, then `[a <tool> call to <target> was
+        not sent]` for every call of the pass.
+
+        `rows {after?, limit?}` is a VIEW of your conversation exactly as you hold it in
+        memory — no store read, no transform; before your first turn you hold nothing
+        (`loaded:false`).
 
         ## The key
 

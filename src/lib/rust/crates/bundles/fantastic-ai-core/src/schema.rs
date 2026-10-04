@@ -251,6 +251,30 @@ pub fn schema_with_window(backend_fields: Vec<Field>, context_window: i64) -> Va
     })
 }
 
+/// [`schema`] where this backend REQUIRES some shared fields — required, no
+/// default (vllm_backend: `context_window`, the server's window, is never
+/// guessed). Python `schema(backend_fields, require=…)`.
+///
+/// # Panics
+/// As [`schema`].
+#[must_use]
+pub fn schema_requiring(backend_fields: Vec<Field>, require: &[&str]) -> Value {
+    let mut sch = schema(backend_fields);
+    if let Some(fields) = sch.get_mut("fields").and_then(Value::as_array_mut) {
+        for f in fields.iter_mut() {
+            let named = f
+                .get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|n| require.contains(&n));
+            if let (true, Some(obj)) = (named, f.as_object_mut()) {
+                obj.remove("default");
+                obj.insert("required".to_string(), Value::Bool(true));
+            }
+        }
+    }
+    sch
+}
+
 /// The schema's fields as JSON objects (an empty slice on a malformed schema —
 /// every schema here is built by [`schema`]).
 fn fields_of(sch: &Value) -> &[Value] {

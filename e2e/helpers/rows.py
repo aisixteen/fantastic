@@ -1,11 +1,12 @@
 """AN AGENT'S ROWS, REACHED THE SAME WAY ON EVERY RUNTIME — through its MEMORY STORE.
 
 The kernel keeps no conversation. A probe that wants an agent's rows reads them
-from the store as an admin naming the owner; one that PLANTS rows appends them
-the same way. See `helpers/memory.py` for the wiring.
+from the store's `dump`; one that PLANTS rows goes through `memory.plant` (in
+process AS the agent, over the wire `dump` → add → `inject`). See
+`helpers/memory.py` for the wiring.
 
-    rows_for   -> store `read`   {owner}          -> rows
-    plant_rows -> store `append` {owner, rows}    -> ids
+    rows_for   -> store `dump`                    -> rows
+    plant_rows -> `memory.plant`                  -> ids
 
 THE KERNEL IS THE ONLY ALLOCATOR. A planted row without an `id` takes the kernel's
 next one (the store asks the counter); a probe that needs to cross-reference

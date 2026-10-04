@@ -70,6 +70,9 @@ pub enum Generation {
         /// dispatched message with the stream it was previewed as (python's
         /// `call_streams`).
         call_streams: Vec<(String, String)>,
+        /// The model stopped with a block open: NOTHING of this pass dispatches,
+        /// its closed calls included (owner, 2026-10-04).
+        cut: bool,
     },
     /// A DEAD turn: nothing left once the thinking is stripped. DISCARDED —
     /// never stored, never an answer — and routed like any turn that dispatched
@@ -250,12 +253,22 @@ pub async fn run_generation(
     // A block still open when the model stopped generating is CUT: an open call
     // is never dispatched (`extract_tool_calls` skips it) and the turn's row says
     // so.
-    let (cut_call, call_streams) = {
+    // ONLY A SUCCESSFUL GENERATION DISPATCHES (owner, 2026-10-04): a pass cut with
+    // a block open sends nothing, its earlier closed calls included, and the marker
+    // lists every call of the pass as not sent.
+    let (cut_calls, call_streams) = {
         let mut p = parts.lock().await;
-        let cut = p.splitter.open_call().cloned();
+        let cut = p.splitter.open_call().is_some();
         let evs = p.splitter.finish();
         p.publisher.push(evs, true).await;
-        (cut, p.splitter.closed_calls.clone())
+        let calls: Vec<_> = p
+            .splitter
+            .parts
+            .iter()
+            .filter(|x| x.kind == crate::stream_parts::PartKind::Call)
+            .cloned()
+            .collect();
+        (cut.then_some(calls), p.splitter.closed_calls.clone())
     };
     let last_text = content_parts.join("");
     // THE ENDPOINT'S OWN COUNT calibrates our chars/4 estimate (python `_calib`).
@@ -329,12 +342,8 @@ pub async fn run_generation(
         // MARKER instead, on top of the context (owner, 2026-10-04).
         json!({
             "role": "assistant",
-            "content": match &cut_call {
-                Some(call) => cut_marker(
-                    &last_text,
-                    "model stopped generating",
-                    std::slice::from_ref(call),
-                ),
+            "content": match &cut_calls {
+                Some(calls) => cut_marker(&last_text, "model stopped generating", calls),
                 None => without_thinking(&last_text),
             },
             "id": message_id,
@@ -346,6 +355,7 @@ pub async fn run_generation(
         text: last_text,
         message_id,
         call_streams,
+        cut: cut_calls.is_some(),
     })
 }
 

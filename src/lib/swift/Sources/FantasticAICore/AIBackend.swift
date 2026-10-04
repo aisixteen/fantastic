@@ -419,7 +419,9 @@ public final class AIBackend: @unchecked Sendable {
         /// batch token every reply tag of this turn names (`↑<turn>`), and every
         /// closed call part `(stream_id, body)` — what routing stamps each
         /// dispatched message with (python's `call_streams`).
-        case ok(String, Int64, [(streamId: String, body: String)])
+        /// text, message id, the closed call parts, and `cut`: the model stopped
+        /// with a block open, so NOTHING of the pass dispatches (owner, 2026-10-04).
+        case ok(String, Int64, [(streamId: String, body: String)], Bool)
         /// A DEAD TURN: the RAW completion held nothing once the thinking was
         /// stripped. Nothing was stored; routing rerolls it with the no-call
         /// reminder (python `_run`'s `dead_turn` reply).
@@ -765,7 +767,7 @@ public final class AIBackend: @unchecked Sendable {
 
         let reply: JSON
         switch produced {
-        case .ok(let textOut, let messageId, let callStreams):
+        case .ok(let textOut, let messageId, _, _):
             reply = .object([
                 "response": .string(textOut),
                 "final": .string(textOut),
@@ -807,14 +809,14 @@ public final class AIBackend: @unchecked Sendable {
         let routed:
             (
                 text: String, messageId: Int64?, dead: Bool,
-                callStreams: [(streamId: String, body: String)]
+                callStreams: [(streamId: String, body: String)], cut: Bool
             )?
         switch produced {
-        case .ok(let t, let m, let c): routed = (t, m, false, c)
-        case .dead(let t): routed = (t, nil, true, [])
+        case .ok(let t, let m, let c, let x): routed = (t, m, false, c, x)
+        case .dead(let t): routed = (t, nil, true, [], false)
         default: routed = nil
         }
-        if let (textOut, messageId, deadTurn, callStreams) = routed {
+        if let (textOut, messageId, deadTurn, callStreams, cut) = routed {
             let deadline = sendTimeoutSeconds
             // THE COORDINATION STATE, threaded through so `await` can count what
             // is actually pending for this agent — its queue and its FIFO lock.
@@ -843,6 +845,7 @@ public final class AIBackend: @unchecked Sendable {
                     messageId: messageId,
                     deadTurn: deadTurn,
                     callStreams: callStreams,
+                    cut: cut,
                     launched: launched)
             }
             await launched.wait()
@@ -1005,10 +1008,10 @@ public final class AIBackend: @unchecked Sendable {
         // cancelled — same contract: the turn is already closed out (`onCancel`
         // wrote its rows), persist nothing more.
         if Task.isCancelled { return .cancelled }
-        // A block still open when the model stopped generating is CUT: an open
-        // call is never dispatched (`extractToolCalls` skips it) and the turn's
-        // row says so.
-        let cutCall = await parts.finish()
+        // ONLY A SUCCESSFUL GENERATION DISPATCHES (owner, 2026-10-04): a pass cut
+        // with a block open sends nothing, its earlier closed calls included, and
+        // the marker lists every call of the pass as not sent.
+        let cutCalls = await parts.finish()
 
         // APPEND this send's user + assistant turns to the durable chat store.
         // NOT the projected view, and NOT the whole conversation re-written: the
@@ -1102,7 +1105,7 @@ public final class AIBackend: @unchecked Sendable {
                 .object([
                     "role": .string("assistant"),
                     "content": .string(
-                        cutCall.map { cutMarker(accumulated, "model stopped generating", [$0]) }
+                        cutCalls.map { cutMarker(accumulated, "model stopped generating", $0) }
                             ?? withoutThinking(accumulated)),
                     "id": .integer(messageId), "parent": .integer(inId),
                 ]),
@@ -1111,7 +1114,7 @@ public final class AIBackend: @unchecked Sendable {
         // The RAW completion — markers in — is what routing parses: a call the
         // model wrote mid-thought still dispatches. Only the DURABLE turn above
         // is stripped.
-        return .ok(accumulated, messageId, await parts.closedCalls())
+        return .ok(accumulated, messageId, await parts.closedCalls(), cutCalls != nil)
     }
 
     // MARK: - status (verb + phase events)

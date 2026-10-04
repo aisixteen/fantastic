@@ -155,6 +155,8 @@ async def test_the_catalog_carries_each_backend_kinds_record_schema(seeded_kerne
         "kv_slots",
         "kv_overflow",
         "memory_store_id",
+        # the server's window — set on the record, used as set
+        "context_window",
     ], required
     # a required field has no default — nothing is guessed about a server
     assert all("default" not in fields[n] for n in required)

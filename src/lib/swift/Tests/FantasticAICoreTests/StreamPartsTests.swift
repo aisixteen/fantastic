@@ -368,4 +368,56 @@ struct StreamPartsTests {
         let out = await rows("stranger")
         #expect(out.result["reason"].asString == "unauthorized", "\(out)")
     }
+
+    /// Only a successful generation dispatches (owner, 2026-10-04): a pass that
+    /// wrote a complete call and then stopped with another block open sends
+    /// NEITHER, and the marker names both as not sent.
+    @Test func aCutPassSendsNothingNotEvenItsClosedCalls() async throws {
+        let doneOne = #"<call name="send"><target_id>notes</target_id><type>reflect</type></call>"#
+        let openTwo = #"<call name="send"><target_id>notes</target_id><type>refl"#
+        let slow = Slow([doneOne + " then " + openTwo, DONE])
+        let (k, ai) = await slowKernel("sp_all", slow)
+        await ramStore(k, "notes")
+        wire(k, "sp_all", "notes")
+        _ = await sendText(k, ai, "go")
+        #expect(await slow.script.waitForCalls(2))
+        let nxt = try #require(slow.script.request(1))
+        let marker = nxt.filter { $0["role"].asString == "assistant" }.last?["content"].asString
+        #expect(
+            marker?.components(separatedBy: "\n") == [
+                "[model stopped generating]",
+                "then",
+                "[a send call to notes was not sent]",
+                "[a send call to notes was not sent]",
+            ], "\(marker ?? "nil")")
+        // nothing reached notes: no reply came back for the closed call either
+        let last = nxt.last?["content"].asString ?? ""
+        #expect(!last.contains("[reply to"), "\(last)")
+    }
+
+    /// Deltas go to the addressee's inbox only (owner, 2026-10-04): the state
+    /// stream carries a part's lifecycle — start / end / abort — never a delta.
+    @Test func deltasNeverReachTheStateStream() async throws {
+        let slow = Slow([CALL, DONE])
+        let (k, ai) = await slowKernel("sp_q", slow)
+        await ramStore(k, "notes")
+        wire(k, "sp_q", "notes")
+        let (sink, pump) = watcher(k, "notes", "w_q")
+        defer { pump.cancel() }
+        let seen = EventSink()
+        let token = k.subscribe { ev, _ in seen.add(ev) }
+        defer { k.unsubscribe(token) }
+        _ = await sendText(k, ai, "go")
+        #expect(await slow.script.waitForCalls(2))
+        try await waitUntil("part_end") {
+            partEvents(sink).contains { $0["type"].asString == "part_end" }
+        }
+        let inbox = partEvents(sink).map { $0["type"].asString ?? "" }
+        #expect(inbox.contains("part_delta"), "\(inbox)")
+        #expect(inbox.first == "part_start" && inbox.last == "part_end", "\(inbox)")
+        let onStream = Set(
+            seen.snapshot().compactMap { $0["payload"]["type"].asString }
+                .filter { $0.hasPrefix("part_") })
+        #expect(onStream == ["part_start", "part_end"], "\(onStream)")
+    }
 }
