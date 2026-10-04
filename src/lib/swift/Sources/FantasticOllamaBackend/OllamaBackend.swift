@@ -129,6 +129,30 @@ public final class OllamaBackendBundle: AgentBundle, @unchecked Sendable {
     wakes — read live each turn; a per-call `system_prompt` beats it for that delivery.
     There is no caller-supplied history: a one-off completion is a disposable agent with its own store; context for another agent travels in the text.
 
+    ## Streaming parts — animation, never action
+    Your output streams as PARTS while you write it — `text`, `thinking`, `call` — each
+    `part_start {stream_id, source, kind, name?, target?, to?, re}` → `part_delta {text}`
+    (batched 50 ms) → `part_end {ok}` | `part_abort {reason}`. A call part goes to its
+    addressee's inbox (each of `to`) once `<target_id>`/`<to>` has closed; every other part
+    goes on your own id, tagged with the caller's `client_id`. Deltas ride inboxes only —
+    the state stream carries a part's start / end / abort, never a delta. Nothing
+    dispatches from a part: a call without its `</call>` is not a call, and ONLY A
+    SUCCESSFUL GENERATION DISPATCHES — a pass that stops with a block still open sends
+    nothing, its earlier closed calls included. The message a call becomes carries the
+    `stream_id` it streamed as (`· stream <id>` on the receiving header), so a consumer
+    settles its draft on it; a call part that ended and saw no such message within 60 s
+    is FAILED.
+
+    A receiver stops you with `stop {stream_id?}`: the provider stream closes and the open
+    parts abort. A CUT pass leaves a marker row on top of your context, never a half
+    answer: `[stopped by <receiver>]` or `[model stopped generating]` (`… while thinking`
+    when cut inside a thought), then the visible text, then `[a <tool> call to <target> was
+    not sent]` for every call of the pass.
+
+    `rows {after?, limit?}` is a VIEW of your conversation exactly as you hold it in
+    memory — no store read, no transform; before your first turn you hold nothing
+    (`loaded:false`).
+
     ## Recursion guard
     A `send` carrying a reserved `_call_stack` that already contains this agent (a
     cycle) or exceeds depth 8 is refused BEFORE the FIFO lock â so an authored agent's AI→AI

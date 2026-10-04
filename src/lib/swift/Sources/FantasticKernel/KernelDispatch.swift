@@ -167,6 +167,13 @@ extension Kernel {
         emitItem(targetId, .text(payload))
     }
 
+    /// QUIET `emit` (owner, 2026-10-04): the inbox and its watchers, NOTHING on
+    /// the state stream — a streaming part's deltas, which would flood every
+    /// subscriber at token rate. Gated and routed exactly as `emit`.
+    public func emitQuiet(_ targetId: AgentId, _ payload: JSON) async {
+        emitItem(targetId, .text(payload), publish: false)
+    }
+
     /// `emit` for a payload carrying raw bytes — a `read_stream` chunk a bridge
     /// re-emits from a remote watch, which must reach a local watcher WHOLE.
     /// Same no-op rule for a non-agent id.
@@ -183,7 +190,7 @@ extension Kernel {
     /// `<guid>|<agent>` of a CONNECTED PEER reaches EVERY live route of that
     /// guid (each tab of one identity), gated on the egress side like a send to
     /// it (`emitPeer`).
-    public func emitItem(_ targetId: AgentId, _ item: InboxItem) {
+    public func emitItem(_ targetId: AgentId, _ item: InboxItem, publish: Bool = true) {
         guard
             let target = agent(targetId)
                 ?? qualifiedTarget(targetId.value).flatMap({ $0.isRemote ? $0 : nil })
@@ -198,7 +205,7 @@ extension Kernel {
             emitPeer(r, item: item)
             return
         }
-        fanout(target, "emit", item)
+        fanout(target, "emit", item, publish: publish)
     }
 
     /// The escalation line every DISTILLED reflect carries — python

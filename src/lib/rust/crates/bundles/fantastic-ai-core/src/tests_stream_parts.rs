@@ -667,3 +667,81 @@ async fn status_during_a_stream_is_json() {
     );
     turn.await.unwrap();
 }
+
+/// Only a successful generation dispatches (owner, 2026-10-04): a pass that wrote
+/// a complete call and then stopped with another block open sends NEITHER, and the
+/// marker names both as not sent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cut_pass_sends_nothing_not_even_its_closed_calls() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = slow_kernel(&tmp).await;
+    let ai = make_ai(&kernel, &id_for(&tmp, "sp_all")).await;
+    ram_store(&kernel, "notes").await;
+    wire(&kernel, ai.as_str(), "notes", json!("*"));
+    let done_one = "<call name=\"send\"><target_id>notes</target_id><type>reflect</type></call>";
+    let open_two = "<call name=\"send\"><target_id>notes</target_id><type>refl";
+    let pass = format!("{done_one} then {open_two}");
+    let fp = slow(&ai, &[&pass, DONE], Duration::ZERO);
+    call(&kernel, ai.as_str(), json!({"type": "send", "text": "go"})).await;
+    until_requests(&fp, 2).await;
+    let marker = last_assistant(&fp, 1);
+    assert_eq!(
+        marker.lines().collect::<Vec<_>>(),
+        vec![
+            "[model stopped generating]",
+            "then",
+            "[a send call to notes was not sent]",
+            "[a send call to notes was not sent]",
+        ],
+        "{marker}"
+    );
+    // nothing reached notes: no reply came back for the closed call either
+    let nxt = fp.request(1);
+    let last = nxt.last().unwrap()["content"].to_string();
+    assert!(!last.contains("[reply to"), "{last}");
+}
+
+/// Deltas go to the addressee's inbox only (owner, 2026-10-04): the state stream
+/// carries a part's lifecycle — start / end / abort — never a delta.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deltas_never_reach_the_state_stream() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = slow_kernel(&tmp).await;
+    let ai = make_ai(&kernel, &id_for(&tmp, "sp_q")).await;
+    ram_store(&kernel, "notes").await;
+    wire(&kernel, ai.as_str(), "notes", json!("*"));
+    let mut rx = watcher(&kernel, "notes", "w_q").await;
+    let seen: Arc<std::sync::Mutex<Vec<Value>>> = Arc::default();
+    let tap = Arc::clone(&seen);
+    let _sub = kernel.add_state_subscriber(Arc::new(move |ev: &Value, _| {
+        tap.lock().unwrap().push(ev.clone());
+    }));
+    let fp = slow(&ai, &[CALL, DONE], Duration::ZERO);
+    call(&kernel, ai.as_str(), json!({"type": "send", "text": "go"})).await;
+    until_requests(&fp, 2).await;
+    let inbox = types(&drain_parts(&mut rx));
+    assert!(inbox.iter().any(|t| t == "part_delta"), "{inbox:?}");
+    assert_eq!(
+        inbox.first().map(String::as_str),
+        Some("part_start"),
+        "{inbox:?}"
+    );
+    assert_eq!(
+        inbox.last().map(String::as_str),
+        Some("part_end"),
+        "{inbox:?}"
+    );
+    let on_stream: std::collections::BTreeSet<String> = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|e| e["payload"]["type"].as_str())
+        .filter(|t| t.starts_with("part_"))
+        .map(str::to_string)
+        .collect();
+    assert_eq!(
+        on_stream,
+        ["part_end", "part_start"].map(String::from).into(),
+        "{on_stream:?}"
+    );
+}

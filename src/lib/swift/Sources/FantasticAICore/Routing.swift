@@ -455,6 +455,10 @@ func routeReply(
     // Every closed call part of the pass, `(stream_id, body)` — python's
     // `call_streams`.
     callStreams: [(streamId: String, body: String)] = [],
+    // The model stopped with a block open — ONLY A SUCCESSFUL GENERATION
+    // DISPATCHES (owner, 2026-10-04): nothing is sent, its closed calls and its
+    // malformed-call reports included; it routes as a turn that dispatched nothing.
+    cut: Bool = false,
     launched: StartSignal? = nil
 ) async {
     // However this route ends, the `send` waiting on its launch is released.
@@ -465,7 +469,7 @@ func routeReply(
     // two. EXACT is python's `==` on str: code points, not canonical equivalence.
     var streams = callStreams
     var matched: [ToolCall] = []
-    for (call, body) in terminatedCalls(text) {
+    for (call, body) in cut ? [] : terminatedCalls(text) {
         var call = call
         if let i = streams.firstIndex(where: {
             $0.body.unicodeScalars.elementsEqual(body.unicodeScalars)
@@ -490,7 +494,7 @@ func routeReply(
     // documented default for an absent `reply_to` is self anyway. TAGGED like
     // everything else (`[reply to - · - -]`): python tags every unit, so an error
     // block is counted in M and reads like its siblings.
-    for bad in malformedCalls(text) {
+    for bad in cut ? [] : malformedCalls(text) {
         units.append(
             RouteUnit(dest: selfId.value, target: "-", verb: "-", idx: nil, body: bad.body))
     }

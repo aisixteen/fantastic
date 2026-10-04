@@ -504,7 +504,7 @@ fn a_record_missing_required_fields_is_refused_at_the_write_naming_all() {
     });
     let err = validate(&obj(meta.clone()), &Map::new()).expect("refused");
     assert!(
-        err.contains("missing: kv_slots, kv_overflow, memory_store_id"),
+        err.contains("missing: kv_slots, kv_overflow, memory_store_id, context_window"),
         "{err}"
     );
     // each missing field is named WITH its hint, from the schema
@@ -514,6 +514,7 @@ fn a_record_missing_required_fields_is_refused_at_the_write_naming_all() {
     full.insert("kv_slots".into(), json!(7));
     full.insert("kv_overflow".into(), json!("evict"));
     full.insert("memory_store_id".into(), json!("memory"));
+    full.insert("context_window".into(), json!(262144));
     assert_eq!(validate(&obj(json!({"seed": 3})), &full), None);
 }
 
@@ -523,6 +524,7 @@ fn a_consistent_write_passes() {
         "endpoint": "http://vllm.test/v1",
         "model": "qwen3.8-27b",
         "max_tokens": 8000,
+        "context_window": 262144,
         "kv_slots": 6,
         "kv_overflow": "evict",
         "thinking_token_budget": 4000,
@@ -612,6 +614,7 @@ async fn reflect_shows_the_effective_posture_and_the_shared_table() {
         json!({
             "id": id, "endpoint": endpoint, "model": "qwen3.8-27b", "max_tokens": 8000,
             "kv_slots": 7, "kv_overflow": "evict", "memory_store_id": "memory", "seed": 3,
+            "context_window": 262144,
         }),
     )
     .await;
@@ -742,7 +745,7 @@ async fn unknown_type_wire_shape_is_byte_exact() {
         &kernel,
         json!({"id": id, "endpoint": format!("http://{id}.test/v1"), "model": "m",
                "max_tokens": 8000, "kv_slots": 2, "kv_overflow": "evict",
-               "memory_store_id": "memory"}),
+               "memory_store_id": "memory", "context_window": 262144}),
     )
     .await;
     assert_eq!(r["id"], json!(id), "{r}");
@@ -777,7 +780,7 @@ async fn the_last_budget_is_per_agent_and_freed_on_delete() {
     let memory =
         fantastic_ram_store::test_support::memory_meta(&kernel, &id, json!({"cli": "*"})).await;
     let mut meta = json!({"id": id, "endpoint": endpoint, "model": "m", "max_tokens": 8000,
-                          "kv_slots": 4, "kv_overflow": "evict"});
+                          "kv_slots": 4, "kv_overflow": "evict", "context_window": 262144});
     for (k, v) in memory {
         meta[k] = v;
     }
@@ -786,7 +789,8 @@ async fn the_last_budget_is_per_agent_and_freed_on_delete() {
     let r = create(
         &kernel,
         json!({"id": sib, "endpoint": endpoint, "model": "m", "max_tokens": 8000,
-               "kv_slots": 4, "kv_overflow": "evict", "memory_store_id": "memory"}),
+               "kv_slots": 4, "kv_overflow": "evict", "memory_store_id": "memory",
+               "context_window": 262144}),
     )
     .await;
     assert_eq!(r["id"], json!(sib), "{r}");

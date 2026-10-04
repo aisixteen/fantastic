@@ -64,7 +64,7 @@ def _sampling(rec: dict) -> tuple[dict, bool]:
 
 def make_provider(id, kernel):
     """Build a VllmProvider from the agent record. `endpoint`, `model`,
-    `max_tokens`, `kv_slots` and `kv_overflow` are REQUIRED."""
+    `max_tokens`, `context_window`, `kv_slots` and `kv_overflow` are REQUIRED."""
     from vllm_backend.provider import VllmProvider
 
     rec = kernel.get(id) or {}
@@ -82,7 +82,7 @@ def make_provider(id, kernel):
         model=required_meta(rec, "model", NAME),
         key=key_reader(id, kernel, NAME, required=False),
         max_tokens=_required_int(rec, "max_tokens"),
-        window=rec.get("context_window"),
+        window=_required_int(rec, "context_window"),
         kv_slots=_required_int(rec, "kv_slots"),
         kv_overflow=overflow,
         kv_ttl=float(rec.get("kv_ttl") or KV_TTL),
@@ -123,7 +123,7 @@ async def _reflect_extra(id, kernel):
 #: THE RECORD SCHEMA (lib request #3) — what this kind's record takes, read with
 #: no agent existing (`reflect bundles=all`). Built from the constants the provider
 #: runs on, and enforced by `validate_meta` below, so the page, the write check and
-#: the turn cannot disagree. The five required fields have NO default: nothing is
+#: the turn cannot disagree. The six required fields have NO default: nothing is
 #: guessed about a server.
 RECORD_SCHEMA = schema(
     [
@@ -194,6 +194,9 @@ RECORD_SCHEMA = schema(
         # the door's key, when it wants one — absent = no Authorization header
         credentials_field(required=False),
     ],
+    # the server's window, set on the record and used as set: the whole-window
+    # rule compares max_tokens with it (never a default)
+    require=("context_window",),
 )
 
 #: The fields a turn cannot run without — refused at the write when absent. The

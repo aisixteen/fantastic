@@ -1372,7 +1372,9 @@ fn the_catalog_carries_each_backend_kinds_record_schema() {
             "max_tokens",
             "kv_slots",
             "kv_overflow",
-            "memory_store_id"
+            "memory_store_id",
+            // the server's window — set on the record, used as set
+            "context_window"
         ]
     );
     // a required field has no default — nothing is guessed about a server

@@ -262,6 +262,8 @@ class HostKernel:
         (w / "agents/web/agent.yaml").write_text(_dump(
             {"id": "web", "handler_module": "web.tools",
              "parent_id": self.root_id, "port": port,
+             # the ws leg watches through its host (forensics, `watch`)
+             "callable_by": {**BASE, "ws": "*"},
              "can_call": {**BASE, self.root_id: ROOT_VERBS, "kernel": "*",
                           "rest": "*", "ws": "*", memory.MEMORY: "*", **reach}}))
         # The WS leg — the EVENT face. Every ws frame is the LEG: it names each

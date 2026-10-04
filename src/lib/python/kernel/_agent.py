@@ -1716,10 +1716,15 @@ class Agent:
             out.append(entry)
         return sorted(out, key=lambda b: b["name"])
 
-    async def emit(self, target_id: str, payload: dict) -> None:
+    async def emit(self, target_id: str, payload: dict, *, quiet: bool = False) -> None:
         """Drop a payload into target_id's inbox + tell watchers.
         Non-routing — does NOT invoke any handler. Telemetry sees an
         `emit` event.
+
+        QUIET (owner, 2026-10-04): the payload reaches the target's inbox and its
+        watchers and NOTHING is published on the state stream — a streaming
+        `part_delta` arrives at token rate, and the state stream carries a part's
+        lifecycle, never its every delta.
 
         GATED LIKE A SEND when an agent emits on ANOTHER agent (verb `emit`): an
         open ws leg used to drop events on any inbox, an AI's input stream
@@ -1742,7 +1747,7 @@ class Agent:
         if sender is not None and sender != target_id:
             if self._gate(sender, "emit", target, payload) is not None:
                 return
-        target._fanout(payload, kind="emit")
+        target._fanout(payload, kind="emit", publish=not quiet)
 
     async def _emit_remote(self, remote: "RemoteTarget", payload: dict) -> None:
         """Hand one emit to every live route of a peer guid. A refused emit is
@@ -2106,7 +2111,7 @@ class Agent:
                 {"agent_id": self.id, "kind": "drain", "backlog": self._in_flight}
             )
 
-    def _fanout(self, payload: dict, *, kind: str) -> None:
+    def _fanout(self, payload: dict, *, kind: str, publish: bool = True) -> None:
         """Publish state event for self's traffic + mirror to watchers.
 
         Watchers may be agents OR synthetic ids (browser WS clients
@@ -2126,23 +2131,24 @@ class Agent:
         own = self.ctx.inboxes.get(self.id)
         if own is not None:
             self._put_drop_oldest(own, payload)
-        self.ctx.publish_state(
-            {
-                "agent_id": self.id,
-                "kind": kind,
-                "backlog": self._in_flight,
-                "sender": sender,
-                "summary": summary,
-                "payload": payload,
-            }
-        )
+        if publish:
+            self.ctx.publish_state(
+                {
+                    "agent_id": self.id,
+                    "kind": kind,
+                    "backlog": self._in_flight,
+                    "sender": sender,
+                    "summary": summary,
+                    "payload": payload,
+                }
+            )
         for tgt_id in tuple(self._watcher_ids):
             tgt_inbox = self.ctx.inboxes.get(tgt_id)
             if tgt_inbox is None:
                 continue
             self._put_drop_oldest(tgt_inbox, payload)
             tgt_agent = self.ctx.agents.get(tgt_id)
-            if tgt_agent is not None:
+            if tgt_agent is not None and publish:
                 self.ctx.publish_state(
                     {
                         "agent_id": tgt_id,

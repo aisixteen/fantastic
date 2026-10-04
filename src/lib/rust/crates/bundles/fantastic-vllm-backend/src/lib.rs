@@ -858,10 +858,7 @@ fn configure(
         model: helpers::required_meta(meta, "model", NAME)?,
         key,
         max_tokens: required_int(meta, "max_tokens")?,
-        window: meta
-            .get("context_window")
-            .and_then(Value::as_i64)
-            .filter(|w| *w > 0),
+        window: Some(required_int(meta, "context_window")?),
         kv_slots: required_int(meta, "kv_slots")?,
         kv_overflow: kv_overflow.to_string(),
         kv_ttl: seconds(meta, "kv_ttl", KV_TTL)?,
@@ -1031,62 +1028,67 @@ fn sampling_default(key: &str) -> Value {
 pub fn record_schema() -> &'static Value {
     static SCHEMA: OnceLock<Value> = OnceLock::new();
     SCHEMA.get_or_init(|| {
-        schema::schema(vec![
-            Field::new("endpoint", "str", "the vLLM server's /v1 URL").required(),
-            Field::new("model", "str", "the served model name").required(),
-            Field::new("max_tokens", "int", "a turn's output budget (tokens)").required(),
-            Field::new(
-                "kv_slots",
-                "int",
-                "how many conversations may be live on the endpoint",
-            )
-            .required(),
-            Field::new(
-                "kv_overflow",
-                "enum",
-                "all slots live: evict (the least-recently-used rotates out) or reject \
+        schema::schema_requiring(
+            vec![
+                Field::new("endpoint", "str", "the vLLM server's /v1 URL").required(),
+                Field::new("model", "str", "the served model name").required(),
+                Field::new("max_tokens", "int", "a turn's output budget (tokens)").required(),
+                Field::new(
+                    "kv_slots",
+                    "int",
+                    "how many conversations may be live on the endpoint",
+                )
+                .required(),
+                Field::new(
+                    "kv_overflow",
+                    "enum",
+                    "all slots live: evict (the least-recently-used rotates out) or reject \
                      (the newcomer is refused)",
-            )
-            .required()
-            .one_of(&KV_OVERFLOWS),
-            Field::new("temperature", "float", "sampling temperature")
-                .default(sampling_default("temperature")),
-            Field::new("top_p", "float", "nucleus sampling").default(sampling_default("top_p")),
-            Field::new("top_k", "int", "top-k sampling").default(sampling_default("top_k")),
-            Field::new(
-                "reasoning_effort",
-                "enum",
-                "how much the model wants to think (xhigh needs a thinking_token_budget)",
-            )
-            .one_of(&REASONING_EFFORTS)
-            .default(sampling_default("reasoning_effort")),
-            Field::new(
-                "thinking_token_budget",
-                "int",
-                "the hard cap on thinking tokens, below max_tokens; unset, a turn sends \
+                )
+                .required()
+                .one_of(&KV_OVERFLOWS),
+                Field::new("temperature", "float", "sampling temperature")
+                    .default(sampling_default("temperature")),
+                Field::new("top_p", "float", "nucleus sampling").default(sampling_default("top_p")),
+                Field::new("top_k", "int", "top-k sampling").default(sampling_default("top_k")),
+                Field::new(
+                    "reasoning_effort",
+                    "enum",
+                    "how much the model wants to think (xhigh needs a thinking_token_budget)",
+                )
+                .one_of(&REASONING_EFFORTS)
+                .default(sampling_default("reasoning_effort")),
+                Field::new(
+                    "thinking_token_budget",
+                    "int",
+                    "the hard cap on thinking tokens, below max_tokens; unset, a turn sends \
                      min(default, max_tokens/2)",
-            )
-            .default(sampling_default("thinking_token_budget")),
-            Field::new("min_p", "float", "min-p sampling; sent only when set"),
-            Field::new("presence_penalty", "float", "sent only when set"),
-            Field::new("frequency_penalty", "float", "sent only when set"),
-            Field::new("repetition_penalty", "float", "sent only when set"),
-            Field::new("no_repeat_ngram_size", "int", "sent only when set"),
-            Field::new("seed", "int", "sent only when set"),
-            Field::new("stop", "list", "stop sequences; sent only when set"),
-            Field::new(
-                "kv_ttl",
-                "float",
-                "seconds an idle conversation keeps its slot",
-            )
-            .default(json!(KV_TTL)),
-            Field::new("connect_timeout", "float", "seconds to reach the server")
-                .default(json!(CONNECT_TIMEOUT)),
-            Field::new("read_timeout", "float", "seconds to wait on a generation")
-                .default(json!(READ_TIMEOUT)),
-            // the door's key, when it wants one — absent = no Authorization header
-            schema::credentials_field(false),
-        ])
+                )
+                .default(sampling_default("thinking_token_budget")),
+                Field::new("min_p", "float", "min-p sampling; sent only when set"),
+                Field::new("presence_penalty", "float", "sent only when set"),
+                Field::new("frequency_penalty", "float", "sent only when set"),
+                Field::new("repetition_penalty", "float", "sent only when set"),
+                Field::new("no_repeat_ngram_size", "int", "sent only when set"),
+                Field::new("seed", "int", "sent only when set"),
+                Field::new("stop", "list", "stop sequences; sent only when set"),
+                Field::new(
+                    "kv_ttl",
+                    "float",
+                    "seconds an idle conversation keeps its slot",
+                )
+                .default(json!(KV_TTL)),
+                Field::new("connect_timeout", "float", "seconds to reach the server")
+                    .default(json!(CONNECT_TIMEOUT)),
+                Field::new("read_timeout", "float", "seconds to wait on a generation")
+                    .default(json!(READ_TIMEOUT)),
+                // the door's key, when it wants one — absent = no Authorization header
+                schema::credentials_field(false),
+            ],
+            // the server's window, set on the record and used as set: the
+            // whole-window rule compares max_tokens with it (never a default)
+            &["context_window"],
+        )
     })
 }
 

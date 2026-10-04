@@ -512,20 +512,24 @@ public final class Kernel: @unchecked Sendable {
     ///
     /// The whole `item` travels, bytes included: a watcher on a `write_stream`
     /// receives the body, which is the binary frame python sends it.
-    func fanout(_ target: Agent, _ kind: String, _ item: InboxItem) {
+    ///
+    /// `publish: false` is a QUIET emit — inboxes only, no state event.
+    func fanout(_ target: Agent, _ kind: String, _ item: InboxItem, publish: Bool = true) {
         // THE CALLER, not the target. Read before any dispatch scope re-points
         // `currentSender` at the target; an operator send carries JSON null.
         let sender = KernelTaskLocals.currentSender
         let summary = summarize(item.payload, body: item.body)
         deliverToInbox(target.id, item)
-        publishState(
-            Kernel.trafficEvent(
-                target.id, kind, target.inFlight, sender, summary, item.payload),
-            body: item.body)
+        if publish {
+            publishState(
+                Kernel.trafficEvent(
+                    target.id, kind, target.inFlight, sender, summary, item.payload),
+                body: item.body)
+        }
         for w in target.watcherIds() {
             guard hasInbox(w) else { continue }
             deliverToInbox(w, item)
-            if let wa = agent(w) {
+            if publish, let wa = agent(w) {
                 publishState(
                     Kernel.trafficEvent(w, kind, wa.inFlight, sender, summary, item.payload),
                     body: item.body)

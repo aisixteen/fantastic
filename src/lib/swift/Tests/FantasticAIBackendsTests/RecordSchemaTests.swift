@@ -52,6 +52,8 @@ private struct Plain: AgentBundle {
         #expect(
             required == [
                 "endpoint", "model", "max_tokens", "kv_slots", "kv_overflow", "memory_store_id",
+                // the server's window — set on the record, used as set
+                "context_window",
             ], "\(required)")
         // a required field has no default — nothing is guessed about a server
         #expect(required.allSatisfy { fields[$0]?.asObject?["default"] == nil })
@@ -209,7 +211,7 @@ private struct Plain: AgentBundle {
                 ["credentials": .null],
                 record: [
                     "endpoint": "http://h", "model": "m", "max_tokens": 10, "kv_slots": 2,
-                    "kv_overflow": "evict", "memory_store_id": "m",
+                    "kv_overflow": "evict", "memory_store_id": "m", "context_window": 262144,
                 ])
                 == nil)
     }

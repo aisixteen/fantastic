@@ -345,56 +345,66 @@ class CaptureKernel(HostKernel):
             raise SystemExit(f"{self.rt}: seeded agent.yaml carries no id: {root!r}")
         self.root_id = measured
 
-        root["callable_by"] = {**BASE, "rest": "*", "ws": "*"}
-        # THE KEYS: every descendant may read one from `creds` (`helpers/creds.py`).
-        root["can_call"] = {**BASE, "rest": "*", **creds.root_grant()}
+        # THE `rest` LEG IS THE TEST'S OPERATOR (owner, 2026-10-04) — the same seed
+        # as `helpers/host/driver.py`. The root is nobody's child, so only this seed
+        # opens it: the legs, the web host and every declared id.
+        root["callable_by"] = {
+            **BASE, "rest": "*", "ws": "*", "web": "*",
+            **{t: "*" for t in self.reach if t != self.root_id},
+        }
         # THE KERNEL'S MEMORY STORE — `kernel_start` refuses to run without one.
-        # One ram_store for the kernel's own rows AND every AI agent's
-        # conversation (each AI record names it in `memory_store_id`); the legs
-        # are its admins, and every declared id may reach it.
+        # One ram_store for the kernel's own rows AND every AI agent's conversation;
+        # it and the credential store live UNDER THE LEG, which wires the agents it
+        # creates to them.
         root["memory_store_id"] = memory.MEMORY
         write_rec(w / "agent.yaml", root)
-        (w / "agents" / memory.MEMORY).mkdir(parents=True, exist_ok=True)
-        write_rec(w / "agents" / memory.MEMORY / "agent.yaml", memory.store_record(
-            self.root_id,
-            admins=["kernel", "rest", "ws"],
-            callable_by={**BASE, "rest": "*", "ws": "*", "web": "*",
-                         **{t: "*" for t in self.reach
-                            if t not in (self.root_id, memory.MEMORY)}}))
+        rest_dir = w / "agents/web/agents/rest"
+        (rest_dir / "agents" / memory.MEMORY).mkdir(parents=True, exist_ok=True)
+        write_rec(rest_dir / "agents" / memory.MEMORY / "agent.yaml", memory.store_record(
+            "rest", callable_by={**BASE, "$parent": "*", "ws": "*", "web": "*"}))
         # THE CREDENTIAL STORE — env-backed (the scrubbed env carries the stub's
         # dummy key), one ref per keyed stub this boot talks to, bound to its URL.
-        (w / "agents" / creds.CREDS).mkdir(parents=True, exist_ok=True)
-        write_rec(w / "agents" / creds.CREDS / "agent.yaml", creds.store_record(
-            self.root_id,
-            {ref: (creds.KEYED[ref][0], url) for ref, url in self.creds.items()}))
+        (rest_dir / "agents" / creds.CREDS).mkdir(parents=True, exist_ok=True)
+        write_rec(rest_dir / "agents" / creds.CREDS / "agent.yaml", {
+            **creds.store_record(
+                "rest", {ref: (creds.KEYED[ref][0], url) for ref, url in self.creds.items()}),
+            "callable_by": {**BASE, "$parent": "*"},
+        })
 
         reach = {t: "*" for t in self.reach if t != self.root_id}
-        reach[memory.MEMORY] = "*"
         legs = {
+            # `web` reads its legs' routes and serves /file/ AS ITSELF; the ws leg
+            # watches through it.
             "agents/web": {
                 "id": "web",
                 "handler_module": "web.tools",
                 "parent_id": self.root_id,
                 "port": port,
-                "can_call": {**BASE, self.root_id: ROOT_VERBS, "kernel": "*", **reach},
+                "callable_by": {**BASE, "ws": "*"},
+                "can_call": {**BASE, self.root_id: ROOT_VERBS, "kernel": "*",
+                             "rest": "*", "ws": "*", memory.MEMORY: "*", **reach},
             },
-            # BOTH HALVES ON THE LEG. An io leg with no `ingress_rule` is SEALED,
-            # and every ws frame is dispatched as THIS agent — so the rule and a
-            # `can_call` naming each id (literal id or `$token`; `"*"` as a KEY
-            # never matches) are what make a watcher anything but a silent stream.
+            # The WS leg — the EVENT face: every ws frame is the leg, naming each
+            # target by literal id.
             "agents/web/agents/ws": {
                 "id": "ws",
                 "handler_module": "web_ws.tools",
                 "parent_id": "web",
                 "ingress_rule": "allow_all_ingress",
-                "can_call": {**BASE, self.root_id: ROOT_VERBS, "kernel": "*", **reach},
+                "callable_by": {**BASE, "$parent": "*"},
+                "can_call": {**BASE, self.root_id: ROOT_VERBS, "kernel": "*", "web": "*",
+                             memory.MEMORY: "*", **reach},
             },
+            # The REST leg — the test's operator: the root's kernel verbs, its own
+            # children, the declared ids.
             "agents/web/agents/rest": {
                 "id": "rest",
                 "handler_module": "web_rest.tools",
                 "parent_id": "web",
                 "ingress_rule": "allow_all_ingress",
-                "can_call": {**BASE, self.root_id: ROOT_VERBS, "kernel": "*", **reach},
+                "callable_by": {**BASE, "$parent": "*"},
+                "can_call": {**BASE, self.root_id: ROOT_VERBS, "kernel": "*",
+                             "$children": "*", **reach},
             },
         }
         for rel, rec in legs.items():

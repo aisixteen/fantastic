@@ -499,6 +499,10 @@ the chain explicitly: <call name=\"done\"></call>";
 /// `call_streams` is every closed call part of the pass, `(stream_id, body)`
 /// ([`crate::stream_parts::PartSplitter::closed_calls`]): a dispatched message
 /// carries the `stream_id` of the part it was streamed as.
+///
+/// `cut`: the model stopped with a block open — ONLY A SUCCESSFUL GENERATION
+/// DISPATCHES (owner, 2026-10-04), so the pass sends nothing, its closed calls and
+/// its malformed-call reports included; it routes as a turn that dispatched nothing.
 #[allow(clippy::too_many_arguments)]
 pub async fn route_reply(
     self_id: AgentId,
@@ -513,6 +517,7 @@ pub async fn route_reply(
     message_id: Option<i64>,
     dead_turn: bool,
     call_streams: Vec<(String, String)>,
+    cut: bool,
 ) {
     // THE MODEL'S CALLS ARE THE AGENT'S CALLS — gated. The routing task is
     // spawned by the agent's own dispatch through `Kernel::spawn_task`, which
@@ -532,6 +537,7 @@ pub async fn route_reply(
         message_id,
         dead_turn,
         call_streams,
+        cut,
     )
     .await
 }
@@ -578,6 +584,7 @@ async fn route_reply_gated(
     message_id: Option<i64>,
     dead_turn: bool,
     call_streams: Vec<(String, String)>,
+    cut: bool,
 ) {
     let sp = system_prompt.as_deref();
     // THE MATCH (owner, 2026-10-04): a dispatched message carries the `stream_id`
@@ -585,7 +592,12 @@ async fn route_reply_gated(
     // Matched by the call's exact body, in order — one reading of the text, not
     // two.
     let mut streams = call_streams;
-    let calls: Vec<crate::tool_parse::ToolCall> = terminated_calls(&text)
+    let parsed = if cut {
+        Vec::new()
+    } else {
+        terminated_calls(&text)
+    };
+    let calls: Vec<crate::tool_parse::ToolCall> = parsed
         .into_iter()
         .map(|(mut call, body)| {
             if let Some(i) = streams.iter().position(|(_, b)| *b == body) {
@@ -606,7 +618,12 @@ async fn route_reply_gated(
     // could not read, and the documented default for an absent `reply_to` is self
     // anyway. TAGGED like everything else (`[reply to - · - -]`): python tags every
     // unit, so an error block is counted in M and reads like its siblings.
-    for bad in malformed_calls(&text) {
+    let malformed = if cut {
+        Vec::new()
+    } else {
+        malformed_calls(&text)
+    };
+    for bad in malformed {
         units.push(Unit {
             dest: self_id.as_str().to_string(),
             target: "-".to_string(),

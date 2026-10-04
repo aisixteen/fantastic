@@ -1446,6 +1446,24 @@ impl Kernel {
     /// A QUALIFIED `<guid>|<agent>` OF A CONNECTED PEER goes to every live route
     /// of that guid ([`crate::peers::emit_peer`]) — every tab of one identity.
     pub async fn emit_item(self: &Arc<Self>, target_id: &AgentId, item: crate::inbox::InboxItem) {
+        self.emit_item_with(target_id, item, true).await;
+    }
+
+    /// [`Self::emit`], QUIET (owner, 2026-10-04): the payload reaches the target's
+    /// inbox and its watchers and NOTHING is published on the state stream — a
+    /// streaming `part_delta` arrives at token rate, and the state stream carries a
+    /// part's lifecycle, never its every delta. Python `Agent.emit(..., quiet=True)`.
+    pub async fn emit_quiet(self: &Arc<Self>, target_id: &AgentId, payload: Value) {
+        self.emit_item_with(target_id, crate::inbox::InboxItem::text(payload), false)
+            .await;
+    }
+
+    async fn emit_item_with(
+        self: &Arc<Self>,
+        target_id: &AgentId,
+        item: crate::inbox::InboxItem,
+        publish: bool,
+    ) {
         let Some(target) = self.agents.get(target_id).map(|e| Arc::clone(&e)) else {
             if let Some(remote) = self
                 .qualified_target(target_id.as_str())
@@ -1461,7 +1479,8 @@ impl Kernel {
                 return;
             }
         }
-        self.fanout(&target, "emit", &item, sender.as_ref()).await;
+        self.fanout_with(&target, "emit", &item, sender.as_ref(), publish)
+            .await;
     }
 
     /// Register `watcher_id` as an observer of `src_id`'s inbox.
@@ -1556,6 +1575,19 @@ impl Kernel {
         item: &crate::inbox::InboxItem,
         sender: Option<&AgentId>,
     ) {
+        self.fanout_with(target, kind, item, sender, true).await;
+    }
+
+    /// [`Self::fanout`]; `publish: false` delivers to the inboxes and publishes
+    /// nothing on the state stream ([`Self::emit_quiet`]).
+    async fn fanout_with(
+        &self,
+        target: &Arc<Agent>,
+        kind: &str,
+        item: &crate::inbox::InboxItem,
+        sender: Option<&AgentId>,
+        publish: bool,
+    ) {
         // `sender` is THE CALLER, not the target; an operator send carries JSON
         // null.
         let summary = summarize_payload(&item.payload, item.body.as_ref());
@@ -1565,16 +1597,21 @@ impl Kernel {
             // `.bufferingNewest` rule, which rust used to invert.
             tx.send(item.clone());
         }
-        self.publish_state_with_body(
-            &traffic_event(&target.id, kind, target.in_flight(), sender, &summary, item),
-            item.body.as_ref(),
-        );
+        if publish {
+            self.publish_state_with_body(
+                &traffic_event(&target.id, kind, target.in_flight(), sender, &summary, item),
+                item.body.as_ref(),
+            );
+        }
         let watchers: Vec<AgentId> = target.watcher_ids.read().await.iter().cloned().collect();
         for w in watchers {
             let Some(tx) = self.inboxes.get(&w).map(|e| e.clone()) else {
                 continue;
             };
             tx.send(item.clone());
+            if !publish {
+                continue;
+            }
             if let Some(wa) = self.agents.get(&w).map(|e| Arc::clone(&e)) {
                 self.publish_state_with_body(
                     &traffic_event(&w, kind, wa.in_flight(), sender, &summary, item),

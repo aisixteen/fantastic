@@ -11,8 +11,8 @@ import OrderedCollections
 ///
 /// A call part with an addressee goes to that inbox (each of `to`), as an emit —
 /// gated like any emit on another agent; a refused one is dropped. Prose, thought
-/// and calls without an addressee (done, await, inquiry_answer) go where the
-/// tokens go: the caller (`toCaller`).
+/// and calls without an addressee (done, await, inquiry_answer) go on the
+/// agent's own inbox, tagged with `client_id` (none for the terminal caller).
 final class PartPublisher {
     static let BATCH_SECONDS = 0.05
 
@@ -42,12 +42,27 @@ final class PartPublisher {
         // `part.get("to") or ([part["target"]] if part.get("target") else [])`
         var addrs: [String] = part.to ?? []
         if addrs.isEmpty, let t = part.target, !t.isEmpty { addrs = [t] }
+        // DELTAS ARE QUIET (owner, 2026-10-04): the addressee's inbox (and its
+        // watchers) only, never the state stream — a token-rate stream would flood
+        // every subscriber. `part_start`/`part_end`/`part_abort` stay on it.
+        let quiet = ev["type"] == .string("part_delta")
         if part.kind != "call" || addrs.isEmpty {
-            await toCaller(kernel: kernel, agentId: selfId, clientId: clientId, event: ev)
+            // The terminal renders tokens, not parts.
+            if clientId == AIConstants.DEFAULT_CLIENT_ID { return }
+            ev["client_id"] = .string(clientId)
+            await emit(selfId, .object(ev), quiet: quiet)
             return
         }
         for addr in addrs {
-            await kernel.emit(addr == "self" ? selfId : AgentId(addr), .object(ev))
+            await emit(addr == "self" ? selfId : AgentId(addr), .object(ev), quiet: quiet)
+        }
+    }
+
+    private func emit(_ target: AgentId, _ ev: JSON, quiet: Bool) async {
+        if quiet {
+            await kernel.emitQuiet(target, ev)
+        } else {
+            await kernel.emit(target, ev)
         }
     }
 
@@ -121,14 +136,16 @@ final class AIStreamParts: @unchecked Sendable {
         await gate.release()
     }
 
-    /// `cut = splitter.open_call; parts_out.push(splitter.finish(), final=True)` —
-    /// the call still open when the model stopped generating, if any.
-    func finish() async -> StreamPart? {
+    /// `cut = splitter.open_call is not None; parts_out.push(splitter.finish(),
+    /// final=True)` — when the model stopped generating with a block open, EVERY
+    /// call part of the pass (none of them is sent); nil otherwise.
+    func finish() async -> [StreamPart]? {
         await gate.acquire()
-        let cut = splitter.openCall
+        let cut = splitter.openCall != nil
         await publisher.push(splitter.finish(), final: true)
+        let calls = splitter.parts.filter { $0.kind == "call" }
         await gate.release()
-        return cut
+        return cut ? calls : nil
     }
 
     /// `parts_out.push(splitter.stop(why), final=True)`. Returns every part the

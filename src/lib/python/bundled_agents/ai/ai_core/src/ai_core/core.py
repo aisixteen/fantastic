@@ -1417,6 +1417,7 @@ async def _route_reply(
     message_id: str | None = None,
     dead_turn: bool = False,
     call_streams: list[tuple[str, str]] | None = None,
+    cut: bool = False,
 ):
     """Honour where this pass's output goes. Runs DETACHED, after the lock is
     released.
@@ -1448,7 +1449,10 @@ async def _route_reply(
     # the call's exact body, in order — one reading of the text, not two.
     streams = list(call_streams or [])
     calls = []
-    for call, body in terminated_calls(text or ""):
+    # ONLY A SUCCESSFUL GENERATION DISPATCHES (owner, 2026-10-04): a pass the model
+    # stopped with a block open sends NOTHING — its earlier closed calls included;
+    # the turn's marker names every one as not sent.
+    for call, body in [] if cut else terminated_calls(text or ""):
         i = next((n for n, (_sid, b) in enumerate(streams) if b == body), None)
         if i is not None:
             call = {**call, "stream_id": streams.pop(i)[0]}
@@ -1463,7 +1467,7 @@ async def _route_reply(
     # matches what the model actually emitted. Goes to SELF: `reply_to` lives
     # inside the body we could not read, and the documented default for an
     # absent `reply_to` is self anyway.
-    for bad in malformed_calls(text or ""):
+    for bad in [] if cut else malformed_calls(text or ""):
         # Plain text, not JSON: the model↔harness path carries no JSON either way.
         units.append(
             (
@@ -1946,12 +1950,22 @@ class _PartPublisher:
 
     async def _send(self, part: dict, ev: dict) -> None:
         ev = {**ev, "stream_id": part["stream_id"], "source": self.self_id}
+        # DELTAS ARE QUIET (owner, 2026-10-04): inbox and watchers only, never the
+        # state stream — it carries a part's lifecycle (start / end / abort).
+        quiet = ev["type"] == "part_delta"
         addrs = part.get("to") or ([part["target"]] if part.get("target") else [])
         if part["kind"] != "call" or not addrs:
-            await _to_caller(self.kernel, self.self_id, self.client_id, ev)
+            # the terminal renders tokens, not parts — `cli` gets none
+            if self.client_id == DEFAULT_CLIENT_ID:
+                return
+            await self.kernel.emit(
+                self.self_id, {**ev, "client_id": self.client_id}, quiet=quiet
+            )
             return
         for addr in addrs:
-            await self.kernel.emit(self.self_id if addr == "self" else addr, ev)
+            await self.kernel.emit(
+                self.self_id if addr == "self" else addr, ev, quiet=quiet
+            )
 
     async def _flush(self, sid: str) -> None:
         held = self._pending.pop(sid, None)
@@ -2505,7 +2519,11 @@ async def _run(
         {
             "role": "assistant",
             "content": (
-                cut_marker(last_text, "model stopped generating", [cut_call])
+                cut_marker(
+                    last_text,
+                    "model stopped generating",
+                    [p for p in splitter.parts if p["kind"] == "call"],
+                )
                 if cut_call is not None
                 else without_thinking(last_text)
             ),
@@ -2522,6 +2540,9 @@ async def _run(
         # every closed call part (stream_id, body) — `_route_reply` stamps each
         # dispatched message with the stream it was previewed as
         "call_streams": list(splitter.closed_calls),
+        # the model stopped generating with a block open — NOTHING of this pass
+        # is sent (owner, 2026-10-04: only a successful generation dispatches)
+        "cut": cut_call is not None,
     }
 
 
@@ -2826,6 +2847,7 @@ def _make_send(cfg: Backend):
         # visible in `ps` and reachable by `cancel`.
         # The closed call parts feed routing only — never the caller's reply.
         call_streams = reply.pop("call_streams", []) if isinstance(reply, dict) else []
+        cut = bool(reply.pop("cut", False)) if isinstance(reply, dict) else False
         if isinstance(reply, dict) and not reply.get("error"):
             coro = _route_reply(
                 id,
@@ -2844,6 +2866,7 @@ def _make_send(cfg: Backend):
                 message_id=reply.get("message_id"),
                 dead_turn=bool(reply.get("dead_turn")),
                 call_streams=call_streams,
+                cut=cut,
             )
             kernel.ctx.spawn_task(id, "route_reply", coro)
         return reply

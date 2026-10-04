@@ -82,8 +82,8 @@ class WireRoot:
         `subai_graph`, 27 minutes each).
 
         This is NOT the in-process bypass wearing a wire coat: every method here
-        goes through the memory store's own verbs, as the admin the driver's leg
-        was seeded to be. One probe, one code path, every runtime — which is the
+        goes through the memory store's own verbs (`dump`/`inject`), as the leg
+        the store is a child of. One probe, one code path, every runtime — which is the
         rule the scenario suite exists under.
         """
         return WireCtx(self.k)
@@ -126,8 +126,8 @@ class WireTranscript:
         # THE STORE, not the backend's `history` verb: `history` answers a DIGEST
         # page and never the text, so the text this reader scores is read from the
         # agent's memory store — the same rows the in-process reader walks.
-        # THE AGENT'S MEMORY STORE, read as an admin naming the owner — the same
-        # rows `_load_history` reads in process.
+        # THE AGENT'S MEMORY STORE, read from its `dump` — the same rows
+        # `_load_history` reads in process.
         rows = WireCtx(self.k).rows_for(self.aid)
         if not rows:
             return
@@ -195,8 +195,8 @@ class WireCtx:
     """A reader over a spawned kernel's REST face, for the scorers.
 
     The kernel keeps no conversation: an agent's rows live in the `memory` store,
-    read here as an ADMIN naming the owner (the driver's `rest` leg is one — see
-    `HostKernel.seed`). BLOCKING, like `WireTranscript._refresh`: the scorers that
+    read here from the store's `dump` (a caller reads only its own key; the driver's
+    `rest` leg is the store's parent — see `HostKernel.seed`). BLOCKING, like `WireTranscript._refresh`: the scorers that
     use it are plain synchronous functions, and every call is bounded.
     """
 
@@ -244,14 +244,6 @@ class WireCtx:
             key=lambda row: row.get("id") or 0,
         )
         return [{**x, "agent": aid} for x in rows]
-
-    def rows_write(self, aid: str, rows: list[dict]) -> list[int]:
-        """Planting rows in ANOTHER agent's conversation needs to act as that agent,
-        which only an in-process kernel can (a caller appends under its own key)."""
-        raise AssertionError(
-            f"rows_write({aid}) over the wire: a caller appends only under its own "
-            "key — plant rows in process"
-        )
 
     def agent_ids(self) -> list[str]:
         r = self._kernel({"type": "list_agents"})

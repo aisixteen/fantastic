@@ -340,3 +340,62 @@ async def test_rows_is_a_view_of_what_the_agent_holds(seeded_kernel, fake_provid
     with as_agent(k, "stranger"):
         out = (await k.send([{"target": "sp_rows", "payload": {"type": "rows"}}]))[0]
     assert (out["result"] or {}).get("reason") == "unauthorized", out
+
+
+async def test_a_cut_pass_sends_nothing_not_even_its_closed_calls(
+    seeded_kernel, fake_providers
+):
+    """Only a successful generation dispatches (owner, 2026-10-04): a pass that
+    wrote a complete call and then stopped with another block open sends NEITHER,
+    and the marker names both as not sent."""
+    k = seeded_kernel
+    _ai(k, "sp_all")
+    k.create("ram_store.tools", id="notes")
+    wire(k, "sp_all", "notes")
+    done_one = (
+        '<call name="send"><target_id>notes</target_id><type>reflect</type></call>'
+    )
+    open_two = '<call name="send"><target_id>notes</target_id><type>refl'
+    fp = fake_providers["sp_all"] = _Slow([done_one + " then " + open_two, DONE])
+    await k.send([{"target": "sp_all", "payload": {"type": "send", "text": "go"}}])
+    await _until(lambda: len(fp.requests) >= 2)
+    nxt = fp.requests[1]
+    marker = [m["content"] for m in nxt if m["role"] == "assistant"][-1]
+    assert marker.splitlines() == [
+        "[model stopped generating]",
+        "then",
+        "[a send call to notes was not sent]",
+        "[a send call to notes was not sent]",
+    ], marker
+    # nothing reached notes: no reply came back for the closed call either
+    assert "[reply to" not in nxt[-1]["content"], nxt[-1]["content"]
+
+
+async def test_deltas_never_reach_the_state_stream(seeded_kernel, fake_providers):
+    """Deltas go to the addressee's inbox only (owner, 2026-10-04): the state
+    stream carries a part's lifecycle — start / end / abort — never a delta."""
+    k = seeded_kernel
+    _ai(k, "sp_q")
+    k.create("ram_store.tools", id="notes")
+    wire(k, "sp_q", "notes")
+    k.ctx.ensure_inbox("w_q")
+    k.watch("notes", "w_q")
+    seen: list[dict] = []
+    k.ctx.state_subscribers.append(lambda ev: seen.append(ev))
+    fp = fake_providers["sp_q"] = _Slow([CALL, DONE])
+    await k.send([{"target": "sp_q", "payload": {"type": "send", "text": "go"}}])
+    await _until(lambda: len(fp.requests) >= 2)
+    inbox = [
+        e["type"]
+        for e in _drain(k, "w_q")
+        if str(e.get("type", "")).startswith("part_")
+    ]
+    assert (
+        "part_delta" in inbox and inbox[0] == "part_start" and inbox[-1] == "part_end"
+    )
+    on_stream = {
+        (e.get("payload") or {}).get("type")
+        for e in seen
+        if str((e.get("payload") or {}).get("type", "")).startswith("part_")
+    }
+    assert on_stream == {"part_start", "part_end"}, on_stream
