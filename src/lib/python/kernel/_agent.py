@@ -783,12 +783,14 @@ class Agent:
         # new root and is refused before it costs an id.
         # The root's own control surface stays open while draining: kernel verbs
         # (`shutdown_agents` again, `shutdown_kernel`, `ps`, `messages`, `ledger`)
-        # and `reflect` are how an operator watches and finishes the stop.
-        to_root = target_id == "kernel" or target_id == self._root().id
+        # and `reflect` are how an operator watches and finishes the stop. Over a
+        # wire the operator's call arrives as a leg's `inbound_call` carrying it —
+        # judged by the call it carries, or a remote operator could never finish
+        # the stop it started.
         if (
             self.ctx.draining
             and not _in_shutdown.get()
-            and not (to_root and (verb in _SYSTEM_VERBS or verb == "reflect"))
+            and not self._is_control(target_id, payload)
             and (cur is None or cur not in self.ctx.tasks)
             and not self.ctx.is_registered(asyncio.current_task())
         ):
@@ -2776,6 +2778,20 @@ class Agent:
         while node.parent is not None:
             node = node.parent
         return node
+
+    def _is_control(self, target_id: str, payload: dict) -> bool:
+        """Is this send the root's CONTROL SURFACE — a kernel verb or `reflect`
+        on the root — directly, or carried by a wire leg's `inbound_call`? The
+        drain gate keeps it open while the kernel stops."""
+        verb = payload.get("type")
+        if verb == "inbound_call":
+            item = payload.get("item")
+            if not isinstance(item, dict) or not isinstance(item.get("payload"), dict):
+                return False
+            target_id, payload = item.get("target"), item["payload"]
+            verb = payload.get("type")
+        to_root = target_id == "kernel" or target_id == self._root().id
+        return to_root and (verb in _SYSTEM_VERBS or verb == "reflect")
 
     # Wiring/posture meta surfaced inline in the DISTILLED tree (not only the full
     # `details` node), so a client reads the IO landscape from ONE root reflect: which

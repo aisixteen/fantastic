@@ -331,30 +331,49 @@ impl TaskTable {
         );
     }
 
-    /// Every live DISPATCH that is not `except` — what the QUIET phase of
+    /// `id` and every ancestor of it — the chain CARRYING a dispatch. Over a
+    /// wire the leg's `inbound_call` is the root of the operator's call, so
+    /// `shutdown_agents` spares the whole chain, not only its own task: cancelling
+    /// the carrier cancels the verb's own reply. Python's `mine` set.
+    pub fn carriers(&self, id: Option<TaskId>) -> Vec<TaskId> {
+        let inner = self.inner.lock().expect("task table poisoned");
+        let mut chain = Vec::new();
+        let mut cur = id;
+        while let Some(t) = cur {
+            if chain.contains(&t) {
+                break;
+            }
+            let Some(e) = inner.tasks.get(&t) else { break };
+            chain.push(t);
+            cur = e.parent;
+        }
+        chain
+    }
+
+    /// Every live DISPATCH that is not in `except` — what the QUIET phase of
     /// `shutdown_agents` waits to settle. Keepalive loops and FORKED service
     /// loops are excluded: neither ever ends on its own, so waiting for them
     /// burns the whole `QUIET_TIMEOUT` and settles nothing. Python's quiet
     /// predicate. The CANCEL step keeps using [`Self::pending`], so a fork
     /// still dies with the rest.
-    pub fn pending_dispatches(&self, except: Option<TaskId>) -> Vec<TaskId> {
+    pub fn pending_dispatches(&self, except: &[TaskId]) -> Vec<TaskId> {
         let inner = self.inner.lock().expect("task table poisoned");
         inner
             .tasks
             .iter()
-            .filter(|(id, e)| !e.keepalive && !e.forked && Some(**id) != except)
+            .filter(|(id, e)| !e.keepalive && !e.forked && !except.contains(id))
             .map(|(id, _)| *id)
             .collect()
     }
 
-    /// Every live task that is NOT a keepalive loop and not `except` — what
+    /// Every live task that is NOT a keepalive loop and not in `except` — what
     /// `shutdown_agents` waits to drain, then cancels. Python's `pending()`.
-    pub fn pending(&self, except: Option<TaskId>) -> Vec<TaskId> {
+    pub fn pending(&self, except: &[TaskId]) -> Vec<TaskId> {
         let inner = self.inner.lock().expect("task table poisoned");
         inner
             .tasks
             .iter()
-            .filter(|(id, e)| !e.keepalive && Some(**id) != except)
+            .filter(|(id, e)| !e.keepalive && !except.contains(id))
             .map(|(id, _)| *id)
             .collect()
     }

@@ -298,12 +298,28 @@ public final class TaskTable: @unchecked Sendable {
             forked: forked)
     }
 
-    /// Every live task that is NOT a keepalive loop and not `except` — what
-    /// `shutdown_agents` waits to drain, then cancels. Python `pending()`.
-    public func pending(except: TaskId?) -> [TaskId] {
+    /// `id` and every ancestor of it — the chain CARRYING a dispatch. Over a
+    /// wire the leg's `inbound_call` is the root of the operator's call, so
+    /// `shutdownAgents` spares the whole chain, not only its own task:
+    /// cancelling the carrier cancels the verb's own reply. Python's `mine` set.
+    public func carriers(_ id: TaskId?) -> Set<TaskId> {
         lock.lock()
         defer { lock.unlock() }
-        return tasks.filter { !$0.value.keepalive && $0.key != except }.map { $0.key }
+        var chain: Set<TaskId> = []
+        var cur = id
+        while let t = cur, !chain.contains(t), let e = tasks[t] {
+            chain.insert(t)
+            cur = e.parent
+        }
+        return chain
+    }
+
+    /// Every live task that is NOT a keepalive loop and not in `except` — what
+    /// `shutdown_agents` waits to drain, then cancels. Python `pending()`.
+    public func pending(except: Set<TaskId>) -> [TaskId] {
+        lock.lock()
+        defer { lock.unlock() }
+        return tasks.filter { !$0.value.keepalive && !except.contains($0.key) }.map { $0.key }
     }
 
     /// The pending DISPATCHES — work that can finish on its own. A `spawnTask`
@@ -311,10 +327,10 @@ public final class TaskTable: @unchecked Sendable {
     /// is a service loop that never settles by construction, so waiting on one
     /// burned the WHOLE quiet timeout on every daemon that ran one. Forks are
     /// CANCELLED by `shutdownAgents`, never awaited. Python `settling()`.
-    public func settling(except: TaskId?) -> [TaskId] {
+    public func settling(except: Set<TaskId>) -> [TaskId] {
         lock.lock()
         defer { lock.unlock() }
-        return tasks.filter { !$0.value.keepalive && !$0.value.forked && $0.key != except }
+        return tasks.filter { !$0.value.keepalive && !$0.value.forked && !except.contains($0.key) }
             .map { $0.key }
     }
 

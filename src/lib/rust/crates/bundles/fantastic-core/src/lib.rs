@@ -816,6 +816,18 @@ impl Bundle for KernelStateBundle {
         if let Some(w) = writer {
             w.flush(kernel).await;
         }
+        // DEBUG FILE FLUSH — a tree with no record store lives in RAM; with
+        // `FANTASTIC_DEBUG_FLUSH=1` (set by the e2e harness, never by default)
+        // every non-ephemeral record lands in its `agent.yaml` at stop, so a test
+        // restart boots the tree it stopped. The wire twin of `_testkit.persist`.
+        if std::env::var("FANTASTIC_DEBUG_FLUSH").as_deref() == Ok("1") {
+            let agents: Vec<Arc<Agent>> = kernel.agents.iter().map(|e| Arc::clone(&e)).collect();
+            for a in agents.iter().filter(|a| !a.ephemeral) {
+                if let Value::Object(rec) = persistence::record_map(&a.record()) {
+                    write_record(&clamp(kernel, &a.root_path)?, &rec, kernel)?;
+                }
+            }
+        }
         Ok(())
     }
 

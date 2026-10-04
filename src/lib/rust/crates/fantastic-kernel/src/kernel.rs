@@ -567,16 +567,17 @@ impl Kernel {
             }
         }
         // The dispatch running THIS verb is in the table too; it is not
-        // pending work.
-        let me = crate::tasks::current_task();
+        // pending work — nor is the chain carrying it (over a wire, the leg's
+        // `inbound_call` is its root: cancelling it cancels this verb's own reply).
+        let mine = self.tasks.carriers(crate::tasks::current_task());
         let deadline = std::time::Instant::now() + QUIET_TIMEOUT;
         // QUIET WAITS ON DISPATCHES ONLY — a forked service loop never settles.
-        while std::time::Instant::now() < deadline && !self.tasks.pending_dispatches(me).is_empty()
+        while std::time::Instant::now() < deadline && !self.tasks.pending_dispatches(&mine).is_empty()
         {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
         let mut cancelled: Vec<Value> = Vec::new();
-        for tid in self.tasks.pending(me) {
+        for tid in self.tasks.pending(&mine) {
             // ROOTS ONLY: the subtree dies with its root, so cancelling a child
             // here would race the parent's own teardown.
             if !self.tasks.is_root(&tid) {

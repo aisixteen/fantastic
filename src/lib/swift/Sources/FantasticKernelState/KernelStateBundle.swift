@@ -275,6 +275,15 @@ public final class KernelStateBundle: AgentBundle, @unchecked Sendable {
     /// store already gone, and the update never landed.
     public func flushPending(agentId: AgentId, kernel: Kernel) async throws {
         await kernel.flushRecords()
+        // DEBUG FILE FLUSH — a tree with no record store lives in RAM; with
+        // `FANTASTIC_DEBUG_FLUSH=1` (set by the e2e harness, never by default)
+        // every non-ephemeral record lands in its `agent.yaml` at stop, so a test
+        // restart boots the tree it stopped. The wire twin of `_testkit.persist`.
+        if ProcessInfo.processInfo.environment["FANTASTIC_DEBUG_FLUSH"] == "1" {
+            for a in kernel.allAgents() where !a.ephemeral {
+                try Self.writeRecord(at: try clamped(a.rootPath.path, kernel), a.record().ordered, kernel)
+            }
+        }
     }
 
     /// Unsubscribe + stop the record loop. `flushPending` normally ran already

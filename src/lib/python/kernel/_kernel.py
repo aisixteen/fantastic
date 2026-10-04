@@ -1408,14 +1408,20 @@ class Kernel:
             with shutdown_context():
                 outs = await asyncio.gather(*(tell(a) for a in targets))
             shut = [a.id for a, o in zip(targets, outs) if o["status"] == COMPLETED]
-        # The dispatch running THIS verb is in the table too; it is not pending work.
-        me = _current_task.get()
+        # The dispatch running THIS verb is in the table too; it is not pending
+        # work — nor is the chain carrying it (over a wire, the leg's
+        # `inbound_call` is its root: cancelling it cancels this verb's own reply).
+        mine: set[int] = set()
+        cur = _current_task.get()
+        while cur is not None and cur in self.tasks and cur not in mine:
+            mine.add(cur)
+            cur = self.tasks[cur].get("parent")
 
         def pending() -> list[int]:
             return [
                 tid
                 for tid, e in self.tasks.items()
-                if not e.get("_keepalive") and tid != me
+                if not e.get("_keepalive") and tid not in mine
             ]
 
         def settling() -> list[int]:

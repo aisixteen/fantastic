@@ -153,9 +153,10 @@ async def reopen_kernel(root):
     The first process must already be gone (`root.ctx.shutdown()` stops it and
     waits). The tree under `.fantastic` is what survives: records, rows, the
     message log. `HostKernel.seed` is idempotent on an existing tree — it boots
-    a seed process only when `agent.yaml` is absent, then rewrites the driver's
-    own records (web/ws/rest) to the same bytes — so booting again here is the
-    restart the probe means, not a fresh kernel wearing the old directory.
+    a seed process only when `agent.yaml` is absent, writes the root and the
+    stores only on the first seed (their runtime grants survive), and rewrites
+    the driver's own records (web/ws/rest, a fresh port) — so booting again here
+    is the restart the probe means, not a fresh kernel wearing the old directory.
 
     In process there is nothing to reopen: `boot_root()` is the caller's, and it
     keeps its own `core` module state. This returns `None` there so a probe can

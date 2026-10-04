@@ -198,19 +198,20 @@ extension Kernel {
             }
         }
         // The dispatch running THIS verb is in the table too; it is not pending
-        // work.
-        let me = KernelTaskLocals.currentTask
+        // work — nor is the chain carrying it (over a wire, the leg's
+        // `inbound_call` is its root: cancelling it cancels this verb's own reply).
+        let mine = tasks.carriers(KernelTaskLocals.currentTask)
         let deadline = Date().addingTimeInterval(quietTimeout)
         // SETTLING, not PENDING: a fork never settles by construction, so
         // waiting on one burned the whole quiet timeout on every daemon with a
         // scheduler / web / bridge loop on the tree (python, 2026-09-21:
         // SIGTERM→exit 10.25 s with a scheduler, 0.29 s without). The cancel
         // loop below still takes every non-keepalive root, forks included.
-        while Date() < deadline && !tasks.settling(except: me).isEmpty {
+        while Date() < deadline && !tasks.settling(except: mine).isEmpty {
             try? await Task.sleep(nanoseconds: 50_000_000)
         }
         var cancelled: [Int64] = []
-        for tid in tasks.pending(except: me) {
+        for tid in tasks.pending(except: mine) {
             // ROOTS ONLY: the subtree dies with its root, so cancelling a child
             // here would race the parent's own teardown.
             guard tasks.isRoot(tid) else { continue }

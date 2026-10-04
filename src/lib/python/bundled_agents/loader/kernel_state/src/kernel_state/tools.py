@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.resources
+import os
 import posixpath
 import secrets
 import sys
@@ -1167,6 +1168,14 @@ async def flush_pending(agent):
     loop = getattr(agent, "_fs_flush_loop", None)
     if loop is not None:
         await loop.aflush()
+    # DEBUG FILE FLUSH — a tree with no record store lives in RAM; with
+    # `FANTASTIC_DEBUG_FLUSH=1` (set by the e2e harness, never by default) every
+    # non-ephemeral record lands in its `agent.yaml` at stop, so a test restart
+    # boots the tree it stopped. The wire twin of `_testkit.persist`.
+    if os.environ.get("FANTASTIC_DEBUG_FLUSH") == "1":
+        for a in list(agent.ctx.agents.values()):
+            if not type(a).ephemeral:
+                write_record(fs.Root(agent.ctx.workdir, a._root_path), a.record)
 
 
 async def on_shutdown(agent):
