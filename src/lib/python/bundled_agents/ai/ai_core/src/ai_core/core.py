@@ -3223,7 +3223,7 @@ async def _derive_reaction(id, kernel) -> dict | None:
 
 
 async def _grep(id, payload, kernel):
-    """args: query:str (req — case-insensitive substring), ids:list[int]? (row ids / pids / fold ids to search; a fold id searches its members), limit:int? (matches, default: as many as fit inline), width:int? (chars of each matched line returned, from its start; default 200 — raise it when the value you need sits deep in a long line). Finds the LINE that mentions something ANYWHERE in your memory — every row you ever wrote or received (behind every clear, inside every fold), the rows other agents SHARED with you, and the reply bodies still held in memory this run. Returns {matches:[{id, line, text}], total, truncated}."""
+    """args: query:str (req — case-insensitive substring), ids:list[int]? (row ids / pids / fold ids to search; a fold id searches its members), limit:int? (matches, default: as many as fit inline), width:int? (chars of each matched line returned, from its start; default 200 — raise it when the value you need sits deep in a long line). Finds the LINE that mentions something ANYWHERE in your memory — every row you ever wrote or received (behind every clear, inside every fold), and the reply bodies still held in memory this run. Returns {matches:[{id, line, text}], total, truncated}."""
     q = str(payload.get("query") or "").strip().lower()
     if not q:
         return {

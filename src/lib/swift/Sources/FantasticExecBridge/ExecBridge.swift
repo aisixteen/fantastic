@@ -214,10 +214,10 @@
             "start": .string("args: command:str (req — on a PTY start, absent = the child's $SHELL), args:list[str]? (argv, default []), pty:{cols,rows}? (run on a terminal). The FULL line (command + args) must fullmatch one of the `allowed` regexes, or be the shell line the record's `shell` permits."),
             "status": .string("args: job_id:int? — one job (with full stdout/stderr), or all of this agent's jobs (summary). A job's id is its kernel task id: `ps` lists it, `cancel task_id=` kills it. Returns {jobs:[…]}."),
             "stop": .string(
-                "args: job_id:int? — SIGKILL one of YOUR jobs (its whole session: the command and everything it launched) or ALL your running jobs on this agent (the operator: all)."
+                "args: job_id:int? — SIGKILL one job (its whole session: the command and everything it launched) or ALL running jobs on this agent."
             ),
-            "interrupt": .string("args: job_id:int? — SIGINT one of YOUR jobs or ALL your running jobs on this agent (the operator: all)."),
-            "clear": .string("args: job_id:int? — drop YOUR finished jobs (one, or all non-running; the operator: all) from the RAM"),
+            "interrupt": .string("args: job_id:int? — SIGINT one job or ALL running jobs on this agent."),
+            "clear": .string("args: job_id:int? — drop finished jobs (one, or all non-running) from the RAM"),
             "write": .string("args: job_id:int (req), data:str (req). Keystrokes/paste into a PTY job, written IN FULL and serialized per job (a bracketed paste is never truncated or interleaved). Returns {written:int}."),
             "resize": .string("args: job_id:int (req), cols:int (req), rows:int (req). Sets a PTY job's window size (the tty sends SIGWINCH, so a TUI redraws). Returns {resized:true, cols, rows}."),
             "ack": .string("args: job_id:int (req), chars:int (req). Flow control from a streaming consumer (an xterm acks each `output` chunk after parsing it): the reader pauses past 100K unacked chars and resumes under 5K. Returns {unacked:int, paused:bool}."),
@@ -1045,11 +1045,11 @@
             }
         }
 
-        /// `clear` — drop finished rows of this agent (one, or all non-running) that
-        /// THIS caller started (the operator: all). The ONE caller that wants the
+        /// `clear` — drop finished rows of this agent (one, or all non-running). The
+        /// ONE caller that wants the
         /// status LABEL rather than process liveness: it is deciding what is
         /// finished enough to forget. No `not_found` guard (python has none): an
-        /// unknown id simply clears nothing; another caller's job is refused.
+        /// unknown id simply clears nothing.
         ///
         /// A NAMED job follows the bulk form's rule (python `_clear`, audit BV-5):
         /// a row still `running` or `stopping` is refused. That row is the only

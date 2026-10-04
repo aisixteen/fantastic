@@ -24,7 +24,7 @@ import threading
 import time
 from pathlib import Path
 
-from families import (BASE, MEMORY, OPEN, VLLM, ai, call, disk_walk, page_walk, quiesce,
+from families import (BASE, MEMORY, OPEN, ROOT_ID, VLLM, ai, call, disk_walk, page_walk, quiesce,
                       save_kernel_log, vllm)
 from spec import CTX_RESERVE, CTX_WINDOW
 from stubs.openai_chat import Handler as OpenAIHandler, OpenAIChatStub
@@ -112,10 +112,10 @@ def roster(stub_url: str, cb: dict, interp: str) -> list:
         ("user", "user_probe.tools", {}),
         ("oracle", "oracle_probe.tools", dict(lines=["the answer is 42"])),
         ("ai", VLLM,
-         ai(**vllm(stub_url), sampling={"x": 1, "y": None},
-              context_async=True, context_window=CTX_WINDOW, output_reserve=CTX_RESERVE,
+         ai(**vllm(stub_url, context_window=CTX_WINDOW), sampling={"x": 1, "y": None},
+              context_async=True, output_reserve=CTX_RESERVE,
               can_call={"readings": "*", "totals": "*", "runner": "*",
-                        "kernel_store": "*", "kernel": "*"})),
+                        "kernel_store": "*", ROOT_ID: "*"})),
     ]
 
 
@@ -310,11 +310,11 @@ def run(ctx) -> None:
     try:
         # ══ s1 — the store first, then the roster ══
         rec.json("s1/create_store", k.create(
-            parent_id=k.root_id, handler_module="file_bridge.tools", allow=["."], id="store", **OPEN,
+            parent_id=k.home, handler_module="file_bridge.tools", allow=["."], id="store", **OPEN,
             root=".fantastic", callable_by={**BASE, **cb}))
         for aid, hm, meta in agents:
             rec.json(f"s1/create_{aid}", k.create(
-                **{"parent_id": k.root_id, "handler_module": hm, "id": aid,
+                **{"parent_id": k.home, "handler_module": hm, "id": aid,
                    **OPEN, "callable_by": cb, **meta}))
         rec.json("s1/sched_schedule", call(k, "sched", {
             "type": "schedule", "target": "readings", "payload": {"type": "list", "path": ""},

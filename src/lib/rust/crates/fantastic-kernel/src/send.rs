@@ -136,6 +136,48 @@ tokio::task_local! {
     pub(crate) static STATE_QUIET: bool;
 }
 
+/// A one-shot "it happened" flag: `fire` is idempotent, `wait` returns once fired
+/// (immediately when it already has).
+#[derive(Default)]
+pub struct Signal {
+    fired: std::sync::atomic::AtomicBool,
+    notify: tokio::sync::Notify,
+}
+
+impl Signal {
+    /// Mark it happened and wake every waiter.
+    pub fn fire(&self) {
+        self.fired.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.notify.notify_waiters();
+    }
+
+    /// Wait until [`Self::fire`] has run.
+    pub async fn wait(&self) {
+        loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.fired.load(std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+tokio::task_local! {
+    /// BATCH LAUNCHED (swift `KernelTaskLocals.onBatchLaunched`): set around a
+    /// `send`, it is called once EVERY item of that batch has reached its target
+    /// (fanned out on its inbox) — before any of them has settled. An AI's router
+    /// uses it so the `send` that spawned the route returns only after the routed
+    /// calls landed: python's event loop gives that order for free (the spawned
+    /// route runs up to its dispatch before the caller resumes). Not inherited by
+    /// the items' own nested sends.
+    pub static ON_BATCH_LAUNCHED: Option<std::sync::Arc<dyn Fn() + Send + Sync>>;
+    /// One item's half of [`ON_BATCH_LAUNCHED`]: fired at its fanout.
+    static ON_FANOUT: Option<std::sync::Arc<Signal>>;
+}
+
 /// Is this inside the kernel's own ledger flush?
 pub(crate) fn state_quiet() -> bool {
     STATE_QUIET.try_with(|v| *v).unwrap_or(false)
@@ -464,8 +506,48 @@ impl Kernel {
         // spawn happens INSIDE `run_dispatch`, which re-establishes them by
         // hand. A `tokio::spawn` here would silently drop all three.
         let mut out: Vec<Outcome> = Vec::with_capacity(launched.len());
-        let settled =
-            futures_util::future::join_all(launched.into_iter().map(|l| self.settle(l))).await;
+        let hook = ON_BATCH_LAUNCHED.try_with(Clone::clone).ok().flatten();
+        let settled = if let Some(hook) = hook {
+            let signals: Vec<std::sync::Arc<Signal>> = launched
+                .iter()
+                .map(|_| std::sync::Arc::new(Signal::default()))
+                .collect();
+            let items = launched
+                .into_iter()
+                .zip(signals.iter().cloned())
+                .map(|(l, sig)| {
+                    async move {
+                        let o = ON_BATCH_LAUNCHED
+                            .scope(
+                                None,
+                                ON_FANOUT.scope(Some(std::sync::Arc::clone(&sig)), self.settle(l)),
+                            )
+                            .await;
+                        // an item that settled without a fanout (a refusal) has landed too
+                        sig.fire();
+                        o
+                    }
+                });
+            let all_landed = async {
+                for s in &signals {
+                    s.wait().await;
+                }
+                hook();
+            };
+            futures_util::future::join(futures_util::future::join_all(items), all_landed)
+                .await
+                .0
+        } else if ON_FANOUT.try_with(|_| ()).is_ok() {
+            // nested inside an item of a hooked batch: its own items fire nothing
+            ON_FANOUT
+                .scope(
+                    None,
+                    futures_util::future::join_all(launched.into_iter().map(|l| self.settle(l))),
+                )
+                .await
+        } else {
+            futures_util::future::join_all(launched.into_iter().map(|l| self.settle(l))).await
+        };
         out.extend(settled);
         out
     }
@@ -1269,6 +1351,12 @@ impl Kernel {
             };
             self.fanout(target, "send", &item, caller.as_ref()).await;
         }
+        // The item has reached its target (a hooked batch counts it launched).
+        let _ = ON_FANOUT.try_with(|s| {
+            if let Some(s) = s {
+                s.fire();
+            }
+        });
         // ONE DISPATCH, whatever the call carries — python's one `handle`. A
         // request body IS the payload's value at its path (python's
         // `payload[field] = body` / `set_path` overwrites the slot), so the

@@ -518,6 +518,7 @@ pub async fn route_reply(
     dead_turn: bool,
     call_streams: Vec<(String, String)>,
     cut: bool,
+    launched: Option<Arc<fantastic_kernel::Signal>>,
 ) {
     // THE MODEL'S CALLS ARE THE AGENT'S CALLS — gated. The routing task is
     // spawned by the agent's own dispatch through `Kernel::spawn_task`, which
@@ -538,8 +539,20 @@ pub async fn route_reply(
         dead_turn,
         call_streams,
         cut,
+        launched,
     )
     .await
+}
+
+/// Fires the route's launch signal however the route ends.
+struct FireOnDrop(Option<Arc<fantastic_kernel::Signal>>);
+
+impl Drop for FireOnDrop {
+    fn drop(&mut self) {
+        if let Some(s) = &self.0 {
+            s.fire();
+        }
+    }
 }
 
 /// One EMITTED thing, in emission order — python's `units` tuple
@@ -585,7 +598,10 @@ async fn route_reply_gated(
     dead_turn: bool,
     call_streams: Vec<(String, String)>,
     cut: bool,
+    launched: Option<Arc<fantastic_kernel::Signal>>,
 ) {
+    // However this route ends, the `send` waiting on its launch is released.
+    let _release = FireOnDrop(launched.clone());
     let sp = system_prompt.as_deref();
     // THE MATCH (owner, 2026-10-04): a dispatched message carries the `stream_id`
     // of the part it was streamed as, so a consumer settles its draft on it.
@@ -846,7 +862,18 @@ async fn route_reply_gated(
         // coming?" — the alternative the model reaches for otherwise is
         // re-issuing the call, which only lengthens the queue that delays it.
         inflight_bump(self_id.as_str(), 1);
-        let out = kernel.send(items).await;
+        // LAUNCHED = every routed call has reached its target; the `send` that
+        // spawned this route returns only then (swift `onBatchLaunched`).
+        let out = match &launched {
+            Some(sig) => {
+                let sig = Arc::clone(sig);
+                let hook: Arc<dyn Fn() + Send + Sync> = Arc::new(move || sig.fire());
+                fantastic_kernel::ON_BATCH_LAUNCHED
+                    .scope(Some(hook), kernel.send(items))
+                    .await
+            }
+            None => kernel.send(items).await,
+        };
         inflight_bump(self_id.as_str(), -1);
         out
     };

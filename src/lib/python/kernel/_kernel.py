@@ -855,7 +855,8 @@ class Kernel:
 
     async def _store_read(self, payload: dict) -> list[dict]:
         """Every row of the kernel's own key matching `payload`, all pages — read
-        as kernel bookkeeping (no origin: the store answers the kernel's key)."""
+        as kernel bookkeeping (no origin: the store answers the kernel's key).
+        QUIET like the flush: a ledger read publishes nothing on the state stream."""
         out: list[dict] = []
         after = None
         store = self.agents.get(self.store_id) if self.store_id is not None else None
@@ -865,7 +866,11 @@ class Kernel:
             q = {"type": "read", **payload, "limit": 1000}
             if after is not None:
                 q["after"] = after
-            res = (await self.bookkeeping(store, q))["result"]
+            quiet = _state_quiet.set(True)
+            try:
+                res = (await self.bookkeeping(store, q))["result"]
+            finally:
+                _state_quiet.reset(quiet)
             if not isinstance(res, dict) or res.get("error"):
                 raise RuntimeError(f"kernel: memory store read failed: {res}")
             out.extend(res.get("rows") or [])

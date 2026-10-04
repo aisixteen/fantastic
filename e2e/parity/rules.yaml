@@ -217,7 +217,7 @@ rules:
       TYPE is kept in the placeholder because an int id and a digit-string id are
       a difference (C17, A4.20, B5.9).
     keys: [id, ids, parent, task_id, job_id, message_id, pid, refs, expand, after, next,
-           bundles_next, view_ids, killed, covers, msg]
+           bundles_next, view_ids, killed, covers, msg, re]
     only_when: int or digit-string; never an agent-id string
     text_anchors:
       - '\[reply to (\d+)'
@@ -250,7 +250,7 @@ rules:
       - '\\?"(expand|ids|refs|view_ids|covers)\\?": [N, …]'
       # A row quoted as json inside a prompt (the fold prompt does this), reached
       # both singly and doubly quoted.
-      - '\\?"(id|task_id|message_id|parent_row|row_id|msg)\\?": N'
+      - '\\?"(id|task_id|message_id|parent_row|row_id|msg|re)\\?": N'
     reservation_mark: >
       `next_id=<n>` in text → `next_id=<NEXT_ID>`. The id counter's RESERVATION
       MARK as the root record renders it into a system prompt: the kernel reserves
@@ -329,8 +329,10 @@ rules:
       serial: '^[0-9a-f]{6}$ → <SERIAL:hex6>'
       schedule_id: 'sch_[0-9a-f]{6} → <SCH:hex6>'
       corr: '^<bridge_id>-(\d+)$ → <CORR:<bridge_id>-#n>'
+      forward_frame_id: '<leg>-<hex12>-<n> → <leg>-<NONCE:hex12>-<n>   # the boot
+        nonce of a bridge forward id (audit IO-5); the leg and the count stay compared'
       ws_client: '_ws_[0-9a-f]{6} → <WS_CLIENT:hex6>'
-      correlation_pid: '<agent>:<hex8> → <CPID:hex8>'
+      correlation_pid: '<agent>:<hex8> → <CPID:hex8>   # a stream id too (`ai2:…`)'
       websocket_accept: 'Sec-WebSocket-Accept → <WS_ACCEPT>'
       websocket_key: 'Sec-WebSocket-Key → <WS_KEY>   # 16 random bytes the CLIENT
         mints per connection (RFC 6455 §4.1); the kernel chooses nothing about
@@ -989,3 +991,23 @@ rules:
       - C10   # the catalog itself — any OTHER extra or missing bundle is a line
       - C8    # the paging keys (`bundles_next` only when non-null) — a port that pages wrongly is never re-paged
       - C17   # the cursor values, re-derived exactly as the port's own walk derived them
+
+  # ── v11 (2026-10-04) — owner decision A ──
+
+  - id: N26
+    name: apple_fm_catalog_entry
+    why: >
+      Rust and swift ship `foundation_models_backend` (Apple's on-device model);
+      python has no such bundle. Every system prompt renders the bundle catalog as
+      `bundles=a,b,…`, so the ports' prompt carries one more name. Owner decision
+      2026-10-04 (A): a by-design catalog difference. Only that entry of a
+      `bundles=` list in TEXT goes; every other name and the list order stay
+      compared. The counts derived from the longer prompt (its token count, the
+      recall budget, the extra page of a paged `bundles` walk) are residual R-C1-1.
+    keys: []
+    text: '`bundles=…foundation_models_backend,…` inside a prompt'
+    replacement: (the entry removed)
+    self_check: diff.py rulecheck — the entry forgiven in a prompt; another
+      catalog difference beside it is still a line
+    must_not_hide:
+      - B1.12

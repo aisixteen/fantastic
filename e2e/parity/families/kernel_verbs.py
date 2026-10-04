@@ -39,15 +39,15 @@ def run(ctx) -> None:  # noqa: C901
     cb = {**BASE, "rest": "*", "web": "*", "ws": "*"}
     try:
         (ctx.work / "a.txt").write_text("a\n")
-        rec.json("setup/files", k.create(parent_id=k.root_id, id="files",
+        rec.json("setup/files", k.create(parent_id=k.home, id="files",
                                          handler_module="file_bridge.tools", allow=["."], root=".", **OPEN,
                                          callable_by=cb))
-        rec.json("setup/readings", k.create(parent_id=k.root_id, id="readings",
+        rec.json("setup/readings", k.create(parent_id=k.home, id="readings",
                                             handler_module="file_bridge.tools", allow=["."], root=".", **OPEN,
                                             callable_by=cb))
-        rec.json("setup/limited", k.create(parent_id=k.root_id, id="limited",
+        rec.json("setup/limited", k.create(parent_id=k.home, id="limited",
                                            handler_module="cli.tools", **OPEN, callable_by=cb))
-        rec.json("setup/kernel_store", k.create(parent_id=k.root_id, id="kernel_store",
+        rec.json("setup/kernel_store", k.create(parent_id=k.home, id="kernel_store",
                                                 handler_module="file_bridge.tools", allow=["."],
                                                 root=".fantastic", **OPEN, callable_by=cb))
         time.sleep(0.8)
@@ -84,27 +84,30 @@ def run(ctx) -> None:  # noqa: C901
         rec.json("C18/cancel_missing", call(k, "kernel", {"type": "cancel"}))
 
         # ── C19 — verbs on the root, and the ids they name ──
+        # The C19–C26 creates name `k.home` as parent (minimal model, owner
+        # 2026-10-04): under the root the mutator rule refuses first and the id /
+        # grant / field check each record is named for is never reached.
         rec.json("C19/create_id_dotdot",
                  call(k, k.root_id, {"type": "create_agent", "id": "../x",
-                                     "handler_module": "cli.tools", "parent_id": k.root_id}))
+                                     "handler_module": "cli.tools", "parent_id": k.home}))
         rec.json("C19/frob_on_root", call(k, k.root_id, {"type": "frob"}))
         rec.json("C19/can_call_int_value",
                  call(k, k.root_id, {"type": "create_agent", "id": "c19a",
-                                     "handler_module": "cli.tools", "parent_id": k.root_id,
+                                     "handler_module": "cli.tools", "parent_id": k.home,
                                      "can_call": {"readings": 5}}))
         # ── C20 — a grant whose KEY is a token, and one whose key is `$x` ──
         rec.json("C20/read_without_grant", call(k, "kernel_store", {"type": "list", "path": ""}))
         for key, tag in (("$x", "unknown_token"), ("$loader", "loader_token"), ("*", "star_key")):
             rec.json(f"C20/create_can_call_{tag}",
                      call(k, k.root_id, {"type": "create_agent", "id": f"c20_{tag}",
-                                         "handler_module": "cli.tools", "parent_id": k.root_id,
+                                         "handler_module": "cli.tools", "parent_id": k.home,
                                          "can_call": {key: "*"}}))
         # ── C21 — an empty verb LIST is not `"*"` ──
         rec.json("C21/limited_reflect", call(k, "limited", {"type": "reflect"}))
         rec.json("C21/limited_say", call(k, "limited", {"type": "say", "text": "x"}))
         rec.json("C21/create_can_call_empty_list",
                  call(k, k.root_id, {"type": "create_agent", "id": "c21a",
-                                     "handler_module": "cli.tools", "parent_id": k.root_id,
+                                     "handler_module": "cli.tools", "parent_id": k.home,
                                      "can_call": {"limited": []}}))
         # ── C22 — the same execution id, a different parent ──
         for n, parent in ((1, k.root_id), (2, "files")):
@@ -117,23 +120,23 @@ def run(ctx) -> None:  # noqa: C901
                            ("with space", "space"), ("Ünï", "nonascii")):
             rec.json(f"C25/create_id_{tag}",
                      call(k, k.root_id, {"type": "create_agent", "id": ident,
-                                         "handler_module": "cli.tools", "parent_id": k.root_id}))
+                                         "handler_module": "cli.tools", "parent_id": k.home}))
         C26 = [
             ("duplicate_id", {"type": "create_agent", "id": "files",
-                              "handler_module": "cli.tools", "parent_id": k.root_id}),
+                              "handler_module": "cli.tools", "parent_id": k.home}),
             ("missing_parent_id", {"type": "create_agent", "id": "c26a",
                                    "handler_module": "cli.tools"}),
             ("empty_handler_module", {"type": "create_agent", "id": "c26b",
-                                      "handler_module": "", "parent_id": k.root_id}),
+                                      "handler_module": "", "parent_id": k.home}),
             ("empty_parent_id", {"type": "create_agent", "id": "c26c",
                                  "handler_module": "cli.tools", "parent_id": ""}),
             ("non_map_grant", {"type": "create_agent", "id": "c26d",
-                               "handler_module": "cli.tools", "parent_id": k.root_id,
+                               "handler_module": "cli.tools", "parent_id": k.home,
                                "can_call": ["files"]}),
             ("two_faults_id_and_parent", {"type": "create_agent", "id": "",
                                           "handler_module": "cli.tools", "parent_id": ""}),
             ("two_faults_dup_and_handler", {"type": "create_agent", "id": "files",
-                                            "handler_module": "", "parent_id": k.root_id}),
+                                            "handler_module": "", "parent_id": k.home}),
             ("two_faults_parent_and_handler", {"type": "create_agent", "id": "c26e",
                                                "handler_module": "", "parent_id": "ghost"}),
         ]
@@ -151,10 +154,13 @@ def run(ctx) -> None:  # noqa: C901
         ]
         for case, payload in C27:
             rec.json(f"C27/{case}", call(k, k.root_id, payload))
-        # delete_lock with a locked child
+        # delete_lock with a locked child. The child is the LEG's (minimal model,
+        # owner 2026-10-04): the leg creates only its own children, so a locked
+        # GRANDCHILD under `files` is unreachable over REST and
+        # `delete_parent_of_locked` is now a plain delete of `files`.
         rec.json("C27/create_locked_child",
                  call(k, k.root_id, {"type": "create_agent", "id": "locked_child",
-                                     "handler_module": "cli.tools", "parent_id": "files",
+                                     "handler_module": "cli.tools", "parent_id": k.home,
                                      "delete_lock": True}))
         rec.json("C27/delete_parent_of_locked", call(k, k.root_id, {"type": "delete_agent",
                                                                     "id": "files"}))

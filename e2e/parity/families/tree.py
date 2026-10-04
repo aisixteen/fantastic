@@ -23,7 +23,7 @@ import re
 import sys
 import time
 
-from families import MEMORY, OPEN, VLLM, ai, call, save_kernel_log, vllm
+from families import MEMORY, OPEN, ROOT_ID, VLLM, ai, call, save_kernel_log, vllm
 from spec import CTX_RESERVE, CTX_WINDOW
 from stubs.openai_chat import Handler as OpenAIHandler, OpenAIChatStub
 
@@ -69,10 +69,10 @@ def roster(stub_url: str, cb: dict, interp: str) -> list:
         ("user", "user_probe.tools", {}),
         ("oracle", "oracle_probe.tools", dict(lines=["the answer is 42"])),
         ("ai", VLLM,
-         ai(**vllm(stub_url), sampling={"x": 1, "y": None},
-              context_window=CTX_WINDOW, output_reserve=CTX_RESERVE,
+         ai(**vllm(stub_url, context_window=CTX_WINDOW), sampling={"x": 1, "y": None},
+              output_reserve=CTX_RESERVE,
               can_call={"readings": "*", "totals": "*", "runner": "*",
-                        "kernel_store": "*", "kernel": "*"})),
+                        "kernel_store": "*", ROOT_ID: "*"})),
     ]
 
 
@@ -93,7 +93,7 @@ def run(ctx) -> None:
         rec.json("root_boot_reflect_full",
                  call(k, k.root_id, {"type": "reflect", "detail": "full"}))
         for aid, hm, meta in agents:
-            m = {"parent_id": k.root_id, "handler_module": hm, "id": aid,
+            m = {"parent_id": k.home, "handler_module": hm, "id": aid,
                  **OPEN, "callable_by": cb, **meta}
             rec.json(f"create_{aid}", k.create(**m))
         time.sleep(1.5)
@@ -163,6 +163,8 @@ def run(ctx) -> None:
 
         rec.json("refusal_unknown_verb_file", call(k, "readings", {"type": "nope"}))
         rec.json("refusal_missing_arg_file", call(k, "readings", {"type": "rename"}))
+        # minimal model (owner 2026-10-04): an id naming no agent is not the leg's
+        # child, so the mutator refusal answers before the unknown-agent one.
         rec.json("refusal_unknown_agent", call(k, "kernel", {"type": "delete_agent", "id": "ghost"}))
         rec.json("refusal_no_type", call(k, "readings", {}))
     finally:

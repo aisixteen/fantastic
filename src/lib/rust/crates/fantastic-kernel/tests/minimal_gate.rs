@@ -193,7 +193,6 @@ async fn the_mutators_act_on_the_senders_own_children_only() {
         json!({
             "error": format!("a may only {verb} its own children — {id} is not one"),
             "reason": "unauthorized",
-            "hint": fantastic_kernel::FROM_ABOVE,
             "side": "mutator",
         })
     };
@@ -302,7 +301,6 @@ async fn a_missing_operand_gets_the_verbs_own_refusal_and_an_unknown_id_the_muta
             json!({
                 "error": format!("a may only {verb} its own children — ghost is not one"),
                 "reason": "unauthorized",
-                "hint": fantastic_kernel::FROM_ABOVE,
                 "side": "mutator",
             })
         );

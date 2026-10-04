@@ -274,6 +274,11 @@ class CaptureKernel(HostKernel):
         refusal is data instead of `driver.py:376`'s 300-character head.
     """
 
+    #: WHERE A FAMILY CREATES ITS AGENTS (minimal model, owner 2026-10-04): every
+    #: call is the `rest` leg, and a mutation must come from the operand's direct
+    #: parent — so the leg's own subtree is the test's world.
+    home = "rest"
+
     def __init__(
         self,
         rt: str,
@@ -359,16 +364,20 @@ class CaptureKernel(HostKernel):
         root["memory_store_id"] = memory.MEMORY
         write_rec(w / "agent.yaml", root)
         rest_dir = w / "agents/web/agents/rest"
+        # Every declared id may reach both stores — an AI agent a family creates
+        # reads its conversation from `memory` and its key from `creds` as itself.
+        declared = {t: "*" for t in self.reach
+                    if t not in (self.root_id, memory.MEMORY, creds.CREDS)}
         (rest_dir / "agents" / memory.MEMORY).mkdir(parents=True, exist_ok=True)
         write_rec(rest_dir / "agents" / memory.MEMORY / "agent.yaml", memory.store_record(
-            "rest", callable_by={**BASE, "$parent": "*", "ws": "*", "web": "*"}))
+            "rest", callable_by={**BASE, "$parent": "*", "ws": "*", "web": "*", **declared}))
         # THE CREDENTIAL STORE — env-backed (the scrubbed env carries the stub's
         # dummy key), one ref per keyed stub this boot talks to, bound to its URL.
         (rest_dir / "agents" / creds.CREDS).mkdir(parents=True, exist_ok=True)
         write_rec(rest_dir / "agents" / creds.CREDS / "agent.yaml", {
             **creds.store_record(
                 "rest", {ref: (creds.KEYED[ref][0], url) for ref, url in self.creds.items()}),
-            "callable_by": {**BASE, "$parent": "*"},
+            "callable_by": {**BASE, "$parent": "*", **declared},
         })
 
         reach = {t: "*" for t in self.reach if t != self.root_id}
