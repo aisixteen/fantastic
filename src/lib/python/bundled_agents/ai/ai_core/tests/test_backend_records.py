@@ -425,6 +425,8 @@ def test_vllm_make_provider_builds_the_effective_posture(monkeypatch):
         "endpoint": "http://e",
         "model": "m",
         "max_tokens": 8000,
+        # the record names no context_window → no whole-window rule
+        "window": None,
         "kv_slots": 3,
         "kv_overflow": "reject",
         "kv_ttl": 1800.0,
