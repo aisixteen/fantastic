@@ -109,6 +109,24 @@ extension Kernel {
     /// Python `Agent._launch` (`kernel/_agent.py:601-732`) — C30's check
     /// order: target → payload dict → timeout → payload.type → id → retries
     /// → killed → draining → resolve → gate.
+    /// Is this send the root's CONTROL SURFACE — a kernel verb or `reflect`
+    /// on the root — directly, or carried by a wire leg's `inbound_call`? The
+    /// drain gate keeps it open while the kernel stops. Python
+    /// `Agent._is_control`.
+    func isControl(target: String, payload: JSON) -> Bool {
+        var target = target
+        var payload = payload
+        if payload["type"].asString == "inbound_call" {
+            let carried = payload["item"]
+            guard carried["payload"].asObject != nil else { return false }
+            target = carried["target"].asString ?? ""
+            payload = carried["payload"]
+        }
+        let verb = payload["type"].asString ?? ""
+        let toRoot = target == "kernel" || root?.id.value == target
+        return toRoot && (Kernel.isSystemVerb(verb) || verb == "reflect")
+    }
+
     func launch(_ item: Item) -> Launched {
         // 1. target — python: `if not isinstance(target_id, str) or not
         // target_id: missing("send", "target")`.
@@ -208,11 +226,12 @@ extension Kernel {
         // before it costs an id. The root's own control surface stays open
         // while draining: kernel verbs (`shutdown_agents` again, `shutdown_
         // kernel`, `ps`, `messages`, `ledger`) and `reflect` are how an
-        // operator watches and finishes the stop. Python `Agent._launch`
-        // (`kernel/_agent.py`).
+        // operator watches and finishes the stop. Over a wire the operator's
+        // call arrives as a leg's `inbound_call` carrying it — judged by the
+        // call it carries, or a remote operator could never finish the stop it
+        // started. Python `Agent._send` (`kernel/_agent.py`).
         if draining && !KernelTaskLocals.inShutdown {
-            let toRoot = item.target.value == "kernel" || root?.id == item.target
-            let control = toRoot && (Kernel.isSystemVerb(verb) || verb == "reflect")
+            let control = isControl(target: item.target.value, payload: item.payload)
             let cur = KernelTaskLocals.currentTask
             let insideLiveWork = cur.map { tasks.contains($0) } ?? false
             if !control && !insideLiveWork && !tasks.isRegistered() {

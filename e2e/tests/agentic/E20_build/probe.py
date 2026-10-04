@@ -114,6 +114,13 @@ TASK = (
     "in the memory agent; (3) when a new reading file appears later and the thing you "
     "built is run again, the stored total updates to include it. Work out how to "
     "build that here, build it, make sure it really runs, and tell me what you made. "
+    # WHO CHECKS. The scorer re-runs the artifact and reads the total as the test
+    # operator (`home(root)`: `rest` over a wire). An agent the model creates is ITS
+    # child, so only the model can open that agent's ingress to the checker — the
+    # task says so, the way a person would say "I'll test it from my machine".
+    "When you say it is done I will check it myself, as `{operator}`: I will run what "
+    "you built again and read the stored total, so everything you build must accept "
+    "calls from `{operator}`. "
     # COMPLETION PRESSURE — same clause 03 needed. Measured 2026-08-20/21: without an
     # explicit "keep going until it works", models analyse, plan, report, and stop.
     # The "or certain it is impossible" half supplies the EXIT so this cannot become
@@ -591,7 +598,8 @@ async def run(
                         "type": "send",
                         "target": aid,
                         "payload": {
-                            "type": "send", "text": task, "client_id": "probe",
+                            "type": "send", "text": task.replace("{operator}", home(root)),
+                            "client_id": "probe",
                         },
                     },
                 }

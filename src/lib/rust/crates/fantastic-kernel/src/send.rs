@@ -438,6 +438,25 @@ struct Joiner {
 }
 
 impl Kernel {
+    /// Is this send the root's CONTROL SURFACE — a kernel verb or `reflect`
+    /// on the root — directly, or carried by a wire leg's `inbound_call`? The
+    /// drain gate keeps it open while the kernel stops. Python
+    /// `Agent._is_control`.
+    fn is_control(&self, target: &str, payload: &Value) -> bool {
+        let (target, payload) = match payload.get("type").and_then(Value::as_str) {
+            Some("inbound_call") => {
+                let Some(item) = payload.get("item").filter(|i| i["payload"].is_object()) else {
+                    return false;
+                };
+                (item["target"].as_str().unwrap_or(""), &item["payload"])
+            }
+            _ => (target, payload),
+        };
+        let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
+        let to_root = target == "kernel" || self.root().is_some_and(|r| r.id.as_str() == target);
+        to_root && (is_kernel_verb(verb) || verb == "reflect")
+    }
+
     /// ARRAY-ONLY batch send: `[Item] -> [Outcome]`.
     ///
     /// There is deliberately NO single-call form — one shape prevents
@@ -721,11 +740,12 @@ impl Kernel {
         // root's own control surface stays open: kernel verbs
         // (`shutdown_agents` again, `kernel_stop`, `ps`, `ledger`) and
         // `reflect` are how an operator watches and finishes
-        // the stop. Python `Agent._send` (`kernel/_agent.py`).
+        // the stop. Over a wire the operator's call arrives as a leg's
+        // `inbound_call` carrying it — judged by the call it carries, or a
+        // remote operator could never finish the stop it started. Python
+        // `Agent._send` (`kernel/_agent.py`).
         if self.draining() && !in_shutdown() {
-            let to_root = item.target.as_str() == "kernel"
-                || self.root().is_some_and(|r| r.id == item.target);
-            let control = to_root && (is_kernel_verb(&verb) || verb == "reflect");
+            let control = self.is_control(item.target.as_str(), &item.payload);
             let inside_live_work = current_task().is_some_and(|t| self.tasks.contains(&t));
             if !control && !inside_live_work {
                 return Launched::Settled(Outcome::refused(crate::refusal::refusal(

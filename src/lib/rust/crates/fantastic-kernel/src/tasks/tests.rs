@@ -988,7 +988,7 @@ async fn a_keepalive_loop_is_neither_waited_for_nor_cancelled() {
         std::future::pending::<()>(),
     );
     assert!(
-        kernel.tasks.pending(None).iter().all(|t| *t != live),
+        kernel.tasks.pending(&[]).iter().all(|t| *t != live),
         "a keepalive task is not pending work"
     );
     let out = kernel.shutdown_agents().await;
@@ -1019,13 +1019,13 @@ async fn a_forked_service_loop_is_not_waited_for_but_is_cancelled() {
     assert!(
         kernel
             .tasks
-            .pending_dispatches(None)
+            .pending_dispatches(&[])
             .iter()
             .all(|t| *t != live),
         "a forked loop is not a pending DISPATCH"
     );
     assert!(
-        kernel.tasks.pending(None).contains(&live),
+        kernel.tasks.pending(&[]).contains(&live),
         "but it IS pending work the cancel step reaches"
     );
     let t0 = std::time::Instant::now();
@@ -1059,7 +1059,7 @@ async fn the_quiet_phase_still_waits_for_a_real_in_flight_dispatch() {
             .await
             .remove(0)
     });
-    while kernel.tasks.pending_dispatches(None).is_empty() {
+    while kernel.tasks.pending_dispatches(&[]).is_empty() {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     let t0 = std::time::Instant::now();

@@ -177,7 +177,10 @@ class HostKernel:
         """
         self.cmd = spec["cmd"]
         self.root_id = spec["root_id"]
-        self.env = {**os.environ, **(spec.get("env") or {})}
+        # The tree wires no record store — it lives in RAM. FANTASTIC_DEBUG_FLUSH
+        # lands every record on disk at stop, so `reopen_kernel` boots the tree
+        # the probe stopped (the wire twin of `_testkit.persist`).
+        self.env = {**os.environ, "FANTASTIC_DEBUG_FLUSH": "1", **(spec.get("env") or {})}
         self.workdir = workdir
         self.reach = list(reach or [])
         self.port: int | None = None
@@ -233,29 +236,35 @@ class HostKernel:
 
         rest_dir = w / "agents/web/agents/rest"
         rest_dir.mkdir(parents=True, exist_ok=True)
-        root = yaml.safe_load((w / "agent.yaml").read_text())
-        # THE `rest` LEG IS THE TEST'S OPERATOR (owner, 2026-10-04, option a). Every
-        # REST call is the leg, and a mutation must come from the operand's direct
-        # parent — so every agent a probe creates is the leg's child, and the leg
-        # writes their records (grants included). The root accepts the legs'
-        # kernel verbs and the web host's reads; nothing is stamped.
-        # The root is nobody's child, so only this seed can open it: the legs, the
-        # web host, and every declared id (an AI's kernel verbs need it too).
-        root["callable_by"] = {
-            **BASE, "rest": "*", "ws": "*", "web": "*",
-            **{t: "*" for t in self.reach if t != self.root_id},
-        }
-        root["memory_store_id"] = memory.MEMORY
-        (w / "agent.yaml").write_text(_dump(root))
-        # THE KERNEL'S MEMORY STORE and THE CREDENTIAL STORE live UNDER THE LEG: an
-        # AI agent the leg creates is wired to them by the leg, which may write its
-        # own children's `callable_by`. The kernel writes its own rows as bookkeeping.
-        (rest_dir / "agents" / memory.MEMORY).mkdir(parents=True, exist_ok=True)
-        (rest_dir / "agents" / memory.MEMORY / "agent.yaml").write_text(_dump(
-            memory.store_record("rest", callable_by={**BASE, "$parent": "*", "ws": "*", "web": "*"})))
-        (rest_dir / "agents" / creds.CREDS).mkdir(parents=True, exist_ok=True)
-        (rest_dir / "agents" / creds.CREDS / "agent.yaml").write_text(_dump(
-            {**creds.store_record("rest", creds.env_refs()), "callable_by": {**BASE, "$parent": "*"}}))
+        # A REOPEN (`reopen_kernel`) boots on a tree a kernel already ran: the root
+        # and the stores carry the grants the probe wrote at runtime (an AI's
+        # ingress on `memory`), so only the FIRST seed writes them.
+        if not (rest_dir / "agents" / memory.MEMORY / "agent.yaml").exists():
+            root = yaml.safe_load((w / "agent.yaml").read_text())
+            # THE `rest` LEG IS THE TEST'S OPERATOR (owner, 2026-10-04, option a).
+            # Every REST call is the leg, and a mutation must come from the
+            # operand's direct parent — so every agent a probe creates is the leg's
+            # child, and the leg writes their records (grants included). The root
+            # accepts the legs' kernel verbs and the web host's reads; nothing is
+            # stamped. The root is nobody's child, so only this seed can open it:
+            # the legs, the web host, and every declared id (an AI's kernel verbs
+            # need it too).
+            root["callable_by"] = {
+                **BASE, "rest": "*", "ws": "*", "web": "*",
+                **{t: "*" for t in self.reach if t != self.root_id},
+            }
+            root["memory_store_id"] = memory.MEMORY
+            (w / "agent.yaml").write_text(_dump(root))
+            # THE KERNEL'S MEMORY STORE and THE CREDENTIAL STORE live UNDER THE
+            # LEG: an AI agent the leg creates is wired to them by the leg, which
+            # may write its own children's `callable_by`. The kernel writes its own
+            # rows as bookkeeping.
+            (rest_dir / "agents" / memory.MEMORY).mkdir(parents=True, exist_ok=True)
+            (rest_dir / "agents" / memory.MEMORY / "agent.yaml").write_text(_dump(
+                memory.store_record("rest", callable_by={**BASE, "$parent": "*", "ws": "*", "web": "*"})))
+            (rest_dir / "agents" / creds.CREDS).mkdir(parents=True, exist_ok=True)
+            (rest_dir / "agents" / creds.CREDS / "agent.yaml").write_text(_dump(
+                {**creds.store_record("rest", creds.env_refs()), "callable_by": {**BASE, "$parent": "*"}}))
         reach = {t: "*" for t in self.reach if t != self.root_id}
         # `web` reads its legs' routes and serves /file/ AS ITSELF: it reaches the
         # root, its legs and the declared ids; its legs accept their parent.

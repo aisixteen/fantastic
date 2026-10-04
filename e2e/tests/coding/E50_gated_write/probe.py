@@ -37,28 +37,46 @@ async def main():
         prefix="coding_gw_", reach=[FB, "vault", "ai", "ai_rev", "cli", "kernel", "user"]
     )
     try:
-        for payload in (
-            {"type": "create_agent", "parent_id": home(root), "id": FB,
-             "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
-             "ingress_rule": "allow_all_ingress",
-             "callable_by": {"rest": "*", "web": "*"}},
-            # The vault ACCEPTS the writer's discovery (reflect) but not its
-            # writes; the reviewer may reach it AND may update it.
-            {"type": "create_agent", "parent_id": home(root), "id": "vault",
-             "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
-             "ingress_rule": "allow_all_ingress",
-             "callable_by": {"rest": "*", "web": "*", "ai": ["reflect"], "ai_rev": "*"}},
-        ):
-            r = await _call(root, root.id, payload)
-            assert not r.get("error"), f"create {payload['id']}: {r}"
+        r = await _call(root, root.id, {
+            "type": "create_agent", "parent_id": home(root), "id": FB,
+            "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
+            "ingress_rule": "allow_all_ingress",
+            "callable_by": {"rest": "*", "web": "*"}})
+        assert not r.get("error"), f"create {FB}: {r}"
 
-        # ── 1. the writer is denied (ONE connection, reused for the retry) ──
         # THE HUMAN who wants the work done — the task comes FROM here.
         await human(root, ai=["ai", "ai_rev"])
+        # The writer connects BEFORE `vault` exists: `connect` opens the ingress of
+        # every LIVE agent its `can_call` names, which would hand it the vault.
         w = await connect(root, core, BK, agent_id="ai",
                           can_call={"vault": "*", "cli": "*", "user": "*"},
                           callable_by={"user": "*"},
                           limits=Limits.from_env(os.environ))
+        # THE AUTHORITY IS THE VAULT'S PARENT (minimal access model: grants on an
+        # agent are written by its parent alone). So the reviewer creates `vault`
+        # as its own child — the wall included — and later opens it.
+        # update_agent is a KERNEL verb answered by the root (id `kernel_state`);
+        # the grant must name that id (the `kernel` alias resolves to it but the
+        # gate keys on the resolved id).
+        rv = await connect(root, core, BK, agent_id="ai_rev",
+                           can_call={"$children": "*",
+                                     # the ROOT id is runtime-specific — grant on
+                                     # the actual root.
+                                     root.id: ["create_agent", "update_agent", "reflect", "list_agents"],
+                                     "cli": "*"},
+                           limits=Limits.from_env(os.environ))
+        await drive(rv,
+            "Create the editor `vault` as YOUR child: send `kernel` a `create_agent` "
+            "with `parent_id` = `ai_rev`, `id` = `vault`, `handler_module` = "
+            "`file_bridge.tools`, `root` = `.`, `allow` = [`.`], `ingress_rule` = "
+            "`allow_all_ingress`, and `callable_by` = {`$parent`: `\"*\"`, `rest`: "
+            "`\"*\"`, `web`: `\"*\"`, `ai`: [`reflect`]} — the agent `ai` may "
+            f"reflect it but not write. When it is created, {DONE}.", client_id="rev")
+        made = await _call(root, "kernel", {"type": "list_agents"})
+        vault = next((a for a in made.get("agents") or [] if a.get("id") == "vault"), None)
+        assert vault is not None, "the reviewer did not create `vault`"
+
+        # ── 1. the writer is denied (ONE connection, reused for the retry) ──
         await drive(w,
             "Write a file `note.md` containing exactly `access: granted` through "
             "the editor `vault`'s `write` verb (reflect it for the shape). Your "
@@ -69,21 +87,8 @@ async def main():
         denied = "unauthorized" in str(h1.get("messages", h1))
 
         # ── 2. the reviewer opens the gate (authority the writer lacks) ──
-        # update_agent is a KERNEL verb answered by the root (id `kernel_state`);
-        # the grant must name that id (the `kernel` alias resolves to it but the
-        # gate keys on the resolved id), and privileged verbs need explicit
-        # naming — no wildcard cover.
-        rv = await connect(root, core, BK, agent_id="ai_rev",
-                           can_call={"vault": "*",
-                                     # the ROOT id is runtime-specific (python
-                                     # `kernel_state`, rust/swift `core`) — grant
-                                     # on the actual root so the REST driver leg
-                                     # can delegate it (it holds ROOT_VERBS there).
-                                     root.id: ["update_agent", "reflect", "get", "list_agents"],
-                                     "cli": "*"},
-                           limits=Limits.from_env(os.environ))
         await drive(rv,
-            "The agent `ai` needs write access to the editor `vault` but is "
+            "The agent `ai` needs write access to your child `vault` but is "
             "denied on ingress. You may grant it. Reflect `vault` to read its "
             "current `callable_by` map, then send `kernel` an `update_agent` for "
             "id `vault` whose `callable_by` INCLUDES every existing entry PLUS "

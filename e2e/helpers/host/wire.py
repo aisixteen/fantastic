@@ -289,6 +289,8 @@ class WireCtx:
 
         ack = await asyncio.to_thread(
             self.k.send, "kernel", {"type": "kernel_stop"}, 30)
+        if isinstance(ack, dict) and ack.get("error"):
+            raise AssertionError(f"kernel_stop refused: {ack}")
         proc = getattr(self.k, "proc", None)
         if proc is not None:
             for _ in range(300):  # the verb defers its exit ~100ms; wait on the PROCESS
