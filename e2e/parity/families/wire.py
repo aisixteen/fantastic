@@ -27,7 +27,7 @@ import struct
 import sys
 import time
 
-from families import BASE, OPEN, VLLM, ai, call, save_kernel_log, vllm
+from families import BASE, OPEN, ROOT_ID, VLLM, ai, call, save_kernel_log, vllm
 from spec import CTX_RESERVE, CTX_WINDOW, wait_port
 from stubs.openai_chat import Handler as OpenAIHandler, OpenAIChatStub
 
@@ -63,29 +63,29 @@ def roster(stub_url: str, cb: dict, interp: str) -> list:
                                                 guid="wirecap-guid", partner_guid="wirecap-partner",
                                                 reconnect=3)),
         ("ai", VLLM,
-         ai(**vllm(stub_url), context_window=CTX_WINDOW,
+         ai(**vllm(stub_url, context_window=CTX_WINDOW),
               output_reserve=CTX_RESERVE,
-              can_call={**BASE, "files": "*", "cli": "*", "kernel": "*"})),
+              can_call={**BASE, "files": "*", "cli": "*", ROOT_ID: "*"})),
     ]
 
 
 def seed_extra(k, w, port):
     """The extra authorities the wire family needs, written BEFORE the daemon.
 
-    `state_subscribe` is privileged, so `"*"` does not cover it — the root names
-    it for `ws` and `web` explicitly, which is the whole reason the granted-leg
-    and ungranted-leg cases can be told apart at all.
+    `"*"` covers every verb, `state_subscribe` included (minimal model, owner
+    2026-10-04): the root accepts `ws`/`web`/`wsx`, and the legs reach the root.
+    `outsider` is seeded under the ROOT, so no leg's grant names it — the leg
+    reaches its own children (`$children`), and a REST-created agent would be one.
     """
     from helpers.host.driver import ROOT_VERBS
     from spec import read_rec, write_rec
 
     root = read_rec(w / "agent.yaml")
-    root["callable_by"] = {**root["callable_by"], "ws": ["*", "state_subscribe"],
-                           "web": ["*", "state_subscribe"], "wsx": "*"}
+    root["callable_by"] = {**root["callable_by"], "ws": "*", "web": "*", "wsx": "*"}
     write_rec(w / "agent.yaml", root)
     for p in ("agents/web/agent.yaml", "agents/web/agents/ws/agent.yaml"):
         rec = read_rec(w / p)
-        rec["can_call"][k.root_id] = ROOT_VERBS + ["state_subscribe"]
+        rec["can_call"][k.root_id] = ROOT_VERBS
         write_rec(w / p, rec)
     reach = {t: "*" for t in k.reach if t != k.root_id}
 
@@ -94,21 +94,32 @@ def seed_extra(k, w, port):
         d.mkdir(parents=True, exist_ok=True)
         write_rec(d / "agent.yaml", rec)
 
+    # A host mounts its legs' routes by calling `get_routes` on them: it reaches its
+    # children, and each leg accepts its parent.
     put("agents/web2", {"id": "web2", "handler_module": "web.tools", "parent_id": k.root_id,
-                        "port": k.port2, "can_call": {**BASE, "kernel": "*", **reach}})
+                        "port": k.port2,
+                        "can_call": {**BASE, k.root_id: "*", "$children": "*", **reach}})
     # OPEN leg, NO target grants: the egress half alone.
     put("agents/web2/agents/wsx", {"id": "wsx", "handler_module": "web_ws.tools",
                                    "parent_id": "web2", "ingress_rule": "allow_all_ingress",
+                                   "callable_by": {**BASE, "$parent": "*"},
                                    "can_call": dict(BASE)})
     # NO ingress rule: SEALED, however well granted its egress is.
     put("agents/web2/agents/rests", {"id": "rests", "handler_module": "web_rest.tools",
                                      "parent_id": "web2",
-                                     "can_call": {**BASE, "kernel": "*", **reach}})
+                                     "callable_by": {**BASE, "$parent": "*"},
+                                     "can_call": {**BASE, k.root_id: "*", **reach}})
+    put("agents/outsider", {"id": "outsider", "handler_module": "file_bridge.tools",
+                            "parent_id": k.root_id, "allow": ["."], "root": ".",
+                            "ingress_rule": "allow_all_ingress",
+                            "callable_by": {**BASE, **{leg: "*" for leg in LEGS}}})
     put("agents/web3", {"id": "web3", "handler_module": "web.tools", "parent_id": k.root_id,
-                        "port": k.port3, "can_call": {**BASE, "kernel": "*", **reach}})
+                        "port": k.port3,
+                        "can_call": {**BASE, k.root_id: "*", "$children": "*", **reach}})
     put("agents/web3/agents/wss", {"id": "wss", "handler_module": "web_ws.tools",
                                    "parent_id": "web3",
-                                   "can_call": {**BASE, "kernel": "*", **reach}})
+                                   "callable_by": {**BASE, "$parent": "*"},
+                                   "can_call": {**BASE, k.root_id: "*", **reach}})
 
 
 class Recorder:
@@ -489,7 +500,7 @@ def run(ctx) -> None:  # noqa: C901 - one family, one shape; splitting it hides 
 
         W.mark("scheduler fire: create store")
         PROBES["store_create"] = {"harness": {"t": W.rel()}, "reply": k.create(
-            parent_id=k.root_id, handler_module="file_bridge.tools", allow=["."], id="store", **OPEN,
+            parent_id=k.home, handler_module="file_bridge.tools", allow=["."], id="store", **OPEN,
             root=".fantastic", callable_by=cb)}
         await asyncio.sleep(1.0)
         W.mark("scheduler fire")
@@ -797,12 +808,8 @@ def run(ctx) -> None:  # noqa: C901 - one family, one shape; splitting it hides 
         setup = {"web2_up": wait_port(port2), "web3_up": wait_port(port3), "creates": {}}
         for aid, hm, meta in agents:
             setup["creates"][aid] = k.create(
-                **{"parent_id": k.root_id, "handler_module": hm, "id": aid,
+                **{"parent_id": k.home, "handler_module": hm, "id": aid,
                    **OPEN, "callable_by": cb, **meta})
-        # `outsider` is created but named in NO leg's reach: the egress refusal.
-        setup["creates"]["outsider"] = k.create(
-            parent_id=k.root_id, id="outsider", handler_module="file_bridge.tools", allow=["."],
-            root=".", **OPEN, callable_by=cb)
         rec.json("setup", setup)
         time.sleep(1.5)
         asyncio.run(main())

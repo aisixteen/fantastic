@@ -1100,6 +1100,12 @@ pub async fn send(
         // What this turn ANSWERED — tells routing whether it was a chain turn
         // (a delivered reply) and so whether a silent turn earns the nudge.
         let route_incoming = incoming_text.clone();
+        // THE ROUTED CALLS REACH THEIR TARGETS BEFORE THIS REPLY GOES BACK
+        // (python's event loop order; swift `StartSignal`): released at launch,
+        // not at completion — a self-addressed call fans out before it needs the
+        // lock, so this never waits on this agent.
+        let launched = Arc::new(fantastic_kernel::Signal::default());
+        let route_launched = Arc::clone(&launched);
         kernel.spawn_task(agent_id, "route_reply", async move {
             crate::route::route_reply(
                 route_self,
@@ -1117,9 +1123,11 @@ pub async fn send(
                 dead_turn,
                 call_streams,
                 cut,
+                Some(route_launched),
             )
             .await;
         });
+        launched.wait().await;
     }
     Ok(reply)
 }

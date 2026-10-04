@@ -78,7 +78,11 @@ class Norm:
                # an AI status event's `msg` — the id of the message it is about.
                # Measured 2026-09-30 on the python self-diff: `ai_paths` events
                # `msg` 1177 against 1180, every relationship the same.
-               "msg"}
+               "msg",
+               # a streaming part's anchor — the message id the turn answers
+               # (`part_start.re`, owner 2026-10-04); measured on the python
+               # self-diff: `re` 187 against 186, every relationship the same.
+               "re"}
     COUNT_KEYS = {"bytes", "size", "body_len", "content-length", "__bytes_len__"}
     OSPID_KEYS = {"pid"}
     GUID_KEYS = {"guid", "owner_guid", "partner_guid"}
@@ -176,6 +180,16 @@ class Norm:
             if new != out:
                 self.fired.add("N2")
             out = new
+        # N26 — the ports' bundle CATALOG names `foundation_models_backend`, Apple's
+        # on-device model, which python does not ship (owner 2026-10-04, decision A).
+        # Only that one entry of a `bundles=` list goes; every other name, and the
+        # list's order, stay compared. The token counts derived from the longer
+        # prompt are residual R-C1-1.
+        new = re.sub(r"(bundles=[\w,]*?)foundation_models_backend,", r"\1", out)
+        new = re.sub(r"(bundles=[\w,]*?),foundation_models_backend(?!\w)", r"\1", new)
+        if new != out:
+            self.fired.add("N26")
+        out = new
         # N3 — a minted guid inside TEXT. The key-based pass sees `{"guid": …}` in
         # a reply; it never sees `guid=<hex32>` in the system prompt, `"guid":
         # "<hex32>"` in cli stdout, or the same inside an HTTP body recorded as a
@@ -218,7 +232,11 @@ class Norm:
             (r"\bsnd_[0-9A-F]{8}\b", "<SEND_ID:snd_HEX8>", "N7"),
             (r"\bsch_[0-9a-f]{6}\b", "<SCH:hex6>", "N7"),
             (r"_ws_[0-9a-f]{6}\b", "<WS_CLIENT:hex6>", "N7"),
-            (r"\b[a-z_]+:[0-9a-f]{8}\b", "<CPID:hex8>", "N7"),
+            # an agent id may carry digits (`ai2:3d113b94`, a stream id — 2026-10-04)
+            (r"\b[a-z_][a-z0-9_]*:[0-9a-f]{8}\b", "<CPID:hex8>", "N7"),
+            # a bridge forward's frame id `<leg>-<boot nonce hex12>-<n>` (audit
+            # IO-5): the nonce is minted at every boot; the leg and the count stay.
+            (r"\b([a-z_][a-z0-9_]*)-[0-9a-f]{12}-(\d+)\b", r"\1-<NONCE:hex12>-\2", "N7"),
             (r"\b([a-z_]+)-(\d+)\b(?!\S)", r"<CORR:\1-#n>", "N7"),
         ):
             new = re.sub(pat, rep, out)
@@ -333,6 +351,9 @@ class Norm:
                     r"\\+u2191(\d+)",
                     r"in batch (\d+)", r"<pid>(\d+)</pid>",
                     r"· msg (\d+)\]",
+                    # …and before the stream a message was previewed as
+                    # (`[from ai2 · msg 1395 · stream ai2:…]`, owner 2026-10-04)
+                    r"· msg (\d+) · stream ",
                     r"<task_id>(\d+)</task_id>", r"<message_id>(\d+)</message_id>", r"\[fold (\d+) ·", r"\[recall (\d+) ·",
                     r"msg (\d+) · re (\d+)", r"joined execution (\d+)", r"(?m)^(\d+) · ",
                     # the dedup note a settled reply carries — `[identical to the
@@ -343,8 +364,13 @@ class Norm:
                     # stub recorded: there the newline is still `\` `n` inside a
                     # json string, so `^` never sees it.
                     r"\\n(\d+) · "):
-            out = re.sub(pat, lambda m: m.group(0).replace(
-                m.group(1), self._id_placeholder(int(m.group(1)))), out)
+            # BY SPAN, not `.replace`: the id's digits can also sit inside the
+            # anchor itself — `\u2191` then id 91 is `\u219191`, and a replace of
+            # "91" rewrote the arrow's own code too (2026-10-04, python self-diff).
+            out = re.sub(pat, lambda m: (
+                m.group(0)[:m.start(1) - m.start(0)]
+                + self._id_placeholder(int(m.group(1)))
+                + m.group(0)[m.end(1) - m.start(0):]), out)
         # N4 — the id counter's RESERVATION MARK, as the root record renders it
         # into a system prompt (`next_id=1001`). The kernel reserves ids in
         # blocks and persists the block's end, so the mark says how many ids the
@@ -387,7 +413,7 @@ class Norm:
         # `msg` too: an origin line quotes the `{to, msg}` it was sent with
         # (`origin: readings reflect {"to": […], "msg": 1414}`) — measured
         # 2026-09-30 on the python self-diff, 1414 against 1408.
-        out = re.sub(r'(\\?"(?:id|task_id|job_id|message_id|parent_row|row_id|msg)\\?"\s*:\s*)(\d+)(?![\d.])',
+        out = re.sub(r'(\\?"(?:id|task_id|job_id|message_id|parent_row|row_id|msg|re)\\?"\s*:\s*)(\d+)(?![\d.])',
                      lambda m: m.group(1) + self._id_placeholder(int(m.group(2))), out)
         # …and a job's id in an `origin` line, written `{job_id: <n>}` — a job's
         # id IS its kernel task id, a counter value like any other here.
@@ -2638,6 +2664,18 @@ def cmd_rulecheck() -> int:
         ("N4 — a different verb beside it is still a line",
          lambda: cjr({"text": "[reply to 7 \\u00b7 files reflect \\u00b7 \\u2191118]"},
                      {"text": "[reply to 7 \\u00b7 files read \\u00b7 \\u2191115]"}, "t/wire/f.json"), True),
+        ("N4 — an id whose digits also sit in the arrow's own code (\\u2191 then 91)",
+         lambda: cjr({"text": "[reply to 7 \\u00b7 files reflect \\u00b7 \\u219192]"},
+                     {"text": "[reply to 7 \\u00b7 files reflect \\u00b7 \\u219191]"}, "t/wire/f.json"), False),
+        ("N7 — a stream id whose agent carries a digit",
+         lambda: cjr({"stream_id": "ai2:3d113b94"}, {"stream_id": "ai2:ca4a928a"},
+                     "t/ai_paths/e.json"), False),
+        ("N7 — a bridge forward id: the boot nonce differs, the count does not",
+         lambda: cjr({"frame": '{"id": "wsb-3c9d11402c46-3"}'}, {"frame": '{"id": "wsb-0a1b2c3d4e5f-4"}'},
+                     "t/bridges/p.json"), True),
+        ("N4 — a part_start's `re` anchor is a minted id",
+         lambda: cjr({"type": "part_start", "re": 187}, {"type": "part_start", "re": 186},
+                     "t/wire/f.json"), False),
         ("N10 — a body count over text naming the runtime",
          lambda: cjr({"body": {"text": '{"runtime":"python","a":1}', "len": 26}},
                      {"body": {"text": '{"runtime":"rust","a":1}', "len": 24}}, "t/wire/r.json"), False),
@@ -2704,6 +2742,14 @@ def cmd_rulecheck() -> int:
          lambda: cjr({"summary": '{"id": 723, "kind": "flush", "covers": [717, 718]}'},
                      {"summary": '{"id": 726, "kind": "flush", "covers": [720, 721, 722]}'},
                      "t/wire/frames.jsonl"), True),
+        ("N26 — the ports' foundation_models_backend catalog entry in a prompt",
+         lambda: cjr({"content": "x  bundles=cli,file_bridge,kernel_state  y"},
+                     {"content": "x  bundles=cli,file_bridge,foundation_models_backend,kernel_state  y"},
+                     "t/ctx/r.json"), False),
+        ("N26 — any other catalog difference beside it is still a line",
+         lambda: cjr({"content": "x  bundles=cli,file_bridge,kernel_state  y"},
+                     {"content": "x  bundles=cli,foundation_models_backend,kernel_state,web  y"},
+                     "t/ctx/r.json"), True),
         ("N23 — a KV conversation id in a reflect",
          lambda: cjr({"kv": {"live": 1, "conversations": ["022609017e2a0f28"]}},
                      {"kv": {"live": 1, "conversations": ["715ef89e7813c656"]}},

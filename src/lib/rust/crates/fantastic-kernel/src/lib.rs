@@ -63,7 +63,7 @@ pub use peers::{PeerCallFuture, PeerEmitFuture, PeerReply, PeerRoute};
 pub use refusal::{bad, missing, not_here, refusal, refusal_hint, unknown_agent};
 pub use rows::{Row, RowStore, RowTail};
 pub use scalar::{coerce_scalar, py_strip};
-pub use send::{current_origin, current_sender};
+pub use send::{current_origin, current_sender, Signal, ON_BATCH_LAUNCHED};
 pub use state::{KernelState, CURRENT_VERSION};
 pub use storage::StorageMode;
 pub use tasks::{current_killed, current_task, spawn_inherit, TaskId, TaskTable, CURRENT_TASK};

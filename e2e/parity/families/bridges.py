@@ -64,34 +64,34 @@ def run(ctx) -> None:  # noqa: C901
     cb = {**BASE, "rest": "*", "web": "*", "ws": "*"}
     try:
         (ctx.work / "a.txt").write_text("a\n")
-        rec.json("setup/readings", k.create(parent_id=k.root_id, id="readings",
+        rec.json("setup/readings", k.create(parent_id=k.home, id="readings",
                                             handler_module="file_bridge.tools", allow=["."], root=".",
                                             **OPEN, callable_by=cb))
         # The live peer, exactly as `wire` writes it.
         rec.json("setup/wsb", k.create(
-            parent_id=k.root_id, id="wsb", handler_module="ws_bridge.tools", **OPEN,
+            parent_id=k.home, id="wsb", handler_module="ws_bridge.tools", **OPEN,
             callable_by=cb, can_call={**BASE, "readings": "*"},
             transport="ws", host="127.0.0.1", port=peer.port,
             peer_id="peer"))
         # A7.x — `memory` transport has no dialer outside a test injection.
         rec.json("setup/wsb_mem", k.create(
-            parent_id=k.root_id, id="wsb_mem", handler_module="ws_bridge.tools", **OPEN,
+            parent_id=k.home, id="wsb_mem", handler_module="ws_bridge.tools", **OPEN,
             callable_by=cb, transport="memory", peer_id="peer"))
         # A7.28 — a password egress rule, so the forward carries an auth token.
         rec.json("setup/wsb_pass", k.create(
-            parent_id=k.root_id, id="wsb_pass", handler_module="ws_bridge.tools", **OPEN,
+            parent_id=k.home, id="wsb_pass", handler_module="ws_bridge.tools", **OPEN,
             callable_by=cb, can_call={**BASE, "readings": "*"},
             transport="ws", host="127.0.0.1", port=peer.port,
             peer_id="peer", egress_rule="password", auth_token="parity-peer-token"))
         rec.json("setup/relay", k.create(
-            parent_id=k.root_id, id="relay", handler_module="relay_connector.tools", **OPEN,
+            parent_id=k.home, id="relay", handler_module="relay_connector.tools", **OPEN,
             callable_by=cb, can_call={**BASE, "readings": "*"},
             url=relay.url(), relay_url=relay.url(), guid="parity0000000000000000000000guid",
             partner_guid="stub-partner", heartbeat=1, reconnect=3,
             identity={"role": "parity"}))
         # A7.13/A7.14 — a relay with NO partner, then the directory verbs on it.
         rec.json("setup/relay_nopartner", k.create(
-            parent_id=k.root_id, id="relay_nopartner", handler_module="relay_connector.tools",
+            parent_id=k.home, id="relay_nopartner", handler_module="relay_connector.tools",
             **OPEN, callable_by=cb, url=relay.url(), relay_url=relay.url()))
         time.sleep(2.0)
 

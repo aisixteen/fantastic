@@ -262,8 +262,7 @@ that clear's member, reachable through grep, recall and `history fold`.
 /// The memory how-to — python `_MEMORY_HOWTO`, verbatim, `{store}` filled in with
 /// the record's `memory_store_id` (or `(none)`).
 pub const MEMORY_HOWTO: &str = r#"## Your memory
-Your conversation lives in your MEMORY STORE `{store}` — every row under YOUR key, which
-only you read and write.
+Your conversation lives in your MEMORY STORE `{store}` — every row under YOUR key.
 "#;
 
 /// The context-window how-to, appended to the DEFAULT system block. Context is

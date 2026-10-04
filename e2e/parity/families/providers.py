@@ -83,10 +83,10 @@ def drive(ctx, provider: str, case: str, stub, handler_meta: dict, env_drop,
     cb = {**BASE, "rest": "*", "web": "*", "ws": "*"}
     try:
         rec.json(f"{rel}/create_readings", k.create(
-            parent_id=k.root_id, id="readings", handler_module="file_bridge.tools", allow=["."], root=".",
+            parent_id=k.home, id="readings", handler_module="file_bridge.tools", allow=["."], root=".",
             **OPEN, callable_by=cb))
         rec.json(f"{rel}/create_ai", k.create(
-            **{"parent_id": k.root_id, "id": "ai", **OPEN, "callable_by": cb,
+            **{"parent_id": k.home, "id": "ai", **OPEN, "callable_by": cb,
                **ai(can_call={**BASE, "readings": "*"}),
                "context_window": CTX_WINDOW, "output_reserve": CTX_RESERVE,
                **handler_meta}))

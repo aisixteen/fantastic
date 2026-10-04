@@ -192,7 +192,7 @@ impl Kernel {
         }
         Some(json!({
             "error": format!("{sender_id} may only {verb} its own children — {given} is not one"),
-            "reason": "unauthorized", "hint": crate::authz::FROM_ABOVE, "side": "mutator",
+            "reason": "unauthorized", "side": "mutator",
         }))
     }
 }

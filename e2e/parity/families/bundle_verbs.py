@@ -298,7 +298,7 @@ def run(ctx) -> None:
         cb = {**BASE, "rest": "*", "web": "*", "ws": "*", "editor": "*", "sched": "*", "runner": "*"}
         for aid, hm, meta in fx:
             rec.json(f"create/{aid}", k.create(
-                **{"parent_id": k.root_id, "handler_module": hm, "id": aid,
+                **{"parent_id": k.home, "handler_module": hm, "id": aid,
                    **OPEN, "callable_by": cb, **meta}))
         time.sleep(1.0)
 

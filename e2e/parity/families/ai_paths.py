@@ -17,7 +17,7 @@ from __future__ import annotations
 import threading
 import time
 
-from families import BASE, MEMORY, OPEN, VLLM, ai, call, quiesce, save_kernel_log, vllm
+from families import BASE, MEMORY, OPEN, ROOT_ID, VLLM, ai, call, quiesce, save_kernel_log, vllm
 from spec import AI_FILL_CHARS, AI_RESERVE, AI_WINDOW
 from stubs.openai_chat import Handler as OpenAIHandler, OpenAIChatStub
 
@@ -135,27 +135,27 @@ def run(ctx) -> None:  # noqa: C901
     reach = ["readings", "slow", "plant", "ai", "ai2", "web", "rest", "ws"]
     k = ctx.boot(reach=reach, port=ports.take("main"))
     try:
-        rec.json("setup/readings", k.create(parent_id=k.root_id, id="readings",
+        rec.json("setup/readings", k.create(parent_id=k.home, id="readings",
                                             handler_module="file_bridge.tools", allow=["."], root=".",
                                             **OPEN, callable_by=cb))
-        rec.json("setup/slow", k.create(parent_id=k.root_id, id="slow",
+        rec.json("setup/slow", k.create(parent_id=k.home, id="slow",
                                         handler_module="slow_probe.tools", **OPEN,
                                         callable_by=cb))
-        rec.json("setup/plant", k.create(parent_id=k.root_id, id="plant",
+        rec.json("setup/plant", k.create(parent_id=k.home, id="plant",
                                          handler_module="plant_probe.tools", **OPEN,
                                          callable_by=cb))
         ai_meta = vllm(stub.base_url(), context_window=AI_WINDOW,
                        output_reserve=AI_RESERVE, context_async=True)
-        rec.json("setup/ai", k.create(parent_id=k.root_id, id="ai",
+        rec.json("setup/ai", k.create(parent_id=k.home, id="ai",
                                       handler_module=VLLM, **OPEN,
                                       callable_by=cb,
                                       **ai(can_call={**BASE, "readings": "*", "slow": "*",
-                                                     "plant": "*", "kernel": "*", "ai2": "*"},
+                                                     "plant": "*", ROOT_ID: "*", "ai2": "*"},
                                            **ai_meta)))
-        rec.json("setup/ai2", k.create(parent_id=k.root_id, id="ai2",
+        rec.json("setup/ai2", k.create(parent_id=k.home, id="ai2",
                                        handler_module=VLLM, **OPEN,
                                        callable_by=cb,
-                                       **ai(can_call={**BASE, "readings": "*", "kernel": "*",
+                                       **ai(can_call={**BASE, "readings": "*", ROOT_ID: "*",
                                                       "ai": "*"},
                                             **ai_meta)))
         time.sleep(1.2)
@@ -292,7 +292,7 @@ def run(ctx) -> None:  # noqa: C901
                       env_extra={"FANTASTIC_AI_SEND_TIMEOUT": "0.5"})
         try:
             rec.json("send_timeout/create_ai", k2.create(
-                parent_id=k2.root_id, id="ai_to", handler_module=VLLM,
+                parent_id=k2.home, id="ai_to", handler_module=VLLM,
                 **OPEN, callable_by=cb, **ai(can_call={**BASE, "readings": "*"}, **ai_meta)))
             time.sleep(1.0)
             t0 = time.monotonic()

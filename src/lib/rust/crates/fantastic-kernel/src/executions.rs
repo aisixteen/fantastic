@@ -569,8 +569,10 @@ impl Kernel {
             if let Some(a) = &after {
                 q.insert("after".to_string(), a.clone());
             }
-            let res = self
-                .bookkeeping(&store, Value::Object(q), None)
+            // QUIET like the flush: a ledger read publishes nothing on the state
+            // stream (python `_store_read`).
+            let res = crate::send::STATE_QUIET
+                .scope(true, self.bookkeeping(&store, Value::Object(q), None))
                 .await
                 .result;
             let ok = res.is_object() && !res.get("error").is_some_and(py_truthy);

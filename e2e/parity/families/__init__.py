@@ -17,6 +17,11 @@ from pathlib import Path
 #: Baseline grant tokens. Keys in a grant map are literal ids or `$tokens`;
 #: `"*"` is a legal VALUE (every verb) and never a legal KEY (it matches no id).
 BASE = {"$self": "*", "$parent": "*", "$children": "*"}
+#: THE ROOT'S ID — what every runtime seeds (`kernel_state`; `Ctx.boot` checks
+#: the measured one against it). A grant names it: `kernel` is the reserved
+#: ADDRESS of the root, never a grant key — under the minimal model (owner,
+#: 2026-10-04) `can_call` keys are literal ids, so `{"kernel": "*"}` matched nothing.
+ROOT_ID = "kernel_state"
 #: The ingress rule an agent needs before any leg may call it.
 OPEN = {"ingress_rule": "allow_all_ingress"}
 #: THE MEMORY STORE `spec.CaptureKernel.seed` writes: one ram_store for the
@@ -32,14 +37,18 @@ VLLM = "vllm_backend.tools"
 #: endpoint's KV session table never decides a capture.
 VLLM_MAX_TOKENS = 4096
 VLLM_KV_SLOTS = 64
+#: The server window every vllm record names (REQUIRED, owner 2026-10-04); a
+#: family that measures context management names its own.
+VLLM_CONTEXT_WINDOW = 32768
 
 
 def vllm(endpoint: str, **meta) -> dict:
-    """A `vllm_backend` record's model half: the stub's `/v1` URL and the five
+    """A `vllm_backend` record's model half: the stub's `/v1` URL and the six
     fields the write requires. No `credentials`: the key is optional on vllm, and
     a stub wants none — the one case about the key (`providers`) names its own."""
     return {"model": "stub-model", "endpoint": endpoint, "max_tokens": VLLM_MAX_TOKENS,
-            "kv_slots": VLLM_KV_SLOTS, "kv_overflow": "evict", **meta}
+            "kv_slots": VLLM_KV_SLOTS, "kv_overflow": "evict",
+            "context_window": VLLM_CONTEXT_WINDOW, **meta}
 
 
 def ai(**meta) -> dict:
@@ -69,6 +78,8 @@ class Ctx:
 
         k = CaptureKernel(self.runtime, self.link, **kw)
         k.boot()
+        if k.root_id != ROOT_ID:
+            raise RuntimeError(f"root id measured {k.root_id!r}, families grant {ROOT_ID!r}")
         self.meta.setdefault("root_id", k.root_id)
         self.meta.setdefault("seed_branch", k.seed_branch)
         self.meta.setdefault("port", k.port)

@@ -578,7 +578,11 @@ extension Kernel {
             for (k, v) in payload { q[k] = v }
             q["limit"] = .integer(1000)
             if after != .null { q["after"] = after }
-            let (res, _) = await storeCall(store, .object(q))
+            // QUIET like the flush: a ledger read publishes nothing on the state
+            // stream (python `_store_read`).
+            let (res, _) = await KernelTaskLocals.$stateQuiet.withValue(true) {
+                await storeCall(store, .object(q))
+            }
             guard case .object(let r) = res, !pyTruthy(r["error"] ?? .null) else {
                 throw PyError("RuntimeError", "kernel: memory store read failed: \(pyStr(res))")
             }
