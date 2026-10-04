@@ -213,8 +213,8 @@ fn readme_keys(dir: &Path) -> Result<Vec<String>, Value> {
 /// path). The CLAMP check is [`clamped_within`] (lexical, tolerates
 /// nonexistent components); the EXISTENCE check is a real `is_file()` on the
 /// UNRESOLVED `f` — the OS itself refuses to walk a `..` through a segment
-/// that is not really a directory (`frontend/panel-recipe/../routing` is
-/// `no doc` because `panel-recipe` is a FILE, not a dir, even though the
+/// that is not really a directory (`frontend/html-agent/../routing` is
+/// `no doc` because `html-agent` is a FILE, not a dir, even though the
 /// clamp check alone would have allowed it).
 fn readme_view(dir: &Path, sel: &str) -> Result<Value, Value> {
     if sel == "index" {

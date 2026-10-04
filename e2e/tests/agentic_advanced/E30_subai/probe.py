@@ -119,15 +119,24 @@ MULTIPLIER = 4
 # lucky turn is not a routine.
 CYCLES = int(os.environ.get("CYCLES", "3"))
 
+# THE TWO IDS THE CREATOR BUILDS (owner 2026-10-04). Under the minimal access model
+# an agent writes grants only on its own children, and `clock`, `totals`, the memory
+# store and the key store are the harness's — so the creator can never open them to an
+# agent it makes. The operator opens them IN ADVANCE to these named ids; every edge
+# between the creator's own children stays the creator's to grant.
+SUB_AI = "hour_ai"
+SUB_CODE = "hour_code"
+
 TASK = (
     "You are the CREATOR here — the mind building the structure. I am going to walk "
     "away, but I am an AGENT here too: if you genuinely cannot proceed without a "
     "decision that is mine, reflect the tree, find me, and send me an `inquiry`.\n\n"
     "Build me a ROUTINE made of THREE things, all of them yours to create:\n"
-    "1. A NEW AI agent (an inference unit like `brain` — `brain` is only your example "
-    "of what such a record looks like; list the agents to read it, then create your "
-    "own with its own id and its own instructions).\n"
-    "2. A NEW code agent — a command runner with a program file YOU write. The program "
+    f"1. A NEW AI agent with id `{SUB_AI}` (an inference unit like `brain` — `brain` is "
+    "only your example of what such a record looks like; list the agents to read it, "
+    "then create your own with its own instructions).\n"
+    f"2. A NEW code agent with id `{SUB_CODE}` — a command runner with a program file "
+    "YOU write. The program "
     f"holds the multiplier {MULTIPLIER} and, when run, computes the CURRENT HOUR (0-23, "
     f"local time) times {MULTIPLIER} and prints it. The multiplier must live in the "
     "program, nowhere else.\n"
@@ -137,7 +146,9 @@ TASK = (
     "stable name, then end its turn with `done`.\n\n"
     "NOTHING can call anything by default: wiring means granting the authority in "
     "BOTH directions for every edge (clock → AI, AI → code agent, AI → `totals`, "
-    "and whatever the code agent's `allowed` needs). Build it, trigger a tick, "
+    "and whatever the code agent's `allowed` needs). The agents that are not yours — "
+    f"`clock`, `totals`, the memory store and the key store — are ALREADY open to `{SUB_AI}`; "
+    "every edge between agents you create is yours to grant. Build it, trigger a tick, "
     "verify the stored value is right, and tell me what you made."
 )
 
@@ -438,6 +449,8 @@ async def build_fixture(root, *, interpreter: str | None = None):
                         "root": ".fantastic/data",
                         "ingress_rule": "allow_all_ingress",
                         "callable_by": {
+                            # the sub-AI stores its value here (= SUB_AI)
+                            "hour_ai": "*",
                             "ai": "*",
                             "brain": "*",
                             # THE HARNESS reads these back to score. In
@@ -491,6 +504,8 @@ async def build_fixture(root, *, interpreter: str | None = None):
                         "parent_id": home(root),
                         "handler_module": "scheduler.tools",
                         "id": "clock",
+                        # a fire runs AS the scheduler: it reaches the named sub-AI
+                        "can_call": {"$self": "*", "hour_ai": "*"},  # = SUB_AI
                         "callable_by": {
                             "ai": "*",
                             "brain": "*",
@@ -543,6 +558,9 @@ async def build_fixture(root, *, interpreter: str | None = None):
                         "ingress_rule": "allow_all_ingress",
                         # the COMMAND runner's gate: run THIS interpreter against a file argument.
                         "allowed": [rf"{re.escape(interp)} \S+"],
+                        # WHERE it runs is the operator's (exec_bridge requires it; a
+                        # leg without one runs nothing): the test's own work dir.
+                        "cwd": os.getcwd(),
                         "description": "Process edge: the command(s) this kernel may spawn.",
                     },
                 }
@@ -808,6 +826,10 @@ async def run(
         await memory.open_ingress(root, memory.MEMORY, who)
         if BK.key_ref:
             await creds.grant_reader(root, who)
+    # the stores' halves for the sub-AI the creator will make (see SUB_AI)
+    await memory.open_ingress(root, memory.MEMORY, SUB_AI)
+    if BK.key_ref:
+        await creds.open_store(root, SUB_AI)
     # FORENSICS: pin the moment any grant on the store changes (rust E30,
     # 2026-09-30 — `rest` vanished from memory's callable_by mid-run).
     _grants_watch = asyncio.create_task(memory.watch_store_grants(root))

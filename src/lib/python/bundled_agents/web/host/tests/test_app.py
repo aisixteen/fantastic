@@ -124,7 +124,7 @@ def test_root_is_not_a_page(client):
 
 
 # ─── The web host renders no agent UI server-side — there is no `GET /<id>/`
-#     render route. Frontend panels (html_agent/gl views) are JS view-agents in
+#     render route. Frontend html agents (html_agent/gl views) are JS view-agents in
 #     the TS kernel; the host only serves STATIC files (the file route below)
 #     and carries the bus. So there's nothing render-side to exercise here.
 

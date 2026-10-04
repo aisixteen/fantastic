@@ -377,8 +377,8 @@ async fn non_root_has_no_readmes_frame() {
 
 /// Seed a docs tree exercising the R2-RFL-5 clamp/existence matrix: a REAL
 /// nested dir (`nested/`), a topic that is a FILE sitting where a later `..`
-/// wants to step through it as a dir (`frontend/panel-recipe.md`, no
-/// `frontend/panel-recipe/` dir), and a top-level topic (`topic.md`).
+/// wants to step through it as a dir (`frontend/html-agent.md`, no
+/// `frontend/html-agent/` dir), and a top-level topic (`topic.md`).
 fn seed_clamp_docs(base: &Path) {
     let docs = base.join("docs");
     std::fs::create_dir_all(docs.join("frontend")).unwrap();
@@ -389,7 +389,7 @@ fn seed_clamp_docs(base: &Path) {
     )
     .unwrap();
     std::fs::write(
-        docs.join("frontend").join("panel-recipe.md"),
+        docs.join("frontend").join("html-agent.md"),
         "> p\n\npanel body",
     )
     .unwrap();
@@ -432,17 +432,17 @@ async fn readme_view_key_check_is_lexical_then_the_index() {
     .await;
     assert_eq!(r["readme"]["error"], "bad key 'nested/../topic'");
 
-    // `frontend/panel-recipe/../routing`: the same, whether or not
-    // `panel-recipe` is a directory — the filesystem is never consulted.
+    // `frontend/html-agent/../routing`: the same, whether or not
+    // `html-agent` is a directory — the filesystem is never consulted.
     let r = bare_reflect(
         &kernel,
         &root,
-        &json!({"type":"reflect","tree":"none","readme":"frontend/panel-recipe/../routing"}),
+        &json!({"type":"reflect","tree":"none","readme":"frontend/html-agent/../routing"}),
     )
     .await;
     assert_eq!(
         r["readme"]["error"],
-        "bad key 'frontend/panel-recipe/../routing'"
+        "bad key 'frontend/html-agent/../routing'"
     );
 
     // `nested//child`: an EMPTY segment is a bad key (no POSIX collapsing).

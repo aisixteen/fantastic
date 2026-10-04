@@ -59,8 +59,8 @@ pub const DOCS: &[(&str, &str)] = &[
     ("streams", include_str!("docs/streams.md")),
     ("frontend", include_str!("docs/frontend.md")),
     (
-        "frontend/panel-recipe",
-        include_str!("docs/frontend/panel-recipe.md"),
+        "frontend/html-agent",
+        include_str!("docs/frontend/html-agent.md"),
     ),
     ("frontend/routing", include_str!("docs/frontend/routing.md")),
     ("terminal", include_str!("docs/terminal.md")),

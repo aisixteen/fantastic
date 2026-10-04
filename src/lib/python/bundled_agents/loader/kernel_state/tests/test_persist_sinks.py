@@ -33,8 +33,8 @@ SHIPPED = {
     "docs/frontend/routing.md": (PKG / "docs" / "frontend" / "routing.md").read_text(
         encoding="utf-8"
     ),
-    "docs/frontend/panel-recipe.md": (
-        PKG / "docs" / "frontend" / "panel-recipe.md"
+    "docs/frontend/html-agent.md": (
+        PKG / "docs" / "frontend" / "html-agent.md"
     ).read_text(encoding="utf-8"),
 }
 
@@ -61,7 +61,7 @@ def _edit_and_delete(d: Path) -> None:
     (d / "readme.md").write_text("OPERATOR README")
     (d / "docs" / "frontend" / "routing.md").write_text("OPERATOR ROUTING")
     (d / "docs" / "memory.md").unlink()
-    (d / "docs" / "frontend" / "panel-recipe.md").unlink()
+    (d / "docs" / "frontend" / "html-agent.md").unlink()
 
 
 def _assert_copy_if_missing(d: Path) -> None:
@@ -69,8 +69,8 @@ def _assert_copy_if_missing(d: Path) -> None:
     assert (d / "docs" / "frontend" / "routing.md").read_text() == "OPERATOR ROUTING"
     # the deleted ones — a top tier and a nested tier — are re-seeded verbatim
     assert (d / "docs" / "memory.md").read_text() == SHIPPED["docs/memory.md"]
-    assert (d / "docs" / "frontend" / "panel-recipe.md").read_text() == SHIPPED[
-        "docs/frontend/panel-recipe.md"
+    assert (d / "docs" / "frontend" / "html-agent.md").read_text() == SHIPPED[
+        "docs/frontend/html-agent.md"
     ]
 
 

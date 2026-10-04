@@ -10,7 +10,7 @@ route like any other.
 
 The web host does exactly two things: serve STATIC files through the file
 route above, and carry `send()` calls + events over the WS bus (the `web_ws`
-sub-agent). It renders no agent UI server-side — frontend panels live in the TS
+sub-agent). It renders no agent UI server-side — frontend html agents live in the TS
 kernel and render there; this host just serves the static `dist` (via a `file`
 agent) and relays the bus. See `ts/SERVE.md`.
 

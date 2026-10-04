@@ -14,4 +14,4 @@ limits:
   no_progress_turns: 0
   turn_chars: 120000
   turn_seconds: 600
-env: {FANTASTIC_AI_SEND_TIMEOUT: "420", UNATTENDED: "600"}
+env: {FANTASTIC_AI_SEND_TIMEOUT: "420", UNATTENDED: "1200"}

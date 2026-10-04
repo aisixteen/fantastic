@@ -195,3 +195,23 @@ async def test_reflect_advertises_the_shell_permission(k):
     await _mk(k, "login", shell="login")
     assert (await _call(k, "plain", {"type": "reflect"}))["shell"] is False
     assert (await _call(k, "login", {"type": "reflect"}))["shell"] == "login"
+
+
+async def test_write_bytes_is_verbatim_so_enter_reaches_the_shell(k, fake_shell):
+    """A `<call>` strips a scalar like `data`, so a key ending in Enter rides
+    `bytes`, written verbatim (owner 2026-10-04): the line runs. Exactly one of
+    `data`/`bytes` is accepted."""
+    await _mk(k, "sh", env={"SHELL": fake_shell}, shell=True)
+    k.watch("sh", "viewer")
+    r = await _call(k, "sh", {"type": "start", "pty": PTY})
+    jid = r["job_id"]
+    await _events_until(k, lambda t: "SHELL_UP" in t)
+    both = await _call(
+        k, "sh", {"type": "write", "job_id": jid, "data": "a", "bytes": b"b"}
+    )
+    assert both.get("arg") == "data" and "exactly one" in both["error"], both
+    none = await _call(k, "sh", {"type": "write", "job_id": jid})
+    assert none.get("arg") == "data", none
+    out = await _call(k, "sh", {"type": "write", "job_id": jid, "bytes": b"yo\n"})
+    assert out == {"written": 3}, out
+    await _events_until(k, lambda t: "GOT yo" in t)

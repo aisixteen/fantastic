@@ -75,6 +75,21 @@ def wire_in_process(root: Any, refs: dict[str, tuple[str, str]]) -> None:
         assert made.get("id") == CREDS, made
 
 
+async def open_store(root: Any, aid: str) -> None:
+    """The STORE's half alone: `creds` accepts `get` from `aid` — for an agent that does
+    not exist yet (a probe's model creates it and writes its own `can_call`)."""
+    listed = (await root.send([{"target": "kernel", "payload": {"type": "list_agents"}}]))[0]
+    recs = {a.get("id"): a for a in ((listed.get("result") or {}).get("agents") or [])}
+    grants = dict((recs.get(CREDS) or {}).get("callable_by") or {})
+    if grants.get(aid) in (GET, "*"):
+        return
+    grants[aid] = GET
+    out = (await root.send([{"target": "kernel", "payload": {
+        "type": "update_agent", "id": CREDS, "callable_by": grants}}]))[0]["result"]
+    if isinstance(out, dict) and out.get("error"):
+        raise AssertionError(f"open_store({aid}): creds.callable_by refused: {out}")
+
+
 async def grant_reader(root: Any, aid: str) -> None:
     """Open BOTH halves of `aid` → `creds` for `get`: the agent's `can_call` and the
     store's `callable_by` — read, add one key, write back (update replaces a field

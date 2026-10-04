@@ -476,3 +476,30 @@ async fn stop_and_delete_kill_everything_a_job_launched() {
         assert!(alive.is_empty(), "{end}: survivors {alive:?}");
     }
 }
+
+/// A `<call>` strips a scalar like `data`, so a key ending in Enter rides
+/// `bytes`, written verbatim (owner 2026-10-04); exactly one of the two.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn write_bytes_is_verbatim_so_enter_reaches_the_program() {
+    let Some(py) = python() else { return };
+    let tmp = TempDir::new().unwrap();
+    let k = kernel_with(&tmp, "term_b", json!({})).await;
+    let mut rx = k.ensure_inbox(&AgentId::from("term_b"));
+    let jid = start(&k, "term_b", &py).await;
+    output_until(&mut rx, |t| t.contains("SIZE")).await;
+    let both = call(
+        &k,
+        "term_b",
+        json!({"type": "write", "job_id": jid, "data": "a", "bytes": "b"}),
+    )
+    .await;
+    assert_eq!(both["arg"], json!("data"), "{both}");
+    let w = call(
+        &k,
+        "term_b",
+        json!({"type": "write", "job_id": jid, "bytes": "hello\n"}),
+    )
+    .await;
+    assert_eq!(w, json!({"written": 6}));
+    output_until(&mut rx, |t| t.contains("GOT hello")).await;
+}

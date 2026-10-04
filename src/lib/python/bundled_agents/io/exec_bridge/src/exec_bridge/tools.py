@@ -1064,17 +1064,29 @@ async def _clear(id, payload, kernel):
 
 
 async def _write(id, payload, kernel):
-    """args: job_id:int (req), data:str (req). Keystrokes/paste into a PTY job, written IN FULL and serialized per job (a bracketed paste is never truncated or interleaved). Returns {written:int}."""
+    """args: job_id:int (req), data:str or bytes:bytes (exactly one). Keystrokes/paste into a PTY job, written IN FULL and serialized per job (a bracketed paste is never truncated or interleaved). `bytes` is written VERBATIM — a trailing newline (Enter) survives; a `<call>` strips a scalar value like `data`, so send keys that end in Enter as `bytes`. Returns {written:int}."""
     job, err = _pty_job("write", id, payload)
     if err:
         return err
-    data = payload.get("data")
-    if not isinstance(data, str):
+    data, raw = payload.get("data"), payload.get("bytes")
+    if (data is None) == (raw is None):
+        return bad(
+            "write", "data", "exactly one of data (a string) or bytes (verbatim)"
+        )
+    if raw is not None:
+        if isinstance(raw, str):
+            raw = raw.encode("utf-8")
+        if not isinstance(raw, (bytes, bytearray)):
+            return bad("write", "bytes", "bytes, or a string written verbatim")
+        buf = bytes(raw)
+    elif not isinstance(data, str):
         return bad("write", "data", "a string")
+    else:
+        buf = data.encode("utf-8")
     pt = job["pty"]
     try:
         async with pt["write_lock"]:
-            written = await _write_all(pt["fd"], data.encode("utf-8"))
+            written = await _write_all(pt["fd"], buf)
     except OSError as e:
         return refusal(TRANSPORT_ERROR, f"exec_bridge: write failed: {e}")
     return {"written": written}
