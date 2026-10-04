@@ -195,7 +195,7 @@ signal: stale lock blocked the relaunch → the flock takeover is broken.
 The web host renders no agent UI server-side: there is no `GET /<id>/`
 page route. The host does exactly two things —
 serve STATIC files via the file route (`/<id>/file/<path>`, Test 11)
-and carry `send()` over the WS bus. Frontend panels live in the TS
+and carry `send()` over the WS bus. Frontend html agents live in the TS
 kernel (`html_agent.ts` → canvas), not as host pages. So `/<id>/` matches
 no route at all → 404.
 
@@ -204,7 +204,7 @@ no route at all → 404.
 code=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:$PORT/kernel_state/")
 [ "$code" = "404" ] && echo "  no /<id>/ render route → 404: OK; PASS" || echo "  FAIL: code=$code"
 ```
-Expected: the check PASSES. Frontend panel rendering is exercised in the
+Expected: the check PASSES. Frontend html-agent rendering is exercised in the
 frontend kernel's selftest (`ts/`), where the `html_agent.ts` record holds
 the body and the canvas renders it; the host only serves the static `dist`
 and relays the bus.

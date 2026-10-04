@@ -35,7 +35,7 @@ curl -s -o /dev/null -w '%{http_code}' http://localhost:$PORT/ | grep -q "404"
 
 ### Test 2: no server-side render route
 
-Rendering routes are python's two; frontend panels live in the TS
+Rendering routes are python's two; frontend html agents live in the TS
 kernel, so `/`, `/<id>/` and `/transport.js` are NOT served.
 
 ```bash

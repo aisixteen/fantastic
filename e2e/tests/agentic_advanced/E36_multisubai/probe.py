@@ -42,7 +42,7 @@ sys.path.insert(
 from backends import backend as _resolve_backend  # noqa: E402
 from helpers import creds, memory
 from helpers import verdict  # noqa: E402
-from helpers.kernel import open_kernel  # noqa: E402, home
+from helpers.kernel import home, open_kernel  # noqa: E402
 
 BK = _resolve_backend()
 BACKEND, MODEL = BK.name, BK.model

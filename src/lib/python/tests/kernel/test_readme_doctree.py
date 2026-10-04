@@ -51,7 +51,7 @@ def test_docs_tree_seeded_on_disk(kernel):
     assert (docs / "self-extension.md").exists()
     assert (docs / "reflect.md").exists()
     # a nested tier
-    assert (docs / "frontend" / "panel-recipe.md").exists()
+    assert (docs / "frontend" / "html-agent.md").exists()
 
 
 async def test_docs_seeded_via_store(seeded_kernel, store_agent):
@@ -102,7 +102,7 @@ async def test_readme_true_is_short_orientation(kernel):
 
 async def test_readme_index_shape_and_nesting(kernel):
     """`readme=index` → `{index:[{key,desc,tokens,children?}]}`; entries carry NO
-    body; nesting is preserved (frontend → panel-recipe/routing)."""
+    body; nesting is preserved (frontend → html-agent/routing)."""
     r = (
         await kernel.send(
             [{"target": "kernel", "payload": {"type": "reflect", "readme": "index"}}]
@@ -119,7 +119,7 @@ async def test_readme_index_shape_and_nesting(kernel):
         assert "body" not in e
     fe = by_key["frontend"]
     child_keys = {c["key"] for c in fe["children"]}
-    assert child_keys == {"frontend/panel-recipe", "frontend/routing"}
+    assert child_keys == {"frontend/html-agent", "frontend/routing"}
 
 
 # ─── readme=<key> → body + children index ──────────────────────
@@ -149,7 +149,7 @@ async def test_readme_key_returns_body_and_children(kernel):
         )
     )[0]["result"]
     assert {c["key"] for c in parent["readme"]["children"]} == {
-        "frontend/panel-recipe",
+        "frontend/html-agent",
         "frontend/routing",
     }
 
@@ -226,13 +226,13 @@ async def test_readme_nested_key_reachable(kernel):
             [
                 {
                     "target": "kernel",
-                    "payload": {"type": "reflect", "readme": "frontend/panel-recipe"},
+                    "payload": {"type": "reflect", "readme": "frontend/html-agent"},
                 }
             ]
         )
     )[0]["result"]
-    assert r["readme"]["key"] == "frontend/panel-recipe"
-    assert "panel" in r["readme"]["body"].lower()
+    assert r["readme"]["key"] == "frontend/html-agent"
+    assert "html agent" in r["readme"]["body"].lower()
 
 
 async def test_readme_unknown_key_is_wellformed_error(kernel):
@@ -251,7 +251,7 @@ async def test_readme_unknown_key_is_wellformed_error(kernel):
     doc = r["readme"]
     assert "error" in doc
     assert "self-extension" in doc["keys"]
-    assert "frontend/panel-recipe" in doc["keys"]  # flattened, includes tiers
+    assert "frontend/html-agent" in doc["keys"]  # flattened, includes tiers
 
 
 async def test_readme_key_cannot_escape_docs_dir(kernel):

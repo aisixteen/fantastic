@@ -218,7 +218,7 @@
             ),
             "interrupt": .string("args: job_id:int? — SIGINT one job or ALL running jobs on this agent."),
             "clear": .string("args: job_id:int? — drop finished jobs (one, or all non-running) from the RAM"),
-            "write": .string("args: job_id:int (req), data:str (req). Keystrokes/paste into a PTY job, written IN FULL and serialized per job (a bracketed paste is never truncated or interleaved). Returns {written:int}."),
+            "write": .string("args: job_id:int (req), data:str or bytes:bytes (exactly one). Keystrokes/paste into a PTY job, written IN FULL and serialized per job (a bracketed paste is never truncated or interleaved). `bytes` is written VERBATIM — a trailing newline (Enter) survives; a `<call>` strips a scalar value like `data`, so send keys that end in Enter as `bytes`. Returns {written:int}."),
             "resize": .string("args: job_id:int (req), cols:int (req), rows:int (req). Sets a PTY job's window size (the tty sends SIGWINCH, so a TUI redraws). Returns {resized:true, cols, rows}."),
             "ack": .string("args: job_id:int (req), chars:int (req). Flow control from a streaming consumer (an xterm acks each `output` chunk after parsing it): the reader pauses past 100K unacked chars and resumes under 5K. Returns {unacked:int, paused:bool}."),
             "output": .string("args: job_id:int (req), max_bytes:int? (default the whole 256 KiB ring). The PTY job's recent output — what a client re-attaching replays before the live `output` events. Returns {job_id, output:str}."),
@@ -778,16 +778,39 @@
             }
         }
 
-        private func writeReply(_ agentId: AgentId, _ payload: JSON) async -> JSON {
+        /// `write {job_id, data | bytes}` — `bytes` is written VERBATIM (a `<call>`
+        /// strips a scalar like `data`, so a trailing Enter only survives as
+        /// `bytes`); `raw` is the binary body when `bytes` rode the binary channel.
+        private func writeReply(_ agentId: AgentId, _ payload: JSON, raw: Data? = nil) async -> JSON {
             let pty: PtyJob
             switch ptyJob("write", agentId, payload) {
             case .failure(let r): return r.json
             case .success(let p): pty = p
             }
-            guard let data = payload["data"].asString else {
-                return Refusal.bad("write", "data", "a string")
+            // `JSON` takes a nil literal, so presence is judged against `.null`
+            // explicitly — never through an optional.
+            let data = payload["data"]
+            let bytesVal = payload["bytes"]
+            let hasData = data != JSON.null
+            let hasBytes = raw != nil || bytesVal != JSON.null
+            if hasData == hasBytes {
+                return Refusal.bad("write", "data", "exactly one of data (a string) or bytes (verbatim)")
             }
-            switch await pty.writeAll(Data(data.utf8)) {
+            let buf: Data
+            if let raw {
+                buf = raw
+            } else if hasBytes {
+                guard let s = bytesVal.asString else {
+                    return Refusal.bad("write", "bytes", "bytes, or a string written verbatim")
+                }
+                buf = Data(s.utf8)
+            } else {
+                guard let s = data.asString else {
+                    return Refusal.bad("write", "data", "a string")
+                }
+                buf = Data(s.utf8)
+            }
+            switch await pty.writeAll(buf) {
             case .success(let n): return .object(["written": .integer(Int64(n))])
             case .failure(.ended): return jobEnded(pty.jobId)
             case .failure(.os(let e)):
@@ -926,7 +949,8 @@
         public func handleBinary(
             agentId: AgentId, header: JSON, body: Blob?, kernel: Kernel
         ) async throws -> (JSON?, Blob?) {
-            guard header["type"].asString == "paste_image" else {
+            let verb = header["type"].asString
+            guard verb == "paste_image" || verb == "write" else {
                 return (try await handle(agentId: agentId, payload: header, kernel: kernel), nil)
             }
             if let agent = kernel.agent(agentId) {
@@ -934,10 +958,13 @@
                     ingressRule: agent.metaValue(forKey: "ingress_rule"),
                     auth: agent.metaValue(forKey: "auth"))
                 if case .deny(let d) = rule.authorize(
-                    AuthAction(kind: "spawn", target: agentId.value, verb: "paste_image", token: nil))
+                    AuthAction(kind: "spawn", target: agentId.value, verb: verb ?? "", token: nil))
                 {
                     return (d.asRefusal, nil)
                 }
+            }
+            if verb == "write" {
+                return (await writeReply(agentId, header, raw: bodyAt(body, "bytes")), nil)
             }
             guard let data = bodyAt(body, "data") else {
                 return (pasteImageText(agentId, header), nil)

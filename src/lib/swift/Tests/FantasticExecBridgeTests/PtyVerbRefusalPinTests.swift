@@ -128,7 +128,7 @@
 
             #expect(
                 await call(k, "pty_l", ["type": "write", "job_id": jid])
-                    == bad("write", "data", "a string"))
+                    == bad("write", "data", "exactly one of data (a string) or bytes (verbatim)"))
             #expect(
                 await call(k, "pty_l", ["type": "write", "job_id": jid, "data": 5])
                     == bad("write", "data", "a string"))

@@ -286,17 +286,39 @@ pub fn dims(verb: &str, raw: &Value) -> Result<(u16, u16), Value> {
     ))
 }
 
-/// `write {job_id, data}` — keystrokes / paste.
-pub async fn write_reply(owner: &AgentId, payload: &Value) -> Value {
+/// `write {job_id, data | bytes}` — keystrokes / paste. `bytes` is written
+/// VERBATIM (a `<call>` strips a scalar like `data`, so a trailing Enter only
+/// survives as `bytes`); `raw` is the binary body when `bytes` rode the binary
+/// channel.
+pub async fn write_reply(owner: &AgentId, payload: &Value, raw: Option<&[u8]>) -> Value {
     let pty = match pty_job("write", owner, payload) {
         Ok(p) => p,
         Err(e) => return e,
     };
-    let Some(data) = payload.get("data").and_then(Value::as_str) else {
-        return bad("write", "data", "a string");
+    let data = payload.get("data").filter(|v| !v.is_null());
+    let bytes_val = payload.get("bytes").filter(|v| !v.is_null());
+    if data.is_some() == (raw.is_some() || bytes_val.is_some()) {
+        return bad(
+            "write",
+            "data",
+            "exactly one of data (a string) or bytes (verbatim)",
+        );
+    }
+    let buf: Vec<u8> = if let Some(r) = raw {
+        r.to_vec()
+    } else if let Some(b) = bytes_val {
+        match b.as_str() {
+            Some(s) => s.as_bytes().to_vec(),
+            None => return bad("write", "bytes", "bytes, or a string written verbatim"),
+        }
+    } else {
+        match data.and_then(Value::as_str) {
+            Some(s) => s.as_bytes().to_vec(),
+            None => return bad("write", "data", "a string"),
+        }
     };
     let _guard = pty.write_lock.lock().await;
-    match write_all(&pty, data.as_bytes()).await {
+    match write_all(&pty, &buf).await {
         Ok(n) => json!({"written": n}),
         Err(e) => refusal(TRANSPORT_ERROR, format!("exec_bridge: write failed: {e}")),
     }

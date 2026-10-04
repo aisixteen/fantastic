@@ -396,7 +396,7 @@ impl Bundle for ExecBridgeBundle {
             "clear" => clear_reply(agent_id, payload),
             "interrupt" => interrupt_reply(agent_id, payload),
             "stop" => stop_reply(agent_id, payload),
-            "write" => pty::write_reply(agent_id, payload).await,
+            "write" => pty::write_reply(agent_id, payload, None).await,
             "resize" => pty::resize_reply(agent_id, payload),
             "ack" => pty::ack_reply(agent_id, payload),
             "output" => pty::output_reply(agent_id, payload),
@@ -460,6 +460,14 @@ impl Bundle for ExecBridgeBundle {
                 Some(data) => pty::paste_image_reply(agent_id, &header, data).await,
                 None => pty::paste_image_text(agent_id, &header),
             };
+            return Ok((Some(reply), None));
+        }
+        if header.get("type").and_then(Value::as_str) == Some("write") {
+            let meta = snapshot_meta(agent_id, kernel);
+            if let Some(denied) = gate(&meta, agent_id, "write") {
+                return Ok((Some(denied), None));
+            }
+            let reply = pty::write_reply(agent_id, &header, body_at(body.as_ref(), "bytes")).await;
             return Ok((Some(reply), None));
         }
         Ok((self.handle(agent_id, &header, kernel).await?, None))
@@ -604,7 +612,7 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
             "stop": "args: job_id:int? — SIGKILL one job (its whole session: the command and everything it launched) or ALL running jobs on this agent.",
             "interrupt": "args: job_id:int? — SIGINT one job or ALL running jobs on this agent.",
             "clear": "args: job_id:int? — drop finished jobs (one, or all non-running) from the RAM",
-            "write": "args: job_id:int (req), data:str (req). Keystrokes/paste into a PTY job, written IN FULL and serialized per job (a bracketed paste is never truncated or interleaved). Returns {written:int}.",
+            "write": "args: job_id:int (req), data:str or bytes:bytes (exactly one). Keystrokes/paste into a PTY job, written IN FULL and serialized per job (a bracketed paste is never truncated or interleaved). `bytes` is written VERBATIM — a trailing newline (Enter) survives; a `<call>` strips a scalar value like `data`, so send keys that end in Enter as `bytes`. Returns {written:int}.",
             "resize": "args: job_id:int (req), cols:int (req), rows:int (req). Sets a PTY job's window size (the tty sends SIGWINCH, so a TUI redraws). Returns {resized:true, cols, rows}.",
             "ack": "args: job_id:int (req), chars:int (req). Flow control from a streaming consumer (an xterm acks each `output` chunk after parsing it): the reader pauses past 100K unacked chars and resumes under 5K. Returns {unacked:int, paused:bool}.",
             "output": "args: job_id:int (req), max_bytes:int? (default the whole 256 KiB ring). The PTY job's recent output — what a client re-attaching replays before the live `output` events. Returns {job_id, output:str}.",

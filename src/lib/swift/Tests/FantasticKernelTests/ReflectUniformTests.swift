@@ -203,7 +203,7 @@ struct ReflectUniformTests {
         let frontend = entries.first { $0["key"].asString == "frontend" }
         #expect(
             frontend?["children"].asArray?.map { $0["key"].asString ?? "" }
-                == ["frontend/panel-recipe", "frontend/routing"], "\(String(describing: frontend))")
+                == ["frontend/html-agent", "frontend/routing"], "\(String(describing: frontend))")
         for e in entries where e["key"].asString != "frontend" {
             #expect(e["children"].isNull, "only a sibling dir adds children: \(e)")
         }
@@ -692,7 +692,7 @@ struct ReadmeDiskModeTests {
         let (kernel, root) = makeDiskKernel([
             "frontend.md": "> frontend doc\nbody",
             "frontend/routing.md": "> routing doc\nbody",
-            "frontend/panel-recipe.md": "> panel doc\nbody",
+            "frontend/html-agent.md": "> panel doc\nbody",
         ])
         defer { try? FileManager.default.removeItem(at: root) }
         let inside = await kernel.send([
@@ -712,10 +712,10 @@ struct ReadmeDiskModeTests {
         #expect(esc["readme"]["error"].asString == "bad key '../escape'", "\(esc)")
 
         let throughFile = await kernel.send([
-            Item("kernel_state", ["type": "reflect", "readme": "frontend/panel-recipe/../routing"])
+            Item("kernel_state", ["type": "reflect", "readme": "frontend/html-agent/../routing"])
         ])[0].result
         #expect(
-            throughFile["readme"]["error"].asString == "bad key 'frontend/panel-recipe/../routing'",
+            throughFile["readme"]["error"].asString == "bad key 'frontend/html-agent/../routing'",
             "\(throughFile)")
         let unlisted = await kernel.send([
             Item("kernel_state", ["type": "reflect", "readme": "frontend/nothing"])

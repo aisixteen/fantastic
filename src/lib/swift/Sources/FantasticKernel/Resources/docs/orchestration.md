@@ -12,7 +12,7 @@ pass (send the AI `<type>send</type> <text>…</text>`), and/or spawn a compute 
 which kernel owns the target.
 
 Memory, inference, and compute are interchangeable units you wire from
-anywhere: a python routine can call an AI; an AI or a JS panel can spawn a
+anywhere: a python routine can call an AI; an AI or an html agent can spawn a
 python routine; all read the same memory. This is why a step written as code
 and a step written as an LLM call are substitutable. Bind by id + duck-typed
 verbs, never by concrete type.

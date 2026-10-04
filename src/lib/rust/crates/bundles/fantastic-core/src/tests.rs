@@ -130,7 +130,7 @@ fn seed_root_readme_writes_nested_tiers() {
     let docs = tmp.path().join(".fantastic/docs");
     for key in [
         "frontend",
-        "frontend/panel-recipe",
+        "frontend/html-agent",
         "frontend/routing",
         "orchestration",
         "system-verbs",
