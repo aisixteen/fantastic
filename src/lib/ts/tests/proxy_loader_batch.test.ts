@@ -89,3 +89,44 @@ test("flush: the persists in dirty order, then the forgets; a second start is a 
   await loader.flush();
   assert.deepEqual(h.calls, []);
 });
+
+test("flush: parents before children — a child waits for its parent's wave; a refusal fails loud", async () => {
+  // A host loader that refuses a record whose parent is not on disk YET — the
+  // record-owner guard walking the parent chain (measured on the canvas).
+  const k = new Kernel();
+  k.registerBundle("v.ts", () => null);
+  const onDisk = new Set<string>(["sess1"]);
+  const order: string[] = [];
+  let refuseNext = false;
+  k.bridge = {
+    forward: async (_t, payload) => {
+      if (payload["type"] !== "persist_record") return { ok: true };
+      const rec = payload["record"] as Payload;
+      const id = String(rec["id"]);
+      await new Promise((r) => setTimeout(r, id === "canvas" ? 20 : 1)); // the parent is slow
+      if (refuseNext && id === "c") return { error: "a record verb is scoped to the caller's own subtree" };
+      if (!onDisk.has(String(rec["parent_id"]))) return { error: `parent ${String(rec["parent_id"])} not on disk` };
+      onDisk.add(id);
+      order.push(id);
+      return { ok: true };
+    },
+    forwardBinary: () => Promise.resolve(null),
+    emitRemote: () => {},
+    watchRemote: () => {},
+    unwatchRemote: () => {},
+    onLifecycle: () => () => {},
+    subscribeState: () => () => {},
+  };
+  k.setRoot(new Agent({ id: "canvas", handlerModule: "v.ts" }));
+  k.register(new Agent({ id: "view_root", parentId: "canvas", handlerModule: "v.ts" }));
+  k.register(new Agent({ id: "bg", parentId: "view_root", handlerModule: "v.ts" }));
+  const loader = new ProxyLoader(k, "sess1", { debounceMs: 100000 });
+  loader.start();
+  await loader.flush();
+  assert.deepEqual(order, ["canvas", "view_root", "bg"]);
+  // a refused write is never dropped silently
+  refuseNext = true;
+  k.register(new Agent({ id: "c", parentId: "canvas", handlerModule: "v.ts" }));
+  await assert.rejects(loader.flush(), /refused 1 write\(s\): persist_record c: a record verb is scoped/);
+  await loader.stop().catch(() => {});
+});

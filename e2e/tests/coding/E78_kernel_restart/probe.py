@@ -34,7 +34,7 @@ from helpers.facts_arm import (
     read_view,
     store_rows,
 )
-from helpers.kernel import open_kernel, restart
+from helpers.kernel import open_kernel, restart, home
 
 BK = _resolve_backend()
 DONE = 'end your run by calling done — emit <call name="done"></call>'
@@ -46,18 +46,18 @@ N = 8
 async def _fixture(root, ids):
     # THE STORE: a file_bridge rooted at `.fantastic` — what the loader discovers as its
     # provider (records, ledger and now the message log). Created BEFORE the root boots.
-    r = await call(root, root.id, {"type": "create_agent", "parent_id": root.id, "id": FB,
+    r = await call(root, root.id, {"type": "create_agent", "parent_id": home(root), "id": FB,
                                     "handler_module": "file_bridge.tools", "allow": ["."], "root": ".fantastic",
                                     "ingress_rule": "allow_all_ingress",
                                     "callable_by": {**{i: "*" for i in ids}, "rest": "*", "web": "*"}})
     assert not r.get("error"), f"create {FB}: {r}"
     # the editor the agents read through (its own bridge over the run dir)
-    r = await call(root, root.id, {"type": "create_agent", "parent_id": root.id, "id": "work_fb",
+    r = await call(root, root.id, {"type": "create_agent", "parent_id": home(root), "id": "work_fb",
                                     "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
                                     "ingress_rule": "allow_all_ingress",
                                     "callable_by": {"rest": "*", "web": "*"}})
     assert not r.get("error"), f"create work_fb: {r}"
-    r = await call(root, root.id, {"type": "create_agent", "parent_id": root.id, "id": "notes",
+    r = await call(root, root.id, {"type": "create_agent", "parent_id": home(root), "id": "notes",
                                     "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
                                     "ingress_rule": "allow_all_ingress",
                                     "callable_by": {**{i: "*" for i in ids}, "rest": "*", "web": "*"}})

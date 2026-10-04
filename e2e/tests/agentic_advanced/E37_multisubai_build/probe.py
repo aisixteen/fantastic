@@ -38,7 +38,9 @@ sys.path.insert(
         next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())
     ),
 )
-from helpers import memory, verdict  # noqa: E402
+from backends import backend as _resolve_backend
+from helpers.kernel import home
+from helpers import creds, memory, verdict  # noqa: E402
 from tests.agentic_advanced.E30_subai import probe as P  # noqa: E402
 from tests.agentic_advanced.E36_multisubai import probe as S  # noqa: E402
 
@@ -145,7 +147,7 @@ async def fixture(root, *, interpreter=None):
                     "target": root.id,
                     "payload": {
                         "type": "create_agent",
-                        "parent_id": root.id,
+                        "parent_id": home(root),
                         "handler_module": "file_bridge.tools", "allow": ["."],
                         "id": "kernel_store",
                         # `notes` is the one that actually reads/writes here (the solvers
@@ -164,7 +166,7 @@ async def fixture(root, *, interpreter=None):
             "target": root.id,
             "payload": {
                 "type": "create_agent",
-                "parent_id": root.id,
+                "parent_id": home(root),
                 "handler_module": "file_bridge.tools", "allow": ["."],
                 "id": "notes",
                 # a DATA store — the records under `.fantastic` stay the loader's
@@ -178,7 +180,7 @@ async def fixture(root, *, interpreter=None):
             "target": root.id,
             "payload": {
                 "type": "create_agent",
-                "parent_id": root.id,
+                "parent_id": home(root),
                 "handler_module": "user_probe.tools",
                 "id": "user",
                 "answer": "do your best judgement",
@@ -194,7 +196,7 @@ async def fixture(root, *, interpreter=None):
                 "target": root.id,
                 "payload": {
                     "type": "create_agent",
-                    "parent_id": root.id,
+                    "parent_id": home(root),
                     "handler_module": "oracle_probe.tools",
                     "id": oid,
                     "lines": S.LEDGERS[k],
@@ -210,6 +212,8 @@ async def fixture(root, *, interpreter=None):
     # call it; the store's own ingress is the fixture's to grant.
     for sid in SOLVERS:
         await memory.open_ingress(root, memory.MEMORY, sid)
+        if _resolve_backend().key_ref:
+            await creds.grant_reader(root, sid)
     return store
 
 

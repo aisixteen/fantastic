@@ -219,6 +219,7 @@ class VllmProvider:
         model: str,
         key,
         max_tokens: int,
+        window: int | None = None,
         kv_slots: int,
         kv_overflow: str,
         kv_ttl: float = KV_TTL,
@@ -238,6 +239,12 @@ class VllmProvider:
         # no `credentials` on the record, no header.
         self._key = key
         self._max_tokens = int(max_tokens)
+        # The record's `context_window`. A turn whose `max_tokens` reaches it asks
+        # for "the rest of the window": vLLM counts the prompt AND the output
+        # against one window, so a cap that is the whole window is refused (HTTP
+        # 400). Such a turn sends NO max_tokens — vLLM then gives it what the
+        # prompt leaves (owner, 2026-10-04: the e2e limit is the whole 260k).
+        self._window = int(window) if window else None
         self._kv = (int(kv_slots), kv_overflow, float(kv_ttl))
         # The effective sampling: the record's values over SAMPLING_DEFAULTS,
         # plus any PASSTHROUGH field the record set.
@@ -298,6 +305,8 @@ class VllmProvider:
             # the final chunk carries usage (and an EMPTY choices array)
             "stream_options": {"include_usage": True},
         }
+        if not side_call and self._window is not None and call_max >= self._window:
+            del body["max_tokens"]  # the rest of the window — see `_window`
         for key in ("temperature", "top_p", "top_k", "reasoning_effort", *PASSTHROUGH):
             if self._sampling.get(key) is not None:
                 body[key] = self._sampling[key]

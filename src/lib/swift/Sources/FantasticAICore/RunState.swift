@@ -69,6 +69,13 @@ struct AICurrentEntry: Sendable {
     /// matches on this to know the killed task is ITS generation (not some other
     /// dispatch on the same agent) and to close the turn out.
     let taskId: String?
+    /// This pass's streaming parts — python's `(splitter, parts_out)` under
+    /// `"parts"`: what `stop` checks a `stream_id` against and what `onCancel`
+    /// aborts.
+    var parts: AIStreamParts? = nil
+    /// Who STOPPED this generation (the `stop` verb's caller, or "operator") —
+    /// the name the cut marker carries.
+    var stoppedBy: String? = nil
 }
 
 /// Per-agent coordination state — the FIFO lock, the waiting queue, and

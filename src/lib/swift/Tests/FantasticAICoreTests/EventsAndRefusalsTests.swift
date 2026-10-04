@@ -339,8 +339,11 @@ struct EventsAndRefusalsTests {
         let tokens = atCli.filter { $0["type"].asString == "token" }
         #expect(tokens.compactMap { $0["text"].asString }.joined().hasPrefix("hello "))
         #expect(atCli.allSatisfy { $0["client_id"].asString == "cli" })
+        // STREAMING PARTS (owner, 2026-10-04): prose and caller-bound call parts
+        // go where the tokens go.
         #expect(
-            Set(atCli.compactMap { $0["type"].asString }).isSubset(of: ["token", "status"]),
+            Set(atCli.compactMap { $0["type"].asString }).isSubset(
+                of: ["token", "status", "part_start", "part_delta", "part_end"]),
             "\(atCli.map { $0["type"].asString ?? "?" })")
         try await Task.sleep(nanoseconds: 50_000_000)
         // The backend's OWN inbox carries the dispatch that was sent TO it — C76,

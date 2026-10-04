@@ -183,10 +183,14 @@ struct ToolParseTests {
         #expect(p["bytes"].asString == "  two spaces \n")
     }
 
-    @Test("an unterminated call at the end is still an attempt")
-    func unterminatedCallAtTheEndIsStillAnAttempt() throws {
+    /// No `</call>`, no call (owner, 2026-10-04): the model stopped generating
+    /// before it closed — nothing dispatches, nothing is "malformed"; the cut
+    /// marker names it.
+    @Test("an unterminated call is not a call")
+    func anUnterminatedCallIsNotACall() {
         let text = #"<call name="send"><target_id>notes</target_id><type>reflect</type>"#
-        #expect(payload(try one(text)) == .object(["type": .string("reflect")]))
+        #expect(extractToolCalls(text).isEmpty)
+        #expect(malformedCalls(text).isEmpty)
     }
 
     @Test("several calls in order, including one inside <think>")
@@ -234,11 +238,13 @@ struct ToolParseTests {
         try refused(text, ["text after the last tag", "no"])
     }
 
-    @Test("bytes never closed")
-    func bytesNeverClosed() throws {
-        try refused(
-            #"<call name="send"><target_id>notes</target_id><type>write</type><bytes>open"#,
-            ["`<bytes>` opened and never closed"])
+    @Test("bytes never closed is a cut, not a call")
+    func bytesNeverClosedIsACutNotACall() {
+        // an open `<bytes>` swallows any `</call>`, so the envelope never closes
+        let text =
+            #"<call name="send"><target_id>notes</target_id><type>write</type><bytes>open</call>"#
+        #expect(extractToolCalls(text).isEmpty)
+        #expect(malformedCalls(text).isEmpty)
     }
 
     @Test("an element never closed")
@@ -316,6 +322,7 @@ struct ToolParseTests {
         let big = String(repeating: "x", count: 40_000)
         let text =
             #"<call name="send"><target_id>n</target_id><type>write</type><bytes>"# + big
+            + "</bytes><path>a</path><path>b</path></call>"
         let bad = malformedCalls(text)
         #expect(bad.count == 1)
         #expect(bad.first?.yourBlock.contains(big) == true)
@@ -403,8 +410,10 @@ struct ToolParseTests {
     func scannerIndexesCodePointsLikePython() throws {
         // 1. head40 counts CODE POINTS: `ab\r\n` × 10 is 40 scalars but only 30
         // Characters, so a grapheme-indexed excerpt quoted a third more text.
+        // TERMINATED: an unterminated block is a cut, never reported malformed.
         let tail = String(repeating: "ab\r\n", count: 20)
-        let faults = malformedCalls("<call name=\"send\"><target_id>a</target_id>" + tail)
+        let faults = malformedCalls(
+            "<call name=\"send\"><target_id>a</target_id>" + tail + "</call>")
         #expect(faults.count == 1)
         #expect(
             faults[0].error.contains(

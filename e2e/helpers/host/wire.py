@@ -228,29 +228,30 @@ class WireCtx:
         return r if isinstance(r, dict) else {}
 
     def rows_for(self, aid: str) -> list[dict]:
-        """That agent's rows WHOLE, oldest first. An agent never written to answers
-        an empty list — a legitimate zero."""
-        out: list[dict] = []
-        after = None
-        while True:
-            q = {"type": "read", "owner": aid, "limit": 1000}
-            if after is not None:
-                q["after"] = after
-            r = self._store(q)
-            rows = r.get("rows")
-            if not isinstance(rows, list):
-                return out
-            out.extend({**x, "agent": aid} for x in rows)
-            after = r.get("next")
-            if after is None:
-                return out
+        """That agent's rows WHOLE, oldest first, from the store's `dump` — a caller
+        reads only its OWN rows, and the leg is not `aid`. An agent never written to
+        answers an empty list — a legitimate zero."""
+        r = self._store({"type": "dump"})
+        tables = r.get("tables") if isinstance(r, dict) else None
+        if not isinstance(tables, dict):
+            return []
+        rows = sorted(
+            (
+                x["row"]
+                for x in tables.get("rows") or []
+                if isinstance(x.get("owner"), str) and x["owner"].split("|", 1)[-1] == aid
+            ),
+            key=lambda row: row.get("id") or 0,
+        )
+        return [{**x, "agent": aid} for x in rows]
 
     def rows_write(self, aid: str, rows: list[dict]) -> list[int]:
-        """Append rows to that agent's conversation (ids from the kernel's counter
-        when a row carries none). Returns the ids, in order."""
-        r = self._store({"type": "append", "owner": aid, "rows": rows})
-        ids = r.get("ids")
-        return ids if isinstance(ids, list) else []
+        """Planting rows in ANOTHER agent's conversation needs to act as that agent,
+        which only an in-process kernel can (a caller appends under its own key)."""
+        raise AssertionError(
+            f"rows_write({aid}) over the wire: a caller appends only under its own "
+            "key — plant rows in process"
+        )
 
     def agent_ids(self) -> list[str]:
         r = self._kernel({"type": "list_agents"})

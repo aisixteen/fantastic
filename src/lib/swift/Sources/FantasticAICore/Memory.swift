@@ -304,6 +304,60 @@ func forgetHead(_ selfId: String, _ kernel: Kernel) {
     }
 }
 
+// ─── the `rows` verb ────────────────────────────────────────────────
+
+/// The `rows` verb: a VIEW of this agent's conversation exactly as the agent HOLDS
+/// it in memory — its loaded head, in the order it lived it; no store read, no
+/// transform, so what a UI draws is what the agent has. Before the agent has
+/// loaded its head (a fresh boot, before its first turn) it holds nothing:
+/// `{rows:[], loaded:false}`. `after` (a row id) starts the page after that row —
+/// an id not in the head is an empty page; `limit` (a positive int) caps it;
+/// `next` is the last row's id when more follow. Python `_rows`.
+func rowsVerb(_ selfId: String, _ payload: JSON, _ kernel: Kernel) -> JSON {
+    guard let head = AIMemory.of(kernel).with({ $0.heads[selfId] }) else {
+        return .object([
+            "rows": .array([]), "next": .null, "total": .integer(0), "loaded": .bool(false),
+        ])
+    }
+    var rows = head
+    // `after is not None` — then python `==` against each row's `id`.
+    let after = payload["after"]
+    if after != .null {
+        let at = rows.firstIndex { pyEquals($0["id"], after) }
+        rows = at.map { Array(rows[($0 + 1)...]) } ?? []
+    }
+    // `isinstance(limit, int) and limit > 0` — a bool IS an int in python.
+    let limit: Int64? =
+        switch payload["limit"] {
+        case .integer(let n) where n > 0: n
+        case .bool(true): 1
+        default: nil
+        }
+    let page = limit.map { Array(rows.prefix(Int(clamping: $0))) } ?? rows
+    let more = page.count < rows.count
+    return .object([
+        "rows": .array(page),
+        "next": more && !page.isEmpty ? page[page.count - 1]["id"] : .null,
+        "total": .integer(Int64(head.count)),
+        "loaded": .bool(true),
+    ])
+}
+
+/// Python `==` between two JSON values: `1 == 1.0 == True`; anything else equal
+/// only as itself.
+private func pyEquals(_ a: JSON, _ b: JSON) -> Bool {
+    func num(_ v: JSON) -> Double? {
+        switch v {
+        case .integer(let n): return Double(n)
+        case .double(let d): return d
+        case .bool(let b): return b ? 1 : 0
+        default: return nil
+        }
+    }
+    if let x = num(a), let y = num(b) { return x == y }
+    return a == b
+}
+
 // ─── the view row ───────────────────────────────────────────────────
 
 /// The agent's STATE: the ordered ids it sees, each at a resolution — a `view`

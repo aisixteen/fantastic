@@ -1,15 +1,13 @@
 """memory/rehydrate — a kernel starts on a memory store it did not write (stubbed model).
 
 The directory holds a previous run's records: the root (its guid, and the id bound
-`next_id` — past every seeded id), the store, an AI agent, a viewer, a worker. The
+`next_id` — past every seeded id), the store, an AI agent, a worker. The
 store's tables are INJECTED before `kernel_start`: the AI's conversation (a goal, a
-stretch cleared by a clear-fold, then a fold and a live tail), a frozen grant from
-the AI to the viewer, and the kernel's own rows (a named execution that completed,
+stretch cleared by a clear-fold, then a fold and a live tail), and the kernel's own rows (a named execution that completed,
 one that failed and was never acked). Scored after the start and ONE stubbed turn:
 the AI's view is rebuilt from its head (the fold visible as its one-line row, nothing
 from before the clear), grep reaches behind the clear, `ledger` reads the kernel's
-rows back (the dead letter still dead), the named execution is not re-run, and the
-viewer still reads the fold under its grant."""
+rows back (the dead letter still dead), and the named execution is not re-run."""
 
 from __future__ import annotations
 
@@ -28,7 +26,7 @@ from helpers import memory, verdict
 from helpers.kernel import WRAPS, replace_with, seat_providers
 
 GUID = "g92rehydrate"
-BASE = {"$self": "*", "$parent": "*", "$children": "*"}
+BASE = {"$self": "*"}
 
 
 def _record(d: Path, rec: dict) -> None:
@@ -47,7 +45,7 @@ class _Stub:
 
 
 def _tables() -> dict:
-    ai, k, viewer = f"{GUID}|ai", f"{GUID}|kernel", f"{GUID}|viewer"
+    ai, k = f"{GUID}|ai", f"{GUID}|kernel"
     conv = [
         {"id": 100, "role": "user", "content": "the goal: keep the survey going"},
         {"id": 101, "role": "user", "content": "the codename behind the clear is ORCHID-7"},
@@ -80,11 +78,6 @@ def _tables() -> dict:
             {"owner": ai, "fold": 103, "members": [100, 101, 102]},
             {"owner": ai, "fold": 106, "members": [104, 105]},
         ],
-        "grants": [
-            {"grant": 1, "owner": ai, "reader": viewer, "scope": {"fold": 106},
-             "mode": "frozen", "anchor": 106, "as_of": 107, "until": None,
-             "why": "seeded", "created_by": None, "ts": 0},
-        ],
     }
 
 
@@ -93,12 +86,10 @@ async def main():
     d = Path(".fantastic")
     _record(d, {"id": "kernel_state", "handler_module": "kernel_state.tools", "guid": GUID,
                 "next_id": 50_000, "memory_store_id": memory.MEMORY})
-    _record(d, memory.store_record("kernel_state", admins=["kernel"],
-                                   callable_by={**BASE, "ai": "*", "viewer": "*"}))
+    _record(d, memory.store_record("kernel_state", callable_by={**BASE, "ai": "*"}))
     _record(d, {"id": "ai", "handler_module": "ollama_backend.tools", "parent_id": "kernel_state",
                 "model": "stub", "context_window": 32000, "context_strategy": "fold",
                 **memory.ai_memory_meta({**BASE, "cli": "*"})})
-    _record(d, {"id": "viewer", "parent_id": "kernel_state", "can_call": {**BASE, memory.MEMORY: "*"}})
     _record(d, {"id": "worker", "handler_module": "slow_probe.tools", "parent_id": "kernel_state"})
     sys.path.insert(0, str(next(p for p in Path(__file__).resolve().parents if (p / ".e2e-root").exists()) / "probes"))
     # `worker` is `slow_probe.tools`: REGISTERED, since the kernel resolves a
@@ -109,8 +100,6 @@ async def main():
     from _testkit import boot_root
     from ai_core import core
     from cli import Cli
-
-    from kernel import sender_context
 
     seat_providers(core)
     root = boot_root()
@@ -129,14 +118,11 @@ async def main():
         led = (await root.send([{"target": "kernel", "payload": {"type": "ledger"}}]))[0]["result"]["executions"]
         by = {e["id"]: e for e in led}
         again = (await root.send([{"target": "worker", "payload": {"type": "work"}, "id": "nightly"}]))[0]
-        with sender_context("viewer"):
-            shared = (await root.send([{"target": memory.MEMORY, "payload": {"type": "read", "grant": 1}}]))[0]["result"]
         print(f"     injected={injected} started={started.get('started')} turn={turn['status']} "
               f"view={len((view or {}).get('ids') or [])} recall={len(recall)} grep={grep.get('total')} "
-              f"ledger={[(e['id'], e['status']) for e in led if e['id'] < 1000]} again={again['result']} "
-              f"shared={[r['id'] for r in shared.get('rows') or []]}")
+              f"ledger={[(e['id'], e['status']) for e in led if e['id'] < 1000]} again={again['result']}")
         checks = [
-            ("the seeded tables were injected before the start", injected == {"rows": 12, "grants": 1}),
+            ("the seeded tables were injected before the start", injected == {"rows": 12}),
             ("the kernel started on the seeded store", started.get("started") is True),
             ("the first turn ran", turn["status"] == "completed"),
             ("the model saw the fold as its one-line row", '[fold 106 · 2 refs' in sent),
@@ -146,13 +132,11 @@ async def main():
             ("the ledger reads the kernel's rows back", by.get(200, {}).get("status") == "completed"),
             ("the dead letter is still dead", by.get(202, {}).get("status") == "failed" and not by[202].get("acked")),
             ("the named execution was not re-run", again["result"] == {"runs": 41}),
-            ("the viewer still reads the fold under its grant",
-             [r["id"] for r in shared.get("rows") or []] == [104, 105, 106]),
         ]
         for name, ok in checks:
             print(f"  [{'ok' if ok else 'XX'}] {name}")
         allok = all(ok for _, ok in checks)
-        verdict(allok, "a seeded store came back whole: view, clear, folds, grants, ledger, dedup"
+        verdict(allok, "a seeded store came back whole: view, clear, folds, ledger, dedup"
                 if allok else "a rehydrate check failed")
     finally:
         WRAPS.pop("ai", None)

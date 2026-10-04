@@ -339,11 +339,18 @@ func fanOut(_ calls: [ToolCall], messageId: Int64? = nil) -> [ToolCall] {
                 payload["type"]?.asString == "send"
             {
                 if payload["msg"] == nil { payload["msg"] = .integer(messageId) }
+                // A MESSAGE carries the stream it was previewed as (only a
+                // message: a verb call's payload stays exactly what the model
+                // wrote).
+                if let sid = call.streamId, !sid.isEmpty { payload["stream_id"] = .string(sid) }
                 if let re = args["re"] { payload["re"] = re }
                 var copy = args
                 copy["payload"] = .object(payload)
                 copy.removeValue(forKey: "re")
-                out.append(ToolCall(id: call.id, name: "send", arguments: .object(copy)))
+                out.append(
+                    ToolCall(
+                        id: call.id, name: "send", arguments: .object(copy),
+                        streamId: call.streamId))
                 continue
             }
             out.append(call)
@@ -358,6 +365,9 @@ func fanOut(_ calls: [ToolCall], messageId: Int64? = nil) -> [ToolCall] {
             payload["to"] = .array(recipients.map { JSON.string($0) })
             // `msg` is the sending row's id: what a reply's `re` names.
             if let messageId { payload["msg"] = .integer(messageId) }
+            if let sid = call.streamId, !sid.isEmpty, payload["type"]?.asString == "send" {
+                payload["stream_id"] = .string(sid)
+            }
             if let re { payload["re"] = re }
             var copy: OrderedDictionary<String, JSON> = [:]
             for (k, v) in args
@@ -368,7 +378,10 @@ func fanOut(_ calls: [ToolCall], messageId: Int64? = nil) -> [ToolCall] {
             }
             copy["target_id"] = .string(r)
             copy["payload"] = .object(payload)
-            out.append(ToolCall(id: call.id, name: "send", arguments: .object(copy)))
+            out.append(
+                ToolCall(
+                    id: call.id, name: "send", arguments: .object(copy),
+                    streamId: call.streamId))
         }
     }
     return out
@@ -439,11 +452,29 @@ func routeReply(
     runState: AIAgentRunState? = nil,
     messageId: Int64? = nil,
     deadTurn: Bool = false,
+    // Every closed call part of the pass, `(stream_id, body)` — python's
+    // `call_streams`.
+    callStreams: [(streamId: String, body: String)] = [],
     launched: StartSignal? = nil
 ) async {
     // However this route ends, the `send` waiting on its launch is released.
     defer { launched?.fire() }
-    let calls = fanOut(extractToolCalls(text), messageId: messageId)
+    // THE MATCH (owner, 2026-10-04): a dispatched message carries the `stream_id`
+    // of the part it was streamed as, so a consumer settles its draft on it.
+    // Matched by the call's exact body, in order — one reading of the text, not
+    // two. EXACT is python's `==` on str: code points, not canonical equivalence.
+    var streams = callStreams
+    var matched: [ToolCall] = []
+    for (call, body) in terminatedCalls(text) {
+        var call = call
+        if let i = streams.firstIndex(where: {
+            $0.body.unicodeScalars.elementsEqual(body.unicodeScalars)
+        }) {
+            call.streamId = streams.remove(at: i).streamId
+        }
+        matched.append(call)
+    }
+    let calls = fanOut(matched, messageId: messageId)
     let doneCalled = calls.contains { $0.name == "done" }
     let awaitCalled = calls.contains { $0.name == "await" }
     let anyCalls = !calls.isEmpty

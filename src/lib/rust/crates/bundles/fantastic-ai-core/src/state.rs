@@ -50,6 +50,14 @@ pub struct CurrentEntry {
     /// `on_cancel` matches on this to know the killed task is ITS generation
     /// (not some other dispatch on the same agent) and to close the turn out.
     pub task_id: Option<String>,
+    /// This pass's STREAMING PARTS — the splitter + publisher the stream loop
+    /// feeds (python `_current[id]["parts"]`). `stop` checks a `stream_id`
+    /// against it; `on_cancel` aborts its open parts. `None` until the provider
+    /// pass starts.
+    pub parts: Option<Arc<AsyncMutex<crate::events::PassParts>>>,
+    /// Who stopped this generation with the `stop` verb — the caller's id, or
+    /// `"operator"` (python `stopped_by`). The cut marker names them.
+    pub stopped_by: Option<String>,
 }
 
 /// Per-agent coordination state. Cloning the `Arc` is cheap.

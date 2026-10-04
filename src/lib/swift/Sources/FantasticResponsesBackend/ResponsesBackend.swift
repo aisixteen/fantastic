@@ -147,7 +147,7 @@ public final class ResponsesBundle: AgentBundle, @unchecked Sendable {
     /// The kernel is killing a task of this agent — close the turn out for the
     /// caller before the substrate cancels it.
     public func onCancel(agentId: AgentId, taskId: TaskId, kernel: Kernel) async throws {
-        await core.onCancel(agentId: agentId, taskId: taskId, kernel: kernel)
+        try await core.onCancel(agentId: agentId, taskId: taskId, kernel: kernel)
     }
 
     /// The shared delete hook: the deleted id's AI-core rows go with it.

@@ -52,6 +52,7 @@ from pathlib import Path
 # file into a folder can never silently break its imports again.
 sys.path.insert(0, str(next(d for d in Path(__file__).resolve().parents
                             if (d / ".e2e-root").exists())))
+from helpers.kernel import home
 from helpers import verdict
 
 sys.argv = [sys.argv[0]]
@@ -151,7 +152,7 @@ async def scenario(name: str, own: bool) -> bool:
     root = boot_root()
     (await root.send([{"target": root.id, "payload": {
             "type": "create_agent",
-            "parent_id": root.id,
+            "parent_id": home(root),
             "handler_module": "file_bridge.tools", "allow": ["."],
             "id": "kernel_store",
             "root": ".",  # the run dir — main.py lands beside readings/ and in runner cwd
@@ -163,7 +164,7 @@ async def scenario(name: str, own: bool) -> bool:
             fh.write(f"{val}\n")
     (await root.send([{"target": root.id, "payload": {
             "type": "create_agent",
-            "parent_id": root.id,
+            "parent_id": home(root),
             "handler_module": "file_bridge.tools", "allow": ["."],
             "id": "readings",
             "root": "readings",
@@ -171,7 +172,7 @@ async def scenario(name: str, own: bool) -> bool:
         }}]))[0]["result"]
     mem = (await root.send([{"target": root.id, "payload": {
             "type": "create_agent",
-            "parent_id": root.id,
+            "parent_id": home(root),
             "handler_module": "file_bridge.tools", "allow": ["."],
             "id": "totals",
             "root": ".",
@@ -189,7 +190,7 @@ async def scenario(name: str, own: bool) -> bool:
         # even though the operator's leg exists and is perfectly usable.
         exec_id = (await root.send([{"target": root.id, "payload": {
                 "type": "create_agent",
-                "parent_id": root.id,
+                "parent_id": home(root),
                 "handler_module": "exec_bridge.tools",
                 "id": OWN_LEG,
                 "cwd": os.getcwd(),

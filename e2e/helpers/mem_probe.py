@@ -10,6 +10,7 @@ import asyncio
 import os
 from typing import Any
 
+from helpers.kernel import home
 from helpers import Limits, connect, human
 from helpers.facts_arm import WINDOW, call
 
@@ -20,11 +21,11 @@ async def files(root, ids: list[str]) -> None:
     """`work_fb` (the run dir, open) and `notes` (a second file agent over the same
     dir — the one the model edits through), both reachable by `ids`."""
     for payload in (
-        {"type": "create_agent", "parent_id": root.id, "id": "work_fb",
+        {"type": "create_agent", "parent_id": home(root), "id": "work_fb",
          "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
          "ingress_rule": "allow_all_ingress",
          "callable_by": {"rest": "*", "web": "*", **{i: "*" for i in ids}}},
-        {"type": "create_agent", "parent_id": root.id, "id": "notes",
+        {"type": "create_agent", "parent_id": home(root), "id": "notes",
          "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
          "ingress_rule": "allow_all_ingress",
          "callable_by": {"rest": "*", "web": "*", **{i: "*" for i in ids}}},

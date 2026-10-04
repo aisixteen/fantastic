@@ -117,6 +117,13 @@ async def open_kernel(prefix: str = "probe_", reach: list[str] | None = None):
         await memory.wire_in_process(root)
         # THE KEYS — a backend reads its key from the `creds` store, never the env.
         creds.wire_in_process(root, creds.env_refs())
+        # THE ROOT accepts every declared id — kernel verbs (`list_agents`,
+        # `create_agent`) are gated on its `callable_by` like any other target, and
+        # nothing is stamped. The same seed the spawned-kernel driver writes.
+        if reach:
+            cb = dict(root._meta.get("callable_by") or {})
+            cb.update({t: "*" for t in reach if t not in (root.id, "kernel")})
+            root.ctx.update(root.id, callable_by=cb)
 
         async def close() -> None:
             return None
@@ -213,3 +220,11 @@ async def restart(root, core):
     root2 = await reopen_kernel(root)
     await memory.inject(root2, tables)
     return root2, stop
+
+
+def home(root) -> str:
+    """Where a probe CREATES its agents. In process the probe is the operator and
+    places them under the root. Over a wire every call is the `rest` leg, and a
+    mutation must come from the operand's direct parent — so the leg's own subtree
+    is the test's world (owner, 2026-10-04, option a)."""
+    return getattr(root, "leg_id", None) or root.id

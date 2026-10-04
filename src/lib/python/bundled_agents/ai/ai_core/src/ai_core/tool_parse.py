@@ -407,9 +407,32 @@ def _scan(text: str) -> list[tuple[str, dict | None, str | None, bool]]:
     return out
 
 
+def parses(block: str) -> bool:
+    """Whether one envelope body (` name="…">…`, the text after `<call`) is a call
+    `extract_tool_calls` would dispatch — the streaming splitter asks it at `</call>`."""
+    try:
+        return parse_call(block) is not None
+    except _Malformed:
+        return False
+
+
+def terminated_calls(text: str) -> list[tuple[dict, str]]:
+    """Every dispatchable call with the BODY it was written as (the text after its
+    `name="…">`), in document order — what links a call to the stream part it was
+    previewed as."""
+    out: list[tuple[dict, str]] = []
+    for block, call, _fault, done in _scan(text):
+        if call is not None and done:
+            out.append((call, block[block.index(">") + 1 :]))
+    return out
+
+
 def extract_tool_calls(text: str) -> list[dict]:
-    """Non-streaming: pull every finalized `<call>` out of a complete string."""
-    return [call for _, call, _f, _t in _scan(text) if call is not None]
+    """Non-streaming: pull every finalized `<call>` out of a complete string. A call
+    with no `</call>` is NOT a call (owner, 2026-10-04): the model stopped generating
+    before it closed, so nothing is dispatched — the turn's cut marker names it as not
+    sent (`stream_parts.cut_marker`)."""
+    return [call for _, call, _f, done in _scan(text) if call is not None and done]
 
 
 # The shape appended to every refusal: literal, minimal, copyable. Advice, not a
@@ -446,8 +469,9 @@ def malformed_calls(text: str) -> list[dict]:
     taught it — it self-corrected out loud — so the fix is not a better parser, it
     is giving this failure the same voice the others already have."""
     out: list[dict] = []
-    for block, call, fault, _terminated in _scan(text):
-        if call is not None:
+    for block, call, fault, terminated in _scan(text):
+        # An UNTERMINATED block is not malformed — it was cut; the cut marker says so.
+        if call is not None or not terminated:
             continue
         out.append(
             {

@@ -60,13 +60,13 @@ sys.path.insert(
     ),
 )
 from backends import backend as _resolve_backend
-from helpers import memory
+from helpers import creds, memory
 from helpers import (
     Watch,
     distinct_calls,
     verdict,
 )
-from helpers.kernel import WRAPS, open_kernel, wrap_with
+from helpers.kernel import WRAPS, open_kernel, wrap_with, home
 from helpers.rows import rows_for
 
 # The probe runs in a fresh tmpdir, and the `.env` autoloader reads CWD — so a key in
@@ -214,7 +214,7 @@ def _ai_meta(
     backend = backend or BACKEND
     meta: dict = {
         "type": "create_agent",
-        "parent_id": root.id,
+        "parent_id": home(root),
         "id": agent_id,
         # Two-sided deny-all: the operator grants the BUILDER its toolset. Written
         # before the call gate existed, this probe gave the builder only the
@@ -368,7 +368,7 @@ async def build_fixture(root, *, interpreter: str | None = None):
                     "target": root.id,
                     "payload": {
                         "type": "create_agent",
-                        "parent_id": root.id,
+                        "parent_id": home(root),
                         "handler_module": "file_bridge.tools", "allow": ["."],
                         "id": "kernel_store",
                         "callable_by": {
@@ -401,7 +401,7 @@ async def build_fixture(root, *, interpreter: str | None = None):
                     "target": root.id,
                     "payload": {
                         "type": "create_agent",
-                        "parent_id": root.id,
+                        "parent_id": home(root),
                         "handler_module": "file_bridge.tools", "allow": ["."],
                         "id": "readings",
                         "callable_by": {
@@ -431,7 +431,7 @@ async def build_fixture(root, *, interpreter: str | None = None):
                     "target": root.id,
                     "payload": {
                         "type": "create_agent",
-                        "parent_id": root.id,
+                        "parent_id": home(root),
                         "handler_module": "file_bridge.tools", "allow": ["."],
                         "id": "totals",
                         # a DATA store — the records under `.fantastic` stay the loader's
@@ -467,7 +467,7 @@ async def build_fixture(root, *, interpreter: str | None = None):
                     "target": root.id,
                     "payload": {
                         "type": "create_agent",
-                        "parent_id": root.id,
+                        "parent_id": home(root),
                         "handler_module": "user_probe.tools",
                         "id": "user",
                         "answer": "do your best judgement",
@@ -488,7 +488,7 @@ async def build_fixture(root, *, interpreter: str | None = None):
                     "target": root.id,
                     "payload": {
                         "type": "create_agent",
-                        "parent_id": root.id,
+                        "parent_id": home(root),
                         "handler_module": "scheduler.tools",
                         "id": "clock",
                         "callable_by": {
@@ -525,7 +525,7 @@ async def build_fixture(root, *, interpreter: str | None = None):
                     "target": root.id,
                     "payload": {
                         "type": "create_agent",
-                        "parent_id": root.id,
+                        "parent_id": home(root),
                         "handler_module": EXEC_MODULE,
                         "id": EXECUTOR_LEG,
                         "callable_by": {
@@ -603,15 +603,32 @@ async def score(root, store_id, total, new_total, transcript):
         f"ai={[n['id'] for n in sub_ais]} code={[n['id'] for n in runners]} made={[n['id'] for n in made]}"
     )
 
-    # ── 2. THE CLOCK AIMS AT THE SUB-AI ──
-    scheds = (
-        (await root.send([{"target": "clock", "payload": {"type": "list"}}]))[0]["result"]
-    ).get("schedules") or []
-    ai_ids = {n["id"] for n in sub_ais}
+    # ── 2. THE CLOCK AIMS AT THE ROUTINE ──
+    # (owner, 2026-10-04, option b) The fixture's `clock` and `totals` are NOT the
+    # model's: it cannot rewrite their grants, so `clock` reaches only `ai`. A
+    # routine that works within the grants routes THROUGH the builder — the clock
+    # at `ai`, `ai` relaying to its sub-AI and code. Both shapes are the routine.
+    # …and the CLOCK may be the fixture's or one the model built itself (a model
+    # that owns its whole routine — clock included — is working within the rules).
+    clocks = ["clock"] + [
+        n["id"]
+        for n in made
+        if records.get(n["id"], {}).get("handler_module") == "scheduler.tools"
+    ]
+
+    async def _schedules() -> list[dict]:
+        out: list[dict] = []
+        for c in clocks:
+            r = (await root.send([{"target": c, "payload": {"type": "list"}}]))[0]["result"]
+            out += [{**s, "_clock": c} for s in (r or {}).get("schedules") or []]
+        return out
+
+    scheds = await _schedules()
+    ai_ids = {n["id"] for n in sub_ais} | {"ai"}
     aimed = [s for s in scheds if s.get("target") in ai_ids]
     c2 = bool(aimed)
     print(
-        f"    2. clock → sub-AI           {'OK' if c2 else 'NO'} "
+        f"    2. clock → the routine      {'OK' if c2 else 'NO'} "
         f"schedules={[(s.get('target'), s.get('interval_seconds')) for s in scheds]}"
     )
 
@@ -633,16 +650,16 @@ async def score(root, store_id, total, new_total, transcript):
         else f"    3. runs unattended          NO stored=None want={sorted(want)}"
     )
 
-    # ── 4. SEVERAL CYCLES: the sub-AI reacted to ≥ CYCLES ticks, each with the code ──
+    # ── 4. SEVERAL CYCLES: the routine (sub-AI or the builder relaying) reacted to
+    # ≥ CYCLES ticks, each with the code ──
     # The clock's own count (`run_count` on the schedule aimed at the sub-AI) says how
     # many ticks were fired; the sub-AI's history says how many it ACTED on: a tick
     # arrives as a root user turn (not a `[reply to …]`), and the reaction is a `start`
     # on the code agent in the turns that follow. Operator reads — ungated.
     async def _fired() -> int:
-        scheds_after = (
-            (await root.send([{"target": "clock", "payload": {"type": "list"}}]))[0]["result"]
-        ).get("schedules") or []
-        return sum(int(s.get("run_count") or 0) for s in scheds_after if s.get("target") in ai_ids)
+        return sum(
+            int(s.get("run_count") or 0) for s in await _schedules() if s.get("target") in ai_ids
+        )
 
     # Keep the clock running until the cycles are there or the budget is spent — a
     # sub-AI turn per tick takes longer than the tick interval.
@@ -660,17 +677,23 @@ async def score(root, store_id, total, new_total, transcript):
         # which hid every `start` (measured 2026-09-10: ticks_received=0 with the
         # routine demonstrably running).
         msgs = await rows_for(root, aid, conversation_only=True)
-        ticks_seen += sum(
-            1
-            for m in msgs
+        # A TICK is a turn the clock opened — its delivered header names the sender
+        # (`[from clock · …]`); the builder's own task and replies are not ticks.
+        tick_at = [
+            i
+            for i, m in enumerate(msgs)
             if m.get("role") == "user"
-            and not str(m.get("content") or "").startswith(("[reply to ", "[no call"))
-        )
-        starts += sum(
-            len(re.findall(r"<type>\s*start\s*</type>", str(m.get("content") or "")))
-            for m in msgs
-            if m.get("role") == "assistant"
-        )
+            and any(str(m.get("content") or "").startswith(f"[from {c}") for c in clocks)
+        ]
+        ticks_seen += len(tick_at)
+        # …and a reaction is a `start` on the code agent AFTER the first tick (the
+        # builder's own build-time runs do not count).
+        if tick_at:
+            starts += sum(
+                len(re.findall(r"<type>\s*start\s*</type>", str(m.get("content") or "")))
+                for m in msgs[tick_at[0] :]
+                if m.get("role") == "assistant"
+            )
     c4 = fired >= CYCLES and ticks_seen >= CYCLES and starts >= CYCLES
     print(
         f"    4. reacted to ≥{CYCLES} cycles    {'OK' if c4 else 'NO'} "
@@ -783,6 +806,8 @@ async def run(
     # the store's half of each memory wire
     for who in ("brain", aid):
         await memory.open_ingress(root, memory.MEMORY, who)
+        if BK.key_ref:
+            await creds.grant_reader(root, who)
     # FORENSICS: pin the moment any grant on the store changes (rust E30,
     # 2026-09-30 — `rest` vanished from memory's callable_by mid-run).
     _grants_watch = asyncio.create_task(memory.watch_store_grants(root))

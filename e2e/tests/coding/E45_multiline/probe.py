@@ -24,7 +24,7 @@ sys.path.insert(
 )
 from backends import backend as _resolve_backend
 from helpers import Limits, connect, drive, human, verdict
-from helpers.kernel import open_kernel
+from helpers.kernel import open_kernel, home
 
 BK = _resolve_backend()
 FB = "ml_fb"
@@ -83,7 +83,7 @@ async def main():
             root.id,
             {
                 "type": "create_agent",
-                "parent_id": root.id,
+                "parent_id": home(root),
                 "id": FB,
                 "handler_module": "file_bridge.tools", "allow": ["."],
                 "root": ".",
@@ -97,7 +97,7 @@ async def main():
             root.id,
             {
                 "type": "create_agent",
-                "parent_id": root.id,
+                "parent_id": home(root),
                 "id": "editor",
                 "handler_module": "file_bridge.tools", "allow": ["."],
                 "root": ".",

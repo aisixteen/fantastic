@@ -31,7 +31,7 @@ from backends import backend as _resolve_backend
 from helpers import Limits, connect, drive, human, verdict
 from helpers.facts_arm import FOLD_ARMS, WINDOW, call, plant_fillers
 from helpers import memory
-from helpers.kernel import open_kernel, restart
+from helpers.kernel import open_kernel, restart, home
 
 BK = _resolve_backend()
 DONE = 'end your run by calling done — emit <call name="done"></call>'
@@ -50,17 +50,17 @@ PAD = 4000
 
 
 async def _fixture(root):
-    r = await call(root, root.id, {"type": "create_agent", "parent_id": root.id, "id": FB,
+    r = await call(root, root.id, {"type": "create_agent", "parent_id": home(root), "id": FB,
                                     "handler_module": "file_bridge.tools", "allow": ["."], "root": ".fantastic",
                                     "ingress_rule": "allow_all_ingress",
                                     "callable_by": {AI: "*", "rest": "*", "web": "*"}})
     assert not r.get("error"), f"create {FB}: {r}"
-    r = await call(root, root.id, {"type": "create_agent", "parent_id": root.id, "id": "work_fb",
+    r = await call(root, root.id, {"type": "create_agent", "parent_id": home(root), "id": "work_fb",
                                     "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
                                     "ingress_rule": "allow_all_ingress",
                                     "callable_by": {"rest": "*", "web": "*"}})
     assert not r.get("error"), f"create work_fb: {r}"
-    r = await call(root, root.id, {"type": "create_agent", "parent_id": root.id, "id": "notes",
+    r = await call(root, root.id, {"type": "create_agent", "parent_id": home(root), "id": "notes",
                                     "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
                                     "ingress_rule": "allow_all_ingress",
                                     "callable_by": {AI: "*", "rest": "*", "web": "*"}})

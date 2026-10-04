@@ -18,7 +18,7 @@ sys.path.insert(
     str(next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())),
 )
 from helpers import verdict
-from helpers.kernel import open_kernel, restart
+from helpers.kernel import open_kernel, restart, home
 
 
 async def _call(root, target, payload):
@@ -28,7 +28,7 @@ async def _call(root, target, payload):
 async def main():
     root, core, close = await open_kernel(prefix="memory_stop_", reach=["slow"])
     try:
-        r = await _call(root, root.id, {"type": "create_agent", "parent_id": root.id,
+        r = await _call(root, root.id, {"type": "create_agent", "parent_id": home(root),
                                          "id": "slow", "handler_module": "slow_probe.tools"})
         assert not r.get("error"), r
         root.ctx.QUIET_TIMEOUT = 0.5

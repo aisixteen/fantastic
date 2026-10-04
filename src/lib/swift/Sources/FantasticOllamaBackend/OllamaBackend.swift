@@ -157,7 +157,7 @@ public final class OllamaBackendBundle: AgentBundle, @unchecked Sendable {
     /// cancels it (which drops the HTTP stream + releases the FIFO lock on its
     /// own). There is no `interrupt` verb any more: cancellation is the kernel's.
     public func onCancel(agentId: AgentId, taskId: TaskId, kernel: Kernel) async throws {
-        await core.onCancel(agentId: agentId, taskId: taskId, kernel: kernel)
+        try await core.onCancel(agentId: agentId, taskId: taskId, kernel: kernel)
     }
 
     /// The shared delete hook: the deleted id's AI-core rows go with it.

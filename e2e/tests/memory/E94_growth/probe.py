@@ -16,7 +16,7 @@ sys.path.insert(
     str(next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())),
 )
 from helpers import memory, verdict
-from helpers.kernel import open_kernel
+from helpers.kernel import open_kernel, home
 
 CAP = 30
 
@@ -25,7 +25,7 @@ async def main():
     root, core, close = await open_kernel(prefix="memory_growth_", reach=["worker"])
     try:
         await root.send([{"target": root.id, "payload": {
-            "type": "create_agent", "parent_id": root.id, "id": "worker",
+            "type": "create_agent", "parent_id": home(root), "id": "worker",
             "handler_module": "slow_probe.tools"}}])
         root.ctx.ledger_cap = CAP
         named = (await root.send([{"target": "worker", "payload": {"type": "work"}, "id": "keep"}]))[0]

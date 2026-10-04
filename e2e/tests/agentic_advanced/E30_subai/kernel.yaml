@@ -1,6 +1,6 @@
 roster:
 - id: <agent_id>
-  parent_id: <root.id>
+  parent_id: <home(root)>
   can_call: '<{''$self'': ''*'', ''$parent'': ''*'', ''$children'': ''*'', root.id:
     [''*'', ''create_agent'', ''update_agent'', ''delete_agent''], ''cli'': ''*'',
     ''readings'': ''*'', ''totals'': ''*'', ''clock'': ''*'', ''brain'': ''*'', ''user'':
@@ -16,7 +16,7 @@ roster:
     web: '*'
 - id: kernel_store
   handler_module: file_bridge.tools
-  parent_id: <root.id>
+  parent_id: <home(root)>
   callable_by:
     ai: '*'
     brain: '*'
@@ -24,7 +24,7 @@ roster:
     web: '*'
 - id: readings
   handler_module: file_bridge.tools
-  parent_id: <root.id>
+  parent_id: <home(root)>
   callable_by:
     ai: '*'
     brain: '*'
@@ -32,7 +32,7 @@ roster:
     web: '*'
 - id: totals
   handler_module: file_bridge.tools
-  parent_id: <root.id>
+  parent_id: <home(root)>
   callable_by:
     ai: '*'
     brain: '*'
@@ -40,7 +40,7 @@ roster:
     web: '*'
 - id: user
   handler_module: user_probe.tools
-  parent_id: <root.id>
+  parent_id: <home(root)>
   can_call:
     ai: '*'
   callable_by:
@@ -50,7 +50,7 @@ roster:
     web: '*'
 - id: clock
   handler_module: scheduler.tools
-  parent_id: <root.id>
+  parent_id: <home(root)>
   callable_by:
     ai: '*'
     brain: '*'
@@ -58,7 +58,7 @@ roster:
     web: '*'
 - id: <EXECUTOR_LEG>
   handler_module: <EXEC_MODULE>
-  parent_id: <root.id>
+  parent_id: <home(root)>
   callable_by:
     ai: '*'
     brain: '*'

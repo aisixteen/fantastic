@@ -35,7 +35,7 @@ use crate::events::emit_status;
 use crate::helpers::mint_batch_token;
 use crate::history_view::REFLECT_NUDGE;
 use crate::state::state_for;
-use crate::tool_parse::{extract_tool_calls, malformed_calls};
+use crate::tool_parse::{malformed_calls, terminated_calls};
 use fantastic_bundle::{py_repr, py_str, py_strip, py_truthy};
 use fantastic_kernel::outcome::Status;
 use fantastic_kernel::{AgentId, Item, Kernel};
@@ -323,9 +323,16 @@ pub(crate) fn fan_out(
                 == Some("send");
             if call.name == "send" && is_peer_send {
                 let re = call.arguments.shift_remove("re");
+                let stream_id = call.stream_id.clone();
                 if let Some(Value::Object(p)) = call.arguments.get_mut("payload") {
                     if let Some(t) = message_id {
                         p.entry("msg".to_string()).or_insert(json!(t));
+                    }
+                    // A MESSAGE carries the stream it was previewed as (only a
+                    // message: a verb call's payload stays exactly what the
+                    // model wrote).
+                    if let Some(sid) = stream_id.filter(|s| !s.is_empty()) {
+                        p.insert("stream_id".to_string(), json!(sid));
                     }
                     if let Some(r) = re {
                         p.insert("re".to_string(), r);
@@ -350,6 +357,11 @@ pub(crate) fn fan_out(
             if let Some(t) = message_id {
                 payload.insert("msg".to_string(), json!(t));
             }
+            if let Some(sid) = call.stream_id.as_deref().filter(|s| !s.is_empty()) {
+                if payload.get("type").and_then(Value::as_str) == Some("send") {
+                    payload.insert("stream_id".to_string(), json!(sid));
+                }
+            }
             if let Some(v) = &re {
                 payload.insert("re".to_string(), v.clone());
             }
@@ -367,6 +379,7 @@ pub(crate) fn fan_out(
                 id: call.id.clone(),
                 name: "send".to_string(),
                 arguments: args,
+                stream_id: call.stream_id.clone(),
             });
         }
     }
@@ -482,6 +495,10 @@ the chain explicitly: <call name=\"done\"></call>";
 /// `model_window` is the routing agent's backend window
 /// ([`crate::agent_loop::BackendConfig::model_window`]) — the inline cap a reply
 /// body is measured against.
+///
+/// `call_streams` is every closed call part of the pass, `(stream_id, body)`
+/// ([`crate::stream_parts::PartSplitter::closed_calls`]): a dispatched message
+/// carries the `stream_id` of the part it was streamed as.
 #[allow(clippy::too_many_arguments)]
 pub async fn route_reply(
     self_id: AgentId,
@@ -495,6 +512,7 @@ pub async fn route_reply(
     model_window: i64,
     message_id: Option<i64>,
     dead_turn: bool,
+    call_streams: Vec<(String, String)>,
 ) {
     // THE MODEL'S CALLS ARE THE AGENT'S CALLS — gated. The routing task is
     // spawned by the agent's own dispatch through `Kernel::spawn_task`, which
@@ -513,6 +531,7 @@ pub async fn route_reply(
         model_window,
         message_id,
         dead_turn,
+        call_streams,
     )
     .await
 }
@@ -558,9 +577,23 @@ async fn route_reply_gated(
     model_window: i64,
     message_id: Option<i64>,
     dead_turn: bool,
+    call_streams: Vec<(String, String)>,
 ) {
     let sp = system_prompt.as_deref();
-    let calls = extract_tool_calls(&text);
+    // THE MATCH (owner, 2026-10-04): a dispatched message carries the `stream_id`
+    // of the part it was streamed as, so a consumer settles its draft on it.
+    // Matched by the call's exact body, in order — one reading of the text, not
+    // two.
+    let mut streams = call_streams;
+    let calls: Vec<crate::tool_parse::ToolCall> = terminated_calls(&text)
+        .into_iter()
+        .map(|(mut call, body)| {
+            if let Some(i) = streams.iter().position(|(_, b)| *b == body) {
+                call.stream_id = Some(streams.remove(i).0);
+            }
+            call
+        })
+        .collect();
     // Everything owed to ONE destination, in the order the model wrote it.
     // Grouping (not a message per call) is the whole point — see below.
     let mut units: Vec<Unit> = Vec::new();

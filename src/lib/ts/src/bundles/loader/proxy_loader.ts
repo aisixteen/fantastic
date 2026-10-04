@@ -113,40 +113,67 @@ export class ProxyLoader {
     }, this.debounceMs);
   }
 
+  /** Depth of a page agent: how many ancestors it has in this kernel (root = 0). */
+  private depth(id: string): number {
+    let d = 0;
+    let cur = this.kernel.get(id)?.parentId ?? null;
+    while (cur !== null) {
+      d += 1;
+      cur = this.kernel.get(cur)?.parentId ?? null;
+    }
+    return d;
+  }
+
   /** Push all pending persists/forgets to the host loader over the bridge. */
   async flush(): Promise<void> {
     const persist = [...this.dirtyPersist];
     this.dirtyPersist.clear();
     const forget = [...this.dirtyForget];
     this.dirtyForget.clear();
-    // ONE BATCH, not a loop of awaits. This is what the array-only send is for:
-    // a hundred dirty records used to be a hundred serial round-trips over the
-    // bridge, each waiting out the last. Launch is synchronous for the whole
-    // batch and the settles race, so a flush costs one round-trip's latency
-    // instead of N. Order within the batch is irrelevant — these are
-    // independent per-record writes.
-    const items: Item[] = [];
+    // PARENTS BEFORE CHILDREN — one batch per DEPTH, each awaited before the next.
+    // The host loader scopes a record verb to the caller's own subtree by walking
+    // the record's parent chain on disk, so a child sent in the same batch as its
+    // new parent races it and is refused (measured on the canvas: `view_root` under
+    // a `canvas` still in flight). Within one depth the records are independent and
+    // go as ONE concurrent batch — a wave costs one round-trip, not one per record.
+    const waves = new Map<number, Item[]>();
     for (const id of persist) {
       const a = this.kernel.get(id);
       if (a === undefined) continue;
       const record = a.record();
       record.parent_id = this.rewrittenParent(a.parentId);
-      items.push({
+      const d = this.depth(id);
+      const wave = waves.get(d) ?? [];
+      wave.push({
         target: this.hostLoaderId,
         payload: { type: "persist_record", record } as unknown as Payload,
       });
+      waves.set(d, wave);
     }
-    for (const [id, parentId] of forget) {
-      items.push({
-        target: this.hostLoaderId,
-        payload: {
-          type: "forget_record",
-          id,
-          parent_id: parentId,
-        } as unknown as Payload,
+    const forgets: Item[] = forget.map(([id, parentId]) => ({
+      target: this.hostLoaderId,
+      payload: { type: "forget_record", id, parent_id: parentId } as unknown as Payload,
+    }));
+    const refused: string[] = [];
+    const settle = (items: Item[], outs: { result?: unknown; status?: string }[]) => {
+      outs.forEach((o, n) => {
+        const r = o.result as { error?: string } | null | undefined;
+        if (o.status !== "completed" || (r && typeof r === "object" && r.error)) {
+          const p = items[n]?.payload as { type?: string; record?: { id?: string }; id?: string };
+          refused.push(`${p?.type} ${p?.record?.id ?? p?.id}: ${r?.error ?? o.status}`);
+        }
       });
+    };
+    for (const d of [...waves.keys()].sort((x, y) => x - y)) {
+      const wave = waves.get(d)!;
+      settle(wave, await this.kernel.send(wave));
     }
-    if (items.length > 0) await this.kernel.send(items);
+    if (forgets.length > 0) settle(forgets, await this.kernel.send(forgets));
+    // A REFUSED WRITE IS NOT DROPPED SILENTLY: the record would stay unsaved with
+    // nothing left to say so. It fails loud, naming each refusal.
+    if (refused.length > 0) {
+      throw new Error(`ProxyLoader: the host loader refused ${refused.length} write(s): ${refused.join("; ")}`);
+    }
   }
 
   /** Stop watching + final flush — a clean teardown loses nothing. */

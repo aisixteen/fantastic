@@ -40,9 +40,9 @@ sys.path.insert(
     ),
 )
 from backends import backend as _resolve_backend  # noqa: E402
-from helpers import memory
+from helpers import creds, memory
 from helpers import verdict  # noqa: E402
-from helpers.kernel import open_kernel  # noqa: E402
+from helpers.kernel import open_kernel  # noqa: E402, home
 
 BK = _resolve_backend()
 BACKEND, MODEL = BK.name, BK.model
@@ -147,7 +147,7 @@ def kickoff(k: int) -> str:
 def _ai_record(agent_id: str, root, store, *, oracle: str, peers: list[str], description: str) -> dict:
     meta: dict = {
         "type": "create_agent",
-        "parent_id": root.id,
+        "parent_id": home(root),
         "id": agent_id,
         "description": description,
         "context_window": CTX,
@@ -187,7 +187,7 @@ async def build(root):
                     "target": root.id,
                     "payload": {
                         "type": "create_agent",
-                        "parent_id": root.id,
+                        "parent_id": home(root),
                         "handler_module": "file_bridge.tools", "allow": ["."],
                         "id": "kernel_store",
                         "callable_by": {**{s: "*" for s in SOLVERS}, "rest": "*", "web": "*"},
@@ -204,7 +204,7 @@ async def build(root):
             "target": root.id,
             "payload": {
                 "type": "create_agent",
-                "parent_id": root.id,
+                "parent_id": home(root),
                 "handler_module": "file_bridge.tools", "allow": ["."],
                 "id": "notes",
                 # a DATA store — the records under `.fantastic` stay the loader's
@@ -221,7 +221,7 @@ async def build(root):
                 "target": root.id,
                 "payload": {
                     "type": "create_agent",
-                    "parent_id": root.id,
+                    "parent_id": home(root),
                     "handler_module": "oracle_probe.tools",
                     "id": oid,
                     "lines": LEDGERS[k],
@@ -248,6 +248,8 @@ async def build(root):
         assert not (out.get("result") or {}).get("error"), out
     for sid in SOLVERS:  # the store's half of each memory wire
         await memory.open_ingress(root, memory.MEMORY, sid)
+        if _resolve_backend().key_ref:
+            await creds.grant_reader(root, sid)
     return store
 
 

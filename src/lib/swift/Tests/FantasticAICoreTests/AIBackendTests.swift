@@ -56,9 +56,8 @@ struct AIBackendTests {
         // is a top-level field beside it, as python spells it.
         #expect(
             r["verbs"].asObject?.keys.elementsEqual([
-                "reflect", "send", "inquiry", "history", "status", "context_status", "recall",
-                "grep", "context_recall", "context_clear", "watch",
-                "unwatch", "boot",
+                "reflect", "send", "stop", "rows", "inquiry", "history", "status", "context_status",
+                "recall", "grep", "context_recall", "context_clear", "watch", "unwatch", "boot",
             ]) == true, "\(r["verbs"])")
         #expect(
             r["verbs"]["reflect"].asString
@@ -416,6 +415,10 @@ struct AIBackendTests {
         // separate task that outlived an already-retired dispatch.)
         let taskId = try await waitForTask(kernel: kernel, agent: id, verb: "send")
         #expect(taskId > 0)  // a pid: an int from the one counter
+        // MID-STREAM, as python's test kills it (inside the provider stream): a
+        // kill that lands while the turn still assembles fails the turn's own
+        // kernel calls (the subtree is marked killed before `onCancel` runs).
+        try await waitUntil("the first token") { sink.first(type: "token") != nil }
         let before = await kernel.send([Item(id, .object(["type": .string("status"), "client_id": .string("c")]))])[0].result
         #expect(before["generating"].asBool == true)
 
@@ -446,13 +449,13 @@ struct AIBackendTests {
         let stillListed = await psRows(kernel).contains(where: { $0["id"].asInt == taskId })
         #expect(!stillListed)
 
-        // The killed turn persisted NOTHING — not the partial assistant row, and
-        // not the user row either. The exchange never completed, so no half of
-        // it is a record. This matches python (`_save_history`, one call site
-        // after the stream) and rust (`agent_loop.rs`, likewise): a turn is
-        // persisted as a UNIT or not at all.
+        // THE CUT (owner, 2026-10-04): the killed turn keeps the incoming message
+        // and a MARKER — never the half answer. A kernel `cancel` names no
+        // stopper, so the marker says `cancel`.
         let msgs = conversationRows(kernel: kernel, id: id)
-        #expect(msgs.isEmpty, "an interrupted turn left a half-exchange behind: \(msgs)")
+        #expect(msgs.map { $0["role"].asString ?? "" } == ["user", "assistant"], "\(msgs)")
+        #expect(msgs.first?["content"].asString == "hi")
+        #expect(msgs.last?["content"].asString?.hasPrefix("[stopped by cancel]") == true, "\(msgs)")
 
         // The FIFO lock was released as the killed generation unwound: the agent
         // still answers a fresh send (a stranded lock would hang here forever).

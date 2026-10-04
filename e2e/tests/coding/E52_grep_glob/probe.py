@@ -25,7 +25,7 @@ sys.path.insert(
 )
 from backends import backend as _resolve_backend
 from helpers import Limits, connect, drive, human, verdict
-from helpers.kernel import open_kernel
+from helpers.kernel import open_kernel, home
 
 BK = _resolve_backend()
 XID = "searcher"
@@ -78,7 +78,7 @@ async def main():
         for payload in (
             {
                 "type": "create_agent",
-                "parent_id": root.id,
+                "parent_id": home(root),
                 "id": FB,
                 "handler_module": "file_bridge.tools", "allow": ["."],
                 "root": ".",
@@ -87,7 +87,7 @@ async def main():
             },
             {
                 "type": "create_agent",
-                "parent_id": root.id,
+                "parent_id": home(root),
                 "id": "notes",
                 "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
                 "ingress_rule": "allow_all_ingress",
@@ -95,7 +95,7 @@ async def main():
             },
             {
                 "type": "create_agent",
-                "parent_id": root.id,
+                "parent_id": home(root),
                 "id": XID,
                 "handler_module": "exec_bridge.tools",
                 "cwd": os.getcwd(),

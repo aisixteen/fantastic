@@ -26,7 +26,7 @@ sys.path.insert(
 )
 from backends import backend as _resolve_backend
 from helpers import Limits, connect, drive, verdict
-from helpers.kernel import open_kernel
+from helpers.kernel import open_kernel, home
 
 BK = _resolve_backend()
 
@@ -50,7 +50,7 @@ async def main():
         for payload in (
             {
                 "type": "create_agent",
-                "parent_id": root.id,
+                "parent_id": home(root),
                 "handler_module": "file_bridge.tools", "allow": ["."],
                 "id": "kernel_store",
                 "root": ".",
@@ -61,7 +61,7 @@ async def main():
             },
             {
                 "type": "create_agent",
-                "parent_id": root.id,
+                "parent_id": home(root),
                 "handler_module": "file_bridge.tools", "allow": ["."],
                 "id": "notes",
                 "root": ".",

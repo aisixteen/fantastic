@@ -177,13 +177,13 @@ fn bytes_is_never_trimmed_and_other_values_are() {
     assert_eq!(payload(&c)["bytes"], json!("  two spaces \n"));
 }
 
+/// No `</call>`, no call (owner, 2026-10-04): the model stopped generating
+/// before it closed — nothing dispatches, nothing is "malformed"; the cut marker
+/// names it.
 #[test]
-fn unterminated_call_at_the_end_is_still_an_attempt() {
+fn an_unterminated_call_is_not_a_call() {
     let text = r#"<call name="send"><target_id>notes</target_id><type>reflect</type>"#;
-    assert_eq!(
-        Value::Object(payload(&one(text)).clone()),
-        json!({"type": "reflect"})
-    );
+    assert!(extract_tool_calls(text).is_empty() && malformed_calls(text).is_empty());
 }
 
 #[test]
@@ -233,11 +233,11 @@ fn bytes_closer_inside_a_document_ends_the_value_early_and_is_refused() {
 }
 
 #[test]
-fn bytes_never_closed() {
-    refused(
-        r#"<call name="send"><target_id>notes</target_id><type>write</type><bytes>open"#,
-        &["`<bytes>` opened and never closed"],
-    );
+fn bytes_never_closed_is_a_cut_not_a_call() {
+    // an open `<bytes>` swallows any `</call>`, so the envelope never closes
+    let text =
+        r#"<call name="send"><target_id>notes</target_id><type>write</type><bytes>open</call>"#;
+    assert!(extract_tool_calls(text).is_empty() && malformed_calls(text).is_empty());
 }
 
 #[test]
@@ -331,8 +331,13 @@ fn defang_breaks_every_delimiter() {
 #[test]
 fn the_broken_block_is_shown_whole() {
     let big = "x".repeat(40_000);
-    let text =
-        format!(r#"<call name="send"><target_id>n</target_id><type>write</type><bytes>{big}"#);
+    let text = format!(
+        concat!(
+            r#"<call name="send"><target_id>n</target_id><type>write</type><bytes>{}</bytes>"#,
+            "<path>a</path><path>b</path></call>"
+        ),
+        big
+    );
     let bad = malformed_calls(&text);
     assert_eq!(bad.len(), 1);
     assert!(bad[0].your_block.contains(&big));

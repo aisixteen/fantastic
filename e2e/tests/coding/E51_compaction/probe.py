@@ -22,7 +22,7 @@ sys.path.insert(
 from backends import backend as _resolve_backend
 from helpers import Limits, connect, ctx_score, drive, human, verdict
 from helpers.facts_arm import store_rows
-from helpers.kernel import open_kernel
+from helpers.kernel import open_kernel, home
 
 BK = _resolve_backend()
 FB = "cmp_fb"
@@ -52,13 +52,13 @@ async def main():
 
         for payload in (
             {
-                "type": "create_agent", "parent_id": root.id, "id": FB,
+                "type": "create_agent", "parent_id": home(root), "id": FB,
                 "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
                 "ingress_rule": "allow_all_ingress",
                 "callable_by": {"ai": "*", "rest": "*", "web": "*"},
             },
             {
-                "type": "create_agent", "parent_id": root.id, "id": "notes",
+                "type": "create_agent", "parent_id": home(root), "id": "notes",
                 "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
                 "ingress_rule": "allow_all_ingress",
                 "callable_by": {"ai": "*", "rest": "*", "web": "*"},

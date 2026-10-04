@@ -170,6 +170,11 @@ public final class AIBackend: @unchecked Sendable {
             return nil
         case "send":
             return try await sendVerb(agent: agent, payload: payload, kernel: kernel)
+        case "stop":
+            return await stopVerb(agentId: agent.id, payload: payload, kernel: kernel)
+        // What the agent HOLDS in memory — its loaded head; never a store read.
+        case "rows":
+            return rowsVerb(agent.id.value, payload, kernel)
         // ONE INQUIRY VERB, WHOEVER RECEIVES IT: a person answers `inquiry` from a
         // record, this agent answers it by THINKING, and the asker writes the
         // same call either way.
@@ -232,9 +237,32 @@ public final class AIBackend: @unchecked Sendable {
     ///
     /// No-op when the cancelled task is some OTHER dispatch on this agent (a
     /// `history`, a `reflect`) — the entry is matched on its task id.
-    public func onCancel(agentId: AgentId, taskId: TaskId, kernel: Kernel) async {
+    public func onCancel(agentId: AgentId, taskId: TaskId, kernel: Kernel) async throws {
         let st = runState(kernel, agentId.value)
         guard let entry = st.takeCurrentForCancel(taskId: String(taskId.value)) else { return }
+        // THE CUT (owner, 2026-10-04): every open part ABORTS for its watchers, and
+        // the turn leaves the incoming message + a marker row — never a half answer
+        // — so the model's next turn knows what it was asked, what it had visibly
+        // said, and who stopped it. Nothing of a stopped pass was dispatched.
+        var unsent: [StreamPart] = []
+        if let parts = entry.parts {
+            unsent = await parts.stop("stopped").filter { $0.kind == "call" }
+        }
+        let who = entry.stoppedBy ?? "cancel"
+        let (inId, inParent) = rowIdsForIncoming(entry.text, kernel: kernel)
+        try await saveHistory(
+            agentId.value, kernel,
+            [
+                .object([
+                    "role": .string("user"), "content": .string(entry.text),
+                    "id": .integer(inId), "parent": inParent.map(JSON.integer) ?? .null,
+                ]),
+                .object([
+                    "role": .string("assistant"),
+                    "content": .string(cutMarker(entry.textSoFar, "stopped by \(who)", unsent)),
+                    "id": .integer(kernel.mintId()), "parent": .integer(inId),
+                ]),
+            ])
         // BOTH CORRELATION FIELDS, explicitly: the entry is already OUT of
         // `_current` by now (that is what stops `status` reporting a phantom
         // generation), so nothing can auto-fill them. `started_at` was missing,
@@ -246,6 +274,34 @@ public final class AIBackend: @unchecked Sendable {
                 ("send_id", .string(entry.sendId)),
                 ("started_at", .double(entry.startedAt)),
             ])
+    }
+
+    /// args: stream_id:str? (a part of the generation in flight). STOP this
+    /// agent's in-flight generation — how a receiver of its streaming parts stops
+    /// it: the provider stream closes, open parts abort, the turn keeps a
+    /// `[stopped by <you>]` marker. Returns {stopped:bool}. Python `_stop`.
+    ///
+    /// The stopper is recorded on the in-flight entry and the generation's kernel
+    /// task is cancelled — `onCancel` does the rest, as for any `cancel`.
+    private func stopVerb(agentId: AgentId, payload: JSON, kernel: Kernel) async -> JSON {
+        let st = runState(kernel, agentId.value)
+        guard let cur = st.currentSnapshot(), let tid = cur.taskId else {
+            return .object(["stopped": .bool(false)])
+        }
+        let sid = payload["stream_id"]
+        if sid != .null {
+            guard let parts = cur.parts, let s = sid.asString,
+                await parts.parts().contains(where: { $0.streamId == s })
+            else {
+                return .object(["stopped": .bool(false)])
+            }
+        }
+        // `current_origin() or "operator"`.
+        let origin = KernelTaskLocals.currentOrigin?.value ?? ""
+        let who = origin.isEmpty ? "operator" : origin
+        st.updateCurrent { if $0.sendId == cur.sendId { $0.stoppedBy = who } }
+        _ = await kernel.cancelTask(TaskId(Int64(tid)!))
+        return .object(["stopped": .bool(true)])
     }
 
     /// The `onDelete` bundle hook, shared by every backend (vllm drops its own
@@ -334,6 +390,8 @@ public final class AIBackend: @unchecked Sendable {
     static let VERBS: OrderedDictionary<String, JSON> = [
         "reflect": .string("Identity + model + endpoint + generating flag + context posture. No args."),
         "send": .string("args: text:str (req), client_id:str? (default 'cli'). Streams tokens to ONLY the caller — cli (stdout) for client_id='cli', or the browser tab whose WS is subscribed and filters by client_id otherwise. Persists per-client chat.json. Per-backend FIFO lock: concurrent callers serialize. If the lock is held when this call arrives, emits a `status` event (phase='queued', detail.ahead) for the caller; first `token` (or `status` of phase != queued) for the same client_id implicitly unqueues. Optional system_prompt:str REPLACES the auto-built prompt (caller-supplied role/context — read it from a state agent yourself, no yaml coupling here). The conversation is always this agent's own (its memory store). _call_stack is reserved for the recursion guard (cycle/over-depth refusal before the lock). Optional send_to:str hands this pass's TEXT to that agent id as a fresh turn, once. The model routes its own work with `<reply_to>` inside its calls. Returns {response, final, client_id}."),
+        "stop": .string("args: stream_id:str? (a part of the generation in flight). STOP this agent's in-flight generation — how a receiver of its streaming parts stops it: the provider stream closes, open parts abort, the turn keeps a `[stopped by <you>]` marker. Returns {stopped:bool}."),
+        "rows": .string("args: after:int? (a row id — the page starts after it), limit:int?. A VIEW of this agent's conversation exactly as the agent HOLDS it in memory — its loaded head, in the order it lived it; no store read, no transform, so what a UI draws is what the agent has. Before the agent has loaded its head (a fresh boot, before its first turn) it holds nothing: {rows:[], loaded:false}. Returns {rows, next, total, loaded}."),
         "inquiry": .string("args: text:str (req), kind:str? (text|single|multi|confirm), options:list?, action:dict?, request_id:str?, client_id:str?. Sends THIS agent an inquiry and returns {answer, request_id} — the answer is the one it emits with the `answer` tool. The same verb a human answers; a sender writes one call for either."),
         "history": .string("args: fold:int? (a fold or clear id — list ITS members instead), limit:int? (default: as many as fit inline), after:int? (a row id — page forward from it). The conversation at DIGEST resolution — {id, parent, kind, role, head, bytes} per row, oldest first, paged. With `fold`, that fold's title + summary and its members (one level down; a member that is itself a fold opens the same way). A row's text is behind `recall` / `grep`. Returns {rows, next, total, fold?}."),
         "status": .string("args: client_id:str? — when provided, returns a privacy-filtered snapshot: full text only for this client's queue entries / current generation; other clients collapse to `others_pending` (an integer count). Without client_id the snapshot redacts text everywhere. Used by chat UIs to rebuild queued/in-flight state on page reload (and for headless polling). Returns {source, client_id, generating, current:{phase, send_id, started_at, elapsed, is_mine, text?, text_so_far?, last_tool?}|null, mine_pending:[{send_id,text,queued_at}], others_pending:int}."),
@@ -357,9 +415,11 @@ public final class AIBackend: @unchecked Sendable {
     /// did NOT finish has to travel back with it rather than being flattened to a
     /// missing value.
     enum AIPassOutcome {
-        /// The RAW completion — what routing parses — and the assistant row's id,
-        /// the batch token every reply tag of this turn names (`↑<turn>`).
-        case ok(String, Int64)
+        /// The RAW completion — what routing parses — the assistant row's id, the
+        /// batch token every reply tag of this turn names (`↑<turn>`), and every
+        /// closed call part `(stream_id, body)` — what routing stamps each
+        /// dispatched message with (python's `call_streams`).
+        case ok(String, Int64, [(streamId: String, body: String)])
         /// A DEAD TURN: the RAW completion held nothing once the thinking was
         /// stripped. Nothing was stored; routing rerolls it with the no-call
         /// reminder (python `_run`'s `dead_turn` reply).
@@ -565,6 +625,11 @@ public final class AIBackend: @unchecked Sendable {
             }
             if payload["msg"] != .null { parts.append("msg \(pyStr(payload["msg"]))") }
             if payload["re"] != .null { parts.append("re \(pyStr(payload["re"]))") }
+            // the stream this message was previewed as — what an AI consumer that
+            // watched it stream matches its draft to (owner, 2026-10-04)
+            if payload["stream_id"] != .null {
+                parts.append("stream \(pyStr(payload["stream_id"]))")
+            }
             text = "[" + parts.joined(separator: " \u{b7} ") + "]\n" + text
         }
 
@@ -700,12 +765,14 @@ public final class AIBackend: @unchecked Sendable {
 
         let reply: JSON
         switch produced {
-        case .ok(let textOut, let messageId):
+        case .ok(let textOut, let messageId, let callStreams):
             reply = .object([
                 "response": .string(textOut),
                 "final": .string(textOut),
                 "client_id": .string(clientId),
                 "message_id": .integer(messageId),
+                // the closed call parts (`callStreams`) feed routing only — never
+                // the caller's reply
             ])
         case .dead(let textOut):
             // python's `{response, final, client_id, dead_turn: True}` — no
@@ -737,13 +804,17 @@ public final class AIBackend: @unchecked Sendable {
         // the task-locals and the row would land parentless, outside `cancel`'s
         // reach.
         // A DEAD turn routes too — as a silent turn, which is how it is rerolled.
-        let routed: (text: String, messageId: Int64?, dead: Bool)?
+        let routed:
+            (
+                text: String, messageId: Int64?, dead: Bool,
+                callStreams: [(streamId: String, body: String)]
+            )?
         switch produced {
-        case .ok(let t, let m): routed = (t, m, false)
-        case .dead(let t): routed = (t, nil, true)
+        case .ok(let t, let m, let c): routed = (t, m, false, c)
+        case .dead(let t): routed = (t, nil, true, [])
         default: routed = nil
         }
-        if let (textOut, messageId, deadTurn) = routed {
+        if let (textOut, messageId, deadTurn, callStreams) = routed {
             let deadline = sendTimeoutSeconds
             // THE COORDINATION STATE, threaded through so `await` can count what
             // is actually pending for this agent — its queue and its FIFO lock.
@@ -771,6 +842,7 @@ public final class AIBackend: @unchecked Sendable {
                     runState: st,
                     messageId: messageId,
                     deadTurn: deadTurn,
+                    callStreams: callStreams,
                     launched: launched)
             }
             await launched.wait()
@@ -827,8 +899,8 @@ public final class AIBackend: @unchecked Sendable {
         // turn. `storeLen` is how many turns the head held behind it.
         //
         // The user turn is NOT persisted here. It is persisted ONCE, with the
-        // assistant turn, after the stream completes — an interrupted turn
-        // persists NOTHING, because the exchange it was part of never happened.
+        // assistant turn, after the stream completes. A STOPPED turn's rows are
+        // `onCancel`'s: the incoming message + the cut marker, never a half answer.
         let (assembled, storeLen) = try await assemble(
             agent: agent, userText: userText, systemPrompt: systemPrompt, kernel: kernel)
         var messages = assembled
@@ -864,6 +936,15 @@ public final class AIBackend: @unchecked Sendable {
         // `_run`.
         var accumulated = ""
         var firstToken = true
+        // STREAMING PARTS (owner, 2026-10-04): the same chunks, split into parts as
+        // they are written — animation for the addressee, never action
+        // (`StreamParts`).
+        let parts = AIStreamParts(
+            splitter: PartSplitter(source: agentId.value),
+            publisher: PartPublisher(
+                kernel: kernel, selfId: agentId, clientId: clientId,
+                re: KernelTaskLocals.currentTask?.value))
+        st.updateCurrent { $0.parts = parts }
         do {
             let model = renderForModel(messages)
             // A FRESH reading per pass: a provider that reports nothing this time
@@ -872,10 +953,11 @@ public final class AIBackend: @unchecked Sendable {
             for try await chunk in provider.chat(messages: model) {
                 // The KERNEL killed this task (`cancel <task_id>`). `onCancel`
                 // already closed the turn out for the client — status(done,
-                // reason:"cancelled") + done — while we were still alive. Bail
-                // WITHOUT emitting anything more and WITHOUT persisting the
-                // partial turn; returning drops the provider stream, whose
-                // `onTermination` cancels the upstream HTTP task.
+                // reason:"cancelled") + done, the incoming row + the cut marker —
+                // while we were still alive. Bail WITHOUT emitting anything more
+                // and WITHOUT persisting the partial turn; returning drops the
+                // provider stream, whose `onTermination` cancels the upstream HTTP
+                // task.
                 if Task.isCancelled { return .cancelled }
                 switch chunk {
                 case .token(let delta):
@@ -899,6 +981,7 @@ public final class AIBackend: @unchecked Sendable {
                             "text": .string(delta),
                             "source": .string(agentId.value),
                         ])
+                    await parts.feed(delta)
                 }
             }
         } catch {
@@ -906,6 +989,7 @@ public final class AIBackend: @unchecked Sendable {
             // OWN kill, not a provider failure. `onCancel` already emitted the
             // terminal events; stay silent.
             if Task.isCancelled { return .cancelled }
+            await parts.stop("error")
             // A PROVIDER FAILURE RAISES (python `_send`'s exception handler). The
             // status carries `str(e)` and the handler RAISES, so the kernel
             // settles `{error:"<Type>: <msg>", raised:true}` and the caller can
@@ -918,17 +1002,21 @@ public final class AIBackend: @unchecked Sendable {
             throw error
         }
         // The stream can also FINISH (rather than throw) when the task is
-        // cancelled — same contract: the turn is already closed out, persist
-        // nothing.
+        // cancelled — same contract: the turn is already closed out (`onCancel`
+        // wrote its rows), persist nothing more.
         if Task.isCancelled { return .cancelled }
+        // A block still open when the model stopped generating is CUT: an open
+        // call is never dispatched (`extractToolCalls` skips it) and the turn's
+        // row says so.
+        let cutCall = await parts.finish()
 
         // APPEND this send's user + assistant turns to the durable chat store.
         // NOT the projected view, and NOT the whole conversation re-written: the
         // store owns the full transcript and each turn is one `append`. THE ONLY
-        // WRITE, and the only one python/rust make either. The error /
-        // FM-interrupt / timeout / cancel paths all return before this point,
-        // so an interrupted turn persists nothing at all — neither half of an
-        // exchange that never completed.
+        // WRITE on a finished pass, as in python. The error / FM-interrupt /
+        // timeout paths return before this point and persist nothing — neither
+        // half of an exchange that never completed; a cancel's rows are
+        // `onCancel`'s (the incoming message + the cut marker).
         //
         // PARSE THE RAW TEXT, PERSIST THE STRIPPED TEXT (Python core.py:1016-1018).
         // The deliberation is not part of the conversation: re-feeding a reasoning
@@ -1009,9 +1097,13 @@ public final class AIBackend: @unchecked Sendable {
                     "role": .string("user"), "content": .string(userText),
                     "id": .integer(inId), "parent": inParent.map(JSON.integer) ?? .null,
                 ]),
+                // A pass the model stopped with a block open leaves the CUT
+                // MARKER instead, on top of the context (owner, 2026-10-04).
                 .object([
                     "role": .string("assistant"),
-                    "content": .string(withoutThinking(accumulated)),
+                    "content": .string(
+                        cutCall.map { cutMarker(accumulated, "model stopped generating", [$0]) }
+                            ?? withoutThinking(accumulated)),
                     "id": .integer(messageId), "parent": .integer(inId),
                 ]),
             ])
@@ -1019,7 +1111,7 @@ public final class AIBackend: @unchecked Sendable {
         // The RAW completion — markers in — is what routing parses: a call the
         // model wrote mid-thought still dispatches. Only the DURABLE turn above
         // is stripped.
-        return .ok(accumulated, messageId)
+        return .ok(accumulated, messageId, await parts.closedCalls())
     }
 
     // MARK: - status (verb + phase events)
@@ -1074,7 +1166,9 @@ public final class AIBackend: @unchecked Sendable {
     ///   `{phase, send_id, started_at, elapsed, is_mine}`, plus `text`,
     ///   `text_so_far` and any `last_tool` when the entry is that caller's own.
     /// - nobody asked → `_redact_text(cur)`: the ENTRY's own keys minus the
-    ///   text-bearing ones and `task_id`, in the entry's order
+    ///   text-bearing ones, `task_id`, the streaming `parts` (the live splitter +
+    ///   publisher) and `stopped_by` — bookkeeping, not status, and the splitter is
+    ///   not JSON — in the entry's order
     ///   (`client_id, send_id, queued_at, started_at, phase`), then `elapsed`
     ///   and `is_mine:false`.
     ///

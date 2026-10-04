@@ -21,6 +21,9 @@ struct ToolCall: Sendable, Equatable {
     let name: String
     /// The call's arguments object. Always an object by the time it lands here.
     let arguments: JSON
+    /// The stream part this call was previewed as — python's `call["stream_id"]`,
+    /// stamped by `routeReply`'s match (owner, 2026-10-04). Never set by a parser.
+    var streamId: String? = nil
 }
 
 /// Mint a call id. Mirrors python's `f"call_{secrets.token_hex(4)}"` — 8 hex

@@ -71,6 +71,8 @@ struct Found<'a> {
     block: &'a str,
     call: Option<ToolCall>,
     fault: Option<String>,
+    /// Closed by its `</call>`.
+    terminated: bool,
 }
 
 fn scan(text: &str) -> Vec<Found<'_>> {
@@ -87,15 +89,50 @@ fn scan(text: &str) -> Vec<Found<'_>> {
         if call.is_none() && fault.is_none() {
             continue;
         }
-        out.push(Found { block, call, fault });
+        out.push(Found {
+            block,
+            call,
+            fault,
+            terminated: end.is_some(),
+        });
     }
     out
 }
 
-/// Non-streaming: pull every finalized `<call>` out of a complete string.
+/// Whether one envelope body (` name="…">…`, the text after `<call`) is a call
+/// [`extract_tool_calls`] would dispatch — the streaming splitter asks it at
+/// `</call>`.
+#[must_use]
+pub fn parses(block: &str) -> bool {
+    matches!(parse_call(block), Ok(Some(_)))
+}
+
+/// Every dispatchable call with the BODY it was written as (the text after its
+/// `name="…">`), in document order — what links a call to the stream part it was
+/// previewed as.
+#[must_use]
+pub fn terminated_calls(text: &str) -> Vec<(ToolCall, String)> {
+    scan(text)
+        .into_iter()
+        .filter(|f| f.terminated)
+        .filter_map(|f| {
+            let body = f.block.find('>').map_or("", |i| &f.block[i + 1..]);
+            f.call.map(|call| (call, body.to_string()))
+        })
+        .collect()
+}
+
+/// Non-streaming: pull every finalized `<call>` out of a complete string. A call
+/// with no `</call>` is NOT a call (owner, 2026-10-04): the model stopped
+/// generating before it closed, so nothing is dispatched — the turn's cut marker
+/// names it as not sent ([`crate::stream_parts::cut_marker`]).
 #[must_use]
 pub fn extract_tool_calls(text: &str) -> Vec<ToolCall> {
-    scan(text).into_iter().filter_map(|f| f.call).collect()
+    scan(text)
+        .into_iter()
+        .filter(|f| f.terminated)
+        .filter_map(|f| f.call)
+        .collect()
 }
 
 /// Every COMPLETE call envelope in `text`, verbatim, in source order — what a
@@ -148,7 +185,9 @@ impl MalformedCall {
 pub fn malformed_calls(text: &str) -> Vec<MalformedCall> {
     scan(text)
         .into_iter()
-        .filter(|f| f.call.is_none())
+        // An UNTERMINATED block is not malformed — it was cut; the cut marker
+        // says so.
+        .filter(|f| f.call.is_none() && f.terminated)
         .map(|f| MalformedCall {
             error: format!(
                 "call NOT dispatched: {}. Nothing ran. {HINT}",
