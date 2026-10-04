@@ -69,10 +69,20 @@ async def _grant_forensics(root: Any) -> str:
 async def rows_of(root: Any, aid: str, *, conversation_only: bool = False) -> list[dict]:
     """Every row of `aid`'s conversation, oldest first. Read from the store's `dump`
     (the whole tables): a caller reads only its OWN rows, so the harness — not `aid` —
-    reads them there."""
+    reads them there. A fold's members live in the `fold_refs` table, not on its
+    row — joined back as the row's `refs`, exactly as the store's own read serves it."""
     tables = await dump(root)
+    refs = {
+        fr["fold"]: list(fr["members"])
+        for fr in tables.get("fold_refs") or []
+        if _owned_by(fr.get("owner"), aid)
+    }
     rows = sorted(
-        (x["row"] for x in tables.get("rows") or [] if _owned_by(x.get("owner"), aid)),
+        (
+            {**x["row"], **({"refs": refs[x["row"]["id"]]} if x["row"].get("id") in refs else {})}
+            for x in tables.get("rows") or []
+            if _owned_by(x.get("owner"), aid)
+        ),
         key=lambda r: r.get("id") or 0,
     )
     if conversation_only:
