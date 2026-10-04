@@ -338,8 +338,8 @@ async def test_an_unparseable_call_reaches_the_model_as_an_error(
     run went on believing its agent existed."""
     oid = await _make_ollama(seeded_kernel)
     broken = (
-        '<call name="send"><target_id>kernel</target_id><type>create_agent</type>'
-        '<bytes>x = "unclosed</call>'
+        '<call name="send"><target_id>kernel</target_id><type>create_agent'
+        "<path>a</path></call>"
     )
     fp = _FakeProvider([[broken], ["ok"]])
     fake_providers[oid] = fp

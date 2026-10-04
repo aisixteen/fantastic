@@ -31,7 +31,7 @@ sys.path.insert(
 from backends import backend as _resolve_backend
 from helpers import Limits, connect, drive, verdict
 from helpers.facts_arm import store_rows
-from helpers.kernel import open_kernel
+from helpers.kernel import open_kernel, home
 
 BK = _resolve_backend()
 FB, RUNNER = "pr_fb", "pr_runner"
@@ -60,15 +60,15 @@ async def main():
         _git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "baseline")
 
         for payload in (
-            {"type": "create_agent", "parent_id": root.id, "id": FB,
+            {"type": "create_agent", "parent_id": home(root), "id": FB,
              "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
              "ingress_rule": "allow_all_ingress",
              "callable_by": {"ai": "*", "ai_rev": "*", "rest": "*", "web": "*"}},
-            {"type": "create_agent", "parent_id": root.id, "id": "editor",
+            {"type": "create_agent", "parent_id": home(root), "id": "editor",
              "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
              "ingress_rule": "allow_all_ingress",
              "callable_by": {"ai": "*", "ai_rev": "*", "rest": "*", "web": "*"}},
-            {"type": "create_agent", "parent_id": root.id, "id": RUNNER,
+            {"type": "create_agent", "parent_id": home(root), "id": RUNNER,
              "handler_module": "exec_bridge.tools", "cwd": os.getcwd(), "inherit_env": ["PATH", "HOME"],
              "ingress_rule": "allow_all_ingress", "allowed": ["git .*"],
              "callable_by": {"ai": "*", "ai_rev": "*", "rest": "*", "web": "*"}},
@@ -80,7 +80,7 @@ async def main():
         # coder's first turn arrives as a gated `user -> ai` send with a ledger
         # row rather than an operator injection from outside the kernel.
         r = await _call(root, root.id, {
-            "type": "create_agent", "parent_id": root.id, "id": "user",
+            "type": "create_agent", "parent_id": home(root), "id": "user",
             "handler_module": "user_probe.tools",
             "answer": "do your best judgement",
             "description": "The human this kernel belongs to.",

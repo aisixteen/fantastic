@@ -30,15 +30,13 @@ AI_STORE_VERBS = "*"
 BOOKKEEPING = ("view",)
 
 
-def store_record(parent_id: str, *, admins: list[str], callable_by: dict) -> dict:
-    """The `memory` ram_store record: serves the operator (the kernel's own rows),
-    admins as given, ingress as given."""
+def store_record(parent_id: str, *, callable_by: dict) -> dict:
+    """The `memory` ram_store record. Its rows are keyed by WHO writes them (the kernel
+    writes its own as bookkeeping); who may reach it at all is its `callable_by`."""
     return {
         "id": MEMORY,
         "handler_module": "ram_store.tools",
         "parent_id": parent_id,
-        "operator": True,
-        "admins": list(admins),
         "callable_by": callable_by,
     }
 
@@ -60,8 +58,7 @@ async def _grant_forensics(root: Any) -> str:
         (a for a in ((r.get("result") or {}).get("agents") or []) if a.get("id") == MEMORY),
         None,
     )
-    lines.append(f"  memory record now: callable_by={(rec or {}).get('callable_by')!r} "
-                 f"admins={(rec or {}).get('admins')!r}")
+    lines.append(f"  memory record now: callable_by={(rec or {}).get('callable_by')!r}")
     led = (await root.send([{"target": "kernel", "payload": {"type": "ledger"}}]))[0]
     for e in ((led.get("result") or {}).get("executions") or []):
         if MEMORY in repr(e.get("outcome")) or e.get("target") == MEMORY and e.get("status") != "completed":
@@ -70,31 +67,33 @@ async def _grant_forensics(root: Any) -> str:
 
 
 async def rows_of(root: Any, aid: str, *, conversation_only: bool = False) -> list[dict]:
-    """Every row of `aid`'s conversation, oldest first (all pages)."""
-    rows: list[dict] = []
-    after = None
-    while True:
-        q = {"type": "read", "owner": aid, "limit": 1000}
-        if after is not None:
-            q["after"] = after
-        r = await _store(root, q)
-        if r.get("error"):
-            raise AssertionError(
-                f"memory read({aid}) refused: {r}\n" + await _grant_forensics(root)
-            )
-        rows.extend(r.get("rows") or [])
-        after = r.get("next")
-        if after is None:
-            break
+    """Every row of `aid`'s conversation, oldest first. Read from the store's `dump`
+    (the whole tables): a caller reads only its OWN rows, so the harness — not `aid` —
+    reads them there."""
+    tables = await dump(root)
+    rows = sorted(
+        (x["row"] for x in tables.get("rows") or [] if _owned_by(x.get("owner"), aid)),
+        key=lambda r: r.get("id") or 0,
+    )
     if conversation_only:
         rows = [x for x in rows if x.get("kind") not in BOOKKEEPING]
     return [{**x, "agent": aid} for x in rows]
 
 
+def _owned_by(owner: Any, aid: str) -> bool:
+    """A row key is `<guid>|<agent>`."""
+    return isinstance(owner, str) and owner.split("|", 1)[-1] == aid
+
+
 async def plant(root: Any, aid: str, rows: list[dict]) -> list[int]:
-    """Append rows to `aid`'s conversation — ids from the kernel's counter when a row
-    carries none. Returns the ids, in order."""
-    r = await _store(root, {"type": "append", "owner": aid, "rows": rows})
+    """Append rows to `aid`'s conversation AS `aid` — a caller appends only under its
+    own key. In-process only: the harness stands in for `aid`'s handler."""
+    ctx = getattr(root, "ctx", None)
+    if ctx is None:
+        raise AssertionError("memory.plant needs an in-process kernel")
+    with ctx.agents[aid]._as_self():
+        out = await root.send([{"target": MEMORY, "payload": {"type": "append", "rows": rows}}])
+    r = out[0].get("result") or {}
     ids = r.get("ids")
     if not isinstance(ids, list):
         raise AssertionError(f"memory append({aid}) refused: {r}")
@@ -116,12 +115,8 @@ async def inject(root: Any, tables: dict) -> dict:
 
 
 async def latest_view(root: Any, aid: str) -> dict | None:
-    r = await _store(
-        root,
-        {"type": "read", "owner": aid, "kinds": ["view"], "order": "desc", "limit": 1},
-    )
-    rows = r.get("rows") or []
-    return rows[0] if rows and isinstance(rows[0].get("ids"), list) else None
+    views = [r for r in await rows_of(root, aid) if r.get("kind") == "view"]
+    return views[-1] if views and isinstance(views[-1].get("ids"), list) else None
 
 
 async def open_ingress(root: Any, target: str, caller: str) -> None:
@@ -160,12 +155,10 @@ def ai_memory_meta(can_call: dict) -> dict:
 
 async def wire_in_process(root: Any) -> None:
     """In-process kernel: create `memory` under the root, name it, START the kernel
-    (the store first, then the flusher). The operator is admin (`kernel`)."""
+    (the store first, then the flusher)."""
     ctx = root.ctx
     if MEMORY not in ctx.agents:
-        rec = root.create(
-            "ram_store.tools", id=MEMORY, operator=True, admins=["kernel"]
-        )
+        rec = root.create("ram_store.tools", id=MEMORY)
         assert rec.get("id") == MEMORY, rec
     ctx.update(root.id, memory_store_id=MEMORY)
     out = await ctx.start(boot_all=False)

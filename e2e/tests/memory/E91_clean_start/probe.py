@@ -16,7 +16,7 @@ sys.path.insert(
     str(next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())),
 )
 from helpers import memory, verdict
-from helpers.kernel import WRAPS, open_kernel, replace_with
+from helpers.kernel import WRAPS, open_kernel, replace_with, home
 
 
 class _Stub:
@@ -32,7 +32,7 @@ async def main():
         import ollama_backend.tools  # noqa: F401 — the bundle the AI runs
 
         r = (await root.send([{"target": root.id, "payload": {
-            "type": "create_agent", "parent_id": root.id, "id": "ai",
+            "type": "create_agent", "parent_id": home(root), "id": "ai",
             "handler_module": "ollama_backend.tools", "model": "stub",
             # required at the write; never dialled — the provider is stubbed below
             "endpoint": "http://127.0.0.1:9",

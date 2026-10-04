@@ -45,14 +45,10 @@ from pathlib import Path
 from . import artifacts
 from helpers import creds, memory
 
-BASE = {"$self": "*", "$parent": "*", "$children": "*"}
-#: PRIVILEGED verbs lose their wildcard cover — named explicitly, as everywhere.
-ROOT_VERBS = [
-    "*",
-    "create_agent",
-    "update_agent",
-    "delete_agent",
-]
+#: The only stamped edge is `$self` — every other edge is an explicit grant.
+BASE = {"$self": "*"}
+#: `*` covers every verb (there is no privileged list).
+ROOT_VERBS = "*"
 
 #: The HTTP header carrying a caller-chosen execution id. The credential
 #: already rides `X-Fantastic-Auth`; dispatch metadata belongs on the carrier
@@ -235,72 +231,56 @@ class HostKernel:
         if not (w / "agent.yaml").exists():
             raise SystemExit(f"kernel never seeded {w}/agent.yaml")
 
-        (w / "agents/web/agents/rest").mkdir(parents=True, exist_ok=True)
+        rest_dir = w / "agents/web/agents/rest"
+        rest_dir.mkdir(parents=True, exist_ok=True)
         root = yaml.safe_load((w / "agent.yaml").read_text())
-        # `ws` may read the STATE STREAM — the grant forensics (the other half
-        # of this edge is on the ws leg's own `can_call`, below).
-        root["callable_by"] = {**BASE, "rest": "*", "ws": ["state_subscribe"]}
-        # THE KEYS: every descendant may read one from `creds` (`helpers/creds.py`).
-        root["can_call"] = {**BASE, "rest": "*", **creds.root_grant()}
-        # THE KERNEL'S MEMORY STORE — `kernel_start` refuses to run without one. One
-        # ram_store for the kernel's own rows AND every AI agent's conversation; the
-        # driver's legs are its admins (they read and plant rows for the probes),
-        # and every declared id may reach it.
+        # THE `rest` LEG IS THE TEST'S OPERATOR (owner, 2026-10-04, option a). Every
+        # REST call is the leg, and a mutation must come from the operand's direct
+        # parent — so every agent a probe creates is the leg's child, and the leg
+        # writes their records (grants included). The root accepts the legs'
+        # kernel verbs and the web host's reads; nothing is stamped.
+        # The root is nobody's child, so only this seed can open it: the legs, the
+        # web host, and every declared id (an AI's kernel verbs need it too).
+        root["callable_by"] = {
+            **BASE, "rest": "*", "ws": "*", "web": "*",
+            **{t: "*" for t in self.reach if t != self.root_id},
+        }
         root["memory_store_id"] = memory.MEMORY
         (w / "agent.yaml").write_text(_dump(root))
-        (w / "agents" / memory.MEMORY).mkdir(parents=True, exist_ok=True)
-        (w / "agents" / memory.MEMORY / "agent.yaml").write_text(_dump(
-            memory.store_record(
-                self.root_id,
-                admins=["kernel", "rest", "ws"],
-                callable_by={**BASE, "rest": "*", "ws": "*", "web": "*",
-                             **{t: "*" for t in self.reach
-                                if t not in (self.root_id, memory.MEMORY)}},
-            )))
-        # THE CREDENTIAL STORE — env-backed, one ref per keyed plug this run names.
-        (w / "agents" / creds.CREDS).mkdir(parents=True, exist_ok=True)
-        (w / "agents" / creds.CREDS / "agent.yaml").write_text(_dump(
-            creds.store_record(self.root_id, creds.env_refs())))
-        # `web` NEEDS EGRESS OF ITS OWN. A `watch` frame is dispatched as the
-        # WEB agent, not as the ws leg that carried it, so without this every
-        # subscription is refused `web may not call "watch" on <id>` — and a
-        # watcher that is refused looks exactly like a stream with no events,
-        # which is worse than no watcher at all.
+        # THE KERNEL'S MEMORY STORE and THE CREDENTIAL STORE live UNDER THE LEG: an
+        # AI agent the leg creates is wired to them by the leg, which may write its
+        # own children's `callable_by`. The kernel writes its own rows as bookkeeping.
+        (rest_dir / "agents" / memory.MEMORY).mkdir(parents=True, exist_ok=True)
+        (rest_dir / "agents" / memory.MEMORY / "agent.yaml").write_text(_dump(
+            memory.store_record("rest", callable_by={**BASE, "$parent": "*", "ws": "*", "web": "*"})))
+        (rest_dir / "agents" / creds.CREDS).mkdir(parents=True, exist_ok=True)
+        (rest_dir / "agents" / creds.CREDS / "agent.yaml").write_text(_dump(
+            {**creds.store_record("rest", creds.env_refs()), "callable_by": {**BASE, "$parent": "*"}}))
+        reach = {t: "*" for t in self.reach if t != self.root_id}
+        # `web` reads its legs' routes and serves /file/ AS ITSELF: it reaches the
+        # root, its legs and the declared ids; its legs accept their parent.
         (w / "agents/web/agent.yaml").write_text(_dump(
             {"id": "web", "handler_module": "web.tools",
              "parent_id": self.root_id, "port": port,
              "can_call": {**BASE, self.root_id: ROOT_VERBS, "kernel": "*",
-                          memory.MEMORY: "*",
-                          **{t: "*" for t in self.reach if t != self.root_id}}}))
-        # The WS leg — the EVENT face. REST cannot push, so a failed pass (which
-        # announces itself as a `status` event on the agent's own stream) is
-        # invisible without this; see `helpers/host/ws.py`.
-        #
-        # BOTH HALVES, ON THE LEG'S OWN RECORD. An io leg with no `ingress_rule`
-        # is SEALED on every runtime now, and EVERY ws frame — `call`, `watch`,
-        # `emit`, `state_subscribe` — is dispatched AS THIS LEG, not as the web
-        # host that carries it. So the leg needs the rule (or the upgrade answers
-        # and every frame is refused) and a `can_call` naming each id by literal
-        # id or `$token`: `"*"` as a grant-map KEY never matches a target.
+                          "rest": "*", "ws": "*", memory.MEMORY: "*", **reach}}))
+        # The WS leg — the EVENT face. Every ws frame is the LEG: it names each
+        # target by literal id (the probe's declared reach, created under `rest`).
         (w / "agents/web/agents/ws").mkdir(parents=True, exist_ok=True)
         (w / "agents/web/agents/ws/agent.yaml").write_text(_dump(
             {"id": "ws", "handler_module": "web_ws.tools", "parent_id": "web",
              "ingress_rule": "allow_all_ingress",
-             # `state_subscribe` is privileged (never under `*`): the grant
-             # forensics (`memory.watch_store_writers`) read the state stream here.
-             "can_call": {**BASE, self.root_id: [*ROOT_VERBS, "state_subscribe"],
-                          "kernel": "*",
-                          memory.MEMORY: "*",
-                          **{t: "*" for t in self.reach if t != self.root_id}}}))
-        (w / "agents/web/agents/rest/agent.yaml").write_text(_dump(
+             "callable_by": {**BASE, "$parent": "*"},
+             "can_call": {**BASE, self.root_id: ROOT_VERBS, "kernel": "*", "web": "*",
+                          memory.MEMORY: "*", **reach}}))
+        # The REST leg — the test's operator: the root's kernel verbs, every one of
+        # its own children (`$children`), the declared ids.
+        (rest_dir / "agent.yaml").write_text(_dump(
             {"id": "rest", "handler_module": "web_rest.tools", "parent_id": "web",
-             # SEALED BY DEFAULT: an io leg with no rule denies every inbound
-             # call. Swift enforces this on the written tree; rust let the same
-             # record through — a parity difference worth knowing.
              "ingress_rule": "allow_all_ingress",
+             "callable_by": {**BASE, "$parent": "*"},
              "can_call": {**BASE, self.root_id: ROOT_VERBS, "kernel": "*",
-                          memory.MEMORY: "*",
-                          **{t: "*" for t in self.reach if t != self.root_id}}}))
+                          "$children": "*", **reach}}))
         return port
 
     def boot(self) -> "HostKernel":

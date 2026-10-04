@@ -8,11 +8,9 @@ No backend reads a key from the environment: an AI agent's record names
 (`OPENAI_API_KEY`, `VLLM_API_KEY`), and the STORE reads it. One ref per keyed
 plug, bound to the host of that plug's endpoint.
 
-Wiring, explicit on every end, written by the operator before anything runs:
-  * the ROOT holds a HERITABLE egress `{creds: {verbs: [get], for: descendants}}`
-    — every agent under the root may ask, the ones a MODEL creates included;
-  * the store's `callable_by` and each ref's `readers` name `$subtree:<root>`.
-A test kernel is one trust domain; a deployment would name its readers.
+Wiring, explicit on both ends, PER AGENT: an AI agent the harness creates gets
+`can_call: {creds: [get]}` and the store's `callable_by` names it (`helpers/ai.py`).
+Nothing is inherited — no grant reaches an agent it does not name.
 """
 
 from __future__ import annotations
@@ -51,29 +49,22 @@ def env_refs() -> dict[str, tuple[str, str]]:
 
 
 def store_record(root_id: str, refs: dict[str, tuple[str, str]]) -> dict:
-    """The `creds` record: env-backed, one ref per `{ref: (env var, endpoint)}`,
-    readable by the root's whole subtree."""
-    everyone = f"$subtree:{root_id}"
+    """The `creds` record: env-backed, one ref per `{ref: (env var, endpoint)}`.
+    Its `callable_by` starts empty — each AI agent is added as it is created."""
     return {
         "id": CREDS,
         "handler_module": "credential_store.tools",
         "parent_id": root_id,
         "backend": "env",
         "refs": {
-            ref: {"host": endpoint, "env": {"api_key": var}, "readers": [everyone]}
+            ref: {"host": endpoint, "env": {"api_key": var}}
             for ref, (var, endpoint) in refs.items()
         },
-        "callable_by": {everyone: GET},
     }
 
 
-def root_grant() -> dict:
-    """The heritable egress the ROOT holds, so every descendant may read a key."""
-    return {CREDS: {"verbs": GET, "for": "descendants"}}
-
-
 def wire_in_process(root: Any, refs: dict[str, tuple[str, str]]) -> None:
-    """In-process kernel: create `creds` under the root and grant the subtree."""
+    """In-process kernel: create `creds` under the root."""
     ctx = root.ctx
     if CREDS not in ctx.agents:
         rec = store_record(root.id, refs)
@@ -82,6 +73,20 @@ def wire_in_process(root: Any, refs: dict[str, tuple[str, str]]) -> None:
             **{k: v for k, v in rec.items() if k != "parent_id"},
         )
         assert made.get("id") == CREDS, made
-    cc = dict(root._meta.get("can_call") or {})
-    cc.update(root_grant())
-    ctx.update(root.id, can_call=cc)
+
+
+async def grant_reader(root: Any, aid: str) -> None:
+    """Open BOTH halves of `aid` → `creds` for `get`: the agent's `can_call` and the
+    store's `callable_by` — read, add one key, write back (update replaces a field
+    whole). For every AI agent a keyed plug drives; nothing is inherited."""
+    listed = (await root.send([{"target": "kernel", "payload": {"type": "list_agents"}}]))[0]
+    recs = {a.get("id"): a for a in ((listed.get("result") or {}).get("agents") or [])}
+    for holder, field_, other in ((aid, "can_call", CREDS), (CREDS, "callable_by", aid)):
+        grants = dict((recs.get(holder) or {}).get(field_) or {})
+        if grants.get(other) in (GET, "*"):
+            continue
+        grants[other] = GET
+        out = (await root.send([{"target": "kernel", "payload": {
+            "type": "update_agent", "id": holder, field_: grants}}]))[0]["result"]
+        if isinstance(out, dict) and out.get("error"):
+            raise AssertionError(f"grant_reader({aid}): {holder}.{field_} refused: {out}")

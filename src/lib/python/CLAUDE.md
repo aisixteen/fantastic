@@ -433,6 +433,19 @@ they did not register.
   module's `validate_meta`: a required field missing (or an enum value outside
   its set) is refused AT THE WRITE, every missing field named with its hint. One
   truth for the set-up page, the write and the turn.
+- **Streaming parts** (`ai_core/stream_parts.py`, owner 2026-10-04, python first —
+  design `tmp/streaming_parts.md`): the model's output is split as it is written into
+  parts — `text`, `thinking`, `call` (args streaming) — each streamed as `part_start
+  {stream_id, source, kind, name?, target?, to?}` → `part_delta {text}` (batched 50 ms) →
+  `part_end` | `part_abort {reason}`. A call part goes to its addressee's inbox (each of
+  `to`) as an emit, once `<target_id>`/`<to>` has closed; everything else goes where the
+  tokens go (the caller). ANIMATION, never action: nothing dispatches from a part. A call
+  with no `</call>` is NOT a call (`extract_tool_calls` skips it). A receiver stops a
+  generation with the agent's own `stop {stream_id?}` verb (the provider stream closes,
+  open parts abort). A CUT pass leaves a marker row on top of the context, never a half
+  answer: `[stopped by <receiver>]` or `[model stopped generating]`, then the visible text
+  (thinking stripped; `… while thinking` when cut inside a thought), then `[a <tool> call
+  to <target> was not sent]` per call that did not go out.
 - **AI chains end only by the model's call** (`ai_core`): a turn that emits no
   `<call>` is reminded to act (`[no call was dispatched]`) every time; a DEAD turn
   (only thinking, nothing left once `<think>` is stripped) is discarded — its incoming

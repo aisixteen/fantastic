@@ -444,8 +444,7 @@ impl Bundle for OllamaBackendBundle {
         task_id: &TaskId,
         kernel: &Arc<Kernel>,
     ) -> Result<(), BundleError> {
-        verbs::on_cancel(agent_id, &task_id.0.to_string(), kernel).await;
-        Ok(())
+        verbs::on_cancel(agent_id, &task_id.0.to_string(), kernel).await
     }
 }
 

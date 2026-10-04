@@ -162,6 +162,24 @@ async def test_the_body_carries_the_defaults_and_only_what_the_record_set():
     assert "presence_penalty" not in body and "frequency_penalty" not in body
 
 
+async def test_a_cap_that_is_the_whole_window_sends_no_max_tokens():
+    """vLLM counts prompt AND output against one window: `max_tokens` equal to the
+    window is refused (HTTP 400). A turn capped at the window asks for the rest of
+    it — the body carries no `max_tokens`; a side call keeps its own bound."""
+    sink: list = []
+    p = _provider(
+        _transport(_sse(_delta(finish="stop")), sink), max_tokens=262144, window=262144
+    )
+    await _drain(p)  # the turn
+    await _drain(p, max_tokens=2000)  # a fold summary
+    assert "max_tokens" not in sink[0]
+    assert sink[1]["max_tokens"] == 2000
+    sink.clear()
+    q = _provider(_transport(_sse(_delta(finish="stop")), sink), max_tokens=8000, window=262144)
+    await _drain(q)
+    assert sink[0]["max_tokens"] == 8000  # a cap below the window is sent as set
+
+
 async def test_every_system_message_becomes_one_at_index_0():
     msgs = [
         {"role": "system", "content": "A"},

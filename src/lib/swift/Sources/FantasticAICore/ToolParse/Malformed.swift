@@ -45,7 +45,8 @@ struct MalformedCall {
 /// Envelopes that opened as a call and did not parse.
 func malformedCalls(_ text: String) -> [MalformedCall] {
     scanToolEnvelopes(text).compactMap { hit -> MalformedCall? in
-        guard hit.call == nil else { return nil }
+        // An UNTERMINATED block is not malformed — it was cut; the cut marker says so.
+        guard hit.call == nil, hit.terminated else { return nil }
         return MalformedCall(
             error: "call NOT dispatched: \(hit.fault ?? ""). Nothing ran. \(HINT)",
             envelope: String(String.UnicodeScalarView(OPEN)),

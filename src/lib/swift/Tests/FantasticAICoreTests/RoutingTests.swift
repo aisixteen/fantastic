@@ -314,11 +314,11 @@ struct RoutingTests {
         // let this ship broken in python: on 2026-08-06 `malformed_calls` returned
         // the right report for gemma's truncated `create_agent` and the model still
         // received nothing, so the run went on believing its agent existed.
-        // A document opened and never closed: the model wrote a program and the
-        // call ran off the end of the turn.
+        // An element opened and never closed inside a terminated envelope (an
+        // UNTERMINATED envelope is a cut, not a malformed call).
         let broken =
-            #"<call name="send"><target_id>core</target_id><type>write</type>"#
-            + #"<bytes>x = "unclosed"#
+            #"<call name="send"><target_id>kernel</target_id><type>create_agent"#
+            + #"<path>a</path></call>"#
         let script = ProviderScript([[broken], ["ok"]])
         let (kernel, ids, _) = await bootMockKernel(
             config: scriptedConfig(["mock": script]), backendIds: ["mock"])

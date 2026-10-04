@@ -339,6 +339,12 @@ struct VllmProvider {
     /// on the record, no header.
     key: Arc<dyn KeySource>,
     max_tokens: i64,
+    /// The record's `context_window`. A turn whose `max_tokens` reaches it asks
+    /// for "the rest of the window": vLLM counts the prompt AND the output against
+    /// one window, so a cap that is the whole window is refused (HTTP 400). Such a
+    /// turn sends NO max_tokens — vLLM then gives it what the prompt leaves (owner,
+    /// 2026-10-04: the e2e limit is the whole 260k). python `VllmProvider._window`.
+    window: Option<i64>,
     kv_slots: i64,
     kv_overflow: String,
     kv_ttl: f64,
@@ -405,7 +411,9 @@ impl VllmProvider {
         let mut body = Map::new();
         body.insert("model".into(), json!(self.model));
         body.insert("messages".into(), json!(one_system_message(messages)));
-        body.insert("max_tokens".into(), json!(call_max));
+        if side_call || self.window.is_none_or(|w| call_max < w) {
+            body.insert("max_tokens".into(), json!(call_max));
+        } // else: the rest of the window — see `window`
         body.insert("stream".into(), json!(true));
         // the final chunk carries usage (and an EMPTY choices array)
         body.insert("stream_options".into(), json!({"include_usage": true}));
@@ -850,6 +858,10 @@ fn configure(
         model: helpers::required_meta(meta, "model", NAME)?,
         key,
         max_tokens: required_int(meta, "max_tokens")?,
+        window: meta
+            .get("context_window")
+            .and_then(Value::as_i64)
+            .filter(|w| *w > 0),
         kv_slots: required_int(meta, "kv_slots")?,
         kv_overflow: kv_overflow.to_string(),
         kv_ttl: seconds(meta, "kv_ttl", KV_TTL)?,
@@ -1150,8 +1162,7 @@ impl Bundle for VllmBundle {
         task_id: &TaskId,
         kernel: &Arc<Kernel>,
     ) -> Result<(), BundleError> {
-        verbs::on_cancel(agent_id, &task_id.0.to_string(), kernel).await;
-        Ok(())
+        verbs::on_cancel(agent_id, &task_id.0.to_string(), kernel).await
     }
 }
 

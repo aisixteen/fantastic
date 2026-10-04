@@ -45,7 +45,7 @@ from helpers import Limits, connect, drive  # noqa: E402
 # Generous budget: the polyglot set is the HARD subset; a from-scratch
 # parser/solver needs many fix-rerun cycles. Overridable via env as usual.
 GYM_LIMITS = dict(max_turns=45, idle=90.0, no_progress=12)
-from helpers.kernel import open_kernel  # noqa: E402
+from helpers.kernel import open_kernel  # noqa: E402, home
 
 BENCH = E2E.parent / "tmp" / "repos" / "polyglot-benchmark"
 FB, RUNNER = "gym_fb", "gym_runner"
@@ -243,15 +243,15 @@ async def one(ex: Path, lang: str, runtime: str) -> dict:
                            check=False, timeout=600)
 
         for payload in (
-            {"type": "create_agent", "parent_id": root.id, "id": FB,
+            {"type": "create_agent", "parent_id": home(root), "id": FB,
              "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
              "ingress_rule": "allow_all_ingress",
              "callable_by": {"ai": "*", "rest": "*", "web": "*"}},
-            {"type": "create_agent", "parent_id": root.id, "id": "editor",
+            {"type": "create_agent", "parent_id": home(root), "id": "editor",
              "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
              "ingress_rule": "allow_all_ingress",
              "callable_by": {"ai": "*", "rest": "*", "web": "*"}},
-            {"type": "create_agent", "parent_id": root.id, "id": RUNNER,
+            {"type": "create_agent", "parent_id": home(root), "id": RUNNER,
              "handler_module": "exec_bridge.tools", "cwd": os.getcwd(), "inherit_env": ["PATH", "HOME"],
              "ingress_rule": "allow_all_ingress", "allowed": L.allow,
              "callable_by": {"ai": "*", "rest": "*", "web": "*"}},

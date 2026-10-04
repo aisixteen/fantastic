@@ -62,7 +62,7 @@ from helpers import (
     distinct_calls,
     verdict,
 )
-from helpers.kernel import open_kernel
+from helpers.kernel import open_kernel, home
 
 CTX = int(os.environ.get("CTX", "262144"))
 IDLE = float(os.environ.get("IDLE", "240"))
@@ -197,7 +197,7 @@ async def wire_executor_leg(
                     "target": root.id,
                     "payload": {
                         "type": "create_agent",
-                        "parent_id": root.id,
+                        "parent_id": home(root),
                         "handler_module": "exec_bridge.tools",
                         "id": agent_id,
                         "cwd": os.getcwd(),
@@ -418,7 +418,7 @@ async def run(
                     "target": root.id,
                     "payload": {
                         "type": "create_agent",
-                        "parent_id": root.id,
+                        "parent_id": home(root),
                         "handler_module": "file_bridge.tools", "allow": ["."],
                         "id": "kernel_store",
                         # The RUN DIR itself: a program written here lands beside readings/ and in
@@ -453,7 +453,7 @@ async def run(
                     "target": root.id,
                     "payload": {
                         "type": "create_agent",
-                        "parent_id": root.id,
+                        "parent_id": home(root),
                         "handler_module": "file_bridge.tools", "allow": ["."],
                         "id": "readings",
                         "root": "readings",
@@ -479,7 +479,7 @@ async def run(
                     "target": root.id,
                     "payload": {
                         "type": "create_agent",
-                        "parent_id": root.id,
+                        "parent_id": home(root),
                         "handler_module": "user_probe.tools",
                         "id": "user",
                         "answer": "do your best judgement",
@@ -498,7 +498,7 @@ async def run(
                     "target": root.id,
                     "payload": {
                         "type": "create_agent",
-                        "parent_id": root.id,
+                        "parent_id": home(root),
                         "handler_module": "file_bridge.tools", "allow": ["."],
                         "id": "totals",
                         "root": ".",

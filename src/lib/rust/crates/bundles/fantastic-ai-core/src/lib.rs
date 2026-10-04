@@ -46,6 +46,9 @@
 //!   `system_prompt` override replaces the default system block whole.
 //!   `_call_stack` is reserved for the recursion guard, refused BEFORE the FIFO
 //!   lock so a cycle cannot deadlock on it.
+//! - `stop` args `{stream_id:str?}` → `{stopped:bool}` — a receiver of this
+//!   agent's streaming parts stops the generation in flight (the provider stream
+//!   closes, open parts abort, the turn keeps a `[stopped by <caller>]` marker).
 //! - `history` args `{client_id:str?}` → `{messages, client_id}`.
 //! - `recall` args `{client_id:str?, query:str?, limit:int?, before:int?}`.
 //! - `context_status` → the budget posture + last compaction + reaction.
@@ -66,6 +69,17 @@
 //! - `{type:"token", text, source, client_id}` — one per chunk.
 //! - `{type:"done", source, client_id}` — final event.
 //! - `{type:"context", ...}` — the compaction push half (see [`projection`]).
+//! - STREAMING PARTS ([`stream_parts`], owner 2026-10-04): the output split as it
+//!   is written into `text` / `thinking` / `call` parts — `part_start {stream_id,
+//!   source, kind, name?, target?, to?, re?}` (`re`: the message this turn
+//!   answers) → `part_delta {text}` (batched 50 ms) → `part_end {ok?}` (`ok` on a
+//!   call: whether it parsed) | `part_abort {reason}`. A call part goes to its
+//!   addressee's inbox (each of `to`) as an emit once `<target_id>`/`<to>` has
+//!   closed; every other part goes where the tokens go. ANIMATION, never action:
+//!   a call with no `</call>` is not a call, and a CUT pass leaves a marker row
+//!   ([`stream_parts::cut_marker`]), never a half answer. The MESSAGE a call part
+//!   becomes carries its `stream_id` (matched by exact body), and the receiving
+//!   AI's header names it: `[from X · msg N · re M · stream <id>]`.
 //!
 //! ### Reasoning channel
 //!
@@ -96,6 +110,7 @@ pub mod route;
 pub mod schema;
 pub mod state;
 pub mod strategies;
+pub mod stream_parts;
 pub mod think;
 pub mod tool_parse;
 pub mod verbs;

@@ -32,7 +32,9 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
-from helpers import memory
+from helpers.kernel import home
+from helpers import creds, memory
+from helpers.stream import StreamJunction
 from helpers.proxy import Limits, distinct_calls
 
 BASELINE = {"$self": "*", "$parent": "*", "$children": "*"}
@@ -56,6 +58,9 @@ class Connected:
     #: five times and then ended on a turn that fit reads `fired: False` there. A
     #: probe that scores what survived compaction must first prove there WAS one.
     compactions: list[dict] = field(default_factory=list)
+    #: THE STREAM JUNCTION (`helpers/stream.py`) — the agent's streaming parts, as
+    #: drafts settled by end/abort/match. In process only (None over a wire).
+    streams: StreamJunction | None = None
     _tasks: list = field(default_factory=list)
 
     @property
@@ -88,13 +93,15 @@ async def connect(
     L = limits or Limits.from_env(os.environ)
     meta = {
         "type": "create_agent",
-        "parent_id": root.id,
+        "parent_id": home(root),
         "id": agent_id,
         "context_window": L.ctx,
         "num_ctx": L.ctx,
         # ITS MEMORY — the conversation lives in the kernel's `memory` store, named
         # on the record and reachable by an explicit egress (ingress opened below).
-        **memory.ai_memory_meta(can_call),
+        **memory.ai_memory_meta(
+            {**can_call, **({creds.CREDS: creds.GET} if backend.key_ref else {})}
+        ),
         # THE INGRESS HALF. A peer granted `can_call: {ai: [...]}` still cannot
         # reach the AI: the gate is two-sided and a sibling has no baseline edge.
         # A fixture that opens only the egress half builds a wire that carries
@@ -131,6 +138,24 @@ async def connect(
     aid = made["id"]
     # THE STORE'S HALF of the memory wire: its `callable_by` names the agent.
     await memory.open_ingress(root, meta.get("memory_store_id") or memory.MEMORY, aid)
+    # THE KEY'S WIRE, both halves: the AI may `get` from `creds` (above) and `creds`
+    # accepts it — explicit, per agent; nothing is inherited.
+    if backend.key_ref:
+        await memory.open_ingress(root, creds.CREDS, aid)
+    # EVERY EGRESS THE FIXTURE NAMED, BOTH HALVES. The gate is two-sided with no
+    # stamped baseline — the root included: a kernel verb (`list_agents`,
+    # `create_agent`) needs the ROOT's `callable_by` to accept the AI as well. So each
+    # literal id in the AI's `can_call` (`kernel` = the root) opens its ingress.
+    listed = (await root.send([{"target": "kernel", "payload": {"type": "list_agents"}}]))[0]
+    live = {a.get("id") for a in ((listed.get("result") or {}).get("agents") or [])}
+    for key in can_call:
+        if key.startswith("$") or "|" in key:
+            continue
+        target = root.id if key == "kernel" else key
+        # an id the fixture names but nothing created yet opens when it is created
+        if target in (memory.MEMORY, creds.CREDS) or target not in live:
+            continue
+        await memory.open_ingress(root, target, aid)
 
     # TWO-SIDED DENY-ALL. The AI streams its turn to `cli`; cli's baseline
     # `callable_by` accepts only its own subtree and creator, so without this the
@@ -172,6 +197,13 @@ async def connect(
     # the store per request, the store from the variable the run exported.
 
     conn = Connected(id=aid, root=root, proxy=None, limits=L)  # type: ignore[arg-type]
+    # Parts that go to the caller land on the agent's own inbox; a call part lands
+    # on its addressee's. Watch both ends the run can see.
+    if getattr(getattr(root, "ctx", None), "agents", None) is not None:
+        live = root.ctx.agents
+        conn.streams = StreamJunction.watch(
+            root, *[a for a in (aid, stream_to) if a and a in live]
+        )
 
     # THE TRANSCRIPT, from whichever side of the wire we are on. In process the
     # reader WRAPS the provider, which is what gives it the per-turn tripwires
@@ -316,7 +348,7 @@ async def human(
     ais = [ai] if isinstance(ai, str) else list(ai)
     payload = {
         "type": "create_agent",
-        "parent_id": root.id,
+        "parent_id": home(root),
         "handler_module": "user_probe.tools",
         "id": agent_id,
         "answer": answer,
@@ -458,4 +490,7 @@ async def drive(
 
     if capped:
         print(f"\n  ** CAPPED: {capped} · {conn.proxy.n} passes **")
+    if conn.streams is not None:
+        conn.streams.drain()
+        print(f"  streams: {conn.streams.summary()}", flush=True)
     return capped

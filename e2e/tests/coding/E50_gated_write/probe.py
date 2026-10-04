@@ -21,7 +21,7 @@ sys.path.insert(
 from backends import backend as _resolve_backend
 from helpers import Limits, connect, drive, human, verdict
 from helpers.facts_arm import store_rows
-from helpers.kernel import open_kernel
+from helpers.kernel import open_kernel, home
 
 BK = _resolve_backend()
 FB = "gw_fb"
@@ -38,13 +38,13 @@ async def main():
     )
     try:
         for payload in (
-            {"type": "create_agent", "parent_id": root.id, "id": FB,
+            {"type": "create_agent", "parent_id": home(root), "id": FB,
              "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
              "ingress_rule": "allow_all_ingress",
              "callable_by": {"rest": "*", "web": "*"}},
             # The vault ACCEPTS the writer's discovery (reflect) but not its
             # writes; the reviewer may reach it AND may update it.
-            {"type": "create_agent", "parent_id": root.id, "id": "vault",
+            {"type": "create_agent", "parent_id": home(root), "id": "vault",
              "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
              "ingress_rule": "allow_all_ingress",
              "callable_by": {"rest": "*", "web": "*", "ai": ["reflect"], "ai_rev": "*"}},

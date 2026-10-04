@@ -82,6 +82,7 @@ def make_provider(id, kernel):
         model=required_meta(rec, "model", NAME),
         key=key_reader(id, kernel, NAME, required=False),
         max_tokens=_required_int(rec, "max_tokens"),
+        window=rec.get("context_window"),
         kv_slots=_required_int(rec, "kv_slots"),
         kv_overflow=overflow,
         kv_ttl=float(rec.get("kv_ttl") or KV_TTL),

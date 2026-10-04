@@ -1,12 +1,12 @@
 roster:
 - id: kernel_store
   handler_module: file_bridge.tools
-  parent_id: <root.id>
+  parent_id: <home(root)>
   callable_by:
     ai: '*'
 - id: user
   handler_module: user_probe.tools
-  parent_id: <root.id>
+  parent_id: <home(root)>
   can_call:
     ai: '*'
   callable_by:
@@ -15,24 +15,24 @@ roster:
     web: '*'
 - id: yaml_store
   handler_module: file_bridge.tools
-  parent_id: <root.id>
+  parent_id: <home(root)>
   callable_by:
     ai: '*'
 - id: shell
   handler_module: exec_bridge.tools
-  parent_id: <root.id>
+  parent_id: <home(root)>
   callable_by:
     ai: '*'
 - id: probe_web
   handler_module: web.tools
-  parent_id: <root.id>
+  parent_id: <home(root)>
   can_call: '<{gid: [''read_stream''] for gid, *_ in GUARDS}>'
   callable_by:
     ai:
     - reflect
 - id: <gid>
   handler_module: file_bridge.tools
-  parent_id: <root.id>
+  parent_id: <home(root)>
   callable_by:
     ai: '*'
 - id: ai

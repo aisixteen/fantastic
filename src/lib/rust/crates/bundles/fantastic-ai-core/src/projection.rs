@@ -371,11 +371,9 @@ pub async fn derive_reaction(
 /// THE MEMORY VERBS are a file_bridge's MUTATING text verbs (`write`/`edit`/
 /// `append`) — a model persists what it must keep as plain files.
 ///
-/// Pure, so the SHAPES it recognizes can be pinned. The parser rewrite widened
-/// that set on purpose: an UNTERMINATED envelope (nemotron omits the closing tag)
-/// and a verb-in-the-tool-name call (`{"name":"recall","arguments":{"target_id":…}}`)
-/// were both dropped here before, so a model that DID react was read as not having
-/// reacted.
+/// Pure, so the SHAPES it recognizes can be pinned. It reads exactly what
+/// dispatch reads: an UNTERMINATED envelope is no call (owner, 2026-10-04), so it
+/// is no reaction either.
 pub fn reaction_from(self_id: &str, turns: &[Value]) -> Value {
     let mut recalled = false;
     let mut persisted = false;
@@ -419,10 +417,9 @@ mod tests {
     }
 
     #[test]
-    fn the_reaction_reader_sees_an_unterminated_call() {
-        // AN UNTERMINATED ENVELOPE IS AN ACTION. It is the last thing in the
-        // completion, so there is nothing after it to misread — dispatch runs
-        // it, and the reaction reader must see the same thing dispatch saw.
+    fn the_reaction_reader_sees_what_dispatch_saw() {
+        // AN UNTERMINATED ENVELOPE IS NOT A CALL (owner, 2026-10-04): dispatch
+        // skips it, and the reaction reader must see the same thing dispatch saw.
         let turns = [
             turn(r#"<call name="send"><target_id>me</target_id><type>recall</type>"#),
             turn(
@@ -430,8 +427,11 @@ mod tests {
             ),
         ];
         let r = reaction_from("me", &turns);
-        assert_eq!(r["recalled"], true, "unterminated recall must count: {r}");
-        assert_eq!(r["recall_count"], 1);
+        assert_eq!(
+            r["recalled"], false,
+            "an unterminated recall is no call: {r}"
+        );
+        assert_eq!(r["recall_count"], 0);
         assert_eq!(r["persisted"], true, "the write must count: {r}");
     }
 

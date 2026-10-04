@@ -21,7 +21,7 @@ from pathlib import Path
 
 from helpers import Limits, connect, ctx_score, drive, human, memory
 from helpers.ai import Connected  # noqa: F401  (re-exported for probes)
-from helpers.kernel import WRAPS
+from helpers.kernel import WRAPS, home
 
 # THE SQUEEZE. The model itself has 256k; this is the window the probes hand the agent so
 # folds, strips and recalls fire inside a run. 12k (2026-09-05) starved the multi-root
@@ -185,13 +185,13 @@ async def fixture(root, fb: str, *, arms=ARMS, extra_callable: tuple[str, ...] =
     ids = [a for a, _, _ in arms] + list(extra_callable)
     for payload in (
         {
-            "type": "create_agent", "parent_id": root.id, "id": fb,
+            "type": "create_agent", "parent_id": home(root), "id": fb,
             "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
             "ingress_rule": "allow_all_ingress",
             "callable_by": {**{i: "*" for i in ids}, "rest": "*", "web": "*"},
         },
         {
-            "type": "create_agent", "parent_id": root.id, "id": "notes",
+            "type": "create_agent", "parent_id": home(root), "id": "notes",
             "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
             "ingress_rule": "allow_all_ingress",
             "callable_by": {**{i: "*" for i in ids}, "rest": "*", "web": "*"},

@@ -65,10 +65,12 @@ from ai_core.strategies.base import NOTICE_ENVELOPE_RESERVE
 # 2026-08-06; `tool_parse`'s own docstring had already been corrected, and one of
 # two stale copies of a fact is worse than none.) `_derive_reaction` is the other
 # consumer, scanning the durable transcript for a recall/persist reaction.
+from ai_core.stream_parts import PartSplitter, cut_marker
 from ai_core.tool_parse import (
     call_spans,
     extract_tool_calls,
     malformed_calls,
+    terminated_calls,
     render_reply,
 )
 from kernel import current_origin, current_task
@@ -212,14 +214,16 @@ def _take_current_for_cancel(self_id: str, task_id: str) -> dict | None:
 def _redact_text(d: dict | None) -> dict | None:
     """Return a copy of a current/queue entry with text-bearing fields
     stripped. Used to surface the existence of someone else's in-flight
-    work to a caller without leaking content. `task_id` is bookkeeping, not
-    status — it stays out of the snapshot (the live table is `ps`'s job)."""
+    work to a caller without leaking content. `task_id`, the streaming `parts`
+    (the live splitter + publisher) and `stopped_by` are bookkeeping, not status —
+    they stay out of the snapshot (the live table is `ps`'s job)."""
     if d is None:
         return None
     return {
         k: v
         for k, v in d.items()
-        if k not in ("text", "text_so_far", "last_tool", "task_id")
+        if k
+        not in ("text", "text_so_far", "last_tool", "task_id", "parts", "stopped_by")
     }
 
 
@@ -1412,6 +1416,7 @@ async def _route_reply(
     *,
     message_id: str | None = None,
     dead_turn: bool = False,
+    call_streams: list[tuple[str, str]] | None = None,
 ):
     """Honour where this pass's output goes. Runs DETACHED, after the lock is
     released.
@@ -1438,7 +1443,16 @@ async def _route_reply(
     with a `timeout` arg in the envelope (validated by the kernel; a bad value
     settles that call as a refusal it can read).
     """
-    calls = extract_tool_calls(text or "")
+    # THE MATCH (owner, 2026-10-04): a dispatched message carries the `stream_id` of
+    # the part it was streamed as, so a consumer settles its draft on it. Matched by
+    # the call's exact body, in order — one reading of the text, not two.
+    streams = list(call_streams or [])
+    calls = []
+    for call, body in terminated_calls(text or ""):
+        i = next((n for n, (_sid, b) in enumerate(streams) if b == body), None)
+        if i is not None:
+            call = {**call, "stream_id": streams.pop(i)[0]}
+        calls.append(call)
     # (dest | None, target, verb, item_index | None, body | None) per EMITTED
     # thing, in emission order. `item_index` links a dispatched call to its
     # outcome; `body` is pre-decided for the paths that never dispatch.
@@ -1485,6 +1499,8 @@ async def _route_reply(
                 payload = dict(a.get("payload") or {})
                 payload["to"] = recipients
                 payload["msg"] = message_id
+                if call.get("stream_id") and payload.get("type") == "send":
+                    payload["stream_id"] = call["stream_id"]
                 if "re" in a:
                     payload["re"] = a["re"]
                 expanded.append(
@@ -1498,6 +1514,10 @@ async def _route_reply(
             ):
                 payload = dict(a["payload"])
                 payload.setdefault("msg", message_id)
+                # A MESSAGE carries the stream it was previewed as (only a message:
+                # a verb call's payload stays exactly what the model wrote).
+                if call.get("stream_id"):
+                    payload["stream_id"] = call["stream_id"]
                 if "re" in a:
                     payload["re"] = a["re"]
                 call = {
@@ -1903,6 +1923,67 @@ async def _assemble(
 
 
 # ─── streaming + native tool-calls (Phase 2) ────────────────────
+
+
+class _PartPublisher:
+    """Routes part events (`stream_parts`) to their addressees, deltas BATCHED so a
+    token-rate stream does not become a token-rate event stream.
+
+    A call part with an addressee goes to that inbox (each of `to`), as an emit — gated
+    like any emit on another agent; a refused one is dropped. Prose, thought and calls
+    without an addressee (done, await, inquiry_answer) go where the tokens go: the
+    caller (`_to_caller`)."""
+
+    BATCH_SECONDS = 0.05
+
+    def __init__(self, kernel, self_id: str, client_id: str, re: int | None = None):
+        self.kernel, self.self_id, self.client_id = kernel, self_id, client_id
+        # THE ANCHOR: the message this turn answers — where a consumer places the
+        # draft in its own (possibly folded) history.
+        self.re = re
+        self._pending: dict[str, tuple[dict, str]] = {}
+        self._last: dict[str, float] = {}
+
+    async def _send(self, part: dict, ev: dict) -> None:
+        ev = {**ev, "stream_id": part["stream_id"], "source": self.self_id}
+        addrs = part.get("to") or ([part["target"]] if part.get("target") else [])
+        if part["kind"] != "call" or not addrs:
+            await _to_caller(self.kernel, self.self_id, self.client_id, ev)
+            return
+        for addr in addrs:
+            await self.kernel.emit(self.self_id if addr == "self" else addr, ev)
+
+    async def _flush(self, sid: str) -> None:
+        held = self._pending.pop(sid, None)
+        if held is not None:
+            part, text = held
+            self._last[sid] = time.monotonic()
+            await self._send(part, {"type": "part_delta", "text": text})
+
+    async def push(self, events: list[tuple], final: bool = False) -> None:
+        for ev in events:
+            kind, part = ev[0], ev[1]
+            sid = part["stream_id"]
+            if kind == "start":
+                head = {k: v for k, v in part.items() if k != "stream_id"}
+                if self.re is not None:
+                    head["re"] = self.re
+                await self._send(part, {"type": "part_start", **head})
+                self._last[sid] = time.monotonic()
+            elif kind == "delta":
+                prev = self._pending.get(sid)
+                self._pending[sid] = (part, (prev[1] if prev else "") + ev[2])
+                if time.monotonic() - self._last.get(sid, 0) >= self.BATCH_SECONDS:
+                    await self._flush(sid)
+            elif kind == "end":
+                await self._flush(sid)
+                await self._send(part, {"type": "part_end", **ev[2]})
+            elif kind == "abort":
+                self._pending.pop(sid, None)
+                await self._send(part, {"type": "part_abort", "reason": ev[2]})
+        if final:
+            for sid in list(self._pending):
+                await self._flush(sid)
 
 
 async def _to_caller(kernel, self_id: str, client_id: str, ev: dict) -> None:
@@ -2322,24 +2403,39 @@ async def _run(
         provider.last_prompt_tokens = None
     except AttributeError:
         pass
-    async for chunk in provider.chat(model_messages):
-        if first_chunk:
-            # First text chunk — phase transitions thinking → streaming.
-            await _emit_status(kernel, self_id, client_id, "streaming")
-            first_chunk = False
-        content_parts.append(chunk)
-        # Accumulate so the `status` verb's snapshot includes everything streamed
-        # so far, letting the UI rebuild a mid-stream view on page reload.
-        if self_id in _current:
-            _current[self_id]["text_so_far"] = (
-                _current[self_id].get("text_so_far", "") + chunk
+    # STREAMING PARTS (owner, 2026-10-04): the same chunks, split into parts as they
+    # are written — animation for the addressee, never action (`stream_parts`).
+    splitter = PartSplitter(self_id)
+    parts_out = _PartPublisher(kernel, self_id, client_id, re=current_task())
+    if self_id in _current:
+        _current[self_id]["parts"] = (splitter, parts_out)
+    try:
+        async for chunk in provider.chat(model_messages):
+            if first_chunk:
+                # First text chunk — phase transitions thinking → streaming.
+                await _emit_status(kernel, self_id, client_id, "streaming")
+                first_chunk = False
+            content_parts.append(chunk)
+            # Accumulate so the `status` verb's snapshot includes everything streamed
+            # so far, letting the UI rebuild a mid-stream view on page reload.
+            if self_id in _current:
+                _current[self_id]["text_so_far"] = (
+                    _current[self_id].get("text_so_far", "") + chunk
+                )
+            await _to_caller(
+                kernel,
+                self_id,
+                client_id,
+                {"type": "token", "text": chunk, "source": self_id},
             )
-        await _to_caller(
-            kernel,
-            self_id,
-            client_id,
-            {"type": "token", "text": chunk, "source": self_id},
-        )
+            await parts_out.push(splitter.feed(chunk))
+    except Exception:
+        await parts_out.push(splitter.stop("error"), final=True)
+        raise
+    # A block still open when the model stopped generating is CUT: an open call is
+    # never dispatched (`extract_tool_calls` skips it) and the turn's row says so.
+    cut_call = splitter.open_call
+    await parts_out.push(splitter.finish(), final=True)
     last_text = "".join(content_parts)
     reported = getattr(provider, "last_prompt_tokens", None)
     if isinstance(reported, int) and reported > 0:
@@ -2403,10 +2499,16 @@ async def _run(
             "parent": in_parent,
         },
         # STRIPPED — the deliberation is not part of the conversation. The raw
-        # text (with thinking) already went to `_route_reply` for parsing.
+        # text (with thinking) already went to `_route_reply` for parsing. A pass
+        # the model stopped with a block open leaves the CUT MARKER instead, on top
+        # of the context (owner, 2026-10-04).
         {
             "role": "assistant",
-            "content": without_thinking(last_text),
+            "content": (
+                cut_marker(last_text, "model stopped generating", [cut_call])
+                if cut_call is not None
+                else without_thinking(last_text)
+            ),
             "id": message_id,
             "parent": in_id,
         },
@@ -2417,6 +2519,9 @@ async def _run(
         "final": last_text,
         "client_id": client_id,
         "message_id": message_id,
+        # every closed call part (stream_id, body) — `_route_reply` stamps each
+        # dispatched message with the stream it was previewed as
+        "call_streams": list(splitter.closed_calls),
     }
 
 
@@ -2618,6 +2723,10 @@ def _make_send(cfg: Backend):
                 parts.append(f"msg {payload.get('msg')}")
             if payload.get("re") is not None:
                 parts.append(f"re {payload.get('re')}")
+            # the stream this message was previewed as — what an AI consumer that
+            # watched it stream matches its draft to (owner, 2026-10-04)
+            if payload.get("stream_id") is not None:
+                parts.append(f"stream {payload.get('stream_id')}")
             text = f"[{' · '.join(parts)}]\n{text}"
         send_id = _new_send_id()
         entry = {
@@ -2715,6 +2824,8 @@ def _make_send(cfg: Backend):
         # immediately: awaiting a self-addressed send here would block on a lock we
         # just held and deadlock until `SEND_TIMEOUT`. The task row makes the chain
         # visible in `ps` and reachable by `cancel`.
+        # The closed call parts feed routing only — never the caller's reply.
+        call_streams = reply.pop("call_streams", []) if isinstance(reply, dict) else []
         if isinstance(reply, dict) and not reply.get("error"):
             coro = _route_reply(
                 id,
@@ -2732,6 +2843,7 @@ def _make_send(cfg: Backend):
                 text,
                 message_id=reply.get("message_id"),
                 dead_turn=bool(reply.get("dead_turn")),
+                call_streams=call_streams,
             )
             kernel.ctx.spawn_task(id, "route_reply", coro)
         return reply
@@ -2820,6 +2932,42 @@ CANCEL_DOC = (
 )
 
 
+async def _rows(id, payload, kernel):
+    """args: after:int? (a row id — the page starts after it), limit:int?. A VIEW of this agent's conversation exactly as the agent HOLDS it in memory — its loaded head, in the order it lived it; no store read, no transform, so what a UI draws is what the agent has. Before the agent has loaded its head (a fresh boot, before its first turn) it holds nothing: {rows:[], loaded:false}. Returns {rows, next, total, loaded}."""
+    head = _mem(kernel)["heads"].get(id)
+    if head is None:
+        return {"rows": [], "next": None, "total": 0, "loaded": False}
+    rows = [dict(r) for r in head]
+    after = payload.get("after")
+    if after is not None:
+        at = next((n for n, r in enumerate(rows) if r.get("id") == after), None)
+        rows = rows[at + 1 :] if at is not None else []
+    limit = payload.get("limit")
+    page = rows[:limit] if isinstance(limit, int) and limit > 0 else rows
+    more = len(page) < len(rows)
+    return {
+        "rows": page,
+        "next": page[-1].get("id") if more and page else None,
+        "total": len(head),
+        "loaded": True,
+    }
+
+
+async def _stop(id, payload, kernel):
+    """args: stream_id:str? (a part of the generation in flight). STOP this agent's in-flight generation — how a receiver of its streaming parts stops it: the provider stream closes, open parts abort, the turn keeps a `[stopped by <you>]` marker. Returns {stopped:bool}."""
+    cur = _current.get(id)
+    if cur is None or cur.get("task_id") is None:
+        return {"stopped": False}
+    sid = payload.get("stream_id")
+    if sid is not None:
+        parts = cur.get("parts")
+        if parts is None or sid not in {p["stream_id"] for p in parts[0].parts}:
+            return {"stopped": False}
+    cur["stopped_by"] = current_origin() or "operator"
+    await kernel.ctx.cancel_task(cur["task_id"])
+    return {"stopped": True}
+
+
 async def on_cancel(id, task_id, kernel):
     """The `on_cancel` bundle hook, SHARED by every backend (each re-exports this
     module-level name, so the substrate discovers it exactly like `on_delete`).
@@ -2838,6 +2986,39 @@ async def on_cancel(id, task_id, kernel):
     if entry is None:
         return
     client_id = entry.get("client_id", DEFAULT_CLIENT_ID)
+    # THE CUT (owner, 2026-10-04): every open part ABORTS for its watchers, and the
+    # turn leaves the incoming message + a marker row — never a half answer — so the
+    # model's next turn knows what it was asked, what it had visibly said, and who
+    # stopped it. Nothing of a stopped pass was dispatched.
+    parts = entry.get("parts")
+    unsent: list[dict] = []
+    if parts is not None:
+        splitter, publisher = parts
+        unsent = [p for p in splitter.parts if p["kind"] == "call"]
+        await publisher.push(splitter.stop("stopped"), final=True)
+    if entry.get("text") is not None:
+        who = entry.get("stopped_by") or "cancel"
+        in_id, in_parent = _row_ids_for_incoming(id, entry["text"], kernel)
+        await _save_history(
+            id,
+            kernel,
+            [
+                {
+                    "role": "user",
+                    "content": entry["text"],
+                    "id": in_id,
+                    "parent": in_parent,
+                },
+                {
+                    "role": "assistant",
+                    "content": cut_marker(
+                        entry.get("text_so_far", ""), f"stopped by {who}", unsent
+                    ),
+                    "id": _mint_row_id(id, kernel),
+                    "parent": in_id,
+                },
+            ],
+        )
     await _emit_status(
         kernel,
         id,
@@ -3511,6 +3692,8 @@ def build(
     verbs: dict[str, Callable] = {
         "reflect": _make_reflect(cfg),
         "send": _make_send(cfg),
+        "stop": _stop,
+        "rows": _rows,
         # ONE INQUIRY VERB, WHOEVER RECEIVES IT. A person answers `question` and so does
         # a peer AI: the asker writes the same call either way and reads the
         # answer off the same reply. Without this an AI asked a question got

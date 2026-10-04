@@ -384,6 +384,12 @@ struct VllmProvider: AIProvider {
     let key: KeyReader
     /// The record's output budget — bounds a turn; a side call brings its own.
     let maxTokens: Int
+    /// The record's `context_window`. A turn whose `max_tokens` reaches it asks for
+    /// "the rest of the window": vLLM counts the prompt AND the output against one
+    /// window, so a cap that is the whole window is refused (HTTP 400). Such a turn
+    /// sends NO max_tokens — vLLM then gives it what the prompt leaves (owner,
+    /// 2026-10-04: the e2e limit is the whole 260k). python `VllmProvider._window`.
+    var window: Int? = nil
     let kvSlots: Int
     let kvOverflow: String
     let kvTtl: Double
@@ -441,6 +447,9 @@ struct VllmProvider: AIProvider {
             // the final chunk carries usage (and an EMPTY choices array)
             "stream_options": .object(["include_usage": .bool(true)]),
         ]
+        if !sideCall, let w = window, callMax >= w {
+            body.removeValue(forKey: "max_tokens")  // the rest of the window — see `window`
+        }
         for key in ["temperature", "top_p", "top_k", "reasoning_effort"] + PASSTHROUGH {
             if let v = sampling[key], v != .null { body[key] = v }
         }
@@ -626,7 +635,7 @@ public final class VllmBundle: AgentBundle, @unchecked Sendable {
     }
 
     public func onCancel(agentId: AgentId, taskId: TaskId, kernel: Kernel) async throws {
-        await core.onCancel(agentId: agentId, taskId: taskId, kernel: kernel)
+        try await core.onCancel(agentId: agentId, taskId: taskId, kernel: kernel)
     }
 
     /// The shared delete hook, plus this backend's own table: the last-budget
@@ -701,6 +710,7 @@ public final class VllmBundle: AgentBundle, @unchecked Sendable {
             model: model,
             key: key,
             maxTokens: maxTokens,
+            window: agent.metaValue(forKey: "context_window")?.asInt.map(Int.init).flatMap { $0 > 0 ? $0 : nil },
             kvSlots: kvSlots,
             kvOverflow: overflow,
             kvTtl: try seconds(agent, "kv_ttl", KV_TTL),

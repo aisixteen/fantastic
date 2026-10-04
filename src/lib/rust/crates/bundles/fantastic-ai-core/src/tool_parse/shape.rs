@@ -18,6 +18,10 @@ pub struct ToolCall {
     /// The call's arguments: top-level routing (`target_id`, `reply_to`) plus
     /// the `payload` that rides to the target.
     pub arguments: Map<String, Value>,
+    /// The stream part this call was previewed as (python `call["stream_id"]`) —
+    /// stamped by routing ([`crate::route`]) when the call's exact body matches a
+    /// closed call part; the parser never sets it.
+    pub stream_id: Option<String>,
 }
 
 impl ToolCall {
@@ -27,6 +31,7 @@ impl ToolCall {
             id: mint_call_id(),
             name: name.into(),
             arguments,
+            stream_id: None,
         }
     }
 

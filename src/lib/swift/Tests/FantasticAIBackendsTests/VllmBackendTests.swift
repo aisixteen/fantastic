@@ -98,6 +98,27 @@ struct VllmBackendTests {
 
     // MARK: the stream
 
+    /// python `test_a_cap_that_is_the_whole_window_sends_no_max_tokens`: vLLM counts
+    /// prompt AND output against one window, so a turn capped at the window asks for
+    /// the rest of it — no `max_tokens`; a side call keeps its own bound; a cap below
+    /// the window is sent as set.
+    @Test func aCapThatIsTheWholeWindowSendsNoMaxTokens() async throws {
+        let stub = StubHTTP([
+            sse([delta(finish: "stop")]), sse([delta(finish: "stop")]), sse([delta(finish: "stop")]),
+        ])
+        defer { stub.stop() }
+        var p = provider(endpoint(port: stub.port), maxTokens: 262144)
+        p.window = 262144
+        _ = await drain(p)  // the turn
+        _ = await drain(p, maxTokens: 2000)  // a fold summary
+        var q = provider(endpoint(port: stub.port))
+        q.window = 262144
+        _ = await drain(q)  // a cap below the window
+        #expect(try body(stub, 0).asObject?["max_tokens"] == nil)
+        #expect(try body(stub, 1)["max_tokens"] == 2000)
+        #expect(try body(stub, 2)["max_tokens"] == 8000)
+    }
+
     @Test func theThoughtChannelIsWrappedOnceNotDropped() async {
         let stub = StubHTTP([
             sse([

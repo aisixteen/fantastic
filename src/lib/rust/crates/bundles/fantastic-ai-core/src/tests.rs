@@ -233,8 +233,7 @@ impl Bundle for MockBundle {
         task_id: &fantastic_kernel::TaskId,
         kernel: &Arc<Kernel>,
     ) -> Result<(), BundleError> {
-        verbs::on_cancel(agent_id, &task_id.0.to_string(), kernel).await;
-        Ok(())
+        verbs::on_cancel(agent_id, &task_id.0.to_string(), kernel).await
     }
 
     /// Every backend's delete hook: the shared teardown.
@@ -838,8 +837,9 @@ async fn status_current_shape_matches_python() {
     let _ = join.await.unwrap();
 }
 
-/// B3.4 — the `send` reply names the row this turn produced. python `_run`
-/// returns `{response, final, client_id, message_id}`; rust minted the id (routing
+/// B3.4 — the `send` reply names the row this turn produced. python `_send`
+/// returns `{response, final, client_id, message_id}` (the closed call parts
+/// feed routing only, never the reply); rust minted the id (routing
 /// needs it to parent the next turn) and then dropped it from the reply, so a
 /// caller could not name the row its own send wrote.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1765,8 +1765,8 @@ async fn an_unparseable_call_reaches_the_model_as_an_error() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "rt_broken").await;
     let broken = concat!(
-        r#"<call name="send"><target_id>kernel</target_id><type>create_agent</type>"#,
-        r#"<parent_id>kernel<code>x = "unclosed</code></call>"#
+        r#"<call name="send"><target_id>kernel</target_id><type>create_agent"#,
+        "<path>a</path></call>"
     );
     let s = script(&backend, vec![pass(broken), pass("ok")], Duration::ZERO);
     let _ = kernel
@@ -1794,7 +1794,8 @@ async fn a_broken_call_beside_a_good_one_is_still_reported() {
     let text = format!(
         "{}{}",
         call_envelope("kernel_state", json!({"type": "list_agents"}), Some("null")),
-        r#"<call name="send"><target_id>n</target_id><code>oops"#
+        // TERMINATED: a block with no `</call>` is a cut, not a malformed call.
+        r#"<call name="send"><target_id>n</target_id><code>oops</call>"#
     );
     let s = script(&backend, vec![pass(text), pass("ok")], Duration::ZERO);
     let _ = kernel
@@ -2509,6 +2510,7 @@ async fn every_model_call_carries_the_layer_default_timeout() {
         crate::constants::DEFAULT_CONTEXT_WINDOW,
         None,
         false,
+        Vec::new(),
     )
     .await;
     assert!(
@@ -2565,6 +2567,7 @@ async fn a_malformed_timeout_arg_settles_the_kernels_refusal() {
         crate::constants::DEFAULT_CONTEXT_WINDOW,
         None,
         false,
+        Vec::new(),
     )
     .await;
     assert!(
@@ -3152,6 +3155,7 @@ async fn a_batch_of_calls_without_reply_to_all_come_back() {
         crate::constants::DEFAULT_CONTEXT_WINDOW,
         None,
         false,
+        Vec::new(),
     )
     .await;
     assert!(
@@ -4098,6 +4102,8 @@ fn reflect_verbs_match_python_first_doc_lines() {
         vec![
             "reflect",
             "send",
+            "stop",
+            "rows",
             "inquiry",
             "history",
             "status",
@@ -5551,3 +5557,7 @@ async fn history_by_fold_parses_the_id_and_refuses_in_pythons_words() {
 /// The record's `system_prompt` — its own file, over this harness.
 #[path = "tests_system_prompt.rs"]
 mod system_prompt;
+
+/// Streaming parts (python `test_stream_parts.py`), on this harness.
+#[path = "tests_stream_parts.rs"]
+mod stream_parts;

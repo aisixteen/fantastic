@@ -160,7 +160,7 @@ final class MockBundle: AgentBundle, @unchecked Sendable {
 
     /// The shared cancel hook — every real backend forwards exactly like this.
     func onCancel(agentId: AgentId, taskId: TaskId, kernel: Kernel) async throws {
-        await core.onCancel(agentId: agentId, taskId: taskId, kernel: kernel)
+        try await core.onCancel(agentId: agentId, taskId: taskId, kernel: kernel)
     }
 
     /// The shared delete hook — forwarded the same way.

@@ -79,6 +79,7 @@ fn provider(endpoint: &str) -> VllmProvider {
         model: "qwen3.8-27b".to_string(),
         key: Arc::new(NoKey),
         max_tokens: 8000,
+        window: None,
         kv_slots: 7,
         kv_overflow: "evict".to_string(),
         kv_ttl: KV_TTL,
@@ -249,6 +250,28 @@ fn a_timeout_is_printed_like_python_g() {
 }
 
 // ─── the request ────────────────────────────────────────────────────────────
+
+/// python `test_a_cap_that_is_the_whole_window_sends_no_max_tokens`: vLLM counts
+/// prompt AND output against one window, so a turn capped at the window asks for
+/// the rest of it — no `max_tokens`; a side call keeps its own bound; a cap below
+/// the window is sent as set.
+#[tokio::test]
+async fn a_cap_that_is_the_whole_window_sends_no_max_tokens() {
+    let (server, endpoint) = server_with(sse(&[delta(Some("stop"), json!({}))], true), 200).await;
+    let mut p = provider(&endpoint);
+    p.max_tokens = 262144;
+    p.window = Some(262144);
+    drain(&p, &hi(), None).await.expect("turn");
+    drain(&p, &hi(), Some(2000)).await.expect("side call");
+    let sent = bodies(&server).await;
+    assert!(sent[0].get("max_tokens").is_none(), "{:?}", sent[0]);
+    assert_eq!(sent[1]["max_tokens"], json!(2000));
+    let (server2, endpoint2) = server_with(sse(&[delta(Some("stop"), json!({}))], true), 200).await;
+    let mut q = provider(&endpoint2);
+    q.window = Some(262144);
+    drain(&q, &hi(), None).await.expect("turn");
+    assert_eq!(bodies(&server2).await[0]["max_tokens"], json!(8000));
+}
 
 #[tokio::test]
 async fn the_body_carries_the_defaults_and_only_what_the_record_set() {

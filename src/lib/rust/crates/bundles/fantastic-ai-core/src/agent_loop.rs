@@ -12,12 +12,13 @@
 
 use crate::assembly::assemble_messages;
 use crate::context::estimate_tokens;
-use crate::events::{emit_status, to_caller};
+use crate::events::{emit_status, to_caller, PartPublisher, PassParts};
 use crate::memory::{save_history, MemoryStoreError};
 use crate::provider::{Provider, ProviderError, ProviderEvent};
 use crate::state::BackendState;
+use crate::stream_parts::{cut_marker, PartSplitter};
 use crate::think::without_thinking;
-use fantastic_kernel::{AgentId, Kernel};
+use fantastic_kernel::{current_task, AgentId, Kernel, TaskId};
 use futures_util::StreamExt;
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
@@ -65,6 +66,10 @@ pub enum Generation {
         text: String,
         /// The assistant row this turn was stored as.
         message_id: i64,
+        /// Every closed call part, `(stream_id, body)` — routing stamps each
+        /// dispatched message with the stream it was previewed as (python's
+        /// `call_streams`).
+        call_streams: Vec<(String, String)>,
     },
     /// A DEAD turn: nothing left once the thinking is stripped. DISCARDED —
     /// never stored, never an answer — and routed like any turn that dispatched
@@ -179,14 +184,42 @@ pub async fn run_generation(
     // A FRESH reading per pass: a provider that reports nothing this time must not
     // leave last pass's number standing.
     provider.clear_prompt_tokens();
-    let mut stream = provider
-        .chat(&model_view, None)
-        .await
-        .map_err(GenFailure::Provider)?;
+    // STREAMING PARTS (owner, 2026-10-04): the same chunks, split into parts as
+    // they are written — animation for the addressee, never action
+    // ([`crate::stream_parts`]). Kept on the in-flight entry, where `stop` and
+    // `on_cancel` find them. `part_start` carries `re` — the message this turn
+    // answers (the kernel task this dispatch runs as).
+    let parts = Arc::new(tokio::sync::Mutex::new(PassParts {
+        splitter: PartSplitter::new(self_id.as_str()),
+        publisher: PartPublisher::new(
+            Arc::clone(kernel),
+            self_id.clone(),
+            client_id.to_string(),
+            current_task().map(TaskId::get),
+        ),
+    }));
+    if let Some(c) = state
+        .current_meta
+        .lock()
+        .expect("current poisoned")
+        .as_mut()
+    {
+        c.parts = Some(Arc::clone(&parts));
+    }
+    // A provider failure ABORTS every open part, then propagates (python's
+    // `except Exception: push(stop("error")); raise`).
+    let mut stream = match provider.chat(&model_view, None).await {
+        Ok(stream) => stream,
+        Err(e) => return Err(abort_parts(&parts, e).await),
+    };
     let mut content_parts: Vec<String> = Vec::new();
     let mut first_text_chunk = true;
     while let Some(ev) = stream.next().await {
-        match ev.map_err(GenFailure::Provider)? {
+        let ev = match ev {
+            Ok(ev) => ev,
+            Err(e) => return Err(abort_parts(&parts, e).await),
+        };
+        match ev {
             ProviderEvent::Token(t) => {
                 if first_text_chunk {
                     first_text_chunk = false;
@@ -205,10 +238,25 @@ pub async fn run_generation(
                     json!({"type": "token", "text": t, "source": self_id.as_str()}),
                 )
                 .await;
+                {
+                    let mut p = parts.lock().await;
+                    let evs = p.splitter.feed(&t);
+                    p.publisher.push(evs, false).await;
+                }
                 content_parts.push(t);
             }
         }
     }
+    // A block still open when the model stopped generating is CUT: an open call
+    // is never dispatched (`extract_tool_calls` skips it) and the turn's row says
+    // so.
+    let (cut_call, call_streams) = {
+        let mut p = parts.lock().await;
+        let cut = p.splitter.open_call().cloned();
+        let evs = p.splitter.finish();
+        p.publisher.push(evs, true).await;
+        (cut, p.splitter.closed_calls.clone())
+    };
     let last_text = content_parts.join("");
     // THE ENDPOINT'S OWN COUNT calibrates our chars/4 estimate (python `_calib`).
     if let Some(reported) = provider.report().prompt_tokens.filter(|n| *n > 0) {
@@ -277,19 +325,42 @@ pub async fn run_generation(
         // receives; only durable history loses the `<think>` spans, because a
         // reasoning model re-fed its own prior deliberation drowns in it
         // (gemma4:12b re-sent a 3,800-char turn-1 thought every later prompt,
-        // 2026-08-02).
-        json!({"role": "assistant", "content": without_thinking(&last_text), "id": message_id, "parent": in_id}),
+        // 2026-08-02). A pass the model stopped with a block open leaves the CUT
+        // MARKER instead, on top of the context (owner, 2026-10-04).
+        json!({
+            "role": "assistant",
+            "content": match &cut_call {
+                Some(call) => cut_marker(
+                    &last_text,
+                    "model stopped generating",
+                    std::slice::from_ref(call),
+                ),
+                None => without_thinking(&last_text),
+            },
+            "id": message_id,
+            "parent": in_id,
+        }),
     ];
     save_history(self_id, kernel, &new_turns).await?;
     Ok(Generation::Answered {
         text: last_text,
         message_id,
+        call_streams,
     })
+}
+
+/// Every open part ABORTS for its watchers (`"error"`), and the provider failure
+/// is handed back to propagate.
+async fn abort_parts(parts: &tokio::sync::Mutex<PassParts>, e: ProviderError) -> GenFailure {
+    let mut p = parts.lock().await;
+    let evs = p.splitter.stop("error");
+    p.publisher.push(evs, true).await;
+    GenFailure::Provider(e)
 }
 
 /// The turn a delivered reply answers: `↑N` on the FIRST tag of the incoming
 /// text — python `_TAG_LINKS`. Anything else is a ROOT.
-fn incoming_parent(text: &str) -> Option<i64> {
+pub(crate) fn incoming_parent(text: &str) -> Option<i64> {
     let rest = text.strip_prefix("[reply to ")?;
     let head = &rest[..rest.find(']')?];
     let (_, after) = head.split_once('↑')?;

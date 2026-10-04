@@ -70,7 +70,7 @@ public final class FoundationModelsBackendBundle: AgentBundle, @unchecked Sendab
     /// The kernel is killing a task of this agent: close the turn out for the
     /// caller; the cancellation itself tears the on-device stream down.
     public func onCancel(agentId: AgentId, taskId: TaskId, kernel: Kernel) async throws {
-        await core.onCancel(agentId: agentId, taskId: taskId, kernel: kernel)
+        try await core.onCancel(agentId: agentId, taskId: taskId, kernel: kernel)
     }
 
     /// The shared delete hook: the deleted id's AI-core rows go with it.

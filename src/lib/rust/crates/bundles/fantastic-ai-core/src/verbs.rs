@@ -12,12 +12,13 @@ use crate::memory::{load_history, MemResult};
 use crate::projection::{derive_reaction, round3, TRIGGER};
 use crate::provider::Provider;
 use crate::state::{state_for, status_snapshot, CurrentEntry, QueuedEntry};
+use crate::stream_parts::{cut_marker, Part, PartKind};
 use fantastic_bundle::{
     py_float_repr, py_int_or, py_json_dumps, py_repr, py_repr_value, py_str, py_strip, py_truthy,
 };
 use fantastic_kernel::bundle::BundleError;
 use fantastic_kernel::call_guard::{check_call_stack, CallStackRefusal};
-use fantastic_kernel::{current_task, AgentId, Kernel};
+use fantastic_kernel::{current_task, AgentId, Kernel, TaskId};
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
 use std::time::Duration;
@@ -42,6 +43,8 @@ pub fn reflect_verbs() -> Value {
     json!({
         "reflect": "Identity + model + endpoint + generating flag + context posture. No args.",
         "send": "args: text:str (req), client_id:str? (default 'cli'). Streams tokens to ONLY the caller — cli (stdout) for client_id='cli', or the browser tab whose WS is subscribed and filters by client_id otherwise. Persists per-client chat.json. Per-backend FIFO lock: concurrent callers serialize. If the lock is held when this call arrives, emits a `status` event (phase='queued', detail.ahead) for the caller; first `token` (or `status` of phase != queued) for the same client_id implicitly unqueues. Optional system_prompt:str REPLACES the auto-built prompt (caller-supplied role/context — read it from a state agent yourself, no yaml coupling here). The conversation is always this agent's own (its memory store). _call_stack is reserved for the recursion guard (cycle/over-depth refusal before the lock). Optional send_to:str hands this pass's TEXT to that agent id as a fresh turn, once. The model routes its own work with `<reply_to>` inside its calls. Returns {response, final, client_id}.",
+        "stop": "args: stream_id:str? (a part of the generation in flight). STOP this agent's in-flight generation — how a receiver of its streaming parts stops it: the provider stream closes, open parts abort, the turn keeps a `[stopped by <you>]` marker. Returns {stopped:bool}.",
+        "rows": "args: after:int? (a row id — the page starts after it), limit:int?. A VIEW of this agent's conversation exactly as the agent HOLDS it in memory — its loaded head, in the order it lived it; no store read, no transform, so what a UI draws is what the agent has. Before the agent has loaded its head (a fresh boot, before its first turn) it holds nothing: {rows:[], loaded:false}. Returns {rows, next, total, loaded}.",
         "inquiry": "args: text:str (req), kind:str? (text|single|multi|confirm), options:list?, action:dict?, request_id:str?, client_id:str?. Sends THIS agent an inquiry and returns {answer, request_id} — the answer is the one it emits with the `answer` tool. The same verb a human answers; a sender writes one call for either.",
         "history": "args: fold:int? (a fold or clear id — list ITS members instead), limit:int? (default: as many as fit inline), after:int? (a row id — page forward from it). The conversation at DIGEST resolution — {id, parent, kind, role, head, bytes} per row, oldest first, paged. With `fold`, that fold's title + summary and its members (one level down; a member that is itself a fold opens the same way). A row's text is behind `recall` / `grep`. Returns {rows, next, total, fold?}.",
         "status": "args: client_id:str? — when provided, returns a privacy-filtered snapshot: full text only for this client's queue entries / current generation; other clients collapse to `others_pending` (an integer count). Without client_id the snapshot redacts text everywhere. Used by chat UIs to rebuild queued/in-flight state on page reload (and for headless polling). Returns {source, client_id, generating, current:{phase, send_id, started_at, elapsed, is_mine, text?, text_so_far?, last_tool?}|null, mine_pending:[{send_id,text,queued_at}], others_pending:int}.",
@@ -166,11 +169,63 @@ pub fn on_delete(agent_id: &AgentId, kernel: &Kernel) {
 /// forever) and emit the final `status(done, reason=cancelled)` + `done` the
 /// client is waiting on. No-op when the cancelled task is some OTHER dispatch on
 /// this agent (a `history`, a `reflect`).
-pub async fn on_cancel(agent_id: &AgentId, task_id: &str, kernel: &Arc<Kernel>) {
+///
+/// THE CUT (owner, 2026-10-04): every open part ABORTS for its watchers, and the
+/// turn leaves the incoming message + a marker row — never a half answer — so the
+/// model's next turn knows what it was asked, what it had visibly said, and who
+/// stopped it. Nothing of a stopped pass was dispatched. A store that refuses
+/// the rows fails the hook (python raises out of `on_cancel`; the kernel logs it
+/// and the kill still happens).
+pub async fn on_cancel(
+    agent_id: &AgentId,
+    task_id: &str,
+    kernel: &Arc<Kernel>,
+) -> Result<(), BundleError> {
     let Some(entry) = crate::state::take_current_for_cancel(agent_id, task_id) else {
-        return;
+        return Ok(());
     };
     let state = state_for(agent_id);
+    let mut unsent: Vec<Part> = Vec::new();
+    // HELD TO THE END OF THE HOOK: the doomed stream loop runs on another worker
+    // until the kernel drops it, and must not open a part after these aborts.
+    let mut _parts_guard = None;
+    if let Some(parts) = &entry.parts {
+        let mut p = parts.lock().await;
+        unsent = p
+            .splitter
+            .parts
+            .iter()
+            .filter(|x| x.kind == PartKind::Call)
+            .cloned()
+            .collect();
+        let evs = p.splitter.stop("stopped");
+        p.publisher.push(evs, true).await;
+        _parts_guard = Some(p);
+    }
+    let who = entry
+        .stopped_by
+        .clone()
+        .filter(|w| !w.is_empty())
+        .unwrap_or_else(|| "cancel".to_string());
+    let in_id = kernel.mint_id();
+    let in_parent = crate::agent_loop::incoming_parent(&entry.text);
+    let marker_id = kernel.mint_id();
+    crate::memory::save_history(
+        agent_id,
+        kernel,
+        &[
+            json!({"role": "user", "content": entry.text, "id": in_id, "parent": in_parent}),
+            json!({
+                "role": "assistant",
+                "content": cut_marker(&entry.text_so_far, &format!("stopped by {who}"), &unsent),
+                "id": marker_id,
+                "parent": in_id,
+            }),
+        ],
+    )
+    .await
+    // python's `str(e)` — the message alone, as the kernel's log line prints it.
+    .map_err(|e| BundleError::from(e.0))?;
     let client_id = entry.client_id;
     let mut detail = Map::new();
     detail.insert("reason".to_string(), json!("cancelled"));
@@ -180,6 +235,159 @@ pub async fn on_cancel(agent_id: &AgentId, task_id: &str, kernel: &Arc<Kernel>) 
     // rust's cancel detail was the one `done` event missing it.
     detail.insert("started_at".to_string(), json!(entry.started_at));
     emit_status(kernel, &state, agent_id, &client_id, "done", detail).await;
+    Ok(())
+}
+
+/// `stop` — python `_stop`. args: `stream_id:str?` (a part of the generation in
+/// flight). STOP this agent's in-flight generation — how a receiver of its
+/// streaming parts stops it: the provider stream closes, open parts abort, the
+/// turn keeps a `[stopped by <you>]` marker. Returns `{stopped:bool}`:
+/// `false` when nothing is in flight or `stream_id` is not one of this pass's
+/// parts.
+pub async fn stop(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
+    let state = state_for(agent_id);
+    let (task_id, parts) = {
+        let cur = state.current_meta.lock().expect("current poisoned");
+        match cur.as_ref() {
+            Some(CurrentEntry {
+                task_id: Some(t),
+                parts,
+                ..
+            }) => (t.clone(), parts.clone()),
+            _ => return json!({"stopped": false}),
+        }
+    };
+    if let Some(sid) = payload.get("stream_id").filter(|v| !v.is_null()) {
+        let Some(parts) = parts else {
+            return json!({"stopped": false});
+        };
+        let known = parts
+            .lock()
+            .await
+            .splitter
+            .parts
+            .iter()
+            .any(|p| sid.as_str() == Some(p.stream_id.as_str()));
+        if !known {
+            return json!({"stopped": false});
+        }
+    }
+    let who = fantastic_kernel::current_origin()
+        .map(|a| a.0)
+        .filter(|w| !w.is_empty())
+        .unwrap_or_else(|| "operator".to_string());
+    if let Some(c) = state
+        .current_meta
+        .lock()
+        .expect("current poisoned")
+        .as_mut()
+        .filter(|c| c.task_id.as_deref() == Some(task_id.as_str()))
+    {
+        c.stopped_by = Some(who);
+    }
+    let pid = task_id
+        .parse::<i64>()
+        .expect("the in-flight task id is the kernel's TaskId number");
+    kernel.cancel_task(&TaskId(pid)).await;
+    json!({"stopped": true})
+}
+
+/// `rows` — python `_rows`. args: `after:int?` (a row id — the page starts
+/// after it), `limit:int?`. A VIEW of this agent's conversation exactly as the
+/// agent HOLDS it in memory — its loaded head, in the order it lived it; no store
+/// read, no transform, so what a UI draws is what the agent has. Before the agent
+/// has loaded its head (a fresh boot, before its first turn) it holds nothing:
+/// `{rows:[], loaded:false}`. Returns `{rows, next, total, loaded}`.
+///
+/// THE HEAD IS THIS KERNEL'S CACHE (`Mem::heads`, python `_mem(kernel)["heads"]`),
+/// never a store mirror (owner, 2026-10-04: a mirror desyncs). `after` matches a row id by
+/// python `==` (an id not in the head pages nothing); `limit` is python
+/// `isinstance(limit, int) and limit > 0` (a bool is an int there); `next` is the
+/// page's last row id only when more rows follow; `total` is the whole head.
+#[must_use]
+pub fn rows(agent_id: &AgentId, payload: &Value, kernel: &Kernel) -> Value {
+    let head = crate::memory::mem(kernel)
+        .heads
+        .lock()
+        .expect("heads poisoned")
+        .get(&agent_id.0)
+        .cloned();
+    let Some(head) = head else {
+        return json!({"rows": [], "next": null, "total": 0, "loaded": false});
+    };
+    let total = head.len();
+    let mut rows = head;
+    if let Some(after) = payload.get("after").filter(|v| !v.is_null()) {
+        rows = match rows
+            .iter()
+            .position(|r| r.get("id").is_some_and(|id| py_eq(id, after)))
+        {
+            Some(at) => rows.split_off(at + 1),
+            None => Vec::new(),
+        };
+    }
+    let limit = match payload.get("limit") {
+        Some(Value::Bool(true)) => Some(1),
+        Some(Value::Number(n)) if !n.is_f64() => match n.as_i64() {
+            Some(i) if i > 0 => Some(usize::try_from(i).unwrap_or(usize::MAX)),
+            Some(_) => None,
+            // a u64 beyond i64 is a positive int
+            None => Some(usize::MAX),
+        },
+        _ => None,
+    };
+    let more = limit.is_some_and(|l| l < rows.len());
+    let page: Vec<Value> = match limit {
+        Some(l) => rows.into_iter().take(l).collect(),
+        None => rows,
+    };
+    let next = if more {
+        page.last()
+            .and_then(|r| r.get("id").cloned())
+            .unwrap_or(Value::Null)
+    } else {
+        Value::Null
+    };
+    json!({"rows": page, "next": next, "total": total, "loaded": true})
+}
+
+/// python `a == b` over two JSON values: a bool is the int 0/1, an int equals a
+/// float of the same value, containers compare element-wise.
+fn py_eq(a: &Value, b: &Value) -> bool {
+    fn int_of(v: &Value) -> Option<i128> {
+        match v {
+            Value::Bool(b) => Some(i128::from(*b)),
+            Value::Number(n) if !n.is_f64() => n
+                .as_i64()
+                .map(i128::from)
+                .or_else(|| n.as_u64().map(i128::from)),
+            _ => None,
+        }
+    }
+    fn int_eq_float(i: i128, f: f64) -> bool {
+        // exact, as python: a float equals an int only when it IS that integer
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            f.is_finite() && f.fract() == 0.0 && (f as i128) == i
+        }
+    }
+    match (a, b) {
+        (Value::Array(x), Value::Array(y)) => {
+            x.len() == y.len() && x.iter().zip(y).all(|(p, q)| py_eq(p, q))
+        }
+        (Value::Object(x), Value::Object(y)) => {
+            x.len() == y.len() && x.iter().all(|(k, v)| y.get(k).is_some_and(|w| py_eq(v, w)))
+        }
+        _ => match (int_of(a), int_of(b)) {
+            (Some(x), Some(y)) => x == y,
+            (Some(x), None) => b.as_f64().is_some_and(|f| b.is_f64() && int_eq_float(x, f)),
+            (None, Some(y)) => a.as_f64().is_some_and(|f| a.is_f64() && int_eq_float(y, f)),
+            (None, None) => match (a, b) {
+                (Value::Number(x), Value::Number(y)) => x.as_f64() == y.as_f64(),
+                _ => a == b,
+            },
+        },
+    }
 }
 
 /// One row at DIGEST resolution — python `_digest`: `{id, parent, kind, role,
@@ -567,6 +775,11 @@ pub async fn send(
             if let Some(r) = payload.get("re").filter(|v| !v.is_null()) {
                 parts.push(format!("re {}", scalar_text(r)));
             }
+            // the stream this message was previewed as — what an AI consumer
+            // that watched it stream matches its draft to (owner, 2026-10-04)
+            if let Some(s) = payload.get("stream_id").filter(|v| !v.is_null()) {
+                parts.push(format!("stream {}", scalar_text(s)));
+            }
             text = format!("[{}]\n{text}", parts.join(" \u{b7} "));
         }
     }
@@ -726,6 +939,8 @@ pub async fn send(
             // The kernel task this generation IS — how `cancel` reaches it, and
             // how `on_cancel` recognises its own turn.
             task_id: current_task().map(|t| t.0.to_string()),
+            parts: None,
+            stopped_by: None,
         });
     }
     emit_status(kernel, &state, agent_id, &client_id, "thinking", Map::new()).await;
@@ -751,6 +966,9 @@ pub async fn send(
     .await;
 
     let mut message_id: Option<i64> = None;
+    // Every closed call part `(stream_id, body)` — routing stamps each dispatched
+    // message with the stream it was previewed as.
+    let mut call_streams: Vec<(String, String)> = Vec::new();
     // A DEAD turn (only thinking) is discarded unstored and routed as a silent
     // turn — the reminder rerolls it, told why.
     let mut dead_turn = false;
@@ -773,18 +991,22 @@ pub async fn send(
         Ok(Ok(Generation::Answered {
             text: final_text,
             message_id: tid,
+            call_streams: streams,
         })) => {
             message_id = Some(tid);
             // `message_id` IS PART OF THE REPLY — python `_run`'s last statement.
             // Rust computed it (routing needs it to parent the next turn) and
             // then dropped it on the floor, so a caller could not name the row
             // its own send produced.
-            json!({
+            let reply = json!({
                 "response": final_text,
                 "final": final_text,
                 "client_id": client_id,
                 "message_id": tid,
-            })
+            });
+            // The closed call parts feed routing only — never the caller's reply.
+            call_streams = streams;
+            reply
         }
         // THE SEAM'S OWN WORDS. A projection refusal never opened a provider
         // pass, so no `status(done)` closes it and no `client_id` is added.
@@ -889,6 +1111,7 @@ pub async fn send(
                 cfg.model_window,
                 message_id,
                 dead_turn,
+                call_streams,
             )
             .await;
         });
@@ -1126,6 +1349,10 @@ where
     let reply = match verb {
         "boot" => boot(agent_id, kernel),
         "send" => send(provider_for(&client_id), agent_id, payload, kernel, cfg).await?,
+        // A receiver of this agent's streaming parts stops the generation.
+        "stop" => stop(agent_id, payload, kernel).await,
+        // What the agent HOLDS in memory — its loaded head, never a store read.
+        "rows" => rows(agent_id, payload, kernel),
         // ONE ASK VERB, WHOEVER IS ASKED: a person answers `inquiry` from a
         // record, this agent answers it by THINKING, and the asker writes the
         // same call either way.

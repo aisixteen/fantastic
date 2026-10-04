@@ -50,7 +50,7 @@ from helpers import (
     distinct_calls,
     verdict,
 )
-from helpers.kernel import open_kernel
+from helpers.kernel import open_kernel, home
 
 # The plug, resolved once (see e2e/backends): which model, reached how.
 BK = _resolve_backend()
@@ -187,7 +187,7 @@ async def main():
                     "target": root.id,
                     "payload": {
                         "type": "create_agent",
-                        "parent_id": root.id,
+                        "parent_id": home(root),
                         "handler_module": "file_bridge.tools", "allow": ["."],
                         "id": "kernel_store",
                         "root": ".fantastic",
@@ -208,7 +208,7 @@ async def main():
                     "target": root.id,
                     "payload": {
                         "type": "create_agent",
-                        "parent_id": root.id,
+                        "parent_id": home(root),
                         "handler_module": "user_probe.tools",
                         "id": "user",
                         "answer": "do your best judgement",
@@ -221,7 +221,7 @@ async def main():
                     "target": root.id,
                     "payload": {
                         "type": "create_agent",
-                        "parent_id": root.id,
+                        "parent_id": home(root),
                         "handler_module": "file_bridge.tools", "allow": ["."],
                         "id": "yaml_store",
                         # a DATA store — the records under `.fantastic` stay the loader's
@@ -252,7 +252,7 @@ async def main():
                         "target": root.id,
                         "payload": {
                             "type": "create_agent",
-                            "parent_id": root.id,
+                            "parent_id": home(root),
                             "handler_module": "file_bridge.tools", "allow": ["."],
                             "id": gid,
                             "root": gid,
@@ -285,7 +285,7 @@ async def main():
                     "target": root.id,
                     "payload": {
                         "type": "create_agent",
-                        "parent_id": root.id,
+                        "parent_id": home(root),
                         "handler_module": "exec_bridge.tools",
                         "id": "shell",
                         # the COMMAND runner's gate: regexes over the full line
@@ -311,7 +311,7 @@ async def main():
                     "target": root.id,
                     "payload": {
                         "type": "create_agent",
-                        "parent_id": root.id,
+                        "parent_id": home(root),
                         "handler_module": "web.tools",
                         # NOT `web`. On a spawned kernel the driver seeds its own `web`
                         # agent as the REST + event face; creating a second one under that

@@ -146,9 +146,11 @@ def test_bytes_is_never_trimmed_and_other_values_are():
     assert p["path"] == "a.md" and p["bytes"] == b"  two spaces \n"
 
 
-def test_unterminated_call_at_the_end_is_still_an_attempt():
+def test_an_unterminated_call_is_not_a_call():
+    """No `</call>`, no call (owner, 2026-10-04): the model stopped generating before
+    it closed — nothing dispatches, nothing is "malformed"; the cut marker names it."""
     text = '<call name="send"><target_id>notes</target_id><type>reflect</type>'
-    assert _one(text)["arguments"]["payload"] == {"type": "reflect"}
+    assert extract_tool_calls(text) == [] and malformed_calls(text) == []
 
 
 def test_several_calls_in_order_and_a_call_inside_think():
@@ -186,11 +188,10 @@ def test_bytes_closer_inside_a_document_ends_the_value_early_and_is_refused():
     _refused(text, "text after the last tag", "no")
 
 
-def test_bytes_never_closed():
-    _refused(
-        '<call name="send"><target_id>notes</target_id><type>write</type><bytes>open',
-        "`<bytes>` opened and never closed",
-    )
+def test_bytes_never_closed_is_a_cut_not_a_call():
+    # an open `<bytes>` swallows any `</call>`, so the envelope never closes
+    text = '<call name="send"><target_id>notes</target_id><type>write</type><bytes>open</call>'
+    assert extract_tool_calls(text) == [] and malformed_calls(text) == []
 
 
 def test_element_never_closed():
@@ -234,7 +235,10 @@ def test_defang_breaks_every_delimiter():
 
 def test_the_broken_block_is_shown_whole():
     big = "x" * 40_000
-    text = f'<call name="send"><target_id>n</target_id><type>write</type><bytes>{big}'
+    text = (
+        f'<call name="send"><target_id>n</target_id><type>write</type><bytes>{big}</bytes>'
+        "<path>a</path><path>b</path></call>"
+    )
     bad = malformed_calls(text)
     assert len(bad) == 1 and big in bad[0]["your_block"]
 
