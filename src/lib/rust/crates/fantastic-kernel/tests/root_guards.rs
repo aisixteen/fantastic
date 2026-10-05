@@ -165,8 +165,8 @@ async fn a_refusal_is_not_decorated_into_a_reflect() {
 #[tokio::test]
 async fn blob_verbs_pass_root_ingress() {
     let (_tmp, kernel) = mk();
-    // A direct child, then a grandchild under it — `$children` on the root does
-    // not reach a grandchild, so the only edge it could have is the explicit one.
+    // A direct child, then a grandchild under it — the root's `callable_by` names
+    // neither, so the only edge the grandchild could have is the explicit one.
     for (id, parent) in [("mid", "kernel"), ("leaf", "mid")] {
         let _ = kernel
             .send(vec![Item::new(

@@ -73,6 +73,7 @@ from kernel._authz import (
     DEFAULT_CAN_CALL,
     LEGAL_GRANT_KEYS,
     _FROM_ABOVE,
+    ancestor_ids,
     authorize_call,
     bad_grant_key,
 )
@@ -162,8 +163,8 @@ _SYSTEM_VERB_DOCS = {
     # finishing with `agents_created: []`.
     "create_agent": (
         "args: handler_module:str, parent_id:str REQUIRED, id:str?, **meta. "
-        "Creates a CHILD OF `parent_id` — an agent names its own id (it creates "
-        "only its own children); 'kernel_state' for top-level. No default parent."
+        "Creates a CHILD OF `parent_id` — an agent names its own id or an agent "
+        "in its subtree; 'kernel_state' for top-level. No default parent."
     ),
     "update_agent": (
         "args: id:str, **meta. EVERY FIELD YOU NAME IS REPLACED, NOT MERGED "
@@ -171,12 +172,12 @@ _SYSTEM_VERB_DOCS = {
         "WHOLE — `can_call`/`callable_by` included: restate every key you want "
         "to keep, the baseline `$self` among them, or the keys you omit are GONE. "
         "Granting one edge reads like a PATCH and behaves like a PUT. An agent "
-        "updates only its own children."
+        "updates only agents in its own subtree."
     ),
     "delete_agent": (
         "args: id:str. CASCADES — deletes that agent AND ITS WHOLE SUBTREE, "
         "deepest first; refuses if any descendant carries `delete_lock`. An "
-        "agent deletes only its own children."
+        "agent deletes only agents in its own subtree."
     ),
     "list_agents": "No args. Every agent's record, flat. Paged.",
     "ps": (
@@ -391,7 +392,7 @@ class Agent:
         # agent that passes through here — the seeded root, a created child, a
         # disk-loaded record alike (one funnel, so nothing lacks it). `can_call`
         # (who I may call) and `callable_by` (who may call me) both start as
-        # {$self:*, $parent:*, $children:*} — reach/accept your own subtree and your
+        # {$self:*, $parent:*, $subtree:*} — reach/accept your own subtree and your
         # creator. It MERGES UNDER any explicit grant already in `meta` (so an
         # explicit key overrides a baseline key; the merge is idempotent on reload).
         # Deny-all governs every edge NOT in the merged grant.
@@ -1310,7 +1311,6 @@ class Agent:
         sender_rec = self.ctx.get(sender_id) or {"id": sender_id}
         s_can = sender_rec.get("can_call") or {}
         s_parent = sender_rec.get("parent_id")
-        s_kids = frozenset(sender._children) if sender is not None else frozenset()
         # Egress — may the SENDER call the target? A target on ANOTHER KERNEL is
         # named `<guid>|<agent>`; whether that agent accepts the call is its OWN
         # kernel's decision, made where the agent lives — egress is the whole
@@ -1321,7 +1321,7 @@ class Agent:
             target.id,
             holder_id=sender_id,
             holder_parent=s_parent,
-            holder_children=s_kids,
+            other_ancestors=ancestor_ids(target),
         )
         if isinstance(target, RemoteTarget):
             if d.allowed:
@@ -1350,7 +1350,7 @@ class Agent:
             sender_id,
             holder_id=target.id,
             holder_parent=target.parent.id if target.parent is not None else None,
-            holder_children=frozenset(target._children),
+            other_ancestors=ancestor_ids(sender),
         )
         if not di.allowed:
             return refusal(
@@ -1359,30 +1359,29 @@ class Agent:
                 hint=_FROM_ABOVE,
                 side="ingress",
             )
-        # MUTATORS act on the sender's OWN CHILDREN only — `create_agent` places
-        # under the sender, `update_agent`/`delete_agent` name a direct child. A
-        # missing or non-string operand is not judged here: the verb answers it
-        # with its own missing/shape refusal. An id naming no agent is not the
-        # sender's child, so it gets the mutator text like any other stranger.
+        # MUTATORS act WITHIN the sender's OWN SUBTREE — `create_agent` places
+        # under the sender or an agent below it, `update_agent`/`delete_agent` name
+        # an agent below it (any depth). A missing or non-string operand is not
+        # judged here: the verb answers it with its own missing/shape refusal. An
+        # id naming no agent is in no subtree, so it gets the mutator text like any
+        # other stranger.
         if verb in _MUTATORS and target.parent is None:
             key = "parent_id" if verb == "create_agent" else "id"
             operand = payload.get(key) if isinstance(payload, dict) else None
             if not isinstance(operand, str) or not operand:
                 return None
+            node = self.ctx.agents.get(operand)
             if verb == "create_agent":
-                owned = operand == sender_id
-            else:
-                node = self.ctx.agents.get(operand)
-                owned = (
-                    node is not None
-                    and node.parent is not None
-                    and node.parent.id == sender_id
+                owned = operand == sender_id or (
+                    node is not None and sender_id in ancestor_ids(node)
                 )
+            else:
+                owned = node is not None and sender_id in ancestor_ids(node)
             if not owned:
                 return refusal(
                     UNAUTHORIZED,
-                    f"{sender_id} may only {verb} its own children — {operand} is "
-                    "not one",
+                    f"{sender_id} may only {verb} within its own subtree — "
+                    f"{operand} is not in it",
                     side="mutator",
                 )
         return None
@@ -2494,7 +2493,7 @@ class Agent:
             for k, v in payload.items()
             if k not in ("type", "handler_module", "id", "parent_id")
         }
-        # The structural authority baseline ({$self,$parent,$children} on both
+        # The structural authority baseline ({$self,$parent,$subtree} on both
         # `can_call` and `callable_by`) is stamped + merged uniformly in Agent.__init__
         # for EVERY agent — so it is NOT re-stamped here; an explicit grant in the
         # payload rides in `meta` and merges over the baseline at construction.

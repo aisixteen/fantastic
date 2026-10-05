@@ -161,14 +161,20 @@ class WireTranscript:
         #
         # Append-only is safe: history is never trimmed, so what is already
         # recorded cannot change under us.
-        if len(turns) > len(self.transcript):
-            fresh = turns[len(self.transcript):]
-            self.transcript.extend(fresh)
-            self.n = len(self.transcript)
+        #
+        # READ PAST `__getattribute__`. A read of `transcript`/`n` from here would
+        # poll again from inside this poll; the 1 s throttle hid that only while a
+        # dump took under 1 s, and an hour-long run's dump does not (subai_graph,
+        # 2026-10-05: RecursionError after 3617 s).
+        transcript = object.__getattribute__(self, "transcript")
+        if len(turns) > len(transcript):
+            fresh = turns[len(transcript):]
+            transcript.extend(fresh)
+            self.n = n = len(transcript)
             # PRINT THE TURN, as the in-process reader does. Without this a wire
             # run's log carries a verdict and nothing to explain it — the whole
             # transcript is on the far side of a socket.
-            for i, t in enumerate(fresh, start=self.n - len(fresh) + 1):
+            for i, t in enumerate(fresh, start=n - len(fresh) + 1):
                 box(f"-- turn {i} - ASSISTANT <-", t, ">")
 
     @property

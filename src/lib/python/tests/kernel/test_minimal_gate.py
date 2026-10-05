@@ -6,7 +6,7 @@
 - Kernel verbs at the root take the same two-sided check against the root.
 - The mutators (`create_agent`, `update_agent`, `delete_agent`) act on the
   sender's DIRECT CHILDREN only, after the gate; a relayed caller owns none.
-- A grant key is an agent id, `$self`, `$parent`, `$children`, `<guid>|<agent>`
+- A grant key is an agent id, `$self`, `$parent`, `$subtree`, `<guid>|<agent>`
   or `<guid>|*` — anything else is refused at the write.
 """
 
@@ -86,9 +86,23 @@ async def test_two_sided_allow_and_deny(seeded_kernel):
     assert other["side"] == "egress", other
 
 
+async def test_subtree_reaches_every_depth(seeded_kernel):
+    """`$subtree` matches every agent BELOW the holder — a grandchild included,
+    on both sides of the gate; an agent outside the subtree stays refused."""
+    k = seeded_kernel
+    _mk(k, "top", can_call={"$subtree": "*"}, callable_by={"$subtree": ["up"]})
+    _mk(k, "mid", parent="top")
+    _mk(k, "deep", parent="mid", can_call={"top": "*"}, callable_by={"top": "*"})
+    _mk(k, "outside", can_call={"top": "*"})
+    assert (await _as(k, "top", "deep", {"type": "down"}))["status"] == "completed"
+    assert (await _as(k, "deep", "top", {"type": "up"}))["status"] == "completed"
+    r = (await _as(k, "outside", "top", {"type": "up"}))["result"]
+    assert r["side"] == "ingress", r
+
+
 async def test_tokens_resolve_relative_to_the_holder(seeded_kernel):
     k = seeded_kernel
-    _mk(k, "boss", can_call={"$children": "*"}, callable_by={"$children": ["up"]})
+    _mk(k, "boss", can_call={"$subtree": "*"}, callable_by={"$subtree": ["up"]})
     _mk(
         k, "kid", parent="boss", can_call={"$parent": "*"}, callable_by={"$parent": "*"}
     )
@@ -152,8 +166,8 @@ async def test_a_kernel_verb_takes_the_root_ingress_check(seeded_kernel):
         "error": "kernel_state does not accept 'ps' from a",
         "reason": "unauthorized",
         "hint": (
-            "grants come from above — the agent's parent (update_agent on its direct "
-            "child) or the operator writes can_call and callable_by; an agent never "
+            "grants come from above — an ancestor (update_agent on an agent in its "
+            "subtree) or the operator writes can_call and callable_by; an agent never "
             "raises its own"
         ),
         "side": "ingress",
@@ -174,15 +188,12 @@ async def test_a_kernel_verb_takes_the_root_ingress_check(seeded_kernel):
             },
             "kernel_state",
         ),
-        ({"type": "create_agent", "parent_id": "kid", "handler_module": MOD}, "kid"),
         ({"type": "update_agent", "id": "a", "description": "x"}, "a"),
-        ({"type": "update_agent", "id": "grandkid", "description": "x"}, "grandkid"),
         ({"type": "update_agent", "id": "peer", "description": "x"}, "peer"),
-        ({"type": "delete_agent", "id": "grandkid"}, "grandkid"),
         ({"type": "delete_agent", "id": "nobody"}, "nobody"),
     ],
 )
-async def test_a_mutator_acts_on_the_senders_own_children_only(
+async def test_a_mutator_acts_within_the_senders_own_subtree_only(
     seeded_kernel, payload, operand
 ):
     k = seeded_kernel
@@ -193,7 +204,7 @@ async def test_a_mutator_acts_on_the_senders_own_children_only(
     _open_root(k, "a")
     r = (await _as(k, "a", "kernel", payload))["result"]
     assert r == {
-        "error": f"a may only {payload['type']} its own children — {operand} is not one",
+        "error": f"a may only {payload['type']} within its own subtree — {operand} is not in it",
         "reason": "unauthorized",
         "side": "mutator",
     }
@@ -239,6 +250,37 @@ async def test_a_mutator_on_a_direct_child_passes(seeded_kernel):
     assert gone["status"] == "completed" and "kid" not in k.ctx.agents, gone
 
 
+async def test_an_ancestor_mutates_at_any_depth(seeded_kernel):
+    """The sender's whole subtree is its own: a grandchild can be created under,
+    updated and deleted by any agent above it."""
+    k = seeded_kernel
+    _mk(k, "a")
+    _mk(k, "kid", parent="a")
+    _mk(k, "grandkid", parent="kid")
+    _open_root(k, "a")
+    made = await _as(
+        k,
+        "a",
+        "kernel",
+        {
+            "type": "create_agent",
+            "parent_id": "kid",
+            "handler_module": MOD,
+            "id": "gk2",
+        },
+    )
+    assert made["status"] == "completed" and "gk2" in k.ctx.agents, made
+    up = await _as(
+        k,
+        "a",
+        "kernel",
+        {"type": "update_agent", "id": "grandkid", "description": "x"},
+    )
+    assert up["status"] == "completed" and up["result"].get("updated") is True, up
+    gone = await _as(k, "a", "kernel", {"type": "delete_agent", "id": "grandkid"})
+    assert gone["status"] == "completed" and "grandkid" not in k.ctx.agents, gone
+
+
 async def test_a_mutator_is_gated_on_the_root_first(seeded_kernel):
     k = seeded_kernel
     _mk(k, "a")
@@ -269,7 +311,7 @@ async def test_an_unknown_grant_key_is_refused_at_the_write(seeded_kernel, key):
         )
         r = out[0]["result"]
         assert r["reason"] == "invalid_meta", r
-        legal = "an agent id, $self, $parent, $children" + (
+        legal = "an agent id, $self, $parent, $subtree" + (
             ", <guid>|<agent> or <guid>|*" if field == "can_call" else ""
         )
         assert r["error"] == (
@@ -300,7 +342,7 @@ async def test_a_bad_grant_value_is_refused_at_the_write(seeded_kernel):
 
 async def test_legal_keys_are_accepted(seeded_kernel):
     k = seeded_kernel
-    local = {"$self": "*", "$parent": ["a"], "$children": "*", "peer": ["b"]}
+    local = {"$self": "*", "$parent": ["a"], "$subtree": "*", "peer": ["b"]}
     out = await k.send(
         [
             {

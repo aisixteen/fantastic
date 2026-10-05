@@ -127,7 +127,7 @@ async fn create(kernel: &Arc<Kernel>, id: &str, parent: &str) {
 }
 
 /// `gc` under `mid` under the root — NOT a direct child, so the root's baseline
-/// `$children` does not reach it.
+/// `$subtree` does not reach it.
 async fn grandchild(kernel: &Arc<Kernel>) -> AgentId {
     create(kernel, "mid", "kernel_state").await;
     create(kernel, "gc", "mid").await;

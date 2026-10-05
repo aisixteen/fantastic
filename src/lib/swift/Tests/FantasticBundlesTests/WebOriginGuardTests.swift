@@ -109,7 +109,7 @@ struct WebOriginGuardTests {
             .object([
                 "type": .string("update_agent"), "id": .string("kernel_state"),
                 "callable_by": .object([
-                    "$self": .string("*"), "$parent": .string("*"), "$children": .string("*"),
+                    "$self": .string("*"), "$parent": .string("*"), "$subtree": .string("*"),
                     "web_ws": .string("*"),
                 ]),
             ]))

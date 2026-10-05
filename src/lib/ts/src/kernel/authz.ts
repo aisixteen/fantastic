@@ -13,7 +13,8 @@
 // and nothing a handler says can name another sender.
 //
 // A grant map is `{key: "*" | [verb, ...]}`. Keys: a literal local agent id,
-// `$self`, `$parent`, `$children` (direct children) — and, in `can_call` only,
+// `$self`, `$parent`, `$subtree` (every agent BELOW the holder, any depth) — and,
+// in `can_call` only,
 // `<guid>|<agent>` / `<guid>|*`: an OUTBOUND peer address. A caller is always a
 // LOCAL agent, so a `<guid>|…` key in `callable_by` never matches. Tokens resolve
 // relative to the HOLDER (the sender for `can_call`, the target for
@@ -35,8 +36,8 @@ export const DEFAULT_GRANT: Readonly<Payload> = { $self: "*" };
 /** The remedy shown on any denial: authority descends, never self-raised
  *  (python `_FROM_ABOVE`, verbatim). */
 export const FROM_ABOVE =
-  "grants come from above — the agent's parent (update_agent on its direct " +
-  "child) or the operator writes can_call and callable_by; an agent never " +
+  "grants come from above — an ancestor (update_agent on an agent in its " +
+  "subtree) or the operator writes can_call and callable_by; an agent never " +
   "raises its own";
 
 /** A grant value is `"*"` (every verb) or a list of verb names. */
@@ -49,7 +50,8 @@ function verbAllowed(grant: Json | undefined, verb: string): boolean {
 export interface GrantContext {
   holderId: string;
   holderParent: string | null;
-  holderChildren: ReadonlySet<string>;
+  /** Every id ABOVE the other end — `$subtree` matches when the holder is one. */
+  otherAncestors: ReadonlySet<string>;
 }
 
 /**
@@ -70,7 +72,7 @@ export function authorizeCall(
   if (grant !== null && grant !== undefined && (typeof grant !== "object" || Array.isArray(grant))) return false;
   for (const [key, value] of Object.entries(grant ?? {})) {
     let matched: boolean;
-    if (key === "$children") matched = ctx.holderChildren.has(otherId);
+    if (key === "$subtree") matched = ctx.otherAncestors.has(ctx.holderId);
     else if (key === "$self") matched = otherId === ctx.holderId;
     else if (key === "$parent") matched = otherId === ctx.holderParent;
     else if (key.startsWith("$")) matched = false; // no other token exists

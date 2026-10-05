@@ -575,7 +575,7 @@ export async function bootHost(port = 8911, opts: BootOptions = {}): Promise<Hos
       // where a command runs is the record's; the host's own tmp dir
       `cwd=${tmp}`,
       "ingress_rule=allow_all_ingress",
-      `callable_by=${JSON.stringify({ $self: "*", $parent: "*", $children: "*", [webWsId]: "*" })}`,
+      `callable_by=${JSON.stringify({ $self: "*", $parent: "*", $subtree: "*", [webWsId]: "*" })}`,
     ]);
     pyId = "exec";
     reach[pyId] = "*";
@@ -599,7 +599,7 @@ export async function bootHost(port = 8911, opts: BootOptions = {}): Promise<Hos
         "id=creds",
         "backend=env",
         `refs=${JSON.stringify({ llm: { host: opts.llm.endpoint, env: { api_key: keyVar }, readers: ["llm"] } })}`,
-        `callable_by=${JSON.stringify({ $self: "*", $parent: "*", $children: "*", llm: ["get"] })}`,
+        `callable_by=${JSON.stringify({ $self: "*", $parent: "*", $subtree: "*", llm: ["get"] })}`,
       ]);
     }
     const args = [
@@ -609,8 +609,8 @@ export async function bootHost(port = 8911, opts: BootOptions = {}): Promise<Hos
       `handler_module=${bundle}`,
       "id=llm",
       "memory_store_id=memory",
-      `can_call=${JSON.stringify({ $self: "*", $parent: "*", $children: "*", memory: "*", ...(keyVar !== undefined ? { creds: ["get"] } : {}), ...(pyId ? { [pyId]: "*" } : {}), ...more })}`,
-      `callable_by=${JSON.stringify({ $self: "*", $parent: "*", $children: "*", [webWsId]: "*" })}`,
+      `can_call=${JSON.stringify({ $self: "*", $parent: "*", $subtree: "*", memory: "*", ...(keyVar !== undefined ? { creds: ["get"] } : {}), ...(pyId ? { [pyId]: "*" } : {}), ...more })}`,
+      `callable_by=${JSON.stringify({ $self: "*", $parent: "*", $subtree: "*", [webWsId]: "*" })}`,
     ];
     if (keyVar !== undefined) args.push(`credentials=${JSON.stringify({ store: "creds", ref: "llm" })}`);
     if (opts.llm.model) args.push(`model=${opts.llm.model}`);
@@ -624,7 +624,7 @@ export async function bootHost(port = 8911, opts: BootOptions = {}): Promise<Hos
       "kernel",
       "update_agent",
       "id=memory",
-      `callable_by=${JSON.stringify({ $self: "*", $parent: "*", $children: "*", llm: "*" })}`,
+      `callable_by=${JSON.stringify({ $self: "*", $parent: "*", $subtree: "*", llm: "*" })}`,
     ]);
     ollamaId = "llm";
     reach[ollamaId] = "*";
@@ -638,7 +638,7 @@ export async function bootHost(port = 8911, opts: BootOptions = {}): Promise<Hos
         "kernel",
         "update_agent",
         `id=${target}`,
-        `callable_by=${JSON.stringify({ $self: "*", $parent: "*", $children: "*", [webWsId]: "*", llm: "*" })}`,
+        `callable_by=${JSON.stringify({ $self: "*", $parent: "*", $subtree: "*", [webWsId]: "*", llm: "*" })}`,
       ]);
     }
   }
@@ -653,8 +653,8 @@ export async function bootHost(port = 8911, opts: BootOptions = {}): Promise<Hos
       "parent_id=kernel_state",
       "handler_module=scheduler.tools",
       "id=scheduler",
-      `can_call=${JSON.stringify({ $self: "*", $parent: "*", $children: "*", ...(pyId ? { [pyId]: "*" } : {}) })}`,
-      `callable_by=${JSON.stringify({ $self: "*", $parent: "*", $children: "*", [webWsId]: "*" })}`,
+      `can_call=${JSON.stringify({ $self: "*", $parent: "*", $subtree: "*", ...(pyId ? { [pyId]: "*" } : {}) })}`,
+      `callable_by=${JSON.stringify({ $self: "*", $parent: "*", $subtree: "*", [webWsId]: "*" })}`,
     ]);
     schedulerId = "scheduler";
     reach[schedulerId] = "*";
@@ -663,7 +663,7 @@ export async function bootHost(port = 8911, opts: BootOptions = {}): Promise<Hos
         "kernel",
         "update_agent",
         `id=${pyId}`,
-        `callable_by=${JSON.stringify({ $self: "*", $parent: "*", $children: "*", [webWsId]: "*", scheduler: "*", ...(ollamaId ? { llm: "*" } : {}) })}`,
+        `callable_by=${JSON.stringify({ $self: "*", $parent: "*", $subtree: "*", [webWsId]: "*", scheduler: "*", ...(ollamaId ? { llm: "*" } : {}) })}`,
       ]);
     }
   } else if (pyId && ollamaId) {
@@ -671,21 +671,21 @@ export async function bootHost(port = 8911, opts: BootOptions = {}): Promise<Hos
       "kernel",
       "update_agent",
       `id=${pyId}`,
-      `callable_by=${JSON.stringify({ $self: "*", $parent: "*", $children: "*", [webWsId]: "*", llm: "*" })}`,
+      `callable_by=${JSON.stringify({ $self: "*", $parent: "*", $subtree: "*", [webWsId]: "*", llm: "*" })}`,
     ]);
   }
 
   // THE LEG'S RIGHTS, both halves: it reaches the root (privileged verbs named
   // — never under `*`), web, the memory store and every optional agent above;
   // the root accepts it.
-  const BASE = { $self: "*", $parent: "*", $children: "*" };
+  const BASE = { $self: "*", $parent: "*", $subtree: "*" };
   const ROOT_VERBS = ["*", "create_agent", "update_agent", "delete_agent"];
   runCli(tmp, [
     "kernel",
     "update_agent",
     `id=${webWsId}`,
     // its loader BY NAME: `load_tree`/`persist_record` are privileged, and the
-    // structural `$children` never covers a privileged verb on egress
+    // structural `$subtree` never covers a privileged verb on egress
     `can_call=${JSON.stringify({ ...BASE, kernel_state: ROOT_VERBS, [webId]: "*", memory: "*", ...(webLoaderId ? { [webLoaderId]: "*" } : {}), ...reach })}`,
   ]);
   runCli(tmp, [

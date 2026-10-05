@@ -177,7 +177,7 @@ async fn star_covers_create_agent() {
 }
 
 #[tokio::test]
-async fn the_mutators_act_on_the_senders_own_children_only() {
+async fn the_mutators_act_within_the_senders_own_subtree() {
     let (_t, k) = mk(json!({"a": "*"}));
     create(
         &k,
@@ -191,7 +191,7 @@ async fn the_mutators_act_on_the_senders_own_children_only() {
     create(&k, "mine", "grandkid", json!({})).await;
     let refused = |verb: &str, id: &str| {
         json!({
-            "error": format!("a may only {verb} its own children — {id} is not one"),
+            "error": format!("a may only {verb} within its own subtree — {id} is not in it"),
             "reason": "unauthorized",
             "side": "mutator",
         })
@@ -206,8 +206,8 @@ async fn the_mutators_act_on_the_senders_own_children_only() {
     .await;
     assert_eq!(out.result, refused("create_agent", "other"));
     assert!(!k.agents.contains_key(&AgentId::from("x")));
-    // update / delete a non-child (a sibling, a grandchild, itself)
-    for id in ["other", "grandkid", "a"] {
+    // update / delete outside the subtree (a sibling, itself)
+    for id in ["other", "a"] {
         let out = as_agent(
             &k,
             "a",
@@ -219,6 +219,35 @@ async fn the_mutators_act_on_the_senders_own_children_only() {
         let out = as_agent(&k, "a", "kernel", json!({"type": "delete_agent", "id": id})).await;
         assert_eq!(out.result, refused("delete_agent", id));
     }
+    // a grandchild is in its subtree: create under it, update it, delete it
+    let out = as_agent(
+        &k,
+        "a",
+        "kernel",
+        json!({"type": "create_agent", "parent_id": "grandkid", "handler_module": MOD, "id": "gk2"}),
+    )
+    .await;
+    assert!(
+        k.agents.contains_key(&AgentId::from("gk2")),
+        "{}",
+        out.result
+    );
+    let out = as_agent(
+        &k,
+        "a",
+        "kernel",
+        json!({"type": "update_agent", "id": "grandkid", "description": "deep"}),
+    )
+    .await;
+    assert_eq!(out.result["updated"], true, "{}", out.result);
+    let out = as_agent(
+        &k,
+        "a",
+        "kernel",
+        json!({"type": "delete_agent", "id": "grandkid"}),
+    )
+    .await;
+    assert_eq!(out.result["deleted"], true, "{}", out.result);
     // its own child: allowed
     let out = as_agent(
         &k,
@@ -299,7 +328,7 @@ async fn a_missing_operand_gets_the_verbs_own_refusal_and_an_unknown_id_the_muta
         assert_eq!(
             out.result,
             json!({
-                "error": format!("a may only {verb} its own children — ghost is not one"),
+                "error": format!("a may only {verb} within its own subtree — ghost is not in it"),
                 "reason": "unauthorized",
                 "side": "mutator",
             })
@@ -326,7 +355,7 @@ async fn a_peer_address_in_callable_by_is_refused_at_the_write() {
             r["error"],
             json!(format!(
                 "callable_by[{}] is not a grant key — legal keys: an agent id, $self, $parent, \
-                 $children",
+                 $subtree",
                 fantastic_bundle::py_repr(key)
             )),
             "{key}"
@@ -357,7 +386,7 @@ async fn an_unknown_grant_key_is_refused_at_the_write() {
             r["error"],
             json!(format!(
                 "can_call[{}] is not a grant key — legal keys: an agent id, $self, $parent, \
-                 $children, <guid>|<agent> or <guid>|*",
+                 $subtree, <guid>|<agent> or <guid>|*",
                 fantastic_bundle::py_repr(key)
             )),
             "{key}"

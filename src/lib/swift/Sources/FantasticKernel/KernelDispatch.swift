@@ -1106,16 +1106,27 @@ extension Kernel {
     /// The sender is always a LOCAL agent — a call a bridge leg serves is judged
     /// as the leg. Then the MUTATORS' children-only rule. A sender with no record
     /// → empty grant → deny-all.
+    /// Every id ABOVE `agent` — what `$subtree` matches against: a grant holder
+    /// reaches the other end when it is one of these. A peer target (no local
+    /// parent) has none.
+    public func ancestorIds(of agent: Agent?) -> Set<String> {
+        var out: Set<String> = []
+        var next = agent?.parentId
+        while let pid = next, out.insert(pid.value).inserted {
+            next = self.agent(pid)?.parentId
+        }
+        return out
+    }
+
     func gate(sender: AgentId, verb: String, target: Agent, payload: JSON) -> JSON? {
         let senderAgent = agent(sender)
         let sCan = senderAgent?.metaValue(forKey: "can_call") ?? .null
         let sParent = senderAgent?.parentId?.value
-        let sKids = Set(senderAgent?.childIds().map { $0.value } ?? [])
 
         // Egress — may the SENDER call the target?
         let d = authorizeCall(
             grant: sCan, verb: verb, otherId: target.id.value,
-            holderId: sender.value, parentId: sParent, childIds: sKids)
+            holderId: sender.value, parentId: sParent, ancestorIds: ancestorIds(of: target))
         if !d.allowed {
             if let remote = target.remote {
                 return .object([
@@ -1146,7 +1157,7 @@ extension Kernel {
         let di = authorizeCall(
             grant: target.metaValue(forKey: "callable_by") ?? .null, verb: verb,
             otherId: sender.value, holderId: target.id.value, parentId: target.parentId?.value,
-            childIds: Set(target.childIds().map { $0.value }))
+            ancestorIds: ancestorIds(of: senderAgent))
         if !di.allowed {
             return .object([
                 "error": .string(
@@ -1156,31 +1167,27 @@ extension Kernel {
             ])
         }
 
-        // MUTATORS answered by the root: the operand must be a DIRECT CHILD of
-        // the sender.
+        // MUTATORS answered by the root: the operand must be in the sender's own
+        // subtree.
         if mutatorVerbs.contains(verb) && target.parentId == nil {
             return mutatorDenial(sender: sender, verb: verb, payload: payload)
         }
         return nil
     }
 
-    /// The MUTATOR rule: `create_agent`'s `parent_id` is the sender;
-    /// `update_agent` / `delete_agent`'s `id` names an agent whose parent is the
-    /// sender (an unknown id is not one). A MISSING or non-string operand is not
-    /// judged here: the verb's own missing/shape refusal answers it. Refusal, or
-    /// nil.
+    /// The MUTATOR rule: `create_agent`'s `parent_id` is the sender or an agent
+    /// below it; `update_agent` / `delete_agent`'s `id` names an agent below the
+    /// sender, any depth (an unknown id is in no subtree). A MISSING or non-string
+    /// operand is not judged here: the verb's own missing/shape refusal answers it.
+    /// Refusal, or nil.
     private func mutatorDenial(sender: AgentId, verb: String, payload: JSON) -> JSON? {
         let field = verb == "create_agent" ? "parent_id" : "id"
         guard let oid = payload[field].asString, !oid.isEmpty else { return nil }
-        let owned: Bool
-        if verb == "create_agent" {
-            owned = oid == sender.value
-        } else {
-            owned = agent(AgentId(oid))?.parentId == sender
-        }
+        let below = agent(AgentId(oid)).map { ancestorIds(of: $0).contains(sender.value) } ?? false
+        let owned = below || (verb == "create_agent" && oid == sender.value)
         if owned { return nil }
         return .object([
-            "error": .string("\(sender.value) may only \(verb) its own children — \(oid) is not one"),
+            "error": .string("\(sender.value) may only \(verb) within its own subtree — \(oid) is not in it"),
             "reason": .string("unauthorized"), "side": .string("mutator"),
         ])
     }

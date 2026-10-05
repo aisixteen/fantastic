@@ -572,7 +572,8 @@ impl Kernel {
         let mine = self.tasks.carriers(crate::tasks::current_task());
         let deadline = std::time::Instant::now() + QUIET_TIMEOUT;
         // QUIET WAITS ON DISPATCHES ONLY — a forked service loop never settles.
-        while std::time::Instant::now() < deadline && !self.tasks.pending_dispatches(&mine).is_empty()
+        while std::time::Instant::now() < deadline
+            && !self.tasks.pending_dispatches(&mine).is_empty()
         {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }

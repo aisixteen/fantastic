@@ -163,19 +163,19 @@ extension Kernel {
         .object([
             "create_agent": .string(
                 "args: handler_module:str, parent_id:str REQUIRED, id:str?, **meta. Creates "
-                    + "a CHILD OF `parent_id` — an agent names its own id (it creates only its "
-                    + "own children); 'kernel_state' for top-level. No default parent."),
+                    + "a CHILD OF `parent_id` — an agent names its own id or an agent in its "
+                    + "subtree; 'kernel_state' for top-level. No default parent."),
             "update_agent": .string(
                 "args: id:str, **meta. EVERY FIELD YOU NAME IS REPLACED, NOT MERGED (a "
                     + "field you do not name is untouched), so a dict field must be sent WHOLE — "
                     + "`can_call`/`callable_by` included: restate every key you want to keep, the "
                     + "baseline `$self` among them, or the keys you omit are GONE. Granting one "
-                    + "edge reads like a PATCH and behaves like a PUT. An agent updates only its "
-                    + "own children."),
+                    + "edge reads like a PATCH and behaves like a PUT. An agent updates only "
+                    + "agents in its own subtree."),
             "delete_agent": .string(
                 "args: id:str. CASCADES — deletes that agent AND ITS WHOLE SUBTREE, deepest "
                     + "first; refuses if any descendant carries `delete_lock`. An agent deletes "
-                    + "only its own children."),
+                    + "only agents in its own subtree."),
             "list_agents": .string("No args. Every agent's record, flat. Paged."),
             "ps": .string(
                 "No args. The live kernel-wide TASK TABLE — {tasks:[{id, agent, parent, "
@@ -282,7 +282,7 @@ extension Kernel {
 
     /// A grant map's SHAPE, judged at WRITE time — the gate only judges edges.
     /// `{key: "*" | [verbs]}`, a key being an agent id, `$self`, `$parent`,
-    /// `$children` — and, in `can_call` only, `<guid>|<agent>` or `<guid>|*` (an
+    /// `$subtree` — and, in `can_call` only, `<guid>|<agent>` or `<guid>|*` (an
     /// outbound peer address; a caller is always local); anything else is
     /// refused so a record can never carry a grant the gate silently denies on.
     private func badGrantShape(_ meta: OrderedDictionary<String, JSON>) -> String? {

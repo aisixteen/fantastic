@@ -69,8 +69,7 @@ async def _call(root, target, payload, **item) -> dict:
 
 
 async def _grandchild(root) -> str:
-    """`gc` under `mid` under the root — NOT a direct child, so the root's baseline
-    `$children` does not reach it."""
+    """`gc` under `mid` under the root — NOT a direct child of the root."""
     for aid, parent in (("mid", root.id), ("gc", "mid")):
         r = (
             await _call(

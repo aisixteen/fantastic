@@ -147,7 +147,7 @@ struct MemoryTransportPinTests {
             [
                 "type": "create_agent", "parent_id": "kernel_state",
                 "handler_module": "ws_bridge.tools", "id": "b_leg", "transport": "memory",
-                "can_call": ["$children": "*"],
+                "can_call": ["$subtree": "*"],
             ])["id"]
         #expect(bLeg == "b_leg")
         let echo = await op(

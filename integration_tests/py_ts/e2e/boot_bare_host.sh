@@ -61,7 +61,7 @@ k create_agent "parent_id=$WEB" handler_module=file_bridge.tools id=canvas_page 
     root=canvas_page allow='["."]' readonly=true ingress_rule=allow_all_ingress >/dev/null
 # THE LEGS' RIGHTS, both halves: each reaches the root (privileged verbs named —
 # never under `*`), web and the memory store; the root accepts both.
-BASE='"$self":"*","$parent":"*","$children":"*"'
+BASE='"$self":"*","$parent":"*","$subtree":"*"'
 for LEG in "$WS" "$REST"; do
   k update_agent "id=$LEG" \
     "can_call={$BASE,\"kernel_state\":[\"*\",\"create_agent\",\"update_agent\",\"delete_agent\"],\"$WEB\":\"*\",\"memory\":\"*\"}" >/dev/null

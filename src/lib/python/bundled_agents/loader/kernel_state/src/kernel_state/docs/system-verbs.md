@@ -23,7 +23,7 @@ and finished sixteen messages having created nothing.
 `create_agent` — args: `handler_module:str`, `parent_id:str` **(required)**, `id:str?`, `**meta`
 : Create a child of `parent_id` and boot it. An agent names **its own id** — it
   creates only its OWN children (`side:'mutator'` otherwise, "<you> may only
-  create_agent its own children — <parent_id> is not one"), and needs
+  create_agent within its own subtree — <parent_id> is not in it"), and needs
   `create_agent` granted on both ends (its `can_call` on the root, the root's
   `callable_by` for it). The operator names any parent (`kernel_state` for a
   top-level agent). There is no default
@@ -43,7 +43,7 @@ and finished sixteen messages having created nothing.
   names must have the sender as its parent — after the two-sided gate on the root
   (`update_agent` in its `can_call` on the root and in the root's `callable_by`).
   Otherwise `{reason:'unauthorized', side:'mutator'}`, "<you> may only
-  update_agent its own children — <id> is not one" — an id naming no agent
+  update_agent within its own subtree — <id> is not in it" — an id naming no agent
   included. A missing or non-string `id` (or `parent_id` for `create_agent`) gets
   the verb's own `missing_arg` refusal instead. So no agent edits its own record:
   grants come from above — the agent's parent or the operator writes them.

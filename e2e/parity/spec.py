@@ -413,7 +413,7 @@ class CaptureKernel(HostKernel):
                 "ingress_rule": "allow_all_ingress",
                 "callable_by": {**BASE, "$parent": "*"},
                 "can_call": {**BASE, self.root_id: ROOT_VERBS, "kernel": "*",
-                             "$children": "*", **reach},
+                             "$subtree": "*", **reach},
             },
         }
         for rel, rec in legs.items():

@@ -75,7 +75,7 @@ def seed_extra(k, w, port):
     `"*"` covers every verb, `state_subscribe` included (minimal model, owner
     2026-10-04): the root accepts `ws`/`web`/`wsx`, and the legs reach the root.
     `outsider` is seeded under the ROOT, so no leg's grant names it — the leg
-    reaches its own children (`$children`), and a REST-created agent would be one.
+    reaches its own children (`$subtree`), and a REST-created agent would be one.
     """
     from helpers.host.driver import ROOT_VERBS
     from spec import read_rec, write_rec
@@ -98,7 +98,7 @@ def seed_extra(k, w, port):
     # children, and each leg accepts its parent.
     put("agents/web2", {"id": "web2", "handler_module": "web.tools", "parent_id": k.root_id,
                         "port": k.port2,
-                        "can_call": {**BASE, k.root_id: "*", "$children": "*", **reach}})
+                        "can_call": {**BASE, k.root_id: "*", "$subtree": "*", **reach}})
     # OPEN leg, NO target grants: the egress half alone.
     put("agents/web2/agents/wsx", {"id": "wsx", "handler_module": "web_ws.tools",
                                    "parent_id": "web2", "ingress_rule": "allow_all_ingress",
@@ -115,7 +115,7 @@ def seed_extra(k, w, port):
                             "callable_by": {**BASE, **{leg: "*" for leg in LEGS}}})
     put("agents/web3", {"id": "web3", "handler_module": "web.tools", "parent_id": k.root_id,
                         "port": k.port3,
-                        "can_call": {**BASE, k.root_id: "*", "$children": "*", **reach}})
+                        "can_call": {**BASE, k.root_id: "*", "$subtree": "*", **reach}})
     put("agents/web3/agents/wss", {"id": "wss", "handler_module": "web_ws.tools",
                                    "parent_id": "web3",
                                    "callable_by": {**BASE, "$parent": "*"},

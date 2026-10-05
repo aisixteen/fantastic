@@ -43,7 +43,7 @@ can_call:
   - write
 callable_by:
   $parent: '*'
-  $children: '*'
+  $subtree: '*'
 nested:
   list:
   - 1

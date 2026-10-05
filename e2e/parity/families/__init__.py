@@ -16,7 +16,7 @@ from pathlib import Path
 
 #: Baseline grant tokens. Keys in a grant map are literal ids or `$tokens`;
 #: `"*"` is a legal VALUE (every verb) and never a legal KEY (it matches no id).
-BASE = {"$self": "*", "$parent": "*", "$children": "*"}
+BASE = {"$self": "*", "$parent": "*", "$subtree": "*"}
 #: THE ROOT'S ID — what every runtime seeds (`kernel_state`; `Ctx.boot` checks
 #: the measured one against it). A grant names it: `kernel` is the reserved
 #: ADDRESS of the root, never a grant key — under the minimal model (owner,

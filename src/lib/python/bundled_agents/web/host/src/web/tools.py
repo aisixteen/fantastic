@@ -251,7 +251,7 @@ def _browser_reachable(web_id: str, kernel) -> list[str]:
     would be a second truth that silently drifts — which is the exact bug this
     field exists to expose."""
     from io_bridge import gate_inbound, resolve_ingress
-    from kernel._authz import authorize_call
+    from kernel._authz import ancestor_ids, authorize_call
 
     web = kernel.ctx.agents.get(web_id)
     if web is None:
@@ -273,7 +273,7 @@ def _browser_reachable(web_id: str, kernel) -> list[str]:
             aid,
             holder_id=web_id,
             holder_parent=web.record.get("parent_id"),
-            holder_children=frozenset(getattr(web, "_children", {}) or {}),
+            other_ancestors=ancestor_ids(agent),
         )
         if not egress.allowed:
             continue
@@ -283,7 +283,7 @@ def _browser_reachable(web_id: str, kernel) -> list[str]:
             web_id,
             holder_id=aid,
             holder_parent=rec.get("parent_id"),
-            holder_children=frozenset(getattr(agent, "_children", {}) or {}),
+            other_ancestors=ancestor_ids(web),
         )
         if not ingress.allowed:
             continue

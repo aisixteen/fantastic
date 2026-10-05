@@ -188,7 +188,8 @@ async def main():
                     "payload": {
                         "type": "create_agent",
                         "parent_id": home(root),
-                        "handler_module": "file_bridge.tools", "allow": ["."],
+                        "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                         "id": "kernel_store",
                         "root": ".fantastic",
                         "ingress_rule": "allow_all_ingress",
@@ -222,54 +223,62 @@ async def main():
                     "payload": {
                         "type": "create_agent",
                         "parent_id": home(root),
-                        "handler_module": "file_bridge.tools", "allow": ["."],
+                        "handler_module": "file_bridge.tools",
+                        "allow": ["."],
                         "id": "yaml_store",
                         # a DATA store — the records under `.fantastic` stay the loader's
                         "root": ".fantastic/data",
                         "ingress_rule": "allow_all_ingress",
                         "callable_by": {"ai": "*"},  # two-sided deny-all: accept the AI
                     },
-                }
+                },
             ]
         )
     )[0]["result"]
+
     # The three guards. All start SEALED (no ingress_rule) — the kernel's default. The
     # CALL gate (callable_by) and the IO gate (ingress_rule) are SEPARATE axes: the
     # guards accept the AI on the call gate here, so what the AI must still DISCOVER +
     # OPEN is the io seal (`ingress_rule=allow_all_ingress`), which is the point of this probe.
-    for gid, desc, _, (fname, body) in GUARDS:
-        os.makedirs(gid, exist_ok=True)
-        with open(os.path.join(gid, fname), "w") as fh:
-            # Each guard's file carries a CANARY minted this run — the same trick
-            # `live_compose` uses for its digest. A status code can be right for the
-            # wrong reason; a fresh random string coming back over HTTP proves the
-            # bytes actually crossed the real surface.
-            fh.write(body + f"canary: {CANARY[gid]}\n")
-        (
-            await root.send(
-                [
-                    {
-                        "target": root.id,
-                        "payload": {
-                            "type": "create_agent",
-                            "parent_id": home(root),
-                            "handler_module": "file_bridge.tools", "allow": ["."],
-                            "id": gid,
-                            "root": gid,
-                            "description": desc,
-                            # All three start IDENTICALLY closed to the browser: the AI is
-                            # admitted, `web` is not, and the io leg is sealed. Seeding a `web`
-                            # grant here instead made `assets` LOOK wired while its io leg was
-                            # shut, and the model read the call gate, saw the grant and reported
-                            # "the public surface keeps working" without a byte ever moving
-                            # (measured 2026-08-21). Identical start = the descriptions are the
-                            # only signal, which is the whole design of this probe.
-                            "callable_by": {"ai": "*"},
-                        },
-                    }
-                ]
-            )
-        )[0]["result"]
+    # They are the AI's CHILDREN — created once it exists (below): an agent rewrites
+    # only records in its own subtree, so a guard elsewhere would be one it may not
+    # touch, and the posture change it is asked for would be unreachable.
+    async def _make_guards(parent: str) -> None:
+        for gid, desc, _, (fname, body) in GUARDS:
+            os.makedirs(gid, exist_ok=True)
+            with open(os.path.join(gid, fname), "w") as fh:
+                # Each guard's file carries a CANARY minted this run — the same trick
+                # `live_compose` uses for its digest. A status code can be right for the
+                # wrong reason; a fresh random string coming back over HTTP proves the
+                # bytes actually crossed the real surface.
+                fh.write(body + f"canary: {CANARY[gid]}\n")
+            made = (
+                await root.send(
+                    [
+                        {
+                            "target": root.id,
+                            "payload": {
+                                "type": "create_agent",
+                                "parent_id": parent,
+                                "handler_module": "file_bridge.tools",
+                                "allow": ["."],
+                                "id": gid,
+                                "root": gid,
+                                "description": desc,
+                                # All three start IDENTICALLY closed to the browser: the AI is
+                                # admitted, `web` is not, and the io leg is sealed. Seeding a `web`
+                                # grant here instead made `assets` LOOK wired while its io leg was
+                                # shut, and the model read the call gate, saw the grant and reported
+                                # "the public surface keeps working" without a byte ever moving
+                                # (measured 2026-08-21). Identical start = the descriptions are the
+                                # only signal, which is the whole design of this probe.
+                                "callable_by": {"ai": "*"},
+                            },
+                        }
+                    ]
+                )
+            )[0]["result"]
+            assert not (isinstance(made, dict) and made.get("error")), made
 
     # A way to CHECK. Sealed like every other io leg and named nowhere in the task,
     # so using it is a decision the model makes. With `web` live on a known port
@@ -340,7 +349,7 @@ async def main():
     CAN_CALL = {
         "$self": "*",
         "$parent": "*",
-        "$children": "*",
+        "$subtree": "*",
         # THE ROOT, by whatever id this runtime gives it (python: kernel_state,
         # rust/swift: core).
         root.id: ["*", "create_agent", "update_agent", "delete_agent"],
@@ -367,19 +376,23 @@ async def main():
     # their own copy of all that, and every copy was behind the others.
     watch = Watch()
     conn = await connect(
-        root, core, BK, can_call=CAN_CALL, limits=LIM, watch=watch, record=EXTRA,
+        root,
+        core,
+        BK,
+        can_call=CAN_CALL,
+        limits=LIM,
+        watch=watch,
+        record=EXTRA,
         # The other half of the gate: SIBLINGS have no baseline edge, so without
         # it the human's task is refused at ingress and the chain never starts.
         callable_by={"user": "*"},
     )
     aid, spy = conn.id, conn.proxy
     runaway, transcript = conn.trips, spy.transcript
+    await _make_guards(aid)
 
     print("═" * (W + 4))
-    print(
-        f"  {MODEL}   ·   plan / change / report"
-
-    )
+    print(f"  {MODEL}   ·   plan / change / report")
     print("  3 sealed file_bridge agents, real contents; descriptions say who may read")
     print("═" * (W + 4))
 
@@ -400,7 +413,9 @@ async def main():
                         "type": "send",
                         "target": aid,
                         "payload": {
-                            "type": "send", "text": TASK, "client_id": "probe",
+                            "type": "send",
+                            "text": TASK,
+                            "client_id": "probe",
                         },
                     },
                 }

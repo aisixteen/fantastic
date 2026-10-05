@@ -135,7 +135,7 @@ async fn declared_agents_carry_baseline_plus_explicit_grants() {
     // the baseline is `$self` alone — every other edge is explicit
     assert_eq!(can["$self"], json!("*"));
     assert!(
-        can.get("$parent").is_none() && can.get("$children").is_none(),
+        can.get("$parent").is_none() && can.get("$subtree").is_none(),
         "{can}"
     );
     assert_eq!(can["memory"], json!(["set", "read"]));
@@ -734,7 +734,7 @@ async fn an_agent_sent_boot_is_refused_and_re_runs_nothing() {
     // The operator revokes worker's lateral edge and deletes `memory`.
     for p in [
         json!({"type": "update_agent", "id": "worker", "can_call": {
-            "$self": "*", "$parent": "*", "$children": "*", "static_loader": ["boot"]}}),
+            "$self": "*", "$parent": "*", "$subtree": "*", "static_loader": ["boot"]}}),
         json!({"type": "delete_agent", "id": "memory"}),
     ] {
         let r = kernel

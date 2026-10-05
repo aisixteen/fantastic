@@ -18,8 +18,8 @@
 // Both `can_call` and `callable_by` are grant maps of the same shape,
 // `{key: "*" | ["<verb>", …]}`. `"*"` covers EVERY verb. A key is one of:
 //   - a literal local agent id (never containing `|`);
-//   - `$self` (the holder), `$parent` (its parent), `$children` (its DIRECT
-//     children) — resolved relative to the grant's HOLDER at call time;
+//   - `$self` (the holder), `$parent` (its parent), `$subtree` (every agent
+//     BELOW it, any depth) — resolved relative to the grant's HOLDER at call time;
 //   - `<guid>|<agent>` / `<guid>|*` — one agent / every agent of a connected
 //     kernel: `can_call` ONLY (an outbound peer address).
 // A caller is always a LOCAL agent: a call a bridge leg serves is judged as the
@@ -46,8 +46,8 @@ public struct Decision {
 
 /// The remedy shown on any denial: authority descends, it is never self-raised.
 public let fromAbove: String =
-    "grants come from above — the agent's parent (update_agent on its direct "
-    + "child) or the operator writes can_call and callable_by; an agent never "
+    "grants come from above — an ancestor (update_agent on an agent in its "
+    + "subtree) or the operator writes can_call and callable_by; an agent never "
     + "raises its own"
 
 /// The baseline stamped + merged on every agent, on `can_call`: `{$self: "*"}`.
@@ -65,15 +65,15 @@ public func defaultCallableBy() -> JSON {
 /// agent. Python `LEGAL_GRANT_KEYS`.
 public func legalGrantKeys(_ field: String) -> String {
     field == "can_call"
-        ? "an agent id, $self, $parent, $children, <guid>|<agent> or <guid>|*"
-        : "an agent id, $self, $parent, $children"
+        ? "an agent id, $self, $parent, $subtree, <guid>|<agent> or <guid>|*"
+        : "an agent id, $self, $parent, $subtree"
 }
 
 /// The structural tokens — the only `$` keys a grant map may carry.
-public let grantTokens: Set<String> = ["$self", "$parent", "$children"]
+public let grantTokens: Set<String> = ["$self", "$parent", "$subtree"]
 
 /// Is `key` a legal key of grant `field`? Legal on both: a literal agent id
-/// (non-empty, no `$` prefix, no `|`, not `*`), `$self`/`$parent`/`$children`.
+/// (non-empty, no `$` prefix, no `|`, not `*`), `$self`/`$parent`/`$subtree`.
 /// `can_call` also takes `<guid>|<agent>` or `<guid>|*` (exactly one `|`, both
 /// halves non-empty) — an outbound peer address; in `callable_by` such a key
 /// could never match a caller and is refused. Python `_authz.bad_grant_key`.
@@ -102,14 +102,15 @@ private func verbAllowed(_ grant: JSON, _ verb: String) -> Bool {
 /// One matching engine, used BOTH ways. `grant` is the HOLDER's grant map
 /// (`can_call` for egress, `callable_by` for ingress); `otherId` is the id at the
 /// other end of the edge (the target for egress, the sender for ingress). Tokens
-/// resolve relative to the holder. Absent/empty grant ⇒ deny.
+/// resolve relative to the holder. Absent/empty grant ⇒ deny. `ancestorIds` is
+/// every id above the other end — `$subtree` matches when the holder is one.
 public func authorizeCall(
     grant: JSON,
     verb: String,
     otherId: String,
     holderId: String,
     parentId: String?,
-    childIds: Set<String>
+    ancestorIds: Set<String>
 ) -> Decision {
     if case .object(let map) = grant {
         for (key, g) in map {
@@ -117,7 +118,7 @@ public func authorizeCall(
             switch key {
             case "$self": matched = otherId == holderId
             case "$parent": matched = parentId == otherId
-            case "$children": matched = childIds.contains(otherId)
+            case "$subtree": matched = ancestorIds.contains(holderId)
             case let k where k.hasPrefix("$"): matched = false
             // every agent of ONE peer kernel: `<guid>|*` (a local id never
             // carries `|`, so this only ever matches an outbound peer target)

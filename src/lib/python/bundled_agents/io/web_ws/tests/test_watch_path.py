@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 from web.app import make_app
 from web_ws.tools import _make_endpoint
 
-BASE = {"$self": "*", "$parent": "*", "$children": "*"}
+BASE = {"$self": "*", "$parent": "*", "$subtree": "*"}
 PY = sys.executable
 
 

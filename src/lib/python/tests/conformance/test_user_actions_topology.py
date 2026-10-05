@@ -267,7 +267,7 @@ def test_toctou_double_click_buys_exactly_once(wired):
 def test_the_leg_is_scoped_to_its_two_lanes(wired):
     """Fewest-endpoints requires the ONE leg to be narrow: anything beyond the
     two granted lanes dies at the leg's own egress. The floor: baseline grants
-    ($self/$parent/$children) always merge, so a leg created under the root can
+    ($self/$parent/$subtree) always merge, so a leg created under the root can
     still reflect the ROOT — full scoping means hanging legs under a scoped
     parent. Lanes hold against SIBLINGS, which is what this pins."""
     kernel, client = wired

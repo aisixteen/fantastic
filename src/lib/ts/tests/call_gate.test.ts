@@ -47,7 +47,7 @@ test("deny-all: one sibling cannot reach another without a grant", async () => {
   assert.equal((out!.result as Payload)["hint"], FROM_ABOVE);
   assert.equal(
     FROM_ABOVE,
-    "grants come from above — the agent's parent (update_agent on its direct child) or the operator writes can_call and callable_by; an agent never raises its own",
+    "grants come from above — an ancestor (update_agent on an agent in its subtree) or the operator writes can_call and callable_by; an agent never raises its own",
   );
 });
 
@@ -82,11 +82,11 @@ test("the baseline is {$self: \"*\"} only — not even your creator is reachable
   const alice = { send: (items: Parameters<Kernel["send"]>[0]) => sendAs(k, "alice", items) };
   const [up] = await alice.send([{ target: "kernel_state", payload: { type: "reflect" } }]);
   assert.equal((up!.result as Payload)["side"], "egress", JSON.stringify(up!.result));
-  // $parent on alice's side, $children on the root's: the edge opens.
+  // $parent on alice's side, $subtree on the root's: the edge opens.
   k.get("alice")!.meta["can_call"] = { $self: "*", $parent: ["reflect"] };
   const [half] = await alice.send([{ target: "kernel_state", payload: { type: "reflect" } }]);
   assert.equal((half!.result as Payload)["side"], "ingress", JSON.stringify(half!.result));
-  k.get("kernel_state")!.meta["callable_by"] = { $self: "*", $children: ["reflect"] };
+  k.get("kernel_state")!.meta["callable_by"] = { $self: "*", $subtree: ["reflect"] };
   const [ok] = await alice.send([{ target: "kernel_state", payload: { type: "reflect" } }]);
   assert.equal(ok!.status, "completed", JSON.stringify(ok!.result));
   // $self covers every verb on yourself
@@ -95,11 +95,11 @@ test("the baseline is {$self: \"*\"} only — not even your creator is reachable
 });
 
 test("`*` covers EVERY verb — create_agent and the kernel verbs included; a list covers what it names", () => {
-  const ctx = { holderId: "alice", holderParent: "kernel_state", holderChildren: new Set(["kid"]) };
+  const ctx = { holderId: "alice", holderParent: "kernel_state", otherAncestors: new Set(["alice", "kernel_state"]) };
   for (const verb of ["create_agent", "update_agent", "delete_agent", "state_subscribe", "ps", "cancel", "ledger", "stop", "watch", "poke"]) {
     assert.equal(authorizeCall({ $parent: "*" }, verb, "kernel_state", ctx), true, verb);
     assert.equal(authorizeCall({ kernel_state: "*" }, verb, "kernel_state", ctx), true, verb);
-    assert.equal(authorizeCall({ $children: "*" }, verb, "kid", ctx), true, verb);
+    assert.equal(authorizeCall({ $subtree: "*" }, verb, "kid", ctx), true, verb);
     assert.equal(authorizeCall({ $self: "*" }, verb, "alice", ctx), true, verb);
     assert.equal(authorizeCall({ $parent: [verb] }, verb, "kernel_state", ctx), true, verb);
     assert.equal(authorizeCall({ $parent: ["other"] }, verb, "kernel_state", ctx), false, verb);
@@ -110,10 +110,11 @@ test("an unknown $token matches nothing rather than everything", () => {
   const ctx = {
     holderId: "alice",
     holderParent: "kernel_state",
-    holderChildren: new Set(["kid"]),
+    otherAncestors: new Set(["alice", "kernel_state"]),
   };
   assert.equal(authorizeCall({ $everyone: "*" }, "poke", "bob", ctx), false);
-  assert.equal(authorizeCall({ $children: "*" }, "poke", "kid", ctx), true);
+  assert.equal(authorizeCall({ $subtree: "*" }, "poke", "kid", ctx), true);
+  assert.equal(authorizeCall({ $children: "*" }, "poke", "kid", ctx), false);
 });
 
 test("#39 — watch is GATED: an agent cannot mirror an inbox it may not call", async () => {
@@ -216,7 +217,7 @@ test("a KERNEL verb at the root takes the same two-sided check — no ingress sk
 
 
 test("a malformed grant is DENY, never a character walk", () => {
-  const ctx = { holderId: "a", holderParent: "p", holderChildren: new Set<string>() };
+  const ctx = { holderId: "a", holderParent: "p", otherAncestors: new Set<string>() };
   assert.equal(authorizeCall("*" as unknown as Payload, "poke", "0", ctx), false);
   assert.equal(authorizeCall(["*"] as unknown as Payload, "poke", "0", ctx), false);
 });
@@ -273,7 +274,7 @@ test("an emit onto ANOTHER agent needs both halves; your own inbox stays ungated
 });
 
 test("`<guid>|*` in can_call names every agent of ONE peer kernel — never a local id, never another kernel", () => {
-  const ctx = { holderId: "canvas", holderParent: "root", holderChildren: new Set<string>() };
+  const ctx = { holderId: "canvas", holderParent: "root", otherAncestors: new Set<string>() };
   const grant = { "h0|*": ["around"] };
   assert.equal(authorizeCall(grant, "around", "h0|cell_7", ctx), true);
   assert.equal(authorizeCall(grant, "around", "h1|cell_7", ctx), false);
@@ -315,7 +316,7 @@ test("watching the ROOT is an ordinary two-sided edge — no named-grant rule", 
   assert.equal(denied?.["error"], "alice may not call 'watch' on kernel_state");
   k.get("alice")!.meta["can_call"] = { $self: "*", $parent: "*" };
   assert.equal((await alice.watch("kernel_state", "alice"))?.["side"], "ingress");
-  k.get("kernel_state")!.meta["callable_by"] = { $self: "*", $children: "*" };
+  k.get("kernel_state")!.meta["callable_by"] = { $self: "*", $subtree: "*" };
   assert.equal(await alice.watch("kernel_state", "alice"), null);
 });
 

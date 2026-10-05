@@ -183,9 +183,9 @@ const out = () => document.getElementById("out");
   // the AI and the leg; the panel then grants the AI its reach onto the bus
   await fantastic.send("kernel_state", { type: "create_agent", parent_id: "kernel_state",
     handler_module: "yaml_state.tools", id: "bus",
-    callable_by: { $self: "*", $parent: "*", $children: "*", [${J(ai)}]: "*", [${J(host.webWsId)}]: "*" } });
+    callable_by: { $self: "*", $parent: "*", $subtree: "*", [${J(ai)}]: "*", [${J(host.webWsId)}]: "*" } });
   await fantastic.send("kernel_state", { type: "update_agent", id: ${J(ai)},
-    can_call: { $self: "*", $parent: "*", $children: "*", memory: "*", bus: "*" } });
+    can_call: { $self: "*", $parent: "*", $subtree: "*", memory: "*", bus: "*" } });
   fantastic.watch("bus", (ev) => {
     if (ev && ev.type === "set" && ev.key === "display") out().textContent = String(ev.value);
   });
@@ -256,7 +256,7 @@ test("E: AI tool-call → another AI leaf (AI→AI, no recursion)", async (t) =>
 let buf = "";
 const out = () => document.getElementById("out");
 (async () => {
-  const base = { $self: "*", $parent: "*", $children: "*" };
+  const base = { $self: "*", $parent: "*", $subtree: "*" };
   await fantastic.send("kernel_state", { type: "update_agent", id: "memory",
     callable_by: { ...base, [${J(ai)}]: "*", aileaf: "*" } });
   await fantastic.send("kernel_state", { type: "create_agent", parent_id: "kernel_state",

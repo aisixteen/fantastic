@@ -130,7 +130,7 @@ private func makeLeg(
     // accepts the leg by name.
     for t in canCall where t != "kernel_state" || peerGuid != nil {
         var accept: JSON = .object([
-            "$self": .string("*"), "$parent": .string("*"), "$children": .string("*"),
+            "$self": .string("*"), "$parent": .string("*"), "$subtree": .string("*"),
         ])
         accept[id] = .string("*")
         _ = await kernel.send([

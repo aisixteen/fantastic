@@ -54,7 +54,7 @@ RECORD = {
     "tab": "a\tb",
     "long": "word " * 30,
     "can_call": {"$self": "*", "$parent": "*", "kernel_store": ["read", "write"]},
-    "callable_by": {"$parent": "*", "$children": "*"},
+    "callable_by": {"$parent": "*", "$subtree": "*"},
     "nested": {"list": [1, "two", {"three": []}], "map": {}, "deep": {"x": [[]]}},
 }
 

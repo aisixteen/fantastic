@@ -360,11 +360,11 @@ async fn add_peer(kernel: &Arc<Kernel>, tmp: &TempDir, primary: &AgentId) -> Age
                     // update REPLACES the named field — the stamped baseline
                     // must ride along or self-delivery loses its own egress.
                     "can_call": {
-                        "$self": "*", "$parent": "*", "$children": "*",
+                        "$self": "*", "$parent": "*", "$subtree": "*",
                         ff: "*", "cli": "*", MEMORY: "*", other.as_str(): "*",
                     },
                     "callable_by": {
-                        "$self": "*", "$parent": "*", "$children": "*",
+                        "$self": "*", "$parent": "*", "$subtree": "*",
                         other.as_str(): "*",
                     },
                 }),
@@ -2081,7 +2081,7 @@ async fn a_dying_handler_comes_back_as_an_error_not_a_dead_chain() {
             .remove(0)
             .result;
     let _ = kernel
-            .send(vec![Item::new(AgentId::from("kernel_state"), json!({"type": "update_agent", "id": backend_id.as_str(), "can_call": {"$self": "*", "$parent": "*", "$children": "*", file_id.as_str(): "*", "cli": "*", MEMORY: "*", raiser.as_str(): "*"}}))])
+            .send(vec![Item::new(AgentId::from("kernel_state"), json!({"type": "update_agent", "id": backend_id.as_str(), "can_call": {"$self": "*", "$parent": "*", "$subtree": "*", file_id.as_str(): "*", "cli": "*", MEMORY: "*", raiser.as_str(): "*"}}))])
             .await
             .remove(0)
             .result;

@@ -17,7 +17,7 @@ pass runs ONLY on the kernel's own boot — origin none: the cold boot, or
 any agent granted a reach to the loader could otherwise re-run the manifest — restore a grant the
 operator revoked, re-create an agent the operator deleted, or apply whatever the
 manifest file says at that moment. After boot the roster is
-deny-all like everything else — an agent creates only its own children, and
+deny-all like everything else — an agent creates only within its own subtree, and
 only when granted — so the set of
 agents is FIXED by the manifest. That is the whole point: declare the roster,
 and mutation is closed by the transport's default, not by a mode flag.

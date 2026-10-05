@@ -37,7 +37,7 @@ roster:
   callable_by: '<{''ai'': ''*'', EXECUTOR_LEG: ''*'', ''rest'': ''*'', ''web'': ''*''}>'
 - id: ai
   created_by: helpers.ai.connect
-  can_call: '<{''$self'': ''*'', ''$parent'': ''*'', ''$children'': ''*'', root.id:
+  can_call: '<{''$self'': ''*'', ''$parent'': ''*'', ''$subtree'': ''*'', root.id:
     [''*'', ''create_agent'', ''update_agent'', ''delete_agent''], ''cli'': ''*'',
     ''readings'': ''*'', ''totals'': ''*'', ''user'': ''*'', EXECUTOR_LEG: ''*'',
     store[''id'']: ''*''}>'

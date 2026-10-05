@@ -1,19 +1,20 @@
 roster:
 - id: <agent_id>
   parent_id: <home(root)>
-  can_call: '<{''$self'': ''*'', ''$parent'': ''*'', ''$children'': ''*'', root.id: [''*'',
-    ''create_agent'', ''update_agent'', ''delete_agent''], ''cli'': ''*'', ''readings'': ''*'',
-    ''totals'': ''*'', ''clock'': ''*'', ''brain'': ''*'', ''user'': ''*'', EXECUTOR_LEG:
-    ''*'', store[''id'']: ''*'', memory.MEMORY: ''*''}>'
+  can_call: '<{''$self'': ''*'', ''$parent'': ''*'', ''$subtree'': ''*'', root.id:
+    [''*'', ''create_agent'', ''update_agent'', ''delete_agent''], ''cli'': ''*'',
+    ''readings'': ''*'', ''totals'': ''*'', ''clock'': ''*'', ''brain'': ''*'', ''user'':
+    ''*'', EXECUTOR_LEG: ''*'', store[''id'']: ''*'', memory.MEMORY: ''*''}>'
   callable_by:
     $self: '*'
     $parent: '*'
-    $children: '*'
+    $subtree: '*'
     ai: '*'
     brain: '*'
     user: '*'
     rest: '*'
     web: '*'
+    ws: '*'
 - id: kernel_store
   handler_module: file_bridge.tools
   parent_id: <home(root)>

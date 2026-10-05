@@ -8,7 +8,7 @@ loaders:
   - id: static_loader
     file: fantastic.yaml
     meta:
-      can_call: {$children: "*"}
+      can_call: {$subtree: "*"}
     manifest:
       agents:
         # The child's env carries SHELL and the record permits it, bare.

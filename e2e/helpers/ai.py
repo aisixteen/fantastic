@@ -37,7 +37,7 @@ from helpers import creds, memory
 from helpers.stream import StreamJunction
 from helpers.proxy import Limits, distinct_calls
 
-BASELINE = {"$self": "*", "$parent": "*", "$children": "*"}
+BASELINE = {"$self": "*", "$parent": "*", "$subtree": "*"}
 
 
 @dataclass
@@ -249,8 +249,21 @@ async def connect(
             and ev.get("phase") == "done"
             # `awaiting` is the model's EXPLICIT wait (`<call name="await">`): a benign
             # end of turn, not a failure — the next delivery wakes it (2026-09-10).
-            and det.get("reason") not in (None, "ok", "awaiting")
+            # `dead_turn` is an empty answer the kernel REROLLS with the no-call
+            # nudge (owner, 2026-09-30) — the chain goes on; capping on it cancelled
+            # live chains (graph_shape:rust, 2026-10-05).
+            and det.get("reason") not in (None, "ok", "awaiting", "dead_turn")
         )
+
+    def _ended(ev: dict) -> bool:
+        return ev.get("type") == "status" and ev.get("phase") == "done"
+
+    def _note_end(det: dict) -> None:
+        """EVERY TURN'S END, not only a failed one. A benign end (`ok`, `awaiting`,
+        `dead_turn`) used to leave no line at all, so a chain that stopped after a
+        clean turn could not say HOW that turn ended (subai_graph:rust,
+        2026-10-05)."""
+        print(f"  · turn ended: {det.get('reason') or 'ok'}", flush=True)
 
     if core is None:
         # THE SAME EVENTS, over the socket. A failed pass announces itself as a
@@ -268,6 +281,8 @@ async def connect(
                         _failed(str(det["error"]))
                     if _died(ev, det):
                         _failed(f"turn ended: {det.get('reason')}")
+                    elif _ended(ev):
+                        _note_end(det)
                     if ev.get("type") == "context" and ev.get("phase") == "too_small":
                         _failed(f"context too_small: {det}")
                     if ev.get("type") == "context" and ev.get("phase") == "compacted":
@@ -291,6 +306,8 @@ async def connect(
             det = ev.get("detail") or {}
             if _died(ev, det):
                 _failed(f"turn ended: {det.get('reason')}")
+            elif _ended(ev):
+                _note_end(det)
             if ev.get("type") == "status" and det.get("error"):
                 _failed(det["error"])
             if ev.get("type") == "context" and ev.get("phase") == "too_small":

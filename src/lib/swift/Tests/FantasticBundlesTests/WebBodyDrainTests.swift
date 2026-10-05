@@ -37,7 +37,7 @@ private func mountRestLeg(_ k: Kernel) async {
             "kernel",
             [
                 "type": "update_agent", "id": "kernel_state",
-                "callable_by": ["$self": "*", "$parent": "*", "$children": "*", "rr": "*"],
+                "callable_by": ["$self": "*", "$parent": "*", "$subtree": "*", "rr": "*"],
             ])
     ])
     wire(k, "web", "rr")

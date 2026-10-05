@@ -207,8 +207,8 @@ class HostKernel:
         """Write the faces the driver needs, before the daemon starts.
 
         The root must name the driver on its INGRESS side explicitly: `rest` is
-        a GRANDCHILD (root → web → rest) and `$children` covers direct children
-        only — a create_agent succeeded while a reflect was refused until this
+        a GRANDCHILD (root → web → rest), and the root grants nothing beyond
+        `$self` — a create_agent succeeded while a reflect was refused until this
         was added.
         """
         port = free_port()
@@ -285,13 +285,13 @@ class HostKernel:
              "can_call": {**BASE, self.root_id: ROOT_VERBS, "kernel": "*", "web": "*",
                           memory.MEMORY: "*", **reach}}))
         # The REST leg — the test's operator: the root's kernel verbs, every one of
-        # its own children (`$children`), the declared ids.
+        # its own children (`$subtree`), the declared ids.
         (rest_dir / "agent.yaml").write_text(_dump(
             {"id": "rest", "handler_module": "web_rest.tools", "parent_id": "web",
              "ingress_rule": "allow_all_ingress",
              "callable_by": {**BASE, "$parent": "*"},
              "can_call": {**BASE, self.root_id: ROOT_VERBS, "kernel": "*",
-                          "$children": "*", **reach}}))
+                          "$subtree": "*", **reach}}))
         return port
 
     def boot(self) -> "HostKernel":

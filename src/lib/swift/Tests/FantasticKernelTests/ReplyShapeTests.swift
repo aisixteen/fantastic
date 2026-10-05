@@ -171,7 +171,7 @@ struct ReplyShapeTests {
                 "display_name": .string("Kid"),
                 "can_call": .object([
                     "$self": .string("*"), "$parent": .string("*"),
-                    "$children": .string("*"), "kernel_state": .array([.string("ps")]),
+                    "$subtree": .string("*"), "kernel_state": .array([.string("ps")]),
                 ]),
             ]))
         #expect(
@@ -179,7 +179,7 @@ struct ReplyShapeTests {
                 "id", "handler_module", "display_name", "can_call", "callable_by", "parent_id",
             ], "\(r.serialize())")
         #expect(
-            r["can_call"].asObject?.keys.elements == ["$self", "$parent", "$children", "kernel_state"],
+            r["can_call"].asObject?.keys.elements == ["$self", "$parent", "$subtree", "kernel_state"],
             "\(r.serialize())")
         // The same record read back through `list_agents` keeps that order.
         let listed = await call(k, "kernel", .object(["type": .string("list_agents")]))

@@ -360,7 +360,7 @@ struct WebBundleTests {
                 "type": .string("create_agent"), "parent_id": .string("kernel_state"),
                 "handler_module": .string("say_probe.tools"), "id": .string("cli"),
                 "callable_by": .object([
-                    "$self": .string("*"), "$parent": .string("*"), "$children": .string("*"),
+                    "$self": .string("*"), "$parent": .string("*"), "$subtree": .string("*"),
                     "web": .string("*"),
                 ]),
             ]))
@@ -396,7 +396,7 @@ struct WebBundleTests {
                 "type": .string("create_agent"), "parent_id": .string("kernel_state"),
                 "handler_module": .string("say_probe.tools"), "id": .string("cli"),
                 "callable_by": .object([
-                    "$self": .string("*"), "$parent": .string("*"), "$children": .string("*"),
+                    "$self": .string("*"), "$parent": .string("*"), "$subtree": .string("*"),
                     "web": .string("*"),
                 ]),
             ]))

@@ -69,7 +69,7 @@ writes only its own rows; context for another agent travels in the text.
 THE CALL GATE is minimal, two-sided and explicit (owner decision 2026-10-03).
 Every record carries `can_call` (egress) and `callable_by` (ingress), each
 `{key: "*" | [verb, ...]}`; a key is an agent id, `$self`, `$parent` or
-`$children` (direct children) — `can_call` also takes an outbound peer address
+`$subtree` (every agent below the holder, any depth) — `can_call` also takes an outbound peer address
 `<guid>|<agent>` or `<guid>|*` — anything else is refused `invalid_meta` at the
 write. The baseline stamped on every agent is `{"$self": "*"}` on both fields,
 nothing else. An agent send passes iff the sender's `can_call` grants (target,

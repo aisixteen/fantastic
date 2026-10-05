@@ -187,7 +187,7 @@ LEG = "cb"
 DRIVER = "web_ws"
 #: The baseline `create_agent` stamps on `can_call`. `update_agent` REPLACES a dict
 #: field, so a grant added to it restates the baseline.
-_BASELINE = {"$self": "*", "$parent": "*", "$children": "*"}
+_BASELINE = {"$self": "*", "$parent": "*", "$subtree": "*"}
 
 
 def relay_credentials() -> dict:

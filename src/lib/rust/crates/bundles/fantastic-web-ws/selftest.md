@@ -19,7 +19,7 @@ FANTASTIC=/path/to/rust/target/release/fantastic_kernel
 PORT=18181
 # Grants are explicit, both ends: the host pulls `get_routes` from its leg, and
 # the leg auto-watches its host.
-$FANTASTIC kernel_state create_agent handler_module=web.tools id=w port=$PORT can_call='{"$children": ["get_routes"]}' callable_by='{"$children": ["watch"]}'
+$FANTASTIC kernel_state create_agent handler_module=web.tools id=w port=$PORT can_call='{"$subtree": ["get_routes"]}' callable_by='{"$subtree": ["watch"]}'
 # THE LEG IS THE SENDER of every frame, and a leg with no `ingress_rule` is
 # SEALED — open it consciously, and grant it the reach the frames below need
 # (a grant map is keyed by a literal id, never `*`).

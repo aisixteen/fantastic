@@ -183,7 +183,7 @@ pub(super) async fn serve(k: &Arc<Kernel>, web_id: &str, legs: &[Value]) -> u16 
     let port = free_port();
     let made = create(
         k,
-        json!({"handler_module": HANDLER_MODULE, "callable_by": {"$children": ["watch"]}, "can_call": {"$children": ["get_routes"]}, "id": web_id, "port": port}),
+        json!({"handler_module": HANDLER_MODULE, "callable_by": {"$subtree": ["watch"]}, "can_call": {"$subtree": ["get_routes"]}, "id": web_id, "port": port}),
     )
     .await;
     assert_eq!(made["id"], json!(web_id), "{made}");

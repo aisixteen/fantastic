@@ -819,6 +819,13 @@ func routeReply(
         let queued = runState?.queueDepth() ?? 0
         let running = (await runState?.fifo.busy() ?? false) ? 1 : 0
         let pending = await inFlightTurns.count(selfId.value) + queued + running
+        // TODO (owner, 2026-10-05) — STALL DETECTION. A chain can stop with no error: calls
+        // dispatched, then nothing (subai_graph:rust, 2026-09-03 and 2026-10-05). Three shapes:
+        // (1) a call never settles (no timeout by default, its task stays in `ps`); (2) every
+        // call settled but the reply batch never reached this agent's conversation; (3) the
+        // reply landed but no turn started. This agent KNOWS it is awaiting `pending` work:
+        // if nothing changes for T seconds, emit status `stalled` naming the calls not settled
+        // / not delivered, so a CLI / canvas / harness shows it like any status.
         if pending > 0 || hadItems {
             await emitStatus(
                 kernel: kernel, agentId: selfId, clientId: clientId, phase: "done",

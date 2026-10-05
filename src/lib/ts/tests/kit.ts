@@ -19,7 +19,7 @@ import { UNHANDLED, refusal } from "../src/kernel/refusal.ts";
 export function kin(meta: Payload = {}): Payload {
   const grant = (field: string): Payload => ({
     $parent: "*",
-    $children: "*",
+    $subtree: "*",
     ...((meta[field] as Payload | undefined) ?? {}),
   });
   return { ...meta, can_call: grant("can_call"), callable_by: grant("callable_by") };

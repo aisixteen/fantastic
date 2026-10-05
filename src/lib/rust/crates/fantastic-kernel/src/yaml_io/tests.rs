@@ -52,7 +52,7 @@ fn record() -> Value {
             "can_call",
             json!({"$self": "*", "$parent": "*", "kernel_store": ["read", "write"]}),
         ),
-        ("callable_by", json!({"$parent": "*", "$children": "*"})),
+        ("callable_by", json!({"$parent": "*", "$subtree": "*"})),
         (
             "nested",
             json!({"list": [1, "two", {"three": []}], "map": {}, "deep": {"x": [[]]}}),

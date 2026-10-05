@@ -57,7 +57,7 @@ async fn create_bridge(kernel: &Arc<Kernel>, id: &str, peer_id: &str, transport:
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
-                "handler_module": WS_HANDLER_MODULE, "can_call": {"$parent": "*", "$children": "*"},
+                "handler_module": WS_HANDLER_MODULE, "can_call": {"$parent": "*", "$subtree": "*"},
                 "id": id,
                 "peer_id": peer_id,
                 "transport": transport,
@@ -80,7 +80,7 @@ async fn grant_edge(kernel: &Arc<Kernel>, from: &str, to: &str) {
         .send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": from,
-                   "can_call": {"$self": "*", "$parent": "*", "$children": "*", to: "*"}}),
+                   "can_call": {"$self": "*", "$parent": "*", "$subtree": "*", to: "*"}}),
         )])
         .await
         .remove(0)
@@ -89,7 +89,7 @@ async fn grant_edge(kernel: &Arc<Kernel>, from: &str, to: &str) {
         .send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": to,
-                   "callable_by": {"$self": "*", "$parent": "*", "$children": "*", from: "*"}}),
+                   "callable_by": {"$self": "*", "$parent": "*", "$subtree": "*", from: "*"}}),
         )])
         .await
         .remove(0)
@@ -615,7 +615,7 @@ async fn ws_boot_fails_cleanly_on_unreachable_host() {
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
-                "handler_module": WS_HANDLER_MODULE, "can_call": {"$parent": "*", "$children": "*"},
+                "handler_module": WS_HANDLER_MODULE, "can_call": {"$parent": "*", "$subtree": "*"},
                 "id": bid,
                 "peer_id": "peer_x",
                 "transport": "ws",
@@ -857,7 +857,7 @@ async fn create_bridge_with_auth(kernel: &Arc<Kernel>, id: &str, peer_id: &str, 
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
-                "handler_module": WS_HANDLER_MODULE, "can_call": {"$parent": "*", "$children": "*"},
+                "handler_module": WS_HANDLER_MODULE, "can_call": {"$parent": "*", "$subtree": "*"},
                 "id": id,
                 "peer_id": peer_id,
                 "transport": "memory",
@@ -1053,7 +1053,7 @@ async fn deny_inbound_default_refuses_inbound_call() {
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
-                "handler_module": WS_HANDLER_MODULE, "can_call": {"$parent": "*", "$children": "*"},
+                "handler_module": WS_HANDLER_MODULE, "can_call": {"$parent": "*", "$subtree": "*"},
                 "id": bid,
                 "peer_id": "stand_in",
                 "transport": "memory",
@@ -1121,7 +1121,7 @@ async fn password_gate_checks_inbound_and_presents_on_forward() {
             json!({
                 "type": "create_agent",
                 "parent_id": "kernel",
-                "handler_module": WS_HANDLER_MODULE, "can_call": {"$parent": "*", "$children": "*"},
+                "handler_module": WS_HANDLER_MODULE, "can_call": {"$parent": "*", "$subtree": "*"},
                 "id": bid,
                 "peer_id": "stand_in",
                 "transport": "memory",
@@ -1236,7 +1236,7 @@ async fn asymmetric_ingress_egress_via_engine() {
             json!({
                 "type": "create_agent",
                 "parent_id": "kernel",
-                "handler_module": WS_HANDLER_MODULE, "can_call": {"$parent": "*", "$children": "*"},
+                "handler_module": WS_HANDLER_MODULE, "can_call": {"$parent": "*", "$subtree": "*"},
                 "id": bid,
                 "peer_id": "stand_in",
                 "transport": "memory",
@@ -2719,7 +2719,7 @@ async fn a_malformed_rule_on_the_record_denies_in_python_s_words() {
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
-                "handler_module": WS_HANDLER_MODULE, "can_call": {"$parent": "*", "$children": "*"},
+                "handler_module": WS_HANDLER_MODULE, "can_call": {"$parent": "*", "$subtree": "*"},
                 "id": bid,
                 "peer_id": "stand_in",
                 "transport": "memory",

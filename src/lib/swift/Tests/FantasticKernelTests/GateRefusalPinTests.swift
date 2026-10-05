@@ -19,7 +19,7 @@ private struct Noop: AgentBundle {
 }
 
 private let FROM_ABOVE =
-    "grants come from above — the agent's parent (update_agent on its direct child) or the "
+    "grants come from above — an ancestor (update_agent on an agent in its subtree) or the "
     + "operator writes can_call and callable_by; an agent never raises its own"
 
 private let BASE: OrderedDictionary<String, JSON> = ["$self": "*"]
@@ -85,17 +85,17 @@ struct GateRefusalPinTests {
                     "type": "create_agent", "parent_id": "b", "id": "x1",
                     "handler_module": "noop.tools",
                 ])
-                == #"{"error":"a may only create_agent its own children — b is not one","reason":"unauthorized","side":"mutator"}"#
+                == #"{"error":"a may only create_agent within its own subtree — b is not in it","reason":"unauthorized","side":"mutator"}"#
         )
         #expect(
             await call(
                 k, as: "a", "kernel", ["type": "update_agent", "id": "a", "can_call": ["b": "*"]])
-                == #"{"error":"a may only update_agent its own children — a is not one","reason":"unauthorized","side":"mutator"}"#
+                == #"{"error":"a may only update_agent within its own subtree — a is not in it","reason":"unauthorized","side":"mutator"}"#
         )
         // an unknown id is not a direct child either
         #expect(
             await call(k, as: "a", "kernel", ["type": "update_agent", "id": "nobody"])
-                == #"{"error":"a may only update_agent its own children — nobody is not one","reason":"unauthorized","side":"mutator"}"#
+                == #"{"error":"a may only update_agent within its own subtree — nobody is not in it","reason":"unauthorized","side":"mutator"}"#
         )
     }
 

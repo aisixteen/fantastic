@@ -118,6 +118,6 @@ def test_a_wildcard_grant_mints_only_under_the_leg_itself(seeded_kernel):
             data = _ws_call(ws, "m3", "kernel_state", dict(_MINT, parent_id="adv4_leg"))
     assert other.get("side") == "mutator", other
     assert other["error"] == (
-        "adv4_leg may only create_agent its own children — kernel_state is not one"
+        "adv4_leg may only create_agent within its own subtree — kernel_state is not in it"
     ), other
     assert data.get("id") == "adv4_minted", data

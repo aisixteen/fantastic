@@ -9,11 +9,21 @@ import Testing
 
 @testable import FantasticKernel
 
-// holder "worker", parent "boss", one child "kid".
+// The tree: boss → worker → kid → grandkid. Every id above `other`.
+private func ancestorsOf(_ other: String) -> Set<String> {
+    switch other {
+    case "worker": return ["boss"]
+    case "kid": return ["worker", "boss"]
+    case "grandkid": return ["kid", "worker", "boss"]
+    default: return []
+    }
+}
+
+// holder "worker", parent "boss", child "kid", grandchild "grandkid".
 private func auth(_ grant: JSON, _ verb: String, _ other: String) -> Decision {
     authorizeCall(
         grant: grant, verb: verb, otherId: other,
-        holderId: "worker", parentId: "boss", childIds: ["kid"])
+        holderId: "worker", parentId: "boss", ancestorIds: ancestorsOf(other))
 }
 
 @Test func absentGrantDeniesEverything() {
@@ -31,12 +41,15 @@ private func auth(_ grant: JSON, _ verb: String, _ other: String) -> Decision {
     #expect(!auth(["$self": "*"], "ping", "boss").allowed)
     #expect(auth(["$parent": "*"], "ping", "boss").allowed)
     #expect(!auth(["$parent": "*"], "ping", "worker").allowed)
-    #expect(auth(["$children": "*"], "ping", "kid").allowed)
-    #expect(!auth(["$children": "*"], "ping", "stranger").allowed)
+    #expect(auth(["$subtree": "*"], "ping", "kid").allowed)
+    #expect(auth(["$subtree": "*"], "ping", "grandkid").allowed)
+    #expect(!auth(["$subtree": "*"], "ping", "worker").allowed)
+    #expect(!auth(["$subtree": "*"], "ping", "stranger").allowed)
 }
 
 @Test func removedTokensMatchNothing() {
     #expect(!auth(["$loader": "*"], "ping", "root").allowed)
+    #expect(!auth(["$children": "*"], "ping", "kid").allowed)
     #expect(!auth(["$subtree:boss": "*"], "ping", "boss").allowed)
 }
 
@@ -71,7 +84,7 @@ private func auth(_ grant: JSON, _ verb: String, _ other: String) -> Decision {
 
 @Test func grantKeysAreChecked() {
     for field in ["can_call", "callable_by"] {
-        for good in ["peer", "$self", "$parent", "$children"] {
+        for good in ["peer", "$self", "$parent", "$subtree"] {
             #expect(isGrantKey(field, good), "\(field) \(good)")
         }
         for bad in ["", "*", "$loader", "$subtree:x", "$foo", "|x", "g2|", "a|b|c"] {
@@ -170,22 +183,22 @@ struct MinimalGateTests {
         #expect(k.agent(AgentId("made"))?.parentId == AgentId("a"))
     }
 
-    @Test func mutatorsActOnTheSendersOwnChildrenOnly() async {
+    @Test func mutatorsActWithinTheSendersOwnSubtree() async {
         let k = await gated()
         let create = await call(
             k, as: "a", "kernel",
             ["type": "create_agent", "parent_id": "b", "id": "x", "handler_module": "noop.tools"])
         #expect(
             create.serialize()
-                == #"{"error":"a may only create_agent its own children — b is not one","reason":"unauthorized","side":"mutator"}"#
+                == #"{"error":"a may only create_agent within its own subtree — b is not in it","reason":"unauthorized","side":"mutator"}"#
         )
         #expect(k.agent(AgentId("x")) == nil)
         let update = await call(
             k, as: "a", "kernel", ["type": "update_agent", "id": "other", "description": "x"])
-        #expect(update["error"] == "a may only update_agent its own children — other is not one")
+        #expect(update["error"] == "a may only update_agent within its own subtree — other is not in it")
         #expect(update["side"] == "mutator")
         let delete = await call(k, as: "a", "kernel", ["type": "delete_agent", "id": "a"])
-        #expect(delete["error"] == "a may only delete_agent its own children — a is not one")
+        #expect(delete["error"] == "a may only delete_agent within its own subtree — a is not in it")
         // its own child passes
         let ok = await call(
             k, as: "a", "kernel", ["type": "update_agent", "id": "kid", "description": "mine"])
@@ -193,6 +206,22 @@ struct MinimalGateTests {
         let gone = await call(k, as: "a", "kernel", ["type": "delete_agent", "id": "kid"])
         #expect(gone["error"] == .null, "\(gone)")
         #expect(k.agent(AgentId("kid")) == nil)
+    }
+
+    @Test func anAncestorMutatesAtAnyDepth() async {
+        let k = await gated()
+        // `deep` under `kid` under `a`: in `a`'s subtree, two levels down
+        let made = await call(
+            k, as: "a", "kernel",
+            ["type": "create_agent", "parent_id": "kid", "id": "deep", "handler_module": "noop.tools"])
+        #expect(made["error"] == .null, "\(made)")
+        #expect(k.agent(AgentId("deep"))?.parentId == AgentId("kid"))
+        let up = await call(
+            k, as: "a", "kernel", ["type": "update_agent", "id": "deep", "description": "x"])
+        #expect(up["updated"] == true, "\(up)")
+        let gone = await call(k, as: "a", "kernel", ["type": "delete_agent", "id": "deep"])
+        #expect(gone["error"] == .null, "\(gone)")
+        #expect(k.agent(AgentId("deep")) == nil)
     }
 
     @Test func anUnknownGrantKeyIsRefusedAtTheWrite() async {
@@ -210,7 +239,7 @@ struct MinimalGateTests {
             #expect(
                 r["error"].asString
                     == "callable_by[\(pyRepr(bad))] is not a grant key — legal keys: an agent id, "
-                    + "$self, $parent, $children", "\(r)")
+                    + "$self, $parent, $subtree", "\(r)")
         }
         // a peer kernel's agent is never a caller here: refused in callable_by,
         // accepted in can_call (an outbound address)

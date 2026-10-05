@@ -10,7 +10,7 @@ description: >
   refusal below is attributable to one declared fact and nothing else.
 
   The only grants declared are the loader→leg edges, both halves (the loader's
-  `$children` egress, each leg's `$parent` ingress), so the CALL gate is open on
+  `$subtree` egress, each leg's `$parent` ingress), so the CALL gate is open on
   each of them; anything that still refuses is refusing at the IO gate, which is
   the whole subject of this scenario.
 

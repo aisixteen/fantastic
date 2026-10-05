@@ -20,7 +20,8 @@
 //! covers EVERY verb. A key is one of:
 //!
 //! - a literal local agent id;
-//! - `$self`, `$parent`, `$children` (direct children) — resolved at the gate
+//! - `$self`, `$parent`, `$subtree` (every agent BELOW the holder, any depth) —
+//!   resolved at the gate
 //!   relative to the grant's HOLDER (the sender for `can_call`, the target for
 //!   `callable_by`);
 //! - `<guid>|<agent>` — one agent of a connected kernel, or `<guid>|*` — every
@@ -57,14 +58,14 @@ impl Decision {
 }
 
 /// The relative tokens a grant key may be.
-pub const TOKENS: [&str; 3] = ["$self", "$parent", "$children"];
+pub const TOKENS: [&str; 3] = ["$self", "$parent", "$subtree"];
 
 /// The legal keys of `callable_by`, in the words its shape refusal uses.
-pub const LEGAL_CALLABLE_BY_KEYS: &str = "an agent id, $self, $parent, $children";
+pub const LEGAL_CALLABLE_BY_KEYS: &str = "an agent id, $self, $parent, $subtree";
 
 /// The legal keys of `can_call`, in the words its shape refusal uses.
 pub const LEGAL_CAN_CALL_KEYS: &str =
-    "an agent id, $self, $parent, $children, <guid>|<agent> or <guid>|*";
+    "an agent id, $self, $parent, $subtree, <guid>|<agent> or <guid>|*";
 
 /// The legal-key words for grant `field` (`can_call` or `callable_by`).
 #[must_use]
@@ -97,8 +98,8 @@ pub fn is_grant_key(field: &str, key: &str) -> bool {
 }
 
 /// The remedy shown on any denial (python `_FROM_ABOVE`, verbatim).
-pub const FROM_ABOVE: &str = "grants come from above — the agent's parent (update_agent on its \
-     direct child) or the operator writes can_call and callable_by; an agent never raises its \
+pub const FROM_ABOVE: &str = "grants come from above — an ancestor (update_agent on an agent in \
+     its subtree) or the operator writes can_call and callable_by; an agent never raises its \
      own";
 
 /// The baseline stamped + merged on every agent, on `can_call` (who I may call):
@@ -131,20 +132,22 @@ fn verb_allowed(grant: &Value, verb: &str) -> bool {
 /// (`can_call` for egress, `callable_by` for ingress); `other_id` is the id at the
 /// other end of the edge (the target for egress, the sender for ingress). Tokens
 /// resolve relative to the holder. Absent/empty grant ⇒ deny (the default posture).
+/// `other_ancestors` is every id above the other end — `$subtree` matches when the
+/// holder is one of them.
 pub fn authorize_call(
     grant: &Value,
     verb: &str,
     other_id: &str,
     holder_id: &str,
     holder_parent: Option<&str>,
-    holder_children: &HashSet<String>,
+    other_ancestors: &HashSet<String>,
 ) -> Decision {
     if let Some(map) = grant.as_object() {
         for (key, g) in map {
             let matched = match key.as_str() {
                 "$self" => other_id == holder_id,
                 "$parent" => holder_parent == Some(other_id),
-                "$children" => holder_children.contains(other_id),
+                "$subtree" => other_ancestors.contains(holder_id),
                 lit if lit.starts_with('$') => false,
                 // every agent of ONE peer kernel: `<guid>|*` (a local id never
                 // carries `|`, so this only ever matches an outbound peer target)

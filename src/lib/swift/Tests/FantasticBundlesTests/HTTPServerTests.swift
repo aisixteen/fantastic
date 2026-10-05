@@ -41,7 +41,7 @@ struct HTTPServerTests {
         ])[0].result
         let restId = rec["id"].asString ?? "rest"
         var grants: JSON = .object([
-            "$self": .string("*"), "$parent": .string("*"), "$children": .string("*"),
+            "$self": .string("*"), "$parent": .string("*"), "$subtree": .string("*"),
         ])
         grants[restId] = .string("*")
         _ = await kernel.send([
@@ -141,7 +141,7 @@ struct HTTPServerTests {
                     // never consulted.
                     "callable_by": .object([
                         "$self": .string("*"), "$parent": .string("*"),
-                        "$children": .string("*"), "web": .string("*"),
+                        "$subtree": .string("*"), "web": .string("*"),
                     ]),
                 ]))
         ])[0].result
@@ -278,7 +278,7 @@ struct HTTPServerTests {
                     "handler_module": .string("parent_probe.tools"), "id": .string("probe"),
                     "callable_by": .object([
                         "$self": .string("*"), "$parent": .string("*"),
-                        "$children": .string("*"), restId: .string("*"),
+                        "$subtree": .string("*"), restId: .string("*"),
                     ]),
                 ]))
         ])[0].result
@@ -569,7 +569,7 @@ struct HTTPServerTests {
                     "type": .string("update_agent"), "id": .string("files"),
                     "callable_by": .object([
                         "$self": .string("*"), "$parent": .string("*"),
-                        "$children": .string("*"), restId: .string("*"), "web": .string("*"),
+                        "$subtree": .string("*"), restId: .string("*"), "web": .string("*"),
                     ]),
                 ]))
         ])[0].result
@@ -808,7 +808,7 @@ struct HTTPServerTests {
                     "type": .string("update_agent"), "id": .string("files"),
                     "callable_by": .object([
                         "$self": .string("*"), "$parent": .string("*"),
-                        "$children": .string("*"), restId: .string("*"),
+                        "$subtree": .string("*"), restId: .string("*"),
                     ]),
                 ]))
         ])[0].result
@@ -862,7 +862,7 @@ struct HTTPServerTests {
                     "type": .string("update_agent"), "id": .string("files"),
                     "callable_by": .object([
                         "$self": .string("*"), "$parent": .string("*"),
-                        "$children": .string("*"), restId: .string("*"),
+                        "$subtree": .string("*"), restId: .string("*"),
                     ]),
                 ]))
         ])[0].result
@@ -920,7 +920,7 @@ struct HTTPServerTests {
                     "type": .string("update_agent"), "id": .string("files"),
                     "callable_by": .object([
                         "$self": .string("*"), "$parent": .string("*"),
-                        "$children": .string("*"), restId: .string("*"),
+                        "$subtree": .string("*"), restId: .string("*"),
                     ]),
                 ]))
         ])[0].result

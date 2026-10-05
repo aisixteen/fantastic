@@ -91,7 +91,7 @@ async def test_an_explicit_watch_grant_is_honoured(wired):
                     "callable_by": {
                         "$self": "*",
                         "$parent": "*",
-                        "$children": "*",
+                        "$subtree": "*",
                         "nosy": ["watch"],
                     },
                 },
@@ -108,7 +108,7 @@ async def test_an_explicit_watch_grant_is_honoured(wired):
                     "can_call": {
                         "$self": "*",
                         "$parent": "*",
-                        "$children": "*",
+                        "$subtree": "*",
                         "secret": ["watch"],
                     },
                 },
@@ -162,7 +162,7 @@ async def test_watching_the_root_takes_both_halves(wired):
         denial = wired.watch(wired.id, "nosy")
     assert denial is not None and denial["side"] == "ingress", denial
     assert "nosy" not in wired._watcher_ids
-    wired.ctx.update(wired.id, callable_by={"$self": "*", "$children": ["watch"]})
+    wired.ctx.update(wired.id, callable_by={"$self": "*", "$subtree": ["watch"]})
     with as_agent(wired, "nosy"):
         assert wired.watch(wired.id, "nosy") is None
     wired.unwatch(wired.id, "nosy")

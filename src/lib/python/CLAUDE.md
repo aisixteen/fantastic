@@ -498,16 +498,16 @@ they did not register.
     A denial names the `side` (`egress`|`ingress`), egress first.
   **Two record fields only**, `can_call` and `callable_by`, each
   `{key: "*" | ["<verb>", …]}`. A key is a literal agent id, `$self`, `$parent`,
-  `$children` (DIRECT children); `can_call` also takes `<guid>|<agent>` or `<guid>|*`
+  `$subtree` (every agent BELOW the holder, any depth); `can_call` also takes `<guid>|<agent>` or `<guid>|*`
   (an OUTBOUND peer address — a caller is always local, so such a key in
   `callable_by` could never match and is refused). Tokens resolve relative to the
   grant's HOLDER. Any other key, or a value that is not `"*"` or a list of strings, is
   refused at the write, `invalid_meta`: "callable_by['<key>'] is not a grant key —
-  legal keys: an agent id, $self, $parent, $children" / "can_call['<key>'] is not a
-  grant key — legal keys: an agent id, $self, $parent, $children, <guid>|<agent> or
+  legal keys: an agent id, $self, $parent, $subtree" / "can_call['<key>'] is not a
+  grant key — legal keys: an agent id, $self, $parent, $subtree, <guid>|<agent> or
   <guid>|*" / "<field>['<key>'] must be "*" or a list of verb strings". A denial's
-  hint: "grants come from above — the agent's parent (update_agent on its direct
-  child) or the operator writes can_call and callable_by; an agent never raises its
+  hint: "grants come from above — an ancestor (update_agent on an agent in its
+  subtree) or the operator writes can_call and callable_by; an agent never raises its
   own". **`"*"` covers EVERY verb** — there is no
   verb list the gate consults. The gate never branches on a verb name: `reflect`, `watch`,
   `emit`, `state_subscribe` are verbs like any other.
@@ -517,13 +517,13 @@ they did not register.
   `list_agents`, …) take the SAME two-sided check against the root — the root's
   `callable_by` must accept the caller.
   **MUTATORS** (`create_agent`, `update_agent`, `delete_agent`), after the gate on
-  the root: the operand must be a DIRECT CHILD of the sender — `create_agent`'s
-  `parent_id` is the sender; `update_agent`/`delete_agent`'s `id` names an agent
-  whose parent is the sender. Otherwise `{reason:"unauthorized", side:"mutator"}`,
-  "<sender> may only <verb> its own children — <id> is not one" (`<id>` = the
+  the root: the operand must be in the sender's OWN SUBTREE — `create_agent`'s
+  `parent_id` is the sender or an agent below it; `update_agent`/`delete_agent`'s
+  `id` names an agent below the sender, at any depth. Otherwise `{reason:"unauthorized", side:"mutator"}`,
+  "<sender> may only <verb> within its own subtree — <id> is not in it" (`<id>` = the
   `parent_id` for `create_agent`; an `id` naming no agent included). A missing or
   non-string operand gets the verb's own `missing_arg` refusal, before this rule. So
-  no agent can raise its own authority — its record is its parent's to write.
+  no agent can raise its own authority — its record is its ancestors' to write.
   **A join** of an execution re-gates the joiner on the ORIGINAL verb; **a reflect**
   that passes the gate returns the tree whole (roster and `detail:"full"`).
   **Kernel bookkeeping is a direct call, never a gated send** (`Kernel.bookkeeping`
