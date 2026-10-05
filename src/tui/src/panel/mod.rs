@@ -134,6 +134,12 @@ pub trait Panel {
     }
     /// Downcast access, for anything the trait cannot express.
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
+    /// A TEXT FIELD of this panel is open (being typed into): every key but
+    /// Ctrl-C goes to it — no global shortcut (`R`, `?`, Tab, holding `q`)
+    /// may swallow a character of what is typed (a key, a URL, a name).
+    fn text_input(&self) -> bool {
+        false
+    }
     /// THE VIEWMODEL STEP for this frame: bring every DERIVED field up to date —
     /// a projected outline, a scroll position clamped to the viewport. The
     /// runtime calls it before every draw, and it is the ONLY place derived state

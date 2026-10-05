@@ -65,6 +65,17 @@ def seed_key(home: Path, record: dict) -> dict:
     Returns the template without the plug's own `credentials` (the e2e `creds`
     store does not exist here): the product names its own ref at spawn."""
     rec = {k: v for k, v in record.items() if k != "credentials"}
+    # the window the model has (owner: 262144 for window AND output — vLLM gives
+    # a turn what the prompt leaves of it when max_tokens reaches the window)
+    if (ctx := os.environ.get("CTX")) and "context_window" not in rec:
+        rec["context_window"] = int(ctx)
+    # the thought: the RUN's, when it names one (REASONING_EFFORT,
+    # THINKING_TOKEN_BUDGET); else vllm_backend's own (medium, its adapted budget)
+    if rec.get("handler_module") == "vllm_backend.tools":
+        if effort := os.environ.get("REASONING_EFFORT"):
+            rec["reasoning_effort"] = effort
+        if budget := os.environ.get("THINKING_TOKEN_BUDGET"):
+            rec["thinking_token_budget"] = int(budget)
     provider = str(rec.get("handler_module", "")).removesuffix("_backend.tools")
     key = os.environ.get(KEY_VARS.get(provider, ""), "")
     if not key or not rec.get("endpoint"):
@@ -74,7 +85,9 @@ def seed_key(home: Path, record: dict) -> dict:
     os.chmod(home / "secrets", 0o700)
     private_write(home / "secrets" / "mode", "plain")
     private_write(home / "secrets" / "refs.json", json.dumps({ref: host}))
-    private_write(home / "credentials.yaml", yaml.safe_dump({"refs": {ref: {"api_key": key}}}))
+    # at rest the value carries its HOST (`{host, fields}`): a stored value with
+    # no host is refused at read
+    private_write(home / "credentials.yaml", yaml.safe_dump({"refs": {ref: {"host": host, "fields": {"api_key": key}}}}))
     return rec
 
 
@@ -86,7 +99,7 @@ def private_write(p: Path, text: str) -> None:
 
 
 # the root view's backend folder on the host: a cell's backend lives here
-FOLDER = "agents/user/agents/web/agents/canvas_page/agents/canvas/agents/backend/agents/view_root"
+FOLDER = "agents/user/agents/web/agents/canvas_page/agents/canvas_root"
 
 
 class Rig:
@@ -254,7 +267,7 @@ class Rig:
         g = self.page_guid()
         out, armed = [], False
         for line in self.log.read_text().splitlines():
-            if re.match(r"^\[\d+\] view_\S+ call spawn", line):
+            if re.match(r"^\[\d+\] canvas_root call spawn", line):
                 armed = True
             elif armed and (re.match(r"^\[\d+\] web_loader call load_tree", line)
                             or (g and re.match(rf"^\[\d+\] {re.escape(g)}\|\S+ call \S+", line))):

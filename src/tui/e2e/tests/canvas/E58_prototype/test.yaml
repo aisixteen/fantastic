@@ -1,0 +1,11 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint (the
+# plug names those). Live: the BACKEND plug.
+id: prototype
+group: canvas
+title: "an AI prototypes back end + front end from an empty canvas, wired both ways, then changes it"
+runner: probe.py
+costs: turns
+limits:
+  total_seconds: 1500
+  quiet_seconds: 40
+env: {}

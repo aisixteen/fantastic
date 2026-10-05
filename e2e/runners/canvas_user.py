@@ -19,6 +19,8 @@ import sys
 import tempfile
 import time
 import urllib.request
+
+import yaml
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -99,11 +101,13 @@ async def place(p: Page, kind: str, x: int, y: int) -> bool:
 
 
 def members(cwd: Path, under: str = "view_root") -> list[str]:
-    """The cells of page view `under` (default: the root view) on disk."""
+    """The cells of page view `under` (default: the root view) on disk — its
+    background is not a cell."""
     d = cwd / ".fantastic" / "web" / "agents" / "canvas" / "agents" / "view_root" / "agents"
     if under != "view_root":
         d = d / under / "agents"
-    return sorted(f.parent.name for f in d.glob("*/agent.yaml")) if d.is_dir() else []
+    return sorted(f.parent.name for f in d.glob("*/agent.yaml")
+                  if (yaml.safe_load(f.read_text()) or {}).get("handler_module") != "background.ts") if d.is_dir() else []
 
 
 async def wait_for(cond, timeout: float = 8.0) -> bool:
@@ -157,9 +161,14 @@ async def run(sc: dict, tmp: Path) -> bool:
 
             # ── a token set ─────────────────────────────────────────────────
             bad = []
-            r = await host_call(port, "kernel", {"type": "update_agent", "id": "user", "token_sha256": sha(tok["admin"])})
-            if r.get("error"):
-                bad.append(f"could not set the token: {r}")
+            # the token is the SHELL's to set: `user`'s own record is written from
+            # above (its parent, or the operator) — here, on disk while it is down
+            host.stop()
+            rec_f = cwd / ".fantastic" / "agents" / "user" / "agent.yaml"
+            rec = yaml.safe_load(rec_f.read_text()) or {}
+            rec["token_sha256"] = sha(tok["admin"])
+            rec_f.write_text(yaml.safe_dump(rec, sort_keys=False))
+            host.start()
             r = await host_call(port, "kernel", {"type": "reflect"})
             if "a token is required" not in json.dumps(r):
                 bad.append(f"a tokenless call still works: {json.dumps(r)[:200]}")

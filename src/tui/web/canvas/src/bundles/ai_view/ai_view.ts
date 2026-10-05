@@ -5,9 +5,11 @@ import { Host } from "../../lib.ts";
 // ai_chat_webapp/index.html, rendered INLINE into a canvas frame, fronting any
 // backend that answers send/history/status (ollama_backend, vllm_backend,
 // the browser-resident ai_backend). Preserves the full queue/inflight state
-// machine, tool blocks, status phases, history+snapshot rebuild, lifecycle reset,
-// ESC-to-cancel (there is no `interrupt` verb: an in-flight `send` IS a kernel
-// task, killed with `ps` → `cancel` on the kernel that runs the backend).
+// machine, tool blocks, status phases, history+snapshot rebuild, lifecycle reset.
+// THE ANSWER STREAMS AS PARTS (`part_start` / `part_delta` / `part_end` /
+// `part_abort`, kind text | thinking | call): one DRAFT per `stream_id`, settled
+// when the part ends — or NOT SENT on an abort or a malformed call. Stop / ESC
+// is the backend's `stop` verb: the generation is cancelled, nothing is sent.
 // ids → scoped classes so many chat frames coexist on one canvas page.
 
 const CHAT_CSS = `
@@ -50,6 +52,8 @@ const CHAT_CSS = `
   .chat-view .c-badge { font-size:11px; margin-left:8px; padding:1px 8px; border-radius:999px; background:rgba(255,255,255,0.08); color:rgba(220,230,245,0.75); }
   .chat-view .msg.thinking { color: #b78cff; font-style: italic; animation: c-think 1.1s ease-in-out infinite; }
   @keyframes c-think { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
+  .chat-view .msg.not-sent { opacity: 0.45; text-decoration: line-through; }
+  .chat-view .msg.not-sent::after { content: ' · not sent — ' attr(data-why); font-size: 10px; text-decoration: none; }
   .chat-view .msg.tool { align-self: flex-start; font: 11px ui-monospace, SFMono-Regular, monospace; color: rgba(220,230,245,0.45); background: transparent; padding: 0 4px; }
   .chat-view .c-badge.kept { background:rgba(126,226,168,0.18); color:#7ee2a8; cursor:pointer; }
   .chat-view .c-keep { margin-left:6px; font-size:11px; padding:1px 10px; border-radius:999px; border:0; cursor:pointer; background:rgba(183,140,255,0.28); color:#fff; }
@@ -117,9 +121,14 @@ interface ToolHandle {
 interface Inflight {
   send_id: string;
   userBubble: HTMLElement;
-  assistantBubble: HTMLElement;
+  /** where this turn's tool blocks land (the first text draft, or the dialog) */
   toolBlocks: Map<string, ToolHandle>;
-  streamText: string;
+}
+/** One streamed part, drawn while the model writes it. */
+interface Draft {
+  el: HTMLElement;
+  kind: string;
+  text: string;
 }
 
 // Non-chat modes are SCAFFOLDED seams: the shell + backend binding live here; the
@@ -169,7 +178,7 @@ export const aiView: ViewBundle = {
   // Fronts a backend it never spawns; cancels a turn through the host root's
   // task table.
   // `$parent: [update]`: [make main] names this cell on its view.
-  grants: (backend) => ({ [backend]: ["watch", "reflect", "history", "status", "send"], kernel: ["ps", "cancel"], backend: ["keep", "rename"], $parent: ["update"] }),
+  grants: (backend) => ({ [backend]: ["watch", "reflect", "history", "status", "send", "stop"], kernel: ["ps", "cancel"], canvas_root: ["keep", "rename"], $parent: ["update"] }),
 
   async mount(ctx: ViewContext): Promise<ViewHandle> {
     const { kernel, mount, selfId, backend, record } = ctx;
@@ -235,7 +244,7 @@ export const aiView: ViewBundle = {
       }
       /** Keep the dialog; false (said in the dialog) when the host refused. */
       const keep = async (): Promise<boolean> => {
-        const r = (await host.callHost("backend", { type: "keep", id: backend } as never)) as Dict;
+        const r = (await host.callHost("canvas_root", { type: "keep", id: backend } as never)) as Dict;
         if (typeof r["error"] === "string") {
           addMsg("notice", `✕ ${r["error"]}`, dialogEl).classList.add("too-small");
           return false;
@@ -255,7 +264,7 @@ export const aiView: ViewBundle = {
         input.select();
         const done = async (save: boolean): Promise<void> => {
           if (save && input.value.trim()) {
-            const r = (await host.callHost("backend", { type: "rename", id: backend, name: input.value.trim() } as never)) as Dict;
+            const r = (await host.callHost("canvas_root", { type: "rename", id: backend, name: input.value.trim() } as never)) as Dict;
             if (typeof r["error"] !== "string") {
               kernel.updateMeta(selfId, { dialog_name: r["name"] } as never);
               showKept(String(r["name"]));
@@ -442,13 +451,7 @@ export const aiView: ViewBundle = {
         const i = queuedOrder.indexOf(sendId);
         if (i >= 0) queuedOrder.splice(i, 1);
       }
-      inflight = {
-        send_id: sendId,
-        userBubble: bubble,
-        assistantBubble: addMsg("assistant", "", dialogEl),
-        toolBlocks: new Map(),
-        streamText: "",
-      };
+      inflight = { send_id: sendId, userBubble: bubble, toolBlocks: new Map() };
       refreshBusy();
     };
 
@@ -459,7 +462,7 @@ export const aiView: ViewBundle = {
       if (!handle) {
         handle = makeToolBlock(tool);
         inflight.toolBlocks.set(callId, handle);
-        inflight.assistantBubble.appendChild(handle.el);
+        dialogEl.appendChild(handle.el);
         dialogEl.scrollTop = dialogEl.scrollHeight;
       }
       if ("reply_preview" in tool) fillToolReply(handle, s(tool, "reply_preview"));
@@ -469,6 +472,7 @@ export const aiView: ViewBundle = {
     const offLifecycle = host.onLifecycle(backend, (state) => {
       if (state === "disconnected") {
         inflight = null;
+        for (const id of [...drafts.keys()]) settle(id, "disconnected");
         for (const [, b] of queuedBubbles) b.remove();
         queuedBubbles.clear();
         queuedOrder.length = 0;
@@ -497,44 +501,83 @@ export const aiView: ViewBundle = {
         setPhase("queued", typeof detail["ahead"] === "number" ? `${detail["ahead"]} ahead` : "");
       } else if (phase === "thinking" || phase === "streaming") {
         if (inflight === null || inflight.send_id !== sendId) promoteToInflight(sendId, "");
-        // reasoning on its own channel: the empty bubble flashes until words come
-        if (phase === "thinking" && inflight !== null && inflight.streamText === "") {
-          inflight.assistantBubble.className = "msg assistant thinking";
-          inflight.assistantBubble.textContent = "thinking";
-        }
-        setPhase(phase, "press stop or esc to interrupt");
+        setPhase(phase, "press stop or esc to stop");
       } else if (phase === "tool_calling") {
         handleToolCall(obj(detail, "tool"));
-        setPhase("tool_calling", "press stop or esc to interrupt");
+        setPhase("tool_calling", "press stop or esc to stop");
       } else if (phase === "done") {
         // the turn is over: nothing is in flight any more (the `done` event is
         // not always delivered to this client — measured: the button stayed on
         // "stop" after the answer)
-        if (inflight !== null && (!sendId || inflight.send_id === sendId)) {
-          if (inflight.assistantBubble.classList.contains("thinking")) inflight.assistantBubble.remove();
-          inflight = null;
-        }
+        if (inflight !== null && (!sendId || inflight.send_id === sendId)) inflight = null;
         refreshBusy();
         setPhase("idle", s(detail, "reason") && s(detail, "reason") !== "ok" ? s(detail, "reason") : "");
       }
     });
-    const offToken = host.on(backend, "token", (p) => {
-      if (mine(p) && inflight !== null) {
-        inflight.streamText += s(p, "text");
-        const said = words(inflight.streamText);
-        const call = said === "" ? CALL_HEAD.exec(inflight.streamText) : null;
-        // REASONING in flight (an open `<think>`, nothing said yet): masked under
-        // a flashing word, as the terminal does
-        const thinking = said === "" && call === null && /<think>(?![\s\S]*<\/think>)/.test(inflight.streamText);
-        inflight.assistantBubble.className = call !== null ? "msg tool" : thinking ? "msg assistant thinking" : "msg assistant";
-        inflight.assistantBubble.textContent = call !== null ? `→ ${call[2] ?? call[1]} ${call[3] ?? ""}`.trim() : thinking ? "thinking" : said;
+    // THE PARTS: one draft per stream_id. ANIMATION, NOT ACTION — a delta never
+    // acts; the part's end settles it (a malformed call, `ok:false`, was never
+    // dispatched), an abort settles it as NOT SENT. Reasoning stays masked.
+    const drafts = new Map<string, Draft>();
+    // STREAMING IS FOR THE HUMAN (owner, 2026-10-04): a part is drawn only when it
+    // answers THIS client; a message between agents is read whole, as its row.
+    const toMe = (p: Dict): boolean => s(p, "client_id") === clientId && (!s(p, "source") || s(p, "source") === backend);
+    const callHead = (p: Dict): string => `→ ${s(p, "target") || (Array.isArray(p["to"]) ? (p["to"] as string[]).join(", ") : "")} ${s(p, "name")}`.trim();
+    /** Settle a draft as NOT SENT, saying why. */
+    const settle = (id: string, why: string): void => {
+      const d = drafts.get(id);
+      if (d === undefined) return;
+      drafts.delete(id);
+      if (d.kind === "thinking" && d.text === "") {
+        d.el.remove();
+        return;
+      }
+      d.el.classList.remove("thinking");
+      d.el.classList.add("not-sent");
+      d.el.dataset["why"] = why;
+      if (d.kind === "thinking") d.el.textContent = "thinking";
+      d.el.title = `not sent — ${why}`;
+    };
+    const offStart = host.on(backend, "part_start", (p) => {
+      if (!toMe(p)) return;
+      const id = s(p, "stream_id");
+      const kind = s(p, "kind");
+      const el = document.createElement("div");
+      el.className = kind === "call" ? "msg tool" : kind === "thinking" ? "msg assistant thinking" : "msg assistant";
+      el.dataset["stream"] = id;
+      if (typeof p["re"] === "number") el.dataset["re"] = String(p["re"]);
+      el.textContent = kind === "call" ? callHead(p) : kind === "thinking" ? "thinking" : "";
+      dialogEl.appendChild(el);
+      dialogEl.scrollTop = dialogEl.scrollHeight;
+      drafts.set(id, { el, kind, text: "" });
+    });
+    const offDelta = host.on(backend, "part_delta", (p) => {
+      if (!toMe(p)) return;
+      const d = drafts.get(s(p, "stream_id"));
+      if (d === undefined) return;
+      d.text += s(p, "text");
+      if (d.kind === "text") {
+        d.el.textContent = d.text;
         dialogEl.scrollTop = dialogEl.scrollHeight;
       }
     });
+    const offEnd = host.on(backend, "part_end", (p) => {
+      if (!toMe(p)) return;
+      const id = s(p, "stream_id");
+      const d = drafts.get(id);
+      if (d === undefined) return;
+      if (p["ok"] === false) {
+        settle(id, "malformed");
+        return;
+      }
+      drafts.delete(id);
+      // a finished thought is the model's own: the mask goes
+      if (d.kind === "thinking") d.el.remove();
+    });
+    const offAbort = host.on(backend, "part_abort", (p) => {
+      if (toMe(p)) settle(s(p, "stream_id"), s(p, "reason") || "aborted");
+    });
     const offDone = host.on(backend, "done", (p) => {
       if (mine(p)) {
-        // a turn that ended in reasoning alone leaves nothing to show
-        if (inflight !== null && inflight.assistantBubble.classList.contains("thinking")) inflight.assistantBubble.remove();
         inflight = null;
         refreshBusy();
       }
@@ -571,16 +614,16 @@ export const aiView: ViewBundle = {
       const cur = obj(snap, "current");
       if (cur["is_mine"] === true) {
         const ub = addMsg("user", s(cur, "text"), dialogEl);
-        const ab = addMsg("assistant", s(cur, "text_so_far"), dialogEl);
-        inflight = { send_id: s(cur, "send_id"), userBubble: ub, assistantBubble: ab, toolBlocks: new Map(), streamText: s(cur, "text_so_far") };
+        if (s(cur, "text_so_far") !== "") addMsg("assistant", s(cur, "text_so_far"), dialogEl);
+        inflight = { send_id: s(cur, "send_id"), userBubble: ub, toolBlocks: new Map() };
         const lastTool = obj(cur, "last_tool");
         if (Object.keys(lastTool).length > 0) {
           const h = makeToolBlock(lastTool);
           inflight.toolBlocks.set(s(lastTool, "call_id"), h);
-          ab.appendChild(h.el);
+          dialogEl.appendChild(h.el);
           if ("reply_preview" in lastTool) fillToolReply(h, s(lastTool, "reply_preview"));
         }
-        setPhase(s(cur, "phase") || "thinking", "press stop or esc to interrupt");
+        setPhase(s(cur, "phase") || "thinking", "press stop or esc to stop");
       }
       const pending = Array.isArray(snap["mine_pending"]) ? (snap["mine_pending"] as Dict[]) : [];
       for (const entry of pending) {
@@ -645,18 +688,11 @@ export const aiView: ViewBundle = {
         refreshBusy();
       });
     };
-    // An in-flight `send` IS a kernel task: find its row in `ps` and `cancel` it,
-    // on the kernel that runs the backend — this page's own for a browser-resident
-    // backend, the host's (reached as `kernel` over the bridge) for a host one.
-    const onBackendKernel = (p: Dict): Promise<unknown> =>
-      kernel.get(backend) !== undefined ? host.call("kernel", p as never) : host.callHost("kernel", p as never);
+    // STOP: the backend's own verb — the generation is cancelled (provider stream
+    // closed), its open parts abort, nothing is sent; the model's history keeps
+    // a cut marker, never a half answer.
     const interrupt = (): void => {
-      void (async () => {
-        const ps = (await onBackendKernel({ type: "ps" })) as Dict;
-        const tasks = Array.isArray(ps["tasks"]) ? (ps["tasks"] as Dict[]) : [];
-        const turn = tasks.find((t) => t["agent"] === backend && t["verb"] === "send");
-        if (turn !== undefined) await onBackendKernel({ type: "cancel", task_id: turn["id"] as never });
-      })().catch((e: Error) => console.warn("[chat] cancel failed:", e));
+      void host.call(backend, { type: "stop" } as never).catch((e: Error) => console.warn("[chat] stop failed:", e));
     };
 
     sendBtn.addEventListener("click", () => (inflight !== null ? interrupt() : submit()));
@@ -689,7 +725,10 @@ export const aiView: ViewBundle = {
         unwatchMain();
         offQueued();
         offStatus();
-        offToken();
+        offStart();
+        offDelta();
+        offEnd();
+        offAbort();
         offDone();
         offContext();
         host.unwatch(backend);

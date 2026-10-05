@@ -289,6 +289,13 @@ fn key(app: &mut App, k: KeyEvent) {
         return;
     }
 
+    // ── a panel's open text field takes every key (no shortcut swallows a
+    // character of what is typed) ─────────────────────────────────────────
+    if panel_typing(app) {
+        panel_key(app, k);
+        return;
+    }
+
     // ── the tree filter is a text field while it is open ─────────────────
     if app.filtering {
         match k.code {
@@ -423,8 +430,9 @@ fn quit_gesture(app: &mut App, k: KeyEvent, now: std::time::Instant) -> bool {
         app.dirty = true;
         return true;
     }
-    // Never while typing: `q` is a letter in the composer and in the filter.
-    if k.code == KeyCode::Char('q') && app.focus != Focus::Composer && !app.filtering {
+    // Never while typing: `q` is a letter in the composer, the filter and a
+    // panel's open text field.
+    if k.code == KeyCode::Char('q') && app.focus != Focus::Composer && !app.filtering && !panel_typing(app) {
         app.q_streak = q_hold_streak(app.q_streak, app.last_q, now);
         app.last_q = Some(now);
         if app.q_streak >= Q_HOLD_STREAK {
@@ -512,6 +520,12 @@ fn tree_key(app: &mut App, k: KeyEvent) {
         _ => {}
     }
     app.dirty = true;
+}
+
+/// The focused panel has a text field open.
+fn panel_typing(app: &App) -> bool {
+    app.focus == Focus::Panel
+        && app.selected().and_then(|a| app.panels.get(a)).is_some_and(|p| p.text_input())
 }
 
 fn panel_key(app: &mut App, k: KeyEvent) {
@@ -837,6 +851,31 @@ mod tests {
         // over the statusline nothing happens
         wheel(&mut app, 1, a.status.y, false);
         assert_eq!(app.sel, before);
+    }
+
+    #[test]
+    fn an_open_text_field_takes_every_character_no_shortcut_swallows_one() {
+        use crate::kern::model::TreeNode;
+        use crossterm::event::{KeyEvent, KeyEventKind, KeyEventState};
+        let leaf = |id: &str| TreeNode { id: id.into(), parent_id: None, handler_module: Some("x.tools".into()), display_name: None, description: None, children: vec![] };
+        let mut app = App::new(crate::env::Paths::at(std::path::Path::new("/nonexistent")));
+        app.screen = ratatui::layout::Rect::new(0, 0, 120, 40);
+        app.tree = Some(TreeNode { children: vec![leaf("s")], ..leaf("root") });
+        app.reflow();
+        app.sel = app.trows.iter().position(|r| r.id.as_str() == "s").expect("the row");
+        let mut p = crate::panel::setup::SetupPanel::new();
+        p.open_key_prompt();
+        app.panels.insert("s".into(), Box::new(p));
+        app.focus = Focus::Panel;
+        let typed = "aRSq?Rz";
+        for c in typed.chars() {
+            let k = KeyEvent { code: KeyCode::Char(c), modifiers: KeyModifiers::NONE, kind: KeyEventKind::Press, state: KeyEventState::NONE };
+            handle(&mut app, Event::Key(k));
+        }
+        let p = app.panels.get_mut(&crate::kern::model::AgentId::from("s")).unwrap();
+        let p = p.as_any_mut().downcast_mut::<crate::panel::setup::SetupPanel>().unwrap();
+        assert_eq!(p.key_typed(), Some(typed), "every character reaches the field");
+        assert!(!app.help && !app.stale, "no shortcut fired");
     }
 
     #[test]

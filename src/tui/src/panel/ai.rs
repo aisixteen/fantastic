@@ -20,9 +20,13 @@
 //!
 //! A TRANSCRIPT: every message shows its whole text (`OutlineLine::body`),
 //! word-wrapped to the pane — a coding-CLI read, not a clipped list — and the
-//! cursor and the scroll move by message. The model's reasoning is never shown:
-//! while a turn is in flight the pane flashes one `thinking` line instead of the
-//! token stream; the answer arrives as its row.
+//! cursor and the scroll move by message. THE ANSWER STREAMS AS PARTS
+//! (`part_start` / `part_delta` / `part_end` / `part_abort`): a text part is drawn
+//! as it is written, a call part as `→ target verb`, under the transcript — a
+//! DRAFT, dropped when its part ends (the answer arrives as its row). The model's
+//! reasoning is never shown: a thinking part flashes `thinking`. A part that was
+//! aborted, or a malformed call, stays as one dim `not sent` line until the next
+//! turn. `S` is the agent's `stop`.
 
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -36,6 +40,9 @@ use crate::kern::model::{AgentId, RowId};
 use crate::panel::{Cx, Handled, Needs, Panel, PanelKind};
 use crate::theme;
 use crate::thread::{self, LineKind, Outline, OutlineState, Waiting, Zoom};
+
+/// How many lines of a text draft are drawn (its tail).
+const DRAFT_TAIL: usize = 6;
 
 /// (row, width) → (the text's hash, its wrapped lines).
 type WrapMemo = std::collections::HashMap<(RowId, usize), (u64, std::rc::Rc<Vec<String>>)>;
@@ -80,6 +87,22 @@ pub struct AiPanel {
     /// accumulates one copy per width.
     wraps_w: u16,
     waiting: Vec<Waiting>,
+    /// The parts being written now, in order (`stream_id`, the draft).
+    drafts: Vec<(String, Draft)>,
+    /// What did not go out this turn — an aborted part, a malformed call — one
+    /// line each, until the next turn.
+    not_sent: Vec<String>,
+}
+
+/// One streamed part, drawn while the model writes it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Draft {
+    /// text | thinking | call.
+    pub kind: String,
+    /// A call part's `→ target verb`.
+    pub head: String,
+    /// The text so far.
+    pub text: String,
 }
 
 impl AiPanel {
@@ -99,6 +122,53 @@ impl AiPanel {
             wraps: Default::default(),
             wraps_w: 0,
             waiting: Vec::new(),
+            drafts: Vec::new(),
+            not_sent: Vec::new(),
+        }
+    }
+
+    /// The draft lines drawn under the transcript: the text parts' tails, the
+    /// call parts' heads, then what was not sent. Thinking stays masked (the
+    /// `thinking` line).
+    fn draft_lines<'a>(&self, width: u16) -> Vec<Line<'a>> {
+        let w = (width as usize).saturating_sub(4).max(8);
+        let mut out = Vec::new();
+        for (_, d) in &self.drafts {
+            match d.kind.as_str() {
+                "text" => {
+                    let lines: Vec<String> = d.text.lines().flat_map(|l| {
+                        let cs: Vec<char> = l.chars().collect();
+                        if cs.is_empty() { vec![String::new()] } else { cs.chunks(w).map(|c| c.iter().collect()).collect() }
+                    }).collect();
+                    for l in lines.iter().skip(lines.len().saturating_sub(DRAFT_TAIL)) {
+                        out.push(Line::from(Span::styled(format!("  {l}"), Style::default().fg(theme::FG))));
+                    }
+                }
+                "call" => out.push(Line::from(Span::styled(format!("  {}", d.head), Style::default().fg(theme::DIM)))),
+                _ => {}
+            }
+        }
+        for n in &self.not_sent {
+            out.push(Line::from(Span::styled(format!("  {n}"), Style::default().fg(theme::DIM).add_modifier(Modifier::CROSSED_OUT))));
+        }
+        out
+    }
+
+    /// Whether a thinking part is open (the mask flashes).
+    fn thinking_open(&self) -> bool {
+        self.drafts.iter().any(|(_, d)| d.kind == "thinking")
+    }
+
+    /// Settle draft `id` as NOT SENT, saying why.
+    fn not_sent(&mut self, id: &str, why: &str) {
+        if let Some(at) = self.drafts.iter().position(|(s, _)| s == id) {
+            let (_, d) = self.drafts.remove(at);
+            let what = match d.kind.as_str() {
+                "call" => d.head,
+                "thinking" => "thinking".to_string(),
+                _ => d.text.lines().next().unwrap_or("").chars().take(60).collect(),
+            };
+            self.not_sent.push(format!("{what} · not sent — {why}"));
         }
     }
 
@@ -222,14 +292,10 @@ impl AiPanel {
         }
     }
 
-    /// `S`: stop every non-infrastructure task under this agent. The kernel kills
-    /// the subtree post-order, so one cancel per root task is enough.
+    /// `S`: the agent's own `stop` — the generation is cancelled (its provider
+    /// stream closed), its open parts abort, nothing is sent.
     fn stop(&self, cx: &Cx<'_>, out: &mut Vec<Cmd>) {
-        for t in cx.tasks {
-            if &t.agent == cx.agent && crate::presence::is_work(t) {
-                out.push(Cmd::Cancel { task_id: t.id });
-            }
-        }
+        out.push(Cmd::Send { target: cx.agent.clone(), payload: json!({"type": "stop"}) });
     }
 
     /// The gutter legend. It names the marks in the model's own words, because a
@@ -521,13 +587,43 @@ impl Panel for AiPanel {
     }
 
     fn on_event(&mut self, payload: &Value, _out: &mut Vec<Cmd>) -> bool {
+        let sid = || payload.get("stream_id").and_then(Value::as_str).unwrap_or("").to_string();
+        let st = |k: &str| payload.get(k).and_then(Value::as_str).unwrap_or("").to_string();
         match payload.get("type").and_then(Value::as_str) {
-            // A token means a turn is in flight. Its TEXT is never shown: the
-            // durable answer is the row, and the reasoning stays the model's.
-            Some("token") => {
-                let was = self.live;
+            // THE PARTS: one draft per stream_id. A delta never acts.
+            Some("part_start") => {
                 self.go_live();
-                !was
+                let to = payload.get("to").and_then(Value::as_array).map(|a| {
+                    a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")
+                });
+                let target = Some(st("target")).filter(|t| !t.is_empty()).or(to).unwrap_or_default();
+                let head = format!("→ {target} {}", st("name")).split_whitespace().collect::<Vec<_>>().join(" ");
+                self.drafts.push((sid(), Draft { kind: st("kind"), head, text: String::new() }));
+                true
+            }
+            Some("part_delta") => {
+                let id = sid();
+                match self.drafts.iter_mut().find(|(s, _)| *s == id) {
+                    Some((_, d)) => {
+                        d.text.push_str(&st("text"));
+                        d.kind == "text"
+                    }
+                    None => false,
+                }
+            }
+            Some("part_end") => {
+                let id = sid();
+                if payload.get("ok") == Some(&json!(false)) {
+                    self.not_sent(&id, "malformed");
+                } else {
+                    self.drafts.retain(|(s, _)| *s != id);
+                }
+                true
+            }
+            Some("part_abort") => {
+                let why = Some(st("reason")).filter(|r| !r.is_empty()).unwrap_or_else(|| "aborted".into());
+                self.not_sent(&sid(), &why);
+                true
             }
             Some("status") => {
                 let phase = payload
@@ -539,10 +635,17 @@ impl Panel for AiPanel {
                     .and_then(|d| d.get("ahead"))
                     .and_then(Value::as_i64);
                 match phase.as_deref() {
-                    Some("thinking" | "streaming" | "tool_calling") => self.go_live(),
+                    Some("thinking" | "streaming" | "tool_calling") => {
+                        // a new turn: last turn's not-sent lines go
+                        if !self.live {
+                            self.not_sent.clear();
+                        }
+                        self.go_live();
+                    }
                     _ => {
                         self.live = false;
                         self.since = None;
+                        self.drafts.clear();
                     }
                 }
                 self.phase = phase;
@@ -611,7 +714,7 @@ impl Panel for AiPanel {
         if self.body.is_none() && !self.last.lines.is_empty() {
             let o = &self.last;
             let head_h = self.header(o).len();
-            let live_h = if self.live { 2 } else { 0 };
+            let live_h = if self.live { 2 } else { 0 } + self.draft_lines(area.width).len();
             let body_h = (area.height as usize).saturating_sub(head_h + live_h);
             // Keep the cursor's WHOLE message on screen — messages have heights —
             // scrolling as little as it takes. O(what is on screen): walk UP from
@@ -663,10 +766,16 @@ impl Panel for AiPanel {
 
         let mut lines = self.header(o);
         let head_h = lines.len();
-        let live_h = if self.live { 2 } else { 0 };
+        let drafts = self.draft_lines(area.width);
+        let live_h = if self.live { 2 } else { 0 } + drafts.len();
         let body_h = (area.height as usize).saturating_sub(head_h + live_h);
 
-        if o.lines.is_empty() {
+        if o.lines.is_empty() && _cx.store.unloaded.contains(_cx.agent) {
+            lines.push(Line::from(Span::styled(
+                "  this agent has not loaded its history yet — it will on its next turn.",
+                Style::default().fg(theme::DIM),
+            )));
+        } else if o.lines.is_empty() {
             lines.push(Line::from(Span::styled(
                 "  nothing yet. Type below to start a thread.",
                 Style::default().fg(theme::DIM),
@@ -691,20 +800,31 @@ impl Panel for AiPanel {
             }
         }
 
-        if self.live {
-            // pinned to the bottom of the pane, under the transcript
-            while lines.len() + 2 < area.height as usize {
+        if self.live || !drafts.is_empty() {
+            // pinned to the bottom of the pane, under the transcript: the drafts,
+            // then the indicator (masking any reasoning in flight)
+            let tail = drafts.len() + if self.live { 2 } else { 0 };
+            while lines.len() + tail < area.height as usize {
                 lines.push(Line::from(""));
             }
-            lines.push(Line::from(""));
-            lines.push(self.thinking_line());
+            lines.extend(drafts);
+            if self.live {
+                lines.push(Line::from(""));
+                lines.push(self.thinking_line());
+            }
         }
 
         f.render_widget(Paragraph::new(lines), area);
     }
 
-    fn status(&self, _cx: &Cx<'_>) -> Option<String> {
+    fn status(&self, cx: &Cx<'_>) -> Option<String> {
         let mut bits = vec![self.agent.to_string()];
+        // THE KV-CACHE TABLE, when the backend keeps one (vLLM: `kv` in its
+        // reflect — live conversations of the slots, how many rotated out).
+        if let Some(kv) = cx.reflect.and_then(|r| r.get("kv")).filter(|k| k.get("slots").is_some_and(|s| !s.is_null())) {
+            let n = |k: &str| kv.get(k).and_then(Value::as_i64).unwrap_or(0);
+            bits.push(format!("kv {}/{} · evicted {}", n("live"), n("slots"), n("evicted")));
+        }
         // THE HONEST WORD for a second send: it is queued behind a turn that holds
         // the backend's lock. It is linked to what is running; it does not steer it.
         match (self.phase.as_deref(), self.ahead) {
@@ -892,56 +1012,32 @@ mod tests {
     }
 
     #[test]
-    fn stop_cancels_only_real_work_never_the_kernels_own_loops() {
-        use crate::kern::model::Task;
+    fn stop_is_the_agents_own_verb() {
         let s = store_with(vec![json!({"id":1,"agent":"ai","content":"a"})]);
-        let tasks = vec![
-            Task {
-                id: 10,
-                agent: "ai".into(),
-                parent: None,
-                verb: "send".into(),
-                started_at: 0.0,
-            },
-            Task {
-                id: 11,
-                agent: "ai".into(),
-                parent: None,
-                verb: "ws_drain".into(),
-                started_at: 0.0,
-            },
-            Task {
-                id: 12,
-                agent: "other".into(),
-                parent: None,
-                verb: "send".into(),
-                started_at: 0.0,
-            },
-        ];
         let mut p = AiPanel::new("ai".into());
         let seen = std::collections::HashSet::new();
         let a: AgentId = "ai".into();
-        let cx = Cx {
-            agent: &a,
-            store: &s,
-            tasks: &tasks,
-            seen: &seen,
-            reflect: None,
-        };
+        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: None };
         let mut out = Vec::new();
-        p.on_key(
-            KeyEvent::new(KeyCode::Char('S'), KeyModifiers::NONE),
-            &cx,
-            &mut out,
+        p.on_key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::NONE), &cx, &mut out);
+        assert!(
+            matches!(&out[..], [Cmd::Send { target, payload }] if target.as_str() == "ai" && payload["type"] == "stop"),
+            "{out:?}"
         );
-        let ids: Vec<_> = out
-            .iter()
-            .filter_map(|c| match c {
-                Cmd::Cancel { task_id } => Some(*task_id),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(ids, vec![10], "infra verbs and other agents are untouched");
+    }
+
+    #[test]
+    fn the_status_names_the_kv_table_when_the_backend_keeps_one() {
+        let p = AiPanel::new("ai".into());
+        let s = Store::default();
+        let seen = std::collections::HashSet::new();
+        let a: AgentId = "ai".into();
+        let r = json!({"kv": {"slots": 2, "overflow": "evict", "live": 2, "evicted": 1, "rejected": 0}});
+        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: Some(&r) };
+        assert!(p.status(&cx).unwrap().contains("kv 2/2 · evicted 1"));
+        let none = json!({"model": "x"});
+        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: Some(&none) };
+        assert!(!p.status(&cx).unwrap().contains("kv "));
     }
 
     #[test]
@@ -967,23 +1063,43 @@ mod tests {
     }
 
     #[test]
-    fn a_turn_in_flight_flashes_thinking_and_never_shows_the_tokens() {
+    fn parts_draw_text_and_calls_mask_thinking_and_settle() {
         let mut p = AiPanel::new("ai".into());
         let mut out = Vec::new();
-        p.on_event(&json!({"type":"token","text":"<think>secret reasoning"}), &mut out);
-        assert!(p.live && p.animating(), "a token starts the indicator");
         let s = Store::default();
         let seen = std::collections::HashSet::new();
         let a: AgentId = "ai".into();
         let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: None };
-        p.layout(Rect::new(0, 0, 60, 12), &cx);
-        let screen = draw_once(&p, &cx, 60, 12);
-        assert!(screen.contains("thinking"), "{screen}");
-        assert!(!screen.contains("secret"), "the stream is never drawn: {screen}");
+        let ev = |v: Value| v;
+        // reasoning: masked
+        p.on_event(&ev(json!({"type":"part_start","stream_id":"ai:1","kind":"thinking","re":4})), &mut out);
+        p.on_event(&ev(json!({"type":"part_delta","stream_id":"ai:1","text":"secret reasoning"})), &mut out);
+        assert!(p.live && p.thinking_open());
+        p.layout(Rect::new(0, 0, 60, 14), &cx);
+        let screen = draw_once(&p, &cx, 60, 14);
+        assert!(screen.contains("thinking") && !screen.contains("secret"), "{screen}");
+        p.on_event(&ev(json!({"type":"part_end","stream_id":"ai:1"})), &mut out);
+        // the answer: drawn as written
+        p.on_event(&ev(json!({"type":"part_start","stream_id":"ai:2","kind":"text","re":4})), &mut out);
+        p.on_event(&ev(json!({"type":"part_delta","stream_id":"ai:2","text":"hello there"})), &mut out);
+        // a call: its head
+        p.on_event(&ev(json!({"type":"part_start","stream_id":"ai:3","kind":"call","name":"send","target":"files","re":4})), &mut out);
+        p.layout(Rect::new(0, 0, 60, 14), &cx);
+        let screen = draw_once(&p, &cx, 60, 14);
+        assert!(screen.contains("hello there") && screen.contains("→ files send"), "{screen}");
+        // a malformed call is not sent; an aborted text neither
+        p.on_event(&ev(json!({"type":"part_end","stream_id":"ai:3","ok":false})), &mut out);
+        p.on_event(&ev(json!({"type":"part_abort","stream_id":"ai:2","reason":"stopped"})), &mut out);
+        assert!(p.drafts.is_empty());
+        p.layout(Rect::new(0, 0, 60, 14), &cx);
+        let screen = draw_once(&p, &cx, 60, 14);
+        assert!(screen.contains("→ files send · not sent — malformed"), "{screen}");
+        assert!(screen.contains("hello there · not sent — stopped"), "{screen}");
+        // the turn ends: the indicator stops; the next turn clears the not-sent lines
         p.on_event(&json!({"type":"status","phase":"done"}), &mut out);
-        assert!(!p.live && !p.animating(), "done stops it");
-        p.layout(Rect::new(0, 0, 60, 12), &cx);
-        assert!(!draw_once(&p, &cx, 60, 12).contains("thinking"));
+        assert!(!p.live);
+        p.on_event(&json!({"type":"status","phase":"thinking"}), &mut out);
+        assert!(p.not_sent.is_empty());
     }
 
     #[test]

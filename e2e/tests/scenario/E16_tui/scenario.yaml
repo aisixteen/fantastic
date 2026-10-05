@@ -27,21 +27,19 @@ runs:
       exit 8000
     frames:
       # no docked title: the live shell gives every row to the work
-      # no docked title, and no `set_of_agents` row: a bare grouping node is
-      # not drawn and its children sit one level up
-      live: {contains: [fs_loader, exec, files, user, store, memory], lacks: [mcp, set_of_agents], contains_block_title: false}
+      live: {contains: [fs_loader, exec, files, user, store, memory], lacks: [mcp], contains_block_title: false}
     after_exit:
       exit_code: 0
       lock_released: true
       files_exist:
-        - .fantastic/agents/set_of_agents/agents/exec/agent.yaml
-        - .fantastic/agents/set_of_agents/agents/files/agent.yaml
-        - .fantastic/agents/set_of_agents/agents/user/agent.yaml
-        - .fantastic/agents/fs_loader/agent.yaml
-        - .fantastic/agents/store/agent.yaml
-        - .fantastic/agents/memory/agent.yaml
+        - .fantastic/agents/user/agents/exec/agent.yaml
+        - .fantastic/agents/user/agents/files/agent.yaml
+        - .fantastic/agents/user/agent.yaml
+        - .fantastic/agents/user/agents/fs_loader/agent.yaml
+        - .fantastic/agents/user/agents/store/agent.yaml
+        - .fantastic/agents/user/agents/memory/agent.yaml
         - .fantastic/memory.db
-      files_absent: [.fantastic/agents/mcp/agent.yaml, .fantastic/messages.yaml, .fantastic/ledger.json]
+      files_absent: [.fantastic/agents/user/agents/mcp/agent.yaml, .fantastic/messages.yaml, .fantastic/ledger.json]
 
   # ── 2 · the same directory: no intro, straight to the tree, log grows ──────
   #       …and an agent with no view of its own opens in the DEFAULT view
@@ -49,6 +47,12 @@ runs:
     script: |
       wait 2500
       shot live
+      key down
+      wait 200
+      key down
+      wait 200
+      key down
+      wait 200
       key down
       wait 200
       key down
@@ -61,8 +65,8 @@ runs:
       key ctrl-c
       exit 8000
     frames:
-      # the Activity row sits right under the kernel's row, so fs_loader is two down
-      live: {contains: [exec, files, user, "✉ Activity"], lacks: [set_of_agents], contains_block_title: false}
+      # Activity and `user` sit under the kernel's row; fs_loader is the third of user's children: five down
+      live: {contains: [exec, files, user, "✉ Activity"], contains_block_title: false}
       # fs_loader has no specific view: who it is, who it talks to, its verbs, its rows
       default_view:
         contains: ["fs_loader  ● open", "EGRESS · may call", "INGRESS · callable by", "baseline: $self", "VERBS", "ROWS ·"]
@@ -119,7 +123,7 @@ runs:
     after_exit:
       exit_code: 0
       lock_released: true
-      files_absent: [.fantastic/agents/set_of_agents/agents/term/agent.yaml]
+      files_absent: [.fantastic/agents/user/agents/term/agent.yaml]
 
   # ── 5 · the sidebar's three views: v flat, < rail, > back ─────────────────
   - name: sidebar
@@ -187,7 +191,7 @@ runs:
   - name: mouse
     script: |
       wait 2500
-      click 5 3
+      click 8 6
       wait 800
       shot clicked
       key ctrl-c

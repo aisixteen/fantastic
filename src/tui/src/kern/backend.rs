@@ -1,30 +1,27 @@
-//! THE CANVAS'S BACKEND, host side: `backend` under the host's `canvas` node,
-//! and under it one FOLDER per page view, mirroring the page's view hierarchy
-//! (the tree, owner 2026-10-04). Every folder is this bundle too.
+//! THE CANVAS'S HOST NODE: `canvas_root` under `canvas_page` — the page records'
+//! loader (`web_loader`), the static files, and every backend of the canvas's
+//! cells as its OWN direct children (the tree, owner 2026-10-04).
 //!
 //! ```text
-//!   canvas
-//!   └── backend              backend.tools
-//!       └── view_root        backend.tools   the root view's backends
-//!           ├── exec_bridge_* · setup_* · ai_<hex>
-//!           └── view_<id>    backend.tools   a nested view's backends …
+//!   canvas_root                   canvas.tools
+//!   ├── exec_bridge_* · setup_* · ai_<hex>   the cells' backends
+//!   ├── static_files
+//!   └── web_loader
 //! ```
 //!
-//! A backend agent CREATES AND DELETES ITS OWN CHILDREN — the kernel's rule:
-//! the mutators act on the sender's direct children only. `create {record}`
-//! makes one direct child (a cell's backend, or a nested view's folder —
-//! `handler_module: backend.tools`); `delete {id}` removes an agent of its own
-//! subtree, a deeper one through its parent folder. The page never writes the
-//! host tree itself.
+//! IT CREATES AND DELETES ITS OWN CHILDREN — the kernel's rule: the mutators act
+//! on the sender's direct children only. `create {record}` makes one direct
+//! child (a cell's backend); `delete {id}` removes an agent of its own subtree,
+//! a deeper one through its parent. The page never writes the host tree itself.
 //!
 //! AI CELLS. The canvas makes an AI cell wherever you type something that is not
 //! a known kind (design: `tmp/canvas_ai.md`). The cell's AI agent is built from
 //! one of the user's TEMPLATES, and only the CLI may read those
-//! (`kern/templates`), so the page asks its view's folder. The AI is the
-//! folder's direct child, on the PROJECT's memory store from its first turn
-//! (owner D4, 2026-10-03: no per-cell RAM store; a closed, unkept cell's rows
-//! stay in SQLite). The store admits it as `user` (the store's parent); its
-//! record lets `user` call the chat verbs; `user`'s own side is `kern/reach`'s.
+//! (`kern/templates`), so the page asks `canvas_root`. The AI is its direct
+//! child, on the PROJECT's memory store from its first turn (owner D4,
+//! 2026-10-03: no per-cell RAM store; a closed, unkept cell's rows stay in
+//! SQLite). The store admits it as `user` (the store's parent); its record lets
+//! `user` call the chat verbs; `user`'s own side is `kern/reach`'s.
 //!
 //! Verbs: `presets` (template names, their backend and model, and the default),
 //! `spawn {template?, stamp?, peer_grants?}` (the named template, else the
@@ -33,17 +30,16 @@
 //! The host knows NOTHING of the page's composition. `stamp` is the CALLER's:
 //! record fields it wants on the cell's backend (the canvas stamps its cell's
 //! id, to reconcile its own pairs), copied without being read. `peer_grants` is
-//! the AI's egress to agents on ANOTHER kernel — only `<guid>|<agent>` keys,
-//! merged into its `can_call`.
+//! more egress for the AI, merged into its `can_call`.
 //!
 //! KEPT DIALOGS. `keep {id, name?}` records the dialog: a `dialog` row in the
 //! memory store under `user`'s key (its name, template and the record to re-make
 //! the AI), the newest row per AI winning — `rename` adds one. `dialogs` lists
 //! them. `reopen {id, stamp?, peer_grants?}` binds a new cell to the dialog: the
 //! live AI when another cell has it open (ONE dialog in several cells, updating
-//! live), else the same AI re-made in the asked folder — its history is in the
-//! store under its own id. Which cells show an AI is the PAGE's count: it deletes
-//! the AI when its last cell on it closes.
+//! live), else the same AI re-made here — its history is in the store under its
+//! own id. Which cells show an AI is the PAGE's count: it deletes the AI when its
+//! last cell on it closes.
 
 use std::sync::Arc;
 
@@ -56,18 +52,12 @@ use crate::env::ClientCfg;
 use crate::kern::host::Host;
 
 /// The `handler_module` this bundle answers to.
-pub const HANDLER_MODULE: &str = "backend.tools";
-
-/// The top backend's id (created by `fantastic canvas`, under the host's `canvas`).
-pub const BACKEND_ID: &str = "backend";
-
-/// The root view's folder, under [`BACKEND_ID`].
-pub const ROOT_VIEW: &str = "view_root";
+pub const HANDLER_MODULE: &str = "canvas.tools";
 
 /// Who the cell's view calls the AI as: a tokenless tab's user.
 const CHAT_USER: &str = crate::env::HUMAN;
 /// What the cell's view may call on a spawned AI.
-pub const CHAT_VERBS: [&str; 5] = ["send", "history", "status", "watch", "reflect"];
+pub const CHAT_VERBS: [&str; 6] = ["send", "history", "status", "watch", "reflect", "stop"];
 
 /// The memory-store row kind a kept dialog is recorded as (under `user`'s key).
 const DIALOG: &str = "dialog";
@@ -76,14 +66,13 @@ const DIALOG: &str = "dialog";
 /// authority — added again when the AI is re-made).
 const NOT_SNAPSHOT: [&str; 7] = ["id", "parent_id", "guid", "agents", "memory_store_id", "can_call", "callable_by"];
 
-/// Fields a caller's `stamp` may never set: identity, placement, authority.
-const NOT_STAMPABLE: [&str; 11] = [
-    "type", "id", "parent_id", "guid", "handler_module", "agents", "can_call", "callable_by", "operator", "admins",
-    "memory_store_id",
-];
+/// Fields a caller's `stamp` may never set: the structural ones (they make a
+/// different agent).
+const NOT_STAMPABLE: [&str; 6] = ["type", "id", "parent_id", "guid", "handler_module", "agents"];
 
-/// The caller's `stamp`: an object of plain fields, none of them identity or
-/// authority. Absent = none.
+/// The caller's `stamp`: an object of fields, none of them structural (a
+/// structural field makes a different agent). Grants pass: the kernel judges
+/// them at the write. Absent = none.
 fn stamp_of(p: &Value) -> Result<Map<String, Value>, Value> {
     match p.get("stamp") {
         None | Some(Value::Null) => Ok(Map::new()),
@@ -95,15 +84,12 @@ fn stamp_of(p: &Value) -> Result<Map<String, Value>, Value> {
     }
 }
 
-/// The caller's `peer_grants`: egress to agents on ANOTHER kernel only — every
-/// key `<guid>|<agent>`. Absent = none.
+/// The caller's `peer_grants`: more egress for the new AI, any grant key (the
+/// kernel refuses an illegal one at the write). Absent = none.
 fn peer_grants_of(p: &Value) -> Result<Map<String, Value>, Value> {
     match p.get("peer_grants") {
         None | Some(Value::Null) => Ok(Map::new()),
-        Some(Value::Object(m)) => match m.keys().find(|k| !k.contains('|')) {
-            Some(k) => Err(refuse("bad_arg", format!("peer_grants: `{k}` is not an agent on another kernel"), "keys are `<guid>|<agent>`")),
-            None => Ok(m.clone()),
-        },
+        Some(Value::Object(m)) => Ok(m.clone()),
         Some(_) => Err(refuse("bad_arg", "peer_grants: must be an object", "")),
     }
 }
@@ -179,24 +165,43 @@ impl BackendBundle {
         }
     }
 
-    /// Create AI `ai` as THIS folder's direct child, on the project's memory
+    /// Create AI `ai` as `canvas_root`'s direct child, on the project's memory
     /// store from its first turn (owner D4): the store admits it (as `user`, the
     /// store's parent), its record names the store, `user` may call its chat
     /// verbs, it may call the store, its key and `peer`. `user`'s own side is
     /// `kern/reach`'s.
     async fn make_ai(host: &Host, me: &AgentId, ai: &str, mut spec: Map<String, Value>, peer: Map<String, Value>) -> Result<(), String> {
-        let store = host.admit_to_memory(ai).await?;
+        // the caller's own store, when it names one (its grants are the
+        // caller's); else the project's, which admits the AI
+        let store = match spec.get("memory_store_id").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+            Some(s) => s.to_string(),
+            None => host.admit_to_memory(ai).await?,
+        };
         let handler = spec.get("handler_module").and_then(Value::as_str).unwrap_or("").to_string();
         crate::kern::keys::attach(host, &handler, &mut spec)?;
         spec.insert("type".into(), json!("create_agent"));
         spec.insert("parent_id".into(), json!(me.0));
         spec.insert("id".into(), json!(ai));
         spec.insert("memory_store_id".into(), json!(store));
-        spec.insert("callable_by".into(), json!({ CHAT_USER: CHAT_VERBS }));
-        let mut cc = peer;
+        // the defaults MERGED with the caller's grants (stamp, peer_grants) —
+        // the caller's keys win on a clash; nothing the caller passed is dropped
+        let caller = |spec: &mut Map<String, Value>, f: &str| match spec.remove(f) {
+            Some(Value::Object(m)) => m,
+            _ => Map::new(),
+        };
+        let (caller_cc, caller_cb) = (caller(&mut spec, "can_call"), caller(&mut spec, "callable_by"));
+        let mut cb = Map::new();
+        cb.insert(CHAT_USER.into(), json!(CHAT_VERBS));
+        cb.extend(caller_cb);
+        spec.insert("callable_by".into(), Value::Object(cb));
+        let mut cc = Map::new();
         cc.insert(store, json!("*"));
         spec.insert("can_call".into(), Value::Object(cc));
         crate::kern::keys::grant_on_create(&mut spec);
+        if let Some(Value::Object(cc)) = spec.get_mut("can_call") {
+            cc.extend(peer);
+            cc.extend(caller_cc);
+        }
         let named = spec.clone();
         let r = host.operator("kernel", Value::Object(spec)).await.result;
         if let Some(e) = r.get("error").and_then(Value::as_str) {
@@ -206,7 +211,9 @@ impl BackendBundle {
             let _ = host.operator("kernel", json!({"type": "delete_agent", "id": ai})).await;
             return Err(e);
         }
-        Ok(())
+        // the cell calls it through `user` and watches it through the leg the
+        // moment this answers: both grants first
+        crate::kern::reach::granted(host, ai).await
     }
 
     /// Whether `id` sits under `me` (strictly).
@@ -232,13 +239,13 @@ impl BackendBundle {
             return refuse("bad_arg", "create: record (dict) required", "");
         };
         if let Some(k) = rec.keys().find(|k| *k != "handler_module" && NOT_STAMPABLE.contains(&k.as_str()) && *k != "id") {
-            return refuse("bad_arg", format!("create: `{k}` is not the caller's to set"), "the child's parent is this agent; grants are the host's");
+            return refuse("bad_arg", format!("create: `{k}` is structural — not the caller's to set"), "the child's parent is this agent");
         }
         let handler = rec.get("handler_module").and_then(Value::as_str).unwrap_or("");
         if handler.is_empty() {
             return refuse("bad_arg", "create: record.handler_module required", "");
         }
-        // a folder asked again is the same folder
+        // a child asked again is the same child
         if let Some(id) = rec.get("id").and_then(Value::as_str) {
             if let Some(a) = host.kernel.agents.get(&AgentId::from(id)) {
                 let r = a.value().record();
@@ -255,11 +262,17 @@ impl BackendBundle {
         if let Some(e) = r.get("error").and_then(Value::as_str) {
             return refuse("bad_arg", format!("create: {e}"), "");
         }
+        // the page calls it through `user` and watches it through the leg the
+        // moment this answers: both grants first
+        let id = r.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+        if let Err(e) = crate::kern::reach::granted(host, &id).await {
+            return refuse("not_found", format!("create: {e}"), "");
+        }
         r
     }
 
     /// `delete {id}` — an agent of this backend's own subtree. A direct child is
-    /// deleted here; a deeper one by ITS parent folder (each deletes its own
+    /// deleted here; a deeper one by ITS parent (each deletes its own
     /// children only).
     async fn delete(host: &Host, me: &AgentId, p: &Value) -> Value {
         let id = p.get("id").and_then(Value::as_str).unwrap_or("");
@@ -279,7 +292,7 @@ impl BackendBundle {
     }
 
     /// The kept dialogs: `dialog` rows in the memory store under `user`'s key
-    /// (no handler may write the top `backend`'s record: grants and fields come
+    /// (no handler may write `canvas_root`'s record: grants and fields come
     /// from above), the newest row per AI wins — `{id: {name, template, record}}`.
     async fn dialogs_map(host: &Host) -> Result<Map<String, Value>, String> {
         let store = host.memory_store()?;
@@ -362,7 +375,7 @@ impl BackendBundle {
     }
 
     /// REOPEN a kept dialog in a new cell: the live AI when another cell has it
-    /// open (one dialog, several cells), else the same AI re-made in THIS folder
+    /// open (one dialog, several cells), else the same AI re-made here
     /// — its history is in the memory store under its own id.
     async fn reopen(host: &Host, me: &AgentId, p: &Value) -> Value {
         let ai = p.get("id").and_then(Value::as_str).unwrap_or("").to_string();
@@ -401,12 +414,12 @@ impl Bundle for BackendBundle {
             "boot" => Ok(None),
             "reflect" => Ok(Some(json!({
                 "handler_module": HANDLER_MODULE,
-                "sentence": "The canvas's backend: creates and deletes its own children — its view's cells' backends and nested views' folders (each one this bundle too) — and spawns AI cells from the user's templates, on the project's memory store.",
+                "sentence": "The canvas's host node: creates and deletes its own children — the cells' backends (exec agents, AIs), beside `web_loader` (the page records) and `static_files` — and spawns AI cells from the user's templates, on the project's memory store.",
                 "verbs": {
-                    "create": "args: record:dict (req — handler_module, id?, its own fields; no parent or grants). One direct child of this agent; a nested view's folder is handler_module backend.tools, and asking for an existing child folder again answers it. {id, …}.",
+                    "create": "args: record:dict (req — handler_module, id?, its own fields; no parent or grants). One direct child of this agent; asking for an existing child of the same handler again answers it. {id, …}.",
                     "delete": "args: id:str (req — an agent under this one). Deletes it and its subtree.",
                     "presets": "No args. {templates: [{name, handler_module, model}], preferred}.",
-                    "spawn": "args: template:str? (else the default), stamp:dict? (the caller's own fields for the backend root, copied unread), peer_grants:dict? (`<guid>|<agent>` keys only — the AI's egress to another kernel). {id, root, template, handler_module, model}.",
+                    "spawn": "args: template:str? (else the default), stamp:dict? (the caller's own fields for the backend root, copied unread), peer_grants:dict? (any grant key — more egress for the AI). {id, root, template, handler_module, model}.",
                     "keep": "args: id:str (req — the cell's AI), name:str?. Records the dialog (its rows are already in the project's memory store); it outlives the cell. {kept, name}.",
                     "rename": "args: id:str, name:str. {id, name}.",
                     "dialogs": "No args. The kept dialogs: {dialogs: [{id, name, template, live}]}.",
@@ -415,7 +428,7 @@ impl Bundle for BackendBundle {
             }))),
             _ => {
                 let Some(host) = Self::host(kernel) else {
-                    return Ok(Some(refuse("not_found", "backend: the kernel has no root", "")));
+                    return Ok(Some(refuse("not_found", "canvas: the kernel has no root", "")));
                 };
                 Ok(Some(match verb {
                     "create" => Self::create(&host, agent_id, payload).await,
@@ -426,7 +439,7 @@ impl Bundle for BackendBundle {
                     "rename" => Self::rename(&host, payload).await,
                     "dialogs" => Self::dialogs(&host).await,
                     "reopen" => Self::reopen(&host, agent_id, payload).await,
-                    _ => refuse("unhandled", format!("backend: unknown type {verb:?}"), ""),
+                    _ => refuse("unhandled", format!("canvas: unknown type {verb:?}"), ""),
                 }))
             }
         }

@@ -7,7 +7,6 @@
 
 pub mod reach;
 pub mod backend;
-pub mod canvas_node;
 pub mod host;
 pub mod keys;
 pub mod model;

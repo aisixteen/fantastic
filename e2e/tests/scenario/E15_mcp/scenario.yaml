@@ -79,7 +79,7 @@ runs:
     after_exit:
       exit_code: 0
       lock_released: true
-      files_exist: [.fantastic/agents/mcp/agent.yaml, .fantastic/memory.db]
+      files_exist: [.fantastic/agents/user/agents/mcp/agent.yaml, .fantastic/memory.db]
       # THE MEMORY STORE holds the execution rows: no tape, no ledger, no JSON/XML
       files_absent: [.fantastic/messages.yaml, .fantastic/ledger.json, .fantastic/messages.xml, .fantastic/agent.json]
       store_has:
@@ -88,11 +88,11 @@ runs:
         # … and its settle row the outcome (unnamed: a digest, never the body)
         - {kind: settle, settled: files, outcome.status: completed}
       record:
-        .fantastic/agents/mcp/agent.yaml:
+        .fantastic/agents/user/agents/mcp/agent.yaml:
           handler_module: web_mcp.tools
           can_call_has: [files, exec, user, kernel]
-        .fantastic/agents/set_of_agents/agents/files/agent.yaml:
-          callable_by_has: ["$subtree:mcp", user, exec]
+        .fantastic/agents/user/agents/files/agent.yaml:
+          callable_by_has: [mcp, user, exec]
       rows_by: {agent: mcp, at_least: 3}
       blueprint_never_names: mcp
 

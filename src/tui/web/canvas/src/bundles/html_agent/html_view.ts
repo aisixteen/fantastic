@@ -13,8 +13,7 @@ import { CONNECTOR_SRC } from "./connector.ts";
 
 export const htmlView: ViewBundle = {
   // The frontend member IS an `html_agent.ts` agent holding its own content.
-  // …and a CHILD CANVAS's card on its parent: the same html body, the child's own.
-  handles: ["html_agent.ts", "canvas.ts"],
+  handles: ["html_agent.ts"],
   // Content, not a host client: its reach is whatever its creator wrote.
   grants: () => ({}),
 
@@ -91,12 +90,9 @@ export const htmlView: ViewBundle = {
           break;
         }
         case "emit":
-          // local frontend agent → local fan-out; host agent → over the bridge.
-          if (kernel.get(m.target ?? "") !== undefined) {
-            kernel.emit(m.target ?? "", m.payload ?? {});
-          } else {
-            kernel.emitRemote(m.target ?? "", m.payload ?? {});
-          }
+          // AS THIS AGENT (`panel_relay.ts`): gated like a send — the emitter's
+          // `can_call` and the receiver's `callable_by` must both name `emit`
+          void asSelf("panel_emit", { target: m.target ?? "", payload: m.payload ?? {} });
           break;
         case "watch": {
           const src = m.src ?? "";

@@ -22,17 +22,15 @@ user
 └── web
     ├── canvas_ws               the socket leg the page speaks through
     └── canvas_page             the embedded page
-        └── canvas              the canvas's host node
+        └── canvas_root         the canvas's host node
             ├── web_loader      the page's records (.fantastic/web)
-            │   ├── static_files                 the files every view's cells load
+            │   ├── static_files                 the files the cells load
             │   └── canvas                       (page side)
             │       └── view_root
-            │           ├── background · <its cells>
-            │           └── view_<id> …          nested views, each the same
+            │           └── background · <its cells>
             └── backend         creates / deletes its own children
-                └── view_root   one folder per page view, the same hierarchy
-                    ├── <backends>   a terminal's exec_bridge, an AI, setup
-                    └── view_<id> …
+                └── backend_view_root   the view's folder
+                    └── <backends>   a terminal's exec_bridge, an AI, setup
 ```
 
 Every page call reaches the host as `user` (`user.forward`, with the token
@@ -44,12 +42,13 @@ both sides; the human narrows them with `update_agent`).
 
 | verb | what |
 |---|---|
-| `place {kind, x, y, …}` | a new cell: `html`, `gl`, `terminal`, `chat`, `view` (a nested view) |
+| `place {kind, x, y, …}` | a new cell: `html`, `gl`, `terminal`, `chat` — or `handler_module` (any page bundle, `.ts` optional) instead of `kind` (one view for now — no nested views) |
 | `move {id, x, y, …}` | move / resize a cell |
-| `update {id, bytes?, fields?}` | a cell's new body (`bytes`, verbatim) or fields (display_name, trusted, readme, geometry) |
-| `wire {sender, receiver, verbs}` | a grant between two cells, both sides |
+| `update {id, bytes?, fields?}` | a cell's new body (`bytes`, verbatim) or fields (display_name, trusted, readme, geometry, can_call, callable_by) |
+| `wire {sender, receiver, verbs}` | a grant, written on each side that is a cell of the view (a host agent receiver: the sender's side only) |
+| (a live URL or a file) | an html cell whose body is `<iframe src=URL>` — `trusted: true` for the host's own files |
+| (grant hint) | a body that calls an agent the cell's `can_call` lacks → the reply names `grants_missing` and the `update` that adds them |
 | `remove {id}` | delete a cell (refused for a delete-locked agent) |
-| `get_html` / `set_html` | a nested view's card html, shown on its parent |
 
 `update {id: <the view>, fields: {main_ai_chat: <chat cell id> | null}}`
 names the view's main chat. Every cell answers `reflect`, `get_html`,
@@ -60,7 +59,7 @@ kind, title, rect, distance, backend_id?}]}`, nearest first.
 ## The background
 
 Each view has one `background` agent with no children (`background` on the
-root view, delete-locked; a nested view's is `<view>_bg`): one GL source,
+view, delete-locked): one GL source,
 `set_bg {source}`, `clear_bg`, `get_bg`. The source is a function body
 `(THREE, scene, t, onFrame, cleanup)`.
 

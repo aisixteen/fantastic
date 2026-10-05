@@ -182,7 +182,8 @@ def main() -> bool:
     for line in stream[:16]:
         print(f"  {line}")
     # `around` is the host's (`user.around`, from the page records)
-    print(f"called around: {any(re.match(r'^\[\d+\] user call around', l) for l in log.read_text().splitlines())}")
+    around_re = re.compile(r"^\[\d+\] user call around")
+    print(f"called around: {any(around_re.match(l) for l in log.read_text().splitlines())}")
     print(f"answer names a terminal: {'terminal' in answer.lower()} · an html panel: {'html' in answer.lower()}")
     print(f"answer: {answer[:600]}")
     if out["errors"]:

@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from _lib.canvas_live import Rig, verdict, answer, ask, html_cell, http_get, in_frame, say, spot, wait_quiet  # noqa: E402,F401
+from _lib.canvas_live import seed_key, Rig, verdict, answer, ask, html_cell, http_get, in_frame, say, spot, wait_quiet  # noqa: E402,F401
 
 def main() -> bool:
     rig = Rig(__file__)
@@ -17,8 +18,12 @@ def main() -> bool:
         return verdict(*rig.finish(False, why))
     rig.build()
     rig.make_home(None)  # NO template: the set-up makes it
+    # the key as an earlier set-up leaves it (plain mode, the ref remembered,
+    # its value in the 0600 file) — BEFORE the first boot, which makes the
+    # credential store from it; the write then names it on the record. The
+    # window comes with it (required on a vLLM record, never guessed: CTX)
+    rec = seed_key(rig.home, rig.plug.record())
     rig.init()
-    rec = rig.plug.record()
     module = rec["handler_module"]
     import json
 

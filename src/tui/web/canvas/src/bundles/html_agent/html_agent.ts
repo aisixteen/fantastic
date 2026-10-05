@@ -1,6 +1,7 @@
 import { str } from "../../lib.ts";
 import { bodyText } from "../body_text.ts";
 import { panelRelay } from "../panel_relay.ts";
+import { grantHint } from "./grant_hint.ts";
 import type { Handler, Json } from "../../lib.ts";
 
 // html_agent — a JS view-agent holding MUTABLE HTML content. Ported from the
@@ -35,10 +36,14 @@ export const htmlAgent: Handler = (id, payload, kernel): Json | Promise<Json> =>
       const html = raw;
       kernel.updateMeta(id, { html }); // → updated event → persist
       kernel.emit(id, { type: "reload_html" }); // universal view reload
-      return { ok: true, bytes: html.length };
+      return { ok: true, bytes: html.length, ...grantHint(id, html, agent?.meta["can_call"]) } as Json;
     }
     default:
-      return { error: `html_agent: unknown verb '${str(payload, "type")}'` };
+      return {
+        error: `html_agent: unknown verb '${str(payload, "type")}' — a cell answers get_html and set_html only`,
+        reason: "unhandled",
+        hint: "placing, moving, updating, wiring (grants) and removing cells are the VIEW's verbs: send place / move / update / wire / remove to the view (view_root), naming this cell by id",
+      };
   }
 };
 

@@ -14,7 +14,7 @@ const P: Presets = {
 
 test("empty: every section — do, AI (★ the default), chats", () => {
   const t = tiles("", P);
-  assert.deepEqual(t.map((x) => x.label), ["ask", "terminal", "html", "stream", "view", "agent", "demo", "@gpt5 ★", "@box", "release notes"]);
+  assert.deepEqual(t.map((x) => x.label), ["ask", "terminal", "html", "stream", "agent", "demo", "@gpt5 ★", "@box", "release notes"]);
   assert.deepEqual([...new Set(t.map((x) => x.section))], ["do", "ai", "chats"]);
   assert.deepEqual(t.at(-1)!.pick, { kind: "chat", id: "ai_1", name: "release notes" });
 });
