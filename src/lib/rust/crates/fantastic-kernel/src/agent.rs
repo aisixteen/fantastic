@@ -139,7 +139,7 @@ impl Agent {
         // agent that passes through here — the seeded root, a created child, a
         // disk-loaded record alike (one funnel, so nothing lacks it). `can_call`
         // (who I may call) and `callable_by` (who may call me) both start as
-        // {$self:*, $parent:*, $children:*}. It MERGES UNDER any explicit grant
+        // {$self:*, $parent:*, $subtree:*}. It MERGES UNDER any explicit grant
         // already in `meta` (an explicit key overrides a baseline key; idempotent on
         // reload). Deny-all governs every edge NOT in the merged grant.
         for (field, base) in [

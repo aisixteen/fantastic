@@ -61,7 +61,7 @@ async fn a_literal_route_beats_a_catch_all_mounted_before_it() {
     kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     for rec in [
-        json!({"parent_id": "kernel", "handler_module": HANDLER_MODULE, "callable_by": {"$children": ["watch"]}, "can_call": {"$children": ["get_routes"]}, "id": web_id,
+        json!({"parent_id": "kernel", "handler_module": HANDLER_MODULE, "callable_by": {"$subtree": ["watch"]}, "can_call": {"$subtree": ["get_routes"]}, "id": web_id,
                "port": port}),
         // the catch-all leg sorts (and mounts) FIRST
         json!({"parent_id": web_id, "handler_module": "web_ws.tools", "can_call": {"$parent": ["watch"]}, "callable_by": {"$parent": ["get_routes"]}, "id": "a_ws",

@@ -229,7 +229,7 @@ async def core_the_roster_is_closed_after_boot(h):
     on the root is refused at egress — the baseline is `{$self: "*"}` alone, so
     nothing reaches the root ungranted. Indirectly: an agent editing its OWN
     `can_call` to grant itself the reach — refused (at egress ungranted, or by the
-    mutator rule: an agent updates only its own children, never itself).
+    mutator rule: an agent updates only agents in its own subtree, never itself).
 
     The refusal is then re-probed for EFFECT, not inspected as a field: after the
     attempt to raise its own grant a previously-denied edge must still deny."""

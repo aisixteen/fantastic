@@ -73,7 +73,7 @@ private func leg() async -> (Kernel, String, PairEnd, URL) {
         k,
         [
             "parent_id": "kernel_state", "handler_module": "ws_bridge.tools",
-            "can_call": ["$children": "*", "kernel_state": "*"],
+            "can_call": ["$subtree": "*", "kernel_state": "*"],
             "transport": "memory", "ingress_rule": "allow_all_ingress",
         ])
     let notes = await create(
@@ -193,7 +193,7 @@ struct LegLifetimeTests {
             kb,
             [
                 "parent_id": "kernel_state", "handler_module": "ws_bridge.tools",
-            "can_call": ["$children": "*", "kernel_state": "*"],
+            "can_call": ["$subtree": "*", "kernel_state": "*"],
                 "id": "b_leg", "transport": "memory", "ingress_rule": "allow_all_ingress",
             ])
         let doc = await create(
@@ -213,7 +213,7 @@ struct LegLifetimeTests {
                 ka,
                 [
                     "parent_id": "kernel_state", "handler_module": "ws_bridge.tools",
-            "can_call": ["$children": "*", "kernel_state": "*"],
+            "can_call": ["$subtree": "*", "kernel_state": "*"],
                     "id": "a_leg", "transport": "memory",
                 ])
             let (ta, tb) = PairEnd.pair()

@@ -560,8 +560,8 @@ struct RootBootTests {
             {
               "id": "kernel_state",
               "handler_module": "kernel_state.tools",
-              "can_call": {"$self": "*", "$parent": "*", "$children": "*"},
-              "callable_by": {"$self": "*", "$parent": "*", "$children": "*"},
+              "can_call": {"$self": "*", "$parent": "*", "$subtree": "*"},
+              "callable_by": {"$self": "*", "$parent": "*", "$subtree": "*"},
               "guid": "0123456789abcdef0123456789abcdef"
             }
             """

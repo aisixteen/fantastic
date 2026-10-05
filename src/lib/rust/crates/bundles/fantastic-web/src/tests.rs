@@ -105,7 +105,7 @@ async fn web_alone_has_no_ws_endpoint() {
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
-                "handler_module": HANDLER_MODULE, "callable_by": {"$children": ["watch"]}, "can_call": {"$children": ["get_routes"]},
+                "handler_module": HANDLER_MODULE, "callable_by": {"$subtree": ["watch"]}, "can_call": {"$subtree": ["get_routes"]},
                 "id": web_id,
                 "port": port,
             }),
@@ -168,7 +168,7 @@ async fn web_with_ws_child_serves_ws() {
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
-                "handler_module": HANDLER_MODULE, "callable_by": {"$children": ["watch"]}, "can_call": {"$children": ["get_routes"]},
+                "handler_module": HANDLER_MODULE, "callable_by": {"$subtree": ["watch"]}, "can_call": {"$subtree": ["get_routes"]},
                 "id": web_id,
                 "port": port,
             }),
@@ -254,7 +254,7 @@ async fn web_with_rest_child_serves_rest() {
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
-                "handler_module": HANDLER_MODULE, "callable_by": {"$children": ["watch"]}, "can_call": {"$children": ["get_routes"]},
+                "handler_module": HANDLER_MODULE, "callable_by": {"$subtree": ["watch"]}, "can_call": {"$subtree": ["get_routes"]},
                 "id": web_id,
                 "port": port,
             }),
@@ -289,7 +289,7 @@ async fn web_with_rest_child_serves_rest() {
         .send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": "kernel_state", "callable_by": {
-                "$self": "*", "$parent": "*", "$children": "*", rest_id: "*",
+                "$self": "*", "$parent": "*", "$subtree": "*", rest_id: "*",
             }}),
         )])
         .await
@@ -356,7 +356,7 @@ async fn stage_web_with_ws_leg(
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
-                "handler_module": HANDLER_MODULE, "callable_by": {"$children": "*"}, "can_call": {"$children": ["get_routes"]},
+                "handler_module": HANDLER_MODULE, "callable_by": {"$subtree": "*"}, "can_call": {"$subtree": ["get_routes"]},
                 "id": web_id,
                 "port": port,
             }),
@@ -913,7 +913,7 @@ async fn web_rest_octet_leg_edit_and_read_stream() {
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
-                "handler_module": HANDLER_MODULE, "callable_by": {"$children": ["watch"]}, "can_call": {"$children": ["get_routes"]}, "id": web_id, "port": port,
+                "handler_module": HANDLER_MODULE, "callable_by": {"$subtree": ["watch"]}, "can_call": {"$subtree": ["get_routes"]}, "id": web_id, "port": port,
             }),
         )])
         .await
@@ -929,7 +929,7 @@ async fn web_rest_octet_leg_edit_and_read_stream() {
                 "handler_module": "file_bridge.tools", "allow": ["."], "id": fb_id,
                 "root": "served",
                 "ingress_rule": "allow_all_ingress",
-                "callable_by": { "$self": "*", "$parent": "*", "$children": "*", rest_id: "*" },
+                "callable_by": { "$self": "*", "$parent": "*", "$subtree": "*", rest_id: "*" },
             }),
         )])
         .await
@@ -1066,7 +1066,7 @@ async fn sealed_rest_leg_answers_403_and_teaches_the_repair() {
         .send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel",
-                   "handler_module": HANDLER_MODULE, "callable_by": {"$children": ["watch"]}, "can_call": {"$children": ["get_routes"]}, "id": web_id, "port": port}),
+                   "handler_module": HANDLER_MODULE, "callable_by": {"$subtree": ["watch"]}, "can_call": {"$subtree": ["get_routes"]}, "id": web_id, "port": port}),
         )])
         .await
         .remove(0)
@@ -1087,7 +1087,7 @@ async fn sealed_rest_leg_answers_403_and_teaches_the_repair() {
         .send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": "kernel_state", "callable_by": {
-                "$self": "*", "$parent": "*", "$children": "*", rest_id: "*"}}),
+                "$self": "*", "$parent": "*", "$subtree": "*", rest_id: "*"}}),
         )])
         .await
         .remove(0)
@@ -1162,7 +1162,7 @@ async fn open_rest_leg_dispatches_including_the_reflect_routes() {
         .send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel",
-                   "handler_module": HANDLER_MODULE, "callable_by": {"$children": ["watch"]}, "can_call": {"$children": ["get_routes"]}, "id": web_id, "port": port}),
+                   "handler_module": HANDLER_MODULE, "callable_by": {"$subtree": ["watch"]}, "can_call": {"$subtree": ["get_routes"]}, "id": web_id, "port": port}),
         )])
         .await
         .remove(0)
@@ -1182,7 +1182,7 @@ async fn open_rest_leg_dispatches_including_the_reflect_routes() {
         .send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": "kernel_state", "callable_by": {
-                "$self": "*", "$parent": "*", "$children": "*", rest_id: "*"}}),
+                "$self": "*", "$parent": "*", "$subtree": "*", rest_id: "*"}}),
         )])
         .await
         .remove(0)
@@ -1310,20 +1310,20 @@ async fn stage_host(
 
     for item in [
         json!({"type": "create_agent", "parent_id": "kernel",
-               "handler_module": HANDLER_MODULE, "callable_by": {"$children": ["watch"]}, "can_call": {"$children": ["get_routes"]}, "id": web_id, "port": port}),
+               "handler_module": HANDLER_MODULE, "callable_by": {"$subtree": ["watch"]}, "can_call": {"$subtree": ["get_routes"]}, "id": web_id, "port": port}),
         json!({"type": "create_agent", "parent_id": "kernel_state",
                "handler_module": "file_bridge.tools", "allow": ["."], "id": fb_id, "root": "served",
                "ingress_rule": "allow_all_ingress",
-               "callable_by": {"$self": "*", "$parent": "*", "$children": "*",
+               "callable_by": {"$self": "*", "$parent": "*", "$subtree": "*",
                                rest_id: "*", web_id: "*"}}),
         json!({"type": "create_agent", "parent_id": web_id,
                "handler_module": "web_rest.tools", "callable_by": {"$parent": ["get_routes"]}, "id": rest_id,
                "ingress_rule": "allow_all_ingress",
                "can_call": {"kernel_state": "*", "kernel": "*", fb_id: "*"}}),
         json!({"type": "update_agent", "id": "kernel_state", "callable_by": {
-               "$self": "*", "$parent": "*", "$children": "*", rest_id: "*"}}),
+               "$self": "*", "$parent": "*", "$subtree": "*", rest_id: "*"}}),
         json!({"type": "update_agent", "id": web_id, "can_call": {
-               "$self": "*", "$parent": "*", "$children": "*", fb_id: "*"}}),
+               "$self": "*", "$parent": "*", "$subtree": "*", fb_id: "*"}}),
     ] {
         let reply = kernel
             .send(vec![Item::new(AgentId::from("kernel_state"), item)])
@@ -2036,7 +2036,7 @@ async fn boot_and_stop_replies_match_python() {
         .send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel",
-                   "handler_module": HANDLER_MODULE, "callable_by": {"$children": ["watch"]}, "can_call": {"$children": ["get_routes"]}, "id": "web_noport"}),
+                   "handler_module": HANDLER_MODULE, "callable_by": {"$subtree": ["watch"]}, "can_call": {"$subtree": ["get_routes"]}, "id": "web_noport"}),
         )])
         .await
         .remove(0)
@@ -2166,7 +2166,7 @@ async fn a_child_created_after_boot_mounts_only_through_mount() {
     let kernel = mk_kernel(&tmp, true, false);
     let web_id = "web_hot";
     for item in [json!({"type": "create_agent", "parent_id": "kernel",
-               "handler_module": HANDLER_MODULE, "callable_by": {"$children": ["watch"]}, "can_call": {"$children": ["get_routes"]}, "id": web_id, "port": port})]
+               "handler_module": HANDLER_MODULE, "callable_by": {"$subtree": ["watch"]}, "can_call": {"$subtree": ["get_routes"]}, "id": web_id, "port": port})]
     {
         let _ = kernel
             .send(vec![Item::new(AgentId::from("kernel_state"), item)])
@@ -2287,10 +2287,10 @@ async fn boot_announces_say_to_cli() {
     for item in [
         json!({"type": "create_agent", "parent_id": "kernel",
                "handler_module": "cli_probe.tools", "id": "cli",
-               "callable_by": {"$self": "*", "$parent": "*", "$children": "*", "web_say": "*"}}),
+               "callable_by": {"$self": "*", "$parent": "*", "$subtree": "*", "web_say": "*"}}),
         json!({"type": "create_agent", "parent_id": "kernel",
-               "handler_module": HANDLER_MODULE, "callable_by": {"$children": ["watch"]}, "id": "web_say", "port": port,
-               "can_call": {"$self": "*", "$parent": "*", "$children": "*", "cli": "*"}}),
+               "handler_module": HANDLER_MODULE, "callable_by": {"$subtree": ["watch"]}, "id": "web_say", "port": port,
+               "can_call": {"$self": "*", "$parent": "*", "$subtree": "*", "cli": "*"}}),
     ] {
         let reply = kernel
             .send(vec![Item::new(AgentId::from("kernel_state"), item)])
@@ -2342,11 +2342,11 @@ async fn boot_announces_the_bound_host() {
     for item in [
         json!({"type": "create_agent", "parent_id": "kernel",
                "handler_module": "cli_probe.tools", "id": "cli",
-               "callable_by": {"$self": "*", "$parent": "*", "$children": "*", "web_host": "*"}}),
+               "callable_by": {"$self": "*", "$parent": "*", "$subtree": "*", "web_host": "*"}}),
         json!({"type": "create_agent", "parent_id": "kernel",
-               "handler_module": HANDLER_MODULE, "callable_by": {"$children": ["watch"]}, "id": "web_host", "port": port,
+               "handler_module": HANDLER_MODULE, "callable_by": {"$subtree": ["watch"]}, "id": "web_host", "port": port,
                "host": "localhost",
-               "can_call": {"$self": "*", "$parent": "*", "$children": "*", "cli": "*"}}),
+               "can_call": {"$self": "*", "$parent": "*", "$subtree": "*", "cli": "*"}}),
     ] {
         let reply = kernel
             .send(vec![Item::new(AgentId::from("kernel_state"), item)])
@@ -2419,7 +2419,7 @@ async fn client_close_is_echoed_with_its_code() {
     let web_id = "web_close";
     for item in [
         json!({"type": "create_agent", "parent_id": "kernel",
-               "handler_module": HANDLER_MODULE, "callable_by": {"$children": ["watch"]}, "can_call": {"$children": ["get_routes"]}, "id": web_id, "port": port}),
+               "handler_module": HANDLER_MODULE, "callable_by": {"$subtree": ["watch"]}, "can_call": {"$subtree": ["get_routes"]}, "id": web_id, "port": port}),
         json!({"type": "create_agent", "parent_id": web_id,
                "handler_module": "web_ws.tools", "can_call": {"$parent": ["watch"]}, "callable_by": {"$parent": ["get_routes"]}, "id": "ws_close",
                "ingress_rule": "allow_all_ingress"}),
@@ -3286,9 +3286,9 @@ async fn the_file_proxy_reads_on_until_a_truthy_eof() {
     kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     for item in [
-        json!({"type": "create_agent", "parent_id": "kernel", "handler_module": HANDLER_MODULE, "callable_by": {"$children": ["watch"]},
+        json!({"type": "create_agent", "parent_id": "kernel", "handler_module": HANDLER_MODULE, "callable_by": {"$subtree": ["watch"]},
                "id": "web_odd", "port": port,
-               "can_call": {"$self": "*", "$parent": "*", "$children": "*",
+               "can_call": {"$self": "*", "$parent": "*", "$subtree": "*",
                             "chunked": "*", "broken": "*"}}),
         json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "odd_source.tools",
                "id": "chunked", "callable_by": {"web_odd": "*"}}),
@@ -3391,7 +3391,7 @@ async fn deleting_one_web_agent_frees_only_its_own_listener() {
         .send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel",
-                   "handler_module": HANDLER_MODULE, "callable_by": {"$children": ["watch"]}, "can_call": {"$children": ["get_routes"]}, "id": "web_s4b", "port": pb}),
+                   "handler_module": HANDLER_MODULE, "callable_by": {"$subtree": ["watch"]}, "can_call": {"$subtree": ["get_routes"]}, "id": "web_s4b", "port": pb}),
         )])
         .await
         .remove(0)

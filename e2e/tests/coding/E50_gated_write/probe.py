@@ -59,7 +59,7 @@ async def main():
         # the grant must name that id (the `kernel` alias resolves to it but the
         # gate keys on the resolved id).
         rv = await connect(root, core, BK, agent_id="ai_rev",
-                           can_call={"$children": "*",
+                           can_call={"$subtree": "*",
                                      # the ROOT id is runtime-specific — grant on
                                      # the actual root.
                                      root.id: ["create_agent", "update_agent", "reflect", "list_agents"],

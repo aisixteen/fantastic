@@ -32,11 +32,11 @@ roster:
     - reflect
 - id: <gid>
   handler_module: file_bridge.tools
-  parent_id: <home(root)>
+  parent_id: <parent>
   callable_by:
     ai: '*'
 - id: ai
   created_by: helpers.ai.connect
-  can_call: '<{''$self'': ''*'', ''$parent'': ''*'', ''$children'': ''*'', root.id:
+  can_call: '<{''$self'': ''*'', ''$parent'': ''*'', ''$subtree'': ''*'', root.id:
     [''*'', ''create_agent'', ''update_agent'', ''delete_agent''], ''cli'': ''*'',
     ''user'': ''*'', mem[''id'']: ''*'', store[''id'']: ''*''}>'

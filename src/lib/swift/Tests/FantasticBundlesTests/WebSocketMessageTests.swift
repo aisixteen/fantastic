@@ -299,7 +299,7 @@ private func wsKernel() async throws -> Kernel {
             "kernel",
             [
                 "type": "update_agent", "id": "kernel_state",
-                "callable_by": ["$self": "*", "$parent": "*", "$children": "*", "web_ws": "*"],
+                "callable_by": ["$self": "*", "$parent": "*", "$subtree": "*", "web_ws": "*"],
             ])
     ])
     wire(k, "web", "web_ws")

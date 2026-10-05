@@ -89,7 +89,7 @@ private func bootLoader(_ text: String) async -> (Kernel, () -> Void) {
     let can = kernel.agent(AgentId("worker"))?.metaValue(forKey: "can_call") ?? .null
     #expect(can["$self"].asString == "*")
     #expect(can.asObject?.keys.contains("$parent") == false, "the baseline is `$self` alone")
-    #expect(can.asObject?.keys.contains("$children") == false)
+    #expect(can.asObject?.keys.contains("$subtree") == false)
     #expect(can["memory"].asArray?.compactMap { $0.asString } == ["set", "read"])
     // memory got the baseline with no explicit can_call in the manifest.
     let mem = kernel.agent(AgentId("memory"))?.metaValue(forKey: "can_call") ?? .null
@@ -464,7 +464,7 @@ private func createLoader(_ kernel: Kernel, _ id: String, _ manifest: JSON) asyn
         [
             "type": "update_agent", "id": "worker",
             "can_call": [
-                "$self": "*", "$parent": "*", "$children": "*", "static_loader": ["boot"],
+                "$self": "*", "$parent": "*", "$subtree": "*", "static_loader": ["boot"],
             ],
         ],
         ["type": "delete_agent", "id": "memory"],

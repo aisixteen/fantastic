@@ -100,7 +100,7 @@ private func create(_ k: Kernel, _ id: String, parent: String) async {
 }
 
 /// `gc` under `mid` under the root — NOT a direct child, so the root's baseline
-/// `$children` does not reach it.
+/// `$subtree` does not reach it.
 private func grandchild(_ k: Kernel) async -> AgentId {
     await create(k, "mid", parent: "kernel_state")
     await create(k, "gc", parent: "mid")

@@ -7,15 +7,14 @@
 //! made inside an agent's handler, or a task it spawned, is that agent's. Every AGENT send — ANY verb, `reflect` and the kernel verbs the
 //! root answers included, nothing exempt — needs BOTH the sender's `can_call`
 //! (egress) AND the target's `callable_by` (ingress). An edge exists only if both
-//! ends grant it. The tree MUTATORS then act only on the sender's own direct
-//! children.
+//! ends grant it. The tree MUTATORS then act only within the sender's own
+//! subtree.
 
 use super::*;
 
-/// Read a holder's authority grant (`can_call` or `callable_by`) + its tree facts
-/// (parent id, direct-child ids) for the gate. An absent agent → empty grant →
-/// deny-all (never a hole).
-fn grant_facts(holder: Option<&Agent>, field: &str) -> (Value, Option<String>, HashSet<String>) {
+/// Read a holder's authority grant (`can_call` or `callable_by`) + its parent id
+/// for the gate. An absent agent → empty grant → deny-all (never a hole).
+fn grant_facts(holder: Option<&Agent>, field: &str) -> (Value, Option<String>) {
     match holder {
         Some(a) => {
             let grant = a
@@ -26,14 +25,28 @@ fn grant_facts(holder: Option<&Agent>, field: &str) -> (Value, Option<String>, H
                 .cloned()
                 .unwrap_or(Value::Null);
             let parent = a.parent_id.as_ref().map(|p| p.0.clone());
-            let kids: HashSet<String> = a.child_ids().into_iter().map(|c| c.0).collect();
-            (grant, parent, kids)
+            (grant, parent)
         }
-        None => (Value::Null, None, HashSet::new()),
+        None => (Value::Null, None),
     }
 }
 
 impl Kernel {
+    /// Every id ABOVE `agent` — what `$subtree` matches against: a grant holder
+    /// reaches the other end when it is one of these. A peer target (no local
+    /// parent) has none.
+    pub fn ancestor_ids(&self, agent: Option<&Agent>) -> HashSet<String> {
+        let mut out = HashSet::new();
+        let mut next = agent.and_then(|a| a.parent_id.clone());
+        while let Some(pid) = next {
+            if !out.insert(pid.0.clone()) {
+                break;
+            }
+            next = self.agents.get(&pid).and_then(|p| p.parent_id.clone());
+        }
+        out
+    }
+
     /// May `origin` receive the outcome of the execution the ledger opened with
     /// `payload` on `target`? Returns a denial, or None.
     ///
@@ -80,7 +93,7 @@ impl Kernel {
         payload: &Value,
     ) -> Option<Value> {
         let sender = self.agents.get(sender_id).map(|e| Arc::clone(&e));
-        let (s_can, s_parent, s_kids) = grant_facts(sender.as_deref(), "can_call");
+        let (s_can, s_parent) = grant_facts(sender.as_deref(), "can_call");
 
         // Egress — may the SENDER call the target?
         let d = crate::authz::authorize_call(
@@ -89,7 +102,7 @@ impl Kernel {
             target.id.as_str(),
             sender_id.as_str(),
             s_parent.as_deref(),
-            &s_kids,
+            &self.ancestor_ids(Some(target.as_ref())),
         );
 
         // A target on ANOTHER KERNEL: egress is the whole check here — the
@@ -132,14 +145,14 @@ impl Kernel {
 
         // Ingress — does the TARGET accept the sender? Tokens resolve relative to
         // the target. The root answering a kernel verb is no exception.
-        let (t_call, t_parent, t_kids) = grant_facts(Some(target.as_ref()), "callable_by");
+        let (t_call, t_parent) = grant_facts(Some(target.as_ref()), "callable_by");
         let di = crate::authz::authorize_call(
             &t_call,
             verb,
             sender_id.as_str(),
             target.id.as_str(),
             t_parent.as_deref(),
-            &t_kids,
+            &self.ancestor_ids(sender.as_deref()),
         );
         if !di.allowed {
             return Some(json!({
@@ -158,11 +171,11 @@ impl Kernel {
         None
     }
 
-    /// THE MUTATORS ACT ON YOUR OWN CHILDREN ONLY. After the gate on the root,
-    /// `create_agent`'s `parent_id` must be the sender, and `update_agent` /
-    /// `delete_agent`'s `id` must name an agent whose parent is the sender — an
-    /// unknown id is not the sender's child either. An operand that is missing or
-    /// not a (non-empty) string is NOT judged here: the verb answers it with its
+    /// THE MUTATORS ACT WITHIN YOUR OWN SUBTREE. After the gate on the root,
+    /// `create_agent`'s `parent_id` must be the sender or an agent below it, and
+    /// `update_agent` / `delete_agent`'s `id` must name an agent below the sender
+    /// (any depth) — an unknown id is in no subtree. An operand that is missing
+    /// or not a (non-empty) string is NOT judged here: the verb answers it with its
     /// own missing/shape refusal. The operator never reaches here. Python
     /// `_gate_mutator`.
     fn gate_mutator(
@@ -180,18 +193,19 @@ impl Kernel {
             .get(field)
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())?;
-        let ok = if verb == "create_agent" {
-            given == sender_id.as_str()
-        } else {
-            self.agents
-                .get(&AgentId::from(given))
-                .is_some_and(|op| op.parent_id.as_ref() == Some(sender_id))
-        };
+        let operand = self
+            .agents
+            .get(&AgentId::from(given))
+            .map(|e| Arc::clone(&e));
+        let below = operand
+            .as_deref()
+            .is_some_and(|op| self.ancestor_ids(Some(op)).contains(sender_id.as_str()));
+        let ok = below || (verb == "create_agent" && given == sender_id.as_str());
         if ok {
             return None;
         }
         Some(json!({
-            "error": format!("{sender_id} may only {verb} its own children — {given} is not one"),
+            "error": format!("{sender_id} may only {verb} within its own subtree — {given} is not in it"),
             "reason": "unauthorized", "side": "mutator",
         }))
     }

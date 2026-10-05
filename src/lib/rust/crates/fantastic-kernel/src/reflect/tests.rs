@@ -790,7 +790,7 @@ fn roster_kernel() -> (Arc<Kernel>, Arc<Agent>) {
     let mut meta = Map::new();
     meta.insert(
         "callable_by".into(),
-        json!({"$self": "*", "$parent": "*", "$children": "*"}),
+        json!({"$self": "*", "$parent": "*", "$subtree": "*"}),
     );
     let root = mk_agent_meta("kernel_state", None, meta);
     kernel.register(Arc::clone(&root));

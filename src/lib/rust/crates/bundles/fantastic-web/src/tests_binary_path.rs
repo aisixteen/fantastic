@@ -83,11 +83,11 @@ async fn stage(tmp: &TempDir, port: u16, web: &str) -> Arc<Kernel> {
     );
     kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
-    let callers = json!({"$self": "*", "$parent": "*", "$children": "*",
+    let callers = json!({"$self": "*", "$parent": "*", "$subtree": "*",
                          ws_leg.as_str(): "*", rest_leg.as_str(): "*"});
     for item in [
         json!({"type": "create_agent", "parent_id": "kernel",
-               "handler_module": HANDLER_MODULE, "callable_by": {"$children": ["watch"]}, "can_call": {"$children": ["get_routes"]}, "id": web, "port": port}),
+               "handler_module": HANDLER_MODULE, "callable_by": {"$subtree": ["watch"]}, "can_call": {"$subtree": ["get_routes"]}, "id": web, "port": port}),
         json!({"type": "create_agent", "parent_id": web, "handler_module": "web_ws.tools", "callable_by": {"$parent": ["get_routes"]},
                "id": ws_leg, "ingress_rule": "allow_all_ingress",
                "can_call": {"$parent": ["watch"], "term": "*", "cap": "*"}}),

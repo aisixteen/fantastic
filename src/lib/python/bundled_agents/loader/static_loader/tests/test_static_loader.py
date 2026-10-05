@@ -64,7 +64,7 @@ async def test_declared_agents_carry_baseline_plus_explicit_grants(seeded_kernel
     await _init_loader(seeded_kernel)
     can = seeded_kernel.ctx.get("worker")["can_call"]
     # Baseline is merged in…
-    assert can["$self"] == "*" and "$parent" not in can and "$children" not in can
+    assert can["$self"] == "*" and "$parent" not in can and "$subtree" not in can
     # …and the manifest's explicit lateral grant is present.
     assert can["memory"] == ["write", "read"]
     # memory got the baseline even with no explicit can_call in the manifest.
@@ -369,7 +369,7 @@ async def test_an_agent_sent_boot_is_refused_and_re_runs_nothing(seeded_kernel):
             "can_call": {
                 "$self": "*",
                 "$parent": "*",
-                "$children": "*",
+                "$subtree": "*",
                 "static_loader": ["boot"],
             },
         },

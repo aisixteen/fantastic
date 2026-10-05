@@ -741,7 +741,7 @@ struct WebSocketTests {
                     "root": .string(rel), "ingress_rule": .string("allow_all_ingress"),
                     "callable_by": .object([
                         "$self": .string("*"), "$parent": .string("*"),
-                        "$children": .string("*"), wsId: .string("*"),
+                        "$subtree": .string("*"), wsId: .string("*"),
                     ]),
                 ]))
         ])[0].result
@@ -836,7 +836,7 @@ struct WebSocketTests {
                     "type": .string("update_agent"), "id": .string("kernel_state"),
                     "callable_by": .object([
                         "$self": .string("*"), "$parent": .string("*"),
-                        "$children": .string("*"),
+                        "$subtree": .string("*"),
                         wsId: .array([.string("*"), .string("state_subscribe")]),
                     ]),
                 ]))

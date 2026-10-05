@@ -70,7 +70,7 @@ struct YamlIOTests {
             "$self": .string("*"), "$parent": .string("*"),
             "kernel_store": .array([.string("read"), .string("write")]),
         ])),
-        "callable_by": .object(obj(["$parent": .string("*"), "$children": .string("*")])),
+        "callable_by": .object(obj(["$parent": .string("*"), "$subtree": .string("*")])),
         "nested": .object(obj([
             "list": .array([.integer(1), .string("two"), .object(obj(["three": .array([])]))]),
             "map": .object([:]),

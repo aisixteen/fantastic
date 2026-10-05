@@ -18,7 +18,7 @@ import Testing
 @testable import FantasticWeb
 
 private let BASE: OrderedDictionary<String, JSON> = [
-    "$self": .string("*"), "$parent": .string("*"), "$children": .string("*"),
+    "$self": .string("*"), "$parent": .string("*"), "$subtree": .string("*"),
 ]
 
 private func create(_ k: Kernel, _ rec: OrderedDictionary<String, JSON>) async {

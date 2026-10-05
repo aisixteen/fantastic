@@ -5,13 +5,27 @@ use super::*;
 use serde_json::json;
 use std::collections::HashSet;
 
-fn kids(ids: &[&str]) -> HashSet<String> {
-    ids.iter().map(|s| s.to_string()).collect()
+// The tree: boss → worker → kid → grandkid. Every id above `other`.
+fn ancestors_of(other: &str) -> HashSet<String> {
+    let chain: &[&str] = match other {
+        "worker" => &["boss"],
+        "kid" => &["worker", "boss"],
+        "grandkid" => &["kid", "worker", "boss"],
+        _ => &[],
+    };
+    chain.iter().map(|s| s.to_string()).collect()
 }
 
-// holder "worker", parent "boss", one child "kid".
+// holder "worker", parent "boss", child "kid", grandchild "grandkid".
 fn auth(grant: &Value, verb: &str, other: &str) -> Decision {
-    authorize_call(grant, verb, other, "worker", Some("boss"), &kids(&["kid"]))
+    authorize_call(
+        grant,
+        verb,
+        other,
+        "worker",
+        Some("boss"),
+        &ancestors_of(other),
+    )
 }
 
 #[test]
@@ -41,9 +55,12 @@ fn parent_token_resolves_to_parent_id() {
 }
 
 #[test]
-fn children_token_matches_only_direct_children() {
-    let g = json!({"$children": "*"});
+fn subtree_token_matches_every_depth_below() {
+    let g = json!({"$subtree": "*"});
     assert!(auth(&g, "ping", "kid").allowed);
+    assert!(auth(&g, "ping", "grandkid").allowed);
+    assert!(!auth(&g, "ping", "worker").allowed);
+    assert!(!auth(&g, "ping", "boss").allowed);
     assert!(!auth(&g, "ping", "stranger").allowed);
 }
 
@@ -96,13 +113,13 @@ fn a_peer_target_matches_only_by_name() {
     assert!(auth(&all, "ping", "g1|bob").allowed);
     assert!(!auth(&all, "ping", "g2|bob").allowed);
     // the tokens never match a peer address
-    let base = json!({"$self": "*", "$parent": "*", "$children": "*"});
+    let base = json!({"$self": "*", "$parent": "*", "$subtree": "*"});
     assert!(!auth(&base, "ping", "g1|boss").allowed);
 }
 
 #[test]
 fn removed_tokens_match_nothing() {
-    for key in ["$loader", "$subtree:worker"] {
+    for key in ["$loader", "$children", "$subtree:worker"] {
         let g = json!({ key: "*" });
         assert!(!auth(&g, "ping", "worker").allowed, "{key}");
         assert!(!auth(&g, "ping", "kid").allowed, "{key}");
@@ -112,7 +129,7 @@ fn removed_tokens_match_nothing() {
 #[test]
 fn grant_keys_are_exactly_the_legal_set() {
     for field in ["can_call", "callable_by"] {
-        for ok in ["$self", "$parent", "$children", "ai"] {
+        for ok in ["$self", "$parent", "$subtree", "ai"] {
             assert!(is_grant_key(field, ok), "{field} {ok}");
         }
         for bad in [
@@ -136,11 +153,11 @@ fn grant_keys_are_exactly_the_legal_set() {
     }
     assert_eq!(
         legal_keys("callable_by"),
-        "an agent id, $self, $parent, $children"
+        "an agent id, $self, $parent, $subtree"
     );
     assert_eq!(
         legal_keys("can_call"),
-        "an agent id, $self, $parent, $children, <guid>|<agent> or <guid>|*"
+        "an agent id, $self, $parent, $subtree, <guid>|<agent> or <guid>|*"
     );
 }
 
@@ -148,7 +165,7 @@ fn grant_keys_are_exactly_the_legal_set() {
 fn the_denial_hint_is_the_from_above_text() {
     assert_eq!(
         FROM_ABOVE,
-        "grants come from above — the agent's parent (update_agent on its direct child) or \
+        "grants come from above — an ancestor (update_agent on an agent in its subtree) or \
          the operator writes can_call and callable_by; an agent never raises its own"
     );
     assert_eq!(auth(&json!({}), "ping", "peer").hint, FROM_ABOVE);

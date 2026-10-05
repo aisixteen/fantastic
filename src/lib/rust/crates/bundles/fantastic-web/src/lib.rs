@@ -270,8 +270,7 @@ fn browser_reachable(web_id: &AgentId, kernel: &Kernel) -> Vec<String> {
         return Vec::new();
     };
     let web_meta = web.meta.read().expect("meta poisoned").clone();
-    let web_children: std::collections::HashSet<String> =
-        web.child_ids().into_iter().map(|c| c.0).collect();
+    let web_ancestors = kernel.ancestor_ids(Some(web.as_ref()));
     let mut out: Vec<String> = Vec::new();
     // Snapshot first: the gates below must not run under a live map iteration.
     let agents: Vec<Arc<fantastic_kernel::Agent>> = kernel
@@ -304,20 +303,18 @@ fn browser_reachable(web_id: &AgentId, kernel: &Kernel) -> Vec<String> {
             agent.id.as_str(),
             web_id.as_str(),
             web.parent_id.as_ref().map(|p| p.0.as_str()),
-            &web_children,
+            &kernel.ancestor_ids(Some(agent.as_ref())),
         );
         if !egress.allowed {
             continue;
         }
-        let children: std::collections::HashSet<String> =
-            agent.child_ids().into_iter().map(|c| c.0).collect();
         let ingress = authorize_call(
             meta.get("callable_by").unwrap_or(&Value::Null),
             "read_stream",
             web_id.as_str(),
             agent.id.as_str(),
             agent.parent_id.as_ref().map(|p| p.0.as_str()),
-            &children,
+            &web_ancestors,
         );
         if !ingress.allowed {
             continue;

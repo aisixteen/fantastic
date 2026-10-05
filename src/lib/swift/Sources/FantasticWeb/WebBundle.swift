@@ -355,12 +355,12 @@ public final class WebBundle: AgentBundle, @unchecked Sendable {
             let egress = authorizeCall(
                 grant: web.metaValue(forKey: "can_call") ?? .null, verb: "read_stream",
                 otherId: agent.id.value, holderId: webId.value, parentId: web.parentId?.value,
-                childIds: Set(web.childIds().map { $0.value }))
+                ancestorIds: kernel.ancestorIds(of: agent))
             if !egress.allowed { continue }
             let ingress = authorizeCall(
                 grant: meta["callable_by"] ?? .null, verb: "read_stream", otherId: webId.value,
                 holderId: agent.id.value, parentId: agent.parentId?.value,
-                childIds: Set(agent.childIds().map { $0.value }))
+                ancestorIds: kernel.ancestorIds(of: web))
             if !ingress.allowed { continue }
             let rule = resolveIngress(ingressRule: meta["ingress_rule"], auth: meta["auth"])
             let action = AuthAction(

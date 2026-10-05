@@ -708,7 +708,7 @@ async fn a_joiner_is_gated_with_the_executions_original_payload() {
         joined.result["error"]
             .as_str()
             .unwrap_or_default()
-            .contains("bob may only create_agent its own children — alice is not one"),
+            .contains("bob may only create_agent within its own subtree — alice is not in it"),
         "the denial must name the ORIGINAL placement: {joined:?}"
     );
 }

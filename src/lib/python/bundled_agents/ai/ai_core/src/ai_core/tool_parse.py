@@ -59,7 +59,7 @@ BYTES_CLOSE = "</bytes>"
 
 _HEAD = re.compile(r'^\s*name\s*=\s*"([A-Za-z_][\w]*)"\s*>', re.DOTALL)
 # A tag name is a KEY, not an XML name: grant maps are keyed by agent ids and the
-# relative tokens (`$self`, `$parent`, `$children`), and the model writes those as
+# relative tokens (`$self`, `$parent`, `$subtree`), and the model writes those as
 # tags (`<$self>*</$self>`, measured 2026-09-09 gated_write, 12 refusals) — so `$`,
 # `-` and `.` are letters here.
 _TAG = re.compile(r"<([A-Za-z_$][\w$.\-]*)>")

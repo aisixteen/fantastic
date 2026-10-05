@@ -383,6 +383,21 @@ export class Kernel {
   }
 
   /**
+   * Every id ABOVE `id` — what `$subtree` matches against: a grant holder reaches
+   * the other end when it is one of these. An id with no local agent (a host-bound
+   * target) has none.
+   */
+  ancestorIds(id: string): Set<string> {
+    const out = new Set<string>();
+    let next = this.agents.get(id)?.parentId ?? null;
+    while (next !== null && !out.has(next)) {
+      out.add(next);
+      next = this.agents.get(next)?.parentId ?? null;
+    }
+    return out;
+  }
+
+  /**
    * The INGRESS half alone — does `targetId` accept `senderId` for `verb`? Its
    * `callable_by`, tokens relative to the target. A sender is always a LOCAL
    * agent, so a `<guid>|…` key there never matches.
@@ -393,14 +408,14 @@ export class Kernel {
     const ok = authorizeCall(target.meta["callable_by"] as Payload | undefined, verb, senderId, {
       holderId: target.id,
       holderParent: target.parentId,
-      holderChildren: new Set(target.children.keys()),
+      otherAncestors: this.ancestorIds(senderId),
     });
     return ok ? null : denial("ingress", senderId, targetId, verb);
   }
 
   /**
    * The EGRESS half alone — may the SENDER call `targetId` with `verb`? Its
-   * `can_call`, tokens relative to the sender (`$self`/`$parent`/`$children`).
+   * `can_call`, tokens relative to the sender (`$self`/`$parent`/`$subtree`).
    *
    * It is the WHOLE local check for a HOST-BOUND send: the target lives on the
    * host, so its `callable_by` is the host's to apply to the arriving call — but
@@ -417,7 +432,7 @@ export class Kernel {
     const ok = authorizeCall(sender?.meta["can_call"] as Payload | undefined, verb, targetId, {
       holderId: senderId,
       holderParent: sender?.parentId ?? null,
-      holderChildren: new Set(sender?.children.keys() ?? []),
+      otherAncestors: this.ancestorIds(targetId),
     });
     return ok ? null : denial("egress", senderId, targetId, verb);
   }

@@ -154,7 +154,7 @@ def _ai_record(agent_id: str, root, store, *, oracle: str, peers: list[str], des
         "can_call": {
             "$self": "*",
             "$parent": "*",
-            "$children": "*",
+            "$subtree": "*",
             oracle: "*",
             "notes": "*",
             store["id"]: "*",
@@ -166,7 +166,7 @@ def _ai_record(agent_id: str, root, store, *, oracle: str, peers: list[str], des
         "callable_by": {
             "$self": "*",
             "$parent": "*",
-            "$children": "*",
+            "$subtree": "*",
             "rest": "*",
             "web": "*",
             **{p: "*" for p in peers},

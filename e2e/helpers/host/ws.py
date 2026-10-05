@@ -114,6 +114,10 @@ class WSWatcher:
                 continue
             if isinstance(frame, dict) and frame.get("type") == "event":
                 yield frame.get("payload") or {}
+            elif isinstance(frame, dict) and frame.get("type") == "error":
+                # A REFUSED watch arrives as an error frame and nothing else ever
+                # will — skipping it left a watcher silent for a whole run.
+                print(f"  ** ws watch {self.agent_id}: {frame.get('error')} **", flush=True)
 
     async def close(self) -> None:
         if self._w is not None:

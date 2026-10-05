@@ -39,10 +39,10 @@ async fn host(
     }
     for item in [
         json!({"type": "create_agent", "parent_id": "kernel",
-               "handler_module": HANDLER_MODULE, "callable_by": {"$children": ["watch"]}, "can_call": {"$children": ["get_routes"]}, "id": web_id, "port": port}),
+               "handler_module": HANDLER_MODULE, "callable_by": {"$subtree": ["watch"]}, "can_call": {"$subtree": ["get_routes"]}, "id": web_id, "port": port}),
         rest,
         json!({"type": "update_agent", "id": "kernel_state", "callable_by": {
-               "$self": "*", "$parent": "*", "$children": "*", leg: "*"}}),
+               "$self": "*", "$parent": "*", "$subtree": "*", leg: "*"}}),
     ] {
         let r = kernel
             .send(vec![Item::new(AgentId::from("kernel_state"), item)])

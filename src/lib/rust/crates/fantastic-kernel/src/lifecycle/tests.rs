@@ -325,7 +325,7 @@ async fn create_agent_demands_a_parent_and_resolves_it_like_a_target() {
 
 /// The `agent_created` event lands on the PARENT's inbox at every depth (audit
 /// 2026-10-03, KV-4). It was emitted as the root, so the gate judged
-/// root→parent, and the root's `$children` baseline reaches depth 1 only: a
+/// root→parent, and the root's baseline grant then reached depth 1 only: a
 /// parent two levels down never got it — an operator create included, an
 /// agent creating under itself too — and nothing reported the drop.
 #[tokio::test]

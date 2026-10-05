@@ -71,7 +71,7 @@ func wireMemoryPair(_ k1: Kernel, _ k2: Kernel) async {
             "id": "br_peer", "transport": "memory",
             "ingress_rule": "allow_all_ingress",
             // the leg's reach is explicit: the root and its own children
-            "can_call": ["$children": "*", "kernel_state": "*"],
+            "can_call": ["$subtree": "*", "kernel_state": "*"],
         ])])[0].result
     let (t1, t2) = MemoryTransport.pair()
     b1.injectTransport(agentId: "br", transport: t1)
@@ -680,7 +680,7 @@ struct BundleSmokeTests {
                 // …and the INGRESS half, on the target.
                 "callable_by": .object([
                     "$self": .string("*"), "$parent": .string("*"),
-                    "$children": .string("*"), "web_ws": .string("*"),
+                    "$subtree": .string("*"), "web_ws": .string("*"),
                 ]),
             ]))])[0].result
 

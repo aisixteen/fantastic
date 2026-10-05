@@ -105,7 +105,7 @@ by `tests/contract_corpus.test.ts` and `tests/c21_conformance.test.ts`.
 
 Two record fields, `can_call` (egress) and `callable_by` (ingress), each
 `{key: "*" | [verb, ...]}`. Keys: a literal agent id, `$self`, `$parent`,
-`$children` (direct children) — and, in `can_call` only, `<guid>|<agent>` /
+`$subtree` (every agent below the holder, any depth) — and, in `can_call` only, `<guid>|<agent>` /
 `<guid>|*`, an outbound peer address. A caller is always a LOCAL agent, so a
 `<guid>|…` key in `callable_by` never matches. Tokens resolve relative to the
 record that holds the map. The baseline stamped on every agent is
@@ -114,8 +114,8 @@ grant. An agent send passes iff the sender's `can_call` grants (target, verb) AN
 the target's `callable_by` grants (sender, verb); `"*"` covers every verb. The
 kernel verbs the root answers take the same two-sided check against the root. An
 operator send (no origin) is ungated. A reflect that passes the gate returns the
-tree whole. A denial's hint: "grants come from above — the agent's parent
-(update_agent on its direct child) or the operator writes can_call and
+tree whole. A denial's hint: "grants come from above — an ancestor
+(update_agent on an agent in its subtree) or the operator writes can_call and
 callable_by; an agent never raises its own".
 
 **Identity comes only from dispatch.** When the kernel runs an agent's handler it

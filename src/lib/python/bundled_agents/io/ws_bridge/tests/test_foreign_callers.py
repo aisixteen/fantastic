@@ -35,7 +35,7 @@ async def leg(seeded_kernel):
                         "peer_id": "peer",
                         "ingress_rule": "allow_all_ingress",
                         # the leg's calls land on its own children
-                        "can_call": {"$children": "*"},
+                        "can_call": {"$subtree": "*"},
                     },
                 }
             ]
@@ -122,5 +122,5 @@ async def test_a_guid_key_in_callable_by_is_refused_at_the_write(leg):
     assert out.get("reason") == "invalid_meta", out
     assert out["error"] == (
         "callable_by['peer-g|ai'] is not a grant key — legal keys: an agent id, "
-        "$self, $parent, $children"
+        "$self, $parent, $subtree"
     ), out

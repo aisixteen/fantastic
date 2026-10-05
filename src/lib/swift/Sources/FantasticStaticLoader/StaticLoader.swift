@@ -362,7 +362,7 @@ public struct StaticLoaderBundle: AgentBundle {
 
         Every declared agent gets the baseline grant (`$self`) plus whatever `can_call` /
         `callable_by` the manifest names. After boot the roster is **closed**: an agent is
-        deny-all, creates only its own children and only when granted `create_agent` on
+        deny-all, creates only within its own subtree and only when granted `create_agent` on
         both ends, so the manifest is the whole roster. Every entry MUST carry an
         explicit `id` — boot is idempotent by id (a reboot re-reads the manifest and
         RE-APPLIES the declared fields over an existing agent), so the manifest and the

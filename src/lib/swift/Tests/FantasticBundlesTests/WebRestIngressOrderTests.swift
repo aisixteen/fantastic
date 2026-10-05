@@ -39,7 +39,7 @@ private func mountLeg(_ k: Kernel, _ id: String, ingress: JSON?) async {
     if let ingress { p["ingress_rule"] = ingress }
     let rec = await k.send([Item("kernel", .object(p))])[0].result
     #expect(rec["id"].asString == id, "\(rec.serialize())")
-    var cb: OrderedDictionary<String, JSON> = ["$self": "*", "$parent": "*", "$children": "*"]
+    var cb: OrderedDictionary<String, JSON> = ["$self": "*", "$parent": "*", "$subtree": "*"]
     cb[id] = "*"
     _ = await k.send([
         Item("kernel", ["type": "update_agent", "id": "kernel_state", "callable_by": .object(cb)])

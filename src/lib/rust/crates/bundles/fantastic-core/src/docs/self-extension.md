@@ -63,17 +63,17 @@ who may CALL IT (`callable_by`, ingress). An edge exists only when BOTH ends
 grant it. The one free edge is yourself (`{"$self": "*"}` on both fields);
 everything else — your parent, your children, the root's kernel verbs — needs an
 explicit grant on each end. A grant map is `{key: "*" | ["<verb>", …]}`, a key an
-agent id, `$self`, `$parent`, `$children`, `<guid>|<agent>` or `<guid>|*`; `"*"`
+agent id, `$self`, `$parent`, `$subtree`, `<guid>|<agent>` or `<guid>|*`; `"*"`
 covers every verb. `reflect` included: a `send` you were not granted comes back
 `{reason:'unauthorized'}`, and the reply's `side` says which end refused (`egress`
 = your reach, `ingress` = their acceptance) and `hint` names the fix.
 
-`create_agent`, `update_agent` and `delete_agent` act on your OWN CHILDREN only —
-`create_agent` with `parent_id` = you, `update_agent`/`delete_agent` naming an agent
-whose parent is you — and need `create_agent`/… granted on the root on both ends.
-Anything else is refused `side:"mutator"`, "<you> may only <verb> its own children —
-<id> is not one". So you cannot raise your own authority (your record is your
-parent's), and you wire YOUR children freely: give a child `can_call` and
+`create_agent`, `update_agent` and `delete_agent` act WITHIN YOUR OWN SUBTREE —
+`create_agent` with `parent_id` = you or an agent below you, `update_agent`/
+`delete_agent` naming an agent below you (any depth) — and need `create_agent`/…
+granted on the root on both ends. Anything else is refused `side:"mutator"`, "<you>
+may only <verb> within its own subtree — <id> is not in it". So you cannot raise your
+own authority (your record is your ancestors'), and you wire YOUR subtree freely: give a child `can_call` and
 `callable_by` at `create_agent`, or rewrite them with `update_agent` (send the
 WHOLE map — update replaces, not merges).
 

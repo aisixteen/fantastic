@@ -1249,7 +1249,7 @@ fn a_daemon_with_a_store_stops_cleanly_and_releases_its_lock() {
             "id=web",
             &port_kv,
             // the host pulls its legs' routes: an explicit edge, both ends
-            "can_call={\"$children\": [\"get_routes\"]}",
+            "can_call={\"$subtree\": [\"get_routes\"]}",
         ],
     );
     // The relay dispatches into the kernel AS ITSELF: `ingress_rule` says who

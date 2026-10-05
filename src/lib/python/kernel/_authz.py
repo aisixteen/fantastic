@@ -18,7 +18,7 @@ Both fields are grant maps of one shape, `{key: "*" | ["<verb>", …]}`. A key i
   - a literal local agent id (never containing `|`)
   - `$self`     → the holder's own id
   - `$parent`   → the holder's parent id
-  - `$children` → the holder's DIRECT children
+  - `$subtree`  → every agent BELOW the holder, at any depth
   - `<guid>|<agent>` → one agent of a connected kernel — `can_call` only (an
     OUTBOUND peer address)
   - `<guid>|*`  → every agent of that one kernel — `can_call` only
@@ -59,19 +59,19 @@ DEFAULT_CAN_CALL: dict[str, object] = {"$self": "*"}
 DEFAULT_CALLABLE_BY: dict[str, object] = {"$self": "*"}
 
 # The structural tokens — the only `$` keys a grant map may carry.
-GRANT_TOKENS: frozenset[str] = frozenset({"$self", "$parent", "$children"})
+GRANT_TOKENS: frozenset[str] = frozenset({"$self", "$parent", "$subtree"})
 
 # The legal-key lists, as the write-time shape refusal names them — per field:
 # a caller is always local, so only `can_call` may name a peer kernel's agent.
 LEGAL_GRANT_KEYS = {
-    "callable_by": "an agent id, $self, $parent, $children",
-    "can_call": "an agent id, $self, $parent, $children, <guid>|<agent> or <guid>|*",
+    "callable_by": "an agent id, $self, $parent, $subtree",
+    "can_call": "an agent id, $self, $parent, $subtree, <guid>|<agent> or <guid>|*",
 }
 
 
 def bad_grant_key(field: str, key: object) -> bool:
     """Is `key` NOT a legal key of grant `field`? Legal on both: a literal agent id
-    (non-empty, no `$` prefix, no `|`), `$self`/`$parent`/`$children`. `can_call`
+    (non-empty, no `$` prefix, no `|`), `$self`/`$parent`/`$subtree`. `can_call`
     also takes `<guid>|<agent>` or `<guid>|*` (exactly one `|`, both halves
     non-empty) — an outbound peer address; in `callable_by` such a key could
     never match a caller and is refused."""
@@ -89,8 +89,8 @@ def bad_grant_key(field: str, key: object) -> bool:
 
 # The remedy shown on any denial: authority descends, it is never self-raised.
 _FROM_ABOVE = (
-    "grants come from above — the agent's parent (update_agent on its direct "
-    "child) or the operator writes can_call and callable_by; an agent never "
+    "grants come from above — an ancestor (update_agent on an agent in its "
+    "subtree) or the operator writes can_call and callable_by; an agent never "
     "raises its own"
 )
 
@@ -105,6 +105,18 @@ def _verb_allowed(grant, verb: str) -> bool:
     return False
 
 
+def ancestor_ids(agent) -> frozenset[str]:
+    """Every id ABOVE `agent` — what `$subtree` matches against: a grant holder
+    reaches the other end when it is one of these. A peer target (no local
+    parent) has none."""
+    out: list[str] = []
+    node = getattr(agent, "parent", None)
+    while node is not None:
+        out.append(node.id)
+        node = node.parent
+    return frozenset(out)
+
+
 def authorize_call(
     grant: dict | None,
     verb: str,
@@ -112,27 +124,29 @@ def authorize_call(
     *,
     holder_id: str | None,
     holder_parent: str | None = None,
-    holder_children: frozenset[str] | set[str] | None = None,
+    other_ancestors: frozenset[str] | set[str] | None = None,
 ) -> Decision:
     """One matching engine, used BOTH ways. `grant` is the holder's grant map
     (`can_call` for egress, `callable_by` for ingress); `other_id` is the id at the
     other end of the edge (the target for egress, the sender for ingress). Tokens
     resolve relative to the HOLDER. Absent/empty grant ⇒ deny (the default posture).
+    `other_ancestors` is every id above the other end — `$subtree` matches when the
+    holder is one of them.
     """
     grant = grant or {}
     if not isinstance(grant, dict):
         # A malformed grant is DENY, never a crash: the gate judges what is there;
         # refusing shape is the writer's job.
         return Decision(False)
-    kids = holder_children or frozenset()
+    above = other_ancestors or frozenset()
     foreign = "|" in other_id
     for key, g in grant.items():
         if key == "$self":
             matched = not foreign and other_id == holder_id
         elif key == "$parent":
             matched = not foreign and other_id == holder_parent
-        elif key == "$children":
-            matched = not foreign and other_id in kids
+        elif key == "$subtree":
+            matched = not foreign and holder_id in above
         elif key.startswith("$"):
             matched = False
         elif key.endswith("|*"):

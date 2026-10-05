@@ -92,7 +92,7 @@ async def _open_bridge(kernel, peer_id: str) -> str:
                         "type": "create_agent",
                         "parent_id": "kernel_state",
                         "handler_module": "ws_bridge.tools",
-                        "can_call": {"$children": "*", "kernel_state": "*"},
+                        "can_call": {"$subtree": "*", "kernel_state": "*"},
                         "transport": "memory",
                         "peer_id": peer_id,
                         # BOTH legs serve inbound here — the round trip is symmetric.

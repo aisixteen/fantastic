@@ -104,32 +104,33 @@ TASK = (
     "`parent_id` to YOUR id. Set `description` to what the solver is for "
     f"(solver k holds the ledger of `oracle_k`). Give each solver these grant maps "
     "(a map is a tag whose children are keyed by agent id or a relative token):\n"
-    f"  `<can_call>`: `<$self>*</$self> <$parent>*</$parent> <$children>*</$children> "
-    f"<oracle_k>*</oracle_k> <notes>*</notes> <memory>*</memory>` (`memory` is the store "
-    "their conversation lives in — its door is already open for them) and one "
+    f"  `<can_call>`: `<$self>*</$self> <$parent>*</$parent> <$subtree>*</$subtree> "
+    f"<oracle_k>*</oracle_k> <notes>*</notes> <memory>*</memory>"
+    + (f" <{creds.CREDS}>*</{creds.CREDS}>" if P.BK.key_ref else "")
+    + "` (`memory` is the store their conversation lives in"
+    + (
+        f", `{creds.CREDS}` holds their model key — both doors are already open for them"
+        if P.BK.key_ref
+        else " — its door is already open for them"
+    )
+    + ") and one "
     "`<solver_j>*</solver_j>` for EACH of the two other solvers.\n"
-    "  `<callable_by>`: `<$self>*</$self> <$parent>*</$parent> <$children>*</$children>` "
+    "  `<callable_by>`: `<$self>*</$self> <$parent>*</$parent> <$subtree>*</$subtree>` "
     "and one `<solver_j>*</solver_j>` for EACH of the two other solvers.\n"
     "That is: solver k reaches its own oracle and both peers, and accepts both peers. "
     "You are their parent, so they can reach you and you them without more grants.\n\n"
-    "STEP 2 — OPEN THE ORACLES' DOORS. Each oracle accepts only me today. For each "
-    "oracle_k, send `kernel` an `update_agent` with `<id>oracle_k</id>` and a "
-    "`<callable_by>` map that contains EVERYTHING it has now PLUS `<solver_k>*"
-    "</solver_k>` — `update_agent` REPLACES a named field whole, it does not merge, "
-    "so read the current map from `list_agents` and resend all of it. Also send "
-    "`kernel` one `update_agent` for `notes` adding all three solvers to ITS "
-    "`<callable_by>` the same way. Do all four updates in ONE batch.\n\n"
-    "STEP 3 — KICK OFF ALL THREE AT ONCE: one batch of three `send` calls, one per "
+    "The oracles' and `notes`' doors are already open for the solvers.\n\n"
+    "STEP 2 — KICK OFF ALL THREE AT ONCE: one batch of three `send` calls, one per "
     "solver, each with `<type>send</type>`, `<client_id>` = the solver's id, "
     "`<reply_to>null</reply_to>` (their first turns are NOT yours to read), and "
     "`<text>` = that solver's instructions, VERBATIM from the three blocks below.\n\n"
-    "STEP 4 — tell me in one paragraph what you built, then call `done`. Do not poll, "
+    "STEP 3 — tell me in one paragraph what you built, then call `done`. Do not poll, "
     "do not read `answer.txt` yet, do not message the solvers again.\n\n"
-    "STEP 5 — LATER, when a solver sends you `CONCLUDED <code>`, you wake up: send "
+    "STEP 4 — LATER, when a solver sends you `CONCLUDED <code>`, you wake up: send "
     "`notes` `<type>read</type><path>answer.txt</path>`, check that the first line "
     "is the same 3-digit code the message names, and tell me `VALIDATED <code>` (or "
     "`MISMATCH` with what you saw).\n\n"
-    "STEP 6 — CLEAN UP THE FLEET: the team's work is over. Send `kernel` ONE batch of "
+    "STEP 5 — CLEAN UP THE FLEET: the team's work is over. Send `kernel` ONE batch of "
     f"three `delete_agent` calls, `<id>{SOLVERS[0]}</id>`, `<id>{SOLVERS[1]}</id>`, "
     f"`<id>{SOLVERS[2]}</id>` (they are your children, so this needs no extra grant), "
     "confirm to me that the three are gone, and call `done`. Nothing else.\n\n"
@@ -172,7 +173,9 @@ async def fixture(root, *, interpreter=None):
                 # a DATA store — the records under `.fantastic` stay the loader's
                 "root": ".fantastic/data",
                 "ingress_rule": "allow_all_ingress",
-                "callable_by": {CREATOR: "*", "rest": "*", "web": "*"},
+                # The solvers' door is the fixture's to open: `notes` is not the
+                # creator's child, so the creator may not write its record.
+                "callable_by": {CREATOR: "*", "rest": "*", "web": "*", **{sid: "*" for sid in SOLVERS}},
                 "description": "Shared text documents. The team's answer goes to `answer.txt`.",
             },
         },
@@ -201,7 +204,9 @@ async def fixture(root, *, interpreter=None):
                     "id": oid,
                     "lines": S.LEDGERS[k],
                     "description": f"Oracle {k + 1}: the {LEDGER_NAMES[k]} ledger; answers `ask`. Knows only its own ledger.",
-                    "callable_by": {CREATOR: "*", "rest": "*", "web": "*"},
+                    # its solver's door, opened here — the oracle is not the
+                    # creator's child, so the creator may not write its record
+                    "callable_by": {CREATOR: "*", "rest": "*", "web": "*", SOLVERS[k]: "*"},
                 },
             }
         )
@@ -213,7 +218,9 @@ async def fixture(root, *, interpreter=None):
     for sid in SOLVERS:
         await memory.open_ingress(root, memory.MEMORY, sid)
         if _resolve_backend().key_ref:
-            await creds.grant_reader(root, sid)
+            # The STORE's half only: the solver does not exist yet, and its own
+            # `can_call` is its creator's to write (the task names `creds` there).
+            await creds.open_store(root, sid)
     return store
 
 

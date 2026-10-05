@@ -77,7 +77,7 @@ extension Kernel {
     /// `state.yaml`, and the victim read the forged content back as its own
     /// memory.
     ///
-    /// The defence was believed to be POSITION — the root accepts `$children`,
+    /// The defence was believed to be POSITION — the root accepts `$subtree`,
     /// and a grandchild is not one — but a DIRECT child passes that check, and
     /// every agent an operator creates at the root is a direct child. Position
     /// bounds who can REACH the verb; it says nothing about which namespace they

@@ -104,7 +104,7 @@ async def test_create_agent_emits_agent_created(seeded_kernel):
 async def test_agent_created_reaches_a_parent_at_any_depth(seeded_kernel):
     """The event lands on the PARENT's inbox at every depth (audit 2026-10-03,
     KV-4). It was emitted as the root, so the gate judged root→parent, and the
-    root's `$children` baseline reaches depth 1 only: a parent two levels down
+    root's baseline grant then reached depth 1 only: a parent two levels down
     never got it — an operator create included, an agent creating under
     itself too — and nothing reported the drop."""
     from _testkit import as_agent

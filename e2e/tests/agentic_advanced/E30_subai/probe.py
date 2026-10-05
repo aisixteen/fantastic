@@ -235,7 +235,7 @@ def _ai_meta(
         "can_call": {
             "$self": "*",
             "$parent": "*",
-            "$children": "*",
+            "$subtree": "*",
             # THE ROOT, by whatever id this runtime gives it (python:
             # kernel_state, rust/swift: core).
             root.id: ["*", "create_agent", "update_agent", "delete_agent"],
@@ -256,14 +256,16 @@ def _ai_meta(
         # The AI agent is pinned to the server's real window; the builder gets its own.
         "context_window": CTX if agent_id == "brain" else BUILDER_CTX,
         # THE WIRE FACES. On a spawned kernel the driver arrives as `rest` and a
-        # `watch` frame dispatches as `web` — both are AGENTS, gated like any
+        # `watch` frame is the `ws` LEG's own call — all AGENTS, gated like any
         # other, so an agent that does not accept them refuses the very first
-        # send and emits to a watcher that was never allowed to subscribe. In
-        # process these ids do not exist and the grant is inert.
+        # send and emits to a watcher that was never allowed to subscribe
+        # (`ws` was missing: the status watcher below saw NOTHING over the wire,
+        # "ai does not accept 'watch' from ws", measured 2026-10-05). In process
+        # these ids do not exist and the grant is inert.
         "callable_by": {
             "$self": "*",
             "$parent": "*",
-            "$children": "*",
+            "$subtree": "*",
             # THE OTHER HALF OF THE WIRE. `can_call` above grants the builder
             # `brain`, but the gate is TWO-SIDED and these two are SIBLINGS, so
             # there is no baseline edge: without this, `ai -> brain` is refused
@@ -276,6 +278,7 @@ def _ai_meta(
             "user": "*",
             "rest": "*",
             "web": "*",
+            "ws": "*",
         },
     }
     if extra_reach:
@@ -974,6 +977,12 @@ async def run(
                     if ev.get("type") == "status" and det.get("error"):
                         print(f"\n  ** TURN FAILED: {det['error']} **\n", flush=True)
                         runaway.append(f"turn failed: {det['error']}")
+                    elif ev.get("type") == "status" and ev.get("phase") == "done":
+                        # EVERY TURN'S END, not only a failed one: a benign end
+                        # (`ok`, `awaiting`, `dead_turn`) left no line, so a chain
+                        # that stopped after a clean turn could not say HOW that
+                        # turn ended (subai_graph:rust, 2026-10-05).
+                        print(f"  · turn ended: {det.get('reason') or 'ok'}", flush=True)
                     if ev.get("type") == "context" and ev.get("phase") == "too_small":
                         print(f"\n  ** TOO_SMALL: {det} **\n", flush=True)
             except Exception as e:
@@ -1156,6 +1165,59 @@ async def run(
                 f"    {_r.get('id') or _r.get('pid')} {_r.get('target')} "
                 f"{_r.get('verb')} -> {_r.get('status')}"
             )
+        # THE AI'S OWN RECORDS. Over a wire the ledger above is read as the `rest`
+        # leg and lists only what IT originated, so it cannot say whether `aid`'s
+        # calls were sent. Those live in the memory store: the call/settle rows
+        # naming `aid` and its conversation (did a reply ever land?). Read while
+        # the kernel is still alive — the store is RAM and dies with it
+        # (subai_graph:rust, 2026-10-05: five closed calls, no reply, no record).
+        # A SETTLE row names neither: it points at its call through `parent` (the
+        # call's id) and at who answered through `settled` — so it is matched to
+        # `aid`'s call rows by id, in a second pass.
+        _tables = await memory.dump(root)
+        _all = [
+            (str(_x.get("owner") or "").split("|")[-1], _x.get("row") or {})
+            for _x in _tables.get("rows") or []
+        ]
+        _mine = [
+            (_own, _r)
+            for _own, _r in _all
+            if aid in (_own, _r.get("caller"), _r.get("target"), _r.get("agent"))
+        ]
+        _calls = {_r.get("id") for _own, _r in _mine if _r.get("kind") == "call"}
+        _mine += [
+            (_own, _r)
+            for _own, _r in _all
+            if _r.get("kind") == "settle" and _r.get("parent") in _calls
+        ]
+        _mine.sort(key=lambda p: p[1].get("id") or 0)
+        print(f"  ── {aid}'s store rows · {len(_mine)} ──")
+        for _own, _r in _mine[-40:]:
+            if _r.get("kind") == "settle":
+                _out = _r.get("outcome") or {}
+                print(
+                    f"    {_r.get('id')} [{_own}] kind=settle call={_r.get('parent')} "
+                    f"settled={_r.get('settled')} status={_out.get('status')} "
+                    f"attempts={_r.get('attempts')} {str(_out.get('result') or '')[:90]}"
+                )
+                continue
+            _txt = str(_r.get("content") or _r.get("payload") or "")[:90].replace("\n", " ")
+            print(
+                f"    {_r.get('id')} [{_own}] kind={_r.get('kind')} role={_r.get('role')} "
+                f"verb={_r.get('verb')} caller={_r.get('caller')} "
+                f"status={_r.get('status')} {_txt}"
+            )
+        # ITS LIVE STATE: still generating, a queue, a last error — what the agent
+        # itself says at the cap. The docs a reflect carries are left out; a refusal
+        # prints as it came.
+        _me = (await root.send([{"target": aid, "payload": {"type": "reflect"}}]))[0]["result"]
+        if isinstance(_me, dict):
+            _me = {
+                k: v
+                for k, v in _me.items()
+                if k not in ("verbs", "emits", "readme", "readmes", "docs", "tree", "sentence", "description")
+            }
+        print(f"  ── {aid} reflect at the cap ──\n    {str(_me)[:1500]}")
     print(f"\n  builder finished after {spy.n} passes — walking away now")
 
     # THE TRANSCRIPT THE SCORER READS MUST BE THE ONE THAT WAS FILLED.

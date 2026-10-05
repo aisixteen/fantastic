@@ -120,7 +120,7 @@ _state_quiet: contextvars.ContextVar[bool] = contextvars.ContextVar(
 # Measured 2026-08-23: an agent holding exactly
 # `can_call: {kernel_state: [persist_blob]}` wrote another agent's `state.yaml`,
 # and the victim read the forged content back as its own memory. The believed
-# defence was POSITION (the root accepts `$children`, a grandchild is not one) —
+# defence was POSITION (the root accepts `$subtree`, a grandchild is not one) —
 # but every agent an operator creates at the root IS a direct child.
 #
 # `None` means OPERATOR ORIGIN, which an agent cannot forge: the CLI, the cold
