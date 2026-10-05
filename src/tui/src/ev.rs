@@ -86,6 +86,9 @@ pub enum Got {
         agent: AgentId,
         rows: Vec<Row>,
         full: bool,
+        /// An AI agent's `rows` said whether it holds its history; `None` for an
+        /// agent that keeps no rows of its own.
+        loaded: Option<bool>,
     },
     Reflect {
         agent: AgentId,

@@ -95,10 +95,9 @@ fn registry() -> BundleRegistry {
     // THE BROWSER'S SET-UP PAGE, host side. Registered so the page can create
     // it; it exists only while that page is open (`kern/setup_agent`).
     reg.register(crate::kern::setup_agent::HANDLER_MODULE, crate::kern::setup_agent::SetupBundle);
-    // THE CANVAS, host side: its node (`kern/canvas_node`), and its backend —
-    // one folder per page view, each creating and deleting its own children and
-    // spawning AI cells from the user's templates (`kern/backend`).
-    reg.register(crate::kern::canvas_node::HANDLER_MODULE, crate::kern::canvas_node::CanvasNodeBundle);
+    // THE CANVAS, host side: its node `canvas_root` — creates and deletes its
+    // own children (the cells' backends) and spawns AI cells from the user's
+    // templates (`kern/backend`).
     reg.register(crate::kern::backend::HANDLER_MODULE, crate::kern::backend::BackendBundle);
     // KEYS: the credential store (`kern/keys`) — every provider key, by ref.
     reg.register(fantastic_credential_store::HANDLER_MODULE, fantastic_credential_store::CredentialStoreBundle::default());
@@ -199,6 +198,12 @@ impl Host {
             cfg: ClientCfg::here(),
             root,
         };
+        // GOD MODE BY GRANTS, in every mode (a strictly single-user dev tool):
+        // `user` and the other holders reach every agent, both edges, before the
+        // shell acts through `user` (`kern/reach`).
+        if let Err(e) = crate::kern::reach::start(&host).await {
+            notes.push(e);
+        }
         // The template store's agent, and the human's grant onto it — re-set on
         // every boot, whatever a record on disk says.
         if let Err(e) = crate::kern::templates::ensure(&host).await {
@@ -310,35 +315,53 @@ impl Host {
         Ok(out.result)
     }
 
-    // ── reading, straight off the store ──────────────────────────────────
+    // ── reading ──────────────────────────────────────────────────────────
 
-    /// One agent's rows, oldest id first: what the memory store holds under its
-    /// own key (an AI agent's conversation, its folds and views), then the
+    /// One agent's rows, oldest id first, and — for an AI agent — whether it
+    /// holds its history (`rows` says `loaded`). Its OWN rows are what the agent
+    /// holds in memory, its loaded head (its `rows` verb: a view of the agent,
+    /// never the store, so the transcript cannot drift from it); then the
     /// kernel's execution rows ABOUT it — flushed ones read back from the store
-    /// under the operator's key, the rest still in RAM.
-    ///
-    /// Read AS THE OPERATOR, the store's admin: the shell renders every agent's
-    /// rows, so it is the one reader that may name any owner.
+    /// under the operator's own key, the rest still in RAM.
     /// `after`: only rows with a larger id (the caller's cursor); `None` = all.
-    pub async fn rows(&self, agent: &str, after: Option<i64>) -> Vec<Row> {
+    pub async fn rows(&self, agent: &str, after: Option<i64>) -> (Vec<Row>, Option<bool>) {
         let Ok(store) = self.memory_store() else {
-            return Vec::new();
+            return (Vec::new(), None);
         };
         let mut by: std::collections::BTreeMap<i64, Value> = std::collections::BTreeMap::new();
-        let mut q = json!({"type": "read", "owner": agent});
-        if let Some(a) = after {
-            q["after"] = json!(a);
-        }
-        let own = self.operator(&store, q).await.result;
-        for mut r in own["rows"].as_array().cloned().unwrap_or_default() {
-            if r.get("agent").is_none() {
-                r["agent"] = json!(agent);
+        // an AI agent: a non-root agent naming a memory store (the root names
+        // the project's, for the kernel's own rows)
+        let keeps_rows = agent != self.root
+            && self
+                .kernel
+                .agents
+                .get(&AgentId::from(agent))
+                .is_some_and(|a| a.value().record().meta.get("memory_store_id").and_then(Value::as_str).is_some());
+        let mut loaded = None;
+        if keeps_rows {
+            let mut cursor = after;
+            loop {
+                let mut q = json!({"type": "rows"});
+                if let Some(a) = cursor {
+                    q["after"] = json!(a);
+                }
+                let page = self.operator(agent, q).await.result;
+                loaded = page.get("loaded").and_then(Value::as_bool).or(loaded);
+                for mut r in page["rows"].as_array().cloned().unwrap_or_default() {
+                    if r.get("agent").is_none() {
+                        r["agent"] = json!(agent);
+                    }
+                    if let Some(id) = r.get("id").and_then(Value::as_i64) {
+                        by.insert(id, r);
+                    }
+                }
+                match page.get("next").and_then(Value::as_i64) {
+                    Some(n) if Some(n) != cursor => cursor = Some(n),
+                    _ => break,
+                }
             }
-            if let Some(id) = r.get("id").and_then(Value::as_i64) {
-                by.insert(id, r);
-            }
         }
-        let mut q = json!({"type": "read", "owner": "kernel", "match": {"agent": agent}});
+        let mut q = json!({"type": "read", "match": {"agent": agent}});
         if let Some(a) = after {
             q["after"] = json!(a);
         }
@@ -355,7 +378,7 @@ impl Host {
                 by.insert(id, r);
             }
         }
-        by.into_values().filter_map(|v| serde_json::from_value(v).ok()).collect()
+        (by.into_values().filter_map(|v| serde_json::from_value(v).ok()).collect(), loaded)
     }
 
     /// What is running right now.
@@ -440,7 +463,6 @@ mod tests {
             "user_home_store.tools",
             "setup.tools",
             "canvas.tools",
-            "backend.tools",
             "exec_bridge.tools",
             "static_loader.tools",
             "user.tools",

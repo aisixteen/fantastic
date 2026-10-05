@@ -208,6 +208,7 @@ pub async fn write(host: &Host, rec: &Record) -> Result<String, String> {
     }
     // its key, when it names one: the store's side of reading it
     crate::kern::keys::wire_record(host, id, &named).await?;
+    crate::kern::reach::granted(host, id).await?;
     let r = host.act(id, json!({"type": "boot"})).await;
     if let Some(e) = err_of(&r) {
         return Err(format!("`{id}` was written but did not boot: {e}"));

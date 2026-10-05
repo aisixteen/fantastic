@@ -18,21 +18,35 @@ const call = async (k: Kernel, payload: Record<string, unknown>): Promise<Payloa
 
 test("a view places, moves, updates, wires and removes its own cells", async () => {
   const k = page();
-  const p = await call(k, { type: "place", kind: "html", id: "a", x: 10, y: 20, html: "<p>a</p>", display_name: "A" });
+  const p = await call(k, { type: "place", kind: "html", id: "a", x: 10, y: 20, html: "<p>a</p>", display_name: "A", callable_by: { b: ["emit"] } });
   assert.equal(p["placed"], "a");
   assert.equal(k.get("a")?.parentId, "view_root");
   assert.equal(k.get("a")?.meta["html"], "<p>a</p>");
+  assert.deepEqual((k.get("a")?.meta["callable_by"] as Record<string, unknown>)["b"], ["emit"], "place takes grants");
   await call(k, { type: "place", kind: "html", id: "b", x: 400, y: 20 });
   assert.equal((await call(k, { type: "move", id: "a", x: 99 }))["moved"], "a");
   assert.equal(k.get("a")?.meta["x"], 99);
   assert.equal((await call(k, { type: "update", id: "b", fields: { html: "<p>b</p>" } }))["updated"], "b");
-  const bad = await call(k, { type: "update", id: "b", fields: { can_call: {} } });
-  assert.equal(bad["reason"], "bad_arg", "grants are never settable through update");
+  // a cell's grants are the view's to write — it is the cell's parent
+  await call(k, { type: "update", id: "b", fields: { can_call: { dev: ["start", "stop"] } } });
+  assert.deepEqual((k.get("b")?.meta["can_call"] as Record<string, unknown>)["dev"], ["start", "stop"]);
   await call(k, { type: "wire", sender: "a", receiver: "b", verbs: ["emit"] });
   assert.deepEqual((k.get("a")?.meta["can_call"] as Record<string, unknown>)["b"], ["emit"]);
   assert.deepEqual((k.get("b")?.meta["callable_by"] as Record<string, unknown>)["a"], ["emit"]);
+  // a receiver that is no cell of the view (a host agent): the sender's side only
+  assert.ok((await call(k, { type: "wire", sender: "a", receiver: "dev", verbs: ["start"] }))["wired"]);
+  assert.deepEqual((k.get("a")?.meta["can_call"] as Record<string, unknown>)["dev"], ["start"]);
   assert.equal((await call(k, { type: "remove", id: "a" }))["deleted"], true);
   assert.equal(k.get("a"), undefined);
+});
+
+test("place takes the cell's handler_module as well as a kind", async () => {
+  const k = page();
+  assert.equal((await call(k, { type: "place", handler_module: "html_agent", id: "p", x: 0, y: 0, bytes: "<p>p</p>" }))["placed"], "p");
+  assert.equal(k.get("p")?.record().handler_module, "html_agent.ts");
+  assert.equal(k.get("p")?.meta["html"], "<p>p</p>");
+  assert.equal((await call(k, { type: "place", handler_module: "stream_view.ts", id: "s", x: 0, y: 0 }))["placed"], "s");
+  assert.equal(k.get("s")?.record().handler_module, "stream_view.ts");
 });
 
 test("place refuses what it cannot make, naming the arg", async () => {
@@ -73,9 +87,9 @@ test("a view names its MAIN chat through update on itself: locked while main, on
   await call(k, { type: "place", kind: "html", id: "h", x: 0, y: 0 });
   assert.equal((await call(k, { type: "update", id: "view_root", fields: { main_ai_chat: "c" } }))["updated"], "view_root");
   assert.equal(k.get("view_root")?.meta["main_ai_chat"], "c");
-  assert.equal((await call(k, { type: "update", id: "view_root", fields: { main_ai_chat: "h" } }))["arg"], "main_ai_chat", "only a chat cell");
-  assert.equal((await call(k, { type: "update", id: "view_root", fields: { main_ai_chat: "nope" } }))["arg"], "main_ai_chat");
-  assert.equal((await call(k, { type: "update", id: "view_root", fields: { x: 1 } }))["arg"], "fields", "nothing else on the view");
+  assert.equal((await call(k, { type: "update", id: "view_root", fields: { readme: "mine" } }))["updated"], "view_root", "any field on the view");
+  assert.equal(k.get("view_root")?.meta["readme"], "mine");
+  assert.equal(k.get("view_root")?.meta["main_ai_chat"], "c", "the main chat untouched");
   // while main it is delete-locked; another made main demotes and unlocks it
   assert.equal(k.get("c")?.meta["delete_lock"], true);
   assert.equal((await call(k, { type: "remove", id: "c" }))["reason"], "locked");
@@ -94,38 +108,20 @@ test("a view names its MAIN chat through update on itself: locked while main, on
   assert.equal(k.get("view_root")?.meta["main_ai_chat"], null, "its main chat gone, the view has no voice");
 });
 
-test("place {kind: view} nests a VIEW with its own card; the nested view rewrites the card", async () => {
+test("place makes no nested view: one view for now (owner, 2026-10-04)", async () => {
   const k = page();
-  const p = await call(k, { type: "place", kind: "view", id: "kid", x: 10, y: 10 });
-  assert.equal(p["placed"], "kid");
-  assert.equal(k.get("kid")?.parentId, "view_root");
-  assert.equal(k.get("kid")?.record().handler_module, "view.ts");
-  assert.match(String(k.get("kid")?.meta["html"]), /a view/, "it starts with a card");
-  // the nested view places its OWN cells, and rewrites its card on the parent
-  const kid = async (payload: Record<string, unknown>): Promise<Payload> =>
-    (await k.send([{ target: "kid", payload: payload as Payload }]))[0]!.result as Payload;
-  assert.equal((await kid({ type: "place", kind: "html", id: "inner", x: 0, y: 0 }))["placed"], "inner");
-  assert.equal(k.get("inner")?.parentId, "kid");
-  assert.equal((await kid({ type: "set_html", bytes: "<b>sql: 3 queries</b>" }))["ok"], true);
-  assert.equal((await kid({ type: "get_html" }))["html"], "<b>sql: 3 queries</b>");
-  // geometry: only the view a page VIEWS is rendered
+  const r = await call(k, { type: "place", kind: "view", id: "kid", x: 0, y: 0 });
+  assert.equal(r["arg"], "kind");
+  assert.equal(k.get("kid"), undefined);
 });
 
-test("place {kind: view, template} scaffolds the nested view WITH its main chat; template is for a view only", async () => {
+test("a body that calls an agent the cell is not granted SAYS so, with the fix", async () => {
   const k = page();
-  k.registerBundle("ai_view.ts", () => null);
-  const { setScaffold } = await import("../src/bundles/canvas/canvas_agent.ts");
-  // the page's spawning, stood in for: a chat cell in the nested view, made main
-  setScaffold(async (view, template) => {
-    k.register(new Agent({ id: `chat_${template}`, parentId: view, handlerModule: "ai_view.ts", meta: { kept: true } }));
-    const [o] = await k.send([{ target: view, payload: { type: "update", id: view, fields: { main_ai_chat: `chat_${template}` } } as unknown as Payload }]);
-    return o!.result as never;
-  });
-  const r = await call(k, { type: "place", kind: "view", id: "spec", x: 0, y: 0, template: "sql" });
-  assert.equal(r["placed"], "spec");
-  assert.equal((r["main_chat"] as Payload)["updated"], "spec");
-  assert.equal(k.get("spec")?.meta["main_ai_chat"], "chat_sql", "the nested view's main chat is named on it");
-  assert.equal(k.get("chat_sql")?.meta["delete_lock"], true, "and locked while main");
-  assert.equal((await call(k, { type: "place", kind: "html", x: 0, y: 0, template: "sql" }))["arg"], "template", "a template is for kind view");
-  assert.equal((await call(k, { type: "place", kind: "view", x: 0, y: 0, template: "" }))["arg"], "template");
+  const body = `<button onclick="fantastic.send('dev',{type:'start',command:'sh'})">go</button><script>fantastic.watch('dev',e=>{})</script>`;
+  const p = await call(k, { type: "place", kind: "html", id: "c", x: 0, y: 0, bytes: body });
+  assert.deepEqual(p["grants_missing"], { dev: ["start", "watch"] });
+  assert.match(String(p["hint"]), /update \{id: c, fields: \{can_call:/);
+  // granted → no hint
+  const u = await call(k, { type: "update", id: "c", fields: { can_call: { $self: "*", dev: ["start", "watch"] } } });
+  assert.equal(u["grants_missing"], undefined);
 });

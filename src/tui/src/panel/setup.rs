@@ -85,6 +85,16 @@ pub struct SetupPanel {
 }
 
 impl SetupPanel {
+    /// Tests: open the key prompt, and read what it holds.
+    #[cfg(test)]
+    pub fn open_key_prompt(&mut self) {
+        self.key = Some(String::new());
+    }
+    #[cfg(test)]
+    pub fn key_typed(&self) -> Option<&str> {
+        self.key.as_deref()
+    }
+
     pub fn new() -> Self {
         Self {
             backends: None,
@@ -283,6 +293,10 @@ impl Panel for SetupPanel {
 
     fn needs(&self) -> Needs {
         Needs { rows: false, reflect: false, watch: false }
+    }
+
+    fn text_input(&self) -> bool {
+        self.key.is_some() || self.editing.is_some()
     }
 
     fn on_key(&mut self, k: KeyEvent, _cx: &Cx<'_>, out: &mut Vec<Cmd>) -> Handled {

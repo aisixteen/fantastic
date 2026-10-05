@@ -5,8 +5,8 @@
 //! The human's surfaces that are not the in-proc operator reach every agent the
 //! way the shell does: the MCP leg (`mcp`, a coding CLI), `user` — the shell's
 //! own identity, which every canvas tab calls through (`user.forward`) — every
-//! AI agent, and the host-side helpers that act for the human (the `backend`
-//! folders, the canvas set-up agents) — a strictly single-user dev tool (owner
+//! AI agent, and the host-side helpers that act for the human (`canvas_root`,
+//! the canvas set-up agents) — a strictly single-user dev tool (owner
 //! 2026-10-04). The shell is the operator (ungated); these are not, so THIS CLI
 //! — the in-proc operator — writes BOTH edges, BY ID, for every agent:
 //!
@@ -19,7 +19,7 @@
 //! agent the state stream reports `added` (made by an AI, by exec, loaded from
 //! disk, or a leg itself). Every grant lives in the records: the human reshapes
 //! them with `update_agent`. A leg's `ingress_rule` still decides who may open
-//! frames on it.
+//! frames on it. Started at every boot (`Host::boot`), whatever the mode.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -55,8 +55,8 @@ fn field(h: &Host, id: &str, f: &str) -> Map<String, Value> {
 
 /// The HOLDERS of the reach (strictly single-user dev tool, owner 2026-10-04):
 /// each present holding leg, `user`, every AI agent (a non-root agent naming a
-/// memory store), and the host-side helpers that act for the human — every
-/// `backend` folder and every canvas set-up agent.
+/// memory store), and the host-side helpers that act for the human —
+/// `canvas_root` and every canvas set-up agent.
 fn holders(h: &Host) -> Vec<String> {
     let root = h.kernel.root().map(|r| r.id.0.clone());
     let helper = [crate::kern::backend::HANDLER_MODULE, crate::kern::setup_agent::HANDLER_MODULE];
@@ -90,6 +90,20 @@ fn leg_verbs(h: &Host, id: &str) -> Value {
     }
 }
 
+/// `had` ∪ `add` as a verb list — `"*"` stays `"*"`; order kept, `add` after.
+fn union(had: Option<&Value>, add: &Value) -> Value {
+    if had == Some(&json!("*")) {
+        return json!("*");
+    }
+    let mut out: Vec<Value> = had.and_then(Value::as_array).cloned().unwrap_or_default();
+    for v in add.as_array().into_iter().flatten() {
+        if !out.contains(v) {
+            out.push(v.clone());
+        }
+    }
+    Value::Array(out)
+}
+
 /// Grant every holder every verb on `ids` — both edges, BY ID (no subtree
 /// keys): each target's `callable_by` names each holder, and each holder's
 /// `can_call` names the target (and `kernel`); the canvas leg, both edges, its
@@ -111,7 +125,8 @@ pub async fn grant(h: &Host, ids: &[String]) -> Result<(), String> {
             }
         }
         if leg && id != CANVAS_LEG {
-            let lv = leg_verbs(h, id);
+            // MERGED into what the record names (`user` admits the leg's calls)
+            let lv = union(cb.get(CANVAS_LEG), &leg_verbs(h, id));
             if cb.get(CANVAS_LEG) != Some(&lv) {
                 cb.insert(CANVAS_LEG.to_string(), lv);
                 changed = true;
@@ -135,7 +150,8 @@ pub async fn grant(h: &Host, ids: &[String]) -> Result<(), String> {
             if id == holder || (id != "kernel" && !exists(h, id)) {
                 continue;
             }
-            let want = if full { all.clone() } else { leg_verbs(h, id) };
+            // the leg's own: MERGED into what it holds (its calls to `user`)
+            let want = if full { all.clone() } else { union(cc.get(id), &leg_verbs(h, id)) };
             if cc.get(id) != Some(&want) {
                 cc.insert(id.to_string(), want);
                 changed = true;
@@ -158,6 +174,32 @@ pub async fn grant_all(h: &Host) -> Result<(), String> {
 }
 
 static WATCHING: AtomicBool = AtomicBool::new(false);
+
+/// Wakes [`granted`] after each batch the watch grants.
+static GRANTED: std::sync::LazyLock<tokio::sync::Notify> = std::sync::LazyLock::new(tokio::sync::Notify::new);
+
+/// How long [`granted`] waits for the watch.
+const GRANT_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Wait until `user` — and the canvas leg, when there is one — hold their
+/// grants on `id`: the watch writes them when the state stream reports the agent
+/// `added`. An agent made from inside a handler cannot write those grants (they
+/// come from above), so code that acts on the new agent through `user`, or a
+/// page that watches it through the leg, awaits this first. Refused when the
+/// watch has not granted it within [`GRANT_WAIT`].
+pub async fn granted(h: &Host, id: &str) -> Result<(), String> {
+    let deadline = tokio::time::Instant::now() + GRANT_WAIT;
+    loop {
+        let wake = GRANTED.notified();
+        let leg_ok = !exists(h, CANVAS_LEG) || field(h, CANVAS_LEG, "can_call").contains_key(id);
+        if field(h, crate::env::HUMAN, "can_call").contains_key(id) && leg_ok {
+            return Ok(());
+        }
+        if tokio::time::timeout_at(deadline, wake).await.is_err() {
+            return Err(format!("reach: `{}` was not granted `{id}` within {}s", crate::env::HUMAN, GRANT_WAIT.as_secs()));
+        }
+    }
+}
 
 /// Every agent now, then each one the state stream reports `added`. The watch
 /// starts once per process, whichever leg is set up first.
@@ -192,6 +234,7 @@ pub async fn start(h: &Host) -> Result<(), String> {
             if let Err(e) = r {
                 tracing::warn!("{e}");
             }
+            GRANTED.notify_waiters();
         }
     });
     Ok(())

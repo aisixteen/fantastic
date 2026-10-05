@@ -1,0 +1,275 @@
+# THREE vLLM AGENTS ON TWO KV SLOTS — the terminal UI, live (owner, 2026-10-04:
+# "test tui (vllm, 2 kv caches, evict)"). A scripted keyboard in a PTY talks to
+# ai_a, ai_b, ai_c in turn — one vLLM endpoint, `kv_slots: 2`, `kv_overflow:
+# evict` — so the third rotates the least-recently-used conversation out; ai_a,
+# asked again, still answers from its history (re-prefill). Then ai_b streams a
+# long answer (its TEXT DRAFT drawn as written) and `S` stops it: the draft is
+# settled `not sent — stopped`, the producer's history keeps the cut marker.
+#
+# Live: the operator's vLLM (VLLM_ENDPOINT, FANTASTIC_AI_MODEL, the key from
+# VLLM_API_KEY or VLLM_API_KEY_FILE — read by an env-backed credential store,
+# never printed). The shared GPU serves production: one scenario at a time.
+#
+# The `kv a/b · evicted n` status comes from the agent's own reflect (re-read on
+# select), so each frame shows the table as of selecting that agent — before
+# its own turn. Three agents on two slots: c's pick shows the table full; c's
+# turn evicts, seen from a's second pick on. The
+# exact count is not pinned — a turn makes more than one model pass, and a side
+# call (the view rebuild) is a conversation of its own (measured: 1 at c, 3 at
+# a's second pick, 4 at b's).
+
+id: tui_kv_evict
+title: 'fantastic — three vLLM agents on two KV slots: streamed drafts, LRU eviction, stop'
+runtimes:
+- tui
+costs: live
+live: vllm
+features:
+- vllm
+screen:
+  rows: 50
+  cols: 140
+runs:
+- name: init
+  script: |
+    wait 1200
+    key space
+    wait 3500
+    key ctrl-c
+    wait 150
+    key ctrl-c
+    exit 8000
+  after_exit:
+    exit_code: 0
+    lock_released: true
+- name: evict
+  seed:
+  - path: .fantastic/agents/user/agent.yaml
+    record:
+      id: user
+      handler_module: user.tools
+      can_call:
+        memory: '*'
+        fs_loader: '*'
+        store: '*'
+        exec: '*'
+        files: '*'
+        kernel_state: '*'
+        ai_a: '*'
+        ai_b: '*'
+        ai_c: '*'
+      callable_by:
+        exec: '*'
+        files: '*'
+        ai_a: '*'
+        ai_b: '*'
+        ai_c: '*'
+  - path: .fantastic/agents/user/agents/memory/agent.yaml
+    record:
+      id: memory
+      handler_module: sqlite_store.tools
+      path: .fantastic/memory.db
+      callable_by:
+        user: '*'
+        ai_a: '*'
+        ai_b: '*'
+        ai_c: '*'
+  - path: .fantastic/agents/user/agents/creds/agent.yaml
+    record:
+      id: creds
+      handler_module: credential_store.tools
+      backend: env
+      refs:
+        vllm:
+          host: '{vllm_endpoint}'
+          env:
+            api_key: VLLM_API_KEY
+      callable_by:
+        user: '*'
+        ai_a:
+        - get
+        ai_b:
+        - get
+        ai_c:
+        - get
+  - path: .fantastic/agents/user/agents/ai_a/agent.yaml
+    record:
+      id: ai_a
+      handler_module: vllm_backend.tools
+      endpoint: '{vllm_endpoint}'
+      model: '{vllm_model}'
+      max_tokens: 262144
+      reasoning_effort: xhigh
+      thinking_token_budget: 65536
+      context_window: 262144
+      no_repeat_ngram_size: 3
+      repetition_penalty: 1.05
+      kv_slots: 2
+      kv_overflow: evict
+      memory_store_id: memory
+      credentials:
+        store: creds
+        ref: vllm
+      callable_by:
+        user: '*'
+      can_call:
+        memory: '*'
+        creds:
+        - get
+  - path: .fantastic/agents/user/agents/ai_b/agent.yaml
+    record:
+      id: ai_b
+      handler_module: vllm_backend.tools
+      endpoint: '{vllm_endpoint}'
+      model: '{vllm_model}'
+      max_tokens: 262144
+      reasoning_effort: xhigh
+      thinking_token_budget: 65536
+      context_window: 262144
+      no_repeat_ngram_size: 3
+      repetition_penalty: 1.05
+      kv_slots: 2
+      kv_overflow: evict
+      memory_store_id: memory
+      credentials:
+        store: creds
+        ref: vllm
+      callable_by:
+        user: '*'
+      can_call:
+        memory: '*'
+        creds:
+        - get
+  - path: .fantastic/agents/user/agents/ai_c/agent.yaml
+    record:
+      id: ai_c
+      handler_module: vllm_backend.tools
+      endpoint: '{vllm_endpoint}'
+      model: '{vllm_model}'
+      max_tokens: 262144
+      reasoning_effort: xhigh
+      thinking_token_budget: 65536
+      context_window: 262144
+      no_repeat_ngram_size: 3
+      repetition_penalty: 1.05
+      kv_slots: 2
+      kv_overflow: evict
+      memory_store_id: memory
+      credentials:
+        store: creds
+        ref: vllm
+      callable_by:
+        user: '*'
+      can_call:
+        memory: '*'
+        creds:
+        - get
+  timeout: 420
+  script: |
+    wait 2500
+    type /ai_a
+    key enter
+    wait 300
+    key enter
+    wait 1200
+    key tab
+    type Reply with exactly one word: ALPHA
+    key enter
+    wait 45000
+    shot a1
+    key tab
+    wait 200
+    key esc
+    wait 300
+    type /ai_b
+    key enter
+    wait 300
+    key enter
+    wait 1200
+    key tab
+    type Reply with exactly one word: BRAVO
+    key enter
+    wait 45000
+    shot b1
+    key tab
+    wait 200
+    key esc
+    wait 300
+    type /ai_c
+    key enter
+    wait 300
+    key enter
+    wait 1200
+    key tab
+    type Reply with exactly one word: CHARLIE
+    key enter
+    wait 45000
+    shot c1
+    key tab
+    wait 200
+    key esc
+    wait 300
+    type /ai_a
+    key enter
+    wait 300
+    key enter
+    wait 1200
+    key tab
+    type Repeat the one word you replied with before, nothing else.
+    key enter
+    wait 60000
+    shot a2
+    key tab
+    wait 200
+    key esc
+    wait 300
+    type /ai_b
+    key enter
+    wait 300
+    key enter
+    wait 1200
+    key tab
+    type Write a long story of at least 600 words about a lighthouse keeper.
+    key enter
+    wait 12000
+    shot b_streaming
+    key tab
+    wait 200
+    key tab
+    wait 200
+    key S
+    wait 4000
+    shot b_stopped
+    key ctrl-c
+    wait 150
+    key ctrl-c
+    exit 15000
+  frames:
+    a1:
+      contains:
+      - ALPHA
+    b1:
+      contains:
+      - BRAVO
+    c1:
+      contains:
+      - CHARLIE
+      - kv 2/2
+    a2:
+      contains:
+      - ALPHA
+      - kv 2/2 · evicted
+      lacks:
+      - evicted 0
+    b_streaming:
+      contains:
+      - · streaming ·
+    b_stopped:
+      contains:
+      - not sent — stopped
+  after_exit:
+    exit_code: 0
+    lock_released: true
+    rows_grew: true
+    rows_contain:
+    - '[stopped by'

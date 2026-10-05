@@ -9,7 +9,7 @@ import { setupView } from "../setup_view/setup_view.ts";
 import { reflectView } from "../reflect_view/reflect_view.ts";
 import { streamView } from "../stream_view/stream_view.ts";
 import { openActionPopup } from "./action_popup.ts";
-import { CARD_HTML, ROOT_VIEW, VIEW, VIEW_VERBS, setScaffold } from "./canvas_agent.ts";
+import { ROOT_VIEW, VIEW, VIEW_VERBS } from "./canvas_agent.ts";
 import { containerOf, hashFor, isContainer, onMac, pathTo, viewFromHash } from "./viewer.ts";
 import type { Lookup } from "./viewer.ts";
 import { BACKGROUND, BACKGROUND_ID, bgCallableBy, viewToBg } from "./background_agent.ts";
@@ -44,11 +44,9 @@ function viewFor(handlerModule: unknown): ViewBundle | undefined {
 // catalog — never matched, never guessed.
 const DEFAULT_VIEW = terminalView;
 
-// THE HOST'S BACKEND (`kern/backend`): `backend`, and under it one FOLDER per
-// page view with the view's own id, mirroring the page's view hierarchy. A
-// folder creates and deletes its own children; the top deletes anywhere under it.
-const BACKEND = "backend";
-const BACKEND_MODULE = "backend.tools";
+// THE HOST'S CANVAS NODE (`kern/backend`): `canvas_root` — every cell's
+// backend is its direct child; it creates, deletes and spawns.
+const BACKEND = "canvas_root";
 
 export interface MountOptions {
   kernel: Kernel;
@@ -92,7 +90,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   }
 
   // THE PAIR: a cell the canvas spawned a backend for, and that backend. The
-  // backend is a child of its VIEW's folder under `backend`, carrying the
+  // backend is a direct child of `canvas_root` on the host, carrying the
   // cell's id (`cell_id`); the cell carries the backend's (`backend_id`,
   // `owns_backend`) and the grant to call it (`can_call`). The backend lives
   // its own life — a page connecting, leaving or reloading never touches it;
@@ -112,26 +110,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     return false;
   };
 
-  // THE FOLDER of the view that holds `cellId`, made on the host (with every
-  // folder above it) when missing: the page's view path, one folder per view.
-  const folders = new Set<string>([ROOT_VIEW]);
-  const folderFor = async (cellId: string): Promise<string | null> => {
-    const view = containerOf(look, cellId) ?? ROOT_VIEW;
-    const chain = pathTo(look, view).filter((id) => isContainer(look, id));
-    for (let i = 1; i < chain.length; i++) {
-      const [parent, child] = [chain[i - 1]!, chain[i]!];
-      if (folders.has(child)) continue;
-      const r = (await host.callHost(parent, { type: "create", record: { id: child, handler_module: BACKEND_MODULE } } as unknown as Payload)) as Rec | null;
-      if (!r || typeof r["error"] === "string") {
-        console.error(`[canvas] the backend folder for view ${child}:`, JSON.stringify(r));
-        return null;
-      }
-      folders.add(child);
-    }
-    return view;
-  };
-
-  // Spawn the backend `bundle` fronts, for cell `cellId`, in its view's folder.
+  // Spawn the backend `bundle` fronts, for cell `cellId`, under `canvas_root`.
   // Returns its id, or null (said why).
   const spawnBackend = async (bundle: ViewBundle, cellId: string): Promise<string | null> => {
     const module = bundle.fronts;
@@ -143,9 +122,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       console.error(`[canvas] the host does not link ${module}`);
       return null;
     }
-    const folder = await folderFor(cellId);
-    if (folder === null) return null;
-    const created = (await host.callHost(folder, {
+    const created = (await host.callHost(BACKEND, {
       type: "create",
       record: { ...(bundle.backendFields ?? {}), handler_module: module, cell_id: cellId },
     } as unknown as Payload)) as { id?: string; error?: string };
@@ -156,7 +133,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     return created.id;
   };
 
-  // A backend gone with its cell: the top backend deletes anywhere under it.
+  // A backend gone with its cell: `canvas_root` deletes anywhere under it.
   const deleteBackend = (id: string): void => {
     void host.callHost(BACKEND, { type: "delete", id } as unknown as Payload);
   };
@@ -210,10 +187,10 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     // the view reaches its background BY NAME (both ends; no implicit parent
     // reach), and its cells may `update` it — a chat's [make main]
     const cb = (c.meta["callable_by"] as Record<string, unknown> | undefined) ?? {};
-    const had = cb["$children"];
+    const had = cb["$subtree"];
     kernel.updateMeta(c.id, {
       can_call: viewToBg(c.meta["can_call"] as Record<string, unknown> | undefined),
-      callable_by: { ...cb, $children: had === "*" ? "*" : [...new Set([...(Array.isArray(had) ? (had as string[]) : []), "update"])] },
+      callable_by: { ...cb, $subtree: had === "*" ? "*" : [...new Set([...(Array.isArray(had) ? (had as string[]) : []), "update"])] },
     } as unknown as Payload);
   };
 
@@ -249,7 +226,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   const cameras = new Map<string, { z: number; ox: number; oy: number }>();
   // RECONCILE THIS CANVAS'S PAIRS, once, before the first render. Nothing on
   // the host enforces the pairing, so the one party that sees both sides keeps
-  // it by rule — for the backends under `backend` carrying a `cell_id`:
+  // it by rule — for the backends under `canvas_root` carrying a `cell_id`:
   //   · a backend whose cell is gone, or whose cell is bound to another
   //     backend, is DELETED (a crash, or a close while the host was down);
   //   · a backend whose cell exists but is not bound yet is LEFT (a spawn in
@@ -588,9 +565,9 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   };
 
   // ── AI CELLS ─────────────────────────────────────────────────────────
-  // The cell's view folder (`kern/backend`) spawns its backend from one of the
-  // user's templates (only the CLI reads those): a RAM store, the AI under it.
-  // The templates and the kept dialogs are the top `backend`'s to answer.
+  // `canvas_root` (`kern/backend`) spawns the cell's AI from one of the user's
+  // templates (only the CLI reads those), and answers the templates and the
+  // kept dialogs.
   const toast = (text: string): void => {
     const t = document.createElement("div");
     t.className = "canvas-toast";
@@ -624,12 +601,10 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     };
   };
   const spawnAi = async (cellId: string, template: string | null): Promise<Rec | null> => {
-    const folder = await folderFor(cellId);
-    if (folder === null) return null;
-    const r = (await host.callHost(folder, {
+    const r = (await host.callHost(BACKEND, {
       type: "spawn",
       stamp: { cell_id: cellId },
-      peer_grants: peerGrants(folder),
+      peer_grants: peerGrants(containerOf(look, cellId) ?? ROOT_VIEW),
       ...(template ? { template } : {}),
     } as unknown as Payload)) as Rec;
     if (typeof r["error"] === "string") {
@@ -665,7 +640,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     }
     if (bool(rec, "backend_lost")) {
       // Its backend is gone: say so, mount nothing, and let ⟳ respawn it (a
-      // fresh child of its view's folder, bound to this same cell).
+      // fresh child of `canvas_root`, bound to this same cell).
       const note = document.createElement("div");
       note.className = "backend-lost";
       note.textContent = `backend ${str(rec, "backend_id") ?? "?"} is gone — ⟳ respawns it`;
@@ -712,18 +687,6 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
         if (f) f.handle = h;
       });
     };
-    // a NESTED VIEW's card: ↗ opens it
-    if (rec["handler_module"] === VIEW) {
-      const chip = document.createElement("span");
-      chip.className = "ext open-canvas";
-      chip.textContent = "↗";
-      chip.title = "open this view";
-      chip.addEventListener("click", (e) => {
-        e.stopPropagation();
-        setViewed(rec.id);
-      });
-      actions.insertBefore(chip, actions.firstChild);
-    }
     // declarative header chips, wired locally (no bus)
     for (const btn of handle.headerButtons ?? []) {
       const chip = document.createElement("span");
@@ -975,21 +938,6 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     return viewId;
   };
 
-  // THE SCAFFOLD: a nested view placed with a template gets its MAIN chat — a
-  // kept AI cell from that template, made main (`canvas_agent.ts` place).
-  setScaffold(async (viewOf: string, template: string): Promise<Json> => {
-    const viewId = await spawnAiIn(viewOf, { x: 40, y: 40 }, template, "");
-    if (viewId === null) return { error: `the main chat from template \`${template}\` could not be spawned`, reason: "bad_arg", arg: "template" };
-    const ai = String(kernel.get(viewId)?.meta["backend_id"] ?? "");
-    const k = (await host.callHost(BACKEND, { type: "keep", id: ai } as unknown as Payload)) as Rec;
-    if (typeof k["error"] === "string") return { error: `the main chat was not kept: ${k["error"]}`, reason: "bad_arg", view: viewId } as unknown as Json;
-    kernel.updateMeta(viewId, { kept: true, dialog_name: k["name"], owns_backend: false } as unknown as Payload);
-    const [out] = await kernel.send([{ target: viewOf, payload: { type: "update", id: viewOf, fields: { main_ai_chat: viewId } } as unknown as Payload }]);
-    const m = (out?.result ?? null) as Rec | null;
-    if (m !== null && typeof m["error"] === "string") return m as unknown as Json;
-    return { view: viewId, ai, name: k["name"] } as unknown as Json;
-  });
-
   // A KEPT dialog in a new cell: the live AI when another cell has it open (one
   // dialog, several cells), else a fresh one on SQLite with its history.
   const reopenAt = async (w: { x: number; y: number }, dialog: { id: string; name: string }): Promise<void> => {
@@ -1003,16 +951,11 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       }),
     );
     await flush();
-    const folder = await folderFor(viewId);
-    if (folder === null) {
-      kernel.remove(viewId);
-      return;
-    }
-    const r = (await host.callHost(folder, {
+    const r = (await host.callHost(BACKEND, {
       type: "reopen",
       id: dialog.id,
       stamp: { cell_id: viewId },
-      peer_grants: peerGrants(folder),
+      peer_grants: peerGrants(containerOf(look, viewId) ?? ROOT_VIEW),
     } as unknown as Payload)) as Rec;
     if (typeof r["error"] === "string") {
       toast(`✕ ${r["error"]}`);
@@ -1153,19 +1096,6 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     );
   };
 
-  // A NESTED VIEW at the spot: under the view being viewed, shown on it as its
-  // card — html the nested view rewrites itself.
-  const spawnNestedViewAt = (w: { x: number; y: number }): void => {
-    kernel.register(
-      new Agent({
-        id: `view_${crypto.randomUUID().slice(0, 8)}`,
-        parentId: containerNow(),
-        handlerModule: VIEW,
-        meta: { x: Math.round(w.x), y: Math.round(w.y), width: 340, height: 220, html: CARD_HTML },
-      }),
-    );
-  };
-
   const spawnHtmlAt = (w: { x: number; y: number }): void => {
     kernel.register(
       new Agent({
@@ -1218,7 +1148,6 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
         else if (p.kind === "setup") openSetupAt(w);
         else if (p.kind === "stream") spawnStreamAt(w);
         else if (p.kind === "chat") void reopenAt(w, { id: p.id, name: p.name });
-        else if (p.kind === "view") spawnNestedViewAt(w);
         else if (p.kind === "demo") spawnDemoAt(w);
         else void spawnAiAt(w, p.template, p.text);
       },

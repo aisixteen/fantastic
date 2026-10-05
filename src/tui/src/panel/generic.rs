@@ -13,7 +13,7 @@
 //! header (id, open or sealed, its sentence), the last call, EGRESS (`can_call`,
 //! `egress_rule`), INGRESS (`callable_by`, `ingress_rule`, or "sealed" when
 //! absent), its verbs, and its rows. The structural baseline every agent is born
-//! with (`$self`, `$parent`, `$children`) is folded into one dim line: on every
+//! with (`$self`, `$parent`, `$subtree`) is folded into one dim line: on every
 //! agent it's noise, but it's never hidden completely.
 
 use ratatui::layout::Rect;
@@ -388,7 +388,7 @@ mod tests {
             "sentence": "reads and writes files under a root",
             "sealed": false,
             "can_call": {"$self": "*", "$parent": "*", "user": "*"},
-            "callable_by": {"$self": "*", "$children": "*", "user": "*", "exec": ["read_stream"]},
+            "callable_by": {"$self": "*", "$subtree": "*", "user": "*", "exec": ["read_stream"]},
             "ingress_rule": "allow_all_ingress",
             "verbs": {"read_stream": "args: path", "list": "args: path?"},
         });

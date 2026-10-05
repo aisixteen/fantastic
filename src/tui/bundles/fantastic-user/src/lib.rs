@@ -5,9 +5,10 @@
 //!
 //! Verbs:
 //! - `forward {target, payload, timeout?, token?}` — `user` sends `payload` to
-//!   `target`; the reply comes back verbatim (the io_bridge contract, timeout
-//!   default 30 s; no secret marks — values travel and are recorded as they
-//!   are). THE TOKEN (for now): if `user` carries no `token_sha256`,
+//!   `target`; the reply comes back verbatim. NO DEFAULT TIMEOUT: the call
+//!   lasts as long as the target takes (an AI turn may run for minutes); a
+//!   `timeout` given is honoured. No secret marks — values travel and are
+//!   recorded as they are. THE TOKEN (for now): if `user` carries no `token_sha256`,
 //!   every caller gets in, as if it gave the token; if one is set, a caller
 //!   that is not the shell (a wire leg, an agent) must give the token that
 //!   hashes to it ([`grants::resolve`]). The shell itself (no origin) needs none.
@@ -39,9 +40,6 @@ pub const HANDLER_MODULE: &str = "user.tools";
 /// The verbs this bundle answers itself (the rest are the probe's).
 pub const VERBS: [&str; 3] = ["forward", "around", "reflect"];
 
-/// `forward`'s default timeout, seconds — the bridge's (`io_bridge`
-/// `DEFAULT_FORWARD_TIMEOUT_SECS`).
-pub const FORWARD_TIMEOUT: f64 = 30.0;
 
 /// A view's background: drawn behind its cells, never one of them.
 const BACKGROUND: &str = "background.ts";
@@ -150,14 +148,14 @@ impl UserBundle {
             return (refuse("bad_arg", "user.forward: target (str) + payload (dict) required"), None);
         }
         let timeout = match p.get("timeout") {
-            None | Some(Value::Null) => FORWARD_TIMEOUT,
+            None | Some(Value::Null) => None,
             Some(v) => match v.as_f64() {
-                Some(t) => t,
+                Some(t) => Some(t),
                 None => return (refuse("bad_arg", "user.forward: timeout must be a number"), None),
             },
         };
         let mut item = Item::new(AgentId::from(target), inner);
-        item.timeout = Some(timeout);
+        item.timeout = timeout;
         if let Some(b) = body {
             // the body's slot is under this call's `payload`: one step less on the far item
             let mut path = b.path;
@@ -268,7 +266,7 @@ impl Bundle for UserBundle {
             if let Some(Value::Object(m)) = r.as_mut() {
                 m.insert("handler_module".into(), json!(HANDLER_MODULE));
                 if let Some(Value::Object(v)) = m.get_mut("verbs") {
-                    v.insert("forward".into(), json!("args: target:str (req), payload:dict (req), timeout:num?, token:str? — `user` sends payload to target; the reply verbatim. A token is needed only when `user` carries one (token_sha256) and the caller is not the shell."));
+                    v.insert("forward".into(), json!("args: target:str (req), payload:dict (req), timeout:num? (none by default: the call lasts as long as the target takes), token:str? — `user` sends payload to target; the reply verbatim. A token is needed only when `user` carries one (token_sha256) and the caller is not the shell."));
                     v.insert("around".into(), json!("args: view:str? (default view_root), x:num, y:num, radius:num — {view, members: [{id, kind, title, rect:{x,y,w,h}, distance, backend_id?}]}: the cells of a page view within radius, nearest first, from the page records; judged by YOUR page grants."));
                 }
             }

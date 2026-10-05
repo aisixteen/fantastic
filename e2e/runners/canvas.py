@@ -2,9 +2,9 @@
 
 The canvas is a thin web UI: the page holds no store and no AI, and its thin
 agents are records the host's page loader (`web_loader`, under the host's
-`canvas` node, rooted at `.fantastic/web`) writes as folders under the canvas
-and hands back on boot; a cell's backend is a child of its view's folder under
-`backend`. This runner:
+`canvas_root` node, rooted at `.fantastic/web`) writes as folders under the
+canvas and hands back on boot; a cell's backend is a direct child of
+`canvas_root`, beside `static_files`. This runner:
 
 1. builds the product (`fantastic`, whose build packs the canvas app and embeds
    `canvas.zip` — the `canvas_page` agent serves it);
@@ -218,12 +218,12 @@ def members(cwd: Path) -> list[dict]:
     return [m for m in every if m.get("handler_module") != "background.ts"]
 
 
-# the root view's backend folder on the host
-FOLDER = ".fantastic/agents/user/agents/web/agents/canvas_page/agents/canvas/agents/backend/agents/view_root"
+# the cells' backends on the host: children of `canvas_root`
+FOLDER = ".fantastic/agents/user/agents/web/agents/canvas_page/agents/canvas_root"
 
 
 def group_ids(cwd: Path) -> list[str]:
-    """The root view's backends: its folder's children that carry a `cell_id`."""
+    """The cells' backends: `canvas_root`'s children that carry a `cell_id`."""
     d = cwd / FOLDER / "agents"
     if not d.is_dir():
         return []
@@ -364,6 +364,9 @@ async def step(run: dict, page: Page, host: Host, cwd: Path, url: str, state: di
     for p in exp.get("files_exist", []):
         if not wait_disk(lambda p=p: (cwd / p).exists()):
             bad.append(f"missing {p}")
+    for p in exp.get("files_absent", []):
+        if (cwd / p).exists():
+            bad.append(f"present {p} (must not exist)")
     if "canvas_members" in exp:
         n = exp["canvas_members"]
         if not wait_disk(lambda: len(members(cwd)) == n):

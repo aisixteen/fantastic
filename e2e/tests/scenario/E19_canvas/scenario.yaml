@@ -7,9 +7,9 @@
 # are folders under its root view in the page loader's store (`.fantastic/web`).
 #
 # The owner's design: the page holds no store and no AI; its thin agents are
-# records the page loader (`web_loader`, under the host's `canvas` node) pumps to
+# records the page loader (`web_loader`, under the host's `canvas_root`) pumps to
 # folders under `agents/canvas/agents/view_root/agents/`, and rehydrates on boot;
-# a cell's backend is a child of its view's folder under the host's `backend`.
+# a cell's backend is a direct child of the host's `canvas_root`.
 
 id: canvas
 title: the canvas — thin agents saved through the ws loader, rehydrated on boot
@@ -24,11 +24,18 @@ runs:
     # the page seeds its root and the loader writes it under its own anchor
     expect:
       page_contains: ["view_root · 0 dom"]   # the toolbar: the breadcrumb (canvas ▸ the root view), then its counts
-      files_exist: [.fantastic/web/agent.yaml, .fantastic/web/agents/canvas/agent.yaml, .fantastic/web/agents/canvas/agents/view_root/agent.yaml]
+      files_exist: [.fantastic/web/agent.yaml, .fantastic/web/agents/canvas/agent.yaml, .fantastic/web/agents/canvas/agents/view_root/agent.yaml,
+                    # THE HOST TREE (owner 2026-10-04): canvas_root holds the files, the page loader and the cells' backends directly
+                    .fantastic/agents/user/agents/web/agents/canvas_page/agents/canvas_root/agent.yaml,
+                    .fantastic/agents/user/agents/web/agents/canvas_page/agents/canvas_root/agents/static_files/agent.yaml,
+                    .fantastic/agents/user/agents/web/agents/canvas_page/agents/canvas_root/agents/web_loader/agent.yaml]
+      # no backend folders any more
+      files_absent: [.fantastic/agents/user/agents/web/agents/canvas_page/agents/canvas_root/agents/backend,
+                     .fantastic/agents/user/agents/web/agents/canvas_page/agents/canvas_root/agents/web_loader/agents/static_files]
       canvas_members: 0
       group_size: 0
 
-  # ── the pair: a double click spawns a backend (a child of the root view's folder) + its cell
+  # ── the pair: a double click spawns a backend (a child of `canvas_root`) + its cell
   - name: spawn-terminal
     dblclick: {x: 500, y: 350}
     type: "echo hi-$((6*7))"

@@ -25,11 +25,11 @@ export function bgCallableBy(): Record<string, string[]> {
   return { $parent: [...BG_PARENT_VERBS] };
 }
 
-/** The view's grant onto its background (`$children`), merged into `can_call`. */
+/** The view's grant onto its background (`$subtree`), merged into `can_call`. */
 export function viewToBg(cc: Record<string, unknown> | undefined): Record<string, unknown> {
-  const had = cc?.["$children"];
+  const had = cc?.["$subtree"];
   const verbs = had === "*" ? "*" : [...new Set([...(Array.isArray(had) ? (had as string[]) : []), ...BG_PARENT_VERBS])];
-  return { ...(cc ?? {}), $children: verbs };
+  return { ...(cc ?? {}), $subtree: verbs };
 }
 
 /** How a GL source runs (the GL host's contract, `gl_host.ts`). */

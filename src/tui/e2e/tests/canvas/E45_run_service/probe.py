@@ -20,7 +20,7 @@ def main() -> bool:
 
     (rig.proj / "site").mkdir()
     (rig.proj / "site" / "index.html").write_text("<p>E45-OK</p>")
-    svc = {"id": "svc", "handler_module": "exec_bridge.tools", "parent_id": "view_root",
+    svc = {"id": "svc", "handler_module": "exec_bridge.tools", "parent_id": "canvas_root",
            "allowed": [r"^python3 -m http\.server [0-9]+ --directory site$"], "cwd": ".", "inherit_env": ["*"],
            "ingress_rule": "allow_all_ingress"}
     rig.init(host_agents=[(FOLDER, svc)])

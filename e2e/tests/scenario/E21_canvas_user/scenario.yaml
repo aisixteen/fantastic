@@ -19,4 +19,4 @@ tokens: {admin: admin-token-3}
 runs:
   - no-token-set             # every tab gets in: a cell placed, on disk
   - around-from-records      # the host's `around` finds it
-  - token-set                # `user` carries a hash: no token → the token form; the token → the canvas
+  - token-set                # `user` carries a hash (set by the shell: on disk, host down): no token → the token form; the token → the canvas

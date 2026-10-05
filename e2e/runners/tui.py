@@ -17,6 +17,14 @@ scripted OpenAI chat endpoint, `parity/stubs/openai_chat.py`) or
 `stub: {responses: {chain: [...]}}`: the stub starts on 127.0.0.1, `{stub_url}` in a
 script becomes its URL, and `env:` is added to the shell's environment (a stub key,
 never a real one). No model, no network.
+
+A LIVE scenario declares `live: vllm` (and `costs: live`): the shell talks to the
+operator's vLLM — `VLLM_ENDPOINT` and `FANTASTIC_AI_MODEL` from the environment
+(`{vllm_endpoint}` / `{vllm_model}` in the scenario), the key from
+`VLLM_API_KEY` or the file `VLLM_API_KEY_FILE` names, handed to the shell's
+environment only (an env-backed credential store reads it) — never printed.
+A run may `seed:` host records before it starts (`[{path, record}]`, paths
+under the work dir), and set its own `timeout` (seconds; default 180).
 """
 
 from __future__ import annotations
@@ -132,6 +140,68 @@ def start_stub(spec: dict, root: Path):
     return stub, stub.base_url()
 
 
+def live_env(kind: str) -> tuple[dict, dict]:
+    """(substitutions, extra env) for a live scenario — fail loud naming what
+    is missing; no endpoint, model or key is ever guessed."""
+    if kind != "vllm":
+        raise SystemExit(f"live: only `vllm` is wired, got {kind!r}")
+    miss = [v for v in ("VLLM_ENDPOINT", "FANTASTIC_AI_MODEL") if not os.environ.get(v)]
+    key = os.environ.get("VLLM_API_KEY")
+    if not key and (f := os.environ.get("VLLM_API_KEY_FILE")):
+        key = Path(f).expanduser().read_text().strip()
+    if not key:
+        miss.append("VLLM_API_KEY (or VLLM_API_KEY_FILE)")
+    if miss:
+        raise SystemExit(f"live vllm scenario: set {', '.join(miss)}")
+    # the record's sizing is the operator's, from the environment (owner: 262144
+    # for window and output, xhigh with a 64k thinking budget, the KV table's
+    # slots and overflow) — nothing is guessed
+    sizing = {"{ctx}": "CTX", "{max_tokens}": "MAX_TOKENS", "{vllm_kv_slots}": "VLLM_KV_SLOTS",
+              "{vllm_kv_overflow}": "VLLM_KV_OVERFLOW"}
+    miss = [v for v in sizing.values() if not os.environ.get(v)]
+    if miss:
+        raise SystemExit(f"live vllm scenario: set {', '.join(miss)}")
+    # a picker field is driven with ← →: its value's position in the backend's
+    # own option order (`kv_overflow`: evict | reject) becomes that many `right`s
+    overflow = os.environ["VLLM_KV_OVERFLOW"]
+    order = ["evict", "reject"]
+    if overflow not in order:
+        raise SystemExit(f"VLLM_KV_OVERFLOW must be one of {order}, got {overflow!r}")
+    rights = "\n".join(["key right"] * (order.index(overflow) + 1))
+    return (
+        {"{vllm_endpoint}": os.environ["VLLM_ENDPOINT"], "{vllm_model}": os.environ["FANTASTIC_AI_MODEL"],
+         "{vllm_key}": key, "{vllm_kv_overflow_keys}": rights, **{k: os.environ[v] for k, v in sizing.items()}},
+        {"VLLM_API_KEY": key},
+    )
+
+
+def seed(cwd: Path, items: list[dict], subst: dict) -> None:
+    """Write host records (YAML) under the work dir, substitutions applied."""
+    import yaml
+
+    for it in items:
+        text = json.dumps(it["record"])
+        for k, v in subst.items():
+            text = text.replace(k, v)
+        p = cwd / it["path"]
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(yaml.safe_dump(json.loads(text), sort_keys=False))
+
+
+def rows_text(store: Path) -> str:
+    """Every row's document in the memory store, joined — for text checks."""
+    import sqlite3
+
+    f = store / "memory.db"
+    if not f.exists():
+        return ""
+    db = sqlite3.connect(f"file:{f}?mode=ro", uri=True)
+    try:
+        return "\n".join(r[0] for r in db.execute("SELECT doc FROM rows"))
+    finally:
+        db.close()
+
+
 def rows(store: Path) -> int:
     """Rows in the memory store's file (`memory.db`), every owner."""
     import sqlite3
@@ -181,6 +251,23 @@ def after(run: dict, cwd: Path, out: str, state: dict) -> list[str]:
             bad += [f"missing {p}" for p in want if not (cwd / p).exists()]
         elif key == "files_absent":
             bad += [f"unexpected {p}" for p in want if (cwd / p).exists()]
+        elif key == "key_stored_is":
+            # every api_key in the run's credential file equals $want's value
+            # (length + equality only — a key is never printed)
+            import yaml
+
+            f = cwd / "home" / "credentials.yaml"
+            refs = ((yaml.safe_load(f.read_text()) or {}).get("refs") or {}) if f.is_file() else {}
+            got = [(e.get("fields") or {}).get("api_key", "") for e in refs.values()]
+            want_v = os.environ.get(want, "")
+            if not got:
+                bad.append(f"no key stored in {f.name}")
+            for v in got:
+                if v != want_v:
+                    bad.append(f"the stored key is not ${want}: {len(v)} chars vs {len(want_v)}")
+        elif key == "rows_contain":
+            text = rows_text(store)
+            bad += [f"no memory row holds {w!r}" for w in want if w not in text]
         elif key == "rows_grew":
             n = rows(store)
             if want and n <= state.get("rows", 0):
@@ -212,10 +299,17 @@ def main(argv: list[str]) -> int:
             subst["{stub_url}"] = url
             print(f"  stub: {url}", flush=True)
         extra_env = {k: str(v) for k, v in (sc.get("env") or {}).items()}
+        if sc.get("live"):
+            more, env_add = live_env(sc["live"])
+            subst.update(more)
+            extra_env.update(env_add)
+            print(f"  live: {sc['live']} · {os.environ['FANTASTIC_AI_MODEL']}", flush=True)
         cwd = Path(tmp) / "work"
         cwd.mkdir()
         for run in sc["runs"]:
             name = run["name"]
+            if run.get("seed"):
+                seed(cwd, run["seed"], subst)
             frames_dir = Path(tmp) / f"frames-{name}"
             script = Path(tmp) / f"{name}.script"
             text = run["script"]
@@ -225,7 +319,7 @@ def main(argv: list[str]) -> int:
             env = {**os.environ, **extra_env, "FT_CWD": str(cwd),
                    "FT_ROWS": str(screen.get("rows", 30)), "FT_COLS": str(screen.get("cols", 110))}
             r = subprocess.run([str(rig), str(binary), str(script), str(frames_dir)],
-                               env=env, capture_output=True, text=True, timeout=180)
+                               env=env, capture_output=True, text=True, timeout=run.get("timeout", 180))
             out = r.stdout + r.stderr
             # E2E_TUI_FRAMES=<dir>: keep each run's frames there (debugging a script)
             if keep := os.environ.get("E2E_TUI_FRAMES"):
@@ -242,6 +336,14 @@ def main(argv: list[str]) -> int:
             bad += after(run, cwd, out, state)
             print(f"  {'✓' if not bad else '✕'} {name}" + ("" if not bad else "  — " + " · ".join(bad)), flush=True)
             failures += [f"{name}: {b}" for b in bad]
+        # E2E_TUI_KEEP=<dir>: keep the run's work dir there (debugging a run)
+        if keep_dir := os.environ.get("E2E_TUI_KEEP"):
+            import shutil as sh
+
+            dst = Path(keep_dir) / path.parent.name
+            for sub in ("home", ".fantastic/agents"):
+                if (cwd / sub).is_dir():
+                    sh.copytree(cwd / sub, dst / sub, dirs_exist_ok=True)
         if stub is not None:
             n = len(stub.requests)
             print(f"  stub answered {n} request(s)", flush=True)

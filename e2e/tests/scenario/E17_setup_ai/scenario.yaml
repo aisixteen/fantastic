@@ -1,23 +1,21 @@
-# THE SET-UP PAGE, END TO END — a scripted keyboard writes an ai agent through
-# the page, and the agent answers. No model and no network: the shell is built
-# with `--features vllm` (the backend linked, NO endpoint hardwired) and the
-# agent's endpoint is the parity harness's scripted OpenAI-chat stub on
-# 127.0.0.1 (its /v1 base). Keyless: a vLLM record's key is optional, and a
-# record that names none sends no Authorization header.
+# THE SET-UP PAGE, END TO END, LIVE — a scripted keyboard writes an AI agent
+# through the terminal's set-up page for the CONFIGURED backend (owner,
+# 2026-10-04: the AI backend is configurable; vLLM, globally, until he
+# redecides), stores its key there, and the agent answers. Every value the
+# record gets is the operator's, from the environment: the endpoint and model
+# (VLLM_ENDPOINT, FANTASTIC_AI_MODEL), the window and output (CTX, MAX_TOKENS —
+# 262144), the KV table (VLLM_KV_SLOTS, VLLM_KV_OVERFLOW), the key
+# (VLLM_API_KEY / VLLM_API_KEY_FILE — typed into the page, never printed).
+# Reasoning: xhigh with a 64k thinking budget (owner, 2026-10-04).
 
 id: setup_ai
-title: fantastic — the set-up page writes an ai agent, it boots and answers
+title: fantastic — the set-up page writes the configured AI agent, stores its key, it answers (live)
 runtimes: [tui]
-costs: free
+costs: live
+live: vllm
 features: [vllm]
 
-stub:
-  vllm:
-    # a call-less first turn, then the turn closes
-    chain: ["stub-reply-42", '<call name="done"></call>']
-  min_requests: 1
-
-screen: {rows: 72, cols: 130}
+screen: {rows: 80, cols: 400}
 
 runs:
   - name: init
@@ -33,8 +31,9 @@ runs:
       exit_code: 0
       lock_released: true
 
-  # ── the page: id, handler, the schema's required fields (endpoint, model) → WRITE ─────────────
+  # ── the page: the record's required fields, xhigh + its budget, the key → WRITE ──
   - name: write
+    timeout: 300
     script: |
       wait 2500
       type G
@@ -49,75 +48,146 @@ runs:
       key right
       key down
       key enter
-      type {stub_url}
+      type {vllm_endpoint}
       key enter
       key down
       key enter
-      type stub-model
+      type {vllm_model}
       key enter
       key down
       key enter
-      type 512
+      type {max_tokens}
       key enter
       key down
       key enter
-      type 4
+      type {vllm_kv_slots}
       key enter
+      key down
+      {vllm_kv_overflow_keys}
+      key down
+      key enter
+      type {ctx}
+      key enter
+      key down
+      key down
+      key down
+      key down
+      key down
       key down
       key right
+      key down
+      key enter
+      key backspace
+      key backspace
+      key backspace
+      key backspace
+      key backspace
+      type 65536
+      key enter
       wait 200
       shot filled
       key down
       key down
+      key down
+      key down
+      key down
+      key down
+      key down
+      key down
+      key down
+      key down
+      key down
+      key down
+      key down
+      key down
+      key down
+      key right
+      key right
+      wait 200
       key enter
-      wait 2000
+      wait 800
+      shot mode
+      type k
+      wait 500
+      type {vllm_key}
+      key enter
+      wait 800
+      shot keyed
+      key up
+      key up
+      key up
+      key up
+      key up
+      key up
+      key up
+      key up
+      key up
+      key up
+      key up
+      key up
+      key up
+      key up
+      key up
+      key up
+      key up
+      key up
+      key up
+      key up
+      key enter
+      wait 3000
       shot written
       key ctrl-c
       wait 150
       key ctrl-c
       exit 8000
     frames:
-      page: {contains: ["SET UP AN AI AGENT", "‹ pick one of 1 ›"], lacks: ["no ai backend is linked"]}
-      filled: {contains: ["docreader", "‹ vllm_backend.tools ›", "stub-model", "http://127.0.0.1:"]}
-      written:
-        contains: ["✓ written to  .fantastic/agents/set_of_agents/agents/docreader/agent.yaml", "docreader"]
+      page: {contains: ["SET UP AN AI AGENT"], lacks: ["no ai backend is linked"]}
+      filled: {contains: ["docreader", "‹ vllm_backend.tools ›", "262144", "xhigh", "65536"]}
+      # PLAIN, in the run's throwaway home — a run must never write the real keychain
+      mode: {contains: ["keys kept ‹ plain ›"], lacks: ["‹ secure ›"]}
+      keyed: {contains: ["key stored as `vllm/"], lacks: ["the keychain ("]}
+      written: {contains: ["✓ written to  .fantastic/agents/user/agents/docreader/agent.yaml"]}
     after_exit:
       exit_code: 0
       lock_released: true
-      files_exist: [.fantastic/agents/set_of_agents/agents/docreader/agent.yaml]
+      files_exist: [.fantastic/agents/user/agents/docreader/agent.yaml]
+      # the key the page stored IS the configured one (compared, never printed)
+      key_stored_is: VLLM_API_KEY
 
   # ── a later run: the agent rehydrates, the human writes to it, it answers ──
   - name: answer
+    timeout: 600
     script: |
       wait 2500
       type /docreader
       key enter
-      wait 200
+      wait 300
       key enter
-      wait 800
+      wait 1200
       key tab
-      type hello
+      type Reply with exactly one word: DELTA
       key enter
-      wait 5000
+      wait 180000
       shot answer
       key ctrl-c
       wait 150
       key ctrl-c
-      exit 8000
+      exit 15000
     frames:
-      answer: {contains: ["stub-reply-42"]}
+      answer: {contains: ["DELTA", "docreader:"]}
     after_exit:
       exit_code: 0
       lock_released: true
       rows_grew: true
 
-  # ── a restart: the thread comes back from the memory store, no new turn ────
+  # ── a restart: boot is lazy — the agent holds no history until its next turn,
+  #    and the transcript is a view of what it holds (`rows`) ──
   - name: recall
     script: |
       wait 2500
       type /docreader
       key enter
-      wait 200
+      wait 300
       key enter
       wait 1500
       shot recalled
@@ -126,8 +196,7 @@ runs:
       key ctrl-c
       exit 8000
     frames:
-      recalled: {contains: ["hello", "stub-reply-42"]}
+      recalled: {contains: ["has not loaded its history yet"]}
     after_exit:
       exit_code: 0
       lock_released: true
-      files_exist: [.fantastic/memory.db]

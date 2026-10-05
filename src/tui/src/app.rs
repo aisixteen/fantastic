@@ -613,6 +613,12 @@ impl App {
                 self.last_rows.remove(&agent);
             }
             LinkEv::AgentEvent { agent, payload } => {
+                // STREAMING IS FOR THE HUMAN (owner, 2026-10-04): an AI's parts are
+                // drawn only when they answer THIS client; a message between
+                // agents is read whole, as its row.
+                if is_part(&payload) && payload.get("client_id").and_then(Value::as_str) != Some(self.cfg.client_id.as_str()) {
+                    return;
+                }
                 if let Some(mut p) = self.panels.remove(&agent) {
                     let mut out = Vec::new();
                     let dirty = p.on_event(&payload, &mut out);
@@ -696,8 +702,13 @@ impl App {
                 self.last_ps = Some(Instant::now());
                 self.reflow();
             }
-            Got::Rows { agent, rows, full } => {
+            Got::Rows { agent, rows, full, loaded } => {
                 self.rows_inflight.remove(&agent);
+                if loaded == Some(false) {
+                    self.store.unloaded.insert(agent.clone());
+                } else {
+                    self.store.unloaded.remove(&agent);
+                }
                 if let Some(newest) = rows.iter().map(|r| r.id).max() {
                     let c = self.row_cursor.entry(agent.clone()).or_insert(newest);
                     *c = (*c).max(newest);
@@ -992,3 +1003,8 @@ fn ancestors(t: &TreeNode, id: &str) -> Vec<AgentId> {
     path
 }
 
+/// Whether an agent event is a streamed part (`part_start` / `_delta` / `_end` /
+/// `_abort`).
+fn is_part(payload: &Value) -> bool {
+    payload.get("type").and_then(Value::as_str).is_some_and(|t| t.starts_with("part_"))
+}

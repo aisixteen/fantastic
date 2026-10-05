@@ -203,12 +203,8 @@ impl Runner {
             Cmd::Rows { agent, full, after } => {
                 // `full` re-reads everything and rebuilds the order; otherwise
                 // only what came after the shell's newest row, merged in.
-                self.got(Got::Rows {
-                    agent: agent.clone(),
-                    rows: self.host.rows(agent, if *full { None } else { *after }).await,
-                    full: *full,
-                })
-                .await
+                let (rows, loaded) = self.host.rows(agent, if *full { None } else { *after }).await;
+                self.got(Got::Rows { agent: agent.clone(), rows, full: *full, loaded }).await
             }
 
             // READING A SELF-DESCRIPTION IS RENDERING, not acting, so it goes out
@@ -216,8 +212,8 @@ impl Runner {
             //
             // Measured 2026-09-13: sent as `user` it is refused on INGRESS by the
             // root, because `reflect` is not a kernel verb and the root's
-            // born-with `callable_by` covers `$children` only — `user` sits a
-            // level deeper. Granting the human `callable_by` on an agent just so
+            // born-with `callable_by` then covered its direct children only
+            // (the old `$children`; `user` sat a level deeper). Granting the human `callable_by` on an agent just so
             // the shell can draw its verb list would be a grant that exists for
             // the renderer's convenience, which is the wrong reason to widen
             // anybody's reach.
@@ -254,12 +250,8 @@ impl Runner {
                         }
                         // The act moved the kernel. Re-read rather than guessing
                         // from the reply: the log is the truth.
-                        self.got(Got::Rows {
-                            agent: target.clone(),
-                            rows: self.host.rows(target, None).await,
-                            full: true,
-                        })
-                        .await;
+                        let (rows, loaded) = self.host.rows(target, None).await;
+                        self.got(Got::Rows { agent: target.clone(), rows, full: true, loaded }).await;
                         self.got(Got::Ps(self.host.tasks())).await;
                     }
                     Err(e) => self.refused(&cmd, e).await,

@@ -53,6 +53,9 @@ pub struct Store {
     /// are minted at turn start and the row lands at turn end, so a turn's row
     /// carries a LOWER id than rows appended before it.
     pub cursor: HashMap<AgentId, RowId>,
+    /// AI agents whose `rows` said `loaded:false`: they hold no history yet
+    /// (boot is lazy — it loads on the agent's next turn).
+    pub unloaded: std::collections::HashSet<AgentId>,
     /// Bumped on every delivery: what a projection is keyed on, so a view
     /// re-derives only when the rows actually changed.
     pub rev: u64,

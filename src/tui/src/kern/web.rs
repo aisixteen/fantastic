@@ -6,13 +6,15 @@
 //! └── web                 web.tools          the HTTP host, loopback, `port` from --port
 //!     ├── canvas_ws       web_ws.tools       the canvas's socket leg
 //!     └── canvas_page     canvas_page.tools  THE CANVAS: its page, embedded in the binary
-//!         └── canvas      canvas.tools       the canvas's host node
-//!             ├── web_loader  kernel_state   the page records (.fantastic/web)
-//!             │   └── static_files  file_bridge  THE files every view's cells load:
-//!             │                                  GET /static_files/file/<path>
-//!             └── backend     backend.tools  creates / deletes its own children
-//!                 └── view_root  backend.tools  the root view's backends; nested
-//!                                               views' folders under it
+//!         └── canvas_root canvas.tools       the canvas's host node: creates /
+//!             │                              deletes its own children — the
+//!             │                              cells' backends (AIs, exec agents)
+//!             ├── static_files  file_bridge  THE files every view's cells load:
+//!             │                              GET /static_files/file/<path>
+//!             └── web_loader  kernel_state   the page records (.fantastic/web)
+//!
+//! No host id here is a page id: the page's records (`canvas`, `view_root`, …)
+//! resolve against the host tree in the page loader.
 //! ```
 //!
 //! THE LEG REACHES ONLY `user` (owner, 2026-10-03/04): a tab's every host call
@@ -36,9 +38,11 @@ pub const CANVAS_PAGE_ID: &str = "canvas_page";
 pub const CANVAS_WS_ID: &str = "canvas_ws";
 /// The canvas page addresses its loader by this id (`src/tui/web/canvas`).
 pub const CANVAS_LOADER_ID: &str = "web_loader";
-/// The canvas's host node, under `canvas_page`.
-pub const CANVAS_NODE_ID: &str = "canvas";
-/// The canvas's one file leg, under the page loader: every view's cells load
+/// The canvas's host node, under `canvas_page` — NOT `canvas`: a host id the
+/// page's records also use would make the page loader file them under the host
+/// agent (ids resolve against the host tree).
+pub const CANVAS_NODE_ID: &str = "canvas_root";
+/// The canvas's one file leg, under `canvas_root`: every view's cells load
 /// `GET /static_files/file/<path>` from it.
 pub const STATIC_FILES_ID: &str = "static_files";
 
@@ -113,10 +117,10 @@ pub async fn ensure(h: &Host, port: Option<u16>) -> Result<Urls, String> {
         create(h, json!({"parent_id": WEB_ID, "id": CANVAS_WS_ID, "handler_module": fantastic_web_ws::HANDLER_MODULE,
             "ingress_rule": "allow_all_ingress"})).await?;
     }
-    // THE CANVAS'S HOST NODE: its page records and its backend.
+    // THE CANVAS'S HOST NODE: its page records, its files, its cells' backends.
     if !exists(h, CANVAS_NODE_ID) {
         create(h, json!({"parent_id": CANVAS_PAGE_ID, "id": CANVAS_NODE_ID,
-            "handler_module": crate::kern::canvas_node::HANDLER_MODULE})).await?;
+            "handler_module": crate::kern::backend::HANDLER_MODULE})).await?;
     }
     if !exists(h, CANVAS_LOADER_ID) {
         create(h, json!({"parent_id": CANVAS_NODE_ID, "id": CANVAS_LOADER_ID, "handler_module": fantastic_core::HANDLER_MODULE,
@@ -127,17 +131,17 @@ pub async fn ensure(h: &Host, port: Option<u16>) -> Result<Urls, String> {
     // written from above (`update_agent`) — exposes what the cells load. `web`
     // serves it, reading AS ITSELF.
     if !exists(h, STATIC_FILES_ID) {
-        create(h, json!({"parent_id": CANVAS_LOADER_ID, "id": STATIC_FILES_ID, "handler_module": "file_bridge.tools",
+        create(h, json!({"parent_id": CANVAS_NODE_ID, "id": STATIC_FILES_ID, "handler_module": "file_bridge.tools",
             "root": ".", "readonly": true, "allow": [], "ingress_rule": "allow_all_ingress"})).await?;
     }
-    merge_verbs(h, STATIC_FILES_ID, "callable_by", WEB_ID, json!(["read_stream"])).await?;
-    merge_verbs(h, WEB_ID, "can_call", STATIC_FILES_ID, json!(["read_stream"])).await?;
-    let (backend, root_view) = (crate::kern::backend::BACKEND_ID, crate::kern::backend::ROOT_VIEW);
-    if !exists(h, backend) {
-        create(h, json!({"parent_id": CANVAS_NODE_ID, "id": backend, "handler_module": crate::kern::backend::HANDLER_MODULE})).await?;
-    }
-    if !exists(h, root_view) {
-        create(h, json!({"parent_id": backend, "id": root_view, "handler_module": crate::kern::backend::HANDLER_MODULE})).await?;
+    // `web` MOUNTS its legs by asking each for its routes, as itself
+    merge_verbs(h, CANVAS_WS_ID, "callable_by", WEB_ID, json!(["get_routes"])).await?;
+    merge_verbs(h, WEB_ID, "can_call", CANVAS_WS_ID, json!(["get_routes"])).await?;
+    // `web` serves every `/<agent>/file/` route READING AS ITSELF: the page,
+    // and the static files, both ends
+    for served in [CANVAS_PAGE_ID, STATIC_FILES_ID] {
+        merge_verbs(h, served, "callable_by", WEB_ID, json!(["read_stream"])).await?;
+        merge_verbs(h, WEB_ID, "can_call", served, json!(["read_stream"])).await?;
     }
     // `user`: the leg's one reach (its verbs), and the page loader it reads.
     let gw_verbs = json!(fantastic_user::VERBS);
@@ -158,7 +162,7 @@ pub async fn ensure(h: &Host, port: Option<u16>) -> Result<Urls, String> {
     // the shell's own page reach: every page agent of every tree
     merge_verbs(h, user, "can_call", "*|*", json!(["*"])).await?;
 
-    let mut boots = vec![CANVAS_PAGE_ID, CANVAS_WS_ID, CANVAS_NODE_ID, CANVAS_LOADER_ID, STATIC_FILES_ID, backend, root_view];
+    let mut boots = vec![CANVAS_PAGE_ID, CANVAS_WS_ID, CANVAS_NODE_ID, CANVAS_LOADER_ID, STATIC_FILES_ID];
     if fresh_host {
         boots.push(WEB_ID); // its boot mounts every child, then listens
     }

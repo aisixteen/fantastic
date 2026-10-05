@@ -3,15 +3,14 @@ import type { Handler, Json, Payload } from "../../lib.ts";
 import { terminalView } from "../terminal_view/terminal_view.ts";
 import { bodyText } from "../body_text.ts";
 import { aiView } from "../ai_view/ai_view.ts";
-import { htmlAgent } from "../html_agent/html_agent.ts";
+import { grantHint } from "../html_agent/grant_hint.ts";
 
-// THE CANVAS AND ITS VIEWS (owner, 2026-10-04: one canvas; views, nested in a
-// hierarchy, each with its own agents and its own background).
+// THE CANVAS AND ITS VIEW (owner, 2026-10-04: one canvas, ONE view for now —
+// more views are on hold).
 //
-//   canvas            canvas.ts   the page's root: holds the root view
-//   └── view_root     view.ts     a VIEW: its cells, its background, nested views
-//       ├── background · <its cells>
-//       └── view_<id> …
+//   canvas            canvas.ts   the page's root: holds the view
+//   └── view_root     view.ts     THE VIEW: its cells and its background
+//       └── background · <its cells>
 //
 // A VIEW's own verbs are the CONTROL PLANE over its own cells (owner
 // 2026-09-30: an AI cell is the control plane) — `place`, `move`, `update`,
@@ -34,28 +33,14 @@ export const PLACEABLE: Record<string, string> = {
   gl: "gl_agent.ts",
   terminal: "terminal_view.ts",
   chat: "ai_view.ts",
-  // a NESTED VIEW: a container of its own; on this view it is a cell showing
-  // its card html, which the nested view rewrites itself (`set_html` on it)
-  view: VIEW,
 };
 
-/** Fields `place` / `update` may set — never identity, placement in the tree,
- *  grants or a view's binding. */
-export const SETTABLE = ["display_name", "html", "gl_source", "trusted", "readme", "x", "y", "width", "height"] as const;
-
-/** What `update` may set on the VIEW ITSELF (`id` = the view): its MAIN chat —
- *  the view's one voice, the AI other views talk to (a chat cell of this view,
- *  or null for none). */
-export const VIEW_SETTABLE = ["main_ai_chat"] as const;
-
-/** A nested view's first card on its parent — the nested view rewrites it. */
-export const CARD_HTML =
-  "<div style='font:14px system-ui;color:#cde;padding:14px;line-height:1.5'>" +
-  "<b>a view</b><br>open it with ↗ above, or from the tree.<br>" +
-  "<span style='opacity:.6'>This card is the view's own: it rewrites it (set_html on the view) as its control panel.</span></div>";
+/** Fields `place` / `update` may set — a cell's grants included (the view is
+ *  its parent); never identity, placement in the tree or a view's binding. */
+export const SETTABLE = ["display_name", "html", "gl_source", "trusted", "readme", "x", "y", "width", "height", "can_call", "callable_by"] as const;
 
 /** Every view verb, for the grants that admit a caller. */
-export const VIEW_VERBS = ["place", "move", "update", "wire", "remove", "reflect", "get_html", "set_html"] as const;
+export const VIEW_VERBS = ["place", "move", "update", "wire", "remove", "reflect"] as const;
 
 const num = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
 
@@ -76,16 +61,7 @@ export const CANVAS_README =
   "The canvas: the page's root agent. It holds the ROOT VIEW, `view_root` — every cell, background and nested view lives under a view. It answers `reflect` and nothing else; talk to a view.";
 
 export const VIEW_README =
-  "A VIEW of the canvas (frontend). Renders its own member tree; mounts each member inline via its view bundle, or as an iframe for external content. Not a host client. Its BACKGROUND is its own singleton child agent (set_bg / clear_bg / get_bg there). WHAT IS NEAR A POINT is the host's: `around {view?, x, y, radius}` on `user` (view coordinates, x grows right, y grows down) answers from the page records, nearest first — reflect a member for more. THE CONTROL PLANE over its cells: `place {kind: html|gl|terminal|chat|view, x, y, id?, width?, height?, display_name?, bytes? (the cell's body, VERBATIM: html for html, the GL source for gl, the CARD for a view), trusted?, backend_id? (terminal/chat: the host agent shown)}` → {placed}; a `view` is a NESTED VIEW — a container with its own cells, verbs and background, nested under this one; with `template: <a template's name>` it comes WITH its main chat (a kept AI cell from that template, made main) → {placed, main_chat}; on this view it shows its CARD, html the nested view owns: `get_html` / `set_html {bytes}` on it rewrite it (its control panel here); `move {id, x?, y?, width?, height?}`; `update {id, bytes? (the new body, verbatim), fields?: {display_name|trusted|readme|x|y|width|height}}` (a new html body reloads the panel); `update {id: <this view>, fields: {main_ai_chat: <a chat cell's id> | null}}` sets the view's MAIN chat — its one voice, named on its record (reflect the view to find it); the main chat is delete-locked while main, and making another main (or null) unlocks it; `wire {sender, receiver, verbs}` (a grant between two cells, both sides — e.g. verbs [emit] lets the sender's panel emit to the receiver's); `remove {id}` (refused on a delete_lock, e.g. the background).";
-
-// THE SCAFFOLD (owner 2026-10-02/03): a nested view placed WITH a `template`
-// comes with its MAIN chat — a kept AI cell from that
-// template, made main. The page (`canvas.ts`) hands the spawning here once it
-// is mounted; no default template: whoever scaffolds names it.
-let scaffold: ((view: string, template: string) => Promise<Json>) | null = null;
-export function setScaffold(fn: (view: string, template: string) => Promise<Json>): void {
-  scaffold = fn;
-}
+  "THE VIEW of the canvas (frontend) — the one view. Renders its own member tree; mounts each member inline via its view bundle, or as an iframe for external content. Not a host client. Its BACKGROUND is its own singleton child agent (set_bg / clear_bg / get_bg there). WHAT IS NEAR A POINT is the host's: `around {view?, x, y, radius}` on `user` (view coordinates, x grows right, y grows down) answers from the page records, nearest first — reflect a member for more. THE CONTROL PLANE over its cells: `place {kind: html|gl|terminal|chat (or handler_module: any page bundle, e.g. html_agent.ts), x, y, id?, width?, height?, display_name?, bytes? (the cell's body, VERBATIM: html for html, the GL source for gl), trusted?, can_call?, callable_by?, backend_id? (terminal/chat: the host agent shown)}` → {placed}; `move {id, x?, y?, width?, height?}`; `update {id, bytes? (the new body, verbatim), fields?: {display_name|trusted|readme|x|y|width|height|can_call|callable_by}}` (a cell's grants: `{<agent id>: [verbs] | *}` — e.g. `can_call: {dev: [start, stop, status, watch]}` lets the cell's panel call the host agent `dev`; replaces the field whole) (a new html body reloads the panel); `update {id: <this view>, fields: {main_ai_chat: <a chat cell's id> | null}}` sets the view's MAIN chat — its one voice, named on its record (reflect the view to find it); the main chat is delete-locked while main, and making another main (or null) unlocks it; any other field of the view is settable the same way; `wire {sender, receiver, verbs}` (a grant, merged into each side that is a cell of this view: the sender's can_call, the receiver's callable_by — e.g. verbs [emit] lets the sender's panel emit to the receiver's; a receiver that is a host agent gets nothing written); `remove {id}` (refused on a delete_lock, e.g. the background). A LIVE URL or a FILE (a PDF, a running service) is shown by an html cell whose body is `<iframe src=URL>` — `trusted: true` for the host's own files (GET /static_files/file/<path>).";
 
 /** The root: `reflect` is the kernel's; it answers nothing else. */
 export const canvasAgent: Handler = (_id, payload): Json => {
@@ -101,43 +77,45 @@ export const canvasAgent: Handler = (_id, payload): Json => {
 export const viewAgent: Handler = (id, payload, kernel): Json | Promise<Json> => {
   switch (str(payload, "type")) {
     case "place": {
-      const kind = str(payload, "kind");
-      const hm = PLACEABLE[kind];
-      if (hm === undefined) return { error: `view: place — kind ${JSON.stringify(kind)} is one of ${Object.keys(PLACEABLE).join(", ")}`, reason: "bad_arg", arg: "kind" };
+      // WHAT to make: a `kind` (html|gl|terminal|chat), or the cell's own
+      // `handler_module` (any page bundle; the `.ts` suffix optional)
+      const given = str(payload, "handler_module");
+      const named = given ? (given.endsWith(".ts") ? given : `${given}.ts`) : undefined;
+      const kind = named !== undefined ? (Object.entries(PLACEABLE).find(([, m]) => m === named)?.[0] ?? named.slice(0, -3)) : str(payload, "kind");
+      const hm = named ?? PLACEABLE[kind];
+      if (hm === undefined) return { error: `view: place — kind ${JSON.stringify(kind)} is one of ${Object.keys(PLACEABLE).join(", ")}, or name the cell's handler_module`, reason: "bad_arg", arg: "kind" };
       if (!num(payload["x"]) || !num(payload["y"])) return { error: "view: place needs x and y (numbers, view coordinates)", reason: "bad_arg", arg: "x" };
       const backend = str(payload, "backend_id");
       if ((kind === "terminal" || kind === "chat") && !backend) {
         return { error: `view: place ${kind} needs backend_id — the host agent it shows`, reason: "bad_arg", arg: "backend_id" };
       }
-      const template = payload["template"];
-      if (template !== undefined && (kind !== "view" || typeof template !== "string" || template === "")) {
-        return { error: "view: place — `template` (a template's name) is for kind view: its main chat", reason: "bad_arg", arg: "template" };
-      }
-      if (typeof template === "string" && scaffold === null) {
-        return { error: "view: place — this page cannot scaffold a main chat (no page is mounted)", reason: "not_found", arg: "template" };
-      }
       const want = str(payload, "id");
       const aid = want || `${kind}_${Math.random().toString(16).slice(2, 10)}`;
-      if (kernel.get(aid) !== undefined) return { error: `view: place — ${aid} already exists`, reason: "exists", arg: "id" };
+      if (kernel.get(aid) !== undefined) return { error: `view: place — ${aid} already exists`, reason: "exists", arg: "id", hint: `to change it: update {id: ${aid}, bytes?, fields?}; to replace it: remove {id: ${aid}} first` };
       const meta: Record<string, unknown> = {};
       for (const k of SETTABLE) if (payload[k] !== undefined) meta[k] = payload[k];
       // the cell's BODY is `bytes` (verbatim): html for html, the source for gl
       const body = bodyOf(kind, payload);
       if (typeof body === "object") return body as unknown as Json;
       if (body !== undefined) meta[kind === "gl" ? "gl_source" : "html"] = body;
-      if (kind === "view" && meta["html"] === undefined) meta["html"] = CARD_HTML;
       // a cell carries its size from birth: the host answers `around` from the records
-      meta["width"] ??= kind === "view" ? 340 : 480;
-      meta["height"] ??= kind === "view" ? 220 : 320;
+      meta["width"] ??= 480;
+      meta["height"] ??= 320;
       if (backend) Object.assign(meta, { backend_id: backend, owns_backend: false });
       // the view's OWN declared grant onto the agent it shows
       if (kind === "terminal") meta["can_call"] = { ...terminalView.grants(backend) };
       if (kind === "chat") meta["can_call"] = { ...aiView.grants(backend) };
       kernel.register(new Agent({ id: aid, parentId: id, handlerModule: hm, meta: meta as Payload }));
-      if (typeof template === "string" && scaffold !== null) {
-        return scaffold(aid, template).then((main) => ({ placed: aid, kind, main_chat: main }) as unknown as Json);
+      // grants the body needs and the cell lacks are SAID (the panel's refused
+      // call never reaches the AI)
+      const grants = typeof meta["html"] === "string" ? grantHint(aid, meta["html"] as string, kernel.get(aid)?.meta["can_call"]) : {};
+      // fields `place` does not take are SAID, never dropped silently
+      const known = new Set<string>(["type", "kind", "handler_module", "id", "bytes", "backend_id", ...SETTABLE]);
+      const ignored = Object.keys(payload).filter((k) => !known.has(k));
+      if (ignored.length) {
+        return { placed: aid, kind, ignored, ...grants, hint: "place does not take those fields — a cell's content is its body (bytes); to show a live URL or a file, make the body an <iframe src=…> (trusted: true for the host's own files)" + (grants["hint"] ? `. Also: ${grants["hint"]}` : "") } as Json;
       }
-      return { placed: aid, kind };
+      return { placed: aid, kind, ...grants } as Json;
     }
     case "move": {
       const target = str(payload, "id");
@@ -167,16 +145,23 @@ export const viewAgent: Handler = (id, payload, kernel): Json | Promise<Json> =>
       }
       kernel.updateMeta(target, f as Payload);
       if ("html" in f) kernel.emit(target, { type: "reload_html" });
-      return { updated: target, fields: Object.keys(fields) };
+      const cell = kernel.get(target);
+      const html = cell?.meta["html"];
+      const grants = typeof html === "string" ? grantHint(target, html, cell?.meta["can_call"]) : {};
+      return { updated: target, fields: Object.keys(fields), ...grants } as Json;
     }
     case "wire": {
-      // a GRANT between two cells, both sides: `sender` may call `receiver`
-      // with `verbs`. (Not from/to: `to` is ai_core's routing tag.)
+      // a GRANT: `sender` may call `receiver` with `verbs`, merged into each
+      // side that is a cell of this view (the view is its parent; another
+      // agent's record is not the view's to write). (Not from/to: `to` is
+      // ai_core's routing tag.)
       const [from, to] = [str(payload, "sender"), str(payload, "receiver")];
       const verbs = payload["verbs"];
       for (const [k, v] of [["sender", from], ["receiver", to]] as const) {
-        if (kernel.get(v)?.parentId !== id) return { error: `view: wire — ${k} ${JSON.stringify(v)} is not a cell of this view`, reason: "not_found", arg: k };
+        if (!v) return { error: `view: wire needs ${k} (an agent id)`, reason: "bad_arg", arg: k };
       }
+      const mine = (aid: string): boolean => kernel.get(aid)?.parentId === id;
+      if (!mine(from) && !mine(to)) return { error: `view: wire — neither ${JSON.stringify(from)} nor ${JSON.stringify(to)} is a cell of this view`, reason: "not_found", arg: "sender" };
       if (!Array.isArray(verbs) || verbs.length === 0 || !verbs.every((x) => typeof x === "string")) {
         return { error: "view: wire needs verbs: [\"emit\", …]", reason: "bad_arg", arg: "verbs" };
       }
@@ -185,8 +170,8 @@ export const viewAgent: Handler = (id, payload, kernel): Json | Promise<Json> =>
         const had = Array.isArray(cur[key]) ? (cur[key] as string[]) : [];
         kernel.updateMeta(aid, { [field]: { ...cur, [key]: [...new Set([...had, ...(verbs as string[])])] } } as unknown as Payload);
       };
-      merge(from, "can_call", to);
-      merge(to, "callable_by", from);
+      if (mine(from)) merge(from, "can_call", to);
+      if (mine(to)) merge(to, "callable_by", from);
       return { wired: { sender: from, receiver: to, verbs } };
     }
     case "remove": {
@@ -199,12 +184,6 @@ export const viewAgent: Handler = (id, payload, kernel): Json | Promise<Json> =>
       }
       return out;
     }
-    // THE CARD: this view's presence on its parent — html it owns and rewrites
-    case "get_html":
-    case "render_html":
-    case "set_html": {
-      return htmlAgent(id, payload, kernel) as Json; // html_agent answers synchronously
-    }
     case "boot":
     case "shutdown":
       return null;
@@ -213,31 +192,26 @@ export const viewAgent: Handler = (id, payload, kernel): Json | Promise<Json> =>
   }
 };
 
-/** `update` on the view itself: only [`VIEW_SETTABLE`]. */
+/** `update` on the view itself: any fields; `main_ai_chat` names the view's
+ *  MAIN chat (delete-locked while main). */
 function updateSelf(id: string, payload: Payload, kernel: Parameters<Handler>[2]): Json {
   const fields = payload["fields"];
   if (typeof fields !== "object" || fields === null || Array.isArray(fields) || Object.keys(fields).length === 0) {
-    return { error: `view: update on the view itself needs fields: {${VIEW_SETTABLE.join("|")}}`, reason: "bad_arg", arg: "fields" };
+    return { error: "view: update on the view itself needs fields: {…}", reason: "bad_arg", arg: "fields" };
   }
   const f = fields as Record<string, unknown>;
-  const bad = Object.keys(f).filter((k) => !(VIEW_SETTABLE as readonly string[]).includes(k));
-  if (bad.length) return { error: `view: update — not settable on the view: ${bad.join(", ")} (settable: ${VIEW_SETTABLE.join(", ")})`, reason: "bad_arg", arg: "fields" };
-  const main = f["main_ai_chat"];
-  if (main !== null) {
-    const cell = typeof main === "string" ? kernel.get(main) : undefined;
-    if (cell === undefined || cell.parentId !== id || cell.record().handler_module !== PLACEABLE["chat"]) {
-      return { error: `view: main_ai_chat must name a chat cell of this view, or null — ${JSON.stringify(main)} is none`, reason: "bad_arg", arg: "main_ai_chat" };
+  if ("main_ai_chat" in f) {
+    const main = f["main_ai_chat"];
+    // THE MAIN CHAT IS DELETE-LOCKED while main: the previous one unlocked, the
+    // new one locked (`remove` refuses it until it is unmade main)
+    const prev = kernel.get(id)?.meta["main_ai_chat"];
+    if (typeof prev === "string" && prev !== main && kernel.get(prev) !== undefined) {
+      kernel.updateMeta(prev, { delete_lock: false } as unknown as Payload);
     }
+    if (typeof main === "string" && kernel.get(main) !== undefined) kernel.updateMeta(main, { delete_lock: true } as unknown as Payload);
   }
-  // THE MAIN CHAT IS DELETE-LOCKED while main: the previous one unlocked, the
-  // new one locked (`remove` refuses it until it is unmade main)
-  const prev = kernel.get(id)?.meta["main_ai_chat"];
-  if (typeof prev === "string" && prev !== main && kernel.get(prev) !== undefined) {
-    kernel.updateMeta(prev, { delete_lock: false } as unknown as Payload);
-  }
-  if (typeof main === "string") kernel.updateMeta(main, { delete_lock: true } as unknown as Payload);
-  kernel.updateMeta(id, { main_ai_chat: main } as unknown as Payload);
-  return { updated: id, fields: ["main_ai_chat"] };
+  kernel.updateMeta(id, f as unknown as Payload);
+  return { updated: id, fields: Object.keys(f) };
 }
 
 /** Register the canvas root's bundle and the view bundle. */
