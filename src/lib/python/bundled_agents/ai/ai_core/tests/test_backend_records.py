@@ -21,6 +21,7 @@ BACKENDS = (
     "ollama_backend",
     "responses_backend",
     "vllm_backend",
+    "anthropic_backend",
 )
 
 _AI_TAIL = [
@@ -41,7 +42,10 @@ _AI_TAIL = [
 
 #: the shared fields a backend declares itself (its own field replaces the shared
 #: one): vllm_backend's `context_window`, read from the server when left out.
-_OVERRIDDEN = {"vllm_backend": ("context_window",)}
+_OVERRIDDEN = {
+    "vllm_backend": ("context_window",),
+    "anthropic_backend": ("context_window",),
+}
 
 
 def _tail(backend):
@@ -54,11 +58,12 @@ SCHEMAS = {
     "ollama_backend": (
         [
             ("endpoint", "str", True, None, None),
-            ("model", "str", True, None, None),
+            ("model", "str", False, None, None),
             ("num_ctx", "int", False, None, None),
             ("temperature", "float", False, 0.3, None),
             ("num_predict", "int", False, None, None),
             ("think", "bool", False, None, None),
+            ("credentials", "credentials", False, None, None),
         ]
     ),
     "responses_backend": (
@@ -68,6 +73,17 @@ SCHEMAS = {
             ("max_tokens", "int", False, 8192, None),
             ("sampling", "map", False, None, None),
             ("credentials", "credentials", True, None, None),
+        ]
+    ),
+    "anthropic_backend": (
+        [
+            ("endpoint", "str", True, None, None),
+            ("model", "str", True, None, None),
+            ("max_tokens", "int", False, None, None),
+            ("context_window", "int", False, None, None),
+            ("temperature", "float", False, None, None),
+            ("thinking_budget", "int", False, None, None),
+            ("credentials", "credentials", False, None, None),
         ]
     ),
     "vllm_backend": (
@@ -201,7 +217,11 @@ def test_validate_meta_names_every_missing_required_field(backend):
 def test_validate_meta_judges_the_merged_record(backend):
     own = SCHEMAS[backend]
     full = {
-        "endpoint": "http://x/v1",
+        # each backend's own endpoint shape (anthropic reads its model list beside
+        # a `/messages` URL)
+        "endpoint": "http://x/v1/messages"
+        if backend == "anthropic_backend"
+        else "http://x/v1",
         "model": "m",
         "max_tokens": 8000,
         "kv_slots": 2,

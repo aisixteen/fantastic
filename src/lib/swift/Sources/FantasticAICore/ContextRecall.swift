@@ -1,5 +1,6 @@
-// `context_recall` — rebuild this agent's VIEW from its store: fit the head to
-// the budget at digest resolution, then ask the model which rows it wants in
+// `context_recall` — rebuild this agent's VIEW from its store: fold a head
+// longer than the budget (fold strategy), fit the head to the budget at digest
+// resolution, then ask the model which rows it wants in
 // full, persist the id list, log the decision as a row, and drop RAM scratch.
 // Runs on boot, after a fold batch, or on request.
 //
@@ -260,21 +261,24 @@ extension AIBackend {
     // MARK: - the verb
 
     /// args: dry:bool? (mechanical fit only — no model call). Rebuild this
-    /// agent's VIEW from its store: fit the head to the budget at digest
-    /// resolution, then ask the model which rows it wants in full, persist the
-    /// id list, log the decision as a row, and drop RAM scratch. Runs on boot,
-    /// after a fold batch, or on request. Returns {kept, expanded, dropped,
-    /// budget, why, degraded}. Python `_context_recall`.
+    /// agent's VIEW from its store: with `context_strategy` fold, a head longer
+    /// than the budget is FOLDED first (oldest spans into fold rows, as a turn's
+    /// projection folds); then fit the head to the budget at digest resolution,
+    /// ask the model which rows it wants in full, persist the id list, log the
+    /// decision as a row, and drop RAM scratch. Runs on boot, after a fold batch,
+    /// or on request. `clientId` is the turn's caller (none for the verb); a
+    /// recall that folded tells it, as a projection does. Returns {kept,
+    /// expanded, dropped, folded, budget, why, degraded}. Python `_context_recall`.
     func contextRecall(
         agent: Agent, payload: JSON, kernel: Kernel, provider: (any AIProvider)?,
-        systemPrompt: String? = nil
+        systemPrompt: String? = nil, clientId: String? = nil
     ) async throws -> JSON {
         let key = agent.id.value
-        let rows = try await loadHistory(key, kernel)
+        var rows = try await loadHistory(key, kernel)
         if rows.isEmpty {
             return .object([
                 "kept": .integer(0), "expanded": .integer(0), "dropped": .integer(0),
-                "why": .string("empty store"), "degraded": .bool(false),
+                "folded": .integer(0), "why": .string("empty store"), "degraded": .bool(false),
             ])
         }
         // The block the turn will actually use (`systemContent`), not the default
@@ -288,11 +292,31 @@ extension AIBackend {
         let bodyBudget = max(
             AIConstants.BUDGET_FLOOR, AIContext.budget(agent, modelWindow: config.modelWindow) - sysTokens - AIConstants.NOTICE_ENVELOPE_RESERVE)
         let target = Int64(Double(bodyBudget) * AIConstants.LOW)
+        // PYTHON TRUTHINESS: `dry:1`, `"false"` and `[0]` are all dry.
+        let dry = pyTruthy(payload["dry"])
+        // A HEAD LONGER THAN THE BUDGET FOLDS FIRST (owner, 2026-10-07). A store
+        // written under a larger window — another model, a planted past — is folded
+        // the way the turn's own `fold` projection folds it: oldest spans into fold
+        // rows, folds of folds as they pile up. Before this the fit below only
+        // stubbed every reply and dropped the oldest rows that still did not fit —
+        // no fold, no summary. Folding takes the model (a summary per span), so a
+        // `dry` recall does not fold.
+        var folded = 0
+        if let provider, !dry, AIContext.strategy(agent).asString == "fold" {
+            let fctx = ProjectionCtx(
+                budget: bodyBudget, recentN: AIContext.recentN(agent),
+                summarize: AIStrategies.makeSummarizer(provider),
+                selfId: agent.id, kernel: kernel, clientId: clientId)
+            let down = try await AIFoldStrategy.foldDown(rows, fctx, budget: bodyBudget)
+            rows = down.rows
+            folded = down.folded
+        }
         let view = AIFolds.render(rows).filter { rowId($0).map { $0 != 0 } ?? false }
         if view.isEmpty {
             return .object([
                 "kept": .integer(0), "expanded": .integer(0), "dropped": .integer(0),
-                "why": .string("no addressable rows"), "degraded": .bool(false),
+                "folded": .integer(0), "why": .string("no addressable rows"),
+                "degraded": .bool(false),
             ])
         }
         func digest(_ r: JSON) -> JSON {
@@ -319,8 +343,6 @@ extension AIBackend {
         var why = "mechanical fit"
         var degraded = true
         var expand: Set<Int64> = []
-        // PYTHON TRUTHINESS: `dry:1`, `"false"` and `[0]` are all dry.
-        let dry = pyTruthy(payload["dry"])
         if let provider, !dry {
             var lines: [String] = []
             for i in head {
@@ -448,10 +470,31 @@ extension AIBackend {
                 ])
             ])
         dropScratch(key, kernel)
+        if folded > 0, let clientId, !clientId.isEmpty {
+            // The caller is told its context was compacted, as by a turn's projection.
+            await toCaller(
+                kernel: kernel, agentId: agent.id, clientId: clientId,
+                event: [
+                    "type": .string("context"), "source": .string(key),
+                    "ts": .double(nowSecs()), "phase": .string("compacted"),
+                    "detail": .object([
+                        "strategy": .string("fold"),
+                        "recall": .bool(true),
+                        "dropped_messages": .integer(Int64(view.count - ids.count)),
+                        "kept_messages": .integer(Int64(ids.count)),
+                        "summarized": .bool(false),
+                        "pinned_facts": .integer(0),
+                        "stripped": .integer(0),
+                        "stripped_bytes": .integer(0),
+                        "folded": .integer(Int64(folded)),
+                    ]),
+                ])
+        }
         return .object([
             "kept": .integer(Int64(ids.count)),
             "expanded": .integer(Int64(expand.count)),
             "dropped": .integer(Int64(view.count - ids.count)),
+            "folded": .integer(Int64(folded)),
             "budget": .integer(bodyBudget),
             "why": .string(why),
             "degraded": .bool(degraded),

@@ -2626,6 +2626,92 @@ async fn all_fire_and_forget_calls_are_not_a_silent_turn() {
     );
 }
 
+/// Two reads through the agent's own file leg — files of `chars` each — at a
+/// 4.5k window; returns the turn that received both replies.
+async fn two_reads_turn(tag: &str, frac: f64) -> (String, i64) {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, tag).await;
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel_state"),
+            json!({"type": "update_agent", "id": backend.as_str(),
+                   "context_window": 4500, "output_reserve": 0}),
+        )])
+        .await;
+    let meta = crate::helpers::agent_meta(&backend, &kernel);
+    let cap = crate::context::inline_cap(&meta, crate::constants::DEFAULT_CONTEXT_WINDOW);
+    let chars = (cap as f64 * 4.0 * frac) as usize;
+    let root = tmp.path().join(".fantastic");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("alpha.txt"), "a".repeat(chars)).unwrap();
+    std::fs::write(root.join("beta.txt"), "b".repeat(chars)).unwrap();
+    let file_leg = format!("ff_{}", backend.as_str());
+    let s = script(
+        &backend,
+        vec![
+            pass(format!(
+                "{}\n{}",
+                call_envelope(
+                    &file_leg,
+                    json!({"type": "read", "path": "alpha.txt"}),
+                    Some("self")
+                ),
+                call_envelope(
+                    &file_leg,
+                    json!({"type": "read", "path": "beta.txt"}),
+                    Some("self")
+                ),
+            )),
+            pass("both back <call name=\"done\"></call>"),
+        ],
+        Duration::ZERO,
+    );
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "go", "client_id": "probe"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(until_passes(&s, 2).await, "the batch never came back");
+    let reqs = s.requests.lock().unwrap();
+    let last = reqs[1].last().cloned().unwrap_or(Value::Null);
+    (last["content"].as_str().unwrap_or("").to_string(), cap)
+}
+
+/// OWNER, 2026-10-07 (measured nested_folds:rust, 4.5k window): two greps, each
+/// under the 434-token cap, arrived as ONE 967-token message and the next turn
+/// could not fit it. The replies of a batch share the cap: the first fits and is
+/// inline, the one that would push the message past it is held.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_inline_cap_bounds_the_whole_batch_not_each_reply() {
+    let (turn, cap) = two_reads_turn("rt_batchcap", 0.6).await;
+    let (first, second) = turn.split_once("\n\n").expect("two blocks");
+    assert!(
+        first.contains(&"a".repeat(100)) && !first.contains("NOT inlined"),
+        "{first}"
+    );
+    assert!(
+        second.contains("NOT inlined") && !second.contains(&"b".repeat(100)),
+        "{second}"
+    );
+    assert!(
+        crate::context::estimate_one(&json!({"role": "user", "content": turn})) <= cap + 64,
+        "{turn}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replies_that_fit_together_are_all_inline() {
+    let (turn, _) = two_reads_turn("rt_batchfit", 0.3).await;
+    assert!(!turn.contains("NOT inlined"), "{turn}");
+    assert!(
+        turn.contains(&"a".repeat(100)) && turn.contains(&"b".repeat(100)),
+        "{turn}"
+    );
+}
+
 /// The batch stamp lives INSIDE the `[reply to …]` tag, where the shared prompt
 /// says it does. It rode on its own trailing line in rust/swift until 2026-09-02,
 /// which python's history trimmers (`_REPLY_TAG` / `_BLOCK_SPLIT`, both anchored
@@ -3876,6 +3962,183 @@ async fn context_recall_on_an_empty_store_says_so_instead_of_failing() {
     );
 }
 
+/// A head written under a window far larger than this agent's: 16 reads of
+/// distinct ~900-char bodies against a 2600-token window. Returns the goal id.
+async fn long_head(kernel: &Arc<Kernel>, backend: &AgentId, strategy: &str) -> i64 {
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel_state"),
+            json!({"type": "update_agent", "id": backend.as_str(),
+                   "context_strategy": strategy, "context_window": 2600,
+                   "output_reserve": 200}),
+        )])
+        .await;
+    let goal = put_row(
+        kernel,
+        backend,
+        json!({"role": "user", "content": "THE GOAL: survey the fillers"}),
+    )
+    .await;
+    let mut prev = goal;
+    for i in 0..16 {
+        let call = put_row(
+            kernel,
+            backend,
+            json!({"role": "assistant", "parent": prev,
+            "content": format!("Reading filler_{i}. <call name=\"send\"><target_id>notes</target_id><title>survey filler_{i}</title><type>read</type><path>filler_{i}.txt</path></call>")}),
+        ).await;
+        let pid = kernel.mint_id();
+        prev = put_row(
+            kernel,
+            backend,
+            json!({"role": "user", "parent": call,
+            "content": format!("[reply to {pid} · notes read · \"survey filler_{i}\"]\n{}", format!("filler {i} text ").repeat(60))}),
+        ).await;
+    }
+    goal
+}
+
+/// `context_recall` over `long_head`, as the agent, with a scripted model: every
+/// pass a summary, so the recall's own question finds no JSON (mechanical fit).
+async fn recall_long_head(
+    kernel: &Arc<Kernel>,
+    backend: &AgentId,
+    payload: Value,
+    client_id: Option<&str>,
+) -> (Value, Arc<MockScript>) {
+    let sc = script(
+        backend,
+        (0..40)
+            .map(|_| pass("A title\n\nA short summary of the stretch."))
+            .collect(),
+        Duration::ZERO,
+    );
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider {
+        script: script_for(backend),
+    });
+    let r = fantastic_kernel::test_support::as_agent(
+        backend.clone(),
+        crate::retrieval::context_recall(
+            backend,
+            &payload,
+            kernel,
+            Some(&provider),
+            crate::constants::DEFAULT_CONTEXT_WINDOW,
+            Some("sys"),
+            client_id,
+        ),
+    )
+    .await
+    .expect("store read");
+    (r, sc)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn context_recall_folds_a_head_longer_than_the_budget() {
+    // OWNER, 2026-10-07: a store written under a larger window (another model, a
+    // planted past) must FOLD at the rebuild — before, the fit stubbed every reply
+    // and dropped what still did not fit, and no fold was ever written.
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "recallfold").await;
+    let goal = long_head(&kernel, &backend, "fold").await;
+    let mut agent_rx = rebind_backend_inbox(&kernel, &backend);
+    let (r, sc) = recall_long_head(&kernel, &backend, json!({}), Some("c1")).await;
+    let rows = fantastic_kernel::test_support::as_agent(
+        backend.clone(),
+        crate::memory::load_history(&backend, &kernel, false),
+    )
+    .await
+    .expect("store read");
+    let folds: Vec<&Value> = rows
+        .iter()
+        .filter(|x| x.get("kind").and_then(Value::as_str) == Some("fold"))
+        .collect();
+    let folded = r["folded"].as_u64().unwrap_or(0);
+    assert!(folded >= 1 && folded as usize == folds.len(), "{r}");
+    assert!(
+        folds
+            .iter()
+            .all(|f| f["refs"].as_array().is_some_and(|a| !a.is_empty())
+                && f["title"].as_str().is_some_and(|t| !t.is_empty())),
+        "{folds:?}"
+    );
+    // one summary per fold, then the recall's own question
+    assert_eq!(sc.passes_served(), folds.len() + 1);
+    let view = fantastic_kernel::test_support::as_agent(
+        backend.clone(),
+        crate::memory::load_view(&backend, &kernel),
+    )
+    .await
+    .expect("store read")
+    .expect("the view must be persisted");
+    let ids = view["ids"].as_array().cloned().unwrap();
+    assert_eq!(
+        ids[0]["id"].as_i64(),
+        Some(goal),
+        "the goal turn is always in"
+    );
+    assert!(ids.iter().any(|e| e["res"] == "fold"), "{ids:?}");
+    // NOTHING FELL OUT UNMARKED: every turn is in the view or under a fold in it
+    let in_view: std::collections::HashSet<i64> =
+        ids.iter().filter_map(|e| e["id"].as_i64()).collect();
+    let fold_ids: Vec<i64> = ids
+        .iter()
+        .filter(|e| e["res"] == "fold")
+        .filter_map(|e| e["id"].as_i64())
+        .collect();
+    let covered: std::collections::HashSet<i64> = crate::folds::expand_ids(&rows, &fold_ids)
+        .into_iter()
+        .collect();
+    for t in rows.iter().filter(|x| {
+        !matches!(
+            x.get("kind").and_then(Value::as_str),
+            Some("fold" | "recall")
+        )
+    }) {
+        let id = t["id"].as_i64().unwrap();
+        assert!(
+            in_view.contains(&id) || covered.contains(&id),
+            "row {id} fell out: {ids:?}"
+        );
+    }
+    // the turn's caller is told, as by a projection
+    let mut evs = Vec::new();
+    while let Some(v) = agent_rx.try_recv() {
+        if v.payload["type"] == "context" {
+            evs.push(v.payload);
+        }
+    }
+    assert_eq!(evs.len(), 1, "{evs:?}");
+    assert_eq!(evs[0]["phase"], "compacted");
+    assert_eq!(evs[0]["client_id"], "c1");
+    assert_eq!(evs[0]["detail"]["folded"].as_u64(), Some(folded));
+    assert_eq!(evs[0]["detail"]["recall"], true);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dry_recall_or_another_strategy_does_not_fold() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "recalldry").await;
+    long_head(&kernel, &backend, "fold").await;
+    let (r, sc) = recall_long_head(&kernel, &backend, json!({"dry": true}), Some("c1")).await;
+    assert_eq!(r["folded"], 0, "dry makes no model call, so no fold: {r}");
+    assert_eq!(sc.passes_served(), 0);
+
+    let (kernel2, backend2) = mk_kernel(&tmp, "recalltrunc").await;
+    long_head(&kernel2, &backend2, "truncate").await;
+    let (r2, _) = recall_long_head(&kernel2, &backend2, json!({}), Some("c1")).await;
+    assert_eq!(r2["folded"], 0, "only the fold strategy folds: {r2}");
+    for (k, b) in [(&kernel, &backend), (&kernel2, &backend2)] {
+        let rows = fantastic_kernel::test_support::as_agent(
+            b.clone(),
+            crate::memory::load_history(b, k, false),
+        )
+        .await
+        .expect("store read");
+        assert!(!rows.iter().any(|x| x["kind"] == "fold"));
+    }
+}
+
 #[tokio::test]
 async fn a_fold_projection_over_budget_writes_folds() {
     // MEASURED 2026-09-12 (fold_descent:rust): four compactions under
@@ -4727,6 +4990,7 @@ async fn a_reply_in_flight_across_a_reboot_is_recorded_not_acted_on() {
         "cli",
         None,
         born,
+        false,
     )
     .await;
     assert_eq!(s.passes_served(), 0, "no turn ran for the late reply");
@@ -4744,7 +5008,16 @@ async fn a_reply_in_flight_across_a_reboot_is_recorded_not_acted_on() {
          recorded, not acted on]\n[reply to 1 · n r]\nlate"
     );
     // A reply from THIS incarnation runs a turn.
-    crate::route::deliver(&kernel, backend.as_str(), "fresh", "cli", None, born + 1).await;
+    crate::route::deliver(
+        &kernel,
+        backend.as_str(),
+        "fresh",
+        "cli",
+        None,
+        born + 1,
+        false,
+    )
+    .await;
     assert!(s.passes_served() >= 1, "a live reply is a turn");
 }
 
@@ -5481,6 +5754,7 @@ async fn delete_drops_every_row_but_the_incarnation() {
             text: "t".into(),
             send_id: "s".into(),
             queued_at: 0.0,
+            notice: false,
         });
     *old.projection.lock().unwrap() = Some(json!({"fired": false}));
     *old.compaction_mark.lock().unwrap() = Some((1, "c".into()));
@@ -5893,4 +6167,145 @@ async fn broken_only_turns_count_toward_giving_up() {
         cap,
         "a broken-only turn reset the silent streak"
     );
+}
+
+// ─── harness text is a NOTICE (python `test_notice_rows.py`) ────────────────
+
+async fn user_rows(kernel: &Arc<Kernel>, backend: &AgentId) -> Vec<Value> {
+    let r = kernel
+        .send(vec![Item::new(backend.clone(), json!({"type": "rows"}))])
+        .await
+        .remove(0)
+        .result;
+    r["rows"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| r["role"] == json!("user"))
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_no_call_reminder_is_a_notice_and_the_task_is_not() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "nt_a").await;
+    let s = script(
+        &backend,
+        vec![pass("just prose"), pass("<call name=\"done\"></call>")],
+        Duration::ZERO,
+    );
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "go"}),
+        )])
+        .await;
+    assert!(until_passes(&s, 2).await);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let users = user_rows(&kernel, &backend).await;
+    assert_eq!(users[0]["content"], json!("go"));
+    assert!(users[0].get("kind").is_none(), "{:?}", users[0]);
+    assert!(users[1]["content"]
+        .as_str()
+        .unwrap_or("")
+        .starts_with("[no call was dispatched]"));
+    assert_eq!(users[1]["kind"], json!("notice"), "{:?}", users[1]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_report_batch_is_a_notice_and_a_batch_with_a_reply_is_not() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "nt_b").await;
+    let good = call_envelope("kernel", json!({"type": "reflect", "tree": "none"}), None);
+    let s = script(
+        &backend,
+        vec![
+            pass(E59_ANSWER),
+            pass(format!(
+                "{good}\n<send><target_id>kernel</target_id></send>"
+            )),
+            pass("<call name=\"done\"></call>"),
+        ],
+        Duration::ZERO,
+    );
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "go"}),
+        )])
+        .await;
+    assert!(until_passes(&s, 3).await);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let users = user_rows(&kernel, &backend).await;
+    assert_eq!(users[1]["kind"], json!("notice"), "{:?}", users[1]);
+    assert!(users[2]["content"]
+        .as_str()
+        .unwrap_or("")
+        .contains("kernel reflect"));
+    assert!(users[2].get("kind").is_none(), "{:?}", users[2]);
+}
+
+#[test]
+fn the_incoming_row_carries_notice_only_when_asked() {
+    assert_eq!(
+        crate::agent_loop::incoming_row("t", 3, Some(2), true),
+        json!({"role": "user", "content": "t", "id": 3, "parent": 2, "kind": "notice"})
+    );
+    assert!(crate::agent_loop::incoming_row("t", 3, None, false)
+        .get("kind")
+        .is_none());
+}
+
+/// Only the agent itself can mark a notice: a peer's `notice` is ignored, so no
+/// peer can hide a message from a person's view.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_peer_cannot_mark_its_message_a_notice() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "nt_d").await;
+    let s = script(
+        &backend,
+        vec![pass("<call name=\"done\"></call>")],
+        Duration::ZERO,
+    );
+    // a REAL peer: the gate is two-sided
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel_state"),
+            json!({"type": "create_agent", "parent_id": "kernel", "id": "peer_x",
+                   "handler_module": "file_bridge.tools", "allow": ["."],
+                   "root": tmp.path().join(".fantastic").to_string_lossy(),
+                   "can_call": {backend.as_str(): "*"}}),
+        )])
+        .await;
+    let rec = crate::helpers::agent_meta(&backend, &kernel);
+    let mut callers = rec.get("callable_by").cloned().unwrap_or_else(|| json!({}));
+    callers["peer_x"] = json!("*");
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel_state"),
+            json!({"type": "update_agent", "id": backend.as_str(), "callable_by": callers}),
+        )])
+        .await;
+    let k = Arc::clone(&kernel);
+    let b = backend.clone();
+    let out = fantastic_kernel::test_support::as_agent("peer_x", async move {
+        k.send(vec![Item::new(
+            b,
+            json!({"type": "send", "text": "hidden?", "notice": true}),
+        )])
+        .await
+    })
+    .await;
+    assert!(until_passes(&s, 1).await, "{:?}", out[0].result);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let users = user_rows(&kernel, &backend).await;
+    assert!(
+        users[0]["content"]
+            .as_str()
+            .unwrap_or("")
+            .ends_with("hidden?"),
+        "{users:?}"
+    );
+    assert!(users[0].get("kind").is_none(), "{users:?}");
 }

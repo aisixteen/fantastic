@@ -258,11 +258,11 @@ a manager drives another manager's kernel by `forward`ing the lifecycle verb to
 that owner. The `relay_connector` advertises this typing via `set_identity`; the
 relay stores + reflects it without interpreting it.
 
-**Trademark carve-out (AGPL §7):** **"Aisixteen Fantastic"** and the
-**AISIXTEEN** word mark (USPTO reg. 7,238,635) are trademarks of AISIXTEEN.
-The license
-covers the code only — it does **not** license these marks, so a fork must
-ship under a different name. The `.fantastic` workdir format is treated as a
+**Trademark carve-out (AGPL §7):** **AISIXTEEN®** (word and robot-head design;
+U.S. Reg. No. 7,238,635; Int'l Reg. No. 1720602) is a registered trademark of
+Koreniuk Oleksandr Vasylovych; **"Aisixteen Fantastic"** is a trademark of the
+same owner. The license covers the code only — it grants **no** rights in these
+marks, so a fork must ship under a different name. The `.fantastic` workdir format is treated as a
 brand asset of the project.
 
 Any managed cloud / relay / sync layer is a separate offering, separately

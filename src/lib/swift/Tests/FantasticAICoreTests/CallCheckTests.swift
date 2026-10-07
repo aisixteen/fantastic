@@ -47,6 +47,28 @@ struct CallCheckTests {
                     + "write them again."))
     }
 
+    /// Measured 2026-10-07 (misleading_fold:rust): a grep scoped by `<ids>` lost
+    /// its leading `<` on the 3090 and the form to write kept only
+    /// target/title/type — the model rewrote it unscoped. Every argument the model
+    /// wrote carries over, a nested `<item>` as part of its list.
+    @Test func theVerbsOwnArgumentsCarryIntoTheFormToWrite() {
+        let broken =
+            "call name=\"send\">\n<target_id>ai_fold</target_id>\n"
+            + "<title>grep for checksum</title>\n<type>grep</type>\n"
+            + "<query>checksum</query>\n<ids><item>32</item></ids>\n</call>"
+        let r = CallCheck.check(broken, ran: 0)
+        #expect(r.count == 1)
+        let form =
+            r.first?.components(separatedBy: "write it as:\n").last?
+            .components(separatedBy: "\nA call is").first ?? ""
+        #expect(
+            form
+                == "<call name=\"send\">\n<target_id>ai_fold</target_id>\n"
+                + "<title>grep for checksum</title>\n<type>grep</type>\n"
+                + "<query>checksum</query>\n<ids><item>32</item></ids>\n</call>",
+            Comment(rawValue: r.first ?? ""))
+    }
+
     @Test func aJsonCallIsShownAsTags() {
         let r = CallCheck.check(
             "{\"name\": \"send\", \"arguments\": {\"target_id\": \"files\", \"payload\": "

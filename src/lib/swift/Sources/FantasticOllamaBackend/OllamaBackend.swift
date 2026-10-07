@@ -48,16 +48,17 @@ public final class OllamaBackendBundle: AgentBundle, @unchecked Sendable {
                         "think": Self.think(agent: agent).map(JSON.bool) ?? .null,
                     ]
                 },
-                makeProvider: { agent, _, _ in
-                    // `endpoint` and `model` are REQUIRED on the record — nothing
-                    // is guessed; an absent one fails the turn loud, naming it.
+                makeProvider: { agent, _, kernel in
+                    // `endpoint` is the record's; `model` the record's or read from
+                    // the server before the turn — an absent one fails loud.
                     OllamaProvider(
                         endpoint: try requiredMeta(agent, "endpoint", "ollama_backend"),
                         model: try requiredMeta(agent, "model", "ollama_backend"),
                         temperature: Self.temperature(agent: agent),
                         numCtx: Self.numCtx(agent: agent),
                         numPredict: Self.numPredict(agent: agent),
-                        think: Self.think(agent: agent))
+                        think: Self.think(agent: agent),
+                        key: keyReader(agent.id, kernel, backend: "ollama_backend", required: false))
                 }
             ))
     }
@@ -82,7 +83,10 @@ public final class OllamaBackendBundle: AgentBundle, @unchecked Sendable {
     static let RECORD_SCHEMA: JSON = RecordSchema.schema(
         [
             RecordSchema.field("endpoint", "str", "the ollama server URL", required: true),
-            RecordSchema.field("model", "str", "the model name", required: true),
+            RecordSchema.field(
+                "model", "str",
+                "the model name; left out, read from the server before a turn and written here "
+                    + "(the one model GET /api/tags lists)"),
             RecordSchema.field(
                 "num_ctx", "int", "the context window ollama loads the model with"),
             RecordSchema.field(
@@ -90,6 +94,8 @@ public final class OllamaBackendBundle: AgentBundle, @unchecked Sendable {
                 default: .double(DEFAULT_TEMPERATURE)),
             RecordSchema.field("num_predict", "int", "a turn's output budget (tokens)"),
             RecordSchema.field("think", "bool", "turn the model's thinking channel on or off"),
+            // a door's key, when the server sits behind one — absent = no header
+            RecordSchema.credentialsField(required: false),
         ])
 
     /// THE PYTHON FILE, BYTE FOR BYTE (`ollama_backend/readme.md`). Persisted as
@@ -108,6 +114,17 @@ public final class OllamaBackendBundle: AgentBundle, @unchecked Sendable {
     `ai_core.core`; this module supplies the `OllamaProvider` builder (endpoint /
     model from the agent record) and `ai_core.build()` wires the rest into
     `(VERBS, handler)`.
+
+    ## The record
+    `endpoint` (the server URL, e.g. `http://127.0.0.1:11434`) is required. `model` left
+    out is READ FROM THE SERVER before a verb that runs a turn (`send`, `inquiry`,
+    `context_recall`) — the ONE model `GET {endpoint}/api/tags` lists — and written back
+    to the record; a server listing several names them and the record must pick one. A
+    server that does not answer refuses the verb (`bad_arg`, `arg: model`). Nothing about
+    the window is read: ollama loads a model with the request's `num_ctx`, else the
+    Modelfile's, else its own default, which the API does not expose — set `num_ctx` (or
+    `context_window`). `credentials` (`{store, ref}`) names a key for a server behind a
+    door: read before each request, sent as `Authorization: Bearer`; absent, no header.
 
     ## Bare completion + the `<call>` grammar — no native tool API
     `send` performs exactly ONE provider pass: the `OllamaProvider` streams the model's text and never receives a `tools` array nor reads `message.tool_calls`. Tool-calling is RAW and shared by every backend: `ai_core` parses the model's `<call name=…>` tags from the streamed text, dispatches them as ONE batch (`kernel.send([...])`), and each destination's results arrive as ONE fresh turn — there is no loop inside a pass.
@@ -177,7 +194,16 @@ public final class OllamaBackendBundle: AgentBundle, @unchecked Sendable {
         payload: JSON,
         kernel: Kernel
     ) async throws -> JSON? {
-        try await core.handle(agentId: agentId, payload: payload, kernel: kernel)
+        // A verb that runs a turn first reads a `model` the record leaves out; a
+        // server that does not answer refuses the verb, naming it.
+        if let verb = payload["type"].asString, OllamaServerRead.TURN_VERBS.contains(verb),
+            let refused = await OllamaServerRead.resolve(
+                agentId, kernel: kernel,
+                key: keyReader(agentId, kernel, backend: "ollama_backend", required: false))
+        {
+            return refused
+        }
+        return try await core.handle(agentId: agentId, payload: payload, kernel: kernel)
     }
 
     /// The kernel is killing a task of this agent. If it is the in-flight
@@ -224,6 +250,9 @@ struct OllamaProvider: AIProvider {
     let numCtx: Int64?
     let numPredict: Int64?
     let think: Bool?
+    /// The key reader, awaited before each request — the record's `credentials`
+    /// (a server behind a door); nil from it = no `Authorization` header.
+    let key: KeyReader
     /// What the endpoint REPORTED for the last pass — the prompt size (ai_core
     /// calibrates its own estimate with it) and the stop reason.
     let usage: AIUsage? = AIUsage()
@@ -240,6 +269,7 @@ struct OllamaProvider: AIProvider {
         let numPredict = numPredict
         let think = think
         let usage = usage
+        let key = key
         return AsyncThrowingStream { continuation in
             let task = Task {
                 // FAILS LOUD, INSIDE THE TURN — python's wording, verbatim.
@@ -276,6 +306,9 @@ struct OllamaProvider: AIProvider {
                 req.headers.add(name: "Content-Type", value: "application/json")
                 req.body = .bytes(ByteBuffer(string: body.serialize()))
                 do {
+                    if let secret = try await key(endpoint), !secret.isEmpty {
+                        req.headers.add(name: "Authorization", value: "Bearer \(secret)")
+                    }
                     let response = try await HTTPClient.shared.execute(req, timeout: .seconds(600))
                     // RAISE ON A NON-2xx, exactly where python's ollama client does.
                     // Its `_request` streams under `r.raise_for_status()` and turns

@@ -57,6 +57,7 @@ let package = Package(
             "FantasticOllamaBackend",
             "FantasticResponsesBackend",
             "FantasticVllmBackend",
+            "FantasticAnthropicBackend",
             "FantasticFoundationModelsBackend",
             "FantasticRamStore",
             "FantasticCredentialStore",
@@ -284,6 +285,15 @@ let package = Package(
                            .product(name: "AsyncHTTPClient", package: "async-http-client"),
                            .product(name: "NIOCore", package: "swift-nio")]
         ),
+        // Anthropic's Messages API — raw prompt-and-parse, an optional key
+        // (python `anthropic_backend`).
+        .target(
+            name: "FantasticAnthropicBackend",
+            dependencies: ["FantasticAICore", "FantasticKernel", "FantasticJSON",
+                           .product(name: "OrderedCollections", package: "swift-collections"),
+                           .product(name: "AsyncHTTPClient", package: "async-http-client"),
+                           .product(name: "NIOCore", package: "swift-nio")]
+        ),
         // Apple Foundation Models (on-device). FMCore is THE ONE implementation
         // of the FoundationModels calls — availability, the window, a raw-text
         // delta stream over a rebuilt transcript; Foundation only, the FM import
@@ -337,6 +347,7 @@ let package = Package(
                 "FantasticOllamaBackend",
                 "FantasticResponsesBackend",
                 "FantasticVllmBackend",
+                "FantasticAnthropicBackend",
                 "FantasticFMCore", "FantasticFoundationModelsBackend",
                 "FantasticExecBridge",
             ]
@@ -424,7 +435,8 @@ let package = Package(
             name: "FantasticAIBackendsTests",
             dependencies: [
                 "FantasticAICore", "FantasticOllamaBackend",
-                "FantasticResponsesBackend", "FantasticVllmBackend", "FantasticJSON",
+                "FantasticResponsesBackend", "FantasticVllmBackend", "FantasticAnthropicBackend",
+                "FantasticJSON",
                 // The key reader against a real credential store (and the memory
                 // store an AI agent's record must name).
                 "FantasticKernel", "FantasticCredentialStore", "FantasticRamStore",

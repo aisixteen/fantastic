@@ -333,6 +333,18 @@ public enum CallCheck {
         return (newlines(text, tok.start) + 1, col + 1, lead + defang(str(shown[...])), caret)
     }
 
+    /// The name of a bare opening tag (`<query>`, no attributes) that is none of
+    /// ours — inside a call run, an argument of the verb. Python `_plain`.
+    static func plain(_ t: Tok) -> String? {
+        guard t.kind == .other, t.text.hasPrefix("<"), t.text.hasSuffix(">") else { return nil }
+        let inner = Array(t.text.unicodeScalars.dropFirst().dropLast())
+        guard let first = inner.first, isIdentStart(first),
+            inner.dropFirst().allSatisfy({ isWord($0) || $0 == "-" })
+        else { return nil }
+        let name = str(inner[...])
+        return name == "item" ? nil : name
+    }
+
     static func report(_ text: S, _ masked: S, _ call: Call) -> String {
         let first = call.toks.first { $0.kind != .other }!
         let name = call.toks.compactMap(\.name).first ?? "send"
@@ -347,10 +359,27 @@ public enum CallCheck {
         case .close: why = "a close with no call open"
         default: why = "not a call tag"
         }
+        // EVERY ARGUMENT THE MODEL WROTE carries into the form to write — the verb's
+        // own (`<query>`, `<ids>`) as much as ours by name. Measured 2026-10-07
+        // (misleading_fold:rust): a grep scoped by `<ids>` lost its `<` and was
+        // reported with only target/title/type; the model rewrote it unscoped. A tag
+        // nested in an argument (an `<item>` of `<ids>`) is part of that value.
+        var after = 0
+        func take(_ t: Tok, _ a: String) {
+            let closer = "</\(a)>"
+            guard let v = value(masked, t, closer) else { return }
+            if let at = find(masked, Array(closer.unicodeScalars), from: t.end) {
+                after = at + closer.unicodeScalars.count
+            }
+            args.append((a, .string(v)))
+        }
         for t in call.toks {
+            if t.start < after { continue }
             switch t.kind {
             case .arg where !t.closing:
-                if let a = t.arg, let v = value(masked, t, "</\(a)>") { args.append((a, .string(v))) }
+                if let a = t.arg { take(t, a) }
+            case .other where plain(t) != nil:
+                take(t, plain(t)!)
             case .param:
                 if let a = t.arg, let close = nextClose(masked, from: t.end) {
                     let v = Array(pyStrip(str(masked[t.end..<close])).unicodeScalars).prefix(200)

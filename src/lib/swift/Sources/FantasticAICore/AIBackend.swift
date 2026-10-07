@@ -243,10 +243,7 @@ public final class AIBackend: @unchecked Sendable {
         try await saveHistory(
             agentId.value, kernel,
             [
-                .object([
-                    "role": .string("user"), "content": .string(entry.text),
-                    "id": .integer(inId), "parent": inParent.map(JSON.integer) ?? .null,
-                ]),
+                incomingRow(entry.text, id: inId, parent: inParent, notice: entry.notice),
                 .object([
                     "role": .string("assistant"),
                     "content": .string(cutMarker(entry.textSoFar, "stopped by \(who)", unsent)),
@@ -391,7 +388,7 @@ public final class AIBackend: @unchecked Sendable {
         "context_status": .string("No args. The context-budget posture + the last overflow projection + the model's\nderived reaction to it. Returns {context_window, output_reserve, budget, strategy,\nlast_projection:{fired, strategy?, kept_messages?, dropped_messages?, summarized?,\ntoo_small?}|null, last_reaction:{recalled, persisted, recall_count}|null}."),
         "recall": .string("args: query:str? (substring of a serialized turn, tool args and replies included), limit:int? (default 20, max 100), before:int? (store index — page backward). Pages turns back from the DURABLE store — the FULL conversation, so anything compaction dropped is one call away. Read-only. A page always fits INLINE; trimmed from the oldest end when it would not, with the index to continue from. Returns {messages:[{index,role,content}], total, truncated, note?}."),
         "grep": .string("args: query:str (req — case-insensitive substring), ids:list[int]? (row, pid or fold ids to search), limit:int? (default: as many as fit inline), width:int? (chars per matched line, default 200). Finds the LINE that mentions something ANYWHERE in your memory — every row you ever wrote or received (behind every clear, inside every fold; a fold id searches its members), and the reply bodies still held this run. Raise `width` when the value sits deep in a long line. Returns {matches:[{id, line, text}], total, truncated}."),
-        "context_recall": .string("args: dry:bool? (mechanical fit only — no model call). Rebuild this agent's VIEW from its store: fit the head to the budget at digest resolution, then ask the model which rows it wants in full, persist the id list, log the decision as a row, and drop RAM scratch. Runs on boot, after a fold batch, or on request. Returns {kept, expanded, dropped, budget, why, degraded}."),
+        "context_recall": .string("args: dry:bool? (mechanical fit only — no model call). Rebuild this agent's VIEW from its store: with `context_strategy` fold, a head longer than the budget is FOLDED first (oldest spans into fold rows, as a turn's projection folds); then fit the head to the budget at digest resolution, ask the model which rows it wants in full, persist the id list, log the decision as a row, and drop RAM scratch. Runs on boot, after a fold batch, or on request. Returns {kept, expanded, dropped, folded, budget, why, degraded}."),
         "context_clear": .string("args: why:str? — start a NEW THREAD on the same store: a CLEAR-FOLD — one row whose members are every row since the previous clear (no summary) — and the model's view begins at its `[cleared <id> · N rows]` line. Nothing is deleted or forgotten: grep, recall and `history {fold: <id>}` reach every member. Empties the persisted view and drops RAM scratch (projection, fold counters, pending recall). Returns {cleared:id, rows:N}."),
         "watch": .string("args: body:bool? (default false), watcher:str? (operator only — an inbox id to deliver to). Announce every row this agent appends to YOUR inbox as {type:'row', source, row:{id, kind, role, bytes}} — content-free; with body:true the row's `content` too. Needs a registered inbox. Returns {watching:true, watcher, body}."),
         "unwatch": .string("args: watcher:str? (operator only). Stop announcing rows to you. Returns {watching:false}."),
@@ -474,7 +471,7 @@ public final class AIBackend: @unchecked Sendable {
                 requestId: payload["request_id"]))
         deliverSoon(
             kernel: kernel, target: id, text: text, clientId: client,
-            systemPrompt: payload["system_prompt"].asString)
+            systemPrompt: payload["system_prompt"].asString, notice: false)
         return .object([
             "accepted": .bool(true),
             "re": task.map { .integer($0.value) } ?? .null,
@@ -600,9 +597,15 @@ public final class AIBackend: @unchecked Sendable {
         // also keeps the chat-store-persisted history race-free.
         let sendId = mintSendId()
         let st = runState(kernel, agent.id.value)
+        // A notice is this agent's own harness text: honoured only when the agent
+        // sent it to itself (or the operator did), so no peer can hide a message
+        // from a person's view. Python `_send`.
+        let origin = KernelTaskLocals.currentOrigin?.value
+        let notice = pyTruthy(payload["notice"]) && (origin == nil || origin == agent.id.value)
         st.enqueue(
             AIQueuedEntry(
-                clientId: clientId, text: text, sendId: sendId, queuedAt: nowSecs()))
+                clientId: clientId, text: text, sendId: sendId, queuedAt: nowSecs(),
+                notice: notice))
 
         // Contention probe (best-effort, like Rust's try_lock): if a generation
         // already holds the lock, tell the caller it's queued. ONE event, and it is
@@ -851,7 +854,7 @@ public final class AIBackend: @unchecked Sendable {
         if takeRecallDue(agentId.value) {
             _ = try await contextRecall(
                 agent: agent, payload: .object([:]), kernel: kernel, provider: provider,
-                systemPrompt: systemPrompt)
+                systemPrompt: systemPrompt, clientId: clientId)
         }
         // The message list UNDER the FIFO lock (we hold it here), so serialized
         // sends can't race load→save: the system block rebuilt from the live
@@ -1015,10 +1018,9 @@ public final class AIBackend: @unchecked Sendable {
             try await saveHistory(
                 agentId.value, kernel,
                 [
-                    .object([
-                        "role": .string("user"), "content": .string(userText),
-                        "id": .integer(inId), "parent": inParent.map(JSON.integer) ?? .null,
-                    ])
+                    incomingRow(
+                        userText, id: inId, parent: inParent,
+                        notice: st.currentSnapshot()?.notice ?? false)
                 ])
             await emitStatus(
                 kernel: kernel, agentId: agentId, clientId: clientId, phase: "done",
@@ -1052,10 +1054,9 @@ public final class AIBackend: @unchecked Sendable {
         try await saveHistory(
             agentId.value, kernel,
             [
-                .object([
-                    "role": .string("user"), "content": .string(userText),
-                    "id": .integer(inId), "parent": inParent.map(JSON.integer) ?? .null,
-                ]),
+                incomingRow(
+                    userText, id: inId, parent: inParent,
+                    notice: st.currentSnapshot()?.notice ?? false),
                 // A pass the model stopped with a block open leaves the CUT
                 // MARKER instead, on top of the context (owner, 2026-10-04).
                 .object([

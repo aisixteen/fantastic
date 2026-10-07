@@ -5,6 +5,11 @@ PREFIX in spans, keeping only the live tail. Scored from the store and the last 
 several folds written, and the final view holds no row that any fold covers — after the
 cut the model sees folds and the tail, nothing else. The report must still name (almost)
 every file, which means the summaries carried them or the model went into a fold.
+
+PRE-SEEDED (owner, 2026-10-07): the reads are PLANTED — the instruction, each read call and
+its reply inline — and the last reply arrives live, so the run continues that chain: the
+folding and the answer are the model's own, without spending a live turn per file.
+The live reply CONTINUES the planted chain, so it is still ONE chain that never closed.
 """
 from __future__ import annotations
 
@@ -21,8 +26,9 @@ from helpers import verdict
 from helpers.facts_arm import (
     FOLD_ARMS,
     base_checks,
-    both_arms,
+    both_planted,
     conclude,
+    file_reads,
     fixture,
     plant_fillers,
     report,
@@ -44,12 +50,13 @@ async def main():
     try:
         plant_fillers(N, pad_to=4000)
         await fixture(root, FB, arms=FOLD_ARMS)
-        recency, fold = await both_arms(root, core, BK, FB, TASK, "report.md", arms=FOLD_ARMS)
+        reads = file_reads([f"filler_{i}.txt" for i in range(N)])
+        recency, fold = await both_planted(root, core, BK, FB, TASK, reads, "report.md", arms=FOLD_ARMS)
         covered = {r for m in fold["msgs"] if m.get("kind") == "fold" for r in (m.get("refs") or [])}
         leaked = [i for i in fold["view_ids"] if i in covered]
         listed = sum(f"filler_{i}.txt" in fold["body"] for i in range(N))
         report((recency, fold), lambda a: f"listed={sum(f'filler_{i}.txt' in a['body'] for i in range(N))}/{N}  view rows={len(a['view_ids'])}")
-        checks = [c for c in base_checks(recency, fold) if not c[0].startswith("both arms produced")] + [
+        checks = [c for c in base_checks(recency, fold, planted=True) if not c[0].startswith("both arms produced")] + [
             (f"several span folds were written ({fold['folded']})", fold["folded"] >= 3),
             (f"the last view holds no folded row ({len(leaked)} leaked)", not leaked),
             (f"the report names nearly every file ({listed}/{N})", listed >= int(N * 0.9)),

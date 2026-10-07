@@ -3,6 +3,10 @@
 `fold_descent`'s fixture: a marker mid-body in filler_1, sixteen reads at a 12k window.
 Scored: a recall row follows each fold batch, every self-reply the agent got back was
 inline (the cap invariant — 0 dehydrated), and the marker is reported.
+
+PRE-SEEDED (owner, 2026-10-07): the reads are PLANTED — the instruction, each read call and
+its reply inline — and the last reply arrives live, so the run continues that chain: the
+folding and the answer are the model's own, without spending a live turn per file.
 """
 from __future__ import annotations
 
@@ -19,9 +23,10 @@ from backends import backend as _resolve_backend
 from helpers import verdict
 from helpers.facts_arm import (
     FOLD_ARMS,
+    file_reads,
     fixture,
     plant_fillers,
-    run_arm,
+    run_planted,
 )
 from helpers.kernel import open_kernel
 
@@ -42,7 +47,8 @@ async def main():
         task = (f"Read `filler_0.txt` … `filler_{N - 1}.txt` through `notes`, ONE PER TURN, noting anything unusual. Then "
                 f"write `report.md` through `notes`: list every file, and add `marker: <filename> <value>` for the one "
                 f"file that carried an audit marker (grep for it if it is no longer in view). Then {DONE}.")
-        a = await run_arm(root, core, BK, FB, AID, STRATEGY, EXTRA, task, "report.md")
+        reads = file_reads([f"filler_{i}.txt" for i in range(N)])
+        a = await run_planted(root, core, BK, FB, AID, STRATEGY, EXTRA, task, reads, "report.md")
         want = f"marker: filler_1.txt {marker}"
         print(f"     turns={a['turns']}  folded={a['folded']}  recalls={a['recall_rows']}  greps={a['greps']}  folds_opened={a['folds_opened']}  "
               f"self-replies dehydrated={a['dehydrated_self']}{(' ' + '; '.join(a.get('dehydrated_self_tags') or [])) if a['dehydrated_self'] else ''}  FOUND={want in a['body']}")

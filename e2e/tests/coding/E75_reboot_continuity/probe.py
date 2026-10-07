@@ -6,6 +6,10 @@ bodies — held in RAM only — are gone. The boot is lazy; the first turn after
 the head and runs `context_recall`. Scored: the report lists all sixteen, reads after
 the reboot do not repeat the first eight, and the post-reboot view is a subset of the
 store.
+
+PRE-SEEDED (owner, 2026-10-07): the first eight reads are PLANTED — each read call and its
+reply inline, then the model's `done` — the agent boots over them, and the reboot and the
+second half run live.
 """
 from __future__ import annotations
 
@@ -21,8 +25,11 @@ from backends import backend as _resolve_backend
 from helpers import verdict
 from helpers.facts_arm import (
     FOLD_ARMS,
+    file_reads,
     fixture,
     plant_fillers,
+    plant_store,
+    planted_reads,
     read_view,
     reboot_agent,
     store_rows,
@@ -46,13 +53,13 @@ async def main():
         from helpers.facts_arm import connect_arm
         half = (f"Read ONLY `filler_0.txt` through `filler_7.txt` (eight files) through `notes`, ONE PER TURN. "
                 f"Do NOT read filler_8 or beyond, do NOT write anything. After filler_7, {DONE}.")
+        # PHASE ONE, PLANTED: the instruction, eight reads, the model's `done`.
+        rows = planted_reads(root.ctx.mint_id, half, file_reads([f"filler_{i}.txt" for i in range(8)]),
+                             tail=False)
+        rows.append({"role": "assistant", "id": root.ctx.mint_id(), "parent": rows[-1]["id"],
+                     "content": '<call name="done"></call>'})
+        await plant_store(core, root, AID, rows)
         conn = await connect_arm(root, core, BK, FB, AID, STRATEGY, EXTRA)
-        # PHASE ONE IS BOUNDED. Measured: unbounded, it ran to the 80-turn cap and the
-        # rebooted agent woke into an unfinished task and finished THAT instead.
-        from dataclasses import replace as _replace
-
-        conn.limits = _replace(conn.limits, max_turns=14)
-        await drive(conn, half, client_id=AID, via="user")
         before = await store_rows(root, core, AID)
         reads_before = len(ctx_score.calls_made(before, target="notes", verb="read"))
         # ── REBOOT ───────────────────────────────────────────────────────────

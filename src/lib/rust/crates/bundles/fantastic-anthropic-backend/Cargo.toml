@@ -1,0 +1,23 @@
+[package]
+publish = false
+name = "fantastic-anthropic-backend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Anthropic LLM bundle — an agent over the Messages API, raw prompt-and-parse tool-calling."
+
+[dependencies]
+fantastic-ai-core = { path = "../fantastic-ai-core" }
+fantastic-bundle = { path = "../../fantastic-bundle" }
+fantastic-kernel = { path = "../../fantastic-kernel" }
+async-trait = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+futures-util = { workspace = true }
+
+[dev-dependencies]
+fantastic-ram-store = { path = "../fantastic-ram-store" }
+tempfile = "3"
+tokio = { workspace = true, features = ["test-util", "macros"] }
+wiremock = "0.6"

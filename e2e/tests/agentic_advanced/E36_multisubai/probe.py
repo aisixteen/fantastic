@@ -42,6 +42,7 @@ sys.path.insert(
 from backends import backend as _resolve_backend  # noqa: E402
 from helpers import creds, memory
 from helpers import verdict  # noqa: E402
+from helpers.ai import IDLE_END, QuietWatch  # noqa: E402
 from helpers.kernel import home, open_kernel  # noqa: E402
 
 BK = _resolve_backend()
@@ -288,6 +289,7 @@ async def main() -> None:
         print(f"  kicked off {SOLVERS} at once; watching up to {UNATTENDED:.0f}s\n")
         answer = None
         seen_rows: set = set()
+        watch = QuietWatch(root)
         while time.monotonic() - t0 < UNATTENDED:
             await asyncio.sleep(15.0)
             p = Path(".fantastic/data/answer.txt")
@@ -312,6 +314,9 @@ async def main() -> None:
             if answer is not None:
                 # let the agreement turns land, then stop
                 await asyncio.sleep(20.0)
+                break
+            if await watch.quiet():
+                print(f"  · nothing in flight for {IDLE_END:.0f}s — the swarm stopped", flush=True)
                 break
         for t in kicks:
             if not t.done():

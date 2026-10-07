@@ -110,6 +110,27 @@ def test_arguments_with_no_call_open():
     assert '<call name="send">\n<target_id>notes</target_id>\n<type>read</type>' in r
 
 
+def test_the_verbs_own_arguments_carry_into_the_form_to_write():
+    """Measured 2026-10-07 (misleading_fold:rust): a grep scoped by `<ids>` lost its
+    leading `<` on the 3090 and the form to write kept only target/title/type — the
+    model rewrote it unscoped. Every argument the model wrote carries over, a nested
+    `<item>` as part of its list."""
+    broken = """call name="send">
+<target_id>ai_fold</target_id>
+<title>grep for checksum</title>
+<type>grep</type>
+<query>checksum</query>
+<ids><item>32</item></ids>
+</call>"""
+    (r,) = check(broken, ran=0)
+    form = r.split("write it as:\n", 1)[1].split("\nA call is", 1)[0]
+    assert form == (
+        '<call name="send">\n<target_id>ai_fold</target_id>\n'
+        "<title>grep for checksum</title>\n<type>grep</type>\n"
+        "<query>checksum</query>\n<ids><item>32</item></ids>\n</call>"
+    ), r
+
+
 def test_a_stray_close_after_a_good_call():
     answer = '<call name="done"></call></call>'
     (r,) = check(answer, ran=0)

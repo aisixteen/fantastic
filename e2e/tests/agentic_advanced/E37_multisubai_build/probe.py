@@ -41,6 +41,7 @@ sys.path.insert(
 from backends import backend as _resolve_backend
 from helpers.kernel import home
 from helpers import creds, memory, verdict  # noqa: E402
+from helpers.ai import IDLE_END, QuietWatch  # noqa: E402
 from tests.agentic_advanced.E30_subai import probe as P  # noqa: E402
 from tests.agentic_advanced.E36_multisubai import probe as S  # noqa: E402
 
@@ -278,6 +279,7 @@ async def score(root, store_id, total, new_total, transcript):
     print(f"       … the team works unattended, up to {UNATTENDED:.0f}s")
     t0 = time.monotonic()
     answer = None
+    watch = QuietWatch(root)
     while time.monotonic() - t0 < UNATTENDED:
         p = Path(".fantastic/data/answer.txt")
         if p.exists():
@@ -285,6 +287,9 @@ async def score(root, store_id, total, new_total, transcript):
             if re.fullmatch(r"\d{3}", first):
                 answer = first
                 break
+        if await watch.quiet():
+            print(f"       … nothing in flight for {IDLE_END:.0f}s — the team stopped")
+            break
         await asyncio.sleep(5.0)
     c3 = answer == S.CODE
     print(f"    3. the code is right                {'OK' if c3 else 'NO'} answer={answer!r} want={S.CODE} after={time.monotonic() - t0:.0f}s")
@@ -292,7 +297,11 @@ async def score(root, store_id, total, new_total, transcript):
     # ── 4. THE CREATOR IS WOKEN, VALIDATES, DELETES THE FLEET, STOPS ──
     woke = validated = stopped = deleted = False
     if c3:
-        end = time.monotonic() + 240.0
+        # UP TO THE UNATTENDED LIMIT, ENDED BY THE IDLE STOP (owner, 2026-10-07): a fixed
+        # 240 s cut the creator mid-work on a one-request-at-a-time GPU (its last turn
+        # was awaiting its own calls' replies); a quiet kernel ends the wait instead.
+        end = time.monotonic() + UNATTENDED
+        watch = QuietWatch(root)
         while time.monotonic() < end and not stopped:
             rows = (await _rows(root, CREATOR))
             # the wake: a root user row from a solver carrying CONCLUDED
@@ -305,6 +314,9 @@ async def score(root, store_id, total, new_total, transcript):
                 ids = {a["id"] for a in (live.get("agents") or [])}
                 deleted = validated and not any(s in ids for s in solvers)
                 stopped = 'name="done"' in after and deleted
+            if not stopped and await watch.quiet():
+                print(f"       … nothing in flight for {IDLE_END:.0f}s — the creator stopped")
+                break
             if not stopped:
                 await asyncio.sleep(5.0)
     c4 = woke and validated and deleted and stopped

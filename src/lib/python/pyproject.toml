@@ -18,6 +18,7 @@ dependencies = [
   "fantastic-kernel-state",
   "fantastic-ollama-backend",
   "fantastic-responses-backend",
+  "fantastic-anthropic-backend",
   "fantastic-vllm-backend",
   "fantastic-io-bridge",
   "fantastic-ws-bridge",
@@ -69,6 +70,7 @@ testpaths = [
   "bundled_agents/ai/ai_core/tests",
   "bundled_agents/ai/ollama/ollama_backend/tests",
   "bundled_agents/ai/responses/responses_backend/tests",
+  "bundled_agents/ai/anthropic/anthropic_backend/tests",
   "bundled_agents/ai/vllm/vllm_backend/tests",
   "bundled_agents/io/io_bridge/tests",
   "bundled_agents/io/ws_bridge/tests",
@@ -94,6 +96,7 @@ members = [
   "bundled_agents/ai/ai_core",
   "bundled_agents/ai/ollama/ollama_backend",
   "bundled_agents/ai/responses/responses_backend",
+  "bundled_agents/ai/anthropic/anthropic_backend",
   "bundled_agents/ai/vllm/vllm_backend",
   "bundled_agents/io/io_bridge",
   "bundled_agents/io/ws_bridge",
@@ -115,6 +118,7 @@ fantastic-scheduler = { workspace = true }
 fantastic-file-bridge = { workspace = true }
 fantastic-ollama-backend = { workspace = true }
 fantastic-responses-backend = { workspace = true }
+fantastic-anthropic-backend = { workspace = true }
 fantastic-vllm-backend = { workspace = true }
 fantastic-io-bridge = { workspace = true }
 fantastic-ws-bridge = { workspace = true }

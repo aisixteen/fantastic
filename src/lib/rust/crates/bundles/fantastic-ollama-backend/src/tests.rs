@@ -515,6 +515,7 @@ async fn an_empty_model_fails_loud_in_chat() {
             num_ctx: None,
             num_predict: None,
             think: None,
+            key: Arc::new(crate::tests_server::NoKey),
             report: Default::default(),
         };
         let err = match p

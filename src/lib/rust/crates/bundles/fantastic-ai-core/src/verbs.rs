@@ -51,7 +51,7 @@ pub fn verb_docs() -> Value {
         "context_status": "No args. The context-budget posture + the last overflow projection + the model's\nderived reaction to it. Returns {context_window, output_reserve, budget, strategy,\nlast_projection:{fired, strategy?, kept_messages?, dropped_messages?, summarized?,\ntoo_small?}|null, last_reaction:{recalled, persisted, recall_count}|null}.",
         "recall": "args: query:str? (substring of a serialized turn, tool args and replies included), limit:int? (default 20, max 100), before:int? (store index — page backward). Pages turns back from the DURABLE store — the FULL conversation, so anything compaction dropped is one call away. Read-only. A page always fits INLINE; trimmed from the oldest end when it would not, with the index to continue from. Returns {messages:[{index,role,content}], total, truncated, note?}.",
         "grep": "args: query:str (req — case-insensitive substring), ids:list[int]? (row, pid or fold ids to search), limit:int? (default: as many as fit inline), width:int? (chars per matched line, default 200). Finds the LINE that mentions something ANYWHERE in your memory — every row you ever wrote or received (behind every clear, inside every fold; a fold id searches its members), and the reply bodies still held this run. Raise `width` when the value sits deep in a long line. Returns {matches:[{id, line, text}], total, truncated}.",
-        "context_recall": "args: dry:bool? (mechanical fit only — no model call). Rebuild this agent's VIEW from its store: fit the head to the budget at digest resolution, then ask the model which rows it wants in full, persist the id list, log the decision as a row, and drop RAM scratch. Runs on boot, after a fold batch, or on request. Returns {kept, expanded, dropped, budget, why, degraded}.",
+        "context_recall": "args: dry:bool? (mechanical fit only — no model call). Rebuild this agent's VIEW from its store: with `context_strategy` fold, a head longer than the budget is FOLDED first (oldest spans into fold rows, as a turn's projection folds); then fit the head to the budget at digest resolution, ask the model which rows it wants in full, persist the id list, log the decision as a row, and drop RAM scratch. Runs on boot, after a fold batch, or on request. Returns {kept, expanded, dropped, folded, budget, why, degraded}.",
         "context_clear": "args: why:str? — start a NEW THREAD on the same store: a CLEAR-FOLD — one row whose members are every row since the previous clear (no summary) — and the model's view begins at its `[cleared <id> · N rows]` line. Nothing is deleted or forgotten: grep, recall and `history {fold: <id>}` reach every member. Empties the persisted view and drops RAM scratch (projection, fold counters, pending recall). Returns {cleared:id, rows:N}.",
         "watch": "args: body:bool? (default false), watcher:str? (operator only — an inbox id to deliver to). Announce every row this agent appends to YOUR inbox as {type:'row', source, row:{id, kind, role, bytes}} — content-free; with body:true the row's `content` too. Needs a registered inbox. Returns {watching:true, watcher, body}.",
         "unwatch": "args: watcher:str? (operator only). Stop announcing rows to you. Returns {watching:false}.",
@@ -216,7 +216,7 @@ pub async fn on_cancel(
         agent_id,
         kernel,
         &[
-            json!({"role": "user", "content": entry.text, "id": in_id, "parent": in_parent}),
+            crate::agent_loop::incoming_row(&entry.text, in_id, in_parent, entry.notice),
             json!({
                 "role": "assistant",
                 "content": cut_marker(&entry.text_so_far, &format!("stopped by {who}"), &unsent),
@@ -871,11 +871,17 @@ pub async fn send(
 
     // Enqueue.
     let queued_at = now_secs();
+    // A notice is this agent's own harness text: honoured only when the agent sent
+    // it to itself (or the operator did), so no peer can hide a message from a
+    // person's view. Python `_send`.
+    let notice = payload.get("notice").is_some_and(py_truthy)
+        && fantastic_kernel::current_origin().is_none_or(|s| s == *agent_id);
     let entry = QueuedEntry {
         client_id: client_id.clone(),
         text: text.clone(),
         send_id: send_id.clone(),
         queued_at,
+        notice,
     };
     // WHO IS AHEAD, counted in the SAME critical section as the push. python's
     // enqueue → `lock.locked()` → acquire runs without yielding, so "the lock is
@@ -945,6 +951,7 @@ pub async fn send(
             task_id: current_task().map(|t| t.0.to_string()),
             parts: None,
             stopped_by: None,
+            notice,
         });
     }
     emit_status(kernel, &state, agent_id, &client_id, "thinking", Map::new()).await;
@@ -1260,6 +1267,7 @@ pub fn inquiry_accept(
         text,
         &client,
         payload.get("system_prompt").and_then(Value::as_str),
+        false,
     );
     json!({
         "accepted": true,
@@ -1401,6 +1409,7 @@ where
                 kernel,
                 Some(&p),
                 cfg.model_window,
+                None,
                 None,
             )
             .await?

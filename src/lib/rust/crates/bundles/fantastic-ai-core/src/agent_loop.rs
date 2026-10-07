@@ -103,6 +103,28 @@ fn render_for_model(messages: &[Value]) -> Vec<Value> {
         .collect()
 }
 
+/// The incoming user row; `kind: "notice"` when it is this layer's own text to
+/// its own agent (python `_notice_kind`) — the row otherwise keeps its role as its
+/// kind.
+#[must_use]
+pub fn incoming_row(text: &str, id: i64, parent: Option<i64>, notice: bool) -> Value {
+    let mut row = json!({"role": "user", "content": text, "id": id, "parent": parent});
+    if notice {
+        row["kind"] = json!("notice");
+    }
+    row
+}
+
+/// Whether the turn in flight answers this layer's own text.
+fn notice_in_flight(state: &BackendState) -> bool {
+    state
+        .current_meta
+        .lock()
+        .expect("current poisoned")
+        .as_ref()
+        .is_some_and(|c| c.notice)
+}
+
 /// One generation: assemble (system + compacted history + user) → project context
 /// ONCE (auto-compact / notice / too_small) → ONE provider pass streaming tokens →
 /// persist. Runs INLINE in the `send` dispatch — which is itself a kernel task, so
@@ -143,6 +165,7 @@ pub async fn run_generation(
             Some(provider),
             cfg.model_window,
             system_prompt.as_deref(),
+            Some(client_id),
         )
         .await?;
     }
@@ -298,7 +321,12 @@ pub async fn run_generation(
         save_history(
             self_id,
             kernel,
-            &[json!({"role": "user", "content": user_text, "id": in_id, "parent": in_parent})],
+            &[incoming_row(
+                user_text,
+                in_id,
+                in_parent,
+                notice_in_flight(state),
+            )],
         )
         .await?;
         emit_status(kernel, state, self_id, client_id, "done", {
@@ -332,7 +360,7 @@ pub async fn run_generation(
     // APPEND this send's user + assistant turns to the memory store so context
     // management (compaction/recall) has the FULL conversation next turn.
     let new_turns = vec![
-        json!({"role": "user", "content": user_text, "id": in_id, "parent": in_parent}),
+        incoming_row(user_text, in_id, in_parent, notice_in_flight(state)),
         // STRIPPED — the deliberation is not part of the conversation. The RAW
         // text (thinking included) is what the caller receives; the router parses
         // only the answer, and durable history loses the `<think>` spans, because a

@@ -13,4 +13,4 @@ limits:
   no_progress_turns: 32
   turn_chars: 60000
   turn_seconds: 300
-env: {E2E_WINDOW: "4500"}  # 4.5k: the past is planted (owner 2026-10-07); 3.5k is below the system block (too_small)
+env: {E2E_WINDOW: "6000"}  # 6k (owner 2026-10-07): at 4.5k a turn of two grep replies did not fit beside the 2.3k system block; fillers still inline (under the cap)

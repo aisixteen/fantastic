@@ -3,6 +3,10 @@
 The very first instruction carries a code. Sixteen reads later, several folds in, the
 model is asked to quote it — recall pages the store where every row and every fold still
 lives — and to find a marker that sits inside a folded read, by grep.
+
+PRE-SEEDED (owner, 2026-10-07): the reads are PLANTED — the instruction, each read call and
+its reply inline — and the last reply arrives live, so the run continues that chain: the
+folding and the answer are the model's own, without spending a live turn per file.
 """
 from __future__ import annotations
 
@@ -20,8 +24,9 @@ from helpers import verdict
 from helpers.facts_arm import (
     FOLD_ARMS,
     base_checks,
-    both_arms,
+    both_planted,
     conclude,
+    file_reads,
     fixture,
     plant_fillers,
     report,
@@ -46,7 +51,8 @@ async def main():
                 f"carried — grep for it>`. Then {DONE}.")
         plant_fillers(N, marker_in=2, marker=marker)
         await fixture(root, FB, arms=FOLD_ARMS)
-        recency, fold = await both_arms(root, core, BK, FB, task, "final.md", arms=FOLD_ARMS)
+        reads = file_reads([f"filler_{i}.txt" for i in range(N)])
+        recency, fold = await both_planted(root, core, BK, FB, task, reads, "final.md", arms=FOLD_ARMS)
         from helpers import ctx_score
         recalled = len(ctx_score.calls_made(fold["msgs"], target="ai_fold", verb="recall"))
         report((recency, fold), lambda a: f"code={code in a['body']}  marker={marker in a['body']}")

@@ -5,6 +5,7 @@ requires-python = ">=3.11"
 [manifest]
 members = [
     "fantastic-ai-core",
+    "fantastic-anthropic-backend",
     "fantastic-cli",
     "fantastic-credential-store",
     "fantastic-exec-bridge",
@@ -336,6 +337,21 @@ version = "0.1.0"
 source = { editable = "bundled_agents/ai/ai_core" }
 
 [[package]]
+name = "fantastic-anthropic-backend"
+version = "0.1.0"
+source = { editable = "bundled_agents/ai/anthropic/anthropic_backend" }
+dependencies = [
+    { name = "fantastic-ai-core" },
+    { name = "httpx" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fantastic-ai-core", editable = "bundled_agents/ai/ai_core" },
+    { name = "httpx" },
+]
+
+[[package]]
 name = "fantastic-cli"
 version = "0.1.0"
 source = { editable = "bundled_agents/cli" }
@@ -394,6 +410,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "fantastic-ai-core" },
+    { name = "fantastic-anthropic-backend" },
     { name = "fantastic-cli" },
     { name = "fantastic-credential-store" },
     { name = "fantastic-exec-bridge" },
@@ -426,6 +443,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "fantastic-ai-core", editable = "bundled_agents/ai/ai_core" },
+    { name = "fantastic-anthropic-backend", editable = "bundled_agents/ai/anthropic/anthropic_backend" },
     { name = "fantastic-cli", editable = "bundled_agents/cli" },
     { name = "fantastic-credential-store", editable = "bundled_agents/security/credential_store" },
     { name = "fantastic-exec-bridge", editable = "bundled_agents/io/exec_bridge" },

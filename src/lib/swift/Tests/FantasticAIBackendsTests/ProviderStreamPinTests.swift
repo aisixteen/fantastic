@@ -247,11 +247,27 @@ struct OllamaStreamPinTests {
 
     private func provider(
         _ port: Int, model: String = "m", numCtx: Int64? = nil, numPredict: Int64? = nil,
-        think: Bool? = nil
+        think: Bool? = nil, key: @escaping KeyReader = { _ in nil }
     ) -> OllamaProvider {
         OllamaProvider(
             endpoint: "http://127.0.0.1:\(port)", model: model, temperature: 0.3, numCtx: numCtx,
-            numPredict: numPredict, think: think)
+            numPredict: numPredict, think: think, key: key)
+    }
+
+    /// The record's key (a server behind a door) rides the chat as a Bearer header;
+    /// none, no header.
+    @Test func theKeyRidesTheChatOnlyWhenSet() async throws {
+        let line = #"{"message":{"content":"ok"},"done":true}"# + "\n"
+        let stub = StubHTTP([.init(body: line), .init(body: line)])
+        for try await _ in provider(stub.port, key: { _ in "sekret" }).chat(
+            messages: [["role": "user", "content": "hi"]], maxTokens: nil) {}
+        for try await _ in provider(stub.port).chat(
+            messages: [["role": "user", "content": "hi"]], maxTokens: nil) {}
+        let auths = stub.requests.map { r in
+            r.split(separator: "\r\n").first { $0.lowercased().hasPrefix("authorization:") }
+                .map { String($0.dropFirst("authorization:".count)).trimmingCharacters(in: .whitespaces) }
+        }
+        #expect(auths == ["Bearer sekret", nil])
     }
 
     /// python's ollama client: `ResponseError(<error>, <code>)`, whose text is

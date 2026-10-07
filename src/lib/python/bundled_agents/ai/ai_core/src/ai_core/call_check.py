@@ -191,6 +191,13 @@ def _where(text: str, tok: _Tok) -> tuple[int, int, str, str]:
     return text.count("\n", 0, tok.start) + 1, col + 1, lead + _defang(shown), caret
 
 
+def _plain(t: _Tok) -> str | None:
+    """The name of a bare opening tag (`<query>`, no attributes) that is none of
+    ours — inside a call run, an argument of the verb."""
+    m = re.fullmatch(r"<([A-Za-z_][\w-]*)>", t.text)
+    return m.group(1) if t.kind == "other" and m and m.group(1) != "item" else None
+
+
 def _report(text: str, masked: str, call: _Call) -> str:
     first = next(t for t in call.toks if t.kind != "other")
     name = next((t.name for t in call.toks if t.name), None) or "send"
@@ -205,11 +212,22 @@ def _report(text: str, masked: str, call: _Call) -> str:
         why = "a close with no call open"
     else:
         why = "not a call tag"
+    # EVERY ARGUMENT THE MODEL WROTE carries into the form to write — the verb's own
+    # (`<query>`, `<ids>`) as much as ours by name. Measured 2026-10-07
+    # (misleading_fold:rust): a grep scoped by `<ids>` lost its `<` and was
+    # reported with only target/title/type; the model rewrote it unscoped. A tag
+    # nested in an argument (an `<item>` of `<ids>`) is part of that value.
+    after = -1
     for t in call.toks:
-        if t.kind == "arg" and not t.closing:
-            v = _value(masked, t, f"</{t.arg}>")
+        if t.start < after:
+            continue
+        head = _plain(t)
+        if (t.kind == "arg" and not t.closing) or head:
+            name_ = t.arg if t.kind == "arg" else head
+            v = _value(masked, t, f"</{name_}>")
             if v is not None:
-                args.append((t.arg, v))
+                args.append((name_, v))
+                after = masked.find(f"</{name_}>", t.end) + len(name_) + 3
         elif t.kind == "param":
             close = re.compile(r"</[^<>\n]{0,40}>").search(masked, t.end)
             v = masked[t.end : close.start()].strip() if close else None

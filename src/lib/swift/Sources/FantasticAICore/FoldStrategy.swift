@@ -222,9 +222,9 @@ public enum AIFoldStrategy {
             refs: ids, title: title, body: text, degraded: degraded,
             id: kernel.mintId(), lvl: lvl,
             parent: idxs.first.flatMap { rowParent(rows[$0]) })
-        if let c = ctx.clientId, !c.isEmpty {
-            try await saveHistory(ctx.selfId.value, kernel, [fr])
-        }
+        // A fold is a MARK that must persist — written whoever the projection is for
+        // (a turn's caller, or a `context_recall` with none).
+        try await saveHistory(ctx.selfId.value, kernel, [fr])
         return fr
     }
 
@@ -263,14 +263,17 @@ public enum AIFoldStrategy {
         return take.count >= 2 ? take.compactMap { rowId($0).flatMap { byId[$0] } } : []
     }
 
-    /// Fold the oldest stretches of the view down to the low watermark, tidy the
-    /// head, then hand what is left to `strip`. Python `fold`.
-    public static func fold(
-        _ body: [JSON], _ systemBlock: [JSON], _ rec: JSON, _ ctx: ProjectionCtx
-    ) async throws -> AIProjection {
-        var rows = body
+    /// FOLD UNTIL IT FITS: when the rendered view is over `budget`, fold its
+    /// oldest stretches down to the low watermark; then tidy the head (adjacent
+    /// folds coalesce), budget or no budget. Returns `(rows + the fold rows
+    /// written, the view, folded, refused)`. The turn's `fold` projection and
+    /// `context_recall` (a store longer than the window, e.g. written under a
+    /// larger one) share it. Python `fold_down`.
+    static func foldDown(
+        _ rowsIn: [JSON], _ ctx: ProjectionCtx, budget: Int64
+    ) async throws -> (rows: [JSON], view: [JSON], folded: Int, refused: Int) {
+        var rows = rowsIn
         var view = AIFolds.render(rows)
-        let budget = ctx.budget - AIConstants.NOTICE_ENVELOPE_RESERVE
         var folded = 0
         var refused = 0
         if AIContext.estimateTokens(view) > budget && rows.count > 2 {
@@ -310,13 +313,23 @@ public enum AIFoldStrategy {
             folded += 1
             view = AIFolds.render(rows)
         }
+        return (rows, view, folded, refused)
+    }
+
+    /// Fold the oldest stretches of the view down to the low watermark, tidy the
+    /// head, then hand what is left to `strip`. Python `fold`.
+    public static func fold(
+        _ body: [JSON], _ systemBlock: [JSON], _ rec: JSON, _ ctx: ProjectionCtx
+    ) async throws -> AIProjection {
+        let down = try await foldDown(
+            body, ctx, budget: ctx.budget - AIConstants.NOTICE_ENVELOPE_RESERVE)
         // Stage two and three: strip bodies in what is left, then cut — strip's
         // own logic.
-        let out = try await AIStripStrategy.strip(view, systemBlock, rec, ctx)
+        let out = try await AIStripStrategy.strip(down.view, systemBlock, rec, ctx)
         return AIProjection(
             body: out.body, omittedMarker: out.omittedMarker,
-            stripped: out.stripped, strippedBytes: out.strippedBytes, folded: folded,
-            foldRefused: refused)
+            stripped: out.stripped, strippedBytes: out.strippedBytes, folded: down.folded,
+            foldRefused: down.refused)
     }
 }
 

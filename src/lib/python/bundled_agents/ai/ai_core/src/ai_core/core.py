@@ -364,6 +364,12 @@ def _as_id(x) -> int | None:
 _TAG_LINKS = re.compile(r"^\[reply to \S+ · [^\]]*?↑([^\s\]]+)[^\]]*\]")
 
 
+def _notice_kind(self_id: str) -> dict:
+    """`{"kind": "notice"}` when the turn in flight answers this layer's own text
+    (see `_deliver`), else nothing — the row keeps its role as its kind."""
+    return {"kind": "notice"} if (_current.get(self_id) or {}).get("notice") else {}
+
+
 def _row_ids_for_incoming(self_id: str, text: str, kernel) -> tuple[int, int | None]:
     """(id, parent) for an incoming turn. A delivered reply turn names the assistant
     turn that made the calls (`↑`) on its first tag; anything else is a ROOT — a fresh
@@ -919,7 +925,9 @@ twice — you get the first outcome back; a new attempt needs a new name);
 # Spawned, it queues behind the current turn.
 
 
-def _deliver_soon(kernel, target, text, client_id, system_prompt) -> None:
+def _deliver_soon(
+    kernel, target, text, client_id, system_prompt, *, notice: bool = False
+) -> None:
     born = _incarnation.get(target, 0)
     """Hand `text` to `target` as a fresh turn, WITHOUT waiting for that turn.
 
@@ -948,12 +956,21 @@ def _deliver_soon(kernel, target, text, client_id, system_prompt) -> None:
     # here "for a stub kernel in tests" — a fallback in product code, which would
     # also have turned a REAL spawn failure into an unregistered orphan. A test
     # fake that delivers now answers `spawn_task` like the kernel does.
-    coro = _deliver(kernel, target, text, client_id, system_prompt, born=born)
+    coro = _deliver(
+        kernel, target, text, client_id, system_prompt, born=born, notice=notice
+    )
     _ctx(kernel).spawn_task(target, "deliver_reply", coro)
 
 
 async def _deliver(
-    kernel, target, text, client_id, system_prompt, *, born: int | None = None
+    kernel,
+    target,
+    text,
+    client_id,
+    system_prompt,
+    *,
+    born: int | None = None,
+    notice: bool = False,
 ) -> None:
     """Hand `text` to `target` as a fresh turn. AWAITS the whole turn — call
     `_deliver_soon` unless you specifically need to block on it.
@@ -975,6 +992,13 @@ async def _deliver(
     routed this reply is a detached task, and raising there kills a chain that may
     have other live branches."""
     payload = {"type": "send", "text": text, "client_id": client_id}
+    # HARNESS TEXT, NOT A MESSAGE (owner, 2026-10-07): a turn this layer writes to
+    # its own agent — a reminder, a malformed-call report, an await refusal — is
+    # stored as `kind: "notice"`, so a view can tell it from a person's message.
+    # The model still reads it as a user turn: Qwen's template takes no system
+    # message past the first. Honoured only on a send to self (see `_send`).
+    if notice:
+        payload["notice"] = True
     if born is not None and _incarnation.get(target, 0) != born:
         # A LATE REPLY TO A PREVIOUS INCARNATION. Kept as a ROW — it is real data —
         # but it does not wake a turn: the agent that made the call is gone, and the
@@ -1445,6 +1469,7 @@ async def _deliver_answer(
             f"[your inquiry answer did not reach {asker}: {err or out.get('status')}]",
             client_id,
             None,
+            notice=True,
         )
 
 
@@ -1797,6 +1822,12 @@ async def _route_reply(
         _get = getattr(kernel, "get", None)  # a bare test kernel has no record
         rec_ = (_get(self_id) if _get else None) or {}
         cap = _inline_cap(rec_)
+        # THE CAP IS PER MESSAGE, not per reply (owner, 2026-10-07): every reply of a
+        # batch lands in ONE message to its addressee, so the replies share the cap.
+        # A reply that would push its batch past it is held like an oversized one.
+        # Measured: two greps, each under the 434-token cap, arrived as one 967-token
+        # message at a 4.5k window — the next turn could not fit it (`too_small`).
+        used: dict[str, int] = {}
         for dest, target, verb, idx, body, *rest in units:
             title = rest[0] if rest else None
             if idx is not None:
@@ -1828,7 +1859,9 @@ async def _route_reply(
                 # its origin line; under it, it is inline.
                 if (
                     pid is not None
-                    and estimate_one({"role": "user", "content": body}) > cap
+                    and used.get(dest, 0)
+                    + estimate_one({"role": "user", "content": body})
+                    > cap
                 ):
                     size = len(body)
                     if await _store_reply(self_id, kernel, pid, body):
@@ -1845,13 +1878,27 @@ async def _route_reply(
                         )
             else:
                 pid = "-"
+            used[dest] = used.get(dest, 0) + estimate_one(
+                {"role": "user", "content": body}
+            )
             n = counts[dest] = counts[dest] + 1
             m_total = sum(1 for u in units if u[0] == dest)
             tag = _reply_tag(pid, target, verb, title, message_id, n, m_total, batch)
             groups[dest][n - 1] = tag + "\n" + body
         for dest in order:
+            # A batch to SELF made only of this layer's own text (malformed-call
+            # reports, refusals of calls it could not read) is a notice; one that
+            # carries any call's outcome is a reply.
+            notice = dest == self_id and all(
+                u[3] is None for u in units if u[0] == dest
+            )
             _deliver_soon(
-                kernel, dest, "\n\n".join(groups[dest]), client_id, system_prompt
+                kernel,
+                dest,
+                "\n\n".join(groups[dest]),
+                client_id,
+                system_prompt,
+                notice=notice,
             )
     if await_called and not done_called:
         # AWAIT: "I am not finished, I am waiting for what is in flight; wake me
@@ -1881,7 +1928,9 @@ async def _route_reply(
                 kernel, self_id, client_id, "done", reason="awaiting", pending=pending
             )
             return
-        _deliver_soon(kernel, self_id, _AWAIT_REFUSED, client_id, system_prompt)
+        _deliver_soon(
+            kernel, self_id, _AWAIT_REFUSED, client_id, system_prompt, notice=True
+        )
         return
     if done_called:
         # AN INQUIRY THIS CHAIN NEVER ANSWERED is closed for its asker, saying so —
@@ -1918,7 +1967,7 @@ async def _route_reply(
         if await _silent_turn(kernel, self_id, client_id, send_to, system_prompt):
             return
         nudge = (_DEAD_TURN_LINE + _NO_CALL_NUDGE) if dead_turn else _NO_CALL_NUDGE
-        _deliver_soon(kernel, self_id, nudge, client_id, system_prompt)
+        _deliver_soon(kernel, self_id, nudge, client_id, system_prompt, notice=True)
         return
     if calls:
         return  # the model routed its own work; a caller's hand-off does not apply
@@ -2518,7 +2567,7 @@ async def _run(
     provider = await _build_provider(self_id, kernel, cfg)
     if self_id in _recall_due:
         _recall_due.discard(self_id)
-        await _context_recall(self_id, {}, kernel, cfg, system_prompt)
+        await _context_recall(self_id, {}, kernel, cfg, system_prompt, client_id)
     messages, store_len = await _assemble(
         self_id, user_text, kernel, client_id, system_prompt
     )
@@ -2609,7 +2658,15 @@ async def _run(
         await _save_history(
             self_id,
             kernel,
-            [{"role": "user", "content": user_text, "id": in_id, "parent": in_parent}],
+            [
+                {
+                    "role": "user",
+                    "content": user_text,
+                    "id": in_id,
+                    "parent": in_parent,
+                    **_notice_kind(self_id),
+                }
+            ],
         )
         await _emit_status(kernel, self_id, client_id, "done", reason="dead_turn")
         return {
@@ -2645,6 +2702,7 @@ async def _run(
             "content": user_text,
             "id": in_id,
             "parent": in_parent,
+            **_notice_kind(self_id),
         },
         # STRIPPED — the deliberation is not part of the conversation. The raw
         # text (with thinking) already went to `_route_reply` for parsing. A pass
@@ -2863,6 +2921,10 @@ def _make_send(cfg: Backend):
             "send_id": send_id,
             "queued_at": time.time(),
         }
+        # A notice is this agent's own harness text: honoured only when the agent
+        # sent it to itself, so no peer can hide a message from a person's view.
+        if payload.get("notice") and sender in (id, None):
+            entry["notice"] = True
         _enqueue(id, entry)
 
         lock = _lock_for(id)
@@ -3148,6 +3210,7 @@ async def on_cancel(id, task_id, kernel):
                     "content": entry["text"],
                     "id": in_id,
                     "parent": in_parent,
+                    **({"kind": "notice"} if entry.get("notice") else {}),
                 },
                 {
                     "role": "assistant",
@@ -3473,9 +3536,14 @@ sentence why. Reply JSON only:
 
 
 async def _context_recall(
-    id, payload, kernel, cfg: Backend | None = None, system_prompt: str | None = None
+    id,
+    payload,
+    kernel,
+    cfg: Backend | None = None,
+    system_prompt: str | None = None,
+    client_id: str | None = None,
 ):
-    """args: dry:bool? (mechanical fit only — no model call). Rebuild this agent's VIEW from its store: fit the head to the budget at digest resolution, then ask the model which rows it wants in full, persist the id list, log the decision as a row, and drop RAM scratch. Runs on boot, after a fold batch, or on request. Returns {kept, expanded, dropped, budget, why, degraded}."""
+    """args: dry:bool? (mechanical fit only — no model call). Rebuild this agent's VIEW from its store: with `context_strategy` fold, a head longer than the budget is FOLDED first (oldest spans into fold rows, as a turn's projection folds); then fit the head to the budget at digest resolution, ask the model which rows it wants in full, persist the id list, log the decision as a row, and drop RAM scratch. Runs on boot, after a fold batch, or on request. Returns {kept, expanded, dropped, folded, budget, why, degraded}."""
     from ai_core.folds import render as fold_render
     from ai_core.strategies.strip import LOW as _LOW, _stripped as _strip_state
 
@@ -3486,6 +3554,7 @@ async def _context_recall(
             "kept": 0,
             "expanded": 0,
             "dropped": 0,
+            "folded": 0,
             "why": "empty store",
             "degraded": False,
         }
@@ -3496,12 +3565,38 @@ async def _context_recall(
     )
     body_budget = max(BUDGET_FLOOR, budget(rec) - sys_tokens - NOTICE_ENVELOPE_RESERVE)
     target = int(body_budget * _LOW)
+    provider = None
+    if cfg is not None and not payload.get("dry"):
+        try:
+            provider = await _build_provider(id, kernel, cfg)
+        except Exception:
+            provider = None
+    # A HEAD LONGER THAN THE BUDGET FOLDS FIRST (owner, 2026-10-07). A store written
+    # under a larger window — another model, a planted past — is folded the way the
+    # turn's own `fold` projection folds it: oldest spans into fold rows, folds of
+    # folds as they pile up. Before this the fit below only stubbed every reply and
+    # dropped the oldest rows that still did not fit — no fold, no summary. Folding
+    # takes the model (a summary per span), so a `dry` recall does not fold.
+    folded = 0
+    if provider is not None and rec.get("context_strategy", DEFAULT_STRATEGY) == "fold":
+        from ai_core.strategies.fold import fold_down
+
+        fctx = ProjectionCtx(
+            budget=body_budget,
+            recent_n=_recent_n(rec),
+            summarize=_make_summarizer(provider),
+            self_id=id,
+            kernel=kernel,
+            client_id=client_id,
+        )
+        rows, _, folded, _ = await fold_down(rows, fctx, body_budget)
     view = [r for r in fold_render(rows) if r.get("id")]
     if not view:
         return {
             "kept": 0,
             "expanded": 0,
             "dropped": 0,
+            "folded": 0,
             "why": "no addressable rows",
             "degraded": False,
         }
@@ -3531,13 +3626,7 @@ async def _context_recall(
     head = sorted(picked)
     # 2. ONE MODEL CALL — the model chooses expansions; a bad answer changes nothing.
     why, degraded, expand = "mechanical fit", True, set()
-    provider = None
-    if cfg is not None and not payload.get("dry"):
-        try:
-            provider = await _build_provider(id, kernel, cfg)
-        except Exception:
-            provider = None
-    if provider is not None and not payload.get("dry"):
+    if provider is not None:
         lines = []
         for i in head:
             r = view[i]
@@ -3654,10 +3743,35 @@ async def _context_recall(
     _projection.pop(id, None)
     _compaction_mark.pop(id, None)
     _strip_state.pop(id, None)
+    if folded and client_id:
+        # The caller is told its context was compacted, as by a turn's projection.
+        await _to_caller(
+            kernel,
+            id,
+            client_id,
+            {
+                "type": "context",
+                "source": id,
+                "ts": time.time(),
+                "phase": "compacted",
+                "detail": {
+                    "strategy": "fold",
+                    "recall": True,
+                    "dropped_messages": len(view) - len(ids),
+                    "kept_messages": len(ids),
+                    "summarized": False,
+                    "pinned_facts": 0,
+                    "stripped": 0,
+                    "stripped_bytes": 0,
+                    "folded": folded,
+                },
+            },
+        )
     return {
         "kept": len(ids),
         "expanded": len(expand),
         "dropped": len(view) - len(ids),
+        "folded": folded,
         "budget": body_budget,
         "why": why,
         "degraded": degraded,

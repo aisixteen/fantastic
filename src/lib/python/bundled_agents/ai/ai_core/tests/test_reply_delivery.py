@@ -264,3 +264,57 @@ async def test_to_fans_out_one_copy_per_recipient_carrying_the_list_and_msg():
         assert i["payload"]["to"] == ["solver_2", "solver_3"]
         assert i["payload"]["msg"] == 412 and i["payload"]["re"] == 398
         assert i["payload"]["text"] == "CANDIDATE 586"
+
+
+class _SizedKernel(_Kernel):
+    """Each call answers `{"text": <n chars>}`; the agent's window is small, so its
+    inline cap is a few hundred tokens."""
+
+    def __init__(self, chars: int):
+        super().__init__()
+        self.chars = chars
+
+    def get(self, _id):
+        return {"context_window": 4500, "output_reserve": 0}
+
+    async def send(self, items):
+        outs = await super().send(items)
+        for n, (it, o) in enumerate(zip(items, outs)):
+            if it["payload"].get("type") != "send":
+                o["pid"] = (
+                    900 + n
+                )  # an int pid, as the kernel mints — a body is held by it
+                o["result"] = {"text": it["target"][0] * self.chars}
+        return outs
+
+
+async def test_the_inline_cap_bounds_the_whole_batch_not_each_reply():
+    """Measured 2026-10-07 (nested_folds:rust, 4.5k window): two greps, each under the
+    434-token cap, arrived as ONE 967-token message and the next turn could not fit
+    it. The replies of a batch share the cap: the first fits and is inline, the one
+    that would push the message past it is held, like an oversized reply."""
+    from ai_core.context import estimate_one
+    from ai_core.core import _inline_cap
+
+    cap = _inline_cap({"context_window": 4500, "output_reserve": 0})
+    k = _SizedKernel(chars=int(cap * 4 * 0.6))  # each reply ~60% of the cap
+    await _route_reply(
+        "ai", k, _call("alpha") + _call("beta"), "cli", None, None, 180.0, ""
+    )
+    await _settle(k, 1)
+    first, second = k.sent[0][1]["text"].split("\n\n")
+    assert "a" * 100 in first and "NOT inlined" not in first, "the first reply fits"
+    assert "NOT inlined" in second and "b" * 100 not in second, "the second is held"
+    assert estimate_one({"role": "user", "content": k.sent[0][1]["text"]}) <= cap + 64
+
+
+async def test_replies_that_fit_together_are_all_inline():
+    from ai_core.core import _inline_cap
+
+    cap = _inline_cap({"context_window": 4500, "output_reserve": 0})
+    k = _SizedKernel(chars=int(cap * 4 * 0.3))  # two together ~60% of the cap
+    await _route_reply(
+        "ai", k, _call("alpha") + _call("beta"), "cli", None, None, 180.0, ""
+    )
+    await _settle(k, 1)
+    assert "NOT inlined" not in k.sent[0][1]["text"]

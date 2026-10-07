@@ -19,6 +19,7 @@ import FantasticKernelState
 import FantasticScenarioProbes
 import FantasticKernelBridge
 import FantasticResponsesBackend
+import FantasticAnthropicBackend
 import FantasticVllmBackend
 import FantasticOllamaBackend
 import FantasticFMCore
@@ -90,6 +91,7 @@ public func defaultBundleRegistry() -> BundleRegistry {
     r.register("ollama_backend.tools", OllamaBackendBundle())
     r.register("responses_backend.tools", ResponsesBundle())
     r.register("vllm_backend.tools", VllmBundle())
+    r.register("anthropic_backend.tools", AnthropicBundle())
     // Apple's on-device model (FantasticFMCore — the same code the rust kernel
     // links through FantasticFMBridge). Registered on every platform: where the
     // model cannot run, a send fails naming why.

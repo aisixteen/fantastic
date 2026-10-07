@@ -45,6 +45,9 @@ struct AIQueuedEntry: Sendable {
     let text: String
     let sendId: String
     let queuedAt: Double
+    /// This layer's own text to its own agent (a reminder, a malformed-call
+    /// report): the incoming row is stored as `kind: "notice"`.
+    var notice: Bool = false
 }
 
 /// The submission currently holding the lock (drives the `status` verb).
@@ -76,6 +79,8 @@ struct AICurrentEntry: Sendable {
     /// Who STOPPED this generation (the `stop` verb's caller, or "operator") —
     /// the name the cut marker carries.
     var stoppedBy: String? = nil
+    /// Carried from the queue row: the incoming row is a `notice`.
+    var notice: Bool = false
 }
 
 /// Per-agent coordination state — the FIFO lock, the waiting queue, and
@@ -115,7 +120,7 @@ final class AIAgentRunState: @unchecked Sendable {
         current = AICurrentEntry(
             clientId: e.clientId, text: e.text, sendId: e.sendId, queuedAt: e.queuedAt,
             startedAt: startedAt, phase: phase, textSoFar: "", lastTool: nil,
-            taskId: taskId)
+            taskId: taskId, notice: e.notice)
     }
 
     /// Drop a still-QUEUED submission (its generation was cancelled before it

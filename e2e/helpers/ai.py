@@ -406,6 +406,37 @@ _QUIET_VERBS = {"ps", "persist_writer", "flush_executions", "ws_drain", "inbound
 LATER: dict[str, set] = {}
 
 
+#: Nothing in flight anywhere for this long ends a wait on a swarm. The swarm tests
+#: run no clock, so a quiet kernel stays quiet (owner, 2026-10-07: multisubai_build's
+#: team was never started and the harness sat out its whole 600 s window).
+IDLE_END = 30.0
+
+
+async def busy(root) -> list[tuple]:
+    """`(agent, verb)` of the work in flight anywhere — every `ps` row but kernel
+    service work and the driver's own calls."""
+    out = await root.send([{"target": "kernel", "payload": {"type": "ps"}}])
+    rows = (out[0].get("result") or {}).get("tasks") or []
+    return [(t.get("agent"), t.get("verb")) for t in rows if t.get("verb") not in _QUIET_VERBS]
+
+
+class QuietWatch:
+    """True from `quiet()` once nothing has been in flight for `IDLE_END` seconds,
+    measured across calls — call it from a polling loop."""
+
+    def __init__(self, root, idle_end: float = IDLE_END):
+        self.root, self.idle_end = root, idle_end
+        self.since: float | None = None
+
+    async def quiet(self) -> bool:
+        now = asyncio.get_running_loop().time()
+        if await busy(self.root):
+            self.since = None
+            return False
+        self.since = now if self.since is None else self.since
+        return now - self.since >= self.idle_end
+
+
 @dataclass
 class ChainEnd:
     """Has the chain ENDED? The one check every drive loop shares.

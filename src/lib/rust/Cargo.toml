@@ -23,6 +23,7 @@ members = [
     "crates/bundles/fantastic-ollama-backend",
     "crates/bundles/fantastic-bridge",
     "crates/bundles/fantastic-responses-backend",
+    "crates/bundles/fantastic-anthropic-backend",
     "crates/bundles/fantastic-vllm-backend",
     "crates/bundles/fantastic-foundation-models-backend",
     "crates/bundles/fantastic-cli-bundle",
