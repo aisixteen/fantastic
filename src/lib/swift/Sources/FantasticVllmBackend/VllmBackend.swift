@@ -608,6 +608,10 @@ struct VllmProvider: AIProvider {
 public final class VllmBundle: AgentBundle, @unchecked Sendable {
     public let name = "vllm_backend"
     public var verbs: [String] { AIBackend.verbNames }
+    public var verbDocTable: JSON { .object(AIBackend.VERBS) }
+    public var emitsDoc: JSON? { .object(AIBackend.REFLECT_EMITS) }
+    public var cancelDoc: JSON? { .string(CANCEL_DOC) }
+    public var notesDoc: JSON? { .object(AIBackend.NOTES) }
 
     let core: AIBackend
 
@@ -631,7 +635,17 @@ public final class VllmBundle: AgentBundle, @unchecked Sendable {
     public var readme: String? { Self.readmeText }
 
     public func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? {
-        try await core.handle(agentId: agentId, payload: payload, kernel: kernel)
+        // A verb that runs a turn first reads what the record leaves to the server;
+        // a server that does not answer refuses the verb, naming the field.
+        if let verb = payload["type"].asString, ServerRead.TURN_VERBS.contains(verb),
+            let refused = await ServerRead.resolve(
+                agentId, kernel: kernel,
+                key: keyReader(agentId, kernel, backend: NAME, required: false),
+                validate: { meta, record in self.validateMeta(meta, record: record) })
+        {
+            return refused
+        }
+        return try await core.handle(agentId: agentId, payload: payload, kernel: kernel)
     }
 
     public func onCancel(agentId: AgentId, taskId: TaskId, kernel: Kernel) async throws {
@@ -662,13 +676,14 @@ public final class VllmBundle: AgentBundle, @unchecked Sendable {
         return (eff, explicit)
     }
 
-    /// A count the record MUST name — never guessed, fails the turn loud.
+    /// A count the turn runs on — set on the record, or read from the server
+    /// before the turn (`ServerRead.resolve`); fails the turn loud otherwise.
     static func requiredInt(_ agent: Agent, _ key: String) throws(PyError) -> Int {
         guard case .integer(let n)? = agent.metaValue(forKey: key), n >= 1 else {
             throw PyError(
                 "ValueError",
-                "\(NAME): `\(key)` is required on the agent record, a positive int — "
-                    + "nothing is guessed (update_agent <id> \(key)=…)")
+                "\(NAME): `\(key)` is not on the agent record, a positive int, and was not "
+                    + "read from the server (update_agent <id> \(key)=…)")
         }
         return Int(n)
     }
@@ -776,7 +791,7 @@ public final class VllmBundle: AgentBundle, @unchecked Sendable {
     ) -> String? {
         var merged = record
         for (k, v) in meta { merged[k] = v }
-        for key in ["max_tokens", "kv_slots"] {
+        for key in ["max_tokens", "context_window", "kv_slots"] {
             if let v = meta[key], v != .null, !Self.positive(v, integer: true) {
                 return "\(key) must be a positive int"
             }
@@ -785,6 +800,20 @@ public final class VllmBundle: AgentBundle, @unchecked Sendable {
             if let v = meta[key], v != .null, !Self.positive(v, integer: false) {
                 return "\(key) must be a positive number of seconds"
             }
+        }
+        if let url = meta["metrics_url"], url != .null {
+            let u = pyStrip(url.asString ?? "")
+            if url.asString == nil || !(u.hasPrefix("http://") || u.hasPrefix("https://")) {
+                return "metrics_url must be an http(s) URL — the server's /metrics page"
+            }
+        }
+        let endpoint = merged["endpoint"]?.asString ?? ""
+        if merged["kv_slots"] == nil || merged["kv_slots"] == .null, !pyStrip(endpoint).isEmpty,
+            ServerRead.metricsURL(merged) == nil
+        {
+            return "kv_slots is left to the server, but the endpoint '\(endpoint)' does not end "
+                + "in /v1, so its metrics page is not known — set metrics_url (the server's "
+                + "/metrics page) or kv_slots"
         }
         if let v = meta["kv_overflow"], v != .null, !KV_OVERFLOWS.contains(v.asString ?? "\u{0}") {
             return "kv_overflow=\(pyRepr(v)) is not a rotation policy — legal values: evict "
@@ -829,17 +858,27 @@ public final class VllmBundle: AgentBundle, @unchecked Sendable {
     /// THE RECORD SCHEMA (lib request #3) — what this kind's record takes, read
     /// with no agent existing (`reflect bundles=all`). Built from the constants
     /// the provider runs on, and enforced by `validateMeta` above, so the page,
-    /// the write check and the turn cannot disagree. The five required fields have
-    /// NO default: nothing is guessed about a server. Python `RECORD_SCHEMA`.
+    /// the write check and the turn cannot disagree. `endpoint` and `kv_overflow`
+    /// are required; the counts a record leaves out are READ FROM THE SERVER before
+    /// a turn (`ServerRead`), never given a default. Python `RECORD_SCHEMA`.
+    static let FROM_SERVER = "; left out, read from the server before a turn and written here"
     static let RECORD_SCHEMA: JSON = RecordSchema.schema(
         [
             RecordSchema.field("endpoint", "str", "the vLLM server's /v1 URL", required: true),
-            RecordSchema.field("model", "str", "the served model name", required: true),
             RecordSchema.field(
-                "max_tokens", "int", "a turn's output budget (tokens)", required: true),
+                "model", "str", "the served model name" + FROM_SERVER + " (the one model it serves)"),
             RecordSchema.field(
-                "kv_slots", "int", "how many conversations may be live on the endpoint",
-                required: true),
+                "max_tokens", "int", "a turn's output budget (tokens)" + FROM_SERVER + " (max_model_len)"),
+            RecordSchema.field(
+                "context_window", "int", "the server's window (tokens)" + FROM_SERVER + " (max_model_len)"),
+            RecordSchema.field(
+                "kv_slots", "int",
+                "how many conversations may be live on the endpoint" + FROM_SERVER
+                    + " (floor of kv_cache_max_concurrency on metrics_url)"),
+            RecordSchema.field(
+                "metrics_url", "str",
+                "the server's Prometheus page, read for kv_slots; left out, the endpoint with /v1 "
+                    + "replaced by /metrics"),
             RecordSchema.field(
                 "kv_overflow", "enum",
                 "all slots live: evict (the least-recently-used rotates out) or reject "
@@ -879,10 +918,7 @@ public final class VllmBundle: AgentBundle, @unchecked Sendable {
                 default: .double(READ_TIMEOUT)),
             // the door's key, when it wants one — absent = no Authorization header
             RecordSchema.credentialsField(required: false),
-        ],
-        // the server's window, set on the record and used as set: the whole-window
-        // rule compares max_tokens with it (never a default)
-        requiring: ["context_window"])
+        ])
 
     /// The fields a turn cannot run without — refused at the write when absent.
     /// The schema's required fields, not a second list. Python `REQUIRED`.
@@ -907,20 +943,36 @@ extension VllmBundle {
 
         ## The record
 
-        REQUIRED — nothing is guessed, and a record missing any of them is refused at the
-        write, naming every missing field (the whole field list, with defaults and hints, is
-        this kind's `schema` in `reflect bundles=all`; `memory_store_id` is required too, as
-        on every AI agent):
+        REQUIRED — refused at the write when missing, every missing field named (the whole
+        field list, with defaults and hints, is this kind's `schema` in `reflect
+        bundles=all`; `memory_store_id` is required too, as on every AI agent):
         - `endpoint` — the server's `/v1` base, e.g. `http://127.0.0.1:18000/v1`
-        - `model` — the served model name, e.g. `qwen3.8-27b`
-        - `max_tokens` — the output budget of a turn (unbounded, a runaway turn decodes for a long time)
-        - `kv_slots` — how many conversations may be LIVE on this endpoint at once
-        - `kv_overflow` — what happens to the next one: `evict` (the least-recently-used
-          conversation rotates out) or `reject` (the newcomer is refused with a retry time)
-        - `context_window` — the server's window (its `--max-model-len`), used exactly as
-          set. A main turn whose `max_tokens` reaches it sends NO `max_tokens`: the server
-          bounds the reply by what the prompt leaves (prompt + `max_tokens` past the window
-          is an HTTP 400). A bounded side call (a fold summary) keeps its own bound.
+        - `kv_overflow` — what happens to a conversation past `kv_slots`: `evict` (the
+          least-recently-used conversation rotates out) or `reject` (the newcomer is refused
+          with a retry time)
+
+        READ FROM THE SERVER when left out — before a verb that runs a turn (`send`,
+        `inquiry`, `context_recall`) every one still absent is read from the server and
+        WRITTEN BACK to the record, so reflect shows it and it is not read again until the
+        field is cleared (`null`). A value set on the record is used as set:
+        - `model` — the served model name; left out, the ONE model `GET {endpoint}/models`
+          lists (several → refused, naming them)
+        - `context_window` — the server's window (its `--max-model-len`); left out, that
+          model's `max_model_len`. A main turn whose `max_tokens` reaches it sends NO
+          `max_tokens`: the server bounds the reply by what the prompt leaves (prompt +
+          `max_tokens` past the window is an HTTP 400). A bounded side call (a fold summary)
+          keeps its own bound.
+        - `max_tokens` — the output budget of a turn; left out, `max_model_len` too
+        - `kv_slots` — how many conversations may be LIVE on this endpoint at once; left out,
+          `floor(kv_cache_max_concurrency)` from the `vllm:cache_config_info` line of the
+          server's Prometheus page — `metrics_url`, or, left out, the endpoint with `/v1`
+          replaced by `/metrics` (an endpoint not ending in `/v1` needs one of the two, refused
+          at the write otherwise)
+
+        A server that does not answer one of them refuses the verb (`bad_arg`, `arg` = the
+        field), naming the URL and what came back — a door that forwards only `/v1` answers
+        404 on `/metrics`: set `kv_slots` (or `metrics_url`) there. The key goes only to the
+        endpoint's host.
 
         Defaults, used only where the record sets nothing: `temperature` 0.2, `top_p` 0.8,
         `top_k` 20, `reasoning_effort` medium (`low`|`medium`|`xhigh`), `thinking_token_budget`
@@ -955,7 +1007,7 @@ extension VllmBundle {
         ## Thinking
 
         The thought streams as `reasoning_content` and is wrapped once in `<think>…</think>`
-        (parsed for tool calls, stripped before the turn is persisted). `thinking_token_budget`
+        (stripped before the turn is persisted; only the answer's calls run). `thinking_token_budget`
         is vLLM's hard stop — once spent, the model moves on to its answer — so it must stay
         BELOW `max_tokens` (refused at the write otherwise). On a main turn an explicit budget
         is sent as set and the default is `min(16000, max_tokens // 2)`; a smaller side call (a

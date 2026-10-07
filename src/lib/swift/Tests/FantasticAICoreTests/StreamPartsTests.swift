@@ -148,14 +148,11 @@ struct StreamPartsTests {
         #expect(ev.map(shape).contains("abort call"))
     }
 
-    @Test func aCallInsideAThoughtIsACallPart() {
+    /// ONLY THE ANSWER ACTS (owner, 2026-10-07): a `<call>` inside `<think>` streams
+    /// as thinking — no call part opens. Python `test_a_call_inside_a_thought_is_thinking_text`.
+    @Test func aCallInsideAThoughtIsThinkingText() {
         let (ev, _) = run("<think>let me \(DONE) then</think>", 4)
-        #expect(
-            ev.filter { !isDelta($0) }.map(shape) == [
-                "start thinking", "end thinking",
-                "start call", "end call",
-                "start thinking", "end thinking",
-            ])
+        #expect(ev.filter { !isDelta($0) }.map(shape) == ["start thinking", "end thinking"])
     }
 
     @Test func theCutMarkerIsAMarkerNotAHalfAnswer() {

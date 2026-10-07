@@ -415,3 +415,103 @@ async fn a_create_on_a_peer_is_gated_on_the_peer_target() {
     assert_eq!(out.result["side"], "egress", "{:?}", out.result);
     assert!(calls.lock().unwrap().is_empty());
 }
+
+/// `docs of: <guid>|<agent>` (owner, 2026-10-06): the question goes to the
+/// connected kernel's own `docs` and the reply names the qualified id. The asker's
+/// grant is `docs` on THIS root, like any `docs`; the peer judges its own leg.
+/// Python `test_docs_of_a_peer_agent_asks_that_kernel`.
+#[tokio::test]
+async fn docs_of_a_peer_agent_asks_that_kernel() {
+    let tmp = TempDir::new().unwrap();
+    let k = kernel(&tmp, Some(HOST));
+    let calls = Calls::default();
+    connect(
+        &k,
+        &calls,
+        Some(
+            json!({"of": "view_root", "bundle": "canvas.tools", "tier": "oneliners",
+                    "verbs": {"place": "args: x, y"}}),
+        ),
+    );
+    create(
+        &k,
+        json!({"type": "create_agent", "parent_id": "kernel", "id": "plain",
+               "handler_module": "echo.tools"}),
+    )
+    .await;
+    let refused = send(
+        &k,
+        "kernel",
+        json!({"type": "docs", "of": format!("{PAGE}|view_root")}),
+        Some("plain"),
+    )
+    .await;
+    assert_eq!(
+        refused.result["side"],
+        json!("egress"),
+        "{:?}",
+        refused.result
+    );
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "a refused docs never reaches the peer"
+    );
+    create(
+        &k,
+        json!({"type": "create_agent", "parent_id": "kernel", "id": "reader",
+               "handler_module": "echo.tools", "can_call": {"kernel_state": ["docs"]}}),
+    )
+    .await;
+    create(
+        &k,
+        json!({"type": "update_agent", "id": "kernel_state",
+               "callable_by": {"$self": "*", "reader": ["docs"]}}),
+    )
+    .await;
+    let out = send(
+        &k,
+        "kernel",
+        json!({"type": "docs", "of": format!("{PAGE}|view_root"), "tier": "oneliners"}),
+        Some("reader"),
+    )
+    .await;
+    assert_eq!(out.status.as_str(), "completed", "{:?}", out.result);
+    assert_eq!(out.result["of"], json!(format!("{PAGE}|view_root")));
+    assert_eq!(out.result["verbs"], json!({"place": "args: x, y"}));
+    assert_eq!(
+        *calls.lock().unwrap(),
+        vec![(
+            "kernel".to_string(),
+            json!({"type": "docs", "of": "view_root", "tier": "oneliners"})
+        )]
+    );
+}
+
+/// An unknown guid is `bad_arg`; this kernel's own guid is a LOCAL id, answered
+/// here with no peer asked. Python `test_docs_of_an_unknown_guid_or_own_guid`.
+#[tokio::test]
+async fn docs_of_an_unknown_guid_or_own_guid() {
+    let tmp = TempDir::new().unwrap();
+    let k = kernel(&tmp, Some(HOST));
+    let calls = Calls::default();
+    connect(&k, &calls, None);
+    let gone = send(
+        &k,
+        "kernel",
+        json!({"type": "docs", "of": "nope|view_root"}),
+        None,
+    )
+    .await;
+    assert_eq!(gone.result["reason"], json!("bad_arg"), "{:?}", gone.result);
+    assert_eq!(gone.result["arg"], json!("of"));
+    let own = send(
+        &k,
+        "kernel",
+        json!({"type": "docs", "of": format!("{HOST}|kernel")}),
+        None,
+    )
+    .await;
+    assert_eq!(own.result["bundle"], json!("kernel"), "{:?}", own.result);
+    assert!(own.result["verbs"].get("create_agent").is_some());
+    assert!(calls.lock().unwrap().is_empty());
+}

@@ -788,8 +788,9 @@ struct CredentialStoreTests {
         let r = await call(f.k, ["type": "reflect"])
         #expect(r.result["backend"] == "file" && r.result["refs"] == 1)
         #expect(r.result["file"] == .string(f.file.path))
+        #expect(r.result.asObject?["verbs"] == nil)
         #expect(
-            r.result["verbs"].asObject.map { Array($0.keys) }
+            CredentialStoreBundle().verbDocTable.asObject.map { Array($0.keys) }
                 == ["reflect", "boot", "set", "get", "list", "forget"])
         #expect(!r.result.serialize().contains(KEY) && !r.result.serialize().contains("openai/main"))
     }

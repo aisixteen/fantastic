@@ -43,61 +43,24 @@ struct HistoryViewTests {
         #expect(all.contains("reading_2 = 42"))
     }
 
-    @Test func answeredReflectsAreStubbedButTheInFlightOneSurvives() {
+    /// A reflect is MUTABLE state (owner, 2026-10-06): its body stays whole after
+    /// the model answers it; only a newer reflect of the same agent supersedes it
+    /// (`dedupeStaleReads`). Only `docs` replies are cut.
+    @Test func aReflectReplyIsNeverCutFromTheView() {
+        let tree = "<id>notes</id>\n<sentence>" + String(repeating: "x", count: 400) + "</sentence>"
         let body = [
-            turn(
-                "user",
-                "[reply to notes:aaa · notes reflect]\n"
-                    + String(repeating: "TREE", count: 200)),
-            turn("assistant", "SEEN notes — key/value store; verbs read/set/keys."),
-            turn(
-                "user",
-                "[reply to assets:bbb · assets reflect]\n"
-                    + String(repeating: "TREE", count: 200)),
-        ]
-        let out = dropAnsweredReflects(body)
-        // answered → stubbed, and the stub still NAMES the agent, so "I already
-        // looked at this" stays true and the model does not re-reflect out of doubt
-        #expect(!texts(out)[0].contains("TREE"))
-        #expect(texts(out)[0].contains("notes"))
-        // the model's own distillation is untouched — it is the record now
-        #expect(out[1] == body[1])
-        // the IN-FLIGHT reflect is verbatim: the model is reading it this very turn
-        #expect(out[2] == body[2])
-    }
-
-    /// FAIL CLOSED. Measured 2026-08-20 (`live_plan`): the model answered several
-    /// reflects with a bare call and no prose. The body was dropped anyway, so
-    /// the facts were simply gone — "The index was dropped from my view. Let me send
-    /// it again and, THIS TIME, actually record the facts." Re-fetching what it lost
-    /// is the exact loop this trim exists to prevent, so a reflect the model did not
-    /// distil must survive: non-compliance costs context, never comprehension.
-    @Test func aReflectTheModelDidNotDistilIsKept() {
-        let body = [
-            turn(
-                "user",
-                "[reply to notes:aaa · notes reflect]\n"
-                    + String(repeating: "TREE", count: 100)),
-            turn("assistant", #"<call name="send">…</call>"#),  // no SEEN
-            turn(
-                "user",
-                "[reply to assets:bbb · assets reflect]\n"
-                    + String(repeating: "FACTS", count: 100)),
-            turn("assistant", "SEEN assets — public web assets; verbs read/list."),
+            turn("user", "[reply to notes:aaa · notes reflect]\n" + tree),
+            turn("assistant", #"<call name="send"><target_id>notes</target_id><type>ps</type></call>"#),
             turn("user", "next"),
         ]
-        let out = texts(dropAnsweredReflects(body))
-        #expect(out[0].contains("TREE"), "undistilled reflect must be KEPT")
-        #expect(!out[2].contains("FACTS"), "distilled reflect is dropped")
-        #expect(out[2].contains("assets"), "the stub still names the agent")
+        #expect(dropReadDocs(dedupeStaleReads(body)) == body)
     }
 
-    /// A batch arrives as ONE turn holding several `[reply to …]` blocks. Both
-    /// trimmers work per BLOCK: a distilled reflect block drops alone, its sibling
-    /// replies stay; a superseded whole-state block dedupes alone. Treating the turn
-    /// as one reply either deleted siblings (`dropAnsweredReflects` replaced the
-    /// WHOLE content) or trimmed nothing (a count guard skipped every multi-reply
-    /// turn — tried 2026-08-25, superseded same day).
+    /// A batch arrives as ONE turn holding several `[reply to …]` blocks. The
+    /// trimmer works per BLOCK: a superseded whole-state block dedupes alone, its
+    /// sibling replies stay. Treating the turn as one reply either deleted siblings
+    /// or trimmed nothing (a count guard skipped every multi-reply turn — tried
+    /// 2026-08-25, superseded same day).
     @Test func aCombinedTurnTrimsPerBlockNeverWhole() {
         let combined =
             "[reply to ks:a1 · kernel_state reflect · 1 of 2 in batch ab12]\n"
@@ -105,15 +68,9 @@ struct HistoryViewTests {
             + "\n\n[reply to tot:b1 · totals read · 2 of 2 in batch ab12]\nreading_1 = 41"
         let body = [
             turn("user", combined),
-            turn("assistant", "SEEN kernel_state — the root; verbs create/list."),
+            turn("assistant", "noted"),
             turn("user", "[reply to ks:a2 · kernel_state reflect]\nNEW TREE"),
         ]
-        let out = texts(dropAnsweredReflects(body))
-        #expect(
-            !out[0].contains(String(repeating: "TREE", count: 5)),
-            "distilled reflect block drops")
-        #expect(out[0].contains("reading_1 = 41"), "sibling block must SURVIVE")
-
         let out2 = texts(dedupeStaleReads(body))
         #expect(
             !out2[0].contains(String(repeating: "TREE", count: 5)),
@@ -165,19 +122,13 @@ struct HistoryViewTests {
     }
 
     /// The tag matcher is python's regex, hand-scanned — including the `[^\]]*` that
-    /// absorbs the batch suffix, and the fail-closed `SEEN` word boundary.
-    @Test func theTagMatcherAndTheSeenBoundaryArePythons() {
+    /// absorbs the batch suffix.
+    @Test func theTagMatcherIsPythons() {
         #expect(parseReplyTag("[reply to a:1 · notes reflect]\nbody")?.agent == "notes")
         #expect(parseReplyTag("[reply to a:1 · notes reflect]\nbody")?.verb == "reflect")
         let stamped = "[reply to a:1 · notes reflect · 2 of 3 in batch ab12]\nbody"
         #expect(parseReplyTag(stamped)?.verb == "reflect")
         #expect(parseReplyTag("no tag here") == nil)
         #expect(parseReplyTag("[reply to a:1 notes reflect]") == nil)
-        // `\bSEEN\b`, any case, anywhere — and NOT inside a longer word.
-        #expect(distilled("seen notes — a store"))
-        #expect(distilled("I have SEEN it."))
-        #expect(!distilled("unforeseen consequences"))
-        #expect(!distilled("SEENING"))
-        #expect(!distilled("a bare tool call and no prose"))
     }
 }

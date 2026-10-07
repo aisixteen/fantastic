@@ -1,8 +1,8 @@
 // The call gate's refusal bodies, byte for byte — key order included.
 //
 // The gate (`Kernel.gate`) spells its refusals as literal dicts: an
-// egress/ingress denial is `error, reason, hint, side`; a mutator denial is
-// `error, reason, side`. Texts are python `kernel/_agent.py`'s.
+// egress/ingress denial is `error, reason, hint, side`. Texts are python
+// `kernel/_agent.py`'s.
 
 import FantasticJSON
 import Foundation
@@ -76,31 +76,8 @@ struct GateRefusalPinTests {
         )
     }
 
-    @Test func mutatorDenials() async {
-        let k = await gatedKernel()
-        #expect(
-            await call(
-                k, as: "a", "kernel",
-                [
-                    "type": "create_agent", "parent_id": "b", "id": "x1",
-                    "handler_module": "noop.tools",
-                ])
-                == #"{"error":"a may only create_agent within its own subtree — b is not in it","reason":"unauthorized","side":"mutator"}"#
-        )
-        #expect(
-            await call(
-                k, as: "a", "kernel", ["type": "update_agent", "id": "a", "can_call": ["b": "*"]])
-                == #"{"error":"a may only update_agent within its own subtree — a is not in it","reason":"unauthorized","side":"mutator"}"#
-        )
-        // an unknown id is not a direct child either
-        #expect(
-            await call(k, as: "a", "kernel", ["type": "update_agent", "id": "nobody"])
-                == #"{"error":"a may only update_agent within its own subtree — nobody is not in it","reason":"unauthorized","side":"mutator"}"#
-        )
-    }
-
-    /// A mutator with a MISSING or non-string operand gets that verb's own
-    /// missing/shape refusal — the mutator rule judges only a named operand.
+    /// A tree verb with a MISSING or non-string operand gets that verb's own
+    /// missing/shape refusal.
     @Test func aMissingOperandGetsTheVerbsOwnRefusal() async {
         let k = await gatedKernel()
         #expect(

@@ -322,10 +322,14 @@ def _render_reply_field(name: str, value) -> str:
         inner = "".join(_render_reply_field(k, v) for k, v in value.items())
         return f"<{name}>\n{inner}</{name}>\n"
     if isinstance(value, list):
-        if all(isinstance(v, (dict, list)) for v in value):
-            inner = "".join(_render_reply_field("item", v) for v in value)
-            return f"<{name}>\n{inner}</{name}>\n"
-        inner = "".join(f"<item>{_reply_text(v)}</item>\n" for v in value)
+        # Each element on its own: a dict/list one nests, a scalar one is text — so a
+        # MIXED list (a reflect `tree=ids` with pruned stubs) renders both right.
+        inner = "".join(
+            _render_reply_field("item", v)
+            if isinstance(v, (dict, list))
+            else f"<item>{_reply_text(v)}</item>\n"
+            for v in value
+        )
         return f"<{name}>\n{inner}</{name}>\n"
     text = _reply_text(value)
     if "\n" in text:
@@ -363,24 +367,6 @@ def _envelopes(text: str):
         if end == -1:
             return
         i = end + len(CLOSE)
-
-
-def call_spans(text: str) -> list[str]:
-    """Every COMPLETE call envelope in `text`, verbatim, in source order — what a
-    history writer keeps out of a dropped thought span (an action taken is not
-    reasoning). An unterminated opener is not kept: dispatch could not parse it."""
-    out: list[str] = []
-    for pos, after, end in _envelopes(text):
-        if end == -1:
-            break
-        block = text[after:end]
-        try:
-            call = parse_call(block)
-        except _Malformed:
-            call = None
-        if call is not None:
-            out.append(text[pos : end + len(CLOSE)])
-    return out
 
 
 def _scan(text: str) -> list[tuple[str, dict | None, str | None, bool]]:

@@ -424,14 +424,13 @@ impl Kernel {
     /// `Agent.advertises(verb)` (`_agent.py:1160`), which reads the module's
     /// `VERBS` table and dispatches nothing.
     ///
-    /// Rust keeps its verb table inside the bundle's own reflect reply, so the
-    /// read calls `Bundle::handle({"type":"reflect"})` DIRECTLY — never through
-    /// `send`. A dispatch would mint a message id and write a call row, a task
-    /// row, a ledger execution and a watcher echo for a question python answers
-    /// with an attribute lookup.
+    /// Read STATICALLY from [`crate::bundle::Bundle::verb_docs`] — the same
+    /// table `docs` serves — never through `send`: a dispatch would mint a
+    /// message id and write a call row, a task row, a ledger execution and a
+    /// watcher echo for a question python answers with an attribute lookup.
     ///
-    /// False for a bare agent, for a handler_module no registry holds (python's
-    /// unimportable bundle advertises nothing) and for a bundle that raised.
+    /// False for a bare agent and for a handler_module no registry holds
+    /// (python's unimportable bundle advertises nothing).
     pub(crate) async fn advertises(self: &Arc<Self>, id: &AgentId, verb: &str) -> bool {
         let Some(agent) = self.agents.get(id).map(|e| Arc::clone(&e)) else {
             return false;
@@ -443,14 +442,9 @@ impl Kernel {
         else {
             return false;
         };
-        let reply = bundle
-            .handle(id, &json!({"type": "reflect"}), self)
-            .await
-            .unwrap_or(None)
-            .unwrap_or(Value::Null);
-        reply
-            .get("verbs")
-            .and_then(Value::as_object)
+        bundle
+            .verb_docs()
+            .as_object()
             .is_some_and(|v| v.contains_key(verb))
     }
 

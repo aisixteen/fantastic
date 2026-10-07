@@ -536,17 +536,13 @@ async fn send_streams_tokens_and_emits_done() {
     assert!(phases.contains("done"), "missing done: {phases:?}");
 }
 
-/// A reasoning turn: the RAW completion (thinking included) is what the caller
-/// gets, what the parser reads and what the ROUTER dispatches; the DURABLE turn is
-/// stripped. Re-feeding a reasoning model its own deliberation crowds the task out
-/// of the window (gemma4:12b, 2026-08-02) — but cutting it before the parse would
-/// lose a tool call the model wrote mid-thought, which is what this dispatches.
-///
-/// `reply_to:null` on the mid-thought call, so the assertion about the DURABLE turn
-/// stays about thinking: a default `reply_to` would (correctly) start a second turn
-/// and append its own assistant message.
+/// A reasoning turn: the RAW completion (thinking included) is what the caller gets
+/// and what streams; the ROUTER dispatches only the ANSWER's calls and the DURABLE
+/// turn is the answer (owner, 2026-10-07: only the answer acts). A call written
+/// mid-thought is thinking — it never runs and is never stored. The answer ends with
+/// `done`, so no reminder starts a second turn.
 #[tokio::test]
-async fn thinking_is_streamed_and_parsed_raw_but_persisted_stripped() {
+async fn thinking_is_streamed_raw_but_neither_dispatched_nor_persisted() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "think").await;
     // The mid-thought call proves DISPATCH by a real filesystem side effect via
@@ -564,7 +560,7 @@ async fn thinking_is_streamed_and_parsed_raw_but_persisted_stripped() {
             ScriptEvent::Token(crate::think::THINK_OPEN.into()),
             ScriptEvent::Token(format!("let me check: {mid_thought_call}")),
             ScriptEvent::Token(crate::think::THINK_CLOSE.into()),
-            ScriptEvent::Token("the answer".into()),
+            ScriptEvent::Token("the answer <call name=\"done\"></call>".into()),
         ]],
         Duration::ZERO,
     );
@@ -579,16 +575,10 @@ async fn thinking_is_streamed_and_parsed_raw_but_persisted_stripped() {
         .remove(0)
         .result;
 
-    // The REPLY is raw — markers intact, mid-thought call still parseable.
+    // The REPLY is raw — markers intact.
     let raw = reply["response"].as_str().expect("response text");
     assert!(raw.contains(crate::think::THINK_OPEN), "raw reply: {raw:?}");
     assert_eq!(reply["final"], reply["response"]);
-    let calls = crate::tool_parse::extract_tool_calls(raw);
-    assert_eq!(
-        calls.len(),
-        1,
-        "parser must see the mid-thought call: {raw}"
-    );
 
     // The token stream is raw too — it concatenates to the reply.
     let events = drain(&mut rx).await;
@@ -599,15 +589,12 @@ async fn thinking_is_streamed_and_parsed_raw_but_persisted_stripped() {
         .collect();
     assert_eq!(streamed, raw);
 
-    // …and it really RAN. Parsing a call the model buried in its deliberation is
-    // only worth anything if the router then dispatches it.
-    for _ in 0..250 {
-        if probe.exists() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    assert!(probe.exists(), "the mid-thought call never dispatched");
+    // …and the mid-thought call NEVER RAN: it was thinking.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !probe.exists(),
+        "a call written inside thinking was dispatched"
+    );
 
     // The DURABLE turn is stripped — no marker, no deliberation, no mid-thought
     // call text; just the answer.
@@ -630,12 +617,10 @@ async fn thinking_is_streamed_and_parsed_raw_but_persisted_stripped() {
         "deliberation was persisted: {content:?}"
     );
     assert!(content.contains("the answer"));
-    // ...but the INVOCATION stays. It dispatched, so history must show the cause
-    // of the reply that is about to arrive — a record that hides it makes the
-    // model read an effect it never caused.
+    // ...and so is the call written inside it: it never ran.
     assert!(
-        content.contains("mid_thought"),
-        "the mid-thought call was erased from history: {content:?}"
+        !content.contains("mid_thought"),
+        "a thinking call was persisted: {content:?}"
     );
 }
 
@@ -2299,7 +2284,7 @@ async fn silent_chain_turns_are_nudged_until_a_call_or_done() {
     for n in [2, 3, 4] {
         assert!(
             s.request(n)
-                .contains("[no call was dispatched] Your turn emitted no"),
+                .contains("[no call was dispatched] Your answer emitted no"),
             "pass {} must be a nudge",
             n + 1
         );
@@ -2738,7 +2723,7 @@ async fn two_identical_turns_get_different_batch_tokens() {
 /// stated once as system-block policy, the model wrote a `SEEN` line for 0 of 10
 /// reflects. Only reflect bodies are dropped later, so only they carry it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn reflect_replies_carry_the_distillation_nudge() {
+async fn reflect_replies_carry_no_cut_notice() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "rt_nudge").await;
     let s = script(
@@ -2746,14 +2731,15 @@ async fn reflect_replies_carry_the_distillation_nudge() {
         vec![
             pass(format!(
                 "{}\n{}",
+                // its OWN reflect — granted ($self); a refusal carries no notice
                 call_envelope(
-                    "kernel_state",
+                    backend.as_str(),
                     json!({"type": "reflect", "tree": "none"}),
                     Some("self")
                 ),
                 call_envelope("kernel_state", json!({"type": "list_agents"}), Some("self")),
             )),
-            pass("SEEN core <call name=\"done\"></call>"),
+            pass("<call name=\"done\"></call>"),
         ],
         Duration::ZERO,
     );
@@ -2767,14 +2753,15 @@ async fn reflect_replies_carry_the_distillation_nudge() {
         .result;
     assert!(until_passes(&s, 2).await, "the reflect never came back");
     let turn2 = s.request(1);
+    // A reflect is MUTABLE state and stays whole (owner, 2026-10-06): it carries
+    // no cut notice — only a `docs` reply does.
     assert!(
-        turn2.contains("this body is TRANSIENT") && turn2.contains("SEEN <id>"),
-        "the reflect block must carry the distillation nudge: {turn2}"
+        turn2.contains("mb_rt_nudge"),
+        "the reflect came back: {turn2}"
     );
-    assert_eq!(
-        turn2.matches("this body is TRANSIENT").count(),
-        1,
-        "and ONLY the reflect block: {turn2}"
+    assert!(
+        !turn2.contains("[transient"),
+        "a reflect is never cut: {turn2}"
     );
 }
 
@@ -4099,9 +4086,9 @@ fn cancel_doc_is_python_verbatim() {
 }
 
 #[test]
-fn reflect_verbs_match_python_first_doc_lines() {
-    // python's `_build` order, and the FIRST LINE of each verb's docstring.
-    let v = crate::verbs::reflect_verbs();
+fn verb_docs_match_python_docstrings() {
+    // python's `_build` order, each verb's WHOLE docstring (served by `docs`).
+    let v = crate::verbs::verb_docs();
     let o = v.as_object().expect("an object");
     assert_eq!(
         o.keys().cloned().collect::<Vec<_>>(),
@@ -4130,23 +4117,21 @@ fn reflect_verbs_match_python_first_doc_lines() {
         o["reflect"],
         "Identity + model + endpoint + generating flag + context posture. No args."
     );
-    assert_eq!(
-        o["context_status"],
-        "No args. The context-budget posture + the last overflow projection + the model's"
-    );
+    assert!(o["context_status"].as_str().unwrap().starts_with(
+        "No args. The context-budget posture + the last overflow projection + the model's\n"
+    ));
+    assert!(o["send"].as_str().unwrap().starts_with(
+        "args: text:str (req), client_id:str? (default 'cli'), system_prompt:str?, send_to:str?."
+    ));
     assert!(o["boot"]
         .as_str()
         .unwrap()
         .starts_with("LAZY: never touches the memory store."));
-    assert!(o["history"]
-        .as_str()
-        .unwrap()
-        .ends_with("Returns {rows, next, total, fold?}."));
 }
 
 #[test]
-fn reflect_emits_and_concurrency_are_python_verbatim() {
-    let e = crate::verbs::reflect_emits();
+fn emits_and_notes_are_python_verbatim() {
+    let e = crate::verbs::emits();
     let o = e.as_object().expect("an object");
     // THREE, in this order — `done` and `say` and `queued` are not python's.
     assert_eq!(
@@ -4160,20 +4145,15 @@ fn reflect_emits_and_concurrency_are_python_verbatim() {
     assert!(o["token"]
         .as_str()
         .unwrap()
-        .starts_with("{type:'token', text:str, source, client_id} — streaming chunk. Routed ONLY"));
-    assert!(o["status"]
-        .as_str()
-        .unwrap()
-        .contains("detail.reason='ok'|'cancelled'|'timeout'|'error'|'awaiting'|'dead_turn' (only thinking — discarded, rerolled)|'gave_up' (MAX_SILENT_TURNS turns in a row with no call; detail.error says so) for done."));
+        .starts_with("{type:'token', text:str, source, client_id} — streaming chunk, routed ONLY"));
     assert!(o["context"]
         .as_str()
         .unwrap()
-        .ends_with("Pull counterpart: the `context_status` verb."));
+        .ends_with("Pull counterpart: `context_status`."));
     assert_eq!(
-        crate::verbs::CONCURRENCY_DOC,
-        "Per-backend FIFO lock around `send`: one generation at a time. Other \
-         callers wait (and receive a `queued` event so their UI can show it). \
-         `reflect`/`history`/`status` skip the lock and stay snappy."
+        crate::verbs::notes()["concurrency"],
+        "A FIFO lock around `send`: one generation at a time; other callers wait and get a \
+         `queued` status. `reflect`/`history`/`status` skip the lock."
     );
 }
 
@@ -4323,59 +4303,146 @@ fn inquiry_turn_text_uses_python_str_and_json_dumps() {
     );
 }
 
-/// B3.2 — the placeholder refusal renders the RAW value with python's `repr`,
-/// and a non-string `answer` is refused on its own. Rust coerced any non-string
-/// to `""` and printed rust's `Debug`, so a model that answered `42` was told
-/// its answer had come back as `""`. The strip is python's: whitespace first,
-/// then dots off both ends, so `'. x'` is a real answer.
-#[test]
-fn inquiry_placeholder_refusal_renders_python_repr() {
-    let closed = |answer: &str| {
-        crate::verbs::inquiry_close(
-            json!({
-                "response": format!(
-                    "<call name=\"inquiry_answer\"><answer>{answer}</answer></call>"
-                ),
-            }),
-            &json!({"request_id": "r1"}),
-        )
-    };
-    let placeholder = closed("...");
-    assert_eq!(
-        placeholder["error"],
-        json!(
-            "that is the PLACEHOLDER, not an answer — `answer` came back as \
-             '...'. Say what you actually concluded."
-        )
+/// INQUIRY, FULLY ASYNC (owner, 2026-10-06) — python `test_inquiry_async.py`. The
+/// primary asks its peer; the inquiry is ACCEPTED at once, the peer answers in a
+/// LATER turn of its own chain, and the answer reaches the primary as a message
+/// under the inquiry's pid. `steps` are the peer's passes after the question.
+async fn inquiry_round(
+    tag: &str,
+    peer_passes: Vec<String>,
+) -> (TempDir, Arc<MockScript>, Arc<MockScript>) {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, tag).await;
+    let peer = add_peer(&kernel, &tmp, &backend).await;
+    let ask = call_envelope(
+        peer.as_str(),
+        json!({"type": "inquiry", "text": "ship?"}),
+        None,
     );
-    assert_eq!(placeholder["reason"], json!("bad_arg"));
-    assert_eq!(placeholder["arg"], json!("answer"));
-    assert_eq!(placeholder["request_id"], json!("r1"));
-    // python whitespace, THEN dots — a dot with prose after it is an answer.
-    assert_eq!(closed(". x")["answer"], json!(". x"));
-    // A NON-STRING is refused, rendered as python writes it.
-    let numeric = crate::verbs::inquiry_close(
-        json!({"response": "<call name=\"inquiry_answer\"><answer>42</answer></call>"}),
-        &json!({"request_id": "r1"}),
+    let a = script(
+        &backend,
+        vec![
+            pass(ask),
+            pass("<call name=\"await\"></call>"),
+            pass("<call name=\"done\"></call>"),
+        ],
+        Duration::ZERO,
+    );
+    let r = script(
+        &peer,
+        peer_passes.into_iter().map(pass).collect(),
+        Duration::from_millis(150),
+    );
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "decide", "client_id": "probe"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(
+        until_passes(&a, 3).await,
+        "the answer never reached the asker"
+    );
+    (tmp, a, r)
+}
+
+fn answer_call(text: &str) -> String {
+    format!("<call name=\"inquiry_answer\"><answer>{text}</answer></call>")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_inquiry_is_accepted_and_answered_later_under_its_pid() {
+    let (_tmp, a, r) = inquiry_round("inq_async", vec![answer_call("ship it")]).await;
+    assert!(
+        a.request(1).contains("<accepted>true</accepted>"),
+        "{}",
+        a.request(1)
+    );
+    let third = a.request(2);
+    assert!(
+        third.contains("[reply to ") && third.contains("_peer inquiry]"),
+        "{third}"
+    );
+    assert!(third.contains("<answer>ship it</answer>"), "{third}");
+    assert!(!third.contains("await refused"), "{third}");
+    assert!(r.request(0).contains("[inquiry from "), "{}", r.request(0));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_receiver_may_work_for_several_turns_before_answering() {
+    let look =
+        "<call name=\"send\"><target_id>kernel</target_id><type>docs</type><of>kernel</of></call>";
+    let (_tmp, a, r) =
+        inquiry_round("inq_work", vec![look.to_string(), answer_call("ship it")]).await;
+    assert!(
+        r.request(1).contains("docs"),
+        "the peer worked a turn first"
     );
     assert!(
-        numeric["error"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("came back as 42."),
-        "{numeric:#?}"
+        a.request(2).contains("<answer>ship it</answer>"),
+        "{}",
+        a.request(2)
     );
-    // A MISSING `answer` is python's `None`.
-    let missing = crate::verbs::inquiry_close(
-        json!({"response": "<call name=\"inquiry_answer\"></call>"}),
-        &json!({"request_id": "r1"}),
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ending_without_an_answer_tells_the_asker() {
+    let (_tmp, a, _) =
+        inquiry_round("inq_done", vec!["<call name=\"done\"></call>".to_string()]).await;
+    assert!(
+        a.request(2).contains("ended its run without answering"),
+        "{}",
+        a.request(2)
+    );
+}
+
+/// The placeholder is refused in the receiver's own chain (python `repr` of the
+/// raw value) and the inquiry stays open for the real answer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_placeholder_answer_is_refused_and_the_inquiry_stays_open() {
+    let (_tmp, a, r) =
+        inquiry_round("inq_ph", vec![answer_call("..."), answer_call("ship it")]).await;
+    assert!(
+        r.request(1)
+            .contains("that is the PLACEHOLDER, not an answer — `answer` came back as '...'"),
+        "{}",
+        r.request(1)
     );
     assert!(
-        missing["error"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("came back as None."),
-        "{missing:#?}"
+        a.request(2).contains("<answer>ship it</answer>"),
+        "{}",
+        a.request(2)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_answer_with_nothing_open_is_told_so() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "inq_lone").await;
+    let s = script(
+        &backend,
+        vec![
+            pass(answer_call("ship it")),
+            pass("<call name=\"done\"></call>"),
+        ],
+        Duration::ZERO,
+    );
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "hi", "client_id": "probe"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(until_passes(&s, 2).await, "no second pass");
+    assert!(
+        s.request(1)
+            .contains("inquiry_answer: nothing asked you in this run"),
+        "{}",
+        s.request(1)
     );
 }
 
@@ -5567,3 +5634,263 @@ mod system_prompt;
 /// Streaming parts (python `test_stream_parts.py`), on this harness.
 #[path = "tests_stream_parts.rs"]
 mod stream_parts;
+
+/// A docs body opens with the line naming the grep that keeps what the model needs,
+/// and once answered it is cut to a stub that names the same pid (owner,
+/// 2026-10-06) — python `test_a_docs_reply_is_cut_to_a_stub_once_answered`.
+#[test]
+fn a_docs_reply_is_cut_to_a_stub_naming_its_held_pid() {
+    let body = "[reply to 12 · kernel docs]\n<of>runner</of>\n<bundle>exec_bridge.tools</bundle>\
+                \n<tier>oneliners</tier>\n<verbs>\n<start>args: command:str</start>\n</verbs>";
+    let sibling = "[reply to 13 · notes read]\nline one";
+    let hist = vec![
+        json!({"role": "user", "content": format!("{body}\n\n{sibling}"), "id": 7}),
+        json!({"role": "assistant", "content": "<call …>", "id": 8}),
+    ];
+    let out = crate::history_view::drop_read_docs(&hist);
+    let content = out[0]["content"].as_str().unwrap();
+    let blocks: Vec<&str> = content.split("\n\n").collect();
+    assert_eq!(
+        blocks[0],
+        "[reply to 12 · kernel docs]\n[docs of=runner tier=oneliners — dropped from your view; \
+         held this run: send yourself <type>grep</type> <ids><item>12</item></ids> \
+         <query>start</query>]"
+    );
+    assert_eq!(blocks[1], sibling);
+    assert!(crate::history_view::docs_head(12, "start").starts_with(
+        "[erased from your view after your next message — decide now which verbs you need"
+    ));
+}
+
+/// The grep example is a REAL verb of the body, never a placeholder, and a body that
+/// lists no verbs is neither held nor cut — python
+/// `test_the_grep_example_is_a_real_verb_and_a_verbless_body_is_not_cut`.
+#[test]
+fn the_grep_example_is_a_real_verb_and_a_verbless_body_is_not_cut() {
+    use crate::history_view::{drop_read_docs, example_verb};
+    assert_eq!(
+        example_verb("<of>x</of>\n<verbs>\n<reflect>a</reflect>\n<boot>b</boot>\n<write>c\nmore</write>\n</verbs>")
+            .as_deref(),
+        Some("write")
+    );
+    assert_eq!(
+        example_verb("<of>x</of>\n<verbs>\n<reflect>a</reflect>\n</verbs>").as_deref(),
+        Some("reflect")
+    );
+    assert_eq!(example_verb("<of>x</of>\n<verbs>\n</verbs>"), None);
+    let bare = "[reply to 5 · kernel docs]\n<of>x</of>\n<bundle>x.tools</bundle>\n<tier>oneliners</tier>\n<verbs>\n</verbs>";
+    let hist = vec![
+        json!({"role": "user", "content": bare}),
+        json!({"role": "assistant", "content": "<call …>"}),
+    ];
+    assert_eq!(drop_read_docs(&hist), hist);
+}
+
+// ─── ONLY THE ANSWER ACTS (owner, 2026-10-07) ───────────────────────────
+// A `<call>` written inside `<think>…</think>` is thinking — not dispatched, not
+// stored. Python `test_answer_only_calls.py`, same five cases.
+
+/// The last message handed to pass `n` — what the model was told next.
+fn last_in(s: &MockScript, n: usize) -> String {
+    s.request_messages(n)
+        .last()
+        .and_then(|m| m["content"].as_str().map(str::to_string))
+        .unwrap_or_default()
+}
+
+/// One scripted turn `first` (built from a self-`reflect` envelope), then `done`;
+/// returns the script once its second pass was served.
+async fn answer_only(
+    tag: &str,
+    first: impl Fn(&str, &str) -> String,
+) -> (TempDir, Arc<MockScript>) {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, tag).await;
+    let reflect = call_envelope(backend.as_str(), json!({"type": "reflect"}), None);
+    let status = call_envelope(backend.as_str(), json!({"type": "status"}), None);
+    let s = script(
+        &backend,
+        vec![
+            pass(first(&reflect, &status)),
+            pass("<call name=\"done\"></call>"),
+        ],
+        Duration::ZERO,
+    );
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "go"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(until_passes(&s, 2).await, "the second pass never came");
+    (tmp, s)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_call_in_thinking_and_answer_dispatches_once() {
+    // The `fanout` shape: drafted in the thought, written again in the answer.
+    let (_t, s) = answer_only("ao1", |r, _| {
+        format!("<think>the shape is {r} — do it</think>{r}")
+    })
+    .await;
+    let next = last_in(&s, 1);
+    assert_eq!(next.matches("[reply to ").count(), 1, "{next}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_draft_only_in_thinking_does_not_run() {
+    let (_t, s) = answer_only("ao2", |r, st| format!("<think>maybe {st} — no</think>{r}")).await;
+    let next = last_in(&s, 1);
+    assert_eq!(next.matches("[reply to ").count(), 1, "{next}");
+    let tag = next.lines().next().unwrap_or("");
+    assert!(
+        tag.contains(" reflect") && !tag.contains(" status"),
+        "{next}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn calls_only_in_thinking_make_a_dead_turn() {
+    // Nothing of it runs; the empty answer is rerolled with the no-answer line.
+    let (_t, s) = answer_only("ao3", |r, _| format!("<think>{r}</think>")).await;
+    let next = last_in(&s, 1);
+    assert!(!next.contains("[reply to "), "{next}");
+    assert!(
+        next.starts_with("[no answer] Your last turn produced only thinking"),
+        "{next}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn done_inside_thinking_does_not_end_the_chain() {
+    let (_t, s) = answer_only("ao4", |_, _| {
+        "<think><call name=\"done\"></call></think>I am finished.".to_string()
+    })
+    .await;
+    let next = last_in(&s, 1);
+    assert!(next.starts_with("[no call was dispatched]"), "{next}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unclosed_thought_with_a_call_does_not_dispatch() {
+    let (_t, s) = answer_only("ao5", |r, _| format!("<think>plan {r} and more")).await;
+    let next = last_in(&s, 1);
+    assert!(!next.contains("[reply to "), "{next}");
+    assert!(next.starts_with("[no answer]"), "{next}");
+}
+
+// ─── the call checker through the agent (python `test_call_check.py`) ───────
+
+/// The last message pass `n` was sent, as text.
+fn last_content(s: &MockScript, n: usize) -> String {
+    s.request_messages(n)
+        .last()
+        .and_then(|m| m["content"].as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+const E59_ANSWER: &str =
+    "I'll look at the files agent.\n<tool_call>\n<function=call name=\"send\">\n\
+<target_id>files</target_id>\n<type>reflect</type>\n</call>\n</tool_call>";
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_broken_call_is_reported_instead_of_the_no_call_reminder() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "cc_a").await;
+    let s = script(
+        &backend,
+        vec![pass(E59_ANSWER), pass("<call name=\"done\"></call>")],
+        Duration::ZERO,
+    );
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "go"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(until_passes(&s, 2).await, "the report did not come back");
+    let nxt = last_content(&s, 1);
+    assert!(!nxt.contains("[no call was dispatched]"), "{nxt}");
+    assert!(
+        nxt.contains("[malformed call — nothing ran] line 3, col 1:"),
+        "{nxt}"
+    );
+    assert!(
+        nxt.contains("<call name=\"send\">\n<target_id>files</target_id>"),
+        "{nxt}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_good_calls_run_and_the_broken_one_comes_back_beside_them() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "cc_b").await;
+    // rendered over 5 lines, so the broken call is on line 6
+    let good = call_envelope("kernel", json!({"type": "reflect", "tree": "none"}), None);
+    let s = script(
+        &backend,
+        vec![
+            pass(format!(
+                "{good}\n<send><target_id>kernel</target_id><type>ps</type></send>"
+            )),
+            pass("<call name=\"done\"></call>"),
+        ],
+        Duration::ZERO,
+    );
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "go"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(until_passes(&s, 2).await, "the batch did not come back");
+    let batch = last_content(&s, 1);
+    assert!(batch.contains("kernel reflect"), "{batch}");
+    assert!(
+        batch.contains("[malformed call — nothing ran] line 6, col 1:"),
+        "{batch}"
+    );
+    assert!(
+        batch.contains("The other call of this answer ran"),
+        "{batch}"
+    );
+}
+
+/// A model stuck on one broken shape still ends: a turn whose only output is
+/// broken calls ran nothing, and counts as silent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn broken_only_turns_count_toward_giving_up() {
+    let cap = crate::constants::MAX_SILENT_TURNS;
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "cc_c").await;
+    let s = script(
+        &backend,
+        (0..cap + 5).map(|_| pass(E59_ANSWER)).collect(),
+        Duration::ZERO,
+    );
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "go"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(
+        until_passes(&s, cap).await,
+        "the chain stalled before the cap"
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        s.passes_served(),
+        cap,
+        "a broken-only turn reset the silent streak"
+    );
+}

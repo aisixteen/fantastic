@@ -1,9 +1,10 @@
 //! A SESSION loader (a `kernel_state` with a `root`, under a leg) persists a
 //! federated kernel's records — a canvas and the thin agents nested under it.
-//! Those records are never live on the host, so the record-owner walk and the path
-//! resolution climb THIS LOADER'S persisted records (disk position) past the live
-//! tree: nested 2+ levels is allowed for the owning leg and refused for a sibling,
-//! and an existing record is placed where it is — never by the payload's parent.
+//! Those records are never live on the host, so the path resolution climbs THIS
+//! LOADER'S persisted records (disk position) past the live tree: nested 2+ levels
+//! lands under its real parents, and an existing record is placed where it is —
+//! never by the payload's parent. WHO may write is the grant alone (owner,
+//! 2026-10-06): any agent granted the record verbs on the loader writes any record.
 //! The twin of python `kernel_state/tests/test_nested_records.py`.
 
 use super::*;
@@ -134,15 +135,20 @@ async fn the_owning_leg_persists_records_nested_under_a_federated_record() {
     assert_eq!(parents["deep"], json!("terminal_view"), "{tree}");
 }
 
+/// The grant is the whole rule: `rest_leg` holds `*` on the loader, so it writes
+/// under another leg's records and forgets them.
 #[tokio::test]
-async fn a_sibling_may_not_touch_the_nested_records() {
+async fn a_granted_sibling_writes_the_nested_records() {
     let tmp = TempDir::new().unwrap();
     let k = booted_with_legs(&tmp);
     setup(&k, &tmp).await;
     persist(&k, "wws", "canvas", "web_loader").await;
     persist(&k, "wws", "terminal_view", "canvas").await;
-    let r = persist(&k, "rest_leg", "sneak", "terminal_view").await;
-    assert_eq!(r["reason"], json!("unauthorized"), "{r}");
+    let r = persist(&k, "rest_leg", "extra", "terminal_view").await;
+    assert_eq!(r, json!({"ok": true}), "{r}");
+    assert!(web_root(&tmp)
+        .join("agents/canvas/agents/terminal_view/agents/extra/agent.yaml")
+        .is_file());
     let r = call_as(
         &k,
         "rest_leg",
@@ -150,14 +156,14 @@ async fn a_sibling_may_not_touch_the_nested_records() {
         json!({"type": "forget_record", "id": "terminal_view", "parent_id": "canvas"}),
     )
     .await;
-    assert_eq!(r["reason"], json!("unauthorized"), "{r}");
-    assert!(web_root(&tmp)
-        .join("agents/canvas/agents/terminal_view/agent.yaml")
-        .is_file());
+    assert_eq!(r, json!({"ok": true}), "{r}");
+    assert!(!web_root(&tmp)
+        .join("agents/canvas/agents/terminal_view")
+        .exists());
 }
 
-/// Naming a record that exists with `parent_id` = yourself used to pass the guard
-/// (the payload's parent was walked first) and overwrite it.
+/// An existing record is written where it IS, whatever `parent_id` the payload
+/// names.
 #[tokio::test]
 async fn an_existing_record_is_placed_by_its_position_not_the_payload() {
     let tmp = TempDir::new().unwrap();
@@ -166,8 +172,11 @@ async fn an_existing_record_is_placed_by_its_position_not_the_payload() {
     persist(&k, "wws", "canvas", "web_loader").await;
     persist(&k, "wws", "terminal_view", "canvas").await;
     let r = persist(&k, "rest_leg", "terminal_view", "rest_leg").await;
-    assert_eq!(r["reason"], json!("unauthorized"), "{r}");
+    assert_eq!(r, json!({"ok": true}), "{r}");
     assert!(!web_root(&tmp).join("agents/terminal_view").exists());
+    assert!(web_root(&tmp)
+        .join("agents/canvas/agents/terminal_view/agent.yaml")
+        .is_file());
 }
 
 #[tokio::test]
@@ -194,13 +203,15 @@ async fn forget_record_removes_a_nested_record_where_it_is() {
         .is_file());
 }
 
-/// No fallback: a brand-new record's placement comes from the payload, and the
-/// walk from there must still reach the caller.
+/// No fallback: a brand-new record's placement comes from the payload.
 #[tokio::test]
-async fn an_id_in_neither_tree_nor_disk_is_placed_by_the_payload_and_guarded() {
+async fn an_id_in_neither_tree_nor_disk_is_placed_by_the_payload() {
     let tmp = TempDir::new().unwrap();
     let k = booted_with_legs(&tmp);
     setup(&k, &tmp).await;
     let r = persist(&k, "wws", "orphan", "nowhere").await;
-    assert_eq!(r["reason"], json!("unauthorized"), "{r}");
+    assert_eq!(r, json!({"ok": true}), "{r}");
+    assert!(web_root(&tmp)
+        .join("agents/nowhere/agents/orphan/agent.yaml")
+        .is_file());
 }

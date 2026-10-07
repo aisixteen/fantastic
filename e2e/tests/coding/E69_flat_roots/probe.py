@@ -26,7 +26,7 @@ from helpers.facts_arm import (
     report,
     run_arm,
     after_tasks,
-    send_later,
+    send_in_turn,
     send_when,
     store_rows,
 )
@@ -55,7 +55,8 @@ async def main():
                  f"ALL {N} tasks you did. Then {DONE}.")
         results = []
         for aid, strategy, extra in FOLD_ARMS:
-            laters = [await send_later(root, aid, task(i), 20.0 * i) for i in range(1, N)]
+            # each task as soon as the previous one ends — over time, no timer idle
+            laters = [await send_in_turn(root, aid, [task(i) for i in range(1, N)])]
             laters.append(await send_when(root, core, aid, final, after_tasks(root, aid, list(laters)), max_wait=20.0 * N + 900))
             results.append(await run_arm(root, core, BK, FB, aid, strategy, extra, task(0), "final.md"))
             for t in laters: t.cancel()

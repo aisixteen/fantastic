@@ -1,8 +1,5 @@
-//! The blob channel — name validation and the OWNER guard.
-//!
-//! The guard is the point: `agent_id` is the namespace and it arrives in the
-//! PAYLOAD, so without it any agent granted `persist_blob` could write any
-//! other agent's sidecar.
+//! The blob channel — name validation. WHO may name a namespace is the grant
+//! alone (owner, 2026-10-06): an agent that reaches `persist_blob` names any.
 
 use super::*;
 
@@ -34,28 +31,4 @@ fn kernel_managed_files_are_reserved() {
         let e = guard_name(Some(reserved)).unwrap_err();
         assert!(e.contains("reserved"), "{reserved}: {e}");
     }
-}
-
-#[tokio::test]
-async fn an_operator_may_name_any_namespace() {
-    // Origin `None` is the bookkeeping this verb exists for: a sidecar written
-    // through the loader as kernel bookkeeping, the loader's own flush, the CLI.
-    assert!(guard_owner("anyone").is_ok());
-}
-
-#[tokio::test]
-async fn an_agent_may_only_name_itself() {
-    // The measured breach (python, 2026-08-23): an agent holding exactly
-    // `can_call: {loader: [persist_blob]}` overwrote ANOTHER agent's state.yaml,
-    // and the victim read the forged content back as its own memory.
-    crate::send::CURRENT_ORIGIN
-        .scope(Some(AgentId::from("alice")), async {
-            assert!(guard_owner("alice").is_ok(), "an agent must reach its own");
-
-            let e = guard_owner("bob").unwrap_err();
-            assert!(e.contains("alice"), "{e}");
-            assert!(e.contains("bob"), "{e}");
-            assert!(e.contains("scoped to itself"), "{e}");
-        })
-        .await;
 }

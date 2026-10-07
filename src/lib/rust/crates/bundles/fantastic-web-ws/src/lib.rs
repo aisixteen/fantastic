@@ -36,10 +36,30 @@ pub const PATH_PATTERN: &str = "/{host_id}/ws";
 /// The WS verb-channel bundle.
 pub struct WebWsBundle;
 
+/// HOW TO CALL this leg — python's `VERBS` docstrings (first line each), the
+/// inbound verbs included; served by the kernel's `docs` verb.
+fn verb_docs_json() -> Value {
+    let mut verbs = json!({
+        "reflect": "Identity + the URL pattern this surface mounts + this leg's auth posture",
+        "boot": "No-op. The parent `web` agent calls `get_routes` on this bundle during its own boot and mounts the WS endpoint onto its FastAPI app.",
+        "get_routes": "Declares this surface's HTTP/WS route mounts. No args. Returns",
+    });
+    if let Some(m) = verbs.as_object_mut() {
+        for (verb, doc) in fantastic_io_bridge::inbound::verb_docs() {
+            m.insert(verb.to_string(), json!(doc));
+        }
+    }
+    verbs
+}
+
 #[async_trait]
 impl Bundle for WebWsBundle {
     fn name(&self) -> &str {
         "web_ws"
+    }
+
+    fn verb_docs(&self) -> Value {
+        verb_docs_json()
     }
 
     fn readme(&self) -> Option<&'static str> {
@@ -131,17 +151,6 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
             out.insert(k.clone(), v.clone());
         }
     }
-    let mut verbs = json!({
-        "reflect": "Identity + the URL pattern this surface mounts + this leg's auth posture",
-        "boot": "No-op. The parent `web` agent calls `get_routes` on this bundle during its own boot and mounts the WS endpoint onto its FastAPI app.",
-        "get_routes": "Declares this surface's HTTP/WS route mounts. No args. Returns",
-    });
-    if let Some(m) = verbs.as_object_mut() {
-        for (verb, doc) in fantastic_io_bridge::inbound::verb_docs() {
-            m.insert(verb.to_string(), json!(doc));
-        }
-    }
-    out.insert("verbs".into(), verbs);
     Value::Object(out)
 }
 

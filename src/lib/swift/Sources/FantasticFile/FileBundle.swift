@@ -97,6 +97,7 @@ func intArg(_ verb: String, _ payload: JSON, _ name: String, default def: Int64,
 public struct FileBundle: AgentBundle {
     public let name = "file_bridge"
     public var verbs: [String] { Array((Self.verbDocs.asObject ?? [:]).keys) }
+    public var verbDocTable: JSON { Self.verbDocs }
 
     /// python's module-level `VERBS` — ONE table: reflect renders it and
     /// `advertises` reads it.
@@ -378,7 +379,6 @@ public struct FileBundle: AgentBundle {
             "allow_count": .integer(Int64(allowList(agent).count)),
             "edit_grammar": .string(Self.editGrammar),
             "compose": .string(Self.compose),
-            "verbs": Self.verbDocs,
         ]
         // The auth posture, python's `**_describe(rec)` — after `verbs`.
         for (k, v) in describe(agent.meta) { out[k] = v }

@@ -261,7 +261,7 @@ extension Kernel {
         // dispatch) is the origin root of trust and never reaches here. Every AGENT send — ANY verb, `reflect`
         // included — needs BOTH ends to grant the edge.
         if let orig = KernelTaskLocals.currentSender {
-            if let denial = gate(sender: orig, verb: verb, target: target, payload: item.payload) {
+            if let denial = gate(sender: orig, verb: verb, target: target) {
                 return .settled(Outcome.refused(denial))
             }
         }

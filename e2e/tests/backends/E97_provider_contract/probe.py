@@ -146,6 +146,14 @@ async def main():
               f"status={out.get('status')} result={err[:80]}")
         check(checks, "ai_cut: the error names the cut", "max_tokens" in err or "max_output_tokens" in err,
               err[:160])
+        # The status event rides the agent's event stream, the reply rides the call:
+        # over the wire they are two connections, so the event may land after the
+        # reply (measured 2026-10-07 at 6 lanes: the check read an empty list).
+        # Bounded wait for it — never a pass by timeout.
+        for _ in range(50):
+            if _done_reasons(events["ai_cut"]):
+                break
+            await asyncio.sleep(0.1)
         check(checks, "ai_cut: the turn closed done/error", "error" in _done_reasons(events["ai_cut"]),
               _done_reasons(events["ai_cut"]))
         cut_rows = await memory.rows_of(root, "ai_cut", conversation_only=True)

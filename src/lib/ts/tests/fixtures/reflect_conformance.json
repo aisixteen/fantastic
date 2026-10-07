@@ -1,5 +1,5 @@
 {
-  "_doc": "The reflect contract, captured from the PYTHON kernel's own replies (src/lib/python, `kernel/_agent.py` `_apply_reflect_flags` / `_roster`) and reproduced by the ts kernel (tests/reflect.test.ts replays every case from `tree` + `bundles`). DISTILLED by default: `tree` is the roster {id, sentence, description?, mode?, children} (whole: a reflect that passes the gate returns the tree whole), `kernel_verbs` sorted and cut at the first em-dash, and a `more` line; `detail:\"full\"` gives the wiring tree and every verb doc whole. `tree` is decided by key presence (absent = all, null/none = omitted), `tree:\"ids\"` and `bundles` page with `limit`/`after` (`next` / `bundles_next`), `readme` is true | \"index\" | \"<key>\" (this kernel's doc tree is empty). Differences BY DESIGN, per runtime: the root's `runtime` (\"ts\") and handler_module; the kernel verbs this kernel answers (no tree CRUD \u2014 the `_` line says so); the bundle catalog; python's root also carries its loader's doc frame (`self_extension`, and `readmes`/`docs` under full), which this kernel has no loader to contribute. The browser kernel has no OS env, so env is always \"host\" and version null.",
+  "_doc": "The reflect contract, captured from the PYTHON kernel's own replies (src/lib/python, `kernel/_agent.py` `_apply_reflect_flags` / `_roster`) and reproduced by the ts kernel (tests/reflect.test.ts replays every case from `tree` + `bundles`). DISTILLED by default: `tree` is the roster {id, sentence, description?, mode?, children} (whole: a reflect that passes the gate returns the tree whole), no verb docs (they are the `docs` kernel verb); `detail:\"full\"` gives the wiring tree. `tree` is decided by key presence (absent = all, null/none = omitted), `tree:\"ids\"` and `bundles` page with `limit`/`after` (`next` / `bundles_next`), `readme` is true | \"index\" | \"<key>\" (this kernel's doc tree is empty). Differences BY DESIGN, per runtime: the root's `runtime` (\"ts\") and handler_module; the kernel verbs this kernel answers (no tree CRUD — the `_` line says so); the bundle catalog; python's root also carries its loader's doc frame (`self_extension`, and `readmes`/`docs` under full), which this kernel has no loader to contribute. The browser kernel has no OS env, so env is always \"host\" and version null.",
   "bundles": [
     "terminal_view.js",
     "canvas.js"
@@ -43,16 +43,6 @@
         "callable_by": {
           "$self": "*"
         },
-        "kernel_verbs": {
-          "_": "Kernel-owned: send to 'kernel'. The id you name is the OPERAND, not the actor. (`verbs` is what this agent itself does.) This kernel answers the verbs below; tree CRUD lives on the HOST root, reached over the bridge. A browser kernel has no process to exit: `kernel_stop` stops it in place, refusing new work until the page reloads.",
-          "ack_deadletter": "args: id:int|str (req",
-          "cancel": "args: task_id:str. Kills that task AND ITS SUBTREE",
-          "kernel_start": "No args. THE START SEQUENCE",
-          "kernel_stop": "No args. Stops the kernel PROCESS gracefully",
-          "ledger": "No args. EVERY execution and what it became",
-          "ps": "No args. The live kernel-wide TASK TABLE",
-          "shutdown_agents": "No args. Stops the AGENTS, not the process: drains (new roots refused), sends `shutdown` to every agent advertising it, waits for in-flight work, cancels the rest. Returns {drained, shut:[ids], cancelled:[ids]}."
-        },
         "runtime": "ts",
         "peers": [],
         "env": "host",
@@ -67,19 +57,18 @@
           "children": [
             {
               "id": "zeta",
-              "sentence": "Bare agent (no handler_module) \u2014 answers substrate verbs only.",
+              "sentence": "Bare agent (no handler_module) — answers substrate verbs only.",
               "children": []
             },
             {
               "id": "alpha",
-              "sentence": "Bare agent (no handler_module) \u2014 answers substrate verbs only.",
+              "sentence": "Bare agent (no handler_module) — answers substrate verbs only.",
               "description": "The chat pane.",
               "mode": "chat",
               "children": []
             }
           ]
-        },
-        "more": "Distilled: every agent and what it is FOR. Reflect one agent for its verbs (<type>reflect</type>). Manual: <type>reflect</type> <readme>index</readme> - keys include system-verbs (ps/cancel/create_agent args) and self-extension (author your own durable tools). <detail>full</detail> on a reflect adds wiring and posture - ask for it only when you need to see how agents are plumbed, not to find one."
+        }
       }
     },
     {
@@ -100,16 +89,6 @@
         },
         "callable_by": {
           "$self": "*"
-        },
-        "kernel_verbs": {
-          "_": "Kernel-owned: send to 'kernel'. The id you name is the OPERAND, not the actor. (`verbs` is what this agent itself does.) This kernel answers the verbs below; tree CRUD lives on the HOST root, reached over the bridge. A browser kernel has no process to exit: `kernel_stop` stops it in place, refusing new work until the page reloads.",
-          "ps": "No args. The live kernel-wide TASK TABLE \u2014 {tasks:[{id, agent, parent, verb, started_at}]}, one row per in-flight dispatch. Paged.",
-          "ledger": "No args. EVERY execution and what it became \u2014 named under its id, unnamed under its minted pid \u2014 {executions:[{id, target, status, attempts, retries, named, outcome?, acked?}]}, paged, scoped to what YOU originated; read from the kernel's memory store plus what is not yet flushed. `outcome` keeps the RESULT only for a named call; a dead letter keeps its error; anything else is {status, bytes} \u2014 the reply itself went to its caller. Failed/timed_out/cancelled rows are the dead-letter queue (announced by the `on_deadletter` event): inspect, retry with a NEW id if you choose, then `ack_deadletter` it \u2014 nothing is retried silently.",
-          "ack_deadletter": "args: id:int|str (req \u2014 an execution id, or its name). Acknowledges a DEAD LETTER (failed/timed_out/cancelled) you originated: recorded in the kernel's store, it may then be pruned. Returns {acked:true, id}.",
-          "kernel_start": "No args. THE START SEQUENCE \u2014 the root must name `memory_store_id` (fail loud otherwise): boots the root, then that store, starts flushing the kernel's execution rows into it, then boots every other agent in registration order. Idempotent. Returns {started, store, booted:[ids]}.",
-          "cancel": "args: task_id:str. Kills that task AND ITS SUBTREE \u2014 the id names its own agent. Returns {cancelled:bool, killed:[\u2026]}; the blocked caller's batch item settles as status:'cancelled'. Unknown id \u21d2 {cancelled:false}.",
-          "shutdown_agents": "No args. Stops the AGENTS, not the process: drains (new roots refused), sends `shutdown` to every agent advertising it, waits for in-flight work, cancels the rest. Returns {drained, shut:[ids], cancelled:[ids]}.",
-          "kernel_stop": "No args. Stops the kernel PROCESS gracefully \u2014 drain, every call settles (done, or cancelled into the dead letters), the last rows flush, agents shut down, exit. Under env:'container', the container."
         },
         "runtime": "ts",
         "peers": [],
@@ -182,16 +161,6 @@
         "callable_by": {
           "$self": "*"
         },
-        "kernel_verbs": {
-          "_": "Kernel-owned: send to 'kernel'. The id you name is the OPERAND, not the actor. (`verbs` is what this agent itself does.) This kernel answers the verbs below; tree CRUD lives on the HOST root, reached over the bridge. A browser kernel has no process to exit: `kernel_stop` stops it in place, refusing new work until the page reloads.",
-          "ack_deadletter": "args: id:int|str (req",
-          "cancel": "args: task_id:str. Kills that task AND ITS SUBTREE",
-          "kernel_start": "No args. THE START SEQUENCE",
-          "kernel_stop": "No args. Stops the kernel PROCESS gracefully",
-          "ledger": "No args. EVERY execution and what it became",
-          "ps": "No args. The live kernel-wide TASK TABLE",
-          "shutdown_agents": "No args. Stops the AGENTS, not the process: drains (new roots refused), sends `shutdown` to every agent advertising it, waits for in-flight work, cancels the rest. Returns {drained, shut:[ids], cancelled:[ids]}."
-        },
         "runtime": "ts",
         "peers": [],
         "env": "host",
@@ -204,8 +173,7 @@
           "kernel_state",
           "zeta"
         ],
-        "next": "zeta",
-        "more": "Distilled: every agent and what it is FOR. Reflect one agent for its verbs (<type>reflect</type>). Manual: <type>reflect</type> <readme>index</readme> - keys include system-verbs (ps/cancel/create_agent args) and self-extension (author your own durable tools). <detail>full</detail> on a reflect adds wiring and posture - ask for it only when you need to see how agents are plumbed, not to find one."
+        "next": "zeta"
       }
     },
     {
@@ -227,16 +195,6 @@
         "callable_by": {
           "$self": "*"
         },
-        "kernel_verbs": {
-          "_": "Kernel-owned: send to 'kernel'. The id you name is the OPERAND, not the actor. (`verbs` is what this agent itself does.) This kernel answers the verbs below; tree CRUD lives on the HOST root, reached over the bridge. A browser kernel has no process to exit: `kernel_stop` stops it in place, refusing new work until the page reloads.",
-          "ack_deadletter": "args: id:int|str (req",
-          "cancel": "args: task_id:str. Kills that task AND ITS SUBTREE",
-          "kernel_start": "No args. THE START SEQUENCE",
-          "kernel_stop": "No args. Stops the kernel PROCESS gracefully",
-          "ledger": "No args. EVERY execution and what it became",
-          "ps": "No args. The live kernel-wide TASK TABLE",
-          "shutdown_agents": "No args. Stops the AGENTS, not the process: drains (new roots refused), sends `shutdown` to every agent advertising it, waits for in-flight work, cancels the rest. Returns {drained, shut:[ids], cancelled:[ids]}."
-        },
         "runtime": "ts",
         "peers": [],
         "env": "host",
@@ -244,8 +202,7 @@
         "persistence": {
           "provider": null
         },
-        "guid": null,
-        "more": "Distilled: every agent and what it is FOR. Reflect one agent for its verbs (<type>reflect</type>). Manual: <type>reflect</type> <readme>index</readme> - keys include system-verbs (ps/cancel/create_agent args) and self-extension (author your own durable tools). <detail>full</detail> on a reflect adds wiring and posture - ask for it only when you need to see how agents are plumbed, not to find one."
+        "guid": null
       }
     },
     {
@@ -269,16 +226,6 @@
         "callable_by": {
           "$self": "*"
         },
-        "kernel_verbs": {
-          "_": "Kernel-owned: send to 'kernel'. The id you name is the OPERAND, not the actor. (`verbs` is what this agent itself does.) This kernel answers the verbs below; tree CRUD lives on the HOST root, reached over the bridge. A browser kernel has no process to exit: `kernel_stop` stops it in place, refusing new work until the page reloads.",
-          "ack_deadletter": "args: id:int|str (req",
-          "cancel": "args: task_id:str. Kills that task AND ITS SUBTREE",
-          "kernel_start": "No args. THE START SEQUENCE",
-          "kernel_stop": "No args. Stops the kernel PROCESS gracefully",
-          "ledger": "No args. EVERY execution and what it became",
-          "ps": "No args. The live kernel-wide TASK TABLE",
-          "shutdown_agents": "No args. Stops the AGENTS, not the process: drains (new roots refused), sends `shutdown` to every agent advertising it, waits for in-flight work, cancels the rest. Returns {drained, shut:[ids], cancelled:[ids]}."
-        },
         "runtime": "ts",
         "peers": [],
         "env": "host",
@@ -287,7 +234,6 @@
           "provider": null
         },
         "guid": null,
-        "more": "Distilled: every agent and what it is FOR. Reflect one agent for its verbs (<type>reflect</type>). Manual: <type>reflect</type> <readme>index</readme> - keys include system-verbs (ps/cancel/create_agent args) and self-extension (author your own durable tools). <detail>full</detail> on a reflect adds wiring and posture - ask for it only when you need to see how agents are plumbed, not to find one.",
         "bundles": [
           "canvas"
         ],
@@ -302,7 +248,7 @@
       },
       "expect": {
         "id": "alpha",
-        "sentence": "Bare agent (no handler_module) \u2014 answers substrate verbs only.",
+        "sentence": "Bare agent (no handler_module) — answers substrate verbs only.",
         "parent_id": "kernel_state",
         "handler_module": null,
         "display_name": "Alpha",
@@ -314,24 +260,13 @@
         "callable_by": {
           "$self": "*"
         },
-        "kernel_verbs": {
-          "_": "Kernel-owned: send to 'kernel'. The id you name is the OPERAND, not the actor. (`verbs` is what this agent itself does.) This kernel answers the verbs below; tree CRUD lives on the HOST root, reached over the bridge. A browser kernel has no process to exit: `kernel_stop` stops it in place, refusing new work until the page reloads.",
-          "ack_deadletter": "args: id:int|str (req",
-          "cancel": "args: task_id:str. Kills that task AND ITS SUBTREE",
-          "kernel_start": "No args. THE START SEQUENCE",
-          "kernel_stop": "No args. Stops the kernel PROCESS gracefully",
-          "ledger": "No args. EVERY execution and what it became",
-          "ps": "No args. The live kernel-wide TASK TABLE",
-          "shutdown_agents": "No args. Stops the AGENTS, not the process: drains (new roots refused), sends `shutdown` to every agent advertising it, waits for in-flight work, cancels the rest. Returns {drained, shut:[ids], cancelled:[ids]}."
-        },
         "tree": {
           "id": "alpha",
-          "sentence": "Bare agent (no handler_module) \u2014 answers substrate verbs only.",
+          "sentence": "Bare agent (no handler_module) — answers substrate verbs only.",
           "description": "The chat pane.",
           "mode": "chat",
           "children": []
-        },
-        "more": "Distilled: every agent and what it is FOR. Reflect one agent for its verbs (<type>reflect</type>). Manual: <type>reflect</type> <readme>index</readme> - keys include system-verbs (ps/cancel/create_agent args) and self-extension (author your own durable tools). <detail>full</detail> on a reflect adds wiring and posture - ask for it only when you need to see how agents are plumbed, not to find one."
+        }
       }
     },
     {
@@ -344,7 +279,7 @@
       },
       "expect": {
         "id": "alpha",
-        "sentence": "Bare agent (no handler_module) \u2014 answers substrate verbs only.",
+        "sentence": "Bare agent (no handler_module) — answers substrate verbs only.",
         "parent_id": "kernel_state",
         "handler_module": null,
         "display_name": "Alpha",
@@ -355,16 +290,6 @@
         },
         "callable_by": {
           "$self": "*"
-        },
-        "kernel_verbs": {
-          "_": "Kernel-owned: send to 'kernel'. The id you name is the OPERAND, not the actor. (`verbs` is what this agent itself does.) This kernel answers the verbs below; tree CRUD lives on the HOST root, reached over the bridge. A browser kernel has no process to exit: `kernel_stop` stops it in place, refusing new work until the page reloads.",
-          "ps": "No args. The live kernel-wide TASK TABLE \u2014 {tasks:[{id, agent, parent, verb, started_at}]}, one row per in-flight dispatch. Paged.",
-          "ledger": "No args. EVERY execution and what it became \u2014 named under its id, unnamed under its minted pid \u2014 {executions:[{id, target, status, attempts, retries, named, outcome?, acked?}]}, paged, scoped to what YOU originated; read from the kernel's memory store plus what is not yet flushed. `outcome` keeps the RESULT only for a named call; a dead letter keeps its error; anything else is {status, bytes} \u2014 the reply itself went to its caller. Failed/timed_out/cancelled rows are the dead-letter queue (announced by the `on_deadletter` event): inspect, retry with a NEW id if you choose, then `ack_deadletter` it \u2014 nothing is retried silently.",
-          "ack_deadletter": "args: id:int|str (req \u2014 an execution id, or its name). Acknowledges a DEAD LETTER (failed/timed_out/cancelled) you originated: recorded in the kernel's store, it may then be pruned. Returns {acked:true, id}.",
-          "kernel_start": "No args. THE START SEQUENCE \u2014 the root must name `memory_store_id` (fail loud otherwise): boots the root, then that store, starts flushing the kernel's execution rows into it, then boots every other agent in registration order. Idempotent. Returns {started, store, booted:[ids]}.",
-          "cancel": "args: task_id:str. Kills that task AND ITS SUBTREE \u2014 the id names its own agent. Returns {cancelled:bool, killed:[\u2026]}; the blocked caller's batch item settles as status:'cancelled'. Unknown id \u21d2 {cancelled:false}.",
-          "shutdown_agents": "No args. Stops the AGENTS, not the process: drains (new roots refused), sends `shutdown` to every agent advertising it, waits for in-flight work, cancels the rest. Returns {drained, shut:[ids], cancelled:[ids]}.",
-          "kernel_stop": "No args. Stops the kernel PROCESS gracefully \u2014 drain, every call settles (done, or cancelled into the dead letters), the last rows flush, agents shut down, exit. Under env:'container', the container."
         }
       }
     },
@@ -378,7 +303,7 @@
       },
       "expect": {
         "id": "zeta",
-        "sentence": "Bare agent (no handler_module) \u2014 answers substrate verbs only.",
+        "sentence": "Bare agent (no handler_module) — answers substrate verbs only.",
         "parent_id": "kernel_state",
         "handler_module": null,
         "display_name": "zeta",
@@ -388,17 +313,6 @@
         "callable_by": {
           "$self": "*"
         },
-        "kernel_verbs": {
-          "_": "Kernel-owned: send to 'kernel'. The id you name is the OPERAND, not the actor. (`verbs` is what this agent itself does.) This kernel answers the verbs below; tree CRUD lives on the HOST root, reached over the bridge. A browser kernel has no process to exit: `kernel_stop` stops it in place, refusing new work until the page reloads.",
-          "ack_deadletter": "args: id:int|str (req",
-          "cancel": "args: task_id:str. Kills that task AND ITS SUBTREE",
-          "kernel_start": "No args. THE START SEQUENCE",
-          "kernel_stop": "No args. Stops the kernel PROCESS gracefully",
-          "ledger": "No args. EVERY execution and what it became",
-          "ps": "No args. The live kernel-wide TASK TABLE",
-          "shutdown_agents": "No args. Stops the AGENTS, not the process: drains (new roots refused), sends `shutdown` to every agent advertising it, waits for in-flight work, cancels the rest. Returns {drained, shut:[ids], cancelled:[ids]}."
-        },
-        "more": "Distilled: every agent and what it is FOR. Reflect one agent for its verbs (<type>reflect</type>). Manual: <type>reflect</type> <readme>index</readme> - keys include system-verbs (ps/cancel/create_agent args) and self-extension (author your own durable tools). <detail>full</detail> on a reflect adds wiring and posture - ask for it only when you need to see how agents are plumbed, not to find one.",
         "readme": {
           "index": []
         }
@@ -414,7 +328,7 @@
       },
       "expect": {
         "id": "zeta",
-        "sentence": "Bare agent (no handler_module) \u2014 answers substrate verbs only.",
+        "sentence": "Bare agent (no handler_module) — answers substrate verbs only.",
         "parent_id": "kernel_state",
         "handler_module": null,
         "display_name": "zeta",
@@ -424,17 +338,6 @@
         "callable_by": {
           "$self": "*"
         },
-        "kernel_verbs": {
-          "_": "Kernel-owned: send to 'kernel'. The id you name is the OPERAND, not the actor. (`verbs` is what this agent itself does.) This kernel answers the verbs below; tree CRUD lives on the HOST root, reached over the bridge. A browser kernel has no process to exit: `kernel_stop` stops it in place, refusing new work until the page reloads.",
-          "ack_deadletter": "args: id:int|str (req",
-          "cancel": "args: task_id:str. Kills that task AND ITS SUBTREE",
-          "kernel_start": "No args. THE START SEQUENCE",
-          "kernel_stop": "No args. Stops the kernel PROCESS gracefully",
-          "ledger": "No args. EVERY execution and what it became",
-          "ps": "No args. The live kernel-wide TASK TABLE",
-          "shutdown_agents": "No args. Stops the AGENTS, not the process: drains (new roots refused), sends `shutdown` to every agent advertising it, waits for in-flight work, cancels the rest. Returns {drained, shut:[ids], cancelled:[ids]}."
-        },
-        "more": "Distilled: every agent and what it is FOR. Reflect one agent for its verbs (<type>reflect</type>). Manual: <type>reflect</type> <readme>index</readme> - keys include system-verbs (ps/cancel/create_agent args) and self-extension (author your own durable tools). <detail>full</detail> on a reflect adds wiring and posture - ask for it only when you need to see how agents are plumbed, not to find one.",
         "readme": {
           "error": "bad key '../x'",
           "keys": []
@@ -451,7 +354,7 @@
       },
       "expect": {
         "id": "zeta",
-        "sentence": "Bare agent (no handler_module) \u2014 answers substrate verbs only.",
+        "sentence": "Bare agent (no handler_module) — answers substrate verbs only.",
         "parent_id": "kernel_state",
         "handler_module": null,
         "display_name": "zeta",
@@ -461,17 +364,6 @@
         "callable_by": {
           "$self": "*"
         },
-        "kernel_verbs": {
-          "_": "Kernel-owned: send to 'kernel'. The id you name is the OPERAND, not the actor. (`verbs` is what this agent itself does.) This kernel answers the verbs below; tree CRUD lives on the HOST root, reached over the bridge. A browser kernel has no process to exit: `kernel_stop` stops it in place, refusing new work until the page reloads.",
-          "ack_deadletter": "args: id:int|str (req",
-          "cancel": "args: task_id:str. Kills that task AND ITS SUBTREE",
-          "kernel_start": "No args. THE START SEQUENCE",
-          "kernel_stop": "No args. Stops the kernel PROCESS gracefully",
-          "ledger": "No args. EVERY execution and what it became",
-          "ps": "No args. The live kernel-wide TASK TABLE",
-          "shutdown_agents": "No args. Stops the AGENTS, not the process: drains (new roots refused), sends `shutdown` to every agent advertising it, waits for in-flight work, cancels the rest. Returns {drained, shut:[ids], cancelled:[ids]}."
-        },
-        "more": "Distilled: every agent and what it is FOR. Reflect one agent for its verbs (<type>reflect</type>). Manual: <type>reflect</type> <readme>index</readme> - keys include system-verbs (ps/cancel/create_agent args) and self-extension (author your own durable tools). <detail>full</detail> on a reflect adds wiring and posture - ask for it only when you need to see how agents are plumbed, not to find one.",
         "readme": {
           "error": "no doc 'topic'",
           "keys": []
@@ -488,7 +380,7 @@
       },
       "expect": {
         "id": "zeta",
-        "sentence": "Bare agent (no handler_module) \u2014 answers substrate verbs only.",
+        "sentence": "Bare agent (no handler_module) — answers substrate verbs only.",
         "parent_id": "kernel_state",
         "handler_module": null,
         "display_name": "zeta",
@@ -498,17 +390,6 @@
         "callable_by": {
           "$self": "*"
         },
-        "kernel_verbs": {
-          "_": "Kernel-owned: send to 'kernel'. The id you name is the OPERAND, not the actor. (`verbs` is what this agent itself does.) This kernel answers the verbs below; tree CRUD lives on the HOST root, reached over the bridge. A browser kernel has no process to exit: `kernel_stop` stops it in place, refusing new work until the page reloads.",
-          "ack_deadletter": "args: id:int|str (req",
-          "cancel": "args: task_id:str. Kills that task AND ITS SUBTREE",
-          "kernel_start": "No args. THE START SEQUENCE",
-          "kernel_stop": "No args. Stops the kernel PROCESS gracefully",
-          "ledger": "No args. EVERY execution and what it became",
-          "ps": "No args. The live kernel-wide TASK TABLE",
-          "shutdown_agents": "No args. Stops the AGENTS, not the process: drains (new roots refused), sends `shutdown` to every agent advertising it, waits for in-flight work, cancels the rest. Returns {drained, shut:[ids], cancelled:[ids]}."
-        },
-        "more": "Distilled: every agent and what it is FOR. Reflect one agent for its verbs (<type>reflect</type>). Manual: <type>reflect</type> <readme>index</readme> - keys include system-verbs (ps/cancel/create_agent args) and self-extension (author your own durable tools). <detail>full</detail> on a reflect adds wiring and posture - ask for it only when you need to see how agents are plumbed, not to find one.",
         "readme": null
       }
     }

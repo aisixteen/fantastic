@@ -16,9 +16,11 @@ Here it is an agent:
                  narrower repertoire than the others. Gated, and the ledger row
                  names this agent: the wiring a test exercises is the wiring
                  production uses.
-  * `inquiry`  — someone sends one, and the ANSWER IS THE REPLY. No suspend, no
-                 resume, no scraping: an ordinary call whose result the sender
-                 reads in its next turn like any other.
+  * `inquiry`  — someone sends one; it is ACCEPTED at once, the human READS it
+                 and replies LATER (owner, 2026-10-06: fully async) — its own
+                 send into the asker's conversation, tagged `[reply to <pid> ·
+                 user inquiry]`, exactly as an AI that was asked answers. No
+                 suspend, no resume, no scraping.
 
 The answer is POLICY ON THE RECORD (`answer`), not code. One bundle serves every
 arm: a test that wants a specific answer writes a different record. There is no
@@ -35,15 +37,23 @@ same verb. The model cannot tell them apart, which is the point.
 
 from __future__ import annotations
 
+import asyncio
+
+from ai_core.tool_parse import render_reply
+from kernel import current_origin, current_task
+
 SENTENCE = (
     "The human. Send me an inquiry when you cannot proceed without a decision "
-    "that is mine to make; the answer comes straight back as the reply."
+    "that is mine to make; I read it and reply later, under its pid."
 )
+#: How long the human takes to read an inquiry before replying.
+READ_DELAY = 1.0
 VERBS = {
     "inquiry": (
         "args: text:str (req), kind:str? (text|single|multi|confirm), "
-        "options:list?, action:dict?, request_id:str?. RETURNS the "
-        "answer — {answer, request_id}. An ordinary call: nothing suspends. "
+        "options:list?, action:dict?, request_id:str?. ACCEPTED at once "
+        "({accepted, re, request_id}); the answer arrives LATER as this "
+        "agent's message under the inquiry's pid. Nothing suspends. "
         "An `action` is a PROPOSAL the sender may not perform itself: it is "
         "HELD, never run here."
     ),
@@ -85,8 +95,7 @@ async def handler(id: str, payload: dict, agent) -> dict | None:
     if verb in ("boot", "shutdown"):
         return None
     if verb == "reflect":
-        return {"id": id, "sentence": SENTENCE, "verbs": VERBS,
-                "inquiries": _RECEIVED.get(id, 0)}
+        return {"id": id, "sentence": SENTENCE, "inquiries": _RECEIVED.get(id, 0)}
 
     if verb == "inquiry":
         q = payload.get("text")
@@ -140,7 +149,22 @@ async def handler(id: str, payload: dict, agent) -> dict | None:
         if isinstance(action, dict):
             _PROPOSALS.setdefault(id, []).append(action)
         _RECEIVED[id] = _RECEIVED.get(id, 0) + 1
-        return {"answer": answer, "request_id": payload.get("request_id"),
+        # A PERSON READS, THEN REPLIES — later, as their own send into the asker's
+        # conversation under the inquiry's pid (gated like any send: `human()`
+        # grants this agent `can_call` on every AI it serves).
+        asker, pid = current_origin(), current_task()
+        text = f"[reply to {pid} · {id} inquiry]\n" + render_reply(
+            {"answer": answer, "request_id": payload.get("request_id")}
+        )
+        reply_client = payload.get("reply_client_id") or "cli"
+
+        async def _reply():
+            await asyncio.sleep(READ_DELAY)
+            await agent.send([{"target": asker, "payload": {
+                "type": "send", "text": text, "client_id": reply_client}}])
+
+        agent.ctx.spawn_task(id, "inquiry_answer", _reply())
+        return {"accepted": True, "re": pid, "request_id": payload.get("request_id"),
                 "inquiries": _RECEIVED[id], "granted": applied}
 
     if verb == "inquiries":

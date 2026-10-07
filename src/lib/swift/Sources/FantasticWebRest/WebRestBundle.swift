@@ -34,6 +34,7 @@ public let HANDLER_MODULE = "web_rest.tools"
 public final class WebRestBundle: AgentBundle, WebRouteEndpoints, @unchecked Sendable {
     public let name = "web_rest"
     public var verbs: [String] { Array(Self.verbDocs.keys) }
+    public var verbDocTable: JSON { .object(Self.verbDocs) }
     public init() {}
 
     public var readme: String? { Self.readmeText }
@@ -97,7 +98,6 @@ public final class WebRestBundle: AgentBundle, WebRouteEndpoints, @unchecked Sen
             // The REST face is a CHANNEL — surface its auth posture so a denied
             // client can find the door (discovery-through-denial).
             for (k, v) in describe(kernel.agent(agentId)?.meta ?? [:]) { out[k] = v }
-            out["verbs"] = .object(Self.verbDocs)
             return .object(out)
         case "boot":
             // python `_boot` → None.

@@ -285,6 +285,20 @@ struct BundleSmokeTests {
         // Fire it NOW (no tick-loop wait).
         let fired = await kernel.send([Item("sched", ["type": "tick_now", "schedule_id": .string(sid)])])[0].result
         #expect(fired["fired"].asBool == true, "\(fired)")
+        // the reply carries the fire's OUTCOME — the target's own answer
+        #expect(!fired["result"]["agents"].isNull && fired["error"].isNull, "\(fired)")
+        // A target that refuses: `{fired:true}` alone hid sixteen refusals from the
+        // model (measured 2026-10-06, rust subai_graph). Python
+        // `test_tick_now_reports_a_refused_fire`.
+        let g = await kernel.send([Item("sched", [
+                "type": "schedule", "target": "ghost", "interval_seconds": .integer(3600),
+                "payload": ["type": "tick"] as JSON,
+            ])])[0].result
+        let ghost = await kernel.send([Item("sched", [
+                "type": "tick_now", "schedule_id": .string(g["schedule_id"].asString ?? ""),
+            ])])[0].result
+        let said = ghost["error"].isNull ? ghost["result"]["error"] : ghost["error"]
+        #expect(pyStr(said).contains("ghost"), "\(ghost)")
         // run_count bumped + persisted.
         let list = await kernel.send([Item("sched", ["type": "list"])])[0].result
         #expect(list["schedules"][0]["run_count"].asInt == 1, "\(list)")
@@ -793,8 +807,8 @@ struct BundleSmokeTests {
         #expect(routes.first?["kind"].asString == "websocket")
         #expect(routes.first?["path"].asString == "/{host_id}/ws")
         #expect(routes.first?["method"].isNull == true, "\(r)")
-        // reflect publishes python's FIRST docstring line, `No args.` included.
-        let refl = await kernel.send([Item("ws", ["type": "reflect"])])[0].result
+        // `docs` publishes python's FIRST docstring line, `No args.` included.
+        let refl = await kernel.send([Item("kernel", ["type": "docs", "of": "ws", "tier": "detailed"])])[0].result
         #expect(
             refl["verbs"]["get_routes"].asString
                 == "Declares this surface's HTTP/WS route mounts. No args. Returns", "\(refl)")
@@ -957,10 +971,11 @@ struct SchedulerParityTests {
 
     /// A5.1 — the `schedule_fired` blurb is python's, verbatim: two em-dashes and
     /// the clause that says the payload send IS the tick.
-    @Test func schedulerReflectEmitsIsPythonVerbatim() async throws {
+    @Test func schedulerDocsEmitsIsPythonVerbatim() async throws {
         let kernel = makeKernelWithAll()
         await newScheduler(kernel, "s_emits")
-        let r = await ask(kernel, "s_emits", ["type": "reflect"])
+        #expect(await ask(kernel, "s_emits", ["type": "reflect"]).asObject?["emits"] == nil)
+        let r = await ask(kernel, "kernel", ["type": "docs", "of": "s_emits", "tier": "detailed"])
         #expect(
             r["emits"]["schedule_fired"].asString
                 == "{type:'schedule_fired', schedule_id, scheduler_id, target, payload, result, error, ts, duration_ms} — emitted on the scheduler's OWN inbox after every fire (never the target's — the payload send is the tick)",

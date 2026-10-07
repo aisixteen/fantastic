@@ -75,8 +75,8 @@ write. The baseline stamped on every agent is `{"$self": "*"}` on both fields,
 nothing else. An agent send passes iff the sender's `can_call` grants (target,
 verb) AND the target's `callable_by` grants (sender, verb); `"*"` covers every
 verb. Kernel verbs answered by the root take the same check against the root.
-The mutators (`create_agent`, `update_agent`, `delete_agent`) then act only on
-the sender's own DIRECT children. IDENTITY COMES ONLY FROM DISPATCH (owner
+The tree verbs (`create_agent`, `update_agent`, `delete_agent`) take that check and
+nothing more: whoever holds one on the root acts on any agent. IDENTITY COMES ONLY FROM DISPATCH (owner
 2026-10-04): the sends an agent's handler makes, and the tasks it spawns, are
 that agent's; a send made outside every dispatch is the operator's and is
 ungated. A wire leg (web_ws, web_rest, a bridge) never sends as anyone else: it

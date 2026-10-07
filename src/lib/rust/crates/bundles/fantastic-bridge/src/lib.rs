@@ -126,7 +126,7 @@ impl Family {
             "reflect": "Identity + transport + connectivity. No args.",
             "boot": "No args. Reads `transport` (kind) + transport-specific fields off the agent record, builds the transport, spawns the read loop, emits `bridge_up`. Idempotent: re-booting a connected bridge is a no-op.",
             "reconnect": "No args. Teardown + boot — explicit because we don't auto-reconnect on transport failure (keeps real network problems visible to operators / telemetry).",
-            "forward": "args: target:str (req — id on the REMOTE kernel) + payload:dict (req — the call to run there; payload is ITSELF a verb frame and MUST carry its own \"type\") + timeout:float? (default 30s). Example: {\"type\":\"forward\",\"target\":\"src\",\"payload\":{\"type\":\"read_stream\",\"path\":\"data.bin\",\"offset\":0}}. Ships a raw `{type:'call', id, target, payload}` frame over the transport, awaits the matching reply, returns the unwrapped data. The far kernel judges the call as the leg that serves it there. Local→local stays direct kernel.send (this verb is only for cross-kernel). Multi-hop loop detection is the caller's responsibility — the bridge ships whatever it's given.",
+            "forward": "args: target:str (req — an id on the REMOTE kernel), payload:dict (req — the call to run there, a verb frame with its own `type`), timeout:float? (default 30s). Example: {\"type\":\"forward\",\"target\":\"src\",\"payload\":{\"type\":\"read_stream\",\"path\":\"data.bin\",\"offset\":0}}. Ships a raw `{type:'call', id, target, payload}` frame over the transport, awaits the matching reply, returns the unwrapped data. The far kernel judges the call as the leg that serves it there. Local→local stays direct kernel.send (this verb is only for cross-kernel). Multi-hop loop detection is the caller's responsibility — the bridge ships whatever it's given.",
             "watch_remote": "args: target:str (req — id on the REMOTE kernel to watch). Sends `{type:'watch', src:<target>}` over the transport and subscribes this leg to `target`. Subsequent `{type:'event', src, payload}` frames whose `src` is subscribed are re-emitted on THIS bridge agent's inbox as the payload plus `src`; an event for anything not subscribed is dropped. Local watchers subscribe to the bridge with `kernel.watch(<bridge_id>, ...)`. Idempotent (web_ws de-dups via its own `watching` set).",
             "unwatch_remote": "args: target:str (req — id previously passed to watch_remote). Unsubscribes this leg from `target` (events for it are dropped from now on) and sends `{type:'unwatch', src:<target>}` so the remote stops emitting them.",
         });
@@ -270,12 +270,15 @@ async fn verb_reply(
 /// python `dispatch`'s miss branch — the commonest slip is a frame with no
 /// `type`, or a `forward` whose inner `payload` dropped its own.
 fn unknown_type(verb: &Value) -> Value {
-    json!({
-        "error": format!("bridge: unknown type {}", py_repr_value(verb)),
-        "hint": "every bridge frame needs a \"type\"; to reach a remote agent use \
+    let mut r = fantastic_kernel::refusal::refusal_hint(
+        fantastic_kernel::refusal::UNHANDLED,
+        format!("bridge: unknown type {}", py_repr_value(verb)),
+        "every bridge frame needs a \"type\"; to reach a remote agent use \
     {\"type\":\"forward\",\"target\":\"<remote_id>\",\"payload\":{\"type\":\"<verb>\",...}} \
     — the inner payload is itself a verb frame and needs its own \"type\".",
-    })
+    );
+    fantastic_kernel::refusal::with(&mut r, "verb", verb.clone());
+    r
 }
 
 /// The relay directory verbs (`relay_connector` only) — addressed to the relay's
@@ -446,6 +449,14 @@ impl Bundle for WsBridgeBundle {
     fn name(&self) -> &str {
         "ws_bridge"
     }
+
+    fn verb_docs(&self) -> Value {
+        Family::Ws.verbs()
+    }
+
+    fn emits_doc(&self) -> Option<Value> {
+        Some(emits_json())
+    }
     fn readme(&self) -> Option<&'static str> {
         Some(WS_README)
     }
@@ -496,6 +507,14 @@ impl Bundle for WsBridgeBundle {
 impl Bundle for RelayConnectorBundle {
     fn name(&self) -> &str {
         "relay_connector"
+    }
+
+    fn verb_docs(&self) -> Value {
+        Family::Relay.verbs()
+    }
+
+    fn emits_doc(&self) -> Option<Value> {
+        Some(emits_json())
     }
     fn readme(&self) -> Option<&'static str> {
         Some(RELAY_README)
@@ -716,6 +735,16 @@ fn rule_spec(agent_id: &AgentId, kernel: &Kernel, primary: &str) -> Option<Value
 
 // ── verb implementations ────────────────────────────────────────────
 
+/// What a bridge leg emits on its own inbox — python `io_bridge.EMITS`, served by
+/// `docs` (tier detailed).
+fn emits_json() -> Value {
+    json!({
+        "bridge_up": "{type:'bridge_up'} — emitted on this agent's inbox after a successful boot",
+        "bridge_down": "{type:'bridge_down'} — emitted when the transport drops (peer closed, tunnel died)",
+        "<remote event>": "events from `watch_remote` subscriptions are re-emitted on this agent's inbox as their original `{type, ...}` shape plus `src` (the watched remote id); unsubscribed events are dropped",
+    })
+}
+
 fn reflect_reply(family: Family, agent_id: &AgentId, kernel: &Kernel) -> Value {
     let bridge = BRIDGES.lock().get(agent_id).cloned();
     // python: `st.transport_kind or rec.get("transport") or default_kind`.
@@ -806,15 +835,6 @@ fn reflect_reply(family: Family, agent_id: &AgentId, kernel: &Kernel) -> Value {
             );
         }
     }
-    out.insert("verbs".into(), family.verbs());
-    out.insert(
-        "emits".into(),
-        json!({
-            "bridge_up": "{type:'bridge_up'} — emitted on this agent's inbox after a successful boot",
-            "bridge_down": "{type:'bridge_down'} — emitted when the transport drops (peer closed, tunnel died)",
-            "<remote event>": "events from `watch_remote` subscriptions are re-emitted on this agent's inbox as their original `{type, ...}` shape plus `src` (the watched remote id); unsubscribed events are dropped",
-        }),
-    );
     Value::Object(out)
 }
 

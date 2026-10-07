@@ -98,6 +98,7 @@ enum AISideTables {
             AICalibration.forget(kernel)
             AISilentStreaks.forget(kernel)
             AIStripStrategy.forget(kernel)
+            AIInquiries.forget(kernel)
         }
     }
 }

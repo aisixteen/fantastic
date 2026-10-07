@@ -26,7 +26,7 @@ from helpers.facts_arm import (
     fixture,
     plant_fillers,
     report,
-    send_later,
+    send_in_turn,
     send_when,
 )
 from helpers.kernel import open_kernel
@@ -55,7 +55,8 @@ async def main():
         results = []
         for aid, strategy, extra in FOLD_ARMS:
             from helpers.facts_arm import run_arm
-            laters = [await send_later(root, aid, task(i), 22.0 * i) for i in range(1, N)]
+            # each task as soon as the previous one ends — over time, no timer idle
+            laters = [await send_in_turn(root, aid, [task(i) for i in range(1, N)])]
             laters.append(await send_when(root, core, aid, final, after_tasks(root, aid, list(laters)), max_wait=22.0 * N + 600))
             a = await run_arm(root, core, BK, FB, aid, strategy, extra, task(0), "final.md")
             for t in laters: t.cancel()

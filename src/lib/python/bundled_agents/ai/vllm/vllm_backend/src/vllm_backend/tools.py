@@ -10,7 +10,9 @@ describe the real server, and vLLM has its own knobs (`top_k`,
 `reasoning_effort`, `thinking_token_budget`, `no_repeat_ngram_size`), its own
 failure shapes and — the reason this bundle
 exists — a KV-cache session table (`kv_slots` + `kv_overflow`) shared per
-endpoint. See `provider.py` for what each is and why.
+endpoint. See `provider.py` for what each is and why. What the record leaves out
+— `model`, `max_tokens`, `context_window`, `kv_slots` — is read from the server
+before a turn and written back (`server.py`).
 
 `on_cancel` is re-exported from `ai_core` because that module-level name IS the
 bundle's cancel hook; `on_delete` is ai_core's, plus this backend's own table.
@@ -23,6 +25,7 @@ from ai_core import on_delete as _core_on_delete
 from ai_core.credentials import key_reader
 from ai_core.schema import credentials_field, field, schema, validate
 
+from vllm_backend import server
 from vllm_backend.provider import (
     CONNECT_TIMEOUT,
     KV_OVERFLOWS,
@@ -39,12 +42,13 @@ NAME = "vllm_backend"
 
 
 def _required_int(rec: dict, key: str) -> int:
-    """A count the record MUST name — never guessed, fails the turn loud."""
+    """A count the turn runs on — set on the record, or read from the server
+    before the turn (`server.resolve`); fails the turn loud otherwise."""
     v = rec.get(key)
     if isinstance(v, bool) or not isinstance(v, int) or v < 1:
         raise ValueError(
-            f"{NAME}: `{key}` is required on the agent record, a positive int — "
-            f"nothing is guessed (update_agent <id> {key}=…)"
+            f"{NAME}: `{key}` is not on the agent record, a positive int, and was not "
+            f"read from the server (update_agent <id> {key}=…)"
         )
     return v
 
@@ -63,8 +67,9 @@ def _sampling(rec: dict) -> tuple[dict, bool]:
 
 
 def make_provider(id, kernel):
-    """Build a VllmProvider from the agent record. `endpoint`, `model`,
-    `max_tokens`, `context_window`, `kv_slots` and `kv_overflow` are REQUIRED."""
+    """Build a VllmProvider from the agent record. `endpoint` and `kv_overflow`
+    are the record's; `model`, `max_tokens`, `context_window` and `kv_slots` are
+    the record's or were read from the server before the turn."""
     from vllm_backend.provider import VllmProvider
 
     rec = kernel.get(id) or {}
@@ -123,18 +128,40 @@ async def _reflect_extra(id, kernel):
 #: THE RECORD SCHEMA (lib request #3) — what this kind's record takes, read with
 #: no agent existing (`reflect bundles=all`). Built from the constants the provider
 #: runs on, and enforced by `validate_meta` below, so the page, the write check and
-#: the turn cannot disagree. The six required fields have NO default: nothing is
-#: guessed about a server.
+#: the turn cannot disagree. `endpoint` and `kv_overflow` are required; the counts
+#: a record leaves out are READ FROM THE SERVER before a turn (`server.py`), never
+#: given a default.
+_FROM_SERVER = "; left out, read from the server before a turn and written here"
 RECORD_SCHEMA = schema(
     [
         field("endpoint", "str", "the vLLM server's /v1 URL", required=True),
-        field("model", "str", "the served model name", required=True),
-        field("max_tokens", "int", "a turn's output budget (tokens)", required=True),
+        field(
+            "model",
+            "str",
+            "the served model name" + _FROM_SERVER + " (the one model it serves)",
+        ),
+        field(
+            "max_tokens",
+            "int",
+            "a turn's output budget (tokens)" + _FROM_SERVER + " (max_model_len)",
+        ),
+        field(
+            "context_window",
+            "int",
+            "the server's window (tokens)" + _FROM_SERVER + " (max_model_len)",
+        ),
         field(
             "kv_slots",
             "int",
-            "how many conversations may be live on the endpoint",
-            required=True,
+            "how many conversations may be live on the endpoint"
+            + _FROM_SERVER
+            + " (floor of kv_cache_max_concurrency on metrics_url)",
+        ),
+        field(
+            "metrics_url",
+            "str",
+            "the server's Prometheus page, read for kv_slots; left out, the "
+            "endpoint with /v1 replaced by /metrics",
         ),
         field(
             "kv_overflow",
@@ -194,9 +221,6 @@ RECORD_SCHEMA = schema(
         # the door's key, when it wants one — absent = no Authorization header
         credentials_field(required=False),
     ],
-    # the server's window, set on the record and used as set: the whole-window
-    # rule compares max_tokens with it (never a default)
-    require=("context_window",),
 )
 
 #: The fields a turn cannot run without — refused at the write when absent. The
@@ -217,7 +241,7 @@ def validate_meta(meta: dict, record: dict) -> str | None:
     set. Checks the MERGED state, because `thinking_token_budget` and
     `max_tokens` are only wrong together."""
     merged = {**record, **meta}
-    for key in ("max_tokens", "kv_slots"):
+    for key in ("max_tokens", "context_window", "kv_slots"):
         if (
             key in meta
             and meta[key] is not None
@@ -231,6 +255,21 @@ def validate_meta(meta: dict, record: dict) -> str | None:
             and not _positive(meta[key], integer=False)
         ):
             return f"{key} must be a positive number of seconds"
+    url = meta.get("metrics_url")
+    if url is not None and not (
+        isinstance(url, str) and url.strip().startswith(("http://", "https://"))
+    ):
+        return "metrics_url must be an http(s) URL — the server's /metrics page"
+    if (
+        merged.get("kv_slots") is None
+        and str(merged.get("endpoint") or "").strip()
+        and server.metrics_url(merged) is None
+    ):
+        return (
+            f"kv_slots is left to the server, but the endpoint "
+            f"{merged['endpoint']!r} does not end in /v1, so its metrics page is not "
+            "known — set metrics_url (the server's /metrics page) or kv_slots"
+        )
     if meta.get("kv_overflow") is not None and meta["kv_overflow"] not in KV_OVERFLOWS:
         return (
             f"kv_overflow={meta['kv_overflow']!r} is not a rotation policy — legal "
@@ -279,7 +318,7 @@ async def on_delete(agent) -> None:
 
 
 def _build():
-    return build(
+    verbs, core = build(
         sentence=(
             "vLLM-backed LLM agent, talking to the vLLM server directly "
             "(raw prompt-and-parse tool-calling; a KV-cache session table per endpoint)."
@@ -289,5 +328,24 @@ def _build():
         reflect_extra=_reflect_extra,
     )
 
+    async def handler(id: str, payload: dict, kernel) -> dict | None:
+        # A verb that runs a turn first reads what the record leaves to the
+        # server; a server that does not answer refuses the verb, naming the field.
+        if payload.get("type") in server.TURN_VERBS:
+            refused = await server.resolve(
+                id,
+                kernel,
+                key=key_reader(id, kernel, NAME, required=False),
+                validate=validate_meta,
+            )
+            if refused is not None:
+                return refused
+        return await core(id, payload, kernel)
+
+    return verbs, handler
+
 
 VERBS, handler = _build()
+
+# Served by the kernel's `docs` verb (tier detailed) — shared by every backend.
+from ai_core import CANCEL, EMITS, NOTES  # noqa: E402, F401

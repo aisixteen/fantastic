@@ -354,8 +354,8 @@ struct FileBundleTests {
 
     // ─── python parity (A1, A2) ─────────────────────────────────
 
-    /// A2.1 — reflect key order is python's: the posture keys sit AFTER `verbs`
-    /// and `root_error` is last.
+    /// A2.1 — reflect key order is python's: the posture keys sit after
+    /// `compose` and `root_error` is last.
     @Test func reflectKeyOrderMatchesPython() async {
         let (k, dir) = await openBridge()
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -363,16 +363,16 @@ struct FileBundleTests {
         // The BUNDLE's keys, in python's order (the kernel frame — can_call,
         // kernel_verbs, tree — is appended after them by the substrate).
         #expect(
-            Array(r.asObject?.keys ?? []).prefix(10) == [
+            Array(r.asObject?.keys ?? []).prefix(9) == [
                 "id", "sentence", "root", "readonly", "allow_count", "edit_grammar", "compose",
-                "verbs", "ingress_rule", "egress_rule",
+                "ingress_rule", "egress_rule",
             ], "\(Array(r.asObject?.keys ?? []))")
         let (k2, dir2) = await openBridge(meta: ["id": "fs2", "root": "../nope"])
         defer { try? FileManager.default.removeItem(at: dir2) }
         let r2 = await k2.send([Item(AgentId("fs2"), .object(["type": "reflect"]))])[0].result
         // `root_error` is last of the bundle's own keys.
         #expect(
-            Array(r2.asObject?.keys ?? []).prefix(12).last == "root_error",
+            Array(r2.asObject?.keys ?? []).prefix(11).last == "root_error",
             "\(Array(r2.asObject?.keys ?? []))")
     }
 

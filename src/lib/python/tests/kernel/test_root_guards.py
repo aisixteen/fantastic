@@ -133,6 +133,8 @@ async def test_get_is_not_a_kernel_verb(seeded_kernel):
     assert "id" not in r, r
 
     kv = (
-        await seeded_kernel.send([{"target": "kernel", "payload": {"type": "reflect"}}])
-    )[0]["result"]["kernel_verbs"]
+        await seeded_kernel.send(
+            [{"target": "kernel", "payload": {"type": "docs", "of": "kernel"}}]
+        )
+    )[0]["result"]["verbs"]
     assert "get" not in kv, kv

@@ -87,9 +87,8 @@ task_local! {
     ///
     /// This exists because `CURRENT_SENDER` is the CALLEE mid-dispatch: inside
     /// a handler it reads as that handler's own agent, so a bundle could not
-    /// tell who actually called it. That gap let an agent write ANOTHER agent's
-    /// memory through a blob verb — the payload named the namespace and nothing
-    /// could check it against the caller.
+    /// tell who actually called it — an inquiry's asker, `stop`'s stopper, an
+    /// operator send told from an agent's.
     pub(crate) static CURRENT_ORIGIN: Option<AgentId>;
 }
 
@@ -776,7 +775,7 @@ impl Kernel {
         // nothing exempt — needs BOTH the sender's `can_call` (egress) AND the
         // target's `callable_by` (ingress) to grant the edge.
         if let Some(orig) = caller.as_ref() {
-            if let Some(denial) = self.gate(orig, &verb, &target, &item.payload) {
+            if let Some(denial) = self.gate(orig, &verb, &target) {
                 return Launched::Settled(Outcome::refused(denial));
             }
         }
@@ -1583,7 +1582,7 @@ impl Kernel {
         };
         let sender = current_sender();
         if let Some(orig) = sender.as_ref() {
-            if orig != target_id && self.gate(orig, "emit", &target, &item.payload).is_some() {
+            if orig != target_id && self.gate(orig, "emit", &target).is_some() {
                 return;
             }
         }
@@ -1615,7 +1614,7 @@ impl Kernel {
             return None; // nothing to mirror; not a refusal
         };
         if let Some(orig) = current_sender() {
-            if let Some(denial) = self.gate(&orig, "watch", &src, &Value::Null) {
+            if let Some(denial) = self.gate(&orig, "watch", &src) {
                 return Some(denial);
             }
         }
@@ -1656,7 +1655,7 @@ impl Kernel {
         // An OPERATOR tap is the origin root of trust, as with send and watch.
         current_sender()?;
         let root = self.root()?;
-        self.gate(watcher_id, "state_subscribe", &root, &Value::Null)
+        self.gate(watcher_id, "state_subscribe", &root)
     }
 
     /// Detach a previously-registered watcher.
@@ -1892,7 +1891,7 @@ fn dispatch(
                     "reflect" => crate::reflect::reflect_identity(&target),
                     // CODED, not a bare error. A reason-less `{error}` is
                     // decorated by `apply_reflect_flags` into something that
-                    // reads like a healthy reflect (kernel_verbs, tree, more)
+                    // reads like a healthy reflect (a tree around it)
                     // with a stray error field — the caller cannot tell a
                     // refusal from an answer (measured 2026-09-02).
                     _ => no_handler_module_refusal(&target.id.0, verb),
@@ -1961,8 +1960,8 @@ executor, and the fields without which the agent is created and never runs) and 
 
 mod gate;
 mod kernel_verbs;
+pub use kernel_verbs::kernel_verb_docs;
 use kernel_verbs::{handle_kernel_verb, is_kernel_verb};
-pub use kernel_verbs::{kernel_verb_docs, kernel_verbs_view, KERNEL_VERBS_PREAMBLE};
 
 #[cfg(test)]
 mod tests;

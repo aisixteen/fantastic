@@ -483,6 +483,45 @@ async fn pause_resume_flips_meta() {
     assert_eq!(flips, 2, "pause and resume each publish `updated`");
 }
 
+/// `tick_now` answers the fire's OUTCOME. Measured 2026-10-06 (rust subai_graph):
+/// a schedule sent `{type:'tick'}` to an AI agent, which has no such verb;
+/// `{fired:true}` alone hid sixteen refusals from the model. Python
+/// `test_tick_now_reports_a_refused_fire`.
+#[tokio::test]
+async fn tick_now_reports_a_refused_fire() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, sch) = mk_kernel(&tmp).await;
+    let r = kernel
+        .send(vec![Item::new(
+            sch.clone(),
+            json!({
+                "type": "schedule",
+                "target": "ghost",
+                "payload": {"type": "tick"},
+                "interval_seconds": 999_999,
+            }),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let sid = r["schedule_id"].as_str().unwrap().to_string();
+    let fired = kernel
+        .send(vec![Item::new(
+            sch.clone(),
+            json!({"type": "tick_now", "schedule_id": sid}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(fired["fired"], true, "{fired}");
+    let said = if fired["error"].is_null() {
+        fired["result"]["error"].clone()
+    } else {
+        fired["error"].clone()
+    };
+    assert!(said.to_string().contains("ghost"), "{fired}");
+}
+
 #[tokio::test]
 async fn tick_now_fires_immediately_and_appends_history() {
     let tmp = TempDir::new().unwrap();
@@ -510,6 +549,10 @@ async fn tick_now_fires_immediately_and_appends_history() {
         .remove(0)
         .result;
     assert_eq!(fired["fired"], true);
+    assert!(
+        fired.get("result").is_some() && fired.get("error").is_some(),
+        "{fired}"
+    );
     let hist = kernel
         .send(vec![Item::new(
             sch.clone(),
@@ -811,12 +854,9 @@ fn scheduler_readme_is_python_verbatim() {
 
 /// A5.1 — the `schedule_fired` emit doc is python's, two em-dashes and all.
 #[tokio::test]
-async fn reflect_emits_is_python_verbatim() {
-    let tmp = TempDir::new().unwrap();
-    let (kernel, sch) = mk_kernel(&tmp).await;
-    let r = reflect_reply(&sch, &kernel);
+async fn docs_emits_is_python_verbatim() {
     assert_eq!(
-        r["emits"]["schedule_fired"],
+        SchedulerBundle.emits_doc().unwrap()["schedule_fired"],
         "{type:'schedule_fired', schedule_id, scheduler_id, target, payload, result, error, ts, duration_ms} — emitted on the scheduler's OWN inbox after every fire (never the target's — the payload send is the tick)"
     );
 }
@@ -824,11 +864,9 @@ async fn reflect_emits_is_python_verbatim() {
 /// A5.15 — `verbs` is python's `VERBS` order, each entry the FIRST LINE of that
 /// verb's docstring. `boot`'s is truncated mid-sentence; that is the python text.
 #[tokio::test]
-async fn reflect_verbs_are_python_verbatim() {
-    let tmp = TempDir::new().unwrap();
-    let (kernel, sch) = mk_kernel(&tmp).await;
-    let r = reflect_reply(&sch, &kernel);
-    let verbs = r["verbs"].as_object().expect("verbs object");
+async fn verb_docs_are_python_verbatim() {
+    let docs = SchedulerBundle.verb_docs();
+    let verbs = docs.as_object().expect("verbs object");
     assert_eq!(
         verbs.keys().map(String::as_str).collect::<Vec<_>>(),
         [
@@ -1323,7 +1361,7 @@ async fn unknown_type_wire_shape_is_byte_exact() {
         .result;
     assert_eq!(
         serde_json::to_string(&r).unwrap(),
-        r#"{"error":"scheduler: unknown type 'frob'"}"#
+        r#"{"error":"scheduler: unknown type 'frob'","reason":"unhandled","verb":"frob"}"#
     );
     let r = SchedulerBundle
         .handle(&sch, &json!({}), &kernel)
@@ -1332,7 +1370,7 @@ async fn unknown_type_wire_shape_is_byte_exact() {
         .unwrap();
     assert_eq!(
         serde_json::to_string(&r).unwrap(),
-        r#"{"error":"scheduler: unknown type None"}"#
+        r#"{"error":"scheduler: unknown type None","reason":"unhandled","verb":null}"#
     );
 }
 

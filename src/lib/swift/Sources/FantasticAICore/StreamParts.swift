@@ -16,8 +16,8 @@
 //
 // Kinds: "text" (prose), "thinking" (inside `<think>`), "call" (a `<call
 // name="…">` envelope, its args streaming as they are written). A call written
-// inside a thought is a call part — dispatch reads the full text, so an action
-// mid-thought is still an action.
+// inside a thought is thinking text, never a call part — only the answer acts
+// (owner, 2026-10-07).
 //
 // It is ANIMATION, never action: nothing here dispatches. The call parser in
 // `ToolParse` stays the one authority on what a call IS; this only tells a
@@ -233,8 +233,10 @@ final class PartSplitter {
 
     private func step(_ out: inout [PartEvent]) -> Bool {
         if call != nil { return stepCall(&out) }
-        // Outside a call: look for the next markup that changes the part.
-        let opens = [OPEN, inThink ? THINK_CLOSE_S : THINK_OPEN_S]
+        // Outside a call: look for the next markup that changes the part. INSIDE
+        // thinking only `</think>` does — a `<call>` there is thinking text, never a
+        // call part (owner, 2026-10-07: only the answer acts).
+        let opens = inThink ? [THINK_CLOSE_S] : [OPEN, THINK_OPEN_S]
         let hits = opens.compactMap { t in findScalars(buf, t, from: 0).map { ($0, t) } }
         guard let hit = hits.min(by: { $0.0 < $1.0 }) else {
             let hold = heldTail(buf, opens)

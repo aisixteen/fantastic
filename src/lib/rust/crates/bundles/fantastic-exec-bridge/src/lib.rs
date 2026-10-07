@@ -248,10 +248,61 @@ fn shell_permits(
 /// The exec_bridge bundle.
 pub struct ExecBridgeBundle;
 
+/// HOW TO CALL an exec_bridge agent — python's `VERBS` docstrings (first line
+/// each), served by the kernel's `docs` verb.
+fn verb_docs_json() -> Value {
+    json!({
+        "start": "args: command:str (req — the executable ALONE, e.g. `grep`; on a PTY start, absent = the child's $SHELL), args:list[str]? (its arguments, one item each — `<args><item>-rn</item><item>x</item></args>`), pty:{cols,rows}? (run on a terminal). The FULL line (command + args) must fullmatch one of the `allowed` regexes, or be the shell line the record's `shell` permits.",
+        "status": "args: job_id:int? — one job (with full stdout/stderr), or all of this agent's jobs (summary). A job's id is its kernel task id: `ps` lists it, `cancel task_id=` kills it. Returns {jobs:[…]}.",
+        "stop": "args: job_id:int? — SIGKILL one job (its whole session: the command and everything it launched) or ALL running jobs on this agent.",
+        "interrupt": "args: job_id:int? — SIGINT one job or ALL running jobs on this agent.",
+        "clear": "args: job_id:int? — drop finished jobs (one, or all non-running) from the RAM",
+        "write": "args: job_id:int (req), data:str or bytes:bytes (exactly one). Keystrokes/paste into a PTY job, written IN FULL and serialized per job (a bracketed paste is never truncated or interleaved). `bytes` is written VERBATIM — a trailing newline (Enter) survives; a `<call>` strips a scalar value like `data`, so send keys that end in Enter as `bytes`. Returns {written:int}.",
+        "resize": "args: job_id:int (req), cols:int (req), rows:int (req). Sets a PTY job's window size (the tty sends SIGWINCH, so a TUI redraws). Returns {resized:true, cols, rows}.",
+        "ack": "args: job_id:int (req), chars:int (req). Flow control from a streaming consumer (an xterm acks each `output` chunk after parsing it): the reader pauses past 100K unacked chars and resumes under 5K. Returns {unacked:int, paused:bool}.",
+        "output": "args: job_id:int (req), max_bytes:int? (default the whole 256 KiB ring). The PTY job's recent output — what a client re-attaching replays before the live `output` events. Returns {job_id, output:str}.",
+        "paste_image": "args: job_id:int (req), data:bytes (req), mime:str (req — image/png|jpeg|gif|webp). Saves a pasted image to a per-job scratch file and types its path into the PTY (a drag-drop — a program like claude in a browser xterm cannot reach the browser clipboard). Returns {path:str, bytes:int}.",
+        "connector": "no args — the reference wire client SOURCE (python): paste `source` verbatim at the top of your program and it gets a `kernel` global (send/emit/watch/on_message); returns {source, howto}.",
+        "reflect": "Identity + running job count + auth posture. No args.",
+        "boot": "No-op. Nothing auto-restarts: a command is started by a caller, not by the record.",
+    })
+}
+
+/// What a job emits on this agent's inbox — python `EMITS`, served by `docs`.
+fn emits_json() -> Value {
+    json!({
+        "job_started": "{type:'job_started', job_id, command, args} — the RESOLVED invocation (a PTY start without `command` names the shell it ran)",
+        "progress": "{type:'progress', job_id, n, line, stream} — one per output line",
+        "job_done": "{type:'job_done', job_id, exit_code, ok, stdout?, stderr?} — a PTY job carries no stdout/stderr split",
+        "output": "{type:'output', job_id, data} — a PTY job's output chunk (UTF-8)",
+    })
+}
+
+/// How a running program talks back — python `NOTES`, served by `docs`.
+fn notes_json() -> Value {
+    json!({
+        "wire": "A program speaks the kernel over the inherited fd FANTASTIC_CTRL_FD, a BIDIRECTIONAL socket: frame is [4-byte BE length | kind | rest], both directions — kind T: a JSON envelope; kind B: [4-byte BE H | H-byte JSON header | raw body], the header's `_binary_path` naming where the body belongs as steps from the frame root — a key as a string (taken literally: ['payload', 'a.b'] is the key 'a.b'), a list index as an int (a stream chunk rides raw, never base64). To CALL another agent: write {op:'send', rid:<your id>, target, payload}; the reply COMES BACK on the SAME fd as {op:'reply', rid:<same id>, data}. Read frames in a loop and skip any whose rid isn't yours (event/inbox frames can arrive first). ops: send/emit/reflect/watch/on_message. A command that never reads the fd runs like any OS process. The `connector` verb returns a ready client.",
+        "inbox": "Any verb this bundle does not answer is MAIL for the running program, delivered to its on_message and ACKed {queued:true}. With no live job it is refused — a script that only defines something exits before its first message arrives.",
+        "tasks": "Every running job IS a row in the kernel TASK TABLE: its `job_id` is that row's id, listed by `ps`. `cancel task_id=<job_id>` kills it — the OS process is SIGKILLed by this bundle's `on_cancel` hook first, so nothing is orphaned.",
+    })
+}
+
 #[async_trait]
 impl Bundle for ExecBridgeBundle {
     fn name(&self) -> &str {
         "exec_bridge"
+    }
+
+    fn verb_docs(&self) -> Value {
+        verb_docs_json()
+    }
+
+    fn emits_doc(&self) -> Option<Value> {
+        Some(emits_json())
+    }
+
+    fn notes_doc(&self) -> Option<Value> {
+        Some(notes_json())
     }
 
     fn readme(&self) -> Option<&'static str> {
@@ -430,10 +481,15 @@ impl Bundle for ExecBridgeBundle {
                     json!({"queued": true})
                 } else {
                     // py `{t!r}` over the RAW value — an absent `type` is `None`.
-                    json!({"error": format!(
-                        "exec_bridge: unknown type {} (no running job to receive it)",
-                        py_repr_value(raw_type)
-                    )})
+                    let mut r = fantastic_kernel::refusal::refusal(
+                        fantastic_kernel::refusal::UNHANDLED,
+                        format!(
+                            "exec_bridge: unknown type {} (no running job to receive it)",
+                            py_repr_value(raw_type)
+                        ),
+                    );
+                    fantastic_kernel::refusal::with(&mut r, "verb", raw_type.clone());
+                    r
                 }
             }
         };
@@ -603,34 +659,6 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
         // or False` — any falsy value reads as false.
         "shell": meta.get("shell").filter(|v| py_truthy(v)).cloned().unwrap_or(json!(false)),
         "running": running,
-        // py `{n: (f.__doc__ or "").strip().splitlines()[0] for n, f in VERBS.items()}`
-        // — the FIRST LINE of each verb's docstring, in `VERBS` order. Several are
-        // truncated mid-sentence; that is the python text, not an abbreviation.
-        "verbs": {
-            "start": "args: command:str (req — on a PTY start, absent = the child's $SHELL), args:list[str]? (argv, default []), pty:{cols,rows}? (run on a terminal). The FULL line (command + args) must fullmatch one of the `allowed` regexes, or be the shell line the record's `shell` permits.",
-            "status": "args: job_id:int? — one job (with full stdout/stderr), or all of this agent's jobs (summary). A job's id is its kernel task id: `ps` lists it, `cancel task_id=` kills it. Returns {jobs:[…]}.",
-            "stop": "args: job_id:int? — SIGKILL one job (its whole session: the command and everything it launched) or ALL running jobs on this agent.",
-            "interrupt": "args: job_id:int? — SIGINT one job or ALL running jobs on this agent.",
-            "clear": "args: job_id:int? — drop finished jobs (one, or all non-running) from the RAM",
-            "write": "args: job_id:int (req), data:str or bytes:bytes (exactly one). Keystrokes/paste into a PTY job, written IN FULL and serialized per job (a bracketed paste is never truncated or interleaved). `bytes` is written VERBATIM — a trailing newline (Enter) survives; a `<call>` strips a scalar value like `data`, so send keys that end in Enter as `bytes`. Returns {written:int}.",
-            "resize": "args: job_id:int (req), cols:int (req), rows:int (req). Sets a PTY job's window size (the tty sends SIGWINCH, so a TUI redraws). Returns {resized:true, cols, rows}.",
-            "ack": "args: job_id:int (req), chars:int (req). Flow control from a streaming consumer (an xterm acks each `output` chunk after parsing it): the reader pauses past 100K unacked chars and resumes under 5K. Returns {unacked:int, paused:bool}.",
-            "output": "args: job_id:int (req), max_bytes:int? (default the whole 256 KiB ring). The PTY job's recent output — what a client re-attaching replays before the live `output` events. Returns {job_id, output:str}.",
-            "paste_image": "args: job_id:int (req), data:bytes (req), mime:str (req — image/png|jpeg|gif|webp). Saves a pasted image to a per-job scratch file and types its path into the PTY (a drag-drop — a program like claude in a browser xterm cannot reach the browser clipboard). Returns {path:str, bytes:int}.",
-            "connector": "no args — the reference wire client SOURCE (python): paste `source` verbatim at the top of your program and it gets a `kernel` global (send/emit/watch/on_message); returns {source, howto}.",
-            "reflect": "Identity + running job count + auth posture. No args.",
-            "boot": "No-op. Nothing auto-restarts: a command is started by a caller, not by the record.",
-        },
-        "emits": {
-            "job_started": "{type:'job_started', job_id, command, args} — the RESOLVED invocation (a PTY start without `command` names the shell it ran)",
-            "progress": "{type:'progress', job_id, n, line, stream} — one per output line",
-            "job_done": "{type:'job_done', job_id, exit_code, ok, stdout?, stderr?} — a PTY job carries no stdout/stderr split",
-            "output": "{type:'output', job_id, data} — a PTY job's output chunk (UTF-8)",
-        },
-        "wire": "A program speaks the kernel over the inherited fd FANTASTIC_CTRL_FD, a BIDIRECTIONAL socket (one end of a socketpair): frame is [4-byte BE length | kind | rest], both directions — kind T: a JSON envelope; kind B: [4-byte BE H | H-byte JSON header | raw body], the header's `_binary_path` naming where the body belongs as a list of steps from the frame root — a key as a string (taken literally: ['payload', 'a.b'] is the key 'a.b'), a list index as an int (a stream chunk rides raw, never base64). To CALL another agent: write {op:'send', rid:<your id>, target, payload} and the reply COMES BACK on the SAME fd as {op:'reply', rid:<same id>, data} — the fd is not one-way. It is not inline, though: read frames in a loop and skip any whose rid isn't yours (event/inbox frames can arrive first) until you see your reply. ops: send/emit/reflect/watch/on_message. A command that never reads the fd runs exactly like any OS process.",
-        "inbox": "Any verb NOT listed in `verbs` is MAIL for the running program, delivered to its on_message and ACKed {queued:true}. With no live job it is an error — a script that only defines something exits before its first message arrives.",
-        "tasks": "Every running job IS a row in the kernel TASK TABLE: its `job_id` is that row's id (an int), listed by the universal `ps`. `cancel task_id=<job_id>` kills it — the OS subprocess is SIGKILLed by this bundle's `on_cancel` hook before the kernel aborts the task, so nothing is orphaned.",
-        "authoring": "A general-purpose command runner: <type>start</type> <command>…</command> <args><item>…</item></args>, gated by the `allowed` regexes on the full command line.",
     });
     // The auth POSTURE, python's `describe(rec)` — `**_describe(rec)` is the last
     // thing python's reflect spreads, so these keys land last and in its order.
@@ -976,12 +1004,23 @@ async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
         Err(e) => {
             // py `f"exec_bridge: spawn failed: {e}"` over the OSError
             // `create_subprocess_exec` raises — `[Errno 2] No such file or
-            // directory: 'nope'`, the COMMAND as the filename.
+            // directory: 'nope'`, the COMMAND as the filename. A MISSING `cwd` is
+            // named instead, as CPython names it (its `noexec:chdir` path): measured
+            // 2026-10-06 (rust subai), a leg whose cwd did not exist answered
+            // `No such file or directory: 'python3'` and the model spent twenty
+            // turns hunting an interpreter that was there all along.
+            let culprit = if e.kind() == std::io::ErrorKind::NotFound
+                && !std::path::Path::new(&cwd).is_dir()
+            {
+                &cwd
+            } else {
+                &command
+            };
             return refusal(
                 TRANSPORT_ERROR,
                 format!(
                     "exec_bridge: spawn failed: {}",
-                    io_error_str(&e, std::path::Path::new(&command))
+                    io_error_str(&e, std::path::Path::new(culprit))
                 ),
             );
         }

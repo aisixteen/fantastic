@@ -290,11 +290,11 @@ struct ReflectUniformTests {
         #expect(s.contains("A DURABLE PROGRAM is a FILE"), "\(s)")
         #expect(s.contains("no `code` field") || s.contains("There is no `code` field"), "\(s)")
         #expect(s.contains("write_stream"), "\(s)")
-        #expect(s.contains("<bytes>"), "\(s)")
+        #expect(s.contains("`bytes` verbatim"), "\(s)")
         #expect(!s.contains("send_binary"), "\(s)")
         #expect(!s.contains("Begin Bytes"), "\(s)")
-        #expect(s.contains("COMMAND runner"), "\(s)")
         #expect(s.contains("exec_bridge.tools"), "\(s)")
+        #expect(s.contains("can_call") && s.contains("callable_by"), "\(s)")
         // The superseded script phrasing must be gone.
         #expect(!s.contains("IS the tool"), "\(s)")
         #expect(!s.contains("code:'<your program"), "\(s)")
@@ -361,8 +361,8 @@ struct ReflectUniformTests {
         #expect(ids["tree"].asArray?.count == 1)
     }
 
-    // ─── C1: `more` on EVERY distilled reflect, verbatim ───────
-    @Test func distilledReflectCarriesMoreVerbatim() async {
+    // ─── C1: no verb docs on ANY reflect (they are `docs`) ───────
+    @Test func reflectCarriesNoVerbDocs() async {
         let kernel = makeKernel()
         _ = await kernel.send([
             Item(
@@ -382,9 +382,12 @@ struct ReflectUniformTests {
         for target in ["kernel_state", "kid"] {
             for flags in flagSets {
                 let r = await kernel.send([Item(AgentId(target), flags)])[0].result
-                #expect(r["more"].asString == Kernel.moreHint, "\(target) \(flags.serialize())")
+                // A reflect carries no verb docs (owner, 2026-10-05): no `more`,
+                // `kernel_verbs`, `verbs`, `emits` or `cancel` — those are `docs`.
+                for key in ["more", "kernel_verbs", "verbs", "emits", "cancel"] {
+                    #expect(r.asObject?[key] == nil, "\(target) \(flags.serialize()) \(key)")
+                }
             }
-            // `detail:full` is the orientation document; it carries no hint.
             let full = await kernel.send([
                 Item(AgentId(target), ["type": "reflect", "detail": "full"])
             ])[0].result
@@ -544,7 +547,7 @@ struct RootWithHandlerTests {
         ])[0].result
         let r = await kernel.send([Item("session", ["type": "reflect"])])[0].result
         #expect(r["sentence"].asString?.hasPrefix("Disk persistence/hydration root") == true, "\(r)")
-        #expect(r["verbs"]["load_tree"].asString?.hasPrefix("args: none.") == true, "\(r)")
+        #expect(r.asObject?["verbs"] == nil, "no verb docs on a reflect: \(r)")
         #expect(r["persistence"] == .null, "the root frame is the ROOT's alone: \(r)")
     }
 

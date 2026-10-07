@@ -229,10 +229,7 @@ pub(crate) async fn emit_peer(
         return;
     };
     if let Some(sender) = crate::send::current_sender() {
-        if kernel
-            .gate(&sender, "emit", target, &item.payload)
-            .is_some()
-        {
+        if kernel.gate(&sender, "emit", target).is_some() {
             return;
         }
     }

@@ -12,4 +12,4 @@ limits:
   no_progress_turns: 32
   turn_chars: 60000
   turn_seconds: 300
-env: {E2E_WINDOW: "12000"}  # the squeeze the fold family measures under (the harness default is 32k)
+env: {E2E_WINDOW: "6000"}  # 6k (2026-10-07): at 12k the leaner context never reached the fold trigger (folded=0)

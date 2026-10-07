@@ -28,7 +28,7 @@ async def handler(id: str, payload: dict, agent) -> dict | None:
     if verb in ("boot", "shutdown"):
         return None
     if verb == "reflect":
-        return {"id": id, "sentence": SENTENCE, "verbs": VERBS}
+        return {"id": id, "sentence": SENTENCE}
     if verb == "slow":
         _STATE["started"] += 1
         await asyncio.sleep(3600)

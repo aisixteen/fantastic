@@ -12,7 +12,6 @@ interface AgentSpec {
   root?: boolean;
   handlerModule?: string;
   sentence?: string;
-  verbs?: { [k: string]: string };
   meta?: Payload;
 }
 interface Case {
@@ -44,7 +43,6 @@ function buildKernel(fx: Fixture): Kernel {
       parentId: spec.parentId,
       handlerModule: spec.handlerModule ?? null,
       sentence: spec.sentence ?? null,
-      verbs: spec.verbs ?? null,
       meta: structuredClone(spec.meta ?? {}),
     });
     k.register(agent);

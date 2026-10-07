@@ -263,9 +263,6 @@ async def _reflect(id, payload, agent):
         "owners": len([o for o in t.rows if t.rows[o]]),
         "rows": sum(len(v) for v in t.rows.values()),
         "optional_verbs": ["search"],
-        "verbs": {
-            n: (f.__doc__ or "").strip().splitlines()[0] for n, f in VERBS.items()
-        },
     }
 
 

@@ -68,6 +68,11 @@ impl Bundle for SlowBundle {
     fn name(&self) -> &str {
         "slow"
     }
+    // ADVERTISES `shutdown`: that is what `shutdown_agents` selects on, so the
+    // slow agent is one it tells.
+    fn verb_docs(&self) -> Value {
+        json!({"shutdown": "no-op"})
+    }
 
     async fn handle(
         &self,
@@ -78,8 +83,6 @@ impl Bundle for SlowBundle {
         let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
         let reply = match verb {
             "boot" | "shutdown" => Value::Null,
-            // ADVERTISES `shutdown`: that is what `shutdown_agents` selects on,
-            // so the slow agent is one it tells.
             // `reflect_ms` on the record holds the reflect — what a deadline on a
             // whole-tree reflect has to cut short.
             "reflect" => {
@@ -93,7 +96,6 @@ impl Bundle for SlowBundle {
                 json!({
                     "id": agent_id.0,
                     "sentence": "slow test agent",
-                    "verbs": {"shutdown": "no-op"},
                 })
             }
             // A RETURNED dict that merely carries `raised: true` — a relayed
@@ -754,103 +756,52 @@ async fn forked_work_outlives_its_dispatch_and_is_adopted_by_its_grandparent() {
     assert_eq!(reply, json!({"cancelled": true}));
 }
 
-// ─── reflect advertises the substrate's own verbs ──────────────
+// ─── the substrate's own verbs: `docs of=kernel`, never a reflect ──────
 
 #[tokio::test]
-async fn every_reflect_advertises_the_kernel_verbs() {
+async fn kernel_verbs_are_docs_not_reflect() {
     // `ps`/`cancel` and the tree verbs belong to no bundle — they are the
-    // SUBSTRATE's own, answered by the root alone. They are advertised on EVERY
-    // agent: root-only was tried and reverted, because a model that never
-    // reflects the root never learns they exist, guesses, and gives up.
+    // SUBSTRATE's own, answered by the root alone, and READ with `docs
+    // of=kernel` (owner, 2026-10-05: a reflect carries no verbs).
     let sh = Arc::new(Shared::default());
     let kernel = mk_kernel(Arc::clone(&sh));
     let a = mk_agent(&kernel, "slow_a").await;
-
-    let r = kernel
-        .send(vec![Item::new(
-            AgentId::from("kernel"),
-            json!({"type": "reflect"}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    let kv = &r["kernel_verbs"];
-    // The `_` line says WHERE to send them and what the named id means —
-    // without it "send create_agent to X" reads three ways.
-    let preamble = kv["_"].as_str().expect("the _ line");
-    assert!(preamble.contains("kernel"));
-    assert!(preamble.contains("OPERAND"));
-
-    // THE CONSEQUENCE PRECEDES THE FIRST EM-DASH, so a default reflect (which
-    // truncates there) still carries the fact a caller needs BEFORE firing.
-    let cancel_doc = kv["cancel"].as_str().expect("cancel doc");
-    assert!(cancel_doc.contains("task_id"));
-    assert!(
-        cancel_doc.to_lowercase().contains("subtree"),
-        "the cascade must survive truncation: {cancel_doc:?}"
-    );
-    assert!(
-        !cancel_doc.contains('—'),
-        "default reflect truncates at the dash"
-    );
-
-    let create_doc = kv["create_agent"].as_str().expect("create doc");
-    assert!(
-        create_doc.contains("parent_id:str REQUIRED"),
-        "placement is the fact a caller needs first: {create_doc:?}"
-    );
-    let update_doc = kv["update_agent"].as_str().expect("update doc");
-    assert!(
-        update_doc.contains("REPLACED, NOT MERGED"),
-        "replace-not-merge must precede the dash: {update_doc:?}"
-    );
-
-    for v in [
-        "create_agent",
-        "update_agent",
-        "delete_agent",
-        "list_agents",
-        "ps",
-    ] {
-        assert!(kv[v].is_string(), "missing kernel verb {v}");
+    for target in [AgentId::from("kernel"), a.clone()] {
+        let r = kernel
+            .send(vec![Item::new(target.clone(), json!({"type": "reflect"}))])
+            .await
+            .remove(0)
+            .result;
+        assert!(r.get("kernel_verbs").is_none(), "{target}: {r}");
     }
-    // `get` is NOT one of them. Rust and swift answered it and advertised it
-    // here; python never had it, so a model reading a rust reflect learned a verb
-    // that does not exist on the reference runtime (seen in the reflect body of
-    // e2e `agentic.build:rust`, 2026-09-03).
-    assert!(
-        kv["get"].is_null(),
-        "`get` is not a kernel verb — python has no such verb"
-    );
-
-    // Every agent carries them, not just the root.
-    let child = kernel
-        .send(vec![Item::new(a, json!({"type": "reflect"}))])
-        .await
-        .remove(0)
-        .result;
-    assert!(
-        child["kernel_verbs"]["cancel"].is_string(),
-        "a non-root agent must advertise them too"
-    );
-
-    // `detail:"full"` keeps each doc WHOLE.
-    let full = kernel
+    let one = kernel
         .send(vec![Item::new(
             AgentId::from("kernel"),
-            json!({"type": "reflect", "detail": "full"}),
+            json!({"type": "docs", "of": "kernel"}),
         )])
         .await
         .remove(0)
         .result;
-    let full_ps = full["kernel_verbs"]["ps"].as_str().expect("ps doc");
-    assert!(full_ps.contains("tasks"), "full detail keeps the shape");
-    assert!(full_ps.contains('—'));
+    assert_eq!(one["bundle"], json!("kernel"));
+    assert_eq!(one["verbs"]["cancel"], json!("args: task_id:str"));
+    assert!(
+        one["verbs"].get("get").is_none(),
+        "`get` is not a kernel verb"
+    );
+    let detailed = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type": "docs", "of": "kernel", "verb": "cancel", "tier": "detailed"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(detailed["verbs"].as_object().unwrap().len(), 1);
+    assert!(detailed["verbs"]["cancel"]
+        .as_str()
+        .unwrap()
+        .contains("SUBTREE"));
 }
-
-// ─────────────────────────────────────────────────────────────────
-// shutdown_agents — the AGENT half of a graceful stop.
-// ─────────────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn shutdown_agents_tells_every_agent_and_then_refuses_new_roots() {

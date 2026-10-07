@@ -178,7 +178,7 @@ async def test_reflect_pages_the_flat_id_index_but_never_the_nested_tree(kernel)
     )[0]["result"]
     assert len(r["tree"]) == 3
     assert r["next"]
-    assert r["id"] and r["kernel_verbs"], "identity and verbs are never paged away"
+    assert r["id"] and r["sentence"], "identity is never paged away"
 
     whole = (
         await kernel.send(

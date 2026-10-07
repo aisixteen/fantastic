@@ -40,10 +40,8 @@ pub const DEFAULT_LEDGER_CAP: usize = 1_000_000;
 struct Row {
     target: AgentId,
     /// The PAYLOAD of the execution this row NAMES. A joiner is handed this
-    /// row's outcome verbatim, so it must be authorized for THIS call — the
-    /// whole payload, because the mutator rule reads fields (`create_agent`'s
-    /// `parent_id`, an update's `id`), not just the verb — and not for
-    /// whatever it happened to send. Kept here because the row outlives the
+    /// row's outcome verbatim, so it must be authorized for THIS call's verb — not
+    /// for whatever it happened to send. Kept here because the row outlives the
     /// dispatch that opened it.
     payload: Value,
     retries: u32,

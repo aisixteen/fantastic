@@ -259,8 +259,17 @@ async fn reflect_shape_for_memory_transport() {
     assert_eq!(r["connected"], false);
     assert_eq!(r["peer_id"], "peer_x");
     assert_eq!(r["pending_count"], 0);
-    assert!(r["verbs"]["forward"].is_string());
-    assert!(r["emits"]["bridge_up"].is_string());
+    assert!(r.get("verbs").is_none() && r.get("emits").is_none(), "{r}");
+    let d = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type": "docs", "of": bid, "tier": "detailed"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(d["verbs"]["forward"].is_string(), "{d}");
+    assert!(d["emits"]["bridge_up"].is_string(), "{d}");
 }
 
 #[tokio::test]
@@ -1687,7 +1696,7 @@ async fn reflect_key_order_per_family() {
         .unwrap()
         .keys()
         .map(String::as_str)
-        .take(13)
+        .take(11)
         .collect();
     assert_eq!(
         keys,
@@ -1703,8 +1712,6 @@ async fn reflect_key_order_per_family() {
             "host",
             "peer_id",
             "port",
-            "verbs",
-            "emits",
         ]
     );
     assert_eq!(
@@ -1716,13 +1723,14 @@ async fn reflect_key_order_per_family() {
     assert_eq!(r["transport"], json!("ws"), "the ws default kind");
     assert_eq!(r["connected"], json!(false));
     assert_eq!(r["sealed"], json!(true));
-    assert_eq!(r["verbs"].as_object().unwrap().len(), 6);
+    let docs = WsBridgeBundle.verb_docs();
+    assert_eq!(docs.as_object().unwrap().len(), 6);
     assert_eq!(
-        r["verbs"]["reflect"],
+        docs["reflect"],
         json!("Identity + transport + connectivity. No args.")
     );
     assert_eq!(
-        r["emits"]["bridge_down"],
+        WsBridgeBundle.emits_doc().unwrap()["bridge_down"],
         json!("{type:'bridge_down'} — emitted when the transport drops (peer closed, tunnel died)")
     );
 
@@ -1732,7 +1740,7 @@ async fn reflect_key_order_per_family() {
         .unwrap()
         .keys()
         .map(String::as_str)
-        .take(17)
+        .take(15)
         .collect();
     assert_eq!(
         keys,
@@ -1752,8 +1760,6 @@ async fn reflect_key_order_per_family() {
             "role",
             "owner_guid",
             "exposes",
-            "verbs",
-            "emits",
         ]
     );
     assert_eq!(
@@ -1764,9 +1770,12 @@ async fn reflect_key_order_per_family() {
     assert_eq!(r["reconnect"], json!(10.0));
     assert_eq!(r["role"], json!("kernel"));
     assert_eq!(r["exposes"], json!([]));
-    assert_eq!(r["verbs"].as_object().unwrap().len(), 10);
     assert_eq!(
-        r["verbs"]["unwatch_directory"],
+        RelayConnectorBundle.verb_docs().as_object().unwrap().len(),
+        10
+    );
+    assert_eq!(
+        RelayConnectorBundle.verb_docs()["unwatch_directory"],
         json!("No args. Stop the directory subscription started by `watch_directory`.")
     );
 }
@@ -2350,7 +2359,9 @@ async fn unknown_type_wire_shape_is_byte_exact_on_both_families() {
         let r = ask(&kernel, id, json!({"type": "garbage"})).await;
         assert_eq!(
             serde_json::to_string(&r).unwrap(),
-            format!(r#"{{"error":"bridge: unknown type 'garbage'","hint":"{hint}"}}"#),
+            format!(
+                r#"{{"error":"bridge: unknown type 'garbage'","reason":"unhandled","hint":"{hint}","verb":"garbage"}}"#
+            ),
             "{id}"
         );
     }
@@ -2361,7 +2372,9 @@ async fn unknown_type_wire_shape_is_byte_exact_on_both_families() {
         .unwrap();
     assert_eq!(
         serde_json::to_string(&r).unwrap(),
-        format!(r#"{{"error":"bridge: unknown type None","hint":"{hint}"}}"#)
+        format!(
+            r#"{{"error":"bridge: unknown type None","reason":"unhandled","hint":"{hint}","verb":null}}"#
+        )
     );
 }
 

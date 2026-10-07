@@ -40,6 +40,19 @@ public protocol AgentBundle: Sendable {
     /// nothing" (`kernel/_agent.py: advertises`).
     var verbs: [String] { get }
 
+    /// HOW TO CALL this bundle's agents — `{verb: doc}`, python's module-level
+    /// `VERBS` docstrings, served by the kernel's `docs` verb (oneliners: each
+    /// doc's signature; detailed: the whole doc). Never on a reflect (owner,
+    /// 2026-10-05). Default: no docs.
+    var verbDocTable: JSON { get }
+
+    /// The rest of the DETAILED docs — python's duck-typed module-level `EMITS`,
+    /// `CANCEL` and `NOTES`, served by `docs` (tier detailed, no `verb`).
+    /// Default: none.
+    var emitsDoc: JSON? { get }
+    var cancelDoc: JSON? { get }
+    var notesDoc: JSON? { get }
+
     /// Dispatch a verb. Receives the agent the verb is targeting,
     /// the JSON payload, and a kernel handle. Returns the reply
     /// (`nil` for fire-and-forget verbs).
@@ -179,6 +192,11 @@ extension AgentBundle {
     public var docs: [(key: String, body: String)] { [] }
 
     public var verbs: [String] { [] }
+
+    public var verbDocTable: JSON { .object([:]) }
+    public var emitsDoc: JSON? { nil }
+    public var cancelDoc: JSON? { nil }
+    public var notesDoc: JSON? { nil }
 
     public var recordSchema: JSON? { nil }
 

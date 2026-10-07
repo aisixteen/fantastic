@@ -111,7 +111,7 @@ export async function startKernel(k: Kernel, bootAll: boolean): Promise<Json> {
  * The AGENT half of a graceful stop — also the `shutdown_agents` kernel verb.
  *
  * 1. DRAIN: new roots are refused; sends with a live parent task still pass.
- * 2. `shutdown` VERB: every agent that advertises it (its reflect `verbs`) is
+ * 2. `shutdown` VERB: every agent whose bundle advertises it (its verb docs) is
  *    told, all at once, bounded — kernel bookkeeping, the handler run directly;
  *    what it sends passes the drain.
  * 3. QUIET: wait for the in-flight dispatches to settle, bounded; the rest is
@@ -126,7 +126,10 @@ export async function shutdownAgents(k: Kernel, me: number | null): Promise<Json
   s.draining = true;
   let shut: string[] = [];
   const targets = [...k.agents.values()].filter(
-    (a) => a.verbs !== null && Object.prototype.hasOwnProperty.call(a.verbs, "shutdown"),
+    (a) => {
+      const verbs = k.verbDocsOf(a);
+      return verbs !== undefined && Object.prototype.hasOwnProperty.call(verbs, "shutdown");
+    },
   );
   if (targets.length > 0 && k.rootId !== null) {
     const tell = (id: string): Promise<string> => {

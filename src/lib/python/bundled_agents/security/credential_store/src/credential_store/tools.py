@@ -248,9 +248,6 @@ async def _reflect(id, payload, agent):
         "sentence": "Credential store — secrets by ref, each bound to one host.",
         "backend": backend,
         "refs": len(_refs(agent)),
-        "verbs": {
-            n: (f.__doc__ or "").strip().splitlines()[0] for n, f in VERBS.items()
-        },
     }
     if backend == "file":
         out["file"] = agent.record.get("file") or f"{DEFAULT_DIR}/{id}.yaml"

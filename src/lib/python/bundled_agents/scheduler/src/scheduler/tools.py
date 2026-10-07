@@ -48,7 +48,7 @@ import yaml
 from kernel_state import yaml_io
 from kernel_state.tools import load_blob, persist_blob
 
-from kernel._refusal import bad
+from kernel._refusal import UNHANDLED, bad, refusal
 
 logger = logging.getLogger(__name__)
 
@@ -253,11 +253,12 @@ def _fire_item(sch: dict) -> dict:
     return item
 
 
-async def _fire_many(sid: str, due: list[dict], kernel) -> None:
+async def _fire_many(sid: str, due: list[dict], kernel) -> list[dict]:
     """Fire every due schedule AS THE SCHEDULER — one batch send, the items
     concurrent, no head-of-line blocking — then record one `schedule_fired` per
-    outcome. The tick loop is a task the scheduler's `boot` spawned and `tick_now`
-    is its own dispatch, so the batch is the scheduler's, gated as it."""
+    outcome, and return those events in `due` order. The tick loop is a task the
+    scheduler's `boot` spawned and `tick_now` is its own dispatch, so the batch is
+    the scheduler's, gated as it."""
     ts = time.time()
     try:
         outcomes = list(await kernel.send([_fire_item(sch) for sch in due]))
@@ -265,6 +266,7 @@ async def _fire_many(sid: str, due: list[dict], kernel) -> None:
         failure = {"status": "failed", "result": {"error": f"{type(e).__name__}: {e}"}}
         outcomes = [failure for _ in due]
     duration_ms = int((time.time() - ts) * 1000)
+    events: list[dict] = []
     for sch, out in zip(due, outcomes):
         status = (out or {}).get("status")
         res = (out or {}).get("result")
@@ -300,6 +302,8 @@ async def _fire_many(sid: str, due: list[dict], kernel) -> None:
         # the event for watchers and `history` already persists it; the target
         # got the actual payload, which IS the tick.
         await kernel.emit(sid, event)
+        events.append(event)
+    return events
 
 
 # ─── verbs ──────────────────────────────────────────────────────
@@ -314,12 +318,6 @@ async def _reflect(id, payload, kernel):
         "tick_sec": _tick_sec(rec),
         "paused": bool(rec.get("paused")),
         "running": id in _tick_tasks and not _tick_tasks[id].done(),
-        "verbs": {
-            n: (f.__doc__ or "").strip().splitlines()[0] for n, f in VERBS.items()
-        },
-        "emits": {
-            "schedule_fired": "{type:'schedule_fired', schedule_id, scheduler_id, target, payload, result, error, ts, duration_ms} — emitted on the scheduler's OWN inbox after every fire (never the target's — the payload send is the tick)",
-        },
     }
 
 
@@ -449,7 +447,7 @@ async def _resume(id, payload, kernel):
 
 
 async def _tick_now(id, payload, kernel):
-    """args: schedule_id:str (req). Bumps run_count, persists, then fires that schedule immediately, as the scheduler. Returns {fired:true, schedule_id}."""
+    """args: schedule_id:str (req). Bumps run_count, persists, then fires that schedule immediately, as the scheduler. Returns {fired:true, schedule_id, result, error} — the fire's outcome as `history` records it: the target's reply, or why the fire failed."""
     sid = payload.get("schedule_id")
     if not sid:
         return {"error": "tick_now: schedule_id required"}
@@ -462,8 +460,17 @@ async def _tick_now(id, payload, kernel):
                     "error": f"scheduler.tick_now: {err['error']}",
                     **({"reason": err["reason"]} if err.get("reason") else {}),
                 }
-            await _fire_many(id, [s], kernel)
-            return {"fired": True, "schedule_id": sid}
+            # THE OUTCOME, not just the fact. `{fired:true}` alone hid a target that
+            # refused every fire: measured 2026-10-06 (rust subai_graph), a schedule
+            # sent `{type:'tick'}` to an AI agent, which has no such verb; `tick_now`
+            # said fired 16 times and the model never learned the payload was wrong.
+            (ev,) = await _fire_many(id, [s], kernel)
+            return {
+                "fired": True,
+                "schedule_id": sid,
+                "result": ev["result"],
+                "error": ev["error"],
+            }
     return {"error": f"schedule {sid!r} not found"}
 
 
@@ -486,6 +493,11 @@ async def _history(id, payload, kernel):
 # ─── dispatch ───────────────────────────────────────────────────
 
 
+#: Served by `docs` (tier detailed).
+EMITS = {
+    "schedule_fired": "{type:'schedule_fired', schedule_id, scheduler_id, target, payload, result, error, ts, duration_ms} — emitted on the scheduler's OWN inbox after every fire (never the target's — the payload send is the tick)",
+}
+
 VERBS = {
     "reflect": _reflect,
     "boot": _boot,
@@ -503,7 +515,7 @@ async def handler(id: str, payload: dict, kernel) -> dict | None:
     t = payload.get("type")
     fn = VERBS.get(t)
     if fn is None:
-        return {"error": f"scheduler: unknown type {t!r}"}
+        return refusal(UNHANDLED, f"scheduler: unknown type {t!r}", verb=t)
     return await fn(id, payload, kernel)
 
 

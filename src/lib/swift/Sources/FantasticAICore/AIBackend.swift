@@ -57,9 +57,8 @@ public func buildAIBackend(_ config: AIBackendConfig) -> AIBackend {
     return AIBackend(config: config)
 }
 
-/// What every backend advertises INSTEAD of an `interrupt` verb — the reflect
-/// surface that teaches a caller how to kill a turn. Byte-identical to Rust's
-/// `fantastic_ai_core::CANCEL_DOC`.
+/// What every backend's docs say INSTEAD of an `interrupt` verb — served by
+/// `docs` (tier detailed). Byte-identical to python's `ai_core.CANCEL`.
 public let CANCEL_DOC: String = """
     No `interrupt` verb — an in-flight `send` IS a kernel task. Kill it with the \
     substrate's universal system verbs: send 'kernel' <type>ps</type> for the live task \
@@ -70,12 +69,6 @@ public let CANCEL_DOC: String = """
     SUBTREE, so any work the turn spawned dies with it.
     """
 
-/// The FIFO posture every backend advertises. Python `_make_reflect`'s
-/// `concurrency`, verbatim.
-public let CONCURRENCY_DOC: String =
-    "Per-backend FIFO lock around `send`: one generation at a time. Other callers wait "
-    + "(and receive a `queued` event so their UI can show it). `reflect`/`history`/`status` "
-    + "skip the lock and stay snappy."
 
 public final class AIBackend: @unchecked Sendable {
     public let config: AIBackendConfig
@@ -179,10 +172,7 @@ public final class AIBackend: @unchecked Sendable {
         // record, this agent answers it by THINKING, and the asker writes the
         // same call either way.
         case "inquiry":
-            let opened = inquiryOpen(payload)
-            if let refusal = opened.refusal { return refusal }
-            let out = try await sendVerb(agent: agent, payload: opened.send!, kernel: kernel)
-            return inquiryClose(out, payload)
+            return inquiryAccept(agent.id.value, payload, kernel)
         case "history":
             return try await historyVerb(agent: agent, payload: payload, kernel: kernel)
         case "recall":
@@ -217,9 +207,9 @@ public final class AIBackend: @unchecked Sendable {
             // `5` for a number, `'shutdown'` for a verb this bundle does not
             // have (its verb map has no `shutdown` entry, so the lifecycle
             // no-op swift answered was a reply python never sends).
-            return .object([
-                "error": .string("\(config.kind): unknown type \(pyRepr(payload["type"]))")
-            ])
+            return Refusal.make(
+                Refusal.unhandled, "\(config.kind): unknown type \(pyRepr(payload["type"]))",
+                extra: [("verb", payload["type"])])
         }
     }
 
@@ -329,6 +319,7 @@ public final class AIBackend: @unchecked Sendable {
         AISilentStreaks.forget(kernel, agent: id)
         AIStripStrategy.forget(kernel, id)
         AIMemory.forget(kernel, id)
+        AIInquiries.forget(kernel, agent: id)
     }
 
     // MARK: - reflect
@@ -355,14 +346,9 @@ public final class AIBackend: @unchecked Sendable {
         for (k, v) in contextReflectFields(agent: agent) {
             fields[k] = v
         }
-        fields["verbs"] = .object(Self.VERBS)
         // A generation IS its kernel dispatch task — the backend holds no task
         // handle of its own. An in-flight entry present ⇔ generating.
         fields["generating"] = .bool(runState(kernel, agent.id.value).currentSnapshot() != nil)
-        // python names the way to kill a turn as a top-level field, not a verb.
-        fields["cancel"] = .string(CANCEL_DOC)
-        fields["emits"] = .object(Self.REFLECT_EMITS)
-        fields["concurrency"] = .string(CONCURRENCY_DOC)
         for (k, v) in config.reflectExtra(agent, kernel) {
             fields[k] = v
         }
@@ -372,32 +358,39 @@ public final class AIBackend: @unchecked Sendable {
     /// The `emits` map, byte-identical to python's. THREE channels, not four:
     /// `done` is not one of them — `status(phase='done')` IS the completion
     /// event, and advertising a second one is two truths for one transition.
-    static let REFLECT_EMITS: OrderedDictionary<String, JSON> = [
+    /// What every backend emits — served by `docs` (tier detailed), byte-identical
+    /// to python's `ai_core.EMITS`.
+    public static let REFLECT_EMITS: OrderedDictionary<String, JSON> = [
         "token": .string(
-            "{type:'token', text:str, source, client_id} — streaming chunk. Routed ONLY to the caller: cli (stdout) when client_id='cli', else this agent's own inbox (browser filters by client_id)."
+            "{type:'token', text:str, source, client_id} — streaming chunk, routed ONLY to the caller: cli (stdout) when client_id='cli', else this agent's own inbox (a browser filters by client_id)."
         ),
         "status": .string(
-            "{type:'status', source, client_id, ts, phase:'queued'|'thinking'|'streaming'|'done', detail:{send_id, started_at, queue_depth, ...phase_specific}} — single channel for phase transitions. detail.reason='ok'|'cancelled'|'timeout'|'error'|'awaiting'|'dead_turn' (only thinking — discarded, rerolled)|'gave_up' (MAX_SILENT_TURNS turns in a row with no call; detail.error says so) for done. detail.ahead for queued."
+            "{type:'status', source, client_id, ts, phase:'queued'|'thinking'|'streaming'|'done', detail:{send_id, started_at, queue_depth, ...}} — the one channel for phase transitions. On done, detail.reason='ok'|'cancelled'|'timeout'|'error'|'awaiting'|'dead_turn' (only thinking — discarded, rerolled)|'gave_up' (MAX_SILENT_TURNS call-less turns in a row; detail.error says so). On queued, detail.ahead."
         ),
         "context": .string(
-            "{type:'context', source, client_id, ts, phase:'compacted'|'too_small', detail:{...}} — the context protocol's push half. compacted: detail={strategy, dropped_messages, kept_messages, summarized} when the live view was compacted to fit the window. too_small: detail={context_window, system_tokens, hint} when even the system block + one turn won't fit (the model is NOT called — a failfast). Pull counterpart: the `context_status` verb."
+            "{type:'context', source, client_id, ts, phase:'compacted'|'too_small', detail} — compacted: {strategy, dropped_messages, kept_messages, summarized}, the view was cut to fit the window; too_small: {context_window, system_tokens, hint}, even the system block + one turn won't fit and the model is NOT called. Pull counterpart: `context_status`."
         ),
     ]
 
-    /// Python's `reflect.verbs` for every ai_core backend — the FIRST LINE of
+    /// python `ai_core.NOTES` — served by `docs` (tier detailed).
+    public static let NOTES: OrderedDictionary<String, JSON> = [
+        "concurrency": .string("A FIFO lock around `send`: one generation at a time; other callers wait and get a `queued` status. `reflect`/`history`/`status` skip the lock."),
+    ]
+
+    /// Python's `VERBS` docs for every ai_core backend (served by `docs`), WHOLE —
     /// each verb's docstring, in `_build`'s order, verbatim. One map, every
     /// backend: the wording never differed per provider in python.
-    static let VERBS: OrderedDictionary<String, JSON> = [
+    public static let VERBS: OrderedDictionary<String, JSON> = [
         "reflect": .string("Identity + model + endpoint + generating flag + context posture. No args."),
-        "send": .string("args: text:str (req), client_id:str? (default 'cli'). Streams tokens to ONLY the caller — cli (stdout) for client_id='cli', or the browser tab whose WS is subscribed and filters by client_id otherwise. Persists per-client chat.json. Per-backend FIFO lock: concurrent callers serialize. If the lock is held when this call arrives, emits a `status` event (phase='queued', detail.ahead) for the caller; first `token` (or `status` of phase != queued) for the same client_id implicitly unqueues. Optional system_prompt:str REPLACES the auto-built prompt (caller-supplied role/context — read it from a state agent yourself, no yaml coupling here). The conversation is always this agent's own (its memory store). _call_stack is reserved for the recursion guard (cycle/over-depth refusal before the lock). Optional send_to:str hands this pass's TEXT to that agent id as a fresh turn, once. The model routes its own work with `<reply_to>` inside its calls. Returns {response, final, client_id}."),
+        "send": .string("args: text:str (req), client_id:str? (default 'cli'), system_prompt:str?, send_to:str?. Runs one turn on `text` and streams tokens to ONLY the caller — cli (stdout) for client_id='cli', else the browser tab whose WS filters by client_id. The conversation is this agent's own (its memory store). A FIFO lock serializes callers: one that waits gets a `status` event (phase='queued', detail.ahead), and its first `token` (or non-queued `status`) unqueues it. `system_prompt` REPLACES the built prompt for this delivery. `send_to` hands this pass's TEXT to that agent id as a fresh turn, once. `_call_stack` is reserved for the recursion guard. The model routes its own work with `<reply_to>` inside its calls. Returns {response, final, client_id}."),
         "stop": .string("args: stream_id:str? (a part of the generation in flight). STOP this agent's in-flight generation — how a receiver of its streaming parts stops it: the provider stream closes, open parts abort, the turn keeps a `[stopped by <you>]` marker. Returns {stopped:bool}."),
         "rows": .string("args: after:int? (a row id — the page starts after it), limit:int?. A VIEW of this agent's conversation exactly as the agent HOLDS it in memory — its loaded head, in the order it lived it; no store read, no transform, so what a UI draws is what the agent has. Before the agent has loaded its head (a fresh boot, before its first turn) it holds nothing: {rows:[], loaded:false}. Returns {rows, next, total, loaded}."),
-        "inquiry": .string("args: text:str (req), kind:str? (text|single|multi|confirm), options:list?, action:dict?, request_id:str?, client_id:str?. Sends THIS agent an inquiry and returns {answer, request_id} — the answer is the one it emits with the `answer` tool. The same verb a human answers; a sender writes one call for either."),
+        "inquiry": .string("args: text:str (req), kind:str? (text|single|multi|confirm), options:list?, action:dict?, request_id:str?. Sends THIS agent an inquiry: accepted at once ({accepted, re, request_id}); the answer it later gives with `inquiry_answer` — or the news that it ended without one — reaches the asker as a message under the inquiry's pid. The same verb a human answers; a sender writes one call for either."),
         "history": .string("args: fold:int? (a fold or clear id — list ITS members instead), limit:int? (default: as many as fit inline), after:int? (a row id — page forward from it). The conversation at DIGEST resolution — {id, parent, kind, role, head, bytes} per row, oldest first, paged. With `fold`, that fold's title + summary and its members (one level down; a member that is itself a fold opens the same way). A row's text is behind `recall` / `grep`. Returns {rows, next, total, fold?}."),
         "status": .string("args: client_id:str? — when provided, returns a privacy-filtered snapshot: full text only for this client's queue entries / current generation; other clients collapse to `others_pending` (an integer count). Without client_id the snapshot redacts text everywhere. Used by chat UIs to rebuild queued/in-flight state on page reload (and for headless polling). Returns {source, client_id, generating, current:{phase, send_id, started_at, elapsed, is_mine, text?, text_so_far?, last_tool?}|null, mine_pending:[{send_id,text,queued_at}], others_pending:int}."),
-        "context_status": .string("No args. The context-budget posture + the last overflow projection + the model's"),
-        "recall": .string("args: query?:str (case-insensitive substring over the serialized turn — matches tool args/replies too), limit?:int (default 20, max 100), before?:int (store index — page backward). Pages turns back from the DURABLE store (the FULL conversation, never trimmed — so anything compaction dropped is one call away). Read-only. A page always fits INLINE (the cap); trimmed from the oldest end when it would not, with the index to continue from. Returns {messages:[{index,role,content}], total, truncated, note?}."),
-        "grep": .string("args: query:str (req — case-insensitive substring), ids:list[int]? (row ids / pids / fold ids to search; a fold id searches its members), limit:int? (matches, default: as many as fit inline), width:int? (chars of each matched line returned, from its start; default 200 — raise it when the value you need sits deep in a long line). Finds the LINE that mentions something ANYWHERE in your memory — every row you ever wrote or received (behind every clear, inside every fold), and the reply bodies still held in memory this run. Returns {matches:[{id, line, text}], total, truncated}."),
+        "context_status": .string("No args. The context-budget posture + the last overflow projection + the model's\nderived reaction to it. Returns {context_window, output_reserve, budget, strategy,\nlast_projection:{fired, strategy?, kept_messages?, dropped_messages?, summarized?,\ntoo_small?}|null, last_reaction:{recalled, persisted, recall_count}|null}."),
+        "recall": .string("args: query:str? (substring of a serialized turn, tool args and replies included), limit:int? (default 20, max 100), before:int? (store index — page backward). Pages turns back from the DURABLE store — the FULL conversation, so anything compaction dropped is one call away. Read-only. A page always fits INLINE; trimmed from the oldest end when it would not, with the index to continue from. Returns {messages:[{index,role,content}], total, truncated, note?}."),
+        "grep": .string("args: query:str (req — case-insensitive substring), ids:list[int]? (row, pid or fold ids to search), limit:int? (default: as many as fit inline), width:int? (chars per matched line, default 200). Finds the LINE that mentions something ANYWHERE in your memory — every row you ever wrote or received (behind every clear, inside every fold; a fold id searches its members), and the reply bodies still held this run. Raise `width` when the value sits deep in a long line. Returns {matches:[{id, line, text}], total, truncated}."),
         "context_recall": .string("args: dry:bool? (mechanical fit only — no model call). Rebuild this agent's VIEW from its store: fit the head to the budget at digest resolution, then ask the model which rows it wants in full, persist the id list, log the decision as a row, and drop RAM scratch. Runs on boot, after a fold batch, or on request. Returns {kept, expanded, dropped, budget, why, degraded}."),
         "context_clear": .string("args: why:str? — start a NEW THREAD on the same store: a CLEAR-FOLD — one row whose members are every row since the previous clear (no summary) — and the model's view begins at its `[cleared <id> · N rows]` line. Nothing is deleted or forgotten: grep, recall and `history {fold: <id>}` reach every member. Empties the persisted view and drops RAM scratch (projection, fold counters, pending recall). Returns {cleared:id, rows:N}."),
         "watch": .string("args: body:bool? (default false), watcher:str? (operator only — an inbox id to deliver to). Announce every row this agent appends to YOUR inbox as {type:'row', source, row:{id, kind, role, bytes}} — content-free; with body:true the row's `content` too. Needs a registered inbox. Returns {watching:true, watcher, body}."),
@@ -437,27 +430,33 @@ public final class AIBackend: @unchecked Sendable {
 
     // MARK: - send
 
-    /// Open an `inquiry`: validate it and render it as the `send` that runs.
+    /// `inquiry` on an AI: accepted at once, answered LATER (owner, 2026-10-06).
     ///
-    /// ONE INQUIRY VERB, WHOEVER RECEIVES IT. A person answers `inquiry` from a record
-    /// and a peer AI answers it by THINKING; the sender writes the same call
-    /// either way. Before this an AI sent an inquiry answered `unknown type`, so
-    /// "consult whoever can answer" was true only for humans.
-    private func inquiryOpen(_ payload: JSON) -> (send: JSON?, refusal: JSON?) {
+    /// The human's bundle answers this verb from a record; an AI answers it by
+    /// working and THINKING, in its own time. Either way the asker reads the answer
+    /// as `[reply to <pid> · <who> inquiry]`, a later message under the same pid, so
+    /// it never branches on who is at the other end. The inquiry runs as its own
+    /// chain on this agent; the answer — given in ANY turn of that chain, after
+    /// whatever work it needs — reaches the asker through `closeInquiry`. It used to
+    /// be read off this agent's FIRST turn only, so a reviewer that read the spec
+    /// and ran `git diff` before answering was told it had not answered (measured
+    /// 2026-10-06, peer_review:rust). Python `_inquiry`.
+    private func inquiryAccept(_ id: String, _ payload: JSON, _ kernel: Kernel) -> JSON {
         let q = payload["text"].asString ?? ""
         if q.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return (
-                nil,
-                .object([
-                    "error": .string("inquiry: `text` must be a non-empty string"),
-                    "reason": .string("missing_arg"), "arg": .string("text"),
-                ])
-            )
+            return .object([
+                "error": .string("inquiry: `text` must be a non-empty string"),
+                "reason": .string("missing_arg"), "arg": .string("text"),
+            ])
         }
-        // The inquiry IS the turn. `options`/`kind` ride in the text because a
-        // model reads prose, not a schema; `action` is carried verbatim so an
-        // answering agent can see what it is being asked to endorse.
-        var text = q
+        let asker = KernelTaskLocals.currentOrigin?.value
+        let task = KernelTaskLocals.currentTask
+        let pid = task.map { String($0.value) } ?? "None"
+        let client = safeClient("inquiry-\(pid)")
+        // `options`/`kind` ride in the text because a model reads prose, not a
+        // schema; `action` is carried verbatim so an answering AI can see what it
+        // is being asked to endorse.
+        var text = inquiryHead(asker: asker ?? "the operator", pid: pid) + "\n" + q
         if let opts = payload["options"].asArray, !opts.isEmpty {
             // `str(o)` per option — `true` reads `True`, a dict its python repr.
             text += "\n\nOptions: " + opts.map { pyStr($0) }.joined(separator: ", ")
@@ -466,63 +465,19 @@ public final class AIBackend: @unchecked Sendable {
             // `json.dumps(act)` — python separators, ensure_ascii.
             text += "\n\nProposed action: " + pyJsonDumps(payload["action"])
         }
-        var sendPayload = payload.asObject ?? [:]
-        sendPayload["type"] = .string("send")
-        sendPayload["text"] = .string(text)
-        return (.object(sendPayload), nil)
-    }
-
-    /// Close an `inquiry`: read the answer the model DECIDED on out of its turn.
-    ///
-    /// Taking the turn's prose would make every stray sentence an answer.
-    /// `inquiry_answer` is a control call in the same class as `done`: the model
-    /// says what its answer IS, and a turn that never emits one is told so
-    /// rather than having its paragraphs harvested.
-    private func inquiryClose(_ out: JSON, _ payload: JSON) -> JSON {
-        if out["error"].asString != nil { return out }
-        let said = extractToolCalls(out["response"].asString ?? "")
-            .last { $0.name == "inquiry_answer" }
-        guard let said else {
-            return .object([
-                "error": .string(
-                    "you were sent an inquiry and did not answer it: emit "
-                        + "<call name=\"inquiry_answer\"><answer>what you concluded"
-                        + "</answer></call>"),
-                "reason": .string("unhandled"),
-                "request_id": payload["request_id"],
-            ])
-        }
-        // THE RAW VALUE, not a coerced string. python refuses a NON-STRING
-        // `answer` outright (`not isinstance(answer, str)`) and renders whatever
-        // came back with `%r` — `42`, `None`, `'...'` — so the model is shown the
-        // thing it actually wrote. Reading `asString ?? ""` turned every
-        // non-string into the empty string and quoted it with `"` python never
-        // uses.
-        let answer = said.arguments["answer"] ?? .null
-        // THE PLACEHOLDER IS NOT AN ANSWER. The refusal above SHOWS the shape,
-        // and a model that could not answer once will copy that example back
-        // verbatim on the retry — measured 2026-09-04 on peer_review, where
-        // "..." was written into review.md as the verdict and scored as a
-        // reviewer that had judged. Same trap as `send_binary`'s literal
-        // "@body", and it earns the same refusal.
-        //
-        // `answer.strip().strip(".")`: python whitespace FIRST, then dots from
-        // both ends — so `'. x'` is an answer and `' ... '` is not.
-        let placeholder: Bool = {
-            guard case .string(let s) = answer else { return true }
-            return pyStripDots(pyStrip(s)).isEmpty
-        }()
-        if placeholder {
-            return .object([
-                "error": .string(
-                    "that is the PLACEHOLDER, not an answer — `answer` came back as "
-                        + "\(pyRepr(answer)). Say what you actually concluded."),
-                "reason": .string("bad_arg"), "arg": .string("answer"),
-                "request_id": payload["request_id"],
-            ])
-        }
+        let replyRaw = payload["reply_client_id"]
+        AIInquiries.register(
+            kernel, id, client,
+            OpenInquiry(
+                asker: asker, pid: pid,
+                replyClient: safeClient(pyTruthy(replyRaw) ? pyStr(replyRaw) : ""),
+                requestId: payload["request_id"]))
+        deliverSoon(
+            kernel: kernel, target: id, text: text, clientId: client,
+            systemPrompt: payload["system_prompt"].asString)
         return .object([
-            "answer": answer,
+            "accepted": .bool(true),
+            "re": task.map { .integer($0.value) } ?? .null,
             "request_id": payload["request_id"],
         ])
     }
@@ -594,6 +549,8 @@ public final class AIBackend: @unchecked Sendable {
         case .integer, .double: text = pyStr(payload["text"])
         default: break
         }
+        // AN ANSWER UNDER AN INQUIRY'S PID settles what this agent was owed.
+        if let t = payload["text"].asString { AIInquiries.settle(kernel, agent.id.value, t) }
         // SANITISED AT ENTRY, as python's `_send` does. The queue/current entry held
         // the RAW id while `statusVerb` compared against `safeClient(requesting)`, so
         // a browser client `tab 1/x` asking after its OWN work was told `is_mine:false,
@@ -1024,9 +981,8 @@ public final class AIBackend: @unchecked Sendable {
         // PARSE THE RAW TEXT, PERSIST THE STRIPPED TEXT (Python core.py:1016-1018).
         // The deliberation is not part of the conversation: re-feeding a reasoning
         // model its own prior thought is against every vendor's guidance and it
-        // compounds turn over turn. The RAW text (markers in) is what a reader
-        // parses for tool calls — a call the model wrote mid-thought still counts —
-        // and it is what the `token`/`done` events already carried.
+        // compounds turn over turn. The RAW text (markers in) is what the
+        // `token`/`done` events already carried; routing reads only the answer.
         // `status(phase='done')` IS THE COMPLETION EVENT, and it is emitted
         // BEFORE the turn is persisted — python's order (`core.py:2039-2064`).
         // A subscriber that watches the store and the events together sees the
@@ -1111,9 +1067,8 @@ public final class AIBackend: @unchecked Sendable {
                 ]),
             ])
 
-        // The RAW completion — markers in — is what routing parses: a call the
-        // model wrote mid-thought still dispatches. Only the DURABLE turn above
-        // is stripped.
+        // The RAW completion — markers in — goes to routing, which reads only the
+        // ANSWER: a call written inside thinking never dispatches (owner, 2026-10-07).
         return .ok(accumulated, messageId, await parts.closedCalls(), cutCalls != nil)
     }
 
@@ -1255,7 +1210,17 @@ public final class AIBackend: @unchecked Sendable {
                         "bundles": .string("ids"),
                     ]))
             ])[0].result
-            let me = await kernel.send([Item(selfId, .object(["type": .string("reflect"), "tree": .string("none")]))])[0].result
+            let full = await kernel.send([Item(selfId, .object(["type": .string("reflect"), "tree": .string("none")]))])[0].result
+            // WHO YOU ARE, not how you are tuned: identity, memory and grants. The
+            // rest of the agent's own reflect (sampling, kv table, timeouts,
+            // endpoint) is operator posture the model never acts on — it cost ~1k
+            // chars on every turn. Python `_SELF_KEYS`, in its order.
+            var me = full
+            if let obj = full.asObject {
+                var kept = OrderedDictionary<String, JSON>()
+                for k in SELF_KEYS { if let v = obj[k] { kept[k] = v } }
+                me = .object(kept)
+            }
             let store = agent.metaValue(forKey: "memory_store_id")
             blocks = [
                 renderReflect(primer),
@@ -1334,12 +1299,12 @@ public final class AIBackend: @unchecked Sendable {
             // turns in a circle.
             let newest = entries.map { idx[$0["id"].asInt!]! }.max()!
             messages.append(
-                contentsOf: dropAnsweredReflects(
+                contentsOf: dropReadDocs(
                     dedupeStaleReads(dedupeRepeatBodies(Array(hist[(newest + 1)...])))))
             setViewSource(agent.id.value, "array")
         } else {
             messages.append(
-                contentsOf: dropAnsweredReflects(dedupeStaleReads(dedupeRepeatBodies(hist))))
+                contentsOf: dropReadDocs(dedupeStaleReads(dedupeRepeatBodies(hist))))
             // AN EMPTY `ids` IS A CLEARED VIEW, not a stale one: `context_clear`
             // empties the array so assembly renders the store from the clear on.
             setViewSource(

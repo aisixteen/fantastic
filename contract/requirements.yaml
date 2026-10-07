@@ -110,3 +110,27 @@ requirements:
   - id: CRED-5
     level: MUST
     title: "forget drops the value and keeps the declaration; only update_agent declares or undeclares a ref"
+  - id: DOC-1
+    level: MUST
+    title: "a reflect carries no verb docs — no `verbs`, `emits`, `cancel`, `more` or `kernel_verbs`"
+  - id: DOC-2
+    level: MUST
+    title: "`docs` is gated like any kernel verb — a `docs` grant on the root (both halves) reads it; an agent without one is refused at egress"
+  - id: DOC-3
+    level: MUST
+    title: "`docs` oneliners carry one signature per verb and name the bundle; `detailed` (optionally one `verb`) carries the whole text"
+  - id: DOC-4
+    level: MUST
+    title: "`docs` of a bundle — by its handler module or its listed name — answers before any agent of it exists"
+  - id: DOC-5
+    level: MUST
+    title: "`docs` refusals are coded (missing `of`, unknown `of`/`verb`/`tier`), and an unknown verb on an agent is refused `unhandled` naming it"
+  - id: FLT-1
+    level: MUST
+    title: "`ignore_subtrees` prunes each named branch to `{id, pruned: n}`, n counting the branch"
+  - id: FLT-2
+    level: MUST
+    title: "`show_subtrees` answers with only the named branches; with both, show applies first and ignore inside it"
+  - id: FLT-3
+    level: MUST
+    title: "a subtree filter naming no agent in the reflected tree is refused `bad_arg`"

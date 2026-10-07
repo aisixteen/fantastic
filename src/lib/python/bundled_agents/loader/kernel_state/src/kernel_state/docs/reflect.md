@@ -3,18 +3,23 @@
 # The reflect surface
 
 `reflect` is the one discovery verb. It returns the ADDRESSED agent
-uniformly — `{id, sentence, display_name, description?, verbs?, ...state}`.
-Three things are root-only: the deployment fields (`runtime`/`env`/`version`),
-`peers` — the kernels this one is connected to, `[{guid, via}]`, each agent there
-reachable as `<guid>|<agent id>` (reflect `<guid>|kernel` for its tree) — and the
-ANSWERING of `kernel_verbs` (advertised everywhere, answered by the root alone). Otherwise the root is not special. Compose the reply with three
-flags:
+uniformly — `{id, sentence, display_name, description?, ...state}` — what it IS,
+never how to call it: verbs, emits and cancel are `docs` (send `kernel`
+`{type: docs, of: <id>}`). Two things are root-only: the deployment fields
+(`runtime`/`env`/`version`) and `peers` — the kernels this one is connected to,
+`[{guid, via}]`, each agent there reachable as `<guid>|<agent id>` (reflect
+`<guid>|kernel` for its tree). Otherwise the root is not special. Compose the reply
+with three flags:
 
 - `tree=all|ids|none` (default `all`)
   - `all`  — the agent's whole subtree, nested + distilled
              (`{id, parent_id, handler_module, display_name, description?, children}`).
   - `ids`  — a flat list of descendant ids. Cheap. Use it to scan.
   - `none` — just the agent, no subtree.
+  - with `all` or `ids`: `show_subtrees=[ids]` answers with ONLY those branches;
+    `ignore_subtrees=[ids]` prunes each named branch to `{id, pruned: n}` (n = the
+    agents it holds), so you see something is there and can open it later. Both:
+    show first, then ignore inside it. An id outside the tree is refused `bad_arg`.
 - `bundles=all|ids|none` (default `none`)
   - `all`  — every installable bundle as `{name, handler_module}`, plus `schema`
     where the bundle publishes one: what that KIND's record takes, readable before
@@ -33,11 +38,12 @@ flags:
 
 ## Context hygiene
 
-Reading reflect output is cheap; readmes are not. To explore without
-flooding your context: SCAN with `reflect tree=ids bundles=ids` (ids only),
-then DRILL into ONE id at a time with `reflect tree=all` or `reflect
-readme=<key>`. Never pull every agent's readme at once — fetch the single
-doc for the topic you are about to act on.
+To explore without flooding your context: SCAN with `reflect tree=ids
+bundles=ids` (ids only), then DRILL into ONE id at a time. Once you know which part
+of the tree you work on, reflect with `show_subtrees` / `ignore_subtrees` — a
+full-tree reflect is for the first look only. Pull `docs` once per kind of agent,
+`detailed` only for the verb you are about to use. Never pull every agent's readme
+at once — fetch the single doc for the topic you are about to act on.
 
 ## The `description` field
 

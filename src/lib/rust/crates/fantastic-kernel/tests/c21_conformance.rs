@@ -54,7 +54,6 @@ impl Bundle for C21Probe {
             "reflect" => Ok(Some(json!({
                 "id": _id.as_str(),
                 "sentence": "C21 probe — answers `poke` identically on every transport.",
-                "verbs": {"poke": "args: value:any — echoes {poked: value}"},
             }))),
             "poke" => Ok(Some(
                 json!({ "poked": payload.get("value").cloned().unwrap_or(Value::Null) }),

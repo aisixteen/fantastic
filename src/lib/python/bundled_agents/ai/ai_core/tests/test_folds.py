@@ -7,7 +7,7 @@ import json
 
 from ai_core import folds
 from ai_core.context import ProjectionCtx, estimate_tokens
-from ai_core.core import _grep, dedupe_stale_reads, drop_answered_reflects
+from ai_core.core import _grep, dedupe_stale_reads
 from ai_core.strategies import get_strategy
 from ai_core.strategies.strip import _stripped
 
@@ -281,10 +281,6 @@ def test_the_view_trimmers_keep_row_keys():
         "parent": "a:0",
         "content": "[reply to n:1 · notes reflect]\nTREE\n\n[reply to n:2 · notes read]\nx",
     }
-    out = drop_answered_reflects(
-        [turn, {"role": "assistant", "content": "SEEN notes"}, dict(turn, id="u:2")]
-    )
-    assert out[0]["id"] == "u:1" and out[0]["parent"] == "a:0"
     out2 = dedupe_stale_reads(
         [turn, {"role": "assistant", "content": "k"}, dict(turn, id="u:2")]
     )

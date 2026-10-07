@@ -490,68 +490,52 @@ struct TaskTableCancelTests {
 
     // MARK: - reflect advertises the substrate's own verbs
 
-    @Test func rootReflectAdvertisesPsAndCancel() async throws {
+    @Test func kernelVerbsAreDocsNotReflect() async throws {
         // `ps`/`cancel` and the tree verbs belong to no bundle — they are the
-        // SUBSTRATE's own, answered by the root alone. They are advertised on
-        // EVERY agent: root-only was tried and reverted, because a model that
-        // never reflects the root never learns they exist, guesses, and gives up.
+        // SUBSTRATE's own, answered by the root alone, and READ with `docs
+        // of=kernel` (owner, 2026-10-05: a reflect carries no verbs).
         let sh = Shared()
         let kernel = makeSlowKernel(sh)
         let a = await makeAgent(kernel, "slow_a", canCall: ["slow_b": "*"])
-
-        let r = await kernel.send([Item(AgentId("kernel"), .object(["type": .string("reflect")]))])[
-            0
-        ].result
-        let kv = r["kernel_verbs"]
-        // The `_` line says WHERE to send them and what the named id means —
-        // without it "send create_agent to X" reads three ways.
-        let preamble = try #require(kv["_"].asString)
-        #expect(preamble.contains("kernel"))
-        #expect(preamble.contains("OPERAND"))
-
-        // THE CONSEQUENCE PRECEDES THE FIRST EM-DASH, so a default reflect
-        // (which truncates there) still carries the fact a caller needs BEFORE
-        // firing.
-        let cancelDoc = try #require(kv["cancel"].asString)
-        #expect(cancelDoc.contains("task_id"))
-        #expect(
-            cancelDoc.lowercased().contains("subtree"),
-            "the cascade must survive truncation: \(cancelDoc)")
-        #expect(!cancelDoc.contains("—"), "a default reflect truncates at the dash")
-
-        let createDoc = try #require(kv["create_agent"].asString)
-        #expect(
-            createDoc.contains("parent_id:str REQUIRED"),
-            "where the agent sits is the fact a caller needs first: \(createDoc)")
-        let updateDoc = try #require(kv["update_agent"].asString)
-        #expect(
-            updateDoc.contains("REPLACED, NOT MERGED"),
-            "replace-not-merge must precede the dash: \(updateDoc)")
-
-        for v in ["create_agent", "update_agent", "delete_agent", "list_agents", "ps"] {
-            #expect(kv[v].asString != nil, "missing kernel verb \(v)")
+        for target in [AgentId("kernel"), a] {
+            let r = await kernel.send([Item(target, .object(["type": .string("reflect")]))])[0].result
+            #expect(r.asObject?["kernel_verbs"] == nil, "\(target)")
         }
-        // `get` is NOT one of them. Rust and swift answered it and advertised it
-        // here; python never had it, so a model reading a swift reflect learned a
-        // verb that does not exist on the reference runtime (seen in the reflect
-        // body of e2e `agentic.build:swift`, 2026-09-03).
-        #expect(kv["get"] == .null, "`get` is not a kernel verb — python has no such verb")
-
-        // EVERY agent carries them, not just the root.
-        let child = await kernel.send([Item(a, .object(["type": .string("reflect")]))])[0].result
-        #expect(
-            child["kernel_verbs"]["cancel"].asString != nil,
-            "a non-root agent must advertise them too")
-
-        // `detail:"full"` keeps each doc WHOLE.
-        let full = await kernel.send([
-            Item(
-                AgentId("kernel"), .object(["type": .string("reflect"), "detail": .string("full")]))
+        let one = await kernel.send([
+            Item(AgentId("kernel"), .object(["type": .string("docs"), "of": .string("kernel")]))
         ])[0].result
-        let fullPs = try #require(full["kernel_verbs"]["ps"].asString)
-        #expect(fullPs.contains("tasks"), "full detail keeps the shape")
-        #expect(fullPs.contains("—"))
+        #expect(one["bundle"].asString == "kernel" && one["tier"].asString == "oneliners")
+        let kv = one["verbs"]
+        for (name, sig) in Self.pythonSignatures {
+            #expect(kv[name].asString == sig, "\(name): \(kv[name])")
+        }
+        // `get` is NOT one of them (python never had it).
+        #expect(kv["get"] == .null, "`get` is not a kernel verb — python has no such verb")
+        let detailed = await kernel.send([
+            Item(AgentId("kernel"), .object([
+                "type": .string("docs"), "of": .string("kernel"), "verb": .string("cancel"),
+                "tier": .string("detailed"),
+            ]))
+        ])[0].result
+        #expect(detailed["verbs"].asObject?.keys.elementsEqual(["cancel"]) == true)
+        #expect(detailed["verbs"]["cancel"].asString?.contains("SUBTREE") == true)
     }
+
+    /// python `kernel/_docs.signature` of each `_SYSTEM_VERB_DOCS` entry.
+    static let pythonSignatures: [(String, String)] = [
+        ("create_agent", "args: handler_module:str, parent_id:str REQUIRED, id:str?, **meta"),
+        ("update_agent", "args: id:str, **meta"),
+        ("delete_agent", "args: id:str"),
+        ("list_agents", "No args"),
+        ("ps", "No args"),
+        ("ledger", "No args"),
+        ("ack_deadletter", "args: id:int|str (req — an execution id, or its name)"),
+        ("kernel_start", "No args"),
+        ("cancel", "args: task_id:str"),
+        ("shutdown_agents", "No args"),
+        ("kernel_stop", "No args"),
+        ("docs", "args: of:str (req — an agent id (`<guid>|<agent id>` on a connected kernel), a bundle, or 'kernel'), tier:'oneliners'|'detailed'?, verb:str?"),
+    ]
 
     // ─── C3 + C4: the kernel-verb map IS python's ──────────────
     //
@@ -563,9 +547,9 @@ struct TaskTableCancelTests {
     // VERBATIM, `create_agent`'s `'kernel_state'` top-level token included — the
     // root-id rename landed with C12.
     static let pythonVerbDocs: [(String, String)] = [
-        ("create_agent", "args: handler_module:str, parent_id:str REQUIRED, id:str?, **meta. Creates a CHILD OF `parent_id` — an agent names its own id or an agent in its subtree; 'kernel_state' for top-level. No default parent."),
-        ("update_agent", "args: id:str, **meta. EVERY FIELD YOU NAME IS REPLACED, NOT MERGED (a field you do not name is untouched), so a dict field must be sent WHOLE — `can_call`/`callable_by` included: restate every key you want to keep, the baseline `$self` among them, or the keys you omit are GONE. Granting one edge reads like a PATCH and behaves like a PUT. An agent updates only agents in its own subtree."),
-        ("delete_agent", "args: id:str. CASCADES — deletes that agent AND ITS WHOLE SUBTREE, deepest first; refuses if any descendant carries `delete_lock`. An agent deletes only agents in its own subtree."),
+        ("create_agent", "args: handler_module:str, parent_id:str REQUIRED, id:str?, **meta. Creates a CHILD OF `parent_id` — any agent you name (your own id grows your own subtree); 'kernel_state' for top-level. No default parent."),
+        ("update_agent", "args: id:str, **meta. EVERY FIELD YOU NAME IS REPLACED, NOT MERGED (a field you do not name is untouched), so a dict field must be sent WHOLE — `can_call`/`callable_by` included: restate every key you want to keep, the baseline `$self` among them, or the keys you omit are GONE. Granting one edge reads like a PATCH and behaves like a PUT. Whoever holds update_agent on the root updates any agent, itself included."),
+        ("delete_agent", "args: id:str. CASCADES — deletes that agent AND ITS WHOLE SUBTREE, deepest first; refuses if any descendant carries `delete_lock`. Whoever holds delete_agent on the root deletes any agent."),
         ("list_agents", "No args. Every agent's record, flat. Paged."),
         ("ps", "No args. The live kernel-wide TASK TABLE — {tasks:[{id, agent, parent, verb, started_at}]}, one row per in-flight dispatch. Paged."),
         ("ledger", "No args. EVERY execution and what it became — named under its id, unnamed under its minted pid — {executions:[{id, target, status, attempts, retries, named, outcome?, acked?}]}, paged, scoped to what YOU originated; read from the kernel's memory store plus what is not yet flushed. `outcome` keeps the RESULT only for a named call; a dead letter keeps its error; anything else is {status, bytes} — the reply itself went to its caller. Failed/timed_out/cancelled rows are the dead-letter queue (announced by the `on_deadletter` event): inspect, retry with a NEW id if you choose, then `ack_deadletter` it — nothing is retried silently."),
@@ -574,13 +558,14 @@ struct TaskTableCancelTests {
         ("cancel", "args: task_id:str. Kills that task AND ITS SUBTREE — the id names its own agent. Returns {cancelled:bool, killed:[…]}; the blocked caller's batch item settles as status:'cancelled'. Unknown id ⇒ {cancelled:false}."),
         ("shutdown_agents", "No args. Stops the AGENTS, not the process: drains (new roots refused), sends `shutdown` to every agent advertising it, waits for in-flight work, cancels the rest. Returns {drained, shut:[ids], cancelled:[ids]}."),
         ("kernel_stop", "No args. Stops the kernel PROCESS gracefully — drain, every call settles (done, or cancelled into the dead letters), the last rows flush, agents shut down, exit. Under env:'container', the container."),
+        ("docs", "args: of:str (req — an agent id (`<guid>|<agent id>` on a connected kernel), a bundle, or 'kernel'), tier:'oneliners'|'detailed'?, verb:str?. HOW TO CALL an agent — its bundle's verbs: `oneliners` (default) is one signature line per verb, `detailed` the full text (no `verb`: plus emits, cancel and notes). Pull once per bundle; `detailed` for a verb you are about to use. Gated like every kernel verb: a `can_call` grant of `docs` on the root. Returns {of, bundle, tier, verbs, emits?, cancel?, notes?}."),
     ]
 
     @Test func testKernelVerbsMapIsPythonVerbatim() async throws {
         let docs = try #require(Kernel.kernelVerbDocs().asObject)
         #expect(
             Array(docs.keys) == Self.pythonVerbDocs.map { $0.0 },
-            "the map is python's 11 keys in python's DECLARATION order")
+            "the map is python's 12 keys in python's DECLARATION order")
         for (name, text) in Self.pythonVerbDocs {
             #expect(docs[name]?.asString == text, "\(name) is not python's text")
         }
@@ -589,22 +574,17 @@ struct TaskTableCancelTests {
         }
     }
 
-    @Test func testFullKernelVerbsKeepPythonOrder() async throws {
-        let declaration = Self.pythonVerbDocs.map { $0.0 }
-        // FULL spreads the map whole ⇒ declaration order, each doc entire.
-        let full = try #require(Kernel.kernelVerbsView(full: true).asObject)
-        #expect(Array(full.keys) == ["_"] + declaration)
+    @Test func testSignaturesArePythons() async throws {
+        // `docs` oneliners: each doc's first paragraph cut at its first
+        // top-level `. ` or ` — ` — python `kernel/_docs.signature`.
         for (name, text) in Self.pythonVerbDocs {
-            #expect(full[name]?.asString == text)
+            let want = Self.pythonSignatures.first { $0.0 == name }?.1
+            #expect(Kernel.signature(text) == want, "\(name)")
         }
-        // DISTILLED is a comprehension over `sorted(_SYSTEM_VERB_DOCS)` ⇒ sorted
-        // keys, each doc cut at the first em-dash and stripped.
-        let distilled = try #require(Kernel.kernelVerbsView(full: false).asObject)
-        #expect(Array(distilled.keys) == ["_"] + declaration.sorted())
-        for (name, text) in Self.pythonVerbDocs {
-            let head = text.split(separator: "\u{2014}", maxSplits: 1)[0]
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            #expect(distilled[name]?.asString == head, "\(name) is not truncated like python")
-        }
+        #expect(Kernel.signature("args: q:str (req — e.g. a word), n:int? (default 5). Finds q.")
+            == "args: q:str (req — e.g. a word), n:int? (default 5)")
+        #expect(Kernel.signature("Start the loop unless `watch=false`\n(a loader). More.\n\nX.")
+            == "Start the loop unless `watch=false` (a loader)")
+        #expect(Kernel.signature("No args.") == "No args")
     }
 }

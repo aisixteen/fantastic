@@ -453,10 +453,6 @@ impl RamStoreBundle {
                 t.rows.values().map(HashMap::len).sum::<usize>(),
             )
         });
-        let mut verbs = Map::new();
-        for (n, d) in VERB_DOCS {
-            verbs.insert(n.to_string(), Value::from(d));
-        }
         let mut out = Map::new();
         out.insert("id".to_string(), Value::from(id.0.clone()));
         out.insert(
@@ -470,7 +466,6 @@ impl RamStoreBundle {
         out.insert("owners".to_string(), Value::from(owners));
         out.insert("rows".to_string(), Value::from(rows));
         out.insert("optional_verbs".to_string(), json!(["search"]));
-        out.insert("verbs".to_string(), Value::Object(verbs));
         Value::Object(out)
     }
 
@@ -805,6 +800,14 @@ impl Bundle for RamStoreBundle {
     /// (`ram_store.tools` leaked into every `bundles=` line of a system prompt).
     fn name(&self) -> &str {
         "ram_store"
+    }
+
+    fn verb_docs(&self) -> Value {
+        let mut verbs = Map::new();
+        for (n, d) in VERB_DOCS {
+            verbs.insert(n.to_string(), Value::from(d));
+        }
+        Value::Object(verbs)
     }
 
     fn readme(&self) -> Option<&'static str> {

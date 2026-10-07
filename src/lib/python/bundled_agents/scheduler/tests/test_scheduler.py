@@ -47,12 +47,23 @@ async def _make_scheduler(kernel):
     return sid
 
 
-async def test_reflect_lists_the_verbs(seeded_kernel, store_agent):
+async def test_docs_list_the_verbs_and_reflect_does_not(seeded_kernel, store_agent):
     sid = await _make_scheduler(seeded_kernel)
     r = (await seeded_kernel.send([{"target": sid, "payload": {"type": "reflect"}}]))[
         0
     ]["result"]
-    assert "schedule" in r["verbs"]
+    assert "verbs" not in r and "emits" not in r
+    d = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "kernel",
+                    "payload": {"type": "docs", "of": sid, "tier": "detailed"},
+                }
+            ]
+        )
+    )[0]["result"]
+    assert "schedule" in d["verbs"] and "schedule_fired" in d["emits"]
 
 
 async def test_boot_succeeds_without_store(seeded_kernel):
@@ -258,10 +269,46 @@ async def test_tick_now_fires(seeded_kernel, store_agent, tmp_path):
         )
     )[0]["result"]
     assert out["fired"] is True
+    assert "result" in out and "error" in out, out
     # schedule_events.yaml now exists
     hist_path = tmp_path / ".fantastic" / "agents" / sid / "schedule_events.yaml"
     assert hist_path.exists()
     assert "schedule_fired" in hist_path.read_text()
+
+
+async def test_tick_now_reports_a_refused_fire(seeded_kernel, store_agent):
+    """`tick_now` answers the fire's OUTCOME. Measured 2026-10-06 (rust
+    subai_graph): a schedule sent `{type:'tick'}` to an AI agent, which has no
+    such verb; `{fired:true}` alone hid sixteen refusals from the model."""
+    sid = await _make_scheduler(seeded_kernel)
+    r = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": sid,
+                    "payload": {
+                        "type": "schedule",
+                        "target": "ghost",
+                        "payload": {"type": "tick"},
+                        "interval_seconds": 60,
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
+    out = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": sid,
+                    "payload": {"type": "tick_now", "schedule_id": r["schedule_id"]},
+                }
+            ]
+        )
+    )[0]["result"]
+    assert out["fired"] is True
+    said = out["error"] or (out["result"] or {}).get("error")
+    assert said and "ghost" in str(said), out
 
 
 async def test_history(seeded_kernel, store_agent):

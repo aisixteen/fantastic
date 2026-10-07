@@ -21,28 +21,18 @@ struct ThinkingTests {
         #expect(withoutThinking("a<think>one</think>b<think>two</think>c") == "abc")
     }
 
-    @Test func aToolCallInsideASpanSurvivesIntoHistory() {
-        // The RAW text is parsed (the call dispatches) and the STRIPPED text is
-        // persisted — so a call the model wrote mid-thought stays in the record.
-        //
-        // It used to be stripped with the reasoning, and the consequence was a
-        // record we had silently edited: the call RAN, returned a reply, and
-        // left no cause behind it. The model then read an effect it never
-        // caused. Reasoning is still dropped; the INVOCATION is not.
+    /// ONLY THE ANSWER ACTS (owner, 2026-10-07): dispatch and history both read
+    /// the answer, so a call inside a thought does neither.
+    @Test func aToolCallInsideASpanIsNeitherDispatchedNorStored() {
         let call =
             #"<call name="send"><target_id>core</target_id><type>reflect</type></call>"#
-        let raw = "<think>I should check the tree first. \(call)</think>Checking."
-        let calls = extractToolCalls(raw)
-        #expect(calls.count == 1)
-        #expect(calls[0].arguments["target_id"].asString == "core")
-
-        let kept = withoutThinking(raw)
-        #expect(kept.contains(call), "the invocation was erased: \(kept)")
-        #expect(kept.contains("Checking."))
-        #expect(!kept.contains("I should check"), "the reasoning must still go")
-        // ...and what we persisted still parses to the same one call, so history
-        // and dispatch agree.
-        #expect(extractToolCalls(kept).count == 1)
+        let kept = withoutThinking("<think>I should check the tree first. \(call)</think>Checking.")
+        #expect(kept == "Checking.")
+        #expect(extractToolCalls(kept).isEmpty)
+        // an unterminated span runs to the end, its call included
+        #expect(withoutThinking("visible<think>cut mid \(call)") == "visible")
+        // only the answer's own call counts
+        #expect(extractToolCalls(withoutThinking("<think>a \(call) b</think>\(call)")).count == 1)
     }
 
     @Test func anUnterminatedSpanDropsItsTail() {

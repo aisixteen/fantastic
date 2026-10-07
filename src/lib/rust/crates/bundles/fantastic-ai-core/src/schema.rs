@@ -219,7 +219,9 @@ pub fn credentials_field(required: bool) -> Field {
 }
 
 /// A backend's whole record schema: its own fields, then [`ai_fields`] — python
-/// `schema(backend_fields)`.
+/// `schema(backend_fields)`. A backend field named like a shared one REPLACES it
+/// (vllm_backend: `context_window` has no default there — left out, it is read
+/// from the server).
 ///
 /// # Panics
 /// On a duplicate field name, or a field [`Field::json`] refuses.
@@ -236,10 +238,12 @@ pub fn schema(backend_fields: Vec<Field>) -> Value {
 /// On a duplicate field name, or a field [`Field::json`] refuses.
 #[must_use]
 pub fn schema_with_window(backend_fields: Vec<Field>, context_window: i64) -> Value {
-    let fields: Vec<Field> = backend_fields
+    let own: Vec<&str> = backend_fields.iter().map(|f| f.name).collect();
+    let shared: Vec<Field> = ai_fields_with_window(context_window)
         .into_iter()
-        .chain(ai_fields_with_window(context_window))
+        .filter(|f| !own.contains(&f.name))
         .collect();
+    let fields: Vec<Field> = backend_fields.into_iter().chain(shared).collect();
     let names: Vec<&str> = fields.iter().map(|f| f.name).collect();
     let mut seen = std::collections::HashSet::new();
     assert!(
@@ -249,30 +253,6 @@ pub fn schema_with_window(backend_fields: Vec<Field>, context_window: i64) -> Va
     json!({
         "fields": fields.iter().map(Field::json).collect::<Vec<_>>(),
     })
-}
-
-/// [`schema`] where this backend REQUIRES some shared fields — required, no
-/// default (vllm_backend: `context_window`, the server's window, is never
-/// guessed). Python `schema(backend_fields, require=…)`.
-///
-/// # Panics
-/// As [`schema`].
-#[must_use]
-pub fn schema_requiring(backend_fields: Vec<Field>, require: &[&str]) -> Value {
-    let mut sch = schema(backend_fields);
-    if let Some(fields) = sch.get_mut("fields").and_then(Value::as_array_mut) {
-        for f in fields.iter_mut() {
-            let named = f
-                .get("name")
-                .and_then(Value::as_str)
-                .is_some_and(|n| require.contains(&n));
-            if let (true, Some(obj)) = (named, f.as_object_mut()) {
-                obj.remove("default");
-                obj.insert("required".to_string(), Value::Bool(true));
-            }
-        }
-    }
-    sch
 }
 
 /// The schema's fields as JSON objects (an empty slice on a malformed schema —
@@ -545,9 +525,24 @@ mod tests {
     }
 
     #[test]
+    fn a_backend_field_replaces_the_shared_one_of_its_name() {
+        let sch = schema(vec![Field::new("recent_n", "int", "h")]);
+        let fields = sch["fields"].as_array().expect("fields");
+        let named = fields.iter().filter(|f| f["name"] == "recent_n").count();
+        assert_eq!(named, 1);
+        assert_eq!(
+            fields[0],
+            json!({"name": "recent_n", "type": "int", "required": false, "hint": "h"})
+        );
+    }
+
+    #[test]
     #[should_panic(expected = "duplicate field in schema")]
-    fn a_backend_field_may_not_shadow_an_ai_field() {
-        let _ = schema(vec![Field::new("recent_n", "int", "h")]);
+    fn a_backend_field_named_twice_is_refused() {
+        let _ = schema(vec![
+            Field::new("x", "int", "h"),
+            Field::new("x", "int", "h"),
+        ]);
     }
 
     #[test]

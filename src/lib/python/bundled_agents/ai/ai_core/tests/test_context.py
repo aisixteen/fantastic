@@ -565,29 +565,28 @@ async def test_every_strategy_keeps_the_goal_when_the_body_overflows():
         )
 
 
-# ─── reflect bulk: distilled by the reader, then dropped ────────
+# ─── reflect bulk: read once, then cut to its ids ───────────────
 #
-# MEASURED (2026-08-20, `live_plan`): reflect replies were 42% of the whole conversation
-# — 73k of 174k chars — and 9 of 16 were a repeat of a target already reflected. That
-# bulk is what fills the window; a full window is what forces compaction; compaction is
-# what put the goal at risk. So the reflect body is kept for exactly one turn — the turn
-# the model reads it — and after the model has answered, only the distillation IT wrote
-# survives. Written by the reader, at read time, with the task in mind: strictly better
-# than a post-hoc summariser that never saw the task.
-def test_answered_reflects_are_dropped_but_the_in_flight_one_survives():
+# MEASURED (2026-08-20, `live_plan`): reflect replies were 42% of the whole conversation.
+# The body is kept for exactly one turn — the turn the model reads it — and once the
+# model has answered, it is cut to a stub that KEEPS THE IDS it named (owner,
+# 2026-10-06; before, the cut waited for a `SEEN` distillation and an undistilled
+# reflect stayed whole: 13 full bodies, 36k chars, over ten e2e runs).
+def test_a_reflect_reply_is_never_cut_from_the_view():
+    """A reflect is MUTABLE state (owner, 2026-10-06): its body stays whole after
+    the model answers it; only a newer reflect of the same agent supersedes it
+    (`dedupe_stale_reads`). Only `docs` replies are cut."""
+    tree = "<id>notes</id>\n<sentence>" + "x" * 4000 + "</sentence>"
     body = [
-        _turn("user", "[reply to notes:aaa · notes reflect]\n" + "TREE" * 2000),
-        _turn("assistant", "SEEN notes — key/value store; verbs read/set/keys."),
-        _turn("user", "[reply to assets:bbb · assets reflect]\n" + "TREE" * 2000),
+        _turn("user", "[reply to notes:aaa · notes reflect]\n" + tree),
+        _turn(
+            "assistant",
+            '<call name="send"><target_id>notes</target_id><type>ps</type></call>',
+        ),
+        _turn("user", "next"),
     ]
-    out = core.drop_answered_reflects(body)
-    # answered → stubbed, and the stub still names the agent (so "I already looked at
-    # this" stays true and the model does not re-reflect out of doubt)
-    assert "TREE" not in out[0]["content"] and "notes" in out[0]["content"]
-    # the model's own distillation is untouched — it is the record now
-    assert out[1] == body[1]
-    # the IN-FLIGHT reflect is verbatim: the model is reading it this very turn
-    assert out[2] == body[2]
+    assert core.drop_read_docs(core.dedupe_stale_reads(body)) == body
+    assert not hasattr(core, "drop_answered_reflects")
 
 
 def test_stale_whole_state_reads_dedupe_but_parameterised_reads_never_do():
@@ -609,54 +608,12 @@ def test_stale_whole_state_reads_dedupe_but_parameterised_reads_never_do():
     assert any("reading_2 = 42" in c for c in contents)
 
 
-def test_a_reflect_the_model_did_not_distil_is_kept():
-    """FAIL CLOSED. Measured 2026-08-20 (`live_plan`): the model answered several
-    reflects with a bare tool_call and no prose. The body was dropped anyway, so the
-    facts were simply gone — "The index was dropped from my view. Let me send it again
-    and, THIS TIME, actually record the facts." Re-fetching what it lost is the exact
-    loop this trim exists to prevent. A reflect the model did not distil must survive:
-    non-compliance costs context, never comprehension."""
-    body = [
-        _turn("user", "[reply to notes:aaa · notes reflect]\n" + "TREE" * 500),
-        _turn(
-            "assistant", '<call name="send"><target_id>x</target_id></call>'
-        ),  # no SEEN
-        _turn("user", "[reply to assets:bbb · assets reflect]\n" + "FACTS" * 500),
-        _turn("assistant", "SEEN assets — public web assets; verbs read/list."),
-        _turn("user", "next"),
-    ]
-    out = core.drop_answered_reflects(body)
-    assert "TREE" in out[0]["content"], "undistilled reflect must be KEPT"
-    assert "FACTS" not in out[2]["content"], "distilled reflect is dropped"
-    assert "assets" in out[2]["content"], "the stub still names the agent"
-
-
-def test_the_distillation_instruction_rides_on_the_reflect_reply_itself():
-    """POINT OF USE, not policy. Measured 2026-08-20 (`live_plan`, the passing run):
-    with the instruction stated once as system-block policy, the model wrote a `SEEN`
-    line for 0 of 10 reflects and re-reflected the SAME agent 9 times in 17 turns. The
-    instruction now rides on the body it talks about, so it arrives every time, at the
-    moment it applies — and only on the replies that are actually transient."""
-    assert "SEEN" in core._REFLECT_NUDGE, "the nudge must show the format it asks for"
-    # It is the LAST thing in the message — the model reads it immediately before
-    # writing the answer the distillation belongs in.
-    assert core._REFLECT_NUDGE.rstrip().endswith("]")
-    # What the nudge asks for is exactly what the drop accepts as compliance: one
-    # contract, so a model that obeys the instruction is never punished by the trim.
-    example = "SEEN notes — durable key/value store; verbs: read/set/keys"
-    assert core._DISTILLED.search(example), "nudge format must satisfy _DISTILLED"
-    # And the policy paragraph must NOT re-state the format — two copies drift, and
-    # the system-block copy is the one that measured 0/10.
-    assert "SEEN" not in core._SEND_TO_HOWTO, "the format lives at point of use only"
-
-
 def test_a_combined_turn_trims_per_block_never_whole():
-    """A batch arrives as ONE turn holding several `[reply to …]` blocks. Both
-    trimmers work per BLOCK: a distilled reflect block drops alone, its sibling
-    replies stay; a superseded whole-state block dedupes alone. Treating the
-    turn as one reply either deleted siblings (drop_answered_reflects replaced
-    the WHOLE content) or trimmed nothing (a count guard skipped every
-    multi-reply turn — tried 2026-08-25, superseded same day)."""
+    """A batch arrives as ONE turn holding several `[reply to …]` blocks. The
+    trimmer works per BLOCK: a superseded whole-state block dedupes alone, its
+    sibling replies stay. Treating the turn as one reply either deleted siblings
+    or trimmed nothing (a count guard skipped every multi-reply turn — tried
+    2026-08-25, superseded same day)."""
     combined = (
         "[reply to ks:a1 · kernel_state reflect · 1 of 2 in batch ab12]\n"
         + "TREE" * 500
@@ -665,13 +622,9 @@ def test_a_combined_turn_trims_per_block_never_whole():
     )
     body = [
         _turn("user", combined),
-        _turn("assistant", "SEEN kernel_state — the root; verbs create/list."),
+        _turn("assistant", "noted"),
         _turn("user", "[reply to ks:a2 · kernel_state reflect]\nNEW TREE"),
     ]
-    out = core.drop_answered_reflects(body)
-    assert "TREE" * 5 not in out[0]["content"], "distilled reflect block drops"
-    assert "reading_1 = 41" in out[0]["content"], "sibling block must SURVIVE"
-
     out2 = core.dedupe_stale_reads(body)
     first = out2[0]["content"]
     assert "TREE" * 5 not in first, "older whole-state block is superseded"

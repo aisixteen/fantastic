@@ -41,13 +41,13 @@ answers `{type:"reflect"}` — the universal discovery verb.
 │   Agent  — recursive node; .send / .emit / .create / .delete             │
 │   Kernel — tree-wide ctx (flat agents index, state stream, save/load,    │
 │            TASK TABLE — every in-flight dispatch, a tree)                │
-│   KERNEL verbs (create/delete/update/list_agents + ps/cancel) — the      │
-│   ROOT answers them; every reflect ADVERTISES them as `kernel_verbs`.    │
+│   KERNEL verbs (create/delete/update/list_agents + ps/cancel + docs) —   │
+│   the ROOT answers them; `docs of=kernel` lists them.                    │
 │   into Agent.                                                            │
 │   CALL GATE — two-sided deny-all `Agent.send` (kernel/_authz.py): an     │
 │   AGENT send needs the sender's `can_call` (egress) AND the target's     │
 │   `callable_by` (ingress) — reflect included; OPERATOR (sender=None)      │
-│   ungated. Baseline {$self:*}; mutators act on own children only.        │
+│   ungated. Baseline {$self:*}; grants are the only rule (tree verbs too). │
 │   Persistence DECOUPLED — `kernel_state` (root) is a weak-bound STREAM      │
 │   CONSUMER: it auto-persists records THROUGH a `file_bridge` provider's     │
 │   write_stream (ephemeral `kernel_store`); cold read stays direct.          │
@@ -293,20 +293,35 @@ they did not register.
 
 - **`reflect`** — every agent answers `{type:"reflect"}` returning the
   ADDRESSED agent uniformly: `{id, sentence, display_name, description?,
-  verbs:{name:doc}, emits:{type:shape}, ...flat state}`. Root is NOT
+  ...flat state}` — what it IS, never how to call it (owner, 2026-10-05: no
+  `verbs`, `emits`, `cancel`, `more` or `kernel_verbs` on any reflect). Root is NOT
   special. Compose the reply with flags:
   `tree=all|ids|none` (default `all` — nested distilled subtree; `ids` =
-  flat descendant-id index), `bundles=all|ids|none` (default `none` —
+  flat descendant-id index; with either, `show_subtrees=[ids]` answers only
+  those branches as a list and `ignore_subtrees=[ids]` prunes each to
+  `{id, pruned: n}` — show first, then ignore inside it; an id outside the
+  reflected tree is `bad_arg`), `bundles=all|ids|none` (default `none` —
   the installable-bundle catalog), and `readme` — polymorphic: `true`
   attaches the agent's SHORT orientation `readme.md`; `"index"` returns
   the token-annotated topic tree `[{key,desc,tokens,children?}]`;
   `"<key>"` drills one topic (body + its sub-docs' index); an unknown key
-  → `{error,keys}`. Verb signatures live in
-  docstrings; `reflect` derives them. Discovery is one round-trip;
+  → `{error,keys}`. Discovery is one round-trip;
   transport/wire docs live in the doc tree (`reflect readme=index`, then
   drill by key). The ROOT reflect always carries `readmes` (the top-level
   topic index) + a `docs` one-liner, so the manual's map rides the first
   reflect.
+- **`docs`** — HOW TO CALL an agent, a KERNEL verb answered by the root
+  (`kernel/_docs.py`): `{type:"docs", of, tier?, verb?}` → `{of, bundle, tier,
+  verbs, emits?, cancel?, notes?}`. `of` is `kernel` (the kernel verbs,
+  `_SYSTEM_VERB_DOCS`), an agent id (the bundle it runs) or a handler module (no
+  agent needed). `tier:"oneliners"` (default) = each docstring's first paragraph cut
+  at its first top-level `. ` or ` — `; `"detailed"` = the whole docstring, and with
+  no `verb` also the module's `EMITS` / `CANCEL` / `NOTES` (duck-typed, like
+  `RECORD_SCHEMA`). Unknown `of`/`verb`/`tier` → `bad_arg`; no `of` → `missing_arg`.
+  **Never gated** — the call gate's one exemption by verb name. In `ai_core` a
+  `docs` reply is cut to a one-line stub once the model has answered it
+  (`drop_read_docs`), and a refusal of the model's own call (`unhandled` naming
+  the verb, `missing_arg` naming the arg) gets a hint pointing at `docs`.
   Each distilled **tree node** also carries the wiring/posture meta it
   has — `ingress_rule`/`egress_rule`/`auth` (a leg's lock; names are
   MANIFOLD-SCOPED: `allow_all_ingress` = open, `password_ingress` = gated,
@@ -416,9 +431,7 @@ they did not register.
     refused, `{reason:"bad_arg", arg:"task_id"}`, "cancel: task <id> (<verb>) is
     a kernel service task — not cancellable", stays listed in `ps`, and a group
     kill leaves it (and its own work) out (owner 2026-10-03, audit KV-5).
-  Advertised on EVERY reflect as `kernel_verbs` (answered by the root alone —
-  advertised widely because root-only advertisement was tried and reverted: a
-  model that never reflects the root never learns they exist). Bundles that fork work
+  Read with `docs of=kernel` (answered by the root alone). Bundles that fork work
   OUTLIVING a dispatch (an `exec_bridge` job) register it with
   `kernel.ctx.spawn_task(...)`, so `ps` sees it and `cancel` reaches it.
 - **A backend KIND's record schema** (`ai_core/schema.py`): each AI backend
@@ -456,7 +469,12 @@ they did not register.
   `<call>` is reminded to act (`[no call was dispatched]`) every time; a DEAD turn
   (only thinking, nothing left once `<think>` is stripped) is discarded — its incoming
   row kept, its empty answer never stored — and rerolled with a `[no answer]` line;
-  `done` ends the chain, `await` parks it on what is in flight. One bound:
+  `done` ends the chain, `await` parks it on what is in flight. A call written WRONG —
+  markup carrying the call vocabulary outside every `<call` envelope
+  (`<tool_call><function=call name="send">`, `<send>`, a JSON call) — is reported like
+  a compiler error: line, caret, and the form to write, built from what the model
+  wrote (`ai_core/call_check.py`); the answer's good calls still run, and the report
+  says so. A turn whose only output is broken calls ran nothing and counts as silent. One bound:
   `MAX_SILENT_TURNS` (10) silent turns in a row and the chain GIVES UP loudly
   (`status done reason=gave_up`, `detail.error` = "The LLM was not able to answer …
   Reiterate the inquiry.", also delivered to a `send_to`). Every ai_core tunable
@@ -509,21 +527,19 @@ they did not register.
   hint: "grants come from above — an ancestor (update_agent on an agent in its
   subtree) or the operator writes can_call and callable_by; an agent never raises its
   own". **`"*"` covers EVERY verb** — there is no
-  verb list the gate consults. The gate never branches on a verb name: `reflect`, `watch`,
-  `emit`, `state_subscribe` are verbs like any other.
+  verb list the gate consults, and NO verb is exempt by name: `docs` (owner,
+  2026-10-06), `reflect`, `watch`, `emit`, `state_subscribe` are verbs like any other —
+  a caller reads docs with a `docs` grant on the root.
   **Baseline:** `{"$self": "*"}` on BOTH fields, stamped + merged on every agent —
   nothing else. Every other edge is an explicit grant.
   **Kernel verbs answered by the root** (`create_agent`, `ps`, `cancel`, `ledger`,
   `list_agents`, …) take the SAME two-sided check against the root — the root's
   `callable_by` must accept the caller.
-  **MUTATORS** (`create_agent`, `update_agent`, `delete_agent`), after the gate on
-  the root: the operand must be in the sender's OWN SUBTREE — `create_agent`'s
-  `parent_id` is the sender or an agent below it; `update_agent`/`delete_agent`'s
-  `id` names an agent below the sender, at any depth. Otherwise `{reason:"unauthorized", side:"mutator"}`,
-  "<sender> may only <verb> within its own subtree — <id> is not in it" (`<id>` = the
-  `parent_id` for `create_agent`; an `id` naming no agent included). A missing or
-  non-string operand gets the verb's own `missing_arg` refusal, before this rule. So
-  no agent can raise its own authority — its record is its ancestors' to write.
+  **The tree verbs** (`create_agent`, `update_agent`, `delete_agent`) take that check
+  and NOTHING MORE (owner, 2026-10-06 — grants are the only rule): whoever holds the
+  verb on the root, both ends, acts on ANY agent it names, its own record included.
+  An agent without `update_agent` on the root cannot raise its own authority. A
+  missing or non-string operand gets the verb's own `missing_arg` refusal.
   **A join** of an execution re-gates the joiner on the ORIGINAL verb; **a reflect**
   that passes the gate returns the tree whole (roster and `detail:"full"`).
   **Kernel bookkeeping is a direct call, never a gated send** (`Kernel.bookkeeping`
@@ -610,8 +626,9 @@ The reply carries:
   `{store, ref}`) — the kind's contract
   before any agent of it exists; `bundles:"ids"` for names only.
 
-Per-agent reflect carries `verbs: {name: doc-line}` so an LLM caller can
-compose any `payload` from the docstring without source diving. "If you
+`docs` (send `kernel` `{type:"docs", of:<id>}`) carries `verbs: {name: signature}`
+so an LLM caller can compose any `payload` from the docstring without source
+diving. "If you
 find yourself reading kernel/ to discover a transport URL, that's a
 regression — it belongs in the root readme."
 
@@ -665,7 +682,10 @@ review, force-push surprise, polluted history) is high.
   Singletons use the bundle name (`kernel_state`, `cli`).
 - Every bundle's `tools.py` defines:
   - per-verb `async def _<name>(id, payload, kernel)` with a
-    one-line docstring (auto-fed into reflect's `verbs` dict).
+    docstring whose first sentence is the signature (`args: …`) — served by
+    the kernel's `docs` verb (oneliners: the signature; detailed: all of it).
+  - optional module-level `EMITS` / `CANCEL` / `NOTES` — the rest of the
+    detailed docs.
   - `VERBS = {"<name>": _<name>, ...}` dispatch table.
   - `async def handler(id, payload, kernel)` 4-line dispatcher.
 - Records in `.fantastic/agents/<id>/agent.yaml` carry only metadata.

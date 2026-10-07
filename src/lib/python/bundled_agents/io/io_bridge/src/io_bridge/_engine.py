@@ -40,7 +40,7 @@ from io_bridge._base import Action, Decision, EgressRule, IngressRule, describe
 from io_bridge.channel import CredentialExtractor, EnvelopeExtractor
 from io_bridge.ingress_rules import resolve_ingress, unknown_ingress_refusal
 from io_bridge.egress_rules import resolve_egress
-from kernel._refusal import NOT_CONNECTED, refusal
+from kernel._refusal import NOT_CONNECTED, UNHANDLED, refusal
 
 DEFAULT_FORWARD_TIMEOUT = 30.0
 
@@ -394,7 +394,7 @@ async def boot(
 
 
 async def _forward(id, payload, kernel):
-    """args: target:str (req — id on the REMOTE kernel) + payload:dict (req — the call to run there; payload is ITSELF a verb frame and MUST carry its own "type") + timeout:float? (default 30s). Example: {"type":"forward","target":"src","payload":{"type":"read_stream","path":"data.bin","offset":0}}. Ships a raw `{type:'call', id, target, payload}` frame over the transport, awaits the matching reply, returns the unwrapped data. The far kernel judges the call as the leg that serves it there. Local→local stays direct kernel.send (this verb is only for cross-kernel). Multi-hop loop detection is the caller's responsibility — the bridge ships whatever it's given."""
+    """args: target:str (req — an id on the REMOTE kernel), payload:dict (req — the call to run there, a verb frame with its own `type`), timeout:float? (default 30s). Example: {"type":"forward","target":"src","payload":{"type":"read_stream","path":"data.bin","offset":0}}. Ships a raw `{type:'call', id, target, payload}` frame over the transport, awaits the matching reply, returns the unwrapped data. The far kernel judges the call as the leg that serves it there. Local→local stays direct kernel.send (this verb is only for cross-kernel). Multi-hop loop detection is the caller's responsibility — the bridge ships whatever it's given."""
     target = payload.get("target")
     inner = payload.get("payload")
     if not target or not isinstance(inner, dict):
@@ -518,14 +518,6 @@ def make_verbs(
             **describe(rec),
         }
         out.update(reflect_fields(rec, st))
-        out["verbs"] = {
-            n: (f.__doc__ or "").strip().splitlines()[0] for n, f in verbs.items()
-        }
-        out["emits"] = {
-            "bridge_up": "{type:'bridge_up'} — emitted on this agent's inbox after a successful boot",
-            "bridge_down": "{type:'bridge_down'} — emitted when the transport drops (peer closed, tunnel died)",
-            "<remote event>": "events from `watch_remote` subscriptions are re-emitted on this agent's inbox as their original `{type, ...}` shape plus `src` (the watched remote id); unsubscribed events are dropped",
-        }
         return out
 
     verbs = {
@@ -539,19 +531,30 @@ def make_verbs(
     return verbs
 
 
+#: What a bridge leg emits on its own inbox — served by `docs` (tier detailed);
+#: each derivation re-exports it as its module's `EMITS`.
+EMITS = {
+    "bridge_up": "{type:'bridge_up'} — emitted on this agent's inbox after a successful boot",
+    "bridge_down": "{type:'bridge_down'} — emitted when the transport drops (peer closed, tunnel died)",
+    "<remote event>": "events from `watch_remote` subscriptions are re-emitted on this agent's inbox as their original `{type, ...}` shape plus `src` (the watched remote id); unsubscribed events are dropped",
+}
+
+
 async def dispatch(verbs: dict, id: str, payload: dict, kernel) -> dict | None:
     t = payload.get("type")
     fn = verbs.get(t)
     if fn is None:
         # Teach the envelope on a miss — the common slip is a frame with no
         # `type`, or a `forward` whose inner `payload` dropped its own `type`.
-        return {
-            "error": f"bridge: unknown type {t!r}",
-            "hint": (
+        return refusal(
+            UNHANDLED,
+            f"bridge: unknown type {t!r}",
+            verb=t,
+            hint=(
                 'every bridge frame needs a "type"; to reach a remote agent use '
                 '{"type":"forward","target":"<remote_id>",'
                 '"payload":{"type":"<verb>",...}} — the inner payload is itself a '
                 'verb frame and needs its own "type".'
             ),
-        }
+        )
     return await fn(id, payload, kernel)

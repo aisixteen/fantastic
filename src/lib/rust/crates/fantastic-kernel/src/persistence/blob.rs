@@ -52,37 +52,6 @@ fn guard_name(name: Option<&str>) -> Result<&str, String> {
     Ok(name)
 }
 
-/// Refuse a blob verb that names SOMEONE ELSE'S namespace.
-///
-/// `agent_id` is the namespace and it arrives in the PAYLOAD — so without this,
-/// any agent granted `persist_blob` on the loader could write any OTHER agent's
-/// sidecar. Measured 2026-08-23 (python): an agent holding exactly
-/// `can_call: {kernel_state: [persist_blob]}` overwrote another agent's
-/// `state.yaml`, and the victim read the forged content back as its own memory.
-///
-/// The defence was believed to be POSITION — the root accepts `$subtree`, and a
-/// grandchild is not one — but a DIRECT child passes that check, and every agent
-/// an operator creates at the root is a direct child. Position bounds who can
-/// REACH the verb; it says nothing about which namespace they may NAME.
-///
-/// No origin (the kernel's own bookkeeping — a sidecar written through the
-/// loader, the loader's own flush — or the CLI) is what this verb exists for and
-/// stays ungated: that is the origin root of trust, and an agent cannot forge it.
-/// An AGENT may only name ITSELF.
-fn guard_owner(aid: &str) -> Result<(), String> {
-    match crate::send::current_origin() {
-        None => Ok(()),
-        Some(caller) if caller.as_str() == aid => Ok(()),
-        Some(caller) => Err(format!(
-            "{} may not use another agent's namespace {} — an agent's blob \
-             verbs are scoped to itself; only an operator may name a namespace \
-             it does not own",
-            fantastic_bundle::py_repr(&caller.0),
-            fantastic_bundle::py_repr(aid)
-        )),
-    }
-}
-
 /// Store-relative dir for an agent's sidecars — `agents/<id>`, or `""` for the
 /// loader itself — relative to THE ADDRESSED LOADER's root (python
 /// `_blob_reldir(agent, aid)`). Prefers the LIVE agent's own `root_path`; a
@@ -165,11 +134,6 @@ fn guard_args<'a>(verb: &str, payload: &'a Value) -> Result<(&'a str, &'a str), 
         .filter(|s| !s.is_empty())
         .ok_or_else(|| err(verb, "agent_id (str) required"))?;
     let name = guard_name(payload.get("name").and_then(Value::as_str)).map_err(|e| err(verb, e))?;
-    if let Err(e) = guard_owner(aid) {
-        let mut out = err(verb, e);
-        out["reason"] = json!("unauthorized");
-        return Err(out);
-    }
     Ok((aid, name))
 }
 

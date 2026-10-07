@@ -104,7 +104,7 @@ test("flush: parents before children — a child waits for its parent's wave; a 
       const rec = payload["record"] as Payload;
       const id = String(rec["id"]);
       await new Promise((r) => setTimeout(r, id === "canvas" ? 20 : 1)); // the parent is slow
-      if (refuseNext && id === "c") return { error: "a record verb is scoped to the caller's own subtree" };
+      if (refuseNext && id === "c") return { error: "refused by the host" };
       if (!onDisk.has(String(rec["parent_id"]))) return { error: `parent ${String(rec["parent_id"])} not on disk` };
       onDisk.add(id);
       order.push(id);
@@ -127,6 +127,6 @@ test("flush: parents before children — a child waits for its parent's wave; a 
   // a refused write is never dropped silently
   refuseNext = true;
   k.register(new Agent({ id: "c", parentId: "canvas", handlerModule: "v.ts" }));
-  await assert.rejects(loader.flush(), /refused 1 write\(s\): persist_record c: a record verb is scoped/);
+  await assert.rejects(loader.flush(), /refused 1 write\(s\): persist_record c: refused by the host/);
   await loader.stop().catch(() => {});
 });

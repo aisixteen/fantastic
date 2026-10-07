@@ -183,6 +183,14 @@ impl Bundle for FileBundle {
         "file_bridge"
     }
 
+    fn verb_docs(&self) -> Value {
+        let mut verbs = Map::new();
+        for (name, doc) in VERBS {
+            verbs.insert(name.to_string(), json!(doc));
+        }
+        Value::Object(verbs)
+    }
+
     fn readme(&self) -> Option<&'static str> {
         Some(README)
     }
@@ -991,10 +999,6 @@ fn reflect_reply(
         Ok(p) => (p.to_string_lossy().into_owned(), None),
         Err(e) => (raw_root, Some(e)),
     };
-    let mut verbs = Map::new();
-    for (name, doc) in VERBS {
-        verbs.insert(name.to_string(), json!(doc));
-    }
     let mut out = Map::new();
     out.insert("id".to_string(), json!(agent_id.as_str()));
     out.insert(
@@ -1009,7 +1013,6 @@ fn reflect_reply(
     out.insert("allow_count".to_string(), json!(allow_list(meta).len()));
     out.insert("edit_grammar".to_string(), json!(EDIT_GRAMMAR));
     out.insert("compose".to_string(), json!(COMPOSE));
-    out.insert("verbs".to_string(), Value::Object(verbs));
     // The auth POSTURE, python's `describe(rec)`: rule NAMES (never config),
     // keyed by the field a caller WRITES (read-key == write-key), + `sealed`.
     if let Some(posture) = fantastic_io_bridge::authorizer::describe(meta).as_object() {

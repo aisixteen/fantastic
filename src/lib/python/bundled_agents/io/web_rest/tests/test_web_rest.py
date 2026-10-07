@@ -25,7 +25,7 @@ async def test_reflect_describes_surface(seeded_kernel):
     assert r["method"] == "POST"
     assert r["reflect_url"] == "/rest_xyz/_reflect"
     assert r["reflect_pattern"] == "/rest_xyz/_reflect/{target_id}"
-    assert "get_routes" in r["verbs"]
+    assert "verbs" not in r
 
 
 async def test_get_routes_returns_post_plus_two_reflect_gets(seeded_kernel):

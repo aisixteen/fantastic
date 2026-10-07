@@ -430,17 +430,13 @@ struct VllmBackendTests {
             "max_tokens": 65536,
         ]
         let err = VllmBundle().validateMeta(meta, record: [:]) ?? ""
-        #expect(
-            err.contains("missing: kv_slots, kv_overflow, memory_store_id, context_window"),
-            "\(err)")
+        #expect(err.contains("missing: kv_overflow, memory_store_id —"), "\(err)")
         // each missing field is named WITH its hint, from the schema
         #expect(err.contains("kv_overflow = all slots live: evict"), "\(err)")
         // an update to a complete record is judged on the MERGED state
         var full = meta
-        full["kv_slots"] = 7
         full["kv_overflow"] = "evict"
         full["memory_store_id"] = "memory"
-        full["context_window"] = 262144
         #expect(VllmBundle().validateMeta(["seed": 3], record: full) == nil)
     }
 
@@ -467,8 +463,8 @@ struct VllmBackendTests {
         #expect(first(["kv_overflow": "evict"]).contains("`endpoint` is required"))
         #expect(
             first(["kv_overflow": "evict", "endpoint": "http://h/v1", "model": "m"])
-                == "ValueError: vllm_backend: `max_tokens` is required on the agent record, a "
-                + "positive int — nothing is guessed (update_agent <id> max_tokens=…)")
+                == "ValueError: vllm_backend: `max_tokens` is not on the agent record, a positive "
+                + "int, and was not read from the server (update_agent <id> max_tokens=…)")
     }
 
     @Test func readmeIsPythonVerbatim() throws {

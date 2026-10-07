@@ -87,14 +87,15 @@
 //! (ollama `message.thinking`, vLLM `reasoning_content`). A provider that reads
 //! only the content channel reports a reasoning turn as an EMPTY completion, so
 //! every provider reads BOTH and wraps the deliberation in
-//! [`think::THINK_OPEN`]/[`think::THINK_CLOSE`] — **once per turn**. The
-//! completion is then parsed RAW (a tool call written mid-thought still counts)
-//! and persisted STRIPPED (see [`think::without_thinking`]).
+//! [`think::THINK_OPEN`]/[`think::THINK_CLOSE`] — **once per turn**. Dispatch and
+//! history then read only the ANSWER (see [`think::without_thinking`]): a call
+//! written inside thinking never runs (owner, 2026-10-07).
 
 #![deny(missing_docs)]
 
 pub mod agent_loop;
 pub mod assembly;
+pub mod call_check;
 pub mod constants;
 pub mod context;
 pub mod credentials;

@@ -32,6 +32,7 @@ public let HANDLER_MODULE = "web.tools"
 public final class WebBundle: AgentBundle, @unchecked Sendable {
     public let name = "web"
     public var verbs: [String] { Array(Self.verbDocs.keys) }
+    public var verbDocTable: JSON { .object(Self.verbDocs) }
     public init() {}
 
     /// Live `WebServer` instances keyed by agent id — python's `_servers`.
@@ -217,9 +218,10 @@ public final class WebBundle: AgentBundle, @unchecked Sendable {
         case "fetch_file":
             return await fetchFile(payload, kernel: kernel, raw: false).0
         default:
-            // python `{"error": f"web: unknown type {t!r}"}` — a plain error dict,
-            // not a coded refusal (web's handler predates the refusal table).
-            return .object(["error": .string("web: unknown type \(pyRepr(type))")])
+            // python `refusal(UNHANDLED, f"web: unknown type {t!r}", verb=t)`.
+            return Refusal.make(
+                Refusal.unhandled, "web: unknown type \(pyRepr(type))",
+                extra: [("verb", payload["type"])])
         }
     }
 
@@ -271,7 +273,6 @@ public final class WebBundle: AgentBundle, @unchecked Sendable {
             "browser_reachable": .array(
                 browserReachable(webId: agent.id, kernel: kernel).map { .string($0) }),
         ]
-        out["verbs"] = .object(Self.verbDocs)
         return .object(out)
     }
 

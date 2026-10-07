@@ -41,20 +41,21 @@ struct CliBundleTests {
         #expect(r["sentence"].asString == "Terminal renderer. Prints incoming events to stdout.")
         // Python's key order; the substrate appends its frame after them.
         #expect(
-            r.asObject?.keys.starts(with: ["id", "sentence", "verbs", "accepts"]) == true, "\(r)")
+            r.asObject?.keys.starts(with: ["id", "sentence", "accepts"]) == true, "\(r)")
+        let d = CliBundle().verbDocTable
         let accepts = (r["accepts"].asArray ?? []).compactMap { $0.asString }
         #expect(accepts == ["token", "done", "say", "error", "status", "context"])
         // The list and the dispatch must not drift: a verb advertised but not
         // rendered is a promise this sink does not keep.
         for verb in CliBundle.accepts {
             #expect(accepts.contains(verb), "missing \(verb)")
-            #expect(r["verbs"][verb].asString != nil, "\(verb) accepted but undocumented")
+            #expect(d[verb].asString != nil, "\(verb) accepted but undocumented")
         }
         // Python's VERBS table, doc strings verbatim.
         #expect(
-            Set((r["verbs"].asObject ?? [:]).keys)
+            Set((d.asObject ?? [:]).keys)
                 == ["reflect", "token", "done", "say", "error", "status", "context", "intro_booting", "booted"])
-        #expect(r["verbs"]["token"].asString == "args: text:str. Writes to stdout (no newline). Returns None.")
+        #expect(d["token"].asString == "args: text:str. Writes to stdout (no newline). Returns None.")
     }
 
     @Test func anUnknownVerbIsDroppedNotRefused() async {

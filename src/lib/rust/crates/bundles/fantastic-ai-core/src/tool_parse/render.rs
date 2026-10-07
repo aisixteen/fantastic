@@ -87,23 +87,16 @@ fn render_reply_field(name: &str, value: &Value) -> String {
             format!("<{name}>\n{inner}</{name}>\n")
         }
         Value::Array(items) => {
-            // A list of STRUCTURES nests; a list holding any scalar renders one
-            // `<item>` per element. An empty list takes the first branch, as
-            // python's `all(...)` over nothing is true.
-            let inner: String = if items
+            // Each element on its own: a dict/list one nests, a scalar one is
+            // text — so a MIXED list (a reflect `tree=ids` with pruned stubs)
+            // renders both right. Python `_render_reply_field`.
+            let inner: String = items
                 .iter()
-                .all(|v| matches!(v, Value::Object(_) | Value::Array(_)))
-            {
-                items
-                    .iter()
-                    .map(|v| render_reply_field("item", v))
-                    .collect()
-            } else {
-                items
-                    .iter()
-                    .map(|v| format!("<item>{}</item>\n", flat_text(v)))
-                    .collect()
-            };
+                .map(|v| match v {
+                    Value::Object(_) | Value::Array(_) => render_reply_field("item", v),
+                    other => format!("<item>{}</item>\n", flat_text(other)),
+                })
+                .collect();
             format!("<{name}>\n{inner}</{name}>\n")
         }
         other => {
@@ -122,8 +115,7 @@ fn render_reply_field(name: &str, value: &Value) -> String {
 ///
 /// `str(v)` and not JSON: a float is python's repr (`1e-05`, `1e+16`, `inf`,
 /// `nan`), and a structure the notation cannot say is python's own repr
-/// (`{'a': 1}`), which is the last resort for a list that mixes scalars with
-/// objects. Rust's `ryu` digits (`0.00001`, `1e16`) and compact JSON objects
+/// (`{'a': 1}`). Rust's `ryu` digits (`0.00001`, `1e16`) and compact JSON objects
 /// were a second dialect the model read on exactly those turns.
 fn flat_text(v: &Value) -> String {
     match v {

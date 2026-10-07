@@ -47,11 +47,9 @@ public enum KernelTaskLocals {
     ///
     /// This exists because `currentSender` is the CALLEE mid-dispatch: inside a
     /// handler it reads as that handler's own agent, so a bundle could not tell
-    /// who actually called it. That gap let an agent write ANOTHER agent's
-    /// memory through a blob verb — the payload NAMES the namespace and nothing
-    /// could check it against the caller.
+    /// who actually called it — an inquiry's asker, `stop`'s stopper, an operator
+    /// send told from an agent's.
     ///
-    /// Read it when a verb's payload names a resource the caller might not own.
     /// Do NOT use it for `(sender, target, verb)` decisions — that is the gate's
     /// job, it runs first, and duplicating it here would be a second truth. Set
     /// only by the kernel's dispatch (internal storage), like the sender.
@@ -455,7 +453,7 @@ public final class Kernel: @unchecked Sendable {
     public func watch(src: AgentId, watcher: AgentId) -> JSON? {
         guard let srcAgent = agent(src) else { return nil }
         if let orig = KernelTaskLocals.currentSender {
-            if let denial = gate(sender: orig, verb: "watch", target: srcAgent, payload: .null) {
+            if let denial = gate(sender: orig, verb: "watch", target: srcAgent) {
                 return denial
             }
         }
@@ -492,7 +490,7 @@ public final class Kernel: @unchecked Sendable {
         // An OPERATOR tap is the origin root of trust, as with send and watch.
         guard KernelTaskLocals.currentSender != nil else { return nil }
         guard let rootAgent = root else { return nil }
-        return gate(sender: watcher, verb: "state_subscribe", target: rootAgent, payload: .null)
+        return gate(sender: watcher, verb: "state_subscribe", target: rootAgent)
     }
 
     public func unwatch(src: AgentId, watcher: AgentId) {

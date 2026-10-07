@@ -20,9 +20,7 @@ relay, rest and exec each dispatch AS THEIR LEG AGENT (identity comes only from
 dispatch: a leg's read loop, its inbound verbs and its job relay are its own).
 So the fixture grants every leg the same reach, both halves (the probe's and the
 root's `callable_by` name every leg), and cases avoid asserting on the gate
-itself (the authz suites' job). The tree mutators are not in the corpus: they act on the
-sender's own children only, so their answer depends on the principal. What
-must be identical is the REPLY.
+itself (the authz suites' job). What must be identical is the REPLY.
 
 Rust and swift join by reading the same YAML once #29 lands there; this file is
 then the contract the ports are graded against.
@@ -80,7 +78,6 @@ async def _echo_handler(id, payload, kernel):
         return {
             "id": id,
             "sentence": "C21 probe — answers `poke` identically on every transport.",
-            "verbs": {"poke": "args: value:any — echoes {poked: value}"},
         }
     if verb == "poke":
         return {"poked": payload.get("value")}

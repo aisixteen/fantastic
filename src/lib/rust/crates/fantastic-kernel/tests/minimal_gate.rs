@@ -5,8 +5,8 @@
 //! - `"*"` covers EVERY verb — `create_agent` included.
 //! - The baseline is `{"$self": "*"}` on both fields, nothing else.
 //! - Kernel verbs answered by the root take the same check against the root.
-//! - The MUTATORS act on the sender's own direct children only; a missing
-//!   operand gets the verb's own refusal first.
+//! - The tree verbs take that check and nothing more (owner, 2026-10-06 — grants
+//!   are the only rule); a missing operand gets the verb's own refusal.
 //! - A grant key outside the legal set is refused `invalid_meta` at the write.
 
 use async_trait::async_trait;
@@ -177,7 +177,10 @@ async fn star_covers_create_agent() {
 }
 
 #[tokio::test]
-async fn the_mutators_act_within_the_senders_own_subtree() {
+async fn a_tree_verb_granted_on_the_root_acts_anywhere() {
+    // GRANTS ARE THE ONLY RULE (owner, 2026-10-06): holding the tree verbs on the
+    // root, an agent creates, updates and deletes ANY agent it names — outside its
+    // own subtree and itself included. No ownership check after the gate.
     let (_t, k) = mk(json!({"a": "*"}));
     create(
         &k,
@@ -189,13 +192,6 @@ async fn the_mutators_act_within_the_senders_own_subtree() {
     create(&k, "kernel_state", "other", json!({})).await;
     create(&k, "a", "mine", json!({})).await;
     create(&k, "mine", "grandkid", json!({})).await;
-    let refused = |verb: &str, id: &str| {
-        json!({
-            "error": format!("a may only {verb} within its own subtree — {id} is not in it"),
-            "reason": "unauthorized",
-            "side": "mutator",
-        })
-    };
     // create elsewhere
     let out = as_agent(
         &k,
@@ -204,9 +200,8 @@ async fn the_mutators_act_within_the_senders_own_subtree() {
         json!({"type": "create_agent", "parent_id": "other", "handler_module": MOD, "id": "x"}),
     )
     .await;
-    assert_eq!(out.result, refused("create_agent", "other"));
-    assert!(!k.agents.contains_key(&AgentId::from("x")));
-    // update / delete outside the subtree (a sibling, itself)
+    assert_eq!(out.result["id"], "x", "{}", out.result);
+    // update a sibling and itself; delete the sibling
     for id in ["other", "a"] {
         let out = as_agent(
             &k,
@@ -215,11 +210,17 @@ async fn the_mutators_act_within_the_senders_own_subtree() {
             json!({"type": "update_agent", "id": id, "description": "x"}),
         )
         .await;
-        assert_eq!(out.result, refused("update_agent", id));
-        let out = as_agent(&k, "a", "kernel", json!({"type": "delete_agent", "id": id})).await;
-        assert_eq!(out.result, refused("delete_agent", id));
+        assert_eq!(out.result["updated"], true, "{id}: {}", out.result);
     }
-    // a grandchild is in its subtree: create under it, update it, delete it
+    let out = as_agent(
+        &k,
+        "a",
+        "kernel",
+        json!({"type": "delete_agent", "id": "other"}),
+    )
+    .await;
+    assert_eq!(out.result["deleted"], true, "{}", out.result);
+    // and below itself, at any depth
     let out = as_agent(
         &k,
         "a",
@@ -268,7 +269,7 @@ async fn the_mutators_act_within_the_senders_own_subtree() {
 }
 
 #[tokio::test]
-async fn a_missing_operand_gets_the_verbs_own_refusal_and_an_unknown_id_the_mutator_text() {
+async fn a_missing_operand_or_an_unknown_id_gets_the_verbs_own_refusal() {
     let (_t, k) = mk(json!({"a": "*"}));
     create(
         &k,
@@ -277,8 +278,7 @@ async fn a_missing_operand_gets_the_verbs_own_refusal_and_an_unknown_id_the_muta
         json!({"can_call": {"kernel_state": "*"}}),
     )
     .await;
-    // a missing or non-string operand is the VERB's missing/shape refusal, never
-    // the mutator text — judged before the mutator rule
+    // a missing or non-string operand is the VERB's missing/shape refusal
     for (payload, verb, arg) in [
         (
             json!({"type": "create_agent", "handler_module": MOD}),
@@ -322,16 +322,13 @@ async fn a_missing_operand_gets_the_verbs_own_refusal_and_an_unknown_id_the_muta
             out.result
         );
     }
-    // an id naming no agent is not the sender's child either: the mutator text
+    // an id naming no agent: the verb's own answer, never an authorization refusal
     for verb in ["update_agent", "delete_agent"] {
         let out = as_agent(&k, "a", "kernel", json!({"type": verb, "id": "ghost"})).await;
-        assert_eq!(
-            out.result,
-            json!({
-                "error": format!("a may only {verb} within its own subtree — ghost is not in it"),
-                "reason": "unauthorized",
-                "side": "mutator",
-            })
+        assert!(
+            out.result["reason"] != "unauthorized" && out.result.get("side").is_none(),
+            "{verb}: {}",
+            out.result
         );
     }
 }

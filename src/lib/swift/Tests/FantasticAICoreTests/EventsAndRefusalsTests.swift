@@ -441,16 +441,20 @@ struct EventsAndRefusalsTests {
         #expect(try await inquiryError(answer: "<answer>. x</answer>") == nil)
     }
 
-    /// Run one `inquiry` whose turn emits `answer` and return the refusal text
-    /// (or nil when the answer was accepted).
+    /// Run one `inquiry` whose turn emits `answer` and return the refusal the
+    /// receiver is told in its NEXT turn (or nil when the answer was accepted and
+    /// the chain ended). Fully async (owner, 2026-10-06): the refusal is a turn, not
+    /// the inquiry's reply.
     private func inquiryError(answer: String) async throws -> String? {
-        let turn = "<call name=\"inquiry_answer\">\(answer)</call>"
-        let (kernel, id) = try await freshMockKernel(
-            config: baseConfig { MockProvider(tokens: [turn]) })
-        let r = await kernel.send([
-            Item(id, .object(["type": .string("inquiry"), "text": .string("well?")]))
+        let script = ProviderScript([["<call name=\"inquiry_answer\">\(answer)</call>"], [doneEnvelope]])
+        let (kernel, ids, _) = await bootMockKernel(
+            config: scriptedConfig(["mock": script]), backendIds: ["mock"])
+        _ = await kernel.send([
+            Item(ids["mock"]!, .object(["type": .string("inquiry"), "text": .string("well?")]))
         ])[0].result
-        return r["error"].asString
+        guard await script.waitForCalls(2, timeout: 0.5) else { return nil }
+        let turn = script.request(1)?.last?["content"].asString ?? ""
+        return turn.split(separator: "\n").first { $0.contains("PLACEHOLDER") }.map(String.init)
     }
 
     // ── B3.3: the two `status.current` shapes ────────────────────────────

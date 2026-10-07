@@ -730,7 +730,7 @@ private func coreTheRosterIsClosedAfterBoot(_ h: Hydration, _ sc: Scenario, _ pi
         "can_call": .object([ROOT: .array([.string("create_agent")])]),
     ]))
     check(&pinned, "PC-3", denied(s), "\(sender) raised its own authority: \(s.serialize())")
-    check(&pinned, "PC-3", ["egress", "mutator"].contains(denialSide(s) ?? ""), "expected an egress or mutator refusal, got \(s.serialize())")
+    check(&pinned, "PC-3", denialSide(s) == "egress", "expected an egress refusal, got \(s.serialize())")
     let r2 = await reach(h.kernel, sender, ROOT, .object([
         "type": .string("create_agent"), "handler_module": .string("file_bridge.tools"), "allow": ["."], "id": .string("smuggled"),
     ]))

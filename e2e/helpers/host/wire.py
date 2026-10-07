@@ -116,7 +116,8 @@ class WireTranscript:
     def _refresh(self) -> None:
         from helpers.proxy import box
 
-        # The drive loop ticks every 2s; polling faster only burns requests.
+        # The drive loop ticks every 0.5 s; a store dump more often than once a
+        # second only burns requests.
         if time.monotonic() - self._last_poll < 1.0:
             return
         self._last_poll = time.monotonic()

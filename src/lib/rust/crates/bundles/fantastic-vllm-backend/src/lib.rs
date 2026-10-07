@@ -62,6 +62,8 @@ pub const README: &str = include_str!("readme.md");
 /// The name every refusal carries.
 const NAME: &str = "vllm_backend";
 
+pub mod server;
+
 /// What `reflect` says this agent IS — python `tools.py`'s `sentence`.
 pub const SENTENCE: &str = "vLLM-backed LLM agent, talking to the vLLM server directly \
 (raw prompt-and-parse tool-calling; a KV-cache session table per endpoint).";
@@ -779,13 +781,14 @@ impl SseState {
 
 // ─── the record ─────────────────────────────────────────────────────────────
 
-/// A count the record MUST name — never guessed, fails the turn loud.
+/// A count the turn runs on — set on the record, or read from the server before
+/// the turn ([`server::resolve`]); fails the turn loud otherwise.
 fn required_int(meta: &Map<String, Value>, key: &str) -> Result<i64, ProviderError> {
     match meta.get(key) {
         Some(Value::Number(n)) if n.as_i64().is_some_and(|v| v >= 1) => Ok(n.as_i64().unwrap_or(1)),
         _ => Err(ProviderError::value_error(format!(
-            "{NAME}: `{key}` is required on the agent record, a positive int — \
-             nothing is guessed (update_agent <id> {key}=…)"
+            "{NAME}: `{key}` is not on the agent record, a positive int, and was not read \
+             from the server (update_agent <id> {key}=…)"
         ))),
     }
 }
@@ -952,7 +955,7 @@ pub fn validate(meta: &Map<String, Value>, record: &Map<String, Value>) -> Optio
         merged.insert(k.clone(), v.clone());
     }
     let set = |k: &str| meta.get(k).filter(|v| !v.is_null());
-    for key in ["max_tokens", "kv_slots"] {
+    for key in ["max_tokens", "context_window", "kv_slots"] {
         if set(key).is_some_and(|v| !positive(v, true)) {
             return Some(format!("{key} must be a positive int"));
         }
@@ -961,6 +964,27 @@ pub fn validate(meta: &Map<String, Value>, record: &Map<String, Value>) -> Optio
         if set(key).is_some_and(|v| !positive(v, false)) {
             return Some(format!("{key} must be a positive number of seconds"));
         }
+    }
+    if let Some(url) = set("metrics_url") {
+        let ok = url
+            .as_str()
+            .is_some_and(|u| u.trim().starts_with("http://") || u.trim().starts_with("https://"));
+        if !ok {
+            return Some(
+                "metrics_url must be an http(s) URL — the server's /metrics page".to_string(),
+            );
+        }
+    }
+    let endpoint = merged.get("endpoint").and_then(Value::as_str).unwrap_or("");
+    if merged.get("kv_slots").is_none_or(Value::is_null)
+        && !endpoint.trim().is_empty()
+        && server::metrics_url(&merged).is_none()
+    {
+        return Some(format!(
+            "kv_slots is left to the server, but the endpoint '{endpoint}' does not end in \
+             /v1, so its metrics page is not known — set metrics_url (the server's /metrics \
+             page) or kv_slots"
+        ));
     }
     if let Some(v) = set("kv_overflow") {
         if !v.as_str().is_some_and(|s| KV_OVERFLOWS.contains(&s)) {
@@ -1022,73 +1046,91 @@ fn sampling_default(key: &str) -> Value {
 /// THE RECORD SCHEMA (lib request #3) — what this kind's record takes, read with
 /// no agent existing (`reflect bundles=all`). Built from the constants the
 /// provider runs on, and enforced by [`validate`], so the page, the write check
-/// and the turn cannot disagree. The five required fields have NO default:
-/// nothing is guessed about a server. Python `RECORD_SCHEMA`, field for field.
+/// and the turn cannot disagree. `endpoint` and `kv_overflow` are required; the
+/// counts a record leaves out are READ FROM THE SERVER before a turn
+/// ([`server`]), never given a default. Python `RECORD_SCHEMA`, field for field.
 #[must_use]
 pub fn record_schema() -> &'static Value {
     static SCHEMA: OnceLock<Value> = OnceLock::new();
     SCHEMA.get_or_init(|| {
-        schema::schema_requiring(
-            vec![
-                Field::new("endpoint", "str", "the vLLM server's /v1 URL").required(),
-                Field::new("model", "str", "the served model name").required(),
-                Field::new("max_tokens", "int", "a turn's output budget (tokens)").required(),
-                Field::new(
-                    "kv_slots",
-                    "int",
-                    "how many conversations may be live on the endpoint",
-                )
-                .required(),
-                Field::new(
-                    "kv_overflow",
-                    "enum",
-                    "all slots live: evict (the least-recently-used rotates out) or reject \
+        const FROM_SERVER: &str = "; left out, read from the server before a turn and written here";
+        schema::schema(vec![
+            Field::new("endpoint", "str", "the vLLM server's /v1 URL").required(),
+            Field::new(
+                "model",
+                "str",
+                format!("the served model name{FROM_SERVER} (the one model it serves)"),
+            ),
+            Field::new(
+                "max_tokens",
+                "int",
+                format!("a turn's output budget (tokens){FROM_SERVER} (max_model_len)"),
+            ),
+            Field::new(
+                "context_window",
+                "int",
+                format!("the server's window (tokens){FROM_SERVER} (max_model_len)"),
+            ),
+            Field::new(
+                "kv_slots",
+                "int",
+                format!(
+                    "how many conversations may be live on the endpoint{FROM_SERVER} \
+                         (floor of kv_cache_max_concurrency on metrics_url)"
+                ),
+            ),
+            Field::new(
+                "metrics_url",
+                "str",
+                "the server's Prometheus page, read for kv_slots; left out, the endpoint \
+                     with /v1 replaced by /metrics",
+            ),
+            Field::new(
+                "kv_overflow",
+                "enum",
+                "all slots live: evict (the least-recently-used rotates out) or reject \
                      (the newcomer is refused)",
-                )
-                .required()
-                .one_of(&KV_OVERFLOWS),
-                Field::new("temperature", "float", "sampling temperature")
-                    .default(sampling_default("temperature")),
-                Field::new("top_p", "float", "nucleus sampling").default(sampling_default("top_p")),
-                Field::new("top_k", "int", "top-k sampling").default(sampling_default("top_k")),
-                Field::new(
-                    "reasoning_effort",
-                    "enum",
-                    "how much the model wants to think (xhigh needs a thinking_token_budget)",
-                )
-                .one_of(&REASONING_EFFORTS)
-                .default(sampling_default("reasoning_effort")),
-                Field::new(
-                    "thinking_token_budget",
-                    "int",
-                    "the hard cap on thinking tokens, below max_tokens; unset, a turn sends \
+            )
+            .required()
+            .one_of(&KV_OVERFLOWS),
+            Field::new("temperature", "float", "sampling temperature")
+                .default(sampling_default("temperature")),
+            Field::new("top_p", "float", "nucleus sampling").default(sampling_default("top_p")),
+            Field::new("top_k", "int", "top-k sampling").default(sampling_default("top_k")),
+            Field::new(
+                "reasoning_effort",
+                "enum",
+                "how much the model wants to think (xhigh needs a thinking_token_budget)",
+            )
+            .one_of(&REASONING_EFFORTS)
+            .default(sampling_default("reasoning_effort")),
+            Field::new(
+                "thinking_token_budget",
+                "int",
+                "the hard cap on thinking tokens, below max_tokens; unset, a turn sends \
                      min(default, max_tokens/2)",
-                )
-                .default(sampling_default("thinking_token_budget")),
-                Field::new("min_p", "float", "min-p sampling; sent only when set"),
-                Field::new("presence_penalty", "float", "sent only when set"),
-                Field::new("frequency_penalty", "float", "sent only when set"),
-                Field::new("repetition_penalty", "float", "sent only when set"),
-                Field::new("no_repeat_ngram_size", "int", "sent only when set"),
-                Field::new("seed", "int", "sent only when set"),
-                Field::new("stop", "list", "stop sequences; sent only when set"),
-                Field::new(
-                    "kv_ttl",
-                    "float",
-                    "seconds an idle conversation keeps its slot",
-                )
-                .default(json!(KV_TTL)),
-                Field::new("connect_timeout", "float", "seconds to reach the server")
-                    .default(json!(CONNECT_TIMEOUT)),
-                Field::new("read_timeout", "float", "seconds to wait on a generation")
-                    .default(json!(READ_TIMEOUT)),
-                // the door's key, when it wants one — absent = no Authorization header
-                schema::credentials_field(false),
-            ],
-            // the server's window, set on the record and used as set: the
-            // whole-window rule compares max_tokens with it (never a default)
-            &["context_window"],
-        )
+            )
+            .default(sampling_default("thinking_token_budget")),
+            Field::new("min_p", "float", "min-p sampling; sent only when set"),
+            Field::new("presence_penalty", "float", "sent only when set"),
+            Field::new("frequency_penalty", "float", "sent only when set"),
+            Field::new("repetition_penalty", "float", "sent only when set"),
+            Field::new("no_repeat_ngram_size", "int", "sent only when set"),
+            Field::new("seed", "int", "sent only when set"),
+            Field::new("stop", "list", "stop sequences; sent only when set"),
+            Field::new(
+                "kv_ttl",
+                "float",
+                "seconds an idle conversation keeps its slot",
+            )
+            .default(json!(KV_TTL)),
+            Field::new("connect_timeout", "float", "seconds to reach the server")
+                .default(json!(CONNECT_TIMEOUT)),
+            Field::new("read_timeout", "float", "seconds to wait on a generation")
+                .default(json!(READ_TIMEOUT)),
+            // the door's key, when it wants one — absent = no Authorization header
+            schema::credentials_field(false),
+        ])
     })
 }
 
@@ -1108,6 +1150,24 @@ pub struct VllmBundle;
 impl Bundle for VllmBundle {
     fn name(&self) -> &str {
         NAME
+    }
+
+    fn verb_docs(&self) -> Value {
+        fantastic_ai_core::verbs::verb_docs()
+    }
+
+    fn emits_doc(&self) -> Option<Value> {
+        Some(fantastic_ai_core::verbs::emits())
+    }
+
+    fn cancel_doc(&self) -> Option<Value> {
+        Some(Value::String(
+            fantastic_ai_core::verbs::CANCEL_DOC.to_string(),
+        ))
+    }
+
+    fn notes_doc(&self) -> Option<Value> {
+        Some(fantastic_ai_core::verbs::notes())
     }
 
     fn readme(&self) -> Option<&'static str> {
@@ -1136,17 +1196,27 @@ impl Bundle for VllmBundle {
         if verb == "reflect" {
             return Ok(Some(reflect_reply(agent_id, kernel)?));
         }
+        // A verb that runs a turn first reads what the record leaves to the server;
+        // a server that does not answer refuses the verb, naming the field.
+        if server::TURN_VERBS.contains(&verb) {
+            if let Some(refused) = server::resolve(agent_id, kernel).await {
+                return Ok(Some(refused));
+            }
+        }
         // EVERY OTHER ai_core VERB, one table for every backend (python `build`).
         let provider = |client: &str| build_provider(agent_id, kernel, client);
         if let Some(reply) = verbs::handle_common(agent_id, payload, kernel, CFG, provider).await? {
             return Ok(Some(reply));
         }
-        Ok(Some(json!({
-            "error": format!(
-                "{NAME}: unknown type {}",
-                py_repr_value(&payload.get("type").cloned().unwrap_or(Value::Null))
-            )
-        })))
+        Ok(Some({
+            let raw = payload.get("type").cloned().unwrap_or(Value::Null);
+            let mut r = fantastic_kernel::refusal::refusal(
+                fantastic_kernel::refusal::UNHANDLED,
+                format!("{NAME}: unknown type {}", py_repr_value(&raw)),
+            );
+            fantastic_kernel::refusal::with(&mut r, "verb", raw);
+            r
+        }))
     }
 
     async fn on_delete(&self, agent_id: &AgentId, kernel: &Arc<Kernel>) -> Result<(), BundleError> {
@@ -1170,3 +1240,6 @@ impl Bundle for VllmBundle {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod tests_server;

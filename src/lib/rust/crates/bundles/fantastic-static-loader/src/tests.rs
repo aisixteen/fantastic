@@ -558,11 +558,10 @@ fn reflect_manifest_is_the_raw_meta_value() {
 }
 
 #[test]
-fn reflect_verbs_are_python_docstrings() {
+fn verb_docs_are_python_docstrings() {
     // A8.15 — the first line of each python docstring, in VERBS order.
-    let agent = loader_with_meta(Map::new());
     assert_eq!(
-        reflect_reply(&agent)["verbs"],
+        StaticLoaderBundle.verb_docs(),
         json!({
             "reflect": "The loader's posture: what manifest it hydrates, and that it IS a loader",
             "boot": "Hydrate the declared roster — kernel bookkeeping at boot.",

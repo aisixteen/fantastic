@@ -118,7 +118,7 @@ fn root_readme_is_pythons_verbatim() {
         .expect("repo's src/lib above the crate")
         .join("python/bundled_agents/loader/kernel_state/src/kernel_state/readme.md");
     assert_eq!(README, std::fs::read_to_string(&py).expect("python readme"));
-    assert!(README.contains("kernel_verbs"));
+    assert!(README.contains("type: docs"));
 }
 
 /// A12.1 — a nested tier seeds into its own directory, so `reflect
@@ -313,8 +313,9 @@ async fn distilled_self_extension_states_the_file_and_command_model() {
     assert_eq!(se, SELF_EXTENSION_SHORT);
     assert!(se.contains("no `code` field"));
     assert!(se.contains("write_stream"));
-    assert!(se.contains("`bytes` is VERBATIM") && se.contains("</bytes>"));
+    assert!(se.contains("`bytes` verbatim"));
     assert!(se.contains("exec_bridge.tools"));
+    assert!(se.contains("can_call") && se.contains("callable_by"));
 }
 
 /// C12: an unknown verb on the loader is python's CODED refusal, verbatim.

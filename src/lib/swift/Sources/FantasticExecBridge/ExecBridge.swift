@@ -207,11 +207,41 @@
     public final class ExecBridgeBundle: AgentBundle, @unchecked Sendable {
         public let name = "exec_bridge"
         public var verbs: [String] { Array(Self.verbDocs.keys) }
+        public var verbDocTable: JSON { .object(Self.verbDocs) }
+        public var emitsDoc: JSON? { .object(Self.emits) }
+        public var notesDoc: JSON? { .object(Self.notes) }
 
         /// python's module-level `VERBS` — ONE table: reflect renders it and
         /// `advertises` reads it.
+        /// What a job emits on this agent's inbox — served by `docs` (tier detailed).
+        /// Python `EMITS`.
+        static let emits: OrderedDictionary<String, JSON> = [
+            "job_started": .string(
+                "{type:'job_started', job_id, command, args} — the RESOLVED invocation (a PTY start without `command` names the shell it ran)"
+            ),
+            "progress": .string("{type:'progress', job_id, n, line, stream} — one per output line"),
+            "job_done": .string(
+                "{type:'job_done', job_id, exit_code, ok, stdout?, stderr?} — a PTY job carries no stdout/stderr split"
+            ),
+            "output": .string("{type:'output', job_id, data} — a PTY job's output chunk (UTF-8)"),
+        ]
+
+        /// How a running program talks back — served by `docs` (tier detailed).
+        /// Python `NOTES`.
+        static let notes: OrderedDictionary<String, JSON> = [
+            "wire": .string(
+                "A program speaks the kernel over the inherited fd FANTASTIC_CTRL_FD, a BIDIRECTIONAL socket: frame is [4-byte BE length | kind | rest], both directions — kind T: a JSON envelope; kind B: [4-byte BE H | H-byte JSON header | raw body], the header's `_binary_path` naming where the body belongs as steps from the frame root — a key as a string (taken literally: ['payload', 'a.b'] is the key 'a.b'), a list index as an int (a stream chunk rides raw, never base64). To CALL another agent: write {op:'send', rid:<your id>, target, payload}; the reply COMES BACK on the SAME fd as {op:'reply', rid:<same id>, data}. Read frames in a loop and skip any whose rid isn't yours (event/inbox frames can arrive first). ops: send/emit/reflect/watch/on_message. A command that never reads the fd runs like any OS process. The `connector` verb returns a ready client."
+            ),
+            "inbox": .string(
+                "Any verb this bundle does not answer is MAIL for the running program, delivered to its on_message and ACKed {queued:true}. With no live job it is refused — a script that only defines something exits before its first message arrives."
+            ),
+            "tasks": .string(
+                "Every running job IS a row in the kernel TASK TABLE: its `job_id` is that row's id, listed by `ps`. `cancel task_id=<job_id>` kills it — the OS process is SIGKILLed by this bundle's `on_cancel` hook first, so nothing is orphaned."
+            ),
+        ]
+
         static let verbDocs: OrderedDictionary<String, JSON> = [
-            "start": .string("args: command:str (req — on a PTY start, absent = the child's $SHELL), args:list[str]? (argv, default []), pty:{cols,rows}? (run on a terminal). The FULL line (command + args) must fullmatch one of the `allowed` regexes, or be the shell line the record's `shell` permits."),
+            "start": .string("args: command:str (req — the executable ALONE, e.g. `grep`; on a PTY start, absent = the child's $SHELL), args:list[str]? (its arguments, one item each — `<args><item>-rn</item><item>x</item></args>`), pty:{cols,rows}? (run on a terminal). The FULL line (command + args) must fullmatch one of the `allowed` regexes, or be the shell line the record's `shell` permits."),
             "status": .string("args: job_id:int? — one job (with full stdout/stderr), or all of this agent's jobs (summary). A job's id is its kernel task id: `ps` lists it, `cancel task_id=` kills it. Returns {jobs:[…]}."),
             "stop": .string(
                 "args: job_id:int? — SIGKILL one job (its whole session: the command and everything it launched) or ALL running jobs on this agent."
@@ -365,11 +395,11 @@
                 if hasRunningJob(agentId) {
                     return .object(["queued": .bool(true)])
                 }
-                return .object([
-                    "error": .string(
-                        "exec_bridge: unknown type \(pyRepr(payload["type"])) "
-                            + "(no running job to receive it)")
-                ])
+                return Refusal.make(
+                    Refusal.unhandled,
+                    "exec_bridge: unknown type \(pyRepr(payload["type"])) "
+                        + "(no running job to receive it)",
+                    extra: [("verb", payload["type"])])
             }
         }
 
@@ -535,6 +565,19 @@
                     extra: [("arg", .string("PATH"))])
             } catch {
                 // python's `str(OSError)`: `[Errno 2] No such file or directory: 'nope'`.
+                // A MISSING `cwd` is named instead, as CPython names it (its
+                // `noexec:chdir` path): measured 2026-10-06 (rust subai), a leg whose
+                // cwd did not exist answered `… 'python3'` and the model spent twenty
+                // turns hunting an interpreter that was there all along.
+                var isDir: ObjCBool = false
+                if let f = error as? Spawn.Failure, f.code == ENOENT,
+                    !(FileManager.default.fileExists(atPath: cwdStr, isDirectory: &isDir)
+                        && isDir.boolValue)
+                {
+                    return Refusal.make(
+                        Refusal.transportError,
+                        "exec_bridge: spawn failed: \(osErrorStr(ENOENT, cwdStr))")
+                }
                 return Refusal.make(
                     Refusal.transportError, "exec_bridge: spawn failed: \(error)")
             }
@@ -1581,31 +1624,6 @@
                 "shell": record?.metaValue(forKey: "shell").flatMap { pyTruthy($0) ? $0 : nil }
                     ?? .bool(false),
                 "running": .integer(Int64(running)),
-                "verbs": .object(Self.verbDocs),
-                "emits": .object([
-                    "job_started": .string(
-                        "{type:'job_started', job_id, command, args} — the RESOLVED invocation (a PTY start without `command` names the shell it ran)"
-                    ),
-                    "progress": .string(
-                        "{type:'progress', job_id, n, line, stream} — one per output line"),
-                    "job_done": .string(
-                        "{type:'job_done', job_id, exit_code, ok, stdout?, stderr?} — a PTY job carries no stdout/stderr split"
-                    ),
-                    "output": .string(
-                        "{type:'output', job_id, data} — a PTY job's output chunk (UTF-8)"),
-                ]),
-                "wire": .string(
-                    "A program speaks the kernel over the inherited fd FANTASTIC_CTRL_FD, a BIDIRECTIONAL socket (one end of a socketpair): frame is [4-byte BE length | kind | rest], both directions — kind T: a JSON envelope; kind B: [4-byte BE H | H-byte JSON header | raw body], the header's `_binary_path` naming where the body belongs as a list of steps from the frame root — a key as a string (taken literally: ['payload', 'a.b'] is the key 'a.b'), a list index as an int (a stream chunk rides raw, never base64). To CALL another agent: write {op:'send', rid:<your id>, target, payload} and the reply COMES BACK on the SAME fd as {op:'reply', rid:<same id>, data} — the fd is not one-way. It is not inline, though: read frames in a loop and skip any whose rid isn't yours (event/inbox frames can arrive first) until you see your reply. ops: send/emit/reflect/watch/on_message. A command that never reads the fd runs exactly like any OS process."
-                ),
-                "inbox": .string(
-                    "Any verb NOT listed in `verbs` is MAIL for the running program, delivered to its on_message and ACKed {queued:true}. With no live job it is an error — a script that only defines something exits before its first message arrives."
-                ),
-                "tasks": .string(
-                    "Every running job IS a row in the kernel TASK TABLE: its `job_id` is that row's id (an int), listed by the universal `ps`. `cancel task_id=<job_id>` kills it — the OS subprocess is SIGKILLed by this bundle's `on_cancel` hook before the kernel aborts the task, so nothing is orphaned."
-                ),
-                "authoring": .string(
-                    "A general-purpose command runner: <type>start</type> <command>…</command> <args><item>…</item></args>, gated by the `allowed` regexes on the full command line."
-                ),
             ]
             // The auth posture, python `**_describe(rec)` — last, all three keys.
             for (k, v) in describe(record?.meta ?? [:]) { out[k] = v }

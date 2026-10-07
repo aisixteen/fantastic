@@ -105,19 +105,3 @@ func extractToolCalls(_ text: String) -> [ToolCall] {
     scanToolEnvelopes(text).compactMap { $0.terminated ? $0.call : nil }
 }
 
-/// Every COMPLETE call envelope in `text`, verbatim, in source order — what a
-/// history writer keeps out of a dropped thought span (an action taken is not
-/// reasoning). An unterminated opener is not kept: dispatch could not parse it,
-/// and neither is a complete envelope that does not parse — a broken call is
-/// reasoning too.
-func callSpans(_ text: String) -> [String] {
-    let chars = Array(text.unicodeScalars)
-    var out: [String] = []
-    for env in envelopes(chars) {
-        guard let end = env.end else { break }
-        if let call = try? parseCall(chars, lo: env.body, hi: end), call != nil {
-            out.append(scalarText(chars, env.start, end + CLOSE.count))
-        }
-    }
-    return out
-}

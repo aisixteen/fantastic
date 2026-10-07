@@ -47,8 +47,9 @@ TASK = (
     "(reflect it for its verbs), write a file `prefs.md` containing one line "
     "`color: <the color>`. You do NOT know their favorite color and you must "
     "not guess it — send the human an inquiry: reflect the tree to find the agent that says "
-    "it is the human, and `send` it an `inquiry`. The answer comes straight "
-    "back as that call's reply. If the answer names a "
+    "it is the human, and `send` it an `inquiry`. It is accepted at once; the "
+    "human reads it and the answer arrives LATER as a message under that "
+    "call's pid — wait for it with `await`. If the answer names a "
     "color, record exactly that. If the answer leaves the choice to you, pick "
     "one yourself and record it. When the file is written, you are done — stop."
 )

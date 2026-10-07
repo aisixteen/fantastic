@@ -745,9 +745,6 @@ async fn tree_children_keep_creation_order() {
 
 // ─── C1 + C7 + C8 + C58 — the reflect flags are python's ─────────────
 
-/// python `_MORE_HINT`, verbatim.
-const PY_MORE_HINT: &str = "Distilled: every agent and what it is FOR. Reflect one agent for its verbs (<type>reflect</type>). Manual: <type>reflect</type> <readme>index</readme> - keys include system-verbs (ps/cancel/create_agent args) and self-extension (author your own durable tools). <detail>full</detail> on a reflect adds wiring and posture - ask for it only when you need to see how agents are plumbed, not to find one.";
-
 /// A bundle whose reflect names a sentence and a `mode` (or raises, for the
 /// agent named `boom`).
 struct RosterBundle;
@@ -824,16 +821,14 @@ async fn kernel_reflect(kernel: &Arc<Kernel>, payload: Value) -> crate::outcome:
 }
 
 #[tokio::test]
-async fn distilled_reflect_carries_more_hint_verbatim() {
+async fn reflect_carries_no_verb_docs() {
+    // Owner, 2026-10-05: a reflect says what an agent IS; verbs, emits, cancel,
+    // `more` and `kernel_verbs` are the `docs` kernel verb.
     let (kernel, root) = roster_kernel();
     let child = probe_child(&kernel, "kid", &root, json!({}));
-    assert_eq!(MORE_HINT, PY_MORE_HINT);
-
-    // Every distilled reflect — the root, a bundle agent, a bare agent.
     let r = kernel_reflect(&kernel, json!({"type": "reflect"}))
         .await
         .result;
-    assert_eq!(r["more"], json!(PY_MORE_HINT));
     let c = kernel
         .send(vec![Item::new(
             child.id.clone(),
@@ -842,9 +837,12 @@ async fn distilled_reflect_carries_more_hint_verbatim() {
         .await
         .remove(0)
         .result;
-    assert_eq!(c["more"], json!(PY_MORE_HINT), "{c}");
-
-    // Python order: after `tree`/`next`, before `bundles`/`readme`.
+    for reply in [&r, &c] {
+        for key in ["more", "kernel_verbs", "verbs", "emits", "cancel"] {
+            assert!(reply.get(key).is_none(), "{key}: {reply}");
+        }
+    }
+    // Python order: `tree`, `next`, `bundles`, `readme`.
     let r = kernel_reflect(
         &kernel,
         json!({"type": "reflect", "tree": "ids", "limit": 1, "bundles": "ids", "readme": true}),
@@ -853,13 +851,7 @@ async fn distilled_reflect_carries_more_hint_verbatim() {
     .result;
     let keys: Vec<&str> = r.as_object().unwrap().keys().map(String::as_str).collect();
     let tail: Vec<&str> = keys[keys.iter().position(|k| *k == "tree").unwrap()..].to_vec();
-    assert_eq!(tail, ["tree", "next", "more", "bundles", "readme"], "{r}");
-
-    // `detail:full` carries none.
-    let full = kernel_reflect(&kernel, json!({"type": "reflect", "detail": "full"}))
-        .await
-        .result;
-    assert!(full.get("more").is_none(), "{full}");
+    assert_eq!(tail, ["tree", "next", "bundles", "readme"], "{r}");
 }
 
 #[tokio::test]
@@ -947,7 +939,7 @@ async fn a_non_string_tree_flag_omits_the_tree() {
             .result;
         assert!(r.get("tree").is_none(), "tree={flag}: {r}");
         assert!(r.get("next").is_none());
-        assert_eq!(r["more"], json!(PY_MORE_HINT));
+        assert!(r.get("more").is_none());
     }
 }
 

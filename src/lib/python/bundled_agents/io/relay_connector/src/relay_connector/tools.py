@@ -36,6 +36,7 @@ from __future__ import annotations
 
 from io_bridge import _state, dispatch, make_verbs
 from io_bridge import on_delete as _engine_on_delete
+from io_bridge import EMITS  # noqa: F401  (`docs` tier detailed)
 from io_bridge import validate_meta as _bridge_validate_meta
 from kernel._refusal import NOT_CONNECTED, bad, refusal
 from relay_connector._relay import (

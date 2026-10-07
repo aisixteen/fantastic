@@ -188,10 +188,6 @@ struct FoldsTests {
             "role": .string("user"), "id": .string("u:1"), "parent": .string("a:0"),
             "content": .string("[reply to n:1 · notes reflect]\nTREE\n\n[reply to n:2 · notes read]\nx"),
         ])
-        let out = dropAnsweredReflects([
-            turn, plainTurn("assistant", "SEEN notes"), withField(turn, "id", .string("u:2")),
-        ])
-        #expect(out[0]["id"].asString == "u:1" && out[0]["parent"].asString == "a:0")
         let out2 = dedupeStaleReads([
             turn, plainTurn("assistant", "k"), withField(turn, "id", .string("u:2")),
         ])

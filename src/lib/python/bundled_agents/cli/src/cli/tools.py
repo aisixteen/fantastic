@@ -43,9 +43,6 @@ async def _reflect(id, payload, kernel):
     return {
         "id": id,
         "sentence": "Terminal renderer. Prints incoming events to stdout.",
-        "verbs": {
-            n: (f.__doc__ or "").strip().splitlines()[0] for n, f in VERBS.items()
-        },
         "accepts": ["token", "done", "say", "error", "status", "context"],
     }
 

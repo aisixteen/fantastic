@@ -285,11 +285,15 @@ fn reflect_reply(agent: &Agent) -> Value {
         "loader": true,
         // The RAW record value, as python reports it — not filtered to a string.
         "manifest": manifest_meta(agent),
-        // python's first docstring lines, in VERBS order.
-        "verbs": {
-            "reflect": "The loader's posture: what manifest it hydrates, and that it IS a loader",
-            "boot": "Hydrate the declared roster — kernel bookkeeping at boot.",
-        },
+    })
+}
+
+/// HOW TO CALL the loader — python's first docstring lines, in `VERBS` order,
+/// served by the kernel's `docs` verb.
+fn verb_docs_json() -> Value {
+    json!({
+        "reflect": "The loader's posture: what manifest it hydrates, and that it IS a loader",
+        "boot": "Hydrate the declared roster — kernel bookkeeping at boot.",
     })
 }
 
@@ -297,6 +301,10 @@ fn reflect_reply(agent: &Agent) -> Value {
 impl Bundle for StaticLoaderBundle {
     fn name(&self) -> &str {
         "static_loader"
+    }
+
+    fn verb_docs(&self) -> Value {
+        verb_docs_json()
     }
 
     /// The manifest's SHAPE at write time — a NAMED manifest must be a non-empty

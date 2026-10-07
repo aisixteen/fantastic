@@ -39,37 +39,30 @@ pub(super) fn is_kernel_verb(verb: &str) -> bool {
             | "kernel_start"
             | "shutdown_agents"
             | "kernel_stop"
+            // HOW TO CALL an agent — its bundle's verb docs. Answered by the
+            // root, and the one verb the call gate never checks (`gate`).
+            | "docs"
     )
 }
 
-/// One line per KERNEL verb — the honest reflect surface.
-///
-/// These are the SUBSTRATE's own verbs, answered by the ROOT alone, so they
-/// appear in no bundle's map. Mirrors python's `_SYSTEM_VERB_DOCS`.
-///
-/// THE CONSEQUENCE MUST PRECEDE THE FIRST EM-DASH. A default reflect keeps only
-/// the text BEFORE it (see [`crate::reflect::apply_reflect_flags`]), so anything
-/// after the dash reaches `detail:"full"` callers only — and these are the facts
-/// a caller needs BEFORE firing the verb, not after. Measured 2026-08-24:
-/// `create_agent` read as `args: handler_module:str, id:str?, **meta` with
-/// "spawn a child agent" cut, and a model spent 16 messages unable to work out what
-/// the target meant, finishing with `agents_created: []`.
+/// One doc per KERNEL verb — what `docs of=kernel` serves. These are the
+/// SUBSTRATE's own verbs, answered by the ROOT alone, so they appear in no
+/// bundle's map. Mirrors python's `_SYSTEM_VERB_DOCS`.
 pub fn kernel_verb_docs() -> Value {
-    // PYTHON DECLARATION ORDER (`_SYSTEM_VERB_DOCS`): `detail:"full"` renders the
-    // map in this order, only the distilled view sorts.
+    // PYTHON DECLARATION ORDER (`_SYSTEM_VERB_DOCS`).
     json!({
         "create_agent": "args: handler_module:str, parent_id:str REQUIRED, id:str?, **meta. \
-    Creates a CHILD OF `parent_id` — an agent names its own id or an agent \
-    in its subtree; 'kernel_state' for top-level. No default parent.",
+    Creates a CHILD OF `parent_id` — any agent you name (your own id grows \
+    your own subtree); 'kernel_state' for top-level. No default parent.",
         "update_agent": "args: id:str, **meta. EVERY FIELD YOU NAME IS REPLACED, NOT MERGED \
     (a field you do not name is untouched), so a dict field must be sent \
     WHOLE — `can_call`/`callable_by` included: restate every key you want \
     to keep, the baseline `$self` among them, or the keys you omit are GONE. \
-    Granting one edge reads like a PATCH and behaves like a PUT. An agent \
-    updates only agents in its own subtree.",
+    Granting one edge reads like a PATCH and behaves like a PUT. Whoever \
+    holds update_agent on the root updates any agent, itself included.",
         "delete_agent": "args: id:str. CASCADES — deletes that agent AND ITS WHOLE SUBTREE, \
-    deepest first; refuses if any descendant carries `delete_lock`. An \
-    agent deletes only agents in its own subtree.",
+    deepest first; refuses if any descendant carries `delete_lock`. Whoever \
+    holds delete_agent on the root deletes any agent.",
         "list_agents": "No args. Every agent's record, flat. Paged.",
         "ps": "No args. The live kernel-wide TASK TABLE — {tasks:[{id, agent, parent, \
     verb, started_at}]}, one row per in-flight dispatch. Paged.",
@@ -101,42 +94,13 @@ pub fn kernel_verb_docs() -> Value {
         "kernel_stop": "No args. Stops the kernel PROCESS gracefully — drain, every call \
     settles (done, or cancelled into the dead letters), the last rows flush, agents \
     shut down, exit. Under env:'container', the container.",
+        "docs": "args: of:str (req — an agent id (`<guid>|<agent id>` on a connected kernel), a bundle, or 'kernel'), \
+    tier:'oneliners'|'detailed'?, verb:str?. HOW TO CALL an agent — its bundle's \
+    verbs: `oneliners` (default) is one signature line per verb, `detailed` the full \
+    text (no `verb`: plus emits, cancel and notes). Pull once per bundle; `detailed` \
+    for a verb you are about to use. Gated like every kernel verb: a `can_call` grant \
+    of `docs` on the root. Returns {of, bundle, tier, verbs, emits?, cancel?, notes?}.",
     })
-}
-
-/// The `_` line that heads `kernel_verbs` — states WHERE to send them and what
-/// the named id means. Without it "send create_agent to X" reads three ways (X
-/// performs it / X is created / X is the parent) and only the last is true.
-pub const KERNEL_VERBS_PREAMBLE: &str =
-    "Kernel-owned: send to 'kernel'. The id you name is the OPERAND, \
-not the actor. (`verbs` is what this agent itself does.)";
-
-/// `kernel_verbs` as a reflect renders it. `full` keeps each doc whole, in
-/// python's declaration order; the default truncates at the first em-dash and
-/// sorts by name.
-///
-/// Read-only verbs used to render as `""` (name only), on the ground that their
-/// reply teaches the rest — but a name with no signature is exactly what left
-/// `ps` and `list_agents` unusable without a `full` reflect, and each is one line.
-pub fn kernel_verbs_view(full: bool) -> Value {
-    let mut out = Map::new();
-    out.insert("_".to_string(), json!(KERNEL_VERBS_PREAMBLE));
-    let docs = kernel_verb_docs();
-    let obj = docs.as_object().expect("kernel_verb_docs is an object");
-    let mut names: Vec<&String> = obj.keys().collect();
-    if !full {
-        names.sort();
-    }
-    for name in names {
-        let doc = obj[name].as_str().unwrap_or("");
-        let text = if full {
-            doc.to_string()
-        } else {
-            doc.split('—').next().unwrap_or(doc).trim().to_string()
-        };
-        out.insert(name.clone(), Value::String(text));
-    }
-    Value::Object(out)
 }
 
 /// `Err` is a python RAISE the verb emulates (a store read that failed, an
@@ -148,6 +112,12 @@ pub(super) async fn handle_kernel_verb(
     payload: &Value,
 ) -> Result<Value, Value> {
     Ok(match verb {
+        "docs" => match payload.get("of").and_then(Value::as_str) {
+            Some(of) if of.contains('|') => {
+                crate::docs::remote_docs_reply(kernel, of, payload).await
+            }
+            _ => crate::docs::docs_reply(kernel, payload),
+        },
         "list_agents" => {
             // REGISTRATION ORDER — python iterates `self.ctx.agents`, a plain
             // dict, and the root comes first because it registered first. The

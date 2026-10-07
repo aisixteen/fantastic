@@ -311,18 +311,14 @@ def test_a_record_missing_required_fields_is_refused_at_the_write_naming_all():
     # what a model spawning a sub-AI wrote (E37): the fields it could see
     meta = {"endpoint": ENDPOINT, "model": "qwen3.8-27b", "max_tokens": 65536}
     err = validate_meta(meta, {})
-    assert (
-        err and "missing: kv_slots, kv_overflow, memory_store_id, context_window" in err
-    ), err
+    assert err and "missing: kv_overflow, memory_store_id —" in err, err
     # each missing field is named WITH its hint, from the schema
     assert "kv_overflow = all slots live: evict" in err, err
     # an update to a complete record is judged on the MERGED state
     full = {
         **meta,
-        "kv_slots": 7,
         "kv_overflow": "evict",
         "memory_store_id": "memory",
-        "context_window": 262144,
     }
     assert validate_meta({"seed": 3}, full) is None
 

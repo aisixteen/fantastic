@@ -1364,21 +1364,19 @@ fn the_catalog_carries_each_backend_kinds_record_schema() {
         .filter(|f| f["required"] == serde_json::json!(true))
         .map(|f| f["name"].as_str().unwrap())
         .collect();
-    assert_eq!(
-        required,
-        [
-            "endpoint",
-            "model",
-            "max_tokens",
-            "kv_slots",
-            "kv_overflow",
-            "memory_store_id",
-            // the server's window — set on the record, used as set
-            "context_window"
-        ]
-    );
-    // a required field has no default — nothing is guessed about a server
+    assert_eq!(required, ["endpoint", "kv_overflow", "memory_store_id"]);
+    // a required field has no default; the counts a record leaves out are read
+    // from the server before a turn — no default either
     assert!(required.iter().all(|n| fields[n].get("default").is_none()));
+    for n in ["model", "max_tokens", "context_window", "kv_slots"] {
+        assert!(fields[n].get("default").is_none(), "{n}");
+        assert!(
+            fields[n]["hint"]
+                .as_str()
+                .is_some_and(|h| h.contains("read from the server")),
+            "{n}"
+        );
+    }
     // the defaulted fields carry THE BACKEND'S OWN values
     assert_eq!(fields["temperature"]["default"], serde_json::json!(0.2));
     assert_eq!(

@@ -30,35 +30,6 @@ import Foundation
 /// earlier one. Python `_WHOLE_STATE_READS`.
 let WHOLE_STATE_READS: Set<String> = ["reflect", "list_agents", "ps", "keys"]
 
-/// A reflect the model has ALREADY ANSWERED is replaced by this stub. The model
-/// was told to carry the facts it needs into that answer (by `REFLECT_NUDGE`,
-/// which rides on the reflect reply itself), so the distillation IT wrote is what
-/// survives — written by the reader, at read time, with the task in mind, which no
-/// post-hoc summarizer can match. The stub NAMES the agent so "I have already
-/// looked at this" stays true, and re-reflecting is always available if the
-/// distillation turns out to be thin.
-func reflectDropped(agent: String) -> String {
-    "[reflect of \(agent) — full text dropped; your distillation follows]"
-}
-
-/// The distillation instruction, appended to every delivered `reflect` reply body
-/// by `Routing`. Python `_REFLECT_NUDGE`, verbatim.
-///
-/// It rides ON the reply, not in the system block. Measured 2026-08-20
-/// (`live_plan`, the passing run): with the instruction stated ONCE as system-block
-/// policy, the model wrote a `SEEN` line for 0 of 10 reflects — and re-reflected the
-/// SAME agent (`kernel_state`) 9 times in a 17-turn run. Policy sits thousands of
-/// tokens from the data and applies to a turn that has not happened yet; this
-/// arrives attached to the body it talks about, every time, at the moment it
-/// applies. It is deliberately the LAST thing in the message: it is what the model
-/// reads immediately before writing its answer.
-let REFLECT_NUDGE =
-    "\n[this body is TRANSIENT — after your next message it is replaced by a stub. "
-    + "Open that message with the facts you will need, one compact line per agent:\n"
-    + "SEEN <id> — <what it is for>; verbs: <the ones you intend to use>. "
-    + "One reflect per agent is complete — reflecting it again yields nothing new; "
-    + "the next useful call is an action.]"
-
 /// The leading `\S+` run of `s` and the rest, or nil when the run is empty.
 private func takeRun(_ s: Substring) -> (Substring, Substring)? {
     let end = s.firstIndex(where: { $0.isWhitespace }) ?? s.endIndex
@@ -149,7 +120,7 @@ func stub(_ block: String) -> String {
 /// A delivered turn carries ONE OR MORE blocks — a batch arrives whole, one block
 /// per call, joined by a blank line. The trimmers below work on the BLOCK, the unit
 /// they were written for; treating the whole turn as one reply either deleted
-/// siblings (`dropAnsweredReflects`) or trimmed nothing (a count guard that skipped
+/// siblings (the reflect cut) or trimmed nothing (a count guard that skipped
 /// every multi-reply turn — tried 2026-08-25, superseded same day).
 func replyBlocks(_ content: String) -> [String] {
     var out: [String] = []
@@ -170,78 +141,122 @@ func replyBlocks(_ content: String) -> [String] {
     return out
 }
 
-/// Python's `\w`, for the `\b` boundary either side of `SEEN`.
-private func isWordChar(_ c: Character) -> Bool {
-    c.isLetter || c.isNumber || c == "_"
-}
-
-/// What counts as "the model recorded it": the `SEEN <agent> — …` line the reflect
-/// nudge asks for. Python `_DISTILLED` (`\bSEEN\b`, case-insensitive) — matched
-/// leniently, because the point is whether facts were carried forward, not whether
-/// a format was obeyed.
-///
-/// FAILS CLOSED: no match means the reflect body is KEPT.
-func distilled(_ text: String) -> Bool {
-    let chars = Array(text)
-    guard chars.count >= 4 else { return false }
-    for i in 0...(chars.count - 4) {
-        guard String(chars[i..<(i + 4)]).lowercased() == "seen" else { continue }
-        let beforeOK = i == 0 || !isWordChar(chars[i - 1])
-        let afterOK = i + 4 >= chars.count || !isWordChar(chars[i + 4])
-        if beforeOK && afterOK { return true }
-    }
-    return false
-}
-
 /// The turn's content, or "".
 private func contentOf(_ turn: JSON) -> String {
     turn["content"].asString ?? ""
 }
 
-/// Replace the body of every reflect reply the model has ALREADY responded to.
-/// Python `drop_answered_reflects`.
-///
-/// The IN-FLIGHT reflect (the last turn, not yet answered) is left intact — the
-/// model is reading it right now. Everything older is a reflect it has already had
-/// its chance to distil.
-///
-/// FAIL CLOSED. The body drops only if the model actually WROTE the distillation in
-/// the turn that answered it. Measured 2026-08-20 (`live_plan`): the model replied
-/// to several reflects with a bare call and no prose, the body was dropped
-/// anyway, and it had to re-fetch what it had lost — "The index was dropped from my
-/// view. Let me send it again and, THIS TIME, actually record the facts." Burning
-/// turns re-reading is the exact loop this trim exists to prevent, so a reflect the
-/// model did not distil is KEPT. Non-compliance then costs context, never
-/// comprehension.
-func dropAnsweredReflects(_ history: [JSON]) -> [JSON] {
-    var out: [JSON] = []
-    for (i, turn) in history.enumerated() {
-        let tagged = turn["role"].asString == "user" && parseReplyTag(contentOf(turn)) != nil
-        let answer = history[(i + 1)...].first { $0["role"].asString == "assistant" }
-        let answered = answer.map { distilled(contentOf($0)) } ?? false
-        if !(tagged && answered) {
-            out.append(turn)
-            continue
+/// A `docs` reply the model has ANSWERED is cut to this stub (owner, 2026-10-05).
+/// The body itself stays HELD this run under its pid (owner, 2026-10-06): the model
+/// keeps the lines it needs with its own `grep`, and those small replies stay in its
+/// view. Python `_DOCS_DROPPED`.
+func docsDropped(of: String, tier: String, pid: String, verb: String) -> String {
+    "[docs of=\(of) tier=\(tier) — dropped from your view; held this run: send yourself "
+        + "<type>grep</type> <ids><item>\(pid)</item></ids> <query>\(verb)</query>]"
+}
+
+/// A REAL verb of this docs body for the grep example: the first that is not
+/// `reflect`/`boot`, else the first. A placeholder example is copied verbatim —
+/// measured 2026-10-06 (canvas E55/E58): `<query>verb</query>` was sent as written,
+/// matched only the `<verbs>` lines, and the model concluded the held body was gone.
+/// `nil` when the body lists no verbs (nothing to keep, so nothing is held).
+/// Python `example_verb`.
+func exampleVerb(_ body: String) -> String? {
+    let all = body.components(separatedBy: "\n")
+    guard let start = all.firstIndex(of: "<verbs>") else { return nil }
+    var names: [String] = []
+    var i = start + 1
+    while i < all.count, !all[i].hasPrefix("</verbs>") {
+        let line = all[i]
+        i += 1
+        // A top-level entry `<name>…</name>` starts a line; its doc may run on over
+        // more lines, up to its own closer.
+        guard line.hasPrefix("<"), let close = line.firstIndex(of: ">") else { continue }
+        let name = String(line[line.index(after: line.startIndex)..<close])
+        guard let first = name.unicodeScalars.first, first == "_" || (first.isASCII && CharacterSet.letters.contains(first)),
+            name.unicodeScalars.allSatisfy({ $0 == "_" || ($0.isASCII && CharacterSet.alphanumerics.contains($0)) })
+        else { continue }
+        let closer = "</\(name)>"
+        if !line[line.index(after: close)...].contains(closer) {
+            while i < all.count, !all[i].contains(closer) { i += 1 }
+            guard i < all.count else { break }
+            i += 1
         }
-        // Per BLOCK: only the reflect bodies drop; sibling replies that share the
-        // turn (a batch arrives whole) stay verbatim.
-        let blocks = replyBlocks(contentOf(turn))
-        let trimmed = blocks.map { b -> String in
-            if let tag = parseReplyTag(b), tag.verb == "reflect" {
-                return reflectDropped(agent: tag.agent)
-            }
-            return b
-        }
-        if trimmed == blocks {
-            out.append(turn)
-        } else {
-            // `{**turn, "content": …}` — the row KEEPS its keys. Rebuilding the turn
-            // as a bare {role, content} silently unlinked every trimmed row from
-            // its `id`/`parent`, and a fold cannot place a row it cannot address.
-            out.append(withField(turn, "content", .string(trimmed.joined(separator: "\n\n"))))
+        names.append(name)
+    }
+    return names.first { $0 != "reflect" && $0 != "boot" } ?? names.first
+}
+
+/// The FIRST line of a docs body: it is erased after the next message, and how to
+/// keep what the model will need. Python `_DOCS_HEAD`.
+func docsHead(pid: Int64, verb: String) -> String {
+    "[erased from your view after your next message — decide now which verbs you need "
+        + "and keep them in this same turn: send yourself <type>grep</type> "
+        + "<ids><item>\(pid)</item></ids> <query>\(verb)</query> <width>1000</width>]\n"
+}
+
+/// The `<of>`/`<tier>` lines of a rendered docs body. Python `_DOCS_FIELD`
+/// (`^<(of|tier)>([^<\n]*)</\1>$`, multiline).
+private func docsFields(_ block: String) -> [String: String] {
+    var out: [String: String] = [:]
+    for line in block.split(separator: "\n", omittingEmptySubsequences: false) {
+        for key in ["of", "tier"] {
+            let open = "<\(key)>", close = "</\(key)>"
+            guard line.hasPrefix(open), line.hasSuffix(close),
+                line.count >= open.count + close.count
+            else { continue }
+            let inner = line.dropFirst(open.count).dropLast(close.count)
+            if !inner.contains("<"), out[key] == nil { out[key] = String(inner) }
         }
     }
     return out
+}
+
+/// Replace every `docs` reply body the model has answered with its stub. The
+/// reply in the last turn (not answered yet) stays whole; a refusal (no `of` in
+/// the body) stays whole. Python `drop_read_docs`.
+func dropReadDocs(_ history: [JSON]) -> [JSON] {
+    var out: [JSON] = []
+    for (i, turn) in history.enumerated() {
+        let content = contentOf(turn)
+        let answered = history[(i + 1)...].contains { $0["role"].asString == "assistant" }
+        if turn["role"].asString != "user" || !answered || parseReplyTag(content) == nil {
+            out.append(turn)
+            continue
+        }
+        let blocks = replyBlocks(content)
+        let trimmed = blocks.map { b -> String in
+            guard let tag = parseReplyTag(b), tag.verb == "docs" else { return b }
+            let fields = docsFields(b)
+            guard let of = fields["of"], let verb = exampleVerb(b) else { return b }
+            let head = b.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false).first
+                .map(String.init) ?? b
+            let pid = head.dropFirst("[reply to ".count).split(separator: " ").first.map(String.init) ?? "-"
+            return head + "\n" + docsDropped(of: of, tier: fields["tier"] ?? "", pid: pid, verb: verb)
+        }
+        out.append(trimmed == blocks ? turn : withField(turn, "content", .string(trimmed.joined(separator: "\n\n"))))
+    }
+    return out
+}
+
+/// A refusal of the model's own call — a verb its target does not answer
+/// (`unhandled`, naming that verb), or an argument it did not send (`missing_arg`
+/// naming the `arg`) — names where the fix is, `docs`, when it carries no hint of
+/// its own. Decided on the machine `reason`, never on prose. Python
+/// `point_to_docs`.
+func pointToDocs(target: String, verb: String?, result: JSON) -> JSON {
+    guard case .object(var o) = result, o["hint"] == nil else { return result }
+    let reason = o["reason"]?.asString
+    if reason == "unhandled", let verb, o["verb"]?.asString == verb {
+        o["hint"] = .string("the verbs \(target) answers: send kernel {type: docs, of: '\(target)'}")
+        return .object(o)  // a NEW key lands last, as python's `{**result, "hint": …}`
+    }
+    if reason == "missing_arg", let verb, let arg = o["arg"], pyTruthy(arg) {
+        o["hint"] = .string(
+            "how to call it: send kernel {type: docs, of: '\(target)', verb: '\(verb)', tier: detailed}")
+        return .object(o)  // a NEW key lands last, as python's `{**result, "hint": …}`
+    }
+    return result
 }
 
 /// Drop whole-state read replies that a later reply to the same `(agent, verb)`

@@ -638,25 +638,15 @@ async fn the_ledger_view_is_caller_scoped() {
 }
 
 /// C22: the ledger row stores the execution's ORIGINAL PAYLOAD, and the join
-/// denial runs the gate with it — not with a synthesised `{"type": verb}`.
-///
-/// `create_agent` is the case that proves it: its gate reads `parent_id` for the
-/// children-only rule. Asked about a payload without it, the gate answers a
-/// different question than the call did — and the joiner would receive a record
-/// for a child it may not create.
+/// denial gates the JOINED call's verb — not the verb the joiner happened to send.
+/// A joiner granted only `ps` must not be handed the record a `create_agent` made.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_joiner_is_gated_with_the_executions_original_payload() {
     let sh = Arc::new(Shared::default());
     let kernel = mk_kernel(Arc::clone(&sh));
-    // Both may `create_agent` on the root, and each only under ITSELF — which is
-    // exactly what the mutator check reads out of the ORIGINAL `parent_id`.
-    for who in ["alice", "bob"] {
-        crate::tasks::tests::mk_agent_grant(
-            &kernel,
-            who,
-            json!({"kernel_state": ["create_agent"]}),
-        )
-        .await;
+    // alice may `create_agent` on the root; bob only `ps`.
+    for (who, verb) in [("alice", "create_agent"), ("bob", "ps")] {
+        crate::tasks::tests::mk_agent_grant(&kernel, who, json!({"kernel_state": [verb]})).await;
     }
     let payload = json!({
         "type": "create_agent", "parent_id": "alice",
@@ -682,14 +672,13 @@ async fn a_joiner_is_gated_with_the_executions_original_payload() {
     .await;
     assert_eq!(made.status, Status::Completed, "{made:?}");
 
-    // bob joins the SAME id. The gate is asked about the create it would be
-    // handed — a child of `alice` — and refuses.
+    // bob joins the SAME id with a verb he holds. The gate is asked about the
+    // call he would be handed — alice's `create_agent` — and refuses.
     let k = Arc::clone(&kernel);
     let joined = as_agent(AgentId::from("bob"), async move {
         k.send(vec![Item {
             target: AgentId::from("kernel_state"),
-            payload: json!({"type": "create_agent", "parent_id": "bob",
-                            "handler_module": "slow.tools", "id": "mine"}),
+            payload: json!({"type": "ps"}),
             id: Some("plant-1".into()),
             timeout: None,
             retries: None,
@@ -708,7 +697,7 @@ async fn a_joiner_is_gated_with_the_executions_original_payload() {
         joined.result["error"]
             .as_str()
             .unwrap_or_default()
-            .contains("bob may only create_agent within its own subtree — alice is not in it"),
-        "the denial must name the ORIGINAL placement: {joined:?}"
+            .contains("bob may not call 'create_agent' on kernel_state"),
+        "the denial must name the JOINED call's verb: {joined:?}"
     );
 }

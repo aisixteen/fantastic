@@ -234,7 +234,7 @@ class ResponsesProvider:
                                 # deltas alone returns a turn spent thinking as an EMPTY
                                 # completion, and a `<call>` written mid-thought is lost.
                                 # WRAPPED once (see `ai_core.core.without_thinking`):
-                                # parsed for calls, stripped before the turn is persisted.
+                                # stripped before the turn is persisted; only the answer's calls run.
                                 think = evt.get("delta") or ""
                                 if think:
                                     if not thinking:

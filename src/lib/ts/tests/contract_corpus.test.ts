@@ -690,11 +690,11 @@ async function coreBefore(h: Hydration): Promise<void> {
   check("PC-3", denied(r), `${sender} could create_agent on the root: ${JSON.stringify(r)}`);
   check("PC-3", sideOf(r) === "egress", `expected an egress refusal, got ${JSON.stringify(r)}`);
   check("PC-3", isDeepStrictEqual([...h.k.agents.keys()].sort(), before), "a refused create changed the roster");
-  // an agent editing its OWN can_call: refused at egress ungranted (this kernel
-  // answers no update_agent; python's mutator rule refuses it where it does)
+  // an agent editing its OWN can_call: refused at egress — it holds no
+  // update_agent on the root
   const self = await reach(h.k, sender, ROOT_ID, { type: "update_agent", id: sender, can_call: { [ROOT_ID]: ["create_agent"] } });
   check("PC-3", denied(self), `${sender} raised its own authority: ${JSON.stringify(self)}`);
-  check("PC-3", sideOf(self) === "egress" || sideOf(self) === "mutator", `expected an egress or mutator refusal, got ${JSON.stringify(self)}`);
+  check("PC-3", sideOf(self) === "egress", `expected an egress refusal, got ${JSON.stringify(self)}`);
   const r2 = await reach(h.k, sender, ROOT_ID, { type: "create_agent", handler_module: "file_bridge.tools", id: "smuggled" });
   check("PC-3", denied(r2), `the roster opened after all: ${JSON.stringify(r2)}`);
 }
@@ -959,7 +959,7 @@ for (const f of SPECS) {
 // What this kernel is expected to prove, decided up front: a requirement moving
 // between these sets is a change someone has to look at, not a silent drift.
 const EXPECTED = {
-  covered: ["PC-1", "PC-2", "PC-3", "C14", "C16", "TSG-1", "TSG-2", "TSG-3", "TSG-4", "TSG-5"],
+  covered: ["PC-1", "PC-2", "PC-3", "C14", "C16", "TSG-1", "TSG-2", "TSG-3", "TSG-4", "TSG-5", "DOC-1", "DOC-2", "DOC-3", "DOC-4", "DOC-5", "FLT-1", "FLT-2", "FLT-3"],
   // C18: only its PRECONDITIONS run here (the roster is live, the neighbour's
   // edge works) — the cascade itself is `delete_agent`, which this kernel lacks.
   partial: ["PC-4", "C15", "C18", "C20", "TSG-6"],

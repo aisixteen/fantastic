@@ -644,9 +644,6 @@ async def _reflect(id, payload, agent):
         "sentence": "Disk persistence/hydration root — owns .fantastic; "
         "answers load_tree / persist_record / forget_record.",
         "root": str(_root(agent)),
-        "verbs": {
-            n: (f.__doc__ or "").strip().splitlines()[0] for n, f in VERBS.items()
-        },
     }
 
 
@@ -702,30 +699,26 @@ def reflect_root_extra(agent, *, full: bool = True) -> dict:
         # An affordance whose CONTRACT you do not know is not usable, and that costs a
         # whole run. Prose stays behind `readme:'self-extension'`; this shape does not.
         base["self_extension"] = (
-            "A DURABLE PROGRAM is a FILE plus a command — no `code` field. (1) WRITE "
-            "it to a file: <type>write_stream</type> <path>…</path> <truncate>true</truncate> <bytes>…</bytes> — `bytes` is "
-            "VERBATIM (the program between `<bytes>` and `</bytes>` exactly as written, real newlines, nothing escaped). "
-            "(2) RUN it on the COMMAND runner: <type>start</type> <command>…</command> <args><item>…</item></args>, gated by its "
-            "`allowed` regexes (reflect it). (3) Re-run the same command to keep it "
-            "current. A COMPUTE worker is an `exec_bridge.tools` agent + a program "
-            "file — NOT a new handler_module. Create it as YOUR child; to wire it "
-            "to a SIBLING (`totals`) grant `can_call:{totals}` AND `update_agent "
-            "id='totals'` to add it to `totals.callable_by` (needs "
-            "`{totals:['update_agent']}` + totals accepting you). Read "
-            "<type>reflect</type> "
-            "<readme>self-extension</readme> — send it to 'kernel' — for the fd wire."
+            "A DURABLE PROGRAM is a FILE plus a command (no `code` field): write it "
+            "with a file agent's <type>write_stream</type> (`bytes` verbatim), run it on "
+            "an `exec_bridge.tools` agent — <type>start</type> <command>python3</command> "
+            "<args><item>prog.py</item></args>, matched against its `allowed` — and "
+            "re-run to update. Wiring an agent to another takes BOTH halves: its "
+            "`can_call` and the other's `callable_by`. More: reflect kernel with "
+            "<readme>self-extension</readme>."
         )
         return base
     return {
         **base,
         "readmes": agent._readme_index(),
         "docs": (
-            "This kernel's manual is a keyed doc tree. To read it, send 'kernel' "
-            "a reflect with a string `readme` field: <type>reflect</type> "
-            "<readme>index</readme> lists every topic with its ~token cost; "
-            "<readme>key</readme> opens one (e.g. self-extension, streams); "
-            "<readme>true</readme> is the short orientation. The field is named exactly "
-            "`readme` (a string) - not 'readme_key'. Read only what a task needs."
+            "How to CALL an agent: send 'kernel' <type>docs</type> <of>agent id, "
+            "bundle or kernel</of> — one signature line per verb; add "
+            "<verb>name</verb> <tier>detailed</tier> for one verb's full text. The "
+            "manual is a keyed doc tree: send 'kernel' <type>reflect</type> with "
+            "<readme>index</readme> (every topic, ~token cost), <readme>key</readme> "
+            "(one topic) or <readme>true</readme> (the short orientation). Read only "
+            "what a task needs."
         ),
         "self_extension": (
             "A DURABLE PROGRAM is a FILE you write plus a command that runs it — "
@@ -751,13 +744,11 @@ def reflect_root_extra(agent, *, full: bool = True) -> dict:
             "handler_module (you cannot add modules to the catalog and do not need "
             "to). 'A specialist with child workers' = a parent agent whose children "
             "are exec_bridge runners, each with its own program file.\n"
-            "WIRING TO A SIBLING: you cannot raise your OWN authority. The records in "
-            "your own subtree are yours to edit; a sibling like `totals`/`readings` "
-            "that is not your child is edited only when your can_call names it with "
-            "`update_agent` (`{totals: ['update_agent']}` — a wildcard never covers "
-            "it) and its callable_by accepts you; a grant on the root edits only the "
-            "root. To let your worker call `totals`: grant the worker `can_call:{totals}` "
-            "AND `update_agent id='totals'` to add the worker to `totals.callable_by` "
+            "WIRING TO A SIBLING: a record is edited with `update_agent` on the root — "
+            "holding that grant (both ends) you edit ANY record, `totals`/`readings` "
+            "included; without it you cannot raise your OWN authority. To let your "
+            "worker call `totals`: grant the worker `can_call:{totals}` AND "
+            "`update_agent id='totals'` to add the worker to `totals.callable_by` "
             "(send the WHOLE map — update replaces, not merges).\n"
             "A SPAWNED PROGRAM reaches agents over its control fd — a TWO-WAY socket "
             "(FANTASTIC_CTRL_FD): write {op:'send', rid, target, payload}; the reply "
@@ -827,7 +818,7 @@ def _guard_parent_chain(verb: str, parent_id: object) -> dict | None:
 def _guard_own_tree(verb: str, agent) -> dict | None:
     """The ROOT loader's tree is the one this kernel HYDRATES at boot, so only the
     operator (its own flush, the CLI, boot) writes it. An agent's record changes
-    through `update_agent`, where the conferral rule runs — a record written here
+    through `update_agent`, gated like any verb — a record written here
     by an agent would be hydrated with whatever grants it named (audit
     2026-09-28). A session loader (a remote's sub-namespace, never hydrated here)
     keeps serving its remote."""
@@ -836,7 +827,7 @@ def _guard_own_tree(verb: str, agent) -> dict | None:
             UNAUTHORIZED,
             f"{verb}: the kernel's own tree is written only by the operator — "
             "an agent's record changes through update_agent",
-            hint="update_agent id=<id> …  (the conferral rule applies there)",
+            hint="update_agent id=<id> …  (needs update_agent granted on the root)",
             side="store",
         )
     return None
@@ -857,12 +848,6 @@ async def _persist_record(id, payload, agent):
     # directory, so an unvalidated one writes wherever it points.
     if (bad_id := guard_agent_id("persist_record", record["id"])) is not None:
         return bad_id
-    if (
-        denied := _guard_record_owner(
-            "persist_record", record["id"], record.get("parent_id"), agent
-        )
-    ) is not None:
-        return denied
     if (
         bad_pid := _guard_parent_chain("persist_record", record.get("parent_id"))
     ) is not None:
@@ -888,12 +873,6 @@ async def _forget_record(id, payload, agent):
     # directory outside the store entirely.
     if (bad_id := guard_agent_id("forget_record", target)) is not None:
         return bad_id
-    if (
-        denied := _guard_record_owner(
-            "forget_record", target, payload.get("parent_id"), agent
-        )
-    ) is not None:
-        return denied
     if (
         bad_pid := _guard_parent_chain("forget_record", payload.get("parent_id"))
     ) is not None:
@@ -959,73 +938,6 @@ def _decoded_blob(name: str, raw: bytes) -> dict:
             "name": name,
             "content": None,
         }
-
-
-def _guard_record_owner(
-    verb: str, record_id: str, parent_id: object, agent
-) -> dict | None:
-    """Refuse a RECORD verb that names an agent outside the caller's own subtree.
-
-    Same hole `_guard_blob_owner` closed for sidecars, one field over: the record
-    id arrives in the PAYLOAD, so any agent granted `persist_record` on the
-    loader could rewrite — or `forget_record` could DELETE — a sibling's record.
-    An OPERATOR (`current_origin()` is None: the loader's own flush, the CLI, a
-    bridge hydrating at boot) is the bookkeeping this verb exists for and stays
-    ungated. An AGENT may name ITSELF or something it owns.
-
-    THE CHAIN IS WALKED WHERE IT REALLY IS: the live tree, then this loader's own
-    persisted records (a federated kernel's records are not live here — a canvas's
-    nested agents used to stop the walk at the canvas and be refused). A record
-    that already exists is placed by the live tree or its disk position, never by
-    the payload — else naming a sibling's id with `parent_id` = yourself passed.
-    The payload's `parent_id` places only a record that exists in neither.
-    """
-    caller = current_origin()
-    if caller is None or caller == record_id:
-        return None
-    known, node, disk = _where(agent, record_id, None)
-    if not known:
-        node = parent_id if isinstance(parent_id, str) and parent_id else None
-    seen: set[str] = set()
-    while node and node not in seen:
-        if node == caller:
-            return None
-        seen.add(node)
-        _, node, disk = _where(agent, node, disk)
-    return refusal(
-        UNAUTHORIZED,
-        f"{caller!r} may not {verb} {record_id!r} — a record verb is scoped to "
-        "the caller's own subtree; only an operator may name one outside it",
-    )
-
-
-def _guard_blob_owner(aid: str) -> str | None:
-    """Refuse a blob verb that names SOMEONE ELSE'S namespace.
-
-    `agent_id` is the namespace, and it arrives in the PAYLOAD — so without this
-    any agent granted `persist_blob` on the loader could write any other agent's
-    sidecar. Measured 2026-08-23: an agent holding exactly
-    `can_call: {kernel_state: [persist_blob]}` overwrote another agent's
-    `state.yaml`, and the victim read the forged content back as its own memory.
-
-    The defence was believed to be POSITION — the root accepts `$subtree`, and a
-    grandchild is not one — but a DIRECT child passes that check, and every agent
-    an operator creates at the root is a direct child. Position bounds who can
-    reach the verb; it says nothing about which namespace they may name.
-
-    An OPERATOR send (no origin: the CLI, a test driver) stays ungated — that is
-    the origin root of trust, and an agent cannot forge it. An AGENT may only name
-    ITSELF. (A bundle persisting its OWN sidecar calls `persist_blob`/`load_blob`
-    directly — bookkeeping, not this verb.)
-    """
-    caller = current_origin()
-    if caller is None or caller == aid:
-        return None
-    return (
-        f"{caller!r} may not use another agent's namespace {aid!r} —"
-        " an agent's blob verbs are scoped to itself; only an operator may name"
-        " a namespace it does not own"
-    )
 
 
 async def persist_blob(agent, aid: str, name: str, content: str) -> dict:
@@ -1134,8 +1046,6 @@ async def _persist_blob(id, payload, agent):
         return {"error": "persist_blob: agent_id (str) required"}
     if err := _guard_blob_name(name):
         return {"error": f"persist_blob: {err}"}
-    if err := _guard_blob_owner(aid):
-        return {"error": f"persist_blob: {err}", "reason": "unauthorized"}
     if not isinstance(content, str):
         return {"error": "persist_blob: content (str) required"}
     return await persist_blob(agent, aid, name, content)
@@ -1152,8 +1062,6 @@ async def _load_blob(id, payload, agent):
         return {"error": "load_blob: agent_id (str) required"}
     if err := _guard_blob_name(name):
         return {"error": f"load_blob: {err}"}
-    if err := _guard_blob_owner(aid):
-        return {"error": f"load_blob: {err}", "reason": "unauthorized"}
     return await load_blob(agent, aid, name)
 
 

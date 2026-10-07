@@ -25,7 +25,8 @@ without any `code` field at all.
 ## What you can do
 
 - **Compose the agents you were given.** Send `kernel` `<type>list_agents</type>`
-  for the tree, `reflect` each for its verbs, then `send`. Most tasks are solved
+  for the tree, `docs` (send `kernel` `{type: docs, of: <id>}`) for each kind's
+  verbs, then `send`. Most tasks are solved
   entirely by wiring existing agents together.
 
 - **Run a command.** The executor is a **general-purpose COMMAND runner** — not a
@@ -68,14 +69,12 @@ covers every verb. `reflect` included: a `send` you were not granted comes back
 `{reason:'unauthorized'}`, and the reply's `side` says which end refused (`egress`
 = your reach, `ingress` = their acceptance) and `hint` names the fix.
 
-`create_agent`, `update_agent` and `delete_agent` act WITHIN YOUR OWN SUBTREE —
-`create_agent` with `parent_id` = you or an agent below you, `update_agent`/
-`delete_agent` naming an agent below you (any depth) — and need `create_agent`/…
-granted on the root on both ends. Anything else is refused `side:"mutator"`, "<you>
-may only <verb> within its own subtree — <id> is not in it". So you cannot raise your
-own authority (your record is your ancestors'), and you wire YOUR subtree freely: give a child `can_call` and
-`callable_by` at `create_agent`, or rewrite them with `update_agent` (send the
-WHOLE map — update replaces, not merges).
+`create_agent`, `update_agent` and `delete_agent` need the verb granted on the
+root on both ends — and that grant is the whole rule: holding it, you create under
+any agent and update or delete any agent you name. Without it you cannot raise your
+own authority. Give a child `can_call` and `callable_by` at `create_agent`, or
+rewrite any record's with `update_agent` (send the WHOLE map — update replaces, not
+merges).
 
 Reach everything by id. A denied send's `hint` and `side` are
 discovery-through-denial — the same way a sealed io leg's denial teaches
@@ -104,12 +103,9 @@ discovery-through-denial — the same way a sealed io leg's denial teaches
   started it. Its reach is that runner's `can_call`; a target must list the runner in
   its `callable_by`. Grant the runner, not the program. Persist results THROUGH the
   agent the task names (e.g. `totals`), never around it into the store underneath.
-- **Create the agents you will grant reach on as YOUR children** (`parent_id: <your
-  id>`). Grants come from above: you write your direct children's records
-  (`update_agent`), so you can set their `can_call` and `callable_by`. A specialist
-  created under the root is NOT yours: you cannot edit its record (refused
-  `side:'mutator'` — not your child), and repairing that costs a delete + recreate
-  (measured 2026-09-02: twenty messages).
+- **Write grants where the agents are.** With `update_agent` granted on the root you
+  set any agent's `can_call` and `callable_by`, wherever it sits in the tree;
+  without it, set a child's grants at `create_agent`.
 - **An edge needs BOTH ends.** For `clock` to call your child, the child's
   `callable_by` names `clock` AND `clock`'s `can_call` names the child — each written
   by that agent's parent (or the operator). No agent ever raises its own.

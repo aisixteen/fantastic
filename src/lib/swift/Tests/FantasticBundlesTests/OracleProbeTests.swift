@@ -42,14 +42,15 @@ struct OracleProbeTests {
             r["sentence"].asString
                 == "An oracle: a ledger of facts I answer questions about. Send me `ask` with a precise `question`; I return the ledger lines that match its words. I know only my own ledger."
         )
+        let d = OracleProbe().verbDocTable
         #expect(
-            r["verbs"]["ask"].asString
+            d["ask"].asString
                 == "args: question:str (req), limit:int? (default 6). Keyword search over my ledger — the lines matching the most words of the question come back as {answers:[str], matched:int}. Ask precisely; a vague question returns noise."
         )
-        #expect(r["verbs"].asObject?.count == 1)
+        #expect(d.asObject?.count == 1)
         #expect(r["asked"].asInt == 0)
         // The bundle's own fields, in python's order; the substrate appends its frame after them.
-        #expect(r.asObject?.keys.starts(with: ["id", "sentence", "verbs", "asked"]) == true, "\(r)")
+        #expect(r.asObject?.keys.starts(with: ["id", "sentence", "asked"]) == true, "\(r)")
     }
 
     @Test func askRanksByHitsThenLineAndTalliesPerAgent() async {

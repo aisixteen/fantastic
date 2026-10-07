@@ -65,11 +65,6 @@ async fn plant_reflect_is_pythons_bytes() {
         json!({
             "id": "flaky_plant",
             "sentence": "Industrial plant. Its pump is unreliable; its valve has seized.",
-            "verbs": {
-                "pump": "no args — runs the pump. Fails intermittently.",
-                "valve": "no args — operates the valve.",
-                "count": "how many times the plant has been called",
-            },
         })
     );
 }
@@ -91,10 +86,6 @@ async fn purchase_reflect_is_pythons_bytes() {
         json!({
             "id": "purchase_desk",
             "sentence": "Purchase desk. Spends real money — only a person may press the button.",
-            "verbs": {
-                "buy": "args: item:str — buys ONE. Spending is a side effect.",
-                "count": "how many purchases have ever been made",
-            },
         })
     );
 }
@@ -240,7 +231,7 @@ async fn inquiry_kind_refusal_lists_python_list() {
     );
     // An ABSENT kind takes python's `"text"` default and passes.
     let ok = call(&p, &k, &id, json!({"type": "inquiry", "text": "q"})).await;
-    assert_eq!(ok["answer"], json!("yes"));
+    assert_eq!(ok["accepted"], json!(true), "{ok}");
 }
 
 /// A10.12 — `send` refuses a payload whose `type` is falsy, not just absent.
@@ -271,7 +262,9 @@ async fn user_send_refuses_a_falsy_type() {
 
 // ── tallies ─────────────────────────────────────────────────────────────────
 
-/// A10.7 — the inquiry reply carries `granted`, the count of grants APPLIED.
+/// A10.7 — the inquiry reply carries `granted`, the count of grants APPLIED. The
+/// reply is the ACCEPTANCE (owner, 2026-10-06: fully async); the answer itself
+/// arrives later as the human's own message under the inquiry's pid.
 #[tokio::test]
 async fn inquiry_reply_carries_granted() {
     let k = kernel();
@@ -280,7 +273,7 @@ async fn inquiry_reply_carries_granted() {
     let plain = agent(&k, "user_plain", json!({"answer": "yes"}));
     assert_eq!(
         call(&p, &k, &plain, json!({"type": "inquiry", "text": "ok?"})).await,
-        json!({"answer": "yes", "request_id": null, "inquiries": 1, "granted": 0})
+        json!({"accepted": true, "re": null, "request_id": null, "inquiries": 1, "granted": 0})
     );
     // One grant on the record, applied before the answer.
     let granting = agent(
@@ -290,7 +283,7 @@ async fn inquiry_reply_carries_granted() {
     );
     let r = call(&p, &k, &granting, json!({"type": "inquiry", "text": "ok?"})).await;
     assert_eq!(r["granted"], json!(1));
-    assert_eq!(r["answer"], json!("yes"));
+    assert_eq!(r["accepted"], json!(true));
 }
 
 /// A10.9 — two humans keep two tallies, and their proposals stay apart.
@@ -441,13 +434,6 @@ async fn slow_reflect_is_pythons_bytes() {
             "id": "slow",
             "sentence": "Probe work: `slow` (never finishes by itself), `work` (counts), \
                          `fail` (raises), `sleep` (takes `seconds`).",
-            "verbs": {
-                "slow": "sleeps for an hour — in flight until cancelled",
-                "work": "counts one run, returns {runs}",
-                "fail": "raises — a failed execution, a dead letter",
-                "started": "how many `slow` calls have started",
-                "sleep": "seconds:number (req) — sleeps that long, then returns {slept}",
-            },
         }))
         .unwrap()
     );

@@ -65,6 +65,7 @@ from kernel._refusal import (
     NOT_FOUND,
     TRANSPORT_ERROR,
     UNAUTHORIZED,
+    UNHANDLED,
     bad,
     missing,
     refusal,
@@ -717,7 +718,7 @@ def _child_env(rec: dict) -> dict:
 
 
 async def _start(id, payload, kernel):
-    """args: command:str (req — on a PTY start, absent = the child's $SHELL), args:list[str]? (argv, default []), pty:{cols,rows}? (run on a terminal). The FULL line (command + args) must fullmatch one of the `allowed` regexes, or be the shell line the record's `shell` permits.
+    """args: command:str (req — the executable ALONE, e.g. `grep`; on a PTY start, absent = the child's $SHELL), args:list[str]? (its arguments, one item each — `<args><item>-rn</item><item>x</item></args>`), pty:{cols,rows}? (run on a terminal). The FULL line (command + args) must fullmatch one of the `allowed` regexes, or be the shell line the record's `shell` permits.
     The FULL line (command + args) must fullmatch one of the
     record's `allowed` regexes or the start is refused naming the patterns.
     A PTY start with no `command` runs the CHILD's own `$SHELL` (read from the
@@ -1207,47 +1208,6 @@ async def _reflect(id, payload, kernel):
         # false (none), true ($SHELL bare) or "login" ($SHELL -l).
         "shell": rec.get("shell") or False,
         "running": running,
-        "verbs": {
-            n: (f.__doc__ or "").strip().splitlines()[0] for n, f in VERBS.items()
-        },
-        "emits": {
-            "job_started": "{type:'job_started', job_id, command, args} — the RESOLVED invocation (a PTY start without `command` names the shell it ran)",
-            "progress": "{type:'progress', job_id, n, line, stream} — one per output line",
-            "job_done": "{type:'job_done', job_id, exit_code, ok, stdout?, stderr?} — a PTY job carries no stdout/stderr split",
-            "output": "{type:'output', job_id, data} — a PTY job's output chunk (UTF-8)",
-        },
-        "wire": (
-            "A program speaks the kernel over the inherited fd FANTASTIC_CTRL_FD, "
-            "a BIDIRECTIONAL socket (one end of a socketpair): frame is "
-            "[4-byte BE length | kind | rest], both directions — kind T: a JSON "
-            "envelope; kind B: [4-byte BE H | H-byte JSON header | raw body], the "
-            "header's `_binary_path` naming where the body belongs as a list of "
-            "steps from the frame root — a key as a string (taken literally: "
-            "['payload', 'a.b'] is the key 'a.b'), a list index as an int "
-            "(a stream chunk rides raw, never base64). To CALL another agent: "
-            "write {op:'send', rid:<your id>, target, payload} and the reply "
-            "COMES BACK on the SAME fd as {op:'reply', rid:<same id>, data} — the fd "
-            "is not one-way. It is not inline, though: read frames in a loop and skip "
-            "any whose rid isn't yours (event/inbox frames can arrive first) until "
-            "you see your reply. ops: send/emit/reflect/watch/on_message. A command "
-            "that never reads the fd runs exactly like any OS process."
-        ),
-        "inbox": (
-            "Any verb NOT listed in `verbs` is MAIL for the running program, delivered "
-            "to its on_message and ACKed {queued:true}. With no live job it is an "
-            "error — a script that only defines something exits before its first message "
-            "arrives."
-        ),
-        "tasks": (
-            "Every running job IS a row in the kernel TASK TABLE: its `job_id` is that "
-            "row's id (an int), listed by the universal `ps`. `cancel task_id=<job_id>` "
-            "kills it — the OS subprocess is SIGKILLed by this bundle's `on_cancel` "
-            "hook before the kernel aborts the task, so nothing is orphaned."
-        ),
-        "authoring": (
-            "A general-purpose command runner: <type>start</type> <command>…</command> <args><item>…</item></args>, gated by "
-            "the `allowed` regexes on the full command line."
-        ),
         **_describe(rec),
     }
 
@@ -1281,6 +1241,44 @@ async def _connector(id, payload, kernel):
         ),
     }
 
+
+#: What a job emits on this agent's inbox — served by `docs` (tier detailed).
+EMITS = {
+    "job_started": "{type:'job_started', job_id, command, args} — the RESOLVED invocation (a PTY start without `command` names the shell it ran)",
+    "progress": "{type:'progress', job_id, n, line, stream} — one per output line",
+    "job_done": "{type:'job_done', job_id, exit_code, ok, stdout?, stderr?} — a PTY job carries no stdout/stderr split",
+    "output": "{type:'output', job_id, data} — a PTY job's output chunk (UTF-8)",
+}
+
+#: How a running program talks back — served by `docs` (tier detailed).
+NOTES = {
+    "wire": (
+        "A program speaks the kernel over the inherited fd FANTASTIC_CTRL_FD, a "
+        "BIDIRECTIONAL socket: frame is [4-byte BE length | kind | rest], both "
+        "directions — kind T: a JSON envelope; kind B: [4-byte BE H | H-byte JSON "
+        "header | raw body], the header's `_binary_path` naming where the body "
+        "belongs as steps from the frame root — a key as a string (taken literally: "
+        "['payload', 'a.b'] is the key 'a.b'), a list index as an int (a stream "
+        "chunk rides raw, never base64). To CALL another agent: write {op:'send', "
+        "rid:<your id>, target, payload}; the reply COMES BACK on the SAME fd as "
+        "{op:'reply', rid:<same id>, data}. Read frames in a loop and skip any whose "
+        "rid isn't yours (event/inbox frames can arrive first). ops: send/emit/"
+        "reflect/watch/on_message. A command that never reads the fd runs like any "
+        "OS process. The `connector` verb returns a ready client."
+    ),
+    "inbox": (
+        "Any verb this bundle does not answer is MAIL for the running program, "
+        "delivered to its on_message and ACKed {queued:true}. With no live job it is "
+        "refused — a script that only defines something exits before its first "
+        "message arrives."
+    ),
+    "tasks": (
+        "Every running job IS a row in the kernel TASK TABLE: its `job_id` is that "
+        "row's id, listed by `ps`. `cancel task_id=<job_id>` kills it — the OS "
+        "process is SIGKILLed by this bundle's `on_cancel` hook first, so nothing is "
+        "orphaned."
+    ),
+}
 
 VERBS = {
     "start": _start,
@@ -1406,9 +1404,11 @@ async def handler(id: str, payload: dict, kernel) -> dict | None:
         # so we do NOT re-emit here; that would double-deliver. We only ACK.
         if _has_running_job(id):
             return {"queued": True}
-        return {
-            "error": f"exec_bridge: unknown type {t!r} (no running job to receive it)"
-        }
+        return refusal(
+            UNHANDLED,
+            f"exec_bridge: unknown type {t!r} (no running job to receive it)",
+            verb=t,
+        )
     return await fn(id, payload, kernel)
 
 

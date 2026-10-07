@@ -126,11 +126,11 @@ struct WebBundleTests {
         let r = await call(kernel, "web", .object(["type": .string("reflect")]))
         // The kernel appends its own reflect tail (can_call/callable_by/
         // kernel_verbs/tree) after the bundle's body — pin the bundle's half.
-        let keys = Array((r.asObject ?? [:]).keys.map { String($0) }.prefix(11))
+        let keys = Array((r.asObject ?? [:]).keys.map { String($0) }.prefix(10))
         #expect(
             keys == [
                 "id", "sentence", "port", "host", "allowed_origins", "running", "served_agent_count", "surfaces", "routes",
-                "browser_reachable", "verbs",
+                "browser_reachable",
             ], "\(keys)")
         #expect(
             r["sentence"].asString
@@ -139,7 +139,7 @@ struct WebBundleTests {
         #expect(r["served_agent_count"].asInt == Int64(kernel.allAgents().count))
         #expect(r["routes"].asObject?.keys.first == "GET /<agent_id>/file/<path>", "\(r)")
         #expect(
-            (r["verbs"].asObject ?? [:]).keys.map { String($0) }
+            (WebBundle().verbDocTable.asObject ?? [:]).keys.map { String($0) }
                 == ["reflect", "boot", "stop", "mount", "unmount", "fetch_file"])
     }
 
@@ -154,11 +154,10 @@ struct WebBundleTests {
                 "handler_module": .string("web_ws.tools"), "id": .string("ws"),
             ]))
         let r = await call(kernel, "ws", .object(["type": .string("reflect")]))
-        let keys = Array((r.asObject ?? [:]).keys.map { String($0) }.prefix(7))
+        let keys = Array((r.asObject ?? [:]).keys.map { String($0) }.prefix(6))
         #expect(
             keys == [
                 "id", "sentence", "path_pattern", "ingress_rule", "egress_rule", "sealed",
-                "verbs",
             ], "\(keys)")
         #expect(
             r["sentence"].asString
@@ -178,12 +177,12 @@ struct WebBundleTests {
                 "handler_module": .string("web_rest.tools"), "id": .string("rest"),
             ]))
         let r = await call(kernel, "rest", .object(["type": .string("reflect")]))
-        let keys = Array((r.asObject ?? [:]).keys.map { String($0) }.prefix(14))
+        let keys = Array((r.asObject ?? [:]).keys.map { String($0) }.prefix(13))
         #expect(
             keys == [
                 "id", "sentence", "path_pattern", "method", "reflect_url", "reflect_pattern",
                 "auth_header", "curl_post", "curl_reflect", "curl_reflect_target",
-                "ingress_rule", "egress_rule", "sealed", "verbs",
+                "ingress_rule", "egress_rule", "sealed",
             ], "\(keys)")
         #expect(r["path_pattern"].asString == "/rest/{target_id}")
         #expect(r["reflect_pattern"].asString == "/rest/_reflect/{target_id}")
@@ -222,12 +221,12 @@ struct WebBundleTests {
             }
             #expect(await call(kernel, id, .object(["type": .string("boot")])).isNull)
         }
-        // The host's unknown verb is python's plain error dict.
+        // The host's unknown verb is python's coded refusal.
         let webKernel = try await startWebKernel()
         defer { Task { _ = await call(webKernel, "web", .object(["type": .string("stop")])) } }
         let r = await call(webKernel, "web", .object(["type": .string("nope")]))
         #expect(r["error"].asString == "web: unknown type 'nope'", "\(r)")
-        #expect(r["reason"].isNull, "\(r)")
+        #expect(r["reason"].asString == "unhandled" && r["verb"].asString == "nope", "\(r)")
         // A null `type` never reaches a bundle through `send` (the batch
         // refuses it), so drive the repr straight at the handler.
         let none = try await WebBundle().handle(

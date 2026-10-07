@@ -48,10 +48,32 @@ pub const README: &str = include_str!("readme.md");
 /// The REST verb-channel bundle.
 pub struct WebRestBundle;
 
+/// HOW TO CALL this leg — python's `VERBS` docstrings (first line each), the
+/// inbound verbs included; served by the kernel's `docs` verb.
+fn verb_docs_json() -> Value {
+    let mut verbs = json!({
+        "reflect": "Identity + URL patterns + curl examples + this leg's auth posture",
+        "boot": "No-op. The parent `web` agent calls `get_routes` on this bundle during its own boot and mounts the HTTP endpoint onto its FastAPI app.",
+        "get_routes": "Declares this surface's HTTP routes. No args. Returns",
+    });
+    if let Some(m) = verbs.as_object_mut() {
+        for (verb, doc) in fantastic_io_bridge::inbound::verb_docs() {
+            if verb == "inbound_call" {
+                m.insert(verb.to_string(), json!(doc));
+            }
+        }
+    }
+    verbs
+}
+
 #[async_trait]
 impl Bundle for WebRestBundle {
     fn name(&self) -> &str {
         "web_rest"
+    }
+
+    fn verb_docs(&self) -> Value {
+        verb_docs_json()
     }
 
     fn readme(&self) -> Option<&'static str> {
@@ -168,19 +190,6 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
             out.insert(k.clone(), v.clone());
         }
     }
-    let mut verbs = json!({
-        "reflect": "Identity + URL patterns + curl examples + this leg's auth posture",
-        "boot": "No-op. The parent `web` agent calls `get_routes` on this bundle during its own boot and mounts the HTTP endpoint onto its FastAPI app.",
-        "get_routes": "Declares this surface's HTTP routes. No args. Returns",
-    });
-    if let Some(m) = verbs.as_object_mut() {
-        for (verb, doc) in fantastic_io_bridge::inbound::verb_docs() {
-            if verb == "inbound_call" {
-                m.insert(verb.to_string(), json!(doc));
-            }
-        }
-    }
-    out.insert("verbs".into(), verbs);
     Value::Object(out)
 }
 

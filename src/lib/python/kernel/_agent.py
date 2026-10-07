@@ -95,7 +95,8 @@ from kernel._kernel import (
     stored_outcome,
     page,
 )
-from kernel._bundles import import_handler
+from kernel._bundles import _find_bundle_module, _in_catalog, import_handler
+from kernel import _docs
 
 
 # System verbs answered natively by every Agent for its own children.
@@ -127,57 +128,33 @@ _SYSTEM_VERBS = frozenset(
         "kernel_start",
         "shutdown_agents",
         "kernel_stop",
+        # HOW TO CALL an agent — its bundle's verb docs, in two tiers. Answered
+        # by the root, and the one verb the call gate never checks (`_gate`).
+        "docs",
     }
 )
 
-# The TREE MUTATORS: after the two-sided gate on the root, the operand must be a
-# DIRECT CHILD of the sender (`create_agent`'s `parent_id` is the sender;
-# `update_agent`/`delete_agent`'s `id` names an agent whose parent is the sender).
-_MUTATORS = frozenset({"create_agent", "update_agent", "delete_agent"})
-
-# One line per system verb — the honest reflect surface. Bundle verbs are
-# derived from their VERBS docstrings; these are the substrate's own, so they
-# appear in no bundle's map and are advertised here (root reflect).
-# The verbs that CHANGE something. Distilled reflect carries their argument line;
-# read-only verbs carry only their name (their reply teaches the rest).
-_MUTATING_VERBS = frozenset(
-    {
-        "create_agent",
-        "update_agent",
-        "delete_agent",
-        "cancel",
-        "ack_deadletter",
-        "kernel_start",
-        "shutdown_agents",
-        "kernel_stop",
-    }
-)
-
+# One doc per system verb — what `docs of=kernel` serves (the verbs appear in no
+# bundle's `VERBS` map). The oneliner tier is the text before the first top-level
+# `. ` or ` — ` (`kernel/_docs.signature`); `detailed` is the whole entry.
 _SYSTEM_VERB_DOCS = {
-    # THE CONSEQUENCE MUST PRECEDE THE FIRST EM-DASH. A default reflect keeps only
-    # the text BEFORE it (see `_apply_reflect_flags`), so anything after the dash
-    # reaches `detail:"full"` callers only — and these are the facts a caller needs
-    # BEFORE firing the verb, not after. Measured 2026-08-24: `create_agent` read
-    # as `args: handler_module:str, id:str?, **meta` with "spawn a child agent"
-    # cut, and a model spent 16 messages unable to work out what the target meant,
-    # finishing with `agents_created: []`.
     "create_agent": (
         "args: handler_module:str, parent_id:str REQUIRED, id:str?, **meta. "
-        "Creates a CHILD OF `parent_id` — an agent names its own id or an agent "
-        "in its subtree; 'kernel_state' for top-level. No default parent."
+        "Creates a CHILD OF `parent_id` — any agent you name (your own id grows "
+        "your own subtree); 'kernel_state' for top-level. No default parent."
     ),
     "update_agent": (
         "args: id:str, **meta. EVERY FIELD YOU NAME IS REPLACED, NOT MERGED "
         "(a field you do not name is untouched), so a dict field must be sent "
         "WHOLE — `can_call`/`callable_by` included: restate every key you want "
         "to keep, the baseline `$self` among them, or the keys you omit are GONE. "
-        "Granting one edge reads like a PATCH and behaves like a PUT. An agent "
-        "updates only agents in its own subtree."
+        "Granting one edge reads like a PATCH and behaves like a PUT. Whoever "
+        "holds update_agent on the root updates any agent, itself included."
     ),
     "delete_agent": (
         "args: id:str. CASCADES — deletes that agent AND ITS WHOLE SUBTREE, "
-        "deepest first; refuses if any descendant carries `delete_lock`. An "
-        "agent deletes only agents in its own subtree."
+        "deepest first; refuses if any descendant carries `delete_lock`. Whoever "
+        "holds delete_agent on the root deletes any agent."
     ),
     "list_agents": "No args. Every agent's record, flat. Paged.",
     "ps": (
@@ -224,6 +201,15 @@ _SYSTEM_VERB_DOCS = {
         "No args. Stops the kernel PROCESS gracefully — drain, every call settles "
         "(done, or cancelled into the dead letters), the last rows flush, agents "
         "shut down, exit. Under env:'container', the container."
+    ),
+    "docs": (
+        "args: of:str (req — an agent id (`<guid>|<agent id>` on a connected kernel), a bundle, or 'kernel'), "
+        "tier:'oneliners'|'detailed'?, verb:str?. HOW TO CALL an agent — its "
+        "bundle's verbs: `oneliners` (default) is one signature line per verb, "
+        "`detailed` the full text (no `verb`: plus emits, cancel and notes). Pull "
+        "once per bundle; `detailed` for a verb you are about to use. Gated like "
+        "every kernel verb: a `can_call` grant of `docs` on the root. "
+        "Returns {of, bundle, tier, verbs, emits?, cancel?, notes?}."
     ),
 }
 
@@ -819,7 +805,7 @@ class Agent:
         # `callable_by` (ingress) to grant the edge.
         sender_id = _current_sender.get()
         if sender_id is not None:
-            denial = self._gate(sender_id, verb, target, payload)
+            denial = self._gate(sender_id, verb, target)
             if denial is not None:
                 return outcome(None, FAILED, denial)
         # `kernel` reflect fast-path: a pure identity read (no dispatch, no
@@ -866,9 +852,7 @@ class Agent:
                 joiner = _current_sender.get()
                 orig_verb = (entry.get("payload") or {}).get("type")
                 if joiner is not None:
-                    denial = self._gate(
-                        joiner, orig_verb, target, entry.get("payload") or {}
-                    )
+                    denial = self._gate(joiner, orig_verb, target)
                     if denial is not None:
                         return outcome(None, FAILED, denial)
                 dispatched.append(
@@ -1297,16 +1281,18 @@ class Agent:
         routes = self.ctx.peers.get(guid)
         return RemoteTarget(target_id, guid, agent_id, routes, self) if routes else None
 
-    def _gate(self, sender_id: str, verb: str, target: "Agent", payload: dict):
+    def _gate(self, sender_id: str, verb: str, target: "Agent"):
         """The two-sided call gate. Returns an error dict if the send is refused,
         else None.
 
         EGRESS — the sender's `can_call` must grant `(target, verb)` — AND INGRESS
         — the target's `callable_by` must grant `(sender, verb)`, both via the one
         `authorize_call` engine. `"*"` covers every verb. A kernel verb answered by
-        the root takes the same check against the root. Then the MUTATORS: the
-        operand must be a DIRECT CHILD of the sender. The sender is always a local
-        agent — a call a bridge leg serves is that leg's."""
+        the root takes the same check against the root — the tree verbs
+        (`create_agent`/`update_agent`/`delete_agent`) included: GRANTS ARE THE ONLY
+        RULE (owner, 2026-10-06), so whoever holds the verb on the root acts on any
+        agent it names. The sender is always a local agent — a call a bridge leg
+        serves is that leg's."""
         sender = self.ctx.agents.get(sender_id)
         sender_rec = self.ctx.get(sender_id) or {"id": sender_id}
         s_can = sender_rec.get("can_call") or {}
@@ -1359,31 +1345,6 @@ class Agent:
                 hint=_FROM_ABOVE,
                 side="ingress",
             )
-        # MUTATORS act WITHIN the sender's OWN SUBTREE — `create_agent` places
-        # under the sender or an agent below it, `update_agent`/`delete_agent` name
-        # an agent below it (any depth). A missing or non-string operand is not
-        # judged here: the verb answers it with its own missing/shape refusal. An
-        # id naming no agent is in no subtree, so it gets the mutator text like any
-        # other stranger.
-        if verb in _MUTATORS and target.parent is None:
-            key = "parent_id" if verb == "create_agent" else "id"
-            operand = payload.get(key) if isinstance(payload, dict) else None
-            if not isinstance(operand, str) or not operand:
-                return None
-            node = self.ctx.agents.get(operand)
-            if verb == "create_agent":
-                owned = operand == sender_id or (
-                    node is not None and sender_id in ancestor_ids(node)
-                )
-            else:
-                owned = node is not None and sender_id in ancestor_ids(node)
-            if not owned:
-                return refusal(
-                    UNAUTHORIZED,
-                    f"{sender_id} may only {verb} within its own subtree — "
-                    f"{operand} is not in it",
-                    side="mutator",
-                )
         return None
 
     async def _run_dispatch(self, target: "Agent", payload: dict) -> dict | None:
@@ -1458,15 +1419,7 @@ class Agent:
             )
         return "Bare agent (no handler_module) — answers substrate verbs only."
 
-    _MORE_HINT = (
-        "Distilled: every agent and what it is FOR. Reflect one agent for its verbs "
-        "(<type>reflect</type>). Manual: <type>reflect</type> <readme>index</readme> - keys "
-        "include system-verbs (ps/cancel/create_agent args) and self-extension (author your "
-        "own durable tools). <detail>full</detail> on a reflect adds wiring and posture - ask "
-        "for it only when you need to see how agents are plumbed, not to find one."
-    )
-
-    async def _roster(self, a) -> dict:
+    async def _roster(self, a, ignore: set = frozenset()) -> dict:
         """`{id, sentence, mode?, children:[...]}` — the tree, but carrying what
         each agent is FOR instead of how it is wired.
 
@@ -1502,7 +1455,10 @@ class Agent:
         for k in self._PURPOSE_KEYS:
             if raw.get(k) is not None:
                 node[k] = raw[k]
-        node["children"] = [await self._roster(c) for c in a._children.values()]
+        node["children"] = [
+            _docs.pruned_stub(c) if c.id in ignore else await self._roster(c, ignore)
+            for c in a._children.values()
+        ]
         return node
 
     async def _apply_reflect_flags(self, target, payload, reply):
@@ -1512,15 +1468,13 @@ class Agent:
         - `detail=distilled|full` (default distilled). DISTILLED answers the
           question a caller actually has most messages — *who do I send to?* — with
           a roster of `{id, sentence, mode?}` and nothing else. FULL is the
-          orientation document: wiring/posture on every node, verb docstrings,
-          and the inlined doc frame. The default is distilled because selection
-          happens on every message while orientation happens once, and because the
-          full view is NOT a superset: it carries `handler_module` and
-          posture but no `sentence`, so two agents of the same bundle
-          are indistinguishable in it at any price. Escalation rides in the
-          reply's own `more` line, not in any caller's system prompt.
+          wiring view: record fields and posture on every node. The full view is
+          NOT a superset: it carries `handler_module` and posture but no
+          `sentence`, so two agents of the same bundle are indistinguishable in it.
         - `tree=all|ids|none` (default all): `all` nests the distilled
           subtree; `ids` is a flat descendant-id index; `none` omits it.
+          `show_subtrees=[ids]` answers with only those branches (a list);
+          `ignore_subtrees=[ids]` prunes each to `{id, pruned: n}`.
         - `bundles=all|ids|none` (default none): `all` is the
           {name, handler_module} catalog; `ids` is bare names; `none`
           omits it.
@@ -1529,11 +1483,12 @@ class Agent:
           `readme="<key>"`: one topic's body + its sub-docs' index.
           Atomic — one agent.
 
-        Transport/wire docs are NOT here — they live in the doc tree
-        (`reflect readme=index`, then drill by key)."""
+        A reflect says what an agent IS, never how to call it: no verbs, emits or
+        cancel (owner, 2026-10-05) — those are the `docs` kernel verb. Transport/
+        wire docs live in the doc tree (`reflect readme=index`, then by key)."""
         if payload.get("type") != "reflect" or not isinstance(reply, dict):
             return reply
-        # A REFUSAL IS NOT A REFLECT. Decorating one with kernel_verbs/tree/more
+        # A REFUSAL IS NOT A REFLECT. Decorating one with a tree
         # produced a reply that reads like a healthy reflect with a stray error
         # field, and a caller could not tell the two apart (measured 2026-09-02).
         if "error" in reply:
@@ -1560,54 +1515,6 @@ class Agent:
         # are RUN-scoped (never persisted to the portable .fantastic workdir,
         # which can move host↔container). Same field names + key order
         # (runtime → env → version) across all four runtimes.
-        # SYSTEM VERBS — on EVERY reflect, not just the root.
-        #
-        # They are universal: every agent answers create/update/delete/ps/cancel
-        # natively, and they appear in no bundle's `verbs` map. Advertising them
-        # only on the ROOT was an optimization that put them where they were least
-        # needed — gemma4:12b reflected `assets`/`transcripts`/`secrets` (that is
-        # where the descriptions are), never reflected the root, and so never saw
-        # `update_agent`'s signature at all. It guessed the args from neighbouring
-        # names, guessed wrong, and abandoned the task. Placement has to follow
-        # WHERE A CALLER LOOKS, not where the field is cheapest to attach.
-        #
-        # Distilled carries every NAME plus the ARGUMENTS of the mutating verbs;
-        # full carries every docstring. The split is by BLAST RADIUS: a wrong guess
-        # about `ps` costs one failed read and the reply teaches you; a wrong guess
-        # about `update_agent` blocks the task or mutates the wrong thing — and
-        # those are the calls a weak model will not fire blind to find out.
-        #
-        # Costs ~115 tok, +11-17% on a per-agent reflect. Measured, and accepted.
-        # `kernel_verbs`, not `system_verbs`, and it sits beside `verbs` on purpose:
-        # `verbs` is what THIS agent does, `kernel_verbs` is what the KERNEL does
-        # when you name this agent. Presenting both under one shape said they were
-        # the same kind of thing, and a model read `delete` (drop one key from this
-        # store) and `delete_agent` (destroy this subtree) as peers.
-        #
-        # Still advertised on EVERY agent even though only the root ANSWERS them.
-        # Root-only advertisement was tried and reverted: gemma4:12b never reflected
-        # the root, never saw the signatures, guessed the args and abandoned the
-        # task. Discoverable everywhere, answered in one place, with the `_` line
-        # saying which is which.
-        reply["kernel_verbs"] = {
-            "_": (
-                "Kernel-owned: send to 'kernel'. The id you name is the OPERAND, "
-                "not the actor. (`verbs` is what this agent itself does.)"
-            ),
-            **(
-                dict(_SYSTEM_VERB_DOCS)
-                if full
-                else {
-                    # Every verb carries its text, truncated at the em-dash.
-                    # Read-only ones used to render as "" (name only), on the
-                    # ground that their reply teaches the rest — but a name with
-                    # no signature is exactly what left `ps` and `list_agents`
-                    # unusable without a `full` reflect, and each is one line.
-                    k: _SYSTEM_VERB_DOCS[k].split("—")[0].strip()
-                    for k in sorted(_SYSTEM_VERB_DOCS)
-                }
-            ),
-        }
         if target.parent is None:
             reply["runtime"] = "python"
             # The kernels this one is CONNECTED to — each agent there is reachable
@@ -1615,10 +1522,6 @@ class Agent:
             reply["peers"] = self.ctx.peer_rows()
             reply["env"] = os.environ.get("FANTASTIC_ENV", "host")
             reply["version"] = os.environ.get("FANTASTIC_VERSION")
-            # The KERNEL's own verbs — answered by the root alone, so they appear
-            # in no bundle's `verbs` map. Advertised on every agent (see
-            # `kernel_verbs` above) so a caller learns in one round-trip that work
-            # in flight is inspectable (`ps`) and killable (`cancel`).
             # Duck-typed root extension: the root's handler_module (the loader) may
             # contribute root-only fields the substrate can't compute without coupling
             # to bundle logic — e.g. `persistence: {provider}` (which file_bridge the
@@ -1644,23 +1547,37 @@ class Agent:
         # relay peer advertises as `owner_guid`, `version` names the build, and
         # `parent_id` is structure. Cheap fields with real consumers stay.
         tree = payload.get("tree", "all")
+        if tree in ("all", "ids"):
+            # SUBTREE FILTERS (owner, 2026-10-05): `show_subtrees` answers with only
+            # those branches, `ignore_subtrees` prunes each named branch to a stub
+            # `{id, pruned: n}`; together, show first and ignore inside it.
+            filt = _docs.subtree_filter(payload, target, self.ctx.agents)
+            if isinstance(filt, dict):
+                return filt
+            show, ignore = filt
+            roots = show or [target]
         if tree == "all":
-            reply["tree"] = (
-                target._tree(depth=None, details=False, current_depth=0)
+            nodes = [
+                _docs.pruned_stub(r)
+                if r.id in ignore
+                else r._tree(depth=None, details=False, current_depth=0, ignore=ignore)
                 if full
-                else await self._roster(target)
-            )
+                else await self._roster(r, ignore)
+                for r in roots
+            ]
+            reply["tree"] = nodes if show else nodes[0]
         elif tree == "ids":
             # The FLAT id index is the one reflect shape that is a plain list, so
             # it is the one that pages. `tree:"all"` is a nested subtree whose
             # value is its structure — slicing it would hand back a forest with
             # no root and call it a page. Ask for ids to walk a big tree.
-            ids, nxt = page(target._descendant_ids(), payload)
+            flat = [i for r in roots for i in r._descendant_ids(ignore)]
+            ids, nxt = page(
+                flat, payload, key=lambda x: x["id"] if isinstance(x, dict) else x
+            )
             reply["tree"] = ids
             if nxt is not None:
                 reply["next"] = nxt
-        if not full:
-            reply["more"] = self._MORE_HINT
         bundles = payload.get("bundles", "none")
         if bundles == "all":
             cat, nxt = page(
@@ -1683,11 +1600,14 @@ class Agent:
             reply["readme"] = target._readme_view(rm)
         return reply
 
-    def _descendant_ids(self) -> list[str]:
-        """Flat id index of self + all descendants (DFS, self first)."""
-        out = [self.id]
+    def _descendant_ids(self, ignore: set = frozenset()) -> list:
+        """Flat id index of self + all descendants (DFS, self first). An id in
+        `ignore` stands as its stub `{id, pruned: n}`, its branch unwalked."""
+        if self.id in ignore:
+            return [_docs.pruned_stub(self)]
+        out: list = [self.id]
         for c in self._children.values():
-            out.extend(c._descendant_ids())
+            out.extend(c._descendant_ids(ignore))
         return out
 
     def child_ids(self) -> list[str]:
@@ -1746,7 +1666,7 @@ class Agent:
             return
         sender = _current_sender.get()
         if sender is not None and sender != target_id:
-            if self._gate(sender, "emit", target, payload) is not None:
+            if self._gate(sender, "emit", target) is not None:
                 return
         target._fanout(payload, kind="emit", publish=not quiet)
 
@@ -1755,7 +1675,7 @@ class Agent:
         dropped."""
         sender = _current_sender.get()
         if sender is not None:
-            if self._gate(sender, "emit", remote, payload) is not None:
+            if self._gate(sender, "emit", remote) is not None:
                 return
         # TODO (owner, open): DESYNC between the tabs of one identity is envisioned
         # and unsolved — each tab gets the event, nothing reconciles what they do
@@ -1787,7 +1707,7 @@ class Agent:
             return None  # nothing to mirror; not a refusal
         sender_id = _current_sender.get()
         if sender_id is not None:
-            denial = self._gate(sender_id, "watch", src, {})
+            denial = self._gate(sender_id, "watch", src)
             if denial is not None:
                 return denial
         # A WATCHER MUST ALREADY BE A READER. This used to lazy-create the
@@ -1829,7 +1749,7 @@ class Agent:
         # whether the read is gated at all depends on the ORIGIN.
         if _current_sender.get() is None:
             return None
-        return self._gate(watcher_id, "state_subscribe", self._root(), {})
+        return self._gate(watcher_id, "state_subscribe", self._root())
 
     def unwatch(self, src_id: str, tgt_id: str) -> None:
         src = self.ctx.agents.get(src_id)
@@ -2075,7 +1995,7 @@ class Agent:
                     return self._reflect_identity()
                 # CODED, not a bare error. A reason-less `{error}` is decorated
                 # by `_apply_reflect_flags` into something that reads like a
-                # healthy reflect (kernel_verbs, tree, more) with a stray error
+                # healthy reflect (a tree around it) with a stray error
                 # field — the caller cannot tell a refusal from an answer
                 # (measured 2026-09-02).
                 return refusal(
@@ -2200,7 +2120,94 @@ class Agent:
             return await self._verb_shutdown_agents(payload)
         if verb == "kernel_stop":
             return await self._verb_kernel_stop(payload)
+        if verb == "docs":
+            of = payload.get("of")
+            if isinstance(of, str) and "|" in of:
+                return await self._remote_docs(of, payload)
+            return self._verb_docs(payload)
         return refusal(UNHANDLED, f"unhandled system verb {verb!r}", verb=verb)
+
+    async def _remote_docs(self, of: str, payload: dict) -> dict:
+        """`docs` of an agent on a CONNECTED KERNEL, `of: <guid>|<agent id>` (owner,
+        2026-10-06). The question goes to THAT kernel's own `docs` — which answers any
+        caller its gate admits — and the reply names the qualified id. The asker's
+        own `docs` grant on THIS root is what the gate checked; this kernel then asks
+        as itself over the peer's live routes, and the peer judges its leg. Measured
+        2026-10-06 (canvas E55/E58): with verbs out of reflect, a model could not learn
+        a page agent's verbs at all — local docs did not know the id and
+        `<guid>|kernel` docs was not granted — and explored until the time ran out."""
+        guid, _, agent_id = of.partition("|")
+        target = (
+            self._qualified_target(f"{guid}|kernel")
+            if guid and agent_id and "|" not in agent_id
+            else None
+        )
+        if target is None:
+            return refusal(
+                BAD_ARG,
+                f"docs: {of!r} names no agent, bundle or 'kernel'",
+                hint="a qualified id names an agent on a CONNECTED kernel "
+                "(`<guid>|<agent id>`, as a reflect tree lists it)",
+                arg="of",
+            )
+        if not isinstance(target, RemoteTarget):  # this kernel's own guid
+            return self._verb_docs({**payload, "of": agent_id})
+        ask = {"type": "docs", "of": agent_id}
+        for k in ("verb", "tier"):
+            if k in payload:
+                ask[k] = payload[k]
+        calls = [asyncio.ensure_future(r.call("kernel", ask)) for r in target.routes]
+        try:
+            done, _ = await asyncio.wait(calls, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for c in calls:
+                c.cancel()
+        out = next(c for c in calls if c in done).result()
+        if isinstance(out, dict) and "of" in out:
+            out = {**out, "of": of}
+        return out
+
+    def _verb_docs(self, payload: dict) -> dict:
+        """args: of:str (req), tier:str?, verb:str?. HOW TO CALL an agent — its
+        bundle's verb docs (`kernel/_docs.py`). `of` is `kernel` (the kernel
+        verbs), an agent id (the bundle it runs), or a bundle — by its listed
+        name or its handler module — readable before any agent of it exists."""
+        of = payload.get("of")
+        if not isinstance(of, str) or not of:
+            return missing(
+                "docs",
+                "of",
+                hint="an agent id, a bundle (e.g. 'exec_bridge.tools') or 'kernel'",
+            )
+        tier = payload.get("tier", "oneliners")
+        if tier not in _docs.TIERS:
+            return bad("docs", "tier", "'oneliners' or 'detailed'")
+        verb = payload.get("verb")
+        if verb is not None and (not isinstance(verb, str) or not verb):
+            return bad("docs", "verb", "a verb name")
+        if of == "kernel":
+            return _docs.render(of, "kernel", tier, verb, dict(_SYSTEM_VERB_DOCS), {})
+        agent = self.ctx.agents.get(of)
+        if agent is not None:
+            module = agent.handler_module
+            if not module:
+                return _docs.render(of, None, tier, verb, {}, {})
+        else:
+            # A BUNDLE by either name the kernel lists it under: `bundles='ids'`
+            # lists the NAME (`file_bridge`), an agent record carries the
+            # handler_module (`file_bridge.tools`). Measured 2026-10-06 (rust,
+            # plan + build): models asked for the listed name and were refused.
+            module = of if _in_catalog(of) else _find_bundle_module(of, self.ctx)
+            if module is None:
+                return refusal(
+                    BAD_ARG,
+                    f"docs: {of!r} names no agent, bundle or 'kernel'",
+                    hint="an agent id from a reflect tree, a bundle's name or "
+                    "handler_module (reflect bundles='all' lists both), or 'kernel'",
+                    arg="of",
+                )
+        table, extras = _docs.module_docs(import_handler(module))
+        return _docs.render(of, module, tier, verb, table, extras)
 
     def _verb_ps(self, payload: dict) -> dict:
         """No args. The live TASK TABLE — {tasks:[{id, agent, parent, verb,
@@ -2840,17 +2847,6 @@ class Agent:
                     node[k] = self._meta[k]
             return node
         node.update(self._meta)
-        if self.handler_module:
-            try:
-                mod = import_handler(self.handler_module)
-                verbs_dict = getattr(mod, "VERBS", None)
-                if isinstance(verbs_dict, dict):
-                    node["verbs"] = {
-                        n: (f.__doc__ or "").strip().splitlines()[0]
-                        for n, f in verbs_dict.items()
-                    }
-            except Exception:
-                pass
         node["in_flight"] = self._in_flight
         return node
 
@@ -2860,15 +2856,19 @@ class Agent:
         depth: int | None,
         details: bool,
         current_depth: int,
+        ignore: set = frozenset(),
     ) -> dict:
         # A reflect that passes the gate returns the tree whole.
         node = self._node_summary(details=details)
         if depth is None or current_depth < depth:
             node["children"] = [
-                c._tree(
+                _docs.pruned_stub(c)
+                if c.id in ignore
+                else c._tree(
                     depth=depth,
                     details=details,
                     current_depth=current_depth + 1,
+                    ignore=ignore,
                 )
                 for c in self._children.values()
             ]

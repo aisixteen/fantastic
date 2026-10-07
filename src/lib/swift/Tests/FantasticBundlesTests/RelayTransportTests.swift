@@ -506,10 +506,10 @@ struct RelayTransportTests {
         // The kernel appends its own reflect flags (can_call, kernel_verbs, tree)
         // after the bundle's keys, so the BUNDLE half is the prefix.
         #expect(
-            Array((r.asObject?.keys ?? []).prefix(17)) == [
+            Array((r.asObject?.keys ?? []).prefix(15)) == [
                 "id", "sentence", "transport", "connected", "pending_count", "ingress_rule",
                 "egress_rule", "sealed", "relay_url", "guid", "partner_guid",
-                "reconnect", "role", "owner_guid", "exposes", "verbs", "emits",
+                "reconnect", "role", "owner_guid", "exposes",
             ], "\(r.serialize())")
         #expect(r["transport"].asString == "relay")
         #expect(r["connected"].asBool == false && r["pending_count"].asInt == 0)
@@ -517,8 +517,9 @@ struct RelayTransportTests {
         #expect(r["egress_rule"].asString == "silent_egress")
         #expect(r["reconnect"] == .double(10.0) && r["role"].asString == "kernel")
         #expect(r["exposes"] == .array([]) && r["owner_guid"].isNull)
-        #expect(r["verbs"].asObject?.count == 10)
-        #expect(r["emits"].asObject?.keys.contains("bridge_up") == true)
+        let d = await kernel.send([Item("kernel", ["type": "docs", "of": "rc", "tier": "detailed"])])[0].result
+        #expect(d["verbs"].asObject?.count == 10)
+        #expect(d["emits"].asObject?.keys.contains("bridge_up") == true)
     }
 
     /// `auth` carries a bare STEM and the gate appends `_ingress` to it, so
@@ -575,9 +576,9 @@ struct RelayTransportTests {
         ])[0].result
         let r = await kernel.send([Item("wb", ["type": "reflect"])])[0].result
         #expect(
-            Array((r.asObject?.keys ?? []).prefix(13)) == [
+            Array((r.asObject?.keys ?? []).prefix(11)) == [
                 "id", "sentence", "transport", "connected", "pending_count", "ingress_rule",
-                "egress_rule", "sealed", "host", "peer_id", "port", "verbs", "emits",
+                "egress_rule", "sealed", "host", "peer_id", "port",
             ], "\(r.serialize())")
         #expect(r["transport"].asString == "ws")
         // A7.24 — the dial to a dead port FAILED, so nothing attached: boot is
@@ -585,7 +586,9 @@ struct RelayTransportTests {
         #expect(r["connected"].asBool == false)
         #expect(r["host"].isNull && r["peer_id"].asString == "kernel_state")
         #expect(r["port"].asInt == 8123)
-        #expect(r["verbs"].asObject?.count == 6)
+        #expect(
+            (await kernel.send([Item("kernel", ["type": "docs", "of": "wb"])])[0].result)["verbs"]
+                .asObject?.count == 6)
         #expect(
             r["sentence"].asString
                 == "Cross-kernel comms bridge — WS-only, asymmetric (no peer bridge needed); weak proxy."

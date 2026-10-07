@@ -535,7 +535,7 @@ async fn an_empty_model_fails_loud_in_chat() {
 async fn reflect_extras_match_python() {
     // python `_reflect_extra`: temperature defaults to the provider's 0.3, and
     // `num_ctx`/`num_predict`/`think` are null unless SET on the record. They
-    // land AFTER `concurrency`, exactly as `out.update(extra)` does.
+    // land AFTER `generating`, exactly as `out.update(extra)` does.
     let tmp = TempDir::new().unwrap();
     let server = MockServer::start().await;
     let (kernel, backend) = mk_kernel(&tmp, "rx", &server.uri()).await;
@@ -544,7 +544,7 @@ async fn reflect_extras_match_python() {
         .await
         .remove(0)
         .result;
-    let keys: Vec<String> = r.as_object().unwrap().keys().take(16).cloned().collect();
+    let keys: Vec<String> = r.as_object().unwrap().keys().take(12).cloned().collect();
     assert_eq!(
         keys,
         vec![
@@ -555,11 +555,7 @@ async fn reflect_extras_match_python() {
             "context_window",
             "context_strategy",
             "memory_store_id",
-            "verbs",
             "generating",
-            "cancel",
-            "emits",
-            "concurrency",
             "temperature",
             "num_ctx",
             "num_predict",
@@ -828,7 +824,7 @@ async fn unknown_type_wire_shape_is_byte_exact() {
         .result;
     assert_eq!(
         serde_json::to_string(&r).unwrap(),
-        r#"{"error":"ollama_backend: unknown type 'frob'"}"#
+        r#"{"error":"ollama_backend: unknown type 'frob'","reason":"unhandled","verb":"frob"}"#
     );
 }
 

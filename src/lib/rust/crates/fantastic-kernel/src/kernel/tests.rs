@@ -623,7 +623,7 @@ async fn shutdown_continues_on_a_raising_hook() {
 // python baseline at `e2e/parity` (`ctx/reboot/*_rows_read.json`): 3 rows per
 // agent on every reboot that python does not have.
 
-/// Declares a `verbs` map in its reflect — with or without `shutdown` — and
+/// Declares a verb table (`verb_docs`) — with or without `shutdown` — and
 /// counts how often the handler is asked anything.
 struct Declares {
     shutdown: bool,
@@ -635,6 +635,14 @@ impl crate::Bundle for Declares {
     fn name(&self) -> &str {
         "declares.tools"
     }
+    fn verb_docs(&self) -> Value {
+        let mut verbs = Map::new();
+        verbs.insert("reflect".to_string(), json!("Identity."));
+        if self.shutdown {
+            verbs.insert("shutdown".to_string(), json!("Tear down."));
+        }
+        Value::Object(verbs)
+    }
     async fn handle(
         &self,
         _id: &AgentId,
@@ -645,12 +653,7 @@ impl crate::Bundle for Declares {
         if payload.get("type").and_then(Value::as_str) != Some("reflect") {
             return Ok(None);
         }
-        let mut verbs = Map::new();
-        verbs.insert("reflect".to_string(), json!("Identity."));
-        if self.shutdown {
-            verbs.insert("shutdown".to_string(), json!("Tear down."));
-        }
-        Ok(Some(json!({"sentence": "declares", "verbs": verbs})))
+        Ok(Some(json!({"sentence": "declares"})))
     }
 }
 
@@ -715,9 +718,10 @@ async fn the_shutdown_sweep_mints_no_id_and_writes_no_row() {
         before_rows,
         "python's VERBS lookup leaves no call row and no internal roster row"
     );
-    assert!(
-        calls.load(Ordering::SeqCst) > seen,
-        "the bundle WAS asked — rust keeps its verb table in the reflect reply"
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        seen,
+        "the bundle is NOT asked — its verb table is read statically (`verb_docs`)"
     );
     assert_eq!(reply["shut"], json!([]), "nothing declares `shutdown`");
 }

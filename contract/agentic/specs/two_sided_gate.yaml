@@ -106,10 +106,9 @@ expect:
 
     # ── the repair path: a peer cannot supply the missing half ───
     #
-    # Authority descends. An agent editing its OWN can_call to reach further is
-    # refused (a mutator acts on the sender's own children only, and this one
-    # holds no reach to the root) — and the refusal is then re-probed for
-    # EFFECT, not inspected as a field: an agent's denied attempt to raise its
+    # Authority is the grant. An agent editing its OWN can_call to reach further is
+    # refused: it holds no `update_agent` on the root — and the refusal is then
+    # re-probed for EFFECT, not inspected as a field: an agent's denied attempt to raise its
     # own grant must leave the edge shut.
 
     - name: a roster agent cannot grant itself the half it lacks

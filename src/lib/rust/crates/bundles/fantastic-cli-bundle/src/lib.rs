@@ -281,6 +281,14 @@ impl Bundle for CliBundle {
         "cli"
     }
 
+    fn verb_docs(&self) -> Value {
+        let mut verbs = Map::new();
+        for (name, doc) in VERBS {
+            verbs.insert(name.to_string(), json!(doc));
+        }
+        Value::Object(verbs)
+    }
+
     fn readme(&self) -> Option<&'static str> {
         Some(README)
     }
@@ -294,14 +302,9 @@ impl Bundle for CliBundle {
         let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
         match verb {
             "reflect" => {
-                let mut verbs = Map::new();
-                for (name, doc) in VERBS {
-                    verbs.insert(name.to_string(), json!(doc));
-                }
                 return Ok(Some(json!({
                     "id": agent_id.as_str(),
                     "sentence": "Terminal renderer. Prints incoming events to stdout.",
-                    "verbs": verbs,
                     "accepts": ACCEPTS,
                 })));
             }

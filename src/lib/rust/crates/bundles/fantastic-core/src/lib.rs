@@ -99,28 +99,11 @@ pub fn seed_root_readme(workdir: &Path) -> io::Result<()> {
 
 /// The SHORT `self_extension` a DISTILLED root reflect carries — python
 /// `reflect_root_extra`'s non-full branch, verbatim.
-const SELF_EXTENSION_SHORT: &str =
-    "A DURABLE PROGRAM is a FILE plus a command — no `code` field. (1) WRITE it \
-to a file: <type>write_stream</type> <path>…</path> \
-<truncate>true</truncate> <bytes>…</bytes> — `bytes` is VERBATIM (the \
-program between `<bytes>` and `</bytes>` exactly as written, real newlines, \
-nothing escaped). (2) RUN it on the COMMAND runner: <type>start</type> \
-<command>…</command> <args><item>…</item></args>, gated by its `allowed` \
-regexes (reflect it). (3) Re-run the same command to keep it current. A \
-COMPUTE worker is an `exec_bridge.tools` agent + a program file — NOT a new \
-handler_module. Create it as YOUR child; to wire it to a SIBLING (`totals`) \
-grant `can_call:{totals}` AND `update_agent id='totals'` to add it to \
-`totals.callable_by` (needs `{totals:['update_agent']}` + totals accepting \
-you). Read <type>reflect</type> \
-<readme>self-extension</readme> — send it to 'kernel' — for the fd wire.";
+const SELF_EXTENSION_SHORT: &str = "A DURABLE PROGRAM is a FILE plus a command (no `code` field): write it with a file agent's <type>write_stream</type> (`bytes` verbatim), run it on an `exec_bridge.tools` agent — <type>start</type> <command>python3</command> <args><item>prog.py</item></args>, matched against its `allowed` — and re-run to update. Wiring an agent to another takes BOTH halves: its `can_call` and the other's `callable_by`. More: reflect kernel with <readme>self-extension</readme>.";
 
-/// The one-liner teaching keyed doc fetch — python `reflect_root_extra`'s `docs`.
-const DOCS_LINE: &str = "This kernel's manual is a keyed doc tree. To read it, send 'kernel' \
-a reflect with a string `readme` field: <type>reflect</type> \
-<readme>index</readme> lists every topic with its ~token cost; \
-<readme>key</readme> opens one (e.g. self-extension, streams); \
-<readme>true</readme> is the short orientation. The field is named exactly \
-`readme` (a string) - not 'readme_key'. Read only what a task needs.";
+/// The one-liner teaching `docs` and keyed doc fetch — python
+/// `reflect_root_extra`'s `docs`.
+const DOCS_LINE: &str = "How to CALL an agent: send 'kernel' <type>docs</type> <of>agent id, bundle or kernel</of> — one signature line per verb; add <verb>name</verb> <tier>detailed</tier> for one verb's full text. The manual is a keyed doc tree: send 'kernel' <type>reflect</type> with <readme>index</readme> (every topic, ~token cost), <readme>key</readme> (one topic) or <readme>true</readme> (the short orientation). Read only what a task needs.";
 
 /// The LONG `self_extension` a `detail:"full"` root reflect carries — python's
 /// full branch, verbatim (it has no fd-wire tail sentence).
@@ -147,14 +130,11 @@ EXISTING command runner) that owns a program file — you never author a new \
 handler_module (you cannot add modules to the catalog and do not need to). \
 'A specialist with child workers' = a parent agent whose children are \
 exec_bridge runners, each with its own program file.\nWIRING TO A SIBLING: \
-you cannot raise your OWN authority. The records in your own subtree are \
-yours to edit; a sibling like `totals`/`readings` that is not your child is \
-edited only when your can_call names it with `update_agent` \
-(`{totals: ['update_agent']}` — a wildcard never covers it) and its \
-callable_by accepts you; a grant on the root edits only the root. To let \
-your worker call `totals`: grant the worker `can_call:{totals}` AND \
-`update_agent id='totals'` to add the worker to `totals.callable_by` (send \
-the WHOLE map — update replaces, not merges).\nA SPAWNED PROGRAM reaches agents over its \
+a record is edited with `update_agent` on the root — holding that grant (both \
+ends) you edit ANY record, `totals`/`readings` included; without it you cannot \
+raise your OWN authority. To let your worker call `totals`: grant the worker \
+`can_call:{totals}` AND `update_agent id='totals'` to add the worker to \
+`totals.callable_by` (send the WHOLE map — update replaces, not merges).\nA SPAWNED PROGRAM reaches agents over its \
 control fd — a TWO-WAY socket (FANTASTIC_CTRL_FD): write {op:'send', rid, \
 target, payload}; the reply comes back on the SAME fd as {op:'reply', rid, \
 data}. It is not inline — read frames until one carries your `rid`, \
@@ -427,9 +407,6 @@ impl KernelStateBundle {
         let parent_id = record.get("parent_id");
         let parent = parent_id.and_then(Value::as_str);
         let mut at = Places::new(agent, kernel);
-        if let Some(denied) = guard_record_owner("persist_record", id, parent, &mut at)? {
-            return Ok(denied);
-        }
         // python `_guard_parent_chain`: a parent_id that is not None must be a
         // valid id — a non-string included.
         if let Some(bad) = parent_id
@@ -467,9 +444,6 @@ impl KernelStateBundle {
         let parent_id = payload.get("parent_id");
         let parent = parent_id.and_then(Value::as_str);
         let mut at = Places::new(agent, kernel);
-        if let Some(denied) = guard_record_owner("forget_record", target, parent, &mut at)? {
-            return Ok(denied);
-        }
         if let Some(bad) = parent_id
             .filter(|p| !p.is_null())
             .and_then(|p| guard_id("forget_record", Some(p)))
@@ -620,19 +594,9 @@ impl<'a> Places<'a> {
     }
 }
 
-/// Refuse a RECORD verb that names an agent outside the caller's own subtree —
-/// python `_guard_record_owner`. An OPERATOR (`current_origin()` is `None`) is
-/// the bookkeeping these verbs exist for and stays ungated; an agent may name
-/// ITSELF or something it owns.
-///
-/// THE CHAIN IS WALKED WHERE IT REALLY IS: the live tree, then this loader's own
-/// persisted records (a federated kernel's records are not live here). A record
-/// that already exists is placed by the live tree or its disk position, never by
-/// the payload — else naming a sibling's id with `parent_id` = yourself passed.
-/// The payload's `parent_id` places only a record that exists in neither.
 /// The ROOT loader's tree is the one this kernel HYDRATES at boot, so only the
 /// operator (its own flush, the CLI, boot) writes it. An agent's record changes
-/// through `update_agent`, where the gate's children-only rule runs — a record written here
+/// through `update_agent`, gated like any verb — a record written here
 /// by an agent would be hydrated with whatever grants it named (audit
 /// 2026-09-28, a15). A session loader (a remote's sub-namespace, never hydrated
 /// here) keeps serving its remote. Python `_guard_own_tree`.
@@ -646,47 +610,10 @@ fn guard_own_tree(verb: &str, agent: &Arc<Agent>) -> Option<Value> {
             "{verb}: the kernel's own tree is written only by the operator — \
              an agent's record changes through update_agent"
         ),
-        "update_agent id=<id> …  (the conferral rule applies there)",
+        "update_agent id=<id> …  (needs update_agent granted on the root)",
     );
     fantastic_kernel::refusal::with(&mut r, "side", json!("store"));
     Some(r)
-}
-
-fn guard_record_owner(
-    verb: &str,
-    record_id: &str,
-    parent_id: Option<&str>,
-    at: &mut Places<'_>,
-) -> Result<Option<Value>, BundleError> {
-    let Some(caller) = fantastic_kernel::current_origin() else {
-        return Ok(None);
-    };
-    if caller.0 == record_id {
-        return Ok(None);
-    }
-    let (known, mut node) = at.locate(record_id)?;
-    if !known {
-        node = parent_id.filter(|p| !p.is_empty()).map(str::to_string);
-    }
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    while let Some(n) = node.filter(|n| !n.is_empty()) {
-        if n == caller.0 {
-            return Ok(None);
-        }
-        if !seen.insert(n.clone()) {
-            break;
-        }
-        node = at.locate(&n)?.1;
-    }
-    Ok(Some(fantastic_kernel::refusal(
-        fantastic_kernel::refusal::UNAUTHORIZED,
-        format!(
-            "{} may not {verb} {} — a record verb is scoped to the caller's own \
-             subtree; only an operator may name one outside it",
-            fantastic_bundle::py_repr(&caller.0),
-            fantastic_bundle::py_repr(record_id)
-        ),
-    )))
 }
 
 #[async_trait]
@@ -695,6 +622,10 @@ impl Bundle for KernelStateBundle {
     // prompt and the `bundles_next` cursor both carry it.
     fn name(&self) -> &str {
         "kernel_state"
+    }
+
+    fn verb_docs(&self) -> Value {
+        verbs_view()
     }
 
     fn readme(&self) -> Option<&'static str> {
@@ -724,7 +655,6 @@ impl Bundle for KernelStateBundle {
                 "sentence": "Disk persistence/hydration root — owns .fantastic; \
                              answers load_tree / persist_record / forget_record.",
                 "root": reported_root(&agent, kernel)?,
-                "verbs": verbs_view(),
             }),
             "boot" => self.boot(&agent, kernel).await?,
             "load_tree" => self.load_tree(&agent, kernel).await?,

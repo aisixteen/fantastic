@@ -294,4 +294,4 @@ async def test_an_agent_reflect_through_the_gate_still_reads_the_module(seeded_k
     k.create(None, id="asker", can_call={"hr": ["reflect"]})
     with as_agent(seeded_kernel, "asker"):
         r = (await _call(k, "hr", {"type": "reflect"}))["result"]
-    assert r["sentence"] == "hook probe" and "kernel_verbs" in r
+    assert r["sentence"] == "hook probe" and "tree" in r

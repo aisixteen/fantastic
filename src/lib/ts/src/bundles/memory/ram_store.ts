@@ -504,6 +504,6 @@ export async function handler(id: string, payload: Payload, kernel: Kernel): Pro
 
 /** Register the bundle so a `ram_store.ts` record runs in this kernel. */
 export function registerRamStore(kernel: Kernel): void {
-  kernel.registerBundle("ram_store.ts", handler);
+  kernel.registerBundle("ram_store.ts", handler, RAM_STORE_VERBS);
   kernel.setBundleReadme("ram_store.ts", RAM_STORE_README);
 }

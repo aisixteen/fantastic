@@ -25,6 +25,10 @@ public let DEFAULT_TEMPERATURE = 0.3
 public final class OllamaBackendBundle: AgentBundle, @unchecked Sendable {
     public let name = "ollama_backend"
     public var verbs: [String] { AIBackend.verbNames }
+    public var verbDocTable: JSON { .object(AIBackend.VERBS) }
+    public var emitsDoc: JSON? { .object(AIBackend.REFLECT_EMITS) }
+    public var cancelDoc: JSON? { .string(CANCEL_DOC) }
+    public var notesDoc: JSON? { .object(AIBackend.NOTES) }
 
     let core: AIBackend
 

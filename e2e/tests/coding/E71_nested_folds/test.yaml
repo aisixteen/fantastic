@@ -6,11 +6,11 @@ title: "long enough for folds of folds — every level summarized, grep finds a 
 runner: probe.py
 runtimes: [python, rust, swift]
 costs: turns
-long: true  # > 8 min measured; at most 2 run at once (run.py LONG_LANES)
+long: true  # live version > 8 min; planted since 2026-10-07 — re-measure before dropping this
 limits:
   idle_seconds: 60
   max_turns: 140
   no_progress_turns: 32
   turn_chars: 60000
   turn_seconds: 300
-env: {E2E_WINDOW: "12000"}  # the squeeze the fold family measures under (the harness default is 32k)
+env: {E2E_WINDOW: "4500"}  # 4.5k: the past is planted (owner 2026-10-07); 3.5k is below the system block (too_small)

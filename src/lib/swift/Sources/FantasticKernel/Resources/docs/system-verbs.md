@@ -2,10 +2,11 @@
 
 # Kernel verbs
 
-These are baked into the substrate, not into any bundle, and they appear in no
-agent's `verbs` map. Every reflect ADVERTISES them (as `kernel_verbs`, so you
-learn they exist wherever you happen to be looking); only the ROOT ANSWERS them.
-Address `kernel`.
+These are baked into the substrate, not into any bundle. Read their signatures
+with `docs` — send `kernel` `{type: docs, of: kernel}` (add `verb: <name>, tier:
+detailed` for one verb's full text); only the ROOT ANSWERS them. Address `kernel`.
+`docs` is one of them, and the one verb the call gate never checks: any agent may
+read any bundle's docs with no grant.
 
 They act on the TREE, or on the kernel-wide task table. **The agent you name is
 the OPERAND, not the actor** — `parent_id`, `id`, `task_id` say what is acted on.
@@ -21,12 +22,10 @@ and finished sixteen messages having created nothing.
 ## Composition
 
 `create_agent` — args: `handler_module:str`, `parent_id:str` **(required)**, `id:str?`, `**meta`
-: Create a child of `parent_id` and boot it. An agent names **its own id** — it
-  creates only its OWN children (`side:'mutator'` otherwise, "<you> may only
-  create_agent within its own subtree — <parent_id> is not in it"), and needs
-  `create_agent` granted on both ends (its `can_call` on the root, the root's
-  `callable_by` for it). The operator names any parent (`kernel_state` for a
-  top-level agent). There is no default
+: Create a child of `parent_id` and boot it — any agent you name (your own id to
+  grow your own subtree, `kernel_state` for a top-level agent). Needs `create_agent`
+  granted on both ends (your `can_call` on the root, the root's `callable_by` for
+  you); the grant is the whole rule. There is no default
   parent: placement is always stated, never inferred from who sent the call.
   `id` is minted as `{bundle}_{hex6}` when omitted. Everything else becomes the
   record's meta — that is how a bundle is configured (`mode`, `root`, `allow`,
@@ -39,20 +38,16 @@ and finished sixteen messages having created nothing.
   `can_call`/`callable_by` included: restate every key you want to keep, the
   baseline `$self` among them, or the keys you omit are gone. Granting one edge reads like a PATCH and behaves like a PUT.
 
-  **Who may:** an agent updates only its OWN DIRECT CHILDREN — the record `id`
-  names must have the sender as its parent — after the two-sided gate on the root
-  (`update_agent` in its `can_call` on the root and in the root's `callable_by`).
-  Otherwise `{reason:'unauthorized', side:'mutator'}`, "<you> may only
-  update_agent within its own subtree — <id> is not in it" — an id naming no agent
-  included. A missing or non-string `id` (or `parent_id` for `create_agent`) gets
-  the verb's own `missing_arg` refusal instead. So no agent edits its own record:
-  grants come from above — the agent's parent or the operator writes them.
+  **Who may:** whoever holds `update_agent` on the root, both ends (its `can_call`
+  on the root and the root's `callable_by`), updates ANY record — its own
+  included. The grant is the whole rule. A missing or non-string `id` (or
+  `parent_id` for `create_agent`) gets the verb's own `missing_arg` refusal.
 
 `delete_agent` — args: `id:str`
 : **Cascades** — deletes that agent and its whole subtree, deepest first. Refuses
   with `{error, reason:'locked', id}` if any descendant carries `delete_lock`;
-  clear it with `update_agent` first. Gated exactly as `update_agent` is:
-  an agent deletes only its OWN DIRECT CHILDREN (`side:'mutator'` otherwise).
+  clear it with `update_agent` first. Gated exactly as `update_agent` is: the
+  grant on the root, both ends, reaches any agent.
 
 `list_agents` — no args
 : Every agent's record, flat. Records only — metadata, no descriptions. To learn

@@ -665,16 +665,11 @@ impl CredentialStoreBundle {
 
     fn reflect(id: &AgentId, rec: &Map<String, Value>) -> Value {
         let backend = backend_kind(rec);
-        let mut verbs = Map::new();
-        for (n, doc) in VERBS {
-            verbs.insert(n.to_string(), json!(doc));
-        }
         let mut out = Map::new();
         out.insert("id".into(), json!(id.0));
         out.insert("sentence".into(), json!(SENTENCE));
         out.insert("backend".into(), json!(backend));
         out.insert("refs".into(), json!(refs_of(rec).len()));
-        out.insert("verbs".into(), Value::Object(verbs));
         if backend == "file" {
             let file = match rec.get("file") {
                 Some(v) if py_truthy(v) => v.clone(),
@@ -877,6 +872,14 @@ impl Bundle for CredentialStoreBundle {
     /// The CATALOG name — python's entry-point name.
     fn name(&self) -> &str {
         NAME
+    }
+
+    fn verb_docs(&self) -> Value {
+        let mut verbs = Map::new();
+        for (n, doc) in VERBS {
+            verbs.insert(n.to_string(), json!(doc));
+        }
+        Value::Object(verbs)
     }
 
     fn readme(&self) -> Option<&'static str> {

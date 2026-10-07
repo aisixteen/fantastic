@@ -67,6 +67,8 @@ public func defaultBundleRegistry() -> BundleRegistry {
         // In-flight, failing and timed work: what a timeout, a stop or a
         // reboot lands on.
         r.registerUnlisted(SLOW_MODULE, SlowProbe())
+        // The `docs_mechanics` vault: opens with a code only its detailed docs teach.
+        r.registerUnlisted(VAULT_MODULE, VaultProbe())
     #endif
     // THE MEMORY STORE in RAM — what the root's `memory_store_id` and every AI
     // agent's name (python `memory/ram_store`).

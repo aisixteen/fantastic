@@ -916,13 +916,13 @@ async fn reflect_is_posture_never_a_value_or_a_ref_name() {
     let f = mk(json!({})).await;
     seed(&f.k).await;
     let r = call(&f.k, json!({"type": "reflect"}), None).await.result;
-    let keys: Vec<&String> = r.as_object().unwrap().keys().take(6).collect();
-    assert_eq!(keys, ["id", "sentence", "backend", "refs", "verbs", "file"]);
+    let keys: Vec<&String> = r.as_object().unwrap().keys().take(5).collect();
+    assert_eq!(keys, ["id", "sentence", "backend", "refs", "file"]);
     assert_eq!(r["backend"], json!("file"));
     assert_eq!(r["refs"], json!(1));
     assert_eq!(r["file"], json!(f.file().to_string_lossy()));
     assert_eq!(
-        r["verbs"].as_object().unwrap().keys().collect::<Vec<_>>(),
+        VERBS.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
         ["reflect", "boot", "set", "get", "list", "forget"]
     );
     let text = r.to_string();

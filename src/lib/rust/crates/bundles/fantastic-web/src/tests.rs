@@ -1947,7 +1947,7 @@ async fn reflect_sentence_and_verbs_match_python() {
     // The bundle's own frame, in python's key order; the kernel then appends
     // its reflect decoration (can_call / callable_by / kernel_verbs / tree).
     assert_eq!(
-        obj.keys().map(String::as_str).take(11).collect::<Vec<_>>(),
+        obj.keys().map(String::as_str).take(10).collect::<Vec<_>>(),
         vec![
             "id",
             "sentence",
@@ -1959,7 +1959,6 @@ async fn reflect_sentence_and_verbs_match_python() {
             "surfaces",
             "routes",
             "browser_reachable",
-            "verbs",
         ]
     );
     assert_eq!(
@@ -1981,7 +1980,8 @@ async fn reflect_sentence_and_verbs_match_python() {
         .expect("route contract")
         .starts_with("Streams a file by read_stream-ing through the named agent."));
     assert_eq!(
-        obj["verbs"]
+        WebBundle
+            .verb_docs()
             .as_object()
             .unwrap()
             .keys()
@@ -1990,7 +1990,7 @@ async fn reflect_sentence_and_verbs_match_python() {
         vec!["reflect", "boot", "stop", "mount", "unmount", "fetch_file"]
     );
     assert_eq!(
-        obj["verbs"]["reflect"],
+        WebBundle.verb_docs()["reflect"],
         json!("Identity + uvicorn port + running flag + currently mounted surfaces (process-local; reflect the live serve for truth).")
     );
     stop(&kernel, "web_r").await;
@@ -2091,11 +2091,11 @@ async fn mount_unmount_and_unknown_verb_match_python() {
     );
     assert_eq!(
         call(json!({"type": "shutdown"})).await,
-        json!({"error": "web: unknown type 'shutdown'"})
+        json!({"error": "web: unknown type 'shutdown'", "reason": "unhandled", "verb": "shutdown"})
     );
     assert_eq!(
         call(json!({"type": "render_html"})).await,
-        json!({"error": "web: unknown type 'render_html'"})
+        json!({"error": "web: unknown type 'render_html'", "reason": "unhandled", "verb": "render_html"})
     );
     stop(&kernel, "web_m").await;
     assert_eq!(
@@ -3362,13 +3362,16 @@ async fn unknown_type_wire_shape_is_byte_exact() {
     for (payload, want) in [
         (
             json!({"type": "frob"}),
-            r#"{"error":"web: unknown type 'frob'"}"#,
+            r#"{"error":"web: unknown type 'frob'","reason":"unhandled","verb":"frob"}"#,
         ),
         (
             json!({"type": "it's"}),
-            r#"{"error":"web: unknown type \"it's\""}"#,
+            r#"{"error":"web: unknown type \"it's\"","reason":"unhandled","verb":"it's"}"#,
         ),
-        (json!({}), r#"{"error":"web: unknown type None"}"#),
+        (
+            json!({}),
+            r#"{"error":"web: unknown type None","reason":"unhandled","verb":null}"#,
+        ),
     ] {
         let reply = WebBundle
             .handle(&AgentId::from("web_x"), &payload, &kernel)

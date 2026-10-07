@@ -25,6 +25,7 @@ import { page } from "./paging.ts";
 import { shutdownAgents, startKernel, stopKernel } from "./lifecycle.ts";
 import { isService } from "./tasks.ts";
 import { timers } from "./timers.ts";
+import { renderDocs } from "./docs.ts";
 
 export const KERNEL_VERBS = [
   "ps",
@@ -34,21 +35,17 @@ export const KERNEL_VERBS = [
   "cancel",
   "shutdown_agents",
   "kernel_stop",
+  "docs",
 ] as const;
 
 export function isKernelVerb(verb: string): boolean {
   return (KERNEL_VERBS as readonly string[]).includes(verb);
 }
 
-/** The signatures reflect advertises — python `_SYSTEM_VERB_DOCS`, VERBATIM and
- *  in its order (rust and swift copy the same bytes), minus the tree CRUD this
- *  kernel does not answer. Each states its CONSEQUENCE BEFORE the first em-dash:
- *  a default reflect truncates there, so anything after it is invisible to the
- *  reader that needs it most. The `_` line is this kernel's own: it says which
- *  verbs live here and what `kernel_stop` means in a page. */
+/** What `docs of=kernel` serves — python `_SYSTEM_VERB_DOCS`, VERBATIM and in
+ *  its order (rust and swift copy the same bytes), minus the tree CRUD this
+ *  kernel does not answer (that lives on the HOST root, over the bridge). */
 export const KERNEL_VERB_DOCS: { [verb: string]: string } = {
-  _:
-    "Kernel-owned: send to 'kernel'. The id you name is the OPERAND, not the actor. (`verbs` is what this agent itself does.) This kernel answers the verbs below; tree CRUD lives on the HOST root, reached over the bridge. A browser kernel has no process to exit: `kernel_stop` stops it in place, refusing new work until the page reloads.",
   ps:
     "No args. The live kernel-wide TASK TABLE — {tasks:[{id, agent, parent, " +
     "verb, started_at}]}, one row per in-flight dispatch. Paged.",
@@ -83,6 +80,14 @@ export const KERNEL_VERB_DOCS: { [verb: string]: string } = {
     "No args. Stops the kernel PROCESS gracefully — drain, every call settles " +
     "(done, or cancelled into the dead letters), the last rows flush, agents " +
     "shut down, exit. Under env:'container', the container.",
+  docs:
+    "args: of:str (req — an agent id (`<guid>|<agent id>` on a connected kernel), a bundle, or 'kernel'), " +
+    "tier:'oneliners'|'detailed'?, verb:str?. HOW TO CALL an agent — its " +
+    "bundle's verbs: `oneliners` (default) is one signature line per verb, " +
+    "`detailed` the full text (no `verb`: plus emits, cancel and notes). Pull " +
+    "once per bundle; `detailed` for a verb you are about to use. Gated like " +
+    "every kernel verb: a `can_call` grant of `docs` on the root. " +
+    "Returns {of, bundle, tier, verbs, emits?, cancel?, notes?}.",
 };
 
 export async function answerKernelVerb(
@@ -95,6 +100,40 @@ export async function answerKernelVerb(
     return refusal(NOT_HERE, `${verb} is a kernel verb — ${targetId} does not answer it`, {
       hint: "address the kernel root ('kernel'); name the agent you mean in `parent_id` / `id`",
       extra: { verb },
+    });
+  }
+
+  if (verb === "docs") {
+    const of = payload["of"];
+    if (typeof of !== "string" || of === "") {
+      return missing("docs", "of", "an agent id, a bundle (e.g. 'exec_bridge.tools') or 'kernel'");
+    }
+    const tierRaw = payload["tier"];
+    const tier = tierRaw === undefined ? "oneliners" : tierRaw;
+    if (tier !== "oneliners" && tier !== "detailed") {
+      return refusal(BAD_ARG, "docs: tier must be 'oneliners' or 'detailed'", { extra: { arg: "tier" } });
+    }
+    const v = payload["verb"];
+    if (v !== undefined && v !== null && (typeof v !== "string" || v === "")) {
+      return refusal(BAD_ARG, "docs: verb must be a verb name", { extra: { arg: "verb" } });
+    }
+    const vName = typeof v === "string" ? v : null;
+    if (of === "kernel") return renderDocs(of, "kernel", tier, vName, KERNEL_VERB_DOCS);
+    const agent = k.agents.get(of);
+    if (agent !== undefined) {
+      return renderDocs(of, agent.handlerModule, tier, vName, k.verbDocsOf(agent) ?? {});
+    }
+    // A BUNDLE by either name the kernel lists it under: `bundles='ids'` lists the
+    // NAME (`file_bridge`), an agent record carries the handler_module
+    // (`file_bridge.tools`). Measured 2026-10-06 (rust, plan + build): models asked
+    // for the listed name and were refused.
+    const listed = k.availableBundles().find((b) => b.handler_module === of || b.name === of);
+    if (listed !== undefined) {
+      return renderDocs(of, listed.handler_module, tier, vName, k.bundleVerbDocs(listed.handler_module) ?? {});
+    }
+    return refusal(BAD_ARG, `docs: ${pyRepr(of)} names no agent, bundle or 'kernel'`, {
+      hint: "an agent id from a reflect tree, a bundle's name or handler_module (reflect bundles='all' lists both), or 'kernel'",
+      extra: { arg: "of" },
     });
   }
 

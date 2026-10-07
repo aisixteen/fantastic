@@ -88,6 +88,8 @@ fn register_default_bundles() -> BundleRegistry {
         // In-flight, failing and timed work: what a timeout, a stop or a
         // reboot lands on.
         reg.register_unlisted(probes::SLOW_MODULE, probes::SlowProbe::default());
+        // The `docs_mechanics` vault: opens with a code only its detailed docs teach.
+        reg.register_unlisted(probes::VAULT_MODULE, probes::VaultProbe::default());
     }
     reg.register("web.tools", fantastic_web::WebBundle);
     reg.register("web_ws.tools", fantastic_web_ws::WebWsBundle);

@@ -114,6 +114,29 @@ pub trait Bundle: Send + Sync {
         None
     }
 
+    /// HOW TO CALL this bundle's agents — `{verb: doc}` in the bundle's order,
+    /// python's module-level `VERBS` docstrings. Served by the kernel's `docs`
+    /// verb (oneliners: each doc's signature; detailed: the whole doc) and read
+    /// by [`crate::kernel::Kernel::advertises`]. Never on a reflect (owner,
+    /// 2026-10-05). Default: no verbs.
+    fn verb_docs(&self) -> Value {
+        Value::Object(serde_json::Map::new())
+    }
+
+    /// The rest of the DETAILED docs — python's duck-typed module-level `EMITS`,
+    /// `CANCEL` and `NOTES`, served by `docs` (tier detailed, no `verb`).
+    fn emits_doc(&self) -> Option<Value> {
+        None
+    }
+    /// How a caller stops this bundle's work (python `CANCEL`). Default: none.
+    fn cancel_doc(&self) -> Option<Value> {
+        None
+    }
+    /// Bundle notes for the detailed tier (python `NOTES`). Default: none.
+    fn notes_doc(&self) -> Option<Value> {
+        None
+    }
+
     /// THE DISPATCH — the kernel calls this for EVERY call, a request body or
     /// not; python's one `handle`, whose reply dict may hold `bytes` at any key.
     /// Raw bytes flow in BOTH directions, never base64. `header` is the payload

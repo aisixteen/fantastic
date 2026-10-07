@@ -129,6 +129,11 @@ extension Kernel {
         // Idempotent: `requestShutdown` collapses a racing signal to one
         // shutdown. With no serve loop there is nothing to stop — it still acks.
         // Python `_verb_kernel_stop`.
+        case "docs":
+            if let of = payload["of"].asString, of.contains("|") {
+                return await remoteDocsReply(of, payload)
+            }
+            return docsReply(payload)
         case "kernel_stop":
             Task { [weak self] in
                 try? await Task.sleep(nanoseconds: 100_000_000)
@@ -163,19 +168,19 @@ extension Kernel {
         .object([
             "create_agent": .string(
                 "args: handler_module:str, parent_id:str REQUIRED, id:str?, **meta. Creates "
-                    + "a CHILD OF `parent_id` — an agent names its own id or an agent in its "
-                    + "subtree; 'kernel_state' for top-level. No default parent."),
+                    + "a CHILD OF `parent_id` — any agent you name (your own id grows your own "
+                    + "subtree); 'kernel_state' for top-level. No default parent."),
             "update_agent": .string(
                 "args: id:str, **meta. EVERY FIELD YOU NAME IS REPLACED, NOT MERGED (a "
                     + "field you do not name is untouched), so a dict field must be sent WHOLE — "
                     + "`can_call`/`callable_by` included: restate every key you want to keep, the "
                     + "baseline `$self` among them, or the keys you omit are GONE. Granting one "
-                    + "edge reads like a PATCH and behaves like a PUT. An agent updates only "
-                    + "agents in its own subtree."),
+                    + "edge reads like a PATCH and behaves like a PUT. Whoever holds update_agent "
+                    + "on the root updates any agent, itself included."),
             "delete_agent": .string(
                 "args: id:str. CASCADES — deletes that agent AND ITS WHOLE SUBTREE, deepest "
-                    + "first; refuses if any descendant carries `delete_lock`. An agent deletes "
-                    + "only agents in its own subtree."),
+                    + "first; refuses if any descendant carries `delete_lock`. Whoever holds "
+                    + "delete_agent on the root deletes any agent."),
             "list_agents": .string("No args. Every agent's record, flat. Paged."),
             "ps": .string(
                 "No args. The live kernel-wide TASK TABLE — {tasks:[{id, agent, parent, "
@@ -211,41 +216,177 @@ extension Kernel {
                 "No args. Stops the kernel PROCESS gracefully — drain, every call settles "
                     + "(done, or cancelled into the dead letters), the last rows flush, agents "
                     + "shut down, exit. Under env:'container', the container."),
+            "docs": .string(
+                "args: of:str (req — an agent id (`<guid>|<agent id>` on a connected kernel), a bundle, or 'kernel'), "
+                    + "tier:'oneliners'|'detailed'?, verb:str?. HOW TO CALL an agent — its "
+                    + "bundle's verbs: `oneliners` (default) is one signature line per verb, "
+                    + "`detailed` the full text (no `verb`: plus emits, cancel and notes). Pull "
+                    + "once per bundle; `detailed` for a verb you are about to use. Gated like "
+                    + "every kernel verb: a `can_call` grant of `docs` on the root. "
+                    + "Returns {of, bundle, tier, verbs, emits?, cancel?, notes?}."),
         ])
     }
 
-    /// The `_` line that heads `kernel_verbs` — states WHERE to send them and
-    /// what the named id means. Without it "send create_agent to X" reads three
-    /// ways (X performs it / X is created / X is the parent) and only the last
-    /// is true.
-    static let kernelVerbsPreamble =
-        "Kernel-owned: send to 'kernel'. The id you name is the OPERAND, "
-        + "not the actor. (`verbs` is what this agent itself does.)"
+    // ── docs ────────────────────────────────────────────────────
 
-    /// `kernel_verbs` as a reflect renders it. `full` keeps each doc whole; the
-    /// default truncates at the first em-dash.
-    ///
-    /// Read-only verbs used to render as `""` (name only), on the ground that
-    /// their reply teaches the rest — but a name with no signature is exactly
-    /// what left `ps` and `list_agents` unusable without a `full` reflect.
-    ///
-    /// ORDER IS PYTHON'S: `full` iterates `_SYSTEM_VERB_DOCS` in DECLARATION
-    /// order (the map is spread whole); only the distilled view sorts, because
-    /// it is built by a comprehension over `sorted(_SYSTEM_VERB_DOCS)`.
-    static func kernelVerbsView(full: Bool) -> JSON {
-        var out: OrderedDictionary<String, JSON> = [:]
-        out["_"] = .string(kernelVerbsPreamble)
-        guard let docs = kernelVerbDocs().asObject else { return .object(out) }
-        for name in full ? Array(docs.keys) : docs.keys.sorted() {
-            let doc = docs[name]?.asString ?? ""
-            out[name] =
-                .string(
-                    full
-                        ? doc
-                        : String(doc.split(separator: "—", maxSplits: 1)[0])
-                            .trimmingCharacters(in: .whitespacesAndNewlines))
+    /// `docs {of, tier?, verb?}` — HOW TO CALL an agent. `of` is `kernel` (the
+    /// kernel verbs), an agent id (the bundle it runs), or a bundle's handler
+    /// module, readable before any agent of it exists. Python `_verb_docs` +
+    /// `kernel/_docs.py`.
+    /// `docs` of an agent on a CONNECTED KERNEL, `of: <guid>|<agent id>` (owner,
+    /// 2026-10-06) — python `Agent._remote_docs`. The question goes to THAT kernel's
+    /// own `docs`, and the reply names the qualified id. The asker's own `docs` grant
+    /// on THIS root is what the gate checked; this kernel then asks as itself over the
+    /// peer's live routes, and the peer judges its leg. Measured 2026-10-06 (canvas E55/E58): with verbs out of
+    /// reflect a model could not learn a page agent's verbs at all.
+    func remoteDocsReply(_ of: String, _ payload: JSON) async -> JSON {
+        var target: Agent? = nil
+        if let bar = of.firstIndex(of: "|") {
+            let guid = String(of[..<bar])
+            let agentId = String(of[of.index(after: bar)...])
+            if !guid.isEmpty, !agentId.isEmpty, !agentId.contains("|") {
+                target = qualifiedTarget(guid + "|kernel")
+            }
+        }
+        guard let target, let bar = of.firstIndex(of: "|") else {
+            return Refusal.make(
+                Refusal.badArg, "docs: \(pyRepr(.string(of))) names no agent, bundle or 'kernel'",
+                hint: "a qualified id names an agent on a CONNECTED kernel (`<guid>|<agent id>`, "
+                    + "as a reflect tree lists it)",
+                extra: [("arg", .string("of"))])
+        }
+        var ask: OrderedDictionary<String, JSON> = [
+            "type": .string("docs"), "of": .string(String(of[of.index(after: bar)...])),
+        ]
+        for k in ["verb", "tier"] where payload.asObject?[k] != nil { ask[k] = payload[k] }
+        guard let remote = target.remote else {
+            return docsReply(.object(ask))  // this kernel's own guid — a LOCAL id
+        }
+        let (out, _) = await callPeer(remote, qualified: target.id, payload: .object(ask), body: nil)
+        guard var o = out.asObject, o["of"] != nil else { return out }
+        o["of"] = .string(of)
+        return .object(o)
+    }
+
+    func docsReply(_ payload: JSON) -> JSON {
+        guard let of = payload["of"].asString, !of.isEmpty else {
+            return Refusal.missing(
+                "docs", "of",
+                hint: "an agent id, a bundle (e.g. 'exec_bridge.tools') or 'kernel'")
+        }
+        let tierRaw = payload.asObject?["tier"]
+        let tier: String
+        switch tierRaw {
+        case .none: tier = "oneliners"
+        case .some(.string("oneliners")): tier = "oneliners"
+        case .some(.string("detailed")): tier = "detailed"
+        default: return Refusal.bad("docs", "tier", "'oneliners' or 'detailed'")
+        }
+        var verb: String? = nil
+        switch payload.asObject?["verb"] {
+        case .none, .some(.null): break
+        case .some(.string(let v)) where !v.isEmpty: verb = v
+        default: return Refusal.bad("docs", "verb", "a verb name")
+        }
+        if of == "kernel" {
+            return Self.renderDocs(
+                of: of, bundle: .string("kernel"), tier: tier, verb: verb,
+                table: Self.kernelVerbDocs(), extras: [])
+        }
+        let module: String
+        if let a = agent(AgentId(of)) {
+            guard let hm = a.handlerModule else {
+                return Self.renderDocs(
+                    of: of, bundle: .null, tier: tier, verb: verb, table: .object([:]), extras: [])
+            }
+            module = hm
+        } else if let hm = bundles.catalog().first(where: { $0.0 == of || $0.1.name == of })?.0 {
+            // A BUNDLE by either name the kernel lists it under: `bundles='ids'`
+            // lists the NAME (`file_bridge`), an agent record carries the
+            // handler_module (`file_bridge.tools`). Measured 2026-10-06 (rust,
+            // plan + build): models asked for the listed name and were refused.
+            module = hm
+        } else {
+            return Refusal.make(
+                Refusal.badArg, "docs: \(pyRepr(of)) names no agent, bundle or 'kernel'",
+                hint: "an agent id from a reflect tree, a bundle's name or handler_module "
+                    + "(reflect bundles='all' lists both), or 'kernel'",
+                extra: [("arg", .string("of"))])
+        }
+        guard let bundle = bundles.get(module) else {
+            return Self.renderDocs(
+                of: of, bundle: .string(module), tier: tier, verb: verb, table: .object([:]),
+                extras: [])
+        }
+        return Self.renderDocs(
+            of: of, bundle: .string(module), tier: tier, verb: verb, table: bundle.verbDocTable,
+            extras: [("emits", bundle.emitsDoc), ("cancel", bundle.cancelDoc), ("notes", bundle.notesDoc)])
+    }
+
+    /// The `docs` reply: `{of, bundle, tier, verbs, emits?, cancel?, notes?}` —
+    /// extras only on a detailed reply with no `verb`. Python `_docs.render`.
+    static func renderDocs(
+        of: String, bundle: JSON, tier: String, verb: String?, table: JSON,
+        extras: [(String, JSON?)]
+    ) -> JSON {
+        let docs = table.asObject ?? [:]
+        if let verb, docs[verb] == nil {
+            return Refusal.make(
+                Refusal.badArg, "docs: \(of) has no verb \(pyRepr(verb))",
+                hint: "its verbs: " + docs.keys.joined(separator: ", "),
+                extra: [("arg", .string("verb"))])
+        }
+        let names = verb.map { [$0] } ?? Array(docs.keys)
+        var verbs: OrderedDictionary<String, JSON> = [:]
+        for n in names {
+            let doc = docs[n]?.asString ?? ""
+            verbs[n] = .string(tier == "detailed" ? fullDoc(doc) : signature(doc))
+        }
+        var out: OrderedDictionary<String, JSON> = [
+            "of": .string(of), "bundle": bundle, "tier": .string(tier), "verbs": .object(verbs),
+        ]
+        if tier == "detailed", verb == nil {
+            for (k, v) in extras { if let v, v != .null { out[k] = v } }
         }
         return .object(out)
+    }
+
+    /// A verb's whole doc, trimmed. Python `_docs.full_doc` (`inspect.cleandoc`).
+    static func fullDoc(_ doc: String) -> String {
+        doc.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// The ONELINER of a verb doc: its first paragraph (wrapped lines joined),
+    /// cut at the first top-level `. ` or ` — ` (never inside brackets); a
+    /// trailing `.` dropped. Python `_docs.signature`.
+    static func signature(_ doc: String) -> String {
+        let trimmed = fullDoc(doc)
+        let para = trimmed.components(separatedBy: "\n\n").first ?? ""
+        let line = para.split(separator: "\n", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .joined(separator: " ")
+        let chars = Array(line)
+        var depth = 0
+        var i = 0
+        while i < chars.count {
+            let ch = chars[i]
+            if "([{".contains(ch) {
+                depth += 1
+            } else if ")]}".contains(ch) {
+                depth = max(0, depth - 1)
+            } else if depth == 0 {
+                if ch == ".", i + 1 < chars.count, chars[i + 1] == " " {
+                    return String(chars[0..<i])
+                }
+                if ch == " ", i + 2 < chars.count, chars[i + 1] == "—", chars[i + 2] == " " {
+                    return String(chars[0..<i])
+                }
+            }
+            i += 1
+        }
+        var out = line
+        while out.hasSuffix(".") { out.removeLast() }
+        return out
     }
 
     // ── list_agents ─────────────────────────────────────────────
@@ -766,7 +907,7 @@ extension Kernel {
     /// in creation order).
     ///
     /// A reflect that passes the gate returns the tree whole.
-    func treeNode(_ agent: Agent) -> JSON {
+    func treeNode(_ agent: Agent, ignore: Set<String> = []) -> JSON {
         var obj: OrderedDictionary<String, JSON> = [:]
         obj["id"] = .string(agent.id.value)
         let kids = agent.childIds().compactMap { self.agent($0) }
@@ -784,7 +925,8 @@ extension Kernel {
                 obj[key] = v
             }
         }
-        obj["children"] = .array(kids.map { treeNode($0) })
+        obj["children"] = .array(
+            kids.map { ignore.contains($0.id.value) ? prunedStub($0) : treeNode($0, ignore: ignore) })
         return .object(obj)
     }
 
@@ -795,6 +937,78 @@ extension Kernel {
         let kids = agent.childIds().compactMap { self.agent($0) }
         for c in kids { out.append(contentsOf: descendantIds(c)) }
         return out
+    }
+
+    /// `descendantIds` as reply entries: an id in `ignore` stands as its stub
+    /// `{id, pruned: n}`, its branch unwalked. Python `_descendant_ids(ignore)`.
+    func descendantEntries(_ agent: Agent, ignore: Set<String>) -> [JSON] {
+        if ignore.contains(agent.id.value) { return [prunedStub(agent)] }
+        var out: [JSON] = [.string(agent.id.value)]
+        for c in agent.childIds().compactMap({ self.agent($0) }) {
+            out.append(contentsOf: descendantEntries(c, ignore: ignore))
+        }
+        return out
+    }
+
+    /// What an ignored branch leaves in the tree: its id and how many agents it
+    /// holds (itself included). Python `_docs.pruned_stub`.
+    func prunedStub(_ agent: Agent) -> JSON {
+        .object(["id": .string(agent.id.value), "pruned": .integer(Int64(descendantIds(agent).count))])
+    }
+
+    /// Validate `show_subtrees` / `ignore_subtrees` on a reflect of `target`.
+    /// Every id must name an agent in `target`'s subtree (`target` included); a
+    /// shown id under another shown id is not repeated. Python
+    /// `_docs.subtree_filter`.
+    func subtreeFilter(_ payload: JSON, _ target: Agent)
+        -> Result<(show: [Agent], ignore: Set<String>), SubtreeRefusal>
+    {
+        var lists: [String: [String]] = [:]
+        for arg in ["show_subtrees", "ignore_subtrees"] {
+            guard let v = payload.asObject?[arg], v != .null else {
+                lists[arg] = []
+                continue
+            }
+            guard case .array(let items) = v,
+                items.allSatisfy({ ($0.asString ?? "").isEmpty == false })
+            else {
+                return .failure(SubtreeRefusal(Refusal.make(
+                    Refusal.badArg, "reflect: \(arg) must be a list of agent ids",
+                    extra: [("arg", .string(arg))])))
+            }
+            let ids = items.compactMap { $0.asString }
+            for x in ids {
+                guard let a = agent(AgentId(x)), within(a, target) else {
+                    return .failure(SubtreeRefusal(Refusal.make(
+                        Refusal.badArg,
+                        "reflect: \(arg) names \(pyRepr(x)) — not an agent in \(target.id.value)'s tree",
+                        hint: "reflect with tree='ids' lists the ids",
+                        extra: [("arg", .string(arg))])))
+                }
+            }
+            lists[arg] = ids
+        }
+        let shownIds = lists["show_subtrees"] ?? []
+        var seen: Set<String> = []
+        var show: [Agent] = []
+        for x in shownIds where seen.insert(x).inserted {
+            guard let a = agent(AgentId(x)) else { continue }
+            let nested = shownIds.contains { o in
+                o != x && (agent(AgentId(o)).map { within(a, $0) } ?? false)
+            }
+            if !nested { show.append(a) }
+        }
+        return .success((show, Set(lists["ignore_subtrees"] ?? [])))
+    }
+
+    /// Is `agent` `ancestor` or below it? The parent-chain walk the gate uses.
+    func within(_ agent: Agent, _ ancestor: Agent) -> Bool {
+        var cur: Agent? = agent
+        while let a = cur {
+            if a.id == ancestor.id { return true }
+            cur = a.parentId.flatMap { self.agent($0) }
+        }
+        return false
     }
 
     /// The INSTALLABLE-bundle catalog as `(name, handlerModule)` pairs, sorted
@@ -874,4 +1088,10 @@ extension Kernel {
         ledger.markAcked(hid)
         return .object(["acked": .bool(true), "id": .integer(hid)])
     }
+}
+
+/// A subtree-filter refusal, carried out of `subtreeFilter` as a `Result` error.
+struct SubtreeRefusal: Error {
+    let reply: JSON
+    init(_ reply: JSON) { self.reply = reply }
 }

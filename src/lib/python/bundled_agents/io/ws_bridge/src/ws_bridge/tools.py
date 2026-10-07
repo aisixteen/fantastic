@@ -28,6 +28,7 @@ from __future__ import annotations
 
 from io_bridge import dispatch, make_verbs
 from io_bridge import on_delete as _engine_on_delete
+from io_bridge import EMITS  # noqa: F401  (`docs` tier detailed)
 from io_bridge import validate_meta  # noqa: F401  (the `ingress_rule` write check)
 from ws_bridge._ws import SENTENCE, build_transport, reflect_fields
 
