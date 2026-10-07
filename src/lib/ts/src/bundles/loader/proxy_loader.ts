@@ -1,6 +1,6 @@
 import type { Kernel } from "../../kernel/kernel.ts";
 import type { Item } from "../../kernel/outcome.ts";
-import type { Payload } from "../../kernel/json.ts";
+import type { Json, Payload } from "../../kernel/json.ts";
 import type { AgentRecord, StateEvent } from "../../kernel/state.ts";
 
 // proxy_loader — the frontend kernel's ONE auto-added loader: the JS runtime's
@@ -67,6 +67,18 @@ export class ProxyLoader {
       }
     }
     return out;
+  }
+
+  /** This kernel's FOLDER BUNDLES as the host loader reads them under its root
+   *  (`read_bundles`: each `bundle.yaml` RAW — the kernel parses it itself);
+   *  `name` reads one. → the loader's reply, `{bundles}` or a refusal. */
+  async readBundles(name?: string): Promise<Json> {
+    return (await this.kernel.send([
+      {
+        target: this.hostLoaderId,
+        payload: name === undefined ? { type: "read_bundles" } : { type: "read_bundles", name },
+      },
+    ]))[0]!.result;
   }
 
   /** Subscribe to the LOCAL state stream + enqueue the current tree for an

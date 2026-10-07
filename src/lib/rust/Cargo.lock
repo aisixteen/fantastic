@@ -417,6 +417,7 @@ dependencies = [
  "fantastic-foundation-models-backend",
  "fantastic-kernel",
  "fantastic-ollama-backend",
+ "fantastic-py-agent",
  "fantastic-ram-store",
  "fantastic-responses-backend",
  "fantastic-scenario-probes",
@@ -573,6 +574,19 @@ dependencies = [
  "tempfile",
  "tokio",
  "wiremock",
+]
+
+[[package]]
+name = "fantastic-py-agent"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "fantastic-bundle",
+ "fantastic-exec-bridge",
+ "fantastic-kernel",
+ "serde_json",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

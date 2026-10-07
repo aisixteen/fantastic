@@ -36,9 +36,11 @@ import asyncio
 import importlib.resources
 import os
 import posixpath
+import re
 import secrets
 import sys
 import uuid
+from importlib.metadata import entry_points
 from pathlib import Path
 from typing import Any
 
@@ -49,9 +51,27 @@ import yaml
 from kernel_state import yaml_io
 
 from kernel import CURRENT_VERSION
-from kernel._bundles import bundle_package
+from kernel._bundles import (
+    _find_bundle_module,
+    bundle_package,
+    clashes,
+    import_handler,
+    refuse_folder,
+    register_folder,
+)
 from kernel import current_origin
-from kernel._refusal import UNAUTHORIZED, UNHANDLED, guard_agent_id, missing, refusal
+from kernel._kernel import BUNDLE_ENTRY_GROUP
+from kernel._refusal import (
+    BAD_ARG,
+    INVALID_META,
+    NOT_FOUND,
+    NOT_HERE,
+    UNAUTHORIZED,
+    UNHANDLED,
+    guard_agent_id,
+    missing,
+    refusal,
+)
 
 # ─── disk I/O via `fs` (the ONE disk surface) — bootstrap cold primitives ──
 # These run before any agent exists, so they call `fs`'s functions directly (not the
@@ -97,6 +117,94 @@ def read_tree(root_dir: fs.Root) -> list[dict]:
     records = [root_rec]
     _walk(rd, children_dir, root_rec.get("id"), records, children_dir)
     return records
+
+
+# ─── folder bundles (owner, 2026-10-08) ──────────────────────────────
+# `<root>/bundles/<name>/bundle.yaml` — code that EXTENDS a bundled agent (`base`).
+# This loader owns the `.fantastic` layout, so it reads the folders: at boot beside
+# `read_tree` (before `kernel.load`, so an instance's handler resolves), and on the
+# root's `reload_bundle`. The base builds the module (`folder_bundle`).
+
+_BUNDLES_DIR = "bundles"
+_BUNDLE_FILE = "bundle.yaml"
+_FOLDER_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*")
+
+
+def _known_bases() -> list[str]:
+    """The installed bundled agents a folder can extend (they build `folder_bundle`)."""
+    out = []
+    for ep in entry_points(group=BUNDLE_ENTRY_GROUP):
+        try:
+            mod = import_handler(ep.value)
+        except Exception:  # noqa: BLE001 — a bundle that cannot import is no base
+            continue
+        if hasattr(mod, "folder_bundle"):
+            out.append(ep.name)
+    return sorted(out)
+
+
+def load_bundle(root_dir: fs.Root, name: str) -> str | None:
+    """Load ONE folder bundle `<root>/bundles/<name>/` into the kernel's registry.
+    → None, or the error — recorded on its catalog row too, never loaded."""
+    rel = f"{_BUNDLES_DIR}/{name}"
+    shown = Path(str(root_dir.rel)).name
+    row = {"name": name, "handler_module": name, "folder": f"{shown}/{rel}"}
+
+    def refuse(why: str) -> str:
+        err = f"bundles/{name}: {why}"
+        refuse_folder(name, {**row, "error": err})
+        return err
+
+    if not _FOLDER_NAME.fullmatch(name):
+        return refuse(
+            "a bundle folder is named with letters, digits, _ and - (the name is "
+            "its instances' handler_module)"
+        )
+    if clashes(name):
+        return refuse(f"{name!r} is a built-in bundle — a folder may not shadow it")
+    if not fs.exists(root_dir, f"{rel}/{_BUNDLE_FILE}"):
+        return refuse("no bundle.yaml")
+    try:
+        spec = yaml_io.load(fs.read_text(root_dir, f"{rel}/{_BUNDLE_FILE}"))
+    except (yaml.YAMLError, OSError, ValueError) as e:
+        return refuse(f"bundle.yaml does not parse: {e}")
+    if not isinstance(spec, dict):
+        return refuse("bundle.yaml is not a mapping")
+    base = spec.get("base")
+    if not isinstance(base, str) or not base:
+        return refuse(
+            "base: required — the bundled agent it extends "
+            f"(here: {', '.join(_known_bases()) or 'none'})"
+        )
+    sentence = spec.get("sentence")
+    if not isinstance(sentence, str) or not sentence.strip():
+        return refuse("sentence: required — one line saying what it is")
+    module = _find_bundle_module(base)
+    base_mod = None
+    if module is not None:
+        try:
+            base_mod = import_handler(module)
+        except Exception:  # noqa: BLE001
+            base_mod = None
+    if base_mod is None or not hasattr(base_mod, "folder_bundle"):
+        return refuse(
+            f"base: {base!r} is no bundled agent a folder can extend in this "
+            f"kernel — known: {', '.join(_known_bases()) or 'none'}"
+        )
+    built = base_mod.folder_bundle(name, str(fs.resolve(root_dir, rel)), spec)
+    if isinstance(built, str):
+        return refuse(built)
+    register_folder(name, built, {**row, "base": base, "sentence": sentence.strip()})
+    return None
+
+
+def load_bundles(root_dir: fs.Root) -> None:
+    """Load every folder under `<root>/bundles/` — the cold read at boot."""
+    if not (fs.exists(root_dir, _BUNDLES_DIR) and fs.is_dir(root_dir, _BUNDLES_DIR)):
+        return
+    for entry in fs.list_dir(root_dir, _BUNDLES_DIR):
+        if entry.is_dir():
+            load_bundle(root_dir, entry.name)
 
 
 def _walk(
@@ -1095,9 +1203,88 @@ async def on_shutdown(agent):
         await loop.stop()
 
 
+async def _reload_bundle(id, payload, agent):
+    """args: name:str (req). Re-read `bundles/<name>/bundle.yaml` (a new folder loads) and restart every live instance of it, abruptly — an in-flight call is answered with an error naming the reload. Returns {reloaded, instances}. The root answers it.
+
+    A folder that no longer loads is refused naming the folder and field; its live
+    instances keep running the previous load until a reload succeeds."""
+    if agent.parent is not None:
+        return refusal(
+            NOT_HERE,
+            "reload_bundle: the kernel's bundles are the ROOT loader's",
+            hint="send it to kernel",
+        )
+    name = payload.get("name")
+    if not isinstance(name, str) or not name:
+        return missing(
+            "reload_bundle", "name", hint="a folder under .fantastic/bundles/"
+        )
+    root_dir = fs.Root(agent.ctx.workdir, _root(agent))
+    rel = f"{_BUNDLES_DIR}/{name}"
+    if not (_FOLDER_NAME.fullmatch(name) and fs.exists(root_dir, rel)):
+        return refusal(
+            NOT_FOUND,
+            f"reload_bundle: no folder {Path(str(root_dir.rel)).name}/{rel}",
+            hint="a bundle is a folder under .fantastic/bundles/ with a bundle.yaml",
+        )
+    err = load_bundle(root_dir, name)
+    if err is not None:
+        return refusal(INVALID_META, err)
+    live = sorted(
+        (a for a in agent.ctx.agents.values() if a.handler_module == name),
+        key=lambda a: a.id,
+    )
+    # EACH INSTANCE, AS ITSELF (kernel bookkeeping): `shutdown` (the reason rides
+    # it — an in-flight call is answered naming the reload), then `boot` under the
+    # freshly loaded folder.
+    for a in live:
+        await agent.ctx.bookkeeping(a, {"type": "shutdown", "reason": "reloaded"})
+        await agent.ctx.bookkeeping(a, {"type": "boot"})
+    return {"reloaded": name, "instances": [a.id for a in live]}
+
+
+async def _read_bundles(id, payload, agent):
+    """args: name:str?. The folder bundles under this loader's root AS TEXT — {bundles:[{name, folder, text?, error?}]}, each `bundles/<name>/bundle.yaml` raw (`error` when it has none); `name` reads one. For a kernel that loads its own folders through this loader (a page kernel's proxy_loader); this loader parses nothing."""
+    root_dir = fs.Root(agent.ctx.workdir, _root(agent))
+    shown = Path(str(root_dir.rel)).name
+    name = payload.get("name")
+    if name is not None and (not isinstance(name, str) or not name):
+        return refusal(BAD_ARG, "read_bundles: name must be a folder name", arg="name")
+    if name is not None:
+        if not (
+            _FOLDER_NAME.fullmatch(name)
+            and fs.exists(root_dir, f"{_BUNDLES_DIR}/{name}")
+            and fs.is_dir(root_dir, f"{_BUNDLES_DIR}/{name}")
+        ):
+            return refusal(
+                NOT_FOUND,
+                f"read_bundles: no folder {shown}/{_BUNDLES_DIR}/{name}",
+                hint=f"a bundle is a folder under {shown}/{_BUNDLES_DIR}/ with a bundle.yaml",
+            )
+        names = [name]
+    elif fs.exists(root_dir, _BUNDLES_DIR) and fs.is_dir(root_dir, _BUNDLES_DIR):
+        names = sorted(
+            e.name for e in fs.list_dir(root_dir, _BUNDLES_DIR) if e.is_dir()
+        )
+    else:
+        names = []
+    out = []
+    for n in names:
+        rel = f"{_BUNDLES_DIR}/{n}"
+        row = {"name": n, "folder": f"{shown}/{rel}"}
+        if fs.exists(root_dir, f"{rel}/{_BUNDLE_FILE}"):
+            row["text"] = fs.read_text(root_dir, f"{rel}/{_BUNDLE_FILE}")
+        else:
+            row["error"] = f"bundles/{n}: no bundle.yaml"
+        out.append(row)
+    return {"bundles": out}
+
+
 VERBS = {
     "reflect": _reflect,
     "boot": _boot,
+    "reload_bundle": _reload_bundle,
+    "read_bundles": _read_bundles,
     "load_tree": _load_tree,
     "persist_record": _persist_record,
     "forget_record": _forget_record,

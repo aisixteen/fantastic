@@ -22,7 +22,7 @@ from pathlib import Path
 
 from cli import Cli
 from file_bridge import fs
-from kernel_state.tools import read_tree, write_record
+from kernel_state.tools import load_bundles, read_tree, write_record
 
 from kernel import Kernel, _load_dotenv, dispatch_argv
 
@@ -34,6 +34,8 @@ def _bootstrap(kernel: Kernel, root_dir: Path = Path(".fantastic")) -> None:
     # The running dir is the dir holding the root's `.fantastic` — before any kernel
     # exists that is `root_dir`'s parent; after `load` it is `kernel.workdir`.
     records = read_tree(fs.Root(root_dir.resolve().parent, root_dir))
+    # FOLDER BUNDLES before the tree loads, so an instance's handler resolves.
+    load_bundles(fs.Root(root_dir.resolve().parent, root_dir))
     # No ROOT record on disk (fresh project, or a missing/corrupt `agent.yaml`
     # with children still under `agents/`): the root IS the loader
     # (id="kernel_state"). Seed its agent.yaml + readme now so the next boot

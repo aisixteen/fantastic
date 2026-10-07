@@ -14,6 +14,7 @@ members = [
     "fantastic-kernel",
     "fantastic-kernel-state",
     "fantastic-ollama-backend",
+    "fantastic-py-agent",
     "fantastic-ram-store",
     "fantastic-relay-connector",
     "fantastic-responses-backend",
@@ -418,6 +419,7 @@ dependencies = [
     { name = "fantastic-io-bridge" },
     { name = "fantastic-kernel-state" },
     { name = "fantastic-ollama-backend" },
+    { name = "fantastic-py-agent" },
     { name = "fantastic-ram-store" },
     { name = "fantastic-relay-connector" },
     { name = "fantastic-responses-backend" },
@@ -451,6 +453,7 @@ requires-dist = [
     { name = "fantastic-io-bridge", editable = "bundled_agents/io/io_bridge" },
     { name = "fantastic-kernel-state", editable = "bundled_agents/loader/kernel_state" },
     { name = "fantastic-ollama-backend", editable = "bundled_agents/ai/ollama/ollama_backend" },
+    { name = "fantastic-py-agent", editable = "bundled_agents/io/py_agent" },
     { name = "fantastic-ram-store", editable = "bundled_agents/memory/ram_store" },
     { name = "fantastic-relay-connector", editable = "bundled_agents/io/relay_connector" },
     { name = "fantastic-responses-backend", editable = "bundled_agents/ai/responses/responses_backend" },
@@ -502,6 +505,17 @@ requires-dist = [
     { name = "fantastic-ai-core", editable = "bundled_agents/ai/ai_core" },
     { name = "ollama" },
 ]
+
+[[package]]
+name = "fantastic-py-agent"
+version = "0.1.0"
+source = { editable = "bundled_agents/io/py_agent" }
+dependencies = [
+    { name = "fantastic-exec-bridge" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "fantastic-exec-bridge", editable = "bundled_agents/io/exec_bridge" }]
 
 [[package]]
 name = "fantastic-ram-store"

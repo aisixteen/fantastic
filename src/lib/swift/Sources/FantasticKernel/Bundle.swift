@@ -179,9 +179,31 @@ public protocol AgentBundle: Sendable {
     /// (same discovery + optionality as `onDelete`). A hook that throws is
     /// ignored and the kill still happens: cancel is not refusable.
     func onCancel(agentId: AgentId, taskId: TaskId, kernel: Kernel) async throws
+
+    /// Can a FOLDER BUNDLE (`<root>/bundles/<name>/bundle.yaml`, `base: <this
+    /// bundle's name>`) extend this bundle? Python: the module exposes
+    /// `folder_bundle`. Default: no (owner, 2026-10-08).
+    var folderBase: Bool { get }
+
+    /// Build the bundle a folder runs as — `name` its folder (its instances'
+    /// handler_module), `folder` the folder's absolute URL, `spec` its parsed
+    /// `bundle.yaml` — or the refusal text naming the field.
+    func folderBundle(name: String, folder: URL, spec: JSON) -> FolderBuild
+}
+
+/// What a base made of a folder: the bundle it runs as, or why not.
+public enum FolderBuild: Sendable {
+    case built(any AgentBundle)
+    case refused(String)
 }
 
 extension AgentBundle {
+    public var folderBase: Bool { false }
+
+    public func folderBundle(name: String, folder: URL, spec: JSON) -> FolderBuild {
+        .refused("\(self.name) is not a base a folder can extend")
+    }
+
     /// Default: accept every patch (most bundles have nothing to check).
     public func validateMeta(
         _ meta: OrderedDictionary<String, JSON>, record: OrderedDictionary<String, JSON>

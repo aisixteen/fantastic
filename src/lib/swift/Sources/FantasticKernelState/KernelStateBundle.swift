@@ -95,6 +95,10 @@ public final class KernelStateBundle: AgentBundle, @unchecked Sendable {
             return await kernel.persistBlob(payload)
         case "load_blob":
             return await kernel.loadBlob(payload)
+        case "reload_bundle":
+            return try await reloadBundle(agent, payload, kernel)
+        case "read_bundles":
+            return try readBundles(agent, payload, kernel)
         default:
             // CODED. A reason-less error on the ROOT — the most-addressed agent
             // in the kernel — is decorated by `applyReflectFlags` into something
@@ -104,6 +108,104 @@ public final class KernelStateBundle: AgentBundle, @unchecked Sendable {
             return Refusal.make(
                 Refusal.unhandled, "kernel_state: unknown type \(pyRepr(t))",
                 extra: [("verb", t)])
+        }
+    }
+
+    /// `reload_bundle {name}` — python `kernel_state._reload_bundle`: re-read
+    /// `bundles/<name>/bundle.yaml` (a new folder loads) and restart every live
+    /// instance, each AS ITSELF (kernel bookkeeping): `shutdown` with the reason,
+    /// then `boot` under the fresh load. A folder that no longer loads is refused
+    /// naming the folder and field; its instances keep the previous load.
+    private func reloadBundle(
+        _ agent: Agent, _ payload: JSON, _ kernel: Kernel
+    ) async throws(PyError) -> JSON {
+        if agent.parentId != nil {
+            return Refusal.make(
+                Refusal.notHere, "reload_bundle: the kernel's bundles are the ROOT loader's",
+                hint: "send it to kernel")
+        }
+        guard let name = payload["name"].asString, !name.isEmpty else {
+            return Refusal.missing(
+                "reload_bundle", "name", hint: "a folder under .fantastic/bundles/")
+        }
+        let root = try clampedRoot(agent, kernel)
+        let rel = "\(Folders.bundlesDir)/\(name)"
+        guard Folders.isFolderName(name),
+            FileManager.default.fileExists(atPath: root.appendingPathComponent(rel).path)
+        else {
+            return Refusal.make(
+                Refusal.notFound, "reload_bundle: no folder \(root.lastPathComponent)/\(rel)",
+                hint: "a bundle is a folder under .fantastic/bundles/ with a bundle.yaml")
+        }
+        if let err = Folders.loadBundle(kernel: kernel, root: root, name: name) {
+            return Refusal.make(Refusal.invalidMeta, err)
+        }
+        let live = kernel.allAgents()
+            .filter { $0.handlerModule == name }
+            .sorted { $0.id.value < $1.id.value }
+        for a in live {
+            _ = await kernel.bookkeeping(
+                a, .object(["type": .string("shutdown"), "reason": .string("reloaded")]))
+            _ = await kernel.bookkeeping(a, .object(["type": .string("boot")]))
+        }
+        return .object([
+            "reloaded": .string(name),
+            "instances": .array(live.map { .string($0.id.value) }),
+        ])
+    }
+
+    /// `read_bundles {name?}` — python `kernel_state._read_bundles`: the folder
+    /// bundles under THIS loader's root as TEXT, each `bundles/<name>/bundle.yaml`
+    /// raw (`error` when it has none), for a kernel that loads its own folders
+    /// through this loader (a page kernel's proxy_loader). Parses nothing.
+    private func readBundles(
+        _ agent: Agent, _ payload: JSON, _ kernel: Kernel
+    ) throws(PyError) -> JSON {
+        let root = try clampedRoot(agent, kernel)
+        let r = root.path
+        let shown = root.lastPathComponent
+        let dir = Folders.bundlesDir
+        var names: [String] = []
+        do {
+            switch payload["name"] {
+            case .null:
+                if try fsExists(r, dir, base: r), try fsIsDir(r, dir, base: r) {
+                    for p in try fsListDir(r, dir, base: r) {
+                        let n = URL(fileURLWithPath: p).lastPathComponent
+                        if try fsIsDir(r, "\(dir)/\(n)", base: r) { names.append(n) }
+                    }
+                }
+            case .string(let n) where !n.isEmpty:
+                let rel = "\(dir)/\(n)"
+                // a name the folder rule refuses is never joined into a path
+                guard Folders.isFolderName(n), try fsExists(r, rel, base: r),
+                    try fsIsDir(r, rel, base: r)
+                else {
+                    return Refusal.make(
+                        Refusal.notFound, "read_bundles: no folder \(shown)/\(rel)",
+                        hint: "a bundle is a folder under \(shown)/\(dir)/ with a bundle.yaml")
+                }
+                names = [n]
+            default:
+                return Refusal.bad("read_bundles", "name", "a folder name")
+            }
+            var out: [JSON] = []
+            for n in names {
+                let rel = "\(dir)/\(n)"
+                let file = "\(rel)/\(Folders.bundleFile)"
+                var row: OrderedDictionary<String, JSON> = [
+                    "name": .string(n), "folder": .string("\(shown)/\(rel)"),
+                ]
+                if try fsExists(r, file, base: r) {
+                    row["text"] = .string(try fsReadText(r, file, base: r))
+                } else {
+                    row["error"] = .string("bundles/\(n): no bundle.yaml")
+                }
+                out.append(.object(row))
+            }
+            return .object(["bundles": .array(out)])
+        } catch {
+            throw Self.raised(error)
         }
     }
 
@@ -483,6 +585,12 @@ public final class KernelStateBundle: AgentBundle, @unchecked Sendable {
             "args: agent_id:str (req), name:str (req), content:str (req). Persist an"),
         "load_blob": .string(
             "args: agent_id:str (req), name:str (req). Read an agent's sidecar THROUGH the"),
+        "reload_bundle": .string(
+            "args: name:str (req). Re-read `bundles/<name>/bundle.yaml` (a new folder loads) and restart every live instance of it, abruptly — an in-flight call is answered with an error naming the reload. Returns {reloaded, instances}. The root answers it."
+        ),
+        "read_bundles": .string(
+            "args: name:str?. The folder bundles under this loader's root AS TEXT — {bundles:[{name, folder, text?, error?}]}, each `bundles/<name>/bundle.yaml` raw (`error` when it has none); `name` reads one. For a kernel that loads its own folders through this loader (a page kernel's proxy_loader); this loader parses nothing."
+        ),
     ])
 }
 

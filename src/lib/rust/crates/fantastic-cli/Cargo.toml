@@ -39,6 +39,8 @@ fantastic-scenario-probes = { path = "../bundles/fantastic-scenario-probes", opt
 # Full-tier-only bundles — subprocess-using; only compiled into the
 # `full` feature build. iOS embedded slice MUST NOT pull them in.
 fantastic-exec-bridge = { path = "../bundles/fantastic-exec-bridge", optional = true }
+# The base a folder bundle with a program extends — it spawns that program.
+fantastic-py-agent = { path = "../bundles/fantastic-py-agent", optional = true }
 tokio = { workspace = true }
 serde_json = { workspace = true }
 
@@ -53,6 +55,7 @@ default = ["full"]
 # allowed. Server, CLI, macOS Pro app.
 full = [
     "dep:fantastic-exec-bridge",
+    "dep:fantastic-py-agent",
 ]
 
 # Sandboxed / embedded-library tier — must compile clean for iOS /

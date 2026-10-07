@@ -337,3 +337,58 @@ async def test_a_record_commits_atomically_and_leaves_no_debris(
     assert parsed["id"] == "atomic_probe" and parsed["display_name"] == "Atomic"
     debris = [p.name for p in agent_dir.iterdir() if ".tmp." in p.name]
     assert debris == [], f"the commit must leave no tmp behind: {debris}"
+
+
+# ─── read_bundles: folder bundles as TEXT, for a kernel that loads its own ──
+
+
+async def _ask(root, target, payload):
+    return (await root.send([{"target": target, "payload": payload}]))[0]["result"]
+
+
+async def test_read_bundles_hands_each_folders_bundle_yaml_raw(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    root = boot_root()
+    sess = ".fantastic/web"
+    sid = (
+        await _ask(
+            root,
+            root.id,
+            {
+                "type": "create_agent",
+                "parent_id": root.id,
+                "handler_module": "kernel_state.tools",
+                "watch": False,
+                "root": sess,
+            },
+        )
+    )["id"]
+    text = "base: html_agent\nsentence: A clock.\nhtml: index.html  # not parsed here\n"
+    (tmp_path / sess / "bundles" / "clock").mkdir(parents=True)
+    (tmp_path / sess / "bundles" / "clock" / "bundle.yaml").write_text(text)
+    (tmp_path / sess / "bundles" / "empty").mkdir()
+    (tmp_path / sess / "bundles" / "stray.txt").write_text("not a folder")
+
+    got = await _ask(root, sid, {"type": "read_bundles"})
+    assert got == {
+        "bundles": [
+            {"name": "clock", "folder": "web/bundles/clock", "text": text},
+            {
+                "name": "empty",
+                "folder": "web/bundles/empty",
+                "error": "bundles/empty: no bundle.yaml",
+            },
+        ]
+    }
+    # one by name; the loader reads ITS OWN root, never another's
+    one = await _ask(root, sid, {"type": "read_bundles", "name": "clock"})
+    assert one["bundles"] == got["bundles"][:1]
+    assert (await _ask(root, root.id, {"type": "read_bundles"})) == {"bundles": []}
+
+
+async def test_read_bundles_refuses_what_is_no_folder(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    root = boot_root()
+    for name, reason in (("nope", "not_found"), ("../x", "not_found"), ("", "bad_arg")):
+        r = await _ask(root, root.id, {"type": "read_bundles", "name": name})
+        assert r.get("reason") == reason, (name, r)

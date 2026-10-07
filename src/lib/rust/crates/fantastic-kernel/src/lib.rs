@@ -28,6 +28,7 @@ pub mod call_guard;
 pub mod docs;
 pub mod errors;
 pub mod executions;
+pub mod folders;
 pub mod inbox;
 pub mod jsonsafe;
 pub mod kernel;

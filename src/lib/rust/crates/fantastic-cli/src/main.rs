@@ -147,6 +147,12 @@ fn register_default_bundles() -> BundleRegistry {
             fantastic_exec_bridge::HANDLER_MODULE,
             fantastic_exec_bridge::ExecBridgeBundle,
         );
+        // the base a folder bundle (`<root>/bundles/<name>/`, `base: py_agent`)
+        // extends — it runs the folder's program
+        reg.register(
+            fantastic_py_agent::HANDLER_MODULE,
+            fantastic_py_agent::PyAgentBundle,
+        );
     }
 
     reg

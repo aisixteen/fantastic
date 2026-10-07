@@ -1082,6 +1082,7 @@ async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
             job_id,
             Arc::clone(kernel),
             Arc::clone(&stop),
+            None,
         ),
     );
     jobs::jobs().insert(
@@ -1123,7 +1124,9 @@ async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
 /// kernel env vars named in `inherit_env` (nothing by default; `["*"]` = every one —
 /// the operator's wildcard), then the operator's `env` extras. Nothing else leaks
 /// in — the kernel's `.env` keys reach a child only when the operator names them.
-fn child_env(meta: &Map<String, Value>) -> Map<String, Value> {
+/// The child's whole environment from a record: `inherit_env` names (`["*"]` =
+/// all), then the record's `env` — shared with py_agent.
+pub fn child_env(meta: &Map<String, Value>) -> Map<String, Value> {
     let names: Vec<String> = meta
         .get("inherit_env")
         .and_then(Value::as_array)

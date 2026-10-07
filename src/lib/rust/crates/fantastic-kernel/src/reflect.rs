@@ -703,6 +703,9 @@ fn available_bundles(kernel: &Arc<Kernel>, schemas: bool) -> Vec<Value> {
             entry
         })
         .collect();
+    // FOLDER BUNDLES of this kernel's root, beside the installed ones — a refused
+    // folder too, with its `error` (owner, 2026-10-08).
+    out.extend(kernel.bundles.folder_rows());
     out.sort_by(|a, b| {
         a.get("name")
             .and_then(Value::as_str)

@@ -18,6 +18,12 @@ import { page } from "./paging.ts";
 export interface BundleInfo {
   name: string;
   handler_module: string;
+  /** A FOLDER bundle's row (folders.ts): its folder, base and sentence — or the
+   *  `error` it was refused with. */
+  folder?: string;
+  base?: string;
+  sentence?: string;
+  error?: string;
 }
 
 const ROOT_SENTENCE =

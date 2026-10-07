@@ -22,10 +22,13 @@ class HostSocket implements WebSocketLike {
   readonly calls: Envelope[] = [];
   readonly frames: Envelope[] = [];
   private readonly records: Payload[];
+  /** `<loader root>/bundles/*` as the host loader's `read_bundles` hands them. */
+  readonly folders: Payload[];
 
-  constructor(url: string, records: Payload[]) {
+  constructor(url: string, records: Payload[], folders: Payload[]) {
     this.url = url;
     this.records = records;
+    this.folders = folders;
     setTimeout(() => this.onopen?.(undefined), 0);
   }
   send(data: string | ArrayBuffer): void {
@@ -36,17 +39,28 @@ class HostSocket implements WebSocketLike {
     const p = env["payload"] as Payload;
     let reply: Json = { ok: true };
     if (p["type"] === "load_tree") reply = { version: 1, records: this.records as Json };
+    if (p["type"] === "read_bundles") {
+      const name = p["name"];
+      const rows = this.folders.filter((f) => name === undefined || f["name"] === name);
+      reply =
+        name !== undefined && rows.length === 0
+          ? { error: `read_bundles: no folder web/bundles/${String(name)}`, reason: "not_found" }
+          : { bundles: rows as Json };
+    }
     setTimeout(() => this.onmessage?.({ data: encodeFrame({ type: "reply", id: env["id"], data: reply }).data }), 0);
   }
   close(): void {}
 }
 
-function host(records: Payload[] = []): { sockets: HostSocket[]; make: (url: string) => HostSocket } {
+function host(
+  records: Payload[] = [],
+  folders: Payload[] = [],
+): { sockets: HostSocket[]; make: (url: string) => HostSocket } {
   const sockets: HostSocket[] = [];
   return {
     sockets,
     make: (url) => {
-      const s = new HostSocket(url, records);
+      const s = new HostSocket(url, records, folders);
       sockets.push(s);
       return s;
     },
@@ -73,7 +87,11 @@ test("boot: an EMPTY tree is the app's to seed — and the seed, root included, 
   assert.equal(kernel.rootId, "app");
   assert.equal(kernel.persistenceProvider, "web_loader");
   assert.equal(h.sockets[0]!.url, "ws://host/web_loader/ws", "the loader is the control endpoint");
-  assert.equal((h.sockets[0]!.calls[0]!["payload"] as Payload)["type"], "load_tree");
+  assert.deepEqual(
+    h.sockets[0]!.calls.slice(0, 2).map((c) => (c["payload"] as Payload)["type"]),
+    ["read_bundles", "load_tree"],
+    "the folders load BEFORE the tree, through the loader",
+  );
   await loader.flush();
   const persisted = h.sockets[0]!.calls.filter((c) => (c["payload"] as Payload)["type"] === "persist_record");
   assert.equal(persisted.length, 1);

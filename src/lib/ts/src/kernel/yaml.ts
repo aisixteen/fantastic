@@ -1,13 +1,13 @@
-// A STRICT YAML subset — exactly what `contract/` is written in, nothing more.
+// A STRICT YAML subset — the one YAML reader of the ts kernel (zero runtime deps).
 //
-// The ts kernel ships zero runtime dependencies and no YAML parser (the browser
-// has no use for one), so the contract-corpus runner carries its own, in TEST
-// code only. It reads: block mappings and sequences by indentation, a sequence
-// item that opens a mapping on its dash line, flow `{…}` / `[…]` (nested, may
-// span lines), plain / single-quoted / double-quoted scalars (a plain scalar may
-// continue on more-indented lines), folded `>` and literal `|` block scalars, and
-// `#` comments. Typing is YAML 1.2 core: true/false, null/~, ints, floats, else
-// a string; a quoted scalar is always a string.
+// It reads a FOLDER BUNDLE's `bundle.yaml` (the page kernel loads its own folders,
+// owner 2026-10-08) and the `contract/` corpus in tests: block mappings and
+// sequences by indentation, a sequence item that opens a mapping on its dash line,
+// flow `{…}` / `[…]` (nested, may span lines), plain / single-quoted /
+// double-quoted scalars (a plain scalar may continue on more-indented lines),
+// folded `>` and literal `|` block scalars, and `#` comments. Typing is YAML 1.2
+// core: true/false, null/~, ints, floats, else a string; a quoted scalar is always
+// a string.
 //
 // Anything else — anchors, aliases, tags, `? ` keys, a tab in indentation, a
 // duplicate key, an unterminated quote or bracket — THROWS naming the file and

@@ -23,12 +23,16 @@ import { WsBridge } from "./transport/bridge.ts";
 import type { SocketFactory } from "./transport/bridge.ts";
 import { ProxyLoader } from "./bundles/loader/proxy_loader.ts";
 import { registerRamStore } from "./bundles/memory/ram_store.ts";
+import { loadBundles } from "./kernel/folders.ts";
 
 export { Kernel } from "./kernel/kernel.ts";
 export type { Bridge } from "./kernel/kernel.ts";
 export { Agent } from "./kernel/agent.ts";
 export type { AgentInit, Handler } from "./kernel/agent.ts";
 export { str } from "./kernel/json.ts";
+export { parseYaml, YamlError } from "./kernel/yaml.ts";
+export { isFolderName, loadBundle, BUNDLE_FILE } from "./kernel/folders.ts";
+export type { FolderBase, FolderBuilt, FolderText, ReadFolders } from "./kernel/folders.ts";
 export type { Json, Payload } from "./kernel/json.ts";
 export type { AgentRecord, StateEvent } from "./kernel/state.ts";
 export type { Item, Outcome, Status } from "./kernel/outcome.ts";
@@ -46,9 +50,10 @@ export interface BootOptions {
    *  the operator created, e.g. id `web_loader`). It is also the bridge's
    *  control endpoint. */
   loader: string;
-  /** The app's turn: register its bundles (`kernel.registerBundle`) and their
-   *  readmes (`kernel.setBundleReadme`) BEFORE the tree is loaded, so a
-   *  persisted record of one of them runs here instead of weak-loading. */
+  /** The app's turn: register its bundles (`kernel.registerBundle`, a BASE with
+   *  `{folderBundle}`) and their readmes (`kernel.setBundleReadme`) BEFORE the
+   *  folders and the tree are loaded, so a persisted record of one of them runs
+   *  here instead of weak-loading. */
   register: (kernel: Kernel) => void;
   /** The app's decision for an EMPTY tree (a fresh host namespace): called only
    *  when the loader held no records, BEFORE the loader starts watching — so
@@ -90,6 +95,11 @@ export async function boot(opts: BootOptions): Promise<Booted> {
   const loader = new ProxyLoader(kernel, opts.loader);
   // `persistence:{provider}` on the root reflect: records persist THROUGH it.
   kernel.persistenceProvider = opts.loader;
+  // FOLDER BUNDLES (`<loader root>/bundles/*/bundle.yaml`, read through the
+  // loader, parsed here) load BEFORE the tree, so an instance's handler resolves;
+  // the root's `reload_bundle` reads through the same loader.
+  kernel.readFolders = (name) => loader.readBundles(name);
+  loadBundles(kernel, await loader.readBundles());
   const records = await loader.loadTree();
   if (records.length > 0) kernel.load(records);
   else opts.seed?.(kernel);

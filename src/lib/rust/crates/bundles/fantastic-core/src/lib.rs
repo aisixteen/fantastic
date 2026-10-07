@@ -662,6 +662,8 @@ impl Bundle for KernelStateBundle {
             "forget_record" => self.forget_record(&agent, payload, kernel).await?,
             "persist_blob" => persistence::persist_blob(kernel, &agent, payload).await?,
             "load_blob" => persistence::load_blob(kernel, &agent, payload).await?,
+            "reload_bundle" => reload_bundle(&agent, payload, kernel).await?,
+            "read_bundles" => read_bundles(&agent, payload, kernel)?,
             // CODED. A reason-less error on the ROOT — the most-addressed agent
             // in the kernel — is decorated by `apply_reflect_flags` into
             // something that reads like a healthy reflect (python 2026-09-02).
@@ -782,6 +784,132 @@ impl Bundle for KernelStateBundle {
 
 /// `verbs` as the loader's own reflect renders it — one line per verb, python's
 /// first-docstring-line rule.
+/// `reload_bundle {name}` — python `kernel_state._reload_bundle`: re-read
+/// `bundles/<name>/bundle.yaml` (a new folder loads) and restart every live
+/// instance, each AS ITSELF (kernel bookkeeping): `shutdown` with the reason, then
+/// `boot` under the fresh load. A folder that no longer loads is refused naming the
+/// folder and field; its instances keep the previous load.
+async fn reload_bundle(
+    agent: &Arc<Agent>,
+    payload: &Value,
+    kernel: &Arc<Kernel>,
+) -> Result<Value, BundleError> {
+    use fantastic_kernel::refusal::{
+        missing_hint, refusal, refusal_hint, INVALID_META, NOT_FOUND, NOT_HERE,
+    };
+    if agent.parent_id.is_some() {
+        return Ok(refusal_hint(
+            NOT_HERE,
+            "reload_bundle: the kernel's bundles are the ROOT loader's",
+            "send it to kernel",
+        ));
+    }
+    let Some(name) = payload
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    else {
+        return Ok(missing_hint(
+            "reload_bundle",
+            "name",
+            "a folder under .fantastic/bundles/",
+        ));
+    };
+    let root = clamp(kernel, &loader_root(agent))?;
+    let shown = fantastic_fs::file_name(&root);
+    let rel = format!("{}/{name}", fantastic_kernel::folders::BUNDLES_DIR);
+    if !(fantastic_kernel::folders::is_folder_name(name) && root.join(&rel).exists()) {
+        return Ok(refusal_hint(
+            NOT_FOUND,
+            format!("reload_bundle: no folder {shown}/{rel}"),
+            "a bundle is a folder under .fantastic/bundles/ with a bundle.yaml",
+        ));
+    }
+    if let Some(err) = fantastic_kernel::folders::load_bundle(kernel, &root, name) {
+        return Ok(refusal(INVALID_META, err));
+    }
+    let mut live: Vec<Arc<Agent>> = kernel
+        .agents
+        .iter()
+        .filter(|e| e.value().handler_module.as_deref() == Some(name))
+        .map(|e| Arc::clone(e.value()))
+        .collect();
+    live.sort_by(|a, b| a.id.0.cmp(&b.id.0));
+    for a in &live {
+        kernel
+            .bookkeeping(a, json!({"type": "shutdown", "reason": "reloaded"}), None)
+            .await;
+        kernel.bookkeeping(a, json!({"type": "boot"}), None).await;
+    }
+    let ids: Vec<&str> = live.iter().map(|a| a.id.0.as_str()).collect();
+    Ok(json!({"reloaded": name, "instances": ids}))
+}
+
+/// `read_bundles {name?}` — python `kernel_state._read_bundles`: the folder
+/// bundles under THIS loader's root as TEXT, each `bundles/<name>/bundle.yaml`
+/// raw (`error` when it has none), for a kernel that loads its own folders
+/// through this loader (a page kernel's proxy_loader). Parses nothing.
+fn read_bundles(
+    agent: &Arc<Agent>,
+    payload: &Value,
+    kernel: &Arc<Kernel>,
+) -> Result<Value, BundleError> {
+    use fantastic_kernel::folders::{is_folder_name, BUNDLES_DIR, BUNDLE_FILE};
+    use fantastic_kernel::refusal::{bad, refusal_hint, NOT_FOUND};
+    let root = clamp(kernel, &loader_root(agent))?;
+    let shown = fantastic_fs::file_name(&root);
+    let names: Vec<String> = match payload.get("name") {
+        None | Some(Value::Null) => {
+            if fantastic_fs::exists(&root, BUNDLES_DIR).map_err(raise_fs)?
+                && fantastic_fs::is_dir(&root, BUNDLES_DIR).map_err(raise_fs)?
+            {
+                let mut ns: Vec<String> = Vec::new();
+                for p in fantastic_fs::list_dir(&root, BUNDLES_DIR).map_err(raise_fs)? {
+                    let n = fantastic_fs::file_name(&p);
+                    if fantastic_fs::is_dir(&root, &format!("{BUNDLES_DIR}/{n}"))
+                        .map_err(raise_fs)?
+                    {
+                        ns.push(n);
+                    }
+                }
+                ns.sort();
+                ns
+            } else {
+                Vec::new()
+            }
+        }
+        Some(Value::String(n)) if !n.is_empty() => {
+            let rel = format!("{BUNDLES_DIR}/{n}");
+            // a name the folder rule refuses is never joined into a path
+            if !(is_folder_name(n)
+                && fantastic_fs::exists(&root, &rel).map_err(raise_fs)?
+                && fantastic_fs::is_dir(&root, &rel).map_err(raise_fs)?)
+            {
+                return Ok(refusal_hint(
+                    NOT_FOUND,
+                    format!("read_bundles: no folder {shown}/{rel}"),
+                    format!("a bundle is a folder under {shown}/{BUNDLES_DIR}/ with a bundle.yaml"),
+                ));
+            }
+            vec![n.clone()]
+        }
+        Some(_) => return Ok(bad("read_bundles", "name", "a folder name")),
+    };
+    let mut out = Vec::with_capacity(names.len());
+    for n in names {
+        let rel = format!("{BUNDLES_DIR}/{n}");
+        let file = format!("{rel}/{BUNDLE_FILE}");
+        let mut row = json!({"name": n, "folder": format!("{shown}/{rel}")});
+        if fantastic_fs::exists(&root, &file).map_err(raise_fs)? {
+            row["text"] = Value::String(fantastic_fs::read_text(&root, &file).map_err(raise_fs)?);
+        } else {
+            row["error"] = Value::String(format!("bundles/{n}: no bundle.yaml"));
+        }
+        out.push(row);
+    }
+    Ok(json!({"bundles": out}))
+}
+
 fn verbs_view() -> Value {
     json!({
         "reflect": "Identity + the disk root it owns. No args.",
@@ -791,6 +919,8 @@ fn verbs_view() -> Value {
         "forget_record": "args: id:str (req), parent_id:str (opt). rmtree the agent's dir. For a",
         "persist_blob": "args: agent_id:str (req), name:str (req), content:str (req). Persist an",
         "load_blob": "args: agent_id:str (req), name:str (req). Read an agent's sidecar THROUGH the",
+        "reload_bundle": "args: name:str (req). Re-read `bundles/<name>/bundle.yaml` (a new folder loads) and restart every live instance of it, abruptly — an in-flight call is answered with an error naming the reload. Returns {reloaded, instances}. The root answers it.",
+        "read_bundles": "args: name:str?. The folder bundles under this loader's root AS TEXT — {bundles:[{name, folder, text?, error?}]}, each `bundles/<name>/bundle.yaml` raw (`error` when it has none); `name` reads one. For a kernel that loads its own folders through this loader (a page kernel's proxy_loader); this loader parses nothing.",
     })
 }
 

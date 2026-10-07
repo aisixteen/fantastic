@@ -404,7 +404,7 @@ pub async fn pump(
 /// `ExitStatus::code()` answers `None` for a signal death, which read as "still
 /// running" everywhere liveness is `exit_code.is_none()` and lost the cause of death
 /// from `job_done` (A4.6).
-pub(crate) fn exit_code(s: std::process::ExitStatus) -> Option<i32> {
+pub fn exit_code(s: std::process::ExitStatus) -> Option<i32> {
     use std::os::unix::process::ExitStatusExt;
     s.code().or_else(|| s.signal().map(|n| -n))
 }

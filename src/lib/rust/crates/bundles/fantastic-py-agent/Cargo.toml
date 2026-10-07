@@ -1,0 +1,19 @@
+[package]
+publish = false
+name = "fantastic-py-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "py_agent: the base a folder bundle with a program extends — the kernel runs the program, the program answers the bundle's verbs over the connector channel."
+
+[dependencies]
+fantastic-bundle = { path = "../../fantastic-bundle" }
+fantastic-kernel = { path = "../../fantastic-kernel" }
+fantastic-exec-bridge = { path = "../fantastic-exec-bridge" }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }
+tempfile = "3"

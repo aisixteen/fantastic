@@ -98,6 +98,9 @@ public func defaultBundleRegistry() -> BundleRegistry {
     r.register("foundation_models_backend.tools", FoundationModelsBackendBundle(engine: SystemFMEngine()))
     #if os(macOS)
         r.register("exec_bridge.tools", ExecBridgeBundle())
+        // the base a folder bundle (`<root>/bundles/<name>/`, `base: py_agent`)
+        // extends — it runs the folder's program
+        r.register(PY_AGENT_HANDLER_MODULE, PyAgentBundle())
     #endif
     return r
 }
@@ -256,6 +259,9 @@ public func startKernel(
                 at: 0)
         }
         let state = KernelState(records: records)
+        // FOLDER BUNDLES before the tree loads, so an instance's handler resolves
+        // (python main._bootstrap → kernel_state.load_bundles).
+        Folders.loadBundles(kernel: kernel, root: dotFantastic)
         do {
             try kernel.load(state)
         } catch {
