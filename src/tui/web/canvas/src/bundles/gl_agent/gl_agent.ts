@@ -30,7 +30,7 @@ export const glAgent: Handler = (id, payload, kernel): Json | Promise<Json> => {
       return { ok: true, bytes: source.length };
     }
     default:
-      return { error: `gl_agent: unknown verb '${str(payload, "type")}'` };
+      return { error: `gl_agent: unknown verb '${str(payload, "type")}'`, reason: "unhandled", verb: str(payload, "type") };
   }
 };
 

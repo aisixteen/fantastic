@@ -44,7 +44,7 @@ pub async fn main_loop(opts: Opts) -> Result<()> {
             <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(out)
         }));
         crate::tty::redirect_std_to(&paths.cli.join("kernel.log"))?;
-        let boot = vm::Boot { canvas: opts.canvas(), port: opts.port, tui: false, announce };
+        let boot = vm::Boot { canvas: opts.canvas(), port: opts.port, vllm: opts.vllm.clone(), tui: false, announce };
         let (_h, model) = vm::new();
         let _ = model.run(app, paths, boot).await;
         if vm::FAILED.load(std::sync::atomic::Ordering::SeqCst) {
@@ -55,7 +55,7 @@ pub async fn main_loop(opts: Opts) -> Result<()> {
     // The TUI draws on /dev/tty and the kernel's own prints go to a log file.
     let log = paths.cli.join("kernel.log");
     let screen = crate::tty::open(&log)?;
-    let boot = vm::Boot { canvas: opts.canvas(), port: opts.port, tui: true, announce: None };
+    let boot = vm::Boot { canvas: opts.canvas(), port: opts.port, vllm: opts.vllm.clone(), tui: true, announce: None };
     let (h, model) = vm::new();
     let view = tokio::spawn(paint(screen.term, h));
     let app = model.run(app, paths, boot).await;

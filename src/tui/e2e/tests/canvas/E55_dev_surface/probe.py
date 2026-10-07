@@ -23,14 +23,16 @@ def main() -> bool:
     port = free_port()
     write_project(rig.proj)
     rig.init(host_agents=[(FOLDER, exec_record(port))])
-    ask_text = (f"Set up a workspace for this project using the exec agent `dev` — it may run exactly `sh build.sh` and "
-                f"`python3 -m http.server {port} --directory dist`. I want: a controls panel with Build, Run and Stop buttons, "
-                "a build log panel, a run log panel, a panel showing the running app, and a status panel that says "
-                "built / running / stopped — all wired so they update by themselves as things happen.")
+    # the same surface in fewer panels (owner 2026-10-06: less filler, same
+    # complexity): buttons drive `dev`, its events update the page by themselves
+    ask_text = (f"Using the exec agent `dev` (it may run exactly `sh build.sh` and `python3 -m http.server {port} --directory dist`), "
+                "build: a panel with Build, Run and Stop buttons, a live log and a status line (built / running / stopped), "
+                "and a panel showing the running app — all updating by themselves.")
 
     async def drive():
         async with rig.page(1900, 1100) as pg:
-            done, said = await ask(pg, 250, 300, ask_text, rig.limits["total_seconds"], rig.limits["quiet_seconds"])
+            # the AI's time: its limit, less what the reactive checks need (≈130 s)
+            done, said = await ask(pg, 250, 300, ask_text, rig.budget(rig.limits["total_seconds"], reserve=150), rig.limits["quiet_seconds"])
             await asyncio.sleep(3)
             made = [c["id"] for c in rig.cells() if c.get("handler_module") in ("html_agent.ts", "terminal_view.ts")]
             checks = await reactive_check(pg, rig.proj, port)
@@ -42,7 +44,7 @@ def main() -> bool:
     rig.summary.update({"answer": said, "made": made, "checks": checks})
     print(f"made {len(made)} cells: {made}")
     print(f"reactive checks: {checks}")
-    ok = len(made) >= 5 and all(checks.values())
+    ok = len(made) >= 2 and all(checks.values())
     return verdict(*rig.finish(ok, f"{len(made)} cells · " + " ".join(f"{k}={'✓' if v else '✗'}" for k, v in checks.items())))
 
 

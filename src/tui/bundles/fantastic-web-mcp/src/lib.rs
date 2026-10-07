@@ -56,6 +56,11 @@ impl Bundle for WebMcpBundle {
         "web_mcp"
     }
 
+    /// HOW TO CALL it — served by the kernel's `docs` verb, never on a reflect.
+    fn verb_docs(&self) -> Value {
+        json!({"inbound_send": INBOUND_SEND_DOC})
+    }
+
     async fn handle(
         &self,
         agent_id: &AgentId,
@@ -71,11 +76,11 @@ impl Bundle for WebMcpBundle {
                 "sentence": "An MCP leg: an external client (Claude Code, any MCP host) drives this kernel through me, with exactly my grants — never as the operator. My carrier speaks MCP; the verbs I dispatch are the kernel's own.",
                 "protocol": PROTOCOL_VERSION,
                 "tools": ["reflect", "send"],
-                "verbs": {"inbound_send": INBOUND_SEND_DOC},
             }),
             other => json!({
                 "error": format!("web_mcp: no verb `{other}` — this leg is driven by its carrier; reflect for what it is"),
-                "reason": "unknown_verb",
+                "reason": "unhandled",
+                "verb": other,
             }),
         }))
     }

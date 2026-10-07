@@ -1,3 +1,4 @@
+import { documentPage } from "../verb_docs.ts";
 import { demoHtml } from "../../demo_page.ts";
 import { Agent, Host } from "../../lib.ts";
 import type { Json, Kernel, Payload } from "../../lib.ts";
@@ -1165,6 +1166,9 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   });
 
   kernel.addStateSubscriber(renderSoon);
+  // every page agent is documented as it appears (the page kernel's `docs`)
+  documentPage(kernel);
+  kernel.addStateSubscriber(() => documentPage(kernel));
   ensureBackground(ROOT_VIEW);
   if (isContainer(look, viewed)) ensureBackground(viewed);
   window.addEventListener("hashchange", () => {

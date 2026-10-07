@@ -194,5 +194,8 @@ async fn the_shell_needs_no_token_and_other_verbs_are_the_probes() {
     assert!(r.get("inquiries").is_some(), "{r}");
     let r = op(&k, "user", json!({"type": "reflect"})).await;
     assert_eq!(r["handler_module"], HANDLER_MODULE, "{r}");
-    assert!(r["verbs"].get("forward").is_some() && r["verbs"].get("inquiry").is_some(), "{r}");
+    assert!(r.get("verbs").is_none(), "a reflect carries no verbs: {r}");
+    // HOW TO CALL it: the kernel's `docs` — its own verbs and the probe's
+    let d = op(&k, "kernel", json!({"type": "docs", "of": "user"})).await;
+    assert!(d["verbs"].get("forward").is_some() && d["verbs"].get("around").is_some() && d["verbs"].get("inquiry").is_some(), "{d}");
 }

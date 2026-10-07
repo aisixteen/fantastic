@@ -34,7 +34,7 @@ def main() -> bool:
     async def drive():
         async with rig.page(1800, 1000) as pg:
             return await ask(pg, 250, 300, "What is this deck? In what order do the slides go, and is anything missing?",
-                             rig.limits["total_seconds"], rig.limits["quiet_seconds"])
+                             rig.budget(rig.limits["total_seconds"]), rig.limits["quiet_seconds"])
     try:
         done, said = asyncio.run(drive())
     finally:

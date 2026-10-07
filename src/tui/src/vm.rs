@@ -101,6 +101,8 @@ pub struct Boot {
     pub canvas: bool,
     /// `--port`: creation-only; a later run reads it from `web`'s record.
     pub port: Option<u16>,
+    /// `canvas run vllm …`: the root AI's server (`kern/root_ai`).
+    pub vllm: Option<crate::kern::root_ai::VllmRun>,
     /// A terminal View is attached (it sizes the ViewModel).
     pub tui: bool,
     /// HEADLESS ONLY: where to say the page's URL, or why there is none. The
@@ -310,6 +312,21 @@ async fn run(
                             Ok(urls) => {
                                 boot.say(&format!("fantastic: the canvas: {}", urls.canvas));
                                 app.note(format!("the canvas: {}", urls.canvas));
+                                // a root AI that cannot be pointed is a loud stop, like no page
+                                if let Some(v) = &boot.vllm {
+                                    match crate::kern::root_ai::run_vllm(&h, v).await {
+                                        Ok(said) => {
+                                            boot.say(&format!("fantastic: {said}"));
+                                            app.note(said);
+                                        }
+                                        Err(e) => {
+                                            boot.say(&format!("fantastic: run vllm: {e}"));
+                                            app.note(format!("run vllm: {e}"));
+                                            failed();
+                                            app.quit = true;
+                                        }
+                                    }
+                                }
                             }
                             // No page to serve is fatal where the page is the
                             // only View; with a terminal it is a note there.

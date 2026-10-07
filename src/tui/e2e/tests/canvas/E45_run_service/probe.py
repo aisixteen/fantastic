@@ -29,11 +29,11 @@ def main() -> bool:
         async with rig.page() as pg:
             done, said = await ask(pg, 250, 300,
                 "Using the exec agent `svc`, start a web server for the `site` directory on a free port, and tell me the port.",
-                rig.limits["total_seconds"], rig.limits["quiet_seconds"])
+                rig.budget(rig.limits["total_seconds"]), rig.limits["quiet_seconds"])
             ports = [int(p) for p in re.findall(r"(?<!\d)(\d{4,5})(?!\d)", said)]
             up = next((p for p in ports if "E45-OK" in http_get(f"http://127.0.0.1:{p}/")[1]), None)
             await say(pg, "Now stop that server.")
-            await wait_quiet(pg, rig.limits["total_seconds"], rig.limits["quiet_seconds"])
+            await wait_quiet(pg, rig.budget(rig.limits["total_seconds"]), rig.limits["quiet_seconds"])
             await asyncio.sleep(2)
             down = up is not None and http_get(f"http://127.0.0.1:{up}/", 3)[0] == 0
             return said, up, down

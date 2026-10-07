@@ -370,12 +370,6 @@ impl UserHomeStore {
             "sentence": "The user's templates: named agent-record blueprints in the home config dir, applied by the CLI when it creates an agent.",
             "dir": self.home.as_ref().map(|h| h.join("templates").display().to_string()).ok(),
             "serves": self.callers,
-            "verbs": {
-                "persist_record": "args: name:str (req), record:dict (req — handler_module + that bundle's config; no identity, wiring or grants), if_match:str?. Returns {name, version, path}.",
-                "forget_record": "args: name:str (req), if_match:str?. Returns {name, forgotten}.",
-                "load_tree": "No args. Returns {templates: [{name, version, record}], preferred, dir}.",
-                "prefer": "args: name:str|null (req). The owner's default for new AI agents; null clears it. Returns {preferred}.",
-            },
         })
     }
 }
@@ -388,6 +382,16 @@ impl Bundle for UserHomeStore {
 
     fn readme(&self) -> Option<&'static str> {
         Some(README)
+    }
+
+    /// HOW TO CALL it — served by the kernel's `docs` verb, never on a reflect.
+    fn verb_docs(&self) -> Value {
+        json!({
+                "persist_record": "args: name:str (req), record:dict (req — handler_module + that bundle's config; no identity, wiring or grants), if_match:str?. Returns {name, version, path}.",
+                "forget_record": "args: name:str (req), if_match:str?. Returns {name, forgotten}.",
+                "load_tree": "No args. Returns {templates: [{name, version, record}], preferred, dir}.",
+                "prefer": "args: name:str|null (req). The owner's default for new AI agents; null clears it. Returns {preferred}.",
+            })
     }
 
     async fn handle(&self, _agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Result<Reply, BundleError> {

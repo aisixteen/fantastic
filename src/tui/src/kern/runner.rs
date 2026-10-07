@@ -223,7 +223,19 @@ impl Runner {
                     .operator(agent, json!({"type":"reflect","tree":"none","readme":true}))
                     .await;
                 match Host::read(out) {
-                    Ok(reply) => {
+                    Ok(mut reply) => {
+                        // HOW TO CALL it is the kernel's `docs` (a reflect no
+                        // longer carries verbs): folded in for the pane, which
+                        // lists the verbs beside the self-description
+                        let docs = self
+                            .host
+                            .operator("kernel", json!({"type":"docs","of": agent,"tier":"detailed"}))
+                            .await;
+                        if let (Ok(d), Value::Object(m)) = (Host::read(docs), &mut reply) {
+                            if let Some(v) = d.get("verbs").filter(|v| v.as_object().is_some_and(|o| !o.is_empty())) {
+                                m.insert("verbs".into(), v.clone());
+                            }
+                        }
                         self.got(Got::Reflect {
                             agent: agent.clone(),
                             reply,

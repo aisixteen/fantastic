@@ -102,10 +102,18 @@ async def frame_eval(pg, expr: str, url_has: str | None = None) -> list:
     return vals
 
 
-async def click_button(pg, label: str) -> bool:
-    expr = ("(()=>{const b=[...document.querySelectorAll('button')].find(b=>b.textContent.trim().toLowerCase().startsWith("
+async def click_button(pg, label: str, secs: float = 8) -> bool:
+    """Click the first button whose text (leading icons such as ▶ ignored)
+    starts with `label`, in any panel. A
+    panel the AI just placed or updated may be reloading its frame: the button
+    is waited for (up to `secs`), then clicked once."""
+    expr = ("(()=>{const b=[...document.querySelectorAll('button')].find(b=>b.textContent.replace(/^[^\\p{L}\\p{N}]+/u,'').toLowerCase().startsWith("
             f"{json.dumps(label.lower())}));if(b){{b.click();return true}}return false}})()")
-    return any(await frame_eval(pg, expr))
+    for _ in range(int(secs * 2)):
+        if any(await frame_eval(pg, expr)):
+            return True
+        await asyncio.sleep(0.5)
+    return False
 
 
 async def texts(pg) -> str:
@@ -130,21 +138,30 @@ async def until(pg, pred, secs: float) -> bool:
 
 
 async def reactive_check(pg, proj: Path, port: int) -> dict:
-    """Build → Run → Stop → edit + Build + Run, each observed on the page."""
+    """Build → Run → Stop → edit + Build + Run, each observed on the page.
+    RAPID: a check whose click found no button fails at once — nothing waits
+    on an effect whose cause never happened; a check that passes returns on its
+    first hit."""
     r: dict = {}
+
+    async def after(click: str, key: str, pred, secs: float) -> None:
+        r[key] = bool(r[click]) and await until(pg, pred, secs)
+
     r["build_clicked"] = await click_button(pg, "build")
-    r["build_logged"] = await until(pg, lambda: _has(pg, r"built: Hello v1"), 20)
+    await after("build_clicked", "build_logged", lambda: _has(pg, r"built: Hello v1"), 20)
     r["run_clicked"] = await click_button(pg, "run")
-    r["run_status"] = await until(pg, lambda: _has(pg, r"(?i)\brunning\b"), 20)
-    r["app_shown"] = await until(pg, lambda: _app(pg, port, "Hello v1"), 25)
+    await after("run_clicked", "run_status", lambda: _has(pg, r"(?i)\brunning\b"), 20)
+    await after("run_clicked", "app_shown", lambda: _app(pg, port, "Hello v1"), 25)
     r["stop_clicked"] = await click_button(pg, "stop")
-    r["stop_status"] = await until(pg, lambda: _has(pg, r"(?i)\bstopped\b|\bexited\b|\bdone\b"), 20)
+    await after("stop_clicked", "stop_status", lambda: _has(pg, r"(?i)\bstopped\b|\bexited\b|\bdone\b"), 20)
     (proj / "app" / "title.txt").write_text("Hello v2")
-    await click_button(pg, "build")
-    r["rebuilt"] = await until(pg, lambda: _has(pg, r"built: Hello v2"), 20)
-    await click_button(pg, "run")
-    r["app_changed"] = await until(pg, lambda: _app(pg, port, "Hello v2"), 25)
+    r["_rebuild_clicked"] = await click_button(pg, "build")
+    await after("_rebuild_clicked", "rebuilt", lambda: _has(pg, r"built: Hello v2"), 20)
+    r["_rerun_clicked"] = await click_button(pg, "run")
+    await after("_rerun_clicked", "app_changed", lambda: _app(pg, port, "Hello v2"), 25)
     await click_button(pg, "stop")
+    for k in ("_rebuild_clicked", "_rerun_clicked"):
+        r.pop(k)
     return r
 
 

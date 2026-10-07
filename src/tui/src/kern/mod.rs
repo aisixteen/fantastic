@@ -6,6 +6,7 @@
 //! spine as everything else, and `host` is how it reaches that spine.
 
 pub mod reach;
+pub mod root_ai;
 pub mod backend;
 pub mod host;
 pub mod keys;

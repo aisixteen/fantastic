@@ -12,10 +12,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from _lib.canvas_live import Rig, verdict, ask, say, wait_quiet  # noqa: E402
 
-ASK = ("Prototype a ticker on this canvas, all by yourself: write a small script that prints an increasing counter, "
-       "one line per second; make an exec agent that may run exactly that script; put a panel with Start and Stop "
-       "buttons that start and stop it, and a live log panel that shows the script's lines as they arrive. "
-       "No packaging, no build step — just make it work.")
+ASK = ("Prototype a ticker: a script printing an increasing counter, one line a second; an exec agent that may run "
+       "exactly that script; one panel with Start and Stop and a live log of the script's lines.")
 CHANGE = "Change it: count by 10 instead, and show the last value big in its own panel."
 
 
@@ -62,7 +60,12 @@ def main() -> bool:
         return False
 
     async def big(pg) -> bool:
-        return any(re.fullmatch(r"\d+", b) and int(b) > 0 and int(b) % 10 == 0 for b in await bodies(pg))
+        """A panel showing ONE number, a multiple of 10 (a label beside it is fine; a log has many)."""
+        for b in await bodies(pg):
+            nums = [int(ln) for ln in b.splitlines() if re.fullmatch(r"\d+", ln.strip())]
+            if len(nums) == 1 and nums[0] > 0 and nums[0] % 10 == 0:
+                return True
+        return False
 
     def made_script() -> list[str]:
         return [str(p.relative_to(rig.proj)) for p in rig.proj.rglob("*")
@@ -80,7 +83,8 @@ def main() -> bool:
     async def drive():
         r: dict = {}
         async with rig.page(1900, 1100) as pg:
-            done1, said1 = await ask(pg, 250, 300, ASK, rig.limits["total_seconds"], rig.limits["quiet_seconds"])
+            # turn 1: its limit, less turn 2 and both turns' clicks
+            done1, said1 = await ask(pg, 250, 300, ASK, rig.budget(rig.limits["turn1_seconds"], reserve=rig.limits["turn2_seconds"] + 90), rig.limits["quiet_seconds"])
             await asyncio.sleep(3)
             scripts = made_script()
             names = [Path(s).name for s in scripts]
@@ -89,15 +93,16 @@ def main() -> bool:
             # `allowed` is regexes (`ticker\.py`): unescape before looking for the name
             r["exec_runs_it"] = any(any(n in str(e.get("allowed", "")).replace("\\", "") for n in names) for e in execs)
             r["start_clicked"] = await click_button(pg, "start")
-            r["counts"] = await grows(pg, 20)
+            # RAPID: an effect is waited for only when its click landed
+            r["counts"] = r["start_clicked"] and await grows(pg, 20)
             r["stop_clicked"] = await click_button(pg, "stop")
             # it STOPS only if it counted first — holding still never started is no stop
-            r["stops"] = r["counts"] and await still(pg)
+            r["stops"] = r["counts"] and r["stop_clicked"] and await still(pg)
             await say(pg, CHANGE)
-            done2 = await wait_quiet(pg, rig.limits["total_seconds"], rig.limits["quiet_seconds"])
+            done2 = await wait_quiet(pg, rig.budget(rig.limits["turn2_seconds"], reserve=45), rig.limits["quiet_seconds"])
             await asyncio.sleep(3)
             r["start2_clicked"] = await click_button(pg, "start")
-            r["counts_by_10"] = await by_ten(pg, 30)
+            r["counts_by_10"] = r["start2_clicked"] and await by_ten(pg, 30)
             r["big_value"] = await big(pg)
             await click_button(pg, "stop")
             return r, {"turn1_quiet": done1, "turn2_quiet": done2, "scripts": scripts,

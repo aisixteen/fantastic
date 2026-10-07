@@ -2,6 +2,7 @@ import { Agent, str } from "../../lib.ts";
 import type { Handler, Json, Payload } from "../../lib.ts";
 import { terminalView } from "../terminal_view/terminal_view.ts";
 import { bodyText } from "../body_text.ts";
+import { htmlRefusal } from "../html_check.ts";
 import { aiView } from "../ai_view/ai_view.ts";
 import { grantHint } from "../html_agent/grant_hint.ts";
 
@@ -52,16 +53,22 @@ function bodyOf(kind: string, payload: Payload): string | undefined | Record<str
   const given = payload["bytes"] ?? payload[field];
   if (given === undefined) return undefined;
   const raw = bodyText(given);
-  if (raw !== null) return raw;
+  if (raw !== null) {
+    // an html body must BE html (a placeholder, a truncated script: refused)
+    if (field === "html") return htmlRefusal("view", raw) ?? raw;
+    return raw;
+  }
   return { error: `view: the ${field} must be a string`, reason: "bad_arg", arg: "bytes", hint: "send the markup as <bytes>…</bytes> — verbatim, nothing escaped" };
 }
 
 
 export const CANVAS_README =
-  "The canvas: the page's root agent. It holds the ROOT VIEW, `view_root` — every cell, background and nested view lives under a view. It answers `reflect` and nothing else; talk to a view.";
+  
+  "The canvas: the page's root agent. It holds the one view, `view_root` — build there (`docs of=view_root`). It answers reflect only.";
 
 export const VIEW_README =
-  "THE VIEW of the canvas (frontend) — the one view. Renders its own member tree; mounts each member inline via its view bundle, or as an iframe for external content. Not a host client. Its BACKGROUND is its own singleton child agent (set_bg / clear_bg / get_bg there). WHAT IS NEAR A POINT is the host's: `around {view?, x, y, radius}` on `user` (view coordinates, x grows right, y grows down) answers from the page records, nearest first — reflect a member for more. THE CONTROL PLANE over its cells: `place {kind: html|gl|terminal|chat (or handler_module: any page bundle, e.g. html_agent.ts), x, y, id?, width?, height?, display_name?, bytes? (the cell's body, VERBATIM: html for html, the GL source for gl), trusted?, can_call?, callable_by?, backend_id? (terminal/chat: the host agent shown)}` → {placed}; `move {id, x?, y?, width?, height?}`; `update {id, bytes? (the new body, verbatim), fields?: {display_name|trusted|readme|x|y|width|height|can_call|callable_by}}` (a cell's grants: `{<agent id>: [verbs] | *}` — e.g. `can_call: {dev: [start, stop, status, watch]}` lets the cell's panel call the host agent `dev`; replaces the field whole) (a new html body reloads the panel); `update {id: <this view>, fields: {main_ai_chat: <a chat cell's id> | null}}` sets the view's MAIN chat — its one voice, named on its record (reflect the view to find it); the main chat is delete-locked while main, and making another main (or null) unlocks it; any other field of the view is settable the same way; `wire {sender, receiver, verbs}` (a grant, merged into each side that is a cell of this view: the sender's can_call, the receiver's callable_by — e.g. verbs [emit] lets the sender's panel emit to the receiver's; a receiver that is a host agent gets nothing written); `remove {id}` (refused on a delete_lock, e.g. the background). A LIVE URL or a FILE (a PDF, a running service) is shown by an html cell whose body is `<iframe src=URL>` — `trusted: true` for the host's own files (GET /static_files/file/<path>).";
+  
+  "THE VIEW — the canvas's one view (frontend). Its cells are its children: you place and change them HERE. VERBS: place {kind: html|gl|terminal|chat (or handler_module), x, y, id?, width?, height?, display_name?, bytes? (the body, verbatim), trusted?, can_call?, callable_by?, backend_id? (terminal/chat: the host agent shown)} · move {id, x?, y?, width?, height?} · update {id, bytes? (a new body reloads it), fields?: {display_name|trusted|readme|x|y|width|height|can_call|callable_by}} (on the view itself: any field; main_ai_chat names its main chat) · wire {sender, receiver, verbs} (a grant, written on each side that is a cell; not from/to) · remove {id}. A PANEL'S JS (an html cell's body) has `fantastic`: `await fantastic.send(id, payload)` → the reply · `fantastic.watch(id, ev => …)` → events (returns off) · `fantastic.emit(id, payload)` · `fantastic.onMessage(p => …)`. Its calls are judged by the CELL's can_call — grant what it calls (`{<id>: [verbs…, watch]}`); a reply's `grants_missing` names any it lacks. On the host they arrive as `user`: a host agent you create for a panel needs `callable_by: {user: [<the verbs the panel calls>, watch]}` in its create_agent (a new agent admits no one); never drop `user` from an existing agent's callable_by. Example — a button that runs a command on a host exec agent `runner` and shows its output live: place {kind: html, x: 700, y: 60, can_call: {runner: [start, watch]}, bytes: <button onclick=\"fantastic.send('runner',{type:'start',command:'ls'}).then(r=>job=r.job_id)\">Run</button><pre id=o></pre><script>let job;fantastic.watch('runner',e=>{if(e.job_id===job&&e.type==='progress')o.textContent+=e.line+'\\n'})</script>} A live URL or a file: an html cell whose body is <iframe src=URL> (trusted: true for GET /static_files/file/<path>). The background is the child `background` (set_bg / clear_bg / get_bg). What is near a point: `around {view?, x, y, radius}` on `user`.";
 
 /** The root: `reflect` is the kernel's; it answers nothing else. */
 export const canvasAgent: Handler = (_id, payload): Json => {
@@ -70,7 +77,7 @@ export const canvasAgent: Handler = (_id, payload): Json => {
     case "shutdown":
       return null;
     default:
-      return { error: `canvas: unknown verb '${str(payload, "type")}' — the canvas holds the root view (${ROOT_VIEW}); talk to a view`, reason: "unhandled" };
+      return { error: `canvas: unknown verb '${str(payload, "type")}' — the canvas holds the root view (${ROOT_VIEW}); talk to a view`, reason: "unhandled", verb: str(payload, "type") };
   }
 };
 
@@ -188,7 +195,7 @@ export const viewAgent: Handler = (id, payload, kernel): Json | Promise<Json> =>
     case "shutdown":
       return null;
     default:
-      return { error: `view: unknown verb '${str(payload, "type")}'`, reason: "unhandled" };
+      return { error: `view: unknown verb '${str(payload, "type")}'`, reason: "unhandled", verb: str(payload, "type") };
   }
 };
 

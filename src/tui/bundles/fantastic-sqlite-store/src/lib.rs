@@ -591,10 +591,6 @@ impl SqliteStoreBundle {
             ]))
         });
         let n = |i: usize| counts.get(i).cloned().unwrap_or(Value::Null);
-        let mut verbs = Map::new();
-        for (name, d) in VERB_DOCS {
-            verbs.insert(name.to_string(), Value::from(d));
-        }
         let mut out = Map::new();
         out.insert("id".to_string(), Value::from(id.0.clone()));
         out.insert(
@@ -615,7 +611,6 @@ impl SqliteStoreBundle {
             out.insert("error".to_string(), counts.get("error").cloned().unwrap_or(Value::Null));
         }
         out.insert("optional_verbs".to_string(), json!(["search"]));
-        out.insert("verbs".to_string(), Value::Object(verbs));
         Value::Object(out)
     }
 
@@ -921,6 +916,15 @@ impl SqliteStoreBundle {
 
 #[async_trait]
 impl Bundle for SqliteStoreBundle {
+    /// HOW TO CALL it — served by the kernel's `docs` verb, never on a reflect.
+    fn verb_docs(&self) -> Value {
+        let mut verbs = Map::new();
+        for (name, d) in VERB_DOCS {
+            verbs.insert(name.to_string(), Value::from(d));
+        }
+        Value::Object(verbs)
+    }
+
     fn name(&self) -> &str {
         HANDLER_MODULE
     }

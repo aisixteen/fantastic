@@ -38,6 +38,7 @@ with `src/tui/e2e/wipe.sh`.
 | E56 `dev_reactive` | a reference dev surface reacts to build / run / stop / edit | same | scripted |
 | E57 `setup_ai` | the set-up cell writes an agent + default template; both answer | owner: set-up is VERY important | live |
 | E58 `prototype` | from an EMPTY canvas: a script, the exec agent that runs it, Start/Stop + a live log wired both ways; then a change (count by 10, the last value big) — scored by clicking | owner 2026-10-04: yes/no for the prototyping flow (a garage, no packaging) | live |
+| E59 `calc` | behind a SEEDED six-button panel (det, factor, simpson, roots, fib_mod, gcd_lcm) the AI writes `calc.py` + its own `test_calc.py` in one ask; scored by its tests, hidden vectors per function and every button | owner 2026-10-07: can the model write good multi-function code and test it |
 
 ## Results — 2026-10-01, vLLM qwen3.8-27b, 2 lanes (the latest run of each)
 

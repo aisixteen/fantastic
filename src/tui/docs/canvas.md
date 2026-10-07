@@ -8,6 +8,16 @@ host kernel through the socket leg `canvas_ws`. It holds no memory store and no
 AI: every cell is a VIEW of a host agent (a terminal, an AI chat, a set-up
 cell) or page-side content (html, gl).
 
+## The root AI on a vLLM server
+
+`fantastic canvas run vllm -p PORT [--host HOST] [--kv-overflow evict|reject]`
+points the AI the view's main chat shows at `http://HOST:PORT/v1` — re-pointed
+when it is already a vLLM AI, else made under `canvas_root` (on the project's
+`memory` store) with a main chat cell. Model, context window, max tokens and
+KV slots are read from the server before its first turn. `--host` is
+`127.0.0.1` and `--kv-overflow` `evict` unless named. Open the canvas once first (the view
+must exist); the binary needs the vLLM backend (`--features vllm`).
+
 ## Two kernels, two address forms
 
 - Host agents: a bare id (`exec`, `ai_<hex>`). The host root is `kernel`.
@@ -22,20 +32,18 @@ user
 └── web
     ├── canvas_ws               the socket leg the page speaks through
     └── canvas_page             the embedded page
-        └── canvas_root         the canvas's host node
-            ├── web_loader      the page's records (.fantastic/web)
-            │   ├── static_files                 the files the cells load
-            │   └── canvas                       (page side)
-            │       └── view_root
-            │           └── background · <its cells>
-            └── backend         creates / deletes its own children
-                └── backend_view_root   the view's folder
-                    └── <backends>   a terminal's exec_bridge, an AI, setup
+        └── canvas_root         the canvas's host node: create / delete / spawn
+            ├── <backends>      a terminal's exec_bridge, an AI, setup
+            ├── static_files    the files the cells load
+            └── web_loader      the page's records (.fantastic/web)
+                └── canvas      (page side)
+                    └── view_root
+                        └── background · <its cells>
 ```
 
 Every page call reaches the host as `user` (`user.forward`, with the token
 when `user` carries a `token_sha256`). `user` — and every AI agent under
-`backend` — reaches every host agent with every verb (god mode, by grants
+`canvas_root` — reaches every host agent with every verb (god mode, by grants
 both sides; the human narrows them with `update_agent`).
 
 ## A view's verbs (page side, on `<page guid>|<view id>`)
@@ -48,6 +56,7 @@ both sides; the human narrows them with `update_agent`).
 | `wire {sender, receiver, verbs}` | a grant, written on each side that is a cell of the view (a host agent receiver: the sender's side only) |
 | (a live URL or a file) | an html cell whose body is `<iframe src=URL>` — `trusted: true` for the host's own files |
 | (grant hint) | a body that calls an agent the cell's `can_call` lacks → the reply names `grants_missing` and the `update` that adds them |
+| (html check) | an html body that is empty, a placeholder (no element) or truncated (an unclosed script, a cut tag) is refused, saying why |
 | `remove {id}` | delete a cell (refused for a delete-locked agent) |
 
 `update {id: <the view>, fields: {main_ai_chat: <chat cell id> | null}}`

@@ -42,7 +42,7 @@ function register(kernel: Kernel): void {
   // it fronts a host capability; the host stays ignorant of the frontend.
   kernel.setBundleReadme(
     "html_agent.ts",
-    "Frontend HTML content agent. Holds a mutable `html` body in its record, rendered in a sandboxed frame; the injected connector relays send/emit/watch/onMessage to the kernel. Content, not a host client.",
+    "An html cell: its record's `html` body, rendered in a sandboxed frame (unsandboxed when trusted). Verbs: get_html, set_html {bytes}. A PANEL'S JS (an html cell's body) has `fantastic`: `await fantastic.send(id, payload)` → the reply · `fantastic.watch(id, ev => …)` → events (returns off) · `fantastic.emit(id, payload)` · `fantastic.onMessage(p => …)`. Its calls are judged by the CELL's can_call — grant what it calls (`{<id>: [verbs…, watch]}`); a reply's `grants_missing` names any it lacks. On the host they arrive as `user`: a host agent you create for a panel needs `callable_by: {user: [<the verbs the panel calls>, watch]}` in its create_agent (a new agent admits no one); never drop `user` from an existing agent's callable_by. Place, move, grant and remove cells through the view (`view_root`).",
   );
   kernel.setBundleReadme(
     "gl_agent.ts",
@@ -50,11 +50,11 @@ function register(kernel: Kernel): void {
   );
   kernel.setBundleReadme(
     "terminal_view.ts",
-    "HTML/xterm CLIENT for a host PTY. Fronts any agent answering the PTY verb surface (boot/write/ack/resize/interrupt/stop) and emitting output/exited, bound by `backend_id`: watches the backend's output, renders it, sends keystrokes via write.",
+    "A terminal cell: an xterm onto a host exec agent's PTY job (`backend_id`) — it starts the job, writes keystrokes (write), resizes, and draws its output.",
   );
   kernel.setBundleReadme(
     "ai_view.ts",
-    "HTML chat CLIENT for a host LLM backend. Fronts any agent answering send/history/interrupt/status, bound by `backend_id`: renders streamed token/done events, sends user turns via send.",
+    "A chat cell: the human's view of a host AI (`backend_id`). It sends the human's turns (send), draws the AI's streamed parts, and stops a turn (stop).",
   );
 }
 

@@ -32,7 +32,7 @@ def main() -> bool:
         from _lib.dev_surface import frame_urls
         async with rig.page() as pg:
             done, said = await ask(pg, 250, 300, f"Show the page at {url} in a panel next to you.",
-                                   rig.limits["total_seconds"], rig.limits["quiet_seconds"])
+                                   rig.budget(rig.limits["total_seconds"]), rig.limits["quiet_seconds"])
             await asyncio.sleep(3)
             return said, await frame_urls(pg)
     try:

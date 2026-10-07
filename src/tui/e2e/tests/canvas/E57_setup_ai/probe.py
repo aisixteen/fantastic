@@ -51,7 +51,7 @@ def main() -> bool:
             default = await note()
             # the default template answers in a NEW cell
             done1, a1 = await __import__('_lib.canvas_live', fromlist=['ask']).ask(pg, 1150, 300, "Reply with exactly one word: hello",
-                                                                                  rig.limits["total_seconds"], rig.limits["quiet_seconds"])
+                                                                                  rig.budget(rig.limits["total_seconds"]), rig.limits["quiet_seconds"])
             # the written agent answers from the sidebar
             for _ in range(6):
                 n = await pg.js("(()=>{const t=[...document.querySelectorAll('#chats .agents-tree li .tw')].filter(x=>x.textContent==='▸');t.forEach(x=>x.click());return t.length})()")
@@ -63,7 +63,7 @@ def main() -> bool:
             await pg.until(f"document.querySelectorAll('.chat-view').length > {before}", 15)
             await asyncio.sleep(2)
             await say(pg, "Reply with exactly one word: ready", cell=before)
-            await wait_quiet(pg, rig.limits["total_seconds"], rig.limits["quiet_seconds"], cell=before)
+            await wait_quiet(pg, rig.budget(rig.limits["total_seconds"]), rig.limits["quiet_seconds"], cell=before)
             a2 = await answer(pg, cell=before)
             return filled, written, saved, default, a1, a2
     try:

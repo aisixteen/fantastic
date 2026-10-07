@@ -6,6 +6,7 @@ title: "an AI builds a reactive dev surface — controls, logs, live app, status
 runner: probe.py
 costs: turns
 limits:
-  total_seconds: 1200
-  quiet_seconds: 40
+  # the AI's time; cut to fit the runner's 15-minute hard stop (canvas_live.budget)
+  total_seconds: 900
+  quiet_seconds: 30
 env: {}

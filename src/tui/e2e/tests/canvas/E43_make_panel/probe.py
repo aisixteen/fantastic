@@ -24,7 +24,7 @@ def main() -> bool:
         async with rig.page() as pg:
             done, said = await ask(pg, 250, 300,
                 "Make me a small calculator panel next to you: kinetic energy in joules from mass (kg) and speed (m/s).",
-                rig.limits["total_seconds"], rig.limits["quiet_seconds"])
+                rig.budget(rig.limits["total_seconds"]), rig.limits["quiet_seconds"])
             await asyncio.sleep(2)
             made = [c["id"] for c in rig.cells() if c.get("handler_module") == "html_agent.ts"]
             # drive it in WHATEVER frame holds it — through CDP (an AI need not mark

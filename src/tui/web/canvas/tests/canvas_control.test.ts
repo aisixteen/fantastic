@@ -125,3 +125,31 @@ test("a body that calls an agent the cell is not granted SAYS so, with the fix",
   const u = await call(k, { type: "update", id: "c", fields: { can_call: { $self: "*", dev: ["start", "watch"] } } });
   assert.equal(u["grants_missing"], undefined);
 });
+
+test("the page kernel's docs answer the page agents' verbs (documentPage)", async () => {
+  const { documentPage } = await import("../src/bundles/verb_docs.ts");
+  const k = page();
+  await call(k, { type: "place", kind: "html", id: "h", x: 0, y: 0 });
+  documentPage(k);
+  const d = (await k.send([{ target: "kernel", payload: { type: "docs", of: "view_root" } as Payload }]))[0]!.result as Payload;
+  assert.ok(Object.keys(d["verbs"] as object).includes("wire"), JSON.stringify(d));
+  const h = (await k.send([{ target: "kernel", payload: { type: "docs", of: "h", verb: "set_html" } as Payload }]))[0]!.result as Payload;
+  assert.ok((h["verbs"] as Payload)["set_html"], JSON.stringify(h));
+});
+
+test("an html body must BE html: a placeholder or a truncated one is refused, saying why", async () => {
+  const k = page();
+  const ph = await call(k, { type: "place", kind: "html", id: "a", x: 0, y: 0, bytes: "...html..." });
+  assert.equal(ph["reason"], "bad_arg"); assert.match(String(ph["error"]), /no element/);
+  assert.equal(k.get("a"), undefined, "nothing is placed");
+  const cut = await call(k, { type: "place", kind: "html", id: "b", x: 0, y: 0, bytes: "<div>x</div><script>let a = 1;" });
+  assert.match(String(cut["error"]), /<script> is opened and never closed/);
+  const tag = await call(k, { type: "place", kind: "html", id: "c", x: 0, y: 0, bytes: "<div>x</div><button cla" });
+  assert.match(String(tag["error"]), /ends inside a tag/);
+  assert.equal((await call(k, { type: "place", kind: "html", id: "d", x: 0, y: 0, bytes: "<p>ok</p>" }))["placed"], "d");
+  const up = await call(k, { type: "update", id: "d", bytes: "TODO" });
+  assert.match(String(up["error"]), /no element/);
+  const sh = (await k.send([{ target: "d", payload: { type: "set_html", bytes: "" } as Payload }]))[0]!.result as Payload;
+  assert.match(String(sh["error"]), /is empty/);
+  assert.equal(k.get("d")?.meta["html"], "<p>ok</p>", "a refused body changes nothing");
+});
