@@ -141,6 +141,58 @@ private func type(_ verb: String) -> JSON { .object(["type": .string(verb)]) }
 
 @Suite("cross-kernel addressing")
 struct PeerAddressingTests {
+    /// `docs of: <guid>|<agent>` (owner, 2026-10-06): the question goes to the
+    /// connected kernel's own `docs` and the reply names the qualified id. The
+    /// asker's grant is `docs` on THIS root, like any `docs`; the peer judges its
+    /// own leg. Python `test_docs_of_a_peer_agent_asks_that_kernel`.
+    @Test func docsOfAPeerAgentAsksThatKernel() async {
+        let k = mkKernel(guid: HOST)
+        let calls = Calls()
+        connect(
+            k, calls,
+            reply: .object([
+                "of": "view_root", "bundle": "canvas.tools", "tier": "oneliners",
+                "verbs": .object(["place": "args: x, y"]),
+            ]))
+        await create(k, "plain")
+        let refused = await send(
+            k, "kernel", .object(["type": "docs", "of": .string("\(PAGE)|view_root")]), as: "plain")
+        #expect(refused.result["side"] == "egress", "\(refused.result.serialize())")
+        #expect(calls.all.isEmpty, "a refused docs never reaches the peer")
+        await create(k, "reader", canCall: .object(["kernel_state": .array(["docs"])]))
+        _ = await send(
+            k, "kernel",
+            .object([
+                "type": "update_agent", "id": "kernel_state",
+                "callable_by": .object(["$self": "*", "reader": .array(["docs"])]),
+            ]))
+        let out = await send(
+            k, "kernel",
+            .object(["type": "docs", "of": .string("\(PAGE)|view_root"), "tier": "oneliners"]),
+            as: "reader")
+        #expect(out.status == .completed, "\(out.result.serialize())")
+        #expect(out.result["of"] == .string("\(PAGE)|view_root"))
+        #expect(out.result["verbs"] == .object(["place": "args: x, y"]))
+        #expect(calls.all.count == 1)
+        #expect(calls.all.first?.0 == "kernel")
+        #expect(calls.all.first?.1 == .object(["type": "docs", "of": "view_root", "tier": "oneliners"]))
+    }
+
+    /// An unknown guid is `bad_arg`; this kernel's own guid is a LOCAL id,
+    /// answered here with no peer asked. Python
+    /// `test_docs_of_an_unknown_guid_or_own_guid`.
+    @Test func docsOfAnUnknownGuidOrOwnGuid() async {
+        let k = mkKernel(guid: HOST)
+        let calls = Calls()
+        connect(k, calls)
+        let gone = await send(k, "kernel", .object(["type": "docs", "of": "nope|view_root"]))
+        #expect(gone.result["reason"] == "bad_arg" && gone.result["arg"] == "of", "\(gone.result.serialize())")
+        let own = await send(k, "kernel", .object(["type": "docs", "of": .string("\(HOST)|kernel")]))
+        #expect(own.result["bundle"] == "kernel", "\(own.result.serialize())")
+        #expect(own.result["verbs"]["create_agent"] != .null)
+        #expect(calls.all.isEmpty)
+    }
+
     @Test func anOperatorSendReachesThePeerAgent() async {
         let k = mkKernel(guid: HOST)
         let calls = Calls()
@@ -326,8 +378,7 @@ struct PeerAddressingTests {
     }
 
     /// `create_agent` sent to `<guid>|kernel` places nothing in THIS tree: it is
-    /// an ordinary call to the peer, gated on egress like any other — the local
-    /// mutator rule (a child of yourself) must not wave it through.
+    /// an ordinary call to the peer, gated on egress like any other.
     @Test func aCreateOnAPeerIsGatedOnThePeerTarget() async {
         let k = mkKernel(guid: HOST)
         let calls = Calls()

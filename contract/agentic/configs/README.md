@@ -115,8 +115,7 @@ passes ungated, proving nothing) and asserts what the caller actually got:
 - `allow: false` → `reason == "unauthorized"`, a non-empty `hint`, and — when
   declared — `side` must match. `side` is the evidence the gate is two-sided at
   all: `egress` means the send never left the sender, `ingress` means the callee
-  refused it, `mutator` means a tree mutator named an operand that is not the
-  sender's own child.
+  refused it.
 
 ## The three hydration verdicts
 

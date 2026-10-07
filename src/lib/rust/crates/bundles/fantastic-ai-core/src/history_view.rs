@@ -29,35 +29,6 @@ use serde_json::{json, Value};
 /// earlier one. Python `_WHOLE_STATE_READS`.
 pub const WHOLE_STATE_READS: [&str; 4] = ["reflect", "list_agents", "ps", "keys"];
 
-/// A reflect the model has ALREADY ANSWERED is replaced by this stub, `{agent}`
-/// filled in. The model was told to carry the facts it needs into that answer (by
-/// [`REFLECT_NUDGE`], which rides on the reflect reply itself), so the
-/// distillation IT wrote is what survives — written by the reader, at read time,
-/// with the task in mind, which no post-hoc summarizer can match. The stub NAMES
-/// the agent so "I have already looked at this" stays true, and re-reflecting is
-/// always available if the distillation turns out to be thin.
-pub fn reflect_dropped(agent: &str) -> String {
-    format!("[reflect of {agent} — full text dropped; your distillation follows]")
-}
-
-/// The distillation instruction, appended to every delivered `reflect` reply body
-/// by [`crate::route`]. Python `_REFLECT_NUDGE`, verbatim.
-///
-/// It rides ON the reply, not in the system block. Measured 2026-08-20
-/// (`live_plan`, the passing run): with the instruction stated ONCE as
-/// system-block policy, the model wrote a `SEEN` line for 0 of 10 reflects — and
-/// re-reflected the SAME agent (`kernel_state`) 9 times in a 17-turn run. Policy
-/// sits thousands of tokens from the data and applies to a turn that has not
-/// happened yet; this arrives attached to the body it talks about, every time, at
-/// the moment it applies. It is deliberately the LAST thing in the message: it is
-/// what the model reads immediately before writing its answer.
-pub const REFLECT_NUDGE: &str =
-    "\n[this body is TRANSIENT — after your next message it is replaced by a stub. \
-Open that message with the facts you will need, one compact line per agent:\n\
-SEEN <id> — <what it is for>; verbs: <the ones you intend to use>. \
-One reflect per agent is complete — reflecting it again yields nothing new; \
-the next useful call is an action.]";
-
 /// Python's `\S` — a char that is not whitespace.
 fn is_non_space(c: char) -> bool {
     !c.is_whitespace()
@@ -121,7 +92,7 @@ fn starts_a_block(s: &str) -> bool {
 /// A delivered turn carries ONE OR MORE blocks — a batch arrives whole, one block
 /// per call, joined by a blank line. The trimmers below work on the BLOCK, the
 /// unit they were written for; treating the whole turn as one reply either deleted
-/// siblings (`drop_answered_reflects`) or trimmed nothing (a count guard that
+/// siblings (the reflect cut) or trimmed nothing (a count guard that
 /// skipped every multi-reply turn — tried 2026-08-25, superseded same day).
 pub fn reply_blocks(content: &str) -> Vec<&str> {
     let mut out: Vec<&str> = Vec::new();
@@ -143,76 +114,120 @@ pub fn reply_blocks(content: &str) -> Vec<&str> {
     out
 }
 
-/// What counts as "the model recorded it": the `SEEN <agent> — …` line the reflect
-/// nudge asks for. Python `_DISTILLED` (`\bSEEN\b`, case-insensitive) — matched
-/// leniently, because the point is whether facts were carried forward, not whether
-/// a format was obeyed.
-///
-/// FAILS CLOSED: no match means the reflect body is KEPT.
-pub fn distilled(text: &str) -> bool {
-    let b = text.as_bytes();
-    let lower = text.to_ascii_lowercase();
-    let mut from = 0usize;
-    while let Some(rel) = lower[from..].find("seen") {
-        let at = from + rel;
-        let before_ok = at == 0 || !is_word_byte(b[at - 1]);
-        let after = at + 4;
-        let after_ok = after >= b.len() || !is_word_byte(b[after]);
-        if before_ok && after_ok {
-            return true;
-        }
-        from = at + 1;
-    }
-    false
-}
-
-/// Python's `\w` for the `\b` boundary either side of `SEEN`.
-fn is_word_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_'
-}
-
 /// The turn's content, or `""`.
 fn content_of(turn: &Value) -> &str {
     turn.get("content").and_then(Value::as_str).unwrap_or("")
 }
 
-/// Replace the body of every reflect reply the model has ALREADY responded to.
-/// Python `drop_answered_reflects`.
-///
-/// The IN-FLIGHT reflect (the last turn, not yet answered) is left intact — the
-/// model is reading it right now. Everything older is a reflect it has already had
-/// its chance to distil.
-///
-/// FAIL CLOSED. The body drops only if the model actually WROTE the distillation
-/// in the turn that answered it. Measured 2026-08-20 (`live_plan`): the model
-/// replied to several reflects with a bare tool_call and no prose, the body was
-/// dropped anyway, and it had to re-fetch what it had lost — "The index was dropped
-/// from my view. Let me send it again and, THIS TIME, actually record the facts."
-/// Burning turns re-reading is the exact loop this trim exists to prevent, so a
-/// reflect the model did not distil is KEPT. Non-compliance then costs context,
-/// never comprehension.
-pub fn drop_answered_reflects(history: &[Value]) -> Vec<Value> {
+/// A `docs` reply the model has ANSWERED is cut to this stub (owner,
+/// 2026-10-05). The body itself stays HELD this run under its pid (owner,
+/// 2026-10-06): the model keeps the lines it needs with its own `grep`, and those
+/// small replies stay in its view. Python `_DOCS_DROPPED`.
+fn docs_dropped(of: &str, tier: &str, pid: &str, verb: &str) -> String {
+    format!(
+        "[docs of={of} tier={tier} — dropped from your view; held this run: send yourself \
+         <type>grep</type> <ids><item>{pid}</item></ids> <query>{verb}</query>]"
+    )
+}
+
+/// A REAL verb of this docs body for the grep example: the first that is not
+/// `reflect`/`boot`, else the first. A placeholder example is copied verbatim —
+/// measured 2026-10-06 (canvas E55/E58): `<query>verb</query>` was sent as written,
+/// matched only the `<verbs>` lines, and the model concluded the held body was gone.
+/// `None` when the body lists no verbs (nothing to keep, so nothing is held).
+/// Python `example_verb`.
+#[must_use]
+pub fn example_verb(body: &str) -> Option<String> {
+    let mut lines = body.lines().skip_while(|l| *l != "<verbs>").skip(1);
+    let mut names: Vec<String> = Vec::new();
+    while let Some(line) = lines.next() {
+        if line.starts_with("</verbs>") {
+            break;
+        }
+        // A top-level entry `<name>…</name>` starts a line; its doc may run on
+        // over more lines, up to its own closer.
+        let Some(name) = line
+            .strip_prefix('<')
+            .and_then(|r| r.split_once('>'))
+            .map(|(n, _)| n)
+            .filter(|n| {
+                n.starts_with(|c: char| c == '_' || c.is_ascii_alphabetic())
+                    && n.chars().all(|c| c == '_' || c.is_ascii_alphanumeric())
+            })
+        else {
+            continue;
+        };
+        let closer = format!("</{name}>");
+        if !line[name.len() + 2..].contains(&closer) && !lines.any(|l| l.contains(&closer)) {
+            break;
+        }
+        names.push(name.to_string());
+    }
+    names
+        .iter()
+        .find(|n| !matches!(n.as_str(), "reflect" | "boot"))
+        .or_else(|| names.first())
+        .cloned()
+}
+
+/// The FIRST line of a docs body: it is erased after the next message, and how to
+/// keep what the model will need. Python `_DOCS_HEAD`.
+#[must_use]
+pub fn docs_head(pid: i64, verb: &str) -> String {
+    format!(
+        "[erased from your view after your next message — decide now which verbs you need \
+         and keep them in this same turn: send yourself <type>grep</type> \
+         <ids><item>{pid}</item></ids> <query>{verb}</query> <width>1000</width>]\n"
+    )
+}
+
+/// The `<of>`/`<tier>` lines of a rendered docs body. Python `_DOCS_FIELD`
+/// (`^<(of|tier)>([^<\n]*)</\1>$`, multiline).
+fn docs_field(block: &str, key: &str) -> Option<String> {
+    let open = format!("<{key}>");
+    let close = format!("</{key}>");
+    block.split('\n').find_map(|line| {
+        let inner = line
+            .strip_prefix(open.as_str())?
+            .strip_suffix(close.as_str())?;
+        (!inner.contains('<')).then(|| inner.to_string())
+    })
+}
+
+/// Replace every `docs` reply body the model has answered with its stub. The
+/// reply in the last turn (not answered yet) stays whole; a refusal (no `of` in
+/// the body) stays whole. Python `drop_read_docs`.
+pub fn drop_read_docs(history: &[Value]) -> Vec<Value> {
     let mut out: Vec<Value> = Vec::with_capacity(history.len());
     for (i, turn) in history.iter().enumerate() {
-        let tagged = turn.get("role").and_then(Value::as_str) == Some("user")
-            && parse_reply_tag(content_of(turn)).is_some();
-        let answer = history[i + 1..]
+        let content = content_of(turn);
+        let answered = history[i + 1..]
             .iter()
-            .find(|t| t.get("role").and_then(Value::as_str) == Some("assistant"));
-        let answered = answer.is_some_and(|a| distilled(content_of(a)));
-        if !(tagged && answered) {
+            .any(|t| t.get("role").and_then(Value::as_str) == Some("assistant"));
+        if turn.get("role").and_then(Value::as_str) != Some("user")
+            || !answered
+            || parse_reply_tag(content).is_none()
+        {
             out.push(turn.clone());
             continue;
         }
-        // Per BLOCK: only the reflect bodies drop; sibling replies that share the
-        // turn (a batch arrives whole) stay verbatim.
-        let content = content_of(turn);
         let blocks = reply_blocks(content);
         let trimmed: Vec<String> = blocks
             .iter()
-            .map(|b| match parse_reply_tag(b) {
-                Some((agent, "reflect")) => reflect_dropped(agent),
-                _ => (*b).to_string(),
+            .map(|b| {
+                let docs = matches!(parse_reply_tag(b), Some((_, "docs")));
+                match (docs, docs_field(b, "of"), example_verb(b)) {
+                    (true, Some(of), Some(verb)) => {
+                        let head = b.split('\n').next().unwrap_or(b);
+                        let tier = docs_field(b, "tier").unwrap_or_default();
+                        let pid = head
+                            .strip_prefix("[reply to ")
+                            .and_then(|r| r.split(' ').next())
+                            .unwrap_or("-");
+                        format!("{head}\n{}", docs_dropped(&of, &tier, pid, &verb))
+                    }
+                    _ => (*b).to_string(),
+                }
             })
             .collect();
         if trimmed
@@ -222,15 +237,38 @@ pub fn drop_answered_reflects(history: &[Value]) -> Vec<Value> {
         {
             out.push(turn.clone());
         } else {
-            // KEEP THE ROW'S KEYS — python `{**turn, "content": …}`. Rebuilding a
-            // bare `{role, content}` dropped `id`/`parent`/`agent`/`ts`, so
-            // `next_span` skipped the row, `save_view` left it out of the array
-            // and the estimate lost its bytes (measured: rust fold 1054 carried 7
-            // refs where python/swift carried 8).
             out.push(with_content(turn, trimmed.join("\n\n")));
         }
     }
     out
+}
+
+/// A refusal of the model's own call — a verb its target does not answer
+/// (`unhandled`, naming that verb), or an argument it did not send (`missing_arg`
+/// naming the `arg`) — names where the fix is, `docs`, when it carries no hint of
+/// its own. Decided on the machine `reason`, never on prose. Python
+/// `point_to_docs`.
+#[must_use]
+pub fn point_to_docs(target: &str, verb: &str, result: &Value) -> Option<Value> {
+    let o = result.as_object()?;
+    if o.contains_key("hint") {
+        return None;
+    }
+    let reason = o.get("reason").and_then(Value::as_str);
+    let hint = if reason == Some("unhandled") && o.get("verb").and_then(Value::as_str) == Some(verb)
+    {
+        format!("the verbs {target} answers: send kernel {{type: docs, of: '{target}'}}")
+    } else if reason == Some("missing_arg") && o.get("arg").is_some_and(fantastic_bundle::py_truthy)
+    {
+        format!(
+            "how to call it: send kernel {{type: docs, of: '{target}', verb: '{verb}', tier: detailed}}"
+        )
+    } else {
+        return None;
+    };
+    let mut m = o.clone();
+    m.insert("hint".to_string(), Value::String(hint));
+    Some(Value::Object(m))
 }
 
 /// The row with a NEW `content` and every other key intact — python's
@@ -371,20 +409,6 @@ mod tests {
                 assert!(r.get("ts").is_some(), "the row lost its ts: {r:#?}");
             }
         };
-        // `drop_answered_reflects`: an ANSWERED reflect body becomes a stub.
-        let reflect = "[reply to 11 \u{b7} notes reflect]\nverbs: read, write".to_string();
-        let answered = vec![
-            row(11, reflect.clone()),
-            json!({"role": "assistant", "content": "seen: notes reads and writes"}),
-        ];
-        let out = drop_answered_reflects(&answered);
-        assert_ne!(
-            out[0]["content"],
-            json!(reflect),
-            "the body must be stubbed"
-        );
-        keys(&out);
-
         // `dedupe_stale_reads`: a SUPERSEDED whole-state block drops from a turn
         // whose sibling block stays.
         let batch = "[reply to 11 \u{b7} notes reflect]\nold state\n\n\
@@ -461,89 +485,11 @@ mod tests {
         assert!(all.contains("reading_2 = 42"), "{all}");
     }
 
-    #[test]
-    fn answered_reflects_are_stubbed_but_the_in_flight_one_survives() {
-        let body = [
-            turn(
-                "user",
-                &format!(
-                    "[reply to notes:aaa · notes reflect]\n{}",
-                    "TREE".repeat(200)
-                ),
-            ),
-            turn(
-                "assistant",
-                "SEEN notes — key/value store; verbs read/set/keys.",
-            ),
-            turn(
-                "user",
-                &format!(
-                    "[reply to assets:bbb · assets reflect]\n{}",
-                    "TREE".repeat(200)
-                ),
-            ),
-        ];
-        let out = drop_answered_reflects(&body);
-        // answered → stubbed, and the stub still NAMES the agent, so "I already
-        // looked at this" stays true and the model does not re-reflect out of doubt
-        assert!(!text(&out[0]).contains("TREE") && text(&out[0]).contains("notes"));
-        // the model's own distillation is untouched — it is the record now
-        assert_eq!(out[1], body[1]);
-        // the IN-FLIGHT reflect is verbatim: the model is reading it this very turn
-        assert_eq!(out[2], body[2]);
-    }
-
-    /// FAIL CLOSED. Measured 2026-08-20 (`live_plan`): the model answered several
-    /// reflects with a bare tool_call and no prose. The body was dropped anyway, so
-    /// the facts were simply gone — "The index was dropped from my view. Let me send
-    /// it again and, THIS TIME, actually record the facts." Re-fetching what it lost
-    /// is the exact loop this trim exists to prevent, so a reflect the model did not
-    /// distil must survive: non-compliance costs context, never comprehension.
-    #[test]
-    fn a_reflect_the_model_did_not_distil_is_kept() {
-        let body = [
-            turn(
-                "user",
-                &format!(
-                    "[reply to notes:aaa · notes reflect]\n{}",
-                    "TREE".repeat(100)
-                ),
-            ),
-            turn("assistant", r#"<tool_call>{"name":"send",...}</tool_call>"#),
-            turn(
-                "user",
-                &format!(
-                    "[reply to assets:bbb · assets reflect]\n{}",
-                    "FACTS".repeat(100)
-                ),
-            ),
-            turn(
-                "assistant",
-                "SEEN assets — public web assets; verbs read/list.",
-            ),
-            turn("user", "next"),
-        ];
-        let out = drop_answered_reflects(&body);
-        assert!(
-            text(&out[0]).contains("TREE"),
-            "undistilled reflect must be KEPT"
-        );
-        assert!(
-            !text(&out[2]).contains("FACTS"),
-            "distilled reflect is dropped"
-        );
-        assert!(
-            text(&out[2]).contains("assets"),
-            "the stub still names the agent"
-        );
-    }
-
-    /// A batch arrives as ONE turn holding several `[reply to …]` blocks. Both
-    /// trimmers work per BLOCK: a distilled reflect block drops alone, its sibling
-    /// replies stay; a superseded whole-state block dedupes alone. Treating the turn
-    /// as one reply either deleted siblings (`drop_answered_reflects` replaced the
-    /// WHOLE content) or trimmed nothing (a count guard skipped every multi-reply
-    /// turn — tried 2026-08-25, superseded same day).
+    /// A batch arrives as ONE turn holding several `[reply to …]` blocks. The
+    /// trimmer works per BLOCK: a superseded whole-state block dedupes alone, its
+    /// sibling replies stay. Treating the turn as one reply either deleted siblings
+    /// or trimmed nothing (a count guard skipped every multi-reply turn — tried
+    /// 2026-08-25, superseded same day).
     #[test]
     fn a_combined_turn_trims_per_block_never_whole() {
         let combined = format!(
@@ -553,21 +499,9 @@ mod tests {
         );
         let body = [
             turn("user", &combined),
-            turn(
-                "assistant",
-                "SEEN kernel_state — the root; verbs create/list.",
-            ),
+            turn("assistant", "noted"),
             turn("user", "[reply to ks:a2 · kernel_state reflect]\nNEW TREE"),
         ];
-        let out = drop_answered_reflects(&body);
-        assert!(
-            !text(&out[0]).contains(&"TREE".repeat(5)),
-            "distilled reflect block drops"
-        );
-        assert!(
-            text(&out[0]).contains("reading_1 = 41"),
-            "sibling block must SURVIVE"
-        );
 
         let out2 = dedupe_stale_reads(&body);
         let first = text(&out2[0]);
@@ -600,9 +534,9 @@ mod tests {
     }
 
     /// The tag matcher is python's regex, hand-scanned — including the `[^\]]*`
-    /// that absorbs the batch suffix, and the fail-closed `SEEN` boundary.
+    /// that absorbs the batch suffix.
     #[test]
-    fn the_tag_matcher_and_the_seen_boundary_are_pythons() {
+    fn the_tag_matcher_is_pythons() {
         assert_eq!(
             parse_reply_tag("[reply to a:1 · notes reflect]\nbody"),
             Some(("notes", "reflect"))
@@ -613,11 +547,5 @@ mod tests {
         );
         assert_eq!(parse_reply_tag("no tag here"), None);
         assert_eq!(parse_reply_tag("[reply to a:1 notes reflect]"), None);
-        // `\bSEEN\b`, any case, anywhere — and NOT inside a longer word.
-        assert!(distilled("seen notes — a store"));
-        assert!(distilled("I have SEEN it."));
-        assert!(!distilled("unforeseen consequences"));
-        assert!(!distilled("SEENING"));
-        assert!(!distilled("a bare tool call and no prose"));
     }
 }

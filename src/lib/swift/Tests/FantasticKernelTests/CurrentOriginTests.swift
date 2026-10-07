@@ -38,8 +38,7 @@ struct CurrentOriginTests {
     @Test func aHandlerReadsItsCallerNotItself() async {
         // `currentSender` inside a handler is that handler's OWN agent — the
         // callee. A bundle whose payload NAMES a resource needs the CALLER,
-        // which is what `currentOrigin` carries. Without it an agent could write
-        // another agent's namespace through a blob verb and nothing could tell.
+        // which is what `currentOrigin` carries.
         let seen = Seen()
         let registry = BundleRegistry()
         registry.register("origin_spy.tools", SpyBundle(seen: seen))

@@ -112,16 +112,10 @@ _state_quiet: contextvars.ContextVar[bool] = contextvars.ContextVar(
 # WHO CALLED THIS DISPATCH. `_current_sender` is rewritten to the TARGET's id
 # the moment a handler runs (`Agent._dispatch`), so a handler cannot see its
 # caller — the gate is the only place that identity has ever existed. That is
-# fine while every authorization decision is `(sender, target, verb)`, which the
-# gate owns. It is NOT fine when a verb's PAYLOAD names a resource: `persist_blob`
-# takes the namespace to write as `agent_id`, so without the caller the loader
-# cannot tell "persist my own memory" from "overwrite someone else's".
-#
-# Measured 2026-08-23: an agent holding exactly
-# `can_call: {kernel_state: [persist_blob]}` wrote another agent's `state.yaml`,
-# and the victim read the forged content back as its own memory. The believed
-# defence was POSITION (the root accepts `$subtree`, a grandchild is not one) —
-# but every agent an operator creates at the root IS a direct child.
+# fine for authorization — every decision is `(sender, target, verb)`, which the
+# gate owns, and grants are the only rule. A handler still needs its CALLER when
+# the answer goes back to it later (an inquiry's asker) or when it records who
+# acted (`stop`'s stopper), and to tell an operator send from an agent's.
 #
 # `None` means OPERATOR ORIGIN, which an agent cannot forge: the CLI, the cold
 # bootstrap, a transport handing an inbound frame to its leg, or the kernel

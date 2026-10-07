@@ -39,17 +39,14 @@ _AI_TAIL = [
 ]
 
 
-#: the backends that REQUIRE a shared field (set on the record, used as set —
-#: no default): vllm_backend's `context_window`, the server's window.
-_REQUIRED_SHARED = {"vllm_backend": ("context_window",)}
+#: the shared fields a backend declares itself (its own field replaces the shared
+#: one): vllm_backend's `context_window`, read from the server when left out.
+_OVERRIDDEN = {"vllm_backend": ("context_window",)}
 
 
 def _tail(backend):
-    req = _REQUIRED_SHARED.get(backend, ())
-    return [
-        (n, ty, True, None, en) if n in req else (n, ty, r, d, en)
-        for (n, ty, r, d, en) in _AI_TAIL
-    ]
+    own = _OVERRIDDEN.get(backend, ())
+    return [t for t in _AI_TAIL if t[0] not in own]
 
 
 #: (name, type, required, default-or-None, enum-or-None) per field, in order.
@@ -76,9 +73,11 @@ SCHEMAS = {
     "vllm_backend": (
         [
             ("endpoint", "str", True, None, None),
-            ("model", "str", True, None, None),
-            ("max_tokens", "int", True, None, None),
-            ("kv_slots", "int", True, None, None),
+            ("model", "str", False, None, None),
+            ("max_tokens", "int", False, None, None),
+            ("context_window", "int", False, None, None),
+            ("kv_slots", "int", False, None, None),
+            ("metrics_url", "str", False, None, None),
             ("kv_overflow", "enum", True, None, ["evict", "reject"]),
             ("temperature", "float", False, 0.2, None),
             ("top_p", "float", False, 0.8, None),
@@ -165,9 +164,18 @@ def test_the_schema_builders_refuse_malformed_fields():
     with pytest.raises(ValueError) as e:
         field("x", "int", "h", required=True, default=3)
     assert str(e.value) == "field 'x': a required field has no default"
+    # a backend field named like a shared one REPLACES it, in the backend's place
+    sch = schema([field("recent_n", "int", "h")])
+    assert [f["name"] for f in sch["fields"]].count("recent_n") == 1
+    assert sch["fields"][0] == {
+        "name": "recent_n",
+        "type": "int",
+        "required": False,
+        "hint": "h",
+    }
     with pytest.raises(ValueError) as e:
-        schema([field("recent_n", "int", "h")])
-    assert str(e.value).startswith("duplicate field in schema: ['recent_n', ")
+        schema([field("x", "int", "h"), field("x", "int", "h")])
+    assert str(e.value).startswith("duplicate field in schema: ['x', 'x', ")
     assert [f["name"] for f in AI_FIELDS] == [t[0] for t in _AI_TAIL]
 
 
@@ -470,9 +478,9 @@ def test_vllm_make_provider_builds_the_effective_posture(monkeypatch):
 
 
 def test_vllm_window_is_the_records_context_window_as_set(monkeypatch):
-    """`context_window` is a REQUIRED property of a vllm record — the server's
-    window, set on the record and used as set (never a default); the whole-window
-    rule compares max_tokens with it."""
+    """`context_window` is the server's window — set on the record, or read from
+    the server before the turn — and used as set (never a default); the
+    whole-window rule compares max_tokens with it."""
     from vllm_backend.provider import VllmProvider
     from vllm_backend.tools import make_provider
 
@@ -487,9 +495,7 @@ def test_vllm_window_is_the_records_context_window_as_set(monkeypatch):
     make_provider("v", _K({**base, "context_window": 262144}))
     ((_, a),) = spy.calls
     assert a["window"] == 262144
-    with pytest.raises(
-        ValueError, match="`context_window` is required on the agent record"
-    ):
+    with pytest.raises(ValueError, match="`context_window` is not on the agent record"):
         make_provider("v", _K(base))
 
 
@@ -503,8 +509,8 @@ def test_vllm_window_is_the_records_context_window_as_set(monkeypatch):
         ),
         (
             {"endpoint": "e", "model": "m", "kv_slots": 1, "kv_overflow": "evict"},
-            "vllm_backend: `max_tokens` is required on the agent record, a positive "
-            "int — nothing is guessed (update_agent <id> max_tokens=…)",
+            "vllm_backend: `max_tokens` is not on the agent record, a positive int, and "
+            "was not read from the server (update_agent <id> max_tokens=…)",
         ),
         (
             {
@@ -515,8 +521,8 @@ def test_vllm_window_is_the_records_context_window_as_set(monkeypatch):
                 "kv_slots": True,
                 "kv_overflow": "evict",
             },
-            "vllm_backend: `kv_slots` is required on the agent record, a positive "
-            "int — nothing is guessed (update_agent <id> kv_slots=…)",
+            "vllm_backend: `kv_slots` is not on the agent record, a positive int, and "
+            "was not read from the server (update_agent <id> kv_slots=…)",
         ),
         (
             {"endpoint": "e", "model": "m", "max_tokens": 1, "kv_slots": 1},
@@ -587,11 +593,7 @@ _SHARED = (
     "context_window",
     "context_strategy",
     "memory_store_id",
-    "verbs",
     "generating",
-    "cancel",
-    "emits",
-    "concurrency",
 )
 
 
@@ -631,9 +633,7 @@ async def test_responses_reflects_no_extras(seeded_kernel):
     assert list(r) == list(_SHARED) + [
         "can_call",
         "callable_by",
-        "kernel_verbs",
         "tree",
-        "more",
     ]
     assert (r["model"], r["endpoint"]) == ("stub", "http://127.0.0.1:9/v1")
 

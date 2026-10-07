@@ -120,10 +120,27 @@ pub(crate) struct AppState {
 /// The HTTP host bundle.
 pub struct WebBundle;
 
+/// HOW TO CALL a web host — python's `VERBS` docstrings (first line each),
+/// served by the kernel's `docs` verb.
+fn verb_docs_json() -> Value {
+    json!({
+        "reflect": "Identity + uvicorn port + running flag + currently mounted surfaces (process-local; reflect the live serve for truth).",
+        "boot": "Idempotent. Builds the host on rec.port (required, no default), mounts each",
+        "stop": "No args. Asks uvicorn to shut down; cancels its task. Returns {stopped:bool}.",
+        "mount": "args: child_id:str (req). Pulls `get_routes` from the named child and (re)mounts its routes onto the live app. Idempotent — unmounts any prior routes for the child first.",
+        "unmount": "args: child_id:str (req). Removes every route belonging to the named child from the live app.",
+        "fetch_file": "args: agent_id:str (req), path:str (req), offset:int (req), length:int (req). One `read_stream` chunk of `path` on `agent_id`, read AS THIS HOST — the file route hands every browser fetch here, so the served agent's gates judge `web`. Returns that agent's reply.",
+    })
+}
+
 #[async_trait]
 impl Bundle for WebBundle {
     fn name(&self) -> &str {
         "web"
+    }
+
+    fn verb_docs(&self) -> Value {
+        verb_docs_json()
     }
 
     fn readme(&self) -> Option<&'static str> {
@@ -161,7 +178,12 @@ impl Bundle for WebBundle {
             "unmount" => unmount_reply(agent_id, payload).await,
             _ => {
                 let raw = payload.get("type").cloned().unwrap_or(Value::Null);
-                json!({"error": format!("web: unknown type {}", py_repr_value(&raw))})
+                let mut r = fantastic_kernel::refusal::refusal(
+                    fantastic_kernel::refusal::UNHANDLED,
+                    format!("web: unknown type {}", py_repr_value(&raw)),
+                );
+                fantastic_kernel::refusal::with(&mut r, "verb", raw);
+                r
             }
         };
         Ok(Some(reply))
@@ -244,17 +266,6 @@ async fn reflect_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
     out.insert(
         "browser_reachable".into(),
         json!(browser_reachable(agent_id, kernel)),
-    );
-    out.insert(
-        "verbs".into(),
-        json!({
-            "reflect": "Identity + uvicorn port + running flag + currently mounted surfaces (process-local; reflect the live serve for truth).",
-            "boot": "Idempotent. Builds the host on rec.port (required, no default), mounts each",
-            "stop": "No args. Asks uvicorn to shut down; cancels its task. Returns {stopped:bool}.",
-            "mount": "args: child_id:str (req). Pulls `get_routes` from the named child and (re)mounts its routes onto the live app. Idempotent — unmounts any prior routes for the child first.",
-            "unmount": "args: child_id:str (req). Removes every route belonging to the named child from the live app.",
-            "fetch_file": "args: agent_id:str (req), path:str (req), offset:int (req), length:int (req). One `read_stream` chunk of `path` on `agent_id`, read AS THIS HOST — the file route hands every browser fetch here, so the served agent's gates judge `web`. Returns that agent's reply.",
-        }),
     );
     Value::Object(out)
 }

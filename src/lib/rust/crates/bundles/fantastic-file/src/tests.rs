@@ -863,7 +863,7 @@ async fn reflect_key_order_matches_python() {
         .unwrap()
         .keys()
         .map(String::as_str)
-        .take(11)
+        .take(10)
         .collect();
     assert_eq!(
         keys,
@@ -875,7 +875,6 @@ async fn reflect_key_order_matches_python() {
             "allow_count",
             "edit_grammar",
             "compose",
-            "verbs",
             "ingress_rule",
             "egress_rule",
             "sealed",
@@ -899,10 +898,10 @@ async fn reflect_key_order_matches_python() {
 }
 
 #[test]
-fn reflect_verbs_are_python_docstring_first_lines() {
+fn verb_docs_are_python_docstring_first_lines() {
     // A2.16 — the first line of each python docstring, in python's VERBS order.
-    let reply = reflect_reply(&AgentId::from("fb"), &Map::new(), &Ok(PathBuf::from("/")));
-    let verbs = reply["verbs"].as_object().unwrap();
+    let docs = FileBundle::default().verb_docs();
+    let verbs = docs.as_object().unwrap();
     assert_eq!(
         verbs.keys().map(String::as_str).collect::<Vec<_>>(),
         [

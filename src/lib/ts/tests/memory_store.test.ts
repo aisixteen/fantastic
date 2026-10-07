@@ -51,7 +51,7 @@ function probeBundle(k: Kernel): Probe {
     }
     if (verb === "fail") throw new Error("probe failed on purpose");
     return { error: `unknown ${String(verb)}`, reason: "unhandled" };
-  });
+  }, { shutdown: "wraps up" });
   return p;
 }
 
@@ -61,7 +61,6 @@ function mk(k: Kernel, id = "probe", meta: Payload = {}): string {
       id,
       parentId: ROOT,
       handlerModule: "mem_probe.ts",
-      verbs: { shutdown: "wraps up" },
       meta: { callable_by: { $parent: "*", caller: "*" }, ...meta },
     }),
   );

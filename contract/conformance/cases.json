@@ -12,8 +12,7 @@
       },
       "expect_keys": [
         "id",
-        "sentence",
-        "verbs"
+        "sentence"
       ],
       "expect": {
         "id": "c21_probe"
@@ -74,8 +73,7 @@
       },
       "expect_keys": [
         "id",
-        "tree",
-        "kernel_verbs"
+        "tree"
       ],
       "pairwise": false,
       "note": "pairwise:false — the reply is checked for SHAPE on every transport but never byte-diffed: the root's live state (its grants, the ledger-driven tree) differs between the legs' runs."

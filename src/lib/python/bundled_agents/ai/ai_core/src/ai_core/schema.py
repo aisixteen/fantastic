@@ -123,17 +123,12 @@ def credentials_field(*, required: bool) -> dict:
     )
 
 
-def schema(backend_fields, *, require: tuple = ()) -> dict:
-    """A backend's whole record schema: its own fields, then `AI_FIELDS`. `require`
-    names shared fields this backend cannot run without — required, no default
-    (vllm_backend: `context_window`, the server's window, is never guessed)."""
-    shared = [
-        {k: v for k, v in f.items() if k != "default"} | {"required": True}
-        if f["name"] in require
-        else f
-        for f in AI_FIELDS
-    ]
-    fields = [*backend_fields, *shared]
+def schema(backend_fields) -> dict:
+    """A backend's whole record schema: its own fields, then `AI_FIELDS`. A backend
+    field named like a shared one REPLACES it (vllm_backend: `context_window` has no
+    default there — left out, it is read from the server)."""
+    own = {f["name"] for f in backend_fields}
+    fields = [*backend_fields, *(f for f in AI_FIELDS if f["name"] not in own)]
     names = [f["name"] for f in fields]
     if len(names) != len(set(names)):
         raise ValueError(f"duplicate field in schema: {names}")

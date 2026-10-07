@@ -68,40 +68,14 @@ extension Kernel {
         return parts.last.map(String.init) ?? ""
     }
 
-    /// Refuse a blob verb that names SOMEONE ELSE'S namespace.
-    ///
-    /// `agent_id` is the namespace and it arrives in the PAYLOAD — so without
-    /// this, any agent granted `persist_blob` could write any OTHER agent's
-    /// sidecar. Measured 2026-08-23 (python): an agent holding exactly
-    /// `can_call: {loader: [persist_blob]}` overwrote another agent's
-    /// `state.yaml`, and the victim read the forged content back as its own
-    /// memory.
-    ///
-    /// The defence was believed to be POSITION — the root accepts `$subtree`,
-    /// and a grandchild is not one — but a DIRECT child passes that check, and
-    /// every agent an operator creates at the root is a direct child. Position
-    /// bounds who can REACH the verb; it says nothing about which namespace they
-    /// may NAME.
-    ///
-    /// An OPERATOR send (origin nil: the CLI, a test driver) stays ungated — an
-    /// agent cannot forge it. An AGENT may only name ITSELF.
-    static func guardBlobOwner(_ aid: String, caller: AgentId?) -> String? {
-        guard let caller else { return nil }
-        if caller.value == aid { return nil }
-        return
-            "\(pyRepr(caller.value)) may not use another agent's namespace \(pyRepr(aid)) —"
-            + " an agent's blob verbs are scoped to itself; only an operator may name"
-            + " a namespace it does not own"
-    }
-
     /// Shared preamble: validate, authorize, resolve the store-relative path.
     ///
     /// PYTHON'S ORDER AND PYTHON'S TEXTS (`kernel_state._persist_blob` /
-    /// `_load_blob`): agent_id, name, owner, then the store. Every refusal is a
-    /// BARE `{error}` (plus `reason` on the owner denial) — these are the
+    /// `_load_blob`): agent_id, name, then the store. Every refusal is a
+    /// BARE `{error}` — these are the
     /// loader's own replies, not kernel refusals, so they carry no code and no
     /// `side`.
-    private func resolveBlob(_ verb: String, _ payload: JSON, caller: AgentId?) -> (
+    private func resolveBlob(_ verb: String, _ payload: JSON) -> (
         ok: (store: AgentId, name: String, path: String)?, refusal: JSON?
     ) {
         guard let aid = payload["agent_id"].asString, !aid.isEmpty else {
@@ -111,14 +85,6 @@ extension Kernel {
         guard let name = checked.name else {
             return (
                 nil, .object(["error": .string("\(verb): \(checked.error ?? "bad name")")])
-            )
-        }
-        if let why = Kernel.guardBlobOwner(aid, caller: caller) {
-            return (
-                nil,
-                .object([
-                    "error": .string("\(verb): \(why)"), "reason": .string("unauthorized"),
-                ])
             )
         }
         guard let store = findStore() else {
@@ -158,7 +124,7 @@ extension Kernel {
             .object([
                 "type": .string("persist_blob"), "agent_id": .string(me.value),
                 "name": .string(name), "content": .string(content),
-            ]), caller: me)
+            ]))
     }
 
     /// `loadOwnBlob` — `persistOwnBlob`'s read: one of the running agent's own
@@ -171,18 +137,13 @@ extension Kernel {
             .object([
                 "type": .string("load_blob"), "agent_id": .string(me.value),
                 "name": .string(name),
-            ]), caller: me)
+            ]))
     }
 
-    /// `persist_blob` — whole-file write of one sidecar. The verb path: the
-    /// caller is the dispatch's origin.
+    /// `persist_blob` — whole-file write of one sidecar.
     public func persistBlob(_ payload: JSON) async -> JSON {
-        await persistBlob(payload, caller: KernelTaskLocals.currentOrigin)
-    }
-
-    private func persistBlob(_ payload: JSON, caller: AgentId?) async -> JSON {
-        let r = resolveBlob("persist_blob", payload, caller: caller)
-        // CONTENT IS CHECKED BETWEEN THE OWNER GUARD AND THE STORE LOOKUP in
+        let r = resolveBlob("persist_blob", payload)
+        // CONTENT IS CHECKED BETWEEN THE NAME GUARD AND THE STORE LOOKUP in
         // python, so a contentless call with no store wired says `content (str)
         // required`, not `no store wired`. `resolveBlob` ends at the store, so
         // the content test runs on its refusal too when that refusal IS the
@@ -230,11 +191,7 @@ extension Kernel {
     /// empty rather than erroring, because "nothing saved yet" is the normal
     /// first state.
     public func loadBlob(_ payload: JSON) async -> JSON {
-        await loadBlob(payload, caller: KernelTaskLocals.currentOrigin)
-    }
-
-    private func loadBlob(_ payload: JSON, caller: AgentId?) async -> JSON {
-        let r = resolveBlob("load_blob", payload, caller: caller)
+        let r = resolveBlob("load_blob", payload)
         guard let ok = r.ok else { return r.refusal ?? .null }
         var chunks = Data()
         var offset = 0

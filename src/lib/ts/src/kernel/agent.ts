@@ -12,6 +12,9 @@ export type Handler = (
   kernel: Kernel,
 ) => Promise<Json> | Json;
 
+/** verb -> its doc — what a bundle declares at registration and `docs` serves. */
+export type VerbDocs = { [verb: string]: string };
+
 export interface AgentInit {
   id: string;
   /** Names the JS view bundle (local) or a host bundle (forwarded). */
@@ -19,8 +22,9 @@ export interface AgentInit {
   parentId?: string | null;
   /** One-line "what am I" — surfaced by reflect; defaults per root/bare. */
   sentence?: string | null;
-  /** verb -> one-line doc; surfaced by reflect when present. */
-  verbs?: { [verb: string]: string } | null;
+  /** verb -> doc for THIS agent, set by a host that stamps docs per agent;
+   *  `docs` reads it before the bundle's own table (`Kernel.registerBundle`). */
+  verbs?: VerbDocs | null;
   /** Free-form identity fields surfaced by reflect (display_name, description, …). */
   meta?: Payload;
   /** Local dispatch fn; null = bare or host-forwarded. */
@@ -37,7 +41,7 @@ export class Agent {
   handlerModule: string | null;
   parentId: string | null;
   sentence: string | null;
-  verbs: { [verb: string]: string } | null;
+  verbs: VerbDocs | null;
   meta: Payload;
   handler: Handler | null;
   children: Map<string, Agent>;

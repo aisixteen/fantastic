@@ -322,6 +322,19 @@ def _descents(msgs, aid) -> list[str]:
     return out
 
 
+def _pending(aid: str, coro):
+    """Schedule a test's message to `aid`, PENDING until sent: the drive loop does not
+    call the chain over while the test still has one to deliver (`helpers.ai.LATER`)."""
+    import asyncio
+
+    from helpers.ai import LATER
+
+    task = asyncio.create_task(coro)
+    LATER.setdefault(aid, set()).add(task)
+    task.add_done_callback(lambda t: LATER.get(aid, set()).discard(t))
+    return task
+
+
 async def send_later(root, aid: str, text: str, delay: float, *, client_id: str | None = None):
     """The HUMAN sends another message while the agent is mid-run. It queues behind the
     agent's FIFO lock and starts a new ROOT when the current turn ends — which is how two
@@ -333,7 +346,7 @@ async def send_later(root, aid: str, text: str, delay: float, *, client_id: str 
         await call(root, "user", {"type": "send", "target": aid,
                                   "payload": {"type": "send", "text": text,
                                               "client_id": client_id or aid}})
-    return asyncio.create_task(_go())
+    return _pending(aid, _go())
 
 
 def done_calls(rows: list[dict]) -> int:
@@ -397,7 +410,43 @@ async def send_when(root, core, aid: str, text: str, ready, *, max_wait: float, 
             await asyncio.sleep(poll)
         await call(root, "user", {"type": "send", "target": aid,
                                   "payload": {"type": "send", "text": text, "client_id": aid}})
-    return asyncio.create_task(_go())
+    return _pending(aid, _go())
+
+
+async def send_in_turn(root, aid: str, texts: list[str], *, quiet: float = 1.0,
+                       max_wait: float = 600.0, client_id: str | None = None):
+    """The HUMAN sends each message as soon as the agent has FINISHED the one before —
+    its own work was seen running, then stayed quiet for `quiet` s — so messages still
+    arrive one after another, over time, without the idle a fixed timer leaves when a
+    task ends early (measured 2026-10-07: flat_roots idled 603 of 1067 s, fold_paging
+    525 of 782 s, on 20/22 s × i timers). The FIRST waits for the run's own first task to
+    start and end. `max_wait` per message bounds a stalled agent: the message goes
+    regardless. One pending task for the whole sequence (the drive loop keeps the chain
+    open while it is pending)."""
+    import asyncio
+    import time
+
+    from helpers.ai import _live_tasks
+
+    async def _after_current() -> None:
+        end = time.monotonic() + max_wait
+        seen, quiet_since = False, None
+        while time.monotonic() < end:
+            if await _live_tasks(root, aid):
+                seen, quiet_since = True, None
+            elif seen:
+                quiet_since = quiet_since or time.monotonic()
+                if time.monotonic() - quiet_since >= quiet:
+                    return
+            await asyncio.sleep(0.25)
+
+    async def _go():
+        for text in texts:
+            await _after_current()
+            await call(root, "user", {"type": "send", "target": aid,
+                                      "payload": {"type": "send", "text": text,
+                                                  "client_id": client_id or aid}})
+    return _pending(aid, _go())
 
 
 async def send_payload_later(root, aid: str, payload: dict, delay: float):
@@ -407,7 +456,7 @@ async def send_payload_later(root, aid: str, payload: dict, delay: float):
     async def _go():
         await asyncio.sleep(delay)
         return await call(root, "user", {"type": "send", "target": aid, "payload": payload})
-    return asyncio.create_task(_go())
+    return _pending(aid, _go())
 
 
 async def inject_row(core, root, aid: str, row: dict) -> None:

@@ -92,7 +92,7 @@ struct AIRefusalPinTests {
         )
     }
 
-    @Test func inquiryOpenAndCloseRefusals() async throws {
+    @Test func inquiryTextRefusals() async throws {
         let (k, id) = try await freshMockKernel(
             config: baseConfig {
                 MockProvider(tokens: ["I would pick b. " + doneEnvelope])
@@ -101,18 +101,11 @@ struct AIRefusalPinTests {
             #"{"error":"inquiry: `text` must be a non-empty string","reason":"missing_arg","arg":"text"}"#
         #expect(await send(k, id.value, ["type": "inquiry"]) == empty)
         #expect(await send(k, id.value, ["type": "inquiry", "text": " \n "]) == empty)
-        // a turn that never emits `inquiry_answer` is told so — its prose is not
-        // harvested as the answer
-        #expect(
-            await send(k, id.value, ["type": "inquiry", "text": "a or b?", "request_id": "r-1"])
-                == #"{"error":"you were sent an inquiry and did not answer it: emit "#
-                + #"<call name=\"inquiry_answer\"><answer>what you concluded</answer></call>","#
-                + #""reason":"unhandled","request_id":"r-1"}"#)
-        #expect(
-            await send(k, id.value, ["type": "inquiry", "text": "a or b?"])
-                == #"{"error":"you were sent an inquiry and did not answer it: emit "#
-                + #"<call name=\"inquiry_answer\"><answer>what you concluded</answer></call>","#
-                + #""reason":"unhandled","request_id":null}"#)
+        // Anything else is ACCEPTED at once (owner, 2026-10-06: fully async); a run
+        // that ends without `inquiry_answer` is told to the asker later
+        // (`InquiryAsyncTests`).
+        let accepted = await send(k, id.value, ["type": "inquiry", "text": "a or b?", "request_id": "r-1"])
+        #expect(accepted.hasPrefix(#"{"accepted":true,"re":"#) && accepted.hasSuffix(#","request_id":"r-1"}"#), "\(accepted)")
     }
 
     /// The store refused (here: the record names no agent): no turn runs, and

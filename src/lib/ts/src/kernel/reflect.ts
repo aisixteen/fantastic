@@ -1,5 +1,5 @@
 import type { Agent } from "./agent.ts";
-import { KERNEL_VERB_DOCS } from "./kernel_verbs.ts";
+import { BAD_ARG, refusal } from "./refusal.ts";
 import type { Json, Payload } from "./json.ts";
 import type { Kernel } from "./kernel.ts";
 import { page } from "./paging.ts";
@@ -11,11 +11,9 @@ import { page } from "./paging.ts";
 //
 // THE DEFAULT IS DISTILLED. It answers the question a caller has on most
 // messages — who do I send to? — with a ROSTER `{id, sentence, description?,
-// mode?, children}`, `kernel_verbs` cut to what precedes each doc's first
-// em-dash, and a `more` line naming the escalation. `detail:"full"` is the
-// orientation view: the WIRING tree (handler_module + posture on every node)
-// and every verb doc whole. The full view is not a superset — it carries no
-// `sentence` — so it is asked for once, not by default.
+// mode?, children}`. `detail:"full"` is the WIRING tree (handler_module +
+// posture on every node). A reflect says what an agent IS, never how to call it
+// (owner, 2026-10-05): verb docs are the `docs` kernel verb.
 
 export interface BundleInfo {
   name: string;
@@ -26,15 +24,6 @@ const ROOT_SENTENCE =
   "Fantastic kernel. Everything is reachable by sending messages to agents.";
 const BARE_SENTENCE =
   "Bare agent (no handler_module) — answers substrate verbs only.";
-
-/** The escalation line every DISTILLED reflect carries — python `_MORE_HINT`,
- *  verbatim (rust and swift carry the same bytes). */
-export const MORE_HINT =
-  "Distilled: every agent and what it is FOR. Reflect one agent for its verbs " +
-  "(<type>reflect</type>). Manual: <type>reflect</type> <readme>index</readme> - keys " +
-  "include system-verbs (ps/cancel/create_agent args) and self-extension (author your " +
-  "own durable tools). <detail>full</detail> on a reflect adds wiring and posture - ask " +
-  "for it only when you need to see how agents are plumbed, not to find one.";
 
 /** PURPOSE, not wiring — the reflect keys a roster node copies beyond its
  *  sentence (python `_PURPOSE_KEYS`). */
@@ -60,7 +49,8 @@ function displayName(agent: Agent): string {
 
 /** The identity block every reflect starts from: id + sentence + record
  *  fields + flat meta. This kernel answers reflect for EVERY agent (a bundle
- *  never builds its own), so a record's `sentence`/`verbs` are read here. */
+ *  never builds its own), so a record's `sentence` is read here; its `verbs`
+ *  are `docs`, never a reflect. */
 export function reflectIdentity(agent: Agent, rootId: string | null): Payload {
   const isRoot = agent.id === rootId || agent.parentId === null;
   const obj: Payload = {
@@ -71,33 +61,18 @@ export function reflectIdentity(agent: Agent, rootId: string | null): Payload {
     display_name: displayName(agent),
   };
   if (agent.description !== null) obj["description"] = agent.description;
-  if (agent.verbs !== null) obj["verbs"] = agent.verbs;
   for (const [k, v] of Object.entries(agent.meta)) {
     if (!(k in obj)) obj[k] = v;
   }
   return obj;
 }
 
-/** `kernel_verbs` at a resolution: FULL carries every doc whole, in order;
- *  DISTILLED carries every verb, sorted, cut at its doc's first em-dash — the
- *  docs state the consequence before it. The `_` line is never cut. */
-export function kernelVerbsView(full: boolean): Payload {
-  const { _: preamble, ...docs } = KERNEL_VERB_DOCS;
-  const out: Payload = { _: preamble as string };
-  const names = Object.keys(docs);
-  if (!full) names.sort();
-  for (const name of names) {
-    const doc = docs[name] as string;
-    out[name] = full ? doc : (doc.split("—")[0] as string).trim();
-  }
-  return out;
-}
-
 /**
  * Compose any reflect reply with the universal flags (python
  * `_apply_reflect_flags`), keys in python's order: identity, `description`,
- * the gate fields, `kernel_verbs`, the root frame, `tree`, `next`, `more`,
- * `bundles`, `bundles_next`, `readme`.
+ * the gate fields, the root frame, `tree`, `next`, `bundles`, `bundles_next`,
+ * `readme`. `show_subtrees` / `ignore_subtrees` cut the tree (python
+ * `kernel/_docs.subtree_filter`).
  *   detail  = distilled (default) | full
  *   tree    = all (default) | ids — decided by KEY PRESENCE: absent is `all`,
  *             any other present value (`none`, null, …) omits it; `ids` pages.
@@ -126,10 +101,6 @@ export function applyReflectFlags(
   for (const gate of ["can_call", "callable_by"]) {
     if (gate in target.meta && !(gate in obj)) obj[gate] = target.meta[gate] as Json;
   }
-  // #26 — advertised on EVERY agent, not just the root. Root-only was tried and
-  // REVERTED: a model that never reflected the root never saw the signatures.
-  obj["kernel_verbs"] = kernelVerbsView(full);
-
   // Kernel runtime identity + deployment context, on the ROOT only. This kernel
   // runs in the BROWSER — no OS env, so env is always "host" and version null.
   // Same field names + key order (runtime → peers → env → version) as the others.
@@ -149,17 +120,28 @@ export function applyReflectFlags(
   }
 
   const tree = "tree" in payload ? payload["tree"] : "all";
-  if (tree === "all") {
-    obj["tree"] = full ? treeNode(target) : roster(kernel, target);
-  } else if (tree === "ids") {
-    // The FLAT id index is the one tree shape that is a plain list, so it is the
-    // one that pages; the nested tree is never sliced (a page of it would be a
-    // forest with no root).
-    const p = page(descendantIds(target), payload);
-    obj["tree"] = p.page;
-    if (p.next !== null) obj["next"] = p.next;
+  if (tree === "all" || tree === "ids") {
+    const filt = subtreeFilter(kernel, payload, target);
+    if ("error" in filt) return filt;
+    const { show, ignore } = filt as { show: Agent[]; ignore: Set<string> };
+    const roots = show.length > 0 ? show : [target];
+    if (tree === "all") {
+      const nodes = roots.map((r) =>
+        ignore.has(r.id) ? prunedStub(r) : full ? treeNode(r, ignore) : roster(kernel, r, ignore),
+      );
+      obj["tree"] = show.length > 0 ? nodes : (nodes[0] as Payload);
+    } else {
+      // The FLAT id index is the one tree shape that is a plain list, so it is the
+      // one that pages; the nested tree is never sliced (a page of it would be a
+      // forest with no root). A pruned branch stands as its stub.
+      const flat: Json[] = roots.flatMap((r) => descendantEntries(r, ignore));
+      const p = page(flat, payload, (x) =>
+        typeof x === "string" ? x : String((x as Payload)["id"]),
+      );
+      obj["tree"] = p.page;
+      if (p.next !== null) obj["next"] = p.next;
+    }
   }
-  if (!full) obj["more"] = MORE_HINT;
 
   const bundles = payload["bundles"];
   if (bundles === "all") {
@@ -190,7 +172,7 @@ export function applyReflectFlags(
 /** python `_roster`: `{id, sentence?, description?, mode?, children}` — the tree
  *  carrying what each agent is FOR. A reflect that passed the gate returns the
  *  tree whole. */
-function roster(kernel: Kernel, a: Agent): Payload {
+function roster(kernel: Kernel, a: Agent, ignore: Set<string> = new Set()): Payload {
   const raw = reflectIdentity(a, kernel.rootId);
   const node: Payload = { id: a.id };
   if (raw["sentence"]) node["sentence"] = raw["sentence"];
@@ -199,13 +181,15 @@ function roster(kernel: Kernel, a: Agent): Payload {
     const v = raw[k];
     if (v !== undefined && v !== null) node[k] = v;
   }
-  node["children"] = [...a.children.values()].map((c) => roster(kernel, c));
+  node["children"] = [...a.children.values()].map((c) =>
+    ignore.has(c.id) ? prunedStub(c) : roster(kernel, c, ignore),
+  );
   return node;
 }
 
 /** python `_tree(details=False)`: the WIRING view, `detail:"full"` only —
  *  children in creation order, like python's dict walk. Whole, as the roster. */
-function treeNode(agent: Agent): Payload {
+function treeNode(agent: Agent, ignore: Set<string> = new Set()): Payload {
   const obj: Payload = {
     id: agent.id,
     parent_id: agent.parentId,
@@ -217,7 +201,9 @@ function treeNode(agent: Agent): Payload {
     const v = agent.meta[k];
     if (v !== undefined) obj[k] = v;
   }
-  obj["children"] = [...agent.children.values()].map(treeNode);
+  obj["children"] = [...agent.children.values()].map((c) =>
+    ignore.has(c.id) ? prunedStub(c) : treeNode(c, ignore),
+  );
   return obj;
 }
 
@@ -226,6 +212,72 @@ function descendantIds(agent: Agent): string[] {
   const out: string[] = [agent.id];
   for (const child of agent.children.values()) out.push(...descendantIds(child));
   return out;
+}
+
+/** `descendantIds` as reply entries: an id in `ignore` stands as its stub. */
+function descendantEntries(agent: Agent, ignore: Set<string>): Json[] {
+  if (ignore.has(agent.id)) return [prunedStub(agent)];
+  const out: Json[] = [agent.id];
+  for (const child of agent.children.values()) out.push(...descendantEntries(child, ignore));
+  return out;
+}
+
+/** What an ignored branch leaves: its id and how many agents it holds (itself
+ *  included). python `_docs.pruned_stub`. */
+function prunedStub(agent: Agent): Payload {
+  return { id: agent.id, pruned: descendantIds(agent).length };
+}
+
+/** Is `agent` `ancestor` or below it? The parent-chain walk the gate uses. */
+function within(kernel: Kernel, agent: Agent, ancestor: Agent): boolean {
+  let a: Agent | undefined = agent;
+  const seen = new Set<string>();
+  while (a !== undefined && !seen.has(a.id)) {
+    if (a.id === ancestor.id) return true;
+    seen.add(a.id);
+    a = a.parentId === null ? undefined : kernel.agents.get(a.parentId);
+  }
+  return false;
+}
+
+/** python `_docs.subtree_filter`: validate `show_subtrees` / `ignore_subtrees`.
+ *  Every id must name an agent in `target`'s subtree; a shown id under another
+ *  shown id is not repeated. */
+function subtreeFilter(
+  kernel: Kernel,
+  payload: Payload,
+  target: Agent,
+): { show: Agent[]; ignore: Set<string> } | Payload {
+  const lists: { [arg: string]: string[] } = {};
+  for (const arg of ["show_subtrees", "ignore_subtrees"]) {
+    const v = payload[arg];
+    if (v === undefined || v === null) {
+      lists[arg] = [];
+      continue;
+    }
+    if (!Array.isArray(v) || !v.every((x) => typeof x === "string" && x !== "")) {
+      return refusal(BAD_ARG, `reflect: ${arg} must be a list of agent ids`, { extra: { arg } });
+    }
+    for (const x of v as string[]) {
+      const a = kernel.agents.get(x);
+      if (a === undefined || !within(kernel, a, target)) {
+        return refusal(
+          BAD_ARG,
+          `reflect: ${arg} names ${pyRepr(x)} — not an agent in ${target.id}'s tree`,
+          { hint: "reflect with tree='ids' lists the ids", extra: { arg } },
+        );
+      }
+    }
+    lists[arg] = v as string[];
+  }
+  const shown = lists["show_subtrees"] as string[];
+  const show: Agent[] = [];
+  for (const x of [...new Set(shown)]) {
+    const a = kernel.agents.get(x) as Agent;
+    const nested = shown.some((o) => o !== x && within(kernel, a, kernel.agents.get(o) as Agent));
+    if (!nested) show.push(a);
+  }
+  return { show, ignore: new Set(lists["ignore_subtrees"]) };
 }
 
 /** python `repr()` of a str, for the messages that quote a caller's key. */

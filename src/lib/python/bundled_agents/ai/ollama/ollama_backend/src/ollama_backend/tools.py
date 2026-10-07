@@ -96,3 +96,6 @@ def _build():
 
 
 VERBS, handler = _build()
+
+# Served by the kernel's `docs` verb (tier detailed) — shared by every backend.
+from ai_core import CANCEL, EMITS, NOTES  # noqa: E402, F401

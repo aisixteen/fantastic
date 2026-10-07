@@ -135,23 +135,6 @@ pub fn extract_tool_calls(text: &str) -> Vec<ToolCall> {
         .collect()
 }
 
-/// Every COMPLETE call envelope in `text`, verbatim, in source order — what a
-/// history writer keeps out of a dropped thought span (an action taken is not
-/// reasoning). An unterminated opener is not kept: dispatch could not parse it,
-/// and neither is a complete envelope that does not parse — a broken call is
-/// reasoning too.
-#[must_use]
-pub fn call_spans(text: &str) -> Vec<&str> {
-    let mut out = Vec::new();
-    for (pos, after, end) in envelopes(text) {
-        let Some(end) = end else { break };
-        if matches!(parse_call(&text[after..end]), Ok(Some(_))) {
-            out.push(&text[pos..end + CLOSE.len()]);
-        }
-    }
-    out
-}
-
 /// An envelope that opened as a call and did not parse.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MalformedCall {

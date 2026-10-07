@@ -28,6 +28,10 @@ public let DEFAULT_MAX_TOKENS = 8192
 public final class ResponsesBundle: AgentBundle, @unchecked Sendable {
     public let name = "responses_backend"
     public var verbs: [String] { AIBackend.verbNames }
+    public var verbDocTable: JSON { .object(AIBackend.VERBS) }
+    public var emitsDoc: JSON? { .object(AIBackend.REFLECT_EMITS) }
+    public var cancelDoc: JSON? { .string(CANCEL_DOC) }
+    public var notesDoc: JSON? { .object(AIBackend.NOTES) }
 
     let core: AIBackend
 
@@ -92,7 +96,7 @@ public final class ResponsesBundle: AgentBundle, @unchecked Sendable {
     This bundle is a thin binding over the shared `ai_core` lib. The queue / FIFO lock, prompt assembly, the ONE-PASS `_run`, and all the context machinery + verb bodies live in `ai_core.core`; this module supplies the `ResponsesProvider` builder (endpoint/model from the agent record) and `ai_core.build()` wires the rest into `(VERBS, handler)`.
 
     ## The wire
-    Stateless: every pass sends `store:false` and the whole conversation as `input` items (the system block as `instructions`) — the conversation is this agent's, never the endpoint's. The stream is read on BOTH channels: `response.reasoning_text` / `reasoning_summary_text` deltas are wrapped in `<think>…</think>` (parsed for calls, stripped before the turn is stored), `response.output_text` deltas are the output. A turn ends `completed`; one cut at `max_output_tokens` (`response.incomplete`) is a loud error on a main turn and an answer (`last_stop_reason:"max_tokens"`) on a bounded side call such as a fold summary. Sampling knobs on the record (`sampling`) merge verbatim into the request body.
+    Stateless: every pass sends `store:false` and the whole conversation as `input` items (the system block as `instructions`) — the conversation is this agent's, never the endpoint's. The stream is read on BOTH channels: `response.reasoning_text` / `reasoning_summary_text` deltas are wrapped in `<think>…</think>` (stripped before the turn is stored; only the answer's calls run), `response.output_text` deltas are the output. A turn ends `completed`; one cut at `max_output_tokens` (`response.incomplete`) is a loud error on a main turn and an answer (`last_stop_reason:"max_tokens"`) on a bounded side call such as a fold summary. Sampling knobs on the record (`sampling`) merge verbatim into the request body.
 
     ## Bare completion + the `<call>` grammar — no native tool API
     `send` performs exactly ONE provider pass: the stream's text is read; it never sends Responses `tools` nor reads `function_call` items (one arriving is a loud error). Tool-calling is RAW and shared by every backend: `ai_core` parses the model's `<call name=…>` tags from the streamed text, dispatches them as ONE batch (`kernel.send([...])`), and each destination's results arrive as ONE fresh turn — there is no loop inside a pass.

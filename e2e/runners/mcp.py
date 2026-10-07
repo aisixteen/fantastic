@@ -199,6 +199,13 @@ def check(step: dict, reply: dict, state: dict) -> list[str]:
             missing = [k for k in want if not (isinstance(body, dict) and k in body)]
             if missing:
                 bad.append(f"body lacks keys {missing}")
+        elif key == "item0_verbs_include":
+            item = body[0] if isinstance(body, list) and body else {}
+            res = item.get("result") if isinstance(item, dict) else None
+            verbs = (res or {}).get("verbs", {}) if isinstance(res, dict) else {}
+            missing = [v for v in want if v not in verbs]
+            if missing:
+                bad.append(f"docs verbs lack {missing}: {str(res)[:160]}")
         elif key == "verbs_include":
             verbs = (body or {}).get("verbs", {}) if isinstance(body, dict) else {}
             missing = [v for v in want if v not in verbs]

@@ -97,14 +97,13 @@ function wired(): Kernel {
     return refusal(UNHANDLED, `c21_probe has no verb '${verb}'`, {
       extra: { verb },
     }) as Json;
-  });
+  }, { poke: "args: value:any — echoes {poked: value}" });
   k.register(
     new Agent({
       id: "c21_probe",
       parentId: ROOT_ID,
       handlerModule: "c21_echo.tools",
       sentence: "C21 probe — answers `poke` identically on every transport.",
-      verbs: { poke: "args: value:any — echoes {poked: value}" },
     }),
   );
   return k;

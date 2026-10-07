@@ -109,8 +109,8 @@ fn render_for_model(messages: &[Value]) -> Vec<Value> {
 /// `cancel` drops this future (and with it the provider stream).
 ///
 /// Returns the RAW completion text, thinking markers intact: [`crate::verbs::send`]
-/// hands it to the router, and a tool call the model wrote mid-thought must still
-/// dispatch. Only the DURABLE turn is stripped.
+/// hands it to the router, which reads only the ANSWER — a call written inside
+/// thinking never dispatches (owner, 2026-10-07). The DURABLE turn is the answer.
 ///
 /// The conversation is ALWAYS this agent's own (its memory store): there is no
 /// caller-supplied history — a one-off completion is a disposable agent with its
@@ -334,8 +334,8 @@ pub async fn run_generation(
     let new_turns = vec![
         json!({"role": "user", "content": user_text, "id": in_id, "parent": in_parent}),
         // STRIPPED — the deliberation is not part of the conversation. The RAW
-        // text (thinking included) is what gets parsed and what the caller
-        // receives; only durable history loses the `<think>` spans, because a
+        // text (thinking included) is what the caller receives; the router parses
+        // only the answer, and durable history loses the `<think>` spans, because a
         // reasoning model re-fed its own prior deliberation drowns in it
         // (gemma4:12b re-sent a 3,800-char turn-1 thought every later prompt,
         // 2026-08-02). A pass the model stopped with a block open leaves the CUT

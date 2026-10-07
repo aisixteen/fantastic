@@ -41,6 +41,10 @@ let OFF_DEVICE_FIELDS = ["endpoint", "model", "credentials"]
 public final class FoundationModelsBackendBundle: AgentBundle, @unchecked Sendable {
     public let name = NAME
     public var verbs: [String] { AIBackend.verbNames }
+    public var verbDocTable: JSON { .object(AIBackend.VERBS) }
+    public var emitsDoc: JSON? { .object(AIBackend.REFLECT_EMITS) }
+    public var cancelDoc: JSON? { .string(CANCEL_DOC) }
+    public var notesDoc: JSON? { .object(AIBackend.NOTES) }
 
     let engine: any FMEngine
     let core: AIBackend

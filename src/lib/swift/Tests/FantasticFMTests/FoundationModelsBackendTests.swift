@@ -194,7 +194,9 @@ struct FoundationModelsBackendTests {
         let tail = ["available", "unavailable_reason", "context_size", "temperature", "max_tokens"]
         if let i = keys.firstIndex(of: "available") {
             #expect(Array(keys[i..<min(i + tail.count, keys.count)]) == tail, "\(keys)")
-            #expect(keys.firstIndex(of: "concurrency")! < i)
+            #expect((keys.firstIndex(of: "generating") ?? keys.count) < i, "\(keys)")
+            // how to CALL it is `docs`; what it IS carries no verb docs or notes
+            #expect(!keys.contains("concurrency") && !keys.contains("verbs"), "\(keys)")
         } else {
             Issue.record("no `available` in \(keys)")
         }
@@ -314,6 +316,18 @@ struct FoundationModelsBackendTests {
         let r = await send(k, "hi", ["system_prompt": "Be terse."])
         #expect(r["response"].asString?.hasPrefix("ok ") == true, "\(r)")
         #expect(engine.requests.map(\.instructions) == ["Be terse."])
+    }
+
+    @Test func theDefaultSystemBlockFitsTheOnDeviceWindow() async {
+        // Measured 2026-10-06: with the verb docs out of the reflects and the howto
+        // tightened, the kernel's default system block fits the 4096-token on-device
+        // window — the turn runs with no `system_prompt`. Rust
+        // `the_default_system_block_fits_the_on_device_window`.
+        let engine = FakeEngine(contextSize: 4096)
+        let (k, _) = await kernel(engine)
+        let r = await send(k, "hi")
+        #expect(r["response"].asString?.hasPrefix("ok ") == true, "\(r)")
+        #expect(!engine.requests.isEmpty, "the model is called")
     }
 
     @Test func aSendOnAnUnavailableModelFailsLoudNamingTheReason() async {

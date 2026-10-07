@@ -53,7 +53,14 @@ runs:
         args: {target: files}
         expect:
           is_error: false
-          verbs_include: [read_stream, list]
+          body_has_keys: [sentence]
+      # HOW TO CALL it is the kernel's `docs` (a reflect carries no verbs)
+      - tool: send
+        args: {items: [{target: kernel, payload: {type: docs, of: files}}]}
+        expect:
+          is_error: false
+          item0.status: completed
+          item0_verbs_include: [read_stream, list]
       # a real read, through a real agent, as the leg
       - tool: send
         args: {items: [{target: files, payload: {type: read_stream, path: note.txt}}]}

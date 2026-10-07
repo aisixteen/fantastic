@@ -1,9 +1,10 @@
 """A SESSION loader (a `kernel_state` with a `root`, under a ws leg) persists a
 federated kernel's records — a canvas and the thin agents nested under it. Those
-records are never live on the host, so the record-owner walk and the path
-resolution climb THIS LOADER'S persisted records (disk position) past the live
-tree: nested 2+ levels is allowed for the owning leg and refused for a sibling,
-and an existing record is placed where it is — never by the payload's parent."""
+records are never live on the host, so the path resolution climbs THIS LOADER'S
+persisted records (disk position) past the live tree: nested 2+ levels lands under
+its real parents, and an existing record is placed where it is — never by the
+payload's parent. WHO may write is the grant alone (owner, 2026-10-06): any agent
+granted the record verbs on the loader writes any record."""
 
 from __future__ import annotations
 
@@ -74,35 +75,39 @@ async def test_the_owning_leg_persists_records_nested_under_a_federated_record(
     assert parents["terminal_view"] == "canvas" and parents["deep"] == "terminal_view"
 
 
-async def test_a_sibling_may_not_touch_the_nested_records(seeded_kernel):
+async def test_a_granted_sibling_writes_the_nested_records(seeded_kernel):
+    """The grant is the whole rule: `rest_leg` holds `*` on the loader, so it writes
+    under another leg's records and forgets them."""
     k = seeded_kernel
     await _setup(k)
     await _persist(k, "wws", "canvas", "web_loader")
     await _persist(k, "wws", "terminal_view", "canvas")
-    r = await _persist(k, "rest_leg", "sneak", "terminal_view")
-    assert r.get("reason") == "unauthorized", r
+    assert (await _persist(k, "rest_leg", "extra", "terminal_view")) == {"ok": True}
+    assert Path(
+        ROOT, "agents/canvas/agents/terminal_view/agents/extra/agent.yaml"
+    ).exists()
     with as_agent(seeded_kernel, "rest_leg"):
         r = await _call(
             k,
             "web_loader",
             {"type": "forget_record", "id": "terminal_view", "parent_id": "canvas"},
         )
-    assert r.get("reason") == "unauthorized", r
-    assert Path(ROOT, "agents/canvas/agents/terminal_view/agent.yaml").exists()
+    assert r == {"ok": True}, r
+    assert not Path(ROOT, "agents/canvas/agents/terminal_view").exists()
 
 
 async def test_an_existing_record_is_placed_by_its_position_not_the_payload(
     seeded_kernel,
 ):
-    """Naming a record that exists with `parent_id` = yourself used to pass the
-    guard (the payload's parent was walked first) and overwrite it."""
+    """An existing record is written where it IS, whatever `parent_id` the payload
+    names."""
     k = seeded_kernel
     await _setup(k)
     await _persist(k, "wws", "canvas", "web_loader")
     await _persist(k, "wws", "terminal_view", "canvas")
-    r = await _persist(k, "rest_leg", "terminal_view", "rest_leg")
-    assert r.get("reason") == "unauthorized", r
+    assert (await _persist(k, "rest_leg", "terminal_view", "rest_leg")) == {"ok": True}
     assert not Path(ROOT, "agents/terminal_view").exists()
+    assert Path(ROOT, "agents/canvas/agents/terminal_view/agent.yaml").exists()
 
 
 async def test_forget_record_removes_a_nested_record_where_it_is(seeded_kernel):
@@ -118,12 +123,9 @@ async def test_forget_record_removes_a_nested_record_where_it_is(seeded_kernel):
     assert Path(ROOT, "agents/canvas/agents/terminal_view/agent.yaml").exists()
 
 
-async def test_an_id_in_neither_tree_nor_disk_is_placed_by_the_payload_and_guarded(
-    seeded_kernel,
-):
-    """No fallback: a brand-new record's placement comes from the payload, and the
-    walk from there must still reach the caller."""
+async def test_an_id_in_neither_tree_nor_disk_is_placed_by_the_payload(seeded_kernel):
+    """No fallback: a brand-new record's placement comes from the payload."""
     k = seeded_kernel
     await _setup(k)
-    r = await _persist(k, "wws", "orphan", "nowhere")
-    assert r.get("reason") == "unauthorized", r
+    assert (await _persist(k, "wws", "orphan", "nowhere")) == {"ok": True}
+    assert Path(ROOT, "agents/nowhere/agents/orphan/agent.yaml").exists()

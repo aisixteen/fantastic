@@ -565,7 +565,8 @@ struct FileTextVerbsTests {
         #expect(r["edit_grammar"].asString?.hasPrefix("one or more blocks:") == true)
         #expect(r["compose"].asString?.contains("`bytes` is VERBATIM") == true)
         #expect(r["hidden_count"].isNull)
-        let verbs = r["verbs"].asObject.map { Array($0.keys) } ?? []
+        #expect(r.asObject?["verbs"] == nil)
+        let verbs = FileBundle().verbDocTable.asObject.map { Array($0.keys) } ?? []
         for v in ["read", "write", "edit", "append", "undo"] { #expect(verbs.contains(v), "\(v)") }
     }
 }

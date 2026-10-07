@@ -205,8 +205,7 @@ async def test_a_reflect_of_a_peer_returns_that_kernels_own_answer(seeded_kernel
 
 async def test_a_create_on_a_peer_is_gated_on_the_peer_target(seeded_kernel):
     """`create_agent` sent to `<guid>|kernel` places nothing in THIS tree: it is an
-    ordinary call to the peer, gated on egress like any other — the local
-    mutator rule (a child of yourself) must not wave it through."""
+    ordinary call to the peer, gated on egress like any other."""
     k = seeded_kernel
     k._meta["guid"] = HOST
     calls: list = []
@@ -220,3 +219,66 @@ async def test_a_create_on_a_peer_is_gated_on_the_peer_target(seeded_kernel):
     )
     assert out["result"]["side"] == "egress", out
     assert calls == []
+
+
+async def test_docs_of_a_peer_agent_asks_that_kernel(seeded_kernel):
+    """`docs of: <guid>|<agent>` (owner, 2026-10-06): the question goes to the
+    connected kernel's own `docs` and the reply names the qualified id. The asker's
+    grant is `docs` on THIS root, like any `docs`; the peer judges its own leg."""
+    k = seeded_kernel
+    k._meta["guid"] = HOST
+    calls: list = []
+    _route(
+        k,
+        calls,
+        reply={
+            "of": "view_root",
+            "bundle": "canvas.tools",
+            "tier": "oneliners",
+            "verbs": {"place": "args: x, y"},
+        },
+    )
+    k.create("file_bridge.tools", id="plain", allow=["."])
+    refused = await _send(
+        k, "kernel", {"type": "docs", "of": f"{PAGE}|view_root"}, as_="plain"
+    )
+    assert refused["result"]["side"] == "egress", refused
+    assert calls == [], "a refused docs never reaches the peer"
+    k.create(
+        "file_bridge.tools",
+        id="reader",
+        allow=["."],
+        can_call={"kernel_state": ["docs"]},
+    )
+    root = k.ctx.agents["kernel_state"]
+    root._meta["callable_by"] = {
+        **(root._meta.get("callable_by") or {}),
+        "reader": ["docs"],
+    }
+    out = await _send(
+        k,
+        "kernel",
+        {"type": "docs", "of": f"{PAGE}|view_root", "tier": "oneliners"},
+        as_="reader",
+    )
+    assert out["status"] == "completed", out
+    r = out["result"]
+    assert r["of"] == f"{PAGE}|view_root" and r["verbs"] == {"place": "args: x, y"}, r
+    assert calls == [
+        ("kernel", {"type": "docs", "of": "view_root", "tier": "oneliners"})
+    ]
+
+
+async def test_docs_of_an_unknown_guid_or_own_guid(seeded_kernel):
+    k = seeded_kernel
+    k._meta["guid"] = HOST
+    calls: list = []
+    _route(k, calls)
+    gone = (await _send(k, "kernel", {"type": "docs", "of": "nope|view_root"}))[
+        "result"
+    ]
+    assert gone["reason"] == "bad_arg" and gone["arg"] == "of", gone
+    # this kernel's own guid is a LOCAL id: answered here, no peer asked
+    own = (await _send(k, "kernel", {"type": "docs", "of": f"{HOST}|kernel"}))["result"]
+    assert own["bundle"] == "kernel" and "create_agent" in own["verbs"], own
+    assert calls == [], calls

@@ -1,6 +1,6 @@
 """Call security wired into the kernel — the two-sided gate in `Agent.send`.
 
-The model is **fully-gated, two-sided, from-above-only**:
+The model is **fully-gated, two-sided** — grants are the only rule:
 
 - An AGENT-originated send (driven here via `as_agent(kernel, <id>)` — the test standing in for that agent's handler) is checked
   TWICE: **egress** (the sender's `can_call` allows the target+verb) AND
@@ -9,8 +9,9 @@ The model is **fully-gated, two-sided, from-above-only**:
 - An OPERATOR send (no `_current_sender` — the CLI / bootstrap / loader-at-boot /
   a test driver calling `kernel.send` directly) is the ORIGIN root of trust and
   passes ungated.
-- The mutators act on the sender's own children only, so an agent can never
-  raise its own `can_call`/`callable_by`.
+- The tree verbs take the gate like any verb and nothing more (owner,
+  2026-10-06): an agent granted `update_agent` on the root may edit ANY record,
+  its own grants included — holding that grant IS the authority.
 
 Every agent carries the baseline `{$self:*}` on BOTH fields — nothing else. Any
 other edge (parent, child, sibling, the root) needs BOTH an explicit `can_call`
@@ -218,11 +219,12 @@ async def test_explicit_kernel_grant_lets_an_agent_create(seeded_kernel):
     assert r.get("reason") != "unauthorized" and "id" in r
 
 
-# ─── authority flows from ABOVE only ────────────────────────────
+# ─── authority is the grant ─────────────────────────────────────
 
 
-async def test_agent_cannot_raise_its_own_authority(seeded_kernel):
-    # update_agent on self, editing own can_call → not its own child, denied.
+async def test_update_agent_on_the_root_is_the_authority_over_records(seeded_kernel):
+    # Granted update_agent on the root (both ends), an agent edits its OWN can_call:
+    # the grant is the authority — no ownership rule after the gate.
     a = await _mk(seeded_kernel)
     wire(seeded_kernel, a, seeded_kernel.id, ["update_agent"])
     b = await _mk(seeded_kernel)
@@ -241,8 +243,29 @@ async def test_agent_cannot_raise_its_own_authority(seeded_kernel):
                 ]
             )
         )[0]["result"]
-    assert r.get("reason") == "unauthorized"
-    assert r.get("side") == "mutator"
+    assert r.get("updated") is True, r
+    assert seeded_kernel.ctx.agents[a]._meta["can_call"].get(b) == ["list"]
+
+
+async def test_without_the_grant_an_agent_cannot_raise_its_own_authority(seeded_kernel):
+    a = await _mk(seeded_kernel)
+    b = await _mk(seeded_kernel)
+    with as_agent(seeded_kernel, a):
+        r = (
+            await seeded_kernel.send(
+                [
+                    {
+                        "target": seeded_kernel.id,
+                        "payload": {
+                            "type": "update_agent",
+                            "id": a,
+                            "can_call": {b: ["list"]},
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
+    assert r.get("reason") == "unauthorized" and r.get("side") == "egress", r
 
 
 async def test_a_parent_writes_any_grant_on_its_own_child(seeded_kernel):

@@ -416,12 +416,10 @@ struct RoutingTests {
         #expect(await recorder.payloads().isEmpty, "nothing may dispatch from a bad head")
     }
 
-    @Test func aCallWrittenMidThoughtStillDispatches() async throws {
-        // The routing half of "thinking is PARSED, not PERSISTED". The RAW
-        // completion is what routing reads, so a call the model wrote inside its
-        // deliberation still runs; only the DURABLE turn is stripped. Reading the
-        // stripped text instead would drop the call and end the chain silently —
-        // the gemma4:12b failure (2026-08-02) in a different disguise.
+    @Test func theAnswersCallDispatchesAndTheThoughtIsDropped() async throws {
+        // A call written in the ANSWER (after `</think>`) runs; the deliberation is
+        // not stored. Reading only `content` would lose a turn spent reasoning — the
+        // gemma4:12b failure (2026-08-02).
         let call = callEnvelope(target: "kernel_state", payload: .object(["type": .string("list_agents")]))
         let raw =
             "\(THINK_OPEN)Let me work out which agent stores data.\(THINK_CLOSE)" + call + "on it"
@@ -433,7 +431,7 @@ struct RoutingTests {
                 "type": .string("send"), "text": .string("go"), "client_id": .string("c"),
             ]))])[0].result
         #expect(
-            await script.waitForCalls(2), "a call inside thinking must still dispatch")
+            await script.waitForCalls(2), "the answer's call must dispatch")
         #expect(script.requestText(1).contains(" · kernel_state "))
         // And the deliberation is not in the durable record.
         try await waitForHistory(kernel: kernel, id: id, count: 2)
@@ -639,7 +637,7 @@ struct RoutingTests {
         #expect(await script.waitForCalls(5), "the chain did not reach done")
         for n in [2, 3, 4] {
             #expect(
-                script.requestText(n).contains("[no call was dispatched] Your turn emitted no"),
+                script.requestText(n).contains("[no call was dispatched] Your answer emitted no"),
                 "pass \(n + 1) must be a nudge")
         }
         try await Task.sleep(nanoseconds: 300_000_000)
@@ -672,7 +670,7 @@ struct RoutingTests {
         #expect(await script.waitForCalls(6), "every silent turn must be nudged")
         for n in [2, 3, 4, 5] {
             #expect(
-                script.requestText(n).contains("[no call was dispatched] Your turn emitted no"),
+                script.requestText(n).contains("[no call was dispatched] Your answer emitted no"),
                 "pass \(n + 1) must be a nudge")
         }
         try await Task.sleep(nanoseconds: 300_000_000)
@@ -1070,12 +1068,14 @@ struct RoutingTests {
     /// away for this run.
     @Test func anOverCapReplyIsStoredAndDeliveredAsTheStub() async throws {
         // A window whose inline cap (an eighth of the budget) is smaller than the
-        // mock's own reflect + nudge, so that reply is the one that dehydrates.
+        // mock's own reflect + nudge, so that reply is the one that dehydrates. The
+        // reflect carries no verb docs any more, so a long `description` makes it big.
         let reflectSelf = callEnvelope(target: "mock", payload: .object(["type": .string("reflect")]))
         let script = ProviderScript([[reflectSelf], ["SEEN mock " + doneEnvelope]])
         let (kernel, ids, _) = await bootMockKernel(
             config: scriptedConfig(["mock": script]), backendIds: ["mock"],
-            contextWindow: 8192, meta: ["context_async": .bool(true)])
+            contextWindow: 8192,
+            meta: ["context_async": .bool(true), "description": .string(String(repeating: "a long purpose ", count: 300))])
         let id = ids["mock"]!
         _ = await kernel.send([Item(id, .object([
                 "type": .string("send"), "text": .string("go"), "client_id": .string("c"),
@@ -1087,7 +1087,6 @@ struct RoutingTests {
         let held = heldBodies(id.value, kernel)
         let firstHeld = held.elements.first
         let (pid, body) = try #require(firstHeld.map { ($0.key, $0.value) }, "the over-cap reply must be HELD")
-        #expect(body.hasSuffix(REFLECT_NUDGE), "the nudge is inside the held body, so it is inside the size")
         #expect(
             AIContext.estimateOne(.object(["role": .string("user"), "content": .string(body)]))
                 > AIContext.inlineCap(kernel.agent(id)!, modelWindow: AIConstants.DEFAULT_CONTEXT_WINDOW))
@@ -1099,19 +1098,20 @@ struct RoutingTests {
         let delivered = conversationRows(kernel: kernel, id: id)[2]["content"].asString ?? ""
         #expect(delivered.hasPrefix("[reply to \(pid) · mock reflect"), Comment(rawValue: delivered))
         #expect(delivered.hasSuffix("]\n" + stub), Comment(rawValue: delivered))
-        #expect(!delivered.contains("this body is TRANSIENT"), "the body itself never rode the turn")
+        #expect(!delivered.contains("a long purpose"), "the body itself never rode the turn")
         // and the body is one grep away, by the pid the stub names
         let g = await kernel.send([Item(id, .object([
-                "type": .string("grep"), "query": .string("TRANSIENT"), "ids": .array([.integer(pid)]),
+                "type": .string("grep"), "query": .string("a long purpose"), "ids": .array([.integer(pid)]),
             ]))])[0].result
         #expect(g["total"].asInt == 1 && g["matches"][0]["id"].asInt == pid, Comment(rawValue: g.serialize()))
     }
 
-    @Test func reflectRepliesCarryTheDistillationNudge() async throws {
-        let reflect = callEnvelope(target: "kernel_state", payload: cheapReflect)
+    @Test func reflectRepliesCarryNoCutNotice() async throws {
+        // its OWN reflect — granted ($self); a refusal carries no notice
+        let reflect = callEnvelope(target: "mock", payload: cheapReflect)
         let list = callEnvelope(target: "kernel_state", payload: .object(["type": .string("list_agents")]))
         let script = ProviderScript([
-            [reflect + "\n" + list], ["SEEN core " + doneEnvelope],
+            [reflect + "\n" + list], [doneEnvelope],
         ])
         let (kernel, ids, _) = await bootMockKernel(
             config: scriptedConfig(["mock": script]), backendIds: ["mock"])
@@ -1120,14 +1120,12 @@ struct RoutingTests {
             ]))])[0].result
         #expect(await script.waitForCalls(2), "the reflect never came back")
         let turn2 = script.requestText(1)
-        #expect(
-            turn2.contains("this body is TRANSIENT"),
-            "the reflect block must carry the distillation nudge")
-        #expect(turn2.contains("SEEN <id>"), "and must show the format it asks for")
-        #expect(
-            turn2.components(separatedBy: "this body is TRANSIENT").count == 2,
-            "and ONLY the reflect block carries it")
+        // A reflect is MUTABLE state and stays whole (owner, 2026-10-06): it carries
+        // no cut notice — only a `docs` reply does.
+        #expect(turn2.contains("mock reflect"), Comment(rawValue: turn2))
+        #expect(!turn2.contains("[transient"), Comment(rawValue: turn2))
     }
+
 
     // ─── every call in a turn gets its reply — delivered TOGETHER ──
     // Mirrors python `test_reply_delivery.py`. Two defects pinned there, both

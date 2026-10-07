@@ -58,16 +58,16 @@ def test_an_open_call_when_the_pass_ends_aborts():
     assert ("abort", "call") in [(e[0], e[1]["kind"]) for e in ev]
 
 
-def test_a_call_inside_a_thought_is_a_call_part():
+def test_a_call_inside_a_thought_is_thinking_text():
+    """ONLY THE ANSWER ACTS (owner, 2026-10-07): a `<call>` inside `<think>` streams
+    as thinking — no call part opens."""
     ev, _ = _run(f"<think>let me {DONE} then</think>", 4)
     assert [(e[0], e[1]["kind"]) for e in ev if e[0] != "delta"] == [
         ("start", "thinking"),
         ("end", "thinking"),
-        ("start", "call"),
-        ("end", "call"),
-        ("start", "thinking"),
-        ("end", "thinking"),
     ]
+    text = "".join(e[2] for e in ev if e[0] == "delta")
+    assert DONE in text, text
 
 
 def test_the_cut_marker_is_a_marker_not_a_half_answer():

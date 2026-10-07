@@ -49,14 +49,14 @@ private struct Plain: AgentBundle {
             uniqueKeysWithValues: (vllm["fields"].asArray ?? []).map { ($0["name"].asString ?? "", $0) })
         let required = (vllm["fields"].asArray ?? []).filter { $0["required"].asBool == true }
             .compactMap { $0["name"].asString }
-        #expect(
-            required == [
-                "endpoint", "model", "max_tokens", "kv_slots", "kv_overflow", "memory_store_id",
-                // the server's window — set on the record, used as set
-                "context_window",
-            ], "\(required)")
-        // a required field has no default — nothing is guessed about a server
+        #expect(required == ["endpoint", "kv_overflow", "memory_store_id"], "\(required)")
+        // a required field has no default; the counts a record leaves out are read
+        // from the server before a turn — no default either
         #expect(required.allSatisfy { fields[$0]?.asObject?["default"] == nil })
+        for n in ["model", "max_tokens", "context_window", "kv_slots"] {
+            #expect(fields[n]?.asObject?["default"] == nil, "\(n)")
+            #expect(fields[n]?["hint"].asString?.contains("read from the server") == true, "\(n)")
+        }
         // the defaulted fields carry THE BACKEND'S OWN values
         #expect(fields["temperature"]?["default"] == .double(0.2))
         #expect(fields["thinking_token_budget"]?["default"] == .integer(16000))

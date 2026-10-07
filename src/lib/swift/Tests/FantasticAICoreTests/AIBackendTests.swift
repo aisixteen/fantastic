@@ -38,10 +38,9 @@ struct AIBackendTests {
         // The kernel appends its own frame (can_call/callable_by/…) after the
         // bundle's body; the BODY is what this pins.
         #expect(
-            (r.asObject?.keys.prefix(13)).map(Array.init) == [
+            (r.asObject?.keys.prefix(9)).map(Array.init) == [
                 "id", "sentence", "model", "endpoint", "context_window", "context_strategy",
-                "memory_store_id", "verbs", "generating", "cancel", "emits", "concurrency",
-                "extra",
+                "memory_store_id", "generating", "extra",
             ], "\(r.asObject?.keys.map { $0 } ?? [])")
         #expect(r["memory_store_id"].asString == "memory")
         #expect(r["id"].asString == id.value)
@@ -49,37 +48,38 @@ struct AIBackendTests {
         // the record's own fields, or null — nothing is guessed
         #expect(r["model"].isNull && r["endpoint"].isNull, "\(r)")
         #expect(r["generating"] == .bool(false))
-        #expect(r["concurrency"].asString == CONCURRENCY_DOC)
         #expect(r["extra"].asString == "yes")
-        // The verb map is python's `_build` table, first doc line each, in
-        // its order — no per-backend wording, no `backend_state`, and `cancel`
-        // is a top-level field beside it, as python spells it.
+        // No verb docs on a reflect (owner, 2026-10-05) — they are `docs`.
+        for key in ["verbs", "cancel", "emits", "concurrency"] {
+            #expect(r.asObject?[key] == nil, "\(key)")
+        }
+        // The verb table `docs` serves is python's `_build` table, in its order.
         #expect(
-            r["verbs"].asObject?.keys.elementsEqual([
+            AIBackend.VERBS.keys.elementsEqual([
                 "reflect", "send", "stop", "rows", "inquiry", "history", "status", "context_status",
                 "recall", "grep", "context_recall", "context_clear", "watch", "unwatch", "boot",
-            ]) == true, "\(r["verbs"])")
+            ]))
         #expect(
-            r["verbs"]["reflect"].asString
+            AIBackend.VERBS["reflect"]?.asString
                 == "Identity + model + endpoint + generating flag + context posture. No args.")
-        #expect(r["verbs"]["send"].asString?.hasPrefix("args: text:str (req), client_id:str? (default 'cli').") == true)
-        #expect(r["verbs"]["backend_state"].isNull && r["verbs"]["cancel"].isNull)
-        #expect(r["cancel"].asString == CANCEL_DOC)
+        #expect(
+            AIBackend.VERBS["send"]?.asString?.hasPrefix(
+                "args: text:str (req), client_id:str? (default 'cli'), system_prompt:str?, send_to:str?.")
+                == true)
     }
 
     // B1.23: THREE channels, python's wording. `done` is NOT one of them —
     // `status(phase='done')` IS the completion event.
-    @Test func reflectEmitsArePythonVerbatim() async throws {
-        let (kernel, id) = try await freshMockKernel(
-            config: baseConfig { MockProvider() })
-        let r = await kernel.send([Item(id, .object(["type": .string("reflect")]))])[0].result
-        #expect(r["emits"].asObject?.keys.elementsEqual(["token", "status", "context"]) == true)
+    @Test func docsEmitsArePythonVerbatim() async throws {
+        // Served by `docs` (tier detailed), never on a reflect.
+        let emits = JSON.object(AIBackend.REFLECT_EMITS)
+        #expect(emits.asObject?.keys.elementsEqual(["token", "status", "context"]) == true)
         #expect(
-            r["emits"]["token"].asString
-                == "{type:'token', text:str, source, client_id} — streaming chunk. Routed ONLY to "
+            emits["token"].asString
+                == "{type:'token', text:str, source, client_id} — streaming chunk, routed ONLY to "
                 + "the caller: cli (stdout) when client_id='cli', else this agent's own inbox "
-                + "(browser filters by client_id).")
-        #expect(r["emits"]["done"].isNull)
+                + "(a browser filters by client_id).")
+        #expect(emits["done"].isNull)
     }
 
     // B1.2: the cancel doc is python's, TAG notation included — the model reads
@@ -834,7 +834,7 @@ struct AIBackendTests {
             ]),
             .object(["role": .string("assistant"), "content": .string("noted again")]),
         ]
-        let view = dropAnsweredReflects(dedupeStaleReads(store))
+        let view = dedupeStaleReads(store)
         #expect(view.count < store.count, "the view must be shorter than the store")
         #expect(
             !view.map { $0["content"].asString ?? "" }.joined().contains("OLD TREE"),

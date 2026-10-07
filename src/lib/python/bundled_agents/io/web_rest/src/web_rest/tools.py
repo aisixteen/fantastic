@@ -361,9 +361,6 @@ async def _reflect(id, payload, kernel):
         # The REST face is a CHANNEL — surface its auth posture so a denied client
         # can find the door (discovery-through-denial).
         **_describe(kernel.get(id) or {}),
-        "verbs": {
-            n: (f.__doc__ or "").strip().splitlines()[0] for n, f in VERBS.items()
-        },
     }
 
 

@@ -359,6 +359,12 @@ def select(tests, groups, ids, backend_name, include_free, runtimes=()):
 # slots FIRST, then a lane; short tests use the lanes freely.
 LONG_LANES = 2
 
+# THE HARD STOP. Owner, 2026-10-06: 15 minutes per test. A test still running then is
+# stopped (its whole process group, kernel included) and scored FAIL with the reason
+# in its log — a run that needs longer is a finding, not a wait. A test that names its
+# own `hard_stop_minutes` in its test.yaml gets that instead (an owner's exception).
+HARD_STOP_S = 15 * 60
+
 
 async def run_one(
     t: dict,
@@ -381,7 +387,12 @@ async def _run_one(t: dict, bk, logdir: Path, sem: asyncio.Semaphore, results: d
         log = logdir / f"{name}.log"
         # The knobs a test owns, rendered into the env its runner already reads.
         env = {**os.environ, **limit_env(t)}
+        # THE METER (E2E_METER=1): this test's model traffic goes through the
+        # run's forwarder under the test's own name — see helpers/meter.py.
+        if meter := os.environ.get("E2E_METER_URL"):
+            env["VLLM_ENDPOINT"] = f"{meter}/m/{name}"
         began = time.monotonic()
+        stop_s = int(t.get("hard_stop_minutes") or HARD_STOP_S // 60) * 60
         results[name] = {"state": "running", "since": began}
         with log.open("w") as fh:
             fh.write(
@@ -414,7 +425,23 @@ async def _run_one(t: dict, bk, logdir: Path, sem: asyncio.Semaphore, results: d
                 start_new_session=True,  # a lane is a process group: killed whole, never orphaned
             )
             try:
-                rc = await proc.wait()
+                try:
+                    rc = await asyncio.wait_for(proc.wait(), stop_s)
+                except TimeoutError:
+                    try:
+                        os.killpg(proc.pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        rc = await asyncio.wait_for(proc.wait(), 20)
+                    except TimeoutError:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                        rc = await proc.wait()
+                    fh.write(
+                        f"\n{MARKER} FAIL — HARD STOP: still running after "
+                        f"{stop_s // 60} min\n"
+                    )
+                    fh.flush()
             except (asyncio.CancelledError, KeyboardInterrupt):
                 # THE LANE DIES WITH THE RUN. Ctrl-C or a cancelled batch used to leave
                 # the probe and its spawned kernel running (measured 2026-09-07).
@@ -496,6 +523,41 @@ class _NoBackend:
 
     def blockers(self) -> list[str]:
         return []
+
+
+async def start_meter(logdir: Path):
+    """Spawn helpers/meter.py in front of `VLLM_ENDPOINT`; per-request usage
+    lands in `<logdir>/meter.jsonl`. Opt-in (`E2E_METER=1`), vLLM only."""
+    import socket
+    import urllib.request
+
+    upstream = os.environ.get("VLLM_ENDPOINT")
+    if not upstream:
+        raise SystemExit("E2E_METER=1 needs VLLM_ENDPOINT — the meter forwards to it")
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    proc = await asyncio.create_subprocess_exec(
+        "uv", "run", "python", "-u", str(E2E / "helpers" / "meter.py"),
+        "--port", str(port), "--upstream", upstream,
+        "--out", str(logdir / "meter.jsonl"),
+        cwd=str(PYROOT),
+    )
+    url = f"http://127.0.0.1:{port}"
+    for _ in range(100):
+        try:
+            await asyncio.to_thread(
+                lambda: urllib.request.urlopen(f"{url}/health", timeout=1).read()
+            )
+            break
+        except OSError:
+            await asyncio.sleep(0.2)
+    else:
+        proc.terminate()
+        raise SystemExit("meter did not come up")
+    os.environ["E2E_METER_URL"] = url
+    print(f"═══ meter: {url} → {logdir / 'meter.jsonl'}", flush=True)
+    return proc
 
 
 async def main() -> int:
@@ -645,6 +707,9 @@ async def main() -> int:
         t0 = time.monotonic()
         ensure_runtime(REPO, rt)
         print(f"═══ built {rt} in {time.monotonic() - t0:.1f}s", flush=True)
+    meter = None
+    if os.environ.get("E2E_METER") == "1":
+        meter = await start_meter(logdir)
     if prebuilt:
         # Cells inherit this and skip their own build; a missing binary still
         # fails loud there rather than being silently tolerated.
@@ -660,6 +725,10 @@ async def main() -> int:
     await asyncio.gather(
         *(run_one(t, bk, logdir, sem, results, long_sem) for t in picked)
     )
+
+    if meter is not None:
+        meter.terminate()
+        await meter.wait()
 
     counts: dict[str, int] = {}
     for r in results.values():

@@ -351,79 +351,57 @@ async def test_script_agent_cancels_another_agents_task(seeded_kernel):
     assert victim_task not in {t["id"] for t in await _rows(seeded_kernel)}
 
 
-# ─── reflect advertises the substrate's own verbs ──────────────
+# ─── the substrate's own verbs: `docs of=kernel`, never a reflect ──────
 
 
-async def test_every_reflect_advertises_the_kernel_verbs(seeded_kernel):
-    """`kernel_verbs` is ADVERTISED everywhere and ANSWERED only by the root.
-
-    Advertised everywhere: root-only advertisement was tried and reverted. It put
-    the surface where it was least needed — gemma4:12b reflected the three agents
-    it cared about (that is where the descriptions are), never reflected the root,
-    never saw `update_agent`'s signature, guessed the args from neighbouring names,
-    guessed wrong, and abandoned the task. Placement follows WHERE A CALLER LOOKS,
-    not where the field is cheapest to attach (~115 tok, +11-17%).
-
-    Answered by the root only (2026-08-24): these verbs act on the TREE and on the
-    kernel-wide task table, so the agent they name is the OPERAND, not the actor.
-    While every agent answered them, "send create_agent to X" could mean X performs
-    it, X is created under something, or X is the parent — and only the last was
-    true. A model asked "But how do I invoke create_agent? Which target?", never
-    resolved it, and finished 16 messages with `agents_created: []`.
-
-    So the two properties are deliberately different, and the `_` line is what
-    reconciles them for a reader who only ever reflects one leaf."""
-    r = (
-        await seeded_kernel.send([{"target": "kernel", "payload": {"type": "reflect"}}])
-    )[0]["result"]
-    kv = r["kernel_verbs"]
-    for v in ("ps", "cancel", "create_agent", "update_agent", "delete_agent"):
+async def test_kernel_verbs_are_docs_not_reflect(seeded_kernel):
+    """The kernel verbs are READ with `docs of=kernel` and ANSWERED only by the root
+    (owner, 2026-10-05: a reflect shows no verbs). They act on the TREE and on the
+    kernel-wide task table, so the agent they name is the OPERAND, not the actor —
+    a non-root agent refuses them, naming where to go."""
+    for target in ("kernel", "cli"):
+        r = (
+            await seeded_kernel.send(
+                [{"target": target, "payload": {"type": "reflect"}}]
+            )
+        )[0]["result"]
+        for key in ("kernel_verbs", "verbs", "more", "emits", "cancel"):
+            assert key not in r, (target, key)
+    kv = (
+        await seeded_kernel.send(
+            [{"target": "kernel", "payload": {"type": "docs", "of": "kernel"}}]
+        )
+    )[0]["result"]["verbs"]
+    for v in ("ps", "cancel", "create_agent", "update_agent", "delete_agent", "docs"):
         assert v in kv
-    assert "OPERAND" in kv["_"] and "kernel" in kv["_"]
-
-    # Every verb carries its signature — the line gemma needed…
+    # Every oneliner is the signature line.
     assert "id:str" in kv["update_agent"], f"{kv['update_agent']!r}"
     assert "handler_module:str" in kv["create_agent"]
     assert "task_id:str" in kv["cancel"]
-    # …including the read-only ones, which used to render as a bare name.
-    assert kv["ps"] and kv["list_agents"], "a name with no signature is unusable"
-
-    # BLAST RADIUS SURVIVES THE TRUNCATION. Distilled keeps only the text before
-    # the first em-dash, and these are the facts a caller needs BEFORE firing.
-    assert "REQUIRED" in kv["create_agent"], "the parent must be stated"
-    assert "CASCADES" in kv["delete_agent"], "a subtree delete must say so"
-    assert "SUBTREE" in kv["cancel"].upper()
-    assert "REPLACED, NOT MERGED" in kv["update_agent"]
-
+    assert kv["ps"] == "No args" and kv["list_agents"] == "No args"
     full = (
         await seeded_kernel.send(
-            [{"target": "kernel", "payload": {"type": "reflect", "detail": "full"}}]
+            [
+                {
+                    "target": "kernel",
+                    "payload": {"type": "docs", "of": "kernel", "tier": "detailed"},
+                }
+            ]
         )
-    )[0]["result"]
-    fkv = full["kernel_verbs"]
-    assert "task_id" in fkv["cancel"] and "subtree" in fkv["cancel"].lower()
-    assert "tasks" in fkv["ps"]
-
-    # A NON-ROOT agent ADVERTISES them — the whole point of the revert…
-    leaf = (
-        await seeded_kernel.send([{"target": "cli", "payload": {"type": "reflect"}}])
-    )[0]["result"]
-    assert "id:str" in leaf["kernel_verbs"]["update_agent"]
-    assert leaf["kernel_verbs"]["ps"]
-    # …and REFUSES them, naming where to go instead.
+    )[0]["result"]["verbs"]
+    assert "CASCADES" in full["delete_agent"]
+    assert "REPLACED, NOT MERGED" in full["update_agent"]
+    assert "subtree" in full["cancel"].lower()
     denied = (await seeded_kernel.send([{"target": "cli", "payload": {"type": "ps"}}]))[
         0
     ]["result"]
     assert denied["reason"] == "not_here" and denied["verb"] == "ps"
     assert "kernel" in denied["hint"], f"a refusal must be actionable: {denied!r}"
-    # `runtime` stays root-only — it describes the KERNEL, not what an agent answers.
-    assert "runtime" not in leaf
 
 
 async def test_system_verb_signatures_are_reachable_from_the_doc_tree(seeded_kernel):
-    """THE TRIM'S PRECONDITION. Distilled drops the system-verb docstrings, so
-    their arguments must be readable somewhere a caller can actually get to —
-    otherwise `cancel`'s signature is unreachable at any price."""
+    """The system verbs' arguments are readable in the doc tree too, not only
+    through `docs of=kernel`."""
     idx = (
         await seeded_kernel.send(
             [{"target": "kernel", "payload": {"type": "reflect", "readme": "index"}}]
@@ -442,12 +420,3 @@ async def test_system_verb_signatures_are_reachable_from_the_doc_tree(seeded_ker
     )[0]["result"]
     body = doc["readme"]["body"]
     assert "task_id" in body and "handler_module" in body
-    # And the distilled reply must POINT at it, or nobody finds the page.
-    more = (
-        (
-            await seeded_kernel.send(
-                [{"target": "kernel", "payload": {"type": "reflect"}}]
-            )
-        )[0]["result"]
-    )["more"]
-    assert "system-verbs" in more

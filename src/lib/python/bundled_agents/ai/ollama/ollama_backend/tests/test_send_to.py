@@ -564,7 +564,7 @@ async def test_a_raising_handler_comes_back_as_an_error_not_a_dead_chain(
 async def test_thinking_is_parsed_but_not_persisted(
     seeded_kernel, store_agent, fake_providers
 ):
-    """A tool call written mid-thought DISPATCHES; the deliberation is NOT kept.
+    """A tool call written in the ANSWER dispatches; the deliberation is NOT kept.
 
     Both halves matter and they pull opposite ways. Read only `content` and a turn
     spent reasoning is an empty completion that silently ends the chain (gemma4:12b,
@@ -596,7 +596,7 @@ async def test_thinking_is_parsed_but_not_persisted(
                 [{"target": oid, "payload": {"type": "send", "text": "go"}}]
             )
         )[0]["result"]
-        assert await _until_calls(fp, 2), "a call inside thinking must still dispatch"
+        assert await _until_calls(fp, 2), "the answer's call must dispatch"
         assert "· kernel_state list_agents · ↑" in str(fp.requests[1])
     finally:
         fake_providers.pop(oid, None)

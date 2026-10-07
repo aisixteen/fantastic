@@ -206,14 +206,45 @@ func deliverSoon(
 // python `_NO_CALL_NUDGE` (canonical; reinstated 2026-09-01 after
 // repo_map:swift twice stopped mid-task).
 let noCallNudge =
-    "[no call was dispatched] Your turn emitted no <call> element, so "
-    + "NOTHING ran — a call decided in thinking does not execute unless the "
-    + "element is written out. If the task is unfinished, emit that call now. "
+    "[no call was dispatched] Your answer emitted no <call> element, so "
+    + "NOTHING ran — a call written in your thinking does not run: write it in "
+    + "your answer, after the thinking. If the task is unfinished, emit that call now. "
     + "If it is finished, end the chain explicitly: <call name=\"done\"></call>"
 
 /// What a caller is told when a chain gives up (`n` silent turns in a row).
 /// Python `_GAVE_UP`, which renders the module's `MAX_SILENT_TURNS`; `n` is the
 /// cap in effect, so a test that lowers the cap reads its own number.
+/// The calls that are not dispatches: they end, park or answer the chain.
+let CONTROL_CALLS: Set<String> = ["done", "await", "inquiry_answer"]
+
+/// Count one silent turn of the chain (a turn that ran nothing). At
+/// `MAX_SILENT_TURNS` in a row the chain GIVES UP — the status says so, an open
+/// inquiry is closed, a `sendTo` is told — and true is returned. Python
+/// `_silent_turn`.
+func silentTurn(
+    kernel: Kernel, selfId: AgentId, clientId: String, sendTo: String?, systemPrompt: String?
+) async -> Bool {
+    let streak = AISilentStreaks.bump(kernel, selfId.value, clientId)
+    let cap = AISilentStreaks.cap(kernel)
+    guard streak >= cap else { return false }
+    AISilentStreaks.reset(kernel, selfId.value, clientId)
+    let text = gaveUp(cap)
+    await emitStatus(
+        kernel: kernel, agentId: selfId, clientId: clientId, phase: "done",
+        detail: [
+            ("reason", .string("gave_up")), ("error", .string(text)),
+            ("silent_turns", .integer(Int64(streak))),
+        ])
+    await closeInquiry(
+        kernel: kernel, selfId: selfId.value, clientId: clientId, [("error", .string(text))])
+    if let sendTo = sendTo {
+        deliverSoon(
+            kernel: kernel, target: sendTo, text: text,
+            clientId: clientId, systemPrompt: systemPrompt)
+    }
+    return true
+}
+
 func gaveUp(_ n: Int) -> String {
     "The LLM was not able to answer — \(n) turns in a row produced "
         + "no call. Reiterate the inquiry."
@@ -469,7 +500,10 @@ func routeReply(
     // two. EXACT is python's `==` on str: code points, not canonical equivalence.
     var streams = callStreams
     var matched: [ToolCall] = []
-    for (call, body) in cut ? [] : terminatedCalls(text) {
+    // ONLY THE ANSWER ACTS (owner, 2026-10-07): calls written inside thinking are
+    // read as thinking — dispatch and the malformed-call report read the answer.
+    let answer = withoutThinking(text)
+    for (call, body) in cut ? [] : terminatedCalls(answer) {
         var call = call
         if let i = streams.firstIndex(where: {
             $0.body.unicodeScalars.elementsEqual(body.unicodeScalars)
@@ -494,24 +528,42 @@ func routeReply(
     // documented default for an absent `reply_to` is self anyway. TAGGED like
     // everything else (`[reply to - · - -]`): python tags every unit, so an error
     // block is counted in M and reads like its siblings.
-    for bad in cut ? [] : malformedCalls(text) {
+    for bad in cut ? [] : malformedCalls(answer) {
         units.append(
             RouteUnit(dest: selfId.value, target: "-", verb: "-", idx: nil, body: bad.body))
     }
+    // CALLS WRITTEN WRONG (owner, 2026-10-07): markup carrying OUR call vocabulary
+    // outside every `<call` envelope — `<tool_call><function=call name="send">`,
+    // `<send>`, a JSON call — is reported like a compiler error, with the form to
+    // write instead (`CallCheck`). The answer's well-formed calls run as written,
+    // and each report says how many did.
+    let ran = calls.filter { !CONTROL_CALLS.contains($0.name) }.count
+    for report in cut ? [] : CallCheck.check(answer, ran: ran) {
+        units.append(RouteUnit(dest: selfId.value, target: "-", verb: "-", idx: nil, body: report))
+    }
     // THE SILENT STREAK of this chain (one per agent + client thread): turns in
     // a row that dispatched nothing. Any call — `done` and `await` included —
-    // ends the streak; see `AIConstants.MAX_SILENT_TURNS`. Python resets at the
-    // same point, on `calls or units` (the malformed units are all there is yet).
-    if anyCalls || !units.isEmpty {
+    // ends the streak; a turn whose only output was BROKEN calls ran nothing and
+    // does not (see `AIConstants.MAX_SILENT_TURNS`).
+    if anyCalls {
         AISilentStreaks.reset(kernel, selfId.value, clientId)
     }
 
+    // THE ANSWER to an inquiry this chain received goes to the asker now, under the
+    // inquiry's pid; an answer with nothing to answer, or a placeholder, is told so.
+    for call in calls where call.name == "inquiry_answer" {
+        if let err = await answerInquiry(
+            kernel: kernel, selfId: selfId.value, clientId: clientId, call)
+        {
+            units.append(RouteUnit(dest: selfId.value, target: "-", verb: "-", idx: nil, body: err))
+        }
+    }
+
     for call in calls {
-        if call.name == "done" || call.name == "await" || call.name == "inquiry_answer" {
+        if CONTROL_CALLS.contains(call.name) {
             // CONTROL CALLS, not dispatches. `done` ends the chain;
-            // `inquiry_answer` hands this turn's answer back to whoever sent the
-            // inquiry (the `inquiry` verb reads it). Neither is a send, neither
-            // is an error, and neither is ever nudged.
+            // `inquiry_answer` was delivered to its asker above. Neither is a
+            // send, neither is an error, and neither is ever nudged.
             continue
         }
         let args = call.arguments.asObject ?? [:]
@@ -608,6 +660,11 @@ func routeReply(
         if target == selfId.value && payload["client_id"] == nil {
             payload["client_id"] = .string(clientId)
         }
+        // THE ASKER'S THREAD rides an inquiry, so the answer that comes back later
+        // (fully async) lands where this chain is working.
+        if payload["type"]?.asString == "inquiry" {
+            payload["reply_client_id"] = .string(clientId)
+        }
 
         // NO `send_binary`, NO FENCE, NO BLOB LIFT. The document rides in the
         // payload as `bytes`, verbatim, because the grammar carries it verbatim
@@ -699,6 +756,13 @@ func routeReply(
             await kernel.send(items)
         }
     if hadItems { await inFlightTurns.bump(selfId.value, -1) }
+    // AN ACCEPTED INQUIRY IS OWED AN ANSWER — counted until a message under its pid
+    // arrives (`AIInquiries.settle`). Python: the same loop after `kernel.send(items)`.
+    for (item, out) in zip(items, outcomes)
+    where item.payload["type"].asString == "inquiry" && pyTruthy(out.result["accepted"]) {
+        AIInquiries.owe(
+            kernel, selfId.value, out.pid.map { String($0.value) } ?? pyStr(out.result["re"]))
+    }
     // The result — INCLUDING an error — goes back. A call that failed silently is
     // the one thing a model can never debug.
     //
@@ -722,10 +786,17 @@ func routeReply(
             // THE RESULT, UNCHANGED. Swift injected a `target` key into a raised
             // handler's body; python renders what the kernel settled and nothing
             // else, and the tag already names the target.
-            body = renderReply(outcome.result)
-            // Only reflect bodies are dropped later, so only they carry the
-            // distillation notice.
-            if u.verb == "reflect" { body += REFLECT_NUDGE }
+            body = renderReply(pointToDocs(target: u.target, verb: u.verb, result: outcome.result))
+            // Only docs bodies are cut later, so only they carry the notice, and are
+            // HELD under their pid for the model's own `grep`. A reflect is MUTABLE
+            // state and stays whole (owner, 2026-10-06); a newer reflect of the same
+            // agent supersedes it (dedupe).
+            if u.verb == "docs", outcome.result["of"] != .null, let p = outcome.pid,
+                let verb = exampleVerb(body)
+            {
+                _ = storeReply(selfId.value, kernel, pid: p.value, body: body)
+                body = docsHead(pid: p.value, verb: verb) + body
+            }
             // A reply is DATA, not a question — the model needs to be able to see
             // it, not forced to swallow it whole as its next turn. Anything over
             // the inline cap is held in RAM under its pid and replaced by its
@@ -788,11 +859,25 @@ func routeReply(
     // model's own prose for the old `{"type":"question"}` line — a text convention
     // had to recognise, with the human living outside it entirely.
     let nudging = !anyCalls && !anyBlocks
+    // Only broken calls: their reports are the next turn — unless this chain has
+    // now been silent MAX_SILENT_TURNS in a row, and gives up.
+    if !anyCalls, anyBlocks,
+        await silentTurn(
+            kernel: kernel, selfId: selfId, clientId: clientId, sendTo: sendTo,
+            systemPrompt: systemPrompt)
+    {
+        return
+    }
     if anyBlocks {
         await deliverGrouped(
             kernel: kernel, blocks: blocks, clientId: clientId, systemPrompt: systemPrompt, messageId: messageId)
     }
     if doneCalled {
+        // AN INQUIRY THIS CHAIN NEVER ANSWERED is closed for its asker, saying so —
+        // the asker must not wait on an answer that will not come.
+        await closeInquiry(
+            kernel: kernel, selfId: selfId.value, clientId: clientId,
+            [("error", .string("\(selfId.value) ended its run without answering"))])
         // Explicitly finished — nothing more runs, nothing reminds. A caller's
         // `send_to` hand-off is the one thing that still applies: the finished
         // text is what it asked to have delivered. It is ALSO the only turn on
@@ -818,7 +903,9 @@ func routeReply(
         // would read empty at exactly the moment something is about to arrive.
         let queued = runState?.queueDepth() ?? 0
         let running = (await runState?.fifo.busy() ?? false) ? 1 : 0
-        let pending = await inFlightTurns.count(selfId.value) + queued + running
+        // ...and the answers its inquiries are still owed (fully async).
+        let owed = AIInquiries.owedCount(kernel, selfId.value)
+        let pending = await inFlightTurns.count(selfId.value) + queued + running + owed
         // TODO (owner, 2026-10-05) — STALL DETECTION. A chain can stop with no error: calls
         // dispatched, then nothing (subai_graph:rust, 2026-09-03 and 2026-10-05). Three shapes:
         // (1) a call never settles (no timeout by default, its task stays in `ps`); (2) every
@@ -852,22 +939,10 @@ func routeReply(
         // that asked for the result by `send_to` gets it as a turn; a clock's
         // tick has nobody reading, so the status event is the record, and the
         // next tick starts a fresh chain with a fresh count.
-        let streak = AISilentStreaks.bump(kernel, selfId.value, clientId)
-        let cap = AISilentStreaks.cap(kernel)
-        if streak >= cap {
-            AISilentStreaks.reset(kernel, selfId.value, clientId)
-            let text = gaveUp(cap)
-            await emitStatus(
-                kernel: kernel, agentId: selfId, clientId: clientId, phase: "done",
-                detail: [
-                    ("reason", .string("gave_up")), ("error", .string(text)),
-                    ("silent_turns", .integer(Int64(streak))),
-                ])
-            if let sendTo = sendTo {
-                deliverSoon(
-                    kernel: kernel, target: sendTo, text: text,
-                    clientId: clientId, systemPrompt: systemPrompt)
-            }
+        if await silentTurn(
+            kernel: kernel, selfId: selfId, clientId: clientId, sendTo: sendTo,
+            systemPrompt: systemPrompt)
+        {
             return
         }
         deliverSoon(

@@ -323,6 +323,21 @@ async def test_a_bare_command_is_found_on_the_childs_path_only(seeded_kernel, tm
     assert r["reason"] == "transport_error" and "No such file" in r["error"], r
 
 
+async def test_a_missing_cwd_is_named_not_the_command(seeded_kernel, tmp_path):
+    """The OSError names the missing DIRECTORY (CPython's `noexec:chdir`), never
+    the command — rust named `python3` for a cwd that did not exist (measured
+    2026-10-06, subai) and the model hunted an interpreter for twenty turns."""
+    gone = tmp_path / "no_such_dir"
+    await _mk(
+        seeded_kernel, agent_id="nowhere", allowed=[r"/bin/echo( .*)?"], cwd=str(gone)
+    )
+    r = await _start(seeded_kernel, "nowhere", "/bin/echo", ["x"])
+    assert r["reason"] == "transport_error", r
+    assert r["error"] == (
+        f"exec_bridge: spawn failed: [Errno 2] No such file or directory: '{gone}'"
+    ), r
+
+
 async def test_many_jobs_run_in_parallel(seeded_kernel):
     await _mk(seeded_kernel, allowed=[r"echo( .*)?"])
     ids = []

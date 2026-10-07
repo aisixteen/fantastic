@@ -66,6 +66,8 @@ from helpers import (
     distinct_calls,
     verdict,
 )
+from helpers.ai import TICK as POLL
+from helpers.ai import ChainEnd
 from helpers.kernel import WRAPS, open_kernel, wrap_with, home
 from helpers.rows import rows_for
 
@@ -1038,8 +1040,9 @@ async def run(
     # result forever still stops. MAX_TURNS remains as a far backstop.
     stale = 0
     seen_writes = -1
+    ender = ChainEnd(root, aid)
     while idle < IDLE:
-        await asyncio.sleep(2.0)
+        await asyncio.sleep(POLL)
         writes = _progress_count(spy.transcript)
         if writes != seen_writes:
             seen_writes, stale = writes, 0
@@ -1047,37 +1050,19 @@ async def run(
             stale += 1
         # CHAIN DEATH. The tripwires examine each TURN, so a model that simply
         # stops producing turns evades every one of them and the run sits out the
-        # full IDLE before scoring. Measured 2026-08-24: test 5 ended at turn 6 and
-        # waited 240s to say so. If nothing of the AI's is in flight and no new
-        # turn has landed, the chain is over — say so now rather than waiting.
-        if idle >= 30 and spy.n == last and last > 0:
-            _rows = (
-                (
-                    (
-                        await root.send(
-                            [{"target": "kernel", "payload": {"type": "ps"}}]
-                        )
-                    )[0]["result"]
-                ).get("tasks")
-                or []
-            )
-            _live = [
-                t for t in _rows if t.get("agent") == aid and t.get("verb") != "ps"
-            ]
-            if not _live:
-                # DUMP THE TABLE. "no turn and nothing in flight" is a conclusion;
-                # the rows are the evidence. Without them a chain that ended and a
-                # detector that fired too early look identical from the transcript.
-                capped = (
-                    f"CHAIN ENDED — no turn and nothing in flight after {idle:.0f}s"
-                    f" · ps={[(t.get('agent'), t.get('verb')) for t in _rows]}"
-                )
-            else:
+        # full IDLE before scoring. The shared check (`helpers.ai.ChainEnd`) ends
+        # the run 30 s after the last turn with nothing of the AI's in flight, or
+        # DONE_QUIET after a `done` call with nothing in flight anywhere.
+        if spy.n == last and last > 0:
+            _cap, _busy = await ender.check(spy.transcript, idle)
+            if _cap:
+                capped = _cap
+            elif _busy and idle >= 30:
                 # A generation IS in flight — activity, not idleness. Without this
                 # hold the `while idle < IDLE` exited SILENTLY mid-generation (same
                 # defect `helpers/ai.py` fixed 2026-09-01; measured here 2026-09-02:
                 # a 33k-char turn regenerating after a fence refusal died at 60s
-                # with no cap line). Held at 28 so the check re-runs each tick.
+                # with no cap line). Held at 28 so the check re-runs.
                 idle = 28.0
         if runaway:
             # A turn blew the per-turn bound: the model is looping INSIDE one pass
@@ -1123,7 +1108,7 @@ async def run(
         if spy.n != last:
             last, idle = spy.n, 0.0
         else:
-            idle += 2.0
+            idle += POLL
         if idle >= IDLE:
             # AN IN-FLIGHT GENERATION IS NOT IDLE. Measured 2026-08-25: pass 2 ran
             # past the 300s window (56k-char turns under GPU contention), the loop

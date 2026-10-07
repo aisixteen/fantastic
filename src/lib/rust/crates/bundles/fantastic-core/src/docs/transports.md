@@ -3,8 +3,8 @@
 # Transports — every way to talk to this kernel
 
 A payload always names its verb in `type` (JSON on the program wires below; tags in a
-model's prompt). `reflect` is universal; per-verb signatures come from each agent's
-reflect `verbs`.
+model's prompt). `reflect` is universal; per-verb signatures come from `docs` (send
+`kernel` `{type: docs, of: <agent id>}`).
 
 - in_process  — `send(target_id, payload)` from code inside the kernel.
 - in_prompt   — an AI agent emits a `<call>` element, one child tag per
@@ -39,7 +39,7 @@ call AS ITSELF, so the leg's `can_call` and the target's `callable_by` decide.
 **Agents on another kernel** are addressed `<guid>|<agent id>` and called with an
 ordinary `send` — no special verb. The root reflect lists the kernels this one is
 connected to as `peers: [{guid, via}]`; send `reflect` to `<guid>|kernel` for that
-kernel's tree and verbs. Your `can_call` must name the target (`<guid>|<agent>`, or
+kernel's tree, `docs` there for its verbs. Your `can_call` must name the target (`<guid>|<agent>`, or
 `<guid>|*` for every agent there); that kernel's own gate decides whether the target
 accepts the call, judged as the leg that serves it there. A guid not in `peers` is
 an unknown agent. A

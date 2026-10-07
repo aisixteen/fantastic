@@ -85,12 +85,14 @@ async def _accept(kernel, target: str, caller: str, verbs="*") -> None:
     )[0]["result"]
 
 
-async def test_reflect_lists_send(seeded_kernel, store_agent):
+async def test_docs_list_send(seeded_kernel, store_agent):
     oid = await _make_ollama(seeded_kernel)
-    r = (await seeded_kernel.send([{"target": oid, "payload": {"type": "reflect"}}]))[
-        0
-    ]["result"]
-    assert "send" in r["verbs"]
+    r = (
+        await seeded_kernel.send(
+            [{"target": "kernel", "payload": {"type": "docs", "of": oid}}]
+        )
+    )[0]["result"]
+    assert r["bundle"] == "ollama_backend.tools" and "send" in r["verbs"]
 
 
 async def test_send_works(seeded_kernel, store_agent, fake_providers):
@@ -983,7 +985,12 @@ async def test_kernel_cancel_kills_an_in_flight_send(
             await seeded_kernel.send([{"target": oid, "payload": {"type": "reflect"}}])
         )[0]["result"]
         assert rr["generating"] is False
-        assert "interrupt" not in rr["verbs"]
+        docs = (
+            await seeded_kernel.send(
+                [{"target": "kernel", "payload": {"type": "docs", "of": oid}}]
+            )
+        )[0]["result"]
+        assert "interrupt" not in docs["verbs"]
         # The FIFO lock was released with the aborted dispatch — the next send runs.
         fake_providers[oid] = _FakeProvider([["after"]])
         assert (

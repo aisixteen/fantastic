@@ -387,6 +387,24 @@ impl Bundle for OllamaBackendBundle {
         "ollama_backend"
     }
 
+    fn verb_docs(&self) -> Value {
+        fantastic_ai_core::verbs::verb_docs()
+    }
+
+    fn emits_doc(&self) -> Option<Value> {
+        Some(fantastic_ai_core::verbs::emits())
+    }
+
+    fn cancel_doc(&self) -> Option<Value> {
+        Some(Value::String(
+            fantastic_ai_core::verbs::CANCEL_DOC.to_string(),
+        ))
+    }
+
+    fn notes_doc(&self) -> Option<Value> {
+        Some(fantastic_ai_core::verbs::notes())
+    }
+
     fn readme(&self) -> Option<&'static str> {
         Some(README)
     }
@@ -422,12 +440,15 @@ impl Bundle for OllamaBackendBundle {
         }
         // python's VERBS map has no `shutdown` — it is an unknown type like any
         // other, and the value is rendered with python's `repr`.
-        Ok(Some(json!({
-            "error": format!(
-                "ollama_backend: unknown type {}",
-                py_repr_value(&payload.get("type").cloned().unwrap_or(Value::Null))
-            )
-        })))
+        Ok(Some({
+            let raw = payload.get("type").cloned().unwrap_or(Value::Null);
+            let mut r = fantastic_kernel::refusal::refusal(
+                fantastic_kernel::refusal::UNHANDLED,
+                format!("ollama_backend: unknown type {}", py_repr_value(&raw)),
+            );
+            fantastic_kernel::refusal::with(&mut r, "verb", raw);
+            r
+        }))
     }
 
     async fn on_delete(&self, agent_id: &AgentId, kernel: &Arc<Kernel>) -> Result<(), BundleError> {

@@ -780,6 +780,6 @@ async fn unknown_type_wire_shape_is_byte_exact() {
         .result;
     assert_eq!(
         serde_json::to_string(&r).unwrap(),
-        r#"{"error":"responses_backend: unknown type 'frob'"}"#
+        r#"{"error":"responses_backend: unknown type 'frob'","reason":"unhandled","verb":"frob"}"#
     );
 }

@@ -868,9 +868,10 @@ async fn reflect_carries_edit_grammar_and_compose() {
     let keys: Vec<&str> = r.as_object().unwrap().keys().map(String::as_str).collect();
     let at = |k: &str| keys.iter().position(|x| *x == k).unwrap();
     assert!(at("allow_count") < at("edit_grammar") && at("edit_grammar") < at("compose"));
-    assert!(at("compose") < at("verbs"));
+    assert!(r.get("verbs").is_none(), "{r}");
     assert!(r.get("hidden_count").is_none(), "{r}");
+    let docs = FileBundle::default().verb_docs();
     for v in ["read", "write", "edit", "append", "undo"] {
-        assert!(r["verbs"].get(v).is_some(), "{v}");
+        assert!(docs.get(v).is_some(), "{v}");
     }
 }

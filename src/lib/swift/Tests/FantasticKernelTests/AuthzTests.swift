@@ -1,7 +1,7 @@
 // The MINIMAL call gate (owner decision 2026-10-03) — mirror of the python
 // `tests/kernel/test_minimal_gate.py`. Unit tests of the one matching engine, then
-// the kernel gate: two-sided allow/deny, `"*"` covers create_agent, the mutators'
-// children-only rule (local and relayed), and the write-time grant-key check.
+// the kernel gate: two-sided allow/deny, `"*"` covers create_agent, the tree verbs
+// acting anywhere once granted, and the write-time grant-key check.
 
 import FantasticJSON
 import OrderedCollections
@@ -183,29 +183,24 @@ struct MinimalGateTests {
         #expect(k.agent(AgentId("made"))?.parentId == AgentId("a"))
     }
 
-    @Test func mutatorsActWithinTheSendersOwnSubtree() async {
+    /// GRANTS ARE THE ONLY RULE (owner, 2026-10-06): holding the tree verbs on the
+    /// root, an agent creates, updates and deletes ANY agent it names — outside its
+    /// own subtree and itself included.
+    @Test func aTreeVerbGrantedOnTheRootActsAnywhere() async {
         let k = await gated()
         let create = await call(
             k, as: "a", "kernel",
             ["type": "create_agent", "parent_id": "b", "id": "x", "handler_module": "noop.tools"])
-        #expect(
-            create.serialize()
-                == #"{"error":"a may only create_agent within its own subtree — b is not in it","reason":"unauthorized","side":"mutator"}"#
-        )
-        #expect(k.agent(AgentId("x")) == nil)
+        #expect(create["error"] == .null, "\(create)")
+        #expect(k.agent(AgentId("x"))?.parentId == AgentId("b"))
         let update = await call(
             k, as: "a", "kernel", ["type": "update_agent", "id": "other", "description": "x"])
-        #expect(update["error"] == "a may only update_agent within its own subtree — other is not in it")
-        #expect(update["side"] == "mutator")
-        let delete = await call(k, as: "a", "kernel", ["type": "delete_agent", "id": "a"])
-        #expect(delete["error"] == "a may only delete_agent within its own subtree — a is not in it")
-        // its own child passes
-        let ok = await call(
-            k, as: "a", "kernel", ["type": "update_agent", "id": "kid", "description": "mine"])
-        #expect(ok["updated"] == true, "\(ok)")
-        let gone = await call(k, as: "a", "kernel", ["type": "delete_agent", "id": "kid"])
+        #expect(update["updated"] == true, "\(update)")
+        let me = await call(k, as: "a", "kernel", ["type": "update_agent", "id": "a", "description": "y"])
+        #expect(me["updated"] == true, "\(me)")
+        let gone = await call(k, as: "a", "kernel", ["type": "delete_agent", "id": "other"])
         #expect(gone["error"] == .null, "\(gone)")
-        #expect(k.agent(AgentId("kid")) == nil)
+        #expect(k.agent(AgentId("other")) == nil)
     }
 
     @Test func anAncestorMutatesAtAnyDepth() async {

@@ -25,6 +25,7 @@ pub mod authz;
 pub mod bootstrap;
 pub mod bundle;
 pub mod call_guard;
+pub mod docs;
 pub mod errors;
 pub mod executions;
 pub mod inbox;
@@ -51,9 +52,7 @@ pub mod yaml_io;
 pub mod test_support;
 
 pub use agent::{Agent, AgentId, AgentRecord, RESERVED_RECORD_KEYS};
-pub use authz::{
-    authorize_call, default_callable_by, default_can_call, Decision, FROM_ABOVE, MUTATORS,
-};
+pub use authz::{authorize_call, default_callable_by, default_can_call, Decision, FROM_ABOVE};
 pub use bundle::{Bundle, BundleRegistry, Reply};
 pub use errors::{KernelError, KernelResult};
 pub use kernel::{Kernel, StateSubscriber, SubscriberToken, DEFAULT_INBOX_BOUND};

@@ -4,8 +4,9 @@
   target's `callable_by` grants (sender, verb); `"*"` covers EVERY verb.
 - The baseline on both fields is `{"$self": "*"}` — nothing else.
 - Kernel verbs at the root take the same two-sided check against the root.
-- The mutators (`create_agent`, `update_agent`, `delete_agent`) act on the
-  sender's DIRECT CHILDREN only, after the gate; a relayed caller owns none.
+- The tree verbs (`create_agent`, `update_agent`, `delete_agent`) take the gate
+  like any verb and nothing more: whoever holds them on the root acts on any agent
+  (owner, 2026-10-06 — grants are the only rule).
 - A grant key is an agent id, `$self`, `$parent`, `$subtree`, `<guid>|<agent>`
   or `<guid>|*` — anything else is refused at the write.
 """
@@ -177,37 +178,40 @@ async def test_a_kernel_verb_takes_the_root_ingress_check(seeded_kernel):
     assert ok["status"] == "completed" and "tasks" in ok["result"], ok
 
 
-@pytest.mark.parametrize(
-    "payload, operand",
-    [
-        (
-            {
-                "type": "create_agent",
-                "parent_id": "kernel_state",
-                "handler_module": MOD,
-            },
-            "kernel_state",
-        ),
-        ({"type": "update_agent", "id": "a", "description": "x"}, "a"),
-        ({"type": "update_agent", "id": "peer", "description": "x"}, "peer"),
-        ({"type": "delete_agent", "id": "nobody"}, "nobody"),
-    ],
-)
-async def test_a_mutator_acts_within_the_senders_own_subtree_only(
-    seeded_kernel, payload, operand
-):
+async def test_a_tree_verb_granted_on_the_root_acts_anywhere(seeded_kernel):
+    """GRANTS ARE THE ONLY RULE (owner, 2026-10-06): an agent granted the tree verbs
+    on the root creates, updates and deletes ANY agent it names — outside its own
+    subtree and itself included. There is no ownership check after the gate."""
     k = seeded_kernel
     _mk(k, "a")
-    _mk(k, "kid", parent="a")
-    _mk(k, "grandkid", parent="kid")
     _mk(k, "peer")
     _open_root(k, "a")
-    r = (await _as(k, "a", "kernel", payload))["result"]
-    assert r == {
-        "error": f"a may only {payload['type']} within its own subtree — {operand} is not in it",
-        "reason": "unauthorized",
-        "side": "mutator",
-    }
+    made = await _as(
+        k,
+        "a",
+        "kernel",
+        {
+            "type": "create_agent",
+            "parent_id": "kernel_state",
+            "handler_module": MOD,
+            "id": "top",
+        },
+    )
+    assert made["status"] == "completed" and "top" in k.ctx.agents, made
+    up = await _as(
+        k, "a", "kernel", {"type": "update_agent", "id": "peer", "description": "x"}
+    )
+    assert up["status"] == "completed" and up["result"].get("updated") is True, up
+    me = await _as(
+        k, "a", "kernel", {"type": "update_agent", "id": "a", "description": "y"}
+    )
+    assert me["status"] == "completed" and me["result"].get("updated") is True, me
+    gone = await _as(k, "a", "kernel", {"type": "delete_agent", "id": "peer"})
+    assert gone["status"] == "completed" and "peer" not in k.ctx.agents, gone
+    nobody = (await _as(k, "a", "kernel", {"type": "delete_agent", "id": "nobody"}))[
+        "result"
+    ]
+    assert nobody.get("side") is None and nobody.get("reason") != "unauthorized", nobody
 
 
 @pytest.mark.parametrize(
@@ -224,8 +228,8 @@ async def test_a_mutator_acts_within_the_senders_own_subtree_only(
 async def test_a_missing_operand_gets_the_verbs_own_refusal(
     seeded_kernel, payload, arg
 ):
-    """A mutator whose operand is missing or not a string is the VERB's to refuse
-    (`missing_arg`), before the mutator rule ever judges ownership."""
+    """A tree verb whose operand is missing or not a string is the VERB's to refuse
+    (`missing_arg`)."""
     k = seeded_kernel
     _mk(k, "a")
     _open_root(k, "a")

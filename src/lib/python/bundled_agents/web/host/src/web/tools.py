@@ -38,6 +38,7 @@ import uvicorn
 from fastapi import FastAPI
 
 from .app import DEFAULT_HOST, extra_origins, make_app, own_origins
+from kernel._refusal import UNHANDLED, refusal
 
 logger = logging.getLogger(__name__)
 
@@ -341,9 +342,6 @@ async def _reflect(id, payload, kernel):
         # still refuses. This answers "what can a browser actually get?" in the
         # one round-trip they already make.
         "browser_reachable": _browser_reachable(id, kernel),
-        "verbs": {
-            n: (f.__doc__ or "").strip().splitlines()[0] for n, f in VERBS.items()
-        },
     }
 
 
@@ -454,7 +452,7 @@ async def handler(id: str, payload: dict, kernel) -> dict | None:
     t = payload.get("type")
     fn = VERBS.get(t)
     if fn is None:
-        return {"error": f"web: unknown type {t!r}"}
+        return refusal(UNHANDLED, f"web: unknown type {t!r}", verb=t)
     return await fn(id, payload, kernel)
 
 

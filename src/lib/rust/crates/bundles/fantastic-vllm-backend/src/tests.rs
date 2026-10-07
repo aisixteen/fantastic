@@ -504,17 +504,15 @@ fn a_record_missing_required_fields_is_refused_at_the_write_naming_all() {
     });
     let err = validate(&obj(meta.clone()), &Map::new()).expect("refused");
     assert!(
-        err.contains("missing: kv_slots, kv_overflow, memory_store_id, context_window"),
+        err.contains("missing: kv_overflow, memory_store_id —"),
         "{err}"
     );
     // each missing field is named WITH its hint, from the schema
     assert!(err.contains("kv_overflow = all slots live: evict"), "{err}");
     // an update to a complete record is judged on the MERGED state
     let mut full = obj(meta);
-    full.insert("kv_slots".into(), json!(7));
     full.insert("kv_overflow".into(), json!("evict"));
     full.insert("memory_store_id".into(), json!("memory"));
-    full.insert("context_window".into(), json!(262144));
     assert_eq!(validate(&obj(json!({"seed": 3})), &full), None);
 }
 
@@ -759,7 +757,7 @@ async fn unknown_type_wire_shape_is_byte_exact() {
         .result;
     assert_eq!(
         serde_json::to_string(&r).unwrap(),
-        r#"{"error":"vllm_backend: unknown type 'frob'"}"#
+        r#"{"error":"vllm_backend: unknown type 'frob'","reason":"unhandled","verb":"frob"}"#
     );
 }
 
@@ -817,6 +815,30 @@ async fn the_last_budget_is_per_agent_and_freed_on_delete() {
         .remove(0)
         .result;
     assert_eq!(out["response"], json!("ok"), "{out}");
+    // The call-less answer is REROLLED in the background (the no-call reminder)
+    // until the chain gives up; let it settle, or a reroll that lands after the
+    // delete below records a budget for the re-created id.
+    let mut quiet = 0;
+    for _ in 0..500 {
+        let st = kernel
+            .send(vec![Item::new(
+                AgentId::from(id.as_str()),
+                json!({"type": "status"}),
+            )])
+            .await
+            .remove(0)
+            .result;
+        quiet = if st["generating"] == json!(false) && st["current"].is_null() {
+            quiet + 1
+        } else {
+            0
+        };
+        if quiet >= 5 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(quiet >= 5, "the chain never settled");
     let mine = last(id.clone()).await;
     assert!(mine.is_i64(), "the pass recorded what it sent: {mine}");
     assert_eq!(

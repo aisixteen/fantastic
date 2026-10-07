@@ -12,8 +12,8 @@ grammar `tool_parse` reads whole, and yields part lifecycle events:
     ("abort", part, why)   the part never closed: the pass ended, was cut, or was stopped
 
 Kinds: "text" (prose), "thinking" (inside `<think>`), "call" (a `<call name="…">`
-envelope, its args streaming as they are written). A call written inside a thought is a
-call part — dispatch reads the full text, so an action mid-thought is still an action.
+envelope, its args streaming as they are written). A call written inside a thought is
+thinking text, never a call part — only the answer acts (owner, 2026-10-07).
 
 It is ANIMATION, never action: nothing here dispatches. The call parser in `tool_parse`
 stays the one authority on what a call IS; this only tells a watcher what is being
@@ -140,8 +140,10 @@ class PartSplitter:
     def _step(self, out: list[tuple]) -> bool:
         if self._call is not None:
             return self._step_call(out)
-        # Outside a call: look for the next markup that changes the part.
-        opens = [OPEN, THINK_CLOSE if self._in_think else THINK_OPEN]
+        # Outside a call: look for the next markup that changes the part. INSIDE
+        # thinking only `</think>` does — a `<call>` there is thinking text, never a
+        # call part (owner, 2026-10-07: only the answer acts).
+        opens = [THINK_CLOSE] if self._in_think else [OPEN, THINK_OPEN]
         hits = [(self._buf.find(t), t) for t in opens]
         hits = [(i, t) for i, t in hits if i != -1]
         if not hits:

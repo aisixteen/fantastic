@@ -1,0 +1,107 @@
+# Test spec for `configs/docs.yaml` — WHAT THIS SUITE ASSERTS.
+# The kernel config it runs against is a separate, deployable file; nothing
+# test-specific may leak into it.
+config: docs.yaml
+
+name: docs
+description: >
+  A reflect says what an agent IS; how to CALL it is the `docs` kernel verb
+  (owner, 2026-10-05), answered by the root and gated like any kernel verb (owner,
+  2026-10-06). Oneliners carry each verb's signature,
+  `detailed` the whole text. A reflect's tree can be cut to the branches a caller
+  works on (`show_subtrees`) or around the ones it knows (`ignore_subtrees`, each
+  pruned branch left as `{id, pruned: n}`).
+
+requirements: [DOC-1, DOC-2, DOC-3, DOC-4, DOC-5, FLT-1, FLT-2, FLT-3]
+
+expect:
+  hydration: ok
+  reboot: true
+  closed_roster_sender: asker
+  steps:
+    # ── DOC-1 · a reflect carries no verb docs ──
+    - name: the root's reflect advertises no kernel verbs
+      operator: {to: kernel, send: {type: reflect}}
+      expect: {absent: kernel_verbs}
+      because: DOC-1
+    - name: an agent's reflect carries no verb signature
+      operator: {to: shelf, send: {type: reflect}}
+      expect: {absent: "args:"}
+      because: DOC-1
+
+    # ── DOC-2 · `docs` is gated like any kernel verb ──
+    - name: an agent with no edge to the root is refused the kernel's docs
+      reach: {from: asker, to: $root, send: {type: docs, of: kernel, verb: cancel}}
+      expect: {allow: false, side: egress}
+      because: DOC-2
+    - name: the root accepts reader's docs
+      grant: {agent: $root, field: callable_by, to: reader, verbs: [docs]}
+      because: DOC-2
+    - name: an agent granted docs on the root reads them
+      reach: {from: reader, to: $root, send: {type: docs, of: kernel, verb: cancel}}
+      expect: {allow: true, contains: {verbs.cancel: "args: task_id:str"}}
+      because: DOC-2
+    - name: and the grant covers docs alone — reflect stays gated
+      reach: {from: reader, to: $root, send: {type: reflect}}
+      expect: {allow: false, side: egress}
+      because: DOC-2
+
+    # ── DOC-3 · two tiers ──
+    - name: oneliners name the bundle and one signature per verb
+      operator: {to: kernel, send: {type: docs, of: shelf}}
+      expect: {contains: {of: shelf, bundle: file_bridge.tools, tier: oneliners}}
+      because: DOC-3
+    - name: detailed for one verb is that verb's whole text
+      operator: {to: kernel, send: {type: docs, of: kernel, verb: cancel, tier: detailed}}
+      expect: {contains: {tier: detailed}, mentions: "Kills that task AND ITS SUBTREE"}
+      because: DOC-3
+
+    # ── DOC-4 · a bundle's docs exist before any agent of it ──
+    - name: docs of a handler module no agent runs
+      operator: {to: kernel, send: {type: docs, of: exec_bridge.tools}}
+      expect: {contains: {of: exec_bridge.tools, bundle: exec_bridge.tools}}
+      because: DOC-4
+    - name: docs of a bundle by the name `bundles='ids'` lists
+      operator: {to: kernel, send: {type: docs, of: exec_bridge}}
+      expect: {contains: {of: exec_bridge, bundle: exec_bridge.tools}}
+      because: DOC-4
+
+    # ── DOC-5 · refusals are coded, and point back at docs ──
+    - name: no `of` is a missing argument
+      operator: {to: kernel, send: {type: docs}}
+      expect: {reason: missing_arg}
+      because: DOC-5
+    - name: an `of` naming nothing is refused
+      operator: {to: kernel, send: {type: docs, of: no_such_thing}}
+      expect: {reason: bad_arg}
+      because: DOC-5
+    - name: a verb the bundle lacks is refused
+      operator: {to: kernel, send: {type: docs, of: kernel, verb: no_such_verb}}
+      expect: {reason: bad_arg}
+      because: DOC-5
+    - name: an unknown tier is refused
+      operator: {to: kernel, send: {type: docs, of: kernel, tier: everything}}
+      expect: {reason: bad_arg}
+      because: DOC-5
+    - name: an unknown verb on an agent is a coded refusal naming the verb
+      operator: {to: shelf, send: {type: frobnicate}}
+      expect: {reason: unhandled, contains: {verb: frobnicate}}
+      because: DOC-5
+
+    # ── FLT-1..3 · reflect subtree filters ──
+    - name: an ignored branch is a stub counting what it holds
+      operator: {to: kernel, send: {type: reflect, tree: ids, ignore_subtrees: [docs_loader]}}
+      expect: {contains: {tree.*.id: docs_loader, tree.*.pruned: 4}, absent: shelf}
+      because: FLT-1
+    - name: a shown branch is all the tree holds
+      operator: {to: kernel, send: {type: reflect, show_subtrees: [shelf]}}
+      expect: {contains: {tree.*.id: shelf}, absent: asker}
+      because: FLT-2
+    - name: show first, then ignore inside what is shown
+      operator: {to: kernel, send: {type: reflect, tree: ids, show_subtrees: [docs_loader], ignore_subtrees: [shelf]}}
+      expect: {contains: {tree.*.pruned: 1}, mentions: asker}
+      because: FLT-2
+    - name: an id naming no agent is refused
+      operator: {to: kernel, send: {type: reflect, ignore_subtrees: [no_such_agent]}}
+      expect: {reason: bad_arg}
+      because: FLT-3

@@ -73,7 +73,7 @@ enum BridgeDocs {
         "reconnect":
             "No args. Teardown + boot — explicit because we don't auto-reconnect on transport failure (keeps real network problems visible to operators / telemetry).",
         "forward":
-            "args: target:str (req — id on the REMOTE kernel) + payload:dict (req — the call to run there; payload is ITSELF a verb frame and MUST carry its own \"type\") + timeout:float? (default 30s). Example: {\"type\":\"forward\",\"target\":\"src\",\"payload\":{\"type\":\"read_stream\",\"path\":\"data.bin\",\"offset\":0}}. Ships a raw `{type:'call', id, target, payload}` frame over the transport, awaits the matching reply, returns the unwrapped data. The far kernel judges the call as the leg that serves it there. Local→local stays direct kernel.send (this verb is only for cross-kernel). Multi-hop loop detection is the caller's responsibility — the bridge ships whatever it's given.",
+            "args: target:str (req — an id on the REMOTE kernel), payload:dict (req — the call to run there, a verb frame with its own `type`), timeout:float? (default 30s). Example: {\"type\":\"forward\",\"target\":\"src\",\"payload\":{\"type\":\"read_stream\",\"path\":\"data.bin\",\"offset\":0}}. Ships a raw `{type:'call', id, target, payload}` frame over the transport, awaits the matching reply, returns the unwrapped data. The far kernel judges the call as the leg that serves it there. Local→local stays direct kernel.send (this verb is only for cross-kernel). Multi-hop loop detection is the caller's responsibility — the bridge ships whatever it's given.",
         "watch_remote":
             "args: target:str (req — id on the REMOTE kernel to watch). Sends `{type:'watch', src:<target>}` over the transport and subscribes this leg to `target`. Subsequent `{type:'event', src, payload}` frames whose `src` is subscribed are re-emitted on THIS bridge agent's inbox as the payload plus `src`; an event for anything not subscribed is dropped. Local watchers subscribe to the bridge with `kernel.watch(<bridge_id>, ...)`. Idempotent (web_ws de-dups via its own `watching` set).",
         "unwatch_remote":
@@ -109,6 +109,8 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
     public let family: BridgeFamily
     public var name: String { family.label }
     public var verbs: [String] { family.verbNames }
+    public var verbDocTable: JSON { family.verbs }
+    public var emitsDoc: JSON? { BridgeDocs.emits }
 
     let stateLock = NSLock()
     var states: [AgentId: BridgeState] = [:]
@@ -297,8 +299,6 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
             let exposes = meta["exposes"] ?? .null
             out["exposes"] = pyTruthy(exposes) ? exposes : .array([])
         }
-        out["verbs"] = family.verbs
-        out["emits"] = BridgeDocs.emits
         return .object(out)
     }
 
@@ -365,10 +365,9 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
     /// Python `io_bridge.dispatch`'s miss: the common slip is a frame with no
     /// `type`, or a `forward` whose inner payload dropped its own.
     private func unknownType(_ t: JSON) -> JSON {
-        .object([
-            "error": .string("bridge: unknown type \(pyRepr(t))"),
-            "hint": .string(BridgeDocs.envelopeHint),
-        ])
+        Refusal.make(
+            Refusal.unhandled, "bridge: unknown type \(pyRepr(t))",
+            hint: BridgeDocs.envelopeHint, extra: [("verb", t)])
     }
 
     // MARK: - readmes (python `readme.md`, byte for byte)

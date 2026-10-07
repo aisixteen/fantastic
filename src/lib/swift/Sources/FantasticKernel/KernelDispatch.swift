@@ -197,7 +197,7 @@ extension Kernel {
         else { return }
         let orig = KernelTaskLocals.currentSender
         if let orig, orig != target.id,
-            gate(sender: orig, verb: "emit", target: target, payload: item.payload) != nil
+            gate(sender: orig, verb: "emit", target: target) != nil
         {
             return
         }
@@ -207,16 +207,6 @@ extension Kernel {
         }
         fanout(target, "emit", item, publish: publish)
     }
-
-    /// The escalation line every DISTILLED reflect carries — python
-    /// `_MORE_HINT`, verbatim. Escalation rides in the REPLY itself, never in
-    /// any caller's system prompt.
-    static let moreHint =
-        "Distilled: every agent and what it is FOR. Reflect one agent for its verbs "
-        + "(<type>reflect</type>). Manual: <type>reflect</type> <readme>index</readme> - keys "
-        + "include system-verbs (ps/cancel/create_agent args) and self-extension (author your "
-        + "own durable tools). <detail>full</detail> on a reflect adds wiring and posture - ask "
-        + "for it only when you need to see how agents are plumbed, not to find one."
 
     /// PURPOSE, not wiring — the reflect keys a roster node copies beyond its
     /// `sentence` (python `_PURPOSE_KEYS`).
@@ -232,7 +222,7 @@ extension Kernel {
     /// reflect, so the caller settles it `failed` with that body. `nil` = fine.
     func applyReflectFlags(_ target: Agent, _ payload: JSON, _ reply: inout JSON) async -> JSON? {
         guard case .object(var obj) = reply else { return nil }
-        // A REFUSAL IS NOT A REFLECT. Decorating one with kernel_verbs/tree/more
+        // A REFUSAL IS NOT A REFLECT. Decorating one with a tree
         // produced a reply that reads like a healthy reflect with a stray error
         // field, and a caller could not tell the two apart (2026-09-02).
         if obj["error"] != nil { return nil }
@@ -248,14 +238,6 @@ extension Kernel {
         for k in ["can_call", "callable_by"] where obj[k] == nil {
             if let v = target.metaValue(forKey: k) { obj[k] = v }
         }
-
-        // The KERNEL's own verbs — answered by the ROOT alone (they act on the
-        // TREE and the kernel-wide task table), so they appear in no bundle's
-        // `verbs` map. Advertised on EVERY agent, not just the root: root-only
-        // was tried and reverted — a model that never reflects the root never
-        // learns they exist, guesses, and gives up.
-        obj["kernel_verbs"] = Kernel.kernelVerbsView(
-            full: payload["detail"].asString == "full")
 
         // Kernel runtime identity + deployment context — surfaced on the ROOT
         // reflect so a client that hops to this kernel learns, in one
@@ -306,30 +288,60 @@ extension Kernel {
         // a bool, a number, a list, `none` — omits the tree. Reading it as
         // `asString ?? "all"` made `tree:null` and `tree:true` insert the whole
         // tree, which is the one answer the caller did not ask for.
-        switch payload.asObject?["tree"] {
+        let treeArg = payload.asObject?["tree"]
+        let walks: Bool
+        switch treeArg {
+        case .none, .some(.string("all")), .some(.string("ids")): walks = true
+        default: walks = false
+        }
+        // SUBTREE FILTERS (owner, 2026-10-05): `show_subtrees` answers with only
+        // those branches, `ignore_subtrees` prunes each named branch to a stub
+        // `{id, pruned: n}`; together, show first and ignore inside it. Python
+        // `kernel/_docs.subtree_filter`.
+        var show: [Agent] = []
+        var ignore: Set<String> = []
+        if walks {
+            switch subtreeFilter(payload, target) {
+            case .failure(let refusal):
+                reply = refusal.reply
+                return nil
+            case .success(let f):
+                show = f.show
+                ignore = f.ignore
+            }
+        }
+        let roots = show.isEmpty ? [target] : show
+        switch treeArg {
         case .none, .some(.string("all")):
             // DISTILLED IS THE GATED ROSTER: `{id, sentence?, description?,
             // mode?, children}`, each sentence ASKED FROM THE AGENT ITSELF.
             // `detail:full` keeps the wiring node.
-            if payload["detail"].asString == "full" {
-                obj["tree"] = treeNode(target)
-            } else {
-                switch await roster(target) {
-                case .node(let node): obj["tree"] = node
-                case .raised(let raised): return raised
+            var nodes: [JSON] = []
+            for r in roots {
+                if ignore.contains(r.id.value) {
+                    nodes.append(prunedStub(r))
+                } else if payload["detail"].asString == "full" {
+                    nodes.append(treeNode(r, ignore: ignore))
+                } else {
+                    switch await roster(r, ignore: ignore) {
+                    case .node(let node): nodes.append(node)
+                    case .raised(let raised): return raised
+                    }
                 }
             }
+            obj["tree"] = show.isEmpty ? nodes[0] : .array(nodes)
         case .some(.string("ids")):
             // PAGED — the cheap id tier is the one most likely to be walked by a
             // caller with a small budget, so it is also the one that most needs
             // a bound. Same cursor law as `list_agents`/`ps`; the cursor is
-            // `next`, and it is present ONLY when a further page exists.
-            let (ids, next) = page(descendantIds(target), payload) { $0 }
-            obj["tree"] = .array(ids.map { .string($0) })
+            // `next`, and it is present ONLY when a further page exists. A
+            // pruned branch stands as its stub; the cursor is its id.
+            let flat = roots.flatMap { descendantEntries($0, ignore: ignore) }
+            let (ids, next) = page(flat, payload) { $0.asString ?? ($0["id"].asString ?? "") }
+            obj["tree"] = .array(ids)
             if let next { obj["next"] = .string(next) }
         default: break
         }
-        if payload["detail"].asString != "full" { obj["more"] = .string(Kernel.moreHint) }
         // The catalog pages with the SAME `limit`/`after` as `tree=ids`, and
         // names its cursor `bundles_next` only when a further page follows.
         switch payload.asObject?["bundles"] {
@@ -395,7 +407,7 @@ extension Kernel {
     ///
     /// `.failure` carries a node's RAISED reflect: python's exception
     /// propagates out of `_roster` and fails the whole reflect.
-    func roster(_ a: Agent) async -> RosterResult {
+    func roster(_ a: Agent, ignore: Set<String> = []) async -> RosterResult {
         var raw: JSON
         if a.handlerModule != nil {
             let (reply, status) = await internalDispatch(a, .object(["type": .string("reflect")]))
@@ -418,7 +430,11 @@ extension Kernel {
         }
         var children: [JSON] = []
         for c in a.childIds().compactMap({ self.agent($0) }) {
-            switch await roster(c) {
+            if ignore.contains(c.id.value) {
+                children.append(prunedStub(c))
+                continue
+            }
+            switch await roster(c, ignore: ignore) {
             case .node(let n): children.append(n)
             case .raised(let raised): return .raised(raised)
             }
@@ -1042,6 +1058,10 @@ extension Kernel {
         // process. Root-only, gated inside their handler to the tree root.
         case "kernel_start", "shutdown_agents", "kernel_stop":
             return true
+        // HOW TO CALL an agent — its bundle's verb docs. Answered by the root,
+        // and the one verb the call gate never checks (`gate`).
+        case "docs":
+            return true
         default:
             return false
         }
@@ -1081,13 +1101,10 @@ extension Kernel {
     /// joiner. An OPERATOR joiner (no origin) is ungated, as everywhere.
     func joinDenial(origin: AgentId?, payload: JSON?, target: Agent) -> JSON? {
         guard let joiner = origin else { return nil }
-        // THE EXECUTION'S OWN PAYLOAD, not a synthesized `{type:<verb>}`. A
-        // rehydrated row has no payload: python's
-        // `(entry.get("payload") or {}).get("type")` is then `None` and the gate
-        // runs on an empty call. Python `_agent.py:786-793`.
-        let orig = payload ?? .object([:])
-        return gate(
-            sender: joiner, verb: orig["type"].asString ?? "", target: target, payload: orig)
+        // THE EXECUTION'S OWN VERB, read off its payload. A rehydrated row has no
+        // payload: python's `(entry.get("payload") or {}).get("type")` is then
+        // `None` and the gate runs on an empty verb.
+        return gate(sender: joiner, verb: payload?["type"].asString ?? "", target: target)
     }
 
     /// Resolve an id the way `send` does — the reserved `kernel` address or a literal id.
@@ -1104,8 +1121,9 @@ extension Kernel {
     /// target's `callable_by` grants `(sender, verb)`) — every target, the root
     /// included: a kernel verb takes the same two-sided check against the root.
     /// The sender is always a LOCAL agent — a call a bridge leg serves is judged
-    /// as the leg. Then the MUTATORS' children-only rule. A sender with no record
-    /// → empty grant → deny-all.
+    /// as the leg. GRANTS ARE THE ONLY RULE (owner, 2026-10-06): the tree verbs take
+    /// this check and nothing more. A sender with no record → empty grant →
+    /// deny-all.
     /// Every id ABOVE `agent` — what `$subtree` matches against: a grant holder
     /// reaches the other end when it is one of these. A peer target (no local
     /// parent) has none.
@@ -1118,7 +1136,7 @@ extension Kernel {
         return out
     }
 
-    func gate(sender: AgentId, verb: String, target: Agent, payload: JSON) -> JSON? {
+    func gate(sender: AgentId, verb: String, target: Agent) -> JSON? {
         let senderAgent = agent(sender)
         let sCan = senderAgent?.metaValue(forKey: "can_call") ?? .null
         let sParent = senderAgent?.parentId?.value
@@ -1167,29 +1185,7 @@ extension Kernel {
             ])
         }
 
-        // MUTATORS answered by the root: the operand must be in the sender's own
-        // subtree.
-        if mutatorVerbs.contains(verb) && target.parentId == nil {
-            return mutatorDenial(sender: sender, verb: verb, payload: payload)
-        }
         return nil
-    }
-
-    /// The MUTATOR rule: `create_agent`'s `parent_id` is the sender or an agent
-    /// below it; `update_agent` / `delete_agent`'s `id` names an agent below the
-    /// sender, any depth (an unknown id is in no subtree). A MISSING or non-string
-    /// operand is not judged here: the verb's own missing/shape refusal answers it.
-    /// Refusal, or nil.
-    private func mutatorDenial(sender: AgentId, verb: String, payload: JSON) -> JSON? {
-        let field = verb == "create_agent" ? "parent_id" : "id"
-        guard let oid = payload[field].asString, !oid.isEmpty else { return nil }
-        let below = agent(AgentId(oid)).map { ancestorIds(of: $0).contains(sender.value) } ?? false
-        let owned = below || (verb == "create_agent" && oid == sender.value)
-        if owned { return nil }
-        return .object([
-            "error": .string("\(sender.value) may only \(verb) within its own subtree — \(oid) is not in it"),
-            "reason": .string("unauthorized"), "side": .string("mutator"),
-        ])
     }
 }
 

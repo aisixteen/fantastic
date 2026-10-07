@@ -92,8 +92,11 @@ async def main():
         # THE REVIEWER, wired to RECEIVE INQUIRIES. It needs the spec and the diff to
         # answer, and the coder needs egress to it; the gate is two-sided and
         # these are siblings, so both halves are written here.
+        # THE ANSWER IS THE REVIEWER'S OWN SEND (owner, 2026-10-06: inquiries are
+        # fully async) — `ai_rev -> ai send`, both halves (the coder's below).
         rv = await connect(root, core, BK, agent_id="ai_rev",
-                           can_call={FB: "*", "editor": "*", RUNNER: "*", "cli": "*"},
+                           can_call={FB: "*", "editor": "*", RUNNER: "*", "cli": "*",
+                                     "ai": ["send"]},
                            callable_by={"ai": "*"},
                            limits=Limits.from_env(os.environ))
 
@@ -111,7 +114,7 @@ async def main():
         )
         c = await connect(root, core, BK, agent_id="ai",
                           can_call={FB: "*", "editor": "*", "cli": "*", "ai_rev": "*"},
-                          callable_by={"user": "*"},
+                          callable_by={"user": "*", "ai_rev": ["send"]},
                           limits=Limits.from_env(os.environ))
         # THE TASK COMES FROM THE HUMAN — gated, ledgered, a real sender.
         await drive(c, coder_task, client_id="coder", via="user")

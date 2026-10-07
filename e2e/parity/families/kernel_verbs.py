@@ -85,8 +85,7 @@ def run(ctx) -> None:  # noqa: C901
 
         # ── C19 — verbs on the root, and the ids they name ──
         # The C19–C26 creates name `k.home` as parent (minimal model, owner
-        # 2026-10-04): under the root the mutator rule refuses first and the id /
-        # grant / field check each record is named for is never reached.
+        # 2026-10-04): the id / grant / field check each record is named for.
         rec.json("C19/create_id_dotdot",
                  call(k, k.root_id, {"type": "create_agent", "id": "../x",
                                      "handler_module": "cli.tools", "parent_id": k.home}))
@@ -154,10 +153,8 @@ def run(ctx) -> None:  # noqa: C901
         ]
         for case, payload in C27:
             rec.json(f"C27/{case}", call(k, k.root_id, payload))
-        # delete_lock with a locked child. The child is the LEG's (minimal model,
-        # owner 2026-10-04): the leg creates only its own children, so a locked
-        # GRANDCHILD under `files` is unreachable over REST and
-        # `delete_parent_of_locked` is now a plain delete of `files`.
+        # delete_lock with a locked child, created under the LEG (minimal model,
+        # owner 2026-10-04); `delete_parent_of_locked` is a plain delete of `files`.
         rec.json("C27/create_locked_child",
                  call(k, k.root_id, {"type": "create_agent", "id": "locked_child",
                                      "handler_module": "cli.tools", "parent_id": k.home,

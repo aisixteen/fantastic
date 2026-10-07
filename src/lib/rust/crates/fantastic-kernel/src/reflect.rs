@@ -27,14 +27,6 @@ use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
 
-/// The escalation line every DISTILLED reflect carries — python `_MORE_HINT`,
-/// verbatim. Escalation rides in the reply itself, not in any caller's prompt.
-pub const MORE_HINT: &str = "Distilled: every agent and what it is FOR. Reflect one agent for its \
-verbs (<type>reflect</type>). Manual: <type>reflect</type> <readme>index</readme> - keys include \
-system-verbs (ps/cancel/create_agent args) and self-extension (author your own durable tools). \
-<detail>full</detail> on a reflect adds wiring and posture - ask for it only when you need to see \
-how agents are plumbed, not to find one.";
-
 /// PURPOSE, not wiring — the reflect keys a roster node copies beyond its
 /// `sentence` (python `_PURPOSE_KEYS`).
 const PURPOSE_KEYS: [&str; 1] = ["mode"];
@@ -326,6 +318,7 @@ fn sentence_for(target: &Arc<Agent>) -> &'static str {
 fn roster(
     kernel: Arc<Kernel>,
     a: Arc<Agent>,
+    ignore: Arc<std::collections::HashSet<String>>,
 ) -> Pin<Box<dyn Future<Output = Result<Value, Value>> + Send>> {
     Box::pin(async move {
         let raw = if a.handler_module.is_some() {
@@ -358,7 +351,11 @@ fn roster(
         }
         let mut children = Vec::new();
         for c in a.children_snapshot() {
-            children.push(roster(Arc::clone(&kernel), c).await?);
+            if ignore.contains(&c.id.0) {
+                children.push(crate::docs::pruned_stub(&c));
+                continue;
+            }
+            children.push(roster(Arc::clone(&kernel), c, Arc::clone(&ignore)).await?);
         }
         node.insert("children".to_string(), Value::Array(children));
         Ok(Value::Object(node))
@@ -369,9 +366,10 @@ fn roster(
 /// uniformly to bare-agent and bundle reflects (python
 /// `_apply_reflect_flags`). Non-object replies and refusals pass through.
 ///
-/// Key order is python's: identity, `description`, gate fields,
-/// `kernel_verbs`, the root frame, `tree`, `next`, `more`, `bundles`,
-/// `bundles_next`, `readme`.
+/// Key order is python's: identity, `description`, gate fields, the root
+/// frame, `tree`, `next`, `bundles`, `bundles_next`, `readme`. A reflect says
+/// what an agent IS, never how to call it (owner, 2026-10-05): verb docs are
+/// the `docs` kernel verb ([`crate::docs`]).
 ///
 /// `Err` = a roster node's reflect raised; the caller settles the whole
 /// reflect `failed` with that reply.
@@ -384,7 +382,7 @@ pub async fn apply_reflect_flags(
     let Some(obj) = reply.as_object_mut() else {
         return Ok(());
     };
-    // A REFUSAL IS NOT A REFLECT. Decorating one with kernel_verbs/tree/more
+    // A REFUSAL IS NOT A REFLECT. Decorating one with a tree
     // produced a reply that reads like a healthy reflect with a stray error
     // field, and a caller could not tell the two apart (2026-09-02).
     if obj.contains_key("error") {
@@ -409,15 +407,6 @@ pub async fn apply_reflect_flags(
             }
         }
     }
-    // The KERNEL's own verbs — answered by the ROOT alone (they act on the TREE
-    // and the kernel-wide task table), so they appear in no bundle's `verbs`
-    // map. Advertised on EVERY agent, not just the root: root-only was tried
-    // and reverted — a model that never reflects the root never learns they
-    // exist, guesses, and gives up.
-    obj.insert(
-        "kernel_verbs".to_string(),
-        crate::send::kernel_verbs_view(full),
-    );
     // Kernel runtime identity + deployment context — surfaced on the ROOT
     // reflect so a client that hops to this kernel learns, in one round-trip:
     // which runtime (`runtime`), WHERE it runs (`env` — "container" when
@@ -462,23 +451,66 @@ pub async fn apply_reflect_flags(
     // DECIDED BY KEY PRESENCE (python `payload.get("tree", "all")`): absent is
     // `all`; a present `all`/`ids` acts; any other present value — null, a bool,
     // a number, `none` — omits the tree.
-    match payload.get("tree") {
-        None => insert_tree(kernel, target, full, obj).await?,
-        Some(Value::String(t)) if t == "all" => insert_tree(kernel, target, full, obj).await?,
-        Some(Value::String(t)) if t == "ids" => {
+    let tree_mode = match payload.get("tree") {
+        None => Some("all"),
+        Some(Value::String(t)) if t == "all" => Some("all"),
+        Some(Value::String(t)) if t == "ids" => Some("ids"),
+        _ => None,
+    };
+    if let Some(mode) = tree_mode {
+        // SUBTREE FILTERS (owner, 2026-10-05): `show_subtrees` answers with only
+        // those branches, `ignore_subtrees` prunes each named branch to a stub
+        // `{id, pruned: n}`; together, show first and ignore inside it.
+        let (show, ignore) = match crate::docs::subtree_filter(kernel, payload, target) {
+            Ok(f) => f,
+            Err(refused) => {
+                *reply = refused;
+                return Ok(());
+            }
+        };
+        let roots: Vec<Arc<Agent>> = if show.is_empty() {
+            vec![Arc::clone(target)]
+        } else {
+            show.clone()
+        };
+        if mode == "all" {
+            let mut nodes = Vec::new();
+            for r in &roots {
+                nodes.push(if ignore.contains(&r.id.0) {
+                    crate::docs::pruned_stub(r)
+                } else if full {
+                    tree_node_pruned(r, &ignore)
+                } else {
+                    roster(Arc::clone(kernel), Arc::clone(r), Arc::new(ignore.clone())).await?
+                });
+            }
+            let tree = if show.is_empty() {
+                nodes.remove(0)
+            } else {
+                Value::Array(nodes)
+            };
+            obj.insert("tree".to_string(), tree);
+        } else {
             // The FLAT id index is the one tree shape that is a plain list, so it
             // is the one that pages. The nested tree is never sliced — a page of
-            // it would be a forest with no root.
-            let (ids, next) = crate::paging::page(descendant_ids(target), payload, Clone::clone);
-            obj.insert("tree".to_string(), json!(ids));
+            // it would be a forest with no root. A pruned branch stands as its stub.
+            let flat: Vec<Value> = roots
+                .iter()
+                .flat_map(|r| descendant_entries(r, &ignore))
+                .collect();
+            let (ids, next) = crate::paging::page(flat, payload, |v| match v {
+                Value::String(s) => s.clone(),
+                other => other
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+            });
+            obj.insert("tree".to_string(), Value::Array(ids));
             if let Some(next) = next {
                 obj.insert("next".to_string(), json!(next));
             }
         }
-        _ => {}
-    }
-    if !full {
-        obj.insert("more".to_string(), json!(MORE_HINT));
     }
     // The catalog pages with the SAME `limit`/`after` as `tree=ids`, and names
     // its cursor `bundles_next` only when a further page exists.
@@ -543,22 +575,6 @@ pub async fn apply_reflect_flags(
     Ok(())
 }
 
-/// `tree=all`: the wiring tree under `detail:full`, the roster otherwise.
-async fn insert_tree(
-    kernel: &Arc<Kernel>,
-    target: &Arc<Agent>,
-    full: bool,
-    obj: &mut Map<String, Value>,
-) -> Result<(), Value> {
-    let tree = if full {
-        tree_node(target)
-    } else {
-        roster(Arc::clone(kernel), Arc::clone(target)).await?
-    };
-    obj.insert("tree".to_string(), tree);
-    Ok(())
-}
-
 /// Walk an agent and its descendants, producing a nested
 /// `{id, parent_id, handler_module, display_name, description?, ...posture,
 /// children:[...]}` dict — the `detail:full` wiring tree (python `_tree`),
@@ -617,6 +633,39 @@ fn tree_fields(target: &Agent, obj: &mut Map<String, Value>) {
             }
         }
     }
+}
+
+/// `tree_node` with `ignore`d branches pruned to their stub.
+fn tree_node_pruned(target: &Arc<Agent>, ignore: &std::collections::HashSet<String>) -> Value {
+    let mut obj = Map::new();
+    obj.insert("id".to_string(), json!(target.id.0));
+    tree_fields(target, &mut obj);
+    let children: Vec<Value> = target
+        .children_snapshot()
+        .iter()
+        .map(|c| {
+            if ignore.contains(&c.id.0) {
+                crate::docs::pruned_stub(c)
+            } else {
+                tree_node_pruned(c, ignore)
+            }
+        })
+        .collect();
+    obj.insert("children".to_string(), Value::Array(children));
+    Value::Object(obj)
+}
+
+/// `descendant_ids` as reply entries: an id in `ignore` stands as its stub
+/// `{id, pruned: n}`, its branch unwalked. Python `_descendant_ids(ignore)`.
+fn descendant_entries(target: &Agent, ignore: &std::collections::HashSet<String>) -> Vec<Value> {
+    if ignore.contains(&target.id.0) {
+        return vec![crate::docs::pruned_stub(target)];
+    }
+    let mut out = vec![json!(target.id.0)];
+    for c in target.children_snapshot() {
+        out.extend(descendant_entries(&c, ignore));
+    }
+    out
 }
 
 /// Flat id index of an agent + all descendants (DFS, self first, children in

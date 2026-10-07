@@ -77,6 +77,7 @@ public final class CredentialStoreBundle: AgentBundle, @unchecked Sendable {
     }
 
     public var verbs: [String] { Array(Self.VERBS.keys) }
+    public var verbDocTable: JSON { .object(Self.VERBS.mapValues { JSON.string($0) }) }
 
     public var readme: String? { Self.README }
 
@@ -286,14 +287,11 @@ private struct Ctx {
     func boot() -> JSON? { nil }
 
     func reflect() -> JSON {
-        var verbs: OrderedDictionary<String, JSON> = [:]
-        for (k, v) in CredentialStoreBundle.VERBS { verbs[k] = .string(v) }
         var out: OrderedDictionary<String, JSON> = [
             "id": .string(id),
             "sentence": .string("Credential store — secrets by ref, each bound to one host."),
             "backend": .string(backendName),
             "refs": .integer(Int64(refs.count)),
-            "verbs": .object(verbs),
         ]
         if backendName == "file" { out["file"] = .string(FileBackend.shown(self)) }
         return .object(out)

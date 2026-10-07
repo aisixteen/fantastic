@@ -10,8 +10,7 @@ the browser's ts kernel, not here, so it is created THERE, by its parent:
    `reflect kernel` → `peers`, then reflect `<guid>|kernel`) to find the view
    that renders html agents and the verbs it answers.
 2. Ask THAT view to create it — its own verbs (e.g. a place/create verb with the
-   `html` body). A record verb reaches only its caller's own subtree, so you never
-   write a frontend record yourself.
+   `html` body); the view writes the frontend record.
 
 The frontend's loader persists the new agent to the host store (`web_loader`)
 by itself — storage follows the tree, it is not how an agent is made.

@@ -17,8 +17,8 @@
 //!
 //! Kinds: `text` (prose), `thinking` (inside `<think>`), `call` (a `<call name="…">`
 //! envelope, its args streaming as they are written). A call written inside a
-//! thought is a call part — dispatch reads the full text, so an action mid-thought
-//! is still an action.
+//! thought is thinking text, never a call part — only the answer acts (owner,
+//! 2026-10-07).
 //!
 //! It is ANIMATION, never action: nothing here dispatches. The call parser in
 //! [`crate::tool_parse`] stays the one authority on what a call IS; this only
@@ -306,17 +306,16 @@ impl PartSplitter {
         if self.call.is_some() {
             return self.step_call(out);
         }
-        // Outside a call: look for the next markup that changes the part.
-        let opens = [
-            OPEN,
-            if self.in_think {
-                THINK_CLOSE
-            } else {
-                THINK_OPEN
-            },
-        ];
-        let Some((i, tag)) = self.first_hit(&opens) else {
-            let cut = self.buf.len() - held_tail(&self.buf, &opens);
+        // Outside a call: look for the next markup that changes the part. INSIDE
+        // thinking only `</think>` does — a `<call>` there is thinking text, never a
+        // call part (owner, 2026-10-07: only the answer acts).
+        let opens: &[&str] = if self.in_think {
+            &[THINK_CLOSE]
+        } else {
+            &[OPEN, THINK_OPEN]
+        };
+        let Some((i, tag)) = self.first_hit(opens) else {
+            let cut = self.buf.len() - held_tail(&self.buf, opens);
             let prose = self.buf[..cut].to_string();
             self.text(out, &prose);
             self.buf.drain(..cut);

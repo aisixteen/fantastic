@@ -90,20 +90,12 @@ fn an_open_call_when_the_pass_ends_aborts() {
     assert!(shape(&ev).contains(&("abort", "call")), "{ev:?}");
 }
 
+/// ONLY THE ANSWER ACTS (owner, 2026-10-07): a `<call>` inside `<think>` streams as
+/// thinking — no call part opens. Python `test_a_call_inside_a_thought_is_thinking_text`.
 #[test]
-fn a_call_inside_a_thought_is_a_call_part() {
+fn a_call_inside_a_thought_is_thinking_text() {
     let (ev, _) = run(&format!("<think>let me {DONE} then</think>"), 4);
-    assert_eq!(
-        shape(&ev),
-        vec![
-            ("start", "thinking"),
-            ("end", "thinking"),
-            ("start", "call"),
-            ("end", "call"),
-            ("start", "thinking"),
-            ("end", "thinking"),
-        ]
-    );
+    assert_eq!(shape(&ev), vec![("start", "thinking"), ("end", "thinking")]);
 }
 
 #[test]

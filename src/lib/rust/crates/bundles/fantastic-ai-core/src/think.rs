@@ -1,4 +1,4 @@
-//! Thinking: PARSED, not PERSISTED.
+//! Thinking: neither DISPATCHED nor PERSISTED — only the answer acts.
 //!
 //! A reasoning model streams two things. ollama labels them `message.thinking` /
 //! `message.content`; vLLM labels them `reasoning_content` / `content`. We must
@@ -8,10 +8,13 @@
 //! is against every vendor's guidance, and it compounds — gemma's 3,800-char
 //! turn-1 deliberation is re-sent in every later prompt, crowding out the task.
 //!
-//! So the two uses split. Providers wrap reasoning in these markers; the FULL
-//! text is parsed (a tool call the model wrote mid-thought still dispatches) and
-//! the STRIPPED text is persisted and shown as the answer. One convention, no
-//! provider learns anything about the tool protocol.
+//! Providers wrap reasoning in these markers, and everything downstream reads the
+//! ANSWER — the text with every span dropped whole: dispatch parses it and history
+//! persists it. A `<call>` written inside thinking is thinking (owner, 2026-10-07):
+//! measured over 2,821 e2e turns, of 106 calls inside thinking 39 were copies of an
+//! answer call (the action ran twice) and 67 were drafts that ran although the model
+//! never wrote them in its answer. One convention, no provider learns anything about
+//! the tool protocol.
 //!
 //! This lives in its own module because the provider crates (ollama, vllm) import
 //! the markers — they are wire vocabulary, not loop internals.
@@ -22,11 +25,10 @@ pub const THINK_OPEN: &str = "<think>";
 /// Closing marker of a reasoning span.
 pub const THINK_CLOSE: &str = "</think>";
 
-/// Drop every `<think>…</think>` span — what goes into durable history.
-///
-/// An UNTERMINATED span (the stream was cut mid-thought) drops its tail: a
-/// half-finished deliberation is not an answer, and keeping it would poison
-/// every later prompt.
+/// The ANSWER: every `<think>…</think>` span dropped whole — what dispatch reads
+/// and what goes into durable history. An UNTERMINATED span runs to the end: the
+/// rest is thinking. Python `without_thinking`.
+#[must_use]
 pub fn without_thinking(text: &str) -> String {
     let mut out = String::new();
     let mut i = 0usize;
@@ -38,43 +40,11 @@ pub fn without_thinking(text: &str) -> String {
         let a = i + rel_open;
         out.push_str(&text[i..a]);
         let Some(rel_close) = text[a..].find(THINK_CLOSE) else {
-            // Unterminated (stream cut mid-thought) — drop the tail, but keep any
-            // envelope it already contained: it was dispatched.
-            out.push_str(&kept_envelopes(&text[a..]));
             break;
         };
-        let span = &text[a..a + rel_close];
-        // KEEP THE ENVELOPES, DROP THE REASONING. A `<call>` is an
-        // INVOCATION wherever it is written, thinking included — it is parsed out
-        // of the full completion and dispatched. Stripping the whole span meant
-        // dispatch read the FULL text while history read the STRIPPED text, so a
-        // call made inside a thought RAN, returned a reply, and left no record.
-        // The model then saw an effect with no cause ("I sent a reflect to
-        // file_bridge but the reply came back from exec_bridge" — correct, given
-        // a record we had silently edited). 3 of 169 calls were lost in one day.
-        out.push_str(&kept_envelopes(span));
         i = a + rel_close + THINK_CLOSE.len();
     }
     out.trim().to_string()
-}
-
-/// Every complete tool-call envelope inside `span`, in order, one per line.
-///
-/// The ACTION taken survives a dropped thought; the reasoning does not. An
-/// envelope that opened and never closed is NOT kept, and neither is one that is
-/// complete but does not parse: dispatch could not have run it, so it was
-/// reasoning too. `call_spans` is the one place that judgement lives.
-fn kept_envelopes(span: &str) -> String {
-    let found = crate::tool_parse::call_spans(span);
-    if found.is_empty() {
-        return String::new();
-    }
-    let mut out = String::from("\n");
-    for e in found {
-        out.push_str(e);
-        out.push('\n');
-    }
-    out
 }
 
 /// Per-TURN reasoning wrapper state, threaded through a provider's chunk decoder.
@@ -234,33 +204,21 @@ mod tests {
     }
 
     #[test]
-    fn a_call_written_inside_a_span_survives_into_history() {
-        // The RAW text is parsed, the STRIPPED text is persisted — so a call the
-        // model wrote mid-thought dispatches AND stays in the record.
-        //
-        // It used to be stripped with the reasoning, and the consequence was a
-        // record we had silently edited: the call RAN, returned a reply, and left
-        // no cause behind it. The model then read an effect it never caused ("I
-        // sent a reflect to file_bridge but the reply came back from
-        // exec_bridge"). Reasoning is still dropped; the INVOCATION is not.
+    fn a_call_written_inside_a_span_is_neither_dispatched_nor_stored() {
+        // ONLY THE ANSWER ACTS (owner, 2026-10-07): dispatch and history both read
+        // the answer, so a call inside a thought does neither.
         let envelope = r#"<call name="send"><target_id>self</target_id><type>recall</type></call>"#;
-        let raw = format!("<think>I should {envelope}</think>done");
-
-        let calls = crate::tool_parse::extract_tool_calls(&raw);
-        assert_eq!(calls.len(), 1, "the parser reads the RAW text: {calls:?}");
-        assert_eq!(calls[0].arguments["payload"]["type"], "recall");
-        assert_eq!(calls[0].arguments["target_id"], "self");
-
-        let kept = without_thinking(&raw);
-        assert!(
-            kept.contains(envelope),
-            "the invocation was erased: {kept:?}"
+        let kept = without_thinking(&format!("<think>I should {envelope}</think>done"));
+        assert_eq!(kept, "done");
+        assert!(crate::tool_parse::extract_tool_calls(&kept).is_empty());
+        // ...an unterminated span runs to the end, its call included
+        assert_eq!(
+            without_thinking(&format!("visible<think>cut mid {envelope}")),
+            "visible"
         );
-        assert!(kept.contains("done"));
-        assert!(!kept.contains("I should"), "the reasoning must still go");
-        // ...and what we persisted still parses to the same one call, so history
-        // and dispatch agree.
-        assert_eq!(crate::tool_parse::extract_tool_calls(&kept).len(), 1);
+        // ...and only the answer's own call counts
+        let both = without_thinking(&format!("<think>a {envelope} b</think>{envelope}"));
+        assert_eq!(crate::tool_parse::extract_tool_calls(&both).len(), 1);
     }
 
     #[test]

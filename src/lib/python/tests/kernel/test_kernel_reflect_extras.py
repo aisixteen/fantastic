@@ -148,18 +148,14 @@ async def test_the_catalog_carries_each_backend_kinds_record_schema(seeded_kerne
     vllm = by["vllm_backend"]["schema"]
     fields = {f["name"]: f for f in vllm["fields"]}
     required = [f["name"] for f in vllm["fields"] if f["required"]]
-    assert required == [
-        "endpoint",
-        "model",
-        "max_tokens",
-        "kv_slots",
-        "kv_overflow",
-        "memory_store_id",
-        # the server's window — set on the record, used as set
-        "context_window",
-    ], required
-    # a required field has no default — nothing is guessed about a server
+    assert required == ["endpoint", "kv_overflow", "memory_store_id"], required
+    # a required field has no default; the counts a record leaves out are read
+    # from the server before a turn — no default either
     assert all("default" not in fields[n] for n in required)
+    for n in ("model", "max_tokens", "context_window", "kv_slots"):
+        assert (
+            "default" not in fields[n] and "read from the server" in fields[n]["hint"]
+        )
     # the defaulted fields carry THE BACKEND'S OWN values
     assert fields["temperature"]["default"] == 0.2
     assert fields["thinking_token_budget"]["default"] == 16000

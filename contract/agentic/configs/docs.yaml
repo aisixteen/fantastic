@@ -1,0 +1,28 @@
+# Kernel config — the SYSTEM SHAPE only. Deployable as-is; carries no test
+# metadata. What is asserted about it lives in `specs/docs.yaml`.
+
+
+loaders:
+  - id: docs_loader
+    file: docs.yaml
+    manifest:
+      agents:
+        # Holds the baseline grant and nothing else — no edge to the root.
+        - id: asker
+          handler_module: file_bridge.tools
+          allow: ['.']
+          ingress_rule: allow_all_ingress
+
+        # Granted `docs` on the root (egress; the spec grants the root's half).
+        - id: reader
+          handler_module: file_bridge.tools
+          allow: ['.']
+          ingress_rule: allow_all_ingress
+          can_call:
+            $root: [docs]
+
+        # An open file leg: an agent whose bundle has docs to read.
+        - id: shelf
+          handler_module: file_bridge.tools
+          allow: ['.']
+          ingress_rule: allow_all_ingress

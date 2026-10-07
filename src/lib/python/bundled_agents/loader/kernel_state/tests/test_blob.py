@@ -237,7 +237,7 @@ async def test_persist_record_refuses_a_siblings_namespace(seeded_kernel):
     """The ROOT loader's tree is hydrated at boot, so no agent writes it — not a
     sibling's record and not its OWN (audit 2026-09-28, a15: a record an agent
     persisted there came back at the next boot with whatever grants it named).
-    An agent's record changes through `update_agent`, where conferral runs."""
+    An agent's record changes through `update_agent`, gated like any verb."""
     from _testkit import as_agent
 
     async def _mk(agent_id):

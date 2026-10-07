@@ -50,6 +50,7 @@ from helpers import (
     distinct_calls,
     verdict,
 )
+from helpers.ai import TICK, ChainEnd
 from helpers.kernel import open_kernel, home
 
 # The plug, resolved once (see e2e/backends): which model, reached how.
@@ -136,10 +137,16 @@ def _free_port() -> int:
 PORT = _free_port()
 
 TASK = (
-    "Your goal is to set the correct client-readability posture on this kernel's "
-    "three file_bridge agents. CORRECT means, for each one: if its description "
-    "says its content is meant for clients, a browser fetching it over this "
-    "kernel's HTTP host must receive the bytes; if its description says otherwise, "
+    # NAMED, not counted. "this kernel's three file_bridge agents" matched FIVE (the
+    # kernel's own `kernel_store` and `yaml_store` are file_bridge too) and "this
+    # kernel's HTTP host" matched both `web` and `probe_web`. Measured 2026-10-06
+    # (rust, captured thinking): turns 4-5 spent ~24k chars of thought deciding which
+    # three and which host. Naming them leaves the posture itself to be discovered.
+    "Your goal is to set the correct client-readability posture on the three "
+    "file_bridge agents `assets`, `transcripts` and `secrets`. CORRECT means, for "
+    "each one: if its description says its content is meant for clients, a browser "
+    "fetching it over `probe_web`, this kernel's HTTP host, must receive the bytes; "
+    "if its description says otherwise, "
     "that same fetch must be refused. Each agent's own description is the only "
     "thing that says which case it is — nothing else will tell you. Work out which "
     "is which, plan the change, apply it, and report what you changed and why. "
@@ -438,8 +445,9 @@ async def main():
     # mutate nothing.
     stale = 0
     seen_writes = -1
+    ender = ChainEnd(root, aid)
     while idle < IDLE:
-        await asyncio.sleep(2.0)
+        await asyncio.sleep(TICK)
         writes = _progress_count(transcript)
         if writes != seen_writes:
             seen_writes, stale = writes, 0
@@ -447,31 +455,13 @@ async def main():
             stale += 1
         # CHAIN DEATH. The tripwires examine each TURN, so a model that simply
         # stops producing turns evades every one of them and the run sits out the
-        # full IDLE before scoring. Measured 2026-08-24: test 5 ended at turn 6 and
-        # waited 240s to say so. If nothing of the AI's is in flight and no new
-        # turn has landed, the chain is over — say so now rather than waiting.
-        if idle >= 30 and spy.n == last and last > 0:
-            _rows = (
-                (
-                    (
-                        await root.send(
-                            [{"target": "kernel", "payload": {"type": "ps"}}]
-                        )
-                    )[0]["result"]
-                ).get("tasks")
-                or []
-            )
-            _live = [
-                t for t in _rows if t.get("agent") == aid and t.get("verb") != "ps"
-            ]
-            if not _live:
-                # DUMP THE TABLE. "no turn and nothing in flight" is a conclusion;
-                # the rows are the evidence. Without them a chain that ended and a
-                # detector that fired too early look identical from the transcript.
-                capped = (
-                    f"CHAIN ENDED — no turn and nothing in flight after {idle:.0f}s"
-                    f" · ps={[(t.get('agent'), t.get('verb')) for t in _rows]}"
-                )
+        # full IDLE before scoring. The shared check (`helpers.ai.ChainEnd`) ends
+        # the run 30 s after the last turn with nothing of the AI's in flight, or
+        # DONE_QUIET after a `done` call with nothing in flight anywhere.
+        if spy.n == last and last > 0:
+            _cap, _busy = await ender.check(spy.transcript, idle)
+            if _cap:
+                capped = _cap
         if runaway:
             # A turn blew the per-turn bound: the model is looping INSIDE one pass
             # and no turn-counting cap can see it.
@@ -514,7 +504,7 @@ async def main():
         if spy.n != last:
             last, idle = spy.n, 0.0
         else:
-            idle += 2.0
+            idle += TICK
         if idle >= IDLE:
             # AN IN-FLIGHT GENERATION IS NOT IDLE — see live_subai.py (measured
             # 2026-08-25: the loop walked away mid-generation and scored FAIL).

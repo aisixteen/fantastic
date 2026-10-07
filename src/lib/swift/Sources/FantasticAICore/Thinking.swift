@@ -1,4 +1,4 @@
-// Thinking: PARSED, not PERSISTED — the reasoning-channel convention.
+// Thinking: neither DISPATCHED nor PERSISTED — only the answer acts.
 //
 // Ported from the canonical Python `ai_core.core` (`THINK_OPEN` /
 // `THINK_CLOSE` / `without_thinking`, core.py:477-508). Its OWN file because
@@ -14,10 +14,13 @@
 // every vendor's guidance, and it compounds — gemma's 3,800-char turn-1
 // deliberation is re-sent in every later prompt, crowding out the task.
 //
-// So the two uses split. Providers wrap reasoning in these markers; the FULL
-// text is parsed (a tool call the model wrote mid-thought still dispatches) and
-// the STRIPPED text is persisted and shown as the answer. One convention, no
-// provider learns anything about the tool protocol.
+// Providers wrap reasoning in these markers, and everything downstream reads the
+// ANSWER — the text with every span dropped whole: dispatch parses it and history
+// persists it. A `<call>` written inside thinking is thinking (owner, 2026-10-07):
+// measured over 2,821 e2e turns, of 106 calls inside thinking 39 were copies of an
+// answer call (the action ran twice) and 67 were drafts that ran although the model
+// never wrote them in its answer. One convention, no provider learns anything about
+// the tool protocol.
 //
 // The `token` events carry the RAW text — markers in — because they are exactly
 // what the model streamed; only the DURABLE assistant turn is stripped (see
@@ -30,11 +33,9 @@ public let THINK_OPEN = "<think>"
 /// Closing marker a provider wraps its reasoning channel in.
 public let THINK_CLOSE = "</think>"
 
-/// Drop every `<think>…</think>` span — what goes into durable history.
-///
-/// Mirrors Python `without_thinking` exactly, including the unterminated case:
-/// a stream cut mid-thought drops its tail rather than persisting a half-thought
-/// (and rather than leaking an unbalanced marker into the conversation).
+/// The ANSWER: every `<think>…</think>` span dropped whole — what dispatch reads
+/// and what goes into durable history. An UNTERMINATED span runs to the end: the
+/// rest is thinking. Python `without_thinking`.
 func withoutThinking(_ text: String) -> String {
     var out = ""
     var i = text.startIndex
@@ -45,36 +46,10 @@ func withoutThinking(_ text: String) -> String {
         }
         out += text[i..<open.lowerBound]
         guard let close = text.range(of: THINK_CLOSE, range: open.lowerBound..<text.endIndex)
-        else {
-            // Unterminated (stream cut mid-thought) — drop the tail, but keep
-            // any envelope it already contained: it was dispatched.
-            out += keptEnvelopes(String(text[open.lowerBound...]))
-            break
-        }
-        // KEEP THE ENVELOPES, DROP THE REASONING. A `<call name=…>` is an
-        // INVOCATION wherever it is written, thinking included — it is parsed
-        // out of the full completion and dispatched. Stripping the whole span
-        // meant dispatch read the FULL text while history read the STRIPPED
-        // text, so a call made inside a thought RAN, returned a reply, and left
-        // no record. The model then saw an effect with no cause ("I sent a
-        // reflect to file_bridge but the reply came back from exec_bridge" —
-        // correct, given a record we had silently edited).
-        out += keptEnvelopes(String(text[open.lowerBound..<close.lowerBound]))
+        else { break }
         i = close.upperBound
     }
     return out.trimmingCharacters(in: .whitespacesAndNewlines)
-}
-
-/// Every complete tool-call envelope inside `span`, in order, one per line.
-///
-/// The ACTION taken survives a dropped thought; the reasoning does not. An
-/// envelope that opened and never closed is NOT kept, and neither is one that is
-/// complete but does not parse: dispatch could not have run it, so it was
-/// reasoning too. `callSpans` is the one place that judgement lives.
-private func keptEnvelopes(_ span: String) -> String {
-    let found = callSpans(span)
-    if found.isEmpty { return "" }
-    return "\n" + found.joined(separator: "\n") + "\n"
 }
 
 /// Folds one turn's TWO channels (reasoning + content) into the ONE wrapped

@@ -2,7 +2,7 @@
 extra facts it carries, and the key order of the dict.
 
 The ports diff these replies, and a model reads the text to repair its call.
-The mutator refusals are pinned in `test_minimal_gate.py`.
+The tree verbs' reach is pinned in `test_minimal_gate.py`.
 """
 
 from __future__ import annotations

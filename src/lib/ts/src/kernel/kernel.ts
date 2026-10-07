@@ -1,5 +1,5 @@
 import { Agent } from "./agent.ts";
-import type { Handler } from "./agent.ts";
+import type { Handler, VerbDocs } from "./agent.ts";
 import type { Json, Payload } from "./json.ts";
 import { str } from "./json.ts";
 import { pyRepr, pyTruthy } from "./pyjson.ts";
@@ -108,6 +108,10 @@ export class Kernel {
 
   /** handler_module -> the JS handler that runs that view bundle locally. */
   private readonly handlers: Map<string, Handler> = new Map();
+  /** handler_module -> the bundle's VERB DOCS (verb -> doc), what `docs` serves —
+   *  per BUNDLE, as rust's `Bundle::verb_docs` / python's `VERBS`, so a bundle is
+   *  readable before any agent of it exists. */
+  private readonly bundleVerbs: Map<string, VerbDocs> = new Map();
   /** handler_module -> the bundle's capability/client readme. Surfaced by
    *  reflect readme=true when an agent of that type carries no per-record
    *  readme — the frontend's self-description, mirroring how host bundles
@@ -126,9 +130,24 @@ export class Kernel {
     this.store = new KernelStore(this);
   }
 
-  /** Register a JS view bundle by its handler_module name. */
-  registerBundle(handlerModule: string, handler: Handler): void {
+  /** Register a JS view bundle by its handler_module name, with the verb docs
+   *  `docs` serves for it. */
+  registerBundle(handlerModule: string, handler: Handler, verbs: VerbDocs = {}): void {
     this.handlers.set(handlerModule, handler);
+    this.bundleVerbs.set(handlerModule, verbs);
+  }
+
+  /** The verb docs a registered bundle declared; `undefined` for a bundle this
+   *  runtime does not run (a host agent's stand-in). */
+  bundleVerbDocs(handlerModule: string): VerbDocs | undefined {
+    return this.bundleVerbs.get(handlerModule);
+  }
+
+  /** The verb docs `docs` serves for an agent: its own table when its host
+   *  stamped one, else its bundle's. */
+  verbDocsOf(agent: Agent): VerbDocs | undefined {
+    if (agent.verbs !== null) return agent.verbs;
+    return agent.handlerModule !== null ? this.bundleVerbs.get(agent.handlerModule) : undefined;
   }
 
   /** Attach a bundle-level readme (a frontend bundle's self-description —

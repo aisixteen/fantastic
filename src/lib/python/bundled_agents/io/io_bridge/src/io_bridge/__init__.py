@@ -34,6 +34,7 @@ from io_bridge.ingress_rules import (
     unknown_ingress_refusal,
 )
 from io_bridge._engine import (
+    EMITS,
     BuildTransport,
     _BridgeState,
     _bridges,
@@ -92,6 +93,7 @@ __all__ = [
     "Silent",
     # engine
     "make_verbs",
+    "EMITS",
     "validate_meta",
     "dispatch",
     "boot",

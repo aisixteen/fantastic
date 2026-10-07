@@ -41,7 +41,6 @@ async def handler(id: str, payload: dict, agent) -> dict | None:
         return {
             "id": id,
             "sentence": SENTENCE,
-            "verbs": VERBS,
             "asked": len(_ASKED.get(id, [])),
         }
     if verb == "ask":

@@ -7,9 +7,10 @@ runtime reaches it with the runtime's full authority.
 
 Here `sender=None` (operator) exists ONLY in-process. A wire frame dispatches
 AS ITS LEG AGENT (pinned by C21), the leg is a gated agent like any other: a
-mutator needs both halves of the leg→root edge, and even then it acts on the
-LEG's own children only. So the same envelope that the operator runs freely dies
-over the wire, and the refusal names the LEG.
+tree verb needs both halves of the leg→root edge, and then it does exactly what
+the LEG is granted — never more. So the same envelope that the operator runs
+freely dies over the wire unless the leg holds the grant, and the refusal names
+the LEG.
 """
 
 from __future__ import annotations
@@ -106,18 +107,21 @@ def test_update_and_delete_are_walled_the_same_way(wired):
     assert dele.get("reason") == "unauthorized", dele
 
 
-def test_a_wildcard_grant_mints_only_under_the_leg_itself(seeded_kernel):
-    """`*` covers every verb — `create_agent` included. The frame still runs AS
-    the leg: it mints under the LEG (its own child), never elsewhere."""
+def test_a_wildcard_grant_is_the_legs_and_mints_anywhere(seeded_kernel):
+    """`*` covers every verb — `create_agent` included — and grants are the only
+    rule (owner, 2026-10-06): a leg holding `*` on the root mints anywhere. The
+    frame still runs AS the leg: the authority used is the LEG's grant."""
     app = _wire(seeded_kernel, {"kernel_state": "*"})
     with TestClient(app, headers={"host": "127.0.0.1:8088"}) as client:
         with client.websocket_connect("/kernel_state/ws") as ws:
             other = _ws_call(
                 ws, "m2", "kernel_state", dict(_MINT, parent_id="kernel_state")
             )
-            data = _ws_call(ws, "m3", "kernel_state", dict(_MINT, parent_id="adv4_leg"))
-    assert other.get("side") == "mutator", other
-    assert other["error"] == (
-        "adv4_leg may only create_agent within its own subtree — kernel_state is not in it"
-    ), other
-    assert data.get("id") == "adv4_minted", data
+            data = _ws_call(
+                ws,
+                "m3",
+                "kernel_state",
+                dict(_MINT, parent_id="adv4_leg", id="adv4_minted2"),
+            )
+    assert other.get("id") == "adv4_minted", other
+    assert data.get("id") == "adv4_minted2", data

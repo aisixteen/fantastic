@@ -47,6 +47,7 @@ public struct CliBundle: AgentBundle {
 
     public let name = "cli"
     public var verbs: [String] { Array(Self.verbDocs.keys) }
+    public var verbDocTable: JSON { .object(Self.verbDocs.mapValues { JSON.string($0) }) }
 
     public init() {}
 
@@ -82,12 +83,9 @@ public struct CliBundle: AgentBundle {
     // ─── reflect ────────────────────────────────────────────────
 
     static func reflect(_ agentId: AgentId) -> JSON {
-        var verbs: OrderedDictionary<String, JSON> = [:]
-        for (n, doc) in verbDocs { verbs[n] = .string(doc) }
         return .object([
             "id": .string(agentId.value),
             "sentence": .string("Terminal renderer. Prints incoming events to stdout."),
-            "verbs": .object(verbs),
             "accepts": .array(accepts.map { .string($0) }),
         ])
     }

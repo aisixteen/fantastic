@@ -2,8 +2,10 @@
 
 An AI agent cannot proceed without a decision that is not its to make, so it
 `send`s an `inquiry` to the `user` agent — the human, first-class, with an id, a
-record, a gate and a ledger row like anyone else. The answer comes back as that
-call's REPLY in the model's next message. Nothing suspends and nothing is scraped.
+record, a gate and a ledger row like anyone else. FULLY ASYNC (owner, 2026-10-06):
+the inquiry is ACCEPTED at once, the human READS it and replies LATER — its own
+send into the asker's conversation, tagged `[reply to <pid> · user inquiry]`.
+Nothing suspends and nothing is scraped.
 
 WHAT THIS FILE REPLACES, and why. `test_mind_plumbed.py` drove a backend as a
 PROSE ORACLE: an authored program sent text, read the completion's `response`
@@ -29,7 +31,8 @@ import types
 import pytest
 
 from _testkit import memory_meta
-from kernel import register_unlisted
+from ai_core.tool_parse import render_reply
+from kernel import current_origin, current_task, register_unlisted
 
 # ─── the `user` agent: the human as an ordinary bundle ──────────
 #
@@ -60,8 +63,10 @@ def _fresh_desk():
 
 USER_SENTENCE = (
     "The human. Send me an inquiry when you cannot proceed without a decision "
-    "that is mine to make; the answer comes straight back as the reply."
+    "that is mine to make; I read it and reply later, under its pid."
 )
+#: How long the human takes to read an inquiry before it replies.
+READ_DELAY = 0.05
 
 
 async def _user_handler(id, payload, kernel):
@@ -74,7 +79,7 @@ async def _user_handler(id, payload, kernel):
             "sentence": USER_SENTENCE,
             "verbs": {
                 "inquiry": "args: text:str (req), kind:str?, options:list?, "
-                "action:dict? — RETURNS {answer, request_id}.",
+                "action:dict? — accepted at once; the answer comes later.",
                 "inquiries": "no args — {inquiries, proposals}: the tally.",
             },
             "inquiries": _RECEIVED.get(id, 0),
@@ -107,11 +112,31 @@ async def _user_handler(id, payload, kernel):
         if isinstance(action, dict):
             _PROPOSALS.setdefault(id, []).append(action)
         _RECEIVED[id] = _RECEIVED.get(id, 0) + 1
-        return {
-            "answer": answer,
-            "request_id": payload.get("request_id"),
-            "inquiries": _RECEIVED[id],
-        }
+        # A PERSON READS, THEN REPLIES — later, as their own send into the asker's
+        # conversation under the inquiry's pid (gated like any send).
+        asker, pid = current_origin(), current_task()
+        text = f"[reply to {pid} · {id} inquiry]\n" + render_reply(
+            {"answer": answer, "request_id": payload.get("request_id")}
+        )
+        reply_client = payload.get("reply_client_id") or "cli"
+
+        async def _reply():
+            await asyncio.sleep(READ_DELAY)
+            await kernel.send(
+                [
+                    {
+                        "target": asker,
+                        "payload": {
+                            "type": "send",
+                            "text": text,
+                            "client_id": reply_client,
+                        },
+                    }
+                ]
+            )
+
+        kernel.ctx.spawn_task(id, "inquiry_answer", _reply())
+        return {"accepted": True, "re": pid, "request_id": payload.get("request_id")}
     if verb == "inquiries":
         return {
             "inquiries": _RECEIVED.get(id, 0),
@@ -162,6 +187,7 @@ def _ask(text: str, *, kind: str = "text", **extra) -> str:
 
 
 DONE = '<call name="done"></call>'
+AWAIT = '<call name="await"></call>'
 
 
 async def _wire(
@@ -181,6 +207,8 @@ async def _wire(
                     "id": "user",
                     "answer": answer,
                     "callable_by": {ai_id: "*"},
+                    # the reply is the human's own send into the asker
+                    "can_call": {ai_id: ["send"]},
                 },
             }
         ]
@@ -199,6 +227,7 @@ async def _wire(
                         "model": "stub",
                         "id": ai_id,
                         "context_window": 32768,
+                        "callable_by": {"user": ["send"]},
                         **memory_meta(kernel, ai_id, {"user": "*", "cli": "*"}),
                     },
                 }
@@ -225,7 +254,7 @@ async def test_an_inquiry_is_a_call_and_the_answer_is_its_reply(
     comes back as that call's reply, tagged like any other; the model reads it
     and finishes. Scored on the human's own count, which only its handler can
     raise."""
-    script = _Script([_ask("Proceed?", kind="confirm"), "understood " + DONE])
+    script = _Script([_ask("Proceed?", kind="confirm"), AWAIT, "understood " + DONE])
     aid = await _wire(
         seeded_kernel, script, answer="yes, proceed", providers=fake_providers
     )
@@ -238,11 +267,12 @@ async def test_an_inquiry_is_a_call_and_the_answer_is_its_reply(
         tally = await _tally(seeded_kernel)
         assert tally["inquiries"] == 1, f"the human was never asked: {tally}"
 
-        assert script.calls == 2, f"the answer did not become a message: {script.calls}"
-        second = script.incoming(1)
-        assert second.startswith("[reply to "), second
-        assert " user inquiry" in second, second
-        assert "yes, proceed" in second, second
+        assert script.calls == 3, f"the answer did not become a message: {script.calls}"
+        assert "<accepted>true</accepted>" in script.incoming(1), script.incoming(1)
+        third = script.incoming(2)
+        assert third.startswith("[from user]") and "[reply to " in third, third
+        assert " user inquiry" in third, third
+        assert "yes, proceed" in third, third
     finally:
         fake_providers.pop(aid, None)
 

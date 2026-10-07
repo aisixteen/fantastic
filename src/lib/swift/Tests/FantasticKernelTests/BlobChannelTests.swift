@@ -206,10 +206,9 @@ struct BlobChannelTests {
         #expect(r["error"] == .null, "\(r)")
     }
 
-    @Test func anAgentCannotWriteAnotherAgentsNamespace() async {
-        // THE CONFUSED DEPUTY. Measured in python: an agent holding exactly
-        // `can_call: {loader:[persist_blob]}` overwrote another agent's
-        // state.yaml, and the victim read the forgery back as its own memory.
+    @Test func aGrantedAgentWritesAnyNamespace() async {
+        // GRANTS ARE THE ONLY RULE (owner, 2026-10-06): an agent that reaches
+        // `persist_blob` names any namespace; the grant is the authority.
         let files = Files()
         let k = await makeKernel(files)
         let forged = await KernelTaskLocals.$origin.withValue(AgentId("attacker")) {
@@ -219,10 +218,8 @@ struct BlobChannelTests {
                     "content": .string("owned: true\n"),
                 ]))
         }
-        #expect(forged["reason"].asString == "unauthorized", "\(forged)")
-        #expect(
-            !files.paths.contains("agents/desk/state.yaml"),
-            "the forged sidecar was written")
+        #expect(forged["error"] == .null, "\(forged)")
+        #expect(files.paths.contains("agents/desk/state.yaml"), "\(files.paths)")
     }
 
     @Test func reservedAndEscapingNamesAreRefused() async {
@@ -285,28 +282,12 @@ struct BlobChannelTests {
             "type": .string("load_blob"), "agent_id": .string("desk"),
         ])
         #expect(noName == .object(["error": .string("load_blob: name (non-empty str) required")]))
-        // CONTENT IS CHECKED AFTER THE OWNER GUARD AND BEFORE THE STORE.
+        // CONTENT IS CHECKED AFTER THE NAME AND BEFORE THE STORE.
         let noContent = await call([
             "type": .string("persist_blob"), "agent_id": .string("desk"),
             "name": .string("s.yaml"),
         ])
         #expect(noContent == .object(["error": .string("persist_blob: content (str) required")]))
-        // The owner denial: python's repr on BOTH ids, `reason`, and no `side`.
-        let forged = await KernelTaskLocals.$origin.withValue(AgentId("attacker")) {
-            await k.persistBlob(
-                .object([
-                    "agent_id": .string("desk"), "name": .string("s.yaml"),
-                    "content": .string("x"),
-                ]))
-        }
-        #expect(
-            forged["error"].asString
-                == "persist_blob: 'attacker' may not use another agent's namespace 'desk' — "
-                + "an agent's blob verbs are scoped to itself; only an operator may name "
-                + "a namespace it does not own", "\(forged)")
-        #expect(forged["reason"].asString == "unauthorized")
-        #expect(forged["side"] == .null, "python's loader refusal carries no side")
-        #expect(forged["code"] == .null, "python's loader refusal carries no code")
     }
 
     /// PERSISTENCE IO IS THE KERNEL'S OWN BOOKKEEPING (owner 2026-10-04): every

@@ -42,6 +42,18 @@ private func send(_ k: Kernel, _ id: String, _ p: JSON) async -> JSON {
     await k.send([Item(AgentId(id), p)])[0].result
 }
 
+/// An asker that records every `send` that reaches it.
+private final class Inbox: AgentBundle, @unchecked Sendable {
+    let name = "inbox"
+    private let lock = NSLock()
+    private var got: [JSON] = []
+    var seen: [JSON] { lock.withLock { got } }
+    func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? {
+        if payload["type"].asString == "send" { lock.withLock { got.append(payload) } }
+        return .object(["ok": .bool(true)])
+    }
+}
+
 @Suite("scenario probes")
 struct ScenarioProbesTests {
 
@@ -55,13 +67,14 @@ struct ScenarioProbesTests {
             r["sentence"].asString
                 == "Coin dispenser — one coin per `dispense` call. A coin must never be issued twice for one job."
         )
+        let v = DispenserProbe().verbDocTable
         #expect(
-            r["verbs"]["dispense"].asString
+            v["dispense"].asString
                 == "args: job:str — issues ONE coin, returns {coin, receipt}. Issuing is a side effect: calling twice dispenses twice."
         )
-        #expect(r["verbs"]["count"].asString == "how many coins have ever been dispensed")
-        #expect(r["verbs"].asObject?.keys.elementsEqual(["dispense", "count"]) == true, "\(r)")
-        #expect(r.asObject?.keys.starts(with: ["id", "sentence", "verbs"]) == true, "\(r)")
+        #expect(v["count"].asString == "how many coins have ever been dispensed")
+        #expect(v.asObject?.keys.elementsEqual(["dispense", "count"]) == true, "\(v)")
+        #expect(r.asObject?.keys.starts(with: ["id", "sentence"]) == true && r.asObject?["verbs"] == nil, "\(r)")
     }
 
     @Test func plantReflectIsPythonsBytes() async {
@@ -71,13 +84,13 @@ struct ScenarioProbesTests {
         #expect(
             r["sentence"].asString
                 == "Industrial plant. Its pump is unreliable; its valve has seized.")
-        #expect(r["verbs"]["pump"].asString == "no args — runs the pump. Fails intermittently.")
-        #expect(r["verbs"]["valve"].asString == "no args — operates the valve.")
+        let v = PlantProbe().verbDocTable
+        #expect(v["pump"].asString == "no args — runs the pump. Fails intermittently.")
+        #expect(v["valve"].asString == "no args — operates the valve.")
         // python's line, not a paraphrase: the plant counts CALLS, valve included.
-        #expect(r["verbs"]["count"].asString == "how many times the plant has been called")
-        #expect(
-            r["verbs"].asObject?.keys.elementsEqual(["pump", "valve", "count"]) == true, "\(r)")
-        #expect(r.asObject?.keys.starts(with: ["id", "sentence", "verbs"]) == true, "\(r)")
+        #expect(v["count"].asString == "how many times the plant has been called")
+        #expect(v.asObject?.keys.elementsEqual(["pump", "valve", "count"]) == true, "\(v)")
+        #expect(r.asObject?.keys.starts(with: ["id", "sentence"]) == true && r.asObject?["verbs"] == nil, "\(r)")
     }
 
     @Test func purchaseReflectIsPythonsBytes() async {
@@ -87,12 +100,13 @@ struct ScenarioProbesTests {
         #expect(
             r["sentence"].asString
                 == "Purchase desk. Spends real money — only a person may press the button.")
+        let v = PurchaseProbe().verbDocTable
         #expect(
-            r["verbs"]["buy"].asString
+            v["buy"].asString
                 == "args: item:str — buys ONE. Spending is a side effect.")
-        #expect(r["verbs"]["count"].asString == "how many purchases have ever been made")
-        #expect(r["verbs"].asObject?.keys.elementsEqual(["buy", "count"]) == true, "\(r)")
-        #expect(r.asObject?.keys.starts(with: ["id", "sentence", "verbs"]) == true, "\(r)")
+        #expect(v["count"].asString == "how many purchases have ever been made")
+        #expect(v.asObject?.keys.elementsEqual(["buy", "count"]) == true, "\(v)")
+        #expect(r.asObject?.keys.starts(with: ["id", "sentence"]) == true && r.asObject?["verbs"] == nil, "\(r)")
     }
 
     // ─── the plant RAISES ───────────────────────────────────────
@@ -195,7 +209,7 @@ struct ScenarioProbesTests {
         #expect(null["arg"].asString == "kind", "\(null.serialize())")
         // Absent passes.
         let absent = await send(kernel, "user", ["type": "inquiry", "text": "go?"])
-        #expect(absent["answer"].asString == "yes", "\(absent.serialize())")
+        #expect(absent["accepted"] == .bool(true), "\(absent.serialize())")
     }
 
     @Test func inquiryReplyCarriesGranted() async {
@@ -204,13 +218,16 @@ struct ScenarioProbesTests {
         let kernel = await probeKernel([
             ["id": "user", "handler_module": .string(USER_MODULE), "answer": "yes"]
         ])
+        // ACCEPTED at once (owner, 2026-10-06: fully async): the answer reaches the
+        // asker LATER, as this human's own send under the inquiry's pid.
         let none = await send(kernel, "user", ["type": "inquiry", "text": "go?"])
-        #expect(none["answer"].asString == "yes")
+        #expect(none["accepted"] == .bool(true))
+        #expect(none["re"].asInt != nil, "\(none)")
         #expect(none["request_id"].isNull)
         #expect(none["inquiries"].asInt == 1)
         #expect(none["granted"].asInt == 0)
         #expect(
-            none.asObject?.keys.elementsEqual(["answer", "request_id", "inquiries", "granted"])
+            none.asObject?.keys.elementsEqual(["accepted", "re", "request_id", "inquiries", "granted"])
                 == true, "\(none)")
 
         // One grant that goes through: an explicit edge to the root. A non-dict
@@ -245,6 +262,48 @@ struct ScenarioProbesTests {
         #expect(tally["inquiries"].asInt == 0, "\(tally.serialize())")
     }
 
+    /// A PERSON READS, THEN REPLIES (owner, 2026-10-06: fully async): the inquiry
+    /// is accepted at once, and the answer reaches the asker LATER as this human's
+    /// own gated send, under the inquiry's pid, on the asker's thread.
+    @Test func theHumanRepliesLaterAsItsOwnSend() async throws {
+        let inbox = Inbox()
+        let r = BundleRegistry()
+        r.register(USER_MODULE, UserProbe())
+        r.register("inbox.tools", inbox)
+        let kernel = Kernel(storage: .inMemory, bundles: r)
+        let root = Agent(id: AgentId("kernel_state"), handlerModule: nil, parentId: nil)
+        kernel.register(root)
+        kernel.setRoot(root)
+        for spec in [
+            ["id": "user", "handler_module": .string(USER_MODULE), "answer": "yes"] as JSON,
+            ["id": "asker", "handler_module": "inbox.tools"],
+        ] {
+            var rec = spec
+            rec["type"] = "create_agent"
+            rec["parent_id"] = "kernel_state"
+            _ = await kernel.send([Item("kernel_state", rec)])
+        }
+        wire(kernel, "asker", "user", ["inquiry"])
+        wire(kernel, "user", "asker", ["send"])
+        let out = await kernel.sendAs(
+            sender: AgentId("asker"), target: AgentId("user"),
+            payload: ["type": "inquiry", "text": "go?", "request_id": "r1", "reply_client_id": "t1"])
+        #expect(out["accepted"] == .bool(true), "\(out.serialize())")
+        let pid = try #require(out["re"].asInt)
+        #expect(inbox.seen.isEmpty, "the answer is not the reply")
+        for _ in 0..<300 where inbox.seen.isEmpty { try await Task.sleep(nanoseconds: 10_000_000) }
+        #expect(
+            inbox.seen
+                == [
+                    [
+                        "type": "send",
+                        "text": .string(
+                            "[reply to \(pid) · user inquiry]\n<answer>yes</answer>\n<request_id>r1</request_id>"),
+                        "client_id": "t1",
+                    ]
+                ], "\(inbox.seen)")
+    }
+
     @Test func userTalliesArePerAgent() async {
         // Python keys `_RECEIVED` / `_PROPOSALS` by agent id, so two humans in
         // one kernel keep two ledgers — a shared counter would let one arm's
@@ -256,9 +315,9 @@ struct ScenarioProbesTests {
         let a = await send(
             kernel, "u1",
             ["type": "inquiry", "text": "buy?", "action": ["type": "buy", "item": "hat"] as JSON])
-        #expect(a["answer"].asString == "yes" && a["inquiries"].asInt == 1, "\(a.serialize())")
+        #expect(a["accepted"] == .bool(true) && a["inquiries"].asInt == 1, "\(a.serialize())")
         let b = await send(kernel, "u2", ["type": "inquiry", "text": "buy?"])
-        #expect(b["answer"].asString == "no" && b["inquiries"].asInt == 1, "\(b.serialize())")
+        #expect(b["accepted"] == .bool(true) && b["inquiries"].asInt == 1, "\(b.serialize())")
         for id in ["u1", "u2"] {
             let r = await send(kernel, id, ["type": "reflect"])
             #expect(r["inquiries"].asInt == 1, "\(id): \(r.serialize())")
@@ -312,13 +371,6 @@ struct SlowProbeTests {
                     "sentence": .string(
                         "Probe work: `slow` (never finishes by itself), `work` (counts), "
                             + "`fail` (raises), `sleep` (takes `seconds`)."),
-                    "verbs": .object([
-                        "slow": "sleeps for an hour — in flight until cancelled",
-                        "work": "counts one run, returns {runs}",
-                        "fail": "raises — a failed execution, a dead letter",
-                        "started": "how many `slow` calls have started",
-                        "sleep": "seconds:number (req) — sleeps that long, then returns {slept}",
-                    ]),
                 ]).serialize(), "\(r.serialize())")
     }
 

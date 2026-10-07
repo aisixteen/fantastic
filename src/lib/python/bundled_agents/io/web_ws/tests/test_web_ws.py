@@ -17,7 +17,7 @@ async def test_reflect_describes_surface(seeded_kernel):
     r = await _reflect("ws_xyz", {}, seeded_kernel)
     assert r["id"] == "ws_xyz"
     assert r["path_pattern"] == "/{host_id}/ws"
-    assert "get_routes" in r["verbs"]
+    assert "verbs" not in r
 
 
 async def test_get_routes_returns_one_websocket(seeded_kernel):

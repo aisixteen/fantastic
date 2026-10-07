@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -91,6 +92,13 @@ async def connect(
 ) -> Connected:
     """Create the AI agent, wire both sides of the gate, install the reader."""
     L = limits or Limits.from_env(os.environ)
+    # `docs` IS A GRANT (owner, 2026-10-06): no verb is exempt by name, so every AI
+    # the suite connects reads docs by a `docs` grant on the root — merged into
+    # whatever the fixture already grants the root; the ingress half opens below
+    # with the rest of the AI's `can_call`.
+    have = can_call.get(root.id)
+    if have != "*" and not (isinstance(have, list) and ("docs" in have or "*" in have)):
+        can_call = {**can_call, root.id: [*(have or []), "docs"]}
     meta = {
         "type": "create_agent",
         "parent_id": home(root),
@@ -379,6 +387,91 @@ async def human(
     return r
 
 
+#: Seconds of quiet after a `done` call before the chain is checked for the end.
+DONE_QUIET = 1.0
+#: The drive loop's poll step. The wire transcript throttles its own store read
+#: to 1 s, and `ps` is held to PS_EVERY, so a short step costs no extra load.
+TICK = 0.5
+#: Minimum seconds between two `ps` checks of one chain.
+PS_EVERY = 2.0
+#: The model's `done` call, in its last turn.
+_DONE_CALL = re.compile(r'<call\s+name="done"')
+_AWAIT_CALL = re.compile(r'<call\s+name="await"')
+#: Kernel service work and the driver's own calls — never a peer still working.
+_QUIET_VERBS = {"ps", "persist_writer", "flush_executions", "ws_drain", "inbound_call"}
+#: Messages a test has SCHEDULED for an agent (`facts_arm.send_later`) and not yet
+#: sent, by agent id. A chain with one pending is not over: measured 2026-10-06, the
+#: DONE_QUIET end cut flat_roots / fold_paging / facts_x_chains after their first
+#: task, before the later tasks the harness was about to send arrived.
+LATER: dict[str, set] = {}
+
+
+@dataclass
+class ChainEnd:
+    """Has the chain ENDED? The one check every drive loop shares.
+
+    A chain is over when no turn has landed for 30 s and nothing of the AI's is
+    in flight — or, once its last turn called `done`, after DONE_QUIET seconds
+    and nothing in flight ANYWHERE (no sub-AI turn, job or tick of a peer), so a
+    test whose peers still report back keeps the 30 s rule. A chain whose last turn
+    called `await` stays open while any peer has work in flight (the 15-min hard
+    stop still bounds it). Measured
+    2026-10-06: the 30 s window was ~34 s of every test's wall (270 of 550 s
+    over eight coding tests) after the model had already called done.
+
+    `check` is called only while no new turn has landed; it reads `ps` at most
+    every PS_EVERY seconds. Returns (cap, busy): `cap` is the CHAIN ENDED
+    reason, `busy` says the AI itself has work in flight.
+    """
+
+    root: Any
+    aid: str
+    ps_at: float = 0.0
+
+    async def check(self, transcript: list[str], idle: float) -> tuple[str, bool]:
+        said_done = bool(transcript) and bool(_DONE_CALL.search(transcript[-1] or ""))
+        # AWAITING: the AI asked to be woken by what is in flight — an inquiry's
+        # later answer, a peer's report. While a peer works, its chain is not over
+        # (measured 2026-10-07, peer_review: the coder awaited the reviewer and the
+        # 30 s rule cut the chain while the reviewer was still working).
+        awaited = bool(transcript) and bool(_AWAIT_CALL.search(transcript[-1] or ""))
+        if LATER.get(self.aid):
+            said_done = False  # the test still has a message to send this agent
+        if not (idle >= 30 or (said_done and idle >= DONE_QUIET)):
+            return "", False
+        now = asyncio.get_running_loop().time()
+        if now - self.ps_at < PS_EVERY:
+            return "", False
+        self.ps_at = now
+        rows = (
+            (
+                (
+                    await self.root.send(
+                        [{"target": "kernel", "payload": {"type": "ps"}}]
+                    )
+                )[0]["result"]
+            ).get("tasks")
+            or []
+        )
+        if [t for t in rows if t.get("agent") == self.aid and t.get("verb") != "ps"]:
+            return "", True
+        peers = [
+            t
+            for t in rows
+            if t.get("agent") != self.aid and t.get("verb") not in _QUIET_VERBS
+        ]
+        if (idle < 30 or awaited) and peers:
+            return "", False  # said done / awaiting, and a peer is still working
+        # DUMP THE TABLE. "no turn and nothing in flight" is a conclusion; the
+        # rows are the evidence. Without them a chain that ended and a detector
+        # that fired too early look identical from the transcript.
+        return (
+            f"CHAIN ENDED — no turn and nothing in flight after {idle:.0f}s"
+            f"{' (the model called done)' if idle < 30 else ''}"
+            f" · ps={[(t.get('agent'), t.get('verb')) for t in rows]}"
+        ), False
+
+
 async def drive(
     conn: Connected, task: str, *, client_id: str = "probe", via: str | None = None
 ) -> str:
@@ -390,7 +483,7 @@ async def drive(
     `{"type":"inquiry"}` out of the model's prose and post a reply back in from
     outside the kernel, which is why the human had no id, no record, no gate and
     no ledger row. The human is an AGENT now (`e2e/probes/user_probe`) — the
-    model calls it, the answer is the reply, and a fixture chooses what the human
+    model calls it, the answer comes back later under its pid, and a fixture chooses what the human
     says by writing that agent's `answer` field.
     """
     root, aid, L = conn.root, conn.id, conn.limits
@@ -431,14 +524,15 @@ async def drive(
         print(f"\n  ** FIRST SEND FAILED: {first['error']} **\n", flush=True)
 
     idle, last, stale, seen_calls, capped = 0.0, 0, 0, -1, ""
+    ender = ChainEnd(root, aid)
     while idle < L.idle:
-        await asyncio.sleep(2.0)
+        await asyncio.sleep(TICK)
         calls = distinct_calls(conn.proxy.transcript)
         # NOTHING IS SCRAPED HERE ANY MORE. The harness used to read the model's
         # own prose for `{"type":"inquiry"}` and post an answer back in from
         # outside the kernel — the human had no id, no record, no gate and no
         # ledger row. The human is an AGENT now (`e2e/probes/user_probe`): the
-        # model calls it and the answer is the reply, so a question needs the
+        # model calls it and the answer arrives later under its pid, so a question needs the
         # driver no more than any other call does.
         if calls != seen_calls:
             seen_calls, stale = calls, 0
@@ -447,32 +541,20 @@ async def drive(
 
         # CHAIN DEATH. The per-turn tripwires only fire when a turn LANDS, so a
         # model that simply stops producing turns evades all of them and the run
-        # sits out the full idle window before scoring.
-        if idle >= 30 and conn.proxy.n == last and last > 0:
-            rows = (
-                (
-                    (
-                        await root.send(
-                            [{"target": "kernel", "payload": {"type": "ps"}}]
-                        )
-                    )[0]["result"]
-                ).get("tasks")
-                or []
-            )
-            if not [t for t in rows if t.get("agent") == aid and t.get("verb") != "ps"]:
-                capped = (
-                    f"CHAIN ENDED — no turn and nothing in flight after {idle:.0f}s"
-                    f" · ps={[(t.get('agent'), t.get('verb')) for t in rows]}"
-                )
-            else:
+        # sits out the full idle window before scoring. See `ChainEnd`.
+        if conn.proxy.n == last and last > 0:
+            cap, busy = await ender.check(conn.proxy.transcript, idle)
+            if cap:
+                capped = cap
+            elif busy and idle >= 30:
                 # A generation IS in flight — that is activity, not idleness.
                 # Without this hold, a single long turn (a big write after a big
                 # read) outlived L.idle and the while-condition exited SILENTLY
                 # mid-generation (measured 2026-09-01, gym bowling×3 + java: the
                 # chain died at turn 3-4, stub never written, no cap printed).
-                # Held at 28 so the in-flight check re-runs every tick; a truly
-                # hung task still ends via the provider/kernel timeout, after
-                # which the cap above fires normally.
+                # Held at 28 so the in-flight check re-runs; a truly hung task
+                # still ends via the provider/kernel timeout, after which the cap
+                # above fires normally.
                 idle = 28.0
 
         if conn.trips:
@@ -503,7 +585,7 @@ async def drive(
         if conn.proxy.n != last:
             last, idle = conn.proxy.n, 0.0
         else:
-            idle += 2.0
+            idle += TICK
 
     if capped:
         print(f"\n  ** CAPPED: {capped} · {conn.proxy.n} passes **")

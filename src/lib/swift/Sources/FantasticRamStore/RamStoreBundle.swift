@@ -312,6 +312,7 @@ public final class RamStoreBundle: AgentBundle, @unchecked Sendable {
     public var name: String { "ram_store" }
 
     public var verbs: [String] { Array(Self.VERBS.keys) }
+    public var verbDocTable: JSON { .object(Self.VERBS.mapValues { JSON.string($0) }) }
 
     public var readme: String? { Self.README }
 
@@ -441,10 +442,6 @@ public final class RamStoreBundle: AgentBundle, @unchecked Sendable {
 
     private func reflect(_ agent: Agent) -> JSON {
         let t = tables(agent)
-        var verbs: OrderedDictionary<String, JSON> = [:]
-        for (k, v) in Self.VERBS {
-            verbs[k] = .string(String(v.split(separator: "\n", omittingEmptySubsequences: false).first ?? ""))
-        }
         return .object([
             "id": .string(agent.id.value),
             "sentence": .string(
@@ -454,7 +451,6 @@ public final class RamStoreBundle: AgentBundle, @unchecked Sendable {
             "owners": .integer(Int64(t.rows.values.filter { !$0.isEmpty }.count)),
             "rows": .integer(Int64(t.rows.values.reduce(0) { $0 + $1.count })),
             "optional_verbs": .array([.string("search")]),
-            "verbs": .object(verbs),
         ])
     }
 

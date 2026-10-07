@@ -138,10 +138,41 @@ impl OnceLockScheduleCache {
 /// The scheduler bundle.
 pub struct SchedulerBundle;
 
+/// HOW TO CALL a scheduler — python's `VERBS` docstrings (first line each),
+/// served by the kernel's `docs` verb.
+fn verb_docs_json() -> Value {
+    json!({
+        "reflect": "Identity + tick state. No args.",
+        "boot": "Idempotent. Starts the tick loop; persistence is THROUGH the loader.",
+        "schedule": "args: target:str, payload:{type:..,...}, interval_seconds:int (default 60), timeout:number? (seconds per fire; absent = wait forever). Every fire runs AS THE SCHEDULER — it reaches what the scheduler's can_call grants. Returns {schedule_id, schedule}. Persisted THROUGH the loader; failfast if no store wired.",
+        "unschedule": "args: schedule_id:str (req). Returns {removed:bool, schedule_id}.",
+        "list": "No args. Returns {schedules: [<schedule record>, ...]} — every schedule.",
+        "pause": "args: schedule_id:str?. With id pauses one schedule; without, pauses the whole scheduler.",
+        "resume": "args: schedule_id:str?. With id resumes one schedule; without, resumes the whole scheduler.",
+        "tick_now": "args: schedule_id:str (req). Bumps run_count, persists, then fires that schedule immediately, as the scheduler. Returns {fired:true, schedule_id, result, error} — the fire's outcome as `history` records it: the target's reply, or why the fire failed.",
+        "history": "args: limit:int? (1..500, default 100), schedule_id:str?. Returns {history:[event,...], count} — every schedule's fires.",
+    })
+}
+
+/// What a scheduler emits — python `EMITS`, served by `docs`.
+fn emits_json() -> Value {
+    json!({
+        "schedule_fired": "{type:'schedule_fired', schedule_id, scheduler_id, target, payload, result, error, ts, duration_ms} — emitted on the scheduler's OWN inbox after every fire (never the target's — the payload send is the tick)",
+    })
+}
+
 #[async_trait]
 impl Bundle for SchedulerBundle {
     fn name(&self) -> &str {
         "scheduler"
+    }
+
+    fn verb_docs(&self) -> Value {
+        verb_docs_json()
+    }
+
+    fn emits_doc(&self) -> Option<Value> {
+        Some(emits_json())
     }
 
     fn readme(&self) -> Option<&'static str> {
@@ -185,7 +216,14 @@ impl Bundle for SchedulerBundle {
             // `shutdown` is NOT a verb (A5.3): python's `VERBS` has no such key, so
             // it lands here like any other unknown type. The tick loop dies in
             // `on_delete`, never behind a verb.
-            _ => json!({"error": format!("scheduler: unknown type {}", py_repr_value(raw_type))}),
+            _ => {
+                let mut r = fantastic_kernel::refusal::refusal(
+                    fantastic_kernel::refusal::UNHANDLED,
+                    format!("scheduler: unknown type {}", py_repr_value(raw_type)),
+                );
+                fantastic_kernel::refusal::with(&mut r, "verb", raw_type.clone());
+                r
+            }
         };
         Ok(Some(reply))
     }
@@ -565,13 +603,14 @@ fn fire_outcome(status: Status, result: Value) -> (Value, Value) {
 
 /// Fire every due schedule AS THE SCHEDULER — one batch send, its items
 /// concurrent, no head-of-line blocking — then record one `schedule_fired` per
-/// outcome.
-async fn fire_many(agent_id: &AgentId, kernel: &Arc<Kernel>, due: &[Value]) {
+/// outcome, and return those events in `due` order.
+async fn fire_many(agent_id: &AgentId, kernel: &Arc<Kernel>, due: &[Value]) -> Vec<Value> {
     let ts = now_secs();
     // AS THE SCHEDULER: this runs in its handler (`tick_now`) or in the tick
     // loop its own `boot` spawned — identity comes from that dispatch.
     let outcomes = kernel.send(due.iter().map(fire_item).collect()).await;
     let duration_ms = ((now_secs() - ts) * 1000.0) as i64;
+    let mut events = Vec::with_capacity(due.len());
     for (sch, out) in due.iter().zip(outcomes) {
         let target = sched_target(sch);
         let payload = sched_payload(sch);
@@ -600,8 +639,10 @@ async fn fire_many(agent_id: &AgentId, kernel: &Arc<Kernel>, due: &[Value]) {
         // `schedule_fired` doubled every delivery to a live program's on_message —
         // the payload send IS the tick; telemetry rides the scheduler's own inbox
         // and schedule_events.yaml.
-        kernel.emit(agent_id, event).await;
+        kernel.emit(agent_id, event.clone()).await;
+        events.push(event);
     }
+    events
 }
 
 fn now_secs() -> f64 {
@@ -638,23 +679,6 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
         "tick_sec": tick_sec(agent_id, kernel),
         "paused": meta_truthy(agent_id, kernel, "paused"),
         "running": running,
-        // py `{n: (f.__doc__ or "").strip().splitlines()[0] for n, f in VERBS.items()}`
-        // — the FIRST LINE of each verb's docstring, in `VERBS` order. `boot`'s is
-        // truncated mid-sentence; that is the python text.
-        "verbs": {
-            "reflect": "Identity + tick state. No args.",
-            "boot": "Idempotent. Starts the tick loop; persistence is THROUGH the loader.",
-            "schedule": "args: target:str, payload:{type:..,...}, interval_seconds:int (default 60), timeout:number? (seconds per fire; absent = wait forever). Every fire runs AS THE SCHEDULER — it reaches what the scheduler's can_call grants. Returns {schedule_id, schedule}. Persisted THROUGH the loader; failfast if no store wired.",
-            "unschedule": "args: schedule_id:str (req). Returns {removed:bool, schedule_id}.",
-            "list": "No args. Returns {schedules: [<schedule record>, ...]} — every schedule.",
-            "pause": "args: schedule_id:str?. With id pauses one schedule; without, pauses the whole scheduler.",
-            "resume": "args: schedule_id:str?. With id resumes one schedule; without, resumes the whole scheduler.",
-            "tick_now": "args: schedule_id:str (req). Bumps run_count, persists, then fires that schedule immediately, as the scheduler. Returns {fired:true, schedule_id}.",
-            "history": "args: limit:int? (1..500, default 100), schedule_id:str?. Returns {history:[event,...], count} — every schedule's fires.",
-        },
-        "emits": {
-            "schedule_fired": "{type:'schedule_fired', schedule_id, scheduler_id, target, payload, result, error, ts, duration_ms} — emitted on the scheduler's OWN inbox after every fire (never the target's — the payload send is the tick)",
-        }
     })
 }
 
@@ -867,8 +891,20 @@ async fn tick_now_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel
         return persist_err("tick_now", &e);
     }
     let due = vec![schedules[idx].clone()];
-    fire_many(agent_id, kernel, &due).await;
-    json!({"fired": true, "schedule_id": sid})
+    // THE OUTCOME, not just the fact. `{fired:true}` alone hid a target that
+    // refused every fire: measured 2026-10-06 (rust subai_graph), a schedule sent
+    // `{type:'tick'}` to an AI agent, which has no such verb; `tick_now` said fired
+    // 16 times and the model never learned the payload was wrong. Python canonical.
+    let ev = fire_many(agent_id, kernel, &due)
+        .await
+        .pop()
+        .unwrap_or(Value::Null);
+    json!({
+        "fired": true,
+        "schedule_id": sid,
+        "result": ev.get("result").cloned().unwrap_or(Value::Null),
+        "error": ev.get("error").cloned().unwrap_or(Value::Null),
+    })
 }
 
 async fn history_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {

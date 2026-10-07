@@ -44,9 +44,18 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
     public let name = "scheduler"
 
     public var verbs: [String] { Array(Self.verbDocs.keys) }
+    public var verbDocTable: JSON { .object(Self.verbDocs) }
+    public var emitsDoc: JSON? { .object(Self.emits) }
 
     /// python's module-level `VERBS` — ONE table: reflect renders it and
     /// `advertises` reads it.
+    /// Served by `docs` (tier detailed). Python `EMITS`.
+    static let emits: OrderedDictionary<String, JSON> = [
+        "schedule_fired": .string(
+            "{type:'schedule_fired', schedule_id, scheduler_id, target, payload, result, error, ts, duration_ms} — emitted on the scheduler's OWN inbox after every fire (never the target's — the payload send is the tick)"
+        )
+    ]
+
     static let verbDocs: OrderedDictionary<String, JSON> = [
         "reflect": .string("Identity + tick state. No args."),
         "boot": .string("Idempotent. Starts the tick loop; persistence is THROUGH the loader."),
@@ -55,7 +64,7 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
         "list": .string("No args. Returns {schedules: [<schedule record>, ...]} — every schedule."),
         "pause": .string("args: schedule_id:str?. With id pauses one schedule; without, pauses the whole scheduler."),
         "resume": .string("args: schedule_id:str?. With id resumes one schedule; without, resumes the whole scheduler."),
-        "tick_now": .string("args: schedule_id:str (req). Bumps run_count, persists, then fires that schedule immediately, as the scheduler. Returns {fired:true, schedule_id}."),
+        "tick_now": .string("args: schedule_id:str (req). Bumps run_count, persists, then fires that schedule immediately, as the scheduler. Returns {fired:true, schedule_id, result, error} — the fire's outcome as `history` records it: the target's reply, or why the fire failed."),
         "history": .string("args: limit:int? (1..500, default 100), schedule_id:str?. Returns {history:[event,...], count} — every schedule's fires."),
     ]
 
@@ -118,9 +127,9 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
             // python `{t!r}`: an absent `type` reads `None`, a number reads bare.
             // `shutdown` is NOT a verb here — python's VERBS table has no such key,
             // so it lands in exactly this branch.
-            return .object([
-                "error": .string("scheduler: unknown type \(pyRepr(payload["type"]))")
-            ])
+            return Refusal.make(
+                Refusal.unhandled, "scheduler: unknown type \(pyRepr(payload["type"]))",
+                extra: [("verb", payload["type"])])
         }
     }
 
@@ -328,14 +337,16 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
 
     /// Fire every due schedule AS THE SCHEDULER — ONE batch send, the items
     /// concurrent, no head-of-line blocking — then record one `schedule_fired`
-    /// per outcome.
-    private func fireMany(_ agentId: AgentId, _ due: [JSON], _ kernel: Kernel) async {
+    /// per outcome, and return those events in `due` order.
+    @discardableResult
+    private func fireMany(_ agentId: AgentId, _ due: [JSON], _ kernel: Kernel) async -> [JSON] {
         let ts = nowSecs()
         let items = due.map { self.fireItem($0) }
         // The scheduler's own handler or tick task — its sends are its own.
         let outs = await kernel.send(items)
         let outcomes: [Outcome?] = due.indices.map { $0 < outs.count ? outs[$0] : nil }
         let durationMs = Int64((nowSecs() - ts) * 1000)
+        var events: [JSON] = []
         for (i, sch) in due.enumerated() {
             let target = sch["target"].asString ?? ""
             let payload = sch.asObject?["payload"] ?? .object([:])
@@ -377,7 +388,9 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
             // on_message — the payload send IS the tick; telemetry rides the
             // scheduler's own inbox and schedule_events.yaml.
             await kernel.emit(agentId, event)
+            events.append(event)
         }
+        return events
     }
 
     private func nowSecs() -> Double { Date().timeIntervalSince1970 }
@@ -404,12 +417,6 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
             // python `bool(rec.get("paused"))` — truthiness in, a BOOL out.
             "paused": .bool(pyTruthy(agent?.metaValue(forKey: "paused") ?? .null)),
             "running": .bool(running),
-            "verbs": .object(Self.verbDocs),
-            "emits": .object([
-                "schedule_fired": .string(
-                    "{type:'schedule_fired', schedule_id, scheduler_id, target, payload, result, error, ts, duration_ms} — emitted on the scheduler's OWN inbox after every fire (never the target's — the payload send is the tick)"
-                )
-            ]),
         ])
     }
 
@@ -612,8 +619,14 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
             setCache(agentId, schedules)
             return persistErr("tick_now", err)
         }
-        await fireMany(agentId, [schedules[i]], kernel)
-        return .object(["fired": .bool(true), "schedule_id": sid])
+        // THE OUTCOME, not just the fact. `{fired:true}` alone hid a target that
+        // refused every fire: measured 2026-10-06 (rust subai_graph), a schedule
+        // sent `{type:'tick'}` to an AI agent, which has no such verb; `tick_now`
+        // said fired 16 times and the model never learned the payload was wrong.
+        let ev = await fireMany(agentId, [schedules[i]], kernel).first ?? .null
+        return .object([
+            "fired": .bool(true), "schedule_id": sid, "result": ev["result"], "error": ev["error"],
+        ])
     }
 
     private func historyReply(_ agentId: AgentId, payload: JSON, kernel: Kernel) async -> JSON {

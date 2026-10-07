@@ -73,18 +73,15 @@ private func renderReplyField(_ name: String, _ value: JSON) -> String {
         let inner = map.map { renderReplyField($0.key, $0.value) }.joined()
         return "<\(name)>\n\(inner)</\(name)>\n"
     case .array(let items):
-        // A list of STRUCTURES nests; a list holding any scalar renders one
-        // `<item>` per element. An empty list takes the first branch, as
-        // python's `all(...)` over nothing is true.
-        let structural = items.allSatisfy {
-            if case .object = $0 { return true }
-            if case .array = $0 { return true }
-            return false
-        }
-        let inner =
-            structural
-            ? items.map { renderReplyField("item", $0) }.joined()
-            : items.map { "<item>\(replyText($0))</item>\n" }.joined()
+        // Each element on its own: a dict/list one nests, a scalar one is text —
+        // so a MIXED list (a reflect `tree=ids` with pruned stubs) renders both
+        // right. Python `_render_reply_field`.
+        let inner = items.map { item -> String in
+            switch item {
+            case .object, .array: return renderReplyField("item", item)
+            default: return "<item>\(replyText(item))</item>\n"
+            }
+        }.joined()
         return "<\(name)>\n\(inner)</\(name)>\n"
     default:
         let text = replyText(value)

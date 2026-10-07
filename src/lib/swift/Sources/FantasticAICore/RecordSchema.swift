@@ -116,8 +116,10 @@ public enum RecordSchema {
             required: required)
     }
 
-    /// A backend's whole record schema: its own fields, then `AI_FIELDS`.
-    /// Python `schema(backend_fields)`.
+    /// A backend's whole record schema: its own fields, then `AI_FIELDS`. A backend
+    /// field named like a shared one REPLACES it (vllm_backend: `context_window` has
+    /// no default there — left out, it is read from the server). Python
+    /// `schema(backend_fields)`.
     public static func schema(_ backendFields: [JSON]) -> JSON {
         schema(backendFields, contextWindow: AIConstants.DEFAULT_CONTEXT_WINDOW)
     }
@@ -125,25 +127,14 @@ public enum RecordSchema {
     /// The same, for a backend whose model window is its own (`modelWindow`):
     /// `context_window` defaults to it.
     public static func schema(_ backendFields: [JSON], contextWindow: Int64) -> JSON {
-        let fields = backendFields + aiFields(contextWindow: contextWindow)
+        let own = Set(backendFields.compactMap { $0["name"].asString })
+        let shared = aiFields(contextWindow: contextWindow).filter {
+            !own.contains($0["name"].asString ?? "")
+        }
+        let fields = backendFields + shared
         let names = fields.compactMap { $0["name"].asString }
         precondition(Set(names).count == names.count, "duplicate field in schema: \(names)")
         return .object(["fields": .array(fields)])
-    }
-
-    /// `schema` where this backend REQUIRES some shared fields — required, no
-    /// default (vllm_backend: `context_window`, the server's window, is never
-    /// guessed). Python `schema(backend_fields, require=…)`.
-    public static func schema(_ backendFields: [JSON], requiring require: [String]) -> JSON {
-        guard case .object(var top) = schema(backendFields), case .array(let fields)? = top["fields"]
-        else { return schema(backendFields) }
-        top["fields"] = .array(fields.map { f in
-            guard let n = f["name"].asString, require.contains(n), case .object(var o) = f else { return f }
-            o.removeValue(forKey: "default")
-            o["required"] = .bool(true)
-            return .object(o)
-        })
-        return .object(top)
     }
 
     /// Whether a record NAMES this field in a usable form — a string must be

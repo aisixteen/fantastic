@@ -490,10 +490,10 @@ struct ToolParseTests {
         #expect(renderReply(.object(["c": .double(.nan)])) == "<c>nan</c>")
         #expect(renderReply(.object(["c": .null])) == "<c></c>")
         #expect(renderReply(.object(["c": .bool(true)])) == "<c>true</c>")
-        // A STRUCTURE inside a MIXED list is python's container repr.
+        // A STRUCTURE inside a MIXED list nests, each element on its own.
         #expect(
             renderReply(.object(["c": .array([.integer(1), .object(["a": .integer(1)])])]))
-                == "<c>\n<item>1</item>\n<item>{'a': 1}</item>\n</c>")
+                == "<c>\n<item>1</item>\n<item>\n<a>1</a>\n</item>\n</c>")
     }
 
     // A CRLF body holds a LF code point, so python spans the tag across lines.

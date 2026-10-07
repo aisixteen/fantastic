@@ -674,6 +674,12 @@ async def test_reflect_fields(two_kernels):
     assert r["guid"] == "A"
     assert r["partner_guid"] == "B"
     assert r["sealed"] is True  # no ingress_rule ⇒ deny_inbound
+    assert "verbs" not in r
+    d = (
+        await ka.send(
+            [{"target": "kernel", "payload": {"type": "docs", "of": rec["id"]}}]
+        )
+    )[0]["result"]
     for v in (
         "boot",
         "forward",
@@ -682,4 +688,4 @@ async def test_reflect_fields(two_kernels):
         "reconnect",
         "reflect",
     ):
-        assert v in r["verbs"]
+        assert v in d["verbs"]

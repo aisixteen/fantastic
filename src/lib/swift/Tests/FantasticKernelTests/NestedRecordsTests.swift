@@ -1,10 +1,10 @@
 // A SESSION loader (a `kernel_state` with a `root`, under a ws leg) persists a
 // federated kernel's records — a canvas and the thin agents nested under it.
-// Those records are never live on the host, so the record-owner walk and the
-// path resolution climb THIS LOADER'S persisted records (disk position) past the
-// live tree: nested 2+ levels is allowed for the owning leg and refused for a
-// sibling, and an existing record is placed where it is — never by the
-// payload's parent.
+// Those records are never live on the host, so the path resolution climbs THIS
+// LOADER'S persisted records (disk position) past the live tree: nested 2+ levels
+// lands under its real parents, and an existing record is placed where it is —
+// never by the payload's parent. WHO may write is the grant alone (owner,
+// 2026-10-06): any agent granted the record verbs on the loader writes any record.
 //
 // Twin of python `bundled_agents/loader/kernel_state/tests/test_nested_records.py`.
 
@@ -120,31 +120,35 @@ struct NestedRecordsTests {
         #expect(parents["deep"] == .string("terminal_view"), "\(tree.serialize())")
     }
 
-    @Test func aSiblingMayNotTouchTheNestedRecords() async {
+    /// The grant is the whole rule: `rest_leg` holds `*` on the loader, so it
+    /// writes under another leg's records and forgets them.
+    @Test func aGrantedSiblingWritesTheNestedRecords() async {
         let f = await setup()
         _ = await persist(f, "wws", "canvas", "web_loader")
         _ = await persist(f, "wws", "terminal_view", "canvas")
-        var r = await persist(f, "rest_leg", "sneak", "terminal_view")
-        #expect(r["reason"].asString == "unauthorized", "\(r.serialize())")
+        var r = await persist(f, "rest_leg", "extra", "terminal_view")
+        #expect(r == OK, "\(r.serialize())")
+        #expect(f.exists("agents/canvas/agents/terminal_view/agents/extra/agent.yaml"))
         r = await call(
             f.k, "web_loader",
             .object([
                 "type": .string("forget_record"), "id": .string("terminal_view"),
                 "parent_id": .string("canvas"),
             ]), as: "rest_leg")
-        #expect(r["reason"].asString == "unauthorized", "\(r.serialize())")
-        #expect(f.exists("agents/canvas/agents/terminal_view/agent.yaml"))
+        #expect(r == OK, "\(r.serialize())")
+        #expect(!f.exists("agents/canvas/agents/terminal_view"))
     }
 
-    /// Naming a record that exists with `parent_id` = yourself used to pass the
-    /// guard (the payload's parent was walked first) and overwrite it.
+    /// An existing record is written where it IS, whatever `parent_id` the
+    /// payload names.
     @Test func anExistingRecordIsPlacedByItsPositionNotThePayload() async {
         let f = await setup()
         _ = await persist(f, "wws", "canvas", "web_loader")
         _ = await persist(f, "wws", "terminal_view", "canvas")
         let r = await persist(f, "rest_leg", "terminal_view", "rest_leg")
-        #expect(r["reason"].asString == "unauthorized", "\(r.serialize())")
+        #expect(r == OK, "\(r.serialize())")
         #expect(!f.exists("agents/terminal_view"))
+        #expect(f.exists("agents/canvas/agents/terminal_view/agent.yaml"))
     }
 
     @Test func forgetRecordRemovesANestedRecordWhereItIs() async {
@@ -160,11 +164,11 @@ struct NestedRecordsTests {
         #expect(f.exists("agents/canvas/agents/terminal_view/agent.yaml"))
     }
 
-    /// No fallback: a brand-new record's location comes from the payload, and
-    /// the walk from there must still reach the caller.
-    @Test func anIdInNeitherTreeNorDiskIsPlacedByThePayloadAndGuarded() async {
+    /// No fallback: a brand-new record's location comes from the payload.
+    @Test func anIdInNeitherTreeNorDiskIsPlacedByThePayload() async {
         let f = await setup()
         let r = await persist(f, "wws", "orphan", "nowhere")
-        #expect(r["reason"].asString == "unauthorized", "\(r.serialize())")
+        #expect(r == OK, "\(r.serialize())")
+        #expect(f.exists("agents/nowhere/agents/orphan/agent.yaml"))
     }
 }

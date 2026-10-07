@@ -80,9 +80,6 @@ async def _reflect(id, payload, kernel):
         # The leg is a CHANNEL — surface its auth posture so discovery-through-denial
         # has something to discover (the door + the pointer to how to open it).
         **_describe(kernel.get(id) or {}),
-        "verbs": {
-            n: (f.__doc__ or "").strip().splitlines()[0] for n, f in VERBS.items()
-        },
     }
 
 

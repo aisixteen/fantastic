@@ -475,8 +475,7 @@ async fn handler_module_not_installed_is_the_python_unhandled_shape() {
 async fn a_handler_reads_its_caller_not_itself() {
     // `current_sender()` inside a handler is that handler's OWN agent — the
     // callee. A bundle whose payload NAMES a resource needs the CALLER, which
-    // is what `current_origin()` carries. Without it an agent could write
-    // another agent's namespace through a blob verb and nothing could tell.
+    // is what `current_origin()` carries.
     use crate::bundle::{Bundle, BundleError, BundleRegistry, Reply};
     use crate::send::current_origin;
     use crate::test_support::as_agent;
@@ -703,12 +702,7 @@ async fn gate_denial_keys_are_error_reason_hint_side() {
 
     // Egress: the sender holds no edge to the target.
     let d = kernel
-        .gate(
-            &AgentId::from("totals"),
-            "write_stream",
-            &store,
-            &json!({"type": "write_stream"}),
-        )
+        .gate(&AgentId::from("totals"), "write_stream", &store)
         .expect("deny-all gate let an ungranted call through");
     // Python's `!r` — single quotes, not rust's Debug double quotes.
     assert_eq!(
@@ -724,12 +718,7 @@ async fn gate_denial_keys_are_error_reason_hint_side() {
     let rest = granted("rest", Some("kernel_state"), "can_call", json!({"ws": "*"}));
     kernel.register(Arc::clone(&rest));
     let d = kernel
-        .gate(
-            &AgentId::from("rest"),
-            "reflect",
-            &ws,
-            &json!({"type": "reflect"}),
-        )
+        .gate(&AgentId::from("rest"), "reflect", &ws)
         .expect("an unaccepted call was admitted");
     assert_eq!(d["error"], "ws does not accept 'reflect' from rest");
     assert_eq!(keys(&d), ["error", "reason", "hint", "side"]);
@@ -1708,10 +1697,10 @@ async fn a_literal_dotted_key_summarizes_at_that_key() {
 
 /// python `_SYSTEM_VERB_DOCS`, in declaration order, verbatim
 /// (`P/kernel/_agent.py`).
-const PY_KERNEL_VERB_DOCS: [(&str, &str); 11] = [
-    ("create_agent", "args: handler_module:str, parent_id:str REQUIRED, id:str?, **meta. Creates a CHILD OF `parent_id` — an agent names its own id or an agent in its subtree; 'kernel_state' for top-level. No default parent."),
-    ("update_agent", "args: id:str, **meta. EVERY FIELD YOU NAME IS REPLACED, NOT MERGED (a field you do not name is untouched), so a dict field must be sent WHOLE — `can_call`/`callable_by` included: restate every key you want to keep, the baseline `$self` among them, or the keys you omit are GONE. Granting one edge reads like a PATCH and behaves like a PUT. An agent updates only agents in its own subtree."),
-    ("delete_agent", "args: id:str. CASCADES — deletes that agent AND ITS WHOLE SUBTREE, deepest first; refuses if any descendant carries `delete_lock`. An agent deletes only agents in its own subtree."),
+const PY_KERNEL_VERB_DOCS: [(&str, &str); 12] = [
+    ("create_agent", "args: handler_module:str, parent_id:str REQUIRED, id:str?, **meta. Creates a CHILD OF `parent_id` — any agent you name (your own id grows your own subtree); 'kernel_state' for top-level. No default parent."),
+    ("update_agent", "args: id:str, **meta. EVERY FIELD YOU NAME IS REPLACED, NOT MERGED (a field you do not name is untouched), so a dict field must be sent WHOLE — `can_call`/`callable_by` included: restate every key you want to keep, the baseline `$self` among them, or the keys you omit are GONE. Granting one edge reads like a PATCH and behaves like a PUT. Whoever holds update_agent on the root updates any agent, itself included."),
+    ("delete_agent", "args: id:str. CASCADES — deletes that agent AND ITS WHOLE SUBTREE, deepest first; refuses if any descendant carries `delete_lock`. Whoever holds delete_agent on the root deletes any agent."),
     ("list_agents", "No args. Every agent's record, flat. Paged."),
     ("ps", "No args. The live kernel-wide TASK TABLE — {tasks:[{id, agent, parent, verb, started_at}]}, one row per in-flight dispatch. Paged."),
     ("ledger", "No args. EVERY execution and what it became — named under its id, unnamed under its minted pid — {executions:[{id, target, status, attempts, retries, named, outcome?, acked?}]}, paged, scoped to what YOU originated; read from the kernel's memory store plus what is not yet flushed. `outcome` keeps the RESULT only for a named call; a dead letter keeps its error; anything else is {status, bytes} — the reply itself went to its caller. Failed/timed_out/cancelled rows are the dead-letter queue (announced by the `on_deadletter` event): inspect, retry with a NEW id if you choose, then `ack_deadletter` it — nothing is retried silently."),
@@ -1720,6 +1709,23 @@ const PY_KERNEL_VERB_DOCS: [(&str, &str); 11] = [
     ("cancel", "args: task_id:str. Kills that task AND ITS SUBTREE — the id names its own agent. Returns {cancelled:bool, killed:[…]}; the blocked caller's batch item settles as status:'cancelled'. Unknown id ⇒ {cancelled:false}."),
     ("shutdown_agents", "No args. Stops the AGENTS, not the process: drains (new roots refused), sends `shutdown` to every agent advertising it, waits for in-flight work, cancels the rest. Returns {drained, shut:[ids], cancelled:[ids]}."),
     ("kernel_stop", "No args. Stops the kernel PROCESS gracefully — drain, every call settles (done, or cancelled into the dead letters), the last rows flush, agents shut down, exit. Under env:'container', the container."),
+    ("docs", "args: of:str (req — an agent id (`<guid>|<agent id>` on a connected kernel), a bundle, or 'kernel'), tier:'oneliners'|'detailed'?, verb:str?. HOW TO CALL an agent — its bundle's verbs: `oneliners` (default) is one signature line per verb, `detailed` the full text (no `verb`: plus emits, cancel and notes). Pull once per bundle; `detailed` for a verb you are about to use. Gated like every kernel verb: a `can_call` grant of `docs` on the root. Returns {of, bundle, tier, verbs, emits?, cancel?, notes?}."),
+];
+
+/// python `kernel/_docs.signature` of each `_SYSTEM_VERB_DOCS` entry.
+const PY_SIGNATURES: [(&str, &str); 12] = [
+    ("create_agent", "args: handler_module:str, parent_id:str REQUIRED, id:str?, **meta"),
+    ("update_agent", "args: id:str, **meta"),
+    ("delete_agent", "args: id:str"),
+    ("list_agents", "No args"),
+    ("ps", "No args"),
+    ("ledger", "No args"),
+    ("ack_deadletter", "args: id:int|str (req — an execution id, or its name)"),
+    ("kernel_start", "No args"),
+    ("cancel", "args: task_id:str"),
+    ("shutdown_agents", "No args"),
+    ("kernel_stop", "No args"),
+    ("docs", "args: of:str (req — an agent id (`<guid>|<agent id>` on a connected kernel), a bundle, or 'kernel'), tier:'oneliners'|'detailed'?, verb:str?"),
 ];
 
 #[test]
@@ -1730,42 +1736,26 @@ fn kernel_verb_docs_match_python_verbatim() {
     for (verb, text) in PY_KERNEL_VERB_DOCS {
         assert_eq!(obj[verb], json!(text), "{verb}");
     }
-    // `shutdown_agents` has no em-dash, so distilled == full.
-    let distilled = kernel_verbs_view(false);
-    assert_eq!(
-        distilled["shutdown_agents"],
-        json!(PY_KERNEL_VERB_DOCS[9].1)
-    );
-    assert_eq!(distilled["ack_deadletter"], json!("args: id:int|str (req"));
+    let keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+    let want: Vec<&str> = PY_KERNEL_VERB_DOCS.iter().map(|(v, _)| *v).collect();
+    assert_eq!(keys, want, "python declaration order");
 }
 
 #[test]
-fn full_kernel_verbs_keep_python_order() {
-    // python renders `dict(_SYSTEM_VERB_DOCS)` under `detail:full` — declaration
-    // order — and sorts only the distilled comprehension.
-    let full = kernel_verbs_view(true);
-    let keys: Vec<&str> = full
-        .as_object()
-        .unwrap()
-        .keys()
-        .map(String::as_str)
-        .collect();
-    let mut want = vec!["_"];
-    want.extend(PY_KERNEL_VERB_DOCS.iter().map(|(v, _)| *v));
-    assert_eq!(keys, want);
-
-    let distilled = kernel_verbs_view(false);
-    let keys: Vec<&str> = distilled
-        .as_object()
-        .unwrap()
-        .keys()
-        .map(String::as_str)
-        .collect();
-    let mut sorted: Vec<&str> = PY_KERNEL_VERB_DOCS.iter().map(|(v, _)| *v).collect();
-    sorted.sort_unstable();
-    let mut want = vec!["_"];
-    want.extend(sorted);
-    assert_eq!(keys, want);
+fn docs_signatures_are_pythons() {
+    for ((verb, text), (sverb, sig)) in PY_KERNEL_VERB_DOCS.iter().zip(PY_SIGNATURES.iter()) {
+        assert_eq!(verb, sverb);
+        assert_eq!(crate::docs::signature(text), *sig, "{verb}");
+    }
+    assert_eq!(
+        crate::docs::signature("args: q:str (req — e.g. a word), n:int? (default 5). Finds q."),
+        "args: q:str (req — e.g. a word), n:int? (default 5)"
+    );
+    assert_eq!(
+        crate::docs::signature("Start the loop unless `watch=false`\n(a loader). More.\n\nX."),
+        "Start the loop unless `watch=false` (a loader)"
+    );
+    assert_eq!(crate::docs::signature("No args."), "No args");
 }
 
 // ─── STEP-4 PINS (2026-10-01): one dispatch per channel ──────────────────────

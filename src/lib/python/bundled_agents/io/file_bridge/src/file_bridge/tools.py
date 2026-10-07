@@ -281,9 +281,6 @@ async def _reflect(id, payload, kernel):
             "call. The document ends at the first `</bytes>`. An edit names its "
             "files as tags: <edits><item><path>a.py</path><hunks>2</hunks></item></edits>"
         ),
-        "verbs": {
-            n: (f.__doc__ or "").strip().splitlines()[0] for n, f in VERBS.items()
-        },
         **_describe(rec),
     }
     if root_error:

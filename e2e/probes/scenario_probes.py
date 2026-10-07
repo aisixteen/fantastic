@@ -4,7 +4,7 @@ The python kernel resolves a `handler_module` only from its bundle catalog plus
 `register_unlisted` (rust's `BundleRegistry::register_unlisted`, swift's
 `registerUnlisted`), so a probe on `sys.path` is not enough: it must be
 REGISTERED, unlisted, in the kernel's own process. The same six rust registers
-behind its feature.
+behind its feature, plus the `vault` of `docs_mechanics`.
 
   * in process — `register()` (`helpers/kernel.py`, and a probe that boots its
     own kernel);
@@ -22,6 +22,7 @@ import plant_probe.tools
 import purchase_probe.tools
 import slow_probe.tools
 import user_probe.tools
+import vault_probe.tools
 
 from kernel import register_unlisted
 
@@ -32,6 +33,7 @@ PROBES = (
     user_probe.tools,
     oracle_probe.tools,
     slow_probe.tools,
+    vault_probe.tools,
 )
 
 

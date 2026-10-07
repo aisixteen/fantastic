@@ -281,7 +281,8 @@ async fn reflect_names_the_posture_and_the_verbs() {
     assert_eq!(r["owners"], json!(1));
     assert_eq!(r["rows"], json!(1));
     assert_eq!(r["optional_verbs"], json!(["search"]));
-    let verbs: Vec<&String> = r["verbs"].as_object().unwrap().keys().collect();
+    assert!(r.get("verbs").is_none(), "{r}");
+    let verbs: Vec<&str> = VERB_DOCS.iter().map(|(n, _)| *n).collect();
     assert_eq!(
         verbs,
         vec!["reflect", "boot", "append", "read", "search", "prune", "inject", "dump"]

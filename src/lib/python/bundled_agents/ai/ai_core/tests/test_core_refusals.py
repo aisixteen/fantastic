@@ -149,7 +149,9 @@ async def test_an_unknown_verb_names_the_backend(seeded_kernel):
     k = seeded_kernel
     _ai(k, "kp_u")
     assert await _call(k, "kp_u", {"type": "zzz"}) == {
-        "error": f"{NAME}: unknown type 'zzz'"
+        "error": f"{NAME}: unknown type 'zzz'",
+        "reason": "unhandled",
+        "verb": "zzz",
     }
 
 
@@ -157,6 +159,10 @@ async def test_an_unknown_verb_names_the_backend(seeded_kernel):
 
 
 async def test_inquiry_texts(seeded_kernel, fake_providers):
+    """`inquiry` on an AI is ACCEPTED at once (owner, 2026-10-06: fully async) and
+    runs as its own turn, the question under a head naming who asked and the pid;
+    the answer — given in any later turn — is covered in `test_inquiry_async.py`.
+    An operator's inquiry has no conversation to land in: the answer is an event."""
     k = seeded_kernel
     _ai(k, "kp_iq0", _Script())
     for bad in ("", "   ", None, 5):
@@ -165,32 +171,25 @@ async def test_inquiry_texts(seeded_kernel, fake_providers):
             "reason": "missing_arg",
             "arg": "text",
         }
-    q = {"type": "inquiry", "text": "ship?", "request_id": "r1"}
-    _ai(k, "kp_iq1", _Script(["I think yes."]))
-    assert await _call(k, "kp_iq1", q) == {
-        "error": (
-            "you were sent an inquiry and did not answer it: emit "
-            '<call name="inquiry_answer"><answer>what you concluded</answer></call>'
-        ),
-        "reason": "unhandled",
+    q = {
+        "type": "inquiry",
+        "text": "ship?",
         "request_id": "r1",
-    }
-    _ai(k, "kp_iq2", _Script([render_call("inquiry_answer", {"answer": "..."})]))
-    assert await _call(k, "kp_iq2", q) == {
-        "error": (
-            "that is the PLACEHOLDER, not an answer — `answer` came back as '...'. "
-            "Say what you actually concluded."
-        ),
-        "reason": "bad_arg",
-        "arg": "answer",
-        "request_id": "r1",
+        "options": ["a", "b"],
+        "action": {"type": "deploy"},
     }
     _ai(k, "kp_iq3", _Script([render_call("inquiry_answer", {"answer": "ship it"})]))
-    opts = {**q, "options": ["a", "b"], "action": {"type": "deploy"}}
-    assert await _call(k, "kp_iq3", opts) == {"answer": "ship it", "request_id": "r1"}
+    got = await _call(k, "kp_iq3", q)
+    assert got["accepted"] is True and got["request_id"] == "r1", got
+    pid = got["re"]
+    for _ in range(100):
+        if fake_providers["kp_iq3"].seen:
+            break
+        await asyncio.sleep(0.02)
     first_turn = fake_providers["kp_iq3"].seen[0]
-    last_user = [m for m in first_turn if m["role"] == "user"][-1]
-    assert last_user["content"].endswith(
+    last_user = [m for m in first_turn if m["role"] == "user"][-1]["content"]
+    assert last_user.startswith(f"[inquiry from the operator · re {pid} — "), last_user
+    assert last_user.endswith(
         'ship?\n\nOptions: a, b\n\nProposed action: {"type": "deploy"}'
     ), last_user
 

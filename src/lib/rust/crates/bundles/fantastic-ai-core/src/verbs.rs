@@ -14,7 +14,7 @@ use crate::provider::Provider;
 use crate::state::{state_for, status_snapshot, CurrentEntry, QueuedEntry};
 use crate::stream_parts::{cut_marker, Part, PartKind};
 use fantastic_bundle::{
-    py_float_repr, py_int_or, py_json_dumps, py_repr, py_repr_value, py_str, py_strip, py_truthy,
+    py_float_repr, py_int_or, py_json_dumps, py_repr, py_str, py_strip, py_truthy,
 };
 use fantastic_kernel::bundle::BundleError;
 use fantastic_kernel::call_guard::{check_call_stack, CallStackRefusal};
@@ -23,9 +23,9 @@ use serde_json::{json, Map, Value};
 use std::sync::Arc;
 use std::time::Duration;
 
-/// What every backend's `reflect` says INSTEAD of an `interrupt` verb — the
-/// substrate's universal cancel, taught in one line so a caller (or an LLM
-/// reading the reflect) needs no bundle-private knowledge to stop a turn.
+/// What every backend's docs say INSTEAD of an `interrupt` verb — the
+/// substrate's universal cancel; served by `docs` (tier detailed). Python
+/// `ai_core.CANCEL`.
 pub const CANCEL_DOC: &str = "No `interrupt` verb — an in-flight `send` IS a kernel task. \
 Kill it with the substrate's universal system verbs: send 'kernel' <type>ps</type> for the live \
 task table, find the row {agent:'<this agent>', verb:'send'}, then send 'kernel' \
@@ -34,23 +34,23 @@ reason='cancelled') + done, its HTTP stream and FIFO lock are released, and the 
 `send` resolves to {cancelled:true}. Cancel kills the task's whole SUBTREE, so any work the turn \
 spawned dies with it.";
 
-/// Python's `reflect.verbs` for every ai_core backend — the FIRST LINE of each
-/// verb's docstring, in `build`'s order, verbatim. ONE map, every backend: the
-/// wording never differed per provider in python, and a backend that wrote its
-/// own copy taught the model a surface that did not exist.
+/// HOW TO CALL every ai_core backend — python's `VERBS` docstrings, whole, in
+/// `build`'s order, verbatim; served by the kernel's `docs` verb (oneliners: each
+/// doc's signature). ONE map, every backend: the wording never differed per
+/// provider in python.
 #[must_use]
-pub fn reflect_verbs() -> Value {
+pub fn verb_docs() -> Value {
     json!({
         "reflect": "Identity + model + endpoint + generating flag + context posture. No args.",
-        "send": "args: text:str (req), client_id:str? (default 'cli'). Streams tokens to ONLY the caller — cli (stdout) for client_id='cli', or the browser tab whose WS is subscribed and filters by client_id otherwise. Persists per-client chat.json. Per-backend FIFO lock: concurrent callers serialize. If the lock is held when this call arrives, emits a `status` event (phase='queued', detail.ahead) for the caller; first `token` (or `status` of phase != queued) for the same client_id implicitly unqueues. Optional system_prompt:str REPLACES the auto-built prompt (caller-supplied role/context — read it from a state agent yourself, no yaml coupling here). The conversation is always this agent's own (its memory store). _call_stack is reserved for the recursion guard (cycle/over-depth refusal before the lock). Optional send_to:str hands this pass's TEXT to that agent id as a fresh turn, once. The model routes its own work with `<reply_to>` inside its calls. Returns {response, final, client_id}.",
+        "send": "args: text:str (req), client_id:str? (default 'cli'), system_prompt:str?, send_to:str?. Runs one turn on `text` and streams tokens to ONLY the caller — cli (stdout) for client_id='cli', else the browser tab whose WS filters by client_id. The conversation is this agent's own (its memory store). A FIFO lock serializes callers: one that waits gets a `status` event (phase='queued', detail.ahead), and its first `token` (or non-queued `status`) unqueues it. `system_prompt` REPLACES the built prompt for this delivery. `send_to` hands this pass's TEXT to that agent id as a fresh turn, once. `_call_stack` is reserved for the recursion guard. The model routes its own work with `<reply_to>` inside its calls. Returns {response, final, client_id}.",
         "stop": "args: stream_id:str? (a part of the generation in flight). STOP this agent's in-flight generation — how a receiver of its streaming parts stops it: the provider stream closes, open parts abort, the turn keeps a `[stopped by <you>]` marker. Returns {stopped:bool}.",
         "rows": "args: after:int? (a row id — the page starts after it), limit:int?. A VIEW of this agent's conversation exactly as the agent HOLDS it in memory — its loaded head, in the order it lived it; no store read, no transform, so what a UI draws is what the agent has. Before the agent has loaded its head (a fresh boot, before its first turn) it holds nothing: {rows:[], loaded:false}. Returns {rows, next, total, loaded}.",
-        "inquiry": "args: text:str (req), kind:str? (text|single|multi|confirm), options:list?, action:dict?, request_id:str?, client_id:str?. Sends THIS agent an inquiry and returns {answer, request_id} — the answer is the one it emits with the `answer` tool. The same verb a human answers; a sender writes one call for either.",
+        "inquiry": "args: text:str (req), kind:str? (text|single|multi|confirm), options:list?, action:dict?, request_id:str?. Sends THIS agent an inquiry: accepted at once ({accepted, re, request_id}); the answer it later gives with `inquiry_answer` — or the news that it ended without one — reaches the asker as a message under the inquiry's pid. The same verb a human answers; a sender writes one call for either.",
         "history": "args: fold:int? (a fold or clear id — list ITS members instead), limit:int? (default: as many as fit inline), after:int? (a row id — page forward from it). The conversation at DIGEST resolution — {id, parent, kind, role, head, bytes} per row, oldest first, paged. With `fold`, that fold's title + summary and its members (one level down; a member that is itself a fold opens the same way). A row's text is behind `recall` / `grep`. Returns {rows, next, total, fold?}.",
         "status": "args: client_id:str? — when provided, returns a privacy-filtered snapshot: full text only for this client's queue entries / current generation; other clients collapse to `others_pending` (an integer count). Without client_id the snapshot redacts text everywhere. Used by chat UIs to rebuild queued/in-flight state on page reload (and for headless polling). Returns {source, client_id, generating, current:{phase, send_id, started_at, elapsed, is_mine, text?, text_so_far?, last_tool?}|null, mine_pending:[{send_id,text,queued_at}], others_pending:int}.",
-        "context_status": "No args. The context-budget posture + the last overflow projection + the model's",
-        "recall": "args: query?:str (case-insensitive substring over the serialized turn — matches tool args/replies too), limit?:int (default 20, max 100), before?:int (store index — page backward). Pages turns back from the DURABLE store (the FULL conversation, never trimmed — so anything compaction dropped is one call away). Read-only. A page always fits INLINE (the cap); trimmed from the oldest end when it would not, with the index to continue from. Returns {messages:[{index,role,content}], total, truncated, note?}.",
-        "grep": "args: query:str (req — case-insensitive substring), ids:list[int]? (row ids / pids / fold ids to search; a fold id searches its members), limit:int? (matches, default: as many as fit inline), width:int? (chars of each matched line returned, from its start; default 200 — raise it when the value you need sits deep in a long line). Finds the LINE that mentions something ANYWHERE in your memory — every row you ever wrote or received (behind every clear, inside every fold), and the reply bodies still held in memory this run. Returns {matches:[{id, line, text}], total, truncated}.",
+        "context_status": "No args. The context-budget posture + the last overflow projection + the model's\nderived reaction to it. Returns {context_window, output_reserve, budget, strategy,\nlast_projection:{fired, strategy?, kept_messages?, dropped_messages?, summarized?,\ntoo_small?}|null, last_reaction:{recalled, persisted, recall_count}|null}.",
+        "recall": "args: query:str? (substring of a serialized turn, tool args and replies included), limit:int? (default 20, max 100), before:int? (store index — page backward). Pages turns back from the DURABLE store — the FULL conversation, so anything compaction dropped is one call away. Read-only. A page always fits INLINE; trimmed from the oldest end when it would not, with the index to continue from. Returns {messages:[{index,role,content}], total, truncated, note?}.",
+        "grep": "args: query:str (req — case-insensitive substring), ids:list[int]? (row, pid or fold ids to search), limit:int? (default: as many as fit inline), width:int? (chars per matched line, default 200). Finds the LINE that mentions something ANYWHERE in your memory — every row you ever wrote or received (behind every clear, inside every fold; a fold id searches its members), and the reply bodies still held this run. Raise `width` when the value sits deep in a long line. Returns {matches:[{id, line, text}], total, truncated}.",
         "context_recall": "args: dry:bool? (mechanical fit only — no model call). Rebuild this agent's VIEW from its store: fit the head to the budget at digest resolution, then ask the model which rows it wants in full, persist the id list, log the decision as a row, and drop RAM scratch. Runs on boot, after a fold batch, or on request. Returns {kept, expanded, dropped, budget, why, degraded}.",
         "context_clear": "args: why:str? — start a NEW THREAD on the same store: a CLEAR-FOLD — one row whose members are every row since the previous clear (no summary) — and the model's view begins at its `[cleared <id> · N rows]` line. Nothing is deleted or forgotten: grep, recall and `history {fold: <id>}` reach every member. Empties the persisted view and drops RAM scratch (projection, fold counters, pending recall). Returns {cleared:id, rows:N}.",
         "watch": "args: body:bool? (default false), watcher:str? (operator only — an inbox id to deliver to). Announce every row this agent appends to YOUR inbox as {type:'row', source, row:{id, kind, role, bytes}} — content-free; with body:true the row's `content` too. Needs a registered inbox. Returns {watching:true, watcher, body}.",
@@ -59,25 +59,31 @@ pub fn reflect_verbs() -> Value {
     })
 }
 
-/// The events every ai_core backend announces — python's `reflect.emits`,
-/// verbatim. `done` is NOT one of them: the phase machine's `done` rides on
-/// `status`.
+/// The events every ai_core backend announces — python's `ai_core.EMITS`,
+/// verbatim, served by `docs` (tier detailed). `done` is NOT one of them: the
+/// phase machine's `done` rides on `status`.
 #[must_use]
-pub fn reflect_emits() -> Value {
+pub fn emits() -> Value {
     json!({
-        "token": "{type:'token', text:str, source, client_id} — streaming chunk. Routed ONLY to the caller: cli (stdout) when client_id='cli', else this agent's own inbox (browser filters by client_id).",
-        "status": "{type:'status', source, client_id, ts, phase:'queued'|'thinking'|'streaming'|'done', detail:{send_id, started_at, queue_depth, ...phase_specific}} — single channel for phase transitions. detail.reason='ok'|'cancelled'|'timeout'|'error'|'awaiting'|'dead_turn' (only thinking — discarded, rerolled)|'gave_up' (MAX_SILENT_TURNS turns in a row with no call; detail.error says so) for done. detail.ahead for queued.",
-        "context": "{type:'context', source, client_id, ts, phase:'compacted'|'too_small', detail:{...}} — the context protocol's push half. compacted: detail={strategy, dropped_messages, kept_messages, summarized} when the live view was compacted to fit the window. too_small: detail={context_window, system_tokens, hint} when even the system block + one turn won't fit (the model is NOT called — a failfast). Pull counterpart: the `context_status` verb.",
+        "token": "{type:'token', text:str, source, client_id} — streaming chunk, routed ONLY to the caller: cli (stdout) when client_id='cli', else this agent's own inbox (a browser filters by client_id).",
+        "status": "{type:'status', source, client_id, ts, phase:'queued'|'thinking'|'streaming'|'done', detail:{send_id, started_at, queue_depth, ...}} — the one channel for phase transitions. On done, detail.reason='ok'|'cancelled'|'timeout'|'error'|'awaiting'|'dead_turn' (only thinking — discarded, rerolled)|'gave_up' (MAX_SILENT_TURNS call-less turns in a row; detail.error says so). On queued, detail.ahead.",
+        "context": "{type:'context', source, client_id, ts, phase:'compacted'|'too_small', detail} — compacted: {strategy, dropped_messages, kept_messages, summarized}, the view was cut to fit the window; too_small: {context_window, system_tokens, hint}, even the system block + one turn won't fit and the model is NOT called. Pull counterpart: `context_status`.",
     })
 }
 
-/// python's `reflect.concurrency` line, verbatim.
-pub const CONCURRENCY_DOC: &str = "Per-backend FIFO lock around `send`: one generation at a time. Other callers wait (and receive a `queued` event so their UI can show it). `reflect`/`history`/`status` skip the lock and stay snappy.";
+/// python's `ai_core.NOTES`, served by `docs` (tier detailed).
+#[must_use]
+pub fn notes() -> Value {
+    json!({
+        "concurrency": "A FIFO lock around `send`: one generation at a time; other callers wait and get a `queued` status. `reflect`/`history`/`status` skip the lock.",
+    })
+}
+
 /// The reflect body EVERY ai_core backend answers with — python's
 /// `_make_reflect`, key for key and in its order: `id, sentence, model,
-/// endpoint, context_window, context_strategy, memory_store_id, verbs,
-/// generating, cancel, emits, concurrency`. A backend adds only its own `reflect_extra` keys, which
-/// land after `concurrency` exactly as python's `out.update(extra)` does.
+/// endpoint, context_window, context_strategy, memory_store_id, generating`. A
+/// backend adds only its own `reflect_extra` keys, which land after `generating`
+/// exactly as python's `out.update(extra)` does. No verb docs (owner, 2026-10-05).
 ///
 /// `model`/`endpoint` are the RECORD's values, raw (absent ⇒ `null`: nothing is
 /// guessed); `context_strategy` takes its default only when ABSENT — a `null`
@@ -117,16 +123,12 @@ pub fn reflect_base(
         "memory_store_id".to_string(),
         meta.get("memory_store_id").cloned().unwrap_or(Value::Null),
     );
-    out.insert("verbs".to_string(), reflect_verbs());
     // A generation IS its kernel dispatch task — the backend holds no task
     // handle of its own. An in-flight entry present ⇔ generating.
     out.insert(
         "generating".to_string(),
         json!(crate::state::is_generating(agent_id)),
     );
-    out.insert("cancel".to_string(), json!(CANCEL_DOC));
-    out.insert("emits".to_string(), reflect_emits());
-    out.insert("concurrency".to_string(), json!(CONCURRENCY_DOC));
     out
 }
 
@@ -752,6 +754,8 @@ pub async fn send(
         Some(Value::Number(n)) => n.to_string(),
         _ => String::new(),
     };
+    // AN ANSWER UNDER AN INQUIRY'S PID settles what this agent was owed.
+    crate::route::settle_owed(agent_id.as_str(), &text);
     // A MESSAGE FROM ANOTHER AGENT OPENS WITH WHO SENT IT — python's
     // `[from <sender> · to a, b · msg N · re N]` line. Without it a peer's
     // inquiry arrives as bare prose and the receiver cannot tell it is being
@@ -1149,6 +1153,18 @@ impl std::error::Error for PythonRaise {}
 
 // ── inquiry ─────────────────────────────────────────────────────────────────
 
+/// What an inquiry carries ON ITSELF (owner, 2026-10-06): that it IS one and how
+/// it is answered. Delivered bare as `[from ai]` + the question, the reviewer in
+/// peer_review (rust, twice) did the work, wrote `REJECT — timeout = 300` as prose
+/// and ended with `done`. Python `_INQUIRY_HEAD`, verbatim (who asked, the pid).
+pub fn inquiry_head(asker: &str, pid: &str) -> String {
+    format!(
+        "[inquiry from {asker} · re {pid} — do any work it needs, then answer with \
+         <call name=\"inquiry_answer\"><answer>…</answer></call> before done: nothing \
+         else counts as your answer]"
+    )
+}
+
 /// Open an `inquiry`: validate it and render it as the `send` payload that runs.
 ///
 /// ONE INQUIRY VERB, WHOEVER RECEIVES IT. A person answers `inquiry` from a record and
@@ -1170,7 +1186,12 @@ pub fn inquiry_open(payload: &Value) -> Result<Value, Value> {
     // The inquiry IS the turn. `options`/`kind` ride in the text because a model
     // reads prose, not a schema; `action` is carried verbatim so an answering
     // agent can see what it is being asked to endorse.
-    let mut text = q.to_string();
+    let asker = fantastic_kernel::current_origin();
+    let pid = fantastic_kernel::current_task().map_or_else(|| "-".to_string(), |t| t.0.to_string());
+    let mut text = format!(
+        "{}\n{q}",
+        inquiry_head(asker.as_ref().map_or("the operator", |a| a.as_str()), &pid)
+    );
     if let Some(opts) = payload.get("options").and_then(Value::as_array) {
         if !opts.is_empty() {
             // python `", ".join(str(o) for o in opts)`: `True` reads `True`, a
@@ -1194,65 +1215,57 @@ pub fn inquiry_open(payload: &Value) -> Result<Value, Value> {
     Ok(send_payload)
 }
 
-/// Close an `inquiry`: read the answer the model DECIDED on out of its turn.
-///
-/// Taking the turn's prose would make every stray sentence an answer and would
-/// put the runtime back in the business of reading minds off text.
-/// `inquiry_answer` is a control call in the same class as `done`: the model
-/// says what its answer IS. A turn that never emits one did not answer, and the
-/// asker is told so rather than handed a paragraph to parse.
-pub fn inquiry_close(out: Value, payload: &Value) -> Value {
-    if out.get("error").is_some() {
-        return out;
-    }
-    let text = out.get("response").and_then(Value::as_str).unwrap_or("");
-    let said = crate::tool_parse::extract_tool_calls(text)
-        .into_iter()
-        .rfind(|c| c.name == "inquiry_answer");
-    match said {
-        None => json!({
-            "error": "you were sent an inquiry and did not answer it: emit \
-                      <call name=\"inquiry_answer\"><answer>what you concluded\
-                      </answer></call>",
-            "reason": "unhandled",
-            "request_id": payload.get("request_id"),
-        }),
-        Some(c) => {
-            // THE RAW VALUE, python `args.get("answer")`: a non-string is a
-            // refusal in its own right, and the refusal RENDERS what came back
-            // with python's `repr` — `42`, `None`, `'...'`. Rust coerced a
-            // non-string to `""` and printed rust's `Debug`, so a model that
-            // answered `42` was told its answer came back as `""`.
-            let answer = c.arguments.get("answer").cloned().unwrap_or(Value::Null);
-            // THE PLACEHOLDER IS NOT AN ANSWER. The refusal above SHOWS the
-            // shape, and a model that could not answer once will copy that
-            // example back verbatim on the retry — measured 2026-09-04 on
-            // peer_review, where "..." was written into review.md as the verdict
-            // and scored as a reviewer that had judged. Same trap as
-            // `send_binary`'s literal "@body", and it earns the same refusal.
-            //
-            // `strip()` then `strip(".")`: python's whitespace set first, then
-            // dots off BOTH ends — so `'. x'` is a real answer and `'...'` is not.
-            let said = answer
-                .as_str()
-                .filter(|s| !py_strip(s).trim_matches('.').is_empty());
-            match said {
-                None => json!({
-                    "error": format!(
-                        "that is the PLACEHOLDER, not an answer — `answer` came back as {}. Say what you actually concluded.",
-                        py_repr_value(&answer)
-                    ),
-                    "reason": "bad_arg",
-                    "arg": "answer",
-                    "request_id": payload.get("request_id"),
-                }),
-                Some(a) => json!({
-                    "answer": a,
-                    "request_id": payload.get("request_id"),
-                }),
-            }
-        }
-    }
+/// Accept an `inquiry` (owner, 2026-10-06: FULLY ASYNC): register it as open on
+/// its own chain, run that chain detached, and answer at once
+/// `{accepted, re, request_id}`. The answer the model gives with `inquiry_answer`
+/// in ANY turn of that chain — or the news that it ended without one — reaches
+/// the asker later as a message under this call's pid (`crate::route`). It used to
+/// be read off this agent's FIRST turn only, so a reviewer that read the spec and
+/// ran `git diff` first was told it had not answered (measured 2026-10-06,
+/// peer_review:rust). Python `_inquiry`.
+pub fn inquiry_accept(
+    agent_id: &AgentId,
+    payload: &Value,
+    sp: &Value,
+    kernel: &Arc<Kernel>,
+) -> Value {
+    let asker = fantastic_kernel::current_origin().map(|a| a.as_str().to_string());
+    let task = fantastic_kernel::current_task();
+    let pid = task.map_or_else(|| "-".to_string(), |t| t.0.to_string());
+    let client = safe_client(&format!("inquiry-{pid}"));
+    let reply_client = safe_client(
+        payload
+            .get("reply_client_id")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(DEFAULT_CLIENT_ID),
+    );
+    let request_id = payload.get("request_id").cloned().unwrap_or(Value::Null);
+    crate::route::open_inquiries()
+        .lock()
+        .expect("open inquiries poisoned")
+        .insert(
+            (agent_id.as_str().to_string(), client.clone()),
+            crate::route::OpenInquiry {
+                asker,
+                pid,
+                reply_client,
+                request_id: request_id.clone(),
+            },
+        );
+    let text = sp.get("text").and_then(Value::as_str).unwrap_or("");
+    crate::route::deliver_soon(
+        kernel,
+        agent_id.as_str(),
+        text,
+        &client,
+        payload.get("system_prompt").and_then(Value::as_str),
+    );
+    json!({
+        "accepted": true,
+        "re": task.map_or(Value::Null, |t| json!(t.0)),
+        "request_id": request_id,
+    })
 }
 
 // ── boot, the row event, context by grant ───────────────────────────────────
@@ -1371,10 +1384,7 @@ where
         // same call either way.
         "inquiry" => match inquiry_open(payload) {
             Err(refusal) => refusal,
-            Ok(sp) => {
-                let out = send(provider_for(&client_id), agent_id, &sp, kernel, cfg).await?;
-                inquiry_close(out, payload)
-            }
+            Ok(sp) => inquiry_accept(agent_id, payload, &sp, kernel),
         },
         "history" => history(agent_id, payload, kernel, cfg.model_window).await?,
         "status" => status(agent_id, payload),

@@ -219,7 +219,8 @@ async fn reflect_advertises_the_allowlist_not_interpreters() {
     assert_eq!(r["running"], 0);
     // THE GATE is advertised.
     assert_eq!(r["allowed"], json!(["ls( .*)?"]));
-    assert!(r["wire"]
+    assert!(r.get("wire").is_none() && r.get("verbs").is_none(), "{r}");
+    assert!(ExecBridgeBundle.notes_doc().unwrap()["wire"]
         .as_str()
         .unwrap_or("")
         .contains("FANTASTIC_CTRL_FD"));
@@ -232,7 +233,10 @@ async fn reflect_advertises_the_allowlist_not_interpreters() {
         "stop",
         "boot",
     ] {
-        assert!(r["verbs"][v].is_string(), "verb {v} missing from reflect");
+        assert!(
+            ExecBridgeBundle.verb_docs()[v].is_string(),
+            "verb {v} missing from docs"
+        );
     }
 }
 
@@ -1776,20 +1780,23 @@ fn readme_matches_python_source() {
 
 /// A4.2 — reflect's prose blocks are python's, verbatim.
 #[tokio::test]
-async fn reflect_texts_match_python_verbatim() {
-    let tmp = TempDir::new().unwrap();
-    let (kernel, a) = mk_kernel(&tmp).await;
-    let r = reflect_reply(&a, &kernel);
+async fn docs_texts_match_python_verbatim() {
+    let notes = ExecBridgeBundle.notes_doc().unwrap();
     assert_eq!(
-        r["authoring"],
-        "A general-purpose command runner: <type>start</type> <command>…</command> <args><item>…</item></args>, gated by the `allowed` regexes on the full command line."
+        notes
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["wire", "inbox", "tasks"]
     );
     assert_eq!(
-        r["inbox"],
-        "Any verb NOT listed in `verbs` is MAIL for the running program, delivered to its on_message and ACKed {queued:true}. With no live job it is an error — a script that only defines something exits before its first message arrives."
+        notes["inbox"],
+        "Any verb this bundle does not answer is MAIL for the running program, delivered to its on_message and ACKed {queued:true}. With no live job it is refused — a script that only defines something exits before its first message arrives."
     );
     assert_eq!(
-        r["emits"]["progress"],
+        ExecBridgeBundle.emits_doc().unwrap()["progress"],
         "{type:'progress', job_id, n, line, stream} — one per output line"
     );
 }
@@ -1797,11 +1804,9 @@ async fn reflect_texts_match_python_verbatim() {
 /// A4.17 — `verbs` is python's `VERBS` order, each entry the FIRST LINE of that
 /// verb's docstring. Several are truncated mid-sentence; that is the python text.
 #[tokio::test]
-async fn reflect_verbs_are_python_first_docstring_lines() {
-    let tmp = TempDir::new().unwrap();
-    let (kernel, a) = mk_kernel(&tmp).await;
-    let r = reflect_reply(&a, &kernel);
-    let verbs = r["verbs"].as_object().expect("verbs object");
+async fn verb_docs_are_python_first_docstring_lines() {
+    let docs = ExecBridgeBundle.verb_docs();
+    let verbs = docs.as_object().expect("verbs object");
     assert_eq!(
         verbs.keys().map(String::as_str).collect::<Vec<_>>(),
         [
@@ -1822,7 +1827,7 @@ async fn reflect_verbs_are_python_first_docstring_lines() {
     );
     assert_eq!(
         verbs["start"],
-        "args: command:str (req — on a PTY start, absent = the child's $SHELL), args:list[str]? (argv, default []), pty:{cols,rows}? (run on a terminal). The FULL line (command + args) must fullmatch one of the `allowed` regexes, or be the shell line the record's `shell` permits."
+        "args: command:str (req — the executable ALONE, e.g. `grep`; on a PTY start, absent = the child's $SHELL), args:list[str]? (its arguments, one item each — `<args><item>-rn</item><item>x</item></args>`), pty:{cols,rows}? (run on a terminal). The FULL line (command + args) must fullmatch one of the `allowed` regexes, or be the shell line the record's `shell` permits."
     );
     assert_eq!(
         verbs["clear"],
@@ -2430,6 +2435,38 @@ async fn spawn_failure_text_matches_python() {
     assert_eq!(r["reason"], "transport_error");
 }
 
+/// A MISSING `cwd` is named, not the command — CPython's `noexec:chdir` text.
+/// Measured 2026-10-06 (rust subai): `No such file or directory: 'python3'` for a
+/// leg whose cwd did not exist sent the model hunting an interpreter for twenty
+/// turns.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_missing_cwd_is_named_not_the_command() {
+    let tmp = TempDir::new().unwrap();
+    let gone = tmp.path().join("no_such_dir");
+    let mut extra = Map::new();
+    extra.insert("ingress_rule".to_string(), json!("allow_all_ingress"));
+    extra.insert("allowed".to_string(), json!([".*"]));
+    extra.insert("cwd".to_string(), json!(gone.to_string_lossy()));
+    let (kernel, a) = mk_kernel_with(&tmp, extra).await;
+    let r = kernel
+        .send(vec![Item::new(
+            a.clone(),
+            json!({"type": "start", "command": "/bin/echo", "args": ["x"]}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(
+        r["error"],
+        json!(format!(
+            "exec_bridge: spawn failed: [Errno 2] No such file or directory: '{}'",
+            gone.to_string_lossy()
+        )),
+        "{r}"
+    );
+    assert_eq!(r["reason"], "transport_error");
+}
+
 /// A4.23 — the two control vars are written OVER the record's `env`, so a program
 /// cannot claim another agent's identity or point the control fd somewhere else.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2705,7 +2742,7 @@ async fn unknown_type_wire_shape_is_byte_exact() {
         .result;
     assert_eq!(
         serde_json::to_string(&r).unwrap(),
-        r#"{"error":"exec_bridge: unknown type 'frob' (no running job to receive it)"}"#
+        r#"{"error":"exec_bridge: unknown type 'frob' (no running job to receive it)","reason":"unhandled","verb":"frob"}"#
     );
     let r = fantastic_kernel::bundle::Bundle::handle(&ExecBridgeBundle, &a, &json!({}), &kernel)
         .await
@@ -2713,7 +2750,7 @@ async fn unknown_type_wire_shape_is_byte_exact() {
         .unwrap();
     assert_eq!(
         serde_json::to_string(&r).unwrap(),
-        r#"{"error":"exec_bridge: unknown type None (no running job to receive it)"}"#
+        r#"{"error":"exec_bridge: unknown type None (no running job to receive it)","reason":"unhandled","verb":null}"#
     );
 }
 

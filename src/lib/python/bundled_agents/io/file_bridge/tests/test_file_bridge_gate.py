@@ -56,7 +56,13 @@ async def test_sealed_bridge_still_reflects(seeded_kernel):
         0
     ]["result"]
     assert r["sealed"] is True
-    assert "verbs" in r  # discovery works on a sealed edge
+    assert r["id"] == fid  # discovery works on a sealed edge
+    d = (
+        await seeded_kernel.send(
+            [{"target": "kernel", "payload": {"type": "docs", "of": fid}}]
+        )
+    )[0]["result"]
+    assert "read" in d["verbs"]  # and so do its docs
 
 
 # ─── (b) open leg works ─────────────────────────────────────────

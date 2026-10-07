@@ -12,10 +12,9 @@ inferred from who sent the call. `delete_agent` cascades depth-first. On disk ea
 root record's `children_dir`, default `agents`) — set `host_agents` here /
 `web_agents` on a `web_loader` for a self-describing layout.
 
-`create_agent` / `update_agent` / `delete_agent` are KERNEL verbs: they
-appear in no agent's `verbs` map, every reflect advertises them as
-`kernel_verbs`, and only the ROOT answers them — send them to `kernel`. The
-agent you name is the OPERAND, not the actor. A record with
+`create_agent` / `update_agent` / `delete_agent` are KERNEL verbs (`docs
+of=kernel` lists them), and only the ROOT answers them — send them to `kernel`.
+The agent you name is the OPERAND, not the actor. A record with
 `delete_lock:true` refuses delete (`{error, reason:'locked', id}`); clear it
 via `update_agent`.
 
@@ -24,7 +23,7 @@ via `update_agent`.
 An agent is a NODE; a **task** is one in-flight **dispatch** — the running
 thing. Tasks are the kernel's process table, and they form a TREE: a `send`
 issued inside a handler is a CHILD of that handler's task. Two more system
-verbs (also in no `verbs` map — send them anywhere):
+verbs (send them to `kernel`):
 
     send `kernel` <type>ps</type>
       -> {tasks:[{id, agent, parent, verb, started_at}, ...]}

@@ -62,6 +62,7 @@ from helpers import (
     distinct_calls,
     verdict,
 )
+from helpers.ai import TICK, ChainEnd
 from helpers.kernel import open_kernel, home
 
 CTX = int(os.environ.get("CTX", "262144"))
@@ -106,12 +107,19 @@ EXECUTOR_LEG = "runner"
 
 TASK = (
     "Your goal is to build something durable in this kernel that totals a directory "
-    "of sensor readings and remembers the total. This kernel has an agent holding "
-    "that directory — one number per file — and a memory agent for durable state. "
+    "of sensor readings and remembers the total. "
+    # NAMED, not described. "a memory agent for durable state" meant `totals`, but the
+    # kernel also holds the AI's own conversation store, a RAM store whose id is
+    # `memory`. Measured 2026-10-06 (rust, captured thinking): turns 2-8 each spent
+    # 3-7k tokens on how a spawned program could write into that RAM store, which
+    # neither `rest` nor the runner may call. Naming the two agents dictates no path,
+    # format or mechanism.
+    "`readings` holds that directory — one number per file — and `totals` is the "
+    "file store for durable results. "
     "DONE means all three: (1) what you build PERSISTS in this kernel — a program "
     "that stays and can be run again, not a one-off action you performed yourself by "
     "hand; (2) the correct total is stored "
-    "in the memory agent; (3) when a new reading file appears later and the thing you "
+    "in `totals`; (3) when a new reading file appears later and the thing you "
     "built is run again, the stored total updates to include it. Work out how to "
     "build that here, build it, make sure it really runs, and tell me what you made. "
     # WHO CHECKS. The scorer re-runs the artifact and reads the total as the test
@@ -624,8 +632,9 @@ async def run(
     # result forever still stops. MAX_TURNS remains as a far backstop.
     stale = 0
     seen_writes = -1
+    ender = ChainEnd(root, aid)
     while idle < IDLE:
-        await asyncio.sleep(2.0)
+        await asyncio.sleep(TICK)
         writes = _progress_count(transcript)
         if writes != seen_writes:
             seen_writes, stale = writes, 0
@@ -633,31 +642,13 @@ async def run(
             stale += 1
         # CHAIN DEATH. The tripwires examine each TURN, so a model that simply
         # stops producing turns evades every one of them and the run sits out the
-        # full IDLE before scoring. Measured 2026-08-24: test 5 ended at turn 6 and
-        # waited 240s to say so. If nothing of the AI's is in flight and no new
-        # turn has landed, the chain is over — say so now rather than waiting.
-        if idle >= 30 and spy.n == last and last > 0:
-            _rows = (
-                (
-                    (
-                        await root.send(
-                            [{"target": "kernel", "payload": {"type": "ps"}}]
-                        )
-                    )[0]["result"]
-                ).get("tasks")
-                or []
-            )
-            _live = [
-                t for t in _rows if t.get("agent") == aid and t.get("verb") != "ps"
-            ]
-            if not _live:
-                # DUMP THE TABLE. "no turn and nothing in flight" is a conclusion;
-                # the rows are the evidence. Without them a chain that ended and a
-                # detector that fired too early look identical from the transcript.
-                capped = (
-                    f"CHAIN ENDED — no turn and nothing in flight after {idle:.0f}s"
-                    f" · ps={[(t.get('agent'), t.get('verb')) for t in _rows]}"
-                )
+        # full IDLE before scoring. The shared check (`helpers.ai.ChainEnd`) ends
+        # the run 30 s after the last turn with nothing of the AI's in flight, or
+        # DONE_QUIET after a `done` call with nothing in flight anywhere.
+        if spy.n == last and last > 0:
+            _cap, _busy = await ender.check(spy.transcript, idle)
+            if _cap:
+                capped = _cap
         if runaway:
             # A turn blew the per-turn bound: the model is looping INSIDE one pass
             # and no turn-counting cap can see it.
@@ -702,7 +693,7 @@ async def run(
         if spy.n != last:
             last, idle = spy.n, 0.0
         else:
-            idle += 2.0
+            idle += TICK
         if idle >= IDLE:
             # AN IN-FLIGHT GENERATION IS NOT IDLE — see live_subai.py (measured
             # 2026-08-25: the loop walked away mid-generation and scored FAIL).

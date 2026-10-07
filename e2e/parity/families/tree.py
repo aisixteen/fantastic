@@ -163,8 +163,7 @@ def run(ctx) -> None:
 
         rec.json("refusal_unknown_verb_file", call(k, "readings", {"type": "nope"}))
         rec.json("refusal_missing_arg_file", call(k, "readings", {"type": "rename"}))
-        # minimal model (owner 2026-10-04): an id naming no agent is not the leg's
-        # child, so the mutator refusal answers before the unknown-agent one.
+        # an id naming no agent: the verb's own unknown-agent refusal.
         rec.json("refusal_unknown_agent", call(k, "kernel", {"type": "delete_agent", "id": "ghost"}))
         rec.json("refusal_no_type", call(k, "readings", {}))
     finally:

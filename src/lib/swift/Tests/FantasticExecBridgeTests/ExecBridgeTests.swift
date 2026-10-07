@@ -231,10 +231,12 @@
             #expect(r["id"].asString == a.value)
             #expect(r["running"].asInt == 0)
             #expect(r["allowed"].asArray?.compactMap { $0.asString } == ["ls( .*)?"])
-            #expect(r["wire"].asString?.contains("FANTASTIC_CTRL_FD") == true)
-            let verbs = try #require(r["verbs"].asObject)
+            #expect(r.asObject?["wire"] == nil && r.asObject?["verbs"] == nil)
+            let d = await kernel.send([Item(AgentId("kernel"), .object(["type": .string("docs"), "of": .string(a.value), "tier": .string("detailed")]))])[0].result
+            #expect(d["notes"]["wire"].asString?.contains("FANTASTIC_CTRL_FD") == true)
+            let verbs = try #require(d["verbs"].asObject)
             for v in ["reflect", "start", "status", "clear", "interrupt", "stop", "boot"] {
-                #expect(verbs[v] != nil, "verb \(v) missing from reflect")
+                #expect(verbs[v] != nil, "verb \(v) missing from docs")
             }
         }
 
@@ -1162,20 +1164,17 @@
         @Test func reflectTextsMatchPythonVerbatim() async throws {
             let kernel = freshKernel()
             let a = await createPy(kernel, id: "texts")
-            let r = await kernel.send([Item(a, .object(["type": .string("reflect")]))])[0].result
-            #expect(
-                r["authoring"].asString
-                    == "A general-purpose command runner: <type>start</type> <command>…</command> <args><item>…</item></args>, gated by the `allowed` regexes on the full command line.",
-                "\(r["authoring"].serialize())")
-            let wire = r["wire"].asString ?? ""
+            let r = await kernel.send([Item(AgentId("kernel"), .object(["type": .string("docs"), "of": .string(a.value), "tier": .string("detailed")]))])[0].result
+            #expect(r["notes"].asObject.map { Array($0.keys) } == ["wire", "inbox", "tasks"])
+            let wire = r["notes"]["wire"].asString ?? ""
             #expect(
                 wire.contains(
-                    "{op:'reply', rid:<same id>, data} — the fd is not one-way. It is not inline, though: read frames in a loop and skip any whose rid isn't yours (event/inbox frames can arrive first) until you see your reply."
+                    "{op:'reply', rid:<same id>, data}. Read frames in a loop and skip any whose rid isn't yours (event/inbox frames can arrive first)."
                 ), "\(wire)")
             #expect(
-                r["inbox"].asString
-                    == "Any verb NOT listed in `verbs` is MAIL for the running program, delivered to its on_message and ACKed {queued:true}. With no live job it is an error — a script that only defines something exits before its first message arrives.",
-                "\(r["inbox"].serialize())")
+                r["notes"]["inbox"].asString
+                    == "Any verb this bundle does not answer is MAIL for the running program, delivered to its on_message and ACKed {queued:true}. With no live job it is refused — a script that only defines something exits before its first message arrives.",
+                "\(r["notes"]["inbox"].serialize())")
         }
 
         /// A4.28 — the vendored readme IS python's `readme.md`, byte for byte.
@@ -1215,7 +1214,7 @@
         @Test func shutdownIsMailNotAVerb() async throws {
             let kernel = freshKernel()
             let a = await createPy(kernel, id: "sd_open")
-            let refl = await kernel.send([Item(a, .object(["type": .string("reflect")]))])[0].result
+            let refl = await kernel.send([Item(AgentId("kernel"), .object(["type": .string("docs"), "of": .string(a.value)]))])[0].result
             #expect(refl["verbs"].asObject?["shutdown"] == nil, "\(refl["verbs"].serialize())")
 
             let r = await kernel.send([Item(a, .object(["type": .string("shutdown")]))])[0].result
@@ -1223,7 +1222,7 @@
                 r["error"].asString
                     == "exec_bridge: unknown type 'shutdown' (no running job to receive it)",
                 "\(r.serialize())")
-            #expect(r["reason"].isNull, "mail is not a refusal: \(r.serialize())")
+            #expect(r["reason"].asString == "unhandled", "no live job — a coded refusal: \(r.serialize())")
 
             // …and, like all mail, it is GATED: a sealed leg refuses it (BV-8).
             let sealedId = await kernel.send([
@@ -1504,6 +1503,24 @@
                 r["error"].asString
                     == "exec_bridge: spawn failed: [Errno 2] No such file or directory: "
                     + "'/nonexistent/fantastic_nope'", "\(r.serialize())")
+        }
+
+        /// A MISSING `cwd` is named, not the command — CPython's `noexec:chdir`
+        /// text. Measured 2026-10-06 (rust subai): `… 'python3'` for a leg whose cwd
+        /// did not exist sent the model hunting an interpreter for twenty turns.
+        @Test func aMissingCwdIsNamedNotTheCommand() async throws {
+            let kernel = freshKernel()
+            let gone = "/nonexistent/fantastic_no_dir_\(UUID().uuidString)"
+            let a = await createPy(kernel, id: "nowhere", meta: ["cwd": .string(gone)])
+            let r = await kernel.send([
+                Item(a, .object(["type": .string("start"), "command": .string("/bin/echo"),
+                                 "args": .array([.string("x")])]))
+            ])[0].result
+            #expect(r["reason"].asString == "transport_error", "\(r.serialize())")
+            #expect(
+                r["error"].asString
+                    == "exec_bridge: spawn failed: [Errno 2] No such file or directory: '\(gone)'",
+                "\(r.serialize())")
         }
 
         /// One id space: the job's id IS its kernel task id — `ps` lists it,

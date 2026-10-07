@@ -316,7 +316,8 @@ async fn reflect_shows_availability_the_window_and_the_knobs() {
             "max_tokens"
         ]
     );
-    assert!(keys.iter().position(|k| *k == "concurrency").unwrap() < i);
+    assert!(keys.iter().position(|k| *k == "generating").unwrap() < i);
+    assert!(!keys.contains(&"concurrency") && !keys.contains(&"verbs"));
 
     engine.set_availability(FmAvailability::Unavailable(
         FmReason::MODEL_NOT_READY.to_string(),
@@ -617,20 +618,19 @@ async fn a_lean_system_prompt_turn_runs_in_the_real_on_device_window() {
 }
 
 #[tokio::test]
-async fn the_default_system_block_does_not_fit_the_on_device_window() {
-    // The OPEN owner decision, pinned as measured: with no `system_prompt` the
-    // kernel's default system block alone overflows 4096 tokens, so the turn
-    // fails fast and the model is never called. Nothing works around it.
+async fn the_default_system_block_fits_the_on_device_window() {
+    // Measured 2026-10-06: with the verb docs out of the reflects and the howto
+    // tightened, the kernel's default system block fits the 4096-token on-device
+    // window — the turn runs with no `system_prompt` (until then it failed fast,
+    // `context_insufficient`, and the model was never called).
     let engine = Arc::new(FakeEngine::new().context_size(4096));
     let fx = kernel(&engine, json!({})).await;
     let r = fx.send("hi", json!({})).await;
-    let e = r["error"].as_str().unwrap_or_default();
     assert!(
-        e.starts_with("foundation_models_backend: context_insufficient — the system prompt ("),
+        r["response"].as_str().is_some_and(|t| t.starts_with("ok ")),
         "{r}"
     );
-    assert!(e.contains("4096-token window"), "{r}");
-    assert!(engine.requests().is_empty(), "the model is not called");
+    assert!(!engine.requests().is_empty(), "the model is called");
 }
 
 #[tokio::test]

@@ -88,11 +88,11 @@ fn reply_scalars_are_python_str() {
     assert_eq!(render_reply(&json!(3.0)), "3.0");
     assert_eq!(render_reply(&json!(null)), "");
     assert_eq!(render_reply(&json!(true)), "true");
-    // A list that MIXES a scalar with a structure renders one `<item>` each, and
-    // the structure lands as python's repr — not compact JSON.
+    // A list that MIXES a scalar with a structure renders each element on its
+    // own: the scalar as text, the structure nested (a `tree=ids` with stubs).
     assert_eq!(
         render_reply(&json!(["a", {"a": 1}])),
-        "<items>\n<item>a</item>\n<item>{'a': 1}</item>\n</items>"
+        "<items>\n<item>a</item>\n<item>\n<a>1</a>\n</item>\n</items>"
     );
     // Nested, a structure is still a python repr on the line.
     assert_eq!(

@@ -27,6 +27,7 @@ public let HANDLER_MODULE = "web_ws.tools"
 public final class WebWSBundle: AgentBundle, WebRouteEndpoints, @unchecked Sendable {
     public let name = "web_ws"
     public var verbs: [String] { Array(Self.verbDocs.keys) }
+    public var verbDocTable: JSON { .object(Self.verbDocs) }
     public init() {}
 
     /// python `route_endpoints(agent)`: the live endpoint of the one declared
@@ -92,7 +93,6 @@ public final class WebWSBundle: AgentBundle, WebRouteEndpoints, @unchecked Senda
             // The leg is a CHANNEL — surface its auth posture so
             // discovery-through-denial has something to discover.
             for (k, v) in describe(kernel.agent(agentId)?.meta ?? [:]) { out[k] = v }
-            out["verbs"] = .object(Self.verbDocs)
             return .object(out)
         case "boot":
             // python `_boot` → None. The parent `web` mounts the route by

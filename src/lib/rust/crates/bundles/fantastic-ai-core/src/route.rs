@@ -33,14 +33,14 @@
 use crate::constants::MAX_SILENT_TURNS;
 use crate::events::emit_status;
 use crate::helpers::mint_batch_token;
-use crate::history_view::REFLECT_NUDGE;
+use crate::history_view::{docs_head, example_verb, point_to_docs};
 use crate::state::state_for;
 use crate::tool_parse::{malformed_calls, terminated_calls};
-use fantastic_bundle::{py_repr, py_str, py_strip, py_truthy};
+use fantastic_bundle::{py_repr, py_repr_value, py_str, py_strip, py_truthy};
 use fantastic_kernel::outcome::Status;
 use fantastic_kernel::{AgentId, Item, Kernel};
 use serde_json::{json, Map, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// ROUTING TURNS with a live batch, per agent — the first summand of `await`'s
@@ -443,6 +443,175 @@ pub(crate) fn silent() -> &'static Mutex<HashMap<(String, String), usize>> {
     SILENT.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// An `inquiry` an AI received and has not answered yet — python's
+/// `_open_inquiries` value: the asker (`None` for the operator), the pid its reply
+/// tag carries, the asker's own thread, and the request id.
+pub(crate) struct OpenInquiry {
+    pub(crate) asker: Option<String>,
+    pub(crate) pid: String,
+    pub(crate) reply_client: String,
+    pub(crate) request_id: Value,
+}
+
+/// OPEN INQUIRIES (owner, 2026-10-06: fully async), by the receiver's chain
+/// `(receiver, client_id)`. The answer the model gives in ANY turn of that chain —
+/// or the news that it ended without one — goes to the asker as a later message
+/// under the inquiry's pid. Python `_open_inquiries`.
+pub(crate) fn open_inquiries() -> &'static Mutex<HashMap<(String, String), OpenInquiry>> {
+    static OPEN: OnceLock<Mutex<HashMap<(String, String), OpenInquiry>>> = OnceLock::new();
+    OPEN.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Answers an agent is still OWED, by inquiry pid: added when its inquiry comes
+/// back `accepted`, cleared when a message under that pid arrives. They count as
+/// work in flight, so `await` is honest while one is out. Python `_awaiting`.
+pub(crate) fn awaiting() -> &'static Mutex<HashMap<String, HashSet<String>>> {
+    static AWAITING: OnceLock<Mutex<HashMap<String, HashSet<String>>>> = OnceLock::new();
+    AWAITING.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Settle what `self_id` was owed: every `[reply to <pid> · <who> inquiry]` tag in
+/// an incoming message clears that pid. Python `_send`'s `_ANSWER_TAG` scan.
+pub(crate) fn settle_owed(self_id: &str, text: &str) {
+    let mut owed = awaiting().lock().expect("awaiting poisoned");
+    let Some(set) = owed.get_mut(self_id) else {
+        return;
+    };
+    for line in text.lines() {
+        let Some(rest) = line.trim_start().strip_prefix("[reply to ") else {
+            continue;
+        };
+        let Some((pid, tail)) = rest.split_once(" · ") else {
+            continue;
+        };
+        if tail
+            .split(']')
+            .next()
+            .is_some_and(|t| t.ends_with(" inquiry"))
+        {
+            set.remove(pid);
+        }
+    }
+}
+
+/// Close the inquiry this chain `(self_id, client_id)` is answering: hand `body`
+/// (`{answer}` or `{error}`) to its asker as `[reply to <pid> · <self_id> inquiry]`.
+/// The answer is THIS agent's own send to the asker (owner, 2026-10-06), gated like
+/// any; a refused delivery is told to this agent. An operator's inquiry has no
+/// conversation to land in: the answer is an event on this agent's inbox. No-op
+/// when nothing is open. Python `_close_inquiry`.
+pub(crate) async fn close_inquiry(
+    kernel: &Arc<Kernel>,
+    self_id: &str,
+    client_id: &str,
+    mut body: Map<String, Value>,
+) {
+    let open = open_inquiries()
+        .lock()
+        .expect("open inquiries poisoned")
+        .remove(&(self_id.to_string(), client_id.to_string()));
+    let Some(open) = open else {
+        return;
+    };
+    body.insert("request_id".to_string(), open.request_id.clone());
+    let Some(asker) = open.asker else {
+        let mut ev = Map::new();
+        ev.insert("type".to_string(), json!("inquiry_answer"));
+        ev.insert("re".to_string(), json!(open.pid));
+        ev.extend(body);
+        kernel
+            .emit(&AgentId::from(self_id), Value::Object(ev))
+            .await;
+        return;
+    };
+    let shown: Map<String, Value> = body.into_iter().filter(|(_, v)| !v.is_null()).collect();
+    let text = format!(
+        "[reply to {} · {self_id} inquiry]\n{}",
+        open.pid,
+        crate::tool_parse::render_reply(&Value::Object(shown))
+    );
+    let (k, me, chain, reply_client) = (
+        Arc::clone(kernel),
+        self_id.to_string(),
+        client_id.to_string(),
+        open.reply_client,
+    );
+    kernel.spawn_task(&AgentId::from(self_id), "inquiry_answer", async move {
+        deliver_answer(&k, &me, &chain, &asker, &reply_client, &text).await;
+    });
+}
+
+/// The answer, sent AS THIS AGENT into the asker's conversation — a send to an AI
+/// runs the asker's whole turn, so this runs as its own task, never inline. A
+/// REFUSED answer is not dropped: this agent is told why, in its own chain. Python
+/// `_deliver_answer`.
+async fn deliver_answer(
+    kernel: &Arc<Kernel>,
+    self_id: &str,
+    client_id: &str,
+    asker: &str,
+    reply_client: &str,
+    text: &str,
+) {
+    let out = kernel
+        .send(vec![Item::new(
+            AgentId::from(asker),
+            json!({"type": "send", "text": text, "client_id": reply_client}),
+        )])
+        .await
+        .remove(0);
+    let err = out.result.get("error").filter(|v| py_truthy(v));
+    if err.is_some() || matches!(out.status, Status::Failed | Status::TimedOut) {
+        let why = err.map_or_else(|| out.status.as_str().to_string(), py_str);
+        deliver_soon(
+            kernel,
+            self_id,
+            &format!("[your inquiry answer did not reach {asker}: {why}]"),
+            client_id,
+            None,
+        );
+    }
+}
+
+/// The model's `inquiry_answer`: delivered to the asker of the inquiry this chain
+/// is answering. `Some` is the error block for the model — nothing to answer, or
+/// the placeholder. Python `_answer_inquiry`.
+pub(crate) async fn answer_inquiry(
+    kernel: &Arc<Kernel>,
+    self_id: &str,
+    client_id: &str,
+    call: &crate::tool_parse::ToolCall,
+) -> Option<String> {
+    let open = open_inquiries()
+        .lock()
+        .expect("open inquiries poisoned")
+        .contains_key(&(self_id.to_string(), client_id.to_string()));
+    if !open {
+        return Some(
+            "inquiry_answer: nothing asked you in this run — an answer goes to an inquiry you \
+             received (`[inquiry from …]`)"
+                .to_string(),
+        );
+    }
+    let answer = call.arguments.get("answer").cloned().unwrap_or(Value::Null);
+    // THE PLACEHOLDER IS NOT AN ANSWER — a model copies the shown example back
+    // verbatim (measured 2026-09-04, peer_review: "..." written as the verdict).
+    let real = answer
+        .as_str()
+        .filter(|s| !py_strip(s).trim_matches('.').is_empty());
+    let Some(real) = real else {
+        return Some(format!(
+            "that is the PLACEHOLDER, not an answer — `answer` came back as {}. Say what \
+             you actually concluded.",
+            py_repr_value(&answer)
+        ));
+    };
+    let mut body = Map::new();
+    body.insert("answer".to_string(), json!(real));
+    close_inquiry(kernel, self_id, client_id, body).await;
+    None
+}
+
 /// Drop a deleted agent's routing count and every silent streak of its chains
 /// ([`crate::verbs::on_delete`]).
 pub(crate) fn forget(self_id: &str) {
@@ -454,6 +623,14 @@ pub(crate) fn forget(self_id: &str) {
         .lock()
         .expect("silent poisoned")
         .retain(|chain, _| chain.0 != self_id);
+    open_inquiries()
+        .lock()
+        .expect("open inquiries poisoned")
+        .retain(|chain, _| chain.0 != self_id);
+    awaiting()
+        .lock()
+        .expect("awaiting poisoned")
+        .remove(self_id);
 }
 
 /// What a caller is told when a chain gives up ([`MAX_SILENT_TURNS`] silent
@@ -476,10 +653,10 @@ pub const DEAD_TURN_LINE: &str =
 /// the model acts or ends the chain, bounded by [`MAX_SILENT_TURNS`] in a row.
 /// Mirrors python `_NO_CALL_NUDGE` (canonical; reinstated 2026-09-01 after
 /// repo_map:swift twice stopped mid-task).
-const NO_CALL_NUDGE: &str = "[no call was dispatched] Your turn emitted no <call> element, so \
-NOTHING ran — a call decided in thinking does not execute unless the element is \
-written out. If the task is unfinished, emit that call now. If it is finished, end \
-the chain explicitly: <call name=\"done\"></call>";
+const NO_CALL_NUDGE: &str = "[no call was dispatched] Your answer emitted no <call> element, so \
+NOTHING ran — a call written in your thinking does not run: write it in your answer, \
+after the thinking. If the task is unfinished, emit that call now. If it is finished, \
+end the chain explicitly: <call name=\"done\"></call>";
 
 /// Honour where this pass's output goes — the DETACHED routing task. The
 /// model's calls are the agent's calls: the task is one the agent's own
@@ -608,10 +785,13 @@ async fn route_reply_gated(
     // Matched by the call's exact body, in order — one reading of the text, not
     // two.
     let mut streams = call_streams;
+    // ONLY THE ANSWER ACTS (owner, 2026-10-07): calls written inside thinking are
+    // read as thinking — dispatch and the malformed-call report read the answer.
+    let answer = crate::think::without_thinking(&text);
     let parsed = if cut {
         Vec::new()
     } else {
-        terminated_calls(&text)
+        terminated_calls(&answer)
     };
     let calls: Vec<crate::tool_parse::ToolCall> = parsed
         .into_iter()
@@ -637,7 +817,7 @@ async fn route_reply_gated(
     let malformed = if cut {
         Vec::new()
     } else {
-        malformed_calls(&text)
+        malformed_calls(&answer)
     };
     for bad in malformed {
         units.push(Unit {
@@ -646,6 +826,30 @@ async fn route_reply_gated(
             verb: "-".to_string(),
             idx: None,
             body: Some(bad.body()),
+            title: None,
+        });
+    }
+    // CALLS WRITTEN WRONG (owner, 2026-10-07): markup carrying OUR call vocabulary
+    // outside every `<call` envelope — `<tool_call><function=call name="send">`,
+    // `<send>`, a JSON call — is reported like a compiler error, with the form to
+    // write instead (`call_check`). The answer's well-formed calls run as written,
+    // and each report says how many did.
+    let ran = calls
+        .iter()
+        .filter(|c| !CONTROL_CALLS.contains(&c.name.as_str()))
+        .count();
+    let reports = if cut {
+        Vec::new()
+    } else {
+        crate::call_check::check(&answer, ran)
+    };
+    for report in reports {
+        units.push(Unit {
+            dest: self_id.as_str().to_string(),
+            target: "-".to_string(),
+            verb: "-".to_string(),
+            idx: None,
+            body: Some(report),
             title: None,
         });
     }
@@ -679,9 +883,23 @@ async fn route_reply_gated(
     // recipient can see who else heard it and reply to the same group instead of
     // forking a private conversation the others never see.
     let calls = fan_out(calls, message_id);
+    // THE ANSWER to an inquiry this chain received goes to the asker now, under the
+    // inquiry's pid; an answer with nothing to answer, or a placeholder, is told so.
+    for call in calls.iter().filter(|c| c.name == "inquiry_answer") {
+        if let Some(err) = answer_inquiry(&kernel, self_id.as_str(), &client_id, call).await {
+            units.push(Unit {
+                dest: self_id.as_str().to_string(),
+                target: "-".to_string(),
+                verb: "-".to_string(),
+                idx: None,
+                body: Some(err),
+                title: None,
+            });
+        }
+    }
 
     for call in calls {
-        if call.name == "done" || call.name == "await" || call.name == "inquiry_answer" {
+        if CONTROL_CALLS.contains(&call.name.as_str()) {
             // CONTROL CALLS, not dispatches. `done` ends the chain; `await`
             // stops the turn until something lands; `inquiry_answer` hands this
             // turn's answer back to whoever sent the inquiry (the `inquiry` verb
@@ -803,6 +1021,11 @@ async fn route_reply_gated(
         if document.is_some() {
             payload.shift_remove("bytes");
         }
+        // THE ASKER'S THREAD rides an inquiry, so the answer that comes back later
+        // (fully async) lands where this chain is working.
+        if payload.get("type").and_then(Value::as_str) == Some("inquiry") {
+            payload.insert("reply_client_id".to_string(), json!(client_id));
+        }
         payloads.push((target.to_string(), Value::Object(payload.clone())));
         let mut item = Item::new(AgentId::from(target), Value::Object(payload.clone()));
         if let Some(doc) = document {
@@ -878,6 +1101,24 @@ async fn route_reply_gated(
         out
     };
 
+    // AN ACCEPTED INQUIRY IS OWED AN ANSWER — counted until a message under its pid
+    // arrives (`settle_owed`). Python: the same loop after `kernel.send(items)`.
+    for ((_, sent), out) in payloads.iter().zip(outcomes.iter()) {
+        let accepted = out.result.get("accepted").is_some_and(py_truthy);
+        if sent.get("type").and_then(Value::as_str) == Some("inquiry") && accepted {
+            let pid = out.pid.map_or_else(
+                || py_str(out.result.get("re").unwrap_or(&Value::Null)),
+                |p| p.0.to_string(),
+            );
+            awaiting()
+                .lock()
+                .expect("awaiting poisoned")
+                .entry(self_id.as_str().to_string())
+                .or_default()
+                .insert(pid);
+        }
+    }
+
     // The result — INCLUDING an error — goes back. A call that failed silently
     // is the one thing a model can never debug.
     //
@@ -900,11 +1141,22 @@ async fn route_reply_gated(
                         .pid
                         .map(|t| t.0.to_string())
                         .unwrap_or_else(|| "-".to_string());
-                    let mut body = crate::tool_parse::render_reply(&reply_as_text(out));
-                    // Only reflect bodies are dropped later, so only they carry
-                    // the distillation notice.
-                    if u.verb == "reflect" {
-                        body.push_str(REFLECT_NUDGE);
+                    let shown = reply_as_text(out);
+                    let pointed = point_to_docs(&u.target, &u.verb, &shown);
+                    let mut body =
+                        crate::tool_parse::render_reply(pointed.as_ref().unwrap_or(&shown));
+                    // Only docs bodies are cut later, so only they carry the notice, and
+                    // are HELD under their pid for the model's own `grep`. A reflect is
+                    // MUTABLE state and stays whole (owner, 2026-10-06); a newer
+                    // reflect of the same agent supersedes it (dedupe).
+                    let docs_body = u.verb == "docs" && shown.get("of").is_some();
+                    if let (true, Some(p), Some(verb)) = (
+                        docs_body,
+                        out.pid,
+                        example_verb(&body).filter(|_| docs_body),
+                    ) {
+                        crate::memory::store_reply(&self_id, &kernel, p.0, &body);
+                        body = docs_head(p.0, &verb) + &body;
                     }
                     // FULL ASYNC. A reply is DATA, not a question — the model
                     // needs to be able to SEE it, not be forced to swallow it
@@ -970,10 +1222,10 @@ async fn route_reply_gated(
     let any_blocks = !blocks.is_empty();
     // THE SILENT STREAK of this chain (one per agent + client thread): turns in a
     // row that dispatched nothing. Any call — `done` and `await` included — ends
-    // the streak; see MAX_SILENT_TURNS. (python resets on `calls or units`; the
-    // blocks ARE the units.)
+    // the streak; a turn whose only output was BROKEN calls ran nothing and does
+    // not (see MAX_SILENT_TURNS).
     let chain = (self_id.as_str().to_string(), client_id.clone());
-    if any_calls || any_blocks {
+    if any_calls {
         silent().lock().expect("silent poisoned").remove(&chain);
     }
     // EVERY CALL-LESS TURN IS NUDGED, chain or not (user, 2026-09-09: "all is
@@ -988,10 +1240,29 @@ async fn route_reply_gated(
     // model's own prose for the old `{"type":"question"}` line — a text convention
     // had to recognise, with the human living outside it entirely.
     let nudging = !any_calls && !any_blocks && chained;
+    // Only broken calls: their reports are the next turn — unless this chain has
+    // now been silent MAX_SILENT_TURNS in a row, and gives up.
+    if !any_calls
+        && any_blocks
+        && silent_turn(&kernel, &self_id, &client_id, send_to.as_deref(), sp).await
+    {
+        return;
+    }
     if any_blocks {
         deliver_grouped(&kernel, blocks, &client_id, sp, message_id).await;
     }
     if done_called {
+        // AN INQUIRY THIS CHAIN NEVER ANSWERED is closed for its asker, saying so —
+        // the asker must not wait on an answer that will not come.
+        let mut body = Map::new();
+        body.insert(
+            "error".to_string(),
+            json!(format!(
+                "{} ended its run without answering",
+                self_id.as_str()
+            )),
+        );
+        close_inquiry(&kernel, self_id.as_str(), &client_id, body).await;
         // Explicitly finished — nothing more runs, nothing reminds. A caller's
         // `send_to` hand-off is the one thing that still applies: the finished
         // text is what it asked to have delivered.
@@ -1016,7 +1287,13 @@ async fn route_reply_gated(
         let st = state_for(&self_id);
         let queued = st.queue.lock().expect("queue poisoned").len() as u64;
         let running = u64::from(st.lock.try_lock().is_err());
-        let pending = inflight_count(self_id.as_str()) + queued + running;
+        // ...and the answers its inquiries are still owed (fully async).
+        let owed = awaiting()
+            .lock()
+            .expect("awaiting poisoned")
+            .get(self_id.as_str())
+            .map_or(0, HashSet::len) as u64;
+        let pending = inflight_count(self_id.as_str()) + queued + running + owed;
         // TODO (owner, 2026-10-05) — STALL DETECTION. A chain can stop with no error: calls
         // dispatched, then nothing (subai_graph:rust, 2026-09-03 and 2026-10-05). Three shapes:
         // (1) a call never settles (no timeout by default, its task stays in `ps`); (2) every
@@ -1046,24 +1323,7 @@ async fn route_reply_gated(
         // that asked for the result by `send_to` gets it as a turn; a clock's tick
         // has nobody reading, so the status event is the record, and the next
         // tick starts a fresh chain with a fresh count.
-        let streak = {
-            let mut m = silent().lock().expect("silent poisoned");
-            let e = m.entry(chain.clone()).or_insert(0);
-            *e += 1;
-            *e
-        };
-        if streak >= MAX_SILENT_TURNS {
-            silent().lock().expect("silent poisoned").remove(&chain);
-            let gave_up = gave_up_text();
-            let st = state_for(&self_id);
-            let mut detail = Map::new();
-            detail.insert("reason".to_string(), json!("gave_up"));
-            detail.insert("error".to_string(), json!(gave_up));
-            detail.insert("silent_turns".to_string(), json!(streak));
-            emit_status(&kernel, &st, &self_id, &client_id, "done", detail).await;
-            if let Some(to) = send_to.as_deref() {
-                deliver_soon(&kernel, to, &gave_up, &client_id, sp);
-            }
+        if silent_turn(&kernel, &self_id, &client_id, send_to.as_deref(), sp).await {
             return;
         }
         let nudge = if dead_turn {
@@ -1083,6 +1343,47 @@ async fn route_reply_gated(
     if let Some(to) = send_to.as_deref() {
         deliver_soon(&kernel, to, &text, &client_id, sp);
     }
+}
+
+/// The calls that are not dispatches: they end, park or answer the chain.
+const CONTROL_CALLS: [&str; 3] = ["done", "await", "inquiry_answer"];
+
+/// Count one silent turn of the chain (a turn that ran nothing). At
+/// [`MAX_SILENT_TURNS`] in a row the chain GIVES UP — the status says so, an open
+/// inquiry is closed, a `send_to` is told — and `true` is returned. Python
+/// `_silent_turn`.
+async fn silent_turn(
+    kernel: &Arc<Kernel>,
+    self_id: &AgentId,
+    client_id: &str,
+    send_to: Option<&str>,
+    sp: Option<&str>,
+) -> bool {
+    let chain = (self_id.as_str().to_string(), client_id.to_string());
+    let streak = {
+        let mut m = silent().lock().expect("silent poisoned");
+        let e = m.entry(chain.clone()).or_insert(0);
+        *e += 1;
+        *e
+    };
+    if streak < MAX_SILENT_TURNS {
+        return false;
+    }
+    silent().lock().expect("silent poisoned").remove(&chain);
+    let gave_up = gave_up_text();
+    let st = state_for(self_id);
+    let mut detail = Map::new();
+    detail.insert("reason".to_string(), json!("gave_up"));
+    detail.insert("error".to_string(), json!(gave_up));
+    detail.insert("silent_turns".to_string(), json!(streak));
+    emit_status(kernel, &st, self_id, client_id, "done", detail).await;
+    let mut body = Map::new();
+    body.insert("error".to_string(), json!(gave_up));
+    close_inquiry(kernel, self_id.as_str(), client_id, body).await;
+    if let Some(to) = send_to {
+        deliver_soon(kernel, to, &gave_up, client_id, sp);
+    }
+    true
 }
 
 /// ONE delivered message per destination: blocks joined by a blank line, each
@@ -1228,10 +1529,10 @@ mod tests {
         );
         assert_eq!(
             NO_CALL_NUDGE,
-            "[no call was dispatched] Your turn emitted no <call> element, so \
-             NOTHING ran — a call decided in thinking does not execute unless the \
-             element is written out. If the task is unfinished, emit that call now. \
-             If it is finished, end the chain explicitly: <call name=\"done\"></call>"
+            "[no call was dispatched] Your answer emitted no <call> element, so \
+             NOTHING ran — a call written in your thinking does not run: write it in \
+             your answer, after the thinking. If the task is unfinished, emit that call \
+             now. If it is finished, end the chain explicitly: <call name=\"done\"></call>"
         );
         // The fourth is composed by the parser, which OWNS the wording (see
         // `MalformedCall::error` and the literal pin in

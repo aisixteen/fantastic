@@ -134,6 +134,3 @@ public func authorizeCall(
     return Decision(allowed: false, reason: "", hint: fromAbove)
 }
 
-/// The tree MUTATORS: answered by the root, and after the gate their operand
-/// must be a DIRECT CHILD of the sender.
-public let mutatorVerbs: Set<String> = ["create_agent", "update_agent", "delete_agent"]

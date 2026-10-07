@@ -80,7 +80,6 @@ async fn reflect_keys_match_python() {
             "ingress_rule",
             "egress_rule",
             "sealed",
-            "verbs",
         ]
     );
     assert_eq!(

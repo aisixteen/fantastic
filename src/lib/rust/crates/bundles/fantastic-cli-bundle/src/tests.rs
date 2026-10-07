@@ -35,7 +35,7 @@ async fn reflect_advertises_exactly_what_it_accepts() {
         .keys()
         .map(String::as_str)
         .collect();
-    assert_eq!(keys, ["id", "sentence", "verbs", "accepts"]);
+    assert_eq!(keys, ["id", "sentence", "accepts"]);
     let accepts: Vec<String> = reply["accepts"]
         .as_array()
         .unwrap()
@@ -47,7 +47,7 @@ async fn reflect_advertises_exactly_what_it_accepts() {
     for verb in ACCEPTS {
         assert!(accepts.contains(&verb.to_string()), "missing {verb}");
         assert!(
-            reply["verbs"].get(verb).is_some(),
+            CliBundle.verb_docs().get(verb).is_some(),
             "{verb} accepted but undocumented"
         );
     }
@@ -57,9 +57,9 @@ async fn reflect_advertises_exactly_what_it_accepts() {
 /// of the python docstring. Two of them are cut mid-sentence on python; copying
 /// the whole sentence would be a divergence, not a courtesy.
 #[tokio::test]
-async fn reflect_verbs_are_pythons_first_docstring_lines() {
-    let reply = dispatch(json!({"type": "reflect"})).await.unwrap().unwrap();
-    let verbs = reply["verbs"].as_object().unwrap();
+async fn verb_docs_are_pythons_first_docstring_lines() {
+    let docs = CliBundle.verb_docs();
+    let verbs = docs.as_object().unwrap();
     let names: Vec<&str> = verbs.keys().map(String::as_str).collect();
     assert_eq!(
         names,

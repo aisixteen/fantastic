@@ -228,8 +228,8 @@ async def core_the_roster_is_closed_after_boot(h):
     Two probes, because closure has two escape routes. Directly: `create_agent`
     on the root is refused at egress — the baseline is `{$self: "*"}` alone, so
     nothing reaches the root ungranted. Indirectly: an agent editing its OWN
-    `can_call` to grant itself the reach — refused (at egress ungranted, or by the
-    mutator rule: an agent updates only agents in its own subtree, never itself).
+    `can_call` to grant itself the reach — refused at egress: it holds no
+    `update_agent` on the root (grants are the only rule, owner 2026-10-06).
 
     The refusal is then re-probed for EFFECT, not inspected as a field: after the
     attempt to raise its own grant a previously-denied edge must still deny."""
@@ -277,8 +277,8 @@ async def core_the_roster_is_closed_after_boot(h):
     check("PC-3", denied(s), f"{sender} raised its own authority: {s!r}")
     check(
         "PC-3",
-        denial_side(s) in ("egress", "mutator"),
-        f"expected an egress or mutator refusal, got {s!r}",
+        denial_side(s) == "egress",
+        f"expected an egress refusal, got {s!r}",
     )
 
     # The refusal must have had no effect — asserted by reachability, not by

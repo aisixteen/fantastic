@@ -10,20 +10,36 @@ comes back empty).
 
 ## The record
 
-REQUIRED — nothing is guessed, and a record missing any of them is refused at the
-write, naming every missing field (the whole field list, with defaults and hints, is
-this kind's `schema` in `reflect bundles=all`; `memory_store_id` is required too, as
-on every AI agent):
+REQUIRED — refused at the write when missing, every missing field named (the whole
+field list, with defaults and hints, is this kind's `schema` in `reflect
+bundles=all`; `memory_store_id` is required too, as on every AI agent):
 - `endpoint` — the server's `/v1` base, e.g. `http://127.0.0.1:18000/v1`
-- `model` — the served model name, e.g. `qwen3.8-27b`
-- `max_tokens` — the output budget of a turn (unbounded, a runaway turn decodes for a long time)
-- `kv_slots` — how many conversations may be LIVE on this endpoint at once
-- `kv_overflow` — what happens to the next one: `evict` (the least-recently-used
-  conversation rotates out) or `reject` (the newcomer is refused with a retry time)
-- `context_window` — the server's window (its `--max-model-len`), used exactly as
-  set. A main turn whose `max_tokens` reaches it sends NO `max_tokens`: the server
-  bounds the reply by what the prompt leaves (prompt + `max_tokens` past the window
-  is an HTTP 400). A bounded side call (a fold summary) keeps its own bound.
+- `kv_overflow` — what happens to a conversation past `kv_slots`: `evict` (the
+  least-recently-used conversation rotates out) or `reject` (the newcomer is refused
+  with a retry time)
+
+READ FROM THE SERVER when left out — before a verb that runs a turn (`send`,
+`inquiry`, `context_recall`) every one still absent is read from the server and
+WRITTEN BACK to the record, so reflect shows it and it is not read again until the
+field is cleared (`null`). A value set on the record is used as set:
+- `model` — the served model name; left out, the ONE model `GET {endpoint}/models`
+  lists (several → refused, naming them)
+- `context_window` — the server's window (its `--max-model-len`); left out, that
+  model's `max_model_len`. A main turn whose `max_tokens` reaches it sends NO
+  `max_tokens`: the server bounds the reply by what the prompt leaves (prompt +
+  `max_tokens` past the window is an HTTP 400). A bounded side call (a fold summary)
+  keeps its own bound.
+- `max_tokens` — the output budget of a turn; left out, `max_model_len` too
+- `kv_slots` — how many conversations may be LIVE on this endpoint at once; left out,
+  `floor(kv_cache_max_concurrency)` from the `vllm:cache_config_info` line of the
+  server's Prometheus page — `metrics_url`, or, left out, the endpoint with `/v1`
+  replaced by `/metrics` (an endpoint not ending in `/v1` needs one of the two, refused
+  at the write otherwise)
+
+A server that does not answer one of them refuses the verb (`bad_arg`, `arg` = the
+field), naming the URL and what came back — a door that forwards only `/v1` answers
+404 on `/metrics`: set `kv_slots` (or `metrics_url`) there. The key goes only to the
+endpoint's host.
 
 Defaults, used only where the record sets nothing: `temperature` 0.2, `top_p` 0.8,
 `top_k` 20, `reasoning_effort` medium (`low`|`medium`|`xhigh`), `thinking_token_budget`
@@ -58,7 +74,7 @@ turn; when compaction rewrites that prefix it is, correctly, a new conversation.
 ## Thinking
 
 The thought streams as `reasoning_content` and is wrapped once in `<think>…</think>`
-(parsed for tool calls, stripped before the turn is persisted). `thinking_token_budget`
+(stripped before the turn is persisted; only the answer's calls run). `thinking_token_budget`
 is vLLM's hard stop — once spent, the model moves on to its answer — so it must stay
 BELOW `max_tokens` (refused at the write otherwise). On a main turn an explicit budget
 is sent as set and the default is `min(16000, max_tokens // 2)`; a smaller side call (a

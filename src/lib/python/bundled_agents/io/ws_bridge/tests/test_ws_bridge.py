@@ -164,6 +164,10 @@ async def test_reflect_lists_verbs(two_kernels):
     ka, _ = two_kernels
     bid = await _make_bridge(ka, peer_id="ignored", transport="memory")
     r = (await ka.send([{"target": bid, "payload": {"type": "reflect"}}]))[0]["result"]
+    assert "verbs" not in r
+    d = (await ka.send([{"target": "kernel", "payload": {"type": "docs", "of": bid}}]))[
+        0
+    ]["result"]
     for v in (
         "reflect",
         "boot",
@@ -172,7 +176,7 @@ async def test_reflect_lists_verbs(two_kernels):
         "watch_remote",
         "unwatch_remote",
     ):
-        assert v in r["verbs"], f"missing verb {v}"
+        assert v in d["verbs"], f"missing verb {v}"
     assert r["transport"] == "memory"
     assert r["connected"] is False  # not booted yet
 

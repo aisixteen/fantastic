@@ -167,9 +167,5 @@ pub fn authorize_call(
     }
 }
 
-/// The tree MUTATORS. After the two-sided gate on the root, an agent's operand
-/// must be its own DIRECT CHILD (create_agent: `parent_id` is the sender).
-pub const MUTATORS: [&str; 3] = ["create_agent", "update_agent", "delete_agent"];
-
 #[cfg(test)]
 mod tests;
