@@ -1,0 +1,11 @@
+<style>body{font:14px system-ui;color:#ddd;padding:12px} button{margin-right:6px}</style>
+<h3>python agent</h3>
+<button id=h>hello</button><button id=c>count</button>
+<pre id=out></pre>
+<script>
+const AGENT = "{{agent}}";  // filled with this instance's id when the view is written
+const out = document.getElementById("out");
+document.getElementById("h").onclick = async () => { const r = await fantastic.send(AGENT, {type: "hello"}); out.textContent = JSON.stringify(r); };
+document.getElementById("c").onclick = () => fantastic.send(AGENT, {type: "count"});
+fantastic.watch(AGENT, (ev) => { if (ev && ev.type === "count") out.textContent = "count = " + ev.count; });
+</script>

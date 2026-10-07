@@ -1,11 +1,11 @@
-// THE CANVAS SIDEBAR (left edge, collapsible) — the CLI's sidebar, on the page.
+// THE SIDEBAR — a CELL like any other (owner 2026-10-08): placed from the
+// double-click, moved, resized, closed; as many as you like. Nothing on the
+// canvas floats: a canvas opens as its background alone.
 //
 //   chats   kept dialogs (● — SQLite, the number of cells showing each) and the
-//           page's ephemeral cells (○ — RAM); `+ new chat here`. The viewed
-//           view's MAIN chat is pinned first, ★.
-//   agents  a TREE per kernel the page sees: the host kernel (every agent
-//           `list_agents` shows) and the page's own kernel (the canvas and its
-//           views).
+//           page's ephemeral cells (○ — RAM); `+ new chat here`.
+//   agents  a TREE per kernel the page sees: the host kernel (this canvas's
+//           agents) and the page's own kernel (the canvas and its views).
 //
 // A click on a PAGE agent VIEWS it (`viewer.ts`: a view → that view, any
 // other → it full); ⌘-click (Ctrl-click off macOS) FOCUSES it instead — its
@@ -35,8 +35,6 @@ export interface SidebarDeps {
   dialogs(): Promise<Dialog[]>;
   /** the page's AI cell records */
   aiCells(): Rec[];
-  /** the backend of the VIEWED view's main chat (`main_ai_chat`), or null */
-  mainChat(): string | null;
   /** every host agent (records with `parent_id`), paged to the end */
   hostAgents(): Promise<Rec[]>;
   /** the page kernel's tree, rooted at the canvas */
@@ -50,8 +48,12 @@ export interface SidebarDeps {
   viewed(): string;
   /** macOS: ⌘ is the focus modifier (Ctrl-click is the Mac's right click) */
   mac: boolean;
-  /** open agent `id` in a new cell (`isAi`: a chat, else its reflect card) */
-  open(id: string, isAi: boolean): void;
+  /** open host agent `id` in a new cell, drawn by its own view */
+  open(id: string): void;
+  /** a host agent added in the background and not shown yet (NEW) */
+  fresh(id: string): boolean;
+  /** delete host agent `id` (its own act: ✕ on a cell only closes the view) */
+  deleteAgent(id: string): void;
   reopen(d: Dialog): void;
   newChat(): void;
 }
@@ -95,21 +97,16 @@ export function glyph(n: TreeNode): string {
   return "◇";
 }
 
-export function createSidebar(d: SidebarDeps): { render(): Promise<void> } {
+export function createSidebar(d: SidebarDeps): { render(): Promise<void>; el: HTMLElement } {
   const el = document.createElement("div");
-  el.id = "chats";
+  el.className = "side";
   el.innerHTML =
-    `<div class="chats-head"><span>chats</span><button class="chats-toggle" title="collapse">«</button></div>` +
+    `<div class="chats-head"><span>chats</span></div>` +
     `<ul class="chats-list"></ul><div class="chats-new">+ new chat here</div>` +
     `<div class="chats-head agents-head"><span>agents</span></div><ul class="agents-tree"></ul>`;
   d.mount.appendChild(el);
   const chatsList = el.querySelector(".chats-list") as HTMLElement;
   const tree = el.querySelector(".agents-tree") as HTMLElement;
-  const toggle = el.querySelector(".chats-toggle") as HTMLElement;
-  toggle.addEventListener("click", () => {
-    el.classList.toggle("collapsed");
-    toggle.textContent = el.classList.contains("collapsed") ? "»" : "«";
-  });
   (el.querySelector(".chats-new") as HTMLElement).addEventListener("click", () => d.newChat());
 
   // several cells on one thing: each click moves to the next one
@@ -153,16 +150,6 @@ export function createSidebar(d: SidebarDeps): { render(): Promise<void> } {
       li.addEventListener("click", () => d.moveTo(String(c["id"])));
       items.push(li);
     }
-    // the viewed canvas's main chat: pinned first, ★
-    const main = d.mainChat();
-    const at = main === null ? -1 : items.findIndex((li) => li.dataset["backend"] === main);
-    if (at >= 0) {
-      const [li] = items.splice(at, 1);
-      li!.classList.add("main");
-      (li!.children[0] as HTMLElement).textContent = "★";
-      li!.title = `this canvas's main chat · ${li!.title}`;
-      items.unshift(li!);
-    }
     chatsList.replaceChildren(...items);
   };
 
@@ -172,7 +159,11 @@ export function createSidebar(d: SidebarDeps): { render(): Promise<void> } {
     // the path to the VIEWED agent is always unfolded: you see where you are
     const isOpen = open.get(n.id) ?? (depth < 1 || n.id === d.viewed() || holds(n, d.viewed()));
     const li = document.createElement("li");
-    li.className = "agent" + (cells.length > 0 ? " has-cell" : "") + (n.id === d.viewed() ? " viewed" : "");
+    // FE (page agents, `*.ts`) and BE (host agents) in the canvas's two colors;
+    // a host agent added in the background and not shown yet is NEW
+    const side = n.handler.endsWith(".ts") ? "page" : "host";
+    const isNew = side === "host" && d.fresh(n.id);
+    li.className = "agent " + side + (cells.length > 0 ? " has-cell" : "") + (n.id === d.viewed() ? " viewed" : "") + (isNew ? " fresh" : "");
     li.style.paddingLeft = `${10 + depth * 12}px`;
     li.innerHTML = `<span class="tw"></span><span class="gl"></span><span class="nm"></span><span class="ct"></span>`;
     const tw = li.children[0] as HTMLElement;
@@ -184,7 +175,7 @@ export function createSidebar(d: SidebarDeps): { render(): Promise<void> } {
     });
     (li.children[1] as HTMLElement).textContent = glyph(n);
     (li.children[2] as HTMLElement).textContent = n.id;
-    (li.children[3] as HTMLElement).textContent = cells.length > 1 ? String(cells.length) : "";
+    (li.children[3] as HTMLElement).textContent = isNew ? "new" : cells.length > 1 ? String(cells.length) : "";
     const fkey = d.mac ? "⌘" : "Ctrl";
     li.title = n.handler.endsWith(".ts")
       ? `${n.id} · ${n.handler} · click: view it · ${fkey}-click: focus it on its canvas`
@@ -196,8 +187,19 @@ export function createSidebar(d: SidebarDeps): { render(): Promise<void> } {
       if (now.length > 0) {
         if (focus) moveNext(n.id, now);
         else d.view(now[0]!, false);
-      } else if (n.handler !== "") d.open(n.id, glyph(n) === "✦");
+      } else if (n.handler !== "") d.open(n.id);
     });
+    if (side === "host" && n.handler !== "") {
+      const del = document.createElement("span");
+      del.className = "del";
+      del.textContent = "⌫";
+      del.title = `delete ${n.id} (the agent, not just its view)`;
+      del.addEventListener("click", (e) => {
+        e.stopPropagation();
+        d.deleteAgent(n.id);
+      });
+      li.appendChild(del);
+    }
     out.push(li);
     if (kids && isOpen) for (const c of n.children) node(c, depth + 1, out);
   };
@@ -224,5 +226,6 @@ export function createSidebar(d: SidebarDeps): { render(): Promise<void> } {
     async render(): Promise<void> {
       await Promise.all([renderChats(), renderTree()]);
     },
+    el,
   };
 }

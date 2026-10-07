@@ -3,7 +3,7 @@
 # `fantastic --headless canvas --port N` over a fresh dir, and drives a REAL
 # headless Chrome over CDP against the page it announces: a double click opens the action popup, `terminal` there spawns one,
 # keystrokes run in it, a drag moves it, a restart rehydrates it, the close
-# button removes it. Every step is checked ON DISK too: the canvas's thin agents
+# button closes its view (the agent lives on). Every step is checked ON DISK too: the canvas's thin agents
 # are folders under its root view in the page loader's store (`.fantastic/web`).
 #
 # The owner's design: the page holds no store and no AI; its thin agents are
@@ -23,7 +23,7 @@ runs:
   - name: first-load
     # the page seeds its root and the loader writes it under its own anchor
     expect:
-      page_contains: ["view_root · 0 dom"]   # the toolbar: the breadcrumb (canvas ▸ the root view), then its counts
+      # nothing floats (owner 2026-10-08): no top bar, no sidebar — the background alone
       files_exist: [.fantastic/web/agent.yaml, .fantastic/web/agents/canvas/agent.yaml, .fantastic/web/agents/canvas/agents/view_root/agent.yaml,
                     # THE HOST TREE (owner 2026-10-04): canvas_root holds the files, the page loader and the cells' backends directly
                     .fantastic/agents/user/agents/web/agents/canvas_page/agents/canvas_root/agent.yaml,
@@ -42,7 +42,8 @@ runs:
     expect:
       xterm_contains: ["hi-42"]
       canvas_members: 1
-      member: {handler_module: terminal_view.ts, owns_backend: true}
+      # backend-owned views: the host agent is made FIRST, the cell only views it
+      member: {handler_module: terminal_view.ts, owns_backend: false}
       # a thin agent lives ONLY under its view — never a top-level loader record
       not_top_level: true
       backend_in_group: true
@@ -70,8 +71,8 @@ runs:
       moved: true
 
   - name: restart
-    # rehydrate WITHOUT --port (read from `web`'s record); a DIFFERENT --port
-    # first is refused (creation-only, exit 2, names update_agent)
+    # rehydrate WITHOUT --port (read from `web`'s record); while it still runs,
+    # an argument (a different --port) is refused (exit 2, "already running")
     restart: {wrong_port: true}
     type: "echo again-$((7*6))"
     expect:
@@ -84,52 +85,48 @@ runs:
       kept_position: true
       group_size: 1
 
-  # ── the binding holds by rule: a lost backend is SAID, never respawned silently
+  # ── BACKEND-OWNED VIEWS (tmp/backend_owned_views.md): the host is the truth —
+  #    a cell whose agent is gone is CLEANED on load (never respawned)
   - name: lost-backend
     restart: {offline: remove_backend}
-    expect:
-      canvas_members: 1
-      member: {backend_lost: true}
-      group_size: 0
-      page_contains: ["is gone"]
-
-  - name: respawn
-    click: ".agent-frame .reload"
-    type: "echo back-$((6*7))"
-    expect:
-      canvas_members: 1
-      member: {backend_lost: false}
-      backend_changed: true
-      backend_in_group: true
-      group_size: 1
-      xterm_contains: ["back-42"]
-      view_bound: true
-
-  - name: close
-    close: true
-    expect:
-      canvas_members: 0
-      backend_record: false
-      group_size: 0
-      files_exist: [.fantastic/web/agents/canvas/agent.yaml]
-
-  # ── an orphan (the view vanished while the host was down) is deleted on load
-  - name: orphan
-    dblclick: {x: 500, y: 350}
-    then_restart: {offline: remove_member}
     expect:
       canvas_members: 0
       group_size: 0
       page_frames: 0
 
-  # ── the shell ending IS the close: `exit` removes the frame, the view and
-  #    its exec agent together, exactly as ✕ does
+  - name: spawn-again
+    dblclick: {x: 500, y: 350}
+    expect:
+      canvas_members: 1
+      member: {handler_module: terminal_view.ts, owns_backend: false}
+      group_size: 1
+      view_bound: true
+
+  # ── ✕ closes the VIEW: the host agent lives on (listed in the sidebar)
+  - name: close
+    close: true
+    expect:
+      canvas_members: 0
+      backend_record: true
+      group_size: 1
+      files_exist: [.fantastic/web/agents/canvas/agent.yaml]
+
+  # ── a view lost while the host was down: the agent stays, the page shows nothing
+  - name: orphan
+    dblclick: {x: 500, y: 350}
+    then_restart: {offline: remove_member}
+    expect:
+      canvas_members: 0
+      group_size: 2
+      page_frames: 0
+
+  # ── the shell ending closes its VIEW; its exec agent lives on
   - name: exit-closes
     dblclick: {x: 500, y: 350}
     type: "exit"
     expect:
       canvas_members: 0
-      group_size: 0
+      group_size: 3
       page_frames: 0
 
   - name: restart-empty
@@ -137,5 +134,5 @@ runs:
     expect:
       load_tree: {canvas: null}
       canvas_members: 0
-      group_size: 0
+      group_size: 3
       page_frames: 0

@@ -1,5 +1,6 @@
 import type { ViewBundle, ViewContext, ViewHandle } from "../view.ts";
 import { Host } from "../../lib.ts";
+import { canvasNode } from "../canvas/host_views.ts";
 
 // ai_view — inline, MULTI-MODE AI view (chat mode = provider-agnostic chat UI). Ported from
 // ai_chat_webapp/index.html, rendered INLINE into a canvas frame, fronting any
@@ -92,7 +93,7 @@ const REPLY_HEAD = /^\[reply to \d+ · ([^\]·]+?)(?: · [^\]]*)?\]/;
  *  the AI's own work. */
 export const CANVAS_SETUP =
   
-  "[canvas setup] You are an AI agent on the HOST kernel: your record, memory and calls live there. A human sees you as a CELL on a CANVAS — a web page that is a SECOND kernel, connected as a peer: its agents are `<page guid>|<agent id>` (its kernel `<page guid>|kernel`). Reflect the host first (it lists the peers), then the page. To BUILD on the canvas, pull `docs of=<page guid>|view_root` first: the view places cells, and its doc carries the panel API. Every user turn ends with [at X,Y], where it was typed (x grows right, y grows down).";
+  "[canvas setup] You are an AI agent on the HOST kernel: your record, memory and calls live there. A human sees you as a CELL on a CANVAS — a web page that is a SECOND kernel, connected as a peer: its agents are `<page guid>|<agent id>` (its kernel `<page guid>|kernel`). Reflect the host first (it lists the peers), then the page. To BUILD on the canvas, pull `docs of=<page guid>|view_root` first: the view places cells, and its doc carries the panel API. A TOOL with its own panel is ONE host agent: create it under this canvas's node — a `canvas.tools` agent, `canvas_root` for the main canvas (`create {record: {handler_module, …, view: {kind: html, bytes, calls: [the verbs its panel calls]}}}`) and show it with `place {backend_id, x, y}` on the view — the panel's grants follow from `calls`. A PYTHON agent is an instance of a BUNDLE (code in `.fantastic/bundles/<name>/`): editing the bundle's files changes EVERY instance at once; to change one alone, copy the folder to a new name first (`fantastic readme bundles`). Every user turn ends with [at X,Y], where it was typed (x grows right, y grows down).";
 /** The setup as the TRANSCRIPT carries it — hidden from the bubble. */
 const SETUP_BLOCK = /\n\[canvas setup\][\s\S]*$/;
 
@@ -172,8 +173,7 @@ export const aiView: ViewBundle = {
   handles: ["ai_view.ts"],
   // Fronts a backend it never spawns; cancels a turn through the host root's
   // task table.
-  // `$parent: [update]`: [make main] names this cell on its view.
-  grants: (backend) => ({ [backend]: ["watch", "reflect", "history", "status", "send", "stop"], kernel: ["ps", "cancel"], canvas_root: ["keep", "rename"], $parent: ["update"] }),
+  grants: (backend) => ({ [backend]: ["watch", "reflect", "history", "status", "send", "stop"], kernel: ["ps", "cancel"], [canvasNode()]: ["keep", "rename"] }),
 
   async mount(ctx: ViewContext): Promise<ViewHandle> {
     const { kernel, mount, selfId, backend, record } = ctx;
@@ -229,7 +229,6 @@ export const aiView: ViewBundle = {
     }
     const tpl = record && typeof record["template"] === "string" ? (record["template"] as string) : "";
     $<HTMLElement>(".c-agent").textContent = tpl ? `✦ ${tpl} · ${backend}` : `${selfId} (client ${clientId})`;
-    let unwatchMain = (): void => {};
     // THE DIALOG'S STORE, in the header: `○ ephemeral` (RAM — closing the
     // cell forgets it) with [keep], or `● kept · <name>` (the project's SQLite —
     // it outlives the cell; click the name to rename it).
@@ -253,7 +252,7 @@ export const aiView: ViewBundle = {
       }
       /** Keep the dialog; false (said in the dialog) when the host refused. */
       const keep = async (): Promise<boolean> => {
-        const r = (await host.callHost("canvas_root", { type: "keep", id: backend } as never)) as Dict;
+        const r = (await host.callHost(canvasNode(), { type: "keep", id: backend } as never)) as Dict;
         if (typeof r["error"] === "string") {
           addMsg("notice", `✕ ${r["error"]}`, dialogEl).classList.add("too-small");
           return false;
@@ -273,7 +272,7 @@ export const aiView: ViewBundle = {
         input.select();
         const done = async (save: boolean): Promise<void> => {
           if (save && input.value.trim()) {
-            const r = (await host.callHost("canvas_root", { type: "rename", id: backend, name: input.value.trim() } as never)) as Dict;
+            const r = (await host.callHost(canvasNode(), { type: "rename", id: backend, name: input.value.trim() } as never)) as Dict;
             if (typeof r["error"] !== "string") {
               kernel.updateMeta(selfId, { dialog_name: r["name"] } as never);
               showKept(String(r["name"]));
@@ -289,35 +288,6 @@ export const aiView: ViewBundle = {
       };
       $<HTMLElement>(".c-agent").after(badge);
       if (!badge.classList.contains("kept")) badge.after(keepBtn);
-
-      // THE VIEW'S MAIN CHAT (its one voice): [make main] keeps the dialog
-      // first when it is ephemeral, then names this cell on its view — the view
-      // delete-locks it and demotes the previous main. `★ main`, clicked,
-      // unmakes it. The view record is the truth: every chat cell follows it.
-      const canvasId = kernel.get(selfId)?.parentId ?? null;
-      if (canvasId !== null) {
-        const mainBtn = document.createElement("button");
-        mainBtn.className = "c-keep c-main";
-        const setMain = async (to: string | null): Promise<void> => {
-          if (to !== null && !badge.classList.contains("kept") && !(await keep())) return;
-          const r = (await kernel.send([{ target: canvasId, payload: { type: "update", id: canvasId, fields: { main_ai_chat: to } } as never }]))[0]?.result as Dict | undefined;
-          if (r !== undefined && typeof r["error"] === "string") addMsg("notice", `✕ ${r["error"]}`, dialogEl).classList.add("too-small");
-        };
-        const showMain = (): void => {
-          const isMain = kernel.get(canvasId)?.meta["main_ai_chat"] === selfId;
-          mainBtn.classList.toggle("is-main", isMain);
-          mainBtn.textContent = isMain ? "★ main" : "make main";
-          mainBtn.title = isMain
-            ? "this view's main chat (delete-locked) — click to unmake it"
-            : "make this the view's main chat: kept, delete-locked, named on the view";
-          mainBtn.onclick = (): void => void setMain(isMain ? null : selfId);
-        };
-        showMain();
-        $<HTMLElement>(".c-header > span").append(mainBtn);
-        unwatchMain = kernel.addStateSubscriber((e) => {
-          if (e["agent_id"] === canvasId) showMain();
-        });
-      }
     }
     const upRefl = (await host.call(backend, { type: "reflect" })) as Dict;
     $<HTMLElement>(".c-model").textContent = s(upRefl, "model");
@@ -618,8 +588,11 @@ export const aiView: ViewBundle = {
     // `history` answers at DIGEST resolution ({id, role, head, bytes} per row) on
     // every runtime; a row's full text is behind the agent's recall / grep.
     const hist = (await host.call(backend, { type: "history", client_id: clientId })) as Dict;
-    const rows = Array.isArray(hist["rows"]) ? (hist["rows"] as Dict[]) : [];
-    for (const m of rows) addMsg(s(m, "role"), s(m, "head"), dialogEl);
+    // a backend not answering yet (a host just restarted) answers null: no rows
+    const rows = Array.isArray(hist?.["rows"]) ? (hist["rows"] as Dict[]) : [];
+    // `kind: "notice"` rows are the AI layer's own turns to its model (the
+    // no-call reminder, a malformed-call report, a refused await): not chat
+    for (const m of rows) if (s(m, "kind") !== "notice") addMsg(s(m, "role"), s(m, "head"), dialogEl);
     const snap = (await host.call(backend, { type: "status", client_id: clientId })) as Dict;
     if (snap) {
       setOthersHint(typeof snap["others_pending"] === "number" ? (snap["others_pending"] as number) : 0);
@@ -737,7 +710,6 @@ export const aiView: ViewBundle = {
       unmount(): void {
         stick.disconnect();
         offLifecycle();
-        unwatchMain();
         offQueued();
         offStatus();
         offStart();

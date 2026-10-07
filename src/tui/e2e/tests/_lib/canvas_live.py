@@ -47,6 +47,8 @@ RUNS = SRC / "tui" / "e2e" / "runs"
 FEATURES = {
     "responses_backend.tools": "responses",
     "vllm_backend.tools": "vllm",
+    "ollama_backend.tools": "ollama",
+    "anthropic_backend.tools": "anthropic",
     "foundation_models_backend.tools": "foundation-models",
 }
 #: Where a run's key comes from, per provider (the plug's own environment).
@@ -392,8 +394,12 @@ async def wait_quiet(pg: Page, total: float, quiet: float, cell: int = 0) -> boo
 
 
 async def answer(pg: Page, cell: int = 0) -> str:
+    """The AI's last WORDS: its last assistant bubble with text, skipping one that
+    is only call markup — a malformed call (the server's dropped `<`, e.g.
+    `call name="done"></call>`) shows as text but is no answer."""
     return await pg.js(f"(()=>{{const m=[...(document.querySelectorAll('.chat-view')[{cell}]?.querySelectorAll('.msg.assistant:not(.thinking)') ?? [])]"
-                       ".filter(x=>x.textContent.trim()); return m.length ? m[m.length-1].textContent : '';})()") or ""
+                       ".filter(x=>{const t=x.textContent.trim(); return t && !/^(<?\\/?call\\b[^>]*>\\s*)+$/.test(t);});"
+                       " return m.length ? m[m.length-1].textContent : '';})()") or ""
 
 
 async def in_frame(pg: Page, cell_id: str, expr: str) -> Any:

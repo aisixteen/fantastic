@@ -1,4 +1,5 @@
 import { test } from "node:test";
+import { setCanvasNode } from "../src/bundles/canvas/host_views.ts";
 import assert from "node:assert/strict";
 import { Agent, Kernel } from "../src/lib.ts";
 import type { Payload } from "../src/lib.ts";
@@ -6,6 +7,7 @@ import { registerCanvas } from "../src/bundles/canvas/canvas_agent.ts";
 import { registerHtmlAgent } from "../src/bundles/html_agent/html_agent.ts";
 
 function page(): Kernel {
+  setCanvasNode("canvas_root");
   const k = new Kernel();
   registerCanvas(k);
   registerHtmlAgent(k);
@@ -78,34 +80,6 @@ test("a body that arrives as RAW BYTES (the bridge's binary frame) is decoded as
   const r = (await k.send([{ target: "b", payload: { type: "set_html", bytes: new TextEncoder().encode("<p>v2</p>") } as unknown as Payload }]))[0]!.result as Payload;
   assert.equal(r["ok"], true);
   assert.equal(k.get("b")?.meta["html"], "<p>v2</p>");
-});
-
-test("a view names its MAIN chat through update on itself: locked while main, one per view, cleared when that chat goes", async () => {
-  const k = page();
-  k.registerBundle("ai_view.ts", () => null);
-  await call(k, { type: "place", kind: "chat", id: "c", x: 0, y: 0, backend_id: "ai_1" });
-  await call(k, { type: "place", kind: "html", id: "h", x: 0, y: 0 });
-  assert.equal((await call(k, { type: "update", id: "view_root", fields: { main_ai_chat: "c" } }))["updated"], "view_root");
-  assert.equal(k.get("view_root")?.meta["main_ai_chat"], "c");
-  assert.equal((await call(k, { type: "update", id: "view_root", fields: { readme: "mine" } }))["updated"], "view_root", "any field on the view");
-  assert.equal(k.get("view_root")?.meta["readme"], "mine");
-  assert.equal(k.get("view_root")?.meta["main_ai_chat"], "c", "the main chat untouched");
-  // while main it is delete-locked; another made main demotes and unlocks it
-  assert.equal(k.get("c")?.meta["delete_lock"], true);
-  assert.equal((await call(k, { type: "remove", id: "c" }))["reason"], "locked");
-  await call(k, { type: "place", kind: "chat", id: "c2", x: 0, y: 0, backend_id: "ai_2" });
-  await call(k, { type: "update", id: "view_root", fields: { main_ai_chat: "c2" } });
-  assert.equal(k.get("c")?.meta["delete_lock"], false);
-  assert.equal(k.get("c2")?.meta["delete_lock"], true);
-  // unmade main: unlocked, the view voiceless
-  assert.equal((await call(k, { type: "update", id: "view_root", fields: { main_ai_chat: null } }))["updated"], "view_root");
-  assert.equal(k.get("c2")?.meta["delete_lock"], false);
-  assert.equal(k.get("view_root")?.meta["main_ai_chat"], null);
-  // unlocked by hand while main and removed: the view has no voice
-  await call(k, { type: "update", id: "view_root", fields: { main_ai_chat: "c" } });
-  k.updateMeta("c", { delete_lock: false } as unknown as Payload);
-  await call(k, { type: "remove", id: "c" });
-  assert.equal(k.get("view_root")?.meta["main_ai_chat"], null, "its main chat gone, the view has no voice");
 });
 
 test("place makes no nested view: one view for now (owner, 2026-10-04)", async () => {

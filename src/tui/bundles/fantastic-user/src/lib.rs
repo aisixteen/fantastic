@@ -14,17 +14,24 @@
 //!   hashes to it ([`grants::resolve`]). The shell itself (no origin) needs none.
 //!   A page loader serves record verbs inside its caller's subtree; the
 //!   canvas's loader sits under `user`.
-//! - `around {view?, x, y, radius}` — the cells of a page view (default: the
-//!   root view, [`ROOT_VIEW`]) within `radius` of the point, nearest first,
+//! - `around {canvas?, view?, x, y, radius}` — the cells of a page view
+//!   (default: the root view, [`ROOT_VIEW`]) of a canvas (its node id; default
+//!   the main canvas, `page_loader`) within `radius` of the point, nearest first,
 //!   from the page RECORDS: `{view, members: [{id, kind, title, rect,
 //!   distance, backend_id?}]}`. Judged by the CALLER's own page grants: the
 //!   shell sees everything; any other caller — the canvas leg (`*|*`), a
 //!   cell's AI — by its own `can_call` (`<tree guid>|<id>`).
+//! - `path {rescan?}` — THE HUMAN'S PROGRAMS: `{dirs, executables: {name:
+//!   full path}}` — the PATH directories (this process's, merged with the
+//!   login shell's) and every executable on them, the first on PATH winning.
+//!   Scanned when `user` boots and kept in RAM; `rescan: true` scans again.
+//!   What a name MEANS (a coding agent, an editor…) is the caller's to decide.
 //! - `reflect` — this agent, its verbs, and (when it can) its `can_call`.
 //! - every other verb is the lib's `user_probe` (the human as a test fixture:
 //!   `inquiry`, `inquiries`, `send`), unchanged.
 
 pub mod grants;
+pub mod path;
 
 use std::sync::Arc;
 
@@ -38,7 +45,7 @@ use serde_json::{json, Map, Value};
 pub const HANDLER_MODULE: &str = "user.tools";
 
 /// The verbs this bundle answers itself (the rest are the probe's).
-pub const VERBS: [&str; 3] = ["forward", "around", "reflect"];
+pub const VERBS: [&str; 4] = ["forward", "around", "path", "reflect"];
 
 
 /// A view's background: drawn behind its cells, never one of them.
@@ -58,6 +65,8 @@ fn kind_of(hm: &str) -> &str {
         "setup_view.ts" => "setup",
         "stream_view.ts" => "stream",
         "reflect_view.ts" => "reflect",
+        "sidebar_view.ts" => "sidebar",
+        "canvases_view.ts" => "canvases",
         other => other,
     }
 }
@@ -74,6 +83,8 @@ fn s<'a>(p: &'a Value, k: &str) -> &'a str {
 #[derive(Default)]
 pub struct UserBundle {
     probe: UserProbe,
+    /// `path`'s scan, made at boot (RAM only — a stale path is never stored)
+    programs: Arc<tokio::sync::Mutex<Option<Value>>>,
 }
 
 impl UserBundle {
@@ -82,6 +93,18 @@ impl UserBundle {
             .agents
             .get(gw)
             .and_then(|a| a.value().record().meta.get("page_loader").and_then(Value::as_str).map(str::to_string))
+    }
+
+    /// A canvas node's page loader: its `kernel_state` child.
+    fn loader_of(kernel: &Kernel, canvas: &str) -> Option<String> {
+        kernel
+            .agents
+            .iter()
+            .find(|a| {
+                let r = a.value().record();
+                r.parent_id.as_deref() == Some(canvas) && r.handler_module.as_deref() == Some("kernel_state.tools")
+            })
+            .map(|a| a.key().0.clone())
     }
 
     /// The token gate: the shell (no origin) passes; any other caller passes
@@ -178,8 +201,15 @@ impl UserBundle {
 
     /// `around {view?, x, y, radius}` from the page records.
     async fn around(me: &AgentId, p: &Value, kernel: &Arc<Kernel>) -> Value {
-        let Some(loader) = Self::page_loader(kernel, me) else {
-            return refuse("not_found", "user.around: this record names no page_loader");
+        let loader = match p.get("canvas").and_then(Value::as_str).filter(|c| !c.is_empty()) {
+            Some(c) => match Self::loader_of(kernel, c) {
+                Some(l) => l,
+                None => return refuse("not_found", format!("user.around: no canvas {c:?} (a canvas node with a page loader)")),
+            },
+            None => match Self::page_loader(kernel, me) {
+                Some(l) => l,
+                None => return refuse("not_found", "user.around: this record names no page_loader"),
+            },
         };
         let num = |k: &str| p.get(k).and_then(Value::as_f64).filter(|v| v.is_finite());
         let (Some(x), Some(y), Some(radius)) = (num("x"), num("y"), num("radius")) else {
@@ -237,9 +267,30 @@ impl UserBundle {
         json!({"view": view, "members": members.into_iter().map(|(_, m)| m).collect::<Vec<_>>()})
     }
 
+    /// `path {rescan?}` — the scan, made once (at boot) and kept.
+    async fn path(&self, p: &Value) -> Value {
+        let mut held = self.programs.lock().await;
+        if held.is_none() || p.get("rescan").and_then(Value::as_bool) == Some(true) {
+            *held = Some(path::scan().await);
+        }
+        held.clone().unwrap_or(Value::Null)
+    }
+
     /// This bundle's own verbs; `None` = not one of them (the probe's).
-    async fn run(me: &AgentId, p: &Value, body: Option<Blob>, kernel: &Arc<Kernel>) -> Option<(Reply, Option<Blob>)> {
+    async fn run(&self, me: &AgentId, p: &Value, body: Option<Blob>, kernel: &Arc<Kernel>) -> Option<(Reply, Option<Blob>)> {
         let reply = match s(p, "type") {
+            "path" => self.path(p).await,
+            "boot" => {
+                // the scan starts with `user`, off the boot's path
+                let held = Arc::clone(&self.programs);
+                tokio::spawn(async move {
+                    let mut h = held.lock().await;
+                    if h.is_none() {
+                        *h = Some(path::scan().await);
+                    }
+                });
+                return None;
+            }
             "forward" => {
                 let (r, b) = Self::forward(me, p, body, kernel).await;
                 return Some((Some(r), b));
@@ -265,12 +316,13 @@ impl Bundle for UserBundle {
             _ => serde_json::Map::new(),
         };
         v.insert("forward".into(), json!("args: target:str (req), payload:dict (req), timeout:num? (none by default: the call lasts as long as the target takes), token:str? — `user` sends payload to target; the reply verbatim. A token is needed only when `user` carries one (token_sha256) and the caller is not the shell."));
-        v.insert("around".into(), json!("args: view:str? (default view_root), x:num, y:num, radius:num — {view, members: [{id, kind, title, rect:{x,y,w,h}, distance, backend_id?}]}: the cells of a page view within radius, nearest first, from the page records; judged by YOUR page grants."));
+        v.insert("path".into(), json!("args: rescan:bool? — {dirs: [PATH dirs], executables: {name: full path}}: every program on the human's PATH (this process's merged with the login shell's), the first on PATH winning; scanned at boot, `rescan: true` scans again. The caller decides what a name means."));
+        v.insert("around".into(), json!("args: canvas:str? (a canvas node id — default the main canvas), view:str? (default view_root), x:num, y:num, radius:num — {view, members: [{id, kind, title, rect:{x,y,w,h}, distance, backend_id?}]}: the cells of a page view within radius, nearest first, from the page records; judged by YOUR page grants."));
         Value::Object(v)
     }
 
     async fn handle(&self, agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Result<Reply, BundleError> {
-        if let Some((r, _)) = Self::run(agent_id, payload, None, kernel).await {
+        if let Some((r, _)) = self.run(agent_id, payload, None, kernel).await {
             return Ok(r);
         }
         let mut r = self.probe.handle(agent_id, payload, kernel).await?;
@@ -290,7 +342,7 @@ impl Bundle for UserBundle {
         kernel: &Arc<Kernel>,
     ) -> Result<(Reply, Option<Blob>), BundleError> {
         // every call lands here (the kernel's binary path)
-        if let Some(out) = Self::run(agent_id, &header, body, kernel).await {
+        if let Some(out) = self.run(agent_id, &header, body, kernel).await {
             return Ok(out);
         }
         Ok((self.handle(agent_id, &header, kernel).await?, None))

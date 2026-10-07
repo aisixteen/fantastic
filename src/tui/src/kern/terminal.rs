@@ -11,6 +11,12 @@
 //! Attaching is CLIENT-SIDE, because `boot` starts nothing: `status` finds a live
 //! PTY job and re-attaches to it (its `output` ring is the replay), or `start`s
 //! the shell as the human. Closing is a `delete_agent`; the job dies with it.
+//!
+//! `fantastic run COMMAND [ARGS…]` (`recipe.rs`): `term` runs exactly that argv
+//! instead of the shell — the user's own program from `$PATH`, as is, at their
+//! discretion. The argv rides `term`'s record (`command`), so a re-attach starts
+//! the same program; a different `run` remakes `term`. With the canvas the same
+//! program runs in a terminal CELL instead ([`canvas_cell`]).
 
 use serde_json::{json, Value};
 
@@ -41,51 +47,131 @@ fn exactly(line: &str) -> String {
     regex::escape(line)
 }
 
-/// The exec record fields that run `sh` and nothing else: the exact line
+/// The exec record fields that run `argv` and nothing else: the exact line
 /// allowed, in the directory the user ran us in (the process cwd), with the
-/// human's whole environment — the human's own shell gets the human's env.
-fn shell_record(sh: &str) -> Value {
-    let line = fantastic_exec_bridge::shlex_join(&[sh.to_string()]);
+/// human's whole environment — the human's own program gets the human's env.
+fn line_record(argv: &[String]) -> Value {
+    let line = fantastic_exec_bridge::shlex_join(argv);
     json!({"allowed": [exactly(&line)], "cwd": ".", "inherit_env": ["*"]})
+}
+
+/// The argv `term`'s record names (`run`), if any.
+fn recorded(host: &Host, id: &str) -> Option<Vec<String>> {
+    let a = host.kernel.agents.get(&fantastic_kernel::AgentId::from(id))?;
+    let v = a.value().record().meta.get("command")?.as_array()?.clone();
+    v.iter().map(|x| x.as_str().map(str::to_string)).collect()
+}
+
+/// `run COMMAND…` in the terminal UI: `term` will run exactly `argv`. A `term`
+/// running anything else is removed first (its job dies with it); the pane
+/// attaches as for `t` ([`open`] starts the recorded argv).
+pub async fn prepare_run(host: &Host, argv: &[String]) -> Result<(), String> {
+    let id = fantastic_kernel::AgentId::from(TERM_ID);
+    if host.kernel.agents.contains_key(&id) {
+        if recorded(host, TERM_ID).as_deref() == Some(argv) {
+            return Ok(());
+        }
+        close(host).await?;
+    }
+    create(host, argv).await
+}
+
+/// Create `term` running exactly `argv`, and merge it into the human's
+/// `can_call` (so `user → term` passes the gate).
+async fn create(host: &Host, argv: &[String]) -> Result<(), String> {
+    let mut create = json!({
+        "type": "create_agent",
+        "parent_id": host.cfg.user.as_str(),
+        "id": TERM_ID,
+        "handler_module": fantastic_exec_bridge::HANDLER_MODULE,
+        "ingress_rule": "allow_all_ingress",
+        "callable_by": {host.cfg.user.as_str(): "*"},
+        "command": argv,
+    });
+    if let (Some(c), Value::Object(f)) = (create.as_object_mut(), line_record(argv)) {
+        c.extend(f);
+    }
+    let r = host.operator("kernel", create).await;
+    if let Some(e) = r.result.get("error").and_then(Value::as_str) {
+        return Err(format!("could not create `{TERM_ID}`: {e}"));
+    }
+    // The human's authority must name the terminal, or every keystroke is
+    // refused. MERGED into what is there, never replacing it.
+    let user = host.cfg.user.clone();
+    let mut cc = host
+        .kernel
+        .agents
+        .get(&fantastic_kernel::AgentId::from(user.as_str()))
+        .and_then(|a| a.value().record().meta.get("can_call").and_then(Value::as_object).cloned())
+        .unwrap_or_default();
+    cc.insert(TERM_ID.into(), json!("*"));
+    let r = host
+        .operator("kernel", json!({"type": "update_agent", "id": user, "can_call": cc}))
+        .await;
+    if let Some(e) = r.result.get("error").and_then(Value::as_str) {
+        return Err(format!("could not grant `{user}` → `{TERM_ID}`: {e}"));
+    }
+    Ok(())
+}
+
+/// `run COMMAND…` with the canvas: an exec agent under `canvas_root` that may
+/// run exactly `argv`, and a terminal cell on the view that starts it (the
+/// cell's `command`). Says the cell's id; `None` when the page has no view yet.
+pub async fn canvas_cell(host: &Host, argv: &[String]) -> Result<Option<String>, String> {
+    if !crate::kern::root_ai::has_view(host).await? {
+        return Ok(None);
+    }
+    let hex = crate::kern::backend::hex8();
+    let (exec, cell) = (format!("run_{hex}"), format!("terminal_{hex}"));
+    let mut create = json!({
+        "type": "create_agent",
+        "parent_id": crate::kern::web::CANVAS_NODE_ID,
+        "id": exec,
+        "handler_module": fantastic_exec_bridge::HANDLER_MODULE,
+        "ingress_rule": "allow_all_ingress",
+        "cell_id": cell,
+    });
+    if let (Some(c), Value::Object(f)) = (create.as_object_mut(), line_record(argv)) {
+        c.extend(f);
+    }
+    let r = host.operator("kernel", create).await;
+    if let Some(e) = r.result.get("error").and_then(Value::as_str) {
+        return Err(format!("could not create `{exec}`: {e}"));
+    }
+    crate::kern::reach::granted(host, &exec).await?;
+    let mut rec = serde_json::Map::new();
+    for (k, v) in [
+        ("id", json!(cell)),
+        ("handler_module", json!("terminal_view.ts")),
+        ("parent_id", json!("view_root")),
+        ("owns_backend", json!(true)),
+        ("backend_id", json!(exec)),
+        ("command", json!(argv)),
+        ("display_name", json!(argv.join(" "))),
+        ("x", json!(0)),
+        ("y", json!(0)),
+        ("width", json!(720)),
+        ("height", json!(420)),
+        ("can_call", json!({exec.clone(): ["watch", "status", "start", "write", "ack", "resize", "output", "paste_image"]})),
+        ("callable_by", json!({"$self": "*"})),
+    ] {
+        rec.insert(k.into(), v);
+    }
+    crate::kern::root_ai::persist(host, rec).await?;
+    Ok(Some(cell))
 }
 
 /// Create `term` if it is missing, then attach to its live PTY job or start one
 /// at `cols`×`rows`.
 pub async fn open(host: &Host, cols: u16, rows: u16) -> Result<Attach, String> {
-    let sh = shell()?;
     let id = fantastic_kernel::AgentId::from(TERM_ID);
+    // the program: the argv `run` recorded, else the human's shell
+    let argv = match recorded(host, TERM_ID) {
+        Some(a) if !a.is_empty() => a,
+        _ => vec![shell()?],
+    };
     if !host.kernel.agents.contains_key(&id) {
-        let mut create = json!({
-            "type": "create_agent",
-            "parent_id": host.cfg.user.as_str(),
-            "id": TERM_ID,
-            "handler_module": fantastic_exec_bridge::HANDLER_MODULE,
-            "ingress_rule": "allow_all_ingress",
-            "callable_by": {host.cfg.user.as_str(): "*"},
-        });
-        if let (Some(c), Value::Object(f)) = (create.as_object_mut(), shell_record(&sh)) {
-            c.extend(f);
-        }
-        let r = host.operator("kernel", create).await;
-        if let Some(e) = r.result.get("error").and_then(Value::as_str) {
-            return Err(format!("could not create `{TERM_ID}`: {e}"));
-        }
-        // The human's authority must name the terminal, or every keystroke is
-        // refused. MERGED into what is there, never replacing it.
-        let user = host.cfg.user.clone();
-        let mut cc = host
-            .kernel
-            .agents
-            .get(&fantastic_kernel::AgentId::from(user.as_str()))
-            .and_then(|a| a.value().record().meta.get("can_call").and_then(Value::as_object).cloned())
-            .unwrap_or_default();
-        cc.insert(TERM_ID.into(), json!("*"));
-        let r = host
-            .operator("kernel", json!({"type": "update_agent", "id": user, "can_call": cc}))
-            .await;
-        if let Some(e) = r.result.get("error").and_then(Value::as_str) {
-            return Err(format!("could not grant `{user}` → `{TERM_ID}`: {e}"));
-        }
+        create(host, &argv).await?;
     }
 
     // A live PTY job is re-attached, never doubled.
@@ -105,12 +191,12 @@ pub async fn open(host: &Host, cols: u16, rows: u16) -> Result<Attach, String> {
     let r = host
         .act(
             TERM_ID,
-            json!({"type": "start", "command": sh, "pty": {"cols": cols, "rows": rows}}),
+            json!({"type": "start", "command": argv[0], "args": &argv[1..], "pty": {"cols": cols, "rows": rows}}),
         )
         .await;
     if let Some(e) = r.result.get("error").and_then(Value::as_str) {
         let why = r.result.get("reason").and_then(Value::as_str).unwrap_or(e);
-        return Err(format!("`{TERM_ID}` did not start {sh}: {why}"));
+        return Err(format!("`{TERM_ID}` did not start {}: {why}", argv.join(" ")));
     }
     match r.result.get("job_id").and_then(Value::as_i64) {
         Some(j) => Ok(Attach { job_id: j, replay: String::new() }),

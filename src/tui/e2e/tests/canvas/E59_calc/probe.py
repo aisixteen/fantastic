@@ -13,11 +13,11 @@ from fractions import Fraction
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from _lib.canvas_live import FOLDER, Rig, verdict, ask, html_cell  # noqa: E402
+from _lib.canvas_live import FOLDER, Rig, verdict, ask  # noqa: E402
 
 FNS = ["det", "factor", "simpson", "roots", "fib_mod", "gcd_lcm"]
 
-ASK = ("The panel `calc` has six buttons; each runs `python3 calc.py <fn> <json input>` on the exec agent `calc_exec` "
+ASK = ("The panel `calc` (the exec agent `calc_exec`'s own view) has six buttons; each runs `python3 calc.py <fn> <json input>` on the exec agent `calc_exec` "
        "and shows the last line printed. Write calc.py (stdlib only) so every button works — each call prints ONE JSON line:\n"
        "- det: an integer matrix → its exact integer determinant\n"
        "- factor: an integer n ≥ 2 → [[p, e], …], primes ascending\n"
@@ -132,13 +132,16 @@ def run(proj: Path, *args: str, timeout: float = 30) -> tuple[int, str]:
 
 # ── the seed: the exec agent and the six-button panel ────────────────────────
 def exec_record() -> dict:
+    """ONE host agent (backend-owned views): the exec that may run exactly the
+    calc lines, carrying its OWN view — the six-button panel, the verbs it calls."""
     return {"id": "calc_exec", "handler_module": "exec_bridge.tools", "parent_id": "canvas_root",
             "allowed": [r"^python3 calc\.py (det|factor|simpson|roots|fib_mod|gcd_lcm) \S+$", r"^python3 test_calc\.py$"],
             # the panel's calls arrive as `user`; an exec leg is sealed until its rule opens it
-            "cwd": ".", "inherit_env": ["*"], "callable_by": {"user": ["*"]}, "ingress_rule": "allow_all_ingress"}
+            "cwd": ".", "inherit_env": ["*"], "callable_by": {"user": ["*"]}, "ingress_rule": "allow_all_ingress",
+            "view": {"kind": "html", "bytes": panel_html(), "calls": ["start", "watch"]}}
 
 
-def panel() -> dict:
+def panel_html() -> str:
     rows = "".join(f"<div><button id=b_{fn}>{fn}</button> <code>{json.dumps(UI[fn], separators=(',', ':'))}</code>"
                    f" → <span id=out_{fn}></span></div>" for fn in FNS)
     inputs = json.dumps({fn: json.dumps(UI[fn], separators=(",", ":")) for fn in FNS})
@@ -154,7 +157,15 @@ for (const fn in IN) document.getElementById('b_' + fn).onclick = async () => {{
   job[fn] = r && r.job_id;
 }};
 </script>"""
-    return html_cell("calc", "calc", 700, 60, html, 520, 300, can_call={"calc_exec": ["start", "watch"]})
+    return html
+
+
+def panel() -> dict:
+    """The page side is only a VIEW of `calc_exec`: layout + backend_id — its body
+    and its grant come from the host record."""
+    return {"id": "calc", "handler_module": "agent_view.ts", "display_name": "calc", "backend_id": "calc_exec",
+            "owns_backend": False, "x": 700, "y": 60, "width": 520, "height": 300}
+
 
 
 async def ui_values(pg) -> dict:

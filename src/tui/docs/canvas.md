@@ -8,15 +8,14 @@ host kernel through the socket leg `canvas_ws`. It holds no memory store and no
 AI: every cell is a VIEW of a host agent (a terminal, an AI chat, a set-up
 cell) or page-side content (html, gl).
 
-## The root AI on a vLLM server
+## The root AI and your own programs
 
-`fantastic canvas run vllm -p PORT [--host HOST] [--kv-overflow evict|reject]`
-points the AI the view's main chat shows at `http://HOST:PORT/v1` — re-pointed
-when it is already a vLLM AI, else made under `canvas_root` (on the project's
-`memory` store) with a main chat cell. Model, context window, max tokens and
-KV slots are read from the server before its first turn. `--host` is
-`127.0.0.1` and `--kv-overflow` `evict` unless named. Open the canvas once first (the view
-must exist); the binary needs the vLLM backend (`--features vllm`).
+`fantastic [canvas] ai vllm -p PORT` (also `ai ollama -p PORT`, `ai responses
+--model M`, `ai anthropic --model M`) puts the ROOT AI `ai` on that backend; on the canvas, any chat cell can
+show it. What the server knows (model, window) is read from it.
+`fantastic [canvas] run COMMAND [ARGS…]` runs your own program from `$PATH`,
+as is, in the terminal — or, with the canvas, in a terminal cell. Open the
+canvas once first (its view must exist).
 
 ## Two kernels, two address forms
 
@@ -25,25 +24,48 @@ must exist); the binary needs the vLLM backend (`--features vllm`).
   `<page guid>|view_root` its root view. Reflect each kernel (`reflect` on
   `kernel`, and on `<page guid>|canvas`) to see what each holds.
 
-## The tree
+## The tree — flat peer canvases
 
 ```
 user
+├── ai                          the root AI (`fantastic … ai BACKEND`), under no canvas
 └── web
-    ├── canvas_ws               the socket leg the page speaks through
+    ├── canvas_ws               the socket leg every page speaks through
     └── canvas_page             the embedded page
-        └── canvas_root         the canvas's host node: create / delete / spawn
-            ├── <backends>      a terminal's exec_bridge, an AI, setup
-            ├── static_files    the files the cells load
-            └── web_loader      the page's records (.fantastic/web)
-                └── canvas      (page side)
-                    └── view_root
-                        └── background · <its cells>
+        ├── canvas_root         THE MAIN canvas (main: true): create / delete / spawn
+        │   ├── <backends>      a terminal's exec_bridge, an AI, setup, a bundle's agent
+        │   ├── static_files    the files the cells load
+        │   └── web_loader      its page records (.fantastic/web)
+        │       └── canvas      (page side) → view_root → background · <its cells>
+        └── canvas_<name>       a PEER canvas: new_canvas {name} on any canvas node
+            ├── <backends>
+            └── canvas_<name>_loader   its page records (.fantastic/web/canvas_<name>)
 ```
 
+Canvases are FLAT peers: each its own page kernel (own guid), own cells' host
+backends. Open one at the page URL with `?canvas=<node id>`
+(none: the main one); a `canvases` cell lists them (★ the main one).
+A canvas shows only its own subtree and the agents under no canvas; another
+canvas's agents never appear on it. `canvases` (any canvas node) lists them.
+NOTHING FLOATS: a canvas opens as its background alone. Everything is a cell
+placed from the double-click — among them a `sidebar` (the chats and the agent
+tree) and `canvases` (every canvas; a click opens one, `+ new canvas` makes a
+peer), as many as you like, moved, resized and closed like any cell. There is
+no main chat: a chat cell goes wherever you place one.
+
+CODING AGENTS: the double-click lists `claude`, `codex`, `aider` and
+`opencode` when they are on your PATH (`user path` — every program on PATH,
+with its full path). A tile starts that program in a terminal cell, as you
+would in a shell; it runs with your own account and settings.
+
+PAGE BUNDLES: `<a canvas's records root>/bundles/<name>/bundle.yaml` with
+`base: html_agent`, `sentence`, and `html: |` (the body each instance starts
+with). They load before the page tree; a changed `bundle.yaml` reloads at once.
+An instance is a page agent whose `handler_module` is the folder name.
+
 Every page call reaches the host as `user` (`user.forward`, with the token
-when `user` carries a `token_sha256`). `user` — and every AI agent under
-`canvas_root` — reaches every host agent with every verb (god mode, by grants
+when `user` carries a `token_sha256`). `user` — and every AI agent under a
+canvas node — reaches every host agent with every verb (god mode, by grants
 both sides; the human narrows them with `update_agent`).
 
 ## A view's verbs (page side, on `<page guid>|<view id>`)
@@ -59,11 +81,18 @@ both sides; the human narrows them with `update_agent`).
 | (html check) | an html body that is empty, a placeholder (no element) or truncated (an unclosed script, a cut tag) is refused, saying why |
 | `remove {id}` | delete a cell (refused for a delete-locked agent) |
 
-`update {id: <the view>, fields: {main_ai_chat: <chat cell id> | null}}`
-names the view's main chat. Every cell answers `reflect`, `get_html`,
+`update {id: <the view>, fields: {…}}` sets the view's own fields. Every cell answers `reflect`, `get_html`,
 `set_html`, `emit`. What is near a point is the host's: `around {view?, x, y,
 radius}` on `user` (default view: `view_root`) — `{view, members: [{id,
 kind, title, rect, distance, backend_id?}]}`, nearest first.
+
+## Views of host agents
+
+A cell is a VIEW of a host agent: the agent's record says how it is drawn
+(`view: {kind, bytes, calls}`, else terminal for an exec agent, chat for an AI,
+else its reflect card). `place {backend_id, x, y}` shows one; ✕ closes the view
+and the agent lives on (the sidebar lists it; ⌫ there deletes it). A cell whose
+agent is gone disappears.
 
 ## The background
 

@@ -56,7 +56,10 @@ export const terminalView: ViewBundle = {
   },
 
   async mount(ctx: ViewContext): Promise<ViewHandle> {
-    const { kernel, mount, selfId, backend, close } = ctx;
+    const { kernel, mount, selfId, backend, close, record } = ctx;
+    // `fantastic canvas run COMMAND…`: the cell names the program (its exec agent
+    // may run exactly that); else the child's login shell
+    const argv = Array.isArray(record?.["command"]) ? (record!["command"] as unknown[]).filter((a): a is string => typeof a === "string") : [];
     const host = new Host(kernel, selfId);
 
     // lazy-load the vendored UMD bundles. As ES modules in the browser (the
@@ -228,13 +231,13 @@ export const terminalView: ViewBundle = {
     } else {
       const started = (await host.call(backend, {
         type: "start",
-        args: ["-l"],
+        ...(argv.length ? { command: argv[0]!, args: argv.slice(1) } : { args: ["-l"] }),
         pty: { cols: term.cols, rows: term.rows },
       })) as { job_id?: number; error?: string; reason?: string };
       if (typeof started?.job_id === "number") {
         jobId = started.job_id;
       } else {
-        term.write(`\r\n[the login shell did not start: ${started?.error ?? JSON.stringify(started)}]\r\n`);
+        term.write(`\r\n[${argv.length ? argv.join(" ") : "the login shell"} did not start: ${started?.error ?? JSON.stringify(started)}]\r\n`);
       }
     }
     for (const e of early.splice(0)) (e["type"] === "job_done" ? ended : draw)(e);

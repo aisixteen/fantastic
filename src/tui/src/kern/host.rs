@@ -107,9 +107,19 @@ fn registry() -> BundleRegistry {
         fantastic_foundation_models_backend::HANDLER_MODULE,
         fantastic_foundation_models_backend::FoundationModelsBackendBundle::system(),
     );
+    // FOLDER BUNDLES' python base (`py_agent`): a `.fantastic/bundles/<name>/`
+    // with `base: py_agent` runs its program as the agent's implementation
+    // (`kern/bundle_watch` reloads it when its folder changes).
+    reg.register(fantastic_py_agent::HANDLER_MODULE, fantastic_py_agent::PyAgentBundle);
     // The vLLM backend: linked by `--features vllm`.
     #[cfg(feature = "vllm")]
     reg.register(fantastic_vllm_backend::HANDLER_MODULE, fantastic_vllm_backend::VllmBundle);
+    // The Anthropic Messages backend: linked by `--features anthropic`.
+    #[cfg(feature = "anthropic")]
+    reg.register(fantastic_anthropic_backend::HANDLER_MODULE, fantastic_anthropic_backend::AnthropicBundle);
+    // The Ollama backend: linked by `--features ollama`.
+    #[cfg(feature = "ollama")]
+    reg.register(fantastic_ollama_backend::HANDLER_MODULE, fantastic_ollama_backend::OllamaBackendBundle);
     // The OpenAI Responses backend: linked by `--features responses`.
     #[cfg(feature = "responses")]
     reg.register(
@@ -126,7 +136,10 @@ impl Host {
     /// `serve_web`: whether a persisted `web` host starts listening. Only a mode
     /// that serves the canvas opens the port; `fantastic` and `fantastic
     /// mcp` leave a `web` record on disk untouched (not booted).
-    pub async fn boot(paths: &Paths, serve_web: bool) -> Result<Self, KernelErr> {
+    /// `web_port`: `--port` — a recorded `web` on another port is set to it
+    /// BEFORE its listener boots (nothing runs here yet, so it is the user's to
+    /// overwrite).
+    pub async fn boot(paths: &Paths, serve_web: bool, web_port: Option<u16>) -> Result<Self, KernelErr> {
         let booted = bootstrap::bootstrap(registry(), BootstrapOptions::daemon(&paths.cwd))
             .map_err(|e| KernelErr::Boot(format!("{e}")))?;
         let kernel = Arc::clone(&booted.kernel);
@@ -182,6 +195,19 @@ impl Host {
             });
             if is_web && !serve_web {
                 continue;
+            }
+            if let (true, Some(p)) = (is_web, web_port) {
+                let had = kernel.agents.get(&id).and_then(|a| a.value().record().meta.get("port").and_then(Value::as_u64));
+                if had != Some(u64::from(p)) {
+                    let r = kernel
+                        .send(vec![Item::new(AgentId::from("kernel"), json!({"type": "update_agent", "id": id.0, "port": p}))])
+                        .await
+                        .remove(0)
+                        .result;
+                    if let Some(err) = r.get("error").and_then(Value::as_str) {
+                        notes.push(format!("{id}: --port {p} not set: {err}"));
+                    }
+                }
             }
             let reply = kernel
                 .send(vec![Item::new(id.clone(), json!({"type": "boot"}))])

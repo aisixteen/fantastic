@@ -244,6 +244,25 @@ pub fn outline(a: Args<'_>) -> Outline {
             conv.drain(..at);
         }
     }
+    // NOTICES are not drawn: `kind: "notice"` rows are the AI layer's own turns
+    // to its model (the no-call reminder, a malformed-call report, a refused
+    // await) — the model reads them, a person need not. A link INTO one lifts to
+    // the notice's own parent, so the reply after it stays in its thread.
+    let notice_up: HashMap<RowId, Option<RowId>> =
+        conv.iter().filter(|r| r.kind_is("notice")).map(|r| (r.id, r.parent)).collect();
+    conv.retain(|r| !r.kind_is("notice"));
+    let past_notices = |mut id: RowId| -> Option<RowId> {
+        for _ in 0..64 {
+            match notice_up.get(&id) {
+                Some(up) => id = (*up)?,
+                None => return Some(id),
+            }
+        }
+        None
+    };
+    if conv.is_empty() {
+        return Outline::default();
+    }
     let pos: HashMap<RowId, usize> = conv.iter().enumerate().map(|(i, r)| (r.id, i)).collect();
 
     // ── 2. Fold cover. A FLAT union over every fold present, which is what the
@@ -300,6 +319,7 @@ pub fn outline(a: Args<'_>) -> Outline {
     // ── 5. Links. A hidden row's link lifts to the fold that hides it, so a
     // reply into a folded turn hangs off the fold rather than disappearing.
     let lift = |id: RowId| -> Option<RowId> {
+        let id = past_notices(id)?;
         if vis_ids.contains(&id) {
             Some(id)
         } else {
@@ -686,6 +706,22 @@ mod tests {
             .map(|l| l.id)
             .collect();
         assert_eq!(roots, vec![1, 3]);
+    }
+
+    #[test]
+    fn notices_are_hidden_and_the_reply_after_one_keeps_its_thread() {
+        // a call-less answer (3), the layer's reminder to the model (4, a
+        // notice), and the answer that followed it (5, parented on the notice)
+        let s = store_of(vec![
+            json!({"id":1,"agent":"ai","role":"user","content":"do it"}),
+            json!({"id":3,"agent":"ai","role":"assistant","parent":1,"content":"thinking out loud"}),
+            json!({"id":4,"agent":"ai","role":"user","kind":"notice","parent":1,
+                   "content":"[no call was dispatched] Your answer emitted no <call> element"}),
+            json!({"id":5,"agent":"ai","role":"assistant","parent":4,"content":"done"}),
+        ]);
+        let o = plain(&s);
+        assert_eq!(ids(&o), vec![1, 3, 5], "the notice is not drawn");
+        assert_eq!(o.lines[2].depth, 1, "the reply after the notice hangs off the turn, not off the hidden row");
     }
 
     #[test]

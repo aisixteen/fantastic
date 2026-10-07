@@ -5,6 +5,25 @@ import { bodyText } from "../body_text.ts";
 import { htmlRefusal } from "../html_check.ts";
 import { aiView } from "../ai_view/ai_view.ts";
 import { grantHint } from "../html_agent/grant_hint.ts";
+import { reflectView } from "../reflect_view/reflect_view.ts";
+import { cellGrant, hostRecordOf, viewOf } from "./host_views.ts";
+import type { Rec } from "./host_views.ts";
+
+/** The cell meta that draws host agent `agent` by its own view (`host_views.ts`). */
+export function hostViewCell(agent: string, rec: Rec): { handler: string; meta: Record<string, unknown> } {
+  const v = viewOf(rec);
+  const meta: Record<string, unknown> = { backend_id: agent, owns_backend: false };
+  // the renderer's OWN grant onto its agent (terminal, chat and the stub declare
+  // theirs); an html view's is its record's `calls`
+  meta["can_call"] =
+    v.kind === "terminal" ? { ...terminalView.grants(agent) }
+    : v.kind === "chat" ? { ...aiView.grants(agent) }
+    : v.kind === "stub" ? { ...reflectView.grants(agent) }
+    : cellGrant(agent, v);
+  // the BODY stays on the host record (`agent_view` reads it there): the cell
+  // holds layout and the grant only
+  return { handler: v.handler, meta };
+}
 
 // THE CANVAS AND ITS VIEW (owner, 2026-10-04: one canvas, ONE view for now —
 // more views are on hold).
@@ -68,7 +87,7 @@ export const CANVAS_README =
 
 export const VIEW_README =
   
-  "THE VIEW — the canvas's one view (frontend). Its cells are its children: you place and change them HERE. VERBS: place {kind: html|gl|terminal|chat (or handler_module), x, y, id?, width?, height?, display_name?, bytes? (the body, verbatim), trusted?, can_call?, callable_by?, backend_id? (terminal/chat: the host agent shown)} · move {id, x?, y?, width?, height?} · update {id, bytes? (a new body reloads it), fields?: {display_name|trusted|readme|x|y|width|height|can_call|callable_by}} (on the view itself: any field; main_ai_chat names its main chat) · wire {sender, receiver, verbs} (a grant, written on each side that is a cell; not from/to) · remove {id}. A PANEL'S JS (an html cell's body) has `fantastic`: `await fantastic.send(id, payload)` → the reply · `fantastic.watch(id, ev => …)` → events (returns off) · `fantastic.emit(id, payload)` · `fantastic.onMessage(p => …)`. Its calls are judged by the CELL's can_call — grant what it calls (`{<id>: [verbs…, watch]}`); a reply's `grants_missing` names any it lacks. On the host they arrive as `user`: a host agent you create for a panel needs `callable_by: {user: [<the verbs the panel calls>, watch]}` in its create_agent (a new agent admits no one); never drop `user` from an existing agent's callable_by. Example — a button that runs a command on a host exec agent `runner` and shows its output live: place {kind: html, x: 700, y: 60, can_call: {runner: [start, watch]}, bytes: <button onclick=\"fantastic.send('runner',{type:'start',command:'ls'}).then(r=>job=r.job_id)\">Run</button><pre id=o></pre><script>let job;fantastic.watch('runner',e=>{if(e.job_id===job&&e.type==='progress')o.textContent+=e.line+'\\n'})</script>} A live URL or a file: an html cell whose body is <iframe src=URL> (trusted: true for GET /static_files/file/<path>). The background is the child `background` (set_bg / clear_bg / get_bg). What is near a point: `around {view?, x, y, radius}` on `user`.";
+  "THE VIEW — the canvas's one view (frontend). Its cells are its children: you place and change them HERE. VERBS: place {kind: html|gl|terminal|chat (or handler_module) — or only backend_id: a VIEW of that host agent, drawn as its record says — x, y, id?, width?, height?, display_name?, bytes? (the body, verbatim), trusted?, can_call?, callable_by?, backend_id? (terminal/chat: the host agent shown)} · move {id, x?, y?, width?, height?} · update {id, bytes? (a new body reloads it), fields?: {display_name|trusted|readme|x|y|width|height|can_call|callable_by}} (on the view itself: any field) · wire {sender, receiver, verbs} (a grant, written on each side that is a cell; not from/to) · remove {id}. A PANEL'S JS (an html cell's body) has `fantastic`: `await fantastic.send(id, payload)` → the reply · `fantastic.watch(id, ev => …)` → events (returns off) · `fantastic.emit(id, payload)` · `fantastic.onMessage(p => …)`. Its calls are judged by the CELL's can_call — grant what it calls (`{<id>: [verbs…, watch]}`); a reply's `grants_missing` names any it lacks. On the host they arrive as `user`: a host agent you create for a panel needs `callable_by: {user: [<the verbs the panel calls>, watch]}` in its create_agent (a new agent admits no one); never drop `user` from an existing agent's callable_by. Example — a button that runs a command on a host exec agent `runner` and shows its output live: place {kind: html, x: 700, y: 60, can_call: {runner: [start, watch]}, bytes: <button onclick=\"fantastic.send('runner',{type:'start',command:'ls'}).then(r=>job=r.job_id)\">Run</button><pre id=o></pre><script>let job;fantastic.watch('runner',e=>{if(e.job_id===job&&e.type==='progress')o.textContent+=e.line+'\\n'})</script>} A live URL or a file: an html cell whose body is <iframe src=URL> (trusted: true for GET /static_files/file/<path>). The background is the child `background` (set_bg / clear_bg / get_bg). What is near a point: `around {view?, x, y, radius}` on `user`.";
 
 /** The root: `reflect` is the kernel's; it answers nothing else. */
 export const canvasAgent: Handler = (_id, payload): Json => {
@@ -85,8 +104,24 @@ export const viewAgent: Handler = (id, payload, kernel): Json | Promise<Json> =>
   switch (str(payload, "type")) {
     case "place": {
       // WHAT to make: a `kind` (html|gl|terminal|chat), or the cell's own
-      // `handler_module` (any page bundle; the `.ts` suffix optional)
+      // `handler_module` (any page bundle; the `.ts` suffix optional) — or,
+      // with only `backend_id`, a VIEW of that host agent, drawn as its own
+      // record says (`view`, else its kind's default, else the stub)
       const given = str(payload, "handler_module");
+      if (!given && !str(payload, "kind") && str(payload, "backend_id")) {
+        if (!num(payload["x"]) || !num(payload["y"])) return { error: "view: place needs x and y (numbers, view coordinates)", reason: "bad_arg", arg: "x" };
+        const agent = str(payload, "backend_id");
+        const rec = hostRecordOf(agent);
+        if (rec === undefined) return { error: `view: place — no host agent ${JSON.stringify(agent)}`, reason: "not_found", arg: "backend_id", hint: "reflect the host kernel for the agents there" };
+        const { handler, meta } = hostViewCell(agent, rec);
+        const aid = str(payload, "id") || `view_${Math.random().toString(16).slice(2, 10)}`;
+        if (kernel.get(aid) !== undefined) return { error: `view: place — ${aid} already exists`, reason: "exists", arg: "id" };
+        for (const k of ["x", "y", "width", "height", "display_name"] as const) if (payload[k] !== undefined) meta[k] = payload[k];
+        meta["width"] ??= 480;
+        meta["height"] ??= 320;
+        kernel.register(new Agent({ id: aid, parentId: id, handlerModule: handler, meta: meta as Payload }));
+        return { placed: aid, shows: agent, view: viewOf(rec).kind } as Json;
+      }
       const named = given ? (given.endsWith(".ts") ? given : `${given}.ts`) : undefined;
       const kind = named !== undefined ? (Object.entries(PLACEABLE).find(([, m]) => m === named)?.[0] ?? named.slice(0, -3)) : str(payload, "kind");
       const hm = named ?? PLACEABLE[kind];
@@ -185,10 +220,6 @@ export const viewAgent: Handler = (id, payload, kernel): Json | Promise<Json> =>
       const target = str(payload, "id");
       if (kernel.get(target)?.parentId !== id) return { error: `view: remove — ${JSON.stringify(target)} is not a cell of this view`, reason: "not_found", arg: "id" };
       const out = kernel.remove(target) as unknown as Json;
-      // the main chat gone, the view has no voice
-      if (kernel.get(target) === undefined && kernel.get(id)?.meta["main_ai_chat"] === target) {
-        kernel.updateMeta(id, { main_ai_chat: null } as unknown as Payload);
-      }
       return out;
     }
     case "boot":
@@ -199,24 +230,13 @@ export const viewAgent: Handler = (id, payload, kernel): Json | Promise<Json> =>
   }
 };
 
-/** `update` on the view itself: any fields; `main_ai_chat` names the view's
- *  MAIN chat (delete-locked while main). */
+/** `update` on the view itself: any fields. */
 function updateSelf(id: string, payload: Payload, kernel: Parameters<Handler>[2]): Json {
   const fields = payload["fields"];
   if (typeof fields !== "object" || fields === null || Array.isArray(fields) || Object.keys(fields).length === 0) {
     return { error: "view: update on the view itself needs fields: {…}", reason: "bad_arg", arg: "fields" };
   }
   const f = fields as Record<string, unknown>;
-  if ("main_ai_chat" in f) {
-    const main = f["main_ai_chat"];
-    // THE MAIN CHAT IS DELETE-LOCKED while main: the previous one unlocked, the
-    // new one locked (`remove` refuses it until it is unmade main)
-    const prev = kernel.get(id)?.meta["main_ai_chat"];
-    if (typeof prev === "string" && prev !== main && kernel.get(prev) !== undefined) {
-      kernel.updateMeta(prev, { delete_lock: false } as unknown as Payload);
-    }
-    if (typeof main === "string" && kernel.get(main) !== undefined) kernel.updateMeta(main, { delete_lock: true } as unknown as Payload);
-  }
   kernel.updateMeta(id, f as unknown as Payload);
   return { updated: id, fields: Object.keys(f) };
 }

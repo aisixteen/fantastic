@@ -86,7 +86,7 @@ class Host:
         self.url: str | None = None
 
     def start(self) -> None:
-        # The port is creation-only: named on the first run, read from `web`'s
+        # The port is named on the first run, read from `web`'s
         # record after that.
         first = not (self.cwd / ".fantastic").exists()
         args = ["--headless", "canvas", *(["--port", str(self.port)] if first else [])]
@@ -252,6 +252,15 @@ def wait_disk(cond, timeout: float = 5.0) -> bool:
 async def restart(spec, page: Page, host: Host, cwd: Path, url: str, state: dict, exp: dict, bad: list[str]) -> None:
     """Stop the host, apply an OFFLINE edit to the disk (a crash's leftovers),
     start it again and reload the page."""
+    # ONE KERNEL PER DIRECTORY: while it runs, ANY argument is refused, exit 2,
+    # "already running" — even a --port that would change it (a swallowed
+    # command confuses more than a refusal).
+    if isinstance(spec, dict) and spec.get("wrong_port"):
+        r = subprocess.run([str(host.binary), "--headless", "canvas", "--port", str(host.port + 1)],
+                           cwd=cwd, capture_output=True, text=True, timeout=60)
+        said = r.stdout + r.stderr
+        if r.returncode != 2 or "already running" not in said:
+            bad.append(f"an argument against the running kernel was not refused: exit {r.returncode}: {said[-300:]!r}")
     code = host.stop()
     if code != 0:
         bad.append(f"host exited {code} on SIGTERM")
@@ -274,14 +283,6 @@ async def restart(spec, page: Page, host: Host, cwd: Path, url: str, state: dict
             shutil.rmtree(cwd / ROOT_VIEW / ms[0]["_dir"])
     elif offline is not None:
         raise SystemExit(f"unknown offline edit {offline!r}")
-    # `--port` is CREATION-ONLY: a different one against the recorded `web` is
-    # refused, exit 2, naming update_agent — and changes nothing on disk.
-    if isinstance(spec, dict) and spec.get("wrong_port"):
-        r = subprocess.run([str(host.binary), "--headless", "canvas", "--port", str(host.port + 1)],
-                           cwd=cwd, capture_output=True, text=True, timeout=60)
-        said = r.stdout + r.stderr
-        if r.returncode != 2 or "creation-only" not in said or "update_agent" not in said:
-            bad.append(f"a different --port was not refused: exit {r.returncode}: {said[-300:]!r}")
     host.start()
     tree = await host_call(host.port, "web_loader", {"type": "load_tree"})
     state["tree"] = [(r.get("id"), r.get("parent_id")) for r in tree.get("records", [])]
@@ -400,8 +401,9 @@ async def step(run: dict, page: Page, host: Host, cwd: Path, url: str, state: di
         b = yaml_of(rec) if rec is not None else {}
         if b.get("cell_id") != m.get("id"):
             bad.append(f"backend {bid} carries cell_id={b.get('cell_id')!r}, want {m.get('id')!r}")
-        # the cell's own grant names its backend, and nothing else
-        cc = m.get("can_call") or {}
+        # the cell's own grant names its backend, and nothing else (the
+        # kernel's own `$self` aside)
+        cc = {k: v for k, v in (m.get("can_call") or {}).items() if k != "$self"}
         if list(cc) != [bid] or "write" not in (cc.get(bid) or []):
             bad.append(f"cell can_call {cc!r} does not grant exactly its backend {bid}")
     if exp.get("backend_changed") and m is not None and m.get("backend_id") == state.get("prev_backend"):

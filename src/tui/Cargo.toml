@@ -70,7 +70,10 @@ vt100 = "0.15"
 # backend — a 0600 file or the keychain (`kern/creds`).
 fantastic-credential-store = { path = "../lib/rust/crates/bundles/fantastic-credential-store" }
 fantastic-responses-backend = { path = "../lib/rust/crates/bundles/fantastic-responses-backend", optional = true }
+fantastic-py-agent = { path = "../lib/rust/crates/bundles/fantastic-py-agent" }
 fantastic-vllm-backend = { path = "../lib/rust/crates/bundles/fantastic-vllm-backend", optional = true }
+fantastic-ollama-backend = { path = "../lib/rust/crates/bundles/fantastic-ollama-backend", optional = true }
+fantastic-anthropic-backend = { path = "../lib/rust/crates/bundles/fantastic-anthropic-backend", optional = true }
 # Apple's on-device model (macOS 26+ Apple Intelligence): built from the lib's
 # Swift core by its build.rs — needs the Xcode toolchain and
 # MACOSX_DEPLOYMENT_TARGET >= 14 (src/.cargo/config.toml).
@@ -90,6 +93,10 @@ responses = ["dep:fantastic-responses-backend"]
 # max_tokens, kv_slots, kv_overflow required — is written on the set-up page
 # from its schema; a key is optional (a credential-store ref).
 vllm = ["dep:fantastic-vllm-backend"]
+# Links the Ollama backend (`ollama_backend.tools`): `fantastic ai ollama -p PORT`.
+ollama = ["dep:fantastic-ollama-backend"]
+# Links the Anthropic Messages backend (`anthropic_backend.tools`): `fantastic ai anthropic --model M`.
+anthropic = ["dep:fantastic-anthropic-backend"]
 # Links Apple's on-device model (`foundation_models_backend.tools`): no endpoint,
 # model or key.
 foundation-models = ["dep:fantastic-foundation-models-backend"]

@@ -1,6 +1,7 @@
 import type { ViewBundle, ViewContext, ViewHandle } from "../view.ts";
 import type { Json, Payload } from "../../lib.ts";
 import { CONNECTOR_SRC } from "./connector.ts";
+import { htmlBodyOf } from "./html_agent.ts";
 
 // html_view — renders an html_agent's MUTABLE body (`meta.html`) as a FULLY
 // sandboxed `srcdoc` iframe, and wires it to the JS kernel through a per-iframe
@@ -18,6 +19,18 @@ export const htmlView: ViewBundle = {
   grants: () => ({}),
 
   mount(ctx: ViewContext): ViewHandle {
+    // `meta.html` is the panel BODY (a fragment), this agent's own content
+    // (a page bundle on the html base starts with its bundle's body)
+    return mountPanel(ctx, () => htmlBodyOf(ctx.kernel, ctx.selfId));
+  },
+};
+
+/** THE PANEL: a sandboxed iframe running `body` with the `fantastic` connector,
+ *  relayed AS the cell's own agent. Shared by `html_view` (page content) and
+ *  `agent_view` (a host agent's own view, `agent_view.ts`). `body` is read at
+ *  every render; `reload_html` on the cell's inbox renders again. */
+export function mountPanel(ctx: ViewContext, body: () => string | Promise<string>): ViewHandle {
+  {
     const { kernel, mount, selfId } = ctx;
     const iframe = document.createElement("iframe");
     // null-origin sandbox: scripts run, but the ONLY way out is postMessage to us.
@@ -33,14 +46,14 @@ export const htmlView: ViewBundle = {
     // BUS message after ONE top-level user gesture (e.g. a master play) — without a
     // separate click inside every sandboxed panel. Safe: autoplay ≠ same-origin.
     iframe.setAttribute("allow", "autoplay");
-    // `meta.html` is the panel BODY (a fragment). Wrap it in a proper document
-    // with the connector injected in <head> so it's defined before the body runs.
+    // The BODY is a fragment: wrap it in a proper document with the connector
+    // injected in <head> so it's defined before the body runs.
     const render = (): void => {
-      const h = kernel.get(selfId)?.meta["html"];
-      const body = typeof h === "string" ? h : "";
-      iframe.srcdoc =
-        `<!doctype html><html><head><meta charset="utf-8">` +
-        `<script>${CONNECTOR_SRC}</script></head><body>${body}</body></html>`;
+      void Promise.resolve(body()).then((b) => {
+        iframe.srcdoc =
+          `<!doctype html><html><head><meta charset="utf-8">` +
+          `<script>${CONNECTOR_SRC}</script></head><body>${b}</body></html>`;
+      });
     };
     render();
     mount.appendChild(iframe);
@@ -140,5 +153,5 @@ export const htmlView: ViewBundle = {
         iframe.remove();
       },
     };
-  },
-};
+  }
+}
