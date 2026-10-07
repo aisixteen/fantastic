@@ -34,7 +34,7 @@ def main() -> bool:
         async with rig.page() as pg:
             done, said = await ask(pg, 250, 300,
                 "Open the PRD in a panel next to you — it is docs/prd.pdf, served by the host's `static_files` agent.",
-                rig.limits["total_seconds"], rig.limits["quiet_seconds"])
+                rig.budget(rig.limits["total_seconds"]), rig.limits["quiet_seconds"])
             await asyncio.sleep(3)
             embeds = await pg.js("[...document.querySelectorAll('.agent-frame iframe')].flatMap(f=>{try{return [...f.contentDocument.querySelectorAll('iframe,embed,object')].map(e=>e.src||e.data||'')}catch(e){return []}})")
             # WHILE the host runs: does each framed URL really serve the PDF?

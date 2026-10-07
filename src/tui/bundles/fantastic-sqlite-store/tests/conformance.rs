@@ -287,7 +287,10 @@ async fn reflect_names_the_same_verbs_and_says_durable() {
         assert_eq!(r["owners"], json!(1));
         assert_eq!(r["rows"], json!(1));
         assert_eq!(r["optional_verbs"], json!(["search"]));
-        let verbs: Vec<&String> = r["verbs"].as_object().unwrap().keys().collect();
+        // HOW TO CALL it is the kernel's `docs`, never on a reflect
+        assert!(r.get("verbs").is_none(), "a reflect carries no verbs");
+        let d = t.k.send(vec![Item::new(AgentId::from("kernel"), json!({"type": "docs", "of": "mem"}))]).await.remove(0).result;
+        let verbs: Vec<&String> = d["verbs"].as_object().unwrap().keys().collect();
         assert_eq!(
             verbs,
             vec!["reflect", "boot", "append", "read", "search", "prune", "inject", "dump"]

@@ -26,7 +26,7 @@ def main() -> bool:
     async def drive():
         async with rig.page(1800, 1000) as pg:
             r = await ask(pg, 250, 300, "Put the six slides in one row, in order, left to right.",
-                          rig.limits["total_seconds"], rig.limits["quiet_seconds"])
+                          rig.budget(rig.limits["total_seconds"]), rig.limits["quiet_seconds"])
             await asyncio.sleep(2)  # the loader flushes
             return r
     try:

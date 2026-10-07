@@ -23,7 +23,7 @@ def main() -> bool:
     async def drive():
         async with rig.page() as pg:
             r = await ask(pg, 250, 300, "Make the canvas background a slow blue gradient.",
-                          rig.limits["total_seconds"], rig.limits["quiet_seconds"])
+                          rig.budget(rig.limits["total_seconds"]), rig.limits["quiet_seconds"])
             await asyncio.sleep(2)
             return r, pg.logs
     try:

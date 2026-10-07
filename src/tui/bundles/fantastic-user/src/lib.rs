@@ -257,6 +257,18 @@ impl Bundle for UserBundle {
         HANDLER_MODULE
     }
 
+    /// HOW TO CALL it — the probe's verbs, then its own; served by the
+    /// kernel's `docs` verb, never on a reflect.
+    fn verb_docs(&self) -> Value {
+        let mut v = match self.probe.verb_docs() {
+            Value::Object(m) => m,
+            _ => serde_json::Map::new(),
+        };
+        v.insert("forward".into(), json!("args: target:str (req), payload:dict (req), timeout:num? (none by default: the call lasts as long as the target takes), token:str? — `user` sends payload to target; the reply verbatim. A token is needed only when `user` carries one (token_sha256) and the caller is not the shell."));
+        v.insert("around".into(), json!("args: view:str? (default view_root), x:num, y:num, radius:num — {view, members: [{id, kind, title, rect:{x,y,w,h}, distance, backend_id?}]}: the cells of a page view within radius, nearest first, from the page records; judged by YOUR page grants."));
+        Value::Object(v)
+    }
+
     async fn handle(&self, agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Result<Reply, BundleError> {
         if let Some((r, _)) = Self::run(agent_id, payload, None, kernel).await {
             return Ok(r);
@@ -265,10 +277,6 @@ impl Bundle for UserBundle {
         if s(payload, "type") == "reflect" {
             if let Some(Value::Object(m)) = r.as_mut() {
                 m.insert("handler_module".into(), json!(HANDLER_MODULE));
-                if let Some(Value::Object(v)) = m.get_mut("verbs") {
-                    v.insert("forward".into(), json!("args: target:str (req), payload:dict (req), timeout:num? (none by default: the call lasts as long as the target takes), token:str? — `user` sends payload to target; the reply verbatim. A token is needed only when `user` carries one (token_sha256) and the caller is not the shell."));
-                    v.insert("around".into(), json!("args: view:str? (default view_root), x:num, y:num, radius:num — {view, members: [{id, kind, title, rect:{x,y,w,h}, distance, backend_id?}]}: the cells of a page view within radius, nearest first, from the page records; judged by YOUR page grants."));
-                }
             }
         }
         Ok(r)

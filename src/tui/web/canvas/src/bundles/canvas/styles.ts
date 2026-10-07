@@ -54,7 +54,7 @@ export const CANVAS_CSS = `
     background: rgba(255, 255, 255, 0.12); color: rgba(255, 255, 255, 0.9);
   }
   .frame-head .lock.locked { color: #f7768e; background: rgba(247, 118, 142, 0.10); }
-  .frame-body { position: relative; z-index: 2; flex: 1; background: transparent; }
+  .frame-body { position: relative; z-index: 2; flex: 1 1 0; min-height: 0; overflow: hidden; background: transparent; }
   .frame-body iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: transparent; }
   .resize-handle {
     position: absolute; bottom: 4px; right: 4px; width: 14px; height: 14px;

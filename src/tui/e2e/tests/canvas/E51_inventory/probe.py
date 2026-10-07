@@ -39,7 +39,7 @@ def main() -> bool:
     async def drive():
         async with rig.page(1900, 1100) as pg:
             return await ask(pg, 250, 300, "Give me an inventory of this canvas: how many cells of each kind are there?",
-                             rig.limits["total_seconds"], rig.limits["quiet_seconds"])
+                             rig.budget(rig.limits["total_seconds"]), rig.limits["quiet_seconds"])
     try:
         done, said = asyncio.run(drive())
     finally:

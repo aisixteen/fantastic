@@ -6,6 +6,8 @@ title: "an AI prototypes back end + front end from an empty canvas, wired both w
 runner: probe.py
 costs: turns
 limits:
-  total_seconds: 1500
-  quiet_seconds: 40
+  # each turn's time; both cut to fit the runner's 15-minute hard stop
+  turn1_seconds: 600
+  turn2_seconds: 150
+  quiet_seconds: 30
 env: {}

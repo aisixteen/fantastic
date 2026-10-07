@@ -96,7 +96,7 @@ fn registry() -> BundleRegistry {
     // it; it exists only while that page is open (`kern/setup_agent`).
     reg.register(crate::kern::setup_agent::HANDLER_MODULE, crate::kern::setup_agent::SetupBundle);
     // THE CANVAS, host side: its node `canvas_root` — creates and deletes its
-    // own children (the cells' backends) and spawns AI cells from the user's
+    // the cells' backends and spawns AI cells from the user's
     // templates (`kern/backend`).
     reg.register(crate::kern::backend::HANDLER_MODULE, crate::kern::backend::BackendBundle);
     // KEYS: the credential store (`kern/keys`) — every provider key, by ref.

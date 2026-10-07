@@ -89,7 +89,7 @@ export const backgroundAgent: Handler = (id, payload, kernel): Json | Promise<Js
     case "shutdown":
       return null;
     default:
-      return { error: `background: unknown verb '${str(payload, "type")}'`, reason: "unhandled" };
+      return { error: `background: unknown verb '${str(payload, "type")}'`, reason: "unhandled", verb: str(payload, "type") };
   }
 };
 

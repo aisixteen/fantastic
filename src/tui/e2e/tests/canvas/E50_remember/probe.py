@@ -23,7 +23,7 @@ def main() -> bool:
     async def first():
         async with rig.page() as pg:
             await ask(pg, 250, 300, "Remember this: my build code is ZEBRA-42. Just say OK.",
-                      rig.limits["total_seconds"], rig.limits["quiet_seconds"])
+                      rig.budget(rig.limits["total_seconds"]), rig.limits["quiet_seconds"])
             await pg.js("document.querySelector('.chat-view .c-keep').click()")
             await asyncio.sleep(2)
             kept = await pg.js("document.querySelector('.chat-view .c-badge')?.textContent")
@@ -38,7 +38,7 @@ def main() -> bool:
             await pg.until("!!document.querySelector('.chat-view')", 20)
             await asyncio.sleep(2)
             await say(pg, "What is my build code?")
-            await wait_quiet(pg, rig.limits["total_seconds"], rig.limits["quiet_seconds"])
+            await wait_quiet(pg, rig.budget(rig.limits["total_seconds"]), rig.limits["quiet_seconds"])
             return await answer(pg)
     try:
         kept = asyncio.run(first())

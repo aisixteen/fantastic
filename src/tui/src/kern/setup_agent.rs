@@ -156,7 +156,7 @@ impl SetupBundle {
                     Err(e) => fail(e),
                 }
             }
-            _ => json!({"error": format!("setup: unknown type {verb:?}"), "reason": "unhandled"}),
+            _ => json!({"error": format!("setup: unknown type {verb:?}"), "reason": "unhandled", "verb": verb}),
         }
     }
 }
@@ -165,6 +165,11 @@ impl SetupBundle {
 impl Bundle for SetupBundle {
     fn name(&self) -> &str {
         HANDLER_MODULE
+    }
+
+    /// HOW TO CALL it — served by the kernel's `docs` verb, never on a reflect.
+    fn verb_docs(&self) -> Value {
+        Value::Object(VERBS.iter().map(|v| ((*v).to_string(), json!(""))).collect())
     }
 
     async fn handle(&self, _agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Result<Reply, BundleError> {
@@ -176,7 +181,6 @@ impl Bundle for SetupBundle {
             return Ok(Some(json!({
                 "handler_module": HANDLER_MODULE,
                 "sentence": "The canvas's AI set-up cell, host side: what the terminal's set-up page does, as the human. Exists only while the cell is open.",
-                "verbs": VERBS,
             })));
         }
         let Some(host) = Self::host(kernel) else {

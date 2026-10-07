@@ -13,10 +13,10 @@ import { Host } from "../../lib.ts";
 // ids → scoped classes so many chat frames coexist on one canvas page.
 
 const CHAT_CSS = `
-  .chat-view { display:flex; flex-direction:column; height:100%; font-family:system-ui,sans-serif; color:#e0e0ff; background:transparent; box-sizing:border-box; }
+  .chat-view { display:flex; flex-direction:column; height:100%; min-height:0; overflow:hidden; font-family:system-ui,sans-serif; color:#e0e0ff; background:transparent; box-sizing:border-box; }
   .chat-view .c-header { padding:8px 14px; font-size:12px; color:rgba(220,230,245,0.65); border-bottom:1px solid rgba(255,255,255,0.06); display:flex; justify-content:space-between; }
   .chat-view .c-header b { color:rgba(220,230,245,0.95); }
-  .chat-view .c-dialog { flex:1; overflow-y:auto; padding:12px; display:flex; flex-direction:column; gap:8px; }
+  .chat-view .c-dialog { flex:1 1 0; min-height:0; overflow-y:auto; overscroll-behavior:contain; padding:12px; display:flex; flex-direction:column; gap:8px; }
   .chat-view .msg { padding:8px 12px; border-radius:12px; line-height:1.45; max-width:85%; word-wrap:break-word; white-space:pre-wrap; font-size:14px; backdrop-filter:blur(20px) saturate(160%); -webkit-backdrop-filter:blur(20px) saturate(160%); box-shadow:inset 0 1px 0 rgba(255,255,255,0.10),0 0 0 1px rgba(255,255,255,0.08),0 6px 14px -6px rgba(0,0,0,0.45); }
   .chat-view .msg.user { align-self:flex-end; background:rgba(110,90,220,0.32); color:#fff; }
   .chat-view .msg.user.queued { opacity:0.55; font-style:italic; }
@@ -32,7 +32,8 @@ const CHAT_CSS = `
   .chat-view .tool-block.pending .tool-state::after { content:'…'; animation:cpulse 1.4s ease-in-out infinite; display:inline-block; }
   .chat-view .tool-block .tool-detail summary { cursor:pointer; color:#667; font-size:11px; }
   .chat-view .tool-block pre { margin:4px 0; padding:6px; background:rgba(8,10,18,0.55); border-radius:4px; color:#abb; white-space:pre-wrap; word-break:break-all; max-height:160px; overflow-y:auto; }
-  .chat-view .c-queued { display:flex; flex-direction:column; gap:4px; padding:0 12px; }
+  .chat-view .c-header, .chat-view .c-footer, .chat-view .c-row { flex:none; }
+  .chat-view .c-queued { flex:none; max-height:30%; overflow-y:auto; display:flex; flex-direction:column; gap:4px; padding:0 12px; }
   .chat-view .c-queued:empty { display:none; }
   .chat-view .c-queued .msg.user { max-width:100%; opacity:0.55; font-style:italic; }
   .chat-view .c-footer { display:flex; align-items:center; gap:10px; padding:6px 14px; border-top:1px solid rgba(255,255,255,0.06); font-size:11px; color:rgba(220,230,245,0.55); min-height:28px; }
@@ -90,14 +91,8 @@ const REPLY_HEAD = /^\[reply to \d+ · ([^\]·]+?)(?: · [^\]]*)?\]/;
  *  names NO address beyond the host's reserved `kernel`: finding the page is
  *  the AI's own work. */
 export const CANVAS_SETUP =
-  "[canvas setup] You are an AI agent on the HOST kernel (the backend): your record, your memory and " +
-  "every call you make live there. A human sees you as a CELL on a CANVAS — a web page that is a SECOND " +
-  "kernel (the frontend), connected to the host as a peer. So there are two kernels: the host, addressed " +
-  "as `kernel`, and the canvas page, whose agents are addressed `<page guid>|<agent id>` (its own kernel " +
-  "is `<page guid>|kernel`). To learn your environment, reflect each kernel: the host first — its reflect " +
-  "lists the connected peers — then the page. The canvas is a 2D surface: every user turn ends with " +
-  "[at X,Y], where it was typed, in canvas coordinates (x grows right, y grows down); here, next to, " +
-  "above and below mean canvas geometry around that spot.";
+  
+  "[canvas setup] You are an AI agent on the HOST kernel: your record, memory and calls live there. A human sees you as a CELL on a CANVAS — a web page that is a SECOND kernel, connected as a peer: its agents are `<page guid>|<agent id>` (its kernel `<page guid>|kernel`). Reflect the host first (it lists the peers), then the page. To BUILD on the canvas, pull `docs of=<page guid>|view_root` first: the view places cells, and its doc carries the panel API. Every user turn ends with [at X,Y], where it was typed (x grows right, y grows down).";
 /** The setup as the TRANSCRIPT carries it — hidden from the bubble. */
 const SETUP_BLOCK = /\n\[canvas setup\][\s\S]*$/;
 
@@ -210,6 +205,20 @@ export const aiView: ViewBundle = {
     const elapsedEl = $<HTMLElement>(".elapsed");
     const hintEl = $<HTMLElement>(".hint");
     const othersHintEl = $<HTMLElement>(".others-hint");
+    // STICKY BOTTOM: every change to the dialog (a message, a streamed part, a
+    // tool block) scrolls it down while the reader is at the bottom; scrolled up
+    // to read, it stays put until they come back down (or send).
+    let pinned = true;
+    const toBottom = (): void => {
+      dialogEl.scrollTop = dialogEl.scrollHeight;
+    };
+    dialogEl.addEventListener("scroll", () => {
+      pinned = dialogEl.scrollHeight - dialogEl.scrollTop - dialogEl.clientHeight < 48;
+    });
+    const stick = new MutationObserver(() => {
+      if (pinned) toBottom();
+    });
+    stick.observe(dialogEl, { childList: true, subtree: true, characterData: true });
 
     // client_id: stable per backend, localStorage so refresh keeps the thread
     const CLIENT_KEY = `ai_chat_client_id:${backend}`;
@@ -368,8 +377,11 @@ export const aiView: ViewBundle = {
 
     let elapsedTimer: ReturnType<typeof setInterval> | null = null;
     let elapsedStart = 0;
-    const setPhase = (phase: string, hint = ""): void => {
+    const setPhase = (phase: string, hint = "", reason = ""): void => {
       phasePill.dataset["phase"] = phase;
+      // why the last turn ended (`done`'s reason): `awaiting` = calls still in
+      // flight, the chain goes on; anything else = the chain is over
+      phasePill.dataset["reason"] = reason;
       phasePill.textContent = phase;
       hintEl.textContent = hint;
       const live = phase === "thinking" || phase === "streaming" || phase === "tool_calling" || phase === "queued";
@@ -511,7 +523,7 @@ export const aiView: ViewBundle = {
         // "stop" after the answer)
         if (inflight !== null && (!sendId || inflight.send_id === sendId)) inflight = null;
         refreshBusy();
-        setPhase("idle", s(detail, "reason") && s(detail, "reason") !== "ok" ? s(detail, "reason") : "");
+        setPhase("idle", s(detail, "reason") && s(detail, "reason") !== "ok" ? s(detail, "reason") : "", s(detail, "reason") || "ok");
       }
     });
     // THE PARTS: one draft per stream_id. ANIMATION, NOT ACTION — a delta never
@@ -647,6 +659,8 @@ export const aiView: ViewBundle = {
       const typed = (override ?? inputEl.value).trim();
       if (!typed) return;
       if (override === undefined) inputEl.value = "";
+      pinned = true;
+      toBottom();
       const [sx, sy] = at ?? cellSpot();
       // the setup rides the dialog's FIRST turn only (the transcript keeps it)
       const first = isCell && !dialogEl.querySelector(".msg.user") && queuedOrder.length === 0;
@@ -721,6 +735,7 @@ export const aiView: ViewBundle = {
 
     return {
       unmount(): void {
+        stick.disconnect();
         offLifecycle();
         unwatchMain();
         offQueued();

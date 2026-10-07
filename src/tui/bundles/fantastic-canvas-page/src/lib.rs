@@ -83,19 +83,23 @@ fn read_stream(payload: &Value) -> (Value, Option<Vec<u8>>) {
 fn reflect(agent_id: &AgentId) -> Value {
     json!({
         "id": agent_id.as_str(),
-        "sentence": "The canvas page, embedded in this binary: served read-only through the parent web host's /file/ route.",
+        "sentence": "The canvas page's files, served read-only (transport only). To build on the canvas, use the page's view: `docs of=<page guid>|view_root`.",
         "files": files().keys().collect::<Vec<_>>(),
-        "verbs": {
-            "reflect": "No args.",
-            "boot": "No-op; the parent `web` host serves the route.",
-            "read_stream": READ_STREAM_DOC,
-            "list": "No args. The served paths.",
-        },
     })
 }
 
 #[async_trait]
 impl Bundle for CanvasPageBundle {
+    /// HOW TO CALL it — served by the kernel's `docs` verb, never on a reflect.
+    fn verb_docs(&self) -> Value {
+        json!({
+            "reflect": "No args.",
+            "boot": "No-op; the parent `web` host serves the route.",
+            "read_stream": READ_STREAM_DOC,
+            "list": "No args. The served paths.",
+        })
+    }
+
     fn name(&self) -> &str {
         "canvas_page"
     }
@@ -108,7 +112,7 @@ impl Bundle for CanvasPageBundle {
             "list" => json!({"files": files().keys().collect::<Vec<_>>()}),
             // Text-only callers get the head; the bytes ride a binary reply.
             "read_stream" => read_stream(payload).0,
-            other => json!({"error": format!("canvas_page: unknown type {other:?}"), "reason": "unhandled"}),
+            other => json!({"error": format!("canvas_page: unknown type {other:?}"), "reason": "unhandled", "verb": other}),
         }))
     }
 

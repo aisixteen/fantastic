@@ -7,7 +7,7 @@
 //!     ├── canvas_ws       web_ws.tools       the canvas's socket leg
 //!     └── canvas_page     canvas_page.tools  THE CANVAS: its page, embedded in the binary
 //!         └── canvas_root canvas.tools       the canvas's host node: creates /
-//!             │                              deletes its own children — the
+//!             │                              deletes the
 //!             │                              cells' backends (AIs, exec agents)
 //!             ├── static_files  file_bridge  THE files every view's cells load:
 //!             │                              GET /static_files/file/<path>

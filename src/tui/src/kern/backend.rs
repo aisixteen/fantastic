@@ -9,10 +9,9 @@
 //!   └── web_loader
 //! ```
 //!
-//! IT CREATES AND DELETES ITS OWN CHILDREN — the kernel's rule: the mutators act
-//! on the sender's direct children only. `create {record}` makes one direct
-//! child (a cell's backend); `delete {id}` removes an agent of its own subtree,
-//! a deeper one through its parent. The page never writes the host tree itself.
+//! IT CREATES AND DELETES THE CELLS' BACKENDS: `create {record}` makes one
+//! direct child (a cell's backend); `delete {id}` removes an agent of its
+//! subtree. The page never writes the host tree itself.
 //!
 //! AI CELLS. The canvas makes an AI cell wherever you type something that is not
 //! a known kind (design: `tmp/canvas_ai.md`). The cell's AI agent is built from
@@ -102,7 +101,7 @@ fn refuse(reason: &str, error: impl Into<String>, hint: &str) -> Value {
     json!({"error": error.into(), "reason": reason, "hint": hint})
 }
 
-fn hex8() -> String {
+pub(crate) fn hex8() -> String {
     let mut b = [0u8; 4];
     let _ = getrandom::getrandom(&mut b);
     b.iter().map(|x| format!("{x:02x}")).collect()
@@ -170,7 +169,7 @@ impl BackendBundle {
     /// store's parent), its record names the store, `user` may call its chat
     /// verbs, it may call the store, its key and `peer`. `user`'s own side is
     /// `kern/reach`'s.
-    async fn make_ai(host: &Host, me: &AgentId, ai: &str, mut spec: Map<String, Value>, peer: Map<String, Value>) -> Result<(), String> {
+    pub(crate) async fn make_ai(host: &Host, me: &AgentId, ai: &str, mut spec: Map<String, Value>, peer: Map<String, Value>) -> Result<(), String> {
         // the caller's own store, when it names one (its grants are the
         // caller's); else the project's, which admits the AI
         let store = match spec.get("memory_store_id").and_then(Value::as_str).filter(|s| !s.is_empty()) {
@@ -271,20 +270,13 @@ impl BackendBundle {
         r
     }
 
-    /// `delete {id}` — an agent of this backend's own subtree. A direct child is
-    /// deleted here; a deeper one by ITS parent (each deletes its own
-    /// children only).
+    /// `delete {id}` — an agent of this node's subtree, and its own subtree.
     async fn delete(host: &Host, me: &AgentId, p: &Value) -> Value {
         let id = p.get("id").and_then(Value::as_str).unwrap_or("");
         if !Self::below(host, me, id) {
             return refuse("not_found", format!("delete: no {id:?} under `{}`", me.0), "");
         }
-        let parent = host.kernel.agents.get(&AgentId::from(id)).and_then(|a| a.value().record().parent_id).unwrap_or_default();
-        if parent == me.0 {
-            host.operator("kernel", json!({"type": "delete_agent", "id": id})).await.result
-        } else {
-            host.operator(&parent, json!({"type": "delete", "id": id})).await.result
-        }
+        host.operator("kernel", json!({"type": "delete_agent", "id": id})).await.result
     }
 
     fn meta_of(host: &Host, id: &str) -> Option<Map<String, Value>> {
@@ -408,14 +400,9 @@ impl Bundle for BackendBundle {
         HANDLER_MODULE
     }
 
-    async fn handle(&self, agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Result<Reply, BundleError> {
-        let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
-        match verb {
-            "boot" => Ok(None),
-            "reflect" => Ok(Some(json!({
-                "handler_module": HANDLER_MODULE,
-                "sentence": "The canvas's host node: creates and deletes its own children — the cells' backends (exec agents, AIs), beside `web_loader` (the page records) and `static_files` — and spawns AI cells from the user's templates, on the project's memory store.",
-                "verbs": {
+    /// HOW TO CALL it — served by the kernel's `docs` verb, never on a reflect.
+    fn verb_docs(&self) -> Value {
+        json!({
                     "create": "args: record:dict (req — handler_module, id?, its own fields; no parent or grants). One direct child of this agent; asking for an existing child of the same handler again answers it. {id, …}.",
                     "delete": "args: id:str (req — an agent under this one). Deletes it and its subtree.",
                     "presets": "No args. {templates: [{name, handler_module, model}], preferred}.",
@@ -424,7 +411,16 @@ impl Bundle for BackendBundle {
                     "rename": "args: id:str, name:str. {id, name}.",
                     "dialogs": "No args. The kept dialogs: {dialogs: [{id, name, template, live}]}.",
                     "reopen": "args: id:str (a kept dialog), stamp:dict?, peer_grants:dict? (as spawn). The live AI if another cell has it, else the same AI re-made here, its history intact. {id, root, template, name, shared}.",
-                },
+                })
+    }
+
+    async fn handle(&self, agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Result<Reply, BundleError> {
+        let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
+        match verb {
+            "boot" => Ok(None),
+            "reflect" => Ok(Some(json!({
+                "handler_module": HANDLER_MODULE,
+                "sentence": "The canvas's host node: the cells' HOST backends (exec agents, AIs) are its children — create / delete them, spawn an AI. Cells themselves are placed on the page's view (`<page guid>|view_root`), not here.",
             }))),
             _ => {
                 let Some(host) = Self::host(kernel) else {
@@ -439,7 +435,11 @@ impl Bundle for BackendBundle {
                     "rename" => Self::rename(&host, payload).await,
                     "dialogs" => Self::dialogs(&host).await,
                     "reopen" => Self::reopen(&host, agent_id, payload).await,
-                    _ => refuse("unhandled", format!("canvas: unknown type {verb:?}"), ""),
+                    _ => {
+                        let mut r = refuse("unhandled", format!("canvas: unknown type {verb:?}"), "");
+                        r["verb"] = json!(verb);
+                        r
+                    }
                 }))
             }
         }

@@ -1,5 +1,6 @@
 import { str } from "../../lib.ts";
 import { bodyText } from "../body_text.ts";
+import { htmlRefusal } from "../html_check.ts";
 import { panelRelay } from "../panel_relay.ts";
 import { grantHint } from "./grant_hint.ts";
 import type { Handler, Json } from "../../lib.ts";
@@ -33,6 +34,8 @@ export const htmlAgent: Handler = (id, payload, kernel): Json | Promise<Json> =>
       if (raw === null) {
         return { error: "html_agent: set_html needs the html as a string", reason: "bad_arg", arg: "bytes", hint: "send the markup as <bytes>…</bytes> — verbatim, nothing escaped" };
       }
+      const bad = htmlRefusal("html_agent", raw);
+      if (bad !== null) return bad as Json;
       const html = raw;
       kernel.updateMeta(id, { html }); // → updated event → persist
       kernel.emit(id, { type: "reload_html" }); // universal view reload
@@ -42,6 +45,7 @@ export const htmlAgent: Handler = (id, payload, kernel): Json | Promise<Json> =>
       return {
         error: `html_agent: unknown verb '${str(payload, "type")}' — a cell answers get_html and set_html only`,
         reason: "unhandled",
+        verb: str(payload, "type"),
         hint: "placing, moving, updating, wiring (grants) and removing cells are the VIEW's verbs: send place / move / update / wire / remove to the view (view_root), naming this cell by id",
       };
   }

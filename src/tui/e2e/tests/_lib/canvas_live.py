@@ -102,10 +102,19 @@ def private_write(p: Path, text: str) -> None:
 FOLDER = "agents/user/agents/web/agents/canvas_page/agents/canvas_root"
 
 
+#: The runner's hard stop per test (`e2e/run.py` HARD_STOP_S), less a margin
+#: for teardown and the verdict line.
+HARD_STOP_S = 15 * 60 - 30
+ENDED_HOLD_S = 3  # a `done` (not awaiting) that holds this long ends the wait
+
+
 class Rig:
     """One test's world: its artifacts dir, its binary, its home, its host."""
 
     def __init__(self, test_file: str, live: bool = True):
+        # the runner's HARD STOP (e2e/run.py, owner 2026-10-06: 15 min a test)
+        # counts from here — build and boot included
+        self.born = time.time()
         self.dir = Path(test_file).resolve().parent
         self.spec = yaml.safe_load((self.dir / "test.yaml").read_text()) or {}
         self.id = self.spec["id"]
@@ -304,6 +313,15 @@ class Rig:
         finally:
             chrome.terminate()
 
+    def left(self, reserve: float = 0.0) -> float:
+        """Seconds still usable under the runner's 15-minute hard stop, keeping
+        `reserve` for what must run after (the scripted checks)."""
+        return max(0.0, HARD_STOP_S - (time.time() - self.born) - reserve)
+
+    def budget(self, limit: float, reserve: float = 0.0) -> float:
+        """The test's own `limit`, cut to what the hard stop leaves."""
+        return min(float(limit), self.left(reserve))
+
     def finish(self, ok: bool, note: str) -> tuple[bool, str]:
         """Record the summary; the probe prints the machine verdict itself
         (`return verdict(*rig.finish(ok, note))`)."""
@@ -333,9 +351,13 @@ async def say(pg: Page, text: str, cell: int = 0) -> None:
 
 
 async def wait_quiet(pg: Page, total: float, quiet: float, cell: int = 0) -> bool:
-    """Until chat cell #cell has answered in words and gone QUIET `quiet` s."""
+    """Until chat cell #cell's chain is OVER — its last `done` names no work
+    still awaited — or, when that event never arrives, until it has answered
+    in words and gone QUIET `quiet` s."""
     deadline = time.time() + total
     last_n, since = -1, time.time()
+    seen_live = False
+    ended = 0.0
     sel = f"document.querySelectorAll('.chat-view')[{cell}]"
     while time.time() < deadline:
         n = await pg.js(f"({sel}?.querySelectorAll('.msg').length) ?? 0") or 0
@@ -345,11 +367,27 @@ async def wait_quiet(pg: Page, total: float, quiet: float, cell: int = 0) -> boo
         # between two calls shows no placeholder) — is never quiet
         thinking = await pg.js(f"!!{sel}?.querySelector('.msg.thinking') || "
                                f"['thinking','streaming','tool_calling','queued'].includes({sel}?.querySelector('.phase-pill')?.dataset.phase)")
+        if thinking:
+            seen_live = True
+        # THE TRIGGER: the turn's `done` arrived and its reason is not
+        # `awaiting` — the chain is over, nothing to wait for. Only after this
+        # wait SAW the cell work (a `done` left from an earlier turn is no end).
+        # `ok` closes EVERY generation, before its calls dispatch: the end must
+        # HOLD `ENDED_HOLD_S` with no new phase (a live chain goes tool_calling).
+        reason = await pg.js(f"{sel}?.querySelector('.phase-pill')?.dataset.reason || ''")
+        if seen_live and said and not thinking and reason not in ("", "awaiting"):
+            ended = ended or time.time()
+            if time.time() - ended >= ENDED_HOLD_S:
+                return True
+        else:
+            ended = 0.0
         if n != last_n or thinking:
             last_n, since = n, time.time()
         elif said and time.time() - since >= quiet:
+            # the `done` event did not reach this cell (it is not always
+            # delivered): the old quiet rule ends the wait
             return True
-        await asyncio.sleep(2)
+        await asyncio.sleep(0.5)
     return False
 
 

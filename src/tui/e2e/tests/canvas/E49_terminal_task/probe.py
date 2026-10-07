@@ -34,7 +34,7 @@ def main() -> bool:
             await asyncio.sleep(2)
             return await ask(pg, 250, 300,
                 "Use the terminal next to you: how many commits does this repo have, and what is the last commit message?",
-                rig.limits["total_seconds"], rig.limits["quiet_seconds"])
+                rig.budget(rig.limits["total_seconds"]), rig.limits["quiet_seconds"])
     try:
         done, said = asyncio.run(drive())
     finally:

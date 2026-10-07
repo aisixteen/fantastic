@@ -29,7 +29,7 @@ def main() -> bool:
         async with rig.page(1800, 1000) as pg:
             done, said = await ask(pg, 250, 300,
                 "Wire Kick, Snare and Hat to the Mixer so their hits reach it. Leave Noise unwired.",
-                rig.limits["total_seconds"], rig.limits["quiet_seconds"])
+                rig.budget(rig.limits["total_seconds"]), rig.limits["quiet_seconds"])
             await asyncio.sleep(2)
             for cid in ("kick", "snare", "hat", "noise"):
                 await in_frame(pg, cid, "(doc.getElementById('hit')?.click(), true)")
