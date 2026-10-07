@@ -1,0 +1,9 @@
+base: py_agent
+sentence: A starter python agent — edit agent.py (its verbs) and panel.html (its view); a change takes effect at once.
+command: [python3, agent.py]
+verbs:
+  hello: "args: name:str?. Returns {greeting}."
+  count: "args: none. Adds one to this agent's counter and returns {count}; emits {type: count, count}."
+record:
+  inherit_env: [PATH]
+  view: {kind: html, bytes_file: panel.html, calls: [hello, count, watch]}

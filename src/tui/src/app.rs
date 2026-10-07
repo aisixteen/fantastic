@@ -266,10 +266,18 @@ impl App {
         use crate::recipe::Recipe;
         let (target, focus) = match r {
             Recipe::Canvas => (self.trows.iter().position(|t| t.id == crate::kern::web::WEB_ID), Focus::Panel),
-            Recipe::Ai => match self.trows.iter().position(|t| t.kind == PanelKind::Ai) {
+            // the ROOT AI first (`kern/root_ai`), else any
+            Recipe::Ai => match self
+                .trows
+                .iter()
+                .position(|t| t.id == crate::kern::root_ai::ROOT_AI)
+                .or_else(|| self.trows.iter().position(|t| t.kind == PanelKind::Ai))
+            {
                 Some(i) => (Some(i), Focus::Composer),
                 None => (self.trows.iter().position(|t| t.id == SETUP_ID), Focus::Panel),
             },
+            // the terminal `run` made (with the canvas the program is a cell there)
+            Recipe::Run => (self.trows.iter().position(|t| t.id == TERM_ID), Focus::Term),
         };
         let Some(i) = target else {
             self.note(format!("{r:?}: nothing to open"));

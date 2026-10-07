@@ -1,10 +1,12 @@
 // THE ACTION POPUP — opened WHERE you want something (a double click on empty
 // canvas, or ⌘K / Ctrl-K at the pointer), macOS-Launchpad style: a text field on
-// top, and below it a GRID of icon tiles in three sections —
+// top, and below it a GRID of icon tiles in two groups (backend-owned views):
 //
-//   do      ask (the default AI) · terminal · html · stream · agent (set-up)
-//   AI      your templates (★ the default) — a new AI cell on that one
-//   chats   your kept dialogs — reopened here
+//   page    html · stream · demo — page content (FE)
+//   host    ask (the default AI) · terminal · agent (set-up) · python agent · your plugins —
+//           a HOST agent made, then a cell views it (BE)
+//   host · AI     your AI templates (★ the default) — a new AI cell on that one
+//   host · chats  your kept dialogs — reopened here
 //
 // Typing FILTERS the tiles; a kind typed exactly offers only that kind; `@name`
 // picks a template with the rest as the first turn; anything else becomes the
@@ -19,17 +21,36 @@ export type Pick =
   | { kind: "stream" }
   | { kind: "setup" }
   | { kind: "demo" }
-  | { kind: "chat"; id: string; name: string };
+  | { kind: "sidebar" }
+  | { kind: "canvases" }
+  | { kind: "chat"; id: string; name: string }
+  | { kind: "plugin"; template: string }
+  | { kind: "bundle"; starter: string }
+  | { kind: "coding"; name: string; path: string };
 
 export interface Presets {
-  templates: Array<{ name: string; handler_module: string; model: string }>;
+  /** `kind`: "ai" (a chat on it) or "agent" (a plugin: a host agent with its own view) */
+  templates: Array<{ name: string; handler_module: string; model: string; kind?: string }>;
   preferred: string | null;
   /** kept dialogs (`backend dialogs`) */
   dialogs: Array<{ id: string; name: string }>;
+  /** the known coding agents found on the human's PATH (`user path`) */
+  coding?: Array<{ name: string; path: string }>;
 }
 
-export type Section = "do" | "ai" | "chats";
-export type Icon = "ask" | "terminal" | "html" | "stream" | "agent" | "template" | "chat" | "demo";
+/** THE CODING AGENTS the menu knows (owner 2026-10-08): LAUNCHERS — a tile
+ *  starts the human's own installed program, interactive, in a terminal cell;
+ *  nothing is automated, no login is touched. Found by name on `user path`.
+ *  Their glyphs are the menu's own outline icons, never a vendor's logo. */
+export const CODING_AGENTS: ReadonlyArray<{ name: string; icon: Icon }> = [
+  { name: "claude", icon: "claude" },
+  { name: "codex", icon: "codex" },
+  { name: "aider", icon: "aider" },
+  { name: "opencode", icon: "opencode" },
+];
+
+export type Section = "page" | "host" | "coding" | "ai" | "chats";
+export type Icon = "ask" | "terminal" | "html" | "stream" | "agent" | "template" | "chat" | "demo" | "sidebar" | "canvases" | "claude" | "codex" | "aider" | "opencode";
 
 export interface Tile {
   icon: Icon;
@@ -42,20 +63,29 @@ export interface Tile {
 /** Tiles per row. */
 export const COLS = 5;
 
-const KINDS: Array<[string, Pick, Icon]> = [
-  ["terminal", { kind: "terminal" }, "terminal"],
-  ["html", { kind: "html" }, "html"],
-  ["stream", { kind: "stream" }, "stream"],
-  ["agent", { kind: "setup" }, "agent"],
-  ["demo", { kind: "demo" }, "demo"],
+const KINDS: Array<[string, Pick, Icon, Section]> = [
+  ["terminal", { kind: "terminal" }, "terminal", "host"],
+  ["agent", { kind: "setup" }, "agent", "host"],
+  // a NEW python agent: a project bundle folder from the CLI's starter, one
+  // instance placed — edit its folder, the change takes effect at once
+  ["python agent", { kind: "bundle", starter: "python_agent" }, "template", "host"],
+  ["html", { kind: "html" }, "html", "page"],
+  ["stream", { kind: "stream" }, "stream", "page"],
+  ["demo", { kind: "demo" }, "demo", "page"],
+  ["sidebar", { kind: "sidebar" }, "sidebar", "page"],
+  ["canvases", { kind: "canvases" }, "canvases", "page"],
 ];
+/** The groups in DRAWN order — the flat tile order follows it (arrow keys walk it). */
+const SECTIONS: Section[] = ["host", "coding", "page", "ai", "chats"];
 
 /** The tiles for what is typed, in order (sections in order). Pure. */
 export function tiles(typed: string, presets: Presets | null): Tile[] {
   const t = typed.trim();
   const low = t.toLowerCase();
   const out: Tile[] = [];
-  const templates = presets?.templates ?? [];
+  const all = presets?.templates ?? [];
+  const templates = all.filter((p) => p.kind !== "agent");
+  const plugins = all.filter((p) => p.kind === "agent");
   const dialogs = presets?.dialogs ?? [];
   const at = /^@(\S*)\s*([\s\S]*)$/.exec(t);
   if (at !== null) {
@@ -65,15 +95,24 @@ export function tiles(typed: string, presets: Presets | null): Tile[] {
     return out;
   }
   const exact = KINDS.find(([k]) => k === low);
-  if (exact) return [{ icon: exact[2], label: exact[0], hint: "", pick: exact[1], section: "do" }];
+  if (exact) return [{ icon: exact[2], label: exact[0], hint: "", pick: exact[1], section: exact[3] }];
   // the first tile: the default AI (free text → its first turn), or set-up
   out.push(
     presets?.preferred
-      ? { icon: "ask", label: t ? `ask ${presets.preferred}` : "ask", hint: `★ ${presets.preferred}`, pick: { kind: "ai", template: null, text: t }, section: "do" }
-      : { icon: "agent", label: "configure AI…", hint: "no default yet", pick: { kind: "setup" }, section: "do" },
+      ? { icon: "ask", label: t ? `ask ${presets.preferred}` : "ask", hint: `★ ${presets.preferred}`, pick: { kind: "ai", template: null, text: t }, section: "host" }
+      : { icon: "agent", label: "configure AI…", hint: "no default yet", pick: { kind: "setup" }, section: "host" },
   );
-  for (const [k, pick, icon] of KINDS) {
-    if (!t || k.startsWith(low)) out.push({ icon, label: k, hint: "", pick, section: "do" });
+  for (const [k, pick, icon, section] of KINDS) {
+    if (!t || k.startsWith(low)) out.push({ icon, label: k, hint: "", pick, section });
+  }
+  for (const p of plugins) {
+    if (t && !p.name.toLowerCase().startsWith(low)) continue;
+    out.push({ icon: "agent", label: p.name, hint: "plugin", pick: { kind: "plugin", template: p.name }, section: "host" });
+  }
+  for (const c of presets?.coding ?? []) {
+    if (t && !c.name.startsWith(low)) continue;
+    const icon = CODING_AGENTS.find((a) => a.name === c.name)?.icon ?? "terminal";
+    out.push({ icon, label: c.name, hint: c.path, pick: { kind: "coding", name: c.name, path: c.path }, section: "coding" });
   }
   for (const p of templates) {
     if (t && !p.name.toLowerCase().startsWith(low)) continue;
@@ -84,7 +123,8 @@ export function tiles(typed: string, presets: Presets | null): Tile[] {
     if (t && !d.name.toLowerCase().includes(low)) continue;
     out.push({ icon: "chat", label: d.name, hint: "kept chat", pick: { kind: "chat", id: d.id, name: d.name }, section: "chats" });
   }
-  return out;
+  // stable by group: the first tile stays the default AI (free text + ⏎ asks it)
+  return SECTIONS.flatMap((sec) => out.filter((x) => x.section === sec));
 }
 
 /** Arrow-key move across the grid of `n` tiles: ±1 across, ±COLS down/up. */
@@ -103,13 +143,20 @@ const PATH: Record<Icon, string> = {
   agent: '<circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1"/>',
   template: '<path d="M12 3l1.8 4.7L18.5 9.5l-4.7 1.8L12 16l-1.8-4.7L5.5 9.5l4.7-1.8z"/><rect x="15" y="15" width="6" height="6" rx="1.5"/>',
   demo: '<circle cx="12" cy="12" r="9"/><path d="M10 8.5v7l6-3.5z"/>',
+  sidebar: '<rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 4v16M12 9h5M12 13h5"/>',
+  // the coding agents: plain outline marks of the menu's own, no vendor logo
+  claude: '<path d="M12 3v18M3 12h18M5.6 5.6l12.8 12.8M18.4 5.6L5.6 18.4"/>',
+  codex: '<path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M9 10l-2 2 2 2M15 10l2 2-2 2"/>',
+  aider: '<rect x="3" y="6" width="18" height="12" rx="2"/><path d="M8 10v4M16 10v4M11 12h2"/>',
+  opencode: '<path d="M8 7l-5 5 5 5M16 7l5 5-5 5M14 4l-4 16"/>',
+  canvases: '<rect x="3" y="5" width="8" height="6" rx="1"/><rect x="13" y="5" width="8" height="6" rx="1"/><rect x="3" y="13" width="8" height="6" rx="1"/><rect x="13" y="13" width="8" height="6" rx="1"/>',
   chat: '<path d="M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v8a2.5 2.5 0 0 1-2.5 2.5H10l-4.5 4v-4H6.5A2.5 2.5 0 0 1 4 13.5z"/>',
 };
 export function iconSvg(icon: Icon): string {
   return `<svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${PATH[icon]}</svg>`;
 }
 
-const SECTION_TITLE: Record<Section, string> = { do: "do", ai: "AI", chats: "chats" };
+const SECTION_TITLE: Record<Section, string> = { page: "page", host: "host", coding: "host · coding agents", ai: "host · AI", chats: "host · chats" };
 
 const CSS = `
   .action-popup { position: fixed; z-index: 1000; width: 520px; max-width: calc(100vw - 32px);
@@ -187,7 +234,7 @@ export function openActionPopup(opts: {
     sel = Math.min(sel, Math.max(0, current.length - 1));
     const parts: HTMLElement[] = [];
     let i = 0;
-    for (const section of ["do", "ai", "chats"] as Section[]) {
+    for (const section of SECTIONS) {
       const these = current.filter((t) => t.section === section);
       if (these.length === 0) continue;
       const h = document.createElement("div");

@@ -34,7 +34,7 @@ def main() -> bool:
             # the AI's time: its limit, less what the reactive checks need (≈130 s)
             done, said = await ask(pg, 250, 300, ask_text, rig.budget(rig.limits["total_seconds"], reserve=150), rig.limits["quiet_seconds"])
             await asyncio.sleep(3)
-            made = [c["id"] for c in rig.cells() if c.get("handler_module") in ("html_agent.ts", "terminal_view.ts")]
+            made = [c["id"] for c in rig.cells() if c.get("handler_module") in ("html_agent.ts", "agent_view.ts", "terminal_view.ts")]
             checks = await reactive_check(pg, rig.proj, port)
             return said, made, checks
     try:

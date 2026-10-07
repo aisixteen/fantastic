@@ -189,6 +189,37 @@ The app consumes the Swift kernel through two umbrella SPM products
 [`swift/README.md`](src/lib/swift/README.md) for the consumption story and the
 bundle scoreboard.
 
+## The `fantastic` CLI
+
+<!-- CLI SECTION — written and kept current by the CLI session; the lib side does not edit between these markers. -->
+
+`fantastic` runs the Rust kernel IN-PROCESS in this directory (`.fantastic/`),
+with a terminal UI, an optional browser canvas, and an MCP face for coding CLIs.
+One kernel per directory: a second `fantastic` here attaches as a thin client,
+and refuses any argument while the first runs.
+
+| command | what |
+|---|---|
+| `fantastic` | the terminal UI (a fresh directory is seeded) |
+| `fantastic canvas --port N` | plus the canvas: a page kernel bridged to the host (`--port` the first time; a new one overwrites) |
+| `fantastic [canvas] ai vllm -p PORT` | the ROOT AI `ai` on a backend — also `ai ollama -p PORT`, `ai responses --model M`, `ai anthropic --model M`; what the server knows (model, window) is read from it |
+| `fantastic [canvas] run COMMAND [ARGS…]` | your own program from `$PATH`, as is, in the terminal (or a canvas cell) |
+| `fantastic --headless …` | no screen: the kernel's message stream on stdout |
+| `fantastic mcp` · `fantastic send '<item>'` · `fantastic readme [key]` | MCP over stdio · one call into the running kernel · the docs |
+
+**The canvas** shows HOST agents through views their own records declare
+(`view: {kind: terminal | chat | html | …}`, else a default per kind, else a
+reflect card): a cell is only layout plus the agent it shows, its grant derived
+from the view. ✕ closes a view, the agent lives on. The double-click menu places
+page content or host agents — including your plugin templates
+(`fantastic readme templates`).
+
+Backends link by cargo feature (`vllm`, `ollama`, `responses`, `anthropic`,
+`foundation-models`). Design: [`src/cli/design/`](src/cli/design/) · live e2e:
+[`src/tui/e2e/tests/`](src/tui/e2e/tests/).
+
+<!-- /CLI SECTION -->
+
 ## Repo layout
 
 | path | content |

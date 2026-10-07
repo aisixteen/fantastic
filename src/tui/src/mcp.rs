@@ -175,7 +175,7 @@ async fn serve(paths: Paths, fresh: bool, proto_fd: i32, err_out: &mut std::fs::
     }
 
     // ── boot / rehydrate ─────────────────────────────────────────────────────
-    let host = match Host::boot(&paths, false).await {
+    let host = match Host::boot(&paths, false, None).await {
         Ok(h) => Arc::new(h),
         Err(e) => return fatal(err_out, &format!("{e}")),
     };

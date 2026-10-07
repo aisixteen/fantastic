@@ -1,0 +1,12 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint (the
+# plug names those). Live: the BACKEND plug (the AI only for step f).
+id: bundle_flow
+group: canvas
+title: "a python agent from the double-click, edited live, kept, bundled into a release, and updated by an AI"
+runner: probe.py
+costs: turns
+limits:
+  # f's two AI asks; a–e are scripted (cut to fit the runner's 15-minute hard stop)
+  ask_seconds: 300
+  quiet_seconds: 30
+env: {}

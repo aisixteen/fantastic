@@ -113,11 +113,26 @@ impl BackendBundle {
         Some(Host { kernel: Arc::clone(kernel), cfg: ClientCfg::here(), root })
     }
 
+    /// Whether `handler` makes an AI agent: its bundle's record names a memory
+    /// store (`memory_store_id`, the field that makes one). Any other template
+    /// is a plain HOST agent — a plugin (backend-owned views).
+    fn is_ai_handler(host: &Host, handler: &str) -> bool {
+        host.kernel
+            .bundles
+            .catalog()
+            .find(|(m, _)| *m == handler)
+            .and_then(|(_, b)| b.record_schema())
+            .is_some_and(|s| s["fields"].as_array().is_some_and(|a| a.iter().any(|f| f["name"] == "memory_store_id")))
+    }
+
     async fn presets(host: &Host) -> Value {
         match crate::kern::templates::shelf(host).await {
             Ok(sh) => json!({
                 "templates": sh.templates.iter().map(|t| json!({
                     "name": t.name, "handler_module": t.handler(), "model": t.model(),
+                    // an AI template opens a chat; any other is a plugin: a host
+                    // agent drawn by its own view
+                    "kind": if Self::is_ai_handler(host, &t.handler()) { "ai" } else { "agent" },
                 })).collect::<Vec<_>>(),
                 "preferred": sh.preferred,
             }),
@@ -138,6 +153,11 @@ impl BackendBundle {
             Ok(s) => s,
             Err(e) => return refuse("not_found", e, "the user's templates are not readable"),
         };
+        // a STARTER BUNDLE (the double-click's "python agent"): a new project
+        // bundle folder from the CLI's starter, loaded, and one instance of it
+        if let Some(kind) = p.get("bundle").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+            return Self::spawn_bundle(host, me, kind, stamp).await;
+        }
         let name = match p.get("template").and_then(Value::as_str).filter(|s| !s.is_empty()) {
             Some(n) => n.to_string(),
             None => match &shelf.preferred {
@@ -154,6 +174,11 @@ impl BackendBundle {
         let Some(t) = shelf.templates.iter().find(|t| t.name == name) else {
             return refuse("not_found", format!("no template `{name}`"), "open ⚙ AI set-up to see your templates");
         };
+        // A PLUGIN template (not an AI): a plain host agent from the record —
+        // no memory store, its key by reference, a fork of the template (`from`)
+        if !Self::is_ai_handler(host, &t.handler()) {
+            return Self::spawn_agent(host, me, &name, t, stamp).await;
+        }
         let ai = format!("ai_{}", hex8());
         let mut spec: Map<String, Value> = t.record.clone();
         spec.extend(stamp);
@@ -162,6 +187,69 @@ impl BackendBundle {
             Ok(()) => json!({"id": ai, "root": ai, "template": name, "handler_module": t.handler(), "model": t.model()}),
             Err(e) => refuse("bad_arg", format!("spawn: the AI from template `{name}`: {e}"), ""),
         }
+    }
+
+    /// A starter bundle placed (owner's workflow b): its files copied into a NEW
+    /// `.fantastic/bundles/py_<hex>/` (the folder name IS the handler), the kernel
+    /// told to load it (`reload_bundle`), one instance made under `canvas_root`,
+    /// its view written from the bundle's view file. Editing the folder then takes
+    /// effect at once (`kern/bundle_watch`).
+    async fn spawn_bundle(host: &Host, me: &AgentId, kind: &str, stamp: Map<String, Value>) -> Value {
+        let paths = match crate::env::Paths::here() {
+            Ok(p) => p,
+            Err(e) => return refuse("not_found", format!("spawn: the project dir: {e}"), ""),
+        };
+        let name = format!("py_{}", &hex8()[..6]);
+        let dir = match crate::kern::bundle_watch::scaffold(&paths.store, kind, &name) {
+            Ok(d) => d,
+            Err(e) => return refuse("bad_arg", format!("spawn: {e}"), ""),
+        };
+        let r = host.operator("kernel", json!({"type": "reload_bundle", "name": name})).await.result;
+        if let Some(e) = r.get("error").and_then(Value::as_str) {
+            return refuse("bad_arg", format!("spawn: loading the bundle `{name}`: {e}"), "");
+        }
+        let id = format!("{name}_1");
+        let mut spec = stamp;
+        for (k, v) in [("type", json!("create_agent")), ("parent_id", json!(me.0)), ("id", json!(id)), ("handler_module", json!(name))] {
+            spec.insert(k.into(), v);
+        }
+        let r = host.operator("kernel", Value::Object(spec)).await.result;
+        if let Some(e) = r.get("error").and_then(Value::as_str) {
+            return refuse("bad_arg", format!("spawn: an instance of `{name}`: {e}"), "");
+        }
+        if let Err(e) = crate::kern::reach::granted(host, &id).await {
+            return refuse("bad_arg", e, "");
+        }
+        if let Err(e) = crate::kern::bundle_watch::refresh_views(host, &name, &dir).await {
+            return refuse("bad_arg", format!("spawn: `{id}`'s view: {e}"), "");
+        }
+        json!({"id": id, "root": id, "bundle": name, "folder": dir.display().to_string(), "kind": "bundle"})
+    }
+
+    /// A plugin template placed: a host agent `<name>_<hex8>` under `canvas_root`,
+    /// its record the template's (a COPY — `from: <template>`), its key attached
+    /// by reference. `kern/reach` grants it to the human and the leg.
+    async fn spawn_agent(host: &Host, me: &AgentId, name: &str, t: &crate::kern::templates::Template, stamp: Map<String, Value>) -> Value {
+        let slug: String = name.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' }).collect();
+        let id = format!("{slug}_{}", hex8());
+        let mut spec: Map<String, Value> = t.record.clone();
+        spec.extend(stamp);
+        spec.insert("from".into(), json!(name));
+        let handler = t.handler();
+        if let Err(e) = crate::kern::keys::attach(host, &handler, &mut spec) {
+            return refuse("bad_arg", format!("spawn: `{name}`: {e}"), "");
+        }
+        spec.insert("type".into(), json!("create_agent"));
+        spec.insert("parent_id".into(), json!(me.0));
+        spec.insert("id".into(), json!(id));
+        let r = host.operator("kernel", Value::Object(spec)).await.result;
+        if let Some(e) = r.get("error").and_then(Value::as_str) {
+            return refuse("bad_arg", format!("spawn: the agent from template `{name}`: {e}"), "");
+        }
+        if let Err(e) = crate::kern::reach::granted(host, &id).await {
+            return refuse("bad_arg", e, "");
+        }
+        json!({"id": id, "root": id, "template": name, "handler_module": handler, "kind": "agent"})
     }
 
     /// Create AI `ai` as `canvas_root`'s direct child, on the project's memory
@@ -277,6 +365,20 @@ impl BackendBundle {
             return refuse("not_found", format!("delete: no {id:?} under `{}`", me.0), "");
         }
         host.operator("kernel", json!({"type": "delete_agent", "id": id})).await.result
+    }
+
+    /// `canvases` — every canvas, the main one (declarative `main: true`) first.
+    fn canvases(host: &Host) -> Value {
+        let mut out: Vec<Value> = crate::kern::web::canvases(host)
+            .into_iter()
+            .map(|(id, loader)| {
+                let m = Self::meta_of(host, &id).unwrap_or_default();
+                json!({"id": id, "loader": loader, "main": m.get("main") == Some(&json!(true)),
+                    "name": m.get("display_name").and_then(Value::as_str).unwrap_or(id.strip_prefix("canvas_").unwrap_or(&id))})
+            })
+            .collect();
+        out.sort_by_key(|c| c["main"] != json!(true));
+        json!({"canvases": out})
     }
 
     fn meta_of(host: &Host, id: &str) -> Option<Map<String, Value>> {
@@ -411,6 +513,8 @@ impl Bundle for BackendBundle {
                     "rename": "args: id:str, name:str. {id, name}.",
                     "dialogs": "No args. The kept dialogs: {dialogs: [{id, name, template, live}]}.",
                     "reopen": "args: id:str (a kept dialog), stamp:dict?, peer_grants:dict? (as spawn). The live AI if another cell has it, else the same AI re-made here, its history intact. {id, root, template, name, shared}.",
+                    "new_canvas": "args: name:str (req). A PEER canvas `canvas_<name>` beside this one (flat — never nested): its own page records and page kernel, its own cells' backends. Open it at the page URL with ?canvas=<id>. {id}.",
+                    "canvases": "No args. Every canvas, the main one first: {canvases: [{id, loader, main, name}]}.",
                 })
     }
 
@@ -435,6 +539,11 @@ impl Bundle for BackendBundle {
                     "rename" => Self::rename(&host, payload).await,
                     "dialogs" => Self::dialogs(&host).await,
                     "reopen" => Self::reopen(&host, agent_id, payload).await,
+                    "new_canvas" => match crate::kern::web::new_canvas(&host, payload.get("name").and_then(Value::as_str).unwrap_or("")).await {
+                        Ok(id) => json!({"id": id}),
+                        Err(e) => refuse("bad_arg", e, "name it: new_canvas {name: \"research\"}"),
+                    },
+                    "canvases" => Self::canvases(&host),
                     _ => {
                         let mut r = refuse("unhandled", format!("canvas: unknown type {verb:?}"), "");
                         r["verb"] = json!(verb);

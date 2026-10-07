@@ -1,8 +1,11 @@
-import { Agent, Kernel, ProxyLoader, WsBridge, registerRamStore } from "./lib.ts";
+import { Agent, Kernel, ProxyLoader, WsBridge, loadBundle, registerRamStore } from "./lib.ts";
+import type { FolderText } from "./lib.ts";
 import { GATEWAY, UserBridge, readToken, writeToken } from "./user_bridge.ts";
 import { registerGlAgent } from "./bundles/gl_agent/gl_agent.ts";
 import { registerHtmlAgent } from "./bundles/html_agent/html_agent.ts";
+import { registerAgentView } from "./bundles/agent_view/agent_view.ts";
 import { mountCanvas } from "./bundles/canvas/canvas.ts";
+import { setCanvasNode } from "./bundles/canvas/host_views.ts";
 import { registerCanvas } from "./bundles/canvas/canvas_agent.ts";
 import { registerBackground } from "./bundles/canvas/background_agent.ts";
 
@@ -13,7 +16,12 @@ import { registerBackground } from "./bundles/canvas/background_agent.ts";
 // LOCAL member tree; host backends are weak peers referenced by id. One shared
 // frontend tree, addressed by the loader's id — no per-session id.
 
-const LOADER = "web_loader"; // the host-side web/kernel_state, by id
+// FLAT PEER CANVASES (phase 4): every canvas is a host `canvas.tools` node under
+// `canvas_page` with its OWN page records (its `kernel_state` child) — so its own
+// page kernel, its own guid. `?canvas=<node>` picks one; without it, the main
+// one (`main: true`, declarative), else the first.
+const CANVAS_NODE = "canvas.tools";
+const LOADER_HM = "kernel_state.tools";
 const origin =
   (location.protocol === "https:" ? "wss://" : "ws://") + location.host;
 
@@ -25,6 +33,7 @@ const origin =
 function register(kernel: Kernel): void {
   registerGlAgent(kernel);
   registerHtmlAgent(kernel);
+  registerAgentView(kernel); // a host agent's own view (its record's `view`)
   registerCanvas(kernel); // the compositor root and its control plane
   registerBackground(kernel); // its singleton, delete-locked background (set_bg/clear_bg/get_bg)
   // View bundles that front a host backend are real frontend agents too — a
@@ -34,6 +43,8 @@ function register(kernel: Kernel): void {
   kernel.registerBundle("reflect_view.ts", () => null);
   kernel.registerBundle("setup_view.ts", () => null);
   kernel.registerBundle("stream_view.ts", () => null);
+  kernel.registerBundle("sidebar_view.ts", () => null); // the chats + agent tree cell
+  kernel.registerBundle("canvases_view.ts", () => null); // the canvas-list cell
 
   // Each frontend bundle declares its role via reflect (readme=true): the view
   // CLIENTS name the host CAPABILITY + verb surface they front (an LLM weaves the
@@ -43,6 +54,18 @@ function register(kernel: Kernel): void {
   kernel.setBundleReadme(
     "html_agent.ts",
     "An html cell: its record's `html` body, rendered in a sandboxed frame (unsandboxed when trusted). Verbs: get_html, set_html {bytes}. A PANEL'S JS (an html cell's body) has `fantastic`: `await fantastic.send(id, payload)` → the reply · `fantastic.watch(id, ev => …)` → events (returns off) · `fantastic.emit(id, payload)` · `fantastic.onMessage(p => …)`. Its calls are judged by the CELL's can_call — grant what it calls (`{<id>: [verbs…, watch]}`); a reply's `grants_missing` names any it lacks. On the host they arrive as `user`: a host agent you create for a panel needs `callable_by: {user: [<the verbs the panel calls>, watch]}` in its create_agent (a new agent admits no one); never drop `user` from an existing agent's callable_by. Place, move, grant and remove cells through the view (`view_root`).",
+  );
+  kernel.setBundleReadme(
+    "agent_view.ts",
+    "A HOST agent's own view: the cell shows `backend_id`, drawn as that agent's record declares (`view: {kind: html, bytes | bytes_file, calls}`). The cell holds no content — the body is the host agent's; its grant onto the agent is the record's `calls`. Show a host agent: place {backend_id, x, y} on the view (no kind).",
+  );
+  kernel.setBundleReadme(
+    "sidebar_view.ts",
+    "A sidebar cell: the chats (kept and open) and the agent tree of both kernels. Page content, no backend; as many as you like.",
+  );
+  kernel.setBundleReadme(
+    "canvases_view.ts",
+    "A canvas-list cell: every canvas on the host (flat peers, ★ the main one); a click opens one, `+ new canvas` makes a peer. Page content, no backend.",
   );
   kernel.setBundleReadme(
     "gl_agent.ts",
@@ -90,8 +113,23 @@ if (me["reason"] === "unauthorized") {
   await new Promise(() => {}); // the form reloads the page
 }
 
+const canvases = await listCanvases();
+const asked = new URLSearchParams(location.search).get("canvas");
+const here = asked !== null ? canvases.find((c) => c.id === asked) : (canvases.find((c) => c.main) ?? canvases[0]);
+if (here === undefined) {
+  document.body.textContent = asked !== null ? `no canvas ${asked} on this host` : "this host holds no canvas";
+  await new Promise(() => {});
+}
+// known before any record loads: a cell's grants name this canvas's node
+setCanvasNode(here!.id);
+const LOADER = here!.loader;
 const loader = new ProxyLoader(kernel, LOADER);
 kernel.persistenceProvider = LOADER;
+// PAGE BUNDLES (`<its records' root>/bundles/*/bundle.yaml`, through its loader)
+// load BEFORE the tree, so a persisted instance runs; a refused read fails loud
+kernel.readFolders = (name) => loader.readBundles(name);
+const folders = await readFolders();
+for (const f of folders) loadBundle(kernel, f);
 const records = await loader.loadTree();
 if (records.length > 0) kernel.load(records);
 else seed(kernel);
@@ -109,7 +147,56 @@ await mountCanvas({
   mount: document.body,
   selfId: kernel.rootId ?? "canvas",
   flush: () => loader.flush(),
+  node: here!.id,
+  canvases,
 });
+
+// LIVE PAGE BUNDLES: a folder whose bundle.yaml changed (or a new one) is
+// reloaded at once — the root's `reload_bundle` restarts its live instances
+let seen = new Map(folders.map((f) => [f.name, JSON.stringify(f)]));
+setInterval(() => {
+  void readFolders().then(async (now) => {
+    const next = new Map(now.map((f) => [f.name, JSON.stringify(f)]));
+    for (const [name, sig] of next) {
+      if (seen.get(name) === sig) continue;
+      const r = (await kernel.send([{ target: "kernel", payload: { type: "reload_bundle", name } as never }]))[0]?.result as Record<string, unknown> | undefined;
+      if (typeof r?.["error"] === "string") console.error(`[canvas] page bundle ${name}: ${r["error"]}`);
+    }
+    seen = next;
+  }, (e: unknown) => console.error("[canvas] page bundles:", e));
+}, 1000);
+
+/** Every canvas on the host: `canvas.tools` children of `canvas_page`, each with
+ *  its page loader (its `kernel_state` child). */
+async function listCanvases(): Promise<Array<{ id: string; loader: string; main: boolean; name: string }>> {
+  const all: Array<Record<string, unknown>> = [];
+  let after: unknown = null;
+  for (;;) {
+    const page = (await kernel.callHost("kernel", { type: "list_agents", limit: 200, after } as never)) as {
+      agents?: Array<Record<string, unknown>>;
+      next?: unknown;
+    };
+    all.push(...(page?.agents ?? []));
+    if (page?.next === null || page?.next === undefined) break;
+    after = page.next;
+  }
+  const out: Array<{ id: string; loader: string; main: boolean; name: string }> = [];
+  for (const n of all) {
+    if (n["handler_module"] !== CANVAS_NODE || n["parent_id"] !== "canvas_page" || typeof n["id"] !== "string") continue;
+    const l = all.find((a) => a["parent_id"] === n["id"] && a["handler_module"] === LOADER_HM);
+    if (typeof l?.["id"] !== "string") continue;
+    const name = typeof n["display_name"] === "string" && n["display_name"] !== "" ? n["display_name"] : n["id"].replace(/^canvas_/, "");
+    out.push({ id: n["id"], loader: l["id"], main: n["main"] === true, name });
+  }
+  return out.sort((a, b) => Number(b.main) - Number(a.main) || (a.id < b.id ? -1 : 1));
+}
+
+/** The page's folders, as its loader reads them — a refusal is LOUD. */
+async function readFolders(): Promise<FolderText[]> {
+  const r = (await loader.readBundles()) as { bundles?: unknown } | null;
+  if (!Array.isArray(r?.bundles)) throw new Error(`page bundles: the loader's read_bundles answered ${JSON.stringify(r)}`);
+  return r.bundles as FolderText[];
+}
 
 /** The token form: shown when the host refuses this tab. The token goes to
  *  browser storage only, then the page reloads. */

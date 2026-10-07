@@ -99,10 +99,12 @@ pub struct Handle {
 pub struct Boot {
     /// Serve the canvas (the `canvas` recipe).
     pub canvas: bool,
-    /// `--port`: creation-only; a later run reads it from `web`'s record.
+    /// `--port`: stored on `web`'s record; a different one overwrites it at boot.
     pub port: Option<u16>,
-    /// `canvas run vllm …`: the root AI's server (`kern/root_ai`).
-    pub vllm: Option<crate::kern::root_ai::VllmRun>,
+    /// `ai BACKEND …`: the root AI's backend (`kern/root_ai`).
+    pub ai: Option<crate::kern::root_ai::Backend>,
+    /// `run COMMAND…`: the program the terminal (or a canvas cell) runs.
+    pub run: Option<Vec<String>>,
     /// A terminal View is attached (it sizes the ViewModel).
     pub tui: bool,
     /// HEADLESS ONLY: where to say the page's URL, or why there is none. The
@@ -298,7 +300,7 @@ async fn run(
             if let Err(e) = crate::tty::redirect_std_to(&paths.cli.join("kernel.log")) {
                 app.note(format!("{e}"));
             }
-            match Host::boot(&paths, boot.canvas).await {
+            match Host::boot(&paths, boot.canvas, boot.port).await {
                 Ok(h) => {
                     let h = Arc::new(h);
                     app.cfg = h.cfg.clone();
@@ -306,27 +308,14 @@ async fn run(
                     crate::kern::runner::spawn_row_tail(Arc::clone(&h), tx.clone(), h.kernel.rows.next_id() - 1);
                     crate::kern::runner::spawn_row_watch(Arc::clone(&h), tx.clone()).await;
                     crate::kern::runner::subscribe_state(&h, tx.clone());
+                    // a host bundle's folder changed → it takes effect at once
+                    crate::kern::bundle_watch::spawn(Arc::clone(&h), paths.store.clone());
                     cmds = Some(crate::kern::runner::spawn(Arc::clone(&h), tx.clone(), paths.clone()));
                     if boot.canvas {
                         match crate::kern::web::ensure(&h, boot.port).await {
                             Ok(urls) => {
                                 boot.say(&format!("fantastic: the canvas: {}", urls.canvas));
                                 app.note(format!("the canvas: {}", urls.canvas));
-                                // a root AI that cannot be pointed is a loud stop, like no page
-                                if let Some(v) = &boot.vllm {
-                                    match crate::kern::root_ai::run_vllm(&h, v).await {
-                                        Ok(said) => {
-                                            boot.say(&format!("fantastic: {said}"));
-                                            app.note(said);
-                                        }
-                                        Err(e) => {
-                                            boot.say(&format!("fantastic: run vllm: {e}"));
-                                            app.note(format!("run vllm: {e}"));
-                                            failed();
-                                            app.quit = true;
-                                        }
-                                    }
-                                }
                             }
                             // No page to serve is fatal where the page is the
                             // only View; with a terminal it is a note there.
@@ -335,6 +324,44 @@ async fn run(
                             Err(e) => {
                                 boot.say(&format!("fantastic: {e}"));
                                 app.note(e);
+                                failed();
+                                app.quit = true;
+                            }
+                        }
+                    }
+                    // `ai BACKEND …` and `run COMMAND…`: with or without the canvas. One
+                    // that cannot be done is a loud stop, like no page.
+                    if let Some(b) = &boot.ai {
+                        match crate::kern::root_ai::run(&h, b).await {
+                            Ok(said) => {
+                                boot.say(&format!("fantastic: {said}"));
+                                app.note(said);
+                            }
+                            Err(e) => {
+                                boot.say(&format!("fantastic: ai: {e}"));
+                                app.note(format!("ai: {e}"));
+                                failed();
+                                app.quit = true;
+                            }
+                        }
+                    }
+                    if let Some(argv) = &boot.run {
+                        let r = if boot.canvas {
+                            crate::kern::terminal::canvas_cell(&h, argv).await.map(|c| match c {
+                                Some(cell) => format!("`{}` runs in the canvas cell `{cell}`", argv.join(" ")),
+                                None => "the canvas has no view yet — open it once and run again".to_string(),
+                            })
+                        } else {
+                            crate::kern::terminal::prepare_run(&h, argv).await.map(|()| format!("`{}` runs in the terminal", argv.join(" ")))
+                        };
+                        match r {
+                            Ok(said) => {
+                                boot.say(&format!("fantastic: {said}"));
+                                app.note(said);
+                            }
+                            Err(e) => {
+                                boot.say(&format!("fantastic: run: {e}"));
+                                app.note(format!("run: {e}"));
                                 failed();
                                 app.quit = true;
                             }

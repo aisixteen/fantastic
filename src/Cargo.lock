@@ -660,6 +660,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "fantastic-anthropic-backend"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "fantastic-ai-core",
+ "fantastic-bundle",
+ "fantastic-kernel",
+ "futures-util",
+ "reqwest",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "fantastic-bundle"
 version = "0.1.0"
 dependencies = [
@@ -779,6 +793,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "fantastic-ollama-backend"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "fantastic-ai-core",
+ "fantastic-bundle",
+ "fantastic-kernel",
+ "futures-util",
+ "reqwest",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "fantastic-py-agent"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "fantastic-bundle",
+ "fantastic-exec-bridge",
+ "fantastic-kernel",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "fantastic-ram-store"
 version = "0.1.0"
 dependencies = [
@@ -849,6 +889,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "crossterm 0.29.0",
+ "fantastic-anthropic-backend",
  "fantastic-canvas-page",
  "fantastic-core",
  "fantastic-credential-store",
@@ -856,6 +897,8 @@ dependencies = [
  "fantastic-file",
  "fantastic-foundation-models-backend",
  "fantastic-kernel",
+ "fantastic-ollama-backend",
+ "fantastic-py-agent",
  "fantastic-responses-backend",
  "fantastic-sqlite-store",
  "fantastic-static-loader",

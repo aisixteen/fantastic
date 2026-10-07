@@ -217,6 +217,34 @@ pub async fn start(h: &Host) -> Result<(), String> {
         }
     });
     h.kernel.add_state_subscriber(sub);
+    // A PAGE CONNECTING: `<guid>|*` is the only grant that reaches a connected
+    // kernel's agents (the gate compares the guid literally — `*|*` matches
+    // nothing). No event says a peer connected, but a page that connects sends,
+    // and every send is on the state stream: each event checks the peer table
+    // for a guid not granted yet (a weak kernel ref: no cycle through the
+    // subscriber it registers).
+    let (ptx, mut prx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let weak = Arc::downgrade(&h.kernel);
+    let seen = Arc::new(std::sync::Mutex::new(std::collections::HashSet::<String>::new()));
+    let peers: fantastic_kernel::StateSubscriber = Arc::new(move |_v: &Value, _body: Option<&fantastic_kernel::Blob>| {
+        let Some(k) = weak.upgrade() else { return };
+        let rows = k.peer_rows();
+        let mut seen = seen.lock().expect("peers seen poisoned");
+        for g in rows.as_array().into_iter().flatten().filter_map(|r| r.get("guid").and_then(Value::as_str)) {
+            if seen.insert(g.to_string()) {
+                let _ = ptx.send(g.to_string());
+            }
+        }
+    });
+    h.kernel.add_state_subscriber(peers);
+    let peer_host = Host { kernel: Arc::clone(&h.kernel), cfg: h.cfg.clone(), root: h.root.clone() };
+    tokio::spawn(async move {
+        while let Some(guid) = prx.recv().await {
+            if let Err(e) = grant_peer(&peer_host, &guid).await {
+                tracing::warn!("{e}");
+            }
+        }
+    });
     let host = Host { kernel: Arc::clone(&h.kernel), cfg: h.cfg.clone(), root: h.root.clone() };
     tokio::spawn(async move {
         while let Some(id) = rx.recv().await {
@@ -237,5 +265,26 @@ pub async fn start(h: &Host) -> Result<(), String> {
             GRANTED.notify_waiters();
         }
     });
+    Ok(())
+}
+
+/// The human and the canvas leg reach every agent of the connected page `guid`
+/// (`<guid>|*`), merged into what their records name.
+async fn grant_peer(h: &Host, guid: &str) -> Result<(), String> {
+    let key = format!("{guid}|*");
+    for holder in [crate::env::HUMAN, CANVAS_LEG] {
+        if !exists(h, holder) {
+            continue;
+        }
+        let mut cc = field(h, holder, "can_call");
+        if cc.get(&key) == Some(&json!(["*"])) {
+            continue;
+        }
+        cc.insert(key.clone(), json!(["*"]));
+        let r = h.operator("kernel", json!({"type": "update_agent", "id": holder, "can_call": cc})).await.result;
+        if let Some(e) = r.get("error").and_then(Value::as_str) {
+            return Err(format!("reach: `{holder}` → `{key}`: {e}"));
+        }
+    }
     Ok(())
 }

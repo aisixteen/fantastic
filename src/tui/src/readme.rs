@@ -11,10 +11,12 @@ const COMMANDS: &str = "Aisixteen Fantastic — a kernel of agents living in thi
 This is `fantastic` without a terminal, so it only prints this readme: it starts nothing and writes nothing. Commands:\n\
 \x20\x20fantastic                          the terminal UI (on a terminal); a fresh directory is seeded on launch\n\
 \x20\x20fantastic canvas [ai] --port N     the terminal UI and the browser canvas (--port the first time only)\n\
+\x20\x20fantastic [canvas] ai vllm -p PORT  the root AI `ai` on a backend (also `ai ollama -p PORT`, `ai responses|anthropic --model M`)\n\
+\x20\x20fantastic [canvas] run CMD [ARGS]   your own program from $PATH, as is, in the terminal (or a canvas cell)\n\
 \x20\x20fantastic --headless [canvas]      no screen: the kernel's message stream on stdout\n\
 \x20\x20fantastic mcp                      MCP over stdio for a coding CLI (attaches to a running kernel, or runs it)\n\
 \x20\x20fantastic send '<item json>'       one call into the running kernel, as the `mcp` leg; `$env:NAME` values come from this shell, marked secret\n\
-\x20\x20fantastic readme [key]              the docs: the index, or one doc (`canvas`, `mcp`, `setup`, and the kernel's own)\n\
+\x20\x20fantastic readme [key]              the docs: the index, or one doc (`canvas`, `mcp`, `setup`, `templates`, `bundles`, and the kernel's own)\n\
 \n";
 
 /// The CLI's own docs, beside the kernel's embedded tree
@@ -24,6 +26,8 @@ const CLI_DOCS: &[(&str, &str)] = &[
     ("canvas", include_str!("../docs/canvas.md")),
     ("mcp", include_str!("../docs/mcp.md")),
     ("setup", include_str!("../docs/setup.md")),
+    ("templates", include_str!("../docs/templates.md")),
+    ("bundles", include_str!("../docs/bundles.md")),
 ];
 
 /// Every doc, the CLI's first: `(key, text)`.
