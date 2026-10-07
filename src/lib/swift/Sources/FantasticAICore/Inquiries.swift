@@ -151,7 +151,7 @@ private func deliverAnswer(
         deliverSoon(
             kernel: kernel, target: selfId,
             text: "[your inquiry answer did not reach \(asker): \(why)]",
-            clientId: clientId, systemPrompt: nil)
+            clientId: clientId, systemPrompt: nil, notice: true)
     }
 }
 

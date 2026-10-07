@@ -18,8 +18,10 @@ system verbs.
 from __future__ import annotations
 
 from ai_core import build, on_cancel, on_delete, required_meta  # noqa: F401 — the hooks
-from ai_core.schema import field, schema, validate
+from ai_core.credentials import key_reader
+from ai_core.schema import credentials_field, field, schema, validate
 
+from ollama_backend import server
 from ollama_backend.provider import DEFAULT_TEMPERATURE
 
 NAME = "ollama_backend"
@@ -31,13 +33,20 @@ NAME = "ollama_backend"
 RECORD_SCHEMA = schema(
     [
         field("endpoint", "str", "the ollama server URL", required=True),
-        field("model", "str", "the model name", required=True),
+        field(
+            "model",
+            "str",
+            "the model name; left out, read from the server before a turn and written "
+            "here (the one model GET /api/tags lists)",
+        ),
         field("num_ctx", "int", "the context window ollama loads the model with"),
         field(
             "temperature", "float", "sampling temperature", default=DEFAULT_TEMPERATURE
         ),
         field("num_predict", "int", "a turn's output budget (tokens)"),
         field("think", "bool", "turn the model's thinking channel on or off"),
+        # a door's key, when the server sits behind one — absent = no header
+        credentials_field(required=False),
     ],
 )
 
@@ -67,6 +76,7 @@ def make_provider(id, kernel):
         temperature=float(temperature) if temperature is not None else None,
         num_predict=int(num_predict) if num_predict else None,
         think=bool(think) if think is not None else None,
+        key=key_reader(id, kernel, NAME, required=False),
     )
 
 
@@ -86,13 +96,25 @@ async def _reflect_extra(id, kernel):
 
 
 def _build():
-
-    return build(
+    verbs, core = build(
         sentence="Ollama-backed LLM agent (raw prompt-and-parse tool-calling).",
         make_provider=make_provider,
         name=NAME,
         reflect_extra=_reflect_extra,
     )
+
+    async def handler(id: str, payload: dict, kernel) -> dict | None:
+        # A verb that runs a turn first reads a `model` the record leaves out; a
+        # server that does not answer refuses the verb, naming it.
+        if payload.get("type") in server.TURN_VERBS:
+            refused = await server.resolve(
+                id, kernel, key=key_reader(id, kernel, NAME, required=False)
+            )
+            if refused is not None:
+                return refused
+        return await core(id, payload, kernel)
+
+    return verbs, handler
 
 
 VERBS, handler = _build()

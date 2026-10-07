@@ -10,6 +10,17 @@ assembly, the ONE-PASS `_run`, and all the context machinery live in
 model from the agent record) and `ai_core.build()` wires the rest into
 `(VERBS, handler)`.
 
+## The record
+`endpoint` (the server URL, e.g. `http://127.0.0.1:11434`) is required. `model` left
+out is READ FROM THE SERVER before a verb that runs a turn (`send`, `inquiry`,
+`context_recall`) — the ONE model `GET {endpoint}/api/tags` lists — and written back
+to the record; a server listing several names them and the record must pick one. A
+server that does not answer refuses the verb (`bad_arg`, `arg: model`). Nothing about
+the window is read: ollama loads a model with the request's `num_ctx`, else the
+Modelfile's, else its own default, which the API does not expose — set `num_ctx` (or
+`context_window`). `credentials` (`{store, ref}`) names a key for a server behind a
+door: read before each request, sent as `Authorization: Bearer`; absent, no header.
+
 ## Bare completion + the `<call>` grammar — no native tool API
 `send` performs exactly ONE provider pass: the `OllamaProvider` streams the model's text and never receives a `tools` array nor reads `message.tool_calls`. Tool-calling is RAW and shared by every backend: `ai_core` parses the model's `<call name=…>` tags from the streamed text, dispatches them as ONE batch (`kernel.send([...])`), and each destination's results arrive as ONE fresh turn — there is no loop inside a pass.
 

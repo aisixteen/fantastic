@@ -23,6 +23,7 @@
 #![deny(missing_docs)]
 
 use async_trait::async_trait;
+use fantastic_ai_core::credentials::{key_reader, KeySource};
 use fantastic_ai_core::provider::{
     Provider, ProviderError, ProviderEvent, ProviderReport, ProviderStream, ReportCell,
     Unconfigured,
@@ -52,6 +53,8 @@ pub const DEFAULT_CLIENT_ID: &str = fantastic_ai_core::DEFAULT_CLIENT_ID;
 
 /// The name a required-field refusal carries.
 const BACKEND: &str = "ollama_backend";
+
+pub mod server;
 
 /// What `reflect` says this agent IS — python `ollama_backend/tools.py`'s
 /// `sentence`, verbatim.
@@ -102,6 +105,9 @@ struct OllamaProvider {
     /// on the record. `None` = don't send it (model default) — non-thinking models
     /// reject the field, so it is opt-in.
     think: Option<bool>,
+    /// The key reader, awaited before each request — the record's `credentials`
+    /// (a server behind a door); `None` from it = no `Authorization` header.
+    key: Arc<dyn KeySource>,
     /// What the endpoint reported about the last pass — `prompt_eval_count`
     /// (ai_core calibrates its estimate with it) and `done_reason` (`length` ⇒
     /// the output stopped at its bound).
@@ -162,9 +168,16 @@ impl Provider for OllamaProvider {
         }
         let client = reqwest::Client::new();
         let url = format!("{}/api/chat", self.endpoint.trim_end_matches('/'));
-        let resp = client
-            .post(&url)
-            .json(&body)
+        let key = self
+            .key
+            .key(&self.endpoint)
+            .await?
+            .filter(|k| !k.is_empty());
+        let mut req = client.post(&url).json(&body);
+        if let Some(key) = &key {
+            req = req.bearer_auth(key);
+        }
+        let resp = req
             .send()
             .await
             .map_err(|e| ProviderError::raised(format!("ollama: request failed: {e}")))?;
@@ -360,7 +373,12 @@ pub fn record_schema() -> &'static Value {
     SCHEMA.get_or_init(|| {
         schema::schema(vec![
             Field::new("endpoint", "str", "the ollama server URL").required(),
-            Field::new("model", "str", "the model name").required(),
+            Field::new(
+                "model",
+                "str",
+                "the model name; left out, read from the server before a turn and written \
+                 here (the one model GET /api/tags lists)",
+            ),
             Field::new(
                 "num_ctx",
                 "int",
@@ -374,6 +392,8 @@ pub fn record_schema() -> &'static Value {
                 "bool",
                 "turn the model's thinking channel on or off",
             ),
+            // a door's key, when the server sits behind one — absent = no header
+            schema::credentials_field(false),
         ])
     })
 }
@@ -432,6 +452,13 @@ impl Bundle for OllamaBackendBundle {
         let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
         if verb == "reflect" {
             return Ok(Some(reflect_reply(agent_id, kernel)?));
+        }
+        // A verb that runs a turn first reads a `model` the record leaves out; a
+        // server that does not answer refuses the verb, naming it.
+        if server::TURN_VERBS.contains(&verb) {
+            if let Some(refused) = server::resolve(agent_id, kernel).await {
+                return Ok(Some(refused));
+            }
         }
         // EVERY OTHER ai_core VERB, one table for every backend (python `build`).
         let provider = |_client: &str| build_provider(agent_id, kernel);
@@ -496,6 +523,7 @@ fn build_provider(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Arc<dyn Provider>
         num_ctx: meta.get("num_ctx").and_then(Value::as_u64),
         num_predict: meta.get("num_predict").and_then(Value::as_u64),
         think: meta.get("think").and_then(Value::as_bool),
+        key: Arc::new(key_reader(agent_id, kernel, BACKEND, false)),
         report: ReportCell::default(),
     })
 }
@@ -538,3 +566,6 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Result<Value, BundleErr
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod tests_server;

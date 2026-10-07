@@ -22,6 +22,9 @@ pub struct QueuedEntry {
     pub send_id: String,
     /// Enqueue timestamp.
     pub queued_at: f64,
+    /// This layer's own text to its own agent (a reminder, a malformed-call
+    /// report): the incoming row is stored as `kind: "notice"`.
+    pub notice: bool,
 }
 
 /// The entry currently holding the FIFO lock (used by `status`).
@@ -58,6 +61,8 @@ pub struct CurrentEntry {
     /// Who stopped this generation with the `stop` verb — the caller's id, or
     /// `"operator"` (python `stopped_by`). The cut marker names them.
     pub stopped_by: Option<String>,
+    /// Carried from the queue row: the incoming row is a `notice`.
+    pub notice: bool,
 }
 
 /// Per-agent coordination state. Cloning the `Arc` is cheap.

@@ -359,6 +359,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "fantastic-anthropic-backend"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "fantastic-ai-core",
+ "fantastic-bundle",
+ "fantastic-kernel",
+ "fantastic-ram-store",
+ "futures-util",
+ "reqwest",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "wiremock",
+]
+
+[[package]]
 name = "fantastic-bridge"
 version = "0.1.0"
 dependencies = [
@@ -389,6 +406,7 @@ dependencies = [
 name = "fantastic-cli"
 version = "0.1.0"
 dependencies = [
+ "fantastic-anthropic-backend",
  "fantastic-bridge",
  "fantastic-bundle",
  "fantastic-cli-bundle",

@@ -420,3 +420,111 @@ async def test_the_live_root_is_found_even_when_a_fold_collapsed_it(monkeypatch)
     ]
     # chain b's own root ("task b") is the newest root and the fold collapsed it too
     assert f"live task: {_id('user:b')}" in rec["content"], rec["content"]
+
+
+# ── a head longer than the budget folds at recall (owner, 2026-10-07) ─
+
+
+class _FoldingModel:
+    """Answers a fold summary with a title + body, and the recall's question with
+    an empty expansion list."""
+
+    last_stop_reason = None
+
+    def __init__(self):
+        self.summaries = 0
+
+    async def chat(self, messages, max_tokens=None):
+        if "Summarize the conversation" in str(messages[0].get("content")):
+            self.summaries += 1
+            yield f"read files {self.summaries}\n\nthe files were read."
+        else:
+            yield json.dumps({"expand": [], "why": "the folds carry it"})
+
+
+async def _long_head(k, strategy="fold"):
+    """A head written under a window far larger than this agent's: 20 reads of
+    3000-char replies (~15k tokens) against a 12k window."""
+    k.record["context_strategy"] = strategy
+    await _seed(k, [_row("user", "GOAL", "user:goal")] + _chain("a", 20))
+
+
+async def test_recall_folds_a_head_longer_than_the_budget(monkeypatch, fake_providers):
+    k = _K()
+    await _long_head(k)
+
+    async def fake_sys(self_id, kernel):
+        return "s" * 4000
+
+    monkeypatch.setattr(core, "_default_system_content", fake_sys)
+    fake_providers["ai"] = model = _FoldingModel()
+    r = await _context_recall("ai", {}, k, _cfg())
+    folds = k.folds_of()
+    assert r["folded"] == len(folds) >= 2 and model.summaries == len(folds), r
+    assert all(f["refs"] and f["title"] and f["body"] for f in folds)
+    # NOTHING FELL OUT UNMARKED: every head row is in the view or under a fold
+    v = await _load_view("ai", k)
+    in_view = {e["id"] for e in v["ids"]}
+    covered = core.expand_fold_ids(
+        k.rows_of(), [e["id"] for e in v["ids"] if e["res"] == "fold"]
+    )
+    turns = [
+        x["id"] for x in k.rows_of() if x.get("kind") not in ("fold", "view", "recall")
+    ]
+    assert all(t in in_view or t in covered for t in turns)
+    assert r["dropped"] == 0, r
+    assert v["ids"][0]["id"] == _id("user:goal"), "the goal turn is always in"
+    assert any(e["res"] == "fold" for e in v["ids"])
+
+
+async def test_a_recall_fold_tells_the_turns_caller(monkeypatch, fake_providers):
+    k = _K()
+    await _long_head(k)
+
+    async def fake_sys(self_id, kernel):
+        return "s" * 4000
+
+    monkeypatch.setattr(core, "_default_system_content", fake_sys)
+    fake_providers["ai"] = _FoldingModel()
+    r = await _context_recall("ai", {}, k, _cfg(), client_id="c1")
+    ev = [p for _, p in k.emitted if p.get("type") == "context"]
+    assert len(ev) == 1 and ev[0]["phase"] == "compacted", ev
+    assert ev[0]["client_id"] == "c1"
+    assert (
+        ev[0]["detail"]["folded"] == r["folded"] and ev[0]["detail"]["recall"] is True
+    )
+
+
+async def test_a_dry_recall_or_another_strategy_does_not_fold(
+    monkeypatch, fake_providers
+):
+    async def fake_sys(self_id, kernel):
+        return "s" * 4000
+
+    monkeypatch.setattr(core, "_default_system_content", fake_sys)
+    fake_providers["ai"] = _FoldingModel()
+    k = _K()
+    await _long_head(k)
+    r = await _context_recall("ai", {"dry": True}, k, _cfg())
+    assert r["folded"] == 0 and not k.folds_of(), (
+        "dry makes no model call, so no summary and no fold"
+    )
+    k2 = _K()
+    await _long_head(k2, strategy="truncate")
+    r2 = await _context_recall("ai", {}, k2, _cfg())
+    assert r2["folded"] == 0 and not k2.folds_of()
+    assert k.emitted == [] and k2.emitted == []
+
+
+async def test_a_head_that_fits_is_not_folded(monkeypatch, fake_providers):
+    async def fake_sys(self_id, kernel):
+        return "s"
+
+    monkeypatch.setattr(core, "_default_system_content", fake_sys)
+    fake_providers["ai"] = model = _FoldingModel()
+    k = _K()
+    k.record["context_strategy"] = "fold"
+    await _seed(k, [_row("user", "GOAL", "user:goal")] + _chain("a", 3))
+    r = await _context_recall("ai", {}, k, _cfg(), client_id="c1")
+    assert r["folded"] == 0 and model.summaries == 0 and not k.folds_of()
+    assert [p for _, p in k.emitted if p.get("type") == "context"] == []

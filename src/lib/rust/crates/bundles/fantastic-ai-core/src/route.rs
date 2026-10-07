@@ -120,9 +120,10 @@ pub(crate) fn deliver_soon(
     text: &str,
     client_id: &str,
     system_prompt: Option<&str>,
+    notice: bool,
 ) {
     let born = crate::state::incarnation(&AgentId::from(target));
-    deliver_soon_with_born(kernel, target, text, client_id, system_prompt, born);
+    deliver_soon_with_born(kernel, target, text, client_id, system_prompt, born, notice);
 }
 
 /// NOT AWAITED. A `send` to an AI agent takes that agent's FIFO lock and does
@@ -143,6 +144,7 @@ fn deliver_soon_with_born(
     client_id: &str,
     system_prompt: Option<&str>,
     born: u64,
+    notice: bool,
 ) {
     let target_id = AgentId::from(target);
     let work_kernel = Arc::clone(kernel);
@@ -157,6 +159,7 @@ fn deliver_soon_with_born(
             &client_id,
             system_prompt.as_deref(),
             born,
+            notice,
         )
         .await;
     });
@@ -181,6 +184,7 @@ pub(crate) async fn deliver(
     client_id: &str,
     system_prompt: Option<&str>,
     born: u64,
+    notice: bool,
 ) {
     let target_agent = AgentId::from(target);
     let late = crate::state::incarnation(&target_agent) != born;
@@ -188,6 +192,13 @@ pub(crate) async fn deliver(
     payload.insert("type".to_string(), json!("send"));
     payload.insert("text".to_string(), json!(text));
     payload.insert("client_id".to_string(), json!(client_id));
+    // HARNESS TEXT, NOT A MESSAGE (owner, 2026-10-07): a turn this layer writes to
+    // its own agent is stored as `kind: "notice"`, so a view can hide it; the model
+    // still reads it as a user turn. Honoured only on a send to self. Python
+    // `_deliver`.
+    if notice {
+        payload.insert("notice".to_string(), json!(true));
+    }
     if late {
         // A LATE REPLY TO A PREVIOUS INCARNATION. Kept as a ROW — it is real data —
         // but it does not wake a turn: the agent that made the call is gone, and
@@ -569,6 +580,7 @@ async fn deliver_answer(
             &format!("[your inquiry answer did not reach {asker}: {why}]"),
             client_id,
             None,
+            true,
         );
     }
 }
@@ -758,6 +770,8 @@ struct Block {
     verb: String,
     title: Option<String>,
     body: String,
+    /// It carries a dispatched call's outcome (not this layer's own text).
+    outcome: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1131,9 +1145,17 @@ async fn route_reply_gated(
     // model can act on.
     let meta = crate::helpers::agent_meta(&self_id, &kernel);
     let cap = crate::context::inline_cap(&meta, model_window);
+    // THE CAP IS PER MESSAGE, not per reply (owner, 2026-10-07): every reply of a
+    // batch lands in ONE message to its addressee, so the replies share the cap.
+    // A reply that would push its batch past it is held like an oversized one.
+    // Measured: two greps, each under the 434-token cap, arrived as one 967-token
+    // message at a 4.5k window — the next turn could not fit it (`too_small`).
+    let mut used: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
     let blocks: Vec<Block> = units
         .into_iter()
         .map(|u| {
+            let outcome = u.idx.is_some();
+            let so_far = used.get(u.dest.as_str()).copied().unwrap_or(0);
             let (pid, body) = match u.idx {
                 Some(i) => {
                     let out = &outcomes[i];
@@ -1165,9 +1187,11 @@ async fn route_reply_gated(
                     // ORIGIN line. SYNC OR ASYNC ALIKE (decided 2026-09-26): a
                     // body is never persisted; under the cap it is inline.
                     if let Some(p) = out.pid {
-                        let over =
-                            crate::context::estimate_one(&json!({"role": "user", "content": body}))
-                                > cap;
+                        let over = so_far
+                            + crate::context::estimate_one(
+                                &json!({"role": "user", "content": body}),
+                            )
+                            > cap;
                         if over && crate::memory::store_reply(&self_id, &kernel, p.0, &body) {
                             // CODE POINTS: python prints `len(body)`.
                             let size = body.chars().count();
@@ -1189,6 +1213,8 @@ async fn route_reply_gated(
                 }
                 None => ("-".to_string(), u.body.unwrap_or_default()),
             };
+            *used.entry(u.dest.to_string()).or_insert(0) +=
+                crate::context::estimate_one(&json!({"role": "user", "content": body}));
             Block {
                 dest: u.dest,
                 pid,
@@ -1196,6 +1222,7 @@ async fn route_reply_gated(
                 verb: u.verb,
                 title: u.title,
                 body,
+                outcome,
             }
         })
         .collect();
@@ -1249,7 +1276,15 @@ async fn route_reply_gated(
         return;
     }
     if any_blocks {
-        deliver_grouped(&kernel, blocks, &client_id, sp, message_id).await;
+        deliver_grouped(
+            &kernel,
+            self_id.as_str(),
+            blocks,
+            &client_id,
+            sp,
+            message_id,
+        )
+        .await;
     }
     if done_called {
         // AN INQUIRY THIS CHAIN NEVER ANSWERED is closed for its asker, saying so —
@@ -1268,7 +1303,7 @@ async fn route_reply_gated(
         // text is what it asked to have delivered.
         if !any_blocks {
             if let Some(to) = send_to.as_deref() {
-                deliver_soon(&kernel, to, &text, &client_id, sp);
+                deliver_soon(&kernel, to, &text, &client_id, sp, false);
             }
         }
         return;
@@ -1310,7 +1345,14 @@ async fn route_reply_gated(
         }
         // Nothing to wait for: say so, as a turn, so the model acts instead of
         // waiting forever on an empty inbox.
-        deliver_soon(&kernel, self_id.as_str(), AWAIT_REFUSED, &client_id, sp);
+        deliver_soon(
+            &kernel,
+            self_id.as_str(),
+            AWAIT_REFUSED,
+            &client_id,
+            sp,
+            true,
+        );
         return;
     }
     if nudging {
@@ -1331,7 +1373,7 @@ async fn route_reply_gated(
         } else {
             NO_CALL_NUDGE.to_string()
         };
-        deliver_soon(&kernel, self_id.as_str(), &nudge, &client_id, sp);
+        deliver_soon(&kernel, self_id.as_str(), &nudge, &client_id, sp, true);
         return;
     }
     if any_calls {
@@ -1341,7 +1383,7 @@ async fn route_reply_gated(
     // this pass's TEXT to `send_to`, once. It must not propagate — a caller cannot
     // spend the model's turns for it.
     if let Some(to) = send_to.as_deref() {
-        deliver_soon(&kernel, to, &text, &client_id, sp);
+        deliver_soon(&kernel, to, &text, &client_id, sp, false);
     }
 }
 
@@ -1381,7 +1423,7 @@ async fn silent_turn(
     body.insert("error".to_string(), json!(gave_up));
     close_inquiry(kernel, self_id.as_str(), client_id, body).await;
     if let Some(to) = send_to {
-        deliver_soon(kernel, to, &gave_up, client_id, sp);
+        deliver_soon(kernel, to, &gave_up, client_id, sp, false);
     }
     true
 }
@@ -1403,6 +1445,7 @@ async fn silent_turn(
 /// three runs (opus 08-07, the model 08-20, the model 08-24).
 async fn deliver_grouped(
     kernel: &Arc<Kernel>,
+    self_id: &str,
     blocks: Vec<Block>,
     client_id: &str,
     sp: Option<&str>,
@@ -1439,6 +1482,9 @@ async fn deliver_grouped(
     for dest in order {
         let parts = by_dest.remove(&dest).unwrap_or_default();
         let m = parts.len();
+        // A batch to SELF made only of this layer's own text is a notice; one that
+        // carries any call's outcome is a reply.
+        let notice = dest == self_id && !parts.iter().any(|b| b.outcome);
         let body = parts
             .iter()
             .enumerate()
@@ -1470,6 +1516,7 @@ async fn deliver_grouped(
             client_id,
             sp,
             born.get(&dest).copied().unwrap_or_default(),
+            notice,
         );
     }
 }

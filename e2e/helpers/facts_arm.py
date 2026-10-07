@@ -101,6 +101,13 @@ def _remap_row(row: dict, seen: dict[int, int]) -> dict:
     # planted reply names a row that does not exist and `grep` / `history` find
     # nothing (which is exactly what the fold probes measure).
     c = out.get("content")
+    # A FOLD ROW NAMES ITSELF in its head (`[fold <id> · …]`) — the id the model
+    # descends by. Left as the placeholder, the model is pointed at a row that
+    # does not exist (measured 2026-10-07, misleading_fold:rust: `[fold 1000000001 …]`).
+    if isinstance(c, str) and c.startswith("[fold "):
+        own = row.get("id")
+        if isinstance(own, int) and own in seen:
+            out["content"] = c.replace(f"[fold {own} ", f"[fold {seen[own]} ", 1)
     if isinstance(c, str) and c.startswith("[reply to "):
         try:
             old_pid = int(c[len("[reply to "):].split(" ", 1)[0])
@@ -109,6 +116,12 @@ def _remap_row(row: dict, seen: dict[int, int]) -> dict:
         if old_pid is not None and old_pid in seen:
             out["content"] = c.replace(
                 f"[reply to {old_pid} ", f"[reply to {seen[old_pid]} ", 1)
+        # …and its `↑<call>` link: the turn that made the call this answers.
+        c = out["content"]
+        head, _, rest = c.partition("\n")
+        for old, new in seen.items():
+            head = head.replace(f"↑{old}]", f"↑{new}]").replace(f"↑{old} ", f"↑{new} ")
+        out["content"] = head + ("\n" + rest if _ else "")
     return out
 
 
@@ -119,22 +132,15 @@ async def plant_store(core, root, aid: str, rows: list[dict]) -> None:
     are never persisted, so a planted history carries its replies inline.
 
     IN PROCESS the rows carry real ids (`root.ctx.mint_id`) and go down in one call.
-    OVER THE WIRE the ids are PLACEHOLDERS (`WireCtx.mint_id`): the rows go one at a
-    time, in dependency order, WITHOUT ids — `memory.plant` takes the kernel's next
-    one —
-    and every reference is remapped to the id just assigned. Every reference a planted
-    history holds points BACKWARD, so one forward pass is enough."""
+    OVER THE WIRE the ids are PLACEHOLDERS (`WireCtx.mint_id`): `memory.plant` mints a
+    real id for every row and remaps every reference (`_remap_row`) in ONE round."""
     if core is not None:
         await memory.plant(root, aid, rows)
         return
-    seen: dict[int, int] = {}
-    for row in rows:
-        placeholder = row.get("id")
-        ids = await memory.plant(root, aid, [_remap_row(row, seen)])
-        if isinstance(placeholder, int):
-            seen[placeholder] = ids[0]
+    ids = await memory.plant(root, aid, rows, remap=_remap_row)
+    for row, real in zip(rows, ids):
         # THE CALLER'S ROW LEARNS ITS REAL ID (a probe scores against it).
-        row["id"] = ids[0]
+        row["id"] = real
 
 
 async def read_view(core, root, aid: str) -> dict | None:
@@ -204,17 +210,17 @@ async def fixture(root, fb: str, *, arms=ARMS, extra_callable: tuple[str, ...] =
 
 
 async def run_arm(root, core, bk, fb: str, aid: str, strategy: str, extra: dict,
-                  task: str, artifact: str) -> dict:
+                  task: str, artifact: str, *, via: str | None = "user", window: int = WINDOW) -> dict:
     conn = await connect(
         root, core, bk, agent_id=aid,
         can_call={fb: "*", "notes": "*", "cli": "*", "user": "*", aid: "*"},
         callable_by={"user": "*"},
         limits=Limits.from_env(os.environ),
-        record={"context_window": WINDOW, "num_ctx": WINDOW,
+        record={"context_window": window, "num_ctx": window,
                 "context_strategy": strategy, **extra},
     )
     try:
-        await drive(conn, task, client_id=aid, via="user")
+        await drive(conn, task, client_id=aid, via=via)
     finally:
         await conn.close()
     msgs = await store_rows(root, core, aid)
@@ -231,7 +237,11 @@ async def run_arm(root, core, bk, fb: str, aid: str, strategy: str, extra: dict,
     if p.exists():
         p.rename(f"{aid}__{artifact}")
     stored = (await call(root, aid, {"type": "facts", "op": "list"})).get("facts") or []
+    views = [r for r in await memory.rows_of(root, aid) if r.get("kind") == "view"]
     return {
+        # THE STARTUP VIEW: the first view the agent wrote — over a planted past, the
+        # one its boot rebuild chose before the first live turn.
+        "startup_compacted": startup_compacted(views[0] if views else None),
         "id": aid, "strategy": strategy, "body": body, "msgs": msgs,
         "turns": conn.turns, "cuts": len(conn.compactions),
         "dropped": ctx_score.dropped_total(conn),
@@ -469,7 +479,7 @@ async def inject_row(core, root, aid: str, row: dict) -> None:
     if core is not None:
         await memory.plant(root, aid, [row])
         return
-    ids = await memory.plant(root, aid, [_remap_row(row, {})])
+    ids = await memory.plant(root, aid, [row], remap=_remap_row)
     row["id"] = ids[0]  # the caller's row learns its real id (see plant_store)
 
 
@@ -490,6 +500,85 @@ async def continue_arm(root, core, aid: str, task: str, artifact: str, *, timeou
     body = p.read_text() if p.exists() else ""
     return {"id": aid, "body": body, "msgs": msgs, "descents": _descents(msgs, aid),
             "greps": len(ctx_score.calls_made(msgs, target=aid, verb="grep"))}
+
+
+# ─── A PRE-SEEDED PAST (owner, 2026-10-07: "we are testing folding") ───────────
+#
+# A fold test needs a past long enough to overflow the window. Producing it LIVE — the
+# model reading N files one per turn — was most of every fold test's wall (fold_descent:
+# 72 turns, 68 of them greps, because at a 6k window each filler is held and read
+# blind). The past is PLANTED instead: the original instruction, then per file the
+# model's `read` call and its reply with the text INLINE (bodies are never persisted;
+# a planted history carries them inline). The LAST reply is delivered LIVE, as the
+# reply a live run would have received, so the run continues that very chain: the
+# folding, the recall and the answer are the model's own, over the same past.
+
+
+def read_reply(path: str, text: str, call_id: int, *, target: str = "notes") -> str:
+    """The reply a `read` of `path` comes back as — the tag names the call's pid (its
+    message id) and the turn that made it (`↑`)."""
+    return (f'[reply to {call_id} · {target} read · "read {path}" · ↑{call_id}]\n'
+            f"<path>{path}</path>\n<text>{text}</text>")
+
+
+def planted_reads(mint, goal: str, reads: list[tuple[str, str]], *, target: str = "notes",
+                  tail: bool = True) -> list[dict]:
+    """The past a live run would have produced: `goal` (the instruction, a root), then
+    per `(path, text)` the model's `read` call and its reply. With `tail` the LAST
+    reply is left out — `run_planted` delivers it live."""
+    goal_row = {"role": "user", "id": mint(), "parent": None, "content": goal}
+    rows, prev = [goal_row], goal_row["id"]
+    for n, (path, text) in enumerate(reads):
+        call_id = mint()
+        rows.append({"role": "assistant", "id": call_id, "parent": prev,
+                     "content": f'Reading {path}. <call name="send"><target_id>{target}</target_id>'
+                                f"<title>read {path}</title><type>read</type><path>{path}</path></call>"})
+        if tail and n == len(reads) - 1:
+            break
+        reply = {"role": "user", "id": mint(), "parent": call_id,
+                 "content": read_reply(path, text, call_id, target=target)}
+        rows.append(reply)
+        prev = reply["id"]
+    return rows
+
+
+def closed_roots(mint, tasks: list[tuple[str, list[tuple[str, str]], str]], *,
+                 target: str = "notes") -> list[dict]:
+    """Finished roots, one after another: per `(goal, reads, answer)` the goal, its
+    reads with their replies, then the model's `answer` ending in `done`."""
+    rows: list[dict] = []
+    for goal, reads, answer in tasks:
+        chain = planted_reads(mint, goal, reads, target=target, tail=False)
+        chain.append({"role": "assistant", "id": mint(), "parent": chain[-1]["id"],
+                      "content": f'{answer} <call name="done"></call>'})
+        rows += chain
+    return rows
+
+
+def file_reads(paths: list[str]) -> list[tuple[str, str]]:
+    """`(path, text)` for files the probe wrote in its working dir."""
+    return [(p, Path(p).read_text()) for p in paths]
+
+
+async def run_planted(root, core, bk, fb: str, aid: str, strategy: str, extra: dict,
+                      goal: str, reads: list[tuple[str, str]], artifact: str) -> dict:
+    """Plant the past for `aid`, then deliver the last read's reply live and run the
+    chain to its end — `run_arm` over a planted past."""
+    rows = planted_reads(root.ctx.mint_id, goal, reads)
+    await plant_store(core, root, aid, rows)
+    path, text = reads[-1]
+    # rows[-1] is the last read CALL; its id is real now (plant_store learned it)
+    tail = read_reply(path, text, rows[-1]["id"])
+    # FROM THE OPERATOR: a reply carries no sender header, so its tag links it to the
+    # call it answers and the chain continues (a send `via` an agent opens a root).
+    return await run_arm(root, core, bk, fb, aid, strategy, extra, tail, artifact, via=None)
+
+
+async def both_planted(root, core, bk, fb, goal, reads, artifact, *, arms=ARMS) -> tuple[dict, dict]:
+    out = []
+    for aid, strategy, extra in arms:
+        out.append(await run_planted(root, core, bk, fb, aid, strategy, extra, goal, reads, artifact))
+    return out[0], out[1]
 
 
 async def both_arms(root, core, bk, fb, task, artifact, *, arms=ARMS) -> tuple[dict, dict]:
@@ -516,16 +605,35 @@ def report(arms, score_line):
         )
 
 
-def base_checks(recency, other) -> list[tuple[str, bool]]:
+def startup_compacted(view: dict | None) -> bool:
+    """Did this view put the past at less than full resolution — a reply as a stub,
+    a stretch as a fold?"""
+    ids = (view or {}).get("ids")
+    return isinstance(ids, list) and any(
+        isinstance(e, dict) and e.get("res") in ("stub", "fold") for e in ids
+    )
+
+
+def base_checks(recency, other, *, planted: bool = False) -> list[tuple[str, bool]]:
     """The preconditions every comparison needs before its claim means anything. The
     mechanism proof is per strategy: facts must have been CARRIED, strip must have
-    actually STRIPPED — otherwise the arm was recency wearing a different name."""
+    actually STRIPPED — otherwise the arm was recency wearing a different name.
+
+    `planted`: the past was PLANTED, so each arm compacts it at startup (its boot
+    rebuild: the fold arm folds, the control stubs) — measured there, not by a second
+    compaction the short live tail may never reach (owner, 2026-10-07)."""
     ran = (
         other["carried"] > 0 if other["strategy"] == "halve"
         else (other["digested"] > 0 or other["folded"] > 0 or other["stripped"] > 0)
     )
+    compacted = (
+        ("both arms compacted the planted past at startup",
+         recency["startup_compacted"] and other["startup_compacted"])
+        if planted
+        else ("both arms actually compacted", recency["cuts"] > 0 and other["cuts"] > 0)
+    )
     return [
-        ("both arms actually compacted", recency["cuts"] > 0 and other["cuts"] > 0),
+        compacted,
         ("the control carried no facts and stripped nothing",
          recency["carried"] == 0 and recency["stripped"] == 0),
         (f"the {other['strategy']} arm's mechanism actually ran", ran),

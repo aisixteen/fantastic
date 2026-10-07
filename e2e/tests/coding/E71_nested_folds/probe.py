@@ -79,7 +79,7 @@ async def main():
         recency, fold = await both_arms(root, core, BK, FB, task, "final.md", arms=FOLD_ARMS)
         want = f"marker: filler_2.txt {marker}"
         report((recency, fold), lambda a: f"FOUND={want in a['body']}")
-        checks = [c for c in base_checks(recency, fold) if not c[0].startswith("both arms produced")] + [
+        checks = [c for c in base_checks(recency, fold, planted=True) if not c[0].startswith("both arms produced")] + [
             (f"a fold of folds exists (levels {fold['fold_levels']})", max(fold["fold_levels"] or [1]) >= 2),
             ("every fold has a title and a body", all(m.get("title") and m.get("body") for m in fold["msgs"] if m.get("kind") == "fold")),
             ("the marker came back exactly through the nesting", want in fold["body"]),

@@ -314,6 +314,20 @@ fn place(text: &str, tok: &Tok) -> (usize, usize, String, String) {
     )
 }
 
+/// The name of a bare opening tag (`<query>`, no attributes) that is none of
+/// ours — inside a call run, an argument of the verb. Python `_plain`.
+fn plain(t: &Tok) -> Option<String> {
+    if t.kind != Kind::Other {
+        return None;
+    }
+    let inner = t.text.strip_prefix('<')?.strip_suffix('>')?;
+    let mut chars = inner.chars();
+    let first = chars.next()?;
+    let ok = (first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|c| c.is_alphanumeric() || c == '_' || c == '-');
+    (ok && inner != "item").then(|| inner.to_string())
+}
+
 fn report(text: &str, masked: &str, call: &Call) -> String {
     let first = call
         .toks
@@ -336,12 +350,36 @@ fn report(text: &str, masked: &str, call: &Call) -> String {
         Kind::Close => "a close with no call open",
         _ => "not a call tag",
     };
+    // EVERY ARGUMENT THE MODEL WROTE carries into the form to write — the verb's
+    // own (`<query>`, `<ids>`) as much as ours by name. Measured 2026-10-07
+    // (misleading_fold:rust): a grep scoped by `<ids>` lost its `<` and was
+    // reported with only target/title/type; the model rewrote it unscoped. A tag
+    // nested in an argument (an `<item>` of `<ids>`) is part of that value.
+    let mut after = 0usize;
     for t in &call.toks {
+        if t.start < after {
+            continue;
+        }
         let arg = t.arg.clone().unwrap_or_default();
+        let plain_name = plain(t);
         match t.kind {
             Kind::Arg if !t.closing => {
-                if let Some(v) = value(masked, t, &format!("</{arg}>")) {
+                let closer = format!("</{arg}>");
+                if let Some(v) = value(masked, t, &closer) {
+                    after = masked[t.end..]
+                        .find(&closer)
+                        .map_or(0, |i| t.end + i + closer.len());
                     args.push((arg, Value::String(v)));
+                }
+            }
+            Kind::Other if plain_name.is_some() => {
+                let name = plain_name.unwrap_or_default();
+                let closer = format!("</{name}>");
+                if let Some(v) = value(masked, t, &closer) {
+                    after = masked[t.end..]
+                        .find(&closer)
+                        .map_or(0, |i| t.end + i + closer.len());
+                    args.push((name, Value::String(v)));
                 }
             }
             Kind::Param => {

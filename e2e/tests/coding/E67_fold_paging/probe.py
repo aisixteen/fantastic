@@ -1,7 +1,8 @@
 """coding/fold_paging — N folds, choose the right one, open only it.
 
-Sixteen tiny tasks sent over time, each reads one file with its own checksum line and
-finishes. Each closes and folds. The final message asks for task #3's checksum. Scored:
+Sixteen tiny tasks, PLANTED as finished roots (each read one file with its own checksum
+line and ended in `done`); the first live turn folds them. The final message asks for
+task #3's checksum. Scored:
 exact answer, the descended fold is the one covering task 3, and at most two folds were
 opened — opening four is paging, not choosing.
 """
@@ -20,14 +21,15 @@ from backends import backend as _resolve_backend
 from helpers import verdict
 from helpers.facts_arm import (
     FOLD_ARMS,
-    after_tasks,
     base_checks,
+    closed_roots,
     conclude,
+    file_reads,
     fixture,
     plant_fillers,
+    plant_store,
     report,
-    send_in_turn,
-    send_when,
+    run_arm,
 )
 from helpers.kernel import open_kernel
 
@@ -54,13 +56,11 @@ async def main():
                  f"single line `checksum: <value>`. Then {DONE}.")
         results = []
         for aid, strategy, extra in FOLD_ARMS:
-            from helpers.facts_arm import run_arm
-            # each task as soon as the previous one ends — over time, no timer idle
-            laters = [await send_in_turn(root, aid, [task(i) for i in range(1, N)])]
-            laters.append(await send_when(root, core, aid, final, after_tasks(root, aid, list(laters)), max_wait=22.0 * N + 600))
-            a = await run_arm(root, core, BK, FB, aid, strategy, extra, task(0), "final.md")
-            for t in laters: t.cancel()
-            results.append(a)
+            # THE PAST, PLANTED — each arm its own copy: tasks 0…N-1 done, one root each
+            past = [(task(i), file_reads([f"filler_{i}.txt"]),
+                     f"filler_{i}.txt carries `>> checksum: {toks[i]}`.") for i in range(N)]
+            await plant_store(core, root, aid, closed_roots(root.ctx.mint_id, past))
+            results.append(await run_arm(root, core, BK, FB, aid, strategy, extra, final, "final.md"))
         recency, fold = results
         want = toks[ask]
         right_fold = None
@@ -70,7 +70,7 @@ async def main():
         opened = set(fold["descents"])
         report((recency, fold), lambda a: f"FINAL={want in a['body']}  folded={a['folded']}  descents={len(a['descents'])}  roots={a['roots']}")
         print(f"  observed: fold covering task {ask} = {right_fold}; opened = {sorted(opened)}")
-        checks = [c for c in base_checks(recency, fold) if not c[0].startswith("both arms produced")] + [
+        checks = [c for c in base_checks(recency, fold, planted=True) if not c[0].startswith("both arms produced")] + [
             # 32k-only test (see test.yaml): at 32k the 16 tasks fold 3 times (measured
             # 2026-09-08); paging through folds needs more than one, not many.
             (f"folds were written ({fold['folded']})", fold["folded"] >= 2),

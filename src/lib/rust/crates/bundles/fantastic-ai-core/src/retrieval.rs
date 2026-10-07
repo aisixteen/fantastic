@@ -12,13 +12,18 @@
 
 use crate::assembly::system_content;
 use crate::constants::{BUDGET_FLOOR, NOTICE_ENVELOPE_RESERVE};
-use crate::context::{budget as agent_budget, estimate_one, fit_reply, inline_cap};
+use crate::context::{
+    budget as agent_budget, estimate_one, fit_reply, inline_cap, recent_n as cfg_recent_n,
+};
+use crate::events::to_caller;
 use crate::folds::{expand_ids, quoted_title, render as fold_render, row_content, row_id};
-use crate::helpers::agent_meta;
+use crate::helpers::{agent_meta, now_secs};
 use crate::history_view::{parse_reply_tag, reply_blocks};
 use crate::memory::{head, load_history, save_history, save_view, store_call, MemResult};
 use crate::provider::{Provider, ProviderEvent};
+use crate::strategies::fold::fold_down;
 use crate::strategies::strip::{pid_of, LOW};
+use crate::strategies::ProjectionCtx;
 use crate::think::without_thinking;
 use crate::view::{apply_res, res_of};
 use fantastic_bundle::{
@@ -347,13 +352,16 @@ pub async fn context_clear(
     Ok(json!({"cleared": rid, "rows": members.len()}))
 }
 
-/// `context_recall`: rebuild this agent's VIEW from its store — fit the head to
-/// the budget at digest resolution, then ask the model which rows it wants in
-/// full, persist the id list, log the decision as a row, and drop RAM scratch.
-/// Runs on boot, after a fold batch, or on request.
+/// `context_recall`: rebuild this agent's VIEW from its store — with
+/// `context_strategy` fold, a head longer than the budget is FOLDED first (oldest
+/// spans into fold rows, as a turn's projection folds); then fit the head to the
+/// budget at digest resolution, ask the model which rows it wants in full,
+/// persist the id list, log the decision as a row, and drop RAM scratch. Runs on
+/// boot, after a fold batch, or on request. `client_id` is the turn's caller
+/// (none for the verb); a recall that folded tells it, as a projection does.
 ///
 /// args: `dry?` (mechanical fit only — no model call). Returns
-/// `{kept, expanded, dropped, budget, why, degraded}`.
+/// `{kept, expanded, dropped, folded, budget, why, degraded}`.
 pub async fn context_recall(
     agent_id: &AgentId,
     payload: &Value,
@@ -361,12 +369,13 @@ pub async fn context_recall(
     provider: Option<&Arc<dyn Provider>>,
     model_window: i64,
     system_prompt: Option<&str>,
+    client_id: Option<&str>,
 ) -> MemResult<Value> {
     let meta = agent_meta(agent_id, kernel);
-    let rows = load_history(agent_id, kernel, false).await?;
+    let mut rows = load_history(agent_id, kernel, false).await?;
     if rows.is_empty() {
         return Ok(
-            json!({"kept": 0, "expanded": 0, "dropped": 0, "why": "empty store", "degraded": false}),
+            json!({"kept": 0, "expanded": 0, "dropped": 0, "folded": 0, "why": "empty store", "degraded": false}),
         );
     }
     // The block the turn will actually use (`system_content`), not the default one:
@@ -378,13 +387,41 @@ pub async fn context_recall(
     let body_budget = (agent_budget(&meta, model_window) - sys_tokens - NOTICE_ENVELOPE_RESERVE)
         .max(BUDGET_FLOOR);
     let target = (body_budget as f64 * LOW) as i64;
+    // PYTHON TRUTHINESS: `dry:1`, `dry:"false"` and `dry:[0]` are all dry.
+    // `as_bool` accepted only a JSON `true`, so a model that wrote `1` got a
+    // model call it had asked not to make.
+    let dry = payload.get("dry").is_some_and(py_truthy);
+    let provider = provider.filter(|_| !dry);
+    // A HEAD LONGER THAN THE BUDGET FOLDS FIRST (owner, 2026-10-07). A store
+    // written under a larger window — another model, a planted past — is folded
+    // the way the turn's own `fold` projection folds it: oldest spans into fold
+    // rows, folds of folds as they pile up. Before this the fit below only
+    // stubbed every reply and dropped the oldest rows that still did not fit — no
+    // fold, no summary. Folding takes the model (a summary per span), so a `dry`
+    // recall does not fold.
+    let mut folded = 0usize;
+    if let Some(p) = provider {
+        if meta.get("context_strategy").and_then(Value::as_str) == Some("fold") {
+            let fctx = ProjectionCtx {
+                budget: body_budget,
+                recent_n: cfg_recent_n(&meta),
+                provider: p,
+                self_id: agent_id,
+                kernel,
+                client_id: client_id.unwrap_or(""),
+            };
+            let (r, _, f, _) = fold_down(&rows, &fctx, body_budget).await?;
+            rows = r;
+            folded = f;
+        }
+    }
     let view: Vec<Value> = fold_render(&rows)
         .into_iter()
         .filter(|r| row_id(r).is_some())
         .collect();
     if view.is_empty() {
         return Ok(
-            json!({"kept": 0, "expanded": 0, "dropped": 0, "why": "no addressable rows", "degraded": false}),
+            json!({"kept": 0, "expanded": 0, "dropped": 0, "folded": 0, "why": "no addressable rows", "degraded": false}),
         );
     }
     let digest = |r: &Value| -> Value {
@@ -418,11 +455,7 @@ pub async fn context_recall(
     let mut why = "mechanical fit".to_string();
     let mut degraded = true;
     let mut expand: HashSet<i64> = HashSet::new();
-    // PYTHON TRUTHINESS: `dry:1`, `dry:"false"` and `dry:[0]` are all dry.
-    // `as_bool` accepted only a JSON `true`, so a model that wrote `1` got a
-    // model call it had asked not to make.
-    let dry = payload.get("dry").is_some_and(py_truthy);
-    if let (Some(provider), false) = (provider, dry) {
+    if let Some(provider) = provider {
         let lines: Vec<String> = head
             .iter()
             .map(|&i| {
@@ -596,10 +629,35 @@ pub async fn context_recall(
     *st.projection.lock().expect("projection poisoned") = None;
     *st.compaction_mark.lock().expect("mark poisoned") = None;
     crate::strategies::strip::forget(agent_id.as_str());
+    if let (true, Some(c)) = (folded > 0, client_id.filter(|c| !c.is_empty())) {
+        // The caller is told its context was compacted, as by a turn's projection.
+        to_caller(
+            kernel,
+            agent_id,
+            c,
+            json!({
+                "type": "context", "source": agent_id.as_str(), "ts": now_secs(),
+                "phase": "compacted",
+                "detail": {
+                    "strategy": "fold",
+                    "recall": true,
+                    "dropped_messages": view.len() - ids.len(),
+                    "kept_messages": ids.len(),
+                    "summarized": false,
+                    "pinned_facts": 0,
+                    "stripped": 0,
+                    "stripped_bytes": 0,
+                    "folded": folded,
+                },
+            }),
+        )
+        .await;
+    }
     Ok(json!({
         "kept": ids.len(),
         "expanded": expand.len(),
         "dropped": view.len() - ids.len(),
+        "folded": folded,
         "budget": body_budget,
         "why": why,
         "degraded": degraded,

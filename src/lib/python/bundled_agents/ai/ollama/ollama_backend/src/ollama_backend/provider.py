@@ -30,9 +30,13 @@ class OllamaProvider:
         temperature: float | None = None,
         num_predict: int | None = None,
         think: bool | None = None,
+        key=None,
     ):
         self._endpoint = endpoint
         self._model = model
+        # `async key(endpoint) -> str | None`, awaited before each request — the
+        # record's `credentials` ref (a server behind a door); None = no header.
+        self._key = key
         # Context window. ollama defaults to 4096 when unset, which is too small
         # for the agentic menu + tool results + history of a multi-step run; the
         # record's `num_ctx` lifts it (e.g. 32768; gemma4 supports up to 262144).
@@ -98,7 +102,9 @@ class OllamaProvider:
         # or the text would be a confetti of tags.
         # ONE client per call: the provider is built per turn, and a client kept
         # on it would hold its connection past the turn.
-        async with ollama.AsyncClient(host=self._endpoint) as client:
+        secret = await self._key(self._endpoint) if self._key else None
+        auth = {"headers": {"Authorization": f"Bearer {secret}"}} if secret else {}
+        async with ollama.AsyncClient(host=self._endpoint, **auth) as client:
             stream = await client.chat(
                 model=self._model,
                 messages=messages,

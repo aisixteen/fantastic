@@ -4,6 +4,10 @@ Rules arrive in four files spread through 24 filler reads at a 12k window, so cl
 stretches of the chain fold repeatedly. Scored: all eight rules bind at the end AND at
 least two fold rows were written AND each has refs, a title and a body. `folded == 0`
 voids the run — then nothing was at risk.
+
+PRE-SEEDED (owner, 2026-10-07): the reads are PLANTED — the instruction, each read call and
+its reply inline — and the last reply arrives live, so the run continues that chain: the
+folding and the answer are the model's own, without spending a live turn per file.
 """
 from __future__ import annotations
 
@@ -21,8 +25,9 @@ from helpers import verdict
 from helpers.facts_arm import (
     FOLD_ARMS,
     base_checks,
-    both_arms,
+    both_planted,
     conclude,
+    file_reads,
     fixture,
     plant_fillers,
     report,
@@ -57,10 +62,13 @@ async def main():
         plant_fillers(N)
         assert not any(v in TASK for v in tok.values())
         await fixture(root, FB, arms=FOLD_ARMS)
-        recency, fold = await both_arms(root, core, BK, FB, TASK, "report.md", arms=FOLD_ARMS)
+        # the sequence the instruction names: each rules file, then its six fillers
+        order = [p for f, lo in zip("abcd", (0, 6, 12, 18))
+                 for p in (f"rules_{f}.md", *(f"filler_{i}.txt" for i in range(lo, lo + 6)))]
+        recency, fold = await both_planted(root, core, BK, FB, TASK, file_reads(order), "report.md", arms=FOLD_ARMS)
         report((recency, fold), lambda a: f"RULES KEPT={score_rules(a['body'], rules)[0]}/8  folded={a['folded']}  fold rows={len(a['fold_ids'])}")
         well_formed = all(m.get("refs") and m.get("title") and m.get("body") for m in fold["msgs"] if m.get("kind") == "fold")
-        checks = [c for c in base_checks(recency, fold) if not c[0].startswith("both arms produced")] + [
+        checks = [c for c in base_checks(recency, fold, planted=True) if not c[0].startswith("both arms produced")] + [
             (f"at least two folds were written ({fold['folded']})", fold["folded"] >= 2),
             ("every fold row has refs, a title and a body", well_formed),
             (f"all eight rules still bind ({score_rules(fold['body'], rules)[0]}/8)", score_rules(fold["body"], rules)[0] == 8),

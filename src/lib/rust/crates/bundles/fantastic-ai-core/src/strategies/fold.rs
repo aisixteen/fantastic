@@ -368,12 +368,22 @@ pub fn next_span(rows: &[Value], view: &[Value], keep_tail: usize, size: usize) 
         .collect()
 }
 
-/// Fold the oldest stretches of the view down to the low watermark, tidy the
-/// head, then hand what is left to `strip`.
-pub async fn fold(body: &[Value], ctx: &ProjectionCtx<'_>) -> Result<Projection, MemoryStoreError> {
-    let mut rows: Vec<Value> = body.to_vec();
+/// FOLD UNTIL IT FITS: when the rendered view is over `budget`, fold its oldest
+/// stretches down to the low watermark; then tidy the head (adjacent folds
+/// coalesce), budget or no budget. Returns `(rows + the fold rows written, the
+/// view, folded, refused)`. The turn's `fold` projection and `context_recall` (a
+/// store longer than the window, e.g. written under a larger one) share it.
+/// Python `fold_down`.
+///
+/// # Errors
+/// The memory store refused a fold row.
+pub async fn fold_down(
+    rows: &[Value],
+    ctx: &ProjectionCtx<'_>,
+    budget: i64,
+) -> Result<(Vec<Value>, Vec<Value>, usize, usize), MemoryStoreError> {
+    let mut rows: Vec<Value> = rows.to_vec();
     let mut view = render(&rows);
-    let budget = ctx.budget - NOTICE_ENVELOPE_RESERVE;
     let mut folded = 0usize;
     let mut refused = 0usize;
     if estimate_tokens(&view) > budget && rows.len() > 2 {
@@ -415,6 +425,14 @@ pub async fn fold(body: &[Value], ctx: &ProjectionCtx<'_>) -> Result<Projection,
         folded += 1;
         view = render(&rows);
     }
+    Ok((rows, view, folded, refused))
+}
+
+/// Fold the oldest stretches of the view down to the low watermark, tidy the
+/// head, then hand what is left to `strip`.
+pub async fn fold(body: &[Value], ctx: &ProjectionCtx<'_>) -> Result<Projection, MemoryStoreError> {
+    let (_, view, folded, refused) =
+        fold_down(body, ctx, ctx.budget - NOTICE_ENVELOPE_RESERVE).await?;
     // Stage two and three: strip bodies in what is left, then cut — strip's own
     // logic.
     let out = strip(&view, ctx).await?;

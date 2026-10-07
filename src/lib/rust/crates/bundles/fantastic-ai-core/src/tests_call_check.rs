@@ -178,3 +178,29 @@ fn a_multibyte_line_keeps_the_caret_under_the_token() {
     );
     assert!(r.contains("\n     ^~~~~~ not a call tag"), "{r}");
 }
+
+/// Measured 2026-10-07 (misleading_fold:rust): a grep scoped by `<ids>` lost its
+/// leading `<` on the 3090 and the form to write kept only target/title/type — the
+/// model rewrote it unscoped. Every argument the model wrote carries over, a nested
+/// `<item>` as part of its list.
+#[test]
+fn the_verbs_own_arguments_carry_into_the_form_to_write() {
+    let broken = "call name=\"send\">\n<target_id>ai_fold</target_id>\n\
+                  <title>grep for checksum</title>\n<type>grep</type>\n\
+                  <query>checksum</query>\n<ids><item>32</item></ids>\n</call>";
+    let r = check(broken, 0);
+    assert_eq!(r.len(), 1, "{r:?}");
+    let form = r[0]
+        .split_once("write it as:\n")
+        .and_then(|(_, rest)| rest.split_once("\nA call is"))
+        .map(|(f, _)| f)
+        .unwrap_or_default();
+    assert_eq!(
+        form,
+        "<call name=\"send\">\n<target_id>ai_fold</target_id>\n\
+         <title>grep for checksum</title>\n<type>grep</type>\n\
+         <query>checksum</query>\n<ids><item>32</item></ids>\n</call>",
+        "{}",
+        r[0]
+    );
+}

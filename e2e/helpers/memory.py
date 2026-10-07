@@ -18,6 +18,7 @@ A ram_store dies with its process. A restart test carries the tables across:
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 #: The one store id every e2e kernel carries.
@@ -95,7 +96,13 @@ def _owned_by(owner: Any, aid: str) -> bool:
     return isinstance(owner, str) and owner.split("|", 1)[-1] == aid
 
 
-async def plant(root: Any, aid: str, rows: list[dict]) -> list[int]:
+async def plant(
+    root: Any,
+    aid: str,
+    rows: list[dict],
+    *,
+    remap: Callable[[dict, dict[int, int]], dict] | None = None,
+) -> list[int]:
     """Append rows to `aid`'s conversation. Returns the ids, in order.
 
     IN PROCESS: AS `aid` (`_as_self`) — a caller appends only under its own key.
@@ -104,7 +111,14 @@ async def plant(root: Any, aid: str, rows: list[dict]) -> list[int]:
     (the kernel stays the only allocator), then `dump` → those rows dropped, `rows`
     added under `<guid>|<aid>` with the minted ids (a row's `refs` become its
     `fold_refs`) → `inject`. The agent's in-memory head is not touched — plant before
-    its first turn, as in process."""
+    its first turn, as in process.
+
+    `remap` (over the wire): the rows carry PLACEHOLDER ids — every row is minted a
+    real one, and `remap(row, {placeholder: real})` rewrites each row's references
+    before the ONE dump → inject. A history plants in one round, not one per row:
+    the kernel's ledger lives in this store and records every inject WITH its
+    payload (the whole tables), so a round per row grew the next dump by the whole
+    store each time (measured 2026-10-07: ~4.5 min for 80 rows)."""
     if getattr(root, "leg_id", None) is None:
         with root.ctx.agents[aid]._as_self():
             out = await root.send(
@@ -115,7 +129,7 @@ async def plant(root: Any, aid: str, rows: list[dict]) -> list[int]:
         if not isinstance(ids, list):
             raise AssertionError(f"memory append({aid}) refused: {r}")
         return ids
-    need = sum(1 for x in rows if x.get("id") is None)
+    need = len(rows) if remap else sum(1 for x in rows if x.get("id") is None)
     minted: list[int] = []
     if need:
         r = await _store(root, {"type": "append", "rows": [{"kind": "_mint"}] * need})
@@ -133,6 +147,9 @@ async def plant(root: Any, aid: str, rows: list[dict]) -> list[int]:
         x for x in tables.get("rows") or []
         if not (x.get("owner") == leg_key and (x.get("row") or {}).get("id") in gone)
     ]
+    if remap:
+        seen = {x["id"]: m for x, m in zip(rows, minted) if isinstance(x.get("id"), int)}
+        rows = [{**remap(x, seen), "id": m} for x, m in zip(rows, minted)]
     fresh = iter(minted)
     ids: list[int] = []
     for x in rows:

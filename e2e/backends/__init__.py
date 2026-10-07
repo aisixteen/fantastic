@@ -130,10 +130,24 @@ def _runner_params() -> dict[str, Any]:
 
 
 def _ollama() -> Backend:
+    # An Ollama server: its URL is the operator's to name (no host guessed); the
+    # window it LOADS the model with is `num_ctx` — ollama's own default is not in
+    # its API — so a run names it (`CTX`), and ai_core folds at the same window.
+    extra: dict[str, Any] = {}
+    if ep := os.environ.get("OLLAMA_ENDPOINT"):
+        extra["endpoint"] = ep
+    if ctx := os.environ.get("CTX"):
+        extra["num_ctx"] = int(ctx)
+        extra["context_window"] = int(ctx)
     return Backend(
         name="ollama",
         handler_module="ollama_backend.tools",
         model=_model_or_die("ollama"),
+        extra=extra,
+        requires=(
+            ("OLLAMA_ENDPOINT", "the ollama server URL (e.g. http://127.0.0.1:11434); no host is guessed"),
+            ("CTX", "the window ollama loads the model with (num_ctx); its default is not in its API"),
+        ),
     )
 
 

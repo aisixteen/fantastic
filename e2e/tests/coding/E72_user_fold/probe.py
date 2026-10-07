@@ -1,8 +1,8 @@
 """coding/user_fold — folding on a person's say-so, any time, with NO extra verb.
 
-The human shrinks the agent's `context_window` through the existing `update_agent` mid-run (to 9000 — below that the
-system block alone trips `too_small` and nothing folds);
-the watermark fires on the next turn and folds; the window is then restored. Scored: a
+The reads are PLANTED (rules, then the fillers). The human's squeeze is the agent's `context_window` at 9000 for
+the first live turn (below that the system block alone trips `too_small` and nothing folds); the watermark fires on
+that turn and folds; once a fold is in the store the window is restored through the existing `update_agent`. Scored: a
 fold landed while the window was shrunk, and the four rules still bind at the end.
 """
 from __future__ import annotations
@@ -20,15 +20,21 @@ from backends import backend as _resolve_backend
 from helpers import verdict
 from helpers.facts_arm import (
     FOLD_ARMS,
+    WINDOW,
     base_checks,
     call,
     conclude,
+    file_reads,
     fixture,
     plant_fillers,
+    plant_store,
+    planted_reads,
+    read_reply,
     report,
     rules_for,
     run_arm,
     score_rules,
+    store_rows,
 )
 from helpers.kernel import open_kernel
 
@@ -39,6 +45,7 @@ FOLD_ONLY = (FOLD_ARMS[1],)
 FB = "ufold_fb"
 N = 12
 KEYS = ("owner", "lane")
+SQUEEZED = 9000  # the floor: below it the system block alone trips `too_small`
 
 
 async def main():
@@ -52,15 +59,23 @@ async def main():
                 f"`report.md` through `notes` listing every filler, obeying every rule. Then {DONE}.")
         await fixture(root, FB, arms=FOLD_ARMS)
         results = []
+        reads = file_reads(["rules.md"] + [f"filler_{i}.txt" for i in range(N)])
         for aid, strategy, extra in FOLD_ARMS:
-            async def _squeeze(aid=aid):
-                await asyncio.sleep(70.0)
-                await call(root, root.id, {"type": "update_agent", "id": aid, "context_window": 9000, "num_ctx": 9000})
-                await asyncio.sleep(60.0)
-                await call(root, root.id, {"type": "update_agent", "id": aid, "context_window": 12000, "num_ctx": 12000})
-            sq = asyncio.create_task(_squeeze())
-            results.append(await run_arm(root, core, BK, FB, aid, strategy, extra, task, "report.md"))
-            sq.cancel()
+            # THE PAST, PLANTED — each arm its own copy; the last reply is delivered live
+            rows = planted_reads(root.ctx.mint_id, task, reads)
+            await plant_store(core, root, aid, rows)
+
+            async def _restore(aid=aid):
+                while not any(m.get("kind") == "fold" for m in await store_rows(root, core, aid)):
+                    await asyncio.sleep(2.0)
+                await call(root, root.id, {"type": "update_agent", "id": aid, "context_window": WINDOW, "num_ctx": WINDOW})
+            rs = asyncio.create_task(_restore())
+            path, text = reads[-1]
+            tail = read_reply(path, text, rows[-1]["id"])
+            # the agent is created squeezed: its first live turn is the one that folds
+            results.append(await run_arm(root, core, BK, FB, aid, strategy, extra, tail, "report.md",
+                                         via=None, window=SQUEEZED))
+            rs.cancel()
         recency, fold = results
         kept, _ = score_rules(fold["body"], rules)
         report((recency, fold), lambda a: f"RULES KEPT={score_rules(a['body'], rules)[0]}/4  folded={a['folded']}")

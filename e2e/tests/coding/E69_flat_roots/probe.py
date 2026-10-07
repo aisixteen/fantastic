@@ -1,7 +1,7 @@
 """coding/flat_roots — a superlong FLAT list: many small roots, no depth.
 
-Each root closes after one read and folds; folds pile up past half the view and fold
-into higher folds. The final message needs a value from (nearly) every root. Scored:
+Each root — PLANTED as finished (one read, then `done`) — folds at the first live turn;
+folds pile up past half the view and fold into higher folds. The final message needs a value from (nearly) every root. Scored:
 a level-2 fold exists with title and body, and the final lists most checksums.
 """
 from __future__ import annotations
@@ -20,15 +20,14 @@ from helpers import verdict
 from helpers.facts_arm import (
     FOLD_ARMS,
     base_checks,
+    closed_roots,
     conclude,
+    file_reads,
     fixture,
     plant_fillers,
+    plant_store,
     report,
     run_arm,
-    after_tasks,
-    send_in_turn,
-    send_when,
-    store_rows,
 )
 from helpers.kernel import open_kernel
 
@@ -55,15 +54,15 @@ async def main():
                  f"ALL {N} tasks you did. Then {DONE}.")
         results = []
         for aid, strategy, extra in FOLD_ARMS:
-            # each task as soon as the previous one ends — over time, no timer idle
-            laters = [await send_in_turn(root, aid, [task(i) for i in range(1, N)])]
-            laters.append(await send_when(root, core, aid, final, after_tasks(root, aid, list(laters)), max_wait=20.0 * N + 900))
-            results.append(await run_arm(root, core, BK, FB, aid, strategy, extra, task(0), "final.md"))
-            for t in laters: t.cancel()
+            # THE PAST, PLANTED — each arm its own copy: tasks 0…N-1 done, one root each
+            past = [(task(i), file_reads([f"filler_{i}.txt"]),
+                     f"filler_{i}.txt: its checksum is {toks[i]}.") for i in range(N)]
+            await plant_store(core, root, aid, closed_roots(root.ctx.mint_id, past))
+            results.append(await run_arm(root, core, BK, FB, aid, strategy, extra, final, "final.md"))
         recency, fold = results
         got = sum(toks[i] in fold["body"] for i in range(N))
         report((recency, fold), lambda a: f"checksums listed={sum(toks[i] in a['body'] for i in range(N))}/{N}")
-        checks = [c for c in base_checks(recency, fold) if not c[0].startswith("both arms produced")] + [
+        checks = [c for c in base_checks(recency, fold, planted=True) if not c[0].startswith("both arms produced")] + [
             (f"many folds ({fold['folded']})", fold["folded"] >= 4),
             (f"a fold of folds exists (levels {fold['fold_levels']})", max(fold["fold_levels"] or [1]) >= 2),
             ("every fold has a title and a body", all(m.get("title") and m.get("body") for m in fold["msgs"] if m.get("kind") == "fold")),

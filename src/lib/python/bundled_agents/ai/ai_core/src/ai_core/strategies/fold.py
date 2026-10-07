@@ -226,8 +226,9 @@ async def write_fold(
         lvl=lvl,
         parent=rows[idxs[0]].get("parent"),
     )
-    if ctx.client_id and ctx.kernel is not None:
-        await _save_history(ctx.self_id, ctx.kernel, [fr])
+    # A fold is a MARK that must persist — written whoever the projection is for (a
+    # turn's caller, or a `context_recall` with none).
+    await _save_history(ctx.self_id, ctx.kernel, [fr])
     return fr
 
 
@@ -261,12 +262,16 @@ def next_span(
     return [by_id[r["id"]] for r in take] if len(take) >= 2 else []
 
 
-async def fold(
-    body: list[dict], system_block: list[dict], rec: dict, ctx: ProjectionCtx
-) -> Projection:
-    rows = list(body)
+async def fold_down(
+    rows: list[dict], ctx: ProjectionCtx, budget: int
+) -> tuple[list[dict], list[dict], int, int]:
+    """FOLD UNTIL IT FITS: when the rendered view is over `budget`, fold its oldest
+    stretches down to the low watermark; then tidy the head (adjacent folds coalesce),
+    budget or no budget. Returns `(rows + the fold rows written, the view, folded,
+    refused)`. The turn's `fold` projection and `context_recall` (a store longer than
+    the window, e.g. written under a larger one) share it."""
+    rows = list(rows)
     view = render(rows)
-    budget = ctx.budget - NOTICE_ENVELOPE_RESERVE
     folded = refused = 0
     if estimate_tokens(view) > budget and len(rows) > 2:
         target = int(budget * LOW)
@@ -304,6 +309,15 @@ async def fold(
         rows.append(fr)
         folded += 1
         view = render(rows)
+    return rows, view, folded, refused
+
+
+async def fold(
+    body: list[dict], system_block: list[dict], rec: dict, ctx: ProjectionCtx
+) -> Projection:
+    _, view, folded, refused = await fold_down(
+        body, ctx, ctx.budget - NOTICE_ENVELOPE_RESERVE
+    )
     # Stage two and three: strip bodies in what is left, then cut — strip's own logic.
     out = await strip(view, system_block, rec, ctx)
     return Projection(

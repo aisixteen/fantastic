@@ -98,12 +98,18 @@ func deliverTurn(
     text: String,
     clientId: String,
     systemPrompt: String?,
-    born: Int? = nil
+    born: Int? = nil,
+    notice: Bool = false
 ) async {
     var payload: OrderedDictionary<String, JSON> = [:]
     payload["type"] = .string("send")
     payload["text"] = .string(text)
     payload["client_id"] = .string(clientId)
+    // HARNESS TEXT, NOT A MESSAGE (owner, 2026-10-07): a turn this layer writes to
+    // its own agent is stored as `kind: "notice"`, so a view can hide it; the
+    // model still reads it as a user turn. Honoured only on a send to self.
+    // Python `_deliver`.
+    if notice { payload["notice"] = .bool(true) }
     if let born, AIIncarnation.of(kernel, target) != born {
         // A LATE REPLY TO A PREVIOUS INCARNATION. Kept as a ROW — it is real
         // data — but it does not wake a turn: the agent that made the call is
@@ -176,7 +182,8 @@ func originLine(_ result: JSON, target: String, verb: String, payload: JSON) -> 
 /// as it schedules the delivery so `_deliver` can tell a reply that outlived
 /// its agent from one that belongs to it.
 func deliverSoon(
-    kernel: Kernel, target: String, text: String, clientId: String, systemPrompt: String?
+    kernel: Kernel, target: String, text: String, clientId: String, systemPrompt: String?,
+    notice: Bool
 ) {
     let born = AIIncarnation.of(kernel, target)
     // NOT AWAITED, AND A `ps` ROW. A send to an AI agent takes its FIFO lock and
@@ -189,7 +196,7 @@ func deliverSoon(
     kernel.spawnTask(agent: AgentId(target), verb: "deliver_reply") {
         await deliverTurn(
             kernel: kernel, target: target, text: text, clientId: clientId,
-            systemPrompt: systemPrompt, born: born)
+            systemPrompt: systemPrompt, born: born, notice: notice)
     }
 }
 
@@ -240,7 +247,7 @@ func silentTurn(
     if let sendTo = sendTo {
         deliverSoon(
             kernel: kernel, target: sendTo, text: text,
-            clientId: clientId, systemPrompt: systemPrompt)
+            clientId: clientId, systemPrompt: systemPrompt, notice: false)
     }
     return true
 }
@@ -439,6 +446,8 @@ private struct RouteUnit {
 /// including the batch stamp, which lives INSIDE it.
 private struct RouteBlock {
     let dest: String
+    /// It carries a dispatched call's outcome (not this layer's own text).
+    var outcome: Bool = false
     let pid: String
     let target: String
     let verb: String
@@ -777,9 +786,16 @@ func routeReply(
     let me = kernel.agent(selfId)
     let cap = me.map { AIContext.inlineCap($0, modelWindow: modelWindow) } ?? 0
     var blocks: [RouteBlock] = []
+    // THE CAP IS PER MESSAGE, not per reply (owner, 2026-10-07): every reply of a
+    // batch lands in ONE message to its addressee, so the replies share the cap. A
+    // reply that would push its batch past it is held like an oversized one.
+    // Measured: two greps, each under the 434-token cap, arrived as one 967-token
+    // message at a 4.5k window — the next turn could not fit it (`too_small`).
+    var used: [String: Int64] = [:]
     for u in units {
         var pid = "-"
         var body = u.body ?? ""
+        let soFar = used[u.dest, default: 0]
         if let i = u.idx {
             let outcome = outcomes[i]
             pid = outcome.pid.map { String($0.value) } ?? "-"
@@ -806,7 +822,8 @@ func routeReply(
             // carries its origin line; under it, it is inline. Measured AFTER the
             // nudge rode on, exactly where python counts it.
             if let p = outcome.pid,
-                AIContext.estimateOne(.object(["role": .string("user"), "content": .string(body)])) > cap
+                soFar + AIContext.estimateOne(.object(["role": .string("user"), "content": .string(body)]))
+                    > cap
             {
                 // `len(body)` — code points, as python counts a str.
                 let size = body.unicodeScalars.count
@@ -824,10 +841,12 @@ func routeReply(
                 }
             }
         }
+        used[u.dest, default: 0] += AIContext.estimateOne(
+            .object(["role": .string("user"), "content": .string(body)]))
         blocks.append(
             RouteBlock(
-                dest: u.dest, pid: pid, target: u.target, verb: u.verb, title: u.title,
-                body: body))
+                dest: u.dest, outcome: u.idx != nil, pid: pid, target: u.target, verb: u.verb,
+                title: u.title, body: body))
     }
 
     // THE TAIL BELOW IS PYTHON'S ORDER, step for step (core.py:1160-1176), and
@@ -870,7 +889,8 @@ func routeReply(
     }
     if anyBlocks {
         await deliverGrouped(
-            kernel: kernel, blocks: blocks, clientId: clientId, systemPrompt: systemPrompt, messageId: messageId)
+            kernel: kernel, selfId: selfId.value, blocks: blocks, clientId: clientId,
+            systemPrompt: systemPrompt, messageId: messageId)
     }
     if doneCalled {
         // AN INQUIRY THIS CHAIN NEVER ANSWERED is closed for its asker, saying so —
@@ -886,7 +906,7 @@ func routeReply(
         if let sendTo = sendTo, !anyBlocks {
             deliverSoon(
                 kernel: kernel, target: sendTo, text: text,
-                clientId: clientId, systemPrompt: systemPrompt)
+                clientId: clientId, systemPrompt: systemPrompt, notice: false)
         }
         return
     }
@@ -925,7 +945,7 @@ func routeReply(
         // waiting forever on an empty inbox.
         deliverSoon(
             kernel: kernel, target: selfId.value, text: awaitRefused,
-            clientId: clientId, systemPrompt: systemPrompt)
+            clientId: clientId, systemPrompt: systemPrompt, notice: true)
         return
     }
     if nudging {
@@ -948,7 +968,7 @@ func routeReply(
         deliverSoon(
             kernel: kernel, target: selfId.value,
             text: deadTurn ? deadTurnLine + noCallNudge : noCallNudge,
-            clientId: clientId, systemPrompt: systemPrompt)
+            clientId: clientId, systemPrompt: systemPrompt, notice: true)
         return
     }
     if anyCalls { return }
@@ -958,7 +978,7 @@ func routeReply(
     if let sendTo = sendTo {
         deliverSoon(
             kernel: kernel, target: sendTo, text: text,
-            clientId: clientId, systemPrompt: systemPrompt)
+            clientId: clientId, systemPrompt: systemPrompt, notice: false)
     }
 }
 
@@ -975,8 +995,8 @@ func routeReply(
 /// flight" — the batch arrives whole. A model that made 2 calls and got 1 back
 /// could not tell "still running" from "answered the wrong one".
 private func deliverGrouped(
-    kernel: Kernel, blocks: [RouteBlock], clientId: String, systemPrompt: String?,
-    messageId: Int64? = nil
+    kernel: Kernel, selfId: String, blocks: [RouteBlock], clientId: String,
+    systemPrompt: String?, messageId: Int64? = nil
 ) async {
     guard !blocks.isEmpty else { return }
     // Destination order = first appearance, so the model reads them in the order
@@ -1006,9 +1026,12 @@ private func deliverGrouped(
             tag += m > 1 ? " \u{b7} \(i + 1) of \(m) in batch \(token)]" : "]"
             return tag + "\n" + b.body
         }.joined(separator: "\n\n")
+        // A batch to SELF made only of this layer's own text is a notice; one that
+        // carries any call's outcome is a reply.
+        let notice = dest == selfId && !(byDest[dest] ?? []).contains { $0.outcome }
         deliverSoon(
             kernel: kernel, target: dest, text: body,
-            clientId: clientId, systemPrompt: systemPrompt)
+            clientId: clientId, systemPrompt: systemPrompt, notice: notice)
     }
 }
 
@@ -1051,4 +1074,15 @@ private func argsWithoutPayload(
     var out: OrderedDictionary<String, JSON> = [:]
     for (k, v) in args where k != "payload" { out[k] = v }
     return out
+}
+
+/// The incoming user row; `kind: "notice"` when it is this layer's own text to its
+/// own agent (python `_notice_kind`) — the row otherwise keeps its role as its kind.
+func incomingRow(_ text: String, id: Int64, parent: Int64?, notice: Bool) -> JSON {
+    var row: OrderedDictionary<String, JSON> = [
+        "role": .string("user"), "content": .string(text),
+        "id": .integer(id), "parent": parent.map(JSON.integer) ?? .null,
+    ]
+    if notice { row["kind"] = .string("notice") }
+    return .object(row)
 }
