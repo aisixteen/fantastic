@@ -236,8 +236,13 @@ def _unframe(body: bytes) -> dict:
     raise ValueError(f"unknown frame kind {kind!r}")
 
 
-async def _serve_ctrl(parent_sock, owner_id, job_id, kernel):
+async def _serve_ctrl(parent_sock, owner_id, job_id, kernel, *, ops=None, on_push=None):
     """Relay a job's wire calls into the real kernel (child → spawner → kernel).
+
+    `ops` / `on_push` let another spawner reuse this ONE relay (py_agent, owner
+    2026-10-08): `ops` maps an extra child op to an awaitable handler of its frame,
+    and `on_push` receives the `push` function once the channel is open, so the
+    spawner can write its own frames (a `call`) down the same fd.
 
     `send` = request/reply; `emit` = one-way; `watch`/`onmessage` subscribe via
     kernel.watch into a per-sub PROXY INBOX this relay drains, pushing each event down
@@ -266,6 +271,7 @@ async def _serve_ctrl(parent_sock, owner_id, job_id, kernel):
 
     subs: dict = {}  # src -> (proxy_id, drain_task)
     self_sub: list = [None]  # on_message: (proxy_id, drain_task) | None
+    ops = ops or {}
 
     def push(obj):
         # `[4-byte BE len | kind | rest]` — kind T = JSON, kind B = the io_bridge
@@ -275,6 +281,9 @@ async def _serve_ctrl(parent_sock, owner_id, job_id, kernel):
         wire, binary = encode_frame(obj)
         data = (b"B" if binary else b"T") + wire
         writer.write(struct.pack(">I", len(data)) + data)
+
+    if on_push is not None:
+        on_push(push)
 
     def release(src, proxy, task):
         """Give a proxy back: unwatch, DROP THE INBOX ROW, cancel the drain.
@@ -322,7 +331,9 @@ async def _serve_ctrl(parent_sock, owner_id, job_id, kernel):
             if not isinstance(m, dict):
                 continue  # so does valid JSON that is no envelope (`T[1]`, audit W-9)
             op = m.get("op")
-            if op == "send":
+            if op in ops:
+                await ops[op](m)
+            elif op == "send":
                 # A target fault settles as a failed outcome (error in result);
                 # send never raises into the relay loop.
                 item = {"target": m.get("target"), "payload": m.get("payload") or {}}

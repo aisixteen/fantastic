@@ -108,12 +108,24 @@
             }
         }
         private static let ownerInbox = OwnerInboxTable()
+        /// The ops this relay serves itself.
+        private static let ownOps: Set<String> = [
+            "send", "emit", "watch", "unwatch", "onmessage", "offmessage",
+        ]
 
-        init(fd: Int32, owner: AgentId, jobId: TaskId, kernel: Kernel) {
+        /// What another spawner adds to this ONE relay (py_agent, owner 2026-10-08):
+        /// every child frame whose op the relay does not own goes here.
+        private let extraOps: (@Sendable (JSON) async -> Void)?
+
+        init(
+            fd: Int32, owner: AgentId, jobId: TaskId, kernel: Kernel,
+            extraOps: (@Sendable (JSON) async -> Void)? = nil
+        ) {
             self.fd = fd
             self.owner = owner
             self.jobId = jobId
             self.kernel = kernel
+            self.extraOps = extraOps
             self.queue = DispatchQueue(label: "exec_bridge.relay.\(jobId)")
             (frames, framesIn) = AsyncStream.makeStream(of: (JSON, Data?).self)
         }
@@ -245,6 +257,12 @@
             }
         }
 
+        /// Write a frame for the child from outside the relay (py_agent's `call`),
+        /// on the queue that owns the socket.
+        func pushOut(_ v: JSON) {
+            queue.async { [weak self] in self?.push(v) }
+        }
+
         /// Frame one JSON value onto the socket (kind `T`).
         private func push(_ v: JSON) {
             writeFrame(kind: UInt8(ascii: "T"), Data(Codec.encodeText(v).utf8))
@@ -305,6 +323,10 @@
         /// run on the queue — and this waits for them too.
         private func serve(_ m: JSON, _ blob: Data?, relayTask: TaskId?) async {
             guard let op = m["op"].asString, let kernel else { return }
+            if let extraOps, !Self.ownOps.contains(op) {
+                await extraOps(m)
+                return
+            }
             // THE PROGRAM'S SENDS ARE THIS AGENT'S SENDS, UNDER THE RELAY'S TASK.
             // This consumer is a task the owner's `start` spawned (the relay's
             // kernel task), so it IS the owner — identity comes only from

@@ -229,9 +229,14 @@ pub async fn serve(
     job_id: TaskId,
     kernel: Arc<Kernel>,
     stop: Arc<tokio::sync::Notify>,
+    extra: Option<Extra>,
 ) {
     let wr = Arc::new(tokio::sync::Mutex::new(wr));
     let mut rd = rd;
+    let (ops_tx, mut out_rx) = match extra {
+        Some(Extra { inbound, outbound }) => (Some(inbound), Some(outbound)),
+        None => (None, None),
+    };
     let mut subs: HashMap<AgentId, Sub> = HashMap::new();
     // Only the proxy id — the drain handle lives in OWNER_INBOX (see `onmessage`).
     let mut self_sub: Option<AgentId> = None;
@@ -242,6 +247,16 @@ pub async fn serve(
             // cancel-safety of `read_exact` does not matter here.
             _ = stop.notified() => None,
             f = read_frame(&mut rd) => f,
+            // a frame the spawner writes down this channel (py_agent's `call`)
+            Some(v) = async {
+                match out_rx.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                push(&wr, &v).await;
+                continue;
+            }
         };
         let Some(body) = frame else {
             break; // EOF, a wire violation, or teardown — release and go.
@@ -408,6 +423,12 @@ pub async fn serve(
                 self_sub = None;
                 release_owner_inbox(&kernel, &owner, job_id).await;
             }
+            // an op the spawner added (py_agent: `hello`, `result`)
+            Some(_) if ops_tx.is_some() => {
+                if let Some(tx) = &ops_tx {
+                    let _ = tx.send(m);
+                }
+            }
             _ => {}
         }
     }
@@ -419,6 +440,16 @@ pub async fn serve(
     if self_sub.take().is_some() {
         release_owner_inbox(&kernel, &owner, job_id).await;
     }
+}
+
+/// What another spawner adds to this ONE relay (py_agent, owner 2026-10-08):
+/// every child frame whose op the relay does not own goes to `inbound`, and every
+/// value sent on `outbound` is pushed down the control fd as a text frame.
+pub struct Extra {
+    /// Child frames with an op this relay does not handle.
+    pub inbound: tokio::sync::mpsc::UnboundedSender<Value>,
+    /// Frames for the child (a `call`).
+    pub outbound: tokio::sync::mpsc::UnboundedReceiver<Value>,
 }
 
 /// Give up the owner's inbox — but ONLY if it still names this job. A predecessor

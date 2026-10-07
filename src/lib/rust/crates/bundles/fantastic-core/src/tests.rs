@@ -1112,3 +1112,73 @@ async fn an_unknown_type_echoes_the_raw_value_as_verb() {
         assert_eq!(serde_json::to_string(&r).unwrap(), want, "{payload}");
     }
 }
+
+async fn ask(kernel: &Arc<Kernel>, target: &str, payload: serde_json::Value) -> serde_json::Value {
+    kernel
+        .send(vec![Item::new(AgentId::from(target), payload)])
+        .await
+        .remove(0)
+        .result
+}
+
+/// python `test_read_bundles_hands_each_folders_bundle_yaml_raw`: a loader hands
+/// its OWN root's folder bundles as raw text, one by name too.
+#[tokio::test]
+async fn read_bundles_hands_each_folders_bundle_yaml_raw() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = booted(&tmp);
+    let root = kernel.root().expect("root").id.0.clone();
+    let r = ask(
+        &kernel,
+        &root,
+        json!({"type": "create_agent", "parent_id": root, "id": "web_loader",
+               "handler_module": HANDLER_MODULE, "watch": false, "root": ".fantastic/web"}),
+    )
+    .await;
+    assert_eq!(r["id"], "web_loader", "{r}");
+    let text = "base: html_agent\nsentence: A clock.\nhtml: index.html  # not parsed here\n";
+    let b = tmp.path().join(".fantastic/web/bundles");
+    std::fs::create_dir_all(b.join("clock")).unwrap();
+    std::fs::write(b.join("clock/bundle.yaml"), text).unwrap();
+    std::fs::create_dir_all(b.join("empty")).unwrap();
+    std::fs::write(b.join("stray.txt"), "not a folder").unwrap();
+
+    let got = ask(&kernel, "web_loader", json!({"type": "read_bundles"})).await;
+    assert_eq!(
+        got,
+        json!({"bundles": [
+            {"name": "clock", "folder": "web/bundles/clock", "text": text},
+            {"name": "empty", "folder": "web/bundles/empty",
+             "error": "bundles/empty: no bundle.yaml"},
+        ]})
+    );
+    let one = ask(
+        &kernel,
+        "web_loader",
+        json!({"type": "read_bundles", "name": "clock"}),
+    )
+    .await;
+    assert_eq!(one["bundles"], json!([got["bundles"][0]]));
+    let own = ask(&kernel, &root, json!({"type": "read_bundles"})).await;
+    assert_eq!(own, json!({"bundles": []}));
+}
+
+#[tokio::test]
+async fn read_bundles_refuses_what_is_no_folder() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = booted(&tmp);
+    let root = kernel.root().expect("root").id.0.clone();
+    for (name, reason) in [
+        ("nope", "not_found"),
+        ("../x", "not_found"),
+        ("", "bad_arg"),
+    ] {
+        let r = ask(
+            &kernel,
+            &root,
+            json!({"type": "read_bundles", "name": name}),
+        )
+        .await;
+        assert_eq!(r["reason"], reason, "{name}: {r}");
+    }
+}

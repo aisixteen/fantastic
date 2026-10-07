@@ -18,6 +18,7 @@ import { errorShaped } from "./outcome.ts";
 import { BAD_ARG, LOCKED, UNHANDLED, refusal, unknown } from "./refusal.ts";
 import { answerKernelVerb, isKernelVerb } from "./kernel_verbs.ts";
 import { authorizeCall, denial } from "./authz.ts";
+import type { FolderBase, FolderBuilt, ReadFolders } from "./folders.ts";
 
 /**
  * The bridge transport (P2). The pure core depends only on this interface, so
@@ -55,6 +56,10 @@ export class Kernel {
    *  reflect as `persistence:{provider}` (mirrors py). For the browser frontend the
    *  loader sets this to the host loader id it proxies to; null = unwired. */
   persistenceProvider: string | null = null;
+  /** The loader's `read_bundles` — how this kernel reads its own FOLDER BUNDLES
+   *  (`folders.ts`): set by `boot` to the proxy loader; null = unwired, and
+   *  `reload_bundle` says so. */
+  readFolders: ReadFolders | null = null;
 
   /** Executions still in RAM — in flight, or settled and not yet flushed:
    *  dedup/join/retry/dead-letter. The rest live in the root's memory store. */
@@ -117,6 +122,12 @@ export class Kernel {
    *  readme — the frontend's self-description, mirroring how host bundles
    *  attach a bundle-level readme. */
   private readonly bundleReadmes: Map<string, string> = new Map();
+  /** handler_module -> the builder of a BASE: a bundle a folder may extend. */
+  private readonly bases: Map<string, FolderBase> = new Map();
+  /** folder name -> its catalog row, loaded or refused (with `error`). */
+  private readonly folderRowMap: Map<string, Payload> = new Map();
+  /** The folders loaded now — their handlers sit in `handlers` under the name. */
+  private readonly folderLoaded: Set<string> = new Set();
   /** src id -> watcher ids subscribed to its inbox. */
   private readonly watchers: Map<string, Set<string>> = new Map();
   /** id -> inbox listeners (a view-agent observing an agent's events). */
@@ -131,10 +142,72 @@ export class Kernel {
   }
 
   /** Register a JS view bundle by its handler_module name, with the verb docs
-   *  `docs` serves for it. */
-  registerBundle(handlerModule: string, handler: Handler, verbs: VerbDocs = {}): void {
+   *  `docs` serves for it. `folderBundle` makes it a BASE: a folder bundle whose
+   *  `bundle.yaml` names it (`base: <its name>`) is built by it. */
+  registerBundle(
+    handlerModule: string,
+    handler: Handler,
+    verbs: VerbDocs = {},
+    opts: { folderBundle?: FolderBase } = {},
+  ): void {
     this.handlers.set(handlerModule, handler);
     this.bundleVerbs.set(handlerModule, verbs);
+    if (opts.folderBundle !== undefined) this.bases.set(handlerModule, opts.folderBundle);
+  }
+
+  // ---- folder bundles (folders.ts) ----------------------------------------
+
+  /** The builder of the base `name` (its name or handler_module), if registered. */
+  folderBase(name: string): FolderBase | undefined {
+    for (const [hm, build] of this.bases) {
+      if (hm === name || bundleName(hm) === name) return build;
+    }
+    return undefined;
+  }
+
+  /** The bases a folder can extend in this kernel, by name. */
+  folderBases(): string[] {
+    return [...this.bases.keys()].map(bundleName).sort();
+  }
+
+  /** Is `name` a registered bundle's name or handler_module? A folder may not
+   *  shadow one. */
+  clashes(name: string): boolean {
+    for (const hm of this.handlers.keys()) {
+      if (this.folderLoaded.has(hm)) continue;
+      if (hm === name || bundleName(hm) === name) return true;
+    }
+    return false;
+  }
+
+  /** Load a folder: `name` resolves to the bundle its base built. Replaces a
+   *  previous load — a reload is a re-register; a live instance keeps the
+   *  handler it was bound to until `reload_bundle` rebinds it. */
+  registerFolder(name: string, built: FolderBuilt, row: Payload): void {
+    this.handlers.set(name, built.handler);
+    this.bundleVerbs.set(name, built.verbs);
+    if (built.readme !== undefined) this.bundleReadmes.set(name, built.readme);
+    else this.bundleReadmes.delete(name);
+    this.folderLoaded.add(name);
+    this.folderRowMap.set(name, row);
+  }
+
+  /** A folder that could not load: listed (with its `error`), never resolvable —
+   *  unless an earlier load stands: a failed RELOAD keeps it (handler and row),
+   *  so its live instances keep running it; the error goes to the caller. */
+  refuseFolder(name: string, row: Payload): void {
+    if (this.folderLoaded.has(name)) return;
+    this.folderRowMap.set(name, row);
+  }
+
+  /** Is `name` a LOADED folder bundle? */
+  isFolder(name: string): boolean {
+    return this.folderLoaded.has(name);
+  }
+
+  /** The handler a loaded folder resolves to now (what `reload_bundle` rebinds). */
+  folderHandler(name: string): Handler | undefined {
+    return this.folderLoaded.has(name) ? this.handlers.get(name) : undefined;
   }
 
   /** The verb docs a registered bundle declared; `undefined` for a bundle this
@@ -771,9 +844,13 @@ export class Kernel {
 
   /** The frontend's view-bundle catalog, for reflect `bundles=all|ids`. */
   availableBundles(): BundleInfo[] {
-    return [...this.handlers.keys()]
-      .map((hm) => ({ name: bundleName(hm), handler_module: hm }))
-      .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    const out: BundleInfo[] = [...this.handlers.keys()]
+      .filter((hm) => !this.folderLoaded.has(hm))
+      .map((hm) => ({ name: bundleName(hm), handler_module: hm }));
+    // FOLDER BUNDLES beside the registered ones — a refused folder too, with its
+    // `error` (owner, 2026-10-08).
+    for (const row of this.folderRowMap.values()) out.push({ ...row } as unknown as BundleInfo);
+    return out.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   }
 }
 

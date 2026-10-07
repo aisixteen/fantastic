@@ -176,3 +176,56 @@ struct KernelStateVerbsTests {
         #expect(out.result["reason"].asString == "unhandled")
     }
 }
+
+/// python `test_read_bundles_*`: a loader hands its OWN root's folder bundles as
+/// raw text, for a kernel that loads them itself (a page kernel's proxy_loader).
+@Suite("kernel_state read_bundles")
+struct ReadBundlesTests {
+    @Test func aLoaderHandsEachFoldersBundleYamlRaw() async throws {
+        let (k, workdir) = ksKernel()
+        defer { try? FileManager.default.removeItem(at: workdir) }
+        let sid = await session(k, root: ".fantastic/web")
+        let text = "base: html_agent\nsentence: A clock.\nhtml: index.html  # not parsed here\n"
+        let b = workdir.appendingPathComponent(".fantastic/web/bundles")
+        let fm = FileManager.default
+        try fm.createDirectory(
+            at: b.appendingPathComponent("clock"), withIntermediateDirectories: true)
+        try text.write(
+            to: b.appendingPathComponent("clock/bundle.yaml"), atomically: true, encoding: .utf8)
+        try fm.createDirectory(
+            at: b.appendingPathComponent("empty"), withIntermediateDirectories: true)
+        try "not a folder".write(
+            to: b.appendingPathComponent("stray.txt"), atomically: true, encoding: .utf8)
+
+        let got = await send(k, sid, .object(["type": .string("read_bundles")])).result
+        let want: JSON = .object([
+            "bundles": .array([
+                .object([
+                    "name": .string("clock"), "folder": .string("web/bundles/clock"),
+                    "text": .string(text),
+                ]),
+                .object([
+                    "name": .string("empty"), "folder": .string("web/bundles/empty"),
+                    "error": .string("bundles/empty: no bundle.yaml"),
+                ]),
+            ])
+        ])
+        #expect(got == want, "\(got.serialize())")
+        let one = await send(
+            k, sid, .object(["type": .string("read_bundles"), "name": .string("clock")]))
+        #expect(one.result["bundles"] == .array([got["bundles"].asArray?.first ?? .null]))
+        let own = await send(k, ROOT_ID, .object(["type": .string("read_bundles")]))
+        #expect(own.result == .object(["bundles": .array([])]), "\(own.result.serialize())")
+    }
+
+    @Test func whatIsNoFolderIsRefused() async {
+        let (k, workdir) = ksKernel()
+        defer { try? FileManager.default.removeItem(at: workdir) }
+        _ = await session(k, root: ".fantastic/web")
+        for (name, reason) in [("nope", "not_found"), ("../x", "not_found"), ("", "bad_arg")] {
+            let r = await send(
+                k, ROOT_ID, .object(["type": .string("read_bundles"), "name": .string(name)]))
+            #expect(r.result["reason"].asString == reason, "\(name): \(r.result.serialize())")
+        }
+    }
+}

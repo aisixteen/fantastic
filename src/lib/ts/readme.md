@@ -35,11 +35,13 @@ boot({ origin, loader, register, seed?, makeSocket? }) → Promise<{ kernel, loa
    (`kernel.registerBundle`, `kernel.setBundleReadme`) before anything loads,
 3. dials the host with a `WsBridge` whose control endpoint is `loader`, and names
    `loader` as the root's `persistence.provider`,
-4. `loadTree()` from that loader → `kernel.load(records)` when there are any; on an
+4. loads this kernel's FOLDER BUNDLES through that loader (below) — a refused read
+   fails the boot loud,
+5. `loadTree()` from that loader → `kernel.load(records)` when there are any; on an
    EMPTY namespace it calls the app's `seed(kernel)` if given (an empty tree
    stays empty otherwise — the library seeds nothing),
-5. `loader.start()` — every local change persists back through the host,
-6. returns the handles. Mounting is the app's.
+6. `loader.start()` — every local change persists back through the host,
+7. returns the handles. Mounting is the app's.
 
 ```ts
 import { Agent, boot } from "../../../lib/ts/src/index.ts";
@@ -64,6 +66,20 @@ keeps that to one file, its `src/lib.ts`).
 `{deleted: true, id}`; an unknown id is `unknown_agent` (with `deleted: false`);
 the ROOT is never removed (`bad_arg`, `deleted: false`) — it answers the kernel
 verbs, and its removal would forget this kernel's whole namespace on the host.
+
+**Folder bundles** (owner, 2026-10-08). A folder `<loader root>/bundles/<name>/`
+with a `bundle.yaml` EXTENDS a base: `base` (a bundle the app registered with
+`registerBundle(hm, handler, verbs, {folderBundle})`), `sentence`, plus whatever
+that base reads (its builder gets the parsed spec and refuses a bad field by
+returning the text). The host loader's `read_bundles` hands each `bundle.yaml` RAW;
+this kernel parses it with its own strict YAML reader (`src/kernel/yaml.ts`) — at
+boot, before the tree, and on the root's `reload_bundle {name}`, which re-reads one
+folder and restarts its live instances (`shutdown` reason `reloaded` under the old
+handler, rebound, `boot`). An instance is an agent whose `handler_module` is the
+folder name. A folder named like a registered bundle, with an unknown base or a bad
+field is listed in `reflect bundles=all` with its `error` and never runs; a failed
+reload keeps the previous load. The page leg needs a `read_bundles` grant on the
+loader.
 
 ## Packing an app's page
 

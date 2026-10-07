@@ -346,23 +346,30 @@ extension Kernel {
         // names its cursor `bundles_next` only when a further page follows.
         switch payload.asObject?["bundles"] {
         case .some(.string("all")):
-            let (cat, next) = page(availableBundles(), payload) { $0.name }
-            obj["bundles"] = .array(
-                cat.map {
-                    var entry: OrderedDictionary<String, JSON> = [
-                        "name": .string($0.name),
-                        "handler_module": .string($0.handlerModule),
-                    ]
-                    // The kind's record schema, where the bundle publishes one —
-                    // on the full catalog only; `bundles=ids` stays names.
-                    if let sch = bundles.get($0.handlerModule)?.recordSchema {
-                        entry["schema"] = sch
-                    }
-                    return .object(entry)
-                })
+            var entries: [JSON] = availableBundles().map {
+                var entry: OrderedDictionary<String, JSON> = [
+                    "name": .string($0.name),
+                    "handler_module": .string($0.handlerModule),
+                ]
+                // The kind's record schema, where the bundle publishes one —
+                // on the full catalog only; `bundles=ids` stays names.
+                if let sch = bundles.get($0.handlerModule)?.recordSchema {
+                    entry["schema"] = sch
+                }
+                return .object(entry)
+            }
+            // FOLDER BUNDLES of this kernel's root, beside the installed ones — a
+            // refused folder too, with its `error` (owner, 2026-10-08).
+            entries += bundles.folderRows()
+            entries.sort { ($0["name"].asString ?? "") < ($1["name"].asString ?? "") }
+            let (cat, next) = page(entries, payload) { $0["name"].asString ?? "" }
+            obj["bundles"] = .array(cat)
             if let next { obj["bundles_next"] = .string(next) }
         case .some(.string("ids")):
-            let (names, next) = page(availableBundles().map { $0.name }, payload) { $0 }
+            let installed = availableBundles().map { $0.name }
+            let folders = bundles.folderRows().compactMap { $0["name"].asString }
+            let listed = (installed + folders).sorted()
+            let (names, next) = page(listed, payload) { $0 }
             obj["bundles"] = .array(names.map { .string($0) })
             if let next { obj["bundles_next"] = .string(next) }
         default: break  // "none" → omit

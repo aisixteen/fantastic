@@ -1296,6 +1296,7 @@ fn wire(
             TaskId(job_id),
             Arc::clone(kernel),
             Arc::clone(&stop),
+            None,
         ),
     ));
     (child, stop, relay)

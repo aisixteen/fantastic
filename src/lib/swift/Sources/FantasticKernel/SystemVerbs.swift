@@ -300,6 +300,9 @@ extension Kernel {
                     of: of, bundle: .null, tier: tier, verb: verb, table: .object([:]), extras: [])
             }
             module = hm
+        } else if bundles.isFolder(of) {
+            // a FOLDER BUNDLE by its name — its handler_module (owner, 2026-10-08)
+            module = of
         } else if let hm = bundles.catalog().first(where: { $0.0 == of || $0.1.name == of })?.0 {
             // A BUNDLE by either name the kernel lists it under: `bundles='ids'`
             // lists the NAME (`file_bridge`), an agent record carries the

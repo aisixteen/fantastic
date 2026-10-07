@@ -159,6 +159,9 @@ fn boot_disk(
         .and_then(|r| r.get("handler_module"))
         .map(fantastic_bundle::py_str)
         .unwrap_or_default();
+    // FOLDER BUNDLES before the tree loads, so an instance's handler resolves
+    // (python main._bootstrap → kernel_state.load_bundles).
+    crate::folders::load_bundles(kernel, &fantastic_dir);
     kernel.load_records(records)?;
     // The root weak-loads like any record: a runtime without its loader bundle
     // has no tree to run. Said, not papered over with a root it cannot serve.

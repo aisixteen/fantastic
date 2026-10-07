@@ -190,6 +190,9 @@ pub fn docs_reply(kernel: &Arc<Kernel>, payload: &Value) -> Value {
             Some(hm) => hm,
             None => return render(of, Value::Null, tier, verb, &json!({}), &[]),
         }
+    } else if kernel.bundles.is_folder(of) {
+        // a FOLDER BUNDLE by its name — its handler_module (owner, 2026-10-08)
+        of.to_string()
     } else if let Some((hm, _)) = kernel
         .bundles
         .catalog()

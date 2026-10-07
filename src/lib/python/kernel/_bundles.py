@@ -27,6 +27,13 @@ _UNLISTED: dict[str, ModuleType] = {}
 #: is looked up on every call and every reflect node, and a scan costs ~1.4 ms.
 _CATALOG: set[str] = set()
 _MISSING: set[str] = set()
+#: FOLDER BUNDLES (owner, 2026-10-08): `<root>/bundles/<name>/` — code that EXTENDS
+#: a bundled agent (`base`), loaded by this kernel's loader from its own root. The
+#: handler_module of an instance is the folder name. One kernel per process, so
+#: process-wide like the catalog. `_FOLDER_ROWS` is what `reflect bundles=all`
+#: lists — a refused folder too, with its `error`, never loaded.
+_FOLDER: dict[str, ModuleType] = {}
+_FOLDER_ROWS: dict[str, dict] = {}
 
 
 def register_unlisted(handler_module: str, module: ModuleType) -> None:
@@ -36,6 +43,43 @@ def register_unlisted(handler_module: str, module: ModuleType) -> None:
     `BundleRegistry::register_unlisted` / swift's `registerUnlisted`: the same
     name, the same meaning, process-wide as python's catalog is."""
     _UNLISTED[handler_module] = module
+
+
+def register_folder(name: str, module: ModuleType, row: dict) -> None:
+    """Load a folder bundle: `name` (its folder) resolves to `module`, the module
+    its BASE built from the folder (`folder_bundle`). Replaces a previous load —
+    a reload is a re-register."""
+    _FOLDER[name] = module
+    _FOLDER_ROWS[name] = row
+
+
+def refuse_folder(name: str, row: dict) -> None:
+    """A folder that could not load: listed (with its `error`), never resolvable —
+    unless an earlier load stands: a failed RELOAD keeps it (module and row), so its
+    live instances keep running it; the error goes to the reload's caller."""
+    if name in _FOLDER:
+        return
+    _FOLDER_ROWS[name] = row
+
+
+def folder_rows() -> list[dict]:
+    """Every folder bundle this kernel read — loaded and refused — by name."""
+    return [dict(_FOLDER_ROWS[n]) for n in sorted(_FOLDER_ROWS)]
+
+
+def is_folder(handler_module: str) -> bool:
+    return handler_module in _FOLDER
+
+
+def clashes(name: str) -> bool:
+    """Is `name` a built-in bundle's name, handler module or package? A folder may
+    not shadow one."""
+    if name in _UNLISTED:
+        return True
+    for ep in entry_points(group=BUNDLE_ENTRY_GROUP):
+        if name in (ep.name, ep.value, ep.value.split(".")[0]):
+            return True
+    return False
 
 
 def import_handler(handler_module: str) -> ModuleType:
@@ -49,7 +93,7 @@ def import_handler(handler_module: str) -> ModuleType:
     A name outside the catalog is, to this kernel, a module that does not exist:
     `ModuleNotFoundError: No module named '<top-level package>'` — rust's and
     swift's text for an unregistered name, so every runtime says one thing."""
-    mod = _UNLISTED.get(handler_module)
+    mod = _UNLISTED.get(handler_module) or _FOLDER.get(handler_module)
     if mod is not None:
         return mod
     if not _in_catalog(handler_module):
@@ -76,6 +120,8 @@ def bundle_package(handler_module: str) -> str | None:
     `__init__`, so a name outside the catalog is never imported to read nothing
     (audit 2026-10-03, ARCH2-1)."""
     top = handler_module.split(".")[0]
+    if handler_module in _FOLDER:
+        return None  # a folder bundle ships no package resources
     if handler_module in _UNLISTED:
         return top if top in sys.modules else None
     return top if _in_catalog(handler_module) else None

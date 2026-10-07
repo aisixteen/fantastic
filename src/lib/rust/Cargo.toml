@@ -16,6 +16,7 @@ members = [
     "crates/bundles/fantastic-web-rest",
     "crates/bundles/fantastic-file",
     "crates/bundles/fantastic-ram-store",
+    "crates/bundles/fantastic-py-agent",
     "crates/bundles/fantastic-credential-store",
     "crates/bundles/fantastic-static-loader",
     "crates/bundles/fantastic-scheduler",

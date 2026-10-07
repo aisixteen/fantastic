@@ -95,7 +95,13 @@ from kernel._kernel import (
     stored_outcome,
     page,
 )
-from kernel._bundles import _find_bundle_module, _in_catalog, import_handler
+from kernel._bundles import (
+    _find_bundle_module,
+    _in_catalog,
+    folder_rows,
+    import_handler,
+    is_folder,
+)
 from kernel import _docs
 
 
@@ -1635,6 +1641,9 @@ class Agent:
                 if sch is not None:
                     entry["schema"] = sch
             out.append(entry)
+        # FOLDER BUNDLES of this kernel's root, beside the installed ones — a
+        # refused folder too, with its `error` (owner, 2026-10-08).
+        out += folder_rows()
         return sorted(out, key=lambda b: b["name"])
 
     async def emit(self, target_id: str, payload: dict, *, quiet: bool = False) -> None:
@@ -2197,7 +2206,11 @@ class Agent:
             # lists the NAME (`file_bridge`), an agent record carries the
             # handler_module (`file_bridge.tools`). Measured 2026-10-06 (rust,
             # plan + build): models asked for the listed name and were refused.
-            module = of if _in_catalog(of) else _find_bundle_module(of, self.ctx)
+            module = (
+                of
+                if is_folder(of) or _in_catalog(of)
+                else _find_bundle_module(of, self.ctx)
+            )
             if module is None:
                 return refusal(
                     BAD_ARG,

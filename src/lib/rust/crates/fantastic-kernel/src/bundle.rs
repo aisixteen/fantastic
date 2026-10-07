@@ -232,6 +232,26 @@ pub trait Bundle: Send + Sync {
         Ok(())
     }
 
+    /// Can a FOLDER BUNDLE (`<root>/bundles/<name>/bundle.yaml`, `base: <this
+    /// bundle's name>`) extend this bundle? Python: the module exposes
+    /// `folder_bundle`. Default: no (owner, 2026-10-08).
+    fn folder_base(&self) -> bool {
+        false
+    }
+
+    /// Build the bundle a folder runs as — `name` its folder (the handler_module of
+    /// its instances), `folder` the folder's absolute path, `spec` its parsed
+    /// `bundle.yaml` — or the refusal text naming the field. Called only on a
+    /// [`Self::folder_base`].
+    fn folder_bundle(
+        &self,
+        _name: &str,
+        _folder: &std::path::Path,
+        _spec: &Value,
+    ) -> Result<Arc<dyn Bundle>, String> {
+        Err(format!("{} is not a base a folder can extend", self.name()))
+    }
+
     /// Optional readme text seeded into the agent's dir on creation.
     /// Default: empty (no readme). Bundles override with
     /// `include_str!("readme.md")` to ship their description.
@@ -286,6 +306,13 @@ pub trait Bundle: Send + Sync {
 pub struct BundleRegistry {
     by_handler: HashMap<String, Arc<dyn Bundle>>,
     unlisted: HashSet<String>,
+    /// FOLDER BUNDLES of this kernel's root (owner, 2026-10-08): name → the bundle
+    /// its base built. Loaded at boot and re-loaded by `reload_bundle`, hence the
+    /// lock — the installed map is fixed once the kernel exists.
+    folders: std::sync::RwLock<HashMap<String, Arc<dyn Bundle>>>,
+    /// What `reflect bundles=all` lists for each folder — a refused one too, with
+    /// its `error`.
+    folder_rows: std::sync::RwLock<std::collections::BTreeMap<String, Value>>,
 }
 
 impl BundleRegistry {
@@ -319,7 +346,93 @@ impl BundleRegistry {
     /// unknown — caller decides whether that's a hard error (live
     /// dispatch) or a weak-load skip (rehydration).
     pub fn get(&self, handler_module: &str) -> Option<Arc<dyn Bundle>> {
-        self.by_handler.get(handler_module).cloned()
+        self.by_handler.get(handler_module).cloned().or_else(|| {
+            self.folders
+                .read()
+                .expect("folders poisoned")
+                .get(handler_module)
+                .cloned()
+        })
+    }
+
+    /// Load a folder bundle: `name` resolves to `bundle` (a reload replaces it).
+    pub fn register_folder(&self, name: &str, bundle: Arc<dyn Bundle>, row: Value) {
+        self.folders
+            .write()
+            .expect("folders poisoned")
+            .insert(name.to_string(), bundle);
+        self.folder_rows
+            .write()
+            .expect("folder rows poisoned")
+            .insert(name.to_string(), row);
+    }
+
+    /// A folder that could not load: listed (with its `error`), never resolvable —
+    /// unless an earlier load stands.
+    pub fn refuse_folder(&self, name: &str, row: Value) {
+        // a failed RELOAD keeps an earlier load (module and row): its live
+        // instances keep running it; the error goes to the reload's caller
+        if self
+            .folders
+            .read()
+            .expect("folders poisoned")
+            .contains_key(name)
+        {
+            return;
+        }
+        self.folder_rows
+            .write()
+            .expect("folder rows poisoned")
+            .insert(name.to_string(), row);
+    }
+
+    /// Every folder bundle this kernel read — loaded and refused — by name.
+    #[must_use]
+    pub fn folder_rows(&self) -> Vec<Value> {
+        self.folder_rows
+            .read()
+            .expect("folder rows poisoned")
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    /// Is `handler_module` a loaded folder bundle?
+    #[must_use]
+    pub fn is_folder(&self, handler_module: &str) -> bool {
+        self.folders
+            .read()
+            .expect("folders poisoned")
+            .contains_key(handler_module)
+    }
+
+    /// Is `name` a registered bundle's handler module, its package, or its name?
+    /// A folder may not shadow one.
+    #[must_use]
+    pub fn clashes(&self, name: &str) -> bool {
+        self.by_handler
+            .iter()
+            .any(|(hm, b)| hm == name || hm.split('.').next() == Some(name) || b.name() == name)
+    }
+
+    /// The installed bundles a folder can extend, by name, sorted.
+    #[must_use]
+    pub fn folder_bases(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .catalog()
+            .filter(|(_, b)| b.folder_base())
+            .map(|(_, b)| b.name().to_string())
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// The installed bundle named `name` (its `name()`), if any.
+    #[must_use]
+    pub fn by_name(&self, name: &str) -> Option<Arc<dyn Bundle>> {
+        self.catalog()
+            .find(|(_, b)| b.name() == name)
+            .map(|(_, b)| Arc::clone(b))
     }
 
     /// The INSTALLED (handler_module, bundle) pairs — python's entry-point

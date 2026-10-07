@@ -8,8 +8,8 @@
 // test time and never edited here.
 //
 // The six per-runtime primitives, in ts:
-//   load_spec  — `contract_yaml.ts` (the kernel ships no YAML parser; this is test
-//                code) + python's strict key checks, so a typo fails at load.
+//   load_spec  — `src/kernel/yaml.ts` (the kernel's own strict subset reader)
+//                + python's strict key checks, so a typo fails at load.
 //   hydrate    — the ts kernel has NO manifest loader (its tree is built by its
 //                bundles and persisted through the host loader), so the runner
 //                plays static_loader's operator part: each loader becomes a child
@@ -59,7 +59,7 @@ import type { Item, Outcome } from "../src/kernel/outcome.ts";
 import { pyRepr } from "../src/kernel/pyjson.ts";
 import { MISSING_ARG, NOT_FOUND, UNHANDLED, refusal } from "../src/kernel/refusal.ts";
 import { ProxyLoader } from "../src/bundles/loader/proxy_loader.ts";
-import { parseYaml } from "./contract_yaml.ts";
+import { parseYaml } from "../src/kernel/yaml.ts";
 import { sendAs } from "./kit.ts";
 
 const CONTRACT = fileURLToPath(new URL("../../../../contract/", import.meta.url));

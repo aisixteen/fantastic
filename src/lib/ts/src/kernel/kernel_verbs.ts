@@ -19,13 +19,15 @@
 import type { Json, Payload } from "./json.ts";
 import type { Kernel } from "./kernel.ts";
 import { DEAD_STATUSES, asId } from "./outcome.ts";
-import { BAD_ARG, NOT_FOUND, NOT_HERE, missing, refusal } from "./refusal.ts";
+import { BAD_ARG, INVALID_META, NOT_CONNECTED, NOT_FOUND, NOT_HERE, missing, refusal } from "./refusal.ts";
 import { pyRepr } from "./pyjson.ts";
 import { page } from "./paging.ts";
 import { shutdownAgents, startKernel, stopKernel } from "./lifecycle.ts";
 import { isService } from "./tasks.ts";
 import { timers } from "./timers.ts";
 import { renderDocs } from "./docs.ts";
+import { isFolderName, loadBundle } from "./folders.ts";
+import type { FolderText } from "./folders.ts";
 
 export const KERNEL_VERBS = [
   "ps",
@@ -36,6 +38,7 @@ export const KERNEL_VERBS = [
   "shutdown_agents",
   "kernel_stop",
   "docs",
+  "reload_bundle",
 ] as const;
 
 export function isKernelVerb(verb: string): boolean {
@@ -88,6 +91,12 @@ export const KERNEL_VERB_DOCS: { [verb: string]: string } = {
     "once per bundle; `detailed` for a verb you are about to use. Gated like " +
     "every kernel verb: a `can_call` grant of `docs` on the root. " +
     "Returns {of, bundle, tier, verbs, emits?, cancel?, notes?}.",
+  reload_bundle:
+    "args: name:str (req). Re-read `bundles/<name>/bundle.yaml` through this " +
+    "kernel's loader (a new folder loads) and restart every live instance of it, " +
+    "abruptly — shutdown with reason 'reloaded', then boot under the fresh load. " +
+    "A folder that no longer loads is refused naming the folder and field; its " +
+    "instances keep the previous load. Returns {reloaded, instances}.",
 };
 
 export async function answerKernelVerb(
@@ -127,7 +136,10 @@ export async function answerKernelVerb(
     // NAME (`file_bridge`), an agent record carries the handler_module
     // (`file_bridge.tools`). Measured 2026-10-06 (rust, plan + build): models asked
     // for the listed name and were refused.
-    const listed = k.availableBundles().find((b) => b.handler_module === of || b.name === of);
+    // a refused folder (its row carries `error`) is listed, never documented
+    const listed = k.availableBundles().find(
+      (b) => b.error === undefined && (b.handler_module === of || b.name === of),
+    );
     if (listed !== undefined) {
       return renderDocs(of, listed.handler_module, tier, vName, k.bundleVerbDocs(listed.handler_module) ?? {});
     }
@@ -136,6 +148,8 @@ export async function answerKernelVerb(
       extra: { arg: "of" },
     });
   }
+
+  if (verb === "reload_bundle") return reloadBundle(k, payload);
 
   if (verb === "ps") {
     const listed = k.tasks.list(payload);
@@ -236,4 +250,46 @@ export async function answerKernelVerb(
     });
   }
   return { type: "kernel_stop", ok: true };
+}
+
+/** `reload_bundle {name}` — python `kernel_state._reload_bundle`, through this
+ *  kernel's loader: re-read the folder (`read_bundles`), re-load it, then each
+ *  live instance AS ITSELF (kernel bookkeeping): `shutdown` with the reason under
+ *  the handler it runs, rebound to the fresh load, `boot`. */
+async function reloadBundle(k: Kernel, payload: Payload): Promise<Json> {
+  const name = payload["name"];
+  if (typeof name !== "string" || name === "") {
+    return missing("reload_bundle", "name", "a folder under the page root's bundles/");
+  }
+  if (k.readFolders === null) {
+    return refusal(NOT_CONNECTED, "reload_bundle: this kernel reads no folders — no loader is wired", {
+      hint: "boot the kernel with a loader (boot({loader}))",
+    });
+  }
+  if (!isFolderName(name)) {
+    return refusal(NOT_FOUND, `reload_bundle: no folder bundles/${name}`, {
+      hint: "a bundle is a folder under the page root's bundles/ with a bundle.yaml",
+    });
+  }
+  const reply = (await k.readFolders(name)) as Payload | null;
+  const rows = reply?.["bundles"];
+  if (!Array.isArray(rows) || rows.length !== 1) {
+    // the loader's own refusal (no such folder, a denied read) — said through
+    const why = typeof reply?.["error"] === "string" ? reply["error"] : JSON.stringify(reply);
+    return refusal(typeof reply?.["reason"] === "string" ? reply["reason"] : NOT_FOUND, `reload_bundle: ${why}`, {
+      ...(typeof reply?.["hint"] === "string" ? { hint: reply["hint"] } : {}),
+    });
+  }
+  const err = loadBundle(k, rows[0] as unknown as FolderText);
+  if (err !== null) return refusal(INVALID_META, err);
+  const handler = k.folderHandler(name) ?? null;
+  const live = [...k.agents.values()]
+    .filter((a) => a.handlerModule === name)
+    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  for (const a of live) {
+    await k.bookkeeping(a.id, { type: "shutdown", reason: "reloaded" });
+    a.handler = handler;
+    await k.bookkeeping(a.id, { type: "boot" });
+  }
+  return { reloaded: name, instances: live.map((a) => a.id) };
 }
