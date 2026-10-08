@@ -278,6 +278,25 @@ def stored_outcome(out: dict, named: bool) -> dict:
     return {"status": status, "bytes": size}
 
 
+#: What a row event carries of the row besides its id and kind — never a payload
+#: or an outcome: `parent` (the task, or the settled execution), `caller` (who made
+#: a call / an ack; None = the operator), `settled` (the agent a settle closes).
+_ROW_EVENT_KEYS = ("parent", "caller", "settled")
+
+
+def row_event(agent_id: str, row: dict) -> dict:
+    """The state event for an EXECUTION row just put (owner, 2026-10-08): a reader
+    learns "row <id> arrived for <agent>" and fetches rows only when told — no
+    polling. Content-free: id, kind and the few links above. Published like every
+    state event (gated by `state_subscribe` on the root) and, like them, never from
+    inside the kernel's own ledger flush, so an idle kernel publishes nothing."""
+    digest = {"id": row.get("id"), "kind": row.get("kind")}
+    for k in _ROW_EVENT_KEYS:
+        if k in row:
+            digest[k] = row[k]
+    return {"agent_id": agent_id, "kind": "row", "row": digest}
+
+
 def outcome(pid: int | None, status: str, result: dict | None) -> dict:
     """The one shape a batch item settles to: {pid, status, result}."""
     return {"pid": pid, "status": status, "result": result}
@@ -538,6 +557,7 @@ class Kernel:
             q.put_nowait(stored)
         if self._flush_wake is not None:
             self._flush_wake.set()
+        self.publish_state(row_event(agent_id, stored))
         return rid
 
     async def rows_stream(self, after: int):
