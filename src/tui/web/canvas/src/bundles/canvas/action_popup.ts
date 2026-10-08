@@ -2,7 +2,7 @@
 // canvas, or ⌘K / Ctrl-K at the pointer), macOS-Launchpad style: a text field on
 // top, and below it a GRID of icon tiles in two groups (backend-owned views):
 //
-//   page    html · stream · demo — page content (FE)
+//   page    html · stream · sidebar · canvases — page content (FE)
 //   host    ask (the default AI) · terminal · agent (set-up) · python agent · your plugins —
 //           a HOST agent made, then a cell views it (BE)
 //   host · AI     your AI templates (★ the default) — a new AI cell on that one
@@ -20,7 +20,6 @@ export type Pick =
   | { kind: "html" }
   | { kind: "stream" }
   | { kind: "setup" }
-  | { kind: "demo" }
   | { kind: "sidebar" }
   | { kind: "canvases" }
   | { kind: "mcp" }
@@ -58,7 +57,7 @@ export function exactLine(argv: string[]): string {
 }
 
 export type Section = "page" | "host" | "coding" | "ai" | "chats";
-export type Icon = "ask" | "terminal" | "html" | "stream" | "agent" | "template" | "chat" | "demo" | "sidebar" | "canvases" | "claude" | "codex" | "aider" | "opencode" | "mcp";
+export type Icon = "ask" | "terminal" | "html" | "stream" | "agent" | "template" | "chat" | "sidebar" | "canvases" | "claude" | "codex" | "aider" | "opencode" | "mcp";
 
 export interface Tile {
   icon: Icon;
@@ -81,7 +80,6 @@ const KINDS: Array<[string, Pick, Icon, Section]> = [
   ["mcp connector", { kind: "mcp" }, "mcp", "host"],
   ["html", { kind: "html" }, "html", "page"],
   ["stream", { kind: "stream" }, "stream", "page"],
-  ["demo", { kind: "demo" }, "demo", "page"],
   ["sidebar", { kind: "sidebar" }, "sidebar", "page"],
   ["canvases", { kind: "canvases" }, "canvases", "page"],
 ];
@@ -152,7 +150,6 @@ const PATH: Record<Icon, string> = {
   stream: '<path d="M4 6h16M4 10h11M4 14h14M4 18h8"/>',
   agent: '<circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1"/>',
   template: '<path d="M12 3l1.8 4.7L18.5 9.5l-4.7 1.8L12 16l-1.8-4.7L5.5 9.5l4.7-1.8z"/><rect x="15" y="15" width="6" height="6" rx="1.5"/>',
-  demo: '<circle cx="12" cy="12" r="9"/><path d="M10 8.5v7l6-3.5z"/>',
   sidebar: '<rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 4v16M12 9h5M12 13h5"/>',
   // the coding agents: plain outline marks of the menu's own, no vendor logo
   claude: '<path d="M12 3v18M3 12h18M5.6 5.6l12.8 12.8M18.4 5.6L5.6 18.4"/>',

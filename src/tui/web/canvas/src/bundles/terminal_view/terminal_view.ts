@@ -106,7 +106,17 @@ export const terminalView: ViewBundle = {
     }
 
     let autoscroll = false;
-    let pendingOutput = false;
+    // EVENT-DRIVEN: output (or the toggle) asks for ONE scroll on the next
+    // animation frame — no timer runs while the terminal is idle
+    let scrollQueued = false;
+    const scrollSoon = (): void => {
+      if (!autoscroll || scrollQueued) return;
+      scrollQueued = true;
+      requestAnimationFrame(() => {
+        scrollQueued = false;
+        if (autoscroll) term.scrollToBottom();
+      });
+    };
 
     // flow control: ack AFTER xterm has parsed a chunk (write callback),
     // buffered to one ack per ACK_SIZE chars — real backpressure on the PTY.
@@ -129,8 +139,10 @@ export const terminalView: ViewBundle = {
     const draw = (e: Record<string, unknown>): void => {
       if (e["job_id"] !== jobId) return;
       const d = typeof e["data"] === "string" ? (e["data"] as string) : "";
-      term.write(d, () => ackChars(d.length));
-      if (autoscroll) pendingOutput = true;
+      term.write(d, () => {
+        ackChars(d.length);
+        scrollSoon();
+      });
     };
     let done = false;
     const ended = (e: Record<string, unknown>): void => {
@@ -176,12 +188,6 @@ export const terminalView: ViewBundle = {
     };
     mount.addEventListener("paste", onPaste);
 
-    const scrollTimer = setInterval(() => {
-      if (autoscroll && pendingOutput) {
-        term.scrollToBottom();
-        pendingOutput = false;
-      }
-    }, 100);
 
     const tightFit = (): void => {
       try {
@@ -191,10 +197,7 @@ export const terminalView: ViewBundle = {
         // the bottom row (reflowOnResize is off, so the buffer doesn't re-pin
         // itself), so re-anchor to the new bottom here. Resize-first, so resize
         // is never gated by autoscroll.
-        if (autoscroll) {
-          term.scrollToBottom();
-          pendingOutput = false;
-        }
+        if (autoscroll) term.scrollToBottom();
       } catch {
         /* layout still settling */
       }
@@ -251,7 +254,7 @@ export const terminalView: ViewBundle = {
           toggle: true,
           onClick: (): boolean => {
             autoscroll = !autoscroll;
-            if (autoscroll) pendingOutput = true;
+            scrollSoon();
             return autoscroll;
           },
         },
@@ -260,7 +263,6 @@ export const terminalView: ViewBundle = {
         offOutput();
         offDone();
         host.unwatch(backend);
-        clearInterval(scrollTimer);
         clearTimeout(roTimer);
         ro.disconnect();
         mount.removeEventListener("paste", onPaste);

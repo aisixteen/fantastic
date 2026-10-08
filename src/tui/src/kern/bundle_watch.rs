@@ -8,44 +8,33 @@
 //!   instances' `view.bytes` rewritten from it, so their cells re-render — no
 //!   restart for a view change.
 //!
-//! A poll of the folders' file times (every [`TICK`]): no watcher dependency, and
-//! a folder that appears is a new bundle (`reload_bundle` loads it).
+//! EVENT-DRIVEN (owner 2026-10-08: no idle loops): the lib's `watch_path` on
+//! [`BRIDGE`] — a read-only file_bridge rooted at the project, exposing the
+//! bundle folders (host `.fantastic/bundles`, the pages' `.fantastic/web`) —
+//! pushes `changed {path, kind}` from the disk's own events (FSEvents /
+//! inotify). It is not recursive: the bundles dir is watched (a folder added or
+//! removed) and so is each bundle's own folder. A burst (an editor's save) is
+//! taken together: after the first event, what else arrives in [`SETTLE`].
+//! Nothing runs while nothing changes. The pages watch the same bridge for
+//! their own `bundles/`.
 
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use serde_json::{json, Value};
 
 use crate::kern::host::Host;
 
-const TICK: Duration = Duration::from_millis(500);
-
-/// (path → (mtime, len)) of every file in one bundle folder.
-type Sig = BTreeMap<PathBuf, (SystemTime, u64)>;
-
-fn sig_of(dir: &Path) -> Sig {
-    let mut out = Sig::new();
-    let mut stack = vec![dir.to_path_buf()];
-    while let Some(d) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&d) else { continue };
-        for e in rd.flatten() {
-            let p = e.path();
-            let Ok(m) = e.metadata() else { continue };
-            if m.is_dir() {
-                // a program's own caches are not its code
-                if p.file_name().is_some_and(|n| n == "__pycache__" || n == ".git") {
-                    continue;
-                }
-                stack.push(p);
-            } else if let Ok(t) = m.modified() {
-                out.insert(p, (t, m.len()));
-            }
-        }
-    }
-    out
-}
+/// The bridge whose `watch_path` reports bundle-folder changes.
+pub const BRIDGE: &str = "bundles_watch";
+/// The host's bundle folders, under the bridge's root (the project).
+const BUNDLES: &str = ".fantastic/bundles";
+/// A burst of events (one save) is taken together within this.
+const SETTLE: Duration = Duration::from_millis(150);
+/// The watcher's own inbox (the bridge's events land here).
+const INBOX: &str = "bundle_watch";
 
 /// The view a bundle declares for its instances (`record.view` in `bundle.yaml`).
 fn bundle_view(dir: &Path) -> Option<serde_json::Map<String, Value>> {
@@ -93,50 +82,107 @@ pub async fn refresh_views(h: &Host, name: &str, dir: &Path) -> Result<(), Strin
     Ok(())
 }
 
-/// Watch `<store>/bundles/` for the life of the process.
+fn err_of(r: &Value) -> Option<String> {
+    r.get("error").and_then(Value::as_str).map(str::to_string)
+}
+
+/// The bridge, made when missing: read-only, rooted at the project, exposing
+/// the host's and the pages' bundle folders, open (the pages watch it too).
+pub async fn ensure_bridge(h: &Host) -> Result<(), String> {
+    if h.kernel.agents.contains_key(&fantastic_kernel::AgentId::from(BRIDGE)) {
+        return Ok(());
+    }
+    let r = h
+        .operator("kernel", json!({"type": "create_agent", "parent_id": crate::env::HUMAN, "id": BRIDGE,
+            "handler_module": "file_bridge.tools", "root": ".", "readonly": true,
+            "allow": [BUNDLES, ".fantastic/web"], "ingress_rule": "allow_all_ingress"}))
+        .await
+        .result;
+    err_of(&r).map_or(Ok(()), |e| Err(format!("the bundle watcher's bridge `{BRIDGE}`: {e}")))
+}
+
+async fn watch_path(h: &Host, path: &str) {
+    let r = h.operator(BRIDGE, json!({"type": "watch_path", "path": path})).await.result;
+    if let Some(e) = err_of(&r) {
+        tracing::warn!("bundle watch {path}: {e}");
+    }
+}
+
+/// The bundle a changed path belongs to, and whether it is the bundle's folder
+/// itself (added / removed) rather than a file in it.
+fn bundle_of(path: &str) -> Option<(String, bool)> {
+    let rest = path.trim_start_matches("./").strip_prefix(BUNDLES)?.trim_start_matches('/');
+    let mut parts = rest.split('/');
+    let name = parts.next().filter(|n| !n.is_empty())?.to_string();
+    Some((name, parts.next().is_none()))
+}
+
+/// Watch `<store>/bundles/` for the life of the process — on the disk's events.
 pub fn spawn(h: Arc<Host>, store: PathBuf) {
     let root = store.join("bundles");
     tokio::spawn(async move {
-        let mut seen: BTreeMap<String, Sig> = BTreeMap::new();
-        let mut first = true;
-        loop {
-            let mut now: BTreeMap<String, Sig> = BTreeMap::new();
-            if let Ok(rd) = std::fs::read_dir(&root) {
-                for e in rd.flatten() {
-                    if e.path().is_dir() {
-                        if let Some(n) = e.file_name().to_str() {
-                            now.insert(n.to_string(), sig_of(&e.path()));
-                        }
-                    }
+        if let Err(e) = std::fs::create_dir_all(&root) {
+            tracing::warn!("{}: {e}", root.display());
+            return;
+        }
+        if let Err(e) = ensure_bridge(&h).await {
+            tracing::warn!("{e}");
+            return;
+        }
+        let inbox = fantastic_kernel::AgentId::from(INBOX);
+        let mut rx = h.kernel.ensure_inbox(&inbox);
+        if let Some(denial) = h.kernel.watch(&fantastic_kernel::AgentId::from(BRIDGE), inbox.clone()).await {
+            tracing::warn!("bundle watch: {denial}");
+            return;
+        }
+        watch_path(&h, BUNDLES).await;
+        for e in std::fs::read_dir(&root).into_iter().flatten().flatten() {
+            if e.path().is_dir() {
+                if let Some(n) = e.file_name().to_str() {
+                    watch_path(&h, &format!("{BUNDLES}/{n}")).await;
                 }
             }
-            if !first {
-                for (name, sig) in &now {
-                    let was = seen.get(name);
-                    if was == Some(sig) {
-                        continue;
-                    }
-                    let dir = root.join(name);
-                    let view = view_file(&dir);
-                    // which files changed (all of them, for a new folder)
-                    let changed: Vec<&PathBuf> = sig.iter().filter(|(p, v)| was.and_then(|w| w.get(*p)) != Some(v)).map(|(p, _)| p).collect();
-                    let code = was.is_none() || changed.iter().any(|p| Some(*p) != view.as_ref());
-                    if code {
-                        let r = h.operator("kernel", json!({"type": "reload_bundle", "name": name})).await.result;
-                        if let Some(e) = r.get("error").and_then(Value::as_str) {
-                            tracing::warn!("bundle {name}: reload: {e}");
-                        }
-                    }
-                    if view.as_ref().is_some_and(|v| changed.contains(&v)) {
-                        if let Err(e) = refresh_views(&h, name, &dir).await {
-                            tracing::warn!("bundle {name}: {e}");
-                        }
-                    }
+        }
+        while let Some(first) = rx.recv().await {
+            // the burst: this event and every one within SETTLE
+            let mut items = vec![first];
+            tokio::time::sleep(SETTLE).await;
+            while let Some(more) = rx.try_recv() {
+                items.push(more);
+            }
+            let mut code: BTreeSet<String> = BTreeSet::new();
+            let mut views: BTreeSet<String> = BTreeSet::new();
+            for it in &items {
+                let p = &it.payload;
+                if p.get("type").and_then(Value::as_str) != Some("changed") {
+                    continue;
+                }
+                let Some((name, is_folder)) = p.get("path").and_then(Value::as_str).and_then(bundle_of) else { continue };
+                let dir = root.join(&name);
+                if !dir.is_dir() {
+                    continue; // removed: nothing to load
+                }
+                if is_folder {
+                    // a NEW bundle: watch its files too, and load it
+                    watch_path(&h, &format!("{BUNDLES}/{name}")).await;
+                    code.insert(name);
+                    continue;
+                }
+                let file = p.get("path").and_then(Value::as_str).unwrap_or("");
+                let is_view = view_file(&dir).is_some_and(|v| v.file_name() == Path::new(file).file_name());
+                if is_view { views.insert(name) } else { code.insert(name) };
+            }
+            for name in &code {
+                let r = h.operator("kernel", json!({"type": "reload_bundle", "name": name})).await.result;
+                if let Some(e) = err_of(&r) {
+                    tracing::warn!("bundle {name}: reload: {e}");
                 }
             }
-            first = false;
-            seen = now;
-            tokio::time::sleep(TICK).await;
+            for name in views.difference(&code) {
+                if let Err(e) = refresh_views(&h, name, &root.join(name)).await {
+                    tracing::warn!("bundle {name}: {e}");
+                }
+            }
         }
     });
 }

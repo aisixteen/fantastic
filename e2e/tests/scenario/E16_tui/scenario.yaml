@@ -48,11 +48,14 @@ runs:
       files_absent: [.fantastic/messages.yaml, .fantastic/ledger.json]
 
   # ── 2 · the same directory: no intro, straight to the tree, log grows ──────
+  #       (under `user`: bundles_watch, exec, files, fs_loader … — sorted)
   #       …and an agent with no view of its own opens in the DEFAULT view
   - name: rehydrate
     script: |
       wait 2500
       shot live
+      key down
+      wait 200
       key down
       wait 200
       key down
@@ -197,7 +200,7 @@ runs:
   - name: mouse
     script: |
       wait 2500
-      click 8 6
+      click 8 7
       wait 800
       shot clicked
       key ctrl-c

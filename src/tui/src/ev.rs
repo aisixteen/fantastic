@@ -26,10 +26,6 @@ pub enum Ev {
     /// The terminal. Crossterm's types STOP HERE — no pane sees a raw event
     /// without going through the keymap first.
     Term(crossterm::event::Event),
-    /// 60 s. A full re-read, as the safety net under the live feed. If a frame
-    /// was ever missed, this is what heals it, so no other code has to be
-    /// clever about gaps.
-    Recon,
     Link(LinkEv),
     Got(Got),
     /// A loud message from a task that holds no `App`: a boot note, a refusal a

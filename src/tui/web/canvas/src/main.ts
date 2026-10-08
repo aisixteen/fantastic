@@ -1,4 +1,4 @@
-import { Agent, Kernel, ProxyLoader, WsBridge, loadBundle, registerRamStore } from "./lib.ts";
+import { Agent, Host, Kernel, ProxyLoader, WsBridge, loadBundle, registerRamStore } from "./lib.ts";
 import type { FolderText } from "./lib.ts";
 import { GATEWAY, UserBridge, readToken, writeToken } from "./user_bridge.ts";
 import { registerGlAgent } from "./bundles/gl_agent/gl_agent.ts";
@@ -65,7 +65,7 @@ function register(kernel: Kernel): void {
   );
   kernel.setBundleReadme(
     "sidebar_view.ts",
-    "A sidebar cell: the chats (kept and open) and the agent tree of both kernels. Page content, no backend; as many as you like.",
+    "A sidebar cell: the agent tree of both kernels. Page content, no backend; as many as you like.",
   );
   kernel.setBundleReadme(
     "canvases_view.ts",
@@ -137,6 +137,47 @@ for (const f of folders) loadBundle(kernel, f);
 const records = await loader.loadTree();
 if (records.length > 0) kernel.load(records);
 else seed(kernel);
+// LIVE PAGE BUNDLES, ON THE DISK'S EVENTS (owner 2026-10-08: no idle loops):
+// the host's `bundles_watch` bridge reports `changed {path}` under this page's
+// own `bundles/` (watched, and each folder in it — not recursive); a burst is
+// taken together, then each touched folder's `reload_bundle` restarts its
+// live instances and their panels draw again. Nothing runs while nothing changes.
+const BRIDGE = "bundles_watch";
+const dir = `${here!.root}/bundles`;
+const watchPath = async (path: string): Promise<void> => {
+  const r = (await kernel.callHost(BRIDGE, { type: "watch_path", path } as never)) as Record<string, unknown> | null;
+  if (typeof r?.["error"] === "string") console.error(`[canvas] page bundles: watch ${path}: ${r["error"]}`);
+};
+const touched = new Set<string>();
+let settle: ReturnType<typeof setTimeout> | null = null;
+const reloadTouched = async (): Promise<void> => {
+  settle = null;
+  const names = [...touched];
+  touched.clear();
+  for (const name of names) {
+    const r = (await kernel.send([{ target: "kernel", payload: { type: "reload_bundle", name } as never }]))[0]?.result as Record<string, unknown> | undefined;
+    if (typeof r?.["error"] === "string") {
+      console.error(`[canvas] page bundle ${name}: ${r["error"]}`);
+      continue;
+    }
+    // its instances restarted on the new load: their panels draw it again
+    for (const id of Array.isArray(r?.["instances"]) ? (r!["instances"] as unknown[]) : []) {
+      if (typeof id === "string") kernel.emit(id, { type: "reload_html" } as never);
+    }
+  }
+};
+new Host(kernel, "canvas").on(BRIDGE, "changed", (ev) => {
+  const path = typeof ev["path"] === "string" ? ev["path"].replace(/^\.\//, "") : "";
+  if (!path.startsWith(`${dir}/`)) return; // another canvas's, or the host's
+  const rest = path.slice(dir.length + 1).split("/");
+  const name = rest[0];
+  if (!name) return;
+  if (rest.length === 1 && ev["kind"] === "added") void watchPath(`${dir}/${name}`); // a new folder: its files too
+  touched.add(name);
+  if (settle === null) settle = setTimeout(() => void reloadTouched(), 150);
+});
+// ARMED BEFORE the tree loads: an edit made once the page shows is never missed
+await Promise.all([watchPath(dir), ...folders.map((f) => watchPath(`${dir}/${f.name}`))]);
 inner.announce();
 loader.start();
 
@@ -155,28 +196,9 @@ await mountCanvas({
   canvases,
 });
 
-// LIVE PAGE BUNDLES: a folder whose bundle.yaml changed (or a new one) is
-// reloaded at once — the root's `reload_bundle` restarts its live instances
-let seen = new Map(folders.map((f) => [f.name, JSON.stringify(f)]));
-setInterval(() => {
-  void readFolders().then(async (now) => {
-    const next = new Map(now.map((f) => [f.name, JSON.stringify(f)]));
-    for (const [name, sig] of next) {
-      if (seen.get(name) === sig) continue;
-      const r = (await kernel.send([{ target: "kernel", payload: { type: "reload_bundle", name } as never }]))[0]?.result as Record<string, unknown> | undefined;
-      if (typeof r?.["error"] === "string") console.error(`[canvas] page bundle ${name}: ${r["error"]}`);
-      // its instances restarted on the new load: their panels draw it again
-      for (const id of Array.isArray(r?.["instances"]) ? (r!["instances"] as unknown[]) : []) {
-        if (typeof id === "string") kernel.emit(id, { type: "reload_html" } as never);
-      }
-    }
-    seen = next;
-  }, (e: unknown) => console.error("[canvas] page bundles:", e));
-}, 1000);
-
 /** Every canvas on the host: `canvas.tools` children of `canvas_page`, each with
  *  its page loader (its `kernel_state` child). */
-async function listCanvases(): Promise<Array<{ id: string; loader: string; main: boolean; name: string }>> {
+async function listCanvases(): Promise<Array<{ id: string; loader: string; root: string; main: boolean; name: string }>> {
   const all: Array<Record<string, unknown>> = [];
   let after: unknown = null;
   for (;;) {
@@ -188,13 +210,13 @@ async function listCanvases(): Promise<Array<{ id: string; loader: string; main:
     if (page?.next === null || page?.next === undefined) break;
     after = page.next;
   }
-  const out: Array<{ id: string; loader: string; main: boolean; name: string }> = [];
+  const out: Array<{ id: string; loader: string; root: string; main: boolean; name: string }> = [];
   for (const n of all) {
     if (n["handler_module"] !== CANVAS_NODE || n["parent_id"] !== "canvas_page" || typeof n["id"] !== "string") continue;
     const l = all.find((a) => a["parent_id"] === n["id"] && a["handler_module"] === LOADER_HM);
     if (typeof l?.["id"] !== "string") continue;
     const name = typeof n["display_name"] === "string" && n["display_name"] !== "" ? n["display_name"] : n["id"].replace(/^canvas_/, "");
-    out.push({ id: n["id"], loader: l["id"], main: n["main"] === true, name });
+    out.push({ id: n["id"], loader: l["id"], root: typeof l["root"] === "string" ? l["root"] : ".fantastic/web", main: n["main"] === true, name });
   }
   return out.sort((a, b) => Number(b.main) - Number(a.main) || (a.id < b.id ? -1 : 1));
 }

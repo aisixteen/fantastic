@@ -48,8 +48,7 @@ backends. Open one at the page URL with `?canvas=<node id>`
 A canvas shows only its own subtree and the agents under no canvas; another
 canvas's agents never appear on it. `canvases` (any canvas node) lists them.
 NOTHING FLOATS: a canvas opens as its background alone. Everything is a cell
-placed from the double-click — among them a `sidebar` (the chats and the agent
-tree) and `canvases` (every canvas; a click opens one, `+ new canvas` makes a
+placed from the double-click — among them a `sidebar` (the agent tree) and `canvases` (every canvas; a click opens one, `+ new canvas` makes a
 peer), as many as you like, moved, resized and closed like any cell. There is
 no main chat: a chat cell goes wherever you place one.
 
@@ -57,6 +56,9 @@ THE SYSTEM BLOCK: `.fantastic/prompt.md` is every AI's system block. It starts
 as the default (`{tree}`, `{self}`, `{howto}` — the agent tree, who the AI is,
 how to call agents); edit it and every AI uses your text from its next turn.
 Keep the placeholders you still want.
+
+ESC: viewing one agent full screen, Esc goes back to the canvas (unless you are
+typing in a terminal or a field).
 
 THE SELECTOR: a double click adds a `selector` agent at the spot — the popup
 — and it deletes itself once you pick. While it is open, `tiles {typed?}` on it
