@@ -78,7 +78,7 @@ const KINDS: Array<[string, Pick, Icon, Section]> = [
   // instance placed — edit its folder, the change takes effect at once
   ["python agent", { kind: "bundle", starter: "python_agent" }, "template", "host"],
   // ONE remote MCP server as a host agent: its tools are its verbs
-  ["mcp server", { kind: "mcp" }, "mcp", "host"],
+  ["mcp connector", { kind: "mcp" }, "mcp", "host"],
   ["html", { kind: "html" }, "html", "page"],
   ["stream", { kind: "stream" }, "stream", "page"],
   ["demo", { kind: "demo" }, "demo", "page"],
@@ -191,6 +191,18 @@ const CSS = `
   .action-popup .tile.sel { background: rgba(183,140,255,0.22); box-shadow: inset 0 0 0 1px rgba(183,140,255,0.45); }
   .action-popup .tile[data-section="chats"] .ic { color: #7ee2a8; }
   .action-popup .foot { padding: 6px 16px 9px; color: rgba(220,230,245,0.4); font-size: 11px; border-top: 1px solid rgba(255,255,255,0.06); }
+  /* NARROW SCREENS (a phone): one vertical list, full width, centred — each tile
+     a row (icon · label · hint) */
+  @media (max-width: 640px) {
+    .action-popup { left: 8px !important; right: 8px !important; width: auto; top: 12vh !important; max-height: 76vh; display: flex; flex-direction: column; }
+    .action-popup .grid { max-height: none; flex: 1; min-height: 0; }
+    .action-popup .row { grid-template-columns: 1fr; gap: 2px; }
+    .action-popup .tile { flex-direction: row; justify-content: flex-start; gap: 12px; padding: 10px 10px; }
+    .action-popup .tile .lb { font-size: 15px; }
+    .action-popup .tile .ht { margin-left: auto; font-size: 11px; }
+    .action-popup input { font-size: 18px; }
+    .action-popup .foot { display: none; }
+  }
 `;
 
 function ensureStyle(): void {
@@ -207,7 +219,11 @@ export function openActionPopup(opts: {
   screenX: number;
   screenY: number;
   presets: Presets | null;
+  /** the popup's title (the selector agent's record) */
+  title: string;
   onPick: (p: Pick) => void;
+  /** it is gone — picked, escaped or clicked away */
+  onClose?: () => void;
 }): () => void {
   ensureStyle();
   document.querySelector(".action-popup")?.remove();
@@ -227,7 +243,7 @@ export function openActionPopup(opts: {
   foot.textContent = "←↑↓→ pick · ⏎ go · esc close";
   const title = document.createElement("div");
   title.className = "title";
-  title.textContent = "Fantastic Canvas";
+  title.textContent = opts.title;
   const ask = document.createElement("div");
   ask.className = "ask";
   ask.append(spark, input);
@@ -242,6 +258,7 @@ export function openActionPopup(opts: {
     done = true;
     box.remove();
     document.removeEventListener("mousedown", away, true);
+    opts.onClose?.();
   };
   const go = (t: Tile | undefined): void => {
     if (!t) return;

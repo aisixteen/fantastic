@@ -357,7 +357,7 @@ where
 }
 
 /// Bind the leg, creating it the first time; then god mode (`kern/reach`).
-async fn ensure_leg(host: &Host) -> Result<(), String> {
+pub(crate) async fn ensure_leg(host: &Host) -> Result<(), String> {
     let existing = host.kernel.agents.get(&fantastic_kernel::AgentId::from(LEG)).map(|e| e.value().handler_module.clone());
     match existing {
         Some(handler) => {

@@ -1,0 +1,9 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint. Scripted: no model.
+id: mcp_config
+group: canvas
+title: "the project's .mcp.json, kept by the mcp leg: its own entry written, other servers kept, untouched when right"
+runner: probe.py
+costs: free
+limits:
+  seconds: 10
+env: {}

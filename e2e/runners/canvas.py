@@ -205,7 +205,8 @@ ROOT_VIEW = ".fantastic/web/agents/canvas/agents/view_root/agents"
 
 
 def members(cwd: Path) -> list[dict]:
-    """The root view's cells — every child but its singleton background."""
+    """The root view's cells — every child but its singleton background and a
+    double click's ephemeral selector (the popup's agent, never a cell)."""
     d = cwd / ROOT_VIEW
     every = []
     for f in sorted(d.glob("*/agent.yaml")) if d.is_dir() else []:
@@ -215,7 +216,7 @@ def members(cwd: Path) -> list[dict]:
             every.append(dict(yaml_of(f), _dir=f.parent.name))
         except FileNotFoundError:
             pass
-    return [m for m in every if m.get("handler_module") != "background.ts"]
+    return [m for m in every if m.get("handler_module") not in ("background.ts", "selector.ts")]
 
 
 # the cells' backends on the host: children of `canvas_root`
@@ -397,8 +398,16 @@ async def step(run: dict, page: Page, host: Host, cwd: Path, url: str, state: di
         bad.append("the page reload changed the backend")
     if exp.get("view_bound") and m is not None:
         bid = m.get("backend_id")
-        rec = host_record(cwd, bid) if bid else None
-        b = yaml_of(rec) if rec is not None else {}
+
+        def bound() -> dict:
+            # a record being rewritten (a grant update) reads empty for an instant
+            rec = host_record(cwd, bid) if bid else None
+            try:
+                return yaml_of(rec) if rec is not None else {}
+            except Exception:  # noqa: BLE001
+                return {}
+        wait_disk(lambda: bound().get("cell_id") == m.get("id"))
+        b = bound()
         if b.get("cell_id") != m.get("id"):
             bad.append(f"backend {bid} carries cell_id={b.get('cell_id')!r}, want {m.get('id')!r}")
         # the cell's own grant names its backend, and nothing else (the

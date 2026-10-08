@@ -53,12 +53,21 @@ tree) and `canvases` (every canvas; a click opens one, `+ new canvas` makes a
 peer), as many as you like, moved, resized and closed like any cell. There is
 no main chat: a chat cell goes wherever you place one.
 
+THE SYSTEM BLOCK: `.fantastic/prompt.md` is every AI's system block. It starts
+as the default (`{tree}`, `{self}`, `{howto}` — the agent tree, who the AI is,
+how to call agents); edit it and every AI uses your text from its next turn.
+Keep the placeholders you still want.
+
+THE SELECTOR: a double click adds a `selector` agent at the spot — the popup
+— and it deletes itself once you pick. While it is open, `tiles {typed?}` on it
+says what can be made there.
+
 CODING AGENTS: the double-click lists `claude`, `codex`, `aider` and
 `opencode` when they are on your PATH (`user path` — every program on PATH,
 with its full path). A tile starts that program in a terminal cell, as you
 would in a shell; it runs with your own account and settings.
 
-MCP SERVERS: the double-click's `mcp server` adds one remote MCP server (its
+MCP SERVERS: the double-click's `mcp connector` adds one remote MCP server (its
 url, and a key if it needs one) as a host agent whose tools are its verbs — an
 AI calls a tool like any agent. Its cell shows the server and its tools; ⟳
 asks the server again. The key goes to your credential store, never a record.

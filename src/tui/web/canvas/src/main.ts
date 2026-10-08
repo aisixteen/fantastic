@@ -8,6 +8,7 @@ import { mountCanvas } from "./bundles/canvas/canvas.ts";
 import { setCanvasNode } from "./bundles/canvas/host_views.ts";
 import { registerCanvas } from "./bundles/canvas/canvas_agent.ts";
 import { registerBackground } from "./bundles/canvas/background_agent.ts";
+import { registerSelector } from "./bundles/canvas/selector_agent.ts";
 
 // The canvas page. The frontend kernel boots as a PEER of the host: it dials the host's `web_loader` (by id) over the bridge (a host-side
 // `kernel_state` rooted at `.fantastic/web/`, which the operator created — no
@@ -36,6 +37,7 @@ function register(kernel: Kernel): void {
   registerAgentView(kernel); // a host agent's own view (its record's `view`)
   registerCanvas(kernel); // the compositor root and its control plane
   registerBackground(kernel); // its singleton, delete-locked background (set_bg/clear_bg/get_bg)
+  registerSelector(kernel); // the double-click popup, as its singleton, delete-locked agent
   // View bundles that front a host backend are real frontend agents too — a
   // no-op handler makes their records load-able; the ViewBundle renders them.
   kernel.registerBundle("terminal_view.ts", () => null);

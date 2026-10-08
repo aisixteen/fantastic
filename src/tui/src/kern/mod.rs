@@ -5,6 +5,9 @@
 //! pid, no socket, no request and no reply — the terminal is an agent on the same
 //! spine as everything else, and `host` is how it reaches that spine.
 
+pub mod mcp_config;
+pub mod orient;
+pub mod prompt;
 pub mod reach;
 pub mod root_ai;
 pub mod backend;

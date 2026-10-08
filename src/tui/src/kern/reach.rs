@@ -263,16 +263,24 @@ pub async fn start(h: &Host) -> Result<(), String> {
                 tracing::warn!("{e}");
             }
             GRANTED.notify_waiters();
+            // a new AI reads the project's system block (`kern/prompt`)
+            for id in &batch {
+                if let Err(e) = crate::kern::prompt::stamp(&host, id).await {
+                    tracing::warn!("{e}");
+                }
+            }
         }
     });
     Ok(())
 }
 
-/// The human and the canvas leg reach every agent of the connected page `guid`
-/// (`<guid>|*`), merged into what their records name.
+/// The human, the canvas leg and the holding legs (`mcp`) reach every agent of
+/// the connected page `guid` (`<guid>|*`), merged into what their records name.
 async fn grant_peer(h: &Host, guid: &str) -> Result<(), String> {
     let key = format!("{guid}|*");
-    for holder in [crate::env::HUMAN, CANVAS_LEG] {
+    // the holding legs too (the `mcp` leg: a coding CLI reaches the page's
+    // agents — the background, the view — as it reaches the host's)
+    for holder in [crate::env::HUMAN, CANVAS_LEG].into_iter().chain(HOLDING_LEGS) {
         if !exists(h, holder) {
             continue;
         }

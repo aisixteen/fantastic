@@ -132,7 +132,7 @@ export const mcpAddView: ViewBundle = {
     if (deps === null) throw new Error("mcp_add_view: the canvas is not mounted");
     const d = deps;
     const root = el("form", "mcp-add");
-    root.innerHTML = `<h3>MCP server</h3>
+    root.innerHTML = `<h3>MCP connector</h3>
       <label>url — the server's MCP endpoint<input name="url" placeholder="https://host/mcp" autocomplete="off"></label>
       <label>key — optional, a static API key (sent as Bearer to that host only)<input name="key" type="password" autocomplete="off"></label>
       <button>add</button><div class="note">its tools become the agent's verbs — an AI calls them like any agent</div><div class="err"></div>`;

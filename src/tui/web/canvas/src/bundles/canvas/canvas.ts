@@ -9,7 +9,8 @@ import { aiView } from "../ai_view/ai_view.ts";
 import { setupView } from "../setup_view/setup_view.ts";
 import { reflectView } from "../reflect_view/reflect_view.ts";
 import { streamView } from "../stream_view/stream_view.ts";
-import { CODING_AGENTS, exactLine, openActionPopup } from "./action_popup.ts";
+import { CODING_AGENTS, exactLine, openActionPopup, tiles } from "./action_popup.ts";
+import { SELECTOR, SELECTOR_PREFIX, setSelectorHost } from "./selector_agent.ts";
 import { ROOT_VIEW, VIEW, VIEW_VERBS, hostViewCell } from "./canvas_agent.ts";
 import { containerOf, hashFor, isContainer, onMac, pathTo, viewFromHash } from "./viewer.ts";
 import type { Lookup } from "./viewer.ts";
@@ -806,7 +807,8 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     const cont = kernel.get(containerNow());
     const all: Rec[] = cont !== undefined ? [...cont.children.values()].map((a) => a.record() as Rec) : [];
     // the background is drawn behind everything, not framed
-    const members = full ? [kernel.get(viewed)!.record() as Rec] : all.filter((r) => r["handler_module"] !== BACKGROUND);
+    // (a selector is the popup on top, never a cell)
+    const members = full ? [kernel.get(viewed)!.record() as Rec] : all.filter((r) => r["handler_module"] !== BACKGROUND && r["handler_module"] !== SELECTOR);
     const bgRec = full ? undefined : all.find((r) => r["handler_module"] === BACKGROUND);
 
     let idx = 0;
@@ -1259,12 +1261,14 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   canvas.addEventListener("mousemove", (e) => {
     pointer = { x: e.clientX, y: e.clientY };
   });
-  const spotAt = async (sx: number, sy: number): Promise<void> => {
+  const spotAt = async (sx: number, sy: number, title: string, onClose?: () => void): Promise<void> => {
     const w = screenToWorld(sx, sy);
     openActionPopup({
       screenX: sx,
       screenY: sy,
       presets: await presets(),
+      title,
+      ...(onClose ? { onClose } : {}),
       onPick: (p: Pick): void => {
         if (p.kind === "terminal") void spawnTerminalAt(w);
         else if (p.kind === "html") spawnHtmlAt(w);
@@ -1284,14 +1288,33 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       },
     });
   };
+  // THE SELECTOR (`selector_agent.ts`): a double click ADDS one at the spot; its
+  // boot opens the popup on top; it deletes itself once the human is done. The
+  // canvas lends it the popup and its tiles. A selector left by a closed tab
+  // (its popup gone with the tab) is removed at load.
+  for (const id of everyAgent()) if (kernel.get(id)?.record().handler_module === SELECTOR) kernel.remove(id);
+  setSelectorHost({
+    open: (_id, sx, sy, title, done) => spotAt(sx ?? pointer.x, sy ?? pointer.y, title, done),
+    tiles: async (typed) => tiles(typed, await presets()).map((t) => ({ label: t.label, kind: t.pick.kind, section: t.section, hint: t.hint })),
+  });
+  const openSelector = (sx: number, sy: number): void => {
+    const w = screenToWorld(sx, sy);
+    const id = `${SELECTOR_PREFIX}${crypto.randomUUID().slice(0, 8)}`;
+    kernel.register(new Agent({
+      id, parentId: containerNow(), handlerModule: SELECTOR,
+      sentence: "The double-click popup, at its spot: it deletes itself once the human picks.",
+      meta: { x: Math.round(w.x), y: Math.round(w.y), sx: Math.round(sx), sy: Math.round(sy) },
+    }));
+    void kernel.send([{ target: id, payload: { type: "boot" } as unknown as Payload }]);
+  };
   canvas.addEventListener("dblclick", (e) => {
     if ((e.target as Element).closest(".agent-frame")) return;
-    void spotAt(e.clientX, e.clientY);
+    openSelector(e.clientX, e.clientY);
   });
   window.addEventListener("keydown", (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
       e.preventDefault();
-      void spotAt(pointer.x, pointer.y);
+      openSelector(pointer.x, pointer.y);
     }
   });
 

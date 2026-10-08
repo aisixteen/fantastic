@@ -12,9 +12,9 @@ const P: Presets = {
   dialogs: [{ id: "ai_1", name: "release notes" }],
 };
 
-test("empty: two groups — host (ask, terminal, agent, python agent, mcp server), page (html, stream, demo, sidebar, canvases) — then AI (★ the default), chats", () => {
+test("empty: two groups — host (ask, terminal, agent, python agent, mcp connector), page (html, stream, demo, sidebar, canvases) — then AI (★ the default), chats", () => {
   const t = tiles("", P);
-  assert.deepEqual(t.map((x) => x.label), ["ask", "terminal", "agent", "python agent", "mcp server", "html", "stream", "demo", "sidebar", "canvases", "@gpt5 ★", "@box", "release notes"]);
+  assert.deepEqual(t.map((x) => x.label), ["ask", "terminal", "agent", "python agent", "mcp connector", "html", "stream", "demo", "sidebar", "canvases", "@gpt5 ★", "@box", "release notes"]);
   assert.deepEqual(t.find((x) => x.label === "python agent")!.pick, { kind: "bundle", starter: "python_agent" });
   assert.deepEqual([...new Set(t.map((x) => x.section))], ["host", "page", "ai", "chats"]);
   assert.deepEqual(t.at(-1)!.pick, { kind: "chat", id: "ai_1", name: "release notes" });
