@@ -122,6 +122,12 @@ fn register_default_bundles() -> BundleRegistry {
         fantastic_anthropic_backend::HANDLER_MODULE,
         fantastic_anthropic_backend::AnthropicBundle,
     );
+    // a remote MCP server (protocol 2026-07-28) as an agent: its tools are the
+    // agent's verbs
+    reg.register(
+        fantastic_mcp_client::HANDLER_MODULE,
+        fantastic_mcp_client::McpClientBundle::default(),
+    );
     // Apple's on-device model — the swift FMCore through its C ABI on macOS.
     // Registered in both tiers and on every target, as swift's registry does:
     // where the model cannot run, a send fails naming why. Registering it calls

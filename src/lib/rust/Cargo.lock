@@ -416,6 +416,7 @@ dependencies = [
  "fantastic-file",
  "fantastic-foundation-models-backend",
  "fantastic-kernel",
+ "fantastic-mcp-client",
  "fantastic-ollama-backend",
  "fantastic-py-agent",
  "fantastic-ram-store",
@@ -556,6 +557,24 @@ dependencies = [
  "tokio",
  "tracing",
  "unsafe-libyaml",
+]
+
+[[package]]
+name = "fantastic-mcp-client"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64",
+ "fantastic-ai-core",
+ "fantastic-bundle",
+ "fantastic-credential-store",
+ "fantastic-kernel",
+ "futures-util",
+ "reqwest",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "wiremock",
 ]
 
 [[package]]

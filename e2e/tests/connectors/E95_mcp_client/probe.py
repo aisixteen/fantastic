@@ -1,0 +1,525 @@
+"""connectors/mcp_client — a remote MCP server as an agent, end to end. NO MODEL.
+
+A scripted fake MCP server (protocol 2026-07-28, Streamable HTTP — it enforces what
+the spec makes a server enforce: headers mirror the body, `_meta` on every request,
+the Bearer key) and the kernel's own `mcp_client` agent, on the PACKAGED host of
+`RUNTIME` (python | rust | swift), every call through `web_rest`:
+
+  1. boot: `server/discover`, then `tools/list` page by page (by cursor) → the
+     agent's verbs; tools it cannot serve are skipped and named;
+  2. `docs of=mcp` is the agent's OWN table, built from each tool's schema;
+  3. a tool call: arguments → `tools/call`, `Mcp-Name`, `Mcp-Param-Region`;
+  4. every result mapping: text, `isError` → error, `structuredContent` →
+     `structured`, image base64 → raw bytes (one body per reply, a later one
+     `omitted`), an SSE answer (with notifications) settles, `input_required`,
+     an unknown `resultType`, an SSE stream with no response, the server's
+     -32602 → bad_arg, an unknown tool → unhandled;
+  5. THE KEY: an env-backed credential ref (the key in a variable the STORE
+     reads, never on a record) → `Authorization: Bearer <key>` on EVERY request;
+     the key never in the ledger; a record without `credentials` sends none and
+     the server's 401 is `unauthorized`.
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+import os
+import secrets
+import shutil
+import sys
+import tempfile
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())
+sys.path.insert(0, str(E2E))
+
+from helpers.host.driver import HostKernel, ensure_runtime, runtime
+from helpers.verdict import verdict
+
+REPO = E2E.parent
+RUNTIME = os.environ.get("RUNTIME", "")
+KEY = "mcp-e2e-" + secrets.token_hex(12)
+KEY_VAR = "E2E_MCP_KEY"
+PNG = b"\x89PNG\r\n\x1a\n\x00\x01raw"
+PROTOCOL = "2026-07-28"
+
+TOOLS = [
+    {
+        "name": "get_weather",
+        "title": "Weather",
+        "description": "Current weather for a city. Units default to metric.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "city": {"type": "string"},
+                "days": {"type": "integer"},
+                "region": {"type": "string", "x-mcp-header": "Region"},
+            },
+            "required": ["city"],
+        },
+    },
+    {
+        "name": "fail",
+        "description": "Always a tool error.",
+        "inputSchema": {"type": "object"},
+    },
+    {
+        "name": "picture",
+        "inputSchema": {"type": "object", "additionalProperties": False},
+    },
+    {
+        "name": "stream",
+        "description": "Answers over SSE with progress.",
+        "inputSchema": {"type": "object"},
+    },
+    {"name": "structured", "inputSchema": {"type": "object"}},
+    {"name": "ask", "inputSchema": {"type": "object"}},
+    {"name": "weird", "inputSchema": {"type": "object"}},
+    {"name": "cut", "inputSchema": {"type": "object"}},
+    {"name": "reflect", "inputSchema": {"type": "object"}},
+    {"name": "ps", "inputSchema": {"type": "object"}},
+    {"name": "fail", "inputSchema": {"type": "object"}},
+    {
+        "name": "bad_header",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "xs": {
+                    "type": "array",
+                    "items": {"type": "string", "x-mcp-header": "X"},
+                }
+            },
+        },
+    },
+]
+SERVED = [
+    "get_weather",
+    "fail",
+    "picture",
+    "stream",
+    "structured",
+    "ask",
+    "weird",
+    "cut",
+]
+
+
+# ─── the fake server ──────────────────────────────────────────────────
+
+
+class Fake:
+    """A 2026-07-28 MCP server on 127.0.0.1: what it saw, and how it answers."""
+
+    def __init__(self):
+        self.seen: list[tuple[dict, dict]] = []
+        self.lock = threading.Lock()
+        fake = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):  # quiet
+                pass
+
+            def do_GET(self):  # the 2026-07-28 transport has no GET stream
+                self.send_response(405)
+                self.end_headers()
+
+            def do_POST(self):
+                n = int(self.headers.get("content-length") or 0)
+                body = json.loads(self.rfile.read(n) or b"null")
+                h = {k.lower(): v for k, v in self.headers.items()}
+                with fake.lock:
+                    fake.seen.append((h, body))
+                status, ctype, payload = fake.answer(h, body)
+                raw = (
+                    payload
+                    if isinstance(payload, bytes)
+                    else json.dumps(payload).encode()
+                )
+                self.send_response(status)
+                if ctype:
+                    self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+        self.srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self.srv.server_address[1]
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+
+    @property
+    def url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/mcp"
+
+    def calls(self, method: str) -> list[tuple[dict, dict]]:
+        with self.lock:
+            return [(h, b) for h, b in self.seen if b.get("method") == method]
+
+    @staticmethod
+    def ok(body, result):
+        return (
+            200,
+            "application/json",
+            {
+                "jsonrpc": "2.0",
+                "id": body["id"],
+                "result": {"resultType": "complete", **result},
+            },
+        )
+
+    @staticmethod
+    def err(status, body, code, msg):
+        return (
+            status,
+            "application/json",
+            {
+                "jsonrpc": "2.0",
+                "id": body.get("id"),
+                "error": {"code": code, "message": msg},
+            },
+        )
+
+    def answer(self, h: dict, body: dict):
+        if h.get("authorization") != f"Bearer {KEY}":
+            return 401, None, b""
+        meta = (body.get("params") or {}).get("_meta") or {}
+        if not {
+            "io.modelcontextprotocol/protocolVersion",
+            "io.modelcontextprotocol/clientCapabilities",
+        } <= set(meta):
+            return self.err(400, body, -32602, "missing _meta")
+        if (
+            h.get("mcp-protocol-version")
+            != meta["io.modelcontextprotocol/protocolVersion"]
+        ):
+            return self.err(400, body, -32020, "protocol header mismatch")
+        if h.get("mcp-method") != body.get("method"):
+            return self.err(400, body, -32020, "Mcp-Method mismatch")
+        accept = h.get("accept", "")
+        if "application/json" not in accept or "text/event-stream" not in accept:
+            return 406, None, b""
+        m = body["method"]
+        if m == "server/discover":
+            return self.ok(
+                body,
+                {
+                    "supportedVersions": [PROTOCOL],
+                    "capabilities": {"tools": {"listChanged": True}},
+                    "_meta": {
+                        "io.modelcontextprotocol/serverInfo": {
+                            "name": "e2e-fake",
+                            "version": "1",
+                        }
+                    },
+                    "instructions": "Weather and friends.",
+                },
+            )
+        if m == "tools/list":
+            start = int(body["params"].get("cursor") or 0)
+            res: dict = {"tools": TOOLS[start : start + 3]}
+            if start + 3 < len(TOOLS):
+                res["nextCursor"] = str(start + 3)
+            return self.ok(body, res)
+        if m == "tools/call":
+            name = body["params"]["name"]
+            if h.get("mcp-name") != name:
+                return self.err(400, body, -32020, "Mcp-Name mismatch")
+            return self.tool(name, body["params"]["arguments"], body, h)
+        return self.err(404, body, -32601, f"no method {m}")
+
+    def tool(self, name, args, body, h):
+        b64 = base64.b64encode(PNG).decode()
+        if name == "get_weather":
+            if "city" not in args:
+                return self.err(400, body, -32602, "city required")
+            if (
+                args.get("region") is not None
+                and h.get("mcp-param-region") != args["region"]
+            ):
+                return self.err(400, body, -32020, "Mcp-Param-Region mismatch")
+            return self.ok(
+                body,
+                {
+                    "content": [{"type": "text", "text": f"sunny in {args['city']}"}],
+                    "isError": False,
+                },
+            )
+        if name == "fail":
+            return self.ok(
+                body,
+                {
+                    "content": [{"type": "text", "text": "no such city"}],
+                    "isError": True,
+                },
+            )
+        if name == "picture":
+            return self.ok(
+                body,
+                {
+                    "content": [
+                        {"type": "image", "data": b64, "mimeType": "image/png"},
+                        {
+                            "type": "resource",
+                            "resource": {
+                                "uri": "mem://x",
+                                "mimeType": "application/octet-stream",
+                                "blob": b64,
+                            },
+                        },
+                    ]
+                },
+            )
+        if name == "structured":
+            return self.ok(
+                body,
+                {
+                    "content": [{"type": "text", "text": '{"t": 21}'}],
+                    "structuredContent": {"t": 21},
+                },
+            )
+        if name == "ask":
+            return self.ok(
+                body,
+                {
+                    "resultType": "input_required",
+                    "inputRequests": {
+                        "who": {
+                            "method": "elicitation/create",
+                            "params": {"message": "name?"},
+                        }
+                    },
+                    "requestState": "st-1",
+                },
+            )
+        if name == "weird":
+            return self.ok(body, {"resultType": "telepathy"})
+        events = []
+        if name == "stream":
+            events = [
+                {
+                    "jsonrpc": "2.0",
+                    "method": "notifications/progress",
+                    "params": {"progressToken": "p", "progress": 1, "total": 2},
+                },
+                {
+                    "jsonrpc": "2.0",
+                    "method": "notifications/message",
+                    "params": {"level": "info", "data": "half"},
+                },
+                {
+                    "jsonrpc": "2.0",
+                    "id": body["id"],
+                    "result": {
+                        "resultType": "complete",
+                        "content": [{"type": "text", "text": "done"}],
+                    },
+                },
+            ]
+        if name == "cut":
+            events = [
+                {
+                    "jsonrpc": "2.0",
+                    "method": "notifications/progress",
+                    "params": {"progressToken": "p", "progress": 1},
+                }
+            ]
+        sse = ": keep-alive\n\n" + "".join(f"data: {json.dumps(e)}\n\n" for e in events)
+        return 200, "text/event-stream", sse.encode()
+
+
+# ─── the run ──────────────────────────────────────────────────────────
+
+
+def main() -> int:
+    name, _ = runtime(REPO, RUNTIME)
+    spec = ensure_runtime(REPO, name)
+    fake = Fake()
+    os.environ[KEY_VAR] = KEY  # the STORE reads it (env backend), never a record
+    work = Path(tempfile.mkdtemp(prefix="e2e-mcp-client-"))
+    hk = HostKernel(spec, work, reach=["mcp", "mcp_keyless", "creds"]).boot()
+    root = hk.root_id
+    bad: list[str] = []
+
+    def need(cond: bool, what: str) -> None:
+        print(f"  {'ok ' if cond else 'BAD'} {what}", flush=True)
+        if not cond:
+            bad.append(what)
+
+    try:
+        # the ref: the key's variable, pinned to the fake's host:port
+        r = hk.send(
+            root,
+            {
+                "type": "update_agent",
+                "id": "creds",
+                "refs": {
+                    "mcp": {
+                        "host": f"127.0.0.1:{fake.port}",
+                        "env": {"api_key": KEY_VAR},
+                    }
+                },
+                "callable_by": {"$self": "*", "$parent": "*", "mcp": ["get"]},
+            },
+        )
+        need(
+            r.get("updated") is True,
+            f"the mcp ref is declared on creds: {str(r)[:200]}",
+        )
+        rec = hk.create(
+            parent_id="rest",
+            handler_module="mcp_client.tools",
+            id="mcp",
+            url=fake.url,
+            credentials={"store": "creds", "ref": "mcp"},
+            can_call={"$self": "*", "creds": ["get"]},
+            callable_by={"$self": "*", "$parent": "*"},
+        )
+        need(rec.get("id") == "mcp", f"create mcp: {str(rec)[:200]}")
+
+        # 1 · boot = discover + every page of tools/list
+        boot = hk.send("mcp", {"type": "boot"})
+        need(
+            boot.get("tools") == SERVED,
+            f"boot lists the servable tools: {str(boot)[:300]}",
+        )
+        skipped = {s.get("name") for s in boot.get("skipped") or []}
+        need(
+            skipped == {"reflect", "ps", "fail", "bad_header"},
+            f"skipped and named: {skipped}",
+        )
+        need(
+            boot.get("server") == {"name": "e2e-fake", "version": "1"},
+            "serverInfo carried",
+        )
+        cursors = [b["params"].get("cursor") for _, b in fake.calls("tools/list")][-4:]
+        need(cursors == [None, "3", "6", "9"], f"tools/list paged by cursor: {cursors}")
+
+        # 2 · docs: the agent's own table
+        d = hk.send("kernel", {"type": "docs", "of": "mcp"})
+        verbs = d.get("verbs") or {}
+        need(
+            set(verbs) == {"reflect", "boot", *SERVED}, f"docs of=mcp: {sorted(verbs)}"
+        )
+        need(
+            verbs.get("get_weather") == "args: city:str (req), days:int?, region:str?",
+            f"a tool's signature from its schema: {verbs.get('get_weather')!r}",
+        )
+        rf = hk.send("mcp", {"type": "reflect"})
+        need(
+            rf.get("tools") == 8
+            and rf.get("protocol_version") == PROTOCOL
+            and "verbs" not in rf,
+            f"reflect: {str(rf)[:200]}",
+        )
+
+        # 3 · a call: arguments, Mcp-Name, Mcp-Param-Region
+        w = hk.send("mcp", {"type": "get_weather", "city": "Kyiv", "region": "eu-1"})
+        need(
+            w == {"content": [{"type": "text", "text": "sunny in Kyiv"}]},
+            f"get_weather: {w}",
+        )
+        h, b = (fake.calls("tools/call") or [({}, {"params": {}})])[-1]
+        need(
+            b["params"].get("arguments") == {"city": "Kyiv", "region": "eu-1"},
+            "arguments → tools/call",
+        )
+        need(
+            h.get("mcp-name") == "get_weather" and h.get("mcp-param-region") == "eu-1",
+            f"Mcp-Name / Mcp-Param-Region: {h.get('mcp-name')!r} {h.get('mcp-param-region')!r}",
+        )
+
+        # 4 · every result mapping
+        f = hk.send("mcp", {"type": "fail"})
+        need(f.get("error") == "no such city", f"isError → error: {f}")
+        s = hk.send("mcp", {"type": "structured"})
+        need(s.get("structured") == {"t": 21}, f"structuredContent → structured: {s}")
+        p = hk.send("mcp", {"type": "picture"})
+        print(
+            f"  picture reply keys: {sorted(p)} → {str({k: (v if not isinstance(v, bytes) else f'<{len(v)} bytes>') for k, v in p.items()})[:300]}",
+            flush=True,
+        )
+        content = p.get("content") or []
+        need(
+            p.get("bytes") == PNG,
+            "the first image arrives as raw bytes, the reply's `bytes`",
+        )
+        first = content[0] if content else {}
+        need(
+            first.get("body") == "bytes" and first.get("size") == len(PNG),
+            f"the image names its body: {first}",
+        )
+        later = (content[1].get("resource") or {}) if len(content) > 1 else {}
+        need(
+            later.get("size") == len(PNG) and "omitted" in later,
+            f"a later binary item is omitted: {later}",
+        )
+        st = hk.send("mcp", {"type": "stream"})
+        need(
+            st == {"content": [{"type": "text", "text": "done"}]},
+            f"an SSE answer settles: {st}",
+        )
+        a = hk.send("mcp", {"type": "ask"})
+        need(
+            (a.get("input_required") or {}).get("requestState") == "st-1",
+            f"input_required: {a}",
+        )
+        for verb, reason in (
+            ("weird", "transport_error"),
+            ("cut", "transport_closed"),
+            ("get_weather", "bad_arg"),
+            ("no_such_tool", "unhandled"),
+        ):
+            out = hk.send("mcp", {"type": verb})
+            need(out.get("reason") == reason, f"{verb} → {reason}: {str(out)[:200]}")
+
+        # 5 · the key
+        with fake.lock:
+            mine = list(fake.seen)
+        need(
+            all(h.get("authorization") == f"Bearer {KEY}" for h, _ in mine),
+            f"Bearer key on every one of {len(mine)} requests",
+        )
+        need(
+            all(h.get("mcp-protocol-version") == PROTOCOL for h, _ in mine),
+            "MCP-Protocol-Version on every request",
+        )
+        ledger = hk.send("kernel", {"type": "ledger"})
+        need(
+            KEY not in json.dumps(ledger, default=str),
+            "the key never lands in the ledger",
+        )
+        before = len(fake.seen)
+        hk.create(
+            parent_id="rest",
+            handler_module="mcp_client.tools",
+            id="mcp_keyless",
+            url=fake.url,
+            callable_by={"$self": "*", "$parent": "*"},
+        )
+        kl = hk.send("mcp_keyless", {"type": "boot"})
+        need(
+            kl.get("reason") == "unauthorized" and kl.get("http_status") == 401,
+            f"keyless → 401 unauthorized: {kl}",
+        )
+        with fake.lock:
+            keyless = fake.seen[before:]
+        need(
+            bool(keyless) and all("authorization" not in h for h, _ in keyless),
+            f"a record without credentials sends no key ({len(keyless)} requests)",
+        )
+    finally:
+        hk.close()
+        fake.srv.shutdown()
+        shutil.rmtree(work, ignore_errors=True)
+
+    verdict(
+        not bad,
+        f"{RUNTIME}: {len(bad)} failed" + (f" — first: {bad[0]}" if bad else ""),
+    )
+    return 0 if not bad else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

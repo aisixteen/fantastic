@@ -46,6 +46,12 @@ public protocol AgentBundle: Sendable {
     /// 2026-10-05). Default: no docs.
     var verbDocTable: JSON { get }
 
+    /// THIS AGENT'S verb docs, when the bundle serves different verbs per agent
+    /// (an MCP server's tools) — python's duck-typed `instance_verbs(agent)`.
+    /// `docs of=<agent id>` reads it before `verbDocTable`; nil keeps the
+    /// bundle's (owner, 2026-10-08). Default: nil.
+    func instanceVerbDocs(_ agent: Agent) -> JSON?
+
     /// The rest of the DETAILED docs — python's duck-typed module-level `EMITS`,
     /// `CANCEL` and `NOTES`, served by `docs` (tier detailed, no `verb`).
     /// Default: none.
@@ -216,6 +222,7 @@ extension AgentBundle {
     public var verbs: [String] { [] }
 
     public var verbDocTable: JSON { .object([:]) }
+    public func instanceVerbDocs(_ agent: Agent) -> JSON? { nil }
     public var emitsDoc: JSON? { nil }
     public var cancelDoc: JSON? { nil }
     public var notesDoc: JSON? { nil }

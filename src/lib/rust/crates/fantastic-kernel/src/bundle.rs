@@ -123,6 +123,14 @@ pub trait Bundle: Send + Sync {
         Value::Object(serde_json::Map::new())
     }
 
+    /// THIS AGENT'S verb docs, when its bundle serves different verbs per agent
+    /// (an MCP server's tools) — python's duck-typed `instance_verbs(agent)`.
+    /// `docs of=<agent id>` reads it before [`Self::verb_docs`]; `None` keeps the
+    /// bundle's (owner, 2026-10-08). Default: none.
+    fn instance_verb_docs(&self, _agent: &crate::agent::Agent) -> Option<Value> {
+        None
+    }
+
     /// The rest of the DETAILED docs — python's duck-typed module-level `EMITS`,
     /// `CANCEL` and `NOTES`, served by `docs` (tier detailed, no `verb`).
     fn emits_doc(&self) -> Option<Value> {

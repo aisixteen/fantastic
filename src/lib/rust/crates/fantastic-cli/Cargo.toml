@@ -27,6 +27,8 @@ fantastic-bridge = { path = "../bundles/fantastic-bridge" }
 fantastic-responses-backend = { path = "../bundles/fantastic-responses-backend" }
 fantastic-vllm-backend = { path = "../bundles/fantastic-vllm-backend" }
 fantastic-anthropic-backend = { path = "../bundles/fantastic-anthropic-backend" }
+# A remote MCP server as an agent — its tools are the agent's verbs.
+fantastic-mcp-client = { path = "../bundles/fantastic-mcp-client" }
 # Apple's on-device model, in BOTH tiers and on every target (as swift registers
 # it): on macOS its build links the swift FantasticFMBridge static library — no
 # subprocess, no dlopen at run time, so the sandboxed tier may carry it; on every

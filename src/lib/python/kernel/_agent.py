@@ -2219,7 +2219,15 @@ class Agent:
                     "handler_module (reflect bundles='all' lists both), or 'kernel'",
                     arg="of",
                 )
-        table, extras = _docs.module_docs(import_handler(module))
+        mod = import_handler(module)
+        table, extras = _docs.module_docs(mod)
+        if agent is not None:
+            # PER-INSTANCE VERBS (owner, 2026-10-08): a bundle whose agents serve
+            # different verbs (an MCP server's tools) names each instance's own
+            # table through the duck-typed `instance_verbs(agent)`; None keeps the
+            # bundle's. A bundle named by `of` (no agent) shows its own table.
+            own = getattr(mod, "instance_verbs", None)
+            table = (own(agent) if callable(own) else None) or table
         return _docs.render(of, module, tier, verb, table, extras)
 
     def _verb_ps(self, payload: dict) -> dict:

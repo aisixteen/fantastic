@@ -185,7 +185,11 @@ pub fn docs_reply(kernel: &Arc<Kernel>, payload: &Value) -> Value {
             &[],
         );
     }
-    let module = if let Some(a) = kernel.agents.get(&crate::agent::AgentId(of.to_string())) {
+    let agent = kernel
+        .agents
+        .get(&crate::agent::AgentId(of.to_string()))
+        .map(|e| Arc::clone(e.value()));
+    let module = if let Some(a) = &agent {
         match a.handler_module.clone() {
             Some(hm) => hm,
             None => return render(of, Value::Null, tier, verb, &json!({}), &[]),
@@ -219,12 +223,19 @@ pub fn docs_reply(kernel: &Arc<Kernel>, payload: &Value) -> Value {
     let Some(bundle) = kernel.bundles.get(&module) else {
         return render(of, json!(module), tier, verb, &json!({}), &[]);
     };
+    // PER-INSTANCE VERBS (owner, 2026-10-08): an agent whose bundle names its own
+    // table (an MCP server's tools) is documented by it; the bundle (no agent)
+    // shows the bundle's.
+    let table = agent
+        .as_deref()
+        .and_then(|a| bundle.instance_verb_docs(a))
+        .unwrap_or_else(|| bundle.verb_docs());
     render(
         of,
         json!(module),
         tier,
         verb,
-        &bundle.verb_docs(),
+        &table,
         &[
             ("emits", bundle.emits_doc()),
             ("cancel", bundle.cancel_doc()),
