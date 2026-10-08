@@ -1,6 +1,7 @@
 import { str } from "../../lib.ts";
 import { bodyText } from "../body_text.ts";
 import { panelRelay } from "../panel_relay.ts";
+import { DEFAULT_BG_SOURCE } from "./default_bg.ts";
 import type { Handler, Json } from "../../lib.ts";
 
 // THE BACKGROUND — its own agent on a view's surface, a SINGLETON (owner,
@@ -18,7 +19,7 @@ export const BACKGROUND_ID = "background";
 
 /** The background's verbs its view may call — granted BY NAME on both ends
  *  (explicit grants only: no implicit parent reach). */
-export const BG_PARENT_VERBS = ["set_bg", "clear_bg", "get_bg", "get_gl_view", "reflect"] as const;
+export const BG_PARENT_VERBS = ["set_bg", "default_bg", "clear_bg", "get_bg", "get_gl_view", "reflect"] as const;
 
 /** The background's own record grant: its view (`$parent`) may call it. */
 export function bgCallableBy(): Record<string, string[]> {
@@ -44,7 +45,7 @@ export const BACKGROUND_README =
   "gradient: `const m = new THREE.ShaderMaterial({uniforms:{u:{value:0}}, vertexShader:'void main(){gl_Position=vec4(position.xy,0.,1.);}', " +
   "fragmentShader:'uniform float u; void main(){vec2 p=gl_FragCoord.xy/vec2(1600.,900.); gl_FragColor=vec4(0.05,0.1+0.1*p.y,0.3+0.2*sin(u*0.2+p.x),1.);}'}); " +
   "scene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), m)); onFrame(t => m.uniforms.u.value = t);`. " +
-  "A source that does not compile is refused, with the error. `clear_bg` removes it, `get_bg` returns it; it persists with its record.";
+  "A source that does not compile is refused, with the error. `default_bg` restores the bundled one (`default_bg.ts`), `clear_bg` removes it, `get_bg` returns it; it persists with its record.";
 
 export const backgroundAgent: Handler = (id, payload, kernel): Json | Promise<Json> => {
   // its GL source's own emits, as this agent (`panel_relay.ts`)
@@ -77,6 +78,9 @@ export const backgroundAgent: Handler = (id, payload, kernel): Json | Promise<Js
       kernel.updateMeta(id, { bg_source: source }); // → updated → persist + re-render
       return { ok: true, bytes: source.length };
     }
+    case "default_bg":
+      kernel.updateMeta(id, { bg_source: DEFAULT_BG_SOURCE });
+      return { ok: true, bytes: DEFAULT_BG_SOURCE.length };
     case "clear_bg":
       kernel.updateMeta(id, { bg_source: "" });
       return { ok: true };

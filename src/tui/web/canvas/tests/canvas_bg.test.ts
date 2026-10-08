@@ -5,6 +5,7 @@ import type { Bridge, Json, Payload } from "../src/lib.ts";
 import { registerCanvas } from "../src/bundles/canvas/canvas_agent.ts";
 import { registerHtmlAgent } from "../src/bundles/html_agent/html_agent.ts";
 import { bgCallableBy, viewToBg, registerBackground } from "../src/bundles/canvas/background_agent.ts";
+import { DEFAULT_BG_SOURCE } from "../src/bundles/canvas/default_bg.ts";
 
 // THE BACKGROUND is its own singleton agent under a view (`background` on the
 // root view, delete-locked): a GL source in its record's `bg_source`, changed by
@@ -74,6 +75,10 @@ test("a view sets its background agent's source, and it persists with that agent
       persisted.some((rec) => rec["id"] === "background" && rec["bg_source"] === SRC && rec["delete_lock"] === true),
       "the loader persists it with the background agent, delete-locked",
     );
+    // the bundled one
+    assert.deepEqual(await via("view_root", { type: "default_bg" }), { ok: true, bytes: DEFAULT_BG_SOURCE.length });
+    assert.equal(k.get("background")?.meta["bg_source"], DEFAULT_BG_SOURCE);
+    new Function("THREE", "scene", "t", "onFrame", "cleanup", DEFAULT_BG_SOURCE); // it compiles as the GL host runs it
     // clear
     await k.send([{ target: "background", payload: { type: "clear_bg" } }]);
     const got = (await k.send([{ target: "background", payload: { type: "get_bg" } }]))[0]!.result as Payload;

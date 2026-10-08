@@ -36,7 +36,7 @@ function register(kernel: Kernel): void {
   registerHtmlAgent(kernel);
   registerAgentView(kernel); // a host agent's own view (its record's `view`)
   registerCanvas(kernel); // the compositor root and its control plane
-  registerBackground(kernel); // its singleton, delete-locked background (set_bg/clear_bg/get_bg)
+  registerBackground(kernel); // its singleton, delete-locked background (set_bg/default_bg/clear_bg/get_bg)
   registerSelector(kernel); // the double-click popup, as its singleton, delete-locked agent
   // View bundles that front a host backend are real frontend agents too — a
   // no-op handler makes their records load-able; the ViewBundle renders them.
