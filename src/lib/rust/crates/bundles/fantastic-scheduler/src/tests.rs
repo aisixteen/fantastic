@@ -45,6 +45,9 @@ impl Hits {
     fn has(&self, id: &str) -> bool {
         self.0.lock().unwrap().contains_key(id)
     }
+    fn clear(&self) {
+        self.0.lock().unwrap().clear();
+    }
 }
 
 /// A probe target: `hit` records when it ran (optionally blocking `block`
@@ -184,7 +187,6 @@ async fn mk_probed(
                 "parent_id": "kernel",
                 "handler_module":HANDLER_MODULE,
                 "id": sch_id,
-                "tick_sec": 0.1,
                 "can_call": can_call,
             }),
         )])
@@ -590,7 +592,7 @@ async fn tick_loop_fires_due_schedule() {
         .await
         .remove(0)
         .result;
-    // tick_sec is 0.1 on the test agent → wait ~1.5s for at least one fire.
+    // the loop fires at the schedule's due time → wait ~1.5s for at least one fire.
     tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
     stop_tick(&kernel, &sch).await;
     let listed = kernel
@@ -618,12 +620,19 @@ async fn due_schedules_fire_as_one_concurrent_batch() {
     // start the second ≥0.3s after the first; one batch starts both together.
     let tmp = TempDir::new().unwrap();
     let (kernel, sch, hits) = mk_probed(&tmp, &["p_slow", "p_fast"], None, true).await;
+    // BOTH DUE when the loop looks: it fires at each schedule's exact due time (no
+    // tick to coalesce on), so the two are made due while the scheduler is paused,
+    // and the resume wakes it to one batch.
+    let _ = kernel
+        .send(vec![Item::new(sch.clone(), json!({"type": "pause"}))])
+        .await;
     let r1 = schedule(&kernel, &sch, "p_slow", 1, json!({"hit": {"block": 0.3}})).await;
     let r2 = schedule(&kernel, &sch, "p_fast", 1, json!({})).await;
     assert!(r1["schedule_id"].is_string(), "{r1}");
     assert!(r2["schedule_id"].is_string(), "{r2}");
+    tokio::time::sleep(Duration::from_millis(1200)).await;
     let _ = kernel
-        .send(vec![Item::new(sch.clone(), json!({"type": "boot"}))])
+        .send(vec![Item::new(sch.clone(), json!({"type": "resume"}))])
         .await;
     let both = wait_for(|| hits.has("p_slow") && hits.has("p_fast"), 3.0).await;
     stop_tick(&kernel, &sch).await;
@@ -810,29 +819,49 @@ async fn schedule_refuses_a_non_object_payload() {
 }
 
 #[tokio::test]
-async fn a_non_numeric_tick_sec_is_refused_at_write_time() {
-    // #136 — `tick_sec: "0.5"` was silently defaulted to 1.0. The record is
-    // judged where the mistake is made.
+async fn an_idle_scheduler_never_wakes_and_a_change_wakes_it() {
+    // No idle wakeups (owner, 2026-10-08): with nothing to wait for the loop
+    // waits on a change; a schedule, or the record's own `paused` flipped by
+    // update_agent, wakes it.
     let tmp = TempDir::new().unwrap();
-    let (kernel, _sch, _hits) = mk_probed(&tmp, &[], None, true).await;
+    let (kernel, sch, hits) = mk_probed(&tmp, &["p_idle"], None, true).await;
+    let _ = kernel
+        .send(vec![Item::new(sch.clone(), json!({"type": "boot"}))])
+        .await
+        .remove(0)
+        .result;
+    // no schedule: nothing fires, and nothing is read on a timer
+    tokio::time::sleep(Duration::from_millis(300)).await;
     let r = kernel
         .send(vec![Item::new(
-            AgentId::from("kernel_state"),
-            json!({
-                "type": "create_agent", "parent_id": "kernel",
-                "handler_module": HANDLER_MODULE,
-                "id": "sch_ticks", "tick_sec": "0.5",
-            }),
+            sch.clone(),
+            json!({"type": "schedule", "target": "p_idle", "payload": {"type": "hit"}, "interval_seconds": 1}),
         )])
         .await
         .remove(0)
         .result;
-    assert_eq!(r["reason"], json!("invalid_meta"), "{r}");
+    assert!(r.get("schedule_id").is_some(), "{r}");
     assert!(
-        r["error"].as_str().unwrap_or_default().contains("tick_sec"),
-        "{r}"
+        wait_for(|| hits.has("p_idle"), 3.0).await,
+        "a schedule woke nothing"
     );
-    assert!(!kernel.agents.contains_key(&AgentId::from("sch_ticks")));
+    let up = |paused: bool| {
+        Item::new(
+            AgentId::from("kernel_state"),
+            json!({"type": "update_agent", "id": sch.as_str(), "paused": paused}),
+        )
+    };
+    let _ = kernel.send(vec![up(true)]).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    hits.clear();
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(!hits.has("p_idle"), "fired while paused");
+    let _ = kernel.send(vec![up(false)]).await;
+    assert!(
+        wait_for(|| hits.has("p_idle"), 3.0).await,
+        "an update_agent resume woke nothing"
+    );
+    stop_tick(&kernel, &sch).await;
 }
 
 // ─── python parity (plan §2 A5) ──────────────────────────────────
@@ -1045,24 +1074,6 @@ async fn paused_meta_uses_python_truthiness() {
     assert!(r["paused"].is_boolean(), "{r}");
 }
 
-/// A5.12 — there is NO 0.1 s floor on `tick_sec`: a faster tick is what the
-/// operator asked for, and reflect reports it as written.
-#[tokio::test]
-async fn tick_sec_below_a_tenth_is_not_clamped() {
-    let tmp = TempDir::new().unwrap();
-    let (kernel, sch) = mk_kernel(&tmp).await;
-    let _ = kernel
-        .send(vec![Item::new(
-            AgentId::from("kernel_state"),
-            json!({"type": "update_agent", "id": sch.as_str(), "tick_sec": 0.02}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    assert_eq!(tick_sec(&sch, &kernel), 0.02);
-    assert_eq!(reflect_reply(&sch, &kernel)["tick_sec"], json!(0.02));
-}
-
 /// The sidecar bytes are python's `yaml_io.dump`: a block YAML sequence,
 /// indent 2, key order kept, unicode verbatim (`allow_unicode`).
 #[tokio::test]
@@ -1184,7 +1195,7 @@ async fn failed_tick_persist_does_not_refire_next_tick() {
         .remove(0)
         .result;
     assert!(wait_for(|| hits.has("p_np"), 3.0).await, "never fired");
-    // Let several more sweeps go by (tick_sec is 0.1s).
+    // Let time go by: the schedule must not re-fire before its interval.
     tokio::time::sleep(Duration::from_millis(600)).await;
     stop_tick(&kernel, &sch).await;
     let listed = kernel
@@ -1419,7 +1430,7 @@ async fn two_schedulers_share_nothing_and_delete_frees_only_its_own() {
         .send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel",
-                   "handler_module": HANDLER_MODULE, "id": b.as_str(), "tick_sec": 0.1}),
+                   "handler_module": HANDLER_MODULE, "id": b.as_str()}),
         )])
         .await
         .remove(0)

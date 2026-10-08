@@ -142,9 +142,9 @@ async def _default(kernel) -> None:
 
 
 async def _block_forever() -> None:
+    """Wait until cancelled — on an event nothing sets, so it never wakes."""
     try:
-        while True:
-            await asyncio.sleep(3600)
+        await asyncio.Event().wait()
     except (KeyboardInterrupt, asyncio.CancelledError):
         pass
 

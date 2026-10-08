@@ -175,11 +175,42 @@ async def _spawn(agent_id: str, kernel) -> _ServerHandle | None:
         port=port,
         log_level="warning",
         loop="asyncio",
+        # The Date header is refreshed only by uvicorn's 0.1 s tick, which
+        # `_Server` removes: without the tick it would freeze at start, so none
+        # is sent (it is optional — RFC 9110 §6.6.1).
+        date_header=False,
     )
-    server = uvicorn.Server(config)
+    server = _Server(config)
     handle = _ServerHandle(server, None, app, port=port)
     _servers[agent_id] = handle
     return handle
+
+
+class _Server(uvicorn.Server):
+    """uvicorn's server with its idle poll removed (owner, 2026-10-08: idle means
+    zero wakeups). `Server.main_loop` sleeps 0.1 s between `on_tick`s — ten
+    wakeups a second while nothing happens — only to notice `should_exit` and
+    refresh the Date header. Here `should_exit` sets an event and the loop waits
+    on it; the Date header is off (see `date_header=False`)."""
+
+    def __init__(self, config: uvicorn.Config) -> None:
+        self._exit = asyncio.Event()
+        super().__init__(config)
+
+    @property
+    def should_exit(self) -> bool:
+        return self._exit.is_set()
+
+    @should_exit.setter
+    def should_exit(self, value: bool) -> None:
+        if value:
+            self._exit.set()
+        else:
+            self._exit.clear()
+
+    async def main_loop(self) -> None:
+        await self.on_tick(0)  # the default headers, once
+        await self._exit.wait()
 
 
 def _start_serving(agent_id: str, handle: _ServerHandle) -> None:

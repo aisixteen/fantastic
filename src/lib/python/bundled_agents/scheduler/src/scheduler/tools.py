@@ -12,8 +12,8 @@ which owns the `.fantastic` store. A write failfasts only when no store is wired
 root (read-empty until then); a denied/failed write is surfaced, not lost.
 
 Verbs:
-  reflect      -> {sentence, tick_sec, paused, ...}
-  boot         -> start tick loop (idempotent)
+  reflect      -> {sentence, paused, running}
+  boot         -> start the fire loop (idempotent)
   schedule     args: target, payload, interval_seconds, timeout?  -> {schedule_id}
   unschedule   args: schedule_id                        -> {removed: bool}
   list                                                  -> {schedules: [...]}
@@ -26,6 +26,11 @@ A SCHEDULE FIRES AS THE SCHEDULER ITSELF: every fire goes out under the
 scheduler's own id, so the gate judges the SCHEDULER's `can_call` and the
 target's `callable_by` for the scheduler. Every verb — list, history, tick_now,
 unschedule, pause, resume — sees every schedule.
+
+NO IDLE WAKEUPS (owner, 2026-10-08): the fire loop sleeps until the EARLIEST due
+schedule, or — none due, or the scheduler paused — until something changes: a
+schedule added, removed, paused or resumed, or the scheduler's own record updated
+(`paused`). An idle scheduler wakes never.
 
 A tick collects every DUE schedule, bumps `run_count`/`next_run`, persists FIRST
 (a crash inside the fire window cannot re-fire on reboot), then fires them all —
@@ -40,6 +45,7 @@ at it doubled every delivery.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import secrets
 import time
@@ -54,11 +60,19 @@ logger = logging.getLogger(__name__)
 
 HISTORY_MAX = 500
 
-#: seconds between tick-loop sweeps when the record does not name one.
-DEFAULT_TICK_SEC = 1.0
-
 _tick_tasks: dict[str, asyncio.Task] = {}
 _cache: dict[str, list[dict]] = {}  # in-process schedules cache
+# Per scheduler: what wakes its fire loop (a change), and the state tap that
+# sets it when the scheduler's own record is updated.
+_wake: dict[str, asyncio.Event] = {}
+_unsub: dict[str, object] = {}
+
+
+def _poke(sid: str) -> None:
+    """Something the fire loop waits on changed: recompute when to wake."""
+    ev = _wake.get(sid)
+    if ev is not None:
+        ev.set()
 
 
 # ─── argument typing ─────────────────────────────────────────────
@@ -81,31 +95,6 @@ def _int_arg(payload: dict, key: str, default: int, verb: str, minimum: int):
         want = "a non-negative int" if minimum == 0 else f"an int >= {minimum}"
         return bad(verb, key, want)
     return v
-
-
-def _tick_sec(rec: dict) -> float:
-    """The record's sweep interval. `validate_meta` refuses a non-positive or
-    non-numeric `tick_sec` at WRITE time, so this read is total: an absent field
-    is the documented default, and no value that reached the record can raise
-    inside the loop."""
-    v = rec.get("tick_sec")
-    if isinstance(v, bool) or not isinstance(v, (int, float)) or v <= 0:
-        return DEFAULT_TICK_SEC
-    return float(v)
-
-
-def validate_meta(meta: dict, record: dict) -> str | None:
-    """Refuse a `tick_sec` that is not a positive number at WRITE time — the
-    point of the mistake. Silently defaulting it (rust/swift did) or raising out
-    of the tick loop (python did) both turn an operator's typo into a behaviour
-    change nobody is told about."""
-    merged = {**record, **meta}
-    if "tick_sec" not in merged:
-        return None
-    v = merged["tick_sec"]
-    if isinstance(v, bool) or not isinstance(v, (int, float)) or v <= 0:
-        return "scheduler: tick_sec must be a positive number of seconds"
-    return None
 
 
 # ─── file routing ────────────────────────────────────────────────
@@ -160,15 +149,15 @@ async def _load(sid: str, kernel) -> list[dict]:
     if sid in _cache:
         return _cache[sid]
     raw = await _file_read(sid, kernel, _SCHED_NAME)
+    # FIRST FILL WINS: a verb that loaded and wrote while this read was in flight
+    # already holds the cache — the read must not replace it with the older list.
     if not raw:
-        _cache[sid] = []
-        return _cache[sid]
+        return _cache.setdefault(sid, [])
     try:
         doc = yaml_io.load(raw)
     except yaml.YAMLError:
         doc = None
-    _cache[sid] = doc if isinstance(doc, list) else []
-    return _cache[sid]
+    return _cache.setdefault(sid, doc if isinstance(doc, list) else [])
 
 
 async def _save(sid: str, kernel) -> dict | None:
@@ -212,34 +201,44 @@ async def _read_history(sid: str, kernel, limit: int) -> list[dict]:
 
 
 async def _tick_loop(sid: str, kernel) -> None:
+    """Fire what is due, then sleep until the earliest next fire — or, with nothing
+    to wait for, until a change (`_poke`). Never on a fixed tick."""
+    wake = _wake.setdefault(sid, asyncio.Event())
     try:
         while True:
+            wake.clear()
             rec = kernel.get(sid)
             if rec is None:
                 return
-            await asyncio.sleep(_tick_sec(rec))
-            if rec.get("paused"):
-                continue
-            now = time.time()
             schedules = await _load(sid, kernel)
-            due = [
-                sch
-                for sch in list(schedules)
-                if not sch.get("paused") and now >= sch.get("next_run", 0)
-            ]
-            if not due:
-                continue
-            # Persist BEFORE the fire: run_count/next_run are bumped and saved
-            # first, so a crash inside the fire window does not re-fire the same
-            # tick on reboot (restart semantics are explicit: at-most-once).
-            for sch in due:
-                sch["run_count"] = sch.get("run_count", 0) + 1
-                sch["next_run"] = now + sch["interval_seconds"]
-            if err := await _save(sid, kernel):
-                logger.warning(
-                    "scheduler %s: persist failed: %s", sid, err.get("error")
-                )
-            await _fire_many(sid, due, kernel)
+            delay = None
+            if not rec.get("paused"):
+                now = time.time()
+                due = [
+                    sch
+                    for sch in list(schedules)
+                    if not sch.get("paused") and now >= sch.get("next_run", 0)
+                ]
+                if due:
+                    # Persist BEFORE the fire: run_count/next_run are bumped and
+                    # saved first, so a crash inside the fire window does not
+                    # re-fire the same tick on reboot (at-most-once).
+                    for sch in due:
+                        sch["run_count"] = sch.get("run_count", 0) + 1
+                        sch["next_run"] = now + sch["interval_seconds"]
+                    if err := await _save(sid, kernel):
+                        logger.warning(
+                            "scheduler %s: persist failed: %s", sid, err.get("error")
+                        )
+                    await _fire_many(sid, due, kernel)
+                    continue
+                pending = [
+                    sch.get("next_run", 0) for sch in schedules if not sch.get("paused")
+                ]
+                if pending:
+                    delay = max(0.0, min(pending) - now)
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(wake.wait(), delay)
     except asyncio.CancelledError:
         pass
     except Exception:
@@ -310,12 +309,11 @@ async def _fire_many(sid: str, due: list[dict], kernel) -> list[dict]:
 
 
 async def _reflect(id, payload, kernel):
-    """Identity + tick state. No args."""
+    """Identity + loop state. No args."""
     rec = kernel.get(id) or {}
     return {
         "id": id,
         "sentence": "Recurring-task scheduler.",
-        "tick_sec": _tick_sec(rec),
         "paused": bool(rec.get("paused")),
         "running": id in _tick_tasks and not _tick_tasks[id].done(),
     }
@@ -324,6 +322,14 @@ async def _reflect(id, payload, kernel):
 async def _boot(id, payload, kernel):
     """Idempotent. Starts the tick loop; persistence is THROUGH the loader.
     A write failfasts only when no store is wired (reads are empty until then)."""
+    if id not in _unsub:
+        # The scheduler's own record changed (`paused`, by a verb or an
+        # update_agent): the loop recomputes when to wake.
+        def _on_state(ev: dict, sid: str = id) -> None:
+            if ev.get("agent_id") == sid and ev.get("kind") == "updated":
+                _poke(sid)
+
+        _unsub[id] = kernel.ctx.add_state_subscriber(_on_state)
     if id not in _tick_tasks or _tick_tasks[id].done():
         # REGISTERED. The tick loop outlives this `boot` dispatch and fires
         # sends for the life of the agent; a bare `create_task` left it out of
@@ -331,6 +337,8 @@ async def _boot(id, payload, kernel):
         # so every schedule it fired was rowed under a task that had ended.
         tid = kernel.ctx.spawn_task(id, "tick_loop", _tick_loop(id, kernel))
         _tick_tasks[id] = kernel.ctx.tasks[tid]["_task"]
+    else:
+        _poke(id)  # a boot of a running loop makes it look again
     return {"running": True}
 
 
@@ -377,6 +385,7 @@ async def _schedule(id, payload, kernel):
         if err.get("reason"):
             out["reason"] = err["reason"]
         return out
+    _poke(id)
     return {"schedule_id": sch["id"], "schedule": sch}
 
 
@@ -395,6 +404,7 @@ async def _unschedule(id, payload, kernel):
                 "error": f"scheduler.unschedule: {err['error']}",
                 **({"reason": err["reason"]} if err.get("reason") else {}),
             }
+        _poke(id)
     return {"removed": removed, "schedule_id": sid}
 
 
@@ -421,6 +431,7 @@ async def _pause(id, payload, kernel):
                     "error": f"scheduler.pause: {err['error']}",
                     **({"reason": err["reason"]} if err.get("reason") else {}),
                 }
+            _poke(id)
         return {"paused": touched > 0, "schedule_id": sid}
     kernel.update(id, paused=True)
     return {"paused": True, "scheduler_id": id}
@@ -441,6 +452,7 @@ async def _resume(id, payload, kernel):
                     "error": f"scheduler.resume: {err['error']}",
                     **({"reason": err["reason"]} if err.get("reason") else {}),
                 }
+            _poke(id)
         return {"resumed": touched > 0, "schedule_id": sid}
     kernel.update(id, paused=False)
     return {"resumed": True, "scheduler_id": id}
@@ -527,6 +539,10 @@ async def on_delete(agent):
     t = _tick_tasks.pop(agent.id, None)
     if t is not None and not t.done():
         t.cancel()
+    unsub = _unsub.pop(agent.id, None)
+    if unsub is not None:
+        unsub()
+    _wake.pop(agent.id, None)
 
 
 # Shutdown frees the same process resources — declared, never inferred.

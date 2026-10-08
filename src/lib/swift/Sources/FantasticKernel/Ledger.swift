@@ -41,6 +41,9 @@ public let defaultLedgerCap = 1_000_000
 public final class OutcomeBox: @unchecked Sendable {
     private let lock = NSLock()
     private var value: Outcome?
+    /// Joiners waiting for the outcome, each with the timer that bounds its wait.
+    private var waiters: [UInt64: (CheckedContinuation<Void, Never>, Task<Void, Never>?)] = [:]
+    private var nextWaiter: UInt64 = 0
 
     init(_ value: Outcome? = nil) { self.value = value }
 
@@ -51,9 +54,51 @@ public final class OutcomeBox: @unchecked Sendable {
     }
 
     func set(_ o: Outcome) {
-        lock.lock()
-        defer { lock.unlock() }
-        if value == nil { value = o }
+        let woken: [(CheckedContinuation<Void, Never>, Task<Void, Never>?)] = lock.withLock {
+            if value == nil { value = o }
+            defer { waiters = [:] }
+            return Array(waiters.values)
+        }
+        for (c, timer) in woken {
+            timer?.cancel()
+            c.resume()
+        }
+    }
+
+    /// The outcome, waited for — woken by `set`, or when `seconds` pass (nil: no
+    /// bound). nil only on expiry. NO POLL (owner, 2026-10-08): a joiner used to
+    /// look every 2 ms for the whole wait.
+    func wait(upTo seconds: Double?) async -> Outcome? {
+        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+            let id: UInt64? = lock.withLock {
+                if value != nil { return nil }
+                nextWaiter += 1
+                waiters[nextWaiter] = (c, nil)
+                return nextWaiter
+            }
+            guard let id else {
+                c.resume()
+                return
+            }
+            guard let seconds else { return }
+            let timer = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
+                if Task.isCancelled { return }
+                self?.expire(id)
+            }
+            let stillWaiting: Bool = lock.withLock {
+                guard waiters[id] != nil else { return false }
+                waiters[id]?.1 = timer
+                return true
+            }
+            if !stillWaiting { timer.cancel() }
+        }
+        return outcome
+    }
+
+    private func expire(_ id: UInt64) {
+        let w = lock.withLock { waiters.removeValue(forKey: id) }
+        w?.0.resume()
     }
 }
 

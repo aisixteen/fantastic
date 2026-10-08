@@ -13,14 +13,19 @@
 //!
 //! Verbs (mirror Python verb-for-verb):
 //!
-//! - `reflect` → `{id, sentence, tick_sec, paused, running, verbs, emits}`
-//! - `boot`    → idempotent. Starts the tick task; answers `{running:true}`.
+//! - `reflect` → `{id, sentence, paused, running}`
+//! - `boot`    → idempotent. Starts the fire loop; answers `{running:true}`.
 //! - `schedule`     args `{target, payload, interval_seconds, timeout?}` → mint + persist
 //! - `unschedule`   args `{schedule_id}`                       → remove + persist
 //! - `list`                                                    → `{schedules}`
 //! - `pause` / `resume` args `{schedule_id?}`                  → flip one or all
 //! - `tick_now`     args `{schedule_id}`                       → fire immediately
 //! - `history`      args `{limit?, schedule_id?}`              → tail of schedule_events.yaml
+//!
+//! NO IDLE WAKEUPS (owner, 2026-10-08): the fire loop sleeps until the EARLIEST
+//! due schedule, or — none due, or the scheduler paused — until something
+//! changes: a schedule added, removed, paused or resumed, or the scheduler's own
+//! record updated (`paused`). An idle scheduler wakes never. Python `_tick_loop`.
 //!
 //! A SCHEDULE FIRES AS THE SCHEDULER. The tick loop is a task the scheduler's own
 //! `boot` spawned, so every fire is the scheduler's send: the gate judges the
@@ -46,13 +51,14 @@ use async_trait::async_trait;
 use fantastic_bundle::{py_repr_value, py_str, py_truthy};
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
 use fantastic_kernel::yaml_io;
-use fantastic_kernel::{bad, AgentId, Item, Kernel, Status};
+use fantastic_kernel::{bad, AgentId, Item, Kernel, Status, SubscriberToken};
 use futures_util::FutureExt;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::sync::Notify;
 
 /// `handler_module` key under which this bundle registers.
 pub const HANDLER_MODULE: &str = "scheduler.tools";
@@ -64,9 +70,33 @@ pub const README: &str = include_str!("readme.md");
 /// Matches Python's `HISTORY_MAX`.
 pub const HISTORY_MAX: usize = 500;
 
-/// Seconds between tick-loop sweeps when the record does not name one
-/// (python `DEFAULT_TICK_SEC`).
-pub const DEFAULT_TICK_SEC: f64 = 1.0;
+/// Per scheduler: what wakes its fire loop (a change), and the state tap that
+/// pokes it when the scheduler's own record is updated. Python `_wake`/`_unsub`.
+type Wakes = HashMap<AgentId, (Arc<Notify>, Option<SubscriberToken>)>;
+static WAKES: OnceLock<Mutex<Wakes>> = OnceLock::new();
+
+fn wakes() -> std::sync::MutexGuard<'static, Wakes> {
+    WAKES
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn wake_of(agent_id: &AgentId) -> Arc<Notify> {
+    Arc::clone(
+        &wakes()
+            .entry(agent_id.clone())
+            .or_insert_with(|| (Arc::new(Notify::new()), None))
+            .0,
+    )
+}
+
+/// Something the fire loop waits on changed: it recomputes when to wake.
+fn poke(agent_id: &AgentId) {
+    if let Some((n, _)) = wakes().get(agent_id) {
+        n.notify_one();
+    }
+}
 
 /// Live tick tasks keyed by scheduler agent id. `boot` populates; `on_delete`
 /// (and an operator's `cancel` on the row) aborts.
@@ -179,22 +209,6 @@ impl Bundle for SchedulerBundle {
         Some(README)
     }
 
-    /// Refuse a `tick_sec` that is not a positive number at WRITE time — the
-    /// point of the mistake. Silently defaulting it (as the tick loop's
-    /// `unwrap_or(1.0)` did) turns an operator's typo into a behaviour change
-    /// nobody is told about.
-    fn validate_meta(
-        &self,
-        meta: &Map<String, Value>,
-        record: &Map<String, Value>,
-    ) -> Option<String> {
-        let raw = meta.get("tick_sec").or_else(|| record.get("tick_sec"))?;
-        match raw.as_f64() {
-            Some(v) if v > 0.0 => None,
-            _ => Some("scheduler: tick_sec must be a positive number of seconds".to_string()),
-        }
-    }
-
     async fn handle(
         &self,
         agent_id: &AgentId,
@@ -237,6 +251,9 @@ impl Bundle for SchedulerBundle {
         // used to list and fire the old schedules (python fixed 2026-09-20).
         SCHEDULE_CACHE.lock().remove(agent_id);
         shutdown_tick(agent_id, kernel).await;
+        if let Some((_, Some(token))) = wakes().remove(agent_id) {
+            kernel.remove_state_subscriber(token);
+        }
         Ok(())
     }
     /// Shutdown frees what delete frees — declared, never a fallback (audit c9).
@@ -287,18 +304,6 @@ fn meta_value(agent_id: &AgentId, kernel: &Kernel, key: &str) -> Option<Value> {
     let agent = kernel.agents.get(agent_id).map(|e| Arc::clone(&e))?;
     let meta = agent.meta.read().expect("meta poisoned");
     meta.get(key).cloned()
-}
-
-/// The record's sweep interval, python's `_tick_sec`.
-///
-/// A bool, a non-number or a non-positive value is the DOCUMENTED DEFAULT (the write
-/// gate already refused those), and there is NO floor: a tick faster than a tenth of
-/// a second is what the operator asked for (A5.12).
-fn tick_sec(agent_id: &AgentId, kernel: &Kernel) -> f64 {
-    match meta_value(agent_id, kernel, "tick_sec") {
-        Some(Value::Number(n)) => n.as_f64().filter(|v| *v > 0.0).unwrap_or(DEFAULT_TICK_SEC),
-        _ => DEFAULT_TICK_SEC,
-    }
 }
 
 /// A meta flag under PYTHON TRUTHINESS (A5.11) — `paused: "no"` is a paused
@@ -416,10 +421,13 @@ async fn load_schedules(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Vec<Value> 
         Some(Ok(Value::Array(items))) => items,
         _ => Vec::new(),
     };
+    // FIRST FILL WINS: a verb that loaded and wrote while this read was in flight
+    // already holds the cache — the read must not replace it with the older list.
     SCHEDULE_CACHE
         .lock()
-        .insert(agent_id.clone(), parsed.clone());
-    parsed
+        .entry(agent_id.clone())
+        .or_insert(parsed)
+        .clone()
 }
 
 /// Write the schedules out — RAM CACHE FIRST (A5.9).
@@ -502,51 +510,60 @@ fn parse_events(raw: &str) -> Vec<Value> {
 // ── tick loop ───────────────────────────────────────────────────────
 
 async fn tick_loop(agent_id: AgentId, kernel: Arc<Kernel>) {
+    let wake = wake_of(&agent_id);
     loop {
-        // py reads the record FIRST and returns when it is gone, then sleeps, then
-        // checks `paused`.
         if kernel.agents.get(&agent_id).is_none() {
             return; // agent was deleted; exit cleanly
         }
-        tokio::time::sleep(Duration::from_secs_f64(tick_sec(&agent_id, &kernel))).await;
-        if meta_truthy(&agent_id, &kernel, "paused") {
-            continue;
-        }
-        let now = now_secs();
-        let mut schedules = load_schedules(&agent_id, &kernel).await;
-        let mut due: Vec<Value> = Vec::new();
-        for sch in schedules.iter_mut() {
-            if sch.get("paused").is_some_and(py_truthy) {
+        let mut delay: Option<f64> = None;
+        if !meta_truthy(&agent_id, &kernel, "paused") {
+            let now = now_secs();
+            let mut schedules = load_schedules(&agent_id, &kernel).await;
+            let mut due: Vec<Value> = Vec::new();
+            for sch in schedules.iter_mut() {
+                if sch.get("paused").is_some_and(py_truthy) {
+                    continue;
+                }
+                let next_run = sch.get("next_run").and_then(Value::as_f64).unwrap_or(0.0);
+                if now < next_run {
+                    delay = Some(delay.map_or(next_run - now, |d: f64| d.min(next_run - now)));
+                    continue;
+                }
+                // Persist BEFORE the fire: run_count/next_run are bumped and saved
+                // first, so a crash inside the fire window does not re-fire the same
+                // tick on reboot (at-most-once restart semantics).
+                let count = sch.get("run_count").and_then(Value::as_u64).unwrap_or(0);
+                let interval = sch
+                    .get("interval_seconds")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(60.0);
+                sch["run_count"] = json!(count + 1);
+                sch["next_run"] = json!(now + interval);
+                due.push(sch.clone());
+            }
+            if !due.is_empty() {
+                if let Err(e) = save_schedules(&agent_id, &kernel, &schedules).await {
+                    // python `logger.warning("scheduler %s: persist failed: %s", sid,
+                    // err.get("error"))` — an ABSENT `error` key reads `None`.
+                    log_line(format!(
+                        "scheduler {agent_id}: persist failed: {}",
+                        py_str(e.get("error").unwrap_or(&Value::Null))
+                    ));
+                }
+                fire_many(&agent_id, &kernel, &due).await;
                 continue;
             }
-            let next_run = sch.get("next_run").and_then(Value::as_f64).unwrap_or(0.0);
-            if now < next_run {
-                continue;
+        }
+        // Until the earliest due fire, or a change — never on a fixed tick.
+        match delay {
+            Some(d) => {
+                tokio::select! {
+                    () = tokio::time::sleep(Duration::from_secs_f64(d.max(0.0))) => {}
+                    () = wake.notified() => {}
+                }
             }
-            // Persist BEFORE the fire: run_count/next_run are bumped and saved
-            // first, so a crash inside the fire window does not re-fire the same
-            // tick on reboot (at-most-once restart semantics).
-            let count = sch.get("run_count").and_then(Value::as_u64).unwrap_or(0);
-            let interval = sch
-                .get("interval_seconds")
-                .and_then(Value::as_f64)
-                .unwrap_or(60.0);
-            sch["run_count"] = json!(count + 1);
-            sch["next_run"] = json!(now + interval);
-            due.push(sch.clone());
+            None => wake.notified().await,
         }
-        if due.is_empty() {
-            continue;
-        }
-        if let Err(e) = save_schedules(&agent_id, &kernel, &schedules).await {
-            // python `logger.warning("scheduler %s: persist failed: %s", sid,
-            // err.get("error"))` — an ABSENT `error` key reads `None`.
-            log_line(format!(
-                "scheduler {agent_id}: persist failed: {}",
-                py_str(e.get("error").unwrap_or(&Value::Null))
-            ));
-        }
-        fire_many(&agent_id, &kernel, &due).await;
     }
 }
 
@@ -676,20 +693,40 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
     json!({
         "id": agent_id.as_str(),
         "sentence": "Recurring-task scheduler.",
-        "tick_sec": tick_sec(agent_id, kernel),
         "paused": meta_truthy(agent_id, kernel, "paused"),
         "running": running,
     })
 }
 
 async fn boot_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
+    // The scheduler's own record changed (`paused`, by a verb or an update_agent):
+    // the loop recomputes when to wake.
+    {
+        let mut w = wakes();
+        let slot = w
+            .entry(agent_id.clone())
+            .or_insert_with(|| (Arc::new(Notify::new()), None));
+        if slot.1.is_none() {
+            let me = agent_id.clone();
+            let n = Arc::clone(&slot.0);
+            slot.1 = Some(kernel.add_state_subscriber(Arc::new(move |ev: &Value, _| {
+                if ev.get("agent_id").and_then(Value::as_str) == Some(me.as_str())
+                    && ev.get("kind").and_then(Value::as_str) == Some("updated")
+                {
+                    n.notify_one();
+                }
+            })));
+        }
+    }
     let mut tasks = SCHEDULER_TASKS.lock();
     if let Some(existing) = tasks.get(agent_id) {
         // LIVENESS COMES FROM THE TABLE, which holds only running work.
         if kernel.tasks.contains(existing) {
             // py `return {"running": True}` on BOTH branches (A5.4): boot is
             // idempotent and says nothing else, so a caller cannot branch on
-            // whether it was first.
+            // whether it was first. A boot of a running loop makes it look again.
+            drop(tasks);
+            poke(agent_id);
             return json!({"running": true});
         }
     }
@@ -791,6 +828,7 @@ async fn schedule_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel
         drop(cache);
         return persist_err("schedule", &e);
     }
+    poke(agent_id);
     json!({"schedule_id": sch["id"], "schedule": sch})
 }
 
@@ -818,6 +856,7 @@ async fn unschedule_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kern
         if let Err(e) = save_schedules(agent_id, kernel, &schedules).await {
             return persist_err("unschedule", &e);
         }
+        poke(agent_id);
     }
     json!({"removed": removed, "schedule_id": sid})
 }
@@ -854,6 +893,7 @@ async fn set_paused(
             if let Err(e) = save_schedules(agent_id, kernel, &schedules).await {
                 return persist_err(verb, &e);
             }
+            poke(agent_id);
         }
         return json!({flag_key: touched > 0, "schedule_id": sid});
     }

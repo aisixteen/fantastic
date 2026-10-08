@@ -607,28 +607,23 @@ extension Kernel {
     /// `timed_out` and the execution KEEPS RUNNING, because a joiner does not own
     /// it and killing another caller's work would be a surprise.
     func joinExecution(_ execId: Int64, timeout: Deadline?, box: OutcomeBox) async -> Outcome {
-        let deadline = timeout.map { Date().addingTimeInterval($0.seconds) }
-        while true {
-            // THE FUTURE THE OWNER SETTLES, held since launch: the execution may
-            // already have been flushed and forgotten by the time we look.
-            if let o = box.outcome { return o }
-            if let d = deadline, Date() >= d {
-                // Python `_agent.py`: `pid` is the JOINED execution's id (not
-                // nil — the caller can still `cancel`/`ps` it), the text names
-                // it via `{d.pid!r}` (a bare int repr, no quotes) and carries
-                // `task_id=d.pid`. The execution ITSELF keeps running — a
-                // joiner does not own it.
-                return Outcome(
-                    pid: TaskId(execId), status: .timedOut,
-                    result: Refusal.make(
-                        Refusal.timeout,
-                        "send: joined execution \(execId) did not settle within this "
-                            + "caller's \(timeout!.text)s wait; the execution itself "
-                            + "keeps running",
-                        extra: [("task_id", .integer(execId))]))
-            }
-            try? await Task.sleep(nanoseconds: 2_000_000)
-        }
+        // THE FUTURE THE OWNER SETTLES, held since launch: the execution may
+        // already have been flushed and forgotten by the time we look. Waited on,
+        // never polled: `set` wakes the joiner.
+        if let o = await box.wait(upTo: timeout?.seconds) { return o }
+        // Only an expiry gets here (no timeout waits for the outcome). Python
+        // `_agent.py`: `pid` is the JOINED execution's id (not nil — the caller
+        // can still `cancel`/`ps` it), the text names it via `{d.pid!r}` (a bare
+        // int repr, no quotes) and carries `task_id=d.pid`. The execution ITSELF
+        // keeps running — a joiner does not own it.
+        return Outcome(
+            pid: TaskId(execId), status: .timedOut,
+            result: Refusal.make(
+                Refusal.timeout,
+                "send: joined execution \(execId) did not settle within this "
+                    + "caller's \(timeout!.text)s wait; the execution itself "
+                    + "keeps running",
+                extra: [("task_id", .integer(execId))]))
     }
 }
 
