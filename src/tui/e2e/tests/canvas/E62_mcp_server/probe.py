@@ -1,6 +1,6 @@
 """E62 mcp_server — ONE remote MCP server as a host agent, from the canvas:
 
-a) the double-click's `mcp server` tile places the add form;
+a) the double-click's `mcp connector` tile places the add form;
 b) url + key → `add_mcp` on the canvas's node: an `mcp_client.tools` agent under
    `canvas_root`, naming its key's ref — the key itself on no record (it is in
    the user's credentials file, bound to the server's host);
@@ -63,7 +63,7 @@ def main() -> bool:
         async with rig.page(1600, 1000) as pg:
             await asyncio.sleep(1.5)
             # a) the tile → the form
-            await spot(pg, 400, 300, "mcp server")
+            await spot(pg, 400, 300, "mcp connector")
             r["form"] = bool(await pg.until("!!document.querySelector('.agent-frame .mcp-add input[name=url]')", 10))
             # b) url + key → add
             await pg.js(f"(()=>{{const f=document.querySelector('.mcp-add'); f.querySelector('input[name=url]').value={json.dumps(fake.url)}; f.querySelector('input[name=key]').value={json.dumps(key)}; f.requestSubmit()}})()")
@@ -88,7 +88,8 @@ def main() -> bool:
     try:
         asyncio.run(drive())
         # b) the agent, its ref, no key on any record
-        recs = [p for p in (rig.proj / ".fantastic" / "agents").rglob("mcp_*/agent.yaml")]
+        # the connector agents, under the canvas's node (not the `mcp` leg's own bridge)
+        recs = [p for p in (rig.proj / ".fantastic" / "agents").rglob("mcp_*/agent.yaml") if "canvas_root/agents/" in str(p)]
         info["agents"] = [str(p.relative_to(rig.proj)) for p in recs]
         import yaml
         rec = yaml.safe_load(recs[0].read_text()) if recs else {}

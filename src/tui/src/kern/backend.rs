@@ -116,7 +116,7 @@ impl BackendBundle {
     /// Whether `handler` makes an AI agent: its bundle's record names a memory
     /// store (`memory_store_id`, the field that makes one). Any other template
     /// is a plain HOST agent — a plugin (backend-owned views).
-    fn is_ai_handler(host: &Host, handler: &str) -> bool {
+    pub(crate) fn is_ai_handler(host: &Host, handler: &str) -> bool {
         host.kernel
             .bundles
             .catalog()

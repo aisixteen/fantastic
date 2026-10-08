@@ -27,7 +27,9 @@ runs:
       exit 8000
     frames:
       # no docked title: the live shell gives every row to the work
-      live: {contains: [fs_loader, exec, files, user, store, memory], lacks: [mcp], contains_block_title: false}
+      # the `mcp` leg is made at boot (owner 2026-10-08: it keeps the project's
+      # .mcp.json right before any client connects), with its bridge
+      live: {contains: [fs_loader, exec, files, user, store, memory, mcp], contains_block_title: false}
     after_exit:
       exit_code: 0
       lock_released: true
@@ -39,7 +41,11 @@ runs:
         - .fantastic/agents/user/agents/store/agent.yaml
         - .fantastic/agents/user/agents/memory/agent.yaml
         - .fantastic/memory.db
-      files_absent: [.fantastic/agents/user/agents/mcp/agent.yaml, .fantastic/messages.yaml, .fantastic/ledger.json]
+        - .fantastic/agents/user/agents/mcp/agent.yaml
+        - .fantastic/agents/user/agents/mcp_config/agent.yaml
+        - .fantastic/prompt.md
+        - .mcp.json
+      files_absent: [.fantastic/messages.yaml, .fantastic/ledger.json]
 
   # ── 2 · the same directory: no intro, straight to the tree, log grows ──────
   #       …and an agent with no view of its own opens in the DEFAULT view

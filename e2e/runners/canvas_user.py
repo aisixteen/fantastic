@@ -103,12 +103,12 @@ async def place(p: Page, kind: str, x: int, y: int) -> bool:
 
 def members(cwd: Path, under: str = "view_root") -> list[str]:
     """The cells of page view `under` (default: the root view) on disk — its
-    background is not a cell."""
+    background is not a cell, nor a double click's ephemeral selector."""
     d = cwd / ".fantastic" / "web" / "agents" / "canvas" / "agents" / "view_root" / "agents"
     if under != "view_root":
         d = d / under / "agents"
     return sorted(f.parent.name for f in d.glob("*/agent.yaml")
-                  if (yaml.safe_load(f.read_text()) or {}).get("handler_module") != "background.ts") if d.is_dir() else []
+                  if (yaml.safe_load(f.read_text()) or {}).get("handler_module") not in ("background.ts", "selector.ts")) if d.is_dir() else []
 
 
 async def wait_for(cond, timeout: float = 8.0) -> bool:
