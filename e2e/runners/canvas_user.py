@@ -89,7 +89,8 @@ async def tab(b: Browser, url: str, token: str | None = None, *, stack) -> Page:
 
 
 async def ready(p: Page) -> bool:
-    return await p.until("!!document.getElementById('canvas') && !!document.querySelector('#toolbar')", 20)
+    # nothing floats (owner 2026-10-08): the canvas is drawn once its world is
+    return await p.until("!!document.getElementById('canvas') && !!document.querySelector('.canvas-world')", 20)
 
 
 async def place(p: Page, kind: str, x: int, y: int) -> bool:

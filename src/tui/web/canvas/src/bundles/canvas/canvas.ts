@@ -9,7 +9,7 @@ import { aiView } from "../ai_view/ai_view.ts";
 import { setupView } from "../setup_view/setup_view.ts";
 import { reflectView } from "../reflect_view/reflect_view.ts";
 import { streamView } from "../stream_view/stream_view.ts";
-import { CODING_AGENTS, openActionPopup } from "./action_popup.ts";
+import { CODING_AGENTS, exactLine, openActionPopup } from "./action_popup.ts";
 import { ROOT_VIEW, VIEW, VIEW_VERBS, hostViewCell } from "./canvas_agent.ts";
 import { containerOf, hashFor, isContainer, onMac, pathTo, viewFromHash } from "./viewer.ts";
 import type { Lookup } from "./viewer.ts";
@@ -20,6 +20,7 @@ import { BACKGROUND, BACKGROUND_ID, bgCallableBy, viewToBg } from "./background_
 const CELL_VERBS = ["reflect", "get_html", "set_html", "emit"] as const;
 /** What a cell's AI may ask the background. */
 const BG_VERBS = ["set_bg", "clear_bg", "get_bg", "reflect"] as const;
+import { MCP_ADD_VIEW, mcpAddView, mcpView, setMcpDeps } from "../mcp_view/mcp_view.ts";
 import { CANVASES_VIEW, SIDEBAR_VIEW, canvasesView, renderSidebars, setSideDeps, sidebarView } from "../side_view/side_view.ts";
 import type { Dialog, TreeNode } from "./sidebar.ts";
 import type { Pick, Presets } from "./action_popup.ts";
@@ -36,7 +37,7 @@ import type { GlHost, GlView } from "./gl_host.ts";
 // kernel sends. The kernel knows none of this.
 
 // inline view registry — host handler_module → TS view bundle
-const VIEW_BUNDLES: readonly ViewBundle[] = [terminalView, aiView, htmlView, agentViewBundle, setupView, reflectView, streamView, sidebarView, canvasesView];
+const VIEW_BUNDLES: readonly ViewBundle[] = [terminalView, aiView, htmlView, agentViewBundle, setupView, reflectView, streamView, sidebarView, canvasesView, mcpView, mcpAddView];
 // A PAGE BUNDLE's instance (handler_module = its folder name) is drawn by its
 // BASE's view (`base: html_agent` → `html_agent.ts`), read off the catalog row.
 function viewFor(handlerModule: unknown, kernel: Kernel): ViewBundle | undefined {
@@ -47,13 +48,6 @@ function viewFor(handlerModule: unknown, kernel: Kernel): ViewBundle | undefined
   if (row === undefined || row.error !== undefined || typeof row.base !== "string") return undefined;
   const base = `${row.base}.ts`;
   return VIEW_BUNDLES.find((b) => b.handles.includes(base));
-}
-
-/** The exec leg's `allowed` entry for EXACTLY `argv` (shlex-joined, regex-
- *  escaped) — `kern/terminal.rs` `line_record`. */
-export function exactLine(argv: string[]): string {
-  const quote = (a: string): string => (a !== "" && /^[\w@%+=:,./-]+$/.test(a) ? a : `'${a.replace(/'/g, `'"'"'`)}'`);
-  return argv.map(quote).join(" ").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 // THE VIEW A DOUBLE CLICK SPAWNS: a terminal. What it spawns on the host is the
@@ -1094,6 +1088,32 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     const rec = a.record() as Rec;
     return { id: a.id, handler: String(rec["handler_module"] ?? ""), rec, children: [...a.children.values()].map(toNode) };
   };
+  // AN MCP SERVER (`mcp_view.ts`): the form adds it on this canvas's node, then
+  // the agent's own view takes the form's place
+  setMcpDeps({
+    add: async (url, key) => {
+      const r = (await host.callHost(BACKEND, { type: "add_mcp", url, ...(key ? { key } : {}) } as unknown as Payload)) as Rec | null;
+      if (typeof r?.["id"] === "string") {
+        placing.add(r["id"]);
+        await syncRegistry();
+        return { id: r["id"] };
+      }
+      return { error: String(r?.["error"] ?? "add_mcp: no answer") };
+    },
+    show: (id, cell) => {
+      const at = kernel.get(cell)?.meta ?? {};
+      const rec = registry.get(id);
+      if (rec === undefined) return;
+      const { handler, meta } = hostViewCell(id, rec);
+      kernel.remove(cell);
+      kernel.register(new Agent({
+        id: `view_${crypto.randomUUID().slice(0, 8)}`,
+        parentId: containerNow(),
+        handlerModule: handler,
+        meta: { ...meta, x: at["x"] ?? 0, y: at["y"] ?? 0, width: 460, height: 420 } as unknown as Payload,
+      }));
+    },
+  });
   // THE SIDEBAR and CANVAS-LIST cells (`side_view.ts`) read the canvas through
   // this wiring; none is made by default — the double-click places them
   setSideDeps({
@@ -1255,6 +1275,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
         // a CODING AGENT: the human's own program, started in a terminal cell
         // (its exec agent runs EXACTLY that program, as `run COMMAND` does)
         else if (p.kind === "coding") void spawnPairAt(DEFAULT_VIEW, w, { width: 760, height: 480 }, { command: [p.path], display_name: p.name }, { allowed: [exactLine([p.path])] });
+        else if (p.kind === "mcp") spawnPageCellAt(w, MCP_ADD_VIEW, "mcp_add", 420, 260);
         else if (p.kind === "sidebar") spawnPageCellAt(w, SIDEBAR_VIEW, "sidebar", 320, 520);
         else if (p.kind === "canvases") spawnPageCellAt(w, CANVASES_VIEW, "canvases", 260, 300);
         else if (p.kind === "plugin") void spawnPluginAt(w, p.template);

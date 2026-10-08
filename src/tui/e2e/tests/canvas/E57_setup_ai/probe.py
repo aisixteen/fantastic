@@ -52,14 +52,15 @@ def main() -> bool:
             # the default template answers in a NEW cell
             done1, a1 = await __import__('_lib.canvas_live', fromlist=['ask']).ask(pg, 1150, 300, "Reply with exactly one word: hello",
                                                                                   rig.budget(rig.limits["total_seconds"]), rig.limits["quiet_seconds"])
-            # the written agent answers from the sidebar
+            # the written agent answers from the sidebar (a cell, placed)
+            await __import__('_lib.canvas_live', fromlist=['open_sidebar']).open_sidebar(pg, 930, 700)
             for _ in range(6):
-                n = await pg.js("(()=>{const t=[...document.querySelectorAll('#chats .agents-tree li .tw')].filter(x=>x.textContent==='▸');t.forEach(x=>x.click());return t.length})()")
+                n = await pg.js("(()=>{const t=[...document.querySelectorAll('.side .agents-tree li .tw')].filter(x=>x.textContent==='▸');t.forEach(x=>x.click());return t.length})()")
                 await asyncio.sleep(0.8)
                 if not n:
                     break
             before = await pg.js("document.querySelectorAll('.chat-view').length")
-            await pg.js("[...document.querySelectorAll('#chats .agents-tree li.agent')].find(l=>l.querySelector('.nm')?.textContent==='helper')?.click()")
+            await pg.js("[...document.querySelectorAll('.side .agents-tree li.agent')].find(l=>l.querySelector('.nm')?.textContent==='helper')?.click()")
             await pg.until(f"document.querySelectorAll('.chat-view').length > {before}", 15)
             await asyncio.sleep(2)
             await say(pg, "Reply with exactly one word: ready", cell=before)

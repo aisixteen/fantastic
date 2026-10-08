@@ -793,6 +793,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "fantastic-mcp-client"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64",
+ "fantastic-ai-core",
+ "fantastic-bundle",
+ "fantastic-kernel",
+ "futures-util",
+ "reqwest",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "fantastic-ollama-backend"
 version = "0.1.0"
 dependencies = [
@@ -897,6 +912,7 @@ dependencies = [
  "fantastic-file",
  "fantastic-foundation-models-backend",
  "fantastic-kernel",
+ "fantastic-mcp-client",
  "fantastic-ollama-backend",
  "fantastic-py-agent",
  "fantastic-responses-backend",

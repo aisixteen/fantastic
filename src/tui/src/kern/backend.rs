@@ -367,6 +367,52 @@ impl BackendBundle {
         host.operator("kernel", json!({"type": "delete_agent", "id": id})).await.result
     }
 
+    /// `add_mcp {url, key?}` — ONE remote MCP server as an agent (`mcp_client`):
+    /// the key, when given, stored in the credential store bound to the url's
+    /// host; the agent made under this node naming it, and granted its `get`.
+    async fn add_mcp(host: &Host, me: &AgentId, p: &Value) -> Value {
+        const MCP: &str = fantastic_mcp_client::HANDLER_MODULE;
+        let url = p.get("url").and_then(Value::as_str).unwrap_or("").trim().to_string();
+        if url.is_empty() {
+            return refuse("bad_arg", "add_mcp: url (the server's MCP endpoint) required", "");
+        }
+        let key = p.get("key").and_then(Value::as_str).unwrap_or("").trim().to_string();
+        if !key.is_empty() {
+            if let Err(e) = crate::kern::keys::store(host, MCP, &url, &key).await {
+                return refuse("bad_arg", format!("add_mcp: the key: {e}"), "");
+            }
+        }
+        let host_part = crate::kern::keys::host_of(&url).unwrap_or_default();
+        let slug: String = host_part.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
+        let id = format!("mcp_{}_{}", slug.trim_matches('_'), hex8());
+        let mut spec = Map::new();
+        spec.insert("type".into(), json!("create_agent"));
+        spec.insert("parent_id".into(), json!(me.0));
+        spec.insert("id".into(), json!(id));
+        spec.insert("handler_module".into(), json!(MCP));
+        spec.insert("url".into(), json!(url));
+        spec.insert("can_call".into(), json!({}));
+        if let Ok(r) = crate::kern::keys::ref_for(MCP, &url) {
+            if crate::kern::keys::has(host, &r) {
+                spec.insert("credentials".into(), json!({"store": crate::kern::keys::STORE, "ref": r}));
+            }
+        }
+        crate::kern::keys::grant_on_create(&mut spec);
+        // the store admits it BEFORE it exists: `create_agent` boots it, and its
+        // boot already lists the server's tools with the key
+        if let Err(e) = crate::kern::keys::wire_record(host, &id, &spec).await {
+            return refuse("not_found", format!("add_mcp: {e}"), "");
+        }
+        let r = host.operator("kernel", Value::Object(spec)).await.result;
+        if let Some(e) = r.get("error").and_then(Value::as_str) {
+            return refuse("bad_arg", format!("add_mcp: {e}"), "");
+        }
+        if let Err(e) = crate::kern::reach::granted(host, &id).await {
+            return refuse("not_found", format!("add_mcp: {e}"), "");
+        }
+        json!({"id": id})
+    }
+
     /// `canvases` — every canvas, the main one (declarative `main: true`) first.
     fn canvases(host: &Host) -> Value {
         let mut out: Vec<Value> = crate::kern::web::canvases(host)
@@ -515,6 +561,7 @@ impl Bundle for BackendBundle {
                     "reopen": "args: id:str (a kept dialog), stamp:dict?, peer_grants:dict? (as spawn). The live AI if another cell has it, else the same AI re-made here, its history intact. {id, root, template, name, shared}.",
                     "new_canvas": "args: name:str (req). A PEER canvas `canvas_<name>` beside this one (flat — never nested): its own page records and page kernel, its own cells' backends. Open it at the page URL with ?canvas=<id>. {id}.",
                     "canvases": "No args. Every canvas, the main one first: {canvases: [{id, loader, main, name}]}.",
+                    "add_mcp": "args: url:str (req — the server's MCP endpoint), key:str? (a static API key, sent as Bearer to that host only). One remote MCP server as an agent under this canvas: its tools are its verbs. The key is stored in the credential store (choose where keys are kept first). {id}.",
                 })
     }
 
@@ -544,6 +591,7 @@ impl Bundle for BackendBundle {
                         Err(e) => refuse("bad_arg", e, "name it: new_canvas {name: \"research\"}"),
                     },
                     "canvases" => Self::canvases(&host),
+                    "add_mcp" => Self::add_mcp(&host, agent_id, payload).await,
                     _ => {
                         let mut r = refuse("unhandled", format!("canvas: unknown type {verb:?}"), "");
                         r["verb"] = json!(verb);

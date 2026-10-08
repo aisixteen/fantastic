@@ -23,6 +23,7 @@ export type Pick =
   | { kind: "demo" }
   | { kind: "sidebar" }
   | { kind: "canvases" }
+  | { kind: "mcp" }
   | { kind: "chat"; id: string; name: string }
   | { kind: "plugin"; template: string }
   | { kind: "bundle"; starter: string }
@@ -49,8 +50,15 @@ export const CODING_AGENTS: ReadonlyArray<{ name: string; icon: Icon }> = [
   { name: "opencode", icon: "opencode" },
 ];
 
+/** The exec leg's `allowed` entry for EXACTLY `argv` (shlex-joined, regex-
+ *  escaped) — `kern/terminal.rs` `line_record`. */
+export function exactLine(argv: string[]): string {
+  const quote = (a: string): string => (a !== "" && /^[\w@%+=:,./-]+$/.test(a) ? a : `'${a.replace(/'/g, `'"'"'`)}'`);
+  return argv.map(quote).join(" ").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 export type Section = "page" | "host" | "coding" | "ai" | "chats";
-export type Icon = "ask" | "terminal" | "html" | "stream" | "agent" | "template" | "chat" | "demo" | "sidebar" | "canvases" | "claude" | "codex" | "aider" | "opencode";
+export type Icon = "ask" | "terminal" | "html" | "stream" | "agent" | "template" | "chat" | "demo" | "sidebar" | "canvases" | "claude" | "codex" | "aider" | "opencode" | "mcp";
 
 export interface Tile {
   icon: Icon;
@@ -69,6 +77,8 @@ const KINDS: Array<[string, Pick, Icon, Section]> = [
   // a NEW python agent: a project bundle folder from the CLI's starter, one
   // instance placed — edit its folder, the change takes effect at once
   ["python agent", { kind: "bundle", starter: "python_agent" }, "template", "host"],
+  // ONE remote MCP server as a host agent: its tools are its verbs
+  ["mcp server", { kind: "mcp" }, "mcp", "host"],
   ["html", { kind: "html" }, "html", "page"],
   ["stream", { kind: "stream" }, "stream", "page"],
   ["demo", { kind: "demo" }, "demo", "page"],
@@ -149,6 +159,7 @@ const PATH: Record<Icon, string> = {
   codex: '<path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M9 10l-2 2 2 2M15 10l2 2-2 2"/>',
   aider: '<rect x="3" y="6" width="18" height="12" rx="2"/><path d="M8 10v4M16 10v4M11 12h2"/>',
   opencode: '<path d="M8 7l-5 5 5 5M16 7l5 5-5 5M14 4l-4 16"/>',
+  mcp: '<circle cx="6" cy="12" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M8.3 11l7.4-3.8M8.3 13l7.4 3.8"/>',
   canvases: '<rect x="3" y="5" width="8" height="6" rx="1"/><rect x="13" y="5" width="8" height="6" rx="1"/><rect x="3" y="13" width="8" height="6" rx="1"/><rect x="13" y="13" width="8" height="6" rx="1"/>',
   chat: '<path d="M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v8a2.5 2.5 0 0 1-2.5 2.5H10l-4.5 4v-4H6.5A2.5 2.5 0 0 1 4 13.5z"/>',
 };
@@ -166,6 +177,8 @@ const CSS = `
     font: 13px system-ui, sans-serif; color: #e5e1ee; overflow: hidden; }
   .action-popup input { width: 100%; box-sizing: border-box; background: transparent; border: 0; outline: none;
     color: #fff; font: 20px system-ui, sans-serif; padding: 14px 16px 12px 46px; }
+  .action-popup .title { padding: 11px 16px 0; font-size: 11px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: rgba(220,230,245,0.55); }
+  .action-popup .ask { position: relative; }
   .action-popup .spark { position: absolute; left: 14px; top: 13px; color: #b78cff; }
   .action-popup .grid { border-top: 1px solid rgba(255,255,255,0.08); padding: 6px 10px 8px; max-height: 360px; overflow-y: auto; }
   .action-popup .sect { font-size: 10px; letter-spacing: .12em; text-transform: uppercase; color: rgba(220,230,245,0.42); padding: 8px 6px 4px; }
@@ -212,7 +225,13 @@ export function openActionPopup(opts: {
   const foot = document.createElement("div");
   foot.className = "foot";
   foot.textContent = "←↑↓→ pick · ⏎ go · esc close";
-  box.append(spark, input, grid, foot);
+  const title = document.createElement("div");
+  title.className = "title";
+  title.textContent = "Fantastic Canvas";
+  const ask = document.createElement("div");
+  ask.className = "ask";
+  ask.append(spark, input);
+  box.append(title, ask, grid, foot);
   document.body.appendChild(box);
 
   let sel = 0;

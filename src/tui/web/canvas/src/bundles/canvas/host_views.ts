@@ -34,6 +34,7 @@ export const RENDERERS: Record<string, string> = {
   chat: "ai_view.ts",
   html: "agent_view.ts",
   stub: "reflect_view.ts",
+  mcp: "mcp_view.ts",
 };
 
 /** The fixed grants a generic renderer needs on the agent it shows. */
@@ -41,9 +42,11 @@ const RENDERER_CALLS: Record<string, string[]> = {
   terminal: ["watch", "status", "start", "write", "ack", "resize", "output", "paste_image"],
   chat: ["watch", "reflect", "history", "status", "send", "stop"],
   stub: ["reflect"],
+  mcp: ["reflect", "boot", "watch"],
 };
 
 const EXEC = "exec_bridge.tools";
+const MCP = "mcp_client.tools";
 
 const str = (r: Rec, k: string): string | undefined => (typeof r[k] === "string" && r[k] !== "" ? (r[k] as string) : undefined);
 
@@ -67,6 +70,7 @@ export function viewOf(r: Rec): HostView {
     return out;
   }
   if (str(r, "handler_module") === EXEC) return { handler: RENDERERS["terminal"]!, kind: "terminal", calls: RENDERER_CALLS["terminal"]! };
+  if (str(r, "handler_module") === MCP) return { handler: RENDERERS["mcp"]!, kind: "mcp", calls: RENDERER_CALLS["mcp"]! };
   if (isAi(r)) return { handler: RENDERERS["chat"]!, kind: "chat", calls: RENDERER_CALLS["chat"]! };
   return { handler: RENDERERS["stub"]!, kind: "stub", calls: RENDERER_CALLS["stub"]! };
 }

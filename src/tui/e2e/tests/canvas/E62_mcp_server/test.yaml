@@ -1,0 +1,10 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint (the
+# plug names those). Scripted: no model.
+id: mcp_server
+group: canvas
+title: "an MCP server added from the double-click: its view lists its tools, its key is stored and sent, a tool answers"
+runner: probe.py
+costs: free
+limits:
+  seconds: 20
+env: {}

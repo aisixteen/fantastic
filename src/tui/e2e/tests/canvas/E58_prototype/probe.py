@@ -52,9 +52,12 @@ def main() -> bool:
         return max(numbers(await texts(pg)), default=0) == a
 
     async def by_ten(pg, secs: float) -> bool:
+        """Three successive multiples of 10 seen OVER TIME (a panel may show only
+        the latest value, so they need not be on the page at once)."""
+        seen: set[int] = set()
         for _ in range(int(secs * 2)):
-            ns = {n for n in numbers(await texts(pg)) if n > 0 and n % 10 == 0}
-            if any(n + 10 in ns and n + 20 in ns for n in ns):
+            seen |= {n for n in numbers(await texts(pg)) if n > 0 and n % 10 == 0}
+            if any(n + 10 in seen and n + 20 in seen for n in seen):
                 return True
             await asyncio.sleep(0.5)
         return False

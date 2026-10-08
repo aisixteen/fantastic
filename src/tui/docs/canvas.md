@@ -58,6 +58,11 @@ CODING AGENTS: the double-click lists `claude`, `codex`, `aider` and
 with its full path). A tile starts that program in a terminal cell, as you
 would in a shell; it runs with your own account and settings.
 
+MCP SERVERS: the double-click's `mcp server` adds one remote MCP server (its
+url, and a key if it needs one) as a host agent whose tools are its verbs — an
+AI calls a tool like any agent. Its cell shows the server and its tools; ⟳
+asks the server again. The key goes to your credential store, never a record.
+
 PAGE BUNDLES: `<a canvas's records root>/bundles/<name>/bundle.yaml` with
 `base: html_agent`, `sentence`, and `html: |` (the body each instance starts
 with). They load before the page tree; a changed `bundle.yaml` reloads at once.

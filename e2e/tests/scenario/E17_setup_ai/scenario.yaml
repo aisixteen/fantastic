@@ -31,7 +31,10 @@ runs:
       exit_code: 0
       lock_released: true
 
-  # ── the page: the record's required fields, xhigh + its budget, the key → WRITE ──
+  # ── the page: its lines are id, handler, the REQUIRED fields (endpoint,
+  # kv_overflow), may call, WRITE, then the optional ones in schema order (model,
+  # max_tokens, context_window, kv_slots… — the server fills what is left out,
+  # lib 2026-10-07); xhigh + its budget, the key → WRITE ──
   - name: write
     timeout: 300
     script: |
@@ -51,6 +54,10 @@ runs:
       type {vllm_endpoint}
       key enter
       key down
+      {vllm_kv_overflow_keys}
+      key down
+      key down
+      key down
       key enter
       type {vllm_model}
       key enter
@@ -60,15 +67,12 @@ runs:
       key enter
       key down
       key enter
-      type {vllm_kv_slots}
-      key enter
-      key down
-      {vllm_kv_overflow_keys}
-      key down
-      key enter
       type {ctx}
       key enter
       key down
+      key enter
+      type {vllm_kv_slots}
+      key enter
       key down
       key down
       key down
@@ -113,6 +117,11 @@ runs:
       key enter
       wait 800
       shot keyed
+      key up
+      key up
+      key up
+      key up
+      key up
       key up
       key up
       key up

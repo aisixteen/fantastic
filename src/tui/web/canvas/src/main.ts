@@ -45,6 +45,8 @@ function register(kernel: Kernel): void {
   kernel.registerBundle("stream_view.ts", () => null);
   kernel.registerBundle("sidebar_view.ts", () => null); // the chats + agent tree cell
   kernel.registerBundle("canvases_view.ts", () => null); // the canvas-list cell
+  kernel.registerBundle("mcp_view.ts", () => null); // an MCP server agent's view
+  kernel.registerBundle("mcp_add_view.ts", () => null); // the add-an-MCP-server form
 
   // Each frontend bundle declares its role via reflect (readme=true): the view
   // CLIENTS name the host CAPABILITY + verb surface they front (an LLM weaves the
@@ -161,6 +163,10 @@ setInterval(() => {
       if (seen.get(name) === sig) continue;
       const r = (await kernel.send([{ target: "kernel", payload: { type: "reload_bundle", name } as never }]))[0]?.result as Record<string, unknown> | undefined;
       if (typeof r?.["error"] === "string") console.error(`[canvas] page bundle ${name}: ${r["error"]}`);
+      // its instances restarted on the new load: their panels draw it again
+      for (const id of Array.isArray(r?.["instances"]) ? (r!["instances"] as unknown[]) : []) {
+        if (typeof id === "string") kernel.emit(id, { type: "reload_html" } as never);
+      }
     }
     seen = next;
   }, (e: unknown) => console.error("[canvas] page bundles:", e));

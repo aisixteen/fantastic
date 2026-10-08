@@ -1,0 +1,161 @@
+"""E61 canvas_cells — the canvas with nothing floating (owner 2026-10-08):
+
+a) a fresh canvas is its background alone — no top bar, no sidebar, no cell;
+b) the double-click's `host · coding agents` group lists a coding agent found on
+   PATH (`user path`), with its full path — a FAKE `claude` this probe puts
+   first on PATH (no real agent runs);
+c) its tile starts EXACTLY that program in a terminal cell, interactive (it
+   echoes what is typed);
+d) `sidebar` and `canvases` are cells placed from the double-click;
+e) `+ new canvas` in the canvases cell makes a PEER canvas and opens it: its own
+   page records and guid, empty, and its sidebar does not list the first
+   canvas's agents;
+f) a page bundle in that canvas's own folder runs its instance, and an edit of
+   its bundle.yaml re-renders it live."""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import sys
+from pathlib import Path
+
+import yaml
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from _lib.canvas_live import Rig, verdict, open_sidebar, spot  # noqa: E402
+
+FAKE = "claude"
+MARK = "FAKE-CODER-READY"
+PEER = "canvas_second"
+
+
+def main() -> bool:
+    rig = Rig(__file__, live=False)
+    rig.build()
+    rig.make_home(None)
+    # the fake coding agent, FIRST on the host's PATH
+    fake_dir = rig.proj.parent / "fakebin"
+    fake_dir.mkdir(parents=True, exist_ok=True)
+    fake = fake_dir / FAKE
+    fake.write_text(f"#!/bin/sh\necho {MARK}\nexec cat\n")
+    fake.chmod(0o755)
+    os.environ["PATH"] = f"{fake_dir}:{os.environ.get('PATH', '')}"
+    rig.init()
+    from _lib.dev_surface import frame_eval
+
+    r: dict = {}
+    secs = rig.limits["seconds"]
+    frames = "[...document.querySelectorAll('.agent-frame')]"
+
+    async def tile(pg, x: int, y: int, label: str) -> bool:
+        for c in (1, 2):
+            await pg.mouse("mousePressed", x, y, c)
+            await pg.mouse("mouseReleased", x, y, c)
+        await pg.until("!!document.querySelector('.action-popup .tile')", 10)
+        await asyncio.sleep(1.0)  # the coding agents come with the presets
+        return bool(await pg.js(f"(()=>{{const t=[...document.querySelectorAll('.action-popup .tile')].find(e=>(e.querySelector('.lb')||{{}}).textContent==={label!r}); if(!t) return false; t.dispatchEvent(new MouseEvent('mousedown',{{bubbles:true}})); return true}})()"))
+
+    async def tree_names(pg) -> list:
+        """Every agent name in the (last) sidebar's tree, fully unfolded."""
+        for _ in range(8):
+            n = await pg.js("(()=>{const t=[...document.querySelectorAll('.side .agents-tree li .tw')].filter(x=>x.textContent==='▸');t.forEach(x=>x.click());return t.length})()")
+            await asyncio.sleep(0.6)
+            if not n:
+                break
+        return await pg.js("[...document.querySelectorAll('.side .agents-tree li .nm')].map(e=>e.textContent)") or []
+
+    async def first() -> None:
+        async with rig.page(1600, 1000) as pg:
+            await asyncio.sleep(2)
+            # a) nothing floats
+            r["bare"] = await pg.js(f"!document.getElementById('toolbar') && !document.getElementById('chats') && {frames}.length === 0")
+            # b) the coding agents group, the fake first on PATH
+            for c in (1, 2):
+                await pg.mouse("mousePressed", 300, 300, c)
+                await pg.mouse("mouseReleased", 300, 300, c)
+            await pg.until("!!document.querySelector('.action-popup .tile')", 10)
+            await pg.until(f"[...document.querySelectorAll('.action-popup .tile')].some(e=>(e.querySelector('.lb')||{{}}).textContent==='{FAKE}')", 10)
+            hint = await pg.js(f"(()=>{{const t=[...document.querySelectorAll('.action-popup .tile[data-section=coding]')].find(e=>(e.querySelector('.lb')||{{}}).textContent==='{FAKE}'); return t ? t.title : null}})()")
+            r["coding_listed"] = isinstance(hint, str) and str(fake) in hint
+            await pg.cdp("Input.dispatchKeyEvent", type="keyDown", key="Escape", code="Escape", windowsVirtualKeyCode=27)
+            await asyncio.sleep(0.5)
+            # c) its tile starts exactly that program, interactive
+            r["coding_clicked"] = await tile(pg, 300, 300, FAKE)
+            r["coding_runs"] = bool(await pg.until(f"{frames}.some(f=>(f.querySelector('.xterm-rows')||{{}}).textContent?.includes('{MARK}'))", secs))
+            await pg.js("document.querySelector('.agent-frame .xterm-helper-textarea')?.focus()")
+            await pg.cdp("Input.insertText", text="ping-61")
+            await pg.cdp("Input.dispatchKeyEvent", type="keyDown", key="Enter", code="Enter", windowsVirtualKeyCode=13, text="\r")
+            r["coding_echoes"] = bool(await pg.until(f"{frames}.some(f=>((f.querySelector('.xterm-rows')||{{}}).textContent||'').split('ping-61').length > 2)", 10))
+            cell = await pg.js(f"{frames}.find(f=>(f.querySelector('.xterm-rows')||{{}}).textContent?.includes('{MARK}'))?.dataset.id")
+            rec = next((c for c in rig.cells() if c.get("id") == cell), {})
+            r["coding_cell"] = rec.get("command") == [str(fake)]
+            backend = rec.get("backend_id", "")
+            r["coding_exact"] = (rig.host_record(backend) or {}).get("allowed") == [str(fake).replace(".", "\\.")]
+            # d) sidebar + canvases cells from the double-click
+            r["sidebar_cell"] = await open_sidebar(pg, 1250, 80)
+            r["sidebar_lists_backend"] = bool(await pg.until(
+                f"(()=>{{[...document.querySelectorAll('.side .agents-tree li .tw')].filter(x=>x.textContent==='▸').forEach(x=>x.click()); return [...document.querySelectorAll('.side .agents-tree li .nm')].some(n=>n.textContent==={backend!r})}})()", 10))
+            await spot(pg, 1250, 700, "canvases")
+            r["canvases_cell"] = bool(await pg.until("document.querySelectorAll('.agent-frame li.canvas.here').length === 1", 10))
+            info["main_backend"] = backend
+            # e) + new canvas → a peer, opened
+            await pg.js("document.querySelector('.agent-frame .canvas-new').click()")
+            await pg.js("(()=>{const i=document.querySelector('.agent-frame .canvas-new input'); i.value='second'; i.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}))})()")
+            r["peer_opened"] = bool(await pg.until(f"location.search.includes('canvas={PEER}')", secs))
+            await pg.until("!!document.getElementById('canvas')", 20)
+            await asyncio.sleep(2)
+            r["peer_empty"] = await pg.js(f"{frames}.length === 0")
+            await open_sidebar(pg, 300, 200)
+            await asyncio.sleep(1.5)
+            names = await tree_names(pg)
+            info["peer_tree"] = names
+            r["peer_isolated"] = PEER in names and backend not in names
+
+    info: dict = {}
+    try:
+        asyncio.run(first())
+        main_rec = rig.proj / ".fantastic/web/agents/canvas/agent.yaml"
+        peer_rec = rig.proj / f".fantastic/web/{PEER}/agents/canvas/agent.yaml"
+        g1 = (yaml.safe_load(main_rec.read_text()) or {}).get("guid") if main_rec.exists() else None
+        g2 = (yaml.safe_load(peer_rec.read_text()) or {}).get("guid") if peer_rec.exists() else None
+        r["peer_own_records"] = bool(g1 and g2 and g1 != g2)
+        # f) a page bundle in the peer's own folder, an instance seeded, edited live
+        rig.stop()
+        folder = rig.proj / f".fantastic/web/{PEER}/bundles/card"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "bundle.yaml").write_text("base: html_agent\nsentence: A card.\nhtml: |\n  <p id=v>card-one</p>\n")
+        inst = rig.proj / f".fantastic/web/{PEER}/agents/canvas/agents/view_root/agents/card_1"
+        inst.mkdir(parents=True, exist_ok=True)
+        (inst / "agent.yaml").write_text(yaml.safe_dump({"id": "card_1", "parent_id": "view_root", "handler_module": "card",
+                                                         "x": 500, "y": 120, "width": 320, "height": 180}))
+        rig.start()
+
+        async def second() -> None:
+            async with rig.page(1600, 1000) as pg:
+                await pg.open(rig.url + f"?canvas={PEER}")
+                await pg.until("!!document.getElementById('canvas')", 20)
+
+                async def body_has(text: str) -> bool:
+                    for _ in range(secs * 2):
+                        if any(isinstance(v, str) and text in v for v in await frame_eval(pg, "document.body ? document.body.innerText : ''")):
+                            return True
+                        await asyncio.sleep(0.5)
+                    return False
+
+                r["bundle_runs"] = await body_has("card-one")
+                (folder / "bundle.yaml").write_text("base: html_agent\nsentence: A card.\nhtml: |\n  <p id=v>card-two</p>\n")
+                r["bundle_reloads"] = await body_has("card-two")
+
+        asyncio.run(second())
+    finally:
+        rig.stop()
+    ok = all(r.values())
+    rig.summary["checks"] = r
+    rig.summary["info"] = info
+    failed = [k for k, v in r.items() if not v]
+    return verdict(*rig.finish(ok, "all checks pass" if ok else f"failed: {', '.join(failed)}"))
+
+
+if __name__ == "__main__":
+    sys.exit(0 if main() else 1)

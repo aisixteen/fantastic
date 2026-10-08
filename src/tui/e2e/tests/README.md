@@ -40,6 +40,8 @@ with `src/tui/e2e/wipe.sh`.
 | E58 `prototype` | from an EMPTY canvas: a script, the exec agent that runs it, Start/Stop + a live log wired both ways; then a change (count by 10, the last value big) — scored by clicking | owner 2026-10-04: yes/no for the prototyping flow (a garage, no packaging) | live |
 | E59 `calc` | behind a SEEDED six-button panel (det, factor, simpson, roots, fib_mod, gcd_lcm) the AI writes `calc.py` + its own `test_calc.py` in one ask; scored by its tests, hidden vectors per function and every button | owner 2026-10-07: can the model write good multi-function code and test it |
 | E60 `bundle_flow` | a python agent's whole life: double-click → a new bundle + instance + view, live edits of logic (reload) and view (re-render), kept across a restart, copied into a release that lives on its own, then the AI updates the release and overwrites it from the working bundle | owner 2026-10-08: the a–f workflow; the AI must tell the BUNDLE (code) from the AGENT (an instance) |
+| E61 `canvas_cells` | scripted: a bare canvas (nothing floats), a FAKE coding agent first on PATH listed and launched exactly (it echoes), `sidebar` + `canvases` cells, `+ new canvas` opens an empty, isolated peer with its own records, a page bundle in its folder runs and re-renders on an edit | owner 2026-10-08: cells only, flat canvases, coding-agent launchers |
+| E62 `mcp_server` | scripted: the lib's fake MCP server; the `mcp server` tile's form adds it, its view lists the server and its tools, the key is stored in the home (on no record) and sent as Bearer on every request, a tool answers, ⟳ lists again | owner 2026-10-08: MCP servers on the canvas |
 
 ## Results — 2026-10-01, vLLM qwen3.8-27b, 2 lanes (the latest run of each)
 

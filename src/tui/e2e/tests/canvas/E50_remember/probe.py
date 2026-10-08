@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from _lib.canvas_live import Rig, verdict, answer, ask, html_cell, http_get, in_frame, say, spot, wait_quiet  # noqa: E402,F401
+from _lib.canvas_live import Rig, verdict, open_sidebar, answer, ask, html_cell, http_get, in_frame, say, spot, wait_quiet  # noqa: E402,F401
 
 def main() -> bool:
     rig = Rig(__file__)
@@ -33,8 +33,9 @@ def main() -> bool:
 
     async def second():
         async with rig.page() as pg:
-            await pg.until("document.querySelectorAll('#chats li.kept').length > 0", 20)
-            await pg.js("document.querySelector('#chats li.kept').click()")
+            await open_sidebar(pg, 900, 150)
+            await pg.until("document.querySelectorAll('.side li.kept').length > 0", 20)
+            await pg.js("document.querySelector('.side li.kept').click()")
             await pg.until("!!document.querySelector('.chat-view')", 20)
             await asyncio.sleep(2)
             await say(pg, "What is my build code?")
