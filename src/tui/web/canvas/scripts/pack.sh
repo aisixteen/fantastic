@@ -21,6 +21,7 @@ sh ../../../lib/ts/scripts/pack.sh src/bundle.ts "$ZIP" readme.md \
   --alias:three=./src/vendor/three.module.js \
   --alias:@xterm/xterm=./src/vendor/xterm.js \
   --alias:@xterm/addon-fit=./src/vendor/addon-fit.js \
+  --alias:@xterm/addon-webgl=./src/vendor/addon-webgl.js \
   --loader:.css=text \
   --loader:.html=text
 

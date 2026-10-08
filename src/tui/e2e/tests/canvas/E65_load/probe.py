@@ -91,11 +91,47 @@ def row_stats(proj: Path, after_ts: float, before_ts: float) -> dict:
     return out
 
 
+# a terminal's ON-SCREEN text, from xterm's own buffer (the WebGL renderer
+# draws to a canvas: there is no text in the DOM)
+TEXT = """((f)=>{const t=f&&f.querySelector('.frame-body')?.xterm; if(!t) return ''; const b=t.buffer.active; let s='';
+  for(let i=0;i<t.rows;i++){const l=b.getLine(b.viewportY+i); if(l) s+=l.translateToString(true)+'\\n';} return s;})"""
+# timed IN THE PAGE: the first RENDER (xterm's onRender) after which the marker is on screen
 ARM = """(()=>{const cid=%s, mk=%s; window.__lat=window.__lat||{};
-  const f=document.querySelector(`.agent-frame[data-id="${cid}"]`); const rows=f&&f.querySelector('.xterm-rows'); if(!rows) return;
-  const t0=performance.now(); const o=new MutationObserver(()=>{ if(rows.textContent.includes(mk)){ window.__lat[mk]=performance.now()-t0; o.disconnect(); } });
-  o.observe(rows,{subtree:true,childList:true,characterData:true});})()"""
+  const f=document.querySelector(`.agent-frame[data-id="${cid}"]`); const t=f&&f.querySelector('.frame-body')?.xterm; if(!t) return;
+  const t0=performance.now(); const d=t.onRender(()=>{ if((""" + TEXT + """)(f).includes(mk)){ window.__lat[mk]=performance.now()-t0; d.dispose(); } });})()"""
 SCREEN = "(id)=>{const f=document.querySelector(`.agent-frame[data-id=\"${id}\"]`); return f ? (f.querySelector('.xterm-rows')||{}).textContent||'' : ''}"
+
+
+def system_sample(host_pid: int) -> dict:
+    """One sample of the machine: load average, and %CPU by who — the host
+    (fantastic), Chrome (by its process type), the shells, everything else."""
+    import subprocess
+    la = subprocess.run(["sysctl", "-n", "vm.loadavg"], capture_output=True, text=True).stdout.strip("{} \n").split()
+    rows = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,pcpu=,rss=,comm=,args="], capture_output=True, text=True).stdout.splitlines()
+    by: dict[str, list[float]] = {}
+    for line in rows:
+        parts = line.split(None, 5)
+        if len(parts) < 5:
+            continue
+        pid, ppid, cpu, rss, comm = int(parts[0]), int(parts[1]), float(parts[2]), int(parts[3]), parts[4]
+        args = parts[5] if len(parts) > 5 else ""
+        if pid == host_pid:
+            k = "host (fantastic)"
+        elif "Google Chrome" in comm or "Google Chrome" in args:
+            k = "chrome gpu" if "--type=gpu-process" in args else "chrome renderer" if "--type=renderer" in args else "chrome other"
+        elif comm.endswith("zsh") or comm.endswith("bash") or comm.endswith("/sh"):
+            k = "shells"
+        else:
+            k = "other"
+        a = by.setdefault(k, [0.0, 0.0, 0])
+        a[0] += cpu
+        a[1] += rss / 1024
+        a[2] += 1
+    import re as _re
+    io = subprocess.run(["ioreg", "-r", "-d", "1", "-c", "IOAccelerator"], capture_output=True, text=True).stdout
+    gpu = {k: int(v) for k, v in _re.findall(r'"(Device|Renderer|Tiler) Utilization %"=(\d+)', io)}
+    total = sum(v[0] for v in by.values())
+    return {"load": [float(x) for x in la[:3]], "cpu_total_pct": round(total), "gpu_pct": gpu.get("Device"), "by": {k: {"cpu": round(v[0]), "mb": round(v[1]), "n": v[2]} for k, v in sorted(by.items(), key=lambda x: -x[1][0])}}
 
 
 async def type_into(pg, cid: str, text: str) -> None:
@@ -167,10 +203,23 @@ async def run(rig: Rig, r: dict, info: dict) -> None:
         t0 = time.time()
         # xterm renders only what is ON SCREEN (an off-screen terminal is paused),
         # so "up" counts the terminals in the viewport
-        VIS = "[...document.querySelectorAll('.agent-frame')].filter(f=>{const b=f.getBoundingClientRect(); return f.querySelector('.xterm-rows') && b.right>0 && b.bottom>0 && b.left<innerWidth && b.top<innerHeight})"
-        await pg.until(f"{VIS}.every(f=>f.querySelector('.xterm-rows').textContent.trim().length>0)", 60 + N * 0.6)
+        VIS = "[...document.querySelectorAll('.agent-frame')].filter(f=>{const b=f.getBoundingClientRect(); return f.querySelector('.xterm') && b.right>0 && b.bottom>0 && b.left<innerWidth && b.top<innerHeight})"
+        # the cells mount first (an empty set is not "all up"), then every one on screen draws its prompt
+        # the boot, as a timeline: cells mounted every 5 s until all are (or it stalls)
+        tl, t0b = [], time.time()
+        while time.time() - t0b < 60 + N * 0.3:
+            n = await pg.js("document.querySelectorAll('.agent-frame').length")
+            smp = system_sample(rig.host.pid)
+            tl.append(f"{time.time() - t0b:.0f}s:{n} cells, load {smp['load'][0]}, cpu {smp['cpu_total_pct']}%, gpu {smp['gpu_pct']}%")
+            if n >= N:
+                break
+            await asyncio.sleep(5)
+        info["boot_timeline"] = tl
+        info["console_errors"] = pg.logs[:10]
+        await pg.until(f"{VIS}.length > 0 && {VIS}.every(f=>({TEXT})(f).trim().length>0)", 60 + N * 0.6)
         vis = await pg.js(f"{VIS}.length")
-        up = await pg.js(f"{VIS}.filter(f=>f.querySelector('.xterm-rows').textContent.trim().length>0).length")
+        up = await pg.js(f"{VIS}.filter(f=>({TEXT})(f).trim().length>0).length")
+        info["renderer"] = await pg.js("(()=>{const c=document.querySelector('.agent-frame .xterm-screen canvas'); return c ? 'canvas' : 'dom'})()")
         info["terminals_up"] = f"{up}/{vis} on screen ({N} total) in {time.time() - t0:.1f}s"
         r["all_up"] = up == vis and vis > 0
         if os.environ.get("LOAD_NOBLUR") == "1":
@@ -197,9 +246,14 @@ async def run(rig: Rig, r: dict, info: dict) -> None:
             job = next((j.get("job_id") for j in st.get("jobs", []) if j.get("pty") and j.get("status") == "running"), None)
             if job is None:
                 return False
-            w = await host_call(rig.port, bid, {"type": "write", "job_id": job, "data": "while :; do date +%s; sleep 0.2; done\r"})
+            w = await host_call(rig.port, bid, {"type": "write", "job_id": job, "data": "zmodload zsh/zselect; while :; do print $EPOCHREALTIME; zselect -t 20; done\r"})
             return "error" not in w
-        started = await asyncio.gather(*(stream(i) for i in range(N))) if STREAM else []
+        # at most 16 at a time: N connections at once overran the host's listen backlog
+        gate = asyncio.Semaphore(16)
+        async def gated(i: int) -> bool:
+            async with gate:
+                return await stream(i)
+        started = await asyncio.gather(*(gated(i) for i in range(N))) if STREAM else []
         info["streams_started"] = f"{sum(started)}/{N}" if STREAM else "off"
         r["streams_started"] = (not STREAM) or all(started)
         await asyncio.sleep(2)
@@ -207,9 +261,21 @@ async def run(rig: Rig, r: dict, info: dict) -> None:
             info["profile_load"] = await profile(pg, 4.0)
         if os.environ.get("LOAD_TRACE") == "1":
             info["trace"] = await trace(pg, 2.0)
-        if os.environ.get("LOAD_EXPERIMENTS") == "1":
+        if os.environ.get("LOAD_EXPERIMENTS") in ("1", "webgl"):
             # one CSS suspect at a time, cumulative: the frame rate after each
-            exps = [("baseline", ""),
+            if os.environ.get("LOAD_EXPERIMENTS") == "webgl":
+                res = []
+                css = lambda c: f"(()=>{{const s=document.createElement('style'); s.textContent={json.dumps(c)}; document.head.appendChild(s)}})()"
+                for name, js in [("baseline", ""),
+                                 ("no scrollbars", css(".xterm .scrollbar,.xterm .slider,.xterm-decoration-overview-ruler{display:none!important}")),
+                                 ("no frame chrome", css(".frame-head,.resize-handle{display:none!important}")),
+                                 ("no link layer", css(".xterm-screen canvas:not(:first-child){display:none!important}"))]:
+                    if js:
+                        await pg.js(js)
+                    await asyncio.sleep(3)
+                    res.append(f"{name}: {await pg.js(fps_js0)} fps")
+                info["experiments"] = res
+            exps = [] if os.environ.get("LOAD_EXPERIMENTS") == "webgl" else [("baseline", ""),
                     ("frame own layer", ".agent-frame{will-change:transform}"),
                     ("rows own layer", ".xterm-rows{will-change:transform}"),
                     ("opaque terminal bg", ".xterm .xterm-viewport,.xterm .xterm-screen,.xterm-rows{background:#0b0b10!important}"),
@@ -225,7 +291,8 @@ async def run(rig: Rig, r: dict, info: dict) -> None:
                     await pg.js(f"(()=>{{const s=document.createElement('style'); s.textContent={json.dumps(css)}; document.head.appendChild(s)}})()")
                 await asyncio.sleep(1.5)
                 res.append(f"{name}: {await pg.js(fps_js0)} fps")
-            info["experiments"] = res
+            if exps:
+                info["experiments"] = res
         # the page's WebSocket traffic: frames and bytes per second, each way
         pg.ws_frames = {"in": [0, 0], "out": [0, 0]}
         await pg.cdp("Network.enable")
@@ -239,16 +306,18 @@ async def run(rig: Rig, r: dict, info: dict) -> None:
         # THE WINDOW
         b0, w0, l0 = store_bytes(rig.proj), time.time(), len(rig.log.read_text().splitlines())
         fps_js = "new Promise(res=>{let n=0;const t=performance.now();const f=()=>{n++; if(performance.now()-t<1000) requestAnimationFrame(f); else res(n)}; requestAnimationFrame(f)})"
-        lat, fps, guard = [], [], None
+        lat, fps, guard, sys_samples = [], [], None, []
         # sample terminals ON SCREEN (an off-screen one is not drawn)
         onscreen = await pg.js(f"{VIS}.map(f=>f.dataset.id)") or ids
         sample = onscreen[:: max(1, len(onscreen) // SAMPLES)][:SAMPLES]
         ro0 = await pg.js("window.__ro ?? null")
+        gl0 = await pg.js("({u: (globalThis.__fantasticWebgl||{}).uploads||0, px: (globalThis.__fantasticWebgl||{}).uploadPx||0, r: (globalThis.__fantasticWebgl||{}).renders||0})")
         while time.time() - w0 < SECONDS:
             if (store_bytes(rig.proj) - b0) / 1e6 > DISK_MB:
                 guard = f"the store grew past {DISK_MB} MB — load stopped"
                 break
             fps.append(await pg.js(fps_js))
+            sys_samples.append(system_sample(rig.host.pid))
             for cid in sample:
                 # timed IN THE PAGE: a MutationObserver on that terminal's screen
                 # stamps the moment the marker is drawn (no polling resolution)
@@ -264,6 +333,9 @@ async def run(rig: Rig, r: dict, info: dict) -> None:
                 lat.append(float(ms) if ms is not None else 5000.0)
         w1 = time.time()
         ro1 = await pg.js("window.__ro ?? null")
+        gl1 = await pg.js("({u: (globalThis.__fantasticWebgl||{}).uploads||0, px: (globalThis.__fantasticWebgl||{}).uploadPx||0, r: (globalThis.__fantasticWebgl||{}).renders||0})")
+        dt = time.time() - w0
+        info["webgl_per_s"] = {"renders": round((gl1["r"] - gl0["r"]) / dt), "uploads": round((gl1["u"] - gl0["u"]) / dt, 1), "upload_mpx": round((gl1["px"] - gl0["px"]) / dt / 1e6, 1)}
         if ro0 is not None:
             info["resize_observer_per_s"] = round((ro1 - ro0) / (w1 - w0))
         b1, l1 = store_bytes(rig.proj), len(rig.log.read_text().splitlines())
@@ -280,6 +352,9 @@ async def run(rig: Rig, r: dict, info: dict) -> None:
             "rows_by_kind_per_s": {k: round(v / secs, 1) for k, v in rows["by_kind"].items()},
             "top_calls": rows["top_calls"], "top_settled": rows["top_settled"],
             "host_lines_per_s": round((l1 - l0) / secs),
+            "system": sys_samples[len(sys_samples) // 2] if sys_samples else None,
+            "system_peak": {"load": max(x["load"][0] for x in sys_samples), "cpu_total_pct": max(x["cpu_total_pct"] for x in sys_samples),
+                            "gpu_pct": max((x["gpu_pct"] or 0) for x in sys_samples)} if sys_samples else None,
         }
         r["no_disk_guard"] = guard is None
         r["echoes_seen"] = bool(lat) and lat[-1] < 5000

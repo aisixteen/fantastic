@@ -57,6 +57,11 @@ as the default (`{tree}`, `{self}`, `{howto}` — the agent tree, who the AI is,
 how to call agents); edit it and every AI uses your text from its next turn.
 Keep the placeholders you still want.
 
+TERMINALS draw with WebGL, through one shared GPU context for the whole page —
+a canvas of a few hundred live terminals stays smooth. A terminal's scrollbar
+appears while the pointer is on it (the wheel scrolls either way). macOS allows
+511 terminals (PTYs) at once by default (`kern.tty.ptmx_max`).
+
 ESC: viewing one agent full screen, Esc goes back to the canvas (unless you are
 typing in a terminal or a field).
 

@@ -159,6 +159,11 @@ class Page:
                 self.trace.extend(m["params"]["value"])
             elif m.get("method") == "Tracing.tracingComplete" and hasattr(self, "trace"):
                 self.trace_done = True
+            elif m.get("method") in ("Network.webSocketFrameReceived", "Network.webSocketFrameSent", "Network.webSocketClosed", "Network.webSocketCreated") and hasattr(self, "ws_log"):
+                # a boot trace: every frame's head, each way (CANVAS_WS_LOG)
+                p = m["params"]
+                pd = (p.get("response") or {}).get("payloadData", "")
+                self.ws_log.append(f"{time.time():.3f} {m['method'].split('.')[-1]} {len(pd)} {pd[:160]}")
             elif m.get("method") in ("Network.webSocketFrameReceived", "Network.webSocketFrameSent") and hasattr(self, "ws_frames"):
                 # a load probe counts the page's WS traffic (frames, payload bytes)
                 way = self.ws_frames["in" if m["method"].endswith("Received") else "out"]
