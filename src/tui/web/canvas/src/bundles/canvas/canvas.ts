@@ -396,8 +396,23 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     applyView();
   });
 
+  // THE WORLD IS ITS OWN LAYER ONLY WHILE IT MOVES (owner 2026-10-09, the load
+  // test): a permanent `will-change: transform` made the whole world one layer,
+  // so ANY cell's change (a terminal's line) re-rasterized all of it. Promoted
+  // for a pan / zoom, dropped once it rests — the text re-rasters sharp at the
+  // new scale.
+  let restTimer: ReturnType<typeof setTimeout> | undefined;
+  const moving = (): void => {
+    canvas.classList.add("moving");
+    clearTimeout(restTimer);
+    restTimer = setTimeout(() => canvas.classList.remove("moving"), 200);
+  };
+  // the zoom animates on frames only WHILE it zooms (no idle frame loop)
+  let ticking = false;
   const tick = (): void => {
+    ticking = false;
     if (view.z !== targetZ) {
+      moving();
       const cx = window.innerWidth / 2;
       const cy = window.innerHeight / 2;
       let nextZ = view.z + (targetZ - view.z) * ZOOM_LERP;
@@ -407,10 +422,14 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       view.oy = cy - (cy - view.oy) * ratio;
       view.z = nextZ;
       applyView();
+      zoomSoon();
     }
+  };
+  const zoomSoon = (): void => {
+    if (ticking) return;
+    ticking = true;
     requestAnimationFrame(tick);
   };
-  requestAnimationFrame(tick);
 
   canvas.addEventListener(
     "wheel",
@@ -419,6 +438,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       e.preventDefault();
       const factor = e.deltaY > 0 ? 0.95 : 1.05;
       targetZ = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, targetZ * factor));
+      zoomSoon();
     },
     { passive: false },
   );
@@ -440,6 +460,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
         canvas.classList.add("panning");
       }
       if (engaged) {
+        moving();
         view.ox = ox0 + dx;
         view.oy = oy0 + dy;
         applyView();
@@ -807,12 +828,32 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     const all: Rec[] = cont !== undefined ? [...cont.children.values()].map((a) => a.record() as Rec) : [];
     // the background is drawn behind everything, not framed
     // (a selector is the popup on top, never a cell)
-    const members = full ? [kernel.get(viewed)!.record() as Rec] : all.filter((r) => r["handler_module"] !== BACKGROUND && r["handler_module"] !== SELECTOR);
-    const bgRec = full ? undefined : all.find((r) => r["handler_module"] === BACKGROUND);
+    // a background viewed full is the SAME background path (swapped in place on
+    // set_bg), not a member: nothing is torn down when Esc goes back
+    const viewedRec = full ? (kernel.get(viewed)!.record() as Rec) : undefined;
+    const viewingBg = viewedRec?.["handler_module"] === BACKGROUND;
+    const members = viewedRec !== undefined ? (viewingBg ? [] : [viewedRec]) : all.filter((r) => r["handler_module"] !== BACKGROUND && r["handler_module"] !== SELECTOR);
+    const bgRec = viewingBg ? viewedRec : full ? undefined : all.find((r) => r["handler_module"] === BACKGROUND);
 
     let idx = 0;
     const seenDom = new Set<string>();
     const seenGl = new Set<string>();
+    // THE BACKGROUND FIRST (owner 2026-10-09): the view's singleton background
+    // agent's `bg_source`, mounted as a GL view under its id, behind every member,
+    // swapped in place — BEFORE the cells mount, so leaving a full view (Esc) never
+    // shows the cells over the old background while they mount.
+    const bgSource = bgRec !== undefined && typeof bgRec["bg_source"] === "string" ? (bgRec["bg_source"] as string) : "";
+    if (bgSource !== "" && bgRec !== undefined) {
+      const gh = await ensureGlHost();
+      if (bgSource !== bgShown) {
+        gh.removeView(bgRec.id);
+        bgShown = bgSource;
+      }
+      if (!gh.hasView(bgRec.id)) gh.installView(bgRec.id, { source: bgSource });
+      seenGl.add(bgRec.id);
+    } else {
+      bgShown = "";
+    }
     for (const rec of members) {
       const mid = rec.id;
       let existing = frames.get(mid);
@@ -872,20 +913,6 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
         if (!gh.hasView(mid)) gh.installView(mid, gl);
         seenGl.add(mid);
       }
-    }
-    // THE BACKGROUND: the view's singleton background agent's `bg_source`, mounted
-    // as a GL view under its id, behind every member; swapped in place.
-    const bgSource = bgRec !== undefined && typeof bgRec["bg_source"] === "string" ? (bgRec["bg_source"] as string) : "";
-    if (bgSource !== "" && bgRec !== undefined) {
-      const gh = await ensureGlHost();
-      if (bgSource !== bgShown) {
-        gh.removeView(bgRec.id);
-        bgShown = bgSource;
-      }
-      if (!gh.hasView(bgRec.id)) gh.installView(bgRec.id, { source: bgSource });
-      seenGl.add(bgRec.id);
-    } else {
-      bgShown = "";
     }
     for (const aid of [...frames.keys()]) if (!seenDom.has(aid)) removeFrame(aid);
     glHost?.prune(seenGl);

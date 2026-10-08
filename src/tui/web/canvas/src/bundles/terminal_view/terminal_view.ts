@@ -14,6 +14,8 @@ import { Host } from "../../lib.ts";
 // control (ack), binary image paste, no-reflow resize, and explicit autoscroll.
 
 const ACK_SIZE = 5000; // CHAR_COUNT_ACK_SIZE — VSCode's AckDataBufferer
+/** What an off-screen terminal holds before backpressure takes over (chars). */
+const HOLD_MAX = 2_000_000;
 
 interface XTermGlobals {
   Terminal: new (opts: unknown) => XTerm;
@@ -27,6 +29,7 @@ interface XTerm {
   onData(cb: (data: string) => void): void;
   onResize(cb: (size: { cols: number; rows: number }) => void): void;
   write(data: string, cb?: () => void): void;
+  reset(): void;
   refresh(start: number, end: number): void;
   scrollToBottom(): void;
   dispose(): void;
@@ -91,9 +94,18 @@ export const terminalView: ViewBundle = {
     });
     const fit = new FitAddonCtor() as { fit(): void };
     term.loadAddon(fit);
-    mount.style.padding = "6px 14px 6px 8px";
-    mount.style.boxSizing = "border-box";
     term.open(mount);
+    // The padding goes on the TERMINAL element, not on `mount`: the fit addon
+    // measures the parent's computed box (with border-box that box INCLUDES the
+    // parent's padding) and subtracts only the `.xterm` element's own padding, so
+    // a padded parent sized the grid past the visible area and clipped the last
+    // column and row (xterm.js #1283). Here it floors over what is really free.
+    const xtEl = (term as unknown as { element?: HTMLElement }).element;
+    if (xtEl) {
+      xtEl.style.padding = "6px 14px 6px 8px";
+      xtEl.style.boxSizing = "border-box";
+      xtEl.style.height = "100%";
+    }
 
     // wait for webfonts before measuring cell metrics (xterm #1164/#1534/#2630)
     const fonts = (document as unknown as { fonts?: { ready: Promise<unknown> } }).fonts;
@@ -136,14 +148,48 @@ export const terminalView: ViewBundle = {
         void host.call(backend, { type: "ack", job_id: jobId, chars: ACK_SIZE });
       }
     };
-    const draw = (e: Record<string, unknown>): void => {
-      if (e["job_id"] !== jobId) return;
-      const d = typeof e["data"] === "string" ? (e["data"] as string) : "";
+    // OFF SCREEN, OUTPUT IS HELD (owner 2026-10-09, the load test; xterm.js
+    // #6208: a paused terminal still re-renders every row on each scroll): a
+    // terminal no one can see parses nothing — its output waits here and is
+    // written in ONE go the moment it scrolls into view. On screen nothing
+    // changes: each chunk is written as it lands. Held chunks are acked as they
+    // land (the shell keeps running) up to HOLD_MAX chars; past that the acks
+    // stop and the PTY's own backpressure holds the shell.
+    let onScreen = true;
+    let held: string[] = [];
+    let heldChars = 0;
+    const writeNow = (d: string): void => {
       term.write(d, () => {
         ackChars(d.length);
         scrollSoon();
       });
     };
+    const draw = (e: Record<string, unknown>): void => {
+      if (e["job_id"] !== jobId) return;
+      const d = typeof e["data"] === "string" ? (e["data"] as string) : "";
+      if (onScreen) return writeNow(d);
+      held.push(d);
+      heldChars += d.length;
+      if (heldChars <= HOLD_MAX) ackChars(d.length);
+    };
+    const release = (): void => {
+      if (held.length === 0) return;
+      const all = held.join("");
+      const acked = Math.min(heldChars, HOLD_MAX);
+      held = [];
+      heldChars = 0;
+      term.write(all, () => {
+        ackChars(all.length - acked); // what was not acked while held
+        scrollSoon();
+      });
+    };
+    const io = new IntersectionObserver((es) => {
+      const vis = es.some((x) => x.isIntersecting);
+      if (vis === onScreen) return;
+      onScreen = vis;
+      if (vis) release();
+    });
+    io.observe(mount);
     let done = false;
     const ended = (e: Record<string, unknown>): void => {
       if (e["job_id"] !== jobId || done) return;
@@ -224,26 +270,48 @@ export const terminalView: ViewBundle = {
     // ring replays (vim/tmux must replay against the right dimensions); none
     // → start the child's login shell AT them.
     tightFit();
-    const st = (await host.call(backend, { type: "status" })) as { jobs?: Job[]; error?: string };
-    const live = (st?.jobs ?? []).find((j) => j.pty === true && j.status === "running");
-    if (typeof live?.job_id === "number") {
-      jobId = live.job_id;
-      await host.call(backend, { type: "resize", job_id: jobId, cols: term.cols, rows: term.rows });
-      const replay = (await host.call(backend, { type: "output", job_id: jobId })) as { output?: string };
-      if (replay && typeof replay.output === "string") term.write(replay.output);
-    } else {
-      const started = (await host.call(backend, {
-        type: "start",
-        ...(argv.length ? { command: argv[0]!, args: argv.slice(1) } : { args: ["-l"] }),
-        pty: { cols: term.cols, rows: term.rows },
-      })) as { job_id?: number; error?: string; reason?: string };
-      if (typeof started?.job_id === "number") {
-        jobId = started.job_id;
-      } else {
-        term.write(`\r\n[${argv.length ? argv.join(" ") : "the login shell"} did not start: ${started?.error ?? JSON.stringify(started)}]\r\n`);
+    // ATTACH: the backend's live PTY job, resized to the grid and its ring
+    // replayed; none → its login shell started at the grid. Run at mount AND
+    // whenever the host comes back (owner 2026-10-09, `sudo mactop` frozen after
+    // a restart): a restarted host has no job — the one this frame held died with
+    // it, so writes went nowhere and the screen stayed on its last frame.
+    const attach = async (again: boolean): Promise<void> => {
+      if (again) {
+        jobId = undefined;
+        held = [];
+        heldChars = 0;
+        term.reset();
       }
-    }
-    for (const e of early.splice(0)) (e["type"] === "job_done" ? ended : draw)(e);
+      const st = (await host.call(backend, { type: "status" })) as { jobs?: Job[]; error?: string };
+      const live = (st?.jobs ?? []).find((j) => j.pty === true && j.status === "running");
+      if (typeof live?.job_id === "number") {
+        jobId = live.job_id;
+        await host.call(backend, { type: "resize", job_id: jobId, cols: term.cols, rows: term.rows });
+        const replay = (await host.call(backend, { type: "output", job_id: jobId })) as { output?: string };
+        if (replay && typeof replay.output === "string") term.write(replay.output);
+      } else {
+        const started = (await host.call(backend, {
+          type: "start",
+          ...(argv.length ? { command: argv[0]!, args: argv.slice(1) } : { args: ["-l"] }),
+          pty: { cols: term.cols, rows: term.rows },
+        })) as { job_id?: number; error?: string; reason?: string };
+        if (typeof started?.job_id === "number") {
+          jobId = started.job_id;
+        } else {
+          term.write(`\r\n[${argv.length ? argv.join(" ") : "the login shell"} did not start: ${started?.error ?? JSON.stringify(started)}]\r\n`);
+        }
+      }
+      for (const e of early.splice(0)) (e["type"] === "job_done" ? ended : draw)(e);
+    };
+    await attach(false);
+    let lost = false;
+    const offLifecycle = host.onLifecycle(backend, (state) => {
+      if (state === "disconnected") lost = true;
+      else if (lost) {
+        lost = false;
+        void attach(true);
+      }
+    });
 
     return {
       headerButtons: [
@@ -260,6 +328,8 @@ export const terminalView: ViewBundle = {
         },
       ],
       unmount(): void {
+        io.disconnect();
+        offLifecycle();
         offOutput();
         offDone();
         host.unwatch(backend);

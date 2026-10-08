@@ -6,7 +6,9 @@ export const CANVAS_CSS = `
   html, body { margin: 0; padding: 0; height: 100%; background: #06060c; color: #aaa; font-family: system-ui, sans-serif; overflow: hidden; }
   #bg { position: fixed; inset: 0; width: 100vw; height: 100vh; z-index: 0; pointer-events: none; display: block; }
   #canvas { position: relative; width: 100%; height: 100vh; overflow: hidden; z-index: 1; }
-  .canvas-world { position: absolute; inset: 0; transform-origin: 0 0; will-change: transform; }
+  .canvas-world { position: absolute; inset: 0; transform-origin: 0 0; }
+  /* its own layer only while it pans / zooms (canvas.ts moving) */
+  #canvas.moving .canvas-world { will-change: transform; }
   #canvas.panning { cursor: grabbing; }
   #canvas.panning .agent-frame iframe,
   body.dragging-frame .agent-frame iframe { pointer-events: none; }
@@ -18,12 +20,26 @@ export const CANVAS_CSS = `
     display: flex;
     flex-direction: column;
     z-index: 2;
+    /* a cell's paint stays inside it: its changes never invalidate the world */
+    contain: layout style paint;
     background: rgba(15, 15, 25, 0.55);
     backdrop-filter: blur(16px) saturate(1.2);
     -webkit-backdrop-filter: blur(16px) saturate(1.2);
     border: 1px solid rgba(255, 255, 255, 0.08);
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.04);
-    transition: box-shadow .3s ease, border-color .3s ease;
+    transition: box-shadow .2s ease, border-color .2s ease, background .2s ease;
+  }
+  /* CONTENT ONLY until the pointer is on the cell (owner 2026-10-09): no bezel,
+     no head, no handle; hovering (or dragging, resizing) shows them. The head
+     floats OVER the content, so nothing reflows. A touch screen has no hover:
+     there the chrome stays. */
+  @media (hover: hover) {
+    .agent-frame:not(:hover):not(.dragging):not(.resizing) {
+      background: transparent; border-color: transparent; box-shadow: none;
+      backdrop-filter: none; -webkit-backdrop-filter: none;
+    }
+    .agent-frame:not(:hover):not(.dragging):not(.resizing) > .frame-head,
+    .agent-frame:not(:hover):not(.dragging):not(.resizing) > .resize-handle { opacity: 0; }
   }
   /* FE = page content, BE = a view of a host agent (backend-owned views) */
   .agent-frame[data-side="page"] { border-color: rgba(120, 170, 255, 0.28); }
@@ -37,7 +53,10 @@ export const CANVAS_CSS = `
     box-shadow: 0 12px 48px rgba(0, 0, 0, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.08);
   }
   .frame-head {
-    position: relative; z-index: 2; min-height: 32px; padding: 9px 12px;
+    position: absolute; top: 0; left: 0; right: 0; z-index: 4; box-sizing: border-box; min-height: 32px; padding: 9px 12px;
+    background: rgba(15, 15, 25, 0.55);
+    backdrop-filter: blur(12px) saturate(1.2); -webkit-backdrop-filter: blur(12px) saturate(1.2);
+    transition: opacity .15s ease;
     display: flex; align-items: center; justify-content: space-between;
     border-bottom: 1px solid rgba(255, 255, 255, 0.05);
     color: rgba(255, 255, 255, 0.7);
@@ -63,7 +82,7 @@ export const CANVAS_CSS = `
     position: absolute; bottom: 4px; right: 4px; width: 14px; height: 14px;
     cursor: nwse-resize;
     background: linear-gradient(135deg, transparent 50%, rgba(255,255,255,0.22) 50%);
-    border-radius: 0 0 10px 0; z-index: 3;
+    border-radius: 0 0 10px 0; z-index: 3; transition: opacity .15s ease;
   }
   /* THE SIDEBAR and CANVAS-LIST cells (side_view.ts): a cell's body, scrolling */
   .side { height: 100%; overflow-y: auto; box-sizing: border-box; padding: 8px 0 6px; display: flex; flex-direction: column;

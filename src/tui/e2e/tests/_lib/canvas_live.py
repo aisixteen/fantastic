@@ -289,7 +289,10 @@ class Rig:
     @asynccontextmanager
     async def page(self, width: int = 1500, height: int = 950, extra: list[str] | None = None):
         cdp = free_port()
-        chrome = subprocess.Popen([MAC_CHROME, "--headless=new", f"--window-size={width},{height}", f"--remote-debugging-port={cdp}",
+        # CANVAS_HEADFUL=1: a visible Chrome on the real GPU (a load test's frame
+        # rate is the GPU's, not the software rasterizer's)
+        mode = [] if os.environ.get("CANVAS_HEADFUL") == "1" else ["--headless=new"]
+        chrome = subprocess.Popen([MAC_CHROME, *mode, f"--window-size={width},{height}", f"--remote-debugging-port={cdp}",
                                    f"--user-data-dir={self.art / 'chrome'}", "--no-first-run",
                                    "--autoplay-policy=no-user-gesture-required", *(extra or []), "about:blank"],
                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -305,6 +308,10 @@ class Rig:
                 pg = Page(ws)
                 await pg.cdp("Runtime.enable")
                 await pg.cdp("Page.enable")
+                if os.environ.get("CANVAS_COUNT_RO") == "1":
+                    # count ResizeObserver callbacks (a load probe's suspect)
+                    await pg.cdp("Page.addScriptToEvaluateOnNewDocument", source="""(()=>{const R=window.ResizeObserver; window.__ro=0;
+                      window.ResizeObserver=class extends R{constructor(cb){super((...a)=>{window.__ro++; return cb(...a)})}}})()""")
                 await pg.open(self.url)
                 await pg.until("!!document.getElementById('canvas')", 30)
                 await asyncio.sleep(1.5)

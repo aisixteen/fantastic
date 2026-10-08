@@ -155,6 +155,15 @@ class Page:
             if m.get("method") == "Runtime.exceptionThrown":
                 d = m["params"]["exceptionDetails"]
                 self.logs.append("EXC " + d.get("exception", {}).get("description", d.get("text", "")))
+            elif m.get("method") == "Tracing.dataCollected" and hasattr(self, "trace"):
+                self.trace.extend(m["params"]["value"])
+            elif m.get("method") == "Tracing.tracingComplete" and hasattr(self, "trace"):
+                self.trace_done = True
+            elif m.get("method") in ("Network.webSocketFrameReceived", "Network.webSocketFrameSent") and hasattr(self, "ws_frames"):
+                # a load probe counts the page's WS traffic (frames, payload bytes)
+                way = self.ws_frames["in" if m["method"].endswith("Received") else "out"]
+                way[0] += 1
+                way[1] += len(m["params"]["response"].get("payloadData", ""))
             elif m.get("method") == "Runtime.consoleAPICalled" and m["params"]["type"] == "error":
                 self.logs.append("ERR " + " ".join(str(a.get("value", a.get("description", ""))) for a in m["params"]["args"]))
             if m.get("id") == me:

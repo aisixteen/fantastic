@@ -372,9 +372,15 @@ async fn run(
                     dispatch(&mut app, &cmds);
                 }
                 Some(VmIn::Resize(view, w, h)) => {
+                    let first = sizes.is_empty();
                     sizes.insert(view, (w, h));
                     latest = Some(view);
                     app.dirty = true;
+                    // the first View catches up on what went by unread
+                    if first {
+                        app.pump();
+                        dispatch(&mut app, &cmds);
+                    }
                 }
                 Some(VmIn::Gone(view)) => {
                     sizes.remove(&view);
@@ -391,8 +397,13 @@ async fn run(
                 while let Ok(more) = rx.try_recv() {
                     app.apply(more);
                 }
-                // what those events made due is read now
-                app.pump();
+                // what those events made due is read now — only for a View to
+                // draw: headless, nothing is shown, so nothing is read (each read
+                // is a row-store scan that keystrokes would queue behind); the
+                // stamps the events cleared stay cleared until a View attaches
+                if !sizes.is_empty() {
+                    app.pump();
+                }
                 dispatch(&mut app, &cmds);
             }
 
