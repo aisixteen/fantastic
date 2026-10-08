@@ -124,7 +124,8 @@ private struct Plain: AgentBundle {
             + "block on every turn) — null clears it"
         let hint =
             "a system block that REPLACES the default one on every turn of this agent (a "
-            + "per-call `system_prompt` beats it for that delivery); null = the default"
+            + "per-call `system_prompt` beats it for that delivery); placeholders {tree} "
+            + "{self} {store} {howto} are filled each turn; null = the default"
         let field = (OllamaBackendBundle().recordSchema?["fields"].asArray ?? [])
             .first { $0["name"] == "system_prompt" }
         #expect(

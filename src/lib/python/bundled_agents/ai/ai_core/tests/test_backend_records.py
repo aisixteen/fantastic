@@ -37,6 +37,7 @@ _AI_TAIL = [
     ),
     ("recent_n", "int", False, 6, None),
     ("system_prompt", "str", False, None, None),
+    ("system_prompt_file", "map", False, None, None),
 ]
 
 

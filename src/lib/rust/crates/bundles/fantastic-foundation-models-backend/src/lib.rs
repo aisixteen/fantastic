@@ -287,7 +287,7 @@ impl Bundle for FoundationModelsBackendBundle {
     }
 
     async fn on_delete(&self, agent_id: &AgentId, kernel: &Arc<Kernel>) -> Result<(), BundleError> {
-        verbs::on_delete(agent_id, kernel);
+        verbs::on_delete(agent_id, kernel).await;
         Ok(())
     }
 

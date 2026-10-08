@@ -105,6 +105,7 @@ pub mod helpers;
 pub mod history_view;
 pub mod memory;
 pub mod projection;
+pub mod prompt_file;
 pub mod provider;
 pub mod retrieval;
 pub mod route;

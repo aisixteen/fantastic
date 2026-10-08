@@ -468,3 +468,38 @@ func parentPath(_ path: String) -> String {
     let head = pySplit(path).head
     return head.isEmpty ? path : head
 }
+
+// MARK: - watching (event-only)
+//
+// `watch_path`'s disk reach — on absolute paths the clamp ALREADY resolved
+// (`fsResolve`), and none of it reads or writes a byte: an event-only descriptor a
+// vnode source listens on, a stat stamp, a directory's entry names.
+
+/// What a watcher compares between two looks at one path.
+struct FsStamp: Equatable {
+    let ino: UInt64
+    let isDir: Bool
+    let mtimeNs: Int64
+    let size: Int64
+}
+
+/// An EVENT-ONLY descriptor (`O_EVTONLY` — it can read nothing) on a resolved
+/// absolute path; -1 when absent.
+func fsEventFd(_ abs: String) -> Int32 {
+    open(abs, O_EVTONLY)
+}
+
+/// The stamp of a resolved absolute path, following links; nil when absent.
+func fsStamp(_ abs: String) -> FsStamp? {
+    var st = stat()
+    guard stat(abs, &st) == 0 else { return nil }
+    return FsStamp(
+        ino: UInt64(st.st_ino), isDir: (st.st_mode & S_IFMT) == S_IFDIR,
+        mtimeNs: Int64(st.st_mtimespec.tv_sec) * 1_000_000_000 + Int64(st.st_mtimespec.tv_nsec),
+        size: Int64(st.st_size))
+}
+
+/// The entry names of a resolved absolute directory; [] when absent.
+func fsEntryNames(_ abs: String) -> [String] {
+    (try? FileManager.default.contentsOfDirectory(atPath: abs)) ?? []
+}

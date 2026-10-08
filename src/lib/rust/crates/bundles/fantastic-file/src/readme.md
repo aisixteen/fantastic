@@ -1,6 +1,6 @@
 # file_bridge — filesystem edge
 
-Verbs: `read(path,offset?,limit?)` · `write(path,bytes,if_match?)` · `edit(edits,bytes,dry_run?)` · `append(path,bytes)` · `undo(path)` · `read_stream(path,offset?,length?)` · `write_stream(path,bytes,offset?,truncate?)` · `pump(source_path,sink?,sink_path?)` · `list(path?)` · `delete(path)` · `rename(old,new)` · `mkdir(path)` · `reflect`
+Verbs: `read(path,offset?,limit?)` · `write(path,bytes,if_match?)` · `edit(edits,bytes,dry_run?)` · `append(path,bytes)` · `undo(path)` · `read_stream(path,offset?,length?)` · `write_stream(path,bytes,offset?,truncate?)` · `pump(source_path,sink?,sink_path?)` · `list(path?)` · `delete(path)` · `rename(old,new)` · `mkdir(path)` · `watch_path(path)` · `unwatch_path(path)` · `reflect`
 **Streams** (the SOURCE/SINK protocol — file_bridge is the fs implementor):
 - `read_stream(path, offset=0, length=65536)` → `{bytes, next_offset, eof, size}` — `bytes` is the RAW chunk (rides the transport as raw bytes — web_ws / bridge binary frame, never base64); pull chunks until `eof` (stateless cursor).
 - `write_stream(path, bytes, offset?, truncate?)` → push RAW chunks (`bytes` = one raw chunk; append by default; `truncate:true` on the first to start fresh). Text files use the whole-file `write`.
@@ -11,6 +11,8 @@ Verbs: `read(path,offset?,limit?)` · `write(path,bytes,if_match?)` · `edit(edi
 - `edit(edits:[{path, hunks, if_match?}], bytes)` → SEARCH/REPLACE hunks (`reflect` shows the grammar), a TRANSACTION over every listed file: any failure writes nothing.
 - `version` = the document's hash; `if_match` refuses a write when the document changed since you read it.
 - `undo(path)` → swaps the document with what the last write/edit/append replaced (a second `undo` is redo). ONE slot per path, in RAM — lost on restart, nothing kept on disk.
+
+**Watching** — `watch_path(path)` puts an exposed file or directory under a disk watcher: any change, by any writer, is emitted on this bridge's inbox as `{type: changed, path, kind: added|modified|deleted}` — WATCH the bridge to receive it (a file is watched through its parent too, so an editor's atomic save is seen; a directory reports its entries, not recursive). Held per caller until `unwatch_path(path)`; RAM only.
 
 A consumer (file serving · a pump · kernel_state) is **storage-agnostic** — it pulls/pushes by id, so a `network_bridge` answering the same verbs serves a *remote* file the same way (G1).
 

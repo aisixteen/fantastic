@@ -317,6 +317,7 @@ public final class AIBackend: @unchecked Sendable {
         AIStripStrategy.forget(kernel, id)
         AIMemory.forget(kernel, id)
         AIInquiries.forget(kernel, agent: id)
+        await PromptFile.drop(kernel, agentId)
     }
 
     // MARK: - reflect
@@ -346,6 +347,9 @@ public final class AIBackend: @unchecked Sendable {
         // A generation IS its kernel dispatch task — the backend holds no task
         // handle of its own. An in-flight entry present ⇔ generating.
         fields["generating"] = .bool(runState(kernel, agent.id.value).currentSnapshot() != nil)
+        if let why = PromptFile.errorOf(kernel, agent.id) {
+            fields["system_prompt_file_error"] = .string(why)
+        }
         for (k, v) in config.reflectExtra(agent, kernel) {
             fields[k] = v
         }
@@ -1177,27 +1181,77 @@ public final class AIBackend: @unchecked Sendable {
     /// Mirrors Rust `assemble_messages` / Python `_assemble`.
     /// THE system block a turn uses — the one choice `assemble` builds the turn on
     /// and `contextRecall` sizes the body budget against, so the two never drift.
-    /// PRECEDENCE: the per-call argument (this delivery) > the record's own
-    /// `system_prompt` (read LIVE, so an `update_agent` lands on the next turn — a
-    /// main turn, a self-delivery, a turn woken by a reply) > the default block.
-    /// Python `_system_content`.
+    /// PRECEDENCE (owner, 2026-10-03, 2026-10-08): the per-call argument (this
+    /// delivery) > the record's own `system_prompt` (read LIVE, so an
+    /// `update_agent` lands on the next turn — a main turn, a self-delivery, a turn
+    /// woken by a reply) > the file the record's `system_prompt_file` names
+    /// (`PromptFile`) > the default block. Whichever prompt is in force has its
+    /// placeholders filled; none is ever appended to another. Python
+    /// `_system_content`.
     func systemContent(agent: Agent, systemPrompt: String?, kernel: Kernel) async -> String {
-        let perCall = systemPrompt.flatMap { pyStrip($0).isEmpty ? nil : $0 }
-        return await assembleSystemPrompt(
-            agent: agent,
-            systemPrompt: perCall
-                ?? RecordSchema.recordSystemPrompt(agent.metaValue(forKey: "system_prompt")),
-            kernel: kernel)
+        if let perCall = systemPrompt, !pyStrip(perCall).isEmpty {
+            return await renderPrompt(perCall, agent: agent, kernel: kernel)
+        }
+        if let rec = RecordSchema.recordSystemPrompt(agent.metaValue(forKey: "system_prompt")) {
+            return await renderPrompt(rec, agent: agent, kernel: kernel)
+        }
+        if let file = await PromptFile.text(agent, kernel), !pyStrip(file).isEmpty {
+            return await renderPrompt(file, agent: agent, kernel: kernel)
+        }
+        return await assembleSystemPrompt(agent: agent, systemPrompt: nil, kernel: kernel)
     }
 
+    /// A caller-supplied `systemPrompt` (placeholders filled), else the DEFAULT
+    /// block: `{tree}\n\n{self}\n\n{howto}`. Python `_default_system_content`.
     func assembleSystemPrompt(agent: Agent, systemPrompt: String?, kernel: Kernel) async -> String {
-        var blocks: [String]
-        if let override = systemPrompt,
-            !override.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        {
-            blocks = [override]
-        } else {
-            let selfId = agent.id
+        if let override = systemPrompt, !pyStrip(override).isEmpty {
+            return await renderPrompt(override, agent: agent, kernel: kernel)
+        }
+        let p = await promptParts(agent: agent, kernel: kernel, need: ["tree", "self", "howto"])
+        return [p["tree"]!, p["self"]!, p["howto"]!].joined(separator: "\n\n")
+    }
+
+    /// THE PLACEHOLDERS a system prompt may hold, filled per agent and per turn
+    /// (owner, 2026-10-08) — so a prompt that REPLACES the default block keeps its
+    /// live parts: `{tree}` the kernel primer (tree ids + bundle catalog), `{self}`
+    /// this agent's identity and grants, `{store}` its memory store id, `{howto}`
+    /// the fixed how-to blocks. `{tree}\n\n{self}\n\n{howto}` IS the default block,
+    /// byte for byte. Only the parts a prompt names are built; any other `{…}`
+    /// stays as written. Python `_PLACEHOLDER`.
+    static let PLACEHOLDERS = ["tree", "self", "store", "howto"]
+
+    /// A prompt with its placeholders filled for this agent and this turn — one
+    /// pass, so a filled part is never scanned again. Python `_render_prompt`.
+    func renderPrompt(_ text: String, agent: Agent, kernel: Kernel) async -> String {
+        let need = Set(Self.PLACEHOLDERS.filter { text.contains("{\($0)}") })
+        if need.isEmpty { return text }
+        let parts = await promptParts(agent: agent, kernel: kernel, need: need)
+        var out = ""
+        var rest = Substring(text)
+        scan: while let i = rest.firstIndex(of: "{") {
+            out += rest[..<i]
+            let tail = rest[i...]
+            for p in Self.PLACEHOLDERS {
+                let token = "{\(p)}"
+                if tail.hasPrefix(token), let v = parts[p] {
+                    out += v
+                    rest = tail.dropFirst(token.count)
+                    continue scan
+                }
+            }
+            out += "{"
+            rest = tail.dropFirst()
+        }
+        out += rest
+        return out
+    }
+
+    /// The live parts of the system block, built only where `need` names them.
+    /// Python `_parts`.
+    func promptParts(agent: Agent, kernel: Kernel, need: Set<String>) async -> [String: String] {
+        var out: [String: String] = [:]
+        let selfId = agent.id
+        if need.contains("tree") {
             // THE `kernel` ADDRESS, not the root's own id: python targets
             // `kernel`, and the root id differs per runtime (`core` here,
             // `kernel_state` in python), so hard-coding it made the primer
@@ -1211,6 +1265,9 @@ public final class AIBackend: @unchecked Sendable {
                         "bundles": .string("ids"),
                     ]))
             ])[0].result
+            out["tree"] = renderReflect(primer)
+        }
+        if need.contains("self") {
             let full = await kernel.send([Item(selfId, .object(["type": .string("reflect"), "tree": .string("none")]))])[0].result
             // WHO YOU ARE, not how you are tuned: identity, memory and grants. The
             // rest of the agent's own reflect (sampling, kv table, timeouts,
@@ -1222,15 +1279,15 @@ public final class AIBackend: @unchecked Sendable {
                 for k in SELF_KEYS { if let v = obj[k] { kept[k] = v } }
                 me = .object(kept)
             }
-            let store = agent.metaValue(forKey: "memory_store_id")
-            blocks = [
-                renderReflect(primer),
-                "You are `\(selfId.value)`. " + renderReflect(me),
-                SEND_TO_HOWTO,
-                CONTEXT_HOWTO,
-                // `rec0.get("memory_store_id") or "(none)"` — python truthiness.
-                memoryHowto(store: store.map { pyTruthy($0) ? pyStr($0) : "(none)" } ?? "(none)"),
-            ]
+            out["self"] = "You are `\(selfId.value)`. " + renderReflect(me)
+        }
+        // `rec0.get("memory_store_id") or "(none)"` — python truthiness.
+        let store =
+            agent.metaValue(forKey: "memory_store_id")
+            .map { pyTruthy($0) ? pyStr($0) : "(none)" } ?? "(none)"
+        if need.contains("store") { out["store"] = store }
+        if need.contains("howto") {
+            var blocks = [SEND_TO_HOWTO, CONTEXT_HOWTO, memoryHowto(store: store)]
             // OPT-IN, on the record. Both verbs exist on every AI, but teaching
             // them costs every agent prompt tokens for a discipline most runs
             // never need — and a block like this changes behavior just by being
@@ -1244,8 +1301,9 @@ public final class AIBackend: @unchecked Sendable {
             let flag = { (k: String) in pyTruthy(agent.metaValue(forKey: k) ?? .null) }
             if flag("context_titles") { blocks.append(TITLES_HOWTO) }
             if flag("context_async") { blocks.append(ASYNC_HOWTO) }
+            out["howto"] = blocks.joined(separator: "\n\n")
         }
-        return blocks.joined(separator: "\n\n")
+        return out
     }
 
     /// Build the message list: the system block, the MODEL VIEW of the store,

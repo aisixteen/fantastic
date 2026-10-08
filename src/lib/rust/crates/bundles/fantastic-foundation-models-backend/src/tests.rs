@@ -134,7 +134,8 @@ fn the_schema_is_two_knobs_then_the_ai_fields_with_the_models_window() {
             "output_reserve",
             "context_strategy",
             "recent_n",
-            "system_prompt"
+            "system_prompt",
+            "system_prompt_file"
         ]
     );
     // the window is the MODEL'S, read from the engine — not the kernel's 128k

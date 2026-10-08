@@ -100,7 +100,15 @@ AI_FIELDS: tuple = (
         "system_prompt",
         "str",
         "a system block that REPLACES the default one on every turn of this agent "
-        "(a per-call `system_prompt` beats it for that delivery); null = the default",
+        "(a per-call `system_prompt` beats it for that delivery); placeholders {tree} "
+        "{self} {store} {howto} are filled each turn; null = the default",
+    ),
+    field(
+        "system_prompt_file",
+        "map",
+        "{bridge, path}: a file read THROUGH that file_bridge as this agent's system "
+        "block (placeholders filled), re-read when the bridge reports it changed; a "
+        "record or per-call `system_prompt` beats it; null = none",
     ),
 )
 
@@ -163,6 +171,10 @@ def validate(sch: dict, backend: str, meta: dict, record: dict) -> str | None:
     sp = meta.get("system_prompt")
     if sp is not None and not (isinstance(sp, str) and sp.strip()):
         return SYSTEM_PROMPT_REFUSAL
+    from ai_core.prompt_file import shape_error as prompt_file_error
+
+    if bad := prompt_file_error(meta.get("system_prompt_file")):
+        return bad
     merged = {**record, **meta}
     missing = [
         f

@@ -20,6 +20,7 @@ use crate::state::BackendState;
 use fantastic_bundle::{py_split_whitespace, py_str, py_strip, py_truthy};
 use fantastic_kernel::{AgentId, Item, Kernel};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// ONE reflect field as the model reads it — python `_render_reflect._one`.
@@ -237,19 +238,129 @@ const SELF_KEYS: [&str; 5] = [
     "callable_by",
 ];
 
-/// The DEFAULT system block: the lean primer, this agent's own reflect, and the
-/// how-to sections its record earns. Extracted so `context_recall` can MEASURE
-/// the same block the next turn will carry — python's `_default_system_content`.
+/// THE PLACEHOLDERS a system prompt may hold, filled per agent and per turn
+/// (owner, 2026-10-08) — so a prompt that REPLACES the default block keeps its
+/// live parts: `{tree}` the kernel primer, `{self}` this agent's identity and
+/// grants, `{store}` its memory store id, `{howto}` the fixed how-to blocks.
+/// `{tree}\n\n{self}\n\n{howto}` IS the default block, byte for byte. Only the
+/// parts a prompt names are built; any other `{…}` stays as written. Python
+/// `_PLACEHOLDER`.
+pub const PLACEHOLDERS: [&str; 4] = ["tree", "self", "store", "howto"];
+
+/// The placeholders `text` names (python `_PLACEHOLDER.findall`).
+fn named(text: &str) -> Vec<&'static str> {
+    PLACEHOLDERS
+        .iter()
+        .copied()
+        .filter(|p| text.contains(&format!("{{{p}}}")))
+        .collect()
+}
+
+/// `text` with every placeholder replaced in ONE pass, so a filled part is never
+/// scanned again (python `_PLACEHOLDER.sub`).
+fn fill(text: &str, parts: &HashMap<&'static str, String>) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    'scan: while let Some(i) = rest.find('{') {
+        out.push_str(&rest[..i]);
+        let tail = &rest[i..];
+        for p in PLACEHOLDERS {
+            let token = format!("{{{p}}}");
+            if tail.starts_with(&token) {
+                if let Some(v) = parts.get(p) {
+                    out.push_str(v);
+                    rest = &tail[token.len()..];
+                    continue 'scan;
+                }
+            }
+        }
+        out.push('{');
+        rest = &tail[1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The live parts of the system block, built only where `need` names them —
+/// python `_parts`.
+async fn parts(
+    self_id: &AgentId,
+    kernel: &Arc<Kernel>,
+    need: &[&str],
+) -> HashMap<&'static str, String> {
+    let mut out: HashMap<&'static str, String> = HashMap::new();
+    if need.contains(&"tree") {
+        // Lean primer: a flat id-index of the tree + the bundle catalog by name.
+        let primer = kernel
+            .send(vec![Item::new(
+                AgentId::from("kernel"),
+                json!({"type": "reflect", "tree": "ids", "bundles": "ids"}),
+            )])
+            .await
+            .remove(0)
+            .result;
+        out.insert("tree", render_reflect(&primer));
+    }
+    if need.contains(&"self") {
+        out.insert("self", self_part(self_id, kernel).await);
+    }
+    let meta = crate::helpers::agent_meta(self_id, kernel);
+    let store = meta
+        .get("memory_store_id")
+        .filter(|v| py_truthy(v))
+        .map_or_else(|| "(none)".to_string(), py_str);
+    if need.contains(&"store") {
+        out.insert("store", store.clone());
+    }
+    if need.contains(&"howto") {
+        // TWO OPTIONAL SECTIONS, gated on the record exactly as python gates
+        // them: a title only earns its line when titles are what survives a
+        // stripped body, and the async/rows how-to only when replies arrive
+        // as rows. Teaching either unconditionally spends window on an
+        // affordance the agent does not have.
+        // PYTHON TRUTHINESS (`if rec_.get(...)`): `1`/`"on"` turn the block on.
+        let flag = |k: &str| meta.get(k).is_some_and(py_truthy);
+        let mut blocks = vec![
+            SEND_TO_HOWTO.to_string(),
+            CONTEXT_HOWTO.to_string(),
+            MEMORY_HOWTO.replace("{store}", &store),
+        ];
+        if flag("context_titles") {
+            blocks.push(TITLES_HOWTO.to_string());
+        }
+        if flag("context_async") {
+            blocks.push(ASYNC_HOWTO.to_string());
+        }
+        out.insert("howto", blocks.join("\n\n"));
+    }
+    out
+}
+
+/// A prompt with its placeholders filled for this agent and this turn — python
+/// `_render_prompt`.
+async fn render_prompt(text: &str, self_id: &AgentId, kernel: &Arc<Kernel>) -> String {
+    let need = named(text);
+    if need.is_empty() {
+        return text.to_string();
+    }
+    fill(text, &parts(self_id, kernel, &need).await)
+}
+
+/// The DEFAULT system block: `{tree}\n\n{self}\n\n{howto}` — the lean primer,
+/// this agent's own reflect, and the how-to sections its record earns. Extracted
+/// so `context_recall` can MEASURE the same block the next turn will carry —
+/// python's `_default_system_content`.
 pub async fn default_system_content(self_id: &AgentId, kernel: &Arc<Kernel>) -> String {
-    // Lean primer: a flat id-index of the tree + the bundle catalog by name.
-    let primer = kernel
-        .send(vec![Item::new(
-            AgentId::from("kernel"),
-            json!({"type": "reflect", "tree": "ids", "bundles": "ids"}),
-        )])
-        .await
-        .remove(0)
-        .result;
+    let p = parts(self_id, kernel, &["tree", "self", "howto"]).await;
+    [&p["tree"], &p["self"], &p["howto"]]
+        .iter()
+        .map(|s| s.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// `You are <id>. ` + this agent's own reflect, cut to who it is.
+async fn self_part(self_id: &AgentId, kernel: &Arc<Kernel>) -> String {
     let me = kernel
         .send(vec![Item::new(
             self_id.clone(),
@@ -270,57 +381,38 @@ pub async fn default_system_content(self_id: &AgentId, kernel: &Arc<Kernel>) -> 
         ),
         other => other,
     };
-    // TWO OPTIONAL SECTIONS, gated on the record exactly as python gates
-    // them: a title only earns its line when titles are what survives a
-    // stripped body, and the async/rows how-to only when replies arrive
-    // as rows. Teaching either unconditionally spends window on an
-    // affordance the agent does not have.
-    let meta = crate::helpers::agent_meta(self_id, kernel);
-    // PYTHON TRUTHINESS (`if rec_.get(...)`): `1`/`"on"` turn the block on, and
-    // `as_bool` read them as off — the prompt the model got depended on whether
-    // the record's flag happened to be a JSON bool.
-    let flag = |k: &str| meta.get(k).is_some_and(py_truthy);
-    let store = meta
-        .get("memory_store_id")
-        .filter(|v| py_truthy(v))
-        .map_or_else(|| "(none)".to_string(), py_str);
-    let mut blocks = vec![
-        render_reflect(&primer),
-        format!("You are `{}`. {}", self_id, render_reflect(&me)),
-        SEND_TO_HOWTO.to_string(),
-        CONTEXT_HOWTO.to_string(),
-        MEMORY_HOWTO.replace("{store}", &store),
-    ];
-    if flag("context_titles") {
-        blocks.push(TITLES_HOWTO.to_string());
-    }
-    if flag("context_async") {
-        blocks.push(ASYNC_HOWTO.to_string());
-    }
-    blocks.join("\n\n")
+    format!("You are `{}`. {}", self_id, render_reflect(&me))
 }
 
 /// THE system block a turn uses — the one choice `assemble_messages` builds the
 /// turn on and `context_recall` sizes the body budget against, so the two never
-/// drift (python `_system_content`). PRECEDENCE: the per-call argument (this
-/// delivery) > the record's own `system_prompt` (read LIVE, so an `update_agent`
-/// lands on the next turn — a main turn, a self-delivery, a turn woken by a
-/// reply) > the default block.
+/// drift (python `_system_content`). PRECEDENCE (owner, 2026-10-03, 2026-10-08):
+/// the per-call argument (this delivery) > the record's own `system_prompt` (read
+/// LIVE, so an `update_agent` lands on the next turn — a main turn, a
+/// self-delivery, a turn woken by a reply) > the file the record's
+/// `system_prompt_file` names ([`crate::prompt_file`]) > the default block.
+/// Whichever prompt is in force has its placeholders filled; none is ever
+/// appended to another.
 pub async fn system_content(
     self_id: &AgentId,
     kernel: &Arc<Kernel>,
     system_prompt: Option<&str>,
 ) -> String {
-    match system_prompt {
-        Some(s) if !s.trim().is_empty() => s.to_string(),
-        _ => {
-            match crate::schema::record_system_prompt(&crate::helpers::agent_meta(self_id, kernel))
-            {
-                Some(s) => s,
-                None => default_system_content(self_id, kernel).await,
-            }
-        }
+    if let Some(s) = system_prompt.filter(|s| !s.trim().is_empty()) {
+        return render_prompt(s, self_id, kernel).await;
     }
+    if let Some(s) =
+        crate::schema::record_system_prompt(&crate::helpers::agent_meta(self_id, kernel))
+    {
+        return render_prompt(&s, self_id, kernel).await;
+    }
+    if let Some(s) = crate::prompt_file::text(self_id, kernel)
+        .await
+        .filter(|s| !py_strip(s).is_empty())
+    {
+        return render_prompt(&s, self_id, kernel).await;
+    }
+    default_system_content(self_id, kernel).await
 }
 
 /// Build the per-turn message list: system block + the MODEL VIEW of the

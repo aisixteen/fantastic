@@ -431,6 +431,8 @@ let package = Package(
             name: "FantasticAICoreTests",
             dependencies: [
                 "FantasticAICore", "FantasticKernel", "FantasticJSON", "FantasticRamStore",
+                // A real file_bridge for `system_prompt_file` (read + watch_path).
+                "FantasticFile",
                 .product(name: "OrderedCollections", package: "swift-collections"),
             ]
         ),

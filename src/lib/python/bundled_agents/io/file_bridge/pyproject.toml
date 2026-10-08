@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Fantastic file_bridge agent — the fs-transport member of the io family: a sealed-by-default, running-dir-clamped filesystem edge."
 license = "AGPL-3.0-or-later"
 requires-python = ">=3.11"
-dependencies = ["fantastic-io-bridge"]
+dependencies = ["fantastic-io-bridge", "watchfiles>=1.0"]
 
 [project.entry-points."fantastic.bundles"]
 file_bridge = "file_bridge.tools"

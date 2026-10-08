@@ -19,6 +19,9 @@ sha2 = "0.10"
 tokio = { workspace = true }
 # `read_private`'s one open: O_NOFOLLOW | O_NONBLOCK, ELOOP, getuid.
 libc = { workspace = true }
+# `watch_path`'s disk watcher — native events (FSEvents / inotify / kqueue), the
+# library python's `watchfiles` is built on.
+notify = "6"
 
 [dev-dependencies]
 tempfile = "3"

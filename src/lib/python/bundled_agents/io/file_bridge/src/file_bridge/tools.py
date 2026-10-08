@@ -982,10 +982,131 @@ async def _undo(id, payload, kernel):
 
 
 async def on_delete(agent) -> None:
-    """The bridge is going away — its undo slots go with it."""
+    """The bridge is going away — its undo slots and its disk watch go with it."""
     slots = _UNDO
     for k in [k for k in slots if k[0] == agent.id]:
         del slots[k]
+    st = _WATCH.pop(agent.id, None)
+    if st and st["task"] is not None:
+        st["task"].cancel()
+
+
+# ─── watching paths (owner, 2026-10-08) ─────────────────────────
+#
+# `watch_path {path}` puts an EXPOSED file or directory under a disk watcher
+# (`watchfiles` — native events: FSEvents / inotify / kqueue): any change to it, by
+# any writer (this bridge, an editor, another process), is emitted on this bridge's
+# own inbox as `{type: changed, path, kind}`. A caller receives them by WATCHING this
+# bridge. A file is watched through its parent directory, so an editor's atomic
+# save (write a temp file, rename it over) is seen. Each path is held per caller;
+# the disk watch stops when no caller holds any path. RAM only: a kernel restart
+# drops every watch (a caller re-arms on boot).
+
+#: A burst of disk events (an editor's save) inside this many ms is one `changed`.
+WATCH_DEBOUNCE_MS = 50
+
+# bridge id → {"paths": {norm path: {caller ids}}, "task": asyncio.Task | None}
+_WATCH: dict[str, dict] = {}
+
+
+def _caller() -> str:
+    """Who holds a watch: the sending agent, or the operator."""
+    from kernel import current_origin
+
+    return current_origin() or "kernel"
+
+
+async def _watch_path(id, payload, kernel):
+    """args: path:str (req — an exposed file or directory). Emit `{type: changed, path, kind}` on this bridge's inbox whenever it changes on disk, by any writer; WATCH this bridge to receive them. Returns {watching, paths}.
+
+    `kind` is `added`, `modified` or `deleted` as the disk reported it — treat any
+    `changed` as "read it again". A directory reports its entries (not recursive).
+    Held per caller until `unwatch_path`; RAM only."""
+    rec = kernel.get(id) or {}
+    root = _root(kernel, rec)
+    path, err = _path_arg("watch_path", payload)
+    if err:
+        return err
+    if err := _gate_path("watch_path", root, _allow(rec), path):
+        return err
+    norm = _norm(path) or "."
+    parent = posixpath.dirname(norm) or "."
+    try:
+        is_dir = fs.is_dir(root, norm)
+        if not (is_dir or fs.is_dir(root, parent)):
+            return refusal(
+                NOT_FOUND,
+                f"watch_path: no directory {parent!r} to watch {path!r} in",
+                path=path,
+            )
+    except (ValueError, OSError) as e:
+        return refusal(TRANSPORT_ERROR, str(e))
+    st = _WATCH.setdefault(id, {"paths": {}, "task": None})
+    st["paths"].setdefault(norm, set()).add(_caller())
+    _rewatch(id, kernel, root)
+    return {"watching": norm, "paths": sorted(st["paths"])}
+
+
+async def _unwatch_path(id, payload, kernel):
+    """args: path:str (req). Stop YOUR watch of a path; the disk watch ends when no caller holds a path. Returns {watching:false, paths}."""
+    rec = kernel.get(id) or {}
+    path, err = _path_arg("unwatch_path", payload)
+    if err:
+        return err
+    norm = _norm(path) or "."
+    st = _WATCH.get(id) or {"paths": {}, "task": None}
+    holders = st["paths"].get(norm)
+    if holders is not None:
+        holders.discard(_caller())
+        if not holders:
+            del st["paths"][norm]
+    _rewatch(id, kernel, _root(kernel, rec))
+    return {"watching": False, "paths": sorted(st["paths"])}
+
+
+def _rewatch(id: str, kernel, root: fs.Root) -> None:
+    """(Re)start the one disk watcher this bridge runs, over the paths held now."""
+    st = _WATCH.get(id)
+    if st is None:
+        return
+    if st["task"] is not None:
+        st["task"].cancel()
+        st["task"] = None
+    if not st["paths"]:
+        return
+    files: dict[str, str] = {}  # absolute file → its path under the root
+    dirs: dict[str, str] = {}  # absolute dir → its path under the root
+    for norm in st["paths"]:
+        target = fs.resolve(root, "" if norm == "." else norm)
+        if fs.is_dir(root, norm):
+            dirs[str(target)] = norm
+        else:
+            files[str(target)] = norm
+    tid = kernel.ctx.spawn_task(id, "watch_path", _watch_loop(id, kernel, files, dirs))
+    st["task"] = kernel.ctx.tasks[tid]["_task"]
+
+
+async def _watch_loop(id: str, kernel, files: dict[str, str], dirs: dict[str, str]):
+    import os
+
+    import watchfiles
+
+    targets = sorted({os.path.dirname(f) for f in files} | set(dirs))
+    async for changes in watchfiles.awatch(
+        *targets, recursive=False, debounce=WATCH_DEBOUNCE_MS, raise_interrupt=False
+    ):
+        seen: dict[str, str] = {}
+        for change, raw in changes:
+            p = os.path.realpath(raw)
+            if p in files:
+                seen[files[p]] = change.name
+                continue
+            d = dirs.get(os.path.dirname(p))
+            if d is not None:
+                name = os.path.basename(p)
+                seen[name if d == "." else f"{d}/{name}"] = change.name
+        for rel, kind in seen.items():
+            await kernel.emit(id, {"type": "changed", "path": rel, "kind": kind})
 
 
 # ─── dispatch ───────────────────────────────────────────────────
@@ -1006,6 +1127,13 @@ VERBS = {
     "delete": _delete,
     "rename": _rename,
     "mkdir": _mkdir,
+    "watch_path": _watch_path,
+    "unwatch_path": _unwatch_path,
+}
+
+EMITS = {
+    "changed": "{path, kind: added|modified|deleted} — a path under `watch_path` changed "
+    "on disk, by any writer; watch this bridge to receive it",
 }
 
 UNGATED = {"reflect"}  # discovery must work on a sealed bridge
