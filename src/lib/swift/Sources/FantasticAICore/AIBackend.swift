@@ -695,6 +695,18 @@ public final class AIBackend: @unchecked Sendable {
                 "error": .string(e.message), "reason": .string("memory_store"),
                 "client_id": .string(clientId),
             ])
+        } catch let e as PromptFileError {
+            // FAIL LOUD: a system_prompt_file is set and unusable — no turn on
+            // another block, said so.
+            await emitStatus(
+                kernel: kernel, agentId: agentId, clientId: clientId, phase: "done",
+                detail: [("reason", .string("error")), ("error", .string(e.message))])
+            st.clearCurrent()
+            await st.fifo.release()
+            return .object([
+                "error": .string(e.message), "reason": .string("system_prompt_file"),
+                "client_id": .string(clientId),
+            ])
         } catch {
             // A PROVIDER FAILURE RAISES (see `runStream`). The lock is
             // python's `finally`: it is released on the way out, or the agent is
@@ -1188,14 +1200,16 @@ public final class AIBackend: @unchecked Sendable {
     /// (`PromptFile`) > the default block. Whichever prompt is in force has its
     /// placeholders filled; none is ever appended to another. Python
     /// `_system_content`.
-    func systemContent(agent: Agent, systemPrompt: String?, kernel: Kernel) async -> String {
+    func systemContent(agent: Agent, systemPrompt: String?, kernel: Kernel) async throws -> String {
         if let perCall = systemPrompt, !pyStrip(perCall).isEmpty {
             return await renderPrompt(perCall, agent: agent, kernel: kernel)
         }
         if let rec = RecordSchema.recordSystemPrompt(agent.metaValue(forKey: "system_prompt")) {
             return await renderPrompt(rec, agent: agent, kernel: kernel)
         }
-        if let file = await PromptFile.text(agent, kernel), !pyStrip(file).isEmpty {
+        // Set and unusable throws `PromptFileError` — the turn fails, never the
+        // default below.
+        if let file = try await PromptFile.text(agent, kernel) {
             return await renderPrompt(file, agent: agent, kernel: kernel)
         }
         return await assembleSystemPrompt(agent: agent, systemPrompt: nil, kernel: kernel)
@@ -1321,7 +1335,8 @@ public final class AIBackend: @unchecked Sendable {
     func assemble(
         agent: Agent, userText: String, systemPrompt: String?, kernel: Kernel
     ) async throws -> ([JSON], Int) {
-        let sysContent = await systemContent(agent: agent, systemPrompt: systemPrompt, kernel: kernel)
+        let sysContent = try await systemContent(
+            agent: agent, systemPrompt: systemPrompt, kernel: kernel)
         // The system block is rebuilt on EVERY user turn; the store holds only the
         // user/assistant turns. The howto is not persisted — it always reflects
         // the latest state at send-time.

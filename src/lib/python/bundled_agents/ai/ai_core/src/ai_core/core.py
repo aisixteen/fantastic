@@ -54,6 +54,7 @@ from ai_core.context import (
     output_reserve,
     resolve_context_window,
 )
+from ai_core import prompt_file
 from ai_core.folds import expand_ids as expand_fold_ids
 from ai_core.strategies import DEFAULT_STRATEGY, get_strategy, strategy_names
 from ai_core.strategies.base import NOTICE_ENVELOPE_RESERVE
@@ -2071,10 +2072,10 @@ async def _system_content(
         return await _render_prompt(system_prompt, self_id, kernel)
     if isinstance(rec_prompt, str) and rec_prompt.strip():
         return await _render_prompt(rec_prompt, self_id, kernel)
-    from ai_core import prompt_file
-
+    # Set and unusable raises `PromptFileError` — the turn fails, never this
+    # block's default below.
     file_text = await prompt_file.text(self_id, kernel)
-    if isinstance(file_text, str) and file_text.strip():
+    if file_text is not None:
         return await _render_prompt(file_text, self_id, kernel)
     # The DEFAULT system block is deliberately lean: a tree id-index + bundle
     # catalog primer, self-identity, and the context-window howto (context IS
@@ -2796,8 +2797,6 @@ def _make_reflect(cfg: Backend):
             # task handle of its own. `_current[id]` present ⇔ in flight.
             "generating": id in _current,
         }
-        from ai_core import prompt_file
-
         if why := prompt_file.error_of(id):
             out["system_prompt_file_error"] = why
         if cfg.reflect_extra is not None:
@@ -3032,6 +3031,17 @@ def _make_send(cfg: Backend):
                 return {
                     "error": str(e),
                     "reason": "memory_store",
+                    "client_id": client_id,
+                }
+            except prompt_file.PromptFileError as e:
+                # FAIL LOUD: a system_prompt_file is set and unusable — no turn
+                # on another block, said so.
+                await _emit_status(
+                    kernel, id, client_id, "done", reason="error", error=str(e)
+                )
+                return {
+                    "error": str(e),
+                    "reason": "system_prompt_file",
                     "client_id": client_id,
                 }
             except Exception as e:
@@ -3312,8 +3322,6 @@ async def on_delete(agent) -> None:
     _awaiting.pop(id, None)
     for table in _mem(agent).values():
         table.pop(id, None)
-    from ai_core import prompt_file
-
     await prompt_file.drop(id, agent)
 
 

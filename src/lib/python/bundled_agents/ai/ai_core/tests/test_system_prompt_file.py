@@ -2,10 +2,12 @@
 
 Placeholders `{tree}` `{self}` `{store}` `{howto}` are filled per agent and per turn
 in whichever prompt is in force; `{tree}\\n\\n{self}\\n\\n{howto}` IS the default block,
-byte for byte. `system_prompt_file: {bridge, path}` makes a file — read THROUGH that
-file_bridge, as the agent — the block, re-read on the next turn after the bridge
-reports it changed (`watch_path`). Precedence: per-call > record `system_prompt` >
-the file > the default; nothing is ever appended. Real turn path, provider faked."""
+byte for byte. `file_bridge_id` + `system_prompt_file` (a path on it) make a file —
+read THROUGH that file_bridge, as the agent — the block, re-read on the next turn
+after the bridge reports it changed (`watch_path`). Not set: nothing is looked up,
+the default block. Set and unusable: the turn FAILS, loud — never another block.
+Precedence: per-call > record `system_prompt` > the file > the default; nothing is
+ever appended. Real turn path, provider faked."""
 
 from __future__ import annotations
 
@@ -66,6 +68,18 @@ async def _turn(k, aid: str, fp: _Fake, **extra) -> str:
     return _sys(fp.requests[n])
 
 
+async def _failed_turn(k, aid: str, fp: _Fake) -> dict:
+    """A turn that must fail loud: no request reaches the model."""
+    n = len(fp.requests)
+    out = (await k.send([{"target": aid, "payload": {"type": "send", "text": "go"}}]))[
+        0
+    ]
+    assert len(fp.requests) == n, "the model was called on another block"
+    res = out["result"] or {}
+    assert res.get("reason") == "system_prompt_file", out
+    return res
+
+
 def _bridge(k, readers: list[str]) -> str:
     rec = k.create(
         "file_bridge.tools",
@@ -82,7 +96,8 @@ def _ai(k, aid: str, fake_providers, *, file: bool = False, **meta) -> _Fake:
     can = {"cli": "*"}
     if file:
         can["prompts"] = BRIDGE_VERBS
-        meta["system_prompt_file"] = {"bridge": "prompts", "path": "prompt.md"}
+        meta["file_bridge_id"] = "prompts"
+        meta["system_prompt_file"] = "prompt.md"
     rec = k.create(
         "ollama_backend.tools",
         id=aid,
@@ -183,19 +198,30 @@ async def test_a_record_prompt_beats_the_file_and_clearing_the_field_drops_it(
     assert await _turn(k, "pf2", fp) == "FILE\n"
     await _op(k, {"type": "update_agent", "id": "pf2", "system_prompt_file": None})
     default = await _turn(k, "pf2", fp)
-    assert default.startswith("[kernel") or "You are `pf2`." in default
+    assert "You are `pf2`." in default, "not set: nothing looked up, the default"
     assert "pf2" not in prompt_file._FILES
     assert _WATCH["prompts"]["paths"] == {}, "the agent's hold is released"
 
 
-async def test_a_missing_file_is_the_default_block_and_reflect_says_why(
+async def test_a_path_without_file_bridge_id_fails_loud(seeded_kernel, fake_providers):
+    k = seeded_kernel
+    fp = _ai(k, "pf6", fake_providers, system_prompt_file="prompt.md")
+    res = await _failed_turn(k, "pf6", fp)
+    assert "no file_bridge_id" in res["error"], res
+    # file_bridge_id alone names nothing to read: the default block, silently
+    await _op(k, {"type": "update_agent", "id": "pf6", "system_prompt_file": None})
+    await _op(k, {"type": "update_agent", "id": "pf6", "file_bridge_id": "prompts"})
+    assert "You are `pf6`." in await _turn(k, "pf6", fp)
+
+
+async def test_a_missing_file_fails_the_turn_and_reflect_says_why(
     seeded_kernel, fake_providers
 ):
     k = seeded_kernel
     _bridge(k, ["pf3"])
     fp = _ai(k, "pf3", fake_providers, file=True)
-    block = await _turn(k, "pf3", fp)
-    assert "You are `pf3`." in block, "the default block"
+    res = await _failed_turn(k, "pf3", fp)
+    assert "prompt.md" in res["error"], res
     rf = (await k.send([{"target": "pf3", "payload": {"type": "reflect"}}]))[0][
         "result"
     ]
@@ -211,18 +237,24 @@ async def test_a_missing_file_is_the_default_block_and_reflect_says_why(
     assert "system_prompt_file_error" not in rf, rf
 
 
-async def test_without_the_grants_the_file_is_refused_not_read(
+async def test_without_the_grants_the_turn_fails_and_nothing_is_read(
     seeded_kernel, fake_providers
 ):
     k = seeded_kernel
     _bridge(k, [])  # the bridge does not accept the agent
     Path("prompt.md").write_text("SECRET\n")
     fp = _ai(k, "pf4", fake_providers, file=True)
-    block = await _turn(k, "pf4", fp)
-    assert "SECRET" not in block and "You are `pf4`." in block
-    assert "unauthorized" in (prompt_file.error_of("pf4") or "") or "not accept" in (
-        prompt_file.error_of("pf4") or ""
-    )
+    res = await _failed_turn(k, "pf4", fp)
+    assert "watch_path" in res["error"] and "SECRET" not in res["error"], res
+
+
+async def test_an_empty_file_fails_the_turn(seeded_kernel, fake_providers):
+    k = seeded_kernel
+    _bridge(k, ["pf7"])
+    Path("prompt.md").write_text(" \n")
+    fp = _ai(k, "pf7", fake_providers, file=True)
+    res = await _failed_turn(k, "pf7", fp)
+    assert "empty" in res["error"], res
 
 
 async def test_deleting_the_agent_releases_the_file(seeded_kernel, fake_providers):
@@ -239,16 +271,22 @@ async def test_deleting_the_agent_releases_the_file(seeded_kernel, fake_provider
 
 
 @pytest.mark.parametrize(
-    "bad",
+    "field,bad,refusal",
     [
-        "prompt.md",
-        {"bridge": "prompts"},
-        {"bridge": "", "path": "p.md"},
-        {"bridge": "prompts", "path": "p.md", "extra": 1},
-        {"bridge": 5, "path": "p.md"},
+        ("system_prompt_file", "", prompt_file.SYSTEM_PROMPT_FILE_REFUSAL),
+        ("system_prompt_file", "  ", prompt_file.SYSTEM_PROMPT_FILE_REFUSAL),
+        ("system_prompt_file", 5, prompt_file.SYSTEM_PROMPT_FILE_REFUSAL),
+        (
+            "system_prompt_file",
+            {"bridge": "prompts", "path": "p.md"},
+            prompt_file.SYSTEM_PROMPT_FILE_REFUSAL,
+        ),
+        ("file_bridge_id", "", prompt_file.FILE_BRIDGE_ID_REFUSAL),
+        ("file_bridge_id", 5, prompt_file.FILE_BRIDGE_ID_REFUSAL),
+        ("file_bridge_id", ["prompts"], prompt_file.FILE_BRIDGE_ID_REFUSAL),
     ],
 )
-async def test_a_bad_value_is_refused_at_the_write(seeded_kernel, bad):
+async def test_a_bad_value_is_refused_at_the_write(seeded_kernel, field, bad, refusal):
     k = seeded_kernel
     meta = memory_meta(k, "pf_bad", {"cli": "*"})
     out = await _op(
@@ -260,11 +298,11 @@ async def test_a_bad_value_is_refused_at_the_write(seeded_kernel, bad):
             "id": "pf_bad",
             "endpoint": "http://127.0.0.1:9/stub",
             "model": "stub",
-            "system_prompt_file": bad,
+            field: bad,
             **meta,
         },
     )
-    assert out.get("error") == prompt_file.REFUSAL, out
+    assert out.get("error") == refusal, out
 
 
 async def test_the_schema_publishes_the_field(seeded_kernel):
@@ -273,4 +311,4 @@ async def test_the_schema_publishes_the_field(seeded_kernel):
     )["bundles"]
     row = next(b for b in cat if b["name"] == "vllm_backend")
     names = [f["name"] for f in row["schema"]["fields"]]
-    assert "system_prompt_file" in names and "system_prompt" in names
+    assert names[-3:] == ["system_prompt", "file_bridge_id", "system_prompt_file"]

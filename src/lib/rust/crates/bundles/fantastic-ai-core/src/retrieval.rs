@@ -370,7 +370,7 @@ pub async fn context_recall(
     model_window: i64,
     system_prompt: Option<&str>,
     client_id: Option<&str>,
-) -> MemResult<Value> {
+) -> Result<Value, crate::assembly::BlockFail> {
     let meta = agent_meta(agent_id, kernel);
     let mut rows = load_history(agent_id, kernel, false).await?;
     if rows.is_empty() {
@@ -382,7 +382,7 @@ pub async fn context_recall(
     // a record or per-call `system_prompt` changes how much room the body gets.
     let sys_tokens = estimate_one(&json!({
         "role": "system",
-        "content": system_content(agent_id, kernel, system_prompt).await,
+        "content": system_content(agent_id, kernel, system_prompt).await?,
     }));
     let body_budget = (agent_budget(&meta, model_window) - sys_tokens - NOTICE_ENVELOPE_RESERVE)
         .max(BUDGET_FLOOR);

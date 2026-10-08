@@ -104,11 +104,17 @@ AI_FIELDS: tuple = (
         "{self} {store} {howto} are filled each turn; null = the default",
     ),
     field(
+        "file_bridge_id",
+        "str",
+        "the file_bridge this agent reads files THROUGH (its `system_prompt_file`); "
+        "null = none, nothing is read",
+    ),
+    field(
         "system_prompt_file",
-        "map",
-        "{bridge, path}: a file read THROUGH that file_bridge as this agent's system "
-        "block (placeholders filled), re-read when the bridge reports it changed; a "
-        "record or per-call `system_prompt` beats it; null = none",
+        "str",
+        "a path on `file_bridge_id`, read through it as this agent's system block "
+        "(placeholders filled), re-read when the bridge reports it changed; a record "
+        "or per-call `system_prompt` beats it; null = none",
     ),
 )
 
@@ -173,7 +179,7 @@ def validate(sch: dict, backend: str, meta: dict, record: dict) -> str | None:
         return SYSTEM_PROMPT_REFUSAL
     from ai_core.prompt_file import shape_error as prompt_file_error
 
-    if bad := prompt_file_error(meta.get("system_prompt_file")):
+    if bad := prompt_file_error(meta):
         return bad
     merged = {**record, **meta}
     missing = [

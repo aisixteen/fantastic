@@ -83,7 +83,8 @@ public enum RecordSchema {
                     + "(\(AIConstants.RECENT_N_RANGE.0)–\(AIConstants.RECENT_N_RANGE.1))",
                 default: .integer(AIConstants.RECENT_N)),
             field("system_prompt", "str", SYSTEM_PROMPT_HINT),
-            field("system_prompt_file", "map", SYSTEM_PROMPT_FILE_HINT),
+            field("file_bridge_id", "str", FILE_BRIDGE_ID_HINT),
+            field("system_prompt_file", "str", SYSTEM_PROMPT_FILE_HINT),
         ]
     }
 
@@ -93,11 +94,16 @@ public enum RecordSchema {
         + "(a per-call `system_prompt` beats it for that delivery); placeholders {tree} "
         + "{self} {store} {howto} are filled each turn; null = the default"
 
+    /// The `file_bridge_id` field's hint. Python `AI_FIELDS`.
+    public static let FILE_BRIDGE_ID_HINT =
+        "the file_bridge this agent reads files THROUGH (its `system_prompt_file`); "
+        + "null = none, nothing is read"
+
     /// The `system_prompt_file` field's hint. Python `AI_FIELDS`.
     public static let SYSTEM_PROMPT_FILE_HINT =
-        "{bridge, path}: a file read THROUGH that file_bridge as this agent's system "
-        + "block (placeholders filled), re-read when the bridge reports it changed; a "
-        + "record or per-call `system_prompt` beats it; null = none"
+        "a path on `file_bridge_id`, read through it as this agent's system block "
+        + "(placeholders filled), re-read when the bridge reports it changed; a record "
+        + "or per-call `system_prompt` beats it; null = none"
 
     /// The refusal for a `system_prompt` the record cannot use. Python
     /// `SYSTEM_PROMPT_REFUSAL`.
@@ -185,7 +191,7 @@ public enum RecordSchema {
         if let v = meta["system_prompt"], v != .null, recordSystemPrompt(v) == nil {
             return SYSTEM_PROMPT_REFUSAL
         }
-        if let bad = PromptFile.shapeError(meta["system_prompt_file"]) {
+        if let bad = PromptFile.shapeError(meta) {
             return bad
         }
         var merged = record

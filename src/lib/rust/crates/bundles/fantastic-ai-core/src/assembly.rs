@@ -15,7 +15,8 @@
 //! afterwards.
 
 use crate::history_view::{dedupe_repeat_bodies, dedupe_stale_reads, drop_read_docs};
-use crate::memory::load_history;
+use crate::memory::{load_history, MemoryStoreError};
+use crate::prompt_file::PromptFileError;
 use crate::state::BackendState;
 use fantastic_bundle::{py_split_whitespace, py_str, py_strip, py_truthy};
 use fantastic_kernel::{AgentId, Item, Kernel};
@@ -397,22 +398,52 @@ pub async fn system_content(
     self_id: &AgentId,
     kernel: &Arc<Kernel>,
     system_prompt: Option<&str>,
-) -> String {
+) -> Result<String, PromptFileError> {
     if let Some(s) = system_prompt.filter(|s| !s.trim().is_empty()) {
-        return render_prompt(s, self_id, kernel).await;
+        return Ok(render_prompt(s, self_id, kernel).await);
     }
     if let Some(s) =
         crate::schema::record_system_prompt(&crate::helpers::agent_meta(self_id, kernel))
     {
-        return render_prompt(&s, self_id, kernel).await;
+        return Ok(render_prompt(&s, self_id, kernel).await);
     }
-    if let Some(s) = crate::prompt_file::text(self_id, kernel)
-        .await
-        .filter(|s| !py_strip(s).is_empty())
-    {
-        return render_prompt(&s, self_id, kernel).await;
+    // Set and unusable is an `Err` — the turn fails, never the default below.
+    if let Some(s) = crate::prompt_file::text(self_id, kernel).await? {
+        return Ok(render_prompt(&s, self_id, kernel).await);
     }
-    default_system_content(self_id, kernel).await
+    Ok(default_system_content(self_id, kernel).await)
+}
+
+/// Why a turn's block or view could not be built: the memory store failed, or a
+/// set `system_prompt_file` is unusable. Either fails the turn, said so (python
+/// `MemoryStoreError` / `PromptFileError`, both caught by `_send`).
+#[derive(Debug)]
+pub enum BlockFail {
+    /// The memory store refused or is unreachable.
+    Store(MemoryStoreError),
+    /// `system_prompt_file` is set and cannot be the block.
+    PromptFile(PromptFileError),
+}
+
+impl From<MemoryStoreError> for BlockFail {
+    fn from(e: MemoryStoreError) -> Self {
+        Self::Store(e)
+    }
+}
+
+impl From<PromptFileError> for BlockFail {
+    fn from(e: PromptFileError) -> Self {
+        Self::PromptFile(e)
+    }
+}
+
+impl From<BlockFail> for fantastic_kernel::bundle::BundleError {
+    fn from(e: BlockFail) -> Self {
+        match e {
+            BlockFail::Store(e) => e.into(),
+            BlockFail::PromptFile(e) => e.into(),
+        }
+    }
 }
 
 /// Build the per-turn message list: system block + the MODEL VIEW of the
@@ -437,8 +468,8 @@ pub async fn assemble_messages(
     kernel: &Arc<Kernel>,
     _client_id: &str,
     system_prompt: Option<&str>,
-) -> Result<(Vec<Value>, usize), crate::memory::MemoryStoreError> {
-    let system_content = system_content(self_id, kernel, system_prompt).await;
+) -> Result<(Vec<Value>, usize), BlockFail> {
+    let system_content = system_content(self_id, kernel, system_prompt).await?;
     let mut messages = vec![json!({"role": "system", "content": system_content})];
     // A trimmed VIEW, not a rewrite of the store: stale whole-state reads deduped,
     // identical bodies stubbed, and answered reflects reduced to a stub — the

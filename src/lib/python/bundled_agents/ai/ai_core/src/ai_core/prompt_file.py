@@ -1,17 +1,19 @@
-"""The system block from a FILE (owner, 2026-10-08): `system_prompt_file: {bridge, path}`.
+"""The system block from a FILE (owner, 2026-10-08): the record's `file_bridge_id`
+names the file_bridge this agent reads files THROUGH, `system_prompt_file` a path on
+it. No `file_bridge_id` (or no path) → nothing is looked up.
 
-The agent reads the file THROUGH that file_bridge, AS ITSELF — every read and watch
-is its own gated send, so its `can_call` names the bridge (`read_stream`,
-`watch_path`, `unwatch_path`, `watch`) and the bridge's `callable_by` names it. It
-holds the path under the bridge's disk watcher (`watch_path`) and watches the bridge
-through a private inbox: a `changed` event for the path marks the text STALE, and
-the next turn reads it again. An editor's save is live on the next turn — no
-restart, and no read on a turn nothing changed.
+The agent reads the file through that bridge AS ITSELF — every read and watch is its
+own gated send, so its `can_call` names the bridge (`read_stream`, `watch_path`,
+`unwatch_path`, `watch`) and the bridge's `callable_by` names it. It holds the path
+under the bridge's disk watcher (`watch_path`) and watches the bridge through a
+private inbox: a `changed` event for the path marks the text STALE, and the next
+turn reads it again. An editor's save is live on the next turn — no restart, and no
+read on a turn nothing changed.
 
 Armed on the first turn that needs it (and again after a kernel restart — all of
-this is RAM); re-armed when the record names another file; dropped when the field
-is cleared or the agent deleted. A file that cannot be read leaves the turn on the
-block below it in the precedence, and the reason is the agent's
+this is RAM); re-armed when the record names another bridge or path; dropped when
+either field is cleared or the agent deleted. A file that cannot be read leaves the
+turn on the block below it in the precedence, and the reason is the agent's
 `system_prompt_file_error` (reflect) until a read succeeds.
 """
 
@@ -19,10 +21,13 @@ from __future__ import annotations
 
 import posixpath
 
-#: The refusal for a `system_prompt_file` the record cannot use.
-REFUSAL = (
-    "system_prompt_file must be {bridge: <file_bridge id>, path: <path under its "
-    "root>} — null clears it"
+#: The refusals for the two fields the record cannot use.
+FILE_BRIDGE_ID_REFUSAL = (
+    "file_bridge_id must be a non-empty file_bridge agent id — null clears it"
+)
+SYSTEM_PROMPT_FILE_REFUSAL = (
+    "system_prompt_file must be a non-empty path on the agent's file_bridge_id — "
+    "null clears it"
 )
 
 # agent id → {ref, text, stale, error, inbox, task}
@@ -30,29 +35,28 @@ _FILES: dict[str, dict] = {}
 
 
 def ref_of(rec: dict) -> tuple[str, str] | None:
-    """`(bridge, path)` the record names, or None."""
-    v = rec.get("system_prompt_file")
+    """`(file_bridge_id, system_prompt_file)` when the record names both, or None."""
+    bridge, path = rec.get("file_bridge_id"), rec.get("system_prompt_file")
     if (
-        isinstance(v, dict)
-        and isinstance(v.get("bridge"), str)
-        and v["bridge"].strip()
-        and isinstance(v.get("path"), str)
-        and v["path"].strip()
+        isinstance(bridge, str)
+        and bridge.strip()
+        and isinstance(path, str)
+        and path.strip()
     ):
-        return v["bridge"], v["path"]
+        return bridge, path
     return None
 
 
-def shape_error(v) -> str | None:
-    """Why a written `system_prompt_file` is unusable, or None (null clears it)."""
-    if v is None:
-        return None
-    if (
-        not isinstance(v, dict)
-        or set(v) != {"bridge", "path"}
-        or ref_of({"system_prompt_file": v}) is None
+def shape_error(meta: dict) -> str | None:
+    """Why a written `file_bridge_id` / `system_prompt_file` is unusable, or None
+    (null clears either)."""
+    for name, refusal in (
+        ("file_bridge_id", FILE_BRIDGE_ID_REFUSAL),
+        ("system_prompt_file", SYSTEM_PROMPT_FILE_REFUSAL),
     ):
-        return REFUSAL
+        v = meta.get(name)
+        if v is not None and not (isinstance(v, str) and v.strip()):
+            return refusal
     return None
 
 
@@ -62,14 +66,28 @@ def error_of(self_id: str) -> str | None:
     return st["error"] if st else None
 
 
+class PromptFileError(RuntimeError):
+    """`system_prompt_file` is set and cannot be the block — the turn fails, said so."""
+
+
 async def text(self_id: str, kernel) -> str | None:
-    """The file's text for this turn, or None (no file named, or unreadable). Runs
-    in the agent's own turn, so every send here is the agent's."""
-    ref = ref_of(kernel.get(self_id) or {})
+    """The file's text for this turn; None when `system_prompt_file` is not set
+    (nothing is looked up — the default block). Set and unusable — no
+    `file_bridge_id`, a refused or failed read, an empty file — raises
+    `PromptFileError`: the turn fails loud, it never falls to another block. Runs in
+    the agent's own turn, so every send here is the agent's."""
+    rec = kernel.get(self_id) or {}
+    path = rec.get("system_prompt_file")
     st = _FILES.get(self_id)
+    ref = ref_of(rec)
     if ref is None:
         if st is not None:
             await drop(self_id, kernel)
+        if isinstance(path, str) and path.strip():
+            raise PromptFileError(
+                f"{self_id}: system_prompt_file {path!r} is set but the record has "
+                "no file_bridge_id — name the file_bridge it is read through"
+            )
         return None
     if st is None or st["ref"] != ref:
         if st is not None:
@@ -82,6 +100,10 @@ async def text(self_id: str, kernel) -> str | None:
     if st["stale"] and st["task"] is not None:
         st["text"], st["error"] = await _read(kernel, *ref)
         st["stale"] = False
+        if st["error"] is None and not st["text"].strip():
+            st["text"], st["error"] = None, f"{ref[0]} {ref[1]}: the file is empty"
+    if st["error"] is not None:
+        raise PromptFileError(f"{self_id}: system_prompt_file: {st['error']}")
     return st["text"]
 
 
