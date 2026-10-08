@@ -216,10 +216,10 @@ enum DaemonMode {
     /// sibling task (REPL exit, signal-driven cancellation) finishes
     /// first. Equivalent to Python's `_block_forever()`.
     private static func blockForever() async {
-        while !Task.isCancelled {
-            // 1-hour granularity; cancellation propagates faster
-            // because `Task.sleep` is cancellation-aware.
-            try? await Task.sleep(nanoseconds: 3600 * 1_000_000_000)
-        }
+        // A stream nothing yields to: its iteration ends only when this task is
+        // cancelled — no timer, no wakeups (owner, 2026-10-08).
+        let (stream, continuation) = AsyncStream<Void>.makeStream()
+        for await _ in stream {}
+        continuation.finish()
     }
 }

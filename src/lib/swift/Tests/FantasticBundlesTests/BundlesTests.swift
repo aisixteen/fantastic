@@ -322,7 +322,7 @@ struct BundleSmokeTests {
     /// A store-backed kernel with `probes` probe targets and a scheduler
     /// (tick 0.1s) granted to call them — both sides of the deny-all gate open.
     private func makeProbedScheduler(
-        dir: URL, rel: String, probes: [String], capture: URL? = nil, tickSec: Double = 0.1,
+        dir: URL, rel: String, probes: [String], capture: URL? = nil,
         paused: Bool = false
     ) async -> (Kernel, SchedProbe) {
         let kernel = makeKernelWithAll(rootPath: dir)
@@ -343,7 +343,7 @@ struct BundleSmokeTests {
         }
         let r = await kernel.send([Item("kernel_state", [
                 "type": "create_agent", "parent_id": "kernel_state", "handler_module": "scheduler.tools", "id": "sched",
-                "tick_sec": .double(tickSec), "can_call": canCall, "paused": .bool(paused),
+                "can_call": canCall, "paused": .bool(paused),
             ])])[0].result
         #expect(r["error"].isNull, "\(r)")
         return (kernel, probe)
@@ -408,22 +408,19 @@ struct BundleSmokeTests {
         let dir = URL(fileURLWithPath: fm.currentDirectoryPath).appendingPathComponent(rel)
         try fm.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? fm.removeItem(at: dir) }
-        // A 2s SWEEP against a 1s interval, so both schedules are OVERDUE when
-        // the first sweep comes and the sweep is the batch. `next_run` is
-        // `created + interval`, and `create_agent` boots the scheduler, so the
-        // loop is already sweeping while the two `schedule` calls run: with a
-        // 0.1s sweep the wall gap between them (a store write each, 38 ms
-        // measured under the full parallel run) landed a sweep BETWEEN their
-        // two `next_run`s. p_slow then fired alone and held the loop for its
-        // whole 4s block, and the batch proof failed on scheduling rather than
-        // on behaviour. The 2s sweep absorbs any gap under a second.
+        // BOTH DUE when the loop looks: it fires at each schedule's exact due
+        // time (no tick to coalesce on), and the two `schedule` calls land a
+        // store write apart — so they are made due while the scheduler is
+        // paused, and the resume wakes it to one batch.
         let (kernel, probe) = await makeProbedScheduler(
-            dir: dir, rel: rel, probes: ["p_slow", "p_fast"], tickSec: 2.0)
+            dir: dir, rel: rel, probes: ["p_slow", "p_fast"])
+        _ = await kernel.send([Item("sched", ["type": "pause"])])[0].result
         let r1 = await schedule(kernel, "p_slow", hit: ["block": .double(4.0)])
         let r2 = await schedule(kernel, "p_fast")
         #expect(r1["schedule_id"].asString != nil, "\(r1)")
         #expect(r2["schedule_id"].asString != nil, "\(r2)")
-        _ = await kernel.send([Item("sched", ["type": "boot"])])[0].result
+        try await Task.sleep(nanoseconds: 1_200_000_000)
+        _ = await kernel.send([Item("sched", ["type": "resume"])])[0].result
         // Anchor on the SLOW hit, never on boot: the first fire is due one
         // interval out, so a deadline measured from boot races the interval.
         let slowSeen = await waitFor({ probe.hit("p_slow") != nil }, seconds: 6.0)
@@ -444,6 +441,35 @@ struct BundleSmokeTests {
         for s in list["schedules"].asArray ?? [] {
             #expect((s["run_count"].asInt ?? 0) >= 1, "\(s)")
         }
+    }
+
+    /// No idle wakeups (owner, 2026-10-08): with nothing to wait for the loop
+    /// waits on a change; a schedule, or the record's `paused` flipped by
+    /// update_agent, wakes it.
+    @Test func anIdleSchedulerNeverWakesAndAChangeWakesIt() async throws {
+        let fm = FileManager.default
+        let rel = "fantastic-sched-idle-\(UUID().uuidString)"
+        let dir = URL(fileURLWithPath: fm.currentDirectoryPath).appendingPathComponent(rel)
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: dir) }
+        let (kernel, probe) = await makeProbedScheduler(dir: dir, rel: rel, probes: ["p_idle"])
+        let r = await schedule(kernel, "p_idle")
+        #expect(r["schedule_id"].asString != nil, "\(r)")
+        #expect(
+            await waitFor({ probe.hit("p_idle") != nil }, seconds: 3.0), "a schedule woke nothing")
+        let up = { (paused: Bool) in
+            Item("kernel_state", ["type": "update_agent", "id": "sched", "paused": .bool(paused)])
+        }
+        _ = await kernel.send([up(true)])
+        try await Task.sleep(nanoseconds: 100_000_000)
+        probe.reset()
+        try await Task.sleep(nanoseconds: 1_500_000_000)
+        #expect(probe.hit("p_idle") == nil, "fired while paused")
+        _ = await kernel.send([up(false)])
+        #expect(
+            await waitFor({ probe.hit("p_idle") != nil }, seconds: 3.0),
+            "an update_agent resume woke nothing")
+        _ = await kernel.send([Item("kernel", ["type": "delete_agent", "id": "sched"])])
     }
 
     @Test func nextRunIsPersistedBeforeTheFire() async throws {
@@ -570,19 +596,6 @@ struct BundleSmokeTests {
             #expect(r["arg"].asString == "payload", "\(badValue.serialize()): \(r.serialize())")
         }
         _ = await kernel.send([Item("kernel", ["type": "delete_agent", "id": "sched"])])[0].result
-    }
-
-    @Test func aNonNumericTickSecIsRefusedAtWriteTime() async {
-        // #136 — `tick_sec: "0.5"` was silently defaulted to 1.0. The record is
-        // judged where the mistake is made.
-        let kernel = makeKernelWithAll()
-        let r = await kernel.send([Item("kernel_state", [
-                "type": "create_agent", "parent_id": "kernel_state",
-                "handler_module": "scheduler.tools", "id": "sch_ticks", "tick_sec": "0.5",
-            ])])[0].result
-        #expect(r["reason"].asString == "invalid_meta", "\(r.serialize())")
-        #expect((r["error"].asString ?? "").contains("tick_sec"), "\(r.serialize())")
-        #expect(kernel.agent(AgentId("sch_ticks")) == nil)
     }
 
     @Test func kernelBridgeForwardInMemory() async {
@@ -871,6 +884,12 @@ final class SchedProbe: AgentBundle, @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return hits[id]
+    }
+
+    func reset() {
+        lock.lock()
+        defer { lock.unlock() }
+        hits = [:]
     }
 
     func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? {
@@ -1186,19 +1205,6 @@ struct SchedulerParityTests {
         #expect(z["paused"] == .bool(false), "0 is not paused: \(z.serialize())")
     }
 
-    /// A5.12 — NO 0.1 s floor. `validateMeta` already refuses everything the read
-    /// cannot use, so a clamp could only contradict a legal record.
-    @Test func tickSecBelowATenthIsNotClamped() async throws {
-        let kernel = makeKernelWithAll()
-        await newScheduler(kernel, "s_fast", ["tick_sec": .double(0.02)])
-        let r = await ask(kernel, "s_fast", ["type": "reflect"])
-        #expect(r["tick_sec"].asDouble == 0.02, "\(r.serialize())")
-        // An absent one is the documented default, not a clamp.
-        await newScheduler(kernel, "s_dflt")
-        let d = await ask(kernel, "s_dflt", ["type": "reflect"])
-        #expect(d["tick_sec"].asDouble == 1.0, "\(d.serialize())")
-    }
-
     /// A5.16 — pause/resume put the FLAG FIRST, python's dict order.
     @Test func schedulerPauseReplyKeyOrderMatchesPython() async throws {
         let (kernel, dir) = try await schedulerOnAStore("schedkeys")
@@ -1302,7 +1308,6 @@ struct SchedulerStderrTests {
             [
                 "type": "create_agent", "parent_id": "kernel_state",
                 "handler_module": "scheduler.tools", "id": "sched",
-                "tick_sec": .double(0.25),
                 "can_call": ["store": "*", "kernel_state": "*"] as JSON,
             ])
         _ = await ask(kernel, "sched", ["type": "boot"])
@@ -1318,9 +1323,8 @@ struct SchedulerStderrTests {
         // next sweep attempts now fails at the loader.
         _ = await ask(kernel, "kernel", ["type": "delete_agent", "id": "store"])
 
-        // One sweep window: tick_sec 0.25, the schedule due at +1s. Kept as
-        // short as the 1 s minimum interval allows — a live tick loop is load on
-        // every test running beside it.
+        // The schedule is due at +1s; the loop wakes then. Kept as short as the
+        // 1 s minimum interval allows.
         let lines = await RuntimeLog.capture {
             try? await Task.sleep(nanoseconds: 1_600_000_000)
         }

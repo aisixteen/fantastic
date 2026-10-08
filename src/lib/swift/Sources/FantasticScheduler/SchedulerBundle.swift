@@ -36,9 +36,64 @@ public let HANDLER_MODULE = "scheduler.tools"
 /// Python's `HISTORY_MAX`.
 public let HISTORY_MAX = 500
 
-/// Seconds between tick-loop sweeps when the record does not name one (python
-/// `DEFAULT_TICK_SEC`).
-public let DEFAULT_TICK_SEC = 1.0
+/// A one-permit wake-up for a fire loop: `poke` wakes the waiter (or, with none
+/// waiting, makes the next `wait` return at once); `wait(upTo:)` returns on a poke
+/// or when the time is up — `nil` waits for a poke only, never on a timer.
+final class Wake: @unchecked Sendable {
+    private let lock = NSLock()
+    private var pending = false
+    private var waiter: CheckedContinuation<Void, Never>?
+
+    func poke() {
+        let c: CheckedContinuation<Void, Never>? = lock.withLock {
+            if let w = waiter {
+                waiter = nil
+                return w
+            }
+            pending = true
+            return nil
+        }
+        c?.resume()
+    }
+
+    private func poked() async {
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+                let now: Bool = lock.withLock {
+                    if pending {
+                        pending = false
+                        return true
+                    }
+                    if Task.isCancelled { return true }
+                    waiter = c
+                    return false
+                }
+                if now { c.resume() }
+            }
+        } onCancel: {
+            let c: CheckedContinuation<Void, Never>? = lock.withLock {
+                defer { waiter = nil }
+                return waiter
+            }
+            c?.resume()
+        }
+    }
+
+    func wait(upTo seconds: Double?) async {
+        guard let seconds else {
+            await poked()
+            return
+        }
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { await self.poked() }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
+            }
+            await group.next()
+            group.cancelAll()
+        }
+    }
+}
 
 public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
     public let name = "scheduler"
@@ -91,6 +146,25 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
     /// Bad JSON on disk reads as an empty list, exactly as `json.JSONDecodeError`
     /// does there.
     private var cache: [String: [JSON]] = [:]
+    /// Per scheduler: what wakes its fire loop (a change), and the state tap that
+    /// pokes it when the scheduler's own record is updated. Python `_wake`/`_unsub`.
+    private var wakes: [String: Wake] = [:]
+    private var subs: [String: SubscriberToken] = [:]
+
+    private func wakeOf(_ agentId: AgentId) -> Wake {
+        lock.withLock {
+            if let w = wakes[agentId.value] { return w }
+            let w = Wake()
+            wakes[agentId.value] = w
+            return w
+        }
+    }
+
+    /// Something the fire loop waits on changed: it recomputes when to wake.
+    private func poke(_ agentId: AgentId) {
+        let w = lock.withLock { wakes[agentId.value] }
+        w?.poke()
+    }
 
     /// python's `readme.md`, verbatim.
     public var readme: String? {
@@ -133,20 +207,6 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
         }
     }
 
-    /// Refuse a `tick_sec` that is not a positive number at WRITE time — the
-    /// point of the mistake. Silently defaulting it (as the tick loop's
-    /// `?? 1.0` did) turns an operator's typo into a behaviour change nobody is
-    /// told about.
-    public func validateMeta(
-        _ meta: OrderedDictionary<String, JSON>, record: OrderedDictionary<String, JSON>
-    ) -> String? {
-        guard let raw = meta["tick_sec"] ?? record["tick_sec"] else { return nil }
-        guard let v = raw.asDouble, v > 0 else {
-            return "scheduler: tick_sec must be a positive number of seconds"
-        }
-        return nil
-    }
-
     // ── argument typing ─────────────────────────────────────────
 
     /// ABSENT ⇒ `def`. Present, an integer, ≥ `minimum` ⇒ that value. ANYTHING
@@ -176,6 +236,11 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
     public func onDelete(agentId: AgentId, kernel: Kernel) async throws {
         lock.withLock { cache[agentId.value] = nil }
         _ = await stopTick(agentId, kernel: kernel)
+        let token: SubscriberToken? = lock.withLock {
+            wakes[agentId.value] = nil
+            return subs.removeValue(forKey: agentId.value)
+        }
+        if let token { kernel.unsubscribe(token) }
     }
 
     // ── persistence (THROUGH the loader) ────────────────────────
@@ -226,15 +291,18 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
 
     private func loadSchedules(_ id: AgentId, _ kernel: Kernel) async -> [JSON] {
         if let hit = cached(id) { return hit }
-        guard let raw = await fileRead(id, kernel, Self.schedulesBlob), !raw.isEmpty else {
-            setCache(id, [])
-            return []
-        }
+        let raw = await fileRead(id, kernel, Self.schedulesBlob)
         // Unreadable YAML (or a document that is not a list) is an EMPTY list,
         // not a crash — python's `_cache[sid] = doc if isinstance(doc, list) else []`.
-        let parsed = (try? YamlIO.load(raw))?.asArray ?? []
-        setCache(id, parsed)
-        return parsed
+        let parsed = raw.flatMap { $0.isEmpty ? nil : (try? YamlIO.load($0))?.asArray } ?? []
+        // FIRST FILL WINS: a verb that loaded and wrote while this read was in
+        // flight already holds the cache — the read must not replace it with the
+        // older list.
+        return lock.withLock {
+            if let held = cache[id.value] { return held }
+            cache[id.value] = parsed
+            return parsed
+        }
     }
 
     /// RAM FIRST, then disk — and the caller decides what a write failure means.
@@ -278,54 +346,52 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
 
     // ── tick loop ───────────────────────────────────────────────
 
-    /// python `_tick_sec`: the record's sweep interval when it is a POSITIVE
-    /// NUMBER (a bool is not one), else the documented default.
-    ///
-    /// NO FLOOR. `max(0.1, …)` silently overrode an operator who asked for a 50 ms
-    /// sweep, and `validateMeta` already refuses everything this read cannot use,
-    /// so the clamp could only ever contradict a legal record.
-    private func tickSec(_ agent: Agent?) -> Double {
-        guard let v = agent?.metaValue(forKey: "tick_sec"), let d = v.asDouble, d > 0 else {
-            return DEFAULT_TICK_SEC
-        }
-        return d
-    }
-
+    /// Fire what is due, then sleep until the earliest next fire — or, with
+    /// nothing to wait for, until a change (`poke`). NO IDLE WAKEUPS (owner,
+    /// 2026-10-08): never on a fixed tick. Python `_tick_loop`.
     private func tickLoop(_ agentId: AgentId, _ kernel: Kernel) async {
+        let wake = wakeOf(agentId)
         while !Task.isCancelled {
-            guard let agent = kernel.agent(agentId) else { return }  // deleted → exit
-            try? await Task.sleep(nanoseconds: UInt64(tickSec(agent) * 1_000_000_000))
-            if Task.isCancelled { return }
+            guard kernel.agent(agentId) != nil else { return }  // deleted → exit
+            var delay: Double?
             // python truthiness on the record's `paused`: `0`, `""` and `[]` are not
             // paused, and any non-empty value is.
-            if pyTruthy(kernel.agent(agentId)?.metaValue(forKey: "paused") ?? .null) { continue }
-            let now = nowSecs()
-            var schedules = await loadSchedules(agentId, kernel)
-            var due: [JSON] = []
-            for i in schedules.indices {
-                if pyTruthy(schedules[i]["paused"]) { continue }
-                let nextRun = schedules[i]["next_run"].asDouble ?? 0
-                if now < nextRun { continue }
-                // Persist BEFORE the fire: run_count/next_run are bumped and saved
-                // first, so a crash inside the fire window does not re-fire the
-                // same tick on reboot (at-most-once restart semantics).
-                let count = schedules[i]["run_count"].asInt ?? 0
-                let interval = schedules[i]["interval_seconds"].asDouble ?? 60
-                schedules[i]["run_count"] = .integer(count + 1)
-                schedules[i]["next_run"] = .double(now + interval)
-                due.append(schedules[i])
+            if !pyTruthy(kernel.agent(agentId)?.metaValue(forKey: "paused") ?? .null) {
+                let now = nowSecs()
+                var schedules = await loadSchedules(agentId, kernel)
+                var due: [JSON] = []
+                for i in schedules.indices {
+                    if pyTruthy(schedules[i]["paused"]) { continue }
+                    let nextRun = schedules[i]["next_run"].asDouble ?? 0
+                    if now < nextRun {
+                        delay = min(delay ?? .infinity, nextRun - now)
+                        continue
+                    }
+                    // Persist BEFORE the fire: run_count/next_run are bumped and
+                    // saved first, so a crash inside the fire window does not
+                    // re-fire the same tick on reboot (at-most-once restart
+                    // semantics).
+                    let count = schedules[i]["run_count"].asInt ?? 0
+                    let interval = schedules[i]["interval_seconds"].asDouble ?? 60
+                    schedules[i]["run_count"] = .integer(count + 1)
+                    schedules[i]["next_run"] = .double(now + interval)
+                    due.append(schedules[i])
+                }
+                if !due.isEmpty {
+                    // THE BUMP IS KEPT even when the write fails: RAM is updated
+                    // first, so a persist fault cannot make the next look re-fire
+                    // the same tick. The fault is NAMED — python
+                    // `scheduler/tools.py`.
+                    if let err = await saveSchedules(agentId, kernel, schedules) {
+                        RuntimeLog.warn(
+                            "scheduler \(agentId.value): persist failed: \(pyStr(err["error"]))")
+                    }
+                    await fireMany(agentId, due, kernel)
+                    continue
+                }
             }
-            if due.isEmpty { continue }
-            // THE BUMP IS KEPT even when the write fails: RAM is updated first, so a
-            // persist fault cannot make the next sweep re-fire the same tick. The
-            // fault is NAMED — python `scheduler/tools.py:236-239`; swallowing it
-            // left a scheduler that ticked forever and lost every schedule on boot
-            // with no line anywhere saying why.
-            if let err = await saveSchedules(agentId, kernel, schedules) {
-                RuntimeLog.warn(
-                    "scheduler \(agentId.value): persist failed: \(pyStr(err["error"]))")
-            }
-            await fireMany(agentId, due, kernel)
+            if Task.isCancelled { return }
+            await wake.wait(upTo: delay)
         }
     }
 
@@ -413,7 +479,6 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
         return .object([
             "id": .string(agentId.value),
             "sentence": .string("Recurring-task scheduler."),
-            "tick_sec": .double(tickSec(agent)),
             // python `bool(rec.get("paused"))` — truthiness in, a BOOL out.
             "paused": .bool(pyTruthy(agent?.metaValue(forKey: "paused") ?? .null)),
             "running": .bool(running),
@@ -428,9 +493,23 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
     /// recreated) is restarted. Holding the stale id and doing nothing left a
     /// scheduler that reported `{running:true}` and never ticked again.
     private func startTickIfNotLive(_ agentId: AgentId, _ kernel: Kernel) {
+        let wake = wakeOf(agentId)
         lock.lock()
         defer { lock.unlock() }
-        if let tid = tasks[agentId.value], kernel.tasks.contains(tid) { return }
+        if subs[agentId.value] == nil {
+            // The scheduler's own record changed (`paused`, by a verb or an
+            // update_agent): the loop recomputes when to wake.
+            let me = agentId.value
+            subs[me] = kernel.subscribe { evt, _ in
+                if evt["agent_id"].asString == me && evt["kind"].asString == "updated" {
+                    wake.poke()
+                }
+            }
+        }
+        if let tid = tasks[agentId.value], kernel.tasks.contains(tid) {
+            wake.poke()  // a boot of a running loop makes it look again
+            return
+        }
         tasks[agentId.value] = kernel.spawnTask(agent: agentId, verb: "tick_loop") {
             [weak self] in
             guard let self else { return }
@@ -523,6 +602,7 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
             setCache(agentId, schedules.filter { $0["id"] != sch["id"] })
             return persistErr("schedule", err)
         }
+        poke(agentId)
         return .object(["schedule_id": sch["id"], "schedule": sch])
     }
 
@@ -544,6 +624,7 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
             if let err = await saveSchedules(agentId, kernel, schedules) {
                 return persistErr("unschedule", err)
             }
+            poke(agentId)
         }
         return .object(["removed": .bool(removed), "schedule_id": sid])
     }
@@ -583,6 +664,7 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
             if touched > 0, let err = await saveSchedules(agentId, kernel, schedules) {
                 return persistErr(paused ? "pause" : "resume", err)
             }
+            if touched > 0 { poke(agentId) }
             // FLAG FIRST — python's dict literal is `{"paused": …, "schedule_id": …}`.
             var out: JSON = .object([:])
             out[key] = .bool(touched > 0)

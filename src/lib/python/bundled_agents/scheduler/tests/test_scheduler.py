@@ -439,7 +439,7 @@ register_unlisted("sched_probe.tools", _probe)
 
 
 async def _make_probed_scheduler(kernel, sched_id: str, probes: list[str]):
-    """A scheduler (explicit id, tick_sec 0.1) + probe targets, both sides of the
+    """A scheduler (explicit id) + probe targets, both sides of the
     deny-all gate opened (scheduler can_call probes, probes callable_by it)."""
     _probe.hits.clear()
     _probe.capture_path = None
@@ -471,7 +471,6 @@ async def _make_probed_scheduler(kernel, sched_id: str, probes: list[str]):
                         "parent_id": "kernel_state",
                         "handler_module": "scheduler.tools",
                         "id": sched_id,
-                        "tick_sec": 0.1,
                         "can_call": {p: "*" for p in probes},
                     },
                 }
@@ -517,12 +516,17 @@ async def test_due_schedules_fire_as_one_concurrent_batch(seeded_kernel, store_a
     # wall-clock gap failed under a loaded test run with the batch intact.
     sid = await _make_probed_scheduler(seeded_kernel, "sch_batch", ["p_slow", "p_fast"])
     _probe.started.clear()
+    # BOTH DUE when the loop looks: the loop fires at each schedule's exact due
+    # time (no tick to coalesce on), so the two are made due while the scheduler
+    # is paused, and the resume wakes it to one batch.
+    (await seeded_kernel.send([{"target": sid, "payload": {"type": "pause"}}]))[0]
     r1 = await _schedule(
         seeded_kernel, sid, "p_slow", hit={"wait_for": "p_fast", "block": 3.0}
     )
     r2 = await _schedule(seeded_kernel, sid, "p_fast")
     assert "schedule_id" in r1 and "schedule_id" in r2
-    (await seeded_kernel.send([{"target": sid, "payload": {"type": "boot"}}]))[0]
+    await asyncio.sleep(1.2)
+    (await seeded_kernel.send([{"target": sid, "payload": {"type": "resume"}}]))[0]
     assert await _wait_for(lambda: {"p_slow", "p_fast"} <= set(_probe.hits), 3.0), (
         _probe.hits
     )
@@ -660,31 +664,45 @@ async def test_schedule_refuses_a_non_object_payload(seeded_kernel, store_agent)
         )
 
 
-async def test_a_non_numeric_tick_sec_is_refused_at_write_time(seeded_kernel):
-    """#136 — `tick_sec: "0.5"` was silently defaulted to 1.0 (rust/swift) or
-    raised inside the tick loop (python). The record is judged where the mistake
-    is made."""
-    r = (
-        await seeded_kernel.send(
-            [
-                {
-                    "target": "kernel_state",
-                    "payload": {
-                        "type": "create_agent",
-                        "parent_id": "kernel_state",
-                        "handler_module": "scheduler.tools",
-                        "id": "sch_ticks",
-                        "tick_sec": "0.5",
-                    },
-                }
-            ]
-        )
-    )[0]["result"]
-    assert r.get("reason") == "invalid_meta" and "tick_sec" in r.get("error", ""), r
-    assert "sch_ticks" not in seeded_kernel.ctx.agents
+async def test_an_idle_scheduler_never_wakes_and_a_change_wakes_it(
+    seeded_kernel, store_agent, monkeypatch
+):
+    """No idle wakeups (owner, 2026-10-08): the loop sleeps until the earliest due
+    fire, and with nothing to wait for until a change — a schedule added, or the
+    scheduler's own record updated (`paused`, even by update_agent)."""
+    from scheduler import tools
 
+    looks = 0
+    real_load = tools._load
 
-# ─── verb answers, pinned (reduction candidate J: its single-item sends) ─────
+    async def counting_load(sid, kernel):
+        nonlocal looks
+        looks += 1
+        return await real_load(sid, kernel)
+
+    monkeypatch.setattr(tools, "_load", counting_load)
+    sid = await _make_probed_scheduler(seeded_kernel, "sch_idle", ["p_idle"])
+    await asyncio.sleep(0.5)
+    idle = looks
+    await asyncio.sleep(1.0)
+    assert looks == idle, f"an idle scheduler woke {looks - idle} times"
+    # a schedule wakes it; it fires at its due time, not on a tick
+    await _schedule(seeded_kernel, sid, "p_idle", interval=1)
+    assert await _wait_for(lambda: "p_idle" in _probe.hits, 3.0), _probe.hits
+    # paused by update_agent: the loop waits on nothing; resumed the same way, it fires
+    up = {"type": "update_agent", "id": sid}
+    await seeded_kernel.send(
+        [{"target": "kernel_state", "payload": {**up, "paused": True}}]
+    )
+    await asyncio.sleep(0.1)
+    _probe.hits.clear()
+    before = looks
+    await asyncio.sleep(1.5)
+    assert "p_idle" not in _probe.hits and looks - before <= 1, looks - before
+    await seeded_kernel.send(
+        [{"target": "kernel_state", "payload": {**up, "paused": False}}]
+    )
+    assert await _wait_for(lambda: "p_idle" in _probe.hits, 3.0), _probe.hits
 
 
 async def test_missing_and_unknown_schedule_ids(seeded_kernel, store_agent):
