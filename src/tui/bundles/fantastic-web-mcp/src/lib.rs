@@ -29,7 +29,8 @@
 //! `notifications/cancelled`) kills the whole subtree. The reply is the call's
 //! outcome, whenever the task ends; an item `timeout` cancels that item.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use async_trait::async_trait;
 use fantastic_kernel::{
@@ -69,20 +70,185 @@ impl Bundle for WebMcpBundle {
     ) -> Result<Reply, BundleError> {
         let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
         Ok(Some(match verb {
-            "boot" | "shutdown" => Value::Null,
+            "boot" => match sync_config(agent_id, kernel).await {
+                Ok(()) => Value::Null,
+                Err(e) => json!({"error": e, "reason": "mcp_config"}),
+            },
+            "shutdown" => {
+                config_errors().lock().expect("config errors").remove(&error_key(kernel, agent_id));
+                Value::Null
+            }
             "inbound_send" => inbound_send(payload, kernel).await,
-            "reflect" => json!({
-                "id": agent_id.as_str(),
-                "sentence": "An MCP leg: an external client (Claude Code, any MCP host) drives this kernel through me, with exactly my grants — never as the operator. My carrier speaks MCP; the verbs I dispatch are the kernel's own.",
-                "protocol": PROTOCOL_VERSION,
-                "tools": ["reflect", "send"],
-            }),
+            "reflect" => {
+                let mut r = json!({
+                    "id": agent_id.as_str(),
+                    "sentence": "An MCP leg: an external client (Claude Code, any MCP host) drives this kernel through me, with exactly my grants — never as the operator. My carrier speaks MCP; the verbs I dispatch are the kernel's own.",
+                    "protocol": PROTOCOL_VERSION,
+                    "tools": ["reflect", "send"],
+                });
+                if let Some(e) = config_error(kernel, agent_id) {
+                    r["mcp_config_error"] = json!(e);
+                }
+                r
+            }
             other => json!({
                 "error": format!("web_mcp: no verb `{other}` — this leg is driven by its carrier; reflect for what it is"),
                 "reason": "unhandled",
                 "verb": other,
             }),
         }))
+    }
+}
+
+// ── the project's MCP config ────────────────────────────────────────────────
+//
+// THE LEG KEEPS THE CLIENT'S ENTRY CORRECT (owner, 2026-10-08): on boot, when the
+// record names `file_bridge_id` (the file_bridge it writes through) AND
+// `mcp_config_file` (a path on it, e.g. `.mcp.json`), the leg reads that file
+// THROUGH the bridge, AS ITSELF (its `can_call` names the bridge with `read_stream`
+// and `write`, the bridge's `callable_by` names it), makes sure
+// `mcpServers.fantastic` is `{command: <this process's binary, absolute>, args:
+// ["mcp"]}`, and writes it back only when that changed — every other server and
+// key kept as they were. So a client opened in the project finds this kernel, and
+// a moved or rebuilt binary is corrected on the next start. No `file_bridge_id` →
+// nothing happens. A missing file is `{}` (the leg creates it). Set and anything
+// goes wrong — no `mcp_config_file`, the bridge refuses, the file is not a JSON
+// object, `mcpServers` is not an object, the write is refused — is LOUD: the boot
+// answers `{error, reason: "mcp_config"}` and the leg's reflect carries it as
+// `mcp_config_error` until a boot succeeds. Nothing is overwritten on an error.
+
+/// The record field naming the file_bridge the leg reads and writes the config
+/// through.
+pub const CONFIG_BRIDGE_FIELD: &str = "file_bridge_id";
+/// The record field naming the config's path on that bridge.
+pub const CONFIG_FILE_FIELD: &str = "mcp_config_file";
+/// The server name this kernel is registered under in the config.
+pub const SERVER_NAME: &str = "fantastic";
+
+/// Per kernel (its address in this process) and leg: why the last boot failed.
+type ErrorKey = (usize, String);
+
+fn config_errors() -> &'static Mutex<HashMap<ErrorKey, String>> {
+    static ERRORS: OnceLock<Mutex<HashMap<ErrorKey, String>>> = OnceLock::new();
+    ERRORS.get_or_init(Mutex::default)
+}
+
+fn error_key(kernel: &Arc<Kernel>, agent_id: &AgentId) -> ErrorKey {
+    (Arc::as_ptr(kernel) as usize, agent_id.0.clone())
+}
+
+/// Why the last boot could not make the config right, or `None`.
+#[must_use]
+pub fn config_error(kernel: &Arc<Kernel>, agent_id: &AgentId) -> Option<String> {
+    config_errors().lock().expect("config errors").get(&error_key(kernel, agent_id)).cloned()
+}
+
+/// The entry this process registers: its own binary, absolute, with `mcp`.
+pub fn server_entry() -> Result<Value, String> {
+    let exe = std::env::current_exe()
+        .and_then(|p| p.canonicalize())
+        .map_err(|e| format!("the binary's own path is unknown: {e}"))?;
+    Ok(json!({"command": exe.display().to_string(), "args": ["mcp"]}))
+}
+
+/// `doc` with `mcpServers.fantastic` set to `entry`, or `None` when it already
+/// is. Every other key and server keeps its place and value.
+pub fn with_entry(doc: &str, entry: &Value) -> Result<Option<String>, String> {
+    let mut root = if doc.is_empty() {
+        Map::new()
+    } else {
+        match serde_json::from_str::<Value>(doc) {
+            Ok(Value::Object(m)) => m,
+            Ok(_) => return Err("the file is not a JSON object".into()),
+            Err(e) => return Err(format!("the file is not JSON: {e}")),
+        }
+    };
+    let servers = root.entry("mcpServers").or_insert_with(|| json!({}));
+    let Some(servers) = servers.as_object_mut() else {
+        return Err("`mcpServers` is not an object".into());
+    };
+    if servers.get(SERVER_NAME) == Some(entry) {
+        return Ok(None);
+    }
+    servers.insert(SERVER_NAME.into(), entry.clone());
+    let text = serde_json::to_string_pretty(&Value::Object(root)).map_err(|e| e.to_string())?;
+    Ok(Some(text + "\n"))
+}
+
+/// Make the config right, as the leg. Records the outcome for reflect.
+async fn sync_config(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Result<(), String> {
+    let meta = kernel
+        .agents
+        .get(agent_id)
+        .map(|e| e.meta.read().expect("meta poisoned").clone())
+        .unwrap_or_default();
+    let name = |k: &str| meta.get(k).and_then(Value::as_str).filter(|s| !s.trim().is_empty()).map(str::to_string);
+    let result = match (name(CONFIG_BRIDGE_FIELD), name(CONFIG_FILE_FIELD)) {
+        (None, _) => Ok(()),
+        (Some(bridge), None) => Err(format!(
+            "{agent_id}: file_bridge_id {bridge:?} is set but {CONFIG_FILE_FIELD} is not — name the \
+             config's path on that bridge (e.g. .mcp.json)"
+        )),
+        (Some(bridge), Some(path)) => write_config(kernel, &bridge, &path).await,
+    };
+    let mut errors = config_errors().lock().expect("config errors");
+    match &result {
+        Ok(()) => errors.remove(&error_key(kernel, agent_id)),
+        Err(e) => errors.insert(error_key(kernel, agent_id), e.clone()),
+    };
+    result
+}
+
+async fn write_config(kernel: &Arc<Kernel>, bridge: &str, path: &str) -> Result<(), String> {
+    let entry = server_entry()?;
+    let current = read_all(kernel, bridge, path).await?;
+    let Some(text) = with_entry(&current, &entry).map_err(|e| format!("{bridge} {path}: {e}"))? else {
+        return Ok(());
+    };
+    let out = Arc::clone(kernel)
+        .send(vec![Item::new(AgentId::from(bridge), json!({"type": "write", "path": path, "bytes": text}))])
+        .await
+        .remove(0);
+    if out.status != Status::Completed || out.result.get("error").is_some_and(|e| !e.is_null()) {
+        return Err(format!("{bridge} write {path}: {}", why(&out)));
+    }
+    Ok(())
+}
+
+/// The whole file through `read_stream`; a missing file is empty.
+async fn read_all(kernel: &Arc<Kernel>, bridge: &str, path: &str) -> Result<String, String> {
+    let mut bytes: Vec<u8> = Vec::new();
+    let mut offset: u64 = 0;
+    loop {
+        let out = Arc::clone(kernel)
+            .send(vec![Item::new(
+                AgentId::from(bridge),
+                json!({"type": "read_stream", "path": path, "offset": offset}),
+            )])
+            .await
+            .remove(0);
+        if out.result.get("reason").and_then(Value::as_str) == Some("not_found") && offset == 0 {
+            return Ok(String::new());
+        }
+        if out.status != Status::Completed || out.result.get("error").is_some_and(|e| !e.is_null()) {
+            return Err(format!("{bridge} read_stream {path}: {}", why(&out)));
+        }
+        if let Some(b) = out.body.as_ref().and_then(|b| b.at("bytes")) {
+            bytes.extend_from_slice(b);
+        }
+        if out.result.get("eof").and_then(Value::as_bool) == Some(true) {
+            break;
+        }
+        offset = out.result.get("next_offset").and_then(Value::as_u64).unwrap_or(offset);
+    }
+    String::from_utf8(bytes).map_err(|e| format!("{bridge} {path}: not utf-8 ({e})"))
+}
+
+fn why(o: &Outcome) -> String {
+    match o.result.get("error") {
+        Some(Value::String(s)) => s.clone(),
+        Some(v) if !v.is_null() => v.to_string(),
+        _ => o.status.as_str().to_string(),
     }
 }
 
