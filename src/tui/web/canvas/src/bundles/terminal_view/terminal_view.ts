@@ -1,3 +1,4 @@
+import { useSharedWebgl } from "./renderer.ts";
 import type { ViewBundle, ViewContext, ViewHandle } from "../view.ts";
 import { Host } from "../../lib.ts";
 
@@ -106,6 +107,11 @@ export const terminalView: ViewBundle = {
       xtEl.style.boxSizing = "border-box";
       xtEl.style.height = "100%";
     }
+    // the renderer: its own piece (renderer.ts) — the shared WebGL one
+    await useSharedWebgl(term, mount);
+    // the frame's terminal, for a probe that reads what it shows (E65/E66): a
+    // canvas renderer has no text in the DOM
+    (mount as unknown as { xterm?: XTerm }).xterm = term;
 
     // wait for webfonts before measuring cell metrics (xterm #1164/#1534/#2630)
     const fonts = (document as unknown as { fonts?: { ready: Promise<unknown> } }).fonts;

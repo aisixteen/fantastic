@@ -33,6 +33,12 @@ export const CANVAS_CSS = `
      no head, no handle; hovering (or dragging, resizing) shows them. The head
      floats OVER the content, so nothing reflows. A touch screen has no hover:
      there the chrome stays. */
+  /* A TERMINAL'S SCROLLBAR only while the pointer is on its cell (owner
+     2026-10-09, E65): xterm's scrollbar re-renders on every scrolled line, and
+     40 streaming terminals with theirs shown held the page at ~7 fps (61 hidden).
+     The wheel scrolls without it. */
+  .agent-frame:not(:hover) .xterm .scrollbar,
+  .agent-frame:not(:hover) .xterm-decoration-overview-ruler { display: none; }
   @media (hover: hover) {
     .agent-frame:not(:hover):not(.dragging):not(.resizing) {
       background: transparent; border-color: transparent; box-shadow: none;

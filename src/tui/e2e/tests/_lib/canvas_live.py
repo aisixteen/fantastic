@@ -304,10 +304,13 @@ class Rig:
                 except Exception:
                     time.sleep(0.2)
             ws_url = next(t for t in tabs if t["type"] == "page")["webSocketDebuggerUrl"]
-            async with websockets.connect(ws_url, max_size=None) as ws:
+            async with websockets.connect(ws_url, max_size=None, ping_interval=None) as ws:
                 pg = Page(ws)
                 await pg.cdp("Runtime.enable")
                 await pg.cdp("Page.enable")
+                if os.environ.get("CANVAS_WS_LOG") == "1":
+                    pg.ws_log = []
+                    await pg.cdp("Network.enable")
                 if os.environ.get("CANVAS_COUNT_RO") == "1":
                     # count ResizeObserver callbacks (a load probe's suspect)
                     await pg.cdp("Page.addScriptToEvaluateOnNewDocument", source="""(()=>{const R=window.ResizeObserver; window.__ro=0;
@@ -319,6 +322,8 @@ class Rig:
                 html = await pg.js("document.documentElement.outerHTML")
                 (self.art / "page.html").write_text(html or "")
                 (self.art / "page_errors.json").write_text(json.dumps(pg.logs, indent=1))
+                if hasattr(pg, "ws_log"):
+                    (self.art / "ws_frames.log").write_text("\n".join(pg.ws_log))
         finally:
             chrome.terminate()
 
