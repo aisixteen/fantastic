@@ -1,0 +1,10 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint. Scripted: no model.
+# LOAD_N (default 10) terminals; step it 10 → 100 → 1000, never straight to 1000.
+id: load
+group: canvas
+title: "N two-way terminals over a heavy background: keystroke round trip, frame rate, row-store writes and disk growth per second"
+runner: probe.py
+costs: free
+limits:
+  seconds: 600
+env: {}
