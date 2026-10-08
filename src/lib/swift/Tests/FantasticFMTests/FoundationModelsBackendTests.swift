@@ -76,7 +76,7 @@ struct FoundationModelsBackendTests {
                 == [
                     "temperature", "max_tokens", "memory_store_id", "context_window",
                     "output_reserve", "context_strategy", "recent_n", "system_prompt",
-                    "system_prompt_file",
+                    "file_bridge_id", "system_prompt_file",
                 ])
         let by = Dictionary(uniqueKeysWithValues: fields.map { ($0["name"].asString!, $0) })
         // the window is the MODEL'S, read from the engine — not the kernel's 128k

@@ -448,12 +448,15 @@ they did not register.
   REPLACES the default system block on every turn of that agent, main, nudge and
   reply-woken alike, read live; the per-call `send` argument beats it for that
   delivery; a non-string or blank value is refused at the write, `null` clears
-  it; `system_prompt_file` optional — `{bridge, path}`: a file the agent reads
-  THROUGH that `file_bridge`, as itself (its `can_call` names the bridge with
-  `read_stream`/`watch_path`/`unwatch_path`/`watch`, the bridge's `callable_by`
-  names it), held under the bridge's `watch_path` so an edit is the block from the
-  next turn on, no restart (`ai_core/prompt_file.py`); unreadable or ungranted, the
-  turn falls to the default block and reflect carries `system_prompt_file_error`.
+  it; `file_bridge_id` + `system_prompt_file` optional — the file_bridge this agent
+  reads files THROUGH and a path on it, read as the agent itself (its `can_call`
+  names the bridge with `read_stream`/`watch_path`/`unwatch_path`/`watch`, the
+  bridge's `callable_by` names it), held under the bridge's `watch_path` so an edit
+  is the block from the next turn on, no restart (`ai_core/prompt_file.py`). NOT SET
+  (or `file_bridge_id` alone) → nothing is looked up, the default block. SET AND
+  UNUSABLE — no `file_bridge_id`, a refused or failed read, an empty file — → the
+  turn FAILS loud (`reason: "system_prompt_file"`, the model never called; reflect
+  carries `system_prompt_file_error`), never another block.
   PRECEDENCE (owner, 2026-10-08): per-call > record `system_prompt` > the file >
   the default block — never appended. PLACEHOLDERS in whichever prompt is in force,
   filled per agent and per turn: `{tree}` (the kernel primer), `{self}` (identity

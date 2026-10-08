@@ -55,6 +55,9 @@ pub enum GenFailure {
     /// The agent's memory store refused or is unreachable — FAIL FAST, no turn
     /// (python `MemoryStoreError`, caught by `_send`).
     Store(MemoryStoreError),
+    /// `system_prompt_file` is set and cannot be the block — FAIL LOUD, no turn
+    /// on another block (python `PromptFileError`, caught by `_send`).
+    PromptFile(crate::prompt_file::PromptFileError),
 }
 
 /// What one generation produced.
@@ -87,6 +90,15 @@ pub enum Generation {
 impl From<MemoryStoreError> for GenFailure {
     fn from(e: MemoryStoreError) -> Self {
         Self::Store(e)
+    }
+}
+
+impl From<crate::assembly::BlockFail> for GenFailure {
+    fn from(e: crate::assembly::BlockFail) -> Self {
+        match e {
+            crate::assembly::BlockFail::Store(e) => Self::Store(e),
+            crate::assembly::BlockFail::PromptFile(e) => Self::PromptFile(e),
+        }
     }
 }
 

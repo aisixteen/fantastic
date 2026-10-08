@@ -3,7 +3,7 @@
 # web_rest on every host runtime.
 id: system_prompt_file
 group: backends
-title: "the system block from a FILE through a file_bridge: placeholders filled, an editor's save / atomic save live next turn, precedence record > file > default, unreadable/ungranted → default + system_prompt_file_error"
+title: "the system block from a FILE (file_bridge_id + system_prompt_file): placeholders filled, an editor's save / atomic save live next turn, precedence record > file > default; not set → default; set and unusable (missing, ungranted, no bridge) → the turn fails loud"
 runner: probe.py
 runtimes: [python, rust, swift]
 costs: free

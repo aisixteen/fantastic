@@ -173,14 +173,19 @@ pub fn ai_fields_with_window(context_window: i64) -> Vec<Field> {
         )
         .default(json!(RECENT_N)),
         Field::new("system_prompt", "str", SYSTEM_PROMPT_HINT),
-        Field::new("system_prompt_file", "map", SYSTEM_PROMPT_FILE_HINT),
+        Field::new("file_bridge_id", "str", FILE_BRIDGE_ID_HINT),
+        Field::new("system_prompt_file", "str", SYSTEM_PROMPT_FILE_HINT),
     ]
 }
 
+/// The `file_bridge_id` field's hint. Python `AI_FIELDS`.
+pub const FILE_BRIDGE_ID_HINT: &str = "the file_bridge this agent reads files THROUGH (its \
+     `system_prompt_file`); null = none, nothing is read";
+
 /// The `system_prompt_file` field's hint. Python `AI_FIELDS`.
-pub const SYSTEM_PROMPT_FILE_HINT: &str = "{bridge, path}: a file read THROUGH that \
-     file_bridge as this agent's system block (placeholders filled), re-read when the bridge \
-     reports it changed; a record or per-call `system_prompt` beats it; null = none";
+pub const SYSTEM_PROMPT_FILE_HINT: &str = "a path on `file_bridge_id`, read through it as this \
+     agent's system block (placeholders filled), re-read when the bridge reports it changed; a \
+     record or per-call `system_prompt` beats it; null = none";
 
 /// The `system_prompt` field's hint. Python `AI_FIELDS`.
 pub const SYSTEM_PROMPT_HINT: &str = "a system block that REPLACES the default one on every \
@@ -332,10 +337,7 @@ pub fn validate(
             return Some(SYSTEM_PROMPT_REFUSAL.to_string());
         }
     }
-    if let Some(bad) = meta
-        .get("system_prompt_file")
-        .and_then(crate::prompt_file::shape_error)
-    {
+    if let Some(bad) = crate::prompt_file::shape_error(meta) {
         return Some(bad);
     }
     let mut merged = record.clone();
@@ -403,6 +405,7 @@ mod tests {
                 "context_strategy",
                 "recent_n",
                 "system_prompt",
+                "file_bridge_id",
                 "system_prompt_file"
             ]
         );

@@ -4,8 +4,10 @@ A scripted Responses endpoint (`runners/_responses_stub.py`: every turn answers
 `done`, every request body recorded — the system block is its `instructions`) and,
 on the PACKAGED host of `RUNTIME` (python | rust | swift), every call through
 `web_rest`: a `file_bridge` exposing `prompt.md` and an AI agent whose record names
-`system_prompt_file: {bridge, path}`. The agent reads the file THROUGH the bridge,
-as itself (both grant halves explicit), and watches it with `watch_path`:
+`file_bridge_id` + `system_prompt_file` (a path on it). The agent reads the file
+THROUGH the bridge, as itself (both grant halves explicit), and watches it with
+`watch_path`. Not set → nothing looked up, the default block; set and unusable →
+the turn FAILS loud (`reason: system_prompt_file`), the model is never called:
 
   1. the file is the block, its placeholders filled per agent (`{store}`), an
      unknown `{…}` kept verbatim;
@@ -14,11 +16,14 @@ as itself (both grant halves explicit), and watches it with `watch_path`:
   3. an atomic save (a temp file renamed over) is seen too;
   4. precedence: the record's `system_prompt` beats the file; null brings it back;
   5. `{tree}\\n\\n{self}\\n\\n{howto}` in the file == the default block, byte for byte;
-  6. the file deleted → the default block, and reflect's `system_prompt_file_error`
-     names the path; written again → the file once more, the error gone;
-  7. a bridge that does not admit the agent → the default block, nothing of the
-     file reaches the model, the error names the refused verb;
-  8. a malformed value is refused at the write.
+  6. the file deleted → the turn fails naming the path (and reflect's
+     `system_prompt_file_error` says it); written again → the file once more, the
+     error gone;
+  7. a bridge that does not admit the agent → the turn fails naming the refused
+     verb, nothing of the file reaches the model;
+  8. a path with no `file_bridge_id` → the turn fails; `file_bridge_id` alone →
+     the default block;
+  9. a malformed value is refused at the write.
 """
 
 from __future__ import annotations
@@ -43,7 +48,7 @@ RUNTIME = os.environ.get("RUNTIME", "")
 KEY = "spf-e2e-" + secrets.token_hex(12)
 KEY_VAR = "E2E_SPF_KEY"
 FILE_VERBS = ["read_stream", "watch_path", "unwatch_path", "watch"]
-REF = {"bridge": "pf", "path": "prompt.md"}
+PATH = "prompt.md"
 
 
 def main() -> int:
@@ -98,6 +103,30 @@ def main() -> int:
         time.sleep(0.3)  # one save per watcher burst
         prompt.write_text(text)
 
+    def failed_turn() -> dict:
+        """A turn that must fail loud: its reply names why, no model request."""
+        before = len(stub.requests)
+        r = hk.send("ai", {"type": "send", "text": "go"})
+        time.sleep(0.3)
+        need(len(stub.requests) == before, "the model was not called on another block")
+        return r if isinstance(r, dict) else {}
+
+    def failed_until(pred, tries: int = 12) -> dict:
+        r: dict = {}
+        for _ in range(tries):
+            r = failed_turn_quiet()
+            if pred(r):
+                break
+            time.sleep(0.25)
+        return r
+
+    def failed_turn_quiet() -> dict:
+        before = len(stub.requests)
+        r = hk.send("ai", {"type": "send", "text": "go"})
+        r = r if isinstance(r, dict) else {}
+        r["_called"] = len(stub.requests) > before
+        return r
+
     def reflect_error() -> object:
         return hk.send("ai", {"type": "reflect"}).get("system_prompt_file_error")
 
@@ -142,17 +171,33 @@ def main() -> int:
         )
         need(rec.get("id") == "ai", f"create ai: {str(rec)[:200]}")
 
-        # 8 · a malformed value is refused at the write
-        for v in ("prompt.md", {"bridge": "pf"}, {"bridge": "pf", "path": "p", "x": 1}):
-            r = update("ai", system_prompt_file=v)
+        # 9 · a malformed value is refused at the write
+        for field, v in (
+            ("system_prompt_file", ""),
+            ("system_prompt_file", {"bridge": "pf", "path": "p"}),
+            ("file_bridge_id", 5),
+        ):
+            r = update("ai", **{field: v})
             need(
-                "system_prompt_file must be {bridge" in str(r.get("error")),
-                f"refused at the write: {v!r} → {str(r)[:160]}",
+                f"{field} must be a non-empty" in str(r.get("error")),
+                f"refused at the write: {field}={v!r} → {str(r)[:160]}",
             )
 
         default = turn()
-        need("You are `ai`." in default, "no file named: the default block")
-        r = update("ai", system_prompt_file=REF)
+        need("You are `ai`." in default, "nothing set: the default block")
+
+        # 8 · a path with no file_bridge_id fails; file_bridge_id alone is the default
+        update("ai", system_prompt_file=PATH)
+        r = failed_turn()
+        need(
+            r.get("reason") == "system_prompt_file" and "no file_bridge_id" in str(r.get("error")),
+            f"a path without file_bridge_id fails loud: {str(r)[:200]}",
+        )
+        update("ai", system_prompt_file=None)
+        update("ai", file_bridge_id="pf")
+        b = turn()
+        need("You are `ai`." in b, "file_bridge_id alone: the default block")
+        r = update("ai", system_prompt_file=PATH)
         need(r.get("updated") is True, f"system_prompt_file set: {str(r)[:200]}")
 
         # 1 · the file is the block; {store} filled, an unknown {…} kept
@@ -191,15 +236,20 @@ def main() -> int:
             f"{{tree}}\\n\\n{{self}}\\n\\n{{howto}} == the default block "
             f"({len(layout)} vs {len(plain)} chars)",
         )
-        update("ai", system_prompt_file=REF)
+        update("ai", system_prompt_file=PATH)
 
-        # 6 · deleted → the default block + the error; written again → the file
+        # 6 · deleted → the turn fails + the error; written again → the file
         save("BACK\n")
         turn_until(lambda s: s == "BACK\n")
         time.sleep(0.3)
         prompt.unlink()
-        b = turn_until(lambda s: "You are `ai`." in s)
-        need("You are `ai`." in b, "the file deleted: the default block")
+        r = failed_until(lambda r: r.get("reason") == "system_prompt_file")
+        need(
+            r.get("reason") == "system_prompt_file"
+            and "prompt.md" in str(r.get("error"))
+            and not r.get("_called"),
+            f"the file deleted: the turn fails loud: {str(r)[:200]}",
+        )
         why = reflect_error()
         need("prompt.md" in str(why), f"reflect names why: {why!r}")
         save("AGAIN\n")
@@ -219,12 +269,14 @@ def main() -> int:
         )
         cc = {"$self": "*", "memory": "*", "creds": ["get"], root: ["reflect"],
               "pf": FILE_VERBS, "pf_sealed": FILE_VERBS}
-        update("ai", can_call=cc, system_prompt_file={"bridge": "pf_sealed", "path": "sealed.md"})
-        b = turn()
-        need("SECRET-ROLE" not in b and "You are `ai`." in b,
-             "an ungranted bridge: the default block, the file unread")
-        why = reflect_error()
-        need("watch_path" in str(why), f"reflect names the refused verb: {str(why)[:160]!r}")
+        update("ai", can_call=cc, file_bridge_id="pf_sealed", system_prompt_file="sealed.md")
+        r = failed_turn()
+        need(
+            r.get("reason") == "system_prompt_file"
+            and "watch_path" in str(r.get("error"))
+            and "SECRET-ROLE" not in str(r),
+            f"an ungranted bridge: the turn fails naming the refused verb: {str(r)[:200]}",
+        )
     finally:
         hk.close()
         stub.stop()

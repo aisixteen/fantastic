@@ -283,12 +283,10 @@ extension AIBackend {
         }
         // The block the turn will actually use (`systemContent`), not the default
         // one: a record or per-call `system_prompt` changes how much room the body gets.
+        let sys = try await systemContent(
+            agent: agent, systemPrompt: systemPrompt, kernel: kernel)
         let sysTokens = AIContext.estimateOne(
-            .object([
-                "role": .string("system"),
-                "content": .string(
-                    await systemContent(agent: agent, systemPrompt: systemPrompt, kernel: kernel)),
-            ]))
+            .object(["role": .string("system"), "content": .string(sys)]))
         let bodyBudget = max(
             AIConstants.BUDGET_FLOOR, AIContext.budget(agent, modelWindow: config.modelWindow) - sysTokens - AIConstants.NOTICE_ENVELOPE_RESERVE)
         let target = Int64(Double(bodyBudget) * AIConstants.LOW)

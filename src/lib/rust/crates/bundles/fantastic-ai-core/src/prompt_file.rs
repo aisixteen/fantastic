@@ -1,28 +1,49 @@
-//! The system block from a FILE (owner, 2026-10-08): `system_prompt_file: {bridge,
-//! path}`. Python `ai_core/prompt_file.py`, text for text.
+//! The system block from a FILE (owner, 2026-10-08): the record's `file_bridge_id`
+//! names the file_bridge this agent reads files THROUGH, `system_prompt_file` a
+//! path on it. Not set → nothing is looked up (the default block). Set and unusable
+//! → [`PromptFileError`]: the turn fails loud, never another block. Python
+//! `ai_core/prompt_file.py`, text for text.
 //!
-//! The agent reads the file THROUGH that file_bridge, AS ITSELF — every read and
-//! watch is its own gated send, so its `can_call` names the bridge (`read_stream`,
+//! The agent reads the file through that bridge, AS ITSELF — every read and watch
+//! is its own gated send, so its `can_call` names the bridge (`read_stream`,
 //! `watch_path`, `unwatch_path`, `watch`) and the bridge's `callable_by` names it.
 //! It holds the path under the bridge's disk watcher (`watch_path`) and watches the
 //! bridge through a private inbox: a `changed` event for the path marks the text
 //! STALE, and the next turn reads it again — no restart, and no read on a turn
 //! nothing changed. RAM only: armed on the first turn that needs it, re-armed when
-//! the record names another file, dropped when the field is cleared or the agent
-//! deleted. A file that cannot be read leaves the turn on the block below it, and
-//! the reason is the agent's `system_prompt_file_error` until a read succeeds.
+//! the record names another bridge or path, dropped when either field is cleared
+//! or the agent deleted. The reason a set file is unusable is also the agent's
+//! `system_prompt_file_error` until a read succeeds.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use fantastic_bundle::py_strip;
+use fantastic_bundle::{py_repr, py_strip};
 use fantastic_kernel::{AgentId, Item, Kernel, Status, TaskId};
 use serde_json::{json, Map, Value};
 
+/// The refusal for a `file_bridge_id` the record cannot use.
+pub const FILE_BRIDGE_ID_REFUSAL: &str =
+    "file_bridge_id must be a non-empty file_bridge agent id — null clears it";
 /// The refusal for a `system_prompt_file` the record cannot use.
-pub const REFUSAL: &str = "system_prompt_file must be {bridge: <file_bridge id>, path: <path \
-     under its root>} — null clears it";
+pub const SYSTEM_PROMPT_FILE_REFUSAL: &str =
+    "system_prompt_file must be a non-empty path on the agent's file_bridge_id — null clears it";
+
+/// `system_prompt_file` is set and cannot be the block — the turn fails, said so.
+/// Python `PromptFileError(RuntimeError)`.
+#[derive(Debug, Clone)]
+pub struct PromptFileError(pub String);
+
+impl std::fmt::Display for PromptFileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "PromptFileError: {}", self.0)
+    }
+}
+
+/// A raise out of a verb handler (the `context_recall` verb) — the kernel settles
+/// it `failed` with python's `f"{type(e).__name__}: {e}"`.
+impl std::error::Error for PromptFileError {}
 
 struct FileState {
     file: (String, String),
@@ -38,38 +59,33 @@ fn files() -> &'static Mutex<HashMap<String, FileState>> {
     FILES.get_or_init(Mutex::default)
 }
 
-/// `(bridge, path)` the record names, or `None`.
+fn non_blank<'a>(meta: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
+    meta.get(key)?.as_str().filter(|s| !py_strip(s).is_empty())
+}
+
+/// `(file_bridge_id, system_prompt_file)` when the record names both, or `None`.
 #[must_use]
 pub fn ref_of(meta: &Map<String, Value>) -> Option<(String, String)> {
-    let v = meta.get("system_prompt_file")?.as_object()?;
-    let bridge = v
-        .get("bridge")?
-        .as_str()
-        .filter(|s| !py_strip(s).is_empty())?;
-    let path = v
-        .get("path")?
-        .as_str()
-        .filter(|s| !py_strip(s).is_empty())?;
+    let bridge = non_blank(meta, "file_bridge_id")?;
+    let path = non_blank(meta, "system_prompt_file")?;
     Some((bridge.to_string(), path.to_string()))
 }
 
-/// Why a written `system_prompt_file` is unusable, or `None` (null clears it).
+/// Why a written `file_bridge_id` / `system_prompt_file` is unusable, or `None`
+/// (null clears either).
 #[must_use]
-pub fn shape_error(v: &Value) -> Option<String> {
-    if v.is_null() {
-        return None;
+pub fn shape_error(meta: &Map<String, Value>) -> Option<String> {
+    for (name, refusal) in [
+        ("file_bridge_id", FILE_BRIDGE_ID_REFUSAL),
+        ("system_prompt_file", SYSTEM_PROMPT_FILE_REFUSAL),
+    ] {
+        match meta.get(name) {
+            None | Some(Value::Null) => {}
+            Some(_) if non_blank(meta, name).is_some() => {}
+            Some(_) => return Some(refusal.to_string()),
+        }
     }
-    let ok = v
-        .as_object()
-        .is_some_and(|m| m.len() == 2 && m.contains_key("bridge") && m.contains_key("path"))
-        && ref_of(
-            &json!({"system_prompt_file": v})
-                .as_object()
-                .cloned()
-                .unwrap_or_default(),
-        )
-        .is_some();
-    (!ok).then(|| REFUSAL.to_string())
+    None
 }
 
 /// Why the file is not this agent's block right now, or `None`.
@@ -101,10 +117,17 @@ fn normpath(p: &str) -> String {
     }
 }
 
-/// The file's text for this turn, or `None` (no file named, or unreadable). Runs
+/// The file's text for this turn; `None` when `system_prompt_file` is not set
+/// (nothing is looked up — the default block). Set and unusable — no
+/// `file_bridge_id`, a refused or failed read, an empty file — is a
+/// [`PromptFileError`]: the turn fails loud, it never falls to another block. Runs
 /// in the agent's own turn, so every send here is the agent's.
-pub async fn text(self_id: &AgentId, kernel: &Arc<Kernel>) -> Option<String> {
-    let wanted = ref_of(&crate::helpers::agent_meta(self_id, kernel));
+pub async fn text(
+    self_id: &AgentId,
+    kernel: &Arc<Kernel>,
+) -> Result<Option<String>, PromptFileError> {
+    let meta = crate::helpers::agent_meta(self_id, kernel);
+    let wanted = ref_of(&meta);
     let held = files()
         .lock()
         .expect("prompt files")
@@ -114,7 +137,14 @@ pub async fn text(self_id: &AgentId, kernel: &Arc<Kernel>) -> Option<String> {
         if held.is_some() {
             drop_file(self_id, kernel).await;
         }
-        return None;
+        if let Some(path) = non_blank(&meta, "system_prompt_file") {
+            return Err(PromptFileError(format!(
+                "{self_id}: system_prompt_file {} is set but the record has no file_bridge_id \
+                 — name the file_bridge it is read through",
+                py_repr(path)
+            )));
+        }
+        return Ok(None);
     };
     match held {
         Some((f, _)) if f != file => {
@@ -127,11 +157,15 @@ pub async fn text(self_id: &AgentId, kernel: &Arc<Kernel>) -> Option<String> {
     }
     let (stale, armed) = {
         let all = files().lock().expect("prompt files");
-        let st = all.get(self_id.as_str())?;
+        let st = all.get(self_id.as_str()).expect("armed above");
         (Arc::clone(&st.stale), st.task.is_some())
     };
     if armed && stale.swap(false, Ordering::SeqCst) {
-        let (txt, err) = read(kernel, &file.0, &file.1).await;
+        let (mut txt, mut err) = read(kernel, &file.0, &file.1).await;
+        if err.is_none() && txt.as_deref().is_some_and(|t| py_strip(t).is_empty()) {
+            txt = None;
+            err = Some(format!("{} {}: the file is empty", file.0, file.1));
+        }
         if let Some(st) = files()
             .lock()
             .expect("prompt files")
@@ -141,11 +175,14 @@ pub async fn text(self_id: &AgentId, kernel: &Arc<Kernel>) -> Option<String> {
             st.error = err;
         }
     }
-    files()
-        .lock()
-        .expect("prompt files")
-        .get(self_id.as_str())
-        .and_then(|s| s.text.clone())
+    let all = files().lock().expect("prompt files");
+    let st = all.get(self_id.as_str()).expect("armed above");
+    match &st.error {
+        Some(e) => Err(PromptFileError(format!(
+            "{self_id}: system_prompt_file: {e}"
+        ))),
+        None => Ok(st.text.clone()),
+    }
 }
 
 async fn send(kernel: &Arc<Kernel>, target: &str, payload: Value) -> (Status, Value) {

@@ -1,26 +1,40 @@
-// The system block from a FILE (owner, 2026-10-08): `system_prompt_file: {bridge,
-// path}`. Python `ai_core/prompt_file.py`, text for text.
+// The system block from a FILE (owner, 2026-10-08): the record's `file_bridge_id`
+// names the file_bridge this agent reads files THROUGH, `system_prompt_file` a path
+// on it. Not set → nothing is looked up (the default block). Set and unusable →
+// `PromptFileError`: the turn fails loud, never another block. Python
+// `ai_core/prompt_file.py`, text for text.
 //
-// The agent reads the file THROUGH that file_bridge, AS ITSELF — every read and
-// watch is its own gated send, so its `can_call` names the bridge (`read_stream`,
+// The agent reads the file through that bridge, AS ITSELF — every read and watch is
+// its own gated send, so its `can_call` names the bridge (`read_stream`,
 // `watch_path`, `unwatch_path`, `watch`) and the bridge's `callable_by` names it. It
 // holds the path under the bridge's disk watcher (`watch_path`) and watches the
 // bridge through a private inbox: a `changed` event for the path marks the text
 // STALE, and the next turn reads it again — no restart, and no read on a turn
 // nothing changed. RAM only: armed on the first turn that needs it, re-armed when
-// the record names another file, dropped when the field is cleared or the agent
-// deleted. A file that cannot be read leaves the turn on the block below it, and the
-// reason is the agent's `system_prompt_file_error` until a read succeeds.
+// the record names another bridge or path, dropped when either field is cleared or
+// the agent deleted. The reason a set file is unusable is also the agent's
+// `system_prompt_file_error` until a read succeeds.
 
 import FantasticJSON
 import FantasticKernel
 import Foundation
 import OrderedCollections
 
+/// `system_prompt_file` is set and cannot be the block — the turn fails, said so.
+/// Python `PromptFileError(RuntimeError)`.
+public struct PromptFileError: Error, CustomStringConvertible, Sendable {
+    public let message: String
+    public init(_ message: String) { self.message = message }
+    public var description: String { message }
+}
+
 public enum PromptFile {
+    /// The refusal for a `file_bridge_id` the record cannot use.
+    public static let FILE_BRIDGE_ID_REFUSAL =
+        "file_bridge_id must be a non-empty file_bridge agent id — null clears it"
     /// The refusal for a `system_prompt_file` the record cannot use.
-    public static let REFUSAL =
-        "system_prompt_file must be {bridge: <file_bridge id>, path: <path under its root>} — null clears it"
+    public static let SYSTEM_PROMPT_FILE_REFUSAL =
+        "system_prompt_file must be a non-empty path on the agent's file_bridge_id — null clears it"
 
     final class Stale: @unchecked Sendable {
         private let lock = NSLock()
@@ -53,20 +67,29 @@ public enum PromptFile {
     private static func get(_ k: String) -> State? { lock.withLock { states[k] } }
     private static func put(_ k: String, _ s: State?) { lock.withLock { states[k] = s } }
 
-    /// `(bridge, path)` the record names, or nil.
-    public static func refOf(_ v: JSON?) -> (bridge: String, path: String)? {
-        guard let m = v?.asObject, case .string(let b)? = m["bridge"], !pyStrip(b).isEmpty,
-            case .string(let p)? = m["path"], !pyStrip(p).isEmpty
+    private static func nonBlank(_ v: JSON?) -> String? {
+        guard case .string(let s)? = v, !pyStrip(s).isEmpty else { return nil }
+        return s
+    }
+
+    /// `(file_bridge_id, system_prompt_file)` when the record names both, or nil.
+    public static func refOf(_ agent: Agent) -> (bridge: String, path: String)? {
+        guard let b = nonBlank(agent.metaValue(forKey: "file_bridge_id")),
+            let p = nonBlank(agent.metaValue(forKey: "system_prompt_file"))
         else { return nil }
         return (b, p)
     }
 
-    /// Why a written `system_prompt_file` is unusable, or nil (null clears it).
-    public static func shapeError(_ v: JSON?) -> String? {
-        guard let v, v != .null else { return nil }
-        guard let m = v.asObject, m.count == 2, m["bridge"] != nil, m["path"] != nil,
-            refOf(v) != nil
-        else { return REFUSAL }
+    /// Why a written `file_bridge_id` / `system_prompt_file` is unusable, or nil
+    /// (null clears either).
+    public static func shapeError(_ meta: OrderedDictionary<String, JSON>) -> String? {
+        for (name, refusal) in [
+            ("file_bridge_id", FILE_BRIDGE_ID_REFUSAL),
+            ("system_prompt_file", SYSTEM_PROMPT_FILE_REFUSAL),
+        ] {
+            guard let v = meta[name], v != .null else { continue }
+            if nonBlank(v) == nil { return refusal }
+        }
         return nil
     }
 
@@ -89,14 +112,21 @@ public enum PromptFile {
         return out.isEmpty ? "." : out.joined(separator: "/")
     }
 
-    /// The file's text for this turn, or nil (no file named, or unreadable). Runs
-    /// in the agent's own turn, so every send here is the agent's.
-    static func text(_ agent: Agent, _ kernel: Kernel) async -> String? {
+    /// The file's text for this turn; nil when `system_prompt_file` is not set
+    /// (nothing is looked up — the default block). Set and unusable — no
+    /// `file_bridge_id`, a refused or failed read, an empty file — throws
+    /// `PromptFileError`: the turn fails loud, it never falls to another block.
+    /// Runs in the agent's own turn, so every send here is the agent's.
+    static func text(_ agent: Agent, _ kernel: Kernel) async throws -> String? {
         let k = key(kernel, agent.id)
-        let wanted = refOf(agent.metaValue(forKey: "system_prompt_file"))
         let held = get(k)
-        guard let file = wanted else {
+        guard let file = refOf(agent) else {
             if held != nil { await drop(kernel, agent.id) }
+            if let path = nonBlank(agent.metaValue(forKey: "system_prompt_file")) {
+                throw PromptFileError(
+                    "\(agent.id.value): system_prompt_file \(pyRepr(path)) is set but the record "
+                        + "has no file_bridge_id — name the file_bridge it is read through")
+            }
             return nil
         }
         if let h = held, h.file != file {
@@ -106,16 +136,23 @@ public enum PromptFile {
             // arming failed on an earlier turn — the same one path, again
             await arm(agent.id, kernel, file)
         }
-        guard let st = get(k) else { return nil }
-        if st.task != nil && st.stale.take() {
-            let (txt, err) = await read(kernel, file.bridge, file.path)
+        if let st = get(k), st.task != nil, st.stale.take() {
+            var (txt, err) = await read(kernel, file.bridge, file.path)
+            if err == nil, let t = txt, pyStrip(t).isEmpty {
+                txt = nil
+                err = "\(file.bridge) \(file.path): the file is empty"
+            }
             if var s = get(k) {
                 s.text = txt
                 s.error = err
                 put(k, s)
             }
         }
-        return get(k)?.text
+        let st = get(k)
+        if let e = st?.error {
+            throw PromptFileError("\(agent.id.value): system_prompt_file: \(e)")
+        }
+        return st?.text
     }
 
     private static func failed(_ out: Outcome) -> Bool {
