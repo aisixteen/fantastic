@@ -1220,7 +1220,7 @@ impl Bundle for VllmBundle {
     }
 
     async fn on_delete(&self, agent_id: &AgentId, kernel: &Arc<Kernel>) -> Result<(), BundleError> {
-        verbs::on_delete(agent_id, kernel);
+        verbs::on_delete(agent_id, kernel).await;
         last_budgets()
             .lock()
             .expect("vllm budgets poisoned")

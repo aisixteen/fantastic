@@ -129,6 +129,9 @@ pub fn reflect_base(
         "generating".to_string(),
         json!(crate::state::is_generating(agent_id)),
     );
+    if let Some(why) = crate::prompt_file::error_of(agent_id) {
+        out.insert("system_prompt_file_error".to_string(), json!(why));
+    }
     out
 }
 
@@ -154,11 +157,12 @@ pub fn status(agent_id: &AgentId, payload: &Value) -> Value {
 ///
 /// NOT the incarnation: it stays monotonic across a re-create, so a reply to a
 /// call the deleted agent made never becomes a live turn of the new one.
-pub fn on_delete(agent_id: &AgentId, kernel: &Kernel) {
+pub async fn on_delete(agent_id: &AgentId, kernel: &Arc<Kernel>) {
     crate::state::drop_state(agent_id);
     crate::route::forget(agent_id.as_str());
     crate::strategies::strip::forget(agent_id.as_str());
     crate::memory::forget(agent_id, kernel);
+    crate::prompt_file::drop_file(agent_id, kernel).await;
 }
 
 /// The `on_cancel` bundle hook, shared by every backend: the kernel is killing

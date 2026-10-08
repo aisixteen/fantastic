@@ -130,12 +130,27 @@ public struct FileBundle: AgentBundle {
             "args: old_path:str, new_path:str (both req). Returns {old_path, new_path}. Creates new parent dirs. Refused if readonly.",
         "mkdir":
             "args: path:str (req). Returns {path, created:true}. Recursive (parents ok). Refused if readonly.",
+        "watch_path":
+            "args: path:str (req — an exposed file or directory). Emit `{type: changed, path, kind}` on this bridge's inbox whenever it changes on disk, by any writer; WATCH this bridge to receive them. Returns {watching, paths}.\n\n`kind` is `added`, `modified` or `deleted` as the disk reported it — treat any\n`changed` as \"read it again\". A directory reports its entries (not recursive).\nHeld per caller until `unwatch_path`; RAM only.",
+        "unwatch_path":
+            "args: path:str (req). Stop YOUR watch of a path; the disk watch ends when no caller holds a path. Returns {watching:false, paths}.",
     ] as JSON
+
+    /// python's module-level `EMITS`.
+    public var emitsDoc: JSON? {
+        .object([
+            "changed": .string(
+                "{path, kind: added|modified|deleted} — a path under `watch_path` changed on disk, by any writer; watch this bridge to receive it"
+            )
+        ])
+    }
 
     /// The text verbs' RAM state — per bundle instance, keyed by kernel (see
     /// `UndoSlots`).
     let undoSlots = UndoSlots()
     let docLocks = DocumentLocks()
+    /// `watch_path`'s disk watchers — RAM, per kernel.
+    let watches = Watches()
 
     public init() {}
 
@@ -175,6 +190,7 @@ public struct FileBundle: AgentBundle {
     static let verbs: [String] = [
         "reflect", "boot", "list", "read", "write", "edit", "append", "undo",
         "read_stream", "write_stream", "pump", "delete", "rename", "mkdir",
+        "watch_path", "unwatch_path",
     ]
 
     public func handle(
@@ -268,6 +284,13 @@ public struct FileBundle: AgentBundle {
                 return Refusal.missing("write_stream", "bytes (one raw chunk)")
             }
             return writeStream(agent: agent, payload: payload, blob: Data(), base: base)
+        case "watch_path", "unwatch_path":
+            let p: String
+            do { p = try pathArg(verb, payload, "path") } catch { return error.json }
+            let root = rootStr(agent)
+            return verb == "watch_path"
+                ? watches.watchPath(agent.id, root: root, path: p, base: base, kernel: kernel)
+                : watches.unwatchPath(agent.id, root: root, path: p, base: base, kernel: kernel)
         case "pump":
             // The PUMP coordinates a SOURCE→SINK copy over the binary channel
             // (it never touches bytes itself), so it rides the text channel.
@@ -525,9 +548,11 @@ public struct FileBundle: AgentBundle {
         + "call. The document ends at the first `</bytes>`. An edit names its "
         + "files as tags: <edits><item><path>a.py</path><hunks>2</hunks></item></edits>"
 
-    /// The bridge is going away — its undo slots go with it (python `on_delete`).
+    /// The bridge is going away — its undo slots and its disk watch go with it
+    /// (python `on_delete`).
     public func onDelete(agentId: AgentId, kernel: Kernel) async throws {
         undoSlots.clear(kernel, bridge: agentId.value)
+        watches.drop(kernel, agentId)
     }
 
     /// python `_target_arg` — `pathArg` for a MUTATING verb: the path must name
@@ -801,6 +826,9 @@ public struct FileBundle: AgentBundle {
                 (try? intArg("read_stream", payload, "length", default: 65536, minimum: 1)) != nil
             else { return nil }
             return gatePath("read_stream", root: root, allow: allow, path: p, base: base)
+        case "watch_path":
+            guard let p = try? pathArg("watch_path", payload, "path") else { return nil }
+            return gatePath("watch_path", root: root, allow: allow, path: p, base: base)
         case "write_stream":
             if readonly { return nil }
             guard let p = try? pathArg("write_stream", payload, "path") else { return nil }
@@ -841,7 +869,7 @@ public struct FileBundle: AgentBundle {
     static let readmeText = """
         # file_bridge — filesystem edge
 
-        Verbs: `read(path,offset?,limit?)` · `write(path,bytes,if_match?)` · `edit(edits,bytes,dry_run?)` · `append(path,bytes)` · `undo(path)` · `read_stream(path,offset?,length?)` · `write_stream(path,bytes,offset?,truncate?)` · `pump(source_path,sink?,sink_path?)` · `list(path?)` · `delete(path)` · `rename(old,new)` · `mkdir(path)` · `reflect`
+        Verbs: `read(path,offset?,limit?)` · `write(path,bytes,if_match?)` · `edit(edits,bytes,dry_run?)` · `append(path,bytes)` · `undo(path)` · `read_stream(path,offset?,length?)` · `write_stream(path,bytes,offset?,truncate?)` · `pump(source_path,sink?,sink_path?)` · `list(path?)` · `delete(path)` · `rename(old,new)` · `mkdir(path)` · `watch_path(path)` · `unwatch_path(path)` · `reflect`
         **Streams** (the SOURCE/SINK protocol — file_bridge is the fs implementor):
         - `read_stream(path, offset=0, length=65536)` → `{bytes, next_offset, eof, size}` — `bytes` is the RAW chunk (rides the transport as raw bytes — web_ws / bridge binary frame, never base64); pull chunks until `eof` (stateless cursor).
         - `write_stream(path, bytes, offset?, truncate?)` → push RAW chunks (`bytes` = one raw chunk; append by default; `truncate:true` on the first to start fresh). Text files use the whole-file `write`.
@@ -852,6 +880,8 @@ public struct FileBundle: AgentBundle {
         - `edit(edits:[{path, hunks, if_match?}], bytes)` → SEARCH/REPLACE hunks (`reflect` shows the grammar), a TRANSACTION over every listed file: any failure writes nothing.
         - `version` = the document's hash; `if_match` refuses a write when the document changed since you read it.
         - `undo(path)` → swaps the document with what the last write/edit/append replaced (a second `undo` is redo). ONE slot per path, in RAM — lost on restart, nothing kept on disk.
+
+        **Watching** — `watch_path(path)` puts an exposed file or directory under a disk watcher: any change, by any writer, is emitted on this bridge's inbox as `{type: changed, path, kind: added|modified|deleted}` — WATCH the bridge to receive it (a file is watched through its parent too, so an editor's atomic save is seen; a directory reports its entries, not recursive). Held per caller until `unwatch_path(path)`; RAM only.
 
         A consumer (file serving · a pump · kernel_state) is **storage-agnostic** — it pulls/pushes by id, so a `network_bridge` answering the same verbs serves a *remote* file the same way (G1).
 

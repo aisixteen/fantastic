@@ -42,6 +42,7 @@
 
 pub mod fs;
 mod text;
+mod watch;
 
 use async_trait::async_trait;
 use fantastic_bundle::{py_repr, py_repr_value, py_str, py_truthy};
@@ -60,7 +61,7 @@ pub const README: &str = include_str!("readme.md");
 
 /// The verb table, in python's `VERBS` order — reflect's `verbs` map, the
 /// unknown-verb refusal and the gate all read it.
-const VERBS: [(&str, &str); 14] = [
+const VERBS: [(&str, &str); 16] = [
     (
         "reflect",
         "Identity + filesystem root + readonly flag + auth posture (ingress/egress/sealed/see). No args.",
@@ -114,6 +115,14 @@ const VERBS: [(&str, &str); 14] = [
         "mkdir",
         "args: path:str (req). Returns {path, created:true}. Recursive (parents ok). Refused if readonly.",
     ),
+    (
+        "watch_path",
+        "args: path:str (req — an exposed file or directory). Emit `{type: changed, path, kind}` on this bridge's inbox whenever it changes on disk, by any writer; WATCH this bridge to receive them. Returns {watching, paths}.\n\n`kind` is `added`, `modified` or `deleted` as the disk reported it — treat any\n`changed` as \"read it again\". A directory reports its entries (not recursive).\nHeld per caller until `unwatch_path`; RAM only.",
+    ),
+    (
+        "unwatch_path",
+        "args: path:str (req). Stop YOUR watch of a path; the disk watch ends when no caller holds a path. Returns {watching:false, paths}.",
+    ),
 ];
 
 /// Discovery must work on a sealed bridge — python's `UNGATED`.
@@ -124,6 +133,7 @@ const UNGATED: [&str; 1] = ["reflect"];
 #[derive(Default)]
 pub struct FileBundle {
     text: text::TextState,
+    watch: watch::Watches,
 }
 
 /// A readonly leg refuses every mutating verb — in THE ONE REFUSAL SHAPE.
@@ -193,6 +203,12 @@ impl Bundle for FileBundle {
 
     fn readme(&self) -> Option<&'static str> {
         Some(README)
+    }
+
+    fn emits_doc(&self) -> Option<Value> {
+        Some(json!({
+            "changed": "{path, kind: added|modified|deleted} — a path under `watch_path` changed on disk, by any writer; watch this bridge to receive it",
+        }))
     }
 
     async fn handle(
@@ -288,6 +304,21 @@ impl Bundle for FileBundle {
                     "delete" => delete_reply(&root, payload, readonly),
                     "rename" => rename_reply(&root, payload, readonly),
                     "mkdir" => mkdir_reply(&root, payload, readonly),
+                    "watch_path" | "unwatch_path" => {
+                        let p = match path_arg(other, payload, "path") {
+                            Ok(p) => p,
+                            Err(e) => return Ok(Some(e)),
+                        };
+                        let r = match clamped(&root) {
+                            Ok(r) => r.to_path_buf(),
+                            Err(e) => return Ok(Some(e)),
+                        };
+                        if other == "watch_path" {
+                            self.watch.watch_path(agent_id, &r, p, kernel)
+                        } else {
+                            self.watch.unwatch_path(agent_id, &r, p, kernel)
+                        }
+                    }
                     _ => unreachable!("every VERBS entry is dispatched"),
                 }
             }
@@ -399,13 +430,14 @@ impl Bundle for FileBundle {
         }
     }
 
-    /// The bridge is going away — its undo slots go with it.
+    /// The bridge is going away — its undo slots and its disk watch go with it.
     async fn on_delete(
         &self,
         agent_id: &AgentId,
         _kernel: &Arc<Kernel>,
     ) -> Result<(), BundleError> {
         self.text.drop_slots(&agent_id.0);
+        self.watch.drop_bridge(agent_id);
         Ok(())
     }
 }
@@ -932,6 +964,10 @@ fn exposure(
             int_arg("read_stream", payload, "length", 65536, 1).ok()?;
             gate_path("read_stream", root, &allow, p)
         }
+        "watch_path" => {
+            let p = path_arg("watch_path", payload, "path").ok()?;
+            gate_path("watch_path", root, &allow, p)
+        }
         "write_stream" => {
             if readonly {
                 return None;
@@ -1200,3 +1236,5 @@ mod tests;
 mod tests_pump_identity;
 #[cfg(test)]
 mod tests_text;
+#[cfg(test)]
+mod tests_watch;

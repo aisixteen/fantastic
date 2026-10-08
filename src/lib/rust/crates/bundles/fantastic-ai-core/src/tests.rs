@@ -238,7 +238,7 @@ impl Bundle for MockBundle {
 
     /// Every backend's delete hook: the shared teardown.
     async fn on_delete(&self, agent_id: &AgentId, kernel: &Arc<Kernel>) -> Result<(), BundleError> {
-        verbs::on_delete(agent_id, kernel);
+        verbs::on_delete(agent_id, kernel).await;
         Ok(())
     }
 }
@@ -5904,6 +5904,11 @@ async fn history_by_fold_parses_the_id_and_refuses_in_pythons_words() {
 /// The record's `system_prompt` — its own file, over this harness.
 #[path = "tests_system_prompt.rs"]
 mod system_prompt;
+
+/// The system block's placeholders and its FILE (`system_prompt_file`), over this
+/// harness.
+#[path = "tests_prompt_file.rs"]
+mod prompt_file_tests;
 
 /// Streaming parts (python `test_stream_parts.py`), on this harness.
 #[path = "tests_stream_parts.rs"]

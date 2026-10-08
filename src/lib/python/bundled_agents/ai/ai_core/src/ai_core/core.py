@@ -1979,48 +1979,78 @@ async def _route_reply(
 _SELF_KEYS = ("id", "description", "memory_store_id", "can_call", "callable_by")
 
 
+#: THE PLACEHOLDERS a system prompt may hold, filled per agent and per turn (owner,
+#: 2026-10-08) — so a prompt that REPLACES the default block keeps its live parts:
+#: `{tree}` the kernel primer (tree ids + bundle catalog), `{self}` this agent's
+#: identity and grants, `{store}` its memory store id, `{howto}` the fixed how-to
+#: blocks. `{tree}\n\n{self}\n\n{howto}` IS the default block, byte for byte. Only
+#: the parts a prompt names are built; any other `{…}` stays as written.
+_PLACEHOLDER = re.compile(r"\{(tree|self|store|howto)\}")
+
+
+async def _parts(self_id: str, kernel, need: set[str]) -> dict[str, str]:
+    """The live parts of the system block, built only where `need` names them."""
+    out: dict[str, str] = {}
+    if "tree" in need:
+        primer = (
+            await kernel.send(
+                [
+                    {
+                        "target": "kernel",
+                        "payload": {"type": "reflect", "tree": "ids", "bundles": "ids"},
+                    }
+                ]
+            )
+        )[0]["result"]
+        out["tree"] = _render_reflect(primer)
+    if "self" in need:
+        me = (
+            await kernel.send(
+                [{"target": self_id, "payload": {"type": "reflect", "tree": "none"}}]
+            )
+        )[0]["result"]
+        # WHO YOU ARE, not how you are tuned: identity, memory and grants. The rest
+        # of the agent's own reflect (sampling, kv table, timeouts, endpoint) is
+        # operator posture the model never acts on — it cost ~1k chars on every turn.
+        if isinstance(me, dict):
+            me = {k: me[k] for k in _SELF_KEYS if k in me}
+        out["self"] = f"You are `{self_id}`. " + _render_reflect(me)
+    rec = kernel.get(self_id) or {}
+    store = rec.get("memory_store_id") or "(none)"
+    if "store" in need:
+        out["store"] = store
+    if "howto" in need:
+        blocks = [_SEND_TO_HOWTO, _CONTEXT_HOWTO, _MEMORY_HOWTO.format(store=store)]
+        # OPT-IN, on the record. The `facts` verb exists on every AI, but teaching it
+        # costs every agent prompt tokens for a discipline most runs never need — and
+        # a block like this changes behavior just by being read. `context_facts`
+        # turns it on INDEPENDENTLY of `context_strategy`, so a comparison can hold
+        # the model's behavior fixed and vary only what the strategy does with the
+        # dumps.
+        if rec.get("context_titles"):
+            blocks.append(_TITLES_HOWTO)
+        if rec.get("context_async"):
+            blocks.append(_ASYNC_HOWTO)
+        out["howto"] = "\n\n".join(blocks)
+    return out
+
+
 async def _default_system_content(self_id: str, kernel) -> str:
     """The deterministic substrate prompt — rebuilt every turn from the live tree. The
-    default `_system_content` falls to when no `system_prompt` replaces it."""
-    primer = (
-        await kernel.send(
-            [
-                {
-                    "target": "kernel",
-                    "payload": {"type": "reflect", "tree": "ids", "bundles": "ids"},
-                }
-            ]
-        )
-    )[0]["result"]
-    me = (
-        await kernel.send(
-            [{"target": self_id, "payload": {"type": "reflect", "tree": "none"}}]
-        )
-    )[0]["result"]
-    # WHO YOU ARE, not how you are tuned: identity, memory and grants. The rest of
-    # the agent's own reflect (sampling, kv table, timeouts, endpoint) is operator
-    # posture the model never acts on — it cost ~1k chars on every turn.
-    if isinstance(me, dict):
-        me = {k: me[k] for k in _SELF_KEYS if k in me}
-    rec0 = kernel.get(self_id) or {}
-    blocks = [
-        _render_reflect(primer),
-        f"You are `{self_id}`. " + _render_reflect(me),
-        _SEND_TO_HOWTO,
-        _CONTEXT_HOWTO,
-        _MEMORY_HOWTO.format(store=rec0.get("memory_store_id") or "(none)"),
-    ]
-    # OPT-IN, on the record. The `facts` verb exists on every AI, but teaching it
-    # costs every agent prompt tokens for a discipline most runs never need — and a
-    # block like this changes behavior just by being read. `context_facts` turns it
-    # on INDEPENDENTLY of `context_strategy`, so a comparison can hold the model's
-    # behavior fixed and vary only what the strategy does with the dumps.
-    rec_ = kernel.get(self_id) or {}
-    if rec_.get("context_titles"):
-        blocks.append(_TITLES_HOWTO)
-    if rec_.get("context_async"):
-        blocks.append(_ASYNC_HOWTO)
-    return "\n\n".join(blocks)
+    default `_system_content` falls to when no prompt replaces it:
+    `{tree}\n\n{self}\n\n{howto}`."""
+    p = await _parts(self_id, kernel, {"tree", "self", "howto"})
+    return "\n\n".join([p["tree"], p["self"], p["howto"]])
+
+
+async def _render_prompt(text: str, self_id: str, kernel) -> str:
+    """A prompt with its placeholders filled for this agent and this turn — one pass,
+    so a filled part is never scanned again."""
+    need = set(_PLACEHOLDER.findall(text))
+    if not need:
+        return text
+    parts = await _parts(self_id, kernel, need)
+    return _PLACEHOLDER.sub(lambda m: parts[m.group(1)], text)
 
 
 async def _system_content(
@@ -2029,14 +2059,23 @@ async def _system_content(
     """THE system block a turn uses — the one choice `_assemble` builds the turn on
     and `_context_recall` sizes the body budget against, so the two never drift.
 
-    PRECEDENCE (owner, 2026-10-03): the per-call argument (that delivery) > the
-    record's `system_prompt` field, read LIVE so an `update_agent` lands on the next
-    turn — a main turn, a nudge and a reply-woken turn alike > the default block."""
+    PRECEDENCE (owner, 2026-10-03, 2026-10-08): the per-call argument (that
+    delivery) > the record's `system_prompt` field, read LIVE so an `update_agent`
+    lands on the next turn — a main turn, a nudge and a reply-woken turn alike > the
+    file the record's `system_prompt_file` names (read through its file_bridge,
+    re-read when the bridge reports it changed — `prompt_file`) > the default
+    block. Whichever prompt is in force has its placeholders filled
+    (`_render_prompt`); none is ever appended to another."""
     rec_prompt = (kernel.get(self_id) or {}).get("system_prompt")
     if isinstance(system_prompt, str) and system_prompt.strip():
-        return system_prompt
+        return await _render_prompt(system_prompt, self_id, kernel)
     if isinstance(rec_prompt, str) and rec_prompt.strip():
-        return rec_prompt
+        return await _render_prompt(rec_prompt, self_id, kernel)
+    from ai_core import prompt_file
+
+    file_text = await prompt_file.text(self_id, kernel)
+    if isinstance(file_text, str) and file_text.strip():
+        return await _render_prompt(file_text, self_id, kernel)
     # The DEFAULT system block is deliberately lean: a tree id-index + bundle
     # catalog primer, self-identity, and the context-window howto (context IS
     # the backend's — see `_CONTEXT_HOWTO`). NO agent menu, NO tool howto — this
@@ -2757,6 +2796,10 @@ def _make_reflect(cfg: Backend):
             # task handle of its own. `_current[id]` present ⇔ in flight.
             "generating": id in _current,
         }
+        from ai_core import prompt_file
+
+        if why := prompt_file.error_of(id):
+            out["system_prompt_file_error"] = why
         if cfg.reflect_extra is not None:
             extra = cfg.reflect_extra(id, kernel)
             if inspect.isawaitable(extra):
@@ -3269,6 +3312,9 @@ async def on_delete(agent) -> None:
     _awaiting.pop(id, None)
     for table in _mem(agent).values():
         table.pop(id, None)
+    from ai_core import prompt_file
+
+    await prompt_file.drop(id, agent)
 
 
 async def _status(id, payload, kernel):

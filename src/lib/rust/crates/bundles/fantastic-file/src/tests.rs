@@ -919,6 +919,8 @@ fn verb_docs_are_python_docstring_first_lines() {
             "delete",
             "rename",
             "mkdir",
+            "watch_path",
+            "unwatch_path",
         ]
     );
     assert_eq!(verbs["boot"], "No-op. Returns None.");

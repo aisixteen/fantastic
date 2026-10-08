@@ -242,7 +242,7 @@ impl Bundle for SlowBundle {
         verbs::on_cancel(agent_id, &task_id.0.to_string(), kernel).await
     }
     async fn on_delete(&self, agent_id: &AgentId, kernel: &Arc<Kernel>) -> Result<(), BundleError> {
-        verbs::on_delete(agent_id, kernel);
+        verbs::on_delete(agent_id, kernel).await;
         Ok(())
     }
 }

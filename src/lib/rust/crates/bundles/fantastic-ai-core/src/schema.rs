@@ -173,13 +173,19 @@ pub fn ai_fields_with_window(context_window: i64) -> Vec<Field> {
         )
         .default(json!(RECENT_N)),
         Field::new("system_prompt", "str", SYSTEM_PROMPT_HINT),
+        Field::new("system_prompt_file", "map", SYSTEM_PROMPT_FILE_HINT),
     ]
 }
 
+/// The `system_prompt_file` field's hint. Python `AI_FIELDS`.
+pub const SYSTEM_PROMPT_FILE_HINT: &str = "{bridge, path}: a file read THROUGH that \
+     file_bridge as this agent's system block (placeholders filled), re-read when the bridge \
+     reports it changed; a record or per-call `system_prompt` beats it; null = none";
+
 /// The `system_prompt` field's hint. Python `AI_FIELDS`.
 pub const SYSTEM_PROMPT_HINT: &str = "a system block that REPLACES the default one on every \
-     turn of this agent (a per-call `system_prompt` beats it for that delivery); null = the \
-     default";
+     turn of this agent (a per-call `system_prompt` beats it for that delivery); placeholders \
+     {tree} {self} {store} {howto} are filled each turn; null = the default";
 
 /// The refusal for a `system_prompt` the record cannot use. Python
 /// `SYSTEM_PROMPT_REFUSAL`.
@@ -326,6 +332,12 @@ pub fn validate(
             return Some(SYSTEM_PROMPT_REFUSAL.to_string());
         }
     }
+    if let Some(bad) = meta
+        .get("system_prompt_file")
+        .and_then(crate::prompt_file::shape_error)
+    {
+        return Some(bad);
+    }
     let mut merged = record.clone();
     for (k, v) in meta {
         merged.insert(k.clone(), v.clone());
@@ -390,7 +402,8 @@ mod tests {
                 "output_reserve",
                 "context_strategy",
                 "recent_n",
-                "system_prompt"
+                "system_prompt",
+                "system_prompt_file"
             ]
         );
         // no `key_var`: a key is never read from the environment — a backend
@@ -464,7 +477,8 @@ mod tests {
         assert_eq!(
             SYSTEM_PROMPT_HINT,
             "a system block that REPLACES the default one on every turn of this agent \
-             (a per-call `system_prompt` beats it for that delivery); null = the default"
+             (a per-call `system_prompt` beats it for that delivery); placeholders {tree} \
+             {self} {store} {howto} are filled each turn; null = the default"
         );
         assert_eq!(
             SYSTEM_PROMPT_REFUSAL,
