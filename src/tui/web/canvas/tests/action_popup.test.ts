@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { COLS, move, tiles } from "../src/bundles/canvas/action_popup.ts";
+import { COLS, exactLine, move, tiles } from "../src/bundles/canvas/action_popup.ts";
 import type { Presets } from "../src/bundles/canvas/action_popup.ts";
 
 const P: Presets = {
@@ -12,9 +12,9 @@ const P: Presets = {
   dialogs: [{ id: "ai_1", name: "release notes" }],
 };
 
-test("empty: two groups — host (ask, terminal, agent, python agent), page (html, stream, demo, sidebar, canvases) — then AI (★ the default), chats", () => {
+test("empty: two groups — host (ask, terminal, agent, python agent, mcp server), page (html, stream, demo, sidebar, canvases) — then AI (★ the default), chats", () => {
   const t = tiles("", P);
-  assert.deepEqual(t.map((x) => x.label), ["ask", "terminal", "agent", "python agent", "html", "stream", "demo", "sidebar", "canvases", "@gpt5 ★", "@box", "release notes"]);
+  assert.deepEqual(t.map((x) => x.label), ["ask", "terminal", "agent", "python agent", "mcp server", "html", "stream", "demo", "sidebar", "canvases", "@gpt5 ★", "@box", "release notes"]);
   assert.deepEqual(t.find((x) => x.label === "python agent")!.pick, { kind: "bundle", starter: "python_agent" });
   assert.deepEqual([...new Set(t.map((x) => x.section))], ["host", "page", "ai", "chats"]);
   assert.deepEqual(t.at(-1)!.pick, { kind: "chat", id: "ai_1", name: "release notes" });
@@ -73,4 +73,11 @@ test("coding agents found on PATH: their own group, after host, launching the fu
   assert.equal(coding[0]!.icon, "claude");
   assert.deepEqual([...new Set(t.map((x) => x.section))], ["host", "coding", "page", "ai", "chats"]);
   assert.deepEqual(tiles("cl", { ...P, coding: [{ name: "claude", path: "/c" }] }).filter((x) => x.section === "coding").map((x) => x.label), ["claude"]);
+});
+
+test("exactLine: the exec allow-list entry for exactly one argv (shlex-joined, regex-escaped)", () => {
+  assert.equal(exactLine(["/Users/me/.local/bin/claude"]), "/Users/me/\\.local/bin/claude");
+  assert.equal(exactLine(["/opt/my tools/codex", "--x"]), "'/opt/my tools/codex' --x");
+  assert.ok(new RegExp(`^${exactLine(["/a/b.c"])}$`).test("/a/b.c"));
+  assert.ok(!new RegExp(`^${exactLine(["/a/b.c"])}$`).test("/a/bxc"));
 });

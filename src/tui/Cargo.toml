@@ -71,6 +71,8 @@ vt100 = "0.15"
 fantastic-credential-store = { path = "../lib/rust/crates/bundles/fantastic-credential-store" }
 fantastic-responses-backend = { path = "../lib/rust/crates/bundles/fantastic-responses-backend", optional = true }
 fantastic-py-agent = { path = "../lib/rust/crates/bundles/fantastic-py-agent" }
+# one remote MCP server as an agent: its tools are its verbs (the canvas's "MCP server")
+fantastic-mcp-client = { path = "../lib/rust/crates/bundles/fantastic-mcp-client" }
 fantastic-vllm-backend = { path = "../lib/rust/crates/bundles/fantastic-vllm-backend", optional = true }
 fantastic-ollama-backend = { path = "../lib/rust/crates/bundles/fantastic-ollama-backend", optional = true }
 fantastic-anthropic-backend = { path = "../lib/rust/crates/bundles/fantastic-anthropic-backend", optional = true }

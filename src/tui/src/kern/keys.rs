@@ -49,7 +49,7 @@ pub fn host_of(endpoint: &str) -> Option<String> {
 
 /// The ref a key for `module` at `endpoint` lives under.
 pub fn ref_for(module: &str, endpoint: &str) -> Result<String, String> {
-    let provider = module.strip_suffix("_backend.tools").unwrap_or(module);
+    let provider = module.strip_suffix("_backend.tools").or_else(|| module.strip_suffix(".tools")).unwrap_or(module);
     let host = host_of(endpoint).ok_or_else(|| format!("no host in the endpoint {endpoint:?} — fill the endpoint first; a key is bound to its host"))?;
     Ok(format!("{provider}/{host}"))
 }
@@ -237,6 +237,7 @@ mod tests {
         assert_eq!(ref_for("responses_backend.tools", "https://api.openai.com/v1/responses").unwrap(), "responses/api.openai.com");
         assert_eq!(ref_for("vllm_backend.tools", "http://Box.Local:8000/v1").unwrap(), "vllm/box.local:8000");
         assert!(ref_for("vllm_backend.tools", "").is_err(), "no endpoint, no host, no ref");
+        assert_eq!(ref_for("mcp_client.tools", "http://127.0.0.1:9000/mcp").unwrap(), "mcp_client/127.0.0.1:9000", "an MCP server's key: its bundle name and the url's host");
         assert_eq!(host_of("http://u:p@h.example/x"), Some("h.example".into()));
     }
 }

@@ -1,4 +1,5 @@
 import { Agent, str } from "../../lib.ts";
+import { mcpView } from "../mcp_view/mcp_view.ts";
 import type { Handler, Json, Payload } from "../../lib.ts";
 import { terminalView } from "../terminal_view/terminal_view.ts";
 import { bodyText } from "../body_text.ts";
@@ -19,6 +20,7 @@ export function hostViewCell(agent: string, rec: Rec): { handler: string; meta: 
     v.kind === "terminal" ? { ...terminalView.grants(agent) }
     : v.kind === "chat" ? { ...aiView.grants(agent) }
     : v.kind === "stub" ? { ...reflectView.grants(agent) }
+    : v.kind === "mcp" ? { ...mcpView.grants(agent) }
     : cellGrant(agent, v);
   // the BODY stays on the host record (`agent_view` reads it there): the cell
   // holds layout and the grant only

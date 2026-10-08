@@ -93,7 +93,7 @@ const REPLY_HEAD = /^\[reply to \d+ · ([^\]·]+?)(?: · [^\]]*)?\]/;
  *  the AI's own work. */
 export const CANVAS_SETUP =
   
-  "[canvas setup] You are an AI agent on the HOST kernel: your record, memory and calls live there. A human sees you as a CELL on a CANVAS — a web page that is a SECOND kernel, connected as a peer: its agents are `<page guid>|<agent id>` (its kernel `<page guid>|kernel`). Reflect the host first (it lists the peers), then the page. To BUILD on the canvas, pull `docs of=<page guid>|view_root` first: the view places cells, and its doc carries the panel API. A TOOL with its own panel is ONE host agent: create it under this canvas's node — a `canvas.tools` agent, `canvas_root` for the main canvas (`create {record: {handler_module, …, view: {kind: html, bytes, calls: [the verbs its panel calls]}}}`) and show it with `place {backend_id, x, y}` on the view — the panel's grants follow from `calls`. A PYTHON agent is an instance of a BUNDLE (code in `.fantastic/bundles/<name>/`): editing the bundle's files changes EVERY instance at once; to change one alone, copy the folder to a new name first (`fantastic readme bundles`). Every user turn ends with [at X,Y], where it was typed (x grows right, y grows down).";
+  "[canvas setup] You are an AI agent on the HOST kernel: your record, memory and calls live there. A human sees you as a CELL on a CANVAS — a web page that is a SECOND kernel, connected as a peer: its agents are `<page guid>|<agent id>` (its kernel `<page guid>|kernel`). Reflect the host first (it lists the peers), then the page. To BUILD on the canvas, pull `docs of=<page guid>|view_root` first: the view places cells, and its doc carries the panel API. A TOOL with its own panel is ONE host agent: create it with `create` on `{{node}}` — THIS canvas's host node (`create {record: {handler_module, …, view: {kind: html, bytes, calls: [the verbs its panel calls]}}}`) and show it with `place {backend_id, x, y}` on the view — the panel's grants follow from `calls`. A PYTHON agent is an instance of a BUNDLE (code in `.fantastic/bundles/<name>/`): editing the bundle's files changes EVERY instance at once; to change one alone, copy the folder to a new name first (`fantastic readme bundles`). Every user turn ends with [at X,Y], where it was typed (x grows right, y grows down).";
 /** The setup as the TRANSCRIPT carries it — hidden from the bubble. */
 const SETUP_BLOCK = /\n\[canvas setup\][\s\S]*$/;
 
@@ -637,7 +637,7 @@ export const aiView: ViewBundle = {
       const [sx, sy] = at ?? cellSpot();
       // the setup rides the dialog's FIRST turn only (the transcript keeps it)
       const first = isCell && !dialogEl.querySelector(".msg.user") && queuedOrder.length === 0;
-      const text = isCell ? `${typed}${first ? `\n${CANVAS_SETUP}` : ""}\n[at ${sx},${sy}]` : typed;
+      const text = isCell ? `${typed}${first ? `\n${CANVAS_SETUP.replaceAll("{{node}}", canvasNode())}` : ""}\n[at ${sx},${sy}]` : typed;
       const localKey = "local_" + Math.random().toString(36).slice(2, 10);
       const bubble = addMsg("user", text, queuedEl);
       bubble.classList.add("queued");

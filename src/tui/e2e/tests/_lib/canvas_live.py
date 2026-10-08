@@ -345,6 +345,17 @@ async def spot(pg: Page, x: int, y: int, text: str) -> None:
     await pg.cdp("Input.dispatchKeyEvent", type="keyDown", key="Enter", code="Enter", windowsVirtualKeyCode=13)
 
 
+async def open_sidebar(pg: Page, x: int, y: int) -> bool:
+    """Place a SIDEBAR cell (the chats + the agent tree) at empty canvas (x, y)
+    — nothing floats: the sidebar is a cell from the double-click."""
+    before = await pg.js("document.querySelectorAll('.agent-frame .side .agents-tree').length")
+    await spot(pg, x, y, "sidebar")
+    if not await pg.until(f"document.querySelectorAll('.agent-frame .side .agents-tree').length > {before}", 10):
+        return False
+    # its host tree is read from the host (async): ready once a host row shows
+    return bool(await pg.until("document.querySelectorAll('.side .agents-tree li.agent.host').length > 0", 10))
+
+
 async def say(pg: Page, text: str, cell: int = 0) -> None:
     """Send a follow-up turn in chat cell #cell — ENTER in its input (it queues
     even while the cell works; the button turns into STOP then, an interrupt)."""

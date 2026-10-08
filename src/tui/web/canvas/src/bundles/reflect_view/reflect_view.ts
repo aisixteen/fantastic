@@ -55,7 +55,7 @@ export const reflectView: ViewBundle = {
       if (typeof r["handler_module"] === "string") root.append(text("div", "hm", r["handler_module"]));
       if (typeof r["sentence"] === "string") root.append(text("div", "sentence", r["sentence"]));
       // HOW TO CALL it is the kernel's `docs` (a reflect no longer carries verbs)
-      const d = (await host.call("kernel", { type: "docs", of: ctx.backend, tier: "detailed" } as never).catch(() => null)) as Dict | null;
+      const d = (await host.callHost("kernel", { type: "docs", of: ctx.backend, tier: "detailed" } as never).catch(() => null)) as Dict | null;
       const verbs = d !== null && typeof d["error"] !== "string" ? d["verbs"] : undefined;
       if (verbs && typeof verbs === "object") {
         root.append(text("h4", "", "VERBS"));

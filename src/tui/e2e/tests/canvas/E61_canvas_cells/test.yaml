@@ -1,0 +1,10 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint (the
+# plug names those). Scripted: no model.
+id: canvas_cells
+group: canvas
+title: "a bare canvas, cells from the double-click (sidebar, canvases, a coding agent), a peer canvas of its own, a page bundle reloaded live"
+runner: probe.py
+costs: free
+limits:
+  seconds: 20
+env: {}
