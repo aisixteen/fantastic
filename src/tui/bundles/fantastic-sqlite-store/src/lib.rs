@@ -63,7 +63,7 @@ const OPERATOR: &str = "kernel";
 
 type Row = Map<String, Value>;
 
-const SCHEMA: &str = "
+const SCHEMA: &str = r#"
 PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS rows (
   owner TEXT NOT NULL, id INTEGER NOT NULL, doc TEXT NOT NULL,
@@ -81,13 +81,21 @@ CREATE TABLE IF NOT EXISTS fold_refs (
   FOREIGN KEY (owner, member) REFERENCES rows (owner, id) ON DELETE CASCADE
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS fold_refs_member ON fold_refs (owner, member);
+-- THE KERNEL'S LOOKUPS, indexed (2026-10-09, the input-lag bug): a named call
+-- is looked up by `name`, its settle by `parent`, on EVERY named send — a scan
+-- of the whole history (json parsed per row) was ~160 ms at 66k rows, under the
+-- store's one lock, and every page call queued behind it. `read` writes these
+-- paths as literals and names the index (`INDEXED BY`): without statistics the
+-- planner preferred the primary key's owner range — the whole history.
+CREATE INDEX IF NOT EXISTS rows_by_name ON rows (owner, json_extract(doc, '$."name"'));
+CREATE INDEX IF NOT EXISTS rows_by_parent ON rows (owner, json_extract(doc, '$."parent"'));
 CREATE VIRTUAL TABLE IF NOT EXISTS text_idx USING fts5 (
   owner UNINDEXED, id UNINDEXED, text, tokenize = 'trigram case_sensitive 1'
 );
 CREATE TRIGGER IF NOT EXISTS rows_text_gone AFTER DELETE ON rows BEGIN
   DELETE FROM text_idx WHERE owner = old.owner AND id = old.id;
 END;
-";
+"#;
 
 /// ram_store `_as_id`: a positive int, or the decimal digits a caller wrote.
 fn as_id(x: &Value) -> Option<i64> {
@@ -189,30 +197,57 @@ impl Db<'_> {
         out
     }
 
-    /// The rows of one owner whose ids are in `ids` — one range scan between the
-    /// smallest and largest id asked for — narrowed in SQL to those whose
-    /// string field `k` equals `v` for every `(k, v)` in `eq`, and whose `kind`
-    /// is one of `kinds`. A SUPERSET of an exact `match`/`kinds` filter (the
-    /// caller still applies that): it only skips decoding rows that cannot pass.
-    fn rows_where(
+    /// The ids of one owner strictly between `lo` and `hi` (either open), ascending.
+    fn ids_between(&self, owner: &str, lo: Option<i64>, hi: Option<i64>) -> rusqlite::Result<Vec<i64>> {
+        let mut st = self.0.prepare_cached("SELECT id FROM rows WHERE owner = ?1 AND id > ?2 AND id < ?3 ORDER BY id")?;
+        let out = st.query_map(params![owner, lo.unwrap_or(i64::MIN), hi.unwrap_or(i64::MAX)], |r| r.get::<_, i64>(0))?.collect();
+        out
+    }
+
+    /// The rows of one owner strictly between `lo` and `hi` (either open),
+    /// narrowed in SQL to those whose field `k` equals `v` for every `(k, v)` in
+    /// `eq` (a string or an integer) and whose `kind` is one of `kinds`. A
+    /// SUPERSET of an exact `match`/`kinds` filter (the caller still applies
+    /// that). The json paths are LITERALS — `name` and `parent` then hit their
+    /// expression indexes — so a key is pushed down only when it is a plain
+    /// label (`[A-Za-z0-9_]`); any other is left to the exact filter.
+    fn rows_between(
         &self,
         owner: &str,
-        ids: &[i64],
-        eq: &[(String, String)],
+        lo: Option<i64>,
+        hi: Option<i64>,
+        eq: &[(String, Value)],
         kinds: Option<&[String]>,
     ) -> rusqlite::Result<HashMap<i64, Row>> {
-        let (Some(lo), Some(hi)) = (ids.iter().min(), ids.iter().max()) else {
-            return Ok(HashMap::new());
+        let pushed = |k: &str| eq.iter().any(|(x, v)| x == k && (v.is_string() || v.as_i64().is_some()));
+        let index = if pushed("name") {
+            " INDEXED BY rows_by_name"
+        } else if pushed("parent") {
+            " INDEXED BY rows_by_parent"
+        } else {
+            ""
         };
-        let want: HashSet<i64> = ids.iter().copied().collect();
-        let mut sql = String::from("SELECT id, doc FROM rows WHERE owner = ? AND id BETWEEN ? AND ?");
-        let mut args: Vec<rusqlite::types::Value> =
-            vec![owner.to_string().into(), (*lo).into(), (*hi).into()];
+        let mut sql = format!("SELECT id, doc FROM rows{index} WHERE owner = ?");
+        let mut args: Vec<rusqlite::types::Value> = vec![owner.to_string().into()];
+        if let Some(lo) = lo {
+            sql.push_str(" AND id > ?");
+            args.push(lo.into());
+        }
+        if let Some(hi) = hi {
+            sql.push_str(" AND id < ?");
+            args.push(hi.into());
+        }
         for (k, v) in eq {
-            // a JSON path naming the key as one quoted label
-            sql.push_str(" AND json_extract(doc, ?) = ?");
-            args.push(format!("$.\"{k}\"").into());
-            args.push(v.clone().into());
+            if k.is_empty() || !k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                continue;
+            }
+            let bound: rusqlite::types::Value = match v {
+                Value::String(t) => t.clone().into(),
+                Value::Number(n) if n.as_i64().is_some() => n.as_i64().expect("checked").into(),
+                _ => continue,
+            };
+            sql.push_str(&format!(" AND json_extract(doc, '$.\"{k}\"') = ?"));
+            args.push(bound);
         }
         if let Some(ks) = kinds {
             sql.push_str(" AND json_extract(doc, '$.kind') IN (");
@@ -223,7 +258,6 @@ impl Db<'_> {
         let mut st = self.0.prepare_cached(&sql)?;
         let out = st
             .query_map(rusqlite::params_from_iter(args), |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
-            .filter(|x| x.as_ref().map_or(true, |(i, _)| want.contains(i)))
             .map(|x| x.map(|(i, t)| (i, doc(&t))))
             .collect();
         out
@@ -688,60 +722,54 @@ impl SqliteStoreBundle {
     fn read(&self, id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
         self.tx(id, kernel, |db| {
             let (owner, _) = caller(kernel)?;
-            let mut ids = db.ids(&owner).map_err(db_err)?;
             let flk = payload.get("from_last_kind").and_then(Value::as_str).filter(|s| !s.is_empty());
             let after = payload.get("after").and_then(as_id);
             let before = payload.get("before").and_then(as_id);
             let desc = payload.get("order").and_then(Value::as_str) == Some("desc");
-            // THE ID BOUNDS FIRST, before any row is decoded: `after`/`before` only
-            // look at ids, so a cursor read ("what came after my newest row") costs
-            // the rows after the cursor, not the owner's whole history. Not with
-            // `from_last_kind`, which must see every row to find the newest of a
-            // kind. The same bounds are applied again below — idempotent.
-            if flk.is_none() {
+            // THE ID BOUNDS IN THE SQL, before any row is read: `after`/`before`
+            // only look at ids, so a cursor read ("what came after my newest row")
+            // costs the rows after the cursor, not the owner's whole history. Not
+            // with `from_last_kind`, which must see every row to find the newest
+            // of a kind. The same bounds are applied again below — idempotent.
+            let (lo, hi) = if flk.is_some() {
+                (None, None)
+            } else {
                 match (desc, after) {
-                    (true, Some(a)) => ids.retain(|i| *i < a),
-                    (false, Some(a)) => ids.retain(|i| *i > a),
-                    _ => {}
+                    (true, Some(a)) => (None, Some(before.map_or(a, |b| b.min(a)))),
+                    (false, Some(a)) => (Some(a), before),
+                    _ => (None, before),
                 }
-                if let Some(b) = before {
-                    ids.retain(|i| *i < b);
-                }
-            }
+            };
             // Rows are decoded only when a filter reads them, and only the ids
             // still in play.
             let needs_rows = flk.is_some()
                 || payload.get("kinds").and_then(Value::as_array).is_some_and(|k| !k.is_empty())
                 || payload.get("match").and_then(Value::as_object).is_some_and(|m| !m.is_empty());
-            let rows = if !needs_rows {
-                HashMap::new()
+            let (mut ids, rows) = if !needs_rows {
+                (db.ids_between(&owner, lo, hi).map_err(db_err)?, HashMap::new())
             } else if flk.is_some() {
-                db.all_rows(&owner).map_err(db_err)?
+                let rows = db.all_rows(&owner).map_err(db_err)?;
+                let mut ids: Vec<i64> = rows.keys().copied().collect();
+                ids.sort_unstable();
+                (ids, rows)
             } else {
-                // Let SQLite narrow the candidates by the STRING-valued `match`
-                // fields and the `kinds` first (json_extract equality — a
-                // superset of the exact filter below, which still decides), so
-                // a lookup like the kernel's named-call dedup
-                // (`{kinds:[call], match:{name}}`) decodes a handful of rows,
-                // not the owner's whole history.
-                let eq: Vec<(String, String)> = payload
+                // SQLite narrows by the `match` fields (strings, integers) and the
+                // `kinds` first — a superset of the exact filter below, which still
+                // decides — so the kernel's per-send lookups (`{kinds:[call],
+                // match:{name}}`, `{kinds:[settle], match:{parent}}`) are index hits.
+                let eq: Vec<(String, Value)> = payload
                     .get("match")
                     .and_then(Value::as_object)
-                    .map(|m| {
-                        m.iter()
-                            // a key holding `"` cannot be one quoted path label: left to the exact filter
-                            .filter(|(k, _)| !k.contains('"'))
-                            .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                            .collect()
-                    })
+                    .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
                     .unwrap_or_default();
                 let kinds: Option<Vec<String>> = payload.get("kinds").and_then(Value::as_array).and_then(|k| {
                     let s: Vec<String> = k.iter().filter_map(|x| x.as_str().map(str::to_string)).collect();
                     (s.len() == k.len() && !s.is_empty()).then_some(s)
                 });
-                let got = db.rows_where(&owner, &ids, &eq, kinds.as_deref()).map_err(db_err)?;
-                ids.retain(|i| got.contains_key(i));
-                got
+                let rows = db.rows_between(&owner, lo, hi, &eq, kinds.as_deref()).map_err(db_err)?;
+                let mut ids: Vec<i64> = rows.keys().copied().collect();
+                ids.sort_unstable();
+                (ids, rows)
             };
             let row_of = |i: &i64| rows.get(i).cloned().unwrap_or_default();
             if let Some(flk) = flk {
