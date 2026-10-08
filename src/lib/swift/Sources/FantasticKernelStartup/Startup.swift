@@ -20,6 +20,7 @@ import FantasticScenarioProbes
 import FantasticKernelBridge
 import FantasticResponsesBackend
 import FantasticAnthropicBackend
+import FantasticMcpClient
 import FantasticVllmBackend
 import FantasticOllamaBackend
 import FantasticFMCore
@@ -92,6 +93,9 @@ public func defaultBundleRegistry() -> BundleRegistry {
     r.register("responses_backend.tools", ResponsesBundle())
     r.register("vllm_backend.tools", VllmBundle())
     r.register("anthropic_backend.tools", AnthropicBundle())
+    // a remote MCP server (protocol 2026-07-28) as an agent: its tools are the
+    // agent's verbs
+    r.register(MCP_CLIENT_HANDLER_MODULE, McpClientBundle())
     // Apple's on-device model (FantasticFMCore — the same code the rust kernel
     // links through FantasticFMBridge). Registered on every platform: where the
     // model cannot run, a send fails naming why.

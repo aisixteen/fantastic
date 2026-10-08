@@ -24,11 +24,17 @@ final class StubHTTP: @unchecked Sendable {
         let status: Int
         let headers: [(String, String)]
         let body: String
+        /// Seconds to wait before answering (a slow server).
+        let delay: TimeInterval
 
-        init(status: Int = 200, headers: [(String, String)] = [], body: String = "") {
+        init(
+            status: Int = 200, headers: [(String, String)] = [], body: String = "",
+            delay: TimeInterval = 0
+        ) {
             self.status = status
             self.headers = headers
             self.body = body
+            self.delay = delay
         }
 
         /// A finished SSE body.
@@ -44,11 +50,19 @@ final class StubHTTP: @unchecked Sendable {
     private let wakeWrite: Int32
     private let lock = NSLock()
     private var pending: [Reply]
+    /// Answers each request from what it asked (the raw request text), instead
+    /// of the script — a server with behaviour (the MCP fake).
+    private let responder: (@Sendable (String) -> Reply)?
     private var seen: [String] = []
     private var stopped = false
 
-    init(_ replies: [Reply]) {
+    convenience init(respond: @escaping @Sendable (String) -> Reply) {
+        self.init([], responder: respond)
+    }
+
+    init(_ replies: [Reply], responder: (@Sendable (String) -> Reply)? = nil) {
         pending = replies
+        self.responder = responder
         listenFD = socket(AF_INET, SOCK_STREAM, 0)
         precondition(listenFD >= 0, "socket() failed")
         var yes: Int32 = 1
@@ -184,9 +198,15 @@ final class StubHTTP: @unchecked Sendable {
 
         lock.lock()
         seen.append(request)
-        let reply =
-            pending.isEmpty ? Reply(status: 500, body: "no scripted reply") : pending.removeFirst()
+        var scripted: Reply? = nil
+        if responder == nil {
+            scripted =
+                pending.isEmpty
+                ? Reply(status: 500, body: "no scripted reply") : pending.removeFirst()
+        }
         lock.unlock()
+        let reply = scripted ?? responder!(request)
+        if reply.delay > 0 { Thread.sleep(forTimeInterval: reply.delay) }
 
         var head = "HTTP/1.1 \(reply.status) \(Self.reason(reply.status))\r\n"
         for (k, v) in reply.headers { head += "\(k): \(v)\r\n" }

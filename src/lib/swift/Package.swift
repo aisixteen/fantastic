@@ -294,6 +294,15 @@ let package = Package(
                            .product(name: "AsyncHTTPClient", package: "async-http-client"),
                            .product(name: "NIOCore", package: "swift-nio")]
         ),
+        // One remote MCP server (Streamable HTTP, protocol 2026-07-28) as an
+        // agent — its tools are the agent's verbs (python `mcp_client`).
+        .target(
+            name: "FantasticMcpClient",
+            dependencies: ["FantasticAICore", "FantasticKernel", "FantasticJSON",
+                           .product(name: "OrderedCollections", package: "swift-collections"),
+                           .product(name: "AsyncHTTPClient", package: "async-http-client"),
+                           .product(name: "NIOCore", package: "swift-nio")]
+        ),
         // Apple Foundation Models (on-device). FMCore is THE ONE implementation
         // of the FoundationModels calls — availability, the window, a raw-text
         // delta stream over a rebuilt transcript; Foundation only, the FM import
@@ -348,6 +357,7 @@ let package = Package(
                 "FantasticResponsesBackend",
                 "FantasticVllmBackend",
                 "FantasticAnthropicBackend",
+                "FantasticMcpClient",
                 "FantasticFMCore", "FantasticFoundationModelsBackend",
                 "FantasticExecBridge",
             ]
@@ -436,6 +446,7 @@ let package = Package(
             dependencies: [
                 "FantasticAICore", "FantasticOllamaBackend",
                 "FantasticResponsesBackend", "FantasticVllmBackend", "FantasticAnthropicBackend",
+                "FantasticMcpClient",
                 "FantasticJSON",
                 // The key reader against a real credential store (and the memory
                 // store an AI agent's record must name).

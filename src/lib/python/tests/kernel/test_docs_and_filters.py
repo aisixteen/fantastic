@@ -86,6 +86,40 @@ async def test_docs_of_a_bundle_and_of_the_kernel(seeded_kernel):
     assert "status" in ai["emits"] and "cancel" in ai["cancel"]
 
 
+async def test_docs_of_an_agent_read_its_own_table_when_its_bundle_names_one(
+    seeded_kernel,
+):
+    """PER-INSTANCE VERBS (owner, 2026-10-08): a bundle whose agents serve different
+    verbs names each one's table (`instance_verbs(agent)`); None keeps the bundle's."""
+    import types
+
+    from kernel import register_unlisted
+
+    mod = types.ModuleType("per_instance_probe")
+
+    async def _ping(id, payload, kernel):
+        """No args. The bundle's own verb."""
+
+    mod.VERBS = {"ping": _ping}
+    mod.handler = lambda id, payload, kernel: None
+    mod.instance_verbs = lambda agent: (
+        {"ping": "No args. Still here.", "own_" + agent.id: "args: x:int. Only mine."}
+        if agent.id != "plain"
+        else None
+    )
+    register_unlisted("per_instance_probe", mod)
+    k = seeded_kernel
+    for aid in ("a1", "a2", "plain"):
+        k.create("per_instance_probe", id=aid)
+    a1 = await _docs(k, of="a1")
+    a2 = await _docs(k, of="a2", tier="detailed", verb="own_a2")
+    assert a1["verbs"] == {"ping": "No args", "own_a1": "args: x:int"}, a1
+    assert a2["verbs"] == {"own_a2": "args: x:int. Only mine."}, a2
+    assert (await _docs(k, of="plain"))["verbs"] == {"ping": "No args"}
+    gone = await _docs(k, of="a1", verb="own_a2")
+    assert gone["reason"] == "bad_arg" and "own_a1" in gone["hint"], gone
+
+
 async def test_docs_refusals_are_coded(seeded_kernel):
     k = seeded_kernel
     assert (await _docs(k))["reason"] == "missing_arg"

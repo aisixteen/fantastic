@@ -164,7 +164,7 @@ extension Kernel {
     /// read as `args: handler_module:str, id:str?, **meta` with "spawn a child
     /// agent" cut, and a model spent 16 passes unable to work out what the target
     /// meant, finishing with `agents_created: []`.
-    static func kernelVerbDocs() -> JSON {
+    public static func kernelVerbDocs() -> JSON {
         .object([
             "create_agent": .string(
                 "args: handler_module:str, parent_id:str REQUIRED, id:str?, **meta. Creates "
@@ -294,7 +294,8 @@ extension Kernel {
                 table: Self.kernelVerbDocs(), extras: [])
         }
         let module: String
-        if let a = agent(AgentId(of)) {
+        let named = agent(AgentId(of))
+        if let a = named {
             guard let hm = a.handlerModule else {
                 return Self.renderDocs(
                     of: of, bundle: .null, tier: tier, verb: verb, table: .object([:]), extras: [])
@@ -321,8 +322,12 @@ extension Kernel {
                 of: of, bundle: .string(module), tier: tier, verb: verb, table: .object([:]),
                 extras: [])
         }
+        // PER-INSTANCE VERBS (owner, 2026-10-08): an agent whose bundle names its
+        // own table (an MCP server's tools) is documented by it; the bundle (no
+        // agent) shows the bundle's.
+        let table = named.flatMap { bundle.instanceVerbDocs($0) } ?? bundle.verbDocTable
         return Self.renderDocs(
-            of: of, bundle: .string(module), tier: tier, verb: verb, table: bundle.verbDocTable,
+            of: of, bundle: .string(module), tier: tier, verb: verb, table: table,
             extras: [("emits", bundle.emitsDoc), ("cancel", bundle.cancelDoc), ("notes", bundle.notesDoc)])
     }
 

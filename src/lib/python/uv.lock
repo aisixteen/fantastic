@@ -13,6 +13,7 @@ members = [
     "fantastic-io-bridge",
     "fantastic-kernel",
     "fantastic-kernel-state",
+    "fantastic-mcp-client",
     "fantastic-ollama-backend",
     "fantastic-py-agent",
     "fantastic-ram-store",
@@ -418,6 +419,7 @@ dependencies = [
     { name = "fantastic-file-bridge" },
     { name = "fantastic-io-bridge" },
     { name = "fantastic-kernel-state" },
+    { name = "fantastic-mcp-client" },
     { name = "fantastic-ollama-backend" },
     { name = "fantastic-py-agent" },
     { name = "fantastic-ram-store" },
@@ -452,6 +454,7 @@ requires-dist = [
     { name = "fantastic-file-bridge", editable = "bundled_agents/io/file_bridge" },
     { name = "fantastic-io-bridge", editable = "bundled_agents/io/io_bridge" },
     { name = "fantastic-kernel-state", editable = "bundled_agents/loader/kernel_state" },
+    { name = "fantastic-mcp-client", editable = "bundled_agents/io/mcp_client" },
     { name = "fantastic-ollama-backend", editable = "bundled_agents/ai/ollama/ollama_backend" },
     { name = "fantastic-py-agent", editable = "bundled_agents/io/py_agent" },
     { name = "fantastic-ram-store", editable = "bundled_agents/memory/ram_store" },
@@ -489,6 +492,21 @@ dependencies = [
 requires-dist = [
     { name = "fantastic-file-bridge", editable = "bundled_agents/io/file_bridge" },
     { name = "pyyaml", specifier = ">=6" },
+]
+
+[[package]]
+name = "fantastic-mcp-client"
+version = "0.1.0"
+source = { editable = "bundled_agents/io/mcp_client" }
+dependencies = [
+    { name = "fantastic-ai-core" },
+    { name = "httpx" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fantastic-ai-core", editable = "bundled_agents/ai/ai_core" },
+    { name = "httpx" },
 ]
 
 [[package]]

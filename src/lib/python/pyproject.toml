@@ -25,6 +25,7 @@ dependencies = [
   "fantastic-relay-connector",
   "fantastic-exec-bridge",
   "fantastic-py-agent",
+  "fantastic-mcp-client",
   "fantastic-ai-core",
   "fantastic-static-loader",
   "fantastic-ram-store",
@@ -78,6 +79,7 @@ testpaths = [
   "bundled_agents/io/relay_connector/tests",
   "bundled_agents/io/exec_bridge/tests",
   "bundled_agents/io/py_agent/tests",
+  "bundled_agents/io/mcp_client/tests",
   "bundled_agents/memory/ram_store/tests",
   "bundled_agents/security/credential_store/tests",
 ]
@@ -105,6 +107,7 @@ members = [
   "bundled_agents/io/relay_connector",
   "bundled_agents/io/exec_bridge",
   "bundled_agents/io/py_agent",
+  "bundled_agents/io/mcp_client",
   "bundled_agents/loader/kernel_state",
   "bundled_agents/loader/static_loader",
   "bundled_agents/memory/ram_store",
@@ -128,6 +131,7 @@ fantastic-ws-bridge = { workspace = true }
 fantastic-relay-connector = { workspace = true }
 fantastic-exec-bridge = { workspace = true }
 fantastic-py-agent = { workspace = true }
+fantastic-mcp-client = { workspace = true }
 fantastic-ai-core = { workspace = true }
 fantastic-kernel-state = { workspace = true }
 fantastic-static-loader = { workspace = true }
