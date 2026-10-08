@@ -73,14 +73,11 @@ export const CANVAS_CSS = `
   .side li { display: flex; gap: 8px; padding: 4px 14px; cursor: pointer; }
   .side li:hover { background: rgba(183,140,255,0.16); }
   .side li .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .side li.kept .dot { color: #7ee2a8; } .side li.eph { opacity: 0.7; }
   .side li .ct { color: rgba(220,230,245,0.45); }
-  .side .chats-new { padding: 6px 14px 2px; color: #b78cff; cursor: pointer; }
   .side li.canvas .dot { color: #ffd36b; } .side li.canvas.here { background: rgba(183,140,255,0.22); cursor: default; }
   .side .canvas-new { padding: 6px 14px 8px; color: #b78cff; cursor: pointer; }
   .side .canvas-new input { width: 100%; box-sizing: border-box; background: rgba(0,0,0,0.3); border: 1px solid rgba(183,140,255,0.4); color: inherit; font: inherit; padding: 3px 6px; border-radius: 6px; }
   .side .agents-tree li.agent { cursor: pointer; }
-  .side .agents-head { margin-top: 10px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.08); }
   .side .agents-tree li { gap: 6px; padding: 2px 10px; cursor: default; }
   .side .agents-tree li.kernel { color: rgba(220,230,245,0.55); padding: 6px 10px 2px; }
   .side .agents-tree li .tw { width: 10px; cursor: pointer; color: rgba(220,230,245,0.5); }

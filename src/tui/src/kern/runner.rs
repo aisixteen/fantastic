@@ -408,9 +408,28 @@ impl Runner {
 pub fn spawn_row_tail(host: Arc<Host>, tx: mpsc::Sender<Ev>, after: i64) {
     tokio::spawn(async move {
         let mut tail = host.kernel.rows.subscribe(after);
+        // THIS shell's own reads write rows too (a call row, then its settle):
+        // they never move anything a view shows, and following them would loop
+        let mut own: std::collections::VecDeque<i64> = std::collections::VecDeque::new();
         while let Some(id) = tail.recv().await {
             let Some(row) = host.kernel.rows.get_one(id) else { continue };
-            let key = if row.get("kind").and_then(Value::as_str) == Some("settle") { "settled" } else { "agent" };
+            let kind = row.get("kind").and_then(Value::as_str);
+            if kind == Some("call")
+                && row.get("caller").is_none_or(Value::is_null)
+                && row.get("verb").and_then(Value::as_str).is_some_and(|v| ["read", "rows", "reflect"].contains(&v))
+            {
+                if let Some(pid) = row.get("id").and_then(Value::as_i64) {
+                    own.push_back(pid);
+                    if own.len() > 512 {
+                        own.pop_front();
+                    }
+                }
+                continue;
+            }
+            if kind == Some("settle") && row.get("parent").and_then(Value::as_i64).is_some_and(|p| own.contains(&p)) {
+                continue;
+            }
+            let key = if kind == Some("settle") { "settled" } else { "agent" };
             let Some(agent) = row.get(key).and_then(Value::as_str) else { continue };
             let ev = Ev::Link(crate::ev::LinkEv::RowsMoved { agent: agent.to_string() });
             if tx.send(ev).await.is_err() {

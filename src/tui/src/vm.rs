@@ -39,10 +39,8 @@ const FRAME: Duration = Duration::from_millis(16);
 /// An animation alone (the `thinking` flash) redraws at ~30 fps — codex's
 /// status line paces itself the same way (`schedule_frame_in(32ms)`).
 const ANIM_FRAME: Duration = Duration::from_millis(32);
-/// Presence, blink, poll cadence.
+/// Presence, blink (only while a View is attached).
 const TICK: Duration = Duration::from_millis(250);
-/// The safety net under anything live.
-const RECONCILE: Duration = Duration::from_secs(60);
 
 /// Which View an intent came from: the owner's own terminal is [`LOCAL`];
 /// every thin client (`share`) gets its own id.
@@ -167,8 +165,7 @@ async fn run(
     let (tx, mut rx) = mpsc::channel::<Ev>(1024);
     let mut frame = tokio::time::interval(FRAME);
     let mut tick = tokio::time::interval(TICK);
-    let mut recon = tokio::time::interval(RECONCILE);
-    for i in [&mut frame, &mut tick, &mut recon] {
+    for i in [&mut frame, &mut tick] {
         i.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     }
     // One off-screen terminal per View, and each View's own derived state.
@@ -192,108 +189,8 @@ async fn run(
         .expect("SIGINT handler");
 
     loop {
-        tokio::select! {
-            biased;
-
-            _ = term_sig.recv() => app.quit = true,
-            _ = int_sig.recv() => app.quit = true,
-
-            _ = frame.tick() => {
-                let anim_due = app.animating() && last_drawn.elapsed() >= ANIM_FRAME;
-                if !sizes.is_empty() && (app.dirty || anim_due) {
-                    last_drawn = std::time::Instant::now();
-                    terms.retain(|v, _| sizes.contains_key(v));
-                    slots.retain(|v, _| sizes.contains_key(v));
-                    // the authoritative View LAST, so what a key acts on between
-                    // passes is the latest View's
-                    let mut order: Vec<ViewId> = sizes.keys().copied().filter(|v| Some(*v) != latest).collect();
-                    order.extend(latest.filter(|v| sizes.contains_key(v)));
-                    let mut by_view = std::collections::BTreeMap::new();
-                    for view in order {
-                        let (w, h) = sizes[&view];
-                        let t = terms
-                            .entry(view)
-                            .or_insert_with(|| Terminal::new(TestBackend::new(w, h)).expect("off-screen terminal"));
-                        if t.size().map(|s| (s.width, s.height)).ok() != Some((w, h)) {
-                            t.backend_mut().resize(w, h);
-                            let _ = t.clear();
-                        }
-                        app.enter(slots.remove(&view).unwrap_or_default());
-                        crate::ui::layout(&mut app, ratatui::layout::Rect::new(0, 0, w, h), latest == Some(view));
-                        let buf = t
-                            .draw(|f| crate::ui::draw(f, &app))
-                            .expect("the off-screen backend cannot fail")
-                            .buffer
-                            .clone();
-                        slots.insert(view, app.leave());
-                        let b = t.backend();
-                        let cursor = b.cursor_visible().then(|| {
-                            let p = b.cursor_position();
-                            (p.x, p.y)
-                        });
-                        by_view.insert(view, Arc::new(Frame { buf, cursor, mouse: app.mouse }));
-                    }
-                    frames.send_replace(Some(Arc::new(Frames { by_view })));
-                    app.dirty = false;
-                    dispatch(&mut app, &cmds);
-                }
-            }
-
-            maybe = input.recv() => match maybe {
-                Some(VmIn::Event(view, e)) => {
-                    if !matches!(e, crossterm::event::Event::FocusLost | crossterm::event::Event::FocusGained) && latest != Some(view) {
-                        latest = Some(view);
-                        app.dirty = true;
-                    }
-                    // a key acts on what THIS View shows: its own derived state
-                    // and layout first, kept again after
-                    app.enter(slots.remove(&view).unwrap_or_default());
-                    if let Some(&(w, h)) = sizes.get(&view) {
-                        crate::ui::layout(&mut app, ratatui::layout::Rect::new(0, 0, w, h), latest == Some(view));
-                    }
-                    app.remote = view != LOCAL;
-                    app.apply(Ev::Term(e));
-                    app.remote = false;
-                    slots.insert(view, app.leave());
-                    if std::mem::take(&mut app.detach) {
-                        if let Some(s) = &share {
-                            s.detach(view, "detached; the kernel keeps running");
-                        }
-                    }
-                    dispatch(&mut app, &cmds);
-                }
-                Some(VmIn::Resize(view, w, h)) => {
-                    sizes.insert(view, (w, h));
-                    latest = Some(view);
-                    app.dirty = true;
-                }
-                Some(VmIn::Gone(view)) => {
-                    sizes.remove(&view);
-                    if latest == Some(view) {
-                        latest = sizes.contains_key(&LOCAL).then_some(LOCAL);
-                    }
-                    app.dirty = true;
-                }
-                None => break,
-            },
-
-            Some(ev) = rx.recv() => {
-                app.apply(ev);
-                while let Ok(more) = rx.try_recv() {
-                    app.apply(more);
-                }
-                dispatch(&mut app, &cmds);
-            }
-
-            _ = tick.tick() => {
-                app.on_tick();
-                dispatch(&mut app, &cmds);
-            }
-
-            _ = recon.tick() => app.apply(Ev::Recon),
-        }
-
-        // BOOT, once, as soon as the directory is seeded (see `run.rs` history:
+        // BOOT, once, as soon as the directory is seeded — BEFORE the wait: with
+        // nothing attached (headless) no branch fires, so it must not wait for one (see `run.rs` history:
         // the order is the kernel daemon's own).
         if host.is_none() && !booting {
             booting = true;
@@ -398,6 +295,112 @@ async fn run(
                     app.quit = true;
                 }
             }
+        }
+
+        tokio::select! {
+            biased;
+
+            _ = term_sig.recv() => app.quit = true,
+            _ = int_sig.recv() => app.quit = true,
+
+            // NO IDLE WAKEUPS (owner 2026-10-08): a frame only while a View is
+            // attached and something is dirty or animating; the tick (the caret,
+            // presence) only while a View is attached. Headless, nothing ticks.
+            _ = frame.tick(), if !sizes.is_empty() && (app.dirty || app.animating()) => {
+                let anim_due = app.animating() && last_drawn.elapsed() >= ANIM_FRAME;
+                if !sizes.is_empty() && (app.dirty || anim_due) {
+                    last_drawn = std::time::Instant::now();
+                    terms.retain(|v, _| sizes.contains_key(v));
+                    slots.retain(|v, _| sizes.contains_key(v));
+                    // the authoritative View LAST, so what a key acts on between
+                    // passes is the latest View's
+                    let mut order: Vec<ViewId> = sizes.keys().copied().filter(|v| Some(*v) != latest).collect();
+                    order.extend(latest.filter(|v| sizes.contains_key(v)));
+                    let mut by_view = std::collections::BTreeMap::new();
+                    for view in order {
+                        let (w, h) = sizes[&view];
+                        let t = terms
+                            .entry(view)
+                            .or_insert_with(|| Terminal::new(TestBackend::new(w, h)).expect("off-screen terminal"));
+                        if t.size().map(|s| (s.width, s.height)).ok() != Some((w, h)) {
+                            t.backend_mut().resize(w, h);
+                            let _ = t.clear();
+                        }
+                        app.enter(slots.remove(&view).unwrap_or_default());
+                        crate::ui::layout(&mut app, ratatui::layout::Rect::new(0, 0, w, h), latest == Some(view));
+                        let buf = t
+                            .draw(|f| crate::ui::draw(f, &app))
+                            .expect("the off-screen backend cannot fail")
+                            .buffer
+                            .clone();
+                        slots.insert(view, app.leave());
+                        let b = t.backend();
+                        let cursor = b.cursor_visible().then(|| {
+                            let p = b.cursor_position();
+                            (p.x, p.y)
+                        });
+                        by_view.insert(view, Arc::new(Frame { buf, cursor, mouse: app.mouse }));
+                    }
+                    frames.send_replace(Some(Arc::new(Frames { by_view })));
+                    app.dirty = false;
+                    dispatch(&mut app, &cmds);
+                }
+            }
+
+            maybe = input.recv() => match maybe {
+                Some(VmIn::Event(view, e)) => {
+                    if !matches!(e, crossterm::event::Event::FocusLost | crossterm::event::Event::FocusGained) && latest != Some(view) {
+                        latest = Some(view);
+                        app.dirty = true;
+                    }
+                    // a key acts on what THIS View shows: its own derived state
+                    // and layout first, kept again after
+                    app.enter(slots.remove(&view).unwrap_or_default());
+                    if let Some(&(w, h)) = sizes.get(&view) {
+                        crate::ui::layout(&mut app, ratatui::layout::Rect::new(0, 0, w, h), latest == Some(view));
+                    }
+                    app.remote = view != LOCAL;
+                    app.apply(Ev::Term(e));
+                    app.pump();
+                    app.remote = false;
+                    slots.insert(view, app.leave());
+                    if std::mem::take(&mut app.detach) {
+                        if let Some(s) = &share {
+                            s.detach(view, "detached; the kernel keeps running");
+                        }
+                    }
+                    dispatch(&mut app, &cmds);
+                }
+                Some(VmIn::Resize(view, w, h)) => {
+                    sizes.insert(view, (w, h));
+                    latest = Some(view);
+                    app.dirty = true;
+                }
+                Some(VmIn::Gone(view)) => {
+                    sizes.remove(&view);
+                    if latest == Some(view) {
+                        latest = sizes.contains_key(&LOCAL).then_some(LOCAL);
+                    }
+                    app.dirty = true;
+                }
+                None => break,
+            },
+
+            Some(ev) = rx.recv() => {
+                app.apply(ev);
+                while let Ok(more) = rx.try_recv() {
+                    app.apply(more);
+                }
+                // what those events made due is read now
+                app.pump();
+                dispatch(&mut app, &cmds);
+            }
+
+            _ = tick.tick(), if !sizes.is_empty() => {
+                app.on_tick();
+                dispatch(&mut app, &cmds);
+            }
+
         }
 
         if app.quit {

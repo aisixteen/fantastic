@@ -95,6 +95,10 @@ pub async fn ensure_canvas(h: &Host, node: &str, loader: &str, root: &str, main:
         create(h, json!({"parent_id": node, "id": loader, "handler_module": fantastic_core::HANDLER_MODULE,
             "root": root, "watch": false})).await?;
     }
+    // its page bundles' folder exists, so the page can WATCH it (`bundle_watch`)
+    if let Err(e) = std::fs::create_dir_all(format!("{root}/bundles")) {
+        return Err(format!("{root}/bundles: {e}"));
+    }
     // `user` reads and writes the page records (every tab's call is `user`'s)
     let user = crate::env::HUMAN;
     merge_verbs(h, user, "can_call", loader, json!(["*"])).await?;

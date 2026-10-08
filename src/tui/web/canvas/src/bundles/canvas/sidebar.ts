@@ -2,26 +2,19 @@
 // double-click, moved, resized, closed; as many as you like. Nothing on the
 // canvas floats: a canvas opens as its background alone.
 //
-//   chats   kept dialogs (● — SQLite, the number of cells showing each) and the
-//           page's ephemeral cells (○ — RAM); `+ new chat here`.
-//   agents  a TREE per kernel the page sees: the host kernel (this canvas's
-//           agents) and the page's own kernel (the canvas and its views).
+// It is JUST THE TREE: one per kernel the page sees — the host kernel (this
+// canvas's agents) and the page's own kernel (the canvas and its views).
 //
 // A click on a PAGE agent VIEWS it (`viewer.ts`: a view → that view, any
 // other → it full); ⌘-click (Ctrl-click off macOS) FOCUSES it instead — its
 // view viewed, the cell centred and flashed. A host agent a cell shows: click
-// views that cell, ⌘-click moves to it (again → the next such cell). A kept
-// chat with no cell open, or ⌥-click on it, opens it in a new cell. An agent
+// views that cell, ⌘-click moves to it (again → the next such cell). An agent
 // no cell shows OPENS in a new cell: an AI as a chat, anything else as its
 // reflect card.
 
 import { isFocusClick } from "./viewer.ts";
 
 type Rec = Record<string, unknown>;
-export interface Dialog {
-  id: string;
-  name: string;
-}
 export interface TreeNode {
   id: string;
   handler: string;
@@ -31,10 +24,6 @@ export interface TreeNode {
 
 export interface SidebarDeps {
   mount: HTMLElement;
-  /** kept dialogs, from the host's `backend` */
-  dialogs(): Promise<Dialog[]>;
-  /** the page's AI cell records */
-  aiCells(): Rec[];
   /** every host agent (records with `parent_id`), paged to the end */
   hostAgents(): Promise<Rec[]>;
   /** the page kernel's tree, rooted at the canvas */
@@ -54,8 +43,6 @@ export interface SidebarDeps {
   fresh(id: string): boolean;
   /** delete host agent `id` (its own act: ✕ on a cell only closes the view) */
   deleteAgent(id: string): void;
-  reopen(d: Dialog): void;
-  newChat(): void;
 }
 
 const str = (r: Rec, k: string): string | undefined => (typeof r[k] === "string" ? (r[k] as string) : undefined);
@@ -100,14 +87,10 @@ export function glyph(n: TreeNode): string {
 export function createSidebar(d: SidebarDeps): { render(): Promise<void>; el: HTMLElement } {
   const el = document.createElement("div");
   el.className = "side";
-  el.innerHTML =
-    `<div class="chats-head"><span>chats</span></div>` +
-    `<ul class="chats-list"></ul><div class="chats-new">+ new chat here</div>` +
-    `<div class="chats-head agents-head"><span>agents</span></div><ul class="agents-tree"></ul>`;
+  // just the tree (owner 2026-10-08: no chats list, no headings)
+  el.innerHTML = `<ul class="agents-tree"></ul>`;
   d.mount.appendChild(el);
-  const chatsList = el.querySelector(".chats-list") as HTMLElement;
   const tree = el.querySelector(".agents-tree") as HTMLElement;
-  (el.querySelector(".chats-new") as HTMLElement).addEventListener("click", () => d.newChat());
 
   // several cells on one thing: each click moves to the next one
   const cycle = new Map<string, number>();
@@ -118,40 +101,6 @@ export function createSidebar(d: SidebarDeps): { render(): Promise<void>; el: HT
   };
   // the user's own expand / collapse choices; unset = open to depth 1
   const open = new Map<string, boolean>();
-
-  const row = (cls: string, dot: string, name: string, count: string, title: string): HTMLLIElement => {
-    const li = document.createElement("li");
-    li.className = cls;
-    li.innerHTML = `<span class="dot"></span><span class="nm"></span><span class="ct"></span>`;
-    (li.children[0] as HTMLElement).textContent = dot;
-    (li.children[1] as HTMLElement).textContent = name;
-    (li.children[2] as HTMLElement).textContent = count;
-    li.title = title;
-    return li;
-  };
-
-  const renderChats = async (): Promise<void> => {
-    const kept = await d.dialogs().catch(() => [] as Dialog[]);
-    const cells = d.aiCells();
-    const items: HTMLElement[] = [];
-    for (const k of kept) {
-      const n = cells.filter((c) => c["backend_id"] === k.id).length;
-      const li = row("kept", "●", k.name, n > 0 ? String(n) : "", n > 0 ? "move to it · ⌥-click: open another cell" : "open in a new cell");
-      li.dataset["backend"] = k.id;
-      li.addEventListener("click", (e) => {
-        const showing = d.aiCells().filter((c) => c["backend_id"] === k.id).map((c) => String(c["id"]));
-        if (showing.length > 0 && !e.altKey) moveNext(k.id, showing);
-        else d.reopen(k);
-      });
-      items.push(li);
-    }
-    for (const c of cells.filter((c) => c["kept"] !== true && typeof c["backend_id"] === "string")) {
-      const li = row("eph", "○", String(c["backend_id"]), "1", "move to it");
-      li.addEventListener("click", () => d.moveTo(String(c["id"])));
-      items.push(li);
-    }
-    chatsList.replaceChildren(...items);
-  };
 
   const node = (n: TreeNode, depth: number, out: HTMLElement[]): void => {
     const cells = d.cellsFor(n.id);
@@ -224,7 +173,7 @@ export function createSidebar(d: SidebarDeps): { render(): Promise<void>; el: HT
 
   return {
     async render(): Promise<void> {
-      await Promise.all([renderChats(), renderTree()]);
+      await renderTree();
     },
     el,
   };

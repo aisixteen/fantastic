@@ -33,9 +33,12 @@ def main() -> bool:
 
     async def second():
         async with rig.page() as pg:
-            await open_sidebar(pg, 900, 150)
-            await pg.until("document.querySelectorAll('.side li.kept').length > 0", 20)
-            await pg.js("document.querySelector('.side li.kept').click()")
+            # the kept dialog is a tile in the double-click (`host · chats`)
+            for c in (1, 2):
+                await pg.mouse("mousePressed", 900, 150, c)
+                await pg.mouse("mouseReleased", 900, 150, c)
+            await pg.until("document.querySelectorAll('.action-popup .tile[data-kind=chat]').length > 0", 20)
+            await pg.js("document.querySelector('.action-popup .tile[data-kind=chat]').dispatchEvent(new MouseEvent('mousedown',{bubbles:true}))")
             await pg.until("!!document.querySelector('.chat-view')", 20)
             await asyncio.sleep(2)
             await say(pg, "What is my build code?")

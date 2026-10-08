@@ -12,9 +12,8 @@ fn main() {
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets it"));
     let app = manifest.join("../../web/canvas").canonicalize().expect("the canvas app is in the tree");
     let lib = manifest.join("../../../lib/ts").canonicalize().expect("the ts library is in the tree");
-    let demo = manifest.join("../../demo/web").canonicalize().expect("the demo is in the tree");
-    // Rebuild when the app, the library or the demo (packed into the page) changes.
-    for dir in [app.join("src"), app.join("scripts"), lib.join("src"), lib.join("scripts"), demo.join("src"), demo.join("scripts")] {
+    // Rebuild when the app or the library changes.
+    for dir in [app.join("src"), app.join("scripts"), lib.join("src"), lib.join("scripts")] {
         println!("cargo:rerun-if-changed={}", dir.display());
     }
     println!("cargo:rerun-if-changed={}", app.join("readme.md").display());

@@ -10,7 +10,7 @@
 //! away and back.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use serde_json::Value;
 
@@ -45,13 +45,9 @@ pub enum Link {
     Up,
 }
 
-// ── poll cadence ─────────────────────────────────────────────────────────────
-/// While an agent has live work, or is stale.
-const HOT: Duration = Duration::from_millis(700);
-/// Otherwise.
-const WARM: Duration = Duration::from_millis(3_000);
-/// The tree and the record set change rarely; an event forces them sooner.
-const COLD: Duration = Duration::from_secs(30);
+/// The verbs THIS shell's own reads send (as operator): their traffic never
+/// re-arms a read — a read publishes, and re-reading on it would loop.
+const OWN_READS: [&str; 3] = ["read", "rows", "reflect"];
 
 pub struct App {
     pub cfg: ClientCfg,
@@ -109,7 +105,7 @@ pub struct App {
     pub notes: Vec<String>,
     pub help: bool,
     pub dirty: bool,
-    /// Set by the 60 s reconcile: the next read of every hot agent is a full one.
+    /// Set by `R` (the human asks): the next read of every hot agent is a full one.
     pub stale: bool,
     pub quit: bool,
     /// The event being applied came from a THIN CLIENT's View (`share`): a quit
@@ -583,11 +579,6 @@ impl App {
     pub fn apply(&mut self, ev: Ev) {
         match ev {
             Ev::Term(e) => crate::keys::handle(self, e),
-            Ev::Recon => {
-                // Not a re-read here: it marks every cursor stale, and the next
-                // cadence pass reads whole. One place decides what to fetch.
-                self.stale = true;
-            }
             Ev::Link(l) => self.on_link(l),
             Ev::Got(g) => self.on_got(g),
             Ev::Note(n) => self.note(n),
@@ -597,6 +588,12 @@ impl App {
     fn on_link(&mut self, l: LinkEv) {
         match l {
             LinkEv::State(e) => {
+                // THIS shell's own reads publish too: never let them re-arm a read
+                // (the loop that kept an idle canvas reading ~3×/s, measured)
+                if e.sender.is_none() && e.verb.as_deref().is_some_and(|v| OWN_READS.contains(&v)) {
+                    return;
+                }
+                self.last_ps = None;
                 // The kernel publishes one event per dispatch. Both ends moved, so
                 // both ends' rows are stale — and a create/delete verb means the
                 // tree itself changed.
@@ -619,6 +616,7 @@ impl App {
             // cadence pass re-read that agent immediately.
             LinkEv::RowsMoved { agent } => {
                 self.last_rows.remove(&agent);
+                self.last_ps = None;
             }
             LinkEv::AgentEvent { agent, payload } => {
                 // STREAMING IS FOR THE HUMAN (owner, 2026-10-04): an AI's parts are
@@ -866,6 +864,13 @@ impl App {
         }
         let now = Instant::now();
         let mut cmds = Vec::new();
+        // `R`: everything is read again, whole
+        let full = std::mem::take(&mut self.stale);
+        if full {
+            self.last_rows.clear();
+            self.last_ps = None;
+            self.last_tree = None;
+        }
 
         let mut hot: Vec<AgentId> = Vec::new();
         if !self.root_id.is_empty() {
@@ -888,7 +893,6 @@ impl App {
         hot.sort();
         hot.dedup();
 
-        let busy = self.tasks.iter().any(crate::presence::is_work);
         for a in hot {
             // A panel that keeps no conversation is not polled for rows. A terminal
             // and a file surface are streams and listings, not logs.
@@ -896,18 +900,15 @@ impl App {
             if !wants_rows && Some(&a) != self.selected() && self.selected().map(String::as_str) != Some(ACTIVITY_ID) {
                 continue;
             }
-            let has_work = self
-                .tasks
-                .iter()
-                .any(|t| t.agent == a && crate::presence::is_work(t));
-            let every = if has_work || self.stale { HOT } else { WARM };
-            let last = self.last_rows.get(&a).copied();
-            if !self.rows_inflight.contains(&a) && last.map(|t| now.duration_since(t) >= every).unwrap_or(true) {
+            // EVENT-DRIVEN (owner 2026-10-08: no idle loops): an agent's rows are
+            // read when its stamp is gone — never read yet, or an event said they
+            // moved (`on_link`) — never on elapsed time
+            if !self.rows_inflight.contains(&a) && !self.last_rows.contains_key(&a) {
                 self.rows_inflight.insert(a.clone());
                 cmds.push(Cmd::Rows {
                     agent: a.clone(),
-                    full: self.stale,
-                    after: if self.stale { None } else { self.row_cursor.get(&a).copied() },
+                    full,
+                    after: if full { None } else { self.row_cursor.get(&a).copied() },
                 });
                 // Reserve the slot so a slow page does not queue a second read.
                 self.last_rows.insert(a.clone(), now);
@@ -918,20 +919,12 @@ impl App {
             }
         }
 
-        let ps_every = if busy { HOT } else { WARM };
-        if self
-            .last_ps
-            .map(|t| now.duration_since(t) >= ps_every)
-            .unwrap_or(true)
-        {
+        // the tasks and the tree, likewise: read when an event cleared them
+        if self.last_ps.is_none() {
             self.last_ps = Some(now);
             cmds.push(Cmd::Ps);
         }
-        if self
-            .last_tree
-            .map(|t| now.duration_since(t) >= COLD)
-            .unwrap_or(true)
-        {
+        if self.last_tree.is_none() {
             self.last_tree = Some(now);
             cmds.push(Cmd::Tree);
             cmds.push(Cmd::Agents);
@@ -950,8 +943,13 @@ impl App {
             }
         }
 
-        self.stale = false;
         cmds
+    }
+
+    /// Queue what the last events made due (`due`).
+    pub fn pump(&mut self) {
+        let due = self.due();
+        self.out.extend(due);
     }
 
     /// Send whatever is in the composer. The rule for `re` is the async law made

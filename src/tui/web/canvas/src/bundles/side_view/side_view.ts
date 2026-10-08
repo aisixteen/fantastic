@@ -6,7 +6,7 @@ import type { SidebarDeps } from "../canvas/sidebar.ts";
 // floats — a canvas opens as its background alone, and these are placed from
 // the double-click like any cell (moved, resized, closed; as many as you like).
 //
-//   sidebar_view.ts   the chats + the agent tree (`sidebar.ts`)
+//   sidebar_view.ts   the agent tree (`sidebar.ts`)
 //   canvases_view.ts  every canvas on the host — flat peers; a click opens one,
 //                     `+ new canvas` makes a peer (a list, for now)
 //

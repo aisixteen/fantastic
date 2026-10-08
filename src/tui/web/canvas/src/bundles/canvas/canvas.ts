@@ -1,5 +1,4 @@
 import { documentPage } from "../verb_docs.ts";
-import { demoHtml } from "../../demo_page.ts";
 import { Agent, Host } from "../../lib.ts";
 import type { Json, Kernel, Payload } from "../../lib.ts";
 import { CANVAS_CSS } from "./styles.ts";
@@ -23,7 +22,7 @@ const CELL_VERBS = ["reflect", "get_html", "set_html", "emit"] as const;
 const BG_VERBS = ["set_bg", "clear_bg", "get_bg", "reflect"] as const;
 import { MCP_ADD_VIEW, mcpAddView, mcpView, setMcpDeps } from "../mcp_view/mcp_view.ts";
 import { CANVASES_VIEW, SIDEBAR_VIEW, canvasesView, renderSidebars, setSideDeps, sidebarView } from "../side_view/side_view.ts";
-import type { Dialog, TreeNode } from "./sidebar.ts";
+import type { TreeNode } from "./sidebar.ts";
 import type { Pick, Presets } from "./action_popup.ts";
 import { htmlView } from "../html_agent/html_view.ts";
 import { agentViewBundle } from "../agent_view/agent_view.ts";
@@ -1119,11 +1118,6 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   // THE SIDEBAR and CANVAS-LIST cells (`side_view.ts`) read the canvas through
   // this wiring; none is made by default — the double-click places them
   setSideDeps({
-    dialogs: async () => {
-      const r = (await host.callHost(BACKEND, { type: "dialogs" } as unknown as Payload)) as Rec | null;
-      return (r?.["dialogs"] as Dialog[] | undefined) ?? [];
-    },
-    aiCells,
     // this canvas's host agents (the registry: its subtree + the shell's own)
     hostAgents: async () => {
       await syncRegistry();
@@ -1169,8 +1163,6 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     },
     fresh: (id) => fresh.has(id),
     deleteAgent,
-    reopen: (dlg) => void reopenAt(centre(), dlg),
-    newChat: () => void spawnAiAt(centre(), null, ""),
   }, {
     canvases: opts.canvases,
     here: BACKEND,
@@ -1238,23 +1230,6 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     );
   };
 
-  // THE DEMO (`src/tui/demo/web`): an html cell holding the packed demo page —
-  // its own document in the panel's frame, so its hash and keys stay its own.
-  const spawnDemoAt = (w: { x: number; y: number }): void => {
-    const page = demoHtml();
-    if (page === null) {
-      console.error("canvas: this build carries no demo page (the bundle sets it; scripts/pack.sh packs it)");
-      return;
-    }
-    kernel.register(
-      new Agent({
-        id: `demo_${crypto.randomUUID().slice(0, 8)}`,
-        parentId: containerNow(),
-        handlerModule: "html_agent.ts",
-        meta: { x: Math.round(w.x), y: Math.round(w.y), width: 900, height: 560, display_name: "demo", html: page },
-      }),
-    );
-  };
 
   // THE ACTION POPUP: a double click on empty canvas, or ⌘K / Ctrl-K at the pointer.
   let pointer = { x: window.innerWidth / 2, y: window.innerHeight / 2 };
@@ -1275,7 +1250,6 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
         else if (p.kind === "setup") openSetupAt(w);
         else if (p.kind === "stream") spawnStreamAt(w);
         else if (p.kind === "chat") void reopenAt(w, { id: p.id, name: p.name });
-        else if (p.kind === "demo") spawnDemoAt(w);
         // a CODING AGENT: the human's own program, started in a terminal cell
         // (its exec agent runs EXACTLY that program, as `run COMMAND` does)
         else if (p.kind === "coding") void spawnPairAt(DEFAULT_VIEW, w, { width: 760, height: 480 }, { command: [p.path], display_name: p.name }, { allowed: [exactLine([p.path])] });
@@ -1310,6 +1284,16 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   canvas.addEventListener("dblclick", (e) => {
     if ((e.target as Element).closest(".agent-frame")) return;
     openSelector(e.clientX, e.clientY);
+  });
+  // ESC LEAVES FULL VIEW (owner 2026-10-08: nothing floats, so this is the way
+  // back): to the canvas's root view — unless the keyboard is in an editor (a
+  // terminal, a text field), whose Esc is its own
+  window.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape" || !fullNow() || document.querySelector(".action-popup")) return;
+    const t = document.activeElement as HTMLElement | null;
+    if (t && (t.isContentEditable || t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.closest(".xterm"))) return;
+    e.preventDefault();
+    setViewed(ROOT_VIEW);
   });
   window.addEventListener("keydown", (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
