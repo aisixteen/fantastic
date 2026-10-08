@@ -49,6 +49,7 @@ from io_bridge import (
     _BridgeState,
     decode_frame,
     encode_frame,
+    sendable,
 )
 
 SUBPROTOCOL = "fantastic.relay.v1"
@@ -323,7 +324,9 @@ class RelayTransport(_BaseTransport):
         ws = self._ws
         if ws is None:
             raise ConnectionClosed("relay_connector: not connected")
-        envelope = {"type": "send", "target": self._partner, "payload": frame}
+        # the BRIDGE frame is what the partner reads: a reply it cannot carry goes
+        # as the refusal (`sendable`), inside the relay's own envelope
+        envelope = {"type": "send", "target": self._partner, "payload": sendable(frame)}
         wire, is_binary = encode_frame(envelope)
         try:
             await ws.send(wire if is_binary else wire.decode("utf-8"))

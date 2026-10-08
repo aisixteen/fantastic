@@ -21,6 +21,7 @@
 // uses TextEncoder/DataView — platform globals, not view concerns.
 
 import { pyDumps, pyRepr, pyReprAt, strictLoads, wireFloat } from "../kernel/pyjson.ts";
+import { TRANSPORT_ERROR, refusal } from "../kernel/refusal.ts";
 
 /** An on-wire envelope. May carry one binary blob (ArrayBuffer/typed-array). */
 export type Envelope = { [key: string]: unknown };
@@ -127,11 +128,66 @@ function asArrayBuffer(v: unknown): ArrayBuffer {
   throw new Error("asArrayBuffer: not binary");
 }
 
+/** An envelope the wire cannot carry — named, never sent corrupted (python
+ *  `io_bridge.FrameError`). */
+export class FrameError extends Error {}
+
+/** Every binary value's path in `obj`, depth-first (python `bytes_paths`). */
+export function binaryPaths(obj: unknown, prefix: BinaryPathStep[] = []): BinaryPathStep[][] {
+  if (isBinary(obj)) return [prefix];
+  const out: BinaryPathStep[][] = [];
+  if (Array.isArray(obj)) {
+    obj.forEach((v, i) => out.push(...binaryPaths(v, [...prefix, i])));
+  } else if (obj !== null && typeof obj === "object") {
+    for (const k of Object.keys(obj as object)) {
+      out.push(...binaryPaths((obj as Record<string, unknown>)[k], [...prefix, k]));
+    }
+  }
+  return out;
+}
+
+/** ONE binary body per frame: an envelope holding more is refused, naming each
+ *  path — it used to go out with the second value written as `{}`. */
+function oneBody(envelope: Envelope): void {
+  const paths = binaryPaths(envelope);
+  if (paths.length > 1) {
+    throw new FrameError(
+      `a frame carries ONE binary body — this one holds ${paths.length}, at ` +
+        paths.map((p) => pyDumps(p)).join(", "),
+    );
+  }
+}
+
+/** The keys that route a frame — kept on what a sender sends instead. */
+const ROUTING = ["type", "op", "id", "rid", "src", "target"] as const;
+
+/** What a sender may put on the wire for `envelope` (python `sendable`): itself
+ *  when it holds at most one binary value; for a REPLY (`data`) or an EVENT
+ *  (`payload` of an `event`) that holds more, its routing keys and a
+ *  `transport_error` refusal where its body was. Anything else that holds more (a
+ *  call this kernel originates) throws `FrameError` — refused where it starts. */
+export function sendable(envelope: Envelope): Envelope {
+  try {
+    oneBody(envelope);
+    return envelope;
+  } catch (e) {
+    if (!(e instanceof FrameError)) throw e;
+    const out: Envelope = {};
+    for (const k of ROUTING) if (k in envelope) out[k] = envelope[k];
+    const body = refusal(TRANSPORT_ERROR, e.message);
+    if ("data" in envelope) out["data"] = body;
+    else if (envelope["type"] === "event" || envelope["op"] === "event") out["payload"] = body;
+    else throw e;
+    return out;
+  }
+}
+
 export function encodeFrame(envelope: Envelope): EncodedFrame {
   const found = findBinaryPath(envelope);
   if (found === null) {
     return { data: pyDumps(envelope), binary: false };
   }
+  oneBody(envelope);
   const [path, value] = found;
   const body = asArrayBuffer(value);
   const head = deepClone(envelope) as Record<string, unknown>;

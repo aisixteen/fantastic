@@ -59,10 +59,13 @@ from io_bridge._inbound import (
 from io_bridge._transport import ConnectionClosed, MemoryTransport, _BaseTransport
 from io_bridge._codec import (
     MAX_FRAME,
+    FrameError,
+    bytes_paths,
     decode_frame,
     encode_frame,
     find_bytes_path,
     loads,
+    sendable,
     set_path,
 )
 
@@ -119,6 +122,9 @@ __all__ = [
     # binary-safe frame codec (shared by every transport)
     "MAX_FRAME",
     "encode_frame",
+    "FrameError",
+    "bytes_paths",
+    "sendable",
     "decode_frame",
     "find_bytes_path",
     "set_path",

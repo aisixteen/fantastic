@@ -56,7 +56,7 @@ import time
 
 from exec_bridge import proc
 from file_bridge import fs
-from io_bridge import decode_frame, describe as _describe, encode_frame
+from io_bridge import decode_frame, describe as _describe, encode_frame, sendable
 from io_bridge import gate_inbound, resolve_ingress, unknown_ingress_refusal
 from io_bridge import loads as strict_loads
 from io_bridge._base import parse_spec
@@ -278,7 +278,7 @@ async def _serve_ctrl(parent_sock, owner_id, job_id, kernel, *, ops=None, on_pus
         # binary frame (a reply carrying a `read_stream` chunk, a watched event with
         # bytes). Raw bytes ride the fd raw, never base64 — the same codec every
         # other transport uses.
-        wire, binary = encode_frame(obj)
+        wire, binary = encode_frame(sendable(obj))
         data = (b"B" if binary else b"T") + wire
         writer.write(struct.pack(">I", len(data)) + data)
 

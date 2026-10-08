@@ -52,6 +52,7 @@ from kernel._refusal import TRANSPORT_ERROR, UNKNOWN_AGENT, bad, refusal
 from io_bridge import (
     decode_frame,
     encode_frame,
+    sendable,
     gate_inbound,
     hand_in,
     resolve_ingress,
@@ -132,7 +133,7 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
                 if src is None
                 else {"type": "event", "src": src, "payload": payload}
             )
-            frame, is_bin = encode_frame(envelope)
+            frame, is_bin = encode_frame(sendable(envelope))
             try:
                 if is_bin:
                     await ws.send_bytes(frame)
@@ -165,7 +166,7 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
         #      and propagates.
         if ws.application_state != WebSocketState.CONNECTED:
             return
-        frame, is_bin = encode_frame(envelope)
+        frame, is_bin = encode_frame(sendable(envelope))
         try:
             if is_bin:
                 await ws.send_bytes(frame)

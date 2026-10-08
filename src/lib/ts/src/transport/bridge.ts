@@ -1,7 +1,7 @@
 import type { Bridge, Kernel } from "../kernel/kernel.ts";
 import type { Json, Payload } from "../kernel/json.ts";
 import { unknown } from "../kernel/refusal.ts";
-import { encodeFrame, decodeFrame } from "./frame.ts";
+import { encodeFrame, sendable, decodeFrame } from "./frame.ts";
 import type { Envelope } from "./frame.ts";
 
 // The WS bridge: the frontend kernel's federation transport. Speaks the EXACT
@@ -245,7 +245,8 @@ class Conn {
   private sendFrame(env: Envelope): boolean {
     if (!this.connected || this.ws === null) return false;
     try {
-      this.ws.send(encodeFrame(env).data);
+      // a reply it cannot carry goes as the refusal (`sendable`), never dropped
+      this.ws.send(encodeFrame(sendable(env)).data);
       return true;
     } catch {
       return false;
