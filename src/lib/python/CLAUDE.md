@@ -612,6 +612,14 @@ they did not register.
   one forever). Its rows stay recorded by the flush row; an id-block
   reservation minted inside it still publishes the root's `updated`, so the
   loader persists the bound.
+- **The ROW state event** (owner, 2026-10-08) — every EXECUTION row the kernel puts
+  (`rows_put`: `call`, `settle`, `task`, `ack`) is announced on the state stream as
+  `{agent_id, kind:"row", row:{id, kind, parent?, caller?, settled?}}` — content-free
+  (never a payload or an outcome), so a reader fetches rows only when told and
+  polls nothing; gated like every state event (`state_subscribe` on the root), and
+  never published from inside the kernel's own ledger flush, so an idle kernel
+  publishes nothing (`kernel/_kernel.py` `row_event`). An AI agent's DIALOG rows are
+  announced by the agent itself to its `watch`ers, not here.
 - **Iframe URLs — never hardcode a host** — agents that return a URL
   from `get_webapp` use a path-relative form (`/<agent_id>/`) so the
   iframe inherits the canvas's `host:port` automatically. Wrappers

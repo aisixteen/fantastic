@@ -32,6 +32,15 @@ const FLUSH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(150
 /// Rows per store page when the kernel reads its own key back.
 const READ_PAGE: i64 = 1000;
 
+/// What a row event carries of an EXECUTION row besides its id and kind — never a
+/// payload or an outcome: `parent` (the task, or the settled execution), `caller`
+/// (who made a call / an ack; null = the operator), `settled` (the agent a settle
+/// closes). Every [`Kernel::rows_put`] announces `{agent_id, kind: "row", row:
+/// {id, kind, …}}` on the state stream (owner, 2026-10-08), so a reader fetches rows
+/// only when told; like every state event, never from inside the kernel's own
+/// ledger flush, so an idle kernel publishes nothing. Python `row_event`.
+const ROW_EVENT_KEYS: [&str; 3] = ["parent", "caller", "settled"];
+
 #[derive(Default)]
 struct Inner {
     /// THE MEMORY STORE the kernel writes its execution rows to — the root
@@ -122,9 +131,22 @@ impl Kernel {
     /// kernel is the only allocator. Bookkeeping from above, never gated. Wakes
     /// the flusher. Returns the id.
     pub fn rows_put(&self, agent: &AgentId, row: Row) -> Result<i64, String> {
+        let mut digest = Map::new();
+        digest.insert("id".into(), Value::Null);
+        digest.insert(
+            "kind".into(),
+            row.get("kind").cloned().unwrap_or(Value::Null),
+        );
+        for k in ROW_EVENT_KEYS {
+            if let Some(v) = row.get(k) {
+                digest.insert(k.to_string(), v.clone());
+            }
+        }
         let (rid, bound) = self.rows.put(agent, row)?;
         self.persist_bound(bound);
         self.exec.wake.notify_one();
+        digest.insert("id".into(), json!(rid));
+        self.publish_state(&json!({"agent_id": agent.as_str(), "kind": "row", "row": digest}));
         Ok(rid)
     }
 

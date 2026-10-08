@@ -362,11 +362,16 @@ async fn state_events_are_python_shape() {
         .iter()
         .map(|e| e["kind"].as_str().unwrap_or(""))
         .collect();
-    // NO ROW EVENT: the kernel holds no conversation, and its execution rows are
-    // not on the state stream (an AI agent announces its own rows to watchers).
-    assert_eq!(kinds, vec!["send", "drain"], "{events:?}");
+    // THE CALL'S EXECUTION ROW first (owner, 2026-10-08: every `rows_put` is
+    // announced, content-free), then the send and its drain.
+    assert_eq!(kinds, vec!["row", "send", "drain"], "{events:?}");
+    assert_eq!(
+        events[0]["row"],
+        json!({"id": events[0]["row"]["id"], "kind": "call", "parent": null, "caller": null}),
+        "{events:?}"
+    );
 
-    let send = &events[0];
+    let send = &events[1];
     let keys: Vec<&str> = send
         .as_object()
         .expect("object")
@@ -392,7 +397,7 @@ async fn state_events_are_python_shape() {
     assert_eq!(send["payload"], json!({"type": "nope"}));
     assert!(send["ts"].is_f64());
 
-    let drain = &events[1];
+    let drain = &events[2];
     let dkeys: Vec<&str> = drain
         .as_object()
         .expect("object")

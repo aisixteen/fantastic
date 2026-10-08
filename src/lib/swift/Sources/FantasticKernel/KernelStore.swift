@@ -177,7 +177,32 @@ extension Kernel {
         }
         let wake = storeLock.withLock { _flushWake }
         wake?.yield()
+        publishState(Self.rowEvent(agent, stored))
         return rid
+    }
+
+    /// What a row event carries of an EXECUTION row besides its id and kind —
+    /// never a payload or an outcome: `parent` (the task, or the settled
+    /// execution), `caller` (who made a call / an ack; null = the operator),
+    /// `settled` (the agent a settle closes).
+    static let rowEventKeys = ["parent", "caller", "settled"]
+
+    /// The state event for an execution row just put (owner, 2026-10-08): a reader
+    /// learns "row <id> arrived for <agent>" and fetches rows only when told — no
+    /// polling. Content-free. Published like every state event (gated by
+    /// `state_subscribe` on the root) and, like them, never from inside the
+    /// kernel's own ledger flush, so an idle kernel publishes nothing. Python
+    /// `row_event`.
+    static func rowEvent(_ agent: AgentId, _ row: Row) -> JSON {
+        var digest: OrderedDictionary<String, JSON> = [
+            "id": row["id"] ?? .null, "kind": row["kind"] ?? .null,
+        ]
+        for k in rowEventKeys {
+            if let v = row[k] { digest[k] = v }
+        }
+        return .object([
+            "agent_id": .string(agent.value), "kind": .string("row"), "row": .object(digest),
+        ])
     }
 
     /// python `_json_safe` of a reply whose raw bytes ride beside it (the

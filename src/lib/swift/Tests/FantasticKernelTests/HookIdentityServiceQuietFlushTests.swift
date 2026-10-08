@@ -290,3 +290,55 @@ struct HookIdentityServiceQuietFlushTests {
         #expect(k.root?.metaValue(forKey: "next_id") == .integer(k.idReserved))
     }
 }
+
+/// The ROW STATE EVENT (owner, 2026-10-08) — the twin of python
+/// `tests/kernel/test_row_event.py`: every execution row the kernel puts is
+/// announced as `{agent_id, kind: "row", row: {id, kind, parent?, caller?,
+/// settled?}}`, content-free; nothing inside the kernel's own ledger flush is
+/// published, so an idle kernel publishes nothing.
+@Suite("the row state event")
+struct RowEventTests {
+    private func rows(_ tap: Tap) -> [JSON] { tap.seen.filter { $0["kind"] == "row" } }
+
+    @Test func aCallAnnouncesItsCallRowAndItsSettle() async throws {
+        let k = makeKernel(HookLog())
+        let tap = Tap()
+        let token = k.subscribe { e, _ in tap.hit(e) }
+        let out = await call(k, "kernel", .object(["type": .string("list_agents")]))
+        k.unsubscribe(token)
+        let pid = JSON.integer(try #require(out.pid).value)
+        let seen = rows(tap)
+        let c = try #require(
+            seen.first { $0["row"]["kind"] == "call" && $0["row"]["id"] == pid })
+        #expect(c["agent_id"] == "kernel_state", "\(c.serialize())")
+        #expect(c["row"]["caller"] == .null, "the operator's call")
+        let s = try #require(
+            seen.first { $0["row"]["kind"] == "settle" && $0["row"]["parent"] == pid })
+        #expect(s["agent_id"] == "kernel_state" && s["row"]["settled"] == "kernel_state")
+        for e in seen {
+            let keys = Set((e["row"].asObject ?? [:]).keys)
+            #expect(
+                keys.isSubset(of: ["id", "kind", "parent", "caller", "settled"]),
+                "\(e.serialize())")
+            #expect(e["ts"] != .null, "\(e.serialize())")
+        }
+    }
+
+    @Test func theFlushPublishesNothingSoIdleIsSilent() async throws {
+        let k = makeKernel(HookLog())
+        await started(k)
+        try await Task.sleep(nanoseconds: 500_000_000)  // the start's rows flushed
+        let tap = Tap()
+        let token = k.subscribe { e, _ in tap.hit(e) }
+        let rid = try k.rowsPut(AgentId("probe"), ["kind": "call", "verb": "after"])
+        for _ in 0..<100 where k.rows.contains(rid) {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        #expect(!k.rows.contains(rid), "never flushed")
+        try await Task.sleep(nanoseconds: 300_000_000)
+        k.unsubscribe(token)
+        #expect(
+            rows(tap).map { $0["row"]["id"] } == [.integer(rid)],
+            "the flush announced rows, or more came while idle")
+    }
+}
