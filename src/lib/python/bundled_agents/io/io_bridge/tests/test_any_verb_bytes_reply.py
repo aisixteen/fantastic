@@ -69,6 +69,8 @@ async def _probe(id, payload, kernel):
         return {"seq": 3, "out": {"chunk": CHUNK}}
     if verb == "listed":
         return {"events": [{"n": 0}, {"n": 1, "bytes": CHUNK}]}
+    if verb == "twice":
+        return {"a": CHUNK, "b": CHUNK}
     return {"error": f"probe: no verb {verb!r}"}
 
 
@@ -176,6 +178,20 @@ def test_e_web_ws_carries_bytes_at_any_depth(one, verb, data, path):
         head, body = _split(msg["bytes"])
         assert head == {"type": "reply", "id": "n1", "data": data, "_binary_path": path}
         assert body == CHUNK
+
+
+def test_f_a_reply_with_two_bodies_reaches_the_caller_as_the_refusal(one):
+    """A frame carries ONE binary body. A reply holding two is not sent with the
+    second stringified (the old `default=str`): the caller gets a TEXT reply whose
+    data is a `transport_error` naming both paths."""
+    with one.websocket_connect("/kernel_state/ws") as ws:
+        msg = _ws_call(ws, "t1", {"type": "twice"})
+        assert msg.get("bytes") is None, msg
+        reply = json.loads(msg["text"])
+        assert reply["type"] == "reply" and reply["id"] == "t1"
+        assert reply["data"]["reason"] == "transport_error"
+        assert '["data", "a"]' in reply["data"]["error"]
+        assert '["data", "b"]' in reply["data"]["error"]
 
 
 def test_b_web_rest_custom_verb_json_call_gets_an_octet_reply(one):

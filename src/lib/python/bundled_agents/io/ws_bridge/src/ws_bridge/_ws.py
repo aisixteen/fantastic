@@ -14,7 +14,13 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from io_bridge import ConnectionClosed, _BaseTransport, decode_frame, encode_frame
+from io_bridge import (
+    ConnectionClosed,
+    _BaseTransport,
+    decode_frame,
+    encode_frame,
+    sendable,
+)
 from io_bridge import _BridgeState
 
 logger = logging.getLogger(__name__)
@@ -48,7 +54,7 @@ class WSTransport(_BaseTransport):
         return self._ws.state in (State.CLOSING, State.CLOSED)
 
     async def send(self, frame: dict) -> None:
-        wire, is_binary = encode_frame(frame)
+        wire, is_binary = encode_frame(sendable(frame))
         try:
             # websockets sends a bytes arg as a binary frame, a str as a text frame —
             # so the text/binary distinction the codec needs survives on the wire.

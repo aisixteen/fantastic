@@ -27,8 +27,14 @@ the relay) and uses the WS frame TYPE — a text frame arrives as `str`, a binar
 frame as `bytes`; `decode_frame` dispatches on that. The relay forwards the WS
 frame kind end-to-end, so a tunneled binary chunk stays a binary frame.
 
-Only ONE bytes value per frame is supported (the stream protocol carries exactly one
-chunk per frame); the first found in a depth-first walk wins.
+ONE bytes value per frame (the stream protocol carries exactly one chunk per frame;
+rust and swift replies hold one body by type). An envelope holding MORE is refused
+by `encode_frame` (`FrameError`, naming each path) — it used to be written with the
+second value stringified (`json.dumps(default=str)` → `"b'…'"`), a corrupted value
+the receiver could not tell from data. A sender passes what it sends through
+`sendable` first: a reply or an event that cannot be carried goes out as its routing
+keys and a refusal where its body was, so the receiver learns why; a frame the
+sender originates (a call) is refused at the sender.
 """
 
 from __future__ import annotations
@@ -38,6 +44,8 @@ import json
 import math
 import struct
 from typing import Any
+
+from kernel._refusal import TRANSPORT_ERROR, refusal
 
 #: THE ONE FRAME CAP every wire leg holds: 16 MiB — a WS frame (`ws_bridge`'s
 #: `max_size`, the relay's `MAX_FRAME`, uvicorn's default `ws_max_size` under
@@ -124,6 +132,58 @@ def _kind(v: Any) -> str:
     return "string"
 
 
+class FrameError(ValueError):
+    """An envelope the wire cannot carry — named, never sent corrupted."""
+
+
+def bytes_paths(obj: Any, prefix: tuple = ()) -> list[list[str | int]]:
+    """Every bytes value's path in `obj`, depth-first (as `_binary_path` spells it)."""
+    if isinstance(obj, (bytes, bytearray)):
+        return [list(prefix)]
+    out: list[list[str | int]] = []
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            out += bytes_paths(v, (*prefix, k))
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            out += bytes_paths(v, (*prefix, i))
+    return out
+
+
+def _one_body(envelope: Any) -> None:
+    paths = bytes_paths(envelope)
+    if len(paths) > 1:
+        raise FrameError(
+            f"a frame carries ONE binary body — this one holds {len(paths)}, at "
+            + ", ".join(json.dumps(p) for p in paths)
+        )
+
+
+#: The keys that route a frame — kept on what a sender sends instead.
+_ROUTING = ("type", "op", "id", "rid", "src", "target")
+
+
+def sendable(envelope: dict) -> dict:
+    """What a sender may put on the wire for `envelope`: itself when it holds at
+    most one bytes value; for a REPLY (`data`) or an EVENT (`payload` of an
+    `event`) that holds more, its routing keys and a `transport_error` refusal
+    where its body was. Anything else that holds more (a call the sender
+    originates) raises `FrameError` — refused where it starts."""
+    try:
+        _one_body(envelope)
+        return envelope
+    except FrameError as e:
+        body = refusal(TRANSPORT_ERROR, str(e))
+        out = {k: envelope[k] for k in _ROUTING if k in envelope}
+        if "data" in envelope:
+            out["data"] = body
+        elif "event" in (envelope.get("type"), envelope.get("op")):
+            out["payload"] = body
+        else:
+            raise
+        return out
+
+
 def encode_frame(envelope: dict) -> tuple[bytes, bool]:
     """Serialize an envelope for the wire. Returns (wire_bytes, is_binary). If any
     bytes value is present, a binary frame `[4-byte BE len | header JSON | body]`;
@@ -132,6 +192,7 @@ def encode_frame(envelope: dict) -> tuple[bytes, bool]:
     found = find_bytes_path(envelope)
     if found is None:
         return json.dumps(envelope, default=str).encode("utf-8"), False
+    _one_body(envelope)
     path, body = found
     head_obj = copy.deepcopy(envelope)
     set_path(head_obj, path, None)

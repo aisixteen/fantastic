@@ -130,3 +130,51 @@ def test_a_too_deep_document_is_a_json_decode_error():
         head = deep.encode()
         with pytest.raises(ValueError, match="bad binary frame header"):
             decode_frame(struct.pack(">I", len(head)) + head + b"body")
+
+
+# ─── ONE binary body per frame (owner, 2026-10-08) ─────────────────────────
+
+
+def test_an_envelope_with_two_bodies_is_refused_naming_both_paths():
+    from io_bridge import FrameError
+
+    env = {"type": "reply", "id": "1", "data": {"a": b"x", "more": [{"b": b"y"}]}}
+    with pytest.raises(FrameError) as e:
+        encode_frame(env)
+    assert '["data", "a"]' in str(e.value) and '["data", "more", 0, "b"]' in str(
+        e.value
+    )
+    # never the old silent `default=str` rendering of the second body
+    assert "b'y'" not in str(e.value)
+
+
+def test_sendable_answers_a_reply_or_an_event_it_cannot_carry_with_the_refusal():
+    from io_bridge import sendable
+
+    one = {"type": "reply", "id": "1", "data": {"chunk": b"x"}}
+    assert sendable(one) is one, "one body: sent as it is"
+    two = {"type": "reply", "id": "7", "data": {"a": b"x", "b": b"y"}}
+    out = sendable(two)
+    assert out["type"] == "reply" and out["id"] == "7"
+    assert out["data"]["reason"] == "transport_error"
+    assert "ONE binary body" in out["data"]["error"]
+    wire, binary = encode_frame(out)
+    assert binary is False and json.loads(wire)["data"]["reason"] == "transport_error"
+    ev = sendable({"type": "event", "src": "s", "payload": {"a": b"x", "b": b"y"}})
+    assert ev["src"] == "s" and ev["payload"]["reason"] == "transport_error"
+    conn = sendable({"op": "reply", "rid": "3", "data": [b"x", b"y"]})
+    assert conn["rid"] == "3" and conn["data"]["reason"] == "transport_error"
+
+
+def test_a_call_with_two_bodies_is_refused_at_its_sender():
+    from io_bridge import FrameError, sendable
+
+    with pytest.raises(FrameError):
+        sendable(
+            {
+                "type": "call",
+                "id": "1",
+                "target": "t",
+                "payload": {"a": b"x", "b": b"y"},
+            }
+        )

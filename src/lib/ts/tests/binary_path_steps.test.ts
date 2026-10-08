@@ -265,3 +265,41 @@ test("a host call with bytes at a literal key reaches the page's agent there; th
   assert.deepEqual(plain(reply), { type: "reply", id: "h1", data: { keys: ["a", "a.b", "type"], "x.y": { bytes: RAW }, x: { y: "kept" } } });
   bridge.close();
 });
+
+// ─── ONE binary body per frame (owner, 2026-10-08) ─────────────────────────
+// Python `io_bridge` text for text: an envelope holding two binary values is
+// refused naming both paths (it went out with the second written as `{}`); a reply
+// or event a sender cannot carry goes as its routing keys and the refusal.
+
+test("an envelope with two binary bodies is refused naming both paths", async () => {
+  const { encodeFrame, FrameError } = await import("../src/transport/frame.ts");
+  const env = { type: "reply", id: "1", data: { a: new Uint8Array([1]).buffer, more: [{ b: new Uint8Array([2]).buffer }] } };
+  assert.throws(() => encodeFrame(env), (e: unknown) => {
+    assert.ok(e instanceof FrameError);
+    assert.equal(
+      (e as Error).message,
+      'a frame carries ONE binary body — this one holds 2, at ["data", "a"], ["data", "more", 0, "b"]',
+    );
+    return true;
+  });
+});
+
+test("sendable answers a reply or an event it cannot carry with the refusal; a call is refused", async () => {
+  const { encodeFrame, sendable, FrameError } = await import("../src/transport/frame.ts");
+  const one = { type: "reply", id: "1", data: { chunk: new Uint8Array([1]).buffer } };
+  assert.equal(sendable(one), one, "one body: sent as it is");
+  const out = sendable({ type: "reply", id: "7", data: { a: new Uint8Array([1]).buffer, b: new Uint8Array([2]).buffer } });
+  assert.equal(out["type"], "reply");
+  assert.equal(out["id"], "7");
+  const data = out["data"] as { reason: string; error: string };
+  assert.equal(data.reason, "transport_error");
+  assert.ok(data.error.includes("ONE binary body"));
+  assert.equal(encodeFrame(out).binary, false);
+  const ev = sendable({ type: "event", src: "s", payload: [new Uint8Array([1]).buffer, new Uint8Array([2]).buffer] });
+  assert.equal(ev["src"], "s");
+  assert.equal((ev["payload"] as { reason: string }).reason, "transport_error");
+  assert.throws(
+    () => sendable({ type: "call", id: "1", target: "t", payload: { a: new Uint8Array([1]).buffer, b: new Uint8Array([2]).buffer } }),
+    FrameError,
+  );
+});
