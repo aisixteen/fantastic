@@ -25,6 +25,7 @@ export const PAGE_VERB_DOCS: { [handlerModule: string]: { [verb: string]: string
   },
   "background.ts": {
     set_bg: "args: bytes:str (req — GL source, verbatim, non-empty). Sets the view's background scene.",
+    default_bg: "No args. Restores the bundled background scene.",
     clear_bg: "No args. Clears the background.",
     get_bg: "No args. The background's source.",
     get_gl_view: "No args. The background's GL view.",

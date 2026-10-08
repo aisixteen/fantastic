@@ -114,7 +114,7 @@ agent is gone disappears.
 
 Each view has one `background` agent with no children (`background` on the
 view, delete-locked): one GL source,
-`set_bg {source}`, `clear_bg`, `get_bg`. The source is a function body
+`set_bg {source}`, `default_bg` (the bundled scene, `default_bg.ts` — black for now), `clear_bg`, `get_bg`. The source is a function body
 `(THREE, scene, t, onFrame, cleanup)`.
 
 ## The viewer

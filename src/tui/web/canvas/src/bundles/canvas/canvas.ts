@@ -19,7 +19,7 @@ import { BACKGROUND, BACKGROUND_ID, bgCallableBy, viewToBg } from "./background_
  *  write a panel's html, emit to it. */
 const CELL_VERBS = ["reflect", "get_html", "set_html", "emit"] as const;
 /** What a cell's AI may ask the background. */
-const BG_VERBS = ["set_bg", "clear_bg", "get_bg", "reflect"] as const;
+const BG_VERBS = ["set_bg", "default_bg", "clear_bg", "get_bg", "reflect"] as const;
 import { MCP_ADD_VIEW, mcpAddView, mcpView, setMcpDeps } from "../mcp_view/mcp_view.ts";
 import { CANVASES_VIEW, SIDEBAR_VIEW, canvasesView, renderSidebars, setSideDeps, sidebarView } from "../side_view/side_view.ts";
 import type { TreeNode } from "./sidebar.ts";
