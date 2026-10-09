@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { COLS, exactLine, move, tiles } from "../src/bundles/canvas/action_popup.ts";
+import { COLS, exactLine, layout, move, tiles } from "../src/bundles/canvas/action_popup.ts";
 import type { Presets } from "../src/bundles/canvas/action_popup.ts";
 
 const P: Presets = {
@@ -12,9 +12,9 @@ const P: Presets = {
   dialogs: [{ id: "ai_1", name: "release notes" }],
 };
 
-test("empty: two groups — host (ask, terminal, agent, python agent, mcp connector), page (html, stream, sidebar, backgrounds, canvases) — then AI (★ the default), chats", () => {
+test("empty: two groups — host (ask, terminal, agent, python agent, mcp connector), page (html, stream, tree view, backgrounds, tips) — then AI (★ the default), chats", () => {
   const t = tiles("", P);
-  assert.deepEqual(t.map((x) => x.label), ["ask", "terminal", "agent", "python agent", "mcp connector", "html", "stream", "sidebar", "backgrounds", "canvases", "@gpt5 ★", "@box", "release notes"]);
+  assert.deepEqual(t.map((x) => x.label), ["ask", "terminal", "agent", "python agent", "mcp connector", "html", "stream", "tree view", "backgrounds", "tips", "@gpt5 ★", "@box", "release notes"]);
   assert.deepEqual(t.find((x) => x.label === "python agent")!.pick, { kind: "bundle", starter: "python_agent" });
   assert.deepEqual([...new Set(t.map((x) => x.section))], ["host", "page", "ai", "chats"]);
   assert.deepEqual(t.at(-1)!.pick, { kind: "chat", id: "ai_1", name: "release notes" });
@@ -23,8 +23,7 @@ test("empty: two groups — host (ask, terminal, agent, python agent, mcp connec
 test("a kind typed exactly offers only that kind", () => {
   assert.deepEqual(tiles("terminal", P).map((x) => x.pick), [{ kind: "terminal" }]);
   assert.deepEqual(tiles("agent", P).map((x) => x.pick), [{ kind: "setup" }]);
-  assert.deepEqual(tiles("sidebar", P).map((x) => x.pick), [{ kind: "sidebar" }]);
-  assert.deepEqual(tiles("canvases", P).map((x) => x.pick), [{ kind: "canvases" }]);
+  assert.deepEqual(tiles("tree view", P).map((x) => x.pick), [{ kind: "tree" }]);
 });
 
 test("free text: the first tile asks the default; the rest filter", () => {
@@ -46,12 +45,20 @@ test("no default template → the first tile opens set-up; nothing guessed", () 
 });
 
 test("grid moves: across by 1, down/up by a row, clamped", () => {
-  assert.equal(move(0, "ArrowRight", 8), 1);
-  assert.equal(move(0, "ArrowLeft", 8), 0);
-  assert.equal(move(0, "ArrowDown", 8), COLS);
-  assert.equal(move(6, "ArrowDown", 8), 7);
-  assert.equal(move(6, "ArrowUp", 8), 6 - COLS);
-  assert.equal(move(0, "ArrowDown", 0), 0);
+  // two groups: host 7 tiles (rows 0-1), page 3 tiles (row 2) — each group starts a row
+  const g = layout([7, 3], COLS);
+  assert.deepEqual(g.slice(5, 8), [{ row: 1, col: 0 }, { row: 1, col: 1 }, { row: 2, col: 0 }]);
+  assert.equal(move(0, "ArrowRight", g), 1);
+  assert.equal(move(0, "ArrowLeft", g), 0);
+  assert.equal(move(0, "ArrowDown", g), COLS); // same column, next row
+  // ↓ from row 1 col 1 lands on row 2 — the page group — col 1, not index 6 + COLS
+  assert.equal(move(6, "ArrowDown", g), 8);
+  // ↓ from row 0 col 4 into the shorter row 1: the nearest column (col 1)
+  assert.equal(move(4, "ArrowDown", g), 6);
+  // ↑ from the page group's col 2 back into host row 1: the nearest column
+  assert.equal(move(9, "ArrowUp", g), 6);
+  assert.equal(move(0, "ArrowUp", g), 0);
+  assert.equal(move(0, "ArrowDown", []), 0);
 });
 
 test("a plugin template is a HOST tile (not an AI one); picking it places its agent", () => {
@@ -79,4 +86,21 @@ test("exactLine: the exec allow-list entry for exactly one argv (shlex-joined, r
   assert.equal(exactLine(["/opt/my tools/codex", "--x"]), "'/opt/my tools/codex' --x");
   assert.ok(new RegExp(`^${exactLine(["/a/b.c"])}$`).test("/a/b.c"));
   assert.ok(!new RegExp(`^${exactLine(["/a/b.c"])}$`).test("/a/bxc"));
+});
+
+test("the project's own bundles: their own group after the coding agents, each placing one more instance", () => {
+  const t = tiles("", { ...P, bundles: [{ name: "project_dashboard", sentence: "a dashboard" }, { name: "py_61a709", sentence: "" }] });
+  const b = t.filter((x) => x.section === "bundles");
+  assert.deepEqual(b.map((x) => x.label), ["project_dashboard", "py_61a709"]);
+  assert.deepEqual(b[0]!.pick, { kind: "instance", bundle: "project_dashboard" });
+  assert.deepEqual(tiles("proj", { ...P, bundles: [{ name: "project_dashboard", sentence: "" }] }).filter((x) => x.section === "bundles").map((x) => x.label), ["project_dashboard"]);
+  // its exact name: that tile alone, so ⏎ places it
+  assert.deepEqual(tiles("project_dashboard", { ...P, bundles: [{ name: "project_dashboard", sentence: "" }] }).map((x) => x.pick), [{ kind: "instance", bundle: "project_dashboard" }]);
+});
+
+test("this canvas's page bundles (an html cell bundled): their own group, each placing one more instance", () => {
+  const t = tiles("", { ...P, pageBundles: [{ name: "card", sentence: "a card" }] });
+  const b = t.filter((x) => x.section === "page_bundles");
+  assert.deepEqual(b.map((x) => [x.label, x.pick]), [["card", { kind: "page_instance", bundle: "card" }]]);
+  assert.deepEqual(tiles("card", { ...P, pageBundles: [{ name: "card", sentence: "" }] }).map((x) => x.pick), [{ kind: "page_instance", bundle: "card" }]);
 });

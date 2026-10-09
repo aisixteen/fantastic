@@ -61,17 +61,17 @@ pub async fn refresh_views(h: &Host, name: &str, dir: &Path) -> Result<(), Strin
         .map(|a| a.key().0.clone())
         .collect();
     for id in instances {
-        // the BUNDLE's view (kind, calls) — a default the kernel applies at run
-        // time, not on the record — under the instance's own
-        let mut view = bundle_view(dir).unwrap_or_default();
-        if let Some(own) = h
+        // the instance's view, with the BUNDLE's declared fields (kind, calls,
+        // bytes_file) over it: an edit of bundle.yaml must reach every instance
+        // (an instance's own stale `calls` used to win, and a panel calling a new
+        // verb was refused)
+        let mut view = h
             .kernel
             .agents
             .get(&fantastic_kernel::AgentId::from(id.as_str()))
             .and_then(|a| a.value().record().meta.get("view").and_then(Value::as_object).cloned())
-        {
-            view.extend(own);
-        }
+            .unwrap_or_default();
+        view.extend(bundle_view(dir).unwrap_or_default());
         // the view's `{{agent}}` is the instance it shows (one bundle, many instances)
         view.insert("bytes".into(), json!(body.replace("{{agent}}", &id)));
         let r = h.operator("kernel", json!({"type": "update_agent", "id": id, "view": view})).await.result;
@@ -169,6 +169,12 @@ pub fn spawn(h: Arc<Host>, store: PathBuf) {
                     continue;
                 }
                 let file = p.get("path").and_then(Value::as_str).unwrap_or("");
+                // python's own bytecode cache, written when an instance FIRST runs
+                // its code: not an edit — taken as one, it restarted every instance
+                // right after placing (and dropped the panel's first click)
+                if Path::new(file).file_name().is_some_and(|f| f == "__pycache__") {
+                    continue;
+                }
                 let is_view = view_file(&dir).is_some_and(|v| v.file_name() == Path::new(file).file_name());
                 if is_view { views.insert(name) } else { code.insert(name) };
             }
@@ -178,7 +184,11 @@ pub fn spawn(h: Arc<Host>, store: PathBuf) {
                     tracing::warn!("bundle {name}: reload: {e}");
                 }
             }
-            for name in views.difference(&code) {
+            // every changed bundle's instances get its view again — a save that
+            // touches the code AND the panel at once (an agent rewriting the
+            // bundle) reloads the code and THEN redraws the panel; skipping the
+            // panel there left the starter's old panel calling verbs that were gone
+            for name in code.union(&views) {
                 if let Err(e) = refresh_views(&h, name, &root.join(name)).await {
                     tracing::warn!("bundle {name}: {e}");
                 }

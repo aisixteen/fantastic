@@ -359,10 +359,10 @@ async def spot(pg: Page, x: int, y: int, text: str) -> None:
 
 
 async def open_sidebar(pg: Page, x: int, y: int) -> bool:
-    """Place a SIDEBAR cell (the chats + the agent tree) at empty canvas (x, y)
-    — nothing floats: the sidebar is a cell from the double-click."""
+    """Place a TREE VIEW cell (the agent tree; a `sidebar_view.ts` cell) at empty
+    canvas (x, y) — nothing floats: it is a cell from the double-click."""
     before = await pg.js("document.querySelectorAll('.agent-frame .side .agents-tree').length")
-    await spot(pg, x, y, "sidebar")
+    await spot(pg, x, y, "tree view")
     if not await pg.until(f"document.querySelectorAll('.agent-frame .side .agents-tree').length > {before}", 10):
         return False
     # its host tree is read from the host (async): ready once a host row shows

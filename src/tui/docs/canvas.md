@@ -44,12 +44,13 @@ user
 
 Canvases are FLAT peers: each its own page kernel (own guid), own cells' host
 backends. Open one at the page URL with `?canvas=<node id>`
-(none: the main one); a `canvases` cell lists them (★ the main one).
+(none: the main one). The canvas-list cell is off the double-click menu for
+now.
 A canvas shows only its own subtree and the agents under no canvas; another
 canvas's agents never appear on it. `canvases` (any canvas node) lists them.
 NOTHING FLOATS: a canvas opens as its background alone. Everything is a cell
-placed from the double-click — among them a `sidebar` (the agent tree) and `canvases` (every canvas; a click opens one, `+ new canvas` makes a
-peer), as many as you like, moved, resized and closed like any cell. There is
+placed from the double-click — among them a `tree view` (the agent tree), as
+many as you like, moved, resized and closed like any cell. There is
 no main chat: a chat cell goes wherever you place one.
 
 THE SYSTEM BLOCK: `.fantastic/prompt.md` is every AI's system block. It starts
@@ -62,8 +63,13 @@ a canvas of a few hundred live terminals stays smooth. A terminal's scrollbar
 appears while the pointer is on it (the wheel scrolls either way). macOS allows
 511 terminals (PTYs) at once by default (`kern.tty.ptmx_max`).
 
-BACKGROUNDS: double-click → `backgrounds` places a backgrounds manager: ten
-stock backgrounds (each in several colour sets), your own list, `random bg`,
+THE POPUP: drag it by its title and the spot it places at
+moves with it. ←↑↓→ move across the tiles as drawn. Double-click → `tips` puts
+a tips & tricks card on the canvas — an html cell: ask your AI to add a tip, or
+edit its html.
+
+BACKGROUNDS: double-click → `backgrounds` places a backgrounds manager: four
+stock backgrounds — Isoline, Glyph, Copper, Moire — each in several colour sets, your own list, `random bg`,
 `every minute`, `none` and `default` (Isoline). × hides a stock one (`restore
 stock` brings them back) or deletes one of yours. Ask an AI cell to add more —
 it calls `add` on the manager, and they stay.
@@ -118,7 +124,7 @@ kind, title, rect, distance, backend_id?}]}`, nearest first.
 A cell is a VIEW of a host agent: the agent's record says how it is drawn
 (`view: {kind, bytes, calls}`, else terminal for an exec agent, chat for an AI,
 else its reflect card). `place {backend_id, x, y}` shows one; ✕ closes the view
-and the agent lives on (the sidebar lists it; ⌫ there deletes it). A cell whose
+and the agent lives on (the tree view lists it; ⌫ there deletes it). A cell whose
 agent is gone disappears.
 
 ## The background
@@ -131,7 +137,7 @@ view, delete-locked): one GL source,
 ## The viewer
 
 The page views ONE page agent at a time: a view (its cells on its world) or
-any other agent full-page. A click in the sidebar tree views an agent;
+any other agent full-page. A click in the tree view views an agent;
 ⌘-click (Ctrl-click off macOS) focuses it on its view. `#view=<id>` in the
 URL is the viewed agent.
 
