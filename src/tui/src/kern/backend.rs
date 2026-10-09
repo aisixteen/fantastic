@@ -431,11 +431,11 @@ impl BackendBundle {
         host.kernel.agents.get(&AgentId::from(id)).map(|a| a.value().record().meta.clone())
     }
 
-    /// The kept dialogs: `dialog` rows in the memory store under `user`'s key
+    /// The kept dialogs: `dialog` rows in the AI store under `user`'s key
     /// (no handler may write `canvas_root`'s record: grants and fields come
     /// from above), the newest row per AI wins — `{id: {name, template, record}}`.
     async fn dialogs_map(host: &Host) -> Result<Map<String, Value>, String> {
-        let store = host.memory_store()?;
+        let store = host.ai_store()?;
         let r = host.act(&store, json!({"type": "read", "kinds": [DIALOG]})).await.result;
         if let Some(e) = r.get("error").and_then(Value::as_str) {
             return Err(format!("backend: reading the kept dialogs: {e}"));
@@ -451,7 +451,7 @@ impl BackendBundle {
 
     /// One `dialog` row: AI `ai` kept as `name`.
     async fn save_dialog(host: &Host, ai: &str, d: &Value) -> Result<(), String> {
-        let store = host.memory_store()?;
+        let store = host.ai_store()?;
         let row = json!({"kind": DIALOG, "ai": ai, "name": d.get("name"), "template": d.get("template"), "record": d.get("record")});
         let r = host.act(&store, json!({"type": "append", "rows": [row]})).await.result;
         match r.get("error").and_then(Value::as_str) {

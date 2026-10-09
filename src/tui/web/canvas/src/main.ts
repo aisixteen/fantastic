@@ -1,3 +1,4 @@
+import { registerBackgrounds } from "./bundles/backgrounds/backgrounds_agent.ts";
 import { Agent, Host, Kernel, ProxyLoader, WsBridge, loadBundle, registerRamStore } from "./lib.ts";
 import type { FolderText } from "./lib.ts";
 import { GATEWAY, UserBridge, readToken, writeToken } from "./user_bridge.ts";
@@ -38,6 +39,7 @@ function register(kernel: Kernel): void {
   registerCanvas(kernel); // the compositor root and its control plane
   registerBackground(kernel); // its singleton, delete-locked background (set_bg/default_bg/clear_bg/get_bg)
   registerSelector(kernel); // the double-click popup, as its singleton, delete-locked agent
+  registerBackgrounds(kernel); // the backgrounds manager: stock + the user's own, random, every minute
   // View bundles that front a host backend are real frontend agents too — a
   // no-op handler makes their records load-able; the ViewBundle renders them.
   kernel.registerBundle("terminal_view.ts", () => null);

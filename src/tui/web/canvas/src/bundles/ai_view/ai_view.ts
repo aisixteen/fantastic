@@ -56,6 +56,9 @@ const CHAT_CSS = `
   @keyframes c-think { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
   .chat-view .msg.not-sent { opacity: 0.45; text-decoration: line-through; }
   .chat-view .msg.not-sent::after { content: ' · not sent — ' attr(data-why); font-size: 10px; text-decoration: none; }
+  .chat-view .msg.monitor { align-self:flex-start; max-width:92%; background:rgba(110,200,160,0.10); box-shadow:inset 0 0 0 1px rgba(110,200,160,0.25); color:rgba(225,240,232,0.92); font:11.5px/1.45 ui-monospace, SFMono-Regular, monospace; white-space:pre-wrap; }
+  .chat-view .msg.monitor .mon-tag { display:block; margin-bottom:3px; font-size:10.5px; color:#7ee2a8; letter-spacing:.02em; }
+  .chat-view .msg.monitor .mon-tag .ended { color:#ffd166; }
   .chat-view .msg.tool { align-self: flex-start; font: 11px ui-monospace, SFMono-Regular, monospace; color: rgba(220,230,245,0.45); background: transparent; padding: 0 4px; }
   .chat-view .c-badge.kept { background:rgba(126,226,168,0.18); color:#7ee2a8; cursor:pointer; }
   .chat-view .c-keep { margin-left:6px; font-size:11px; padding:1px 10px; border-radius:999px; border:0; cursor:pointer; background:rgba(183,140,255,0.28); color:#fff; }
@@ -81,6 +84,39 @@ const THINK = /<think>[\s\S]*?(?:<\/think>|$)/g;
 const words = (t: string): string => t.replace(THINK, "").replace(CALLS, "").replace(OPEN_CALL, "").trim();
 /** The first call of a calls-only turn: its name, target and verb. */
 const CALL_HEAD = /<call name="([^"]+)">(?:[\s\S]*?<target_id>([^<]*)<\/target_id>)?(?:[\s\S]*?<type>([^<]*)<\/type>)?/;
+/** AN EXEC_BRIDGE MONITOR'S DELIVERY (the lib, 2026-10-09): a `send {text}` from
+ *  the runner, stored as `[from <runner>]` then
+ *  `[monitor 787 · job 514 · from your call 783 · "w5" · job ended]` then the
+ *  matched lines. A NOTIFICATION, never a question waiting on the human. */
+const MONITOR_HEAD = /^\[monitor (\d+) · job (\d+) · from (.+?) call (\S+?)(?: · "([^"]*)")?( · job ended)?\]\s*/;
+
+export interface MonitorDelivery {
+  id: string;
+  job: string;
+  /** whose call started the job: `your` / `<caller>'s` / `the operator's` */
+  who: string;
+  label: string | null;
+  /** the job ended: the monitor's last delivery */
+  ended: boolean;
+  /** the matched lines, the headers stripped */
+  lines: string;
+}
+
+/** A stored turn that is a monitor delivery → its parts; else null. */
+export function monitorOf(text: string): MonitorDelivery | null {
+  const from = /^\[from [^\]]*\]\s*/.exec(text);
+  if (from === null) return null;
+  const rest = text.slice(from[0].length);
+  const m = MONITOR_HEAD.exec(rest);
+  if (m === null) return null;
+  return { id: m[1]!, job: m[2]!, who: m[3]!, label: m[5] ?? null, ended: m[6] !== undefined, lines: rest.slice(m[0].length).replace(/\s+$/, "") };
+}
+
+/** A monitor delivery's tag: `monitor 787 · job 514 "w5" · ended`. */
+export function monitorTag(d: MonitorDelivery): string {
+  return `monitor ${d.id} · job ${d.job}${d.label !== null ? ` "${d.label}"` : ""}`;
+}
+
 /** ai_core's header on a reply that comes back as the next turn. */
 const REPLY_HEAD = /^\[reply to \d+ · ([^\]·]+?)(?: · [^\]]*)?\]/;
 
@@ -302,6 +338,25 @@ export const aiView: ViewBundle = {
       if (call !== null || reply !== null) {
         div.className = "msg tool";
         div.textContent = call !== null ? `→ ${call[2] ?? call[1]} ${call[3] ?? ""}`.trim() : `↳ ${reply![1]}`;
+        parent.appendChild(div);
+        if (parent === dialogEl) dialogEl.scrollTop = dialogEl.scrollHeight;
+        return div;
+      }
+      // a MONITOR's delivery: a notification from the runner — its tag and the
+      // matched lines, never a bubble of the human's
+      const mon = role === "user" ? monitorOf(text) : null;
+      if (mon !== null) {
+        div.className = "msg monitor";
+        const tag = document.createElement("span");
+        tag.className = "mon-tag";
+        tag.textContent = monitorTag(mon);
+        if (mon.ended) {
+          const e = document.createElement("span");
+          e.className = "ended";
+          e.textContent = " · ended";
+          tag.append(e);
+        }
+        div.append(tag, mon.lines);
         parent.appendChild(div);
         if (parent === dialogEl) dialogEl.scrollTop = dialogEl.scrollHeight;
         return div;

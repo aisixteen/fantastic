@@ -13,26 +13,30 @@ export const CANVAS_CSS = `
   #canvas.panning .agent-frame iframe,
   body.dragging-frame .agent-frame iframe { pointer-events: none; }
 
+  /* A CELL IS ITS CONTENT; ITS CHROME GROWS OUTWARD (owner 2026-10-09): the
+     frame's box is exactly the content's, and the bezel (glass, border, shadow —
+     \`::before\`), the head (above) and the resize handle (the corner) sit OUTSIDE
+     it, shown while the pointer is on the cell (or it is dragged / resized). The
+     content never shrinks, moves or is covered. A touch screen has no hover:
+     there the chrome stays. */
   .agent-frame {
     position: absolute;
-    border-radius: 14px;
-    overflow: hidden;
     display: flex;
     flex-direction: column;
     z-index: 2;
-    /* a cell's paint stays inside it: its changes never invalidate the world */
-    contain: layout style paint;
+    /* a cell's layout stays inside it (no paint containment: the chrome is outside) */
+    contain: layout style;
+  }
+  .agent-frame::before {
+    content: ""; position: absolute; inset: -32px -6px -6px -6px; z-index: -1;
+    border-radius: 16px;
     background: rgba(15, 15, 25, 0.55);
     backdrop-filter: blur(16px) saturate(1.2);
     -webkit-backdrop-filter: blur(16px) saturate(1.2);
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.10);
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.04);
-    transition: box-shadow .2s ease, border-color .2s ease, background .2s ease;
+    transition: opacity .15s ease, box-shadow .2s ease, border-color .2s ease;
   }
-  /* CONTENT ONLY until the pointer is on the cell (owner 2026-10-09): no bezel,
-     no head, no handle; hovering (or dragging, resizing) shows them. The head
-     floats OVER the content, so nothing reflows. A touch screen has no hover:
-     there the chrome stays. */
   /* A TERMINAL'S SCROLLBAR only while the pointer is on its cell (owner
      2026-10-09, E65): xterm's scrollbar re-renders on every scrolled line, and
      40 streaming terminals with theirs shown held the page at ~7 fps (61 hidden).
@@ -40,31 +44,23 @@ export const CANVAS_CSS = `
   .agent-frame:not(:hover) .xterm .scrollbar,
   .agent-frame:not(:hover) .xterm-decoration-overview-ruler { display: none; }
   @media (hover: hover) {
-    .agent-frame:not(:hover):not(.dragging):not(.resizing) {
-      background: transparent; border-color: transparent; box-shadow: none;
-      backdrop-filter: none; -webkit-backdrop-filter: none;
-    }
+    .agent-frame:not(:hover):not(.dragging):not(.resizing)::before,
     .agent-frame:not(:hover):not(.dragging):not(.resizing) > .frame-head,
-    .agent-frame:not(:hover):not(.dragging):not(.resizing) > .resize-handle { opacity: 0; }
+    .agent-frame:not(:hover):not(.dragging):not(.resizing) > .resize-handle { opacity: 0; pointer-events: none; }
   }
   /* FE = page content, BE = a view of a host agent (backend-owned views) */
-  .agent-frame[data-side="page"] { border-color: rgba(120, 170, 255, 0.28); }
-  .agent-frame[data-side="host"] { border-color: rgba(255, 190, 90, 0.34); }
-  .agent-frame:hover {
-    border-color: rgba(255, 255, 255, 0.14);
+  .agent-frame[data-side="page"]::before { border-color: rgba(120, 170, 255, 0.28); }
+  .agent-frame[data-side="host"]::before { border-color: rgba(255, 190, 90, 0.34); }
+  .agent-frame:hover::before {
     box-shadow: 0 8px 40px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.06);
   }
-  .agent-frame.dragging, .agent-frame.resizing {
-    border-color: rgba(255, 255, 255, 0.20);
+  .agent-frame.dragging::before, .agent-frame.resizing::before {
     box-shadow: 0 12px 48px rgba(0, 0, 0, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.08);
   }
   .frame-head {
-    position: absolute; top: 0; left: 0; right: 0; z-index: 4; box-sizing: border-box; min-height: 32px; padding: 9px 12px;
-    background: rgba(15, 15, 25, 0.55);
-    backdrop-filter: blur(12px) saturate(1.2); -webkit-backdrop-filter: blur(12px) saturate(1.2);
+    position: absolute; top: -32px; left: 0; right: 0; height: 32px; z-index: 4; box-sizing: border-box; padding: 0 6px;
     transition: opacity .15s ease;
     display: flex; align-items: center; justify-content: space-between;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
     color: rgba(255, 255, 255, 0.7);
     font: 600 11px ui-monospace, SFMono-Regular, monospace;
     letter-spacing: 0.5px; text-transform: uppercase; cursor: move; user-select: none;
@@ -82,13 +78,13 @@ export const CANVAS_CSS = `
     background: rgba(255, 255, 255, 0.12); color: rgba(255, 255, 255, 0.9);
   }
   .frame-head .lock.locked { color: #f7768e; background: rgba(247, 118, 142, 0.10); }
-  .frame-body { position: relative; z-index: 2; flex: 1 1 0; min-height: 0; overflow: hidden; background: transparent; }
+  .frame-body { position: relative; z-index: 2; flex: 1 1 0; min-height: 0; overflow: hidden; background: transparent; border-radius: 10px; }
   .frame-body iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: transparent; }
   .resize-handle {
-    position: absolute; bottom: 4px; right: 4px; width: 14px; height: 14px;
+    position: absolute; bottom: -6px; right: -6px; width: 14px; height: 14px;
     cursor: nwse-resize;
-    background: linear-gradient(135deg, transparent 50%, rgba(255,255,255,0.22) 50%);
-    border-radius: 0 0 10px 0; z-index: 3; transition: opacity .15s ease;
+    background: linear-gradient(135deg, transparent 50%, rgba(255,255,255,0.30) 50%);
+    border-radius: 0 0 14px 0; z-index: 3; transition: opacity .15s ease;
   }
   /* THE SIDEBAR and CANVAS-LIST cells (side_view.ts): a cell's body, scrolling */
   .side { height: 100%; overflow-y: auto; box-sizing: border-box; padding: 8px 0 6px; display: flex; flex-direction: column;
@@ -124,8 +120,8 @@ export const CANVAS_CSS = `
     font: 13px ui-monospace, SFMono-Regular, monospace; box-shadow: 0 0 0 1px rgba(255,120,120,0.3); }
   /* VIEWING ONE AGENT FULL: no world transform, the frame fills the page */
   #canvas.full-view .canvas-world { transform: none !important; }
-  #canvas.full-view .agent-frame.full { left: 12px !important; top: 12px !important;
-    width: calc(100vw - 24px) !important; height: calc(100vh - 24px) !important; }
+  #canvas.full-view .agent-frame.full { left: 12px !important; top: 44px !important;
+    width: calc(100vw - 24px) !important; height: calc(100vh - 56px) !important; }
   #canvas.full-view .agent-frame.full .resize-handle { display: none; }
   .side .agent.viewed { background: rgba(183,140,255,0.18); }
 `;

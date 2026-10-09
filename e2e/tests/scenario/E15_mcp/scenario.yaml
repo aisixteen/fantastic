@@ -87,20 +87,16 @@ runs:
       exit_code: 0
       lock_released: true
       files_exist: [.fantastic/agents/user/agents/mcp/agent.yaml, .fantastic/memory.db]
-      # THE MEMORY STORE holds the execution rows: no tape, no ledger, no JSON/XML
+      # no tape, no ledger, no JSON/XML — and the kernel's execution rows stay
+      # in RAM (`kernel_memory`, owner 2026-10-09): memory.db holds AI rows only
       files_absent: [.fantastic/messages.yaml, .fantastic/ledger.json, .fantastic/messages.xml, .fantastic/agent.json]
-      store_has:
-        # the call row carries its payload verbatim, and who made the call …
-        - {kind: call, verb: read_stream, caller: mcp, payload.type: read_stream, payload.path: note.txt}
-        # … and its settle row the outcome (unnamed: a digest, never the body)
-        - {kind: settle, settled: files, outcome.status: completed}
+      no_kernel_rows: true
       record:
         .fantastic/agents/user/agents/mcp/agent.yaml:
           handler_module: web_mcp.tools
           can_call_has: [files, exec, user, kernel]
         .fantastic/agents/user/agents/files/agent.yaml:
           callable_by_has: [mcp, user, exec]
-      rows_by: {agent: mcp, at_least: 3}
       blueprint_never_names: mcp
 
   # ── 2 · same directory: bind to the leg, rehydrate ─────────────────────────
@@ -119,7 +115,7 @@ runs:
     after_exit:
       exit_code: 0
       lock_released: true
-      rows_grew: true
+      no_kernel_rows: true
       mcp_records: 1
 
   # ── 3 · any argument is refused, not ignored ──────────────────────────────
@@ -150,5 +146,5 @@ runs:
       lock_held_by_host: true
       stderr_contains: "Register it ONCE"
       lock_released: true
-      rows_grew: true
+      no_kernel_rows: true
       mcp_records: 1

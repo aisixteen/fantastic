@@ -62,6 +62,12 @@ a canvas of a few hundred live terminals stays smooth. A terminal's scrollbar
 appears while the pointer is on it (the wheel scrolls either way). macOS allows
 511 terminals (PTYs) at once by default (`kern.tty.ptmx_max`).
 
+BACKGROUNDS: double-click → `backgrounds` places a backgrounds manager: ten
+stock backgrounds (each in several colour sets), your own list, `random bg`,
+`every minute`, `none` and `default` (Isoline). × hides a stock one (`restore
+stock` brings them back) or deletes one of yours. Ask an AI cell to add more —
+it calls `add` on the manager, and they stay.
+
 ESC: viewing one agent full screen, Esc goes back to the canvas (unless you are
 typing in a terminal or a field).
 

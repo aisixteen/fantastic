@@ -65,6 +65,8 @@ runs:
       key down
       wait 200
       key down
+      wait 200
+      key down
       wait 300
       key enter
       wait 1200
@@ -74,7 +76,7 @@ runs:
       key ctrl-c
       exit 8000
     frames:
-      # Activity and `user` sit under the kernel's row; fs_loader is the third of user's children: five down
+      # Activity, `kernel_memory` (the kernel's RAM store) and `user` sit under the kernel's row; fs_loader is user's fourth child: seven down
       live: {contains: [exec, files, user, "✉ Activity"], contains_block_title: false}
       # fs_loader has no specific view: who it is, who it talks to, its verbs, its rows
       default_view:
@@ -83,7 +85,7 @@ runs:
     after_exit:
       exit_code: 0
       lock_released: true
-      rows_grew: true
+      no_kernel_rows: true
 
   # ── 3 · the Activity page: every open question to the human, none here ─────
   - name: activity
@@ -196,11 +198,11 @@ runs:
       lock_released: true
 
   # ── 7 · the mouse: a click on a sidebar row selects and opens it ──────────
-  #       (the tree box's border is row 0; row 3 is the third entry, fs_loader)
+  #       (the tree box's border is row 0; `kernel_memory` takes a row above `user`: fs_loader is one lower)
   - name: mouse
     script: |
       wait 2500
-      click 8 7
+      click 8 8
       wait 800
       shot clicked
       key ctrl-c

@@ -172,7 +172,7 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
         lvl1.sort();
-        assert_eq!(lvl1, vec![USER]);
+        assert_eq!(lvl1, vec!["kernel_memory", USER]);
 
         // Under `user`: exactly these, NESTED under it, which is what makes them
         // its children — the kernel reads the parent off the directory.
@@ -195,12 +195,15 @@ mod tests {
     #[test]
     fn the_root_names_the_blueprints_memory_store() {
         let f = root_fields().unwrap();
-        assert_eq!(f["memory_store_id"], json!("memory"));
+        // the KERNEL'S store is RAM; the AI store is the sqlite file
+        assert_eq!(f["memory_store_id"], json!("kernel_memory"));
         let list = entries(BLUEPRINT).unwrap();
+        let km = list.iter().find(|e| e["id"] == json!("kernel_memory")).expect("the kernel's store is a root child");
+        assert_eq!(km["handler_module"], json!(fantastic_ram_store::HANDLER_MODULE));
         let kids = list.iter().find(|e| e["id"] == json!(USER)).and_then(|u| u["agents"].as_array()).expect("user holds the tree");
         let mem = kids.iter().find(|e| e["id"] == json!("memory")).expect("the store is in the blueprint");
         assert_eq!(mem["handler_module"], json!(fantastic_sqlite_store::HANDLER_MODULE));
-        assert_eq!(mem["operator"], json!(true));
+        assert!(mem.get("operator").is_none(), "the kernel no longer writes the AI store");
         assert_eq!(mem["admins"], json!(["kernel"]));
     }
 

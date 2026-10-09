@@ -1,3 +1,6 @@
+import { BACKGROUNDS, BACKGROUNDS_VERBS, grantsFor } from "../backgrounds/backgrounds_agent.ts";
+import { backgroundsView } from "../backgrounds/backgrounds_view.ts";
+import { DEFAULT_BG_SOURCE } from "./default_bg.ts";
 import { documentPage } from "../verb_docs.ts";
 import { Agent, Host } from "../../lib.ts";
 import type { Json, Kernel, Payload } from "../../lib.ts";
@@ -37,7 +40,7 @@ import type { GlHost, GlView } from "./gl_host.ts";
 // kernel sends. The kernel knows none of this.
 
 // inline view registry — host handler_module → TS view bundle
-const VIEW_BUNDLES: readonly ViewBundle[] = [terminalView, aiView, htmlView, agentViewBundle, setupView, reflectView, streamView, sidebarView, canvasesView, mcpView, mcpAddView];
+const VIEW_BUNDLES: readonly ViewBundle[] = [terminalView, aiView, htmlView, agentViewBundle, setupView, reflectView, streamView, sidebarView, canvasesView, mcpView, mcpAddView, backgroundsView];
 // A PAGE BUNDLE's instance (handler_module = its folder name) is drawn by its
 // BASE's view (`base: html_agent` → `html_agent.ts`), read off the catalog row.
 function viewFor(handlerModule: unknown, kernel: Kernel): ViewBundle | undefined {
@@ -200,8 +203,8 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
         parentId: c.id,
         handlerModule: BACKGROUND,
         meta: isRoot
-          ? { delete_lock: true, bg_source: "", callable_by: bgCallableBy() }
-          : { bg_source: "", callable_by: bgCallableBy() },
+          ? { delete_lock: true, bg_source: DEFAULT_BG_SOURCE, callable_by: bgCallableBy() }
+          : { bg_source: DEFAULT_BG_SOURCE, callable_by: bgCallableBy() },
       }),
     );
     // the view reaches its background BY NAME (both ends; no implicit parent
@@ -674,7 +677,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       // any cell — and the view verbs, since the cells are their OPERANDS
       // (`move {id}`, `wire {sender, receiver}`): the host's egress gate checks
       // the agents a call names, not only its target
-      [`${kernel.guid}|*`]: [...new Set([...CELL_VERBS, ...VIEW_VERBS])],
+      [`${kernel.guid}|*`]: [...new Set([...CELL_VERBS, ...VIEW_VERBS, ...BACKGROUNDS_VERBS])],
     };
   };
   const spawnAi = async (cellId: string, template: string | null, view?: string): Promise<Rec | null> => {
@@ -1228,6 +1231,24 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     );
   };
 
+  // THE BACKGROUNDS AGENT at the spot: a page agent that IS its cell, granted
+  // onto its view's background on both ends (`backgrounds_agent.grantsFor`)
+  const spawnBackgroundsAt = (w: { x: number; y: number }): void => {
+    const parent = containerNow();
+    const id = `backgrounds_${crypto.randomUUID().slice(0, 8)}`;
+    const g = grantsFor(kernel, id, parent);
+    if (g.bg !== undefined) kernel.updateMeta(g.bg.id, { callable_by: g.bg.callableBy } as unknown as Payload);
+    kernel.register(
+      new Agent({
+        id,
+        parentId: parent,
+        handlerModule: BACKGROUNDS,
+        meta: { x: Math.round(w.x), y: Math.round(w.y), width: 400, height: 620, display_name: "backgrounds",
+          can_call: g.canCall as unknown as Json, callable_by: { $self: "*" }, user_bgs: [], hidden_stock: [], current: null, rotate: { on: false, every_s: 60 } },
+      }),
+    );
+  };
+
   // THE MESSAGE STREAM at the spot: a page-only cell (no backend).
   const spawnStreamAt = (w: { x: number; y: number }): void => {
     kernel.register(
@@ -1282,6 +1303,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
         else if (p.kind === "coding") void spawnPairAt(DEFAULT_VIEW, w, { width: 760, height: 480 }, { command: [p.path], display_name: p.name }, { allowed: [exactLine([p.path])] });
         else if (p.kind === "mcp") spawnPageCellAt(w, MCP_ADD_VIEW, "mcp_add", 420, 260);
         else if (p.kind === "sidebar") spawnPageCellAt(w, SIDEBAR_VIEW, "sidebar", 320, 520);
+        else if (p.kind === "backgrounds") spawnBackgroundsAt(w);
         else if (p.kind === "canvases") spawnPageCellAt(w, CANVASES_VIEW, "canvases", 260, 300);
         else if (p.kind === "plugin") void spawnPluginAt(w, p.template);
         else if (p.kind === "bundle") void spawnPluginAt(w, null, p.starter);

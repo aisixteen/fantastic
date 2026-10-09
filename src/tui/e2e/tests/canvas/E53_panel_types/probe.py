@@ -41,7 +41,7 @@ def main() -> bool:
                 await asyncio.sleep(3)
                 seen.append({
                     "ids": await ids(),
-                    "term": await pg.js("[...document.querySelectorAll('.agent-frame .xterm-rows')].map(r=>r.innerText).join(' ').includes('MARK-53')"),
+                    "term": await pg.js("((()=>[...document.querySelectorAll('.agent-frame .frame-body')].map(f=>{const t=f.xterm; if(!t) return ''; const b=t.buffer.active; let s=''; for(let i=0;i<b.length;i++){const l=b.getLine(i); if(l) s+=l.translateToString(true)+' ';} return s;}).join(' '))()).includes('MARK-53')"),
                     "html": await pg.js("[...document.querySelectorAll('.agent-frame iframe')].some(f=>{try{return f.contentDocument.body.innerText.includes('html-53')}catch(e){return false}})"),
                     "setup": await pg.js("!!document.querySelector('.setup-view select')"),
                     "stream": await pg.js("!!document.querySelector('.stream-view')"),

@@ -46,7 +46,7 @@ class Browser:
         chrome = os.environ.get("CHROME") or MAC_CHROME
         if not Path(chrome).exists():
             raise SystemExit(f"no Chrome at {chrome}: set CHROME")
-        self.proc = subprocess.Popen([chrome, "--headless=new", "--disable-gpu", f"--window-size={w['width']},{w['height']}",
+        self.proc = subprocess.Popen([chrome, "--headless=new", "--use-angle=swiftshader", "--enable-unsafe-swiftshader", f"--window-size={w['width']},{w['height']}",
                                       f"--remote-debugging-port={self.port}", f"--user-data-dir={tmp / ('chrome-' + name)}",
                                       "--no-first-run", "about:blank"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.used_first = False

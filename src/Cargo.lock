@@ -925,6 +925,7 @@ dependencies = [
  "fantastic-mcp-client",
  "fantastic-ollama-backend",
  "fantastic-py-agent",
+ "fantastic-ram-store",
  "fantastic-responses-backend",
  "fantastic-sqlite-store",
  "fantastic-static-loader",

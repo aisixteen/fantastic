@@ -16,8 +16,9 @@
 # stores).
 #
 #   <root>                     (the kernel's own; named @root in grants)
+#   ├── kernel_memory            ram_store — the KERNEL'S store: its execution rows, in RAM
 #   └── user                     the human's own face: the ONE user, everything under it
-#       ├── memory               sqlite_store at .fantastic/memory.db — THE memory store
+#       ├── memory               sqlite_store at .fantastic/memory.db — THE AI store (every AI agent's rows)
 #       ├── fs_loader            static_loader; ui agents get added under here
 #       ├── store                file_bridge over .fantastic, allow: ['.'] — the kernel's provider
 #       ├── exec                 exec_bridge, allowed: ['.*'], cwd: '.', inherit_env: ["*"]
@@ -32,12 +33,23 @@
 # kernel's root at boot, only while the root does not carry it yet.
 #
 # `memory_store_id`: the kernel will not start without a memory store — its
-# ledger, dead letters and named-call dedup live there, and so does every AI
-# agent's conversation.
+# ledger, dead letters and named-call dedup live there. It is `kernel_memory`, a
+# ram_store (owner 2026-10-09): every call / settle / task / ack / flush row stays
+# in RAM, so no keystroke, output replay or read touches disk. A restart loses
+# named-call dedup, dead letters from a stop and the ledger history (this run
+# only); ids stay unique (the counter is in the root record). The ledger is capped
+# at 100 000 calls (the shell sets it, `kern/host::LEDGER_CAP`).
 root:
-  memory_store_id: memory
+  memory_store_id: kernel_memory
 
 agents:
+  # THE KERNEL'S STORE — RAM only. The kernel writes as the operator; the shell
+  # reads any owner's rows as its admin (`kernel`).
+  - id: kernel_memory
+    handler_module: ram_store.tools
+    admins: [kernel]
+    callable_by: {user: "*"}
+
   - id: user
     handler_module: user.tools
     can_call:
@@ -49,14 +61,15 @@ agents:
       "@root": "*"
     callable_by: {exec: "*", files: "*"}
     agents:
-      # THE MEMORY STORE. One SQLite file; it survives the process, so a restart
-      # reads everything back with nothing re-injected. The kernel writes as the
-      # operator (`operator: true`) and the shell reads any owner's rows as its
-      # admin (`kernel`). Every AI agent is granted onto it when it is created.
+      # THE AI STORE — ONE shared SQLite file for EVERY AI agent (owner
+      # 2026-10-09): chats, folds, recall and shared rows survive restarts. Rows
+      # are keyed `<guid>|<agent>`, so agents never mix. Every AI agent is granted
+      # onto it when it is created (both ends: its `can_call[memory]`, this
+      # store's `callable_by[<ai>]`); the shell reads any owner's rows as its
+      # admin (`kernel`). The kernel's own rows are NOT here (`kernel_memory`).
       - id: memory
         handler_module: sqlite_store.tools
         path: .fantastic/memory.db
-        operator: true
         admins: [kernel]
         callable_by: {user: "*"}
 

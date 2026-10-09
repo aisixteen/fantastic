@@ -291,7 +291,8 @@ class Rig:
         cdp = free_port()
         # CANVAS_HEADFUL=1: a visible Chrome on the real GPU (a load test's frame
         # rate is the GPU's, not the software rasterizer's)
-        mode = [] if os.environ.get("CANVAS_HEADFUL") == "1" else ["--headless=new"]
+        # headless: software WebGL (SwiftShader) — the terminals draw with WebGL
+        mode = [] if os.environ.get("CANVAS_HEADFUL") == "1" else ["--headless=new", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"]
         chrome = subprocess.Popen([MAC_CHROME, *mode, f"--window-size={width},{height}", f"--remote-debugging-port={cdp}",
                                    f"--user-data-dir={self.art / 'chrome'}", "--no-first-run",
                                    "--autoplay-policy=no-user-gesture-required", *(extra or []), "about:blank"],
