@@ -222,6 +222,7 @@ async fn read_stream<R: tokio::io::AsyncRead + Unpin>(
         let text = String::from_utf8_lossy(&raw).into_owned();
         collected.push_str(&text);
         let line = text.trim_end_matches('\n').to_string();
+        crate::monitor::feed_line(&owner, job_id, &line);
         let n = {
             let mut c = counter.lock().expect("line counter poisoned");
             c.n += 1;
@@ -326,6 +327,7 @@ pub async fn pump(
         return;
     };
     let mut finalize = FinalizeRow::new((owner.clone(), job_id));
+    let _monitors = crate::monitor::EndOnDrop(owner.clone(), job_id);
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     // ONE counter across both pipes, held by the PUMP: `n` is a single monotonic

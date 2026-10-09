@@ -343,7 +343,7 @@ async def _boot(id, payload, kernel):
 
 
 async def _schedule(id, payload, kernel):
-    """args: target:str, payload:{type:..,...}, interval_seconds:int (default 60), timeout:number? (seconds per fire; absent = wait forever). Every fire runs AS THE SCHEDULER — it reaches what the scheduler's can_call grants. Returns {schedule_id, schedule}. Persisted THROUGH the loader; failfast if no store wired."""
+    """args: target:str (the agent each fire calls), payload:{type:<verb>, ...} (the call itself: any verb `target` answers, with its args; {type:'send', text:'...'} wakes an AI with that text), interval_seconds:int (default 60), timeout:number? (seconds per fire; absent = wait forever). Every fire runs AS THE SCHEDULER — it reaches what the scheduler's can_call grants. Returns {schedule_id, schedule}. Persisted THROUGH the loader; failfast if no store wired."""
     target = payload.get("target", "")
     sched_payload = payload.get("payload")
     if sched_payload is None:

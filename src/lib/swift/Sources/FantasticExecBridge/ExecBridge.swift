@@ -254,10 +254,16 @@
             "output": .string("args: job_id:int (req), max_bytes:int? (default the whole 256 KiB ring). The PTY job's recent output — what a client re-attaching replays before the live `output` events. Returns {job_id, output:str}."),
             "paste_image": .string("args: job_id:int (req), data:bytes (req), mime:str (req — image/png|jpeg|gif|webp). Saves a pasted image to a per-job scratch file and types its path into the PTY (a drag-drop — a program like claude in a browser xterm cannot reach the browser clipboard). Returns {path:str, bytes:int}."),
             "connector": .string("no args — the reference wire client SOURCE (python): paste `source` verbatim at the top of your program and it gets a `kernel` global (send/emit/watch/on_message); returns {source, howto}."),
+            "monitor": .string("args: job_id:int (req — a RUNNING job of this agent), notify:str (req — the agent told), match:str? (a regex; absent = every line), every:number? (seconds — at most one delivery per window; required without `match`), tail:int? (newest lines per delivery, default 100), label:str?. Watches the job's output AS IT ARRIVES and SENDS what matches to `notify` as a turn — it polls nothing. Returns {monitor_id, job_id, notify, match, every, tail, label}; kernel `cancel` (or `unmonitor`) ends it, and it ends with its job."),
+            "monitors": .string("no args — this agent's live monitors: {monitors:[{monitor_id, job_id, notify, match, every, tail, label, delivered, pending}]}."),
+            "unmonitor": .string("args: monitor_id:int (req). End one of this agent's monitors (kernel `cancel` on its id does the same). Returns {unmonitored:true, monitor_id}."),
             "reflect": .string("Identity + running job count + auth posture. No args."),
             "boot": .string("No-op. Nothing auto-restarts: a command is started by a caller, not by the record."),
         ]
         public init() {}
+
+        /// This instance's live monitors (`Monitor.swift`).
+        let monitorTable = MonitorTable()
 
         // MARK: - the job table
 
@@ -378,6 +384,12 @@
                 return outputReply(agentId, payload)
             case "paste_image":
                 return pasteImageText(agentId, payload)
+            case "monitor":
+                return monitorReply(agentId, payload, kernel: kernel)
+            case "monitors":
+                return monitorTable.listing(agentId)
+            case "unmonitor":
+                return await unmonitorReply(agentId, payload, kernel: kernel)
             case "interrupt", "stop":
                 let want: TaskId?
                 switch jobArg(verb, payload, required: false) {
@@ -424,6 +436,23 @@
             // thing, so the same seal read differently per edge.
             if case .deny(let d) = rule.authorize(action) { return d.asRefusal }
             return nil
+        }
+
+        /// `monitor` — the job checks (python's order: the id, this agent's, alive),
+        /// then `startMonitor` (`Monitor.swift`).
+        private func monitorReply(_ agentId: AgentId, _ payload: JSON, kernel: Kernel) -> JSON {
+            let jid: TaskId
+            switch jobArg("monitor", payload, required: true) {
+            case .failure(let r): return r.json
+            case .success(let j): jid = j!
+            }
+            guard let job = lock.withLock({ jobs[jid] }), job.agent == agentId else {
+                return noJob(jid)
+            }
+            if !job.child.isAlive {
+                return Refusal.bad("monitor", "job_id", "a RUNNING job — this one has exited")
+            }
+            return startMonitor(agentId, jobId: jid, child: job.child, payload: payload, kernel: kernel)
         }
 
         /// Any live process of this owner.
@@ -668,6 +697,8 @@
             agentId: AgentId, jobId: TaskId, spawned: Spawn.Spawned, counter: LineCounter,
             kernel: Kernel
         ) async {
+            // the job's monitors end with it, on every way out
+            defer { monitorTable.jobEnded(agentId, jobId) }
             async let outD = pumpStream(
                 spawned.stdout, stream: "stdout", agentId: agentId, jobId: jobId,
                 counter: counter, kernel: kernel)
@@ -725,7 +756,9 @@
         private func ptyPump(
             agentId: AgentId, jobId: TaskId, pty: PtyJob, child: Child, kernel: Kernel
         ) async {
-            let code = await pty.run(kernel: kernel)
+            defer { monitorTable.jobEnded(agentId, jobId) }
+            let table = monitorTable
+            let code = await pty.run(kernel: kernel) { table.feedText(agentId, jobId, $0) }
             relayFor(jobId)?.stop()
             if takeCancelled(jobId) {
                 lock.withLock {
@@ -760,6 +793,7 @@
             counter: LineCounter, kernel: Kernel
         ) async {
             let n = counter.bump(line)
+            monitorTable.feedLine(agentId, jobId, line)
             await kernel.emit(
                 agentId,
                 .object([
@@ -1419,8 +1453,8 @@
             It is a GENERAL-PURPOSE command runner. A program is a FILE some process (or a `write_stream`) put on disk;
             running it is `command` + `args`, exactly like anything else.
 
-            Verbs: `start` · `status` · `stop` · `interrupt` · `clear` · `reflect` · `boot`, and for a
-            PTY job `write` · `resize` · `ack` · `output` · `paste_image`.
+            Verbs: `start` · `status` · `stop` · `interrupt` · `clear` · `monitor` · `monitors` ·
+            `unmonitor` · `reflect` · `boot`, and for a PTY job `write` · `resize` · `ack` · `output` · `paste_image`.
             Any verb NOT in that list is **MAIL** for the running program (see below).
 
             WHERE and WITH WHAT a command runs is the RECORD's, never the call's: `cwd` (REQUIRED — a
@@ -1534,6 +1568,29 @@
 
             A running program has the full wire, so it can itself `create_agent` more agents, read memory
             anywhere, call an AI, or spawn more jobs — tools compose into tools.
+
+            ## Monitor a job — early stop
+
+            `monitor(job_id, notify, match?, every?, tail?, label?)` watches a RUNNING job's output as it
+            arrives and SENDS what matches to `notify` (an agent — usually the AI that asked) as a turn.
+            It polls nothing: an idle monitor wakes never. It is how a long run is stopped EARLY.
+
+            - `match`: a regex; each output line that matches is delivered. Absent = every line — then
+              `every` is required.
+            - `every`: seconds. The first delivery goes at once; later matches are gathered and delivered
+              at most once per window. `tail`: the newest lines per delivery (default 100; older ones are
+              counted as dropped).
+            - A delivery reads `[monitor <id> · job <id> · from your call <pid> · "<label>"]` with the
+              lines below. The listener decides: show them, and stop the job early with kernel `cancel`
+              (`task_id` = its `job_id`).
+            - A monitor is a kernel task: `ps` lists it, `monitors` lists this agent's, kernel `cancel` (or
+              `unmonitor`) ends it, and it ends with its job after delivering what still waited. Monitors
+              on different jobs, at different cadences, run in parallel.
+
+            Deliveries are this agent's own calls: the listener's `callable_by` must name this agent, and
+            this agent's `can_call` the listener. A source that does not push (a URL, a remote status) gets
+            its cadence from the `scheduler`: a schedule fires a one-shot check job every
+            `interval_seconds`.
 
             ## Mail — `{queued:true}`
 

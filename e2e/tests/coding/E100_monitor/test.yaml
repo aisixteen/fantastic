@@ -1,0 +1,15 @@
+# WHAT to measure and HOW LONG to allow. Never a model, an endpoint, a key
+# or a backend name — those live in e2e/backends/.
+id: monitor
+group: coding
+title: "the model runs four workers under four PARALLEL exec_bridge monitors (every 5 s / 10 s / 20 s / 60 s), shows each FATAL line to the user, stops those workers EARLY, and after ~1 minute CANCELS the monitors left and stops everything — exec_bridge only"
+runner: probe.py
+runtimes: [python, rust, swift]
+costs: turns
+limits:
+  idle_seconds: 150
+  max_turns: 40
+  no_progress_turns: 40
+  turn_chars: 60000
+  turn_seconds: 300
+env: {}

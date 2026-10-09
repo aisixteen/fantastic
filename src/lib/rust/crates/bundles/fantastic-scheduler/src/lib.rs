@@ -174,7 +174,7 @@ fn verb_docs_json() -> Value {
     json!({
         "reflect": "Identity + tick state. No args.",
         "boot": "Idempotent. Starts the tick loop; persistence is THROUGH the loader.",
-        "schedule": "args: target:str, payload:{type:..,...}, interval_seconds:int (default 60), timeout:number? (seconds per fire; absent = wait forever). Every fire runs AS THE SCHEDULER — it reaches what the scheduler's can_call grants. Returns {schedule_id, schedule}. Persisted THROUGH the loader; failfast if no store wired.",
+        "schedule": "args: target:str (the agent each fire calls), payload:{type:<verb>, ...} (the call itself: any verb `target` answers, with its args; {type:'send', text:'...'} wakes an AI with that text), interval_seconds:int (default 60), timeout:number? (seconds per fire; absent = wait forever). Every fire runs AS THE SCHEDULER — it reaches what the scheduler's can_call grants. Returns {schedule_id, schedule}. Persisted THROUGH the loader; failfast if no store wired.",
         "unschedule": "args: schedule_id:str (req). Returns {removed:bool, schedule_id}.",
         "list": "No args. Returns {schedules: [<schedule record>, ...]} — every schedule.",
         "pause": "args: schedule_id:str?. With id pauses one schedule; without, pauses the whole scheduler.",

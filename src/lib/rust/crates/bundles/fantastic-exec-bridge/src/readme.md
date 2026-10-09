@@ -7,8 +7,8 @@ and the commands it may run come from an operator **allowlist** of regexes.
 It is a GENERAL-PURPOSE command runner. A program is a FILE some process (or a `write_stream`) put on disk;
 running it is `command` + `args`, exactly like anything else.
 
-Verbs: `start` · `status` · `stop` · `interrupt` · `clear` · `reflect` · `boot`, and for a
-PTY job `write` · `resize` · `ack` · `output` · `paste_image`.
+Verbs: `start` · `status` · `stop` · `interrupt` · `clear` · `monitor` · `monitors` ·
+`unmonitor` · `reflect` · `boot`, and for a PTY job `write` · `resize` · `ack` · `output` · `paste_image`.
 Any verb NOT in that list is **MAIL** for the running program (see below).
 
 WHERE and WITH WHAT a command runs is the RECORD's, never the call's: `cwd` (REQUIRED — a
@@ -122,6 +122,29 @@ no `code` field at all:
 
 A running program has the full wire, so it can itself `create_agent` more agents, read memory
 anywhere, call an AI, or spawn more jobs — tools compose into tools.
+
+## Monitor a job — early stop
+
+`monitor(job_id, notify, match?, every?, tail?, label?)` watches a RUNNING job's output as it
+arrives and SENDS what matches to `notify` (an agent — usually the AI that asked) as a turn.
+It polls nothing: an idle monitor wakes never. It is how a long run is stopped EARLY.
+
+- `match`: a regex; each output line that matches is delivered. Absent = every line — then
+  `every` is required.
+- `every`: seconds. The first delivery goes at once; later matches are gathered and delivered
+  at most once per window. `tail`: the newest lines per delivery (default 100; older ones are
+  counted as dropped).
+- A delivery reads `[monitor <id> · job <id> · from your call <pid> · "<label>"]` with the
+  lines below. The listener decides: show them, and stop the job early with kernel `cancel`
+  (`task_id` = its `job_id`).
+- A monitor is a kernel task: `ps` lists it, `monitors` lists this agent's, kernel `cancel` (or
+  `unmonitor`) ends it, and it ends with its job after delivering what still waited. Monitors
+  on different jobs, at different cadences, run in parallel.
+
+Deliveries are this agent's own calls: the listener's `callable_by` must name this agent, and
+this agent's `can_call` the listener. A source that does not push (a URL, a remote status) gets
+its cadence from the `scheduler`: a schedule fires a one-shot check job every
+`interval_seconds`.
 
 ## Mail — `{queued:true}`
 

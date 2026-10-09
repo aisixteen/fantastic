@@ -1,12 +1,13 @@
-//! The four line grammars the kernel writes into row content, parsed back.
+//! The five line grammars the kernel writes into row content, parsed back.
 //!
-//! Each mirrors one producer in `ai_core`, and each is ANCHORED: a pattern that
+//! Each mirrors one producer — four in `ai_core`, the monitor header in
+//! `exec_bridge` — and each is ANCHORED: a pattern that
 //! matched mid-line would turn a quoted example inside a turn into a fake link.
 //! Nothing here guesses — a field the producer omits comes back `None`, and the
 //! caller decides what that means.
 
-// The four grammars are parsed whole. A consumer that needs only three must not
-// be the reason the fourth is deleted — the kernel writes all four.
+// The five grammars are parsed whole. A consumer that needs only some must not
+// be the reason the others are deleted — the kernel writes all five.
 #![allow(dead_code)]
 
 use regex::Regex;
@@ -55,6 +56,25 @@ pub struct FoldMark {
     pub title: String,
 }
 
+/// `[monitor 787 · job 514 · from your call 783 · "w5" · job ended]` — the head
+/// of an `exec_bridge` monitor's delivery, the line after the vouched
+/// `[from <runner>]`. The lines below it are what the job printed that matched.
+///
+/// `who` is the producer's own words — `your` when the caller is the one told,
+/// else `<caller>'s` or `the operator's`. `call` is `None` when it wrote `None`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MonitorTag {
+    pub id: RowId,
+    pub job: RowId,
+    pub who: String,
+    pub call: Option<RowId>,
+    pub label: Option<String>,
+    /// The job ended: this is the monitor's last delivery.
+    pub ended: bool,
+    /// Byte offset (in the whole content) just past the header.
+    pub end: usize,
+}
+
 fn vouched_re() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
     R.get_or_init(|| {
@@ -72,6 +92,16 @@ fn reply_re() -> &'static Regex {
             r#"^\[reply to (?P<pid>\S+) · (?P<target>\S+) (?P<verb>[^\]\s]+)(?: · "(?P<title>[^"]*)")?(?: · ↑(?P<up>\S+?))?(?: · (?P<n>\d+) of (?P<m>\d+) in batch (?P<b>\S+?))?\]"#,
         )
         .expect("reply pattern")
+    })
+}
+
+fn monitor_re() -> &'static Regex {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| {
+        Regex::new(
+            r#"^\[monitor (?P<id>\d+) · job (?P<job>\d+) · from (?P<who>.+?) call (?P<call>\S+?)(?: · "(?P<label>[^"]*)")?(?P<ended> · job ended)?\]"#,
+        )
+        .expect("monitor pattern")
     })
 }
 
@@ -117,6 +147,25 @@ pub fn reply(content: &str) -> Option<ReplyTag> {
             _ => None,
         },
         end: c.get(0)?.end(),
+    })
+}
+
+/// A monitor's delivery: the header right after the vouched one (or opening the
+/// row). Anchored there — a monitor header quoted in prose is not a delivery.
+pub fn monitor(content: &str) -> Option<MonitorTag> {
+    let start = vouched(content).map_or(0, |v| {
+        let rest = &content[v.end..];
+        v.end + (rest.len() - rest.trim_start_matches('\n').len())
+    });
+    let c = monitor_re().captures(&content[start..])?;
+    Some(MonitorTag {
+        id: c.name("id")?.as_str().parse().ok()?,
+        job: c.name("job")?.as_str().parse().ok()?,
+        who: c.name("who")?.as_str().to_string(),
+        call: c.name("call").and_then(|m| m.as_str().parse().ok()),
+        label: c.name("label").map(|m| m.as_str().to_string()),
+        ended: c.name("ended").is_some(),
+        end: start + c.get(0)?.end(),
     })
 }
 
@@ -272,6 +321,20 @@ mod tests {
         assert_eq!(head_of(row), "2 replies · files read_stream · files list");
         let one = "[reply to 234 · files list · ↑229]\nbody";
         assert_eq!(head_of(one), "[reply to 234 · files list · ↑229]", "a single reply is unchanged");
+    }
+
+    #[test]
+    fn a_monitor_delivery_parses_after_its_vouched_header() {
+        let row = "[from runner]\n[monitor 787 · job 514 · from your call 783 · \"w5\" · job ended]\nFATAL w5: x\nFATAL w5: y";
+        let m = monitor(row).unwrap();
+        assert_eq!((m.id, m.job, m.call), (787, 514, Some(783)));
+        assert_eq!(m.who, "your");
+        assert_eq!(m.label.as_deref(), Some("w5"));
+        assert!(m.ended);
+        assert_eq!(&row[m.end..], "\nFATAL w5: x\nFATAL w5: y");
+        let bare = monitor("[from runner]\n[monitor 9 · job 8 · from the operator's call None]\nl").unwrap();
+        assert_eq!((bare.who.as_str(), bare.call, bare.label, bare.ended), ("the operator's", None, None, false));
+        assert!(monitor("[from ai]\nI saw [monitor 9 · job 8 · from your call 1] once").is_none(), "anchored");
     }
 
     #[test]
