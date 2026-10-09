@@ -206,9 +206,13 @@
         /// THE JOB'S TASK body (python `_pty_pump`): start the reader, forward every
         /// event in order, and when the terminal reaches EOF await the process and
         /// return its exit code — the caller writes the row and emits `job_done`.
-        func run(kernel: Kernel) async -> Int32 {
+        /// `onText` sees each chunk first (the job's monitors).
+        func run(kernel: Kernel, onText: (String) -> Void) async -> Int32 {
             readQueue.async { [weak self] in self?.readLoop() }
-            for await event in stream { await kernel.emit(owner, event) }
+            for await event in stream {
+                if let text = event["data"].asString { onText(text) }
+                await kernel.emit(owner, event)
+            }
             return await child.wait()
         }
 

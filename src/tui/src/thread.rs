@@ -107,6 +107,14 @@ pub enum LineKind {
     Late,
     /// A message from another agent that nobody has answered yet.
     Waiting,
+    /// An `exec_bridge` monitor's delivery: what a watched job printed that
+    /// matched. A notification, never a question — nothing answers it.
+    Monitor {
+        id: RowId,
+        job: RowId,
+        label: Option<String>,
+        ended: bool,
+    },
     Other(String),
 }
 
@@ -206,6 +214,10 @@ pub fn waiting_for(store: &Store, agent: &AgentId, human: &str) -> Vec<Waiting> 
             let content = r.content.as_deref()?;
             let v = tags::vouched(content)?;
             if &v.from == agent || v.from == human || answered.contains(&r.id) {
+                return None;
+            }
+            // A monitor's delivery tells; it asks nothing.
+            if tags::monitor(content).is_some() {
                 return None;
             }
             Some(Waiting {
@@ -431,6 +443,9 @@ pub fn outline(a: Args<'_>) -> Outline {
         if waiting_ids.contains(&r.id) {
             return LineKind::Waiting;
         }
+        if let Some(m) = r.content.as_deref().and_then(tags::monitor) {
+            return LineKind::Monitor { id: m.id, job: m.job, label: m.label, ended: m.ended };
+        }
         match r.kind.as_deref() {
             Some("fold") => LineKind::Fold {
                 level: r.level.unwrap_or(1),
@@ -453,8 +468,16 @@ pub fn outline(a: Args<'_>) -> Outline {
             agent: r.agent.clone(),
             depth,
             kind: kind_of(r),
-            head: tags::head_of(content),
-            body: tags::body_of(content),
+            // A monitor's delivery reads as the lines it brought; its header is
+            // the line's tag (`LineKind::Monitor`), not its text.
+            head: match tags::monitor(content) {
+                Some(m) => tags::head_of(&content[m.end..]),
+                None => tags::head_of(content),
+            },
+            body: match tags::monitor(content) {
+                Some(m) => content[m.end..].trim().to_string(),
+                None => tags::body_of(content),
+            },
             reply: tags::is_reply(content),
             mark: mark_of(r),
             closure,
@@ -722,6 +745,27 @@ mod tests {
         let o = plain(&s);
         assert_eq!(ids(&o), vec![1, 3, 5], "the notice is not drawn");
         assert_eq!(o.lines[2].depth, 1, "the reply after the notice hangs off the turn, not off the hidden row");
+    }
+
+    #[test]
+    fn a_monitor_delivery_is_not_a_question_and_reads_as_its_lines() {
+        let s = store_of(vec![
+            json!({"id":1,"agent":"ai","role":"user",
+                   "content":"[from runner]\n[monitor 787 · job 514 · from your call 783 · \"w5\"]\nFATAL w5: loss diverged"}),
+            json!({"id":2,"agent":"ai","role":"user",
+                   "content":"[from solver]\nwhich port?"}),
+        ]);
+        let w = waiting_for(&s, &ai(), crate::env::HUMAN);
+        assert_eq!(w.iter().map(|w| w.row).collect::<Vec<_>>(), vec![2], "a delivery asks nothing");
+        let o = plain(&s);
+        let m = &o.lines[o.position(1).unwrap()];
+        assert_eq!(
+            m.kind,
+            LineKind::Monitor { id: 787, job: 514, label: Some("w5".into()), ended: false }
+        );
+        assert_eq!(m.body, "FATAL w5: loss diverged");
+        assert_eq!(m.head, "FATAL w5: loss diverged");
+        assert_eq!(m.from.as_deref(), Some("runner"));
     }
 
     #[test]

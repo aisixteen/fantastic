@@ -1822,6 +1822,9 @@ async fn verb_docs_are_python_first_docstring_lines() {
             "output",
             "paste_image",
             "connector",
+            "monitor",
+            "monitors",
+            "unmonitor",
             "reflect",
             "boot"
         ]

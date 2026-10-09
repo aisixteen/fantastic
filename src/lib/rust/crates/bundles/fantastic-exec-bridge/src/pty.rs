@@ -124,6 +124,7 @@ pub async fn pump(
         return;
     };
     let mut finalize = jobs::FinalizeRow::new((owner.clone(), job_id));
+    let _monitors = crate::monitor::EndOnDrop(owner.clone(), job_id);
     let mut buf = vec![0u8; 4096];
     loop {
         let paused = {
@@ -174,6 +175,7 @@ pub async fn pump(
             }
             out
         };
+        crate::monitor::feed_text(&owner, job_id, &text);
         kernel
             .emit(
                 &owner,

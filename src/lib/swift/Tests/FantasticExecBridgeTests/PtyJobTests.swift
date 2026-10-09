@@ -132,7 +132,7 @@
             let job = PtyJob(
                 jobId: TaskId(1), owner: AgentId("term_end"), child: child, masterFd: master,
                 cols: 80, rows: 24)
-            _ = await job.run(kernel: k)  // the terminal reached EOF and closed
+            _ = await job.run(kernel: k) { _ in }  // the terminal reached EOF and closed
             #expect(!job.isLive)
             let path = NSTemporaryDirectory() + "pty_reuse_\(UUID().uuidString)"
             let reused = open(path, O_CREAT | O_RDWR, 0o600)

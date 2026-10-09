@@ -352,7 +352,11 @@ impl AiPanel {
     /// body is empty.
     fn text_of(l: &thread::OutlineLine) -> &str {
         match &l.kind {
-            LineKind::Turn { .. } | LineKind::Waiting | LineKind::Late if !l.body.is_empty() => &l.body,
+            LineKind::Turn { .. } | LineKind::Waiting | LineKind::Late | LineKind::Monitor { .. }
+                if !l.body.is_empty() =>
+            {
+                &l.body
+            }
             _ => &l.head,
         }
     }
@@ -375,6 +379,12 @@ impl AiPanel {
             LineKind::Recall => "recall ".into(),
             LineKind::Late => "late ".into(),
             LineKind::Waiting => "asks you ".into(),
+            // `monitor 787 · job 514 "w5" · ended` — which watch spoke, on which job.
+            LineKind::Monitor { id, job, label, ended } => format!(
+                "monitor {id} · job {job}{}{} ",
+                label.as_ref().map_or(String::new(), |l| format!(" \"{l}\"")),
+                if *ended { " · ended" } else { "" },
+            ),
             LineKind::Turn { .. } => String::new(),
             LineKind::Other(k) => format!("{k} "),
         };
@@ -1159,6 +1169,24 @@ mod tests {
         assert_eq!(hue(2, "▸ send"), Some(theme::SAY_CALL), "a tool call");
         assert_eq!(hue(3, "reply"), Some(theme::SAY_REPLY), "a tool reply");
         assert_eq!(hue(2, "on it"), Some(theme::FG), "plain text");
+    }
+
+    #[test]
+    fn a_monitor_delivery_is_tagged_with_its_watch_and_shows_its_lines() {
+        let s = store_with(vec![json!({"id":1,"agent":"ai","role":"user",
+            "content":"[from runner]\n[monitor 787 · job 514 · from your call 783 · \"w5\" · job ended]\nFATAL w5: loss diverged"})]);
+        let mut p = AiPanel::new("ai".into());
+        let seen = std::collections::HashSet::new();
+        let a: AgentId = "ai".into();
+        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: None };
+        p.layout(Rect::new(0, 0, 80, 10), &cx);
+        let screen = draw_once(&p, &cx, 80, 10);
+        assert!(
+            screen.contains("monitor 787 · job 514 \"w5\" · ended runner: FATAL w5: loss diverged"),
+            "{screen}"
+        );
+        assert!(!screen.contains("asks you"), "a delivery is not a question: {screen}");
+        assert!(!screen.contains("[monitor"), "the header is the tag, not the text: {screen}");
     }
 
     #[test]

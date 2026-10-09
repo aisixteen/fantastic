@@ -263,6 +263,9 @@ fn verb_docs_json() -> Value {
         "output": "args: job_id:int (req), max_bytes:int? (default the whole 256 KiB ring). The PTY job's recent output — what a client re-attaching replays before the live `output` events. Returns {job_id, output:str}.",
         "paste_image": "args: job_id:int (req), data:bytes (req), mime:str (req — image/png|jpeg|gif|webp). Saves a pasted image to a per-job scratch file and types its path into the PTY (a drag-drop — a program like claude in a browser xterm cannot reach the browser clipboard). Returns {path:str, bytes:int}.",
         "connector": "no args — the reference wire client SOURCE (python): paste `source` verbatim at the top of your program and it gets a `kernel` global (send/emit/watch/on_message); returns {source, howto}.",
+        "monitor": "args: job_id:int (req — a RUNNING job of this agent), notify:str (req — the agent told), match:str? (a regex; absent = every line), every:number? (seconds — at most one delivery per window; required without `match`), tail:int? (newest lines per delivery, default 100), label:str?. Watches the job's output AS IT ARRIVES and SENDS what matches to `notify` as a turn — it polls nothing. Returns {monitor_id, job_id, notify, match, every, tail, label}; kernel `cancel` (or `unmonitor`) ends it, and it ends with its job.",
+        "monitors": "no args — this agent's live monitors: {monitors:[{monitor_id, job_id, notify, match, every, tail, label, delivered, pending}]}.",
+        "unmonitor": "args: monitor_id:int (req). End one of this agent's monitors (kernel `cancel` on its id does the same). Returns {unmonitored:true, monitor_id}.",
         "reflect": "Identity + running job count + auth posture. No args.",
         "boot": "No-op. Nothing auto-restarts: a command is started by a caller, not by the record.",
     })
@@ -451,6 +454,9 @@ impl Bundle for ExecBridgeBundle {
             "resize" => pty::resize_reply(agent_id, payload),
             "ack" => pty::ack_reply(agent_id, payload),
             "output" => pty::output_reply(agent_id, payload),
+            "monitor" => monitor::monitor_reply(agent_id, payload, kernel).await,
+            "monitors" => monitor::monitors_reply(agent_id),
+            "unmonitor" => monitor::unmonitor_reply(agent_id, payload, kernel).await,
             // `data` is bytes: on the text channel there is none to paste.
             "paste_image" => pty::paste_image_text(agent_id, payload),
             // The reference wire client SOURCE — a model pastes it at the top of
@@ -674,6 +680,7 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
 }
 
 pub mod jobs;
+mod monitor;
 pub mod pty;
 pub mod relay;
 pub mod spawn;
@@ -684,6 +691,8 @@ mod pty_tests;
 mod shell_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_monitor;
 
 /// `interrupt` / `stop` — signal this agent's jobs, or one named job.
 ///

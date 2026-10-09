@@ -46,6 +46,7 @@ import collections
 import fcntl
 import json
 import os
+import re
 import secrets
 import signal as signal_mod
 import socket
@@ -54,7 +55,7 @@ import tempfile
 import termios
 import time
 
-from exec_bridge import proc
+from exec_bridge import _monitor, proc
 from file_bridge import fs
 from io_bridge import decode_frame, describe as _describe, encode_frame, sendable
 from io_bridge import gate_inbound, resolve_ingress, unknown_ingress_refusal
@@ -130,6 +131,7 @@ async def _read_stream(reader, job, stream, owner, job_id, kernel):
         parts.append(text)
         job["lines"] += 1
         job["last_line"] = text.rstrip("\n")
+        _monitor.feed_line(job_id, text.rstrip("\n"))
         await kernel.emit(
             owner,
             {
@@ -155,6 +157,13 @@ async def _pump(owner, ready, process, kernel):
     job = _jobs.get(job_id)
     if job is None:
         return
+    try:
+        await _pipe_body(job, job_id, owner, process, kernel)
+    finally:
+        _monitor.job_ended(job_id)
+
+
+async def _pipe_body(job, job_id, owner, process, kernel):
     out, err = "", ""
     try:
         try:
@@ -502,6 +511,7 @@ def _pty_readable(owner: str, job_id: int, kernel) -> None:
     if not text:
         return
     _ring_add(pt, text)
+    _monitor.feed_text(job_id, text)
     asyncio.ensure_future(
         kernel.emit(owner, {"type": "output", "job_id": job_id, "data": text})
     )
@@ -521,6 +531,13 @@ async def _pty_pump(owner, ready, process, kernel):
     job = _jobs.get(job_id)
     if job is None:
         return
+    try:
+        await _pty_body(job, job_id, owner, process, kernel)
+    finally:
+        _monitor.job_ended(job_id)
+
+
+async def _pty_body(job, job_id, owner, process, kernel):
     pt = job["pty"]
     loop = asyncio.get_running_loop()
     try:
@@ -992,6 +1009,110 @@ async def _status(id, payload, kernel):
     }
 
 
+async def _monitor_verb(id, payload, kernel):
+    """args: job_id:int (req — a RUNNING job of this agent), notify:str (req — the agent told), match:str? (a regex; absent = every line), every:number? (seconds — at most one delivery per window; required without `match`), tail:int? (newest lines per delivery, default 100), label:str?. Watches the job's output AS IT ARRIVES and SENDS what matches to `notify` as a turn — it polls nothing. Returns {monitor_id, job_id, notify, match, every, tail, label}; kernel `cancel` (or `unmonitor`) ends it, and it ends with its job.
+
+    Each delivery is a call made by THIS agent — its `can_call` must name `notify`,
+    and `notify`'s `callable_by` this agent — headed
+    `[monitor <id> · job <id> · from your call <pid> · "<label>"]` with the matched
+    lines below. The first match goes at once; with `every`, later ones are gathered
+    and delivered at most once per window, and a timer runs only while something
+    waits. A monitor is a kernel task: `ps` lists it, `monitors` lists this agent's."""
+    from kernel import current_origin, current_task
+
+    jid, err = _job_arg("monitor", payload, required=True)
+    if err:
+        return err
+    job = _jobs.get(jid)
+    if job is None or job.get("owner") != id:
+        return refusal(NOT_FOUND, f"exec_bridge: no job {jid!r}", job_id=jid)
+    if not _alive(job):
+        return bad("monitor", "job_id", "a RUNNING job — this one has exited")
+    notify = payload.get("notify")
+    if notify is None:
+        return missing("monitor", "notify")
+    if not isinstance(notify, str) or not notify:
+        return bad("monitor", "notify", "an agent id")
+    if kernel.get(notify) is None:
+        return refusal(
+            NOT_FOUND, f"monitor: no agent {notify!r} to notify", arg="notify"
+        )
+    pattern = payload.get("match")
+    match = None
+    if pattern is not None:
+        if not isinstance(pattern, str) or not pattern:
+            return bad("monitor", "match", "a regex string")
+        try:
+            match = _monitor.compile_match(pattern)
+        except re.error as e:
+            return bad("monitor", "match", f"a valid regex ({e})")
+    every = payload.get("every")
+    if every is not None and (
+        isinstance(every, bool) or not isinstance(every, (int, float)) or every <= 0
+    ):
+        return bad("monitor", "every", "a positive number of seconds")
+    if match is None and every is None:
+        return refusal(
+            MISSING_ARG,
+            "monitor: every required — without `match` every line counts, so name the "
+            "window (`every`, seconds) its deliveries are gathered in",
+            arg="every",
+        )
+    tail = payload.get("tail", _monitor.DEFAULT_TAIL)
+    if isinstance(tail, bool) or not isinstance(tail, int) or tail < 1:
+        return bad("monitor", "tail", "an int >= 1 (lines per delivery)")
+    label = payload.get("label")
+    if label is not None and not isinstance(label, str):
+        return bad("monitor", "label", "a string")
+    m = {
+        "id": None,
+        "owner": id,
+        "job_id": jid,
+        "notify": notify,
+        "match": match,
+        "every": every,
+        "tail": tail,
+        "label": label or None,
+        "caller": current_origin(),
+        "call": current_task(),
+        "queue": asyncio.Queue(),
+        "carry": "",
+        "delivered": 0,
+        "pending": 0,
+    }
+    mid = kernel.ctx.spawn_task(id, "monitor", _monitor.run(m, kernel))
+    m["id"] = mid
+    _monitor._MONITORS[mid] = m
+    return {
+        "monitor_id": mid,
+        "job_id": jid,
+        "notify": notify,
+        "match": pattern,
+        "every": every,
+        "tail": tail,
+        "label": m["label"],
+    }
+
+
+async def _monitors(id, payload, kernel):
+    """no args — this agent's live monitors: {monitors:[{monitor_id, job_id, notify, match, every, tail, label, delivered, pending}]}."""
+    return {"monitors": _monitor.listing(id)}
+
+
+async def _unmonitor(id, payload, kernel):
+    """args: monitor_id:int (req). End one of this agent's monitors (kernel `cancel` on its id does the same). Returns {unmonitored:true, monitor_id}."""
+    mid = payload.get("monitor_id")
+    if mid is None:
+        return missing("unmonitor", "monitor_id")
+    if isinstance(mid, bool) or not isinstance(mid, int):
+        return bad("unmonitor", "monitor_id", "an int — the id `monitor` returned")
+    m = _monitor._MONITORS.get(mid)
+    if m is None or m["owner"] != id:
+        return refusal(NOT_FOUND, f"exec_bridge: no monitor {mid!r}", monitor_id=mid)
+    await kernel.ctx.cancel_task(mid)
+    return {"unmonitored": True, "monitor_id": mid}
+
+
 def _no_job(verb: str, id: str, jid) -> dict | None:
     """The `not_found` refusal for a named job this agent does not own, or None.
 
@@ -1303,6 +1424,9 @@ VERBS = {
     "output": _output,
     "paste_image": _paste_image,
     "connector": _connector,
+    "monitor": _monitor_verb,
+    "monitors": _monitors,
+    "unmonitor": _unmonitor,
     "reflect": _reflect,
     "boot": _boot,
 }
