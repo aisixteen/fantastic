@@ -9,8 +9,8 @@ background. Over LOAD_SECONDS (default 20) of load it measures:
 - input → echo: a marker typed into a sample terminal until it is on that
   terminal's screen (keystroke → PTY → output → xterm), p50 / p95 / max;
 - the page's frame rate (requestAnimationFrame) under the load;
-- the kernel's row store: rows written per second by kind and by agent/verb,
-  and the store's growth on disk (`memory.db` + its WAL) per second;
+- the disk: the AI store's growth (`memory.db` + its WAL) per second, and that
+  NO kernel execution row reaches it (the kernel's store is RAM, `kernel_memory`);
 - the host's call stream: lines per second (one per call).
 
 THE DISK GUARD: the load stops the moment the store passes LOAD_DISK_MB
@@ -99,7 +99,6 @@ TEXT = """((f)=>{const t=f&&f.querySelector('.frame-body')?.xterm; if(!t) return
 ARM = """(()=>{const cid=%s, mk=%s; window.__lat=window.__lat||{};
   const f=document.querySelector(`.agent-frame[data-id="${cid}"]`); const t=f&&f.querySelector('.frame-body')?.xterm; if(!t) return;
   const t0=performance.now(); const d=t.onRender(()=>{ if((""" + TEXT + """)(f).includes(mk)){ window.__lat[mk]=performance.now()-t0; d.dispose(); } });})()"""
-SCREEN = "(id)=>{const f=document.querySelector(`.agent-frame[data-id=\"${id}\"]`); return f ? (f.querySelector('.xterm-rows')||{}).textContent||'' : ''}"
 
 
 def system_sample(host_pid: int) -> dict:
@@ -357,6 +356,9 @@ async def run(rig: Rig, r: dict, info: dict) -> None:
                             "gpu_pct": max((x["gpu_pct"] or 0) for x in sys_samples)} if sys_samples else None,
         }
         r["no_disk_guard"] = guard is None
+        # the kernel's execution rows are RAM-only (`kernel_memory`, owner
+        # 2026-10-09): none of the load's calls may reach memory.db
+        r["no_kernel_rows_on_disk"] = rows["rows"] == 0
         r["echoes_seen"] = bool(lat) and lat[-1] < 5000
 
 

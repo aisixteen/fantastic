@@ -82,12 +82,12 @@ def main() -> bool:
             await asyncio.sleep(0.5)
             # c) its tile starts exactly that program, interactive
             r["coding_clicked"] = await tile(pg, 300, 300, FAKE)
-            r["coding_runs"] = bool(await pg.until(f"{frames}.some(f=>(f.querySelector('.xterm-rows')||{{}}).textContent?.includes('{MARK}'))", secs))
+            r["coding_runs"] = bool(await pg.until(f"{frames}.some(f=>(f=>{{const t=f.querySelector('.frame-body')?.xterm; if(!t) return ''; const b=t.buffer.active; let s=''; for(let i=0;i<b.length;i++){{const l=b.getLine(i); if(l) s+=l.translateToString(true)+'\\n';}} return s;}})(f).includes('{MARK}'))", secs))
             await pg.js("document.querySelector('.agent-frame .xterm-helper-textarea')?.focus()")
             await pg.cdp("Input.insertText", text="ping-61")
             await pg.cdp("Input.dispatchKeyEvent", type="keyDown", key="Enter", code="Enter", windowsVirtualKeyCode=13, text="\r")
-            r["coding_echoes"] = bool(await pg.until(f"{frames}.some(f=>((f.querySelector('.xterm-rows')||{{}}).textContent||'').split('ping-61').length > 2)", 10))
-            cell = await pg.js(f"{frames}.find(f=>(f.querySelector('.xterm-rows')||{{}}).textContent?.includes('{MARK}'))?.dataset.id")
+            r["coding_echoes"] = bool(await pg.until(f"{frames}.some(f=>(f=>{{const t=f.querySelector('.frame-body')?.xterm; if(!t) return ''; const b=t.buffer.active; let s=''; for(let i=0;i<b.length;i++){{const l=b.getLine(i); if(l) s+=l.translateToString(true)+'\\n';}} return s;}})(f).split('ping-61').length > 2)", 10))
+            cell = await pg.js(f"{frames}.find(f=>(f=>{{const t=f.querySelector('.frame-body')?.xterm; if(!t) return ''; const b=t.buffer.active; let s=''; for(let i=0;i<b.length;i++){{const l=b.getLine(i); if(l) s+=l.translateToString(true)+'\\n';}} return s;}})(f).includes('{MARK}'))?.dataset.id")
             rec = next((c for c in rig.cells() if c.get("id") == cell), {})
             r["coding_cell"] = rec.get("command") == [str(fake)]
             backend = rec.get("backend_id", "")

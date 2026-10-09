@@ -33,6 +33,12 @@ use serde_json::{json, Value};
 use crate::env::{ClientCfg, Paths};
 use crate::kern::model::{AgentId as MyId, KernelErr, Record, Row, Task, TreeNode};
 
+/// The ledger cap: calls kept before the kernel prunes its store (owner 2026-10-09).
+pub const LEDGER_CAP: usize = 100_000;
+
+/// The one shared persistent AI store's id (the blueprint's).
+pub const AI_STORE: &str = "memory";
+
 /// The kernel, plus who this terminal is when it speaks.
 pub struct Host {
     pub kernel: Arc<Kernel>,
@@ -53,8 +59,11 @@ fn registry() -> BundleRegistry {
     // The one disk surface. Clamped to its declared root; a path outside is
     // refused rather than normalised.
     reg.register("file_bridge.tools", fantastic_file::FileBundle::default());
-    // THE MEMORY STORE: the kernel's execution rows and every AI agent's
-    // conversation, in one SQLite file that survives the process.
+    // THE TWO MEMORY STORES (owner 2026-10-09): the KERNEL'S execution rows
+    // (call / settle / task / ack / flush) in RAM — the root's `kernel_memory`,
+    // a ram_store, so a keystroke never touches disk — and every AI agent's
+    // conversation in ONE shared SQLite file (`memory`) that survives the process.
+    reg.register(fantastic_ram_store::HANDLER_MODULE, fantastic_ram_store::RamStoreBundle::default());
     reg.register(
         fantastic_sqlite_store::HANDLER_MODULE,
         fantastic_sqlite_store::SqliteStoreBundle::default(),
@@ -144,6 +153,11 @@ impl Host {
         let booted = bootstrap::bootstrap(registry(), BootstrapOptions::daemon(&paths.cwd))
             .map_err(|e| KernelErr::Boot(format!("{e}")))?;
         let kernel = Arc::clone(&booted.kernel);
+        // THE LEDGER CAP (owner 2026-10-09): 100 000 calls; past it the kernel
+        // prunes its store to 90% — oldest settled first, unnamed before named,
+        // never in-flight work or unacked dead letters. In-proc, the cap is
+        // this shell's to set (the headless kernel binary parses `--ledger-cap`).
+        kernel.set_ledger_cap(Some(LEDGER_CAP));
         let root = kernel
             .root()
             .map(|r| r.id.0.clone())
@@ -268,13 +282,25 @@ impl Host {
         Ok(host)
     }
 
-    /// The memory store the root names — THE store every AI agent this shell
-    /// creates keeps its conversation in.
-    pub fn memory_store(&self) -> Result<String, String> {
+    /// The KERNEL'S store — the one the root names in `memory_store_id` (a
+    /// ram_store): its execution rows live there, for this run only.
+    pub fn kernel_store(&self) -> Result<String, String> {
         self.kernel
             .root()
             .and_then(|r| r.meta.read().ok()?.get("memory_store_id")?.as_str().map(str::to_string))
             .ok_or_else(|| "the root names no `memory_store_id`".to_string())
+    }
+
+    /// THE AI STORE — the one shared persistent store every AI agent this shell
+    /// creates keeps its conversation in (and the kept dialogs): `memory`, the
+    /// blueprint's sqlite store. Rows are keyed `<guid>|<agent>`, so agents
+    /// never mix.
+    pub fn ai_store(&self) -> Result<String, String> {
+        if self.kernel.agents.contains_key(&AgentId::from(AI_STORE)) {
+            Ok(AI_STORE.to_string())
+        } else {
+            Err(format!("the AI store `{AI_STORE}` is not in the tree"))
+        }
     }
 
     /// The AI agents in the tree: every non-root agent whose record names a
@@ -295,7 +321,7 @@ impl Host {
     /// own record to name in `memory_store_id` and grant in `can_call`. Done
     /// BEFORE the AI is created: its first boot checks the store it names.
     pub async fn admit_to_memory(&self, ai: &str) -> Result<String, String> {
-        let store = self.memory_store()?;
+        let store = self.ai_store()?;
         let mut cb = self
             .kernel
             .agents
@@ -372,7 +398,7 @@ impl Host {
     /// under the operator's own key, the rest still in RAM.
     /// `after`: only rows with a larger id (the caller's cursor); `None` = all.
     pub async fn rows(&self, agent: &str, after: Option<i64>) -> (Vec<Row>, Option<bool>) {
-        let Ok(store) = self.memory_store() else {
+        let Ok(store) = self.kernel_store() else {
             return (Vec::new(), None);
         };
         let mut by: std::collections::BTreeMap<i64, Value> = std::collections::BTreeMap::new();
@@ -507,6 +533,7 @@ mod tests {
             "kernel_state.tools",
             "file_bridge.tools",
             "sqlite_store.tools",
+            "ram_store.tools",
             "user_home_store.tools",
             "setup.tools",
             "canvas.tools",

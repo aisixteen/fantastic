@@ -55,6 +55,7 @@ fantastic-static-loader = { path = "../lib/rust/crates/bundles/fantastic-static-
 fantastic-web-mcp = { path = "bundles/fantastic-web-mcp" }
 fantastic-user = { path = "bundles/fantastic-user" }
 fantastic-sqlite-store = { path = "bundles/fantastic-sqlite-store" }
+fantastic-ram-store = { path = "../lib/rust/crates/bundles/fantastic-ram-store" }
 # THE USER'S TEMPLATES: named agent blueprints in the home config dir (FANTASTIC_HOME
 # or ~/.config/fantastic), owned by this binary — see kern/templates.
 fantastic-user-home-store = { path = "bundles/fantastic-user-home-store" }

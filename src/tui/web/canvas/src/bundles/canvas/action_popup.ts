@@ -21,6 +21,7 @@ export type Pick =
   | { kind: "stream" }
   | { kind: "setup" }
   | { kind: "sidebar" }
+  | { kind: "backgrounds" }
   | { kind: "canvases" }
   | { kind: "mcp" }
   | { kind: "chat"; id: string; name: string }
@@ -57,7 +58,7 @@ export function exactLine(argv: string[]): string {
 }
 
 export type Section = "page" | "host" | "coding" | "ai" | "chats";
-export type Icon = "ask" | "terminal" | "html" | "stream" | "agent" | "template" | "chat" | "sidebar" | "canvases" | "claude" | "codex" | "aider" | "opencode" | "mcp";
+export type Icon = "ask" | "terminal" | "html" | "stream" | "agent" | "template" | "chat" | "sidebar" | "backgrounds" | "canvases" | "claude" | "codex" | "aider" | "opencode" | "mcp";
 
 export interface Tile {
   icon: Icon;
@@ -81,6 +82,7 @@ const KINDS: Array<[string, Pick, Icon, Section]> = [
   ["html", { kind: "html" }, "html", "page"],
   ["stream", { kind: "stream" }, "stream", "page"],
   ["sidebar", { kind: "sidebar" }, "sidebar", "page"],
+  ["backgrounds", { kind: "backgrounds" }, "backgrounds", "page"],
   ["canvases", { kind: "canvases" }, "canvases", "page"],
 ];
 /** The groups in DRAWN order — the flat tile order follows it (arrow keys walk it). */
@@ -151,6 +153,7 @@ const PATH: Record<Icon, string> = {
   agent: '<circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1"/>',
   template: '<path d="M12 3l1.8 4.7L18.5 9.5l-4.7 1.8L12 16l-1.8-4.7L5.5 9.5l4.7-1.8z"/><rect x="15" y="15" width="6" height="6" rx="1.5"/>',
   sidebar: '<rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 4v16M12 9h5M12 13h5"/>',
+  backgrounds: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 15l5-5 4 4 3-3 6 6"/><circle cx="16" cy="9" r="1.5"/>',
   // the coding agents: plain outline marks of the menu's own, no vendor logo
   claude: '<path d="M12 3v18M3 12h18M5.6 5.6l12.8 12.8M18.4 5.6L5.6 18.4"/>',
   codex: '<path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M9 10l-2 2 2 2M15 10l2 2-2 2"/>',

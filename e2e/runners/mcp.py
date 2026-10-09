@@ -231,6 +231,22 @@ def check(step: dict, reply: dict, state: dict) -> list[str]:
     return bad
 
 
+def kernel_rows_on_disk(store: Path) -> int:
+    """The KERNEL'S execution rows (call / settle / task / flush) in `memory.db`.
+    Its store is RAM (`kernel_memory`, owner 2026-10-09): the file holds AI rows
+    only, so this must be 0."""
+    import sqlite3
+
+    f = store / "memory.db"
+    if not f.exists():
+        return 0
+    db = sqlite3.connect(f"file:{f}?mode=ro", uri=True)
+    try:
+        return db.execute("SELECT COUNT(*) FROM rows WHERE json_extract(doc, '$.kind') IN ('call', 'settle', 'task', 'flush')").fetchone()[0]
+    finally:
+        db.close()
+
+
 def store_rows(store: Path) -> list[dict]:
     """Every row in the memory store's file (`memory.db`), oldest id first. A
     row the store keeps under an agent's own key gets that agent as `agent`;
@@ -307,6 +323,10 @@ def after(run: dict, cwd: Path, code: int, client: Client, state: dict) -> list[
             n = row_count(store, want["agent"])
             if n < want["at_least"]:
                 bad.append(f"rows by {want['agent']}: {n} < {want['at_least']}")
+        elif key == "no_kernel_rows":
+            n = kernel_rows_on_disk(store)
+            if want and n:
+                bad.append(f"memory.db holds {n} kernel execution rows (the kernel's store is RAM)")
         elif key == "rows_grew":
             n = row_count(store)
             if want and n <= state.get("rows", 0):

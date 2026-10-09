@@ -50,6 +50,8 @@ REPO = E2E.parent
 SRC = REPO / "src"
 BIN = SRC / "target" / "debug" / "fantastic"
 MAC_CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+# a terminal's text, from its BUFFER (the WebGL renderer leaves no text in the DOM)
+XTERM_TEXT = "((()=>{const t=document.querySelector('.agent-frame .frame-body')?.xterm; if(!t) return ''; const b=t.buffer.active; let s=''; for(let i=0;i<b.length;i++){const l=b.getLine(i); if(l) s+=l.translateToString(true)+'\\n';} return s;})())"
 
 
 
@@ -357,7 +359,7 @@ async def step(run: dict, page: Page, host: Host, cwd: Path, url: str, state: di
         await page.type(run["type"])
     if "before_reload_xterm" in run:
         w = run["before_reload_xterm"]
-        if not await page.until(f"(document.querySelector('.xterm-rows')?.innerText||'').includes({json.dumps(w)})", 10):
+        if not await page.until(XTERM_TEXT + f".includes({json.dumps(w)})", 10):
             bad.append(f"the shell never answered {w!r} before the reload")
     if run.get("reload_page"):
         await page.open(url)
@@ -374,8 +376,8 @@ async def step(run: dict, page: Page, host: Host, cwd: Path, url: str, state: di
         if not await page.until(f"document.body.innerText.includes({json.dumps(word)})", 10):
             bad.append(f"page lacks {word!r}")
     for word in exp.get("xterm_contains", []):
-        if not await page.until(f"(document.querySelector('.xterm-rows')?.innerText||'').includes({json.dumps(word)})", 10):
-            txt = await page.js("document.querySelector('.xterm-rows')?.innerText||''")
+        if not await page.until(XTERM_TEXT + f".includes({json.dumps(word)})", 10):
+            txt = await page.js(XTERM_TEXT)
             bad.append(f"xterm lacks {word!r}: {txt[-200:]!r}")
     for p in exp.get("files_exist", []):
         if not wait_disk(lambda p=p: (cwd / p).exists()):
@@ -494,7 +496,7 @@ async def run_all(sc: dict, tmp: Path) -> bool:
         raise SystemExit(f"no Chrome at {chrome}: set CHROME")
     cdp_port = free_port()
     w = sc["window"]
-    br = subprocess.Popen([chrome, "--headless=new", "--disable-gpu", f"--window-size={w['width']},{w['height']}",
+    br = subprocess.Popen([chrome, "--headless=new", "--use-angle=swiftshader", "--enable-unsafe-swiftshader", f"--window-size={w['width']},{w['height']}",
                            f"--remote-debugging-port={cdp_port}", f"--user-data-dir={tmp / 'chrome'}",
                            "--no-first-run", "about:blank"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     host = Host(binary, cwd, port)

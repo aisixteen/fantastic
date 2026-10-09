@@ -188,6 +188,22 @@ def seed(cwd: Path, items: list[dict], subst: dict) -> None:
         p.write_text(yaml.safe_dump(json.loads(text), sort_keys=False))
 
 
+def kernel_rows_on_disk(store: Path) -> int:
+    """The KERNEL'S execution rows (call / settle / task / flush) in `memory.db`.
+    Its store is RAM (`kernel_memory`, owner 2026-10-09): the file holds AI rows
+    only, so this must be 0."""
+    import sqlite3
+
+    f = store / "memory.db"
+    if not f.exists():
+        return 0
+    db = sqlite3.connect(f"file:{f}?mode=ro", uri=True)
+    try:
+        return db.execute("SELECT COUNT(*) FROM rows WHERE json_extract(doc, '$.kind') IN ('call', 'settle', 'task', 'flush')").fetchone()[0]
+    finally:
+        db.close()
+
+
 def rows_text(store: Path) -> str:
     """Every row's document in the memory store, joined — for text checks."""
     import sqlite3
@@ -268,6 +284,10 @@ def after(run: dict, cwd: Path, out: str, state: dict) -> list[str]:
         elif key == "rows_contain":
             text = rows_text(store)
             bad += [f"no memory row holds {w!r}" for w in want if w not in text]
+        elif key == "no_kernel_rows":
+            n = kernel_rows_on_disk(store)
+            if want and n:
+                bad.append(f"memory.db holds {n} kernel execution rows (the kernel's store is RAM)")
         elif key == "rows_grew":
             n = rows(store)
             if want and n <= state.get("rows", 0):
