@@ -342,6 +342,12 @@ async def step(run: dict, page: Page, host: Host, cwd: Path, url: str, state: di
             bad.append("no frame head to drag")
         else:
             x0, y0 = r["x"] + r["w"] / 2 - 40, r["y"] + r["h"] / 2
+            # the head shows while the pointer is on the cell: point at the
+            # content first, then up onto the head, as a hand does
+            body = await page.rect(".agent-frame .frame-body")
+            if body is not None:
+                await page.cdp("Input.dispatchMouseEvent", type="mouseMoved", x=body["x"] + body["w"] / 2, y=body["y"] + 20)
+                await page.cdp("Input.dispatchMouseEvent", type="mouseMoved", x=x0, y=y0)
             await page.mouse("mousePressed", x0, y0)
             for i in range(1, 9):
                 await page.cdp("Input.dispatchMouseEvent", type="mouseMoved", x=x0 + run["drag"]["dx"] * i / 8,

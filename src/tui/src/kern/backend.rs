@@ -135,9 +135,36 @@ impl BackendBundle {
                     "kind": if Self::is_ai_handler(host, &t.handler()) { "ai" } else { "agent" },
                 })).collect::<Vec<_>>(),
                 "preferred": sh.preferred,
+                "bundles": Self::project_bundles(host),
             }),
             Err(e) => refuse("not_found", e, "the user's templates are not readable"),
         }
+    }
+
+    /// THE PROJECT'S OWN BUNDLES (owner 2026-10-09: "bundle it, then place it from
+    /// the popup"): every `.fantastic/bundles/<name>/` the kernel has loaded —
+    /// `{name, sentence}`, sorted — each placeable as a new instance
+    /// (`spawn {instance_of}`).
+    fn project_bundles(host: &Host) -> Vec<Value> {
+        let Ok(paths) = crate::env::Paths::here() else { return Vec::new() };
+        let mut out: Vec<(String, String)> = std::fs::read_dir(paths.store.join("bundles"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.path().join("bundle.yaml").is_file())
+            .filter_map(|e| e.file_name().to_str().map(str::to_string))
+            .filter(|n| host.kernel.bundles.is_folder(n))
+            .map(|n| {
+                let sentence = std::fs::read_to_string(paths.store.join("bundles").join(&n).join("bundle.yaml"))
+                    .ok()
+                    .and_then(|t| serde_yaml::from_str::<Value>(&t).ok())
+                    .and_then(|d| d.get("sentence").and_then(Value::as_str).map(str::to_string))
+                    .unwrap_or_default();
+                (n, sentence)
+            })
+            .collect();
+        out.sort();
+        out.into_iter().map(|(name, sentence)| json!({"name": name, "sentence": sentence})).collect()
     }
 
     async fn spawn(host: &Host, me: &AgentId, p: &Value) -> Value {
@@ -157,6 +184,11 @@ impl BackendBundle {
         // bundle folder from the CLI's starter, loaded, and one instance of it
         if let Some(kind) = p.get("bundle").and_then(Value::as_str).filter(|s| !s.is_empty()) {
             return Self::spawn_bundle(host, me, kind, stamp).await;
+        }
+        // ONE MORE INSTANCE of a bundle the project already holds (the popup's
+        // "host · bundles" group)
+        if let Some(name) = p.get("instance_of").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+            return Self::spawn_instance(host, me, name, stamp).await;
         }
         let name = match p.get("template").and_then(Value::as_str).filter(|s| !s.is_empty()) {
             Some(n) => n.to_string(),
@@ -224,6 +256,40 @@ impl BackendBundle {
             return refuse("bad_arg", format!("spawn: `{id}`'s view: {e}"), "");
         }
         json!({"id": id, "root": id, "bundle": name, "folder": dir.display().to_string(), "kind": "bundle"})
+    }
+
+    /// An instance of project bundle `name` (`.fantastic/bundles/<name>/`, loaded):
+    /// `<name>_<n>` (the next free n) under this canvas node, granted like any
+    /// cell's backend, its view written from the bundle's view file.
+    async fn spawn_instance(host: &Host, me: &AgentId, name: &str, stamp: Map<String, Value>) -> Value {
+        let paths = match crate::env::Paths::here() {
+            Ok(p) => p,
+            Err(e) => return refuse("not_found", format!("spawn: the project dir: {e}"), ""),
+        };
+        let dir = paths.store.join("bundles").join(name);
+        if !dir.join("bundle.yaml").is_file() || !host.kernel.bundles.is_folder(name) {
+            let have: Vec<String> = Self::project_bundles(host).iter().filter_map(|b| b["name"].as_str().map(str::to_string)).collect();
+            return refuse("not_found", format!("spawn: no project bundle `{name}`"), &format!("the project's bundles: {}", have.join(", ")));
+        }
+        let id = (1..)
+            .map(|n| format!("{name}_{n}"))
+            .find(|c| !host.kernel.agents.contains_key(&AgentId::from(c.as_str())))
+            .expect("an unused instance id");
+        let mut spec = stamp;
+        for (k, v) in [("type", json!("create_agent")), ("parent_id", json!(me.0)), ("id", json!(id)), ("handler_module", json!(name))] {
+            spec.insert(k.into(), v);
+        }
+        let r = host.operator("kernel", Value::Object(spec)).await.result;
+        if let Some(e) = r.get("error").and_then(Value::as_str) {
+            return refuse("bad_arg", format!("spawn: an instance of `{name}`: {e}"), "");
+        }
+        if let Err(e) = crate::kern::reach::granted(host, &id).await {
+            return refuse("bad_arg", e, "");
+        }
+        if let Err(e) = crate::kern::bundle_watch::refresh_views(host, name, &dir).await {
+            return refuse("bad_arg", format!("spawn: `{id}`'s view: {e}"), "");
+        }
+        json!({"id": id, "root": id, "bundle": name, "kind": "bundle"})
     }
 
     /// A plugin template placed: a host agent `<name>_<hex8>` under `canvas_root`,
@@ -553,8 +619,8 @@ impl Bundle for BackendBundle {
         json!({
                     "create": "args: record:dict (req — handler_module, id?, its own fields; no parent or grants). One direct child of this agent; asking for an existing child of the same handler again answers it. {id, …}.",
                     "delete": "args: id:str (req — an agent under this one). Deletes it and its subtree.",
-                    "presets": "No args. {templates: [{name, handler_module, model}], preferred}.",
-                    "spawn": "args: template:str? (else the default), stamp:dict? (the caller's own fields for the backend root, copied unread), peer_grants:dict? (any grant key — more egress for the AI). {id, root, template, handler_module, model}.",
+                    "presets": "No args. {templates: [{name, handler_module, model}], preferred, bundles: [{name, sentence}] (the project's own bundles)}.",
+                    "spawn": "args: template:str? (else the default) | bundle:str (a NEW project bundle from that starter) | instance_of:str (one more instance of a project bundle), stamp:dict? (the caller's own fields for the backend root, copied unread), peer_grants:dict? (any grant key — more egress for the AI). {id, root, template, handler_module, model}.",
                     "keep": "args: id:str (req — the cell's AI), name:str?. Records the dialog (its rows are already in the project's memory store); it outlives the cell. {kept, name}.",
                     "rename": "args: id:str, name:str. {id, name}.",
                     "dialogs": "No args. The kept dialogs: {dialogs: [{id, name, template, live}]}.",

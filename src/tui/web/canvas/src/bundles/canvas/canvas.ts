@@ -1,3 +1,4 @@
+import { TIPS_HTML } from "../tips/tips_html.ts";
 import { BACKGROUNDS, BACKGROUNDS_VERBS, grantsFor } from "../backgrounds/backgrounds_agent.ts";
 import { backgroundsView } from "../backgrounds/backgrounds_view.ts";
 import { DEFAULT_BG_SOURCE } from "./default_bg.ts";
@@ -24,7 +25,7 @@ const CELL_VERBS = ["reflect", "get_html", "set_html", "emit"] as const;
 /** What a cell's AI may ask the background. */
 const BG_VERBS = ["set_bg", "default_bg", "clear_bg", "get_bg", "reflect"] as const;
 import { MCP_ADD_VIEW, mcpAddView, mcpView, setMcpDeps } from "../mcp_view/mcp_view.ts";
-import { CANVASES_VIEW, SIDEBAR_VIEW, canvasesView, renderSidebars, setSideDeps, sidebarView } from "../side_view/side_view.ts";
+import { SIDEBAR_VIEW, canvasesView, renderSidebars, setSideDeps, sidebarView } from "../side_view/side_view.ts";
 import type { TreeNode } from "./sidebar.ts";
 import type { Pick, Presets } from "./action_popup.ts";
 import { htmlView } from "../html_agent/html_view.ts";
@@ -663,6 +664,13 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       preferred: (r["preferred"] as string | null) ?? null,
       dialogs: ((d?.["dialogs"] as Presets["dialogs"] | undefined) ?? []).map((x) => ({ id: x.id, name: x.name })),
       coding: await codingAgents(),
+      bundles: (r["bundles"] as Presets["bundles"]) ?? [],
+      // this canvas's page bundles: folder rows with a base, loaded (not refused)
+      pageBundles: kernel
+        .availableBundles()
+        .map((b) => b as unknown as Record<string, unknown>)
+        .filter((b) => typeof b["base"] === "string" && b["error"] === undefined)
+        .map((b) => ({ name: String(b["name"]), sentence: typeof b["sentence"] === "string" ? b["sentence"] : "" })),
     };
   };
   // THE VIEW AS A PEER: a cell's AI (on the host) reaches the cell's view at
@@ -1034,9 +1042,9 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   // agent's own record says — host-first, like a terminal.
   // A STARTER BUNDLE (`starter`): the same, from a NEW project bundle folder the
   // host scaffolds (`canvas_root spawn {bundle}`).
-  const spawnPluginAt = async (w: { x: number; y: number }, template: string | null, starter?: string): Promise<void> => {
+  const spawnPluginAt = async (w: { x: number; y: number }, template: string | null, starter?: string, instanceOf?: string): Promise<void> => {
     const cellId = `view_${crypto.randomUUID().slice(0, 8)}`;
-    const what = starter !== undefined ? { bundle: starter } : { template };
+    const what = instanceOf !== undefined ? { instance_of: instanceOf } : starter !== undefined ? { bundle: starter } : { template };
     const r = (await host.callHost(BACKEND, { type: "spawn", ...what, stamp: { cell_id: cellId } } as unknown as Payload)) as Rec;
     if (typeof r["error"] === "string") {
       toast(`✕ ${r["error"]}`);
@@ -1220,13 +1228,13 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   };
 
   // A SIDEBAR or the CANVAS LIST at the spot: page-only cells (no backend).
-  const spawnPageCellAt = (w: { x: number; y: number }, handler: string, prefix: string, width: number, height: number): void => {
+  const spawnPageCellAt = (w: { x: number; y: number }, handler: string, prefix: string, width: number, height: number, name?: string): void => {
     kernel.register(
       new Agent({
         id: `${prefix}_${crypto.randomUUID().slice(0, 8)}`,
         parentId: containerNow(),
         handlerModule: handler,
-        meta: { x: Math.round(w.x), y: Math.round(w.y), width, height },
+        meta: { x: Math.round(w.x), y: Math.round(w.y), width, height, ...(name !== undefined ? { display_name: name } : {}) },
       }),
     );
   };
@@ -1245,6 +1253,19 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
         handlerModule: BACKGROUNDS,
         meta: { x: Math.round(w.x), y: Math.round(w.y), width: 400, height: 620, display_name: "backgrounds",
           can_call: g.canCall as unknown as Json, callable_by: { $self: "*" }, user_bgs: [], hidden_stock: [], current: null, rotate: { on: false, every_s: 60 } },
+      }),
+    );
+  };
+
+  // TIPS & TRICKS at the spot: a PLAIN html cell, its default body the tips
+  // card (`tips/tips_html.ts`) — edited like any html cell
+  const spawnTipsAt = (w: { x: number; y: number }): void => {
+    kernel.register(
+      new Agent({
+        id: `tips_${crypto.randomUUID().slice(0, 8)}`,
+        parentId: containerNow(),
+        handlerModule: "html_agent.ts",
+        meta: { x: Math.round(w.x), y: Math.round(w.y), width: 440, height: 290, display_name: "tips & tricks", html: TIPS_HTML },
       }),
     );
   };
@@ -1284,14 +1305,22 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   canvas.addEventListener("mousemove", (e) => {
     pointer = { x: e.clientX, y: e.clientY };
   });
-  const spotAt = async (sx: number, sy: number, title: string, onClose?: () => void): Promise<void> => {
-    const w = screenToWorld(sx, sy);
+  const spotAt = async (sx: number, sy: number, title: string, onClose?: () => void, selector?: string): Promise<void> => {
+    let w = screenToWorld(sx, sy);
     openActionPopup({
       screenX: sx,
       screenY: sy,
       presets: await presets(),
       title,
       ...(onClose ? { onClose } : {}),
+      // the popup dragged: the pick lands at the moved insert point, and the
+      // selector's own record says where it now is
+      onMove: (nx: number, ny: number): void => {
+        w = screenToWorld(nx, ny);
+        if (selector !== undefined && kernel.get(selector) !== undefined) {
+          kernel.updateMeta(selector, { x: Math.round(w.x), y: Math.round(w.y), sx: Math.round(nx), sy: Math.round(ny) } as unknown as Payload);
+        }
+      },
       onPick: (p: Pick): void => {
         if (p.kind === "terminal") void spawnTerminalAt(w);
         else if (p.kind === "html") spawnHtmlAt(w);
@@ -1302,11 +1331,13 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
         // (its exec agent runs EXACTLY that program, as `run COMMAND` does)
         else if (p.kind === "coding") void spawnPairAt(DEFAULT_VIEW, w, { width: 760, height: 480 }, { command: [p.path], display_name: p.name }, { allowed: [exactLine([p.path])] });
         else if (p.kind === "mcp") spawnPageCellAt(w, MCP_ADD_VIEW, "mcp_add", 420, 260);
-        else if (p.kind === "sidebar") spawnPageCellAt(w, SIDEBAR_VIEW, "sidebar", 320, 520);
+        else if (p.kind === "tree") spawnPageCellAt(w, SIDEBAR_VIEW, "tree", 320, 520, "tree view");
         else if (p.kind === "backgrounds") spawnBackgroundsAt(w);
-        else if (p.kind === "canvases") spawnPageCellAt(w, CANVASES_VIEW, "canvases", 260, 300);
+        else if (p.kind === "tips") spawnTipsAt(w);
         else if (p.kind === "plugin") void spawnPluginAt(w, p.template);
         else if (p.kind === "bundle") void spawnPluginAt(w, null, p.starter);
+        else if (p.kind === "instance") void spawnPluginAt(w, null, undefined, p.bundle);
+        else if (p.kind === "page_instance") spawnPageCellAt(w, p.bundle, p.bundle, 360, 260);
         else void spawnAiAt(w, p.template, p.text);
       },
     });
@@ -1317,7 +1348,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   // (its popup gone with the tab) is removed at load.
   for (const id of everyAgent()) if (kernel.get(id)?.record().handler_module === SELECTOR) kernel.remove(id);
   setSelectorHost({
-    open: (_id, sx, sy, title, done) => spotAt(sx ?? pointer.x, sy ?? pointer.y, title, done),
+    open: (id, sx, sy, title, done) => spotAt(sx ?? pointer.x, sy ?? pointer.y, title, done, id),
     tiles: async (typed) => tiles(typed, await presets()).map((t) => ({ label: t.label, kind: t.pick.kind, section: t.section, hint: t.hint })),
   });
   const openSelector = (sx: number, sy: number): void => {

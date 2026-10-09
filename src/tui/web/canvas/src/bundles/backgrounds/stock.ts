@@ -1,4 +1,5 @@
-// THE STOCK BACKGROUNDS (owner 2026-10-09) — made from the bganim canvas's
+// THE STOCK BACKGROUNDS (owner 2026-10-09) — the owner's set: Isoline, Glyph and
+// Copper from the bganim canvas's panel, and Moire (made there by an AI). From that
 // backgrounds panel: one shared PRELUDE (disposables, the clock, a baked noise
 // texture, GLSL helpers, a world backdrop plane, the headline) and, per
 // background, a BODY and its colour SETS (4 hex: field, line, mid, accent).
@@ -57,92 +58,6 @@ export const STOCK: readonly StockBackground[] = [
    ]
   ],
   "body": "// Isoline — a slow topographic field of hairline contours; one contour burns in the accent\nbackdrop(`\n  float t = uT * 0.012; vec2 p = vW.xy / 1100.0;\n  float n = fbm(p + vec2(t, -t * 0.6) + 0.35 * fbm2(p * 0.7 + vec2(-t, t)));\n  float v = n * 16.0;\n  vec3 c = uC0 + uC1 * (0.19 * hair(v, 1.0) + 0.13 * hair(v / 4.0, 1.2));\n  float lvl = 7.5 + 1.5 * sin(uT * 0.03);\n  c += uC3 * hairAt(v, lvl, 1.6) * 0.9 + uC2 * exp(-abs(v - lvl) * 3.5) * 0.5;\n  c *= vignette(vW.xy);\n  gl_FragColor = vec4(c + grain(uT) * 0.025, 1.0);\n`);\nheadline();\n"
- },
- {
-  "name": "Bitmap",
-  "note": "1-bit Bayer dither glow",
-  "sets": [
-   [
-    "Ember",
-    [
-     "#050506",
-     "#8a8884",
-     "#6b1d08",
-     "#ff6a1f"
-    ]
-   ],
-   [
-    "Lagoon",
-    [
-     "#040607",
-     "#7f8b8a",
-     "#0c3a36",
-     "#2fd0bd"
-    ]
-   ],
-   [
-    "Damson",
-    [
-     "#060407",
-     "#8d7f8f",
-     "#3d1546",
-     "#ff4d8d"
-    ]
-   ],
-   [
-    "Cloud",
-    [
-     "#060606",
-     "#8a8a88",
-     "#2e2e2c",
-     "#f0eee9"
-    ]
-   ]
-  ],
-  "body": "// Bitmap — 1-bit Bayer dither: a slow glow rendered as ordered dots on black\nbackdrop(`\n  float t = uT * 0.02;\n  vec2 p = (vW.xy - vec2(650.0, -330.0)) / 800.0;\n  vec2 q = p + (fbm2(p * 1.4 + t) - 0.5) * 0.6;\n  float f = exp(-dot(q, q) * 3.0) * 0.7 + (fbm(vW.xy / 600.0 + t * 2.0) - 0.5) * 0.08;\n  float on = step(bayer8(floor(gl_FragCoord.xy / (2.0 * uPR))), f * 0.85);\n  vec3 c = uC0 + on * mix(uC1 * 0.3, uC3, smoothstep(0.28, 0.45, f));\n  gl_FragColor = vec4(c, 1.0);\n`, { decl: `\n  float bayer2(vec2 a){ a = floor(a); return fract(a.x / 2.0 + a.y * a.y * 0.75); }\n  float bayer4(vec2 a){ return bayer2(0.5 * a) * 0.25 + bayer2(a); }\n  float bayer8(vec2 a){ return bayer4(0.5 * a) * 0.25 + bayer2(a); }\n` });\nheadline();\n"
- },
- {
-  "name": "Halftone",
-  "note": "print dot field · dense dots in accent",
-  "sets": [
-   [
-    "Ember",
-    [
-     "#050506",
-     "#8a8884",
-     "#6b1d08",
-     "#ff6a1f"
-    ]
-   ],
-   [
-    "Lagoon",
-    [
-     "#040607",
-     "#7f8b8a",
-     "#0c3a36",
-     "#2fd0bd"
-    ]
-   ],
-   [
-    "Damson",
-    [
-     "#060407",
-     "#8d7f8f",
-     "#3d1546",
-     "#ff4d8d"
-    ]
-   ],
-   [
-    "Cloud",
-    [
-     "#060606",
-     "#8a8a88",
-     "#2e2e2c",
-     "#f0eee9"
-    ]
-   ]
-  ],
-  "body": "// Halftone — a print-screen dot field; dot size follows a drifting wave, the densest dots take the accent\nbackdrop(`\n  float S = 16.0;\n  vec2 ctr = (floor(vW.xy / S) + 0.5) * S;\n  float t = uT * 0.02;\n  float n = fbm(ctr / 900.0 + vec2(t, -t * 0.7));\n  float wave = 0.55 + 0.45 * sin(ctr.x * 0.004 + ctr.y * 0.002 - uT * 0.15);\n  float k = clamp(n * n * 1.7 * wave, 0.0, 0.95);\n  float r = S * 0.5 * k, px = fwidth(vW.x);\n  float dotm = 1.0 - smoothstep(r - px, r + px, length(vW.xy - ctr));\n  float vis = 1.0 - smoothstep(S / 8.0, S / 4.0, px);\n  float hot = smoothstep(0.66, 0.82, k);\n  vec3 col = mix(uC1, uC3, hot);\n  vec3 c = uC0 + col * (dotm * vis + k * k * 0.78 * (1.0 - vis)) * (0.45 + 0.55 * hot);\n  c *= vignette(vW.xy);\n  gl_FragColor = vec4(c + grain(uT) * 0.02, 1.0);\n`);\nheadline();\n"
  },
  {
   "name": "Glyph",
@@ -231,8 +146,8 @@ export const STOCK: readonly StockBackground[] = [
   "body": "// Copper — a dark wire terrain rolling toward you; only the crests catch the accent light\nbackdrop(`\n  vec3 c = uC0 + uC2 * exp(-pow((vW.y + 120.0) / 260.0, 2.0)) * 0.5;\n  gl_FragColor = vec4(c * vignette(vW.xy) + grain(uT) * 0.02, 1.0);\n`, { z: -1100 });\n{\n  const lp = [], STEP = 36, SEG = 9, X = 1100, Z0 = 100, Z1 = -1000;\n  for (let x = -X; x <= X; x += STEP) for (let z = Z0; z > Z1; z -= SEG) lp.push(x, 0, z, x, 0, z - SEG);\n  for (let z = Z0; z >= Z1; z -= STEP) for (let x = -X; x < X; x += SEG) lp.push(x, 0, z, x + SEG, 0, z);\n  const geo = keep(new THREE.BufferGeometry());\n  geo.setAttribute('position', new THREE.Float32BufferAttribute(lp, 3));\n  const mat = keep(new THREE.ShaderMaterial({\n    uniforms, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,\n    vertexShader: `uniform float uT; varying float vF, vH;\n      float hgt(vec2 q){ float t = uT * 0.12;\n        return 26.0 * sin(q.x * 0.006 + q.y * 0.004 - t) + 16.0 * sin(-q.x * 0.009 + q.y * 0.011 - t * 1.4) + 7.0 * sin(q.x * 0.021 + q.y * 0.017 - t * 2.1); }\n      void main(){\n        vec3 p = position; float h = hgt(p.xz); p.y += h; vH = h;\n        vF = (1.0 - smoothstep(-200.0, -980.0, p.z)) * smoothstep(100.0, 20.0, p.z) * (1.0 - smoothstep(600.0, 1100.0, abs(p.x)));\n        gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);\n      }`,\n    fragmentShader: `uniform vec3 uC1, uC3; varying float vF, vH; void main(){\n      float crest = smoothstep(22.0, 40.0, vH);\n      vec3 c = mix(uC1 * 0.75, uC3, crest) * (0.45 + 0.9 * crest);\n      gl_FragColor = vec4(c * vF * 0.6, 1.0); }`,\n  }));\n  const terrain = new THREE.LineSegments(geo, mat);\n  terrain.position.y = -95;\n  terrain.frustumCulled = false;\n  scene.add(terrain);\n}\nheadline();\n"
  },
  {
-  "name": "Signal",
-  "note": "pulsar-plot traces · peaks in accent",
+  "name": "Moire",
+  "note": "two drifting ring fields; accent where they cross",
   "sets": [
    [
     "Ember",
@@ -271,179 +186,7 @@ export const STOCK: readonly StockBackground[] = [
     ]
    ]
   ],
-  "body": "// Signal — stacked hairline traces, a pulsar-plot ridge in the middle; the highest peaks glow in the accent\nbackdrop(`\n  float S = 22.0, line = 0.0, hot = 0.0;\n  float i0 = floor(vW.y / S);\n  float env = exp(-pow(vW.x / 620.0, 2.0) * 2.0) * exp(-pow(vW.y / 900.0, 2.0));\n  for (int k = -5; k <= 0; k++){\n    float i = i0 + float(k);\n    vec2 nn = fbm2(vec2(vW.x / 150.0, i * 0.37 + uT * 0.05));\n    float d = env * pow(nn.x, 2.2) * 120.0 + (nn.y - 0.5) * 2.0;\n    float l = hairAt(vW.y, i * S + d, 1.2);\n    line = max(line, l);\n    hot = max(hot, l * smoothstep(28.0, 60.0, d));\n  }\n  vec3 c = uC0 + uC1 * 0.37 * line * (0.4 + 0.6 * env) + uC3 * hot * 0.95;\n  c *= vignette(vW.xy);\n  gl_FragColor = vec4(c + grain(uT) * 0.02, 1.0);\n`);\nheadline();\n"
- },
- {
-  "name": "Damson",
-  "note": "frosted glass pools · accent rim",
-  "sets": [
-   [
-    "Ember",
-    [
-     "#050506",
-     "#8a8884",
-     "#6b1d08",
-     "#ff6a1f"
-    ]
-   ],
-   [
-    "Lagoon",
-    [
-     "#040607",
-     "#7f8b8a",
-     "#0c3a36",
-     "#2fd0bd"
-    ]
-   ],
-   [
-    "Damson",
-    [
-     "#060407",
-     "#8d7f8f",
-     "#3d1546",
-     "#ff4d8d"
-    ]
-   ],
-   [
-    "Cloud",
-    [
-     "#060606",
-     "#8a8a88",
-     "#2e2e2c",
-     "#f0eee9"
-    ]
-   ]
-  ],
-  "body": "// Damson — dark frosted glass: slow light pools behind grain, an accent hairline traces their rim\nbackdrop(`\n  vec2 p = vW.xy / 700.0; float t = uT * 0.05;\n  vec2 c1 = vec2(sin(t * 0.7) * 0.8, cos(t * 0.5) * 0.4);\n  vec2 c2 = vec2(cos(t * 0.4 + 2.0) * 0.9, sin(t * 0.6 + 1.0) * 0.45);\n  vec2 c3 = vec2(sin(t * 0.3 + 4.0) * 0.6, cos(t * 0.8 + 3.0) * 0.35);\n  float f = 0.09 / dot(p - c1, p - c1) + 0.06 / dot(p - c2, p - c2) + 0.05 / dot(p - c3, p - c3);\n  vec3 c = uC0 + uC2 * smoothstep(0.35, 2.6, f) * 1.1;\n  c += uC3 * hairAt(f, 1.15, 1.4) * 0.65;\n  gl_FragColor = vec4(c + grain(uT) * 0.05, 1.0);\n`);\nheadline();\n"
- },
- {
-  "name": "Thread",
-  "note": "one liquid line of light · echoes",
-  "sets": [
-   [
-    "Ember",
-    [
-     "#050506",
-     "#8a8884",
-     "#6b1d08",
-     "#ff6a1f"
-    ]
-   ],
-   [
-    "Lagoon",
-    [
-     "#040607",
-     "#7f8b8a",
-     "#0c3a36",
-     "#2fd0bd"
-    ]
-   ],
-   [
-    "Damson",
-    [
-     "#060407",
-     "#8d7f8f",
-     "#3d1546",
-     "#ff4d8d"
-    ]
-   ],
-   [
-    "Cloud",
-    [
-     "#060606",
-     "#8a8a88",
-     "#2e2e2c",
-     "#f0eee9"
-    ]
-   ]
-  ],
-  "body": "// Thread — one liquid line of accent light weaving across black, faint echoes beside it\nbackdrop(`\n  float t = uT * 0.04, x = vW.x;\n  float y = 260.0 * sin(x * 0.0011 + t) + 120.0 * sin(x * 0.0027 - t * 1.7) + 80.0 * (fbm(vec2(x * 0.002, t)) - 0.5);\n  float d = abs(vW.y - y);\n  float along = 0.55 + 0.45 * sin(x * 0.002 - uT * 0.3);\n  vec3 c = uC0 + uC3 * (hairAt(vW.y, y, 1.5) * 0.9 + exp(-d / 16.0) * 0.35 + exp(-d / 90.0) * 0.12) * along;\n  for (int k = 1; k <= 4; k++){\n    float o = float(k) * (34.0 + 10.0 * sin(x * 0.0015 + t * 2.0 + float(k)));\n    c += uC1 * 0.2 * (hairAt(vW.y, y + o, 1.0) + hairAt(vW.y, y - o, 1.0)) * (1.0 - float(k) * 0.2);\n  }\n  c *= vignette(vW.xy);\n  gl_FragColor = vec4(c + grain(uT) * 0.02, 1.0);\n`);\nheadline();\n"
- },
- {
-  "name": "Orbit",
-  "note": "hairline orbits · one accent body",
-  "sets": [
-   [
-    "Ember",
-    [
-     "#050506",
-     "#8a8884",
-     "#6b1d08",
-     "#ff6a1f"
-    ]
-   ],
-   [
-    "Lagoon",
-    [
-     "#040607",
-     "#7f8b8a",
-     "#0c3a36",
-     "#2fd0bd"
-    ]
-   ],
-   [
-    "Damson",
-    [
-     "#060407",
-     "#8d7f8f",
-     "#3d1546",
-     "#ff4d8d"
-    ]
-   ],
-   [
-    "Cloud",
-    [
-     "#060606",
-     "#8a8a88",
-     "#2e2e2c",
-     "#f0eee9"
-    ]
-   ]
-  ],
-  "body": "// Orbit — hairline orbits around an off-centre point; a single accent body trails light\nbackdrop(`\n  vec2 p = vW.xy - vec2(-200.0, -150.0);\n  float r = length(p), a = atan(p.y, p.x);\n  vec3 c = uC0 + uC1 * 0.17 * hair(r / 140.0, 1.0) * (1.0 - smoothstep(140.0 * 7.5, 140.0 * 8.5, r));\n  for (int k = 1; k <= 7; k++){\n    float R = 140.0 * float(k);\n    float ang = uT * 0.25 / pow(float(k), 1.5) + float(k) * 1.9;\n    vec2 q = R * vec2(cos(ang), sin(ang));\n    float dq = length(p - q);\n    float body = 1.0 - smoothstep(5.0, 7.0, dq);\n    float trail = exp(-mod(ang - a, 6.2832) * 2.5) * hairAt(r, R, 1.4);\n    if (k == 3) c += uC3 * (body + trail * 0.8 + exp(-dq / 40.0) * 0.25);\n    else c += uC1 * (body + trail * 0.8) * 0.5;\n  }\n  c *= vignette(vW.xy);\n  gl_FragColor = vec4(c + grain(uT) * 0.02, 1.0);\n`);\nheadline();\n"
- },
- {
-  "name": "Riso",
-  "note": "misregistered two-ink overprint",
-  "sets": [
-   [
-    "Pop",
-    [
-     "#050506",
-     "#ff3d8b",
-     "#f2382f",
-     "#ff6a1f"
-    ]
-   ],
-   [
-    "Pool",
-    [
-     "#040607",
-     "#2fd0bd",
-     "#1f8a9a",
-     "#3a6bff"
-    ]
-   ],
-   [
-    "Sun",
-    [
-     "#060504",
-     "#ffb000",
-     "#ff5a1f",
-     "#ff3d2f"
-    ]
-   ],
-   [
-    "Mono",
-    [
-     "#060606",
-     "#d8d6d0",
-     "#ffffff",
-     "#7a7874"
-    ]
-   ]
-  ],
-  "body": "// Riso — two overprinted ink shapes (line + accent inks, mid where they overlap), misregistered, heavy grain\nbackdrop(`\n  float t = uT * 0.05;\n  vec2 mis = vec2(sin(t * 0.7), cos(t * 0.9)) * 7.0;\n  vec2 a = vW.xy - vec2(-420.0 + 60.0 * sin(t * 0.3), 120.0 + 40.0 * cos(t * 0.4));\n  vec2 b = vW.xy + mis - vec2(360.0 + 50.0 * cos(t * 0.25), -260.0 + 50.0 * sin(t * 0.35));\n  float wob = (fbm(vW.xy / 220.0 + t) - 0.5) * 40.0;\n  float px = fwidth(vW.x);\n  float sa = 1.0 - smoothstep(-px, px, length(a) - 190.0 - wob);\n  float sb = 1.0 - smoothstep(-px, px, length(b * vec2(1.0, 1.35)) - 170.0 + wob);\n  float tooth = 0.72 + 0.28 * hash(floor(vW.xy / 3.0));\n  vec3 ink = mix(uC1 * sa * 0.34 + uC3 * sb * 0.42, uC2 * 0.62, sa * sb);\n  gl_FragColor = vec4(uC0 + ink * tooth + grain(uT) * 0.06, 1.0);\n`);\nheadline({ accent: SET[1] });\n"
+  "body": "// Moire — two hairline ring fields drift apart and back; accent only where rings cross\nbackdrop(`\n  vec2 a = vec2(-260.0, -120.0) + 60.0 * vec2(cos(uT * 0.05), sin(uT * 0.04));\n  vec2 b = vec2(240.0, 140.0) + 60.0 * vec2(sin(uT * 0.045), cos(uT * 0.055));\n  float ra = length(vW.xy - a) / 22.0, rb = length(vW.xy - b) / 22.0;\n  float lod = 1.0 - smoothstep(0.25, 0.6, fwidth(ra));\n  float fade = (1.0 - smoothstep(900.0, 1800.0, length(vW.xy))) * lod;\n  float la = hair(ra, 1.0), lb = hair(rb, 1.0);\n  float beat = 0.5 + 0.5 * cos((ra - rb) * 6.2832);\n  vec3 c = uC0 + uC1 * 0.14 * max(la, lb) * fade;\n  c += uC3 * la * lb * fade * 0.9;\n  c += uC2 * beat * 0.3 * exp(-length(vW.xy - mix(a, b, 0.5)) / 500.0);\n  gl_FragColor = vec4(c * vignette(vW.xy) + grain(uT) * 0.02, 1.0);\n`);\nheadline();\n"
  }
 ];
 

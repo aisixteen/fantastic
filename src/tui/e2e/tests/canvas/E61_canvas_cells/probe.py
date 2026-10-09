@@ -6,9 +6,10 @@ b) the double-click's `host · coding agents` group lists a coding agent found o
    first on PATH (no real agent runs);
 c) its tile starts EXACTLY that program in a terminal cell, interactive (it
    echoes what is typed);
-d) `sidebar` and `canvases` are cells placed from the double-click;
-e) `+ new canvas` in the canvases cell makes a PEER canvas and opens it: its own
-   page records and guid, empty, and its sidebar does not list the first
+d) `tree view` is a cell placed from the double-click (the canvas-list cell is
+   gone from the menu for now, owner 2026-10-09);
+e) `new_canvas` on the canvas node makes a PEER canvas, opened by its URL: its
+   own page records and guid, empty, and its tree view does not list the first
    canvas's agents;
 f) a page bundle in that canvas's own folder runs its instance, and an edit of
    its bundle.yaml re-renders it live."""
@@ -77,7 +78,8 @@ def main() -> bool:
             await pg.until("!!document.querySelector('.action-popup .tile')", 10)
             await pg.until(f"[...document.querySelectorAll('.action-popup .tile')].some(e=>(e.querySelector('.lb')||{{}}).textContent==='{FAKE}')", 10)
             hint = await pg.js(f"(()=>{{const t=[...document.querySelectorAll('.action-popup .tile[data-section=coding]')].find(e=>(e.querySelector('.lb')||{{}}).textContent==='{FAKE}'); return t ? t.title : null}})()")
-            r["coding_listed"] = isinstance(hint, str) and str(fake) in hint
+            # listed by its name alone — no path under or on the tile (owner 2026-10-09)
+            r["coding_listed"] = hint == FAKE
             await pg.cdp("Input.dispatchKeyEvent", type="keyDown", key="Escape", code="Escape", windowsVirtualKeyCode=27)
             await asyncio.sleep(0.5)
             # c) its tile starts exactly that program, interactive
@@ -92,16 +94,16 @@ def main() -> bool:
             r["coding_cell"] = rec.get("command") == [str(fake)]
             backend = rec.get("backend_id", "")
             r["coding_exact"] = (rig.host_record(backend) or {}).get("allowed") == [str(fake).replace(".", "\\.")]
-            # d) sidebar + canvases cells from the double-click
+            # d) a tree view cell from the double-click
             r["sidebar_cell"] = await open_sidebar(pg, 1250, 80)
             r["sidebar_lists_backend"] = bool(await pg.until(
                 f"(()=>{{[...document.querySelectorAll('.side .agents-tree li .tw')].filter(x=>x.textContent==='▸').forEach(x=>x.click()); return [...document.querySelectorAll('.side .agents-tree li .nm')].some(n=>n.textContent==={backend!r})}})()", 10))
-            await spot(pg, 1250, 700, "canvases")
-            r["canvases_cell"] = bool(await pg.until("document.querySelectorAll('.agent-frame li.canvas.here').length === 1", 10))
             info["main_backend"] = backend
-            # e) + new canvas → a peer, opened
-            await pg.js("document.querySelector('.agent-frame .canvas-new').click()")
-            await pg.js("(()=>{const i=document.querySelector('.agent-frame .canvas-new input'); i.value='second'; i.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}))})()")
+            # e) a peer canvas — the canvas node's `new_canvas`, opened by its URL
+            from canvas import host_call
+            made = await host_call(rig.port, "canvas_root", {"type": "new_canvas", "name": "second"})
+            info["new_canvas"] = made
+            await pg.open(rig.url + f"?canvas={made.get('id', '')}")
             r["peer_opened"] = bool(await pg.until(f"location.search.includes('canvas={PEER}')", secs))
             await pg.until("!!document.getElementById('canvas')", 20)
             await asyncio.sleep(2)

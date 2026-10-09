@@ -27,22 +27,21 @@ function page(): { k: Kernel; call: (p: Payload) => Promise<Record<string, unkno
   return { k, call };
 }
 
-test("the stock is the bganim panel's ten backgrounds, and the default is Isoline · Ember", async () => {
-  assert.equal(STOCK.length, 10);
-  assert.deepEqual(STOCK.map((s) => s.name), ["Isoline", "Bitmap", "Halftone", "Glyph", "Copper", "Signal", "Damson", "Thread", "Orbit", "Riso"]);
+test("the stock is the owner's set — Isoline, Glyph, Copper, Moire — and the default is Isoline · Ember", async () => {
+  assert.deepEqual(STOCK.map((s) => s.name), ["Isoline", "Glyph", "Copper", "Moire"]);
   const iso = STOCK[0]!;
   assert.equal(DEFAULT_BG_SOURCE, sourceOf(iso.body, iso.sets.find(([n]) => n === "Ember")![1]));
 });
 
 test("set applies a stock background through the view's background; list says what is current", async () => {
   const { k, call } = page();
-  const r = await call({ type: "set", name: "Halftone", set: 1 });
-  assert.equal(r["applied"], "Halftone", JSON.stringify(r));
-  const h = STOCK.find((s) => s.name === "Halftone")!;
+  const r = await call({ type: "set", name: "Copper", set: 1 });
+  assert.equal(r["applied"], "Copper", JSON.stringify(r));
+  const h = STOCK.find((s) => s.name === "Copper")!;
   assert.equal(k.get("background")?.meta["bg_source"], sourceOf(h.body, h.sets[1]![1]));
   const l = await call({ type: "list" });
-  assert.deepEqual(l["current"], { name: "Halftone", set: h.sets[1]![0] });
-  assert.equal((l["stock"] as unknown[]).length, 10);
+  assert.deepEqual(l["current"], { name: "Copper", set: h.sets[1]![0] });
+  assert.equal((l["stock"] as unknown[]).length, STOCK.length);
 });
 
 test("delete hides a stock background; restore_stock brings it back; random never picks a hidden one", async () => {
@@ -50,12 +49,12 @@ test("delete hides a stock background; restore_stock brings it back; random neve
   for (const s of STOCK.slice(1)) await call({ type: "delete", name: s.name });
   let l = await call({ type: "list" });
   assert.deepEqual((l["stock"] as Array<{ name: string }>).map((s) => s.name), ["Isoline"]);
-  assert.equal((l["hidden_stock"] as string[]).length, 9);
+  assert.equal((l["hidden_stock"] as string[]).length, STOCK.length - 1);
   const r = await call({ type: "random" });
   assert.equal(r["applied"], "Isoline");
   await call({ type: "restore_stock" });
   l = await call({ type: "list" });
-  assert.equal((l["stock"] as unknown[]).length, 10);
+  assert.equal((l["stock"] as unknown[]).length, STOCK.length);
 });
 
 test("add: a user background (full source, or a body on the prelude); a bad one is refused; delete removes it", async () => {

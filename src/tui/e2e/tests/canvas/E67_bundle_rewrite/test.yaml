@@ -1,0 +1,9 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint. Scripted: no model.
+id: bundle_rewrite
+group: canvas
+title: "a python agent rewritten in one save (code + verbs + panel) shows its new panel, granted its new verb; copied to a new name it is a popup tile, placed again and working"
+runner: probe.py
+costs: free
+limits:
+  seconds: 180
+env: {}

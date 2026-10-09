@@ -2,9 +2,11 @@
 // canvas, or ⌘K / Ctrl-K at the pointer), macOS-Launchpad style: a text field on
 // top, and below it a GRID of icon tiles in two groups (backend-owned views):
 //
-//   page    html · stream · sidebar · canvases — page content (FE)
+//   page    html · stream · tree view · backgrounds · tips — page content (FE)
 //   host    ask (the default AI) · terminal · agent (set-up) · python agent · your plugins —
 //           a HOST agent made, then a cell views it (BE)
+//   host · bundles  this project's own bundles — one more instance of each
+//   page · bundles  this canvas's page bundles (an html cell bundled) — likewise
 //   host · AI     your AI templates (★ the default) — a new AI cell on that one
 //   host · chats  your kept dialogs — reopened here
 //
@@ -20,13 +22,15 @@ export type Pick =
   | { kind: "html" }
   | { kind: "stream" }
   | { kind: "setup" }
-  | { kind: "sidebar" }
+  | { kind: "tree" }
   | { kind: "backgrounds" }
-  | { kind: "canvases" }
+  | { kind: "tips" }
   | { kind: "mcp" }
   | { kind: "chat"; id: string; name: string }
   | { kind: "plugin"; template: string }
   | { kind: "bundle"; starter: string }
+  | { kind: "instance"; bundle: string }
+  | { kind: "page_instance"; bundle: string }
   | { kind: "coding"; name: string; path: string };
 
 export interface Presets {
@@ -37,6 +41,10 @@ export interface Presets {
   dialogs: Array<{ id: string; name: string }>;
   /** the known coding agents found on the human's PATH (`user path`) */
   coding?: Array<{ name: string; path: string }>;
+  /** the project's own bundles (`.fantastic/bundles/`), each placeable again */
+  bundles?: Array<{ name: string; sentence: string }>;
+  /** this canvas's PAGE bundles (`<web root>/bundles/`, e.g. on the html base) */
+  pageBundles?: Array<{ name: string; sentence: string }>;
 }
 
 /** THE CODING AGENTS the menu knows (owner 2026-10-08): LAUNCHERS — a tile
@@ -57,8 +65,8 @@ export function exactLine(argv: string[]): string {
   return argv.map(quote).join(" ").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-export type Section = "page" | "host" | "coding" | "ai" | "chats";
-export type Icon = "ask" | "terminal" | "html" | "stream" | "agent" | "template" | "chat" | "sidebar" | "backgrounds" | "canvases" | "claude" | "codex" | "aider" | "opencode" | "mcp";
+export type Section = "page" | "host" | "coding" | "bundles" | "page_bundles" | "ai" | "chats";
+export type Icon = "ask" | "terminal" | "html" | "stream" | "agent" | "template" | "chat" | "tree" | "backgrounds" | "tips" | "claude" | "codex" | "aider" | "opencode" | "mcp";
 
 export interface Tile {
   icon: Icon;
@@ -81,12 +89,13 @@ const KINDS: Array<[string, Pick, Icon, Section]> = [
   ["mcp connector", { kind: "mcp" }, "mcp", "host"],
   ["html", { kind: "html" }, "html", "page"],
   ["stream", { kind: "stream" }, "stream", "page"],
-  ["sidebar", { kind: "sidebar" }, "sidebar", "page"],
+  // the agent tree of both kernels (a `sidebar_view.ts` cell)
+  ["tree view", { kind: "tree" }, "tree", "page"],
   ["backgrounds", { kind: "backgrounds" }, "backgrounds", "page"],
-  ["canvases", { kind: "canvases" }, "canvases", "page"],
+  ["tips", { kind: "tips" }, "tips", "page"],
 ];
 /** The groups in DRAWN order — the flat tile order follows it (arrow keys walk it). */
-const SECTIONS: Section[] = ["host", "coding", "page", "ai", "chats"];
+const SECTIONS: Section[] = ["host", "coding", "bundles", "page", "page_bundles", "ai", "chats"];
 
 /** The tiles for what is typed, in order (sections in order). Pure. */
 export function tiles(typed: string, presets: Presets | null): Tile[] {
@@ -106,6 +115,11 @@ export function tiles(typed: string, presets: Presets | null): Tile[] {
   }
   const exact = KINDS.find(([k]) => k === low);
   if (exact) return [{ icon: exact[2], label: exact[0], hint: "", pick: exact[1], section: exact[3] }];
+  // a project bundle's name typed exactly: only that bundle (⏎ places it)
+  const exactBundle = (presets?.bundles ?? []).find((b) => b.name.toLowerCase() === low);
+  if (exactBundle) return [{ icon: "template", label: exactBundle.name, hint: "", pick: { kind: "instance", bundle: exactBundle.name }, section: "bundles" }];
+  const exactPage = (presets?.pageBundles ?? []).find((b) => b.name.toLowerCase() === low);
+  if (exactPage) return [{ icon: "html", label: exactPage.name, hint: "", pick: { kind: "page_instance", bundle: exactPage.name }, section: "page_bundles" }];
   // the first tile: the default AI (free text → its first turn), or set-up
   out.push(
     presets?.preferred
@@ -122,7 +136,19 @@ export function tiles(typed: string, presets: Presets | null): Tile[] {
   for (const c of presets?.coding ?? []) {
     if (t && !c.name.startsWith(low)) continue;
     const icon = CODING_AGENTS.find((a) => a.name === c.name)?.icon ?? "terminal";
-    out.push({ icon, label: c.name, hint: c.path, pick: { kind: "coding", name: c.name, path: c.path }, section: "coding" });
+    // no path under the tile (owner 2026-10-09): the name is enough
+    out.push({ icon, label: c.name, hint: "", pick: { kind: "coding", name: c.name, path: c.path }, section: "coding" });
+  }
+  // the project's own bundles: one more instance of each (owner 2026-10-09:
+  // "bundle it, then place it from the popup")
+  for (const b of presets?.bundles ?? []) {
+    if (t && !b.name.toLowerCase().startsWith(low)) continue;
+    out.push({ icon: "template", label: b.name, hint: "", pick: { kind: "instance", bundle: b.name }, section: "bundles" });
+  }
+  // this canvas's page bundles (an html cell bundled): one more instance each
+  for (const b of presets?.pageBundles ?? []) {
+    if (t && !b.name.toLowerCase().startsWith(low)) continue;
+    out.push({ icon: "html", label: b.name, hint: "", pick: { kind: "page_instance", bundle: b.name }, section: "page_bundles" });
   }
   for (const p of templates) {
     if (t && !p.name.toLowerCase().startsWith(low)) continue;
@@ -137,11 +163,52 @@ export function tiles(typed: string, presets: Presets | null): Tile[] {
   return SECTIONS.flatMap((sec) => out.filter((x) => x.section === sec));
 }
 
-/** Arrow-key move across the grid of `n` tiles: ±1 across, ±COLS down/up. */
-export function move(sel: number, key: string, n: number): number {
+/** A tile's place on the drawn grid: its visual row and column. */
+export interface Cell {
+  row: number;
+  col: number;
+}
+
+/** ARROW-KEY MOVE BY GRID POSITION (owner 2026-10-09: ↑↓ moved by item index,
+ *  and every group starts a new row, so it landed in the wrong place): ← → step
+ *  through the tiles in order; ↑ ↓ go to the tile in the row above / below in
+ *  the SAME column — or the nearest one when that row is shorter. `cells` are
+ *  the tiles' drawn positions (the popup reads them off the DOM, so the phone's
+ *  one-column list moves right too). */
+export function move(sel: number, key: string, cells: readonly Cell[]): number {
+  const n = cells.length;
   if (n === 0) return 0;
-  const d = key === "ArrowRight" ? 1 : key === "ArrowLeft" ? -1 : key === "ArrowDown" ? COLS : key === "ArrowUp" ? -COLS : 0;
-  return Math.max(0, Math.min(n - 1, sel + d));
+  if (key === "ArrowRight") return Math.min(n - 1, sel + 1);
+  if (key === "ArrowLeft") return Math.max(0, sel - 1);
+  if (key !== "ArrowDown" && key !== "ArrowUp") return sel;
+  const cur = cells[sel]!;
+  const rows = [...new Set(cells.map((c) => c.row))].sort((a, b) => a - b);
+  const at = rows.indexOf(cur.row);
+  const want = rows[key === "ArrowDown" ? at + 1 : at - 1];
+  if (want === undefined) return sel;
+  let best = sel;
+  let dist = Infinity;
+  cells.forEach((c, i) => {
+    if (c.row !== want) return;
+    const d = Math.abs(c.col - cur.col);
+    if (d < dist) {
+      dist = d;
+      best = i;
+    }
+  });
+  return best;
+}
+
+/** The grid positions of `n` tiles laid out section by section, `cols` per
+ *  row, each section starting a new row — the desktop layout, as drawn. */
+export function layout(counts: readonly number[], cols: number = COLS): Cell[] {
+  const out: Cell[] = [];
+  let row = 0;
+  for (const n of counts) {
+    for (let i = 0; i < n; i++) out.push({ row: row + Math.floor(i / cols), col: i % cols });
+    if (n > 0) row += Math.ceil(n / cols);
+  }
+  return out;
 }
 
 // ── icons: inline SVG, 24×24, stroke = currentColor ─────────────────────────
@@ -152,7 +219,8 @@ const PATH: Record<Icon, string> = {
   stream: '<path d="M4 6h16M4 10h11M4 14h14M4 18h8"/>',
   agent: '<circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1"/>',
   template: '<path d="M12 3l1.8 4.7L18.5 9.5l-4.7 1.8L12 16l-1.8-4.7L5.5 9.5l4.7-1.8z"/><rect x="15" y="15" width="6" height="6" rx="1.5"/>',
-  sidebar: '<rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 4v16M12 9h5M12 13h5"/>',
+  tree: '<rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 4v16M12 9h5M12 13h5"/>',
+  tips: '<path d="M9 18h6M10 21h4"/><path d="M12 3a6 6 0 0 0-3.6 10.8c.7.6 1.1 1.4 1.1 2.2h5c0-.8.4-1.6 1.1-2.2A6 6 0 0 0 12 3z"/>',
   backgrounds: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 15l5-5 4 4 3-3 6 6"/><circle cx="16" cy="9" r="1.5"/>',
   // the coding agents: plain outline marks of the menu's own, no vendor logo
   claude: '<path d="M12 3v18M3 12h18M5.6 5.6l12.8 12.8M18.4 5.6L5.6 18.4"/>',
@@ -160,14 +228,13 @@ const PATH: Record<Icon, string> = {
   aider: '<rect x="3" y="6" width="18" height="12" rx="2"/><path d="M8 10v4M16 10v4M11 12h2"/>',
   opencode: '<path d="M8 7l-5 5 5 5M16 7l5 5-5 5M14 4l-4 16"/>',
   mcp: '<circle cx="6" cy="12" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M8.3 11l7.4-3.8M8.3 13l7.4 3.8"/>',
-  canvases: '<rect x="3" y="5" width="8" height="6" rx="1"/><rect x="13" y="5" width="8" height="6" rx="1"/><rect x="3" y="13" width="8" height="6" rx="1"/><rect x="13" y="13" width="8" height="6" rx="1"/>',
   chat: '<path d="M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v8a2.5 2.5 0 0 1-2.5 2.5H10l-4.5 4v-4H6.5A2.5 2.5 0 0 1 4 13.5z"/>',
 };
 export function iconSvg(icon: Icon): string {
   return `<svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${PATH[icon]}</svg>`;
 }
 
-const SECTION_TITLE: Record<Section, string> = { page: "page", host: "host", coding: "host · coding agents", ai: "host · AI", chats: "host · chats" };
+const SECTION_TITLE: Record<Section, string> = { page: "page", host: "host", coding: "host · coding agents", bundles: "host · bundles", page_bundles: "page · bundles", ai: "host · AI", chats: "host · chats" };
 
 const CSS = `
   .action-popup { position: fixed; z-index: 1000; width: 520px; max-width: calc(100vw - 32px);
@@ -177,7 +244,10 @@ const CSS = `
     font: 13px system-ui, sans-serif; color: #e5e1ee; overflow: hidden; }
   .action-popup input { width: 100%; box-sizing: border-box; background: transparent; border: 0; outline: none;
     color: #fff; font: 20px system-ui, sans-serif; padding: 14px 16px 12px 46px; }
-  .action-popup .title { padding: 11px 16px 0; font-size: 11px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: rgba(220,230,245,0.55); }
+  .action-popup .title { padding: 11px 16px 0; font-size: 11px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: rgba(220,230,245,0.55);
+    cursor: grab; user-select: none; }
+  .action-popup.dragging .title { cursor: grabbing; }
+
   .action-popup .ask { position: relative; }
   .action-popup .spark { position: absolute; left: 14px; top: 13px; color: #b78cff; }
   .action-popup .grid { border-top: 1px solid rgba(255,255,255,0.08); padding: 6px 10px 8px; max-height: 360px; overflow-y: auto; }
@@ -224,6 +294,8 @@ export function openActionPopup(opts: {
   onPick: (p: Pick) => void;
   /** it is gone — picked, escaped or clicked away */
   onClose?: () => void;
+  /** the popup was dragged: the INSERT POINT moved with it, to this screen point */
+  onMove?: (screenX: number, screenY: number) => void;
 }): () => void {
   ensureStyle();
   document.querySelector(".action-popup")?.remove();
@@ -240,7 +312,7 @@ export function openActionPopup(opts: {
   grid.className = "grid";
   const foot = document.createElement("div");
   foot.className = "foot";
-  foot.textContent = "←↑↓→ pick · ⏎ go · esc close";
+  foot.textContent = "←↑↓→ pick · ⏎ go · esc close · drag the title to move the spot";
   const title = document.createElement("div");
   title.className = "title";
   title.textContent = opts.title;
@@ -249,6 +321,31 @@ export function openActionPopup(opts: {
   ask.append(spark, input);
   box.append(title, ask, grid, foot);
   document.body.appendChild(box);
+  // the insert point: the header drags the popup AND it (same offset)
+  const ins = { x: opts.screenX, y: opts.screenY };
+  title.addEventListener("mousedown", (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const sx = e.clientX, sy = e.clientY;
+    const bx = box.offsetLeft, by = box.offsetTop, ix = ins.x, iy = ins.y;
+    box.classList.add("dragging");
+    const mv = (ev: MouseEvent): void => {
+      const dx = ev.clientX - sx, dy = ev.clientY - sy;
+      box.style.left = `${bx + dx}px`;
+      box.style.top = `${by + dy}px`;
+      ins.x = ix + dx;
+      ins.y = iy + dy;
+    };
+    const up = (): void => {
+      box.classList.remove("dragging");
+      window.removeEventListener("mousemove", mv);
+      window.removeEventListener("mouseup", up);
+      opts.onMove?.(ins.x, ins.y);
+      input.focus();
+    };
+    window.addEventListener("mousemove", mv);
+    window.addEventListener("mouseup", up);
+  });
 
   let sel = 0;
   let current: Tile[] = [];
@@ -310,13 +407,23 @@ export function openActionPopup(opts: {
     } else if (e.key === "ArrowDown" || e.key === "ArrowUp" || ((e.key === "ArrowLeft" || e.key === "ArrowRight") && input.value === "")) {
       // ← → move tiles only while the field is empty (else they edit the text)
       e.preventDefault();
-      sel = move(sel, e.key, current.length);
+      sel = move(sel, e.key, drawnCells());
       render();
     } else if (e.key === "Enter") {
       e.preventDefault();
       go(current[sel]);
     }
   });
+  // the tiles' drawn grid positions (rows by their top, columns by their left)
+  const drawnCells = (): Cell[] => {
+    const els = [...grid.querySelectorAll<HTMLElement>(".tile")];
+    const tops = [...new Set(els.map((x) => x.offsetTop))].sort((a, b) => a - b);
+    return els.map((x) => {
+      const row = tops.indexOf(x.offsetTop);
+      const col = els.filter((y) => y.offsetTop === x.offsetTop && y.offsetLeft < x.offsetLeft).length;
+      return { row, col };
+    });
+  };
   const away = (e: MouseEvent): void => {
     if (!box.contains(e.target as Node)) close();
   };
