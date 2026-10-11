@@ -77,8 +77,7 @@ swappable. Weak binding is the beauty.
 served bytes), because the WS RPC surface exists only for a sandboxed *browser*. Same
 config shape, different realization: `web` is the **passive/served** sub-kernel,
 `cli` the **initiator** one. Sub-kernels are a generic construct (web is not a special
-case) — the full model + roles live in the CLI contract
-[`src/cli/design/25_subkernels.md`](../../cli/design/25_subkernels.md).
+case).
 
 ---
 
