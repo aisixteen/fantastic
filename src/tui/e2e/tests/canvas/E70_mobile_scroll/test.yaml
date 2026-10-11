@@ -1,0 +1,9 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint. Scripted: no model.
+id: mobile_scroll
+group: canvas
+title: "a phone-wide tab with a live terminal: lines typed, then the column scrolled burst after burst — the frame rate and the host's call rate hold"
+runner: probe.py
+costs: free
+limits:
+  seconds: 180
+env: {}

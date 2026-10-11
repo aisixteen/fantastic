@@ -12,9 +12,9 @@ const P: Presets = {
   dialogs: [{ id: "ai_1", name: "release notes" }],
 };
 
-test("empty: two groups — host (ask, terminal, agent, python agent, mcp connector), page (html, stream, tree view, backgrounds, tips) — then AI (★ the default), chats", () => {
+test("empty: two groups — host (ask, terminal, agent, python agent, mcp connector), page (html, stream, tree view, backgrounds, tips, the 3 themes) — then AI (★ the default), chats", () => {
   const t = tiles("", P);
-  assert.deepEqual(t.map((x) => x.label), ["ask", "terminal", "agent", "python agent", "mcp connector", "html", "stream", "tree view", "backgrounds", "tips", "@gpt5 ★", "@box", "release notes"]);
+  assert.deepEqual(t.map((x) => x.label), ["ask", "terminal", "agent", "python agent", "mcp connector", "html", "stream", "tree view", "backgrounds", "tips", "canvas theme", "mobile theme", "auto theme", "@gpt5 ★", "@box", "release notes"]);
   assert.deepEqual(t.find((x) => x.label === "python agent")!.pick, { kind: "bundle", starter: "python_agent" });
   assert.deepEqual([...new Set(t.map((x) => x.section))], ["host", "page", "ai", "chats"]);
   assert.deepEqual(t.at(-1)!.pick, { kind: "chat", id: "ai_1", name: "release notes" });
@@ -24,6 +24,7 @@ test("a kind typed exactly offers only that kind", () => {
   assert.deepEqual(tiles("terminal", P).map((x) => x.pick), [{ kind: "terminal" }]);
   assert.deepEqual(tiles("agent", P).map((x) => x.pick), [{ kind: "setup" }]);
   assert.deepEqual(tiles("tree view", P).map((x) => x.pick), [{ kind: "tree" }]);
+  assert.deepEqual(tiles("mobile theme", P).map((x) => x.pick), [{ kind: "theme", name: "mobile" }]);
 });
 
 test("free text: the first tile asks the default; the rest filter", () => {
@@ -69,6 +70,13 @@ test("a plugin template is a HOST tile (not an AI one); picking it places its ag
   assert.deepEqual(plugin.pick, { kind: "plugin", template: "web_search" });
   assert.ok(!t.some((x) => x.label.startsWith("@web_search")), "not offered as an AI template");
   assert.deepEqual(tiles("web", withPlugin).slice(1).map((x) => x.label), ["web_search"], "typing filters plugins too");
+});
+
+test("fantastic on PATH: a HOST tile, not a coding agent", () => {
+  const t = tiles("", { ...P, coding: [{ name: "fantastic", path: "/u/.local/bin/fantastic" }] });
+  const f = t.find((x) => x.label === "fantastic")!;
+  assert.equal(f.section, "host");
+  assert.deepEqual(f.pick, { kind: "coding", name: "fantastic", path: "/u/.local/bin/fantastic" });
 });
 
 test("coding agents found on PATH: their own group, after host, launching the full path", () => {

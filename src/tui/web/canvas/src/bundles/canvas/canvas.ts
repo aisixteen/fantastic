@@ -32,6 +32,8 @@ import { htmlView } from "../html_agent/html_view.ts";
 import { agentViewBundle } from "../agent_view/agent_view.ts";
 import { seenHere, setCanvasNode, setHostRecords, sideOf, viewChangedFor } from "./host_views.ts";
 import { createGlHost } from "./gl_host.ts";
+import { COLUMN, LAYOUT, THEMES, pinnedOf, placeMissing, prune, rectsOf, setPinned, setRect, stack, themeOf, writeRects } from "./layout.ts";
+import type { Rect, Theme } from "./layout.ts";
 import type { GlHost, GlView } from "./gl_host.ts";
 
 // The canvas view-AGENT: the DOM-root compositor. Owns document.body, renders
@@ -365,6 +367,13 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   world.className = "canvas-world";
   canvas.appendChild(world);
   mount.appendChild(canvas);
+  // the label of an agent viewed full: "<name> · press Esc to return to the canvas"
+  const fullHint = document.createElement("div");
+  fullHint.className = "full-hint";
+  fullHint.hidden = true;
+  const fullName = document.createElement("b");
+  fullHint.append(fullName, " · press ", Object.assign(document.createElement("kbd"), { textContent: "Esc" }), " to return to the canvas");
+  canvas.appendChild(fullHint);
 
   // ─── view: zoom + pan (DOM transform on .canvas-world; GL camera locked) ──
   const view = { z: 1, ox: 0, oy: 0 };
@@ -373,9 +382,27 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   const ZOOM_MAX = 5;
   const ZOOM_LERP = 0.72;
   let glHost: GlHost | null = null;
+  let placePinned = (): void => {}; // set once the frames exist (themes, below)
+  // MOBILE'S CAMERA: the column fills the tab's width (a gutter for the bezels)
+  // and only scrolls — from its top down to its last cell's bottom
+  const MOBILE_GUTTER = 12;
+  let columnBottom = 0; // the column's last cell's bottom, view coordinates
+  const lockMobile = (): void => {
+    if (!canvas.classList.contains("theme-mobile")) return;
+    const w = canvas.clientWidth;
+    const h = canvas.clientHeight;
+    view.z = targetZ = (w - 2 * MOBILE_GUTTER) / COLUMN.width;
+    view.ox = w / 2 - (COLUMN.x + COLUMN.width / 2) * view.z;
+    // the pinned cell covers the screen's bottom: the column scrolls past it
+    const pinH = pinnedId !== null ? Math.min(rectsNow()[pinnedId]?.height ?? 320, h * 0.5) * view.z + 16 : 0;
+    const low = Math.min(0, h - pinH - (columnBottom + COLUMN.gap) * view.z);
+    view.oy = Math.max(low, Math.min(0, view.oy));
+  };
   const applyView = (): void => {
+    lockMobile();
     world.style.transform = `translate(${view.ox}px, ${view.oy}px) scale(${view.z})`;
     glHost?.applyCamera();
+    placePinned();
   };
   applyView();
 
@@ -398,6 +425,8 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   window.addEventListener("resize", () => {
     glHost?.resize();
     applyView();
+    // `auto` follows the width: crossing 768px switches the theme
+    if (themeShown !== null && themeNow() !== themeShown) void refresh();
   });
 
   // THE WORLD IS ITS OWN LAYER ONLY WHILE IT MOVES (owner 2026-10-09, the load
@@ -438,6 +467,15 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   canvas.addEventListener(
     "wheel",
     (e) => {
+      // mobile: the wheel SCROLLS the column — anywhere, unless the content under
+      // the pointer can still scroll that way itself
+      if (canvas.classList.contains("theme-mobile")) {
+        if (scrollsItself(e.target as Element, e.deltaY)) return;
+        e.preventDefault();
+        view.oy -= e.deltaY;
+        applyView();
+        return;
+      }
       if ((e.target as Element).closest(".agent-frame")) return;
       e.preventDefault();
       const factor = e.deltaY > 0 ? 0.95 : 1.05;
@@ -446,6 +484,22 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     },
     { passive: false },
   );
+
+  // mobile: a finger dragged anywhere scrolls the column (the same rule as the wheel)
+  let touchY: number | null = null;
+  canvas.addEventListener("touchstart", (e) => {
+    touchY = e.touches.length === 1 ? e.touches[0]!.clientY : null;
+  }, { passive: true });
+  canvas.addEventListener("touchmove", (e) => {
+    if (touchY === null || !canvas.classList.contains("theme-mobile") || e.touches.length !== 1) return;
+    const y = e.touches[0]!.clientY;
+    const dy = y - touchY;
+    touchY = y;
+    if (scrollsItself(e.target as Element, -dy)) return;
+    e.preventDefault();
+    view.oy += dy;
+    applyView();
+  }, { passive: false });
 
   canvas.addEventListener("mousedown", (e) => {
     if ((e.target as Element).closest(".agent-frame")) return;
@@ -479,6 +533,20 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     window.addEventListener("mouseup", up);
   });
 
+  // can the element under the pointer (or one of its boxes up to its cell's body)
+  // still scroll by `dy` itself?
+  const scrollsItself = (el: Element | null, dy: number): boolean => {
+    for (let e = el; e !== null && e !== canvas; e = e.parentElement) {
+      if (!(e instanceof HTMLElement)) continue;
+      const oy = getComputedStyle(e).overflowY;
+      if ((oy === "auto" || oy === "scroll") && e.scrollHeight > e.clientHeight) {
+        if (dy > 0 ? e.scrollTop + e.clientHeight < e.scrollHeight - 1 : e.scrollTop > 0) return true;
+      }
+      if (e.classList.contains("agent-frame")) break;
+    }
+    return false;
+  };
+
   const screenToWorld = (clientX: number, clientY: number): { x: number; y: number } => {
     const rect = canvas.getBoundingClientRect();
     return {
@@ -487,39 +555,48 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     };
   };
 
+  // ─── themes: where the cells sit (`layout.ts`) ────────────────────
+  // A cell's rect is in its view's layout for the theme in use — never on the
+  // cell. The theme: the view's `theme` (canvas | mobile), or auto by this
+  // tab's width.
+  const themeNow = (): Theme => themeOf(kernel, containerNow(), innerWidth);
+  const rectsNow = (): Record<string, Rect> => rectsOf(kernel, containerNow(), themeNow());
+  // THE ONE WAY THE CANVAS MAKES A CELL: the x/y/width/height it is made with go
+  // to the layout of the theme in use (first — so it is not placed twice), the
+  // cell itself is registered without them
+  const registerCell = (a: Agent): void => {
+    const g: Partial<Rect> = {};
+    for (const k of ["x", "y", "width", "height"] as const) {
+      const v = a.meta[k];
+      if (typeof v === "number" && Number.isFinite(v)) g[k] = v;
+      delete a.meta[k];
+    }
+    const v = a.parentId ?? containerNow();
+    if (Object.keys(g).length > 0) setRect(kernel, v, themeOf(kernel, v, innerWidth), a.id, g);
+    kernel.register(a);
+  };
+
   // ─── frames ──────────────────────────────────────────────────────
   const frames = new Map<string, Frame>();
 
-  const rectFromRec = (
-    rec: Rec,
-    defW: number,
-    defH: number,
-    idx: number,
-  ): { x: number; y: number; w: number; h: number } => ({
-    x: num(rec, "x") ?? 40 + (idx % 4) * 360,
-    y: num(rec, "y") ?? 40 + Math.floor(idx / 4) * 280,
-    w: num(rec, "width") ?? defW,
-    h: num(rec, "height") ?? defH,
-  });
+  const rectFromRec = (rec: Rec, defW: number, defH: number): { x: number; y: number; w: number; h: number } => {
+    const r = rectsNow()[rec.id];
+    return { x: r?.x ?? 0, y: r?.y ?? 0, w: r?.width ?? defW, h: r?.height ?? defH };
+  };
 
+  // Geometry is FRONTEND state — the layout agent's record, which the
+  // proxy_loader debounce-persists to the host like any other
   const persistRect = (aid: string, x?: number, y?: number, w?: number, h?: number): void => {
-    // Geometry is FRONTEND state — patch the LOCAL record; the proxy_loader
-    // debounce-persists it to the host web/kernel_state.
-    const patch: Payload = {};
-    if (x !== undefined) {
-      patch["x"] = Math.round(x);
-      patch["y"] = Math.round(y ?? 0);
-    }
-    if (w !== undefined) {
-      patch["width"] = Math.round(w);
-      patch["height"] = Math.round(h ?? 0);
-    }
-    kernel.updateMeta(aid, patch);
+    const patch: Partial<Rect> = {};
+    if (x !== undefined) Object.assign(patch, { x, y: y ?? 0 });
+    if (w !== undefined) Object.assign(patch, { width: w, height: h ?? 0 });
+    setRect(kernel, containerNow(), themeNow(), aid, patch);
   };
 
 
   const startDrag = (e: MouseEvent, aid: string, el: HTMLElement): void => {
     e.preventDefault();
+    if (el.classList.contains("pinned")) return; // held on the screen, not the world
     el.classList.add("dragging");
     document.body.classList.add("dragging-frame");
     const sx = e.clientX;
@@ -544,6 +621,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   const startResize = (e: MouseEvent, aid: string, el: HTMLElement): void => {
     e.preventDefault();
     e.stopPropagation();
+    if (el.classList.contains("pinned")) return;
     el.classList.add("resizing");
     document.body.classList.add("dragging-frame");
     const sx = e.clientX;
@@ -587,6 +665,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       <div class="frame-head">
         <span class="id">${title} · <code style="opacity:0.6;font-size:10px">${rec.id}</code></span>
         <span class="actions">
+          <span class="pin" title="pin to the screen's bottom (mobile)">📌</span>
           <span class="lock ${locked ? "locked" : ""}" title="${locked ? "unlock (allow delete)" : "lock (refuse delete)"}">${locked ? "🔒" : "🔓"}</span>
           <span class="reload" title="reload">⟳</span>
           <span class="close" title="close the view (a host agent lives on)">×</span>
@@ -607,6 +686,11 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     (el.querySelector(".reload") as HTMLElement).addEventListener("click", (e) => {
       e.stopPropagation();
       onReload();
+    });
+    (el.querySelector(".pin") as HTMLElement).addEventListener("click", (e) => {
+      e.stopPropagation();
+      const v = containerNow();
+      setPinned(kernel, v, "mobile", pinnedOf(kernel, v, "mobile") === rec.id ? null : rec.id);
     });
     (el.querySelector(".lock") as HTMLElement).addEventListener("click", (e) => {
       e.stopPropagation();
@@ -713,7 +797,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
 
   // Mount a first-party TS view-agent inline into a fresh frame.
   const mountInline = async (rec: Rec, bundle: ViewBundle, idx: number): Promise<void> => {
-    const rect = rectFromRec(rec, 480, 320, idx);
+    const rect = rectFromRec(rec, 480, 320);
     let reload = (): void => {};
     const { el, body, actions } = makeShell(rec, str(rec, "display_name") ?? rec.id, rect, () => reload());
     if ((bool(rec, "owns_backend") || bool(rec, "kept")) && str(rec, "backend_id") === undefined && !bool(rec, "backend_lost")) {
@@ -792,7 +876,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
 
   // Mount untrusted/external content as an iframe.
   const mountIframe = (rec: Rec, wa: Webapp, idx: number): void => {
-    const rect = rectFromRec(rec, wa.default_width ?? 340, wa.default_height ?? 240, idx);
+    const rect = rectFromRec(rec, wa.default_width ?? 340, wa.default_height ?? 240);
     const { el, body } = makeShell(rec, wa.title ?? rec.id, rect, () =>
       host.emit(rec.id, { type: "reload_html" }),
     );
@@ -816,25 +900,64 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     frames.delete(aid);
   };
 
-  const applyRectFromRec = (el: HTMLElement, rec: Rec): void => {
-    const x = num(rec, "x");
-    if (x !== undefined) {
-      el.style.left = `${x}px`;
-      el.style.top = `${num(rec, "y") ?? 0}px`;
-    }
-    const w = num(rec, "width");
-    if (w !== undefined) el.style.width = `${w}px`;
-    const h = num(rec, "height");
-    if (h !== undefined) el.style.height = `${h}px`;
+  const applyRect = (el: HTMLElement, r: Rect | undefined): void => {
+    if (r === undefined) return;
+    el.style.left = `${r.x}px`;
+    el.style.top = `${r.y}px`;
+    el.style.width = `${r.width}px`;
+    el.style.height = `${r.height}px`;
   };
 
   let bgShown = ""; // the background source the GL host shows now
+  let themeShown: Theme | null = null; // the theme this tab last drew
+  let pinnedId: string | null = null; // mobile: the cell held on the screen
+  // the pinned cell stays in the world (an iframe moved in the DOM would reload)
+  // but is placed against the camera: full width, on the screen's bottom, at
+  // screen scale, half the screen at most
+  placePinned = (): void => {
+    const f = pinnedId !== null ? frames.get(pinnedId) : undefined;
+    if (f === undefined) return;
+    const box = canvas.getBoundingClientRect();
+    const h = Math.min(rectsNow()[f.rec.id]?.height ?? 320, box.height * 0.5);
+    f.el.style.transformOrigin = "0 0";
+    f.el.style.transform = `scale(${1 / view.z})`;
+    f.el.style.left = `${(8 - view.ox) / view.z}px`;
+    f.el.style.top = `${(box.height - h - 8 - view.oy) / view.z}px`;
+    f.el.style.width = `${box.width - 16}px`;
+    f.el.style.height = `${h}px`;
+  };
+  // LEAVING A FULL VIEW (owner 2026-10-11: "agent → canvas: for a moment the
+  // agents show over the old background"): 1) the full agent goes (the world is
+  // hidden at once), 2) the view's background mounts and draws its first frame,
+  // 3) the cells mount — the world shows again only then, all at once
+  let fullShown = false; // the full state the last refresh drew
+  let refreshSeq = 0;
+  let hiddenBy = 0; // the refresh that hid the world, 0: shown
   const refresh = async (): Promise<void> => {
+    const my = ++refreshSeq;
+    try {
+      await refreshView(my);
+    } finally {
+      if (hiddenBy === my) {
+        hiddenBy = 0;
+        world.style.visibility = "";
+      }
+    }
+  };
+  const refreshView = async (my: number): Promise<void> => {
     // Members are this view's OWN children in the LOCAL tree (hydrated from
     // web/kernel_state, persisted back via proxy_loader). No host membership read.
     // THE VIEWED: a view's own children on its world, or one agent FULL.
     if (kernel.get(viewed) === undefined) viewed = ROOT_VIEW; // removed meanwhile
     const full = fullNow();
+    if (fullShown && !full) {
+      hiddenBy = my;
+      world.style.visibility = "hidden";
+      canvas.classList.remove("full-view");
+      fullHint.hidden = true;
+      for (const f of frames.values()) f.el.classList.remove("full");
+    }
+    fullShown = full;
     const cont = kernel.get(containerNow());
     const all: Rec[] = cont !== undefined ? [...cont.children.values()].map((a) => a.record() as Rec) : [];
     // the background is drawn behind everything, not framed
@@ -843,9 +966,42 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     // set_bg), not a member: nothing is torn down when Esc goes back
     const viewedRec = full ? (kernel.get(viewed)!.record() as Rec) : undefined;
     const viewingBg = viewedRec?.["handler_module"] === BACKGROUND;
-    const members = viewedRec !== undefined ? (viewingBg ? [] : [viewedRec]) : all.filter((r) => r["handler_module"] !== BACKGROUND && r["handler_module"] !== SELECTOR);
+    const isCell = (r: Rec): boolean => r["handler_module"] !== BACKGROUND && r["handler_module"] !== SELECTOR && r["handler_module"] !== LAYOUT;
+    const members = viewedRec !== undefined ? (viewingBg ? [] : [viewedRec]) : all.filter(isCell);
     const bgRec = viewingBg ? viewedRec : full ? undefined : all.find((r) => r["handler_module"] === BACKGROUND);
 
+    // THE LAYOUT OF THE THEME IN USE: a removed cell's rects go; a cell with no
+    // rect in this theme is placed by it — canvas: free space around the centre
+    // of what this tab shows; mobile: the column's bottom (`layout.ts`)
+    const theme = themeNow();
+    const cells = all.filter(isCell);
+    let rects = rectsNow();
+    if (cont !== undefined) {
+      prune(kernel, cont.id, new Set(cells.map((c) => c.id)));
+      const other = THEMES.filter((t) => t !== theme).map((t) => rectsOf(kernel, cont.id, t));
+      const sized = cells.map((c) => {
+        const o = other.map((m) => m[c.id]).find((x) => x !== undefined);
+        return { id: c.id, size: { width: o?.width ?? 480, height: o?.height ?? 320 } };
+      });
+      const box = canvas.getBoundingClientRect();
+      rects = placeMissing(kernel, cont.id, theme, sized, screenToWorld(box.left + box.width / 2, box.top + box.height / 2));
+      // mobile: always ONE full-width column, cells in their order
+      if (theme === "mobile") {
+        const col = stack(rects);
+        if (JSON.stringify(col) !== JSON.stringify(rects)) writeRects(kernel, cont.id, theme, col);
+        rects = col;
+        columnBottom = Object.values(col).reduce((m, r) => Math.max(m, r.y + r.height), 0);
+      }
+    }
+    // a tab that turns mobile looks at the column (its top, centred)
+    if (theme !== themeShown) {
+      themeShown = theme;
+      if (theme === "mobile") {
+        view.oy = 0;
+        canvas.classList.add("theme-mobile");
+        applyView();
+      }
+    }
     let idx = 0;
     const seenDom = new Set<string>();
     const seenGl = new Set<string>();
@@ -862,6 +1018,8 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       }
       if (!gh.hasView(bgRec.id)) gh.installView(bgRec.id, { source: bgSource });
       seenGl.add(bgRec.id);
+      // leaving a full view: the background is ON SCREEN before any cell is
+      if (hiddenBy === my) await gh.rendered();
     } else {
       bgShown = "";
     }
@@ -880,7 +1038,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       }
       if (existing !== undefined) {
         existing.rec = rec;
-        applyRectFromRec(existing.el, rec);
+        applyRect(existing.el, rects[mid]);
         // the lock chip follows the record
         const lockEl = existing.el.querySelector(":scope > .frame-head .lock") as HTMLElement | null;
         if (lockEl !== null) {
@@ -926,9 +1084,31 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       }
     }
     for (const aid of [...frames.keys()]) if (!seenDom.has(aid)) removeFrame(aid);
+    // MOBILE'S PIN: the pinned cell is held on the screen's bottom
+    canvas.classList.toggle("theme-mobile", theme === "mobile" && !full);
+    applyView();
+    pinnedId = theme === "mobile" && !full ? pinnedOf(kernel, containerNow(), "mobile") : null;
+    for (const [id, f] of frames) {
+      const on = id === pinnedId;
+      if (!on && f.el.classList.contains("pinned")) {
+        f.el.classList.remove("pinned");
+        f.el.style.transform = "";
+        applyRect(f.el, rects[id]);
+      }
+      f.el.classList.toggle("pinned", on);
+      f.el.querySelector(":scope > .frame-head .pin")?.classList.toggle("on", on);
+    }
+    placePinned();
     glHost?.prune(seenGl);
     canvas.classList.toggle("full-view", full);
     for (const [id, f] of frames) f.el.classList.toggle("full", full && id === viewed);
+    // VIEWED FULL (owner 2026-10-11): its name on the middle of its top border,
+    // and the way back
+    fullHint.hidden = !full;
+    if (full) {
+      const r = kernel.get(viewed)?.record() as Rec | undefined;
+      fullName.textContent = (r !== undefined ? str(r, "display_name") : undefined) ?? viewed; // as its head shows it
+    }
     const glCount = glHost === null ? 0 : seenGl.size;
   };
 
@@ -955,7 +1135,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     const backendId = await spawnBackend(bundle, cellId, backendFields);
     if (backendId === null) return;
     placing.add(backendId);
-    kernel.register(
+    registerCell(
       new Agent({
         id: cellId,
         parentId: containerNow(),
@@ -985,7 +1165,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     }
     const f = frames.get(cellId);
     if (!f) return;
-    const r = rectFromRec(f.rec, 480, 320, 0);
+    const r = rectFromRec(f.rec, 480, 320);
     const rect = canvas.getBoundingClientRect();
     view.ox = rect.width / 2 - (r.x + r.w / 2) * view.z;
     view.oy = rect.height / 2 - (r.y + r.h / 2) * view.z;
@@ -1018,7 +1198,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     const r = await spawnAi(viewId, template, parent);
     if (r === null) return null;
     placing.add(String(r["id"]));
-    kernel.register(
+    registerCell(
       new Agent({
         id: viewId,
         parentId: parent,
@@ -1059,7 +1239,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       return;
     }
     const { handler, meta } = hostViewCell(id, rec);
-    kernel.register(
+    registerCell(
       new Agent({
         id: cellId,
         parentId: containerNow(),
@@ -1073,7 +1253,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   // dialog, several cells), else a fresh one on SQLite with its history.
   const reopenAt = async (w: { x: number; y: number }, dialog: { id: string; name: string }): Promise<void> => {
     const viewId = `ai_view_${crypto.randomUUID().slice(0, 8)}`;
-    kernel.register(
+    registerCell(
       new Agent({
         id: viewId,
         parentId: containerNow(),
@@ -1140,16 +1320,16 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       return { error: String(r?.["error"] ?? "add_mcp: no answer") };
     },
     show: (id, cell) => {
-      const at = kernel.get(cell)?.meta ?? {};
+      const at = rectsNow()[cell];
       const rec = registry.get(id);
       if (rec === undefined) return;
       const { handler, meta } = hostViewCell(id, rec);
       kernel.remove(cell);
-      kernel.register(new Agent({
+      registerCell(new Agent({
         id: `view_${crypto.randomUUID().slice(0, 8)}`,
         parentId: containerNow(),
         handlerModule: handler,
-        meta: { ...meta, x: at["x"] ?? 0, y: at["y"] ?? 0, width: 460, height: 420 } as unknown as Payload,
+        meta: { ...meta, x: at?.x ?? 0, y: at?.y ?? 0, width: 460, height: 420 } as unknown as Payload,
       }));
     },
   });
@@ -1188,7 +1368,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       const viewId = `view_${crypto.randomUUID().slice(0, 8)}`;
       const w = centre();
       const ai = handler === aiView.handles[0];
-      kernel.register(
+      registerCell(
         new Agent({
           id: viewId,
           parentId: containerNow(),
@@ -1229,7 +1409,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
 
   // A SIDEBAR or the CANVAS LIST at the spot: page-only cells (no backend).
   const spawnPageCellAt = (w: { x: number; y: number }, handler: string, prefix: string, width: number, height: number, name?: string): void => {
-    kernel.register(
+    registerCell(
       new Agent({
         id: `${prefix}_${crypto.randomUUID().slice(0, 8)}`,
         parentId: containerNow(),
@@ -1246,7 +1426,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     const id = `backgrounds_${crypto.randomUUID().slice(0, 8)}`;
     const g = grantsFor(kernel, id, parent);
     if (g.bg !== undefined) kernel.updateMeta(g.bg.id, { callable_by: g.bg.callableBy } as unknown as Payload);
-    kernel.register(
+    registerCell(
       new Agent({
         id,
         parentId: parent,
@@ -1260,7 +1440,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   // TIPS & TRICKS at the spot: a PLAIN html cell, its default body the tips
   // card (`tips/tips_html.ts`) — edited like any html cell
   const spawnTipsAt = (w: { x: number; y: number }): void => {
-    kernel.register(
+    registerCell(
       new Agent({
         id: `tips_${crypto.randomUUID().slice(0, 8)}`,
         parentId: containerNow(),
@@ -1272,7 +1452,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
 
   // THE MESSAGE STREAM at the spot: a page-only cell (no backend).
   const spawnStreamAt = (w: { x: number; y: number }): void => {
-    kernel.register(
+    registerCell(
       new Agent({
         id: `stream_${crypto.randomUUID().slice(0, 8)}`,
         parentId: containerNow(),
@@ -1283,7 +1463,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   };
 
   const spawnHtmlAt = (w: { x: number; y: number }): void => {
-    kernel.register(
+    registerCell(
       new Agent({
         id: `html_${crypto.randomUUID().slice(0, 8)}`,
         parentId: containerNow(),
@@ -1334,6 +1514,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
         else if (p.kind === "tree") spawnPageCellAt(w, SIDEBAR_VIEW, "tree", 320, 520, "tree view");
         else if (p.kind === "backgrounds") spawnBackgroundsAt(w);
         else if (p.kind === "tips") spawnTipsAt(w);
+        else if (p.kind === "theme") void kernel.send([{ target: containerNow(), payload: { type: "theme", name: p.name } }]);
         else if (p.kind === "plugin") void spawnPluginAt(w, p.template);
         else if (p.kind === "bundle") void spawnPluginAt(w, null, p.starter);
         else if (p.kind === "instance") void spawnPluginAt(w, null, undefined, p.bundle);

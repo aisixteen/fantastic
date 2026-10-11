@@ -9,6 +9,8 @@ import { grantHint } from "../html_agent/grant_hint.ts";
 import { reflectView } from "../reflect_view/reflect_view.ts";
 import { cellGrant, hostRecordOf, viewOf } from "./host_views.ts";
 import type { Rec } from "./host_views.ts";
+import { setRect, tabWidth, themeOf } from "./layout.ts";
+import type { Rect } from "./layout.ts";
 
 /** The cell meta that draws host agent `agent` by its own view (`host_views.ts`). */
 export function hostViewCell(agent: string, rec: Rec): { handler: string; meta: Record<string, unknown> } {
@@ -36,10 +38,10 @@ export function hostViewCell(agent: string, rec: Rec): { handler: string; meta: 
 //
 // A VIEW's own verbs are the CONTROL PLANE over its own cells (owner
 // 2026-09-30: an AI cell is the control plane) — `place`, `move`, `update`,
-// `wire`, `remove`. `around` is the HOST's (`user.around`, from the page
-// records — no tab needs to show the view). The page kernel has no tree-CRUD
-// verbs by design; the view, which owns its members, answers these. Its
-// background is its own singleton child agent (`background_agent.ts`).
+// `wire`, `remove`, `theme`. The page kernel has no tree-CRUD verbs by design;
+// the view, which owns its members, answers these. Its background is its own
+// singleton child agent (`background_agent.ts`); where its cells sit is its
+// per-theme layout children (`layout.ts`).
 
 /** The page's root agent. */
 export const CANVAS = "canvas.ts";
@@ -59,12 +61,23 @@ export const PLACEABLE: Record<string, string> = {
 
 /** Fields `place` / `update` may set — a cell's grants included (the view is
  *  its parent); never identity, placement in the tree or a view's binding. */
-export const SETTABLE = ["display_name", "html", "gl_source", "trusted", "readme", "x", "y", "width", "height", "can_call", "callable_by"] as const;
+export const SETTABLE = ["display_name", "html", "gl_source", "trusted", "readme", "can_call", "callable_by"] as const;
+
+/** A cell's GEOMETRY: not on its record — in the view's layout for the theme in
+ *  use (`layout.ts`). `place`, `move` and `update` take these and write them there. */
+export const GEOMETRY = ["x", "y", "width", "height"] as const;
 
 /** Every view verb, for the grants that admit a caller. */
-export const VIEW_VERBS = ["place", "move", "update", "wire", "remove", "reflect"] as const;
+export const VIEW_VERBS = ["place", "move", "update", "wire", "remove", "theme", "reflect"] as const;
 
 const num = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+
+/** The geometry fields of a call, as a rect patch. */
+const geometryOf = (p: Record<string, unknown>): Partial<Rect> => {
+  const m: Partial<Rect> = {};
+  for (const k of GEOMETRY) if (num(p[k])) m[k] = p[k] as number;
+  return m;
+};
 
 /** A cell's BODY from a call: `bytes` (ai_core's verbatim convention), or the
  *  kind's own field (`html` / `gl_source`). undefined = none given; a refusal
@@ -89,7 +102,7 @@ export const CANVAS_README =
 
 export const VIEW_README =
   
-  "THE VIEW — the canvas's one view (frontend). Its cells are its children: you place and change them HERE. VERBS: place {kind: html|gl|terminal|chat (or handler_module) — or only backend_id: a VIEW of that host agent, drawn as its record says — x, y, id?, width?, height?, display_name?, bytes? (the body, verbatim), trusted?, can_call?, callable_by?, backend_id? (terminal/chat: the host agent shown)} · move {id, x?, y?, width?, height?} · update {id, bytes? (a new body reloads it), fields?: {display_name|trusted|readme|x|y|width|height|can_call|callable_by}} (on the view itself: any field) · wire {sender, receiver, verbs} (a grant, written on each side that is a cell; not from/to) · remove {id}. A PANEL'S JS (an html cell's body) has `fantastic`: `await fantastic.send(id, payload)` → the reply · `fantastic.watch(id, ev => …)` → events (returns off) · `fantastic.emit(id, payload)` · `fantastic.onMessage(p => …)`. Its calls are judged by the CELL's can_call — grant what it calls (`{<id>: [verbs…, watch]}`); a reply's `grants_missing` names any it lacks. On the host they arrive as `user`: a host agent you create for a panel needs `callable_by: {user: [<the verbs the panel calls>, watch]}` in its create_agent (a new agent admits no one); never drop `user` from an existing agent's callable_by. Example — a button that runs a command on a host exec agent `runner` and shows its output live: place {kind: html, x: 700, y: 60, can_call: {runner: [start, watch]}, bytes: <button onclick=\"fantastic.send('runner',{type:'start',command:'ls'}).then(r=>job=r.job_id)\">Run</button><pre id=o></pre><script>let job;fantastic.watch('runner',e=>{if(e.job_id===job&&e.type==='progress')o.textContent+=e.line+'\\n'})</script>} A live URL or a file: an html cell whose body is <iframe src=URL> (trusted: true for GET /static_files/file/<path>). The background is the child `background` (set_bg / default_bg / clear_bg / get_bg). What is near a point: `around {view?, x, y, radius}` on `user`.";
+  "THE VIEW — the canvas's one view (frontend). Its cells are its children: you place and change them HERE. VERBS: place {kind: html|gl|terminal|chat (or handler_module) — or only backend_id: a VIEW of that host agent, drawn as its record says — x, y, id?, width?, height?, display_name?, bytes? (the body, verbatim), trusted?, can_call?, callable_by?, backend_id? (terminal/chat: the host agent shown)} · move {id, x?, y?, width?, height?} · update {id, bytes? (a new body reloads it), fields?: {display_name|trusted|readme|x|y|width|height|can_call|callable_by}} (on the view itself: any field) · theme {name?: auto|canvas|mobile} (which layout the cells sit in: canvas = the free 2D canvas, mobile = one column; auto = mobile under 768px wide; x/y/width/height are per theme, kept in the view's layout_<theme> child, never on a cell — a cell new to a theme is placed by it) · wire {sender, receiver, verbs} (a grant, written on each side that is a cell; not from/to) · remove {id}. A PANEL'S JS (an html cell's body) has `fantastic`: `await fantastic.send(id, payload)` → the reply · `fantastic.watch(id, ev => …)` → events (returns off) · `fantastic.emit(id, payload)` · `fantastic.onMessage(p => …)`. Its calls are judged by the CELL's can_call — grant what it calls (`{<id>: [verbs…, watch]}`); a reply's `grants_missing` names any it lacks. On the host they arrive as `user`: a host agent you create for a panel needs `callable_by: {user: [<the verbs the panel calls>, watch]}` in its create_agent (a new agent admits no one); never drop `user` from an existing agent's callable_by. Example — a button that runs a command on a host exec agent `runner` and shows its output live: place {kind: html, x: 700, y: 60, can_call: {runner: [start, watch]}, bytes: <button onclick=\"fantastic.send('runner',{type:'start',command:'ls'}).then(r=>job=r.job_id)\">Run</button><pre id=o></pre><script>let job;fantastic.watch('runner',e=>{if(e.job_id===job&&e.type==='progress')o.textContent+=e.line+'\\n'})</script>} A live URL or a file: an html cell whose body is <iframe src=URL> (trusted: true for GET /static_files/file/<path>). The background is the child `background` (set_bg / default_bg / clear_bg / get_bg). ";
 
 /** The root: `reflect` is the kernel's; it answers nothing else. */
 export const canvasAgent: Handler = (_id, payload): Json => {
@@ -118,9 +131,8 @@ export const viewAgent: Handler = (id, payload, kernel): Json | Promise<Json> =>
         const { handler, meta } = hostViewCell(agent, rec);
         const aid = str(payload, "id") || `view_${Math.random().toString(16).slice(2, 10)}`;
         if (kernel.get(aid) !== undefined) return { error: `view: place — ${aid} already exists`, reason: "exists", arg: "id" };
-        for (const k of ["x", "y", "width", "height", "display_name"] as const) if (payload[k] !== undefined) meta[k] = payload[k];
-        meta["width"] ??= 480;
-        meta["height"] ??= 320;
+        if (payload["display_name"] !== undefined) meta["display_name"] = payload["display_name"];
+        setRect(kernel, id, themeOf(kernel, id, tabWidth()), aid, { width: 480, height: 320, ...geometryOf(payload) });
         kernel.register(new Agent({ id: aid, parentId: id, handlerModule: handler, meta: meta as Payload }));
         return { placed: aid, shows: agent, view: viewOf(rec).kind } as Json;
       }
@@ -142,9 +154,8 @@ export const viewAgent: Handler = (id, payload, kernel): Json | Promise<Json> =>
       const body = bodyOf(kind, payload);
       if (typeof body === "object") return body as unknown as Json;
       if (body !== undefined) meta[kind === "gl" ? "gl_source" : "html"] = body;
-      // a cell carries its size from birth: the host answers `around` from the records
-      meta["width"] ??= 480;
-      meta["height"] ??= 320;
+      // its rect in the theme in use (a size from birth), written before the cell
+      setRect(kernel, id, themeOf(kernel, id, tabWidth()), aid, { width: 480, height: 320, ...geometryOf(payload) });
       if (backend) Object.assign(meta, { backend_id: backend, owns_backend: false });
       // the view's OWN declared grant onto the agent it shows
       if (kind === "terminal") meta["can_call"] = { ...terminalView.grants(backend) };
@@ -154,7 +165,7 @@ export const viewAgent: Handler = (id, payload, kernel): Json | Promise<Json> =>
       // call never reaches the AI)
       const grants = typeof meta["html"] === "string" ? grantHint(aid, meta["html"] as string, kernel.get(aid)?.meta["can_call"]) : {};
       // fields `place` does not take are SAID, never dropped silently
-      const known = new Set<string>(["type", "kind", "handler_module", "id", "bytes", "backend_id", ...SETTABLE]);
+      const known = new Set<string>(["type", "kind", "handler_module", "id", "bytes", "backend_id", ...SETTABLE, ...GEOMETRY]);
       const ignored = Object.keys(payload).filter((k) => !known.has(k));
       if (ignored.length) {
         return { placed: aid, kind, ignored, ...grants, hint: "place does not take those fields — a cell's content is its body (bytes); to show a live URL or a file, make the body an <iframe src=…> (trusted: true for the host's own files)" + (grants["hint"] ? `. Also: ${grants["hint"]}` : "") } as Json;
@@ -164,11 +175,10 @@ export const viewAgent: Handler = (id, payload, kernel): Json | Promise<Json> =>
     case "move": {
       const target = str(payload, "id");
       if (kernel.get(target)?.parentId !== id) return { error: `view: move — ${JSON.stringify(target)} is not a cell of this view`, reason: "not_found", arg: "id" };
-      const m: Record<string, number> = {};
-      for (const k of ["x", "y", "width", "height"] as const) if (num(payload[k])) m[k] = payload[k] as number;
+      const m = geometryOf(payload);
       if (Object.keys(m).length === 0) return { error: "view: move needs x, y, width or height", reason: "bad_arg", arg: "x" };
-      kernel.updateMeta(target, m as unknown as Payload);
-      return { moved: target, ...m };
+      const theme = themeOf(kernel, id, tabWidth());
+      return { moved: target, theme, ...setRect(kernel, id, theme, target, m) } as unknown as Json;
     }
     case "update": {
       const target = str(payload, "id");
@@ -177,9 +187,14 @@ export const viewAgent: Handler = (id, payload, kernel): Json | Promise<Json> =>
       const fields = payload["fields"] ?? {};
       if (typeof fields !== "object" || Array.isArray(fields)) return { error: "view: update — fields must be {…}", reason: "bad_arg", arg: "fields" };
       if (Object.keys(fields).length === 0 && payload["bytes"] === undefined) return { error: "view: update needs bytes (a new body) or fields", reason: "bad_arg", arg: "fields" };
-      const bad = Object.keys(fields).filter((k) => !(SETTABLE as readonly string[]).includes(k));
-      if (bad.length) return { error: `view: update — not settable: ${bad.join(", ")} (settable: ${SETTABLE.join(", ")})`, reason: "bad_arg", arg: "fields" };
+      const settable: readonly string[] = [...SETTABLE, ...GEOMETRY];
+      const bad = Object.keys(fields).filter((k) => !settable.includes(k));
+      if (bad.length) return { error: `view: update — not settable: ${bad.join(", ")} (settable: ${settable.join(", ")})`, reason: "bad_arg", arg: "fields" };
       const f = { ...(fields as Record<string, unknown>) };
+      // geometry goes to the layout of the theme in use, never onto the cell
+      const g = geometryOf(f);
+      for (const k of GEOMETRY) delete f[k];
+      if (Object.keys(g).length > 0) setRect(kernel, id, themeOf(kernel, id, tabWidth()), target, g);
       const kindOf = kernel.get(target)?.record().handler_module === "gl_agent.ts" ? "gl" : "html";
       const body = bodyOf(kindOf, payload);
       if (typeof body === "object") return body as unknown as Json;
@@ -187,7 +202,7 @@ export const viewAgent: Handler = (id, payload, kernel): Json | Promise<Json> =>
       for (const k of ["html", "gl_source"]) {
         if (f[k] !== undefined && typeof f[k] !== "string") return { error: `view: update — ${k} must be a string`, reason: "bad_arg", arg: "bytes", hint: "send the markup as <bytes>…</bytes> — verbatim, nothing escaped" };
       }
-      kernel.updateMeta(target, f as Payload);
+      if (Object.keys(f).length > 0) kernel.updateMeta(target, f as Payload);
       if ("html" in f) kernel.emit(target, { type: "reload_html" });
       const cell = kernel.get(target);
       const html = cell?.meta["html"];
@@ -223,6 +238,17 @@ export const viewAgent: Handler = (id, payload, kernel): Json | Promise<Json> =>
       if (kernel.get(target)?.parentId !== id) return { error: `view: remove — ${JSON.stringify(target)} is not a cell of this view`, reason: "not_found", arg: "id" };
       const out = kernel.remove(target) as unknown as Json;
       return out;
+    }
+    case "theme": {
+      // THE THEME: which layout the cells sit in (canvas | mobile), or `auto` —
+      // per tab, mobile under 768px wide. No name: what it is.
+      const name = payload["name"];
+      if (name !== undefined) {
+        if (name !== "auto" && name !== "canvas" && name !== "mobile") return { error: "view: theme — name is auto, canvas or mobile", reason: "bad_arg", arg: "name" };
+        kernel.updateMeta(id, { theme: name });
+      }
+      const choice = kernel.get(id)?.meta["theme"] ?? "auto";
+      return { theme: choice as Json, in_use: themeOf(kernel, id, tabWidth()), themes: ["auto", "canvas", "mobile"] };
     }
     case "boot":
     case "shutdown":

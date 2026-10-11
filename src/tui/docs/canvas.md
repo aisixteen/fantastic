@@ -81,8 +81,8 @@ THE SELECTOR: a double click adds a `selector` agent at the spot — the popup
 — and it deletes itself once you pick. While it is open, `tiles {typed?}` on it
 says what can be made there.
 
-CODING AGENTS: the double-click lists `claude`, `codex`, `aider` and
-`opencode` when they are on your PATH (`user path` — every program on PATH,
+CODING AGENTS: the double-click lists `claude`, `codex`, `aider`,
+`opencode` and `fantastic` when they are on your PATH (`user path` — every program on PATH,
 with its full path). A tile starts that program in a terminal cell, as you
 would in a shell; it runs with your own account and settings.
 
@@ -106,8 +106,9 @@ both sides; the human narrows them with `update_agent`).
 | verb | what |
 |---|---|
 | `place {kind, x, y, …}` | a new cell: `html`, `gl`, `terminal`, `chat` — or `handler_module` (any page bundle, `.ts` optional) instead of `kind` (one view for now — no nested views) |
-| `move {id, x, y, …}` | move / resize a cell |
+| `move {id, x, y, …}` | move / resize a cell — in the layout of the theme in use |
 | `update {id, bytes?, fields?}` | a cell's new body (`bytes`, verbatim) or fields (display_name, trusted, readme, geometry, can_call, callable_by) |
+| `theme {name?}` | which layout the cells sit in: `canvas` (the free 2D canvas), `mobile` (one column), `auto` (default — mobile in a tab under 768px wide); no name: what it is |
 | `wire {sender, receiver, verbs}` | a grant, written on each side that is a cell of the view (a host agent receiver: the sender's side only) |
 | (a live URL or a file) | an html cell whose body is `<iframe src=URL>` — `trusted: true` for the host's own files |
 | (grant hint) | a body that calls an agent the cell's `can_call` lacks → the reply names `grants_missing` and the `update` that adds them |
@@ -115,9 +116,20 @@ both sides; the human narrows them with `update_agent`).
 | `remove {id}` | delete a cell (refused for a delete-locked agent) |
 
 `update {id: <the view>, fields: {…}}` sets the view's own fields. Every cell answers `reflect`, `get_html`,
-`set_html`, `emit`. What is near a point is the host's: `around {view?, x, y,
-radius}` on `user` (default view: `view_root`) — `{view, members: [{id,
-kind, title, rect, distance, backend_id?}]}`, nearest first.
+`set_html`, `emit`.
+
+## Themes — where the cells sit
+
+A cell's `x, y, width, height` are not on the cell: they are in its view's
+LAYOUT for the theme in use — one agent per theme, `layout_canvas` /
+`layout_mobile` (`layout.ts`, children of the view, `rects: {<cell id>: {x, y,
+width, height}}`). Switching theme moves the cells, never the agents. A cell
+with no rect in the theme in use is placed by it, once: `canvas` — the nearest
+free space around the centre of what the tab shows; `mobile` — the bottom of
+the column. On mobile, the wheel scrolls the column, and a cell's 📌 PINS it
+(one per layout, `pinned` on `layout_mobile`): held on the screen's bottom,
+full width, while the column scrolls (e.g. a chat). The popup's `canvas theme`
+/ `mobile theme` / `auto theme` tiles set it.
 
 ## Views of host agents
 

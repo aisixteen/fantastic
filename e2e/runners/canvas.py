@@ -232,7 +232,17 @@ def members(cwd: Path) -> list[dict]:
             every.append(dict(yaml_of(f), _dir=f.parent.name))
         except FileNotFoundError:
             pass
-    return [m for m in every if m.get("handler_module") not in ("background.ts", "selector.ts")]
+    return [m for m in every if m.get("handler_module") not in ("background.ts", "selector.ts", "layout.ts")]
+
+
+def rect_of(cwd: Path, cell: str) -> dict:
+    """Where `cell` sits in the canvas theme: the root view's `layout_canvas`
+    agent's rects (a cell carries no geometry)."""
+    f = cwd / ROOT_VIEW / "layout_canvas" / "agent.yaml"
+    try:
+        return dict(((yaml_of(f) or {}).get("rects") or {}).get(cell) or {})
+    except FileNotFoundError:
+        return {}
 
 
 # the cells' backends on the host: children of `canvas_root`
@@ -303,6 +313,8 @@ async def restart(spec, page: Page, host: Host, cwd: Path, url: str, state: dict
     host.start()
     tree = await host_call(host.port, "web_loader", {"type": "load_tree"})
     state["tree"] = [(r.get("id"), r.get("parent_id")) for r in tree.get("records", [])]
+    # a view's layouts (where its cells sit, per theme) are no members
+    state["tree_layouts"] = [r.get("id") for r in tree.get("records", []) if r.get("handler_module") == "layout.ts"]
     await page.open(url)
 
 
@@ -407,6 +419,7 @@ async def step(run: dict, page: Page, host: Host, cwd: Path, url: str, state: di
         if m.get("id") != m["_dir"]:
             bad.append(f"member folder {m['_dir']} holds id {m.get('id')}")
         state["member"] = m
+        state["rect"] = rect_of(cwd, m.get("id", ""))
     if exp.get("not_top_level") and m is not None:
         top = cwd / ".fantastic/web/agents" / m["id"]
         if top.exists():
@@ -450,13 +463,16 @@ async def step(run: dict, page: Page, host: Host, cwd: Path, url: str, state: di
         elif wait_disk(lambda: (host_record(cwd, bid) is not None) == exp["backend_record"]) is False:
             bad.append(f"host record of {bid}: {'missing' if exp['backend_record'] else 'still there'}")
     if exp.get("moved") and m is not None:
-        before = state.get("member") or {}
-        if not wait_disk(lambda: (members(cwd) or [{}])[0].get("x") != before.get("x")):
-            bad.append(f"x did not move: {before.get('x')} → {m.get('x')}")
-        m = members(cwd)[0]
-        state["moved"] = (m.get("x"), m.get("y"))
-    if exp.get("kept_position") and m is not None and (m.get("x"), m.get("y")) != state.get("moved"):
-        bad.append(f"position after restart {(m.get('x'), m.get('y'))} != {state.get('moved')}")
+        cell = m.get("id", "")
+        before = state.get("rect") or {}
+        if not wait_disk(lambda: rect_of(cwd, cell).get("x") != before.get("x")):
+            bad.append(f"x did not move: {before.get('x')} → {rect_of(cwd, cell).get('x')}")
+        r = rect_of(cwd, cell)
+        state["moved"] = (r.get("x"), r.get("y"))
+    if exp.get("kept_position") and m is not None:
+        r = rect_of(cwd, m.get("id", ""))
+        if (r.get("x"), r.get("y")) != state.get("moved"):
+            bad.append(f"position after restart {(r.get('x'), r.get('y'))} != {state.get('moved')}")
     # `--headless`: the kernel's message stream is the host's stdout, one line
     # per row (`[<id>] <agent> <kind|role> <verb>? · <first line>`), no escapes.
     if exp.get("stream"):
@@ -473,7 +489,7 @@ async def step(run: dict, page: Page, host: Host, cwd: Path, url: str, state: di
             bad.append(f"load_tree has no canvas with its root view: {state.get('tree')}")
         if "canvas" in want and tree.get("background") != "view_root":
             bad.append(f"load_tree has no background singleton under the root view: {state.get('tree')}")
-        others = [i for i in tree if i not in ("canvas", "view_root", "web_loader", "background")]
+        others = [i for i in tree if i not in ("canvas", "view_root", "web_loader", "background") and i not in state.get("tree_layouts", [])]
         if "member_parent" in want:
             if len(others) != 1 or tree[others[0]] != want["member_parent"]:
                 bad.append(f"load_tree members {[(i, tree[i]) for i in others]}, want one under {want['member_parent']}")

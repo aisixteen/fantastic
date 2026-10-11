@@ -30,9 +30,10 @@ export const CANVAS_CSS = `
   .agent-frame::before {
     content: ""; position: absolute; inset: -32px -6px -6px -6px; z-index: -1;
     border-radius: 16px;
-    background: rgba(15, 15, 25, 0.55);
-    backdrop-filter: blur(16px) saturate(1.2);
-    -webkit-backdrop-filter: blur(16px) saturate(1.2);
+    /* NO backdrop blur (owner 2026-10-11, E70): a blurred bezel re-filtered the
+       animated background every frame — one hovered cell took the GPU process
+       from 27% to 440% CPU on desktop, every cell on mobile 185% → 658% */
+    background: rgba(15, 15, 25, 0.88);
     border: 1px solid rgba(255, 255, 255, 0.10);
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.04);
     transition: opacity .15s ease, box-shadow .2s ease, border-color .2s ease;
@@ -78,6 +79,20 @@ export const CANVAS_CSS = `
     background: rgba(255, 255, 255, 0.12); color: rgba(255, 255, 255, 0.9);
   }
   .frame-head .lock.locked { color: #f7768e; background: rgba(247, 118, 142, 0.10); }
+  .frame-head .pin { display: none; }
+  #canvas.theme-mobile .frame-head .pin {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 20px; height: 20px; border-radius: 4px; font-size: 11px; cursor: pointer; user-select: none;
+    background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.06); filter: grayscale(1); opacity: .7;
+  }
+  #canvas.theme-mobile .frame-head .pin.on { filter: none; opacity: 1; background: rgba(126, 226, 168, 0.12); border-color: rgba(126, 226, 168, 0.4); }
+  .agent-frame.pinned { z-index: 50; }
+  /* MOBILE: the chrome always shows (no hover on a phone), the bezel opaque over
+     the background's headline; the width is the column's — no resize */
+  #canvas.theme-mobile .agent-frame::before,
+  #canvas.theme-mobile .agent-frame > .frame-head { opacity: 1; pointer-events: auto; }
+  #canvas.theme-mobile .agent-frame::before { background: rgb(17, 17, 26); }
+  #canvas.theme-mobile .agent-frame > .resize-handle { display: none; }
   .frame-body { position: relative; z-index: 2; flex: 1 1 0; min-height: 0; overflow: hidden; background: transparent; border-radius: 10px; }
   .frame-body iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: transparent; }
   .resize-handle {
@@ -123,5 +138,15 @@ export const CANVAS_CSS = `
   #canvas.full-view .agent-frame.full { left: 12px !important; top: 44px !important;
     width: calc(100vw - 24px) !important; height: calc(100vh - 56px) !important; }
   #canvas.full-view .agent-frame.full .resize-handle { display: none; }
+  /* the viewed-full label: centred ON the frame's top border (top: 44px) */
+  .full-hint { position: fixed; top: 44px; left: 50%; transform: translate(-50%, -50%); z-index: 60;
+    max-width: calc(100vw - 48px); box-sizing: border-box; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    padding: 7px 16px; border-radius: 999px; pointer-events: none;
+    background: rgb(20, 18, 30); box-shadow: 0 0 0 1px rgba(183, 140, 255, 0.35), 0 8px 24px rgba(0, 0, 0, 0.5);
+    color: rgba(225, 228, 240, 0.72); font: 400 13px/1.2 system-ui, -apple-system, "Segoe UI", sans-serif; letter-spacing: 0.2px; }
+  .full-hint[hidden] { display: none; }
+  .full-hint b { color: #f2f0ff; font-weight: 600; }
+  .full-hint kbd { font: 600 11px ui-monospace, SFMono-Regular, monospace; color: #e6dcff;
+    padding: 2px 6px; margin: 0 1px; border-radius: 5px; background: rgba(183, 140, 255, 0.16); box-shadow: inset 0 0 0 1px rgba(183, 140, 255, 0.4); }
   .side .agent.viewed { background: rgba(183,140,255,0.18); }
 `;

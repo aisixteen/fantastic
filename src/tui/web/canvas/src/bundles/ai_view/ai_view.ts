@@ -1,6 +1,7 @@
 import type { ViewBundle, ViewContext, ViewHandle } from "../view.ts";
 import { Host } from "../../lib.ts";
 import { canvasNode } from "../canvas/host_views.ts";
+import { rectsOf, themeOf } from "../canvas/layout.ts";
 
 // ai_view — inline, MULTI-MODE AI view (chat mode = provider-agnostic chat UI). Ported from
 // ai_chat_webapp/index.html, rendered INLINE into a canvas frame, fronting any
@@ -18,14 +19,14 @@ const CHAT_CSS = `
   .chat-view .c-header { padding:8px 14px; font-size:12px; color:rgba(220,230,245,0.65); border-bottom:1px solid rgba(255,255,255,0.06); display:flex; justify-content:space-between; }
   .chat-view .c-header b { color:rgba(220,230,245,0.95); }
   .chat-view .c-dialog { flex:1 1 0; min-height:0; overflow-y:auto; overscroll-behavior:contain; padding:12px; display:flex; flex-direction:column; gap:8px; }
-  .chat-view .msg { padding:8px 12px; border-radius:12px; line-height:1.45; max-width:85%; word-wrap:break-word; white-space:pre-wrap; font-size:14px; backdrop-filter:blur(20px) saturate(160%); -webkit-backdrop-filter:blur(20px) saturate(160%); box-shadow:inset 0 1px 0 rgba(255,255,255,0.10),0 0 0 1px rgba(255,255,255,0.08),0 6px 14px -6px rgba(0,0,0,0.45); }
+  .chat-view .msg { padding:8px 12px; border-radius:12px; line-height:1.45; max-width:85%; word-wrap:break-word; white-space:pre-wrap; font-size:14px; box-shadow:inset 0 1px 0 rgba(255,255,255,0.10),0 0 0 1px rgba(255,255,255,0.08),0 6px 14px -6px rgba(0,0,0,0.45); }
   .chat-view .msg.user { align-self:flex-end; background:rgba(110,90,220,0.32); color:#fff; }
   .chat-view .msg.user.queued { opacity:0.55; font-style:italic; }
   .chat-view .msg.assistant { align-self:flex-start; background:rgba(36,38,56,0.50); color:#cde; }
   .chat-view .msg.notice { align-self:center; max-width:92%; text-align:center; font-size:11px; color:#ffd166; background:rgba(255,209,102,0.12); box-shadow:inset 0 0 0 1px rgba(255,209,102,0.18); }
   .chat-view .msg.notice.too-small { color:#ff8a8a; background:rgba(255,120,120,0.12); box-shadow:inset 0 0 0 1px rgba(255,120,120,0.22); }
   .chat-view .tool-block.recall .tool-verb { color:#9ad0ff; }
-  .chat-view .tool-block { margin:6px 0; padding:6px 8px; border-radius:8px; background:rgba(24,26,40,0.50); backdrop-filter:blur(12px) saturate(160%); box-shadow:inset 0 0 0 1px rgba(255,255,255,0.06); font-family:ui-monospace,SFMono-Regular,monospace; font-size:12px; color:#abb; }
+  .chat-view .tool-block { margin:6px 0; padding:6px 8px; border-radius:8px; background:rgba(24,26,40,0.50); box-shadow:inset 0 0 0 1px rgba(255,255,255,0.06); font-family:ui-monospace,SFMono-Regular,monospace; font-size:12px; color:#abb; }
   .chat-view .tool-block .tool-head { display:flex; align-items:baseline; gap:6px; }
   .chat-view .tool-block .tool-verb { color:#ffd166; }
   .chat-view .tool-block .tool-target { color:#8ad; }
@@ -45,7 +46,7 @@ const CHAT_CSS = `
   .chat-view .others-hint { color:#666; font-size:10px; }
   @keyframes cpulse { 0%,100%{opacity:1;} 50%{opacity:0.45;} }
   .chat-view .c-row { display:flex; padding:10px; gap:8px; border-top:1px solid rgba(255,255,255,0.06); }
-  .chat-view .c-input { flex:1; background:rgba(255,255,255,0.06); backdrop-filter:blur(16px) saturate(180%); border:0; box-shadow:inset 0 0 0 1px rgba(255,255,255,0.10); border-radius:10px; padding:8px 12px; color:#e0e0ff; font-size:14px; outline:none; }
+  .chat-view .c-input { flex:1; background:rgba(255,255,255,0.06); border:0; box-shadow:inset 0 0 0 1px rgba(255,255,255,0.10); border-radius:10px; padding:8px 12px; color:#e0e0ff; font-size:14px; outline:none; }
   .chat-view .c-input:focus { box-shadow:inset 0 0 0 1px rgba(180,220,255,0.45),0 0 0 3px rgba(120,200,255,0.10); }
   .chat-view .c-send { background:rgba(110,90,220,0.45); border:0; box-shadow:inset 0 1px 0 rgba(255,255,255,0.12),inset 0 0 0 1px rgba(255,255,255,0.10); border-radius:10px; color:#fff; padding:8px 14px; cursor:pointer; }
   .chat-view .c-send:hover { background:rgba(130,110,240,0.55); }
@@ -679,9 +680,10 @@ export const aiView: ViewBundle = {
     // names one (the action popup's). Plain chat views (not cells) send plain text.
     const isCell = tpl !== "";
     const cellSpot = (): [number, number] => {
-      const x = typeof record?.["x"] === "number" ? (record["x"] as number) : 0;
-      const y = typeof record?.["y"] === "number" ? (record["y"] as number) : 0;
-      return [Math.round(x), Math.round(y)];
+      // where it sits in the theme in use (its view's layout)
+      const view = kernel.get(selfId)?.parentId ?? "";
+      const r = rectsOf(kernel, view, themeOf(kernel, view, innerWidth))[selfId];
+      return [Math.round(r?.x ?? 0), Math.round(r?.y ?? 0)];
     };
     const submit = (override?: string, at?: [number, number]): void => {
       const typed = (override ?? inputEl.value).trim();
