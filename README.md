@@ -143,8 +143,7 @@ See [`ts/readme.md`](src/lib/ts/readme.md) and [`ts/SERVE.md`](src/lib/ts/SERVE.
 The frontend is one **sub-kernel** (`web_loader = kernel_state @ .fantastic/web`).
 The `fantastic` CLI is another of the same shape — `cli_loader @ .fantastic/cli`, a
 native, folder-anchored *initiator* sibling (no browser proxy). Sub-kernels are a
-generic construct (web is not special-cased); the model lives in
-[`src/cli/design/25_subkernels.md`](src/cli/design/25_subkernels.md).
+generic construct (web is not special-cased).
 
 ## One runtime active per workdir
 
@@ -215,7 +214,7 @@ page content or host agents — including your plugin templates
 (`fantastic readme templates`).
 
 Backends link by cargo feature (`vllm`, `ollama`, `responses`, `anthropic`,
-`foundation-models`). Design: [`src/cli/design/`](src/cli/design/) · live e2e:
+`foundation-models`). Live e2e:
 [`src/tui/e2e/tests/`](src/tui/e2e/tests/).
 
 <!-- /CLI SECTION -->
@@ -231,7 +230,7 @@ Backends link by cargo feature (`vllm`, `ollama`, `responses`, `anthropic`,
 | [`container/`](container/) | one universal OCI image (podman/docker, amd64+arm64) — python + rust kernels + embedded JS bundle; runtime chosen at launch; headless API + headful page on one port |
 | [`integration_tests/`](integration_tests/) | cross-runtime bridge matrix (pytest) + `py_ts/` browser/e2e |
 | [`.github/workflows/`](.github/workflows/) | CI — python lint/tests, swift lint, codeql, spellcheck |
-| [`src/tui/`](src/tui/) | the `fantastic` shell: the rust kernel in-process, a terminal UI, and `fantastic mcp` (design: [`src/cli/design/`](src/cli/design/)) |
+| [`src/tui/`](src/tui/) | the `fantastic` shell: the rust kernel in-process, a terminal UI, and `fantastic mcp` |
 | [`e2e/`](e2e/) | end-to-end scenarios and runners (live-model and free/CPU tiers) |
 | [`.claude/`](.claude/) | working notes and plans for Claude Code sessions |
 
