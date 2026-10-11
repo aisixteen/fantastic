@@ -85,8 +85,14 @@ class WireRoot:
         goes through the memory store's own verbs (`dump`/`inject`), as the leg
         the store is a child of. One probe, one code path, every runtime — which is the
         rule the scenario suite exists under.
+
+        ONE PER ROOT (2026-10-11): it holds the placeholder-id counter, and a fresh
+        WireCtx per access restarted it — every `root.ctx.mint_id()` call returned the
+        same id (the e2e plant fit re-minted 300 rows to ONE id over rust).
         """
-        return WireCtx(self.k)
+        if getattr(self, "_ctx", None) is None:
+            self._ctx = WireCtx(self.k)
+        return self._ctx
 
     def watch(self, *_a, **_kw) -> None:
         """No-op. Status-event spying needs an inbox subscription this face does

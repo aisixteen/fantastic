@@ -86,6 +86,11 @@ impl Pty {
         self.st.lock().expect("pty poisoned")
     }
 
+    /// The ring's text NOW — what `tail`/`grep` read on a PTY job.
+    pub(crate) fn ring_text(&self) -> String {
+        self.lock().ring.iter().map(String::as_str).collect()
+    }
+
     /// `(cols, rows)` — for `status`.
     pub fn dims(&self) -> (u16, u16) {
         let g = self.lock();

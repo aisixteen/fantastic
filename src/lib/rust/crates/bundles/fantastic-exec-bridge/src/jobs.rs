@@ -65,6 +65,14 @@ pub struct Job {
     pub stdout: String,
     /// Collected stderr (newlines preserved).
     pub stderr: String,
+    /// THE LIVE LINE RING (owner, 2026-10-11): every line a pipe job prints, as
+    /// `(n, stream, line)`, the last `LINE_RING` bytes — what `tail`/`grep` read
+    /// while the job runs (its stdout/stderr land only when it ends).
+    pub line_ring: std::collections::VecDeque<(u64, String, String)>,
+    /// Bytes held in `line_ring` (each line + its newline).
+    pub line_ring_bytes: usize,
+    /// Lines the ring already dropped from its front.
+    pub line_ring_dropped: u64,
     /// The terminal of a PTY job (`start pty={cols,rows}`); `None` for a pipe job.
     pub pty: Option<Arc<crate::pty::Pty>>,
 }
@@ -235,6 +243,7 @@ async fn read_stream<R: tokio::io::AsyncRead + Unpin>(
             if let Some(j) = g.get_mut(&(owner.clone(), job_id)) {
                 j.lines = n;
                 j.last_line = line.clone();
+                crate::tail::line_ring_add(j, n, stream, &line);
             }
         }
         kernel

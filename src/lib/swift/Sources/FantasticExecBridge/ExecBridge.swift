@@ -252,6 +252,8 @@
             "resize": .string("args: job_id:int (req), cols:int (req), rows:int (req). Sets a PTY job's window size (the tty sends SIGWINCH, so a TUI redraws). Returns {resized:true, cols, rows}."),
             "ack": .string("args: job_id:int (req), chars:int (req). Flow control from a streaming consumer (an xterm acks each `output` chunk after parsing it): the reader pauses past 100K unacked chars and resumes under 5K. Returns {unacked:int, paused:bool}."),
             "output": .string("args: job_id:int (req), max_bytes:int? (default the whole 256 KiB ring). The PTY job's recent output — what a client re-attaching replays before the live `output` events. Returns {job_id, output:str}."),
+            "tail": .string("args: job_id:int (req), lines:int? (default 20, max 500), stream:str? (stdout|stderr|both, default both — a PTY job has one). The last lines a job has printed SO FAR — running or ended, pipe or PTY. Returns {job_id, status, lines:[{n, stream, line}], printed, dropped}."),
+            "grep": .string("args: job_id:int (req), match:str (req — a regex, searched in each line), lines:int? (most matches returned, default 50, max 500 — the LAST ones), stream:str? (stdout|stderr|both, default both). Searches what a job has printed SO FAR — running or ended, pipe or PTY; lines older than the 256 KiB ring are gone (`dropped` says how many). Returns {job_id, status, matches:[{n, stream, line}], total, scanned, dropped}."),
             "paste_image": .string("args: job_id:int (req), data:bytes (req), mime:str (req — image/png|jpeg|gif|webp). Saves a pasted image to a per-job scratch file and types its path into the PTY (a drag-drop — a program like claude in a browser xterm cannot reach the browser clipboard). Returns {path:str, bytes:int}."),
             "connector": .string("no args — the reference wire client SOURCE (python): paste `source` verbatim at the top of your program and it gets a `kernel` global (send/emit/watch/on_message); returns {source, howto}."),
             "monitor": .string("args: job_id:int (req — a RUNNING job of this agent), notify:str (req — the agent told), match:str? (a regex; absent = every line), every:number? (seconds — at most one delivery per window; required without `match`), tail:int? (newest lines per delivery, default 100), label:str?. Watches the job's output AS IT ARRIVES and SENDS what matches to `notify` as a turn — it polls nothing. Returns {monitor_id, job_id, notify, match, every, tail, label}; kernel `cancel` (or `unmonitor`) ends it, and it ends with its job."),
@@ -382,6 +384,10 @@
                 return ackReply(agentId, payload)
             case "output":
                 return outputReply(agentId, payload)
+            case "tail":
+                return tailGrepReply("tail", agentId, payload)
+            case "grep":
+                return tailGrepReply("grep", agentId, payload)
             case "paste_image":
                 return pasteImageText(agentId, payload)
             case "monitor":
@@ -792,7 +798,7 @@
             _ line: String, stream: String, agentId: AgentId, jobId: TaskId,
             counter: LineCounter, kernel: Kernel
         ) async {
-            let n = counter.bump(line)
+            let n = counter.bump(line, stream: stream)
             monitorTable.feedLine(agentId, jobId, line)
             await kernel.emit(
                 agentId,
@@ -963,6 +969,76 @@
                 "job_id": .integer(jid.value), "output": .string(text),
                 "origin": .string(
                     "\(agentId.value) output {job_id: \(jid.value)} — the ring NOW; re-send, it moves"),
+            ])
+        }
+
+        /// `tail` / `grep` — a job's output SO FAR (owner, 2026-10-11), running or
+        /// ended, pipe or PTY; each line `{n, stream, line}`. Python `_tail` / `_grep`.
+        private func tailGrepReply(_ verb: String, _ agentId: AgentId, _ payload: JSON) -> JSON {
+            let jid: TaskId
+            switch jobArg(verb, payload, required: true) {
+            case .failure(let r): return r.json
+            case .success(let j): jid = j!  // required: absent is already refused
+            }
+            var matcher: NSRegularExpression? = nil
+            var pattern = ""
+            if verb == "grep" {
+                guard case .string(let s) = payload["match"], !s.isEmpty else {
+                    return Refusal.bad("grep", "match", "a regex string")
+                }
+                do {
+                    matcher = try NSRegularExpression(pattern: pyRegexSource(s))
+                    pattern = s
+                } catch {
+                    return Refusal.bad("grep", "match", "a valid regex (\(error.localizedDescription))")
+                }
+            }
+            var want = verb == "tail" ? 20 : 50
+            if payload["lines"] != .null {
+                guard case .integer(let n) = payload["lines"], n >= 1, n <= MAX_LINES else {
+                    return Refusal.bad(verb, "lines", "an integer 1–\(MAX_LINES)")
+                }
+                want = Int(n)
+            }
+            var stream = "both"
+            if payload["stream"] != .null {
+                guard case .string(let s) = payload["stream"], ["stdout", "stderr", "both"].contains(s)
+                else { return Refusal.bad(verb, "stream", "one of stdout, stderr, both") }
+                stream = s
+            }
+            let found = lock.withLock { jobs[jid].flatMap { $0.agent == agentId ? $0 : nil } }
+            guard let job = found else { return noJob(jid) }
+            var rows: [(Int, String, String)]
+            var dropped = 0
+            if let pty = job.pty {
+                rows = pySplitlines(pty.ringText()).enumerated().map { ($0.offset + 1, "pty", String($0.element)) }
+            } else {
+                (rows, dropped) = job.counter.snapshot()
+                if stream != "both" { rows = rows.filter { $0.1 == stream } }
+            }
+            func row(_ r: (Int, String, String)) -> JSON {
+                .object(["n": .integer(Int64(r.0)), "stream": .string(r.1), "line": .string(r.2)])
+            }
+            if verb == "tail" {
+                return .object([
+                    "job_id": .integer(jid.value), "status": .string(job.status),
+                    "lines": .array(rows.suffix(want).map(row)),
+                    "printed": .integer(Int64(job.pty == nil ? job.counter.lines : rows.count)),
+                    "dropped": .integer(Int64(dropped)),
+                    "origin": .string("\(agentId.value) tail {job_id: \(jid.value)} — the output NOW; re-send, it moves"),
+                ])
+            }
+            let hits = rows.filter { r in
+                let ns = r.2 as NSString
+                return matcher!.firstMatch(in: r.2, range: NSRange(location: 0, length: ns.length)) != nil
+            }
+            return .object([
+                "job_id": .integer(jid.value), "status": .string(job.status),
+                "matches": .array(hits.suffix(want).map(row)),
+                "total": .integer(Int64(hits.count)), "scanned": .integer(Int64(rows.count)),
+                "dropped": .integer(Int64(dropped)),
+                "origin": .string(
+                    "\(agentId.value) grep {job_id: \(jid.value), match: \(pyRepr(pattern))} — the output NOW; re-send, it moves"),
             ])
         }
 
@@ -1453,8 +1529,9 @@
             It is a GENERAL-PURPOSE command runner. A program is a FILE some process (or a `write_stream`) put on disk;
             running it is `command` + `args`, exactly like anything else.
 
-            Verbs: `start` · `status` · `stop` · `interrupt` · `clear` · `monitor` · `monitors` ·
-            `unmonitor` · `reflect` · `boot`, and for a PTY job `write` · `resize` · `ack` · `output` · `paste_image`.
+            Verbs: `start` · `status` · `stop` · `interrupt` · `clear` · `tail` · `grep` · `monitor` ·
+            `monitors` · `unmonitor` · `reflect` · `boot`, and for a PTY job `write` · `resize` · `ack` ·
+            `output` · `paste_image`.
             Any verb NOT in that list is **MAIL** for the running program (see below).
 
             WHERE and WITH WHAT a command runs is the RECORD's, never the call's: `cwd` (REQUIRED — a
@@ -1568,6 +1645,15 @@
 
             A running program has the full wire, so it can itself `create_agent` more agents, read memory
             anywhere, call an AI, or spawn more jobs — tools compose into tools.
+
+            ## Look at a job's output NOW — `tail`, `grep`
+
+            A pipe job's `stdout`/`stderr` land in `status` only when it ends; while it runs, read it
+            with `tail(job_id, lines?, stream?)` — the last lines printed so far — and
+            `grep(job_id, match, lines?, stream?)` — the lines so far matching a regex (the last
+            `lines` of them). Both work on any job, running or ended, pipe or PTY; each line comes as
+            `{n, stream, line}`. The job keeps its last 256 KiB of lines; older ones are gone and
+            `dropped` counts them. `stream` is `stdout`, `stderr` or `both` (the default).
 
             ## Monitor a job — early stop
 
@@ -1704,20 +1790,49 @@
     ///
     /// python's `_read_stream` closes over the job DICT (A4.15). Shared across
     /// stdout and stderr, so `n` is one monotonic sequence.
+    /// A pipe job's live line ring, in bytes — the same bound as the PTY ring.
+    let LINE_RING = 256 * 1024
+    /// The most lines one `tail` / `grep` reply carries.
+    let MAX_LINES: Int64 = 500
+
     final class LineCounter: @unchecked Sendable {
         private let lock = NSLock()
         private var count = 0
         private var last = ""
 
+        /// THE LIVE LINE RING (owner, 2026-10-11): every line a pipe job prints, as
+        /// (n, stream, line), the last `LINE_RING` bytes — what `tail`/`grep` read
+        /// while the job runs (its stdout/stderr land only when it ends).
+        private var ring: [(Int, String, String)] = []
+        private var ringHead = 0
+        private var ringBytes = 0
+        private var dropped = 0
+
         var lines: Int { lock.withLock { count } }
         var lastLine: String { lock.withLock { last } }
 
-        func bump(_ line: String) -> Int {
+        func bump(_ line: String, stream: String) -> Int {
             lock.withLock {
                 count += 1
                 last = line
+                ring.append((count, stream, line))
+                ringBytes += line.utf8.count + 1
+                while ringBytes > LINE_RING && ringHead < ring.count {
+                    ringBytes -= ring[ringHead].2.utf8.count + 1
+                    ringHead += 1
+                    dropped += 1
+                }
+                if ringHead > 4096 {
+                    ring.removeFirst(ringHead)
+                    ringHead = 0
+                }
                 return count
             }
+        }
+
+        /// The ring NOW, oldest first, and how many lines it already dropped.
+        func snapshot() -> ([(Int, String, String)], Int) {
+            lock.withLock { (Array(ring[ringHead...]), dropped) }
         }
     }
 
