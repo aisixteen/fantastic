@@ -1,0 +1,11 @@
+# WHAT to measure and HOW LONG to allow. NO MODEL: the `e2e/mocks` provider servers
+# and the kernel's own AI agent per provider, driven over web_rest on every host runtime.
+id: provider_mocks
+group: backends
+title: "the provider mocks (vllm, ollama, responses, anthropic) answer each backend for real: a turn's text, the probes a record leaves to the server, the key on every request, an HTTP error and a refused key fail the turn loud"
+runner: probe.py
+runtimes: [python, rust, swift]
+costs: free
+limits:
+  idle_seconds: 120
+  turn_seconds: 300
