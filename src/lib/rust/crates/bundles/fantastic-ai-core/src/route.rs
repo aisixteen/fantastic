@@ -912,6 +912,7 @@ async fn route_reply_gated(
         }
     }
 
+    let mut doc_args: HashMap<(String, String), HashSet<String>> = HashMap::new();
     for call in calls {
         if CONTROL_CALLS.contains(&call.name.as_str()) {
             // CONTROL CALLS, not dispatches. `done` ends the chain; `await`
@@ -942,13 +943,20 @@ async fn route_reply_gated(
         // emitting NO call. A dropped key now costs a wasted turn instead of
         // the whole task, and discarding a reply became something you must SAY
         // (`reply_to: null` / "none"), which is the right way round.
+        // The tag grammar types a bare number (`<reply_to>1001</reply_to>` → 1001):
+        // a number is an id the model wrote, never "discard" — it is checked like
+        // any id below (python, measured 2026-10-11, e2e chat_users).
         let reply_to: Option<String> = match args.get("reply_to") {
-            Some(v) => v
-                .as_str()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .filter(|s| !matches!(s.to_lowercase().as_str(), "none" | "null" | "nobody"))
-                .map(str::to_string),
+            Some(v) => match v {
+                Value::String(s) => Some(s.clone()),
+                Value::Number(n) => Some(py_str(&Value::Number(n.clone()))),
+                _ => None,
+            }
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .filter(|s| !matches!(s.to_lowercase().as_str(), "none" | "null" | "nobody"))
+            .map(str::to_string),
             None => Some(self_id.as_str().to_string()),
         };
         let reply_to = reply_to.map(|r| {
@@ -973,6 +981,41 @@ async fn route_reply_gated(
             }
             continue;
         };
+        // A REPLY ADDRESSED TO NOBODY IS LOST. `reply_to` is where this call's
+        // answer goes, never an argument the target sees; one naming no agent made
+        // the delivery fail on that missing agent's inbox, so nobody saw it and the
+        // model never learned what its call did (python, measured 2026-10-11, e2e
+        // chat_users). Nothing is dispatched; the model is told. A peer address
+        // (`<guid>|<agent>`) is the peer's to resolve.
+        if let Some(rt) = reply_to.as_deref() {
+            if rt != self_id.as_str() && !rt.contains('|') && kernel.resolve_target(rt).is_none() {
+                let verb = match args.get("payload") {
+                    Some(Value::Object(p)) => p.get("type").map_or("?".to_string(), py_str),
+                    _ => "-".to_string(),
+                };
+                let body = json!({
+                    "error": format!(
+                        "reply_to={} names no agent, so nothing was dispatched to {}. \
+                         `reply_to` is where this call's reply goes (left out: back to \
+                         you) and never reaches the target — an argument of the \
+                         target's verb needs the name its docs give.",
+                        py_repr(rt),
+                        py_repr(target)
+                    ),
+                    "target": target,
+                    "reply_to": rt,
+                });
+                units.push(Unit {
+                    dest: self_id.as_str().to_string(),
+                    target: target.to_string(),
+                    verb,
+                    idx: None,
+                    body: Some(crate::tool_parse::render_reply(&body)),
+                    title: None,
+                });
+                continue;
+            }
+        }
         // AN EMPTY PAYLOAD IS NO PAYLOAD. The grammar always produces the key
         // (every child that is not routing IS the payload), so `{}` is exactly
         // what a send with no verb looks like — and dispatching it reaches the
@@ -1017,6 +1060,46 @@ async fn route_reply_gated(
             Some(v) => py_str(v),
             None => "?".to_string(),
         };
+        // A ROUTING NAME THE VERB ALSO TAKES IS LOST (owner, 2026-10-11). `title`,
+        // `timeout`, `reply_to`, … are this call's own fields — lifted out, never
+        // sent to the target. A verb that documents an argument of the same name can
+        // never receive it from a model call (python, measured: a knowledge store's
+        // `create(title)` failed on every call, the model retried 8 times and blamed
+        // the store). The target's `docs` names the verb's arguments; a clash refuses
+        // the call, loud.
+        if let Some(vt) = payload.get("type").and_then(Value::as_str) {
+            let used: Vec<&str> = crate::tool_parse::grammar::ROUTING
+                .iter()
+                .copied()
+                .filter(|k| *k != "target_id" && args.contains_key(*k))
+                .collect();
+            if !used.is_empty() {
+                let clash = routing_clash(&kernel, target, vt, &used, &mut doc_args);
+                if !clash.is_empty() {
+                    let names = clash.join(", ");
+                    let body = json!({
+                        "error": format!(
+                            "{names} on this call {} call routing, never sent to the target \
+                             — but {target}'s `{vt}` documents an argument named {names}, \
+                             which no call can deliver; nothing was dispatched. Call it \
+                             without that argument, or have the verb's owner rename it.",
+                            if clash.len() == 1 { "is" } else { "are" }
+                        ),
+                        "target": target,
+                        "clash": clash,
+                    });
+                    units.push(Unit {
+                        dest: self_id.as_str().to_string(),
+                        target: target.to_string(),
+                        verb: verb.clone(),
+                        idx: None,
+                        body: Some(crate::tool_parse::render_reply(&body)),
+                        title: None,
+                    });
+                    continue;
+                }
+            }
+        }
 
         // THE `bytes` ARGUMENT IS RAW BYTES, NOT A JSON STRING (A13.19).
         // Python's parser returns `raw.encode("utf-8")` for the one argument
@@ -1519,6 +1602,42 @@ async fn deliver_grouped(
             notice,
         );
     }
+}
+
+/// The routing fields of this call that `target`'s `verb` also documents as
+/// arguments — read from the kernel's own `docs` (the signature the model reads),
+/// in process: no dispatch, no ledger row, once per (target, verb) per batch. A
+/// target this kernel cannot document (a peer's agent, an unknown verb) documents
+/// nothing here: the call goes on, and its own reply says what happened. Python
+/// `_routing_clash`.
+fn routing_clash(
+    kernel: &Arc<Kernel>,
+    target: &str,
+    verb: &str,
+    used: &[&str],
+    cache: &mut HashMap<(String, String), HashSet<String>>,
+) -> Vec<String> {
+    static DOC_ARG: OnceLock<regex::Regex> = OnceLock::new();
+    let re = DOC_ARG.get_or_init(|| {
+        regex::Regex::new(r"(?:\bargs:|,)\s*([A-Za-z_][A-Za-z0-9_]*)\s*:").expect("doc arg regex")
+    });
+    let names = cache
+        .entry((target.to_string(), verb.to_string()))
+        .or_insert_with(|| {
+            let res =
+                fantastic_kernel::docs::docs_reply(kernel, &json!({"of": target, "verb": verb}));
+            let sig = res
+                .get("verbs")
+                .and_then(|v| v.get(verb))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            re.captures_iter(&sig).map(|c| c[1].to_string()).collect()
+        });
+    used.iter()
+        .filter(|k| names.contains(**k))
+        .map(|k| (*k).to_string())
+        .collect()
 }
 
 #[cfg(test)]

@@ -105,9 +105,9 @@ async def plant(
 ) -> list[int]:
     """Append rows to `aid`'s conversation. Returns the ids, in order.
 
-    IN PROCESS: AS `aid` (`_as_self`) — a caller appends only under its own key.
-    OVER THE WIRE the leg is not `aid`, so the tables are rewritten at setup (owner,
-    2026-10-04): the leg appends one throwaway row per id-less row under ITS OWN key
+    The tables are rewritten at setup, from above (owner, 2026-10-04; in process too
+    since 2026-10-11), so `aid` need not exist yet. In process the rows carry real
+    ids. OVER THE WIRE the leg appends one throwaway row per id-less row under ITS OWN key
     (the kernel stays the only allocator), then `dump` → those rows dropped, `rows`
     added under `<guid>|<aid>` with the minted ids (a row's `refs` become its
     `fold_refs`) → `inject`. The agent's in-memory head is not touched — plant before
@@ -119,18 +119,18 @@ async def plant(
     the kernel's ledger lives in this store and records every inject WITH its
     payload (the whole tables), so a round per row grew the next dump by the whole
     store each time (measured 2026-10-07: ~4.5 min for 80 rows)."""
-    if getattr(root, "leg_id", None) is None:
-        with root.ctx.agents[aid]._as_self():
-            out = await root.send(
-                [{"target": MEMORY, "payload": {"type": "append", "rows": rows}}]
-            )
-        r = out[0].get("result") or {}
-        ids = r.get("ids")
-        if not isinstance(ids, list):
-            raise AssertionError(f"memory append({aid}) refused: {r}")
-        return ids
+    # ONE PATH, FROM ABOVE (2026-10-11): the store is rewritten (dump → rows added
+    # under `<guid>|<aid>` → inject), so the agent need not exist yet. In process
+    # used to append AS `aid` (`_as_self`), which raised KeyError for an agent not
+    # yet created — every probe that plants before creating its agent (synthetic_
+    # recall, nested_folds) died there on python. In process the rows already carry
+    # real ids from the kernel's counter, so nothing is minted.
+    wire = getattr(root, "leg_id", None) is not None
     need = len(rows) if remap else sum(1 for x in rows if x.get("id") is None)
     minted: list[int] = []
+    if need and not wire:
+        raise AssertionError(f"memory plant({aid}): in process every row needs its id "
+                             "(root.ctx.mint_id)")
     if need:
         r = await _store(root, {"type": "append", "rows": [{"kind": "_mint"}] * need})
         minted = r.get("ids") if isinstance(r.get("ids"), list) else []
@@ -141,7 +141,7 @@ async def plant(
     if not isinstance(guid, str) or not guid:
         raise AssertionError(f"memory plant({aid}): the root reflect carries no guid: {out}")
     tables = await dump(root)
-    leg_key, owner = f"{guid}|{root.leg_id}", f"{guid}|{aid}"
+    leg_key, owner = f"{guid}|{getattr(root, 'leg_id', None)}", f"{guid}|{aid}"
     gone = set(minted)
     tables["rows"] = [
         x for x in tables.get("rows") or []

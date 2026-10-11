@@ -410,7 +410,7 @@ pub async fn context_recall(
                 kernel,
                 client_id: client_id.unwrap_or(""),
             };
-            let (r, _, f, _) = fold_down(&rows, &fctx, body_budget).await?;
+            let (r, _, f) = fold_down(&rows, &fctx, body_budget).await?;
             rows = r;
             folded = f;
         }

@@ -497,7 +497,7 @@ extension KernelBridgeBundle {
                 "error": .string("bridge.forward: target (str) + payload (dict) required")
             ])
         }
-        let timeout = try pyFloat(payload.asObject?["timeout"] ?? .double(30.0))
+        let timeout = try pyFloat(payload.asObject?["forward_timeout"] ?? .double(30.0))
         let st = state(agentId)
         guard let transport = st.transport, await !transport.isClosed() else {
             return Refusal.make(
@@ -536,7 +536,7 @@ extension KernelBridgeBundle {
 
     /// `forward` carrying a raw request chunk / returning a raw reply chunk —
     /// the binary channel. Same correlation, same texts. The local caller sends
-    /// `{type:forward, target, payload, timeout?}` with the body INSIDE the inner
+    /// `{type:forward, target, payload, forward_timeout?}` with the body INSIDE the inner
     /// payload (`Blob(parts: ["payload", …steps], …)` — python's forward payload
     /// holds the bytes there); the bridge ships a binary `call` frame with the body
     /// at `["payload", …steps]`, or a TEXT one when the call carries no body (a raw
@@ -555,7 +555,7 @@ extension KernelBridgeBundle {
                 ]), nil
             )
         }
-        let timeout = try pyFloat(header.asObject?["timeout"] ?? .double(30.0))
+        let timeout = try pyFloat(header.asObject?["forward_timeout"] ?? .double(30.0))
         let st = state(agentId)
         guard let transport = st.transport, await !transport.isClosed() else {
             return (

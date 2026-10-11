@@ -2571,6 +2571,56 @@ async fn a_malformed_timeout_arg_settles_the_kernels_refusal() {
     assert!(turn.contains("'soon'"), "must echo the raw value: {turn}");
 }
 
+/// A `reply_to` naming NO AGENT dispatches nothing and tells the model (python,
+/// measured 2026-10-11, e2e chat_users: `<reply_to>1001</reply_to>` meant a chat
+/// message id; typed as the number 1001 it used to DISCARD the reply). The grammar
+/// types the bare number here too, so this pins the number-is-an-id half as well.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reply_to_naming_no_agent_dispatches_nothing_and_says_so() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp, "rt_deadreply").await;
+    let b = add_peer(&kernel, &tmp, &a).await;
+    let sa = script(
+        &a,
+        vec![pass("read it <call name=\"done\"></call>")],
+        Duration::ZERO,
+    );
+    let sb = script(&b, vec![pass("must never run")], Duration::ZERO);
+    let call = call_envelope(
+        b.as_str(),
+        json!({"type": "send", "text": "hi", "client_id": "probe"}),
+        Some("1001"),
+    );
+    crate::route::route_reply(
+        a.clone(),
+        Arc::clone(&kernel),
+        call,
+        "probe".to_string(),
+        None,
+        None,
+        String::new(),
+        5.0,
+        crate::constants::DEFAULT_CONTEXT_WINDOW,
+        None,
+        false,
+        Vec::new(),
+        false,
+        None,
+    )
+    .await;
+    assert!(
+        until_passes(&sa, 1).await,
+        "the refusal must reach the model"
+    );
+    let turn = sa.request(0);
+    assert!(
+        turn.contains("reply_to='1001' names no agent, so nothing was dispatched"),
+        "{turn}"
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(sb.passes_served(), 0, "the call must not have run");
+}
+
 /// A turn whose calls all carried `reply_to:null` DISPATCHED REAL WORK. It is
 /// owed no reply, and it is not a silent turn: rust nudged it anyway until
 /// 2026-09-02 (gating on the blocks instead of python's `not calls and not
@@ -6313,4 +6363,103 @@ async fn a_peer_cannot_mark_its_message_a_notice() {
         "{users:?}"
     );
     assert!(users[0].get("kind").is_none(), "{users:?}");
+}
+
+/// A ROUTING NAME A VERB ALSO TAKES (owner, 2026-10-11): `title` on a call is
+/// routing, never sent to the target. A verb whose `docs` names `title` could never
+/// receive it — the call is refused, loud, and a verb without one is untouched.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_routing_name_the_verb_documents_is_refused_loud() {
+    struct Store(Arc<std::sync::Mutex<Vec<String>>>);
+    #[async_trait]
+    impl Bundle for Store {
+        fn name(&self) -> &str {
+            "clash_store"
+        }
+        fn verb_docs(&self) -> Value {
+            json!({
+                "create": "args: title:str (req), body:str (req). A page → {created}.",
+                "ping": "No args. → {pong}.",
+            })
+        }
+        async fn handle(
+            &self,
+            _agent_id: &AgentId,
+            payload: &Value,
+            _kernel: &Arc<Kernel>,
+        ) -> Result<Reply, BundleError> {
+            let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
+            if matches!(verb, "boot" | "shutdown") {
+                return Ok(None);
+            }
+            self.0.lock().unwrap().push(verb.to_string());
+            Ok(Some(json!({"ok": verb})))
+        }
+    }
+
+    let got = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let g = Arc::clone(&got);
+    let tmp = TempDir::new().unwrap();
+    let kernel = base_kernel(&tmp, move |k| {
+        k.bundles.register("clash_store.tools", Store(g))
+    })
+    .await;
+    let backend_id = id_for(&tmp, "rt_clash");
+    let file_id = format!("ff_{backend_id}");
+    add_file_bridge(
+        &kernel,
+        &file_id,
+        &tmp.path().join(".fantastic"),
+        &backend_id,
+    )
+    .await;
+    let backend = add_backend(&kernel, &backend_id, &file_id).await;
+    let kb = format!("{backend_id}_kb");
+    let _ = kernel
+        .send(vec![Item::new(AgentId::from("kernel_state"), json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "clash_store.tools", "id": kb, "callable_by": {backend_id.as_str(): "*"}}))])
+        .await;
+    let _ = kernel
+        .send(vec![Item::new(AgentId::from("kernel_state"), json!({"type": "update_agent", "id": backend_id.as_str(), "can_call": {"$self": "*", "$parent": "*", "$subtree": "*", file_id.as_str(): "*", "cli": "*", MEMORY: "*", kb.as_str(): "*"}}))])
+        .await;
+    let mut create = Map::new();
+    create.insert("target_id".into(), json!(kb));
+    create.insert("title".into(), json!("Notes"));
+    create.insert("payload".into(), json!({"type": "create", "body": "b"}));
+    let mut ping = Map::new();
+    ping.insert("target_id".into(), json!(kb));
+    ping.insert("title".into(), json!("check kb"));
+    ping.insert("payload".into(), json!({"type": "ping"}));
+    let s = script(
+        &backend,
+        vec![
+            pass(format!(
+                "{}\n{}",
+                crate::tool_parse::render_call("send", &create),
+                crate::tool_parse::render_call("send", &ping)
+            )),
+            pass("saw it <call name=\"done\"></call>"),
+        ],
+        Duration::ZERO,
+    );
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "go", "client_id": "probe"}),
+        )])
+        .await;
+    assert!(
+        until_passes(&s, 2).await,
+        "the refusal must reach the model"
+    );
+    let turn = s.request(1);
+    assert!(
+        turn.contains("title on this call is call routing"),
+        "{turn}"
+    );
+    assert!(turn.contains("documents an argument named title"), "{turn}");
+    assert_eq!(
+        *got.lock().unwrap(),
+        vec!["ping".to_string()],
+        "create must not run"
+    );
 }

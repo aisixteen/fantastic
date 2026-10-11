@@ -559,7 +559,7 @@ async def test_inbound_error_frame_fails_forward_promptly(two_kernels):
                         "type": "forward",
                         "target": "whatever",
                         "payload": {"type": "reflect"},
-                        "timeout": 30.0,
+                        "forward_timeout": 30.0,
                     },
                 }
             ]

@@ -72,7 +72,7 @@ VERBS = make_verbs(
 
 
 async def _list_peers(id, payload, kernel):
-    """No args (optional timeout). One-shot snapshot of the relay directory:
+    """args: list_timeout:float? (default 30s — not `timeout`, which is a call's own routing field). One-shot snapshot of the relay directory:
     `{peers:[{guid, status(green|yellow|red), last_seen, since}]}` — addresses the
     relay's own `relay` agent (target:"relay"), not the partner. Boot first."""
     st = _state(id)
@@ -82,7 +82,7 @@ async def _list_peers(id, payload, kernel):
             "relay_connector.list_peers: not connected",
             hint="call boot first",
         )
-    return await st.transport.list_peers(timeout=float(payload.get("timeout", 30.0)))
+    return await st.transport.list_peers(timeout=float(payload.get("list_timeout", 30.0)))
 
 
 async def _watch_directory(id, payload, kernel):

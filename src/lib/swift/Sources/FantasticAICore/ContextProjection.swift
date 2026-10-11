@@ -283,9 +283,6 @@ extension AIBackend {
                 "stripped": .integer(Int64(proj.stripped)),
                 "stripped_bytes": .integer(Int64(proj.strippedBytes)),
                 "folded": .integer(Int64(proj.folded)),
-                // Spans the fold strategy did NOT fold: the summary stayed over its
-                // budget after one re-summarise. Loud here, never a truncated summary.
-                "fold_refused": .integer(Int64(proj.foldRefused)),
                 // What the model actually sees this turn — so "after reload it sees
                 // only the fold" is measured from the view, never self-reported.
                 "view_ids": .array(viewIds.prefix(200).map(JSON.integer)),

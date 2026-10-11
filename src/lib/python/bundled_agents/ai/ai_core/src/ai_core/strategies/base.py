@@ -36,9 +36,6 @@ class Projection:
     stripped: int = 0
     stripped_bytes: int = 0
     folded: int = 0  # `fold`: fold rows written this projection
-    # `fold`: spans NOT folded because the summary stayed over its budget after the
-    # one re-summarise — the span stays in view, reported, never a degraded fold.
-    fold_refused: int = 0
 
 
 # (body, system_block, rec, ctx) -> Projection (body excludes the system block)

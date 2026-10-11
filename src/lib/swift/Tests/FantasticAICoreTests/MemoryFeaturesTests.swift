@@ -190,21 +190,28 @@ struct MemoryFeaturesTests {
         #expect(out[2]["id"].asInt == 3 && out[3] == hist[3])
     }
 
-    // ── the fold summary: a budget, one retry, then refuse ──
+    // ── the fold summary: a fixed budget, three retries, then a loud error ──
 
-    @Test func anOversizedSummaryIsResummarisedOnceThenRefused() async {
+    @Test func anOversizedSummaryIsResummarisedThenFailsLoud() async {
         let s = ScriptedSummarizer { _ in ("TITLE\n\n" + String(repeating: "word ", count: 5000), false) }
-        let out = await AIFoldStrategy.summarize(sctx(s.fn), bigRows(), Array(1...5))
-        #expect(out == nil, "still over budget after the retry — nothing is folded")
-        #expect(s.texts.count == 2 && s.texts[1].contains("Rewrite it to fit"))
-        #expect(s.texts[0].contains("AT MOST ~") && s.texts[0].contains("ERRORS:"), "fixed sections, a target")
+        do {
+            _ = try await AIFoldStrategy.summarize(sctx(s.fn), bigRows(), Array(1...5))
+            Issue.record("over budget after every retry must throw")
+        } catch let e as FoldSummaryError {
+            #expect(e.message.contains("over its 1024-token budget after 3 re-summarises"), "\(e)")
+        } catch {
+            Issue.record("wrong error \(error)")
+        }
+        #expect(s.texts.count == 1 + AIConstants.SUMMARY_RETRIES)
+        #expect(s.texts.dropFirst().allSatisfy { $0.contains("Rewrite it to fit") })
+        #expect(s.texts[0].contains("AT MOST ~1024 tokens") && s.texts[0].contains("ERRORS:"))
     }
 
     @Test func aRetryThatFitsIsTheSummary() async throws {
         let s = ScriptedSummarizer { n in
             ("TITLE\n\n" + (n == 1 ? String(repeating: "word ", count: 5000) : "short summary"), false)
         }
-        let out = try #require(await AIFoldStrategy.summarize(sctx(s.fn), bigRows(), Array(1...5)))
+        let out = try await AIFoldStrategy.summarize(sctx(s.fn), bigRows(), Array(1...5))
         #expect(out.0 == "TITLE" && out.1 == "short summary" && out.2 == false)
     }
 
@@ -221,20 +228,20 @@ struct MemoryFeaturesTests {
         #expect(!idx.contains("[reply to"), "runtime lines are not the user's words")
     }
 
-    @Test func aSummaryCutAtItsBudgetIsResummarisedOnce() async throws {
-        let s = ScriptedSummarizer { n in ("TITLE\n\n" + (n <= 1 ? "partial" : "whole summary"), n <= 1) }
-        let c = sctx(s.fn)
-        let rows = bigRows()
-        let out = try #require(await AIFoldStrategy.summarize(c, rows, Array(1...5)))
-        #expect(out.1 == "whole summary" && s.calls.count == 2)
-        let want = AIFoldStrategy.summaryBudget(c, rows, Array(1...5))
-        let bound = Int(want + AIConstants.THINK_ALLOWANCE)  // the thought counts against max_tokens
-        #expect(s.calls == [bound, bound], "the call is bounded by budget + thinking")
+    @Test func aSummaryCutAtItsBudgetIsResummarised() async throws {
+        let s = ScriptedSummarizer { n in ("TITLE\n\n" + (n <= 3 ? "partial" : "whole summary"), n <= 3) }
+        let out = try await AIFoldStrategy.summarize(sctx(s.fn), bigRows(), Array(1...5))
+        #expect(out.1 == "whole summary" && s.calls.count == 4)
+        #expect(AIConstants.SUMMARY_BUDGET == 1024)
+        let bound = Int(AIConstants.SUMMARY_BUDGET + AIConstants.THINK_ALLOWANCE)
+        #expect(s.calls == Array(repeating: bound, count: 4), "bounded by budget + thinking")
     }
 
-    @Test func aSummaryCutTwiceIsRefusedNothingFolded() async {
-        let s = ScriptedSummarizer { n in ("TITLE\n\n" + (n <= 2 ? "partial" : "whole summary"), n <= 2) }
-        #expect(await AIFoldStrategy.summarize(sctx(s.fn), bigRows(), Array(1...5)) == nil)
+    @Test func aSummaryCutPastEveryRetryFailsLoud() async {
+        let s = ScriptedSummarizer { _ in ("TITLE\n\npartial", true) }
+        await #expect(throws: FoldSummaryError.self) {
+            try await AIFoldStrategy.summarize(sctx(s.fn), bigRows(), Array(1...5))
+        }
     }
 
     private func pair() async -> (Kernel, ProviderScript, ProviderScript) {

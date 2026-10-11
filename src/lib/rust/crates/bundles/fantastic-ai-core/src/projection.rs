@@ -41,11 +41,23 @@ pub enum ProjectFail {
     Refusal(Value),
     /// The memory store refused a read or a write the projection needed.
     Store(MemoryStoreError),
+    /// A fold's summary would not fit its budget after every re-summarise — the
+    /// turn fails loud (python `FoldSummaryError`).
+    FoldSummary(crate::strategies::fold::FoldSummaryError),
 }
 
 impl From<MemoryStoreError> for ProjectFail {
     fn from(e: MemoryStoreError) -> Self {
         Self::Store(e)
+    }
+}
+
+impl From<crate::strategies::fold::FoldFail> for ProjectFail {
+    fn from(e: crate::strategies::fold::FoldFail) -> Self {
+        match e {
+            crate::strategies::fold::FoldFail::Store(e) => Self::Store(e),
+            crate::strategies::fold::FoldFail::Summary(e) => Self::FoldSummary(e),
+        }
     }
 }
 
@@ -264,9 +276,6 @@ pub async fn project_context(
         "stripped": proj.stripped,
         "stripped_bytes": proj.stripped_bytes,
         "folded": proj.folded,
-        // Spans the fold strategy did NOT fold: the summary stayed over its budget
-        // after one re-summarise. Loud here, never a truncated summary.
-        "fold_refused": proj.fold_refused,
         // What the model actually sees this turn — so "after reload it sees only
         // the fold" is measured from the view, never self-reported.
         "view_ids": out_body.iter().filter_map(|m| m.get("id").and_then(Value::as_i64))

@@ -895,7 +895,7 @@ struct RelayTransportTests {
                 .object([
                     "type": .string("forward"), "target": .string("x"),
                     "payload": .object(["type": .string("reflect")]),
-                    "timeout": .double(0.2),
+                    "forward_timeout": .double(0.2),
                 ]))
         ])[0].result
         #expect(

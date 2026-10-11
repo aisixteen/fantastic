@@ -58,6 +58,10 @@ pub enum GenFailure {
     /// `system_prompt_file` is set and cannot be the block — FAIL LOUD, no turn
     /// on another block (python `PromptFileError`, caught by `_send`).
     PromptFile(crate::prompt_file::PromptFileError),
+    /// A fold's summary would not fit its budget after every re-summarise — FAIL
+    /// LOUD, no turn on an unfolded view (python `FoldSummaryError`, caught by
+    /// `_send`).
+    FoldSummary(crate::strategies::fold::FoldSummaryError),
 }
 
 /// What one generation produced.
@@ -98,6 +102,7 @@ impl From<crate::assembly::BlockFail> for GenFailure {
         match e {
             crate::assembly::BlockFail::Store(e) => Self::Store(e),
             crate::assembly::BlockFail::PromptFile(e) => Self::PromptFile(e),
+            crate::assembly::BlockFail::FoldSummary(e) => Self::FoldSummary(e),
         }
     }
 }
@@ -214,6 +219,9 @@ pub async fn run_generation(
         // `client_id` is stapled onto a refusal python returns bare.
         Err(crate::projection::ProjectFail::Refusal(e)) => return Err(GenFailure::Projection(e)),
         Err(crate::projection::ProjectFail::Store(e)) => return Err(GenFailure::Store(e)),
+        Err(crate::projection::ProjectFail::FoldSummary(e)) => {
+            return Err(GenFailure::FoldSummary(e))
+        }
     };
 
     // ONE provider pass. Every chunk is a content token — the provider knows

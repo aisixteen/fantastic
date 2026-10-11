@@ -568,6 +568,7 @@ func routeReply(
         }
     }
 
+    var docArgs: [String: Set<String>] = [:]
     for call in calls {
         if CONTROL_CALLS.contains(call.name) {
             // CONTROL CALLS, not dispatches. `done` ends the chain;
@@ -607,10 +608,18 @@ func routeReply(
         // default.
         var replyTo: String?
         if let raw = args["reply_to"] {
-            // A non-string `reply_to` is not an address; python maps it to None
-            // rather than coercing a guess. A string that trims to empty lands on
-            // the same falsy path python's `""` takes.
-            let trimmed = raw.asString?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            // The tag grammar types a bare number (`<reply_to>1001</reply_to>` →
+            // 1001): a number is an id the model wrote, never "discard" — it is
+            // checked like any id below (python, measured 2026-10-11, e2e
+            // chat_users). Any other non-string maps to python's None. A string
+            // that trims to empty lands on the same falsy path python's `""` takes.
+            let text: String?
+            switch raw {
+            case .string(let s): text = s
+            case .integer, .double: text = pyStr(raw)
+            default: text = nil
+            }
+            let trimmed = text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             if trimmed.isEmpty || ["none", "null", "nobody"].contains(trimmed.lowercased()) {
                 replyTo = nil
             } else {
@@ -634,6 +643,38 @@ func routeReply(
                                 "you_sent": .object(argsWithoutPayload(args)),
                             ]))))
             }
+            continue
+        }
+
+        // A REPLY ADDRESSED TO NOBODY IS LOST. `reply_to` is where this call's
+        // answer goes, never an argument the target sees; one naming no agent made
+        // the delivery fail on that missing agent's inbox, so nobody saw it and the
+        // model never learned what its call did (python, measured 2026-10-11, e2e
+        // chat_users). Nothing is dispatched; the model is told. A peer address
+        // (`<guid>|<agent>`) is the peer's to resolve.
+        if let rt = replyTo, rt != selfId.value, !rt.contains("|"),
+            kernel.resolveAgent(rt) == nil
+        {
+            let verb: String
+            if let p = args["payload"]?.asObject {
+                verb = p["type"].map { pyStr($0) } ?? "?"
+            } else {
+                verb = "-"
+            }
+            units.append(
+                RouteUnit(
+                    dest: selfId.value, target: target, verb: verb, idx: nil,
+                    body: renderReply(
+                        .object([
+                            "error": .string(
+                                "reply_to=\(pyRepr(rt)) names no agent, so nothing was "
+                                    + "dispatched to \(pyRepr(target)). `reply_to` is where "
+                                    + "this call's reply goes (left out: back to you) and "
+                                    + "never reaches the target — an argument of the "
+                                    + "target's verb needs the name its docs give."),
+                            "target": .string(target),
+                            "reply_to": .string(rt),
+                        ]))))
             continue
         }
 
@@ -661,6 +702,39 @@ func routeReply(
         // non-string `<type>` still names the reply (`· a 42 ·`, `· a True ·`),
         // and `?` means the key was ABSENT — not that it held something odd.
         let verb = payload["type"].map { pyStr($0) } ?? "?"
+
+        // A ROUTING NAME THE VERB ALSO TAKES IS LOST (owner, 2026-10-11). `title`,
+        // `timeout`, `reply_to`, … are this call's own fields — lifted out, never
+        // sent to the target. A verb that documents an argument of the same name can
+        // never receive it from a model call (python, measured: a knowledge store's
+        // `create(title)` failed on every call, the model retried 8 times and blamed
+        // the store). The target's verb docs name its arguments; a clash refuses the
+        // call, loud.
+        if let vt = payload["type"]?.asString {
+            let used = ROUTING.filter { $0 != "target_id" && args[$0] != nil }
+            if !used.isEmpty {
+                let clash = routingClash(kernel, target, vt, used, &docArgs)
+                if !clash.isEmpty {
+                    let names = clash.joined(separator: ", ")
+                    units.append(
+                        RouteUnit(
+                            dest: selfId.value, target: target, verb: verb, idx: nil,
+                            body: renderReply(
+                                .object([
+                                    "error": .string(
+                                        "\(names) on this call \(clash.count == 1 ? "is" : "are") call "
+                                            + "routing, never sent to the target — but \(target)'s "
+                                            + "`\(vt)` documents an argument named \(names), which no "
+                                            + "call can deliver; nothing was dispatched. Call it "
+                                            + "without that argument, or have the verb's owner "
+                                            + "rename it."),
+                                    "target": .string(target),
+                                    "clash": .array(clash.map { .string($0) }),
+                                ]))))
+                    continue
+                }
+            }
+        }
 
         // A SELF-CALL INHERITS ITS CONVERSATION. The model's calls are dispatched
         // here, AFTER the turn closed and the in-flight entry was cleared — so a
@@ -1085,4 +1159,37 @@ func incomingRow(_ text: String, id: Int64, parent: Int64?, notice: Bool) -> JSO
     ]
     if notice { row["kind"] = .string("notice") }
     return .object(row)
+}
+
+/// An argument name in a verb's docs (`args: name:type …, name:type`).
+private let docArgPattern = try! NSRegularExpression(
+    pattern: #"(?:\bargs:|,)\s*([A-Za-z_][A-Za-z0-9_]*)\s*:"#)
+
+/// The routing fields of this call that `target`'s `verb` also documents as
+/// arguments — read from the target's own verb docs (the first paragraph: the
+/// signature the model reads), in process: no dispatch, once per (target, verb)
+/// per batch. A target this kernel cannot document (a peer's agent, an unknown
+/// verb) documents nothing here: the call goes on, and its own reply says what
+/// happened. Python `_routing_clash`.
+func routingClash(
+    _ kernel: Kernel, _ target: String, _ verb: String, _ used: [String],
+    _ cache: inout [String: Set<String>]
+) -> [String] {
+    let key = "\(target)\u{0}\(verb)"
+    if cache[key] == nil {
+        var names = Set<String>()
+        if let agent = kernel.resolveAgent(target), let hm = agent.handlerModule,
+            let bundle = kernel.bundles.get(hm)
+        {
+            let table = bundle.instanceVerbDocs(agent) ?? bundle.verbDocTable
+            let doc = table[verb].asString ?? ""
+            let sig = doc.components(separatedBy: "\n\n").first ?? ""
+            let ns = sig as NSString
+            for m in docArgPattern.matches(in: sig, range: NSRange(location: 0, length: ns.length)) {
+                names.insert(ns.substring(with: m.range(at: 1)))
+            }
+        }
+        cache[key] = names
+    }
+    return used.filter { cache[key]!.contains($0) }
 }

@@ -175,7 +175,38 @@ pub fn ai_fields_with_window(context_window: i64) -> Vec<Field> {
         Field::new("system_prompt", "str", SYSTEM_PROMPT_HINT),
         Field::new("file_bridge_id", "str", FILE_BRIDGE_ID_HINT),
         Field::new("system_prompt_file", "str", SYSTEM_PROMPT_FILE_HINT),
+        Field::new("pre_system_prompt", "str", PRE_SYSTEM_PROMPT_HINT),
+        Field::new("post_system_prompt", "str", POST_SYSTEM_PROMPT_HINT),
     ]
+}
+
+/// The `pre_system_prompt` field's hint. Python `AI_FIELDS`.
+pub const PRE_SYSTEM_PROMPT_HINT: &str = "text placed BEFORE the system block on every turn \
+     — whichever is in force (the default, `system_prompt` or `system_prompt_file`), never \
+     replacing it; verbatim, no placeholders; null = nothing";
+
+/// The `post_system_prompt` field's hint. Python `AI_FIELDS`.
+pub const POST_SYSTEM_PROMPT_HINT: &str = "text placed AFTER the system block on every turn \
+     — whichever is in force, never replacing it; verbatim, no placeholders; null = nothing";
+
+/// The refusal for a `pre_system_prompt` / `post_system_prompt` the record cannot
+/// use. Python `WRAP_PROMPT_REFUSAL.format(name=…)`.
+#[must_use]
+pub fn wrap_prompt_refusal(name: &str) -> String {
+    format!(
+        "{name} must be a non-empty string (it wraps the system block on every turn) — \
+         null clears it"
+    )
+}
+
+/// The record's `pre_system_prompt` / `post_system_prompt` — a non-blank string,
+/// else `None` (nothing is added).
+#[must_use]
+pub fn record_wrap_prompt(meta: &Map<String, Value>, name: &str) -> Option<String> {
+    meta.get(name)
+        .and_then(Value::as_str)
+        .filter(|s| !py_strip(s).is_empty())
+        .map(str::to_string)
 }
 
 /// The `file_bridge_id` field's hint. Python `AI_FIELDS`.
@@ -337,6 +368,13 @@ pub fn validate(
             return Some(SYSTEM_PROMPT_REFUSAL.to_string());
         }
     }
+    for name in ["pre_system_prompt", "post_system_prompt"] {
+        if let Some(v) = meta.get(name).filter(|v| !v.is_null()) {
+            if !v.as_str().is_some_and(|s| !py_strip(s).is_empty()) {
+                return Some(wrap_prompt_refusal(name));
+            }
+        }
+    }
     if let Some(bad) = crate::prompt_file::shape_error(meta) {
         return Some(bad);
     }
@@ -406,7 +444,9 @@ mod tests {
                 "recent_n",
                 "system_prompt",
                 "file_bridge_id",
-                "system_prompt_file"
+                "system_prompt_file",
+                "pre_system_prompt",
+                "post_system_prompt"
             ]
         );
         // no `key_var`: a key is never read from the environment — a backend

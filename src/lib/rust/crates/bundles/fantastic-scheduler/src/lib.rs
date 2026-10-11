@@ -174,7 +174,7 @@ fn verb_docs_json() -> Value {
     json!({
         "reflect": "Identity + tick state. No args.",
         "boot": "Idempotent. Starts the tick loop; persistence is THROUGH the loader.",
-        "schedule": "args: target:str (the agent each fire calls), payload:{type:<verb>, ...} (the call itself: any verb `target` answers, with its args; {type:'send', text:'...'} wakes an AI with that text), interval_seconds:int (default 60), timeout:number? (seconds per fire; absent = wait forever). Every fire runs AS THE SCHEDULER — it reaches what the scheduler's can_call grants. Returns {schedule_id, schedule}. Persisted THROUGH the loader; failfast if no store wired.",
+        "schedule": "args: target:str (the agent each fire calls), payload:{type:<verb>, ...} (the call itself: any verb `target` answers, with its args; {type:'send', text:'...'} wakes an AI with that text), interval_seconds:int (default 60), fire_timeout:number? (seconds per fire; absent = wait forever — not `timeout`, which is a call's own routing field). Every fire runs AS THE SCHEDULER — it reaches what the scheduler's can_call grants. Returns {schedule_id, schedule}. Persisted THROUGH the loader; failfast if no store wired.",
         "unschedule": "args: schedule_id:str (req). Returns {removed:bool, schedule_id}.",
         "list": "No args. Returns {schedules: [<schedule record>, ...]} — every schedule.",
         "pause": "args: schedule_id:str?. With id pauses one schedule; without, pauses the whole scheduler.",
@@ -591,10 +591,10 @@ fn fire_item(sch: &Value) -> Item {
         AgentId::from(sched_target(sch).as_str()),
         sched_payload(sch),
     );
-    // python `if sch.get("timeout") is not None: item["timeout"] = sch["timeout"]`
+    // python `if sch.get("fire_timeout") is not None: item["timeout"] = sch["fire_timeout"]`
     // — the value AS STORED, so the kernel validates it and its prose prints the
     // number the schedule holds (`5` → `5s`, not `5.0s`).
-    if let Some(t) = sch.get("timeout").filter(|v| !v.is_null()) {
+    if let Some(t) = sch.get("fire_timeout").filter(|v| !v.is_null()) {
         item = item.with_raw_timeout(t.clone());
     }
     item
@@ -788,12 +788,12 @@ async fn schedule_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel
     }
     // Per-fire bound, seconds. Optional: absent = wait forever (never defaulted).
     // It is STORED AS SENT (A5.6) — an int `5` stays `5`, it does not become `5.0`.
-    let timeout = match payload.get("timeout") {
+    let timeout = match payload.get("fire_timeout") {
         None | Some(Value::Null) => None,
         Some(Value::Number(n)) if n.as_f64().is_some_and(|t| t > 0.0) => {
             Some(Value::Number(n.clone()))
         }
-        Some(_) => return bad("schedule", "timeout", "a positive number of seconds"),
+        Some(_) => return bad("schedule", "fire_timeout", "a positive number of seconds"),
     };
     let now = now_secs();
     let mut sch = json!({
@@ -807,7 +807,7 @@ async fn schedule_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel
         "paused": false,
     });
     if let Some(t) = timeout {
-        sch["timeout"] = t;
+        sch["fire_timeout"] = t;
     }
     let mut schedules = load_schedules(agent_id, kernel).await;
     schedules.push(sch.clone());

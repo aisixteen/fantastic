@@ -281,7 +281,10 @@ struct SystemPromptFileTests {
                 record: rec) == nil, "null clears")
         let names = (sch["fields"].asArray ?? []).compactMap { $0["name"].asString }
         #expect(
-            Array(names.suffix(3)) == ["system_prompt", "file_bridge_id", "system_prompt_file"],
+            Array(names.suffix(5)) == [
+                "system_prompt", "file_bridge_id", "system_prompt_file", "pre_system_prompt",
+                "post_system_prompt",
+            ],
             "\(names)")
     }
 }

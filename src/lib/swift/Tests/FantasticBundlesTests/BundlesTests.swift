@@ -359,7 +359,7 @@ struct BundleSmokeTests {
             "type": "schedule", "target": .string(target), "interval_seconds": .integer(interval),
             "payload": hitPayload,
         ]
-        if let timeout { payload["timeout"] = timeout }
+        if let timeout { payload["fire_timeout"] = timeout }
         return await kernel.send([Item("sched", payload)])[0].result
     }
 
@@ -522,7 +522,7 @@ struct BundleSmokeTests {
             dir: dir, rel: rel, probes: ["p_hang"], paused: true)
         let r = await schedule(kernel, "p_hang", interval: 60, hit: ["block": .double(2.0)], timeout: .double(0.1))
         let sid = try #require(r["schedule_id"].asString)
-        #expect(r["schedule"]["timeout"].asDouble == 0.1, "\(r)")
+        #expect(r["schedule"]["fire_timeout"].asDouble == 0.1, "\(r)")
         let t0 = Date()
         let fired = await kernel.send([Item("sched", ["type": "tick_now", "schedule_id": .string(sid)])])[0].result
         #expect(fired["fired"].asBool == true, "\(fired)")
@@ -533,7 +533,7 @@ struct BundleSmokeTests {
         // A bad timeout is refused with the kernel's bad_arg code.
         for badValue in [JSON.integer(0), .integer(-1), .string("5"), .bool(true)] {
             let bad = await schedule(kernel, "p_hang", timeout: badValue)
-            #expect(bad["reason"].asString == "bad_arg" && bad["arg"].asString == "timeout", "\(bad)")
+            #expect(bad["reason"].asString == "bad_arg" && bad["arg"].asString == "fire_timeout", "\(bad)")
         }
         _ = await kernel.send([Item("kernel", ["type": "delete_agent", "id": "sched"])])[0].result
     }
@@ -970,7 +970,7 @@ private func addSchedule(
         "type": "schedule", "target": target, "interval_seconds": .integer(interval),
         "payload": payload,
     ]
-    if let timeout { p["timeout"] = timeout }
+    if let timeout { p["fire_timeout"] = timeout }
     return await ask(kernel, "sched", p)
 }
 
@@ -1092,11 +1092,11 @@ struct SchedulerParityTests {
         defer { try? FileManager.default.removeItem(at: dir) }
         let r = await addSchedule(
             kernel, target: "kernel_state", payload: ["type": "list_agents"], timeout: .integer(5))
-        #expect(r["schedule"]["timeout"] == .integer(5), "\(r.serialize())")
+        #expect(r["schedule"]["fire_timeout"] == .integer(5), "\(r.serialize())")
         let raw = try String(
             contentsOf: dir.appendingPathComponent("agents/sched/schedules.yaml"),
             encoding: .utf8)
-        #expect(raw.contains("  timeout: 5\n"), "widened on disk: \(raw)")
+        #expect(raw.contains("  fire_timeout: 5\n"), "widened on disk: \(raw)")
     }
 
     /// A5.7 — every `schedule_id` read is python TRUTHINESS, and the value is

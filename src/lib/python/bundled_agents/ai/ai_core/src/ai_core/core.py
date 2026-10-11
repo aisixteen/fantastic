@@ -58,6 +58,7 @@ from ai_core import prompt_file
 from ai_core.folds import expand_ids as expand_fold_ids
 from ai_core.strategies import DEFAULT_STRATEGY, get_strategy, strategy_names
 from ai_core.strategies.base import NOTICE_ENVELOPE_RESERVE
+from ai_core.strategies.fold import FoldSummaryError
 
 # TWO live consumers. The agentic LOOP is still emergent — the backend does ONE
 # provider pass per send and never iterates — but `_route_reply` DOES parse this
@@ -69,6 +70,7 @@ from ai_core.strategies.base import NOTICE_ENVELOPE_RESERVE
 from ai_core.call_check import check as check_calls
 from ai_core.stream_parts import PartSplitter, cut_marker
 from ai_core.tool_parse import (
+    _ROUTING,
     extract_tool_calls,
     malformed_calls,
     terminated_calls,
@@ -1499,6 +1501,28 @@ async def _answer_inquiry(
     return None
 
 
+#: an argument name in a verb's `docs` signature (`args: name:type …, name:type`)
+_DOC_ARG = re.compile(r"(?:\bargs:|,)\s*([A-Za-z_][A-Za-z0-9_]*)\s*:")
+
+
+def _routing_clash(
+    kernel, target: str, verb: str, used: list[str], cache: dict
+) -> list[str]:
+    """The routing fields of this call that `target`'s `verb` also documents as
+    arguments — read from the kernel's own `docs` (the signature the model reads),
+    in process: no dispatch, no ledger row, once per (target, verb) per batch. A
+    target this kernel cannot document (a peer's agent, an unknown verb) documents
+    nothing here: the call goes on, and its own reply says what happened."""
+    key = (target, verb)
+    if key not in cache:
+        res = kernel._verb_docs({"of": target, "verb": verb})
+        sig = ""
+        if isinstance(res, dict) and isinstance(res.get("verbs"), dict):
+            sig = str(res["verbs"].get(verb) or "")
+        cache[key] = set(_DOC_ARG.findall(sig))
+    return [k for k in used if k in cache[key]]
+
+
 async def _route_reply(
     self_id,
     kernel,
@@ -1660,6 +1684,7 @@ async def _route_reply(
             err = await _answer_inquiry(kernel, self_id, client_id, call)
             if err:
                 units.append((self_id, "-", "-", None, err))
+    doc_args: dict[tuple[str, str], set[str]] = {}
     for call in calls:
         if call.get("name") in _CONTROL_CALLS:
             # CONTROL CALLS, not dispatches. `done` ends the chain;
@@ -1676,6 +1701,11 @@ async def _route_reply(
         # pass 1 with nothing to see).
         if "reply_to" in args:
             reply_to = args.get("reply_to")
+            # The tag grammar types a bare number (`<reply_to>1001</reply_to>` →
+            # 1001): a number is an id written by the model, never "discard" —
+            # it is checked like any id below (measured 2026-10-11, chat_users).
+            if isinstance(reply_to, (int, float)) and not isinstance(reply_to, bool):
+                reply_to = str(reply_to)
             reply_to = reply_to.strip() if isinstance(reply_to, str) else None
             if reply_to and reply_to.lower() in ("none", "null", "nobody"):
                 reply_to = None
@@ -1714,6 +1744,43 @@ async def _route_reply(
             continue
         target = target.strip()
         payload = args.get("payload")
+        # A REPLY ADDRESSED TO NOBODY IS LOST. `reply_to` is where this call's
+        # answer goes, never an argument the target sees; one naming no agent made
+        # the delivery fail on that missing agent's inbox, so nobody saw it and the
+        # model never learned what its call did (measured 2026-10-11, e2e
+        # chat_users: a chat `post` with `<reply_to>1001</reply_to>` meant a chat
+        # message id; read as a number it DISCARDED the reply, and six refusals
+        # vanished). Nothing is dispatched; the model is told. A peer address
+        # (`<guid>|<agent>`) is the peer's to resolve.
+        if (
+            reply_to
+            and reply_to not in (self_id, "kernel")
+            and "|" not in reply_to
+            and kernel.get(reply_to) is None
+        ):
+            verb = payload.get("type", "?") if isinstance(payload, dict) else "-"
+            units.append(
+                (
+                    self_id,
+                    target,
+                    str(verb),
+                    None,
+                    render_reply(
+                        {
+                            "error": (
+                                f"reply_to={reply_to!r} names no agent, so nothing "
+                                f"was dispatched to {target!r}. `reply_to` is where "
+                                "this call's reply goes (left out: back to you) and "
+                                "never reaches the target — an argument of the "
+                                "target's verb needs the name its docs give."
+                            ),
+                            "target": target,
+                            "reply_to": reply_to,
+                        }
+                    ),
+                )
+            )
+            continue
         if not isinstance(payload, dict) or not payload:
             # NO PAYLOAD, NO SEND — what arrives here has no verb in it, and
             # saying so beats a Python error about our internals.
@@ -1740,6 +1807,41 @@ async def _route_reply(
                     )
                 )
             continue
+        # A ROUTING NAME THE VERB ALSO TAKES IS LOST (owner, 2026-10-11). `title`,
+        # `timeout`, `reply_to`, … are this call's own fields — lifted out, never sent
+        # to the target. A verb that documents an argument of the same name can never
+        # receive it from a model call (measured: a knowledge store's `create(title)`
+        # failed on every call, the model retried 8 times and blamed the store). The
+        # target's `docs` names the verb's arguments; a clash refuses the call, loud.
+        used = [k for k in _ROUTING if k != "target_id" and k in args]
+        if used and isinstance(payload.get("type"), str):
+            clash = _routing_clash(kernel, target, payload["type"], used, doc_args)
+            if clash:
+                units.append(
+                    (
+                        self_id,
+                        target,
+                        payload["type"],
+                        None,
+                        render_reply(
+                            {
+                                "error": (
+                                    f"{', '.join(clash)} on this call "
+                                    + ("is" if len(clash) == 1 else "are")
+                                    + " call routing, never sent to the target — but "
+                                    f"{target}'s `{payload['type']}` documents an "
+                                    f"argument named {', '.join(clash)}, which no call "
+                                    "can deliver; nothing was dispatched. Call it "
+                                    "without that argument, or have the verb's owner "
+                                    "rename it."
+                                ),
+                                "target": target,
+                                "clash": clash,
+                            }
+                        ),
+                    )
+                )
+                continue
         # The model's own `timeout` overrides the layer default; the kernel
         # validates it, so a bad value comes back as a readable refusal.
         # A SELF-CALL INHERITS ITS CONVERSATION. The model's calls are dispatched here,
@@ -2057,7 +2159,25 @@ async def _render_prompt(text: str, self_id: str, kernel) -> str:
 async def _system_content(
     self_id: str, kernel, system_prompt: str | None = None
 ) -> str:
-    """THE system block a turn uses — the one choice `_assemble` builds the turn on
+    """THE system block a turn uses, WRAPPED: the record's `pre_system_prompt` goes
+    BEFORE whichever prompt is in force and `post_system_prompt` AFTER it (owner,
+    2026-10-11), each read live and taken verbatim — no placeholders, and neither
+    replaces anything: the default block, a `system_prompt` or a prompt file stays
+    whole between them. Absent or null adds nothing."""
+    rec = kernel.get(self_id) or {}
+    inner = await _inner_system_content(self_id, kernel, system_prompt)
+    parts = [
+        v
+        for v in (rec.get("pre_system_prompt"), inner, rec.get("post_system_prompt"))
+        if isinstance(v, str) and v.strip()
+    ]
+    return "\n\n".join(parts)
+
+
+async def _inner_system_content(
+    self_id: str, kernel, system_prompt: str | None = None
+) -> str:
+    """The prompt in force, before the pre/post wrap — the one choice `_assemble` builds the turn on
     and `_context_recall` sizes the body budget against, so the two never drift.
 
     PRECEDENCE (owner, 2026-10-03, 2026-10-08): the per-call argument (that
@@ -2536,9 +2656,6 @@ async def _project_context(
         "stripped": proj.stripped,
         "stripped_bytes": proj.stripped_bytes,
         "folded": proj.folded,
-        # Spans the fold strategy did NOT fold: the summary stayed over its budget
-        # after one re-summarise. Loud here, never a truncated summary.
-        "fold_refused": proj.fold_refused,
         # What the model actually sees this turn — so "after reload it sees only the
         # fold" is measured from the view, never self-reported.
         "view_ids": [m.get("id") for m in out_body if m.get("id")][:200],
@@ -3031,6 +3148,17 @@ def _make_send(cfg: Backend):
                 return {
                     "error": str(e),
                     "reason": "memory_store",
+                    "client_id": client_id,
+                }
+            except FoldSummaryError as e:
+                # FAIL LOUD (owner, 2026-10-11): a span's summary would not fit its
+                # budget after every re-summarise — no turn on an unfolded view.
+                await _emit_status(
+                    kernel, id, client_id, "done", reason="error", error=str(e)
+                )
+                return {
+                    "error": str(e),
+                    "reason": "fold_summary",
                     "client_id": client_id,
                 }
             except prompt_file.PromptFileError as e:
@@ -3643,7 +3771,7 @@ async def _context_recall(
             kernel=kernel,
             client_id=client_id,
         )
-        rows, _, folded, _ = await fold_down(rows, fctx, body_budget)
+        rows, _, folded = await fold_down(rows, fctx, body_budget)
     view = [r for r in fold_render(rows) if r.get("id")]
     if not view:
         return {

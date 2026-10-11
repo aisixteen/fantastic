@@ -23,7 +23,7 @@
 //! | `boot` | none | `{booted, transport}` or `{error, already}` |
 //! | `shutdown` | none | `{stopped:true}` (runs the `on_delete` cascade) |
 //! | `reconnect` | none | shutdown + boot |
-//! | `forward` | `{target, payload, timeout?}` | the unwrapped reply from the remote |
+//! | `forward` | `{target, payload, forward_timeout?}` | the unwrapped reply from the remote |
 //! | `watch_remote` | `{target}` | `{ok, watching}` — stream a remote agent's emits onto this bridge's inbox |
 //! | `unwatch_remote` | `{target}` | `{ok, unwatched}` |
 //!
@@ -126,7 +126,7 @@ impl Family {
             "reflect": "Identity + transport + connectivity. No args.",
             "boot": "No args. Reads `transport` (kind) + transport-specific fields off the agent record, builds the transport, spawns the read loop, emits `bridge_up`. Idempotent: re-booting a connected bridge is a no-op.",
             "reconnect": "No args. Teardown + boot — explicit because we don't auto-reconnect on transport failure (keeps real network problems visible to operators / telemetry).",
-            "forward": "args: target:str (req — an id on the REMOTE kernel), payload:dict (req — the call to run there, a verb frame with its own `type`), timeout:float? (default 30s). Example: {\"type\":\"forward\",\"target\":\"src\",\"payload\":{\"type\":\"read_stream\",\"path\":\"data.bin\",\"offset\":0}}. Ships a raw `{type:'call', id, target, payload}` frame over the transport, awaits the matching reply, returns the unwrapped data. The far kernel judges the call as the leg that serves it there. Local→local stays direct kernel.send (this verb is only for cross-kernel). Multi-hop loop detection is the caller's responsibility — the bridge ships whatever it's given.",
+            "forward": "args: target:str (req — an id on the REMOTE kernel), payload:dict (req — the call to run there, a verb frame with its own `type`), forward_timeout:float? (default 30s — not `timeout`, which is a call's own routing field). Example: {\"type\":\"forward\",\"target\":\"src\",\"payload\":{\"type\":\"read_stream\",\"path\":\"data.bin\",\"offset\":0}}. Ships a raw `{type:'call', id, target, payload}` frame over the transport, awaits the matching reply, returns the unwrapped data. The far kernel judges the call as the leg that serves it there. Local→local stays direct kernel.send (this verb is only for cross-kernel). Multi-hop loop detection is the caller's responsibility — the bridge ships whatever it's given.",
             "watch_remote": "args: target:str (req — id on the REMOTE kernel to watch). Sends `{type:'watch', src:<target>}` over the transport and subscribes this leg to `target`. Subsequent `{type:'event', src, payload}` frames whose `src` is subscribed are re-emitted on THIS bridge agent's inbox as the payload plus `src`; an event for anything not subscribed is dropped. Local watchers subscribe to the bridge with `kernel.watch(<bridge_id>, ...)`. Idempotent (web_ws de-dups via its own `watching` set).",
             "unwatch_remote": "args: target:str (req — id previously passed to watch_remote). Unsubscribes this leg from `target` (events for it are dropped from now on) and sends `{type:'unwatch', src:<target>}` so the remote stops emitting them.",
         });
@@ -134,7 +134,7 @@ impl Family {
             if let Some(o) = v.as_object_mut() {
                 o.insert(
                     "list_peers".into(),
-                    json!("No args (optional timeout). One-shot snapshot of the relay directory:"),
+                    json!("args: list_timeout:float? (default 30s — not `timeout`, which is a call's own routing field). One-shot snapshot of the relay directory:"),
                 );
                 o.insert("watch_directory".into(), json!("No args. Subscribe to the relay directory; live `peer_joined`/`peer_left`/"));
                 o.insert(
@@ -305,7 +305,7 @@ async fn directory_reply(
     };
     Ok(match op {
         "list_peers" => {
-            let timeout = py_timeout(payload)?;
+            let timeout = py_timeout(payload, "list_timeout")?;
             state.transport.list_peers(timeout).await
         }
         // python passes NO timeout here — the transport's own 10 s stands.
@@ -344,11 +344,13 @@ async fn directory_reply(
     })
 }
 
-/// python `float(payload.get("timeout", 30))`: a number or a numeric string is
-/// the timeout, a bool is 0/1, and `null` or a non-numeric string RAISES — the
-/// handler dies with python's `TypeError`/`ValueError`, settled `failed`.
-fn py_timeout(payload: &Value) -> Result<f64, BundleError> {
-    match payload.get("timeout") {
+/// python `float(payload.get(<key>, 30))` — `forward_timeout` on `forward`,
+/// `list_timeout` on `list_peers` (never `timeout`, a call's own routing field): a
+/// number or a numeric string is the timeout, a bool is 0/1, and `null` or a
+/// non-numeric string RAISES — the handler dies with python's
+/// `TypeError`/`ValueError`, settled `failed`.
+fn py_timeout(payload: &Value, key: &str) -> Result<f64, BundleError> {
+    match payload.get(key) {
         None => Ok(DEFAULT_FORWARD_TIMEOUT_SECS),
         Some(v) => py_float(v).map_err(|e| format!("{}: {}", e.class_name(), e.message()).into()),
     }
@@ -401,7 +403,7 @@ async fn set_identity_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Ke
 
 /// The bridge's dispatch, every verb — the one bridge engine both derivations
 /// run. `forward` is the one verb that carries bytes either way: the local
-/// caller sends `{type:forward, target, payload, timeout?}`, a request body (if
+/// caller sends `{type:forward, target, payload, forward_timeout?}`, a request body (if
 /// any) inside the INNER payload (`Item::with_binary(["payload", …], …)` —
 /// python's forward payload holds the bytes there); the bridge ships a `call`
 /// frame (binary when it carries that body, text otherwise) and returns
@@ -434,7 +436,7 @@ async fn dispatch(
             None,
         ));
     }
-    let timeout_secs = py_timeout(&header)?;
+    let timeout_secs = py_timeout(&header, "forward_timeout")?;
     // A body INSIDE the forwarded `payload` — its path below the step `payload`.
     // One bound to the literal top-level key `payload.x` (the REST octet leg) is
     // a different key, never inside it: python's `payload[field] = body` puts it

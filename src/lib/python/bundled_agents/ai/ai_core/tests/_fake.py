@@ -40,6 +40,11 @@ class FakeCtx:
         self._alias: dict[str, int] = {}
 
     # ── the Kernel surface a bundle uses ─────────────────────────────────
+    def _verb_docs(self, payload):
+        """The kernel's `docs`, read in process by routing: this fake documents
+        no verb, so no routing field clashes."""
+        return {"of": payload.get("of"), "verbs": {}}
+
     def spawn_task(self, agent_id: str, verb: str, coro) -> int:
         """Fork background work the way the kernel does — a registered task with
         an id from the one counter (ai_core delivers replies this way; there is no

@@ -394,12 +394,12 @@ async def boot(
 
 
 async def _forward(id, payload, kernel):
-    """args: target:str (req — an id on the REMOTE kernel), payload:dict (req — the call to run there, a verb frame with its own `type`), timeout:float? (default 30s). Example: {"type":"forward","target":"src","payload":{"type":"read_stream","path":"data.bin","offset":0}}. Ships a raw `{type:'call', id, target, payload}` frame over the transport, awaits the matching reply, returns the unwrapped data. The far kernel judges the call as the leg that serves it there. Local→local stays direct kernel.send (this verb is only for cross-kernel). Multi-hop loop detection is the caller's responsibility — the bridge ships whatever it's given."""
+    """args: target:str (req — an id on the REMOTE kernel), payload:dict (req — the call to run there, a verb frame with its own `type`), forward_timeout:float? (default 30s — not `timeout`, which is a call's own routing field). Example: {"type":"forward","target":"src","payload":{"type":"read_stream","path":"data.bin","offset":0}}. Ships a raw `{type:'call', id, target, payload}` frame over the transport, awaits the matching reply, returns the unwrapped data. The far kernel judges the call as the leg that serves it there. Local→local stays direct kernel.send (this verb is only for cross-kernel). Multi-hop loop detection is the caller's responsibility — the bridge ships whatever it's given."""
     target = payload.get("target")
     inner = payload.get("payload")
     if not target or not isinstance(inner, dict):
         return {"error": "bridge.forward: target (str) + payload (dict) required"}
-    timeout = float(payload.get("timeout", DEFAULT_FORWARD_TIMEOUT))
+    timeout = float(payload.get("forward_timeout", DEFAULT_FORWARD_TIMEOUT))
 
     st = _state(id)
     if st.transport is None or st.transport.closed:
