@@ -131,6 +131,7 @@ async def _read_stream(reader, job, stream, owner, job_id, kernel):
         parts.append(text)
         job["lines"] += 1
         job["last_line"] = text.rstrip("\n")
+        _line_ring_add(job, job["lines"], stream, job["last_line"])
         _monitor.feed_line(job_id, text.rstrip("\n"))
         await kernel.emit(
             owner,
@@ -462,6 +463,106 @@ async def _serve_ctrl(parent_sock, owner_id, job_id, kernel, *, ops=None, on_pus
 # past HIGH_WATERMARK unacked chars; a streamer's `ack` resumes it under LOW).
 
 PTY_RING = 256 * 1024
+#: A pipe job's live line ring, in bytes — the same bound as the PTY ring.
+LINE_RING = 256 * 1024
+#: The most lines one `tail` / `grep` reply carries.
+MAX_LINES = 500
+
+
+def _line_ring_add(job: dict, n: int, stream: str, line: str) -> None:
+    ring = job["line_ring"]
+    ring.append((n, stream, line))
+    job["line_ring_bytes"] += len(line.encode("utf-8", errors="replace")) + 1
+    while job["line_ring_bytes"] > LINE_RING and ring:
+        _, _, old = ring.popleft()
+        job["line_ring_bytes"] -= len(old.encode("utf-8", errors="replace")) + 1
+        job["line_ring_dropped"] += 1
+
+
+def _job_lines(job: dict, stream: str) -> tuple[list[tuple[int, str, str]], int]:
+    """The output a job has printed SO FAR, as (n, stream, line), oldest first, and how
+    many earlier lines the ring already dropped. A PTY job has one stream: its ring,
+    split into lines (a partial last line included)."""
+    if job.get("pty") is not None:
+        text = "".join(job["pty"]["ring"])
+        return [(i + 1, "pty", ln) for i, ln in enumerate(text.splitlines())], 0
+    rows = [r for r in job["line_ring"] if stream == "both" or r[1] == stream]
+    return rows, job["line_ring_dropped"]
+
+
+def _lines_arg(verb: str, payload: dict, default: int):
+    v = payload.get("lines", default)
+    if isinstance(v, bool) or not isinstance(v, int) or not 1 <= v <= MAX_LINES:
+        return None, bad(verb, "lines", f"an integer 1–{MAX_LINES}")
+    return v, None
+
+
+def _stream_arg(verb: str, payload: dict):
+    v = payload.get("stream", "both")
+    if v not in ("stdout", "stderr", "both"):
+        return None, bad(verb, "stream", "one of stdout, stderr, both")
+    return v, None
+
+
+async def _tail(id, payload, kernel):
+    """args: job_id:int (req), lines:int? (default 20, max 500), stream:str? (stdout|stderr|both, default both — a PTY job has one). The last lines a job has printed SO FAR — running or ended, pipe or PTY. Returns {job_id, status, lines:[{n, stream, line}], printed, dropped}."""
+    jid, err = _job_arg("tail", payload, required=True)
+    if err:
+        return err
+    job = _jobs.get(jid)
+    if job is None or job.get("owner") != id:
+        return refusal(NOT_FOUND, f"exec_bridge: no job {jid!r}", job_id=jid)
+    n, err = _lines_arg("tail", payload, 20)
+    if err:
+        return err
+    stream, err = _stream_arg("tail", payload)
+    if err:
+        return err
+    rows, dropped = _job_lines(job, stream)
+    return {
+        "job_id": jid,
+        "status": job["status"],
+        "lines": [{"n": a, "stream": b, "line": c} for a, b, c in rows[-n:]],
+        "printed": job["lines"] if job.get("pty") is None else len(rows),
+        "dropped": dropped,
+        "origin": f"{id} tail {{job_id: {jid}}} — the output NOW; re-send, it moves",
+    }
+
+
+async def _grep(id, payload, kernel):
+    """args: job_id:int (req), match:str (req — a regex, searched in each line), lines:int? (most matches returned, default 50, max 500 — the LAST ones), stream:str? (stdout|stderr|both, default both). Searches what a job has printed SO FAR — running or ended, pipe or PTY; lines older than the 256 KiB ring are gone (`dropped` says how many). Returns {job_id, status, matches:[{n, stream, line}], total, scanned, dropped}."""
+    jid, err = _job_arg("grep", payload, required=True)
+    if err:
+        return err
+    job = _jobs.get(jid)
+    if job is None or job.get("owner") != id:
+        return refusal(NOT_FOUND, f"exec_bridge: no job {jid!r}", job_id=jid)
+    pat = payload.get("match")
+    if not isinstance(pat, str) or not pat:
+        return bad("grep", "match", "a regex string")
+    try:
+        rx = re.compile(pat)
+    except re.error as e:
+        return bad("grep", "match", f"a valid regex ({e})")
+    n, err = _lines_arg("grep", payload, 50)
+    if err:
+        return err
+    stream, err = _stream_arg("grep", payload)
+    if err:
+        return err
+    rows, dropped = _job_lines(job, stream)
+    hits = [r for r in rows if rx.search(r[2])]
+    return {
+        "job_id": jid,
+        "status": job["status"],
+        "matches": [{"n": a, "stream": b, "line": c} for a, b, c in hits[-n:]],
+        "total": len(hits),
+        "scanned": len(rows),
+        "dropped": dropped,
+        "origin": f"{id} grep {{job_id: {jid}, match: {pat!r}}} — the output NOW; re-send, it moves",
+    }
+
+
 HIGH_WATERMARK = 100_000
 LOW_WATERMARK = 5_000
 # Image paste — the formats a CLI like Claude Code accepts, and its size cap. A
@@ -907,6 +1008,12 @@ async def _start(id, payload, kernel):
         "last_line": "",
         "stdout": "",
         "stderr": "",
+        # THE LIVE LINE RING (owner, 2026-10-11): every line a pipe job prints, as
+        # (n, stream, line), the last LINE_RING bytes — what `tail`/`grep` read while
+        # the job runs (its stdout/stderr land only when it ends).
+        "line_ring": collections.deque(),
+        "line_ring_bytes": 0,
+        "line_ring_dropped": 0,
         "task": None,
         "ctrl_sock": parent_sock,
         "ctrl_task": None,
@@ -1422,6 +1529,8 @@ VERBS = {
     "resize": _resize,
     "ack": _ack,
     "output": _output,
+    "tail": _tail,
+    "grep": _grep,
     "paste_image": _paste_image,
     "connector": _connector,
     "monitor": _monitor_verb,

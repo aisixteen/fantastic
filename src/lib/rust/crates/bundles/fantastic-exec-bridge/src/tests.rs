@@ -1820,6 +1820,8 @@ async fn verb_docs_are_python_first_docstring_lines() {
             "resize",
             "ack",
             "output",
+            "tail",
+            "grep",
             "paste_image",
             "connector",
             "monitor",
@@ -2829,3 +2831,57 @@ async fn arg_refusals_are_byte_exact_in_key_order() {
 // `test_binary_path_steps.py` (e)'s twins.
 #[path = "tests_binary_steps.rs"]
 mod tests_binary_steps;
+
+/// `tail` / `grep` read a RUNNING pipe job's output so far (owner, 2026-10-11):
+/// `status` holds stdout/stderr only once the job ends. Order holds within a
+/// stream only (stdout and stderr are read concurrently).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tail_and_grep_read_a_running_job() {
+    let Some(py) = find_real_python() else {
+        return;
+    };
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    let mut rx = inbox(&kernel, &a);
+    let started = kernel
+        .send(vec![Item::new(
+            a.clone(),
+            py_start(
+                &py,
+                "import sys, time\nfor i in range(6):\n    print(f'step {i} ok', flush=True)\n\
+                 print('ERROR disk full', file=sys.stderr, flush=True)\nprint('step 6 ok', flush=True)\n\
+                 time.sleep(30)\n",
+                false,
+            ),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let jid = started["job_id"].clone();
+    let _ = until(&mut rx, |v| v["type"] == "progress" && v["n"] == 8, 20)
+        .await
+        .expect("8 lines never printed");
+    let ask = |p: Value| {
+        let k = Arc::clone(&kernel);
+        let a = a.clone();
+        async move { k.send(vec![Item::new(a, p)]).await.remove(0).result }
+    };
+    let t = ask(json!({"type": "tail", "job_id": jid, "lines": 2, "stream": "stdout"})).await;
+    assert_eq!(t["status"], "running", "{t}");
+    assert_eq!(t["printed"], 8, "{t}");
+    let lines: Vec<&str> = t["lines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["line"].as_str().unwrap())
+        .collect();
+    assert_eq!(lines, ["step 5 ok", "step 6 ok"], "{t}");
+    let g = ask(json!({"type": "grep", "job_id": jid, "match": "ERROR|step [45]"})).await;
+    assert_eq!(g["total"], 3, "{g}");
+    assert_eq!(g["scanned"], 8, "{g}");
+    let bad = ask(json!({"type": "grep", "job_id": jid, "match": "("})).await;
+    assert_eq!(bad["arg"], "match", "{bad}");
+    let bad = ask(json!({"type": "tail", "job_id": jid, "lines": 0})).await;
+    assert_eq!(bad["arg"], "lines", "{bad}");
+    let _ = ask(json!({"type": "stop", "job_id": jid})).await;
+}

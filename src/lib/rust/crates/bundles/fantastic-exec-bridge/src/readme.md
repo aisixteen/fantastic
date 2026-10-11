@@ -7,8 +7,9 @@ and the commands it may run come from an operator **allowlist** of regexes.
 It is a GENERAL-PURPOSE command runner. A program is a FILE some process (or a `write_stream`) put on disk;
 running it is `command` + `args`, exactly like anything else.
 
-Verbs: `start` · `status` · `stop` · `interrupt` · `clear` · `monitor` · `monitors` ·
-`unmonitor` · `reflect` · `boot`, and for a PTY job `write` · `resize` · `ack` · `output` · `paste_image`.
+Verbs: `start` · `status` · `stop` · `interrupt` · `clear` · `tail` · `grep` · `monitor` ·
+`monitors` · `unmonitor` · `reflect` · `boot`, and for a PTY job `write` · `resize` · `ack` ·
+`output` · `paste_image`.
 Any verb NOT in that list is **MAIL** for the running program (see below).
 
 WHERE and WITH WHAT a command runs is the RECORD's, never the call's: `cwd` (REQUIRED — a
@@ -122,6 +123,15 @@ no `code` field at all:
 
 A running program has the full wire, so it can itself `create_agent` more agents, read memory
 anywhere, call an AI, or spawn more jobs — tools compose into tools.
+
+## Look at a job's output NOW — `tail`, `grep`
+
+A pipe job's `stdout`/`stderr` land in `status` only when it ends; while it runs, read it
+with `tail(job_id, lines?, stream?)` — the last lines printed so far — and
+`grep(job_id, match, lines?, stream?)` — the lines so far matching a regex (the last
+`lines` of them). Both work on any job, running or ended, pipe or PTY; each line comes as
+`{n, stream, line}`. The job keeps its last 256 KiB of lines; older ones are gone and
+`dropped` counts them. `stream` is `stdout`, `stderr` or `both` (the default).
 
 ## Monitor a job — early stop
 

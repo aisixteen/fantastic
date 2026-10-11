@@ -928,6 +928,34 @@
             _ = await kernel.send([Item(a, .object(["type": .string("stop")]))])[0].result
         }
 
+        /// `tail` / `grep` read a RUNNING pipe job's output so far (owner, 2026-10-11):
+        /// `status` holds stdout/stderr only once the job ends. Order holds within a
+        /// stream only (stdout and stderr are read concurrently).
+        @Test func tailAndGrepReadARunningJob() async throws {
+            guard let py = py3() else { return }
+            let kernel = freshKernel()
+            let a = await createPy(kernel, id: "tail_grep")
+            let stream = kernel.ensureInbox(a)
+            let code = "import sys, time\nfor i in range(6):\n    print(f'step {i} ok', flush=True)\n"
+                + "print('ERROR disk full', file=sys.stderr, flush=True)\nprint('step 6 ok', flush=True)\n"
+                + "time.sleep(30)"
+            let started = await kernel.send([Item(a, pyStart(py, code))])[0].result
+            let jid = started["job_id"]
+            _ = await drainUntil(stream, timeout: 20) { $0["type"].asString == "progress" && $0["n"].asInt == 8 }
+            func ask(_ p: OrderedDictionary<String, JSON>) async -> JSON {
+                await kernel.send([Item(a, .object(p))])[0].result
+            }
+            let t = await ask(["type": "tail", "job_id": jid, "lines": 2, "stream": "stdout"])
+            #expect(t["status"].asString == "running", "\(t.serialize())")
+            #expect(t["printed"].asInt == 8, "\(t.serialize())")
+            #expect((t["lines"].asArray ?? []).map { $0["line"].asString ?? "" } == ["step 5 ok", "step 6 ok"])
+            let g = await ask(["type": "grep", "job_id": jid, "match": "ERROR|step [45]"])
+            #expect(g["total"].asInt == 3 && g["scanned"].asInt == 8, "\(g.serialize())")
+            let bad = await ask(["type": "tail", "job_id": jid, "lines": 0])
+            #expect(bad["arg"].asString == "lines", "\(bad.serialize())")
+            _ = await ask(["type": "stop"])
+        }
+
         /// A cancelled job's row finalises to `stopped` — not `failed` (the SIGKILL's
         /// own status, indistinguishable from a program that failed on its own) — and
         /// `clear` then forgets it. python/rust parity.

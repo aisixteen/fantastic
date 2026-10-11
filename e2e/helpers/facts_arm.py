@@ -147,6 +147,37 @@ def arm_window(aid: str) -> int:
     return FIT_WINDOW.get(aid, WINDOW)
 
 
+_WIRE_SYS: dict[str, int] = {}
+
+
+def _wire_sys_tokens(aid: str) -> int:
+    """The default system block's size for `aid`, measured by a throwaway in-process
+    python kernel in a subprocess (the probe drives a remote kernel; booting a second
+    one here would move its cwd and module state)."""
+    if aid not in _WIRE_SYS:
+        import subprocess
+        import sys as _sys
+
+        code = (
+            "import asyncio, os, tempfile, sys\n"
+            f"sys.path.insert(0, {str(Path(__file__).resolve().parents[2] / 'src/lib/python')!r})\n"
+            "os.chdir(tempfile.mkdtemp(prefix='sysmeasure_'))\n"
+            "from _testkit import boot_root\n"
+            "from ai_core import core\n"
+            "from ai_core.context import estimate_one\n"
+            "root = boot_root()\n"
+            f"t = asyncio.run(core._default_system_content({aid!r}, root))\n"
+            "print(estimate_one({'role': 'system', 'content': t}))\n"
+        )
+        out = subprocess.run(
+            [_sys.executable, "-c", code], capture_output=True, text=True, timeout=120
+        )
+        if out.returncode != 0 or not out.stdout.strip().splitlines():
+            raise AssertionError(f"fit[{aid}]: measuring the system block failed: {out.stderr[-800:]}")
+        _WIRE_SYS[aid] = int(out.stdout.strip().splitlines()[-1])
+    return _WIRE_SYS[aid]
+
+
 async def fit_planted(core, root, aid: str, rows: list[dict], *, window: int, band) -> None:
     """MEASURE the planted past against the fold trigger, and FIT it into `band`, in
     place: under it, neutral filler turns go in right after the goal (the oldest
@@ -157,17 +188,22 @@ async def fit_planted(core, root, aid: str, rows: list[dict], *, window: int, ba
     Rows are ordered by id, so a filler insert RE-MINTS every row in order and remaps
     every reference in place (`_remap_row`) — a probe holding a row dict keeps a valid
     id. Over the wire there is no in-process ai_core to measure with: said, not fitted."""
-    if core is None:
-        print(f"     fit[{aid}]: not measured over the wire — planted as written", flush=True)
-        return
     from ai_core.constants import FOLD_AT
     from ai_core.context import estimate_one, estimate_tokens
     from ai_core.folds import render
     from ai_core.strategies.base import NOTICE_ENVELOPE_RESERVE
 
-    sys_tok = estimate_one(
-        {"role": "system", "content": await core._default_system_content(aid, root)}
-    )
+    if core is not None:
+        sys_tok = estimate_one(
+            {"role": "system", "content": await core._default_system_content(aid, root)}
+        )
+    else:
+        # OVER THE WIRE (owner, 2026-10-11): the runtime's default block mirrors
+        # python's (parity) — measured on a throwaway python kernel, once per run.
+        from ai_core import core as pycore
+
+        core = pycore
+        sys_tok = _wire_sys_tokens(aid)
     body = core.budget({"context_window": window}) - sys_tok - NOTICE_ENVELOPE_RESERVE
     trigger = int(body * FOLD_AT)
     lo, hi = band
