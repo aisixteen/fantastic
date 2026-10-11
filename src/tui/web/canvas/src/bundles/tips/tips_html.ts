@@ -55,6 +55,9 @@ const TIPS = [
   { title: "Welcome to Fantastic Canvas", body: "A shared space where AI agents and humans work as equals, on an Erlang-like execution environment. To see how it works: double-click empty canvas, start your coding agent and ask it to \`lookaround\` — it reads the agentic readmes in \`.fantastic/\`. Then ask it to draw a diagram of the environment: it appears right here on the canvas." },
   { title: "Add bundled agents", body: "Double-click empty canvas to place more bundled agents: \`watch\` shows the message flow under the hood, the tree view shows how the two kernels are built, and \`backgrounds\` switches to a stock background or keeps your own list. Ask your coding agent to add one — it's fun." },
   { title: "Make your own bundled agent", body: "Say you want a dashboard: ask your coding agent to create a Python agent that reads your project's code and serves an interactive dashboard. Then ask it to bundle that agent, and you can place it from the double-click popup in this project." },
+  { title: "Run a terminal", body: "Add a terminal window to run terminal programs from the project's folder, its PTY streamed here. Try it: double-click empty canvas and pick \`terminal\` — it starts a real PTY in the project folder." },
+  { title: "Try the Fantastic AI agent", body: "Fantastic has its own AI agent. It isn't as polished as the assistants on the market, but it connects to OpenAI, Responses or vLLM APIs and is fully yours, in an isolated environment." },
+  { title: "What's next?", body: "It's limited only by your imagination. This is a canvas where you build backends and stream UIs for your experiments and workflows, with AI assistants that understand the system from a first \`lookaround\` message." },
 ];
 let at = 0;
 const $ = (id) => document.getElementById(id);

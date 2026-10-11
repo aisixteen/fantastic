@@ -21,7 +21,7 @@ const m = new THREE.ShaderMaterial({uniforms:{u:{value:0}}, depthTest:false, dep
   fragmentShader:'uniform float u; void main(){gl_FragColor=vec4(0.6,0.1,0.5+0.3*sin(u),1.);}'});
 const q = new THREE.Mesh(new THREE.PlaneGeometry(2,2), m); q.frustumCulled=false; scene.add(q);
 onFrame(t => { m.uniforms.u.value = t; });
-cleanup(() => { q.geometry.dispose(); m.dispose(); });
+cleanup.push(() => { q.geometry.dispose(); m.dispose(); });
 """
 # every draw call on the background's canvas, counted
 COUNT_DRAWS = """(()=>{window.__draws=0; for (const C of [window.WebGLRenderingContext, window.WebGL2RenderingContext]) { if (!C) continue;

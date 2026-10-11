@@ -12,9 +12,9 @@ const P: Presets = {
   dialogs: [{ id: "ai_1", name: "release notes" }],
 };
 
-test("empty: two groups — host (ask, terminal, agent, python agent, mcp connector), page (html, stream, tree view, backgrounds, tips, the 3 themes) — then AI (★ the default), chats", () => {
+test("empty: two groups — host (ask, terminal, AI agent, python agent, mcp connector), page (html, stream, tree view, backgrounds, tips, the 3 themes) — then AI (★ the default), chats", () => {
   const t = tiles("", P);
-  assert.deepEqual(t.map((x) => x.label), ["ask", "terminal", "agent", "python agent", "mcp connector", "html", "stream", "tree view", "backgrounds", "tips", "canvas theme", "mobile theme", "auto theme", "@gpt5 ★", "@box", "release notes"]);
+  assert.deepEqual(t.map((x) => x.label), ["ask", "terminal", "AI agent", "python agent", "mcp connector", "html", "stream", "tree view", "backgrounds", "tips", "canvas theme", "mobile theme", "auto theme", "@gpt5 ★", "@box", "release notes"]);
   assert.deepEqual(t.find((x) => x.label === "python agent")!.pick, { kind: "bundle", starter: "python_agent" });
   assert.deepEqual([...new Set(t.map((x) => x.section))], ["host", "page", "ai", "chats"]);
   assert.deepEqual(t.at(-1)!.pick, { kind: "chat", id: "ai_1", name: "release notes" });
@@ -22,7 +22,7 @@ test("empty: two groups — host (ask, terminal, agent, python agent, mcp connec
 
 test("a kind typed exactly offers only that kind", () => {
   assert.deepEqual(tiles("terminal", P).map((x) => x.pick), [{ kind: "terminal" }]);
-  assert.deepEqual(tiles("agent", P).map((x) => x.pick), [{ kind: "setup" }]);
+  assert.deepEqual(tiles("ai agent", P).map((x) => x.pick), [{ kind: "setup" }], "the wizard, typed in any case");
   assert.deepEqual(tiles("tree view", P).map((x) => x.pick), [{ kind: "tree" }]);
   assert.deepEqual(tiles("mobile theme", P).map((x) => x.pick), [{ kind: "theme", name: "mobile" }]);
 });
@@ -39,10 +39,12 @@ test("@name picks a template, the rest is the first turn", () => {
   assert.deepEqual(t[0]!.pick, { kind: "ai", template: "box", text: "hi there" });
 });
 
-test("no default template → the first tile opens set-up; nothing guessed", () => {
+test("no AI set up: typed text first opens the wizard; empty, the \"AI agent\" tile does — nothing guessed", () => {
   const t = tiles("hello", { templates: [], preferred: null, dialogs: [] });
   assert.deepEqual(t.map((x) => x.pick), [{ kind: "setup" }]);
-  assert.equal(tiles("", null)[0]!.pick.kind, "setup");
+  const empty = tiles("", null);
+  assert.ok(!empty.some((x) => x.pick.kind === "ai"), "no ask tile without a default");
+  assert.deepEqual(empty.find((x) => x.label === "AI agent")!.pick, { kind: "setup" });
 });
 
 test("grid moves: across by 1, down/up by a row, clamped", () => {

@@ -29,8 +29,11 @@ pub const HANDLER_MODULE: &str = "setup.tools";
 
 /// Every verb the page calls (none is privileged: the leg's structural grants
 /// reach its own child).
-pub const VERBS: [&str; 10] = [
+pub const VERBS: [&str; 13] = [
     "backends",
+    "keys",
+    "ai_settings",
+    "configure_ai",
     "write_ai",
     "key_mode",
     "set_key_mode",
@@ -70,6 +73,63 @@ impl SetupBundle {
                     "default": f.default, "hint": f.hint,
                 })).collect::<Vec<_>>(),
             })).collect::<Vec<_>>()}),
+            // the keys stored so far (ref + host, never a value) and where they are kept
+            "keys" => match (crate::kern::keys::stored(), crate::kern::keys::mode()) {
+                (Ok(refs), Ok((m, w))) => json!({
+                    "keys": refs.iter().map(|(r, h)| json!({"ref": r, "host": h})).collect::<Vec<_>>(),
+                    "mode": m.map(|m| m.name()),
+                    "where": w,
+                }),
+                (Err(e), _) | (_, Err(e)) => fail(e),
+            },
+            // an AI agent's settings, as the wizard shows them: its handler and
+            // every schema field's current value
+            "ai_settings" => match ai_record(host, &s(p, "id")) {
+                Ok((handler, meta)) => {
+                    let fields: serde_json::Map<String, Value> = crate::kern::setup::backends(host)
+                        .into_iter()
+                        .find(|b| b.module == handler)
+                        .map(|b| b.fields.iter().filter_map(|f| meta.get(&f.name).map(|v| (f.name.clone(), v.clone()))).collect())
+                        .unwrap_or_default();
+                    json!({"id": s(p, "id"), "handler": handler, "fields": fields, "template": meta.get("template")})
+                }
+                Err(e) => fail(format!("ai_settings: {e}")),
+            },
+            // change a live AI agent's fields (same backend): live on its next
+            // turn — the backend reads its record per call. The key for its
+            // endpoint, when one is stored, is named and granted.
+            "configure_ai" => {
+                let id = s(p, "id");
+                let (handler, meta) = match ai_record(host, &id) {
+                    Ok(r) => r,
+                    Err(e) => return fail(format!("configure_ai: {e}")),
+                };
+                let mut upd = match typed_fields(host, &handler, p) {
+                    Ok(f) => f,
+                    Err(e) => return fail(format!("configure_ai: {e}")),
+                };
+                let endpoint = upd.get("endpoint").or_else(|| meta.get("endpoint")).and_then(Value::as_str).unwrap_or("").to_string();
+                if crate::kern::keys::keyed(host, &handler).is_some() {
+                    if let Ok(r) = crate::kern::keys::ref_for(&handler, &endpoint) {
+                        if crate::kern::keys::has(host, &r) {
+                            upd.insert("credentials".into(), json!({"store": crate::kern::keys::STORE, "ref": r}));
+                            let mut cc = meta.get("can_call").and_then(Value::as_object).cloned().unwrap_or_default();
+                            cc.insert(crate::kern::keys::STORE.into(), json!(["get"]));
+                            upd.insert("can_call".into(), Value::Object(cc));
+                            if let Err(e) = crate::kern::keys::wire(host, &id).await {
+                                return fail(format!("configure_ai: {e}"));
+                            }
+                        }
+                    }
+                }
+                let mut payload = json!({"type": "update_agent", "id": id});
+                payload.as_object_mut().expect("an object").extend(upd);
+                let r = host.act("kernel", payload).await.result;
+                match r.get("error").and_then(Value::as_str) {
+                    Some(e) => fail(format!("configure_ai: {e}")),
+                    None => json!({"configured": id, "note": "live on its next turn"}),
+                }
+            }
             "write_ai" => {
                 let handler = s(p, "handler");
                 let fields = match typed_fields(host, &handler, p) {
@@ -206,6 +266,17 @@ fn typed_fields(host: &Host, handler: &str, p: &Value) -> Result<serde_json::Map
         }
     }
     Ok(fields)
+}
+
+/// An AI agent's handler and record fields — refused for any other agent.
+fn ai_record(host: &Host, id: &str) -> Result<(String, serde_json::Map<String, Value>), String> {
+    let a = host.kernel.agents.get(&AgentId::from(id)).ok_or_else(|| format!("no agent {id:?}"))?;
+    let rec = a.value().record();
+    let handler = rec.handler_module.clone().unwrap_or_default();
+    if !crate::kern::setup::backends(host).iter().any(|b| b.module == handler) {
+        return Err(format!("{id:?} is not an AI agent ({handler})"));
+    }
+    Ok((handler, rec.meta.clone()))
 }
 
 /// Delete every `setup` agent a previous run left behind: it lives only while a

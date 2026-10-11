@@ -22,7 +22,7 @@ const m = new THREE.ShaderMaterial({uniforms:{u:{value:0}}, depthTest:false, dep
   fragmentShader:'uniform float u; void main(){vec2 p=gl_FragCoord.xy/900.; gl_FragColor=vec4(0.5+0.5*sin(u+p.x*9.),0.3,0.5+0.5*cos(u+p.y*7.),1.);}'});
 const q = new THREE.Mesh(new THREE.PlaneGeometry(2,2), m); q.frustumCulled=false; q.renderOrder=-1; scene.add(q);
 onFrame(t => { m.uniforms.u.value = t; });
-cleanup(() => { q.geometry.dispose(); m.dispose(); });
+cleanup.push(() => { q.geometry.dispose(); m.dispose(); });
 """
 WIDTH = int(os.environ.get("E70_WIDTH", "390"))  # 390: a phone (mobile); 1500: desktop (canvas)
 VERBS = ["watch", "status", "start", "write", "ack", "resize", "output", "paste_image"]

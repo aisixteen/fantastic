@@ -24,6 +24,10 @@ const CHAT_CSS = `
   .chat-view .msg.user.queued { opacity:0.55; font-style:italic; }
   .chat-view .msg.assistant { align-self:flex-start; background:rgba(36,38,56,0.50); color:#cde; }
   .chat-view .msg.notice { align-self:center; max-width:92%; text-align:center; font-size:11px; color:#ffd166; background:rgba(255,209,102,0.12); box-shadow:inset 0 0 0 1px rgba(255,209,102,0.18); }
+  .chat-view .c-setup-help { color:#ece9f5; font-size:12.5px; background:rgba(183,140,255,0.12); box-shadow:inset 0 0 0 1px rgba(183,140,255,0.35); }
+  .chat-view .c-help-row { display:flex; gap:8px; justify-content:center; margin-top:8px; }
+  .chat-view .c-help-row button { font:inherit; color:#ece9f5; background:#241f35; border:1px solid #312c40; border-radius:8px; padding:6px 12px; cursor:pointer; }
+  .chat-view .c-help-row .c-help-settings { background:#b78cff; border-color:#b78cff; color:#16121f; font-weight:700; }
   .chat-view .msg.notice.too-small { color:#ff8a8a; background:rgba(255,120,120,0.12); box-shadow:inset 0 0 0 1px rgba(255,120,120,0.22); }
   .chat-view .tool-block.recall .tool-verb { color:#9ad0ff; }
   .chat-view .tool-block { margin:6px 0; padding:6px 8px; border-radius:8px; background:rgba(24,26,40,0.50); box-shadow:inset 0 0 0 1px rgba(255,255,255,0.06); font-family:ui-monospace,SFMono-Regular,monospace; font-size:12px; color:#abb; }
@@ -550,6 +554,9 @@ export const aiView: ViewBundle = {
         if (inflight !== null && (!sendId || inflight.send_id === sendId)) inflight = null;
         refreshBusy();
         setPhase("idle", s(detail, "reason") && s(detail, "reason") !== "ok" ? s(detail, "reason") : "", s(detail, "reason") || "ok");
+        // a turn that failed (not one stopped): the agent may not be set up right
+        const why = s(detail, "reason");
+        if (why && why !== "ok" && !/cancel|stop|interrupt|abort/i.test(why)) setupHelp();
       }
     });
     // THE PARTS: one draft per stream_id. ANIMATION, NOT ACTION — a delta never
@@ -719,6 +726,7 @@ export const aiView: ViewBundle = {
           const hint = typeof o["hint"] === "string" && o["hint"] ? ` — ${o["hint"]}` : "";
           const n = addMsg("notice", `✕ ${o["error"]}${hint}`, dialogEl);
           n.classList.add("too-small");
+          setupHelp();
           dropLocal();
         }
       }).catch((e: Error) => {
@@ -739,6 +747,17 @@ export const aiView: ViewBundle = {
       void host.call(backend, { type: "stop" } as never).catch((e: Error) => console.warn("[chat] stop failed:", e));
     };
 
+    // A TURN THAT FAILED: how to fix the agent — its settings, or a coding agent
+    // started next to it to help (owner 2026-10-11)
+    const setupHelp = (): void => {
+      if (ctx.actions === undefined || dialogEl.querySelector(".c-setup-help")) return;
+      const help = document.createElement("div");
+      help.className = "msg notice c-setup-help";
+      help.innerHTML = `Press settings to set me up, or start your coding AI agent here to help set me up.<div class="c-help-row"><button class="c-help-settings">⚙ settings</button><button class="c-help-coding">▸ coding agent</button></div>`;
+      (help.querySelector(".c-help-settings") as HTMLButtonElement).onclick = (): void => ctx.actions?.openSetup(selfId, backend);
+      (help.querySelector(".c-help-coding") as HTMLButtonElement).onclick = (): void => void ctx.actions?.startCoding(selfId);
+      dialogEl.appendChild(help);
+    };
     sendBtn.addEventListener("click", () => (inflight !== null ? interrupt() : submit()));
     // The action popup's text is the cell's FIRST turn: sent once, then dropped
     // from the record so a reload does not send it again.
@@ -764,6 +783,10 @@ export const aiView: ViewBundle = {
     window.addEventListener("keydown", onEsc);
 
     return {
+      // ⚙ SETTINGS: the wizard's page 2 for this agent
+      headerButtons: ctx.actions
+        ? [{ id: "settings", glyph: "⚙", title: "settings — this agent's provider, model and key", toggle: false, onClick: (): void => ctx.actions?.openSetup(selfId, backend) }]
+        : [],
       unmount(): void {
         stick.disconnect();
         offLifecycle();

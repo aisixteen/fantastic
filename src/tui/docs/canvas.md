@@ -166,5 +166,14 @@ URL is the viewed agent.
 - html panels run sandboxed (null origin) unless `trusted: true`; their only
   way out is the connector: `fantastic.send(target, payload)`,
   `fantastic.emit`, `fantastic.onMessage`, `fantastic.watch`.
-- Set-up (⚙): writes AI agent records, keys and templates — `fantastic readme
+- AI set-up: a two-page WIZARD (double-click → `AI agent`, any time). Page 1:
+  a saved provider (its agent is made at once) or a new one — responses,
+  anthropic, ollama, vllm. Page 2: a name (auto), the URL (filled), the model,
+  the backend's required fields, and the key (the stored key for that host, a
+  new one pasted into the keychain or a 0600 file, or none); "create & open
+  chat" saves it as a template (the first becomes the default). Every page has
+  SKIP: an AI cell "not set up yet", whose ⚙ settings runs the wizard for it.
+  ⚙ on any AI cell is its settings (page 2 with its values), live on its next
+  turn. A failed turn offers settings, or a coding agent started next to the
+  cell to help. Keys are never read from the environment — `fantastic readme
   setup`.

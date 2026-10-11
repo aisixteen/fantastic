@@ -20,6 +20,22 @@ export interface ViewContext {
   record?: Record<string, unknown>;
   /** remove this view — and the backend it owns — exactly as its ✕ does */
   close(): void;
+  /** what a view may ask of the canvas around it (the AI set-up wizard, an AI cell) */
+  actions?: CanvasActions;
+}
+
+/** The canvas's own moves a view may ask for. */
+export interface CanvasActions {
+  /** an AI from saved template `template`: bound to AI cell `cell` when given
+   *  (one not set up yet), else a new AI cell where view `from` sits; `from` (the
+   *  wizard) closes */
+  spawnAi(template: string, from: string, cell?: string): Promise<void>;
+  /** an AI cell with no AI yet ("not set up"), where view `from` sits; `from` closes */
+  skipAi(from: string): void;
+  /** the AI set-up wizard — for AI cell `cell`; the settings of its AI `ai` when given */
+  openSetup(cell?: string, ai?: string): void;
+  /** the first coding agent found on PATH, in a terminal next to view `near` */
+  startCoding(near: string): Promise<void>;
 }
 
 
