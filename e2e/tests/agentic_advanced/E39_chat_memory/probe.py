@@ -328,7 +328,7 @@ async def main():
                         "content": f'{said} <call name="done"></call>',
                     },
                 ]
-            await plant_store(core, root, AI, rows)
+            await plant_store(core, root, AI, rows, band=None)
             chars = sum(len(r["content"]) for r in rows)
             print(
                 f"     batch {batch}: planted {len(rows)} rows, {chars} chars "

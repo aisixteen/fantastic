@@ -36,7 +36,7 @@ from ai_core.constants import (
     THINK_ALLOWANCE,
     INDEX_USER_CHARS,
     KEEP_TAIL,
-    SPAN,
+    FOLD_AT,
     FOLD_RUN,
 )  # noqa: F401 — re-exported seams
 
@@ -230,9 +230,10 @@ async def write_fold(ctx: ProjectionCtx, rows: list[dict], idxs: list[int]) -> d
 
 
 def next_span(
-    rows: list[dict], view: list[dict], *, keep_tail: int = KEEP_TAIL, size: int = SPAN
+    rows: list[dict], view: list[dict], *, need: int, keep_tail: int = KEEP_TAIL
 ) -> list[int]:
-    """The oldest foldable stretch of the VIEW, as indices into `rows`.
+    """The oldest foldable stretch of the VIEW, as indices into `rows` — the oldest
+    rows whose tokens reach `need` (the excess to shed), never a row count.
 
     Never the goal turn, never the last `keep_tail` rows, and never ending between a
     call and its answer. Folds are ordinary members, but NOT the first pick: a stretch
@@ -240,7 +241,7 @@ def next_span(
     list of summaries-of-summaries (measured 2026-09-06: twelve levels deep in 26 cuts,
     the model lost in it for 50 turns). So: skip the folds at the head and take the oldest
     NON-fold rows; only when `FOLD_RUN` folds sit adjacent at the head do they become the
-    span themselves. Depth then grows with the log of the history, not its length."""
+    span themselves — a tree whose depth grows with the log of the history."""
     by_id = {r.get("id"): i for i, r in enumerate(rows) if r.get("id")}
     head = (
         [r for r in view[1:-keep_tail] if r.get("id") in by_id]
@@ -253,7 +254,12 @@ def next_span(
     if lead >= FOLD_RUN:
         take = head[:lead]  # fold the folds — same operation, same summarizer
     else:
-        take = head[lead : lead + size]
+        take, got = [], 0
+        for r in head[lead:]:
+            if is_fold(r) or got >= need:
+                break
+            take.append(r)
+            got += estimate_tokens([r])
         while take and take[-1].get("role") == "assistant":
             take = take[:-1]
     return [by_id[r["id"]] for r in take] if len(take) >= 2 else []
@@ -262,19 +268,23 @@ def next_span(
 async def fold_down(
     rows: list[dict], ctx: ProjectionCtx, budget: int
 ) -> tuple[list[dict], list[dict], int]:
-    """FOLD UNTIL IT FITS: when the rendered view is over `budget`, fold its oldest
-    stretches down to the low watermark; then tidy the head (adjacent folds coalesce),
-    budget or no budget. Returns `(rows + the fold rows written, the view, folded)`. The turn's `fold` projection and `context_recall` (a store longer than
-    the window, e.g. written under a larger one) share it."""
+    """FOLD WHEN NEAR FULL: once the rendered view passes `FOLD_AT` of `budget`, ONE
+    fold takes the oldest rows, by tokens, down to `LOW` of it; then tidy the head
+    (`FOLD_RUN` adjacent folds become one parent — the fold tree), budget or no budget.
+    Returns `(rows + the fold rows written, the view, folded)`. The turn's `fold`
+    projection and `context_recall` (a store longer than the window, e.g. written
+    under a larger one) share it."""
     rows = list(rows)
     view = render(rows)
     folded = 0
-    if estimate_tokens(view) > budget and len(rows) > 2:
+    if estimate_tokens(view) > int(budget * FOLD_AT) and len(rows) > 2:
         target = int(budget * LOW)
-        # ONE MOVE, REPEATED: fold the oldest stretch of the view — rows, folds, or a
-        # mix — until under the low watermark or nothing foldable is left.
+        # ONE FOLD, SIZED BY TOKENS: the oldest rows that bring the view to LOW, plus
+        # room for the fold row itself (its summary budget). Repeated only if that
+        # still leaves the view over LOW, or nothing foldable is left.
         while estimate_tokens(view) > target:
-            span = next_span(rows, view)
+            need = estimate_tokens(view) - target + SUMMARY_BUDGET
+            span = next_span(rows, view, need=need)
             if not span:
                 break
             rows.append(await write_fold(ctx, rows, span))
@@ -291,7 +301,7 @@ async def fold_down(
     # run shrinks by `FOLD_RUN - 1` every time and `next_span` stops selecting
     # once fewer than `FOLD_RUN` remain.
     while True:
-        span = next_span(rows, view)
+        span = next_span(rows, view, need=0)  # only a FOLD_RUN of folds qualifies here
         if not span or not all(is_fold(rows[i]) for i in span):
             break
         rows.append(await write_fold(ctx, rows, span))

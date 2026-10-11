@@ -141,11 +141,13 @@ pub const THINK_ALLOWANCE: i64 = 1024;
 pub const INDEX_USER_CHARS: usize = 1200;
 /// Rows at the end of the view that never fold — the live tail.
 pub const KEEP_TAIL: usize = 6;
-/// Rows per fold at the watermark (owner, 2026-10-11: 1024 "for now"). At 8 a
-/// chat past folded 8 rows at a time into fold rows nearly as big as the rows
-/// (summary + index): 47 folds, 4 levels, 391 s before the first answer (python
-/// E39). At 1024 one overflow folds the whole foldable stretch into ONE fold.
-pub const SPAN: usize = 1024;
+/// WHEN AND HOW MUCH TO FOLD — shares of the body budget, never a row count
+/// (owner, 2026-10-11). A fold starts once the view passes `FOLD_AT` of the
+/// budget; ONE fold then takes the oldest foldable rows, by tokens, until the view
+/// lands at `LOW` or under. The old row count (SPAN = 8) folded a chat past 8 rows
+/// at a time into fold rows nearly as big as the rows: 47 folds, 4 levels, 391 s
+/// before the first answer (python E39).
+pub const FOLD_AT: f64 = 0.95;
 /// Adjacent folds at the head of the view before they fold as a group.
 ///
 /// THREE, not four. A real run folds at most once per turn — each projection

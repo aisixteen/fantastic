@@ -69,7 +69,7 @@ async def main():
         report((recency, fold), lambda a: f"RULES KEPT={score_rules(a['body'], rules)[0]}/8  folded={a['folded']}  fold rows={len(a['fold_ids'])}")
         well_formed = all(m.get("refs") and m.get("title") and m.get("body") for m in fold["msgs"] if m.get("kind") == "fold")
         checks = [c for c in base_checks(recency, fold, planted=True) if not c[0].startswith("both arms produced")] + [
-            (f"at least two folds were written ({fold['folded']})", fold["folded"] >= 2),
+            (f"a fold was written ({fold['folded']}, levels {fold['fold_levels']})", fold["folded"] >= 1),
             ("every fold row has refs, a title and a body", well_formed),
             (f"all eight rules still bind ({score_rules(fold['body'], rules)[0]}/8)", score_rules(fold["body"], rules)[0] == 8),
         ]

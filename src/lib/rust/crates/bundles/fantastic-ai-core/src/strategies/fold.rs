@@ -36,7 +36,7 @@ use std::sync::{Arc, OnceLock};
 // The tunables live in [`crate::constants`]; re-exported so every
 // `crate::strategies::fold::…` path keeps working.
 pub use crate::constants::{
-    FOLD_RUN, INDEX_USER_CHARS, KEEP_TAIL, MAX_TITLE, SPAN, SUMMARY_BUDGET, SUMMARY_RETRIES,
+    FOLD_AT, FOLD_RUN, INDEX_USER_CHARS, KEEP_TAIL, MAX_TITLE, SUMMARY_BUDGET, SUMMARY_RETRIES,
     THINK_ALLOWANCE,
 };
 
@@ -357,7 +357,7 @@ pub async fn write_fold(
 /// only when `FOLD_RUN` folds sit adjacent at the head do they become the span
 /// themselves. Depth then grows with the log of the history, not its length.
 #[must_use]
-pub fn next_span(rows: &[Value], view: &[Value], keep_tail: usize, size: usize) -> Vec<usize> {
+pub fn next_span(rows: &[Value], view: &[Value], keep_tail: usize, need: i64) -> Vec<usize> {
     let by_id: HashMap<i64, usize> = rows
         .iter()
         .enumerate()
@@ -378,8 +378,16 @@ pub fn next_span(rows: &[Value], view: &[Value], keep_tail: usize, size: usize) 
     let take: Vec<&Value> = if lead >= FOLD_RUN {
         head[..lead].to_vec() // fold the folds — same operation, same summarizer
     } else {
-        let end = (lead + size).min(head.len());
-        let mut t = head[lead..end].to_vec();
+        // the oldest rows whose tokens reach `need` — never a row count
+        let mut t: Vec<&Value> = Vec::new();
+        let mut got = 0i64;
+        for r in &head[lead..] {
+            if is_fold(r) || got >= need {
+                break;
+            }
+            t.push(r);
+            got += estimate_tokens(std::slice::from_ref(*r));
+        }
         while t.last().is_some_and(|r| row_role(r) == "assistant") {
             t.pop();
         }
@@ -393,9 +401,10 @@ pub fn next_span(rows: &[Value], view: &[Value], keep_tail: usize, size: usize) 
         .collect()
 }
 
-/// FOLD UNTIL IT FITS: when the rendered view is over `budget`, fold its oldest
-/// stretches down to the low watermark; then tidy the head (adjacent folds
-/// coalesce), budget or no budget. Returns `(rows + the fold rows written, the
+/// FOLD WHEN NEAR FULL: once the rendered view passes `FOLD_AT` of `budget`, ONE
+/// fold takes the oldest rows, by tokens, down to `LOW` of it; then tidy the head
+/// (`FOLD_RUN` adjacent folds become one parent — the fold tree), budget or no
+/// budget. Returns `(rows + the fold rows written, the
 /// view, folded)`. The turn's `fold` projection and `context_recall` (a
 /// store longer than the window, e.g. written under a larger one) share it.
 /// Python `fold_down`.
@@ -410,12 +419,14 @@ pub async fn fold_down(
     let mut rows: Vec<Value> = rows.to_vec();
     let mut view = render(&rows);
     let mut folded = 0usize;
-    if estimate_tokens(&view) > budget && rows.len() > 2 {
+    if estimate_tokens(&view) > (budget as f64 * FOLD_AT) as i64 && rows.len() > 2 {
         let target = (budget as f64 * LOW) as i64;
-        // ONE MOVE, REPEATED: fold the oldest stretch of the view — rows, folds,
-        // or a mix — until under the low watermark or nothing foldable is left.
+        // ONE FOLD, SIZED BY TOKENS: the oldest rows that bring the view to LOW,
+        // plus room for the fold row itself (its summary budget). Repeated only if
+        // that still leaves the view over LOW, or nothing foldable is left.
         while estimate_tokens(&view) > target {
-            let span = next_span(&rows, &view, KEEP_TAIL, SPAN);
+            let need = estimate_tokens(&view) - target + SUMMARY_BUDGET;
+            let span = next_span(&rows, &view, KEEP_TAIL, need);
             if span.is_empty() {
                 break;
             }
@@ -434,7 +445,7 @@ pub async fn fold_down(
     // run shrinks by `FOLD_RUN - 1` every time and `next_span` stops selecting
     // once fewer than `FOLD_RUN` remain.
     loop {
-        let span = next_span(&rows, &view, KEEP_TAIL, SPAN);
+        let span = next_span(&rows, &view, KEEP_TAIL, 0); // only a FOLD_RUN of folds qualifies here
         if span.is_empty() || !span.iter().all(|&i| is_fold(&rows[i])) {
             break;
         }
