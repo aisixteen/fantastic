@@ -73,13 +73,15 @@ LOW = 0.6  # strip down to this fraction of the budget once over it
 # ─── the fold strategy (strategies/fold.py) ────────────────────────────────
 
 MAX_TITLE = 140
-# THE SUMMARY BUDGET — this strategy's own defaults (the per-agent strategy slot is
-# where they become configurable; not exposed now). A summary may take a fifth of
-# the span it replaces, and never more than a quarter of the body budget: a fold
-# that is itself a large fraction of the window buys nothing.
-SUMMARY_SHARE = 0.20
-WINDOW_SHARE = 0.25
-SUMMARY_FLOOR = 48  # tokens — a title and one sentence always fit
+# THE SUMMARY BUDGET (owner, 2026-10-11): a fold summary gets a FIXED 1024 tokens, and
+# the model is told exactly that number; the fold's mechanical index rides beside it,
+# outside the budget. The old formula — a fifth of the span, minus the index — put
+# short, user-heavy chat spans on a 48-token floor: the model overshot, the one
+# re-summarise was cut while it counted tokens, and nothing folded (measured, E39).
+SUMMARY_BUDGET = 1024
+# Re-summarises after the first answer; past them the fold fails LOUD (the turn ends
+# `reason: fold_summary`), never a silent unfolded span (owner, 2026-10-11).
+SUMMARY_RETRIES = 3
 # THE THINKING ALLOWANCE on a summary call's `max_tokens` (decided 2026-09-26). The
 # endpoint counts a reasoning model's thought against `max_tokens`; at a bare budget
 # (as small as ~93 tokens for a short span) the thought alone hit the bound, every
@@ -89,7 +91,11 @@ SUMMARY_FLOOR = 48  # tokens — a title and one sentence always fit
 THINK_ALLOWANCE = 1024
 INDEX_USER_CHARS = 1200  # the user's own words, verbatim, at most this much per fold
 KEEP_TAIL = 6  # rows at the end of the view that never fold — the live tail
-SPAN = 8  # rows per fold at the watermark — small enough to summarize, large enough to matter
+# Rows per fold at the watermark (owner, 2026-10-11: 1024 "for now"). At 8 a chat past
+# folded 8 rows at a time into fold rows nearly as big as the rows (summary + index):
+# 47 folds, 4 levels, 391 s before the first answer (E39). At 1024 one overflow folds
+# the whole foldable stretch into ONE fold.
+SPAN = 1024
 #: Adjacent folds at the head of the view before they fold as a group.
 #:
 #: THREE, not four. A real run folds at most once per turn — each projection

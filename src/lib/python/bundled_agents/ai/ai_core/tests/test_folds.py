@@ -404,9 +404,10 @@ def test_a_late_reply_whose_parent_is_folded_stays_visible_and_attached():
     )  # attached by parent, not orphaned
 
 
-async def test_folding_does_not_build_a_linked_list_of_summaries():
-    """Twelve levels in 26 cuts was the measured failure: every span began on the last
-    fold. The head's folds are skipped until FOLD_RUN of them sit together."""
+async def test_one_overflow_folds_the_whole_stretch_once():
+    """SPAN = 1024 (owner, 2026-10-11): one overflow folds the whole foldable stretch
+    into ONE fold — not 8 rows at a time (E39: 47 folds, 4 levels). Twelve levels in
+    26 cuts was the older failure; one fold per overflow cannot build that list."""
     k = _K()
     a = _chain("a", 30)
     body = [_row("user", "GOAL", "user:goal")] + a + [_row("user", "now?", None)]
@@ -414,8 +415,7 @@ async def test_folding_does_not_build_a_linked_list_of_summaries():
     await get_strategy("fold")(body, [], {}, _ctx(bud, k))
     stored = list(k.rows_of())
     levels = [r.get("level", 1) for r in stored if r.get("kind") == "fold"]
-    assert len(levels) >= 3
-    assert max(levels) <= 3, levels
+    assert levels == [1], levels
 
 
 def test_a_fold_inherits_its_first_members_parent():

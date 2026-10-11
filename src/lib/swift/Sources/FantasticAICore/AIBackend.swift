@@ -695,6 +695,18 @@ public final class AIBackend: @unchecked Sendable {
                 "error": .string(e.message), "reason": .string("memory_store"),
                 "client_id": .string(clientId),
             ])
+        } catch let e as FoldSummaryError {
+            // FAIL LOUD (owner, 2026-10-11): a fold's summary would not fit its
+            // budget after every re-summarise — no turn on an unfolded view.
+            await emitStatus(
+                kernel: kernel, agentId: agentId, clientId: clientId, phase: "done",
+                detail: [("reason", .string("error")), ("error", .string(e.message))])
+            st.clearCurrent()
+            await st.fifo.release()
+            return .object([
+                "error": .string(e.message), "reason": .string("fold_summary"),
+                "client_id": .string(clientId),
+            ])
         } catch let e as PromptFileError {
             // FAIL LOUD: a system_prompt_file is set and unusable — no turn on
             // another block, said so.
@@ -1201,6 +1213,19 @@ public final class AIBackend: @unchecked Sendable {
     /// placeholders filled; none is ever appended to another. Python
     /// `_system_content`.
     func systemContent(agent: Agent, systemPrompt: String?, kernel: Kernel) async throws -> String {
+        // THE WRAP (owner, 2026-10-11): the record's `pre_system_prompt` goes BEFORE
+        // whichever prompt is in force and `post_system_prompt` AFTER it, each read
+        // live and taken verbatim — no placeholders, and neither replaces anything.
+        // Absent or null adds nothing (python `_system_content`).
+        let inner = try await innerSystemContent(agent: agent, systemPrompt: systemPrompt, kernel: kernel)
+        let pre = RecordSchema.recordSystemPrompt(agent.metaValue(forKey: "pre_system_prompt"))
+        let post = RecordSchema.recordSystemPrompt(agent.metaValue(forKey: "post_system_prompt"))
+        return [pre, inner, post].compactMap { $0 }.filter { !pyStrip($0).isEmpty }
+            .joined(separator: "\n\n")
+    }
+
+    /// The prompt in force, before the pre/post wrap of `systemContent`.
+    func innerSystemContent(agent: Agent, systemPrompt: String?, kernel: Kernel) async throws -> String {
         if let perCall = systemPrompt, !pyStrip(perCall).isEmpty {
             return await renderPrompt(perCall, agent: agent, kernel: kernel)
         }

@@ -85,7 +85,27 @@ public enum RecordSchema {
             field("system_prompt", "str", SYSTEM_PROMPT_HINT),
             field("file_bridge_id", "str", FILE_BRIDGE_ID_HINT),
             field("system_prompt_file", "str", SYSTEM_PROMPT_FILE_HINT),
+            field("pre_system_prompt", "str", PRE_SYSTEM_PROMPT_HINT),
+            field("post_system_prompt", "str", POST_SYSTEM_PROMPT_HINT),
         ]
+    }
+
+    /// The `pre_system_prompt` field's hint. Python `AI_FIELDS`.
+    public static let PRE_SYSTEM_PROMPT_HINT =
+        "text placed BEFORE the system block on every turn — whichever is in force "
+        + "(the default, `system_prompt` or `system_prompt_file`), never replacing it; "
+        + "verbatim, no placeholders; null = nothing"
+
+    /// The `post_system_prompt` field's hint. Python `AI_FIELDS`.
+    public static let POST_SYSTEM_PROMPT_HINT =
+        "text placed AFTER the system block on every turn — whichever is in force, "
+        + "never replacing it; verbatim, no placeholders; null = nothing"
+
+    /// The refusal for a `pre_system_prompt` / `post_system_prompt` the record
+    /// cannot use. Python `WRAP_PROMPT_REFUSAL.format(name=…)`.
+    public static func wrapPromptRefusal(_ name: String) -> String {
+        "\(name) must be a non-empty string (it wraps the system block on every turn) — "
+            + "null clears it"
     }
 
     /// The `system_prompt` field's hint. Python `AI_FIELDS`.
@@ -190,6 +210,11 @@ public enum RecordSchema {
         // default" without saying so.
         if let v = meta["system_prompt"], v != .null, recordSystemPrompt(v) == nil {
             return SYSTEM_PROMPT_REFUSAL
+        }
+        for name in ["pre_system_prompt", "post_system_prompt"] {
+            if let v = meta[name], v != .null, recordSystemPrompt(v) == nil {
+                return wrapPromptRefusal(name)
+            }
         }
         if let bad = PromptFile.shapeError(meta) {
             return bad

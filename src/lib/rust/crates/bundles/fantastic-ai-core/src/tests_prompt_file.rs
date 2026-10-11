@@ -343,7 +343,9 @@ fn a_bad_value_is_refused_at_the_write() {
         names.ends_with(&[
             "system_prompt".to_string(),
             "file_bridge_id".to_string(),
-            "system_prompt_file".to_string()
+            "system_prompt_file".to_string(),
+            "pre_system_prompt".to_string(),
+            "post_system_prompt".to_string()
         ]),
         "{names:?}"
     );

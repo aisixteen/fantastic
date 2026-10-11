@@ -563,10 +563,10 @@ async def test_next_run_is_persisted_before_the_fire(
 async def test_a_schedule_timeout_bounds_its_fire(seeded_kernel, store_agent):
     sid = await _make_probed_scheduler(seeded_kernel, "sch_timeout", ["p_hang"])
     r = await _schedule(
-        seeded_kernel, sid, "p_hang", interval=60, timeout=0.1, hit={"block": 2.0}
+        seeded_kernel, sid, "p_hang", interval=60, fire_timeout=0.1, hit={"block": 2.0}
     )
     sch_id = r["schedule_id"]
-    assert r["schedule"]["timeout"] == 0.1
+    assert r["schedule"]["fire_timeout"] == 0.1
     t0 = time.time()
     fired = (
         await seeded_kernel.send(
@@ -587,8 +587,8 @@ async def test_a_schedule_timeout_bounds_its_fire(seeded_kernel, store_agent):
 async def test_schedule_rejects_a_bad_timeout(seeded_kernel, store_agent):
     sid = await _make_probed_scheduler(seeded_kernel, "sch_badto", ["p_x"])
     for bad_value in (0, -1, "5", True):
-        r = await _schedule(seeded_kernel, sid, "p_x", timeout=bad_value)
-        assert r.get("reason") == "bad_arg" and r.get("arg") == "timeout", r
+        r = await _schedule(seeded_kernel, sid, "p_x", fire_timeout=bad_value)
+        assert r.get("reason") == "bad_arg" and r.get("arg") == "fire_timeout", r
     listed = (await seeded_kernel.send([{"target": sid, "payload": {"type": "list"}}]))[
         0
     ]["result"]["schedules"]

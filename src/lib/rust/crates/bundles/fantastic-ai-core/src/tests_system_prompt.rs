@@ -151,3 +151,89 @@ async fn recall_sizes_the_block_the_turn_uses() {
     }
     assert!(budgets[1] > budgets[0], "{budgets:?}");
 }
+
+async fn update(kernel: &Arc<Kernel>, backend: &AgentId, fields: Value) -> Value {
+    let mut p = json!({"type": "update_agent", "id": backend.as_str()});
+    for (k, v) in fields.as_object().unwrap() {
+        p[k] = v.clone();
+    }
+    kernel
+        .send(vec![Item::new(AgentId::from("kernel_state"), p)])
+        .await
+        .remove(0)
+        .result
+}
+
+/// `pre_system_prompt` / `post_system_prompt` (owner, 2026-10-11) WRAP the block in
+/// force — the default, the record's, the per-call — verbatim, never replacing it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pre_and_post_wrap_whichever_block_is_in_force() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "sp_wrap").await;
+    let r = update(
+        &kernel,
+        &backend,
+        json!({"pre_system_prompt": "PRE {tree}", "post_system_prompt": "POST"}),
+    )
+    .await;
+    assert!(r.get("error").is_none(), "{r}");
+    let done = || pass(r#"ok <call name="done"></call>"#);
+    let s = script(
+        &backend,
+        vec![done(), done(), done(), done()],
+        Duration::ZERO,
+    );
+    say(&kernel, &backend, json!({"type": "send", "text": "go"})).await;
+    assert!(until_passes(&s, 1).await);
+    // the default block stays whole between them, verbatim pre (no fill)
+    let first = system_of(&s, 0);
+    assert!(first.starts_with("PRE {tree}\n\n"), "{first}");
+    assert!(first.ends_with("\n\nPOST"), "{first}");
+    assert!(first.contains("\n\nYou are `"), "{first}");
+    update(&kernel, &backend, json!({"system_prompt": "ROLE"})).await;
+    say(&kernel, &backend, json!({"type": "send", "text": "go"})).await;
+    assert!(until_passes(&s, 2).await);
+    assert_eq!(system_of(&s, 1), "PRE {tree}\n\nROLE\n\nPOST");
+    say(
+        &kernel,
+        &backend,
+        json!({"type": "send", "text": "go", "system_prompt": "CALL"}),
+    )
+    .await;
+    assert!(until_passes(&s, 3).await);
+    assert_eq!(system_of(&s, 2), "PRE {tree}\n\nCALL\n\nPOST");
+    update(
+        &kernel,
+        &backend,
+        json!({"pre_system_prompt": null, "post_system_prompt": null}),
+    )
+    .await;
+    say(&kernel, &backend, json!({"type": "send", "text": "go"})).await;
+    assert!(until_passes(&s, 4).await);
+    assert_eq!(system_of(&s, 3), "ROLE");
+}
+
+#[test]
+fn an_unusable_wrap_value_is_refused_at_the_write() {
+    let sch = crate::schema::schema(Vec::new());
+    let rec = json!({"memory_store_id": "m"})
+        .as_object()
+        .cloned()
+        .unwrap();
+    for name in ["pre_system_prompt", "post_system_prompt"] {
+        for bad in [json!(""), json!("   "), json!(42), json!(["x"])] {
+            let mut meta = serde_json::Map::new();
+            meta.insert(name.to_string(), bad.clone());
+            assert_eq!(
+                crate::schema::validate(&sch, "b", &meta, &rec),
+                Some(crate::schema::wrap_prompt_refusal(name)),
+                "{name}={bad}"
+            );
+        }
+        for ok in [json!("FINE"), Value::Null] {
+            let mut meta = serde_json::Map::new();
+            meta.insert(name.to_string(), ok);
+            assert_eq!(crate::schema::validate(&sch, "b", &meta, &rec), None);
+        }
+    }
+}

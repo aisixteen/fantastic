@@ -54,6 +54,11 @@ class _Kernel:
     def get(self, _id):
         return {}
 
+    def _verb_docs(self, payload):
+        """The kernel's `docs`, read in process by routing: this fake documents
+        no verb, so no routing field clashes."""
+        return {"of": payload.get("of"), "verbs": {}}
+
     def spawn_task(self, _agent_id, _verb, coro):
         """Deliveries are FORKED through the kernel (ai_core has one path, no
         unregistered fallback) — run the work as a task, like the kernel does."""

@@ -160,7 +160,7 @@ struct RelayDirectoryPinTests {
         let (kernel, bundle) = await legKernel()
         await boot(kernel, bundle, DirectoryWire(answer: nil))
         #expect(
-            await verb(kernel, ["type": "list_peers", "timeout": 0.2])
+            await verb(kernel, ["type": "list_peers", "list_timeout": 0.2])
                 == #"{"error":"relay_connector: directory timeout after 0.2s","reason":"timeout"}"#)
         await teardown(kernel)
     }
@@ -355,7 +355,7 @@ struct BridgeEnginePinTests {
                 == required)
         // nobody answers on the partner side: the bound is the reply
         let late = await binaryForward(
-            kernel, ["type": "forward", "target": "x", "payload": ["type": "ping"], "timeout": 0.2])
+            kernel, ["type": "forward", "target": "x", "payload": ["type": "ping"], "forward_timeout": 0.2])
         #expect(late.0 == #"{"error":"bridge.forward: timeout after 0.2s"}"#)
         #expect(late.1 == 0)
         await teardown(kernel)

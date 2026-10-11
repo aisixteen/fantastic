@@ -136,7 +136,9 @@ fn the_schema_is_two_knobs_then_the_ai_fields_with_the_models_window() {
             "recent_n",
             "system_prompt",
             "file_bridge_id",
-            "system_prompt_file"
+            "system_prompt_file",
+            "pre_system_prompt",
+            "post_system_prompt"
         ]
     );
     // the window is the MODEL'S, read from the engine — not the kernel's 128k

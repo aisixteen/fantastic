@@ -114,7 +114,7 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
     static let verbDocs: OrderedDictionary<String, JSON> = [
         "reflect": .string("Identity + tick state. No args."),
         "boot": .string("Idempotent. Starts the tick loop; persistence is THROUGH the loader."),
-        "schedule": .string("args: target:str (the agent each fire calls), payload:{type:<verb>, ...} (the call itself: any verb `target` answers, with its args; {type:'send', text:'...'} wakes an AI with that text), interval_seconds:int (default 60), timeout:number? (seconds per fire; absent = wait forever). Every fire runs AS THE SCHEDULER — it reaches what the scheduler's can_call grants. Returns {schedule_id, schedule}. Persisted THROUGH the loader; failfast if no store wired."),
+        "schedule": .string("args: target:str (the agent each fire calls), payload:{type:<verb>, ...} (the call itself: any verb `target` answers, with its args; {type:'send', text:'...'} wakes an AI with that text), interval_seconds:int (default 60), fire_timeout:number? (seconds per fire; absent = wait forever — not `timeout`, which is a call's own routing field). Every fire runs AS THE SCHEDULER — it reaches what the scheduler's can_call grants. Returns {schedule_id, schedule}. Persisted THROUGH the loader; failfast if no store wired."),
         "unschedule": .string("args: schedule_id:str (req). Returns {removed:bool, schedule_id}."),
         "list": .string("No args. Returns {schedules: [<schedule record>, ...]} — every schedule."),
         "pause": .string("args: schedule_id:str?. With id pauses one schedule; without, pauses the whole scheduler."),
@@ -404,7 +404,7 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
     private func fireItem(_ sch: JSON) -> Item {
         let payload = sch.asObject?["payload"] ?? .object([:])
         return Item(
-            AgentId(sch["target"].asString ?? ""), payload, timeout: sch["timeout"].asDouble)
+            AgentId(sch["target"].asString ?? ""), payload, timeout: sch["fire_timeout"].asDouble)
     }
 
     /// Fire every due schedule AS THE SCHEDULER — ONE batch send, the items
@@ -576,7 +576,7 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
         // STORED AS SENT — an int `5` stays `5`; widening it to `5.0` changed the
         // persisted bytes and every reply that echoes the schedule.
         var timeout: JSON = .null
-        if let raw = payload.asObject?["timeout"], !raw.isNull {
+        if let raw = payload.asObject?["fire_timeout"], !raw.isNull {
             let positive: Bool
             switch raw {
             case .integer(let n): positive = n > 0
@@ -584,7 +584,7 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
             default: positive = false
             }
             guard positive else {
-                return Refusal.bad("schedule", "timeout", "a positive number of seconds")
+                return Refusal.bad("schedule", "fire_timeout", "a positive number of seconds")
             }
             timeout = raw
         }
@@ -599,7 +599,7 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
             "run_count": .integer(0),
             "paused": .bool(false),
         ])
-        if !timeout.isNull { sch["timeout"] = timeout }
+        if !timeout.isNull { sch["fire_timeout"] = timeout }
         var schedules = await loadSchedules(agentId, kernel)
         schedules.append(sch)
         if let err = await saveSchedules(agentId, kernel, schedules) {

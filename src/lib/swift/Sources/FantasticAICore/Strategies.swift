@@ -37,14 +37,9 @@ public struct AIProjection: Sendable {
     public var strippedBytes: Int
     /// `fold`: fold rows written this projection.
     public var folded: Int
-    /// `fold`: spans NOT folded because the summary stayed over its budget after
-    /// the one re-summarise — the span stays in view, reported, never a degraded
-    /// fold. Python `Projection.fold_refused`.
-    public var foldRefused: Int
     public init(
         body: [JSON], summary: String? = nil, omittedMarker: Bool = false,
-        pinned: [String] = [], stripped: Int = 0, strippedBytes: Int = 0, folded: Int = 0,
-        foldRefused: Int = 0
+        pinned: [String] = [], stripped: Int = 0, strippedBytes: Int = 0, folded: Int = 0
     ) {
         self.body = body
         self.summary = summary
@@ -53,7 +48,6 @@ public struct AIProjection: Sendable {
         self.stripped = stripped
         self.strippedBytes = strippedBytes
         self.folded = folded
-        self.foldRefused = foldRefused
     }
 }
 

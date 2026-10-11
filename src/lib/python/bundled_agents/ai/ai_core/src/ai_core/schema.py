@@ -116,12 +116,32 @@ AI_FIELDS: tuple = (
         "(placeholders filled), re-read when the bridge reports it changed; a record "
         "or per-call `system_prompt` beats it; null = none",
     ),
+    field(
+        "pre_system_prompt",
+        "str",
+        "text placed BEFORE the system block on every turn — whichever is in force "
+        "(the default, `system_prompt` or `system_prompt_file`), never replacing it; "
+        "verbatim, no placeholders; null = nothing",
+    ),
+    field(
+        "post_system_prompt",
+        "str",
+        "text placed AFTER the system block on every turn — whichever is in force, "
+        "never replacing it; verbatim, no placeholders; null = nothing",
+    ),
 )
 
 #: The refusal for a `system_prompt` the record cannot use.
 SYSTEM_PROMPT_REFUSAL = (
     "system_prompt must be a non-empty string (it replaces the default system "
     "block on every turn) — null clears it"
+)
+
+
+#: The refusal for a `pre_system_prompt` / `post_system_prompt` the record cannot use.
+WRAP_PROMPT_REFUSAL = (
+    "{name} must be a non-empty string (it wraps the system block on every turn) — "
+    "null clears it"
 )
 
 
@@ -177,6 +197,10 @@ def validate(sch: dict, backend: str, meta: dict, record: dict) -> str | None:
     sp = meta.get("system_prompt")
     if sp is not None and not (isinstance(sp, str) and sp.strip()):
         return SYSTEM_PROMPT_REFUSAL
+    for name in ("pre_system_prompt", "post_system_prompt"):
+        v = meta.get(name)
+        if v is not None and not (isinstance(v, str) and v.strip()):
+            return WRAP_PROMPT_REFUSAL.format(name=name)
     from ai_core.prompt_file import shape_error as prompt_file_error
 
     if bad := prompt_file_error(meta):

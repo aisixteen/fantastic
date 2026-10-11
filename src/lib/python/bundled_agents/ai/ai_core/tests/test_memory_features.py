@@ -4,6 +4,8 @@ for the head."""
 
 from __future__ import annotations
 
+import pytest
+
 
 from ai_core import core
 from ai_core.context import ProjectionCtx
@@ -85,7 +87,7 @@ def test_a_repeated_body_is_a_stub_citing_the_first():
     assert out[2]["id"] == 3 and out[3] == hist[3]
 
 
-# ── the fold summary: a budget, one retry, then refuse ─────────────────
+# ── the fold summary: a fixed budget, three retries, then a loud error ──
 
 
 def _rows(n=6, size=2000):
@@ -95,7 +97,7 @@ def _rows(n=6, size=2000):
     return rows
 
 
-async def test_an_oversized_summary_is_resummarised_once_then_refused():
+async def test_an_oversized_summary_is_resummarised_then_fails_loud():
     asks: list[str] = []
 
     async def verbose(msgs, max_tokens=None):
@@ -111,10 +113,12 @@ async def test_an_oversized_summary_is_resummarised_once_then_refused():
         client_id=None,
     )
     rows = _rows()
-    out = await fold_mod._summarize(ctx, rows, list(range(1, 6)))
-    assert out is None, "still over budget after the retry — nothing is folded"
-    assert len(asks) == 2 and "Rewrite it to fit" in asks[1]
-    assert "AT MOST ~" in asks[0] and "ERRORS:" in asks[0], "fixed sections, a target"
+    with pytest.raises(fold_mod.FoldSummaryError, match="over its 1024-token budget"):
+        await fold_mod._summarize(ctx, rows, list(range(1, 6)))
+    assert len(asks) == 4 and all("Rewrite it to fit" in a for a in asks[1:])
+    assert "AT MOST ~1024 tokens" in asks[0] and "ERRORS:" in asks[0], (
+        "fixed sections, the fixed budget told to the model"
+    )
 
 
 async def test_a_retry_that_fits_is_the_summary():
@@ -266,32 +270,25 @@ class _CutThenFit:
         return "TITLE\n\n" + ("partial" if self.last_cut else "whole summary")
 
 
-async def test_a_summary_cut_at_its_budget_is_resummarised_once():
-    s = _CutThenFit(cuts=1)
-    ctx = ProjectionCtx(
-        budget=4000,
-        recent_n=4,
-        summarize=s,
-        self_id="ai",
-        kernel=None,
-        client_id=None,
+def _sctx(s):
+    return ProjectionCtx(
+        budget=4000, recent_n=4, summarize=s, self_id="ai", kernel=None, client_id=None
     )
-    rows = _rows()
-    title, body, _ = await fold_mod._summarize(ctx, rows, list(range(1, 6)))
-    assert body == "whole summary" and len(s.asked) == 2
-    want = fold_mod.summary_budget(ctx, rows, list(range(1, 6)))
-    bound = want + fold_mod.THINK_ALLOWANCE  # the thought counts against max_tokens
-    assert s.asked == [bound, bound], "the call is bounded by budget + thinking"
 
 
-async def test_a_summary_cut_twice_is_refused_nothing_folded():
-    s = _CutThenFit(cuts=2)
-    ctx = ProjectionCtx(
-        budget=4000,
-        recent_n=4,
-        summarize=s,
-        self_id="ai",
-        kernel=None,
-        client_id=None,
-    )
-    assert await fold_mod._summarize(ctx, _rows(), list(range(1, 6))) is None
+async def test_a_summary_cut_at_its_budget_is_resummarised():
+    """The budget is a FIXED `SUMMARY_BUDGET`, told to the model; every call is
+    bounded by it plus the thinking allowance."""
+    s = _CutThenFit(cuts=3)
+    title, body, _ = await fold_mod._summarize(_sctx(s), _rows(), list(range(1, 6)))
+    assert body == "whole summary" and len(s.asked) == 4  # first + 3 re-summarises
+    bound = fold_mod.SUMMARY_BUDGET + fold_mod.THINK_ALLOWANCE
+    assert s.asked == [bound] * 4, "the call is bounded by budget + thinking"
+    assert fold_mod.SUMMARY_BUDGET == 1024
+
+
+async def test_a_summary_cut_past_every_retry_fails_loud():
+    s = _CutThenFit(cuts=1 + fold_mod.SUMMARY_RETRIES)
+    with pytest.raises(fold_mod.FoldSummaryError, match="after 3 re-summarises"):
+        await fold_mod._summarize(_sctx(s), _rows(), list(range(1, 6)))
+    assert len(s.asked) == 1 + fold_mod.SUMMARY_RETRIES

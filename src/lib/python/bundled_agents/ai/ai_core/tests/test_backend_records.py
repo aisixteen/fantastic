@@ -39,6 +39,8 @@ _AI_TAIL = [
     ("system_prompt", "str", False, None, None),
     ("file_bridge_id", "str", False, None, None),
     ("system_prompt_file", "str", False, None, None),
+    ("pre_system_prompt", "str", False, None, None),
+    ("post_system_prompt", "str", False, None, None),
 ]
 
 

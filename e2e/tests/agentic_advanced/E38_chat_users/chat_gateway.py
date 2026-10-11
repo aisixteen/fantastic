@@ -44,10 +44,11 @@ VERBS = {
         "parent?, with?}]}."
     ),
     "event": (
-        "args: event:dict (req), label:str?. The PLATFORM side: one event in "
+        "args: event:dict (req), label:str?, backfill:bool?. The PLATFORM side: one event in "
         "(message_create {channel_id, message_id, author_id, content, reply_to?} | "
         "member_join {user_id} | member_update {user_id, nick}); the author is "
-        "reported to `users`, then the event is forwarded to `ai`."
+        "reported to `users`, then the event is forwarded to `ai` — or, with "
+        "`backfill`, recorded only and its text returned (history from before the bot)."
     ),
 }
 
@@ -219,6 +220,12 @@ async def _event(id: str, payload: dict, agent) -> dict:
         )
     else:
         return _err("event", f"unknown kind {kind!r}")
+
+    # BACKFILL: an event from before the bot was connected (a platform's message
+    # history) — recorded in the channel and reported to `users` like any event, but
+    # not forwarded; its rendered text comes back for whoever replays the past.
+    if payload.get("backfill"):
+        return {"forwarded": False, "text": text, "person": person}
 
     target = rec.get("ai")
     client = rec.get("client_id") or "chat"

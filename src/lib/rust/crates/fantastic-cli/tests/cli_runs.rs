@@ -1447,7 +1447,9 @@ fn the_catalog_carries_the_on_device_backend() {
             "recent_n",
             "system_prompt",
             "file_bridge_id",
-            "system_prompt_file"
+            "system_prompt_file",
+            "pre_system_prompt",
+            "post_system_prompt"
         ]
     );
     let window = fields[3]["default"].as_i64().expect("an int window");

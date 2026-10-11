@@ -399,6 +399,28 @@ pub async fn system_content(
     kernel: &Arc<Kernel>,
     system_prompt: Option<&str>,
 ) -> Result<String, PromptFileError> {
+    // THE WRAP (owner, 2026-10-11): the record's `pre_system_prompt` goes BEFORE
+    // whichever prompt is in force and `post_system_prompt` AFTER it, each read
+    // live and taken verbatim — no placeholders, and neither replaces anything.
+    // Absent or null adds nothing (python `_system_content`).
+    let meta = crate::helpers::agent_meta(self_id, kernel);
+    let inner = inner_system_content(self_id, kernel, system_prompt).await?;
+    let pre = crate::schema::record_wrap_prompt(&meta, "pre_system_prompt");
+    let post = crate::schema::record_wrap_prompt(&meta, "post_system_prompt");
+    Ok([pre, Some(inner), post]
+        .into_iter()
+        .flatten()
+        .filter(|s| !py_strip(s).is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n"))
+}
+
+/// The prompt in force, before the pre/post wrap of [`system_content`].
+async fn inner_system_content(
+    self_id: &AgentId,
+    kernel: &Arc<Kernel>,
+    system_prompt: Option<&str>,
+) -> Result<String, PromptFileError> {
     if let Some(s) = system_prompt.filter(|s| !s.trim().is_empty()) {
         return Ok(render_prompt(s, self_id, kernel).await);
     }
@@ -423,6 +445,17 @@ pub enum BlockFail {
     Store(MemoryStoreError),
     /// `system_prompt_file` is set and cannot be the block.
     PromptFile(PromptFileError),
+    /// A fold's summary would not fit its budget (a `context_recall` fold).
+    FoldSummary(crate::strategies::fold::FoldSummaryError),
+}
+
+impl From<crate::strategies::fold::FoldFail> for BlockFail {
+    fn from(e: crate::strategies::fold::FoldFail) -> Self {
+        match e {
+            crate::strategies::fold::FoldFail::Store(e) => Self::Store(e),
+            crate::strategies::fold::FoldFail::Summary(e) => Self::FoldSummary(e),
+        }
+    }
 }
 
 impl From<MemoryStoreError> for BlockFail {
@@ -442,6 +475,7 @@ impl From<BlockFail> for fantastic_kernel::bundle::BundleError {
         match e {
             BlockFail::Store(e) => e.into(),
             BlockFail::PromptFile(e) => e.into(),
+            BlockFail::FoldSummary(e) => e.into(),
         }
     }
 }

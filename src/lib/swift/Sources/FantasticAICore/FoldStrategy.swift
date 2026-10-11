@@ -14,8 +14,8 @@
 //
 // If the summarizer fails, the fold is still written — refs plus the members'
 // joined titles — and says so on its own line. Degraded, loud, never silent. A
-// summary that stays OVER ITS BUDGET (or is CUT OFF by it) after one re-summarise
-// is REFUSED: nothing is folded, the span stays in view, `fold_refused` reports it.
+// summary that stays OVER ITS BUDGET (or is CUT OFF by it) after `SUMMARY_RETRIES`
+// re-summarises fails the turn LOUD (`FoldSummaryError`).
 //
 // Python `ai_core/strategies/fold.py` is the reference; rust `fold.rs` the guide.
 
@@ -125,14 +125,6 @@ public enum AIFoldStrategy {
         return lines.isEmpty ? "" : "INDEX (mechanical):\n" + lines.joined(separator: "\n")
     }
 
-    /// The summary budget for one span. Python `summary_budget`.
-    public static func summaryBudget(_ ctx: ProjectionCtx, _ rows: [JSON], _ chain: [Int]) -> Int64 {
-        let span = AIContext.estimateTokens(chain.map { rows[$0] })
-        return max(
-            AIConstants.SUMMARY_FLOOR,
-            min(Int64(Double(span) * AIConstants.SUMMARY_SHARE), Int64(Double(ctx.budget) * AIConstants.WINDOW_SHARE)))
-    }
-
     /// (title, body) out of a summary, or `nil` when it is not one. Python
     /// `_split`.
     static func split(_ text: String) -> (String, String)? {
@@ -151,25 +143,22 @@ public enum AIFoldStrategy {
         return (cut.isEmpty ? "(untitled)" : cut, body.isEmpty ? title : body)
     }
 
-    /// (title, body, degraded), or `nil` when the summary stays OVER ITS BUDGET (or
-    /// is CUT OFF by it) after one re-summarise — then nothing is folded (the span
-    /// stays in view; loud in `context_status`), never a truncated summary.
-    ///
-    /// The budget is stated in the prompt; the call's `maxTokens` is the budget
-    /// plus `AIConstants.THINK_ALLOWANCE` (a reasoning model's thought counts against it);
-    /// `reserve` is what the fold row spends on its mechanical index, so summary +
-    /// index fit. A provider that stopped at `maxTokens` says so (`cut`) — a
-    /// cut-off summary is treated like an oversized one, never kept. Python
-    /// `_summarize`.
+    /// (title, body, degraded). The model is told the budget
+    /// (`AIConstants.SUMMARY_BUDGET`); the call's `maxTokens` is the budget plus
+    /// `AIConstants.THINK_ALLOWANCE` (a reasoning model's thought counts against
+    /// it). An answer OVER the budget, or CUT OFF by it, is asked again, telling the
+    /// model the numbers — up to `AIConstants.SUMMARY_RETRIES` times; then
+    /// `FoldSummaryError`, never a truncated summary and never a silent unfolded
+    /// span. Python `_summarize`.
     static func summarize(
-        _ ctx: ProjectionCtx, _ rows: [JSON], _ chain: [Int], reserve: Int64 = 0
-    ) async -> (String, String, Bool)? {
+        _ ctx: ProjectionCtx, _ rows: [JSON], _ chain: [Int]
+    ) async throws -> (String, String, Bool) {
         let degraded = { () -> (String, String, Bool) in
             let t = titlesOf(rows, chain)
             return (cutTitle(t), t, true)
         }
         guard let summarize = ctx.summarize else { return degraded() }
-        let budget = max(AIConstants.SUMMARY_FLOOR, summaryBudget(ctx, rows, chain) - reserve)
+        let budget = AIConstants.SUMMARY_BUDGET
         func ask(_ content: String) async -> (String, Bool) {
             do {
                 let (text, cut) = try await summarize(
@@ -180,40 +169,44 @@ public enum AIFoldStrategy {
                 return ("", false)
             }
         }
+        func cost(_ t: String) -> Int64 {
+            AIContext.estimateOne(.object(["role": .string("user"), "content": .string(t)]))
+        }
         var (text, cut) = await ask(foldPrompt(budget) + AIFolds.chainText(rows, chain))
         if text.isEmpty { return degraded() }
-        let got = AIContext.estimateOne(.object(["role": .string("user"), "content": .string(text)]))
-        if cut || got > budget {
-            // ONE re-summarise, telling the model the numbers.
-            let tell = cut ? resummarizeCut(budget: budget) : resummarize(got: got, budget: budget)
-            (text, cut) = await ask(tell + text)
-            if text.isEmpty || cut
-                || AIContext.estimateOne(.object(["role": .string("user"), "content": .string(text)]))
-                    > budget
-            {
-                return nil
+        var got = cost(text)
+        var retries = 0
+        while cut || got > budget {
+            if retries == AIConstants.SUMMARY_RETRIES {
+                let ids = chain.compactMap { rowId(rows[$0]) }
+                throw FoldSummaryError(
+                    "fold: the summary of rows \(ids.first ?? 0)…\(ids.last ?? 0) was "
+                        + (cut ? "cut off at" : "~\(got) tokens, over")
+                        + " its \(budget)-token budget after \(AIConstants.SUMMARY_RETRIES) "
+                        + "re-summarises — nothing folded")
             }
+            retries += 1
+            let tell = cut ? resummarizeCut(budget: budget) : resummarize(got: got, budget: budget)
+            let (again, againCut) = await ask(tell + text)
+            cut = againCut
+            if !again.isEmpty { text = again }
+            got = cost(text)
         }
         guard let parts = split(text) else { return degraded() }
         return (parts.0, parts.1, false)
     }
 
-    /// Summarize `idxs` and append ONE fold row for them — or `nil` when the
-    /// summary would not fit its budget (nothing folded). A fold row in `idxs` is
+    /// Summarize `idxs` and append ONE fold row for them (a summary that will not
+    /// fit throws `FoldSummaryError`). A fold row in `idxs` is
     /// just a member — that is how folds nest: the next fold over this stretch of
     /// the view takes the earlier fold as one of its rows, and its level is one
     /// above the deepest member. Python `write_fold`.
-    static func writeFold(_ ctx: ProjectionCtx, _ rows: [JSON], _ idxs: [Int]) async throws -> JSON? {
+    static func writeFold(_ ctx: ProjectionCtx, _ rows: [JSON], _ idxs: [Int]) async throws -> JSON {
         let ids = idxs.compactMap { rowId(rows[$0]) }
         let lvl = 1 + (idxs.filter { isFold(rows[$0]) }.map { AIFolds.level(rows, rows[$0]) }.max() ?? 0)
-        // THE INDEX IS INSIDE THE BUDGET: built first, its size reserved from the
-        // summary's.
+        // THE INDEX RIDES BESIDE THE SUMMARY, outside its budget (owner, 2026-10-11).
         let index = mechanicalIndex(rows, idxs)
-        let reserve =
-            index.isEmpty
-            ? 0 : AIContext.estimateOne(.object(["role": .string("user"), "content": .string(index)]))
-        guard let (title, summary, degraded) = await summarize(ctx, rows, idxs, reserve: reserve)
-        else { return nil }
+        let (title, summary, degraded) = try await summarize(ctx, rows, idxs)
         let text = index.isEmpty ? summary : "\(summary)\n\n\(index)"
         guard let kernel = ctx.kernel else {
             throw PyError("RuntimeError", "fold: no kernel to mint the fold's id from")
@@ -266,16 +259,15 @@ public enum AIFoldStrategy {
     /// FOLD UNTIL IT FITS: when the rendered view is over `budget`, fold its
     /// oldest stretches down to the low watermark; then tidy the head (adjacent
     /// folds coalesce), budget or no budget. Returns `(rows + the fold rows
-    /// written, the view, folded, refused)`. The turn's `fold` projection and
+    /// written, the view, folded)`. The turn's `fold` projection and
     /// `context_recall` (a store longer than the window, e.g. written under a
     /// larger one) share it. Python `fold_down`.
     static func foldDown(
         _ rowsIn: [JSON], _ ctx: ProjectionCtx, budget: Int64
-    ) async throws -> (rows: [JSON], view: [JSON], folded: Int, refused: Int) {
+    ) async throws -> (rows: [JSON], view: [JSON], folded: Int) {
         var rows = rowsIn
         var view = AIFolds.render(rows)
         var folded = 0
-        var refused = 0
         if AIContext.estimateTokens(view) > budget && rows.count > 2 {
             let target = Int64(Double(budget) * AIConstants.LOW)
             // ONE MOVE, REPEATED: fold the oldest stretch of the view — rows, folds,
@@ -283,11 +275,7 @@ public enum AIFoldStrategy {
             while AIContext.estimateTokens(view) > target {
                 let span = nextSpan(rows, view)
                 if span.isEmpty { break }
-                guard let fr = try await writeFold(ctx, rows, span) else {
-                    refused += 1  // the summary would not fit: this span stays; stop here
-                    break
-                }
-                rows.append(fr)
+                rows.append(try await writeFold(ctx, rows, span))
                 folded += 1
                 view = AIFolds.render(rows)
             }
@@ -302,18 +290,14 @@ public enum AIFoldStrategy {
         // Terminates: each pass replaces `AIConstants.FOLD_RUN` adjacent folds with ONE, so
         // the run shrinks by `AIConstants.FOLD_RUN - 1` every time and `nextSpan` stops
         // selecting once fewer than `AIConstants.FOLD_RUN` remain.
-        while refused == 0 {
+        while true {
             let span = nextSpan(rows, view)
             if span.isEmpty || !span.allSatisfy({ isFold(rows[$0]) }) { break }
-            guard let fr = try await writeFold(ctx, rows, span) else {
-                refused += 1
-                break
-            }
-            rows.append(fr)
+            rows.append(try await writeFold(ctx, rows, span))
             folded += 1
             view = AIFolds.render(rows)
         }
-        return (rows, view, folded, refused)
+        return (rows, view, folded)
     }
 
     /// Fold the oldest stretches of the view down to the low watermark, tidy the
@@ -328,8 +312,7 @@ public enum AIFoldStrategy {
         let out = try await AIStripStrategy.strip(down.view, systemBlock, rec, ctx)
         return AIProjection(
             body: out.body, omittedMarker: out.omittedMarker,
-            stripped: out.stripped, strippedBytes: out.strippedBytes, folded: down.folded,
-            foldRefused: down.refused)
+            stripped: out.stripped, strippedBytes: out.strippedBytes, folded: down.folded)
     }
 }
 
@@ -345,4 +328,13 @@ private func pyTrim(_ s: String, _ chars: String) -> String {
     while hi > lo, set.contains(view[hi - 1]) { hi -= 1 }
     view = Array(view[lo..<hi])
     return String(String.UnicodeScalarView(view))
+}
+
+/// A span's summary stayed over `AIConstants.SUMMARY_BUDGET` (or was cut at it)
+/// after `AIConstants.SUMMARY_RETRIES` re-summarises — the fold fails the turn,
+/// loud. Python `FoldSummaryError(RuntimeError)`.
+public struct FoldSummaryError: Error, CustomStringConvertible, Sendable {
+    public let message: String
+    public init(_ message: String) { self.message = message }
+    public var description: String { message }
 }

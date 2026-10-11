@@ -1053,6 +1053,18 @@ pub async fn send(
             .await;
             json!({"error": e.0, "reason": "system_prompt_file", "client_id": client_id})
         }
+        // FAIL LOUD (owner, 2026-10-11): a fold's summary would not fit its budget
+        // after every re-summarise — no turn on an unfolded view, said so.
+        Ok(Err(GenFailure::FoldSummary(e))) => {
+            emit_status(kernel, &state, agent_id, &client_id, "done", {
+                let mut m = Map::new();
+                m.insert("reason".to_string(), json!("error"));
+                m.insert("error".to_string(), json!(e.0.clone()));
+                m
+            })
+            .await;
+            json!({"error": e.0, "reason": "fold_summary", "client_id": client_id})
+        }
         // PROVIDER FAILURE (python `core.py`'s `except Exception`):
         // `status(done, reason='error', error=str(e))` announces it, then python
         // re-raises, and a raise is a FAILED execution — which is what makes

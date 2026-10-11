@@ -1,7 +1,7 @@
 """scheduler bundle — recurring tasks as an agent.
 
 State (sidecars in `.fantastic/agents/{id}/`, persisted THROUGH the loader):
-  schedules.yaml         — a YAML sequence of {id, target, payload, interval_seconds, next_run, paused, run_count, timeout?}
+  schedules.yaml         — a YAML sequence of {id, target, payload, interval_seconds, next_run, paused, run_count, fire_timeout?}
   schedule_events.yaml   — a YAML STREAM, one `---` document per schedule_fired event,
                            ring-trimmed to HISTORY_MAX
   Both are written by `kernel_state.yaml_io.dump` — the one emitter config the
@@ -14,7 +14,7 @@ root (read-empty until then); a denied/failed write is surfaced, not lost.
 Verbs:
   reflect      -> {sentence, paused, running}
   boot         -> start the fire loop (idempotent)
-  schedule     args: target, payload, interval_seconds, timeout?  -> {schedule_id}
+  schedule     args: target, payload, interval_seconds, fire_timeout?  -> {schedule_id}
   unschedule   args: schedule_id                        -> {removed: bool}
   list                                                  -> {schedules: [...]}
   pause        args: schedule_id?                       -> pause one or all
@@ -35,7 +35,7 @@ schedule added, removed, paused or resumed, or the scheduler's own record update
 A tick collects every DUE schedule, bumps `run_count`/`next_run`, persists FIRST
 (a crash inside the fire window cannot re-fire on reboot), then fires them all —
 ONE `kernel.send([{target, payload, timeout?}, ...])` batch, the items concurrent,
-so one hung target never blocks the others. `timeout` is the schedule's own per-fire
+so one hung target never blocks the others. `fire_timeout` is the schedule's own per-fire
 bound (seconds); absent = wait forever (the kernel never defaults it). After
 firing, scheduler emits one `{type:"schedule_fired", ...}` per outcome to its OWN
 inbox only — the target gets the PAYLOAD, which is the tick; echoing telemetry
@@ -247,8 +247,8 @@ async def _tick_loop(sid: str, kernel) -> None:
 
 def _fire_item(sch: dict) -> dict:
     item = {"target": sch.get("target", ""), "payload": sch.get("payload") or {}}
-    if sch.get("timeout") is not None:
-        item["timeout"] = sch["timeout"]
+    if sch.get("fire_timeout") is not None:
+        item["timeout"] = sch["fire_timeout"]
     return item
 
 
@@ -343,7 +343,7 @@ async def _boot(id, payload, kernel):
 
 
 async def _schedule(id, payload, kernel):
-    """args: target:str (the agent each fire calls), payload:{type:<verb>, ...} (the call itself: any verb `target` answers, with its args; {type:'send', text:'...'} wakes an AI with that text), interval_seconds:int (default 60), timeout:number? (seconds per fire; absent = wait forever). Every fire runs AS THE SCHEDULER — it reaches what the scheduler's can_call grants. Returns {schedule_id, schedule}. Persisted THROUGH the loader; failfast if no store wired."""
+    """args: target:str (the agent each fire calls), payload:{type:<verb>, ...} (the call itself: any verb `target` answers, with its args; {type:'send', text:'...'} wakes an AI with that text), interval_seconds:int (default 60), fire_timeout:number? (seconds per fire; absent = wait forever — not `timeout`, which is a call's own routing field). Every fire runs AS THE SCHEDULER — it reaches what the scheduler's can_call grants. Returns {schedule_id, schedule}. Persisted THROUGH the loader; failfast if no store wired."""
     target = payload.get("target", "")
     sched_payload = payload.get("payload")
     if sched_payload is None:
@@ -358,13 +358,13 @@ async def _schedule(id, payload, kernel):
         return {"error": "schedule: target required"}
     if not sched_payload.get("type"):
         return {"error": "schedule: payload.type required"}
-    timeout = payload.get("timeout")
+    timeout = payload.get("fire_timeout")
     if timeout is not None and (
         isinstance(timeout, bool)
         or not isinstance(timeout, (int, float))
         or timeout <= 0
     ):
-        return bad("schedule", "timeout", "a positive number of seconds")
+        return bad("schedule", "fire_timeout", "a positive number of seconds")
     sch = {
         "id": f"sch_{secrets.token_hex(3)}",
         "target": target,
@@ -376,7 +376,7 @@ async def _schedule(id, payload, kernel):
         "paused": False,
     }
     if timeout is not None:
-        sch["timeout"] = timeout
+        sch["fire_timeout"] = timeout
     (await _load(id, kernel)).append(sch)
     if err := await _save(id, kernel):
         # roll back the in-cache append so a failed persist leaves no phantom schedule

@@ -42,10 +42,6 @@ pub struct Projection {
     pub stripped_bytes: i64,
     /// `fold`: fold rows written this projection.
     pub folded: usize,
-    /// `fold`: spans NOT folded because the summary stayed over its budget after
-    /// the one re-summarise — the span stays in view, reported, never a degraded
-    /// fold.
-    pub fold_refused: usize,
 }
 
 /// Everything a strategy needs, WITHOUT importing the seam. `budget` is the
@@ -177,7 +173,6 @@ pub async fn compact(
             stripped: 0,
             stripped_bytes: 0,
             folded: 0,
-            fold_refused: 0,
         };
     }
     let summary = safe_summary(provider, &overflow).await;
@@ -201,7 +196,6 @@ pub async fn compact(
             stripped: 0,
             stripped_bytes: 0,
             folded: 0,
-            fold_refused: 0,
         };
     };
     let head_cost = estimate_one(first);
@@ -221,7 +215,6 @@ pub async fn compact(
         stripped: 0,
         stripped_bytes: 0,
         folded: 0,
-        fold_refused: 0,
     }
 }
 
@@ -236,7 +229,6 @@ pub fn truncate(body: &[Value], budget: i64) -> Projection {
             stripped: 0,
             stripped_bytes: 0,
             folded: 0,
-            fold_refused: 0,
         };
     }
     let first = body[0].clone();
@@ -252,7 +244,6 @@ pub fn truncate(body: &[Value], budget: i64) -> Projection {
         stripped: 0,
         stripped_bytes: 0,
         folded: 0,
-        fold_refused: 0,
     }
 }
 

@@ -303,6 +303,8 @@ struct ViewRecallTests {
             + [f.row("user", "now?", nil)]
         // the conversation the projection folds is the agent's store
         f.seed(Array(body.dropFirst()))
+        // one overflow is ONE fold now (SPAN = 1024): the batch that crosses RECALL_EVERY
+        backend.countFolds(agent.id.value, AIConstants.RECALL_EVERY - 1)
         let out = try await KernelTaskLocals.$sender.withValue(agent.id) { try await backend.projectContext(
             provider: MockProvider(), agent: agent, clientId: "cli", messages: body,
             storeLen: body.count - 1, kernel: kernel) }

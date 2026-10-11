@@ -311,4 +311,10 @@ async def test_the_schema_publishes_the_field(seeded_kernel):
     )["bundles"]
     row = next(b for b in cat if b["name"] == "vllm_backend")
     names = [f["name"] for f in row["schema"]["fields"]]
-    assert names[-3:] == ["system_prompt", "file_bridge_id", "system_prompt_file"]
+    assert names[-5:] == [
+        "system_prompt",
+        "file_bridge_id",
+        "system_prompt_file",
+        "pre_system_prompt",
+        "post_system_prompt",
+    ]

@@ -387,14 +387,14 @@ async fn schedule_rejects_a_bad_timeout() {
                     "type": "schedule",
                     "target": "kernel_state",
                     "payload": {"type": "list_agents"},
-                    "timeout": bad_value,
+                    "fire_timeout": bad_value,
                 }),
             )])
             .await
             .remove(0)
             .result;
         assert_eq!(r["reason"], "bad_arg", "{r}");
-        assert_eq!(r["arg"], "timeout", "{r}");
+        assert_eq!(r["arg"], "fire_timeout", "{r}");
     }
     let listed = kernel
         .send(vec![Item::new(sch.clone(), json!({"type": "list"}))])
@@ -695,11 +695,11 @@ async fn a_schedule_timeout_bounds_its_fire() {
         &sch,
         "p_hang",
         60,
-        json!({"timeout": 0.1, "hit": {"block": 2.0}}),
+        json!({"fire_timeout": 0.1, "hit": {"block": 2.0}}),
     )
     .await;
     let sid = r["schedule_id"].as_str().unwrap().to_string();
-    assert_eq!(r["schedule"]["timeout"], 0.1, "{r}");
+    assert_eq!(r["schedule"]["fire_timeout"], 0.1, "{r}");
     let t0 = now();
     let fired = kernel
         .send(vec![Item::new(
@@ -1019,13 +1019,13 @@ async fn an_int_timeout_stays_an_int() {
         .send(vec![Item::new(
             sch.clone(),
             json!({"type": "schedule", "target": "kernel_state",
-                   "payload": {"type": "list_agents"}, "timeout": 5}),
+                   "payload": {"type": "list_agents"}, "fire_timeout": 5}),
         )])
         .await
         .remove(0)
         .result;
-    assert_eq!(r["schedule"]["timeout"], json!(5), "{r}");
-    assert!(r["schedule"]["timeout"].is_i64(), "{r}");
+    assert_eq!(r["schedule"]["fire_timeout"], json!(5), "{r}");
+    assert!(r["schedule"]["fire_timeout"].is_i64(), "{r}");
 }
 
 /// A5.7 — `schedule_id` is read under python TRUTHINESS, and the raw value is
@@ -1347,15 +1347,15 @@ async fn a_failed_persist_prints_python_line() {
     assert!(history.contains("no store"), "{history}");
 }
 
-/// python `item["timeout"] = sch["timeout"]`: a fire carries the timeout AS
+/// python `item["timeout"] = sch["fire_timeout"]`: a fire carries the timeout AS
 /// STORED (an int stays an int), so the kernel's prose and call row print the
 /// schedule's own number.
 #[test]
 fn a_fire_carries_the_stored_timeout_raw() {
-    let item = fire_item(&json!({"target": "t", "payload": {"type": "x"}, "timeout": 5}));
+    let item = fire_item(&json!({"target": "t", "payload": {"type": "x"}, "fire_timeout": 5}));
     assert_eq!(item.raw_timeout, Some(json!(5)));
     assert!(item.timeout.is_none());
-    let item = fire_item(&json!({"target": "t", "payload": {"type": "x"}, "timeout": null}));
+    let item = fire_item(&json!({"target": "t", "payload": {"type": "x"}, "fire_timeout": null}));
     assert!(item.raw_timeout.is_none());
 }
 

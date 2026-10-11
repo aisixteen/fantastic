@@ -31,9 +31,8 @@ from ai_core.strategies.base import NOTICE_ENVELOPE_RESERVE, Projection
 from ai_core.strategies.strip import LOW, strip
 from ai_core.constants import (
     MAX_TITLE,
-    SUMMARY_SHARE,
-    WINDOW_SHARE,
-    SUMMARY_FLOOR,
+    SUMMARY_BUDGET,
+    SUMMARY_RETRIES,
     THINK_ALLOWANCE,
     INDEX_USER_CHARS,
     KEEP_TAIL,
@@ -123,11 +122,9 @@ def mechanical_index(rows: list[dict], chain: list[int]) -> str:
     return ("INDEX (mechanical):\n" + "\n".join(lines)) if lines else ""
 
 
-def summary_budget(ctx: ProjectionCtx, rows: list[dict], chain: list[int]) -> int:
-    span = estimate_tokens([rows[i] for i in chain])
-    return max(
-        SUMMARY_FLOOR, min(int(span * SUMMARY_SHARE), int(ctx.budget * WINDOW_SHARE))
-    )
+class FoldSummaryError(RuntimeError):
+    """A span's summary stayed over `SUMMARY_BUDGET` (or was cut at it) after
+    `SUMMARY_RETRIES` re-summarises — the fold fails the turn, loud."""
 
 
 def _split(text: str) -> tuple[str, str] | None:
@@ -141,21 +138,17 @@ def _split(text: str) -> tuple[str, str] | None:
 
 
 async def _summarize(
-    ctx: ProjectionCtx, rows: list[dict], chain: list[int], reserve: int = 0
-) -> tuple[str, str, bool] | None:
-    """(title, body, degraded), or None when the summary stays OVER ITS BUDGET (or is
-    CUT OFF by it) after one re-summarise — then nothing is folded (the span stays in
-    view; loud in `context_status`), never a truncated summary.
-
-    The budget is stated in the prompt; the call's `max_tokens` is the budget plus
-    `THINK_ALLOWANCE` (a reasoning model's thought counts against it); `reserve`
-    is what the fold row spends on its mechanical index, so summary + index fit. A
-    provider that stopped at `max_tokens` says so (`last_cut` on the summarizer) —
-    a cut-off summary is treated like an oversized one, never kept."""
+    ctx: ProjectionCtx, rows: list[dict], chain: list[int]
+) -> tuple[str, str, bool]:
+    """(title, body, degraded). The model is told the budget (`SUMMARY_BUDGET`); the
+    call's `max_tokens` is the budget plus `THINK_ALLOWANCE` (a reasoning model's
+    thought counts against it). An answer OVER the budget, or CUT OFF by it, is asked
+    again, telling the model the numbers — up to `SUMMARY_RETRIES` times; then
+    `FoldSummaryError`, never a truncated summary and never a silent unfolded span."""
     if ctx.summarize is None:
         t = _titles_of(rows, chain)
         return t[:MAX_TITLE], t, True
-    budget = max(SUMMARY_FLOOR, summary_budget(ctx, rows, chain) - reserve)
+    budget = SUMMARY_BUDGET
 
     async def ask(content: str) -> tuple[str, bool]:
         try:
@@ -175,16 +168,26 @@ async def _summarize(
         t = _titles_of(rows, chain)
         return t[:MAX_TITLE], t, True
     got = estimate_one({"role": "user", "content": text})
-    if cut or got > budget:
-        # ONE re-summarise, telling the model the numbers.
+    retries = 0
+    while cut or got > budget:
+        if retries == SUMMARY_RETRIES:
+            ids = [rows[i].get("id") for i in chain]
+            raise FoldSummaryError(
+                f"fold: the summary of rows {ids[0]}…{ids[-1]} was "
+                + ("cut off at" if cut else f"~{got} tokens, over")
+                + f" its {budget}-token budget after {SUMMARY_RETRIES} re-summarises "
+                "— nothing folded"
+            )
+        retries += 1
         tell = (
             RESUMMARIZE_CUT.format(budget=budget)
             if cut
             else RESUMMARIZE.format(got=got, budget=budget)
         )
-        text, cut = await ask(tell + text)
-        if not text or cut or estimate_one({"role": "user", "content": text}) > budget:
-            return None
+        again, cut = await ask(tell + text)
+        if again:
+            text = again
+        got = estimate_one({"role": "user", "content": text})
     parts = _split(text)
     if parts is None:
         t = _titles_of(rows, chain)
@@ -192,24 +195,18 @@ async def _summarize(
     return parts[0], parts[1], False
 
 
-async def write_fold(
-    ctx: ProjectionCtx, rows: list[dict], idxs: list[int]
-) -> dict | None:
-    """Summarize `idxs` and append ONE fold row for them — or None when the summary
-    would not fit its budget (nothing folded). A fold row in `idxs` is just a member —
+async def write_fold(ctx: ProjectionCtx, rows: list[dict], idxs: list[int]) -> dict:
+    """Summarize `idxs` and append ONE fold row for them (a summary that will not fit
+    raises `FoldSummaryError`). A fold row in `idxs` is just a member —
     that is how folds nest: the next fold over this stretch of the view takes the
     earlier fold as one of its rows, and its level is one above the deepest member."""
     from ai_core.core import _save_history  # lazy: core imports this package
 
     ids = [rows[i].get("id") for i in idxs]
     lvl = 1 + max((level(rows, rows[i]) for i in idxs if is_fold(rows[i])), default=0)
-    # THE INDEX IS INSIDE THE BUDGET: built first, its size reserved from the summary's.
+    # THE INDEX RIDES BESIDE THE SUMMARY, outside its budget (owner, 2026-10-11).
     index = mechanical_index(rows, idxs)
-    reserve = estimate_one({"role": "user", "content": index}) if index else 0
-    summarized = await _summarize(ctx, rows, idxs, reserve)
-    if summarized is None:
-        return None
-    title, text, degraded = summarized
+    title, text, degraded = await _summarize(ctx, rows, idxs)
     if index:
         text = f"{text}\n\n{index}"
     from ai_core.core import _ctx  # lazy: core imports this package
@@ -264,15 +261,14 @@ def next_span(
 
 async def fold_down(
     rows: list[dict], ctx: ProjectionCtx, budget: int
-) -> tuple[list[dict], list[dict], int, int]:
+) -> tuple[list[dict], list[dict], int]:
     """FOLD UNTIL IT FITS: when the rendered view is over `budget`, fold its oldest
     stretches down to the low watermark; then tidy the head (adjacent folds coalesce),
-    budget or no budget. Returns `(rows + the fold rows written, the view, folded,
-    refused)`. The turn's `fold` projection and `context_recall` (a store longer than
+    budget or no budget. Returns `(rows + the fold rows written, the view, folded)`. The turn's `fold` projection and `context_recall` (a store longer than
     the window, e.g. written under a larger one) share it."""
     rows = list(rows)
     view = render(rows)
-    folded = refused = 0
+    folded = 0
     if estimate_tokens(view) > budget and len(rows) > 2:
         target = int(budget * LOW)
         # ONE MOVE, REPEATED: fold the oldest stretch of the view — rows, folds, or a
@@ -281,11 +277,7 @@ async def fold_down(
             span = next_span(rows, view)
             if not span:
                 break
-            fr = await write_fold(ctx, rows, span)
-            if fr is None:
-                refused += 1  # the summary would not fit: this span stays; stop here
-                break
-            rows.append(fr)
+            rows.append(await write_fold(ctx, rows, span))
             folded += 1
             view = render(rows)
     # TIDY THE HEAD, budget or no budget. Coalescing used to happen only while
@@ -298,26 +290,20 @@ async def fold_down(
     # Terminates: each pass replaces `FOLD_RUN` adjacent folds with ONE, so the
     # run shrinks by `FOLD_RUN - 1` every time and `next_span` stops selecting
     # once fewer than `FOLD_RUN` remain.
-    while not refused:
+    while True:
         span = next_span(rows, view)
         if not span or not all(is_fold(rows[i]) for i in span):
             break
-        fr = await write_fold(ctx, rows, span)
-        if fr is None:
-            refused += 1
-            break
-        rows.append(fr)
+        rows.append(await write_fold(ctx, rows, span))
         folded += 1
         view = render(rows)
-    return rows, view, folded, refused
+    return rows, view, folded
 
 
 async def fold(
     body: list[dict], system_block: list[dict], rec: dict, ctx: ProjectionCtx
 ) -> Projection:
-    _, view, folded, refused = await fold_down(
-        body, ctx, ctx.budget - NOTICE_ENVELOPE_RESERVE
-    )
+    _, view, folded = await fold_down(body, ctx, ctx.budget - NOTICE_ENVELOPE_RESERVE)
     # Stage two and three: strip bodies in what is left, then cut — strip's own logic.
     out = await strip(view, system_block, rec, ctx)
     return Projection(
@@ -326,5 +312,4 @@ async def fold(
         stripped=out.stripped,
         stripped_bytes=out.stripped_bytes,
         folded=folded,
-        fold_refused=refused,
     )

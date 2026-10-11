@@ -297,17 +297,18 @@ struct FoldsTests {
         #expect(AIFolds.chains(a + [fd, late])[0].contains(a.count + 1))
     }
 
-    /// Twelve levels in 26 cuts was the measured failure: every span began on the
-    /// last fold. The head's folds are skipped until FOLD_RUN of them sit together.
-    @Test func foldingDoesNotBuildALinkedListOfSummaries() async throws {
+    /// SPAN = 1024 (owner, 2026-10-11): one overflow folds the whole foldable
+    /// stretch into ONE fold — not 8 rows at a time (python E39: 47 folds, 4
+    /// levels). Twelve levels in 26 cuts was the older failure; one fold per
+    /// overflow cannot build that list.
+    @Test func oneOverflowFoldsTheWholeStretchOnce() async throws {
         let f = FoldFixture(agent: AI)
         let a = f.chain("a", 30)
         let body = [f.row("user", "GOAL", "user:goal")] + a + [f.row("user", "now?", nil)]
         let bud = Int64(Double(AIContext.estimateTokens(body)) * 0.35)
         _ = try await fold(body, f.ctx(bud))
         let levels = f.foldsOf().map { $0["level"].asInt ?? 1 }
-        #expect(levels.count >= 3)
-        #expect((levels.max() ?? 0) <= 3, "\(levels)")
+        #expect(levels == [1], "\(levels)")
     }
 
     @Test func aFoldInheritsItsFirstMembersParent() {

@@ -49,7 +49,7 @@ async def _probe_handler(id, payload, kernel):
                         "payload": {"type": "reflect", "tree": "none"},
                         # Short, so the OLD inline-dispatch code fails this test in
                         # seconds instead of parking it for the 30s default.
-                        "timeout": 3.0,
+                        "forward_timeout": 3.0,
                     },
                 }
             ]
@@ -167,7 +167,7 @@ async def test_reentrant_forward_completes_instead_of_deadlocking(two_kernels):
                         "type": "forward",
                         "target": probe,
                         "payload": {"type": "bounce", "bridge": b_id},
-                        "timeout": 10.0,
+                        "forward_timeout": 10.0,
                     },
                 }
             ]
@@ -254,7 +254,7 @@ async def test_a_mistyped_answer_id_is_skipped_while_a_forward_waits(two_kernels
                         "type": "forward",
                         "target": "far",
                         "payload": {"type": "reflect"},
-                        "timeout": 5.0,
+                        "forward_timeout": 5.0,
                     },
                 }
             ]

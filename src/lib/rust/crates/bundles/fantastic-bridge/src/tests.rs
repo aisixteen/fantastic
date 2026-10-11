@@ -446,7 +446,7 @@ async fn pending_futures_rejected_on_close() {
                 "type": "forward",
                 "target": "irrelevant_target",
                 "payload": {"type": "reflect"},
-                "timeout": 30.0,
+                "forward_timeout": 30.0,
             }),
         )])
         .await
@@ -1362,7 +1362,7 @@ impl Bundle for BouncerBundle {
                     "payload": {"type": "reflect"},
                     // Short, so the OLD inline code fails this in seconds rather
                     // than parking it for the 30s default.
-                    "timeout": 3.0,
+                    "forward_timeout": 3.0,
                 }),
             )])
             .await
@@ -1432,7 +1432,7 @@ async fn a_reentrant_forward_completes_instead_of_deadlocking() {
             AgentId::from(a_id.as_str()),
             json!({"type": "forward", "target": probe,
                    "payload": {"type": "bounce", "bridge": b_id, "back_to": "kernel_state"},
-                   "timeout": 10.0}),
+                   "forward_timeout": 10.0}),
         )]),
     )
     .await
@@ -1977,7 +1977,7 @@ async fn forward_error_texts_match_python() {
     let r = ask(
         &kernel,
         &bid,
-        json!({"type": "forward", "target": "x", "payload": {"type": "reflect"}, "timeout": 0.05}),
+        json!({"type": "forward", "target": "x", "payload": {"type": "reflect"}, "forward_timeout": 0.05}),
     )
     .await;
     assert_eq!(r, json!({"error": "bridge.forward: timeout after 0.05s"}));
@@ -2002,7 +2002,7 @@ async fn forward_error_texts_match_python() {
     let r = ask(
         &kernel2,
         &bridge_id,
-        json!({"type": "forward", "target": "x", "payload": {"type": "reflect"}, "timeout": 5.0}),
+        json!({"type": "forward", "target": "x", "payload": {"type": "reflect"}, "forward_timeout": 5.0}),
     )
     .await;
     answer.await.unwrap();
@@ -2287,7 +2287,8 @@ async fn a_malformed_frame_is_skipped_and_the_reader_survives() {
     server.abort();
 }
 
-/// python `float(payload.get("timeout", 30))` in `_forward` / `_list_peers`:
+/// python `float(payload.get("forward_timeout", 30))` in `_forward` (and
+/// `list_timeout` in `_list_peers`):
 /// `null` raises TypeError and a non-numeric string ValueError — the handler
 /// fails (`raised`), before the not-connected check; a numeric string is a
 /// timeout like any number.
@@ -2305,7 +2306,7 @@ async fn forward_timeout_is_python_float() {
     .await;
     let fwd = |timeout: Value| {
         json!({"type": "forward", "target": "x", "payload": {"type": "reflect"},
-               "timeout": timeout})
+               "forward_timeout": timeout})
     };
     let out = kernel
         .send(vec![Item::new(

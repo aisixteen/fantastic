@@ -44,6 +44,11 @@ class _Kernel:
     def get(self, _id):
         return {}
 
+    def _verb_docs(self, payload):
+        """The kernel's `docs`, read in process by routing: this fake documents
+        no verb, so no routing field clashes."""
+        return {"of": payload.get("of"), "verbs": {}}
+
     def spawn_task(self, _agent_id, _verb, coro):
         """Deliveries are FORKED through the kernel (ai_core has one path, no
         unregistered fallback) — run the work as a task, like the kernel does."""
@@ -318,3 +323,62 @@ async def test_replies_that_fit_together_are_all_inline():
     )
     await _settle(k, 1)
     assert "NOT inlined" not in k.sent[0][1]["text"]
+
+
+class _KnownKernel(_Kernel):
+    """Knows only the ids it is given — `get` answers None for anything else."""
+
+    def __init__(self, ids):
+        super().__init__()
+        self.ids = set(ids)
+
+    def get(self, _id):
+        return {} if _id in self.ids else None
+
+
+async def test_a_reply_to_naming_no_agent_dispatches_nothing_and_says_so():
+    """Measured 2026-10-11 (e2e chat_users): `<reply_to>1001</reply_to>` meant a
+    chat message id; the call ran, its reply went to agent "1001", which does not
+    exist, and the model never saw it. Now that call is NOT dispatched and the
+    model is told why, in the same delivered message as the turn's other replies."""
+    k = _KnownKernel({"ai", "chat", "kernel"})
+    text = _call("chat", "post", reply_to="1001") + _call("kernel")
+    await _route_reply("ai", k, text, "cli", None, None, 180.0, "")
+    await _settle(k, 1)
+
+    assert k.batches == [["kernel"]], "the call with a dead reply_to must not run"
+    assert len(k.sent) == 1 and k.sent[0][0] == "ai"
+    body = k.sent[0][1]["text"]
+    assert "reply_to='1001' names no agent" in body
+    assert "nothing was dispatched to 'chat'" in body
+    assert body.count("[reply to ") == 2, "both calls answered, in one message"
+
+
+async def test_a_reply_to_naming_a_live_agent_or_a_peer_still_routes():
+    """A known agent, the reserved `kernel` address and a peer address pass."""
+    k = _KnownKernel({"ai", "chat", "scribe"})
+    text = (
+        _call("chat", reply_to="scribe")
+        + _call("chat", reply_to="kernel")
+        + _call("chat", reply_to="g1|scribe")
+    )
+    await _route_reply("ai", k, text, "cli", None, None, 180.0, "")
+    await _settle(k, 3)
+
+    assert k.batches == [["chat", "chat", "chat"]]
+    assert {t for t, _ in k.sent} == {"scribe", "kernel", "g1|scribe"}
+
+
+async def test_a_numeric_reply_to_is_an_id_not_a_discard():
+    """The grammar types `<reply_to>1001</reply_to>` as the NUMBER 1001, which
+    used to read as "discard the reply". A number is an id: here it names an
+    agent that exists, so the reply goes there."""
+    k = _KnownKernel({"ai", "chat", "1001"})
+    text = render_call(
+        "send", {"target_id": "chat", "payload": {"type": "post"}, "reply_to": 1001}
+    )
+    await _route_reply("ai", k, text, "cli", None, None, 180.0, "")
+    await _settle(k, 1)
+
+    assert k.batches == [["chat"]]
+    assert k.sent[0][0] == "1001"

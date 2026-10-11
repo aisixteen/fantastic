@@ -217,6 +217,35 @@ struct RoutingTests {
         }
     }
 
+    @Test func aReplyToNamingNoAgentDispatchesNothingAndSaysSo() async throws {
+        // python, measured 2026-10-11 (e2e chat_users): `<reply_to>1001</reply_to>`
+        // meant a chat message id; typed as the number 1001 it DISCARDED the reply.
+        // A number is an id, an id naming no agent dispatches nothing, and the model
+        // is told why.
+        let mine = ProviderScript([
+            [
+                callEnvelope(
+                    target: "peer",
+                    payload: .object(["type": .string("send"), "text": .string("ping")]),
+                    replyTo: .some("1001"))
+            ],
+            ["read it"],
+        ])
+        let theirs = ProviderScript([["must never run"]])
+        let (kernel, ids, _) = await bootMockKernel(
+            config: scriptedConfig(["mock": mine, "peer": theirs]),
+            backendIds: ["mock", "peer"])
+        _ = await kernel.send([Item(ids["mock"]!, .object([
+                "type": .string("send"), "text": .string("go"), "client_id": .string("c"),
+            ]))])[0].result
+        #expect(await mine.waitForCalls(2), "the refusal never reached the model")
+        #expect(
+            mine.requestText(1).contains("reply_to='1001' names no agent, so nothing was dispatched"),
+            "\(mine.requestText(1).suffix(400))")
+        try await Task.sleep(nanoseconds: 200_000_000)
+        #expect(theirs.calls == 0, "the call must not have run")
+    }
+
     @Test func failedCallComesBackToTheModel() async throws {
         // A call that fails must be VISIBLE to the model — a silent failure is the
         // one thing it can never debug.
