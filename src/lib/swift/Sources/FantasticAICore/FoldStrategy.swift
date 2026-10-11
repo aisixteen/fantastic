@@ -234,7 +234,7 @@ public enum AIFoldStrategy {
     /// they become the span themselves. Depth then grows with the log of the
     /// history, not its length.
     static func nextSpan(
-        _ rows: [JSON], _ view: [JSON], keepTail: Int = AIConstants.KEEP_TAIL, size: Int = AIConstants.SPAN
+        _ rows: [JSON], _ view: [JSON], need: Int64, keepTail: Int = AIConstants.KEEP_TAIL
     ) -> [Int] {
         var byId: [Int64: Int] = [:]
         for (i, r) in rows.enumerated() {
@@ -250,15 +250,23 @@ public enum AIFoldStrategy {
         if lead >= AIConstants.FOLD_RUN {
             take = Array(head[..<lead])  // fold the folds — same operation, same summarizer
         } else {
-            take = Array(head[lead..<min(head.count, lead + size)])
+            // the oldest rows whose tokens reach `need` — never a row count
+            take = []
+            var got: Int64 = 0
+            for r in head[lead...] {
+                if isFold(r) || got >= need { break }
+                take.append(r)
+                got += AIContext.estimateTokens([r])
+            }
             while let last = take.last, rowRole(last) == "assistant" { take.removeLast() }
         }
         return take.count >= 2 ? take.compactMap { rowId($0).flatMap { byId[$0] } } : []
     }
 
-    /// FOLD UNTIL IT FITS: when the rendered view is over `budget`, fold its
-    /// oldest stretches down to the low watermark; then tidy the head (adjacent
-    /// folds coalesce), budget or no budget. Returns `(rows + the fold rows
+    /// FOLD WHEN NEAR FULL: once the rendered view passes `FOLD_AT` of `budget`,
+    /// ONE fold takes the oldest rows, by tokens, down to `LOW` of it; then tidy the
+    /// head (`FOLD_RUN` adjacent folds become one parent — the fold tree), budget or
+    /// no budget. Returns `(rows + the fold rows
     /// written, the view, folded)`. The turn's `fold` projection and
     /// `context_recall` (a store longer than the window, e.g. written under a
     /// larger one) share it. Python `fold_down`.
@@ -268,12 +276,16 @@ public enum AIFoldStrategy {
         var rows = rowsIn
         var view = AIFolds.render(rows)
         var folded = 0
-        if AIContext.estimateTokens(view) > budget && rows.count > 2 {
+        if AIContext.estimateTokens(view) > Int64(Double(budget) * AIConstants.FOLD_AT)
+            && rows.count > 2
+        {
             let target = Int64(Double(budget) * AIConstants.LOW)
-            // ONE MOVE, REPEATED: fold the oldest stretch of the view — rows, folds,
-            // or a mix — until under the low watermark or nothing foldable is left.
+            // ONE FOLD, SIZED BY TOKENS: the oldest rows that bring the view to LOW,
+            // plus room for the fold row itself (its summary budget). Repeated only
+            // if that still leaves the view over LOW, or nothing foldable is left.
             while AIContext.estimateTokens(view) > target {
-                let span = nextSpan(rows, view)
+                let need = AIContext.estimateTokens(view) - target + AIConstants.SUMMARY_BUDGET
+                let span = nextSpan(rows, view, need: need)
                 if span.isEmpty { break }
                 rows.append(try await writeFold(ctx, rows, span))
                 folded += 1
@@ -291,7 +303,7 @@ public enum AIFoldStrategy {
         // the run shrinks by `AIConstants.FOLD_RUN - 1` every time and `nextSpan` stops
         // selecting once fewer than `AIConstants.FOLD_RUN` remain.
         while true {
-            let span = nextSpan(rows, view)
+            let span = nextSpan(rows, view, need: 0)  // only a FOLD_RUN of folds qualifies here
             if span.isEmpty || !span.allSatisfy({ isFold(rows[$0]) }) { break }
             rows.append(try await writeFold(ctx, rows, span))
             folded += 1

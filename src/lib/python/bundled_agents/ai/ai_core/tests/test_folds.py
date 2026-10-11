@@ -296,7 +296,7 @@ async def test_an_open_superlong_chain_folds_its_oldest_stretch_and_keeps_the_ta
     k = _K()
     ch = _chain("a", 12, open_end=True)  # 25 rows, still awaiting a reply
     body = [_row("user", "GOAL", "user:goal")] + ch + [_row("user", "now?", None)]
-    span = next_span(body, folds.render(body))
+    span = next_span(body, folds.render(body), need=estimate_tokens(body))
     assert len(span) >= 2 and 0 not in span
     tail_ids = {r["id"] for r in ch[-5:]}
     assert not any(body[i]["id"] in tail_ids for i in span), "the live tail never folds"
@@ -405,7 +405,7 @@ def test_a_late_reply_whose_parent_is_folded_stays_visible_and_attached():
 
 
 async def test_one_overflow_folds_the_whole_stretch_once():
-    """SPAN = 1024 (owner, 2026-10-11): one overflow folds the whole foldable stretch
+    """FOLD_AT + LOW by tokens (owner, 2026-10-11): one overflow folds the oldest stretch
     into ONE fold — not 8 rows at a time (E39: 47 folds, 4 levels). Twelve levels in
     26 cuts was the older failure; one fold per overflow cannot build that list."""
     k = _K()
@@ -448,7 +448,7 @@ def test_three_adjacent_folds_at_the_head_fold_as_a_group():
         f["id"] = 1000 + i
     tail = [_row("user", f"t{i}", f"user:t{i}") for i in range(KEEP_TAIL + 1)]
     rows = [goal] + heads + tail
-    span = next_span(rows, rows)
+    span = next_span(rows, rows, need=0)
     # The three folds are at indices 1-3; anything else means the rule skipped
     # them and took ordinary rows, so they would never coalesce.
     assert span == [1, 2, 3], (
@@ -487,3 +487,27 @@ async def test_the_head_is_coalesced_even_when_the_view_already_fits():
     assert levels and max(levels) >= 2, (
         f"the head was left uncoalesced while under budget: {levels}"
     )
+
+
+async def test_a_fold_starts_at_fold_at_and_lands_at_low_by_tokens():
+    """Owner, 2026-10-11: the threshold is a share of the context, never a row count.
+    Under FOLD_AT of the budget nothing folds; past it ONE fold takes the oldest rows,
+    by tokens, and the view lands at LOW or under."""
+    from ai_core.strategies.fold import FOLD_AT, LOW, fold_down
+
+    body = (
+        [_row("user", "GOAL", "user:goal")]
+        + _chain("a", 30)
+        + [_row("user", "now?", None)]
+    )
+    size = estimate_tokens(folds.render(body))
+    k = _K()
+    _, view, folded = await fold_down(
+        body, _ctx(int(size / (FOLD_AT - 0.05)), k), int(size / (FOLD_AT - 0.05))
+    )
+    assert folded == 0, "under FOLD_AT nothing folds"
+    k = _K()
+    bud = int(size / 1.0)  # the view is the whole budget: past FOLD_AT
+    _, view, folded = await fold_down(body, _ctx(bud, k), bud)
+    assert folded == 1, f"one fold per overflow, got {folded}"
+    assert estimate_tokens(view) <= int(bud * LOW), (estimate_tokens(view), bud)

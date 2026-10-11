@@ -270,7 +270,7 @@ async def test_a_fold_batch_makes_recall_due_on_the_next_turn(monkeypatch):
     from ai_core.core import RECALL_EVERY, _folds_since, _project_context, _recall_due
 
     k = _K()
-    # one overflow is ONE fold now (SPAN = 1024): the batch that crosses RECALL_EVERY
+    # one overflow is ONE fold now (sized by tokens): the batch that crosses RECALL_EVERY
     _folds_since["ai"] = RECALL_EVERY - 1
     body = (
         [{"role": "system", "content": "sys"}, _row("user", "GOAL", "user:goal")]
@@ -462,7 +462,7 @@ async def test_recall_folds_a_head_longer_than_the_budget(monkeypatch, fake_prov
     fake_providers["ai"] = model = _FoldingModel()
     r = await _context_recall("ai", {}, k, _cfg())
     folds = k.folds_of()
-    # ONE fold for the whole over-budget head (SPAN = 1024, owner 2026-10-11)
+    # ONE fold for the over-budget head (sized by tokens, owner 2026-10-11)
     assert r["folded"] == len(folds) == 1 and model.summaries == 1, r
     assert all(f["refs"] and f["title"] and f["body"] for f in folds)
     # NOTHING FELL OUT UNMARKED: every head row is in the view or under a fold

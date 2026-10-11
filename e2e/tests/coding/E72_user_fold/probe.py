@@ -63,7 +63,7 @@ async def main():
         for aid, strategy, extra in FOLD_ARMS:
             # THE PAST, PLANTED — each arm its own copy; the last reply is delivered live
             rows = planted_reads(root.ctx.mint_id, task, reads)
-            await plant_store(core, root, aid, rows)
+            await plant_store(core, root, aid, rows, band=None)  # its own squeeze is the subject
 
             async def _restore(aid=aid):
                 while not any(m.get("kind") == "fold" for m in await store_rows(root, core, aid)):

@@ -200,7 +200,7 @@ struct FoldsTests {
         let f = FoldFixture(agent: AI)
         let ch = f.chain("a", 12, openEnd: true)  // 25 rows, still awaiting a reply
         let body = [f.row("user", "GOAL", "user:goal")] + ch + [f.row("user", "now?", nil)]
-        let span = AIFoldStrategy.nextSpan(body, AIFolds.render(body))
+        let span = AIFoldStrategy.nextSpan(body, AIFolds.render(body), need: .max)
         #expect(span.count >= 2 && !span.contains(0))
         let tailIds = Set(ch.suffix(5).compactMap(rowId))
         #expect(!span.contains { rowId(body[$0]).map { tailIds.contains($0) } ?? false }, "the live tail never folds")
@@ -338,7 +338,7 @@ struct FoldsTests {
         let heads = (0..<3).map { f.fold([], "fold \($0)", "body", false, parent: nil, id: 1000 + Int64($0)) }
         let tail = (0..<(AIConstants.KEEP_TAIL + 1)).map { f.row("user", "t\($0)", "user:t\($0)") }
         let rows = [goal] + heads + tail
-        let span = AIFoldStrategy.nextSpan(rows, rows)
+        let span = AIFoldStrategy.nextSpan(rows, rows, need: 0)
         // The three folds are at indices 1-3; anything else means the rule skipped
         // them and took ordinary rows, so they would never coalesce.
         #expect(span == [1, 2, 3], "three adjacent folds at the head must fold as a group, got \(span)")
@@ -406,5 +406,20 @@ struct FoldsTests {
         let fd = try #require(f.foldsOf().first)
         #expect(fd["title"].asString?.count == 140, "the title is cut at 140")
         #expect((fd["content"].asString ?? "").contains(long), "the BODY keeps all 200")
+    }
+
+    /// A fold is sized by TOKENS, never a row count (owner, 2026-10-11): `nextSpan`
+    /// takes the oldest rows until their tokens reach `need`, and no further.
+    @Test func aSpanIsSizedByTokensNotRows() {
+        let f = FoldFixture(agent: AI)
+        var rows = [f.row("user", "GOAL", "user:goal")]
+        for i in 2...40 {
+            rows.append(f.row("user", "row \(i) " + String(repeating: "x", count: 400), "user:r\(i)"))
+        }
+        let view = AIFolds.render(rows)
+        let one = AIContext.estimateTokens([rows[1]])
+        #expect(AIFoldStrategy.nextSpan(rows, view, need: one * 3).count == 3)
+        #expect(
+            AIFoldStrategy.nextSpan(rows, view, need: .max).count == 40 - AIConstants.KEEP_TAIL - 1)
     }
 }

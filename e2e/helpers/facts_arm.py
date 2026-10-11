@@ -68,12 +68,19 @@ async def call(root, target, payload):
 
 
 async def store_rows(root, core, aid: str) -> list[dict]:
-    """The agent's conversation, for SCORING. In process it is what the agent itself
-    reads (`_load_history`: its head, from the last clear on); over the wire it is the
-    same agent's rows read from its memory store — every runtime answers it."""
-    if core is not None:
-        return await core._load_history(aid, root)
-    return await memory.rows_of(root, aid, conversation_only=True)
+    """The agent's conversation, for SCORING: its rows read from its MEMORY STORE (the
+    store's dump — the one read every runtime answers), from the last `clear` on, turns
+    only — what the agent's own head holds. ONE PATH (2026-10-11): in process this used
+    to call `core._load_history` from outside the agent, so the store answered the read
+    under the CALLER's key — empty before the agent's first turn (E75 counted 0 planted
+    reads and told the model it had read nothing; E39 saw 0 folds)."""
+    rows = await memory.rows_of(root, aid, conversation_only=True)
+    last_clear = max(
+        (i for i, r in enumerate(rows) if r.get("kind") == "clear"), default=None
+    )
+    if last_clear is not None:
+        rows = rows[last_clear:]
+    return [r for r in rows if r.get("role") in ("user", "assistant", "system")]
 
 
 #: Fields of a planted row that hold REFERENCES to other planted rows. A remap
@@ -125,7 +132,110 @@ def _remap_row(row: dict, seen: dict[int, int]) -> dict:
     return out
 
 
-async def plant_store(core, root, aid: str, rows: list[dict]) -> None:
+#: Where a planted past must land, as a share of the FOLD TRIGGER (`FOLD_AT` of the
+#: agent's body budget — owner, 2026-10-11). Just over it, by default: exactly one fold
+#: at boot. Well over it, for the tests whose subject is heavy compaction: several
+#: folds, folds of folds.
+FIT_ONE = (1.00, 1.10)
+FIT_MANY = (1.30, 1.40)
+#: The window each fitted agent runs at (`fit_planted` sets it; every arm-connect path
+#: reads it): the arms' WINDOW unless the planted past was over its band.
+FIT_WINDOW: dict[str, int] = {}
+
+
+def arm_window(aid: str) -> int:
+    return FIT_WINDOW.get(aid, WINDOW)
+
+
+async def fit_planted(core, root, aid: str, rows: list[dict], *, window: int, band) -> None:
+    """MEASURE the planted past against the fold trigger, and FIT it into `band`, in
+    place: under it, neutral filler turns go in right after the goal (the oldest
+    region, folded first); over it the plant fails loud — a probe's own rows are never
+    dropped (needles live there). The measure is ai_core's own: the system block this
+    agent will carry, the window's budget, the fold trigger, the rendered view.
+
+    Rows are ordered by id, so a filler insert RE-MINTS every row in order and remaps
+    every reference in place (`_remap_row`) — a probe holding a row dict keeps a valid
+    id. Over the wire there is no in-process ai_core to measure with: said, not fitted."""
+    if core is None:
+        print(f"     fit[{aid}]: not measured over the wire — planted as written", flush=True)
+        return
+    from ai_core.constants import FOLD_AT
+    from ai_core.context import estimate_one, estimate_tokens
+    from ai_core.folds import render
+    from ai_core.strategies.base import NOTICE_ENVELOPE_RESERVE
+
+    sys_tok = estimate_one(
+        {"role": "system", "content": await core._default_system_content(aid, root)}
+    )
+    body = core.budget({"context_window": window}) - sys_tok - NOTICE_ENVELOPE_RESERVE
+    trigger = int(body * FOLD_AT)
+    lo, hi = band
+
+    def ratio() -> float:
+        return estimate_tokens(render(rows)) / trigger
+
+    before = ratio()
+    if before > hi:
+        # OVER: AUTOSIZE THE WINDOW (owner, 2026-10-11) — the planted content and its
+        # needles stay whole; the window grows until the past sits mid-band.
+        size = estimate_tokens(render(rows))
+        want_body = int(size / (((lo + hi) / 2) * FOLD_AT))
+        w = want_body + sys_tok + NOTICE_ENVELOPE_RESERVE
+        while core.budget({"context_window": w}) - sys_tok - NOTICE_ENVELOPE_RESERVE < want_body:
+            w += 256
+        FIT_WINDOW[aid] = w
+        trigger = int((core.budget({"context_window": w}) - sys_tok - NOTICE_ENVELOPE_RESERVE) * FOLD_AT)
+        print(
+            f"     fit[{aid}]: planted {before:.2f}× the fold trigger at window {window} "
+            f"→ window {w}: {ratio():.2f}× (band {lo}–{hi}, system {sys_tok})",
+            flush=True,
+        )
+        return
+    FIT_WINDOW.pop(aid, None)
+    added = 0
+    if before < lo:
+        goal = rows[0]
+        fillers: list[dict] = []
+        answers: dict[int, dict] = {}  # assistant filler → its user turn (by position)
+        k = 0
+        while (estimate_tokens(render(rows + fillers)) / trigger) < (lo + hi) / 2:
+            u = {"role": "user", "id": 0, "parent": None,
+                 "content": f"[from user]\nbackground note {k} (no action needed): "
+                            + LOREM[: 600]}
+            a = {"role": "assistant", "id": 0, "parent": None,
+                 "content": 'Noted. <call name="done"></call>'}
+            answers[id(a)] = u
+            fillers += [u, a]
+            k += 1
+        ordered = [goal, *fillers, *rows[1:]]
+        seen: dict[int, int] = {}
+        for r in ordered:
+            new = root.ctx.mint_id()
+            if r.get("id"):
+                seen[r["id"]] = new
+            r["_new"] = new
+        for r in ordered:
+            remapped = _remap_row(r, seen)
+            r.clear()
+            r.update(remapped)
+            r["id"] = r.pop("_new")
+        for r in ordered:
+            if (u := answers.get(id(r))) is not None:
+                r["parent"] = u["id"]
+        rows[:] = ordered
+        added = len(fillers)
+    print(
+        f"     fit[{aid}]: planted {before:.2f}× the fold trigger ({trigger} tok; window "
+        f"{window}, system {sys_tok}) → {ratio():.2f}× after +{added} filler rows "
+        f"(band {lo}–{hi})",
+        flush=True,
+    )
+
+
+async def plant_store(
+    core, root, aid: str, rows: list[dict], *, band=FIT_ONE, window: int | None = None
+) -> None:
     """Write a conversation FROM ABOVE before the agent exists (or beside it): rows into
     the agent's MEMORY STORE under its id (`memory.plant`). The agent need not
     exist yet — the store keys rows by owner, and rows outlive the agent. Reply BODIES
@@ -133,7 +243,12 @@ async def plant_store(core, root, aid: str, rows: list[dict]) -> None:
 
     IN PROCESS the rows carry real ids (`root.ctx.mint_id`) and go down in one call.
     OVER THE WIRE the ids are PLACEHOLDERS (`WireCtx.mint_id`): `memory.plant` mints a
-    real id for every row and remaps every reference (`_remap_row`) in ONE round."""
+    real id for every row and remaps every reference (`_remap_row`) in ONE round.
+
+    FITTED first (`fit_planted`, owner 2026-10-11): `band` against the fold trigger at
+    `window` (default the arms' WINDOW); `band=None` plants as written."""
+    if band is not None:
+        await fit_planted(core, root, aid, rows, window=window or WINDOW, band=band)
     if core is not None:
         await memory.plant(root, aid, rows)
         return
@@ -158,7 +273,7 @@ async def connect_arm(root, core, bk, fb: str, aid: str, strategy: str, extra: d
         can_call={fb: "*", "notes": "*", "cli": "*", "user": "*", aid: "*"},
         callable_by={"user": "*"},
         limits=Limits.from_env(os.environ),
-        record={"context_window": WINDOW, "num_ctx": WINDOW,
+        record={"context_window": arm_window(aid), "num_ctx": arm_window(aid),
                 "context_strategy": strategy, **extra},
     )
 
@@ -182,7 +297,7 @@ async def reboot_agent(root, core, bk, fb: str, aid: str, strategy: str, extra: 
         can_call={fb: "*", "notes": "*", "cli": "*", "user": "*", aid: "*"},
         callable_by={"user": "*"},
         limits=Limits.from_env(os.environ),
-        record={"context_window": WINDOW, "num_ctx": WINDOW,
+        record={"context_window": arm_window(aid), "num_ctx": arm_window(aid),
                 "context_strategy": strategy, **extra},
     )
 
@@ -210,7 +325,9 @@ async def fixture(root, fb: str, *, arms=ARMS, extra_callable: tuple[str, ...] =
 
 
 async def run_arm(root, core, bk, fb: str, aid: str, strategy: str, extra: dict,
-                  task: str, artifact: str, *, via: str | None = "user", window: int = WINDOW) -> dict:
+                  task: str, artifact: str, *, via: str | None = "user",
+                  window: int | None = None) -> dict:
+    window = window or arm_window(aid)
     conn = await connect(
         root, core, bk, agent_id=aid,
         can_call={fb: "*", "notes": "*", "cli": "*", "user": "*", aid: "*"},
@@ -561,11 +678,12 @@ def file_reads(paths: list[str]) -> list[tuple[str, str]]:
 
 
 async def run_planted(root, core, bk, fb: str, aid: str, strategy: str, extra: dict,
-                      goal: str, reads: list[tuple[str, str]], artifact: str) -> dict:
+                      goal: str, reads: list[tuple[str, str]], artifact: str,
+                      *, band=FIT_ONE) -> dict:
     """Plant the past for `aid`, then deliver the last read's reply live and run the
     chain to its end — `run_arm` over a planted past."""
     rows = planted_reads(root.ctx.mint_id, goal, reads)
-    await plant_store(core, root, aid, rows)
+    await plant_store(core, root, aid, rows, band=band)
     path, text = reads[-1]
     # rows[-1] is the last read CALL; its id is real now (plant_store learned it)
     tail = read_reply(path, text, rows[-1]["id"])
@@ -574,10 +692,12 @@ async def run_planted(root, core, bk, fb: str, aid: str, strategy: str, extra: d
     return await run_arm(root, core, bk, fb, aid, strategy, extra, tail, artifact, via=None)
 
 
-async def both_planted(root, core, bk, fb, goal, reads, artifact, *, arms=ARMS) -> tuple[dict, dict]:
+async def both_planted(root, core, bk, fb, goal, reads, artifact, *, arms=ARMS,
+                       band=FIT_ONE) -> tuple[dict, dict]:
     out = []
     for aid, strategy, extra in arms:
-        out.append(await run_planted(root, core, bk, fb, aid, strategy, extra, goal, reads, artifact))
+        out.append(await run_planted(root, core, bk, fb, aid, strategy, extra, goal, reads,
+                                     artifact, band=band))
     return out[0], out[1]
 
 

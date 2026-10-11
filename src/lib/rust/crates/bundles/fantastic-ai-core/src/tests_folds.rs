@@ -10,7 +10,7 @@ use crate::folds::{
     chains, clean_title, expand_ids, is_open, make_fold, quoted_title, render, row_id,
     SUMMARY_INPUT_CAP,
 };
-use crate::strategies::fold::{next_span, FOLD_RUN, KEEP_TAIL, SPAN};
+use crate::strategies::fold::{next_span, FOLD_RUN, KEEP_TAIL};
 use crate::strategies::strip::{is_reply, pid_of, stub};
 use serde_json::{json, Value};
 
@@ -181,7 +181,7 @@ fn a_span_never_takes_the_goal_turn_or_the_live_tail() {
         rows.push(turn(i, "user", Some(1), &format!("row {i}")));
     }
     let view = render(&rows);
-    let span = next_span(&rows, &view, KEEP_TAIL, SPAN);
+    let span = next_span(&rows, &view, KEEP_TAIL, i64::MAX);
     assert!(!span.is_empty(), "a 20-row view has something to fold");
     assert!(
         !span.contains(&0),
@@ -205,7 +205,7 @@ fn a_span_never_ends_between_a_call_and_its_answer() {
         rows.push(reply(id + 1, id, Some(id), "answered"));
     }
     let view = render(&rows);
-    let span = next_span(&rows, &view, KEEP_TAIL, SPAN);
+    let span = next_span(&rows, &view, KEEP_TAIL, i64::MAX);
     assert!(!span.is_empty());
     let last = *span.last().unwrap();
     assert_ne!(
@@ -241,7 +241,7 @@ fn folds_at_the_head_are_skipped_until_there_are_fold_run_of_them() {
         rows.push(turn(200 + i, "user", Some(1), &format!("row {i}")));
     }
     let view = render(&rows);
-    let span = next_span(&rows, &view, KEEP_TAIL, SPAN);
+    let span = next_span(&rows, &view, KEEP_TAIL, i64::MAX);
     assert!(
         span.iter().all(|&i| !crate::folds::is_fold(&rows[i])),
         "under the threshold the folds at the head are SKIPPED: {span:?}"
@@ -267,7 +267,7 @@ fn folds_at_the_head_are_skipped_until_there_are_fold_run_of_them() {
         rows2.push(turn(200 + i, "user", Some(1), &format!("row {i}")));
     }
     let view2 = render(&rows2);
-    let span2 = next_span(&rows2, &view2, KEEP_TAIL, SPAN);
+    let span2 = next_span(&rows2, &view2, KEEP_TAIL, i64::MAX);
     assert_eq!(span2.len(), FOLD_RUN, "{span2:?}");
     assert!(
         span2.iter().all(|&i| crate::folds::is_fold(&rows2[i])),
@@ -281,7 +281,7 @@ fn a_view_with_nothing_foldable_yields_no_span() {
     // only thing that stops it.
     let rows = vec![turn(1, "user", None, "goal"), turn(2, "user", None, "one")];
     let view = render(&rows);
-    assert!(next_span(&rows, &view, KEEP_TAIL, SPAN).is_empty());
+    assert!(next_span(&rows, &view, KEEP_TAIL, i64::MAX).is_empty());
 }
 
 // ─── strip: bodies go, titles stay ──────────────────────────────
@@ -373,5 +373,30 @@ fn chain_text_elision_tail_is_python_slice() {
         out.contains(&tail[..40]),
         "the tail must start {} chars from the end",
         per.div_ceil(2)
+    );
+}
+
+/// A fold is sized by TOKENS, never a row count (owner, 2026-10-11): `next_span`
+/// takes the oldest rows until their tokens reach `need`, and no further.
+#[test]
+fn a_span_is_sized_by_tokens_not_rows() {
+    let mut rows = vec![turn(1, "user", None, "goal")];
+    for i in 2..=40 {
+        rows.push(turn(
+            i,
+            "user",
+            Some(1),
+            &format!("row {i} {}", "x".repeat(400)),
+        ));
+    }
+    let view = render(&rows);
+    let one = crate::context::estimate_tokens(std::slice::from_ref(&rows[1]));
+    let small = next_span(&rows, &view, KEEP_TAIL, one * 3);
+    assert_eq!(small.len(), 3, "need of ~3 rows takes 3 rows: {small:?}");
+    let all = next_span(&rows, &view, KEEP_TAIL, i64::MAX);
+    assert_eq!(
+        all.len(),
+        40 - KEEP_TAIL - 1,
+        "everything but the goal and the tail"
     );
 }

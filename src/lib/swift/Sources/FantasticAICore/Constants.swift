@@ -125,11 +125,13 @@ public enum AIConstants {
     public static let INDEX_USER_CHARS = 1200
     /// Rows at the end of the view that never fold — the live tail.
     public static let KEEP_TAIL = 6
-    /// Rows per fold at the watermark (owner, 2026-10-11: 1024 "for now"). At 8
-    /// a chat past folded 8 rows at a time into fold rows nearly as big as the rows
-    /// (summary + index): 47 folds, 4 levels, 391 s before the first answer (python
-    /// E39). At 1024 one overflow folds the whole foldable stretch into ONE fold.
-    public static let SPAN = 1024
+    /// WHEN AND HOW MUCH TO FOLD — shares of the body budget, never a row count
+    /// (owner, 2026-10-11). A fold starts once the view passes `FOLD_AT` of the
+    /// budget; ONE fold then takes the oldest foldable rows, by tokens, until the
+    /// view lands at `LOW` or under. The old row count (SPAN = 8) folded a chat past
+    /// 8 rows at a time into fold rows nearly as big as the rows: 47 folds, 4
+    /// levels, 391 s before the first answer (python E39).
+    public static let FOLD_AT = 0.95
     /// Adjacent folds at the head of the view before they fold as a group.
     ///
     /// THREE, not four. A real run folds at most once per turn — each projection
