@@ -8,8 +8,10 @@ arguments}` is a `tools/call`. `docs of=<this agent>` lists them — the agent's
 table, built from each tool's `inputSchema` and `description` (per-instance verbs).
 A grant names tools like verbs: `can_call {gh: ["create_issue"]}`.
 
-Protocol 2026-07-28 only (Streamable HTTP, stateless — `wire.py`); a server on an
-older protocol is refused naming its versions. AUTH = a static key: the ref's
+Streamable HTTP, DUAL-ERA (`wire.py`): protocol 2026-07-28 (stateless) first; a
+server that speaks only an `initialize`-era version (2025-11-25, 2025-06-18,
+2025-03-26, 2024-11-05) is spoken to in that version, through its session.
+`reflect` names the version agreed. AUTH = a static key: the ref's
 `api_key`, read from the credential store before EVERY request (as an AI backend
 reads its key) and sent as `Authorization: Bearer` to the ref's host only.
 
@@ -43,7 +45,7 @@ from kernel._refusal import (
 )
 
 from mcp_client import wire
-from mcp_client.wire import PROTOCOL, McpError
+from mcp_client.wire import McpError, Session
 
 NAME = "mcp_client"
 #: Verbs the kernel and this bundle answer first — a tool by one of these names is
@@ -65,21 +67,24 @@ RECORD_SCHEMA = {
 # instance id → what its server said: {tools, docs, mirrors, server, instructions,
 # skipped, error}
 _STATE: dict[str, dict] = {}
+# instance id → what it agreed with its server (era, version, session id)
+_SESSIONS: dict[str, Session] = {}
 
 
 # ─── the bundle's own verbs ─────────────────────────────────────────
 
 
 async def _reflect(id, payload, kernel):
-    """No args. → {id, sentence, url, protocol_version, server?, instructions?, tools, skipped?, last_error?}."""
+    """No args. → {id, sentence, url, protocol_version (the one agreed at boot; null before), server?, instructions?, tools, skipped?, last_error?}."""
     rec = kernel.get(id) or {}
     st = _STATE.get(id) or {}
+    sess = _SESSIONS.get(id)
     out: dict[str, Any] = {
         "id": id,
         "sentence": f"The MCP server at {rec.get('url')} — its tools are this "
         f"agent's verbs (docs of={id}).",
         "url": rec.get("url"),
-        "protocol_version": PROTOCOL,
+        "protocol_version": sess.version if sess is not None else None,
         "tools": len(st.get("tools") or {}),
     }
     for key in ("server", "instructions"):
@@ -93,24 +98,16 @@ async def _reflect(id, payload, kernel):
 
 
 async def _boot(id, payload, kernel):
-    """No args. Ask the server who it is and list its tools — this agent's verbs. Returns {server, tools:[names], skipped?}.
+    """No args. Ask the server who it is and list its tools — this agent's verbs. Returns {server, protocol_version, tools:[names], skipped?}.
 
     Sent again it RE-LISTS (a server's tools changed). A failure keeps the tools
     already listed and answers why; `reflect` shows it as `last_error`."""
     url = (kernel.get(id) or {}).get("url")
     st = _STATE.setdefault(id, {})
+    sess = _SESSIONS.setdefault(id, Session())
     try:
         key = await _key(id, kernel, url)
-        disc = await wire.rpc(url, "server/discover", {}, key=key)
-        versions = disc.get("supportedVersions") or []
-        if PROTOCOL not in versions:
-            raise McpError(
-                refusal(
-                    TRANSPORT_ERROR,
-                    f"mcp {url}: the server speaks {versions} — this client speaks "
-                    f"{PROTOCOL} only",
-                )
-            )
+        disc = await wire.connect(url, key, sess)
         caps = disc.get("capabilities") or {}
         tools: list = []
         if "tools" in caps:
@@ -121,6 +118,7 @@ async def _boot(id, payload, kernel):
                     "tools/list",
                     {} if cursor is None else {"cursor": cursor},
                     key=key,
+                    sess=sess,
                 )
                 tools += page.get("tools") or []
                 cursor = page.get("nextCursor")
@@ -151,12 +149,13 @@ async def _boot(id, payload, kernel):
         if name in table:
             skipped.append({"name": name, "why": "listed twice"})
             continue
-        found = wire.mirrors(t.get("inputSchema") or {})
+        # `x-mcp-header` is a 2026-07-28 rule: a legacy server's schema mirrors nothing
+        found = wire.mirrors(t.get("inputSchema") or {}) if sess.era == "modern" else []
         if isinstance(found, str):
             skipped.append({"name": name, "why": found})
             continue
         table[name], docs[name], mir[name] = t, tool_doc(t), found
-    server = (disc.get("_meta") or {}).get("io.modelcontextprotocol/serverInfo")
+    server = disc.get("server")
     st.clear()
     st.update(
         tools=table,
@@ -169,7 +168,11 @@ async def _boot(id, payload, kernel):
     await kernel.emit(
         id, {"type": "tools_listed", "tools": list(table), "skipped": skipped}
     )
-    out: dict[str, Any] = {"server": server, "tools": list(table)}
+    out: dict[str, Any] = {
+        "server": server,
+        "protocol_version": sess.version,
+        "tools": list(table),
+    }
     if skipped:
         out["skipped"] = skipped
     return out
@@ -244,6 +247,7 @@ async def handler(id: str, payload: dict, kernel) -> dict | None:
 
 async def on_delete(agent) -> None:
     _STATE.pop(agent.id, None)
+    _SESSIONS.pop(agent.id, None)
 
 
 # ─── a tool call ────────────────────────────────────────────────────
@@ -268,6 +272,7 @@ async def _call(id, tool, payload, kernel, st) -> dict:
             "tools/call",
             {"name": tool, "arguments": arguments},
             key=key,
+            sess=_SESSIONS.setdefault(id, Session()),
             headers=headers,
             on_note=note,
         )

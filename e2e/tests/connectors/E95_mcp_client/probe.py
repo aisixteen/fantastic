@@ -17,7 +17,14 @@ the Bearer key) and the kernel's own `mcp_client` agent, on the PACKAGED host of
   5. THE KEY: an env-backed credential ref (the key in a variable the STORE
      reads, never on a record) → `Authorization: Bearer <key>` on EVERY request;
      the key never in the ledger; a record without `credentials` sends none and
-     the server's 401 is `unauthorized`.
+     the server's 401 is `unauthorized`;
+  6. A LEGACY SERVER (2025-11-25 Streamable HTTP, shaped like mcp.exa.ai): the
+     modern discover is refused with HTTP 400 + a non-modern error → the client
+     falls back to `initialize` (2025-11-25, its clientInfo), takes the server's
+     session id, sends `notifications/initialized`, then lists and calls with
+     `MCP-Session-Id` + `MCP-Protocol-Version` and no modern headers; a server
+     ping on the call's stream is answered; reflect names 2025-11-25; a reboot
+     ends the old session (DELETE); the key on every request there too.
 """
 
 from __future__ import annotations
@@ -329,6 +336,148 @@ class Fake:
         return 200, "text/event-stream", sse.encode()
 
 
+# ─── a legacy (initialize-era) server ─────────────────────────────────
+
+LEGACY_REFUSAL = (
+    "Bad Request: Unsupported protocol version: 2026-07-28 (supported versions: "
+    "2025-11-25, 2025-06-18, 2025-03-26, 2024-11-05, 2024-10-07)"
+)
+
+
+class LegacyFake:
+    """A 2025-11-25 Streamable HTTP server on 127.0.0.1 — refuses a modern request
+    the way mcp.exa.ai does, negotiates on `initialize`, mints and requires a
+    session, requires the version header, puts a ping on the tools/call stream."""
+
+    def __init__(self):
+        self.seen: list[tuple[str, dict, dict]] = []
+        self.sessions: list[str] = []
+        self.deleted: list[str] = []
+        self.answers: list[dict] = []
+        self.live: str | None = None
+        self.lock = threading.Lock()
+        fake = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):  # quiet
+                pass
+
+            def _send(self, status, head=None, ctype=None, raw=b""):
+                self.send_response(status)
+                for k, v in (head or {}).items():
+                    self.send_header(k, v)
+                if ctype:
+                    self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+            def do_DELETE(self):
+                h = {k.lower(): v for k, v in self.headers.items()}
+                with fake.lock:
+                    if h.get("authorization") == f"Bearer {KEY}":
+                        fake.deleted.append(h.get("mcp-session-id"))
+                self._send(200)
+
+            def do_GET(self):  # no standalone stream offered
+                self._send(405)
+
+            def do_POST(self):
+                n = int(self.headers.get("content-length") or 0)
+                body = json.loads(self.rfile.read(n) or b"null")
+                h = {k.lower(): v for k, v in self.headers.items()}
+                with fake.lock:
+                    fake.seen.append(("POST", h, body))
+                    self._send(*fake.answer(h, body))
+
+        self.srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self.srv.server_address[1]
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+
+    @property
+    def url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/mcp"
+
+    def methods(self) -> list:
+        with self.lock:
+            return [b.get("method") for _, _, b in self.seen]
+
+    @staticmethod
+    def js(obj, head=None):
+        return 200, head, "application/json", json.dumps(obj).encode()
+
+    def answer(self, h: dict, body: dict):
+        if h.get("authorization") != f"Bearer {KEY}":
+            return 401, None, None, b""
+        if "_meta" in (body.get("params") or {}):
+            err = {"code": -32000, "message": LEGACY_REFUSAL}
+            raw = json.dumps({"jsonrpc": "2.0", "id": None, "error": err}).encode()
+            return 400, None, "application/json", raw
+        m = body.get("method")
+        if m == "initialize":
+            self.live = f"sess-{len(self.sessions) + 1}"
+            self.sessions.append(self.live)
+            res = {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "e2e-legacy", "version": "1"},
+                "instructions": "Old but gold.",
+            }
+            return self.js(
+                {"jsonrpc": "2.0", "id": body["id"], "result": res},
+                {"Mcp-Session-Id": self.live},
+            )
+        if h.get("mcp-session-id") is None:
+            return 400, None, "text/plain", b"Bad Request: No valid session ID provided"
+        if h.get("mcp-session-id") != self.live:
+            return 404, None, "text/plain", b"session not found"
+        if h.get("mcp-protocol-version") != "2025-11-25":
+            return 400, None, "text/plain", b"bad MCP-Protocol-Version"
+        if "mcp-method" in h:
+            return 400, None, "text/plain", b"a modern header on a legacy request"
+        if m is None:  # the client's answer to our ping
+            self.answers.append(body)
+            return 202, None, None, b""
+        if "id" not in body:  # notifications/initialized
+            return 202, None, None, b""
+        if m == "tools/list":
+            tools = [
+                {
+                    "name": "echo",
+                    "description": "Echoes `say`.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {"say": {"type": "string"}},
+                        "required": ["say"],
+                    },
+                }
+            ]
+            return self.js(
+                {"jsonrpc": "2.0", "id": body["id"], "result": {"tools": tools}}
+            )
+        if m == "tools/call":
+            say = body["params"]["arguments"].get("say")
+            events = [
+                {"jsonrpc": "2.0", "id": "srv-1", "method": "ping"},
+                {
+                    "jsonrpc": "2.0",
+                    "id": body["id"],
+                    "result": {"content": [{"type": "text", "text": f"echo {say}"}]},
+                },
+            ]
+            sse = "".join(
+                f"id: e{i}\ndata: {json.dumps(e)}\n\n" for i, e in enumerate(events)
+            )
+            return 200, None, "text/event-stream", sse.encode()
+        return self.js(
+            {
+                "jsonrpc": "2.0",
+                "id": body["id"],
+                "error": {"code": -32601, "message": f"no {m}"},
+            }
+        )
+
+
 # ─── the run ──────────────────────────────────────────────────────────
 
 
@@ -336,9 +485,12 @@ def main() -> int:
     name, _ = runtime(REPO, RUNTIME)
     spec = ensure_runtime(REPO, name)
     fake = Fake()
+    legacy = LegacyFake()
     os.environ[KEY_VAR] = KEY  # the STORE reads it (env backend), never a record
     work = Path(tempfile.mkdtemp(prefix="e2e-mcp-client-"))
-    hk = HostKernel(spec, work, reach=["mcp", "mcp_keyless", "creds"]).boot()
+    hk = HostKernel(
+        spec, work, reach=["mcp", "mcp_keyless", "mcp_legacy", "creds"]
+    ).boot()
     root = hk.root_id
     bad: list[str] = []
 
@@ -358,9 +510,18 @@ def main() -> int:
                     "mcp": {
                         "host": f"127.0.0.1:{fake.port}",
                         "env": {"api_key": KEY_VAR},
-                    }
+                    },
+                    "legacy": {
+                        "host": f"127.0.0.1:{legacy.port}",
+                        "env": {"api_key": KEY_VAR},
+                    },
                 },
-                "callable_by": {"$self": "*", "$parent": "*", "mcp": ["get"]},
+                "callable_by": {
+                    "$self": "*",
+                    "$parent": "*",
+                    "mcp": ["get"],
+                    "mcp_legacy": ["get"],
+                },
             },
         )
         need(
@@ -509,8 +670,101 @@ def main() -> int:
             bool(keyless) and all("authorization" not in h for h, _ in keyless),
             f"a record without credentials sends no key ({len(keyless)} requests)",
         )
+
+        # 6 · a legacy server: initialize, its session, its version
+        rec = hk.create(
+            parent_id="rest",
+            handler_module="mcp_client.tools",
+            id="mcp_legacy",
+            url=legacy.url,
+            credentials={"store": "creds", "ref": "legacy"},
+            can_call={"$self": "*", "creds": ["get"]},
+            callable_by={"$self": "*", "$parent": "*"},
+        )
+        need(rec.get("id") == "mcp_legacy", f"create mcp_legacy: {str(rec)[:200]}")
+        lb = hk.send("mcp_legacy", {"type": "boot"})
+        need(
+            lb.get("protocol_version") == "2025-11-25"
+            and lb.get("tools") == ["echo"]
+            and lb.get("server") == {"name": "e2e-legacy", "version": "1"},
+            f"legacy boot: {str(lb)[:300]}",
+        )
+        with legacy.lock:
+            first = [b.get("method") for _, _, b in legacy.seen[:4]]
+            init = next(
+                (b for _, _, b in legacy.seen if b.get("method") == "initialize"), {}
+            )
+        need(
+            first
+            == [
+                "server/discover",
+                "initialize",
+                "notifications/initialized",
+                "tools/list",
+            ],
+            f"modern probe refused → initialize → initialized → tools/list: {first}",
+        )
+        ip = init.get("params") or {}
+        need(
+            ip.get("protocolVersion") == "2025-11-25"
+            and ip.get("capabilities") == {}
+            and (ip.get("clientInfo") or {}).get("name") == "aisixteen-fantastic",
+            f"initialize asks 2025-11-25 with clientInfo: {ip}",
+        )
+        e = hk.send("mcp_legacy", {"type": "echo", "say": "hi"})
+        need(
+            e == {"content": [{"type": "text", "text": "echo hi"}]},
+            f"a legacy tool call (its stream carried a ping): {e}",
+        )
+        with legacy.lock:
+            _, ch, cb = (
+                legacy.seen[-2]
+                if legacy.seen[-1][2].get("method") is None
+                else legacy.seen[-1]
+            )
+            answers = list(legacy.answers)
+        # create boots once; the explicit boot opened another session
+        live = legacy.sessions[-1]
+        need(
+            ch.get("mcp-session-id") == live
+            and ch.get("mcp-protocol-version") == "2025-11-25"
+            and "mcp-method" not in ch
+            and "_meta" not in (cb.get("params") or {}),
+            f"the call carries the session + version, no modern headers: "
+            f"{ {k: ch.get(k) for k in ('mcp-session-id', 'mcp-protocol-version', 'mcp-method')} }",
+        )
+        need(
+            answers == [{"jsonrpc": "2.0", "id": "srv-1", "result": {}}],
+            f"the server's ping is answered: {answers}",
+        )
+        lr = hk.send("mcp_legacy", {"type": "reflect"})
+        need(
+            lr.get("protocol_version") == "2025-11-25"
+            and lr.get("instructions") == "Old but gold.",
+            f"reflect names the version agreed: {str(lr)[:200]}",
+        )
+        hk.send("mcp_legacy", {"type": "boot"})
+        need(
+            legacy.deleted[-1:] == [live]
+            and legacy.sessions[-1] != live
+            and len(legacy.deleted) == len(legacy.sessions) - 1,
+            f"every reboot ends the session it replaces: deleted={legacy.deleted} "
+            f"sessions={legacy.sessions}",
+        )
+        with legacy.lock:
+            heads = [h for _, h, _ in legacy.seen]
+        need(
+            all(h.get("authorization") == f"Bearer {KEY}" for h in heads),
+            f"Bearer key on every one of {len(heads)} legacy requests",
+        )
+        md = hk.send("mcp", {"type": "reflect"})
+        need(
+            md.get("protocol_version") == PROTOCOL and not fake.calls("initialize"),
+            f"the modern agent stays modern: {md.get('protocol_version')}",
+        )
     finally:
         hk.close()
+        legacy.srv.shutdown()
         fake.srv.shutdown()
         shutil.rmtree(work, ignore_errors=True)
 

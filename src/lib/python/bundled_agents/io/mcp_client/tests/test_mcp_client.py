@@ -81,6 +81,8 @@ class FakeMcp:
         self.seen: list[tuple[httpx.Request, dict]] = []
 
     async def __call__(self, request: httpx.Request) -> httpx.Response:
+        if request.method != "POST":  # 2026-07-28: no GET stream, no sessions
+            return httpx.Response(405)
         body = json.loads(request.content)
         self.seen.append((request, body))
         h = request.headers
@@ -247,6 +249,12 @@ class FakeMcp:
         )
 
     @staticmethod
+    def _ok_plain(body, result) -> httpx.Response:
+        return httpx.Response(
+            200, json={"jsonrpc": "2.0", "id": body["id"], "result": result}
+        )
+
+    @staticmethod
     def _err(status, body, code, msg, data=None) -> httpx.Response:
         err = {"code": code, "message": msg}
         if data is not None:
@@ -257,6 +265,15 @@ class FakeMcp:
 
     def calls(self, method: str) -> list[tuple[httpx.Request, dict]]:
         return [(r, b) for r, b in self.seen if b["method"] == method]
+
+
+@pytest.fixture(autouse=True)
+def _fresh_agents():
+    """Each test's `mcp` agent starts unbooted (the bundle's tables are per process)."""
+    from mcp_client import tools
+
+    tools._STATE.clear()
+    tools._SESSIONS.clear()
 
 
 @pytest.fixture
@@ -566,18 +583,20 @@ async def test_an_unknown_tool_names_the_tools_there_are(seeded_kernel, tmp_path
 # ─── versions, connection, lifecycle ────────────────────────────────
 
 
-async def test_a_server_on_an_older_protocol_is_refused_naming_its_versions(
+async def test_a_discover_naming_only_older_versions_goes_legacy(
     seeded_kernel, tmp_path, monkeypatch
 ):
-    srv = FakeMcp(versions=["2025-11-25"])
+    """A modern server whose discover lists only legacy versions (a dual-era server
+    that keeps the new protocol off): the client goes to `initialize`."""
+    srv = FakeLegacy(modern_discover=["2025-11-25"])
     monkeypatch.setattr(wire, "TRANSPORT", httpx.MockTransport(srv))
-    await _setup(seeded_kernel, tmp_path)
-    out = await _call(seeded_kernel, "mcp", {"type": "boot"})
-    assert out["result"]["reason"] == "transport_error"
-    assert (
-        "2025-11-25" in out["result"]["error"]
-        and "2026-07-28 only" in out["result"]["error"]
-    )
+    r = await _booted(seeded_kernel, tmp_path)
+    assert r["protocol_version"] == "2025-11-25", r
+    assert [b.get("method") for _, b in srv.seen[:3]] == [
+        "server/discover",
+        "initialize",
+        "notifications/initialized",
+    ]
 
 
 async def test_an_unsupported_version_error_names_the_servers_versions(
@@ -597,7 +616,9 @@ async def test_an_unsupported_version_error_names_the_servers_versions(
     monkeypatch.setattr(wire, "TRANSPORT", httpx.MockTransport(handler))
     await _setup(seeded_kernel, tmp_path)
     r = (await _call(seeded_kernel, "mcp", {"type": "boot"}))["result"]
+    # -32022 naming a legacy version → initialize; this server refuses that too
     assert r["reason"] == "transport_error" and "2025-06-18" in r["error"], r
+    assert "2026-07-28, 2025-11-25" in r["error"], r
 
 
 async def test_an_unreachable_server_is_not_connected_and_calls_say_so(
@@ -697,3 +718,289 @@ async def test_cancelling_a_call_closes_its_stream(
     out = await _call(k, "mcp", {"type": "get_weather", "city": "x"}, timeout=0.5)
     assert out["status"] == "timed_out", out
     assert started.is_set()
+
+
+# ─── legacy servers: the initialize era (2025-11-25 … 2024-11-05) ────
+
+
+class FakeLegacy:
+    """A 2025-11-25-shaped Streamable HTTP server: refuses a modern request the way
+    a legacy server does (HTTP 400, a non-modern JSON-RPC error — Exa's own answer),
+    negotiates on `initialize`, mints a session, requires it and the version header,
+    and answers tools/list + tools/call. `version` is what it answers `initialize`
+    with; `session=False` mints none; `expire_after` drops the session after that
+    many requests carrying it; `ping` puts a server ping (and an unknown request) on
+    the tools/call stream; `modern_discover` answers a modern discover with those
+    `supportedVersions` (a dual-era server)."""
+
+    def __init__(
+        self,
+        *,
+        key=KEY,
+        version="2025-11-25",
+        session=True,
+        expire_after=None,
+        ping=False,
+        modern_discover=None,
+    ):
+        self.key, self.version, self.session = key, version, session
+        self.expire_after, self.ping = expire_after, ping
+        self.modern_discover = modern_discover
+        self.seen: list[tuple[httpx.Request, dict]] = []
+        self.sessions: list[str] = []
+        self.live: str | None = None
+        self.uses = 0
+        self.deleted: list[str] = []
+        self.answers: list[dict] = []
+
+    async def __call__(self, request: httpx.Request) -> httpx.Response:
+        h = request.headers
+        if self.key is not None and h.get("authorization") != f"Bearer {self.key}":
+            return httpx.Response(401)
+        if request.method == "DELETE":
+            self.deleted.append(h.get("mcp-session-id"))
+            return httpx.Response(200)
+        body = json.loads(request.content)
+        self.seen.append((request, body))
+        if "_meta" in (body.get("params") or {}):
+            if self.modern_discover is not None and body["method"] == "server/discover":
+                return FakeMcp._ok(
+                    body,
+                    {
+                        "supportedVersions": self.modern_discover,
+                        "capabilities": {"tools": {}},
+                    },
+                )
+            err = {
+                "code": -32000,
+                "message": "Bad Request: Unsupported protocol version: "
+                "2026-07-28 (supported versions: 2025-11-25, 2025-06-18, 2025-03-26, "
+                "2024-11-05, 2024-10-07)",
+            }
+            return httpx.Response(
+                400, json={"jsonrpc": "2.0", "id": None, "error": err}
+            )
+        m = body.get("method")
+        if m == "initialize":
+            p = body["params"]
+            assert p["protocolVersion"] == "2025-11-25" and p["capabilities"] == {}
+            assert p["clientInfo"]["name"] == "aisixteen-fantastic"
+            assert "mcp-session-id" not in h and "mcp-protocol-version" not in h
+            head = {}
+            if self.session:
+                self.live = f"sess-{len(self.sessions) + 1}"
+                self.sessions.append(self.live)
+                self.uses = 0
+                head["mcp-session-id"] = self.live
+            res = {
+                "protocolVersion": self.version,
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "legacy-fake", "version": "1"},
+                "instructions": "Old but gold.",
+            }
+            return httpx.Response(
+                200,
+                headers=head,
+                json={"jsonrpc": "2.0", "id": body["id"], "result": res},
+            )
+        # every later request: the session and (from 2025-06-18) the version header
+        if self.session:
+            if h.get("mcp-session-id") is None:
+                return httpx.Response(
+                    400, text="Bad Request: No valid session ID provided"
+                )
+            if h.get("mcp-session-id") != self.live:
+                return httpx.Response(404, text="session not found")
+            self.uses += 1
+            if self.expire_after is not None and self.uses > self.expire_after:
+                self.live = None
+                return httpx.Response(404, text="session expired")
+        want = self.version if self.version >= "2025-06-18" else None
+        if h.get("mcp-protocol-version") != want:
+            return httpx.Response(
+                400, text=f"bad MCP-Protocol-Version {h.get('mcp-protocol-version')}"
+            )
+        if "mcp-method" in h:
+            return httpx.Response(400, text="a modern header on a legacy request")
+        if "method" not in body:  # the client's response to a server request
+            self.answers.append(body)
+            return httpx.Response(202)
+        if "id" not in body:  # a notification
+            return httpx.Response(202)
+        if m == "tools/list":
+            return FakeMcp._ok_plain(
+                body,
+                {
+                    "tools": [
+                        {
+                            "name": "echo",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "say": {"type": "string", "x-mcp-header": "Say"}
+                                },
+                            },
+                        }
+                    ]
+                },
+            )
+        if m == "tools/call":
+            say = body["params"]["arguments"].get("say")
+            final = {
+                "jsonrpc": "2.0",
+                "id": body["id"],
+                "result": {"content": [{"type": "text", "text": f"echo {say}"}]},
+            }
+            if not self.ping:
+                return httpx.Response(200, json=final)
+            events = [
+                {"jsonrpc": "2.0", "id": "s1", "method": "ping"},
+                {
+                    "jsonrpc": "2.0",
+                    "id": "s2",
+                    "method": "sampling/createMessage",
+                    "params": {},
+                },
+                final,
+            ]
+            sse = "".join(
+                f"id: e{i}\ndata: {json.dumps(e)}\n\n" for i, e in enumerate(events)
+            )
+            return httpx.Response(
+                200, headers={"content-type": "text/event-stream"}, text=sse
+            )
+        return httpx.Response(
+            200,
+            json={
+                "jsonrpc": "2.0",
+                "id": body["id"],
+                "error": {"code": -32601, "message": f"no {m}"},
+            },
+        )
+
+    def methods(self) -> list:
+        return [b.get("method") for _, b in self.seen]
+
+
+def _legacy(monkeypatch, **kw) -> FakeLegacy:
+    srv = FakeLegacy(**kw)
+    monkeypatch.setattr(wire, "TRANSPORT", httpx.MockTransport(srv))
+    return srv
+
+
+async def test_a_legacy_server_is_spoken_to_through_initialize_and_its_session(
+    seeded_kernel, tmp_path, monkeypatch
+):
+    srv = _legacy(monkeypatch)
+    k = seeded_kernel
+    r = await _booted(k, tmp_path)
+    assert r == {
+        "server": {"name": "legacy-fake", "version": "1"},
+        "protocol_version": "2025-11-25",
+        "tools": ["echo"],
+    }, r
+    assert srv.methods() == [
+        "server/discover",
+        "initialize",
+        "notifications/initialized",
+        "tools/list",
+    ]
+    out = (await _call(k, "mcp", {"type": "echo", "say": "hi"}))["result"]
+    assert out == {"content": [{"type": "text", "text": "echo hi"}]}, out
+    req, body = srv.seen[-1]
+    assert body["params"] == {"name": "echo", "arguments": {"say": "hi"}}, body
+    assert req.headers["mcp-session-id"] == "sess-1"
+    assert req.headers["mcp-protocol-version"] == "2025-11-25"
+    assert "mcp-param-say" not in req.headers and "mcp-name" not in req.headers
+    rf = (await _call(k, "mcp", {"type": "reflect"}))["result"]
+    assert (
+        rf["protocol_version"] == "2025-11-25" and rf["instructions"] == "Old but gold."
+    )
+    assert all(r.headers.get("authorization") == f"Bearer {KEY}" for r, _ in srv.seen)
+
+
+@pytest.mark.parametrize(
+    "version,header",
+    [("2025-06-18", "2025-06-18"), ("2025-03-26", None), ("2024-11-05", None)],
+)
+async def test_the_servers_version_is_kept_and_the_header_follows_it(
+    seeded_kernel, tmp_path, monkeypatch, version, header
+):
+    srv = _legacy(monkeypatch, version=version)
+    r = await _booted(seeded_kernel, tmp_path)
+    assert r["protocol_version"] == version, r
+    req, _ = srv.seen[-1]  # tools/list
+    assert req.headers.get("mcp-protocol-version") == header
+
+
+async def test_a_sessionless_legacy_server_gets_no_session_header(
+    seeded_kernel, tmp_path, monkeypatch
+):
+    srv = _legacy(monkeypatch, session=False)
+    await _booted(seeded_kernel, tmp_path)
+    out = (await _call(seeded_kernel, "mcp", {"type": "echo", "say": "x"}))["result"]
+    assert out["content"][0]["text"] == "echo x", out
+    assert all("mcp-session-id" not in r.headers for r, _ in srv.seen)
+
+
+async def test_a_version_this_client_does_not_speak_is_refused_naming_its_own(
+    seeded_kernel, tmp_path, monkeypatch
+):
+    _legacy(monkeypatch, version="2099-01-01")
+    await _setup(seeded_kernel, tmp_path)
+    r = (await _call(seeded_kernel, "mcp", {"type": "boot"}))["result"]
+    assert r["reason"] == "transport_error", r
+    assert "'2099-01-01'" in r["error"] and wire.SPOKEN in r["error"], r
+
+
+async def test_an_expired_session_is_initialized_again_once(
+    seeded_kernel, tmp_path, monkeypatch
+):
+    srv = _legacy(monkeypatch, expire_after=2)
+    k = seeded_kernel
+    await _booted(k, tmp_path)  # initialized + tools/list: 2 uses
+    out = (await _call(k, "mcp", {"type": "echo", "say": "again"}))["result"]
+    assert out["content"][0]["text"] == "echo again", out
+    assert srv.sessions == ["sess-1", "sess-2"]
+    assert srv.methods()[-4:] == [
+        "tools/call",
+        "initialize",
+        "notifications/initialized",
+        "tools/call",
+    ]
+
+
+async def test_a_server_request_on_the_stream_is_answered(
+    seeded_kernel, tmp_path, monkeypatch
+):
+    srv = _legacy(monkeypatch, ping=True)
+    k = seeded_kernel
+    await _booted(k, tmp_path)
+    out = (await _call(k, "mcp", {"type": "echo", "say": "p"}))["result"]
+    assert out["content"][0]["text"] == "echo p", out
+    assert srv.answers == [
+        {"jsonrpc": "2.0", "id": "s1", "result": {}},
+        {
+            "jsonrpc": "2.0",
+            "id": "s2",
+            "error": {
+                "code": -32601,
+                "message": "this client does not serve 'sampling/createMessage'",
+            },
+        },
+    ], srv.answers
+
+
+async def test_a_reboot_ends_the_old_session(seeded_kernel, tmp_path, monkeypatch):
+    srv = _legacy(monkeypatch)
+    k = seeded_kernel
+    await _booted(k, tmp_path)
+    r = (await _call(k, "mcp", {"type": "boot"}))["result"]
+    assert r["tools"] == ["echo"], r
+    assert srv.deleted == ["sess-1"] and srv.sessions == ["sess-1", "sess-2"]
+
+
+async def test_a_modern_server_never_sees_initialize(seeded_kernel, tmp_path, fake):
+    r = await _booted(seeded_kernel, tmp_path)
+    assert r["protocol_version"] == "2026-07-28", r
+    assert "initialize" not in [b["method"] for _, b in fake.seen]

@@ -9,8 +9,10 @@
 //! lists them — the agent's own table ([`Bundle::instance_verb_docs`]), built from
 //! each tool's `inputSchema` and `description`. A grant names tools like verbs.
 //!
-//! Protocol 2026-07-28 only (Streamable HTTP, stateless — [`wire`]). AUTH = a
-//! static key: the ref's `api_key`, read from the credential store before EVERY
+//! Streamable HTTP, DUAL-ERA ([`wire`]): protocol 2026-07-28 (stateless) first; a
+//! server that speaks only an `initialize`-era version (2025-11-25, 2025-06-18,
+//! 2025-03-26, 2024-11-05) is spoken to in that version, through its session.
+//! `reflect` names the version agreed. AUTH = a static key: the ref's `api_key`, read from the credential store before EVERY
 //! request (as an AI backend reads its key) and sent as `Authorization: Bearer`
 //! to the ref's host only.
 //!
@@ -42,7 +44,7 @@ use fantastic_kernel::refusal::{
 use fantastic_kernel::{AgentId, Kernel};
 use serde_json::{json, Map, Value};
 
-use crate::wire::{McpError, Mirror, Opts, PROTOCOL};
+use crate::wire::{Era, McpError, Mirror, Opts, Session};
 
 /// The handler module a record names.
 pub const HANDLER_MODULE: &str = "mcp_client.tools";
@@ -52,8 +54,8 @@ pub const NAME: &str = "mcp_client";
 pub const OMITTED: &str = "one binary body per reply — this item's bytes were not sent";
 
 const REFLECT_DOC: &str =
-    "No args. → {id, sentence, url, protocol_version, server?, instructions?, tools, skipped?, last_error?}.";
-const BOOT_DOC: &str = "No args. Ask the server who it is and list its tools — this agent's verbs. Returns {server, tools:[names], skipped?}.\n\nSent again it RE-LISTS (a server's tools changed). A failure keeps the tools\nalready listed and answers why; `reflect` shows it as `last_error`.";
+    "No args. → {id, sentence, url, protocol_version (the one agreed at boot; null before), server?, instructions?, tools, skipped?, last_error?}.";
+const BOOT_DOC: &str = "No args. Ask the server who it is and list its tools — this agent's verbs. Returns {server, protocol_version, tools:[names], skipped?}.\n\nSent again it RE-LISTS (a server's tools changed). A failure keeps the tools\nalready listed and answers why; `reflect` shows it as `last_error`.";
 const NOTES: &str = "A remote MCP server's tools are this agent's verbs (`docs of=<id>`). Record: `url` (the MCP endpoint), `credentials` ({store, ref} holding `api_key`, sent as a Bearer key to that host only; absent = keyless). Wiring: this agent's `can_call` names the store, the store's `callable_by` names this agent. A tool runs on the remote server with the key's rights — the grant on each tool is the consent.";
 
 /// What one server said, per instance.
@@ -73,6 +75,8 @@ struct State {
 #[derive(Default)]
 pub struct McpClientBundle {
     state: Mutex<HashMap<String, State>>,
+    /// What each instance agreed with its server (era, version, session id).
+    sessions: Mutex<HashMap<String, Session>>,
 }
 
 impl McpClientBundle {
@@ -83,6 +87,20 @@ impl McpClientBundle {
             .get(id)
             .cloned()
             .unwrap_or_default()
+    }
+    fn session(&self, id: &str) -> Session {
+        self.sessions
+            .lock()
+            .expect("sessions")
+            .get(id)
+            .cloned()
+            .unwrap_or_default()
+    }
+    fn set_session(&self, id: &str, s: Session) {
+        self.sessions
+            .lock()
+            .expect("sessions")
+            .insert(id.to_string(), s);
     }
     fn put(&self, id: &str, f: impl FnOnce(&mut State)) {
         f(self
@@ -360,7 +378,10 @@ impl McpClientBundle {
             )),
         );
         out.insert("url".into(), url);
-        out.insert("protocol_version".into(), json!(PROTOCOL));
+        out.insert(
+            "protocol_version".into(),
+            json!(self.session(id.as_str()).version),
+        );
         out.insert("tools".into(), json!(st.tools.as_ref().map_or(0, Vec::len)));
         for (k, v) in [("server", &st.server), ("instructions", &st.instructions)] {
             if fantastic_bundle::py_truthy(v) {
@@ -390,33 +411,10 @@ impl McpClientBundle {
 
     async fn list(&self, id: &AgentId, kernel: &Arc<Kernel>, url: &str) -> Result<Value, McpError> {
         let key = read_key(id, kernel, url).await?;
-        let disc = wire::rpc(
-            url,
-            "server/discover",
-            Map::new(),
-            Opts {
-                key: key.as_deref(),
-                headers: vec![],
-            },
-            no_note,
-        )
-        .await?;
-        let versions = disc
-            .get("supportedVersions")
-            .cloned()
-            .unwrap_or_else(|| json!([]));
-        let speaks = versions
-            .as_array()
-            .is_some_and(|a| a.iter().any(|v| v == PROTOCOL));
-        if !speaks {
-            return Err(McpError(refusal(
-                TRANSPORT_ERROR,
-                format!(
-                    "mcp {url}: the server speaks {} — this client speaks {PROTOCOL} only",
-                    py_repr_value(&versions)
-                ),
-            )));
-        }
+        let mut sess = self.session(id.as_str());
+        let connected = wire::connect(url, key.as_deref(), &mut sess).await;
+        self.set_session(id.as_str(), sess.clone());
+        let disc = connected?;
         let mut tools: Vec<Value> = Vec::new();
         let has_tools = disc
             .get("capabilities")
@@ -438,9 +436,12 @@ impl McpClientBundle {
                         key: key.as_deref(),
                         headers: vec![],
                     },
+                    &mut sess,
                     no_note,
                 )
-                .await?;
+                .await;
+                self.set_session(id.as_str(), sess.clone());
+                let page = page?;
                 tools.extend(
                     page.get("tools")
                         .and_then(Value::as_array)
@@ -481,7 +482,13 @@ impl McpClientBundle {
                 continue;
             }
             let schema = t.get("inputSchema").cloned().unwrap_or_else(|| json!({}));
-            match wire::mirrors(&schema) {
+            // `x-mcp-header` is a 2026-07-28 rule: a legacy server's schema mirrors nothing
+            let found = if sess.era == Some(Era::Modern) {
+                wire::mirrors(&schema)
+            } else {
+                Ok(vec![])
+            };
+            match found {
                 Err(why) => {
                     skipped.push(json!({"name": n, "why": why}));
                     continue;
@@ -493,11 +500,7 @@ impl McpClientBundle {
             docs.push((n.to_string(), tool_doc(&t)));
             table.push((n.to_string(), t));
         }
-        let server = disc
-            .get("_meta")
-            .and_then(|m| m.get("io.modelcontextprotocol/serverInfo"))
-            .cloned()
-            .unwrap_or(Value::Null);
+        let server = disc.get("server").cloned().unwrap_or(Value::Null);
         let names: Vec<String> = table.iter().map(|(n, _)| n.clone()).collect();
         let instructions = disc.get("instructions").cloned().unwrap_or(Value::Null);
         self.put(id.as_str(), |s| {
@@ -519,6 +522,7 @@ impl McpClientBundle {
             .await;
         let mut out = Map::new();
         out.insert("server".into(), server);
+        out.insert("protocol_version".into(), json!(sess.version));
         out.insert("tools".into(), json!(names));
         if !skipped.is_empty() {
             out.insert("skipped".into(), Value::Array(skipped));
@@ -573,6 +577,7 @@ impl McpClientBundle {
                 k.emit(&me, Value::Object(out)).await;
             }
         };
+        let mut sess = self.session(id.as_str());
         let result = wire::rpc(
             &url,
             "tools/call",
@@ -581,9 +586,12 @@ impl McpClientBundle {
                 key: key.as_deref(),
                 headers,
             },
+            &mut sess,
             note,
         )
-        .await?;
+        .await;
+        self.set_session(id.as_str(), sess);
+        let result = result?;
         answer(&url, tool, &result)
     }
 }
@@ -728,6 +736,10 @@ impl Bundle for McpClientBundle {
         _kernel: &Arc<Kernel>,
     ) -> Result<(), BundleError> {
         self.state.lock().expect("state").remove(agent_id.as_str());
+        self.sessions
+            .lock()
+            .expect("sessions")
+            .remove(agent_id.as_str());
         Ok(())
     }
 }

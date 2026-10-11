@@ -280,6 +280,168 @@ private func seen(_ stub: StubHTTP, _ method: String? = nil) -> [Seen] {
     stub.requests.map(parse).filter { method == nil || $0.body["method"].asString == method }
 }
 
+// ─── legacy servers: the initialize era (2025-11-25 … 2024-11-05) ────
+
+/// A 2025-11-25-shaped Streamable HTTP server — python `FakeLegacy`, rule for rule.
+private final class LegacyFake: @unchecked Sendable {
+    let version: String
+    let session: Bool
+    let expireAfter: Int?
+    let ping: Bool
+    let modernDiscover: [String]?
+    private let lock = NSLock()
+    private(set) var seen: [(method: String, headers: [String: String], body: JSON)] = []
+    private(set) var sessions: [String] = []
+    private var live: String? = nil
+    private var uses = 0
+    private(set) var deleted: [String] = []
+    private(set) var answers: [JSON] = []
+    var stub: StubHTTP!
+
+    init(
+        version: String = "2025-11-25", session: Bool = true, expireAfter: Int? = nil,
+        ping: Bool = false, modernDiscover: [String]? = nil
+    ) {
+        self.version = version
+        self.session = session
+        self.expireAfter = expireAfter
+        self.ping = ping
+        self.modernDiscover = modernDiscover
+        stub = StubHTTP(respond: { [unowned self] request in self.answer(request) })
+    }
+
+    func methods() -> [String] { lock.withLock { seen.compactMap { $0.body["method"].asString } } }
+    func snapshot<T>(_ f: (LegacyFake) -> T) -> T { lock.withLock { f(self) } }
+
+    private func text(_ status: Int, _ body: String) -> StubHTTP.Reply {
+        StubHTTP.Reply(status: status, headers: [("Content-Type", "text/plain")], body: body)
+    }
+
+    private func answer(_ request: String) -> StubHTTP.Reply {
+        lock.lock()
+        defer { lock.unlock() }
+        let verb = String(request.prefix { $0 != " " })
+        let r = parse(request)
+        let h = r.headers
+        if h["authorization"] != "Bearer \(KEY)" { return StubHTTP.Reply(status: 401) }
+        if verb == "DELETE" {
+            deleted.append(h["mcp-session-id"] ?? "")
+            return StubHTTP.Reply(status: 200)
+        }
+        let body = r.body
+        seen.append((verb, h, body))
+        if body["params"].asObject?["_meta"] != nil {
+            if let vs = modernDiscover, body["method"].asString == "server/discover" {
+                return ok(
+                    body,
+                    ["supportedVersions": .array(vs.map { .string($0) }), "capabilities": ["tools": [:]]])
+            }
+            return reply(
+                400,
+                [
+                    "jsonrpc": "2.0", "id": .null,
+                    "error": [
+                        "code": -32000,
+                        "message":
+                            "Bad Request: Unsupported protocol version: 2026-07-28 (supported versions: 2025-11-25, 2025-06-18, 2025-03-26, 2024-11-05, 2024-10-07)",
+                    ],
+                ])
+        }
+        let m = body["method"].asString
+        if m == "initialize" {
+            let p = body["params"]
+            precondition(p["protocolVersion"] == "2025-11-25" && p["capabilities"] == .object([:]))
+            precondition(p["clientInfo"]["name"] == "aisixteen-fantastic")
+            precondition(h["mcp-session-id"] == nil && h["mcp-protocol-version"] == nil)
+            var head: [(String, String)] = [("Content-Type", "application/json")]
+            if session {
+                let sid = "sess-\(sessions.count + 1)"
+                sessions.append(sid)
+                live = sid
+                uses = 0
+                head.append(("Mcp-Session-Id", sid))
+            }
+            let res: JSON = [
+                "protocolVersion": .string(version), "capabilities": ["tools": [:]],
+                "serverInfo": ["name": "legacy-fake", "version": "1"],
+                "instructions": "Old but gold.",
+            ]
+            return StubHTTP.Reply(
+                status: 200, headers: head,
+                body: JSON.object(["jsonrpc": "2.0", "id": body["id"], "result": res]).serialize())
+        }
+        if session {
+            guard let sid = h["mcp-session-id"] else {
+                return text(400, "Bad Request: No valid session ID provided")
+            }
+            if sid != live { return text(404, "session not found") }
+            uses += 1
+            if let n = expireAfter, uses > n {
+                live = nil
+                return text(404, "session expired")
+            }
+        }
+        let want: String? = version >= "2025-06-18" ? version : nil
+        if h["mcp-protocol-version"] != want { return text(400, "bad MCP-Protocol-Version") }
+        if h["mcp-method"] != nil { return text(400, "a modern header on a legacy request") }
+        if m == nil {
+            answers.append(body)
+            return StubHTTP.Reply(status: 202)
+        }
+        if body.asObject?["id"] == nil { return StubHTTP.Reply(status: 202) }
+        switch m {
+        case "tools/list":
+            return reply(
+                200,
+                [
+                    "jsonrpc": "2.0", "id": body["id"],
+                    "result": [
+                        "tools": [
+                            [
+                                "name": "echo",
+                                "inputSchema": [
+                                    "type": "object",
+                                    "properties": ["say": ["type": "string", "x-mcp-header": "Say"]],
+                                ],
+                            ]
+                        ]
+                    ],
+                ])
+        case "tools/call":
+            let say = body["params"]["arguments"]["say"].asString ?? ""
+            let fin: JSON = [
+                "jsonrpc": "2.0", "id": body["id"],
+                "result": ["content": [["type": "text", "text": .string("echo \(say)")]]],
+            ]
+            if !ping { return reply(200, fin) }
+            let events: [JSON] = [
+                ["jsonrpc": "2.0", "id": "s1", "method": "ping"],
+                ["jsonrpc": "2.0", "id": "s2", "method": "sampling/createMessage", "params": [:]],
+                fin,
+            ]
+            return StubHTTP.Reply.sse(
+                events.enumerated().map { "id: e\($0.offset)\ndata: \($0.element.serialize())\n\n" }
+                    .joined())
+        default:
+            return reply(
+                200,
+                [
+                    "jsonrpc": "2.0", "id": body["id"],
+                    "error": ["code": -32601, "message": .string("no \(m ?? "")")],
+                ])
+        }
+    }
+}
+
+/// A legacy fake and its booted `mcp` (`mk` creates it, so it booted once) — the
+/// boot's reply re-read through an explicit boot.
+private func legacyBooted(_ fake: LegacyFake) async -> (Kernel, URL, JSON) {
+    let (k, dir) = await mk("http://127.0.0.1:\(fake.stub.port)/mcp")
+    let out = await send(k, "mcp", ["type": "boot"])
+    #expect(out.status == .completed, "\(out.result.serialize())")
+    return (k, dir, out.result)
+}
+
 @Suite("mcp_client: a remote MCP server as an agent", .serialized)
 struct McpClientTests {
     @Test func bootListsEveryPageAndSkipsWhatItCannotServe() async throws {
@@ -504,15 +666,15 @@ struct McpClientTests {
         #expect(hint.contains("get_weather") && hint.contains("docs of=mcp"), "\(hint)")
     }
 
-    @Test func aServerOnAnOlderProtocolIsRefusedNamingItsVersions() async throws {
-        let stub = fakeMcp(versions: ["2025-11-25"])
-        let (k, dir) = await mk("http://127.0.0.1:\(stub.port)/mcp")
-
+    @Test func aDiscoverNamingOnlyOlderVersionsGoesLegacy() async throws {
+        let fake = LegacyFake(modernDiscover: ["2025-11-25"])
+        let (k, dir) = await mk("http://127.0.0.1:\(fake.stub.port)/mcp")
         defer { try? FileManager.default.removeItem(at: dir) }
-        let out = await send(k, "mcp", ["type": "boot"]).result
-        #expect(out["reason"] == "transport_error")
-        let e = out["error"].asString ?? ""
-        #expect(e.contains("2025-11-25") && e.contains("2026-07-28 only"), "\(e)")
+        let out = await send(k, "mcp", ["type": "boot"])
+        #expect(out.result["protocol_version"] == "2025-11-25", "\(out.result.serialize())")
+        #expect(
+            Array(fake.methods().prefix(3))
+                == ["server/discover", "initialize", "notifications/initialized"])
     }
 
     @Test func anUnsupportedVersionErrorNamesTheServersVersions() async throws {
@@ -532,9 +694,12 @@ struct McpClientTests {
 
         defer { try? FileManager.default.removeItem(at: dir) }
         let out = await send(k, "mcp", ["type": "boot"]).result
+        // -32022 naming a legacy version → initialize; this server refuses that too
         #expect(
             out["reason"] == "transport_error"
-                && out["error"].asString?.contains("2025-06-18") == true)
+                && out["error"].asString?.contains("2025-06-18") == true
+                && out["error"].asString?.contains("2026-07-28, 2025-11-25") == true,
+            "\(out.serialize())")
     }
 
     @Test func anUnreachableServerIsNotConnectedAndCallsSayIt() async throws {
@@ -637,5 +802,113 @@ private func fakeAnswer(_ r: Seen) -> StubHTTP.Reply {
         return ok(body, ["supportedVersions": ["2026-07-28"], "capabilities": ["tools": [:]]])
     default:
         return ok(body, ["tools": .array(Array(TOOLS.prefix(1)))])
+    }
+}
+
+extension McpClientTests {
+    @Test func aLegacyServerIsSpokenToThroughInitializeAndItsSession() async throws {
+        let fake = LegacyFake()
+        let (k, dir) = await mk("http://127.0.0.1:\(fake.stub.port)/mcp")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        #expect(
+            fake.methods() == ["server/discover", "initialize", "notifications/initialized", "tools/list"],
+            "\(fake.methods())")
+        let rf0 = await send(k, "mcp", ["type": "reflect"]).result
+        #expect(rf0["protocol_version"] == "2025-11-25", "\(rf0.serialize())")
+        let out = await send(k, "mcp", ["type": "echo", "say": "hi"]).result
+        #expect(out == ["content": [["type": "text", "text": "echo hi"]]], "\(out.serialize())")
+        let last = fake.snapshot { $0.seen.last! }
+        #expect(last.body["params"] == ["name": "echo", "arguments": ["say": "hi"]])
+        #expect(last.headers["mcp-session-id"] == "sess-1")
+        #expect(last.headers["mcp-protocol-version"] == "2025-11-25")
+        #expect(last.headers["mcp-param-say"] == nil && last.headers["mcp-name"] == nil)
+        let rf = await send(k, "mcp", ["type": "reflect"]).result
+        #expect(rf["instructions"] == "Old but gold.")
+        #expect(fake.snapshot { $0.seen.allSatisfy { $0.headers["authorization"] == "Bearer \(KEY)" } })
+        let boot = await send(k, "mcp", ["type": "boot"]).result
+        #expect(
+            boot == [
+                "server": ["name": "legacy-fake", "version": "1"], "protocol_version": "2025-11-25",
+                "tools": ["echo"],
+            ], "\(boot.serialize())")
+    }
+
+    @Test(arguments: [("2025-06-18", "2025-06-18"), ("2025-03-26", nil), ("2024-11-05", nil)])
+    func theServersVersionIsKeptAndTheHeaderFollowsIt(version: String, header: String?) async throws {
+        let fake = LegacyFake(version: version)
+        let (_, dir, r) = await legacyBooted(fake)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        #expect(r["protocol_version"] == .string(version))
+        #expect(fake.snapshot { $0.seen.last!.headers["mcp-protocol-version"] } == header)
+    }
+
+    @Test func aSessionlessLegacyServerGetsNoSessionHeader() async throws {
+        let fake = LegacyFake(session: false)
+        let (k, dir, _) = await legacyBooted(fake)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let out = await send(k, "mcp", ["type": "echo", "say": "x"]).result
+        #expect(out["content"][0]["text"] == "echo x", "\(out.serialize())")
+        #expect(fake.snapshot { $0.seen.allSatisfy { $0.headers["mcp-session-id"] == nil } })
+    }
+
+    @Test func aVersionThisClientDoesNotSpeakIsRefusedNamingItsOwn() async throws {
+        let fake = LegacyFake(version: "2099-01-01")
+        let (k, dir) = await mk("http://127.0.0.1:\(fake.stub.port)/mcp")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let r = await send(k, "mcp", ["type": "boot"]).result
+        #expect(r["reason"] == "transport_error", "\(r.serialize())")
+        let e = r["error"].asString ?? ""
+        #expect(e.contains("'2099-01-01'") && e.contains(McpWire.spoken), "\(e)")
+    }
+
+    @Test func anExpiredSessionIsInitializedAgainOnce() async throws {
+        let fake = LegacyFake(expireAfter: 2)
+        let (k, dir) = await mk("http://127.0.0.1:\(fake.stub.port)/mcp")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let out = await send(k, "mcp", ["type": "echo", "say": "again"]).result
+        #expect(out["content"][0]["text"] == "echo again", "\(out.serialize())")
+        #expect(fake.snapshot { $0.sessions } == ["sess-1", "sess-2"])
+        #expect(
+            Array(fake.methods().suffix(4))
+                == ["tools/call", "initialize", "notifications/initialized", "tools/call"])
+    }
+
+    @Test func aServerRequestOnTheStreamIsAnswered() async throws {
+        let fake = LegacyFake(ping: true)
+        let (k, dir) = await mk("http://127.0.0.1:\(fake.stub.port)/mcp")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let out = await send(k, "mcp", ["type": "echo", "say": "p"]).result
+        #expect(out["content"][0]["text"] == "echo p", "\(out.serialize())")
+        let answers = fake.snapshot { $0.answers }
+        #expect(
+            answers == [
+                ["jsonrpc": "2.0", "id": "s1", "result": [:]],
+                [
+                    "jsonrpc": "2.0", "id": "s2",
+                    "error": [
+                        "code": -32601,
+                        "message": "this client does not serve 'sampling/createMessage'",
+                    ],
+                ],
+            ], "\(answers)")
+    }
+
+    @Test func aRebootEndsTheOldSession() async throws {
+        let fake = LegacyFake()
+        let (k, dir, r) = await legacyBooted(fake)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        #expect(r["tools"] == ["echo"], "\(r.serialize())")
+        #expect(fake.snapshot { $0.deleted } == ["sess-1"])
+        #expect(fake.snapshot { $0.sessions } == ["sess-1", "sess-2"])
+        _ = k
+    }
+
+    @Test func aModernServerNeverSeesInitialize() async throws {
+        let stub = fakeMcp()
+        let (k, dir) = await mk("http://127.0.0.1:\(stub.port)/mcp")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let rf = await send(k, "mcp", ["type": "reflect"]).result
+        #expect(rf["protocol_version"] == "2026-07-28")
+        #expect(seen(stub, "initialize").isEmpty)
     }
 }

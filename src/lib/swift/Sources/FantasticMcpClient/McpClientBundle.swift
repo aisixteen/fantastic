@@ -9,7 +9,10 @@
 // agent's own table (`instanceVerbDocs`), built from each tool's `inputSchema` and
 // `description`. A grant names tools like verbs.
 //
-// Protocol 2026-07-28 only (`McpWire`). AUTH = a static key: the ref's `api_key`,
+// Streamable HTTP, DUAL-ERA (`McpWire`): protocol 2026-07-28 (stateless) first; a
+// server that speaks only an `initialize`-era version (2025-11-25, 2025-06-18,
+// 2025-03-26, 2024-11-05) is spoken to in that version, through its session.
+// `reflect` names the version agreed. AUTH = a static key: the ref's `api_key`,
 // read from the credential store before EVERY request and sent as
 // `Authorization: Bearer` to the ref's host only.
 //
@@ -30,9 +33,9 @@ public let MCP_CLIENT_HANDLER_MODULE = "mcp_client.tools"
 public let MCP_OMITTED = "one binary body per reply — this item's bytes were not sent"
 
 private let REFLECT_DOC =
-    "No args. → {id, sentence, url, protocol_version, server?, instructions?, tools, skipped?, last_error?}."
+    "No args. → {id, sentence, url, protocol_version (the one agreed at boot; null before), server?, instructions?, tools, skipped?, last_error?}."
 private let BOOT_DOC =
-    "No args. Ask the server who it is and list its tools — this agent's verbs. Returns {server, tools:[names], skipped?}.\n\nSent again it RE-LISTS (a server's tools changed). A failure keeps the tools\nalready listed and answers why; `reflect` shows it as `last_error`."
+    "No args. Ask the server who it is and list its tools — this agent's verbs. Returns {server, protocol_version, tools:[names], skipped?}.\n\nSent again it RE-LISTS (a server's tools changed). A failure keeps the tools\nalready listed and answers why; `reflect` shows it as `last_error`."
 private let NOTES =
     "A remote MCP server's tools are this agent's verbs (`docs of=<id>`). Record: `url` (the MCP endpoint), `credentials` ({store, ref} holding `api_key`, sent as a Bearer key to that host only; absent = keyless). Wiring: this agent's `can_call` names the store, the store's `callable_by` names this agent. A tool runs on the remote server with the key's rights — the grant on each tool is the consent."
 
@@ -76,6 +79,8 @@ public final class McpClientBundle: AgentBundle, @unchecked Sendable {
 
     private let lock = NSLock()
     private var state: [String: McpState] = [:]
+    /// What each instance agreed with its server (era, version, session id).
+    private var sessions: [String: McpSession] = [:]
 
     public init() {}
 
@@ -83,6 +88,18 @@ public final class McpClientBundle: AgentBundle, @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return state[id] ?? McpState()
+    }
+
+    private func session(_ id: String) -> McpSession {
+        lock.lock()
+        defer { lock.unlock() }
+        return sessions[id] ?? McpSession()
+    }
+
+    private func setSession(_ id: String, _ s: McpSession) {
+        lock.lock()
+        defer { lock.unlock() }
+        sessions[id] = s
     }
 
     private func put(_ id: String, _ f: (inout McpState) -> Void) {
@@ -173,6 +190,7 @@ public final class McpClientBundle: AgentBundle, @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         state[id] = nil
+        sessions[id] = nil
     }
 
     // ── the verbs ────────────────────────────────────────────────────
@@ -201,7 +219,7 @@ public final class McpClientBundle: AgentBundle, @unchecked Sendable {
                 "The MCP server at \(url == .null ? "None" : pyStr(url)) — its tools are this agent's verbs (docs of=\(id.value))."
             ),
             "url": url,
-            "protocol_version": .string(McpWire.protocolVersion),
+            "protocol_version": session(id.value).version.map(JSON.string) ?? .null,
             "tools": .integer(Int64(st.tools?.count ?? 0)),
         ]
         if pyTruthy(st.server) { out["server"] = st.server }
@@ -225,14 +243,14 @@ public final class McpClientBundle: AgentBundle, @unchecked Sendable {
     private func list(_ id: AgentId, _ kernel: Kernel, _ url: String) async throws(McpError) -> JSON
     {
         let k = try await key(id, kernel, url)
-        let disc = try await McpWire.rpc(url, "server/discover", [:], key: k)
-        let versions = disc["supportedVersions"] ?? .array([])
-        guard versions.asArray?.contains(.string(McpWire.protocolVersion)) == true else {
-            throw McpError(
-                Refusal.make(
-                    Refusal.transportError,
-                    "mcp \(url): the server speaks \(pyRepr(versions)) — this client speaks \(McpWire.protocolVersion) only"
-                ))
+        var sess = session(id.value)
+        let disc: OrderedDictionary<String, JSON>
+        do {
+            disc = try await McpWire.connect(url, key: k, &sess)
+            setSession(id.value, sess)
+        } catch {
+            setSession(id.value, sess)
+            throw error
         }
         var tools: [JSON] = []
         if disc["capabilities"]?.asObject?["tools"] != nil {
@@ -241,7 +259,14 @@ public final class McpClientBundle: AgentBundle, @unchecked Sendable {
             while true {
                 var params: OrderedDictionary<String, JSON> = [:]
                 if let c = cursor { params["cursor"] = c }
-                let page = try await McpWire.rpc(url, "tools/list", params, key: k)
+                let page: OrderedDictionary<String, JSON>
+                do {
+                    page = try await McpWire.rpc(url, "tools/list", params, key: k, session: &sess)
+                    setSession(id.value, sess)
+                } catch {
+                    setSession(id.value, sess)
+                    throw error
+                }
                 tools += page["tools"]?.asArray ?? []
                 let next = page["nextCursor"] ?? .null
                 guard pyTruthy(next) else { break }
@@ -278,7 +303,10 @@ public final class McpClientBundle: AgentBundle, @unchecked Sendable {
                 continue
             }
             let schema = t["inputSchema"] == .null ? JSON.object([:]) : t["inputSchema"]
-            switch McpWire.mirrors(schema) {
+            // `x-mcp-header` is a 2026-07-28 rule: a legacy server's schema mirrors nothing
+            let found: Result<[McpWire.Mirror], McpReason> =
+                sess.era == .modern ? McpWire.mirrors(schema) : .success([])
+            switch found {
             case .failure(let why):
                 skipped.append(.object(["name": .string(n), "why": .string(why.text)]))
                 continue
@@ -288,7 +316,7 @@ public final class McpClientBundle: AgentBundle, @unchecked Sendable {
             docs.append((n, Self.toolDoc(t)))
             table.append((n, t))
         }
-        let server = disc["_meta"]?["io.modelcontextprotocol/serverInfo"] ?? .null
+        let server = disc["server"] ?? .null
         let names = table.map(\.0)
         let instructions = disc["instructions"] ?? .null
         put(id.value) { s in
@@ -304,7 +332,8 @@ public final class McpClientBundle: AgentBundle, @unchecked Sendable {
                 "skipped": .array(skipped),
             ]))
         var out: OrderedDictionary<String, JSON> = [
-            "server": server, "tools": .array(names.map { .string($0) }),
+            "server": server, "protocol_version": sess.version.map(JSON.string) ?? .null,
+            "tools": .array(names.map { .string($0) }),
         ]
         if !skipped.isEmpty { out["skipped"] = .array(skipped) }
         return .object(out)
@@ -319,9 +348,11 @@ public final class McpClientBundle: AgentBundle, @unchecked Sendable {
         for (k, v) in payload.asObject ?? [:] where k != "type" { arguments[k] = v }
         let k = try await key(id, kernel, u)
         let headers = try McpWire.paramHeaders(mirrors, .object(arguments))
+        var sess = session(id.value)
+        defer { setSession(id.value, sess) }
         let result = try await McpWire.rpc(
             u, "tools/call", ["name": .string(tool), "arguments": .object(arguments)], key: k,
-            headers: headers
+            session: &sess, headers: headers
         ) { msg in
             let kind: String
             switch msg["method"].asString {

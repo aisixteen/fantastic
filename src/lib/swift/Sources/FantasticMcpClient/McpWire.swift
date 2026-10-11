@@ -1,13 +1,30 @@
-// The MCP wire — Streamable HTTP, protocol 2026-07-28 ONLY (owner, 2026-10-08).
-// Python `mcp_client/wire.py`, text for text.
+// The MCP wire — Streamable HTTP, DUAL-ERA (owner, 2026-10-12). Python
+// `mcp_client/wire.py`, text for text: the modern protocol 2026-07-28 first, the
+// `initialize`-era ones (`legacy`) when the server speaks only those — the spec's
+// "dual-era client" (2026-07-28 basic/versioning + transports/streamable-http).
 //
-// Every JSON-RPC request is its own POST to the server's one endpoint, carrying its
-// version, identity and capabilities in `params._meta` (no handshake, no session)
-// and mirrored into headers: `MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name` (a
-// `tools/call`'s tool), `Mcp-Param-<name>` (each `x-mcp-header` argument). The
-// answer is one JSON object or an SSE stream scoped to the request (its
-// notifications, then the response). A server on an older protocol is refused
-// naming its versions — no handshake fallback.
+// MODERN: every JSON-RPC request is its own POST to the server's one endpoint,
+// carrying its version, identity and capabilities in `params._meta` (no handshake,
+// no session) and mirrored into headers: `MCP-Protocol-Version`, `Mcp-Method`,
+// `Mcp-Name` (a `tools/call`'s tool), `Mcp-Param-<name>` (each `x-mcp-header`
+// argument). The answer is one JSON object or an SSE stream scoped to the request
+// (its notifications, then the response).
+//
+// DETECTION (`connect`): `server/discover` is sent modern. A success naming
+// 2026-07-28 stays modern. A recognized modern error (`-32022`, `-32021`, `-32020`)
+// is a MODERN server: `-32022` (or a discover) listing only legacy versions goes
+// legacy, anything else is refused. Any other 4xx (or an error body that is not a
+// recognized modern one — `-32601` included) is a LEGACY server → `initialize`.
+//
+// LEGACY (2025-11-25 Streamable HTTP): `initialize {protocolVersion: 2025-11-25,
+// capabilities: {}, clientInfo}` → the server's version (one of `legacy`, else
+// refused) and maybe an `MCP-Session-Id`; then `notifications/initialized` (202).
+// Every later POST carries `MCP-Session-Id` (when one was given) and
+// `MCP-Protocol-Version` (from 2025-06-18 on); no `_meta`, no mirrored headers. A
+// 404 on a session is an expired session: one new `initialize`, then the request
+// again. A server REQUEST on an SSE stream is answered (a `ping` with `{}`, anything
+// else `-32601`). A new session ends the old one (HTTP DELETE; a 405 is fine). The
+// deprecated HTTP+SSE transport (2024-11-05's two endpoints) is not spoken.
 //
 // Every failure is a reply the caller reads: `McpError.reply` is a refusal from
 // the kernel's closed set, or `{error, mcp_error}` for a JSON-RPC error the
@@ -22,8 +39,16 @@ import NIOCore
 import OrderedCollections
 
 public enum McpWire {
-    /// The one protocol version this client speaks.
+    /// The modern protocol: per-request `_meta`, no handshake.
     public static let protocolVersion = "2026-07-28"
+    /// The `initialize`-era protocols this client speaks over Streamable HTTP, newest first.
+    public static let legacy = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]
+    /// Legacy revisions from this one on define the `MCP-Protocol-Version` header.
+    public static let versionHeaderFrom = "2025-06-18"
+    /// Every protocol this client speaks, as an error names them.
+    public static var spoken: String { ([protocolVersion] + legacy).joined(separator: ", ") }
+    /// The modern JSON-RPC errors that identify a modern server (never a fallback).
+    static let modernErrors: Set<Int64> = [-32022, -32021, -32020]
     /// How this client names itself (`io.modelcontextprotocol/clientInfo`).
     public static let clientName = "aisixteen-fantastic"
     public static let clientVersion = "0.1.0"
@@ -57,6 +82,29 @@ public enum McpWire {
 public struct McpError: Error, Sendable {
     public let reply: JSON
     public init(_ reply: JSON) { self.reply = reply }
+}
+
+/// Which era a server was found to speak.
+public enum McpEra: Sendable, Equatable {
+    case modern, legacy
+}
+
+/// What one agent agreed with its server: the era, the protocol version, and a
+/// legacy server's session id (nil when it gave none).
+public struct McpSession: Sendable {
+    public var era: McpEra? = nil
+    public var version: String? = nil
+    public var sessionId: String? = nil
+    public init() {}
+}
+
+/// Why one exchange did not settle: a reply, or a cue the era logic acts on.
+enum McpFault: Error {
+    case mcp(McpError)
+    /// The modern probe was answered the way only a legacy server answers.
+    case legacy
+    /// HTTP 404 on a request carrying a session id — the session is gone.
+    case expired
 }
 
 // ─── header values ───────────────────────────────────────────────────
@@ -197,10 +245,11 @@ extension McpWire {
         case -32602: return coded(Refusal.badArg, "mcp \(url): \(msg)", code)
         case -32601: return coded(Refusal.unhandled, "mcp \(url): \(msg)", code)
         case -32022:
-            return coded(
-                Refusal.transportError,
-                "mcp \(url): the server speaks \(pyRepr(data["supported"])) — this client speaks \(protocolVersion) only",
-                code)
+            return McpError(
+                Refusal.make(
+                    Refusal.transportError,
+                    "mcp \(url): the server speaks \(pyRepr(data["supported"])) — this client speaks \(spoken)",
+                    extra: [("mcp_code", code), ("supported", data["supported"])]))
         case -32021:
             return coded(
                 Refusal.transportError,
@@ -239,13 +288,103 @@ extension McpWire {
         return result
     }
 
-    /// POST one request; → its `result`, or `McpError`. Notifications on an SSE
-    /// answer go to `onNote` as they arrive.
+    static let baseHeaders: [(String, String)] = [
+        ("Accept", "application/json, text/event-stream"), ("Content-Type", "application/json"),
+    ]
+
+    static func legacyHeaders(_ sess: McpSession) -> [(String, String)] {
+        var h = baseHeaders
+        if let v = sess.version, v >= versionHeaderFrom { h.append(("MCP-Protocol-Version", v)) }
+        if let sid = sess.sessionId { h.append(("MCP-Session-Id", sid)) }
+        return h
+    }
+
+    /// Detect the server's era and agree a version (the file header) — fills `sess`;
+    /// → `{server, instructions, capabilities}`. A legacy session `sess` held is ended
+    /// first (DELETE).
+    public static func connect(_ url: String, key: String?, _ sess: inout McpSession)
+        async throws(McpError) -> OrderedDictionary<String, JSON>
+    {
+        let old = sess.sessionId
+        sess = McpSession()
+        if let old { await endSession(url, key: key, old) }
+        let disc: OrderedDictionary<String, JSON>
+        do {
+            disc = try await modern(url, "server/discover", [:], key: key, headers: [], probe: true) { _ in }
+        } catch {
+            switch error {
+            case .legacy: return try await initialize(url, key: key, &sess)
+            case .mcp(let e):
+                if let sup = e.reply["supported"].asArray,
+                    sup.contains(where: { legacy.contains($0.asString ?? "") })
+                {
+                    return try await initialize(url, key: key, &sess)
+                }
+                throw e
+            case .expired: fatalError("a modern request carries no session")
+            }
+        }
+        let versions = disc["supportedVersions"] ?? .array([])
+        let names = (versions.asArray ?? []).compactMap(\.asString)
+        if !names.contains(protocolVersion) {
+            if names.contains(where: { legacy.contains($0) }) {
+                return try await initialize(url, key: key, &sess)
+            }
+            throw McpError(
+                Refusal.make(
+                    Refusal.transportError,
+                    "mcp \(url): the server speaks \(pyRepr(versions)) — this client speaks \(spoken)"))
+        }
+        sess.era = .modern
+        sess.version = protocolVersion
+        return [
+            "server": disc["_meta"]?["io.modelcontextprotocol/serverInfo"] ?? .null,
+            "instructions": disc["instructions"] ?? .null,
+            "capabilities": disc["capabilities"] ?? .object([:]),
+        ]
+    }
+
+    /// POST one request in the agreed era; → its `result`, or `McpError`.
+    /// Notifications on an SSE answer go to `onNote` as they arrive. `headers` (the
+    /// mirrored `Mcp-Param-*`) ride a modern request only.
     public static func rpc(
         _ url: String, _ method: String, _ params: OrderedDictionary<String, JSON>,
-        key: String?, headers: [(String, String)] = [],
+        key: String?, session sess: inout McpSession, headers: [(String, String)] = [],
         onNote: @Sendable (JSON) async -> Void = { _ in }
     ) async throws(McpError) -> OrderedDictionary<String, JSON> {
+        if sess.era != .legacy {
+            do {
+                return try await modern(url, method, params, key: key, headers: headers, probe: false, onNote)
+            } catch {
+                if case .mcp(let e) = error { throw e }
+                fatalError("only a probe falls back")
+            }
+        }
+        do {
+            return try await legacyCall(url, method, params, key: key, sess, onNote)
+        } catch {
+            switch error {
+            case .mcp(let e): throw e
+            case .legacy: fatalError("only a probe falls back")
+            case .expired:
+                _ = try await initialize(url, key: key, &sess)
+                do {
+                    return try await legacyCall(url, method, params, key: key, sess, onNote)
+                } catch {
+                    if case .mcp(let e) = error { throw e }
+                    throw McpError(
+                        Refusal.make(
+                            Refusal.transportError, "mcp \(url): the new session expired at once"))
+                }
+            }
+        }
+    }
+
+    static func modern(
+        _ url: String, _ method: String, _ params: OrderedDictionary<String, JSON>,
+        key: String?, headers: [(String, String)], probe: Bool,
+        _ onNote: @Sendable (JSON) async -> Void
+    ) async throws(McpFault) -> OrderedDictionary<String, JSON> {
         let rid = nextId()
         var p = params
         p["_meta"] = meta()
@@ -253,15 +392,143 @@ extension McpWire {
             "jsonrpc": .string("2.0"), "id": .string(rid), "method": .string(method),
             "params": .object(p),
         ])
+        var h = baseHeaders
+        h.append(("MCP-Protocol-Version", protocolVersion))
+        h.append(("Mcp-Method", method))
+        if method == "tools/call" { h.append(("Mcp-Name", headerValue(p["name"]?.asString ?? ""))) }
+        h += headers
+        return try await post(url, body, h, key: key, rid: rid, probe: probe, sess: nil, onNote).0
+    }
+
+    static func legacyCall(
+        _ url: String, _ method: String, _ params: OrderedDictionary<String, JSON>,
+        key: String?, _ sess: McpSession, _ onNote: @Sendable (JSON) async -> Void
+    ) async throws(McpFault) -> OrderedDictionary<String, JSON> {
+        let rid = nextId()
+        let body: JSON = .object([
+            "jsonrpc": .string("2.0"), "id": .string(rid), "method": .string(method),
+            "params": .object(params),
+        ])
+        return try await post(url, body, legacyHeaders(sess), key: key, rid: rid, probe: false, sess: sess, onNote).0
+    }
+
+    /// The legacy handshake: `initialize` at the newest legacy version, the server's
+    /// answer (its version must be one this client speaks), its session id, then
+    /// `notifications/initialized`.
+    static func initialize(_ url: String, key: String?, _ sess: inout McpSession)
+        async throws(McpError) -> OrderedDictionary<String, JSON>
+    {
+        sess = McpSession()
+        sess.era = .legacy
+        let rid = nextId()
+        let body: JSON = .object([
+            "jsonrpc": "2.0", "id": .string(rid), "method": "initialize",
+            "params": [
+                "protocolVersion": .string(legacy[0]), "capabilities": .object([:]),
+                "clientInfo": ["name": .string(clientName), "version": .string(clientVersion)],
+            ],
+        ])
+        let result: OrderedDictionary<String, JSON>
+        let head: [(String, String)]
+        do {
+            (result, head) = try await post(url, body, baseHeaders, key: key, rid: rid, probe: false, sess: nil) { _ in }
+        } catch {
+            if case .mcp(let e) = error { throw e }
+            fatalError("no probe, no session")
+        }
+        let version = result["protocolVersion"] ?? .null
+        guard let v = version.asString, legacy.contains(v) else {
+            sess.era = nil
+            throw McpError(
+                Refusal.make(
+                    Refusal.transportError,
+                    "mcp \(url): the server answered initialize with protocol \(pyRepr(version)) — this client speaks \(spoken)"))
+        }
+        sess.version = v
+        let sid = head.first { $0.0.lowercased() == "mcp-session-id" }?.1
+        sess.sessionId = (sid?.isEmpty ?? true) ? nil : sid
+        try await sendMessage(url, ["jsonrpc": "2.0", "method": "notifications/initialized"], key: key, sess)
+        return [
+            "server": result["serverInfo"] ?? .null,
+            "instructions": result["instructions"] ?? .null,
+            "capabilities": result["capabilities"] ?? .object([:]),
+        ]
+    }
+
+    /// POST a notification or a response (legacy): the server answers 202 Accepted.
+    static func sendMessage(_ url: String, _ msg: JSON, key: String?, _ sess: McpSession)
+        async throws(McpError)
+    {
         var req = HTTPClientRequest(url: url)
         req.method = .POST
-        req.headers.add(name: "Accept", value: "application/json, text/event-stream")
-        req.headers.add(name: "Content-Type", value: "application/json")
-        req.headers.add(name: "MCP-Protocol-Version", value: protocolVersion)
-        req.headers.add(name: "Mcp-Method", value: method)
-        if method == "tools/call" {
-            req.headers.add(name: "Mcp-Name", value: headerValue(p["name"]?.asString ?? ""))
+        for (k, v) in legacyHeaders(sess) { req.headers.add(name: k, value: v) }
+        if let key { req.headers.add(name: "Authorization", value: "Bearer \(key)") }
+        req.body = .bytes(ByteBuffer(string: msg.serialize()))
+        let resp: HTTPClientResponse
+        do {
+            resp = try await client.execute(req, deadline: .distantFuture)
+        } catch {
+            throw McpError(Refusal.make(Refusal.notConnected, "mcp \(url): cannot connect: \(error)"))
         }
+        let status = Int(resp.status.code)
+        let raw = (try? await resp.body.collect(upTo: 1 << 20)).map { Data(buffer: $0) } ?? Data()
+        if status >= 300 {
+            let what =
+                msg["method"].asString ?? "the response to \(pyRepr(msg["id"]))"
+            let text = String(String(decoding: raw, as: UTF8.self).prefix(200))
+            throw McpError(
+                Refusal.make(
+                    Refusal.transportError,
+                    "mcp \(url): \(what) answered HTTP \(status) (202 expected): \(text)",
+                    extra: [("http_status", .integer(Int64(status)))]))
+        }
+    }
+
+    /// End a legacy session (HTTP DELETE) — best effort: a server may answer 405, or
+    /// be gone.
+    static func endSession(_ url: String, key: String?, _ sid: String) async {
+        var req = HTTPClientRequest(url: url)
+        req.method = .DELETE
+        req.headers.add(name: "MCP-Session-Id", value: sid)
+        if let key { req.headers.add(name: "Authorization", value: "Bearer \(key)") }
+        if let resp = try? await client.execute(req, deadline: .distantFuture) {
+            _ = try? await resp.body.collect(upTo: 1 << 20)
+        }
+    }
+
+    /// A probe's error body is NOT a recognized modern error — a legacy server.
+    static func legacyAnswer(_ err: JSON) -> Bool {
+        guard let c = err["code"].asInt else { return true }
+        return !modernErrors.contains(c)
+    }
+
+    /// A legacy server's own REQUEST on an SSE stream: a `ping` is answered `{}`;
+    /// anything else `-32601` — this client declares no capability.
+    static func answerServerRequest(_ url: String, _ msg: JSON, key: String?, _ sess: McpSession)
+        async throws(McpError)
+    {
+        let reply: JSON
+        if msg["method"].asString == "ping" {
+            reply = .object(["jsonrpc": "2.0", "id": msg["id"], "result": .object([:])])
+        } else {
+            reply = .object([
+                "jsonrpc": "2.0", "id": msg["id"],
+                "error": [
+                    "code": .integer(-32601),
+                    "message": .string("this client does not serve \(pyRepr(msg["method"]))"),
+                ],
+            ])
+        }
+        try await sendMessage(url, reply, key: key, sess)
+    }
+
+    /// One request POSTed; → (its result, the response headers).
+    static func post(
+        _ url: String, _ body: JSON, _ headers: [(String, String)], key: String?, rid: String,
+        probe: Bool, sess: McpSession?, _ onNote: @Sendable (JSON) async -> Void
+    ) async throws(McpFault) -> (OrderedDictionary<String, JSON>, [(String, String)]) {
+        var req = HTTPClientRequest(url: url)
+        req.method = .POST
         for (k, v) in headers { req.headers.add(name: k, value: v) }
         if let key { req.headers.add(name: "Authorization", value: "Bearer \(key)") }
         req.body = .bytes(ByteBuffer(string: body.serialize()))
@@ -269,20 +536,23 @@ extension McpWire {
         do {
             response = try await client.execute(req, deadline: .distantFuture)
         } catch {
-            throw McpError(
-                Refusal.make(Refusal.notConnected, "mcp \(url): cannot connect: \(error)"))
+            throw .mcp(
+                McpError(Refusal.make(Refusal.notConnected, "mcp \(url): cannot connect: \(error)")))
         }
-        return try await read(url, rid, response, keyed: key != nil, onNote)
+        let head = response.headers.map { ($0.name, $0.value) }
+        let result = try await read(url, rid, response, key: key, probe: probe, sess: sess, onNote)
+        return (result, head)
     }
 
     static func read(
-        _ url: String, _ rid: String, _ resp: HTTPClientResponse, keyed: Bool,
-        _ onNote: @Sendable (JSON) async -> Void
-    ) async throws(McpError) -> OrderedDictionary<String, JSON> {
+        _ url: String, _ rid: String, _ resp: HTTPClientResponse, key: String?, probe: Bool,
+        sess: McpSession?, _ onNote: @Sendable (JSON) async -> Void
+    ) async throws(McpFault) -> OrderedDictionary<String, JSON> {
+        func fail(_ r: JSON) -> McpFault { .mcp(McpError(r)) }
         let status = Int(resp.status.code)
         if status == 401 || status == 403 {
-            let why = keyed ? "refused the key" : "needs a key"
-            throw McpError(
+            let why = key != nil ? "refused the key" : "needs a key"
+            throw fail(
                 Refusal.make(
                     Refusal.unauthorized, "mcp \(url): HTTP \(status) — the server \(why)",
                     hint:
@@ -294,21 +564,29 @@ extension McpWire {
             .split(separator: ";").first.map {
                 $0.trimmingCharacters(in: .whitespaces).lowercased()
             } ?? ""
-        func collect() async throws(McpError) -> Data {
+        func collect() async throws(McpFault) -> Data {
             do {
                 let buf = try await resp.body.collect(upTo: 64 << 20)
                 return Data(buffer: buf)
             } catch {
-                throw McpError(Refusal.make(Refusal.transportError, "mcp \(url): \(error)"))
+                throw fail(Refusal.make(Refusal.transportError, "mcp \(url): \(error)"))
             }
+        }
+        func settled(_ msg: JSON) throws(McpFault) -> OrderedDictionary<String, JSON> {
+            do { return try settle(url, msg) } catch { throw .mcp(error) }
+        }
+        if status == 404, sess?.sessionId != nil {
+            _ = try? await resp.body.collect(upTo: 1 << 20)
+            throw .expired
         }
         if status >= 400 {
             let raw = try await collect()
-            if let msg = try? JSON.parse(raw), msg["error"].asObject != nil {
-                throw protocolError(url, msg["error"])
-            }
+            let msg = try? JSON.parse(raw)
+            let err = msg?["error"] ?? .null
+            if probe && status < 500 && legacyAnswer(err) { throw .legacy }
+            if err.asObject != nil { throw .mcp(protocolError(url, err)) }
             let text = String(String(decoding: raw, as: UTF8.self).prefix(300))
-            throw McpError(
+            throw fail(
                 Refusal.make(
                     Refusal.transportError, "mcp \(url): HTTP \(status): \(text)",
                     extra: [("http_status", .integer(Int64(status)))]))
@@ -317,11 +595,12 @@ extension McpWire {
             let raw = try await collect()
             let msg: JSON
             do { msg = try JSON.parse(raw) } catch {
-                throw McpError(
+                throw fail(
                     Refusal.make(
                         Refusal.transportError, "mcp \(url): the answer is not JSON: \(error)"))
             }
-            return try settle(url, msg)
+            if probe, msg.asObject?["error"] != nil, legacyAnswer(msg["error"]) { throw .legacy }
+            return try settled(msg)
         }
         if ctype == "text/event-stream" {
             var data: [String] = []
@@ -340,7 +619,7 @@ extension McpWire {
                         data = []
                         let msg: JSON
                         do { msg = try JSON.parse(event) } catch {
-                            throw McpError(
+                            throw fail(
                                 Refusal.make(
                                     Refusal.transportError,
                                     "mcp \(url): an SSE event is not JSON: \(error)"))
@@ -349,19 +628,30 @@ extension McpWire {
                             await onNote(msg)
                             continue
                         }
-                        if msg["id"] == .string(rid) { return try settle(url, msg) }
+                        if let s = sess, msg.asObject?["method"] != nil {
+                            do { try await answerServerRequest(url, msg, key: key, s) } catch {
+                                throw McpFault.mcp(error)
+                            }
+                            continue
+                        }
+                        if msg["id"] == .string(rid) {
+                            if probe, msg.asObject?["error"] != nil, legacyAnswer(msg["error"]) {
+                                throw McpFault.legacy
+                            }
+                            return try settled(msg)
+                        }
                     }
                 }
-            } catch let e as McpError {
+            } catch let e as McpFault {
                 throw e
             } catch {
-                throw McpError(Refusal.make(Refusal.transportError, "mcp \(url): \(error)"))
+                throw fail(Refusal.make(Refusal.transportError, "mcp \(url): \(error)"))
             }
-            throw McpError(
+            throw fail(
                 Refusal.make(
                     Refusal.transportClosed, "mcp \(url): the stream ended before the response"))
         }
-        throw McpError(
+        throw fail(
             Refusal.make(
                 Refusal.transportError,
                 "mcp \(url): unexpected content-type \(pyRepr(ctype.isEmpty ? "none" : ctype))"))
