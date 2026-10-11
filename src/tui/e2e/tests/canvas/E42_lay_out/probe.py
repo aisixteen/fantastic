@@ -33,7 +33,8 @@ def main() -> bool:
         done, said = asyncio.run(drive())
     finally:
         rig.stop()
-    pos = {c["id"]: (c.get("x", 0), c.get("y", 0)) for c in rig.cells() if c["id"].startswith("s")}
+    rects = rig.rects()
+    pos = {c["id"]: (rects.get(c["id"], {}).get("x", 0), rects.get(c["id"], {}).get("y", 0)) for c in rig.cells() if c["id"].startswith("s")}
     xs = [pos[f"s{n}"][0] for n in range(1, 7)]
     ys = [pos[f"s{n}"][1] for n in range(1, 7)]
     in_order = all(a < b for a, b in zip(xs, xs[1:]))

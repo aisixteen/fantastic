@@ -129,8 +129,7 @@ def main() -> bool:
         (folder / "bundle.yaml").write_text("base: html_agent\nsentence: A card.\nhtml: |\n  <p id=v>card-one</p>\n")
         inst = rig.proj / f".fantastic/web/{PEER}/agents/canvas/agents/view_root/agents/card_1"
         inst.mkdir(parents=True, exist_ok=True)
-        (inst / "agent.yaml").write_text(yaml.safe_dump({"id": "card_1", "parent_id": "view_root", "handler_module": "card",
-                                                         "x": 500, "y": 120, "width": 320, "height": 180}))
+        (inst / "agent.yaml").write_text(yaml.safe_dump({"id": "card_1", "parent_id": "view_root", "handler_module": "card"}))
         rig.start()
 
         async def second() -> None:

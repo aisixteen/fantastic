@@ -1,0 +1,9 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint. Scripted: no model.
+id: full_return
+group: canvas
+title: "leaving an agent viewed full (Esc): the full agent goes, the view's background draws, THEN the cells show — never a cell over a missing or old background"
+runner: probe.py
+costs: free
+limits:
+  seconds: 120
+env: {}

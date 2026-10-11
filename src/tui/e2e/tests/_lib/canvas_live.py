@@ -55,6 +55,9 @@ FEATURES = {
 KEY_VARS = {"vllm": "VLLM_API_KEY", "responses": "OPENAI_API_KEY"}
 
 
+#: A cell's geometry — kept in its view's layout per theme (`layout.ts`), never on the cell.
+GEOMETRY = ("x", "y", "width", "height")
+
 def host_of(endpoint: str) -> str:
     """The `host[:port]` of a URL, lowercased — as the product's `kern/keys`."""
     rest = endpoint.split("://", 1)[-1]
@@ -222,11 +225,31 @@ class Rig:
         return self.proj / ".fantastic" / "web" / "agents" / "canvas" / "agents" / "view_root" / "agents"
 
     def seed_cells(self, cells: list[dict]) -> None:
-        """Write page cells into the root view as the page loader stores them (host stopped)."""
+        """Write page cells into the root view as the page loader stores them (host stopped):
+        each cell's x/y/width/height into the view's canvas-theme layout, never on the cell."""
+        rects = self.rects()
         for c in cells:
-            rec = {"parent_id": "view_root", **c}
+            rec = {"parent_id": "view_root", **{k: v for k, v in c.items() if k not in GEOMETRY}}
+            g = {k: c[k] for k in GEOMETRY if k in c}
+            if g:
+                rects[c["id"]] = {"x": 0, "y": 0, "width": 480, "height": 320, **rects.get(c["id"], {}), **g}
             (self.cells_dir / c["id"]).mkdir(parents=True, exist_ok=True)
             (self.cells_dir / c["id"] / "agent.yaml").write_text(yaml.safe_dump(rec, sort_keys=False, allow_unicode=True))
+        if rects:
+            d = self.cells_dir / "layout_canvas"
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "agent.yaml").write_text(yaml.safe_dump({"id": "layout_canvas", "parent_id": "view_root", "handler_module": "layout.ts",
+                                                          "theme": "canvas", "rects": rects}, sort_keys=False))
+
+    def pinned(self, theme: str = "mobile") -> str | None:
+        """The cell pinned in `theme` (its layout agent's `pinned`)."""
+        f = self.cells_dir / f"layout_{theme}" / "agent.yaml"
+        return (yaml.safe_load(f.read_text()) or {}).get("pinned") if f.exists() else None
+
+    def rects(self, theme: str = "canvas") -> dict:
+        """Where the root view's cells sit in `theme` (its layout agent's rects)."""
+        f = self.cells_dir / f"layout_{theme}" / "agent.yaml"
+        return dict((yaml.safe_load(f.read_text()) or {}).get("rects") or {}) if f.exists() else {}
 
     def seed_host_agent(self, parent_path: str, rec: dict) -> None:
         """Write a HOST agent record under `parent_path` (e.g. `FOLDER`, the
@@ -248,7 +271,7 @@ class Rig:
         out = []
         for f in sorted(self.cells_dir.glob("*/agent.yaml")):
             r = yaml.safe_load(f.read_text()) or {}
-            if r.get("handler_module") != "background.ts":
+            if r.get("handler_module") not in ("background.ts", "layout.ts"):
                 out.append(r)
         return out
 

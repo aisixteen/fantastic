@@ -25,6 +25,7 @@ export type Pick =
   | { kind: "tree" }
   | { kind: "backgrounds" }
   | { kind: "tips" }
+  | { kind: "theme"; name: "auto" | "canvas" | "mobile" }
   | { kind: "mcp" }
   | { kind: "chat"; id: string; name: string }
   | { kind: "plugin"; template: string }
@@ -51,11 +52,13 @@ export interface Presets {
  *  starts the human's own installed program, interactive, in a terminal cell;
  *  nothing is automated, no login is touched. Found by name on `user path`.
  *  Their glyphs are the menu's own outline icons, never a vendor's logo. */
-export const CODING_AGENTS: ReadonlyArray<{ name: string; icon: Icon }> = [
+export const CODING_AGENTS: ReadonlyArray<{ name: string; icon: Icon; section?: Section }> = [
   { name: "claude", icon: "claude" },
   { name: "codex", icon: "codex" },
   { name: "aider", icon: "aider" },
   { name: "opencode", icon: "opencode" },
+  // fantastic itself: a HOST tile (owner 2026-10-11), not among the coding agents
+  { name: "fantastic", icon: "fantastic", section: "host" },
 ];
 
 /** The exec leg's `allowed` entry for EXACTLY `argv` (shlex-joined, regex-
@@ -66,7 +69,7 @@ export function exactLine(argv: string[]): string {
 }
 
 export type Section = "page" | "host" | "coding" | "bundles" | "page_bundles" | "ai" | "chats";
-export type Icon = "ask" | "terminal" | "html" | "stream" | "agent" | "template" | "chat" | "tree" | "backgrounds" | "tips" | "claude" | "codex" | "aider" | "opencode" | "mcp";
+export type Icon = "ask" | "terminal" | "html" | "stream" | "agent" | "template" | "chat" | "tree" | "backgrounds" | "tips" | "claude" | "codex" | "aider" | "opencode" | "fantastic" | "mcp";
 
 export interface Tile {
   icon: Icon;
@@ -93,6 +96,10 @@ const KINDS: Array<[string, Pick, Icon, Section]> = [
   ["tree view", { kind: "tree" }, "tree", "page"],
   ["backgrounds", { kind: "backgrounds" }, "backgrounds", "page"],
   ["tips", { kind: "tips" }, "tips", "page"],
+  // where the cells sit: the free canvas, one column, or by the tab's width
+  ["canvas theme", { kind: "theme", name: "canvas" }, "backgrounds", "page"],
+  ["mobile theme", { kind: "theme", name: "mobile" }, "backgrounds", "page"],
+  ["auto theme", { kind: "theme", name: "auto" }, "backgrounds", "page"],
 ];
 /** The groups in DRAWN order — the flat tile order follows it (arrow keys walk it). */
 const SECTIONS: Section[] = ["host", "coding", "bundles", "page", "page_bundles", "ai", "chats"];
@@ -135,9 +142,9 @@ export function tiles(typed: string, presets: Presets | null): Tile[] {
   }
   for (const c of presets?.coding ?? []) {
     if (t && !c.name.startsWith(low)) continue;
-    const icon = CODING_AGENTS.find((a) => a.name === c.name)?.icon ?? "terminal";
+    const known = CODING_AGENTS.find((a) => a.name === c.name);
     // no path under the tile (owner 2026-10-09): the name is enough
-    out.push({ icon, label: c.name, hint: "", pick: { kind: "coding", name: c.name, path: c.path }, section: "coding" });
+    out.push({ icon: known?.icon ?? "terminal", label: c.name, hint: "", pick: { kind: "coding", name: c.name, path: c.path }, section: known?.section ?? "coding" });
   }
   // the project's own bundles: one more instance of each (owner 2026-10-09:
   // "bundle it, then place it from the popup")
@@ -227,6 +234,7 @@ const PATH: Record<Icon, string> = {
   codex: '<path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M9 10l-2 2 2 2M15 10l2 2-2 2"/>',
   aider: '<rect x="3" y="6" width="18" height="12" rx="2"/><path d="M8 10v4M16 10v4M11 12h2"/>',
   opencode: '<path d="M8 7l-5 5 5 5M16 7l5 5-5 5M14 4l-4 16"/>',
+  fantastic: '<path d="M12 3l2.2 5.8L20 9.5l-4.5 3.9L17 20l-5-3.2L7 20l1.5-6.6L4 9.5l5.8-.7z"/>',
   mcp: '<circle cx="6" cy="12" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M8.3 11l7.4-3.8M8.3 13l7.4 3.8"/>',
   chat: '<path d="M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v8a2.5 2.5 0 0 1-2.5 2.5H10l-4.5 4v-4H6.5A2.5 2.5 0 0 1 4 13.5z"/>',
 };
@@ -238,8 +246,8 @@ const SECTION_TITLE: Record<Section, string> = { page: "page", host: "host", cod
 
 const CSS = `
   .action-popup { position: fixed; z-index: 1000; width: 520px; max-width: calc(100vw - 32px);
-    background: rgba(22, 20, 32, 0.84); backdrop-filter: blur(28px) saturate(180%);
-    -webkit-backdrop-filter: blur(28px) saturate(180%); border-radius: 16px;
+    background: rgba(22, 20, 32, 0.96);
+    border-radius: 16px;
     box-shadow: inset 0 1px 0 rgba(255,255,255,0.10), 0 0 0 1px rgba(255,255,255,0.12), 0 22px 60px -12px rgba(0,0,0,0.65);
     font: 13px system-ui, sans-serif; color: #e5e1ee; overflow: hidden; }
   .action-popup input { width: 100%; box-sizing: border-box; background: transparent; border: 0; outline: none;

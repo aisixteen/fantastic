@@ -1,0 +1,9 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint. Scripted: no model.
+id: themes
+group: canvas
+title: "two themes over the same cells: a phone-wide tab is mobile (auto) and stacks the canvas's cells in one column; a desktop tab keeps the canvas layout; the cells are untouched"
+runner: probe.py
+costs: free
+limits:
+  seconds: 120
+env: {}

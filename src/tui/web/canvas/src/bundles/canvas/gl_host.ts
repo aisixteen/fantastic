@@ -27,6 +27,9 @@ export interface GlHost {
   /** remove every GL view whose id isn't in `keep`. */
   prune(keep: Set<string>): void;
   applyCamera(): void;
+  /** resolves once the next frame is drawn (a just-installed view's shaders
+   *  compile in it) */
+  rendered(): Promise<void>;
   resize(): void;
   dispose(): void;
 }
@@ -202,6 +205,7 @@ export async function createGlHost(opts: {
 
   const start = performance.now();
   let raf = 0;
+  const drawn: Array<() => void> = []; // waiting for the next drawn frame
   function frame(): void {
     const time = (performance.now() - start) / 1000;
     for (const cbs of frameCbs.values()) {
@@ -214,6 +218,7 @@ export async function createGlHost(opts: {
       }
     }
     renderer.render(scene, camera);
+    for (const r of drawn.splice(0)) r();
     raf = requestAnimationFrame(frame);
   }
   raf = requestAnimationFrame(frame);
@@ -246,6 +251,7 @@ export async function createGlHost(opts: {
       }
     },
     applyCamera,
+    rendered: () => new Promise<void>((res) => drawn.push(res)),
     resize() {
       camera.aspect = window.innerWidth / window.innerHeight;
       renderer.setSize(window.innerWidth, window.innerHeight, false);
