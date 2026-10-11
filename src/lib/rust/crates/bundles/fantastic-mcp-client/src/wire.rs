@@ -1,13 +1,30 @@
-//! The MCP wire — Streamable HTTP, protocol 2026-07-28 ONLY (owner, 2026-10-08).
-//! Python `mcp_client/wire.py`, text for text.
+//! The MCP wire — Streamable HTTP, DUAL-ERA (owner, 2026-10-12). Python
+//! `mcp_client/wire.py`, text for text: the modern protocol 2026-07-28 first, the
+//! `initialize`-era ones ([`LEGACY`]) when the server speaks only those — the spec's
+//! "dual-era client" (2026-07-28 basic/versioning + transports/streamable-http).
 //!
-//! Every JSON-RPC request is its own POST to the server's one endpoint, carrying
-//! its version, identity and capabilities in `params._meta` (no handshake, no
-//! session) and mirrored into headers: `MCP-Protocol-Version`, `Mcp-Method`,
+//! MODERN: every JSON-RPC request is its own POST to the server's one endpoint,
+//! carrying its version, identity and capabilities in `params._meta` (no handshake,
+//! no session) and mirrored into headers: `MCP-Protocol-Version`, `Mcp-Method`,
 //! `Mcp-Name` (a `tools/call`'s tool), `Mcp-Param-<name>` (each `x-mcp-header`
 //! argument). The answer is one JSON object or an SSE stream scoped to the request
-//! (its notifications, then the response). A server on an older protocol is
-//! refused naming its versions — no handshake fallback.
+//! (its notifications, then the response).
+//!
+//! DETECTION ([`connect`]): `server/discover` is sent modern. A success naming
+//! 2026-07-28 stays modern. A recognized modern error (`-32022`, `-32021`, `-32020`)
+//! is a MODERN server: `-32022` (or a discover) listing only legacy versions goes
+//! legacy, anything else is refused. Any other 4xx (or an error body that is not a
+//! recognized modern one — `-32601` included) is a LEGACY server → `initialize`.
+//!
+//! LEGACY (2025-11-25 Streamable HTTP): `initialize {protocolVersion: 2025-11-25,
+//! capabilities: {}, clientInfo}` → the server's version (one of [`LEGACY`], else
+//! refused) and maybe an `MCP-Session-Id`; then `notifications/initialized` (202).
+//! Every later POST carries `MCP-Session-Id` (when one was given) and
+//! `MCP-Protocol-Version` (from 2025-06-18 on); no `_meta`, no mirrored headers. A
+//! 404 on a session is an expired session: one new `initialize`, then the request
+//! again. A server REQUEST on an SSE stream is answered (a `ping` with `{}`, anything
+//! else `-32601`). A new session ends the old one (HTTP DELETE; a 405 is fine). The
+//! deprecated HTTP+SSE transport (2024-11-05's two endpoints) is not spoken.
 //!
 //! Every failure is a reply the caller reads: [`McpError`] holds a refusal from
 //! the kernel's closed set, or `{error, mcp_error}` for a JSON-RPC error the
@@ -27,8 +44,56 @@ use futures_util::StreamExt;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::{json, Map, Value};
 
-/// The one protocol version this client speaks.
+/// The modern protocol: per-request `_meta`, no handshake.
 pub const PROTOCOL: &str = "2026-07-28";
+/// The `initialize`-era protocols this client speaks over Streamable HTTP, newest first.
+pub const LEGACY: [&str; 4] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
+/// Legacy revisions from this one on define the `MCP-Protocol-Version` header.
+pub const VERSION_HEADER_FROM: &str = "2025-06-18";
+/// The modern JSON-RPC errors that identify a modern server (never a fallback).
+const MODERN_ERRORS: [i64; 3] = [-32022, -32021, -32020];
+
+/// Every protocol this client speaks, as an error names them.
+#[must_use]
+pub fn spoken() -> String {
+    format!("{PROTOCOL}, {}", LEGACY.join(", "))
+}
+
+/// Which era a server was found to speak.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Era {
+    /// 2026-07-28: per-request metadata.
+    Modern,
+    /// An `initialize`-era version.
+    Legacy,
+}
+
+/// What one agent agreed with its server: the era, the protocol version, and a
+/// legacy server's session id (`None` when it gave none).
+#[derive(Debug, Clone, Default)]
+pub struct Session {
+    /// `None` until a boot agreed one.
+    pub era: Option<Era>,
+    /// The version agreed.
+    pub version: Option<String>,
+    /// A legacy server's `MCP-Session-Id`.
+    pub session_id: Option<String>,
+}
+
+/// Why one exchange did not settle: a reply, or a cue the era logic acts on.
+enum Fault {
+    Mcp(McpError),
+    /// The modern probe was answered the way only a legacy server answers.
+    Legacy,
+    /// HTTP 404 on a request carrying a session id — the session is gone.
+    Expired,
+}
+
+impl From<McpError> for Fault {
+    fn from(e: McpError) -> Self {
+        Fault::Mcp(e)
+    }
+}
 /// How this client names itself (`io.modelcontextprotocol/clientInfo`).
 pub const CLIENT_NAME: &str = "aisixteen-fantastic";
 /// Its version.
@@ -219,14 +284,17 @@ fn protocol_error(url: &str, err: &Value) -> McpError {
                 .and_then(|d| d.get("supported"))
                 .cloned()
                 .unwrap_or(Value::Null);
-            fail(coded(
+            let mut r = coded(
                 TRANSPORT_ERROR,
                 format!(
-                    "mcp {url}: the server speaks {} — this client speaks {PROTOCOL} only",
-                    py_repr_value(&supported)
+                    "mcp {url}: the server speaks {} — this client speaks {}",
+                    py_repr_value(&supported),
+                    spoken()
                 ),
                 &code,
-            ))
+            );
+            with(&mut r, "supported", supported);
+            fail(r)
         }
         Some(-32021) => {
             let need = data
@@ -293,33 +361,13 @@ fn settle(url: &str, msg: &Value) -> Result<Map<String, Value>, McpError> {
 pub struct Opts<'a> {
     /// The Bearer key, or `None` for a keyless server.
     pub key: Option<&'a str>,
-    /// Extra headers (`Mcp-Param-*`).
+    /// Extra headers (`Mcp-Param-*`) — a modern request only.
     pub headers: Vec<(String, String)>,
 }
 
-/// POST one request; → its `result`, or [`McpError`]. Notifications on an SSE
-/// answer go to `on_note` as they arrive.
-///
-/// # Errors
-/// [`McpError`] — the reply the caller reads.
-pub async fn rpc<F, Fut>(
-    url: &str,
-    method: &str,
-    params: Map<String, Value>,
-    opts: Opts<'_>,
-    mut on_note: F,
-) -> Result<Map<String, Value>, McpError>
-where
-    F: FnMut(Value) -> Fut,
-    Fut: Future<Output = ()>,
-{
-    let rid = IDS.fetch_add(1, Ordering::Relaxed).to_string();
-    let mut p = params;
-    p.insert("_meta".into(), meta());
-    let name = p.get("name").and_then(Value::as_str).map(str::to_string);
-    let body = json!({"jsonrpc": "2.0", "id": rid, "method": method, "params": p});
+fn header_map(url: &str, pairs: &[(String, String)]) -> Result<HeaderMap, McpError> {
     let mut head = HeaderMap::new();
-    let mut put = |k: &str, v: &str| -> Result<(), McpError> {
+    for (k, v) in pairs {
         let name = HeaderName::from_bytes(k.as_bytes()).map_err(|e| {
             fail(refusal(
                 TRANSPORT_ERROR,
@@ -333,58 +381,464 @@ where
             ))
         })?;
         head.insert(name, value);
-        Ok(())
-    };
-    put("Accept", "application/json, text/event-stream")?;
-    put("Content-Type", "application/json")?;
-    put("MCP-Protocol-Version", PROTOCOL)?;
-    put("Mcp-Method", method)?;
-    if method == "tools/call" {
-        put("Mcp-Name", &header_value(name.as_deref().unwrap_or("")))?;
     }
-    for (k, v) in &opts.headers {
-        put(k, v)?;
+    Ok(head)
+}
+
+fn base_headers() -> Vec<(String, String)> {
+    vec![
+        (
+            "Accept".into(),
+            "application/json, text/event-stream".into(),
+        ),
+        ("Content-Type".into(), "application/json".into()),
+    ]
+}
+
+fn legacy_headers(sess: &Session) -> Vec<(String, String)> {
+    let mut h = base_headers();
+    if let Some(v) = sess
+        .version
+        .as_deref()
+        .filter(|v| *v >= VERSION_HEADER_FROM)
+    {
+        h.push(("MCP-Protocol-Version".into(), v.to_string()));
     }
-    if let Some(key) = opts.key {
-        put("Authorization", &format!("Bearer {key}"))?;
+    if let Some(sid) = &sess.session_id {
+        h.push(("MCP-Session-Id".into(), sid.clone()));
     }
-    let client = reqwest::Client::builder()
+    h
+}
+
+fn client(url: &str) -> Result<reqwest::Client, McpError> {
+    reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
         .build()
-        .map_err(|e| fail(refusal(TRANSPORT_ERROR, format!("mcp {url}: {e}"))))?;
-    let resp = client
+        .map_err(|e| fail(refusal(TRANSPORT_ERROR, format!("mcp {url}: {e}"))))
+}
+
+fn send_error(url: &str, e: &reqwest::Error) -> McpError {
+    if e.is_connect() {
+        fail(refusal(
+            NOT_CONNECTED,
+            format!("mcp {url}: cannot connect: {e}"),
+        ))
+    } else {
+        fail(refusal(TRANSPORT_ERROR, format!("mcp {url}: {e}")))
+    }
+}
+
+fn next_id() -> String {
+    IDS.fetch_add(1, Ordering::Relaxed).to_string()
+}
+
+/// Detect the server's era and agree a version (the module docs) — fills `sess`;
+/// → `{server, instructions, capabilities}`. A legacy session `sess` held is ended
+/// first (DELETE).
+///
+/// # Errors
+/// [`McpError`] — the reply the caller reads.
+pub async fn connect(
+    url: &str,
+    key: Option<&str>,
+    sess: &mut Session,
+) -> Result<Map<String, Value>, McpError> {
+    let old = sess.session_id.take();
+    *sess = Session::default();
+    if let Some(sid) = old {
+        end_session(url, key, &sid).await;
+    }
+    let disc = match modern(
+        url,
+        "server/discover",
+        Map::new(),
+        &Opts {
+            key,
+            headers: vec![],
+        },
+        true,
+        &mut |_| async {},
+    )
+    .await
+    {
+        Ok(d) => d,
+        Err(Fault::Legacy) => return initialize(url, key, sess).await,
+        Err(Fault::Mcp(e)) => {
+            let legacy =
+                e.0.get("supported")
+                    .and_then(Value::as_array)
+                    .is_some_and(|vs| {
+                        vs.iter()
+                            .any(|v| v.as_str().is_some_and(|v| LEGACY.contains(&v)))
+                    });
+            if legacy {
+                return initialize(url, key, sess).await;
+            }
+            return Err(e);
+        }
+        Err(Fault::Expired) => unreachable!("a modern request carries no session"),
+    };
+    let versions = disc
+        .get("supportedVersions")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    let names: Vec<&str> = versions
+        .as_array()
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    if !names.contains(&PROTOCOL) {
+        if names.iter().any(|v| LEGACY.contains(v)) {
+            return initialize(url, key, sess).await;
+        }
+        return Err(fail(refusal(
+            TRANSPORT_ERROR,
+            format!(
+                "mcp {url}: the server speaks {} — this client speaks {}",
+                py_repr_value(&versions),
+                spoken()
+            ),
+        )));
+    }
+    sess.era = Some(Era::Modern);
+    sess.version = Some(PROTOCOL.to_string());
+    let server = disc
+        .get("_meta")
+        .and_then(|m| m.get("io.modelcontextprotocol/serverInfo"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let mut out = Map::new();
+    out.insert("server".into(), server);
+    out.insert(
+        "instructions".into(),
+        disc.get("instructions").cloned().unwrap_or(Value::Null),
+    );
+    out.insert(
+        "capabilities".into(),
+        disc.get("capabilities")
+            .cloned()
+            .unwrap_or_else(|| json!({})),
+    );
+    Ok(out)
+}
+
+/// POST one request in the agreed era; → its `result`, or [`McpError`].
+/// Notifications on an SSE answer go to `on_note` as they arrive. `opts.headers`
+/// (the mirrored `Mcp-Param-*`) ride a modern request only.
+///
+/// # Errors
+/// [`McpError`] — the reply the caller reads.
+pub async fn rpc<F, Fut>(
+    url: &str,
+    method: &str,
+    params: Map<String, Value>,
+    opts: Opts<'_>,
+    sess: &mut Session,
+    mut on_note: F,
+) -> Result<Map<String, Value>, McpError>
+where
+    F: FnMut(Value) -> Fut,
+    Fut: Future<Output = ()>,
+{
+    if sess.era != Some(Era::Legacy) {
+        return match modern(url, method, params, &opts, false, &mut on_note).await {
+            Ok(r) => Ok(r),
+            Err(Fault::Mcp(e)) => Err(e),
+            Err(Fault::Legacy | Fault::Expired) => unreachable!("only a probe falls back"),
+        };
+    }
+    match legacy(url, method, params.clone(), opts.key, sess, &mut on_note).await {
+        Err(Fault::Expired) => {
+            initialize(url, opts.key, sess).await?;
+            match legacy(url, method, params, opts.key, sess, &mut on_note).await {
+                Ok(r) => Ok(r),
+                Err(Fault::Mcp(e)) => Err(e),
+                Err(Fault::Expired) => Err(fail(refusal(
+                    TRANSPORT_ERROR,
+                    format!("mcp {url}: the new session expired at once"),
+                ))),
+                Err(Fault::Legacy) => unreachable!("only a probe falls back"),
+            }
+        }
+        Ok(r) => Ok(r),
+        Err(Fault::Mcp(e)) => Err(e),
+        Err(Fault::Legacy) => unreachable!("only a probe falls back"),
+    }
+}
+
+async fn modern<F, Fut>(
+    url: &str,
+    method: &str,
+    params: Map<String, Value>,
+    opts: &Opts<'_>,
+    probe: bool,
+    on_note: &mut F,
+) -> Result<Map<String, Value>, Fault>
+where
+    F: FnMut(Value) -> Fut,
+    Fut: Future<Output = ()>,
+{
+    let rid = next_id();
+    let mut p = params;
+    p.insert("_meta".into(), meta());
+    let name = p.get("name").and_then(Value::as_str).map(str::to_string);
+    let body = json!({"jsonrpc": "2.0", "id": rid, "method": method, "params": p});
+    let mut h = base_headers();
+    h.push(("MCP-Protocol-Version".into(), PROTOCOL.into()));
+    h.push(("Mcp-Method".into(), method.into()));
+    if method == "tools/call" {
+        h.push((
+            "Mcp-Name".into(),
+            header_value(name.as_deref().unwrap_or("")),
+        ));
+    }
+    h.extend(opts.headers.iter().cloned());
+    let (result, _) = post(url, &body, h, opts.key, &rid, probe, None, on_note).await?;
+    Ok(result)
+}
+
+async fn legacy<F, Fut>(
+    url: &str,
+    method: &str,
+    params: Map<String, Value>,
+    key: Option<&str>,
+    sess: &Session,
+    on_note: &mut F,
+) -> Result<Map<String, Value>, Fault>
+where
+    F: FnMut(Value) -> Fut,
+    Fut: Future<Output = ()>,
+{
+    let rid = next_id();
+    let body = json!({"jsonrpc": "2.0", "id": rid, "method": method, "params": params});
+    let (result, _) = post(
+        url,
+        &body,
+        legacy_headers(sess),
+        key,
+        &rid,
+        false,
+        Some(sess),
+        on_note,
+    )
+    .await?;
+    Ok(result)
+}
+
+/// The legacy handshake: `initialize` at the newest legacy version, the server's
+/// answer (its version must be one this client speaks), its session id, then
+/// `notifications/initialized`.
+async fn initialize(
+    url: &str,
+    key: Option<&str>,
+    sess: &mut Session,
+) -> Result<Map<String, Value>, McpError> {
+    *sess = Session {
+        era: Some(Era::Legacy),
+        ..Session::default()
+    };
+    let rid = next_id();
+    let body = json!({"jsonrpc": "2.0", "id": rid, "method": "initialize", "params": {
+        "protocolVersion": LEGACY[0],
+        "capabilities": {},
+        "clientInfo": {"name": CLIENT_NAME, "version": CLIENT_VERSION},
+    }});
+    let (result, head) = match post(
+        url,
+        &body,
+        base_headers(),
+        key,
+        &rid,
+        false,
+        None,
+        &mut |_| async {},
+    )
+    .await
+    {
+        Ok(x) => x,
+        Err(Fault::Mcp(e)) => return Err(e),
+        Err(Fault::Legacy | Fault::Expired) => unreachable!("no probe, no session"),
+    };
+    let version = result
+        .get("protocolVersion")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let Some(v) = version.as_str().filter(|v| LEGACY.contains(v)) else {
+        sess.era = None;
+        return Err(fail(refusal(
+            TRANSPORT_ERROR,
+            format!(
+                "mcp {url}: the server answered initialize with protocol {} — this client speaks {}",
+                py_repr_value(&version),
+                spoken()
+            ),
+        )));
+    };
+    sess.version = Some(v.to_string());
+    sess.session_id = head
+        .get("mcp-session-id")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    send_message(
+        url,
+        &json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+        key,
+        sess,
+    )
+    .await?;
+    let mut out = Map::new();
+    out.insert(
+        "server".into(),
+        result.get("serverInfo").cloned().unwrap_or(Value::Null),
+    );
+    out.insert(
+        "instructions".into(),
+        result.get("instructions").cloned().unwrap_or(Value::Null),
+    );
+    out.insert(
+        "capabilities".into(),
+        result
+            .get("capabilities")
+            .cloned()
+            .unwrap_or_else(|| json!({})),
+    );
+    Ok(out)
+}
+
+/// POST a notification or a response (legacy): the server answers 202 Accepted.
+async fn send_message(
+    url: &str,
+    msg: &Value,
+    key: Option<&str>,
+    sess: &Session,
+) -> Result<(), McpError> {
+    let mut h = legacy_headers(sess);
+    if let Some(k) = key {
+        h.push(("Authorization".into(), format!("Bearer {k}")));
+    }
+    let resp = client(url)?
         .post(url)
-        .headers(head)
+        .headers(header_map(url, &h)?)
+        .body(msg.to_string())
+        .send()
+        .await
+        .map_err(|e| send_error(url, &e))?;
+    let status = resp.status().as_u16();
+    if status >= 300 {
+        let what = msg.get("method").and_then(Value::as_str).map_or_else(
+            || {
+                format!(
+                    "the response to {}",
+                    py_repr_value(msg.get("id").unwrap_or(&Value::Null))
+                )
+            },
+            str::to_string,
+        );
+        let text: String = resp
+            .text()
+            .await
+            .unwrap_or_default()
+            .chars()
+            .take(200)
+            .collect();
+        let mut r = refusal(
+            TRANSPORT_ERROR,
+            format!("mcp {url}: {what} answered HTTP {status} (202 expected): {text}"),
+        );
+        with(&mut r, "http_status", json!(status));
+        return Err(fail(r));
+    }
+    Ok(())
+}
+
+/// End a legacy session (HTTP DELETE) — best effort: a server may answer 405, or be
+/// gone.
+async fn end_session(url: &str, key: Option<&str>, sid: &str) {
+    let mut h = vec![("MCP-Session-Id".to_string(), sid.to_string())];
+    if let Some(k) = key {
+        h.push(("Authorization".into(), format!("Bearer {k}")));
+    }
+    let (Ok(c), Ok(head)) = (client(url), header_map(url, &h)) else {
+        return;
+    };
+    let _ = c.delete(url).headers(head).send().await;
+}
+
+/// A probe's error body is NOT a recognized modern error — a legacy server.
+fn legacy_answer(err: Option<&Value>) -> bool {
+    !err.and_then(|e| e.get("code"))
+        .and_then(Value::as_i64)
+        .is_some_and(|c| MODERN_ERRORS.contains(&c))
+}
+
+/// A legacy server's own REQUEST on an SSE stream: a `ping` is answered `{}`;
+/// anything else `-32601` — this client declares no capability.
+async fn answer_server_request(
+    url: &str,
+    msg: &Value,
+    key: Option<&str>,
+    sess: &Session,
+) -> Result<(), McpError> {
+    let id = msg.get("id").cloned().unwrap_or(Value::Null);
+    let method = msg.get("method").cloned().unwrap_or(Value::Null);
+    let reply = if method.as_str() == Some("ping") {
+        json!({"jsonrpc": "2.0", "id": id, "result": {}})
+    } else {
+        json!({"jsonrpc": "2.0", "id": id, "error": {
+            "code": -32601,
+            "message": format!("this client does not serve {}", py_repr_value(&method)),
+        }})
+    };
+    send_message(url, &reply, key, sess).await
+}
+
+/// One request POSTed; → (its result, the response headers).
+#[allow(clippy::too_many_arguments)]
+async fn post<F, Fut>(
+    url: &str,
+    body: &Value,
+    mut h: Vec<(String, String)>,
+    key: Option<&str>,
+    rid: &str,
+    probe: bool,
+    sess: Option<&Session>,
+    on_note: &mut F,
+) -> Result<(Map<String, Value>, HeaderMap), Fault>
+where
+    F: FnMut(Value) -> Fut,
+    Fut: Future<Output = ()>,
+{
+    if let Some(k) = key {
+        h.push(("Authorization".into(), format!("Bearer {k}")));
+    }
+    let resp = client(url)?
+        .post(url)
+        .headers(header_map(url, &h)?)
         .body(body.to_string())
         .send()
         .await
-        .map_err(|e| {
-            if e.is_connect() {
-                fail(refusal(
-                    NOT_CONNECTED,
-                    format!("mcp {url}: cannot connect: {e}"),
-                ))
-            } else {
-                fail(refusal(TRANSPORT_ERROR, format!("mcp {url}: {e}")))
-            }
-        })?;
-    read(url, &rid, resp, opts.key.is_some(), &mut on_note).await
+        .map_err(|e| send_error(url, &e))?;
+    let head = resp.headers().clone();
+    let result = read(url, rid, resp, key, probe, sess, on_note).await?;
+    Ok((result, head))
 }
 
 async fn read<F, Fut>(
     url: &str,
     rid: &str,
     resp: reqwest::Response,
-    keyed: bool,
+    key: Option<&str>,
+    probe: bool,
+    sess: Option<&Session>,
     on_note: &mut F,
-) -> Result<Map<String, Value>, McpError>
+) -> Result<Map<String, Value>, Fault>
 where
     F: FnMut(Value) -> Fut,
     Fut: Future<Output = ()>,
 {
     let status = resp.status().as_u16();
     if status == 401 || status == 403 {
-        let why = if keyed {
+        let why = if key.is_some() {
             "refused the key"
         } else {
             "needs a key"
@@ -395,7 +849,7 @@ where
             "the key is a credential-store ref: credentials={store, ref}, field api_key",
         );
         with(&mut r, "http_status", json!(status));
-        return Err(fail(r));
+        return Err(Fault::Mcp(fail(r)));
     }
     let ctype = resp
         .headers()
@@ -408,17 +862,23 @@ where
         .trim()
         .to_lowercase();
     let wire_err = |e: reqwest::Error| fail(refusal(TRANSPORT_ERROR, format!("mcp {url}: {e}")));
+    if status == 404 && sess.is_some_and(|s| s.session_id.is_some()) {
+        return Err(Fault::Expired);
+    }
     if status >= 400 {
         let raw = resp.bytes().await.map_err(wire_err)?;
-        if let Ok(msg) = serde_json::from_slice::<Value>(&raw) {
-            if let Some(err) = msg.get("error").filter(|e| e.is_object()) {
-                return Err(protocol_error(url, err));
-            }
+        let msg = serde_json::from_slice::<Value>(&raw).ok();
+        let err = msg.as_ref().and_then(|m| m.get("error"));
+        if probe && status < 500 && legacy_answer(err) {
+            return Err(Fault::Legacy);
+        }
+        if let Some(err) = err.filter(|e| e.is_object()) {
+            return Err(protocol_error(url, err).into());
         }
         let text: String = String::from_utf8_lossy(&raw).chars().take(300).collect();
         let mut r = refusal(TRANSPORT_ERROR, format!("mcp {url}: HTTP {status}: {text}"));
         with(&mut r, "http_status", json!(status));
-        return Err(fail(r));
+        return Err(Fault::Mcp(fail(r)));
     }
     if ctype == "application/json" {
         let raw = resp.bytes().await.map_err(wire_err)?;
@@ -428,7 +888,10 @@ where
                 format!("mcp {url}: the answer is not JSON: {e}"),
             ))
         })?;
-        return settle(url, &msg);
+        if probe && msg.get("error").is_some() && legacy_answer(msg.get("error")) {
+            return Err(Fault::Legacy);
+        }
+        return Ok(settle(url, &msg)?);
     }
     if ctype == "text/event-stream" {
         let mut stream = resp.bytes_stream();
@@ -460,24 +923,31 @@ where
                         on_note(msg).await;
                         continue;
                     }
+                    if let Some(s) = sess.filter(|_| msg.get("method").is_some()) {
+                        answer_server_request(url, &msg, key, s).await?;
+                        continue;
+                    }
                     if msg.get("id").and_then(Value::as_str) == Some(rid) {
-                        return settle(url, &msg);
+                        if probe && msg.get("error").is_some() && legacy_answer(msg.get("error")) {
+                            return Err(Fault::Legacy);
+                        }
+                        return Ok(settle(url, &msg)?);
                     }
                 }
             }
         }
-        return Err(fail(refusal(
+        return Err(Fault::Mcp(fail(refusal(
             TRANSPORT_CLOSED,
             format!("mcp {url}: the stream ended before the response"),
-        )));
+        ))));
     }
     let shown = if ctype.is_empty() {
         "none".to_string()
     } else {
         ctype
     };
-    Err(fail(refusal(
+    Err(Fault::Mcp(fail(refusal(
         TRANSPORT_ERROR,
         format!("mcp {url}: unexpected content-type {}", py_repr(&shown)),
-    )))
+    ))))
 }

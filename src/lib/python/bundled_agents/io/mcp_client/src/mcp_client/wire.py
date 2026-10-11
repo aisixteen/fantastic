@@ -1,12 +1,32 @@
-"""The MCP wire — Streamable HTTP, protocol 2026-07-28 ONLY (owner, 2026-10-08).
+"""The MCP wire — Streamable HTTP, DUAL-ERA (owner, 2026-10-12): the modern protocol
+2026-07-28 first, the `initialize`-era ones (2025-11-25, 2025-06-18, 2025-03-26,
+2024-11-05) when the server speaks only those — the spec's "dual-era client"
+(2026-07-28 basic/versioning + transports/streamable-http, Backward Compatibility).
 
-Every JSON-RPC request is its own POST to the server's one endpoint, carrying its
-version, identity and capabilities in `params._meta` (no handshake, no session) and
-mirrored into headers: `MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name` (a
-`tools/call`'s tool), `Mcp-Param-<name>` (each `x-mcp-header` argument). The answer is
-one JSON object or an SSE stream scoped to the request (its notifications, then the
-response). A server on an older protocol is refused naming its versions — no
-handshake fallback.
+MODERN (2026-07-28): every JSON-RPC request is its own POST to the server's one
+endpoint, carrying its version, identity and capabilities in `params._meta` (no
+handshake, no session) and mirrored into headers: `MCP-Protocol-Version`,
+`Mcp-Method`, `Mcp-Name` (a `tools/call`'s tool), `Mcp-Param-<name>` (each
+`x-mcp-header` argument). The answer is one JSON object or an SSE stream scoped to
+the request (its notifications, then the response).
+
+DETECTION (`connect`): `server/discover` is sent modern. A success naming 2026-07-28
+stays modern. A recognized modern error (`-32022` UnsupportedProtocolVersion,
+`-32021`, `-32020`) is a MODERN server: `-32022` (or a discover) listing only legacy
+versions goes legacy, anything else is refused. Any other 4xx (or an error body
+that is not a recognized modern one — `-32601` included: every modern server
+implements discover) is a LEGACY server → `initialize`.
+
+LEGACY (2025-11-25 Streamable HTTP): `initialize {protocolVersion: 2025-11-25,
+capabilities: {}, clientInfo}` → the server's version (one of `LEGACY`, else
+refused) and maybe an `MCP-Session-Id`; then `notifications/initialized` (202).
+Every later POST carries `MCP-Session-Id` (when one was given) and
+`MCP-Protocol-Version` (from 2025-06-18 on — the version that defined it); no
+`_meta`, no mirrored headers. A 404 on a session is an expired session: one new
+`initialize`, then the request again. A server REQUEST on an SSE stream is answered
+(a `ping` with `{}`, anything else `-32601` — this client offers no capability). A
+new session ends the old one (HTTP DELETE; a 405 is fine). The deprecated HTTP+SSE
+transport (2024-11-05's two endpoints) is not spoken.
 
 Every failure is a reply the caller reads: `McpError.reply` is a refusal from the
 kernel's closed set, or `{error, mcp_error}` for a JSON-RPC error the server raised.
@@ -30,7 +50,16 @@ from kernel._refusal import (
     refusal,
 )
 
+#: The modern protocol: per-request `_meta`, no handshake.
 PROTOCOL = "2026-07-28"
+#: The `initialize`-era protocols this client speaks over Streamable HTTP, newest first.
+LEGACY = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
+#: Legacy revisions from this one on define the `MCP-Protocol-Version` header.
+VERSION_HEADER_FROM = "2025-06-18"
+#: Every protocol this client speaks, as an error names them.
+SPOKEN = f"{PROTOCOL}, {', '.join(LEGACY)}"
+#: The modern JSON-RPC errors that identify a modern server (never a fallback).
+MODERN_ERRORS = (-32022, -32021, -32020)
 CLIENT_INFO = {"name": "aisixteen-fantastic", "version": "0.1.0"}
 #: A connect that does not happen fails; a call itself is bounded by its caller's
 #: own item timeout (the kernel never defaults one), so there is no read clock.
@@ -55,6 +84,24 @@ class McpError(Exception):
     def __init__(self, reply: dict):
         super().__init__(reply.get("error"))
         self.reply = reply
+
+
+class Session:
+    """What one agent agreed with its server: the era, the protocol version, and a
+    legacy server's session id (None when it gave none)."""
+
+    def __init__(self) -> None:
+        self.era: str | None = None  # "modern" | "legacy"
+        self.version: str | None = None
+        self.session_id: str | None = None
+
+
+class _Legacy(Exception):
+    """The modern probe was answered the way only a legacy server answers."""
+
+
+class _Expired(Exception):
+    """HTTP 404 on a request carrying a session id — the session is gone."""
 
 
 # ─── header values ──────────────────────────────────────────────────
@@ -171,8 +218,9 @@ def _protocol_error(url: str, err: Any) -> McpError:
             refusal(
                 TRANSPORT_ERROR,
                 f"mcp {url}: the server speaks {supported} — this client speaks "
-                f"{PROTOCOL} only",
+                f"{SPOKEN}",
                 mcp_code=code,
+                supported=supported,
             )
         )
     if code == -32021:
@@ -199,6 +247,23 @@ def _protocol_error(url: str, err: Any) -> McpError:
     )
 
 
+async def _answer_server_request(url, msg: dict, key, sess: Session) -> None:
+    """A legacy server's own REQUEST on an SSE stream: a `ping` is answered `{}`;
+    anything else `-32601` — this client declares no capability."""
+    if msg.get("method") == "ping":
+        reply = {"jsonrpc": "2.0", "id": msg.get("id"), "result": {}}
+    else:
+        reply = {
+            "jsonrpc": "2.0",
+            "id": msg.get("id"),
+            "error": {
+                "code": -32601,
+                "message": f"this client does not serve {msg.get('method')!r}",
+            },
+        }
+    await _send_message(url, reply, key, sess)
+
+
 def _settle(url: str, msg: Any) -> dict:
     if not isinstance(msg, dict):
         raise McpError(refusal(TRANSPORT_ERROR, f"mcp {url}: not a JSON-RPC message"))
@@ -217,17 +282,70 @@ def _settle(url: str, msg: Any) -> dict:
     return result
 
 
+_BASE_HEADERS = {
+    "Accept": "application/json, text/event-stream",
+    "Content-Type": "application/json",
+}
+
+
+async def connect(url: str, key: str | None, sess: Session) -> dict:
+    """Detect the server's era and agree a version (the module docstring) — fills
+    `sess`; → `{server, instructions, capabilities}`. A legacy session `sess` held is
+    ended first (DELETE)."""
+    old = sess.session_id
+    sess.era = sess.version = sess.session_id = None
+    if old is not None:
+        await _end_session(url, key, old)
+    try:
+        disc = await _modern(url, "server/discover", {}, key, None, None, probe=True)
+    except _Legacy:
+        return await _initialize(url, key, sess)
+    except McpError as e:
+        supported = e.reply.get("supported")
+        if isinstance(supported, list) and any(v in LEGACY for v in supported):
+            return await _initialize(url, key, sess)
+        raise
+    versions = disc.get("supportedVersions") or []
+    if PROTOCOL not in versions:
+        if any(v in LEGACY for v in versions):
+            return await _initialize(url, key, sess)
+        raise McpError(
+            refusal(
+                TRANSPORT_ERROR,
+                f"mcp {url}: the server speaks {versions} — this client speaks {SPOKEN}",
+            )
+        )
+    sess.era, sess.version = "modern", PROTOCOL
+    return {
+        "server": (disc.get("_meta") or {}).get("io.modelcontextprotocol/serverInfo"),
+        "instructions": disc.get("instructions"),
+        "capabilities": disc.get("capabilities") or {},
+    }
+
+
 async def rpc(
     url: str,
     method: str,
     params: dict,
     *,
     key: str | None,
+    sess: Session,
     headers: dict | None = None,
     on_note: Callable[[dict], Awaitable[None]] | None = None,
 ) -> dict:
-    """POST one request; → its `result`, or raise `McpError`. Notifications on an SSE
-    answer go to `on_note` as they arrive."""
+    """POST one request in the agreed era; → its `result`, or raise `McpError`.
+    Notifications on an SSE answer go to `on_note` as they arrive. `headers` (the
+    mirrored `Mcp-Param-*`) ride a modern request only."""
+    if sess.era != "legacy":
+        return await _modern(url, method, params, key, headers, on_note)
+    try:
+        return await _legacy(url, method, params, key, sess, on_note)
+    except _Expired:
+        await _initialize(url, key, sess)
+        return await _legacy(url, method, params, key, sess, on_note)
+
+
+async def _modern(url, method, params, key, headers, on_note, *, probe=False) -> dict:
     rid = str(next(_ids))
     body = {
         "jsonrpc": "2.0",
@@ -235,15 +353,118 @@ async def rpc(
         "method": method,
         "params": {**params, "_meta": _meta()},
     }
-    head = {
-        "Accept": "application/json, text/event-stream",
-        "Content-Type": "application/json",
-        "MCP-Protocol-Version": PROTOCOL,
-        "Mcp-Method": method,
-    }
+    head = {**_BASE_HEADERS, "MCP-Protocol-Version": PROTOCOL, "Mcp-Method": method}
     if method == "tools/call":
         head["Mcp-Name"] = header_value(params["name"])
     head.update(headers or {})
+    result, _ = await _post(url, body, head, key, on_note, rid=rid, probe=probe)
+    return result
+
+
+def _legacy_head(sess: Session) -> dict:
+    head = dict(_BASE_HEADERS)
+    if sess.version is not None and sess.version >= VERSION_HEADER_FROM:
+        head["MCP-Protocol-Version"] = sess.version
+    if sess.session_id is not None:
+        head["MCP-Session-Id"] = sess.session_id
+    return head
+
+
+async def _legacy(url, method, params, key, sess: Session, on_note) -> dict:
+    rid = str(next(_ids))
+    body = {"jsonrpc": "2.0", "id": rid, "method": method, "params": params}
+    result, _ = await _post(
+        url, body, _legacy_head(sess), key, on_note, rid=rid, sess=sess
+    )
+    return result
+
+
+async def _initialize(url: str, key: str | None, sess: Session) -> dict:
+    """The legacy handshake: `initialize` at the newest legacy version, the server's
+    answer (its version must be one this client speaks), its session id, then
+    `notifications/initialized`."""
+    sess.era, sess.version, sess.session_id = "legacy", None, None
+    rid = str(next(_ids))
+    body = {
+        "jsonrpc": "2.0",
+        "id": rid,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": LEGACY[0],
+            "capabilities": {},
+            "clientInfo": CLIENT_INFO,
+        },
+    }
+    result, head = await _post(url, body, dict(_BASE_HEADERS), key, None, rid=rid)
+    version = result.get("protocolVersion")
+    if version not in LEGACY:
+        sess.era = None
+        raise McpError(
+            refusal(
+                TRANSPORT_ERROR,
+                f"mcp {url}: the server answered initialize with protocol "
+                f"{version!r} — this client speaks {SPOKEN}",
+            )
+        )
+    sess.version = version
+    sid = head.get("mcp-session-id")
+    sess.session_id = sid if sid else None
+    await _send_message(
+        url,
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        key,
+        sess,
+    )
+    return {
+        "server": result.get("serverInfo"),
+        "instructions": result.get("instructions"),
+        "capabilities": result.get("capabilities") or {},
+    }
+
+
+async def _send_message(url: str, msg: dict, key, sess: Session) -> None:
+    """POST a notification or a response (legacy): the server answers 202 Accepted."""
+    head = _legacy_head(sess)
+    if key is not None:
+        head["Authorization"] = f"Bearer {key}"
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(None, connect=CONNECT_TIMEOUT), transport=TRANSPORT
+        ) as client:
+            resp = await client.post(url, json=msg, headers=head)
+    except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+        raise McpError(refusal(NOT_CONNECTED, f"mcp {url}: cannot connect: {e}")) from e
+    except httpx.HTTPError as e:
+        raise McpError(refusal(TRANSPORT_ERROR, f"mcp {url}: {e}")) from e
+    if resp.status_code >= 300:
+        what = msg.get("method") or f"the response to {msg.get('id')!r}"
+        raise McpError(
+            refusal(
+                TRANSPORT_ERROR,
+                f"mcp {url}: {what} answered HTTP {resp.status_code} (202 expected): "
+                f"{resp.text[:200]}",
+                http_status=resp.status_code,
+            )
+        )
+
+
+async def _end_session(url: str, key, sid: str) -> None:
+    """End a legacy session (HTTP DELETE) — best effort: a server may answer 405, or
+    be gone."""
+    head = {"MCP-Session-Id": sid}
+    if key is not None:
+        head["Authorization"] = f"Bearer {key}"
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(None, connect=CONNECT_TIMEOUT), transport=TRANSPORT
+        ) as client:
+            await client.delete(url, headers=head)
+    except httpx.HTTPError:
+        pass
+
+
+async def _post(url, body, head, key, on_note, *, rid, probe=False, sess=None):
+    """One request POSTed; → (its result, the response headers)."""
     if key is not None:
         head["Authorization"] = f"Bearer {key}"
     try:
@@ -251,14 +472,20 @@ async def rpc(
             timeout=httpx.Timeout(None, connect=CONNECT_TIMEOUT), transport=TRANSPORT
         ) as client:
             async with client.stream("POST", url, json=body, headers=head) as resp:
-                return await _read(url, rid, resp, key, on_note)
+                result = await _read(url, rid, resp, key, on_note, probe, sess)
+                return result, resp.headers
     except (httpx.ConnectError, httpx.ConnectTimeout) as e:
         raise McpError(refusal(NOT_CONNECTED, f"mcp {url}: cannot connect: {e}")) from e
     except httpx.HTTPError as e:
         raise McpError(refusal(TRANSPORT_ERROR, f"mcp {url}: {e}")) from e
 
 
-async def _read(url, rid, resp: httpx.Response, key, on_note) -> dict:
+def _legacy_answer(err: Any) -> bool:
+    """A probe's error body is NOT a recognized modern error — a legacy server."""
+    return not (isinstance(err, dict) and err.get("code") in MODERN_ERRORS)
+
+
+async def _read(url, rid, resp: httpx.Response, key, on_note, probe, sess) -> dict:
     status = resp.status_code
     if status in (401, 403):
         why = "refused the key" if key is not None else "needs a key"
@@ -272,14 +499,19 @@ async def _read(url, rid, resp: httpx.Response, key, on_note) -> dict:
             )
         )
     ctype = resp.headers.get("content-type", "").split(";")[0].strip().lower()
+    if status == 404 and sess is not None and sess.session_id is not None:
+        raise _Expired()
     if status >= 400:
         raw = await resp.aread()
         try:
             msg = json.loads(raw)
         except ValueError:
             msg = None
-        if isinstance(msg, dict) and isinstance(msg.get("error"), dict):
-            raise _protocol_error(url, msg["error"])
+        err = msg.get("error") if isinstance(msg, dict) else None
+        if probe and status < 500 and _legacy_answer(err):
+            raise _Legacy()
+        if isinstance(err, dict):
+            raise _protocol_error(url, err)
         text = raw.decode("utf-8", "replace")[:300]
         raise McpError(
             refusal(
@@ -293,6 +525,9 @@ async def _read(url, rid, resp: httpx.Response, key, on_note) -> dict:
             raise McpError(
                 refusal(TRANSPORT_ERROR, f"mcp {url}: the answer is not JSON: {e}")
             ) from e
+        if probe and isinstance(msg, dict) and "error" in msg:
+            if _legacy_answer(msg["error"]):
+                raise _Legacy()
         return _settle(url, msg)
     if ctype == "text/event-stream":
         data: list[str] = []
@@ -316,7 +551,12 @@ async def _read(url, rid, resp: httpx.Response, key, on_note) -> dict:
                     if on_note is not None:
                         await on_note(msg)
                     continue
+                if isinstance(msg, dict) and "method" in msg and sess is not None:
+                    await _answer_server_request(url, msg, key, sess)
+                    continue
                 if isinstance(msg, dict) and msg.get("id") == rid:
+                    if probe and "error" in msg and _legacy_answer(msg["error"]):
+                        raise _Legacy()
                     return _settle(url, msg)
         raise McpError(
             refusal(

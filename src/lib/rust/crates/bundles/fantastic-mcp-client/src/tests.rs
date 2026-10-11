@@ -4,6 +4,7 @@
 //! through a real credential store (file backend under a temp dir).
 
 use super::*;
+use crate::wire::PROTOCOL;
 use fantastic_credential_store::test_support as creds;
 use fantastic_kernel::outcome::Step;
 use fantastic_kernel::{Item, Status};
@@ -635,15 +636,19 @@ async fn failures_are_refusals_from_the_closed_set() {
 // ─── versions, connection, lifecycle ─────────────────────────────────
 
 #[tokio::test]
-async fn a_server_on_an_older_protocol_is_refused_naming_its_versions() {
-    let (srv, _seen) = server(Some(KEY), vec!["2025-11-25"]).await;
+async fn a_discover_naming_only_older_versions_goes_legacy() {
+    let (srv, fake) = legacy_server(Legacy {
+        modern_discover: Some(vec!["2025-11-25"]),
+        ..Legacy::default()
+    })
+    .await;
     let (k, _tmp) = rig_on(&format!("{}/mcp", srv.uri()), None, KEY, true).await;
-    let out = send(&k, "mcp", json!({"type": "boot"})).await.result;
-    assert_eq!(out["reason"], "transport_error");
-    let e = out["error"].as_str().unwrap();
-    assert!(
-        e.contains("2025-11-25") && e.contains("2026-07-28 only"),
-        "{e}"
+    let out = send(&k, "mcp", json!({"type": "boot"})).await;
+    assert_eq!(out.status, Status::Completed, "{}", out.result);
+    assert_eq!(out.result["protocol_version"], "2025-11-25");
+    assert_eq!(
+        fake.methods()[..3],
+        ["server/discover", "initialize", "notifications/initialized"]
     );
 }
 
@@ -661,9 +666,11 @@ async fn an_unsupported_version_error_names_the_servers_versions() {
         .await;
     let (k, _tmp) = rig_on(&format!("{}/mcp", srv.uri()), None, KEY, true).await;
     let out = send(&k, "mcp", json!({"type": "boot"})).await.result;
+    // -32022 naming a legacy version → initialize; this server refuses that too
     assert_eq!(out["reason"], "transport_error");
+    let e = out["error"].as_str().unwrap();
     assert!(
-        out["error"].as_str().unwrap().contains("2025-06-18"),
+        e.contains("2025-06-18") && e.contains("2026-07-28, 2025-11-25"),
         "{out}"
     );
 }
@@ -801,4 +808,370 @@ async fn a_call_past_its_timeout_settles_timed_out() {
     item.timeout = Some(0.5);
     let out = r.kernel.send(vec![item]).await.remove(0);
     assert_eq!(out.status, Status::TimedOut, "{}", out.result);
+}
+
+// ─── legacy servers: the initialize era (2025-11-25 … 2024-11-05) ────
+
+/// A 2025-11-25-shaped Streamable HTTP server — python `FakeLegacy`, rule for rule.
+#[derive(Default)]
+struct Legacy {
+    version: Option<&'static str>,
+    no_session: bool,
+    expire_after: Option<usize>,
+    ping: bool,
+    modern_discover: Option<Vec<&'static str>>,
+    st: StdMutex<LegacyState>,
+}
+
+#[derive(Default)]
+struct LegacyState {
+    seen: Vec<(HashMap<String, String>, Value)>,
+    sessions: Vec<String>,
+    live: Option<String>,
+    uses: usize,
+    deleted: Vec<String>,
+    answers: Vec<Value>,
+}
+
+impl Legacy {
+    fn version(&self) -> &'static str {
+        self.version.unwrap_or("2025-11-25")
+    }
+    fn methods(&self) -> Vec<String> {
+        self.st
+            .lock()
+            .unwrap()
+            .seen
+            .iter()
+            .map(|(_, b)| b["method"].as_str().unwrap_or("").to_string())
+            .collect()
+    }
+}
+
+fn raw_ok(body: &Value, result: Value) -> ResponseTemplate {
+    ResponseTemplate::new(200)
+        .set_body_json(json!({"jsonrpc": "2.0", "id": body["id"], "result": result}))
+}
+
+struct LegacyResp(Arc<Legacy>);
+
+impl Respond for LegacyResp {
+    fn respond(&self, req: &Request) -> ResponseTemplate {
+        self.0.answer(req)
+    }
+}
+
+impl Legacy {
+    fn answer(&self, req: &Request) -> ResponseTemplate {
+        let h: HashMap<String, String> = req
+            .headers
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.as_str().to_lowercase(),
+                    v.to_str().unwrap_or("").to_string(),
+                )
+            })
+            .collect();
+        let get = |k: &str| h.get(k).cloned();
+        if get("authorization").as_deref() != Some(&format!("Bearer {KEY}")) {
+            return ResponseTemplate::new(401);
+        }
+        let mut st = self.st.lock().unwrap();
+        if req.method.as_str() == "DELETE" {
+            st.deleted.push(get("mcp-session-id").unwrap_or_default());
+            return ResponseTemplate::new(200);
+        }
+        let body: Value = serde_json::from_slice(&req.body).unwrap();
+        st.seen.push((h.clone(), body.clone()));
+        if body["params"].get("_meta").is_some() {
+            if let (Some(vs), Some("server/discover")) =
+                (&self.modern_discover, body["method"].as_str())
+            {
+                return ok(
+                    &body,
+                    json!({"supportedVersions": vs, "capabilities": {"tools": {}}}),
+                );
+            }
+            return ResponseTemplate::new(400).set_body_json(json!({"jsonrpc": "2.0", "id": null,
+                "error": {"code": -32000, "message": "Bad Request: Unsupported protocol version: 2026-07-28 (supported versions: 2025-11-25, 2025-06-18, 2025-03-26, 2024-11-05, 2024-10-07)"}}));
+        }
+        let m = body["method"].as_str().map(str::to_string);
+        if m.as_deref() == Some("initialize") {
+            let p = &body["params"];
+            assert_eq!(p["protocolVersion"], "2025-11-25");
+            assert_eq!(p["capabilities"], json!({}));
+            assert_eq!(p["clientInfo"]["name"], "aisixteen-fantastic");
+            assert!(get("mcp-session-id").is_none() && get("mcp-protocol-version").is_none());
+            let mut r = raw_ok(
+                &body,
+                json!({"protocolVersion": self.version(), "capabilities": {"tools": {}},
+                "serverInfo": {"name": "legacy-fake", "version": "1"}, "instructions": "Old but gold."}),
+            );
+            if !self.no_session {
+                let sid = format!("sess-{}", st.sessions.len() + 1);
+                st.sessions.push(sid.clone());
+                st.live = Some(sid.clone());
+                st.uses = 0;
+                r = r.insert_header("mcp-session-id", sid.as_str());
+            }
+            return r;
+        }
+        if !self.no_session {
+            let Some(sid) = get("mcp-session-id") else {
+                return ResponseTemplate::new(400)
+                    .set_body_string("Bad Request: No valid session ID provided");
+            };
+            if st.live.as_deref() != Some(sid.as_str()) {
+                return ResponseTemplate::new(404).set_body_string("session not found");
+            }
+            st.uses += 1;
+            if self.expire_after.is_some_and(|n| st.uses > n) {
+                st.live = None;
+                return ResponseTemplate::new(404).set_body_string("session expired");
+            }
+        }
+        let want = (self.version() >= "2025-06-18").then(|| self.version().to_string());
+        if get("mcp-protocol-version") != want {
+            return ResponseTemplate::new(400).set_body_string("bad MCP-Protocol-Version");
+        }
+        if get("mcp-method").is_some() {
+            return ResponseTemplate::new(400)
+                .set_body_string("a modern header on a legacy request");
+        }
+        if m.is_none() {
+            st.answers.push(body.clone());
+            return ResponseTemplate::new(202);
+        }
+        if body.get("id").is_none() {
+            return ResponseTemplate::new(202);
+        }
+        match m.as_deref() {
+            Some("tools/list") => raw_ok(
+                &body,
+                json!({"tools": [{"name": "echo", "inputSchema": {"type": "object",
+                "properties": {"say": {"type": "string", "x-mcp-header": "Say"}}}}]}),
+            ),
+            Some("tools/call") => {
+                let say = body["params"]["arguments"]["say"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string();
+                let fin = json!({"jsonrpc": "2.0", "id": body["id"],
+                    "result": {"content": [{"type": "text", "text": format!("echo {say}")}]}});
+                if !self.ping {
+                    return ResponseTemplate::new(200).set_body_json(fin);
+                }
+                let events = [
+                    json!({"jsonrpc": "2.0", "id": "s1", "method": "ping"}),
+                    json!({"jsonrpc": "2.0", "id": "s2", "method": "sampling/createMessage", "params": {}}),
+                    fin,
+                ];
+                let sse: String = events
+                    .iter()
+                    .enumerate()
+                    .map(|(i, e)| format!("id: e{i}\ndata: {e}\n\n"))
+                    .collect();
+                ResponseTemplate::new(200).set_body_raw(sse, "text/event-stream")
+            }
+            Some(other) => raw_ok(&body, json!(null))
+                .set_body_json(json!({"jsonrpc": "2.0", "id": body["id"],
+                "error": {"code": -32601, "message": format!("no {other}")}})),
+            None => unreachable!(),
+        }
+    }
+}
+
+async fn legacy_server(fake: Legacy) -> (MockServer, Arc<Legacy>) {
+    let srv = MockServer::start().await;
+    let fake = Arc::new(fake);
+    Mock::given(path("/mcp"))
+        .respond_with(LegacyResp(Arc::clone(&fake)))
+        .mount(&srv)
+        .await;
+    (srv, fake)
+}
+
+async fn legacy_booted(
+    fake: Legacy,
+) -> (
+    Arc<Kernel>,
+    Arc<Legacy>,
+    Value,
+    MockServer,
+    tempfile::TempDir,
+) {
+    let (srv, fake) = legacy_server(fake).await;
+    let (k, tmp) = rig_on(&format!("{}/mcp", srv.uri()), None, KEY, true).await;
+    let out = send(&k, "mcp", json!({"type": "boot"})).await;
+    assert_eq!(out.status, Status::Completed, "{}", out.result);
+    (k, fake, out.result, srv, tmp)
+}
+
+#[tokio::test]
+async fn a_legacy_server_is_spoken_to_through_initialize_and_its_session() {
+    let (k, fake, r, _srv, _tmp) = legacy_booted(Legacy::default()).await;
+    assert_eq!(
+        r,
+        json!({"server": {"name": "legacy-fake", "version": "1"},
+        "protocol_version": "2025-11-25", "tools": ["echo"]})
+    );
+    assert_eq!(
+        fake.methods(),
+        [
+            "server/discover",
+            "initialize",
+            "notifications/initialized",
+            "tools/list"
+        ]
+    );
+    let out = send(&k, "mcp", json!({"type": "echo", "say": "hi"}))
+        .await
+        .result;
+    assert_eq!(
+        out,
+        json!({"content": [{"type": "text", "text": "echo hi"}]})
+    );
+    let (h, body) = fake.st.lock().unwrap().seen.last().cloned().unwrap();
+    assert_eq!(
+        body["params"],
+        json!({"name": "echo", "arguments": {"say": "hi"}})
+    );
+    assert_eq!(h["mcp-session-id"], "sess-1");
+    assert_eq!(h["mcp-protocol-version"], "2025-11-25");
+    assert!(!h.contains_key("mcp-param-say") && !h.contains_key("mcp-name"));
+    let rf = send(&k, "mcp", json!({"type": "reflect"})).await.result;
+    assert_eq!(rf["protocol_version"], "2025-11-25");
+    assert_eq!(rf["instructions"], "Old but gold.");
+    assert!(fake
+        .st
+        .lock()
+        .unwrap()
+        .seen
+        .iter()
+        .all(|(h, _)| h["authorization"] == format!("Bearer {KEY}")));
+}
+
+#[tokio::test]
+async fn the_servers_version_is_kept_and_the_header_follows_it() {
+    for (version, header) in [
+        ("2025-06-18", Some("2025-06-18")),
+        ("2025-03-26", None),
+        ("2024-11-05", None),
+    ] {
+        let (_k, fake, r, _srv, _tmp) = legacy_booted(Legacy {
+            version: Some(version),
+            ..Legacy::default()
+        })
+        .await;
+        assert_eq!(r["protocol_version"], version);
+        let (h, _) = fake.st.lock().unwrap().seen.last().cloned().unwrap();
+        assert_eq!(
+            h.get("mcp-protocol-version").map(String::as_str),
+            header,
+            "{version}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_sessionless_legacy_server_gets_no_session_header() {
+    let (k, fake, _r, _srv, _tmp) = legacy_booted(Legacy {
+        no_session: true,
+        ..Legacy::default()
+    })
+    .await;
+    let out = send(&k, "mcp", json!({"type": "echo", "say": "x"}))
+        .await
+        .result;
+    assert_eq!(out["content"][0]["text"], "echo x", "{out}");
+    assert!(fake
+        .st
+        .lock()
+        .unwrap()
+        .seen
+        .iter()
+        .all(|(h, _)| !h.contains_key("mcp-session-id")));
+}
+
+#[tokio::test]
+async fn a_version_this_client_does_not_speak_is_refused_naming_its_own() {
+    let (srv, _fake) = legacy_server(Legacy {
+        version: Some("2099-01-01"),
+        ..Legacy::default()
+    })
+    .await;
+    let (k, _tmp) = rig_on(&format!("{}/mcp", srv.uri()), None, KEY, true).await;
+    let r = send(&k, "mcp", json!({"type": "boot"})).await.result;
+    assert_eq!(r["reason"], "transport_error", "{r}");
+    let e = r["error"].as_str().unwrap();
+    assert!(
+        e.contains("'2099-01-01'") && e.contains(&wire::spoken()),
+        "{e}"
+    );
+}
+
+#[tokio::test]
+async fn an_expired_session_is_initialized_again_once() {
+    let (k, fake, _r, _srv, _tmp) = legacy_booted(Legacy {
+        expire_after: Some(2),
+        ..Legacy::default()
+    })
+    .await;
+    let out = send(&k, "mcp", json!({"type": "echo", "say": "again"}))
+        .await
+        .result;
+    assert_eq!(out["content"][0]["text"], "echo again", "{out}");
+    assert_eq!(fake.st.lock().unwrap().sessions, ["sess-1", "sess-2"]);
+    let m = fake.methods();
+    assert_eq!(
+        m[m.len() - 4..],
+        [
+            "tools/call",
+            "initialize",
+            "notifications/initialized",
+            "tools/call"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_server_request_on_the_stream_is_answered() {
+    let (k, fake, _r, _srv, _tmp) = legacy_booted(Legacy {
+        ping: true,
+        ..Legacy::default()
+    })
+    .await;
+    let out = send(&k, "mcp", json!({"type": "echo", "say": "p"}))
+        .await
+        .result;
+    assert_eq!(out["content"][0]["text"], "echo p", "{out}");
+    assert_eq!(
+        fake.st.lock().unwrap().answers,
+        vec![
+            json!({"jsonrpc": "2.0", "id": "s1", "result": {}}),
+            json!({"jsonrpc": "2.0", "id": "s2", "error": {"code": -32601,
+            "message": "this client does not serve 'sampling/createMessage'"}}),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_reboot_ends_the_old_session() {
+    let (k, fake, _r, _srv, _tmp) = legacy_booted(Legacy::default()).await;
+    let r = send(&k, "mcp", json!({"type": "boot"})).await.result;
+    assert_eq!(r["tools"], json!(["echo"]), "{r}");
+    let st = fake.st.lock().unwrap();
+    assert_eq!(st.deleted, ["sess-1"]);
+    assert_eq!(st.sessions, ["sess-1", "sess-2"]);
+}
+
+#[tokio::test]
+async fn a_modern_server_never_sees_initialize() {
+    let r = booted().await;
+    let out = send(&r.kernel, "mcp", json!({"type": "reflect"}))
+        .await
+        .result;
+    assert_eq!(out["protocol_version"], PROTOCOL);
+    assert!(calls(&r.seen, "initialize").is_empty());
 }
