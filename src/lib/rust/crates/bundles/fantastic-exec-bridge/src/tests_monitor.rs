@@ -405,3 +405,56 @@ async fn a_monitor_ends_with_its_job_delivering_what_waited() {
     let listed = call(&k, &rn, json!({"type": "monitors"})).await;
     assert_eq!(listed["monitors"], json!([]), "{listed}");
 }
+
+/// python `test_a_refused_delivery_ends_the_monitor_and_monitors_says_why`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_delivery_ends_the_monitor_and_monitors_says_why() {
+    let tmp = TempDir::new().unwrap();
+    let (k, ear) = setup(&tmp).await;
+    let (rn, en) = ids(&tmp);
+    let r = call(
+        &k,
+        "kernel_state",
+        json!({"type": "update_agent", "id": en, "callable_by": {"$self": "*"}}),
+    )
+    .await;
+    assert_eq!(r["updated"], json!(true), "{r}");
+    let jid = printer(&k, &rn, 30, 0.05, "", 5.0).await;
+    let r = call(
+        &k,
+        &rn,
+        json!({"type": "monitor", "job_id": jid, "notify": en, "match": "INFO"}),
+    )
+    .await;
+    let mid = r["monitor_id"].as_i64().unwrap_or_else(|| panic!("{r}"));
+    let listed = || async { call(&k, &rn, json!({"type": "monitors"})).await["monitors"].clone() };
+    let mut rows = Value::Null;
+    for _ in 0..300 {
+        rows = listed().await;
+        if rows[0]["status"] == json!("dead") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let m = &rows[0];
+    assert_eq!(rows.as_array().map(Vec::len), Some(1), "{rows}");
+    assert_eq!(m["monitor_id"], json!(mid), "{m}");
+    assert_eq!(m["status"], json!("dead"), "{m}");
+    assert!(
+        m["error"]
+            .as_str()
+            .is_some_and(|e| e.contains(&format!("{en} does not accept 'send' from {rn}"))),
+        "{m}"
+    );
+    assert_eq!(m["delivered"], json!(0), "{m}");
+    assert!(ear.texts().is_empty());
+    // dead stays dead: later output is not sent
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let rows = listed().await;
+    assert_eq!(rows[0]["status"], json!("dead"), "{rows}");
+    assert_eq!(rows[0]["delivered"], json!(0), "{rows}");
+    let r = call(&k, &rn, json!({"type": "unmonitor", "monitor_id": mid})).await;
+    assert_eq!(r, json!({"unmonitored": true, "monitor_id": mid}));
+    assert_eq!(listed().await, json!([]));
+    stop_all(&k, &rn).await;
+}

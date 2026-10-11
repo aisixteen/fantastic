@@ -257,7 +257,7 @@
             "paste_image": .string("args: job_id:int (req), data:bytes (req), mime:str (req — image/png|jpeg|gif|webp). Saves a pasted image to a per-job scratch file and types its path into the PTY (a drag-drop — a program like claude in a browser xterm cannot reach the browser clipboard). Returns {path:str, bytes:int}."),
             "connector": .string("no args — the reference wire client SOURCE (python): paste `source` verbatim at the top of your program and it gets a `kernel` global (send/emit/watch/on_message); returns {source, howto}."),
             "monitor": .string("args: job_id:int (req — a RUNNING job of this agent), notify:str (req — the agent told), match:str? (a regex; absent = every line), every:number? (seconds — at most one delivery per window; required without `match`), tail:int? (newest lines per delivery, default 100), label:str?. Watches the job's output AS IT ARRIVES and SENDS what matches to `notify` as a turn — it polls nothing. Returns {monitor_id, job_id, notify, match, every, tail, label}; kernel `cancel` (or `unmonitor`) ends it, and it ends with its job."),
-            "monitors": .string("no args — this agent's live monitors: {monitors:[{monitor_id, job_id, notify, match, every, tail, label, delivered, pending}]}."),
+            "monitors": .string("no args — this agent's monitors: {monitors:[{monitor_id, job_id, notify, match, every, tail, label, delivered, pending, status, error}]}. `status` is running, or dead once `notify` REFUSED a delivery (`error` says why; nothing more is sent) — `unmonitor` clears it."),
             "unmonitor": .string("args: monitor_id:int (req). End one of this agent's monitors (kernel `cancel` on its id does the same). Returns {unmonitored:true, monitor_id}."),
             "reflect": .string("Identity + running job count + auth posture. No args."),
             "boot": .string("No-op. Nothing auto-restarts: a command is started by a caller, not by the record."),
@@ -1674,7 +1674,9 @@
               on different jobs, at different cadences, run in parallel.
 
             Deliveries are this agent's own calls: the listener's `callable_by` must name this agent, and
-            this agent's `can_call` the listener. A source that does not push (a URL, a remote status) gets
+            this agent's `can_call` the listener. A delivery the listener REFUSES (no grant, no such agent)
+            ends the monitor: `monitors` keeps it with `status: "dead"` and the refusal as `error`, nothing
+            more is sent, and `unmonitor` clears it. A source that does not push (a URL, a remote status) gets
             its cadence from the `scheduler`: a schedule fires a one-shot check job every
             `interval_seconds`.
 

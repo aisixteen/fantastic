@@ -1202,7 +1202,7 @@ async def _monitor_verb(id, payload, kernel):
 
 
 async def _monitors(id, payload, kernel):
-    """no args — this agent's live monitors: {monitors:[{monitor_id, job_id, notify, match, every, tail, label, delivered, pending}]}."""
+    """no args — this agent's monitors: {monitors:[{monitor_id, job_id, notify, match, every, tail, label, delivered, pending, status, error}]}. `status` is running, or dead once `notify` REFUSED a delivery (`error` says why; nothing more is sent) — `unmonitor` clears it."""
     return {"monitors": _monitor.listing(id)}
 
 
@@ -1216,6 +1216,9 @@ async def _unmonitor(id, payload, kernel):
     m = _monitor._MONITORS.get(mid)
     if m is None or m["owner"] != id:
         return refusal(NOT_FOUND, f"exec_bridge: no monitor {mid!r}", monitor_id=mid)
+    if m.get("error"):  # dead: its task is over, only the record is left
+        _monitor._MONITORS.pop(mid, None)
+        return {"unmonitored": True, "monitor_id": mid}
     await kernel.ctx.cancel_task(mid)
     return {"unmonitored": True, "monitor_id": mid}
 

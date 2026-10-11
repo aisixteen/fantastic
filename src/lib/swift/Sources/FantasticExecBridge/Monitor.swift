@@ -15,6 +15,11 @@
 // task. A monitor IS a kernel task (its id is the `monitor_id`): `ps` lists it, kernel
 // `cancel` (or `unmonitor`) ends it, and it ends with its job — after delivering what
 // still waited. RAM only, like the job it watches.
+//
+// A DELIVERY THE TARGET REFUSES (the call gate: `unauthorized`; no such agent:
+// `unknown_agent`) ENDS the monitor — never a silent drop. The dead monitor stays in
+// `monitors` with `status: "dead"` and the refusal as `error` until `unmonitor`
+// clears it.
 
 #if os(macOS)
 
@@ -25,6 +30,9 @@
 
     /// Lines in one delivery when the caller names no `tail`.
     let MONITOR_DEFAULT_TAIL: Int64 = 100
+
+    /// What a refused delivery answers — the target will never take one.
+    let MONITOR_REFUSED: Set<String> = ["unauthorized", "unknown_agent"]
 
     /// What `monitor` was asked for, checked — python `_monitor_verb` past its job checks.
     struct MonitorArgs {
@@ -126,6 +134,8 @@
         private var waiter: CheckedContinuation<Void, Never>? = nil
         private var delivered: Int64 = 0
         private var pending: Int64 = 0
+        /// Set when `notify` refused a delivery: the monitor is dead.
+        private var error: String? = nil
 
         init(owner: AgentId, jobId: TaskId, args: MonitorArgs, caller: String?, call: Int64?) {
             self.owner = owner
@@ -136,6 +146,8 @@
         }
 
         var monitorId: Int64 { lock.withLock { id } }
+
+        var isDead: Bool { lock.withLock { error != nil } }
 
         /// The id is known: from here on what was fed counts.
         func arm(_ taskId: TaskId) {
@@ -250,7 +262,8 @@
         /// The monitor's task: gather what matched, deliver it on the throttle, end with
         /// the job or a cancel. No timer while nothing waits.
         func run(kernel: Kernel, table: MonitorTable) async {
-            defer { table.remove(self) }
+            // a DEAD monitor stays listed (its `error` says why) until `unmonitor`
+            defer { if !isDead { table.remove(self) } }
             let clock = ContinuousClock()
             var last: ContinuousClock.Instant? = nil
             var pending: [String] = []
@@ -269,7 +282,7 @@
                     // throttled: wait out the rest of the window; idle: wait for a line
                     let timeout = pending.isEmpty ? nil : (args.everySecs ?? 0) - elapsed()
                     await wait(timeout: timeout)
-                    if Task.isCancelled { return }
+                    if Task.isCancelled || isDead { return }
                     let (got, end) = take()
                     pending += got
                     if end { ended = true }
@@ -301,13 +314,31 @@
             let dropped = lines.count - keep
             var body = lines.suffix(keep).joined(separator: "\n")
             if dropped > 0 { body += "\n(+\(dropped) earlier lines dropped)" }
-            lock.withLock { delivered += 1 }
+            // dead: the target refused an earlier delivery
+            let dead = lock.withLock { () -> Bool in
+                if error != nil { return true }
+                delivered += 1
+                return false
+            }
+            if dead { return }
             let text = header(ended: ended) + "\n" + body
             let target = AgentId(args.notify)
-            kernel.spawnTask(agent: owner, verb: "monitor_notify") {
-                _ = await kernel.send([
+            kernel.spawnTask(agent: owner, verb: "monitor_notify") { [self] in
+                let out = await kernel.send([
                     Item(target, .object(["type": .string("send"), "text": .string(text)]))
                 ])
+                let got = out.first?.result ?? .null
+                guard case .string(let reason) = got["reason"], MONITOR_REFUSED.contains(reason)
+                else { return }
+                let why: String
+                if case .string(let e) = got["error"] { why = e } else { why = reason }
+                let first = lock.withLock { () -> Bool in
+                    guard error == nil else { return false }
+                    error = why
+                    delivered = max(0, delivered - 1)
+                    return true
+                }
+                if first { wake() }
             }
         }
 
@@ -320,6 +351,8 @@
                     "every": args.every, "tail": .integer(args.tail),
                     "label": args.label.map(JSON.string) ?? .null,
                     "delivered": .integer(delivered), "pending": .integer(pending),
+                    "status": .string(error == nil ? "running" : "dead"),
+                    "error": error.map(JSON.string) ?? .null,
                 ])
             }
         }
@@ -346,7 +379,7 @@
         }
 
         private func of(_ owner: AgentId, _ jobId: TaskId) -> [Monitor] {
-            lock.withLock { all.filter { $0.owner == owner && $0.jobId == jobId } }
+            lock.withLock { all.filter { $0.owner == owner && $0.jobId == jobId && !$0.isDead } }
         }
 
         func feedLine(_ owner: AgentId, _ jobId: TaskId, _ line: String) {
@@ -361,11 +394,11 @@
             for m in of(owner, jobId) { m.jobEnded() }
         }
 
-        func owned(_ owner: AgentId, _ id: Int64) -> Bool {
-            lock.withLock { all.contains { $0.owner == owner && $0.monitorId == id } }
+        func owned(_ owner: AgentId, _ id: Int64) -> Monitor? {
+            lock.withLock { all.first { $0.owner == owner && $0.monitorId == id } }
         }
 
-        /// `monitors` — this agent's live monitors.
+        /// `monitors` — this agent's monitors, a dead one with its `error`.
         func listing(_ owner: AgentId) -> JSON {
             let mine = lock.withLock { all.filter { $0.owner == owner && $0.monitorId != 0 } }
             return .object(["monitors": .array(mine.map(\.listing))])
@@ -410,10 +443,14 @@
                 if raw.isNull { return Refusal.missing("unmonitor", "monitor_id") }
                 return Refusal.bad("unmonitor", "monitor_id", "an int — the id `monitor` returned")
             }
-            guard monitorTable.owned(agentId, mid) else {
+            guard let m = monitorTable.owned(agentId, mid) else {
                 return Refusal.make(
                     Refusal.notFound, "exec_bridge: no monitor \(mid)",
                     extra: [("monitor_id", raw)])
+            }
+            if m.isDead {  // its task is over, only the record is left
+                monitorTable.remove(m)
+                return .object(["unmonitored": .bool(true), "monitor_id": .integer(mid)])
             }
             _ = await kernel.cancelTask(TaskId(mid))
             return .object(["unmonitored": .bool(true), "monitor_id": .integer(mid)])

@@ -297,3 +297,47 @@ async def test_a_monitor_ends_with_its_job_delivering_what_waited(seeded_kernel)
         lambda: mid not in __import__("exec_bridge._monitor", fromlist=["x"])._MONITORS,
         what="monitor gone",
     )
+
+
+async def test_a_refused_delivery_ends_the_monitor_and_monitors_says_why(seeded_kernel):
+    """The listener does not accept the bridge's `send` (its `callable_by` lacks it):
+    the first delivery is refused, the monitor ENDS — never a silent drop — and
+    `monitors` keeps it as `dead` with the refusal until `unmonitor` clears it."""
+    k = seeded_kernel
+    await _setup(k, "deaf")
+    r = await _call(
+        k, k.id, {"type": "update_agent", "id": "deaf", "callable_by": {"$self": "*"}}
+    )
+    assert r.get("updated") is True, r
+    jid = await _printer(k, 30, 0.05)
+    r = await _call(
+        k,
+        "runner",
+        {"type": "monitor", "job_id": jid, "notify": "deaf", "match": "INFO"},
+    )
+    mid = r["monitor_id"]
+
+    rows: list[dict] = []
+
+    async def listed():
+        rows[:] = (await _call(k, "runner", {"type": "monitors"}))["monitors"]
+
+    for _ in range(300):
+        await listed()
+        if rows and rows[0].get("status") == "dead":
+            break
+        await asyncio.sleep(0.02)
+    assert len(rows) == 1, rows
+    m = rows[0]
+    assert m["monitor_id"] == mid and m["status"] == "dead", m
+    assert "deaf does not accept 'send' from runner" in m["error"], m
+    assert m["delivered"] == 0, m
+    assert _heard("deaf") == []
+    # dead stays dead: later output is not sent
+    await asyncio.sleep(0.3)
+    await listed()
+    assert rows[0]["status"] == "dead" and rows[0]["delivered"] == 0, rows
+    r = await _call(k, "runner", {"type": "unmonitor", "monitor_id": mid})
+    assert r == {"unmonitored": True, "monitor_id": mid}, r
+    await listed()
+    assert rows == [], rows

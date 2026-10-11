@@ -15,6 +15,11 @@
 //! task. A monitor IS a kernel task (its id is the `monitor_id`): `ps` lists it, kernel
 //! `cancel` (or `unmonitor`) ends it, and it ends with its job — after delivering what
 //! still waited. RAM only, like the job it watches.
+//!
+//! A DELIVERY THE TARGET REFUSES (the call gate: `unauthorized`; no such agent:
+//! `unknown_agent`) ENDS the monitor — never a silent drop. The dead monitor stays in
+//! `monitors` with `status: "dead"` and the refusal as `error` until `unmonitor`
+//! clears it.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
@@ -34,7 +39,12 @@ pub const DEFAULT_TAIL: i64 = 100;
 enum Msg {
     Line(String),
     End,
+    /// The target refused a delivery: stop now, deliver nothing more.
+    Dead,
 }
+
+/// What a refused delivery answers — the target will never take one.
+const REFUSED: [&str; 2] = ["unauthorized", "unknown_agent"];
 
 struct Mon {
     owner: AgentId,
@@ -50,6 +60,8 @@ struct Mon {
     carry: String,
     delivered: u64,
     pending: usize,
+    /// Set when `notify` refused a delivery: the monitor is dead.
+    error: Option<String>,
 }
 
 /// What the monitor's task needs, fixed at its start.
@@ -85,7 +97,7 @@ fn matches(m: &Mon, line: &str) -> bool {
 /// One output line of the job: queued for every monitor whose `match` it meets.
 pub(crate) fn feed_line(owner: &AgentId, job_id: TaskId, line: &str) {
     for m in monitors().values() {
-        if &m.owner == owner && m.job_id == job_id && matches(m, line) {
+        if &m.owner == owner && m.job_id == job_id && m.error.is_none() && matches(m, line) {
             let _ = m.tx.send(Msg::Line(line.to_string()));
         }
     }
@@ -94,7 +106,7 @@ pub(crate) fn feed_line(owner: &AgentId, job_id: TaskId, line: &str) {
 /// A PTY chunk: split into lines (a partial line waits for its end).
 pub(crate) fn feed_text(owner: &AgentId, job_id: TaskId, text: &str) {
     for m in monitors().values_mut() {
-        if &m.owner != owner || m.job_id != job_id {
+        if &m.owner != owner || m.job_id != job_id || m.error.is_some() {
             continue;
         }
         let buf = std::mem::take(&mut m.carry) + text;
@@ -112,7 +124,7 @@ pub(crate) fn feed_text(owner: &AgentId, job_id: TaskId, text: &str) {
 /// The job is gone: each of its monitors delivers what waits, then ends.
 pub(crate) fn job_ended(owner: &AgentId, job_id: TaskId) {
     for m in monitors().values_mut() {
-        if &m.owner != owner || m.job_id != job_id {
+        if &m.owner != owner || m.job_id != job_id || m.error.is_some() {
             continue;
         }
         let carry = std::mem::take(&mut m.carry);
@@ -137,7 +149,11 @@ struct RemoveOnDrop(Key);
 
 impl Drop for RemoveOnDrop {
     fn drop(&mut self) {
-        monitors().remove(&self.0);
+        let mut g = monitors();
+        // a DEAD monitor stays listed (its `error` says why) until `unmonitor`
+        if g.get(&self.0).is_some_and(|m| m.error.is_none()) {
+            g.remove(&self.0);
+        }
     }
 }
 
@@ -206,13 +222,18 @@ async fn run(
                 None => ended = true,
                 Some(None) => {}
                 Some(Some(first)) => {
+                    let mut dead = false;
                     let mut take = |m: Msg| match m {
                         Msg::Line(l) => pending.push(l),
                         Msg::End => ended = true,
+                        Msg::Dead => dead = true,
                     };
                     take(first);
                     while let Ok(m) = rx.try_recv() {
                         take(m);
+                    }
+                    if dead {
+                        return;
                     }
                 }
             }
@@ -236,19 +257,37 @@ fn deliver(cfg: &Cfg, key: &Key, lines: Vec<String>, ended: bool, kernel: &Arc<K
     if dropped > 0 {
         body.push_str(&format!("\n(+{dropped} earlier lines dropped)"));
     }
-    if let Some(m) = monitors().get_mut(key) {
-        m.delivered += 1;
+    match monitors().get_mut(key) {
+        // dead: the target refused an earlier delivery
+        Some(m) if m.error.is_some() => return,
+        Some(m) => m.delivered += 1,
+        None => {}
     }
     let text = format!("{}\n{body}", header(cfg, id, ended));
     let k = Arc::clone(kernel);
     let target = AgentId::from(cfg.notify.as_str());
+    let key = key.clone();
     kernel.spawn_task(&cfg.owner, "monitor_notify", async move {
-        let _ = k
+        let out = k
             .send(vec![Item::new(
                 target,
                 json!({"type": "send", "text": text}),
             )])
             .await;
+        let got = out
+            .into_iter()
+            .next()
+            .map(|o| o.result)
+            .unwrap_or(Value::Null);
+        let reason = got.get("reason").and_then(Value::as_str).unwrap_or("");
+        if REFUSED.contains(&reason) {
+            if let Some(m) = monitors().get_mut(&key).filter(|m| m.error.is_none()) {
+                let why = got.get("error").and_then(Value::as_str).unwrap_or(reason);
+                m.error = Some(why.to_string());
+                m.delivered = m.delivered.saturating_sub(1);
+                let _ = m.tx.send(Msg::Dead);
+            }
+        }
     });
 }
 
@@ -347,6 +386,7 @@ pub(crate) async fn monitor_reply(owner: &AgentId, payload: &Value, kernel: &Arc
             carry: String::new(),
             delivered: 0,
             pending: 0,
+            error: None,
         },
     );
     let _ = id_tx.send(mid);
@@ -361,7 +401,7 @@ pub(crate) async fn monitor_reply(owner: &AgentId, payload: &Value, kernel: &Arc
     })
 }
 
-/// `monitors` — this agent's live monitors.
+/// `monitors` — this agent's monitors, a dead one with its `error`.
 pub(crate) fn monitors_reply(owner: &AgentId) -> Value {
     let list: Vec<Value> = monitors()
         .iter()
@@ -377,6 +417,8 @@ pub(crate) fn monitors_reply(owner: &AgentId) -> Value {
                 "label": m.label,
                 "delivered": m.delivered,
                 "pending": m.pending,
+                "status": if m.error.is_some() { "dead" } else { "running" },
+                "error": m.error,
             })
         })
         .collect();
@@ -400,8 +442,14 @@ pub(crate) async fn unmonitor_reply(
             "an int — the id `monitor` returned",
         );
     };
-    let mine = monitors().contains_key(&(owner.0.clone(), mid));
-    if !mine {
+    let key = (owner.0.clone(), mid);
+    let dead = monitors().get(&key).map(|m| m.error.is_some());
+    if dead == Some(true) {
+        // its task is over, only the record is left
+        monitors().remove(&key);
+        return json!({"unmonitored": true, "monitor_id": mid});
+    }
+    if dead.is_none() {
         let mut r = refusal(
             NOT_FOUND,
             format!("exec_bridge: no monitor {}", py_str(&raw)),

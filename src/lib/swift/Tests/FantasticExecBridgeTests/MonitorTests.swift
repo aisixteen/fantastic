@@ -288,6 +288,44 @@
             #expect(ear.texts.joined(separator: "\n").contains("FATAL step 1"))
             _ = await until("monitor gone") { await liveMonitors(k).isEmpty }
         }
+
+        @Test("a refused delivery ends the monitor, and monitors says why")
+        func refusedDeliveryEndsMonitor() async throws {
+            guard let py = py3() else { return }
+            let (k, ear) = await setup()
+            let u = await call(
+                k, "kernel_state",
+                [
+                    "type": .string("update_agent"), "id": .string("ear"),
+                    "callable_by": .object(["$self": .string("*")]),
+                ])
+            #expect(u["updated"].asBool == true, "\(u)")
+            let jid = await printer(k, py, n: 30, gap: 0.05)
+            let mid =
+                await monitor(
+                    k, ["job_id": .integer(jid), "notify": .string("ear"), "match": .string("INFO")]
+                )["monitor_id"].asInt ?? -1
+            _ = await until("the monitor is dead") {
+                await liveMonitors(k).first?["status"].asString == "dead"
+            }
+            let rows = await liveMonitors(k)
+            #expect(rows.count == 1, "\(rows)")
+            #expect(rows.first?["monitor_id"].asInt == mid, "\(rows)")
+            #expect(
+                rows.first?["error"].asString?.contains("ear does not accept 'send' from runner") == true,
+                "\(rows)")
+            #expect(rows.first?["delivered"].asInt == 0, "\(rows)")
+            #expect(ear.texts.isEmpty)
+            // dead stays dead: later output is not sent
+            try await Task.sleep(nanoseconds: 300_000_000)
+            let again = await liveMonitors(k)
+            #expect(again.first?["status"].asString == "dead", "\(again)")
+            #expect(again.first?["delivered"].asInt == 0, "\(again)")
+            let un = await call(k, "runner", ["type": .string("unmonitor"), "monitor_id": .integer(mid)])
+            #expect(un == .object(["unmonitored": .bool(true), "monitor_id": .integer(mid)]), "\(un)")
+            #expect(await liveMonitors(k).isEmpty)
+            await stopAll(k)
+        }
     }
 
 #endif  // os(macOS)
