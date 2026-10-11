@@ -17,6 +17,12 @@ Each delivery is a call, made by this bridge AS ITSELF (its `can_call` must name
 A monitor IS a kernel task (its id is the `monitor_id`): `ps` lists it, kernel
 `cancel` (or `unmonitor`) ends it, and it ends with its job — after delivering what
 was still waiting. RAM only, like the job it watches.
+
+A DELIVERY THE TARGET REFUSES (the call gate: `unauthorized`; no such agent:
+`unknown_agent`) ENDS the monitor — never a silent drop (fantastic-cli, 2026-10-12:
+an AI whose `callable_by` lacked the bridge got no turn and nobody learned it). The
+dead monitor stays in `monitors` with `status: "dead"` and the refusal as `error`
+until `unmonitor` clears it.
 """
 
 from __future__ import annotations
@@ -29,13 +35,19 @@ import time
 DEFAULT_TAIL = 100
 
 _END = object()
+_DEAD = object()
+
+#: What a refused delivery answers — the target will never take one.
+REFUSED = ("unauthorized", "unknown_agent")
 
 # monitor id → its state
 _MONITORS: dict[int, dict] = {}
 
 
 def by_job(job_id: int) -> list[dict]:
-    return [m for m in _MONITORS.values() if m["job_id"] == job_id]
+    return [
+        m for m in _MONITORS.values() if m["job_id"] == job_id and not m.get("error")
+    ]
 
 
 def feed_line(job_id: int, line: str) -> None:
@@ -79,6 +91,8 @@ def listing(owner: str) -> list[dict]:
             "label": m["label"],
             "delivered": m["delivered"],
             "pending": m["pending"],
+            "status": "dead" if m.get("error") else "running",
+            "error": m.get("error"),
         }
         for m in _MONITORS.values()
         if m["owner"] == owner
@@ -122,6 +136,8 @@ async def run(m: dict, kernel) -> None:
                     item = None
                 if item is not None:
                     for x in [item, *_drain(q)]:
+                        if x is _DEAD:
+                            return
                         if x is _END:
                             ended = True
                         else:
@@ -138,7 +154,8 @@ async def run(m: dict, kernel) -> None:
             if ended:
                 return
     finally:
-        _MONITORS.pop(m["id"], None)
+        if not m.get("error"):
+            _MONITORS.pop(m["id"], None)
 
 
 def _drain(q: asyncio.Queue) -> list:
@@ -151,6 +168,8 @@ def _drain(q: asyncio.Queue) -> list:
 
 
 def _deliver(m: dict, lines: list[str], ended: bool, kernel) -> None:
+    if m.get("error"):  # dead: the target refused an earlier delivery
+        return
     dropped = max(0, len(lines) - m["tail"])
     body = "\n".join(lines[-m["tail"] :])
     if dropped:
@@ -159,8 +178,18 @@ def _deliver(m: dict, lines: list[str], ended: bool, kernel) -> None:
     text = header(m, ended) + "\n" + body
 
     async def send():
-        await kernel.send(
+        out = await kernel.send(
             [{"target": m["notify"], "payload": {"type": "send", "text": text}}]
         )
+        got = (out or [{}])[0]
+        got = got.get("result", got) if isinstance(got, dict) else got
+        if (
+            isinstance(got, dict)
+            and got.get("reason") in REFUSED
+            and not m.get("error")
+        ):
+            m["error"] = str(got.get("error") or got.get("reason"))
+            m["delivered"] -= 1
+            m["queue"].put_nowait(_DEAD)
 
     kernel.ctx.spawn_task(m["owner"], "monitor_notify", send())

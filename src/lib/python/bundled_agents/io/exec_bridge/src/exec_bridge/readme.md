@@ -152,7 +152,9 @@ It polls nothing: an idle monitor wakes never. It is how a long run is stopped E
   on different jobs, at different cadences, run in parallel.
 
 Deliveries are this agent's own calls: the listener's `callable_by` must name this agent, and
-this agent's `can_call` the listener. A source that does not push (a URL, a remote status) gets
+this agent's `can_call` the listener. A delivery the listener REFUSES (no grant, no such agent)
+ends the monitor: `monitors` keeps it with `status: "dead"` and the refusal as `error`, nothing
+more is sent, and `unmonitor` clears it. A source that does not push (a URL, a remote status) gets
 its cadence from the `scheduler`: a schedule fires a one-shot check job every
 `interval_seconds`.
 
