@@ -1,0 +1,9 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint. Scripted: no model.
+id: cell_chrome
+group: canvas
+title: "a cell's chrome: it shows with the pointer just outside the cell (its real border), every corner resizes (the opposite corner stays), and sweeping the pointer over cells costs no frame rate or GPU over an animated background"
+runner: probe.py
+costs: free
+limits:
+  seconds: 150
+env: {}

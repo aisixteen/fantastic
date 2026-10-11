@@ -23,8 +23,10 @@
 //! `--host` is `127.0.0.1` and `--kv-overflow` `evict` unless named. `run` takes
 //! EVERY word after it (the command's own flags included).
 //!
-//! `--headless`: no terminal UI; the kernel's message stream goes to stdout.
-//! `--port N` belongs to `canvas`; a new one overwrites the recorded. A kernel
+//! `--headless`: no terminal UI; the kernel's message stream goes to stdout (it
+//! may stand anywhere: `fantastic canvas --headless` is the same).
+//! `--port N` belongs to `canvas`; a new one overwrites the recorded. The first
+//! `canvas` without one picks a free port and records it; later runs reuse it. A kernel
 //! already running here refuses every argument (`run.rs`). `fantastic mcp` stays its own
 //! command (stdout is its protocol).
 
@@ -223,6 +225,8 @@ mod tests {
     #[test]
     fn port_belongs_to_canvas() {
         assert_eq!(p("canvas --port 8123").unwrap().port, Some(8123));
+        assert!(p("canvas --headless").unwrap().headless, "a flag after the recipe counts the same");
+        assert!(p("canvas --headless").unwrap().port.is_none(), "no port: the first run picks one");
         assert!(p("ai --port 8123").is_err());
         assert!(p("canvas --port 0").is_err());
     }

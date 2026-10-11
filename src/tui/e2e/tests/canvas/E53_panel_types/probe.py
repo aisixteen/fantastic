@@ -29,8 +29,8 @@ def main() -> bool:
             await asyncio.sleep(1.5)
             await spot(pg, 1250, 450, "stream")
             await asyncio.sleep(1)
-            await spot(pg, 250, 700, "agent")
-            await pg.until("!!document.querySelector('.setup-view select')", 20)
+            await spot(pg, 250, 700, "AI agent")
+            await pg.until("!!document.querySelector('.wiz .tiles button')", 20)
             await asyncio.sleep(2)  # the loader's flush lands before any reload
             ids = lambda: pg.js("[...document.querySelectorAll('.agent-frame')].map(f=>f.dataset.id).sort()")
             before = await ids()
@@ -43,7 +43,7 @@ def main() -> bool:
                     "ids": await ids(),
                     "term": await pg.js("((()=>[...document.querySelectorAll('.agent-frame .frame-body')].map(f=>{const t=f.xterm; if(!t) return ''; const b=t.buffer.active; let s=''; for(let i=0;i<b.length;i++){const l=b.getLine(i); if(l) s+=l.translateToString(true)+' ';} return s;}).join(' '))()).includes('MARK-53')"),
                     "html": await pg.js("[...document.querySelectorAll('.agent-frame iframe')].some(f=>{try{return f.contentDocument.body.innerText.includes('html-53')}catch(e){return false}})"),
-                    "setup": await pg.js("!!document.querySelector('.setup-view select')"),
+                    "setup": await pg.js("!!document.querySelector('.wiz .tiles button')"),
                     "stream": await pg.js("!!document.querySelector('.stream-view')"),
                 })
             errors = [e for e in pg.logs if "WebGL" not in e and "EXC" in e]

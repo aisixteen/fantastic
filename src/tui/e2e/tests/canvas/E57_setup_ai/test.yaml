@@ -2,7 +2,7 @@
 # plug names those). Live: the BACKEND plug.
 id: setup_ai
 group: canvas
-title: "the AI set-up cell writes an agent and a default template, and both answer"
+title: "the AI set-up wizard makes the first agent from the plug (provider → details → create): its template is saved as the default, and it answers"
 runner: probe.py
 costs: turns
 limits:

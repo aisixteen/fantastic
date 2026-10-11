@@ -200,7 +200,7 @@ and refuses any argument while the first runs.
 | command | what |
 |---|---|
 | `fantastic` | the terminal UI (a fresh directory is seeded) |
-| `fantastic canvas --port N` | plus the canvas: a page kernel bridged to the host (`--port` the first time; a new one overwrites) |
+| `fantastic canvas [--port N]` | plus the canvas: a page kernel bridged to the host (no `--port` the first time: a free one is picked and kept; a new one overwrites) |
 | `fantastic [canvas] ai vllm -p PORT` | the ROOT AI `ai` on a backend — also `ai ollama -p PORT`, `ai responses --model M`, `ai anthropic --model M`; what the server knows (model, window) is read from it |
 | `fantastic [canvas] run COMMAND [ARGS…]` | your own program from `$PATH`, as is, in the terminal (or a canvas cell) |
 | `fantastic --headless …` | no screen: the kernel's message stream on stdout |

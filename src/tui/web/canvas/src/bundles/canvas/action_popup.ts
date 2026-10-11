@@ -84,7 +84,8 @@ export const COLS = 5;
 
 const KINDS: Array<[string, Pick, Icon, Section]> = [
   ["terminal", { kind: "terminal" }, "terminal", "host"],
-  ["agent", { kind: "setup" }, "agent", "host"],
+  // a NEW AI agent, any time: the set-up wizard (a saved provider, or a new one)
+  ["AI agent", { kind: "setup" }, "agent", "host"],
   // a NEW python agent: a project bundle folder from the CLI's starter, one
   // instance placed — edit its folder, the change takes effect at once
   ["python agent", { kind: "bundle", starter: "python_agent" }, "template", "host"],
@@ -120,21 +121,22 @@ export function tiles(typed: string, presets: Presets | null): Tile[] {
     }
     return out;
   }
-  const exact = KINDS.find(([k]) => k === low);
+  const exact = KINDS.find(([k]) => k.toLowerCase() === low);
   if (exact) return [{ icon: exact[2], label: exact[0], hint: "", pick: exact[1], section: exact[3] }];
   // a project bundle's name typed exactly: only that bundle (⏎ places it)
   const exactBundle = (presets?.bundles ?? []).find((b) => b.name.toLowerCase() === low);
   if (exactBundle) return [{ icon: "template", label: exactBundle.name, hint: "", pick: { kind: "instance", bundle: exactBundle.name }, section: "bundles" }];
   const exactPage = (presets?.pageBundles ?? []).find((b) => b.name.toLowerCase() === low);
   if (exactPage) return [{ icon: "html", label: exactPage.name, hint: "", pick: { kind: "page_instance", bundle: exactPage.name }, section: "page_bundles" }];
-  // the first tile: the default AI (free text → its first turn), or set-up
-  out.push(
-    presets?.preferred
-      ? { icon: "ask", label: t ? `ask ${presets.preferred}` : "ask", hint: `★ ${presets.preferred}`, pick: { kind: "ai", template: null, text: t }, section: "host" }
-      : { icon: "agent", label: "configure AI…", hint: "no default yet", pick: { kind: "setup" }, section: "host" },
-  );
+  // the first tile: the default AI (free text → its first turn); with none set
+  // up, typed text first sets one up (the wizard)
+  if (presets?.preferred) {
+    out.push({ icon: "ask", label: t ? `ask ${presets.preferred}` : "ask", hint: `★ ${presets.preferred}`, pick: { kind: "ai", template: null, text: t }, section: "host" });
+  } else if (t) {
+    out.push({ icon: "agent", label: "set up an AI agent…", hint: "no AI set up yet", pick: { kind: "setup" }, section: "host" });
+  }
   for (const [k, pick, icon, section] of KINDS) {
-    if (!t || k.startsWith(low)) out.push({ icon, label: k, hint: "", pick, section });
+    if (!t || k.toLowerCase().startsWith(low)) out.push({ icon, label: k, hint: "", pick, section });
   }
   for (const p of plugins) {
     if (t && !p.name.toLowerCase().startsWith(low)) continue;

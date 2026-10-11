@@ -29,7 +29,7 @@
 //! (owner, 2026-09-30): its page is served by `canvas_page` through `web`'s
 //! `/file/` route; the page speaks through `canvas_ws` to `user`.
 //!
-//! `port`: the first `fantastic canvas` needs `--port N`; later runs read it
+//! `port`: the first `fantastic canvas` takes `--port N`, or picks a free port; later runs read it
 //! from `web`'s record, and a different `--port` overwrites it (only when no
 //! kernel runs here — a running one refuses every argument, `run.rs`).
 
@@ -157,6 +157,12 @@ pub async fn new_canvas(h: &Host, name: &str) -> Result<String, String> {
     Ok(node)
 }
 
+/// A port free on this machine now (the OS picks it), for the first run that names none.
+fn free_port() -> Result<u16, String> {
+    let l = std::net::TcpListener::bind(("127.0.0.1", 0)).map_err(|e| format!("no free port to pick: {e}"))?;
+    l.local_addr().map(|a| a.port()).map_err(|e| format!("no free port to pick: {e}"))
+}
+
 /// What `ensure` serves: the canvas's page.
 pub struct Urls {
     pub canvas: String,
@@ -177,7 +183,9 @@ pub async fn ensure(h: &Host, port: Option<u16>) -> Result<Urls, String> {
             ))
         }
         (true, None) => recorded.ok_or("the `web` record has no port")?,
-        (false, None) => return Err("the first `fantastic canvas` needs --port N (no default)".into()),
+        // THE FIRST RUN WITHOUT --port (owner 2026-10-11): a free port, picked once
+        // and recorded — every later run reuses it, so the command is idempotent
+        (false, None) => free_port()?,
         (false, Some(p)) => p,
     };
     let user = crate::env::HUMAN;

@@ -6,7 +6,7 @@ import { documentPage } from "../verb_docs.ts";
 import { Agent, Host } from "../../lib.ts";
 import type { Json, Kernel, Payload } from "../../lib.ts";
 import { CANVAS_CSS } from "./styles.ts";
-import type { ViewBundle, ViewHandle } from "../view.ts";
+import type { CanvasActions, ViewBundle, ViewHandle } from "../view.ts";
 import { terminalView } from "../terminal_view/terminal_view.ts";
 import { aiView } from "../ai_view/ai_view.ts";
 import { setupView } from "../setup_view/setup_view.ts";
@@ -572,9 +572,17 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       delete a.meta[k];
     }
     const v = a.parentId ?? containerNow();
-    if (Object.keys(g).length > 0) setRect(kernel, v, themeOf(kernel, v, innerWidth), a.id, g);
-    kernel.register(a);
+    // the rect lands before the cell: a refresh the rect's write starts must not
+    // prune it as a removed cell's (it read the size as 480×320 — measured)
+    registering.add(a.id);
+    try {
+      if (Object.keys(g).length > 0) setRect(kernel, v, themeOf(kernel, v, innerWidth), a.id, g);
+      kernel.register(a);
+    } finally {
+      registering.delete(a.id);
+    }
   };
+  const registering = new Set<string>(); // cells whose rect is written, the cell not yet
 
   // ─── frames ──────────────────────────────────────────────────────
   const frames = new Map<string, Frame>();
@@ -618,7 +626,9 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     window.addEventListener("mouseup", up);
   };
 
-  const startResize = (e: MouseEvent, aid: string, el: HTMLElement): void => {
+  // RESIZE FROM ANY CORNER (owner 2026-10-11): the corner dragged moves, the
+  // opposite one stays put
+  const startResize = (e: MouseEvent, aid: string, el: HTMLElement, corner: string): void => {
     e.preventDefault();
     e.stopPropagation();
     if (el.classList.contains("pinned")) return;
@@ -626,18 +636,28 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     document.body.classList.add("dragging-frame");
     const sx = e.clientX;
     const sy = e.clientY;
+    const ox = parseFloat(el.style.left);
+    const oy = parseFloat(el.style.top);
     const ow = parseFloat(el.style.width);
     const oh = parseFloat(el.style.height);
+    const west = corner.includes("w");
+    const north = corner.includes("n");
     const move = (ev: MouseEvent): void => {
-      el.style.width = `${Math.max(180, ow + (ev.clientX - sx) / view.z)}px`;
-      el.style.height = `${Math.max(120, oh + (ev.clientY - sy) / view.z)}px`;
+      const dx = (ev.clientX - sx) / view.z;
+      const dy = (ev.clientY - sy) / view.z;
+      const w = Math.max(180, west ? ow - dx : ow + dx);
+      const h = Math.max(120, north ? oh - dy : oh + dy);
+      el.style.width = `${w}px`;
+      el.style.height = `${h}px`;
+      if (west) el.style.left = `${ox + ow - w}px`;
+      if (north) el.style.top = `${oy + oh - h}px`;
     };
     const up = (): void => {
       el.classList.remove("resizing");
       document.body.classList.remove("dragging-frame");
       window.removeEventListener("mousemove", move);
       window.removeEventListener("mouseup", up);
-      void persistRect(aid, undefined, undefined, parseFloat(el.style.width), parseFloat(el.style.height));
+      void persistRect(aid, parseFloat(el.style.left), parseFloat(el.style.top), parseFloat(el.style.width), parseFloat(el.style.height));
     };
     window.addEventListener("mousemove", move);
     window.addEventListener("mouseup", up);
@@ -672,7 +692,10 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
         </span>
       </div>
       <div class="frame-body"></div>
-      <div class="resize-handle"></div>
+      <div class="resize-handle se" data-corner="se"></div>
+      <div class="resize-handle sw" data-corner="sw"></div>
+      <div class="resize-handle ne" data-corner="ne"></div>
+      <div class="resize-handle nw" data-corner="nw"></div>
     `;
     world.appendChild(el);
     const head = el.querySelector(".frame-head") as HTMLElement;
@@ -680,9 +703,9 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       if ((e.target as Element).closest(".actions")) return;
       startDrag(e, rec.id, el);
     });
-    (el.querySelector(".resize-handle") as HTMLElement).addEventListener("mousedown", (e) =>
-      startResize(e as MouseEvent, rec.id, el),
-    );
+    for (const h of el.querySelectorAll<HTMLElement>(":scope > .resize-handle")) {
+      h.addEventListener("mousedown", (e) => startResize(e, rec.id, el, h.dataset.corner ?? "se"));
+    }
     (el.querySelector(".reload") as HTMLElement).addEventListener("click", (e) => {
       e.stopPropagation();
       onReload();
@@ -790,6 +813,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       backend_id: r["id"],
       backend_root: r["root"],
       backend_lost: false,
+      unconfigured: false,
       template: r["template"],
       can_call: { ...aiView.grants(String(r["id"])) },
     } as unknown as Payload);
@@ -807,6 +831,12 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       note.className = "backend-starting";
       note.textContent = "starting its backend…";
       body.appendChild(note);
+      frames.set(rec.id, { el, rec, kind: "inline" });
+      return;
+    }
+    if (bundle === aiView && bool(rec, "unconfigured") && str(rec, "backend_id") === undefined) {
+      // AN AI CELL NOT SET UP YET (the wizard's skip): how to set it up
+      body.appendChild(notSetUp(rec.id));
       frames.set(rec.id, { el, rec, kind: "inline" });
       return;
     }
@@ -843,7 +873,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     // The frame is REGISTERED before the mount's awaits: a refresh landing
     // meanwhile must see it, or it mounts the same view a second time.
     frames.set(rec.id, { el, rec, kind: "inline" });
-    const handle = await bundle.mount({ kernel: asView, mount: body, selfId: rec.id, backend, record: rec, close });
+    const handle = await bundle.mount({ kernel: asView, mount: body, selfId: rec.id, backend, record: rec, close, actions: canvasActions });
     const mine = frames.get(rec.id);
     if (mine === undefined || mine.el !== el) {
       handle.unmount(); // removed while it mounted
@@ -854,7 +884,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     reload = (): void => {
       handle.unmount();
       body.innerHTML = "";
-      void Promise.resolve(bundle.mount({ kernel: asView, mount: body, selfId: rec.id, backend, record: rec, close })).then((h) => {
+      void Promise.resolve(bundle.mount({ kernel: asView, mount: body, selfId: rec.id, backend, record: rec, close, actions: canvasActions })).then((h) => {
         const f = frames.get(rec.id);
         if (f) f.handle = h;
       });
@@ -977,7 +1007,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     const cells = all.filter(isCell);
     let rects = rectsNow();
     if (cont !== undefined) {
-      prune(kernel, cont.id, new Set(cells.map((c) => c.id)));
+      prune(kernel, cont.id, new Set([...cells.map((c) => c.id), ...registering]));
       const other = THEMES.filter((t) => t !== theme).map((t) => rectsOf(kernel, cont.id, t));
       const sized = cells.map((c) => {
         const o = other.map((m) => m[c.id]).find((x) => x !== undefined);
@@ -1025,6 +1055,10 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     }
     for (const rec of members) {
       const mid = rec.id;
+      // A REFRESH'S MEMBERS ARE A SNAPSHOT: one removed while this refresh awaited
+      // an earlier mount is not mounted again (a newer refresh already took its
+      // frame down)
+      if (kernel.get(mid) === undefined) continue;
       let existing = frames.get(mid);
       // A pair that changed state (bound, lost, respawned) is REMOUNTED: the
       // view fronts a different backend now, or none.
@@ -1083,7 +1117,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
         seenGl.add(mid);
       }
     }
-    for (const aid of [...frames.keys()]) if (!seenDom.has(aid)) removeFrame(aid);
+    for (const aid of [...frames.keys()]) if (!seenDom.has(aid) || kernel.get(aid) === undefined) removeFrame(aid);
     // MOBILE'S PIN: the pinned cell is held on the screen's bottom
     canvas.classList.toggle("theme-mobile", theme === "mobile" && !full);
     applyView();
@@ -1174,12 +1208,71 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     setTimeout(() => f.el.classList.remove("flash"), 900);
   };
 
-  // THE SET-UP CELL — one per view: opening it again moves to it.
-  const openSetupAt = (w: { x: number; y: number }): void => {
+  // THE AI SET-UP WIZARD — one per view: opening it again moves to it; opened
+  // FOR an AI cell (its settings, or one not set up yet) it replaces the open one.
+  const SETUP_SIZE = { width: 900, height: 640 };
+  const openSetupAt = (w: { x: number; y: number }, extra: Record<string, unknown> = {}): void => {
     const c = kernel.get(containerNow());
     const open = c ? [...c.children.values()].find((a) => a.record().handler_module === setupView.handles[0]) : undefined;
-    if (open) moveTo(open.id);
-    else void spawnPairAt(setupView, w, { width: 640, height: 720 });
+    if (open && Object.keys(extra).length === 0) return moveTo(open.id);
+    if (open) closeView(open.id);
+    void spawnPairAt(setupView, w, SETUP_SIZE, extra);
+  };
+  // where a cell sits (its rect in the theme in use), or the screen's centre
+  const spotOf = (cellId: string): { x: number; y: number; w: number; h: number } => {
+    const r = rectsNow()[cellId];
+    if (r !== undefined) return { x: r.x, y: r.y, w: r.width, h: r.height };
+    const c = centre();
+    return { x: c.x, y: c.y, w: 0, h: 0 };
+  };
+  // THE CANVAS'S MOVES a view may ask for (the wizard, an AI cell)
+  const canvasActions: CanvasActions = {
+    async spawnAi(template, from, cell) {
+      if (cell !== undefined && kernel.get(cell) !== undefined) {
+        const r = await spawnAi(cell, template);
+        if (r === null) return;
+        removeFrame(cell);
+        bindAi(cell, r);
+      } else {
+        const at = spotOf(from);
+        if ((await spawnAiIn(containerOf(look, from) ?? containerNow(), at, template, "")) === null) return;
+      }
+      closeView(from);
+    },
+    skipAi(from) {
+      const at = spotOf(from);
+      registerCell(
+        new Agent({
+          id: `ai_view_${crypto.randomUUID().slice(0, 8)}`,
+          parentId: containerOf(look, from) ?? containerNow(),
+          handlerModule: aiView.handles[0]!,
+          meta: { owns_backend: false, unconfigured: true, x: Math.round(at.x), y: Math.round(at.y), width: 440, height: 360 },
+        }),
+      );
+      closeView(from);
+    },
+    openSetup(cell, ai) {
+      const at = cell !== undefined ? spotOf(cell) : { ...centre(), w: 0, h: 0 };
+      openSetupAt({ x: at.x + at.w + 40, y: at.y }, { ...(cell !== undefined ? { target_cell: cell } : {}), ...(ai !== undefined ? { edit_ai: ai } : {}) });
+    },
+    async startCoding(near) {
+      const found = (await codingAgents()).filter((a) => CODING_AGENTS.find((c) => c.name === a.name)?.section !== "host");
+      const first = found[0];
+      if (first === undefined) return toast("no coding agent found on your PATH (claude, codex, aider or opencode)");
+      const at = spotOf(near);
+      await spawnPairAt(DEFAULT_VIEW, { x: at.x + at.w + 40, y: at.y }, { width: 760, height: 480 }, { command: [first.path], display_name: first.name }, { allowed: [exactLine([first.path])] });
+    },
+  };
+  // AN AI CELL NOT SET UP YET: what it needs, and the two ways to get there
+  const notSetUp = (cellId: string): HTMLElement => {
+    const box = document.createElement("div");
+    box.className = "ai-not-set-up";
+    box.innerHTML = `<div class="nsu-title">⚙ Not set up yet</div>
+      <p>Press settings to set me up, or start your coding AI agent here to help set me up.</p>
+      <div class="nsu-row"><button class="nsu-settings">⚙ settings</button><button class="nsu-coding">▸ coding agent</button></div>`;
+    (box.querySelector(".nsu-settings") as HTMLButtonElement).onclick = (): void => canvasActions.openSetup(cellId);
+    (box.querySelector(".nsu-coding") as HTMLButtonElement).onclick = (): void => void canvasActions.startCoding(cellId);
+    return box;
   };
 
   // An AI cell at the spot, its first turn what was typed. The same order as a

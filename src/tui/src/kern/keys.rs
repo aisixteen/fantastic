@@ -149,6 +149,12 @@ pub async fn store(h: &Host, module: &str, endpoint: &str, secret: &str) -> Resu
     Ok(r)
 }
 
+/// Every key the user's home remembers: `(ref, host)` — metadata only, never
+/// a value (the set-up wizard's "saved keys").
+pub fn stored() -> Result<Vec<(String, String)>, String> {
+    secrets().refs()
+}
+
 /// Whether `module`'s records take a key: `Some(required)` when its record
 /// schema declares a `credentials` field.
 pub fn keyed(h: &Host, module: &str) -> Option<bool> {

@@ -36,7 +36,8 @@ export const CANVAS_CSS = `
     background: rgba(15, 15, 25, 0.88);
     border: 1px solid rgba(255, 255, 255, 0.10);
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.04);
-    transition: opacity .15s ease, box-shadow .2s ease, border-color .2s ease;
+    /* NO TRANSITIONS on the chrome (E73): a fade re-painted the bezel's shadow
+       every frame as the pointer crossed cells — the GPU process 125% → 511% */
   }
   /* A TERMINAL'S SCROLLBAR only while the pointer is on its cell (owner
      2026-10-09, E65): xterm's scrollbar re-renders on every scrolled line, and
@@ -45,22 +46,24 @@ export const CANVAS_CSS = `
   .agent-frame:not(:hover) .xterm .scrollbar,
   .agent-frame:not(:hover) .xterm-decoration-overview-ruler { display: none; }
   @media (hover: hover) {
-    .agent-frame:not(:hover):not(.dragging):not(.resizing)::before,
+    /* hidden, the bezel still catches the pointer: coming at a cell from outside,
+       its chrome shows on its REAL border (owner 2026-10-11), not only once the
+       pointer is over the content */
+    .agent-frame:not(:hover):not(.dragging):not(.resizing)::before { opacity: 0; }
     .agent-frame:not(:hover):not(.dragging):not(.resizing) > .frame-head,
     .agent-frame:not(:hover):not(.dragging):not(.resizing) > .resize-handle { opacity: 0; pointer-events: none; }
   }
+  /* a margin round the bezel that also counts as on the cell: a little above or
+     beside it shows the chrome — and its corners to resize from */
+  .agent-frame::after { content: ""; position: absolute; inset: -42px -16px -16px -16px; z-index: -2; }
   /* FE = page content, BE = a view of a host agent (backend-owned views) */
   .agent-frame[data-side="page"]::before { border-color: rgba(120, 170, 255, 0.28); }
   .agent-frame[data-side="host"]::before { border-color: rgba(255, 190, 90, 0.34); }
-  .agent-frame:hover::before {
-    box-shadow: 0 8px 40px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.06);
-  }
   .agent-frame.dragging::before, .agent-frame.resizing::before {
     box-shadow: 0 12px 48px rgba(0, 0, 0, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.08);
   }
   .frame-head {
     position: absolute; top: -32px; left: 0; right: 0; height: 32px; z-index: 4; box-sizing: border-box; padding: 0 6px;
-    transition: opacity .15s ease;
     display: flex; align-items: center; justify-content: space-between;
     color: rgba(255, 255, 255, 0.7);
     font: 600 11px ui-monospace, SFMono-Regular, monospace;
@@ -95,12 +98,16 @@ export const CANVAS_CSS = `
   #canvas.theme-mobile .agent-frame > .resize-handle { display: none; }
   .frame-body { position: relative; z-index: 2; flex: 1 1 0; min-height: 0; overflow: hidden; background: transparent; border-radius: 10px; }
   .frame-body iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: transparent; }
-  .resize-handle {
-    position: absolute; bottom: -6px; right: -6px; width: 14px; height: 14px;
-    cursor: nwse-resize;
-    background: linear-gradient(135deg, transparent 50%, rgba(255,255,255,0.30) 50%);
-    border-radius: 0 0 14px 0; z-index: 3; transition: opacity .15s ease;
-  }
+  /* A HANDLE ON EACH CORNER of the bezel (head included) */
+  .resize-handle { position: absolute; width: 16px; height: 16px; z-index: 5; }
+  .resize-handle.se { bottom: -8px; right: -8px; cursor: nwse-resize; border-radius: 0 0 14px 0;
+    background: linear-gradient(135deg, transparent 50%, rgba(255,255,255,0.30) 50%); }
+  .resize-handle.sw { bottom: -8px; left: -8px; cursor: nesw-resize; border-radius: 0 0 0 14px;
+    background: linear-gradient(225deg, transparent 50%, rgba(255,255,255,0.30) 50%); }
+  .resize-handle.ne { top: -40px; right: -8px; cursor: nesw-resize; border-radius: 0 14px 0 0;
+    background: linear-gradient(45deg, transparent 50%, rgba(255,255,255,0.30) 50%); }
+  .resize-handle.nw { top: -40px; left: -8px; cursor: nwse-resize; border-radius: 14px 0 0 0;
+    background: linear-gradient(315deg, transparent 50%, rgba(255,255,255,0.30) 50%); }
   /* THE SIDEBAR and CANVAS-LIST cells (side_view.ts): a cell's body, scrolling */
   .side { height: 100%; overflow-y: auto; box-sizing: border-box; padding: 8px 0 6px; display: flex; flex-direction: column;
     color: rgba(220,230,245,0.85); font: 12px ui-monospace, SFMono-Regular, monospace; }
@@ -138,6 +145,16 @@ export const CANVAS_CSS = `
   #canvas.full-view .agent-frame.full { left: 12px !important; top: 44px !important;
     width: calc(100vw - 24px) !important; height: calc(100vh - 56px) !important; }
   #canvas.full-view .agent-frame.full .resize-handle { display: none; }
+  /* an AI cell not set up yet (the wizard's skip) */
+  .ai-not-set-up { height: 100%; box-sizing: border-box; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 10px; padding: 24px; text-align: center; background: #0f0e16; color: #a39cba; border-radius: 10px;
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif; }
+  .ai-not-set-up .nsu-title { color: #ece9f5; font-size: 17px; font-weight: 650; }
+  .ai-not-set-up p { margin: 0; max-width: 300px; }
+  .ai-not-set-up .nsu-row { display: flex; gap: 8px; margin-top: 6px; }
+  .ai-not-set-up button { font: inherit; color: #ece9f5; background: #241f35; border: 1px solid #312c40; border-radius: 8px; padding: 8px 14px; cursor: pointer; }
+  .ai-not-set-up button:hover { border-color: #b78cff; }
+  .ai-not-set-up .nsu-settings { background: #b78cff; border-color: #b78cff; color: #16121f; font-weight: 700; }
   /* the viewed-full label: centred ON the frame's top border (top: 44px) */
   .full-hint { position: fixed; top: 44px; left: 50%; transform: translate(-50%, -50%); z-index: 60;
     max-width: calc(100vw - 48px); box-sizing: border-box; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
