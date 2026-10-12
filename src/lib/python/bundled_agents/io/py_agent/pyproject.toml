@@ -1,0 +1,20 @@
+[project]
+name = "fantastic-py-agent"
+version = "0.1.0"
+description = "py_agent: the base a folder bundle with a program extends — the kernel runs the program, the program answers the bundle's verbs over the connector channel."
+requires-python = ">=3.11"
+dependencies = ["fantastic-exec-bridge"]
+
+# A folder bundle (`<root>/bundles/<name>/bundle.yaml`, `base: py_agent`) names its
+# program (`command`) and its verbs; the kernel runs the program for each instance and
+# relays verb calls to it. The program speaks the exec_bridge connector channel.
+
+[project.entry-points."fantastic.bundles"]
+py_agent = "py_agent.tools"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/py_agent"]

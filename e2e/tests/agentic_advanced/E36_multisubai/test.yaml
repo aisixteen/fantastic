@@ -1,0 +1,17 @@
+# WHAT to measure and HOW LONG to allow. Never a model, an endpoint, a key
+# or a backend name — those live in e2e/backends/.
+id: multisubai
+group: agentic_advanced
+title: three solvers, three oracles, one code — the harness builds and kicks off; the swarm solves
+runner: probe.py
+runtimes: [python, rust, swift]
+costs: turns
+# THREE LANES inside one test: the solvers share the proxy. Run alone.
+long: true
+limits:
+  idle_seconds: 60
+  max_turns: 50
+  no_progress_turns: 0
+  turn_chars: 120000
+  turn_seconds: 600
+env: {FANTASTIC_AI_SEND_TIMEOUT: "420", UNATTENDED: "1200"}

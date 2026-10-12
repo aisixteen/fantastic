@@ -4,7 +4,7 @@
             "type": "swift",
             "request": "launch",
             "args": [],
-            "cwd": "${workspaceFolder:fantastic_canvas}/swift",
+            "cwd": "${workspaceFolder:fantastic_canvas}/src/lib/swift",
             "name": "Debug fantastic (swift)",
             "target": "fantastic",
             "configuration": "debug",
@@ -14,7 +14,7 @@
             "type": "swift",
             "request": "launch",
             "args": [],
-            "cwd": "${workspaceFolder:fantastic_canvas}/swift",
+            "cwd": "${workspaceFolder:fantastic_canvas}/src/lib/swift",
             "name": "Release fantastic (swift)",
             "target": "fantastic",
             "configuration": "release",
@@ -24,7 +24,7 @@
             "type": "swift",
             "request": "launch",
             "args": [],
-            "cwd": "${workspaceFolder:fantastic_canvas}/swift",
+            "cwd": "${workspaceFolder:fantastic_canvas}/src/lib/swift",
             "name": "Debug CloudBridgeDerisk (swift)",
             "target": "CloudBridgeDerisk",
             "configuration": "debug",
@@ -34,11 +34,31 @@
             "type": "swift",
             "request": "launch",
             "args": [],
-            "cwd": "${workspaceFolder:fantastic_canvas}/swift",
+            "cwd": "${workspaceFolder:fantastic_canvas}/src/lib/swift",
             "name": "Release CloudBridgeDerisk (swift)",
             "target": "CloudBridgeDerisk",
             "configuration": "release",
             "preLaunchTask": "swift: Build Release CloudBridgeDerisk (swift)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:fantastic_canvas}/src/lib/swift",
+            "name": "Debug fantastic_kernel (src/lib/swift)",
+            "target": "fantastic_kernel",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug fantastic_kernel (src/lib/swift)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:fantastic_canvas}/src/lib/swift",
+            "name": "Release fantastic_kernel (src/lib/swift)",
+            "target": "fantastic_kernel",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release fantastic_kernel (src/lib/swift)"
         }
     ]
 }

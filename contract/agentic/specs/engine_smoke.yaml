@@ -1,0 +1,34 @@
+# Test spec for `configs/engine_smoke.yaml` — WHAT THIS SUITE ASSERTS.
+# The kernel config it runs against is a separate, deployable file; nothing
+# test-specific may leak into it.
+config: engine_smoke.yaml
+
+name: engine_smoke
+description: >
+  An engine fixture, not a scenario. A healthy four-agent roster wired so that
+  each of the two gate halves refuses at least once — enough shape, reachability
+  and reboot surface to keep hydrate/dehydrate/reach honest on their own.
+
+expect:
+  hydration: ok
+  reboot: true
+  closed_roster_sender: worker
+  steps:
+    - name: the declared worker→memory edge is usable
+      reach: {from: worker, to: memory, send: {type: write, path: probe.txt, bytes_utf8: "1"}}
+      expect: {allow: true}
+    - name: a loader reaches not even its own child without a grant
+      reach: {from: static_loader, to: memory, send: {type: reflect}}
+      expect: {allow: false, side: egress}
+    - name: a verb outside the grant is refused by the sender's own egress
+      reach: {from: worker, to: memory, send: {type: append, path: probe.txt, bytes_utf8: x}}
+      expect: {allow: false, side: egress}
+    - name: can_call without callable_by is refused BY THE CALLEE
+      reach: {from: worker, to: quiet, send: {type: list, path: ""}}
+      expect: {allow: false, side: ingress}
+    - name: an undeclared lateral edge never leaves the sender
+      reach: {from: worker, to: island, send: {type: list, path: ""}}
+      expect: {allow: false, side: egress}
+    - name: a granted edge is one-way — the reverse was never declared
+      reach: {from: memory, to: worker, send: {type: list, path: ""}}
+      expect: {allow: false, side: egress}

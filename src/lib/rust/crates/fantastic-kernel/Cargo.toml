@@ -1,0 +1,33 @@
+[package]
+publish = false
+name = "fantastic-kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Recursive Agent substrate + Kernel shared context for the fantastic_canvas medium."
+
+[dependencies]
+# CPython-format helpers (`py_repr`, `py_str`, …) — the kernel's refusal texts
+# are python's, byte for byte, so it reads them from the one shared crate
+# instead of keeping a Debug-quoting copy.
+fantastic-bundle = { path = "../fantastic-bundle" }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# THE YAML READER (`yaml_io::load`) is PyYAML's `CSafeLoader`: libyaml gives
+# the EVENTS (each scalar's tag and `plain_implicit`) and `yaml_io/read.rs`
+# applies PyYAML's YAML 1.1 resolver + `SafeConstructor` to them. No Rust YAML
+# crate implements 1.1 plain scalars, tags and `<<` merges as PyYAML does.
+unsafe-libyaml = "0.2"
+regex = "1"
+dashmap = { workspace = true }
+futures-util = { workspace = true }
+arc-swap = { workspace = true }
+libc = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }
+tempfile = "3"

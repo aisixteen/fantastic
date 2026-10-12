@@ -1,0 +1,216 @@
+# THE SCENARIO — data, one copy. No model: the actor is a scripted keyboard in a
+# pseudo-terminal (the shell's own PTY rig, src/tui/e2e/screenshot.rs), and
+# every key and every expected frame is written below. What is measured is the
+# `fantastic` SHELL BINARY: init on launch, the blueprint, the live tree, the
+# clean exit, and rehydration.
+#
+# Runs are sequential processes over ONE temp directory.
+
+id: tui
+title: fantastic — the shell's init on launch, blueprint and rehydration, keyboard-driven
+runtimes: [tui]
+costs: free
+
+screen: {rows: 40, cols: 120}
+
+runs:
+  # ── 1 · launch: a fresh directory is seeded, the live tree, a clean exit ──
+  - name: init
+    script: |
+      wait 1200
+      key space
+      wait 3500
+      shot live
+      key ctrl-c
+      wait 150
+      key ctrl-c
+      exit 8000
+    frames:
+      # no docked title: the live shell gives every row to the work
+      # the `mcp` leg is made at boot (owner 2026-10-08: it keeps the project's
+      # .mcp.json right before any client connects), with its bridge
+      live: {contains: [fs_loader, exec, files, user, store, memory, mcp], contains_block_title: false}
+    after_exit:
+      exit_code: 0
+      lock_released: true
+      files_exist:
+        - .fantastic/agents/user/agents/exec/agent.yaml
+        - .fantastic/agents/user/agents/files/agent.yaml
+        - .fantastic/agents/user/agent.yaml
+        - .fantastic/agents/user/agents/fs_loader/agent.yaml
+        - .fantastic/agents/user/agents/store/agent.yaml
+        - .fantastic/agents/user/agents/memory/agent.yaml
+        - .fantastic/memory.db
+        - .fantastic/agents/user/agents/mcp/agent.yaml
+        - .fantastic/agents/user/agents/mcp_config/agent.yaml
+        - .fantastic/prompt.md
+        - .mcp.json
+      files_absent: [.fantastic/messages.yaml, .fantastic/ledger.json]
+
+  # ── 2 · the same directory: no intro, straight to the tree, log grows ──────
+  #       (under `user`: bundles_watch, exec, files, fs_loader … — sorted)
+  #       …and an agent with no view of its own opens in the DEFAULT view
+  - name: rehydrate
+    script: |
+      wait 2500
+      shot live
+      key down
+      wait 200
+      key down
+      wait 200
+      key down
+      wait 200
+      key down
+      wait 200
+      key down
+      wait 200
+      key down
+      wait 200
+      key down
+      wait 300
+      key enter
+      wait 1200
+      shot default_view
+      key ctrl-c
+      wait 150
+      key ctrl-c
+      exit 8000
+    frames:
+      # Activity, `kernel_memory` (the kernel's RAM store) and `user` sit under the kernel's row; fs_loader is user's fourth child: seven down
+      live: {contains: [exec, files, user, "✉ Activity"], contains_block_title: false}
+      # fs_loader has no specific view: who it is, who it talks to, its verbs, its rows
+      default_view:
+        contains: ["fs_loader  ● open", "EGRESS · may call", "INGRESS · callable by", "baseline: $self", "VERBS", "ROWS ·"]
+        lacks: ["sealed —"]
+    after_exit:
+      exit_code: 0
+      lock_released: true
+      no_kernel_rows: true
+
+  # ── 3 · the Activity page: every open question to the human, none here ─────
+  - name: activity
+    script: |
+      wait 2500
+      key down
+      wait 300
+      key enter
+      wait 800
+      shot activity
+      key ctrl-c
+      wait 150
+      key ctrl-c
+      exit 8000
+    frames:
+      activity:
+        contains: ["✉ Activity  0 open · 0 answered", "OPEN · 0", "nothing waiting on you", "ANSWERED · 0"]
+    after_exit:
+      exit_code: 0
+      lock_released: true
+
+  # ── 4 · the in-app terminal: `t` opens $SHELL below the page as an agent,
+  #       typed keys reach it, Esc hands the keyboard back, `t` closes it ─────
+  - name: terminal
+    script: |
+      wait 2500
+      key t
+      wait 2500
+      type echo hi-$((6*7))
+      key enter
+      wait 1200
+      shot open
+      key esc
+      wait 300
+      key t
+      wait 1200
+      shot closed
+      key ctrl-c
+      wait 150
+      key ctrl-c
+      exit 8000
+    frames:
+      # the arithmetic is the shell's, so `hi-42` on screen proves a live PTY
+      open: {contains: [" term ", "hi-42"]}
+      closed: {lacks: ["hi-42", "● term"]}
+    after_exit:
+      exit_code: 0
+      lock_released: true
+      files_absent: [.fantastic/agents/user/agents/term/agent.yaml]
+
+  # ── 5 · the sidebar's three views: v flat, < rail, > back ─────────────────
+  - name: sidebar
+    script: |
+      wait 2500
+      key v
+      wait 400
+      shot flat
+      type <
+      wait 400
+      shot rail
+      type >
+      wait 400
+      shot back
+      key v
+      wait 400
+      shot tree
+      key ctrl-c
+      wait 150
+      key ctrl-c
+      exit 8000
+    frames:
+      # FLAT: one level of channels; the loader and the store fold into one line
+      flat: {contains: ["# exec", "# files", "# user", "+ 2 system", "v tree · < collapse"], lacks: ["fs_loader"]}
+      # RAIL: tiles, the selection's tall mark, the way back
+      rail: {contains: ["▄▄▄▄▄", "▐   F", "» >"], lacks: ["# exec"]}
+      back: {contains: ["# exec", "+ 2 system"]}
+      tree: {contains: ["● fs_loader", "● store", "v flat · < collapse"]}
+    after_exit:
+      exit_code: 0
+      lock_released: true
+
+  # ── 6 · the set-up page: four fields, no defaults, nothing written unasked.
+  #       This build links no ai backend, so the page says so and a write is
+  #       refused in place, naming what is missing.
+  - name: setup
+    script: |
+      wait 2500
+      type G
+      wait 200
+      key enter
+      wait 800
+      shot page
+      key down
+      key down
+      key down
+      key enter
+      wait 300
+      shot refused
+      key ctrl-c
+      wait 150
+      key ctrl-c
+      exit 8000
+    frames:
+      page:
+        contains: ["+ add an ai agent", "SET UP AN AI AGENT", "no ai backend is linked into this build",
+                   "— none linked —", "id              — not set —", "WRITE THE RECORD"]
+      refused: {contains: ["✕ missing: id, handler"]}
+    after_exit:
+      exit_code: 0
+      lock_released: true
+
+  # ── 7 · the mouse: a click on a sidebar row selects and opens it ──────────
+  #       (the tree box's border is row 0; `kernel_memory` takes a row above `user`: fs_loader is one lower)
+  - name: mouse
+    script: |
+      wait 2500
+      click 8 8
+      wait 800
+      shot clicked
+      key ctrl-c
+      wait 150
+      key ctrl-c
+      exit 8000
+    frames:
+      clicked: {contains: ["fs_loader  ● open", "╭", "╰"]}
+    after_exit:
+      exit_code: 0
+      lock_released: true

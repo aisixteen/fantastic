@@ -1,0 +1,33 @@
+[package]
+publish = false
+name = "fantastic-ai-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared reflect-driven LLM-agent machinery (state, verbs, agentic loop, prompt assembly, events, history) behind a Provider seam. Backends supply only their Provider + a thin Bundle."
+
+[dependencies]
+# python-format helpers: `py_truthy` decides the `target_id or target`
+# fall-through exactly as python does.
+fantastic-bundle = { path = "../../fantastic-bundle" }
+fantastic-kernel = { path = "../../fantastic-kernel" }
+async-trait = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+futures-util = { workspace = true }
+# `getentropy` — the OS CSPRNG behind python's `secrets` module.
+libc = { workspace = true }
+# The fold's MECHANICAL INDEX — python's `_PATH` / `_IDENT` patterns.
+regex = "1"
+
+[dev-dependencies]
+fantastic-file = { path = "../fantastic-file" }
+# Every AI agent keeps its conversation in a memory store; the tests wire one.
+fantastic-ram-store = { path = "../fantastic-ram-store" }
+# A backend reads its key from a credential store; the reader's tests wire one.
+fantastic-credential-store = { path = "../fantastic-credential-store" }
+fantastic-exec-bridge = { path = "../fantastic-exec-bridge" }
+# The author tests allowlist a REAL interpreter — the test acting as operator.
+which = "6"
+tempfile = "3"
+tokio = { workspace = true, features = ["test-util", "macros"] }

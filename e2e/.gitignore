@@ -1,0 +1,7 @@
+# Run artifacts. The suite is tracked; what a RUN produces is not — logs carry
+# model output and transcripts, and a `.fantastic` store is a scratch kernel tree.
+runs/
+*.log
+.fantastic/
+__pycache__/
+*.pyc

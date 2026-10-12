@@ -1,0 +1,148 @@
+# `e2e/` — the live suite
+
+Tests that spend **real model turns**. Nothing here runs automatically and
+nothing should: no pytest collection, no CI, no `npm test`. They exist to answer
+one question a unit test cannot — *can a model, given only this substrate's own
+self-description, actually use it?*
+
+```
+e2e/
+  run.py                the launcher: picks a backend, runs N tests in parallel
+  backends/             THE PLUG — which model, reached how (ollama|responses|vllm)
+  helpers/              the shared machinery: bootstrap · proxy reader · AI connector · verdict
+  preflight.py          free, instant: would a run fail for a reason that is not the substrate?
+  tests/<group>/<id>/   one folder per test
+  runs/<stamp>/         per-test logs (gitignored — they carry model output)
+```
+
+## One test, one folder
+
+Every test owns its directory, and every directory has the same shape:
+
+| file | what it is |
+|---|---|
+| `README.md` | what this test proves, and how to run it alone |
+| `kernel.yaml` | the agent roster it builds — **checked against `probe.py` before every run** |
+| `test.yaml` | limits and knobs; backend-agnostic by construction |
+| `probe.py` | the runner |
+| `selftest.py` | *(where it exists)* the same fixture driven by a scripted actor, no model |
+
+Adding a test is adding a directory. There is no central list to forget.
+
+## The two axes: what is measured vs. what answers
+
+This separation is the whole design, and it is worth being blunt about why.
+
+**`tests/` never names a model, an endpoint, a key, or a backend.** It says what
+to measure and how long to allow. **`backends/` names nothing about a test.** It
+says which model, reached how, and what that plug needs before it can run.
+
+The suite used to carry an `if BACKEND == …: … elif …` inside each probe, at
+three sites each. Thirty branches that drifted independently — and did: one probe
+never read its endpoint variable, so it died on a 401 while five siblings ran fine
+against the same server. That class of bug is now unwritable.
+
+The same property makes results comparable. Run `agentic/plan` against a hosted
+frontier model and against a local 12B and the only thing that differed is the
+plug.
+
+## Groups
+
+| group | what lives there |
+|---|---|
+| `agentic/` | a model doing real work in the substrate — building, composing, planning, discovering peers, and the kernel contracts (ledger, dead letters, user actions) measured *through* a model |
+| `agentic_advanced/` | the hard end: structures that OUTLIVE the conversation — durable sub-agents, wired graphs, A/B on whether naming the graph changes its shape |
+| `backends/` | the inference plug itself — the Responses wire measured raw (`wire_responses`) and the provider contract ai_core relies on, through a live agent (`provider_contract`, any `BACKEND`) |
+| `connectors/` | an outside service as an agent, NO model — a scripted fake of the service, the kernel's connector on every host runtime over `web_rest`, what crosses the wire (`mcp_client`: tools → verbs, every result mapping, the key on every request) |
+
+The top level is by *kind*, deliberately: not every future test type is an LLM
+test, and a non-LLM group should not have to pretend to be one.
+
+## Running it
+
+Preflight first — it is free and it names the fix:
+
+```sh
+cd src/lib/python && uv run python ../../../e2e/preflight.py
+```
+
+Then the launcher. Against a vLLM server, `BACKEND=vllm` names the server and the
+KV-cache table's policy — all required, nothing guessed:
+
+```sh
+cd src/lib/python && \
+BACKEND=vllm \
+VLLM_ENDPOINT=http://127.0.0.1:18000/v1 \
+FANTASTIC_AI_MODEL=qwen3.8-27b \
+VLLM_KV_SLOTS=7 VLLM_KV_OVERFLOW=evict \
+uv run python ../../../e2e/run.py --lanes 1
+```
+
+It sends the repetition knobs in `sampling.default.json` as record fields and leaves
+the thinking budget to the backend's own per-call rule. A door in front of the
+server that wants a key: export `VLLM_API_KEY` and the plug names the `vllm` ref (the
+store reads the variable); unset, the record names no `credentials` and no header goes
+out. For the shared GPU the URL is the production deployment's HTTPS door, with its
+own key (recipe: `tmp/vllm_backend.md`); keep lanes at 1–2 there — its run slots are
+shared with production.
+
+The OpenAI Responses wire is `BACKEND=responses` with `RESPONSES_ENDPOINT` (the full
+`…/v1/responses` URL) and `OPENAI_API_KEY`; a local ollama is `BACKEND=ollama`.
+
+**Keys never reach a backend from the environment.** Every e2e kernel carries a
+`creds` credential_store with the `env` backend (`helpers/creds.py`): the key
+variable you export is read BY THE STORE, one ref per keyed plug (`responses`,
+`vllm`) bound to that plug's endpoint host, and every keyed AI record names
+`credentials: {store: creds, ref: <plug>}`. The root holds a heritable `get` grant
+on the store, so an agent a MODEL creates reads its key the same way.
+
+| flag | effect |
+|---|---|
+| `--lanes N` | how many run at once |
+| `--group agentic` | one group |
+| `--id plan` | one test (repeatable) |
+| `--free` / `--only-free` | include / run only the self-tests, which cost no turns |
+| `--list` | show what would run, run nothing |
+
+**Lanes are somebody else's latency.** The GPU behind the endpoint holds a fixed
+number of sequences and production traffic shares it. `--lanes` is a promise
+about that, not a throughput dial.
+
+## No guessed defaults
+
+`BACKEND` and `FANTASTIC_AI_MODEL` are required and never inferred. This is the
+same rule the kernel holds itself to, for the same reason: a guessed default is
+how a run ends up measuring something other than what you meant, and here that
+mistake also costs real turns to discover.
+
+## Reading a result
+
+Probes print a human verdict line *and* a machine one — `E2E-VERDICT: PASS|FAIL`.
+The launcher reads only the machine line. A probe that prints neither is reported
+`no verdict`, never guessed into a pass: "the probe never said" and "the probe
+said no" are different facts, and collapsing them invents a result.
+
+Every run keeps its full transcripts under `runs/<stamp>/`. These cost turns —
+re-running to look again is not free.
+
+## The self-tests exist because a fixture lied
+
+`selftest.py` drives a probe's fixture with a *perfect scripted actor* and asserts
+it passes. That sounds redundant until it isn't: `subai`'s fixture withheld the
+grants its own task required, so the task was unpassable, and every run scored a
+model failure that had never happened. The self-test found it in seconds and costs
+nothing. Run them whenever a probe starts failing in a way that smells structural.
+
+## Thinking, and its budget
+
+Reasoning models think here and that is the intended mode — the vllm provider
+reads **both** channels, wrapping `reasoning_content` deltas in `<think>…</think>`
+and streaming them beside the answer. Nothing in this suite turns thinking off.
+
+`think` is an ollama **record** field, never defaulted here.
+
+What does need attention is the **budget**. A reasoning model can spend an entire
+turn thinking and come back cut at `max_tokens` — thought present, answer empty.
+That is a budget problem wearing a model failure's clothes. `max_tokens` is ONE
+constant for every test (`backends.THINK_BUDGET`); `MAX_TOKENS=…` overrides it for
+one deliberate run, and vllm_backend keeps its `thinking_token_budget` below it.

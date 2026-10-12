@@ -1,0 +1,77 @@
+[package]
+publish = false
+name = "fantastic-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The `fantastic` binary — composes the kernel + default bundle set."
+
+[[bin]]
+name = "fantastic_kernel"
+path = "src/main.rs"
+
+[dependencies]
+fantastic-bundle = { path = "../fantastic-bundle" }
+fantastic-kernel = { path = "../fantastic-kernel" }
+fantastic-core = { path = "../bundles/fantastic-core" }
+fantastic-file = { path = "../bundles/fantastic-file" }
+fantastic-ram-store = { path = "../bundles/fantastic-ram-store" }
+fantastic-credential-store = { path = "../bundles/fantastic-credential-store" }
+fantastic-web = { path = "../bundles/fantastic-web" }
+fantastic-web-ws = { path = "../bundles/fantastic-web-ws" }
+fantastic-web-rest = { path = "../bundles/fantastic-web-rest" }
+fantastic-scheduler = { path = "../bundles/fantastic-scheduler" }
+fantastic-static-loader = { path = "../bundles/fantastic-static-loader" }
+fantastic-ollama-backend = { path = "../bundles/fantastic-ollama-backend" }
+fantastic-bridge = { path = "../bundles/fantastic-bridge" }
+fantastic-responses-backend = { path = "../bundles/fantastic-responses-backend" }
+fantastic-vllm-backend = { path = "../bundles/fantastic-vllm-backend" }
+fantastic-anthropic-backend = { path = "../bundles/fantastic-anthropic-backend" }
+# A remote MCP server as an agent — its tools are the agent's verbs.
+fantastic-mcp-client = { path = "../bundles/fantastic-mcp-client" }
+# Apple's on-device model, in BOTH tiers and on every target (as swift registers
+# it): on macOS its build links the swift FantasticFMBridge static library — no
+# subprocess, no dlopen at run time, so the sandboxed tier may carry it; on every
+# other target nothing is linked and a send is refused naming the platform.
+fantastic-foundation-models-backend = { path = "../bundles/fantastic-foundation-models-backend" }
+fantastic-cli-bundle = { path = "../bundles/fantastic-cli-bundle" }
+# TEST-ONLY fixture agents the shared e2e scenarios name. OPTIONAL and
+# off by default — a production binary carries none of it.
+fantastic-scenario-probes = { path = "../bundles/fantastic-scenario-probes", optional = true }
+# Full-tier-only bundles — subprocess-using; only compiled into the
+# `full` feature build. iOS embedded slice MUST NOT pull them in.
+fantastic-exec-bridge = { path = "../bundles/fantastic-exec-bridge", optional = true }
+# The base a folder bundle with a program extends — it spawns that program.
+fantastic-py-agent = { path = "../bundles/fantastic-py-agent", optional = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+
+[features]
+# Default for the standalone CLI binary is the full tier — it runs on
+# Linux servers, macOS Pro builds, CI runners, and any unsandboxed
+# host. The subprocess-spawning bundle (exec_bridge — commands and PTY jobs) gates
+# to this feature; the `embedded` build excludes them at compile time.
+default = ["full"]
+
+# Full tier — no sandbox constraints. Subprocess-spawning bundles are
+# allowed. Server, CLI, macOS Pro app.
+full = [
+    "dep:fantastic-exec-bridge",
+    "dep:fantastic-py-agent",
+]
+
+# Sandboxed / embedded-library tier — must compile clean for iOS /
+# iPadOS / visionOS / macOS Lite (App Sandbox). Compile-time
+# guarantee: no `std::process`, no `fork`, no dynamic library loading.
+# Building the CLI under this feature is unusual but supported (e.g.
+# an iOS-tier dev binary that refuses to register full-tier bundles).
+embedded = []
+
+# Compile the e2e scenario fixtures into the binary. `e2e/runners/host.py`
+# builds with this; nothing else does, so a default build carries none of it.
+scenario-probes = ["dep:fantastic-scenario-probes"]
+
+[dev-dependencies]
+tempfile = "3"
+# SIGTERM a spawned daemon in the A14.13 lifecycle-lines integration test.
+libc = { workspace = true }

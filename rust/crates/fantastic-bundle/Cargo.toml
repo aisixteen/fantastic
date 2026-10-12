@@ -1,9 +1,0 @@
-[package]
-publish = false
-name = "fantastic-bundle"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-description = "Bundle trait re-exported by every fantastic_canvas Rust bundle."
-
-[dependencies]

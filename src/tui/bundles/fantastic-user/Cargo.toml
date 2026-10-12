@@ -1,0 +1,20 @@
+[package]
+name = "fantastic-user"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+publish = false
+description = "`user` — the one human, as an agent (`user.tools`): every call the terminal and the canvas make goes out through it (`forward`, token-checked for a wire caller when a token is set), `around` from the page records, and the probe's own verbs."
+
+# Outside `src/lib`, like the MCP leg: only the kernel's public surface.
+[dependencies]
+fantastic-kernel = { path = "../../../lib/rust/crates/fantastic-kernel" }
+fantastic-scenario-probes = { path = "../../../lib/rust/crates/bundles/fantastic-scenario-probes" }
+async-trait = "0.1"
+serde_json = "1"
+sha2 = "0.10"
+subtle = "2.6"
+tokio = { version = "1.40", features = ["sync", "time", "process", "rt"] }
+
+[dev-dependencies]
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "sync", "time"] }

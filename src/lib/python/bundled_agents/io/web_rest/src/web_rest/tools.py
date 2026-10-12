@@ -1,0 +1,412 @@
+"""web_rest — HTTP/REST verb-invocation surface as a sub-agent of `web`.
+
+Diagnostic-friendly: any curl-able client can POST a verb payload to
+`/<self_id>/<target_id>` and get the kernel.send reply back as JSON.
+Multiple instances coexist with different ids (and, later, different
+auth/logging knobs on the record).
+
+Routes mounted on the parent web's FastAPI app:
+
+    POST /<self_id>/<target_id>       body: JSON payload (must contain `type`)
+                                      → JSON reply from kernel.send
+                                      headers: X-Fantastic-Auth (credential),
+                                      X-Fantastic-Execution-Id (the item `id`)
+    GET  /<self_id>/_reflect          → kernel.reflect (substrate primer)
+    GET  /<self_id>/_reflect/<target> → reflect on a specific agent
+
+The GET routes are browser-pastable shortcuts for the universal
+discovery verb. They're typed (single verb, no body, idempotent) so
+they don't slide into a generic HTTP call channel — POST is still the
+only path for arbitrary verbs.
+
+The `self_id` is baked into the path literal so several `web_rest`
+agents under the same `web` parent don't collide.
+
+GATE FIRST, THEN THE BODY (audit IO-4, 2026-10-03). A POST is judged by the leg's
+ingress rule on what the request says up front — its target and its
+`X-Fantastic-Auth` credential — and only an admitted request's body is read, at
+most `MAX_BODY` bytes (16 MiB: io_bridge's `MAX_FRAME`, the one frame cap every
+wire leg holds); a larger body is refused 413, loud, with nothing past the bound
+read (a declared `Content-Length` over it is refused unread). Reading and parsing
+the whole body before the gate let a client the leg was about to refuse make the
+kernel buffer any amount of data.
+
+IDENTITY: the HTTP server is the TRANSPORT — a request runs outside every
+dispatch, so what it sends is the operator's. It sends nothing onward itself:
+every admitted request is handed to this leg as `inbound_call`
+(`io_bridge.hand_in`), and the leg performs it AS ITSELF — gated as the leg.
+
+Verbs:
+  reflect       -> identity + URL patterns
+  boot          -> no-op (web mounts the route by pulling get_routes)
+  get_routes    -> the duck-typed call surface used by `web._boot`; PURE DATA
+                   ({kind, method, path}), so the reply renders over this very
+                   leg and persists into the ledger like any other. The live
+                   endpoint callables are handed to the parent in-process
+                   through the module hook `route_endpoints(agent)` below —
+                   never through a reply.
+  inbound_call  -> the INBOUND half (`io_bridge._inbound`): a request handed in,
+                   sent onward AS THIS LEG.
+"""
+
+from __future__ import annotations
+
+import json
+
+from fastapi import Request
+from fastapi.responses import JSONResponse, Response
+
+from io_bridge import MAX_FRAME
+from io_bridge import describe as _describe
+from io_bridge import (
+    gate_inbound,
+    hand_in,
+    inbound_call,
+    resolve_ingress,
+    unknown_ingress_refusal,
+)
+from io_bridge import loads as strict_loads
+from kernel._refusal import TRANSPORT_ERROR, UNHANDLED, refusal
+
+
+# ─── auth gate (the io_bridge ingress rule on THIS leg) ─────────
+# The REST face is a CHANNEL. The credential rides the `X-Fantastic-Auth`
+# request header (the http modality's envelope) — mapped onto the frame so the
+# shared `gate_inbound` path (EnvelopeExtractor) is reused, and the dispatched
+# target never sees it. Absent rule ⇒ DenyInbound (SEALED by default — a bare leg
+# refuses every request). A sealed leg denies AND teaches (reason/hint/see); open it
+# consciously with `ingress_rule=allow_all_ingress`/`password`.
+
+
+def _gate(self_id: str, kernel, target_id: str, payload: dict, request: Request):
+    rec = kernel.get(self_id) or {}
+    frame = {
+        "target": target_id,
+        "payload": payload if isinstance(payload, dict) else {},
+        "auth_token": request.headers.get("X-Fantastic-Auth"),
+    }
+    return gate_inbound(resolve_ingress(rec), "call", frame)
+
+
+#: The most body bytes this leg reads from one request: io_bridge's one frame cap.
+MAX_BODY = MAX_FRAME
+
+
+async def _read_body(request: Request) -> bytes | None:
+    """The request body — at most `MAX_BODY` bytes, read chunk by chunk; None when
+    it is larger, with nothing past the bound read (a declared `Content-Length`
+    over it is refused before one byte)."""
+    declared = request.headers.get("content-length")
+    if declared is not None and declared.isdigit() and int(declared) > MAX_BODY:
+        return None
+    buf = bytearray()
+    async for chunk in request.stream():
+        buf += chunk
+        if len(buf) > MAX_BODY:
+            return None
+    return bytes(buf)
+
+
+def _too_large() -> JSONResponse:
+    return JSONResponse(
+        refusal(
+            TRANSPORT_ERROR,
+            f"web_rest: the request body exceeds {MAX_BODY} bytes — the one frame "
+            "cap every wire leg holds (io_bridge MAX_FRAME); send larger data in "
+            "chunks (write_stream)",
+            limit=MAX_BODY,
+        ),
+        status_code=413,
+    )
+
+
+def _deny(decision) -> JSONResponse:
+    data = {"error": decision.reason, "reason": "unauthorized"}
+    if decision.hint:
+        data["hint"] = decision.hint
+    if decision.see:
+        data["see"] = decision.see
+    return JSONResponse(data, status_code=403)
+
+
+# ─── the binary leg ─────────────────────────────────────────────
+# JSON has no bytes type, so a verb whose payload (or reply) carries RAW bytes —
+# a file_bridge `edit`, `write_stream`, `read_stream` — rides an octet-stream body
+# instead: the bytes ARE the body, the rest of the envelope is JSON on
+# `X-Fantastic-Payload`, and the one bytes-valued FIELD is named by
+# `X-Fantastic-Bytes-Field` (default `bytes`). Symmetric in both directions, never
+# base64 — the HTTP mirror of the WS binary frame.
+_OCTET = "application/octet-stream"
+_PAYLOAD_HEADER = "x-fantastic-payload"
+_BYTES_FIELD_HEADER = "x-fantastic-bytes-field"
+
+
+def _json_reply(reply) -> Response:
+    """The ONE place a kernel reply becomes this leg's JSON body.
+
+    A reply carrying something with no JSON form (an in-process object, an
+    out-of-range float) makes `JSONResponse` raise while it renders, i.e. INSIDE
+    the ASGI app: uvicorn then answered a bare text/plain 500 and logged
+    `Exception in ASGI application` with a full traceback (measured, parity
+    capture 20260921b). Naming it here keeps that a stated transport refusal in
+    the shape every other answer on this leg uses. (`get_routes` is pure data;
+    the live endpoints reach `web` through the `route_endpoints(agent)` module
+    hook.)
+    """
+    try:
+        return JSONResponse(reply)
+    except (TypeError, ValueError):
+        return JSONResponse(
+            refusal(
+                TRANSPORT_ERROR,
+                "web_rest: the reply has no JSON representation on this leg",
+                hint=(
+                    "this verb answers with in-process objects; call it "
+                    "in-process, not over HTTP"
+                ),
+            ),
+            status_code=500,
+        )
+
+
+def _first_bytes_field(d: dict) -> tuple[str | None, bytes | None]:
+    """The ONE field whose value is raw bytes — how a binary envelope carries its
+    blob. Returns `(name, blob)` or `(None, None)`."""
+    for k, v in d.items():
+        if isinstance(v, (bytes, bytearray)):
+            return k, bytes(v)
+    return None, None
+
+
+# ─── route endpoints ────────────────────────────────────────────
+
+
+def _make_post_endpoint(self_id: str, kernel):
+    async def _rest_call(request: Request, target_id: str):
+        # THE GATE FIRST, on what the request says before its body: the target and
+        # the `X-Fantastic-Auth` credential. A refused client's body is never read.
+        decision = _gate(self_id, kernel, target_id, {}, request)
+        if not decision.allowed:
+            return _deny(decision)
+        body = await _read_body(request)
+        if body is None:
+            return _too_large()
+        if request.headers.get("content-type", "").startswith(_OCTET):
+            # Binary leg: the raw body IS one field's bytes; the rest of the
+            # envelope rides `X-Fantastic-Payload`, the field named by
+            # `X-Fantastic-Bytes-Field` (default `bytes`).
+            try:
+                payload = strict_loads(request.headers.get(_PAYLOAD_HEADER) or "{}")
+            except json.JSONDecodeError:
+                return JSONResponse(
+                    {"error": "web_rest: X-Fantastic-Payload is not valid JSON"},
+                    status_code=400,
+                )
+            if not isinstance(payload, dict):
+                return JSONResponse(
+                    {"error": "web_rest: X-Fantastic-Payload must be a JSON object"},
+                    status_code=400,
+                )
+            payload[request.headers.get(_BYTES_FIELD_HEADER) or "bytes"] = body
+        else:
+            try:
+                payload = strict_loads(body) if body else {}
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                # RFC 8259 §8.1 — a JSON body IS UTF-8. Bytes that do not decode
+                # are a MALFORMED BODY, the same client error as `{not json`:
+                # `json.loads` sniffs the encoding first, so it raises
+                # UnicodeDecodeError (not JSONDecodeError) before it ever parses.
+                # Uncaught, that raised inside the ASGI app and uvicorn answered a
+                # bare text/plain 500 with a traceback in the kernel log (measured,
+                # parity capture 20260921b, case `invalid_utf8_body`).
+                # Don't echo the parser exception back — generic message
+                # only (CodeQL: information exposure through an exception).
+                return JSONResponse(
+                    {"error": "web_rest: request body is not valid JSON"},
+                    status_code=400,
+                )
+            if not isinstance(payload, dict):
+                return JSONResponse(
+                    {"error": "web_rest: body must be a JSON object"}, status_code=400
+                )
+        # Handed to THIS LEG (`inbound_call`), which sends it as itself — an HTTP
+        # caller has no agent identity of its own.
+        # NAMING an execution. The credential rides `X-Fantastic-Auth`; an
+        # execution id rides its own header for the same reason — it is
+        # dispatch metadata about the call, not part of the verb payload the
+        # target agent reads. With it, ensure-semantics reach the wire: an
+        # unknown id dispatches, an in-flight id JOINS, and a settled id
+        # returns the recorded outcome rather than running the verb twice.
+        # Without it an HTTP caller cannot express a safe repeat at all.
+        item = {"target": target_id, "payload": payload}
+        exec_id = request.headers.get("X-Fantastic-Execution-Id")
+        if exec_id:
+            item["id"] = exec_id
+        reply = await hand_in(kernel, self_id, {"type": "inbound_call", "item": item})
+        if reply is None:
+            return Response(status_code=204)
+        # A reply that carries raw bytes (e.g. `read_stream`) goes back the same
+        # way it came in — octet body + JSON header — never base64.
+        if isinstance(reply, dict):
+            field, blob = _first_bytes_field(reply)
+            if field is not None:
+                rest = {k: v for k, v in reply.items() if k != field}
+                return Response(
+                    content=blob,
+                    media_type=_OCTET,
+                    headers={
+                        _PAYLOAD_HEADER: json.dumps(rest),
+                        _BYTES_FIELD_HEADER: field,
+                    },
+                )
+        return _json_reply(reply)
+
+    return _rest_call
+
+
+def _reflect_payload(request: Request) -> dict:
+    """Reflect payload, composing the reply from query flags so the
+    browser-pastable GET shortcuts work: `?readme=1` attaches the
+    orientation readme, `?readme=index` the topic map, `?readme=<key>` one
+    topic; `?tree=all|ids|none` and `?bundles=all|ids|none` pick the tiers
+    (defaults: tree=all, bundles omitted)."""
+    payload: dict = {"type": "reflect"}
+    rm = request.query_params.get("readme")
+    if rm in ("1", "true", "yes"):
+        payload["readme"] = True
+    elif rm and rm not in ("0", "false", "no"):
+        payload["readme"] = rm  # a doc key: `?readme=index` / `?readme=self-extension`
+    tree = request.query_params.get("tree")
+    if tree in ("all", "ids", "none"):
+        payload["tree"] = tree
+    bundles = request.query_params.get("bundles")
+    if bundles in ("all", "ids", "none"):
+        payload["bundles"] = bundles
+    return payload
+
+
+def _make_reflect_get(self_id: str, kernel):
+    async def _reflect_target(request: Request, target_id: str):
+        payload = _reflect_payload(request)
+        decision = _gate(self_id, kernel, target_id, payload, request)
+        if not decision.allowed:
+            return _deny(decision)
+        reply = await hand_in(
+            kernel,
+            self_id,
+            {"type": "inbound_call", "item": {"target": target_id, "payload": payload}},
+        )
+        if reply is None:
+            return Response(status_code=404)
+        return _json_reply(reply)
+
+    return _reflect_target
+
+
+def _make_reflect_root(self_id: str, kernel):
+    async def _reflect_kernel(request: Request):
+        payload = _reflect_payload(request)
+        decision = _gate(self_id, kernel, "kernel", payload, request)
+        if not decision.allowed:
+            return _deny(decision)
+        reply = await hand_in(
+            kernel,
+            self_id,
+            {"type": "inbound_call", "item": {"target": "kernel", "payload": payload}},
+        )
+        if reply is None:
+            return Response(status_code=404)
+        return _json_reply(reply)
+
+    return _reflect_kernel
+
+
+def route_endpoints(agent):
+    """Duck-typed module hook the parent `web` host calls at mount time
+    (discovered exactly like `on_delete` / `reflect_root_extra`): `{path: live
+    endpoint}` for every path `get_routes` declared. Each endpoint is the
+    `(request, target_id) -> Response` shape FastAPI expects for
+    `app.add_api_route`. Callables are in-process objects — they travel this
+    way, NOT inside a verb reply, so the reply stays JSON."""
+    id = agent.id
+    return {
+        f"/{id}/{{target_id}}": _make_post_endpoint(id, agent),
+        f"/{id}/_reflect": _make_reflect_root(id, agent),
+        f"/{id}/_reflect/{{target_id}}": _make_reflect_get(id, agent),
+    }
+
+
+# ─── verbs ──────────────────────────────────────────────────────
+
+
+async def _reflect(id, payload, kernel):
+    """Identity + URL patterns + curl examples + this leg's auth posture
+    (`ingress`/`egress`/`sealed`/`see`). No args. The credential rides the
+    `X-Fantastic-Auth` header; a sealed leg surfaces the `see` pointer so a denied
+    client learns how to open the edge."""
+    return {
+        "id": id,
+        "sentence": "REST verb-invocation surface; POST /<self>/<target_id> body=payload.",
+        "path_pattern": f"/{id}/{{target_id}}",
+        "method": "POST",
+        "reflect_url": f"/{id}/_reflect",
+        "reflect_pattern": f"/{id}/_reflect/{{target_id}}",
+        "auth_header": "X-Fantastic-Auth",
+        "curl_post": (
+            f'curl -X POST -H "content-type: application/json" '
+            f'-d \'{{"type":"reflect"}}\' http://<host>/{id}/<target_id>'
+        ),
+        "curl_reflect": f"curl http://<host>/{id}/_reflect           # root reflect (tree)",
+        "curl_reflect_target": f"curl http://<host>/{id}/_reflect/<target_id>  # any agent",
+        # The REST face is a CHANNEL — surface its auth posture so a denied client
+        # can find the door (discovery-through-denial).
+        **_describe(kernel.get(id) or {}),
+    }
+
+
+async def _boot(id, payload, kernel):
+    """No-op. The parent `web` agent calls `get_routes` on this bundle during its own boot and mounts the HTTP endpoint onto its FastAPI app."""
+    return None
+
+
+async def _get_routes(id, payload, kernel):
+    """Declares this surface's HTTP routes. No args. Returns
+    {routes:[{kind:'http', method, path}]} — pure data. The parent `web` host
+    gets the live endpoint for each path from this module's
+    `route_endpoints(agent)` hook, in-process."""
+    return {
+        "routes": [
+            # Generic POST verb channel.
+            {"kind": "http", "method": "POST", "path": f"/{id}/{{target_id}}"},
+            # GET shortcut: reflect kernel (substrate primer). No target
+            # in URL — default. Browser-pastable.
+            {"kind": "http", "method": "GET", "path": f"/{id}/_reflect"},
+            # GET shortcut: reflect a specific agent. Browser-pastable.
+            {"kind": "http", "method": "GET", "path": f"/{id}/_reflect/{{target_id}}"},
+        ]
+    }
+
+
+# ─── dispatch ───────────────────────────────────────────────────
+
+
+VERBS = {
+    "reflect": _reflect,
+    "boot": _boot,
+    "get_routes": _get_routes,
+    "inbound_call": inbound_call,
+}
+
+
+def validate_meta(meta: dict, record: dict) -> str | None:
+    """The leg's `ingress_rule`, refused at the WRITE when no rule implements it
+    — the one check every leg makes (`io_bridge.unknown_ingress_refusal`)."""
+    return unknown_ingress_refusal(meta)
+
+
+async def handler(id: str, payload: dict, kernel) -> dict | None:
+    t = payload.get("type")
+    fn = VERBS.get(t)
+    if fn is None:
+        return refusal(UNHANDLED, f"web_rest: unknown type {t!r}", verb=t)
+    return await fn(id, payload, kernel)

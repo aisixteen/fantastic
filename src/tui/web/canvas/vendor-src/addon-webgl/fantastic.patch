@@ -1,0 +1,368 @@
+diff --git a/addons/addon-webgl/src/GlyphRenderer.ts b/addons/addon-webgl/src/GlyphRenderer.ts
+index 10c9ad7..fe3f6f7 100644
+--- a/addons/addon-webgl/src/GlyphRenderer.ts
++++ b/addons/addon-webgl/src/GlyphRenderer.ts
+@@ -2,6 +2,7 @@
+  * Copyright (c) 2018 The xterm.js authors. All rights reserved.
+  * @license MIT
+  */
++import { bindPageTexture } from './SharedContext';
+ import { TextureAtlas } from './TextureAtlas';
+ import { IRenderDimensions } from 'browser/renderer/shared/Types';
+ import { NULL_CELL_CODE } from 'common/buffer/Constants';
+@@ -209,8 +210,17 @@ export class GlyphRenderer extends Disposable {
+     this.handleResize();
+   }
+ 
++  private _lastSeenPageLayoutVersion = -1;
++  /** Whether the full model must be rebuilt: the atlas page layout changed since this renderer last drew. */
+   public beginFrame(): boolean {
+-    return this._atlas ? this._atlas.beginFrame() : true;
++    if (!this._atlas) {
++      return true;
++    }
++    if (this._atlas.pageLayoutVersion !== this._lastSeenPageLayoutVersion) {
++      this._lastSeenPageLayoutVersion = this._atlas.pageLayoutVersion;
++      return true;
++    }
++    return false;
+   }
+ 
+   public updateCell(x: number, y: number, code: number, bg: number, fg: number, ext: number, chars: string, width: number, lastBg: number): void {
+@@ -315,11 +325,17 @@ export class GlyphRenderer extends Disposable {
+     }
+   }
+ 
+-  public handleResize(): void {
++  private _target = { width: 1, height: 1 };
++  /** The size this terminal draws at (its own canvas, in device pixels) — the GL canvas is shared. */
++  public setTarget(width: number, height: number): void {
++    this._target = { width, height };
+     const gl = this._gl;
+     gl.useProgram(this._program);
+-    gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
+-    gl.uniform2f(this._resolutionLocation, gl.canvas.width, gl.canvas.height);
++    gl.uniform2f(this._resolutionLocation, width, height);
++  }
++
++  public handleResize(): void {
++    this.setTarget(this._target.width, this._target.height);
+     this.clear();
+   }
+ 
+@@ -356,11 +372,11 @@ export class GlyphRenderer extends Disposable {
+     gl.bindBuffer(gl.ARRAY_BUFFER, this._attributesBuffer);
+     gl.bufferData(gl.ARRAY_BUFFER, activeBuffer.subarray(0, bufferLength), gl.STREAM_DRAW);
+ 
+-    // Bind the atlas page texture if they have changed
++    // Bind EVERY atlas page to its unit — the context is shared, so another
++    // renderer may have bound its own since this one last drew; a page is one
++    // texture for all renderers, uploaded once per version (SharedContext.ts)
+     for (let i = 0; i < this._atlas.pages.length; i++) {
+-      if (this._atlas.pages[i].version !== this._atlasTextures[i].version) {
+-        this._bindAtlasPageTexture(gl, this._atlas, i);
+-      }
++      bindPageTexture(gl, i, this._atlas.pages[i].canvas, this._atlas.pages[i].version);
+     }
+ 
+     // Draw the viewport
+@@ -369,6 +385,7 @@ export class GlyphRenderer extends Disposable {
+ 
+   public setAtlas(atlas: ITextureAtlas): void {
+     this._atlas = atlas;
++    this._lastSeenPageLayoutVersion = -1;
+     for (const glTexture of this._atlasTextures) {
+       glTexture.version = -1;
+     }
+diff --git a/addons/addon-webgl/src/SharedContext.ts b/addons/addon-webgl/src/SharedContext.ts
+new file mode 100644
+index 0000000..aedec84
+--- /dev/null
++++ b/addons/addon-webgl/src/SharedContext.ts
+@@ -0,0 +1,108 @@
++/**
++ * THE SHARED WEBGL CONTEXT (Aisixteen Fantastic patch): every terminal on the
++ * page renders through ONE WebGL2 context on ONE hidden canvas, then copies
++ * its frame into its own 2D canvas inside its cell. A browser keeps only ~16
++ * WebGL contexts alive per page (the oldest is force-lost past that), so one
++ * context per terminal cannot serve N terminals; one shared context can.
++ *
++ * The shared canvas is an OffscreenCanvas sized to the frame being drawn; the
++ * finished frame is handed to the terminal's `bitmaprenderer` canvas as an
++ * ImageBitmap — `transferToImageBitmap()` / `transferFromImageBitmap()` move
++ * the GPU buffer, no pixel copy and no readback (a `drawImage` copy forced a
++ * GPU flush + sync per terminal update and capped the frame rate).
++ */
++
++import { IWebGL2RenderingContext } from './Types';
++
++export interface ISharedGl {
++  readonly canvas: OffscreenCanvas;
++  readonly gl: IWebGL2RenderingContext;
++}
++
++let current: ISharedGl | undefined;
++
++/** WHAT THE SHARED RENDERER DID, for a probe (E65 load, E66 render fidelity) —
++ *  counters only, plus a way to LOSE the context on purpose (WEBGL_lose_context).
++ *  On `globalThis.__fantasticWebgl`. */
++const stats = { renders: 0, uploads: 0, uploadPx: 0, contexts: 0, pages: 0, released: 0, loseContext: (): void => {}, restoreContext: (): void => {} };
++(globalThis as unknown as { __fantasticWebgl: typeof stats }).__fantasticWebgl = stats;
++export function countRender(): void {
++  stats.renders++;
++}
++
++/** The page's shared context; a new one once the old is lost. */
++export function acquireSharedGl(_doc: Document): ISharedGl {
++  if (current && !current.gl.isContextLost()) {
++    return current;
++  }
++  const canvas = new OffscreenCanvas(256, 256);
++  const gl = canvas.getContext('webgl2', { antialias: false, depth: false, premultipliedAlpha: true, preserveDrawingBuffer: false }) as IWebGL2RenderingContext | null;
++  if (!gl) {
++    throw new Error('WebGL2 not supported');
++  }
++  current = { canvas, gl };
++  stats.contexts++;
++  const lose = gl.getExtension('WEBGL_lose_context');
++  stats.loseContext = () => lose?.loseContext();
++  stats.restoreContext = () => lose?.restoreContext();
++  return current;
++}
++
++/** Size the shared canvas to EXACTLY one terminal's frame: its whole drawing
++ *  buffer is handed over (`transferToImageBitmap`, zero copy) — terminals of one
++ *  size never reallocate it. */
++export function sizeSharedTo(s: ISharedGl, width: number, height: number): void {
++  if (s.canvas.width !== width || s.canvas.height !== height) {
++    s.canvas.width = width;
++    s.canvas.height = height;
++  }
++}
++
++/**
++ * THE ATLAS PAGES, ONCE ON THE GPU: terminals that share a texture atlas (same
++ * font / theme / DPR — CharAtlasCache) now share the GL context too, so a page
++ * is ONE texture, uploaded once per page version, and every renderer BINDS it
++ * to its unit before it draws (texture units are context state: a renderer that
++ * binds only on upload draws with whatever the previous renderer left bound —
++ * another terminal's pages, or the 1×1 red placeholders).
++ */
++interface IPageTexture { texture: WebGLTexture; version: number }
++let pageTextures = new Map<object, IPageTexture>();
++let pagesOf: IWebGL2RenderingContext | undefined;
++
++export function bindPageTexture(gl: IWebGL2RenderingContext, unit: number, page: TexImageSource, version: number): void {
++  if (pagesOf !== gl) {
++    // a new context (the old one lost): its textures went with it
++    pageTextures = new Map();
++    pagesOf = gl;
++  }
++  let e = pageTextures.get(page);
++  if (!e) {
++    e = { texture: gl.createTexture()!, version: -1 };
++    pageTextures.set(page, e);
++    stats.pages = pageTextures.size;
++  }
++  gl.activeTexture(gl.TEXTURE0 + unit);
++  gl.bindTexture(gl.TEXTURE_2D, e.texture);
++  if (e.version !== version) {
++    stats.uploads++;
++    stats.uploadPx += (page as { width: number }).width * (page as { height: number }).height;
++    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
++    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
++    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, page);
++    gl.generateMipmap(gl.TEXTURE_2D);
++    e.version = version;
++  }
++}
++
++/** A page left its atlas (merged away, or the atlas disposed): its texture goes. */
++export function releasePageTexture(page: object): void {
++  const e = pageTextures.get(page);
++  if (e && pagesOf && !pagesOf.isContextLost()) {
++    pagesOf.deleteTexture(e.texture);
++  }
++  if (pageTextures.delete(page)) {
++    stats.released++;
++  }
++  stats.pages = pageTextures.size;
++}
+diff --git a/addons/addon-webgl/src/TextureAtlas.ts b/addons/addon-webgl/src/TextureAtlas.ts
+index 330c627..5eb4b56 100644
+--- a/addons/addon-webgl/src/TextureAtlas.ts
++++ b/addons/addon-webgl/src/TextureAtlas.ts
+@@ -3,6 +3,7 @@
+  * @license MIT
+  */
+ 
++import { releasePageTexture } from './SharedContext';
+ import { IColorContrastCache } from 'browser/Types';
+ import { DIM_OPACITY, TEXT_BASELINE } from './Constants';
+ import { tryDrawCustomChar } from './CustomGlyphs';
+@@ -105,6 +106,7 @@ export class TextureAtlas implements ITextureAtlas {
+   public dispose(): void {
+     this._tmpCanvas.remove();
+     for (const page of this.pages) {
++      releasePageTexture(page.canvas);
+       page.canvas.remove();
+     }
+     this._onAddTextureAtlasCanvas.dispose();
+@@ -130,10 +132,8 @@ export class TextureAtlas implements ITextureAtlas {
+     }
+   }
+ 
+-  private _requestClearModel = false;
+-  public beginFrame(): boolean {
+-    return this._requestClearModel;
+-  }
++  private _pageLayoutVersion = 0;
++  public get pageLayoutVersion(): number { return this._pageLayoutVersion; }
+ 
+   public clearTexture(): void {
+     if (this._pages[0].currentRow.x === 0 && this._pages[0].currentRow.y === 0) {
+@@ -145,6 +145,8 @@ export class TextureAtlas implements ITextureAtlas {
+     this._cacheMap.clear();
+     this._cacheMapCombined.clear();
+     this._didWarmUp = false;
++    // a SHARED atlas: every other owner still holds texture coords into the wiped rows
++    this._pageLayoutVersion++;
+   }
+ 
+   private _createNewPage(): AtlasPage {
+@@ -191,8 +193,8 @@ export class TextureAtlas implements ITextureAtlas {
+       // Add the new merged page to the end
+       this.pages.push(mergedPage);
+ 
+-      // Request the model to be cleared to refresh all texture pages.
+-      this._requestClearModel = true;
++      // Every renderer sharing the atlas refreshes all texture pages.
++      this._pageLayoutVersion++;
+       this._onAddTextureAtlasCanvas.fire(mergedPage.canvas);
+     }
+ 
+@@ -233,6 +235,7 @@ export class TextureAtlas implements ITextureAtlas {
+   }
+ 
+   private _deletePage(pageIndex: number): void {
++    releasePageTexture(this._pages[pageIndex].canvas);
+     this._pages.splice(pageIndex, 1);
+     for (let j = pageIndex; j < this._pages.length; j++) {
+       const adjustingPage = this._pages[j];
+@@ -794,8 +797,8 @@ export class TextureAtlas implements ITextureAtlas {
+           this._overflowSizePage = new AtlasPage(this._document, this._config.deviceMaxTextureSize);
+           this.pages.push(this._overflowSizePage);
+ 
+-          // Request the model to be cleared to refresh all texture pages.
+-          this._requestClearModel = true;
++          // Every renderer sharing the atlas refreshes all texture pages.
++          this._pageLayoutVersion++;
+           this._onAddTextureAtlasCanvas.fire(this._overflowSizePage.canvas);
+         }
+         activePage = this._overflowSizePage;
+diff --git a/addons/addon-webgl/src/Types.ts b/addons/addon-webgl/src/Types.ts
+index e030e57..082cf7d 100644
+--- a/addons/addon-webgl/src/Types.ts
++++ b/addons/addon-webgl/src/Types.ts
+@@ -70,7 +70,8 @@ export interface ITextureAtlas extends IDisposable {
+    * Call when a frame is being drawn, this will return true if the atlas was cleared to make room
+    * for a new set of glyphs.
+    */
+-  beginFrame(): boolean;
++  /** bumped whenever texture pages are cleared, merged or added: every renderer sharing the atlas rebuilds its model */
++  readonly pageLayoutVersion: number;
+ 
+   /**
+    * Clear all glyphs from the texture atlas.
+diff --git a/addons/addon-webgl/src/WebglRenderer.ts b/addons/addon-webgl/src/WebglRenderer.ts
+index e3a2d0c..8f89090 100644
+--- a/addons/addon-webgl/src/WebglRenderer.ts
++++ b/addons/addon-webgl/src/WebglRenderer.ts
+@@ -17,6 +17,7 @@ import { Attributes, Content, NULL_CELL_CHAR, NULL_CELL_CODE } from 'common/buff
+ import { ICoreService, IDecorationService, IOptionsService } from 'common/services/Services';
+ import { Terminal } from '@xterm/xterm';
+ import { GlyphRenderer } from './GlyphRenderer';
++import { acquireSharedGl, countRender, sizeSharedTo, ISharedGl } from './SharedContext';
+ import { RectangleRenderer } from './RectangleRenderer';
+ import { COMBINED_CHAR_BIT_MASK, RENDER_MODEL_BG_OFFSET, RENDER_MODEL_EXT_OFFSET, RENDER_MODEL_FG_OFFSET, RENDER_MODEL_INDICIES_PER_CELL, RenderModel } from './RenderModel';
+ import { IWebGL2RenderingContext, type ITextureAtlas } from './Types';
+@@ -43,6 +44,9 @@ export class WebglRenderer extends Disposable implements IRenderer {
+ 
+   private _canvas: HTMLCanvasElement;
+   private _gl: IWebGL2RenderingContext;
++  /** the page's ONE WebGL context (SharedContext.ts); this terminal's own canvas is 2D */
++  private _shared: ISharedGl;
++  private _bitmap: ImageBitmapRenderingContext;
+   private _rectangleRenderer: MutableDisposable<RectangleRenderer> = this._register(new MutableDisposable());
+   private _glyphRenderer: MutableDisposable<GlyphRenderer> = this._register(new MutableDisposable());
+ 
+@@ -80,15 +84,12 @@ export class WebglRenderer extends Disposable implements IRenderer {
+     // prevent possible listeners leaking and continuing to operate after the WebglRenderer has been
+     // discarded.
+     this._canvas = this._coreBrowserService.mainDocument.createElement('canvas');
+-    const contextAttributes = {
+-      antialias: false,
+-      depth: false,
+-      preserveDrawingBuffer
+-    };
+-    this._gl = this._canvas.getContext('webgl2', contextAttributes) as IWebGL2RenderingContext;
+-    if (!this._gl) {
+-      throw new Error('WebGL2 not supported ' + this._gl);
+-    }
++    // this terminal's own canvas shows ImageBitmaps: its frames are drawn
++    // through the page's shared WebGL context and handed over (SharedContext.ts)
++    void preserveDrawingBuffer;
++    this._bitmap = this._canvas.getContext('bitmaprenderer') as ImageBitmapRenderingContext;
++    this._shared = acquireSharedGl(this._coreBrowserService.mainDocument);
++    this._gl = this._shared.gl;
+ 
+     this._register(this._themeService.onChangeColors(() => this._handleColorChange()));
+ 
+@@ -107,7 +108,7 @@ export class WebglRenderer extends Disposable implements IRenderer {
+ 
+     this._deviceMaxTextureSize = this._gl.getParameter(this._gl.MAX_TEXTURE_SIZE);
+ 
+-    this._register(addDisposableListener(this._canvas, 'webglcontextlost', (e) => {
++    this._register(addDisposableListener(this._shared.canvas, 'webglcontextlost', (e) => {
+       console.log('webglcontextlost event received');
+       // Prevent the default behavior in order to enable WebGL context restoration.
+       e.preventDefault();
+@@ -119,7 +120,7 @@ export class WebglRenderer extends Disposable implements IRenderer {
+         this._onContextLoss.fire(e);
+       }, 3000 /* ms */);
+     }));
+-    this._register(addDisposableListener(this._canvas, 'webglcontextrestored', (e) => {
++    this._register(addDisposableListener(this._shared.canvas, 'webglcontextrestored', (e) => {
+       console.warn('webglcontextrestored event received');
+       clearTimeout(this._contextRestorationTimeout);
+       this._contextRestorationTimeout = undefined;
+@@ -351,12 +352,28 @@ export class WebglRenderer extends Disposable implements IRenderer {
+       this._updateModel(start, end);
+     }
+ 
+-    // Render
++    // Render — the shared context sized to this frame, the frame then handed
++    // to this terminal's own canvas (zero copy) before any other terminal draws
++    const w = this._canvas.width;
++    const h = this._canvas.height;
++    if (w === 0 || h === 0) {
++      return;
++    }
++    const gl = this._gl;
++    countRender();
++    sizeSharedTo(this._shared, w, h);
++    gl.viewport(0, 0, w, h);
++    gl.clearColor(0, 0, 0, 0);
++    gl.clear(gl.COLOR_BUFFER_BIT);
++    gl.enable(gl.BLEND);
++    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
++    this._glyphRenderer.value.setTarget(w, h);
+     this._rectangleRenderer.value.renderBackgrounds();
+     this._glyphRenderer.value.render(this._model);
+     if (!this._cursorBlinkStateManager.value || this._cursorBlinkStateManager.value.isCursorVisible) {
+       this._rectangleRenderer.value.renderCursor();
+     }
++    this._bitmap.transferFromImageBitmap(this._shared.canvas.transferToImageBitmap());
+   }
+ 
+   private _updateCursorBlink(): void {

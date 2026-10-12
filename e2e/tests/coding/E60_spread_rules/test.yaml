@@ -1,0 +1,16 @@
+# WHAT to measure and HOW LONG to allow. Never a model, an endpoint, a key
+# or a backend name — those live in e2e/backends/.
+id: spread_rules
+group: coding
+title: rules arriving in THREE files across a 12-filler run — checkpointing must keep happening after cuts start
+runner: probe.py
+runtimes: [python, rust, swift]
+costs: turns
+long: true  # > 8 min measured; at most 2 run at once (run.py LONG_LANES)
+limits:
+  idle_seconds: 60
+  max_turns: 50
+  no_progress_turns: 32
+  turn_chars: 60000
+  turn_seconds: 300
+env: {E2E_WINDOW: "12000"}  # the squeeze the fold family measures under (the harness default is 32k)

@@ -1,0 +1,26 @@
+[package]
+publish = false
+name = "fantastic-responses-backend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "OpenAI Responses-API LLM bundle — same ai-core surface as the other backends, Responses transport (stateless, typed input items, event-typed SSE)."
+
+[dependencies]
+fantastic-ai-core = { path = "../fantastic-ai-core" }
+fantastic-bundle = { path = "../../fantastic-bundle" }
+fantastic-kernel = { path = "../../fantastic-kernel" }
+async-trait = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+futures-util = { workspace = true }
+
+[dev-dependencies]
+# Every AI agent keeps its conversation in a memory store; the tests wire one.
+fantastic-ram-store = { path = "../fantastic-ram-store" }
+# The key is a credential store ref, read per request; the tests wire a store.
+fantastic-credential-store = { path = "../fantastic-credential-store" }
+tempfile = "3"
+tokio = { workspace = true, features = ["test-util", "macros"] }
+wiremock = "0.6"

@@ -1,0 +1,45 @@
+# THE SCENARIO — shared data, one copy, every runtime.
+#
+# This is the same idea as `contract/agentic/`: a scenario is a DECLARED fixture
+# plus a task plus what must become true. One runner drives every runtime over
+# REST (python, rust, swift), and the scenario is shared. Three
+# copies differing only in how the store gets registered is duplication that
+# drifts the first time the task changes — and then the results stop being
+# comparable, which is the only reason to run it on four kernels at all.
+
+id: dialog
+title: it DISCOVERS an unnamed peer from the tree and really acts on it
+
+# The task NAMES NOTHING. Which agent stores documents, and which verbs it
+# takes, are what the model has to work out — that is the measurement.
+task: >-
+  Somewhere in this kernel is an agent that stores data durably. Find it, and
+  store the number 42 in a document named exactly 'answer' (no extension). Then say ANSWER STORED.
+
+limits:
+  max_turns: 10
+  idle_seconds: 100
+
+# The fixture, by ROLE rather than by bundle name: a compiled kernel can only
+# run bundles compiled into it — the role is the contract; the runner picks
+# the implementation it has (a `file_bridge` data store).
+roster:
+  - role: memory
+    id: yaml_store
+    sentence: A text-document memory — plain files, any format.
+    verbs:
+      read: "args: path — returns {path, lines: [{n, text}], version}"
+      write: "args: path, bytes — stores the document"
+  - role: render_sink
+    id: cli
+
+# The AI's toolset. Deny-all is the posture, so this is not decoration: it is
+# the difference between a graph and a pile of agents.
+grants:
+  ai_can_call: [cli, yaml_store]
+
+# FALSIFIABLE. Scored against the store's contents, never the model's prose —
+# a model that says ANSWER STORED without calling anything cannot pass.
+expect:
+  - read: {agent: yaml_store, path: answer}
+    contains: "42"

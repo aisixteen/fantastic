@@ -5,7 +5,7 @@
 import { Browser, chromeAvailable } from "../_chrome.ts";
 
 const port = process.argv[2] ?? "8930";
-const url = `http://127.0.0.1:${port}/ts_dist/file/_e2e_canvas.html`;
+const url = `http://127.0.0.1:${port}/canvas_page/file/index.html`;
 
 if (!chromeAvailable()) {
   console.log("SKIP: system Chrome not found");

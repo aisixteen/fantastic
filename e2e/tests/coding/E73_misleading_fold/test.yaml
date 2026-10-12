@@ -1,0 +1,15 @@
+# WHAT to measure and HOW LONG to allow. Never a model, an endpoint, a key
+# or a backend name — those live in e2e/backends/.
+id: misleading_fold
+group: coding
+title: "a planted fold whose summary contradicts its members — does the model verify by descending?"
+runner: probe.py
+runtimes: [python, rust, swift]
+costs: turns
+limits:
+  idle_seconds: 60
+  max_turns: 60
+  no_progress_turns: 32
+  turn_chars: 60000
+  turn_seconds: 300
+env: {E2E_WINDOW: "12000"}  # the squeeze the fold family measures under (the harness default is 32k)

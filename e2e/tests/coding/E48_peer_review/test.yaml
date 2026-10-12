@@ -1,0 +1,15 @@
+# WHAT to measure and HOW LONG to allow. Never a model, an endpoint, a key
+# or a backend name — those live in e2e/backends/.
+id: peer_review
+group: coding
+title: a reviewer agent catches the flaw in a coder agent's diff
+runner: probe.py
+runtimes: [python, rust, swift]
+costs: turns
+limits:
+  idle_seconds: 60
+  max_turns: 16
+  no_progress_turns: 32
+  turn_chars: 60000
+  turn_seconds: 300
+env: {}

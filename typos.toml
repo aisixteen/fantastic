@@ -12,6 +12,10 @@ q_ba = "q_ba"
 q_ab = "q_ab"
 close_b = "close_b"
 close_a = "close_a"
+# `ix`/`iy` are the integer screen-coordinate locals in the TUI panel
+# renderer (`let (ix, iy) = draw_panel(...)`). typos reads `iy` as `it`.
+iy = "iy"
+ix = "ix"
 
 [default.extend-words]
 # Python tests sometimes use single-letter or two-letter locals
@@ -27,6 +31,10 @@ ab = "ab"
 # nvidia_nim_backend's tests — simulates an SSE delta that only
 # carries the first 3 chars of "hello". Not a typo of `help`.
 hel = "hel"
+# `helo` is the DELIBERATE misspelling a TUI composer test types, then
+# corrects mid-word by inserting the missing 'l' (`chat.rs`
+# composer_cursor_insert_move_and_delete). Fixing it would defeat the test.
+helo = "helo"
 # `unparseable` is a valid English spelling (less common than
 # `unparsable` but in OED). Used in nvidia_nim_backend's Rust doc
 # comment + Python test name. Allowlisted rather than rewritten to
@@ -53,13 +61,13 @@ strat = "strat"
 extend-exclude = [
     "**/.fantastic/",
     "**/.build/",
-    "swift/Sources/FantasticWeb/Resources/",
+    "src/lib/swift/Sources/FantasticWeb/Resources/",
     # Rust mirror of the same vendored assets (Three.js `metalness`/`lod`/
     # `LOD`, xterm minified two-letter symbols). The Swift copy is already
     # excluded above; the Rust kernel restoration brought the same files in.
-    "rust/crates/bundles/fantastic-web/src/assets/",
-    # The TS frontend kernel's own copies of those vendored bundles
+    "src/lib/rust/crates/bundles/fantastic-web/src/assets/",
+    # The canvas app's own copies of those vendored bundles
     # (Three.js `LOD`, xterm's minified `diposable`/`Sur`, …) — the
     # originals the swift/rust copies above mirror.
-    "ts/src/vendor/",
+    "src/tui/web/canvas/src/vendor/",
 ]

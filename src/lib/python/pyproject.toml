@@ -1,0 +1,139 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fantastic-kernel"
+version = "0.1.0"
+description = "Fantastic kernel — agents, send, filesystem registry. Plugin-discovered bundles via fantastic.bundles entry points."
+license = "AGPL-3.0-or-later"
+requires-python = ">=3.11"
+dependencies = [
+  "fantastic-cli",
+  "fantastic-web",
+  "fantastic-web-ws",
+  "fantastic-web-rest",
+  "fantastic-scheduler",
+  "fantastic-file-bridge",
+  "fantastic-kernel-state",
+  "fantastic-ollama-backend",
+  "fantastic-responses-backend",
+  "fantastic-anthropic-backend",
+  "fantastic-vllm-backend",
+  "fantastic-io-bridge",
+  "fantastic-ws-bridge",
+  "fantastic-relay-connector",
+  "fantastic-exec-bridge",
+  "fantastic-py-agent",
+  "fantastic-mcp-client",
+  "fantastic-ai-core",
+  "fantastic-static-loader",
+  "fantastic-ram-store",
+  "fantastic-credential-store",
+  "pyyaml>=6",
+]
+
+[project.scripts]
+fantastic_kernel = "main:main_dispatch"
+
+[tool.hatch.build.targets.wheel]
+only-include = ["main.py", "kernel"]
+
+[dependency-groups]
+dev = [
+  "pytest>=8",
+  "pytest-asyncio>=0.24",
+  "pytest-xdist>=3.6",
+  "pytest-cov>=5",
+  "httpx>=0.28",
+]
+
+# Pin the lint gate. With no [tool.ruff] section, `uvx ruff check` applied whatever
+# the freshly-fetched ruff version defaults to — measured 2026-08-07: ruff 0.16.1's
+# widened defaults reported 212 findings on a tree that is clean under the set it was
+# written against. The gate CLAUDE.md documents must mean one thing across machines
+# and ruff releases.
+[tool.ruff]
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = [
+  "tests",
+  "bundled_agents/cli/tests",
+  "bundled_agents/web/host/tests",
+  "bundled_agents/io/web_ws/tests",
+  "bundled_agents/io/web_rest/tests",
+  "bundled_agents/scheduler/tests",
+  "bundled_agents/io/file_bridge/tests",
+  "bundled_agents/loader/kernel_state/tests",
+  "bundled_agents/loader/static_loader/tests",
+  "bundled_agents/ai/ai_core/tests",
+  "bundled_agents/ai/ollama/ollama_backend/tests",
+  "bundled_agents/ai/responses/responses_backend/tests",
+  "bundled_agents/ai/anthropic/anthropic_backend/tests",
+  "bundled_agents/ai/vllm/vllm_backend/tests",
+  "bundled_agents/io/io_bridge/tests",
+  "bundled_agents/io/ws_bridge/tests",
+  "bundled_agents/io/relay_connector/tests",
+  "bundled_agents/io/exec_bridge/tests",
+  "bundled_agents/io/py_agent/tests",
+  "bundled_agents/io/mcp_client/tests",
+  "bundled_agents/memory/ram_store/tests",
+  "bundled_agents/security/credential_store/tests",
+]
+# `-n auto` — xdist across every core BY DEFAULT. It used to live only in
+# run_checks.sh, so a bare `pytest` ran the whole suite on one core while the
+# other nine idled. Parallelism is a property of the suite, not of the one
+# script that happened to remember the flag.
+addopts = "-q -n auto"
+
+[tool.uv.workspace]
+members = [
+  "bundled_agents/cli",
+  "bundled_agents/web/host",
+  "bundled_agents/io/web_ws",
+  "bundled_agents/io/web_rest",
+  "bundled_agents/scheduler",
+  "bundled_agents/io/file_bridge",
+  "bundled_agents/ai/ai_core",
+  "bundled_agents/ai/ollama/ollama_backend",
+  "bundled_agents/ai/responses/responses_backend",
+  "bundled_agents/ai/anthropic/anthropic_backend",
+  "bundled_agents/ai/vllm/vllm_backend",
+  "bundled_agents/io/io_bridge",
+  "bundled_agents/io/ws_bridge",
+  "bundled_agents/io/relay_connector",
+  "bundled_agents/io/exec_bridge",
+  "bundled_agents/io/py_agent",
+  "bundled_agents/io/mcp_client",
+  "bundled_agents/loader/kernel_state",
+  "bundled_agents/loader/static_loader",
+  "bundled_agents/memory/ram_store",
+  "bundled_agents/security/credential_store",
+  "installed_agents/*",
+]
+
+[tool.uv.sources]
+fantastic-cli = { workspace = true }
+fantastic-web = { workspace = true }
+fantastic-web-ws = { workspace = true }
+fantastic-web-rest = { workspace = true }
+fantastic-scheduler = { workspace = true }
+fantastic-file-bridge = { workspace = true }
+fantastic-ollama-backend = { workspace = true }
+fantastic-responses-backend = { workspace = true }
+fantastic-anthropic-backend = { workspace = true }
+fantastic-vllm-backend = { workspace = true }
+fantastic-io-bridge = { workspace = true }
+fantastic-ws-bridge = { workspace = true }
+fantastic-relay-connector = { workspace = true }
+fantastic-exec-bridge = { workspace = true }
+fantastic-py-agent = { workspace = true }
+fantastic-mcp-client = { workspace = true }
+fantastic-ai-core = { workspace = true }
+fantastic-kernel-state = { workspace = true }
+fantastic-static-loader = { workspace = true }
+fantastic-ram-store = { workspace = true }
+fantastic-credential-store = { workspace = true }

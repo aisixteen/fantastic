@@ -1,0 +1,51 @@
+# Kernel config — the SYSTEM SHAPE only. Deployable as-is; carries no test
+# metadata. What is asserted about it lives in `specs/sealed_by_default.yaml`.
+
+
+loaders:
+  - id: static_loader
+    file: fantastic.yaml
+    meta:
+      can_call: {$subtree: "*"}
+    manifest:
+      agents:
+        # THREE legs over ONE directory. Posture is a property of the LEG, not
+        # of the bytes: `sealed_fs` and `rw` serve the same `data/` and reach it
+        # differently, so the sibling leg is a witness that nothing moved.
+        - id: sealed_fs
+          handler_module: file_bridge.tools
+          callable_by: {$parent: "*"}
+          allow: ['.']
+          root: data
+          # no ingress_rule — SEALED BY DEFAULT, the subject of this scenario
+        - id: denied_fs
+          handler_module: file_bridge.tools
+          callable_by: {$parent: "*"}
+          allow: ['.']
+          root: data
+          ingress_rule: deny_ingress # the same seal, said out loud
+        - id: ro
+          handler_module: file_bridge.tools
+          callable_by: {$parent: "*"}
+          allow: ['.']
+          root: data
+          ingress_rule: allow_all_ingress
+          readonly: true
+        - id: rw
+          handler_module: file_bridge.tools
+          callable_by: {$parent: "*"}
+          allow: ['.']
+          root: data
+          ingress_rule: allow_all_ingress
+        # A DIFFERENT root: what one leg writes another cannot see or reach.
+        - id: vault
+          handler_module: file_bridge.tools
+          callable_by: {$parent: "*"}
+          allow: ['.']
+          root: vault
+          ingress_rule: allow_all_ingress
+        # The PROCESS edge of the same io family — sealed by the same default,
+        # to show the seal belongs to io_bridge and not to file_bridge.
+        - id: sealed_proc
+          handler_module: exec_bridge.tools
+          callable_by: {$parent: "*"}

@@ -20,3 +20,27 @@ tmp/
 
 # Generated container head page (built from readmes by container/head/gen_head.py)
 container/head/index.html
+# Swift test scratch dirs — bundles under test create real store roots in cwd
+# (scheduler sidecars, ws binary-stream blobs). Runtime state, never source.
+src/lib/swift/fantastic-sched-*/
+src/lib/swift/fantastic-schedfire-*/
+src/lib/swift/fantastic-wsbrstream-*/
+e2e/backends/sampling.json
+e2e/backends/connection.local.env
+# Staged kernel artifacts — built from source on demand, never committed.
+e2e/dist/
+
+# local model-proxy connections (one file per model)
+e2e/backends/local/
+# CRITICAL TODO(dev-llm): the dev CLI's hardwired LLM endpoint. Never commit.
+src/tui/dev.local.yaml
+
+# Release artifacts built by scripts/build/*.sh (tarballs, zips, unpacked kernels).
+dist/
+
+# the canvas e2e artifacts (host logs, project dirs, page DOMs) — wipe: src/tui/e2e/wipe.sh
+src/tui/e2e/runs/
+src/tui/e2e/tests/**/__pycache__/
+
+# the paper drafts — local only
+/paper/

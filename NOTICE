@@ -21,10 +21,11 @@ author and form one product family under one license (AGPL-3.0-or-later).
 
 ---
 
-Trademark (AGPL-3.0 §7 additional term): "Aisixteen Fantastic" and the
-"AISIXTEEN" word mark (USPTO reg. 7,238,635) are trademarks of AISIXTEEN.
-The license covers the code only and does not license these marks — a fork
-must ship under a different name. The `.fantastic` workdir format is a brand
+Trademark (AGPL-3.0 §7 additional term): AISIXTEEN® (word and robot-head
+design; U.S. Reg. No. 7,238,635; Int'l Reg. No. 1720602) is a registered
+trademark of Koreniuk Oleksandr Vasylovych; "Aisixteen Fantastic" is a
+trademark of the same owner. The license covers the code only and grants no
+rights in these marks — a fork must ship under a different name. The `.fantastic` workdir format is a brand
 asset of the project, not licensed by these terms.
 
 ---

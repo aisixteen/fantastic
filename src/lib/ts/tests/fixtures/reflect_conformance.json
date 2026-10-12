@@ -1,0 +1,397 @@
+{
+  "_doc": "The reflect contract, captured from the PYTHON kernel's own replies (src/lib/python, `kernel/_agent.py` `_apply_reflect_flags` / `_roster`) and reproduced by the ts kernel (tests/reflect.test.ts replays every case from `tree` + `bundles`). DISTILLED by default: `tree` is the roster {id, sentence, description?, mode?, children} (whole: a reflect that passes the gate returns the tree whole), no verb docs (they are the `docs` kernel verb); `detail:\"full\"` gives the wiring tree. `tree` is decided by key presence (absent = all, null/none = omitted), `tree:\"ids\"` and `bundles` page with `limit`/`after` (`next` / `bundles_next`), `readme` is true | \"index\" | \"<key>\" (this kernel's doc tree is empty). Differences BY DESIGN, per runtime: the root's `runtime` (\"ts\") and handler_module; the kernel verbs this kernel answers (no tree CRUD — the `_` line says so); the bundle catalog; python's root also carries its loader's doc frame (`self_extension`, and `readmes`/`docs` under full), which this kernel has no loader to contribute. The browser kernel has no OS env, so env is always \"host\" and version null.",
+  "bundles": [
+    "terminal_view.js",
+    "canvas.js"
+  ],
+  "tree": [
+    {
+      "id": "kernel_state",
+      "parentId": null,
+      "root": true
+    },
+    {
+      "id": "zeta",
+      "parentId": "kernel_state"
+    },
+    {
+      "id": "alpha",
+      "parentId": "kernel_state",
+      "meta": {
+        "display_name": "Alpha",
+        "description": "The chat pane.",
+        "mode": "chat"
+      }
+    }
+  ],
+  "cases": [
+    {
+      "name": "root, default (distilled)",
+      "target": "kernel",
+      "payload": {
+        "type": "reflect"
+      },
+      "expect": {
+        "id": "kernel_state",
+        "sentence": "Fantastic kernel. Everything is reachable by sending messages to agents.",
+        "parent_id": null,
+        "handler_module": null,
+        "display_name": "kernel_state",
+        "can_call": {
+          "$self": "*"
+        },
+        "callable_by": {
+          "$self": "*"
+        },
+        "runtime": "ts",
+        "peers": [],
+        "env": "host",
+        "version": null,
+        "persistence": {
+          "provider": null
+        },
+        "guid": null,
+        "tree": {
+          "id": "kernel_state",
+          "sentence": "Fantastic kernel. Everything is reachable by sending messages to agents.",
+          "children": [
+            {
+              "id": "zeta",
+              "sentence": "Bare agent (no handler_module) — answers substrate verbs only.",
+              "children": []
+            },
+            {
+              "id": "alpha",
+              "sentence": "Bare agent (no handler_module) — answers substrate verbs only.",
+              "description": "The chat pane.",
+              "mode": "chat",
+              "children": []
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "root, detail full",
+      "target": "kernel",
+      "payload": {
+        "type": "reflect",
+        "detail": "full"
+      },
+      "expect": {
+        "id": "kernel_state",
+        "sentence": "Fantastic kernel. Everything is reachable by sending messages to agents.",
+        "parent_id": null,
+        "handler_module": null,
+        "display_name": "kernel_state",
+        "can_call": {
+          "$self": "*"
+        },
+        "callable_by": {
+          "$self": "*"
+        },
+        "runtime": "ts",
+        "peers": [],
+        "env": "host",
+        "version": null,
+        "persistence": {
+          "provider": null
+        },
+        "guid": null,
+        "tree": {
+          "id": "kernel_state",
+          "parent_id": null,
+          "handler_module": null,
+          "display_name": "kernel_state",
+          "can_call": {
+            "$self": "*"
+          },
+          "callable_by": {
+            "$self": "*"
+          },
+          "children": [
+            {
+              "id": "zeta",
+              "parent_id": "kernel_state",
+              "handler_module": null,
+              "display_name": "zeta",
+              "can_call": {
+                "$self": "*"
+              },
+              "callable_by": {
+                "$self": "*"
+              },
+              "children": []
+            },
+            {
+              "id": "alpha",
+              "parent_id": "kernel_state",
+              "handler_module": null,
+              "display_name": "Alpha",
+              "description": "The chat pane.",
+              "can_call": {
+                "$self": "*"
+              },
+              "callable_by": {
+                "$self": "*"
+              },
+              "children": []
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "root, tree ids paged",
+      "target": "kernel_state",
+      "payload": {
+        "type": "reflect",
+        "tree": "ids",
+        "limit": 2
+      },
+      "expect": {
+        "id": "kernel_state",
+        "sentence": "Fantastic kernel. Everything is reachable by sending messages to agents.",
+        "parent_id": null,
+        "handler_module": null,
+        "display_name": "kernel_state",
+        "can_call": {
+          "$self": "*"
+        },
+        "callable_by": {
+          "$self": "*"
+        },
+        "runtime": "ts",
+        "peers": [],
+        "env": "host",
+        "version": null,
+        "persistence": {
+          "provider": null
+        },
+        "guid": null,
+        "tree": [
+          "kernel_state",
+          "zeta"
+        ],
+        "next": "zeta"
+      }
+    },
+    {
+      "name": "root, tree null omits",
+      "target": "kernel_state",
+      "payload": {
+        "type": "reflect",
+        "tree": null
+      },
+      "expect": {
+        "id": "kernel_state",
+        "sentence": "Fantastic kernel. Everything is reachable by sending messages to agents.",
+        "parent_id": null,
+        "handler_module": null,
+        "display_name": "kernel_state",
+        "can_call": {
+          "$self": "*"
+        },
+        "callable_by": {
+          "$self": "*"
+        },
+        "runtime": "ts",
+        "peers": [],
+        "env": "host",
+        "version": null,
+        "persistence": {
+          "provider": null
+        },
+        "guid": null
+      }
+    },
+    {
+      "name": "root, tree none + bundles ids paged",
+      "target": "kernel_state",
+      "payload": {
+        "type": "reflect",
+        "tree": "none",
+        "bundles": "ids",
+        "limit": 1
+      },
+      "expect": {
+        "id": "kernel_state",
+        "sentence": "Fantastic kernel. Everything is reachable by sending messages to agents.",
+        "parent_id": null,
+        "handler_module": null,
+        "display_name": "kernel_state",
+        "can_call": {
+          "$self": "*"
+        },
+        "callable_by": {
+          "$self": "*"
+        },
+        "runtime": "ts",
+        "peers": [],
+        "env": "host",
+        "version": null,
+        "persistence": {
+          "provider": null
+        },
+        "guid": null,
+        "bundles": [
+          "canvas"
+        ],
+        "bundles_next": "canvas"
+      }
+    },
+    {
+      "name": "leaf, default",
+      "target": "alpha",
+      "payload": {
+        "type": "reflect"
+      },
+      "expect": {
+        "id": "alpha",
+        "sentence": "Bare agent (no handler_module) — answers substrate verbs only.",
+        "parent_id": "kernel_state",
+        "handler_module": null,
+        "display_name": "Alpha",
+        "description": "The chat pane.",
+        "mode": "chat",
+        "can_call": {
+          "$self": "*"
+        },
+        "callable_by": {
+          "$self": "*"
+        },
+        "tree": {
+          "id": "alpha",
+          "sentence": "Bare agent (no handler_module) — answers substrate verbs only.",
+          "description": "The chat pane.",
+          "mode": "chat",
+          "children": []
+        }
+      }
+    },
+    {
+      "name": "leaf, detail full, tree none",
+      "target": "alpha",
+      "payload": {
+        "type": "reflect",
+        "detail": "full",
+        "tree": "none"
+      },
+      "expect": {
+        "id": "alpha",
+        "sentence": "Bare agent (no handler_module) — answers substrate verbs only.",
+        "parent_id": "kernel_state",
+        "handler_module": null,
+        "display_name": "Alpha",
+        "description": "The chat pane.",
+        "mode": "chat",
+        "can_call": {
+          "$self": "*"
+        },
+        "callable_by": {
+          "$self": "*"
+        }
+      }
+    },
+    {
+      "name": "readme index",
+      "target": "zeta",
+      "payload": {
+        "type": "reflect",
+        "tree": "none",
+        "readme": "index"
+      },
+      "expect": {
+        "id": "zeta",
+        "sentence": "Bare agent (no handler_module) — answers substrate verbs only.",
+        "parent_id": "kernel_state",
+        "handler_module": null,
+        "display_name": "zeta",
+        "can_call": {
+          "$self": "*"
+        },
+        "callable_by": {
+          "$self": "*"
+        },
+        "readme": {
+          "index": []
+        }
+      }
+    },
+    {
+      "name": "readme bad key",
+      "target": "zeta",
+      "payload": {
+        "type": "reflect",
+        "tree": "none",
+        "readme": "../x"
+      },
+      "expect": {
+        "id": "zeta",
+        "sentence": "Bare agent (no handler_module) — answers substrate verbs only.",
+        "parent_id": "kernel_state",
+        "handler_module": null,
+        "display_name": "zeta",
+        "can_call": {
+          "$self": "*"
+        },
+        "callable_by": {
+          "$self": "*"
+        },
+        "readme": {
+          "error": "bad key '../x'",
+          "keys": []
+        }
+      }
+    },
+    {
+      "name": "readme unknown key",
+      "target": "zeta",
+      "payload": {
+        "type": "reflect",
+        "tree": "none",
+        "readme": "topic"
+      },
+      "expect": {
+        "id": "zeta",
+        "sentence": "Bare agent (no handler_module) — answers substrate verbs only.",
+        "parent_id": "kernel_state",
+        "handler_module": null,
+        "display_name": "zeta",
+        "can_call": {
+          "$self": "*"
+        },
+        "callable_by": {
+          "$self": "*"
+        },
+        "readme": {
+          "error": "no doc 'topic'",
+          "keys": []
+        }
+      }
+    },
+    {
+      "name": "readme true",
+      "target": "zeta",
+      "payload": {
+        "type": "reflect",
+        "tree": "none",
+        "readme": true
+      },
+      "expect": {
+        "id": "zeta",
+        "sentence": "Bare agent (no handler_module) — answers substrate verbs only.",
+        "parent_id": "kernel_state",
+        "handler_module": null,
+        "display_name": "zeta",
+        "can_call": {
+          "$self": "*"
+        },
+        "callable_by": {
+          "$self": "*"
+        },
+        "readme": null
+      }
+    }
+  ]
+}

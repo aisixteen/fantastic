@@ -1,0 +1,1364 @@
+//! THE CONVERSATION, as the human reads it and as the MODEL sees it, on one
+//! screen.
+//!
+//! Two things make this pane different from every other chat view:
+//!
+//!   1. **Threads are parsed, not stored.** The model never emits a thread id and
+//!      never knows this structure exists. Parents come from row links, folds come
+//!      from the kernel's own fold rows, and the outline is a projection over the
+//!      log. Change the projection and nothing about the model changes.
+//!
+//!   2. **The gutter is the model's own view row, verbatim.** Every line carries a
+//!      mark saying whether the model sees it whole, abbreviated, as a fold, or not
+//!      at all. Nothing here is inferred from token counts or guessed from
+//!      position, so the human can see exactly what the model is working from —
+//!      which is the difference between reading a transcript and understanding a
+//!      context.
+//!
+//! Folded by default: a finished root is one message. A coding session that ran
+//! forty tool calls reads as the request it answered, and opening it is one key.
+//!
+//! A TRANSCRIPT: every message shows its whole text (`OutlineLine::body`),
+//! word-wrapped to the pane — a coding-CLI read, not a clipped list — and the
+//! cursor and the scroll move by message. THE ANSWER STREAMS AS PARTS
+//! (`part_start` / `part_delta` / `part_end` / `part_abort`): a text part is drawn
+//! as it is written, a call part as `→ target verb`, under the transcript — a
+//! DRAFT, dropped when its part ends (the answer arrives as its row). The model's
+//! reasoning is never shown: a thinking part flashes `thinking`. A part that was
+//! aborted, or a malformed call, stays as one dim `not sent` line until the next
+//! turn. `S` is the agent's `stop`.
+
+use ratatui::layout::Rect;
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::Paragraph;
+use ratatui::Frame;
+use serde_json::{json, Value};
+
+use crate::ev::Cmd;
+use crate::kern::model::{AgentId, RowId};
+use crate::panel::{Cx, Handled, Needs, Panel, PanelKind};
+use crate::theme;
+use crate::thread::{self, LineKind, Outline, OutlineState, Waiting, Zoom};
+
+/// How many lines of a text draft are drawn (its tail).
+const DRAFT_TAIL: usize = 6;
+
+/// (row, width) → (the text's hash, its wrapped lines).
+type WrapMemo = std::collections::HashMap<(RowId, usize), (u64, std::rc::Rc<Vec<String>>)>;
+
+/// What one View derives for this panel: its window into the thread and the
+/// wrap memo for its width (`Panel::take_view`).
+#[derive(Default)]
+struct AiView {
+    top: usize,
+    wraps: WrapMemo,
+    wraps_w: u16,
+}
+
+pub struct AiPanel {
+    agent: AgentId,
+    pub st: OutlineState,
+    /// First visible line. Kept as an OFFSET because it is a window into the
+    /// rendered list, while the cursor is a row id.
+    pub top: usize,
+    /// A turn is in flight (a `thinking`/`streaming`/`tool_calling` status, or
+    /// tokens arriving): the pane flashes `thinking` — never the token stream.
+    pub live: bool,
+    /// When the turn in flight began, for the indicator's clock.
+    since: Option<std::time::Instant>,
+    /// Seconds since `since`, taken in `layout` so `render` stays a pure view.
+    clock: f32,
+    /// The kernel's own phase for this agent, from its status frames. Never
+    /// inferred: `queued` with `ahead` is the honest word for a second send.
+    pub phase: Option<String>,
+    pub ahead: Option<i64>,
+    /// The last generation's USAGE, from its `done` status (`prompt_tokens`,
+    /// `completion_tokens`, `gen_seconds`, `context_window`, `*_estimated`) —
+    /// the status line's speed and context, as on the canvas.
+    usage: Option<Value>,
+    /// The body a human opened in the pager.
+    pub body: Option<(RowId, String)>,
+    /// The outline as of the last render, so keys can act on what is on screen.
+    last: Outline,
+    /// What `last` was projected from (`proj_key`): a frame re-projects only
+    /// when the rows, the task table or the fold state changed — never per frame.
+    proj_key: Option<u64>,
+    /// Each message's wrapped text, per (row, width), keyed by its text: a
+    /// frame wraps only what changed. A memo, not state — `render` may fill it.
+    wraps: std::cell::RefCell<WrapMemo>,
+    /// The pane width the memo was filled at: a resize empties it, so it never
+    /// accumulates one copy per width.
+    wraps_w: u16,
+    waiting: Vec<Waiting>,
+    /// The parts being written now, in order (`stream_id`, the draft).
+    drafts: Vec<(String, Draft)>,
+    /// What did not go out this turn — an aborted part, a malformed call — one
+    /// line each, until the next turn.
+    not_sent: Vec<String>,
+}
+
+/// One streamed part, drawn while the model writes it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Draft {
+    /// text | thinking | call.
+    pub kind: String,
+    /// A call part's `→ target verb`.
+    pub head: String,
+    /// The text so far.
+    pub text: String,
+}
+
+impl AiPanel {
+    pub fn new(agent: AgentId) -> Self {
+        Self {
+            agent,
+            st: OutlineState::default(),
+            top: 0,
+            live: false,
+            since: None,
+            clock: 0.0,
+            phase: None,
+            usage: None,
+            ahead: None,
+            body: None,
+            last: Outline::default(),
+            proj_key: None,
+            wraps: Default::default(),
+            wraps_w: 0,
+            waiting: Vec::new(),
+            drafts: Vec::new(),
+            not_sent: Vec::new(),
+        }
+    }
+
+    /// The draft lines drawn under the transcript: the text parts' tails, the
+    /// call parts' heads, then what was not sent. Thinking stays masked (the
+    /// `thinking` line).
+    fn draft_lines<'a>(&self, width: u16) -> Vec<Line<'a>> {
+        let w = (width as usize).saturating_sub(4).max(8);
+        let mut out = Vec::new();
+        for (_, d) in &self.drafts {
+            match d.kind.as_str() {
+                "text" => {
+                    let lines: Vec<String> = d.text.lines().flat_map(|l| {
+                        let cs: Vec<char> = l.chars().collect();
+                        if cs.is_empty() { vec![String::new()] } else { cs.chunks(w).map(|c| c.iter().collect()).collect() }
+                    }).collect();
+                    for l in lines.iter().skip(lines.len().saturating_sub(DRAFT_TAIL)) {
+                        out.push(Line::from(Span::styled(format!("  {l}"), Style::default().fg(theme::FG))));
+                    }
+                }
+                "call" => out.push(Line::from(Span::styled(format!("  {}", d.head), Style::default().fg(theme::DIM)))),
+                _ => {}
+            }
+        }
+        for n in &self.not_sent {
+            out.push(Line::from(Span::styled(format!("  {n}"), Style::default().fg(theme::DIM).add_modifier(Modifier::CROSSED_OUT))));
+        }
+        out
+    }
+
+    /// Whether a thinking part is open (the mask flashes).
+    fn thinking_open(&self) -> bool {
+        self.drafts.iter().any(|(_, d)| d.kind == "thinking")
+    }
+
+    /// Settle draft `id` as NOT SENT, saying why.
+    fn not_sent(&mut self, id: &str, why: &str) {
+        if let Some(at) = self.drafts.iter().position(|(s, _)| s == id) {
+            let (_, d) = self.drafts.remove(at);
+            let what = match d.kind.as_str() {
+                "call" => d.head,
+                "thinking" => "thinking".to_string(),
+                _ => d.text.lines().next().unwrap_or("").chars().take(60).collect(),
+            };
+            self.not_sent.push(format!("{what} · not sent — {why}"));
+        }
+    }
+
+    pub fn project(&mut self, cx: &Cx<'_>) -> Outline {
+        self.waiting = thread::waiting_for(cx.store, cx.agent, crate::env::HUMAN);
+        let o = thread::outline(thread::Args {
+            store: cx.store,
+            agent: cx.agent,
+            tasks: cx.tasks,
+            waiting: &self.waiting,
+            seen: cx.seen,
+            st: &self.st,
+        });
+        // A fold can swallow the row the cursor was on. Lifting it to whatever
+        // covers it is the only behaviour that does not lose the human's place.
+        self.st.cursor = thread::repair_cursor(&o, self.st.cursor);
+        o
+    }
+
+    /// A turn is in flight: start the indicator's clock (once per turn).
+    fn go_live(&mut self) {
+        if !self.live {
+            self.live = true;
+            self.since = Some(std::time::Instant::now());
+        }
+    }
+
+    /// What the projection depends on: the rows (`Store::rev`), the task table,
+    /// and the fold state. The cursor is not in it — moving never re-projects.
+    fn proj_key(&self, cx: &Cx<'_>) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        cx.store.rev.hash(&mut h);
+        for t in cx.tasks {
+            (t.id, &t.agent, t.parent).hash(&mut h);
+        }
+        let mut pins: Vec<_> = self.st.pins.iter().collect();
+        pins.sort();
+        let mut open: Vec<_> = self.st.open.iter().collect();
+        open.sort();
+        (pins, open, self.st.zoom as u8, self.st.model_view_only, self.st.narrow).hash(&mut h);
+        h.finish()
+    }
+
+    /// Re-project only when the key moved; the cursor is repaired either way.
+    fn refresh(&mut self, cx: &Cx<'_>) {
+        let key = self.proj_key(cx);
+        if self.proj_key != Some(key) {
+            self.last = self.project(cx);
+            self.proj_key = Some(key);
+        } else {
+            self.st.cursor = thread::repair_cursor(&self.last, self.st.cursor);
+        }
+    }
+
+    /// `text` wrapped to `w`, from the memo when the row's text is unchanged.
+    fn wrapped(&self, id: RowId, w: usize, text: &str) -> std::rc::Rc<Vec<String>> {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        text.hash(&mut h);
+        let sig = h.finish();
+        let mut memo = self.wraps.borrow_mut();
+        if let Some((s, lines)) = memo.get(&(id, w)) {
+            if *s == sig {
+                return std::rc::Rc::clone(lines);
+            }
+        }
+        let lines = std::rc::Rc::new(crate::ui::chrome::wrap(text, w));
+        memo.insert((id, w), (sig, std::rc::Rc::clone(&lines)));
+        lines
+    }
+
+    /// The row the cursor is on, or the first line.
+    fn at(&self) -> Option<RowId> {
+        self.at_in(&self.last)
+    }
+
+    /// The same, against an outline that is not stored yet — `layout` resolves
+    /// the cursor on the NEW projection before it replaces the old one.
+    fn at_in(&self, o: &Outline) -> Option<RowId> {
+        self.st.cursor.or_else(|| o.lines.first().map(|l| l.id))
+    }
+
+    fn move_by(&mut self, d: isize) {
+        if self.last.lines.is_empty() {
+            return;
+        }
+        let cur = self.at().and_then(|id| self.last.position(id)).unwrap_or(0) as isize;
+        let n = self.last.lines.len() as isize;
+        let next = (cur + d).clamp(0, n - 1) as usize;
+        self.st.cursor = Some(self.last.lines[next].id);
+    }
+
+    /// `Space`: pin or unpin. A PIN IS THE HUMAN'S, and it survives the next fold —
+    /// otherwise the kernel's summarizer would keep closing the thing you are
+    /// reading.
+    fn toggle_pin(&mut self) {
+        let Some(id) = self.at() else { return };
+        if self.st.pins.remove(&id) {
+            self.st.open.remove(&id);
+        } else {
+            self.st.pins.insert(id);
+            self.st.open.insert(id);
+        }
+    }
+
+    /// The next open question to the human. Derived from rows, so it is correct
+    /// without anything being tracked. It never meant "stopped": the thread
+    /// carrying the question keeps going.
+    fn next_asking(&mut self) {
+        let start = self.at().and_then(|id| self.last.position(id)).unwrap_or(0);
+        let n = self.last.lines.len();
+        for step in 1..=n {
+            let i = (start + step) % n.max(1);
+            if let Some(l) = self.last.lines.get(i) {
+                if l.asking {
+                    self.st.cursor = Some(l.id);
+                    return;
+                }
+            }
+        }
+    }
+
+    /// `S`: the agent's own `stop` — the generation is cancelled (its provider
+    /// stream closed), its open parts abort, nothing is sent.
+    fn stop(&self, cx: &Cx<'_>, out: &mut Vec<Cmd>) {
+        out.push(Cmd::Send { target: cx.agent.clone(), payload: json!({"type": "stop"}) });
+    }
+
+    /// CLEAR (owner 2026-10-12, as on the canvas): a new thread on the same
+    /// store — `context_clear`; nothing is deleted.
+    fn clear(&self, cx: &Cx<'_>, out: &mut Vec<Cmd>) {
+        out.push(Cmd::Send { target: cx.agent.clone(), payload: json!({"type": "context_clear", "why": "cleared from the terminal"}) });
+    }
+
+    /// The gutter legend. It names the marks in the model's own words, because a
+    /// glyph nobody can decode is decoration.
+    fn header<'a>(&self, o: &Outline) -> Vec<Line<'a>> {
+        let mut out = Vec::new();
+        match &o.view {
+            Some(v) => {
+                out.push(Line::from(vec![
+                    Span::styled("  context  ", Style::default().fg(theme::LABEL)),
+                    Span::styled(
+                        format!("{} rows", v.rows),
+                        Style::default().fg(theme::FG).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        if v.budget > 0 {
+                            format!("  ·  budget {}", v.budget)
+                        } else {
+                            String::new()
+                        },
+                        Style::default().fg(theme::DIM),
+                    ),
+                    Span::styled(
+                        if v.why.is_empty() {
+                            String::new()
+                        } else {
+                            format!("  ·  {}", v.why)
+                        },
+                        Style::default().fg(theme::DIM),
+                    ),
+                ]));
+                out.push(Line::from(Span::styled(
+                    format!(
+                        "  {} in full   {} shortened   {} folded   {} not in context",
+                        theme::MARK_FULL,
+                        theme::MARK_STUB,
+                        theme::MARK_FOLD,
+                        theme::MARK_OUT
+                    ),
+                    Style::default().fg(theme::DIM),
+                )));
+            }
+            None => out.push(Line::from(Span::styled(
+                "  context  the model has written no projection yet, so every row rides in full",
+                Style::default().fg(theme::DIM),
+            ))),
+        }
+        out.push(Line::from(""));
+        out
+    }
+
+    /// The text a message shows: its whole body for a turn or a question, the
+    /// one-line head for plumbing (folds, recalls, other kinds) and whenever the
+    /// body is empty.
+    fn text_of(l: &thread::OutlineLine) -> &str {
+        match &l.kind {
+            LineKind::Turn { .. } | LineKind::Waiting | LineKind::Late | LineKind::Monitor { .. }
+                if !l.body.is_empty() =>
+            {
+                &l.body
+            }
+            _ => &l.head,
+        }
+    }
+
+    /// One message as the lines it takes at `width`: the gutter (the model's own
+    /// view mark), then the text word-wrapped — the first line after its bullet,
+    /// tag and sender, the rest indented under them.
+    fn block_of<'a>(&self, l: &thread::OutlineLine, cursor: bool, width: u16) -> Vec<Line<'a>> {
+        let (glyph, gcol) = theme::mark(l.mark);
+        let indent = "  ".repeat(l.depth as usize);
+        let bullet = match (&l.kind, l.expandable, l.expanded) {
+            (LineKind::Fold { .. }, _, false) => theme::FOLDED,
+            (LineKind::Fold { .. }, _, true) => theme::OPENED,
+            (_, true, false) => theme::FOLDED,
+            (_, true, true) => theme::OPENED,
+            _ => ' ',
+        };
+        let tag = match &l.kind {
+            LineKind::Fold { level, refs } => format!("fold L{level} · {refs} "),
+            LineKind::Recall => "recall ".into(),
+            LineKind::Late => "late ".into(),
+            LineKind::Waiting => "asks you ".into(),
+            // `monitor 787 · job 514 "w5" · ended` — which watch spoke, on which job.
+            LineKind::Monitor { id, job, label, ended } => format!(
+                "monitor {id} · job {job}{}{} ",
+                label.as_ref().map_or(String::new(), |l| format!(" \"{l}\"")),
+                if *ended { " · ended" } else { "" },
+            ),
+            LineKind::Turn { .. } => String::new(),
+            LineKind::Other(k) => format!("{k} "),
+        };
+        // WHAT THE LINE IS decides its hue (theme's SAY_*); a failed thread's
+        // text reads red whatever it is. The bullet and bar keep the state.
+        let text_col = match (&l.kind, l.reply, l.closure) {
+            (_, _, thread::Closure::Failed) => theme::FAILED,
+            (LineKind::Fold { .. } | LineKind::Recall | LineKind::Other(_), _, _) => theme::SAY_PLUMBING,
+            (_, true, _) => theme::SAY_REPLY,
+            _ => theme::FG,
+        };
+        let mut style = Style::default().fg(text_col);
+        if l.pinned {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        let state = Style::default().fg(theme::closure(l.closure));
+        // Who said it: the vouched sender, else — for the model's own turn — this
+        // agent's id. Its label wears the speaker's hue.
+        let (from, from_col) = match (&l.from, &l.kind) {
+            (Some(f), _) if f == crate::env::HUMAN => (format!("{f}: "), theme::SAY_HUMAN),
+            (Some(f), _) if f == &self.agent => (format!("{f}: "), theme::SAY_SELF),
+            (Some(f), _) => (format!("{f}: "), theme::SAY_OTHER),
+            (None, LineKind::Turn { assistant: true }) => (format!("{}: ", self.agent), theme::SAY_SELF),
+            _ => (String::new(), theme::FG),
+        };
+        // THE QUESTION BADGE on a root that carries one: the inquiry colour, the
+        // envelope — beside the thread's own state, never instead of it.
+        let badge = l.asking && l.depth == 0;
+        // Width is a render concern, handled here and nowhere in the projection:
+        // gutter (3) + badge (2) + indent + bullet and space (2).
+        let lead = 3 + if badge { 2 } else { 0 } + indent.chars().count() + 2;
+        let avail = (width as usize).saturating_sub(lead + 1).max(8);
+        let text = format!("{tag}{from}{}", Self::text_of(l));
+        let wrapped = self.wrapped(l.id, avail, &text);
+        let bar = if cursor { "▌" } else { " " };
+        let mut out = Vec::with_capacity(wrapped.len());
+        for (n, piece) in wrapped.iter().enumerate() {
+            let mut spans = Vec::new();
+            spans.push(Span::styled(bar, Style::default().fg(theme::ACCENT_HI)));
+            if n == 0 {
+                spans.push(Span::styled(format!("{glyph} "), Style::default().fg(gcol)));
+                if badge {
+                    spans.push(Span::styled("✉ ", Style::default().fg(theme::BLOCKED).add_modifier(Modifier::BOLD)));
+                }
+                spans.push(Span::styled(format!("{indent}{bullet} "), state));
+            } else {
+                spans.push(Span::raw(" ".repeat(lead - 1)));
+            }
+            let rev = |st: Style| if cursor && n == 0 { st.add_modifier(Modifier::REVERSED) } else { st };
+            let mut rest: &str = piece;
+            if n == 0 {
+                if let Some(r) = rest.strip_prefix(tag.as_str()).filter(|_| !tag.is_empty()) {
+                    spans.push(Span::styled(tag.clone(), rev(Style::default().fg(theme::LABEL))));
+                    rest = r;
+                }
+                if let Some(r) = rest.strip_prefix(from.as_str()).filter(|_| !from.is_empty()) {
+                    spans.push(Span::styled(from.clone(), rev(Style::default().fg(from_col).add_modifier(Modifier::BOLD))));
+                    rest = r;
+                }
+            }
+            // a tool call, as `body_of` wrote it
+            let st = if rest.starts_with("▸ ") { Style::default().fg(theme::SAY_CALL) } else { style };
+            spans.push(Span::styled(rest.to_string(), rev(st)));
+            out.push(Line::from(spans));
+        }
+        out
+    }
+
+    /// Lines a message takes on screen at `width`, the spacer above a new root
+    /// included (none above the first one shown).
+    fn height_of(&self, l: &thread::OutlineLine, first: bool, width: u16) -> usize {
+        self.block_of(l, false, width).len() + usize::from(!first && l.depth == 0)
+    }
+
+    /// THE THINKING LINE: a braille spinner, the word with a shimmer travelling
+    /// through it, the seconds so far. Driven by `clock` (set in `layout`).
+    fn thinking_line<'a>(&self) -> Line<'a> {
+        const SPIN: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+        const WORD: &str = "thinking";
+        let t = self.clock;
+        let frame = SPIN[(t * 12.0) as usize % SPIN.len()];
+        let n = WORD.chars().count() as f32;
+        let at = (t * 9.0) % (n + 6.0) - 3.0; // the shimmer's centre, off both ends
+        let mut spans = vec![
+            Span::raw("  "),
+            Span::styled(format!("{frame} "), Style::default().fg(theme::ACCENT_HI).add_modifier(Modifier::BOLD)),
+        ];
+        for (i, ch) in WORD.chars().enumerate() {
+            let d = (i as f32 - at).abs();
+            let st = if d < 0.8 {
+                Style::default().fg(theme::ACCENT_HI).add_modifier(Modifier::BOLD)
+            } else if d < 2.0 {
+                Style::default().fg(theme::FG)
+            } else {
+                Style::default().fg(theme::DIM)
+            };
+            spans.push(Span::styled(ch.to_string(), st));
+        }
+        spans.push(Span::styled(format!("  {}s", t as u64), Style::default().fg(theme::DIM)));
+        Line::from(spans)
+    }
+}
+
+impl Panel for AiPanel {
+    fn kind(&self) -> PanelKind {
+        PanelKind::Ai
+    }
+
+    fn needs(&self) -> Needs {
+        Needs {
+            rows: true,
+            reflect: true,
+            watch: true,
+        }
+    }
+
+    fn on_key(
+        &mut self,
+        k: crossterm::event::KeyEvent,
+        cx: &Cx<'_>,
+        out: &mut Vec<Cmd>,
+    ) -> Handled {
+        use crossterm::event::KeyCode as K;
+        if self.body.is_some() {
+            if matches!(k.code, K::Esc | K::Char('q')) {
+                self.body = None;
+                return Handled::Yes;
+            }
+            return Handled::No;
+        }
+        match k.code {
+            K::Down | K::Char('j') => {
+                self.move_by(1);
+                Handled::Yes
+            }
+            K::Up | K::Char('k') => {
+                self.move_by(-1);
+                Handled::Yes
+            }
+            K::PageDown => {
+                self.move_by(15);
+                Handled::Yes
+            }
+            K::PageUp => {
+                self.move_by(-15);
+                Handled::Yes
+            }
+            K::Char(' ') => {
+                self.toggle_pin();
+                Handled::Yes
+            }
+            K::Enter => {
+                let Some(id) = self.at() else {
+                    return Handled::Yes;
+                };
+                let expandable = self
+                    .last
+                    .lines
+                    .iter()
+                    .find(|l| l.id == id)
+                    .map(|l| l.expandable)
+                    .unwrap_or(false);
+                if expandable {
+                    // Narrow: the subtree becomes the whole pane, with a
+                    // breadcrumb out.
+                    self.st.narrow = Some(id);
+                    self.st.open.insert(id);
+                } else if let Some(bid) = cx.store.body_of.get(&id) {
+                    let text = cx
+                        .store
+                        .rows
+                        .get(bid)
+                        .and_then(|r| r.content.clone().or_else(|| r.body.clone()))
+                        .unwrap_or_default();
+                    self.body = Some((id, text));
+                } else if let Some(r) = cx.store.rows.get(&id) {
+                    self.body = Some((id, r.content.clone().unwrap_or_default()));
+                }
+                Handled::Yes
+            }
+            K::Esc => {
+                if self.st.narrow.take().is_some() {
+                    Handled::Yes
+                } else {
+                    Handled::No // let focus leave the panel
+                }
+            }
+            K::Char('n') => {
+                self.next_asking();
+                Handled::Yes
+            }
+            K::Char('z') => {
+                self.st.zoom = match self.st.zoom {
+                    Zoom::All => Zoom::Decisions,
+                    Zoom::Decisions => Zoom::Roots,
+                    Zoom::Roots => Zoom::All,
+                };
+                Handled::Yes
+            }
+            K::Char('v') => {
+                self.st.model_view_only = !self.st.model_view_only;
+                Handled::Yes
+            }
+            K::Char('S') => {
+                self.stop(cx, out);
+                Handled::Yes
+            }
+            K::Char('C') => {
+                self.clear(cx, out);
+                Handled::Yes
+            }
+            // THE THOUGHT behind the line under the cursor (kept on its row), in
+            // the pager — Esc closes it, as any body
+            K::Char('t') => {
+                if let Some(id) = self.at() {
+                    if let Some(t) = cx.store.rows.get(&id).and_then(|r| r.thinking.clone()).filter(|t| !t.trim().is_empty()) {
+                        self.body = Some((id, format!("💭 thought\n\n{t}")));
+                    }
+                }
+                Handled::Yes
+            }
+            _ => Handled::No,
+        }
+    }
+
+    fn on_event(&mut self, payload: &Value, _out: &mut Vec<Cmd>) -> bool {
+        let sid = || payload.get("stream_id").and_then(Value::as_str).unwrap_or("").to_string();
+        let st = |k: &str| payload.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+        match payload.get("type").and_then(Value::as_str) {
+            // THE PARTS: one draft per stream_id. A delta never acts.
+            Some("part_start") => {
+                self.go_live();
+                let to = payload.get("to").and_then(Value::as_array).map(|a| {
+                    a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")
+                });
+                let target = Some(st("target")).filter(|t| !t.is_empty()).or(to).unwrap_or_default();
+                let head = format!("→ {target} {}", st("name")).split_whitespace().collect::<Vec<_>>().join(" ");
+                self.drafts.push((sid(), Draft { kind: st("kind"), head, text: String::new() }));
+                true
+            }
+            Some("part_delta") => {
+                let id = sid();
+                match self.drafts.iter_mut().find(|(s, _)| *s == id) {
+                    Some((_, d)) => {
+                        d.text.push_str(&st("text"));
+                        d.kind == "text"
+                    }
+                    None => false,
+                }
+            }
+            Some("part_end") => {
+                let id = sid();
+                if payload.get("ok") == Some(&json!(false)) {
+                    self.not_sent(&id, "malformed");
+                } else {
+                    self.drafts.retain(|(s, _)| *s != id);
+                }
+                true
+            }
+            Some("part_abort") => {
+                let why = Some(st("reason")).filter(|r| !r.is_empty()).unwrap_or_else(|| "aborted".into());
+                self.not_sent(&sid(), &why);
+                true
+            }
+            Some("status") => {
+                let phase = payload
+                    .get("phase")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                self.ahead = payload
+                    .get("detail")
+                    .and_then(|d| d.get("ahead"))
+                    .and_then(Value::as_i64);
+                if let Some(d) = payload.get("detail").filter(|d| d.get("completion_tokens").is_some()) {
+                    self.usage = Some(d.clone());
+                }
+                match phase.as_deref() {
+                    Some("thinking" | "streaming" | "tool_calling") => {
+                        // a new turn: last turn's not-sent lines go
+                        if !self.live {
+                            self.not_sent.clear();
+                        }
+                        self.go_live();
+                    }
+                    _ => {
+                        self.live = false;
+                        self.since = None;
+                        self.drafts.clear();
+                    }
+                }
+                self.phase = phase;
+                true
+            }
+            // A compaction happened. The gutter is about to change, so the pane
+            // must re-read rather than keep rendering a stale projection.
+            Some("context") => true,
+            _ => false,
+        }
+    }
+
+    fn on_select(&mut self, _cx: &Cx<'_>, out: &mut Vec<Cmd>) {
+        out.push(Cmd::Reflect {
+            agent: self.agent.clone(),
+        });
+        out.push(Cmd::Rows {
+            agent: self.agent.clone(),
+            full: true,
+            after: None,
+        });
+        out.push(Cmd::Watch(self.agent.clone()));
+    }
+
+    fn seen_now(&self) -> Vec<RowId> {
+        // The line under the cursor, and the body the human opened. Not the whole
+        // visible page: scrolling past something is not reading it.
+        self.st
+            .cursor
+            .into_iter()
+            .chain(self.body.as_ref().map(|(id, _)| *id))
+            .collect()
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
+    fn animating(&self) -> bool {
+        self.live
+    }
+
+    fn take_view(&mut self) -> Option<Box<dyn std::any::Any>> {
+        Some(Box::new(AiView {
+            top: std::mem::take(&mut self.top),
+            wraps: std::mem::take(&mut *self.wraps.borrow_mut()),
+            wraps_w: std::mem::take(&mut self.wraps_w),
+        }))
+    }
+
+    fn put_view(&mut self, view: Box<dyn std::any::Any>) {
+        if let Ok(v) = view.downcast::<AiView>() {
+            self.top = v.top;
+            *self.wraps.borrow_mut() = v.wraps;
+            self.wraps_w = v.wraps_w;
+        }
+    }
+
+    fn layout(&mut self, area: Rect, cx: &Cx<'_>) {
+        self.clock = self.since.map_or(0.0, |t| t.elapsed().as_secs_f32());
+        if area.width != self.wraps_w {
+            self.wraps.borrow_mut().clear();
+            self.wraps_w = area.width;
+        }
+        self.refresh(cx);
+        if self.body.is_none() && !self.last.lines.is_empty() {
+            let o = &self.last;
+            let head_h = self.header(o).len();
+            let live_h = if self.live { 2 } else { 0 } + self.draft_lines(area.width).len();
+            let body_h = (area.height as usize).saturating_sub(head_h + live_h);
+            // Keep the cursor's WHOLE message on screen — messages have heights —
+            // scrolling as little as it takes. O(what is on screen): walk UP from
+            // the cursor until the screen is full, never over the whole thread.
+            let cur = self.at_in(o).and_then(|id| o.position(id)).unwrap_or(0);
+            let mut top = self.top.min(o.lines.len().saturating_sub(1));
+            if cur < top {
+                top = cur;
+            } else {
+                let mut used = 0usize;
+                let mut i = cur;
+                loop {
+                    // as the first message shown (no spacer above it)
+                    let h = self.height_of(&o.lines[i], true, area.width);
+                    if used + h > body_h && i < cur {
+                        top = top.max(i + 1);
+                        break;
+                    }
+                    if i <= top {
+                        break;
+                    }
+                    used += self.height_of(&o.lines[i], false, area.width);
+                    i -= 1;
+                }
+            }
+            self.top = top;
+        }
+    }
+
+    fn render(&self, f: &mut Frame<'_>, area: Rect, _cx: &Cx<'_>) {
+        let o = &self.last;
+
+        if let Some((id, text)) = &self.body {
+            let mut lines = vec![Line::from(Span::styled(
+                format!("  row {id} · Esc closes"),
+                Style::default()
+                    .fg(theme::LABEL)
+                    .add_modifier(Modifier::BOLD),
+            ))];
+            for l in text.lines() {
+                lines.push(Line::from(Span::styled(
+                    l.to_string(),
+                    Style::default().fg(theme::FG),
+                )));
+            }
+            f.render_widget(Paragraph::new(lines), area);
+            return;
+        }
+
+        let mut lines = self.header(o);
+        let head_h = lines.len();
+        let drafts = self.draft_lines(area.width);
+        let live_h = if self.live { 2 } else { 0 } + drafts.len();
+        let body_h = (area.height as usize).saturating_sub(head_h + live_h);
+
+        if o.lines.is_empty() && _cx.store.unloaded.contains(_cx.agent) {
+            lines.push(Line::from(Span::styled(
+                "  this agent has not loaded its history yet — it will on its next turn.",
+                Style::default().fg(theme::DIM),
+            )));
+        } else if o.lines.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "  nothing yet. Type below to start a thread.",
+                Style::default().fg(theme::DIM),
+            )));
+        }
+        let mut used = 0usize;
+        for (k, l) in o.lines.iter().skip(self.top).enumerate() {
+            if used >= body_h {
+                break;
+            }
+            if k > 0 && l.depth == 0 {
+                lines.push(Line::from(""));
+                used += 1;
+            }
+            let is_cur = Some(l.id) == self.at();
+            for line in self.block_of(l, is_cur, area.width) {
+                if used >= body_h {
+                    break;
+                }
+                lines.push(line);
+                used += 1;
+            }
+        }
+
+        if self.live || !drafts.is_empty() {
+            // pinned to the bottom of the pane, under the transcript: the drafts,
+            // then the indicator (masking any reasoning in flight)
+            let tail = drafts.len() + if self.live { 2 } else { 0 };
+            while lines.len() + tail < area.height as usize {
+                lines.push(Line::from(""));
+            }
+            lines.extend(drafts);
+            if self.live {
+                lines.push(Line::from(""));
+                lines.push(self.thinking_line());
+            }
+        }
+
+        f.render_widget(Paragraph::new(lines), area);
+    }
+
+    fn status(&self, cx: &Cx<'_>) -> Option<String> {
+        let mut bits = vec![self.agent.to_string()];
+        // THE KV-CACHE TABLE, when the backend keeps one (vLLM: `kv` in its
+        // reflect — live conversations of the slots, how many rotated out).
+        if let Some(kv) = cx.reflect.and_then(|r| r.get("kv")).filter(|k| k.get("slots").is_some_and(|s| !s.is_null())) {
+            let n = |k: &str| kv.get(k).and_then(Value::as_i64).unwrap_or(0);
+            bits.push(format!("kv {}/{} · evicted {}", n("live"), n("slots"), n("evicted")));
+        }
+        // THE HONEST WORD for a second send: it is queued behind a turn that holds
+        // the backend's lock. It is linked to what is running; it does not steer it.
+        match (self.phase.as_deref(), self.ahead) {
+            (Some("queued"), Some(n)) => bits.push(format!("queued · ahead {n}")),
+            (Some(p), _) => bits.push(p.to_string()),
+            (None, _) => {}
+        }
+        if !self.waiting.is_empty() {
+            bits.push(format!("{}{}", theme::INQUIRY, self.waiting.len()));
+        }
+        // SPEED AND CONTEXT (as on the canvas): the last generation's tok/s and
+        // its prompt of the window — `~` when the backend only estimated it
+        let window = self
+            .usage
+            .as_ref()
+            .and_then(|u| u.get("context_window"))
+            .or_else(|| cx.reflect.and_then(|r| r.get("context_window")))
+            .and_then(Value::as_f64);
+        if let Some(sp) = speed_and_context(self.usage.as_ref(), window) {
+            bits.push(sp);
+        }
+        bits.push(
+            match self.st.zoom {
+                Zoom::All => "all",
+                Zoom::Decisions => "decisions",
+                Zoom::Roots => "roots",
+            }
+            .to_string(),
+        );
+        if self.st.model_view_only {
+            bits.push("model view".into());
+        }
+        Some(bits.join(" · "))
+    }
+}
+
+/// `N tok/s · Xk / Wk ctx` from a `done` status's usage (`~` marks an estimate);
+/// the window alone before any generation. None without a window.
+fn speed_and_context(usage: Option<&Value>, window: Option<f64>) -> Option<String> {
+    let k = |n: f64| if n >= 1000.0 { format!("{:.1}k", n / 1000.0).replace(".0k", "k") } else { format!("{n:.0}") };
+    let est = |f: &str| if usage.and_then(|u| u.get(f)).and_then(Value::as_bool) == Some(true) { "~" } else { "" };
+    let num = |f: &str| usage.and_then(|u| u.get(f)).and_then(Value::as_f64);
+    let mut bits = Vec::new();
+    if let (Some(out), Some(secs)) = (num("completion_tokens"), num("gen_seconds")) {
+        if secs > 0.0 {
+            bits.push(format!("{}{:.0} tok/s", est("completion_tokens_estimated"), out / secs));
+        }
+    }
+    let w = window?;
+    let prompt = num("prompt_tokens").map(|p| format!("{}{}", est("prompt_tokens_estimated"), k(p))).unwrap_or_else(|| "—".into());
+    bits.push(format!("{prompt} / {} ctx", k(w)));
+    Some(bits.join(" · "))
+}
+
+/// The payload a human's message becomes. `re` is what threads an answer onto the
+/// row that asked, and it is the ONLY mechanism: there is no answer verb, because
+/// nothing was ever parked waiting for one.
+pub fn say_payload(to: &AgentId, text: &str, client_id: &str, re: Option<RowId>) -> Value {
+    let mut p = json!({
+        "type": "send",
+        "text": text,
+        "client_id": client_id,
+        "to": [to],
+    });
+    if let Some(r) = re {
+        p["re"] = json!(r);
+    }
+    p
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::Store;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn store_with(rows: Vec<Value>) -> Store {
+        let mut s = Store::default();
+        s.apply_full(
+            &"ai".to_string(),
+            rows.into_iter()
+                .map(|v| serde_json::from_value(v).unwrap())
+                .collect(),
+        );
+        s
+    }
+
+    fn key(c: KeyCode) -> KeyEvent {
+        KeyEvent::new(c, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn a_message_carries_the_client_id_and_threads_with_re() {
+        let p = say_payload(&"ai".into(), "use auth-v2", "tui-abc123", Some(423));
+        assert_eq!(p["client_id"], "tui-abc123");
+        assert_ne!(
+            p["client_id"], "cli",
+            "`cli` is the kernel's own internal id"
+        );
+        assert_eq!(p["re"], 423);
+        assert_eq!(p["to"][0], "ai");
+        let plain = say_payload(&"ai".into(), "hi", "tui-abc123", None);
+        assert!(plain.get("re").is_none(), "a new thread points at nothing");
+    }
+
+    #[test]
+    fn a_pin_survives_and_unpinning_closes() {
+        let s = store_with(vec![
+            json!({"id":1,"agent":"ai","role":"user","content":"a"}),
+            json!({"id":2,"agent":"ai","role":"assistant","parent":1,"content":"b"}),
+        ]);
+        let mut p = AiPanel::new("ai".into());
+        let seen = std::collections::HashSet::new();
+        let a: AgentId = "ai".into();
+        let cx = Cx {
+            agent: &a,
+            store: &s,
+            tasks: &[],
+            seen: &seen,
+            reflect: None,
+        };
+        p.last = p.project(&cx);
+        p.st.cursor = Some(1);
+        let mut out = Vec::new();
+        p.on_key(key(KeyCode::Char(' ')), &cx, &mut out);
+        assert!(p.st.pins.contains(&1) && p.st.open.contains(&1));
+        p.on_key(key(KeyCode::Char(' ')), &cx, &mut out);
+        assert!(!p.st.pins.contains(&1) && !p.st.open.contains(&1));
+    }
+
+    /// Render `p` into an off-screen terminal and return the text it drew.
+    fn draw_once(p: &AiPanel, cx: &Cx<'_>, w: u16, h: u16) -> String {
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
+        term.draw(|f| p.render(f, f.area(), cx)).unwrap();
+        let buf = term.backend().buffer().clone();
+        (0..h)
+            .map(|y| (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn render_is_a_pure_view_layout_is_where_state_changes() {
+        // MVVM, pinned: `layout` derives, `render` only reads. Two draws of the
+        // same state are identical and leave the panel exactly as it was.
+        let s = store_with((1..=30).map(|i| json!({"id":i,"agent":"ai","role":"user","content":format!("m{i}")})).collect());
+        let mut p = AiPanel::new("ai".into());
+        let seen = std::collections::HashSet::new();
+        let a: AgentId = "ai".into();
+        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: None };
+        let area = Rect::new(0, 0, 60, 10);
+        p.layout(area, &cx);
+        let (top, cur, n) = (p.top, p.st.cursor, p.last.lines.len());
+        let first = draw_once(&p, &cx, 60, 10);
+        let second = draw_once(&p, &cx, 60, 10);
+        assert_eq!(first, second, "a second draw of the same state must be identical");
+        assert_eq!((p.top, p.st.cursor, p.last.lines.len()), (top, cur, n), "render changed state");
+    }
+
+    #[test]
+    fn an_open_question_is_a_badge_not_a_stopped_thread() {
+        // A question to the human never blocks the conversation: its thread is
+        // drawn in its own state, with the envelope beside it.
+        let s = store_with(vec![json!({"id":1,"agent":"ai","content":"[from other · msg 1]\nwhich port?"})]);
+        let mut p = AiPanel::new("ai".into());
+        let seen = std::collections::HashSet::new();
+        let a: AgentId = "ai".into();
+        let w = thread::waiting_for(&s, &a, crate::env::HUMAN);
+        assert_eq!(w.len(), 1);
+        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: None };
+        p.layout(Rect::new(0, 0, 70, 10), &cx);
+        assert!(p.last.lines[0].asking);
+        let drawn = draw_once(&p, &cx, 70, 10);
+        assert!(drawn.contains('✉'), "the question badge is drawn:\n{drawn}");
+        assert!(drawn.contains("which port?"));
+    }
+
+    #[test]
+    fn layout_keeps_the_cursor_on_screen() {
+        let s = store_with((1..=30).map(|i| json!({"id":i,"agent":"ai","role":"user","content":format!("m{i}")})).collect());
+        let mut p = AiPanel::new("ai".into());
+        let seen = std::collections::HashSet::new();
+        let a: AgentId = "ai".into();
+        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: None };
+        let area = Rect::new(0, 0, 60, 8);
+        p.layout(area, &cx);
+        // Put the cursor on the last line, far below an 8-row viewport.
+        p.st.cursor = p.last.lines.last().map(|l| l.id);
+        p.layout(area, &cx);
+        let cur = p.at().and_then(|id| p.last.position(id)).unwrap();
+        let body_h = (area.height as usize).saturating_sub(p.header(&p.last).len());
+        assert!(cur >= p.top && cur < p.top + body_h.max(1), "cursor {cur} outside [{}, +{body_h})", p.top);
+        assert!(draw_once(&p, &cx, 60, 8).contains("m30"), "the cursor's row is drawn");
+    }
+
+    #[test]
+    fn zoom_cycles_through_three_and_returns() {
+        let s = store_with(vec![json!({"id":1,"agent":"ai","content":"a"})]);
+        let mut p = AiPanel::new("ai".into());
+        let seen = std::collections::HashSet::new();
+        let a: AgentId = "ai".into();
+        let cx = Cx {
+            agent: &a,
+            store: &s,
+            tasks: &[],
+            seen: &seen,
+            reflect: None,
+        };
+        let mut out = Vec::new();
+        for want in [Zoom::Decisions, Zoom::Roots, Zoom::All] {
+            p.on_key(key(KeyCode::Char('z')), &cx, &mut out);
+            assert_eq!(p.st.zoom, want);
+        }
+    }
+
+    #[test]
+    fn speed_and_context_reads_the_done_usage() {
+        let u = json!({"prompt_tokens": 3600, "completion_tokens": 120, "gen_seconds": 0.5, "context_window": 65536});
+        assert_eq!(speed_and_context(Some(&u), Some(65536.0)).as_deref(), Some("240 tok/s · 3.6k / 65.5k ctx"));
+        let e = json!({"prompt_tokens": 900, "completion_tokens": 10, "gen_seconds": 1.0, "prompt_tokens_estimated": true});
+        assert_eq!(speed_and_context(Some(&e), Some(262144.0)).as_deref(), Some("10 tok/s · ~900 / 262.1k ctx"));
+        assert_eq!(speed_and_context(None, Some(8192.0)).as_deref(), Some("— / 8.2k ctx"));
+        assert_eq!(speed_and_context(None, None), None);
+    }
+
+    #[test]
+    fn t_opens_the_thought_kept_on_the_row() {
+        let s = store_with(vec![json!({"id":1,"agent":"ai","role":"assistant","content":"the answer","thinking":"why I said it"})]);
+        let mut p = AiPanel::new("ai".into());
+        let seen = std::collections::HashSet::new();
+        let a: AgentId = "ai".into();
+        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: None };
+        let mut out = Vec::new();
+        p.st.cursor = Some(1);
+        p.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE), &cx, &mut out);
+        assert!(p.body.as_ref().is_some_and(|(id, t)| *id == 1 && t.contains("why I said it")), "{:?}", p.body);
+    }
+
+    #[test]
+    fn clear_is_context_clear() {
+        let s = store_with(vec![json!({"id":1,"agent":"ai","content":"a"})]);
+        let mut p = AiPanel::new("ai".into());
+        let seen = std::collections::HashSet::new();
+        let a: AgentId = "ai".into();
+        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: None };
+        let mut out = Vec::new();
+        p.on_key(KeyEvent::new(KeyCode::Char('C'), KeyModifiers::NONE), &cx, &mut out);
+        assert!(matches!(&out[..], [Cmd::Send { target, payload }] if target.as_str() == "ai" && payload["type"] == "context_clear"), "{out:?}");
+    }
+
+    #[test]
+    fn stop_is_the_agents_own_verb() {
+        let s = store_with(vec![json!({"id":1,"agent":"ai","content":"a"})]);
+        let mut p = AiPanel::new("ai".into());
+        let seen = std::collections::HashSet::new();
+        let a: AgentId = "ai".into();
+        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: None };
+        let mut out = Vec::new();
+        p.on_key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::NONE), &cx, &mut out);
+        assert!(
+            matches!(&out[..], [Cmd::Send { target, payload }] if target.as_str() == "ai" && payload["type"] == "stop"),
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn the_status_names_the_kv_table_when_the_backend_keeps_one() {
+        let p = AiPanel::new("ai".into());
+        let s = Store::default();
+        let seen = std::collections::HashSet::new();
+        let a: AgentId = "ai".into();
+        let r = json!({"kv": {"slots": 2, "overflow": "evict", "live": 2, "evicted": 1, "rejected": 0}});
+        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: Some(&r) };
+        assert!(p.status(&cx).unwrap().contains("kv 2/2 · evicted 1"));
+        let none = json!({"model": "x"});
+        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: Some(&none) };
+        assert!(!p.status(&cx).unwrap().contains("kv "));
+    }
+
+    #[test]
+    fn a_status_frame_reports_queued_with_how_many_are_ahead() {
+        let mut p = AiPanel::new("ai".into());
+        let mut out = Vec::new();
+        assert!(p.on_event(
+            &json!({"type":"status","phase":"queued","detail":{"ahead":2}}),
+            &mut out
+        ));
+        let s = Store::default();
+        let seen = std::collections::HashSet::new();
+        let a: AgentId = "ai".into();
+        let cx = Cx {
+            agent: &a,
+            store: &s,
+            tasks: &[],
+            seen: &seen,
+            reflect: None,
+        };
+        let line = p.status(&cx).unwrap();
+        assert!(line.contains("queued · ahead 2"), "{line}");
+    }
+
+    #[test]
+    fn parts_draw_text_and_calls_mask_thinking_and_settle() {
+        let mut p = AiPanel::new("ai".into());
+        let mut out = Vec::new();
+        let s = Store::default();
+        let seen = std::collections::HashSet::new();
+        let a: AgentId = "ai".into();
+        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: None };
+        let ev = |v: Value| v;
+        // reasoning: masked
+        p.on_event(&ev(json!({"type":"part_start","stream_id":"ai:1","kind":"thinking","re":4})), &mut out);
+        p.on_event(&ev(json!({"type":"part_delta","stream_id":"ai:1","text":"secret reasoning"})), &mut out);
+        assert!(p.live && p.thinking_open());
+        p.layout(Rect::new(0, 0, 60, 14), &cx);
+        let screen = draw_once(&p, &cx, 60, 14);
+        assert!(screen.contains("thinking") && !screen.contains("secret"), "{screen}");
+        p.on_event(&ev(json!({"type":"part_end","stream_id":"ai:1"})), &mut out);
+        // the answer: drawn as written
+        p.on_event(&ev(json!({"type":"part_start","stream_id":"ai:2","kind":"text","re":4})), &mut out);
+        p.on_event(&ev(json!({"type":"part_delta","stream_id":"ai:2","text":"hello there"})), &mut out);
+        // a call: its head
+        p.on_event(&ev(json!({"type":"part_start","stream_id":"ai:3","kind":"call","name":"send","target":"files","re":4})), &mut out);
+        p.layout(Rect::new(0, 0, 60, 14), &cx);
+        let screen = draw_once(&p, &cx, 60, 14);
+        assert!(screen.contains("hello there") && screen.contains("→ files send"), "{screen}");
+        // a malformed call is not sent; an aborted text neither
+        p.on_event(&ev(json!({"type":"part_end","stream_id":"ai:3","ok":false})), &mut out);
+        p.on_event(&ev(json!({"type":"part_abort","stream_id":"ai:2","reason":"stopped"})), &mut out);
+        assert!(p.drafts.is_empty());
+        p.layout(Rect::new(0, 0, 60, 14), &cx);
+        let screen = draw_once(&p, &cx, 60, 14);
+        assert!(screen.contains("→ files send · not sent — malformed"), "{screen}");
+        assert!(screen.contains("hello there · not sent — stopped"), "{screen}");
+        // the turn ends: the indicator stops; the next turn clears the not-sent lines
+        p.on_event(&json!({"type":"status","phase":"done"}), &mut out);
+        assert!(!p.live);
+        p.on_event(&json!({"type":"status","phase":"thinking"}), &mut out);
+        assert!(p.not_sent.is_empty());
+    }
+
+    #[test]
+    fn a_frame_touches_only_what_is_on_screen_however_long_the_thread() {
+        // THE SLOWDOWN, pinned by WORK not time: measured before the fix, a
+        // 2000-message thread cost 174 ms a frame in a debug build (every
+        // message wrapped twice, the outline re-projected, every frame).
+        let text = "word ".repeat(150);
+        let s = store_with(
+            (1..=2000)
+                .map(|i| json!({"id": i, "agent": "ai", "role": if i % 2 == 1 { "user" } else { "assistant" }, "content": text}))
+                .collect(),
+        );
+        let mut p = AiPanel::new("ai".into());
+        let seen = std::collections::HashSet::new();
+        let a: AgentId = "ai".into();
+        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: None };
+        let area = Rect::new(0, 0, 120, 40);
+        p.layout(area, &cx);
+        p.st.cursor = Some(2000);
+        p.layout(area, &cx);
+        draw_once(&p, &cx, 120, 40);
+        assert!(p.wraps.borrow().len() <= 12, "only visible messages are wrapped: {}", p.wraps.borrow().len());
+        // moving the cursor never re-projects the thread
+        let key = p.proj_key;
+        p.st.cursor = Some(1999);
+        p.layout(area, &cx);
+        assert_eq!(p.proj_key, key);
+        // a resize empties the memo instead of keeping a copy per width
+        p.layout(Rect::new(0, 0, 100, 40), &cx);
+        draw_once(&p, &cx, 100, 40);
+        assert!(p.wraps.borrow().len() <= 12);
+    }
+
+    #[test]
+    fn a_line_wears_the_hue_of_what_it_is() {
+        let s = store_with(vec![
+            json!({"id":1,"agent":"ai","role":"user","content":"[from user]\nread it"}),
+            json!({"id":2,"agent":"ai","role":"assistant","content":"on it\n<call name=\"send\"><arg name=\"target_id\">files</arg></call>"}),
+            json!({"id":3,"agent":"ai","role":"user","content":"[reply to 9 · files read_stream]\nfn main() {}"}),
+        ]);
+        let mut p = AiPanel::new("ai".into());
+        let seen = std::collections::HashSet::new();
+        let a: AgentId = "ai".into();
+        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: None };
+        p.layout(Rect::new(0, 0, 60, 20), &cx);
+        let hue = |id: RowId, needle: &str| -> Option<ratatui::style::Color> {
+            let l = p.last.lines.iter().find(|l| l.id == id)?;
+            p.block_of(l, false, 60)
+                .into_iter()
+                .flat_map(|line| line.spans.into_iter())
+                .find(|sp| sp.content.contains(needle))
+                .and_then(|sp| sp.style.fg)
+        };
+        assert_eq!(hue(1, "user:"), Some(theme::SAY_HUMAN), "the human's label");
+        assert_eq!(hue(2, "ai:"), Some(theme::SAY_SELF), "the agent's own label");
+        assert_eq!(hue(2, "▸ send"), Some(theme::SAY_CALL), "a tool call");
+        assert_eq!(hue(3, "reply"), Some(theme::SAY_REPLY), "a tool reply");
+        assert_eq!(hue(2, "on it"), Some(theme::FG), "plain text");
+    }
+
+    #[test]
+    fn a_monitor_delivery_is_tagged_with_its_watch_and_shows_its_lines() {
+        let s = store_with(vec![json!({"id":1,"agent":"ai","role":"user",
+            "content":"[from runner]\n[monitor 787 · job 514 · from your call 783 · \"w5\" · job ended]\nFATAL w5: loss diverged"})]);
+        let mut p = AiPanel::new("ai".into());
+        let seen = std::collections::HashSet::new();
+        let a: AgentId = "ai".into();
+        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: None };
+        p.layout(Rect::new(0, 0, 80, 10), &cx);
+        let screen = draw_once(&p, &cx, 80, 10);
+        assert!(
+            screen.contains("monitor 787 · job 514 \"w5\" · ended runner: FATAL w5: loss diverged"),
+            "{screen}"
+        );
+        assert!(!screen.contains("asks you"), "a delivery is not a question: {screen}");
+        assert!(!screen.contains("[monitor"), "the header is the tag, not the text: {screen}");
+    }
+
+    #[test]
+    fn a_long_message_wraps_whole_and_the_cursor_keeps_it_on_screen() {
+        let long = "The entry point is src/main.rs. It parses the flags, seeds the directory on the first run, then boots the kernel in process and hands it to the shell.";
+        let s = store_with(vec![
+            json!({"id":1,"agent":"ai","role":"user","content":"where does it start?"}),
+            json!({"id":2,"agent":"ai","role":"assistant","content":long}),
+        ]);
+        let mut p = AiPanel::new("ai".into());
+        let seen = std::collections::HashSet::new();
+        let a: AgentId = "ai".into();
+        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: None };
+        let area = Rect::new(0, 0, 40, 16);
+        p.layout(area, &cx);
+        p.st.cursor = Some(2);
+        p.layout(area, &cx);
+        let screen = draw_once(&p, &cx, 40, 16);
+        // every word of the answer is on screen: wrapped, not clipped
+        for w in ["entry", "flags,", "directory", "kernel", "shell."] {
+            assert!(screen.contains(w), "{w} missing:\n{screen}");
+        }
+        assert!(screen.lines().all(|l| l.chars().count() <= 40));
+    }
+
+    #[test]
+    fn selecting_the_agent_reads_the_whole_conversation_and_opens_a_watch() {
+        let mut p = AiPanel::new("ai".into());
+        let s = Store::default();
+        let seen = std::collections::HashSet::new();
+        let a: AgentId = "ai".into();
+        let cx = Cx {
+            agent: &a,
+            store: &s,
+            tasks: &[],
+            seen: &seen,
+            reflect: None,
+        };
+        let mut out = Vec::new();
+        p.on_select(&cx, &mut out);
+        assert!(out
+            .iter()
+            .any(|c| matches!(c, Cmd::Rows { full: true, .. })));
+        assert!(out.iter().any(|c| matches!(c, Cmd::Watch(_))));
+    }
+
+    #[test]
+    fn the_cursor_moves_over_visible_lines_and_stops_at_the_ends() {
+        let s = store_with(vec![
+            json!({"id":1,"agent":"ai","role":"user","content":"a"}),
+            json!({"id":2,"agent":"ai","role":"assistant","parent":1,"content":"b"}),
+            json!({"id":3,"agent":"ai","role":"user","content":"c"}),
+        ]);
+        let mut p = AiPanel::new("ai".into());
+        let seen = std::collections::HashSet::new();
+        let a: AgentId = "ai".into();
+        let cx = Cx {
+            agent: &a,
+            store: &s,
+            tasks: &[],
+            seen: &seen,
+            reflect: None,
+        };
+        p.last = p.project(&cx);
+        let n = p.last.lines.len();
+        assert!(n >= 2);
+        let mut out = Vec::new();
+        p.on_key(key(KeyCode::Down), &cx, &mut out);
+        assert_eq!(p.st.cursor, Some(p.last.lines[1].id));
+        for _ in 0..50 {
+            p.on_key(key(KeyCode::Down), &cx, &mut out);
+        }
+        assert_eq!(
+            p.st.cursor,
+            Some(p.last.lines[n - 1].id),
+            "never past the end"
+        );
+        for _ in 0..50 {
+            p.on_key(key(KeyCode::Up), &cx, &mut out);
+        }
+        assert_eq!(p.st.cursor, Some(p.last.lines[0].id));
+    }
+}

@@ -1,0 +1,19 @@
+[package]
+name = "fantastic-user-home-store"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+publish = false
+description = "The user's TEMPLATE store (`user_home_store.tools`): named agent-record blueprints in the user's home config dir, owned by the CLI — never pluggable into an agent, never located by a record."
+
+# CLI-project scope, not the lib: an ordinary agent bundle built against the
+# kernel's public API. `src/lib` is not edited.
+[dependencies]
+fantastic-kernel = { path = "../../../lib/rust/crates/fantastic-kernel" }
+async-trait = "0.1"
+serde_json = "1"
+sha2 = "0.10"
+
+[dev-dependencies]
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tempfile = "3"

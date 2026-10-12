@@ -1,0 +1,16 @@
+# WHAT to measure and HOW LONG to allow. Never a model, an endpoint, a key
+# or a backend name — those live in e2e/backends/.
+id: chat_memory
+group: agentic_advanced
+title: "the chat bot's long past (3 × 120 pre-written events, planted in batches between live asks) folds at a small window — a fold per batch, then a fold of folds; four live asks recall private and public facts from the folds — and the secrets stay with their owners"
+runner: probe.py
+runtimes: [python]
+costs: turns
+long: true
+limits:
+  idle_seconds: 120
+  max_turns: 120
+  no_progress_turns: 0
+  turn_chars: 120000
+  turn_seconds: 600
+env: {E2E_WINDOW: "8000", FANTASTIC_AI_SEND_TIMEOUT: "600"}

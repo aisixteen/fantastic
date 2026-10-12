@@ -1,0 +1,96 @@
+"""Context-window budgeting primitives for the ai_core overflow strategies.
+
+A char-based token ESTIMATE — deliberately tokenizer-agnostic. Exactness is
+irrelevant for a fit-to-window budget (we under-fill with an output reserve), and
+tiktoken would be the WRONG tokenizer for gemma/nemotron anyway. Plus the
+window/budget resolution read off the agent record. Used by `ai_core.strategies`
+and the projection seam in `core._run`.
+"""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from typing import Any
+from ai_core.constants import (
+    CHARS_PER_TOKEN,
+    DEFAULT_CONTEXT_WINDOW,
+    DEFAULT_OUTPUT_RESERVE,
+    BUDGET_FLOOR,
+)  # noqa: F401 — re-exported seams
+
+
+def estimate_one(message: dict) -> int:
+    """Rough token estimate for ONE message — counts the SERIALIZED form, because the
+    role + content + JSON envelope all consume real context."""
+    n = len(json.dumps(message, default=str))
+    return (n + CHARS_PER_TOKEN - 1) // CHARS_PER_TOKEN
+
+
+def estimate_tokens(messages: list[dict]) -> int:
+    return sum(estimate_one(m) for m in messages)
+
+
+def _as_pos_int(v: Any) -> int | None:
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, int) and v > 0:
+        return v
+    if isinstance(v, float) and v > 0:
+        return int(v)
+    # Parse the STRIPPED text that was checked: `str.strip` drops `\x1c`-`\x1f` but
+    # `int()` does not, so `int("\x1c12")` raises. ASCII digits only (`'²'` is not one).
+    if isinstance(v, str):
+        t = v.strip()
+        if t.isascii() and t.isdigit() and int(t) > 0:
+            return int(t)
+    return None
+
+
+def resolve_context_window(rec: dict) -> int:
+    """The model's usable window, by STATIC precedence (no fallback-chain):
+    `context_window` (the explicit per-agent override — the UNIFORM lever, works on any
+    backend incl. vllm/responses which have no `num_ctx`) → `num_ctx` (ollama's real knob) → a
+    conservative default."""
+    for key in ("context_window", "num_ctx"):
+        v = _as_pos_int(rec.get(key))
+        if v is not None:
+            return v
+    return DEFAULT_CONTEXT_WINDOW
+
+
+def output_reserve(rec: dict) -> int:
+    v = rec.get("output_reserve")
+    if isinstance(v, int) and not isinstance(v, bool) and v >= 0:
+        return v
+    if isinstance(v, str):
+        t = v.strip()
+        if t.isascii() and t.isdigit():
+            return int(t)
+    return DEFAULT_OUTPUT_RESERVE
+
+
+def budget(rec: dict) -> int:
+    """Token budget for the INPUT (window minus output headroom), floored."""
+    return max(resolve_context_window(rec) - output_reserve(rec), BUDGET_FLOOR)
+
+
+@dataclass
+class ProjectionCtx:
+    """Everything a strategy needs, WITHOUT importing `core`.
+
+    `budget` here is the budget for the conversation BODY (the window budget minus
+    the already-measured system block) — strategies fit the body to it. `summarize`
+    is a closure over the backend provider (None for backends that can't summarize);
+    only `compact` uses it.
+    """
+
+    budget: int
+    recent_n: int
+    summarize: Callable[..., Awaitable[str]] | None  # (msgs, max_tokens=None)
+    self_id: str
+    kernel: Any
+    # The conversation this projection is for. `fold` is the one strategy that WRITES
+    # (fold rows are marks that must persist); it needs to know which store.
+    client_id: str | None = None

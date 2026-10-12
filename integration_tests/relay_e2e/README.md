@@ -14,6 +14,14 @@ group password (`RELAY_PASSWORD`), set on the relay as `FANTASTIC_GROUP_TOKEN` w
 `RELAY_INGRESS_RULE=password`. The per-leg `ingress_rule`/`egress_rule`/`auth` that
 gate the **tunneled** bridge calls are INDEPENDENT of that connection password.
 
+On each kernel the password lives in a `credential_store`, never on the leg's record
+(`relay_token` is not a `relay_connector` field). `seed_relay_creds` (operator,
+before the daemon starts) creates `creds` declaring the ref `relay/group` — `host` =
+the relay's `host:port`, `readers` = [the leg `cb`], `writers` = [`web_ws`] — and
+grants `web_ws` `get`/`set` on it; `set_relay_password` writes the `password` field
+through `web_ws`, marked `secret: ['payload.fields']`; the leg names
+`credentials: {store: creds, ref: relay/group}` with `can_call: {creds: [get]}`.
+
 ## Two targets (like the rest of the suite)
 
 - **`FANTASTIC_TARGET=local`** (default): a local `relayd` subprocess on loopback;
@@ -49,7 +57,7 @@ only if a runtime's binary isn't built (clear skip reason).
   expects → B's `password` gate refuses `unauthorized`. B = each runtime in turn
   (the enforcing receiver).
 - **`test_relay_asymmetric_rules`** — A is a hub with the symmetric SPLIT
-  (`ingress_rule="deny_inbound"` + `egress_rule="password"`), B a group member.
+  (`ingress_rule="deny_ingress"` + `egress_rule="password_egress"`), B a group member.
   A→B round-trips (A's egress presents, B's ingress checks); B→A is denied (A's
   ingress). Independent per-direction rules, identical wire shape everywhere.
 - **`test_relay_directory[python|rust|swift]`** — two connectors of the runtime
@@ -91,7 +99,7 @@ uv run pytest relay_e2e/ -v
   `RELAY_INGRESS_RULE=password` (local target), or runs `relay:latest` published on
   the host (container target). It skips cleanly when the binary/image is missing.
 - Each daemon boots with `web` + `web_ws` (drivable over WS, no auto-booting relay
-  leg). The test then `create_agent`s a `relay_connector` leg on **both
+  leg) + the `creds` store holding the relay password. The test then `create_agent`s a `relay_connector` leg on **both
   concurrently** (`asyncio.gather`), polls `reflect.connected`, and `forward`s a
   reflect through the relay.
 - The relay binary is parametrizable via the harness; the same suite runs the Swift

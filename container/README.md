@@ -46,22 +46,23 @@ one matching `uname -m` (`x86_64`→`:amd64`, `arm64`/`aarch64`→`:arm64`). The
    > your AI compose one** — it drives the kernel to create `web`/`web_ws`/`rest`.
    > A blank workdir serves nothing until a web host is composed (the entrypoint
    > prints the exact `create_agent` hint when it finds none).
-3. **Read the head** — once a web host exists, with head on (default) its `/`
-   serves the descriptive head page; the kernel is also drivable headless:
-   - headful: open `GET http://127.0.0.1:<port>/` → the all-readmes head page.
+3. **Read the head** — once a web host exists, with head on (default) the
+   descriptive head page is served through its file_bridge (`/` itself is a 404 —
+   the host renders nothing of its own); the kernel is also drivable headless:
+   - headful: open `GET http://127.0.0.1:<port>/head/file/index.html` → the all-readmes head page.
    - headless self-description: `curl -s -X POST -H 'Content-Type: application/json'
      http://127.0.0.1:<port>/<rest_id>/kernel -d '{"type":"reflect","readme":true,"bundles":"all"}'`
      → the full root readme + bundle catalog.
 
-   A composed web's `/` is always the live agent-tree index; serve the descriptive
+   A composed web's `/` is always a 404 (it renders nothing); serve the descriptive
    head through a gated `file_bridge` over `/opt/fantastic/head` (see "The head").
 4. **Connect an LLM to the kernel and let it BUILD — this is the intended way.**
    The running kernel is fully drivable over `web_ws` (`GET /web/ws`) and `rest`
    (`POST /rest/<target>`) — **no client library, the protocol IS the API.** An LLM
    reads `reflect` (step 3), then **composes agents with `create_agent` and wires
    them with `send`** — building your app *inside this kernel*, operating on the
-   folder you mounted at **`/work`** (the `file_bridge` / `terminal_backend` /
-   `python_runtime` agents all act on it). Hand it a **[recipe](recipes.md)** plus
+   folder you mounted at **`/work`** (the `file_bridge` / `exec_bridge` agents
+   act on it). Hand it a **[recipe](recipes.md)** plus
    the `reflect readme=true bundles=all` output and it assembles a working
    approximation — capability emerges from self-description, no bespoke glue.
    - **Federate, too:** the image also carries `ws_bridge` + `local_runner` /
@@ -108,7 +109,7 @@ podman|docker run -d --name fantastic-<nodeId> \
   **8088**, bound inside the container), `FANTASTIC_WORKDIR`
   (default `/work`), `FANTASTIC_JS_KERNEL_ZIP` (default
   `/opt/fantastic/js_kernel.zip` — always exported for discovery). (`/` is always
-  the agent-tree index; the head page rides the gated `/head/file/index.html`
+  a 404; the head page rides the gated `/head/file/index.html`
   route — no env back-channel.)
 - **Port:** the kernel binds `0.0.0.0:8088` inside the isolated namespace by
   default — `8088` is **unprivileged**, so uid 1000 binds it with no root / no
@@ -148,10 +149,17 @@ nothing), it is a **callable** kernel, not just a renderer:
 
 To compose it explicitly (the documented procedure the image used to do for you):
 ```sh
-fantastic <root> create_agent handler_module=web.tools id=web port=8088
+fantastic <root> create_agent handler_module=web.tools id=web port=8088 host=0.0.0.0 allowed_origins=http://localhost:8088
 fantastic web   create_agent handler_module=web_ws.tools id=web_ws
 fantastic web   create_agent handler_module=web_rest.tools id=rest
 ```
+
+**Host guard (audit W-2, owner-accepted):** the web host answers only the `Host` it
+binds — `<host>:<port>`, plus `localhost`/`127.0.0.1`/`[::1]` on a loopback bind. On
+this `host=0.0.0.0` bind only `Host: 0.0.0.0:8088` passes: a port-mapped name
+(`-p 8088:8088` reached as `localhost:8088` / `127.0.0.1:8088`, the `curl` below
+included), a LAN name or a tunnel name is refused — 403 on HTTP, a refused websocket
+upgrade.
 
 Read the kernel's runtime in one round-trip (send the JSON content-type — rust's
 REST surface requires it): `curl -s -X POST -H 'Content-Type: application/json'
@@ -194,7 +202,7 @@ is not a CDN).
 
 The **descriptive head** is the all-readmes page (main → kernels → containers + the
 GitHub URL), baked at `/opt/fantastic/head/index.html`. On EVERY runtime the web's
-`/` is the live **agent-tree index** — the kernel's own web owns no `fs` surface, so
+`/` is a **404** — the kernel's own web renders nothing and owns no `fs` surface, so
 there is no `FANTASTIC_WEB_INDEX`/`FANTASTIC_HEAD` env that reads a landing file off
 disk (deleted to match Python; what Python deletes, rust + swift delete). To show
 the head, serve it the one gated way — a read-only `file_bridge`. The fs edge clamps
@@ -204,7 +212,7 @@ then root the bridge at the relative dir:
 ```sh
 cp /opt/fantastic/head/index.html "$FANTASTIC_WORKDIR/head/"     # into the workdir
 $BIN <web> create_agent handler_module=file_bridge.tools id=head \
-     root=head readonly=true ingress_rule=allow_all
+     root=head readonly=true allow='["index.html"]' ingress_rule=allow_all_ingress
 # → http://<host>:8088/head/file/index.html  (piped via read_stream, chunked)
 ```
 
@@ -228,7 +236,7 @@ sh container/test/build_smoke.sh    # builds + smoke-tests the image (podman/doc
 
 Separate from the main test suites — it validates the **build + run contract**
 (both runtimes boot + bind a **composed** web, `reflect.runtime` correct, `/` is
-the agent-tree index + the head page rides the gated `/head/file/index.html`
+a 404 + the head page rides the gated `/head/file/index.html`
 route, **a blank workdir autocreates nothing**, embedded zip pullable,
 SIGTERM-clean, no JS engine / compilers in the final image), not kernel logic.
 
@@ -241,8 +249,8 @@ and it assembles a working approximation by itself — `reflect` gives the live 
 Capability **emerges** from self-description. Full versions: **[`recipes.md`](recipes.md)**.
 
 Everything splits across **two kernels**: the **host** (this image — data/compute/
-transport: `kernel_state web web_ws web_rest file_bridge python_runtime terminal_backend ai_*
-yaml_state scheduler ws_bridge local_runner ssh_runner`) and the **frontend**
+transport: `kernel_state web web_ws web_rest file_bridge exec_bridge ai_*
+ram_store scheduler ws_bridge`) and the **frontend**
 (the embedded `js_kernel.zip` — the VIEW: `canvas terminal_view html_agent gl_agent
 ai_view`). The host serves the frontend + relays the WS bus; panels are frontend
 agents the **canvas** iframes (any agent answering `get_webapp`). Binding is weak —
@@ -251,18 +259,20 @@ agents see it.
 
 1. **Spatial canvas of panels** — `web`+`web_ws` host + `canvas` frontend; any agent
    answering `get_webapp` becomes a draggable, persisted tile. *(the base for the rest)*
-2. **Terminal / dev console** — `terminal_backend` (PTY, cwd=project) + `terminal_view`
+2. **Terminal / dev console** — an `exec_bridge` PTY job (cwd=project) + `terminal_view`
    (xterm), bound by id; flow-control + clipboard-image paste. *(PTY runs in-image)*
-3. **AI chat with tool-use** — an `ai_*` backend (+ a `file_bridge` for history) + `ai_view`;
-   the model calls `python_runtime`/`file_bridge`/`yaml_state` as tools and routes its own
-   output (emergent, no `reply_to`). *(key via `-e ANTHROPIC_KEY`)*
-4. **Background compute / training runner** — `python_runtime.start` → `job_id` +
+3. **AI chat with tool-use** — an `ai_*` backend (+ a `ram_store` for its conversation) + `ai_view`;
+   the model calls `exec_bridge`/`file_bridge` as tools and routes its own
+   output (emergent, no `reply_to`). *(key, when the endpoint wants one: a
+   `credential_store` ref named in the record's `credentials` — e.g. an `env`-backed
+   store reading `-e VLLM_API_KEY` or `-e OPENAI_API_KEY`)*
+4. **Background compute / training runner** — `exec_bridge.start` → `job_id` +
    streamed `progress`/`job_done` → a live html panel (or the job's own UI via a
    `file_bridge` agent). *(⚠ GPU = host's; this image is CPU-only)*
-5. **Live data / WebGL panel** — `gl_agent` (frontend) fed frames by a `python_runtime`
+5. **Live data / WebGL panel** — `gl_agent` (frontend) fed frames by an `exec_bridge`
    job; assets via `/<file>/file/…`. *(⚠ your shaders are app content; headless WebGL off)*
 6. **Generative audio-visual panel** — `html_agent`/`gl_agent` (WebAudio+WebGL) driven
-   by a media `python_runtime`; serve audio via a `file_bridge` agent. *(⚠ WebAudio needs
+   by a media `exec_bridge` job; serve audio via a `file_bridge` agent. *(⚠ WebAudio needs
    iframe `allow=autoplay`; cross-panel sync must go through a HOST bus agent — you wire it)*
 7. **Federated multi-project canvas** — `local_runner` (local dir) / `ssh_runner`
    (remote) + `ws_bridge` per peer; one canvas tile per project, each its **own**

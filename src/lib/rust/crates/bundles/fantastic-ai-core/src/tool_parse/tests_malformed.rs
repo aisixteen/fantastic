@@ -1,0 +1,89 @@
+//! A broken envelope must have a VOICE. Mirrors the `malformed_calls` half of
+//! `bundled_agents/ai/ai_core/tests/test_tool_parse.py`.
+//!
+//! Why the module exists at all: a call that cannot be read returns `[]` from
+//! `extract_tool_calls`, which is byte-identical to a turn that emitted no call
+//! — and that means "done". Measured on gemma-4-12B (2026-08-06): nothing
+//! parsed, nothing dispatched, no error came back, and the run ended looking
+//! finished with the task untouched.
+
+use super::{extract_tool_calls, malformed_calls, HINT, OPEN};
+
+/// The advice is a PROMPT, not a diagnostic: a model reads it and retries from
+/// it, and every runtime must say the same words. Pinned as LITERAL TEXT (this
+/// module owns the wording; [`crate::route`] delivers it verbatim), so "tidying"
+/// a sentence shows up as a failing test rather than as silent cross-runtime
+/// drift. Byte-for-byte python's `_HINT`.
+#[test]
+fn the_hint_is_verbatim() {
+    assert_eq!(
+        HINT,
+        "The shape: <call name=\"send\">\n\
+         <target_id>agent id</target_id>\n\
+         <type>verb</type>\n\
+         <path>a.md</path>\n\
+         <bytes>document, verbatim, to the first </bytes>\n\
+         </bytes>\n\
+         </call> — one child tag per argument, a list is one tag whose children \
+         are all <item>, nothing is escaped."
+    );
+}
+
+/// The three fields are python's dict, and the composed sentence is this
+/// module's: `error` is the whole reply body so the wording has ONE owner.
+#[test]
+fn the_report_is_three_fields_and_one_composed_sentence() {
+    let text = r#"<call name="send"><target_id>n</target_id><path>a</path><path>b</path></call>"#;
+    let bad = malformed_calls(text);
+    assert_eq!(bad.len(), 1);
+    assert_eq!(bad[0].envelope, OPEN);
+    assert_eq!(
+        bad[0].error,
+        format!(
+            "call NOT dispatched: duplicate `<path>` — a list is one tag whose \
+             children are all `<item>`: `<path><item>…</item><item>…</item></path>`. \
+             Nothing ran. {HINT}"
+        )
+    );
+    // The block is what sits BETWEEN the opener and the closer, whole and
+    // defanged — neither delimiter is part of it.
+    assert_eq!(
+        bad[0].your_block,
+        "name=\"send\"><target_id>n</target_id><path>a</path><path>b</path>"
+    );
+}
+
+/// PLAIN TEXT, not JSON — the model↔harness path carries none in either
+/// direction, and a JSON-dumped refusal cost a run to doubled backslashes
+/// (2026-09-09, program_tests).
+#[test]
+fn the_body_delivered_to_the_model_is_plain_text() {
+    let bad = malformed_calls(r#"<call name="send"><type>reflect</type></call>"#);
+    let body = bad[0].body();
+    assert!(body.starts_with("call NOT dispatched: a send names its target"));
+    assert!(body.contains("\n\nyour block:\n"));
+    assert!(!body.starts_with('{'));
+}
+
+/// Two broken envelopes are two reports, in document order — a batch of calls is
+/// answered as a batch, and a model that broke two of them must see both.
+#[test]
+fn every_broken_envelope_gets_its_own_report() {
+    let text = concat!(
+        r#"<call name="send"><type>reflect</type></call>"#,
+        "\n",
+        r#"<call name="nope"><target_id>n</target_id></call>"#
+    );
+    let bad = malformed_calls(text);
+    assert_eq!(bad.len(), 2);
+    assert!(bad[0].error.contains("a send names its target"));
+    assert!(bad[1].error.contains("`nope` is not a tool"));
+}
+
+/// A turn that parsed is silent here: nothing to report, nothing to nudge.
+#[test]
+fn a_good_turn_reports_nothing() {
+    let text = r#"<call name="send"><target_id>n</target_id><type>reflect</type></call>"#;
+    assert_eq!(extract_tool_calls(text).len(), 1);
+    assert!(malformed_calls(text).is_empty());
+}

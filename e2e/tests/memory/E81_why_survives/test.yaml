@@ -1,0 +1,15 @@
+# WHAT to measure and HOW LONG to allow. Never a model, an endpoint, a key
+# or a backend name — those live in e2e/backends/.
+id: why_survives
+group: memory
+title: "compaction keeps the plan AND the why: a decision and its reason told early are both stated after folds"
+runner: probe.py
+runtimes: [python]
+costs: turns
+limits:
+  idle_seconds: 90
+  max_turns: 40
+  no_progress_turns: 32
+  turn_chars: 60000
+  turn_seconds: 300
+env: {E2E_WINDOW: "16000"}

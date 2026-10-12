@@ -1,0 +1,340 @@
+# ollama_backend selftest
+
+> scopes: kernel, ai, persistence, http
+> requires: `uv sync`; live ollama at a reachable endpoint with a
+> tool-calling model (gemma4:e2b, llama3.1+); tests run
+> against a running `fantastic` so the provider HTTP client +
+> in-flight tasks stay alive across calls
+> out-of-scope: HTTP routes (covered by webapp selftest), browser
+
+Reflect-driven LLM agent. Tests prompt assembly, `<call>` tag tool-calls,
+the conversation in its memory store.
+
+**Why a running serve is required:** ollama_backend caches the
+`OllamaProvider` HTTP client and in-flight `_run` tasks in
+process-memory. Multi-step tests would lose state between separate
+`fantastic call` invocations. Drive via `fantastic` + HTTP.
+
+## Pre-flight
+
+ASK USER which provider + model:
+- ollama endpoint (REQUIRED on the record — there is no default)
+- model name (e.g. `gemma4:e2b`, `llama3.1:8b`)
+
+Verify reachable BEFORE wiping state:
+```bash
+curl -s "$ENDPOINT/api/tags" | head
+# confirm the named model is in the list
+```
+If unreachable or model missing → STOP, report.
+
+```bash
+rm -rf .fantastic
+PORT=18911
+pkill -9 -f "fantastic" 2>/dev/null; sleep 0.3
+uv run --active python fantastic kernel create_agent parent_id=kernel_state handler_module=web.tools port=$PORT >/dev/null
+WEB_ID=$(ls .fantastic/agents | grep '^web_' | head -1)
+uv run --active fantastic kernel create_agent parent_id=$WEB_ID handler_module=web_ws.tools ingress_rule=allow_all_ingress >/dev/null
+uv run --active python fantastic > /tmp/s.log 2>&1 &
+SPID=$!
+for i in $(seq 1 20); do grep -q "kernel up" /tmp/s.log 2>/dev/null && break; sleep 0.5; done
+
+# This helper opens a one-shot WS, sends a `call` frame, prints reply.
+call() {
+  TARGET="$1" PAYLOAD="$2" PORT="$PORT" uv run --active python - <<'PY'
+import asyncio, json, os, websockets
+target = os.environ["TARGET"]; payload = json.loads(os.environ["PAYLOAD"])
+port = os.environ["PORT"]
+async def main():
+    async with websockets.connect(f"ws://localhost:{port}/{target}/ws") as ws:
+        await ws.send(json.dumps({"type":"call","target":target,"payload":payload,"id":"1"}))
+        while True:
+            m = json.loads(await ws.recv())
+            if m.get("id") == "1" and m.get("type") in ("reply","error"):
+                print(json.dumps(m.get("data"))); return
+asyncio.run(main())
+PY
+}
+```
+
+After all tests:
+```bash
+kill -9 $SPID 2>/dev/null; rm -rf .fantastic /tmp/s.log
+```
+
+## Tests
+
+### Test 1: send works (the conversation lives in the memory store)
+
+The AI writes no disk itself: its conversation is rows in the memory store its
+record names (`memory_store_id`).
+
+```bash
+MEM=$(call kernel '{"type":"create_agent","parent_id":"kernel_state","handler_module":"ram_store.tools"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
+OB=$(call kernel "{\"type\":\"create_agent\",\"parent_id\":\"kernel_state\",\"handler_module\":\"ollama_backend.tools\",\"endpoint\":\"$ENDPOINT\",\"model\":\"$MODEL\",\"memory_store_id\":\"$MEM\",\"can_call\":{\"$MEM\":\"*\"}}" | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
+call $OB '{"type":"send","text":"reply with the single word: ready"}' | python -c "import json,sys; print(json.load(sys.stdin).get('final','').lower())"
+```
+Expected: a `final` reply containing "ready".
+
+### Test 2: reflect surfaces the context-window posture
+
+```bash
+call $OB '{"type":"reflect"}' | python -c "
+import json,sys
+r = json.load(sys.stdin)
+print('context_window:', r.get('context_window'))
+print('context_strategy:', r.get('context_strategy'))
+"
+```
+Expected: `context_window` is an int (default 4096) and `context_strategy`
+is a string (default `compact`).
+
+### Test 3: simple send streams tokens, persists history
+
+The default caller is `client_id="cli"` (REPL/daemon flow). The conversation is
+rows in the memory store the record names — the AI writes no disk itself. Read it
+back via the `history` verb, a DIGEST of rows. A different `client_id` addresses a
+different thread.
+
+```bash
+call $OB '{"type":"send","text":"reply with the single word: ok"}' | python -m json.tool | grep -F '"final"'
+call $OB '{"type":"history"}' | python -c "
+import json,sys
+d = json.load(sys.stdin)['rows']
+print('rows:', len(d), 'last:', d[-1]['head'][:50])
+"
+```
+Expected: rows ≥ 2; the last row's head contains "ok" (case-insensitive).
+
+### Test 4: tool-call round-trip — and the history keeps the round-trip
+
+```bash
+call $OB '{"type":"send","text":"how many agents are online? actually check using the send tool"}' | python -c "import json,sys; print(json.load(sys.stdin).get('final',''))"
+```
+Expected: the model emits a `<call name="send">` to `kernel` with
+`<type>list_agents</type>`, reads the reply, summarizes. Final answer mentions a
+number. Regression signal: the model just says "I cannot check" without emitting a
+`<call>` → the prompt's call section (`_SEND_TO_HOWTO`) broke.
+
+The persistence is **lossless** — the history must contain the assistant turn WITH
+its `<call>` text AND the `[reply to …]` user row that answered it, not just the
+user/final-assistant pair. This is the audit trail for malformed calls (a tag never
+closed, a verb written as the tool name, JSON where tags were expected).
+
+```bash
+call $OB '{"type":"history"}' | python -c "
+import json,sys
+d = json.load(sys.stdin)['messages']
+has_call = any('<call name=' in (m.get('content') or '') for m in d if m['role']=='assistant')
+has_reply = any('[reply to' in (m.get('content') or '') for m in d if m['role']=='user')
+print('PASS' if has_call and has_reply else f'FAIL call={has_call} reply={has_reply}')
+"
+```
+Expected: `PASS`.
+Regression signal: PASS missing → the turn store dropped the call or its reply
+(saving only user + final assistant). Faulty tool calls evaporate.
+
+### Test 5: history persists across calls
+
+```bash
+call $OB '{"type":"send","text":"my favorite color is teal, remember it"}' >/dev/null
+call $OB '{"type":"send","text":"what color did I just say?"}' | python -c "import json,sys; print(json.load(sys.stdin).get('final','').lower())"
+```
+Expected: response mentions "teal" — proves the history round-trip via the
+mounted chat JSONL sidecar (persisted through the loader).
+
+### Test 6: history verb returns messages
+
+```bash
+call $OB '{"type":"history"}' | python -c "import json,sys; d=json.load(sys.stdin); print('messages:', len(d['messages']))"
+```
+Expected: ≥ 4 (multiple user/assistant pairs after Tests 3 + 5).
+
+### Test 7: status verb snapshot when idle
+
+```bash
+call $OB '{"type":"status","client_id":"alice"}' | python -m json.tool
+```
+Expected: `{generating:false, current:null, mine_pending:[], others_pending:0, source:"<OB>", client_id:"alice"}`.
+Reflect should also list `status` in `verbs` and document the `status`
+event type in `emits`:
+```bash
+call $OB '{"type":"reflect"}' | python -c "
+import json,sys
+d=json.load(sys.stdin)
+print('status verb:', 'status' in d['verbs'])
+print('status event:', 'status' in d['emits'])
+"
+```
+Expected: both `True`.
+
+### Test 8: status events fire at every phase transition
+
+```bash
+uv run --active python -c "
+import asyncio, json, websockets
+async def main():
+    async with websockets.connect('ws://localhost:$PORT/$OB/ws') as ws:
+        await ws.send(json.dumps({'type':'watch','src':'$OB'}))
+        await ws.send(json.dumps({
+            'type':'call','target':'$OB',
+            'payload':{'type':'send','text':'use the send tool to call list_agents on kernel_state, then summarize in one sentence','client_id':'alice'},
+            'id':'1',
+        }))
+        phases = []
+        async for msg in ws:
+            ev = json.loads(msg)
+            p = ev.get('payload') or {}
+            if p.get('type') == 'status' and p.get('client_id') == 'alice':
+                phases.append(p['phase'])
+                if p['phase'] == 'done': break
+        # Expect: thinking → streaming/tool_calling → … → done.
+        print('phases:', phases)
+        ok = phases[0] == 'thinking' and phases[-1] == 'done' and 'tool_calling' in phases
+        print('PASS' if ok else 'FAIL')
+asyncio.run(main())
+"
+```
+Expected: `PASS`. Phases must start with `thinking`, end with `done`,
+and include at least one `tool_calling` (entry+exit). Each
+`tool_calling` event carries `detail.tool` with `target`, `verb`,
+`args`, and (on exit) `reply_preview`.
+
+### Test 9: contended send → caller receives `queued` event + `status(queued)`
+
+```bash
+# Background a slow send (alice). While it's holding the lock, fire
+# a second send (bob). Bob should receive a `queued` event tagged
+# with his client_id BEFORE his first `token` arrives.
+uv run --active python -c "
+import asyncio, json, websockets
+async def main():
+    async with websockets.connect('ws://localhost:$PORT/$OB/ws') as wsB:
+        await wsB.send(json.dumps({'type':'watch','src':'$OB'}))
+
+        # Alice (client A) starts first.
+        async with websockets.connect('ws://localhost:$PORT/$OB/ws') as wsA:
+            await wsA.send(json.dumps({'type':'watch','src':'$OB'}))
+            await wsA.send(json.dumps({
+                'type':'call','target':'$OB',
+                'payload':{'type':'send','text':'count slowly to 20','client_id':'alice'},
+                'id':'A',
+            }))
+
+            # Tiny pause so alice acquires the lock.
+            await asyncio.sleep(0.5)
+
+            # Bob (client B) sends — should hit the lock and get queued.
+            await wsB.send(json.dumps({
+                'type':'call','target':'$OB',
+                'payload':{'type':'send','text':'one word reply','client_id':'bob'},
+                'id':'B',
+            }))
+
+            status_queued_seen = False
+            token_after_queued = False
+            async for msg in wsB:
+                ev = json.loads(msg)
+                if ev.get('type') != 'event': continue
+                p = ev['payload']
+                if p.get('client_id') != 'bob': continue
+                if p.get('type') == 'status' and p.get('phase') == 'queued':
+                    status_queued_seen = True
+                elif p.get('type') == 'token' and status_queued_seen:
+                    token_after_queued = True
+                    break
+            ok = status_queued_seen and token_after_queued
+            print('PASS' if ok else f'FAIL status_queued={status_queued_seen} token={token_after_queued}')
+asyncio.run(main())
+"
+```
+Expected: `PASS`. Bob's WS sees a `status` event with `phase='queued'`
+before any token, then tokens arrive once alice releases the lock.
+
+### Test 10: status verb privacy filter (mid-flight)
+
+```bash
+# Drive a long-running send as alice in the background.
+( call $OB '{"type":"send","text":"count slowly to 20","client_id":"alice"}' >/dev/null ) &
+sleep 1.0
+
+# Snapshot from BOB's perspective: alice is current, bob has nothing.
+# Bob must not see alice's text in `current`.
+call $OB '{"type":"status","client_id":"bob"}' | python -c "
+import json,sys
+d=json.load(sys.stdin)
+cur=d['current']
+ok = (cur is not None
+      and cur.get('is_mine') is False
+      and 'text' not in cur
+      and 'text_so_far' not in cur)
+print('PASS' if ok else f'FAIL {cur!r}')
+"
+wait
+```
+Expected: `PASS`. Privacy filter strips `text`/`text_so_far` for any
+client that is not the current entry's owner.
+
+### Test 11: kernel `ps` → `cancel` → status(done, reason=cancelled)
+
+There is no `interrupt` verb. An in-flight `send` IS a kernel task, so it is
+killed with the universal system verbs — `ps` to find it, `cancel` to kill it.
+The bundle's `on_cancel` hook closes the turn out for the client.
+
+```bash
+( call $OB '{"type":"send","text":"count slowly to 200","client_id":"alice"}' >/dev/null ) &
+sleep 0.8
+
+uv run --active python -c "
+import asyncio, json, websockets
+async def main():
+    async with websockets.connect('ws://localhost:$PORT/$OB/ws') as ws:
+        await ws.send(json.dumps({'type':'watch','src':'$OB'}))
+        # Find the in-flight generation in the live task table…
+        await ws.send(json.dumps({'type':'call','target':'kernel','payload':{'type':'ps'},'id':'P'}))
+        task_id = None
+        async for msg in ws:
+            ev = json.loads(msg)
+            if ev.get('id') == 'P':
+                rows = [t for t in ev['result']['tasks']
+                        if t['agent'] == '$OB' and t['verb'] == 'send']
+                task_id = rows[0]['id'] if rows else None
+                break
+        if not task_id:
+            print('FAIL no in-flight send in ps'); return
+        # …and kill it with the universal system verb.
+        await ws.send(json.dumps({'type':'call','target':'kernel','payload':{'type':'cancel','task_id':task_id},'id':'X'}))
+        async for msg in ws:
+            ev = json.loads(msg)
+            p = ev.get('payload') or {}
+            if p.get('type') == 'status' and p.get('phase') == 'done':
+                ok = p.get('detail', {}).get('reason') == 'cancelled'
+                print('PASS' if ok else f'FAIL detail={p.get(\"detail\")}')
+                return
+asyncio.run(main())
+"
+wait
+```
+Expected: `PASS`. The terminal `status` carries `detail.reason='cancelled'`, the
+blocked caller's `send` resolves to `{cancelled:true}`, and `$OB` reports
+`generating:false` afterwards (no phantom turn).
+
+## Summary
+
+| # | Test | Pass |
+|---|------|------|
+| 1 | send works (conversation in the memory store) | |
+| 2 | reflect surfaces context_window + context_strategy | |
+| 3 | send streams + persists per-client history (history verb) | |
+| 4 | tool-call round-trip + lossless tool history (history verb) | |
+| 5 | history persists across calls | |
+| 6 | history verb returns messages | |
+| 7 | status verb idle snapshot + reflect lists status | |
+| 8 | status events fire at every phase transition | |
+| 9 | contended send emits queued + status(queued) | |
+| 10 | status verb privacy filter (cross-client) | |
+| 11 | kernel `ps` → `cancel` → status(done, reason='cancelled') | |
+
+Also report:
+- provider + model used.
+- whether tool-calling Test 4 / Test 8 was skipped (model dependent).

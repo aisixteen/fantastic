@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fantastic-static-loader"
+version = "0.1.0"
+description = "Fantastic static_loader — a declarative YAML roster loader; hydrates the declared agents as operator at boot."
+license = "AGPL-3.0-or-later"
+requires-python = ">=3.11"
+# file_bridge for `fs` — the single clamped disk surface (the manifest is a cold
+# read, clamped to cwd like kernel_state.read_tree). pyyaml for the manifest format.
+dependencies = ["fantastic-file-bridge", "pyyaml>=6"]
+
+[project.entry-points."fantastic.bundles"]
+static_loader = "static_loader.tools"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/static_loader"]

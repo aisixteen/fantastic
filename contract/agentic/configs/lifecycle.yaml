@@ -1,0 +1,75 @@
+# Kernel config — the SYSTEM SHAPE only. Deployable as-is; carries no test
+# metadata. What is asserted about it lives in `specs/lifecycle.yaml`.
+
+
+loaders:
+  - id: static_loader
+    file: fantastic.yaml
+    manifest:
+      agents:
+        # `lifecycle_probe.tools` is a TEST BUNDLE — `tests/agentic/
+        # lifecycle_probe/`, a real package beside the suite, registered
+        # UNLISTED by the agentic conftest (python resolves a handler_module
+        # only from the bundle catalog plus `register_unlisted`). No shipped bundle
+        # offers a cancellable in-flight dispatch without a subprocess or a
+        # socket (`scheduler`'s tick is a bare `create_task`, outside the task
+        # table; `exec_bridge` would have to name an interpreter path), and
+        # inventing a kernel mechanism to make a test expressible is not on.
+        #
+        # WHY THE CONFTEST, MEASURED: a module registered by the validator
+        # resolved for `Agent._dispatch` but not for `Kernel.load` when the
+        # general runner ran ALONE (`pytest tests/agentic/test_manifest_contract.py`,
+        # which never imports the validator): the record was dropped on the PC-4
+        # reboot — stderr `[kernel] skipping agent slowbot: bundle
+        # lifecycle_probe.tools not installed in this runtime` — and the loader
+        # re-CREATED it, so PC-4 went red for this config and no other. Every
+        # invocation of the suite passes through the conftest, so resolution
+        # couples nothing to collection order.
+        - id: slowbot
+          handler_module: lifecycle_probe.tools
+          callable_by:
+            warden: [slow]
+
+        # The agent-origin caller. `ps`/`cancel` are KERNEL verbs — they read and
+        # act on the kernel-wide task table, so the ROOT answers them and the task
+        # names its own agent in the pid. They are not exempt from the gate: the
+        # edge that grants them is `warden -> kernel_state` (both halves — the
+        # root's `callable_by` is granted by the spec, the root being no roster
+        # agent), and it covers EVERY task at once. Until 2026-08-24 they were answered by every agent
+        # and this manifest could grant "warden may watch and kill SLOWBOT" as a
+        # per-victim edge; that granularity is gone, knowingly.
+        - id: warden
+          handler_module: file_bridge.tools
+          allow: ['.']
+          can_call:
+            $root: [ps, cancel]
+            slowbot: [slow]
+            # A wildcard on purpose: the unknown-VERB class must be answered by
+            # the BUNDLE, so the verb the validator invents has to clear the gate
+            # first. Naming a fake verb in the grant would prove the same thing
+            # about a different layer.
+            open_fs: "*"
+            doomed: [list]
+
+        - id: open_fs
+          handler_module: file_bridge.tools
+          allow: ['.']
+          ingress_rule: allow_all_ingress
+          callable_by:
+            warden: "*"
+
+        # Deleted mid-scenario, WITH warden's grant on it left standing — that is
+        # what makes the reply about non-existence and not about authority.
+        - id: doomed
+          handler_module: file_bridge.tools
+          allow: ['.']
+          ingress_rule: allow_all_ingress
+          callable_by:
+            warden: [list]
+
+        # Open at its own ingress and still unreachable: warden's `can_call`
+        # never names it. The denial class of the taxonomy.
+        - id: stranger
+          handler_module: file_bridge.tools
+          allow: ['.']
+          ingress_rule: allow_all_ingress

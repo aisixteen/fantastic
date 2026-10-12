@@ -1,0 +1,71 @@
+roster:
+- id: <agent_id>
+  parent_id: <home(root)>
+  can_call: '<{''$self'': ''*'', ''$parent'': ''*'', ''$subtree'': ''*'', root.id:
+    [''*'', ''create_agent'', ''update_agent'', ''delete_agent''], ''cli'': ''*'',
+    ''readings'': ''*'', ''totals'': ''*'', ''clock'': ''*'', ''brain'': ''*'', ''user'':
+    ''*'', EXECUTOR_LEG: ''*'', store[''id'']: ''*'', memory.MEMORY: ''*''}>'
+  callable_by:
+    $self: '*'
+    $parent: '*'
+    $subtree: '*'
+    ai: '*'
+    brain: '*'
+    user: '*'
+    rest: '*'
+    web: '*'
+    ws: '*'
+- id: kernel_store
+  handler_module: file_bridge.tools
+  parent_id: <home(root)>
+  callable_by:
+    ai: '*'
+    brain: '*'
+    rest: '*'
+    web: '*'
+- id: readings
+  handler_module: file_bridge.tools
+  parent_id: <home(root)>
+  callable_by:
+    ai: '*'
+    brain: '*'
+    rest: '*'
+    web: '*'
+- id: totals
+  handler_module: file_bridge.tools
+  parent_id: <home(root)>
+  callable_by:
+    hour_ai: '*'
+    ai: '*'
+    brain: '*'
+    rest: '*'
+    web: '*'
+- id: user
+  handler_module: user_probe.tools
+  parent_id: <home(root)>
+  can_call:
+    ai: '*'
+  callable_by:
+    ai: '*'
+    brain: '*'
+    rest: '*'
+    web: '*'
+- id: clock
+  handler_module: scheduler.tools
+  parent_id: <home(root)>
+  can_call:
+    $self: '*'
+    hour_ai: '*'
+  callable_by:
+    ai: '*'
+    brain: '*'
+    rest: '*'
+    web: '*'
+- id: <EXECUTOR_LEG>
+  handler_module: <EXEC_MODULE>
+  parent_id: <home(root)>
+  callable_by:
+    ai: '*'
+    brain: '*'
+    rest: '*'
+    web: '*'

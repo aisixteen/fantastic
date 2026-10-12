@@ -1,0 +1,42 @@
+[package]
+publish = false
+name = "fantastic-exec-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Process edge of the io family — a general-purpose COMMAND runner, sealed by default, gated by a regex allowlist over a published control wire. Spawns commands in the background."
+
+[dependencies]
+fantastic-bundle = { path = "../../fantastic-bundle" }
+fantastic-kernel = { path = "../../fantastic-kernel" }
+fantastic-io-bridge = { path = "../../fantastic-io-bridge" }
+# The one disk module — a PTY job's pasted-image scratch file goes through it.
+fantastic-file = { path = "../fantastic-file" }
+async-trait = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+nix = { version = "0.29", features = ["signal"] }
+libc = { workspace = true }
+# The command gate is a REGEX allowlist over the shell-joined line, in PYTHON's
+# `re` dialect (D5): a backtracker, so `(?P<name>…)`, `(?P=name)`, backreferences
+# and lookaround all compile. Anchored `\A(?s:…)\z` gives `re.fullmatch` + DOTALL.
+fancy-regex = "0.11"
+# The job table is python's insertion-ordered `dict`: `status` lists jobs in START
+# order (A4.12), so removal must be order-preserving (`shift_remove`).
+indexmap = "2"
+# A PTY job's incremental UTF-8 decode (a char split across reads is held, not shattered).
+encoding_rs = "0.8"
+
+[dev-dependencies]
+# The ROOT LOADER bundle — tests need it registered so the root answers the
+# verbs it serves (`persist_blob`/`load_blob`, `boot`), as it does in production.
+fantastic-core = { path = "../fantastic-core" }
+# A program marking a credential_store `set`/`get` over the guest wire (the
+# store's keychain is its in-memory test double, never the real one).
+fantastic-credential-store = { path = "../fantastic-credential-store" }
+tempfile = "3"
+# TEST-ONLY. The resolver does NOT probe PATH — that would invent an
+# interpreter nobody named. The tests use `which` to find a real python to
+# WIRE onto the agent record (or to skip), which is the operator's job.
+which = "6"
+tokio = { workspace = true, features = ["test-util", "macros"] }

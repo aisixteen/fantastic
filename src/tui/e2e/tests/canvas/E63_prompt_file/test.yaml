@@ -1,0 +1,10 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint (the
+# plug names those). Scripted: a stub model (no GPU).
+id: prompt_file
+group: canvas
+title: "the project's system block: .fantastic/prompt.md seeded, every AI reads it, an edit is the block on the next turn"
+runner: probe.py
+costs: free
+limits:
+  seconds: 30
+env: {}

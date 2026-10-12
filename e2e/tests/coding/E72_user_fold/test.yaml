@@ -1,0 +1,15 @@
+# WHAT to measure and HOW LONG to allow. Never a model, an endpoint, a key
+# or a backend name — those live in e2e/backends/.
+id: user_fold
+group: coding
+title: "the human folds the agent's finished work mid-run through the verb — and the rules still hold"
+runner: probe.py
+runtimes: [python, rust, swift]
+costs: turns
+limits:
+  idle_seconds: 60
+  max_turns: 80
+  no_progress_turns: 32
+  turn_chars: 60000
+  turn_seconds: 300
+env: {E2E_WINDOW: "12000"}  # above the 9000 squeeze, so the fold is the squeeze's doing (planted past, 2026-10-07)

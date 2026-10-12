@@ -1,0 +1,9 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint. Scripted: no model.
+id: render_fidelity
+group: canvas
+title: "K terminals on the shared WebGL renderer under a glyph/colour sweep: no placeholder-red pixel in any frame, every terminal equal to its fresh redraw after atlas growth, merges, sibling clears and a lost context"
+runner: probe.py
+costs: free
+limits:
+  seconds: 600
+env: {}

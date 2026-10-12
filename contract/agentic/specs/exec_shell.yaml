@@ -1,0 +1,71 @@
+# Test spec for `configs/exec_shell.yaml` — WHAT THIS SUITE ASSERTS.
+# The kernel config it runs against is a separate, deployable file; nothing
+# test-specific may leak into it.
+config: exec_shell.yaml
+
+name: exec_shell
+description: >
+  A PTY `start` with no `command` runs the CHILD's own `$SHELL` — read from the
+  environment the record passes down, never guessed, never from a fallback
+  chain. The allowlist still decides: the record's `shell` field permits that
+  exact line (`true` → `$SHELL`, `"login"` → `$SHELL -l`) and nothing wider.
+  A client with no environment of its own (a browser page) can therefore start
+  a terminal without knowing which shell the host runs.
+
+requirements: [EXS-1, EXS-2, EXS-3, EXS-4, EXS-5]
+
+expect:
+  hydration: ok
+  reboot: true
+  steps:
+    # ── EXS-1 · no command on a PTY → the child's $SHELL, reported resolved ──
+    # Sent AS the loader (the leg's parent; both halves of that edge are granted
+    # explicitly): the caller names no shell and needs to know none.
+    - name: a PTY start without a command runs the shell the record passes down
+      reach: {from: static_loader, to: shell_term, send: {type: start, pty: {cols: 80, rows: 24}}}
+      expect: {allow: true, contains: {status: running, pty: true}}
+      because: EXS-1
+    - name: the job reports the RESOLVED command, so a client can show and re-issue it
+      operator: {to: shell_term, send: {type: status}}
+      expect: {contains: {jobs.*.command: /bin/sh}}
+      because: EXS-1
+    - name: (cleanup) the shell stops
+      operator: {to: shell_term, send: {type: stop}}
+
+    # ── EXS-2 · no SHELL in the child's env → refused, naming it ──────────
+    - name: a child environment without SHELL is refused — no fallback shell
+      operator: {to: bare_env_term, send: {type: start, pty: {cols: 80, rows: 24}}}
+      expect: {reason: missing_arg, contains: {arg: SHELL}}
+      because: EXS-2
+
+    # ── EXS-3 · autodiscovery is PTY-only ────────────────────────────────
+    - name: a pipe job still names its command
+      operator: {to: shell_term, send: {type: start}}
+      expect: {reason: missing_arg, contains: {arg: command}}
+      because: EXS-3
+
+    # ── EXS-4 · `shell` permits ONE exact line ───────────────────────────
+    - name: "`shell: true` does not cover the shell with extra args"
+      operator: {to: shell_term, send: {type: start, args: ['-c', 'id'], pty: {cols: 80, rows: 24}}}
+      expect: {reason: unauthorized}
+      because: EXS-4
+    - name: "`shell: login` does not cover the bare shell"
+      operator: {to: login_term, send: {type: start, pty: {cols: 80, rows: 24}}}
+      expect: {reason: unauthorized}
+      because: EXS-4
+    - name: "`shell: login` covers exactly `$SHELL -l`"
+      operator: {to: login_term, send: {type: start, args: ['-l'], pty: {cols: 80, rows: 24}}}
+      expect: {contains: {status: running}}
+      because: EXS-4
+    - name: (cleanup) the login shell stops
+      operator: {to: login_term, send: {type: stop}}
+    - name: with no `shell` on the record, the resolved line must match `allowed`
+      operator: {to: allow_term, send: {type: start, pty: {cols: 80, rows: 24}}}
+      expect: {reason: unauthorized}
+      because: EXS-4
+
+    # ── EXS-5 · `shell` is refused at write time unless true/false/"login" ──
+    - name: a shell NAME is not a shell permission
+      operator: {to: kernel, send: {type: update_agent, id: shell_term, shell: bash}}
+      expect: {reason: invalid_meta}
+      because: EXS-5

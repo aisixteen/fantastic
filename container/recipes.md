@@ -26,8 +26,8 @@ Fantastic is **two cooperating kernels**, and recipes always split across them:
 HOST kernel (this container: python or rust)         FRONTEND kernel (browser, ts/)
   data · compute · transport · memory                  the VIEW lives here
   kernel_state(root) web web_ws web_rest file_bridge             canvas · *_view · *content
-  python_runtime terminal_backend ai_* yaml_state      (federates to the host over
-  scheduler ws_bridge local_runner ssh_runner          the SAME web_ws WS wire)
+  exec_bridge ai_* ram_store                           (federates to the host over
+  scheduler ws_bridge                                  the SAME web_ws WS wire)
 ```
 
 The host **serves** the frontend (a static `file_bridge` agent) and **relays** the WS
@@ -81,7 +81,7 @@ tree. Any agent I create that answers `get_webapp` becomes a tile."*
 clipboard-image paste).
 
 ```text
-HOST:      terminal_backend  (PTY; cwd = your project)
+HOST:      exec_bridge       (a PTY job; cwd = your project)
 FRONTEND:  terminal_view     (xterm)  ── bound by id ──▶ the backend
 ```
 
@@ -90,8 +90,8 @@ flow-control (`ack` past ~100K unacked), incremental UTF-8 (no split-char litter
 serialized paste-safe writes, and an image-paste bridge (browser clipboard image
 → saved file → path typed into the shell, e.g. for a CLI like `claude`).
 
-**Hand to an LLM:** *"Create a `terminal_backend` cwd'd at my project; attach a
-`terminal_view`; give me a shell."*
+**Hand to an LLM:** *"Create an `exec_bridge` cwd'd at my project that allows my shell;
+start it as a PTY job; attach a `terminal_view`."*
 
 **⚠ Today:** fully ported. The PTY runs **inside** this image (sh/bash); mount
 your project at `/work` so the shell sees your files.
@@ -100,28 +100,38 @@ your project at `/work` so the shell sees your files.
 
 ## 3. AI chat with tool-use (agents as tools, emergent routing)
 
-**Build:** a chat panel to Claude / ollama / NVIDIA NIM; the model **calls other
-agents as tools** and routes its own output.
+**Build:** a chat panel to a vLLM server / an OpenAI Responses endpoint / ollama; the
+model **calls other agents as tools** and routes its own output.
 
 ```text
-HOST:      ai backend (anthropic_backend | ollama_backend | nvidia_nim_backend)
-             + file_bridge (chat history sidecar; file_bridge_id=…)
+HOST:      ai backend (vllm_backend | responses_backend | ollama_backend;
+             endpoint + model on the record — vllm also max_tokens, kv_slots,
+             kv_overflow)
+             + ram_store (its conversation; memory_store_id=…)
 FRONTEND:  ai_view (chat panel)  ── by id ──▶ the backend
 ```
 
 **Wiring:** send a prompt to the backend; it streams `token`/`done` **on its own
 id**; the prompt *names who listens* and the system prompt carries the `send()`
 signature, so the model **routes its own result** (no `reply_to` primitive; 1:N
-falls out). Tell it the ids of a `python_runtime`, a `file_bridge`, a `yaml_state` and it
-calls them as tools. A recursion guard keeps AI→AI chains safe.
+falls out). Tell it the ids of an `exec_bridge` and a `file_bridge` and it calls them as
+tools. A recursion guard keeps AI→AI chains safe.
 
-**Hand to an LLM:** *"Create an `anthropic_backend` (key from env); attach an
-`ai_view`. Here are the ids of a python_runtime and a yaml_state memory — use them
-as tools."*
+**Hand to an LLM:** *"Create a `vllm_backend` (endpoint, model, max_tokens, kv_slots,
+kv_overflow on its record; its key, if the server wants one: the `vllm` ref in the
+`creds` credential_store, named in `credentials`); attach an `ai_view`. Here are the
+ids of an exec_bridge and a notes file_bridge — use them as tools."*
 
-**⚠ Today:** fully ported. Pass the key at launch (`-e ANTHROPIC_KEY=…`). Durable
-memory = a `yaml_state` agent (recipe 4's sibling); the model decides what to save
-and recalls it on a fresh turn — judgment emerges, it isn't coded.
+**⚠ Today:** fully ported. No backend reads a key from the environment: create a
+`credential_store` and name its ref on the AI record (`credentials: {store, ref}`). In a
+container the store's `env` backend is the fit — pass the key at launch
+(`-e VLLM_API_KEY=…`) and map it: `refs: {vllm: {host: <endpoint>, env:
+{api_key: VLLM_API_KEY}, readers: [<ai id>]}}`. A vLLM server started without
+`--api-key` takes none: leave `credentials` off. Durable
+memory = files on a DATA `file_bridge` (`root=.fantastic/data allow='["."]'` — keep it
+apart from the `.fantastic` records store, which holds every agent's grants); the
+model decides what to save and recalls it on a fresh turn — judgment emerges, it
+isn't coded.
 
 ---
 
@@ -133,19 +143,21 @@ background job, stream its progress to a live panel, manage it by `job_id`.
 boards.)*
 
 ```text
-HOST:      python_runtime  (cwd = project)   ── start → job_id; streams progress/job_done
+HOST:      exec_bridge  (cwd = project)      ── start → job_id; streams progress/job_done
              + file_bridge agent  (serves the job's own UI / artifacts)
 FRONTEND:  an html panel (or ai_view) subscribing to progress — or the job's
            own training_ui.html served via the file_bridge agent
 ```
 
-**Wiring:** `python_runtime.start` runs `python -u …` in the background (many in
-parallel), returns a `job_id` immediately, streams `progress`/`job_done`;
+**Wiring:** `exec_bridge.start` runs your `code` under one of its allowlisted
+`interpreters` in the background (many in parallel), returns a `job_id`
+immediately, streams `progress`/`job_done`;
 `status`/`stop`/`interrupt`/`clear` by `job_id`. The spawned code gets a **kernel
 connector** (send/emit/spawn back into the kernel over a socketpair), so a job can
 push frames to a panel, call an AI, or read memory — by id.
 
-**Hand to an LLM:** *"Create a `python_runtime` at my project; start `train.py` as
+**Hand to an LLM:** *"Create an `exec_bridge` at my project (`interpreters` naming
+my python, `shim=python`, `ingress_rule=allow_all_ingress`); start `train.py` as
 a job; render its `progress` stream into an html panel and serve `training_ui.html`
 via a file_bridge agent."*
 
@@ -163,16 +175,16 @@ diffusion-transformer visualization: a looping point-cloud → Gaussian → coll
 motif beside a manim animation.)*
 
 ```text
-HOST:      python_runtime (computes frames/point-clouds) + file_bridge agent (serves js/assets)
+HOST:      exec_bridge (computes frames/point-clouds) + file_bridge agent (serves js/assets)
 FRONTEND:  gl_agent (WebGL content)  ── fed by the host job; iframed by canvas
 ```
 
 **Wiring:** `gl_agent` renders the shader/point-cloud; the host job streams data to
 it by id; static assets via `/<file>/file/<path>`. A separate "explainer" animation
-(e.g. manim) is just a plain `python_runtime` **render job** — no special agent.
+(e.g. manim) is just a plain `exec_bridge` **render job** — no special agent.
 
 **Hand to an LLM:** *"Create a `gl_agent` with my point-cloud shader; feed it frames
-from a `python_runtime` job; drop it on the canvas."*
+from an `exec_bridge` job; drop it on the canvas."*
 
 **⚠ Today:** `gl_agent` **is** ported (frontend). **Not** ported: your specific
 shaders/`*.js` (app content — you supply them), and **headless/CI WebGL is
@@ -187,7 +199,7 @@ audio-capture/playback tool, driven by a Python media backend. *(distilled from 
 generative "trance" panel and audio + geo-data boards.)*
 
 ```text
-HOST:      python_runtime (audio gen/processing; writes wavs/geojson) + file_bridge agent (serves media)
+HOST:      exec_bridge (audio gen/processing; writes wavs/geojson) + file_bridge agent (serves media)
            [+ a HOST "bus" agent if multiple panels must talk]
 FRONTEND:  html_agent / gl_agent panel (WebAudio + canvas/WebGL)
 ```
@@ -221,11 +233,12 @@ FRONTEND:     canvas — one tile per project, iframing that project's own webap
 
 **Wiring:** `local_runner` start/stop/status a project's own `fantastic` (truth from
 its `.fantastic/lock.json` pid+port); `ws_bridge` dials a peer **by URL** (weak
-binding — memory / ws / ssh+ws transports); from **either** kernel a routine reads
+binding — memory / ws transports); from **either** kernel a routine reads
 memory anywhere + spawns ai/py **by id**. Each project can also be a **container** —
 **a unit at `host:port`** (no shared network): the bridge dials
 `host.containers.internal:<port>` for another container on this host, or
-`ws://<ip>:<port>/…` (or the `ssh+ws` transport) for one on another machine.
+`ws://<ip>:<port>/…` for one on another machine (over ssh: tunnel with an
+`exec_bridge` job and dial the tunnel's local end).
 
 **Hand to an LLM:** *"For each project dir, create a `local_runner` (or run its
 container); bridge to it; iframe its webapp as a canvas tile. To reach a project on

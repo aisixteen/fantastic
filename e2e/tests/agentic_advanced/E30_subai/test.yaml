@@ -1,0 +1,22 @@
+# WHAT to measure and HOW LONG to allow. Never a model, an endpoint, a key
+# or a backend name — those live in e2e/backends/, so this same file runs
+# against any plug and the results stay comparable.
+id: subai
+group: agentic_advanced
+title: a sub-agentic ROUTINE — a new AI, a new code agent, the clock at the AI, the multiplier in code
+runner: probe.py
+# ONE probe, three kernels. `RUNTIME` is the plug the probe reads; the same
+# assertions run against each. python is in-process (its asserts read the live
+# tree); rust and swift are spawned and driven over REST.
+runtimes: [python, rust, swift]
+costs: turns
+# SINGLE LANE: the routine spawns live AI agents that share the proxy.
+long: true
+limits:
+  idle_seconds: 60
+  max_turns: 50
+  no_progress_turns: 0   # disabled: planning-heavy — repeated reflects are not "no progress"; max_turns is the backstop
+  turn_chars: 120000
+  turn_seconds: 600
+env: {FANTASTIC_AI_SEND_TIMEOUT: "420", UNATTENDED: "240"}  # the first planning turns run 14-18k chars of thinking; 180 s cut the run at pass 6 while it was progressing (2026-09-10)
+# No free selftest: a perfect actor for this task needs a live sub-AI turn (costs turns).

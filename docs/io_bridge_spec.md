@@ -74,7 +74,7 @@ single point of variance is `(transport | listener) + (transport literal) +
 
 | Derivation | Path | Direction | Transport | Extractor |
 |---|---|---|---|---|
-| `ws_bridge` (was `kernel_bridge`) | `io/ws_bridge/` | outbound dial | ws / ssh+ws / memory | `EnvelopeExtractor` |
+| `ws_bridge` (was `kernel_bridge`) | `io/ws_bridge/` | outbound dial | ws / memory | `EnvelopeExtractor` |
 | `relay_connector` | `io/relay_connector/` | outbound dial (relay router) | `relay` | `EnvelopeExtractor` |
 | `web_ws` | `io/web_ws/` | inbound, 1:N | ws (listener) | `EnvelopeExtractor` |
 | `web_rest` | `io/web_rest/` | inbound, 1:N | http (listener) | header (`X-Fantastic-Auth`) |
@@ -139,8 +139,8 @@ an empty `see` (discovery via the agent's own readme + the `hint`).
 Open a leg consciously, e.g.:
 
 ```bash
-fantastic <web> create_agent handler_module=web_ws.tools ingress_rule=allow_all     # local dev
-fantastic <web> create_agent handler_module=web_rest.tools ingress_rule=password    # shared group
+fantastic <web> create_agent handler_module=web_ws.tools ingress_rule=allow_all_ingress     # local dev
+fantastic <web> create_agent handler_module=web_rest.tools ingress_rule=password_ingress    # shared group
 ```
 
 A freshly-created `web_ws`/`web_rest` with no rule mounts but a browser/REST client
@@ -156,7 +156,7 @@ denial's inline `hint` — there is no keystone agent to reflect:
 ```
 1. try a verb over a sealed edge  → { reason:"unauthorized", hint }   # `see` is empty
 2. reflect readme=true on the SEALED AGENT ITSELF → its own short readme (the open recipe)
-3. set ingress_rule on the leg    → update_agent ingress_rule=password
+3. set ingress_rule on the leg    → update_agent ingress_rule=password_ingress
 4. present the credential          → auth_token ON THE ENVELOPE (or X-Fantastic-Auth for http)
 5. the edge opens; the wire works
 ```
@@ -215,8 +215,9 @@ two-tree federation, the plain WS bridge matrix, and the Swift `ParityHarness`):
   adds `persistence: {provider:<id>|null}` (which file_bridge the loader persists through),
   via a duck-typed `reflect_root_extra(agent)` hook. So a client reads the whole gate/wiring
   state in ONE reflect — no per-agent round-trips, no kernel skip-sealed heuristic.
-- **Record fields** (`.fantastic`): `transport` (memory|ws|ssh+ws|relay),
-  per-leg `ingress_rule`/`egress_rule`/`auth`. `handler_module` strings:
+- **Record fields** (`.fantastic`): `transport` (memory|ws|relay),
+  per-leg `ingress_rule`/`egress_rule`/`auth`, and `peer_guid` (the ONE peer kernel whose
+  agents an inbound-serving leg accepts, as `<peer_guid>|<agent>`). `handler_module` strings:
   `relay_connector.tools`, `web.tools`, `web_ws.tools`, `web_rest.tools` stable;
   `kernel_bridge.tools` → `ws_bridge.tools` migrated in lockstep.
 - **Relay** (external interface `../fantastic_relay`, a relay-KERNEL router):
@@ -250,8 +251,7 @@ The following is decided-later and is **not** built; do not treat it as present:
   `modality = stream` slot for it.
 
 These two are jointly "http_file," to be revisited as one later decision. Other
-out-of-scope-for-now items: verb-level elevation/privileged-verb policy, the
-`terminal_backend` child-env scrub, browser PoP for the message channel, and the
+out-of-scope-for-now items: verb-level elevation/privileged-verb policy, browser PoP for the message channel, and the
 existing-project migration script — all tracked in the historical blueprint, none on
 this doc's current-state critical path.
 

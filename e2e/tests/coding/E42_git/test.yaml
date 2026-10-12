@@ -1,0 +1,13 @@
+id: git_ops
+group: coding
+title: the model COMMITS with the git organ — repo state is the score
+runner: probe.py
+runtimes: [python, rust, swift]
+costs: turns
+limits:
+  idle_seconds: 60
+  max_turns: 16
+  no_progress_turns: 32
+  turn_chars: 60000
+  turn_seconds: 300
+env: {}

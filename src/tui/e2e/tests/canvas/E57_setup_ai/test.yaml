@@ -1,0 +1,11 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint (the
+# plug names those). Live: the BACKEND plug.
+id: setup_ai
+group: canvas
+title: "the AI set-up wizard makes the first agent from the plug (provider → details → create): its template is saved as the default, and it answers"
+runner: probe.py
+costs: turns
+limits:
+  total_seconds: 600
+  quiet_seconds: 25
+env: {}

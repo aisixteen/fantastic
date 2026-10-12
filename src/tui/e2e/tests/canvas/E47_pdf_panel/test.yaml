@@ -1,0 +1,11 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint (the
+# plug names those). Live: the BACKEND plug.
+id: pdf_panel
+group: canvas
+title: "an AI opens an allowed PDF in a panel; the file leg refuses the rest"
+runner: probe.py
+costs: turns
+limits:
+  total_seconds: 600
+  quiet_seconds: 30
+env: {}

@@ -1,0 +1,15 @@
+# WHAT to measure and HOW LONG to allow. Never a model, an endpoint, a key
+# or a backend name — those live in e2e/backends/.
+id: fold_descent
+group: coding
+title: "after folds fire, the answer lives inside a folded chain — go in and get it"
+runner: probe.py
+runtimes: [python, rust, swift]
+costs: turns
+limits:
+  idle_seconds: 60
+  max_turns: 60
+  no_progress_turns: 32
+  turn_chars: 60000
+  turn_seconds: 300
+env: {E2E_WINDOW: "6000"}  # 6k (2026-10-06): the leaner system block left 12k peaks under the fold trigger

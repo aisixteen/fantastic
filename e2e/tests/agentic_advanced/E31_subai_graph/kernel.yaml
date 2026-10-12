@@ -1,0 +1,8 @@
+# This test builds NO tree of its own. It drives the `subai` fixture, imported
+# rather than copied, and scores the result as a GRAPH — edges, not just nodes.
+# A copied fixture would drift and the two scores would stop being comparable.
+# See tests/agentic_advanced/subai/kernel.yaml for the roster.
+#
+# fixture: tests/agentic_advanced/subai/probe.py
+
+roster: []

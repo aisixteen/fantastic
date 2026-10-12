@@ -1,0 +1,46 @@
+[package]
+publish = false
+name = "fantastic-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "HTTP host — serves python's four rendering routes and mounts child call surfaces."
+
+[dependencies]
+# python-format helpers: `{x!r}`, `int()`, truthiness, `json.dumps`.
+fantastic-bundle = { path = "../../fantastic-bundle" }
+fantastic-kernel = { path = "../../fantastic-kernel" }
+fantastic-io-bridge = { path = "../../fantastic-io-bridge" }
+tokio = { workspace = true }
+# `getentropy` — the OS CSPRNG behind python's `secrets` module.
+libc = { workspace = true }
+axum = { workspace = true }
+# The WS upgrade is answered here (permessage-deflate is negotiated before the
+# 101): hyper's upgrade handle, its tokio adapter, and tungstenite over the
+# negotiated byte stream.
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+tokio-tungstenite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+tower = "0.5"
+futures-util = "0.3"
+
+[dev-dependencies]
+# The ROOT LOADER bundle — tests need it registered so the root answers the
+# verbs it serves (`persist_blob`/`load_blob`, `boot`), as it does in production.
+fantastic-core = { path = "../fantastic-core" }
+tempfile = "3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio = { workspace = true, features = ["test-util", "macros"] }
+fantastic-web-ws = { path = "../fantastic-web-ws" }
+fantastic-web-rest = { path = "../fantastic-web-rest" }
+fantastic-file = { path = "../fantastic-file" }
+# `paste_image` over the binary channel, end to end on both wire legs.
+fantastic-exec-bridge = { path = "../fantastic-exec-bridge" }
+# Calls across the legs: a ws_bridge dialing web_ws (and a page kernel's bridge
+# end), the memory store every record lands in, and a credential store.
+fantastic-bridge = { path = "../fantastic-bridge" }
+fantastic-ram-store = { path = "../fantastic-ram-store" }
+fantastic-credential-store = { path = "../fantastic-credential-store" }

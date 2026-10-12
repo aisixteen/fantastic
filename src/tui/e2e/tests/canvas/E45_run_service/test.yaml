@@ -1,0 +1,11 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint (the
+# plug names those). Live: the BACKEND plug.
+id: run_service
+group: canvas
+title: "an AI starts a server through an exec agent, reports its port, stops it"
+runner: probe.py
+costs: turns
+limits:
+  total_seconds: 600
+  quiet_seconds: 30
+env: {}

@@ -11,7 +11,7 @@ if (!chromeAvailable()) {
 }
 const b = await Browser.launch();
 try {
-  await b.goto("http://127.0.0.1:8890/ts_dist/file/_dawee_canvas.html");
+  await b.goto("http://127.0.0.1:8890/canvas_page/file/index.html");
   await b.waitFor("!!document.getElementById('canvas')", 20000);
   await b.waitFor("document.querySelectorAll('.agent-frame iframe').length >= 5", 20000);
   await sleep(2500); // panels boot + watches settle

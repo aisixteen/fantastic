@@ -1,0 +1,15 @@
+# WHAT to measure and HOW LONG to allow. Never a model, an endpoint, a key
+# or a backend name — those live in e2e/backends/.
+id: context_clear
+group: coding
+title: "context_clear is a BOUNDARY, not a deletion: chat/clear/chat, chat/fold/clear/chat, and a clear that survives a kernel restart"
+runner: probe.py
+runtimes: [python, rust, swift]
+costs: turns
+limits:
+  idle_seconds: 60
+  max_turns: 30
+  no_progress_turns: 32
+  turn_chars: 60000
+  turn_seconds: 300
+env: {E2E_WINDOW: "16000"}  # squeezed so folds fire in phase 2 (same window as kernel_restart)

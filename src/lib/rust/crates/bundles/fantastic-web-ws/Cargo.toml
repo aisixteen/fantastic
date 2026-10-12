@@ -1,0 +1,19 @@
+[package]
+publish = false
+name = "fantastic-web-ws"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "WebSocket verb channel — mounts ws://host/<agent_id>/ws on a parent web agent."
+
+[dependencies]
+# python-format helpers: `{x!r}` in the unhandled refusal.
+fantastic-bundle = { path = "../../fantastic-bundle" }
+fantastic-kernel = { path = "../../fantastic-kernel" }
+# the shared leg posture (`describe`) this surface reflects.
+fantastic-io-bridge = { path = "../../fantastic-io-bridge" }
+async-trait = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

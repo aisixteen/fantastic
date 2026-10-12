@@ -1,0 +1,19 @@
+[package]
+publish = false
+name = "fantastic-cli-bundle"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "cli singleton — terminal render sink. Prints token/done/say/error/status/context to stdout."
+
+[dependencies]
+fantastic-bundle = { path = "../../fantastic-bundle" }
+fantastic-kernel = { path = "../../fantastic-kernel" }
+async-trait = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+# The ROOT LOADER bundle — tests need it registered so the root answers the
+# verbs it serves (`persist_blob`/`load_blob`, `boot`), as it does in production.
+fantastic-core = { path = "../fantastic-core" }
+tokio = { workspace = true, features = ["macros", "rt"] }

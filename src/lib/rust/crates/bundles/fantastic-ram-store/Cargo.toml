@@ -1,0 +1,22 @@
+[package]
+publish = false
+name = "fantastic-ram-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "In-RAM memory store agent: per-owner rows, fold refs, grants, search — the sqlite topology held in maps, ephemeral by design."
+
+# Owns no disk. Everything it holds dies with the process — that is what "ram" says.
+# A durable store answers the SAME verbs over the SAME tables (sqlite_store, the CLI
+# project), so a caller never learns which one it is talking to.
+
+[dependencies]
+fantastic-bundle = { path = "../../fantastic-bundle" }
+fantastic-kernel = { path = "../../fantastic-kernel" }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }
+tempfile = "3"

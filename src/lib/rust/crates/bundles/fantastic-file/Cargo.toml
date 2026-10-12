@@ -1,0 +1,27 @@
+[package]
+publish = false
+name = "fantastic-file"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Filesystem-as-agent — text verbs, streams, list/delete/rename/mkdir and the allow list, rooted at the `root` field."
+
+[dependencies]
+# python-format helpers: repr/str/truthiness/OSError text, python-canonical.
+fantastic-bundle = { path = "../../fantastic-bundle" }
+fantastic-kernel = { path = "../../fantastic-kernel" }
+fantastic-io-bridge = { path = "../../fantastic-io-bridge" }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+# the on-demand document `version` (sha256[:16]).
+sha2 = "0.10"
+# the per-document edit locks.
+tokio = { workspace = true }
+# `read_private`'s one open: O_NOFOLLOW | O_NONBLOCK, ELOOP, getuid.
+libc = { workspace = true }
+# `watch_path`'s disk watcher — native events (FSEvents / inotify / kqueue), the
+# library python's `watchfiles` is built on.
+notify = "6"
+
+[dev-dependencies]
+tempfile = "3"

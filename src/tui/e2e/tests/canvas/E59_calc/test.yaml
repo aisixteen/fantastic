@@ -1,0 +1,12 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint (the
+# plug names those). Live: the BACKEND plug.
+id: calc
+group: canvas
+title: "an AI writes a multi-function math module + its own tests behind a seeded six-button panel"
+runner: probe.py
+costs: turns
+limits:
+  # one ask; the checks need ≈60 s more (cut to fit the runner's 15-minute hard stop)
+  total_seconds: 600
+  quiet_seconds: 30
+env: {}

@@ -13,8 +13,8 @@ parametrized over every host runtime. Done-when: bytes written through the relay
 land verbatim on B's disk AND read back byte-identical over the same chain.
 
 The codec is reimplemented inline (≈20 lines) on purpose: this test asserts the
-WIRE contract `[4B BE len | JSON header (+_binary_path) | raw body]`, not a
-library import.
+WIRE contract `[4B BE len | JSON header (+_binary_path, a list of steps) | raw
+body]`, not a library import.
 """
 
 from __future__ import annotations
@@ -31,7 +31,13 @@ import pytest
 import websockets
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from relay_harness import Relay, require_relay  # noqa: E402
+from relay_harness import (  # noqa: E402
+    LEG,
+    Relay,
+    require_relay,
+    seed_relay_creds,
+    set_relay_password,
+)
 
 from helpers.kernel_proc import KernelProc  # noqa: E402
 from helpers.seeding import seed_create, seed_web, seed_web_ws  # noqa: E402
@@ -49,23 +55,24 @@ PAYLOAD = bytes([0x00, 0xFF, 0xCA, 0xFE, 0xBA, 0xBE, 0x10, 0x80]) * 1024  # 8 Ki
 
 def _encode_frame(envelope: dict[str, Any]) -> bytes:
     """`[4B BE len | header | body]` — the single bytes value nulled in the
-    header, its dotted path in `_binary_path`, raw bytes trailing."""
+    header, its path in `_binary_path` (a list of steps: a key as a string, taken
+    literally), raw bytes trailing."""
 
-    def find(obj: Any, prefix: str = "") -> tuple[str, bytes] | None:
+    def find(obj: Any, path: list) -> tuple[list, bytes] | None:
         if isinstance(obj, (bytes, bytearray)):
-            return (prefix, bytes(obj))
+            return (path, bytes(obj))
         if isinstance(obj, dict):
             for k, v in obj.items():
-                r = find(v, f"{prefix}.{k}" if prefix else k)
+                r = find(v, [*path, k])
                 if r:
                     return r
         return None
 
-    path, body = find(envelope) or (None, b"")
+    path, body = find(envelope, []) or (None, b"")
     assert path, "test frame must carry bytes"
 
-    def nulled(obj: Any, at: str) -> Any:
-        head, _, rest = at.partition(".")
+    def nulled(obj: Any, at: list) -> Any:
+        head, rest = at[0], at[1:]
         return {
             k: (nulled(v, rest) if k == head and rest else (None if k == head else v))
             for k, v in obj.items()
@@ -85,10 +92,9 @@ def _decode_frame(wire: bytes) -> dict[str, Any]:
     path = header.pop("_binary_path", None)
     if path:
         obj = header
-        parts = path.split(".")
-        for p in parts[:-1]:
-            obj = obj[p]
-        obj[parts[-1]] = body
+        for step in path[:-1]:
+            obj = obj[step]
+        obj[path[-1]] = body
     return header
 
 
@@ -126,22 +132,26 @@ async def test_relay_streams_raw_bytes(
     wd_a.mkdir(parents=True)
     wd_b.mkdir(parents=True)
     port_a, port_b = free_port(), free_port()
+    # The relay's host:port is what each kernel's password ref is bound to, so
+    # the relay is placed before the seeds (started after them).
+    relay = Relay(require_relay(), free_port())
 
     for binary, wd, port in [(bin_a, wd_a, port_a), (bin_b, wd_b, port_b)]:
         seed_web(binary, wd, port)
         seed_web_ws(binary, wd)
+        seed_relay_creds(binary, wd, relay)
     # B's fs edge — an OPEN file_bridge rooted INSIDE B's workdir (the clamp).
     (wd_b / "streams").mkdir()
     seed_create(
         bin_b,
         wd_b,
-        handler_module="file_bridge.tools",
+        handler_module="file_bridge.tools", allow=["."],
         agent_id="fs",
         root="streams",
-        ingress_rule="allow_all",
+        ingress_rule="allow_all_ingress",
     )
 
-    relay = Relay(require_relay(), free_port()).start()
+    relay.start()
     spawned: list[KernelProc] = []
     try:
         kp_a = bin_a.start_daemon(wd_a, port_a, label="python")
@@ -150,20 +160,19 @@ async def test_relay_streams_raw_bytes(
         kp_b = bin_b.start_daemon(wd_b, port_b, label=rt_b)
         spawned.append(kp_b)
         await kp_b.wait_ready()
+        await asyncio.gather(set_relay_password(kp_a, relay), set_relay_password(kp_b, relay))
 
         meta_a = _relay_meta(
             handler_module=_HANDLER_MODULE["python"],
             guid="A",
             partner_guid="B",
             relay_url=relay.url,
-            relay_token=relay.password,
         )
         meta_b = _relay_meta(
             handler_module=_HANDLER_MODULE[rt_b],
             guid="B",
             partner_guid="A",
             relay_url=relay.url,
-            relay_token=relay.password,
             # B answers inbound forwards — its leg must be explicitly OPEN.
             auth="allow_all",
         )
@@ -171,20 +180,20 @@ async def test_relay_streams_raw_bytes(
             kp_a.call("kernel", "create_agent", **meta_a),
             kp_b.call("kernel", "create_agent", **meta_b),
         )
-        rcb = await kp_a.call("cb", "reflect")
+        rcb = await kp_a.call(LEG, "reflect")
         for _ in range(50):
             if rcb.get("connected"):
                 break
             await asyncio.sleep(0.1)
-            rcb = await kp_a.call("cb", "reflect")
+            rcb = await kp_a.call(LEG, "reflect")
         assert rcb.get("connected") is True, f"A leg never connected: {rcb}"
 
-        url = f"ws://127.0.0.1:{port_a}/cb/ws"
+        url = f"ws://127.0.0.1:{port_a}/{LEG}/ws"
         async with websockets.connect(url, open_timeout=10, max_size=None) as ws:
             # write_stream: raw bytes A → relay → B → disk.
             w = await _binary_call(
                 ws,
-                "cb",
+                LEG,
                 {
                     "type": "forward",
                     "target": "fs",
@@ -203,7 +212,7 @@ async def test_relay_streams_raw_bytes(
             # read_stream: raw bytes B → relay → A → this socket.
             r = await _binary_call(
                 ws,
-                "cb",
+                LEG,
                 {
                     "type": "forward",
                     "target": "fs",

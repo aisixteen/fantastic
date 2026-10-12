@@ -1,0 +1,48 @@
+"""`password` — kernel-GROUP membership by a shared secret (ingress side: CHECK)."""
+
+from __future__ import annotations
+
+import hmac
+import os
+from dataclasses import dataclass
+
+from io_bridge._base import ALLOW, Action, Decision, IngressRule
+
+
+@dataclass(frozen=True)
+class Password(IngressRule):
+    """Authorize an inbound `call` only if its envelope `auth_token` matches this
+    leg's group token, read from an env var (`env`, default
+    `FANTASTIC_GROUP_TOKEN`) so the secret never touches the portable `.fantastic`
+    workdir. Fail-closed: an unset/empty env var refuses every inbound `call`.
+    Constant-time compare over the UTF-8 BYTES of both sides (rust and swift compare
+    bytes): on `str`, `hmac.compare_digest` raises TypeError for any non-ASCII text,
+    so a stray `é` from a tokenless client was an unhandled error instead of a
+    denial, and a non-ASCII group token refused its own holders (audit IO-6,
+    2026-10-03). The egress mirror (`egress_rules.password`) PRESENTS the
+    same token, so one group token in env makes a leg a full member."""
+
+    env: str = "FANTASTIC_GROUP_TOKEN"
+
+    def authorize(self, action: Action) -> Decision:
+        # Gate EVERY inbound kind the choke point asks about — `call` (dispatch) AND
+        # the data-bearing kinds `emit`/`watch`/`state_subscribe`. The web inbound
+        # legs route those through this same gate, so a missing token must refuse
+        # them too, else a "locked" leg leaks telemetry to a tokenless client.
+        expected = os.environ.get(self.env) or None
+        if expected is None:
+            return Decision(False, f"group token unset ({self.env})")
+        presented = (
+            action.token
+        )  # the frame-envelope token (NOT the dispatched payload)
+        if isinstance(presented, str) and hmac.compare_digest(
+            _utf8(presented), _utf8(expected)
+        ):
+            return ALLOW
+        return Decision(False, "invalid or missing group token")
+
+
+def _utf8(text: str) -> bytes:
+    """A token's bytes as compared. `surrogatepass` so no `str` can raise here — a
+    lone surrogate is bytes no real token has, so it simply does not match."""
+    return text.encode("utf-8", "surrogatepass")

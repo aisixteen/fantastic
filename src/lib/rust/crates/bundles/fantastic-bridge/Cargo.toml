@@ -1,0 +1,30 @@
+[package]
+publish = false
+name = "fantastic-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Cross-kernel bridge — WS-only, asymmetric; ships raw call frames over memory/WS transports."
+
+[dependencies]
+fantastic-kernel = { path = "../../fantastic-kernel" }
+fantastic-io-bridge = { path = "../../fantastic-io-bridge" }
+fantastic-bundle = { path = "../../fantastic-bundle" }
+async-trait = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+# `getentropy` — the OS CSPRNG behind python's `uuid.uuid4()`.
+libc = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
+
+[dev-dependencies]
+fantastic-file = { path = "../fantastic-file" }
+# The memory store each test kernel flushes into — the secret tests read every
+# record a kernel keeps, the store's included.
+fantastic-ram-store = { path = "../fantastic-ram-store" }
+# The relay password a relay leg reads before every dial (audit IO-7): a
+# credential_store on its in-memory keychain double.
+fantastic-credential-store = { path = "../fantastic-credential-store" }
+tempfile = "3"
+tokio = { workspace = true, features = ["test-util", "macros"] }

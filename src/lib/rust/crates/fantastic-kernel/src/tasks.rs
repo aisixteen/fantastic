@@ -1,0 +1,719 @@
+//! The TASK TABLE — `ps` + `cancel`, the kernel's process table.
+//!
+//! The unit is a **task**: ONE in-flight dispatch, not an agent. Its id
+//! (`"<agent_id>:<n>"`) is a pid — `n` is a per-agent counter, monotonic for
+//! the process lifetime, so an id is never reused and a stale id cancels
+//! nothing rather than killing an innocent task.
+//!
+//! Tasks form a **tree** through the send chain: a `send` issued INSIDE a
+//! handler is a CHILD of that handler's task. The current id rides the
+//! [`CURRENT_TASK`] task-local exactly as the sender rides
+//! [`crate::send::CURRENT_SENDER`] — and because `tokio::spawn` MOVES the
+//! future onto a fresh task (task-locals do NOT inherit), the scope is
+//! re-established INSIDE the spawned dispatch (see [`Kernel::run_dispatch`]).
+//! That tree is what makes `cancel` a process-GROUP kill rather than a single
+//! abort.
+//!
+//! ## Cancellation is two-phase (SIGTERM → SIGKILL)
+//!
+//! Dropping a future frees NO real resource — it unwinds `async` frames and
+//! nothing else. An OS subprocess, a PTY, a socket held for that task must be
+//! released by its bundle first. So [`Kernel::cancel_task`]:
+//!
+//! 1. **`on_cancel`** ([`crate::Bundle::on_cancel`]) — awaited for the WHOLE
+//!    subtree while every task is still alive, so a bundle can release what it
+//!    owns and no handler observes a half-killed group.
+//! 2. **abort** — leaves-up, synchronously (no `await` in that loop): a parent
+//!    can never resume between its child's death and its own.
+//!
+//! ## How a task is stopped
+//!
+//! Not `JoinHandle::abort` — that handle only exists AFTER `tokio::spawn`,
+//! which would leave a window where a freshly-registered row is unkillable and
+//! a nested `send` could claim a parent that isn't in the table yet. Instead a
+//! [`TaskHandle`] (a `Notify` + a killed flag) is created BEFORE the spawn and
+//! registered with the row; the dispatch runs in a `select!` against it, so
+//! `stop()` drops the dispatch future at its next yield — abort semantics, no
+//! race.
+
+use crate::agent::AgentId;
+use crate::kernel::Kernel;
+use serde_json::{json, Map, Value};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::sync::Notify;
+use tokio::task_local;
+
+/// A task id — a message id. A pid.
+///
+/// ONE NUMBER NAMES ONE THING. It comes from the kernel's single counter
+/// ([`crate::rows::RowStore::mint_id`]), the same allocator a conversation row, a
+/// reply body and a forked task take theirs from, so the id in `ps` is the id in
+/// `cancel`, in the ledger, in a reply tag and in the message log.
+///
+/// There is NO `From<&str>`. A string arriving from outside is a NAME — a
+/// caller-chosen execution handle the ledger resolves — and letting one become a
+/// pid is exactly the ambiguity the counter exists to remove.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct TaskId(pub i64);
+
+impl TaskId {
+    /// The underlying number.
+    #[must_use]
+    pub fn get(self) -> i64 {
+        self.0
+    }
+}
+
+impl From<i64> for TaskId {
+    fn from(n: i64) -> Self {
+        TaskId(n)
+    }
+}
+
+impl std::fmt::Display for TaskId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+task_local! {
+    /// The id of the task whose dispatch is running right now. Set INSIDE the
+    /// spawned dispatch (a spawn moves the future — task-locals don't inherit),
+    /// read by the next `send` to record its PARENT. That is what makes the
+    /// table a tree. Unset outside any dispatch (a web surface, a one-shot CLI
+    /// verb, a test) — such a task is a root of the table, like a process
+    /// spawned by init.
+    pub static CURRENT_TASK: TaskId;
+
+    /// "My own task is inside a subtree the kernel is killing." Set by
+    /// [`Kernel::cancel_task`] on every marked row BEFORE any task is stopped,
+    /// so a handler that gets woken by its child's death does not resurrect
+    /// itself: it parks and takes its own stop signal instead.
+    pub static CURRENT_KILLED: Arc<AtomicBool>;
+}
+
+/// The current task id, or `None` outside any dispatch.
+pub fn current_task() -> Option<TaskId> {
+    CURRENT_TASK.try_with(|t| *t).ok()
+}
+
+/// `true` iff the calling task has been marked killed by an in-flight
+/// [`Kernel::cancel_task`]. `false` outside any dispatch.
+pub fn current_killed() -> bool {
+    CURRENT_KILLED
+        .try_with(|f| f.load(Ordering::SeqCst))
+        .unwrap_or(false)
+}
+
+/// Spawn `work` DETACHED — no task-table row — carrying the identity of the code
+/// that spawned it: a task an agent's code spawns is that agent's (python's
+/// `asyncio.create_task`, which copies the context). `tokio::spawn` alone drops
+/// every task-local, so a send the work made would arrive as the OPERATOR. Not a
+/// switch: the identity is the spawner's own, read here. Use
+/// [`Kernel::spawn_task`] for work that belongs in `ps`.
+pub fn spawn_inherit<F>(work: F) -> tokio::task::JoinHandle<F::Output>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    let sender = crate::send::current_sender();
+    let origin = crate::send::current_origin();
+    let quiet = crate::send::state_quiet();
+    tokio::spawn(crate::send::STATE_QUIET.scope(
+        quiet,
+        crate::send::CURRENT_SENDER.scope(sender, crate::send::CURRENT_ORIGIN.scope(origin, work)),
+    ))
+}
+
+/// Seconds since the epoch — the `started_at` clock (Python's `time.time()`).
+fn now_secs() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+/// The stop handle of one registered task: a `Notify` the task's `select!`
+/// races against, plus the killed flag its own descendants read.
+///
+/// Created BEFORE the task is spawned so the row is complete (and killable)
+/// the instant it enters the table.
+#[derive(Clone)]
+pub struct TaskHandle {
+    cancel: Arc<Notify>,
+    killed: Arc<AtomicBool>,
+}
+
+impl Default for TaskHandle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TaskHandle {
+    /// A fresh handle for a task that is about to be registered + spawned.
+    pub fn new() -> Self {
+        Self {
+            cancel: Arc::new(Notify::new()),
+            killed: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Phase ① — mark the task as dying. Its own `send`s, woken by a child's
+    /// death, will park instead of resuming.
+    fn mark(&self) {
+        self.killed.store(true, Ordering::SeqCst);
+    }
+
+    /// Phase ② — stop the task: the `select!` in `Kernel::run_dispatch` /
+    /// [`Kernel::spawn_task`] takes this branch and DROPS the work future.
+    /// `notify_one` stores a permit, so a task that hasn't been polled yet
+    /// still stops the moment it starts.
+    pub(crate) fn stop(&self) {
+        self.cancel.notify_one();
+    }
+
+    /// The `Notify` the task's `select!` waits on.
+    pub(crate) fn cancel_signal(&self) -> Arc<Notify> {
+        Arc::clone(&self.cancel)
+    }
+
+    /// The killed flag scoped into the task as [`CURRENT_KILLED`].
+    pub(crate) fn killed_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.killed)
+    }
+}
+
+/// One row of the table. `handle` is the stop handle and never leaves the
+/// kernel — `ps` serves the five public fields only.
+struct TaskEntry {
+    agent: AgentId,
+    parent: Option<TaskId>,
+    verb: String,
+    started_at: f64,
+    /// Registration order — `ps` reports oldest first, deterministically (the
+    /// `started_at` clock is too coarse to sort by).
+    order: u64,
+    handle: TaskHandle,
+    /// A loop that is SUPPOSED to outlive a graceful agent shutdown — a
+    /// persister tailing the row store, a scheduler tick. `shutdown_agents`
+    /// neither waits for it (it never ends) nor cancels it (the persister has
+    /// to be alive to catch up on what the shutdown verb just wrote); it dies
+    /// with the process. Python marks these `_keepalive` for the same reason.
+    keepalive: bool,
+    /// FORKED work — registered by [`Kernel::spawn_task`], not by a dispatch:
+    /// a service loop a bundle runs for as long as its agent lives (a scheduler
+    /// tick, an io_bridge read loop, `ws_drain`, an exec job pump, a
+    /// `pty_reader`). The QUIET phase of `shutdown_agents` does not wait for it
+    /// — it never ends, so waiting spent one full `QUIET_TIMEOUT` every stop
+    /// (measured in python: 10.25 s → 0.29 s). It is still CANCELLED with every
+    /// other non-keepalive root right after. Python's `_forked`.
+    forked: bool,
+}
+
+#[derive(Default)]
+struct Inner {
+    tasks: HashMap<TaskId, TaskEntry>,
+    /// Registration order — what `ps` sorts by. Non-reuse is the kernel
+    /// counter's job now, not this table's.
+    order: u64,
+}
+
+/// The live table of in-flight work. Lives on the [`Kernel`]; `ps` reads it,
+/// `cancel` acts on it.
+///
+/// A plain `Mutex` — every critical section is a few map operations with no
+/// `await` inside (the `on_cancel` hooks in [`Kernel::cancel_task`] run
+/// between locked sections, never under the lock).
+#[derive(Default)]
+pub struct TaskTable {
+    inner: Mutex<Inner>,
+}
+
+impl TaskTable {
+    /// Empty table.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    // NO MINTER HERE ANY MORE. `TaskTable::mint` used to hand out
+    // `"<agent>:<8 hex>"` from a per-agent counter, hashed and salted so a
+    // visible sequence could not be read as an ordering (measured 2026-08-20 in
+    // python: a model inferred ordering from `<agent>:<n>`, decided "the reply
+    // queue is running ahead of me", and re-polled forever). Python reversed that
+    // trade: ONE int64 counter allocates every id in the kernel, so `ps`,
+    // `cancel`, the ledger, a reply tag and the message log all name the same
+    // number — and a number that names one thing everywhere is worth more than
+    // one that hides its order. The allocator is `kernel.mint_id()`; the
+    // caller mints, and this table only registers.
+
+    /// Put one in-flight task in the table.
+    ///
+    /// THE PARENT IS RECORDED AS GIVEN. There used to be a silent
+    /// `parent.filter(|p| inner.tasks.contains_key(p))` here, defended as
+    /// init-adoption; python REMOVED the same line for the same shape
+    /// (`_kernel.py:602-616`, "A PARENT IS ALWAYS ALIVE"), because converting a
+    /// dead parent to `None` puts the work OUTSIDE every subtree, where
+    /// `cancel` on its caller can never reach it. Re-parenting belongs to
+    /// [`Self::forget`], which walks the children when the parent actually
+    /// ends. Measured: `kernel ps` answered `parent: null` for the scheduler
+    /// tick loop, the pty readers and `ps` itself, where python names the
+    /// dispatch that spawned them (`e2e/parity` `wire/probes.json`,
+    /// `bundle_verbs/kernel_ps_after.json`, `kernel_verbs/bare/ps.json`).
+    pub fn register(
+        &self,
+        id: &TaskId,
+        agent_id: &AgentId,
+        verb: &str,
+        parent: Option<TaskId>,
+        handle: TaskHandle,
+    ) {
+        self.register_marked(id, agent_id, verb, parent, handle, false);
+    }
+
+    /// [`Self::register`], saying whether this task is a keepalive loop.
+    pub fn register_marked(
+        &self,
+        id: &TaskId,
+        agent_id: &AgentId,
+        verb: &str,
+        parent: Option<TaskId>,
+        handle: TaskHandle,
+        keepalive: bool,
+    ) {
+        self.put(id, agent_id, verb, parent, handle, keepalive, false);
+    }
+
+    /// [`Self::register_marked`] for work FORKED out of a dispatch
+    /// (`spawn_task`) rather than being a dispatch itself — the QUIET phase of
+    /// `shutdown_agents` does not wait for it.
+    pub fn register_fork(
+        &self,
+        id: &TaskId,
+        agent_id: &AgentId,
+        verb: &str,
+        parent: Option<TaskId>,
+        handle: TaskHandle,
+        keepalive: bool,
+    ) {
+        self.put(id, agent_id, verb, parent, handle, keepalive, true);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn put(
+        &self,
+        id: &TaskId,
+        agent_id: &AgentId,
+        verb: &str,
+        parent: Option<TaskId>,
+        handle: TaskHandle,
+        keepalive: bool,
+        forked: bool,
+    ) {
+        let mut inner = self.inner.lock().expect("task table poisoned");
+        inner.order += 1;
+        let order = inner.order;
+        inner.tasks.insert(
+            *id,
+            TaskEntry {
+                agent: agent_id.clone(),
+                parent,
+                verb: verb.to_string(),
+                started_at: now_secs(),
+                order,
+                handle,
+                keepalive,
+                forked,
+            },
+        );
+    }
+
+    /// `id` and every ancestor of it — the chain CARRYING a dispatch. Over a
+    /// wire the leg's `inbound_call` is the root of the operator's call, so
+    /// `shutdown_agents` spares the whole chain, not only its own task: cancelling
+    /// the carrier cancels the verb's own reply. Python's `mine` set.
+    pub fn carriers(&self, id: Option<TaskId>) -> Vec<TaskId> {
+        let inner = self.inner.lock().expect("task table poisoned");
+        let mut chain = Vec::new();
+        let mut cur = id;
+        while let Some(t) = cur {
+            if chain.contains(&t) {
+                break;
+            }
+            let Some(e) = inner.tasks.get(&t) else { break };
+            chain.push(t);
+            cur = e.parent;
+        }
+        chain
+    }
+
+    /// Every live DISPATCH that is not in `except` — what the QUIET phase of
+    /// `shutdown_agents` waits to settle. Keepalive loops and FORKED service
+    /// loops are excluded: neither ever ends on its own, so waiting for them
+    /// burns the whole `QUIET_TIMEOUT` and settles nothing. Python's quiet
+    /// predicate. The CANCEL step keeps using [`Self::pending`], so a fork
+    /// still dies with the rest.
+    pub fn pending_dispatches(&self, except: &[TaskId]) -> Vec<TaskId> {
+        let inner = self.inner.lock().expect("task table poisoned");
+        inner
+            .tasks
+            .iter()
+            .filter(|(id, e)| !e.keepalive && !e.forked && !except.contains(id))
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
+    /// Every live task that is NOT a keepalive loop and not in `except` — what
+    /// `shutdown_agents` waits to drain, then cancels. Python's `pending()`.
+    pub fn pending(&self, except: &[TaskId]) -> Vec<TaskId> {
+        let inner = self.inner.lock().expect("task table poisoned");
+        inner
+            .tasks
+            .iter()
+            .filter(|(id, e)| !e.keepalive && !except.contains(id))
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
+    /// `true` iff `id` is a live ROOT task (no parent) — the only tasks
+    /// `shutdown_agents` cancels, since a subtree dies with its root.
+    pub fn is_root(&self, id: &TaskId) -> bool {
+        let inner = self.inner.lock().expect("task table poisoned");
+        inner.tasks.get(id).is_some_and(|e| e.parent.is_none())
+    }
+
+    /// Drop one row. Surviving children are RE-PARENTED to the dead task's
+    /// parent — init-adoption: work forked out of a dispatch outlives it and
+    /// must stay in the caller's process group, else cancelling the caller
+    /// could never reach it. No-op if absent.
+    pub fn forget(&self, id: &TaskId) {
+        let mut inner = self.inner.lock().expect("task table poisoned");
+        remove_and_reparent(&mut inner, id);
+    }
+
+    /// `true` iff `id` names a live task.
+    pub fn contains(&self, id: &TaskId) -> bool {
+        self.inner
+            .lock()
+            .expect("task table poisoned")
+            .tasks
+            .contains_key(id)
+    }
+
+    /// The public table — the `ps` reply rows `{id, agent, parent, verb,
+    /// started_at}`, oldest first. The stop handle stays behind.
+    pub fn rows(&self) -> Vec<Value> {
+        let inner = self.inner.lock().expect("task table poisoned");
+        let mut rows: Vec<(u64, Value)> = inner
+            .tasks
+            .iter()
+            .map(|(id, e)| {
+                (
+                    e.order,
+                    json!({
+                        "id": id.0,
+                        "agent": e.agent.0,
+                        "parent": e.parent.as_ref().map(|p| p.0),
+                        "verb": e.verb,
+                        "started_at": e.started_at,
+                    }),
+                )
+            })
+            .collect();
+        rows.sort_by_key(|(order, _)| *order);
+        rows.into_iter().map(|(_, row)| row).collect()
+    }
+
+    /// The agent that owns `id`, if it is still live.
+    pub fn agent_of(&self, id: &TaskId) -> Option<AgentId> {
+        self.inner
+            .lock()
+            .expect("task table poisoned")
+            .tasks
+            .get(id)
+            .map(|e| e.agent.clone())
+    }
+
+    /// The verb of `id` when it is a KERNEL SERVICE TASK — a keepalive loop
+    /// the ROOT owns (`root`): the execution flusher, the record persister.
+    /// `cancel` never kills one (audit KV-5, owner 2026-10-03): killing it
+    /// stopped ledger durability and record persistence until the process
+    /// restarted, and nothing restarted it. It stays listed in `ps`; the
+    /// kernel's own stop ends it. Python `Kernel.is_service_task`.
+    fn service_verb(&self, id: &TaskId, root: &AgentId) -> Option<String> {
+        let inner = self.inner.lock().expect("task table poisoned");
+        inner
+            .tasks
+            .get(id)
+            .filter(|e| is_service(e, Some(root)))
+            .map(|e| e.verb.clone())
+    }
+
+    /// Phase ① of `cancel`: `id` + every descendant, POST-ORDER (leaves
+    /// first — the kill order of a process group), with every one of them
+    /// MARKED killed before the caller runs a single hook or stops a single
+    /// task. `None` if `id` isn't in the table. A kernel service task below
+    /// `id` (a flusher started by a `kernel_start` some agent's dispatch sent)
+    /// is not part of the group: it and its own work are left out.
+    fn begin_cancel(&self, id: &TaskId, root: Option<&AgentId>) -> Option<Vec<TaskId>> {
+        let inner = self.inner.lock().expect("task table poisoned");
+        if !inner.tasks.contains_key(id) {
+            return None;
+        }
+        let mut kids: HashMap<&TaskId, Vec<&TaskId>> = HashMap::new();
+        for (tid, e) in inner.tasks.iter() {
+            if let Some(p) = e.parent.as_ref() {
+                if !is_service(e, root) {
+                    kids.entry(p).or_default().push(tid);
+                }
+            }
+        }
+        // Deterministic order among siblings (oldest first).
+        for v in kids.values_mut() {
+            v.sort_by_key(|t| inner.tasks.get(*t).map(|e| e.order).unwrap_or(0));
+        }
+        let mut out: Vec<TaskId> = Vec::new();
+        walk(id, &kids, &mut out);
+        for tid in &out {
+            if let Some(e) = inner.tasks.get(tid) {
+                e.handle.mark();
+            }
+        }
+        Some(out)
+    }
+
+    /// Phase ② of `cancel`: stop the whole subtree leaves-up and drop its rows
+    /// — SYNCHRONOUS, no `await`, so a parent cannot resume between its child's
+    /// death and its own. Returns the ids actually killed (the table only ever
+    /// holds LIVE work).
+    fn abort_subtree(&self, ids: &[TaskId]) -> Vec<i64> {
+        let mut inner = self.inner.lock().expect("task table poisoned");
+        let mut killed = Vec::new();
+        for tid in ids {
+            if let Some(entry) = remove_and_reparent(&mut inner, tid) {
+                entry.handle.stop();
+                killed.push(tid.0);
+            }
+        }
+        killed
+    }
+}
+
+/// Is `e` a kernel service task — a keepalive loop the root owns?
+fn is_service(e: &TaskEntry, root: Option<&AgentId>) -> bool {
+    e.keepalive && root == Some(&e.agent)
+}
+
+/// Post-order DFS of the task tree.
+fn walk(id: &TaskId, kids: &HashMap<&TaskId, Vec<&TaskId>>, out: &mut Vec<TaskId>) {
+    if let Some(children) = kids.get(id) {
+        for c in children {
+            walk(c, kids, out);
+        }
+    }
+    out.push(*id);
+}
+
+/// Remove one row, re-parenting its surviving children to its parent.
+fn remove_and_reparent(inner: &mut Inner, id: &TaskId) -> Option<TaskEntry> {
+    let entry = inner.tasks.remove(id)?;
+    for e in inner.tasks.values_mut() {
+        if e.parent.as_ref() == Some(id) {
+            e.parent = entry.parent;
+        }
+    }
+    Some(entry)
+}
+
+/// Drops one row when the task it belongs to ends — completed OR stopped.
+/// Held INSIDE a task spawned by [`Kernel::spawn_task`], so the row lives
+/// exactly as long as the work.
+struct ForgetOnDrop {
+    kernel: Arc<Kernel>,
+    id: TaskId,
+}
+
+impl Drop for ForgetOnDrop {
+    fn drop(&mut self) {
+        self.kernel.tasks.forget(&self.id);
+    }
+}
+
+impl Kernel {
+    /// Register BACKGROUND work a bundle forks out of a dispatch (an OS
+    /// subprocess pump, a PTY reader) — work that OUTLIVES the dispatch that
+    /// started it. Bundles call this so their real work is visible to `ps` and
+    /// killable by `cancel`; without it the dispatch returns, its row drops,
+    /// and the resource is unreachable (that is the orphan bug).
+    ///
+    /// Parent = the dispatch that forked it, so the fork stays inside the
+    /// caller's process group even after that dispatch returns (its row is
+    /// re-parented to init on removal). Inside the spawned task the new task id
+    /// is scoped, so anything the work `send`s nests under IT.
+    ///
+    /// Returns the new task id.
+    pub fn spawn_task<F>(self: &Arc<Self>, agent_id: &AgentId, verb: &str, work: F) -> TaskId
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        self.spawn_task_marked(agent_id, verb, work, false)
+    }
+
+    /// [`Self::spawn_task`] for a loop that must SURVIVE `shutdown_agents` — a
+    /// persister, a scheduler tick. See [`TaskTable::pending`].
+    pub fn spawn_keepalive_task<F>(
+        self: &Arc<Self>,
+        agent_id: &AgentId,
+        verb: &str,
+        work: F,
+    ) -> TaskId
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        self.spawn_task_marked(agent_id, verb, work, true)
+    }
+
+    fn spawn_task_marked<F>(
+        self: &Arc<Self>,
+        agent_id: &AgentId,
+        verb: &str,
+        work: F,
+        keepalive: bool,
+    ) -> TaskId
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        // A FORK IS A MESSAGE: the task's id is the id of a `task` row written
+        // here, so every id in the kernel names a row — the counter is reached
+        // through the store, never around it. Python `Kernel.spawn_task`.
+        let parent = current_task();
+        let mut row = Map::new();
+        row.insert("kind".to_string(), Value::from("task"));
+        row.insert("verb".to_string(), Value::from(verb));
+        row.insert("parent".to_string(), Value::from(parent.map(TaskId::get)));
+        let task_id = TaskId(
+            self.rows_put(agent_id, row)
+                .expect("a minted task row id is unused"),
+        );
+        let handle = TaskHandle::new();
+        self.tasks
+            .register_fork(&task_id, agent_id, verb, parent, handle.clone(), keepalive);
+
+        let cancel = handle.cancel_signal();
+        let killed = handle.killed_flag();
+        // A FORK ACTS AS WHOEVER FORKED IT — a task an agent's code spawns is
+        // that agent's. `tokio::spawn` inherits no task-locals, so the identity
+        // the gate reads would be dropped at the spawn and every send the fork
+        // made would arrive as OPERATOR — ungated, and attributed to nobody.
+        let sender = crate::send::current_sender();
+        let origin = crate::send::current_origin();
+        // A fork started inside the kernel's own ledger flush is silent too
+        // (python copies `_state_quiet` into every task).
+        let quiet = crate::send::state_quiet();
+        let guard = ForgetOnDrop {
+            kernel: Arc::clone(self),
+            id: task_id,
+        };
+        let tid = task_id;
+        tokio::spawn(async move {
+            let _guard = guard;
+            let scoped = CURRENT_TASK.scope(
+                tid,
+                CURRENT_KILLED.scope(
+                    killed,
+                    crate::send::CURRENT_SENDER.scope(
+                        sender,
+                        crate::send::CURRENT_ORIGIN.scope(origin, async move {
+                            tokio::select! {
+                                biased;
+                                _ = cancel.notified() => {}
+                                _ = work => {}
+                            }
+                        }),
+                    ),
+                ),
+            );
+            crate::send::STATE_QUIET.scope(quiet, scoped).await;
+        });
+        task_id
+    }
+
+    /// Kill a task AND ITS SUBTREE — children first, like killing a process
+    /// group. Two-phase, mirroring SIGTERM → SIGKILL:
+    ///
+    /// ① `on_cancel` — each agent's bundle hook releases the REAL resources it
+    ///    holds for that task (an OS subprocess, a PTY, a socket). Dropping a
+    ///    future frees NONE of those. Nothing is stopped in this phase, so no
+    ///    handler can wake mid-walk and observe a half-killed group.
+    /// ② stop — the tasks are dropped leaves-up, synchronously.
+    ///
+    /// Returns `{cancelled, killed:[task_id]}`. An unknown or already-finished
+    /// id is not in the table → `{"cancelled": false, "killed": []}`: cancel
+    /// fails honestly, it never pretends. A kernel service task
+    /// ([`TaskTable::service_verb`]) is refused, and left alive.
+    ///
+    /// Every hook runs AS ITS OWN AGENT (audit G-3) — see the loop below.
+    pub async fn cancel_task(self: &Arc<Self>, task_id: &TaskId) -> Value {
+        let root = self.root().map(|r| r.id.clone());
+        if let Some(verb) = root
+            .as_ref()
+            .and_then(|r| self.tasks.service_verb(task_id, r))
+        {
+            let mut r = crate::refusal::refusal_hint(
+                crate::refusal::BAD_ARG,
+                format!(
+                    "cancel: task {task_id} ({verb}) is a kernel service task — not cancellable"
+                ),
+                "it runs for the life of the kernel and stays listed in ps; kernel_stop ends it",
+            );
+            crate::refusal::with(&mut r, "arg", json!("task_id"));
+            return r;
+        }
+        let Some(ids) = self.tasks.begin_cancel(task_id, root.as_ref()) else {
+            return json!({"cancelled": false, "killed": []});
+        };
+        // ① SIGTERM — hooks first, subtree-wide, while everything is still alive.
+        for tid in &ids {
+            let Some(agent_id) = self.tasks.agent_of(tid) else {
+                continue;
+            };
+            let Some(agent) = self.agents.get(&agent_id).map(|e| Arc::clone(&e)) else {
+                continue;
+            };
+            let Some(hm) = agent.handler_module.as_deref() else {
+                continue;
+            };
+            let Some(bundle) = self.bundles.get(hm) else {
+                continue;
+            };
+            // A hook that fails is logged and the kill still happens: cancel is
+            // not refusable. C87: python's exact stdout line (`_agent.py:2858-
+            // 2859`, `print(f"  [cancel] {self.id} bundle on_cancel raised:
+            // {e}")`).
+            //
+            // AS THE AGENT ITSELF, on every path that kills the task — the
+            // `cancel` verb (inside the root's dispatch), an item's own deadline,
+            // `shutdown_agents` (audit G-3, owner 2026-10-03): an emit on its own
+            // inbox is ungated, every other send is gated as this agent. The verb
+            // path used to run it as the ROOT, so a non-top-level agent's
+            // own-inbox emit (ai_core's final `status done`) was gated root →
+            // agent and dropped; the deadline path ran it as the operator.
+            let hook = bundle.on_cancel(&agent.id, tid, self);
+            if let Err(e) = crate::send::as_agent(&agent.id, hook).await {
+                println!("  [cancel] {} bundle on_cancel raised: {e}", agent.id.0);
+            }
+        }
+        // ② SIGKILL — leaves-up, no await in the loop.
+        let killed = self.tasks.abort_subtree(&ids);
+        json!({"cancelled": true, "killed": killed})
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests;
+
+#[cfg(test)]
+mod hook_identity_tests;

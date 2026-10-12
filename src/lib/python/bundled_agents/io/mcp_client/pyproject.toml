@@ -1,0 +1,19 @@
+[project]
+name = "fantastic-mcp-client"
+version = "0.1.0"
+description = "mcp_client: one remote MCP server (Streamable HTTP, protocol 2026-07-28) as an agent — its tools are the agent's verbs."
+requires-python = ">=3.11"
+dependencies = ["fantastic-ai-core", "httpx"]
+
+# The key is a credential-store ref (`credentials: {store, ref}`, field `api_key`),
+# read per request as an AI backend reads its key (`ai_core/credentials.py`).
+
+[project.entry-points."fantastic.bundles"]
+mcp_client = "mcp_client.tools"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mcp_client"]

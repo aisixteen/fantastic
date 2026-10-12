@@ -1,0 +1,12 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint (the
+# plug names those). Live: the BACKEND plug.
+id: dev_surface
+group: canvas
+title: "an AI builds a reactive dev surface — controls, logs, live app, status — cross-wired"
+runner: probe.py
+costs: turns
+limits:
+  # the AI's time; cut to fit the runner's 15-minute hard stop (canvas_live.budget)
+  total_seconds: 900
+  quiet_seconds: 30
+env: {}

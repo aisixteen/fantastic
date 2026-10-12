@@ -1,0 +1,391 @@
+//! Bridge authorization — base types + the two rule registries (`ingress`/`egress`).
+//!
+//! Two independent, TYPED rules govern a leg, mirrored on the wire and enforced on
+//! the RECEIVER:
+//!   - an INGRESS rule (the inbound FILTER) — [`ingress::resolve`] → `authorize`,
+//!     consulted at the read-loop choke point before an inbound `call` dispatches.
+//!   - an EGRESS rule (the outbound DECORATOR) — [`egress::resolve`] → `credential`,
+//!     consulted by `forward` to stamp this leg's token on the frame ENVELOPE (never
+//!     the dispatched payload — the target never sees it).
+//!
+//! Each rule is typed in the record (`{"type": <name>, "env": <var>}`) and resolved
+//! BY NAME from a registry — the [`ingress`] and [`egress`] modules, each a folder
+//! of one-rule-per-file plus a `mod.rs` importer that registers names. Add a rule =
+//! drop a file + one registry arm; the engine never changes. The record carries
+//! `ingress_rule`/`egress_rule` (symmetric), or the `auth` shorthand (sets
+//! both sides). Rules are TRANSITIONAL (inline plumbing), not invocational (agents).
+
+use fantastic_bundle::{py_repr_value, py_truthy};
+use serde_json::{json, Value};
+
+pub mod egress;
+pub mod ingress;
+
+/// One inbound request the peer is asking this leg to perform locally.
+pub struct Action<'a> {
+    /// `"call"` (gated) | `"watch"` | `"unwatch"`.
+    pub kind: &'a str,
+    /// The local agent id the peer addressed.
+    pub target: &'a str,
+    /// `payload["type"]` — the verb requested (e.g. `"reflect"`).
+    pub verb: &'a str,
+    /// The `auth_token` the peer attached to this call on the frame ENVELOPE, if any.
+    pub token: Option<&'a str>,
+}
+
+/// Everything a refusal carries — the denial half of python's `Decision`,
+/// field for field.
+///
+/// It used to be a bare `String`, so a rule could state a fact and nothing
+/// else: every gate that received one invented its own `hint` at the call site
+/// (the fs gate said "the fs edge is sealed" for whichever leg called it) and
+/// the three runtimes drifted into three vocabularies for the same `unauthorized`
+/// code. The rule KNOWS why it refused and how to open the edge; that knowledge
+/// travels with the verdict instead of being guessed downstream.
+#[derive(Debug, Clone, Default)]
+pub struct Denial {
+    /// One line a person reads — the `error` field on the wire.
+    pub reason: String,
+    /// The repair: what to do instead. Empty ⇒ omit the field.
+    pub hint: String,
+    /// A doc pointer (readme key). Empty ⇒ omit the field.
+    pub see: String,
+}
+
+impl Denial {
+    /// A denial that states only the reason.
+    pub fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+            hint: String::new(),
+            see: String::new(),
+        }
+    }
+
+    /// …plus the repair. A refusal that cannot be acted on costs the same as no
+    /// reply.
+    #[must_use]
+    pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
+        self.hint = hint.into();
+        self
+    }
+
+    /// …plus a doc pointer.
+    #[must_use]
+    pub fn with_see(mut self, see: impl Into<String>) -> Self {
+        self.see = see.into();
+        self
+    }
+
+    /// The wire shape every inbound gate answers a denial with. Built HERE so no
+    /// call site has to remember the key order or invent the teaching half — the
+    /// fs gate used to bolt on a hint claiming "the fs edge" for whichever leg
+    /// had called it.
+    #[must_use]
+    pub fn to_refusal(&self) -> Value {
+        let mut out = json!({ "error": self.reason, "reason": "unauthorized" });
+        let obj = out.as_object_mut().expect("json! object");
+        // Empty ⇒ ABSENT, not `""` — the same rule the kernel's `refusal`
+        // follows, so a caller tests for the key, not for an empty string.
+        if !self.hint.is_empty() {
+            obj.insert("hint".to_string(), Value::String(self.hint.clone()));
+        }
+        if !self.see.is_empty() {
+            obj.insert("see".to_string(), Value::String(self.see.clone()));
+        }
+        out
+    }
+}
+
+/// An ingress rule's verdict on an [`Action`].
+pub enum Decision {
+    /// Permit the inbound action — dispatch `kernel.send`.
+    Allow,
+    /// Refuse it; the gate replies `{error: reason, reason:"unauthorized",
+    /// hint?, see?}` — forwarding the [`Denial`]'s fields, never inventing its
+    /// own.
+    Deny(Denial),
+}
+
+/// The inbound FILTER — decides whether the peer may perform an inbound action.
+/// Object-safe so the gate stays rule-agnostic (`Arc<dyn IngressRule>`).
+pub trait IngressRule: Send + Sync {
+    /// Authorize one inbound action.
+    fn authorize(&self, action: &Action) -> Decision;
+}
+
+/// The outbound DECORATOR — the token this leg PRESENTS on its own outbound `call`s
+/// (stamped on the frame envelope by `forward`). `None` ⇒ present nothing.
+pub trait EgressRule: Send + Sync {
+    /// The credential to present, or `None`.
+    fn credential(&self) -> Option<String>;
+}
+
+/// Default env var for the `password` rule when the record names none.
+pub(crate) const DEFAULT_TOKEN_ENV: &str = "FANTASTIC_GROUP_TOKEN";
+
+/// Normalize a rule spec `Value` to `(type_name, secret_env_key)`. python
+/// `io_bridge._base.parse_spec`: a FALSY spec (absent, null, `""`, `0`, `[]`,
+/// `{}`) is `(None, None)`, a string is `(name, None)`, an object is
+/// `(type, env)`; a null `type`/`env` is an absent one.
+///
+/// `type` and `env` are the only spellings.
+///
+/// An object with no `type` is `(None, env)` — a plain SEAL, as python resolves
+/// it. It used to be an `Err` that every caller turned into its own shape: the
+/// file gate answered a bare `{error:"rule object missing 'type'"}` and refused
+/// the write, and exec_bridge threw the same string out of `handle`.
+///
+/// MALFORMED ⇒ `(python repr of the spec, None)`: a spec that is neither a
+/// string nor an object, or an object whose `type` or `env` is not a string, is
+/// named by its own repr — a name no registry holds, so ingress SEALS on it
+/// (`DenyInbound::unknown`) and egress refuses it like any unknown name. It was
+/// an `Err` each gate worded its own way (`bridge: bad auth rule: unsupported
+/// rule spec Number(7)`), a non-string `type` read as no rule at all, and a
+/// non-string `env` as the DEFAULT variable — a malformed password rule admitted
+/// the default group token (audit W-8, 2026-10-03).
+pub(crate) fn parse_spec(spec: Option<&Value>) -> (Option<String>, Option<String>) {
+    let Some(spec) = spec else {
+        return (None, None);
+    };
+    if !py_truthy(spec) {
+        return (None, None);
+    }
+    let text = |key: &str, o: &serde_json::Map<String, Value>| match o.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => Ok(Some(s.clone())),
+        Some(_) => Err(()),
+    };
+    match spec {
+        Value::String(s) => (Some(s.clone()), None),
+        Value::Object(o) => match (text("type", o), text("env", o)) {
+            (Ok(name), Ok(env)) => (name, env),
+            _ => (Some(py_repr_value(spec)), None),
+        },
+        other => (Some(py_repr_value(other)), None),
+    }
+}
+
+/// The effective spec for ONE manifold, with the `auth` shorthand already SCOPED.
+///
+/// Rule names are manifold-scoped: a name binds to exactly one direction, so a name
+/// written into the wrong field is a loud error instead of a silent policy change.
+/// Measured 2026-08-21 (python, and this runtime had the identical defect): with bare
+/// names, `auth:"silent"` — a legitimate EGRESS policy — resolved ingress to
+/// `DenyInbound(unknown="silent")`, SEALING the leg while saying nothing; and
+/// `auth:"allow_all"` handed egress a `Silent` nobody asked for. One unscoped name
+/// against two registries with different membership is a fallback, and this kernel does
+/// not have fallbacks.
+///
+/// The per-direction field WINS and is taken as written (the author already scoped it).
+/// `auth` carries a bare STEM, and each manifold appends its own suffix — except that an
+/// inbound-only stem presents nothing outbound, which is a MEANING spelled out per stem,
+/// not a lookup miss. Doing the scoping HERE keeps `resolve` and `rule_name` unchanged:
+/// they only ever see an already-scoped spec.
+pub fn manifold_spec(primary: Option<&Value>, auth: Option<&Value>, suffix: &str) -> Option<Value> {
+    if let Some(v) = primary {
+        return Some(v.clone());
+    }
+    let spec = auth?;
+    let (name, env) = parse_spec(Some(spec));
+    let stem = name?;
+    if suffix == "_egress" && (stem == "allow_all" || stem == "deny") {
+        return Some(Value::String("silent_egress".to_string()));
+    }
+    let scoped = format!("{stem}{suffix}");
+    match env {
+        Some(e) => Some(json!({ "type": scoped, "env": e })),
+        None => Some(Value::String(scoped)),
+    }
+}
+
+/// The rule TYPE name for reflect — never surfaces the rule's config. Absent,
+/// falsy or type-less ⇒ `default`, which the CALLER supplies: `deny_ingress` for
+/// ingress (IO legs seal by default) and `silent_egress` for egress. python
+/// `rule_name`: `parse_spec(spec)[0] or default`.
+pub fn rule_name(spec: Option<&Value>, default: &str) -> String {
+    match parse_spec(spec) {
+        (Some(name), _) if !name.is_empty() => name,
+        _ => default.to_string(),
+    }
+}
+
+/// A leg's auth POSTURE for `reflect` — the rule NAMES (never their config) plus
+/// whether the leg is sealed: `{ingress_rule, egress_rule, sealed}`. python
+/// `io_bridge._base.describe`.
+///
+/// Keyed by the field you SET (read-key == write-key), so a readme-only LLM reads
+/// `ingress_rule: deny_ingress` and opens the leg with
+/// `ingress_rule: allow_all_ingress` — a direct mirror, no translation. The name
+/// is reported SCOPED whichever field it came from, the GATE's exact rule
+/// ([`manifold_spec`]): an `auth` stem always gets the suffix, so
+/// `auth: allow_all_ingress` reflects `allow_all_ingress_ingress` and `sealed`
+/// — the rule the gate resolves (unknown ⇒ deny). An ABSENT spec is the
+/// manifold's default, which already carries its suffix.
+#[must_use]
+pub fn describe(meta: &serde_json::Map<String, Value>) -> Value {
+    let ingress_scoped = meta.contains_key("ingress_rule");
+    let egress_scoped = meta.contains_key("egress_rule");
+    let ing_spec = if ingress_scoped {
+        meta.get("ingress_rule")
+    } else {
+        meta.get("auth")
+    };
+    let egr_spec = if egress_scoped {
+        meta.get("egress_rule")
+    } else {
+        meta.get("auth")
+    };
+    let ing_name = rule_name(ing_spec, "");
+    let egr_name = rule_name(egr_spec, "");
+    let ingress = if ing_name.is_empty() {
+        "deny_ingress".to_string()
+    } else {
+        scoped(&ing_name, "_ingress", ingress_scoped)
+    };
+    let egress = if egr_name.is_empty() {
+        "silent_egress".to_string()
+    } else {
+        scoped(&egr_name, "_egress", egress_scoped)
+    };
+    json!({
+        "ingress_rule": ingress,
+        "egress_rule": egress,
+        "sealed": ingress != "allow_all_ingress",
+    })
+}
+
+/// python `_base._scoped`: report the SCOPED rule name whichever field it came
+/// from — a per-direction field as written, an `auth` stem with this manifold's
+/// suffix (the gate's exact rule, so `reflect` never shows a name that resolves
+/// differently when written back into `ingress_rule`).
+fn scoped(name: &str, suffix: &str, was_scoped: bool) -> String {
+    if was_scoped {
+        return name.to_string();
+    }
+    if suffix == "_egress" && (name == "allow_all" || name == "deny") {
+        return "silent_egress".to_string();
+    }
+    format!("{name}{suffix}")
+}
+
+/// Content-blind constant-time compare given equal length (length is not secret —
+/// same posture as Python's `hmac.compare_digest`). Avoids a timing oracle without a
+/// crypto dependency.
+pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+#[cfg(test)]
+mod describe_tests {
+    use super::*;
+
+    fn posture(meta: Value) -> Value {
+        describe(meta.as_object().expect("a record"))
+    }
+
+    /// python `_base.describe`: an `auth` stem ALWAYS gets the manifold suffix —
+    /// the gate's exact rule — so `auth: allow_all_ingress` reflects the rule the
+    /// gate resolves (`allow_all_ingress_ingress`, unknown ⇒ sealed). Absent specs
+    /// are the manifold defaults, suffixed once.
+    #[test]
+    fn describe_scopes_an_auth_stem_like_the_gate() {
+        assert_eq!(
+            posture(json!({})),
+            json!({"ingress_rule": "deny_ingress", "egress_rule": "silent_egress", "sealed": true})
+        );
+        assert_eq!(
+            posture(json!({"auth": "allow_all"})),
+            json!({"ingress_rule": "allow_all_ingress", "egress_rule": "silent_egress", "sealed": false})
+        );
+        assert_eq!(
+            posture(json!({"auth": "allow_all_ingress"})),
+            json!({"ingress_rule": "allow_all_ingress_ingress",
+                   "egress_rule": "allow_all_ingress_egress", "sealed": true})
+        );
+        assert_eq!(
+            posture(json!({"ingress_rule": "allow_all_ingress"})),
+            json!({"ingress_rule": "allow_all_ingress", "egress_rule": "silent_egress", "sealed": false})
+        );
+    }
+}
+
+#[cfg(test)]
+mod malformed_spec_tests {
+    use super::*;
+    use fantastic_bundle::py_repr;
+
+    /// python `parse_spec` (audit W-8): a spec that is not a string or an object,
+    /// or whose `type`/`env` is not a string, is named by its python repr — a
+    /// name no registry holds — so ingress SEALS on it, egress refuses it, and
+    /// reflect reports it, in python's words. It was an `Err` worded per gate, a
+    /// plain seal, or (a non-string `env`) the DEFAULT token variable.
+    #[test]
+    fn a_malformed_spec_is_named_by_its_python_repr() {
+        for (spec, name) in [
+            (json!(7), "7"),
+            (json!(["allow_all_ingress"]), "['allow_all_ingress']"),
+            (json!({"type": ["x"]}), "{'type': ['x']}"),
+            (json!({"type": {"a": 1}}), "{'type': {'a': 1}}"),
+            (
+                json!({"type": "password_ingress", "env": 7}),
+                "{'type': 'password_ingress', 'env': 7}",
+            ),
+        ] {
+            assert_eq!(ingress::unknown(Some(&spec)).as_deref(), Some(name));
+            let Decision::Deny(d) = ingress::resolve(Some(&spec)).authorize(&Action {
+                kind: "call",
+                target: "t",
+                verb: "reflect",
+                token: Some("x"),
+            }) else {
+                panic!("a malformed rule must never allow: {spec}");
+            };
+            assert_eq!(
+                d.reason,
+                format!("edge sealed — unknown ingress rule {}", py_repr(name))
+            );
+            assert_eq!(
+                egress::resolve(Some(&spec)).err(),
+                Some(format!("unknown egress rule type {}", py_repr(name)))
+            );
+            let rec = json!({ "ingress_rule": spec });
+            assert_eq!(
+                describe(rec.as_object().expect("a record"))["ingress_rule"],
+                name
+            );
+            assert_eq!(
+                ingress::unknown_refusal(rec.as_object().expect("a record"), &ingress::REGISTRY),
+                Some(format!(
+                    "ingress_rule={} is not a rule this bundle implements — legal values: \
+                     allow_all_ingress, deny_ingress, password_ingress",
+                    py_repr_value(&spec)
+                ))
+            );
+        }
+        // null inside a spec is ABSENT, as it is for the whole spec.
+        assert!(ingress::unknown(Some(&json!({"type": null}))).is_none());
+        assert_eq!(
+            parse_spec(Some(&json!({"type": "password_ingress", "env": null}))),
+            (Some("password_ingress".to_string()), None)
+        );
+        // an implemented name, or no `ingress_rule`, is no refusal.
+        for rec in [
+            json!({"ingress_rule": "password_ingress"}),
+            json!({"auth": "nope"}),
+        ] {
+            assert!(ingress::unknown_refusal(
+                rec.as_object().expect("a record"),
+                &ingress::REGISTRY
+            )
+            .is_none());
+        }
+    }
+}

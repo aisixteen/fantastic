@@ -1,0 +1,5 @@
+{
+  "_note": "Runner (meta) params — sampling knobs, SEPARATE from connection (endpoint/key/model). The vllm plug copies `no_repeat_ngram_size` and `repetition_penalty` onto the vllm_backend record: the proven fix for the CoT-repetition loop (verbatim-repeat rate 48x -> 0), which does not degrade the tool envelope. The thinking budget is NOT set here: vllm_backend adapts its own per call. Copy this file to `sampling.json` (gitignored) to override a knob for a sweep. Do NOT add `min_p` (rejected 400 under speculative decoding) or presence/frequency_penalty (measured worse).",
+  "no_repeat_ngram_size": 3,
+  "repetition_penalty": 1.05
+}

@@ -1,0 +1,364 @@
+# Known, DECIDED differences. A residual is not a waiver: it is a decision with
+# an owner, a shape and a blast radius.
+#
+#   state: accepted       — the owner decided; a line matching it does not stop a
+#                           run being CLEAN, and does not count against an item's
+#                           pass — even when the item is in landed.yaml (v6).
+#   state: pending-owner  — the decision is not made. A line matching it counts
+#                           OPEN, and the run is not clean while it does.
+#
+# Two rules make a residual honest:
+#   * every residual must MATCH AT LEAST ONCE on each runtime it names. One that
+#     matches nothing is stale and FAILS the run — a residual outliving its
+#     difference is how a real regression gets a place to hide.
+#   * a line matching a PENDING residual whose items are ALL in landed.yaml is
+#     a REGRESSION, not a residual: an undecided difference cannot outlive the
+#     claim that the item landed. An ACCEPTED one stays accepted.
+
+version: 6
+#
+# v6 (2026-10-01) — the owner ACCEPTED the library-identity differences
+# (`tmp/todo.md`, parity leftovers b). R-D4-9, R-D4-12 and R-D4-10 move to the top
+# as `accepted`; R-L1-1…8 are new, each pinned to one slot. An ACCEPTED residual
+# now wins over landed.yaml (the owner decided the difference IS that runtime's
+# landed behaviour) and its lines no longer count against an item's pass.
+#   SUPERSEDED and deleted (each matched nothing once the entries above and the
+#   2026-10-01 rules existed): R-D3-1 → R-L1-8; R-D4-1 → R-L1-5; R-D4-2 → R-L1-6;
+#   R-D4-3 (its one line was the http `Connection` name slot, now R-D4-10);
+#   R-D4-4 → R-L1-2/R-L1-3/R-D4-9 (the ollama SDK's body, traceback, headers);
+#   R-D4-8 → R-L1-3/R-L1-4; R-D4-11 → R-L1-3 (no `Exception in ASGI application`
+#   remains in any capture — every traceback left is ai_core's turn-failure print);
+#   R-N2-1 → rules N2/N10 (runtime-name counts) and R-L1-7 (swift's big-int
+#   `stdout_bytes`). R-D4-6 is rust-only now: its swift matches were the stub
+#   requests N22 re-pairs. R-L1-8 is swift-only: rust's tail equals python's.
+#
+# v5 (2026-09-22) — R-D4-10 widened from `bundle_verbs/**` to every family and
+# from `[rust]` to `[rust, swift]`: the request header NAME slot is the HTTP
+# CLIENT's, wherever a case records one, and scoping it to one family left the
+# identical lines scoring REGRESSION in `kernel_verbs` and on swift. The ANCHOR
+# is what keeps it narrow, and it is unchanged. Three new entries, each pinned
+# to ONE slot: R-N2-1 (the `runtime=` word inside a `budget`/`stdout_bytes`
+# COUNT), R-D13-2 (the lone surrogate `"\udcff"` — one ledger census bucket) and
+# R-D16-3 (`bytes` present-and-null against absent in a read outcome).
+#
+# v4 — the state this file was in on 2026-09-21b.
+
+residuals:
+  # ══ v6 (2026-10-01) — OWNER-ACCEPTED LIBRARY IDENTITY ══════════════════════
+  # Decided by the owner on 2026-10-01 (`tmp/todo.md`, "parity leftovers (b)"):
+  # each difference below is the library a runtime uses — its HTTP/WS client and
+  # server, its SDK, its traceback printer, its OS/regex/JSON error text — not a
+  # behaviour of the kernel. They come FIRST so they win over the broader
+  # pending entries further down; each is pinned to its slot and nothing else.
+
+  - id: R-L1-1
+    decision: L1
+    state: accepted
+    runtimes: [rust, swift]
+    file_glob: "wire/handshakes.json"
+    # A WS handshake RESPONSE's header table: name case (`Upgrade` vs `upgrade`),
+    # count and the positions a missing header slides. Lines that name the
+    # permessage-deflate extension are NOT here — that is a negotiated CAPABILITY,
+    # still pending under R-D16-1.
+    anchor: '^(?!.*(permessage-deflate|Sec-WebSocket-Extensions)).*"where": "\$\.[^"]*#[0-9]+\.headers'
+    allowed_tail_regex: ".*"
+    items: [A13.16, A13.17, A13.18]
+    note: >
+      Measured 2026-10-01: python (uvicorn/websockets) answers the upgrade with
+      6 headers in Title-Case (`Upgrade`, `Connection`, `Sec-WebSocket-Accept`,
+      `Sec-WebSocket-Extensions`, `date`, `server: uvicorn`); rust and swift
+      answer with 5, lowercase where their HTTP stack writes names verbatim, and
+      no `server`. 45 lines on rust, 60 on swift. The accept KEY is compared (as
+      `<WS_ACCEPT>`) in every handshake, and the status line is not a header.
+      Blast radius: a handshake response header a port drops or adds hides here,
+      except the deflate extension.
+
+
+  - id: R-D4-9
+    decision: D4
+    state: accepted
+    # ACCEPTED (owner, 2026-10-01): library identity — http/ws header case and count (tmp/todo.md, parity leftovers b).
+    runtimes: [rust, swift]
+    # The stub writes one `requests.json` per provider family with the header
+    # table of every request it was sent (`e2e/parity/stubs/__init__.py:55-66`).
+    file_glob: "**/requests.json"
+    # Two alternatives, and the `where` slot decides which — nothing outside a
+    # recorded header table can match either.
+    #   1. The table's own SHAPE: its length (`headers · len`, 9 vs 6), a pair's
+    #      length, and the NAME slot `headers[i][0]`. Because the tables are
+    #      compared BY POSITION, one missing header slides every later name by
+    #      one, so `Accept-Encoding` lands opposite a credential header and the
+    #      name slot of a credential header IS part of the census (94 such lines
+    #      on rust, measured 2026-09-21b) — the old lookahead dropped exactly
+    #      those and left them unmapped.
+    #   2. The VALUE slot, as before, and only when the line names no credential
+    #      header: a credential VALUE that differs is a kernel difference, not a
+    #      client default.
+    anchor: '"where": "\$\[[0-9]+\]\.headers(\[[0-9]+\])?( · len|\[0\])"|^(?!.*[Aa]uthorization).*headers\[[0-9]+\]'
+    allowed_tail_regex: ".*"
+    items: []
+    note: >
+      The model-endpoint REQUEST header block is the HTTP CLIENT's, not the
+      kernel's. python's providers run on httpx, which sends its own default set
+      (`Host`, `Accept`, `Accept-Encoding`, `Connection`, `User-Agent:
+      python-httpx/<ver>`) in its own order; rust runs on reqwest/hyper and swift
+      on its own client, both of which send a smaller set and, because
+      `http::HeaderName` is lowercase and hyper's writer emits it verbatim,
+      cannot write a capitalised name at all. Matching the set would mean
+      claiming httpx's User-Agent and pinning its version — a library identity,
+      not a behaviour. Blast radius: a genuinely missing REQUEST header (e.g. a
+      `content-type` the kernel chooses) hides here too, and — new with the name
+      slot — so does a request header NAME the port never sends at all.
+
+  - id: R-D4-12
+    decision: D4
+    state: accepted
+    # ACCEPTED (owner, 2026-10-01): library identity — http/ws header case and count (tmp/todo.md, parity leftovers b).
+    runtimes: [rust, swift]
+    # The SAME census, in the stub's OTHER record. `stubs/__init__.py` writes the
+    # header table twice: into `requests.json` (R-D4-9) and into the `index.json`
+    # summary beside it. Only `ai_paths/stub/` and `store/stub/` reach it — 400
+    # lines each on rust, 400 on swift, every one unmapped before this entry
+    # (measured 2026-09-21b) — and `index.json` exists nowhere else, so this is
+    # R-D4-9's file_glob widened by the one file it could not name (fnmatch has
+    # no alternation).
+    file_glob: "**/stub/index.json"
+    anchor: '"where": "\$\[[0-9]+\]\.headers(\[[0-9]+\])?( · len|\[0\])"|^(?!.*[Aa]uthorization).*headers\[[0-9]+\]'
+    allowed_tail_regex: ".*"
+    items: []
+    note: >
+      Same difference, same decision, same blast radius as R-D4-9 — see its note.
+      Kept as its own entry rather than a broader glob so neither selector can
+      reach a file that is not one of the stub's two header records.
+
+  - id: R-D4-10
+    decision: D4
+    state: accepted
+    # ACCEPTED (owner, 2026-10-01): library identity — http/ws header case and count (tmp/todo.md, parity leftovers b).
+    runtimes: [rust, swift]
+    # EVERY family's `http` census, not just `bundle_verbs`: the census is
+    # written by the same recorder wherever a case records its HTTP exchange,
+    # and the difference is the CLIENT's, so scoping it to one family left the
+    # identical lines unmapped elsewhere (measured 2026-09-22 on the swift
+    # capture: 134 in `bundle_verbs`, 2 in `kernel_verbs`, and both scored
+    # REGRESSION because the files carry landed items). The ANCHOR, not the
+    # glob, is what keeps this narrow: `$.http[i].headers[j][0]` is the NAME
+    # slot of a recorded REQUEST header table and nothing else matches it.
+    file_glob: "**/*"
+    # The NAME slot of the recorded request header table (`headers[i][0]`) and
+    # nothing else. The VALUE slot is NOT covered: `headers[2][1]` is
+    # `content-length`, and 124 vs 109 there is a real body-size difference
+    # (`file_bridge/readonly_write`, measured 2026-09-21) that must stay visible.
+    # Neither is the table's LENGTH (`$.http[i].headers · len`), so a request
+    # header a port never sends at all is still a diff line.
+    anchor: '\$\.http\[[0-9]+\]\.headers\[[0-9]+\]\[0\]'
+    allowed_tail_regex: ".*"
+    items: []
+    note: >
+      `Connection` vs `connection` on the HTTP census — 136 lines on swift, 5 on
+      rust, one physical difference. Same client-library class as R-D4-9 and
+      R-D16-2: `http::HeaderName` is lowercase by construction and hyper's
+      writer emits it verbatim, so rust cannot write a capitalised request
+      header name at all, while python's client sends httpx's own casing; swift
+      lowercases for its own reasons. The SET, the ORDER and the VALUES are
+      compared as before. Blast radius: a request header whose name the kernel
+      itself chooses hides here.
+
+  - id: R-L1-2
+    decision: L1
+    state: accepted
+    runtimes: [rust, swift]
+    file_glob: "providers/ollama/*/stub/req_*.bin"
+    # The ollama SDK's request BODY, a single line: python's `ollama` client
+    # writes `stream`/`options` before `messages` and appends `"tools": []`; the
+    # ports write `messages` first and no `tools`. Line diffs come in pairs, so
+    # both shapes are named.
+    anchor: '"where": "line", "base": "\{\\"model\\":[^,]*,\\"stream\\":true,.*\\"tools\\":\[\]\}", "other": ""|"where": "line", "base": "", "other": "\{\\"model\\":[^,]*,\\"messages\\":'
+    allowed_tail_regex: ".*"
+    items: [B4.6]
+    note: >
+      Measured 2026-10-01: the two bodies are the same messages in a different
+      key order plus the SDK's empty `tools` (we never send native tools — the
+      tool grammar is raw text). Key order is never normalised (rules.yaml), so
+      this is a residual, not a rule. Blast radius: the WHOLE ollama request body
+      line — a content difference in an ollama request hides here; the same
+      prompt assembly (ai_core) is compared whole in `ai_paths` and `ctx`.
+
+  - id: R-L1-3
+    decision: L1
+    state: accepted
+    runtimes: [rust, swift]
+    file_glob: "**/kernel_log*.txt"
+    # A python-ONLY log line (`other` empty) that is part of a traceback block:
+    # the header, a `File "…", line N, in f` frame, its source line, its `^^^`
+    # marker, and the closing `SomeError: …` line.
+    anchor: '"base": "(Traceback \(most recent call last\):|  File \\"(?:[^"\\]|\\.)*\\", line [0-9]+, in (?:[^"\\]|\\.)*|    \S(?:[^"\\]|\\.)*|\s+\^+\s*|[A-Za-z_][A-Za-z0-9_.]*(Error|Exception): (?:[^"\\]|\\.)*)", "other": ""'
+    allowed_tail_regex: ".*"
+    items: [A15.1, A15.2, B2.1]
+    note: >
+      Python's `logger.exception` / `traceback.print_exc()` print the stack;
+      rust and swift print none. A port's OWN error line is an `other` line and
+      never matches, so a port that stops logging a failure at all is still a
+      line only if python's closing line differs — the traceback body itself is
+      python's runtime, not ours. 39 lines on each port, 2026-10-01.
+
+  - id: R-L1-4
+    decision: L1
+    state: accepted
+    runtimes: [rust, swift]
+    file_glob: "**/kernel_log*.txt"
+    # The JSON parser's own message after a fixed kernel prefix.
+    anchor: 'skipping malformed frame: bad text frame: '
+    allowed_tail_regex: ".*"
+    items: [A15.1]
+    note: >
+      `Expecting property name enclosed in double quotes: line 1 column 2`
+      (python's json) vs `parseFailure("expected string key at …")` (swift) and
+      serde_json's text (rust). The kernel's prefix is compared by the anchor
+      itself; only the parser's tail differs.
+
+  - id: R-L1-5
+    decision: L1
+    state: accepted
+    runtimes: [rust, swift]
+    file_glob: "bundle_verbs/create/runner_badre.json"
+    anchor: "allowed contains a broken regex '\\(unclosed': "
+    allowed_tail_regex: ".*"
+    items: [A4.5]
+    note: >
+      The regex engine's own complaint after the kernel's fixed refusal:
+      python `missing ), unterminated subpattern at position 0`, rust's regex
+      crate, swift's `The value “(unclosed” is invalid.`
+
+  - id: R-L1-6
+    decision: L1
+    state: accepted
+    runtimes: [rust, swift]
+    file_glob: "wire/*"
+    anchor: 'ws boot failed: (\[Errno [0-9]+\] Connect call failed|Connection errors: |[^"]*os error [0-9]+)'
+    allowed_tail_regex: ".*"
+    items: [A7.13]
+    note: >
+      The OS/socket library's connect-refused text after the kernel's fixed
+      `bridge: ws boot failed: ` prefix: python `[Errno 61] Connect call failed
+      ('127.0.0.1', 9)`, rust `… os error 61`, swift `Connection errors:
+      SingleConnectionFailure(…)`.
+
+  - id: R-L1-7
+    decision: L1
+    state: accepted
+    runtimes: [swift]
+    file_glob: "cli/cli/call_create_coerce_parent_kernel*"
+    # The cli's k=v coercion of `big=12345678901234567890` (and a 30-digit one):
+    # python makes an int, swift keeps a STRING, and the stdout byte count moves
+    # by the two pairs of quotes (+4).
+    anchor: '12345678901234567890|"where": "\$\.stdout(_bytes)?"'
+    allowed_tail_regex: ".*"
+    items: [C74, A14.9]
+    note: >
+      Swift's JSON holds no integer past 64 bits, so its coercion leaves the
+      digits a string. The WIRE half of D13 is gone (python refuses such a value
+      at the wire since 2026-10-01); this is the cli's argv coercion, which no
+      wire rule reaches. Scoped to the two captures that exist to test it; their
+      whole `$.stdout` field is covered too — the digits fall past the 400-char
+      excerpt a line carries, and the same text is compared line by line in the
+      `.stdout` capture beside it.
+
+  - id: R-L1-8
+    decision: L1
+    state: accepted
+    runtimes: [swift]
+    file_glob: "*"
+    anchor: "handler_module 'absent_bundle\\.tools' cannot be imported in this runtime: "
+    allowed_tail_regex: ".*"
+    items: [C24]
+    note: >
+      The tail after the kernel's fixed refusal names the loader's own error:
+      python `No module named 'absent_bundle'`, swift its bundle-registry text.
+
+
+  - id: R-C1-1
+    decision: C1
+    state: accepted
+    runtimes: [rust, swift]
+    file_glob: "*"
+    # The NUMBERS derived from the ports' one extra catalog entry (N26): the
+    # system prompt's token count, the recall budget (a field and in a recall
+    # reply), the store family's paged `bundles` walk (+1 page, so +2 completed
+    # calls per walked agent in the ledger census).
+    anchor: 'system prompt \(\d+ tok\)|<budget>\d+</budget>|"where": "\$\.budget"|\.system_tokens"|__row_census__'
+    allowed_tail_regex: ".*"
+    items: []
+    note: >
+      Owner decision A, 2026-10-04: rust and swift ship `foundation_models_backend`
+      (Apple's on-device model), python does not. Measured: +6 tokens on every
+      system prompt, budgets -6, +2 completed calls per agent the store family
+      pages with `bundles` and `limit 2`.
+
+
+  - id: R-L1-9
+    decision: L1
+    state: accepted
+    runtimes: [rust, swift]
+    file_glob: "bridges/bridges/peer_frames.json"
+    anchor: 'event.{1,12}open.{1,12}headers'
+    allowed_tail_regex: ".*"
+    items: []
+    note: >
+      Owner 2026-10-04: the ws CLIENT's upgrade request headers are its library's
+      (python's websockets sends `user-agent` and offers permessage-deflate; swift
+      writes `connection: upgrade` lowercase). Pinned to the peer's `open` event.
+
+
+  # ── D3: python names its exception classes; the ports have none ──
+
+  # ── D4: a library's own text, which cannot be reproduced without the library ──
+  - id: R-D4-6
+    decision: D4
+    state: pending-owner
+    runtimes: [rust]
+    file_glob: "ai_paths/**"
+    anchor: "timeout"
+    allowed_tail_regex: "^-1(\\.0)?$"
+    items: [C30]
+    note: "`-1` vs `-1.0`: a typed timeout rendered by two number formatters."
+
+
+  # ── D6: python quirks the ports mirror, or pin ──
+
+
+  # ── D13 / D14 / D16 ──
+
+  - id: R-D13-1
+    decision: D13
+    state: pending-owner
+    runtimes: [swift]
+    file_glob: "**/*"
+    anchor: "123456789012345678901234567890|NaN|nan|inf|udcff"
+    allowed_tail_regex: ".*"
+    items: [C74, C18, A13.11, A14.9]
+    note: >
+      `serde_json::Value` has no arbitrary precision and swift's JSON turns an
+      over-Int64 int into a double and a non-finite double into null.
+
+  - id: R-D16-1
+    decision: D16
+    state: accepted   # owner 2026-10-04: transport-library defaults, accepted
+    runtimes: [rust, swift]
+    file_glob: "wire/**"
+    anchor: "server|permessage-deflate|Sec-WebSocket-Extensions"
+    allowed_tail_regex: ".*"
+    items: [A13.17, A13.18, A13.7, A13.8]
+    note: >
+      uvicorn/websockets defaults python gets for free: `server: uvicorn` on
+      every response, permessage-deflate, 20s ping / 20s pong.
+
+  # ── already decided ──
+
+  # ── new in this harness ──
+
+  # ── new 2026-09-20: transport-library header sets, PTY chunk boundaries ──
+
+  # ── new 2026-09-22: three BY-DESIGN differences, each pinned to one slot ──
+
+  # ── new 2026-09-21: the `http` census carries the client's header NAMES ──

@@ -1,0 +1,169 @@
+# Test spec for `configs/two_sided_gate.yaml` — WHAT THIS SUITE ASSERTS.
+# The kernel config it runs against is a separate, deployable file; nothing
+# test-specific may leak into it.
+config: two_sided_gate.yaml
+
+name: two_sided_gate
+description: >
+  An edge exists only if BOTH halves grant it — the SENDER's `can_call` (egress)
+  and the TARGET's `callable_by` (ingress) — and a denial names the half that
+  refused. The roster is a TRUTH TABLE over those two halves: one `caller`, and
+  one callee per quadrant, named for which half the manifest declares (the
+  denial then names the OTHER one). Everything is a `file_bridge` opened at its
+  own io leg, so the call gate is the only gate that can refuse: a sealed leg
+  denies with the same `reason: unauthorized` and NO `side`, which would make a
+  seal indistinguishable from an egress refusal.
+
+requirements: [TSG-1, TSG-2, TSG-3, TSG-4, TSG-5, TSG-6]
+
+expect:
+  hydration: ok
+  reboot: true
+  closed_roster_sender: caller
+  steps:
+    - name: both halves declared — the edge exists
+      reach: {from: caller, to: both_grant, send: {type: list, path: ""}}
+      expect: {allow: true}
+
+    - name: the caller's half alone is refused BY THE CALLEE
+      reach: {from: caller, to: only_caller_grants, send: {type: list, path: ""}}
+      expect: {allow: false, side: ingress}
+
+    - name: the callee's half alone never leaves the SENDER
+      reach: {from: caller, to: only_callee_grants, send: {type: list, path: ""}}
+      expect: {allow: false, side: egress}
+
+    - name: neither half — egress is decided first
+      reach: {from: caller, to: neither_grants, send: {type: list, path: ""}}
+      expect: {allow: false, side: egress}
+
+    - name: a verb the caller was not granted dies on the caller's half
+      reach: {from: caller, to: both_grant, send: {type: mkdir, path: refused_at_egress}}
+      expect: {allow: false, side: egress}
+
+    - name: a verb the callee does not accept dies on the callee's half
+      reach: {from: caller, to: callee_narrows_verbs, send: {type: mkdir, path: refused_at_ingress}}
+      expect: {allow: false, side: ingress}
+
+    - name: the verb BOTH halves name still crosses the narrowed edge
+      reach: {from: caller, to: callee_narrows_verbs, send: {type: list, path: ""}}
+      expect: {allow: true}
+
+    - name: the edge is one-way — the reverse direction was never declared
+      reach: {from: both_grant, to: caller, send: {type: list, path: ""}}
+      expect: {allow: false, side: egress}
+
+    - name: a roster agent reaches not even its loader without a grant
+      reach: {from: caller, to: gate_loader, send: {type: reflect}}
+      expect: {allow: false, side: egress}
+
+    # ── the SWEEPS: reconciliations, not hand-listed probes ──────
+    #
+    # A declared list can only confirm the edges its author thought of. These
+    # walk what the manifest ACTUALLY declares, so a grant somebody added and
+    # forgot to assert is still probed.
+
+    - name: every declared triple reconciles verb-by-verb with what a caller gets
+      reconcile_grants: {min_probes: 6, payloads: {list: {path: ""}, mkdir: {path: sweep_probe}}}
+      because: TSG-3
+
+    - name: nothing rides along — the reachable set is self plus declared
+      sweep_undeclared: {verbs: [list, reflect], payloads: {list: {path: ""}}}
+      because: TSG-4
+
+    # ── the LADDER: each half is independently necessary ─────────
+    #
+    # THE CASE THAT FORCED THE STEPS DSL. A flat edge list states a verdict; it
+    # cannot state a CAUSE. Opening one half at a time and watching the denial
+    # MOVE from egress to ingress is what proves the second half was refusing
+    # independently the whole time — invisible behind the first.
+
+    - name: "rung 0 — neither half: refused, and egress answers FIRST"
+      reach: {from: caller, to: neither_grants, send: {type: list, path: ""}}
+      expect: {allow: false, side: egress}
+      because: TSG-1
+
+    - name: the refusal is not a quiet no-op — the write it carried never ran
+      reach: {from: caller, to: neither_grants, send: {type: mkdir, path: never_created}}
+      expect: {allow: false}
+      because: TSG-2
+    - name: and the callee's handler never ran behind the egress denial
+      operator: {to: neither_grants, send: {type: list, path: ""}}
+      expect: {not_contains: {files.*.name: never_created}}
+      because: TSG-2
+
+    - name: "rung 1 — the SENDER's half only: still refused, denial MOVED to ingress"
+      grant: {agent: caller, field: can_call, to: neither_grants, verbs: [list]}
+    - reach: {from: caller, to: neither_grants, send: {type: list, path: ""}}
+      expect: {allow: false, side: ingress}
+      because: TSG-2
+
+    - name: "rung 2 — both halves: only now does the edge exist"
+      grant: {agent: neither_grants, field: callable_by, to: caller, verbs: [list]}
+    - reach: {from: caller, to: neither_grants, send: {type: list, path: ""}}
+      expect: {allow: true}
+      because: TSG-1
+
+    # ── the repair path: a peer cannot supply the missing half ───
+    #
+    # Authority is the grant. An agent editing its OWN can_call to reach further is
+    # refused: it holds no `update_agent` on the root — and the refusal is then
+    # re-probed for EFFECT, not inspected as a field: an agent's denied attempt to raise its
+    # own grant must leave the edge shut.
+
+    - name: a roster agent cannot grant itself the half it lacks
+      reach:
+        from: only_callee_grants
+        to: kernel
+        send:
+          type: update_agent
+          id: only_callee_grants
+          can_call: {both_grant: [list]}
+      expect: {allow: false}
+      because: TSG-5
+    - name: and the edge it tried to open is still shut
+      reach: {from: only_callee_grants, to: both_grant, send: {type: list, path: ""}}
+      expect: {allow: false, side: egress}
+      because: TSG-5
+
+    - name: the operator CAN supply it, and the same edge opens
+      grant: {agent: only_callee_grants, field: can_call, to: both_grant, verbs: [list]}
+    - grant: {agent: both_grant, field: callable_by, to: only_callee_grants, verbs: [list]}
+    - reach: {from: only_callee_grants, to: both_grant, send: {type: list, path: ""}}
+      expect: {allow: true}
+      because: TSG-5
+
+    # ── a lateral grant must not silently close the others ──
+    #
+    # `update_agent` REPLACES a field rather than merging it, so a bare
+    # `{other: verbs}` would drop every other grant off the live record. The
+    # runner's `grant` step merges; this asserts the merge actually held.
+
+    - name: after a lateral grant the declared edges still work
+      reach: {from: caller, to: both_grant, send: {type: list, path: ""}}
+      expect: {allow: true}
+      because: TSG-6
+
+    # ── a reboot re-applies the MANIFEST, which owns the whole field ──
+    #
+    # THE MANIFEST IS TRUTH; a store is only a MEDIUM. The record IS persisted and
+    # IS hydrated — but `static_loader.boot` then writes each declared field back
+    # over the hydrated record, and `update_agent` REPLACES a named field rather
+    # than merging it. So a lateral edge the yaml does not declare is gone after a
+    # reboot, while everything the yaml declares comes back exactly. A durable
+    # roster change is a manifest edit, not a runtime `update_agent`.
+
+    - name: a reboot re-applies the manifest over the hydrated record
+      reboot: {}
+    - name: the narrowed edge the manifest declares survives the re-apply
+      reach: {from: caller, to: callee_narrows_verbs, send: {type: list, path: ""}}
+      expect: {allow: true}
+      because: TSG-6
+    - name: and every edge the manifest declares is back
+      reach: {from: caller, to: both_grant, send: {type: list, path: ""}}
+      expect: {allow: true}
+      because: TSG-1
+    - name: but the runtime-only edge is NOT — the manifest never declared it
+      reach: {from: caller, to: neither_grants, send: {type: list, path: ""}}
+      expect: {allow: false, side: egress}
+      because: TSG-6

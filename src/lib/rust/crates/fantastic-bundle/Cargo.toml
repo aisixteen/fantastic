@@ -1,0 +1,12 @@
+[package]
+publish = false
+name = "fantastic-bundle"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Python-format helpers shared by every fantastic_canvas Rust bundle: CPython repr/str/truthiness/json.dumps/int()/OSError text."
+
+[dependencies]
+serde_json = { workspace = true }
+# `strerror_r` — CPython's OSError text is the platform C library's message.
+libc = { workspace = true }

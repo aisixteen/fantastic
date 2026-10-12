@@ -1,0 +1,18 @@
+# WHAT to measure and HOW LONG to allow. Never a model, an endpoint, a key
+# or a backend name — those live in e2e/backends/, so this same file runs
+# against any plug and the results stay comparable.
+id: self_complete
+group: agentic_advanced
+title: it finishes a small task and ENDS its chain with an explicit done call
+runner: probe.py
+# Done is an explicit call in every runtime (the nudge reminds a silent
+# turn once), so the claim is cross-runtime.
+runtimes: [python, rust, swift]
+costs: turns
+limits:
+  idle_seconds: 60
+  max_turns: 12
+  no_progress_turns: 32
+  turn_chars: 60000
+  turn_seconds: 300
+env: {}

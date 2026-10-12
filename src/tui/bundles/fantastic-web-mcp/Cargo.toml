@@ -1,0 +1,22 @@
+[package]
+name = "fantastic-web-mcp"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+publish = false
+description = "The MCP leg as an ordinary bundle, built OUTSIDE the kernel tree: an agent (`web_mcp.tools`) plus the carrier-agnostic protocol core every MCP carrier calls."
+
+# Deliberately a crate of its own, next to the shell rather than inside
+# `src/lib`: it is the proof that the kernel is extensible from outside — every
+# API it touches is the kernel's public surface, and `src/lib` is not edited.
+[dependencies]
+fantastic-kernel = { path = "../../../lib/rust/crates/fantastic-kernel" }
+async-trait = "0.1"
+serde_json = { version = "1", features = ["preserve_order"] }
+tokio = { version = "1.40", features = ["sync", "time"] }
+
+[dev-dependencies]
+fantastic-core = { path = "../../../lib/rust/crates/bundles/fantastic-core" }
+fantastic-file = { path = "../../../lib/rust/crates/bundles/fantastic-file" }
+tempfile = "3"
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "sync", "time"] }

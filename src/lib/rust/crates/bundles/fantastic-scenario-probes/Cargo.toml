@@ -1,0 +1,20 @@
+[package]
+publish = false
+name = "fantastic-scenario-probes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Stateful fixture agents the shared e2e scenarios name. TEST-ONLY — compiled in behind a feature, never in a default build."
+
+[dependencies]
+fantastic-bundle = { path = "../../fantastic-bundle" }
+fantastic-kernel = { path = "../../fantastic-kernel" }
+async-trait = { workspace = true }
+serde_json = { workspace = true }
+# `getentropy` — the OS CSPRNG behind python's `secrets` module.
+libc = { workspace = true }
+# `slow_probe`'s `slow`/`sleep` — the in-flight work a timeout or a boot lands on.
+tokio = { workspace = true, features = ["time"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }

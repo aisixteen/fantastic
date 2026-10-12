@@ -1,0 +1,11 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint (the
+# plug names those). Live: the BACKEND plug.
+id: deck_order
+group: canvas
+title: "an AI reads a two-language slide deck: its order and what is missing"
+runner: probe.py
+costs: turns
+limits:
+  total_seconds: 600
+  quiet_seconds: 30
+env: {}

@@ -1,0 +1,15 @@
+# Test spec for `configs/engine_smoke_unreadable_manifest.yaml` — WHAT THIS SUITE ASSERTS.
+# The kernel config it runs against is a separate, deployable file; nothing
+# test-specific may leak into it.
+config: engine_smoke_unreadable_manifest.yaml
+
+name: engine_smoke_unreadable_manifest
+description: >
+  An engine fixture, not a scenario. `static_loader` checks only the SHAPE of
+  `manifest` at write time (a non-empty path string), so a path that is missing
+  (or escapes the running dir) becomes a record; the READ happens at boot,
+  against the kernel's running dir, and the explicit re-boot is where it says so.
+
+expect:
+  hydration: boot_error
+  error_contains: "cannot read manifest"

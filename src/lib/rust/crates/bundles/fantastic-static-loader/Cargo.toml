@@ -1,0 +1,30 @@
+[package]
+publish = false
+name = "fantastic-static-loader"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Declarative YAML roster loader — hydrates the declared agents as operator at boot."
+
+[dependencies]
+# python-format helpers: repr/str/truthiness, python-canonical.
+fantastic-bundle = { path = "../../fantastic-bundle" }
+fantastic-kernel = { path = "../../fantastic-kernel" }
+# The running-dir clamp: `fs` is the one disk surface, and the cold manifest
+# read is not exempt (python does the same — static_loader imports file_bridge.fs).
+fantastic-file = { path = "../fantastic-file" }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+
+[dev-dependencies]
+# The shared agentic corpus is TEST data (`contract/`), read by the agentic
+# runner — not a manifest, so it needs no PyYAML semantics.
+serde_yaml = "0.9"
+tempfile = "3"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+# The agentic runner (tests/agentic.rs) boots the same rosters the shared corpus
+# at `contract/agentic/` declares, so it needs the bundles those manifests name.
+fantastic-exec-bridge = { path = "../fantastic-exec-bridge" }
+# `credential_store.yaml` declares a credential store (CRED-1..5); its keychain is
+# the in-memory double, so the runner never reaches the real one.
+fantastic-credential-store = { path = "../fantastic-credential-store" }

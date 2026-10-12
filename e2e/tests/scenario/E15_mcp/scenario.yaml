@@ -1,0 +1,150 @@
+# THE SCENARIO — data, one copy. Unlike E10–E14 there is NO MODEL here: the
+# "actor" is a scripted MCP client (runners/mcp.py) and every call it makes is
+# written below. What is measured is the PRODUCT BINARY's MCP face — `fantastic
+# mcp` hosting the rust kernel in-process over stdio — not a model's judgement.
+#
+# Protocol: MCP 2025-11-25 over stdio, because that is what Claude Code 2.1.280's
+# stdio client sends (measured 2026-09-22: its first frame is `initialize` at
+# 2025-11-25). No Claude Code is run by this test, ever — owner rule, TOS.
+#
+# Runs are sequential processes over ONE temp directory, so the second run
+# proves rehydration of what the first one left behind.
+#
+# Placeholders the runner fills: $NONCE (fresh per run), $ROOT (the kernel's
+# own root id, discovered from the first reflect — never spelled here).
+
+id: mcp
+title: fantastic mcp — the stdio leg, scripted end to end
+runtimes: [mcp]
+costs: free
+
+# Files the runner writes into the temp directory before the first run.
+fixture:
+  note.txt: "hello from E15 $NONCE\n"
+
+runs:
+  # ── 1 · a fresh directory: init from the blueprint, create the leg ─────────
+  - name: create
+    argv: []
+    steps:
+      - call: initialize
+        params:
+          protocolVersion: "2025-11-25"
+          capabilities: {}
+          clientInfo: {name: e15, version: "1"}
+        expect:
+          result.protocolVersion: "2025-11-25"
+          result.serverInfo.name: fantastic
+          result.capabilities.tools: present
+      - notify: notifications/initialized
+      - call: ping
+        expect: {result: present}
+      - call: tools/list
+        expect:
+          tool_names: [reflect, send]
+      # the zero-arg reflect is the kernel's own primer
+      - tool: reflect
+        args: {}
+        expect:
+          is_error: false
+          body_has_keys: [tree, bundles, readme]
+          capture_root: true
+      - tool: reflect
+        args: {target: files}
+        expect:
+          is_error: false
+          body_has_keys: [sentence]
+      # HOW TO CALL it is the kernel's `docs` (a reflect carries no verbs)
+      - tool: send
+        args: {items: [{target: kernel, payload: {type: docs, of: files}}]}
+        expect:
+          is_error: false
+          item0.status: completed
+          item0_verbs_include: [read_stream, list]
+      # a real read, through a real agent, as the leg
+      - tool: send
+        args: {items: [{target: files, payload: {type: read_stream, path: note.txt}}]}
+        expect:
+          is_error: false
+          item0.status: completed
+          text_contains: "hello from E15 $NONCE"
+      # god mode: the leg holds every verb, privileged ones included
+      - tool: send
+        args: {items: [{target: kernel, payload: {type: ps}}]}
+        expect:
+          is_error: false
+          item0.status: completed
+      # a shape error is the client's, and says how to fix it
+      - tool: send
+        args: {items: [{target: files, payload: {verb: read_stream}}]}
+        expect:
+          is_error: true
+          text_contains: "payload.type"
+      - call: no/such/method
+        expect:
+          error.code: -32601
+    after_exit:
+      exit_code: 0
+      lock_released: true
+      files_exist: [.fantastic/agents/user/agents/mcp/agent.yaml, .fantastic/memory.db]
+      # no tape, no ledger, no JSON/XML — and the kernel's execution rows stay
+      # in RAM (`kernel_memory`, owner 2026-10-09): memory.db holds AI rows only
+      files_absent: [.fantastic/messages.yaml, .fantastic/ledger.json, .fantastic/messages.xml, .fantastic/agent.json]
+      no_kernel_rows: true
+      record:
+        .fantastic/agents/user/agents/mcp/agent.yaml:
+          handler_module: web_mcp.tools
+          can_call_has: [files, exec, user, kernel]
+        .fantastic/agents/user/agents/files/agent.yaml:
+          callable_by_has: [mcp, user, exec]
+      blueprint_never_names: mcp
+
+  # ── 2 · same directory: bind to the leg, rehydrate ─────────────────────────
+  - name: rehydrate
+    argv: []
+    steps:
+      - call: initialize
+        params: {protocolVersion: "2025-11-25", capabilities: {}, clientInfo: {name: e15, version: "1"}}
+        expect: {result.protocolVersion: "2025-11-25"}
+      - notify: notifications/initialized
+      - tool: send
+        args: {items: [{target: files, payload: {type: read_stream, path: note.txt}}]}
+        expect:
+          item0.status: completed
+          text_contains: "hello from E15 $NONCE"
+    after_exit:
+      exit_code: 0
+      lock_released: true
+      no_kernel_rows: true
+      mcp_records: 1
+
+  # ── 3 · any argument is refused, not ignored ──────────────────────────────
+  - name: refuse-args
+    argv: [--can-call, files]
+    steps: []
+    after_exit:
+      exit_code: 2
+      stderr_contains: "takes no arguments"
+      lock_released: true
+
+  # ── 4 · a kernel already runs here: `fantastic mcp` ATTACHES to its socket ─
+  - name: attach
+    host_argv: [--headless]
+    argv: []
+    steps:
+      - call: initialize
+        params: {protocolVersion: "2025-11-25", capabilities: {}, clientInfo: {name: e15, version: "1"}}
+        expect: {result.protocolVersion: "2025-11-25", result.serverInfo.name: fantastic}
+      - notify: notifications/initialized
+      - tool: send
+        args: {items: [{target: files, payload: {type: read_stream, path: note.txt}}]}
+        expect:
+          item0.status: completed
+          text_contains: "hello from E15 $NONCE"
+    after_exit:
+      exit_code: 0
+      lock_held_by_host: true
+      stderr_contains: "Register it ONCE"
+      lock_released: true
+      no_kernel_rows: true
+      mcp_records: 1

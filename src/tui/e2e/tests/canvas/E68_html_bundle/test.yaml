@@ -1,0 +1,9 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint. Scripted: no model.
+id: html_bundle
+group: canvas
+title: "an html cell placed from the popup, edited through the host (set_html), bundled as a page folder (base html_agent): the bundle is a popup tile, placed again it shows the body, and a bundle edit reaches the placed instance"
+runner: probe.py
+costs: free
+limits:
+  seconds: 150
+env: {}

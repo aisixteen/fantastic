@@ -1,0 +1,8 @@
+# This test builds NO tree of its own. Both A/B arms drive the `build` fixture,
+# imported rather than copied, so the two arms differ ONLY in the task wording —
+# which is the entire measurement. See tests/agentic/build/kernel.yaml for the
+# roster that is actually constructed.
+#
+# fixture: tests/agentic/build/probe.py
+
+roster: []

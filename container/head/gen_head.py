@@ -4,8 +4,8 @@ readmes (main -> kernels -> containers) + the GitHub URL + how to drive the
 kernel. Plain (readmes in <pre> sections) + a tiny inline-JS table of contents;
 NO vendored markdown lib, no external assets.
 
-The kernel's `/` is the live agent-tree index (reflect / web_ws / web_rest — :8088
-is a reflectable/bridgeable brain kernel). This head page is served the one gated
+The kernel's `/` is a 404 — the host renders nothing of its own (:8088 is a
+reflectable/bridgeable brain kernel over web_ws / web_rest). This head page is served the one gated
 way: a read-only `file_bridge` over /opt/fantastic/head, reached at
 `/head/file/index.html` (read_stream). No env back-channel reads it off disk.
 
@@ -25,10 +25,10 @@ GITHUB = "https://github.com/Alexadar/fantastic_canvas"
 # should follow: main first, then each kernel, then the container.
 DOCS = [
     ("Main", "Root — Aisixteen Fantastic", "README.md"),
-    ("Kernels", "python kernel", "python/README.md"),
-    ("Kernels", "rust kernel", "rust/README.md"),
-    ("Kernels", "swift kernel", "swift/README.md"),
-    ("Kernels", "ts frontend kernel", "ts/readme.md"),
+    ("Kernels", "python kernel", "src/lib/python/README.md"),
+    ("Kernels", "rust kernel", "src/lib/rust/README.md"),
+    ("Kernels", "swift kernel", "src/lib/swift/README.md"),
+    ("Kernels", "ts frontend kernel", "src/lib/ts/readme.md"),
     ("Containers", "container (this image)", "container/README.md"),
 ]
 

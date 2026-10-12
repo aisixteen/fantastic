@@ -1,0 +1,7 @@
+id: rehydrate
+group: memory
+title: "a SEEDED memory store (conversation with folds and a clear-fold, grants, the kernel's rows incl. a dead letter) comes back whole on kernel_start"
+runner: probe.py
+costs: free
+limits:
+  idle_seconds: 60

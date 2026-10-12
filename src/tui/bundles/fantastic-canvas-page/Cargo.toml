@@ -1,0 +1,18 @@
+[package]
+name = "fantastic-canvas-page"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+publish = false
+description = "The canvas page (`canvas_page.tools`): the canvas app's `canvas.zip`, embedded in the binary at build time, served read-only through the `web` host's `/file/` route."
+build = "build.rs"
+
+[dependencies]
+fantastic-kernel = { path = "../../../lib/rust/crates/fantastic-kernel" }
+async-trait = "0.1"
+serde_json = "1"
+# The zip is DEFLATED (the canvas pack); only the inflater is linked.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread"] }

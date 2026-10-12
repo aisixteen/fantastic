@@ -1,0 +1,209 @@
+"""Long-running default mode: boot agents, REPL loop, signal-driven shutdown."""
+
+from __future__ import annotations
+
+import asyncio
+import shlex
+import signal
+import sys
+from typing import Any
+
+from kernel._bundles import _find_bundle_module
+from kernel._lock import FantasticLock
+
+from kernel.modes.parse import _coerce, _parse_at
+from kernel.modes.print import _print_result, _read_line
+
+
+async def _default(kernel) -> None:
+    """Compose & run the long-running default. Acquires the lock for
+    the lifetime of the process — refuses cleanly if another fantastic
+    owns this project dir.
+
+    Composition:
+      - web on disk → uvicorn binds + blocks via _block_forever
+      - tty stdin → REPL stdin loop
+      - neither → exit silently (no lock acquired)
+    """
+    web_mod = _find_bundle_module("web", ctx=kernel)
+    web_agents = (
+        [a for a in kernel.agents.values() if a.handler_module == web_mod]
+        if web_mod
+        else []
+    )
+    has_repl = sys.stdin.isatty()
+
+    if not web_agents and not has_repl:
+        return  # nothing to do — exit silently, no lock
+
+    # Lock-first — before booting (so port binds don't happen on conflict).
+    with FantasticLock():
+        # First PTY push (tty only): orient whoever lands in the terminal —
+        # human or an LLM dropped into the PTY — BEFORE boot, while the port is
+        # still unknown. The text lives in the `cli` renderer bundle; the kernel
+        # stays decoupled and just sends it a verb (the cli agent exists only
+        # when stdin is a tty, composed in main._bootstrap).
+        if has_repl:
+            (
+                await kernel.send(
+                    [{"target": "cli", "payload": {"type": "intro_booting"}}]
+                )
+            )[0]["result"]
+        # THE START SEQUENCE — the root's memory store first, then everyone. A root
+        # with no `memory_store_id` does not start: fail loud, exit non-zero.
+        started = await kernel.start(boot_all=True)
+        if isinstance(started, dict) and started.get("error"):
+            hint = started.get("hint")
+            raise RuntimeError(
+                f"{started['error']}" + (f"\n  hint: {hint}" if hint else "")
+            )
+        # The stop handlers go in BEFORE the "all booted" close / `[kernel] up`:
+        # whoever reads that line may signal at once, and a SIGTERM that landed
+        # before the handler existed took the default action — the process died
+        # with no teardown (rust closed the same window: `StopSignals::install`).
+        #
+        # Graceful-shutdown plumbing: SIGTERM / SIGINT / SIGHUP set
+        # the stop event, the `wait(FIRST_COMPLETED)` returns, and the
+        # `finally` block walks the tree calling each bundle's
+        # `on_shutdown` / `on_delete` hook so PTYs, `code serve-web`,
+        # uvicorn etc. die before the kernel exits — instead of
+        # being left as orphans for the user to clean up by hand.
+        stop = asyncio.Event()
+        # Publish the SAME event on the kernel ctx so the root-only
+        # `shutdown_kernel` verb can trigger this exact graceful path
+        # remotely (over web_rest / web_ws), not just via an OS signal.
+        kernel.shutdown_event = stop
+        loop = asyncio.get_running_loop()
+
+        def _request_stop(sig_name: str) -> None:
+            if not stop.is_set():
+                print(
+                    f"\n[kernel] {sig_name} — shutting down...",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                stop.set()
+
+        for sig_name in ("SIGINT", "SIGTERM", "SIGHUP"):
+            sig = getattr(signal, sig_name, None)
+            if sig is None:
+                continue
+            try:
+                loop.add_signal_handler(sig, _request_stop, sig_name)
+            except NotImplementedError:
+                # Windows / non-Unix loops can't install signal
+                # handlers — KeyboardInterrupt still propagates.
+                pass
+
+        # Second PTY push: the "all booted" close. Each agent already announced
+        # its OWN endpoints to cli during its boot (e.g. web sent its listening
+        # URL) — the kernel does NOT gather them. Non-tty (the container daemon)
+        # keeps the plain one-line marker so logs / smoke greps are unchanged.
+        if has_repl:
+            (await kernel.send([{"target": "cli", "payload": {"type": "booted"}}]))[0][
+                "result"
+            ]
+        else:
+            print("[kernel] up", flush=True)
+
+        tasks: list[asyncio.Task] = []
+        if web_agents:
+            tasks.append(asyncio.create_task(_block_forever()))
+        if has_repl:
+            tasks.append(asyncio.create_task(_repl_loop(kernel)))
+        stop_task = asyncio.create_task(stop.wait())
+
+        try:
+            try:
+                await asyncio.wait(
+                    [*tasks, stop_task],
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            except (KeyboardInterrupt, asyncio.CancelledError):
+                pass
+            # Whatever was still running (the other branch + stop_task
+            # if a real task finished first) — cancel and drain.
+            for t in [*tasks, stop_task]:
+                if not t.done():
+                    t.cancel()
+            await asyncio.gather(*tasks, stop_task, return_exceptions=True)
+        finally:
+            # Always-run cleanup: depth-first call each agent's
+            # `on_shutdown` / `on_delete` hook. Idempotent — `Kernel.
+            # shutdown` flips `_shutdown_complete` so the atexit
+            # safety net in main.py is a no-op when the daemon
+            # exited cleanly through here.
+            print("[kernel] tearing down agents...", file=sys.stderr, flush=True)
+            try:
+                await kernel.shutdown()
+            except Exception as e:
+                print(f"[kernel] shutdown raised: {e}", file=sys.stderr)
+            print("[kernel] down", file=sys.stderr, flush=True)
+
+
+async def _block_forever() -> None:
+    """Wait until cancelled — on an event nothing sets, so it never wakes."""
+    try:
+        await asyncio.Event().wait()
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        pass
+
+
+async def _repl_loop(kernel) -> None:
+    """Interactive stdin loop. Exits on EOF / `exit` / `quit`."""
+    while True:
+        try:
+            line = await _read_line("fantastic> ")
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+        line = line.strip()
+        if not line:
+            continue
+        if line in ("exit", "quit"):
+            break
+        if line == "list":
+            for a in kernel.list():
+                tag = " (singleton)" if a.get("singleton") else ""
+                print(f"  {a['id']}{tag}  →  {a.get('handler_module', '<root>')}")
+            continue
+        if line.startswith("add "):
+            parts = shlex.split(line[4:])
+            if not parts:
+                print("  usage: add <bundle> [k=v ...]")
+                continue
+            bundle = parts[0]
+            handler_module = _find_bundle_module(bundle, ctx=kernel)
+            if handler_module is None:
+                print(f"  unknown bundle {bundle!r}")
+                continue
+            meta: dict[str, Any] = {}
+            for p in parts[1:]:
+                if "=" in p:
+                    k2, v = p.split("=", 1)
+                    meta[k2] = _coerce(v)
+            r = kernel.create(handler_module, **meta)
+            if isinstance(r, dict) and "id" in r:
+                (await kernel.send([{"target": r["id"], "payload": {"type": "boot"}}]))[
+                    0
+                ]["result"]
+                print(f"  created {r['id']}")
+                continue
+            await _print_result(r)
+            continue
+        if line.startswith("delete "):
+            r = await kernel.delete(line[7:].strip())
+            await _print_result(r)
+            continue
+        if line.startswith("@"):
+            target, body = _parse_at(line)
+            if not target:
+                print("  usage: @<id> <text> | @<id> <verb> k=v ...")
+                continue
+            r = (await kernel.send([{"target": target, "payload": body}]))[0]["result"]
+            await _print_result(r)
+            continue
+        print(
+            f"  unknown command: {line!r}  "
+            "(try: list, add <bundle>, delete <id>, @<id> ...)"
+        )

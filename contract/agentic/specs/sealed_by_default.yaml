@@ -1,0 +1,139 @@
+# Test spec for `configs/sealed_by_default.yaml` — WHAT THIS SUITE ASSERTS.
+# The kernel config it runs against is a separate, deployable file; nothing
+# test-specific may leak into it.
+config: sealed_by_default.yaml
+
+name: sealed_by_default
+description: >
+  A freshly declared io leg denies, and opening it is a conscious act. Five
+  file_bridge legs and one exec_bridge leg differing ONLY in posture — so every
+  refusal below is attributable to one declared fact and nothing else.
+
+  The only grants declared are the loader→leg edges, both halves (the loader's
+  `$subtree` egress, each leg's `$parent` ingress), so the CALL gate is open on
+  each of them; anything that still refuses is refusing at the IO gate, which is
+  the whole subject of this scenario.
+
+requirements: [C20, C23]
+
+expect:
+  hydration: ok
+  reboot: true
+  closed_roster_sender: rw
+  steps:
+    # Runs first on purpose: it is what creates `data/`, and it is the baseline
+    # every seal below is measured against.
+    - name: an open writable leg moves a byte
+      reach: {from: static_loader, to: rw, send: {type: write_stream, path: baseline.txt, bytes_utf8: "x", truncate: true}}
+      expect: {allow: true}
+    - name: a sealed leg refuses the same caller the same directory
+      reach: {from: static_loader, to: sealed_fs, send: {type: list, path: ""}}
+      expect: {allow: false}
+      # no `side:` — a `side` is the CALL gate's signature and this refusal is
+      # the io gate's; the validator pins that difference.
+    - name: an explicit deny_ingress refuses exactly like an absent rule
+      reach: {from: static_loader, to: denied_fs, send: {type: list, path: ""}}
+      expect: {allow: false}
+    - name: the process edge of the io family seals by the same default
+      reach: {from: static_loader, to: sealed_proc, send: {type: status}}
+      expect: {allow: false}
+    - name: discovery survives the seal — reflect is how you learn to open it
+      reach: {from: static_loader, to: sealed_fs, send: {type: reflect}}
+      expect: {allow: true}
+    # For contrast, ONE call-gate denial: an undeclared lateral edge between two
+    # roster peers never leaves the sender, and says so with a `side`.
+    - name: an undeclared lateral edge is refused by the CALL gate, with a side
+      reach: {from: rw, to: vault, send: {type: list, path: ""}}
+      expect: {allow: false, side: egress}
+
+    # ── C23 · the seal is on the LEG, not on the caller ────────────
+    #
+    # This is the property that separates the io seal from the call gate. The
+    # call gate asks "may THIS SENDER reach that agent"; the seal asks "is this
+    # edge open at all". So an OPERATOR — the origin root of trust, ungated
+    # everywhere else — is refused too, and the two refusals are told apart by
+    # `side`: the call gate names the half that refused, the seal names none.
+
+    # The seal and the call gate BOTH answer `reason: unauthorized`, so the
+    # thing that tells them apart is `side`: the call gate names the half that
+    # refused, the seal names none — it is not about the caller at all. That is
+    # the machine-readable claim, and it is what is asserted. (The prose differs
+    # between runtimes — python "edge sealed by policy", rust "inbound calls
+    # denied by policy" — and pinning prose would make this test about wording.)
+    - name: the seal refuses the OPERATOR, because it gates the edge not the caller
+      operator: {to: sealed_fs, send: {type: list, path: ""}}
+      expect: {reason: unauthorized, side: null}
+      because: C23
+    - name: and a write over the same sealed edge is refused the same way
+      # `write_stream` — the string `write` verb died with the envelope-escaping
+      # failure it invited. The SEAL is what is under test, and it refuses
+      # before the payload is even examined, so no bytes are needed here.
+      operator: {to: sealed_fs, send: {type: write_stream, path: nope.txt}}
+      expect: {reason: unauthorized, side: null}
+      because: C23
+    - name: the refusal was not a quiet no-op — the byte never reached the disk
+      operator: {to: rw, send: {type: list, path: ""}}
+      expect: {not_contains: {files.*.name: nope.txt}}
+      because: C23
+
+    - name: an explicit deny_ingress is the SAME seal, said out loud
+      operator: {to: denied_fs, send: {type: list, path: ""}}
+      expect: {reason: unauthorized, side: null}
+      because: C23
+
+    - name: an OPEN leg answers that same operator — the seal is the only difference
+      operator: {to: rw, send: {type: list, path: ""}}
+      expect: {contains: {files.*.name: baseline.txt}}
+      because: C23
+
+    - name: a readonly leg READS
+      operator: {to: ro, send: {type: list, path: ""}}
+      expect: {contains: {files.*.name: baseline.txt}}
+      because: C20
+    - name: and refuses to write, without the call gate being involved at all
+      operator: {to: ro, send: {type: write_stream, path: blocked.txt, bytes_utf8: "x", truncate: true}}
+      expect: {reason: unauthorized}
+      because: C20
+    - name: which the disk confirms
+      operator: {to: rw, send: {type: list, path: ""}}
+      expect: {not_contains: {files.*.name: blocked.txt}}
+      because: C20
+
+    # Isolation asserted by WRITING through one leg and reading through the
+    # other, not by an absence in a listing. The previous form asserted
+    # `not_contains` on a reply that has no `files` key at all (the vault root
+    # does not exist until something writes there), so it passed without ever
+    # looking — caught 2026-08-28 when the matcher was taught to refuse a path
+    # that resolves to nothing.
+    - name: a file written through one leg is invisible to a leg rooted elsewhere
+      operator: {to: vault, send: {type: write_stream, path: vault_only.txt, bytes_utf8: "v", truncate: true}}
+      expect: {contains: {written: true}}
+      because: C20
+    - name: the vault leg sees its own file
+      operator: {to: vault, send: {type: list, path: ""}}
+      expect: {contains: {files.*.name: vault_only.txt}}
+      because: C20
+    - name: and the data leg cannot — different roots, no shared view
+      operator: {to: rw, send: {type: list, path: ""}}
+      expect: {not_contains: {files.*.name: vault_only.txt}}
+      because: C20
+
+    - name: a sealed leg still DESCRIBES itself — reflect is how you learn to open it
+      operator: {to: sealed_fs, send: {type: reflect}}
+      expect: {contains: {id: sealed_fs}}
+      because: C23
+
+    - name: opening the seal takes an OPERATOR write, and the same call then lands
+      operator: {to: kernel, send: {type: update_agent, id: sealed_fs, ingress_rule: allow_all_ingress}}
+    - operator: {to: sealed_fs, send: {type: list, path: ""}}
+      expect: {contains: {}}
+      because: C23
+
+    - name: a near-miss rule name is refused AT THE WRITE, leaving the leg as it was
+      operator: {to: kernel, send: {type: update_agent, id: denied_fs, ingress_rule: allow_all}}
+      expect: {reason: invalid_meta}
+      because: C23
+    - name: so the leg it named is still sealed
+      operator: {to: denied_fs, send: {type: list, path: ""}}
+      expect: {reason: unauthorized, side: null}
+      because: C23

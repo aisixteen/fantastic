@@ -1,0 +1,22 @@
+# THE CANVAS'S ONE USER, end to end. No model. One host (`fantastic --headless
+# canvas`), a headless Chrome per browser storage (a browser keeps ONE token for
+# every tab of an origin — storage, never the URL). Every host call a tab makes
+# goes through `user` (`user.forward`).
+#
+# The owner's rule checked here (for now): no token set on `user` = every tab
+# gets in, as if it gave the token; a token set (`token_sha256` on `user`) = a
+# tab must give it, else it is refused and asked for one. Single user (owner,
+# 2026-10-03): no other users, no per-user page grants, no tab sync.
+
+id: canvas_user
+title: the canvas's one user — open with no token set, the token required once set
+runtimes: [canvas_user]
+costs: free
+window: {width: 1280, height: 800}
+
+tokens: {admin: admin-token-3}
+
+runs:
+  - no-token-set             # every tab gets in: a cell placed, on disk
+  - around-from-records      # the host's `around` finds it
+  - token-set                # `user` carries a hash (set by the shell: on disk, host down): no token → the token form; the token → the canvas

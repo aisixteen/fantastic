@@ -1,0 +1,93 @@
+# Fantastic Kernel — Rust workspace.
+#
+# Each Phase-1 crate has its own Cargo.toml under crates/. See
+# ./README.md for the architecture overview and build instructions.
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/fantastic-kernel",
+    "crates/fantastic-io-bridge",
+    "crates/fantastic-bundle",
+    "crates/fantastic-cli",
+    "crates/bundles/fantastic-core",
+    "crates/bundles/fantastic-web",
+    "crates/bundles/fantastic-web-ws",
+    "crates/bundles/fantastic-web-rest",
+    "crates/bundles/fantastic-file",
+    "crates/bundles/fantastic-ram-store",
+    "crates/bundles/fantastic-py-agent",
+    "crates/bundles/fantastic-mcp-client",
+    "crates/bundles/fantastic-credential-store",
+    "crates/bundles/fantastic-static-loader",
+    "crates/bundles/fantastic-scheduler",
+    "crates/bundles/fantastic-ai-core",
+    "crates/bundles/fantastic-ollama-backend",
+    "crates/bundles/fantastic-bridge",
+    "crates/bundles/fantastic-responses-backend",
+    "crates/bundles/fantastic-anthropic-backend",
+    "crates/bundles/fantastic-vllm-backend",
+    "crates/bundles/fantastic-foundation-models-backend",
+    "crates/bundles/fantastic-cli-bundle",
+    "crates/bundles/fantastic-scenario-probes",
+    "crates/bundles/fantastic-exec-bridge",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/Alexadar/fantastic_canvas"
+
+[workspace.dependencies]
+# Async runtime — single source of truth so every crate uses the same version.
+tokio = { version = "1.40", features = ["full"] }
+async-trait = "0.1"
+
+# JSON record encoding + WS frames + reflect payloads.
+serde = { version = "1", features = ["derive"] }
+# `preserve_order` so `serde_json::Map` round-trips JSON object key
+# order — matches Python's `dict` insertion-order semantics. Without
+# it, agent.yaml fields shuffle to alphabetical (BTreeMap), making
+# cross-runtime byte-for-byte parity flaky.
+serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision"] }
+
+# Concurrent combinators. The kernel needs `join_all` for the batch send: a
+# batch must run CONCURRENTLY without `tokio::spawn`, because a spawn moves the
+# future and tokio task-locals do not cross that move — the sender/task/origin
+# scopes would be silently lost at every item.
+futures-util = "0.3"
+
+# Concurrent maps for kernel.agents + kernel.inboxes.
+dashmap = "6"
+arc-swap = "1"
+
+# HTTP + WS surfaces.
+axum = { version = "0.7", features = ["ws"] }
+tokio-tungstenite = "0.24"
+# The upgraded connection under a WS leg: hyper's `OnUpgrade` (axum re-exports
+# none of it) and the tokio adapter around the upgraded IO.
+hyper = "1"
+hyper-util = { version = "0.1", features = ["tokio"] }
+# permessage-deflate (RFC 7692), which python's websockets negotiates on every
+# WS leg. zlib-rs (pure rust) because the negotiated LZ77 window
+# (`*_max_window_bits`) needs zlib's `windowBits`, which flate2's default
+# miniz backend cannot set.
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
+# The WS client handshake's response head, read where the extension is
+# negotiated.
+httparse = "1"
+
+# Path-safety + cross-platform PID checks for the lock file.
+libc = "0.2"
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Bundle registration macro.
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }
+

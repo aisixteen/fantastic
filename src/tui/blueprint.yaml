@@ -1,0 +1,113 @@
+# THE BASE TREE a fresh store gets. Applied ONCE, at init, and only when the
+# human presses a key on the intro screen or runs `fantastic mcp`. Every later
+# run rehydrates what is on disk and never reads this file again; editing it
+# does not touch a store that already exists.
+#
+# DISK POSITION IS THE PARENT: nesting under `agents:` is what makes an agent a
+# child. No entry carries `parent_id` — the writer refuses one.
+#
+# The root is not here: the kernel creates its own root, with its own id and
+# guid. A grant that names the root writes `@root`, and the writer substitutes the
+# kernel's own root id (`bootstrap::DEFAULT_ROOT_ID`) — the id is the kernel's to
+# choose, so the blueprint never spells it.
+#
+# `mcp`, `web`, `credentials` and `user_home` are not here either: code adds
+# them under `user` (the `mcp` command, `fantastic canvas`, the key and template
+# stores).
+#
+#   <root>                     (the kernel's own; named @root in grants)
+#   ├── kernel_memory            ram_store — the KERNEL'S store: its execution rows, in RAM
+#   └── user                     the human's own face: the ONE user, everything under it
+#       ├── memory               sqlite_store at .fantastic/memory.db — THE AI store (every AI agent's rows)
+#       ├── fs_loader            static_loader; ui agents get added under here
+#       ├── store                file_bridge over .fantastic, allow: ['.'] — the kernel's provider
+#       ├── exec                 exec_bridge, allowed: ['.*'], cwd: '.', inherit_env: ["*"]
+#       └── files                file_bridge, root: '.', allow: ['.']
+#
+# EXPLICIT GRANTS ONLY: every agent is born with {$self: "*"} and nothing else,
+# so every edge below is written on both ends, by id. `exec` and `files` are
+# sealed by default: `ingress_rule: allow_all_ingress` opens them.
+
+# THE ROOT'S OWN FIELDS. The root record is the kernel's (it mints the id and
+# the guid), so these are not written at init: the shell sets each one on the
+# kernel's root at boot, only while the root does not carry it yet.
+#
+# `memory_store_id`: the kernel will not start without a memory store — its
+# ledger, dead letters and named-call dedup live there. It is `kernel_memory`, a
+# ram_store (owner 2026-10-09): every call / settle / task / ack / flush row stays
+# in RAM, so no keystroke, output replay or read touches disk. A restart loses
+# named-call dedup, dead letters from a stop and the ledger history (this run
+# only); ids stay unique (the counter is in the root record). The ledger is capped
+# at 100 000 calls (the shell sets it, `kern/host::LEDGER_CAP`).
+root:
+  memory_store_id: kernel_memory
+
+agents:
+  # THE KERNEL'S STORE — RAM only. The kernel writes as the operator; the shell
+  # reads any owner's rows as its admin (`kernel`).
+  - id: kernel_memory
+    handler_module: ram_store.tools
+    admins: [kernel]
+    callable_by: {user: "*"}
+
+  - id: user
+    handler_module: user.tools
+    can_call:
+      memory: "*"
+      fs_loader: "*"
+      store: "*"
+      exec: "*"
+      files: "*"
+      "@root": "*"
+    callable_by: {exec: "*", files: "*"}
+    agents:
+      # THE AI STORE — ONE shared SQLite file for EVERY AI agent (owner
+      # 2026-10-09): chats, folds, recall and shared rows survive restarts. Rows
+      # are keyed `<guid>|<agent>`, so agents never mix. Every AI agent is granted
+      # onto it when it is created (both ends: its `can_call[memory]`, this
+      # store's `callable_by[<ai>]`); the shell reads any owner's rows as its
+      # admin (`kernel`). The kernel's own rows are NOT here (`kernel_memory`).
+      - id: memory
+        handler_module: sqlite_store.tools
+        path: .fantastic/memory.db
+        admins: [kernel]
+        callable_by: {user: "*"}
+
+      - id: fs_loader
+        handler_module: static_loader.tools
+        manifest: .fantastic/kernel.yaml
+        callable_by: {user: "*"}
+
+      # THE STORE. The kernel persists records, the ledger and messages.xml only
+      # through a file_bridge whose root is the store dir itself; without one it
+      # says "no store wired — messages stay in RAM" and nothing survives a
+      # restart. It is found by position (anywhere under the root) and must exist
+      # before the root boots — which is why it is here, in the blueprint.
+      - id: store
+        handler_module: file_bridge.tools
+        root: .fantastic
+        # the whole store dir: without it record persistence stops at the first write
+        allow: ["."]
+        ingress_rule: allow_all_ingress
+        callable_by: {user: "*"}
+
+      - id: exec
+        handler_module: exec_bridge.tools
+        allowed: [".*"]
+        # where a command runs is the record's: the directory the user ran us in
+        cwd: "."
+        # a bare command is found on the CHILD's PATH only, never the kernel's
+        inherit_env: ["*"]
+        ingress_rule: allow_all_ingress
+        callable_by: {user: "*"}
+        can_call: {files: "*", user: "*"}
+
+      - id: files
+        handler_module: file_bridge.tools
+        root: "."
+        # a bridge is DENY-ALL at the path level: this one is the human's
+        # browser over the project, so it exposes the whole root
+        allow: ["."]
+        ingress_rule: allow_all_ingress
+        callable_by: {user: "*", exec: "*"}
+        can_call: {user: "*"}

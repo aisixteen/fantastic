@@ -1,0 +1,15 @@
+# WHAT to measure and HOW LONG to allow. Never a model, an endpoint, a key
+# or a backend name — those live in e2e/backends/. Runs on ANY backend plug.
+id: stream_stop
+group: backends
+title: "a RECEIVER stops a live stream: parts abort, nothing is sent, the turn keeps a [stopped by …] marker"
+runner: probe.py
+runtimes: [python]
+costs: turns
+limits:
+  idle_seconds: 90
+  max_turns: 4
+  no_progress_turns: 4
+  turn_chars: 60000
+  turn_seconds: 300
+env: {}
