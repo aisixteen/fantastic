@@ -78,6 +78,15 @@ export const CANVAS_CSS = `
     color: rgba(255, 255, 255, 0.7); font-size: 11px; cursor: pointer; user-select: none;
     transition: background .15s ease, color .15s ease;
   }
+  /* A VIEW'S OWN CHIPS (⚙ settings…): bigger than the frame's, easy to hit (owner 2026-10-11) */
+  .frame-head .ext {
+    display: inline-flex; align-items: center; justify-content: center;
+    min-width: 26px; height: 24px; padding: 0 4px; box-sizing: border-box; border-radius: 6px;
+    background: rgba(183, 140, 255, 0.16); border: 1px solid rgba(183, 140, 255, 0.45);
+    color: #e6dcff; font-size: 16px; line-height: 1; cursor: pointer; user-select: none;
+  }
+  .frame-head .ext:hover { background: rgba(183, 140, 255, 0.32); color: #fff; }
+  .frame-head .ext.active { background: rgba(183, 140, 255, 0.45); color: #fff; }
   .frame-head .reload:hover, .frame-head .lock:hover, .frame-head .close:hover {
     background: rgba(255, 255, 255, 0.12); color: rgba(255, 255, 255, 0.9);
   }

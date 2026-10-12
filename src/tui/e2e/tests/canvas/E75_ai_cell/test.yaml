@@ -1,0 +1,9 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint. Scripted: the vLLM MOCK (e2e/mocks), no model.
+id: ai_cell
+group: canvas
+title: "the AI cell's sunshine paths on a mock model: it knows the kernel out of the box (no lookaround), its first call reaches its canvas, it answers, queues, stops, keeps a dialog across a reload and a reopened cell, and folds once at a small window"
+runner: probe.py
+costs: free
+limits:
+  seconds: 240
+env: {}

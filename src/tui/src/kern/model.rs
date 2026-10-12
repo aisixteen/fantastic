@@ -37,6 +37,10 @@ pub struct Row {
     pub parent: Option<RowId>,
     #[serde(default)]
     pub content: Option<String>,
+    /// The generation's THINKING, kept on its answer's row (never in the model's
+    /// view): shown on demand (`t` in the AI panel).
+    #[serde(default)]
+    pub thinking: Option<String>,
 
     // ── call / task rows ─────────────────────────────────────────────────
     #[serde(default)]

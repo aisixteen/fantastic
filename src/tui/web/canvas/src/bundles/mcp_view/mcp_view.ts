@@ -1,4 +1,5 @@
 import { Host } from "../../lib.ts";
+import { canvasNode } from "../canvas/host_views.ts";
 import type { ViewBundle, ViewContext, ViewHandle } from "../view.ts";
 
 // MCP SERVERS on the canvas (owner 2026-10-08): ONE remote MCP server is ONE
@@ -37,6 +38,14 @@ const CSS = `
   .mcp-view h4 { margin: 10px 0 4px; font-size: 11px; letter-spacing: .1em; color: rgba(220,230,245,0.5); display: flex; justify-content: space-between; }
   .mcp-view h4 button { background: transparent; border: 1px solid rgba(183,140,255,0.4); color: #b78cff; border-radius: 6px; font: inherit; cursor: pointer; padding: 0 6px; }
   .mcp-view .tool { margin: 3px 0; }
+  .mcp-view .mcp-set { margin: 8px 0 10px; padding: 10px 12px; border-radius: 8px; background: rgba(183,140,255,0.08); box-shadow: inset 0 0 0 1px rgba(183,140,255,0.3);
+    display: flex; flex-direction: column; gap: 8px; font: 13px system-ui, sans-serif; }
+  .mcp-view .mcp-set label { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: rgba(220,230,245,0.65); }
+  .mcp-view .mcp-set input { background: rgba(0,0,0,0.3); border: 1px solid rgba(183,140,255,0.35); color: #fff; font: 13px ui-monospace, monospace; padding: 6px 8px; border-radius: 6px; }
+  .mcp-view .mcp-set .row { display: flex; gap: 8px; }
+  .mcp-view .mcp-set button { background: rgba(183,140,255,0.25); border: 1px solid rgba(183,140,255,0.5); color: #fff; border-radius: 8px; padding: 6px 14px; cursor: pointer; font: inherit; }
+  .mcp-view .mcp-set button.save { background: #b78cff; color: #16121f; font-weight: 700; }
+  .mcp-view .mcp-set .say { font-size: 12px; color: #d9c99a; min-height: 1em; }
   .mcp-view .tool b { color: #7ee2a8; font-weight: 600; }
   .mcp-view .skip { color: rgba(220,230,245,0.45); }
   .mcp-add { padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; font: 13px system-ui, sans-serif; color: #e5e1ee; }
@@ -75,12 +84,45 @@ export const mcpView: ViewBundle = {
   handles: [MCP_VIEW],
   // reflect (the header), boot (list again), watch (`tools_listed`); the verb
   // list is the kernel's `docs`
-  grants: (backend) => ({ [backend]: ["reflect", "boot", "watch"], kernel: ["docs"] }),
+  grants: (backend) => ({ [backend]: ["reflect", "boot", "watch"], kernel: ["docs"], [canvasNode()]: ["configure_mcp"] }),
   async mount(ctx: ViewContext): Promise<ViewHandle> {
     ensureStyle();
     const root = el("div", "mcp-view");
     ctx.mount.appendChild(root);
     const host = new Host(ctx.kernel, ctx.selfId);
+    // ⚙ SETTINGS (owner 2026-10-11): its url and key, saved and reconnected —
+    // or a reset (reconnect as it is); `configure_mcp` on this canvas's node
+    let settingsOpen = false;
+    let lastUrl = "";
+    const settings = (): HTMLElement => {
+      const box = el("div", "mcp-set");
+      box.innerHTML = `<label>url<input name="url" autocomplete="off"></label>
+        <label>key — leave empty to keep the one it has<input name="key" type="password" autocomplete="off" placeholder="unchanged"></label>
+        <div class="row"><button class="save">save &amp; reconnect</button><button class="reset">reset</button></div><div class="say"></div>`;
+      box.addEventListener("keydown", (e) => e.stopPropagation());
+      const url = box.querySelector("input[name=url]") as HTMLInputElement;
+      const key = box.querySelector("input[name=key]") as HTMLInputElement;
+      const say = box.querySelector(".say") as HTMLElement;
+      url.value = lastUrl;
+      const go = async (args: Dict, doing: string): Promise<void> => {
+        say.textContent = doing;
+        const r = (await host.callHost(canvasNode(), { type: "configure_mcp", id: ctx.backend, ...args } as never).catch((e: Error) => ({ error: e.message }))) as Dict;
+        key.value = "";
+        if (typeof r["error"] === "string") {
+          say.textContent = `✕ ${r["error"]}`;
+          return;
+        }
+        settingsOpen = false;
+        await render();
+      };
+      (box.querySelector(".save") as HTMLButtonElement).onclick = (): void => {
+        const a: Dict = { url: url.value.trim() };
+        if (key.value.trim()) a["key"] = key.value.trim();
+        void go(a, "saving and reconnecting…");
+      };
+      (box.querySelector(".reset") as HTMLButtonElement).onclick = (): void => void go({}, "reconnecting…");
+      return box;
+    };
     const render = async (): Promise<void> => {
       const r = (await host.call(ctx.backend, { type: "reflect" }).catch((e: Error) => ({ error: e.message }))) as Dict | null;
       root.replaceChildren();
@@ -88,7 +130,9 @@ export const mcpView: ViewBundle = {
         root.append(el("div", "err", `✕ ${r === null ? "no reply" : String(r["error"])}`));
         return;
       }
+      lastUrl = String(r["url"] ?? "");
       root.append(el("div", "url", String(r["url"] ?? ctx.backend)));
+      if (settingsOpen) root.append(settings());
       const srv = (r["server"] ?? {}) as Dict;
       const pv = typeof r["protocol_version"] === "string" ? ` · MCP ${r["protocol_version"]}` : "";
       root.append(el("div", "srv", `${String(srv["name"] ?? "—")} ${String(srv["version"] ?? "")}${pv}`.trim()));
@@ -116,6 +160,14 @@ export const mcpView: ViewBundle = {
     // a new listing (boot, or the server's) draws again
     const off = host.on(ctx.backend, "tools_listed", () => void render());
     return {
+      headerButtons: [{
+        id: "settings", glyph: "⚙", title: "settings — its url and key; reset reconnects", toggle: true,
+        onClick: (): boolean => {
+          settingsOpen = !settingsOpen;
+          void render();
+          return settingsOpen;
+        },
+      }],
       unmount(): void {
         off();
         root.remove();

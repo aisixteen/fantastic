@@ -87,13 +87,15 @@ test("a page bundle on the html base starts with its bundle's body; set_html mak
   assert.match(String(loadBundle(k, { name: "bad", folder: "web/bundles/bad", text: "base: html_agent\nsentence: Bad.\nhtml: [1]\n" })), /html: the body/);
 });
 
-test("an MCP server agent is drawn by its own view: url + tools, its grant reflect/boot/watch and kernel docs", async () => {
+test("an MCP server agent is drawn by its own view: url + tools, its grant reflect/boot/watch, kernel docs and configure_mcp on the node", async () => {
   const v = viewOf({ id: "mcp_x", handler_module: "mcp_client.tools", url: "https://h/mcp" });
   assert.equal(v.handler, "mcp_view.ts");
   assert.equal(v.kind, "mcp");
   const { hostViewCell } = await import("../src/bundles/canvas/canvas_agent.ts");
   const cell = hostViewCell("mcp_x", { id: "mcp_x", handler_module: "mcp_client.tools", url: "https://h/mcp" });
-  assert.deepEqual(cell.meta["can_call"], { mcp_x: ["reflect", "boot", "watch"], kernel: ["docs"] });
+  const { canvasNode } = await import("../src/bundles/canvas/host_views.ts");
+  // ⚙ settings: `configure_mcp` on this canvas's node (owner 2026-10-11)
+  assert.deepEqual(cell.meta["can_call"], { mcp_x: ["reflect", "boot", "watch"], kernel: ["docs"], [canvasNode()]: ["configure_mcp"] });
   const { toolsOf } = await import("../src/bundles/mcp_view/mcp_view.ts");
   assert.deepEqual(toolsOf({ verbs: { search: "args: q:str (req)", fetch: "args: url:str" } }), [["search", "args: q:str (req)"], ["fetch", "args: url:str"]]);
   assert.deepEqual(toolsOf({ error: "x" }), []);

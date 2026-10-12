@@ -30,9 +30,9 @@ import type { TreeNode } from "./sidebar.ts";
 import type { Pick, Presets } from "./action_popup.ts";
 import { htmlView } from "../html_agent/html_view.ts";
 import { agentViewBundle } from "../agent_view/agent_view.ts";
-import { seenHere, setCanvasNode, setHostRecords, sideOf, viewChangedFor } from "./host_views.ts";
+import { seenHere, setCanvasNode, setHostRecords, setHostSync, sideOf, viewChangedFor } from "./host_views.ts";
 import { createGlHost } from "./gl_host.ts";
-import { COLUMN, LAYOUT, THEMES, pinnedOf, placeMissing, prune, rectsOf, setPinned, setRect, stack, themeOf, writeRects } from "./layout.ts";
+import { COLUMN, LAYOUT, layoutOf, pinnedOf, placeMissing, prune, rectsOf, setPinned, setRect, stack, themeOf, themesOf, writeRects } from "./layout.ts";
 import type { Rect, Theme } from "./layout.ts";
 import type { GlHost, GlView } from "./gl_host.ts";
 
@@ -259,6 +259,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   /** host agents THIS page is creating (no NEW badge for them) */
   const placing = new Set<string>();
   setHostRecords((id) => registry.get(id));
+  setHostSync(() => syncRegistry());
   // the page cells showing host agent `agent`
   const shownBy = (agent: string): string[] =>
     everyAgent().filter((id) => {
@@ -713,7 +714,8 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     (el.querySelector(".pin") as HTMLElement).addEventListener("click", (e) => {
       e.stopPropagation();
       const v = containerNow();
-      setPinned(kernel, v, "mobile", pinnedOf(kernel, v, "mobile") === rec.id ? null : rec.id);
+      const t = themeNow();
+      setPinned(kernel, v, t, pinnedOf(kernel, v, t) === rec.id ? null : rec.id);
     });
     (el.querySelector(".lock") as HTMLElement).addEventListener("click", (e) => {
       e.stopPropagation();
@@ -814,6 +816,9 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       backend_root: r["root"],
       backend_lost: false,
       unconfigured: false,
+      // every dialog is kept from its start (no ephemeral chats)
+      kept: true,
+      ...(typeof r["dialog_name"] === "string" ? { dialog_name: r["dialog_name"] } : {}),
       template: r["template"],
       can_call: { ...aiView.grants(String(r["id"])) },
     } as unknown as Payload);
@@ -1004,19 +1009,20 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     // rect in this theme is placed by it — canvas: free space around the centre
     // of what this tab shows; mobile: the column's bottom (`layout.ts`)
     const theme = themeNow();
+    const column = layoutOf(kernel, containerNow(), theme) === "column";
     const cells = all.filter(isCell);
     let rects = rectsNow();
     if (cont !== undefined) {
       prune(kernel, cont.id, new Set([...cells.map((c) => c.id), ...registering]));
-      const other = THEMES.filter((t) => t !== theme).map((t) => rectsOf(kernel, cont.id, t));
+      const other = themesOf(kernel, cont.id).map((d) => d.name).filter((t) => t !== theme).map((t) => rectsOf(kernel, cont.id, t));
       const sized = cells.map((c) => {
         const o = other.map((m) => m[c.id]).find((x) => x !== undefined);
         return { id: c.id, size: { width: o?.width ?? 480, height: o?.height ?? 320 } };
       });
       const box = canvas.getBoundingClientRect();
       rects = placeMissing(kernel, cont.id, theme, sized, screenToWorld(box.left + box.width / 2, box.top + box.height / 2));
-      // mobile: always ONE full-width column, cells in their order
-      if (theme === "mobile") {
+      // a COLUMN theme: always ONE full-width column, cells in their order
+      if (column) {
         const col = stack(rects);
         if (JSON.stringify(col) !== JSON.stringify(rects)) writeRects(kernel, cont.id, theme, col);
         rects = col;
@@ -1026,7 +1032,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     // a tab that turns mobile looks at the column (its top, centred)
     if (theme !== themeShown) {
       themeShown = theme;
-      if (theme === "mobile") {
+      if (column) {
         view.oy = 0;
         canvas.classList.add("theme-mobile");
         applyView();
@@ -1119,9 +1125,9 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     }
     for (const aid of [...frames.keys()]) if (!seenDom.has(aid) || kernel.get(aid) === undefined) removeFrame(aid);
     // MOBILE'S PIN: the pinned cell is held on the screen's bottom
-    canvas.classList.toggle("theme-mobile", theme === "mobile" && !full);
+    canvas.classList.toggle("theme-mobile", column && !full);
     applyView();
-    pinnedId = theme === "mobile" && !full ? pinnedOf(kernel, containerNow(), "mobile") : null;
+    pinnedId = column && !full ? pinnedOf(kernel, containerNow(), theme) : null;
     for (const [id, f] of frames) {
       const on = id === pinnedId;
       if (!on && f.el.classList.contains("pinned")) {
@@ -1141,7 +1147,11 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     fullHint.hidden = !full;
     if (full) {
       const r = kernel.get(viewed)?.record() as Rec | undefined;
-      fullName.textContent = (r !== undefined ? str(r, "display_name") : undefined) ?? viewed; // as its head shows it
+      // its name: the head's, else a dialog's renamed name (an AI cell — its default
+      // is its AI's id), else its template's, else its id
+      const dn = r !== undefined ? str(r, "dialog_name") : undefined;
+      const renamed = dn !== undefined && dn !== (r !== undefined ? str(r, "backend_id") : undefined) ? dn : undefined;
+      fullName.textContent = (r !== undefined ? str(r, "display_name") ?? renamed ?? str(r, "template") : undefined) ?? viewed;
     }
     const glCount = glHost === null ? 0 : seenGl.size;
   };
@@ -1256,7 +1266,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       openSetupAt({ x: at.x + at.w + 40, y: at.y }, { ...(cell !== undefined ? { target_cell: cell } : {}), ...(ai !== undefined ? { edit_ai: ai } : {}) });
     },
     async startCoding(near) {
-      const found = (await codingAgents()).filter((a) => CODING_AGENTS.find((c) => c.name === a.name)?.section !== "host");
+      const found = (await codingAgents()).filter((a) => a.name !== "fantastic"); // a coding AGENT to help — not the shell itself
       const first = found[0];
       if (first === undefined) return toast("no coding agent found on your PATH (claude, codex, aider or opencode)");
       const at = spotOf(near);
@@ -1459,18 +1469,20 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       if (rec === undefined) return;
       const { handler, meta } = hostViewCell(id, rec);
       const viewId = `view_${crypto.randomUUID().slice(0, 8)}`;
+      // CENTRED on what the person is looking at, and the camera stays put
+      // (owner 2026-10-12: no refocus after a tree click spawns a cell)
       const w = centre();
       const ai = handler === aiView.handles[0];
+      const [width, height] = ai ? [440, 520] : [480, 360];
       registerCell(
         new Agent({
           id: viewId,
           parentId: containerNow(),
           handlerModule: handler,
-          meta: { ...meta, x: Math.round(w.x), y: Math.round(w.y), width: ai ? 440 : 480, height: ai ? 520 : 360 } as unknown as Payload,
+          meta: { ...meta, x: Math.round(w.x - width / 2), y: Math.round(w.y - height / 2), width, height } as unknown as Payload,
         }),
       );
       fresh.delete(id);
-      setTimeout(() => moveTo(viewId), 400);
     },
     fresh: (id) => fresh.has(id),
     deleteAgent,
@@ -1524,7 +1536,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
         id,
         parentId: parent,
         handlerModule: BACKGROUNDS,
-        meta: { x: Math.round(w.x), y: Math.round(w.y), width: 400, height: 620, display_name: "backgrounds",
+        meta: { x: Math.round(w.x), y: Math.round(w.y), width: 400, height: 620, display_name: "canvas theme",
           can_call: g.canCall as unknown as Json, callable_by: { $self: "*" }, user_bgs: [], hidden_stock: [], current: null, rotate: { on: false, every_s: 60 } },
       }),
     );
@@ -1607,7 +1619,6 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
         else if (p.kind === "tree") spawnPageCellAt(w, SIDEBAR_VIEW, "tree", 320, 520, "tree view");
         else if (p.kind === "backgrounds") spawnBackgroundsAt(w);
         else if (p.kind === "tips") spawnTipsAt(w);
-        else if (p.kind === "theme") void kernel.send([{ target: containerNow(), payload: { type: "theme", name: p.name } }]);
         else if (p.kind === "plugin") void spawnPluginAt(w, p.template);
         else if (p.kind === "bundle") void spawnPluginAt(w, null, p.starter);
         else if (p.kind === "instance") void spawnPluginAt(w, null, undefined, p.bundle);

@@ -29,7 +29,7 @@ def main() -> bool:
             await asyncio.sleep(1.5)
             await spot(pg, 1250, 450, "stream")
             await asyncio.sleep(1)
-            await spot(pg, 250, 700, "AI agent")
+            await spot(pg, 250, 700, "new AI agent…")
             await pg.until("!!document.querySelector('.wiz .tiles button')", 20)
             await asyncio.sleep(2)  # the loader's flush lands before any reload
             ids = lambda: pg.js("[...document.querySelectorAll('.agent-frame')].map(f=>f.dataset.id).sort()")

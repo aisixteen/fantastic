@@ -2,8 +2,21 @@ import { str } from "../../lib.ts";
 import type { Handler, Json, Kernel, Payload } from "../../lib.ts";
 import { BACKGROUND, GL_SIGNATURE } from "../canvas/background_agent.ts";
 import { STOCK, sourceOf } from "./stock.ts";
+import { STOCK_THEMES, themeDefOf, themeNameOk, themesOf } from "../canvas/layout.ts";
+import type { ThemeDef } from "../canvas/layout.ts";
 
-// THE BACKGROUNDS AGENT (owner 2026-10-09) — a page agent that manages its
+// THE CANVAS THEME AGENT (owner 2026-10-12: "rename backgrounds to canvas theme;
+// two sections, backgrounds and themes") — its view's BACKGROUNDS (below) and its
+// THEMES: the stock ones (`layout.ts` STOCK_THEMES, hideable) and the user's own
+// ({name, layout: free | column, trigger: {max_width?, min_width?} | null, note}),
+// added and edited like a background. Themes are kept on its record too:
+//
+//   user_themes    [ThemeDef] — the user's own (a stock name: replaces that one)
+//   hidden_themes  [stock names] — stock themes the user removed (`restore_themes`)
+//
+// and `use_theme` sets its view's `theme` (a name, or auto — by the triggers).
+//
+// THE BACKGROUNDS (owner 2026-10-09) — a page agent that manages its
 // view's background: a STOCK list (`stock.ts`, read-only, hideable), the USER's
 // own list (filled by the human or by an AI through `add`), a random pick and an
 // automatic one every minute. Its STATE is its record, so it survives reloads
@@ -20,7 +33,7 @@ import { STOCK, sourceOf } from "./stock.ts";
 export const BACKGROUNDS = "backgrounds.ts";
 
 /** What an AI cell (or a panel) calls on it. */
-export const BACKGROUNDS_VERBS = ["list", "set", "random", "none", "default", "delete", "restore_stock", "add", "rotate"] as const;
+export const BACKGROUNDS_VERBS = ["list", "set", "random", "none", "default", "delete", "restore_stock", "add", "rotate", "themes", "use_theme", "add_theme", "delete_theme", "restore_themes"] as const;
 
 /** The background verbs it calls. */
 const BG_CALLS = ["set_bg", "clear_bg", "default_bg", "get_bg"] as const;
@@ -36,7 +49,9 @@ export const BACKGROUNDS_README =
   "`delete {name}` removes a user background, or HIDES a stock one. " +
   "`add {name, note?, bytes}` adds a USER background: `bytes` is a GL source in the background's format (JavaScript run as new Function(THREE, scene, t, onFrame, cleanup, bytes) — see the `background` agent's readme). " +
   "Or `add {name, note?, body, sets?}`: a BODY on the stock prelude — it already defines `SET` (4 hex: field, line, mid, accent), `uniforms` (uT time, uC0..uC3 the set's colours, uNoise), GLSL helpers fbm(p), fbm2(p), hair(v,w), hairAt(v,lvl,w), vignette(p), grain(t), hash(p), and backdrop(glsl, {decl?, uniforms?, z?}) — a full-screen plane whose fragment body writes gl_FragColor (vW = world position) — and headline(); read any stock entry (`list`, then `get {name}`) for an example. " +
-  "`sets` defaults to the stock colour sets. A source that does not compile is refused, with the error; the same name replaces the old one. `get {name}` → its source.";
+  "`sets` defaults to the stock colour sets. A source that does not compile is refused, with the error; the same name replaces the old one. `get {name}` → its source. " +
+  "THEMES — where the view's cells sit: `themes` → {themes: [{name, layout, trigger, note, from}], hidden, current}. `use_theme {name}` (a name, or auto: the first whose trigger matches the tab's width). " +
+  "`add_theme {name, layout: free|column, trigger?: {max_width?, min_width?}, note?}` adds or replaces one of YOURS (a stock name replaces that stock theme). `delete_theme {name}` deletes yours, or hides a stock one; `restore_themes` brings the stock back.";
 
 interface Entry {
   name: string;
@@ -136,7 +151,47 @@ export const backgroundsAgent: Handler = async (id, payload, kernel): Promise<Js
     if (r.on) timers.set(id, setInterval(() => void random(), r.every_s * 1000));
   };
 
+  const userThemes = (): ThemeDef[] => arr<unknown>(meta["user_themes"]).map(themeDefOf).filter((d): d is ThemeDef => d !== null);
+  const hiddenThemes = (): string[] => arr<string>(meta["hidden_themes"]);
+  const view = me.parentId ?? "";
+
   switch (str(payload, "type")) {
+    case "themes": {
+      const all = themesOf(kernel, view);
+      const own = new Set(userThemes().map((d) => d.name));
+      return {
+        themes: all.map((d) => ({ ...d, from: own.has(d.name) ? "user" : "stock" })),
+        hidden: hiddenThemes(),
+        current: (kernel.get(view)?.meta["theme"] ?? "auto") as Json,
+      } as unknown as Json;
+    }
+    case "use_theme": {
+      const name = str(payload, "name") || "auto";
+      if (name !== "auto" && !themesOf(kernel, view).some((d) => d.name === name)) return { error: `canvas theme: no theme ${JSON.stringify(name)}`, reason: "not_found", hint: "`themes` names them" };
+      kernel.updateMeta(view, { theme: name } as unknown as Payload);
+      return { theme: name };
+    }
+    case "add_theme": {
+      const def = themeDefOf({ name: str(payload, "name").trim(), layout: payload["layout"], trigger: payload["trigger"] ?? null, note: str(payload, "note") || undefined });
+      if (def === null) return { error: "canvas theme: add_theme needs name (letters, digits, - _) and layout: free | column; trigger, when given, is {max_width?, min_width?}", reason: "bad_arg" };
+      kernel.updateMeta(id, { user_themes: [...userThemes().filter((d) => d.name !== def.name), def] } as unknown as Payload);
+      return { added: def.name, themes: themesOf(kernel, view).length };
+    }
+    case "delete_theme": {
+      const name = str(payload, "name");
+      if (userThemes().some((d) => d.name === name)) {
+        kernel.updateMeta(id, { user_themes: userThemes().filter((d) => d.name !== name) } as unknown as Payload);
+        return { deleted: name, from: "user" };
+      }
+      if (STOCK_THEMES.some((d) => d.name === name)) {
+        if (!hiddenThemes().includes(name)) kernel.updateMeta(id, { hidden_themes: [...hiddenThemes(), name] } as unknown as Payload);
+        return { deleted: name, from: "stock", hint: "`restore_themes` brings the stock back" };
+      }
+      return { error: `canvas theme: no theme ${JSON.stringify(name)}`, reason: "not_found" };
+    }
+    case "restore_themes":
+      kernel.updateMeta(id, { hidden_themes: [] } as unknown as Payload);
+      return { restored: STOCK_THEMES.length };
     case "boot":
       arm(); // a persisted automatic pick runs again
       return null;
@@ -248,6 +303,11 @@ export function registerBackgrounds(kernel: {
     delete: "args: name:str. Removes a user background, or hides a stock one.",
     restore_stock: "No args. Every hidden stock background back.",
     add: "args: name:str, note?:str, bytes?:str (a full GL source) | body?:str, sets?:[[name, [4 hex]]] (on the stock prelude). Adds a USER background; same name replaces.",
+    themes: "No args. {themes: [{name, layout, trigger, note, from: stock|user}], hidden, current}.",
+    use_theme: "args: name:str (a theme's name, or auto — the first whose trigger matches the tab's width). Sets the view's theme.",
+    add_theme: "args: name:str, layout:free|column, trigger?:{max_width?, min_width?} (px — when auto switches to it), note?:str. Adds or replaces one of YOURS (a stock name replaces that stock theme).",
+    delete_theme: "args: name:str. Deletes yours, or hides a stock theme.",
+    restore_themes: "No args. Every hidden stock theme back.",
   });
   kernel.setBundleReadme(BACKGROUNDS, BACKGROUNDS_README);
 }

@@ -28,6 +28,20 @@ const CHAT_CSS = `
   .chat-view .c-help-row { display:flex; gap:8px; justify-content:center; margin-top:8px; }
   .chat-view .c-help-row button { font:inherit; color:#ece9f5; background:#241f35; border:1px solid #312c40; border-radius:8px; padding:6px 12px; cursor:pointer; }
   .chat-view .c-help-row .c-help-settings { background:#b78cff; border-color:#b78cff; color:#16121f; font-weight:700; }
+  .chat-view .c-inquiry { align-self:stretch; max-width:100%; background:rgba(255,209,102,0.10); box-shadow:inset 0 0 0 1px rgba(255,209,102,0.45); color:#f3ecd6; }
+  .chat-view .c-inquiry .c-inq-head { font:600 10.5px ui-monospace, SFMono-Regular, monospace; letter-spacing:.1em; text-transform:uppercase; color:#ffd166; margin-bottom:4px; }
+  .chat-view .c-inquiry .c-inq-text { font-size:14px; white-space:pre-wrap; }
+  .chat-view .c-inquiry .c-inq-row { display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin-top:8px; }
+  .chat-view .c-inquiry .c-inq-row button { font:inherit; font-size:13px; color:#f3ecd6; background:#2a2516; border:1px solid #5a4a22; border-radius:8px; padding:6px 12px; cursor:pointer; }
+  .chat-view .c-inquiry .c-inq-row button.primary { background:#ffd166; border-color:#ffd166; color:#1e1806; font-weight:700; }
+  .chat-view .c-inquiry .c-inq-row label { font-size:13px; margin-right:6px; }
+  .chat-view .c-inquiry .c-inq-input { flex:1; min-width:120px; font:inherit; font-size:13px; color:inherit; background:#1b1810; border:1px solid #5a4a22; border-radius:8px; padding:6px 10px; }
+  .chat-view .c-inquiry .c-inq-status { font-size:12px; margin-top:6px; color:#d9c99a; }
+  .chat-view .c-inquiry.answered { opacity:.75; }
+  .chat-view .c-stats { margin-left:auto; font:11px ui-monospace, SFMono-Regular, monospace; color:rgba(220,230,245,0.6); white-space:nowrap; }
+  .chat-view .c-clear { font:11px system-ui, sans-serif; color:rgba(220,230,245,0.8); background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.14); border-radius:6px; padding:2px 9px; cursor:pointer; margin-left:8px; }
+  .chat-view .c-clear:hover { border-color:#b78cff; color:#fff; }
+  .chat-view .c-malformed { align-self:stretch; max-width:100%; text-align:left; white-space:pre-wrap; font:11.5px/1.45 ui-monospace, SFMono-Regular, monospace; color:#ffd166; }
   .chat-view .msg.notice.too-small { color:#ff8a8a; background:rgba(255,120,120,0.12); box-shadow:inset 0 0 0 1px rgba(255,120,120,0.22); }
   .chat-view .tool-block.recall .tool-verb { color:#9ad0ff; }
   .chat-view .tool-block { margin:6px 0; padding:6px 8px; border-radius:8px; background:rgba(24,26,40,0.50); box-shadow:inset 0 0 0 1px rgba(255,255,255,0.06); font-family:ui-monospace,SFMono-Regular,monospace; font-size:12px; color:#abb; }
@@ -58,6 +72,11 @@ const CHAT_CSS = `
   .chat-view .msg .spot { display:block; font-size:10px; opacity:0.6; margin-bottom:2px; font-family:ui-monospace,SFMono-Regular,monospace; }
   .chat-view .c-badge { font-size:11px; margin-left:8px; padding:1px 8px; border-radius:999px; background:rgba(255,255,255,0.08); color:rgba(220,230,245,0.75); }
   .chat-view .msg.thinking { color: #b78cff; font-style: italic; animation: c-think 1.1s ease-in-out infinite; }
+  .chat-view .c-think { padding:4px 12px; background:rgba(183,140,255,0.06); box-shadow:inset 0 0 0 1px rgba(183,140,255,0.22); color:#cbb8f0; font-style:normal; }
+  .chat-view .c-think.thinking { animation: none; }
+  .chat-view .c-think.thinking summary { animation: c-think 1.1s ease-in-out infinite; }
+  .chat-view .c-think summary { cursor:pointer; font:italic 12px system-ui, sans-serif; color:#b78cff; list-style:revert; user-select:none; }
+  .chat-view .c-think .c-think-body { white-space:pre-wrap; font-size:12.5px; line-height:1.45; color:rgba(220,210,245,0.78); margin-top:6px; max-height:320px; overflow:auto; }
   @keyframes c-think { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
   .chat-view .msg.not-sent { opacity: 0.45; text-decoration: line-through; }
   .chat-view .msg.not-sent::after { content: ' · not sent — ' attr(data-why); font-size: 10px; text-decoration: none; }
@@ -134,7 +153,7 @@ const REPLY_HEAD = /^\[reply to \d+ · ([^\]·]+?)(?: · [^\]]*)?\]/;
  *  the AI's own work. */
 export const CANVAS_SETUP =
   
-  "[canvas setup] You are an AI agent on the HOST kernel: your record, memory and calls live there. A human sees you as a CELL on a CANVAS — a web page that is a SECOND kernel, connected as a peer: its agents are `<page guid>|<agent id>` (its kernel `<page guid>|kernel`). Reflect the host first (it lists the peers), then the page. To BUILD on the canvas, pull `docs of=<page guid>|view_root` first: the view places cells, and its doc carries the panel API. A TOOL with its own panel is ONE host agent: create it with `create` on `{{node}}` — THIS canvas's host node (`create {record: {handler_module, …, view: {kind: html, bytes, calls: [the verbs its panel calls]}}}`) and show it with `place {backend_id, x, y}` on the view — the panel's grants follow from `calls`. A PYTHON agent is an instance of a BUNDLE (code in `.fantastic/bundles/<name>/`): editing the bundle's files changes EVERY instance at once; to change one alone, copy the folder to a new name first (`fantastic readme bundles`). Every user turn ends with [at X,Y], where it was typed (x grows right, y grows down).";
+  "[canvas setup] You are an AI agent on the HOST kernel: your record, memory and calls live there. A human sees you as a CELL on a CANVAS — a web page that is a SECOND kernel, connected as a peer: its agents are `<page guid>|<agent id>` (its kernel `<page guid>|kernel`). Reflect the host first (it lists the peers), then the page. To BUILD on the canvas, pull `docs of=<page guid>|view_root` first: the view places cells, and its doc carries the panel API. A TOOL with its own panel is ONE host agent: create it with `create` on `{{node}}` — THIS canvas's host node (`create {record: {handler_module, …, view: {kind: html, bytes, calls: [the verbs its panel calls]}}}`) and show it with `place {backend_id, x, y}` on the view — the panel's grants follow from `calls`. A PYTHON agent is an instance of a BUNDLE (code in `.fantastic/bundles/<name>/`): editing the bundle's files changes EVERY instance at once; to change one alone, copy the folder to a new name first (`fantastic readme bundles`). A LIVE panel — a host agent that pushes updates into its own cell (streaming to its panel) — is the python_agent STARTER: `spawn {bundle: python_agent}` on `{{node}}` makes a new bundle and one instance; its `agent.py` sends `fa.emit({type, …})`, its `panel.html` redraws on `fantastic.watch(<agent id>, ev => …)`, and its `bundle.yaml` record carries the view (`view: {kind: html, bytes_file: panel.html, calls: [<verbs>, watch]}`); show it with `place {backend_id}`. Every user turn ends with [at X,Y], where it was typed (x grows right, y grows down).";
 /** The setup as the TRANSCRIPT carries it — hidden from the bubble. */
 const SETUP_BLOCK = /\n\[canvas setup\][\s\S]*$/;
 
@@ -214,7 +233,7 @@ export const aiView: ViewBundle = {
   handles: ["ai_view.ts"],
   // Fronts a backend it never spawns; cancels a turn through the host root's
   // task table.
-  grants: (backend) => ({ [backend]: ["watch", "reflect", "history", "status", "send", "stop"], kernel: ["ps", "cancel"], [canvasNode()]: ["keep", "rename"] }),
+  grants: (backend) => ({ [backend]: ["watch", "reflect", "history", "rows", "status", "send", "stop", "context_clear"], kernel: ["ps", "cancel"], [canvasNode()]: ["rename"] }),
 
   async mount(ctx: ViewContext): Promise<ViewHandle> {
     const { kernel, mount, selfId, backend, record } = ctx;
@@ -233,6 +252,8 @@ export const aiView: ViewBundle = {
       <div class="c-footer">
         <span class="phase-pill" data-phase="idle">idle</span>
         <span class="elapsed"></span><span class="hint"></span><span class="others-hint"></span>
+        <span class="c-stats" title="the last generation's speed · the context used of the window — ~ marks an estimate (≈4 characters a token; the conversation only) until the backend reports usage"></span>
+        <button class="c-clear" title="start a new thread: the AI's view begins here (nothing is deleted — recall pages back)">clear</button>
       </div>
       <div class="c-row"><input class="c-input" placeholder="message…"><button class="c-send">send</button></div>
     `;
@@ -246,6 +267,49 @@ export const aiView: ViewBundle = {
     const elapsedEl = $<HTMLElement>(".elapsed");
     const hintEl = $<HTMLElement>(".hint");
     const othersHintEl = $<HTMLElement>(".others-hint");
+    // SPEED AND CONTEXT (owner 2026-10-11): the last generation's tok/s and the
+    // context it used of the window — from the `done` status's usage, when the
+    // backend reports it; the window alone until then
+    const statsEl = $<HTMLElement>(".c-stats");
+    let windowTokens: number | null = null;
+    let genChars = 0; // characters streamed to this cell in the current generation
+    let genStart = 0; // when its first one arrived
+    let lastRate: number | null = null; // the last generation's estimated tok/s
+    let lastPrompt: string | null = null; // the last reported prompt size, as shown
+    let lastSpeed: string | null = null; // the last generation's speed, as shown
+    let convBytes = 0; // the conversation's size (history bytes) since the last clear
+    const liveRate = (): number => Math.round(genChars / 4 / Math.max(0.25, (Date.now() - genStart) / 1000));
+    const kTok = (n: number): string => (n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : String(Math.round(n)));
+    const showStats = (detail: Dict): void => {
+      const num = (k: string): number | null => (typeof detail[k] === "number" && Number.isFinite(detail[k] as number) ? (detail[k] as number) : null);
+      const cw = num("context_window") ?? windowTokens;
+      if (cw !== null) windowTokens = cw;
+      const out = num("completion_tokens");
+      const secs = num("gen_seconds");
+      const prompt = num("prompt_tokens");
+      const bits: string[] = [];
+      // the backend's usage (`*_estimated`: its own estimate, not the provider's)
+      const est = (k: string): string => (detail[`${k}_estimated`] === true ? "~" : "");
+      if (out !== null && secs !== null && secs > 0) lastSpeed = `${est("completion_tokens")}${Math.round(out / secs)} tok/s`;
+      else if (lastSpeed === null && lastRate !== null) lastSpeed = `~${lastRate} tok/s`;
+      if (lastSpeed !== null) bits.push(lastSpeed);
+      if (prompt !== null) lastPrompt = `${est("prompt_tokens")}${kTok(prompt)}`;
+      if (cw !== null) bits.push(`${lastPrompt ?? (convBytes > 0 ? `~${kTok(convBytes / 4)}` : "—")} / ${kTok(cw)} ctx`);
+      statsEl.textContent = bits.join(" · ");
+    };
+    // CLEAR: a new thread on the same store (`context_clear`) — nothing deleted
+    $<HTMLButtonElement>(".c-clear").addEventListener("click", () => {
+      void host.call(backend, { type: "context_clear", why: "cleared from the chat" } as never).then((r) => {
+        const o = r as Dict | null;
+        if (o && typeof o["error"] === "string") addMsg("notice", `✕ ${o["error"]}`, dialogEl).classList.add("too-small");
+        else {
+          addMsg("notice", "— cleared: a new thread starts here (the earlier one is kept — recall pages back) —", dialogEl);
+          convBytes = 0;
+          lastPrompt = null;
+          showStats({});
+        }
+      });
+    });
     // STICKY BOTTOM: every change to the dialog (a message, a streamed part, a
     // tool block) scrolls it down while the reader is at the bottom; scrolled up
     // to read, it stays put until they come back down (or send).
@@ -270,44 +334,20 @@ export const aiView: ViewBundle = {
     }
     const tpl = record && typeof record["template"] === "string" ? (record["template"] as string) : "";
     $<HTMLElement>(".c-agent").textContent = tpl ? `✦ ${tpl} · ${backend}` : `${selfId} (client ${clientId})`;
-    // THE DIALOG'S STORE, in the header: `○ ephemeral` (RAM — closing the
-    // cell forgets it) with [keep], or `● kept · <name>` (the project's SQLite —
-    // it outlives the cell; click the name to rename it).
+    // THE DIALOG'S NAME, in the header (owner 2026-10-12: no ephemeral chats —
+    // every dialog is kept from its start, as in the terminal): click to rename
     if (tpl) {
       const badge = document.createElement("span");
-      badge.className = "c-badge";
-      const keepBtn = document.createElement("button");
-      keepBtn.className = "c-keep";
-      keepBtn.textContent = "keep";
-      keepBtn.title = "keep this dialog: it moves to the project's memory and outlives the cell";
-      const showKept = (name: string): void => {
-        badge.className = "c-badge kept";
-        badge.textContent = `● kept · ${name}`;
-        badge.title = "click to rename";
-        keepBtn.remove();
+      badge.className = "c-badge kept";
+      const show = (name: string): void => {
+        badge.textContent = name;
+        badge.title = "click to rename this dialog";
       };
-      if (record && record["kept"] === true) showKept(typeof record["dialog_name"] === "string" ? (record["dialog_name"] as string) : backend);
-      else {
-        badge.textContent = "○ ephemeral";
-        badge.title = "this dialog lives in RAM: closing the cell forgets it";
-      }
-      /** Keep the dialog; false (said in the dialog) when the host refused. */
-      const keep = async (): Promise<boolean> => {
-        const r = (await host.callHost(canvasNode(), { type: "keep", id: backend } as never)) as Dict;
-        if (typeof r["error"] === "string") {
-          addMsg("notice", `✕ ${r["error"]}`, dialogEl).classList.add("too-small");
-          return false;
-        }
-        kernel.updateMeta(selfId, { kept: true, dialog_name: r["name"], owns_backend: false } as never);
-        showKept(String(r["name"]));
-        return true;
-      };
-      keepBtn.onclick = (): void => void keep();
+      show(record && typeof record["dialog_name"] === "string" ? (record["dialog_name"] as string) : backend);
       badge.onclick = (): void => {
-        if (!badge.classList.contains("kept")) return;
         const input = document.createElement("input");
         input.className = "c-rename";
-        input.value = badge.textContent?.replace(/^● kept · /, "") ?? "";
+        input.value = badge.textContent ?? "";
         badge.replaceWith(input);
         input.focus();
         input.select();
@@ -315,9 +355,9 @@ export const aiView: ViewBundle = {
           if (save && input.value.trim()) {
             const r = (await host.callHost(canvasNode(), { type: "rename", id: backend, name: input.value.trim() } as never)) as Dict;
             if (typeof r["error"] !== "string") {
-              kernel.updateMeta(selfId, { dialog_name: r["name"] } as never);
-              showKept(String(r["name"]));
-            }
+              kernel.updateMeta(selfId, { dialog_name: r["name"], kept: true } as never);
+              show(String(r["name"]));
+            } else addMsg("notice", `✕ ${r["error"]}`, dialogEl).classList.add("too-small");
           }
           input.replaceWith(badge);
         };
@@ -328,10 +368,10 @@ export const aiView: ViewBundle = {
         input.onblur = (): void => void done(true);
       };
       $<HTMLElement>(".c-agent").after(badge);
-      if (!badge.classList.contains("kept")) badge.after(keepBtn);
     }
     const upRefl = (await host.call(backend, { type: "reflect" })) as Dict;
     $<HTMLElement>(".c-model").textContent = s(upRefl, "model");
+    showStats(typeof upRefl["context_window"] === "number" ? { context_window: upRefl["context_window"] } : {});
 
     const addMsg = (role: string, text: string, parent: HTMLElement): HTMLElement => {
       const div = document.createElement("div");
@@ -339,6 +379,17 @@ export const aiView: ViewBundle = {
       // calls, and the reply that comes back as the next (user-role) turn, show
       // as one quiet line each — `→ target verb` / `↳ target verb`.
       const call = role === "assistant" && words(text) === "" ? CALL_HEAD.exec(text) : null;
+      // THE CALL CHECKER'S REPORT (ai_core): the model wrote a call that did not
+      // parse — nothing ran, and it is told how to write it. A notice, not a
+      // bubble of the human's
+      const bad = role === "user" ? text.indexOf("[malformed call — nothing ran]") : -1;
+      if (bad >= 0) {
+        div.className = "msg notice c-malformed";
+        div.textContent = text.slice(bad);
+        parent.appendChild(div);
+        if (parent === dialogEl) dialogEl.scrollTop = dialogEl.scrollHeight;
+        return div;
+      }
       const reply = role === "user" ? REPLY_HEAD.exec(text) : null;
       if (call !== null || reply !== null) {
         div.className = "msg tool";
@@ -418,14 +469,23 @@ export const aiView: ViewBundle = {
       if (live) {
         if (elapsedTimer === null) {
           elapsedStart = Date.now();
+          genChars = 0;
+          genStart = 0;
+          // SPEED, LIVE (owner 2026-10-12: tok/s, not seconds): ~4 characters a
+          // token over what streamed so far — the backend's own count replaces it
+          // when its `done` reports usage; seconds only until the first token
           elapsedTimer = setInterval(() => {
-            elapsedEl.textContent = `${((Date.now() - elapsedStart) / 1000).toFixed(1)}s`;
+            elapsedEl.textContent = genChars > 0 ? `~${liveRate()} tok/s` : `${((Date.now() - elapsedStart) / 1000).toFixed(1)}s`;
           }, 250);
         }
       } else if (elapsedTimer !== null) {
         clearInterval(elapsedTimer);
         elapsedTimer = null;
         elapsedEl.textContent = "";
+        if (genChars > 0) {
+          lastRate = liveRate();
+          lastSpeed = null; // this generation's: its usage, or the estimate, on the next draw
+        }
       }
     };
     const setOthersHint = (n: number): void => {
@@ -534,6 +594,7 @@ export const aiView: ViewBundle = {
       if (mine(p) && s(p, "send_id")) bindNextLocalToSendId(s(p, "send_id"));
     });
     const offStatus = host.on(backend, "status", (p) => {
+      if (s(p, "phase") === "done") inquiriesSoon();
       if (!mine(p)) return;
       const phase = s(p, "phase");
       const detail = obj(p, "detail");
@@ -552,11 +613,13 @@ export const aiView: ViewBundle = {
         // not always delivered to this client — measured: the button stayed on
         // "stop" after the answer)
         if (inflight !== null && (!sendId || inflight.send_id === sendId)) inflight = null;
+        showStats(detail);
         refreshBusy();
         setPhase("idle", s(detail, "reason") && s(detail, "reason") !== "ok" ? s(detail, "reason") : "", s(detail, "reason") || "ok");
         // a turn that failed (not one stopped): the agent may not be set up right
         const why = s(detail, "reason");
-        if (why && why !== "ok" && !/cancel|stop|interrupt|abort/i.test(why)) setupHelp();
+        // (`awaiting` is a chain waiting on its calls — an inquiry, a job — not a failure)
+        if (why && why !== "ok" && why !== "awaiting" && !/cancel|stop|interrupt|abort/i.test(why)) setupHelp();
       }
     });
     // THE PARTS: one draft per stream_id. ANIMATION, NOT ACTION — a delta never
@@ -579,27 +642,41 @@ export const aiView: ViewBundle = {
       d.el.classList.remove("thinking");
       d.el.classList.add("not-sent");
       d.el.dataset["why"] = why;
-      if (d.kind === "thinking") d.el.textContent = "thinking";
+      if (d.kind === "thinking") {
+        const sum = d.el.querySelector("summary");
+        if (sum) sum.textContent = "thinking";
+      }
       d.el.title = `not sent — ${why}`;
     };
     const offStart = host.on(backend, "part_start", (p) => {
       if (!toMe(p)) return;
       const id = s(p, "stream_id");
       const kind = s(p, "kind");
-      const el = document.createElement("div");
-      el.className = kind === "call" ? "msg tool" : kind === "thinking" ? "msg assistant thinking" : "msg assistant";
+      // THINKING is a collapsible block (owner 2026-10-12): it streams in, stays
+      // after, collapsed — click to expand
+      const el = document.createElement(kind === "thinking" ? "details" : "div");
+      el.className = kind === "call" ? "msg tool" : kind === "thinking" ? "msg assistant thinking c-think" : "msg assistant";
       el.dataset["stream"] = id;
       if (typeof p["re"] === "number") el.dataset["re"] = String(p["re"]);
-      el.textContent = kind === "call" ? callHead(p) : kind === "thinking" ? "thinking" : "";
+      if (kind === "thinking") {
+        el.innerHTML = `<summary>thinking</summary><div class="c-think-body"></div>`;
+        el.dataset["t0"] = String(Date.now());
+      } else el.textContent = kind === "call" ? callHead(p) : "";
       dialogEl.appendChild(el);
       dialogEl.scrollTop = dialogEl.scrollHeight;
       drafts.set(id, { el, kind, text: "" });
     });
     const offDelta = host.on(backend, "part_delta", (p) => {
       if (!toMe(p)) return;
+      if (genStart === 0) genStart = Date.now();
+      genChars += s(p, "text").length;
       const d = drafts.get(s(p, "stream_id"));
       if (d === undefined) return;
       d.text += s(p, "text");
+      if (d.kind === "thinking") {
+        const body = d.el.querySelector(".c-think-body");
+        if (body) body.textContent = d.text;
+      }
       if (d.kind === "text") {
         d.el.textContent = d.text;
         dialogEl.scrollTop = dialogEl.scrollHeight;
@@ -615,13 +692,22 @@ export const aiView: ViewBundle = {
         return;
       }
       drafts.delete(id);
-      // a finished thought is the model's own: the mask goes
-      if (d.kind === "thinking") d.el.remove();
+      // a finished thought stays, collapsed: how long it took; click to read it
+      if (d.kind === "thinking") {
+        if (d.text.trim() === "") d.el.remove();
+        else {
+          d.el.classList.remove("thinking");
+          const secs = ((Date.now() - Number(d.el.dataset["t0"] ?? Date.now())) / 1000).toFixed(1);
+          const sum = d.el.querySelector("summary");
+          if (sum) sum.textContent = `thought for ${secs}s`;
+        }
+      }
     });
     const offAbort = host.on(backend, "part_abort", (p) => {
       if (toMe(p)) settle(s(p, "stream_id"), s(p, "reason") || "aborted");
     });
     const offDone = host.on(backend, "done", (p) => {
+      inquiriesSoon();
       if (mine(p)) {
         inflight = null;
         refreshBusy();
@@ -640,22 +726,52 @@ export const aiView: ViewBundle = {
         setPhase("idle", "context too small");
         refreshBusy();
       } else {
+        // ONLY WHEN SOMETHING WENT (owner 2026-10-11): past the fold trigger the
+        // projection runs every turn, mostly stripping repeats — that is no news
         const strat = s(detail, "strategy");
         const dropped = typeof detail["dropped_messages"] === "number" ? (detail["dropped_messages"] as number) : 0;
+        const folded = typeof detail["folded"] === "number" ? (detail["folded"] as number) : 0;
         const kept = typeof detail["kept_messages"] === "number" ? (detail["kept_messages"] as number) : 0;
-        addMsg("notice", `context compacted · ${strat} · ${dropped} dropped → ${kept} kept (recall to page back)`, dialogEl);
+        if (folded === 0 && dropped === 0) return;
+        addMsg("notice", folded > 0
+          ? `context folded · ${folded} older part${folded === 1 ? "" : "s"} summarized · ${kept} kept (recall to page back)`
+          : `context compacted · ${strat} · ${dropped} dropped → ${kept} kept (recall to page back)`, dialogEl);
       }
     });
 
     // boot: replay history + rebuild from a status snapshot
     // `history` answers at DIGEST resolution ({id, role, head, bytes} per row) on
     // every runtime; a row's full text is behind the agent's recall / grep.
+    let lastRow = 0; // the newest history row this cell has drawn
     const hist = (await host.call(backend, { type: "history", client_id: clientId })) as Dict;
     // a backend not answering yet (a host just restarted) answers null: no rows
     const rows = Array.isArray(hist?.["rows"]) ? (hist["rows"] as Dict[]) : [];
     // `kind: "notice"` rows are the AI layer's own turns to its model (the
     // no-call reminder, a malformed-call report, a refused await): not chat
-    for (const m of rows) if (s(m, "kind") !== "notice") addMsg(s(m, "role"), s(m, "head"), dialogEl);
+    // — except the CALL CHECKER's report (owner 2026-10-12): the person sees why
+    // nothing ran
+    const isReport = (m: Dict): boolean => s(m, "head").includes("[malformed call — nothing ran]");
+    // THINKING, kept on its answer's row (`thinking`, flagged `has_thinking` in the
+    // digest): the full rows are read once, and each answer is drawn after its
+    // thought — collapsed
+    const thoughts = new Map<number, { text: string; cut: number }>();
+    if (rows.some((m) => m["has_thinking"] === true)) {
+      let after: unknown = undefined;
+      for (let page = 0; page < 20; page++) {
+        const r = (await host.call(backend, { type: "rows", ...(after !== undefined ? { after } : {}) } as never).catch(() => null)) as Dict | null;
+        const got = r !== null && Array.isArray(r["rows"]) ? (r["rows"] as Dict[]) : [];
+        for (const x of got) if (typeof x["id"] === "number" && typeof x["thinking"] === "string") thoughts.set(x["id"] as number, { text: x["thinking"] as string, cut: typeof x["thinking_cut"] === "number" ? (x["thinking_cut"] as number) : 0 });
+        if (r === null || r["next"] === null || r["next"] === undefined) break;
+        after = r["next"];
+      }
+    }
+    for (const m of rows) {
+      const t = typeof m["id"] === "number" ? thoughts.get(m["id"] as number) : undefined;
+      if (t !== undefined) dialogEl.appendChild(thoughtBlock(t.text, t.cut));
+      if (s(m, "kind") !== "notice" || isReport(m)) addMsg(s(m, "role"), s(m, "head"), dialogEl);
+    }
+    for (const m of rows) if (typeof m["id"] === "number") lastRow = Math.max(lastRow, m["id"] as number);
+    for (const m of rows) if (typeof m["bytes"] === "number") convBytes += m["bytes"] as number;
     const snap = (await host.call(backend, { type: "status", client_id: clientId })) as Dict;
     if (snap) {
       setOthersHint(typeof snap["others_pending"] === "number" ? (snap["others_pending"] as number) : 0);
@@ -747,6 +863,138 @@ export const aiView: ViewBundle = {
       void host.call(backend, { type: "stop" } as never).catch((e: Error) => console.warn("[chat] stop failed:", e));
     };
 
+    // a kept thought, collapsed: click to read it
+    function thoughtBlock(text: string, cut: number): HTMLElement {
+      const d = document.createElement("details");
+      d.className = "msg assistant c-think";
+      const sum = document.createElement("summary");
+      sum.textContent = `thought · ${text.length} chars${cut > 0 ? ` (+${cut} cut)` : ""}`;
+      const body = document.createElement("div");
+      body.className = "c-think-body";
+      body.textContent = text;
+      d.append(sum, body);
+      return d;
+    }
+    // ITS QUESTIONS TO THE PERSON (owner 2026-10-11): an `inquiry` the AI sent
+    // `user` is HELD there; this cell shows its open ones as cards and answers one
+    // with `answer_inquiry` — the AI gets it on its thread. Read when its phase
+    // changes or a turn ends (an inquiry is sent inside a turn), and at mount.
+    const shownInquiries = new Set<number>();
+    const optionsOf = (o: unknown): Array<{ value: string; label: string }> =>
+      (Array.isArray(o) ? o : []).map((x) => {
+        if (x !== null && typeof x === "object") {
+          const r = x as Dict;
+          const v = String(r["value"] ?? r["label"] ?? "");
+          return { value: v, label: String(r["label"] ?? v) };
+        }
+        return { value: String(x), label: String(x) };
+      });
+    const inquiryCard = (q: Dict): HTMLElement => {
+      const re = Number(q["re"]);
+      const kind = s(q, "kind") || "text";
+      const card = document.createElement("div");
+      card.className = "msg c-inquiry";
+      card.dataset.re = String(re);
+      const head = document.createElement("div");
+      head.className = "c-inq-head";
+      head.textContent = "asks you";
+      const text = document.createElement("div");
+      text.className = "c-inq-text";
+      text.textContent = s(q, "text");
+      const row = document.createElement("div");
+      row.className = "c-inq-row";
+      const status = document.createElement("div");
+      status.className = "c-inq-status";
+      card.append(head, text, row, status);
+      const reply = async (answer: unknown, shown: string): Promise<void> => {
+        for (const b of row.querySelectorAll("button, input")) (b as HTMLButtonElement).disabled = true;
+        const r = (await host.callHost("user", { type: "answer_inquiry", re, answer } as never).catch((e: Error) => ({ error: e.message }))) as Dict;
+        if (typeof r["error"] === "string") {
+          status.textContent = `✕ ${r["error"]}`;
+          for (const b of row.querySelectorAll("button, input")) (b as HTMLButtonElement).disabled = false;
+          return;
+        }
+        card.classList.add("answered");
+        row.replaceChildren();
+        status.textContent = `✓ you answered: ${shown}`;
+      };
+      const button = (label: string, onClick: () => void, primary = false): HTMLButtonElement => {
+        const b = document.createElement("button");
+        b.textContent = label;
+        if (primary) b.className = "primary";
+        b.onclick = onClick;
+        return b;
+      };
+      if (kind === "confirm") {
+        row.append(button("Yes", () => void reply(true, "yes"), true), button("No", () => void reply(false, "no")));
+      } else if (kind === "single") {
+        for (const o of optionsOf(q["options"])) row.append(button(o.label, () => void reply(o.value, o.label)));
+      } else if (kind === "multi") {
+        const picks: HTMLInputElement[] = [];
+        for (const o of optionsOf(q["options"])) {
+          const l = document.createElement("label");
+          const c = document.createElement("input");
+          c.type = "checkbox";
+          c.value = o.value;
+          picks.push(c);
+          l.append(c, ` ${o.label}`);
+          row.append(l);
+        }
+        row.append(button("answer", () => {
+          const chosen = picks.filter((c) => c.checked).map((c) => c.value);
+          if (chosen.length > 0) void reply(chosen, chosen.join(", "));
+        }, true));
+      } else {
+        const input = document.createElement("input");
+        input.className = "c-inq-input";
+        input.placeholder = "your answer…";
+        const send = (): void => {
+          if (input.value.trim()) void reply(input.value.trim(), input.value.trim());
+        };
+        input.onkeydown = (e: KeyboardEvent): void => {
+          if (e.key === "Enter") send();
+        };
+        row.append(input, button("answer", send, true));
+      }
+      return card;
+    };
+    // LIVE: a checker report is a turn the AI layer delivers, never streamed —
+    // read once a turn ends: the rows after the last one seen (`lastRow`)
+    const rowsOf = (h: Dict | null): Dict[] => (h !== null && Array.isArray(h["rows"]) ? (h["rows"] as Dict[]) : []);
+    const checkReports = async (): Promise<void> => {
+      const read = (args: Dict): Promise<Dict | null> =>
+        host.call(backend, { type: "history", client_id: clientId, ...args } as never).catch(() => null) as Promise<Dict | null>;
+      // a cursor the history no longer holds (a clear started a new thread) pages
+      // nothing: then the thread from its start, keeping only what is newer
+      let fresh = lastRow > 0 ? rowsOf(await read({ after: lastRow })) : [];
+      if (fresh.length === 0) fresh = rowsOf(await read({})).filter((m) => typeof m["id"] === "number" && (m["id"] as number) > lastRow);
+      for (const m of fresh) {
+        if (typeof m["id"] === "number") lastRow = Math.max(lastRow, m["id"] as number);
+        if (typeof m["bytes"] === "number") convBytes += m["bytes"] as number;
+        if (s(m, "head").includes("[malformed call — nothing ran]")) addMsg("user", s(m, "head"), dialogEl);
+      }
+      showStats({});
+    };
+    const checkInquiries = async (): Promise<void> => {
+      const r = (await host.callHost("user", { type: "inquiries", asker: backend } as never).catch(() => null)) as Dict | null;
+      const open = r !== null && Array.isArray(r["inquiries"]) ? (r["inquiries"] as Dict[]) : [];
+      for (const q of open) {
+        const re = Number(q["re"]);
+        if (!Number.isFinite(re) || shownInquiries.has(re)) continue;
+        shownInquiries.add(re);
+        dialogEl.appendChild(inquiryCard(q));
+      }
+    };
+    // read once per turn's end (an inquiry ends its turn: awaited or done), debounced
+    let inquiryTimer: ReturnType<typeof setTimeout> | null = null;
+    const inquiriesSoon = (): void => {
+      if (inquiryTimer !== null) return;
+      inquiryTimer = setTimeout(() => {
+        inquiryTimer = null;
+        void checkInquiries();
+        void checkReports();
+      }, 250);
+    };
     // A TURN THAT FAILED: how to fix the agent — its settings, or a coding agent
     // started next to it to help (owner 2026-10-11)
     const setupHelp = (): void => {
@@ -781,6 +1029,9 @@ export const aiView: ViewBundle = {
       }
     };
     window.addEventListener("keydown", onEsc);
+    // mounted and listening: the input takes a turn from here on
+    root.dataset.ready = "1";
+    void checkInquiries();
 
     return {
       // ⚙ SETTINGS: the wizard's page 2 for this agent

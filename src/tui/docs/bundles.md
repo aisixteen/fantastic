@@ -53,6 +53,22 @@ instance (`py_<hex>_1`), its view on the canvas.
   the release folder — every instance of the RELEASE restarts with the new code.
 - Never edit a bundle to change ONE agent: every instance of it changes. Fork first.
 
+## Live panels
+
+A host agent can PUSH updates into its own cell — a live panel, no polling. The
+python agent starter (double-click → `python agent`; files in
+`src/tui/starters/python_agent/`) is the minimal working one:
+
+- `bundle.yaml` — the record carries the view:
+  `view: {kind: html, bytes_file: panel.html, calls: [hello, count, watch]}`.
+- `agent.py` — a verb does its work and EMITS: `fa.emit({"type": "count", "count": n})`.
+- `panel.html` — calls with `fantastic.send(AGENT, {type: "count"})` and redraws
+  on every event with `fantastic.watch(AGENT, ev => …)`.
+
+Grow it the same way: verbs return data, an `emit` on each change, the panel
+redraws. `innerHTML` runs no `<script>` — keep the panel's script in
+`panel.html` and send data (or script-free HTML) in the events.
+
 ## Share it
 
 A bundle is a folder of open files: zip it, send it, drop it into another

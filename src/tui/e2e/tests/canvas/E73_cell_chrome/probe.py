@@ -48,8 +48,10 @@ def main() -> bool:
                 await pg.until("document.querySelectorAll('.agent-frame').length === 6", 20)
                 await host_call(rig.port, f"{rig.page_guid()}|background", {"type": "set_bg", "bytes": BG})
                 await asyncio.sleep(3)
+                await pg.until("!!document.querySelector('.agent-frame[data-id=c0] .frame-body')", 10)
                 body = await pg.rect(".agent-frame[data-id=c0] .frame-body")
                 info["c0"] = body
+                info["frames_at_measure"] = await pg.js("[...document.querySelectorAll('.agent-frame')].map(f=>f.dataset.id+':'+!!f.querySelector('.frame-body'))")
                 # 1. the pointer 10px ABOVE the cell and 10px RIGHT of it: the chrome shows
                 await pg.cdp("Input.dispatchMouseEvent", type="mouseMoved", x=700, y=880)
                 await asyncio.sleep(0.4)

@@ -10,16 +10,36 @@ import type { Handler, Json, Kernel, Payload } from "../../lib.ts";
 //   ├── layout_canvas  layout.ts  rects: {<cell id>: {x, y, width, height}}
 //   └── layout_mobile  layout.ts  rects: {…}
 //
-// Two themes: `canvas` (the free 2D canvas) and `mobile` (ONE column). `auto`
-// (the default) picks per tab by its width: under MOBILE_MAX_WIDTH px, mobile.
-// A cell with no rect in the theme in use is PLACED, once, by the theme: canvas
-// — the nearest free space around the centre of what the tab shows; mobile —
-// the bottom of the column. A removed cell's rects go with it.
+// THEMES ARE DATA (owner 2026-10-12: "themes like backgrounds — edit, restore;
+// a trigger to auto-switch"): a theme is {name, layout: free | column, trigger}.
+// Two STOCK themes — `canvas` (the free 2D canvas) and `mobile` (ONE column,
+// triggered under MOBILE_MAX_WIDTH px) — and the user's own, kept on the view's
+// CANVAS THEME agent (`backgrounds.ts`: `user_themes`, `hidden_themes`). `auto`
+// (the default) takes the first theme whose trigger matches the tab's width
+// (yours first), else the first without a trigger. A cell with no rect in the
+// theme in use is PLACED, once, by its layout: free — the nearest free space
+// around the centre of what the tab shows; column — the column's bottom. A
+// removed cell's rects go with it.
 
 export const LAYOUT = "layout.ts";
-export const THEMES = ["canvas", "mobile"] as const;
-export type Theme = (typeof THEMES)[number];
+/** A theme's name (its layout agent is `layout_<name>`). */
+export type Theme = string;
 export type ThemeChoice = Theme | "auto";
+/** How a theme lays its cells out. */
+export type ThemeLayout = "free" | "column";
+/** When `auto` switches to a theme: the tab's width within these bounds (px). */
+export interface ThemeTrigger {
+  max_width?: number;
+  min_width?: number;
+}
+export interface ThemeDef {
+  name: string;
+  layout: ThemeLayout;
+  trigger: ThemeTrigger | null;
+  note?: string;
+}
+/** The canvas theme agent's handler (the view's child that keeps the user's themes). */
+export const CANVAS_THEME_AGENT = "backgrounds.ts";
 
 /** A tab narrower than this is a phone: `auto` is `mobile` there (the common
  *  768px breakpoint — under it, one column). */
@@ -39,11 +59,62 @@ export interface Rect {
 
 export const layoutId = (theme: Theme): string => `layout_${theme}`;
 
-/** The theme a choice means in a tab `width` px wide. */
-export function resolveTheme(choice: unknown, width: number): Theme {
-  if (choice === "canvas" || choice === "mobile") return choice;
-  return width < MOBILE_MAX_WIDTH ? "mobile" : "canvas";
+/** The stock themes, in their order. */
+export const STOCK_THEMES: ReadonlyArray<ThemeDef> = [
+  { name: "canvas", layout: "free", trigger: null, note: "the free 2D canvas" },
+  { name: "mobile", layout: "column", trigger: { max_width: MOBILE_MAX_WIDTH - 1 }, note: "one column — a tab under 768px wide" },
+];
+
+/** A name a theme may take (it names its layout agent). */
+export const themeNameOk = (n: string): boolean => /^[A-Za-z0-9_-]{1,40}$/.test(n);
+
+/** Whether `trigger` holds for a tab `width` px wide. */
+export function triggered(trigger: ThemeTrigger | null, width: number): boolean {
+  if (trigger === null) return false;
+  if (trigger.max_width !== undefined && width > trigger.max_width) return false;
+  if (trigger.min_width !== undefined && width < trigger.min_width) return false;
+  return trigger.max_width !== undefined || trigger.min_width !== undefined;
 }
+
+/** The theme a choice means in a tab `width` px wide, among `defs`. */
+export function resolveTheme(choice: unknown, width: number, defs: ReadonlyArray<ThemeDef> = STOCK_THEMES): Theme {
+  if (typeof choice === "string" && choice !== "auto" && defs.some((d) => d.name === choice)) return choice;
+  const hit = defs.find((d) => triggered(d.trigger, width));
+  if (hit !== undefined) return hit.name;
+  return (defs.find((d) => d.trigger === null) ?? defs[0] ?? STOCK_THEMES[0]!).name;
+}
+
+const isTrigger = (v: unknown): v is ThemeTrigger => {
+  if (v === null || typeof v !== "object" || Array.isArray(v)) return false;
+  const t = v as Record<string, unknown>;
+  return ["max_width", "min_width"].every((k) => t[k] === undefined || (typeof t[k] === "number" && Number.isFinite(t[k])));
+};
+/** A stored theme, checked — or null. */
+export function themeDefOf(v: unknown): ThemeDef | null {
+  const r = v as Record<string, unknown> | null;
+  if (r === null || typeof r !== "object") return null;
+  const name = typeof r["name"] === "string" ? r["name"] : "";
+  if (!themeNameOk(name)) return null;
+  const layout = r["layout"] === "column" ? "column" : r["layout"] === "free" ? "free" : null;
+  if (layout === null) return null;
+  const trigger = r["trigger"] === null || r["trigger"] === undefined ? null : isTrigger(r["trigger"]) ? (r["trigger"] as ThemeTrigger) : null;
+  return { name, layout, trigger, ...(typeof r["note"] === "string" ? { note: r["note"] } : {}) };
+}
+
+/** The themes `view` has: the user's (its canvas theme agent's), then the stock
+ *  ones not hidden — a user theme of a stock name takes its place. */
+export function themesOf(kernel: Kernel, view: string): ThemeDef[] {
+  const owner = [...(kernel.get(view)?.children.values() ?? [])].find((a) => a.record().handler_module === CANVAS_THEME_AGENT);
+  const meta = owner?.meta ?? {};
+  const user = (Array.isArray(meta["user_themes"]) ? (meta["user_themes"] as unknown[]) : []).map(themeDefOf).filter((d): d is ThemeDef => d !== null);
+  const hidden = new Set(Array.isArray(meta["hidden_themes"]) ? (meta["hidden_themes"] as unknown[]).filter((x): x is string => typeof x === "string") : []);
+  const stock = STOCK_THEMES.filter((d) => !hidden.has(d.name) && !user.some((u) => u.name === d.name));
+  return [...user, ...stock];
+}
+
+/** How `theme` lays out `view`'s cells (an unknown theme: free). */
+export const layoutOf = (kernel: Kernel, view: string, theme: Theme): ThemeLayout =>
+  themesOf(kernel, view).find((d) => d.name === theme)?.layout ?? "free";
 
 const overlaps = (a: Rect, b: Rect, gap: number): boolean =>
   a.x < b.x + b.width + gap && b.x < a.x + a.width + gap && a.y < b.y + b.height + gap && b.y < a.y + a.height + gap;
@@ -93,9 +164,9 @@ export function stack(rects: Record<string, Rect>): Record<string, Rect> {
   return out;
 }
 
-/** Where `theme` puts a cell it has no rect for. */
-export function assign(theme: Theme, occupied: Rect[], size: { width: number; height: number }, center: { x: number; y: number }): Rect {
-  return theme === "mobile" ? columnSpot(occupied, size.height) : freeSpot(occupied, size.width, size.height, center);
+/** Where a theme of layout `kind` puts a cell it has no rect for. */
+export function assign(kind: ThemeLayout, occupied: Rect[], size: { width: number; height: number }, center: { x: number; y: number }): Rect {
+  return kind === "column" ? columnSpot(occupied, size.height) : freeSpot(occupied, size.width, size.height, center);
 }
 
 const isRect = (v: unknown): v is Rect => {
@@ -131,7 +202,7 @@ export const tabWidth = (): number => (typeof innerWidth === "number" ? innerWid
 
 /** The theme `view` is in, for a tab `width` px wide. */
 export function themeOf(kernel: Kernel, view: string, width: number): Theme {
-  return resolveTheme(kernel.get(view)?.meta["theme"], width);
+  return resolveTheme(kernel.get(view)?.meta["theme"], width, themesOf(kernel, view));
 }
 
 /** Set (merge) a cell's rect in `theme`: partial fields over what it had. */
@@ -163,7 +234,11 @@ export function setPinned(kernel: Kernel, view: string, theme: Theme, cell: stri
 
 /** Drop every rect of cells no longer in `view` (all themes). */
 export function prune(kernel: Kernel, view: string, live: Set<string>): void {
-  for (const t of THEMES) {
+  // every layout the view holds (a deleted theme's too)
+  const themes = [...(kernel.get(view)?.children.values() ?? [])]
+    .filter((a) => a.record().handler_module === LAYOUT)
+    .map((a) => (typeof a.meta["theme"] === "string" ? (a.meta["theme"] as string) : a.id.replace(/^layout_/, "")));
+  for (const t of themes) {
     const p = pinnedOf(kernel, view, t);
     if (p !== null && !live.has(p)) setPinned(kernel, view, t, null);
     const rects = rectsOf(kernel, view, t);
@@ -189,7 +264,7 @@ export function placeMissing(
   let added = false;
   for (const c of cells) {
     if (rects[c.id] !== undefined) continue;
-    rects[c.id] = assign(theme, Object.values(rects), c.size, center);
+    rects[c.id] = assign(layoutOf(kernel, view, theme), Object.values(rects), c.size, center);
     added = true;
   }
   if (added) writeRects(kernel, view, theme, rects);
@@ -197,10 +272,11 @@ export function placeMissing(
 }
 
 export const LAYOUT_README =
-  "A view's LAYOUT for one theme (canvas | mobile): `rects: {<cell id>: {x, y, width, height}}` — where each cell sits in that theme. " +
-  "The cells are untouched by it; the view's `theme` verb picks which layout is in use (auto: mobile under 768px wide). " +
-  "Move cells with the view's `move`; a cell with no rect in a theme is placed by it (canvas: free space near the centre; mobile: the column's bottom). " +
-  "`pinned: <cell id>` (mobile): that cell is held on the screen's bottom while the column scrolls (the 📌 on its head).";
+  "A view's LAYOUT for one theme: `rects: {<cell id>: {x, y, width, height}}` — where each cell sits in that theme. " +
+  "The cells are untouched by it; the view's `theme` verb picks which theme is in use (auto: the first whose width trigger matches the tab — stock `mobile` under 768px wide). " +
+  "Themes are listed, added and edited on the canvas theme agent (`themes`, `add_theme`…). " +
+  "Move cells with the view's `move`; a cell with no rect in a theme is placed by its layout (free: free space near the centre; column: the column's bottom). " +
+  "`pinned: <cell id>` (a column theme): that cell is held on the screen's bottom while the column scrolls (the 📌 on its head).";
 
 /** A layout holds state only: it answers reflect (the kernel's) and nothing else. */
 export const layoutAgent: Handler = (_id, payload): Json => {
