@@ -61,7 +61,7 @@ def main() -> bool:
         return "ok"
     stub.responder = responder
     stub.start(Handler)
-    # the template: every count named, so nothing is read from the (stub) server
+    # the saved set-up: every count named, so nothing is read from the (stub) server
     rig.make_home({"handler_module": "vllm_backend.tools", "endpoint": stub.base_url(), "model": "stub",
                    "context_window": 32768, "max_tokens": 4096, "kv_slots": 4, "kv_overflow": "evict"})
     rig.init()

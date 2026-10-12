@@ -1,299 +1,66 @@
 # Aisixteen Fantastic
 
 *A medium that unifies humans and AIs into a single workspace.*
-Repo codename: `fantastic-canvas` — the open-core kernels + browser frontend.
 
 [![License: AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue.svg)](LICENSE)
-[![CodeQL](https://github.com/aisixteen/fantastic/actions/workflows/codeql.yml/badge.svg)](https://github.com/aisixteen/fantastic/actions/workflows/codeql.yml)
-[![Python lint](https://github.com/aisixteen/fantastic/actions/workflows/python-lint-typecheck.yml/badge.svg)](https://github.com/aisixteen/fantastic/actions/workflows/python-lint-typecheck.yml)
-![runtimes: python · rust · swift · ts](https://img.shields.io/badge/runtimes-python%20%C2%B7%20rust%20%C2%B7%20swift%20%C2%B7%20ts-informational)
 ![status: alpha](https://img.shields.io/badge/status-alpha-orange)
 
-Recursive `Agent` nodes, one primitive (`send`), compile-time-linked
-bundles. Every agent answers `{"type":"reflect"}` — the universal
-discovery verb. No client library: the protocol IS the API. The on-disk
-`.fantastic/` workdir format is part of the product.
+Recursive `Agent` nodes and one primitive, `send`. Every agent answers
+`{"type":"reflect"}` with a description of itself, so there is no client library:
+the protocol is the API. Given only those readmes, an AI wires the system itself.
 
-Capabilities **emerge from that self-description**: given only the readmes, an
-AI weaves the wiring itself — e.g. told merely that a memory file on a
-`file_bridge` exists, it manages durable memory with judgment (saves salient facts, recalls
-them on a fresh turn, prunes the rest), entirely through `send`. Proof:
-[`e2e/tests/coding/E51b_memory_distill`](e2e/tests/coding/E51b_memory_distill/probe.py).
+Every edge is sealed: all IO (kernel↔kernel, disk, browser) crosses a gated bridge
+that is deny-all until opened, and one `reflect` shows what is open.
 
-**Every edge is sealed.** All IO — kernel↔kernel, kernel↔disk, kernel↔browser —
-crosses through a **gated bridge that is deny-all by default**, opened on demand
-(`ingress_rule=allow_all_ingress` / `password`). Disk is just another gated edge: a
-`file_bridge` agent is the single surface, and persistence routes through ONE
-`.fantastic` store — no provider wired ⇒ state stays in RAM (a kernel has **no silent
-fallbacks**, one path or none). And the whole lock/wiring landscape is **readable from
-one `reflect`** (`detail=full`): each tree node carries its posture (`ingress_rule` /
-`root` / `allow`), the root carries `persistence:{provider, error?}`. So the same
-self-description that lets an AI *build* also lets it *see what's open* — and wire
-access **correctly and granularly** (the records store kept to the loader; a data
-store for shared state; a narrow read-only bridge for public assets), not one
-blanket-open surface.
-
-## Run it now — one container, driven by an AI
-
-The container ships as **two separate per-architecture images** (podman **and**
-docker). **Pick the one for your machine** — there is no merged "latest" manifest:
-
-| image tag | use this on | also pinned |
-|---|---|---|
-| `ghcr.io/aisixteen/fantastic:amd64` | **Intel / AMD** x86-64 (a.k.a. x64) — most Linux servers, Intel Macs/PCs | `:v0.5.4-amd64` |
-| `ghcr.io/aisixteen/fantastic:arm64` | **Apple silicon / ARM** (aarch64) — M-series Macs, ARM servers, Raspberry Pi | `:v0.5.4-arm64` |
-
-> **AI / LLM: choose by the host arch.** `uname -m` → `x86_64`/`amd64` ⇒ pull
-> `:amd64`; `arm64`/`aarch64` ⇒ pull `:arm64`. (Pulling the wrong arch fails or runs
-> slowly under emulation — these are single-arch images, the registry does **not**
-> auto-select.)
-
-*What to build with it: 7 ready-to-assemble **[recipes](container/recipes.md)** —
-canvas, terminal, AI-chat-with-tools, compute/training, WebGL, audio-visual, and
-federated multi-kernel — also rendered on the served head page.*
-
-**Pull + run** (arm64 shown; use `:amd64` on Intel/AMD):
+## Run
 
 ```sh
 podman run -d -p 127.0.0.1:8088:8088 -v "$PWD":/work \
-  ghcr.io/aisixteen/fantastic:arm64           # :amd64 on Intel/AMD; docker is identical
+  ghcr.io/aisixteen/fantastic:arm64      # :amd64 on Intel/AMD; docker works the same
 ```
 
-> The image **composes nothing on its own** (no agent autocreation — composition
-> is explicit). So either mount a project that **carries its own web stack** (it
-> serves immediately), or let your **AI compose one** (next paragraph). Once a web
-> host exists, **open `http://127.0.0.1:8088/`** → a self-describing **head page**,
-> and the same self-description is one call away:
-
-```sh
-curl -s -X POST -H 'Content-Type: application/json' \
-  http://127.0.0.1:8088/<rest_id>/kernel \
-  -d '{"type":"reflect","readme":true,"bundles":"all"}'
-```
-
-**The intended way to use it — give an AI this URL.** It pulls + runs the image,
-reads `reflect` over `web_ws` (`/web/ws`) / `rest` (`POST /rest/<target>`) — **no
-client library, the protocol IS the API** — and then **builds** by composing
-agents (`create_agent` + wiring them with `send`) against the folder you mounted
-at **`/work`** (the `file_bridge` / `terminal` / `exec_bridge` agents act on it). Hand
-it a [recipe](container/recipes.md) and it assembles a working app — capability
-emerges from self-description, no bespoke glue. Full run contract + 7 recipes:
-[`container/README.md`](container/README.md) · [`container/recipes.md`](container/recipes.md).
-
-## Four runtimes, one workdir
-
-Four kernels share the same `send`/`reflect` protocol and wire format:
-three interchangeable **hosts** (python, swift, rust) plus the browser
-**frontend** (ts). The three hosts share one on-disk `.fantastic/` workdir
-— **one host active per workdir at a time** (the `lock.json` PID guard).
-The ts frontend is the fourth kernel: it runs in the browser, federates to
-whichever host is up over the WS bridge, and any host serves it generically
-(a `file_bridge` agent over a workdir copy of `ts/dist`) while knowing nothing about it.
-
-```
-fantastic_canvas/src/lib/
-├── python/   reference implementation — uvicorn + FastAPI
-├── swift/    production runtime for Apple — swift-nio web + URLSession (serves Linux too)
-├── rust/     server / CLI host runtime — axum + tokio (pure Rust)
-└── ts/       browser frontend kernel — views as agents, served over the bridge
-```
-
-- **Python** (`src/lib/python/`) — **the canonical reference**. When
-  implementations disagree, Python is correct. The other runtimes
-  mirror its wire shape, on-disk format, and verb payloads. The
-  protocol surface (HTTP routes, WS frames, system verbs, reflect
-  contract, on-disk layout) is documented inside Python's
-  [`CLAUDE.md`](src/lib/python/CLAUDE.md); no separate protocol spec exists.
-  Run with `cd src/lib/python && uv sync && uv run fantastic`. See
-  [`python/README.md`](src/lib/python/README.md).
-- **Swift** (`src/lib/swift/`) — same behavior, fits inside a sandboxed iOS /
-  iPadOS / visionOS app and runs unsandboxed on macOS Pro. Drift from
-  Python's wire/on-disk/verb shape is a bug; the conformance test at
-  [`swift/Tests/FantasticParityTests`](src/lib/swift/Tests/FantasticParityTests)
-  spawns a peer kernel and byte-diffs replies as the mechanical drift
-  detector. Run with `cd src/lib/swift && swift run fantastic`. See
-  [`swift/README.md`](src/lib/swift/README.md).
-- **Rust** (`src/lib/rust/`) — a pure-Rust host kernel for servers and the CLI
-  (the embedded slice has no subprocess deps). It is **not** linked into
-  the Apple app; it's a peer host and the cross-runtime bridge partner.
-  Run with `cd src/lib/rust && cargo run`. See [`rust/README.md`](src/lib/rust/README.md).
-- **TS** (`src/lib/ts/`) — the browser **frontend** kernel: the view layer
-  (canvas, `html_agent`, `gl_agent`, the `ai` + `terminal` views) as
-  agents in their own kernel, federated to a host over the WS bridge and
-  persisted back to the host's disk opaquely. Dev build: `cd src/lib/ts && npm run
-  build` → `ts/dist/`. Sovereign artifact: `cd src/lib/ts && sh scripts/pack.sh`
-  → `ts/dist/js_kernel.zip` (one inlined bundle, no npm at serve time).
-  See [`ts/readme.md`](src/lib/ts/readme.md) and [`ts/SERVE.md`](src/lib/ts/SERVE.md).
-
-### The frontend is decoupled
-
-The host kernels render no UI of their own. The browser frontend lives
-in `src/lib/ts/` (its own kernel — views are agents: `canvas`, `html_agent`,
-`gl_agent`, the `ai` and `terminal` views) and is served by **any** host
-through a generic `file_bridge` agent rooted at a workdir copy of the
-built `ts/dist` (its root is clamped to the running dir). The host
-never imports, names, or knows about the frontend (weak binding); it
-persists frontend records opaquely and weak-loads past them. The same
-recipe serves any view package. The sovereign distribution artifact is
-`ts/dist/js_kernel.zip` (`cd src/lib/ts && sh scripts/pack.sh`): one inlined
-`bundle.min.js` + `readme.md` + map, pulled on demand and served via a
-`file_bridge` agent — no import map, no CSS link (vendors + CSS are inlined).
-See [`ts/readme.md`](src/lib/ts/readme.md) and [`ts/SERVE.md`](src/lib/ts/SERVE.md).
-
-The frontend is one **sub-kernel** (`web_loader = kernel_state @ .fantastic/web`).
-The `fantastic` CLI is another of the same shape — `cli_loader @ .fantastic/cli`, a
-native, folder-anchored *initiator* sibling (no browser proxy). Sub-kernels are a
-generic construct (web is not special-cased).
-
-## One runtime active per workdir
-
-**One host runtime is active per workdir at a time.** The
-`.fantastic/lock.json` PID guard enforces it — no concurrent mode for a
-single dir. Switching is a reboot: stop one daemon, start another
-against the same dir. (Distinct kernels *do* talk across the WS
-`ws_bridge` — that's separate, explicit wiring, not shared-dir
-concurrency.)
-
-**Weak loading** keeps switching safe. If a persisted agent's
-`handler_module` isn't installed in the active runtime, the kernel logs
-one line to stderr and skips that agent on boot — same byte shape across
-all kernels so CI and selftests can grep it:
-
-    [kernel] skipping agent <id>: bundle <module> not installed in this runtime
-
-The record stays on disk untouched. Reboot under a runtime that has the
-bundle and the agent rehydrates intact. (This is exactly how a host that
-ships no view bundles still round-trips a `src/lib/ts/` frontend record on disk.)
-
-## Apple integration
-
-The Swift app at
-[`Alexadar/fantastic_app`](https://github.com/Alexadar/fantastic_app)
-links the **Swift** kernel directly as a SwiftPM dependency — no UniFFI,
-no XCFramework, no Rust on the device:
-
-- **FantasticPro** (macOS, unsandboxed) — full bundle set including
-  PTY / subprocess (`exec_bridge`). Macros and
-  in-process Cocoa interop available because the kernel runs as
-  Swift in the app's address space.
-- **FantasticLite** (macOS + iOS + iPadOS + visionOS, App Store
-  sandboxed) — subprocess / PTY bundles are compile-time excluded
-  via `#if os(macOS)` gates inside `FantasticExecBridge`, so the slice is App Sandbox compliant.
-  Binds a loopback `127.0.0.1:0` server the existing `WKWebView`
-  points at; zero changes to canvas frontend code.
-
-The app consumes the Swift kernel through two umbrella SPM products
-(`FantasticKernelEmbedded` / `FantasticKernelFull`) that
-`@_exported import` the kernel modules under a stable name. See
-[`swift/README.md`](src/lib/swift/README.md) for the consumption story and the
-bundle scoreboard.
-
-## The `fantastic` CLI
+The image composes nothing on its own: give an AI the URL and a
+[recipe](container/recipes.md), and it builds on the folder mounted at `/work`.
+See [`container/README.md`](container/README.md).
 
 <!-- CLI SECTION — written and kept current by the CLI session; the lib side does not edit between these markers. -->
 
-`fantastic` runs the Rust kernel IN-PROCESS in this directory (`.fantastic/`),
+## The `fantastic` CLI
+
+`fantastic` runs the Rust kernel in-process in the current directory (`.fantastic/`),
 with a terminal UI, an optional browser canvas, and an MCP face for coding CLIs.
-One kernel per directory: a second `fantastic` here attaches as a thin client,
-and refuses any argument while the first runs.
 
-| command | what |
-|---|---|
-| `fantastic` | the terminal UI (a fresh directory is seeded) |
-| `fantastic canvas [--port N]` | plus the canvas: a page kernel bridged to the host (no `--port` the first time: a free one is picked and kept; a new one overwrites) |
-| `fantastic [canvas] ai vllm -p PORT` | the ROOT AI `ai` on a backend — also `ai ollama -p PORT`, `ai responses --model M`, `ai anthropic --model M`; what the server knows (model, window) is read from it |
-| `fantastic [canvas] run COMMAND [ARGS…]` | your own program from `$PATH`, as is, in the terminal (or a canvas cell) |
-| `fantastic --headless …` | no screen: the kernel's message stream on stdout |
-| `fantastic mcp` · `fantastic send '<item>'` · `fantastic readme [key]` | MCP over stdio · one call into the running kernel · the docs |
-
-**The canvas** shows HOST agents through views their own records declare
-(`view: {kind: terminal | chat | html | …}`, else a default per kind, else a
-reflect card): a cell is only layout plus the agent it shows, its grant derived
-from the view. ✕ closes a view, the agent lives on. The double-click menu places
-page content or host agents — including your plugin templates
-(`fantastic readme templates`).
-
-Backends link by cargo feature (`vllm`, `ollama`, `responses`, `anthropic`,
-`foundation-models`). Live e2e:
-[`src/tui/e2e/tests/`](src/tui/e2e/tests/).
+```sh
+fantastic                       # the terminal UI
+fantastic canvas                # plus the browser canvas
+fantastic ai vllm -p PORT       # the root AI on a backend (ollama, responses, anthropic too)
+fantastic mcp                   # MCP over stdio
+fantastic readme [key]          # the docs
+```
 
 <!-- /CLI SECTION -->
 
-## Repo layout
+## Runtimes
 
-| path | content |
-|---|---|
-| [`src/lib/python/`](src/lib/python/) | reference host kernel + bundles + tests + selftests |
-| [`src/lib/swift/`](src/lib/swift/) | Apple-platform host kernel — multi-platform + macOS-Pro tiers, iOS-safe embedded slice |
-| [`src/lib/rust/`](src/lib/rust/) | pure-Rust host kernel — server / CLI, `full` + `embedded` feature tiers |
-| [`src/lib/ts/`](src/lib/ts/) | browser frontend kernel (views as agents), served by any host from `ts/dist` |
-| [`container/`](container/) | one universal OCI image (podman/docker, amd64+arm64) — python + rust kernels + embedded JS bundle; runtime chosen at launch; headless API + headful page on one port |
-| [`integration_tests/`](integration_tests/) | cross-runtime bridge matrix (pytest) + `py_ts/` browser/e2e |
-| [`.github/workflows/`](.github/workflows/) | CI — python lint/tests, swift lint, codeql, spellcheck |
-| [`src/tui/`](src/tui/) | the `fantastic` shell: the rust kernel in-process, a terminal UI, and `fantastic mcp` |
-| [`e2e/`](e2e/) | end-to-end scenarios and runners (live-model and free/CPU tiers) |
-| [`.claude/`](.claude/) | working notes and plans for Claude Code sessions |
+Three interchangeable hosts share one wire protocol and one `.fantastic/` workdir
+(one active per workdir), plus a browser frontend:
 
-## Status
+- [`src/lib/python/`](src/lib/python/): the reference; when runtimes disagree, Python is right
+- [`src/lib/rust/`](src/lib/rust/): server and CLI host
+- [`src/lib/swift/`](src/lib/swift/): Apple platforms, linked in-process by the
+  [Apple client](https://github.com/Alexadar/fantastic_app)
+- [`src/lib/ts/`](src/lib/ts/): the browser frontend kernel, served by any host
 
-|                                  | Python | Swift | Rust |
-|----------------------------------|--------|-------|------|
-| substrate                        | ✓ | ✓ | ✓ |
-| HTTP / WS / REST surfaces        | ✓ | ✓ | ✓ |
-| WS binary frames (incl. chunked) | ✓ | ✓ | ✓ |
-| io legs sealed-by-default (ingress rules) | ✓ | ✓ | ✓ |
-| all IO via gated `file_bridge` (deny-all `allow` list) | ✓ | ✓ | ✓ |
-| raw-bytes stream verbs (`read_stream`/`write_stream`) | ✓ | ✓ | ✓ |
-| binary forward over the bridge wire (WS + cloud) | ✓ | ✓ | ✓ |
-| reflect posture + `persistence.provider` | ✓ | ✓ | ✓ |
-| sidecars persist through the loader (`persist_blob`) | ✓ | ✓ | ✓ |
-| LLM backend bundles              | ollama / NIM / Anthropic / llama.cpp / Responses | same | same |
-| exec_bridge PTY jobs             | ✓ | ✓ (macOS only) | ✓ |
-| serves the `src/lib/ts/` frontend        | ✓ | ✓ | ✓ |
-| Apple in-process linking         | n/a | ✓ SwiftPM | n/a |
-| feature gates                    | n/a | Pro / Lite | full / embedded |
-| cross-runtime workdir loading    | ✓ | ✓ | ✓ |
-| weak-load contract               | ✓ | ✓ | ✓ |
-
-## Contributing
-
-All host runtimes share the wire contract — any change that affects the
-HTTP/WS protocol, the `.fantastic/` on-disk format, or the reflect
-contract needs to land in every host. Lint + test commands per runtime
-are in the respective READMEs.
-
-Commits and pushes require explicit consent per project convention.
+A change to the protocol, the on-disk format or `reflect` lands in every host.
 
 ## License & brand
 
-The source in this repository — the kernels (`src/lib/python/`, `src/lib/swift/`, `src/lib/rust/`)
-and the browser frontend (`src/lib/ts/`) — is licensed **AGPL-3.0-or-later**
-([`LICENSE`](LICENSE) at the repo root). If you run a modified kernel as a
-network service, AGPL §13 requires you to offer that modified source to its
-users.
+AGPL-3.0-or-later ([`LICENSE`](LICENSE)). This repo, the
+[Apple client](https://github.com/Alexadar/fantastic_app) and the
+[relay](https://github.com/Alexadar/fantastic_relay) are one product family by
+Koreniuk Oleksandr (aisixteen, kvazis@gmail.com).
 
-This kernel is **not an independent project.** It, the
-[Aisixteen Fantastic Apple client](https://github.com/Alexadar/fantastic_app)
-and the [relay-kernel router](https://github.com/Alexadar/fantastic_relay)
-are by the **same author — Koreniuk Oleksandr (aisixteen, kvazis@gmail.com)**
-— and form one product family under one license (AGPL-3.0-or-later). The
-client links this Swift kernel directly as a dependency; the relay is the
-relay-KERNEL router the `relay_connector` bundle dials to reach kernels across
-networks. The relay is a thin **directory + router**: kernels and **managers**
-(an app — incl. a headless `app --headless` — that owns kernels and exposes
-control) join the same group and appear in its live directory (`list_peers`),
-each typed by `role` (`manager`/`kernel`), `owner_guid`, and an advertised
-`exposes` control surface. **Reach ≠ control** — the directory says who owns what;
-a manager drives another manager's kernel by `forward`ing the lifecycle verb to
-that owner. The `relay_connector` advertises this typing via `set_identity`; the
-relay stores + reflects it without interpreting it.
-
-**Trademark carve-out (AGPL §7):** **AISIXTEEN®** (word and robot-head design;
-U.S. Reg. No. 7,238,635; Int'l Reg. No. 1720602) is a registered trademark of
-Koreniuk Oleksandr Vasylovych; **"Aisixteen Fantastic"** is a trademark of the
-same owner. The license covers the code only — it grants **no** rights in these
-marks, so a fork must ship under a different name. The `.fantastic` workdir format is treated as a
-brand asset of the project.
-
-Any managed cloud / relay / sync layer is a separate offering, separately
-licensed, and is not part of this repository.
+**Trademarks (AGPL §7):** **AISIXTEEN®** (U.S. Reg. No. 7,238,635; Int'l Reg. No.
+1720602) is a registered trademark of Koreniuk Oleksandr Vasylovych; "Aisixteen
+Fantastic" is a trademark of the same owner. The license grants no rights in these
+marks, so a fork must ship under a different name.

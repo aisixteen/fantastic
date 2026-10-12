@@ -1,7 +1,7 @@
 # WHAT to measure and HOW LONG to allow — never a model or an endpoint. Scripted: no model.
 id: setup_wizard
 group: canvas
-title: "the AI set-up wizard: skip leaves an AI cell that says how to set it up; its settings run the wizard (provider → details → create), which saves a default template and binds the cell; a failed turn offers settings; ⚙ changes the agent live"
+title: "the AI set-up wizard: skip leaves an AI cell that says how to set it up; its settings run the wizard (provider → details → create), which saves a default set-up and binds the cell; a failed turn offers settings; ⚙ changes the agent live"
 runner: probe.py
 costs: free
 limits:

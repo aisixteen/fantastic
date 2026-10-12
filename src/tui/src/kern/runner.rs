@@ -118,23 +118,23 @@ impl Runner {
                 let r = crate::kern::keys::mode().map(|(m, w)| (m.map(|m| m.name().to_string()), w));
                 self.got(Got::KeyMode(r)).await;
             }
-            Cmd::Templates => self.got(Got::Templates(crate::kern::templates::shelf(&self.host).await)).await,
-            Cmd::SaveTemplate { name, record } => {
-                let r = crate::kern::templates::save(&self.host, name, record.clone()).await.map(|path| {
+            Cmd::Saved => self.got(Got::Saved(crate::kern::saved::shelf(&self.host).await)).await,
+            Cmd::Save { name, record } => {
+                let r = crate::kern::saved::save(&self.host, name, record.clone()).await.map(|path| {
                     format!(
-                        "saved as template `{name}` at {path} — LOAD TEMPLATE brings it back any time; d on it makes it your default for new AI agents"
+                        "saved as `{name}` at {path} — LOAD SAVED brings it back any time; d on it makes it your default for new AI agents"
                     )
                 });
                 self.got(Got::Setup(r)).await;
-                self.got(Got::Templates(crate::kern::templates::shelf(&self.host).await)).await;
+                self.got(Got::Saved(crate::kern::saved::shelf(&self.host).await)).await;
             }
-            Cmd::PreferTemplate { name } => {
-                let r = crate::kern::templates::prefer(&self.host, name.as_deref()).await.map(|p| match p {
+            Cmd::Prefer { name } => {
+                let r = crate::kern::saved::prefer(&self.host, name.as_deref()).await.map(|p| match p {
                     Some(n) => format!("`{n}` is your default for new AI agents"),
-                    None => "no default AI template — new AI agents start from nothing".to_string(),
+                    None => "no default AI set-up — new AI agents start from nothing".to_string(),
                 });
                 self.got(Got::Setup(r)).await;
-                self.got(Got::Templates(crate::kern::templates::shelf(&self.host).await)).await;
+                self.got(Got::Saved(crate::kern::saved::shelf(&self.host).await)).await;
             }
             Cmd::WriteAi(rec) => {
                 let mut r = crate::kern::setup::write(&self.host, rec).await;

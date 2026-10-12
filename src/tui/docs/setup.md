@@ -1,4 +1,4 @@
-> Setting up an AI agent: the backend's record schema, keys in the credential store, templates — the human's choices.
+> Setting up an AI agent: the backend's record schema, keys in the credential store, saved set-ups — the human's choices.
 
 # Setting up an AI agent
 
@@ -34,7 +34,7 @@ its targets and `memory`), grants both sides, boots and flushes it.
 
   ```
   <home>/
-  ├── agents/ai_agent/templates/   saved set-ups (+ .preferred, the default)
+  ├── agents/ai_agent/saved/       saved set-ups (+ .preferred, the default)
   ├── agents/ai_agent/keys/        mode, refs.json (refs, no values), credentials.yaml (plain mode)
   └── fantastics/                  stored fantastic locations (the user store)
   ```
@@ -53,8 +53,12 @@ its targets and `memory`), grants both sides, boots and flushes it.
   `secret` mark, so no row, ledger, reflect or stream holds it. An AI model
   never calls the store (`holds_secrets: true`).
 
-## Templates
+## Saved set-ups
 
-A record can be saved as a named template (no id, key or grants in it) in
-`<home>`, loaded back into the page, and one marked the default — the canvas's
-action popup spawns AI cells from them.
+The AI agent's own data in its user folder: a record saved under a name
+(`<home>/agents/ai_agent/saved/<name>.yaml` — an AI backend's `handler_module`
+and its config, no id, key value or grants), loaded back into a set-up page, and
+one marked the default (`.preferred`). The double-click's `AI agent` makes a new
+AI agent from the default; another one is the AI cell's ⚙ settings → `‹ other
+set-ups`. A saved record on a handler that is not an AI is refused. Only the human
+saves them (a set-up page, or a file there): the home store serves the CLI alone.

@@ -4,7 +4,7 @@ free: the endpoint is unreachable on purpose (no model is called).
 1. "AI agent" from the double-click opens page 1 (saved providers + the four new
    ones); SKIP leaves an AI cell that is "not set up yet".
 2. That cell's ⚙ settings runs the wizard FOR it: vllm → page 2 (name auto,
-   URL filled) → create: the template is saved and made the default, and the
+   URL filled) → create: the saved set-up is saved and made the default, and the
    SAME cell is bound to the new AI (the wizard closes).
 3. A turn fails (nothing listens at the URL): the chat offers settings.
 4. The cell's ⚙ chip opens its settings (page 2, its values); a changed model
@@ -20,7 +20,7 @@ from pathlib import Path
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from _lib.canvas_live import other_setups, Rig, say, spot, verdict, tpl_dir  # noqa: E402
+from _lib.canvas_live import other_setups, Rig, say, spot, verdict, saved_dir  # noqa: E402
 
 BTN = "((t)=>[...document.querySelectorAll('.wiz button')].find(b=>b.textContent.trim().startsWith(t)))"
 
@@ -28,7 +28,7 @@ BTN = "((t)=>[...document.querySelectorAll('.wiz button')].find(b=>b.textContent
 def main() -> bool:
     rig = Rig(__file__, live=False)
     rig.build("vllm")
-    rig.make_home(None)  # no template: the wizard makes the first
+    rig.make_home(None)  # no saved set-up: the wizard makes the first
     r: dict = {}
     info: dict = {}
     try:
@@ -91,7 +91,7 @@ def main() -> bool:
                 await pg.until("(document.querySelector('.wiz .say')?.textContent||'').includes('saved')", 15)
                 info["saved_say"] = await pg.js("document.querySelector('.wiz .say')?.textContent")
                 await asyncio.sleep(2.0)
-                # EDIT the saved provider: its template rewritten under its name —
+                # EDIT the saved provider: its saved set-up rewritten under its name —
                 # page 1 is the cell's ⚙ → `‹ other set-ups` (no menu tile for it)
                 await pg.until("!document.querySelector('.wiz')", 10)
                 await other_setups(pg, cell)
@@ -112,9 +112,9 @@ def main() -> bool:
         r["skip_leaves_not_set_up_cell"] = "Press settings to set me up" in (info.get("not_set_up") or "")
         p2 = dict(info.get("page2") or [])
         r["page2_name_auto_url_filled"] = p2.get("name") == "vllm-1" and p2.get("URL") == "http://127.0.0.1:8000/v1"
-        tpl = tpl_dir(rig.home) / "vllm-1.yaml"
-        pref = tpl_dir(rig.home) / ".preferred"
-        r["template_saved_and_default"] = tpl.exists() and pref.exists() and pref.read_text().strip() == "vllm-1"
+        tpl = saved_dir(rig.home) / "vllm-1.yaml"
+        pref = saved_dir(rig.home) / ".preferred"
+        r["saved_and_default"] = tpl.exists() and pref.exists() and pref.read_text().strip() == "vllm-1"
         sv = dict(info.get("settings_values") or [])
         r["settings_show_its_values"] = (info.get("settings_title") or "").startswith("Settings · vllm-1") and sv.get("URL") == "http://127.0.0.1:9/v1" and sv.get("model") == "x"
         cellrec = next((c for c in rig.cells() if c.get("id") == info.get("cell")), {})
@@ -123,9 +123,9 @@ def main() -> bool:
         rec = rig.host_record(ai) if ai else None
         info["ai_model"] = (rec or {}).get("model")
         r["url_without_scheme_refused"] = "http://" in (info.get("no_scheme_say") or "")
-        tdoc = yaml.safe_load((tpl_dir(rig.home) / "vllm-1.yaml").read_text()) if (tpl_dir(rig.home) / "vllm-1.yaml").exists() else {}
-        info["template_model"] = tdoc.get("model")
-        r["saved_provider_edit_rewrites_template"] = "saved" in (info.get("edit_say") or "") and tdoc.get("model") == "edited-model"
+        tdoc = yaml.safe_load((saved_dir(rig.home) / "vllm-1.yaml").read_text()) if (saved_dir(rig.home) / "vllm-1.yaml").exists() else {}
+        info["saved_model"] = tdoc.get("model")
+        r["saved_provider_edit_rewrites_its_file"] = "saved" in (info.get("edit_say") or "") and tdoc.get("model") == "edited-model"
         r["settings_save_live"] = "saved" in (info.get("saved_say") or "") and (rec or {}).get("model") == "y"
     finally:
         rig.stop()

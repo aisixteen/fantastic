@@ -154,10 +154,20 @@ export const CANVAS_CSS = `
   .term-last[hidden] { display: none; }
   .term-last .cmd { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   .term-last .cmd::before { content: "↺ "; opacity: .6; }
-  .term-last .run { pointer-events: auto; flex: 0 0 auto; font: 600 11px ui-monospace, SFMono-Regular, monospace; color: #0d1a12;
-    background: #7ee2a8; border: 0; border-radius: 5px; padding: 3px 9px; cursor: pointer; }
-  .term-last .run[hidden] { display: none; }
-  .term-last .run:hover { background: #a5f0c5; }
+  /* STOPPED (owner 2026-10-12): no live job past its first start — nothing starts
+     on its own; the human's ▶ does */
+  .term-stopped { position: absolute; inset: 0; z-index: 4; display: flex; align-items: center; justify-content: center;
+    background: rgba(6, 6, 12, 0.66); backdrop-filter: blur(2px); }
+  .term-stopped[hidden] { display: none; }
+  .term-stopped .box { max-width: 80%; padding: 14px 16px; border-radius: 10px; background: rgba(17, 17, 26, 0.92);
+    border: 1px solid rgba(255, 255, 255, 0.10); color: #e5e5e5; font: 12.5px/1.4 system-ui, sans-serif; text-align: center; }
+  .term-stopped .title { font-weight: 650; font-size: 13.5px; margin-bottom: 4px; }
+  .term-stopped .note { color: rgba(229, 229, 229, 0.62); margin-bottom: 10px; }
+  .term-stopped .row { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
+  .term-stopped button { font: 600 12px ui-monospace, SFMono-Regular, monospace; color: #0d1a12; background: #7ee2a8; border: 0;
+    border-radius: 6px; padding: 5px 12px; cursor: pointer; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .term-stopped button:hover { background: #a5f0c5; }
+  .term-stopped button[hidden] { display: none; }
   /* THE SIDEBAR and CANVAS-LIST cells (side_view.ts): a cell's body, scrolling */
   .side { height: 100%; overflow-y: auto; box-sizing: border-box; padding: 8px 0 6px; display: flex; flex-direction: column;
     color: rgba(220,230,245,0.85); font: 12px ui-monospace, SFMono-Regular, monospace; }

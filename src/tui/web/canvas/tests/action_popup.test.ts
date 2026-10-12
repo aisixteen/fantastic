@@ -8,7 +8,7 @@ const P: Presets = {
   dialogs: [{ id: "ai_1", name: "release notes" }],
 };
 
-test("empty: two groups — host (AI agent, terminal, python agent, mcp connector, user store), page (html, stream, tree view, canvas theme, tips) — then chats; no AI template tiles", () => {
+test("empty: two groups — host (AI agent, terminal, python agent, mcp connector, user store), page (html, stream, tree view, canvas theme, tips) — then chats; no AI saved set-up tiles", () => {
   const t = tiles("", P);
   assert.deepEqual(t.map((x) => x.label), ["AI agent", "terminal", "python agent", "mcp connector", "user store", "html", "stream", "tree view", "canvas theme", "tips", "release notes"]);
   assert.deepEqual(t.find((x) => x.label === "python agent")!.pick, { kind: "bundle", starter: "python_agent" });
@@ -58,7 +58,7 @@ test("grid moves: across by 1, down/up by a row, clamped", () => {
 test("AI set-ups are the AI agent's option, not the menu's: no tile, and `@name` is plain text", () => {
   assert.ok(!tiles("", P).some((x) => x.label.startsWith("@")), "no set-up tiles on an empty field");
   assert.deepEqual(tiles("@box hi", P).map((x) => x.pick), [{ kind: "ai", text: "@box hi" }], "`@name` no longer picks one: it is the default's first turn");
-  assert.deepEqual(tiles("bo", P).map((x) => x.label), ["AI agent · gpt5"], "typing a template's name shows no tile for it");
+  assert.deepEqual(tiles("bo", P).map((x) => x.label), ["AI agent · gpt5"], "typing a saved set-up's name shows no tile for it");
   assert.equal(tiles("", P)[0]!.hint, "★ gpt5", "the default is named on the AI agent tile");
 });
 

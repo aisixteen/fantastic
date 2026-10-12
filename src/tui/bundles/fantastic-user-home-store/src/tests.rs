@@ -8,7 +8,7 @@ use serde_json::{json, Map, Value};
 
 use super::*;
 
-/// A target bundle whose own rule a template must pass: it needs a `model`.
+/// A target bundle whose own rule a saved set-up must pass: it needs a `model`.
 struct NeedsModel;
 
 #[async_trait]
@@ -65,19 +65,19 @@ fn err(v: &Value) -> &str {
 }
 
 #[tokio::test]
-async fn a_template_saves_lists_and_forgets_as_a_private_file() {
+async fn a_saved_setup_saves_lists_and_forgets_as_a_private_file() {
     let td = tempfile::tempdir().unwrap();
     let home = td.path().join("home"); // created by the store, 0700
     let k = kernel(&home);
     let rec = json!({"handler_module": "demo_backend.tools", "model": "m-1", "endpoint": "http://127.0.0.1:9"});
     let saved = call(&k, "user", json!({"type": "persist_record", "name": "opus", "record": rec})).await;
     assert!(saved.get("version").is_some(), "{saved}");
-    let file = home.join("agents/ai_agent/templates/opus.yaml");
+    let file = home.join("agents/ai_agent/saved/opus.yaml");
     assert_eq!(fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
-    assert_eq!(fs::metadata(home.join("agents/ai_agent/templates")).unwrap().permissions().mode() & 0o777, 0o700);
+    assert_eq!(fs::metadata(home.join("agents/ai_agent/saved")).unwrap().permissions().mode() & 0o777, 0o700);
     let tree = call(&k, "user", json!({"type": "load_tree"})).await;
-    assert_eq!(tree["templates"][0]["name"], "opus");
-    assert_eq!(tree["templates"][0]["record"]["model"], "m-1");
+    assert_eq!(tree["saved"][0]["name"], "opus");
+    assert_eq!(tree["saved"][0]["record"]["model"], "m-1");
     assert_eq!(tree["preferred"], Value::Null, "nothing is a default until the owner says so");
     let gone = call(&k, "user", json!({"type": "forget_record", "name": "opus"})).await;
     assert_eq!(gone["forgotten"], true, "{gone}");
@@ -85,7 +85,7 @@ async fn a_template_saves_lists_and_forgets_as_a_private_file() {
 }
 
 #[tokio::test]
-async fn a_template_carries_no_identity_wiring_or_grants_and_passes_its_bundle() {
+async fn a_saved_setup_carries_no_identity_wiring_or_grants_and_passes_its_bundle() {
     let td = tempfile::tempdir().unwrap();
     let home = td.path().join("home"); // created by the store, 0700
     let k = kernel(&home);
@@ -109,12 +109,12 @@ async fn only_the_cli_is_served_whatever_a_record_grants() {
     let home = td.path().join("home"); // created by the store, 0700
     let k = kernel(&home);
     // a read creates nothing on the user's disk
-    assert!(call(&k, "user", json!({"type": "load_tree"})).await["templates"].as_array().unwrap().is_empty());
+    assert!(call(&k, "user", json!({"type": "load_tree"})).await["saved"].as_array().unwrap().is_empty());
     assert!(!home.exists(), "listing an empty store must not create the home dir");
     // `home`'s record grants `ai` everything; the store still refuses it.
     let r = call(&k, "ai", json!({"type": "load_tree"})).await;
     assert_eq!(r["reason"], "unauthorized", "{r}");
-    assert!(call(&k, "user", json!({"type": "load_tree"})).await.get("templates").is_some());
+    assert!(call(&k, "user", json!({"type": "load_tree"})).await.get("saved").is_some());
 }
 
 #[tokio::test]
@@ -128,19 +128,19 @@ async fn a_stale_save_is_refused_and_a_loose_file_is_refused_naming_the_chmod() 
     call(&k, "user", json!({"type": "persist_record", "name": "opus", "record": {"handler_module": "demo_backend.tools", "model": "m-2"}})).await;
     let r = call(&k, "user", json!({"type": "persist_record", "name": "opus", "record": rec, "if_match": v1})).await;
     assert_eq!(r["arg"], "if_match", "a lost update is refused: {r}");
-    let file = home.join("agents/ai_agent/templates/opus.yaml");
+    let file = home.join("agents/ai_agent/saved/opus.yaml");
     fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
     let r = call(&k, "user", json!({"type": "load_tree"})).await;
     assert!(r["hint"].as_str().unwrap_or("").starts_with("chmod 600"), "{r}");
 }
 
 #[tokio::test]
-async fn the_default_is_explicit_and_forgetting_its_template_clears_it() {
+async fn the_default_is_explicit_and_forgetting_its_saved_setup_clears_it() {
     let td = tempfile::tempdir().unwrap();
     let home = td.path().join("home"); // created by the store, 0700
     let k = kernel(&home);
     let r = call(&k, "user", json!({"type": "prefer", "name": "opus"})).await;
-    assert_eq!(r["reason"], "not_found", "no default for a template that does not exist: {r}");
+    assert_eq!(r["reason"], "not_found", "no default for a saved set-up that does not exist: {r}");
     call(&k, "user", json!({"type": "persist_record", "name": "opus", "record": {"handler_module": "demo_backend.tools", "model": "m"}})).await;
     assert_eq!(call(&k, "user", json!({"type": "prefer", "name": "opus"})).await["preferred"], "opus");
     assert_eq!(call(&k, "user", json!({"type": "load_tree"})).await["preferred"], "opus");

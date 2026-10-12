@@ -18,7 +18,7 @@ pub mod model;
 pub mod runner;
 pub mod setup;
 pub mod setup_agent;
-pub mod templates;
+pub mod saved;
 pub mod term_watch;
 pub mod user_store;
 pub mod terminal;

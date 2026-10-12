@@ -19,9 +19,9 @@
 //! keychain item). ← → picks, enter applies (moving any stored keys); there is
 //! no default, and `k` is refused until one is chosen. The line says where.
 //!
-//! TEMPLATES (`kern/templates`): the backend and its set fields can be SAVED
+//! SAVED SET-UPS (`kern/saved`): the backend and its set fields can be SAVED
 //! under a name the human types (never derived) in the user's home config dir,
-//! and LOADED back into the page later, in any project. `d` on a saved template
+//! and LOADED back into the page later, in any project. `d` on a saved set-up
 //! makes it the default for new AI agents — nothing is a default until then.
 //!
 //! Handing the page to a coder in the in-app terminal is future work: a coder
@@ -53,8 +53,8 @@ pub enum Line_ {
     Write,
     KeyMode,
     TplName,
-    TplSave,
-    TplPick,
+    SavedSave,
+    SavedPick,
 }
 
 pub struct SetupPanel {
@@ -72,11 +72,11 @@ pub struct SetupPanel {
     key: Option<String>,
     /// The last write or key store.
     result: Option<Result<String, String>>,
-    /// The name to save the template under — typed, never derived.
-    tpl_name: String,
-    /// The saved templates, once read (or why they cannot be).
-    shelf: Option<Result<crate::kern::templates::Shelf, String>>,
-    /// Which saved template LOAD / `d` act on.
+    /// The name to save the saved set-up under — typed, never derived.
+    saved_name: String,
+    /// The saved set-ups, once read (or why they cannot be).
+    shelf: Option<Result<crate::kern::saved::Shelf, String>>,
+    /// Which saved set-up LOAD / `d` act on.
     pick: Option<usize>,
     /// Where keys are kept (mode `None` until chosen, and where), once read.
     key_mode: Option<Result<(Option<String>, String), String>>,
@@ -106,7 +106,7 @@ impl SetupPanel {
             editing: None,
             key: None,
             result: None,
-            tpl_name: String::new(),
+            saved_name: String::new(),
             shelf: None,
             pick: None,
             key_mode: None,
@@ -124,27 +124,27 @@ impl SetupPanel {
         self.key_mode.as_ref()?.as_ref().ok()?.0.as_deref()
     }
 
-    pub fn set_shelf(&mut self, s: Result<crate::kern::templates::Shelf, String>) {
-        let n = s.as_ref().map_or(0, |s| s.templates.len());
+    pub fn set_shelf(&mut self, s: Result<crate::kern::saved::Shelf, String>) {
+        let n = s.as_ref().map_or(0, |s| s.saved.len());
         self.pick = self.pick.filter(|i| *i < n).or((n > 0).then_some(0));
         self.shelf = Some(s);
     }
 
-    fn picked(&self) -> Option<&crate::kern::templates::Template> {
+    fn picked(&self) -> Option<&crate::kern::saved::Saved> {
         let shelf = self.shelf.as_ref()?.as_ref().ok()?;
-        self.pick.and_then(|i| shelf.templates.get(i))
+        self.pick.and_then(|i| shelf.saved.get(i))
     }
 
-    /// Fill the page from the picked template: the handler (when this build
+    /// Fill the page from the picked saved set-up: the handler (when this build
     /// links it), the model and the endpoint. The id stays the human's.
     fn load_picked(&mut self) {
         let Some(t) = self.picked().cloned() else {
-            self.result = Some(Err("no saved template to load".into()));
+            self.result = Some(Err("no saved set-up to load".into()));
             return;
         };
         let at = self.backends.as_ref().and_then(|b| b.iter().position(|h| h.module == t.handler()));
         let Some(i) = at else {
-            self.result = Some(Err(format!("template `{}` needs {}, which this build does not link", t.name, t.handler())));
+            self.result = Some(Err(format!("saved set-up `{}` needs {}, which this build does not link", t.name, t.handler())));
             return;
         };
         self.pick_handler(i);
@@ -154,8 +154,8 @@ impl SetupPanel {
             }
         }
         // the page grew by the backend's fields: the cursor stays on LOAD
-        self.at = self.lines().iter().position(|l| *l == Line_::TplPick).unwrap_or(0);
-        self.result = Some(Ok(format!("loaded template `{}` — give it an id, then WRITE THE RECORD", t.name)));
+        self.at = self.lines().iter().position(|l| *l == Line_::SavedPick).unwrap_or(0);
+        self.result = Some(Ok(format!("loaded saved set-up `{}` — give it an id, then WRITE THE RECORD", t.name)));
     }
 
     pub fn set_backends(&mut self, b: Vec<Backend>) {
@@ -184,14 +184,14 @@ impl SetupPanel {
     }
 
     /// The page's lines, in order: the record (required fields), WRITE, the
-    /// optional fields, keys, templates.
+    /// optional fields, keys, saved set-ups.
     fn lines(&self) -> Vec<Line_> {
         let f = self.fields();
         let mut v = vec![Line_::Id, Line_::Handler];
         v.extend((0..f.len()).filter(|i| f[*i].required).map(Line_::Field));
         v.extend([Line_::MayCall, Line_::Write]);
         v.extend((0..f.len()).filter(|i| !f[*i].required).map(Line_::Field));
-        v.extend([Line_::KeyMode, Line_::TplName, Line_::TplSave, Line_::TplPick]);
+        v.extend([Line_::KeyMode, Line_::TplName, Line_::SavedSave, Line_::SavedPick]);
         v
     }
 
@@ -203,7 +203,7 @@ impl SetupPanel {
     pub fn set_result(&mut self, r: Result<String, String>) {
         if r.is_ok() && self.key.is_none() && self.result_is_write(&r) {
             // Written: the id and who it may call start over for the next agent;
-            // the backend and its fields STAY, to save as a template right away.
+            // the backend and its fields STAY, to save it right away.
             self.id.clear();
             self.may_call.clear();
             self.at = 0;
@@ -268,8 +268,8 @@ impl SetupPanel {
                 Some(self.values.entry(name).or_default())
             }
             Line_::MayCall => Some(&mut self.may_call),
-            Line_::TplName => Some(&mut self.tpl_name),
-            Line_::Handler | Line_::Write | Line_::KeyMode | Line_::TplSave | Line_::TplPick => None,
+            Line_::TplName => Some(&mut self.saved_name),
+            Line_::Handler | Line_::Write | Line_::KeyMode | Line_::SavedSave | Line_::SavedPick => None,
         }
     }
 
@@ -389,17 +389,17 @@ impl Panel for SetupPanel {
                 Some(_) => {}
                 None => self.result = Some(Err("pick plain or secure with ← →, then enter".into())),
             },
-            KeyCode::Left | KeyCode::Right if line == Line_::TplPick => {
-                let n = self.shelf.as_ref().and_then(|s| s.as_ref().ok()).map_or(0, |s| s.templates.len());
+            KeyCode::Left | KeyCode::Right if line == Line_::SavedPick => {
+                let n = self.shelf.as_ref().and_then(|s| s.as_ref().ok()).map_or(0, |s| s.saved.len());
                 if n > 0 {
                     let i = self.pick.unwrap_or(0);
                     self.pick = Some(if k.code == KeyCode::Left { (i + n - 1) % n } else { (i + 1) % n });
                 }
             }
-            KeyCode::Enter if line == Line_::TplSave => {
+            KeyCode::Enter if line == Line_::SavedSave => {
                 let mut miss: Vec<String> = Vec::new();
-                if self.tpl_name.trim().is_empty() {
-                    miss.push("template name".into());
+                if self.saved_name.trim().is_empty() {
+                    miss.push("saved set-up name".into());
                 }
                 miss.extend(self.missing().into_iter().filter(|m| m != "id"));
                 match self.record() {
@@ -409,16 +409,16 @@ impl Panel for SetupPanel {
                         // the backend and every field set — never the id, the key or grants
                         let mut record = rec.fields;
                         record.insert("handler_module".into(), serde_json::json!(rec.handler));
-                        out.push(Cmd::SaveTemplate { name: self.tpl_name.trim().to_string(), record: Value::Object(record) });
+                        out.push(Cmd::Save { name: self.saved_name.trim().to_string(), record: Value::Object(record) });
                     }
                 }
             }
-            KeyCode::Enter if line == Line_::TplPick => self.load_picked(),
-            KeyCode::Char('d') if line == Line_::TplPick => {
+            KeyCode::Enter if line == Line_::SavedPick => self.load_picked(),
+            KeyCode::Char('d') if line == Line_::SavedPick => {
                 if let Some(t) = self.picked() {
                     let is_default = self.shelf.as_ref().and_then(|s| s.as_ref().ok()).and_then(|s| s.preferred.as_deref())
                         == Some(t.name.as_str());
-                    out.push(Cmd::PreferTemplate { name: (!is_default).then(|| t.name.clone()) });
+                    out.push(Cmd::Prefer { name: (!is_default).then(|| t.name.clone()) });
                 }
             }
             KeyCode::Enter if line == Line_::Write => match (self.missing(), self.record()) {
@@ -448,7 +448,7 @@ impl Panel for SetupPanel {
     fn on_select(&mut self, _cx: &Cx<'_>, out: &mut Vec<Cmd>) {
         out.push(Cmd::Backends);
         out.push(Cmd::KeyMode);
-        out.push(Cmd::Templates);
+        out.push(Cmd::Saved);
     }
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
@@ -636,16 +636,16 @@ impl Panel for SetupPanel {
                 Err(e) => Line::from(Span::styled(format!("  ✕ {e}"), Style::default().fg(theme::FAILED).add_modifier(Modifier::BOLD))),
             });
         }
-        // ── TEMPLATES ─────────────────────────────────────────────────────
+        // ── SAVED SET-UPS ─────────────────────────────────────────────────────
         lines.push(Line::from(""));
-        lines.push(rule("TEMPLATES — REUSE IT IN ANY PROJECT"));
+        lines.push(rule("SAVED — REUSE IT IN ANY PROJECT"));
         lines.push(Line::from(""));
         let row_cur = |l: Line_| at == l && self.key.is_none();
         let arrow = |c: bool| Span::styled(if c { "  ▸ " } else { "    " }, Style::default().fg(theme::ACCENT_HI));
         let name_shown = match &self.editing {
             Some((Line_::TplName, buf)) => format!("{buf}▌"),
-            _ if self.tpl_name.is_empty() => "— not set —".to_string(),
-            _ => self.tpl_name.clone(),
+            _ if self.saved_name.is_empty() => "— not set —".to_string(),
+            _ => self.saved_name.clone(),
         };
         lines.push(Line::from(vec![
             arrow(row_cur(Line_::TplName)),
@@ -654,14 +654,14 @@ impl Panel for SetupPanel {
             Span::styled("   what to call it — you choose; letters, digits, - _", dim),
         ]));
         lines.push(Line::from(vec![
-            arrow(row_cur(Line_::TplSave)),
-            Span::styled(" SAVE AS TEMPLATE ", if row_cur(Line_::TplSave) { bold.add_modifier(Modifier::REVERSED) } else { bold }),
+            arrow(row_cur(Line_::SavedSave)),
+            Span::styled(" SAVE ", if row_cur(Line_::SavedSave) { bold.add_modifier(Modifier::REVERSED) } else { bold }),
             Span::styled("   the backend + every field set — never the key, the id or grants", dim),
         ]));
         let (pick_text, pick_note) = match &self.shelf {
-            None => ("reading your templates…".to_string(), String::new()),
+            None => ("reading your saved set-ups…".to_string(), String::new()),
             Some(Err(e)) => (format!("unavailable: {e}"), String::new()),
-            Some(Ok(s)) if s.templates.is_empty() => ("— none saved yet —".to_string(), format!("   in {}", s.dir)),
+            Some(Ok(s)) if s.saved.is_empty() => ("— none saved yet —".to_string(), format!("   in {}", s.dir)),
             Some(Ok(s)) => {
                 let t = self.picked().cloned();
                 let name = t.as_ref().map_or(String::new(), |t| t.name.clone());
@@ -673,8 +673,8 @@ impl Panel for SetupPanel {
             }
         };
         lines.push(Line::from(vec![
-            arrow(row_cur(Line_::TplPick)),
-            Span::styled(" LOAD TEMPLATE ", if row_cur(Line_::TplPick) { bold.add_modifier(Modifier::REVERSED) } else { bold }),
+            arrow(row_cur(Line_::SavedPick)),
+            Span::styled(" LOAD SAVED ", if row_cur(Line_::SavedPick) { bold.add_modifier(Modifier::REVERSED) } else { bold }),
             Span::styled(format!(" {pick_text}"), fg),
             Span::styled(pick_note, dim),
         ]));
@@ -690,7 +690,7 @@ impl Panel for SetupPanel {
         )));
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            "  ↑ ↓ pick · enter edit / write / save / load · ← → handler, template · d default · esc leave",
+            "  ↑ ↓ pick · enter edit / write / save / load · ← → handler, saved · d default · esc leave",
             dim,
         )));
         f.render_widget(Paragraph::new(lines), area);
@@ -794,7 +794,7 @@ mod tests {
         }
         p.set_result(Ok("written to  x".into()));
         assert!(p.id.is_empty(), "a written record clears the id for the next one");
-        assert_eq!(p.handler_name(), Some("vllm_backend.tools"), "the backend stays, to save as a template");
+        assert_eq!(p.handler_name(), Some("vllm_backend.tools"), "the backend stays, to save it");
         assert_eq!(p.values["model"], "m-1", "and so do its fields");
     }
 
@@ -827,11 +827,11 @@ mod tests {
         assert!(out.is_empty() && p.key.is_none());
     }
 
-    fn shelf(names: &[(&str, &str)], preferred: Option<&str>) -> crate::kern::templates::Shelf {
-        crate::kern::templates::Shelf {
-            templates: names
+    fn shelf(names: &[(&str, &str)], preferred: Option<&str>) -> crate::kern::saved::Shelf {
+        crate::kern::saved::Shelf {
+            saved: names
                 .iter()
-                .map(|(n, h)| crate::kern::templates::Template {
+                .map(|(n, h)| crate::kern::saved::Saved {
                     name: n.to_string(),
                     version: "v".into(),
                     record: serde_json::json!({"handler_module": h, "model": format!("{n}-m"), "endpoint": format!("http://{n}")})
@@ -841,12 +841,12 @@ mod tests {
                 })
                 .collect(),
             preferred: preferred.map(str::to_string),
-            dir: "/home/.config/fantastic/templates".into(),
+            dir: "/home/.config/fantastic/agents/ai_agent/saved".into(),
         }
     }
 
     #[test]
-    fn a_template_is_saved_under_a_typed_name_without_id_or_grants() {
+    fn a_setup_is_saved_under_a_typed_name_without_id_or_grants() {
         let mut p = SetupPanel::new();
         p.set_backends(vec![be("responses_backend.tools")]);
         let mut keys = typed("docreader");
@@ -861,12 +861,12 @@ mod tests {
         keys.push(KeyCode::Enter); // SAVE with no name
         let out = drive(&mut p, &keys);
         assert!(out.is_empty());
-        assert!(matches!(&p.result, Some(Err(e)) if e == "missing: template name"), "{:?}", p.result);
+        assert!(matches!(&p.result, Some(Err(e)) if e == "missing: saved set-up name"), "{:?}", p.result);
         let mut keys = vec![KeyCode::Up];
         keys.extend(typed("opus"));
         keys.extend([KeyCode::Down, KeyCode::Enter]);
         match &drive(&mut p, &keys)[..] {
-            [Cmd::SaveTemplate { name, record }] => {
+            [Cmd::Save { name, record }] => {
                 assert_eq!(name, "opus");
                 assert_eq!(
                     record,
@@ -879,7 +879,7 @@ mod tests {
     }
 
     #[test]
-    fn a_saved_template_loads_into_the_page_and_d_toggles_the_default() {
+    fn a_saved_setup_loads_into_the_page_and_d_toggles_the_default() {
         let mut p = SetupPanel::new();
         p.set_backends(vec![be("vllm_backend.tools"), be("responses_backend.tools")]);
         p.set_shelf(Ok(shelf(&[("box", "vllm_backend.tools"), ("gpt", "responses_backend.tools")], Some("gpt"))));
@@ -890,20 +890,20 @@ mod tests {
         assert_eq!(p.handler_name(), Some("responses_backend.tools"));
         assert_eq!((p.values["model"].as_str(), p.values["endpoint"].as_str()), ("gpt-m", "http://gpt"));
         assert!(p.id.is_empty(), "the id stays the human's");
-        assert_eq!(p.line_at(), Line_::TplPick, "the cursor stays on LOAD as the page grows");
+        assert_eq!(p.line_at(), Line_::SavedPick, "the cursor stays on LOAD as the page grows");
         match &drive(&mut p, &[KeyCode::Char('d')])[..] {
-            [Cmd::PreferTemplate { name: None }] => {}
+            [Cmd::Prefer { name: None }] => {}
             other => panic!("d on the default clears it: {other:?}"),
         }
         drive(&mut p, &[KeyCode::Left]);
         match &drive(&mut p, &[KeyCode::Char('d')])[..] {
-            [Cmd::PreferTemplate { name: Some(n) }] => assert_eq!(n, "box"),
+            [Cmd::Prefer { name: Some(n) }] => assert_eq!(n, "box"),
             other => panic!("{other:?}"),
         }
     }
 
     #[test]
-    fn a_template_for_a_backend_this_build_lacks_is_said_not_half_loaded() {
+    fn a_saved_setup_for_a_backend_this_build_lacks_is_said_not_half_loaded() {
         let mut p = SetupPanel::new();
         p.set_backends(vec![be("responses_backend.tools")]);
         p.set_shelf(Ok(shelf(&[("q", "vllm_backend.tools")], None)));

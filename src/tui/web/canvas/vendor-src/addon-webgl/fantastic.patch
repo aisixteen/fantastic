@@ -339,9 +339,16 @@ index e3a2d0c..8f89090 100644
        console.warn('webglcontextrestored event received');
        clearTimeout(this._contextRestorationTimeout);
        this._contextRestorationTimeout = undefined;
-@@ -351,12 +352,28 @@ export class WebglRenderer extends Disposable implements IRenderer {
+@@ -351,12 +352,35 @@ export class WebglRenderer extends Disposable implements IRenderer {
        this._updateModel(start, end);
      }
++    // A MERGE WHILE THIS FRAME PLACED NEW GLYPHS moved the atlas pages: every row
++    // already in the model holds stale texture coords — rebuild them in this same
++    // frame, or they stay wrong until the terminal next draws (E66)
++    for (let i = 0; i < 3 && this._glyphRenderer.value.beginFrame(); i++) {
++      this._clearModel(true);
++      this._updateModel(0, this._terminal.rows - 1);
++    }
  
 -    // Render
 +    // Render — the shared context sized to this frame, the frame then handed

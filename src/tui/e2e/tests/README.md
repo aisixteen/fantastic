@@ -36,14 +36,14 @@ with `src/tui/e2e/wipe.sh`.
 | E54 `media` | video + audio play, before and after a reload | gaus final cuts, dawee WebAudio | scripted |
 | E55 `dev_surface` | an AI builds a reactive dev surface (controls, logs, app, status) | dara Compose + terminals + webapp | live |
 | E56 `dev_reactive` | a reference dev surface reacts to build / run / stop / edit | same | scripted |
-| E57 `setup_ai` | the set-up cell writes an agent + default template; both answer | owner: set-up is VERY important | live |
+| E57 `setup_ai` | the set-up cell writes an agent + default set-up; both answer | owner: set-up is VERY important | live |
 | E58 `prototype` | from an EMPTY canvas: a script, the exec agent that runs it, Start/Stop + a live log wired both ways; then a change (count by 10, the last value big) — scored by clicking | owner 2026-10-04: yes/no for the prototyping flow (a garage, no packaging) | live |
 | E59 `calc` | behind a SEEDED six-button panel (det, factor, simpson, roots, fib_mod, gcd_lcm) the AI writes `calc.py` + its own `test_calc.py` in one ask; scored by its tests, hidden vectors per function and every button | owner 2026-10-07: can the model write good multi-function code and test it |
 | E60 `bundle_flow` | a python agent's whole life: double-click → a new bundle + instance + view, live edits of logic (reload) and view (re-render), kept across a restart, copied into a release that lives on its own, then the AI updates the release and overwrites it from the working bundle | owner 2026-10-08: the a–f workflow; the AI must tell the BUNDLE (code) from the AGENT (an instance) |
 | E61 `canvas_cells` | scripted: a bare canvas (nothing floats), a FAKE coding agent first on PATH listed and launched exactly (it echoes), `sidebar` + `canvases` cells, `+ new canvas` opens an empty, isolated peer with its own records, a page bundle in its folder runs and re-renders on an edit | owner 2026-10-08: cells only, flat canvases, coding-agent launchers |
 | E62 `mcp_server` | scripted: the lib's fake MCP server; the `mcp connector` tile's form adds it, its view lists the server and its tools, the key is stored in the home (on no record) and sent as Bearer on every request, a tool answers, ⟳ lists again | owner 2026-10-08: MCP servers on the canvas |
 | E63 `prompt_file` | scripted (a stub model): `.fantastic/prompt.md` seeded with the default placeholders, the first turn's block is the default, the AI names the file, an edit is the block on the next turn with its id still filled; records never persist through the prompt bridge | owner 2026-10-08: the project's system block |
-| E64 `mcp_config` | scripted: a `.mcp.json` with another server; after boot it also holds `fantastic` → this binary + `[mcp]`, the other server and key order kept, a reboot leaves it byte-identical, no `mcp_config_error` | owner 2026-10-08: the mcp leg keeps .mcp.json |
+| E64 `mcp_config` | scripted: a `.fantastic/.mcp.json` with another server (nothing created outside `.fantastic`); after boot it also holds `fantastic` → this binary + `[mcp]`, the other server and key order kept, a reboot leaves it byte-identical, no `mcp_config_error` | owner 2026-10-08: the mcp leg keeps .mcp.json |
 
 ## Results — 2026-10-01, vLLM qwen3.8-27b, 2 lanes (the latest run of each)
 
@@ -60,7 +60,7 @@ kernel session) · a cell's `bytes` body arrives as raw bytes over the bridge
 the AI needs the canvas verbs on page cells (operand gating) · the background's
 contract stated + compiled before it is stored · the AI cell's button stayed
 on "stop" after an answer (so Send interrupted) · the set-up form forgot its
-fields after a write (so no template could be saved) · templates were checked
+fields after a write (so no saved set-up could be saved) · saved set-ups were checked
 as full agent records (demanding `memory_store_id`).
 Harness lessons: evidence from the host stream and the records, not the cell's
 tool lines; a "thinking" bubble or a busy phase pill is never "done"; untrusted

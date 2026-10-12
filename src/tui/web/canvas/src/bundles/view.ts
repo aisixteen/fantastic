@@ -26,10 +26,10 @@ export interface ViewContext {
 
 /** The canvas's own moves a view may ask for. */
 export interface CanvasActions {
-  /** an AI from saved template `template`: bound to AI cell `cell` when given
+  /** an AI from saved set-up `saved`: bound to AI cell `cell` when given
    *  (one not set up yet), else a new AI cell where view `from` sits; `from` (the
    *  wizard) closes */
-  spawnAi(template: string, from: string, cell?: string): Promise<void>;
+  spawnAi(saved: string, from: string, cell?: string): Promise<void>;
   /** an AI cell with no AI yet ("not set up"), where view `from` sits; `from` closes */
   skipAi(from: string): void;
   /** the AI set-up wizard — for AI cell `cell`; the settings of its AI `ai` when given */

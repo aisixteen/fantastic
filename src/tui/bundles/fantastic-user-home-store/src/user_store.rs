@@ -4,7 +4,7 @@
 //! ```text
 //!   <home>/
 //!   ├── agents/ai_agent/keys/      the stored keys (refs + hosts shown, never values)
-//!   ├── agents/ai_agent/templates/ the saved set-ups (names shown)
+//!   ├── agents/ai_agent/saved/ the saved set-ups (names shown)
 //!   └── fantastics/                0700   the stored LOCATIONS
 //!       └── <id>.yaml              0600   {path, name, stored_at, last_seen}
 //! ```
@@ -27,7 +27,7 @@ use fantastic_kernel::{AgentId, Kernel};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use crate::{private, private_dirs, read_private, secrets::Secrets, templates_dir, valid_name, write_private};
+use crate::{private, private_dirs, read_private, secrets::Secrets, saved_dir, valid_name, write_private};
 
 /// The `handler_module` this bundle answers to.
 pub const HANDLER_MODULE: &str = "user_store.tools";
@@ -102,8 +102,8 @@ impl UserStore {
             .into_iter()
             .map(|(r, h)| json!({"ref": r, "host": h}))
             .collect();
-        let tdir = templates_dir(home);
-        let mut templates: Vec<String> = fs::read_dir(&tdir)
+        let tdir = saved_dir(home);
+        let mut saved: Vec<String> = fs::read_dir(&tdir)
             .map(|rd| {
                 rd.flatten()
                     .filter_map(|e| e.file_name().to_str().and_then(|n| n.strip_suffix(".yaml")).map(str::to_string))
@@ -111,14 +111,14 @@ impl UserStore {
                     .collect()
             })
             .unwrap_or_default();
-        templates.sort();
+        saved.sort();
         let locations = self.locations()?;
         let stored = locations.iter().any(|l| l["here"] == true);
         Ok(json!({
             "home": home.display().to_string(),
             "here": {"path": self.here.display().to_string(), "stored": stored},
             "keys": keys,
-            "templates": templates,
+            "saved": saved,
             "locations": locations,
         }))
     }
@@ -195,7 +195,7 @@ impl Bundle for UserStore {
 
     fn verb_docs(&self) -> Value {
         json!({
-            "list": "No args. Returns {home, here: {path, stored}, keys: [{ref, host}] (never values), templates: [name], locations: [{id, path, name, stored_at, last_seen, here, exists}]}.",
+            "list": "No args. Returns {home, here: {path, stored}, keys: [{ref, host}] (never values), saved: [name], locations: [{id, path, name, stored_at, last_seen, here, exists}]}.",
             "store_here": "args: name:str? (default: the folder's name). Stores this fantastic's location. Returns {stored, id}.",
             "unstore": "args: path:str? (default: this fantastic). Returns {unstored}.",
             "unstore_others": "No args. Unstores every location but this one. Returns {unstored: [path]}.",
@@ -267,7 +267,7 @@ mod tests {
     }
 
     #[test]
-    fn keys_and_templates_are_listed_from_the_ai_agent_dir() {
+    fn keys_and_saved_setups_are_listed_from_the_ai_agent_dir() {
         let h = home();
         let s = Secrets::new(Ok(h.clone()));
         s.set_mode(crate::secrets::Mode::Plain).unwrap();

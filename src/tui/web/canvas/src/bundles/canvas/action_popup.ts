@@ -12,8 +12,8 @@
 // Your AI set-ups are NOT in the menu (owner 2026-10-12): the AI agent's is
 // chosen in its ⚙ settings (★ the default). Typing FILTERS the tiles; a kind
 // typed exactly offers only that kind; anything else becomes the
-// FIRST TURN of a new AI cell on the default template. With no default
-// template the first tile opens set-up instead — nothing is guessed. ←↑↓→ move
+// FIRST TURN of a new AI cell on the default set-up. With no default
+// saved set-up the first tile opens set-up instead — nothing is guessed. ←↑↓→ move
 // across the grid, ⏎ goes, esc / a click away closes; a pick replaces the popup.
 
 export type Pick =
@@ -66,7 +66,7 @@ export function exactLine(argv: string[]): string {
 }
 
 export type Section = "page" | "host" | "coding" | "bundles" | "page_bundles" | "chats";
-export type Icon = "ask" | "terminal" | "html" | "stream" | "agent" | "template" | "chat" | "tree" | "backgrounds" | "tips" | "claude" | "codex" | "aider" | "opencode" | "fantastic" | "mcp" | "store";
+export type Icon = "ask" | "terminal" | "html" | "stream" | "agent" | "bundle" | "chat" | "tree" | "backgrounds" | "tips" | "claude" | "codex" | "aider" | "opencode" | "fantastic" | "mcp" | "store";
 
 export interface Tile {
   icon: Icon;
@@ -83,7 +83,7 @@ const KINDS: Array<[string, Pick, Icon, Section]> = [
   ["terminal", { kind: "terminal" }, "terminal", "host"],
   // a NEW python agent: a project bundle folder from the CLI's starter, one
   // instance placed — edit its folder, the change takes effect at once
-  ["python agent", { kind: "bundle", starter: "python_agent" }, "template", "host"],
+  ["python agent", { kind: "bundle", starter: "python_agent" }, "bundle", "host"],
   // ONE remote MCP server as a host agent: its tools are its verbs
   ["mcp connector", { kind: "mcp" }, "mcp", "host"],
   // the user's home: stored keys, set-ups and fantastic locations (owner 2026-10-12)
@@ -109,7 +109,7 @@ export function tiles(typed: string, presets: Presets | null): Tile[] {
   if (exact) return [{ icon: exact[2], label: exact[0], hint: "", pick: exact[1], section: exact[3] }];
   // a project bundle's name typed exactly: only that bundle (⏎ places it)
   const exactBundle = (presets?.bundles ?? []).find((b) => b.name.toLowerCase() === low);
-  if (exactBundle) return [{ icon: "template", label: exactBundle.name, hint: "", pick: { kind: "instance", bundle: exactBundle.name }, section: "bundles" }];
+  if (exactBundle) return [{ icon: "bundle", label: exactBundle.name, hint: "", pick: { kind: "instance", bundle: exactBundle.name }, section: "bundles" }];
   const exactPage = (presets?.pageBundles ?? []).find((b) => b.name.toLowerCase() === low);
   if (exactPage) return [{ icon: "html", label: exactPage.name, hint: "", pick: { kind: "page_instance", bundle: exactPage.name }, section: "page_bundles" }];
   // THE FIRST TILE, "AI agent" (owner 2026-10-12: was "ask"; the ONE way to make
@@ -134,7 +134,7 @@ export function tiles(typed: string, presets: Presets | null): Tile[] {
   // "bundle it, then place it from the popup")
   for (const b of presets?.bundles ?? []) {
     if (t && !b.name.toLowerCase().startsWith(low)) continue;
-    out.push({ icon: "template", label: b.name, hint: "", pick: { kind: "instance", bundle: b.name }, section: "bundles" });
+    out.push({ icon: "bundle", label: b.name, hint: "", pick: { kind: "instance", bundle: b.name }, section: "bundles" });
   }
   // this canvas's page bundles (an html cell bundled): one more instance each
   for (const b of presets?.pageBundles ?? []) {
@@ -204,7 +204,7 @@ const PATH: Record<Icon, string> = {
   html: '<rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M3 8.5h18M6 6.3h.01M8.5 6.3h.01"/>',
   stream: '<path d="M4 6h16M4 10h11M4 14h14M4 18h8"/>',
   agent: '<circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1"/>',
-  template: '<path d="M12 3l1.8 4.7L18.5 9.5l-4.7 1.8L12 16l-1.8-4.7L5.5 9.5l4.7-1.8z"/><rect x="15" y="15" width="6" height="6" rx="1.5"/>',
+  bundle: '<path d="M12 3l1.8 4.7L18.5 9.5l-4.7 1.8L12 16l-1.8-4.7L5.5 9.5l4.7-1.8z"/><rect x="15" y="15" width="6" height="6" rx="1.5"/>',
   tree: '<rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 4v16M12 9h5M12 13h5"/>',
   tips: '<path d="M9 18h6M10 21h4"/><path d="M12 3a6 6 0 0 0-3.6 10.8c.7.6 1.1 1.4 1.1 2.2h5c0-.8.4-1.6 1.1-2.2A6 6 0 0 0 12 3z"/>',
   store: '<ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v6c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/><path d="M4 12v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/>',

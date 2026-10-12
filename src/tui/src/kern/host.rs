@@ -87,8 +87,8 @@ fn registry(cwd: &std::path::Path) -> BundleRegistry {
     // record itself is only ever created by `fantastic mcp`, never by the
     // blueprint.
     reg.register(fantastic_web_mcp::HANDLER_MODULE, fantastic_web_mcp::WebMcpBundle);
-    // THE USER'S TEMPLATES. Its directory and the ONE caller it serves (the
-    // human) are fixed here, by the binary — never by a record (`kern/templates`).
+    // THE AI AGENT'S SAVED SET-UPS. Its directory and the ONE caller it serves (the
+    // human) are fixed here, by the binary — never by a record (`kern/saved`).
     reg.register(
         fantastic_user_home_store::HANDLER_MODULE,
         fantastic_user_home_store::UserHomeStore::new(
@@ -115,7 +115,7 @@ fn registry(cwd: &std::path::Path) -> BundleRegistry {
     reg.register(crate::kern::setup_agent::HANDLER_MODULE, crate::kern::setup_agent::SetupBundle);
     // THE CANVAS, host side: its node `canvas_root` — creates and deletes its
     // the cells' backends and spawns AI cells from the user's
-    // templates (`kern/backend`).
+    // saved set-ups (`kern/backend`).
     reg.register(crate::kern::backend::HANDLER_MODULE, crate::kern::backend::BackendBundle);
     // KEYS: the credential store (`kern/keys`) — every provider key, by ref.
     reg.register(fantastic_credential_store::HANDLER_MODULE, fantastic_credential_store::CredentialStoreBundle::default());
@@ -254,9 +254,9 @@ impl Host {
         if let Err(e) = crate::kern::reach::start(&host).await {
             notes.push(e);
         }
-        // The template store's agent, and the human's grant onto it — re-set on
+        // The saved set-up store's agent, and the human's grant onto it — re-set on
         // every boot, whatever a record on disk says.
-        if let Err(e) = crate::kern::templates::ensure(&host).await {
+        if let Err(e) = crate::kern::saved::ensure(&host).await {
             notes.push(e);
         }
         if let Err(e) = crate::kern::user_store::ensure(&host).await {
@@ -273,7 +273,7 @@ impl Host {
             }
             Err(e) => notes.push(e),
         }
-        // THE PROJECT'S `.mcp.json`: kept by the `mcp` leg, through its bridge
+        // THE PROJECT'S `.fantastic/.mcp.json`: kept by the `mcp` leg, through its bridge
         // (`kern/mcp_config`) — right before any coding CLI connects
         if let Err(e) = crate::kern::mcp_config::ensure(&host).await {
             notes.push(e);

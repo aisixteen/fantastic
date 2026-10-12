@@ -1,4 +1,4 @@
-//! THE USER'S TEMPLATES, through the one agent that holds them.
+//! THE AI AGENT'S SAVED SET-UPS, through the one agent that holds them.
 //!
 //! `user_home` is a `user_home_store` agent under the root. The binary fixes
 //! where its files live (`FANTASTIC_HOME`, else `~/.config/fantastic`) and that
@@ -7,7 +7,7 @@
 //! verbs used here — RE-SET on every boot, so a record on disk that widened them
 //! is narrowed again.
 //!
-//! A template is `handler_module` + that bundle's config: for an AI agent the
+//! A saved set-up is `handler_module` + that bundle's config: for an AI agent the
 //! backend, model and endpoint. It never carries an id, a memory store or
 //! grants — whoever creates an agent from it adds those. Nothing is a default
 //! until the human makes one (`prefer`).
@@ -16,21 +16,21 @@ use serde_json::{json, Map, Value};
 
 use crate::kern::host::Host;
 
-/// The template store's agent id.
+/// The saved set-up store's agent id.
 pub const HOME_ID: &str = "user_home";
 
 /// Exactly the verbs the human calls on it (three are privileged: named).
 const VERBS: [&str; 5] = ["persist_record", "forget_record", "load_tree", "prefer", "reflect"];
 
-/// One saved template.
+/// One saved set-up.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Template {
+pub struct Saved {
     pub name: String,
     pub version: String,
     pub record: Map<String, Value>,
 }
 
-impl Template {
+impl Saved {
     fn field(&self, k: &str) -> String {
         self.record.get(k).and_then(Value::as_str).unwrap_or("").to_string()
     }
@@ -48,7 +48,7 @@ impl Template {
 /// Everything the store holds, and where.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Shelf {
-    pub templates: Vec<Template>,
+    pub saved: Vec<Saved>,
     pub preferred: Option<String>,
     pub dir: String,
 }
@@ -92,13 +92,13 @@ pub async fn shelf(host: &Host) -> Result<Shelf, String> {
     if let Some(e) = err_of(&r) {
         return Err(e);
     }
-    let templates = r["templates"]
+    let saved = r["saved"]
         .as_array()
         .cloned()
         .unwrap_or_default()
         .into_iter()
         .filter_map(|t| {
-            Some(Template {
+            Some(Saved {
                 name: t.get("name")?.as_str()?.to_string(),
                 version: t.get("version").and_then(Value::as_str).unwrap_or("").to_string(),
                 record: t.get("record")?.as_object()?.clone(),
@@ -106,13 +106,13 @@ pub async fn shelf(host: &Host) -> Result<Shelf, String> {
         })
         .collect();
     Ok(Shelf {
-        templates,
+        saved,
         preferred: r["preferred"].as_str().map(str::to_string),
         dir: r["dir"].as_str().unwrap_or("").to_string(),
     })
 }
 
-/// Save `record` as template `name`. Returns where it was written.
+/// Save `record` as saved set-up `name`. Returns where it was written.
 pub async fn save(host: &Host, name: &str, record: Value) -> Result<String, String> {
     let r = host.act(HOME_ID, json!({"type": "persist_record", "name": name, "record": record})).await.result;
     match err_of(&r) {
@@ -121,7 +121,7 @@ pub async fn save(host: &Host, name: &str, record: Value) -> Result<String, Stri
     }
 }
 
-/// Make template `name` the default for new AI agents; `None` clears it.
+/// Make saved set-up `name` the default for new AI agents; `None` clears it.
 pub async fn prefer(host: &Host, name: Option<&str>) -> Result<Option<String>, String> {
     let r = host.act(HOME_ID, json!({"type": "prefer", "name": name})).await.result;
     match err_of(&r) {

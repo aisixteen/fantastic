@@ -793,7 +793,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
 
   // ── AI CELLS ─────────────────────────────────────────────────────────
   // `canvas_root` (`kern/backend`) spawns the cell's AI from one of the user's
-  // templates (only the CLI reads those), and answers the templates and the
+  // saved set-ups (only the CLI reads those), and answers the saved set-ups and the
   // kept dialogs.
   const toast = (text: string): void => {
     const t = document.createElement("div");
@@ -845,12 +845,12 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       [`${kernel.guid}|*`]: [...new Set([...CELL_VERBS, ...VIEW_VERBS, ...BACKGROUNDS_VERBS])],
     };
   };
-  const spawnAi = async (cellId: string, template: string | null, view?: string): Promise<Rec | null> => {
+  const spawnAi = async (cellId: string, saved: string | null, view?: string): Promise<Rec | null> => {
     const r = (await host.callHost(BACKEND, {
       type: "spawn",
       stamp: { cell_id: cellId },
       peer_grants: peerGrants(view ?? containerOf(look, cellId) ?? ROOT_VIEW),
-      ...(template ? { template } : {}),
+      ...(saved ? { saved } : {}),
     } as unknown as Payload)) as Rec;
     if (typeof r["error"] === "string") {
       toast(`✕ ${r["error"]}${typeof r["hint"] === "string" && r["hint"] ? ` — ${r["hint"]}` : ""}`);
@@ -867,7 +867,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       // every dialog is kept from its start (no ephemeral chats)
       kept: true,
       ...(typeof r["dialog_name"] === "string" ? { dialog_name: r["dialog_name"] } : {}),
-      template: r["template"],
+      saved: r["saved"],
       can_call: { ...aiView.grants(String(r["id"])) },
     } as unknown as Payload);
   };
@@ -903,7 +903,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       frames.set(rec.id, { el, rec, kind: "inline" });
       reload = (): void => {
         if (bundle === aiView) {
-          void spawnAi(rec.id, str(rec, "template") ?? null).then((r) => {
+          void spawnAi(rec.id, str(rec, "saved") ?? null).then((r) => {
             if (r === null) return;
             removeFrame(rec.id);
             bindAi(rec.id, r);
@@ -1199,10 +1199,10 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     if (full) {
       const r = kernel.get(viewed)?.record() as Rec | undefined;
       // its name: the head's, else a dialog's renamed name (an AI cell — its default
-      // is its AI's id), else its template's, else its id
+      // is its AI's id), else its saved set-up's, else its id
       const dn = r !== undefined ? str(r, "dialog_name") : undefined;
       const renamed = dn !== undefined && dn !== (r !== undefined ? str(r, "backend_id") : undefined) ? dn : undefined;
-      fullName.textContent = (r !== undefined ? str(r, "display_name") ?? renamed ?? str(r, "template") : undefined) ?? viewed;
+      fullName.textContent = (r !== undefined ? str(r, "display_name") ?? renamed ?? str(r, "saved") : undefined) ?? viewed;
     }
     const glCount = glHost === null ? 0 : seenGl.size;
   };
@@ -1288,15 +1288,15 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   };
   // THE CANVAS'S MOVES a view may ask for (the wizard, an AI cell)
   const canvasActions: CanvasActions = {
-    async spawnAi(template, from, cell) {
+    async spawnAi(saved, from, cell) {
       if (cell !== undefined && kernel.get(cell) !== undefined) {
-        const r = await spawnAi(cell, template);
+        const r = await spawnAi(cell, saved);
         if (r === null) return;
         removeFrame(cell);
         bindAi(cell, r);
       } else {
         const at = spotOf(from);
-        if ((await spawnAiIn(containerOf(look, from) ?? containerNow(), at, template, "")) === null) return;
+        if ((await spawnAiIn(containerOf(look, from) ?? containerNow(), at, saved, "")) === null) return;
       }
       closeView(from);
     },
@@ -1338,18 +1338,18 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
 
   // An AI cell at the spot, its first turn what was typed. The same order as a
   // terminal: the cell lands on disk first, then its backend, then the bind.
-  const spawnAiAt = async (w: { x: number; y: number }, template: string | null, text: string): Promise<void> => {
-    await spawnAiIn(containerNow(), w, template, text);
+  const spawnAiAt = async (w: { x: number; y: number }, saved: string | null, text: string): Promise<void> => {
+    await spawnAiIn(containerNow(), w, saved, text);
   };
   // An AI cell on view `parent`: the cell, then its backend. Its id, or null
   // (the refusal toasted, the cell removed).
-  const spawnAiIn = async (parent: string, w: { x: number; y: number }, template: string | null, text: string): Promise<string | null> => {
+  const spawnAiIn = async (parent: string, w: { x: number; y: number }, saved: string | null, text: string): Promise<string | null> => {
     // HOST-FIRST: the AI is made (stamped with the cell it will show in), then
     // the cell views it
     const viewId = `ai_view_${crypto.randomUUID().slice(0, 8)}`;
     const x = Math.round(w.x);
     const y = Math.round(w.y);
-    const r = await spawnAi(viewId, template, parent);
+    const r = await spawnAi(viewId, saved, parent);
     if (r === null) return null;
     placing.add(String(r["id"]));
     registerCell(

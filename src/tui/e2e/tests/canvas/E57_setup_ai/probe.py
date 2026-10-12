@@ -4,7 +4,7 @@ live: the wizard makes the first AI agent from the BACKEND plug and it answers.
 "AI agent" from the double-click → page 1: the plug's provider → page 2: its
 URL, model and required fields from the plug's record, the key already stored
 (an earlier set-up's, picked as the saved key for that host) → create & open
-chat: the template is saved and made the default, and the new cell answers. Its
+chat: the saved set-up is saved and made the default, and the new cell answers. Its
 ⚙ settings then show the same values."""
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from _lib.canvas_live import seed_key, Rig, verdict, answer, say, spot, wait_quiet, tpl_dir  # noqa: E402
+from _lib.canvas_live import seed_key, Rig, verdict, answer, say, spot, wait_quiet, saved_dir  # noqa: E402
 
 BTN = "((t)=>[...document.querySelectorAll('.wiz button')].find(b=>b.textContent.trim().startsWith(t)))"
 
@@ -26,7 +26,7 @@ def main() -> bool:
     if why:
         return verdict(*rig.finish(False, why))
     rig.build()
-    rig.make_home(None)  # NO template: the wizard makes it
+    rig.make_home(None)  # NO saved set-up: the wizard makes it
     # the key as an earlier set-up leaves it (plain mode, the ref remembered,
     # its value in the 0600 file) — BEFORE the first boot, which makes the
     # credential store from it; the wizard then picks it as the saved key
@@ -67,12 +67,12 @@ def main() -> bool:
     finally:
         rig.stop()
     name = f"{provider}-1"
-    tpl = (tpl_dir(rig.home) / f"{name}.yaml").exists()
-    pref = (tpl_dir(rig.home) / ".preferred").read_text().strip() if (tpl_dir(rig.home) / ".preferred").exists() else ""
-    rig.summary.update({**out, "template_file": tpl, "preferred": pref})
+    tpl = (saved_dir(rig.home) / f"{name}.yaml").exists()
+    pref = (saved_dir(rig.home) / ".preferred").read_text().strip() if (saved_dir(rig.home) / ".preferred").exists() else ""
+    rig.summary.update({**out, "saved_file": tpl, "preferred": pref})
     print(json.dumps(rig.summary, indent=1, default=str)[:2000])
     ok = out.get("created") and tpl and pref == name and bool((out.get("answer") or "").strip()) and out.get("settings_url") == fill["URL"]
-    return verdict(*rig.finish(bool(ok), f"created: {out.get('created')} · template saved + default: {tpl and pref == name} · answers: {bool((out.get('answer') or '').strip())} · settings show its URL: {out.get('settings_url') == fill['URL']}"))
+    return verdict(*rig.finish(bool(ok), f"created: {out.get('created')} · saved set-up saved + default: {tpl and pref == name} · answers: {bool((out.get('answer') or '').strip())} · settings show its URL: {out.get('settings_url') == fill['URL']}"))
 
 
 if __name__ == "__main__":

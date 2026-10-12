@@ -4,11 +4,12 @@
 
 ## `fantastic mcp`
 
-THE PROJECT'S `.mcp.json` is written for you: at every start the `mcp` leg
-sets `mcpServers.fantastic = {command: <this fantastic binary>, args: [mcp]}` in
-the project root's `.mcp.json` (through its own bridge, `mcp_config`), keeping
-every other server, and only when it changed. A coding CLI opened in the
-project (Claude Code reads that file) finds this kernel without any setup.
+THE PROJECT'S MCP CONFIG is written for you, INSIDE `.fantastic` — nothing is
+created outside it: at every start the `mcp` leg sets `mcpServers.fantastic =
+{command: <this fantastic binary>, args: [mcp]}` in `.fantastic/.mcp.json`
+(through its own bridge, `mcp_config`), keeping every other server, and only
+when it changed. Point a coding CLI at it: `claude --mcp-config
+.fantastic/.mcp.json`.
 
 MCP over stdio, protocol 2025-11-25, two tools: `reflect` and `send`. No
 arguments. Register it once as a stdio server — command `fantastic`, args

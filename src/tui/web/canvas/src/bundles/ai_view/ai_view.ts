@@ -332,7 +332,7 @@ export const aiView: ViewBundle = {
       clientId = "web_" + Math.random().toString(36).slice(2, 10);
       localStorage.setItem(CLIENT_KEY, clientId);
     }
-    const tpl = record && typeof record["template"] === "string" ? (record["template"] as string) : "";
+    const tpl = record && typeof record["saved"] === "string" ? (record["saved"] as string) : "";
     $<HTMLElement>(".c-agent").textContent = tpl ? `✦ ${tpl} · ${backend}` : `${selfId} (client ${clientId})`;
     // THE DIALOG'S NAME, in the header (owner 2026-10-12: no ephemeral chats —
     // every dialog is kept from its start, as in the terminal): click to rename

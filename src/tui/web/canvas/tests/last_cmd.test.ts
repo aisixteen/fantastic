@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { attached, launched, ran, runLine, savedCmd, shortCmd } from "../src/bundles/terminal_view/last_cmd.ts";
+import { attach, launched, pressed, programName, runLine, savedCmd, shortCmd, stoppedText } from "../src/bundles/terminal_view/last_cmd.ts";
 
 test("last_cmd: the record's saved command, else none", () => {
   assert.equal(savedCmd({ last_cmd: " npm run dev " }), "npm run dev");
@@ -9,23 +9,28 @@ test("last_cmd: the record's saved command, else none", () => {
   assert.equal(savedCmd(undefined), null);
 });
 
-test("last_cmd: run is offered only on a NEW shell with a saved command", () => {
-  const s = { cmd: "npm run dev", offer: false };
-  assert.deepEqual(attached(s, true, true), { cmd: "npm run dev", offer: true }, "after a restart");
-  assert.equal(attached(s, false, true).offer, false, "a live shell joined: nothing to re-run");
-  assert.equal(attached(s, true, false).offer, false, "a coding agent's cell runs its own program");
-  assert.equal(attached({ cmd: null, offer: false }, true, true).offer, false, "first ever: nothing ran");
+test("nothing starts on its own: only the first placement starts the program; later it waits stopped", () => {
+  const s = { cmd: "npm run dev", stopped: false };
+  assert.deepEqual(attach(s, false, false), { state: { cmd: "npm run dev", stopped: false }, start: true }, "placed: the human's act starts it");
+  assert.deepEqual(attach(s, false, true), { state: { cmd: "npm run dev", stopped: true }, start: false }, "after a restart: stopped, never started for them");
+  assert.deepEqual(attach({ cmd: null, stopped: true }, true, true), { state: { cmd: null, stopped: false }, start: false }, "a live job is joined");
 });
 
-test("last_cmd: another command running, or run pressed, takes the offer away", () => {
-  const offered = { cmd: "npm run dev", offer: true };
-  assert.deepEqual(launched(offered, "vim a.txt"), { cmd: "vim a.txt", offer: false });
-  assert.deepEqual(ran(offered), { cmd: "npm run dev", offer: false });
+test("▶ (start or run) ends stopped; a launched command is the last one", () => {
+  const off = { cmd: "npm run dev", stopped: true };
+  assert.deepEqual(pressed(off), { cmd: "npm run dev", stopped: false });
+  assert.deepEqual(launched({ cmd: "npm run dev", stopped: false }, "vim a.txt"), { cmd: "vim a.txt", stopped: false });
   assert.equal(runLine("npm run dev"), "npm run dev\r");
+});
+
+test("the stopped overlay names the program: claude, codex, fantastic — or the shell", () => {
+  assert.equal(programName(["/Users/me/.local/bin/claude"]), "claude");
+  assert.equal(programName(["codex", "--x"]), "codex");
+  assert.equal(programName([]), "the shell");
+  assert.deepEqual(stoppedText(["/opt/bin/fantastic"]), { title: "fantastic is not running", note: "Nothing starts on its own after a restart — press ▶ to start it." });
 });
 
 test("last_cmd: shortened for the bar, its start kept", () => {
   assert.equal(shortCmd("ls  -la\n"), "ls -la");
-  const long = "x".repeat(80);
-  assert.equal(shortCmd(long, 10), "xxxxxxxxx…");
+  assert.equal(shortCmd("x".repeat(80), 10), "xxxxxxxxx…");
 });

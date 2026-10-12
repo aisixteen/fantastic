@@ -68,25 +68,16 @@ window.__fid = (() => {
     scratch.width = c.width; scratch.height = c.height; sx.clearRect(0, 0, c.width, c.height); sx.drawImage(c, 0, 0);
     return sx.getImageData(0, 0, c.width, c.height).data; };
   const hash = d => { let h = 2166136261 >>> 0; for (let i = 0; i < d.length; i += 4) { h ^= d[i] | (d[i+1] << 8) | (d[i+2] << 16) | (d[i+3] << 24); h = Math.imul(h, 16777619) >>> 0; } return h; };
-  // placeholder red, NOT an emoji's own red: a cell holding a pictograph (and the
-  // cell either side, its edge spills over) is skipped — the placeholder, a whole
-  // page drawn with the 1×1 red texture, shows in plain glyphs too
-  const PICT = /\p{Extended_Pictographic}/u;
-  const reds = (d, f) => { const c = f && canvasOf(f), t = f && f.querySelector('.frame-body').xterm; let skip = null, cw = 1, ch = 1;
-    let n = 0; for (let i = 0; i < d.length; i += 4) if (d[i] > 235 && d[i+1] < 25 && d[i+2] < 25 && d[i+3] > 235) {
-      if (t && c) { if (skip === null) { skip = new Set(); cw = c.width / t.cols; ch = c.height / t.rows; const b = t.buffer.active;
-          for (let r = 0; r < t.rows; r++) { const l = b.getLine(b.viewportY + r); if (!l) continue; for (let x = 0; x < t.cols; x++) { if (PICT.test(l.getCell(x)?.getChars() || '')) for (const dx of [-1, 0, 1, 2]) skip.add(r * t.cols + x + dx); } } }
-        const p = i / 4; if (skip.has(((p / c.width / ch) | 0) * t.cols + ((p % c.width) / cw | 0))) continue; }
-      n++; } return n; };
+  const reds = d => { let n = 0; for (let i = 0; i < d.length; i += 4) if (d[i] > 235 && d[i+1] < 25 && d[i+2] < 25 && d[i+3] > 235) n++; return n; };
   const lit = d => { let n = 0; for (let i = 3; i < d.length; i += 4) if (d[i] > 0) n++; return n; };
   const state = { frames: 0, redFrames: 0, redMax: 0, redWhere: [] , watching: false };
   const watch = () => { if (!state.watching) return; state.frames++;
-    for (const f of frames()) { const d = pixels(f); if (!d) continue; const r = reds(d, f);
+    for (const f of frames()) { const d = pixels(f); if (!d) continue; const r = reds(d);
       if (r > 0) { state.redFrames++; state.redMax = Math.max(state.redMax, r); if (state.redWhere.length < 20) state.redWhere.push(`${f.dataset.id}:${r}`); } }
     requestAnimationFrame(watch); };
   return {
     ids: () => frames().map(f => f.dataset.id),
-    snap: () => Object.fromEntries(frames().map(f => { const d = pixels(f); return [f.dataset.id, d ? { h: hash(d), lit: lit(d), red: reds(d, f) } : null]; })),
+    snap: () => Object.fromEntries(frames().map(f => { const d = pixels(f); return [f.dataset.id, d ? { h: hash(d), lit: lit(d), red: reds(d) } : null]; })),
     text: id => { const f = frames().find(x => x.dataset.id === id); const t = f?.querySelector('.frame-body').xterm; if (!t) return '';
       const b = t.buffer.active; let s = ''; for (let i = 0; i < t.rows; i++) { const l = b.getLine(b.viewportY + i); if (l) s += l.translateToString(true) + '\n'; } return s; },
     quiet: () => { for (const f of frames()) { const t = f.querySelector('.frame-body').xterm; t.options.cursorBlink = false; t.options.cursorInactiveStyle = 'none'; t.blur?.(); } },
@@ -127,8 +118,16 @@ async def run(rig: Rig, r: dict, info: dict) -> None:
         jobs: dict[str, int] = {}
         for i in range(K):
             bid = f"exec_bridge_fid{i:03d}"
-            st = await host_call(rig.port, bid, {"type": "status"})
-            jobs[bid] = next(j["job_id"] for j in st.get("jobs", []) if j.get("pty") and j.get("status") == "running")
+            # its login shell: running a moment after its cell drew its first text
+            for _ in range(150):
+                st = await host_call(rig.port, bid, {"type": "status"})
+                job = next((j["job_id"] for j in st.get("jobs", []) if j.get("pty") and j.get("status") == "running"), None)
+                if job is not None:
+                    jobs[bid] = job
+                    break
+                await asyncio.sleep(0.2)
+            else:
+                raise SystemExit(f"{bid}: no running shell in 30 s ({st})")
         await pg.js("window.__fid.watchStart()")
         mismatches: list[str] = []
         worst = 0

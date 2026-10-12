@@ -74,6 +74,9 @@ runs:
     # rehydrate WITHOUT --port (read from `web`'s record); while it still runs,
     # an argument (a different --port) is refused (exit 2, "already running")
     restart: {wrong_port: true}
+    # nothing starts on its own (owner 2026-10-12, TOS): the shell comes back
+    # STOPPED — the human's ▶ starts it
+    click: ".term-stopped .start"
     type: "echo again-$((7*6))"
     expect:
       # the headless stdout is the kernel's message stream, no escapes

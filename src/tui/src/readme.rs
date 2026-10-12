@@ -16,7 +16,7 @@ This is `fantastic` without a terminal, so it only prints this readme: it starts
 \x20\x20fantastic --headless [canvas]      no screen: the kernel's message stream on stdout\n\
 \x20\x20fantastic mcp                      MCP over stdio for a coding CLI (attaches to a running kernel, or runs it)\n\
 \x20\x20fantastic send '<item json>'       one call into the running kernel, as the `mcp` leg; `$env:NAME` values come from this shell, marked secret\n\
-\x20\x20fantastic readme [key]              the docs: the index, or one doc (`canvas`, `mcp`, `setup`, `templates`, `bundles`, and the kernel's own)\n\
+\x20\x20fantastic readme [key]              the docs: the index, or one doc (`canvas`, `mcp`, `setup`, `bundles`, and the kernel's own)\n\
 \n";
 
 /// The CLI's own docs, beside the kernel's embedded tree
@@ -26,7 +26,6 @@ const CLI_DOCS: &[(&str, &str)] = &[
     ("canvas", include_str!("../docs/canvas.md")),
     ("mcp", include_str!("../docs/mcp.md")),
     ("setup", include_str!("../docs/setup.md")),
-    ("templates", include_str!("../docs/templates.md")),
     ("bundles", include_str!("../docs/bundles.md")),
 ];
 

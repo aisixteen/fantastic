@@ -182,9 +182,11 @@ URL is the viewed agent.
 - Terminal: an `exec_bridge` PTY job running the human's login `$SHELL`; the
   shell ending closes the cell. The host watches each shell for the command it
   launches (its foreground job) and keeps the last one on the exec agent
-  (`last_cmd`): the cell shows it top right, and after a restart (a new shell)
-  `▶ run` types it again — gone once any command runs. A coding agent's cell
-  runs its program, so it has no run offer.
+  (`last_cmd`): the cell shows it top right. NOTHING STARTS ON ITS OWN (TOS): a
+  terminal's program — its shell, or claude / codex / `fantastic` / any program
+  it was placed with — starts when you place the cell; after a restart (no live
+  job) the cell shows it STOPPED, and only your `▶ start` (or, for a shell,
+  `▶ run <last command>`) starts it. Our own AI agent cells restart by themselves.
 - AI chat: every dialog is KEPT from its start (as in the terminal): listed
   under the double-click's chats for reopening; its badge is its name (click to
   rename). The footer: `clear` (a new thread — nothing deleted), the last
@@ -207,7 +209,7 @@ URL is the viewed agent.
   anthropic, ollama, vllm. Page 2: a name (auto), the URL (filled), the model,
   the backend's required fields, and the key (the stored key for that host, a
   new one pasted into the keychain or a 0600 file, or none); "create & open
-  chat" saves it as a template (the first becomes the default). Every page has
+  chat" saves it as a saved set-up (the first becomes the default). Every page has
   SKIP: an AI cell "not set up yet", whose ⚙ settings runs the wizard for it.
   ⚙ on any AI cell is its settings (page 2 with its values), live on its next
   turn. A failed turn offers settings, or a coding agent started next to the

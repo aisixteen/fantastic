@@ -774,7 +774,7 @@ impl App {
                 }
                 self.dirty = true;
             }
-            Got::Templates(t) => {
+            Got::Saved(t) => {
                 if let Some(p) = self.panels.get_mut(SETUP_ID) {
                     if let Some(s) = p.as_any_mut().downcast_mut::<SetupPanel>() {
                         s.set_shelf(t);

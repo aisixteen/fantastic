@@ -14,3 +14,10 @@ test("a minimized cell hides its body, not unmounts it", () => {
   const css = CANVAS_CSS.replace(/\s+/g, " ");
   assert.match(css, /\.agent-frame\.minimized > \.frame-body,[^{]*\{ visibility: hidden;/);
 });
+
+test("a stopped terminal's overlay covers the cell; its ▶ buttons take clicks", () => {
+  const css = CANVAS_CSS.replace(/\s+/g, " ");
+  assert.match(css, /\.term-stopped \{ position: absolute; inset: 0;/);
+  assert.match(css, /\.term-stopped\[hidden\] \{ display: none; \}/);
+  assert.match(css, /\.term-stopped button \{[^}]*cursor: pointer;/);
+});

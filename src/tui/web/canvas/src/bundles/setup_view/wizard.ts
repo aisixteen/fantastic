@@ -35,5 +35,5 @@ export function savedKeyFor(keys: ReadonlyArray<{ ref: string }>, module: string
   return keys.some((k) => k.ref === r) ? r : null;
 }
 
-/** A name a template may take. */
+/** A name a saved set-up may take. */
 export const nameOk = (name: string): boolean => /^[A-Za-z0-9_-]+$/.test(name);

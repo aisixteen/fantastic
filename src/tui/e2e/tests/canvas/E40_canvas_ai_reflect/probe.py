@@ -37,7 +37,7 @@ SRC = REPO / "src"
 BIN = SRC / "target" / "debug" / "fantastic"
 #: The backends the CLI links, and the cargo feature that links each.
 sys.path.insert(0, str(HERE.parent.parent / "_lib"))
-from canvas_live import FEATURES, private_dirs, seed_key, tpl_dir  # noqa: E402
+from canvas_live import FEATURES, private_dirs, seed_key, saved_dir  # noqa: E402
 FIRST_TURN = "Hey! Look around and see whats on a canvas and a backend"
 
 LIMITS = (yaml.safe_load((HERE / "test.yaml").read_text()) or {}).get("limits") or {}
@@ -119,12 +119,12 @@ def main() -> bool:
         return verdict(False, f"the CLI links no {be.handler_module} — it links {', '.join(FEATURES)}")
     tmp = Path(tempfile.mkdtemp(prefix="fc-e40-"))
     binary = build(feature, tmp)
-    # the user's home: ONE template, the plug's own record, made the default
+    # the user's home: ONE saved set-up, the plug's own record, made the default
     home = tmp / "home"
-    private_dirs(tpl_dir(home))
+    private_dirs(saved_dir(home))
     os.chmod(home, 0o700)
-    private_write(tpl_dir(home) / "plug.yaml", yaml.safe_dump(seed_key(home, be.record()), sort_keys=False))
-    private_write(tpl_dir(home) / ".preferred", "plug")
+    private_write(saved_dir(home) / "plug.yaml", yaml.safe_dump(seed_key(home, be.record()), sort_keys=False))
+    private_write(saved_dir(home) / ".preferred", "plug")
     proj = tmp / "proj"
     proj.mkdir()
     log = tmp / "host.log"

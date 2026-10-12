@@ -12,7 +12,7 @@
 # choose, so the blueprint never spells it.
 #
 # `mcp`, `web`, `credentials` and `user_home` are not here either: code adds
-# them under `user` (the `mcp` command, `fantastic canvas`, the key and template
+# them under `user` (the `mcp` command, `fantastic canvas`, the key and saved set-up
 # stores).
 #
 #   <root>                     (the kernel's own; named @root in grants)

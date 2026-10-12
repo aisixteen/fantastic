@@ -47,7 +47,7 @@ async function render() {
   for (const x of $("locs").querySelectorAll("button[data-i]")) x.onclick = async () => { await call("unstore", { path: r.locations[+x.dataset.i].path }); render(); };
   $("others").disabled = !r.locations.some((l) => !l.here);
   $("keys").innerHTML = r.keys.length === 0 ? `<div class="empty">none stored</div>` : r.keys.map((k) => `<div class="row"><code class="grow">${esc(k.ref)}</code><span class="dim">${esc(k.host)}</span></div>`).join("");
-  $("tpls").innerHTML = r.templates.length === 0 ? `<div class="empty">none saved</div>` : r.templates.map((t) => `<div class="row"><code class="grow">${esc(t)}</code></div>`).join("");
+  $("tpls").innerHTML = r.saved.length === 0 ? `<div class="empty">none saved</div>` : r.saved.map((t) => `<div class="row"><code class="grow">${esc(t)}</code></div>`).join("");
   $("home").textContent = `kept in ${r.home}`;
 }
 $("others").onclick = async () => { await call("unstore_others"); render(); };

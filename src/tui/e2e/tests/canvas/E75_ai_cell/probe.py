@@ -37,7 +37,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[6] / "e2e"))
-from _lib.canvas_live import FOLDER, Rig, other_setups, private_write, rebound, say, spot, verdict, tpl_dir  # noqa: E402
+from _lib.canvas_live import FOLDER, Rig, other_setups, private_write, rebound, say, spot, verdict, saved_dir  # noqa: E402
 from mocks.vllm import VllmMock  # noqa: E402
 
 CHATS = "[...document.querySelectorAll('.chat-view')].map(v=>v.closest('.agent-frame').dataset.id)"
@@ -58,7 +58,7 @@ class SlowVllm(VllmMock):
         return super().turn(h, req, text)
 
 
-def template(url: str, **extra) -> str:
+def saved_record(url: str, **extra) -> str:
     return yaml.safe_dump({"handler_module": "vllm_backend.tools", "endpoint": url, "model": "mock-x", "kv_overflow": "evict", **extra}, sort_keys=False)
 
 
@@ -85,10 +85,10 @@ def main() -> bool:
     rig = Rig(__file__, live=False)
     rig.build("vllm")
     rig.make_home(None)
-    # two saved templates: the default on the mock, and a small-window one
-    private_write(tpl_dir(rig.home) / "mock.yaml", template(mock.url))
-    private_write(tpl_dir(rig.home) / "small.yaml", template(small.url, context_window=W, max_tokens=W, context_strategy="fold", context_async=True, context_titles=True))
-    private_write(tpl_dir(rig.home) / ".preferred", "mock")
+    # two saved set-ups: the default on the mock, and a small-window one
+    private_write(saved_dir(rig.home) / "mock.yaml", saved_record(mock.url))
+    private_write(saved_dir(rig.home) / "small.yaml", saved_record(small.url, context_window=W, max_tokens=W, context_strategy="fold", context_async=True, context_titles=True))
+    private_write(saved_dir(rig.home) / ".preferred", "mock")
     r: dict = {}
     info: dict = {}
     try:

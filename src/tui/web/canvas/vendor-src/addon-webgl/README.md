@@ -23,7 +23,11 @@ switcher yet).
 4. **Atlas pages sample NEAREST** (no mipmaps; owner 2026-10-12, E66): glyphs are drawn
    1:1, so each texel is drawn exactly — with LINEAR, a glyph re-rasterized at another
    atlas spot (a clear, a merge, a lost context) drew slightly different edges.
-5. **Counters for probes** on `globalThis.__fantasticWebgl`: renders, uploads, page
+5. **A merge mid-frame rebuilds that frame** (owner 2026-10-12, E66): the page-layout
+   version is checked again after the frame places its new glyphs — a merge while
+   rasterizing them left the rows already drawn on stale texture coords until the
+   terminal next drew (whole screens of wrong glyphs once its output stopped).
+6. **Counters for probes** on `globalThis.__fantasticWebgl`: renders, uploads, page
    textures live / released, contexts made, and `loseContext()` / `restoreContext()`.
 
 ## Rebuild

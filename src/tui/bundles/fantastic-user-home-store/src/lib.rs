@@ -1,4 +1,4 @@
-//! user_home_store — the user's TEMPLATE store (`user_home_store.tools`).
+//! user_home_store — the user's SAVED SET-UP store (`user_home_store.tools`).
 //!
 //! Named agent-record blueprints in the user's home config dir, one plain-text
 //! file per name:
@@ -7,7 +7,7 @@
 //!   <home>/                        0700   FANTASTIC_HOME, else ~/.config/fantastic
 //!   ├── agents/                    0700   per-agent-kind state (owner 2026-10-12)
 //!   │   └── ai_agent/              0700
-//!   │       ├── templates/         0700
+//!   │       ├── saved set-ups/         0700
 //!   │       │   ├── opus.yaml      0600   handler_module + that bundle's config
 //!   │       │   └── .preferred     0600   the owner's explicit default (a name)
 //!   │       └── keys/              0700   the key mode + refs (`secrets`)
@@ -22,12 +22,12 @@
 //! session's analysis, 2026-09-30: a file_bridge rooted in home, even
 //! operator-set, would let a hydrated project record rewrite the owner's prefs.)
 //!
-//! A TEMPLATE IS NOT AN AGENT. It carries no identity, no per-project wiring and
+//! A SAVED SET-UP IS NOT AN AGENT. It carries no identity, no per-project wiring and
 //! no authority — the creator adds those at instantiation — and it must pass the
-//! target bundle's own `validate_meta`, so a template that could not make a
+//! target bundle's own `validate_meta`, so a saved set-up that could not make a
 //! working agent is refused when saved, not when used.
 //!
-//! Files `0600`, dirs `0700`, created with that mode (no window); a template or
+//! Files `0600`, dirs `0700`, created with that mode (no window); a saved set-up or
 //! dir readable by others is refused, naming the `chmod`. Writes are atomic
 //! (temp + rename); `if_match` (the version read) refuses a lost update between
 //! two running fantastics.
@@ -58,8 +58,8 @@ pub const README: &str = include_str!("readme.md");
 /// The environment variable that names the home dir; unset → `~/.config/fantastic`.
 pub const HOME_VAR: &str = "FANTASTIC_HOME";
 
-/// Fields a template may never carry: identity, per-project wiring, authority.
-pub const NOT_IN_A_TEMPLATE: [&str; 10] = [
+/// Fields a saved set-up may never carry: identity, per-project wiring, authority.
+pub const NOT_SAVED: [&str; 10] = [
     "id",
     "parent_id",
     "guid",
@@ -79,9 +79,9 @@ pub fn ai_agent_dir(home: &Path) -> PathBuf {
     home.join("agents").join("ai_agent")
 }
 
-/// The templates dir under the home.
-pub fn templates_dir(home: &Path) -> PathBuf {
-    ai_agent_dir(home).join("templates")
+/// The saved set-ups dir under the home.
+pub fn saved_dir(home: &Path) -> PathBuf {
+    ai_agent_dir(home).join("saved")
 }
 
 /// Create `dir` and every missing level up from `home`, each `0700`; refuse any
@@ -107,7 +107,7 @@ pub(crate) fn private_dirs(home: &Path, dir: &Path) -> Result<(), Value> {
     Ok(())
 }
 
-/// Where the templates live, resolved ONCE by the binary: `FANTASTIC_HOME`, else
+/// Where the saved set-ups live, resolved ONCE by the binary: `FANTASTIC_HOME`, else
 /// `$HOME/.config/fantastic`. `Err` names what is missing — never guessed.
 pub fn home_dir_from_env() -> Result<PathBuf, String> {
     if let Some(h) = std::env::var_os(HOME_VAR).filter(|v| !v.is_empty()) {
@@ -115,7 +115,7 @@ pub fn home_dir_from_env() -> Result<PathBuf, String> {
     }
     match std::env::var_os("HOME").filter(|v| !v.is_empty()) {
         Some(h) => Ok(PathBuf::from(h).join(".config").join("fantastic")),
-        None => Err(format!("neither {HOME_VAR} nor HOME is set — no home dir for templates")),
+        None => Err(format!("neither {HOME_VAR} nor HOME is set — no home dir for saved set-ups")),
     }
 }
 
@@ -132,11 +132,11 @@ impl UserHomeStore {
         Self { home, callers }
     }
 
-    /// The templates dir for a READ: `None` when nothing was ever saved — a
+    /// The saved set-ups dir for a READ: `None` when nothing was ever saved — a
     /// read creates nothing on the user's disk.
-    fn templates_if_any(&self) -> Result<Option<PathBuf>, Value> {
+    fn saved_if_any(&self) -> Result<Option<PathBuf>, Value> {
         let home = self.home.as_ref().map_err(|e| refusal(NOT_FOUND, format!("user_home_store: {e}")))?;
-        let dir = templates_dir(home);
+        let dir = saved_dir(home);
         if !dir.exists() {
             return Ok(None);
         }
@@ -145,16 +145,16 @@ impl UserHomeStore {
         Ok(Some(dir))
     }
 
-    /// The templates dir for a WRITE: created `0700` (both levels) if missing.
-    fn templates(&self) -> Result<PathBuf, Value> {
+    /// The saved set-ups dir for a WRITE: created `0700` (both levels) if missing.
+    fn saved_for_write(&self) -> Result<PathBuf, Value> {
         let home = self.home.as_ref().map_err(|e| refusal(NOT_FOUND, format!("user_home_store: {e}")))?;
-        let dir = templates_dir(home);
+        let dir = saved_dir(home);
         private_dirs(home, &dir)?;
         Ok(dir)
     }
 
-    /// Who may reach the owner's templates — decided HERE, not only by the
-    /// record's `callable_by`: the templates are the USER's resource, not this
+    /// Who may reach the owner's saved set-ups — decided HERE, not only by the
+    /// record's `callable_by`: the saved set-ups are the USER's resource, not this
     /// project's, and a project record (cloned, or written by an AI) must not be
     /// able to widen who reads or rewrites them. The caller is the dispatch's
     /// ORIGIN (the handler's own "sender" is itself); a call relayed across a
@@ -166,7 +166,7 @@ impl UserHomeStore {
             Some(s) => Err(refusal_hint(
                 UNAUTHORIZED,
                 format!("user_home_store serves only the CLI ({}), not {}", self.callers.join(", "), s.0),
-                "templates are applied by the CLI when it creates an agent — no agent reaches them",
+                "saved set-ups are applied by the CLI when it creates an agent — no agent reaches them",
             )),
         }
     }
@@ -254,21 +254,21 @@ impl UserHomeStore {
         let Some(hm) = rec.get("handler_module").and_then(Value::as_str) else {
             return Err(missing("persist_record", "record.handler_module"));
         };
-        let bad: Vec<&str> = NOT_IN_A_TEMPLATE.iter().copied().filter(|k| rec.contains_key(*k)).collect();
+        let bad: Vec<&str> = NOT_SAVED.iter().copied().filter(|k| rec.contains_key(*k)).collect();
         if !bad.is_empty() {
             return Err(refusal_hint(
                 INVALID_META,
-                format!("persist_record: a template carries no identity, wiring or authority — drop {}", bad.join(", ")),
-                "the creator adds id, parent, memory store and grants when it makes an agent from a template",
+                format!("persist_record: a saved set-up carries no identity, wiring or authority — drop {}", bad.join(", ")),
+                "the creator adds id, parent, memory store and grants when it makes an agent from a saved set-up",
             ));
         }
         let Some(bundle) = kernel.bundles.get(hm) else {
             return Err(refusal(INVALID_META, format!("persist_record: no bundle {hm:?} is linked into this build")));
         };
-        // A template is checked against the backend's RECORD SCHEMA (the same
+        // A saved set-up is checked against the backend's RECORD SCHEMA (the same
         // constants its create validates with) — minus what the CREATOR adds
-        // (`NOT_IN_A_TEMPLATE`: the memory store, id, grants…). A full
-        // `validate_meta` would demand exactly those, which a template must never
+        // (`NOT_SAVED`: the memory store, id, grants…). A full
+        // `validate_meta` would demand exactly those, which a saved set-up must never
         // carry. A bundle with no schema is checked by its own `validate_meta`.
         let schema = bundle.record_schema();
         if schema.is_none() {
@@ -277,7 +277,7 @@ impl UserHomeStore {
             let mut target = Map::new();
             target.insert("handler_module".into(), json!(hm));
             if let Some(why) = bundle.validate_meta(&meta, &target) {
-                return Err(refusal(INVALID_META, format!("persist_record: {hm} refuses this template: {why}")));
+                return Err(refusal(INVALID_META, format!("persist_record: {hm} refuses this saved set-up: {why}")));
             }
         }
         if let Some(schema) = schema {
@@ -285,7 +285,7 @@ impl UserHomeStore {
             let mut missing_f: Vec<String> = Vec::new();
             for f in &fields {
                 let name = f["name"].as_str().unwrap_or("");
-                if NOT_IN_A_TEMPLATE.contains(&name) {
+                if NOT_SAVED.contains(&name) {
                     continue;
                 }
                 let given = rec.get(name).filter(|v| !v.is_null());
@@ -299,10 +299,10 @@ impl UserHomeStore {
                 }
             }
             if !missing_f.is_empty() {
-                return Err(refusal(INVALID_META, format!("persist_record: {hm} refuses this template — required and missing: {}", missing_f.join("; "))));
+                return Err(refusal(INVALID_META, format!("persist_record: {hm} refuses this saved set-up — required and missing: {}", missing_f.join("; "))));
             }
         }
-        let path = self.templates()?.join(format!("{name}.yaml"));
+        let path = self.saved_for_write()?.join(format!("{name}.yaml"));
         let now = read_private(&path)?.map(|b| version(&b));
         if let Some(want) = payload.get("if_match").and_then(Value::as_str) {
             if now.as_deref() != Some(want) {
@@ -316,12 +316,12 @@ impl UserHomeStore {
 
     fn forget(&self, payload: &Value) -> Result<Value, Value> {
         let name = name_arg("forget_record", payload)?;
-        let Some(dir) = self.templates_if_any()? else {
-            return Err(refusal(NOT_FOUND, format!("forget_record: no template {name}")));
+        let Some(dir) = self.saved_if_any()? else {
+            return Err(refusal(NOT_FOUND, format!("forget_record: no saved set-up {name}")));
         };
         let path = dir.join(format!("{name}.yaml"));
         let Some(bytes) = read_private(&path)? else {
-            return Err(refusal(NOT_FOUND, format!("forget_record: no template {name}")));
+            return Err(refusal(NOT_FOUND, format!("forget_record: no saved set-up {name}")));
         };
         if let Some(want) = payload.get("if_match").and_then(Value::as_str) {
             let have = version(&bytes);
@@ -343,9 +343,9 @@ impl UserHomeStore {
     }
 
     fn load_tree(&self) -> Result<Value, Value> {
-        let shown = self.home.as_ref().map(|h| templates_dir(h).display().to_string()).unwrap_or_default();
-        let Some(dir) = self.templates_if_any()? else {
-            return Ok(json!({"templates": [], "preferred": null, "dir": shown}));
+        let shown = self.home.as_ref().map(|h| saved_dir(h).display().to_string()).unwrap_or_default();
+        let Some(dir) = self.saved_if_any()? else {
+            return Ok(json!({"saved": [], "preferred": null, "dir": shown}));
         };
         let mut names: Vec<String> = fs::read_dir(&dir)
             .map_err(|e| refusal(BAD_ARG, format!("user_home_store: {}: {e}", dir.display())))?
@@ -362,14 +362,14 @@ impl UserHomeStore {
                 .map_err(|e| refusal(BAD_ARG, format!("user_home_store: {}: {e}", path.display())))?;
             out.push(json!({"name": n, "version": version(&bytes), "record": rec}));
         }
-        Ok(json!({"templates": out, "preferred": self.preferred(&dir)?, "dir": dir.display().to_string()}))
+        Ok(json!({"saved": out, "preferred": self.preferred(&dir)?, "dir": dir.display().to_string()}))
     }
 
     fn prefer(&self, payload: &Value) -> Result<Value, Value> {
-        let Some(dir) = self.templates_if_any()? else {
+        let Some(dir) = self.saved_if_any()? else {
             return match payload.get("name") {
                 Some(Value::Null) => Ok(json!({"preferred": null})),
-                _ => Err(refusal(NOT_FOUND, format!("prefer: no template {}", payload.get("name").and_then(Value::as_str).unwrap_or("")))),
+                _ => Err(refusal(NOT_FOUND, format!("prefer: no saved set-up {}", payload.get("name").and_then(Value::as_str).unwrap_or("")))),
             };
         };
         let p = dir.join(PREFERRED);
@@ -383,7 +383,7 @@ impl UserHomeStore {
             _ => {
                 let name = name_arg("prefer", payload)?;
                 if !dir.join(format!("{name}.yaml")).exists() {
-                    return Err(refusal(NOT_FOUND, format!("prefer: no template {name}")));
+                    return Err(refusal(NOT_FOUND, format!("prefer: no saved set-up {name}")));
                 }
                 write_private(&p, name.as_bytes())?;
                 Ok(json!({"preferred": name}))
@@ -394,8 +394,8 @@ impl UserHomeStore {
     fn reflect(&self) -> Value {
         json!({
             "handler_module": HANDLER_MODULE,
-            "sentence": "The user's templates: named agent-record blueprints in the home config dir, applied by the CLI when it creates an agent.",
-            "dir": self.home.as_ref().map(|h| templates_dir(h).display().to_string()).ok(),
+            "sentence": "The user's saved set-ups: named agent-record blueprints in the home config dir, applied by the CLI when it creates an agent.",
+            "dir": self.home.as_ref().map(|h| saved_dir(h).display().to_string()).ok(),
             "serves": self.callers,
         })
     }
@@ -416,7 +416,7 @@ impl Bundle for UserHomeStore {
         json!({
                 "persist_record": "args: name:str (req), record:dict (req — handler_module + that bundle's config; no identity, wiring or grants), if_match:str?. Returns {name, version, path}.",
                 "forget_record": "args: name:str (req), if_match:str?. Returns {name, forgotten}.",
-                "load_tree": "No args. Returns {templates: [{name, version, record}], preferred, dir}.",
+                "load_tree": "No args. Returns {saved: [{name, version, record}], preferred, dir}.",
                 "prefer": "args: name:str|null (req). The owner's default for new AI agents; null clears it. Returns {preferred}.",
             })
     }
@@ -446,7 +446,7 @@ impl Bundle for UserHomeStore {
         Ok(Some(out.unwrap_or_else(|r| r)))
     }
 
-    /// Deleting the agent never deletes the owner's templates: they belong to the
+    /// Deleting the agent never deletes the owner's saved set-ups: they belong to the
     /// user, not to this project.
     async fn on_delete(&self, _agent_id: &AgentId, _kernel: &Arc<Kernel>) -> Result<(), BundleError> {
         Ok(())

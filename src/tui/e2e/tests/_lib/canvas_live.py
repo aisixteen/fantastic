@@ -37,7 +37,7 @@ sys.path.insert(0, str(REPO / "e2e" / "runners"))
 
 import websockets  # noqa: E402
 
-from canvas import MAC_CHROME, Page, free_port  # noqa: E402
+from canvas import MAC_CHROME, Page, attach, free_port  # noqa: E402
 from helpers.verdict import verdict  # noqa: E402
 
 SRC = REPO / "src"
@@ -67,7 +67,7 @@ def host_of(endpoint: str) -> str:
 def seed_key(home: Path, record: dict) -> dict:
     """The PRODUCT's key path, seeded the way a user's set-up leaves it: the
     plain key mode, the ref remembered, its value in the 0600 credentials file.
-    Returns the template without the plug's own `credentials` (the e2e `creds`
+    Returns the saved set-up without the plug's own `credentials` (the e2e `creds`
     store does not exist here): the product names its own ref at spawn."""
     rec = {k: v for k, v in record.items() if k != "credentials"}
     # the window the model has (owner: 262144 for window AND output — vLLM gives
@@ -94,9 +94,9 @@ def seed_key(home: Path, record: dict) -> dict:
     return rec
 
 
-def tpl_dir(home: Path) -> Path:
-    """The home's AI templates: `agents/ai_agent/templates`."""
-    return home / "agents" / "ai_agent" / "templates"
+def saved_dir(home: Path) -> Path:
+    """The home's AI saved set-ups: `agents/ai_agent/saved`."""
+    return home / "agents" / "ai_agent" / "saved"
 
 
 def keys_dir(home: Path) -> Path:
@@ -181,14 +181,14 @@ class Rig:
         self.binary = self.art / "fantastic"
         shutil.copy2(BIN, self.binary)  # a private copy: another build cannot swap it mid-run
 
-    def make_home(self, template: dict | None = None, name: str = "plug") -> None:
-        """A throwaway FANTASTIC_HOME — with `template` as the default, or none."""
-        private_dirs(tpl_dir(self.home))
+    def make_home(self, record: dict | None = None, name: str = "plug") -> None:
+        """A throwaway FANTASTIC_HOME — with `record` saved as the default, or none."""
+        private_dirs(saved_dir(self.home))
         os.chmod(self.home, 0o700)
-        if template is not None:
-            template = seed_key(self.home, template)
-            private_write(tpl_dir(self.home) / f"{name}.yaml", yaml.safe_dump(template, sort_keys=False))
-            private_write(tpl_dir(self.home) / ".preferred", name)
+        if record is not None:
+            record = seed_key(self.home, record)
+            private_write(saved_dir(self.home) / f"{name}.yaml", yaml.safe_dump(record, sort_keys=False))
+            private_write(saved_dir(self.home) / ".preferred", name)
 
     # ── the host ──────────────────────────────────────────────────────────
     def env(self) -> dict:
@@ -340,14 +340,7 @@ class Rig:
                                    "--autoplay-policy=no-user-gesture-required", *(extra or []), "about:blank"],
                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
-            for _ in range(50):
-                try:
-                    tabs = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{cdp}/json/list").read())
-                    break
-                except Exception:
-                    time.sleep(0.2)
-            ws_url = next(t for t in tabs if t["type"] == "page")["webSocketDebuggerUrl"]
-            async with websockets.connect(ws_url, max_size=None, ping_interval=None) as ws:
+            async with await attach(cdp) as ws:
                 pg = Page(ws)
                 await pg.cdp("Runtime.enable")
                 await pg.cdp("Page.enable")

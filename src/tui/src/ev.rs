@@ -106,8 +106,8 @@ pub enum Got {
     /// Where provider keys are kept: the mode (`None` until chosen) and where
     /// that is, in words — or why it cannot be read.
     KeyMode(Result<(Option<String>, String), String>),
-    /// The user's saved templates, or why they cannot be read.
-    Templates(Result<crate::kern::templates::Shelf, String>),
+    /// The user's saved set-ups, or why they cannot be read.
+    Saved(Result<crate::kern::saved::Shelf, String>),
     /// What the set-up page's last write or key store came to.
     Setup(Result<String, String>),
     /// A REFUSAL IS DATA. The kernel's `{"error":…,"reason":…}` is not an
@@ -200,15 +200,15 @@ pub enum Cmd {
     SetKeyMode {
         mode: String,
     },
-    /// The user's saved templates (`kern/templates`).
-    Templates,
-    /// Save the set-up page's backend, model and endpoint as template `name`.
-    SaveTemplate {
+    /// The user's saved set-ups (`kern/saved`).
+    Saved,
+    /// Save the set-up page's backend, model and endpoint as saved set-up `name`.
+    Save {
         name: String,
         record: Value,
     },
-    /// Make template `name` the default for new AI agents; `None` clears it.
-    PreferTemplate {
+    /// Make saved set-up `name` the default for new AI agents; `None` clears it.
+    Prefer {
         name: Option<String>,
     },
     /// Store a provider key in the keychain (`kern/keys`).
@@ -245,7 +245,7 @@ impl Cmd {
             Cmd::Stream { .. } => What::Send,
             Cmd::OpenTerminal { .. } | Cmd::CloseTerminal => What::RosterBoot,
             Cmd::Backends | Cmd::WriteAi(_) | Cmd::StoreKey { .. } => What::RosterBoot,
-            Cmd::Templates | Cmd::SaveTemplate { .. } | Cmd::PreferTemplate { .. } => What::RosterBoot,
+            Cmd::Saved | Cmd::Save { .. } | Cmd::Prefer { .. } => What::RosterBoot,
             Cmd::KeyMode | Cmd::SetKeyMode { .. } => What::RosterBoot,
         }
     }

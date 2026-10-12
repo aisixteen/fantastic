@@ -3,15 +3,15 @@
 //! The canvas's set-up cell (`setup_view.ts`) does everything the terminal's
 //! set-up page does — list the backends, write an AI agent's record, choose
 //! where keys are kept and store a backend's key there, save / load / forget
-//! templates, set the default — through the canvas's existing socket leg
+//! saved set-ups, set the default — through the canvas's existing socket leg
 //! (`canvas_ws`), with its OWN state (it does not drive the terminal's screen).
 //!
 //! NOT RUN BY DEFAULT. The canvas spawns this agent under the leg as the cell's
 //! backend (the view/backend pair) and deletes it with the cell; `Host::boot`
 //! deletes any left behind, so it is never hydrated (the cell then shows its
 //! backend lost; ⟳ respawns it). While it exists it does, AS THE HUMAN, exactly
-//! what the terminal's page does (`kern/setup`, `kern/keys`, `kern/templates`)
-//! — the template store serves only the human, and the cell reaches it through
+//! what the terminal's page does (`kern/setup`, `kern/keys`, `kern/saved`)
+//! — the saved set-up store serves only the human, and the cell reaches it through
 //! this agent, never directly.
 
 use std::sync::Arc;
@@ -38,9 +38,9 @@ pub const VERBS: [&str; 13] = [
     "key_mode",
     "set_key_mode",
     "store_key",
-    "templates",
-    "save_template",
-    "forget_template",
+    "saved",
+    "save",
+    "forget",
     "prefer",
     "reflect",
 ];
@@ -91,7 +91,7 @@ impl SetupBundle {
                         .find(|b| b.module == handler)
                         .map(|b| b.fields.iter().filter_map(|f| meta.get(&f.name).map(|v| (f.name.clone(), v.clone()))).collect())
                         .unwrap_or_default();
-                    json!({"id": s(p, "id"), "handler": handler, "fields": fields, "template": meta.get("template")})
+                    json!({"id": s(p, "id"), "handler": handler, "fields": fields, "saved": meta.get("saved")})
                 }
                 Err(e) => fail(format!("ai_settings: {e}")),
             },
@@ -175,37 +175,37 @@ impl SetupBundle {
                     Err(e) => fail(e),
                 }
             }
-            "templates" => match crate::kern::templates::shelf(host).await {
+            "saved" => match crate::kern::saved::shelf(host).await {
                 Ok(sh) => json!({
-                    "templates": sh.templates.iter().map(|t| json!({"name": t.name, "record": t.record})).collect::<Vec<_>>(),
+                    "saved": sh.saved.iter().map(|t| json!({"name": t.name, "record": t.record})).collect::<Vec<_>>(),
                     "preferred": sh.preferred,
                     "dir": sh.dir,
                 }),
                 Err(e) => fail(e),
             },
-            "save_template" => {
+            "save" => {
                 let name = s(p, "name");
                 let handler = s(p, "handler");
                 let mut record = match typed_fields(host, &handler, p) {
                     Ok(f) => f,
-                    Err(e) => return fail(format!("save_template: {e}")),
+                    Err(e) => return fail(format!("save: {e}")),
                 };
                 // the backend + every field set — never an id, a key or grants;
                 // the stored key for its endpoint is NAMED (a ref, never the value):
-                // a backend that requires one refuses a template without it
+                // a backend that requires one refuses a saved set-up without it
                 if let Err(e) = crate::kern::keys::attach(host, &handler, &mut record) {
-                    return fail(format!("save_template: {e}"));
+                    return fail(format!("save: {e}"));
                 }
                 record.insert("handler_module".into(), json!(handler));
                 let record = Value::Object(record);
-                match crate::kern::templates::save(host, &name, record).await {
+                match crate::kern::saved::save(host, &name, record).await {
                     Ok(path) => json!({"saved": name, "path": path}),
                     Err(e) => fail(e),
                 }
             }
-            "forget_template" => {
+            "forget" => {
                 let r = host
-                    .act(crate::kern::templates::HOME_ID, json!({"type": "forget_record", "name": s(p, "name")}))
+                    .act(crate::kern::saved::HOME_ID, json!({"type": "forget_record", "name": s(p, "name")}))
                     .await
                     .result;
                 if r.get("error").is_some() {
@@ -216,7 +216,7 @@ impl SetupBundle {
             }
             "prefer" => {
                 let name = p.get("name").and_then(Value::as_str).map(str::to_string);
-                match crate::kern::templates::prefer(host, name.as_deref()).await {
+                match crate::kern::saved::prefer(host, name.as_deref()).await {
                     Ok(pr) => json!({"preferred": pr}),
                     Err(e) => fail(e),
                 }
@@ -256,7 +256,7 @@ impl Bundle for SetupBundle {
 }
 
 /// The page's field TEXTS (`fields: {name: text}`), typed by `handler`'s
-/// record schema — the one typing path for a write and a template save.
+/// record schema — the one typing path for a write and a saved set-up save.
 fn typed_fields(host: &Host, handler: &str, p: &Value) -> Result<serde_json::Map<String, Value>, String> {
     let backend = crate::kern::setup::backends(host)
         .into_iter()

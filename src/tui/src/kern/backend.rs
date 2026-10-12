@@ -15,15 +15,15 @@
 //!
 //! AI CELLS. The canvas makes an AI cell wherever you type something that is not
 //! a known kind (design: `tmp/canvas_ai.md`). The cell's AI agent is built from
-//! one of the user's TEMPLATES, and only the CLI may read those
-//! (`kern/templates`), so the page asks `canvas_root`. The AI is its direct
+//! one of the user's SAVED SET-UPS, and only the CLI may read those
+//! (`kern/saved`), so the page asks `canvas_root`. The AI is its direct
 //! child, on the PROJECT's memory store from its first turn (owner D4,
 //! 2026-10-03: no per-cell RAM store; a closed, unkept cell's rows stay in
 //! SQLite). The store admits it as `user` (the store's parent); its record lets
 //! `user` call the chat verbs; `user`'s own side is `kern/reach`'s.
 //!
 //! Verbs: `presets` (the default AI set-up and the project's bundles),
-//! `spawn {template?, stamp?, peer_grants?}` (the named template, else the
+//! `spawn {saved set-up?, stamp?, peer_grants?}` (the named saved set-up, else the
 //! owner's default — no default and no name is refused, naming how to set one).
 //!
 //! The host knows NOTHING of the page's composition. `stamp` is the CALLER's:
@@ -32,7 +32,7 @@
 //! more egress for the AI, merged into its `can_call`.
 //!
 //! KEPT DIALOGS. `keep {id, name?}` records the dialog: a `dialog` row in the
-//! memory store under `user`'s key (its name, template and the record to re-make
+//! memory store under `user`'s key (its name, saved set-up and the record to re-make
 //! the AI), the newest row per AI winning — `rename` adds one. `dialogs` lists
 //! them. `reopen {id, stamp?, peer_grants?}` binds a new cell to the dialog: the
 //! live AI when another cell has it open (ONE dialog in several cells, updating
@@ -61,7 +61,7 @@ pub const CHAT_VERBS: [&str; 6] = ["send", "history", "status", "watch", "reflec
 /// The memory-store row kind a kept dialog is recorded as (under `user`'s key).
 const DIALOG: &str = "dialog";
 
-/// A template-record field the dialog snapshot never carries (identity, wiring,
+/// A saved set-up-record field the dialog snapshot never carries (identity, wiring,
 /// authority — added again when the AI is re-made).
 const NOT_SNAPSHOT: [&str; 7] = ["id", "parent_id", "guid", "agents", "memory_store_id", "can_call", "callable_by"];
 
@@ -114,7 +114,7 @@ impl BackendBundle {
     }
 
     /// Whether `handler` makes an AI agent: its bundle's record names a memory
-    /// store (`memory_store_id`, the field that makes one). A template is an AI
+    /// store (`memory_store_id`, the field that makes one). A saved set-up is an AI
     /// set-up; one on any other handler is not offered.
     pub(crate) fn is_ai_handler(host: &Host, handler: &str) -> bool {
         host.kernel
@@ -126,12 +126,12 @@ impl BackendBundle {
     }
 
     async fn presets(host: &Host) -> Value {
-        match crate::kern::templates::shelf(host).await {
+        match crate::kern::saved::shelf(host).await {
             Ok(sh) => json!({
                 "preferred": sh.preferred,
                 "bundles": Self::project_bundles(host),
             }),
-            Err(e) => refuse("not_found", e, "the user's templates are not readable"),
+            Err(e) => refuse("not_found", e, "the user's saved set-ups are not readable"),
         }
     }
 
@@ -170,9 +170,9 @@ impl BackendBundle {
             Ok(g) => g,
             Err(e) => return e,
         };
-        let shelf = match crate::kern::templates::shelf(host).await {
+        let shelf = match crate::kern::saved::shelf(host).await {
             Ok(s) => s,
-            Err(e) => return refuse("not_found", e, "the user's templates are not readable"),
+            Err(e) => return refuse("not_found", e, "the user's saved set-ups are not readable"),
         };
         // a STARTER BUNDLE (the double-click's "python agent"): a new project
         // bundle folder from the CLI's starter, loaded, and one instance of it
@@ -184,38 +184,38 @@ impl BackendBundle {
         if let Some(name) = p.get("instance_of").and_then(Value::as_str).filter(|s| !s.is_empty()) {
             return Self::spawn_instance(host, me, name, stamp).await;
         }
-        let name = match p.get("template").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+        let name = match p.get("saved").and_then(Value::as_str).filter(|s| !s.is_empty()) {
             Some(n) => n.to_string(),
             None => match &shelf.preferred {
                 Some(n) => n.clone(),
                 None => {
                     return refuse(
                         "not_found",
-                        "no default AI template",
-                        "open ⚙ AI set-up: save a template and make it your default",
+                        "no default AI set-up",
+                        "open ⚙ AI set-up: save one and make it your default",
                     )
                 }
             },
         };
-        let Some(t) = shelf.templates.iter().find(|t| t.name == name) else {
-            return refuse("not_found", format!("no template `{name}`"), "open ⚙ AI set-up to see your templates");
+        let Some(t) = shelf.saved.iter().find(|t| t.name == name) else {
+            return refuse("not_found", format!("no saved set-up `{name}`"), "open ⚙ AI set-up to see your saved set-ups");
         };
         if !Self::is_ai_handler(host, &t.handler()) {
-            return refuse("bad_arg", format!("template `{name}` is not an AI set-up ({})", t.handler()), "open ⚙ AI set-up to see your templates");
+            return refuse("bad_arg", format!("saved set-up `{name}` is not an AI set-up ({})", t.handler()), "open ⚙ AI set-up to see your saved set-ups");
         }
         let ai = format!("ai_{}", hex8());
         let mut spec: Map<String, Value> = t.record.clone();
         spec.extend(stamp);
-        spec.insert("template".into(), json!(name));
+        spec.insert("saved".into(), json!(name));
         match Self::make_ai(host, me, &ai, spec, peer).await {
             // EVERY dialog is KEPT from its start (owner 2026-10-12: no ephemeral
             // chats — the canvas and the terminal keep them alike): listed for reopening
             Ok(()) => {
                 let kept = Self::keep(host, &json!({"id": ai})).await;
-                json!({"id": ai, "root": ai, "template": name, "handler_module": t.handler(), "model": t.model(),
+                json!({"id": ai, "root": ai, "saved": name, "handler_module": t.handler(), "model": t.model(),
                        "dialog_name": kept.get("name").cloned().unwrap_or(json!(ai))})
             }
-            Err(e) => refuse("bad_arg", format!("spawn: the AI from template `{name}`: {e}"), ""),
+            Err(e) => refuse("bad_arg", format!("spawn: the AI from saved set-up `{name}`: {e}"), ""),
         }
     }
 
@@ -517,7 +517,7 @@ impl BackendBundle {
 
     /// The kept dialogs: `dialog` rows in the AI store under `user`'s key
     /// (no handler may write `canvas_root`'s record: grants and fields come
-    /// from above), the newest row per AI wins — `{id: {name, template, record}}`.
+    /// from above), the newest row per AI wins — `{id: {name, saved set-up, record}}`.
     async fn dialogs_map(host: &Host) -> Result<Map<String, Value>, String> {
         let store = host.ai_store()?;
         let r = host.act(&store, json!({"type": "read", "kinds": [DIALOG]})).await.result;
@@ -527,7 +527,7 @@ impl BackendBundle {
         let mut out = Map::new();
         for row in r["rows"].as_array().cloned().unwrap_or_default() {
             if let Some(ai) = row.get("ai").and_then(Value::as_str) {
-                out.insert(ai.to_string(), json!({"name": row.get("name"), "template": row.get("template"), "record": row.get("record")}));
+                out.insert(ai.to_string(), json!({"name": row.get("name"), "saved": row.get("saved"), "record": row.get("record")}));
             }
         }
         Ok(out)
@@ -536,7 +536,7 @@ impl BackendBundle {
     /// One `dialog` row: AI `ai` kept as `name`.
     async fn save_dialog(host: &Host, ai: &str, d: &Value) -> Result<(), String> {
         let store = host.ai_store()?;
-        let row = json!({"kind": DIALOG, "ai": ai, "name": d.get("name"), "template": d.get("template"), "record": d.get("record")});
+        let row = json!({"kind": DIALOG, "ai": ai, "name": d.get("name"), "saved": d.get("saved"), "record": d.get("record")});
         let r = host.act(&store, json!({"type": "append", "rows": [row]})).await.result;
         match r.get("error").and_then(Value::as_str) {
             Some(e) => Err(format!("backend: could not record the dialog: {e}")),
@@ -545,7 +545,7 @@ impl BackendBundle {
     }
 
     /// KEEP: the AI is on the project's memory store from its first turn, so a
-    /// kept dialog is a recorded one — its name, template and how to re-make it.
+    /// kept dialog is a recorded one — its name, saved set-up and how to re-make it.
     async fn keep(host: &Host, p: &Value) -> Value {
         let ai = p.get("id").and_then(Value::as_str).unwrap_or("").to_string();
         let Some(meta) = Self::meta_of(host, &ai) else {
@@ -564,7 +564,7 @@ impl BackendBundle {
         let handler = host.kernel.agents.get(&AgentId::from(ai.as_str())).and_then(|a| a.value().record().handler_module);
         record.insert("handler_module".into(), json!(handler));
         let name = p.get("name").and_then(Value::as_str).filter(|s| !s.trim().is_empty()).unwrap_or(&ai).trim().to_string();
-        let d = json!({"name": name, "template": meta.get("template"), "record": record});
+        let d = json!({"name": name, "saved": meta.get("saved"), "record": record});
         match Self::save_dialog(host, &ai, &d).await {
             Ok(()) => json!({"kept": ai, "name": name}),
             Err(e) => refuse("bad_arg", e, ""),
@@ -591,7 +591,7 @@ impl BackendBundle {
     async fn dialogs(host: &Host) -> Value {
         match Self::dialogs_map(host).await {
             Ok(d) => json!({"dialogs": d.iter().map(|(id, v)| json!({
-                "id": id, "name": v.get("name"), "template": v.get("template"),
+                "id": id, "name": v.get("name"), "saved": v.get("saved"),
                 "live": host.kernel.agents.contains_key(&AgentId::from(id.as_str())),
             })).collect::<Vec<_>>()}),
             Err(e) => refuse("not_found", e, ""),
@@ -615,12 +615,12 @@ impl BackendBundle {
             (Err(e), _) | (_, Err(e)) => return e,
         };
         if host.kernel.agents.contains_key(&AgentId::from(ai.as_str())) {
-            return json!({"id": ai, "root": ai, "template": d.get("template"), "name": d.get("name"), "shared": true});
+            return json!({"id": ai, "root": ai, "saved": d.get("saved"), "name": d.get("name"), "shared": true});
         }
         let mut spec: Map<String, Value> = d.get("record").and_then(Value::as_object).cloned().unwrap_or_default();
         spec.extend(stamp);
         match Self::make_ai(host, me, &ai, spec, peer).await {
-            Ok(()) => json!({"id": ai, "root": ai, "template": d.get("template"), "name": d.get("name"), "shared": false}),
+            Ok(()) => json!({"id": ai, "root": ai, "saved": d.get("saved"), "name": d.get("name"), "shared": false}),
             Err(e) => refuse("bad_arg", format!("reopen: re-making the AI: {e}"), ""),
         }
     }
@@ -638,11 +638,11 @@ impl Bundle for BackendBundle {
                     "create": "args: record:dict (req — handler_module, id?, its own fields; no parent or grants). One direct child of this agent; asking for an existing child of the same handler again answers it. {id, …}.",
                     "delete": "args: id:str (req — an agent under this one). Deletes it and its subtree.",
                     "presets": "No args. {preferred (the default AI set-up), bundles: [{name, sentence}] (the project's own bundles)}.",
-                    "spawn": "args: template:str? (else the default) | bundle:str (a NEW project bundle from that starter) | instance_of:str (one more instance of a project bundle), stamp:dict? (the caller's own fields for the backend root, copied unread), peer_grants:dict? (any grant key — more egress for the AI). {id, root, template, handler_module, model}.",
+                    "spawn": "args: saved:str? (else the default) | bundle:str (a NEW project bundle from that starter) | instance_of:str (one more instance of a project bundle), stamp:dict? (the caller's own fields for the backend root, copied unread), peer_grants:dict? (any grant key — more egress for the AI). {id, root, saved, handler_module, model}.",
                     "keep": "args: id:str (req — the cell's AI), name:str?. Records the dialog (its rows are already in the project's memory store); it outlives the cell. {kept, name}.",
                     "rename": "args: id:str, name:str. {id, name}.",
-                    "dialogs": "No args. The kept dialogs: {dialogs: [{id, name, template, live}]}.",
-                    "reopen": "args: id:str (a kept dialog), stamp:dict?, peer_grants:dict? (as spawn). The live AI if another cell has it, else the same AI re-made here, its history intact. {id, root, template, name, shared}.",
+                    "dialogs": "No args. The kept dialogs: {dialogs: [{id, name, saved, live}]}.",
+                    "reopen": "args: id:str (a kept dialog), stamp:dict?, peer_grants:dict? (as spawn). The live AI if another cell has it, else the same AI re-made here, its history intact. {id, root, saved, name, shared}.",
                     "new_canvas": "args: name:str (req). A PEER canvas `canvas_<name>` beside this one (flat — never nested): its own page records and page kernel, its own cells' backends. Open it at the page URL with ?canvas=<id>. {id}.",
                     "canvases": "No args. Every canvas, the main one first: {canvases: [{id, loader, main, name}]}.",
                     "configure_mcp": "args: id:str (req — an MCP agent of this canvas), url:str?, key:str? — its settings changed (a new key stored for the url's host and named), then it connects and lists its tools again (`boot`). Neither given: a reset — it reconnects as it is. {id, url}.",

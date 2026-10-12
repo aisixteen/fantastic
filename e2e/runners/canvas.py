@@ -62,6 +62,27 @@ def _scenario_path(scenario_id: str) -> Path:
     raise SystemExit(f"no scenario {scenario_id!r}")
 
 
+async def attach(cdp_port: int, timeout: float = 10.0):
+    """Chrome's page target, CONNECTED: a fresh Chrome lists its debugging port
+    before its page, and can refuse the page's socket (HTTP 404) for a moment
+    after listing it — retry both until `timeout`, then fail saying which."""
+    import websockets
+    deadline = time.time() + timeout
+    why = "its debugging port never answered"
+    while time.time() < deadline:
+        try:
+            tabs = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{cdp_port}/json/list").read())
+            page_ws = next((t["webSocketDebuggerUrl"] for t in tabs if t.get("type") == "page"), None)
+            if page_ws is None:
+                why = "it listed no page target"
+            else:
+                return await websockets.connect(page_ws, max_size=None, ping_interval=None)
+        except Exception as e:  # noqa: BLE001 — not up yet: retried until the deadline
+            why = f"{type(e).__name__}: {e}"
+        await asyncio.sleep(0.2)
+    raise SystemExit(f"Chrome on port {cdp_port}: not attached in {timeout:.0f} s — {why}")
+
+
 def free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -319,6 +340,8 @@ async def restart(spec, page: Page, host: Host, cwd: Path, url: str, state: dict
 
 
 async def click(page: Page, sel: str, bad: list[str]) -> None:
+    # a target drawn a moment after the page (a stopped terminal's ▶, past its attach)
+    await page.until(f"!!document.querySelector({json.dumps(sel)})", 10)
     r = await page.rect(sel)
     if r is None:
         bad.append(f"nothing to click at {sel}")
@@ -526,17 +549,7 @@ async def run_all(sc: dict, tmp: Path) -> bool:
     try:
         host.start()
         url = host.url
-        deadline = time.time() + 15
-        while True:
-            try:
-                tabs = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{cdp_port}/json/list").read())
-                page_ws = next(t for t in tabs if t["type"] == "page")["webSocketDebuggerUrl"]
-                break
-            except Exception:
-                if time.time() > deadline:
-                    raise SystemExit("Chrome never opened its debugging port")
-                time.sleep(0.2)
-        async with websockets.connect(page_ws, max_size=None) as ws:
+        async with await attach(cdp_port, 15) as ws:
             page = Page(ws)
             await page.cdp("Runtime.enable")
             await page.cdp("Page.enable")

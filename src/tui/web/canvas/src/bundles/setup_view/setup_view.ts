@@ -8,7 +8,7 @@ import { PROVIDERS, autoName, nameOk, providerOf, savedKeyFor } from "./wizard.t
 //      four (responses, anthropic, ollama, vllm);
 //   2. the new one's details: a name (auto), its URL (filled), its model, its key
 //      (a stored key for that host, a new one pasted, or none) and the backend's
-//      own optional fields — then "create & open chat" saves it as a template
+//      own optional fields — then "create & open chat" saves it as a saved set-up
 //      (the first becomes the default) and opens the agent's chat.
 // Every page has SKIP: an AI cell with no AI yet, which says how to set it up.
 // THE SETTINGS of an AI agent are page 2 for that agent (`edit_ai` on the
@@ -35,7 +35,7 @@ interface BackendInfo {
   key: boolean | null;
   fields: SchemaField[];
 }
-interface Template {
+interface Saved {
   name: string;
   record: Rec;
 }
@@ -44,7 +44,7 @@ const textOf = (v: unknown): string =>
   v === null || v === undefined ? "" : Array.isArray(v) ? v.join(", ") : typeof v === "object" ? JSON.stringify(v) : String(v);
 
 /** Every verb the cell calls on its set-up agent. */
-const VERBS = ["backends", "keys", "ai_settings", "configure_ai", "key_mode", "set_key_mode", "store_key", "templates", "save_template", "prefer", "reflect"] as const;
+const VERBS = ["backends", "keys", "ai_settings", "configure_ai", "key_mode", "set_key_mode", "store_key", "saved", "save", "prefer", "reflect"] as const;
 /** Shown on their own rows (page 2's top), never under "advanced". */
 const MAIN = new Set(["endpoint", "model"]);
 
@@ -142,16 +142,16 @@ export const setupView: ViewBundle = {
       });
 
     let backends: BackendInfo[] = [];
-    let templates: Template[] = [];
+    let saved: Saved[] = [];
     let preferred: string | null = null;
     let keys: Array<{ ref: string; host: string }> = [];
     let keyMode: string | null = null;
     const loadAll = async (): Promise<string | null> => {
-      const [b, t, k] = await Promise.all([call("backends"), call("templates"), call("keys")]);
+      const [b, t, k] = await Promise.all([call("backends"), call("saved"), call("keys")]);
       const e = errOf(b) ?? errOf(t) ?? errOf(k);
       if (e) return e;
       backends = ((b as Rec)["backends"] as BackendInfo[] | undefined) ?? [];
-      templates = ((t as Rec)["templates"] as Template[] | undefined) ?? [];
+      saved = ((t as Rec)["saved"] as Saved[] | undefined) ?? [];
       preferred = ((t as Rec)["preferred"] as string | null) ?? null;
       keys = ((k as Rec)["keys"] as Array<{ ref: string; host: string }> | undefined) ?? [];
       keyMode = ((k as Rec)["mode"] as string | null) ?? null;
@@ -161,7 +161,7 @@ export const setupView: ViewBundle = {
     // ── page 1: a provider ──
     const page1 = (): void => {
       const ai = new Set(backends.map((b) => b.module));
-      const saved = templates.filter((t) => ai.has(String(t.record["handler_module"] ?? "")));
+      const aiSaved = saved.filter((t) => ai.has(String(t.record["handler_module"] ?? "")));
       wiz.replaceChildren(
         el("div", { className: "top" }, el("h1", {}, "New AI agent"), el("span", { className: "step" }, "1 / 2")),
         el("p", { className: "lead" }, "You can set everything up manually, or let your coding agent do it."),
@@ -174,12 +174,12 @@ export const setupView: ViewBundle = {
           ", then ask it to set up an AI agent.",
         ),
         el("h2", {}, "SAVED"),
-        saved.length === 0
+        aiSaved.length === 0
           ? el("div", { className: "none" }, "Nothing saved yet — pick a provider below.")
           : el(
               "div",
               { className: "saved" },
-              ...saved.map((t) => {
+              ...aiSaved.map((t) => {
                 const b = el(
                   "button",
                   {},
@@ -211,12 +211,12 @@ export const setupView: ViewBundle = {
     };
 
     // ── page 2: the details (a new provider, or an agent's settings) ──
-    const page2 = (module: string, current?: { name: string; fields: Rec }, template = false): void => {
+    const page2 = (module: string, current?: { name: string; fields: Rec }, editSaved = false): void => {
       const b = backends.find((x) => x.module === module);
       if (b === undefined) return say(false, `this build links no ${module}`);
       const provider = PROVIDERS.find((p) => p.module === module);
       const editing = current !== undefined;
-      const name = el("input", { value: current?.name ?? autoName(module, templates.map((t) => t.name)) });
+      const name = el("input", { value: current?.name ?? autoName(module, saved.map((t) => t.name)) });
       name.disabled = editing;
       const schemaOf = (n: string): SchemaField | undefined => b.fields.find((f) => f.name === n);
       const start = (n: string): string => textOf(current?.fields[n] ?? (n === "endpoint" ? provider?.endpoint : schemaOf(n)?.default));
@@ -311,7 +311,7 @@ export const setupView: ViewBundle = {
         if (keyNeeded && b.key === true && source.value === "none") m.push("a key");
         return m;
       };
-      const go = button(template ? "save" : editing ? "save" : "create & open chat", () => void submit(), "primary");
+      const go = button(editSaved ? "save" : editing ? "save" : "create & open chat", () => void submit(), "primary");
       const submit = async (): Promise<void> => {
         const m = missing();
         if (m.length > 0) return say(false, `missing: ${m.join(", ")}`);
@@ -319,8 +319,8 @@ export const setupView: ViewBundle = {
         try {
           const ke = await storeKey();
           if (ke) return say(false, ke);
-          if (template) {
-            const r = await call("save_template", { name: current!.name, handler: module, fields: fieldTexts() });
+          if (editSaved) {
+            const r = await call("save", { name: current!.name, handler: module, fields: fieldTexts() });
             const e = errOf(r);
             if (e) return say(false, e);
             const le = await loadAll();
@@ -338,7 +338,7 @@ export const setupView: ViewBundle = {
             return;
           }
           const t = name.value.trim();
-          const r = await call("save_template", { name: t, handler: module, fields: fieldTexts() });
+          const r = await call("save", { name: t, handler: module, fields: fieldTexts() });
           const e = errOf(r);
           if (e) return say(false, e);
           if (preferred === null) await call("prefer", { name: t });
@@ -352,10 +352,10 @@ export const setupView: ViewBundle = {
         el(
           "div",
           { className: "top" },
-          el("h1", {}, template ? `Edit saved · ${current!.name}` : editing ? `Settings · ${current!.name}` : `New AI agent · ${provider?.label ?? providerOf(module)}`),
+          el("h1", {}, editSaved ? `Edit saved · ${current!.name}` : editing ? `Settings · ${current!.name}` : `New AI agent · ${provider?.label ?? providerOf(module)}`),
           el("span", { className: "step" }, editing ? providerOf(module) : "2 / 2"),
         ),
-        el("p", { className: "lead" }, template ? "Agents made from it from now on use these values; agents already running keep theirs (change those in their ⚙ settings)." : editing ? "Changes are live on the agent's next turn." : "Check the values, then create it — you can change them later in its ⚙ settings."),
+        el("p", { className: "lead" }, editSaved ? "Agents made from it from now on use these values; agents already running keep theirs (change those in their ⚙ settings)." : editing ? "Changes are live on the agent's next turn." : "Check the values, then create it — you can change them later in its ⚙ settings."),
         field("name", name, editing ? "" : "a name for reuse — it appears under SAVED"),
         field("URL", url, provider ? "filled for you — change it for your own server" : ""),
         field("model", model, schemaOf("model")?.hint ?? ""),
@@ -366,7 +366,7 @@ export const setupView: ViewBundle = {
         // an agent's settings: `‹ other set-ups` is page 1 FOR this cell — a saved
         // set-up or a new provider rebinds it (owner 2026-10-12: the set-up is the
         // AI agent's option, not a menu tile)
-        el("div", { className: "foot" }, button(editing && !template ? "‹ other set-ups" : "‹ back", () => page1()), el("span", { className: "grow" }), ...(template ? [] : [skip()]), go),
+        el("div", { className: "foot" }, button(editing && !editSaved ? "‹ other set-ups" : "‹ back", () => page1()), el("span", { className: "grow" }), ...(editSaved ? [] : [skip()]), go),
       );
     };
 
@@ -382,7 +382,7 @@ export const setupView: ViewBundle = {
         if (e2) {
           wiz.replaceChildren(el("h1", {}, "Settings"), sayEl);
           say(false, e2);
-        } else page2(String(r["handler"]), { name: textOf(r["template"]) || editAi, fields: (r["fields"] as Rec) ?? {} });
+        } else page2(String(r["handler"]), { name: textOf(r["saved"]) || editAi, fields: (r["fields"] as Rec) ?? {} });
       } else page1();
     } catch (err) {
       wiz.replaceChildren(el("h1", {}, "New AI agent"), sayEl);

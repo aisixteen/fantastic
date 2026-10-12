@@ -1,4 +1,4 @@
-# E64 · mcp_config — the project's `.mcp.json`, kept by the `mcp` leg
+# E64 · mcp_config — the project's `.fantastic/.mcp.json`, kept by the `mcp` leg
 
 Scripted, no model (`costs: free`).
 
@@ -10,4 +10,5 @@ Scripted, no model (`costs: free`).
 | other_kept | a server already in the file, its fields and key order, and any other key are untouched |
 | unchanged_on_reboot | a second boot leaves the file byte-identical |
 | no_error | the leg's reflect carries no `mcp_config_error` |
-| bridge_only_file | the `mcp_config` bridge is writable, rooted at the project, exposing only `.mcp.json` |
+| bridge_only_file | the `mcp_config` bridge is writable, rooted at the project, exposing only `.fantastic/.mcp.json` |
+| nothing_outside_fantastic | the project holds nothing the CLI made but `.fantastic/` |
