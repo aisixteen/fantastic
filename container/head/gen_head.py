@@ -19,7 +19,7 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
-GITHUB = "https://github.com/Alexadar/fantastic_canvas"
+GITHUB = "https://github.com/aisixteen/fantastic"
 
 # (section group, title, repo-relative path) — order is the read order an LLM
 # should follow: main first, then each kernel, then the container.
@@ -63,7 +63,7 @@ HOW = f"""# This is a Fantastic kernel — its own description IS the API.
 #   reflect (machine head):  POST /rest/kernel  {{"type":"reflect","readme":true,"bundles":"all"}}
 #   live verb calls (WS):    ws://<host>/web/ws
 #   pick a runtime at launch: -e FANTASTIC_RUNTIME=python|rust|ts (default python)
-#   image tag:               ghcr.io/alexadar/fantastic:latest
+#   image tag:               ghcr.io/aisixteen/fantastic:latest
 # Repo: {GITHUB}
 """
 

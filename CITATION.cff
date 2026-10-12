@@ -13,8 +13,8 @@ abstract: >-
   across four runtimes (python, swift, rust host kernels + a ts browser
   frontend). Capabilities emerge from self-description — given only the readmes,
   an AI weaves the wiring itself.
-repository-code: "https://github.com/Alexadar/fantastic_canvas"
-url: "https://github.com/Alexadar/fantastic_canvas"
+repository-code: "https://github.com/aisixteen/fantastic"
+url: "https://github.com/aisixteen/fantastic"
 license: AGPL-3.0-or-later
 keywords:
   - agents

@@ -41,10 +41,10 @@ After a successful release at tag `rust-v0.1.0`:
 
 ```
 # Version-pinned (recommended for CI / reproducible installs):
-https://github.com/Alexadar/fantastic_canvas/releases/download/rust-v0.1.0/fantastic-macos-aarch64.tar.gz
+https://github.com/aisixteen/fantastic/releases/download/rust-v0.1.0/fantastic-macos-aarch64.tar.gz
 
 # Floating "latest" (GitHub redirects to whatever's marked latest):
-https://github.com/Alexadar/fantastic_canvas/releases/latest/download/fantastic-macos-aarch64.tar.gz
+https://github.com/aisixteen/fantastic/releases/latest/download/fantastic-macos-aarch64.tar.gz
 ```
 
 Also at the release page: `sha256sums.txt` with checksums for every
@@ -96,11 +96,11 @@ the checksums file, and marks the tag as `latest`.
 
 ```bash
 # Pinned URL works
-curl -fIsS https://github.com/Alexadar/fantastic_canvas/releases/download/rust-v0.1.0/fantastic-linux-x86_64.tar.gz \
+curl -fIsS https://github.com/aisixteen/fantastic/releases/download/rust-v0.1.0/fantastic-linux-x86_64.tar.gz \
   | head -1   # → HTTP/2 302  (GH redirects to the CDN)
 
 # Floating-latest URL works
-curl -fIsS https://github.com/Alexadar/fantastic_canvas/releases/latest/download/fantastic-macos-aarch64.tar.gz \
+curl -fIsS https://github.com/aisixteen/fantastic/releases/latest/download/fantastic-macos-aarch64.tar.gz \
   | head -1
 ```
 
@@ -153,7 +153,7 @@ one-liner to bootstrap a binary on a remote host:
 ```bash
 arch=$(uname -m); os=$(uname -s | tr '[:upper:]' '[:lower:]')
 [ "$arch" = "arm64" ] && arch=aarch64    # macOS reports arm64; we use aarch64
-curl -fsSL "https://github.com/Alexadar/fantastic_canvas/releases/latest/download/fantastic-${os}-${arch}.tar.gz" \
+curl -fsSL "https://github.com/aisixteen/fantastic/releases/latest/download/fantastic-${os}-${arch}.tar.gz" \
   | tar -xzC ~/.local/bin
 ~/.local/bin/fantastic --help
 ```

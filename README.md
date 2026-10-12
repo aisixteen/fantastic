@@ -4,8 +4,8 @@
 Repo codename: `fantastic-canvas` — the open-core kernels + browser frontend.
 
 [![License: AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue.svg)](LICENSE)
-[![CodeQL](https://github.com/Alexadar/fantastic_canvas/actions/workflows/codeql.yml/badge.svg)](https://github.com/Alexadar/fantastic_canvas/actions/workflows/codeql.yml)
-[![Python lint](https://github.com/Alexadar/fantastic_canvas/actions/workflows/python-lint-typecheck.yml/badge.svg)](https://github.com/Alexadar/fantastic_canvas/actions/workflows/python-lint-typecheck.yml)
+[![CodeQL](https://github.com/aisixteen/fantastic/actions/workflows/codeql.yml/badge.svg)](https://github.com/aisixteen/fantastic/actions/workflows/codeql.yml)
+[![Python lint](https://github.com/aisixteen/fantastic/actions/workflows/python-lint-typecheck.yml/badge.svg)](https://github.com/aisixteen/fantastic/actions/workflows/python-lint-typecheck.yml)
 ![runtimes: python · rust · swift · ts](https://img.shields.io/badge/runtimes-python%20%C2%B7%20rust%20%C2%B7%20swift%20%C2%B7%20ts-informational)
 ![status: alpha](https://img.shields.io/badge/status-alpha-orange)
 
@@ -40,8 +40,8 @@ docker). **Pick the one for your machine** — there is no merged "latest" manif
 
 | image tag | use this on | also pinned |
 |---|---|---|
-| `ghcr.io/alexadar/fantastic:amd64` | **Intel / AMD** x86-64 (a.k.a. x64) — most Linux servers, Intel Macs/PCs | `:v0.5.4-amd64` |
-| `ghcr.io/alexadar/fantastic:arm64` | **Apple silicon / ARM** (aarch64) — M-series Macs, ARM servers, Raspberry Pi | `:v0.5.4-arm64` |
+| `ghcr.io/aisixteen/fantastic:amd64` | **Intel / AMD** x86-64 (a.k.a. x64) — most Linux servers, Intel Macs/PCs | `:v0.5.4-amd64` |
+| `ghcr.io/aisixteen/fantastic:arm64` | **Apple silicon / ARM** (aarch64) — M-series Macs, ARM servers, Raspberry Pi | `:v0.5.4-arm64` |
 
 > **AI / LLM: choose by the host arch.** `uname -m` → `x86_64`/`amd64` ⇒ pull
 > `:amd64`; `arm64`/`aarch64` ⇒ pull `:arm64`. (Pulling the wrong arch fails or runs
@@ -56,7 +56,7 @@ federated multi-kernel — also rendered on the served head page.*
 
 ```sh
 podman run -d -p 127.0.0.1:8088:8088 -v "$PWD":/work \
-  ghcr.io/alexadar/fantastic:arm64           # :amd64 on Intel/AMD; docker is identical
+  ghcr.io/aisixteen/fantastic:arm64           # :amd64 on Intel/AMD; docker is identical
 ```
 
 > The image **composes nothing on its own** (no agent autocreation — composition

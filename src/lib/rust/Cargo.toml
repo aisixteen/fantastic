@@ -38,7 +38,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.75"
 license = "AGPL-3.0-or-later"
-repository = "https://github.com/Alexadar/fantastic_canvas"
+repository = "https://github.com/aisixteen/fantastic"
 
 [workspace.dependencies]
 # Async runtime — single source of truth so every crate uses the same version.

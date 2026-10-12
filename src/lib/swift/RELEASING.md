@@ -9,7 +9,7 @@ trigger is fully manual — there is no scheduled or auto-tag release.
 > `FantasticKernelFull`, …) are not binary-distributable; they ship
 > as source via SwiftPM and consumers reference them by Git tag:
 >
->     .package(url: "https://github.com/Alexadar/fantastic_canvas",
+>     .package(url: "https://github.com/aisixteen/fantastic",
 >              from: "0.1.0")
 >
 > The Python kernel is development-only today; it has no release
@@ -42,10 +42,10 @@ After a successful release at tag `swift-v0.1.0`:
 
 ```
 # Version-pinned (recommended):
-https://github.com/Alexadar/fantastic_canvas/releases/download/swift-v0.1.0/fantastic-macos-universal.tar.gz
+https://github.com/aisixteen/fantastic/releases/download/swift-v0.1.0/fantastic-macos-universal.tar.gz
 
 # Floating "latest":
-https://github.com/Alexadar/fantastic_canvas/releases/latest/download/fantastic-macos-universal.tar.gz
+https://github.com/aisixteen/fantastic/releases/latest/download/fantastic-macos-universal.tar.gz
 ```
 
 Also at the release page: `sha256sums.txt` with the tarball's

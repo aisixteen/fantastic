@@ -18,8 +18,8 @@ The kernels are self-describing; given only their `reflect` + the zip's readme a
 LLM weaves/​revives the wiring itself (the emergent-code capability).
 
 **Published images (public, GHCR) — pick your architecture:**
-- `ghcr.io/alexadar/fantastic:amd64` — **Intel / AMD x86-64** (a.k.a. x64); pinned `:vX.Y.Z-amd64`
-- `ghcr.io/alexadar/fantastic:arm64` — **Apple silicon / ARM** (aarch64); pinned `:vX.Y.Z-arm64`
+- `ghcr.io/aisixteen/fantastic:amd64` — **Intel / AMD x86-64** (a.k.a. x64); pinned `:vX.Y.Z-amd64`
+- `ghcr.io/aisixteen/fantastic:arm64` — **Apple silicon / ARM** (aarch64); pinned `:vX.Y.Z-arm64`
 
 These are **single-arch images** — the registry does NOT auto-select, so pull the
 one matching `uname -m` (`x86_64`→`:amd64`, `arm64`/`aarch64`→`:arm64`). There is
@@ -27,7 +27,7 @@ one matching `uname -m` (`x86_64`→`:amd64`, `arm64`/`aarch64`→`:arm64`). The
 
 ## Quickstart for an AI chat (e.g. Claude Code) — the distribution model
 
-> **Tagline:** *"Pull `ghcr.io/alexadar/fantastic:<your-arch>`, run it, then
+> **Tagline:** *"Pull `ghcr.io/aisixteen/fantastic:<your-arch>`, run it, then
 > read its head to learn what it does and how to drive it."*
 
 1. **Image tag — choose by arch:** `:amd64` (Intel/AMD x86-64) or `:arm64` (Apple
@@ -38,7 +38,7 @@ one matching `uname -m` (`x86_64`→`:amd64`, `arm64`/`aarch64`→`:arm64`). The
    documented suggestion:
    ```sh
    podman|docker run -d --name fantastic -p 127.0.0.1:8088:8088 -v "$PWD":/work \
-     ghcr.io/alexadar/fantastic:arm64        # :amd64 on Intel/AMD
+     ghcr.io/aisixteen/fantastic:arm64        # :amd64 on Intel/AMD
    ```
    > **The image composes NOTHING (no agent autocreation).** It boots exactly what
    > `/work/.fantastic` already contains. So either **mount a project that carries
@@ -77,8 +77,8 @@ sh container/build.sh                               # host arch → fantastic:la
 ARCH=arm64 sh container/build.sh                    # one arch (native) → fantastic:arm64
 ARCH=amd64 sh container/build.sh                    # one arch (emulated on arm host) → fantastic:amd64
 # publish ONE arch (opt-in) — push its own tag:
-PUSH=1 ARCH=arm64 TAG=ghcr.io/alexadar/fantastic:arm64 sh container/build.sh
-PUSH=1 ARCH=amd64 TAG=ghcr.io/alexadar/fantastic:amd64 sh container/build.sh
+PUSH=1 ARCH=arm64 TAG=ghcr.io/aisixteen/fantastic:arm64 sh container/build.sh
+PUSH=1 ARCH=amd64 TAG=ghcr.io/aisixteen/fantastic:amd64 sh container/build.sh
 ```
 
 CI builds each arch on its OWN native runner (amd64 on `ubuntu-latest`, arm64 on
@@ -102,7 +102,7 @@ podman|docker run -d --name fantastic-<nodeId> \
   -v <hostWorkdir>:/work[:Z] \      # :Z = SELinux relabel (podman on RHEL/Fedora)
   -e FANTASTIC_RUNTIME=python \     # python (default) | rust | ts
   -e FANTASTIC_WORKDIR=/work \
-  ghcr.io/alexadar/fantastic:arm64   # or :amd64 — pick your arch
+  ghcr.io/aisixteen/fantastic:arm64   # or :amd64 — pick your arch
 ```
 
 - **Env:** `FANTASTIC_RUNTIME` (default `python`), `FANTASTIC_PORT` (default

@@ -185,6 +185,6 @@ cat <<EOF
       "$DIST_DIR/sha256sums.txt"
 
   # download URL after release:
-  #   https://github.com/Alexadar/fantastic_canvas/releases/download/$TAG/fantastic-macos-universal.tar.gz
+  #   https://github.com/aisixteen/fantastic/releases/download/$TAG/fantastic-macos-universal.tar.gz
 
 EOF

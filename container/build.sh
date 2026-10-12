@@ -5,7 +5,7 @@
 #   ARCH=arm64 sh container/build.sh              # one arch (native) → fantastic:arm64
 #   ARCH=amd64 sh container/build.sh              # one arch (emulated on arm host) → fantastic:amd64
 #   PLATFORM=linux/amd64,linux/arm64 sh …/build.sh   # multi-arch manifest (local)
-#   PUSH=1 ARCH=arm64 TAG=ghcr.io/alexadar/fantastic:0.3.0-linux-arm64 sh …/build.sh  # publish one arch
+#   PUSH=1 ARCH=arm64 TAG=ghcr.io/aisixteen/fantastic:0.3.0-linux-arm64 sh …/build.sh  # publish one arch
 #
 # `ARCH` builds ONE platform on whatever builder you run it on — native on a
 # matching host (arm64 on Apple silicon), emulated otherwise. That's the local
