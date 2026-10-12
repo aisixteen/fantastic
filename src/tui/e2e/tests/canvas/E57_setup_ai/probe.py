@@ -40,7 +40,7 @@ def main() -> bool:
     async def drive() -> dict:
         out: dict = {}
         async with rig.page(1600, 1000) as pg:
-            await spot(pg, 250, 250, "AI agent")
+            await spot(pg, 250, 250, "new AI agent…")
             await pg.until("document.querySelectorAll('.wiz .tiles button').length === 4", 20)
             await pg.js(f"[...document.querySelectorAll('.wiz .tiles button')].find(b=>b.firstChild.textContent==={json.dumps(provider)})?.click()")
             await pg.until("!!document.querySelector('.wiz label input')", 10)

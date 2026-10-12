@@ -12,9 +12,9 @@ const P: Presets = {
   dialogs: [{ id: "ai_1", name: "release notes" }],
 };
 
-test("empty: two groups — host (ask, terminal, AI agent, python agent, mcp connector), page (html, stream, tree view, backgrounds, tips, the 3 themes) — then AI (★ the default), chats", () => {
+test("empty: two groups — host (AI agent, terminal, new AI agent…, python agent, mcp connector), page (html, stream, tree view, canvas theme, tips) — then AI (★ the default), chats", () => {
   const t = tiles("", P);
-  assert.deepEqual(t.map((x) => x.label), ["ask", "terminal", "AI agent", "python agent", "mcp connector", "html", "stream", "tree view", "backgrounds", "tips", "canvas theme", "mobile theme", "auto theme", "@gpt5 ★", "@box", "release notes"]);
+  assert.deepEqual(t.map((x) => x.label), ["AI agent", "terminal", "new AI agent…", "python agent", "mcp connector", "html", "stream", "tree view", "canvas theme", "tips", "@gpt5 ★", "@box", "release notes"]);
   assert.deepEqual(t.find((x) => x.label === "python agent")!.pick, { kind: "bundle", starter: "python_agent" });
   assert.deepEqual([...new Set(t.map((x) => x.section))], ["host", "page", "ai", "chats"]);
   assert.deepEqual(t.at(-1)!.pick, { kind: "chat", id: "ai_1", name: "release notes" });
@@ -22,9 +22,9 @@ test("empty: two groups — host (ask, terminal, AI agent, python agent, mcp con
 
 test("a kind typed exactly offers only that kind", () => {
   assert.deepEqual(tiles("terminal", P).map((x) => x.pick), [{ kind: "terminal" }]);
-  assert.deepEqual(tiles("ai agent", P).map((x) => x.pick), [{ kind: "setup" }], "the wizard, typed in any case");
+  assert.deepEqual(tiles("new ai agent…", P).map((x) => x.pick), [{ kind: "setup" }], "the wizard, typed in any case");
   assert.deepEqual(tiles("tree view", P).map((x) => x.pick), [{ kind: "tree" }]);
-  assert.deepEqual(tiles("mobile theme", P).map((x) => x.pick), [{ kind: "theme", name: "mobile" }]);
+  assert.deepEqual(tiles("canvas theme", P).map((x) => x.pick), [{ kind: "backgrounds" }]);
 });
 
 test("free text: the first tile asks the default; the rest filter", () => {
@@ -39,12 +39,13 @@ test("@name picks a template, the rest is the first turn", () => {
   assert.deepEqual(t[0]!.pick, { kind: "ai", template: "box", text: "hi there" });
 });
 
-test("no AI set up: typed text first opens the wizard; empty, the \"AI agent\" tile does — nothing guessed", () => {
+test("no AI set up: the first tile, \"AI agent\", opens the wizard (typed or not) — nothing guessed", () => {
   const t = tiles("hello", { templates: [], preferred: null, dialogs: [] });
   assert.deepEqual(t.map((x) => x.pick), [{ kind: "setup" }]);
   const empty = tiles("", null);
-  assert.ok(!empty.some((x) => x.pick.kind === "ai"), "no ask tile without a default");
-  assert.deepEqual(empty.find((x) => x.label === "AI agent")!.pick, { kind: "setup" });
+  assert.ok(!empty.some((x) => x.pick.kind === "ai"), "no default AI tile without a default");
+  assert.deepEqual(empty[0]!.label, "AI agent");
+  assert.deepEqual(empty[0]!.pick, { kind: "setup" }, "with none set up, \"AI agent\" opens the wizard");
 });
 
 test("grid moves: across by 1, down/up by a row, clamped", () => {
@@ -74,10 +75,11 @@ test("a plugin template is a HOST tile (not an AI one); picking it places its ag
   assert.deepEqual(tiles("web", withPlugin).slice(1).map((x) => x.label), ["web_search"], "typing filters plugins too");
 });
 
-test("fantastic on PATH: a HOST tile, not a coding agent", () => {
-  const t = tiles("", { ...P, coding: [{ name: "fantastic", path: "/u/.local/bin/fantastic" }] });
+test("fantastic on PATH: the FIRST of the coding agents", () => {
+  const t = tiles("", { ...P, coding: [{ name: "fantastic", path: "/u/.local/bin/fantastic" }, { name: "claude", path: "/c" }] });
   const f = t.find((x) => x.label === "fantastic")!;
-  assert.equal(f.section, "host");
+  assert.equal(f.section, "coding");
+  assert.deepEqual(t.filter((x) => x.section === "coding").map((x) => x.label), ["fantastic", "claude"]);
   assert.deepEqual(f.pick, { kind: "coding", name: "fantastic", path: "/u/.local/bin/fantastic" });
 });
 

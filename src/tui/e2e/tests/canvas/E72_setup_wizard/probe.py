@@ -38,7 +38,7 @@ def main() -> bool:
             async with rig.page(1500, 950) as pg:
                 click = lambda t: pg.js(f"{BTN}({json.dumps(t)})?.click()")
                 # 1. page 1, then skip
-                await spot(pg, 300, 300, "AI agent")
+                await spot(pg, 300, 300, "new AI agent…")
                 await pg.until("document.querySelectorAll('.wiz .tiles button').length === 4", 20)
                 info["tiles"] = await pg.js("[...document.querySelectorAll('.wiz .tiles button')].map(b=>[b.firstChild.textContent, b.disabled])")
                 info["lead"] = await pg.js("document.querySelector('.wiz .lead')?.textContent")
@@ -64,6 +64,12 @@ def main() -> bool:
                   for (const i of document.querySelectorAll('.wiz label input')) if (!i.value && i.placeholder.includes('required')) i.value='32000';
                   for (const s of document.querySelectorAll('.wiz > label select')) if (!s.value && s.options.length > 1 && s.options[0].textContent.includes('choose')) s.value = s.options[1].value;
                   const k=[...document.querySelectorAll('.wiz label')].find(l=>l.querySelector('span').textContent==='key'); const s=k&&k.querySelector('select'); if(s){s.value='none'; s.dispatchEvent(new Event('change'));}})()""")
+                # a URL with no scheme is refused, naming what it needs
+                await pg.js("(()=>{const l=[...document.querySelectorAll('.wiz label')].find(l=>l.querySelector('span').textContent==='URL'); const i=l.querySelector('input'); i.value='127.0.0.1:9/v1'; i.dispatchEvent(new Event('input'));})()")
+                await click("create")
+                await pg.until("(document.querySelector('.wiz .say')?.textContent||'').includes('http://')", 5)
+                info["no_scheme_say"] = await pg.js("document.querySelector('.wiz .say')?.textContent")
+                await pg.js("(()=>{const l=[...document.querySelectorAll('.wiz label')].find(l=>l.querySelector('span').textContent==='URL'); const i=l.querySelector('input'); i.value='http://127.0.0.1:9/v1'; i.dispatchEvent(new Event('input'));})()")
                 await click("create")
                 bound = await pg.until(f"!document.querySelector('.wiz') && !!document.querySelector('.agent-frame[data-id=\"{cell}\"] .chat-view')", 20)
                 info["say_after_create"] = await pg.js("document.querySelector('.wiz .say')?.textContent")
@@ -85,6 +91,16 @@ def main() -> bool:
                 await pg.until("(document.querySelector('.wiz .say')?.textContent||'').includes('saved')", 15)
                 info["saved_say"] = await pg.js("document.querySelector('.wiz .say')?.textContent")
                 await asyncio.sleep(2.0)
+                # EDIT the saved provider: its template rewritten under its name
+                await pg.until("!document.querySelector('.wiz')", 10)
+                await spot(pg, 900, 600, "new AI agent…")
+                await pg.until("document.querySelectorAll('.wiz .saved-row').length > 0", 10)
+                await pg.js("[...document.querySelectorAll('.wiz .saved-row')].find(r=>r.querySelector('.name')?.textContent==='vllm-1')?.querySelector('button.edit')?.click()")
+                await pg.until("(document.querySelector('.wiz h1')?.textContent||'').startsWith('Edit saved')", 8)
+                await pg.js("(()=>{const l=[...document.querySelectorAll('.wiz label')].find(l=>l.querySelector('span').textContent==='model'); l.querySelector('input').value='edited-model';})()")
+                await click("save")
+                await pg.until("(document.querySelector('.wiz .say')?.textContent||'').includes('saved')", 8)
+                info["edit_say"] = await pg.js("document.querySelector('.wiz .say')?.textContent")
                 info["console"] = [x for x in pg.logs if "WebGL" not in x][:8]
 
         asyncio.run(run())
@@ -105,6 +121,10 @@ def main() -> bool:
         info["ai"] = ai
         rec = rig.host_record(ai) if ai else None
         info["ai_model"] = (rec or {}).get("model")
+        r["url_without_scheme_refused"] = "http://" in (info.get("no_scheme_say") or "")
+        tdoc = yaml.safe_load((rig.home / "templates" / "vllm-1.yaml").read_text()) if (rig.home / "templates" / "vllm-1.yaml").exists() else {}
+        info["template_model"] = tdoc.get("model")
+        r["saved_provider_edit_rewrites_template"] = "saved" in (info.get("edit_say") or "") and tdoc.get("model") == "edited-model"
         r["settings_save_live"] = "saved" in (info.get("saved_say") or "") and (rec or {}).get("model") == "y"
     finally:
         rig.stop()

@@ -31,6 +31,7 @@
 //!   `inquiry`, `inquiries`, `send`), unchanged.
 
 pub mod grants;
+pub mod inquiries;
 pub mod path;
 
 use std::sync::Arc;
@@ -45,7 +46,7 @@ use serde_json::{json, Map, Value};
 pub const HANDLER_MODULE: &str = "user.tools";
 
 /// The verbs this bundle answers itself (the rest are the probe's).
-pub const VERBS: [&str; 4] = ["forward", "around", "path", "reflect"];
+pub const VERBS: [&str; 7] = ["forward", "around", "path", "reflect", "inquiry", "inquiries", "answer_inquiry"];
 
 
 /// A view's background: drawn behind its cells, never one of them.
@@ -85,6 +86,8 @@ pub struct UserBundle {
     probe: UserProbe,
     /// `path`'s scan, made at boot (RAM only — a stale path is never stored)
     programs: Arc<tokio::sync::Mutex<Option<Value>>>,
+    /// the questions agents asked the person, open until answered
+    inquiries: inquiries::Inquiries,
 }
 
 impl UserBundle {
@@ -296,6 +299,10 @@ impl UserBundle {
                 return Some((Some(r), b));
             }
             "around" => Self::around(me, p, kernel).await,
+            // THE PERSON'S INQUIRIES: held, listed, answered (`inquiries.rs`)
+            "inquiry" => self.inquiries.ask(p),
+            "inquiries" => self.inquiries.list(p),
+            "answer_inquiry" => self.inquiries.answer(me, p, kernel).await,
             _ => return None,
         };
         Some((Some(reply), None))
@@ -316,6 +323,9 @@ impl Bundle for UserBundle {
             _ => serde_json::Map::new(),
         };
         v.insert("forward".into(), json!("args: target:str (req), payload:dict (req), timeout:num? (none by default: the call lasts as long as the target takes), token:str? — `user` sends payload to target; the reply verbatim. A token is needed only when `user` carries one (token_sha256) and the caller is not the shell."));
+        v.insert("inquiry".into(), json!("args: text:str (req), kind:str? (text|single|multi|confirm, default text), options:list? (required for single/multi), request_id:str? — ACCEPTED at once ({accepted, re}) and held for the person; the answer arrives LATER as `[reply to <re> · user inquiry] <answer>…</answer>` on your thread. Nothing suspends: keep working, or await."));
+        v.insert("inquiries".into(), json!("args: asker:str? — {inquiries: [{re, asker, text, kind, options, request_id, ts}]}: the open questions (one asker's, when named)."));
+        v.insert("answer_inquiry".into(), json!("args: re:int (req — the inquiry's pid), answer: str | list | bool (req) — the person's answer, sent to the asker under the inquiry's pid; then closed."));
         v.insert("path".into(), json!("args: rescan:bool? — {dirs: [PATH dirs], executables: {name: full path}}: every program on the human's PATH (this process's merged with the login shell's), the first on PATH winning; scanned at boot, `rescan: true` scans again. The caller decides what a name means."));
         v.insert("around".into(), json!("args: canvas:str? (a canvas node id — default the main canvas), view:str? (default view_root), x:num, y:num, radius:num — {view, members: [{id, kind, title, rect:{x,y,w,h}, distance, backend_id?}]}: the cells of a page view within radius, nearest first, from the page records; judged by YOUR page grants."));
         Value::Object(v)

@@ -25,7 +25,6 @@ export type Pick =
   | { kind: "tree" }
   | { kind: "backgrounds" }
   | { kind: "tips" }
-  | { kind: "theme"; name: "auto" | "canvas" | "mobile" }
   | { kind: "mcp" }
   | { kind: "chat"; id: string; name: string }
   | { kind: "plugin"; template: string }
@@ -53,12 +52,12 @@ export interface Presets {
  *  nothing is automated, no login is touched. Found by name on `user path`.
  *  Their glyphs are the menu's own outline icons, never a vendor's logo. */
 export const CODING_AGENTS: ReadonlyArray<{ name: string; icon: Icon; section?: Section }> = [
+  // fantastic itself FIRST among the coding agents (owner 2026-10-12)
+  { name: "fantastic", icon: "fantastic" },
   { name: "claude", icon: "claude" },
   { name: "codex", icon: "codex" },
   { name: "aider", icon: "aider" },
   { name: "opencode", icon: "opencode" },
-  // fantastic itself: a HOST tile (owner 2026-10-11), not among the coding agents
-  { name: "fantastic", icon: "fantastic", section: "host" },
 ];
 
 /** The exec leg's `allowed` entry for EXACTLY `argv` (shlex-joined, regex-
@@ -84,8 +83,8 @@ export const COLS = 5;
 
 const KINDS: Array<[string, Pick, Icon, Section]> = [
   ["terminal", { kind: "terminal" }, "terminal", "host"],
-  // a NEW AI agent, any time: the set-up wizard (a saved provider, or a new one)
-  ["AI agent", { kind: "setup" }, "agent", "host"],
+  // the wizard, any time: one more AI agent from a saved provider, or a new one
+  ["new AI agent…", { kind: "setup" }, "agent", "host"],
   // a NEW python agent: a project bundle folder from the CLI's starter, one
   // instance placed — edit its folder, the change takes effect at once
   ["python agent", { kind: "bundle", starter: "python_agent" }, "template", "host"],
@@ -95,12 +94,9 @@ const KINDS: Array<[string, Pick, Icon, Section]> = [
   ["stream", { kind: "stream" }, "stream", "page"],
   // the agent tree of both kernels (a `sidebar_view.ts` cell)
   ["tree view", { kind: "tree" }, "tree", "page"],
-  ["backgrounds", { kind: "backgrounds" }, "backgrounds", "page"],
+  // the view's backgrounds AND themes (owner 2026-10-12: "backgrounds" renamed)
+  ["canvas theme", { kind: "backgrounds" }, "backgrounds", "page"],
   ["tips", { kind: "tips" }, "tips", "page"],
-  // where the cells sit: the free canvas, one column, or by the tab's width
-  ["canvas theme", { kind: "theme", name: "canvas" }, "backgrounds", "page"],
-  ["mobile theme", { kind: "theme", name: "mobile" }, "backgrounds", "page"],
-  ["auto theme", { kind: "theme", name: "auto" }, "backgrounds", "page"],
 ];
 /** The groups in DRAWN order — the flat tile order follows it (arrow keys walk it). */
 const SECTIONS: Section[] = ["host", "coding", "bundles", "page", "page_bundles", "ai", "chats"];
@@ -128,12 +124,12 @@ export function tiles(typed: string, presets: Presets | null): Tile[] {
   if (exactBundle) return [{ icon: "template", label: exactBundle.name, hint: "", pick: { kind: "instance", bundle: exactBundle.name }, section: "bundles" }];
   const exactPage = (presets?.pageBundles ?? []).find((b) => b.name.toLowerCase() === low);
   if (exactPage) return [{ icon: "html", label: exactPage.name, hint: "", pick: { kind: "page_instance", bundle: exactPage.name }, section: "page_bundles" }];
-  // the first tile: the default AI (free text → its first turn); with none set
-  // up, typed text first sets one up (the wizard)
+  // THE FIRST TILE, "AI agent" (owner 2026-10-12: was "ask"): the default AI —
+  // free text is its first turn; with none set up, the wizard
   if (presets?.preferred) {
-    out.push({ icon: "ask", label: t ? `ask ${presets.preferred}` : "ask", hint: `★ ${presets.preferred}`, pick: { kind: "ai", template: null, text: t }, section: "host" });
-  } else if (t) {
-    out.push({ icon: "agent", label: "set up an AI agent…", hint: "no AI set up yet", pick: { kind: "setup" }, section: "host" });
+    out.push({ icon: "ask", label: t ? `AI agent · ${presets.preferred}` : "AI agent", hint: `★ ${presets.preferred}`, pick: { kind: "ai", template: null, text: t }, section: "host" });
+  } else {
+    out.push({ icon: "agent", label: "AI agent", hint: "set one up", pick: { kind: "setup" }, section: "host" });
   }
   for (const [k, pick, icon, section] of KINDS) {
     if (!t || k.toLowerCase().startsWith(low)) out.push({ icon, label: k, hint: "", pick, section });

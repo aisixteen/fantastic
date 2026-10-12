@@ -2,7 +2,12 @@ import type { Payload } from "../../lib.ts";
 import type { ViewBundle, ViewContext, ViewHandle } from "../view.ts";
 import { BACKGROUNDS } from "./backgrounds_agent.ts";
 
-// THE BACKGROUNDS PANEL — the backgrounds agent's own view (one record: the
+// THE CANVAS THEME PANEL (owner 2026-10-12) — two sections: BACKGROUNDS and
+// THEMES. Themes: each row uses it on a click; ✎ edits it (name, layout, its
+// width trigger), × deletes yours or hides a stock one, `restore stock` brings
+// them back, `+ new theme` adds one; `auto` lets the triggers choose.
+//
+// THE BACKGROUNDS SECTION — the backgrounds agent's own view (one record: the
 // agent IS the cell). Top: random · every minute · none · default. Then the
 // STOCK list (each with its colour sets; × hides one, `restore stock` brings
 // them back) and YOUR list (× deletes), with the hint how an AI fills it. Every
@@ -36,6 +41,16 @@ const CSS = `
   .bgs .hint { margin: 6px 0 2px; padding: 9px 10px; border-radius: 8px; border: 1px dashed #3a3a3e; color: #a9a7a2; font-size: 12px; }
   .bgs .hint b { color: #ededeb; font-weight: 500; }
   .bgs .hint code { font: 11px ui-monospace, SFMono-Regular, monospace; color: #b78cff; }
+  .bgs h2 { margin: 18px 0 8px; font: 650 15px system-ui, sans-serif; color: #ededeb; display: flex; align-items: baseline; justify-content: space-between; }
+  .bgs h2:first-child { margin-top: 0; }
+  .bgs .tform { display: grid; grid-template-columns: 70px minmax(0, 1fr); gap: 6px 10px; align-items: center; padding: 10px; margin: 6px 0; border-radius: 8px; border: 1px solid #3a3a3e; background: #101012; }
+  .bgs .tform input, .bgs .tform select { font: 12px ui-monospace, SFMono-Regular, monospace; color: #ededeb; background: #18181b; border: 1px solid #2a2a2c; border-radius: 6px; padding: 5px 7px; min-width: 0; width: 100%; box-sizing: border-box; }
+  .bgs .tform .trig select { flex: 1; width: auto; }
+  .bgs .tform .trig input { flex: 0 0 72px; }
+  .bgs .tform .trig span { flex: 0 0 auto; color: #8a8884; font-size: 12px; }
+  .bgs .tform label { color: #8a8884; font-size: 12px; }
+  .bgs .tform .trig { display: flex; gap: 6px; align-items: center; }
+  .bgs .tform .row2 { grid-column: 1 / -1; display: flex; gap: 8px; justify-content: flex-end; }
   .bgs .st { margin-top: 8px; min-height: 16px; color: #77757a; font: 11px ui-monospace, SFMono-Regular, monospace; }
 `;
 
@@ -50,6 +65,10 @@ function ensureStyle(): void {
 type Dict = Record<string, unknown>;
 interface SetRow { name: string; colors: string[] }
 interface Item { name: string; note: string; sets: SetRow[] }
+interface ThemeRow { name: string; layout: "free" | "column"; trigger: { max_width?: number; min_width?: number } | null; note?: string; from: "stock" | "user" }
+/** A trigger in words. */
+const triggerText = (t: ThemeRow["trigger"]): string =>
+  t === null ? "manual" : t.max_width !== undefined && t.min_width !== undefined ? `${t.min_width}–${t.max_width}px wide` : t.max_width !== undefined ? `up to ${t.max_width}px wide` : t.min_width !== undefined ? `from ${t.min_width}px wide` : "manual";
 
 const el = <K extends keyof HTMLElementTagNameMap>(tag: K, cls = "", text = ""): HTMLElementTagNameMap[K] => {
   const e = document.createElement(tag);
@@ -113,7 +132,7 @@ export const backgroundsView: ViewBundle = {
       const stock = (l["stock"] ?? []) as Item[];
       const user = (l["user"] ?? []) as Item[];
       const hidden = (l["hidden_stock"] ?? []) as string[];
-      root.replaceChildren();
+      root.replaceChildren(el("h2", "", "Backgrounds"));
       // the bar
       const bar = el("div", "bar");
       const btn = (label: string, title: string, p: Dict, doing: string, on = false): HTMLElement => {
@@ -144,14 +163,96 @@ export const backgroundsView: ViewBundle = {
       const hint = el("div", "hint");
       hint.innerHTML =
         "<b>Ask your AI agent to look around and add more backgrounds.</b><br>" +
-        "Open an AI cell (double-click → <b>ask</b>) and say e.g. <i>“make three calm backgrounds for this canvas”</i> — " +
+        "Open an AI cell (double-click → <b>AI agent</b>) and say e.g. <i>“make three calm backgrounds for this canvas”</i> — " +
         `it adds them here with <code>add</code> on this agent (<code>${ctx.selfId}</code>), and they stay.`;
-      root.append(hint, st);
+      root.append(hint);
+      // ── THEMES ──
+      const th = await call({ type: "themes" });
+      const themes = (th["themes"] ?? []) as ThemeRow[];
+      const hiddenT = (th["hidden"] ?? []) as string[];
+      const curT = String(th["current"] ?? "auto");
+      const h2 = el("h2", "", "Themes");
+      const tbar = el("div", "bar");
+      tbar.append(
+        btn(curT === "auto" ? "auto ✓" : "auto", "let the width triggers choose", { type: "use_theme", name: "auto" }, "…", curT === "auto"),
+      );
+      const add = el("button", "btn", "+ new theme");
+      add.onclick = (): void => {
+        root.querySelector(".tform")?.remove();
+        tbar.after(themeForm(null));
+      };
+      tbar.append(add);
+      if (hiddenT.length > 0) {
+        const rs = el("button", "link", `restore stock (${hiddenT.length} hidden)`);
+        rs.onclick = () => void act({ type: "restore_themes" }, "restoring…");
+        h2.append(rs);
+      }
+      root.append(h2, tbar);
+      for (const t of themes) {
+        const r = el("div", "row");
+        const b = el("button", "name");
+        b.append(el("b", "", t.name), el("small", "", `${t.layout === "column" ? "one column" : "free canvas"} · ${triggerText(t.trigger)}${t.from === "user" ? " · yours" : ""}${t.note ? ` · ${t.note}` : ""}`));
+        if (curT === t.name) b.classList.add("on");
+        b.title = `use ${t.name}`;
+        b.onclick = () => void act({ type: "use_theme", name: t.name }, `switching to ${t.name}…`);
+        const ed = el("button", "x", "✎");
+        ed.title = t.from === "stock" ? "edit (saves as yours, in place of the stock one)" : "edit";
+        ed.onclick = (): void => {
+          root.querySelector(".tform")?.remove();
+          r.after(themeForm(t));
+        };
+        const x = el("button", "x", "×");
+        x.title = t.from === "stock" ? "hide it (restore stock brings it back)" : "delete it";
+        x.onclick = () => void act({ type: "delete_theme", name: t.name }, `removing ${t.name}…`);
+        r.append(b, ed, x);
+        root.append(r);
+      }
+      root.append(st);
+    };
+    // a theme's form: name, layout, its width trigger, a note — saved as yours
+    const themeForm = (t: ThemeRow | null): HTMLElement => {
+      const f = el("div", "tform");
+      const name = el("input");
+      name.value = t?.name ?? "";
+      name.placeholder = "letters, digits, - _";
+      const layout = el("select");
+      layout.append(Object.assign(el("option"), { value: "free", textContent: "free canvas" }), Object.assign(el("option"), { value: "column", textContent: "one column" }));
+      layout.value = t?.layout ?? "free";
+      const kind = el("select");
+      kind.append(
+        Object.assign(el("option"), { value: "manual", textContent: "manual only" }),
+        Object.assign(el("option"), { value: "max", textContent: "when the tab is at most" }),
+        Object.assign(el("option"), { value: "min", textContent: "when the tab is at least" }),
+      );
+      const px = el("input");
+      px.type = "number";
+      const tr = t?.trigger ?? null;
+      kind.value = tr === null ? "manual" : tr.max_width !== undefined ? "max" : "min";
+      px.value = String(tr?.max_width ?? tr?.min_width ?? "");
+      const note = el("input");
+      note.value = t?.note ?? "";
+      const trig = el("div", "trig");
+      trig.append(kind, px, el("span", "", "px wide"));
+      const save = el("button", "btn on", "save");
+      const cancel = el("button", "btn", "cancel");
+      cancel.onclick = () => f.remove();
+      save.onclick = (): void => {
+        const n = Number(px.value);
+        const trigger = kind.value === "manual" || !Number.isFinite(n) || n <= 0 ? null : kind.value === "max" ? { max_width: n } : { min_width: n };
+        void act({ type: "add_theme", name: name.value.trim(), layout: layout.value, trigger, note: note.value.trim() }, "saving…");
+      };
+      const row2 = el("div", "row2");
+      row2.append(cancel, save);
+      f.append(el("label", "", "name"), name, el("label", "", "layout"), layout, el("label", "", "auto"), trig, el("label", "", "note"), note, row2);
+      f.addEventListener("keydown", (e) => e.stopPropagation());
+      return f;
     };
     void render();
     // the agent's state moved (an AI's add, another tab) → draw again
     const off = ctx.kernel.addStateSubscriber((e) => {
-      if ((e as Dict)["agent_id"] === ctx.selfId && (e as Dict)["kind"] === "updated") void render();
+      // …or its view's theme moved (use_theme, the view's `theme` verb)
+      const who = (e as Dict)["agent_id"];
+      if ((who === ctx.selfId || who === ctx.kernel.get(ctx.selfId)?.parentId) && (e as Dict)["kind"] === "updated") void render();
     });
     return {
       unmount(): void {

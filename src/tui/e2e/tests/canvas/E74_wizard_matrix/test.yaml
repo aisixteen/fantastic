@@ -1,0 +1,9 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint. Scripted: the provider MOCKS (e2e/mocks), no model.
+id: wizard_matrix
+group: canvas
+title: "the AI set-up wizard across all four providers (vllm, ollama, responses, anthropic) on their mocks: a pasted key, the saved key, no key, a saved provider, skip → settings, a failed turn, a settings change — each agent answers, with the right key on the wire"
+runner: probe.py
+costs: free
+limits:
+  seconds: 420
+env: {}

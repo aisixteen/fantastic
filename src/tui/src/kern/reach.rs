@@ -164,6 +164,77 @@ pub async fn grant(h: &Host, ids: &[String]) -> Result<(), String> {
             }
         }
     }
+    grant_back(h, ids).await
+}
+
+/// THE WAY BACK (owner 2026-10-11: the canvas AI is god mode — it builds): every
+/// agent may `send` TO every holder — an exec agent's monitor delivery, an
+/// inquiry's answer, a sub-routine the AI built reporting back. Both edges, BY ID,
+/// for every pair that involves one of `ids`: the holder's `callable_by` names the
+/// agent with `send`, the agent's `can_call` names the holder with `send` (merged —
+/// a `*` stays `*`). One write per changed record.
+pub async fn grant_back(h: &Host, ids: &[String]) -> Result<(), String> {
+    let send = json!(["send"]);
+    let holders = holders(h);
+    let root = h.kernel.root().map(|r| r.id.0.clone());
+    // the agents that may START a call back: not a store (a store only answers),
+    // not another holder (holders already reach each other with `*`)
+    let held: std::collections::HashSet<&str> = holders.iter().map(String::as_str).collect();
+    let everyone: Vec<String> = h
+        .kernel
+        .agents
+        .iter()
+        .filter(|e| {
+            let id = e.key().0.as_str();
+            Some(&e.key().0) != root.as_ref() && id != CANVAS_LEG && !held.contains(id)
+                && !e.value().record().handler_module.as_deref().is_some_and(|m| m.contains("store"))
+        })
+        .map(|e| e.key().0.clone())
+        .collect();
+    let touched: std::collections::HashSet<&str> = ids.iter().map(String::as_str).collect();
+    let pairs = |holder: &str| -> Vec<String> {
+        everyone
+            .iter()
+            .filter(|x| x.as_str() != holder && (touched.contains(holder) || touched.contains(x.as_str())))
+            .cloned()
+            .collect()
+    };
+    // the holders' side: who may send to them
+    for holder in &holders {
+        let mut cb = field(h, holder, "callable_by");
+        let mut changed = false;
+        for x in pairs(holder) {
+            let want = union(cb.get(&x), &send);
+            if cb.get(&x) != Some(&want) {
+                cb.insert(x, want);
+                changed = true;
+            }
+        }
+        if changed {
+            let r = h.operator("kernel", json!({"type": "update_agent", "id": holder, "callable_by": cb})).await.result;
+            if let Some(e) = r.get("error").and_then(Value::as_str) {
+                return Err(format!("reach: `{holder}`.callable_by (the way back): {e}"));
+            }
+        }
+    }
+    // the senders' side: whom they may send to
+    for x in &everyone {
+        let mut cc = field(h, x, "can_call");
+        let mut changed = false;
+        for holder in holders.iter().filter(|hd| hd.as_str() != x && (touched.contains(hd.as_str()) || touched.contains(x.as_str()))) {
+            let want = union(cc.get(holder), &send);
+            if cc.get(holder) != Some(&want) {
+                cc.insert(holder.clone(), want);
+                changed = true;
+            }
+        }
+        if changed {
+            let r = h.operator("kernel", json!({"type": "update_agent", "id": x, "can_call": cc})).await.result;
+            if let Some(e) = r.get("error").and_then(Value::as_str) {
+                return Err(format!("reach: `{x}`.can_call (the way back): {e}"));
+            }
+        }
+    }
     Ok(())
 }
 

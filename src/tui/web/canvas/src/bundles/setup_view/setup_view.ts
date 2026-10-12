@@ -60,7 +60,10 @@ const CSS = `
   .wiz .tip code { font: 600 12.5px ui-monospace, SFMono-Regular, monospace; color: #e6dcff; padding: 1px 6px; border-radius: 5px; background: rgba(183, 140, 255, 0.2); }
   .wiz h2 { margin: 18px 0 8px; color: #8f88a6; font: 600 11px ui-monospace, SFMono-Regular, monospace; letter-spacing: .14em; }
   .wiz .saved { display: flex; flex-direction: column; gap: 6px; }
+  .wiz .saved-row { display: flex; gap: 6px; }
+  .wiz .saved-row > button:first-child { flex: 1; min-width: 0; }
   .wiz .saved button { display: flex; align-items: baseline; gap: 10px; text-align: left; width: 100%; padding: 10px 12px; }
+  .wiz .saved button.edit { width: auto; flex: 0 0 auto; align-items: center; color: #a39cba; }
   .wiz .saved .name { font-weight: 650; }
   .wiz .saved .star { color: #ffd166; font-size: 12px; }
   .wiz .saved .desc { color: #8f88a6; font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -184,7 +187,10 @@ export const setupView: ViewBundle = {
                   el("span", { className: "desc" }, `${providerOf(String(t.record["handler_module"]))} · ${textOf(t.record["model"])} · ${textOf(t.record["endpoint"])}`),
                 );
                 b.onclick = (): void => void ctx.actions?.spawnAi(t.name, ctx.selfId, targetCell);
-                return b;
+                // EDIT a saved provider (owner 2026-10-12): its fields, saved back under its name
+                const edit = button("edit", () => page2(String(t.record["handler_module"]), { name: t.name, fields: t.record }, true), "edit");
+                edit.title = "edit this saved provider — agents made from it later use the new values";
+                return el("div", { className: "saved-row" }, b, edit);
               }),
             ),
         el("h2", {}, "NEW"),
@@ -204,7 +210,7 @@ export const setupView: ViewBundle = {
     };
 
     // ── page 2: the details (a new provider, or an agent's settings) ──
-    const page2 = (module: string, current?: { name: string; fields: Rec }): void => {
+    const page2 = (module: string, current?: { name: string; fields: Rec }, template = false): void => {
       const b = backends.find((x) => x.module === module);
       if (b === undefined) return say(false, `this build links no ${module}`);
       const provider = PROVIDERS.find((p) => p.module === module);
@@ -222,9 +228,12 @@ export const setupView: ViewBundle = {
       const keep = el("select");
       keep.append(el("option", { value: "secure", textContent: "the keychain (secure)" }), el("option", { value: "plain", textContent: "a 0600 text file (plain)" }));
       const keyNeeded = b.key !== null;
+      // the key source follows the URL (a saved key for its host, when there is
+      // one) until the user picks one
+      let picked = false;
       const fillSources = (): void => {
         const fit = savedKeyFor(keys, module, url.value.trim());
-        const was = source.value;
+        const was = picked ? source.value : "";
         source.replaceChildren(
           ...(fit !== null ? [el("option", { value: "saved", textContent: `saved key · ${fit}` })] : []),
           el("option", { value: "new", textContent: "paste a new key" }),
@@ -244,7 +253,10 @@ export const setupView: ViewBundle = {
         );
       };
       url.oninput = (): void => fillSources();
-      source.onchange = (): void => renderKey();
+      source.onchange = (): void => {
+        picked = true;
+        renderKey();
+      };
       // the backend's optional fields, at its own defaults
       const extra = new Map<string, HTMLInputElement | HTMLSelectElement>();
       const own = b.fields.filter((f) => !MAIN.has(f.name) && f.type !== "credentials" && f.name !== "memory_store_id");
@@ -292,12 +304,13 @@ export const setupView: ViewBundle = {
         const m: string[] = [];
         if (!editing && !nameOk(name.value.trim())) m.push("a name (letters, digits, - and _)");
         if (!url.value.trim()) m.push("the URL");
+        else if (!/^https?:\/\//i.test(url.value.trim())) m.push("a URL starting with http:// or https://");
         if (schemaOf("model")?.required && !model.value.trim()) m.push("the model");
         for (const f of required) if (!extra.get(f.name)?.value.trim()) m.push(f.name.replaceAll("_", " "));
         if (keyNeeded && b.key === true && source.value === "none") m.push("a key");
         return m;
       };
-      const go = button(editing ? "save" : "create & open chat", () => void submit(), "primary");
+      const go = button(template ? "save" : editing ? "save" : "create & open chat", () => void submit(), "primary");
       const submit = async (): Promise<void> => {
         const m = missing();
         if (m.length > 0) return say(false, `missing: ${m.join(", ")}`);
@@ -305,6 +318,16 @@ export const setupView: ViewBundle = {
         try {
           const ke = await storeKey();
           if (ke) return say(false, ke);
+          if (template) {
+            const r = await call("save_template", { name: current!.name, handler: module, fields: fieldTexts() });
+            const e = errOf(r);
+            if (e) return say(false, e);
+            const le = await loadAll();
+            if (le) return say(false, le);
+            page1();
+            say(true, `saved \`${current!.name}\` — agents made from it from now on use these values`);
+            return;
+          }
           if (editing) {
             const r = await call("configure_ai", { id: editAi, fields: fieldTexts() });
             const e = errOf(r);
@@ -328,10 +351,10 @@ export const setupView: ViewBundle = {
         el(
           "div",
           { className: "top" },
-          el("h1", {}, editing ? `Settings · ${current.name}` : `New AI agent · ${provider?.label ?? providerOf(module)}`),
+          el("h1", {}, template ? `Edit saved · ${current!.name}` : editing ? `Settings · ${current!.name}` : `New AI agent · ${provider?.label ?? providerOf(module)}`),
           el("span", { className: "step" }, editing ? providerOf(module) : "2 / 2"),
         ),
-        el("p", { className: "lead" }, editing ? "Changes are live on the agent's next turn." : "Check the values, then create it — you can change them later in its ⚙ settings."),
+        el("p", { className: "lead" }, template ? "Agents made from it from now on use these values; agents already running keep theirs (change those in their ⚙ settings)." : editing ? "Changes are live on the agent's next turn." : "Check the values, then create it — you can change them later in its ⚙ settings."),
         field("name", name, editing ? "" : "a name for reuse — it appears under SAVED"),
         field("URL", url, provider ? "filled for you — change it for your own server" : ""),
         field("model", model, schemaOf("model")?.hint ?? ""),
@@ -339,7 +362,7 @@ export const setupView: ViewBundle = {
         ...(keyNeeded ? [field("key", source), keyBox] : []),
         ...(optional.length ? [advanced] : []),
         sayEl,
-        el("div", { className: "foot" }, ...(editing ? [] : [button("‹ back", () => page1())]), el("span", { className: "grow" }), skip(), go),
+        el("div", { className: "foot" }, ...(editing && !template ? [] : [button("‹ back", () => page1())]), el("span", { className: "grow" }), ...(template ? [] : [skip()]), go),
       );
     };
 

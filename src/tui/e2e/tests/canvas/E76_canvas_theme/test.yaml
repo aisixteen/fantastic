@@ -1,0 +1,9 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint. Scripted: no model.
+id: canvas_theme
+group: canvas
+title: "the canvas theme agent: Backgrounds and Themes sections; a theme added through its form (one column, triggered from 1000px) is what auto picks; a theme used by hand holds; a stock theme hidden and restored"
+runner: probe.py
+costs: free
+limits:
+  seconds: 150
+env: {}

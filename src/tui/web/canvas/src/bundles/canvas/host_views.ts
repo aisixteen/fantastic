@@ -102,6 +102,19 @@ export function setHostRecords(fn: (id: string) => Rec | undefined): void {
 export function hostRecordOf(id: string): Rec | undefined {
   return recordOf(id);
 }
+// a fresh read of the host's agents (the canvas sets it at mount): an agent made
+// a moment ago is not in the page's copy until the next sync
+let syncHost: () => Promise<void> = () => Promise.resolve();
+export function setHostSync(fn: () => Promise<void>): void {
+  syncHost = fn;
+}
+/** `id`'s host record — read again from the host when the page has none yet. */
+export async function hostRecordFresh(id: string): Promise<Rec | undefined> {
+  const now = recordOf(id);
+  if (now !== undefined) return now;
+  await syncHost();
+  return recordOf(id);
+}
 /** Run `fn` whenever host agent `id`'s `view` changes; returns the unsubscribe. */
 export function onViewChange(id: string, fn: () => void): () => void {
   const set = viewChanged.get(id) ?? new Set<() => void>();

@@ -470,9 +470,13 @@ pub fn outline(a: Args<'_>) -> Outline {
             kind: kind_of(r),
             // A monitor's delivery reads as the lines it brought; its header is
             // the line's tag (`LineKind::Monitor`), not its text.
-            head: match tags::monitor(content) {
-                Some(m) => tags::head_of(&content[m.end..]),
-                None => tags::head_of(content),
+            head: {
+                let h = match tags::monitor(content) {
+                    Some(m) => tags::head_of(&content[m.end..]),
+                    None => tags::head_of(content),
+                };
+                // a row that kept its THINKING says so (`t` opens it)
+                if r.thinking.as_deref().is_some_and(|t| !t.trim().is_empty()) { format!("💭 {h}") } else { h }
             },
             body: match tags::monitor(content) {
                 Some(m) => content[m.end..].trim().to_string(),

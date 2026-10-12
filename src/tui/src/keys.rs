@@ -166,6 +166,16 @@ pub const TABLE: &[Binding] = &[
         does: "stop this agent's work",
     },
     Binding {
+        scope: "ai",
+        keys: "t",
+        does: "read the thought behind the line (💭)",
+    },
+    Binding {
+        scope: "ai",
+        keys: "C",
+        does: "clear: a new thread (nothing deleted — recall pages back)",
+    },
+    Binding {
         scope: "terminal",
         keys: "Ctrl-F",
         does: "take over the keyboard",

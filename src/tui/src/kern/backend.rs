@@ -216,7 +216,13 @@ impl BackendBundle {
         spec.extend(stamp);
         spec.insert("template".into(), json!(name));
         match Self::make_ai(host, me, &ai, spec, peer).await {
-            Ok(()) => json!({"id": ai, "root": ai, "template": name, "handler_module": t.handler(), "model": t.model()}),
+            // EVERY dialog is KEPT from its start (owner 2026-10-12: no ephemeral
+            // chats — the canvas and the terminal keep them alike): listed for reopening
+            Ok(()) => {
+                let kept = Self::keep(host, &json!({"id": ai})).await;
+                json!({"id": ai, "root": ai, "template": name, "handler_module": t.handler(), "model": t.model(),
+                       "dialog_name": kept.get("name").cloned().unwrap_or(json!(ai))})
+            }
             Err(e) => refuse("bad_arg", format!("spawn: the AI from template `{name}`: {e}"), ""),
         }
     }
@@ -479,6 +485,52 @@ impl BackendBundle {
         json!({"id": id})
     }
 
+    /// `configure_mcp {id, url?, key?}` — an MCP agent's SETTINGS (owner 2026-10-11:
+    /// "settings to edit mcp and reset"): a new url and / or key (stored bound to
+    /// the url's host, named on the record), then `boot` — it connects again and
+    /// lists the server's tools. Neither given: a reset (reconnect as it is).
+    async fn configure_mcp(host: &Host, p: &Value) -> Value {
+        const MCP: &str = fantastic_mcp_client::HANDLER_MODULE;
+        let id = p.get("id").and_then(Value::as_str).unwrap_or("").trim().to_string();
+        let Some(meta) = Self::meta_of(host, &id) else {
+            return refuse("not_found", format!("configure_mcp: no agent {id:?}"), "");
+        };
+        if host.kernel.agents.get(&AgentId::from(id.as_str())).and_then(|a| a.value().record().handler_module.clone()).as_deref() != Some(MCP) {
+            return refuse("bad_arg", format!("configure_mcp: {id:?} is not an MCP agent"), "");
+        }
+        let url = p.get("url").and_then(Value::as_str).map(str::trim).filter(|u| !u.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| meta.get("url").and_then(Value::as_str).unwrap_or("").to_string());
+        let key = p.get("key").and_then(Value::as_str).unwrap_or("").trim().to_string();
+        if !key.is_empty() {
+            if let Err(e) = crate::kern::keys::store(host, MCP, &url, &key).await {
+                return refuse("bad_arg", format!("configure_mcp: the key: {e}"), "");
+            }
+        }
+        let mut upd = json!({"type": "update_agent", "id": id, "url": url});
+        // the key for the url's host, when one is stored — named and granted
+        if let Ok(r) = crate::kern::keys::ref_for(MCP, &url) {
+            if crate::kern::keys::has(host, &r) {
+                upd["credentials"] = json!({"store": crate::kern::keys::STORE, "ref": r});
+                let mut cc = meta.get("can_call").and_then(Value::as_object).cloned().unwrap_or_default();
+                cc.insert(crate::kern::keys::STORE.into(), json!(["get"]));
+                upd["can_call"] = Value::Object(cc);
+                if let Err(e) = crate::kern::keys::wire(host, &id).await {
+                    return refuse("not_found", format!("configure_mcp: {e}"), "");
+                }
+            }
+        }
+        let r = host.operator("kernel", upd).await.result;
+        if let Some(e) = r.get("error").and_then(Value::as_str) {
+            return refuse("bad_arg", format!("configure_mcp: {e}"), "");
+        }
+        let b = host.operator(&id, json!({"type": "boot"})).await.result;
+        if let Some(e) = b.get("error").and_then(Value::as_str) {
+            return refuse("bad_arg", format!("configure_mcp: reconnecting: {e}"), "");
+        }
+        json!({"id": id, "url": url})
+    }
+
     /// `canvases` — every canvas, the main one (declarative `main: true`) first.
     fn canvases(host: &Host) -> Value {
         let mut out: Vec<Value> = crate::kern::web::canvases(host)
@@ -627,6 +679,7 @@ impl Bundle for BackendBundle {
                     "reopen": "args: id:str (a kept dialog), stamp:dict?, peer_grants:dict? (as spawn). The live AI if another cell has it, else the same AI re-made here, its history intact. {id, root, template, name, shared}.",
                     "new_canvas": "args: name:str (req). A PEER canvas `canvas_<name>` beside this one (flat — never nested): its own page records and page kernel, its own cells' backends. Open it at the page URL with ?canvas=<id>. {id}.",
                     "canvases": "No args. Every canvas, the main one first: {canvases: [{id, loader, main, name}]}.",
+                    "configure_mcp": "args: id:str (req — an MCP agent of this canvas), url:str?, key:str? — its settings changed (a new key stored for the url's host and named), then it connects and lists its tools again (`boot`). Neither given: a reset — it reconnects as it is. {id, url}.",
                     "add_mcp": "args: url:str (req — the server's MCP endpoint), key:str? (a static API key, sent as Bearer to that host only). One remote MCP server as an agent under this canvas: its tools are its verbs. The key is stored in the credential store (choose where keys are kept first). {id}.",
                 })
     }
@@ -658,6 +711,7 @@ impl Bundle for BackendBundle {
                     },
                     "canvases" => Self::canvases(&host),
                     "add_mcp" => Self::add_mcp(&host, agent_id, payload).await,
+                    "configure_mcp" => Self::configure_mcp(&host, payload).await,
                     _ => {
                         let mut r = refuse("unhandled", format!("canvas: unknown type {verb:?}"), "");
                         r["verb"] = json!(verb);

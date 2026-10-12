@@ -58,7 +58,7 @@ test("mobile: the bottom of the column, full column width, its own height", () =
   const a = columnSpot([], 300);
   const b = columnSpot([a], 200);
   assert.equal(b.y, a.y + a.height + COLUMN.gap);
-  assert.deepEqual(assign("mobile", [a, b], { width: 900, height: 120 }, { x: 5000, y: 5000 }).y, b.y + b.height + COLUMN.gap, "the centre is the canvas theme's, not mobile's");
+  assert.deepEqual(assign("column", [a, b], { width: 900, height: 120 }, { x: 5000, y: 5000 }).y, b.y + b.height + COLUMN.gap, "the centre is the canvas theme's, not mobile's");
 });
 
 test("the view's place / move / update write the layout of the theme in use — never the cell", async () => {
@@ -127,4 +127,19 @@ test("mobile stack: one full-width column in the cells' order, gap apart, height
   const s = stack({ b: { x: 300, y: 900, width: 200, height: 100 }, a: { x: 0, y: 16, width: 400, height: 300 } });
   assert.deepEqual(s["a"], { x: COLUMN.x, y: COLUMN.top, width: COLUMN.width, height: 300 });
   assert.deepEqual(s["b"], { x: COLUMN.x, y: COLUMN.top + 300 + COLUMN.gap, width: COLUMN.width, height: 100 });
+});
+
+test("themes are data: stock canvas (free) + mobile (column, under 768px); the user's first; auto by the triggers", async () => {
+  const { STOCK_THEMES, resolveTheme, themeDefOf, triggered } = await import("../src/bundles/canvas/layout.ts");
+  assert.deepEqual(STOCK_THEMES.map((d) => [d.name, d.layout]), [["canvas", "free"], ["mobile", "column"]]);
+  assert.ok(triggered({ max_width: 767 }, 767) && !triggered({ max_width: 767 }, 768) && !triggered(null, 100));
+  const wide = themeDefOf({ name: "wide", layout: "column", trigger: { min_width: 2000 } })!;
+  const defs = [wide, ...STOCK_THEMES];
+  assert.equal(resolveTheme("auto", 2560, defs), "wide", "a user trigger wins");
+  assert.equal(resolveTheme("auto", 1400, defs), "canvas", "none triggered: the first without a trigger");
+  assert.equal(resolveTheme("auto", 500, defs), "mobile");
+  assert.equal(resolveTheme("wide", 500, defs), "wide", "a named theme holds whatever the width");
+  assert.equal(resolveTheme("gone", 1400, defs), "canvas", "an unknown name falls to auto");
+  assert.equal(themeDefOf({ name: "bad name", layout: "free" }), null);
+  assert.equal(themeDefOf({ name: "x", layout: "grid" }), null);
 });

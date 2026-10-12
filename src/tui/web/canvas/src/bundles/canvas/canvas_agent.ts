@@ -7,9 +7,9 @@ import { htmlRefusal } from "../html_check.ts";
 import { aiView } from "../ai_view/ai_view.ts";
 import { grantHint } from "../html_agent/grant_hint.ts";
 import { reflectView } from "../reflect_view/reflect_view.ts";
-import { cellGrant, hostRecordOf, viewOf } from "./host_views.ts";
+import { cellGrant, hostRecordFresh, viewOf } from "./host_views.ts";
 import type { Rec } from "./host_views.ts";
-import { setRect, tabWidth, themeOf } from "./layout.ts";
+import { setRect, tabWidth, themeOf, themesOf } from "./layout.ts";
 import type { Rect } from "./layout.ts";
 
 /** The cell meta that draws host agent `agent` by its own view (`host_views.ts`). */
@@ -102,7 +102,7 @@ export const CANVAS_README =
 
 export const VIEW_README =
   
-  "THE VIEW — the canvas's one view (frontend). Its cells are its children: you place and change them HERE. VERBS: place {kind: html|gl|terminal|chat (or handler_module) — or only backend_id: a VIEW of that host agent, drawn as its record says — x, y, id?, width?, height?, display_name?, bytes? (the body, verbatim), trusted?, can_call?, callable_by?, backend_id? (terminal/chat: the host agent shown)} · move {id, x?, y?, width?, height?} · update {id, bytes? (a new body reloads it), fields?: {display_name|trusted|readme|x|y|width|height|can_call|callable_by}} (on the view itself: any field) · theme {name?: auto|canvas|mobile} (which layout the cells sit in: canvas = the free 2D canvas, mobile = one column; auto = mobile under 768px wide; x/y/width/height are per theme, kept in the view's layout_<theme> child, never on a cell — a cell new to a theme is placed by it) · wire {sender, receiver, verbs} (a grant, written on each side that is a cell; not from/to) · remove {id}. A PANEL'S JS (an html cell's body) has `fantastic`: `await fantastic.send(id, payload)` → the reply · `fantastic.watch(id, ev => …)` → events (returns off) · `fantastic.emit(id, payload)` · `fantastic.onMessage(p => …)`. Its calls are judged by the CELL's can_call — grant what it calls (`{<id>: [verbs…, watch]}`); a reply's `grants_missing` names any it lacks. On the host they arrive as `user`: a host agent you create for a panel needs `callable_by: {user: [<the verbs the panel calls>, watch]}` in its create_agent (a new agent admits no one); never drop `user` from an existing agent's callable_by. Example — a button that runs a command on a host exec agent `runner` and shows its output live: place {kind: html, x: 700, y: 60, can_call: {runner: [start, watch]}, bytes: <button onclick=\"fantastic.send('runner',{type:'start',command:'ls'}).then(r=>job=r.job_id)\">Run</button><pre id=o></pre><script>let job;fantastic.watch('runner',e=>{if(e.job_id===job&&e.type==='progress')o.textContent+=e.line+'\\n'})</script>} A live URL or a file: an html cell whose body is <iframe src=URL> (trusted: true for GET /static_files/file/<path>). The background is the child `background` (set_bg / default_bg / clear_bg / get_bg). ";
+  "THE VIEW — the canvas's one view (frontend). Its cells are its children: you place and change them HERE. VERBS: place {kind: html|gl|terminal|chat (or handler_module) — or only backend_id: a VIEW of that host agent, drawn as its record says — x, y, id?, width?, height?, display_name?, bytes? (the body, verbatim), trusted?, can_call?, callable_by?, backend_id? (terminal/chat: the host agent shown)} · move {id, x?, y?, width?, height?} · update {id, bytes? (a new body reloads it), fields?: {display_name|trusted|readme|x|y|width|height|can_call|callable_by}} (on the view itself: any field) · theme {name?: auto | a theme's name} (which theme the cells sit in — stock: canvas = the free 2D canvas, mobile = one column; the canvas theme agent lists, adds and edits themes (`themes`, `add_theme`); auto = the first theme whose width trigger matches the tab (stock mobile: under 768px wide); x/y/width/height are per theme, kept in the view's layout_<theme> child, never on a cell — a cell new to a theme is placed by it) · wire {sender, receiver, verbs} (a grant, written on each side that is a cell; not from/to) · remove {id}. A PANEL'S JS (an html cell's body) has `fantastic`: `await fantastic.send(id, payload)` → the reply · `fantastic.watch(id, ev => …)` → events (returns off) · `fantastic.emit(id, payload)` · `fantastic.onMessage(p => …)`. Its calls are judged by the CELL's can_call — grant what it calls (`{<id>: [verbs…, watch]}`); a reply's `grants_missing` names any it lacks. On the host they arrive as `user`: a host agent you create for a panel needs `callable_by: {user: [<the verbs the panel calls>, watch]}` in its create_agent (a new agent admits no one); never drop `user` from an existing agent's callable_by. Example — a button that runs a command on a host exec agent `runner` and shows its output live: place {kind: html, x: 700, y: 60, can_call: {runner: [start, watch]}, bytes: <button onclick=\"fantastic.send('runner',{type:'start',command:'ls'}).then(r=>job=r.job_id)\">Run</button><pre id=o></pre><script>let job;fantastic.watch('runner',e=>{if(e.job_id===job&&e.type==='progress')o.textContent+=e.line+'\\n'})</script>} A LIVE HOST CELL — the agent pushes, its panel redraws (no polling): a bundle agent (start from `spawn {bundle: python_agent}` on the canvas's host node) whose record has `view: {kind: html, bytes_file: panel.html, calls: [get_html, watch]}` and `callable_by: {user: [get_html, watch]}`; its `agent.py` sends `fa.emit({'type': 'update', 'html': …})` on each change; its `panel.html` does `fantastic.send(id,{type:'get_html'})` once, then `fantastic.watch(id, e => { if (e.type==='update') root.innerHTML = e.html })`; show it with place {backend_id: id}. innerHTML runs no <script>: keep the panel's script in panel.html and send data (or script-free HTML) in the events. A live URL or a file: an html cell whose body is <iframe src=URL> (trusted: true for GET /static_files/file/<path>). The background is the child `background` (set_bg / default_bg / clear_bg / get_bg). ";
 
 /** The root: `reflect` is the kernel's; it answers nothing else. */
 export const canvasAgent: Handler = (_id, payload): Json => {
@@ -126,15 +126,18 @@ export const viewAgent: Handler = (id, payload, kernel): Json | Promise<Json> =>
       if (!given && !str(payload, "kind") && str(payload, "backend_id")) {
         if (!num(payload["x"]) || !num(payload["y"])) return { error: "view: place needs x and y (numbers, view coordinates)", reason: "bad_arg", arg: "x" };
         const agent = str(payload, "backend_id");
-        const rec = hostRecordOf(agent);
-        if (rec === undefined) return { error: `view: place — no host agent ${JSON.stringify(agent)}`, reason: "not_found", arg: "backend_id", hint: "reflect the host kernel for the agents there" };
-        const { handler, meta } = hostViewCell(agent, rec);
-        const aid = str(payload, "id") || `view_${Math.random().toString(16).slice(2, 10)}`;
-        if (kernel.get(aid) !== undefined) return { error: `view: place — ${aid} already exists`, reason: "exists", arg: "id" };
-        if (payload["display_name"] !== undefined) meta["display_name"] = payload["display_name"];
-        setRect(kernel, id, themeOf(kernel, id, tabWidth()), aid, { width: 480, height: 320, ...geometryOf(payload) });
-        kernel.register(new Agent({ id: aid, parentId: id, handlerModule: handler, meta: meta as Payload }));
-        return { placed: aid, shows: agent, view: viewOf(rec).kind } as Json;
+        // an agent made a moment ago (spawn, then place) is read from the host
+        // first — the page's copy of the host agents syncs only on its own events
+        return hostRecordFresh(agent).then((rec): Json => {
+          if (rec === undefined) return { error: `view: place — no host agent ${JSON.stringify(agent)}`, reason: "not_found", arg: "backend_id", hint: "reflect the host kernel for the agents there" };
+          const { handler, meta } = hostViewCell(agent, rec);
+          const aid = str(payload, "id") || `view_${Math.random().toString(16).slice(2, 10)}`;
+          if (kernel.get(aid) !== undefined) return { error: `view: place — ${aid} already exists`, reason: "exists", arg: "id" };
+          if (payload["display_name"] !== undefined) meta["display_name"] = payload["display_name"];
+          setRect(kernel, id, themeOf(kernel, id, tabWidth()), aid, { width: 480, height: 320, ...geometryOf(payload) });
+          kernel.register(new Agent({ id: aid, parentId: id, handlerModule: handler, meta: meta as Payload }));
+          return { placed: aid, shows: agent, view: viewOf(rec).kind } as Json;
+        });
       }
       const named = given ? (given.endsWith(".ts") ? given : `${given}.ts`) : undefined;
       const kind = named !== undefined ? (Object.entries(PLACEABLE).find(([, m]) => m === named)?.[0] ?? named.slice(0, -3)) : str(payload, "kind");
@@ -244,11 +247,12 @@ export const viewAgent: Handler = (id, payload, kernel): Json | Promise<Json> =>
       // per tab, mobile under 768px wide. No name: what it is.
       const name = payload["name"];
       if (name !== undefined) {
-        if (name !== "auto" && name !== "canvas" && name !== "mobile") return { error: "view: theme — name is auto, canvas or mobile", reason: "bad_arg", arg: "name" };
+        const known = themesOf(kernel, id).map((d) => d.name);
+        if (name !== "auto" && !(typeof name === "string" && known.includes(name))) return { error: `view: theme — name is auto or one of ${known.join(", ")}`, reason: "bad_arg", arg: "name", hint: "the canvas theme agent lists and adds themes (`themes`, `add_theme`)" };
         kernel.updateMeta(id, { theme: name });
       }
       const choice = kernel.get(id)?.meta["theme"] ?? "auto";
-      return { theme: choice as Json, in_use: themeOf(kernel, id, tabWidth()), themes: ["auto", "canvas", "mobile"] };
+      return { theme: choice as Json, in_use: themeOf(kernel, id, tabWidth()), themes: ["auto", ...themesOf(kernel, id).map((d) => d.name)] };
     }
     case "boot":
     case "shutdown":

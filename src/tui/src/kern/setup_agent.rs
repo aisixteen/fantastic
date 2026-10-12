@@ -190,7 +190,12 @@ impl SetupBundle {
                     Ok(f) => f,
                     Err(e) => return fail(format!("save_template: {e}")),
                 };
-                // the backend + every field set — never an id, a key or grants
+                // the backend + every field set — never an id, a key or grants;
+                // the stored key for its endpoint is NAMED (a ref, never the value):
+                // a backend that requires one refuses a template without it
+                if let Err(e) = crate::kern::keys::attach(host, &handler, &mut record) {
+                    return fail(format!("save_template: {e}"));
+                }
                 record.insert("handler_module".into(), json!(handler));
                 let record = Value::Object(record);
                 match crate::kern::templates::save(host, &name, record).await {

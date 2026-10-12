@@ -73,6 +73,10 @@ pub struct AiPanel {
     /// inferred: `queued` with `ahead` is the honest word for a second send.
     pub phase: Option<String>,
     pub ahead: Option<i64>,
+    /// The last generation's USAGE, from its `done` status (`prompt_tokens`,
+    /// `completion_tokens`, `gen_seconds`, `context_window`, `*_estimated`) —
+    /// the status line's speed and context, as on the canvas.
+    usage: Option<Value>,
     /// The body a human opened in the pager.
     pub body: Option<(RowId, String)>,
     /// The outline as of the last render, so keys can act on what is on screen.
@@ -115,6 +119,7 @@ impl AiPanel {
             since: None,
             clock: 0.0,
             phase: None,
+            usage: None,
             ahead: None,
             body: None,
             last: Outline::default(),
@@ -296,6 +301,12 @@ impl AiPanel {
     /// stream closed), its open parts abort, nothing is sent.
     fn stop(&self, cx: &Cx<'_>, out: &mut Vec<Cmd>) {
         out.push(Cmd::Send { target: cx.agent.clone(), payload: json!({"type": "stop"}) });
+    }
+
+    /// CLEAR (owner 2026-10-12, as on the canvas): a new thread on the same
+    /// store — `context_clear`; nothing is deleted.
+    fn clear(&self, cx: &Cx<'_>, out: &mut Vec<Cmd>) {
+        out.push(Cmd::Send { target: cx.agent.clone(), payload: json!({"type": "context_clear", "why": "cleared from the terminal"}) });
     }
 
     /// The gutter legend. It names the marks in the model's own words, because a
@@ -592,6 +603,20 @@ impl Panel for AiPanel {
                 self.stop(cx, out);
                 Handled::Yes
             }
+            K::Char('C') => {
+                self.clear(cx, out);
+                Handled::Yes
+            }
+            // THE THOUGHT behind the line under the cursor (kept on its row), in
+            // the pager — Esc closes it, as any body
+            K::Char('t') => {
+                if let Some(id) = self.at() {
+                    if let Some(t) = cx.store.rows.get(&id).and_then(|r| r.thinking.clone()).filter(|t| !t.trim().is_empty()) {
+                        self.body = Some((id, format!("💭 thought\n\n{t}")));
+                    }
+                }
+                Handled::Yes
+            }
             _ => Handled::No,
         }
     }
@@ -644,6 +669,9 @@ impl Panel for AiPanel {
                     .get("detail")
                     .and_then(|d| d.get("ahead"))
                     .and_then(Value::as_i64);
+                if let Some(d) = payload.get("detail").filter(|d| d.get("completion_tokens").is_some()) {
+                    self.usage = Some(d.clone());
+                }
                 match phase.as_deref() {
                     Some("thinking" | "streaming" | "tool_calling") => {
                         // a new turn: last turn's not-sent lines go
@@ -845,6 +873,17 @@ impl Panel for AiPanel {
         if !self.waiting.is_empty() {
             bits.push(format!("{}{}", theme::INQUIRY, self.waiting.len()));
         }
+        // SPEED AND CONTEXT (as on the canvas): the last generation's tok/s and
+        // its prompt of the window — `~` when the backend only estimated it
+        let window = self
+            .usage
+            .as_ref()
+            .and_then(|u| u.get("context_window"))
+            .or_else(|| cx.reflect.and_then(|r| r.get("context_window")))
+            .and_then(Value::as_f64);
+        if let Some(sp) = speed_and_context(self.usage.as_ref(), window) {
+            bits.push(sp);
+        }
         bits.push(
             match self.st.zoom {
                 Zoom::All => "all",
@@ -858,6 +897,24 @@ impl Panel for AiPanel {
         }
         Some(bits.join(" · "))
     }
+}
+
+/// `N tok/s · Xk / Wk ctx` from a `done` status's usage (`~` marks an estimate);
+/// the window alone before any generation. None without a window.
+fn speed_and_context(usage: Option<&Value>, window: Option<f64>) -> Option<String> {
+    let k = |n: f64| if n >= 1000.0 { format!("{:.1}k", n / 1000.0).replace(".0k", "k") } else { format!("{n:.0}") };
+    let est = |f: &str| if usage.and_then(|u| u.get(f)).and_then(Value::as_bool) == Some(true) { "~" } else { "" };
+    let num = |f: &str| usage.and_then(|u| u.get(f)).and_then(Value::as_f64);
+    let mut bits = Vec::new();
+    if let (Some(out), Some(secs)) = (num("completion_tokens"), num("gen_seconds")) {
+        if secs > 0.0 {
+            bits.push(format!("{}{:.0} tok/s", est("completion_tokens_estimated"), out / secs));
+        }
+    }
+    let w = window?;
+    let prompt = num("prompt_tokens").map(|p| format!("{}{}", est("prompt_tokens_estimated"), k(p))).unwrap_or_else(|| "—".into());
+    bits.push(format!("{prompt} / {} ctx", k(w)));
+    Some(bits.join(" · "))
 }
 
 /// The payload a human's message becomes. `re` is what threads an answer onto the
@@ -1019,6 +1076,41 @@ mod tests {
             p.on_key(key(KeyCode::Char('z')), &cx, &mut out);
             assert_eq!(p.st.zoom, want);
         }
+    }
+
+    #[test]
+    fn speed_and_context_reads_the_done_usage() {
+        let u = json!({"prompt_tokens": 3600, "completion_tokens": 120, "gen_seconds": 0.5, "context_window": 65536});
+        assert_eq!(speed_and_context(Some(&u), Some(65536.0)).as_deref(), Some("240 tok/s · 3.6k / 65.5k ctx"));
+        let e = json!({"prompt_tokens": 900, "completion_tokens": 10, "gen_seconds": 1.0, "prompt_tokens_estimated": true});
+        assert_eq!(speed_and_context(Some(&e), Some(262144.0)).as_deref(), Some("10 tok/s · ~900 / 262.1k ctx"));
+        assert_eq!(speed_and_context(None, Some(8192.0)).as_deref(), Some("— / 8.2k ctx"));
+        assert_eq!(speed_and_context(None, None), None);
+    }
+
+    #[test]
+    fn t_opens_the_thought_kept_on_the_row() {
+        let s = store_with(vec![json!({"id":1,"agent":"ai","role":"assistant","content":"the answer","thinking":"why I said it"})]);
+        let mut p = AiPanel::new("ai".into());
+        let seen = std::collections::HashSet::new();
+        let a: AgentId = "ai".into();
+        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: None };
+        let mut out = Vec::new();
+        p.st.cursor = Some(1);
+        p.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE), &cx, &mut out);
+        assert!(p.body.as_ref().is_some_and(|(id, t)| *id == 1 && t.contains("why I said it")), "{:?}", p.body);
+    }
+
+    #[test]
+    fn clear_is_context_clear() {
+        let s = store_with(vec![json!({"id":1,"agent":"ai","content":"a"})]);
+        let mut p = AiPanel::new("ai".into());
+        let seen = std::collections::HashSet::new();
+        let a: AgentId = "ai".into();
+        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: None };
+        let mut out = Vec::new();
+        p.on_key(KeyEvent::new(KeyCode::Char('C'), KeyModifiers::NONE), &cx, &mut out);
+        assert!(matches!(&out[..], [Cmd::Send { target, payload }] if target.as_str() == "ai" && payload["type"] == "context_clear"), "{out:?}");
     }
 
     #[test]

@@ -68,11 +68,20 @@ moves with it. ←↑↓→ move across the tiles as drawn. Double-click → `ti
 a tips & tricks card on the canvas — an html cell: ask your AI to add a tip, or
 edit its html.
 
-BACKGROUNDS: double-click → `backgrounds` places a backgrounds manager: four
-stock backgrounds — Isoline, Glyph, Copper, Moire — each in several colour sets, your own list, `random bg`,
-`every minute`, `none` and `default` (Isoline). × hides a stock one (`restore
-stock` brings them back) or deletes one of yours. Ask an AI cell to add more —
-it calls `add` on the manager, and they stay.
+CANVAS THEME: double-click → `canvas theme` places the view's theme manager,
+two sections. BACKGROUNDS: four stock backgrounds — Isoline, Glyph, Copper,
+Moire — each in several colour sets, your own list, `random bg`, `every
+minute`, `none` and `default` (Isoline). × hides a stock one (`restore stock`
+brings them back) or deletes one of yours. THEMES: where the cells sit — stock
+`canvas` (the free canvas) and `mobile` (one column, auto under 768px wide),
+and yours: `+ new theme` / ✎ edit a theme's name, layout (free canvas or one
+column) and AUTO trigger (when the tab is at most / at least N px wide); ×
+hides a stock one or deletes yours; `auto` lets the triggers choose (yours
+first). Ask an AI cell to add more — it calls `add` / `add_theme` on the
+manager, and they stay.
+
+THE DOUBLE-CLICK: `AI agent` — your default AI (typed text is its first turn;
+with none set up, the set-up wizard); `new AI agent…` — the wizard any time.
 
 ESC: viewing one agent full screen, Esc goes back to the canvas (unless you are
 typing in a terminal or a field).
@@ -121,15 +130,16 @@ both sides; the human narrows them with `update_agent`).
 ## Themes — where the cells sit
 
 A cell's `x, y, width, height` are not on the cell: they are in its view's
-LAYOUT for the theme in use — one agent per theme, `layout_canvas` /
-`layout_mobile` (`layout.ts`, children of the view, `rects: {<cell id>: {x, y,
-width, height}}`). Switching theme moves the cells, never the agents. A cell
-with no rect in the theme in use is placed by it, once: `canvas` — the nearest
-free space around the centre of what the tab shows; `mobile` — the bottom of
-the column. On mobile, the wheel scrolls the column, and a cell's 📌 PINS it
-(one per layout, `pinned` on `layout_mobile`): held on the screen's bottom,
-full width, while the column scrolls (e.g. a chat). The popup's `canvas theme`
-/ `mobile theme` / `auto theme` tiles set it.
+LAYOUT for the theme in use — one agent per theme, `layout_<theme>`
+(`layout.ts`, children of the view, `rects: {<cell id>: {x, y, width,
+height}}`). Switching theme moves the cells, never the agents. A cell with no
+rect in the theme in use is placed by its layout, once: free — the nearest free
+space around the centre of what the tab shows; column — the bottom of the
+column. In a column theme the wheel scrolls the column, and a cell's 📌 PINS it
+(one per layout, `pinned` on its layout agent): held on the screen's bottom,
+full width, while the column scrolls (e.g. a chat). Themes are chosen and edited
+on the canvas theme agent (`themes`, `use_theme`, `add_theme`), or with the
+view's `theme` verb.
 
 ## Views of host agents
 
@@ -157,9 +167,17 @@ URL is the viewed agent.
 
 - Terminal: an `exec_bridge` PTY job running the human's login `$SHELL`; the
   shell ending closes the cell.
-- AI chat: the cell's view folder spawns `aimem_<hex>` (a RAM store) with
-  `ai_<hex>` under it; `keep` (on `backend`) moves the dialog to the project's
-  SQLite store.
+- AI chat: every dialog is KEPT from its start (as in the terminal): listed
+  under the double-click's chats for reopening; its badge is its name (click to
+  rename). The footer: `clear` (a new thread — nothing deleted), the last
+  generation's speed and the context it used of the window (`N tok/s · Xk / Wk
+  ctx`, from the backend's reported usage; `~` = its estimate). Thinking is a
+  collapsible block (collapsed when done), KEPT on its answer's row: it is back
+  after a reload. In the terminal's AI panel a line with a kept thought shows 💭
+  and `t` opens it; `C` clears, and the status line shows the same speed and
+  context. A call whose `<` the server dropped is
+  repaired by the call checker and runs; any other malformed call shows the
+  checker's notice.
 - Files: `GET /static_files/file/<path>` — one read-only file leg over the
   project dir for every view, deny-all: its `allow` list (on its record,
   `update_agent` from above) exposes what the cells load.
@@ -177,3 +195,8 @@ URL is the viewed agent.
   turn. A failed turn offers settings, or a coding agent started next to the
   cell to help. Keys are never read from the environment — `fantastic readme
   setup`.
+- An AI's QUESTIONS to you: an `inquiry` it sends `user` (text, single, multi
+  or confirm) is held there (`inquiries`) and shows as a card in its chat — a
+  field, choice buttons, checkboxes or yes / no; your answer goes back to it on
+  its thread (`answer_inquiry`). Open questions are kept in RAM: a host restart
+  forgets them (the AI's history keeps the question).
