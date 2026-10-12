@@ -30,9 +30,9 @@ import type { TreeNode } from "./sidebar.ts";
 import type { Pick, Presets } from "./action_popup.ts";
 import { htmlView } from "../html_agent/html_view.ts";
 import { agentViewBundle } from "../agent_view/agent_view.ts";
-import { seenHere, setCanvasNode, setHostRecords, setHostSync, sideOf, viewChangedFor } from "./host_views.ts";
+import { headTitle, seenHere, setCanvasNode, setHostRecords, setHostSync, sideOf, viewChangedFor } from "./host_views.ts";
 import { createGlHost } from "./gl_host.ts";
-import { COLUMN, LAYOUT, layoutOf, pinnedOf, placeMissing, prune, rectsOf, setPinned, setRect, stack, themeOf, themesOf, writeRects } from "./layout.ts";
+import { COLUMN, LAYOUT, layoutOf, minimizedOf, pinnedOf, placeMissing, prune, rectsOf, reorderY, setMinimized, setPinned, setRect, stack, themeOf, themesOf, writeRects } from "./layout.ts";
 import type { Rect, Theme } from "./layout.ts";
 import type { GlHost, GlView } from "./gl_host.ts";
 
@@ -386,7 +386,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   let placePinned = (): void => {}; // set once the frames exist (themes, below)
   // MOBILE'S CAMERA: the column fills the tab's width (a gutter for the bezels)
   // and only scrolls — from its top down to its last cell's bottom
-  const MOBILE_GUTTER = 12;
+  const MOBILE_GUTTER = 0; // flat, edge to edge (owner 2026-10-12)
   let columnBottom = 0; // the column's last cell's bottom, view coordinates
   const lockMobile = (): void => {
     if (!canvas.classList.contains("theme-mobile")) return;
@@ -489,7 +489,8 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   // mobile: a finger dragged anywhere scrolls the column (the same rule as the wheel)
   let touchY: number | null = null;
   canvas.addEventListener("touchstart", (e) => {
-    touchY = e.touches.length === 1 ? e.touches[0]!.clientY : null;
+    // the reorder grip drags its cell, never the column
+    touchY = e.touches.length === 1 && !(e.target as Element).closest(".grip") ? e.touches[0]!.clientY : null;
   }, { passive: true });
   canvas.addEventListener("touchmove", (e) => {
     if (touchY === null || !canvas.classList.contains("theme-mobile") || e.touches.length !== 1) return;
@@ -627,6 +628,42 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     window.addEventListener("mouseup", up);
   };
 
+  // MOBILE REORDER (owner 2026-10-12): the grip in the middle of a cell's head
+  // drags it up or down the column (finger or mouse); dropped, it takes the slot
+  // its centre is in — the column restacks by `y`
+  const startReorder = (e: PointerEvent, aid: string, el: HTMLElement, grip: HTMLElement): void => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (el.classList.contains("pinned")) return;
+    grip.setPointerCapture(e.pointerId);
+    el.classList.add("dragging");
+    document.body.classList.add("dragging-frame");
+    const sy = e.clientY;
+    const oy = parseFloat(el.style.top);
+    const move = (ev: PointerEvent): void => {
+      el.style.top = `${oy + (ev.clientY - sy) / view.z}px`;
+    };
+    const up = (): void => {
+      grip.removeEventListener("pointermove", move);
+      grip.removeEventListener("pointerup", up);
+      grip.removeEventListener("pointercancel", up);
+      el.classList.remove("dragging");
+      document.body.classList.remove("dragging-frame");
+      const rects = rectsNow();
+      const me = rects[aid];
+      if (me === undefined) return;
+      const y = reorderY(rects, aid, parseFloat(el.style.top));
+      if (y === me.y) {
+        el.style.top = `${me.y}px`;
+        return;
+      }
+      void persistRect(aid, me.x, y);
+    };
+    grip.addEventListener("pointermove", move);
+    grip.addEventListener("pointerup", up);
+    grip.addEventListener("pointercancel", up);
+  };
+
   // RESIZE FROM ANY CORNER (owner 2026-10-11): the corner dragged moves, the
   // opposite one stays put
   const startResize = (e: MouseEvent, aid: string, el: HTMLElement, corner: string): void => {
@@ -684,7 +721,8 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     const locked = bool(rec, "delete_lock");
     el.innerHTML = `
       <div class="frame-head">
-        <span class="id">${title} · <code style="opacity:0.6;font-size:10px">${rec.id}</code></span>
+        <span class="id">${headTitle(title, rec.id)}</span>
+        <span class="grip" title="drag to reorder">⠿</span>
         <span class="actions">
           <span class="pin" title="pin to the screen's bottom (mobile)">📌</span>
           <span class="lock ${locked ? "locked" : ""}" title="${locked ? "unlock (allow delete)" : "lock (refuse delete)"}">${locked ? "🔒" : "🔓"}</span>
@@ -702,8 +740,19 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     const head = el.querySelector(".frame-head") as HTMLElement;
     head.addEventListener("mousedown", (e) => {
       if ((e.target as Element).closest(".actions")) return;
+      if (canvas.classList.contains("theme-mobile")) return; // mobile: the grip reorders
       startDrag(e, rec.id, el);
     });
+    // MINIMIZE TO ITS BAR (owner 2026-10-12): a double click on the head; again: back
+    head.addEventListener("dblclick", (e) => {
+      if ((e.target as Element).closest(".actions, .grip")) return;
+      e.stopPropagation();
+      const v = containerNow();
+      const t = themeNow();
+      setMinimized(kernel, v, t, rec.id, !minimizedOf(kernel, v, t).has(rec.id));
+    });
+    const grip = el.querySelector(":scope > .frame-head .grip") as HTMLElement;
+    grip.addEventListener("pointerdown", (e) => startReorder(e, rec.id, el, grip));
     for (const h of el.querySelectorAll<HTMLElement>(":scope > .resize-handle")) {
       h.addEventListener("mousedown", (e) => startResize(e, rec.id, el, h.dataset.corner ?? "se"));
     }
@@ -769,7 +818,6 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     if (!r || typeof r["error"] === "string") return null;
     const d = (await host.callHost(BACKEND, { type: "dialogs" } as unknown as Payload).catch(() => null)) as Rec | null;
     return {
-      templates: (r["templates"] as Presets["templates"]) ?? [],
       preferred: (r["preferred"] as string | null) ?? null,
       dialogs: ((d?.["dialogs"] as Presets["dialogs"] | undefined) ?? []).map((x) => ({ id: x.id, name: x.name })),
       coding: await codingAgents(),
@@ -1023,10 +1071,11 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       rects = placeMissing(kernel, cont.id, theme, sized, screenToWorld(box.left + box.width / 2, box.top + box.height / 2));
       // a COLUMN theme: always ONE full-width column, cells in their order
       if (column) {
-        const col = stack(rects);
+        const mins = minimizedOf(kernel, cont.id, theme);
+        const col = stack(rects, mins);
         if (JSON.stringify(col) !== JSON.stringify(rects)) writeRects(kernel, cont.id, theme, col);
         rects = col;
-        columnBottom = Object.values(col).reduce((m, r) => Math.max(m, r.y + r.height), 0);
+        columnBottom = Object.entries(col).reduce((m, [id, r]) => Math.max(m, r.y + (mins.has(id) ? 0 : r.height)), 0);
       }
     }
     // a tab that turns mobile looks at the column (its top, centred)
@@ -1139,6 +1188,8 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       f.el.querySelector(":scope > .frame-head .pin")?.classList.toggle("on", on);
     }
     placePinned();
+    const mins = cont !== undefined && !full ? minimizedOf(kernel, cont.id, theme) : new Set<string>();
+    for (const [id, f] of frames) f.el.classList.toggle("minimized", mins.has(id));
     glHost?.prune(seenGl);
     canvas.classList.toggle("full-view", full);
     for (const [id, f] of frames) f.el.classList.toggle("full", full && id === viewed);
@@ -1320,14 +1371,12 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     return viewId;
   };
 
-  // A PLUGIN template placed (backend-owned views): `canvas_root spawn` makes
-  // its host agent (a copy of the template), then a cell VIEWS it, drawn as the
-  // agent's own record says — host-first, like a terminal.
-  // A STARTER BUNDLE (`starter`): the same, from a NEW project bundle folder the
-  // host scaffolds (`canvas_root spawn {bundle}`).
-  const spawnPluginAt = async (w: { x: number; y: number }, template: string | null, starter?: string, instanceOf?: string): Promise<void> => {
+  // A BUNDLE'S AGENT placed (backend-owned views): `canvas_root spawn` makes the
+  // host agent — from a NEW project bundle folder the host scaffolds (`starter`:
+  // `spawn {bundle}`) or one more instance of a project bundle (`instance_of`) —
+  // then a cell VIEWS it, drawn as the agent's own record says, like a terminal.
+  const spawnBundleAt = async (w: { x: number; y: number }, what: { bundle: string } | { instance_of: string }): Promise<void> => {
     const cellId = `view_${crypto.randomUUID().slice(0, 8)}`;
-    const what = instanceOf !== undefined ? { instance_of: instanceOf } : starter !== undefined ? { bundle: starter } : { template };
     const r = (await host.callHost(BACKEND, { type: "spawn", ...what, stamp: { cell_id: cellId } } as unknown as Payload)) as Rec;
     if (typeof r["error"] === "string") {
       toast(`✕ ${r["error"]}`);
@@ -1618,12 +1667,16 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
         else if (p.kind === "mcp") spawnPageCellAt(w, MCP_ADD_VIEW, "mcp_add", 420, 260);
         else if (p.kind === "tree") spawnPageCellAt(w, SIDEBAR_VIEW, "tree", 320, 520, "tree view");
         else if (p.kind === "backgrounds") spawnBackgroundsAt(w);
+        // THE USER STORE: a view of the host's `user_store` agent (its own html view)
+        else if (p.kind === "user_store") void kernel.send([{ target: containerNow(), payload: { type: "place", backend_id: "user_store", x: Math.round(w.x), y: Math.round(w.y), width: 440, height: 560 } as unknown as Payload }]).then((r) => {
+          const e = (r[0]?.result as Rec | null)?.["error"];
+          if (typeof e === "string") toast(`✕ ${e}`);
+        });
         else if (p.kind === "tips") spawnTipsAt(w);
-        else if (p.kind === "plugin") void spawnPluginAt(w, p.template);
-        else if (p.kind === "bundle") void spawnPluginAt(w, null, p.starter);
-        else if (p.kind === "instance") void spawnPluginAt(w, null, undefined, p.bundle);
+        else if (p.kind === "bundle") void spawnBundleAt(w, { bundle: p.starter });
+        else if (p.kind === "instance") void spawnBundleAt(w, { instance_of: p.bundle });
         else if (p.kind === "page_instance") spawnPageCellAt(w, p.bundle, p.bundle, 360, 260);
-        else void spawnAiAt(w, p.template, p.text);
+        else void spawnAiAt(w, null, p.text);
       },
     });
   };

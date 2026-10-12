@@ -151,3 +151,9 @@ export function seenHere(id: string, parentOf: (id: string) => string | undefine
   }
   return true;
 }
+
+/** A cell head's name: its title, and its id beside it only when they differ —
+ *  a cell with no display name is titled by its id, shown once. */
+export function headTitle(title: string, id: string): string {
+  return title === id ? title : `${title} · <code style="opacity:0.6;font-size:10px">${id}</code>`;
+}

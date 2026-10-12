@@ -129,6 +129,37 @@ test("mobile stack: one full-width column in the cells' order, gap apart, height
   assert.deepEqual(s["b"], { x: COLUMN.x, y: COLUMN.top + 300 + COLUMN.gap, width: COLUMN.width, height: 100 });
 });
 
+test("minimized: a cell is its bar alone — the column's next cell follows its head; per theme; pruned", async () => {
+  const { minimizedOf, setMinimized } = await import("../src/bundles/canvas/layout.ts");
+  const s = stack({ a: { x: 0, y: 0, width: 400, height: 300 }, b: { x: 0, y: 500, width: 400, height: 100 } }, new Set(["a"]));
+  assert.equal(s["b"]!.y, COLUMN.top + COLUMN.gap, "b sits right under a's bar");
+  assert.equal(s["a"]!.height, 300, "a keeps its size for when it comes back");
+  const k = page();
+  setMinimized(k, "view_root", "mobile", "a", true);
+  assert.deepEqual([...minimizedOf(k, "view_root", "mobile")], ["a"]);
+  assert.equal(minimizedOf(k, "view_root", "canvas").size, 0, "per theme");
+  setMinimized(k, "view_root", "mobile", "a", false);
+  assert.equal(minimizedOf(k, "view_root", "mobile").size, 0);
+});
+
+test("mobile reorder: a dropped cell takes the slot its centre is over; the column restacks", async () => {
+  const { reorderY } = await import("../src/bundles/canvas/layout.ts");
+  const col = stack({ a: { x: 0, y: 0, width: 400, height: 100 }, b: { x: 0, y: 200, width: 400, height: 100 }, c: { x: 0, y: 400, width: 400, height: 100 } });
+  const order = (r: Record<string, Rect>): string[] => Object.entries(stack(r)).sort((x, y) => x[1].y - y[1].y).map(([k]) => k);
+  // c dragged to the top
+  const up = { ...col, c: { ...col["c"]!, y: reorderY(col, "c", col["a"]!.y - 10) } };
+  assert.deepEqual(order(up), ["c", "a", "b"]);
+  // a dragged past b's centre
+  const down = { ...col, a: { ...col["a"]!, y: reorderY(col, "a", col["b"]!.y + 10) } };
+  assert.deepEqual(order(down), ["b", "a", "c"]);
+  // a dragged to the bottom
+  const last = { ...col, a: { ...col["a"]!, y: reorderY(col, "a", col["c"]!.y + 300) } };
+  assert.deepEqual(order(last), ["b", "c", "a"]);
+  // dropped back over its own slot: its own y, nothing moves
+  assert.equal(reorderY(col, "b", col["b"]!.y + 5), col["b"]!.y);
+  assert.equal(reorderY(col, "c", col["c"]!.y + 40), col["c"]!.y);
+});
+
 test("themes are data: stock canvas (free) + mobile (column, under 768px); the user's first; auto by the triggers", async () => {
   const { STOCK_THEMES, resolveTheme, themeDefOf, triggered } = await import("../src/bundles/canvas/layout.ts");
   assert.deepEqual(STOCK_THEMES.map((d) => [d.name, d.layout]), [["canvas", "free"], ["mobile", "column"]]);

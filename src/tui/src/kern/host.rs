@@ -52,7 +52,7 @@ pub struct Host {
 /// Every bundle this shell's roster can name. Deliberately short: the set of
 /// agents is the user's to grow, and registering a bundle nobody declared only
 /// widens what a stray record could become.
-fn registry() -> BundleRegistry {
+fn registry(cwd: &std::path::Path) -> BundleRegistry {
     let mut reg = BundleRegistry::new();
     // THE ROOT. Its handler is the durable-state loader; see the module header.
     reg.register(fantastic_core::HANDLER_MODULE, fantastic_core::KernelStateBundle::default());
@@ -94,6 +94,15 @@ fn registry() -> BundleRegistry {
         fantastic_user_home_store::UserHomeStore::new(
             fantastic_user_home_store::home_dir_from_env(),
             vec![crate::env::HUMAN.to_string()],
+        ),
+    );
+    // THE USER STORE: the keys, set-ups and stored fantastic locations in the
+    // user's home; "here" is this project's dir, fixed by the binary (`kern/user_store`).
+    reg.register(
+        fantastic_user_home_store::user_store::HANDLER_MODULE,
+        fantastic_user_home_store::user_store::UserStore::new(
+            fantastic_user_home_store::home_dir_from_env(),
+            std::path::absolute(cwd).unwrap_or_else(|_| cwd.to_path_buf()),
         ),
     );
     // THE CANVAS: the HTTP host, its embedded page and its socket leg. Only ever
@@ -150,7 +159,7 @@ impl Host {
     /// BEFORE its listener boots (nothing runs here yet, so it is the user's to
     /// overwrite).
     pub async fn boot(paths: &Paths, serve_web: bool, web_port: Option<u16>) -> Result<Self, KernelErr> {
-        let booted = bootstrap::bootstrap(registry(), BootstrapOptions::daemon(&paths.cwd))
+        let booted = bootstrap::bootstrap(registry(&paths.cwd), BootstrapOptions::daemon(&paths.cwd))
             .map_err(|e| KernelErr::Boot(format!("{e}")))?;
         let kernel = Arc::clone(&booted.kernel);
         // THE LEDGER CAP (owner 2026-10-09): 100 000 calls; past it the kernel
@@ -248,6 +257,9 @@ impl Host {
         // The template store's agent, and the human's grant onto it — re-set on
         // every boot, whatever a record on disk says.
         if let Err(e) = crate::kern::templates::ensure(&host).await {
+            notes.push(e);
+        }
+        if let Err(e) = crate::kern::user_store::ensure(&host).await {
             notes.push(e);
         }
         // THE PROJECT'S SYSTEM BLOCK: `.fantastic/prompt.md`, seeded, read by
@@ -528,13 +540,14 @@ mod tests {
 
     #[test]
     fn the_registry_holds_exactly_the_declared_set() {
-        let reg = registry();
+        let reg = registry(std::path::Path::new("."));
         for m in [
             "kernel_state.tools",
             "file_bridge.tools",
             "sqlite_store.tools",
             "ram_store.tools",
             "user_home_store.tools",
+            "user_store.tools",
             "setup.tools",
             "canvas.tools",
             "exec_bridge.tools",

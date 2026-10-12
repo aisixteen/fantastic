@@ -76,12 +76,15 @@ brings them back) or deletes one of yours. THEMES: where the cells sit — stock
 `canvas` (the free canvas) and `mobile` (one column, auto under 768px wide),
 and yours: `+ new theme` / ✎ edit a theme's name, layout (free canvas or one
 column) and AUTO trigger (when the tab is at most / at least N px wide); ×
-hides a stock one or deletes yours; `auto` lets the triggers choose (yours
-first). Ask an AI cell to add more — it calls `add` / `add_theme` on the
-manager, and they stay.
+hides a stock one or deletes yours — never the default `canvas`; `auto` lets
+the triggers choose (yours first). A NEW theme (or background) is your AI
+agent's to make: ask an AI cell — it calls `add` / `add_theme` on the manager,
+and they stay.
 
-THE DOUBLE-CLICK: `AI agent` — your default AI (typed text is its first turn;
-with none set up, the set-up wizard); `new AI agent…` — the wizard any time.
+THE DOUBLE-CLICK: `AI agent` — the ONE way to make an AI: your default (★)
+set-up, typed text its first turn; with none set up, the set-up wizard. Your
+saved set-ups are not tiles: another one is the AI cell's ⚙ settings →
+`‹ other set-ups` (a saved one or a new provider, in that cell).
 
 ESC: viewing one agent full screen, Esc goes back to the canvas (unless you are
 typing in a terminal or a field).
@@ -99,6 +102,14 @@ MCP SERVERS: the double-click's `mcp connector` adds one remote MCP server (its
 url, and a key if it needs one) as a host agent whose tools are its verbs — an
 AI calls a tool like any agent. Its cell shows the server and its tools; ⟳
 asks the server again. The key goes to your credential store, never a record.
+
+USER STORE: the double-click's `user store` shows the `user_store` host agent:
+what your home keeps across every fantastic — the stored keys (refs and hosts,
+never values), the AI set-ups, and the stored LOCATIONS of your fantastics
+(`<home>/fantastics/`, one file each: path, name, when stored, last seen).
+`store` / `unstore` this fantastic, × unstores one, `unstore all others` keeps
+only this one. A stored fantastic's `last seen` moves on each start — the list a
+local manager of fantastics reads.
 
 PAGE BUNDLES: `<a canvas's records root>/bundles/<name>/bundle.yaml` with
 `base: html_agent`, `sentence`, and `html: |` (the body each instance starts
@@ -137,7 +148,10 @@ rect in the theme in use is placed by its layout, once: free — the nearest fre
 space around the centre of what the tab shows; column — the bottom of the
 column. In a column theme the wheel scrolls the column, and a cell's 📌 PINS it
 (one per layout, `pinned` on its layout agent): held on the screen's bottom,
-full width, while the column scrolls (e.g. a chat). Themes are chosen and edited
+full width, while the column scrolls (e.g. a chat). The column is flat (no
+border, no rounding, no holes); the ⠿ grip in the middle of a cell's head drags
+it up or down the column. A double click on any cell's head MINIMIZES it to its
+bar (`minimized` on its layout agent); again, it is back. Themes are chosen and edited
 on the canvas theme agent (`themes`, `use_theme`, `add_theme`), or with the
 view's `theme` verb.
 
@@ -166,7 +180,11 @@ URL is the viewed agent.
 ## Cells
 
 - Terminal: an `exec_bridge` PTY job running the human's login `$SHELL`; the
-  shell ending closes the cell.
+  shell ending closes the cell. The host watches each shell for the command it
+  launches (its foreground job) and keeps the last one on the exec agent
+  (`last_cmd`): the cell shows it top right, and after a restart (a new shell)
+  `▶ run` types it again — gone once any command runs. A coding agent's cell
+  runs its program, so it has no run offer.
 - AI chat: every dialog is KEPT from its start (as in the terminal): listed
   under the double-click's chats for reopening; its badge is its name (click to
   rename). The footer: `clear` (a new thread — nothing deleted), the last

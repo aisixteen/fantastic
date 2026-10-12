@@ -2,7 +2,7 @@
 
 Named agent-record BLUEPRINTS kept in the user's home config dir
 (`FANTASTIC_HOME`, else `~/.config/fantastic`), one plain-text file per name
-under `templates/`. The CLI owns it: the binary fixes its directory and the
+under `agents/ai_agent/templates/`. The CLI owns it: the binary fixes its directory and the
 only callers it serves when it registers it — a record can do neither.
 
 A template is `handler_module` plus that bundle's config (endpoint, model,

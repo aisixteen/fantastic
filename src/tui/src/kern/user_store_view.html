@@ -1,0 +1,55 @@
+<style>
+  body { margin: 0; padding: 14px 16px; font: 13px/1.45 ui-sans-serif, -apple-system, system-ui, sans-serif; color: #d8d8e4; background: transparent; }
+  h2 { margin: 14px 0 6px; font: 600 11px ui-monospace, SFMono-Regular, monospace; letter-spacing: .6px; text-transform: uppercase; color: rgba(255,255,255,.55); }
+  h2:first-child { margin-top: 0; }
+  .row { display: flex; align-items: center; gap: 8px; padding: 5px 0; border-bottom: 1px solid rgba(255,255,255,.06); min-width: 0; }
+  .grow { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dim { color: rgba(255,255,255,.45); font-size: 11px; }
+  code { font: 12px ui-monospace, SFMono-Regular, monospace; }
+  button { font: inherit; font-size: 12px; color: #e6dcff; background: rgba(183,140,255,.16); border: 1px solid rgba(183,140,255,.45); border-radius: 6px; padding: 3px 10px; cursor: pointer; }
+  button:hover { background: rgba(183,140,255,.32); color: #fff; }
+  button.x { padding: 1px 8px; }
+  .here { color: #7ee2a8; font-size: 11px; }
+  .empty { color: rgba(255,255,255,.35); padding: 4px 0; }
+  .err { color: #f7768e; }
+</style>
+<h2>This fantastic</h2>
+<div id="here" class="row"></div>
+<h2>Stored locations</h2>
+<div id="locs"></div>
+<div style="margin-top:8px"><button id="others">unstore all others</button></div>
+<h2>Keys</h2>
+<div id="keys"></div>
+<h2>AI set-ups</h2>
+<div id="tpls"></div>
+<div id="home" class="dim" style="margin-top:12px"></div>
+<div id="err" class="err"></div>
+<script>
+const ID = "user_store";
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+const ago = (t) => { if (!t) return ""; const s = Math.max(0, Date.now() / 1000 - t); return s < 90 ? "just now" : s < 5400 ? `${Math.round(s / 60)} min ago` : s < 129600 ? `${Math.round(s / 3600)} h ago` : `${Math.round(s / 86400)} d ago`; };
+async function call(type, extra) {
+  const r = await fantastic.send(ID, Object.assign({ type }, extra || {}));
+  $("err").textContent = r && r.error ? r.error : "";
+  return r;
+}
+async function render() {
+  const r = await call("list");
+  if (!r || r.error) return;
+  $("here").innerHTML = `<span class="grow"><code>${esc(r.here.path)}</code></span>` +
+    (r.here.stored ? `<button id="unhere">unstore</button>` : `<button id="store">store</button>`);
+  const b = $("store") || $("unhere");
+  b.onclick = async () => { await call(r.here.stored ? "unstore" : "store_here"); render(); };
+  $("locs").innerHTML = r.locations.length === 0 ? `<div class="empty">none stored</div>` : r.locations.map((l, i) =>
+    `<div class="row"><span class="grow"><b>${esc(l.name)}</b> ${l.here ? '<span class="here">· this one</span>' : ""}<br><code class="dim">${esc(l.path)}</code>${l.exists ? "" : ' <span class="err">· gone</span>'}</span>` +
+    `<span class="dim">${esc(ago(l.last_seen))}</span><button class="x" data-i="${i}" title="unstore">×</button></div>`).join("");
+  for (const x of $("locs").querySelectorAll("button[data-i]")) x.onclick = async () => { await call("unstore", { path: r.locations[+x.dataset.i].path }); render(); };
+  $("others").disabled = !r.locations.some((l) => !l.here);
+  $("keys").innerHTML = r.keys.length === 0 ? `<div class="empty">none stored</div>` : r.keys.map((k) => `<div class="row"><code class="grow">${esc(k.ref)}</code><span class="dim">${esc(k.host)}</span></div>`).join("");
+  $("tpls").innerHTML = r.templates.length === 0 ? `<div class="empty">none saved</div>` : r.templates.map((t) => `<div class="row"><code class="grow">${esc(t)}</code></div>`).join("");
+  $("home").textContent = `kept in ${r.home}`;
+}
+$("others").onclick = async () => { await call("unstore_others"); render(); };
+render();
+</script>

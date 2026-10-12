@@ -4,43 +4,33 @@ import { COLS, exactLine, layout, move, tiles } from "../src/bundles/canvas/acti
 import type { Presets } from "../src/bundles/canvas/action_popup.ts";
 
 const P: Presets = {
-  templates: [
-    { name: "gpt5", handler_module: "responses_backend.tools", model: "gpt-5" },
-    { name: "box", handler_module: "vllm_backend.tools", model: "qwen" },
-  ],
   preferred: "gpt5",
   dialogs: [{ id: "ai_1", name: "release notes" }],
 };
 
-test("empty: two groups — host (AI agent, terminal, new AI agent…, python agent, mcp connector), page (html, stream, tree view, canvas theme, tips) — then AI (★ the default), chats", () => {
+test("empty: two groups — host (AI agent, terminal, python agent, mcp connector, user store), page (html, stream, tree view, canvas theme, tips) — then chats; no AI template tiles", () => {
   const t = tiles("", P);
-  assert.deepEqual(t.map((x) => x.label), ["AI agent", "terminal", "new AI agent…", "python agent", "mcp connector", "html", "stream", "tree view", "canvas theme", "tips", "@gpt5 ★", "@box", "release notes"]);
+  assert.deepEqual(t.map((x) => x.label), ["AI agent", "terminal", "python agent", "mcp connector", "user store", "html", "stream", "tree view", "canvas theme", "tips", "release notes"]);
   assert.deepEqual(t.find((x) => x.label === "python agent")!.pick, { kind: "bundle", starter: "python_agent" });
-  assert.deepEqual([...new Set(t.map((x) => x.section))], ["host", "page", "ai", "chats"]);
+  assert.deepEqual([...new Set(t.map((x) => x.section))], ["host", "page", "chats"]);
   assert.deepEqual(t.at(-1)!.pick, { kind: "chat", id: "ai_1", name: "release notes" });
 });
 
 test("a kind typed exactly offers only that kind", () => {
   assert.deepEqual(tiles("terminal", P).map((x) => x.pick), [{ kind: "terminal" }]);
-  assert.deepEqual(tiles("new ai agent…", P).map((x) => x.pick), [{ kind: "setup" }], "the wizard, typed in any case");
+  assert.deepEqual(tiles("new ai agent…", P).map((x) => x.label), ["AI agent · gpt5"], "no \"new AI agent…\": only free text for the one AI agent tile");
   assert.deepEqual(tiles("tree view", P).map((x) => x.pick), [{ kind: "tree" }]);
   assert.deepEqual(tiles("canvas theme", P).map((x) => x.pick), [{ kind: "backgrounds" }]);
 });
 
 test("free text: the first tile asks the default; the rest filter", () => {
   const t = tiles("rel", P);
-  assert.deepEqual(t[0]!.pick, { kind: "ai", template: null, text: "rel" });
+  assert.deepEqual(t[0]!.pick, { kind: "ai", text: "rel" });
   assert.deepEqual(t.slice(1).map((x) => x.label), ["release notes"]);
 });
 
-test("@name picks a template, the rest is the first turn", () => {
-  const t = tiles("@bo hi there", P);
-  assert.equal(t.length, 1);
-  assert.deepEqual(t[0]!.pick, { kind: "ai", template: "box", text: "hi there" });
-});
-
 test("no AI set up: the first tile, \"AI agent\", opens the wizard (typed or not) — nothing guessed", () => {
-  const t = tiles("hello", { templates: [], preferred: null, dialogs: [] });
+  const t = tiles("hello", { preferred: null, dialogs: [] });
   assert.deepEqual(t.map((x) => x.pick), [{ kind: "setup" }]);
   const empty = tiles("", null);
   assert.ok(!empty.some((x) => x.pick.kind === "ai"), "no default AI tile without a default");
@@ -65,14 +55,11 @@ test("grid moves: across by 1, down/up by a row, clamped", () => {
   assert.equal(move(0, "ArrowDown", []), 0);
 });
 
-test("a plugin template is a HOST tile (not an AI one); picking it places its agent", () => {
-  const withPlugin: Presets = { ...P, templates: [...P.templates, { name: "web_search", handler_module: "exec_bridge.tools", model: "", kind: "agent" }] };
-  const t = tiles("", withPlugin);
-  const plugin = t.find((x) => x.label === "web_search")!;
-  assert.equal(plugin.section, "host");
-  assert.deepEqual(plugin.pick, { kind: "plugin", template: "web_search" });
-  assert.ok(!t.some((x) => x.label.startsWith("@web_search")), "not offered as an AI template");
-  assert.deepEqual(tiles("web", withPlugin).slice(1).map((x) => x.label), ["web_search"], "typing filters plugins too");
+test("AI set-ups are the AI agent's option, not the menu's: no tile, and `@name` is plain text", () => {
+  assert.ok(!tiles("", P).some((x) => x.label.startsWith("@")), "no set-up tiles on an empty field");
+  assert.deepEqual(tiles("@box hi", P).map((x) => x.pick), [{ kind: "ai", text: "@box hi" }], "`@name` no longer picks one: it is the default's first turn");
+  assert.deepEqual(tiles("bo", P).map((x) => x.label), ["AI agent · gpt5"], "typing a template's name shows no tile for it");
+  assert.equal(tiles("", P)[0]!.hint, "★ gpt5", "the default is named on the AI agent tile");
 });
 
 test("fantastic on PATH: the FIRST of the coding agents", () => {
@@ -89,7 +76,7 @@ test("coding agents found on PATH: their own group, after host, launching the fu
   assert.deepEqual(coding.map((x) => x.label), ["claude", "aider"]);
   assert.deepEqual(coding[0]!.pick, { kind: "coding", name: "claude", path: "/opt/bin/claude" });
   assert.equal(coding[0]!.icon, "claude");
-  assert.deepEqual([...new Set(t.map((x) => x.section))], ["host", "coding", "page", "ai", "chats"]);
+  assert.deepEqual([...new Set(t.map((x) => x.section))], ["host", "coding", "page", "chats"]);
   assert.deepEqual(tiles("cl", { ...P, coding: [{ name: "claude", path: "/c" }] }).filter((x) => x.section === "coding").map((x) => x.label), ["claude"]);
 });
 
@@ -115,4 +102,10 @@ test("this canvas's page bundles (an html cell bundled): their own group, each p
   const b = t.filter((x) => x.section === "page_bundles");
   assert.deepEqual(b.map((x) => [x.label, x.pick]), [["card", { kind: "page_instance", bundle: "card" }]]);
   assert.deepEqual(tiles("card", { ...P, pageBundles: [{ name: "card", sentence: "" }] }).map((x) => x.pick), [{ kind: "page_instance", bundle: "card" }]);
+});
+
+test("ONE way to make an AI: the \"AI agent\" tile — typed exactly, that tile alone (the default, or the wizard with none)", () => {
+  assert.deepEqual(tiles("AI agent", P).map((x) => x.pick), [{ kind: "ai", text: "" }]);
+  assert.deepEqual(tiles("ai agent", { preferred: null, dialogs: [] }).map((x) => x.pick), [{ kind: "setup" }]);
+  assert.equal(tiles("", P).filter((x) => x.label.toLowerCase().includes("ai agent")).length, 1);
 });

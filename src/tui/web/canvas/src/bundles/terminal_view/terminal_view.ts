@@ -1,6 +1,9 @@
 import { useSharedWebgl } from "./renderer.ts";
 import type { ViewBundle, ViewContext, ViewHandle } from "../view.ts";
 import { Host } from "../../lib.ts";
+import { hostRecordFresh } from "../canvas/host_views.ts";
+import { attached, launched, ran, runLine, savedCmd, shortCmd } from "./last_cmd.ts";
+import type { LastCmd } from "./last_cmd.ts";
 
 // terminal_view — inline xterm.js view-agent, rendered INLINE into a canvas
 // frame body (no iframe), drawing ONE PTY job of its exec_bridge backend over
@@ -206,6 +209,35 @@ export const terminalView: ViewBundle = {
     const offOutput = host.on(backend, "output", (e) => (jobId === undefined ? early.push(e) : draw(e)));
     const offDone = host.on(backend, "job_done", (e) => (jobId === undefined ? early.push(e) : ended(e)));
 
+    // THE LAST LAUNCHED COMMAND (owner 2026-10-12, `last_cmd.ts`): a bar on the
+    // cell; after a restart, ▶ run types it into the new shell — gone once any
+    // command runs
+    let last: LastCmd = { cmd: savedCmd(await hostRecordFresh(backend).catch(() => undefined)), offer: false };
+    const bar = document.createElement("div");
+    bar.className = "term-last";
+    bar.innerHTML = `<span class="cmd"></span><button class="run" title="run it again">▶ run</button>`;
+    mount.appendChild(bar);
+    const drawLast = (): void => {
+      bar.hidden = last.cmd === null;
+      const c = bar.querySelector(".cmd") as HTMLElement;
+      c.textContent = last.cmd === null ? "" : shortCmd(last.cmd);
+      c.title = last.cmd ?? "";
+      (bar.querySelector(".run") as HTMLElement).hidden = !last.offer;
+    };
+    (bar.querySelector(".run") as HTMLElement).addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (jobId === undefined || last.cmd === null) return;
+      void host.call(backend, { type: "write", job_id: jobId, data: runLine(last.cmd) });
+      last = ran(last);
+      drawLast();
+    });
+    const offLast = host.on(backend, "last_cmd", (e) => {
+      if (typeof e["cmd"] !== "string") return;
+      last = launched(last, e["cmd"]);
+      drawLast();
+    });
+    drawLast();
+
     term.onData((data: string) => {
       if (jobId !== undefined) void host.call(backend, { type: "write", job_id: jobId, data });
     });
@@ -295,6 +327,7 @@ export const terminalView: ViewBundle = {
         await host.call(backend, { type: "resize", job_id: jobId, cols: term.cols, rows: term.rows });
         const replay = (await host.call(backend, { type: "output", job_id: jobId })) as { output?: string };
         if (replay && typeof replay.output === "string") term.write(replay.output);
+        last = attached(last, false, argv.length === 0);
       } else {
         const started = (await host.call(backend, {
           type: "start",
@@ -303,11 +336,13 @@ export const terminalView: ViewBundle = {
         })) as { job_id?: number; error?: string; reason?: string };
         if (typeof started?.job_id === "number") {
           jobId = started.job_id;
+          last = attached(last, true, argv.length === 0);
         } else {
           term.write(`\r\n[${argv.length ? argv.join(" ") : "the login shell"} did not start: ${started?.error ?? JSON.stringify(started)}]\r\n`);
         }
       }
       for (const e of early.splice(0)) (e["type"] === "job_done" ? ended : draw)(e);
+      drawLast();
     };
     await attach(false);
     let lost = false;
@@ -338,6 +373,8 @@ export const terminalView: ViewBundle = {
         offLifecycle();
         offOutput();
         offDone();
+        offLast();
+        bar.remove();
         host.unwatch(backend);
         clearTimeout(roTimer);
         ro.disconnect();

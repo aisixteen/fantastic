@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from _lib.canvas_live import seed_key, Rig, verdict, answer, say, spot, wait_quiet  # noqa: E402
+from _lib.canvas_live import seed_key, Rig, verdict, answer, say, spot, wait_quiet, tpl_dir  # noqa: E402
 
 BTN = "((t)=>[...document.querySelectorAll('.wiz button')].find(b=>b.textContent.trim().startsWith(t)))"
 
@@ -40,7 +40,7 @@ def main() -> bool:
     async def drive() -> dict:
         out: dict = {}
         async with rig.page(1600, 1000) as pg:
-            await spot(pg, 250, 250, "new AI agent…")
+            await spot(pg, 250, 250, "AI agent")  # none set up: the wizard
             await pg.until("document.querySelectorAll('.wiz .tiles button').length === 4", 20)
             await pg.js(f"[...document.querySelectorAll('.wiz .tiles button')].find(b=>b.firstChild.textContent==={json.dumps(provider)})?.click()")
             await pg.until("!!document.querySelector('.wiz label input')", 10)
@@ -67,8 +67,8 @@ def main() -> bool:
     finally:
         rig.stop()
     name = f"{provider}-1"
-    tpl = (rig.home / "templates" / f"{name}.yaml").exists()
-    pref = (rig.home / "templates" / ".preferred").read_text().strip() if (rig.home / "templates" / ".preferred").exists() else ""
+    tpl = (tpl_dir(rig.home) / f"{name}.yaml").exists()
+    pref = (tpl_dir(rig.home) / ".preferred").read_text().strip() if (tpl_dir(rig.home) / ".preferred").exists() else ""
     rig.summary.update({**out, "template_file": tpl, "preferred": pref})
     print(json.dumps(rig.summary, indent=1, default=str)[:2000])
     ok = out.get("created") and tpl and pref == name and bool((out.get("answer") or "").strip()) and out.get("settings_url") == fill["URL"]

@@ -12,7 +12,8 @@ import { PROVIDERS, autoName, nameOk, providerOf, savedKeyFor } from "./wizard.t
 //      (the first becomes the default) and opens the agent's chat.
 // Every page has SKIP: an AI cell with no AI yet, which says how to set it up.
 // THE SETTINGS of an AI agent are page 2 for that agent (`edit_ai` on the
-// record): its fields, changed live on its next turn.
+// record): its fields, changed live on its next turn; `‹ other set-ups` is page 1
+// for its cell — another saved set-up, or a new provider, rebinds that cell.
 //
 // It fronts a `setup.tools` agent the canvas spawns in its view's backend folder
 // for it (the pair model); the host sweeps one left behind at boot, so after a
@@ -362,7 +363,10 @@ export const setupView: ViewBundle = {
         ...(keyNeeded ? [field("key", source), keyBox] : []),
         ...(optional.length ? [advanced] : []),
         sayEl,
-        el("div", { className: "foot" }, ...(editing && !template ? [] : [button("‹ back", () => page1())]), el("span", { className: "grow" }), ...(template ? [] : [skip()]), go),
+        // an agent's settings: `‹ other set-ups` is page 1 FOR this cell — a saved
+        // set-up or a new provider rebinds it (owner 2026-10-12: the set-up is the
+        // AI agent's option, not a menu tile)
+        el("div", { className: "foot" }, button(editing && !template ? "‹ other set-ups" : "‹ back", () => page1()), el("span", { className: "grow" }), ...(template ? [] : [skip()]), go),
       );
     };
 

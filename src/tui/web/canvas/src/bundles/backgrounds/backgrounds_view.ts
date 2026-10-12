@@ -1,11 +1,12 @@
 import type { Payload } from "../../lib.ts";
 import type { ViewBundle, ViewContext, ViewHandle } from "../view.ts";
 import { BACKGROUNDS } from "./backgrounds_agent.ts";
+import { DEFAULT_THEME } from "../canvas/layout.ts";
 
 // THE CANVAS THEME PANEL (owner 2026-10-12) — two sections: BACKGROUNDS and
 // THEMES. Themes: each row uses it on a click; ✎ edits it (name, layout, its
 // width trigger), × deletes yours or hides a stock one, `restore stock` brings
-// them back, `+ new theme` adds one; `auto` lets the triggers choose.
+// them back, a new one is your AI agent's to add (`add_theme`), the default `canvas` is never deleted; `auto` lets the triggers choose.
 //
 // THE BACKGROUNDS SECTION — the backgrounds agent's own view (one record: the
 // agent IS the cell). Top: random · every minute · none · default. Then the
@@ -176,12 +177,6 @@ export const backgroundsView: ViewBundle = {
       tbar.append(
         btn(curT === "auto" ? "auto ✓" : "auto", "let the width triggers choose", { type: "use_theme", name: "auto" }, "…", curT === "auto"),
       );
-      const add = el("button", "btn", "+ new theme");
-      add.onclick = (): void => {
-        root.querySelector(".tform")?.remove();
-        tbar.after(themeForm(null));
-      };
-      tbar.append(add);
       if (hiddenT.length > 0) {
         const rs = el("button", "link", `restore stock (${hiddenT.length} hidden)`);
         rs.onclick = () => void act({ type: "restore_themes" }, "restoring…");
@@ -204,20 +199,28 @@ export const backgroundsView: ViewBundle = {
         const x = el("button", "x", "×");
         x.title = t.from === "stock" ? "hide it (restore stock brings it back)" : "delete it";
         x.onclick = () => void act({ type: "delete_theme", name: t.name }, `removing ${t.name}…`);
-        r.append(b, ed, x);
+        // the default theme stays: no × on it
+        if (t.name === DEFAULT_THEME && t.from === "stock") r.append(b, ed);
+        else r.append(b, ed, x);
         root.append(r);
       }
+      const thint = el("div", "hint");
+      thint.innerHTML =
+        "<b>To make a new theme, ask your AI agent.</b><br>" +
+        "Open an AI cell (double-click → <b>AI agent</b>) and say e.g. <i>“add a theme for wide screens”</i> — " +
+        `it adds it here with <code>add_theme</code> on this agent (<code>${ctx.selfId}</code>).`;
+      root.append(thint);
       root.append(st);
     };
     // a theme's form: name, layout, its width trigger, a note — saved as yours
-    const themeForm = (t: ThemeRow | null): HTMLElement => {
+    const themeForm = (t: ThemeRow): HTMLElement => {
       const f = el("div", "tform");
       const name = el("input");
-      name.value = t?.name ?? "";
+      name.value = t.name;
       name.placeholder = "letters, digits, - _";
       const layout = el("select");
       layout.append(Object.assign(el("option"), { value: "free", textContent: "free canvas" }), Object.assign(el("option"), { value: "column", textContent: "one column" }));
-      layout.value = t?.layout ?? "free";
+      layout.value = t.layout;
       const kind = el("select");
       kind.append(
         Object.assign(el("option"), { value: "manual", textContent: "manual only" }),
@@ -226,11 +229,11 @@ export const backgroundsView: ViewBundle = {
       );
       const px = el("input");
       px.type = "number";
-      const tr = t?.trigger ?? null;
+      const tr = t.trigger;
       kind.value = tr === null ? "manual" : tr.max_width !== undefined ? "max" : "min";
       px.value = String(tr?.max_width ?? tr?.min_width ?? "");
       const note = el("input");
-      note.value = t?.note ?? "";
+      note.value = t.note ?? "";
       const trig = el("div", "trig");
       trig.append(kind, px, el("span", "", "px wide"));
       const save = el("button", "btn on", "save");
