@@ -100,6 +100,30 @@ KV_TTL = 1800.0
 KV_OVERFLOWS = ("evict", "reject")
 
 
+#: Tokens a chat template adds around one message (role markers, separators) —
+#: a generous bound (Qwen's ChatML adds ~5).
+MESSAGE_OVERHEAD = 16
+
+
+def prompt_bound(messages: list[dict]) -> int:
+    """An UPPER bound on the prompt's tokens: every byte of each message's role and
+    content (a byte-level BPE token is at least one byte) plus `MESSAGE_OVERHEAD`
+    per message. Never below the server's count, so a turn it lets keep its
+    `max_tokens` fits the window."""
+    total = 0
+    for m in messages:
+        c = m.get("content")
+        text = (
+            c
+            if isinstance(c, str)
+            else json.dumps(c, ensure_ascii=False, separators=(",", ":"))
+        )
+        total += (
+            len(str(m.get("role", "")).encode()) + len(text.encode()) + MESSAGE_OVERHEAD
+        )
+    return total
+
+
 class KvSlotsFull(RuntimeError):
     """`kv_overflow: reject` and every slot on the endpoint is live."""
 
@@ -209,6 +233,8 @@ def one_system_message(messages: list[dict]) -> list[dict]:
 class VllmProvider:
     #: The prompt size vLLM REPORTED for the last pass; ai_core calibrates with it.
     last_prompt_tokens: int | None = None
+    #: The output tokens the server reported for the last pass (None = not reported).
+    last_completion_tokens: int | None = None
     last_stop_reason: str | None = None
 
     def __init__(
@@ -239,11 +265,13 @@ class VllmProvider:
         # no `credentials` on the record, no header.
         self._key = key
         self._max_tokens = int(max_tokens)
-        # The record's `context_window`. A turn whose `max_tokens` reaches it asks
-        # for "the rest of the window": vLLM counts the prompt AND the output
-        # against one window, so a cap that is the whole window is refused (HTTP
-        # 400). Such a turn sends NO max_tokens — vLLM then gives it what the
-        # prompt leaves (owner, 2026-10-04: the e2e limit is the whole 260k).
+        # The record's `context_window`. vLLM counts the prompt AND the output
+        # against one window, so a cap the prompt leaves no room for is refused
+        # (HTTP 400). A turn whose `max_tokens` could overrun it — the prompt's
+        # token BOUND plus `max_tokens` past the window — sends NO max_tokens:
+        # vLLM then gives it exactly what the prompt leaves (owner, 2026-10-04:
+        # the e2e limit is the whole 260k; 2026-10-12: max_tokens 64000 on a
+        # 65536 window with a 1537-token prompt was refused).
         self._window = int(window) if window else None
         self._kv = (int(kv_slots), kv_overflow, float(kv_ttl))
         # The effective sampling: the record's values over SAMPLING_DEFAULTS,
@@ -305,7 +333,11 @@ class VllmProvider:
             # the final chunk carries usage (and an EMPTY choices array)
             "stream_options": {"include_usage": True},
         }
-        if not side_call and self._window is not None and call_max >= self._window:
+        if (
+            not side_call
+            and self._window is not None
+            and call_max + prompt_bound(body["messages"]) > self._window
+        ):
             del body["max_tokens"]  # the rest of the window — see `_window`
         for key in ("temperature", "top_p", "top_k", "reasoning_effort", *PASSTHROUGH):
             if self._sampling.get(key) is not None:
@@ -378,6 +410,8 @@ class VllmProvider:
                     usage = obj.get("usage")
                     if isinstance(usage, dict) and usage.get("prompt_tokens"):
                         self.last_prompt_tokens = int(usage["prompt_tokens"])
+                    if isinstance(usage, dict) and usage.get("completion_tokens"):
+                        self.last_completion_tokens = int(usage["completion_tokens"])
                     choices = obj.get("choices") or []
                     if not choices:
                         continue  # the usage-only final chunk

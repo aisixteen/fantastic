@@ -9,6 +9,8 @@ silently. EVERY turn is held to it — a first turn from a person too (2026-09-0
 from _testkit import memory_meta
 import asyncio
 
+import pytest
+
 from ai_core import core
 
 
@@ -300,5 +302,183 @@ async def test_a_chain_gives_up_after_max_silent_turns(
                 reasons.append(((ev.get("detail") or {}).get("reason"), ev))
         assert reasons and reasons[-1][0] == "gave_up", reasons
         assert "Reiterate the inquiry" in reasons[-1][1]["detail"]["error"], reasons
+    finally:
+        fake_providers.pop(aid, None)
+
+
+class _Reporting(_Script):
+    """A provider that reports its usage, as vLLM's final chunk does."""
+
+    async def chat(self, messages, max_tokens=None):
+        async for c in super().chat(messages, max_tokens):
+            yield c
+        self.last_prompt_tokens = 1234
+        self.last_completion_tokens = 56
+
+
+def _done_details(kernel, inbox: str) -> list[dict]:
+    q = kernel.ctx.inboxes[inbox]
+    out = []
+    while not q.empty():
+        ev = q.get_nowait()
+        if ev.get("type") == "status" and ev.get("phase") == "done":
+            out.append(ev.get("detail") or {})
+    return out
+
+
+async def test_the_done_status_carries_the_token_usage(seeded_kernel, fake_providers):
+    """A finished generation's `status` `done` carries what a chat needs for
+    `tok/s · ctx`: the provider's reported `prompt_tokens` / `completion_tokens`
+    (estimated and marked so when it reports none), `gen_seconds`, and the
+    `context_window` in force."""
+    for aid, fp, estimated in [
+        ("usage_rep", _Reporting([_done()]), False),
+        ("usage_est", _Script([_done()]), True),
+    ]:
+        seeded_kernel.create(
+            "ollama_backend.tools",
+            id=aid,
+            context_window=32768,
+            **memory_meta(seeded_kernel, aid, {"cli": "*"}),
+        )
+        inbox = f"watch_{aid}"
+        seeded_kernel.ctx.ensure_inbox(inbox)
+        seeded_kernel.watch(aid, inbox)
+        fake_providers[aid] = fp
+        try:
+            await seeded_kernel.send(
+                [
+                    {
+                        "target": aid,
+                        "payload": {"type": "send", "text": "go", "client_id": "tab1"},
+                    }
+                ]
+            )
+            await _settle(fp, 1)
+            await asyncio.sleep(0.3)
+            ok = [
+                d
+                for d in _done_details(seeded_kernel, inbox)
+                if d.get("reason") == "ok"
+            ]
+            assert ok, aid
+            d = ok[-1]
+            assert d["context_window"] == 32768, d
+            assert isinstance(d["gen_seconds"], float) and d["gen_seconds"] >= 0, d
+            if estimated:
+                assert (
+                    d["prompt_tokens"] > 0 and d["prompt_tokens_estimated"] is True
+                ), d
+                assert d["completion_tokens"] > 0, d
+                assert d["completion_tokens_estimated"] is True, d
+            else:
+                assert (d["prompt_tokens"], d["completion_tokens"]) == (1234, 56), d
+                assert "prompt_tokens_estimated" not in d, d
+                assert "completion_tokens_estimated" not in d, d
+        finally:
+            fake_providers.pop(aid, None)
+
+
+@pytest.mark.skip(
+    reason="DEFERRED (owner, 2026-10-12: 'not yet'): resume-after-restart is parked "
+    "unwired — during a drain the kernel refuses on_cancel's store writes"
+)
+async def test_a_turn_a_host_stop_cut_is_resumed_once_on_the_next_boot(
+    seeded_kernel, fake_providers, monkeypatch
+):
+    """RESUME AFTER RESTART (owner, 2026-10-12): the host stops (the kernel drains)
+    while a turn is generating — its cut row is marked `interrupted` with the
+    client it streamed to; the next boot runs it again ONCE, as a
+    `[resumed after restart]` turn to that client. A cancel by anyone else, or a
+    boot with nothing cut, resumes nothing."""
+    from ai_core import core
+
+    fp = _Script(["…", DONE], delay=5.0)
+    aid = "resumer"
+    seeded_kernel.create(
+        "ollama_backend.tools",
+        id=aid,
+        context_window=32768,
+        **memory_meta(seeded_kernel, aid, {"cli": "*"}),
+    )
+    fake_providers[aid] = fp
+    ctx = seeded_kernel.ctx
+    try:
+        turn = asyncio.ensure_future(
+            seeded_kernel.send(
+                [
+                    {
+                        "target": aid,
+                        "payload": {
+                            "type": "send",
+                            "text": "the question",
+                            "client_id": "tab7",
+                        },
+                    }
+                ]
+            )
+        )
+        await _settle(fp, 1)
+        # a stop waits QUIET_TIMEOUT for in-flight turns; a generation longer than
+        # that is cut (here: 0.2 s against a 5 s turn)
+        monkeypatch.setattr(ctx, "QUIET_TIMEOUT", 0.2)
+        await ctx.shutdown_agents()  # drains: the generating turn is cut
+        await asyncio.wait_for(turn, 5)
+        ctx.draining = False  # the stop is over; read the store as the next life will
+        rows = [r for r in await core._load_history(aid, seeded_kernel)]
+        cut = rows[-1]
+        assert cut["role"] == "assistant" and cut["interrupted"] == {
+            "client_id": "tab7"
+        }, cut
+        assert "the host stopping" in cut["content"], cut
+        assert rows[-2]["content"] == "the question", rows[-2]
+        # the next incarnation: the kernel runs again and the agent boots
+        await seeded_kernel.send([{"target": aid, "payload": {"type": "boot"}}])
+        await _settle(fp, 2)
+        assert fp.incoming[1] == core.RESUMED_NOTICE, fp.incoming
+        assert "the question" in [m["content"] for m in fp.seen[1]], fp.seen[1]
+        # once: another boot finds the resumed turn newest, not the cut
+        await seeded_kernel.send([{"target": aid, "payload": {"type": "boot"}}])
+        await asyncio.sleep(0.5)
+        assert fp.calls == 2, fp.incoming
+    finally:
+        ctx.draining = False
+        fake_providers.pop(aid, None)
+
+
+async def test_the_thinking_is_kept_on_its_row_and_never_shown_to_the_model(
+    seeded_kernel, fake_providers
+):
+    """THINKING ON THE ROW (owner, 2026-10-12): a chat shows a generation's thinking
+    collapsed under its answer, after a reload too. The assistant row keeps it as
+    `thinking` (a call written there stays undispatched); the model's next view
+    carries only the answer; `history` flags the row `has_thinking`."""
+    from ai_core import core
+
+    thought = 'weigh it <call name="send"><target_id>x</target_id><type>t</type></call>'
+    fp = _Script([f"<think>{thought}</think>the answer", DONE])
+    aid = "thinker"
+    seeded_kernel.create(
+        "ollama_backend.tools",
+        id=aid,
+        context_window=32768,
+        **memory_meta(seeded_kernel, aid, {"cli": "*"}),
+    )
+    fake_providers[aid] = fp
+    try:
+        await seeded_kernel.send(
+            [{"target": aid, "payload": {"type": "send", "text": "go"}}]
+        )
+        await _settle(fp, 2)  # the answer had no call: the nudge is the 2nd pass
+        rows = await core._load_history(aid, seeded_kernel)
+        first = next(r for r in rows if r.get("role") == "assistant")
+        assert first["content"] == "the answer" and first["thinking"] == thought, first
+        assert all("weigh it" not in m["content"] for m in fp.seen[1]), fp.seen[1]
+        assert all(set(m) == {"role", "content"} for m in fp.seen[1]), fp.seen[1]
+        out = (
+            await seeded_kernel.send([{"target": aid, "payload": {"type": "history"}}])
+        )[0]["result"]
+        flagged = [d for d in out["rows"] if d.get("has_thinking")]
+        assert [d["id"] for d in flagged] == [first["id"]], out
     finally:
         fake_providers.pop(aid, None)

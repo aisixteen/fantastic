@@ -37,6 +37,13 @@ MAX_REPORTS = 3
 _SHOWN = 160  # chars of a quoted line
 
 _TAG = re.compile(r"<(/?)([^\s<>/=]*)([^<>\n]{0,300}?)(/?)>")
+#: A call opener whose leading `<` was dropped — `call name="await">` (measured
+#: 2026-10-12 on qwen3.8-27b, right after `</think>`; 2026-10-07 an `<ids>` lost its
+#: `<` the same way). Not a tag to `_TAG`, so without this only its `</call>` was
+#: seen and the report said to delete that.
+#: Only at the start of the text or after whitespace — where the dropped `<` was
+#: (`</think>\n\n<call`); `<function=call name="send">` is another shape.
+_BARE = re.compile(r"""(?<!\S)call\s+name\s*=\s*["']?([A-Za-z_]\w*)["']?\s*>""")
 _NAMED = re.compile(r"""\bname\s*=\s*["']?([A-Za-z_]\w*)""")
 _EQ = re.compile(r"""^=\s*["']?([A-Za-z_]\w*)""")
 _JSON = re.compile(
@@ -53,6 +60,7 @@ class _Tok:
     name: str | None = None  # the call name it carries, when it carries one
     arg: str | None = None  # the argument it opens, for arg / param
     closing: bool = False
+    bare: bool = False  # a call opener written without its leading `<`
 
 
 @dataclass
@@ -96,6 +104,10 @@ def _classify(m: re.Match) -> _Tok:
 
 def _tokens(masked: str) -> list[_Tok]:
     toks = [_classify(m) for m in _TAG.finditer(masked)]
+    for m in _BARE.finditer(masked):
+        toks.append(
+            _Tok("opener", m.group(0), m.start(), m.end(), name=m.group(1), bare=True)
+        )
     for m in _JSON.finditer(masked):
         toks.append(_Tok("json", m.group(0), m.start(), m.end(), name=m.group(1)))
     return sorted(toks, key=lambda t: t.start)
@@ -203,7 +215,9 @@ def _report(text: str, masked: str, call: _Call) -> str:
     name = next((t.name for t in call.toks if t.name), None) or "send"
     args: list[tuple[str, str]] = []
     notes: list[str] = []
-    if first.kind == "json":
+    if first.bare:
+        why = "the opening `<` is missing"
+    elif first.kind == "json":
         args = list(_json_args(masked, first).items())
         why = "calls are tags, not JSON"
     elif first.kind in ("arg", "param"):
@@ -259,6 +273,23 @@ def _report(text: str, masked: str, call: _Call) -> str:
         'A call is <call name="…">, one child tag per argument, closed by </call>.'
     )
     return "\n".join(out)
+
+
+def repair(answer: str) -> str:
+    """The answer with every call opener that lost its leading `<` given it back —
+    `call name="X">…</call>` → `<call name="X">…</call>` — when a `</call>` closes it.
+    The owner's spell checker (2026-10-12): the `<` is not the model's — vLLM's
+    streaming reasoning parser drops the content that shares a delta with
+    `</think>` (measured on the 3090, 2 of 7 turns), so the call is restored and
+    runs, and the stored answer shows it whole. Outside every `<call` envelope
+    only; anything else stays the checker's to report."""
+    masked = _mask(answer)
+    at = [
+        m.start() for m in _BARE.finditer(masked) if masked.find(CLOSE, m.end()) != -1
+    ]
+    for i in reversed(at):
+        answer = answer[:i] + "<" + answer[i:]
+    return answer
 
 
 def check(answer: str, *, ran: int) -> list[str]:

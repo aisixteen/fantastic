@@ -244,11 +244,15 @@ public final class AIBackend: @unchecked Sendable {
             agentId.value, kernel,
             [
                 incomingRow(entry.text, id: inId, parent: inParent, notice: entry.notice),
-                .object([
-                    "role": .string("assistant"),
-                    "content": .string(cutMarker(entry.textSoFar, "stopped by \(who)", unsent)),
-                    "id": .integer(kernel.mintId()), "parent": .integer(inId),
-                ]),
+                {
+                    var row: OrderedDictionary<String, JSON> = [
+                        "role": .string("assistant"),
+                        "content": .string(cutMarker(entry.textSoFar, "stopped by \(who)", unsent)),
+                        "id": .integer(kernel.mintId()), "parent": .integer(inId),
+                    ]
+                    for (k, v) in thinkingFields(entry.textSoFar) { row[k] = v }
+                    return .object(row)
+                }(),
             ])
         // BOTH CORRELATION FIELDS, explicitly: the entry is already OUT of
         // `_current` by now (that is what stops `status` reporting a phantom
@@ -387,7 +391,7 @@ public final class AIBackend: @unchecked Sendable {
         "stop": .string("args: stream_id:str? (a part of the generation in flight). STOP this agent's in-flight generation — how a receiver of its streaming parts stops it: the provider stream closes, open parts abort, the turn keeps a `[stopped by <you>]` marker. Returns {stopped:bool}."),
         "rows": .string("args: after:int? (a row id — the page starts after it), limit:int?. A VIEW of this agent's conversation exactly as the agent HOLDS it in memory — its loaded head, in the order it lived it; no store read, no transform, so what a UI draws is what the agent has. Before the agent has loaded its head (a fresh boot, before its first turn) it holds nothing: {rows:[], loaded:false}. Returns {rows, next, total, loaded}."),
         "inquiry": .string("args: text:str (req), kind:str? (text|single|multi|confirm), options:list?, action:dict?, request_id:str?. Sends THIS agent an inquiry: accepted at once ({accepted, re, request_id}); the answer it later gives with `inquiry_answer` — or the news that it ended without one — reaches the asker as a message under the inquiry's pid. The same verb a human answers; a sender writes one call for either."),
-        "history": .string("args: fold:int? (a fold or clear id — list ITS members instead), limit:int? (default: as many as fit inline), after:int? (a row id — page forward from it). The conversation at DIGEST resolution — {id, parent, kind, role, head, bytes} per row, oldest first, paged. With `fold`, that fold's title + summary and its members (one level down; a member that is itself a fold opens the same way). A row's text is behind `recall` / `grep`. Returns {rows, next, total, fold?}."),
+        "history": .string("args: fold:int? (a fold or clear id — list ITS members instead), limit:int? (default: as many as fit inline), after:int? (a row id — page forward from it). The conversation at DIGEST resolution — {id, parent, kind, role, head, bytes, has_thinking?} per row, oldest first, paged. With `fold`, that fold's title + summary and its members (one level down; a member that is itself a fold opens the same way). A row's text is behind `recall` / `grep`. Returns {rows, next, total, fold?}."),
         "status": .string("args: client_id:str? — when provided, returns a privacy-filtered snapshot: full text only for this client's queue entries / current generation; other clients collapse to `others_pending` (an integer count). Without client_id the snapshot redacts text everywhere. Used by chat UIs to rebuild queued/in-flight state on page reload (and for headless polling). Returns {source, client_id, generating, current:{phase, send_id, started_at, elapsed, is_mine, text?, text_so_far?, last_tool?}|null, mine_pending:[{send_id,text,queued_at}], others_pending:int}."),
         "context_status": .string("No args. The context-budget posture + the last overflow projection + the model's\nderived reaction to it. Returns {context_window, output_reserve, budget, strategy,\nlast_projection:{fired, strategy?, kept_messages?, dropped_messages?, summarized?,\ntoo_small?}|null, last_reaction:{recalled, persisted, recall_count}|null}."),
         "recall": .string("args: query:str? (substring of a serialized turn, tool args and replies included), limit:int? (default 20, max 100), before:int? (store index — page backward). Pages turns back from the DURABLE store — the FULL conversation, so anything compaction dropped is one call away. Read-only. A page always fits INLINE; trimmed from the oldest end when it would not, with the index to continue from. Returns {messages:[{index,role,content}], total, truncated, note?}."),
@@ -926,6 +930,7 @@ public final class AIBackend: @unchecked Sendable {
         // every chat template renders. Mirrors Rust `run_generation` / Python
         // `_run`.
         var accumulated = ""
+        var genStarted = Date()
         var firstToken = true
         // STREAMING PARTS (owner, 2026-10-04): the same chunks, split into parts as
         // they are written — animation for the addressee, never action
@@ -941,6 +946,9 @@ public final class AIBackend: @unchecked Sendable {
             // A FRESH reading per pass: a provider that reports nothing this time
             // must not leave last pass's number standing.
             provider.usage?.lastPromptTokens = nil
+            provider.usage?.lastCompletionTokens = nil
+            // GENERATION TIME — from the request to the stream's end (the `done` detail).
+            genStarted = Date()
             for try await chunk in provider.chat(messages: model) {
                 // The KERNEL killed this task (`cancel <task_id>`). `onCancel`
                 // already closed the turn out for the client — status(done,
@@ -1058,7 +1066,11 @@ public final class AIBackend: @unchecked Sendable {
 
         await emitStatus(
             kernel: kernel, agentId: agentId, clientId: clientId, phase: "done",
-            detail: [("reason", .string("ok"))])
+            detail: [("reason", .string("ok"))]
+                + usageDetail(
+                    provider.usage, renderForModel(messages), accumulated,
+                    Date().timeIntervalSince(genStarted),
+                    AIContext.resolveContextWindow(agent, modelWindow: config.modelWindow)))
 
         // ROW IDS for this turn: the incoming row (a root, or a delivered reply
         // turn that names its parent on its tag) and the assistant row that
@@ -1087,13 +1099,17 @@ public final class AIBackend: @unchecked Sendable {
                     notice: st.currentSnapshot()?.notice ?? false),
                 // A pass the model stopped with a block open leaves the CUT
                 // MARKER instead, on top of the context (owner, 2026-10-04).
-                .object([
-                    "role": .string("assistant"),
-                    "content": .string(
-                        cutCalls.map { cutMarker(accumulated, "model stopped generating", $0) }
-                            ?? withoutThinking(accumulated)),
-                    "id": .integer(messageId), "parent": .integer(inId),
-                ]),
+                {
+                    var row: OrderedDictionary<String, JSON> = [
+                        "role": .string("assistant"),
+                        "content": .string(
+                            cutCalls.map { cutMarker(accumulated, "model stopped generating", $0) }
+                                ?? CallCheck.repair(withoutThinking(accumulated))),
+                        "id": .integer(messageId), "parent": .integer(inId),
+                    ]
+                    for (k, v) in thinkingFields(accumulated) { row[k] = v }
+                    return .object(row)
+                }(),
             ])
 
         // The RAW completion — markers in — goes to routing, which reads only the
@@ -1439,14 +1455,17 @@ public final class AIBackend: @unchecked Sendable {
         let scalars = content.unicodeScalars
         var head = String.UnicodeScalarView()
         for c in scalars.prefix(120) { head.append(c == "\n" ? " " : c) }
-        return .object([
+        var d: OrderedDictionary<String, JSON> = [
             "id": r["id"],
             "parent": r["parent"],
             "kind": pyTruthy(r["kind"]) ? r["kind"] : r["role"],
             "role": r["role"],
             "head": .string(String(head)),
             "bytes": .integer(Int64(scalars.count)),
-        ])
+        ]
+        // a row that kept its generation's thinking says so (python `has_thinking`)
+        if pyTruthy(r["thinking"]) { d["has_thinking"] = .bool(true) }
+        return .object(d)
     }
 
     /// args: fold:int? (a fold or clear id — list ITS members instead),

@@ -254,6 +254,8 @@ pub async fn run_generation(
     }
     // A provider failure ABORTS every open part, then propagates (python's
     // `except Exception: push(stop("error")); raise`).
+    // GENERATION TIME — from the request to the stream's end (the `done` detail).
+    let gen_started = std::time::Instant::now();
     let mut stream = match provider.chat(&model_view, None).await {
         Ok(stream) => stream,
         Err(e) => return Err(abort_parts(&parts, e).await),
@@ -361,6 +363,17 @@ pub async fn run_generation(
     emit_status(kernel, state, self_id, client_id, "done", {
         let mut m = Map::new();
         m.insert("reason".to_string(), json!("ok"));
+        let window = crate::context::resolve_context_window(
+            &crate::helpers::agent_meta(self_id, kernel),
+            cfg.model_window,
+        );
+        m.extend(usage_detail(
+            &provider.report(),
+            &model_view,
+            &last_text,
+            gen_started.elapsed().as_secs_f64(),
+            window,
+        ));
         m
     })
     .await;
@@ -388,15 +401,21 @@ pub async fn run_generation(
         // (gemma4:12b re-sent a 3,800-char turn-1 thought every later prompt,
         // 2026-08-02). A pass the model stopped with a block open leaves the CUT
         // MARKER instead, on top of the context (owner, 2026-10-04).
-        json!({
-            "role": "assistant",
-            "content": match &cut_calls {
-                Some(calls) => cut_marker(&last_text, "model stopped generating", calls),
-                None => without_thinking(&last_text),
-            },
-            "id": message_id,
-            "parent": in_id,
-        }),
+        {
+            let mut row = json!({
+                "role": "assistant",
+                "content": match &cut_calls {
+                    Some(calls) => cut_marker(&last_text, "model stopped generating", calls),
+                    None => crate::call_check::repair(&without_thinking(&last_text)),
+                },
+                "id": message_id,
+                "parent": in_id,
+            });
+            if let Some(m) = row.as_object_mut() {
+                m.extend(crate::think::thinking_fields(&last_text));
+            }
+            row
+        },
     ];
     save_history(self_id, kernel, &new_turns).await?;
     Ok(Generation::Answered {
@@ -409,6 +428,51 @@ pub async fn run_generation(
 
 /// Every open part ABORTS for its watchers (`"error"`), and the provider failure
 /// is handed back to propagate.
+/// The token figures a finished generation's `status` `done` carries (owner,
+/// 2026-10-12: a chat shows `42 tok/s · 3.1k / 64k ctx`): `prompt_tokens` and
+/// `completion_tokens` as the provider REPORTED them — estimated (this layer's
+/// own count) when it reported none, and then `prompt_tokens_estimated` /
+/// `completion_tokens_estimated` says so — `gen_seconds` (the wall time from the
+/// request to the stream's end, thinking included) and `context_window` (the
+/// window in force). Python `usage_detail`.
+#[must_use]
+pub fn usage_detail(
+    report: &crate::provider::ProviderReport,
+    model_view: &[Value],
+    text: &str,
+    gen_seconds: f64,
+    window: i64,
+) -> Map<String, Value> {
+    let mut m = Map::new();
+    match report.prompt_tokens.filter(|n| *n > 0) {
+        Some(n) => {
+            m.insert("prompt_tokens".into(), json!(n));
+        }
+        None => {
+            m.insert("prompt_tokens".into(), json!(estimate_tokens(model_view)));
+            m.insert("prompt_tokens_estimated".into(), json!(true));
+        }
+    }
+    match report.completion_tokens.filter(|n| *n > 0) {
+        Some(n) => {
+            m.insert("completion_tokens".into(), json!(n));
+        }
+        None => {
+            // python `max(1, len(text) // 4) if text else 0` — chars, not bytes
+            let chars = i64::try_from(text.chars().count()).unwrap_or(i64::MAX);
+            let est = if chars == 0 { 0 } else { (chars / 4).max(1) };
+            m.insert("completion_tokens".into(), json!(est));
+            m.insert("completion_tokens_estimated".into(), json!(true));
+        }
+    }
+    m.insert(
+        "gen_seconds".into(),
+        json!((gen_seconds * 1000.0).round() / 1000.0),
+    );
+    m.insert("context_window".into(), json!(window));
+    m
+}
+
 async fn abort_parts(parts: &tokio::sync::Mutex<PassParts>, e: ProviderError) -> GenFailure {
     let mut p = parts.lock().await;
     let evs = p.splitter.stop("error");
@@ -424,4 +488,34 @@ pub(crate) fn incoming_parent(text: &str) -> Option<i64> {
     let (_, after) = head.split_once('↑')?;
     let tok: String = after.chars().take_while(|c| !c.is_whitespace()).collect();
     tok.parse::<i64>().ok()
+}
+
+#[cfg(test)]
+mod usage_tests {
+    use super::usage_detail;
+    use crate::provider::ProviderReport;
+    use serde_json::json;
+
+    /// python `test_the_done_status_carries_the_token_usage`: reported figures as
+    /// reported; none reported → estimated and marked so.
+    #[test]
+    fn the_done_detail_carries_the_token_usage() {
+        let view = vec![json!({"role": "user", "content": "go"})];
+        let rep = ProviderReport {
+            prompt_tokens: Some(1234),
+            completion_tokens: Some(56),
+            stop_reason: None,
+        };
+        let d = usage_detail(&rep, &view, "answer", 1.23456, 32768);
+        assert_eq!(
+            serde_json::Value::Object(d),
+            json!({"prompt_tokens": 1234, "completion_tokens": 56,
+                   "gen_seconds": 1.235, "context_window": 32768})
+        );
+        let d = usage_detail(&ProviderReport::default(), &view, "abcdefgh", 0.5, 8192);
+        assert_eq!(d["prompt_tokens_estimated"], json!(true));
+        assert_eq!(d["completion_tokens"], json!(2));
+        assert_eq!(d["completion_tokens_estimated"], json!(true));
+        assert!(d["prompt_tokens"].as_i64().is_some_and(|n| n > 0));
+    }
 }

@@ -63,6 +63,7 @@ impl Provider for Reporting {
     fn report(&self) -> ProviderReport {
         ProviderReport {
             prompt_tokens: Some(self.0),
+            completion_tokens: None,
             stop_reason: None,
         }
     }

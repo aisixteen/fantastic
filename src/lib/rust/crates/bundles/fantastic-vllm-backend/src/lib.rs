@@ -276,6 +276,33 @@ pub fn conversation_key(messages: &[Value]) -> String {
         .to_string()
 }
 
+/// Tokens a chat template adds around one message (role markers, separators) — a
+/// generous bound (Qwen's ChatML adds ~5).
+pub const MESSAGE_OVERHEAD: i64 = 16;
+
+/// An UPPER bound on the prompt's tokens: every byte of each message's role and
+/// content (a byte-level BPE token is at least one byte) plus
+/// [`MESSAGE_OVERHEAD`] per message. Never below the server's count, so a turn it
+/// lets keep its `max_tokens` fits the window. python `prompt_bound`.
+#[must_use]
+pub fn prompt_bound(messages: &[Value]) -> i64 {
+    messages
+        .iter()
+        .map(|m| {
+            let role = m
+                .get("role")
+                .map(fantastic_bundle::py_str)
+                .unwrap_or_default();
+            let content = match m.get("content") {
+                Some(Value::String(s)) => s.len(),
+                Some(v) => serde_json::to_string(v).map_or(0, |s| s.len()),
+                None => "null".len(),
+            };
+            i64::try_from(role.len() + content).unwrap_or(i64::MAX) + MESSAGE_OVERHEAD
+        })
+        .sum()
+}
+
 /// Every system message merged into ONE at index 0 (Qwen's template refuses a
 /// system message anywhere else); the other turns keep their order.
 #[must_use]
@@ -341,11 +368,13 @@ struct VllmProvider {
     /// on the record, no header.
     key: Arc<dyn KeySource>,
     max_tokens: i64,
-    /// The record's `context_window`. A turn whose `max_tokens` reaches it asks
-    /// for "the rest of the window": vLLM counts the prompt AND the output against
-    /// one window, so a cap that is the whole window is refused (HTTP 400). Such a
-    /// turn sends NO max_tokens — vLLM then gives it what the prompt leaves (owner,
-    /// 2026-10-04: the e2e limit is the whole 260k). python `VllmProvider._window`.
+    /// The record's `context_window`. vLLM counts the prompt AND the output against
+    /// one window, so a cap the prompt leaves no room for is refused (HTTP 400). A
+    /// turn whose `max_tokens` could overrun it — [`prompt_bound`] plus `max_tokens`
+    /// past the window — sends NO max_tokens: vLLM then gives it exactly what the
+    /// prompt leaves (owner, 2026-10-04: the e2e limit is the whole 260k;
+    /// 2026-10-12: 64000 on a 65536 window with a 1537-token prompt was refused).
+    /// python `VllmProvider._window`.
     window: Option<i64>,
     kv_slots: i64,
     kv_overflow: String,
@@ -412,8 +441,12 @@ impl VllmProvider {
     ) -> Result<Value, ProviderError> {
         let mut body = Map::new();
         body.insert("model".into(), json!(self.model));
-        body.insert("messages".into(), json!(one_system_message(messages)));
-        if side_call || self.window.is_none_or(|w| call_max < w) {
+        let sent = one_system_message(messages);
+        let room = self
+            .window
+            .is_none_or(|w| call_max.saturating_add(prompt_bound(&sent)) <= w);
+        body.insert("messages".into(), json!(sent));
+        if side_call || room {
             body.insert("max_tokens".into(), json!(call_max));
         } // else: the rest of the window — see `window`
         body.insert("stream".into(), json!(true));
@@ -495,7 +528,9 @@ impl Provider for VllmProvider {
     }
 
     fn clear_prompt_tokens(&self) {
-        self.report.lock().expect("report poisoned").prompt_tokens = None;
+        let mut r = self.report.lock().expect("report poisoned");
+        r.prompt_tokens = None;
+        r.completion_tokens = None;
     }
 
     fn clear_stop_reason(&self) {

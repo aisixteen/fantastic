@@ -47,6 +47,8 @@ public enum CallCheck {
         var name: String? = nil
         var arg: String? = nil
         let closing: Bool
+        /// A call opener written without its leading `<`.
+        var bare = false
     }
 
     struct Call {
@@ -209,6 +211,62 @@ public enum CallCheck {
         return out
     }
 
+    /// python `_BARE.finditer`: `(?<!\S)call\s+name\s*=\s*["']?([A-Za-z_]\w*)["']?\s*>`
+    /// — a call opener whose leading `<` was dropped (`call name="await">`, measured
+    /// 2026-10-12 on qwen3.8-27b right after `</think>`). Not a tag to `tags`, so
+    /// without this only its `</call>` was seen and the report said to delete that.
+    static func bareCalls(_ s: S) -> [Tok] {
+        var out: [Tok] = []
+        let word = Array("call".unicodeScalars)
+        let key = Array("name".unicodeScalars)
+        var i = 0
+        while i + word.count <= s.count {
+            // only at the start or after whitespace — where the dropped `<` was
+            guard Array(s[i..<i + word.count]) == word, i == 0 || pyIsSpace(s[i - 1])
+            else { i += 1; continue }
+            var j = i + word.count
+            guard j < s.count, pyIsSpace(s[j]) else { i += 1; continue }
+            j = skipSpace(s, j)
+            guard j + key.count <= s.count, Array(s[j..<j + key.count]) == key else { i += 1; continue }
+            j = skipSpace(s, j + key.count)
+            guard j < s.count, s[j] == "=" else { i += 1; continue }
+            j = skipSpace(s, j + 1)
+            guard let id = ident(s, j) else { i += 1; continue }
+            if s[j] == "\"" || s[j] == "'" { j += 1 }
+            j += id.unicodeScalars.count
+            if j < s.count, s[j] == "\"" || s[j] == "'" { j += 1 }
+            j = skipSpace(s, j)
+            guard j < s.count, s[j] == ">" else { i += 1; continue }
+            out.append(
+                Tok(kind: .opener, text: str(s[i...j]), start: i, end: j + 1, name: id, closing: false, bare: true))
+            i = j + 1
+        }
+        return out
+    }
+
+    /// The answer with every call opener that lost its leading `<` given it back —
+    /// `call name="X">…</call>` → `<call name="X">…</call>` — when a `</call>` closes
+    /// it. The owner's spell checker (2026-10-12): the `<` is not the model's — vLLM's
+    /// streaming reasoning parser drops the content that shares a delta with
+    /// `</think>` (measured on the 3090, 2 of 7 turns), so the call is restored and
+    /// runs, and the stored answer shows it whole. python `repair`.
+    public static func repair(_ answer: String) -> String {
+        var text = Array(answer.unicodeScalars)
+        let masked = mask(text)
+        let close = Array(CLOSE_TEXT.unicodeScalars)
+        func closedAfter(_ from: Int) -> Bool {
+            var i = from
+            while i + close.count <= masked.count {
+                if Array(masked[i..<i + close.count]) == close { return true }
+                i += 1
+            }
+            return false
+        }
+        let at = bareCalls(masked).filter { closedAfter($0.end) }.map(\.start)
+        for i in at.reversed() { text.insert("<", at: i) }
+        return String(String.UnicodeScalarView(text))
+    }
+
     static func newlines(_ s: S, _ upto: Int) -> Int {
         s[0..<upto].reduce(0) { $0 + ($1 == "\n" ? 1 : 0) }
     }
@@ -352,6 +410,7 @@ public enum CallCheck {
         var notes: [String] = []
         let why: String
         switch first.kind {
+        case _ where first.bare: why = "the opening `<` is missing"
         case .json:
             args = jsonArgs(masked, first).map { ($0.key, $0.value) }
             why = "calls are tags, not JSON"
@@ -421,7 +480,7 @@ public enum CallCheck {
     public static func check(_ answer: String, ran: Int) -> [String] {
         let text = Array(answer.unicodeScalars)
         let masked = mask(text)
-        let toks = (tags(masked) + jsonCalls(masked)).sorted { $0.start < $1.start }
+        let toks = (tags(masked) + jsonCalls(masked) + bareCalls(masked)).sorted { $0.start < $1.start }
         let found = calls(masked, toks)
         var reports = found.prefix(MAX_REPORTS).map { report(text, masked, $0) }
         if found.count > MAX_REPORTS {

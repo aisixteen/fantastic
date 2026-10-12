@@ -63,9 +63,10 @@ class ResponsesMock(MockServer):
                 "content": []}
         msg = {**msg0, "status": "completed", "content": [part]}
         where = {"item_id": mid, "output_index": 0, "content_index": 0}
-        usage = {"input_tokens": 100, "input_tokens_details": {"cached_tokens": 0},
-                 "output_tokens": 10, "output_tokens_details": {"reasoning_tokens": 0},
-                 "total_tokens": 110}
+        p, c = self.usage(text)
+        usage = {"input_tokens": p, "input_tokens_details": {"cached_tokens": 0},
+                 "output_tokens": c, "output_tokens_details": {"reasoning_tokens": 0},
+                 "total_tokens": p + c}
         out = [ev("response.created", response=response("in_progress", [])),
                ev("response.in_progress", response=response("in_progress", [])),
                ev("response.output_item.added", output_index=0, item=msg0),

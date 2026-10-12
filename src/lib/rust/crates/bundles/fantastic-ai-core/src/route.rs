@@ -801,7 +801,7 @@ async fn route_reply_gated(
     let mut streams = call_streams;
     // ONLY THE ANSWER ACTS (owner, 2026-10-07): calls written inside thinking are
     // read as thinking — dispatch and the malformed-call report read the answer.
-    let answer = crate::think::without_thinking(&text);
+    let answer = crate::call_check::repair(&crate::think::without_thinking(&text));
     let parsed = if cut {
         Vec::new()
     } else {

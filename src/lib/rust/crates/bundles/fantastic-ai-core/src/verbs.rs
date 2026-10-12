@@ -46,7 +46,7 @@ pub fn verb_docs() -> Value {
         "stop": "args: stream_id:str? (a part of the generation in flight). STOP this agent's in-flight generation — how a receiver of its streaming parts stops it: the provider stream closes, open parts abort, the turn keeps a `[stopped by <you>]` marker. Returns {stopped:bool}.",
         "rows": "args: after:int? (a row id — the page starts after it), limit:int?. A VIEW of this agent's conversation exactly as the agent HOLDS it in memory — its loaded head, in the order it lived it; no store read, no transform, so what a UI draws is what the agent has. Before the agent has loaded its head (a fresh boot, before its first turn) it holds nothing: {rows:[], loaded:false}. Returns {rows, next, total, loaded}.",
         "inquiry": "args: text:str (req), kind:str? (text|single|multi|confirm), options:list?, action:dict?, request_id:str?. Sends THIS agent an inquiry: accepted at once ({accepted, re, request_id}); the answer it later gives with `inquiry_answer` — or the news that it ended without one — reaches the asker as a message under the inquiry's pid. The same verb a human answers; a sender writes one call for either.",
-        "history": "args: fold:int? (a fold or clear id — list ITS members instead), limit:int? (default: as many as fit inline), after:int? (a row id — page forward from it). The conversation at DIGEST resolution — {id, parent, kind, role, head, bytes} per row, oldest first, paged. With `fold`, that fold's title + summary and its members (one level down; a member that is itself a fold opens the same way). A row's text is behind `recall` / `grep`. Returns {rows, next, total, fold?}.",
+        "history": "args: fold:int? (a fold or clear id — list ITS members instead), limit:int? (default: as many as fit inline), after:int? (a row id — page forward from it). The conversation at DIGEST resolution — {id, parent, kind, role, head, bytes, has_thinking?} per row, oldest first, paged. With `fold`, that fold's title + summary and its members (one level down; a member that is itself a fold opens the same way). A row's text is behind `recall` / `grep`. Returns {rows, next, total, fold?}.",
         "status": "args: client_id:str? — when provided, returns a privacy-filtered snapshot: full text only for this client's queue entries / current generation; other clients collapse to `others_pending` (an integer count). Without client_id the snapshot redacts text everywhere. Used by chat UIs to rebuild queued/in-flight state on page reload (and for headless polling). Returns {source, client_id, generating, current:{phase, send_id, started_at, elapsed, is_mine, text?, text_so_far?, last_tool?}|null, mine_pending:[{send_id,text,queued_at}], others_pending:int}.",
         "context_status": "No args. The context-budget posture + the last overflow projection + the model's\nderived reaction to it. Returns {context_window, output_reserve, budget, strategy,\nlast_projection:{fired, strategy?, kept_messages?, dropped_messages?, summarized?,\ntoo_small?}|null, last_reaction:{recalled, persisted, recall_count}|null}.",
         "recall": "args: query:str? (substring of a serialized turn, tool args and replies included), limit:int? (default 20, max 100), before:int? (store index — page backward). Pages turns back from the DURABLE store — the FULL conversation, so anything compaction dropped is one call away. Read-only. A page always fits INLINE; trimmed from the oldest end when it would not, with the index to continue from. Returns {messages:[{index,role,content}], total, truncated, note?}.",
@@ -221,12 +221,18 @@ pub async fn on_cancel(
         kernel,
         &[
             crate::agent_loop::incoming_row(&entry.text, in_id, in_parent, entry.notice),
-            json!({
-                "role": "assistant",
-                "content": cut_marker(&entry.text_so_far, &format!("stopped by {who}"), &unsent),
-                "id": marker_id,
-                "parent": in_id,
-            }),
+            {
+                let mut row = json!({
+                    "role": "assistant",
+                    "content": cut_marker(&entry.text_so_far, &format!("stopped by {who}"), &unsent),
+                    "id": marker_id,
+                    "parent": in_id,
+                });
+                if let Some(m) = row.as_object_mut() {
+                    m.extend(crate::think::thinking_fields(&entry.text_so_far));
+                }
+                row
+            },
         ],
     )
     .await
@@ -403,7 +409,7 @@ fn digest(r: &Value) -> Value {
     // null one is `None` (4 bytes), a dict one is its repr.
     let content = r.get("content").cloned().unwrap_or_else(|| json!(""));
     let text = py_str(&content);
-    json!({
+    let mut d = json!({
         "id": r.get("id"),
         "parent": r.get("parent"),
         // `kind` FALLS BACK TO `role` on PYTHON TRUTHINESS (`kind or role`).
@@ -414,7 +420,12 @@ fn digest(r: &Value) -> Value {
         "role": r.get("role"),
         "head": text.chars().take(120).collect::<String>().replace('\n', " "),
         "bytes": text.chars().count(),
-    })
+    });
+    // a row that kept its generation's thinking says so (python `has_thinking`)
+    if r.get("thinking").is_some_and(py_truthy) {
+        d["has_thinking"] = json!(true);
+    }
+    d
 }
 
 /// `history` verb — the conversation at DIGEST resolution, or, with `fold`, that

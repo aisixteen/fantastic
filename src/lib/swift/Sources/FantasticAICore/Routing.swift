@@ -511,7 +511,7 @@ func routeReply(
     var matched: [ToolCall] = []
     // ONLY THE ANSWER ACTS (owner, 2026-10-07): calls written inside thinking are
     // read as thinking — dispatch and the malformed-call report read the answer.
-    let answer = withoutThinking(text)
+    let answer = CallCheck.repair(withoutThinking(text))
     for (call, body) in cut ? [] : terminatedCalls(answer) {
         var call = call
         if let i = streams.firstIndex(where: {

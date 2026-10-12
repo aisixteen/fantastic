@@ -19,6 +19,7 @@ struct ResponsesDecoded: Equatable {
     var error: String? = nil
     /// The terminal response's reported `usage.input_tokens` (`nil`: none).
     var promptTokens: Int? = nil
+    var completionTokens: Int? = nil
 }
 
 /// State carried ACROSS lines within one turn.
@@ -84,6 +85,8 @@ func decodeResponsesSSELine(_ line: String, state: inout ResponsesStreamState)
         // PROVIDER-REPORTED USAGE — what the window really held.
         let n = resp["usage"]["input_tokens"].asInt ?? 0
         out.promptTokens = n != 0 ? Int(n) : nil
+        let o = resp["usage"]["output_tokens"].asInt ?? 0
+        out.completionTokens = o != 0 ? Int(o) : nil
         out.done = true
 
     case "response.failed":

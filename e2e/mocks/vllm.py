@@ -15,8 +15,10 @@ the `vllm:cache_config_info` info-gauge) and the OpenAI `ChatCompletionChunk`
                    labels carry `kv_cache_max_concurrency`
   POST …/chat/completions  `data: {chat.completion.chunk}` frames — the first
                    delta `{"role":"assistant","content":""}`, the answer, a last
-                   chunk with `finish_reason:"stop"` and an empty delta — then
-                   `data: [DONE]`
+                   chunk with `finish_reason:"stop"` and an empty delta, with
+                   `stream_options.include_usage` a usage-only chunk (`choices: []`,
+                   `usage: {prompt_tokens, completion_tokens, total_tokens}`) —
+                   then `data: [DONE]`
   errors           {"error":{"message","type","param":null,"code":<status>}}
 """
 
@@ -76,5 +78,13 @@ class VllmMock(MockServer):
 
         out = [chunk({"role": "assistant", "content": ""})]
         out += [chunk({"content": p}) for p in halves(text)]
-        out += [chunk({}, "stop"), b"data: [DONE]\n\n"]
+        out.append(chunk({}, "stop"))
+        if (req.get("stream_options") or {}).get("include_usage"):
+            # the usage-only final chunk: EMPTY choices, then `usage`
+            p, c = self.usage(text)
+            out.append(sse(None, {"id": cid, "object": "chat.completion.chunk",
+                                  "created": created, "model": self.model, "choices": [],
+                                  "usage": {"prompt_tokens": p, "completion_tokens": c,
+                                            "total_tokens": p + c}}))
+        out.append(b"data: [DONE]\n\n")
         h.stream("text/event-stream; charset=utf-8", out)

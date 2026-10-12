@@ -11,7 +11,7 @@ from _testkit import memory_meta
 import asyncio
 
 from ai_core import core
-from ai_core.call_check import MAX_REPORTS, check
+from ai_core.call_check import MAX_REPORTS, check, repair
 
 E59 = """I'll look at the files agent.
 <tool_call>
@@ -128,6 +128,21 @@ def test_the_verbs_own_arguments_carry_into_the_form_to_write():
         '<call name="send">\n<target_id>ai_fold</target_id>\n'
         "<title>grep for checksum</title>\n<type>grep</type>\n"
         "<query>checksum</query>\n<ids><item>32</item></ids>\n</call>"
+    ), r
+
+
+def test_a_call_opener_that_lost_its_lt_is_named_as_that():
+    """Measured 2026-10-12 (the owner's canvas, qwen3.8-27b on the 3090): the answer
+    after `</think>` was exactly `call name="await"></call>` — the opening `<`
+    dropped. Only the `</call>` is a tag, so the report said "a close with no call
+    open — delete it"; it names the missing `<` and the call to write."""
+    (r,) = check('call name="await"></call>', ran=0)
+    assert r == (
+        "[malformed call — nothing ran] line 1, col 1:\n"
+        '  call name="await">‹/call›\n'
+        "  ^~~~~~~~~~~~~~~~~~ the opening `<` is missing\n"
+        "write it as:\n"
+        '<call name="await"></call>\n' + TAIL
     ), r
 
 
@@ -281,3 +296,54 @@ def test_a_multibyte_line_keeps_the_caret_under_the_token():
     (r,) = check("é→ <send><target_id>a</target_id></send>", ran=0)
     assert r.startswith("[malformed call — nothing ran] line 1, col 4:\n  é→ <send>"), r
     assert "\n     ^~~~~~ not a call tag" in r, r
+
+
+def test_repair_gives_a_dropped_lt_back_and_nothing_else():
+    """The spell checker (owner, 2026-10-12): vLLM's streaming reasoning parser drops
+    what shares a delta with `</think>` — the `<` of the call after it. A bare
+    `call name="X">` closed by `</call>` gets its `<` back; prose, a well-formed call
+    and an opener nothing closes stay as written."""
+    broken = (
+        'call name="send">\n<target_id>kernel</target_id>\n<type>docs</type>\n</call>'
+    )
+    assert repair(broken) == "<" + broken
+    assert check(repair(broken), ran=1) == []
+    for same in [
+        'I will call name="x"> later',
+        '<call name="done"></call>',
+        'call name="send"><target_id>a</target_id>',
+    ]:
+        assert repair(same) == same
+
+
+async def test_a_call_that_lost_its_lt_runs_and_is_stored_whole(
+    seeded_kernel, fake_providers
+):
+    """Measured shape (the owner's 3090): the answer after `</think>` is the call
+    without its `<`. It RUNS — its reply is the next turn, no malformed report — and
+    the stored answer is the repaired call."""
+    from ai_core import core as _core
+
+    fp = _Script(
+        [
+            '<think>x</think>call name="send"><target_id>kernel</target_id>'
+            "<type>reflect</type></call>",
+            '<call name="done"></call>',
+        ]
+    )
+    aid = "cc_lt"
+    _agent(seeded_kernel, aid)
+    fake_providers[aid] = fp
+    try:
+        await seeded_kernel.send(
+            [{"target": aid, "payload": {"type": "send", "text": "go"}}]
+        )
+        await _settle(fp, 2)
+        nxt = fp.incoming[1]
+        assert "[malformed call" not in nxt and "[reply to " in nxt, nxt
+        assert "kernel reflect" in nxt, nxt
+        rows = await _core._load_history(aid, seeded_kernel)
+        said = [r["content"] for r in rows if r.get("role") == "assistant"]
+        assert said[0].startswith('<call name="send">'), said
+    finally:
+        fake_providers.pop(aid, None)

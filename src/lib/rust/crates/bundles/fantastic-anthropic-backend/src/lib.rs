@@ -151,7 +151,9 @@ impl Provider for AnthropicProvider {
     }
 
     fn clear_prompt_tokens(&self) {
-        self.report.lock().expect("report poisoned").prompt_tokens = None;
+        let mut r = self.report.lock().expect("report poisoned");
+        r.prompt_tokens = None;
+        r.completion_tokens = None;
     }
 
     fn clear_stop_reason(&self) {
@@ -350,6 +352,16 @@ impl SseState {
             "message_delta" => {
                 if let Some(r) = evt["delta"].get("stop_reason").and_then(Value::as_str) {
                     self.report.lock().expect("report poisoned").stop_reason = Some(r.to_string());
+                }
+                if let Some(n) = evt["usage"]
+                    .get("output_tokens")
+                    .and_then(Value::as_i64)
+                    .filter(|n| *n > 0)
+                {
+                    self.report
+                        .lock()
+                        .expect("report poisoned")
+                        .completion_tokens = Some(n);
                 }
             }
             "message_stop" => self.stopped = true,

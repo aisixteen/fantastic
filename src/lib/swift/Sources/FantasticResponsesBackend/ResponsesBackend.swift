@@ -348,6 +348,7 @@ struct ResponsesProvider: AIProvider {
                             for try await line in bytesToLines(response.body) {
                                 let d = decodeResponsesSSELine(line, state: &state)
                                 if let n = d.promptTokens { usage?.lastPromptTokens = n }
+                                if let n = d.completionTokens { usage?.lastCompletionTokens = n }
                                 for token in d.tokens { continuation.yield(.token(token)) }
                                 if let err = d.error {
                                     continuation.finish(

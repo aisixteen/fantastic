@@ -54,6 +54,14 @@ func decodeOllamaLine(_ line: String, wrap: inout ThinkingWrap) -> OllamaDecoded
 /// ollama counted (`prompt_eval_count`) and why the stream ended (`done_reason`,
 /// `length` → `max_tokens`). `nil` fields: not on this line. Python
 /// `OllamaProvider.chat`.
+/// The OUTPUT tokens a line reports (`eval_count`, on the final line), or `nil`.
+func ollamaCompletionTokens(_ line: String) -> Int? {
+    guard let data = line.data(using: .utf8), let parsed = try? JSON.parse(data),
+        pyTruthy(parsed["eval_count"])
+    else { return nil }
+    return parsed["eval_count"].asInt.map(Int.init)
+}
+
 func ollamaReport(_ line: String) -> (promptTokens: Int?, stopReason: String?) {
     guard let data = line.data(using: .utf8), let parsed = try? JSON.parse(data) else {
         return (nil, nil)

@@ -12,23 +12,30 @@ context_window), so each probe path is exercised. Per provider:
   2. the key arrives on EVERY request, in the provider's header;
   3. an HTTP 500 → the turn fails loud, naming the status; the next turn works;
   4. a refused key (the mock's 401) → the turn fails loud;
-  5. the key never lands in the ledger.
+  5. the key never lands in the ledger;
+  6. the turn's `status` `done` carries the usage the mock reported —
+     `prompt_tokens`, `completion_tokens` (not estimated), `gen_seconds`,
+     `context_window` — watched over the ws face.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import time
+import asyncio
 import secrets
 import shutil
 import sys
 import tempfile
+import threading
 from pathlib import Path
 
 E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())
 sys.path.insert(0, str(E2E))
 
 from helpers.host.driver import HostKernel, ensure_runtime, runtime
+from helpers.host.ws import WSWatcher
 from helpers.verdict import verdict
 from mocks.anthropic import AnthropicMock
 from mocks.ollama import OllamaMock
@@ -53,6 +60,33 @@ PROVIDERS = {
     "anthropic": (AnthropicMock, "anthropic_backend.tools", {"model": "mock-anthropic"},
                   {"max_tokens": 262144, "context_window": 262144}),
 }
+
+
+def watch(port: int, aid: str) -> tuple[list, threading.Event]:
+    """Collect `aid`'s events over the ws face in a thread until `stop` is set."""
+    seen: list = []
+    stop = threading.Event()
+    ready = threading.Event()
+
+    async def run():
+        w = WSWatcher(port, aid)
+        await w.connect()
+        ready.set()
+        it = w.events().__aiter__()
+        try:
+            while not stop.is_set():
+                try:
+                    seen.append(await asyncio.wait_for(it.__anext__(), 0.2))
+                except asyncio.TimeoutError:
+                    continue
+                except StopAsyncIteration:
+                    return
+        finally:
+            await w.close()
+
+    threading.Thread(target=lambda: asyncio.run(run()), daemon=True).start()
+    ready.wait(10)
+    return seen, stop
 
 
 def main() -> int:
@@ -100,19 +134,39 @@ def main() -> int:
                             memory_store_id="memory",
                             can_call={"$self": "*", "memory": "*", "creds": ["get"],
                                       root: ["reflect"]},
-                            callable_by={"$self": "*", "$parent": "*", "rest": "*"},
+                            callable_by={"$self": "*", "$parent": "*", "rest": "*", "ws": "*"},
                             **fields)
             need(rec.get("id") == aid, f"{p}: create: {str(rec)[:200]}")
 
             # 1 · a turn answers the mock's text; the server-read fields land
             word = f"MOCK-{p.upper()}-{secrets.token_hex(3)}"
             m.reply(word)
-            out = hk.send(aid, {"type": "send", "text": "say the word"})
+            m.prompt_tokens, m.completion_tokens = 1234, 56
+            events, stop = watch(hk.port, aid)
+            # a browser-style client: its events reach the agent's watchers
+            out = hk.send(aid, {"type": "send", "text": "say the word", "client_id": "tab1"})
+            time.sleep(0.5)
+            stop.set()
             need(word in str(out.get("response")) and not out.get("error"),
                  f"{p}: the turn answers the mock's text: {str(out)[:200]}")
             got = record(aid)
             need(all(got.get(k) == v for k, v in read.items()),
                  f"{p}: read from the server: {({k: got.get(k) for k in read})}")
+            done = [
+                e.get("detail") or {}
+                for e in events
+                if e.get("type") == "status" and e.get("phase") == "done"
+            ]
+            d = next((x for x in done if x.get("reason") == "ok"), {})
+            need(
+                d.get("prompt_tokens") == 1234
+                and d.get("completion_tokens") == 56
+                and "prompt_tokens_estimated" not in d
+                and "completion_tokens_estimated" not in d
+                and isinstance(d.get("gen_seconds"), (int, float))
+                and d.get("context_window") == read.get("context_window", fields.get("context_window")),
+                f"{p}: the done status carries the reported usage: {d}",
+            )
             probes = sorted({r['path'] for r in m.requests if r['kind'] == 'probe'})
             print(f"     probes: {probes}  turns: {len(m.turns())}", flush=True)
 

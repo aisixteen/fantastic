@@ -182,6 +182,25 @@ async def test_a_cap_that_is_the_whole_window_sends_no_max_tokens():
     assert sink[0]["max_tokens"] == 8000  # a cap below the window is sent as set
 
 
+async def test_a_cap_the_prompt_leaves_no_room_for_sends_no_max_tokens():
+    """Measured 2026-10-12 (the owner's 3090): max_tokens 64000 on a 65536 window
+    with a 1537-token prompt — vLLM refused "a total of at least 65537 tokens"
+    (HTTP 400). When the prompt's token BOUND (`prompt_bound`: its bytes + a
+    per-message allowance) plus the cap overruns the window, the turn asks for the
+    rest of it; a prompt that leaves the room keeps the cap."""
+    sink: list = []
+    p = _provider(
+        _transport(_sse(_delta(finish="stop")), sink), max_tokens=64000, window=65536
+    )
+    big = [{"role": "user", "content": "x" * 6000}]
+    await _drain(p, big)
+    assert "max_tokens" not in sink[0]
+    assert vp.prompt_bound(big) == len("user") + 6000 + vp.MESSAGE_OVERHEAD
+    sink.clear()
+    await _drain(p, [{"role": "user", "content": "hi"}])
+    assert sink[0]["max_tokens"] == 64000  # 64000 + the bound fits 65536
+
+
 async def test_every_system_message_becomes_one_at_index_0():
     msgs = [
         {"role": "system", "content": "A"},

@@ -90,6 +90,8 @@ class ResponsesProvider:
     #: The prompt size the endpoint REPORTED for the last pass (None: not reported).
     #: ai_core calibrates its own token estimate with it.
     last_prompt_tokens: int | None = None
+    #: The output tokens the server reported for the last pass (None = not reported).
+    last_completion_tokens: int | None = None
     #: `completed`, `max_tokens` (an `incomplete` cut at `max_output_tokens`), or the
     #: endpoint's own incomplete reason. ai_core reads `max_tokens` (a fold refuses a
     #: cut summary).
@@ -270,6 +272,9 @@ class ResponsesProvider:
                                 u = final.get("usage") or {}
                                 self.last_prompt_tokens = (
                                     int(u.get("input_tokens") or 0) or None
+                                )
+                                self.last_completion_tokens = (
+                                    int(u.get("output_tokens") or 0) or None
                                 )
                             elif etype == "response.failed":
                                 err = (evt.get("response") or {}).get("error")

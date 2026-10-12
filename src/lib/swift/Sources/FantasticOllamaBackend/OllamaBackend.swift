@@ -339,6 +339,7 @@ struct OllamaProvider: AIProvider {
                         // with it.
                         let (reported, stop) = ollamaReport(line)
                         if let reported { usage?.lastPromptTokens = reported }
+                        if let out = ollamaCompletionTokens(line) { usage?.lastCompletionTokens = out }
                         if let stop { usage?.lastStopReason = stop }
                         let decoded = decodeOllamaLine(line, wrap: &wrap)
                         for token in decoded.tokens { continuation.yield(.token(token)) }

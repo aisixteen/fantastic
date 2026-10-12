@@ -55,10 +55,11 @@ class OllamaMock(MockServer):
         out = [line({"model": self.model, "created_at": _now(),
                      "message": {"role": "assistant", "content": p}, "done": False})
                for p in halves(text)]
+        p, c = self.usage(text)
         out.append(line({"model": self.model, "created_at": _now(),
                          "message": {"role": "assistant", "content": ""},
                          "done": True, "done_reason": "stop",
                          "total_duration": 1000000, "load_duration": 1000,
-                         "prompt_eval_count": 100, "prompt_eval_duration": 100000,
-                         "eval_count": 10, "eval_duration": 100000}))
+                         "prompt_eval_count": p, "prompt_eval_duration": 100000,
+                         "eval_count": c, "eval_duration": 100000}))
         h.stream("application/x-ndjson", out)

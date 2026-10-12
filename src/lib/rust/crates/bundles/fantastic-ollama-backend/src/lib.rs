@@ -125,7 +125,9 @@ impl Provider for OllamaProvider {
     }
 
     fn clear_prompt_tokens(&self) {
-        self.report.lock().expect("report poisoned").prompt_tokens = None;
+        let mut r = self.report.lock().expect("report poisoned");
+        r.prompt_tokens = None;
+        r.completion_tokens = None;
     }
 
     fn clear_stop_reason(&self) {
@@ -303,6 +305,13 @@ fn note_usage(chunk: &Value, report: &ReportCell) {
         .and_then(Value::as_i64)
     {
         r.prompt_tokens = Some(n);
+    }
+    if let Some(n) = chunk
+        .get("eval_count")
+        .filter(|v| fantastic_bundle::py_truthy(v))
+        .and_then(Value::as_i64)
+    {
+        r.completion_tokens = Some(n);
     }
     if let Some(dr) = chunk
         .get("done_reason")

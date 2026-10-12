@@ -26,12 +26,50 @@
 // what the model streamed; only the DURABLE assistant turn is stripped (see
 // `AIBackend.runStream`).
 
+import FantasticJSON
+import FantasticKernel
 import Foundation
 
 /// Opening marker a provider wraps its reasoning channel in.
 public let THINK_OPEN = "<think>"
 /// Closing marker a provider wraps its reasoning channel in.
 public let THINK_CLOSE = "</think>"
+
+/// Characters of a generation's thinking kept on its assistant row (`thinking`);
+/// what is past them is counted in `thinking_cut`. Python `THINKING_CAP`.
+public let THINKING_CAP = 32000
+
+/// A generation's THINKING, for its assistant row (owner, 2026-10-12: a chat shows
+/// it collapsed under the answer, after a reload too): every `<think>…</think>` span
+/// of `text` (an unclosed one runs to the end), joined by a blank line —
+/// `thinking`, the first `THINKING_CAP` characters (code points), plus
+/// `thinking_cut` when more were dropped; empty when there was none. NEVER the
+/// model's view (it reads role + content only) and never dispatched. Python
+/// `thinking_fields`.
+func thinkingFields(_ text: String) -> [(String, JSON)] {
+    var spans: [String] = []
+    var rest = Substring(text)
+    while let a = rest.range(of: THINK_OPEN) {
+        let after = rest[a.upperBound...]
+        if let b = after.range(of: THINK_CLOSE) {
+            spans.append(pyStrip(String(after[..<b.lowerBound])))
+            rest = after[b.upperBound...]
+        } else {
+            spans.append(pyStrip(String(after)))
+            break
+        }
+    }
+    let thought = spans.filter { !$0.isEmpty }.joined(separator: "\n\n")
+    if thought.isEmpty { return [] }
+    let scalars = thought.unicodeScalars
+    var out: [(String, JSON)] = [
+        ("thinking", .string(String(String.UnicodeScalarView(scalars.prefix(THINKING_CAP)))))
+    ]
+    if scalars.count > THINKING_CAP {
+        out.append(("thinking_cut", .integer(Int64(scalars.count - THINKING_CAP))))
+    }
+    return out
+}
 
 /// The ANSWER: every `<think>…</think>` span dropped whole — what dispatch reads
 /// and what goes into durable history. An UNTERMINATED span runs to the end: the
