@@ -48,7 +48,10 @@ os.environ["FANTASTIC_HOME"] = tempfile.mkdtemp(prefix="fc-e2e-home-")
 
 REPO = E2E.parent
 SRC = REPO / "src"
-BIN = SRC / "target" / "debug" / "fantastic"
+# e2e builds go to their OWN target dir: the dev binary (`src/target/debug/fantastic`,
+# often linked as `~/.local/bin/fantastic`) keeps the features its owner built it with
+E2E_TARGET = SRC / "target" / "e2e"
+BIN = E2E_TARGET / "debug" / "fantastic"
 MAC_CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 # a terminal's text, from its BUFFER (the WebGL renderer leaves no text in the DOM)
 XTERM_TEXT = "((()=>{const t=document.querySelector('.agent-frame .frame-body')?.xterm; if(!t) return ''; const b=t.buffer.active; let s=''; for(let i=0;i<b.length;i++){const l=b.getLine(i); if(l) s+=l.translateToString(true)+'\\n';} return s;})())"
@@ -91,7 +94,7 @@ def free_port() -> int:
 
 # ── build ─────────────────────────────────────────────────────────────────────
 def build_bin(into: Path) -> Path:
-    r = subprocess.run(["cargo", "build", "-p", "fantastic-tui"], cwd=SRC, capture_output=True, text=True)
+    r = subprocess.run(["cargo", "build", "-p", "fantastic-tui"], cwd=SRC, capture_output=True, text=True, env={**os.environ, "CARGO_TARGET_DIR": str(E2E_TARGET)})
     if r.returncode != 0:
         raise SystemExit(f"cargo build fantastic-tui failed:\n{r.stderr[-2000:]}")
     b = into / "fantastic"

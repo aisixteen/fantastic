@@ -1,5 +1,5 @@
 # THE SET-UP PAGE, END TO END, LIVE — a scripted keyboard writes an AI agent
-# through the terminal's set-up page for the CONFIGURED backend (owner,
+# through the terminal's set-up wizard for the CONFIGURED backend (owner,
 # 2026-10-04: the AI backend is configurable; vLLM, globally, until he
 # redecides), stores its key there, and the agent answers. Every value the
 # record gets is the operator's, from the environment: the endpoint and model
@@ -31,10 +31,13 @@ runs:
       exit_code: 0
       lock_released: true
 
-  # ── the page: its lines are id, handler, the REQUIRED fields (endpoint,
-  # kv_overflow), may call, WRITE, then the optional ones in schema order (model,
-  # max_tokens, context_window, kv_slots… — the server fills what is left out,
-  # lib 2026-10-07); xhigh + its budget, the key → WRITE ──
+  # ── the wizard (owner 2026-10-12: the canvas's two pages, in the terminal):
+  # page 1 → vllm (the 4th provider; nothing saved) → page 2, its lines: name
+  # (`vllm-1`), URL, model, key (← → paste a new key: its value, then where keys
+  # are kept — PLAIN in this throwaway home, never the real keychain), kv
+  # overflow, advanced (enter opens: max_tokens, context_window, kv_slots,
+  # metrics_url, temperature, top_p, top_k, reasoning_effort, thinking budget, …)
+  # → advanced closed again, CREATE & OPEN CHAT ──
   - name: write
     timeout: 300
     script: |
@@ -44,22 +47,60 @@ runs:
       key enter
       wait 800
       shot page
+      key down
+      key down
+      key down
       key enter
-      type docreader
+      wait 400
+      key down
+      key enter
+      key backspace
+      key backspace
+      key backspace
+      key backspace
+      key backspace
+      key backspace
+      key backspace
+      key backspace
+      key backspace
+      key backspace
+      key backspace
+      key backspace
+      key backspace
+      key backspace
+      key backspace
+      key backspace
+      key backspace
+      key backspace
+      key backspace
+      key backspace
+      key backspace
+      key backspace
+      key backspace
+      key backspace
+      key backspace
+      key backspace
+      key backspace
+      key backspace
+      key backspace
+      key backspace
+      type {vllm_endpoint}
+      key enter
+      key down
+      key enter
+      type {vllm_model}
       key enter
       key down
       key right
       key down
       key enter
-      type {vllm_endpoint}
+      type {vllm_key}
       key enter
+      key down
+      key right
       key down
       {vllm_kv_overflow_keys}
       key down
-      key down
-      key down
-      key enter
-      type {vllm_model}
       key enter
       key down
       key enter
@@ -90,49 +131,6 @@ runs:
       key enter
       wait 200
       shot filled
-      key down
-      key down
-      key down
-      key down
-      key down
-      key down
-      key down
-      key down
-      key down
-      key down
-      key down
-      key down
-      key down
-      key down
-      key down
-      key right
-      key right
-      wait 200
-      key enter
-      wait 800
-      shot mode
-      type k
-      wait 500
-      type {vllm_key}
-      key enter
-      wait 800
-      shot keyed
-      key up
-      key up
-      key up
-      key up
-      key up
-      key up
-      key up
-      key up
-      key up
-      key up
-      key up
-      key up
-      key up
-      key up
-      key up
-      key up
       key up
       key up
       key up
@@ -143,23 +141,26 @@ runs:
       key up
       key up
       key enter
-      wait 3000
+      key down
+      key enter
+      wait 4000
       shot written
       key ctrl-c
       wait 150
       key ctrl-c
       exit 8000
     frames:
-      page: {contains: ["SET UP AN AI AGENT"], lacks: ["no ai backend is linked"]}
-      filled: {contains: ["docreader", "‹ vllm_backend.tools ›", "262144", "xhigh", "65536"]}
-      # PLAIN, in the run's throwaway home — a run must never write the real keychain
-      mode: {contains: ["keys kept ‹ plain ›"], lacks: ["‹ secure ›"]}
-      keyed: {contains: ["key stored as `vllm/"], lacks: ["the keychain ("]}
-      written: {contains: ["✓ written to  .fantastic/agents/user/agents/docreader/agent.yaml"]}
+      page: {contains: ["NEW AI AGENT", "1 / 2"], lacks: ["vllm    not in this build"]}
+      # the key masked, PLAIN in the run's throwaway home — never the real keychain
+      filled: {contains: ["vllm-1", "262144", "xhigh", "65536", "‹ a 0600 text file (plain) ›", "‹ paste a new key ›"]}
+      # made, its chat open: the agent is the selected one
+      written: {contains: [" · vllm-1 · "], lacks: ["✕"]}
     after_exit:
       exit_code: 0
       lock_released: true
-      files_exist: [.fantastic/agents/user/agents/docreader/agent.yaml]
+      files_exist:
+        - .fantastic/agents/user/agents/vllm-1/agent.yaml
+        - home/agents/ai_agent/saved/vllm-1.yaml
       # the key the page stored IS the configured one (compared, never printed)
       key_stored_is: VLLM_API_KEY
 
@@ -168,7 +169,7 @@ runs:
     timeout: 600
     script: |
       wait 2500
-      type /docreader
+      type /vllm-1
       key enter
       wait 300
       key enter
@@ -183,7 +184,7 @@ runs:
       key ctrl-c
       exit 15000
     frames:
-      answer: {contains: ["DELTA", "docreader:"]}
+      answer: {contains: ["DELTA", "vllm-1:"]}
     after_exit:
       exit_code: 0
       lock_released: true
@@ -194,7 +195,7 @@ runs:
   - name: recall
     script: |
       wait 2500
-      type /docreader
+      type /vllm-1
       key enter
       wait 300
       key enter

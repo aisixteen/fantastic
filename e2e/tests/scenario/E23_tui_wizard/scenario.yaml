@@ -1,0 +1,158 @@
+# THE TERMINAL'S AI SET-UP WIZARD (owner 2026-10-12: "make the ai agent wizard
+# simple as the ai agent html" — the canvas's two pages, in the terminal), end to
+# end, FREE: a scripted keyboard in a PTY, the vLLM backend linked, no model
+# called (an agent is made, not asked). What is measured is the binary and what it
+# leaves on disk — the run's throwaway home (`home/`, the rig's FANTASTIC_HOME)
+# and the project's `.fantastic`.
+#
+# 1 · create — page 1: nothing saved, the four providers (only vllm linked);
+#     vllm → page 2: name `vllm-1`, the URL filled; a model, a pasted key kept
+#     plain (masked on screen), kv_overflow → CREATE & OPEN CHAT: the set-up saved
+#     (and made the default, the first), the key stored, the agent written and
+#     its chat opened.
+# 2 · from saved — a new launch: page 1 lists `vllm-1 ★ default`; enter makes an
+#     agent from it at once: `vllm-1-2` (the name is taken by the first agent).
+# 3 · edit + default — `e` opens it (EDIT SAVED, the stored key offered for its
+#     host), a new model SAVED back; `d` stops it being the default.
+
+id: tui_wizard
+title: fantastic — the terminal's two-page AI set-up wizard makes an agent, saves its set-up and key, makes more from it
+runtimes: [tui]
+costs: free
+features: [vllm]
+
+screen: {rows: 50, cols: 160}
+
+runs:
+  - name: create
+    script: |
+      wait 2500
+      type G
+      wait 200
+      key enter
+      wait 900
+      shot page1
+      key down
+      key down
+      key down
+      key enter
+      wait 400
+      shot page2
+      key down
+      key down
+      key enter
+      type mock-x
+      key enter
+      key down
+      key right
+      wait 200
+      key down
+      key enter
+      type sk-e2e-1
+      key enter
+      key down
+      key right
+      key down
+      key right
+      wait 200
+      shot filled
+      key down
+      key down
+      key enter
+      wait 3000
+      shot created
+      key ctrl-c
+      wait 150
+      key ctrl-c
+      exit 8000
+    frames:
+      page1:
+        contains: ["NEW AI AGENT", "1 / 2", "Nothing saved yet — pick a provider below.", "responses", "vllm", "not in this build"]
+      page2: {contains: ["NEW AI AGENT · vllm", "2 / 2", "vllm-1", "http://127.0.0.1:8000/v1", "CREATE & OPEN CHAT"]}
+      # the key MASKED, never shown; where keys go asked once (plain in this throwaway home)
+      filled:
+        contains: ["mock-x", "‹ paste a new key ›", "••••••••", "‹ a 0600 text file (plain) ›", "evict"]
+        lacks: ["sk-e2e-1"]
+      # its chat is open: the agent is the selected one (the status line names it)
+      created: {contains: [" · vllm-1 · ", "this agent has not loaded its history yet"], lacks: ["✕"]}
+    after_exit:
+      exit_code: 0
+      lock_released: true
+      files_exist:
+        - .fantastic/agents/user/agents/vllm-1/agent.yaml
+        - home/agents/ai_agent/saved/vllm-1.yaml
+        - home/agents/ai_agent/saved/.preferred
+        - home/agents/ai_agent/keys/credentials.yaml
+      file_contains:
+        home/agents/ai_agent/saved/vllm-1.yaml: ["vllm_backend.tools", "mock-x", "evict"]
+        home/agents/ai_agent/saved/.preferred: ["vllm-1"]
+        home/agents/ai_agent/keys/credentials.yaml: ["sk-e2e-1"]
+
+  - name: from_saved
+    script: |
+      wait 2500
+      type G
+      wait 200
+      key enter
+      wait 900
+      shot listed
+      key enter
+      wait 3000
+      shot made
+      key ctrl-c
+      wait 150
+      key ctrl-c
+      exit 8000
+    frames:
+      listed: {contains: ["SAVED", "vllm-1", "★ default", "vllm · mock-x · http://127.0.0.1:8000/v1"]}
+      made: {contains: [" · vllm-1-2 · ", "this agent has not loaded its history yet"], lacks: ["✕"]}
+    after_exit:
+      exit_code: 0
+      lock_released: true
+      files_exist: [.fantastic/agents/user/agents/vllm-1-2/agent.yaml]
+
+  - name: edit_and_default
+    script: |
+      wait 2500
+      type G
+      wait 200
+      key enter
+      wait 900
+      type e
+      wait 400
+      shot editing
+      key down
+      key down
+      key enter
+      key backspace
+      key backspace
+      key backspace
+      key backspace
+      key backspace
+      key backspace
+      type mock-y
+      key enter
+      key down
+      key down
+      key down
+      key down
+      key enter
+      wait 1500
+      shot saved
+      type d
+      wait 1200
+      shot nodefault
+      key ctrl-c
+      wait 150
+      key ctrl-c
+      exit 8000
+    frames:
+      # the stored key for the URL's host is offered, not asked again
+      editing: {contains: ["EDIT SAVED · vllm-1", "mock-x", "‹ saved key · vllm/127.0.0.1:8000 ›", " SAVE "]}
+      saved: {contains: ["✓ saved `vllm-1`", "NEW AI AGENT", "mock-y"]}
+      nodefault: {contains: ["no default AI set-up"], lacks: ["★ default"]}
+    after_exit:
+      exit_code: 0
+      lock_released: true
+      file_contains:
+        home/agents/ai_agent/saved/vllm-1.yaml: ["mock-y"]

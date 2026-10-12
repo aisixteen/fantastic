@@ -206,7 +206,12 @@ export const viewAgent: Handler = (id, payload, kernel): Json | Promise<Json> =>
         if (f[k] !== undefined && typeof f[k] !== "string") return { error: `view: update — ${k} must be a string`, reason: "bad_arg", arg: "bytes", hint: "send the markup as <bytes>…</bytes> — verbatim, nothing escaped" };
       }
       if (Object.keys(f).length > 0) kernel.updateMeta(target, f as Payload);
-      if ("html" in f) kernel.emit(target, { type: "reload_html" });
+      // the cell's NEW BODY shows at once (owner 2026-10-13): its own inbox is told
+      // directly — the view just rewrote the cell's record, its own child's; an
+      // `emit` would be gated as the view's call ONTO the cell and dropped unless
+      // the cell happened to grant `emit` (a panel whose can_call/callable_by an
+      // AI set kept its old body until the page was reloaded)
+      if ("html" in f) kernel.deliverInbox(target, { type: "reload_html" });
       const cell = kernel.get(target);
       const html = cell?.meta["html"];
       const grants = typeof html === "string" ? grantHint(target, html, cell?.meta["can_call"]) : {};

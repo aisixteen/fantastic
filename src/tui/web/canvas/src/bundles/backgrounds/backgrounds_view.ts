@@ -126,8 +126,14 @@ export const backgroundsView: ViewBundle = {
       r.append(x);
       return r;
     };
+    // ONE DRAW AT A TIME: both lists are read first, then the panel is drawn in
+    // one go — a redraw overtaken by a newer one (an update event while it
+    // waited) draws nothing, or two halves of the panel stacked (two Themes)
+    let drawing = 0;
     const render = async (): Promise<void> => {
-      const l = await call({ type: "list" });
+      const mine = ++drawing;
+      const [l, th] = await Promise.all([call({ type: "list" }), call({ type: "themes" })]);
+      if (mine !== drawing) return;
       const cur = (l["current"] ?? null) as Dict | null;
       const rot = (l["rotate"] ?? {}) as Dict;
       const stock = (l["stock"] ?? []) as Item[];
@@ -168,7 +174,6 @@ export const backgroundsView: ViewBundle = {
         `it adds them here with <code>add</code> on this agent (<code>${ctx.selfId}</code>), and they stay.`;
       root.append(hint);
       // ── THEMES ──
-      const th = await call({ type: "themes" });
       const themes = (th["themes"] ?? []) as ThemeRow[];
       const hiddenT = (th["hidden"] ?? []) as string[];
       const curT = String(th["current"] ?? "auto");

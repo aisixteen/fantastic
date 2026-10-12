@@ -34,10 +34,10 @@ from canvas import MAC_CHROME, Page, free_port  # noqa: E402
 from helpers.verdict import verdict  # noqa: E402
 
 SRC = REPO / "src"
-BIN = SRC / "target" / "debug" / "fantastic"
 #: The backends the CLI links, and the cargo feature that links each.
 sys.path.insert(0, str(HERE.parent.parent / "_lib"))
-from canvas_live import FEATURES, private_dirs, seed_key, saved_dir  # noqa: E402
+from canvas_live import E2E_TARGET, FEATURES, private_dirs, seed_key, saved_dir  # noqa: E402
+BIN = E2E_TARGET / "debug" / "fantastic"
 FIRST_TURN = "Hey! Look around and see whats on a canvas and a backend"
 
 LIMITS = (yaml.safe_load((HERE / "test.yaml").read_text()) or {}).get("limits") or {}
@@ -46,7 +46,8 @@ QUIET_S = float(LIMITS["quiet_seconds"])
 
 
 def build(feature: str, into: Path) -> Path:
-    r = subprocess.run(["cargo", "build", "-p", "fantastic-tui", "--features", feature], cwd=SRC, capture_output=True, text=True)
+    r = subprocess.run(["cargo", "build", "-p", "fantastic-tui", "--features", feature], cwd=SRC, capture_output=True, text=True,
+                       env={**os.environ, "CARGO_TARGET_DIR": str(E2E_TARGET)})
     if r.returncode != 0:
         raise SystemExit(f"cargo build --features {feature} failed:\n{r.stderr[-2000:]}")
     b = into / "fantastic"

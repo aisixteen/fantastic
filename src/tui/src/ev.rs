@@ -108,8 +108,13 @@ pub enum Got {
     KeyMode(Result<(Option<String>, String), String>),
     /// The user's saved set-ups, or why they cannot be read.
     Saved(Result<crate::kern::saved::Shelf, String>),
-    /// What the set-up page's last write or key store came to.
+    /// What the set-up page's last act came to (a saved edit, a default).
     Setup(Result<String, String>),
+    /// The stored keys' refs and hosts (never values), for the set-up page.
+    Keys(Result<Vec<(String, String)>, String>),
+    /// The set-up page made an AI agent: its id (selected, its chat opened) —
+    /// or why not.
+    Created(Result<String, String>),
     /// A REFUSAL IS DATA. The kernel's `{"error":…,"reason":…}` is not an
     /// exception to swallow — it is the answer, and it renders where the request
     /// was made so the human sees which grant is missing.
@@ -192,31 +197,35 @@ pub enum Cmd {
     CloseTerminal,
     /// The backends this build links, for the set-up page.
     Backends,
-    /// Write an AI agent's record from the set-up page (`kern/setup`).
-    WriteAi(crate::kern::setup::Record),
     /// Where provider keys are kept (`kern/keys`).
     KeyMode,
-    /// Choose (or change) where provider keys are kept: "plain" | "secure".
-    SetKeyMode {
-        mode: String,
-    },
+    /// The stored keys' refs (`kern/keys`), for the set-up page's key choice.
+    Keys,
     /// The user's saved set-ups (`kern/saved`).
     Saved,
-    /// Save the set-up page's backend, model and endpoint as saved set-up `name`.
-    Save {
-        name: String,
-        record: Value,
-    },
     /// Make saved set-up `name` the default for new AI agents; `None` clears it.
     Prefer {
         name: Option<String>,
     },
-    /// Store a provider key in the keychain (`kern/keys`).
-    StoreKey {
+    /// THE WIZARD (`kern/wizard`): a NEW provider's details → its key, saved
+    /// set-up `name`, and an AI agent from it.
+    WizardCreate {
+        name: String,
         module: String,
-        /// The endpoint the key is for: a key is bound to its host.
-        endpoint: String,
-        secret: String,
+        /// field texts by name (`endpoint`, `model`, the backend's own)
+        texts: serde_json::Map<String, Value>,
+        key: Option<crate::kern::wizard::KeyIn>,
+    },
+    /// An AI agent from saved set-up `name`.
+    WizardFromSaved {
+        name: String,
+    },
+    /// Saved set-up `name`'s fields rewritten (and a key, when pasted).
+    WizardSaveEdit {
+        name: String,
+        module: String,
+        texts: serde_json::Map<String, Value>,
+        key: Option<crate::kern::wizard::KeyIn>,
     },
     /// SHELL-LOCAL, never on the wire: select `agent` and put the cursor on
     /// `row`. The Activity page's Enter. The app handles it before the runner
@@ -244,9 +253,8 @@ impl Cmd {
             Cmd::Watch(_) | Cmd::Unwatch(_) | Cmd::Jump { .. } | Cmd::Quit => What::Ps,
             Cmd::Stream { .. } => What::Send,
             Cmd::OpenTerminal { .. } | Cmd::CloseTerminal => What::RosterBoot,
-            Cmd::Backends | Cmd::WriteAi(_) | Cmd::StoreKey { .. } => What::RosterBoot,
-            Cmd::Saved | Cmd::Save { .. } | Cmd::Prefer { .. } => What::RosterBoot,
-            Cmd::KeyMode | Cmd::SetKeyMode { .. } => What::RosterBoot,
+            Cmd::Backends | Cmd::Keys | Cmd::KeyMode | Cmd::Saved | Cmd::Prefer { .. } => What::RosterBoot,
+            Cmd::WizardCreate { .. } | Cmd::WizardFromSaved { .. } | Cmd::WizardSaveEdit { .. } => What::RosterBoot,
         }
     }
 

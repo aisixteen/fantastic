@@ -255,22 +255,9 @@ impl Bundle for SetupBundle {
     }
 }
 
-/// The page's field TEXTS (`fields: {name: text}`), typed by `handler`'s
-/// record schema — the one typing path for a write and a saved set-up save.
+/// The page's field TEXTS (`fields: {name: text}`), typed by `handler`'s schema.
 fn typed_fields(host: &Host, handler: &str, p: &Value) -> Result<serde_json::Map<String, Value>, String> {
-    let backend = crate::kern::setup::backends(host)
-        .into_iter()
-        .find(|b| b.module == handler)
-        .ok_or_else(|| format!("this build links no backend {handler:?}"))?;
-    let texts = p.get("fields").and_then(Value::as_object).cloned().unwrap_or_default();
-    let mut fields = serde_json::Map::new();
-    for f in &backend.fields {
-        let t = texts.get(&f.name).and_then(Value::as_str).unwrap_or("");
-        if let Some(v) = crate::kern::setup::coerce(f, t)? {
-            fields.insert(f.name.clone(), v);
-        }
-    }
-    Ok(fields)
+    crate::kern::setup::typed(host, handler, &p.get("fields").and_then(Value::as_object).cloned().unwrap_or_default())
 }
 
 /// An AI agent's handler and record fields — refused for any other agent.

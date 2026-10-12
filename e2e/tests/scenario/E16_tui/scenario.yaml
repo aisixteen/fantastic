@@ -28,7 +28,7 @@ runs:
     frames:
       # no docked title: the live shell gives every row to the work
       # the `mcp` leg is made at boot (owner 2026-10-08: it keeps the project's
-      # .mcp.json right before any client connects), with its bridge
+      # .fantastic/.mcp.json right before any client connects), with its bridge
       live: {contains: [fs_loader, exec, files, user, store, memory, mcp], contains_block_title: false}
     after_exit:
       exit_code: 0
@@ -44,8 +44,9 @@ runs:
         - .fantastic/agents/user/agents/mcp/agent.yaml
         - .fantastic/agents/user/agents/mcp_config/agent.yaml
         - .fantastic/prompt.md
-        - .mcp.json
-      files_absent: [.fantastic/messages.yaml, .fantastic/ledger.json]
+        - .fantastic/.mcp.json
+      # nothing outside `.fantastic` (owner 2026-10-12: no pollution)
+      files_absent: [.fantastic/messages.yaml, .fantastic/ledger.json, .mcp.json, .claude]
 
   # ── 2 · the same directory: no intro, straight to the tree, log grows ──────
   #       (under `user`: bundles_watch, exec, files, fs_loader … — sorted)
@@ -168,8 +169,8 @@ runs:
       lock_released: true
 
   # ── 6 · the set-up page: four fields, no defaults, nothing written unasked.
-  #       This build links no ai backend, so the page says so and a write is
-  #       refused in place, naming what is missing.
+  #       This build links no ai backend, so every provider is "not in this
+  #       build" and picking one is refused in place, naming it.
   - name: setup
     script: |
       wait 2500
@@ -178,9 +179,6 @@ runs:
       key enter
       wait 800
       shot page
-      key down
-      key down
-      key down
       key enter
       wait 300
       shot refused
@@ -189,10 +187,12 @@ runs:
       key ctrl-c
       exit 8000
     frames:
+      # the wizard's page 1 (owner 2026-10-12: the canvas's wizard): nothing
+      # saved, the four providers — none linked into this build
       page:
-        contains: ["+ add an ai agent", "SET UP AN AI AGENT", "no ai backend is linked into this build",
-                   "— none linked —", "id              — not set —", "WRITE THE RECORD"]
-      refused: {contains: ["✕ missing: id, handler"]}
+        contains: ["+ add an ai agent", "NEW AI AGENT", "1 / 2", "Nothing saved yet — pick a provider below.",
+                   "responses", "anthropic", "ollama", "vllm", "not in this build"]
+      refused: {contains: ["✕ this build links no responses"]}
     after_exit:
       exit_code: 0
       lock_released: true

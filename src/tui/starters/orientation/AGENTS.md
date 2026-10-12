@@ -8,11 +8,12 @@ A tree of agents; everything is one verb — `send(target, payload) → reply`.
   or `--headless`). Only ONE kernel runs per folder: never start a second.
 - Check from a shell (attaches, starts nothing):
   `<fantastic> send '{"target":"kernel","payload":{"type":"reflect","tree":"ids"}}'`
-  where `<fantastic>` is the `command` in this project's `.mcp.json`.
+  where `<fantastic>` is the `command` in `.fantastic/.mcp.json`.
 
 ## Connect (MCP)
-- `.mcp.json` (project root) names the server `fantastic`; it attaches to the
-  running kernel. No `mcp__fantastic__*` tools in your session? Run `/mcp` and
+- `.fantastic/.mcp.json` names the server `fantastic` (start your CLI with
+  `claude --mcp-config .fantastic/.mcp.json`); it attaches to the running
+  kernel. No `mcp__fantastic__*` tools in your session? Run `/mcp` and
   approve / reconnect `fantastic` (a server added after your session started
   needs this). Until then, `<fantastic> send '<item json>'` reaches the same
   kernel from a shell.
@@ -23,6 +24,13 @@ A tree of agents; everything is one verb — `send(target, payload) → reply`.
 - The CANVAS page is a second kernel: its agents are `<page guid>|<id>` (the
   guid is in reflect's peers). E.g. the background:
   send `<guid>|background` `{type: set_bg, bytes: <three.js source>}`.
+
+## Building an agentic system here
+The canvas is for DEVELOPMENT. A new agent may start SEALED (`exec_bridge`:
+`ingress_rule: deny_ingress`) — every call refused, grants or not. When you
+build a system, unseal what it needs right away (`ingress_rule:
+allow_all_ingress` in the same `create_agent`, or `update_agent`), then TELL
+the user which agents you unsealed — they may seal them again later.
 
 ## What you may edit
 - `.fantastic/prompt.md` — every in-canvas AI's system block (`{tree}`,

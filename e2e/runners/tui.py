@@ -50,7 +50,10 @@ os.environ["FANTASTIC_HOME"] = tempfile.mkdtemp(prefix="fc-e2e-home-")
 
 REPO = E2E.parent
 TUI = REPO / "src" / "tui"
-TARGET = REPO / "src" / "target" / "debug"
+# e2e builds go to their OWN target dir: the dev binary (`src/target/debug/fantastic`,
+# often linked as `~/.local/bin/fantastic`) keeps the features its owner built it with
+E2E_TARGET = REPO / "src" / "target" / "e2e"
+TARGET = E2E_TARGET / "debug"
 
 
 def _scenario_path(scenario_id: str) -> Path:
@@ -63,7 +66,7 @@ def _scenario_path(scenario_id: str) -> Path:
 
 def build(what: list[str]) -> None:
     r = subprocess.run(["cargo", "build", "--manifest-path", str(TUI / "Cargo.toml"), *what],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, env={**os.environ, "CARGO_TARGET_DIR": str(E2E_TARGET)})
     if r.returncode != 0:
         print(r.stderr[-2000:])
         raise SystemExit(f"cargo build {' '.join(what)} failed")
@@ -267,12 +270,18 @@ def after(run: dict, cwd: Path, out: str, state: dict) -> list[str]:
             bad += [f"missing {p}" for p in want if not (cwd / p).exists()]
         elif key == "files_absent":
             bad += [f"unexpected {p}" for p in want if (cwd / p).exists()]
+        elif key == "file_contains":
+            # {path: [text, …]} — each file holds each text (a saved set-up's model)
+            for p, words in want.items():
+                f = cwd / p
+                body = f.read_text() if f.is_file() else ""
+                bad += [f"{p} lacks {w!r}" for w in words if w not in body] if body else [f"missing {p}"]
         elif key == "key_stored_is":
             # every api_key in the run's credential file equals $want's value
             # (length + equality only — a key is never printed)
             import yaml
 
-            f = cwd / "home" / "credentials.yaml"
+            f = cwd / "home" / "agents" / "ai_agent" / "keys" / "credentials.yaml"
             refs = ((yaml.safe_load(f.read_text()) or {}).get("refs") or {}) if f.is_file() else {}
             got = [(e.get("fields") or {}).get("api_key", "") for e in refs.values()]
             want_v = os.environ.get(want, "")

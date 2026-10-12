@@ -23,6 +23,7 @@ pub mod ai;
 pub mod files;
 pub mod generic;
 pub mod setup;
+pub mod wizard;
 pub mod terminal;
 
 use serde_json::Value;

@@ -79,6 +79,23 @@ impl Runner {
         let _ = self.tx.send(Ev::Note(s)).await;
     }
 
+    /// The wizard made an AI agent (or why not): its rows watched, the tree and
+    /// the shelf fresh, then `Created` — the app selects it, its chat opened.
+    async fn made(&self, r: Result<String, String>) {
+        let r = match r {
+            Ok(id) => watch_rows(&self.host, &id).await.map(|()| id),
+            Err(e) => Err(e),
+        };
+        if r.is_ok() {
+            if let Some(t) = self.host.tree() {
+                self.got(Got::Tree(t)).await;
+            }
+        }
+        self.got(Got::Saved(crate::kern::saved::shelf(&self.host).await)).await;
+        self.got(Got::Keys(crate::kern::keys::stored())).await;
+        self.got(Got::Created(r)).await;
+    }
+
     async fn one(&self, cmd: Cmd) {
         match &cmd {
             Cmd::Quit | Cmd::Jump { .. } => {}
@@ -109,25 +126,8 @@ impl Runner {
                 let r = crate::kern::keys::mode().map(|(m, w)| (m.map(|m| m.name().to_string()), w));
                 self.got(Got::KeyMode(r)).await
             }
-            Cmd::SetKeyMode { mode } => {
-                let r = match fantastic_user_home_store::secrets::Mode::parse(mode) {
-                    Some(m) => crate::kern::keys::set_mode(&self.host, m).await.map(|w| format!("keys are kept {w}")),
-                    None => Err(format!("no key mode {mode:?} — plain or secure")),
-                };
-                self.got(Got::Setup(r)).await;
-                let r = crate::kern::keys::mode().map(|(m, w)| (m.map(|m| m.name().to_string()), w));
-                self.got(Got::KeyMode(r)).await;
-            }
+            Cmd::Keys => self.got(Got::Keys(crate::kern::keys::stored())).await,
             Cmd::Saved => self.got(Got::Saved(crate::kern::saved::shelf(&self.host).await)).await,
-            Cmd::Save { name, record } => {
-                let r = crate::kern::saved::save(&self.host, name, record.clone()).await.map(|path| {
-                    format!(
-                        "saved as `{name}` at {path} — LOAD SAVED brings it back any time; d on it makes it your default for new AI agents"
-                    )
-                });
-                self.got(Got::Setup(r)).await;
-                self.got(Got::Saved(crate::kern::saved::shelf(&self.host).await)).await;
-            }
             Cmd::Prefer { name } => {
                 let r = crate::kern::saved::prefer(&self.host, name.as_deref()).await.map(|p| match p {
                     Some(n) => format!("`{n}` is your default for new AI agents"),
@@ -136,25 +136,21 @@ impl Runner {
                 self.got(Got::Setup(r)).await;
                 self.got(Got::Saved(crate::kern::saved::shelf(&self.host).await)).await;
             }
-            Cmd::WriteAi(rec) => {
-                let mut r = crate::kern::setup::write(&self.host, rec).await;
-                if r.is_ok() {
-                    if let Err(why) = watch_rows(&self.host, rec.id.trim()).await {
-                        r = Err(why);
-                    }
-                }
-                if r.is_ok() {
-                    if let Some(t) = self.host.tree() {
-                        self.got(Got::Tree(t)).await;
-                    }
-                }
-                self.got(Got::Setup(r.map(|p| format!("written to  {p}")))).await;
+            Cmd::WizardCreate { name, module, texts, key } => {
+                let r = crate::kern::wizard::create(&self.host, name, module, texts, key.as_ref()).await;
+                self.made(r).await;
             }
-            Cmd::StoreKey { module, endpoint, secret } => {
-                let r = crate::kern::keys::store(&self.host, module, endpoint, secret)
+            Cmd::WizardFromSaved { name } => {
+                let r = crate::kern::wizard::from_saved(&self.host, name).await;
+                self.made(r).await;
+            }
+            Cmd::WizardSaveEdit { name, module, texts, key } => {
+                let r = crate::kern::wizard::save_edit(&self.host, name, module, texts, key.as_ref())
                     .await
-                    .map(|r| format!("key stored as `{r}` — live on the next call, no restart"));
+                    .map(|()| format!("saved `{name}` — agents made from it from now on use these values"));
                 self.got(Got::Setup(r)).await;
+                self.got(Got::Saved(crate::kern::saved::shelf(&self.host).await)).await;
+                self.got(Got::Keys(crate::kern::keys::stored())).await;
             }
             Cmd::CloseTerminal => {
                 self.unwatch(&crate::kern::terminal::TERM_ID.into()).await;

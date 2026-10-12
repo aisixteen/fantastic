@@ -255,6 +255,30 @@ impl App {
         self.dirty = true;
     }
 
+    /// Select agent `agent` (a filter that hides it is dropped, a collapsed
+    /// ancestor opened) with its composer focused — a just-made AI agent.
+    fn goto(&mut self, agent: AgentId) {
+        if !self.trows.iter().any(|r| r.id == agent) {
+            self.filter = None;
+            self.filtering = false;
+            if let Some(t) = &self.tree {
+                for id in ancestors(t, &agent) {
+                    self.collapsed.remove(&id);
+                }
+            }
+            self.reflow();
+        }
+        let Some(i) = self.trows.iter().position(|r| r.id == agent) else {
+            self.note(format!("{agent} is not in the tree yet."));
+            return;
+        };
+        self.sel = i;
+        let kind = self.trows[i].kind;
+        self.select(agent, kind);
+        self.focus = Focus::Composer;
+        self.dirty = true;
+    }
+
     /// Open the screen on a recipe. `web`: the `web` host. `ai`: the first ai
     /// agent with the composer focused — type and it works; with none, the
     /// set-up page (the recipe has no model to add one with yet).
@@ -779,6 +803,26 @@ impl App {
                     if let Some(s) = p.as_any_mut().downcast_mut::<SetupPanel>() {
                         s.set_shelf(t);
                     }
+                }
+                self.dirty = true;
+            }
+            Got::Keys(k) => {
+                if let Some(p) = self.panels.get_mut(SETUP_ID) {
+                    if let Some(s) = p.as_any_mut().downcast_mut::<SetupPanel>() {
+                        s.set_keys(k);
+                    }
+                }
+                self.dirty = true;
+            }
+            Got::Created(r) => {
+                if let Some(p) = self.panels.get_mut(SETUP_ID) {
+                    if let Some(s) = p.as_any_mut().downcast_mut::<SetupPanel>() {
+                        s.set_created(&r);
+                    }
+                }
+                // the new agent selected, its chat open, the composer ready
+                if let Ok(id) = r {
+                    self.goto(id.as_str().into());
                 }
                 self.dirty = true;
             }

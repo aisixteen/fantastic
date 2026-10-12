@@ -71,7 +71,20 @@ export async function createGlHost(opts: {
   camera.lookAt(0, LOOK_Y, 0);
 
   const views = new Map<string, ViewEntry>();
-  const frameCbs = new Map<string, Set<(t: number) => void>>();
+  // A view's per-frame callbacks. `hz` absent: every frame (a GL cell animating
+  // freely — the frame is drawn each time); `hz` given: a CLOCK ticked at most
+  // that often (a background drifting slowly) — DRAWN ONLY WHEN DUE (owner
+  // 2026-10-12: the empty canvas held the GPU at 20→70% repainting near-identical
+  // frames), and on any frame drawn anyway (a pan, a zoom) so it stays current.
+  interface FrameCb { fn: (t: number) => void; hz?: number; last: number }
+  const frameCbs = new Map<string, Set<FrameCb>>();
+  // something changed that the next frame must show: the camera, the size, a view
+  let dirty = true;
+  // the frame loop: 0 when stopped (nothing to draw); `wake` starts it again
+  let raf = 0;
+  function wake(): void {
+    if (raf === 0) raf = requestAnimationFrame(frame);
+  }
 
   // a minimal transport shim for GL sources (call/emit/subscribeState + a
   // local bus). The old `t.on`/`t.watch` global-dispatch isn't used by the
@@ -132,7 +145,7 @@ export async function createGlHost(opts: {
     const group = new THREE.Group();
     scene.add(group);
     const cleanup: Array<() => void> = [];
-    const cbs = new Set<(t: number) => void>();
+    const cbs = new Set<FrameCb>();
     frameCbs.set(agentId, cbs);
     try {
       // eslint-disable-next-line @typescript-eslint/no-implied-eval
@@ -140,7 +153,7 @@ export async function createGlHost(opts: {
         three: unknown,
         sceneGroup: unknown,
         t: unknown,
-        onFrame: (cb: (time: number) => void) => void,
+        onFrame: (cb: (time: number) => void, opt?: { hz?: number }) => void,
         cleanupArr: Array<() => void>,
       ) => void;
       const t = {
@@ -157,9 +170,14 @@ export async function createGlHost(opts: {
           return off;
         },
       };
-      fn(THREE, group, t, (cb) => cbs.add(cb), cleanup);
+      fn(THREE, group, t, (cb, opt) => {
+        const hz = typeof opt?.hz === "number" && opt.hz > 0 ? opt.hz : undefined;
+        cbs.add({ fn: cb, hz, last: -Infinity });
+      }, cleanup);
       const entry: ViewEntry = { group, cleanup };
       views.set(agentId, entry);
+      dirty = true;
+      wake();
       return entry;
     } catch (e) {
       console.error("[gl] mount failed for", agentId, ":", e);
@@ -184,9 +202,13 @@ export async function createGlHost(opts: {
     disposeObject3D(entry.group);
     views.delete(agentId);
     frameCbs.delete(agentId);
+    dirty = true;
+    wake(); // one more frame clears what it drew
   }
 
   function applyCamera(): void {
+    dirty = true;
+    wake();
     const fovRad = (camera.fov * Math.PI) / 180;
     const worldH = 2 * BASE_Z * Math.tan(fovRad / 2);
     const W = window.innerWidth;
@@ -204,24 +226,37 @@ export async function createGlHost(opts: {
   applyCamera();
 
   const start = performance.now();
-  let raf = 0;
   const drawn: Array<() => void> = []; // waiting for the next drawn frame
   function frame(): void {
     const time = (performance.now() - start) / 1000;
+    // draw THIS frame? when something changed, a free-running view, a clock due,
+    // or a caller waiting for a drawn frame
+    let draw = dirty || drawn.length > 0;
     for (const cbs of frameCbs.values()) {
-      for (const cb of cbs) {
-        try {
-          cb(time);
-        } catch (e) {
-          console.error("[gl] onFrame raised:", e);
+      for (const cb of cbs) if (cb.hz === undefined || time - cb.last >= 1 / cb.hz - 1e-3) draw = true;
+    }
+    if (draw) {
+      for (const cbs of frameCbs.values()) {
+        for (const cb of cbs) {
+          cb.last = time;
+          try {
+            cb.fn(time);
+          } catch (e) {
+            console.error("[gl] onFrame raised:", e);
+          }
         }
       }
+      renderer.render(scene, camera);
+      dirty = false;
+      for (const r of drawn.splice(0)) r();
     }
-    renderer.render(scene, camera);
-    for (const r of drawn.splice(0)) r();
-    raf = requestAnimationFrame(frame);
+    // NOTHING TO DRAW (no GL view — the background set to none): the last frame
+    // just cleared the scene, and the loop STOPS — no GPU work for an empty
+    // canvas; a view installed again starts it (`wake`). A frame not drawn costs
+    // nothing: no draw, so the browser keeps the last one on screen.
+    raf = views.size === 0 && !dirty ? 0 : requestAnimationFrame(frame);
   }
-  raf = requestAnimationFrame(frame);
+  wake(); // one loop only: applyCamera() above may have started it
 
   const api: GlHost = {
     hasView: (agentId) => views.has(agentId),
@@ -251,11 +286,15 @@ export async function createGlHost(opts: {
       }
     },
     applyCamera,
-    rendered: () => new Promise<void>((res) => drawn.push(res)),
+    rendered: () =>
+      new Promise<void>((res) => {
+        drawn.push(res);
+        wake();
+      }),
     resize() {
       camera.aspect = window.innerWidth / window.innerHeight;
       renderer.setSize(window.innerWidth, window.innerHeight, false);
-      applyCamera();
+      applyCamera(); // marks the frame dirty
     },
     dispose() {
       cancelAnimationFrame(raf);

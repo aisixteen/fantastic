@@ -1,0 +1,9 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint. Scripted: no model.
+id: update_reloads
+group: canvas
+title: "the view's update with a new body re-renders the cell at once — no page reload — for a trusted and a sandboxed panel, its can_call set in the same update"
+runner: probe.py
+costs: free
+limits:
+  seconds: 150
+env: {}

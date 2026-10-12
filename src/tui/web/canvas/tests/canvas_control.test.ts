@@ -130,3 +130,21 @@ test("an html body must BE html: a placeholder or a truncated one is refused, sa
   assert.match(String(sh["error"]), /is empty/);
   assert.equal(k.get("d")?.meta["html"], "<p>ok</p>", "a refused body changes nothing");
 });
+
+test("update with a new body tells the cell to re-render at once — whatever the cell grants", async () => {
+  const k = page();
+  // a panel whose grants an AI set: $self only — no `emit` for the view
+  await call(k, { type: "place", kind: "html", id: "p", x: 0, y: 0, bytes: "<p>v1</p>", can_call: { $self: "*" }, callable_by: { $self: "*" } });
+  const got: Payload[] = [];
+  const off = k.onInbox("p", (m) => got.push(m as Payload));
+  const r = await call(k, { type: "update", id: "p", bytes: "<p>v2</p>", fields: { can_call: { $self: "*", static_files: ["list"] } } });
+  off();
+  assert.equal(r["updated"], "p");
+  assert.equal(k.get("p")?.meta["html"], "<p>v2</p>");
+  assert.deepEqual(got.map((m) => m["type"]), ["reload_html"], "the cell's view hears it and renders the new body");
+  // grants alone: no reload
+  const off2 = k.onInbox("p", (m) => got.push(m as Payload));
+  await call(k, { type: "update", id: "p", fields: { display_name: "P" } });
+  off2();
+  assert.equal(got.length, 1);
+});

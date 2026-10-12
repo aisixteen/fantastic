@@ -161,6 +161,23 @@ fn err_of(r: &fantastic_kernel::Outcome) -> Option<String> {
 
 
 
+/// Field TEXTS (`{name: text}`) typed by `handler`'s record schema — the one
+/// typing path for a write and a saved set-up (an empty text is left out).
+pub fn typed(host: &Host, handler: &str, texts: &Map<String, Value>) -> Result<Map<String, Value>, String> {
+    let backend = backends(host)
+        .into_iter()
+        .find(|b| b.module == handler)
+        .ok_or_else(|| format!("this build links no backend {handler:?}"))?;
+    let mut fields = Map::new();
+    for f in &backend.fields {
+        let t = texts.get(&f.name).and_then(Value::as_str).unwrap_or("");
+        if let Some(v) = coerce(f, t)? {
+            fields.insert(f.name.clone(), v);
+        }
+    }
+    Ok(fields)
+}
+
 /// Create, grant and boot. Returns where the record was written.
 pub async fn write(host: &Host, rec: &Record) -> Result<String, String> {
     let missing = rec.missing();

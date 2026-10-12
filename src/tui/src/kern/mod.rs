@@ -19,6 +19,7 @@ pub mod runner;
 pub mod setup;
 pub mod setup_agent;
 pub mod saved;
+pub mod wizard;
 pub mod term_watch;
 pub mod user_store;
 pub mod terminal;

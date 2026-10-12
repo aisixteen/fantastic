@@ -41,7 +41,10 @@ from canvas import MAC_CHROME, Page, attach, free_port  # noqa: E402
 from helpers.verdict import verdict  # noqa: E402
 
 SRC = REPO / "src"
-BIN = SRC / "target" / "debug" / "fantastic"
+# e2e builds go to their OWN target dir: the dev binary (`src/target/debug/fantastic`,
+# often linked as `~/.local/bin/fantastic`) keeps the features its owner built it with
+E2E_TARGET = SRC / "target" / "e2e"
+BIN = E2E_TARGET / "debug" / "fantastic"
 RUNS = SRC / "tui" / "e2e" / "runs"
 #: The backends the CLI links, and the cargo feature that links each.
 FEATURES = {
@@ -175,7 +178,7 @@ class Rig:
     def build(self, *features: str) -> None:
         feats = sorted({*features, *([FEATURES[self.plug.handler_module]] if self.plug else [])})
         args = ["cargo", "build", "-p", "fantastic-tui", *(["--features", ",".join(feats)] if feats else [])]
-        r = subprocess.run(args, cwd=SRC, capture_output=True, text=True)
+        r = subprocess.run(args, cwd=SRC, capture_output=True, text=True, env={**os.environ, "CARGO_TARGET_DIR": str(E2E_TARGET)})
         if r.returncode != 0:
             raise SystemExit(f"{' '.join(args)} failed:\n{r.stderr[-2000:]}")
         self.binary = self.art / "fantastic"

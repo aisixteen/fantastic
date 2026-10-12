@@ -11,5 +11,5 @@ store) is E20's. No real key or endpoint is ever used.
 | run | proves |
 |---|---|
 | `init` | a store from the blueprint |
-| `write` | `+ add an ai agent` → the id, the handler and vLLM's required fields (endpoint, model, max_tokens, kv_slots, kv_overflow) typed in → WRITE THE RECORD → `✓ written to …/docreader/agent.yaml`, the agent in the tree, the record on disk |
-| `answer` | next start: `docreader` rehydrates; the human writes `hello`; the stub's scripted reply `stub-reply-42` is on screen; the stub saw ≥ 1 request |
+| `write` | `+ add an ai agent` → the wizard: page 1 → vllm → page 2: the URL, the model, a pasted key (kept plain in the throwaway home), kv_overflow, the advanced budget fields → CREATE & OPEN CHAT → `vllm-1` made and selected, its saved set-up and the agent's record on disk, the stored key the configured one |
+| `answer` | next start: `vllm-1` rehydrates; the human writes `hello`; the stub's scripted reply `stub-reply-42` is on screen; the stub saw ≥ 1 request |

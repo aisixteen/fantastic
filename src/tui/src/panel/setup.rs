@@ -1,31 +1,20 @@
-//! SET UP AN AI AGENT — one page, not a wizard.
+//! SET UP AN AI AGENT — the canvas's two-page wizard, in the terminal (owner
+//! 2026-10-12: "make the ai agent wizard simple as the ai agent html").
 //!
-//! One page shows the whole record at once: the id, the handler (a backend this
-//! build links, from the kernel's own catalog), then THAT BACKEND'S OWN FIELDS
-//! as its record schema declares them (`kern/setup::Backend`) — its REQUIRED
-//! ones first (empty; nothing is guessed; a missing one is called out in
-//! place), who it may call, WRITE THE RECORD, and below it the backend's
-//! OPTIONAL fields, each starting at the backend's own default. `enter` on WRITE THE RECORD writes it
-//! (`kern/setup`), and the answer, a path or the kernel's refusal, shows right
-//! there.
+//! 1. a provider: a SAVED one (enter makes an agent from it at once; `e` edits
+//!    it; `d` makes it the default, or stops it being one) or a NEW one of the
+//!    four (responses, anthropic, ollama, vllm — dimmed when this build does not
+//!    link it);
+//! 2. its details: a name (auto), the URL (filled), the model, the key (the
+//!    stored one for the URL's host, a new one pasted, or none — and where keys
+//!    are kept, the first time), the backend's REQUIRED fields, its optional
+//!    ones under "advanced" — then CREATE & OPEN CHAT: saved under the name
+//!    (the first becomes the default) and an AI agent made from it, its chat
+//!    opened. Editing a saved one, the button SAVES it back.
 //!
-//! Keys: ↑ ↓ pick a line · `enter` edit that field (enter again keeps it, esc
-//! drops the edit) · ← → pick the handler · `k` put the backend's key in the
-//! keychain, when it takes one · `esc` leave.
-//!
-//! KEYS (`kern/keys`): the `keys kept` line chooses where provider keys go —
-//! PLAIN (one 0600 file per key; a yellow warning says anything running as the
-//! user can read them) or SECURE (one sealed file, its master key the only
-//! keychain item). ← → picks, enter applies (moving any stored keys); there is
-//! no default, and `k` is refused until one is chosen. The line says where.
-//!
-//! SAVED SET-UPS (`kern/saved`): the backend and its set fields can be SAVED
-//! under a name the human types (never derived) in the user's home config dir,
-//! and LOADED back into the page later, in any project. `d` on a saved set-up
-//! makes it the default for new AI agents — nothing is a default until then.
-//!
-//! Handing the page to a coder in the in-app terminal is future work: a coder
-//! cannot attach to the running kernel yet.
+//! Keys: ↑ ↓ pick · enter edit / go · ← → choose (key, where keys go, an enum
+//! field) · esc back (page 2) or leave (page 1). The pure part is `wizard.rs`;
+//! the acts are `kern/wizard`'s, one call each.
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::Rect;
@@ -36,247 +25,328 @@ use ratatui::Frame;
 use serde_json::Value;
 
 use crate::ev::Cmd;
-use crate::kern::setup::{Backend, Field, Record};
+use crate::kern::saved::{Saved, Shelf};
+use crate::kern::setup::Backend;
+use crate::panel::wizard::{own, provider_of, Details, KeySource, PROVIDERS};
 use crate::panel::{Cx, Handled, Needs, Panel, PanelKind};
 use crate::theme;
 
 /// The tree row's id. `#` never appears in a kernel agent id.
 pub const SETUP_ID: &str = "#setup";
 
+/// A line of page 1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Line_ {
-    Id,
-    Handler,
-    /// The picked backend's field, by its index in the schema.
+enum One {
+    Saved(usize),
+    Provider(usize),
+}
+
+/// A line of page 2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Two {
+    Name,
+    Url,
+    Model,
+    Key,
+    Secret,
+    Keep,
+    /// one of the backend's own fields, by name order in `own()`
     Field(usize),
-    MayCall,
-    Write,
-    KeyMode,
-    TplName,
-    SavedSave,
-    SavedPick,
+    Advanced,
+    Go,
+    Back,
+}
+
+enum Page {
+    One { at: usize },
+    Two { d: Details, at: usize, editing: Option<(Two, String)> },
 }
 
 pub struct SetupPanel {
     /// `None` until the kernel said which backends it links (with schemas).
     backends: Option<Vec<Backend>>,
-    handler: Option<usize>,
-    id: String,
-    /// The picked backend's fields as typed, by name (a default starts here).
-    values: std::collections::BTreeMap<String, String>,
-    may_call: String,
-    at: usize,
-    /// The text being edited, and for which line.
-    editing: Option<(Line_, String)>,
-    /// A key being typed, masked on screen.
-    key: Option<String>,
-    /// The last write or key store.
-    result: Option<Result<String, String>>,
-    /// The name to save the saved set-up under — typed, never derived.
-    saved_name: String,
-    /// The saved set-ups, once read (or why they cannot be).
-    shelf: Option<Result<crate::kern::saved::Shelf, String>>,
-    /// Which saved set-up LOAD / `d` act on.
-    pick: Option<usize>,
-    /// Where keys are kept (mode `None` until chosen, and where), once read.
+    shelf: Option<Result<Shelf, String>>,
+    /// the stored keys' refs and hosts (never values)
+    keys: Vec<(String, String)>,
+    /// where keys are kept (`None` until chosen), once read
     key_mode: Option<Result<(Option<String>, String), String>>,
-    /// The mode the `keys kept` line shows while the human picks (← →).
-    key_pick: Option<&'static str>,
+    page: Page,
+    result: Option<Result<String, String>>,
+    /// an act is on its way: no second one
+    busy: bool,
 }
 
 impl SetupPanel {
-    /// Tests: open the key prompt, and read what it holds.
+    /// Tests: open a text field (the key's), and read what it holds.
     #[cfg(test)]
     pub fn open_key_prompt(&mut self) {
-        self.key = Some(String::new());
+        let b = Backend { module: "x.tools".into(), fields: vec![], key: Some(true) };
+        self.page = Page::Two { d: Details::new(&b, None, &[]), at: 0, editing: Some((Two::Secret, String::new())) };
+        self.backends = Some(vec![b]);
     }
     #[cfg(test)]
     pub fn key_typed(&self) -> Option<&str> {
-        self.key.as_deref()
+        match &self.page {
+            Page::Two { editing: Some((_, buf)), .. } => Some(buf.as_str()),
+            _ => None,
+        }
     }
 
     pub fn new() -> Self {
-        Self {
-            backends: None,
-            handler: None,
-            id: String::new(),
-            values: std::collections::BTreeMap::new(),
-            may_call: String::new(),
-            at: 0,
-            editing: None,
-            key: None,
-            result: None,
-            saved_name: String::new(),
-            shelf: None,
-            pick: None,
-            key_mode: None,
-            key_pick: None,
-        }
-    }
-
-    pub fn set_key_mode(&mut self, m: Result<(Option<String>, String), String>) {
-        self.key_pick = None;
-        self.key_mode = Some(m);
-    }
-
-    /// The chosen mode, once read and chosen.
-    fn chosen_mode(&self) -> Option<&str> {
-        self.key_mode.as_ref()?.as_ref().ok()?.0.as_deref()
-    }
-
-    pub fn set_shelf(&mut self, s: Result<crate::kern::saved::Shelf, String>) {
-        let n = s.as_ref().map_or(0, |s| s.saved.len());
-        self.pick = self.pick.filter(|i| *i < n).or((n > 0).then_some(0));
-        self.shelf = Some(s);
-    }
-
-    fn picked(&self) -> Option<&crate::kern::saved::Saved> {
-        let shelf = self.shelf.as_ref()?.as_ref().ok()?;
-        self.pick.and_then(|i| shelf.saved.get(i))
-    }
-
-    /// Fill the page from the picked saved set-up: the handler (when this build
-    /// links it), the model and the endpoint. The id stays the human's.
-    fn load_picked(&mut self) {
-        let Some(t) = self.picked().cloned() else {
-            self.result = Some(Err("no saved set-up to load".into()));
-            return;
-        };
-        let at = self.backends.as_ref().and_then(|b| b.iter().position(|h| h.module == t.handler()));
-        let Some(i) = at else {
-            self.result = Some(Err(format!("saved set-up `{}` needs {}, which this build does not link", t.name, t.handler())));
-            return;
-        };
-        self.pick_handler(i);
-        for f in self.fields().to_vec() {
-            if let Some(v) = t.record.get(&f.name) {
-                self.values.insert(f.name.clone(), crate::kern::setup::text_of(v));
-            }
-        }
-        // the page grew by the backend's fields: the cursor stays on LOAD
-        self.at = self.lines().iter().position(|l| *l == Line_::SavedPick).unwrap_or(0);
-        self.result = Some(Ok(format!("loaded saved set-up `{}` — give it an id, then WRITE THE RECORD", t.name)));
+        Self { backends: None, shelf: None, keys: Vec::new(), key_mode: None, page: Page::One { at: 0 }, result: None, busy: false }
     }
 
     pub fn set_backends(&mut self, b: Vec<Backend>) {
-        // One backend is still a choice the human makes, so none is pre-picked.
-        self.handler = self.handler.filter(|i| *i < b.len());
         self.backends = Some(b);
     }
-
-    /// Pick backend `i`: its fields start at the BACKEND's defaults (a required
-    /// one starts empty).
-    fn pick_handler(&mut self, i: usize) {
-        self.handler = Some(i);
-        self.values = self
-            .fields()
-            .iter()
-            .map(|f| (f.name.clone(), f.default.as_ref().map(crate::kern::setup::text_of).unwrap_or_default()))
-            .collect();
+    pub fn set_key_mode(&mut self, m: Result<(Option<String>, String), String>) {
+        self.key_mode = Some(m);
+    }
+    pub fn set_shelf(&mut self, s: Result<Shelf, String>) {
+        self.shelf = Some(s);
+    }
+    pub fn set_keys(&mut self, k: Result<Vec<(String, String)>, String>) {
+        self.keys = k.unwrap_or_default();
     }
 
-    /// The picked backend's schema fields.
-    fn fields(&self) -> &[Field] {
-        match (&self.backends, self.handler) {
-            (Some(b), Some(i)) => b.get(i).map_or(&[], |b| b.fields.as_slice()),
-            _ => &[],
-        }
-    }
-
-    /// The page's lines, in order: the record (required fields), WRITE, the
-    /// optional fields, keys, saved set-ups.
-    fn lines(&self) -> Vec<Line_> {
-        let f = self.fields();
-        let mut v = vec![Line_::Id, Line_::Handler];
-        v.extend((0..f.len()).filter(|i| f[*i].required).map(Line_::Field));
-        v.extend([Line_::MayCall, Line_::Write]);
-        v.extend((0..f.len()).filter(|i| !f[*i].required).map(Line_::Field));
-        v.extend([Line_::KeyMode, Line_::TplName, Line_::SavedSave, Line_::SavedPick]);
-        v
-    }
-
-    fn line_at(&self) -> Line_ {
-        let l = self.lines();
-        l[self.at.min(l.len() - 1)]
-    }
-
+    /// A saved edit or a default came back: page 1 again on a saved edit.
     pub fn set_result(&mut self, r: Result<String, String>) {
-        if r.is_ok() && self.key.is_none() && self.result_is_write(&r) {
-            // Written: the id and who it may call start over for the next agent;
-            // the backend and its fields STAY, to save it right away.
-            self.id.clear();
-            self.may_call.clear();
-            self.at = 0;
+        self.busy = false;
+        if r.is_ok() && matches!(&self.page, Page::Two { d, .. } if d.edit.is_some()) {
+            self.page = Page::One { at: 0 };
         }
         self.result = Some(r);
     }
 
-    fn result_is_write(&self, r: &Result<String, String>) -> bool {
-        matches!(r, Ok(s) if s.starts_with("written"))
-    }
-
-    fn handler_name(&self) -> Option<&str> {
-        let b = self.backends.as_ref()?;
-        self.handler.and_then(|i| b.get(i)).map(|b| b.module.as_str())
-    }
-
-    /// The record as it stands, each field typed by the schema — or the first
-    /// field whose text is not of its type.
-    pub fn record(&self) -> Result<Record, String> {
-        let mut fields = serde_json::Map::new();
-        for f in self.fields() {
-            let text = self.values.get(&f.name).map_or("", String::as_str);
-            // an untouched default stays the BACKEND's to apply — not written
-            if f.default.as_ref().is_some_and(|d| crate::kern::setup::text_of(d) == text.trim()) {
-                continue;
+    /// The wizard made an agent (the app opens its chat) — or why not.
+    pub fn set_created(&mut self, r: &Result<String, String>) {
+        self.busy = false;
+        match r {
+            Ok(id) => {
+                self.page = Page::One { at: 0 };
+                self.result = Some(Ok(format!("made `{id}` — its chat is open")));
             }
-            if let Some(v) = crate::kern::setup::coerce(f, text)? {
-                fields.insert(f.name.clone(), v);
-            }
+            Err(e) => self.result = Some(Err(e.clone())),
         }
-        Ok(Record {
-            id: self.id.trim().to_string(),
-            handler: self.handler_name().unwrap_or("").to_string(),
-            fields,
-            may_call: self.may_call.split_whitespace().map(str::to_string).collect(),
-        })
     }
 
-    /// The page's own missing list: the id, the handler, and each REQUIRED field
-    /// left empty (the backend refuses them too, with its hints).
-    fn missing(&self) -> Vec<String> {
-        let mut m: Vec<String> = Vec::new();
-        if self.id.trim().is_empty() {
-            m.push("id".into());
-        }
-        if self.handler.is_none() {
-            m.push("handler".into());
-        }
-        for f in self.fields().iter().filter(|f| f.required) {
-            if self.values.get(&f.name).is_none_or(|v| v.trim().is_empty()) {
-                m.push(f.name.clone());
-            }
-        }
-        m
+    fn mode_chosen(&self) -> bool {
+        matches!(&self.key_mode, Some(Ok((Some(_), _))))
     }
 
-    fn field(&mut self, l: Line_) -> Option<&mut String> {
+    fn backend(&self, module: &str) -> Option<&Backend> {
+        self.backends.as_ref()?.iter().find(|b| b.module == module)
+    }
+
+    /// The saved set-ups this build can run (an AI backend it links), in order.
+    fn saved(&self) -> Vec<&Saved> {
+        let Some(Ok(s)) = &self.shelf else { return Vec::new() };
+        s.saved.iter().filter(|t| self.backend(&t.handler()).is_some()).collect()
+    }
+
+    fn taken(&self) -> Vec<String> {
+        match &self.shelf {
+            Some(Ok(s)) => s.saved.iter().map(|t| t.name.clone()).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn preferred(&self) -> Option<&str> {
+        match &self.shelf {
+            Some(Ok(s)) => s.preferred.as_deref(),
+            _ => None,
+        }
+    }
+
+    fn ones(&self) -> Vec<One> {
+        let mut v: Vec<One> = (0..self.saved().len()).map(One::Saved).collect();
+        v.extend((0..PROVIDERS.len()).map(One::Provider));
+        v
+    }
+
+    fn twos(&self, d: &Details) -> Vec<Two> {
+        let Some(b) = self.backend(&d.module) else { return vec![Two::Back] };
+        let mut v = vec![Two::Name, Two::Url, Two::Model];
+        if let Some(s) = d.key_source(b, &self.keys) {
+            v.push(Two::Key);
+            if s == KeySource::New {
+                v.push(Two::Secret);
+                if !self.mode_chosen() {
+                    v.push(Two::Keep);
+                }
+            }
+        }
+        let fields = own(b);
+        v.extend((0..fields.len()).filter(|i| fields[*i].required).map(Two::Field));
+        if fields.iter().any(|f| !f.required) {
+            v.push(Two::Advanced);
+            if d.advanced {
+                v.extend((0..fields.len()).filter(|i| !fields[*i].required).map(Two::Field));
+            }
+        }
+        v.extend([Two::Go, Two::Back]);
+        v
+    }
+
+    fn open(&mut self, module: &str, current: Option<&Saved>) {
+        let taken = self.taken();
+        match self.backend(module) {
+            Some(b) => {
+                let d = Details::new(b, current, &taken);
+                self.page = Page::Two { d, at: 0, editing: None };
+                self.result = None;
+            }
+            None => self.result = Some(Err(format!("this build links no {}", provider_of(module)))),
+        }
+    }
+
+    fn page_one(&mut self, k: KeyCode, out: &mut Vec<Cmd>) -> Handled {
+        let Page::One { at } = self.page else { return Handled::No };
+        let ones = self.ones();
+        let n = ones.len();
+        let line = ones.get(at.min(n.saturating_sub(1))).copied();
+        match k {
+            KeyCode::Up => self.page = Page::One { at: at.saturating_sub(1) },
+            KeyCode::Down => self.page = Page::One { at: (at + 1).min(n.saturating_sub(1)) },
+            KeyCode::Enter if self.busy => {}
+            KeyCode::Enter => match line {
+                Some(One::Saved(i)) => {
+                    let name = self.saved()[i].name.clone();
+                    self.busy = true;
+                    self.result = Some(Ok(format!("making an agent from `{name}`…")));
+                    out.push(Cmd::WizardFromSaved { name });
+                }
+                Some(One::Provider(j)) => self.open(PROVIDERS[j].module, None),
+                None => {}
+            },
+            KeyCode::Char('e') => {
+                if let Some(One::Saved(i)) = line {
+                    let s = self.saved()[i].clone();
+                    self.open(&s.handler(), Some(&s));
+                }
+            }
+            KeyCode::Char('d') => {
+                if let Some(One::Saved(i)) = line {
+                    let name = self.saved()[i].name.clone();
+                    let is_default = self.preferred() == Some(name.as_str());
+                    out.push(Cmd::Prefer { name: (!is_default).then_some(name) });
+                }
+            }
+            _ => return Handled::No,
+        }
+        Handled::Yes
+    }
+
+    fn field_mut<'a>(d: &'a mut Details, b: &Backend, l: Two) -> Option<&'a mut String> {
         match l {
-            Line_::Id => Some(&mut self.id),
-            Line_::Field(i) => {
-                let name = self.fields().get(i)?.name.clone();
-                Some(self.values.entry(name).or_default())
+            Two::Name if d.edit.is_none() => Some(&mut d.name),
+            Two::Url => Some(&mut d.url),
+            Two::Model => Some(&mut d.model),
+            Two::Secret => Some(&mut d.secret),
+            Two::Field(i) => {
+                let name = own(b).get(i)?.name.clone();
+                Some(d.extra.entry(name).or_default())
             }
-            Line_::MayCall => Some(&mut self.may_call),
-            Line_::TplName => Some(&mut self.saved_name),
-            Line_::Handler | Line_::Write | Line_::KeyMode | Line_::SavedSave | Line_::SavedPick => None,
+            _ => None,
         }
     }
 
-    /// The picked backend, when its record takes a key: `k` stores one.
-    fn takes_key(&self) -> Option<&str> {
-        let b = self.backends.as_ref()?;
-        self.handler.and_then(|i| b.get(i)).filter(|b| b.key.is_some()).map(|b| b.module.as_str())
+    fn page_two(&mut self, k: KeyCode, out: &mut Vec<Cmd>) -> Handled {
+        let keys = self.keys.clone();
+        let mode_chosen = self.mode_chosen();
+        let taken = self.taken();
+        let backends = self.backends.clone().unwrap_or_default();
+        let lines = match &self.page {
+            Page::Two { d, .. } => self.twos(d),
+            Page::One { .. } => return Handled::No,
+        };
+        let Page::Two { d, at, editing } = &mut self.page else { return Handled::No };
+        let Some(b) = backends.iter().find(|b| b.module == d.module) else {
+            self.page = Page::One { at: 0 };
+            return Handled::Yes;
+        };
+        // ── typing into a field ───────────────────────────────────────────
+        if let Some((line, buf)) = editing.as_mut() {
+            match k {
+                KeyCode::Esc => *editing = None,
+                KeyCode::Backspace => {
+                    buf.pop();
+                }
+                KeyCode::Char(c) => buf.push(c),
+                KeyCode::Enter => {
+                    let (line, text) = (*line, buf.clone());
+                    *editing = None;
+                    if let Some(f) = Self::field_mut(d, b, line) {
+                        *f = text;
+                    }
+                }
+                _ => {}
+            }
+            return Handled::Yes;
+        }
+        let line = lines[(*at).min(lines.len() - 1)];
+        let fields = own(b);
+        match k {
+            KeyCode::Up => *at = at.saturating_sub(1),
+            KeyCode::Down => *at = (*at + 1).min(lines.len() - 1),
+            KeyCode::Esc => {
+                self.page = Page::One { at: 0 };
+                self.result = None;
+            }
+            KeyCode::Left | KeyCode::Right if line == Two::Key => {
+                let offered = d.sources(b, &keys);
+                let now = d.key_source(b, &keys).and_then(|s| offered.iter().position(|o| *o == s)).unwrap_or(0);
+                let n = offered.len();
+                let next = if k == KeyCode::Left { (now + n - 1) % n } else { (now + 1) % n };
+                d.source = Some(offered[next]);
+            }
+            KeyCode::Left | KeyCode::Right if line == Two::Keep => d.keep = if d.keep == "secure" { "plain" } else { "secure" },
+            KeyCode::Left | KeyCode::Right if matches!(line, Two::Field(i) if !fields[i].one_of.is_empty()) => {
+                if let Two::Field(i) = line {
+                    let f = fields[i];
+                    // "" — the backend's default — and each value
+                    let mut opts: Vec<String> = vec![String::new()];
+                    opts.extend(f.one_of.iter().cloned());
+                    let now = opts.iter().position(|o| Some(o) == d.extra.get(&f.name)).unwrap_or(0);
+                    let n = opts.len();
+                    let next = if k == KeyCode::Left { (now + n - 1) % n } else { (now + 1) % n };
+                    d.extra.insert(f.name.clone(), opts[next].clone());
+                }
+            }
+            KeyCode::Enter if line == Two::Advanced => d.advanced = !d.advanced,
+            KeyCode::Enter if line == Two::Back => {
+                self.page = Page::One { at: 0 };
+                self.result = None;
+            }
+            KeyCode::Enter if line == Two::Go => {
+                if self.busy {
+                    return Handled::Yes;
+                }
+                let m = d.missing(b, &keys, &taken);
+                if !m.is_empty() {
+                    self.result = Some(Err(format!("missing: {}", m.join(", "))));
+                    return Handled::Yes;
+                }
+                let (texts, key) = (d.texts(b), d.key_in(b, &keys, mode_chosen));
+                let module = d.module.clone();
+                match d.edit.clone() {
+                    Some(name) => out.push(Cmd::WizardSaveEdit { name, module, texts, key }),
+                    None => out.push(Cmd::WizardCreate { name: d.name.trim().to_string(), module, texts, key }),
+                }
+                // the pasted key leaves the page with the act — never kept on it
+                d.secret.clear();
+                self.busy = true;
+                self.result = Some(Ok("on its way…".into()));
+            }
+            KeyCode::Enter => {
+                if let Some(f) = Self::field_mut(d, b, line) {
+                    let text = if line == Two::Secret { String::new() } else { f.clone() };
+                    *editing = Some((line, text));
+                }
+            }
+            _ => return Handled::No,
+        }
+        Handled::Yes
     }
 }
 
@@ -296,149 +366,14 @@ impl Panel for SetupPanel {
     }
 
     fn text_input(&self) -> bool {
-        self.key.is_some() || self.editing.is_some()
+        matches!(&self.page, Page::Two { editing: Some(_), .. })
     }
 
     fn on_key(&mut self, k: KeyEvent, _cx: &Cx<'_>, out: &mut Vec<Cmd>) -> Handled {
-        // ── typing a key: masked, never shown, never kept after enter ───────
-        if let Some(buf) = self.key.as_mut() {
-            match k.code {
-                KeyCode::Esc => self.key = None,
-                KeyCode::Backspace => {
-                    buf.pop();
-                }
-                KeyCode::Char(c) => buf.push(c),
-                KeyCode::Enter => {
-                    let secret = self.key.take().unwrap_or_default();
-                    // a key is bound to its endpoint's host: the record's endpoint
-                    let endpoint = self.values.get("endpoint").map(|s| s.trim().to_string()).unwrap_or_default();
-                    if let (false, Some(module)) = (secret.is_empty(), self.handler_name()) {
-                        out.push(Cmd::StoreKey { module: module.to_string(), endpoint, secret });
-                    }
-                }
-                _ => {}
-            }
-            return Handled::Yes;
+        match self.page {
+            Page::One { .. } => self.page_one(k.code, out),
+            Page::Two { .. } => self.page_two(k.code, out),
         }
-        // ── editing a field ────────────────────────────────────────────────
-        if let Some((line, buf)) = self.editing.as_mut() {
-            match k.code {
-                KeyCode::Esc => self.editing = None,
-                KeyCode::Backspace => {
-                    buf.pop();
-                }
-                KeyCode::Char(c) => buf.push(c),
-                KeyCode::Enter => {
-                    let (line, text) = (*line, buf.clone());
-                    self.editing = None;
-                    if let Some(f) = self.field(line) {
-                        *f = text;
-                    }
-                }
-                _ => {}
-            }
-            return Handled::Yes;
-        }
-        let line = self.line_at();
-        match k.code {
-            KeyCode::Up => self.at = self.at.saturating_sub(1),
-            KeyCode::Down => self.at = (self.at + 1).min(self.lines().len() - 1),
-            KeyCode::Left | KeyCode::Right if line == Line_::Handler => {
-                let n = self.backends.as_ref().map_or(0, Vec::len);
-                if n > 0 {
-                    let i = match (self.handler, k.code) {
-                        (None, KeyCode::Left) => n - 1,
-                        (None, _) => 0,
-                        (Some(i), KeyCode::Left) => (i + n - 1) % n,
-                        (Some(i), _) => (i + 1) % n,
-                    };
-                    self.pick_handler(i);
-                }
-            }
-            // an ENUM field: ← → steps through its values
-            KeyCode::Left | KeyCode::Right if matches!(line, Line_::Field(i) if !self.fields()[i].one_of.is_empty()) => {
-                if let Line_::Field(i) = line {
-                    let f = self.fields()[i].clone();
-                    let now = self.values.get(&f.name).and_then(|v| f.one_of.iter().position(|o| o == v));
-                    let n = f.one_of.len();
-                    let next = match (now, k.code) {
-                        (None, KeyCode::Left) => n - 1,
-                        (None, _) => 0,
-                        (Some(j), KeyCode::Left) => (j + n - 1) % n,
-                        (Some(j), _) => (j + 1) % n,
-                    };
-                    self.values.insert(f.name, f.one_of[next].clone());
-                }
-            }
-            KeyCode::Left | KeyCode::Right if line == Line_::KeyMode => {
-                let now = self.key_pick.or(match self.chosen_mode() {
-                    Some("plain") => Some("plain"),
-                    Some("secure") => Some("secure"),
-                    _ => None,
-                });
-                self.key_pick = Some(match now {
-                    Some("plain") => "secure",
-                    Some(_) => "plain",
-                    // nothing chosen: → offers secure first, ← plain
-                    None if k.code == KeyCode::Right => "secure",
-                    None => "plain",
-                });
-            }
-            KeyCode::Enter if line == Line_::KeyMode => match self.key_pick {
-                Some(m) if Some(m) != self.chosen_mode() => out.push(Cmd::SetKeyMode { mode: m.to_string() }),
-                Some(_) => {}
-                None => self.result = Some(Err("pick plain or secure with ← →, then enter".into())),
-            },
-            KeyCode::Left | KeyCode::Right if line == Line_::SavedPick => {
-                let n = self.shelf.as_ref().and_then(|s| s.as_ref().ok()).map_or(0, |s| s.saved.len());
-                if n > 0 {
-                    let i = self.pick.unwrap_or(0);
-                    self.pick = Some(if k.code == KeyCode::Left { (i + n - 1) % n } else { (i + 1) % n });
-                }
-            }
-            KeyCode::Enter if line == Line_::SavedSave => {
-                let mut miss: Vec<String> = Vec::new();
-                if self.saved_name.trim().is_empty() {
-                    miss.push("saved set-up name".into());
-                }
-                miss.extend(self.missing().into_iter().filter(|m| m != "id"));
-                match self.record() {
-                    Err(e) => self.result = Some(Err(e)),
-                    Ok(_) if !miss.is_empty() => self.result = Some(Err(format!("missing: {}", miss.join(", ")))),
-                    Ok(rec) => {
-                        // the backend and every field set — never the id, the key or grants
-                        let mut record = rec.fields;
-                        record.insert("handler_module".into(), serde_json::json!(rec.handler));
-                        out.push(Cmd::Save { name: self.saved_name.trim().to_string(), record: Value::Object(record) });
-                    }
-                }
-            }
-            KeyCode::Enter if line == Line_::SavedPick => self.load_picked(),
-            KeyCode::Char('d') if line == Line_::SavedPick => {
-                if let Some(t) = self.picked() {
-                    let is_default = self.shelf.as_ref().and_then(|s| s.as_ref().ok()).and_then(|s| s.preferred.as_deref())
-                        == Some(t.name.as_str());
-                    out.push(Cmd::Prefer { name: (!is_default).then(|| t.name.clone()) });
-                }
-            }
-            KeyCode::Enter if line == Line_::Write => match (self.missing(), self.record()) {
-                (_, Err(e)) => self.result = Some(Err(e)),
-                (m, Ok(rec)) if m.is_empty() => out.push(Cmd::WriteAi(rec)),
-                (m, Ok(_)) => self.result = Some(Err(format!("missing: {}", m.join(", ")))),
-            },
-            KeyCode::Enter => {
-                if let Some(f) = self.field(line) {
-                    let text = f.clone();
-                    self.editing = Some((line, text));
-                }
-            }
-            KeyCode::Char('k') if self.takes_key().is_some() && self.chosen_mode().is_none() => {
-                self.result = Some(Err("choose where keys are kept first — the `keys kept` line (← → then enter)".into()));
-            }
-            KeyCode::Char('k') if self.takes_key().is_some() => self.key = Some(String::new()),
-            _ => return Handled::No,
-        }
-        Handled::Yes
     }
 
     fn on_event(&mut self, _payload: &Value, _out: &mut Vec<Cmd>) -> bool {
@@ -446,9 +381,7 @@ impl Panel for SetupPanel {
     }
 
     fn on_select(&mut self, _cx: &Cx<'_>, out: &mut Vec<Cmd>) {
-        out.push(Cmd::Backends);
-        out.push(Cmd::KeyMode);
-        out.push(Cmd::Saved);
+        out.extend([Cmd::Backends, Cmd::KeyMode, Cmd::Saved, Cmd::Keys]);
     }
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
@@ -457,177 +390,174 @@ impl Panel for SetupPanel {
 
     fn render(&self, f: &mut Frame<'_>, area: Rect, _cx: &Cx<'_>) {
         let dim = Style::default().fg(theme::DIM);
+        let muted = Style::default().fg(theme::MUTED);
         let fg = Style::default().fg(theme::FG);
         let bold = Style::default().fg(theme::FG).add_modifier(Modifier::BOLD);
         let warn = Style::default().fg(theme::BLOCKED).add_modifier(Modifier::BOLD);
-        let rule = |label: &str| {
-            let w = area.width.saturating_sub(4 + label.chars().count() as u16) as usize;
-            Line::from(vec![
-                Span::styled(format!("  ── {label} "), dim),
-                Span::styled("─".repeat(w.saturating_sub(4)), Style::default().fg(theme::RULE)),
-            ])
-        };
-        let none = self.backends.as_ref().is_some_and(Vec::is_empty);
-        let mut lines = vec![
-            Line::from(vec![
-                Span::styled("  SET UP AN AI AGENT", bold),
-                Span::styled(
-                    if none { "      no ai backend is linked into this build" } else { "" },
-                    warn,
-                ),
-            ]),
-            Line::from(""),
-            Line::from(Span::styled(
-                "  The backend's schema names its fields. Nothing required is filled in for you, and nothing is written",
-                Style::default().fg(theme::MUTED),
-            )),
-            Line::from(Span::styled(
-                "  until you pick WRITE THE RECORD.",
-                Style::default().fg(theme::MUTED),
-            )),
-            Line::from(""),
-            rule("THE RECORD"),
-            Line::from(""),
-        ];
-        let handler_text = match (&self.backends, self.handler_name()) {
-            (None, _) => "reading the catalog…".to_string(),
-            (Some(b), _) if b.is_empty() => "— none linked —".to_string(),
-            (Some(_), Some(h)) => format!("‹ {h} ›"),
-            (Some(b), None) => format!("‹ pick one of {} ›", b.len()),
-        };
-        let at = self.line_at();
-        // one row: label, value (or the edit in progress), and a note
-        let row = |line: Line_, label: String, value: String, note: String, required: bool| -> Line<'static> {
-            let cur = line == at && self.key.is_none();
-            let (shown, missing) = match &self.editing {
-                Some((l, buf)) if *l == line => (format!("{buf}▌"), false),
-                _ if value.is_empty() || (line == Line_::Handler && self.handler.is_none()) => {
-                    let empty = if value.is_empty() { "— not set —".to_string() } else { value };
-                    (empty, required)
+        let arrow = |c: bool| Span::styled(if c { "  ▸ " } else { "    " }, Style::default().fg(theme::ACCENT_HI));
+        let pick = |c: bool| if c { bold.add_modifier(Modifier::REVERSED) } else { bold };
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        match &self.page {
+            Page::One { at } => {
+                let ones = self.ones();
+                let cur = ones.get((*at).min(ones.len().saturating_sub(1))).copied();
+                lines.push(Line::from(vec![Span::styled("  NEW AI AGENT", bold), Span::styled("      1 / 2", dim)]));
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled("  You can set everything up here, or let your coding agent do it.", muted)));
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled("  SAVED", dim)));
+                let saved = self.saved();
+                if saved.is_empty() {
+                    lines.push(Line::from(Span::styled("    Nothing saved yet — pick a provider below.", dim)));
                 }
-                _ => (value, false),
-            };
-            Line::from(vec![
-                Span::styled(if cur { "  ▸ " } else { "    " }, Style::default().fg(theme::ACCENT_HI)),
-                Span::styled(format!("{label:<16}"), Style::default().fg(theme::MUTED)),
-                Span::styled(
-                    shown,
-                    if missing {
-                        warn
-                    } else if cur {
-                        bold.add_modifier(Modifier::REVERSED)
-                    } else {
-                        bold
-                    },
-                ),
-                Span::styled(if missing { "  ⚠" } else { "" }, warn),
-                Span::styled(format!("   {note}"), dim),
-            ])
-        };
-        let field_row = |i: usize| {
-            let f = &self.fields()[i];
-            let value = self.values.get(&f.name).cloned().unwrap_or_default();
-            let mut note = f.hint.clone();
-            if !f.one_of.is_empty() {
-                note = format!("{note} — ← → {}", f.one_of.join(" | "));
-            }
-            if let Some(d) = &f.default {
-                note = format!("{note} (backend default {})", crate::kern::setup::text_of(d));
-            }
-            row(Line_::Field(i), f.name.clone(), value, note, f.required)
-        };
-        lines.push(row(Line_::Id, "id".into(), self.id.clone(), "a new agent id".into(), true));
-        lines.push(row(Line_::Handler, "handler".into(), handler_text, "what makes it a conversation — ← → to pick".into(), true));
-        let fields = self.fields();
-        for i in (0..fields.len()).filter(|i| fields[*i].required) {
-            lines.push(field_row(i));
-        }
-        lines.push(row(Line_::MayCall, "may call".into(), self.may_call.clone(), "agent ids, space-separated — optional".into(), false));
-        lines.push(Line::from(""));
-        let can = self.missing().is_empty();
-        let cur = at == Line_::Write && self.key.is_none();
-        lines.push(Line::from(vec![
-            Span::styled(if cur { "  ▸ " } else { "    " }, Style::default().fg(theme::ACCENT_HI)),
-            Span::styled(
-                " WRITE THE RECORD ",
-                if can && cur {
-                    Style::default().fg(theme::FG).bg(theme::ACCENT_HI).add_modifier(Modifier::BOLD)
-                } else if can {
-                    bold
-                } else {
-                    dim
-                },
-            ),
-        ]));
-        if fields.iter().any(|f| !f.required) {
-            lines.push(Line::from(""));
-            lines.push(rule("OPTIONAL — EACH STARTS AT THE BACKEND'S OWN DEFAULT"));
-            for i in (0..fields.len()).filter(|i| !fields[*i].required) {
-                lines.push(field_row(i));
-            }
-        }
-        // ── where keys are kept ─────────────────────────────────────────
-        lines.push(Line::from(""));
-        let km_cur = at == Line_::KeyMode && self.key.is_none();
-        let (mode_text, where_text) = match &self.key_mode {
-            None => ("reading…".to_string(), String::new()),
-            Some(Err(e)) => (format!("unavailable: {e}"), String::new()),
-            Some(Ok((m, w))) => {
-                let shown = self.key_pick.or(m.as_deref().and_then(|m| if m == "plain" { Some("plain") } else if m == "secure" { Some("secure") } else { None }));
-                let pending = self.key_pick.is_some() && self.key_pick != m.as_deref();
-                (
-                    match shown {
-                        Some(s) if pending => format!("‹ {s} ›  enter switches to it"),
-                        Some(s) => format!("‹ {s} ›"),
-                        None => "‹ not chosen ›".to_string(),
-                    },
-                    w.clone(),
-                )
-            }
-        };
-        lines.push(Line::from(vec![
-            Span::styled(if km_cur { "  ▸ " } else { "    " }, Style::default().fg(theme::ACCENT_HI)),
-            Span::styled(format!("{:<10}", "keys kept"), Style::default().fg(theme::MUTED)),
-            Span::styled(
-                mode_text,
-                if self.chosen_mode().is_none() {
-                    warn
-                } else if km_cur {
-                    bold.add_modifier(Modifier::REVERSED)
-                } else {
-                    bold
-                },
-            ),
-            Span::styled("   ← → plain / secure · enter applies", dim),
-        ]));
-        if !where_text.is_empty() {
-            lines.push(Line::from(Span::styled(format!("              {where_text}"), dim)));
-        }
-        if self.chosen_mode() == Some("plain") {
-            lines.push(Line::from(Span::styled(
-                "              ⚠ not secured: keys are plain text — anything running as you can read them",
-                Style::default().fg(theme::BLOCKED),
-            )));
-        }
-        if self.takes_key().is_some() {
-            lines.push(Line::from(""));
-            lines.push(Line::from(vec![
-                Span::styled("    k ", bold),
-                Span::styled(
-                    match self.chosen_mode() {
-                        Some(m) => format!("put this backend's key where keys are kept ({m})"),
-                        None => "put this backend's key — choose where keys are kept first".to_string(),
-                    },
+                for (i, s) in saved.iter().enumerate() {
+                    let c = cur == Some(One::Saved(i));
+                    let star = if self.preferred() == Some(s.name.as_str()) { "  ★ default" } else { "" };
+                    lines.push(Line::from(vec![
+                        arrow(c),
+                        Span::styled(format!(" {} ", s.name), pick(c)),
+                        Span::styled(star.to_string(), Style::default().fg(theme::ACCENT_HI)),
+                        Span::styled(format!("   {} · {} · {}", provider_of(&s.handler()), s.model(), s.endpoint()), dim),
+                    ]));
+                }
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled("  NEW", dim)));
+                for (j, p) in PROVIDERS.iter().enumerate() {
+                    let c = cur == Some(One::Provider(j));
+                    let linked = self.backend(p.module).is_some();
+                    lines.push(Line::from(vec![
+                        arrow(c),
+                        Span::styled(format!(" {} ", p.label), if linked { pick(c) } else { dim }),
+                        Span::styled(if linked { String::new() } else { "   not in this build".into() }, dim),
+                    ]));
+                }
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    "  ↑ ↓ pick · enter: a saved one makes an agent now, a new one opens its details · e edit · d default · esc leave",
                     dim,
-                ),
-            ]));
-        }
-        if let Some(buf) = &self.key {
-            lines.push(Line::from(vec![
-                Span::styled("    key: ", bold),
-                Span::styled(format!("{}▌", "•".repeat(buf.chars().count())), fg),
-                Span::styled("   enter stores it · esc drops it", dim),
-            ]));
+                )));
+            }
+            Page::Two { d, at, editing } => {
+                let Some(b) = self.backend(&d.module) else {
+                    f.render_widget(Paragraph::new(Line::from(Span::styled("  this build links no such backend", warn))), area);
+                    return;
+                };
+                let twos = self.twos(d);
+                let cur = twos[(*at).min(twos.len() - 1)];
+                let title = match &d.edit {
+                    Some(n) => format!("  EDIT SAVED · {n}"),
+                    None => format!("  NEW AI AGENT · {}", provider_of(&d.module)),
+                };
+                lines.push(Line::from(vec![Span::styled(title, bold), Span::styled(if d.edit.is_some() { "" } else { "      2 / 2" }, dim)]));
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    if d.edit.is_some() {
+                        "  Agents made from it from now on use these values; running ones keep theirs."
+                    } else {
+                        "  Check the values, then create it — you can change them later."
+                    },
+                    muted,
+                )));
+                lines.push(Line::from(""));
+                let shown = |l: Two, value: String, secret: bool| -> (String, bool) {
+                    match editing {
+                        Some((e, buf)) if *e == l => (format!("{}▌", if secret { "•".repeat(buf.chars().count()) } else { buf.clone() }), false),
+                        _ if value.is_empty() => ("— not set —".into(), true),
+                        _ => (if secret { "•".repeat(value.chars().count()) } else { value }, false),
+                    }
+                };
+                // the label column fits the longest label (a backend's own field names run long)
+                let w = own(b).iter().map(|f| f.name.chars().count()).max().unwrap_or(0).max(12) + 2;
+                let row = |l: Two, label: &str, value: String, note: String, required: bool, secret: bool| -> Line<'static> {
+                    let c = cur == l;
+                    let (text, empty) = shown(l, value, secret);
+                    Line::from(vec![
+                        arrow(c),
+                        Span::styled(format!("{label:<w$}"), muted),
+                        Span::styled(text, if empty && required { warn } else { pick(c) }),
+                        Span::styled(format!("   {note}"), dim),
+                    ])
+                };
+                let fields = own(b);
+                for l in &twos {
+                    match *l {
+                        Two::Name => lines.push(row(
+                            Two::Name,
+                            "name",
+                            d.name.clone(),
+                            if d.edit.is_some() { String::new() } else { "a name for reuse — it appears under SAVED".into() },
+                            true,
+                            false,
+                        )),
+                        Two::Url => lines.push(row(Two::Url, "URL", d.url.clone(), "filled for you — change it for your own server".into(), true, false)),
+                        Two::Model => {
+                            let req = b.fields.iter().any(|f| f.name == "model" && f.required);
+                            lines.push(row(Two::Model, "model", d.model.clone(), String::new(), req, false));
+                        }
+                        Two::Key => {
+                            let text = match d.key_source(b, &self.keys) {
+                                Some(KeySource::Saved) => format!("‹ saved key · {} ›", d.fit(&self.keys).unwrap_or_default()),
+                                Some(KeySource::New) => "‹ paste a new key ›".into(),
+                                _ => "‹ no key ›".into(),
+                            };
+                            lines.push(Line::from(vec![
+                                arrow(cur == Two::Key),
+                                Span::styled(format!("{:<w$}", "key"), muted),
+                                Span::styled(text, pick(cur == Two::Key)),
+                                Span::styled("   ← → saved / new / none", dim),
+                            ]));
+                        }
+                        Two::Secret => lines.push(row(Two::Secret, "  value", d.secret.clone(), "bound to the URL's host; never shown again".into(), true, true)),
+                        Two::Keep => lines.push(Line::from(vec![
+                            arrow(cur == Two::Keep),
+                            Span::styled(format!("{:<w$}", "  keep it in"), muted),
+                            Span::styled(
+                                if d.keep == "secure" { "‹ the keychain (secure) ›".to_string() } else { "‹ a 0600 text file (plain) ›".to_string() },
+                                pick(cur == Two::Keep),
+                            ),
+                            Span::styled("   chosen once, for every key", dim),
+                        ])),
+                        Two::Field(i) => {
+                            let fl = fields[i];
+                            let v = d.extra.get(&fl.name).cloned().unwrap_or_default();
+                            let mut note = fl.hint.clone();
+                            if !fl.one_of.is_empty() {
+                                note = format!("{note} — ← → {}", fl.one_of.join(" | "));
+                            }
+                            lines.push(row(Two::Field(i), &fl.name.replace('_', " "), v, note, fl.required, false));
+                        }
+                        Two::Advanced => lines.push(Line::from(vec![
+                            arrow(cur == Two::Advanced),
+                            Span::styled(
+                                format!("{} advanced", if d.advanced { "▾" } else { "▸" }),
+                                pick(cur == Two::Advanced),
+                            ),
+                            Span::styled("   each starts at the backend's own default — enter shows them", dim),
+                        ])),
+                        Two::Go => {
+                            lines.push(Line::from(""));
+                            let ok = d.missing(b, &self.keys, &self.taken()).is_empty();
+                            let label = if d.edit.is_some() { " SAVE " } else { " CREATE & OPEN CHAT " };
+                            lines.push(Line::from(vec![
+                                arrow(cur == Two::Go),
+                                Span::styled(
+                                    label,
+                                    if ok && cur == Two::Go {
+                                        Style::default().fg(theme::FG).bg(theme::ACCENT_HI).add_modifier(Modifier::BOLD)
+                                    } else if ok {
+                                        bold
+                                    } else {
+                                        dim
+                                    },
+                                ),
+                            ]));
+                        }
+                        Two::Back => lines.push(Line::from(vec![arrow(cur == Two::Back), Span::styled(" ‹ back ", pick(cur == Two::Back))])),
+                    }
+                }
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled("  ↑ ↓ pick · enter edit / go · ← → choose · esc back", dim)));
+            }
         }
         if let Some(r) = &self.result {
             lines.push(Line::from(""));
@@ -636,63 +566,7 @@ impl Panel for SetupPanel {
                 Err(e) => Line::from(Span::styled(format!("  ✕ {e}"), Style::default().fg(theme::FAILED).add_modifier(Modifier::BOLD))),
             });
         }
-        // ── SAVED SET-UPS ─────────────────────────────────────────────────────
-        lines.push(Line::from(""));
-        lines.push(rule("SAVED — REUSE IT IN ANY PROJECT"));
-        lines.push(Line::from(""));
-        let row_cur = |l: Line_| at == l && self.key.is_none();
-        let arrow = |c: bool| Span::styled(if c { "  ▸ " } else { "    " }, Style::default().fg(theme::ACCENT_HI));
-        let name_shown = match &self.editing {
-            Some((Line_::TplName, buf)) => format!("{buf}▌"),
-            _ if self.saved_name.is_empty() => "— not set —".to_string(),
-            _ => self.saved_name.clone(),
-        };
-        lines.push(Line::from(vec![
-            arrow(row_cur(Line_::TplName)),
-            Span::styled(format!("{:<10}", "name"), Style::default().fg(theme::MUTED)),
-            Span::styled(name_shown, if row_cur(Line_::TplName) { bold.add_modifier(Modifier::REVERSED) } else { bold }),
-            Span::styled("   what to call it — you choose; letters, digits, - _", dim),
-        ]));
-        lines.push(Line::from(vec![
-            arrow(row_cur(Line_::SavedSave)),
-            Span::styled(" SAVE ", if row_cur(Line_::SavedSave) { bold.add_modifier(Modifier::REVERSED) } else { bold }),
-            Span::styled("   the backend + every field set — never the key, the id or grants", dim),
-        ]));
-        let (pick_text, pick_note) = match &self.shelf {
-            None => ("reading your saved set-ups…".to_string(), String::new()),
-            Some(Err(e)) => (format!("unavailable: {e}"), String::new()),
-            Some(Ok(s)) if s.saved.is_empty() => ("— none saved yet —".to_string(), format!("   in {}", s.dir)),
-            Some(Ok(s)) => {
-                let t = self.picked().cloned();
-                let name = t.as_ref().map_or(String::new(), |t| t.name.clone());
-                let star = if s.preferred.as_deref() == Some(name.as_str()) { " ★ default" } else { "" };
-                (
-                    format!("‹ {name} ›{star}"),
-                    t.map_or(String::new(), |t| format!("   {} · {}", t.handler(), t.model())),
-                )
-            }
-        };
-        lines.push(Line::from(vec![
-            arrow(row_cur(Line_::SavedPick)),
-            Span::styled(" LOAD SAVED ", if row_cur(Line_::SavedPick) { bold.add_modifier(Modifier::REVERSED) } else { bold }),
-            Span::styled(format!(" {pick_text}"), fg),
-            Span::styled(pick_note, dim),
-        ]));
-        lines.push(Line::from(Span::styled(
-            "    ← → pick · enter loads it into the record · d makes it (or stops it being) your default for new AI agents",
-            dim,
-        )));
-        lines.push(Line::from(""));
-        lines.push(rule("OR HAND IT TO A CODER"));
-        lines.push(Line::from(Span::styled(
-            "  later: a coder in the in-app terminal (t) cannot attach to this kernel yet.",
-            dim,
-        )));
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "  ↑ ↓ pick · enter edit / write / save / load · ← → handler, saved · d default · esc leave",
-            dim,
-        )));
+        let _ = fg;
         f.render_widget(Paragraph::new(lines), area);
     }
 
@@ -705,6 +579,7 @@ impl Panel for SetupPanel {
 mod tests {
     use super::*;
     use crossterm::event::KeyModifiers;
+    use serde_json::json;
 
     fn key(c: KeyCode) -> KeyEvent {
         KeyEvent::new(c, KeyModifiers::NONE)
@@ -729,207 +604,175 @@ mod tests {
         v
     }
 
-    /// A backend with a small schema: two required fields, one with the
-    /// backend's default, one enum.
-    fn be(module: &str) -> Backend {
+    fn vllm() -> Backend {
         Backend::from_schema(
-            module,
-            &serde_json::json!({"fields": [
-                {"name": "endpoint", "type": "str", "required": true, "hint": "its URL"},
-                {"name": "model", "type": "str", "required": true, "hint": "the model"},
-                {"name": "max_tokens", "type": "int", "required": false, "default": 4096, "hint": "a turn's budget"},
-                {"name": "kv_overflow", "type": "enum", "required": false, "enum": ["evict", "reject"], "hint": "who gives way"},
-                {"name": "memory_store_id", "type": "str", "required": true, "hint": "the store"},
+            "vllm_backend.tools",
+            &json!({"fields": [
+                {"name": "endpoint", "type": "str", "required": true},
+                {"name": "model", "type": "str", "required": true},
+                {"name": "max_tokens", "type": "int", "required": true},
+                {"name": "temperature", "type": "float", "required": false, "default": 0.2},
+                {"name": "credentials", "type": "credentials", "required": false},
             ]}),
         )
     }
 
-    #[test]
-    fn nothing_is_written_until_every_required_field_is_set() {
-        let mut p = SetupPanel::new();
-        p.set_backends(vec![be("responses_backend.tools")]);
-        assert_eq!(p.handler_name(), None, "one backend is still not a default");
-        // id, handler, may call, WRITE — no backend picked, so no fields yet
-        let out = drive(&mut p, &[KeyCode::Down, KeyCode::Down, KeyCode::Down, KeyCode::Enter]);
-        assert!(out.is_empty());
-        assert!(matches!(&p.result, Some(Err(e)) if e == "missing: id, handler"), "{:?}", p.result);
-        // pick the backend: its REQUIRED fields join the missing list; the
-        // write-owned memory_store_id is never asked for
-        drive(&mut p, &[KeyCode::Up, KeyCode::Up, KeyCode::Right]);
-        let names: Vec<&str> = p.fields().iter().map(|f| f.name.as_str()).collect();
-        assert_eq!(names, ["endpoint", "model", "max_tokens", "kv_overflow"]);
-        assert_eq!(p.missing(), ["id", "endpoint", "model"]);
-        assert_eq!(p.values["max_tokens"], "4096", "a defaulted field starts at the BACKEND's value");
-    }
-
-    #[test]
-    fn the_schema_fields_make_the_record_typed_and_enter_writes_it() {
-        let mut p = SetupPanel::new();
-        p.set_backends(vec![be("responses_backend.tools"), be("vllm_backend.tools")]);
-        let mut keys = typed("docreader");
-        keys.extend([KeyCode::Down, KeyCode::Right, KeyCode::Right, KeyCode::Down]); // vllm → endpoint
-        keys.extend(typed("http://127.0.0.1:9/v1"));
-        keys.push(KeyCode::Down);
-        keys.extend(typed("m-1"));
-        keys.push(KeyCode::Down);
-        keys.extend(typed("files exec"));
-        keys.extend([KeyCode::Down, KeyCode::Down]); // past WRITE → max_tokens
-        keys.extend([KeyCode::Enter, KeyCode::Backspace, KeyCode::Backspace, KeyCode::Backspace, KeyCode::Backspace]);
-        keys.extend("512".chars().map(KeyCode::Char));
-        keys.push(KeyCode::Enter);
-        keys.extend([KeyCode::Down, KeyCode::Right, KeyCode::Right]); // kv_overflow: evict → reject
-        keys.extend([KeyCode::Up, KeyCode::Up, KeyCode::Enter]); // WRITE
-        let out = drive(&mut p, &keys);
-        match &out[..] {
-            [Cmd::WriteAi(r)] => {
-                assert_eq!((r.id.as_str(), r.handler.as_str()), ("docreader", "vllm_backend.tools"));
-                assert_eq!(
-                    serde_json::Value::Object(r.fields.clone()),
-                    serde_json::json!({"endpoint": "http://127.0.0.1:9/v1", "model": "m-1", "max_tokens": 512, "kv_overflow": "reject"}),
-                    "each field typed by the schema"
-                );
-                assert_eq!(r.may_call, ["files", "exec"]);
-            }
-            other => panic!("{other:?}"),
-        }
-        p.set_result(Ok("written to  x".into()));
-        assert!(p.id.is_empty(), "a written record clears the id for the next one");
-        assert_eq!(p.handler_name(), Some("vllm_backend.tools"), "the backend stays, to save it");
-        assert_eq!(p.values["model"], "m-1", "and so do its fields");
-    }
-
-    #[test]
-    fn a_field_of_the_wrong_type_is_refused_in_place() {
-        let mut p = SetupPanel::new();
-        p.set_backends(vec![be("x_backend.tools")]);
-        let mut keys = typed("a");
-        keys.extend([KeyCode::Down, KeyCode::Right, KeyCode::Down]);
-        keys.extend(typed("http://e"));
-        keys.push(KeyCode::Down);
-        keys.extend(typed("m"));
-        keys.extend([KeyCode::Down, KeyCode::Down, KeyCode::Down]); // max_tokens
-        keys.extend([KeyCode::Enter, KeyCode::Char('x'), KeyCode::Enter]);
-        keys.extend([KeyCode::Up, KeyCode::Enter]); // WRITE
-        let out = drive(&mut p, &keys);
-        assert!(out.is_empty());
-        assert!(matches!(&p.result, Some(Err(e)) if e.contains("max_tokens") && e.contains("integer")), "{:?}", p.result);
-    }
-
-    #[test]
-    fn esc_drops_an_edit_and_a_build_with_no_keyed_backend_offers_no_k() {
-        let mut p = SetupPanel::new();
-        p.set_backends(vec![be("vllm_backend.tools")]);
-        drive(&mut p, &[KeyCode::Enter, KeyCode::Char('x'), KeyCode::Esc]);
-        assert!(p.id.is_empty());
-        drive(&mut p, &[KeyCode::Down, KeyCode::Right]);
-        assert!(p.takes_key().is_none());
-        let out = drive(&mut p, &[KeyCode::Char('k')]);
-        assert!(out.is_empty() && p.key.is_none());
-    }
-
-    fn shelf(names: &[(&str, &str)], preferred: Option<&str>) -> crate::kern::saved::Shelf {
-        crate::kern::saved::Shelf {
+    fn shelf(names: &[&str], preferred: Option<&str>) -> Shelf {
+        Shelf {
             saved: names
                 .iter()
-                .map(|(n, h)| crate::kern::saved::Saved {
-                    name: n.to_string(),
-                    version: "v".into(),
-                    record: serde_json::json!({"handler_module": h, "model": format!("{n}-m"), "endpoint": format!("http://{n}")})
+                .map(|n| Saved {
+                    name: (*n).into(),
+                    version: String::new(),
+                    record: json!({"handler_module": "vllm_backend.tools", "endpoint": "http://box:8000/v1", "model": "q", "max_tokens": 9})
                         .as_object()
                         .unwrap()
                         .clone(),
                 })
                 .collect(),
             preferred: preferred.map(str::to_string),
-            dir: "/home/.config/fantastic/agents/ai_agent/saved".into(),
+            dir: "/h/agents/ai_agent/saved".into(),
+        }
+    }
+
+    fn panel() -> SetupPanel {
+        let mut p = SetupPanel::new();
+        p.set_backends(vec![vllm()]);
+        p.set_key_mode(Ok((Some("plain".into()), "a file".into())));
+        p.set_shelf(Ok(shelf(&[], None)));
+        p
+    }
+
+    #[test]
+    fn page_one_lists_saved_then_the_four_providers_unlinked_ones_refused() {
+        let mut p = panel();
+        p.set_shelf(Ok(shelf(&["box"], Some("box"))));
+        assert_eq!(p.ones(), [One::Saved(0), One::Provider(0), One::Provider(1), One::Provider(2), One::Provider(3)]);
+        // responses is not linked: enter says so, page 1 stays
+        drive(&mut p, &[KeyCode::Down, KeyCode::Enter]);
+        assert!(matches!(&p.page, Page::One { .. }));
+        assert!(matches!(&p.result, Some(Err(e)) if e == "this build links no responses"), "{:?}", p.result);
+    }
+
+    #[test]
+    fn a_saved_one_makes_an_agent_at_once_e_edits_it_d_toggles_the_default() {
+        let mut p = panel();
+        p.set_shelf(Ok(shelf(&["box"], Some("box"))));
+        let out = drive(&mut p, &[KeyCode::Enter]);
+        assert!(matches!(&out[..], [Cmd::WizardFromSaved { name }] if name == "box"), "{out:?}");
+        assert!(drive(&mut p, &[KeyCode::Enter]).is_empty(), "busy: no second act");
+        p.set_created(&Ok("box".into()));
+        let out = drive(&mut p, &[KeyCode::Char('d')]);
+        assert!(matches!(&out[..], [Cmd::Prefer { name: None }]), "the default stops being one: {out:?}");
+        drive(&mut p, &[KeyCode::Char('e')]);
+        match &p.page {
+            Page::Two { d, .. } => assert_eq!((d.edit.as_deref(), d.url.as_str()), (Some("box"), "http://box:8000/v1")),
+            Page::One { .. } => panic!("e opens page 2"),
         }
     }
 
     #[test]
-    fn a_setup_is_saved_under_a_typed_name_without_id_or_grants() {
-        let mut p = SetupPanel::new();
-        p.set_backends(vec![be("responses_backend.tools")]);
-        let mut keys = typed("docreader");
-        keys.extend([KeyCode::Down, KeyCode::Right, KeyCode::Down]);
-        keys.extend(typed("http://e"));
-        keys.push(KeyCode::Down);
-        keys.extend(typed("m-1"));
-        keys.push(KeyCode::Down);
-        keys.extend(typed("files"));
-        // may call → WRITE, max_tokens, kv_overflow, keys, name, SAVE
-        keys.extend([KeyCode::Down; 6]);
-        keys.push(KeyCode::Enter); // SAVE with no name
-        let out = drive(&mut p, &keys);
-        assert!(out.is_empty());
-        assert!(matches!(&p.result, Some(Err(e)) if e == "missing: saved set-up name"), "{:?}", p.result);
-        let mut keys = vec![KeyCode::Up];
-        keys.extend(typed("opus"));
-        keys.extend([KeyCode::Down, KeyCode::Enter]);
-        match &drive(&mut p, &keys)[..] {
-            [Cmd::Save { name, record }] => {
-                assert_eq!(name, "opus");
-                assert_eq!(
-                    record,
-                    &serde_json::json!({"handler_module": "responses_backend.tools", "endpoint": "http://e", "model": "m-1"}),
-                    "the backend + every field set (an untouched default is the backend's); never the id or grants"
-                );
+    fn a_new_provider_fills_page_two_and_create_sends_one_act() {
+        let mut p = panel();
+        // vllm is the 4th provider (no saved ones)
+        drive(&mut p, &[KeyCode::Down, KeyCode::Down, KeyCode::Down, KeyCode::Enter]);
+        let lines = match &p.page {
+            Page::Two { d, .. } => {
+                assert_eq!((d.name.as_str(), d.url.as_str()), ("vllm-1", "http://127.0.0.1:8000/v1"));
+                p.twos(d)
             }
-            other => panic!("{other:?}"),
+            Page::One { .. } => panic!("page 2"),
+        };
+        assert_eq!(lines, [Two::Name, Two::Url, Two::Model, Two::Key, Two::Field(0), Two::Advanced, Two::Go, Two::Back]);
+        // GO with gaps: refused, naming them
+        let go = lines.iter().position(|l| *l == Two::Go).unwrap();
+        let mut ks = vec![KeyCode::Down; go];
+        ks.push(KeyCode::Enter);
+        assert!(drive(&mut p, &ks).is_empty());
+        assert!(matches!(&p.result, Some(Err(e)) if e == "missing: the model, max tokens"), "{:?}", p.result);
+        // fill model and max tokens, then GO
+        let mut ks = vec![KeyCode::Up; go];
+        ks.extend([KeyCode::Down, KeyCode::Down]);
+        ks.extend(typed("qwen"));
+        ks.extend([KeyCode::Down, KeyCode::Down]);
+        ks.extend(typed("262144"));
+        ks.extend([KeyCode::Down, KeyCode::Down, KeyCode::Enter]);
+        let out = drive(&mut p, &ks);
+        match &out[..] {
+            [Cmd::WizardCreate { name, module, texts, key }] => {
+                assert_eq!((name.as_str(), module.as_str()), ("vllm-1", "vllm_backend.tools"));
+                assert_eq!(Value::Object(texts.clone()), json!({"endpoint": "http://127.0.0.1:8000/v1", "model": "qwen", "max_tokens": "262144"}));
+                assert_eq!(*key, None, "an optional key left at none");
+            }
+            other => panic!("one create: {other:?}"),
         }
     }
 
     #[test]
-    fn a_saved_setup_loads_into_the_page_and_d_toggles_the_default() {
-        let mut p = SetupPanel::new();
-        p.set_backends(vec![be("vllm_backend.tools"), be("responses_backend.tools")]);
-        p.set_shelf(Ok(shelf(&[("box", "vllm_backend.tools"), ("gpt", "responses_backend.tools")], Some("gpt"))));
-        // no backend picked yet: id, handler, may call, WRITE, keys, name, save, LOAD
-        let mut keys = vec![KeyCode::Down; 7];
-        keys.extend([KeyCode::Right, KeyCode::Enter]); // ‹ gpt › — loads it
-        drive(&mut p, &keys);
-        assert_eq!(p.handler_name(), Some("responses_backend.tools"));
-        assert_eq!((p.values["model"].as_str(), p.values["endpoint"].as_str()), ("gpt-m", "http://gpt"));
-        assert!(p.id.is_empty(), "the id stays the human's");
-        assert_eq!(p.line_at(), Line_::SavedPick, "the cursor stays on LOAD as the page grows");
-        match &drive(&mut p, &[KeyCode::Char('d')])[..] {
-            [Cmd::Prefer { name: None }] => {}
-            other => panic!("d on the default clears it: {other:?}"),
+    fn a_pasted_key_goes_with_the_act_masked_and_never_kept() {
+        let mut p = panel();
+        p.set_key_mode(Ok((None, String::new())));
+        drive(&mut p, &[KeyCode::Down, KeyCode::Down, KeyCode::Down, KeyCode::Enter]);
+        // key: ← → to "paste a new key" — its value and where keys go appear
+        drive(&mut p, &[KeyCode::Down, KeyCode::Down, KeyCode::Down, KeyCode::Right]);
+        let lines = match &p.page {
+            Page::Two { d, .. } => p.twos(d),
+            Page::One { .. } => panic!(),
+        };
+        assert_eq!(&lines[3..6], [Two::Key, Two::Secret, Two::Keep]);
+        let mut ks = vec![KeyCode::Down];
+        ks.extend(typed("sk-1"));
+        ks.extend([KeyCode::Down, KeyCode::Right]); // keep it in: plain
+        drive(&mut p, &ks);
+        match &p.page {
+            Page::Two { d, .. } => assert_eq!((d.secret.as_str(), d.keep), ("sk-1", "plain")),
+            Page::One { .. } => panic!(),
         }
-        drive(&mut p, &[KeyCode::Left]);
-        match &drive(&mut p, &[KeyCode::Char('d')])[..] {
-            [Cmd::Prefer { name: Some(n) }] => assert_eq!(n, "box"),
-            other => panic!("{other:?}"),
+        if let Page::Two { d, .. } = &mut p.page {
+            d.model = "q".into();
+            d.extra.insert("max_tokens".into(), "9".into());
         }
+        let go = match &p.page {
+            Page::Two { d, .. } => p.twos(d).iter().position(|l| *l == Two::Go).unwrap(),
+            Page::One { .. } => panic!(),
+        };
+        let mut ks = vec![KeyCode::Up; 20];
+        ks.extend(vec![KeyCode::Down; go]);
+        ks.push(KeyCode::Enter);
+        let out = drive(&mut p, &ks);
+        assert!(
+            matches!(&out[..], [Cmd::WizardCreate { key: Some(k), .. }] if k.secret == "sk-1" && k.mode.as_deref() == Some("plain")),
+            "{out:?}"
+        );
+        assert!(matches!(&p.page, Page::Two { d, .. } if d.secret.is_empty()), "the key left the page with the act");
     }
 
     #[test]
-    fn a_saved_setup_for_a_backend_this_build_lacks_is_said_not_half_loaded() {
-        let mut p = SetupPanel::new();
-        p.set_backends(vec![be("responses_backend.tools")]);
-        p.set_shelf(Ok(shelf(&[("q", "vllm_backend.tools")], None)));
-        let mut keys = vec![KeyCode::Down; 7];
-        keys.push(KeyCode::Enter);
-        drive(&mut p, &keys);
-        assert!(matches!(&p.result, Some(Err(e)) if e.contains("does not link")), "{:?}", p.result);
-        assert!(p.values.is_empty() && p.handler.is_none());
+    fn esc_goes_back_from_page_two_and_leaves_from_page_one() {
+        let mut p = panel();
+        drive(&mut p, &[KeyCode::Down, KeyCode::Down, KeyCode::Down, KeyCode::Enter, KeyCode::Esc]);
+        assert!(matches!(&p.page, Page::One { .. }));
+        let store = crate::store::Store::default();
+        let seen = std::collections::HashSet::new();
+        let a: crate::kern::model::AgentId = SETUP_ID.into();
+        let cx = Cx { agent: &a, store: &store, tasks: &[], seen: &seen, reflect: None };
+        assert!(matches!(p.on_key(key(KeyCode::Esc), &cx, &mut Vec::new()), Handled::No), "page 1: esc is the app's — leave");
     }
 
     #[test]
-    fn keys_wait_for_an_explicit_mode_and_plain_is_warned() {
-        let mut p = SetupPanel::new();
-        p.set_backends(vec![be("x_backend.tools")]);
-        p.set_key_mode(Ok((None, "not chosen — …".into())));
-        // no backend picked: id, handler, may call, WRITE, then `keys kept`;
-        // → offers secure, enter applies it
-        let mut keys = vec![KeyCode::Down; 4];
-        keys.extend([KeyCode::Right, KeyCode::Enter]);
-        match &drive(&mut p, &keys)[..] {
-            [Cmd::SetKeyMode { mode }] => assert_eq!(mode, "secure"),
-            other => panic!("{other:?}"),
-        }
-        p.set_key_mode(Ok((Some("plain".into()), "plain text in /h/secrets".into())));
-        assert_eq!(p.chosen_mode(), Some("plain"));
-        // enter without a new pick applies nothing
-        assert!(drive(&mut p, &[KeyCode::Enter]).is_empty());
+    fn a_saved_edit_saves_back_under_its_name_and_returns_to_page_one() {
+        let mut p = panel();
+        p.set_shelf(Ok(shelf(&["box"], None)));
+        drive(&mut p, &[KeyCode::Char('e')]);
+        let go = match &p.page {
+            Page::Two { d, .. } => p.twos(d).iter().position(|l| *l == Two::Go).unwrap(),
+            Page::One { .. } => panic!(),
+        };
+        let mut ks = vec![KeyCode::Down; go];
+        ks.push(KeyCode::Enter);
+        let out = drive(&mut p, &ks);
+        assert!(matches!(&out[..], [Cmd::WizardSaveEdit { name, .. }] if name == "box"), "{out:?}");
+        p.set_result(Ok("saved".into()));
+        assert!(matches!(&p.page, Page::One { .. }));
     }
 }
