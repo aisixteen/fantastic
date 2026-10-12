@@ -25,6 +25,58 @@ pub const THINK_OPEN: &str = "<think>";
 /// Closing marker of a reasoning span.
 pub const THINK_CLOSE: &str = "</think>";
 
+/// Characters of a generation's thinking kept on its assistant row
+/// (`thinking`); what is past them is counted in `thinking_cut`. Python
+/// `THINKING_CAP`.
+pub const THINKING_CAP: usize = 32000;
+
+/// A generation's THINKING, for its assistant row (owner, 2026-10-12: a chat
+/// shows it collapsed under the answer, after a reload too): every
+/// `<think>…</think>` span of `text` (an unclosed one runs to the end), joined by
+/// a blank line — `{"thinking": …}`, the first [`THINKING_CAP`] characters, plus
+/// `{"thinking_cut": n}` when n more were dropped; empty when there was none.
+/// NEVER the model's view (it reads role + content only) and never dispatched.
+/// Python `thinking_fields`.
+#[must_use]
+pub fn thinking_fields(text: &str) -> serde_json::Map<String, serde_json::Value> {
+    let mut spans: Vec<&str> = Vec::new();
+    let mut i = 0usize;
+    while let Some(rel) = text[i..].find(THINK_OPEN) {
+        let a = i + rel + THINK_OPEN.len();
+        match text[a..].find(THINK_CLOSE) {
+            Some(relb) => {
+                spans.push(fantastic_bundle::py_strip(&text[a..a + relb]));
+                i = a + relb + THINK_CLOSE.len();
+            }
+            None => {
+                spans.push(fantastic_bundle::py_strip(&text[a..]));
+                break;
+            }
+        }
+    }
+    let thought = spans
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let mut out = serde_json::Map::new();
+    if thought.is_empty() {
+        return out;
+    }
+    let total = thought.chars().count();
+    out.insert(
+        "thinking".into(),
+        serde_json::Value::String(thought.chars().take(THINKING_CAP).collect()),
+    );
+    if total > THINKING_CAP {
+        out.insert(
+            "thinking_cut".into(),
+            serde_json::json!(total - THINKING_CAP),
+        );
+    }
+    out
+}
+
 /// The ANSWER: every `<think>…</think>` span dropped whole — what dispatch reads
 /// and what goes into durable history. An UNTERMINATED span runs to the end: the
 /// rest is thinking. Python `without_thinking`.
@@ -140,6 +192,14 @@ pub fn note_openai_usage(chunk: &serde_json::Value, report: &crate::provider::Re
     {
         r.prompt_tokens = Some(n);
     }
+    if let Some(n) = chunk
+        .get("usage")
+        .and_then(|u| u.get("completion_tokens"))
+        .filter(|v| fantastic_bundle::py_truthy(v))
+        .and_then(serde_json::Value::as_i64)
+    {
+        r.completion_tokens = Some(n);
+    }
     let fr = chunk
         .get("choices")
         .and_then(serde_json::Value::as_array)
@@ -243,5 +303,27 @@ mod tests {
         // A content-only turn never opens a span.
         let mut w2 = ThinkWrap::new();
         assert_eq!(w2.close_marker(), None);
+    }
+}
+
+#[cfg(test)]
+mod thinking_fields_tests {
+    use super::thinking_fields;
+    use serde_json::json;
+
+    /// python `thinking_fields`: every span, joined by a blank line; none → empty.
+    #[test]
+    fn thinking_is_every_span_joined() {
+        assert_eq!(
+            serde_json::Value::Object(thinking_fields("<think>a\nb</think>answer")),
+            json!({"thinking": "a\nb"})
+        );
+        assert_eq!(
+            serde_json::Value::Object(thinking_fields("<think>x</think>mid<think>y")),
+            json!({"thinking": "x\n\ny"})
+        );
+        assert!(thinking_fields("plain").is_empty());
+        let long = format!("<think>{}</think>", "z".repeat(super::THINKING_CAP + 5));
+        assert_eq!(thinking_fields(&long)["thinking_cut"], json!(5));
     }
 }

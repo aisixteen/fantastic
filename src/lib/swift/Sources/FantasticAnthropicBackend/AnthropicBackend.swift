@@ -158,6 +158,9 @@ struct AnthropicProvider: AIProvider {
                     }
                 case "message_delta":
                     if let r = evt["delta"]["stop_reason"].asString { usage?.lastStopReason = r }
+                    if let n = evt["usage"]["output_tokens"].asInt, n > 0 {
+                        usage?.lastCompletionTokens = Int(n)
+                    }
                 case "message_stop":
                     stopped = true
                 case "error":

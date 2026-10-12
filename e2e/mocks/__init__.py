@@ -15,6 +15,8 @@ Reusable by any harness (`e2e/`, the canvas e2e): import the provider's class,
     m.require_key("sk-1")                      # a request without it → the provider's 401
     m.requests                                 # [{method, path, headers, body, raw, answered}]
     m.keys()                                   # the key each request carried (None = none)
+    m.prompt_tokens = 1234                     # the usage every turn reports (default 100)
+    m.completion_tokens = 56                   # default: len(answer) // 4, at least 1
     m.stop()
 
 Every switch is per mock and takes effect on the next request. A turn with no
@@ -73,6 +75,15 @@ class MockServer:
         #: None falls through to the queue.
         self.responder: Callable[[dict], str | None] | None = None
         self.srv: ThreadingHTTPServer | None = None
+        #: The usage each turn REPORTS, in the provider's own fields: the prompt's
+        #: size, and the answer's (None = `len(answer) // 4`, at least 1).
+        self.prompt_tokens = 100
+        self.completion_tokens: int | None = None
+
+    def usage(self, text: str) -> tuple[int, int]:
+        """(prompt, completion) tokens a turn answering `text` reports."""
+        out = self.completion_tokens
+        return self.prompt_tokens, out if out is not None else max(1, len(text) // 4)
 
     # ── switches ─────────────────────────────────────────────────────────────
     def reply(self, *texts: str) -> Self:

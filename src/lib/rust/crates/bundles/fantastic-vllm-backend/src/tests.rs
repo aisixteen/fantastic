@@ -273,6 +273,25 @@ async fn a_cap_that_is_the_whole_window_sends_no_max_tokens() {
     assert_eq!(bodies(&server2).await[0]["max_tokens"], json!(8000));
 }
 
+/// python `test_a_cap_the_prompt_leaves_no_room_for_sends_no_max_tokens`: 64000 on
+/// a 65536 window — refused by vLLM with a 1537-token prompt (owner's 3090,
+/// 2026-10-12). The prompt's bound plus the cap past the window asks for the rest
+/// of it; a prompt that leaves the room keeps the cap.
+#[tokio::test]
+async fn a_cap_the_prompt_leaves_no_room_for_sends_no_max_tokens() {
+    let (server, endpoint) = server_with(sse(&[delta(Some("stop"), json!({}))], true), 200).await;
+    let mut p = provider(&endpoint);
+    p.max_tokens = 64000;
+    p.window = Some(65536);
+    let big = vec![json!({"role": "user", "content": "x".repeat(6000)})];
+    drain(&p, &big, None).await.expect("big");
+    assert_eq!(prompt_bound(&big), 4 + 6000 + MESSAGE_OVERHEAD);
+    drain(&p, &hi(), None).await.expect("small");
+    let sent = bodies(&server).await;
+    assert!(sent[0].get("max_tokens").is_none(), "{:?}", sent[0]);
+    assert_eq!(sent[1]["max_tokens"], json!(64000));
+}
+
 #[tokio::test]
 async fn the_body_carries_the_defaults_and_only_what_the_record_set() {
     let (server, endpoint) = server_with(sse(&[delta(Some("stop"), json!({}))], true), 200).await;

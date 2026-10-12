@@ -20,6 +20,8 @@ class OllamaProvider:
     #: The prompt size the endpoint REPORTED for the last pass (None: not reported).
     #: ai_core calibrates its own token estimate with it.
     last_prompt_tokens: int | None = None
+    #: The output tokens the server reported for the last pass (None = not reported).
+    last_completion_tokens: int | None = None
     last_stop_reason: str | None = None
 
     def __init__(
@@ -117,6 +119,8 @@ class OllamaProvider:
                 if chunk.get("prompt_eval_count"):
                     # PROVIDER-REPORTED USAGE — ai_core calibrates its estimate with it.
                     self.last_prompt_tokens = int(chunk["prompt_eval_count"])
+                if chunk.get("eval_count"):
+                    self.last_completion_tokens = int(chunk["eval_count"])
                 if chunk.get("done_reason"):
                     dr = chunk["done_reason"]
                     self.last_stop_reason = "max_tokens" if dr == "length" else dr

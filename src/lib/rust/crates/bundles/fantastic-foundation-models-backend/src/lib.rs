@@ -386,7 +386,9 @@ impl Provider for FoundationModelsProvider {
     }
 
     fn clear_prompt_tokens(&self) {
-        self.report.lock().expect("report poisoned").prompt_tokens = None;
+        let mut r = self.report.lock().expect("report poisoned");
+        r.prompt_tokens = None;
+        r.completion_tokens = None;
     }
 
     /// `max_tokens` bounds a side call (a fold summary); `None`, the record's

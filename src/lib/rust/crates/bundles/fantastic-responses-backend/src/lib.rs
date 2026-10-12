@@ -230,7 +230,9 @@ impl Provider for ResponsesProvider {
     }
 
     fn clear_prompt_tokens(&self) {
-        self.report.lock().expect("report poisoned").prompt_tokens = None;
+        let mut r = self.report.lock().expect("report poisoned");
+        r.prompt_tokens = None;
+        r.completion_tokens = None;
     }
 
     fn clear_stop_reason(&self) {
@@ -488,7 +490,16 @@ fn decode_sse_line(st: &mut SseState, line: &str) -> Result<Vec<ProviderEvent>, 
                 .and_then(|u| u.get("input_tokens"))
                 .and_then(Value::as_i64)
                 .unwrap_or(0);
-            st.report.lock().expect("report poisoned").prompt_tokens = (n != 0).then_some(n);
+            let output = resp
+                .get("usage")
+                .and_then(|u| u.get("output_tokens"))
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
+            {
+                let mut r = st.report.lock().expect("report poisoned");
+                r.prompt_tokens = (n != 0).then_some(n);
+                r.completion_tokens = (output != 0).then_some(output);
+            }
             st.final_response = Some(resp);
             // A turn spent ENTIRELY reasoning ends inside the span — balance it.
             if let Some(m) = st.wrap.close_marker() {

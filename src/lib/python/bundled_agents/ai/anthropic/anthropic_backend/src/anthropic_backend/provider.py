@@ -70,6 +70,8 @@ def to_messages(messages: list[dict]) -> tuple[str, list[dict]]:
 class AnthropicProvider:
     #: The prompt size the API REPORTED for the last pass; ai_core calibrates with it.
     last_prompt_tokens: int | None = None
+    #: The output tokens the server reported for the last pass (None = not reported).
+    last_completion_tokens: int | None = None
     last_stop_reason: str | None = None
 
     def __init__(
@@ -178,6 +180,9 @@ class AnthropicProvider:
                         reason = (evt.get("delta") or {}).get("stop_reason")
                         if reason:
                             self.last_stop_reason = reason
+                        out = (evt.get("usage") or {}).get("output_tokens")
+                        if out:
+                            self.last_completion_tokens = int(out)
                     elif kind == "message_stop":
                         stopped = True
                     elif kind == "error":

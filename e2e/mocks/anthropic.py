@@ -65,17 +65,18 @@ class AnthropicMock(MockServer):
         def ev(kind, **body):
             return sse(kind, {"type": kind, **body})
 
+        p, c = self.usage(text)
         out = [ev("message_start", message={
                    "id": "msg_" + uuid.uuid4().hex[:24], "type": "message",
                    "role": "assistant", "content": [], "model": self.model,
                    "stop_reason": None, "stop_sequence": None,
-                   "usage": {"input_tokens": 100, "output_tokens": 1}}),
+                   "usage": {"input_tokens": p, "output_tokens": 1}}),
                ev("content_block_start", index=0, content_block={"type": "text", "text": ""}),
                ev("ping")]
         out += [ev("content_block_delta", index=0, delta={"type": "text_delta", "text": p})
                 for p in halves(text)]
         out += [ev("content_block_stop", index=0),
                 ev("message_delta", delta={"stop_reason": "end_turn", "stop_sequence": None},
-                   usage={"output_tokens": 10}),
+                   usage={"output_tokens": c}),
                 ev("message_stop")]
         h.stream("text/event-stream; charset=utf-8", out)

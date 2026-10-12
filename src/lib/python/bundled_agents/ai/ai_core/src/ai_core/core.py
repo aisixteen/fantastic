@@ -68,6 +68,7 @@ from ai_core.strategies.fold import FoldSummaryError
 # two stale copies of a fact is worse than none.) `_derive_reaction` is the other
 # consumer, scanning the durable transcript for a recall/persist reaction.
 from ai_core.call_check import check as check_calls
+from ai_core.call_check import repair as repair_calls
 from ai_core.stream_parts import PartSplitter, cut_marker
 from ai_core.tool_parse import (
     _ROUTING,
@@ -1284,6 +1285,38 @@ def without_thinking(text: str) -> str:
     return "".join(out).strip()
 
 
+#: Characters of a generation's thinking kept on its assistant row (`thinking`);
+#: what is past them is counted in `thinking_cut`.
+THINKING_CAP = 32000
+
+
+def thinking_fields(text: str) -> dict:
+    """A generation's THINKING, for its assistant row (owner, 2026-10-12: a chat
+    shows it collapsed under the answer, after a reload too): every
+    `<think>…</think>` span of `text` (an unclosed one runs to the end), joined by a
+    blank line — `{"thinking": …}`, the first `THINKING_CAP` characters, plus
+    `{"thinking_cut": n}` when n more were dropped; `{}` when there was none. NEVER
+    the model's view (`_render_for_model` reads role + content only) and never
+    dispatched."""
+    spans, i = [], 0
+    while True:
+        a = text.find(THINK_OPEN, i)
+        if a == -1:
+            break
+        b = text.find(THINK_CLOSE, a)
+        spans.append(text[a + len(THINK_OPEN) : len(text) if b == -1 else b].strip())
+        if b == -1:
+            break
+        i = b + len(THINK_CLOSE)
+    thought = "\n\n".join(x for x in spans if x)
+    if not thought:
+        return {}
+    out: dict = {"thinking": thought[:THINKING_CAP]}
+    if len(thought) > THINKING_CAP:
+        out["thinking_cut"] = len(thought) - THINKING_CAP
+    return out
+
+
 # NO TRUNCATOR. `_real_output` used to cut every completion at the first
 # `[reply to ` — our own marker, so its presence proves the model started writing
 # replies it never received. The cut was right about that text and wrong about
@@ -1572,7 +1605,7 @@ async def _route_reply(
     # stopped with a block open sends NOTHING — its earlier closed calls included;
     # the turn's marker names every one as not sent. ONLY THE ANSWER ACTS (owner,
     # 2026-10-07): calls written inside thinking are read as thinking.
-    answer = without_thinking(text or "")
+    answer = repair_calls(without_thinking(text or ""))
     for call, body in [] if cut else terminated_calls(answer):
         i = next((n for n, (_sid, b) in enumerate(streams) if b == body), None)
         if i is not None:
@@ -2361,6 +2394,34 @@ async def _to_caller(kernel, self_id: str, client_id: str, ev: dict) -> None:
         await kernel.emit(self_id, ev)
 
 
+def usage_detail(
+    provider, model_messages: list, text: str, gen_seconds: float, window: int
+) -> dict:
+    """The token figures a finished generation's `status` `done` carries (owner,
+    2026-10-12: a chat shows `42 tok/s · 3.1k / 64k ctx`): `prompt_tokens` and
+    `completion_tokens` as the provider REPORTED them — estimated (chars/4, this
+    layer's own count) when it reported none, and then `prompt_tokens_estimated` /
+    `completion_tokens_estimated` says so — `gen_seconds` (the wall time from the
+    request to the stream's end, thinking included) and `context_window` (the window
+    in force)."""
+    out: dict = {}
+    reported = getattr(provider, "last_prompt_tokens", None)
+    if isinstance(reported, int) and reported > 0:
+        out["prompt_tokens"] = reported
+    else:
+        out["prompt_tokens"] = estimate_tokens(model_messages)
+        out["prompt_tokens_estimated"] = True
+    done = getattr(provider, "last_completion_tokens", None)
+    if isinstance(done, int) and done > 0:
+        out["completion_tokens"] = done
+    else:
+        out["completion_tokens"] = max(1, len(text) // 4) if text else 0
+        out["completion_tokens_estimated"] = True
+    out["gen_seconds"] = round(gen_seconds, 3)
+    out["context_window"] = window
+    return out
+
+
 async def _emit_status(
     kernel, self_id: str, client_id: str, phase: str, **detail
 ) -> None:
@@ -2753,16 +2814,19 @@ async def _run(
     model_messages = _render_for_model(messages)
     # A FRESH reading per pass: a provider that reports nothing this time must not
     # leave last pass's number standing.
-    try:
-        provider.last_prompt_tokens = None
-    except AttributeError:
-        pass
+    for field_ in ("last_prompt_tokens", "last_completion_tokens"):
+        try:
+            setattr(provider, field_, None)
+        except AttributeError:
+            pass
     # STREAMING PARTS (owner, 2026-10-04): the same chunks, split into parts as they
     # are written — animation for the addressee, never action (`stream_parts`).
     splitter = PartSplitter(self_id)
     parts_out = _PartPublisher(kernel, self_id, client_id, re=current_task())
     if self_id in _current:
         _current[self_id]["parts"] = (splitter, parts_out)
+    # GENERATION TIME — from the request to the stream's end (the `done` detail).
+    gen_started = time.monotonic()
     try:
         async for chunk in provider.chat(model_messages):
             if first_chunk:
@@ -2836,7 +2900,20 @@ async def _run(
     # `status(phase='done')` IS the completion event. There is no second `done`
     # event: two events for one transition is two truths, and a subscriber that
     # watches the wrong one drifts silently.
-    await _emit_status(kernel, self_id, client_id, "done", reason="ok")
+    await _emit_status(
+        kernel,
+        self_id,
+        client_id,
+        "done",
+        reason="ok",
+        **usage_detail(
+            provider,
+            model_messages,
+            last_text,
+            time.monotonic() - gen_started,
+            resolve_context_window(kernel.get(self_id) or {}),
+        ),
+    )
 
     # ROW IDS for this turn: the incoming row (a root, or a delivered reply turn that
     # names its parent on its tag) and the assistant row that answers it. The batch
@@ -2874,10 +2951,11 @@ async def _run(
                     [p for p in splitter.parts if p["kind"] == "call"],
                 )
                 if cut_call is not None
-                else without_thinking(last_text)
+                else repair_calls(without_thinking(last_text))
             ),
             "id": message_id,
             "parent": in_id,
+            **thinking_fields(last_text),
         },
     ]
     await _save_history(self_id, kernel, new_turns)
@@ -3232,12 +3310,13 @@ def _digest(r: dict) -> dict:
         "role": r.get("role"),
         "head": (str(r.get("content", ""))[:120]).replace("\n", " "),
         "bytes": len(str(r.get("content", ""))),
+        **({"has_thinking": True} if r.get("thinking") else {}),
     }
 
 
 def _make_history(cfg: Backend):
     async def _history(id, payload, kernel):
-        """args: fold:int? (a fold or clear id — list ITS members instead), limit:int? (default: as many as fit inline), after:int? (a row id — page forward from it). The conversation at DIGEST resolution — {id, parent, kind, role, head, bytes} per row, oldest first, paged. With `fold`, that fold's title + summary and its members (one level down; a member that is itself a fold opens the same way). A row's text is behind `recall` / `grep`. Returns {rows, next, total, fold?}."""
+        """args: fold:int? (a fold or clear id — list ITS members instead), limit:int? (default: as many as fit inline), after:int? (a row id — page forward from it). The conversation at DIGEST resolution — {id, parent, kind, role, head, bytes, has_thinking?} per row, oldest first, paged. With `fold`, that fold's title + summary and its members (one level down; a member that is itself a fold opens the same way). A row's text is behind `recall` / `grep`. Returns {rows, next, total, fold?}."""
         fold_id = _as_id(payload.get("fold"))
         head: dict | None = None
         if payload.get("fold") is not None:
@@ -3379,8 +3458,12 @@ async def on_cancel(id, task_id, kernel):
         splitter, publisher = parts
         unsent = [p for p in splitter.parts if p["kind"] == "call"]
         await publisher.push(splitter.stop("stopped"), final=True)
+    # A HOST STOP (owner, 2026-10-12): the kernel is draining — this turn was cut by
+    # the stop, not by anyone's cancel. Its cut row is marked `interrupted` (with
+    # the client it streamed to), and the next boot resumes it once.
+    stopping = bool(getattr(_ctx(kernel), "draining", False))
     if entry.get("text") is not None:
-        who = entry.get("stopped_by") or "cancel"
+        who = "the host stopping" if stopping else entry.get("stopped_by") or "cancel"
         in_id, in_parent = _row_ids_for_incoming(id, entry["text"], kernel)
         await _save_history(
             id,
@@ -3400,6 +3483,8 @@ async def on_cancel(id, task_id, kernel):
                     ),
                     "id": _mint_row_id(id, kernel),
                     "parent": in_id,
+                    **thinking_fields(entry.get("text_so_far", "")),
+                    **({"interrupted": {"client_id": client_id}} if stopping else {}),
                 },
             ],
         )
@@ -4042,9 +4127,54 @@ def _make_boot(cfg: Backend):
         # A new incarnation reads its store afresh; bodies are this run's only.
         _mem(kernel)["heads"].pop(id, None)
         _recall_due.add(id)
+        # RESUME AFTER RESTART is PARKED (owner, 2026-10-12: "not yet"): unwired —
+        # `_resume_interrupted` is not spawned here until the kernel lets a drain's
+        # `on_cancel` writes through (kernel gate; see that function).
         return None
 
     return _boot
+
+
+#: The turn that resumes a turn a host stop cut (owner, 2026-10-12).
+RESUMED_NOTICE = (
+    "[resumed after restart] The host stopped while you were answering the message "
+    "above; your answer was cut there and nothing of it ran. Answer it now."
+)
+#: Seconds a resume check waits for the kernel to finish starting.
+RESUME_WAIT = 60.0
+
+
+async def _resume_interrupted(id: str, kernel) -> None:
+    """DEFERRED — NOT WIRED (owner, 2026-10-12: "not yet"). Blocked on the kernel:
+    during a drain it refuses `on_cancel`'s store writes, so the cut turn this reads
+    is never stored. To enable: let those writes through (kernel gate), then spawn
+    this from `_boot`.
+
+    RESUME AFTER RESTART (owner, 2026-10-12). A turn in flight when the host
+    stopped left its incoming row and a cut row marked `interrupted` (`on_cancel`
+    during the drain). If that cut row is still the newest of this agent's
+    conversation, the turn is run again ONCE — a `[resumed after restart]` notice
+    to the client it streamed to; the model has the message above it. A turn ended
+    by anyone's cancel, or followed by anything newer, is left as it is."""
+    ctx = _ctx(kernel)
+    waited = 0.0
+    while not getattr(ctx, "started", True) and waited < RESUME_WAIT:
+        await asyncio.sleep(0.05)
+        waited += 0.05
+    rows = [
+        r
+        for r in await _load_history(id, kernel)
+        if r.get("role") in ("user", "assistant")
+    ]
+    last = rows[-1] if rows else None
+    if not (
+        last
+        and last.get("role") == "assistant"
+        and isinstance(last.get("interrupted"), dict)
+    ):
+        return
+    client_id = last["interrupted"].get("client_id") or DEFAULT_CLIENT_ID
+    _deliver_soon(kernel, id, RESUMED_NOTICE, client_id, None, notice=True)
 
 
 async def _watch(id, payload, kernel):

@@ -270,6 +270,27 @@ func conversationKey(_ messages: [JSON]) -> String {
     return String(digest.map { String(format: "%02x", $0) }.joined().prefix(16))
 }
 
+/// Tokens a chat template adds around one message (role markers, separators) — a
+/// generous bound (Qwen's ChatML adds ~5).
+let MESSAGE_OVERHEAD = 16
+
+/// An UPPER bound on the prompt's tokens: every byte of each message's role and
+/// content (a byte-level BPE token is at least one byte) plus `MESSAGE_OVERHEAD`
+/// per message. Never below the server's count, so a turn it lets keep its
+/// `max_tokens` fits the window (owner, 2026-10-12: 64000 on a 65536 window with a
+/// 1537-token prompt was refused). python `prompt_bound`.
+func promptBound(_ messages: [JSON]) -> Int {
+    messages.reduce(0) { total, m in
+        let role = m["role"].asString ?? ""
+        let content: Int
+        switch m["content"] {
+        case .string(let s): content = s.utf8.count
+        case let v: content = v.serialize().utf8.count
+        }
+        return total + role.utf8.count + content + MESSAGE_OVERHEAD
+    }
+}
+
 /// Every system message merged into ONE at index 0 (Qwen's template refuses a
 /// system message anywhere else); the other turns keep their order.
 func oneSystemMessage(_ messages: [JSON]) -> [JSON] {
@@ -439,15 +460,16 @@ struct VllmProvider: AIProvider {
     func body(_ messages: [JSON], callMax: Int, sideCall: Bool) throws(PyError)
         -> OrderedDictionary<String, JSON>
     {
+        let sent = oneSystemMessage(messages)
         var body: OrderedDictionary<String, JSON> = [
             "model": .string(model),
-            "messages": .array(oneSystemMessage(messages)),
+            "messages": .array(sent),
             "max_tokens": .integer(Int64(callMax)),
             "stream": .bool(true),
             // the final chunk carries usage (and an EMPTY choices array)
             "stream_options": .object(["include_usage": .bool(true)]),
         ]
-        if !sideCall, let w = window, callMax >= w {
+        if !sideCall, let w = window, callMax + promptBound(sent) > w {
             body.removeValue(forKey: "max_tokens")  // the rest of the window — see `window`
         }
         for key in ["temperature", "top_p", "top_k", "reasoning_effort"] + PASSTHROUGH {
@@ -549,6 +571,11 @@ struct VllmProvider: AIProvider {
                     let n = u["prompt_tokens"], pyTruthy(n), let tokens = n.asInt
                 {
                     usage.lastPromptTokens = Int(tokens)
+                }
+                if let usage, case .object(let u)? = obj.asObject?["usage"],
+                    let n = u["completion_tokens"], pyTruthy(n), let tokens = n.asInt
+                {
+                    usage.lastCompletionTokens = Int(tokens)
                 }
                 guard let choices = obj["choices"].asArray, !choices.isEmpty else {
                     continue  // the usage-only final chunk
@@ -958,10 +985,11 @@ extension VllmBundle {
         - `model` — the served model name; left out, the ONE model `GET {endpoint}/models`
           lists (several → refused, naming them)
         - `context_window` — the server's window (its `--max-model-len`); left out, that
-          model's `max_model_len`. A main turn whose `max_tokens` reaches it sends NO
-          `max_tokens`: the server bounds the reply by what the prompt leaves (prompt +
-          `max_tokens` past the window is an HTTP 400). A bounded side call (a fold summary)
-          keeps its own bound.
+          model's `max_model_len`. A main turn whose `max_tokens` could overrun it — the
+          prompt's token bound (its bytes, plus 16 a message) plus `max_tokens` past the
+          window — sends NO `max_tokens`: the server bounds the reply by what the prompt
+          leaves (prompt + `max_tokens` past the window is an HTTP 400). A bounded side
+          call (a fold summary) keeps its own bound.
         - `max_tokens` — the output budget of a turn; left out, `max_model_len` too
         - `kv_slots` — how many conversations may be LIVE on this endpoint at once; left out,
           `floor(kv_cache_max_concurrency)` from the `vllm:cache_config_info` line of the

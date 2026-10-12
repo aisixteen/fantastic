@@ -119,6 +119,23 @@ struct VllmBackendTests {
         #expect(try body(stub, 2)["max_tokens"] == 8000)
     }
 
+    /// python `test_a_cap_the_prompt_leaves_no_room_for_sends_no_max_tokens`: 64000
+    /// on a 65536 window — refused by vLLM with a 1537-token prompt (owner's 3090,
+    /// 2026-10-12). The prompt's bound plus the cap past the window asks for the rest
+    /// of it; a prompt that leaves the room keeps the cap.
+    @Test func aCapThePromptLeavesNoRoomForSendsNoMaxTokens() async throws {
+        let stub = StubHTTP([sse([delta(finish: "stop")]), sse([delta(finish: "stop")])])
+        defer { stub.stop() }
+        var p = provider(endpoint(port: stub.port), maxTokens: 64000)
+        p.window = 65536
+        let big: [JSON] = [.object(["role": "user", "content": .string(String(repeating: "x", count: 6000))])]
+        _ = await drain(p, big)
+        _ = await drain(p)
+        #expect(promptBound(big) == 4 + 6000 + MESSAGE_OVERHEAD)
+        #expect(try body(stub, 0).asObject?["max_tokens"] == nil)
+        #expect(try body(stub, 1)["max_tokens"] == 64000)
+    }
+
     @Test func theThoughtChannelIsWrappedOnceNotDropped() async {
         let stub = StubHTTP([
             sse([

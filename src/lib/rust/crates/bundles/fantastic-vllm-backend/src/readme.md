@@ -25,10 +25,11 @@ field is cleared (`null`). A value set on the record is used as set:
 - `model` — the served model name; left out, the ONE model `GET {endpoint}/models`
   lists (several → refused, naming them)
 - `context_window` — the server's window (its `--max-model-len`); left out, that
-  model's `max_model_len`. A main turn whose `max_tokens` reaches it sends NO
-  `max_tokens`: the server bounds the reply by what the prompt leaves (prompt +
-  `max_tokens` past the window is an HTTP 400). A bounded side call (a fold summary)
-  keeps its own bound.
+  model's `max_model_len`. A main turn whose `max_tokens` could overrun it — the
+  prompt's token bound (its bytes, plus 16 a message) plus `max_tokens` past the
+  window — sends NO `max_tokens`: the server bounds the reply by what the prompt
+  leaves (prompt + `max_tokens` past the window is an HTTP 400). A bounded side
+  call (a fold summary) keeps its own bound.
 - `max_tokens` — the output budget of a turn; left out, `max_model_len` too
 - `kv_slots` — how many conversations may be LIVE on this endpoint at once; left out,
   `floor(kv_cache_max_concurrency)` from the `vllm:cache_config_info` line of the

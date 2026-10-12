@@ -82,6 +82,7 @@ extension AIProvider {
 public final class AIUsage: @unchecked Sendable {
     private let lock = NSLock()
     private var _promptTokens: Int?
+    private var _completionTokens: Int?
     private var _stopReason: String?
 
     public init() {}
@@ -92,10 +93,47 @@ public final class AIUsage: @unchecked Sendable {
         set { lock.withLock { _promptTokens = newValue } }
     }
 
+    /// The endpoint's count of the last pass's OUTPUT tokens, or `nil` (python
+    /// `last_completion_tokens`).
+    public var lastCompletionTokens: Int? {
+        get { lock.withLock { _completionTokens } }
+        set { lock.withLock { _completionTokens = newValue } }
+    }
+
     /// Why the last stream ended — `"max_tokens"` when it stopped AT the output
     /// bound.
     public var lastStopReason: String? {
         get { lock.withLock { _stopReason } }
         set { lock.withLock { _stopReason = newValue } }
     }
+}
+
+/// The token figures a finished generation's `status` `done` carries (owner,
+/// 2026-10-12: a chat shows `42 tok/s · 3.1k / 64k ctx`): `prompt_tokens` and
+/// `completion_tokens` as the provider REPORTED them — estimated (this layer's own
+/// count) when it reported none, and then `prompt_tokens_estimated` /
+/// `completion_tokens_estimated` says so — `gen_seconds` (the wall time from the
+/// request to the stream's end, thinking included) and `context_window` (the window
+/// in force). Python `usage_detail`.
+public func usageDetail(
+    _ usage: AIUsage?, _ modelView: [JSON], _ text: String, _ genSeconds: Double, _ window: Int64
+) -> [(String, JSON)] {
+    var out: [(String, JSON)] = []
+    if let n = usage?.lastPromptTokens, n > 0 {
+        out.append(("prompt_tokens", .integer(Int64(n))))
+    } else {
+        out.append(("prompt_tokens", .integer(AIContext.estimateTokens(modelView))))
+        out.append(("prompt_tokens_estimated", .bool(true)))
+    }
+    if let n = usage?.lastCompletionTokens, n > 0 {
+        out.append(("completion_tokens", .integer(Int64(n))))
+    } else {
+        // python `max(1, len(text) // 4) if text else 0` — code points
+        let chars = text.unicodeScalars.count
+        out.append(("completion_tokens", .integer(Int64(chars == 0 ? 0 : max(1, chars / 4)))))
+        out.append(("completion_tokens_estimated", .bool(true)))
+    }
+    out.append(("gen_seconds", .double((genSeconds * 1000).rounded() / 1000)))
+    out.append(("context_window", .integer(window)))
+    return out
 }

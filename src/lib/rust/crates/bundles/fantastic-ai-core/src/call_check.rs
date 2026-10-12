@@ -43,6 +43,16 @@ fn tag_re() -> &'static Regex {
     R.get_or_init(|| Regex::new(r"<(/?)([^\s<>/=]*)([^<>\n]{0,300}?)(/?)>").expect("tag"))
 }
 
+/// A call opener whose leading `<` was dropped — `call name="await">` (measured
+/// 2026-10-12 on qwen3.8-27b, right after `</think>`). Not a tag to [`tag_re`], so
+/// without this only its `</call>` was seen and the report said to delete that.
+/// Only at the start of the text or after whitespace — where the dropped `<` was
+/// (`</think>\n\n<call`); python's `(?<!\S)` lookbehind is checked in [`bare`].
+fn bare_re() -> &'static Regex {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| Regex::new(r#"call\s+name\s*=\s*["']?([A-Za-z_]\w*)["']?\s*>"#).expect("bare"))
+}
+
 fn named_re() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
     R.get_or_init(|| Regex::new(r#"\bname\s*=\s*["']?([A-Za-z_]\w*)"#).expect("named"))
@@ -88,6 +98,8 @@ struct Tok {
     name: Option<String>,
     arg: Option<String>,
     closing: bool,
+    /// A call opener written without its leading `<`.
+    bare: bool,
 }
 
 #[derive(Debug, Default)]
@@ -128,6 +140,7 @@ fn classify(m: &regex::Captures<'_>) -> Tok {
         name: None,
         arg: None,
         closing: slash,
+        bare: false,
     };
     let named = named_re()
         .captures(rest)
@@ -160,6 +173,42 @@ fn classify(m: &regex::Captures<'_>) -> Tok {
     t
 }
 
+/// The bare openers ([`bare_re`]) at the start of the text or after whitespace.
+fn bare(masked: &str) -> Vec<regex::Captures<'_>> {
+    bare_re()
+        .captures_iter(masked)
+        .filter(|c| {
+            let start = c.get(0).expect("match").start();
+            masked[..start]
+                .chars()
+                .next_back()
+                .is_none_or(char::is_whitespace)
+        })
+        .collect()
+}
+
+/// The answer with every call opener that lost its leading `<` given it back —
+/// `call name="X">…</call>` → `<call name="X">…</call>` — when a `</call>` closes
+/// it. The owner's spell checker (2026-10-12): the `<` is not the model's — vLLM's
+/// streaming reasoning parser drops the content that shares a delta with
+/// `</think>` (measured on the 3090, 2 of 7 turns), so the call is restored and
+/// runs, and the stored answer shows it whole. python `repair`.
+#[must_use]
+pub fn repair(answer: &str) -> String {
+    let masked = mask(answer);
+    let at: Vec<usize> = bare(&masked)
+        .iter()
+        .map(|c| c.get(0).expect("match"))
+        .filter(|m| masked[m.end()..].contains(CLOSE))
+        .map(|m| m.start())
+        .collect();
+    let mut out = answer.to_string();
+    for i in at.into_iter().rev() {
+        out.insert(i, '<');
+    }
+    out
+}
+
 fn tokens(masked: &str) -> Vec<Tok> {
     let mut toks: Vec<Tok> = tag_re()
         .captures_iter(masked)
@@ -175,6 +224,20 @@ fn tokens(masked: &str) -> Vec<Tok> {
             name: c.get(1).map(|g| g.as_str().to_string()),
             arg: None,
             closing: false,
+            bare: false,
+        });
+    }
+    for c in bare(masked) {
+        let whole = c.get(0).expect("match");
+        toks.push(Tok {
+            kind: Kind::Opener,
+            text: whole.as_str().to_string(),
+            start: whole.start(),
+            end: whole.end(),
+            name: c.get(1).map(|g| g.as_str().to_string()),
+            arg: None,
+            closing: false,
+            bare: true,
         });
     }
     toks.sort_by_key(|t| t.start);
@@ -342,6 +405,7 @@ fn report(text: &str, masked: &str, call: &Call) -> String {
     let mut args: Vec<(String, Value)> = Vec::new();
     let mut notes: Vec<String> = Vec::new();
     let why = match first.kind {
+        _ if first.bare => "the opening `<` is missing",
         Kind::Json => {
             args = json_args(masked, first);
             "calls are tags, not JSON"

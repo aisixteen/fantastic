@@ -108,6 +108,9 @@ pub struct ProviderReport {
     /// The endpoint's own count of the last prompt (calibrates the estimate), or
     /// `None` when it reported none.
     pub prompt_tokens: Option<i64>,
+    /// The endpoint's count of the last pass's OUTPUT tokens, or `None` when it
+    /// reported none (python `last_completion_tokens`).
+    pub completion_tokens: Option<i64>,
     /// Why the last stream ended — `"max_tokens"` when it stopped AT the output
     /// bound (a side call's budget).
     pub stop_reason: Option<String>,

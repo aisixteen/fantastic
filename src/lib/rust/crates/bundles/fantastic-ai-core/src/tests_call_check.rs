@@ -1,7 +1,7 @@
 //! The CALL CHECKER — python `tests/test_call_check.py`, case for case and string
 //! for string (the reports are the parity proof).
 
-use super::{check, MAX_REPORTS};
+use super::{check, repair, MAX_REPORTS};
 
 const E59: &str = "I'll look at the files agent.\n<tool_call>\n<function=call name=\"send\">\n\
 <target_id>files</target_id>\n<type>reflect</type>\n</call>\n</tool_call>";
@@ -203,4 +203,32 @@ fn the_verbs_own_arguments_carry_into_the_form_to_write() {
         "{}",
         r[0]
     );
+}
+
+/// python `test_a_call_opener_that_lost_its_lt_is_named_as_that`.
+#[test]
+fn a_call_opener_that_lost_its_lt_is_named_as_that() {
+    assert_eq!(
+        check(r#"call name="await"></call>"#, 0),
+        vec![format!(
+            "[malformed call — nothing ran] line 1, col 1:\n  call name=\"await\">‹/call›\n  \
+             ^~~~~~~~~~~~~~~~~~ the opening `<` is missing\nwrite it as:\n<call name=\"await\"></call>\n{TAIL}"
+        )]
+    );
+}
+
+/// python `test_repair_gives_a_dropped_lt_back_and_nothing_else`.
+#[test]
+fn repair_gives_a_dropped_lt_back_and_nothing_else() {
+    let broken = "call name=\"send\">\n<target_id>kernel</target_id>\n<type>docs</type>\n</call>";
+    assert_eq!(repair(broken), format!("<{broken}"));
+    assert!(check(&repair(broken), 1).is_empty());
+    for same in [
+        "I will call name=\"x\"> later",
+        "<call name=\"done\"></call>",
+        "call name=\"send\"><target_id>a</target_id>",
+        E59,
+    ] {
+        assert_eq!(repair(same), same);
+    }
 }

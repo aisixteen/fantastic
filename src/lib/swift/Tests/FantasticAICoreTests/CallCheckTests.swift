@@ -107,6 +107,29 @@ struct CallCheckTests {
         #expect(r.contains("<call name=\"send\">\n<target_id>notes</target_id>\n<type>read</type>"))
     }
 
+    /// python `test_a_call_opener_that_lost_its_lt_is_named_as_that`.
+    @Test func aCallOpenerThatLostItsLtIsNamedAsThat() {
+        #expect(
+            CallCheck.check(#"call name="await"></call>"#, ran: 0) == [
+                "[malformed call — nothing ran] line 1, col 1:\n  call name=\"await\">‹/call›\n  "
+                    + "^~~~~~~~~~~~~~~~~~ the opening `<` is missing\nwrite it as:\n<call name=\"await\"></call>\n"
+                    + TAIL
+            ])
+    }
+
+    /// python `test_repair_gives_a_dropped_lt_back_and_nothing_else`.
+    @Test func repairGivesADroppedLtBackAndNothingElse() {
+        let broken = "call name=\"send\">\n<target_id>kernel</target_id>\n<type>docs</type>\n</call>"
+        #expect(CallCheck.repair(broken) == "<" + broken)
+        #expect(CallCheck.check(CallCheck.repair(broken), ran: 1).isEmpty)
+        for same in [
+            "I will call name=\"x\"> later", "<call name=\"done\"></call>",
+            "call name=\"send\"><target_id>a</target_id>", E59,
+        ] {
+            #expect(CallCheck.repair(same) == same)
+        }
+    }
+
     @Test func aStrayCloseAfterAGoodCall() {
         let r = CallCheck.check("<call name=\"done\"></call></call>", ran: 0)[0]
         #expect(r.contains("line 1, col 26:"), "\(r)")
