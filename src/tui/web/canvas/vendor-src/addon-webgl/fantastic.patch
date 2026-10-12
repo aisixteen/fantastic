@@ -79,7 +79,7 @@ new file mode 100644
 index 0000000..aedec84
 --- /dev/null
 +++ b/addons/addon-webgl/src/SharedContext.ts
-@@ -0,0 +1,108 @@
+@@ -0,0 +1,111 @@
 +/**
 + * THE SHARED WEBGL CONTEXT (Aisixteen Fantastic patch): every terminal on the
 + * page renders through ONE WebGL2 context on ONE hidden canvas, then copies
@@ -171,8 +171,11 @@ index 0000000..aedec84
 +    stats.uploadPx += (page as { width: number }).width * (page as { height: number }).height;
 +    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
 +    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
++    // glyphs are drawn 1:1: NEAREST samples each texel exactly, so a glyph
++    // re-rasterized at another atlas spot (a clear, a merge) draws the same pixels
++    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
++    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
 +    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, page);
-+    gl.generateMipmap(gl.TEXTURE_2D);
 +    e.version = version;
 +  }
 +}

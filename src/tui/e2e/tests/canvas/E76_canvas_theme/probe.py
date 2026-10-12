@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -32,17 +33,21 @@ def main() -> bool:
                 info["headings"] = await pg.js("[...document.querySelectorAll('.bgs h2')].map(h=>h.firstChild.textContent)")
                 info["rows"] = await pg.js(ROWS)
                 info["column_at_start"] = await pg.js(COLUMN)
-                # + new theme: tall, one column, auto from 1000px
-                await pg.js("[...document.querySelectorAll('.bgs .btn')].find(b=>b.textContent==='+ new theme').click()")
-                await pg.until("!!document.querySelector('.bgs .tform')", 5)
-                await pg.js("""(()=>{const f=document.querySelector('.bgs .tform'); const [name, note]=[...f.querySelectorAll('input:not([type=number])')]; name.value='tall';
-                  const [layout, kind]=f.querySelectorAll('select'); layout.value='column'; kind.value='min'; f.querySelector('input[type=number]').value='1000';
-                  [...f.querySelectorAll('button')].find(b=>b.textContent==='save').click();})()""")
+                # no "+ new theme" (owner 2026-10-12): a new theme is the AI agent's —
+                # `add_theme` on the agent, as an AI calls it: tall, one column, auto from 1000px
+                info["no_new_theme_button"] = not await pg.js("[...document.querySelectorAll('.bgs .btn')].some(b=>b.textContent.includes('new theme'))")
+                info["ask_ai_hint"] = await pg.js("[...document.querySelectorAll('.bgs .hint')].some(h=>h.textContent.includes('To make a new theme, ask your AI agent'))")
+                agent = await pg.js("document.querySelector('.bgs').closest('.agent-frame').dataset.id")
+                p = subprocess.run([str(rig.binary), "send", json.dumps({"target": f"{rig.page_guid()}|{agent}", "payload": {"type": "add_theme", "name": "tall", "layout": "column", "trigger": {"min_width": 1000}}})],
+                                   cwd=rig.proj, env=rig.env(), capture_output=True, text=True, timeout=60)
+                info["add_theme"] = p.stdout[-300:] or p.stderr[-300:]
                 info["tall_listed"] = bool(await pg.until(f"{ROWS}.includes('tall')", 8))
                 info["auto_picks_tall"] = bool(await pg.until(COLUMN, 8))
                 # use canvas by hand
                 await pg.js("[...document.querySelectorAll('.bgs .row .name')].find(b=>b.querySelector('b').textContent==='canvas').click()")
                 info["canvas_by_hand"] = bool(await pg.until(f"!{COLUMN}", 8))
+                # the default theme has no ×; a direct delete is refused
+                info["canvas_no_x"] = await pg.js("[...document.querySelectorAll('.bgs .row')].find(r=>r.querySelector('.name b')?.textContent==='canvas')?.querySelectorAll('.x').length === 1")
                 # hide stock mobile, restore it
                 await pg.js("[...document.querySelectorAll('.bgs .row')].find(r=>r.querySelector('.name b')?.textContent==='mobile')?.querySelectorAll('.x')[1].click()")
                 info["mobile_hidden"] = bool(await pg.until(f"!{ROWS}.includes('mobile')", 8))
@@ -54,7 +59,9 @@ def main() -> bool:
         r["two sections: Backgrounds and Themes"] = info.get("headings", [])[:2] == ["Backgrounds", "Themes"]
         r["stock themes listed"] = {"canvas", "mobile"} <= set(info.get("rows") or [])
         r["a wide tab starts on the free canvas"] = info.get("column_at_start") is False
-        r["a theme added through the form is listed"] = info.get("tall_listed") is True
+        r["no + new theme; the panel says to ask the AI agent"] = info.get("no_new_theme_button") is True and info.get("ask_ai_hint") is True
+        r["a theme added with add_theme (as an AI does) is listed"] = info.get("tall_listed") is True
+        r["the default canvas theme has no ×"] = info.get("canvas_no_x") is True
         r["auto picks it by its trigger"] = info.get("auto_picks_tall") is True
         r["a theme used by hand holds"] = info.get("canvas_by_hand") is True
         r["a stock theme hides and restores"] = info.get("mobile_hidden") is True and info.get("mobile_restored") is True

@@ -379,7 +379,7 @@ def main() -> bool:
                 c = [x for x in await pg.js(CHATS) if x != b][0]
                 await ready(pg, c)
                 await other_setups(pg, c)
-                await pg.js("[...document.querySelectorAll('.wiz .saved button')].find(b=>b.querySelector('.name').textContent==='small')?.click()")
+                await pg.js("[...document.querySelectorAll('.wiz .saved button')].find(b=>b.querySelector('.name')?.textContent==='small')?.click()")
                 await rebound(pg, c, 15)
                 await ready(pg, c)
                 for k in range(8):

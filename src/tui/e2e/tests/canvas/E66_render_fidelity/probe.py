@@ -35,6 +35,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from _lib.canvas_live import FOLDER, Rig, verdict  # noqa: E402
 
 K = int(os.environ.get("FIDELITY_K", "12"))
+# pixels a terminal may change on a redraw: a glyph that overhangs its cell can
+# land a texel column apart (the GPU's own rounding); a STALE glyph — what this
+# catches — is a whole cell wrong, hundreds of pixels
+TOL = 64
 ROUNDS = int(os.environ.get("FIDELITY_ROUNDS", "6"))
 VERBS = ["watch", "status", "start", "write", "ack", "resize", "output", "paste_image"]
 HERE = Path(__file__).resolve().parent
@@ -58,22 +62,31 @@ def seeds(k: int) -> tuple[list[dict], list[tuple[str, dict]]]:
 PAGE = r"""
 window.__fid = (() => {
   const frames = () => [...document.querySelectorAll('.agent-frame')].filter(f => f.querySelector('.frame-body')?.xterm);
-  const canvasOf = f => f.querySelector('.xterm-screen canvas');
+  const canvasOf = f => f.querySelector('.xterm-screen canvas:not(.xterm-link-layer)');
   const scratch = document.createElement('canvas'); const sx = scratch.getContext('2d', { willReadFrequently: true });
   const pixels = f => { const c = canvasOf(f); if (!c || !c.width) return null;
     scratch.width = c.width; scratch.height = c.height; sx.clearRect(0, 0, c.width, c.height); sx.drawImage(c, 0, 0);
     return sx.getImageData(0, 0, c.width, c.height).data; };
   const hash = d => { let h = 2166136261 >>> 0; for (let i = 0; i < d.length; i += 4) { h ^= d[i] | (d[i+1] << 8) | (d[i+2] << 16) | (d[i+3] << 24); h = Math.imul(h, 16777619) >>> 0; } return h; };
-  const reds = d => { let n = 0; for (let i = 0; i < d.length; i += 4) if (d[i] > 235 && d[i+1] < 25 && d[i+2] < 25 && d[i+3] > 235) n++; return n; };
+  // placeholder red, NOT an emoji's own red: a cell holding a pictograph (and the
+  // cell either side, its edge spills over) is skipped — the placeholder, a whole
+  // page drawn with the 1×1 red texture, shows in plain glyphs too
+  const PICT = /\p{Extended_Pictographic}/u;
+  const reds = (d, f) => { const c = f && canvasOf(f), t = f && f.querySelector('.frame-body').xterm; let skip = null, cw = 1, ch = 1;
+    let n = 0; for (let i = 0; i < d.length; i += 4) if (d[i] > 235 && d[i+1] < 25 && d[i+2] < 25 && d[i+3] > 235) {
+      if (t && c) { if (skip === null) { skip = new Set(); cw = c.width / t.cols; ch = c.height / t.rows; const b = t.buffer.active;
+          for (let r = 0; r < t.rows; r++) { const l = b.getLine(b.viewportY + r); if (!l) continue; for (let x = 0; x < t.cols; x++) { if (PICT.test(l.getCell(x)?.getChars() || '')) for (const dx of [-1, 0, 1, 2]) skip.add(r * t.cols + x + dx); } } }
+        const p = i / 4; if (skip.has(((p / c.width / ch) | 0) * t.cols + ((p % c.width) / cw | 0))) continue; }
+      n++; } return n; };
   const lit = d => { let n = 0; for (let i = 3; i < d.length; i += 4) if (d[i] > 0) n++; return n; };
   const state = { frames: 0, redFrames: 0, redMax: 0, redWhere: [] , watching: false };
   const watch = () => { if (!state.watching) return; state.frames++;
-    for (const f of frames()) { const d = pixels(f); if (!d) continue; const r = reds(d);
+    for (const f of frames()) { const d = pixels(f); if (!d) continue; const r = reds(d, f);
       if (r > 0) { state.redFrames++; state.redMax = Math.max(state.redMax, r); if (state.redWhere.length < 20) state.redWhere.push(`${f.dataset.id}:${r}`); } }
     requestAnimationFrame(watch); };
   return {
     ids: () => frames().map(f => f.dataset.id),
-    snap: () => Object.fromEntries(frames().map(f => { const d = pixels(f); return [f.dataset.id, d ? { h: hash(d), lit: lit(d), red: reds(d) } : null]; })),
+    snap: () => Object.fromEntries(frames().map(f => { const d = pixels(f); return [f.dataset.id, d ? { h: hash(d), lit: lit(d), red: reds(d, f) } : null]; })),
     text: id => { const f = frames().find(x => x.dataset.id === id); const t = f?.querySelector('.frame-body').xterm; if (!t) return '';
       const b = t.buffer.active; let s = ''; for (let i = 0; i < t.rows; i++) { const l = b.getLine(b.viewportY + i); if (l) s += l.translateToString(true) + '\n'; } return s; },
     quiet: () => { for (const f of frames()) { const t = f.querySelector('.frame-body').xterm; t.options.cursorBlink = false; t.options.cursorInactiveStyle = 'none'; t.blur?.(); } },
@@ -81,6 +94,11 @@ window.__fid = (() => {
     watchStart: () => { state.watching = true; requestAnimationFrame(watch); },
     watchStop: () => { state.watching = false; return state; },
     gl: () => ({ ...(globalThis.__fantasticWebgl || {}) }),
+    // the pixels of every terminal kept, then how many changed since (any channel)
+    keep: () => { window.__kept = Object.fromEntries(frames().map(f => [f.dataset.id, pixels(f)?.slice() ?? null])); return true; },
+    changed: () => Object.fromEntries(frames().map(f => { const a = (window.__kept || {})[f.dataset.id], b = pixels(f);
+      if (!a || !b || a.length !== b.length) return [f.dataset.id, -1];
+      let n = 0; for (let i = 0; i < a.length; i += 4) if (a[i] !== b[i] || a[i+1] !== b[i+1] || a[i+2] !== b[i+2] || a[i+3] !== b[i+3]) n++; return [f.dataset.id, n]; })),
   };
 })();
 """
@@ -105,7 +123,7 @@ async def run(rig: Rig, r: dict, info: dict) -> None:
         ids = [c["id"] for c in seeds(K)[0]]
         await pg.until(f"window.__fid.ids().length >= {K} && window.__fid.ids().every(id => window.__fid.text(id).trim().length > 0)", 60)
         await pg.js("window.__fid.quiet()")
-        info["renderer"] = await pg.js("(()=>document.querySelector('.agent-frame .xterm-screen canvas') ? 'canvas' : 'dom')()")
+        info["renderer"] = await pg.js("(()=>document.querySelector('.agent-frame .xterm-screen canvas:not(.xterm-link-layer)') ? 'canvas' : 'dom')()")
         jobs: dict[str, int] = {}
         for i in range(K):
             bid = f"exec_bridge_fid{i:03d}"
@@ -113,6 +131,7 @@ async def run(rig: Rig, r: dict, info: dict) -> None:
             jobs[bid] = next(j["job_id"] for j in st.get("jobs", []) if j.get("pty") and j.get("status") == "running")
         await pg.js("window.__fid.watchStart()")
         mismatches: list[str] = []
+        worst = 0
         blank: list[str] = []
         for rnd in range(ROUNDS):
             mk = f"DONE{rnd:02d}"
@@ -125,27 +144,36 @@ async def run(rig: Rig, r: dict, info: dict) -> None:
             blank += [f"r{rnd}:{c}" for c, v in before.items() if not v or v["lit"] == 0]
             # ONE terminal clears the SHARED atlas: every sibling must redraw right
             victim = ids[rnd % K]
+            await pg.js("window.__fid.keep()")
             await pg.js(f"window.__fid.clearAtlas({json.dumps(victim)})")
-            after = await settle(pg)
-            mismatches += [f"r{rnd} sibling-clear by {victim}: {c}" for c in ids if (before.get(c) or {}).get("h") != (after.get(c) or {}).get("h")]
+            await settle(pg)
+            ch = await pg.js("window.__fid.changed()")
+            worst = max([worst, *[n for n in ch.values() if n >= 0]])
+            mismatches += [f"r{rnd} sibling-clear by {victim}: {c} ({ch.get(c)} px)" for c in ids if ch.get(c, -1) < 0 or ch[c] > TOL]
             # each terminal against its own fresh redraw
             for c in ids[rnd % 3:: 3]:
-                pre = (await pg.js("window.__fid.snap()")).get(c)
+                await pg.js("window.__fid.keep()")
                 await pg.js(f"window.__fid.clearAtlas({json.dumps(c)})")
-                post = (await settle(pg)).get(c)
-                if (pre or {}).get("h") != (post or {}).get("h"):
-                    mismatches.append(f"r{rnd} fresh redraw: {c}")
+                await settle(pg)
+                n = (await pg.js("window.__fid.changed()")).get(c, -1)
+                worst = max(worst, n)
+                if n < 0 or n > TOL:
+                    mismatches.append(f"r{rnd} fresh redraw: {c} ({n} px)")
         # a LOST context: every terminal back, as it was
-        pre = await settle(pg)
+        await settle(pg)
+        await pg.js("window.__fid.keep()")
         await pg.js("window.__fantasticWebgl.loseContext()")
         await asyncio.sleep(4.5)  # the addon waits 3 s for a restore, then rebuilds
         post = await settle(pg, 20)
-        lost = [c for c in ids if (pre.get(c) or {}).get("h") != (post.get(c) or {}).get("h") or not post.get(c) or post[c]["lit"] == 0]
+        ch = await pg.js("window.__fid.changed()")
+        info["context_loss_changed_px"] = ch
+        lost = [c for c in ids if ch.get(c, -1) < 0 or ch[c] > TOL or not post.get(c) or post[c]["lit"] == 0]
         watch = await pg.js("window.__fid.watchStop()")
         gl = await pg.js("window.__fid.gl()")
         info["frames_checked"] = watch["frames"]
         info["red"] = {"frames": watch["redFrames"], "max_px": watch["redMax"], "where": watch["redWhere"]}
         info["mismatches"] = mismatches[:30]
+        info["redraw_worst_px"] = worst
         info["blank"] = blank[:20]
         info["after_context_loss_differs"] = lost
         info["atlas"] = {k: gl.get(k) for k in ("pages", "released", "uploads", "contexts", "renders")}

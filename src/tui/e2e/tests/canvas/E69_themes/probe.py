@@ -49,10 +49,12 @@ def main() -> bool:
                 info["pinned_at"] = await pg.js(bottom)
                 # the canvas as drawn (a headless window is at least ~500px wide)
                 info["canvas_box"] = await pg.js("(()=>{const r=document.getElementById('canvas').getBoundingClientRect(); return [Math.round(r.width), Math.round(r.bottom)]})()")
-                # the column fills the width (a 12px gutter each side) and its chrome shows without hover
+                # the column fills the width edge to edge (mobile is flat, owner 2026-10-12) and its chrome shows without hover
                 info["a_screen_w"] = await pg.js("Math.round(document.querySelector('.agent-frame[data-id=a]').getBoundingClientRect().width)")
                 info["a_head_opacity"] = await pg.js("getComputedStyle(document.querySelector('.agent-frame[data-id=a] > .frame-head')).opacity")
-                await pg.cdp("Input.dispatchMouseEvent", type="mouseWheel", x=info["canvas_box"][0] - 4, y=300, deltaX=0, deltaY=300)  # the gutter: an iframe takes its own wheel
+                # the wheel over A's head bar (no gutter now; an iframe takes its own wheel)
+                head = await pg.rect(".agent-frame[data-id=a] > .frame-head")
+                await pg.cdp("Input.dispatchMouseEvent", type="mouseWheel", x=(head or {}).get("x", 0) + 12, y=(head or {}).get("y", 0) + 16, deltaX=0, deltaY=300)
                 await asyncio.sleep(0.6)
                 info["pinned_after_scroll"] = await pg.js(bottom)
                 info["phone_a_after_scroll"] = await left_top(pg, "a")
@@ -75,7 +77,7 @@ def main() -> bool:
         pa, ps = info.get("pinned_at") or [], info.get("pinned_after_scroll") or []
         cw, cb = info.get("canvas_box") or [0, 0]
         r["pinned_on_screen_bottom"] = len(pa) == 3 and pa[0] == 8 and abs(pa[1] - (cb - 8)) <= 2 and abs(pa[2] - (cw - 16)) <= 1
-        r["column_full_width"] = isinstance(info.get("a_screen_w"), (int, float)) and abs(info["a_screen_w"] - (cw - 24)) <= 2
+        r["column_full_width"] = isinstance(info.get("a_screen_w"), (int, float)) and abs(info["a_screen_w"] - cw) <= 2
         r["chrome_always_shown"] = info.get("a_head_opacity") == "1"
         r["column_scrolled"] = isinstance(info.get("a_top_after_scroll"), (int, float)) and info["a_top_after_scroll"] < 0
         r["pin_holds_while_scrolling"] = ps == pa

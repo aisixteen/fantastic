@@ -20,7 +20,10 @@ switcher yet).
 3. **The atlas page-layout version** every sharing renderer compares (backport of
    xterm.js master #6055): a cleared / merged / evicted shared atlas reaches every
    sibling (6.0.0's one-owner flag reached only the clearer, and was never reset).
-4. **Counters for probes** on `globalThis.__fantasticWebgl`: renders, uploads, page
+4. **Atlas pages sample NEAREST** (no mipmaps; owner 2026-10-12, E66): glyphs are drawn
+   1:1, so each texel is drawn exactly — with LINEAR, a glyph re-rasterized at another
+   atlas spot (a clear, a merge, a lost context) drew slightly different edges.
+5. **Counters for probes** on `globalThis.__fantasticWebgl`: renders, uploads, page
    textures live / released, contexts made, and `loseContext()` / `restoreContext()`.
 
 ## Rebuild

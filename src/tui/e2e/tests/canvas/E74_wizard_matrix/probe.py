@@ -129,6 +129,7 @@ def main() -> bool:
                 def lap(name: str) -> None:
                     now = time.time()
                     timing[name] = round(now - mark[0], 1)
+                    print(f"E74 step {name}: {timing[name]}s", flush=True)
                     mark[0] = now
                 for i, (provider, Mock) in enumerate(PROVIDERS.items()):
                     p: dict = {}
@@ -189,7 +190,7 @@ def main() -> bool:
                     f = await wizard(pg, 200, base_y + 600)
                     saved = await pg.js("[...document.querySelectorAll('.wiz .saved button .name')].map(n=>n.textContent)")
                     p["F_saved_list"] = saved
-                    await pg.js(f"[...document.querySelectorAll('.wiz .saved button')].find(b=>b.querySelector('.name').textContent==={json.dumps(provider + '-1')})?.click()")
+                    await pg.js(f"[...document.querySelectorAll('.wiz .saved button')].find(b=>b.querySelector('.name')?.textContent==={json.dumps(provider + '-1')})?.click()")
                     p["F_bound_same_cell"] = f is not None and await rebound(pg, f)
                     p["F_answers"] = p["F_bound_same_cell"] and await turn(pg, f, keyed, "hi", f"answer-F-{provider}")
                     lap(f"{provider}.F")

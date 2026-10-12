@@ -104,8 +104,20 @@ def keys_dir(home: Path) -> Path:
     return home / "agents" / "ai_agent" / "keys"
 
 
+def private_dirs(d: Path) -> None:
+    """`d` and every missing parent made 0700 — as the home store wants every
+    level (`os.makedirs`'s mode reaches only the leaf since Python 3.7)."""
+    missing = []
+    while not d.exists():
+        missing.append(d)
+        d = d.parent
+    for m in reversed(missing):
+        m.mkdir(mode=0o700)
+        os.chmod(m, 0o700)
+
+
 def private_write(p: Path, text: str) -> None:
-    os.makedirs(p.parent, mode=0o700, exist_ok=True)
+    private_dirs(p.parent)
     fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     os.write(fd, text.encode())
     os.close(fd)
@@ -171,7 +183,7 @@ class Rig:
 
     def make_home(self, template: dict | None = None, name: str = "plug") -> None:
         """A throwaway FANTASTIC_HOME — with `template` as the default, or none."""
-        os.makedirs(tpl_dir(self.home), mode=0o700, exist_ok=True)
+        private_dirs(tpl_dir(self.home))
         os.chmod(self.home, 0o700)
         if template is not None:
             template = seed_key(self.home, template)
@@ -396,7 +408,10 @@ async def other_setups(pg: Page, cell: str) -> None:
     that cell (a saved set-up or a new provider rebinds it). The old chat view is
     marked, so `rebound` can tell the new one."""
     await pg.js(f"document.querySelector('.agent-frame[data-id=\"{cell}\"] .chat-view')?.setAttribute('data-old', '1')")
-    await pg.js(f"[...document.querySelectorAll('.agent-frame[data-id=\"{cell}\"] > .frame-head .ext')].find(c=>c.textContent==='⚙')?.click()")
+    gear = f"[...document.querySelectorAll('.agent-frame[data-id=\"{cell}\"] > .frame-head .ext')].find(c=>c.textContent==='⚙')"
+    # the ⚙ chip comes with the mounted chat view, a moment after the cell
+    await pg.until(f"!!{gear}", 15)
+    await pg.js(f"{gear}.click()")
     await pg.until("(document.querySelector('.wiz h1')?.textContent||'').startsWith('Settings')", 15)
     await pg.js("[...document.querySelectorAll('.wiz button')].find(b=>b.textContent.trim()==='‹ other set-ups')?.click()")
     await pg.until("document.querySelectorAll('.wiz .tiles button').length === 4", 10)
