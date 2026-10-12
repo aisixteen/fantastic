@@ -4,11 +4,14 @@
 //! file per name:
 //!
 //! ```text
-//!   <home>/                    0700   FANTASTIC_HOME, else ~/.config/fantastic
-//!   └── templates/             0700
-//!       ├── opus.yaml          0600   handler_module + that bundle's config
-//!       ├── qwen-vllm.yaml     0600
-//!       └── .preferred         0600   the owner's explicit default (a name)
+//!   <home>/                        0700   FANTASTIC_HOME, else ~/.config/fantastic
+//!   ├── agents/                    0700   per-agent-kind state (owner 2026-10-12)
+//!   │   └── ai_agent/              0700
+//!   │       ├── templates/         0700
+//!   │       │   ├── opus.yaml      0600   handler_module + that bundle's config
+//!   │       │   └── .preferred     0600   the owner's explicit default (a name)
+//!   │       └── keys/              0700   the key mode + refs (`secrets`)
+//!   └── fantastics/                0700   the stored locations (`user_store`)
 //! ```
 //!
 //! THE BINARY OWNS IT. Its directory and the callers it serves are fixed when the
@@ -71,6 +74,39 @@ pub const NOT_IN_A_TEMPLATE: [&str; 10] = [
 
 const PREFERRED: &str = ".preferred";
 
+/// The AI agent's dir under the home: `agents/ai_agent`.
+pub fn ai_agent_dir(home: &Path) -> PathBuf {
+    home.join("agents").join("ai_agent")
+}
+
+/// The templates dir under the home.
+pub fn templates_dir(home: &Path) -> PathBuf {
+    ai_agent_dir(home).join("templates")
+}
+
+/// Create `dir` and every missing level up from `home`, each `0700`; refuse any
+/// level others can read.
+pub(crate) fn private_dirs(home: &Path, dir: &Path) -> Result<(), Value> {
+    let mut levels = vec![home.to_path_buf()];
+    if let Ok(rest) = dir.strip_prefix(home) {
+        let mut at = home.to_path_buf();
+        for c in rest.components() {
+            at.push(c);
+            levels.push(at.clone());
+        }
+    }
+    for d in &levels {
+        if !d.exists() {
+            fs::DirBuilder::new()
+                .mode(0o700)
+                .create(d)
+                .map_err(|e| refusal(BAD_ARG, format!("user_home_store: {}: {e}", d.display())))?;
+        }
+        private(d, true)?;
+    }
+    Ok(())
+}
+
 /// Where the templates live, resolved ONCE by the binary: `FANTASTIC_HOME`, else
 /// `$HOME/.config/fantastic`. `Err` names what is missing — never guessed.
 pub fn home_dir_from_env() -> Result<PathBuf, String> {
@@ -100,7 +136,7 @@ impl UserHomeStore {
     /// read creates nothing on the user's disk.
     fn templates_if_any(&self) -> Result<Option<PathBuf>, Value> {
         let home = self.home.as_ref().map_err(|e| refusal(NOT_FOUND, format!("user_home_store: {e}")))?;
-        let dir = home.join("templates");
+        let dir = templates_dir(home);
         if !dir.exists() {
             return Ok(None);
         }
@@ -112,17 +148,8 @@ impl UserHomeStore {
     /// The templates dir for a WRITE: created `0700` (both levels) if missing.
     fn templates(&self) -> Result<PathBuf, Value> {
         let home = self.home.as_ref().map_err(|e| refusal(NOT_FOUND, format!("user_home_store: {e}")))?;
-        let dir = home.join("templates");
-        for d in [home.as_path(), dir.as_path()] {
-            if !d.exists() {
-                fs::DirBuilder::new()
-                    .recursive(true)
-                    .mode(0o700)
-                    .create(d)
-                    .map_err(|e| refusal(BAD_ARG, format!("user_home_store: {}: {e}", d.display())))?;
-            }
-            private(d, true)?;
-        }
+        let dir = templates_dir(home);
+        private_dirs(home, &dir)?;
         Ok(dir)
     }
 
@@ -316,7 +343,7 @@ impl UserHomeStore {
     }
 
     fn load_tree(&self) -> Result<Value, Value> {
-        let shown = self.home.as_ref().map(|h| h.join("templates").display().to_string()).unwrap_or_default();
+        let shown = self.home.as_ref().map(|h| templates_dir(h).display().to_string()).unwrap_or_default();
         let Some(dir) = self.templates_if_any()? else {
             return Ok(json!({"templates": [], "preferred": null, "dir": shown}));
         };
@@ -368,7 +395,7 @@ impl UserHomeStore {
         json!({
             "handler_module": HANDLER_MODULE,
             "sentence": "The user's templates: named agent-record blueprints in the home config dir, applied by the CLI when it creates an agent.",
-            "dir": self.home.as_ref().map(|h| h.join("templates").display().to_string()).ok(),
+            "dir": self.home.as_ref().map(|h| templates_dir(h).display().to_string()).ok(),
             "serves": self.callers,
         })
     }
@@ -427,6 +454,7 @@ impl Bundle for UserHomeStore {
 }
 
 pub mod secrets;
+pub mod user_store;
 
 #[cfg(test)]
 mod tests;

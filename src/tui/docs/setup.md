@@ -26,10 +26,18 @@ its targets and `memory`), grants both sides, boots and flushes it.
 
 - Kept in the kernel's credential store, the `credentials` agent
   (`reflect credentials`). Where it keeps them is the human's choice, with no
-  default: **plain** — one 0600 file, `<home>/credentials.yaml` (not secured);
+  default: **plain** — one 0600 file, `<home>/agents/ai_agent/keys/credentials.yaml` (not secured);
   **secure** — the keychain. `<home>` is `FANTASTIC_HOME`, else
   `~/.config/fantastic`. Until a choice is made there is no `credentials`
   agent.
+- The home, laid out:
+
+  ```
+  <home>/
+  ├── agents/ai_agent/templates/   saved set-ups (+ .preferred, the default)
+  ├── agents/ai_agent/keys/        mode, refs.json (refs, no values), credentials.yaml (plain mode)
+  └── fantastics/                  stored fantastic locations (the user store)
+  ```
 - A key is a REF `<provider>/<host>` (`responses/api.openai.com`) bound to its
   endpoint's host; the store refuses to hand it to any other host.
 - An AI agent names its ref on its record — `credentials: {store:

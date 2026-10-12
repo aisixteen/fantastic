@@ -100,3 +100,16 @@ test("an MCP server agent is drawn by its own view: url + tools, its grant refle
   assert.deepEqual(toolsOf({ verbs: { search: "args: q:str (req)", fetch: "args: url:str" } }), [["search", "args: q:str (req)"], ["fetch", "args: url:str"]]);
   assert.deepEqual(toolsOf({ error: "x" }), []);
 });
+
+test("a cell head names it once: the id beside the title only when they differ", async () => {
+  const { headTitle } = await import("../src/bundles/canvas/host_views.ts");
+  assert.equal(headTitle("ai_view_e96d14e9", "ai_view_e96d14e9"), "ai_view_e96d14e9");
+  assert.match(headTitle("tree view", "tree_42511a66"), /^tree view · <code[^>]*>tree_42511a66<\/code>$/);
+});
+
+test("the user store tile places a view of the host's user_store agent", async () => {
+  const { tiles } = await import("../src/bundles/canvas/action_popup.ts");
+  const t = tiles("user", null).find((x) => x.label === "user store");
+  assert.deepEqual(t?.pick, { kind: "user_store" });
+  assert.equal(t?.section, "host");
+});

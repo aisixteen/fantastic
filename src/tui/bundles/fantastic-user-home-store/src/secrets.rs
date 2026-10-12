@@ -2,9 +2,10 @@
 //! (there is no default: nothing is stored until a mode is chosen).
 //!
 //! ```text
-//!   <home>/secrets/            0700
-//!   ├── mode                   0600   "plain" | "secure"
-//!   └── refs.json              0600   {ref: host} — the keys stored, NO values
+//!   <home>/agents/ai_agent/keys/   0700
+//!   ├── mode                       0600   "plain" | "secure"
+//!   ├── refs.json                  0600   {ref: host} — the keys stored, NO values
+//!   └── credentials.yaml           0600   the PLAIN mode's values
 //! ```
 //!
 //! The keys themselves live in the kernel's CREDENTIAL STORE (the
@@ -12,20 +13,23 @@
 //! host, written and read only with secret marks, never in a record, a row or
 //! the environment. The mode decides that store's BACKEND ([`Mode::store`]):
 //!
-//! - PLAIN — one private file, `<home>/credentials.yaml` (0600): no keychain,
+//! - PLAIN — one private file, `keys/credentials.yaml` (0600): no keychain,
 //!   no prompts, readable by anything running as the user;
 //! - SECURE — the platform keychain, one item per ref.
 //!
 //! Changing the mode with keys already stored is refused by the caller (the
 //! values would stay behind in the old backend).
 
-use std::fs;
-use std::os::unix::fs::DirBuilderExt;
 use std::path::PathBuf;
 
 use serde_json::{json, Value};
 
-use crate::{private, read_private, write_private};
+use crate::{ai_agent_dir, private, private_dirs, read_private, write_private};
+
+/// The keys dir under the home: `agents/ai_agent/keys`.
+pub fn keys_dir(home: &std::path::Path) -> PathBuf {
+    ai_agent_dir(home).join("keys")
+}
 
 /// The keychain namespace the SECURE mode's items live under.
 pub const KEYCHAIN_NAMESPACE: &str = "aisixteen.fantastic-tui";
@@ -58,16 +62,16 @@ impl Mode {
     /// The credential store's record fields for this mode, under `home`.
     pub fn store(self, home: &std::path::Path) -> Value {
         match self {
-            Mode::Plain => json!({"backend": "file", "file": home.join(CREDENTIALS).display().to_string()}),
+            Mode::Plain => json!({"backend": "file", "file": keys_dir(home).join(CREDENTIALS).display().to_string()}),
             Mode::Secure => json!({"backend": "keychain", "keychain_namespace": KEYCHAIN_NAMESPACE}),
         }
     }
 }
 
-/// The plain mode's file, under the home.
+/// The plain mode's file, in the keys dir.
 pub const CREDENTIALS: &str = "credentials.yaml";
 
-/// The key-mode choice over `<home>/secrets`.
+/// The key-mode choice over the keys dir.
 pub struct Secrets {
     home: Result<PathBuf, String>,
 }
@@ -96,7 +100,7 @@ impl Secrets {
     }
 
     fn dir(&self) -> Result<PathBuf, String> {
-        Ok(self.home.as_ref().map_err(Clone::clone)?.join("secrets"))
+        Ok(keys_dir(self.home.as_ref().map_err(Clone::clone)?))
     }
 
     /// The chosen mode, `None` until the user chooses one. Creates nothing.
@@ -113,10 +117,10 @@ impl Secrets {
 
     /// Where the keys are, in the user's words — shown next to the mode.
     pub fn describe(&self, mode: Option<Mode>) -> String {
-        let home = self.home.as_ref().map(|d| d.display().to_string()).unwrap_or_else(|e| e.clone());
+        let dir = self.dir().map(|d| d.display().to_string()).unwrap_or_else(|e| e);
         match mode {
             None => "not chosen — pick plain or secure before storing a key".to_string(),
-            Some(Mode::Plain) => format!("plain text in {home}/{CREDENTIALS} (0600)"),
+            Some(Mode::Plain) => format!("plain text in {dir}/{CREDENTIALS} (0600)"),
             Some(Mode::Secure) => format!("the keychain (namespace {KEYCHAIN_NAMESPACE}, one item per key)"),
         }
     }
@@ -144,20 +148,11 @@ impl Secrets {
         write_private(&dir.join(REFS), &body).map_err(msg)
     }
 
-    /// Record the mode. The home and its `secrets/` dir are created `0700`.
+    /// Record the mode. The home and each level down to the keys dir are created `0700`.
     pub fn set_mode(&self, to: Mode) -> Result<(), String> {
         let home = self.home.as_ref().map_err(Clone::clone)?;
-        let dir = home.join("secrets");
-        for d in [home.as_path(), dir.as_path()] {
-            if !d.exists() {
-                fs::DirBuilder::new()
-                    .recursive(true)
-                    .mode(0o700)
-                    .create(d)
-                    .map_err(|e| format!("secrets: {}: {e}", d.display()))?;
-            }
-            private(d, true).map_err(msg)?;
-        }
+        let dir = keys_dir(home);
+        private_dirs(home, &dir).map_err(msg)?;
         write_private(&dir.join(MODE), to.name().as_bytes()).map_err(msg)
     }
 }
@@ -165,6 +160,7 @@ impl Secrets {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     fn home() -> PathBuf {
         let d = std::env::temp_dir().join(format!("fc-secrets-{}-{}", std::process::id(), rand_suffix()));
@@ -193,9 +189,22 @@ mod tests {
     }
 
     #[test]
+    fn keys_live_under_agents_ai_agent_keys_every_level_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let h = home();
+        Secrets::new(Ok(h.clone())).set_mode(Mode::Plain).unwrap();
+        for d in ["", "agents", "agents/ai_agent", "agents/ai_agent/keys"] {
+            assert_eq!(fs::metadata(h.join(d)).unwrap().permissions().mode() & 0o777, 0o700, "{d}");
+        }
+        assert!(h.join("agents/ai_agent/keys/mode").is_file());
+        assert!(!h.join("secrets").exists(), "nothing at the old place");
+        let _ = fs::remove_dir_all(&h);
+    }
+
+    #[test]
     fn each_mode_names_its_credential_store_backend() {
         let h = PathBuf::from("/h");
-        assert_eq!(Mode::Plain.store(&h), json!({"backend": "file", "file": "/h/credentials.yaml"}));
+        assert_eq!(Mode::Plain.store(&h), json!({"backend": "file", "file": "/h/agents/ai_agent/keys/credentials.yaml"}));
         assert_eq!(Mode::Secure.store(&h)["backend"], "keychain");
     }
 }

@@ -37,7 +37,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[6] / "e2e"))
-from _lib.canvas_live import FOLDER, Rig, private_write, say, spot, verdict  # noqa: E402
+from _lib.canvas_live import FOLDER, Rig, other_setups, private_write, rebound, say, spot, verdict, tpl_dir  # noqa: E402
 from mocks.vllm import VllmMock  # noqa: E402
 
 CHATS = "[...document.querySelectorAll('.chat-view')].map(v=>v.closest('.agent-frame').dataset.id)"
@@ -86,9 +86,9 @@ def main() -> bool:
     rig.build("vllm")
     rig.make_home(None)
     # two saved templates: the default on the mock, and a small-window one
-    private_write(rig.home / "templates" / "mock.yaml", template(mock.url))
-    private_write(rig.home / "templates" / "small.yaml", template(small.url, context_window=W, max_tokens=W, context_strategy="fold", context_async=True, context_titles=True))
-    private_write(rig.home / "templates" / ".preferred", "mock")
+    private_write(tpl_dir(rig.home) / "mock.yaml", template(mock.url))
+    private_write(tpl_dir(rig.home) / "small.yaml", template(small.url, context_window=W, max_tokens=W, context_strategy="fold", context_async=True, context_titles=True))
+    private_write(tpl_dir(rig.home) / ".preferred", "mock")
     r: dict = {}
     info: dict = {}
     try:
@@ -372,9 +372,15 @@ def main() -> bool:
                 small.responder = lambda body: (
                     "Filler turns about lorem ipsum\n\nASKED: filler turns\nDONE: answered each\nBINDING: none\nERRORS: none\nOPEN: none"
                     if "FOLD this finished piece of work" in json.dumps(body) else None)
-                await spot(pg, 300, 700, "@small hi")
+                # an AI on the `small` set-up: the default's cell, then its ⚙ →
+                # `‹ other set-ups` → the saved `small` rebinds it (no menu tile)
+                await spot(pg, 300, 700, "AI agent")
                 await pg.until(f"{CHATS}.length === 2", 15)
                 c = [x for x in await pg.js(CHATS) if x != b][0]
+                await ready(pg, c)
+                await other_setups(pg, c)
+                await pg.js("[...document.querySelectorAll('.wiz .saved button')].find(b=>b.querySelector('.name').textContent==='small')?.click()")
+                await rebound(pg, c, 15)
                 await ready(pg, c)
                 for k in range(8):
                     small.reply(f"S8-turn-{k} " + long)

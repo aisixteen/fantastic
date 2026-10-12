@@ -45,8 +45,8 @@ export const CANVAS_THEME_AGENT = "backgrounds.ts";
  *  768px breakpoint — under it, one column). */
 export const MOBILE_MAX_WIDTH = 768;
 /** The mobile column, in view coordinates: the first cell's top at `top`, then
- *  `gap` between cells — room for each cell's head (32px) and bezel above it. */
-export const COLUMN = { x: 0, width: 400, top: 40, gap: 48 } as const;
+ *  `gap` between cells — exactly each cell's head (32px): flat, no holes. */
+export const COLUMN = { x: 0, width: 400, top: 32, gap: 32 } as const;
 /** The space kept between cells the canvas theme places. */
 export const GAP = 24;
 
@@ -64,6 +64,9 @@ export const STOCK_THEMES: ReadonlyArray<ThemeDef> = [
   { name: "canvas", layout: "free", trigger: null, note: "the free 2D canvas" },
   { name: "mobile", layout: "column", trigger: { max_width: MOBILE_MAX_WIDTH - 1 }, note: "one column — a tab under 768px wide" },
 ];
+
+/** The default theme: the free canvas, never deleted (owner 2026-10-12). */
+export const DEFAULT_THEME: Theme = "canvas";
 
 /** A name a theme may take (it names its layout agent). */
 export const themeNameOk = (n: string): boolean => /^[A-Za-z0-9_-]{1,40}$/.test(n);
@@ -153,15 +156,34 @@ export function columnSpot(occupied: Rect[], height: number): Rect {
 }
 
 /** MOBILE: the cells as ONE column — in their order top to bottom, each at the
- *  column's x and full width, `gap` apart; heights kept. */
-export function stack(rects: Record<string, Rect>): Record<string, Rect> {
+ *  column's x and full width, `gap` apart; heights kept. A `minimized` cell is
+ *  its head alone: the next one follows its head. */
+export function stack(rects: Record<string, Rect>, minimized: ReadonlySet<string> = new Set()): Record<string, Rect> {
   const out: Record<string, Rect> = {};
   let y: number = COLUMN.top;
   for (const [id, r] of Object.entries(rects).sort((a, b) => a[1].y - b[1].y)) {
     out[id] = { x: COLUMN.x, y, width: COLUMN.width, height: r.height };
-    y += r.height + COLUMN.gap;
+    y += (minimized.has(id) ? 0 : r.height) + COLUMN.gap;
   }
   return out;
+}
+
+/** MOBILE REORDER: the `y` that puts cell `id`, dropped with its top at `top`,
+ *  in the slot its centre is over — just above the first cell whose centre is
+ *  below it, else after the last; its own `y` when that changes nothing. The
+ *  column restacks by `y` (`stack`). */
+export function reorderY(rects: Record<string, Rect>, id: string, top: number): number {
+  const me = rects[id];
+  if (me === undefined) return top;
+  const mid = top + me.height / 2;
+  const others = Object.entries(rects).filter(([k]) => k !== id).sort((a, b) => a[1].y - b[1].y);
+  const before = others.findIndex(([, r]) => mid < r.y + r.height / 2);
+  // the slot it already holds: nothing moves
+  const now = others.findIndex(([, r]) => r.y > me.y);
+  if (before === now) return me.y;
+  if (before >= 0) return others[before]![1].y - 0.5;
+  const last = others[others.length - 1];
+  return last !== undefined ? last[1].y + 0.5 : me.y;
 }
 
 /** Where a theme of layout `kind` puts a cell it has no rect for. */
@@ -232,6 +254,23 @@ export function setPinned(kernel: Kernel, view: string, theme: Theme, cell: stri
   kernel.updateMeta(layoutId(theme), { pinned: cell } as unknown as Payload);
 }
 
+/** The cells MINIMIZED in `theme` — shown as their head bar alone (a double
+ *  click on the head toggles it). */
+export function minimizedOf(kernel: Kernel, view: string, theme: Theme): Set<string> {
+  const a = kernel.get(layoutId(theme));
+  const m = a !== undefined && a.parentId === view ? a.meta["minimized"] : null;
+  return new Set(Array.isArray(m) ? m.filter((x): x is string => typeof x === "string") : []);
+}
+
+/** Minimize `cell` in `theme` (`on` false: back to its full size). */
+export function setMinimized(kernel: Kernel, view: string, theme: Theme, cell: string, on: boolean): void {
+  if (kernel.get(layoutId(theme)) === undefined) writeRects(kernel, view, theme, {});
+  const m = minimizedOf(kernel, view, theme);
+  if (on) m.add(cell);
+  else m.delete(cell);
+  kernel.updateMeta(layoutId(theme), { minimized: [...m] } as unknown as Payload);
+}
+
 /** Drop every rect of cells no longer in `view` (all themes). */
 export function prune(kernel: Kernel, view: string, live: Set<string>): void {
   // every layout the view holds (a deleted theme's too)
@@ -241,6 +280,7 @@ export function prune(kernel: Kernel, view: string, live: Set<string>): void {
   for (const t of themes) {
     const p = pinnedOf(kernel, view, t);
     if (p !== null && !live.has(p)) setPinned(kernel, view, t, null);
+    for (const m of minimizedOf(kernel, view, t)) if (!live.has(m)) setMinimized(kernel, view, t, m, false);
     const rects = rectsOf(kernel, view, t);
     const gone = Object.keys(rects).filter((k) => !live.has(k));
     if (gone.length === 0) continue;
@@ -276,6 +316,7 @@ export const LAYOUT_README =
   "The cells are untouched by it; the view's `theme` verb picks which theme is in use (auto: the first whose width trigger matches the tab — stock `mobile` under 768px wide). " +
   "Themes are listed, added and edited on the canvas theme agent (`themes`, `add_theme`…). " +
   "Move cells with the view's `move`; a cell with no rect in a theme is placed by its layout (free: free space near the centre; column: the column's bottom). " +
+  "`minimized: [<cell id>…]`: those cells show their head bar alone (a double click on the head toggles it). " +
   "`pinned: <cell id>` (a column theme): that cell is held on the screen's bottom while the column scrolls (the 📌 on its head).";
 
 /** A layout holds state only: it answers reflect (the kernel's) and nothing else. */

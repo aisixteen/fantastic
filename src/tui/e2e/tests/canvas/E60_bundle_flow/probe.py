@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from _lib.canvas_live import Rig, verdict, ask, say, wait_quiet  # noqa: E402
+from _lib.canvas_live import Rig, verdict, ask, say, wait_quiet, tpl_dir  # noqa: E402
 
 RELEASE = "release_agent"
 
@@ -63,7 +63,7 @@ def main() -> bool:
     async def drive() -> None:
         async with rig.page(1900, 1100) as pg:
             # a) the AI is set up: its template is the default (its cell opens on the first ask, f)
-            r["ai_ready"] = (rig.home / "templates" / ".preferred").exists()
+            r["ai_ready"] = (tpl_dir(rig.home) / ".preferred").exists()
             # b) double-click → python agent
             for c in (1, 2):
                 await pg.mouse("mousePressed", 900, 500, c)

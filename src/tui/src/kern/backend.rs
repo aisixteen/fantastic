@@ -22,7 +22,7 @@
 //! SQLite). The store admits it as `user` (the store's parent); its record lets
 //! `user` call the chat verbs; `user`'s own side is `kern/reach`'s.
 //!
-//! Verbs: `presets` (template names, their backend and model, and the default),
+//! Verbs: `presets` (the default AI set-up and the project's bundles),
 //! `spawn {template?, stamp?, peer_grants?}` (the named template, else the
 //! owner's default — no default and no name is refused, naming how to set one).
 //!
@@ -114,8 +114,8 @@ impl BackendBundle {
     }
 
     /// Whether `handler` makes an AI agent: its bundle's record names a memory
-    /// store (`memory_store_id`, the field that makes one). Any other template
-    /// is a plain HOST agent — a plugin (backend-owned views).
+    /// store (`memory_store_id`, the field that makes one). A template is an AI
+    /// set-up; one on any other handler is not offered.
     pub(crate) fn is_ai_handler(host: &Host, handler: &str) -> bool {
         host.kernel
             .bundles
@@ -128,12 +128,6 @@ impl BackendBundle {
     async fn presets(host: &Host) -> Value {
         match crate::kern::templates::shelf(host).await {
             Ok(sh) => json!({
-                "templates": sh.templates.iter().map(|t| json!({
-                    "name": t.name, "handler_module": t.handler(), "model": t.model(),
-                    // an AI template opens a chat; any other is a plugin: a host
-                    // agent drawn by its own view
-                    "kind": if Self::is_ai_handler(host, &t.handler()) { "ai" } else { "agent" },
-                })).collect::<Vec<_>>(),
                 "preferred": sh.preferred,
                 "bundles": Self::project_bundles(host),
             }),
@@ -206,10 +200,8 @@ impl BackendBundle {
         let Some(t) = shelf.templates.iter().find(|t| t.name == name) else {
             return refuse("not_found", format!("no template `{name}`"), "open ⚙ AI set-up to see your templates");
         };
-        // A PLUGIN template (not an AI): a plain host agent from the record —
-        // no memory store, its key by reference, a fork of the template (`from`)
         if !Self::is_ai_handler(host, &t.handler()) {
-            return Self::spawn_agent(host, me, &name, t, stamp).await;
+            return refuse("bad_arg", format!("template `{name}` is not an AI set-up ({})", t.handler()), "open ⚙ AI set-up to see your templates");
         }
         let ai = format!("ai_{}", hex8());
         let mut spec: Map<String, Value> = t.record.clone();
@@ -296,32 +288,6 @@ impl BackendBundle {
             return refuse("bad_arg", format!("spawn: `{id}`'s view: {e}"), "");
         }
         json!({"id": id, "root": id, "bundle": name, "kind": "bundle"})
-    }
-
-    /// A plugin template placed: a host agent `<name>_<hex8>` under `canvas_root`,
-    /// its record the template's (a COPY — `from: <template>`), its key attached
-    /// by reference. `kern/reach` grants it to the human and the leg.
-    async fn spawn_agent(host: &Host, me: &AgentId, name: &str, t: &crate::kern::templates::Template, stamp: Map<String, Value>) -> Value {
-        let slug: String = name.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' }).collect();
-        let id = format!("{slug}_{}", hex8());
-        let mut spec: Map<String, Value> = t.record.clone();
-        spec.extend(stamp);
-        spec.insert("from".into(), json!(name));
-        let handler = t.handler();
-        if let Err(e) = crate::kern::keys::attach(host, &handler, &mut spec) {
-            return refuse("bad_arg", format!("spawn: `{name}`: {e}"), "");
-        }
-        spec.insert("type".into(), json!("create_agent"));
-        spec.insert("parent_id".into(), json!(me.0));
-        spec.insert("id".into(), json!(id));
-        let r = host.operator("kernel", Value::Object(spec)).await.result;
-        if let Some(e) = r.get("error").and_then(Value::as_str) {
-            return refuse("bad_arg", format!("spawn: the agent from template `{name}`: {e}"), "");
-        }
-        if let Err(e) = crate::kern::reach::granted(host, &id).await {
-            return refuse("bad_arg", e, "");
-        }
-        json!({"id": id, "root": id, "template": name, "handler_module": handler, "kind": "agent"})
     }
 
     /// Create AI `ai` as `canvas_root`'s direct child, on the project's memory
@@ -671,7 +637,7 @@ impl Bundle for BackendBundle {
         json!({
                     "create": "args: record:dict (req — handler_module, id?, its own fields; no parent or grants). One direct child of this agent; asking for an existing child of the same handler again answers it. {id, …}.",
                     "delete": "args: id:str (req — an agent under this one). Deletes it and its subtree.",
-                    "presets": "No args. {templates: [{name, handler_module, model}], preferred, bundles: [{name, sentence}] (the project's own bundles)}.",
+                    "presets": "No args. {preferred (the default AI set-up), bundles: [{name, sentence}] (the project's own bundles)}.",
                     "spawn": "args: template:str? (else the default) | bundle:str (a NEW project bundle from that starter) | instance_of:str (one more instance of a project bundle), stamp:dict? (the caller's own fields for the backend root, copied unread), peer_grants:dict? (any grant key — more egress for the AI). {id, root, template, handler_module, model}.",
                     "keep": "args: id:str (req — the cell's AI), name:str?. Records the dialog (its rows are already in the project's memory store); it outlives the cell. {kept, name}.",
                     "rename": "args: id:str, name:str. {id, name}.",

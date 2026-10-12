@@ -9,9 +9,12 @@ MOCKS (`e2e/mocks`, no model). For each provider, in one canvas:
      wizard when the backend requires a key, else the agent answers keyless.
   D. A FAILED TURN (the mock answers 500 on every request): the chat offers settings.
   E. ⚙ SETTINGS on A: a changed model is on the live record and on the next turn.
-  F. A SAVED provider from page 1: a new agent at once, answering.
-  G. SKIP → the cell's ⚙ settings → page 1 → the saved provider: the SAME cell is
-     bound and answers."""
+  F. A SAVED provider from page 1 (an AI cell's ⚙ → `‹ other set-ups`): the
+     SAME cell is bound at once, answering.
+
+The wizard for a new agent is the double-click's ONE `AI agent` tile: the
+wizard itself while nothing is set up, else an AI cell on the default whose
+⚙ → `‹ other set-ups` is page 1 for it (a create rebinds that cell)."""
 
 from __future__ import annotations
 
@@ -23,7 +26,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[6] / "e2e"))
-from _lib.canvas_live import Rig, say, spot, verdict  # noqa: E402
+from _lib.canvas_live import Rig, new_ai_wizard, rebound, say, verdict  # noqa: E402
 from mocks.anthropic import AnthropicMock  # noqa: E402
 from mocks.ollama import OllamaMock  # noqa: E402
 from mocks.responses import ResponsesMock  # noqa: E402
@@ -39,10 +42,10 @@ BTN = "((t)=>[...document.querySelectorAll('.wiz button')].find(b=>b.textContent
 CHATS = "[...document.querySelectorAll('.chat-view')].map(v=>v.closest('.agent-frame').dataset.id)"
 
 
-async def wizard(pg, x: int, y: int) -> None:
-    """Open the wizard from the double-click at (x, y)."""
-    await spot(pg, x, y, "new AI agent…")
-    await pg.until("document.querySelectorAll('.wiz .tiles button').length === 4", 8)
+async def wizard(pg, x: int, y: int) -> str | None:
+    """Open the wizard for a new agent from the double-click at (x, y); the cell
+    it will bind, or None (a create then makes a new cell)."""
+    return await new_ai_wizard(pg, x, y)
 
 
 async def page2(pg, provider: str, url: str, model: str, key: str) -> dict:
@@ -69,15 +72,20 @@ async def page2(pg, provider: str, url: str, model: str, key: str) -> dict:
     return shown
 
 
-async def create(pg) -> tuple[str | None, str]:
-    """Press create; the new chat cell's id (None if the wizard stayed) and what it said."""
+async def create(pg, target: str | None) -> tuple[str | None, str]:
+    """Press create; the chat cell's id — `target` rebound, or a new cell — (None
+    if the wizard stayed) and what it said."""
     before = set(await pg.js(CHATS))
     await pg.js(f"{BTN}('create')?.click()")
     t0 = time.time()
     while time.time() - t0 < 8:
-        now = set(await pg.js(CHATS))
-        if (now - before) and not await pg.js("!!document.querySelector('.wiz')"):
-            return (now - before).pop(), ""
+        if target is not None:
+            if await rebound(pg, target, 0.3):
+                return target, ""
+        else:
+            now = set(await pg.js(CHATS))
+            if (now - before) and not await pg.js("!!document.querySelector('.wiz')"):
+                return (now - before).pop(), ""
         said = await pg.js("document.querySelector('.wiz .say')?.textContent || ''")
         if said.startswith("✕"):
             return None, said
@@ -131,22 +139,22 @@ def main() -> bool:
                     mocks.extend([keyed, open_])
                     base_y = 100 + i * 40
                     # A. a pasted key
-                    await wizard(pg, 200, base_y)
+                    at = await wizard(pg, 200, base_y)
                     p["A_page2"] = await page2(pg, provider, keyed.url, "mock-x", "new")
-                    a, p["A_say"] = await create(pg)
+                    a, p["A_say"] = await create(pg, at)
                     p["A_answers"] = bool(a) and await turn(pg, a, keyed, "hi", f"answer-A-{provider}")
                     lap(f"{provider}.A")
                     p["A_keys"] = sorted({k for k in keyed.keys() if k is not None} | ({None} if None in keyed.keys() else set()), key=str)
                     # B. the same host: the saved key
-                    await wizard(pg, 700, base_y)
+                    at = await wizard(pg, 700, base_y)
                     p["B_page2"] = await page2(pg, provider, keyed.url, "mock-x", "saved")
-                    b, p["B_say"] = await create(pg)
+                    b, p["B_say"] = await create(pg, at)
                     p["B_answers"] = bool(b) and await turn(pg, b, keyed, "hi", f"answer-B-{provider}")
                     lap(f"{provider}.B")
                     # C. no key, on the open mock
-                    await wizard(pg, 1200, base_y)
+                    at = await wizard(pg, 1200, base_y)
                     p["C_page2"] = await page2(pg, provider, open_.url, "mock-x", "none")
-                    c, p["C_say"] = await create(pg)
+                    c, p["C_say"] = await create(pg, at)
                     if c is None:
                         p["C_refused"] = "a key" in p["C_say"]
                         await pg.js(f"{BTN}('skip')?.click()")  # leave the wizard
@@ -177,27 +185,14 @@ def main() -> bool:
                         await asyncio.sleep(1.5)
                         p["E_record_model"] = (rig.host_record(ai) or {}).get("model") if ai else None
                     lap(f"{provider}.DE")
-                    # F. a saved provider from page 1
-                    await wizard(pg, 200, base_y + 600)
+                    # F. a saved provider from page 1: the SAME cell rebound at once
+                    f = await wizard(pg, 200, base_y + 600)
                     saved = await pg.js("[...document.querySelectorAll('.wiz .saved button .name')].map(n=>n.textContent)")
                     p["F_saved_list"] = saved
-                    before = set(await pg.js(CHATS))
                     await pg.js(f"[...document.querySelectorAll('.wiz .saved button')].find(b=>b.querySelector('.name').textContent==={json.dumps(provider + '-1')})?.click()")
-                    await pg.until(f"{CHATS}.length > {len(before)} && !document.querySelector('.wiz')", 8)
-                    f_new = list(set(await pg.js(CHATS)) - before)
-                    p["F_answers"] = bool(f_new) and await turn(pg, f_new[0], keyed, "hi", f"answer-F-{provider}")
+                    p["F_bound_same_cell"] = f is not None and await rebound(pg, f)
+                    p["F_answers"] = p["F_bound_same_cell"] and await turn(pg, f, keyed, "hi", f"answer-F-{provider}")
                     lap(f"{provider}.F")
-                    # G. skip → the cell's settings → the saved provider binds the SAME cell
-                    await wizard(pg, 700, base_y + 600)
-                    await pg.js(f"{BTN}('skip')?.click()")
-                    await pg.until("!!document.querySelector('.ai-not-set-up')", 8)
-                    g = await pg.js("document.querySelector('.ai-not-set-up').closest('.agent-frame').dataset.id")
-                    await pg.js("document.querySelector('.ai-not-set-up .nsu-settings').click()")
-                    await pg.until("document.querySelectorAll('.wiz .saved button').length > 0", 8)
-                    await pg.js(f"[...document.querySelectorAll('.wiz .saved button')].find(b=>b.querySelector('.name').textContent==={json.dumps(provider + '-1')})?.click()")
-                    p["G_bound_same_cell"] = bool(await pg.until(f"!!document.querySelector('.agent-frame[data-id=\"{g}\"] .chat-view') && !document.querySelector('.wiz')", 8))
-                    p["G_answers"] = p["G_bound_same_cell"] and await turn(pg, g, keyed, "hi", f"answer-G-{provider}")
-                    lap(f"{provider}.G")
                     p["keyed_keys_seen"] = sorted({str(k) for k in keyed.keys()})
                     p["E_next_turn_model"] = next((q["body"].get("model") for q in reversed(keyed.requests) if q.get("kind") == "turn" and isinstance(q.get("body"), dict)), None)
                     # tidy the canvas for the next provider
@@ -215,8 +210,7 @@ def main() -> bool:
             r[f"{provider}: C no key: answers keyless, or refused when required"] = p.get("C_refused") is True or (p.get("C_answers") is True and set(p.get("C_keys") or []) == {None})
             r[f"{provider}: D failed turn offers settings"] = p.get("D_offers_settings") is True
             r[f"{provider}: E settings change is live"] = p.get("E_saved") is True and p.get("E_record_model") == "mock-y"
-            r[f"{provider}: F saved provider answers"] = f"{provider}-1" in (p.get("F_saved_list") or []) and p.get("F_answers") is True
-            r[f"{provider}: G skip → settings binds the same cell"] = p.get("G_answers") is True
+            r[f"{provider}: F saved provider binds the same cell and answers"] = f"{provider}-1" in (p.get("F_saved_list") or []) and p.get("F_answers") is True
     finally:
         for m in mocks:
             m.stop()

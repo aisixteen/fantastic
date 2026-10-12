@@ -22,7 +22,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from _lib.canvas_live import Rig, verdict, private_write, spot  # noqa: E402
+from _lib.canvas_live import Rig, verdict, private_write, spot, keys_dir  # noqa: E402
 
 E95 = Path(__file__).resolve().parents[6] / "e2e" / "tests" / "connectors" / "E95_mcp_client" / "probe.py"
 
@@ -40,9 +40,7 @@ def main() -> bool:
     rig.build()
     rig.make_home(None)
     # where keys are kept: the user's choice (plain), as a set-up leaves it
-    (rig.home / "secrets").mkdir(parents=True, exist_ok=True)
-    (rig.home / "secrets").chmod(0o700)
-    private_write(rig.home / "secrets" / "mode", "plain")
+    private_write(keys_dir(rig.home) / "mode", "plain")
     fake, key = fake_server()
     rig.init()
     from _lib.dev_surface import frame_eval  # noqa: F401
@@ -98,7 +96,7 @@ def main() -> bool:
         r["agent_names_ref"] = (rec.get("credentials") or {}).get("ref", "").startswith("mcp_client/127.0.0.1:")
         leaked = [str(p) for p in (rig.proj / ".fantastic").rglob("*.yaml") if key in p.read_text(errors="ignore")]
         r["key_on_no_record"] = not leaked
-        r["key_in_home"] = key in (rig.home / "credentials.yaml").read_text() if (rig.home / "credentials.yaml").exists() else False
+        r["key_in_home"] = key in (keys_dir(rig.home) / "credentials.yaml").read_text() if (keys_dir(rig.home) / "credentials.yaml").exists() else False
         # d) a tool answers through the agent
         ans = send(aid, {"type": "get_weather", "city": "Kyiv"})
         info["answer"] = json.dumps(ans)[:300]

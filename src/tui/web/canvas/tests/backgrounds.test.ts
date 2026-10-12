@@ -86,3 +86,18 @@ test("none clears the background; default restores Isoline; rotate is kept in th
   await call({ type: "rotate", on: false });
   await call({ type: "shutdown" });
 });
+
+test("the default theme `canvas` cannot be deleted; a stock `mobile` still hides", async () => {
+  const { call } = page();
+  const r = await call({ type: "delete_theme", name: "canvas" });
+  assert.equal(r["reason"], "bad_arg");
+  assert.ok((((await call({ type: "themes" }))["themes"]) as { name: string }[]).some((t) => t.name === "canvas"), "canvas still listed");
+  assert.equal((await call({ type: "delete_theme", name: "mobile" }))["deleted"], "mobile");
+});
+
+test("the theme panel has no `+ new theme`: a new theme is the AI agent's to add", async () => {
+  const src = await import("node:fs").then((fs) => fs.readFileSync(new URL("../src/bundles/backgrounds/backgrounds_view.ts", import.meta.url), "utf8"));
+  assert.ok(!src.includes("+ new theme"));
+  assert.match(src, /To make a new theme, ask your AI agent/);
+  assert.match(src, /t\.name === DEFAULT_THEME && t\.from === "stock"\) r\.append\(b, ed\)/, "no × on the default theme");
+});

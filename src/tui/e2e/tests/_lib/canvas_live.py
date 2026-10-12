@@ -86,18 +86,26 @@ def seed_key(home: Path, record: dict) -> dict:
     if not key or not rec.get("endpoint"):
         return rec
     ref, host = f"{provider}/{host_of(rec['endpoint'])}", host_of(rec["endpoint"])
-    (home / "secrets").mkdir(parents=True, exist_ok=True)
-    os.chmod(home / "secrets", 0o700)
-    private_write(home / "secrets" / "mode", "plain")
-    private_write(home / "secrets" / "refs.json", json.dumps({ref: host}))
+    private_write(keys_dir(home) / "mode", "plain")
+    private_write(keys_dir(home) / "refs.json", json.dumps({ref: host}))
     # at rest the value carries its HOST (`{host, fields}`): a stored value with
     # no host is refused at read
-    private_write(home / "credentials.yaml", yaml.safe_dump({"refs": {ref: {"host": host, "fields": {"api_key": key}}}}))
+    private_write(keys_dir(home) / "credentials.yaml", yaml.safe_dump({"refs": {ref: {"host": host, "fields": {"api_key": key}}}}))
     return rec
 
 
+def tpl_dir(home: Path) -> Path:
+    """The home's AI templates: `agents/ai_agent/templates`."""
+    return home / "agents" / "ai_agent" / "templates"
+
+
+def keys_dir(home: Path) -> Path:
+    """The home's keys (mode, refs, the plain file): `agents/ai_agent/keys`."""
+    return home / "agents" / "ai_agent" / "keys"
+
+
 def private_write(p: Path, text: str) -> None:
-    p.parent.mkdir(parents=True, exist_ok=True)
+    os.makedirs(p.parent, mode=0o700, exist_ok=True)
     fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     os.write(fd, text.encode())
     os.close(fd)
@@ -163,13 +171,12 @@ class Rig:
 
     def make_home(self, template: dict | None = None, name: str = "plug") -> None:
         """A throwaway FANTASTIC_HOME — with `template` as the default, or none."""
-        (self.home / "templates").mkdir(parents=True, exist_ok=True)
+        os.makedirs(tpl_dir(self.home), mode=0o700, exist_ok=True)
         os.chmod(self.home, 0o700)
-        os.chmod(self.home / "templates", 0o700)
         if template is not None:
             template = seed_key(self.home, template)
-            private_write(self.home / "templates" / f"{name}.yaml", yaml.safe_dump(template, sort_keys=False))
-            private_write(self.home / "templates" / ".preferred", name)
+            private_write(tpl_dir(self.home) / f"{name}.yaml", yaml.safe_dump(template, sort_keys=False))
+            private_write(tpl_dir(self.home) / ".preferred", name)
 
     # ── the host ──────────────────────────────────────────────────────────
     def env(self) -> dict:
@@ -379,6 +386,41 @@ async def spot(pg: Page, x: int, y: int, text: str) -> None:
     await pg.cdp("Input.insertText", text=text)
     await asyncio.sleep(0.3)
     await pg.cdp("Input.dispatchKeyEvent", type="keyDown", key="Enter", code="Enter", windowsVirtualKeyCode=13)
+
+
+CHAT_IDS = "[...document.querySelectorAll('.chat-view')].map(v=>v.closest('.agent-frame').dataset.id)"
+
+
+async def other_setups(pg: Page, cell: str) -> None:
+    """AI cell `cell`'s ⚙ settings → `‹ other set-ups`: page 1 of the wizard FOR
+    that cell (a saved set-up or a new provider rebinds it). The old chat view is
+    marked, so `rebound` can tell the new one."""
+    await pg.js(f"document.querySelector('.agent-frame[data-id=\"{cell}\"] .chat-view')?.setAttribute('data-old', '1')")
+    await pg.js(f"[...document.querySelectorAll('.agent-frame[data-id=\"{cell}\"] > .frame-head .ext')].find(c=>c.textContent==='⚙')?.click()")
+    await pg.until("(document.querySelector('.wiz h1')?.textContent||'').startsWith('Settings')", 15)
+    await pg.js("[...document.querySelectorAll('.wiz button')].find(b=>b.textContent.trim()==='‹ other set-ups')?.click()")
+    await pg.until("document.querySelectorAll('.wiz .tiles button').length === 4", 10)
+
+
+async def rebound(pg: Page, cell: str, timeout: float = 8) -> bool:
+    """True once `cell` shows a NEW chat view (not the one `other_setups` marked) and the wizard is gone."""
+    return bool(await pg.until(f"!!document.querySelector('.agent-frame[data-id=\"{cell}\"] .chat-view:not([data-old])') && !document.querySelector('.wiz')", timeout))
+
+
+async def new_ai_wizard(pg: Page, x: int, y: int) -> str | None:
+    """The wizard for a new AI from the double-click's ONE `AI agent` tile: with
+    no default set-up it opens the wizard (None); with one it makes an AI cell on
+    it, and that cell's ⚙ → `‹ other set-ups` is the wizard for it (its id)."""
+    before = set(await pg.js(CHAT_IDS))
+    await spot(pg, x, y, "AI agent")
+    await pg.until(f"!!document.querySelector('.wiz .tiles button') || {CHAT_IDS}.length > {len(before)}", 20)
+    new = set(await pg.js(CHAT_IDS)) - before
+    if not new:
+        await pg.until("document.querySelectorAll('.wiz .tiles button').length === 4", 10)
+        return None
+    cell = new.pop()
+    await other_setups(pg, cell)
+    return cell
 
 
 async def open_sidebar(pg: Page, x: int, y: int) -> bool:

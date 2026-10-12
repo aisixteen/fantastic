@@ -3,21 +3,21 @@
 // top, and below it a GRID of icon tiles in two groups (backend-owned views):
 //
 //   page    html · stream · tree view · backgrounds · tips — page content (FE)
-//   host    ask (the default AI) · terminal · agent (set-up) · python agent · your plugins —
+//   host    ask (the default AI) · terminal · agent (set-up) · python agent —
 //           a HOST agent made, then a cell views it (BE)
 //   host · bundles  this project's own bundles — one more instance of each
 //   page · bundles  this canvas's page bundles (an html cell bundled) — likewise
-//   host · AI     your AI templates (★ the default) — a new AI cell on that one
 //   host · chats  your kept dialogs — reopened here
 //
-// Typing FILTERS the tiles; a kind typed exactly offers only that kind; `@name`
-// picks a template with the rest as the first turn; anything else becomes the
+// Your AI set-ups are NOT in the menu (owner 2026-10-12): the AI agent's is
+// chosen in its ⚙ settings (★ the default). Typing FILTERS the tiles; a kind
+// typed exactly offers only that kind; anything else becomes the
 // FIRST TURN of a new AI cell on the default template. With no default
 // template the first tile opens set-up instead — nothing is guessed. ←↑↓→ move
 // across the grid, ⏎ goes, esc / a click away closes; a pick replaces the popup.
 
 export type Pick =
-  | { kind: "ai"; template: string | null; text: string }
+  | { kind: "ai"; text: string }
   | { kind: "terminal" }
   | { kind: "html" }
   | { kind: "stream" }
@@ -26,16 +26,14 @@ export type Pick =
   | { kind: "backgrounds" }
   | { kind: "tips" }
   | { kind: "mcp" }
+  | { kind: "user_store" }
   | { kind: "chat"; id: string; name: string }
-  | { kind: "plugin"; template: string }
   | { kind: "bundle"; starter: string }
   | { kind: "instance"; bundle: string }
   | { kind: "page_instance"; bundle: string }
   | { kind: "coding"; name: string; path: string };
 
 export interface Presets {
-  /** `kind`: "ai" (a chat on it) or "agent" (a plugin: a host agent with its own view) */
-  templates: Array<{ name: string; handler_module: string; model: string; kind?: string }>;
   preferred: string | null;
   /** kept dialogs (`backend dialogs`) */
   dialogs: Array<{ id: string; name: string }>;
@@ -67,8 +65,8 @@ export function exactLine(argv: string[]): string {
   return argv.map(quote).join(" ").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-export type Section = "page" | "host" | "coding" | "bundles" | "page_bundles" | "ai" | "chats";
-export type Icon = "ask" | "terminal" | "html" | "stream" | "agent" | "template" | "chat" | "tree" | "backgrounds" | "tips" | "claude" | "codex" | "aider" | "opencode" | "fantastic" | "mcp";
+export type Section = "page" | "host" | "coding" | "bundles" | "page_bundles" | "chats";
+export type Icon = "ask" | "terminal" | "html" | "stream" | "agent" | "template" | "chat" | "tree" | "backgrounds" | "tips" | "claude" | "codex" | "aider" | "opencode" | "fantastic" | "mcp" | "store";
 
 export interface Tile {
   icon: Icon;
@@ -83,13 +81,13 @@ export const COLS = 5;
 
 const KINDS: Array<[string, Pick, Icon, Section]> = [
   ["terminal", { kind: "terminal" }, "terminal", "host"],
-  // the wizard, any time: one more AI agent from a saved provider, or a new one
-  ["new AI agent…", { kind: "setup" }, "agent", "host"],
   // a NEW python agent: a project bundle folder from the CLI's starter, one
   // instance placed — edit its folder, the change takes effect at once
   ["python agent", { kind: "bundle", starter: "python_agent" }, "template", "host"],
   // ONE remote MCP server as a host agent: its tools are its verbs
   ["mcp connector", { kind: "mcp" }, "mcp", "host"],
+  // the user's home: stored keys, set-ups and fantastic locations (owner 2026-10-12)
+  ["user store", { kind: "user_store" }, "store", "host"],
   ["html", { kind: "html" }, "html", "page"],
   ["stream", { kind: "stream" }, "stream", "page"],
   // the agent tree of both kernels (a `sidebar_view.ts` cell)
@@ -99,24 +97,14 @@ const KINDS: Array<[string, Pick, Icon, Section]> = [
   ["tips", { kind: "tips" }, "tips", "page"],
 ];
 /** The groups in DRAWN order — the flat tile order follows it (arrow keys walk it). */
-const SECTIONS: Section[] = ["host", "coding", "bundles", "page", "page_bundles", "ai", "chats"];
+const SECTIONS: Section[] = ["host", "coding", "bundles", "page", "page_bundles", "chats"];
 
 /** The tiles for what is typed, in order (sections in order). Pure. */
 export function tiles(typed: string, presets: Presets | null): Tile[] {
   const t = typed.trim();
   const low = t.toLowerCase();
   const out: Tile[] = [];
-  const all = presets?.templates ?? [];
-  const templates = all.filter((p) => p.kind !== "agent");
-  const plugins = all.filter((p) => p.kind === "agent");
   const dialogs = presets?.dialogs ?? [];
-  const at = /^@(\S*)\s*([\s\S]*)$/.exec(t);
-  if (at !== null) {
-    for (const p of templates.filter((p) => p.name.startsWith(at[1]!))) {
-      out.push({ icon: "template", label: `@${p.name}`, hint: p.model, pick: { kind: "ai", template: p.name, text: at[2]! }, section: "ai" });
-    }
-    return out;
-  }
   const exact = KINDS.find(([k]) => k.toLowerCase() === low);
   if (exact) return [{ icon: exact[2], label: exact[0], hint: "", pick: exact[1], section: exact[3] }];
   // a project bundle's name typed exactly: only that bundle (⏎ places it)
@@ -124,19 +112,17 @@ export function tiles(typed: string, presets: Presets | null): Tile[] {
   if (exactBundle) return [{ icon: "template", label: exactBundle.name, hint: "", pick: { kind: "instance", bundle: exactBundle.name }, section: "bundles" }];
   const exactPage = (presets?.pageBundles ?? []).find((b) => b.name.toLowerCase() === low);
   if (exactPage) return [{ icon: "html", label: exactPage.name, hint: "", pick: { kind: "page_instance", bundle: exactPage.name }, section: "page_bundles" }];
-  // THE FIRST TILE, "AI agent" (owner 2026-10-12: was "ask"): the default AI —
-  // free text is its first turn; with none set up, the wizard
-  if (presets?.preferred) {
-    out.push({ icon: "ask", label: t ? `AI agent · ${presets.preferred}` : "AI agent", hint: `★ ${presets.preferred}`, pick: { kind: "ai", template: null, text: t }, section: "host" });
-  } else {
-    out.push({ icon: "agent", label: "AI agent", hint: "set one up", pick: { kind: "setup" }, section: "host" });
-  }
+  // THE FIRST TILE, "AI agent" (owner 2026-10-12: was "ask"; the ONE way to make
+  // an AI — no "new AI agent…" beside it): the default AI, free text its first
+  // turn; with none set up, the wizard. Another provider: the cell's ⚙ settings.
+  const aiTile = (text: string): Tile =>
+    presets?.preferred
+      ? { icon: "ask", label: text ? `AI agent · ${presets.preferred}` : "AI agent", hint: `★ ${presets.preferred}`, pick: { kind: "ai", text }, section: "host" }
+      : { icon: "agent", label: "AI agent", hint: "set one up", pick: { kind: "setup" }, section: "host" };
+  if (low === "ai agent") return [aiTile("")];
+  out.push(aiTile(t));
   for (const [k, pick, icon, section] of KINDS) {
     if (!t || k.toLowerCase().startsWith(low)) out.push({ icon, label: k, hint: "", pick, section });
-  }
-  for (const p of plugins) {
-    if (t && !p.name.toLowerCase().startsWith(low)) continue;
-    out.push({ icon: "agent", label: p.name, hint: "plugin", pick: { kind: "plugin", template: p.name }, section: "host" });
   }
   for (const c of presets?.coding ?? []) {
     if (t && !c.name.startsWith(low)) continue;
@@ -154,11 +140,6 @@ export function tiles(typed: string, presets: Presets | null): Tile[] {
   for (const b of presets?.pageBundles ?? []) {
     if (t && !b.name.toLowerCase().startsWith(low)) continue;
     out.push({ icon: "html", label: b.name, hint: "", pick: { kind: "page_instance", bundle: b.name }, section: "page_bundles" });
-  }
-  for (const p of templates) {
-    if (t && !p.name.toLowerCase().startsWith(low)) continue;
-    const star = p.name === presets?.preferred ? " ★" : "";
-    out.push({ icon: "template", label: `@${p.name}${star}`, hint: p.model, pick: { kind: "ai", template: p.name, text: "" }, section: "ai" });
   }
   for (const d of dialogs) {
     if (t && !d.name.toLowerCase().includes(low)) continue;
@@ -226,6 +207,7 @@ const PATH: Record<Icon, string> = {
   template: '<path d="M12 3l1.8 4.7L18.5 9.5l-4.7 1.8L12 16l-1.8-4.7L5.5 9.5l4.7-1.8z"/><rect x="15" y="15" width="6" height="6" rx="1.5"/>',
   tree: '<rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 4v16M12 9h5M12 13h5"/>',
   tips: '<path d="M9 18h6M10 21h4"/><path d="M12 3a6 6 0 0 0-3.6 10.8c.7.6 1.1 1.4 1.1 2.2h5c0-.8.4-1.6 1.1-2.2A6 6 0 0 0 12 3z"/>',
+  store: '<ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v6c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/><path d="M4 12v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/>',
   backgrounds: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 15l5-5 4 4 3-3 6 6"/><circle cx="16" cy="9" r="1.5"/>',
   // the coding agents: plain outline marks of the menu's own, no vendor logo
   claude: '<path d="M12 3v18M3 12h18M5.6 5.6l12.8 12.8M18.4 5.6L5.6 18.4"/>',
@@ -240,7 +222,7 @@ export function iconSvg(icon: Icon): string {
   return `<svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${PATH[icon]}</svg>`;
 }
 
-const SECTION_TITLE: Record<Section, string> = { page: "page", host: "host", coding: "host · coding agents", bundles: "host · bundles", page_bundles: "page · bundles", ai: "host · AI", chats: "host · chats" };
+const SECTION_TITLE: Record<Section, string> = { page: "page", host: "host", coding: "host · coding agents", bundles: "host · bundles", page_bundles: "page · bundles", chats: "host · chats" };
 
 const CSS = `
   .action-popup { position: fixed; z-index: 1000; width: 520px; max-width: calc(100vw - 32px);
