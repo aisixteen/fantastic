@@ -961,8 +961,6 @@ dependencies = [
  "fantastic-kernel",
  "fantastic-scenario-probes",
  "serde_json",
- "sha2",
- "subtle",
  "tokio",
 ]
 

@@ -2,15 +2,13 @@
 
     cd src/lib/python && .venv/bin/python -u ../../../e2e/runners/canvas_user.py
 
-One host, ONE user (owner, 2026-10-03: the multi-user paradigm is dropped): the
-no token set (every tab gets in), then a token set (it must be given). One Chrome per storage (a
-browser keeps one token per origin).
+One host, ONE user (owner, 2026-10-03: the multi-user paradigm is dropped): a tab
+gets in through `user`, and `around` reads the page records.
 """
 
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import os
 import shutil
@@ -32,10 +30,6 @@ from helpers import verdict  # noqa: E402
 
 SC = E2E / "tests" / "scenario" / "E21_canvas_user" / "scenario.yaml"
 FRAMES = "document.querySelectorAll('#world .agent-frame, .agent-frame').length"
-
-
-def sha(t: str) -> str:
-    return hashlib.sha256(t.encode()).hexdigest()
 
 
 class Browser:
@@ -74,7 +68,7 @@ class Browser:
             self.proc.kill()
 
 
-async def tab(b: Browser, url: str, token: str | None = None, *, stack) -> Page:
+async def tab(b: Browser, url: str, *, stack) -> Page:
     import websockets
 
     ws = await stack.enter_async_context(websockets.connect(b.ws_url(), max_size=None))
@@ -82,9 +76,6 @@ async def tab(b: Browser, url: str, token: str | None = None, *, stack) -> Page:
     await p.cdp("Runtime.enable")
     await p.cdp("Page.enable")
     await p.open(url)
-    if token is not None:
-        await p.js(f"localStorage.setItem('fantastic.canvas.token', {json.dumps(token)})")
-        await p.open(url)
     return p
 
 
@@ -127,7 +118,6 @@ async def run(sc: dict, tmp: Path) -> bool:
     cwd.mkdir(parents=True)
     binary = build_bin(tmp)
     host = Host(binary, cwd, free_port())
-    tok = sc["tokens"]
     browsers: list[Browser] = []
     results: list[tuple[str, list[str]]] = []
     try:
@@ -139,7 +129,7 @@ async def run(sc: dict, tmp: Path) -> bool:
             me = Browser(tmp, "me", sc["window"])
             browsers.append(me)
 
-            # ── no token set: every tab gets in ─────────────────────────────
+            # ── a tab gets in ───────────────────────────────────────────────
             bad: list[str] = []
             a = await tab(me, url, stack=stack)
             if not await ready(a):
@@ -150,7 +140,7 @@ async def run(sc: dict, tmp: Path) -> bool:
                 bad.append(f"tab A shows {await a.js(FRAMES)} cells, want 1")
             if not await wait_for(lambda: len(members(cwd)) >= 1):
                 bad.append(f"no cell on disk: {members(cwd)}")
-            results.append(("no-token-set", bad))
+            results.append(("tab-gets-in", bad))
 
             # `around` is the host's, from the page records (a tab: as `user`)
             bad = []
@@ -160,31 +150,7 @@ async def run(sc: dict, tmp: Path) -> bool:
                 bad.append(f"around on the root view found nothing: {r}")
             results.append(("around-from-records", bad))
 
-            # ── a token set ─────────────────────────────────────────────────
-            bad = []
-            # the token is the SHELL's to set: `user`'s own record is written from
-            # above (its parent, or the operator) — here, on disk while it is down
-            host.stop()
-            rec_f = cwd / ".fantastic" / "agents" / "user" / "agent.yaml"
-            rec = yaml.safe_load(rec_f.read_text()) or {}
-            rec["token_sha256"] = sha(tok["admin"])
-            rec_f.write_text(yaml.safe_dump(rec, sort_keys=False))
-            host.start()
-            r = await host_call(port, "kernel", {"type": "reflect"})
-            if "a token is required" not in json.dumps(r):
-                bad.append(f"a tokenless call still works: {json.dumps(r)[:200]}")
-            fresh = Browser(tmp, "fresh", sc["window"])
-            browsers.append(fresh)
-            e = await tab(fresh, url, stack=stack)
-            if not await e.until("!!document.querySelector('.token-ask')", 15):
-                bad.append(f"no token form: {await e.js('document.body.innerText.slice(0,200)')}")
-            else:
-                await e.js(f"(()=>{{const f=document.querySelector('.token-ask'); f.querySelector('input').value={json.dumps(tok['admin'])}; f.requestSubmit();}})()")
-                if not await ready(e):
-                    bad.append("the admin token did not open the canvas")
-            results.append(("token-set", bad))
-
-            for p in (a, e):
+            for p in (a,):
                 for l in p.logs:
                     if "EXC" in l:
                         results.append(("page exceptions", [l]))

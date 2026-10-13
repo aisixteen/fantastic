@@ -228,6 +228,11 @@ async fn run(
                             }
                         }
                     }
+                    // THE GRANT WATCH, once the boot's own grant writes (the canvas's
+                    // above) are done; `ai` and `run` below wait on its grants
+                    if let Err(e) = crate::kern::reach::start(&h).await {
+                        app.note(e);
+                    }
                     // `ai BACKEND …` and `run COMMAND…`: with or without the canvas. One
                     // that cannot be done is a loud stop, like no page.
                     if let Some(b) = &boot.ai {

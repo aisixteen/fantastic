@@ -5,6 +5,7 @@ group: canvas
 title: "N two-way terminals over a heavy background: keystroke round trip, frame rate, row-store writes and disk growth per second"
 runner: probe.py
 costs: free
+solo: true   # measures frame rate under load: runs alone (e2e/run.py)
 limits:
   seconds: 600
 env: {}

@@ -186,6 +186,12 @@ async fn serve(paths: Paths, fresh: bool, proto_fd: i32, err_out: &mut std::fs::
         host.shutdown(&paths).await;
         return code;
     }
+    // THE GRANT WATCH, once the boot's own grant writes are done (`kern/reach`)
+    if let Err(e) = crate::kern::reach::start(&host).await {
+        let code = fatal(err_out, &e);
+        host.shutdown(&paths).await;
+        return code;
+    }
     if let Err(e) = listen(Arc::clone(&served)) {
         let code = fatal(err_out, &e);
         host.shutdown(&paths).await;
@@ -385,6 +391,8 @@ pub(crate) async fn ensure_leg(host: &Host) -> Result<(), String> {
             let _ = host.operator(LEG, json!({"type": "boot"})).await;
         }
     }
-    // Both edges on every agent BEFORE the first request is served.
-    crate::kern::reach::start(host).await
+    // Both edges on every agent BEFORE the first request is served (the watch
+    // for agents added later is started by the launcher, after its own grant
+    // writes: `kern/reach`).
+    crate::kern::reach::grant_all(host).await
 }

@@ -21,6 +21,7 @@ FANTASTIC title do, which is enough to verify legibility and behaviour headless.
 ## Script verbs (inside a scenario's ```script block)
 ```
 wait <ms>            sleep
+until <ms> <text…>   wait until the screen shows <text> (at most <ms>; prefer it to wait)
 type <text…>         send literal text (rest of the line)
 key  <name>          space|enter|esc|tab|backspace|ctrl-c|ctrl-f|ctrl-q|up|down|left|right|<char>
 shot <label>         capture one frame  → NN_<label>.txt

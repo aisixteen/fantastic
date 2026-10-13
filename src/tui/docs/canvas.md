@@ -116,8 +116,7 @@ PAGE BUNDLES: `<a canvas's records root>/bundles/<name>/bundle.yaml` with
 with). They load before the page tree; a changed `bundle.yaml` reloads at once.
 An instance is a page agent whose `handler_module` is the folder name.
 
-Every page call reaches the host as `user` (`user.forward`, with the token
-when `user` carries a `token_sha256`). `user` — and every AI agent under a
+Every page call reaches the host as `user` (`user.forward`). `user` — and every AI agent under a
 canvas node — reaches every host agent with every verb (god mode, by grants
 both sides; the human narrows them with `update_agent`).
 

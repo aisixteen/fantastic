@@ -4,6 +4,7 @@ group: canvas
 title: "a cell's chrome: it shows with the pointer just outside the cell (its real border), every corner resizes (the opposite corner stays), and sweeping the pointer over cells costs no frame rate or GPU over an animated background"
 runner: probe.py
 costs: free
+solo: true   # measures frame rate and GPU: runs alone (e2e/run.py)
 limits:
   seconds: 150
 env: {}

@@ -1,7 +1,7 @@
 import { registerBackgrounds } from "./bundles/backgrounds/backgrounds_agent.ts";
 import { Agent, Host, Kernel, ProxyLoader, WsBridge, loadBundle, registerRamStore } from "./lib.ts";
 import type { FolderText } from "./lib.ts";
-import { GATEWAY, UserBridge, readToken, writeToken } from "./user_bridge.ts";
+import { GATEWAY, UserBridge } from "./user_bridge.ts";
 import { registerGlAgent } from "./bundles/gl_agent/gl_agent.ts";
 import { registerHtmlAgent } from "./bundles/html_agent/html_agent.ts";
 import { registerAgentView } from "./bundles/agent_view/agent_view.ts";
@@ -107,18 +107,15 @@ const kernel = new Kernel();
 registerRamStore(kernel);
 register(kernel);
 const inner = new WsBridge(kernel, { origin, controlEndpoint: GATEWAY });
-// the token is read ONCE, at load: a token typed in another tab takes effect here
-// on this tab's next load, never mid-session
-const token = readToken();
-new UserBridge(kernel, inner, { token: () => token });
+new UserBridge(kernel, inner);
 
 // IS THIS TAB LET IN: `user.forward` to the host kernel's reflect — refused
-// only when `user` carries a token this tab does not give. Refused → ask for
-// a token, and nothing else runs.
+// when `user`'s grants do not admit the leg. Refused → the reason, LOUD, and
+// nothing else runs.
 const me = (await kernel.callHost("kernel", { type: "reflect", tree: "none" } as never)) as Record<string, unknown>;
 if (me["reason"] === "unauthorized") {
-  askToken(String(me["error"] ?? "no answer"));
-  await new Promise(() => {}); // the form reloads the page
+  refused(String(me["error"] ?? "no answer"));
+  await new Promise(() => {});
 }
 
 const canvases = await listCanvases();
@@ -232,19 +229,11 @@ async function readFolders(): Promise<FolderText[]> {
   return r.bundles as FolderText[];
 }
 
-/** The token form: shown when the host refuses this tab. The token goes to
- *  browser storage only, then the page reloads. */
-function askToken(why: string): void {
-  const box = document.createElement("form");
-  box.className = "token-ask";
-  box.innerHTML = `<p class="why"></p><input type="password" autocomplete="off" placeholder="token"><button>open</button>`;
-  (box.querySelector(".why") as HTMLElement).textContent = `This canvas wants a token — ${why}.`;
-  box.style.cssText = "position:fixed;inset:0;display:grid;place-content:center;gap:10px;font:14px system-ui;color:#cde;background:#0b0b10";
-  box.addEventListener("submit", (e) => {
-    e.preventDefault();
-    writeToken((box.querySelector("input") as HTMLInputElement).value.trim());
-    location.reload();
-  });
+/** The host refused this tab: its reason, in place of the canvas. */
+function refused(why: string): void {
+  const box = document.createElement("p");
+  box.className = "host-refused";
+  box.textContent = `The host refused this canvas — ${why}.`;
+  box.style.cssText = "position:fixed;inset:0;display:grid;place-content:center;font:14px system-ui;color:#cde;background:#0b0b10";
   document.body.replaceChildren(box);
-  (box.querySelector("input") as HTMLInputElement).focus();
 }

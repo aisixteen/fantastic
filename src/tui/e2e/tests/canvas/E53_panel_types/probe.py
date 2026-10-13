@@ -10,6 +10,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from _lib.canvas_live import Rig, verdict, answer, ask, html_cell, http_get, in_frame, say, spot, wait_quiet  # noqa: E402,F401
 
+# every terminal's buffer, as text
+TERM_TEXT = ("((()=>[...document.querySelectorAll('.agent-frame .frame-body')].map(f=>{const t=f.xterm; if(!t) return ''; "
+             "const b=t.buffer.active; let s=''; for(let i=0;i<b.length;i++){const l=b.getLine(i); if(l) s+=l.translateToString(true)+' ';} return s;}).join(' '))())")
+
+
 def main() -> bool:
     rig = Rig(__file__, live=False)
     rig.build()
@@ -22,11 +27,17 @@ def main() -> bool:
         async with rig.page(1800, 1000) as pg:
             await spot(pg, 700, 450, "terminal")
             await pg.until("!!document.querySelector('.agent-frame .xterm')", 20)
-            await asyncio.sleep(2)
+            # keys register only once the shell has loaded (owner 2026-10-13): its
+            # prompt drawn, not a guessed wait
+            await pg.until(f"{TERM_TEXT}.trim().length > 0", 30)
             await pg.js("document.querySelector('.agent-frame .xterm textarea')?.focus()")
             await pg.cdp("Input.insertText", text="echo MARK-53")
             await pg.cdp("Input.dispatchKeyEvent", type="keyDown", key="Enter", code="Enter", windowsVirtualKeyCode=13)
-            await asyncio.sleep(1.5)
+            # the shell echoed it (a reload before that has nothing to replay)
+            echoed = await pg.until(f"{TERM_TEXT}.includes('MARK-53')", 20)
+            # what the terminal showed before the reloads (a failure's evidence)
+            diag = {"echoed": echoed, "term_before": ((await pg.js(TERM_TEXT)) or "").strip()[:600],
+                    "overlay_before": await pg.js("[...document.querySelectorAll('.term-stopped')].filter(o=>!o.hidden).map(o=>o.textContent.trim()).join(' | ')")}
             await spot(pg, 1250, 450, "stream")
             await asyncio.sleep(1)
             await spot(pg, 250, 700, "AI agent")  # none set up: the wizard
@@ -41,18 +52,20 @@ def main() -> bool:
                 await asyncio.sleep(3)
                 seen.append({
                     "ids": await ids(),
-                    "term": await pg.js("((()=>[...document.querySelectorAll('.agent-frame .frame-body')].map(f=>{const t=f.xterm; if(!t) return ''; const b=t.buffer.active; let s=''; for(let i=0;i<b.length;i++){const l=b.getLine(i); if(l) s+=l.translateToString(true)+' ';} return s;}).join(' '))()).includes('MARK-53')"),
+                    "term": await pg.js(f"{TERM_TEXT}.includes('MARK-53')"),
                     "html": await pg.js("[...document.querySelectorAll('.agent-frame iframe')].some(f=>{try{return f.contentDocument.body.innerText.includes('html-53')}catch(e){return false}})"),
                     "setup": await pg.js("!!document.querySelector('.wiz .tiles button')"),
                     "stream": await pg.js("!!document.querySelector('.stream-view')"),
+                    "term_text": ((await pg.js(TERM_TEXT)) or "").strip()[:300],
+                    "overlay": await pg.js("[...document.querySelectorAll('.term-stopped')].filter(o=>!o.hidden).map(o=>o.textContent.trim()).join(' | ')"),
                 })
             errors = [e for e in pg.logs if "WebGL" not in e and "EXC" in e]
-            return before, seen, errors
+            return before, seen, errors, diag
     try:
-        before, seen, errors = asyncio.run(drive())
+        before, seen, errors, diag = asyncio.run(drive())
     finally:
         rig.stop()
-    rig.summary.update({"before": before, "after": seen, "errors": errors})
+    rig.summary.update({"before": before, "after": seen, "errors": errors, "terminal": diag})
     print(f"frames {before} · after reloads {seen} · errors {errors[:3]}")
     ok = all(s["ids"] == before and s["term"] and s["html"] and s["setup"] and s["stream"] for s in seen) and not errors
     return verdict(*rig.finish(ok, f"{len(before)} kinds of cell, same after 2 reloads, terminal replay + html + set-up + stream intact: {ok}"))

@@ -37,6 +37,7 @@ SRC = REPO / "src"
 #: The backends the CLI links, and the cargo feature that links each.
 sys.path.insert(0, str(HERE.parent.parent / "_lib"))
 from canvas_live import E2E_TARGET, FEATURES, private_dirs, seed_key, saved_dir  # noqa: E402
+from e2e_build import build_lock  # noqa: E402
 BIN = E2E_TARGET / "debug" / "fantastic"
 FIRST_TURN = "Hey! Look around and see whats on a canvas and a backend"
 
@@ -46,12 +47,13 @@ QUIET_S = float(LIMITS["quiet_seconds"])
 
 
 def build(feature: str, into: Path) -> Path:
-    r = subprocess.run(["cargo", "build", "-p", "fantastic-tui", "--features", feature], cwd=SRC, capture_output=True, text=True,
-                       env={**os.environ, "CARGO_TARGET_DIR": str(E2E_TARGET)})
-    if r.returncode != 0:
-        raise SystemExit(f"cargo build --features {feature} failed:\n{r.stderr[-2000:]}")
-    b = into / "fantastic"
-    shutil.copy2(BIN, b)  # a private copy: another build cannot swap it mid-run
+    with build_lock(E2E_TARGET):  # the build AND the copy: no other build lands in between
+        r = subprocess.run(["cargo", "build", "-p", "fantastic-tui", "--features", feature], cwd=SRC, capture_output=True, text=True,
+                           env={**os.environ, "CARGO_TARGET_DIR": str(E2E_TARGET)})
+        if r.returncode != 0:
+            raise SystemExit(f"cargo build --features {feature} failed:\n{r.stderr[-2000:]}")
+        b = into / "fantastic"
+        shutil.copy2(BIN, b)  # a private copy: another build cannot swap it mid-run
     return b
 
 

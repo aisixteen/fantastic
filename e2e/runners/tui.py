@@ -41,6 +41,7 @@ E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exis
 sys.path.insert(0, str(E2E))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from e2e_build import build_lock  # noqa: E402
 from helpers import verdict  # noqa: E402
 
 # The binary's user-home template store (`user_home_store`) reads FANTASTIC_HOME,
@@ -81,19 +82,24 @@ def resolve(argv: list[str], features: list[str], into: Path) -> tuple[Path, Pat
     elif os.environ.get("FANTASTIC_BIN"):
         b = Path(os.environ["FANTASTIC_BIN"]).expanduser().resolve()
     else:
-        what = ["--features", ",".join(features)] if features else []
-        print(f"building {TUI} {' '.join(what)}…", flush=True)
-        build(what)
-        b = TARGET / "fantastic"
-    build(["--example", "screenshot"])
-    rig = TARGET / "examples" / "screenshot"
-    out = []
-    for p in (b, rig):
-        if not p.is_file() or not os.access(p, os.X_OK):
-            raise SystemExit(f"not an executable: {p}")
-        dst = into / p.name
-        shutil.copy2(p, dst)
-        out.append(dst)
+        b = None
+    # the build AND the copy under one lock: another test's build (other
+    # features) cannot land in between
+    with build_lock(E2E_TARGET):
+        if b is None:
+            what = ["--features", ",".join(features)] if features else []
+            print(f"building {TUI} {' '.join(what)}…", flush=True)
+            build(what)
+            b = TARGET / "fantastic"
+        build(["--example", "screenshot"])
+        rig = TARGET / "examples" / "screenshot"
+        out = []
+        for p in (b, rig):
+            if not p.is_file() or not os.access(p, os.X_OK):
+                raise SystemExit(f"not an executable: {p}")
+            dst = into / p.name
+            shutil.copy2(p, dst)
+            out.append(dst)
     return out[0], out[1]
 
 

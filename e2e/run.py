@@ -359,6 +359,12 @@ def select(tests, groups, ids, backend_name, include_free, runtimes=()):
 # slots FIRST, then a lane; short tests use the lanes freely.
 LONG_LANES = 2
 
+# LOAD TESTS RUN ALONE (owner, 2026-10-13: "its important to run isolated always
+# load tests"). A test marked `solo: true` in its test.yaml MEASURES the machine —
+# frame rate, GPU, a time bound — so another test beside it changes its numbers
+# (measured: 60 fps hovering alone, 41 beside five others). Solo tests run after
+# the rest, one at a time, nothing else running.
+
 # THE HARD STOP. Owner, 2026-10-06: 15 minutes per test. A test still running then is
 # stopped (its whole process group, kernel included) and scored FAIL with the reason
 # in its log — a run that needs longer is a finding, not a wait. A test that names its
@@ -723,8 +729,10 @@ async def main() -> int:
     # progress without parsing 14 transcripts.
     began = time.monotonic()
     await asyncio.gather(
-        *(run_one(t, bk, logdir, sem, results, long_sem) for t in picked)
+        *(run_one(t, bk, logdir, sem, results, long_sem) for t in picked if not t.get("solo"))
     )
+    for t in (t for t in picked if t.get("solo")):
+        await run_one(t, bk, logdir, sem, results, long_sem)
 
     if meter is not None:
         meter.terminate()

@@ -39,6 +39,7 @@ from pathlib import Path
 E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())
 sys.path.insert(0, str(E2E))
 
+from e2e_build import build_lock  # noqa: E402
 from helpers import verdict  # noqa: E402
 
 # The binary's user-home template store (`user_home_store`) reads FANTASTIC_HOME,
@@ -94,12 +95,13 @@ def free_port() -> int:
 
 # ── build ─────────────────────────────────────────────────────────────────────
 def build_bin(into: Path) -> Path:
-    r = subprocess.run(["cargo", "build", "-p", "fantastic-tui"], cwd=SRC, capture_output=True, text=True, env={**os.environ, "CARGO_TARGET_DIR": str(E2E_TARGET)})
-    if r.returncode != 0:
-        raise SystemExit(f"cargo build fantastic-tui failed:\n{r.stderr[-2000:]}")
-    b = into / "fantastic"
-    b.unlink(missing_ok=True)  # never cp over a signed binary (macOS kills it)
-    shutil.copy2(BIN, b)
+    with build_lock(E2E_TARGET):  # the build AND the copy: no other build lands in between
+        r = subprocess.run(["cargo", "build", "-p", "fantastic-tui"], cwd=SRC, capture_output=True, text=True, env={**os.environ, "CARGO_TARGET_DIR": str(E2E_TARGET)})
+        if r.returncode != 0:
+            raise SystemExit(f"cargo build fantastic-tui failed:\n{r.stderr[-2000:]}")
+        b = into / "fantastic"
+        b.unlink(missing_ok=True)  # never cp over a signed binary (macOS kills it)
+        shutil.copy2(BIN, b)
     return b
 
 
@@ -144,15 +146,12 @@ class Host:
         return code
 
 
-async def host_call(port: int, target: str, payload: dict, token: str | None = None) -> dict:
+async def host_call(port: int, target: str, payload: dict) -> dict:
     """A host call the way a canvas tab makes one: through `user` — `forward`
-    to `target`, or `user`'s own verb when `target` is `user` — with the token
-    when one is given."""
+    to `target`, or `user`'s own verb when `target` is `user`."""
     import websockets
 
     body = dict(payload) if target == "user" else {"type": "forward", "target": target, "payload": payload}
-    if token is not None:
-        body["token"] = token
     frame = {"type": "call", "target": "user", "payload": body, "id": secrets.token_hex(6)}
     async with websockets.connect(f"ws://127.0.0.1:{port}/user/ws", origin=f"http://127.0.0.1:{port}") as ws:
         await ws.send(json.dumps(frame))

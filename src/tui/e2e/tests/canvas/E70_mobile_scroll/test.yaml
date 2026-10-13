@@ -4,6 +4,7 @@ group: canvas
 title: "a phone-wide tab with a live terminal: lines typed, then the column scrolled burst after burst — the frame rate and the host's call rate hold"
 runner: probe.py
 costs: free
+solo: true   # measures frame rate: runs alone (e2e/run.py)
 limits:
   seconds: 180
 env: {}

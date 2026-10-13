@@ -154,6 +154,23 @@ fn main() {
                     writer.flush().ok();
                 }
             }
+            // `until MS TEXT`: wait until the screen shows TEXT (at most MS) — a
+            // step that waits on the app, not on a guessed time
+            "until" => {
+                let (ms, text) = rest.trim().split_once(char::is_whitespace).unwrap_or((rest.trim(), ""));
+                let ms: u64 = ms.parse().unwrap_or(10000);
+                let deadline = std::time::Instant::now() + Duration::from_millis(ms);
+                loop {
+                    if parser.lock().unwrap().screen().contents().contains(text) {
+                        break;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        println!("  until: timeout {text:?}");
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            }
             "shot" => shot(rest.trim()),
             "stream" => {
                 let mut it = rest.split_whitespace();

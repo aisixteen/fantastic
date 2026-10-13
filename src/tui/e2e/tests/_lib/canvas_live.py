@@ -38,6 +38,7 @@ sys.path.insert(0, str(REPO / "e2e" / "runners"))
 import websockets  # noqa: E402
 
 from canvas import MAC_CHROME, Page, attach, free_port  # noqa: E402
+from e2e_build import build_lock  # noqa: E402
 from helpers.verdict import verdict  # noqa: E402
 
 SRC = REPO / "src"
@@ -178,11 +179,14 @@ class Rig:
     def build(self, *features: str) -> None:
         feats = sorted({*features, *([FEATURES[self.plug.handler_module]] if self.plug else [])})
         args = ["cargo", "build", "-p", "fantastic-tui", *(["--features", ",".join(feats)] if feats else [])]
-        r = subprocess.run(args, cwd=SRC, capture_output=True, text=True, env={**os.environ, "CARGO_TARGET_DIR": str(E2E_TARGET)})
-        if r.returncode != 0:
-            raise SystemExit(f"{' '.join(args)} failed:\n{r.stderr[-2000:]}")
-        self.binary = self.art / "fantastic"
-        shutil.copy2(BIN, self.binary)  # a private copy: another build cannot swap it mid-run
+        # the build AND the copy under one lock: another test's build (other
+        # features) cannot land in between
+        with build_lock(E2E_TARGET):
+            r = subprocess.run(args, cwd=SRC, capture_output=True, text=True, env={**os.environ, "CARGO_TARGET_DIR": str(E2E_TARGET)})
+            if r.returncode != 0:
+                raise SystemExit(f"{' '.join(args)} failed:\n{r.stderr[-2000:]}")
+            self.binary = self.art / "fantastic"
+            shutil.copy2(BIN, self.binary)  # a private copy: another build cannot swap it mid-run
 
     def make_home(self, record: dict | None = None, name: str = "plug") -> None:
         """A throwaway FANTASTIC_HOME — with `record` saved as the default, or none."""
@@ -238,7 +242,18 @@ class Rig:
         self.start()
 
     async def _touch(self) -> None:
-        async with self.page():
+        # until the page has STORED its root view: seeds written before that land
+        # under a view the next boot makes afresh, and never load
+        root = self.cells_dir.parent / "agent.yaml"
+        async with self.page() as pg:
+            for _ in range(120):
+                if root.is_file():
+                    break
+                await asyncio.sleep(0.25)
+            else:
+                (self.art / "touch_page_errors.json").write_text(json.dumps(pg.logs, indent=1))
+                (self.art / "touch_page.html").write_text(await pg.js("document.documentElement.outerHTML") or "")
+                raise SystemExit(f"the page never stored its root view: {root}")
             await asyncio.sleep(1.0)
 
     # ── the disk: seeding and reading the two trees ─────────────────────────
@@ -463,7 +478,7 @@ async def wait_quiet(pg: Page, total: float, quiet: float, cell: int = 0) -> boo
     sel = f"document.querySelectorAll('.chat-view')[{cell}]"
     while time.time() < deadline:
         n = await pg.js(f"({sel}?.querySelectorAll('.msg').length) ?? 0") or 0
-        said = await pg.js(f"[...({sel}?.querySelectorAll('.msg.assistant:not(.thinking)') ?? [])].some(m=>m.textContent.trim())")
+        said = await pg.js(f"[...({sel}?.querySelectorAll('.msg.assistant:not(.thinking):not(.c-think)') ?? [])].some(m=>m.textContent.trim())")
         # still WORKING — the flashing placeholder, or the cell's own phase pill
         # (thinking / streaming / tool_calling / queued; a turn that reasons
         # between two calls shows no placeholder) — is never quiet
@@ -497,7 +512,7 @@ async def answer(pg: Page, cell: int = 0) -> str:
     """The AI's last WORDS: its last assistant bubble with text, skipping one that
     is only call markup — a malformed call (the server's dropped `<`, e.g.
     `call name="done"></call>`) shows as text but is no answer."""
-    return await pg.js(f"(()=>{{const m=[...(document.querySelectorAll('.chat-view')[{cell}]?.querySelectorAll('.msg.assistant:not(.thinking)') ?? [])]"
+    return await pg.js(f"(()=>{{const m=[...(document.querySelectorAll('.chat-view')[{cell}]?.querySelectorAll('.msg.assistant:not(.thinking):not(.c-think)') ?? [])]"
                        ".filter(x=>{const t=x.textContent.trim(); return t && !/^(<?\\/?call\\b[^>]*>\\s*)+$/.test(t);});"
                        " return m.length ? m[m.length-1].textContent : '';})()") or ""
 

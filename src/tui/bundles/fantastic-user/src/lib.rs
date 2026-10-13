@@ -4,15 +4,12 @@
 //! checked and replies route back to it.
 //!
 //! Verbs:
-//! - `forward {target, payload, timeout?, token?}` — `user` sends `payload` to
+//! - `forward {target, payload, timeout?}` — `user` sends `payload` to
 //!   `target`; the reply comes back verbatim. NO DEFAULT TIMEOUT: the call
 //!   lasts as long as the target takes (an AI turn may run for minutes); a
 //!   `timeout` given is honoured. No secret marks — values travel and are
-//!   recorded as they are. THE TOKEN (for now): if `user` carries no `token_sha256`,
-//!   every caller gets in, as if it gave the token; if one is set, a caller
-//!   that is not the shell (a wire leg, an agent) must give the token that
-//!   hashes to it ([`grants::resolve`]). The shell itself (no origin) needs none.
-//!   A page loader serves record verbs inside its caller's subtree; the
+//!   recorded as they are. Who may call it is `user`'s `callable_by`, nothing
+//!   else. A page loader serves record verbs inside its caller's subtree; the
 //!   canvas's loader sits under `user`.
 //! - `around {canvas?, view?, x, y, radius}` — the cells of a page view
 //!   (default: the root view, [`ROOT_VIEW`]) of a canvas (its node id; default
@@ -49,8 +46,12 @@ pub const HANDLER_MODULE: &str = "user.tools";
 pub const VERBS: [&str; 7] = ["forward", "around", "path", "reflect", "inquiry", "inquiries", "answer_inquiry"];
 
 
-/// A view's background: drawn behind its cells, never one of them.
-const BACKGROUND: &str = "background.ts";
+/// A view's children that are not cells: its background (drawn behind them),
+/// its theme layouts, a double click's selector, the canvas theme agent.
+const NOT_CELLS: [&str; 4] = ["background.ts", "layout.ts", "selector.ts", "backgrounds.ts"];
+
+/// The theme `around` reads rects in by default: the free 2D canvas.
+const AROUND_THEME: &str = "canvas";
 
 /// The page's root view: `around`'s default.
 pub const ROOT_VIEW: &str = "view_root";
@@ -110,17 +111,6 @@ impl UserBundle {
             .map(|a| a.key().0.clone())
     }
 
-    /// The token gate: the shell (no origin) passes; any other caller passes
-    /// when `user` carries no token, else only with the token.
-    fn admit(kernel: &Kernel, me: &AgentId, p: &Value) -> Result<(), Value> {
-        if fantastic_kernel::current_origin().is_none() {
-            return Ok(());
-        }
-        grants::resolve(kernel, me, p.get("token").and_then(Value::as_str))
-            .map(|_| ())
-            .map_err(|e| refuse("unauthorized", format!("user: {e}")))
-    }
-
     /// One item, sent from inside this handler: its sender is `user`.
     async fn send_as(kernel: &Arc<Kernel>, item: Item) -> (Value, Option<Blob>) {
         let k = Arc::clone(kernel);
@@ -162,10 +152,7 @@ impl UserBundle {
     }
 
     /// `forward` — `user` calls `target`.
-    async fn forward(me: &AgentId, p: &Value, body: Option<Blob>, kernel: &Arc<Kernel>) -> (Value, Option<Blob>) {
-        if let Err(e) = Self::admit(kernel, me, p) {
-            return (e, None);
-        }
+    async fn forward(p: &Value, body: Option<Blob>, kernel: &Arc<Kernel>) -> (Value, Option<Blob>) {
         let target = s(p, "target");
         let Some(inner) = p.get("payload").filter(|v| v.is_object()).cloned() else {
             return (refuse("bad_arg", "user.forward: target (str) + payload (dict) required"), None);
@@ -193,15 +180,6 @@ impl UserBundle {
         Self::send_as(kernel, item).await
     }
 
-    /// Whose page grants judge `around`: `None` = the shell, sees everything;
-    /// any other caller by its own page grants (the canvas leg holds `*|*`).
-    fn judge(kernel: &Kernel, me: &AgentId, p: &Value) -> Result<Option<AgentId>, Value> {
-        match fantastic_kernel::current_origin() {
-            None => Ok(None),
-            Some(o) => Self::admit(kernel, me, p).map(|()| Some(o)),
-        }
-    }
-
     /// `around {view?, x, y, radius}` from the page records.
     async fn around(me: &AgentId, p: &Value, kernel: &Arc<Kernel>) -> Value {
         let loader = match p.get("canvas").and_then(Value::as_str).filter(|c| !c.is_empty()) {
@@ -221,16 +199,24 @@ impl UserBundle {
         if radius <= 0.0 {
             return refuse("bad_arg", "user.around needs x, y and radius as numbers (radius > 0)");
         }
-        let judge = match Self::judge(kernel, me, p) {
-            Ok(j) => j,
-            Err(e) => return e,
-        };
+        // whose page grants judge it: `None` = the shell, sees everything; any
+        // other caller by its own page grants (the canvas leg holds `*|*`)
+        let judge = fantastic_kernel::current_origin();
         let (recs, guid) = Self::tree(kernel, &loader).await;
         let view = p.get("view").and_then(Value::as_str).filter(|c| !c.is_empty()).unwrap_or(ROOT_VIEW).to_string();
         if !recs.iter().any(|r| r.get("id").and_then(Value::as_str) == Some(view.as_str())) {
             return refuse("not_found", format!("user.around: no view {view:?} here"));
         }
         let up = Self::ancestors(&recs, &loader, Some(&view));
+        // a cell's rect is not on its record but in the view's layout for a theme
+        // (`layout_<theme>`, `rects: {<cell id>: {x, y, width, height}}`)
+        let theme = p.get("theme").and_then(Value::as_str).filter(|t| !t.is_empty()).unwrap_or(AROUND_THEME);
+        let layout = format!("layout_{theme}");
+        let rects = recs
+            .iter()
+            .find(|r| r.get("id").and_then(Value::as_str) == Some(layout.as_str()) && r.get("parent_id").and_then(Value::as_str) == Some(view.as_str()))
+            .and_then(|r| r.get("rects").and_then(Value::as_object).cloned())
+            .unwrap_or_default();
         let sees = |id: &str| match &judge {
             None => true,
             Some(u) => grants::sees(&grants::page_verbs(&grants::can_call(kernel, u), &guid, id, &up)),
@@ -238,10 +224,11 @@ impl UserBundle {
         let mut members: Vec<(f64, Value)> = recs
             .iter()
             .filter(|r| r.get("parent_id").and_then(Value::as_str) == Some(view.as_str()))
-            .filter(|r| r.get("handler_module").and_then(Value::as_str) != Some(BACKGROUND))
+            .filter(|r| !r.get("handler_module").and_then(Value::as_str).is_some_and(|m| NOT_CELLS.contains(&m)))
             .filter_map(|r| {
                 let id = r.get("id").and_then(Value::as_str)?;
-                let n = |k: &str| r.get(k).and_then(Value::as_f64);
+                let rect = rects.get(id)?;
+                let n = |k: &str| rect.get(k).and_then(Value::as_f64);
                 let (rx, ry, w, h) = (n("x")?, n("y")?, n("width")?, n("height")?);
                 if !sees(id) {
                     return None;
@@ -295,7 +282,7 @@ impl UserBundle {
                 return None;
             }
             "forward" => {
-                let (r, b) = Self::forward(me, p, body, kernel).await;
+                let (r, b) = Self::forward(p, body, kernel).await;
                 return Some((Some(r), b));
             }
             "around" => Self::around(me, p, kernel).await,
@@ -322,12 +309,12 @@ impl Bundle for UserBundle {
             Value::Object(m) => m,
             _ => serde_json::Map::new(),
         };
-        v.insert("forward".into(), json!("args: target:str (req), payload:dict (req), timeout:num? (none by default: the call lasts as long as the target takes), token:str? — `user` sends payload to target; the reply verbatim. A token is needed only when `user` carries one (token_sha256) and the caller is not the shell."));
+        v.insert("forward".into(), json!("args: target:str (req), payload:dict (req), timeout:num? (none by default: the call lasts as long as the target takes) — `user` sends payload to target; the reply verbatim."));
         v.insert("inquiry".into(), json!("args: text:str (req), kind:str? (text|single|multi|confirm, default text), options:list? (required for single/multi), request_id:str? — ACCEPTED at once ({accepted, re}) and held for the person; the answer arrives LATER as `[reply to <re> · user inquiry] <answer>…</answer>` on your thread. Nothing suspends: keep working, or await."));
         v.insert("inquiries".into(), json!("args: asker:str? — {inquiries: [{re, asker, text, kind, options, request_id, ts}]}: the open questions (one asker's, when named)."));
         v.insert("answer_inquiry".into(), json!("args: re:int (req — the inquiry's pid), answer: str | list | bool (req) — the person's answer, sent to the asker under the inquiry's pid; then closed."));
         v.insert("path".into(), json!("args: rescan:bool? — {dirs: [PATH dirs], executables: {name: full path}}: every program on the human's PATH (this process's merged with the login shell's), the first on PATH winning; scanned at boot, `rescan: true` scans again. The caller decides what a name means."));
-        v.insert("around".into(), json!("args: canvas:str? (a canvas node id — default the main canvas), view:str? (default view_root), x:num, y:num, radius:num — {view, members: [{id, kind, title, rect:{x,y,w,h}, distance, backend_id?}]}: the cells of a page view within radius, nearest first, from the page records; judged by YOUR page grants."));
+        v.insert("around".into(), json!("args: canvas:str? (a canvas node id — default the main canvas), view:str? (default view_root), theme:str? (whose layout's rects — default canvas), x:num, y:num, radius:num — {view, members: [{id, kind, title, rect:{x,y,w,h}, distance, backend_id?}]}: the cells of a page view within radius, nearest first, from the page records; judged by YOUR page grants."));
         Value::Object(v)
     }
 

@@ -250,8 +250,10 @@ impl Host {
         };
         // GOD MODE BY GRANTS, in every mode (a strictly single-user dev tool):
         // `user` and the other holders reach every agent, both edges, before the
-        // shell acts through `user` (`kern/reach`).
-        if let Err(e) = crate::kern::reach::start(&host).await {
+        // shell acts through `user` (`kern/reach`). The WATCH that grants each
+        // agent added later starts only once the boot's own grant writes are done
+        // (the caller's `reach::start`): two writers of one record lose entries.
+        if let Err(e) = crate::kern::reach::grant_all(&host).await {
             notes.push(e);
         }
         // The saved set-up store's agent, and the human's grant onto it — re-set on

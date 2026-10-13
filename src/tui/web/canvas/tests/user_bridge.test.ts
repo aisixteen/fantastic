@@ -26,27 +26,22 @@ function fakeInner(): { inner: never; sent: Array<{ target: string; payload: Rec
   return { inner: inner as never, sent, watched };
 }
 
-test("a host call goes to `user` as forward, with the token when one is set", async () => {
+test("a host call goes to `user` as forward", async () => {
   const { inner, sent } = fakeInner();
-  const b = new UserBridge(new Kernel(), inner, { token: () => "T" });
-  await b.forward("setup", { type: "store_key", secret: "k" } as Payload);
+  await new UserBridge(new Kernel(), inner).forward("setup", { type: "store_key", secret: "k" } as Payload);
   assert.equal(sent[0]!.target, "user");
-  assert.deepEqual(sent[0]!.payload, { type: "forward", target: "setup", payload: { type: "store_key", secret: "k" }, token: "T" });
-  // no token: none sent
-  const n = fakeInner();
-  await new UserBridge(new Kernel(), n.inner, { token: () => null }).forward("x", { type: "v" } as Payload);
-  assert.equal(n.sent[0]!.payload["token"], undefined);
+  assert.deepEqual(sent[0]!.payload, { type: "forward", target: "setup", payload: { type: "store_key", secret: "k" } });
 });
 
-test("a call to `user` itself carries the token on its own payload", async () => {
+test("a call to `user` itself is its own payload", async () => {
   const { inner, sent } = fakeInner();
-  await new UserBridge(new Kernel(), inner, { token: () => "T" }).forward("user", { type: "reflect" } as Payload);
-  assert.deepEqual(sent[0]!.payload, { type: "reflect", token: "T" });
+  await new UserBridge(new Kernel(), inner).forward("user", { type: "reflect" } as Payload);
+  assert.deepEqual(sent[0]!.payload, { type: "reflect" });
 });
 
 test("a watch rides the leg's own frames, not `user`", () => {
   const { inner, sent, watched } = fakeInner();
-  const b = new UserBridge(new Kernel(), inner, { token: () => null });
+  const b = new UserBridge(new Kernel(), inner);
   b.watchRemote("exec_1");
   assert.deepEqual(watched, ["exec_1"]);
   assert.equal(sent.length, 0);

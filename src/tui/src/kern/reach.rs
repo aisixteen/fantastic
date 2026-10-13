@@ -19,7 +19,10 @@
 //! agent the state stream reports `added` (made by an AI, by exec, loaded from
 //! disk, or a leg itself). Every grant lives in the records: the human reshapes
 //! them with `update_agent`. A leg's `ingress_rule` still decides who may open
-//! frames on it. Started at every boot (`Host::boot`), whatever the mode.
+//! frames on it. Granted at every boot (`Host::boot`); the watch starts AFTER the
+//! boot's own grant writes ([`start`], called by the launcher once its legs are
+//! set up) — grant records are read, changed and written whole, so a watch
+//! writing while the boot writes loses one side's entries.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -273,7 +276,8 @@ pub async fn granted(h: &Host, id: &str) -> Result<(), String> {
 }
 
 /// Every agent now, then each one the state stream reports `added`. The watch
-/// starts once per process, whichever leg is set up first.
+/// starts once per process, AFTER the boot's own grant writes (the launcher
+/// calls this last); a second call only grants.
 pub async fn start(h: &Host) -> Result<(), String> {
     grant_all(h).await?;
     if WATCHING.swap(true, Ordering::SeqCst) {

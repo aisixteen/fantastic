@@ -5,6 +5,7 @@ group: canvas
 title: "a 300-cell canvas loads within the bound"
 runner: probe.py
 costs: free
+solo: true   # measures a time bound: runs alone (e2e/run.py)
 limits:
   render_seconds: 40
 env: {}

@@ -28,9 +28,11 @@ FPS = "new Promise(res=>{let n=0;const t=performance.now();const f=()=>{n++; if(
 HEAD_SHOWN = "(id)=>getComputedStyle(document.querySelector(`.agent-frame[data-id=\"${id}\"] > .frame-head`)).opacity"
 
 
-def gpu_cpu() -> float:
+def gpu_cpu(profile: str) -> float:
+    """THIS test's Chrome GPU process only (its own profile dir is on its args):
+    every other test's headless Chrome runs at the same time."""
     rows = subprocess.run(["ps", "-A", "-o", "pcpu=,args="], capture_output=True, text=True).stdout.splitlines()
-    return sum(float(x.split(None, 1)[0]) for x in rows if "--type=gpu-process" in x and "headless" in x)
+    return sum(float(x.split(None, 1)[0]) for x in rows if "--type=gpu-process" in x and profile in x)
 
 
 def main() -> bool:
@@ -93,7 +95,7 @@ def main() -> bool:
                             await pg.cdp("Input.dispatchMouseEvent", type="mouseMoved", x=100 + (k * 37) % 1200, y=100 + (k * 53) % 700)
                         k += 1
                         if k % 10 == 0:
-                            cpu.append(gpu_cpu())
+                            cpu.append(gpu_cpu(str(rig.art / "chrome")))
                         await asyncio.sleep(0.03)
                     fps = await pg.js("Math.round(window.__n * 1000 / (performance.now() - window.__t0))")
                     return fps, round(sum(cpu) / max(len(cpu), 1))

@@ -21,8 +21,7 @@
 //! ```
 //!
 //! THE LEG REACHES ONLY `user` (owner, 2026-10-03/04): a tab's every host call
-//! is `user.forward` (with its token when `user` carries a `token_sha256`), and
-//! `user` makes it — the shell's own identity, god mode by grants
+//! is `user.forward`, and `user` makes it — the shell's own identity, god mode by grants
 //! (`kern/reach`).
 //!
 //! THE CANVAS (design 33) replaced the browser View of the terminal shell
@@ -263,8 +262,9 @@ pub async fn ensure(h: &Host, port: Option<u16>) -> Result<Urls, String> {
     for (node, loader) in canvases(h) {
         boot_canvas(h, &node, &loader).await?;
     }
-    // GOD MODE, by grants: `user` and the canvas's AIs reach every agent, both edges (`kern/reach`).
-    crate::kern::reach::start(h).await?;
+    // GOD MODE, by grants: `user` and the canvas's AIs reach every agent, both edges
+    // (`kern/reach`); the watch for agents added later starts after this (`vm.rs`)
+    crate::kern::reach::grant_all(h).await?;
     Ok(Urls {
         canvas: format!("http://127.0.0.1:{port}/{CANVAS_PAGE_ID}/file/index.html"),
     })

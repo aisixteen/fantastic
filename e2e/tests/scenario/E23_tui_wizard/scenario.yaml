@@ -14,6 +14,8 @@
 #     agent from it at once: `vllm-1-2` (the name is taken by the first agent).
 # 3 · edit + default — `e` opens it (EDIT SAVED, the stored key offered for its
 #     host), a new model SAVED back; `d` stops it being the default.
+# Each step waits on what the screen shows (`until`), never a guessed time: under
+# a loaded machine (23 lanes) fixed waits shot frames before the app drew them.
 
 id: tui_wizard
 title: fantastic — the terminal's two-page AI set-up wizard makes an agent, saves its set-up and key, makes more from it
@@ -30,13 +32,13 @@ runs:
       type G
       wait 200
       key enter
-      wait 900
+      until 20000 not in this build
       shot page1
       key down
       key down
       key down
       key enter
-      wait 400
+      until 20000 2 / 2
       shot page2
       key down
       key down
@@ -54,12 +56,13 @@ runs:
       key right
       key down
       key right
-      wait 200
+      until 20000 ‹ a 0600 text file (plain) ›
+      wait 300
       shot filled
       key down
       key down
       key enter
-      wait 3000
+      until 30000 this agent has not loaded its history yet
       shot created
       key ctrl-c
       wait 150
@@ -94,10 +97,10 @@ runs:
       type G
       wait 200
       key enter
-      wait 900
+      until 20000 ★ default
       shot listed
       key enter
-      wait 3000
+      until 30000 this agent has not loaded its history yet
       shot made
       key ctrl-c
       wait 150
@@ -117,9 +120,9 @@ runs:
       type G
       wait 200
       key enter
-      wait 900
+      until 20000 ★ default
       type e
-      wait 400
+      until 20000 EDIT SAVED
       shot editing
       key down
       key down
@@ -137,10 +140,10 @@ runs:
       key down
       key down
       key enter
-      wait 1500
+      until 20000 ✓ saved
       shot saved
       type d
-      wait 1200
+      until 20000 no default AI set-up
       shot nodefault
       key ctrl-c
       wait 150

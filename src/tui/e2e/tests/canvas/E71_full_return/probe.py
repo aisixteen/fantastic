@@ -69,8 +69,9 @@ def main() -> bool:
                     await pg.cdp("Input.dispatchKeyEvent", type="keyUp", key="Escape", code="Escape", windowsVirtualKeyCode=27)
                     await pg.until("window.__s.length >= 120", 40)
                     s = await pg.js("window.__s")
-                    early = [i for i, (d, shown, _f) in enumerate(s) if shown > 0 and d == d0]
-                    first_cells = next((i for i, x in enumerate(s) if x[1] > 0), None)
+                    # samples still FULL are before the Esc landed (the full agent itself shows)
+                    early = [i for i, (d, shown, f) in enumerate(s) if shown > 0 and d == d0 and not f]
+                    first_cells = next((i for i, x in enumerate(s) if x[1] > 0 and not x[2]), None)
                     first_draw = next((i for i, x in enumerate(s) if x[0] > d0), None)
                     info[f"round{round_}"] = {"full_view_bg_draws_per_300ms": full_draws, "first_bg_draw_frame": first_draw,
                                               "first_cells_frame": first_cells, "cells_before_bg_frames": len(early),

@@ -5,7 +5,7 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use fantastic_user::{grants, UserBundle, HANDLER_MODULE};
+use fantastic_user::{UserBundle, HANDLER_MODULE};
 use fantastic_kernel::{
     bootstrap::{bootstrap, BootstrapOptions},
     bundle::BundleError,
@@ -87,10 +87,19 @@ async fn as_agent(k: &Arc<Kernel>, agent: &str, payload: Value) -> Value {
 }
 
 fn rec(id: &str, parent: &str) -> Value {
-    json!({"id": id, "parent_id": parent, "handler_module": "x.ts", "x": 0, "y": 0, "width": 100, "height": 50})
+    json!({"id": id, "parent_id": parent, "handler_module": "x.ts"})
 }
 
-/// root ─ leg · echo · user {loader}; the page tree canvas {view_root {cv1 {c1}, cv2}}.
+/// The page's canvas-theme layout under `view`: each cell's rect (never on the
+/// cell's record). One per page kernel, as the page keeps it (`layout.ts`).
+fn layout(view: &str, cells: &[&str]) -> Value {
+    let rects: serde_json::Map<String, Value> =
+        cells.iter().map(|c| ((*c).to_string(), json!({"x": 0, "y": 0, "width": 100, "height": 50}))).collect();
+    json!({"id": "layout_canvas", "parent_id": view, "handler_module": "layout.ts", "theme": "canvas", "rects": rects})
+}
+
+/// root ─ leg · echo · user {loader}; the page tree canvas {view_root {cv1 {c1}, cv2}},
+/// the root view's rects in its `layout_canvas`.
 async fn setup() -> Arc<Kernel> {
     let mut reg = BundleRegistry::new();
     reg.register(HANDLER_MODULE, UserBundle::default());
@@ -99,7 +108,8 @@ async fn setup() -> Arc<Kernel> {
         let mut r = loader.0.lock().unwrap();
         let mut root = rec("canvas", "loader");
         root["guid"] = json!(G);
-        r.extend([root, rec("view_root", "canvas"), rec("cv1", "view_root"), rec("c1", "cv1"), rec("cv2", "view_root")]);
+        r.extend([root, rec("view_root", "canvas"), rec("cv1", "view_root"), rec("c1", "cv1"), rec("cv2", "view_root"),
+            layout("view_root", &["cv1", "cv2"])]);
     }
     reg.register("loader.tools", loader);
     reg.register("echo.tools", Echo);
@@ -133,26 +143,17 @@ fn ids(r: &Value) -> Vec<String> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn no_token_set_is_full_access_a_token_set_must_be_given() {
+async fn a_tab_forwards_through_user() {
     let k = setup().await;
     let r = tab(&k, json!({"type": "forward", "target": "echo", "payload": {"type": "ping"}})).await;
     assert_eq!(r["echo"]["type"], "ping", "only `user` may call echo: {r}");
-    // a token SET on `user`: a call without it is refused
-    op(&k, "kernel", json!({"type": "update_agent", "id": "user", "token_sha256": grants::hash("t-admin")})).await;
-    let r = tab(&k, json!({"type": "forward", "target": "echo", "payload": {"type": "ping"}})).await;
-    assert_eq!(r["reason"], "unauthorized", "{r}");
-    assert!(r["error"].as_str().unwrap().contains("a token is required"), "{r}");
-    let r = tab(&k, json!({"type": "forward", "target": "echo", "payload": {"type": "ping"}, "token": "nope"})).await;
-    assert!(r["error"].as_str().unwrap().contains("unknown token"), "{r}");
-    let r = tab(&k, json!({"type": "forward", "target": "echo", "payload": {"type": "ping"}, "token": "t-admin"})).await;
-    assert_eq!(r["echo"]["type"], "ping", "{r}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_page_loader_under_user_is_reached_whole_and_writable() {
     let k = setup().await;
     let r = tab(&k, json!({"type": "forward", "target": "loader", "payload": {"type": "load_tree"}})).await;
-    assert_eq!(ids(&r), vec!["c1", "canvas", "cv1", "cv2", "view_root"], "{r}");
+    assert_eq!(ids(&r), vec!["c1", "canvas", "cv1", "cv2", "layout_canvas", "view_root"], "{r}");
     let r = tab(&k, json!({"type": "forward", "target": "loader",
         "payload": {"type": "persist_record", "record": {"id": "c9", "parent_id": "cv2"}}})).await;
     assert_eq!(r["ok"], true, "{r}");
@@ -166,8 +167,11 @@ async fn around_answers_from_the_page_records_by_the_callers_page_grants() {
     let got: Vec<&str> = r["members"].as_array().unwrap_or_else(|| panic!("{r}")).iter().filter_map(|m| m["id"].as_str()).collect();
     assert_eq!(got, vec!["cv1", "cv2"], "{r}");
     assert_eq!(r["members"][0]["distance"], 0.0);
+    // a cell with no rect in the theme is not placed there: none found
     let r = tab(&k, json!({"type": "around", "view": "cv1", "x": 0, "y": 0, "radius": 5})).await;
-    assert_eq!(r["members"][0]["id"], "c1", "{r}");
+    assert_eq!(r["members"], json!([]), "{r}");
+    let r = tab(&k, json!({"type": "around", "theme": "mobile", "x": 50, "y": 25, "radius": 10})).await;
+    assert_eq!(r["members"], json!([]), "no mobile layout: {r}");
     let r = tab(&k, json!({"type": "around", "x": "a", "y": 0, "radius": 5})).await;
     assert_eq!(r["reason"], "bad_arg", "{r}");
     // a cell's AI: judged by its own page grants (cv2 only)
@@ -183,10 +187,9 @@ async fn around_answers_from_the_page_records_by_the_callers_page_grants() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_shell_needs_no_token_and_other_verbs_are_the_probes() {
+async fn the_shell_forwards_and_other_verbs_are_the_probes() {
     let k = setup().await;
-    op(&k, "kernel", json!({"type": "update_agent", "id": "user", "token_sha256": grants::hash("t")})).await;
-    // the shell (no origin): no token
+    // the shell (no origin)
     let r = op(&k, "user", json!({"type": "forward", "target": "echo", "payload": {"type": "ping"}})).await;
     assert_eq!(r["echo"]["type"], "ping", "{r}");
     // the probe's own verbs, unchanged
