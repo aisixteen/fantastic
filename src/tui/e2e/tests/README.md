@@ -44,6 +44,7 @@ with `src/tui/e2e/wipe.sh`.
 | E62 `mcp_server` | scripted: the lib's fake MCP server; the `mcp connector` tile's form adds it, its view lists the server and its tools, the key is stored in the home (on no record) and sent as Bearer on every request, a tool answers, ⟳ lists again | owner 2026-10-08: MCP servers on the canvas |
 | E63 `prompt_file` | scripted (a stub model): `.fantastic/prompt.md` seeded with the default placeholders, the first turn's block is the default, the AI names the file, an edit is the block on the next turn with its id still filled; records never persist through the prompt bridge | owner 2026-10-08: the project's system block |
 | E64 `mcp_config` | scripted: a `.fantastic/.mcp.json` with another server (nothing created outside `.fantastic`); after boot it also holds `fantastic` → this binary + `[mcp]`, the other server and key order kept, a reboot leaves it byte-identical, no `mcp_config_error` | owner 2026-10-08: the mcp leg keeps .mcp.json |
+| E78 `fit` | scripted: the view's `fit` sizes an html cell to what it draws — a 640×360 box (sandboxed and trusted) and a paragraph wrapped at `max_width: 400` — the frame that size, nothing overflowing, the layout holding it; an unknown id refused | owner 2026-10-13: fit to content, a verb an AI can call | scripted |
 
 ## Results — 2026-10-01, vLLM qwen3.8-27b, 2 lanes (the latest run of each)
 

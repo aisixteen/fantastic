@@ -1,0 +1,9 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint. Scripted: no model.
+id: fit
+group: canvas
+title: "the view's fit sizes an html cell to what it draws — a fixed box (sandboxed and trusted) and a paragraph wrapped at a max width — with no overflow left, and refuses what is not its cell"
+runner: probe.py
+costs: free
+limits:
+  seconds: 150
+env: {}

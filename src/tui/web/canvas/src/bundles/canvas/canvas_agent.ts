@@ -1,6 +1,6 @@
 import { Agent, str } from "../../lib.ts";
 import { mcpView } from "../mcp_view/mcp_view.ts";
-import type { Handler, Json, Payload } from "../../lib.ts";
+import type { Handler, Json, Kernel, Payload } from "../../lib.ts";
 import { terminalView } from "../terminal_view/terminal_view.ts";
 import { bodyText } from "../body_text.ts";
 import { htmlRefusal } from "../html_check.ts";
@@ -10,6 +10,7 @@ import { reflectView } from "../reflect_view/reflect_view.ts";
 import { cellGrant, hostRecordFresh, viewOf } from "./host_views.ts";
 import type { Rec } from "./host_views.ts";
 import { setRect, tabWidth, themeOf, themesOf } from "./layout.ts";
+import { chromeOf, FIT_MAX, fitSize, nextSize, sizeOf } from "./fit.ts";
 import type { Rect } from "./layout.ts";
 
 /** The cell meta that draws host agent `agent` by its own view (`host_views.ts`). */
@@ -68,7 +69,7 @@ export const SETTABLE = ["display_name", "html", "gl_source", "trusted", "readme
 export const GEOMETRY = ["x", "y", "width", "height"] as const;
 
 /** Every view verb, for the grants that admit a caller. */
-export const VIEW_VERBS = ["place", "move", "update", "wire", "remove", "theme", "reflect"] as const;
+export const VIEW_VERBS = ["place", "move", "fit", "update", "wire", "remove", "theme", "reflect"] as const;
 
 const num = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
 
@@ -96,13 +97,38 @@ function bodyOf(kind: string, payload: Payload): string | undefined | Record<str
 }
 
 
+/** How long `fit` waits for a panel's measure: its first, and the one after its
+ *  new width (a paragraph wraps differently). */
+const FIT_WAIT_MS = 3000;
+
+/** `fit`: the width the content wants, then — the panel measured again at that
+ *  width — its height (`fit.ts`). */
+async function fitCell(kernel: Kernel, view: string, cell: string, max: { width: number; height: number }): Promise<Json> {
+  const first = sizeOf(cell) ?? (await nextSize(cell, FIT_WAIT_MS));
+  if (first === null) {
+    return { error: `view: fit — ${JSON.stringify(cell)} reported no content size`, reason: "not_ready", arg: "id", hint: "only an html cell (a panel) measures what it draws, once it is drawn" };
+  }
+  const theme = themeOf(kernel, view, tabWidth());
+  const chrome = chromeOf(cell);
+  const wide = fitSize({ width: first.mw, height: first.h }, chrome, max);
+  const again = nextSize(cell, FIT_WAIT_MS);
+  setRect(kernel, view, theme, cell, { width: wide.width });
+  const at = (await again) ?? first;
+  const f = fitSize({ width: first.mw, height: at.h }, chrome, max);
+  const rect = setRect(kernel, view, theme, cell, { width: f.width, height: f.height });
+  // OVERFLOWED: still too big at this size — too tall for the max, or wider than
+  // the clamped width even wrapped (the panel's own measure there)
+  const overflowed = at.h + chrome.height > max.height || (wide.overflowed && at.ox === true);
+  return { fitted: cell, theme, ...rect, content: { width: first.mw, height: at.h }, overflowed } as unknown as Json;
+}
+
 export const CANVAS_README =
   
   "The canvas: the page's root agent. It holds the one view, `view_root` — build there (`docs of=view_root`). It answers reflect only.";
 
 export const VIEW_README =
   
-  "THE VIEW — the canvas's one view (frontend). Its cells are its children: you place and change them HERE. VERBS: place {kind: html|gl|terminal|chat (or handler_module) — or only backend_id: a VIEW of that host agent, drawn as its record says — x, y, id?, width?, height?, display_name?, bytes? (the body, verbatim), trusted?, can_call?, callable_by?, backend_id? (terminal/chat: the host agent shown)} · move {id, x?, y?, width?, height?} · update {id, bytes? (a new body reloads it), fields?: {display_name|trusted|readme|x|y|width|height|can_call|callable_by}} (on the view itself: any field) · theme {name?: auto | a theme's name} (which theme the cells sit in — stock: canvas = the free 2D canvas, mobile = one column; the canvas theme agent lists, adds and edits themes (`themes`, `add_theme`); auto = the first theme whose width trigger matches the tab (stock mobile: under 768px wide); x/y/width/height are per theme, kept in the view's layout_<theme> child, never on a cell — a cell new to a theme is placed by it) · wire {sender, receiver, verbs} (a grant, written on each side that is a cell; not from/to) · remove {id}. A PANEL'S JS (an html cell's body) has `fantastic`: `await fantastic.send(id, payload)` → the reply · `fantastic.watch(id, ev => …)` → events (returns off) · `fantastic.emit(id, payload)` · `fantastic.onMessage(p => …)`. Its calls are judged by the CELL's can_call — grant what it calls (`{<id>: [verbs…, watch]}`); a reply's `grants_missing` names any it lacks. On the host they arrive as `user`: a host agent you create for a panel needs `callable_by: {user: [<the verbs the panel calls>, watch]}` in its create_agent (a new agent admits no one); never drop `user` from an existing agent's callable_by. Example — a button that runs a command on a host exec agent `runner` and shows its output live: place {kind: html, x: 700, y: 60, can_call: {runner: [start, watch]}, bytes: <button onclick=\"fantastic.send('runner',{type:'start',command:'ls'}).then(r=>job=r.job_id)\">Run</button><pre id=o></pre><script>let job;fantastic.watch('runner',e=>{if(e.job_id===job&&e.type==='progress')o.textContent+=e.line+'\\n'})</script>} A LIVE HOST CELL — the agent pushes, its panel redraws (no polling): a bundle agent (start from `spawn {bundle: python_agent}` on the canvas's host node) whose record has `view: {kind: html, bytes_file: panel.html, calls: [get_html, watch]}` and `callable_by: {user: [get_html, watch]}`; its `agent.py` sends `fa.emit({'type': 'update', 'html': …})` on each change; its `panel.html` does `fantastic.send(id,{type:'get_html'})` once, then `fantastic.watch(id, e => { if (e.type==='update') root.innerHTML = e.html })`; show it with place {backend_id: id}. innerHTML runs no <script>: keep the panel's script in panel.html and send data (or script-free HTML) in the events. A live URL or a file: an html cell whose body is <iframe src=URL> (trusted: true for GET /static_files/file/<path>). The background is the child `background` (set_bg / default_bg / clear_bg / get_bg). ";
+  "THE VIEW — the canvas's one view (frontend). Its cells are its children: you place and change them HERE. VERBS: place {kind: html|gl|terminal|chat (or handler_module) — or only backend_id: a VIEW of that host agent, drawn as its record says — x, y, id?, width?, height?, display_name?, bytes? (the body, verbatim), trusted?, can_call?, callable_by?, backend_id? (terminal/chat: the host agent shown)} · move {id, x?, y?, width?, height?} · fit {id, max_width?, max_height?} (an html cell sized to what it draws — {width, height, overflowed}; a cell keeps its size otherwise, 480×320 when place names none: after you place or update an html cell, call fit) · update {id, bytes? (a new body reloads it), fields?: {display_name|trusted|readme|x|y|width|height|can_call|callable_by}} (on the view itself: any field) · theme {name?: auto | a theme's name} (which theme the cells sit in — stock: canvas = the free 2D canvas, mobile = one column; the canvas theme agent lists, adds and edits themes (`themes`, `add_theme`); auto = the first theme whose width trigger matches the tab (stock mobile: under 768px wide); x/y/width/height are per theme, kept in the view's layout_<theme> child, never on a cell — a cell new to a theme is placed by it) · wire {sender, receiver, verbs} (a grant, written on each side that is a cell; not from/to) · remove {id}. A PANEL'S JS (an html cell's body) has `fantastic`: `await fantastic.send(id, payload)` → the reply · `fantastic.watch(id, ev => …)` → events (returns off) · `fantastic.emit(id, payload)` · `fantastic.onMessage(p => …)`. Its calls are judged by the CELL's can_call — grant what it calls (`{<id>: [verbs…, watch]}`); a reply's `grants_missing` names any it lacks. On the host they arrive as `user`: a host agent you create for a panel needs `callable_by: {user: [<the verbs the panel calls>, watch]}` in its create_agent (a new agent admits no one); never drop `user` from an existing agent's callable_by. Example — a button that runs a command on a host exec agent `runner` and shows its output live: place {kind: html, x: 700, y: 60, can_call: {runner: [start, watch]}, bytes: <button onclick=\"fantastic.send('runner',{type:'start',command:'ls'}).then(r=>job=r.job_id)\">Run</button><pre id=o></pre><script>let job;fantastic.watch('runner',e=>{if(e.job_id===job&&e.type==='progress')o.textContent+=e.line+'\\n'})</script>} A LIVE HOST CELL — the agent pushes, its panel redraws (no polling): a bundle agent (start from `spawn {bundle: python_agent}` on the canvas's host node) whose record has `view: {kind: html, bytes_file: panel.html, calls: [get_html, watch]}` and `callable_by: {user: [get_html, watch]}`; its `agent.py` sends `fa.emit({'type': 'update', 'html': …})` on each change; its `panel.html` does `fantastic.send(id,{type:'get_html'})` once, then `fantastic.watch(id, e => { if (e.type==='update') root.innerHTML = e.html })`; show it with place {backend_id: id}. innerHTML runs no <script>: keep the panel's script in panel.html and send data (or script-free HTML) in the events. A live URL or a file: an html cell whose body is <iframe src=URL> (trusted: true for GET /static_files/file/<path>). The background is the child `background` (set_bg / default_bg / clear_bg / get_bg). ";
 
 /** The root: `reflect` is the kernel's; it answers nothing else. */
 export const canvasAgent: Handler = (_id, payload): Json => {
@@ -182,6 +208,15 @@ export const viewAgent: Handler = (id, payload, kernel): Json | Promise<Json> =>
       if (Object.keys(m).length === 0) return { error: "view: move needs x, y, width or height", reason: "bad_arg", arg: "x" };
       const theme = themeOf(kernel, id, tabWidth());
       return { moved: target, theme, ...setRect(kernel, id, theme, target, m) } as unknown as Json;
+    }
+    case "fit": {
+      const target = str(payload, "id");
+      if (kernel.get(target)?.parentId !== id) return { error: `view: fit — ${JSON.stringify(target)} is not a cell of this view`, reason: "not_found", arg: "id" };
+      const max = {
+        width: num(payload["max_width"]) ? (payload["max_width"] as number) : FIT_MAX.width,
+        height: num(payload["max_height"]) ? (payload["max_height"] as number) : FIT_MAX.height,
+      };
+      return fitCell(kernel, id, target, max);
     }
     case "update": {
       const target = str(payload, "id");

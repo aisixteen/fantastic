@@ -14,6 +14,8 @@
 //   const off = fantastic.watch("exec_bridge_x", (ev) => …);            // ← agent events
 //   fantastic.onMessage((p) => …);                                         // ← messages sent to ME
 
+import { MEASURE_SRC } from "../canvas/fit.ts";
+
 export const CONNECTOR_SRC = `(() => {
   const pending = new Map();
   const watchers = new Map();
@@ -33,6 +35,7 @@ export const CONNECTOR_SRC = `(() => {
       for (const cb of [...inboxCbs]) { try { cb(m.payload); } catch (_) {} }
     }
   });
+  ${MEASURE_SRC}
   globalThis.fantastic = {
     send(target, payload) {
       const id = String(++rid);

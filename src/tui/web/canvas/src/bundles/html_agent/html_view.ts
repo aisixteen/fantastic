@@ -1,6 +1,7 @@
 import type { ViewBundle, ViewContext, ViewHandle } from "../view.ts";
 import type { Json, Payload } from "../../lib.ts";
 import { CONNECTOR_SRC } from "./connector.ts";
+import { forgetSize, reportSize } from "../canvas/fit.ts";
 import { htmlBodyOf } from "./html_agent.ts";
 
 // html_view — renders an html_agent's MUTABLE body (`meta.html`) as a FULLY
@@ -134,6 +135,12 @@ export function mountPanel(ctx: ViewContext, body: () => string | Promise<string
           }
           break;
         }
+        case "size": {
+          // the panel measured its content (`fit.ts`): what `fit` sizes the cell to
+          const z = m as unknown as { mw?: unknown; h?: unknown; ox?: unknown };
+          if (typeof z.mw === "number" && typeof z.h === "number") reportSize(selfId, { mw: z.mw, h: z.h, ox: z.ox === true });
+          break;
+        }
         case "unwatch": {
           const src = m.src ?? "";
           watchOffs.get(src)?.();
@@ -148,6 +155,7 @@ export function mountPanel(ctx: ViewContext, body: () => string | Promise<string
       unmount(): void {
         window.removeEventListener("message", onMsg);
         offInbox();
+        forgetSize(selfId);
         for (const off of watchOffs.values()) off();
         watchOffs.clear();
         iframe.remove();

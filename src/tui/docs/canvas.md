@@ -126,6 +126,7 @@ both sides; the human narrows them with `update_agent`).
 |---|---|
 | `place {kind, x, y, …}` | a new cell: `html`, `gl`, `terminal`, `chat` — or `handler_module` (any page bundle, `.ts` optional) instead of `kind` (one view for now — no nested views) |
 | `move {id, x, y, …}` | move / resize a cell — in the layout of the theme in use |
+| `fit {id, max_width?, max_height?}` | size an html cell to what it draws (its width, then its height at that width) — `overflowed` when it still does not fit; a cell keeps its size otherwise, so call it after placing or updating an html cell |
 | `update {id, bytes?, fields?}` | a cell's new body (`bytes`, verbatim) or fields (display_name, trusted, readme, geometry, can_call, callable_by) |
 | `theme {name?}` | which layout the cells sit in: `canvas` (the free 2D canvas), `mobile` (one column), `auto` (default — mobile in a tab under 768px wide); no name: what it is |
 | `wire {sender, receiver, verbs}` | a grant, written on each side that is a cell of the view (a host agent receiver: the sender's side only) |
