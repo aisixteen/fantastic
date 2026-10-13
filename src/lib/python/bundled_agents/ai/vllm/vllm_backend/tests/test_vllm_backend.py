@@ -396,6 +396,8 @@ async def test_reflect_shows_the_effective_posture_and_the_shared_table(seeded_k
     out = (await k.send([{"target": "v1", "payload": {"type": "reflect"}}]))[0][
         "result"
     ]
+    # WHERE its key is read: absent here, shown as null (a pointer, never a secret).
+    assert "credentials" in out and out["credentials"] is None, out
     assert out["sampling"]["temperature"] == 0.2 and out["sampling"]["seed"] == 3
     assert out["thinking_token_budget_source"] == "default"
     assert out["timeouts"] == {"connect": 5.0, "read": 900.0}

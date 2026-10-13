@@ -846,6 +846,10 @@ fn stop_reply(agent_id: &AgentId, payload: &Value) -> Value {
 /// `shell` permits — or the start is refused naming the patterns. A pipe job
 /// always names its command. Everything else is the RECORD's, never the call's:
 /// `cwd` (required), `env` + `inherit_env` (the child's environment).
+/// `start` sends no one anything — the refusal of a `notify`/`match`/`every` on it.
+const START_WAKE_HINT: &str = "absent — `start` sends no one anything; to be told what the job \
+     prints (or when it ends), `monitor` it: job_id, notify, match, every";
+
 async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
     let meta = snapshot_meta(agent_id, kernel);
     // EVERY refusal on this verb carries a CODE, so nothing has to tell a typo
@@ -860,6 +864,13 @@ async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
                 gone,
                 &format!("absent — `{gone}` is the record's (update_agent {agent_id} {gone}=…)"),
             );
+        }
+    }
+    // A WAKE-UP is a monitor's, never the start's: a `notify` here used to be
+    // dropped silently, and the caller waited for a message nothing would send.
+    for gone in ["notify", "match", "every"] {
+        if payload.get(gone).is_some_and(|v| !v.is_null()) {
+            return bad("start", gone, START_WAKE_HINT);
         }
     }
     // `args` — a list of scalars, each stringified into argv. python's

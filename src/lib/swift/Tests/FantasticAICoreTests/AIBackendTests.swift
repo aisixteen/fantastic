@@ -38,11 +38,12 @@ struct AIBackendTests {
         // The kernel appends its own frame (can_call/callable_by/…) after the
         // bundle's body; the BODY is what this pins.
         #expect(
-            (r.asObject?.keys.prefix(9)).map(Array.init) == [
+            (r.asObject?.keys.prefix(10)).map(Array.init) == [
                 "id", "sentence", "model", "endpoint", "context_window", "context_strategy",
-                "memory_store_id", "generating", "extra",
+                "memory_store_id", "credentials", "generating", "extra",
             ], "\(r.asObject?.keys.map { $0 } ?? [])")
         #expect(r["memory_store_id"].asString == "memory")
+        #expect(r["credentials"].isNull, "no key named: \(r)")
         #expect(r["id"].asString == id.value)
         #expect(r["kind"].isNull && r["provider"].isNull)
         // the record's own fields, or null — nothing is guessed

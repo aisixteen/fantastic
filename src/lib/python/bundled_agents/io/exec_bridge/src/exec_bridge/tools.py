@@ -879,6 +879,16 @@ async def _start(id, payload, kernel):
                 gone,
                 f"absent — `{gone}` is the record's (update_agent {id} {gone}=…)",
             )
+    # A WAKE-UP is a monitor's, never the start's: a `notify` here used to be
+    # dropped silently, and the caller waited for a message nothing would send.
+    for gone in ("notify", "match", "every"):
+        if payload.get(gone) is not None:
+            return bad(
+                "start",
+                gone,
+                "absent — `start` sends no one anything; to be told what the job "
+                "prints (or when it ends), `monitor` it: job_id, notify, match, every",
+            )
     raw_args = payload.get("args", [])
     if not isinstance(raw_args, list) or any(
         not isinstance(a, (str, int, float)) for a in raw_args

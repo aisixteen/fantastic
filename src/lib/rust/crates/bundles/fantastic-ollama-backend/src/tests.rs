@@ -545,7 +545,7 @@ async fn reflect_extras_match_python() {
         .await
         .remove(0)
         .result;
-    let keys: Vec<String> = r.as_object().unwrap().keys().take(12).cloned().collect();
+    let keys: Vec<String> = r.as_object().unwrap().keys().take(13).cloned().collect();
     assert_eq!(
         keys,
         vec![
@@ -556,6 +556,7 @@ async fn reflect_extras_match_python() {
             "context_window",
             "context_strategy",
             "memory_store_id",
+            "credentials",
             "generating",
             "temperature",
             "num_ctx",

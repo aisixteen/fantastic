@@ -19,7 +19,7 @@ sys.path.insert(
     str(next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())),
 )
 from backends import backend as _resolve_backend
-from helpers import verdict
+from helpers import ctx_score, verdict
 from helpers.facts_arm import (
     FOLD_ARMS,
     file_reads,
@@ -60,6 +60,10 @@ async def main():
                             f"filler_1.txt was read; its checksum line said >> checksum: {wrong}.", False,
                             id=root.ctx.mint_id())  # a planted fold is minted by the store like any row
         await inject_row(core, root, aid, planted)
+        # THE ROWS ARE THE ONLY TRUTH: with the file still on disk, re-reading it was an
+        # honest check that bypassed the fold (rust, 2026-10-13) — gone, only descent
+        # into the fold's members can contradict its summary.
+        Path("filler_1.txt").unlink()
         final = (f"FINAL: what is the checksum in `filler_1.txt`? Its read is folded — the fold summary may be stale; "
                  f"verify against the actual row before answering. Write `final.md` through `notes` with "
                  f"`checksum: <value>`. Then {DONE}.")
@@ -74,6 +78,15 @@ async def main():
                 holds(r, (*seen, fid)) for r in refs.get(fid, []) if r in refs and r not in seen)
 
         opened = [d for d in a2["descents"] if holds(d)]
+        # AN UNSCOPED grep is a check of the source too when its query reaches a member
+        # of the planted fold (rust, 2026-10-13: `grep query=checksum` found the read
+        # row and the model named the fold stale). The store keeps a reply's origin
+        # line, not its hits, so the query is matched against the members here.
+        members = [m for m in a2["msgs"] if m.get("id") in set(member_ids)]
+        for c in ctx_score.calls_made(a2["msgs"], target=aid, verb="grep"):
+            q = str(c["payload"].get("query") or "")
+            if not c["payload"].get("ids") and q and any(q in str(m.get("content", "")) for m in members):
+                opened.append(f"grep:{q}")
         descended = bool(opened)
         print(f"     answer real={real in a2['body']}  wrong={wrong in a2['body']}  "
               f"descended into the planted fold or one holding it={opened}")

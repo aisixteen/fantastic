@@ -645,6 +645,8 @@ async fn reflect_shows_the_effective_posture_and_the_shared_table() {
         .remove(0)
         .result;
     assert_eq!(out["sentence"], json!(SENTENCE));
+    // WHERE its key is read: absent here, shown as null (a pointer, never a secret).
+    assert_eq!(out.get("credentials"), Some(&Value::Null), "{out}");
     assert_eq!(out["sampling"]["temperature"], json!(0.2));
     assert_eq!(out["sampling"]["seed"], json!(3));
     assert_eq!(out["thinking_token_budget_source"], json!("default"));

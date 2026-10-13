@@ -2988,6 +2988,10 @@ def _make_reflect(cfg: Backend):
             "context_window": resolve_context_window(rec),
             "context_strategy": rec.get("context_strategy", DEFAULT_STRATEGY),
             "memory_store_id": rec.get("memory_store_id"),
+            # WHERE its key is read — `{store, ref}`, a pointer, never the secret. An
+            # agent copying this one's record needs it (e2e subai, 2026-10-13: a keyed
+            # door, and the template it was told to read did not show it).
+            "credentials": rec.get("credentials"),
             # A generation IS its kernel dispatch task — the backend holds no
             # task handle of its own. `_current[id]` present ⇔ in flight.
             "generating": id in _current,

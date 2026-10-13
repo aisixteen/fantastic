@@ -276,6 +276,18 @@ async def test_a_per_call_env_or_cwd_is_refused(seeded_kernel):
         assert (r["reason"], r["arg"]) == ("bad_arg", arg), r
 
 
+async def test_a_wake_up_on_start_is_refused_naming_monitor(seeded_kernel):
+    # A `notify` on `start` was dropped silently: the caller waited for a message
+    # nothing would send (e2e monitor, 2026-10-13).
+    await _mk(seeded_kernel, allowed=[r"/bin/sh -c .*"])
+    for arg, val in (("notify", "ai"), ("match", "WAKE"), ("every", 5)):
+        r = await _start(
+            seeded_kernel, "runner", "/bin/sh", ["-c", "true"], **{arg: val}
+        )
+        assert (r["reason"], r["arg"]) == ("bad_arg", arg), r
+        assert "`monitor` it" in r["error"], r
+
+
 async def test_a_leg_with_no_cwd_runs_nothing(seeded_kernel):
     await _mk(seeded_kernel, agent_id="nocwd", allowed=[r"/bin/sh -c .*"], cwd=None)
     r = await _start(seeded_kernel, "nocwd", "/bin/sh", ["-c", "true"])

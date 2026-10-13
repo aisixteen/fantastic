@@ -617,6 +617,7 @@ _SHARED = (
     "context_window",
     "context_strategy",
     "memory_store_id",
+    "credentials",
     "generating",
 )
 

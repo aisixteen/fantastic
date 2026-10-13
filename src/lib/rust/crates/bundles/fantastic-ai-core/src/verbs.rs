@@ -123,6 +123,13 @@ pub fn reflect_base(
         "memory_store_id".to_string(),
         meta.get("memory_store_id").cloned().unwrap_or(Value::Null),
     );
+    // WHERE its key is read — `{store, ref}`, a pointer, never the secret. An agent
+    // copying this one's record needs it (e2e subai, 2026-10-13: a keyed door, and
+    // the template it was told to read did not show it).
+    out.insert(
+        "credentials".to_string(),
+        meta.get("credentials").cloned().unwrap_or(Value::Null),
+    );
     // A generation IS its kernel dispatch task — the backend holds no task
     // handle of its own. An in-flight entry present ⇔ generating.
     out.insert(

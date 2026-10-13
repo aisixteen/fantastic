@@ -149,8 +149,9 @@ TASK = (
     "NOTHING can call anything by default: wiring means granting the authority in "
     "BOTH directions for every edge (clock → AI, AI → code agent, AI → `totals`, "
     "and whatever the code agent's `allowed` needs). The agents that are not yours — "
-    f"`clock`, `totals`, the memory store and the key store — are ALREADY open to `{SUB_AI}`; "
-    "every edge between agents you create is yours to grant. Build it, trigger a tick, "
+    f"`clock`, `totals`, the memory store and the key store — are ALREADY open to `{SUB_AI}` "
+    f"on THEIR side (their `callable_by`); `{SUB_AI}`'s own `can_call` must still name each "
+    "of them it calls, and every edge between agents you create is yours to grant. Build it, trigger a tick, "
     "verify the stored value is right, and tell me what you made."
 )
 

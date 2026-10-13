@@ -7,7 +7,8 @@ detailed: the whole text, for one verb); a reflect's tree can be cut with
 task below names none of them.
 
 THE FIXTURE. A ~30-agent estate: four wings, rooms below them, and one VAULT five
-levels down (`site / south_wing / basement / archive_room / vault`). The vault's
+levels down (`ai / site / south_wing / basement / archive_room / vault` — under the
+AI, which reaches it as `$subtree`; its system block has no `{tree}`, so no id is given). The vault's
 `open` takes `code:str`; only its DETAILED docs say how the code is made from the
 `serial` its reflect shows (backwards, prefixed `V-`), so a model that never pulls
 detailed docs for `open` cannot open it. Structural rooms are sealed file legs
@@ -16,10 +17,10 @@ with a `description` — readable in the tree, callable by nobody.
 SCORED ON THE MODEL'S OWN CALLS (parsed from its turns) and on the FILE:
   1. task done        — `answer.md` on the desk holds the vault's secret;
   2. oneliners first  — a `docs` of the vault (oneliners) before its first `open`;
-  3. detailed only for a used verb — every detailed pull names a verb, and that
-                        verb is then called;
-  4. a filtered reflect after the first look — `show_subtrees` / `ignore_subtrees`.
-Reported, not scored: docs pulls by tier, reflects plain vs filtered, and the
+  3. detailed only for a used verb — every detailed pull's verb is then called (a
+                        pull naming no verb: one of that agent's verbs is);
+Reported, not scored: a filtered reflect after the first look (`show_subtrees` /
+`ignore_subtrees` — optional, owner 2026-10-13), docs pulls by tier, reflects plain vs filtered, and the
 share of reflect + docs replies in the conversation the agent holds.
 """
 
@@ -45,6 +46,8 @@ BK = _resolve_backend()
 AID = "ai"
 SERIAL = str(40000 + secrets.randbelow(50000))
 SECRET = "amber-" + secrets.token_hex(3)
+#: The vault's id. Its own grants name it to the model, so no id can make it search.
+VAULT = "vault"
 
 TASK = (
     "Somewhere in this kernel's tree there is a vault. Open it, then write the "
@@ -91,7 +94,7 @@ def _calls(transcript: list[str]) -> list[tuple[str, dict]]:
 
 
 def _is_vault(of: object) -> bool:
-    return of in ("vault", "vault_probe.tools")
+    return of in (VAULT, "vault_probe.tools")
 
 
 def _share(rows: list[dict]) -> tuple[int, int]:
@@ -114,38 +117,9 @@ def _share(rows: list[dict]) -> tuple[int, int]:
 
 async def main():
     root, core, close_kernel = await open_kernel(
-        "docs_mech_", reach=["desk", "vault", "kernel_store", AID, "cli", "user"]
+        "docs_mech_", reach=["desk", VAULT, "kernel_store", AID, "cli", "user"]
     )
-    for rid, parent, desc in ROOMS:
-        r = (
-            await root.send(
-                [
-                    {
-                        "target": root.id,
-                        "payload": {
-                            "type": "create_agent",
-                            "parent_id": parent or home(root),
-                            "handler_module": "file_bridge.tools",
-                            "id": rid,
-                            "root": ".",
-                            "allow": [],
-                            "description": desc,
-                        },
-                    }
-                ]
-            )
-        )[0]["result"]
-        assert not r.get("error"), f"create {rid}: {r}"
     for payload in (
-        {
-            "type": "create_agent",
-            "parent_id": "archive_room",
-            "handler_module": "vault_probe.tools",
-            "id": "vault",
-            "serial": SERIAL,
-            "secret": SECRET,
-            "callable_by": {AID: "*", "rest": "*"},
-        },
         {
             "type": "create_agent",
             "parent_id": home(root),
@@ -176,10 +150,48 @@ async def main():
         core,
         BK,
         agent_id=AID,
-        can_call={root.id: "*", "vault": "*", "desk": "*", "cli": "*", "user": "*"},
+        # THE VAULT'S ID IS NOWHERE IN THE MODEL'S VIEW (2026-10-13): it holds the
+        # estate as `$subtree`, not by name, and its system block leaves out `{tree}`
+        # (the primer lists every id) — so finding the vault takes the tree itself.
+        can_call={root.id: "*", "$subtree": "*", "desk": "*", "cli": "*", "user": "*"},
         callable_by={"user": "*"},
         limits=Limits.from_env(os.environ),
+        record={"system_prompt": "{self}\n\n{howto}"},
     )
+    # THE ESTATE, under the AI (so `$subtree` reaches it), the vault five levels down.
+    for rid, parent, desc in ROOMS:
+        r = (
+            await root.send(
+                [
+                    {
+                        "target": root.id,
+                        "payload": {
+                            "type": "create_agent",
+                            "parent_id": parent or AID,
+                            "handler_module": "file_bridge.tools",
+                            "id": rid,
+                            "root": ".",
+                            "allow": [],
+                            "description": desc,
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
+        assert not r.get("error"), f"create {rid}: {r}"
+    for payload in (
+        {
+            "type": "create_agent",
+            "parent_id": "archive_room",
+            "handler_module": "vault_probe.tools",
+            "id": VAULT,
+            "serial": SERIAL,
+            "secret": SECRET,
+            "callable_by": {AID: "*", "rest": "*"},
+        },
+    ):
+        r = (await root.send([{"target": root.id, "payload": payload}]))[0]["result"]
+        assert not r.get("error"), f"create {payload['id']}: {r}"
     capped = await drive(conn, TASK, client_id="docs", via="user")
     calls = _calls(conn.proxy.transcript)
     held = (await root.send([{"target": AID, "payload": {"type": "rows"}}]))[0][
@@ -198,7 +210,7 @@ async def main():
         return p.get("type") == "docs"
 
     opens = [
-        i for i, (t, p) in enumerate(calls) if t == "vault" and p.get("type") == "open"
+        i for i, (t, p) in enumerate(calls) if t == VAULT and p.get("type") == "open"
     ]
     first_open = opens[0] if opens else len(calls)
     docs = [(i, p) for i, (t, p) in enumerate(calls) if is_docs(p)]
@@ -218,13 +230,13 @@ async def main():
     def _used(p):
         of, verb = p.get("of"), p.get("verb")
         target = (
-            "vault"
-            if _is_vault(of)
-            else ("kernel" if of in ("kernel", root.id) else of)
+            VAULT if _is_vault(of) else ("kernel" if of in ("kernel", root.id) else of)
         )
-        return bool(verb) and any(
-            (t, v) == (target, verb)
-            or (target == "kernel" and t == root.id and v == verb)
+        # A detailed pull with no `verb` is the kernel's own contract (every verb,
+        # plus emits/cancel/notes) — it counts when one of that agent's verbs is used.
+        return any(
+            (t == target or (target == "kernel" and t == root.id))
+            and (verb is None or v == verb)
             for t, v in used
         )
 
@@ -258,12 +270,19 @@ async def main():
         f"  3. detailed only for a verb then used        : {'OK' if detailed_ok else 'NO'}"
     )
     print(
-        f"  4. a filtered reflect after the first look   : {'OK' if filtered_after else 'NO'}"
+        f"  4. a filtered reflect after the first look   : {'OK' if filtered_after else 'NO'} (reported)"
     )
-    ok = done and oneliners_first and detailed_ok and filtered_after
+    # Check 4 is REPORTED, not scored (owner, 2026-10-13): cutting the tree is optional —
+    # a tree small enough to read whole needs no filter.
+    # TODO(owner, 2026-10-13): figure out how to MEASURE tree cutting — this was the only
+    # e2e of a model choosing `show_subtrees`/`ignore_subtrees`. One idea: an estate
+    # whose full reflect passes the inline cap (~30k tokens at 262k, ~1.4k at 12k), so
+    # the first look comes back digested and only a cut reaches the vault; then score
+    # check 4 again.
+    ok = done and oneliners_first and detailed_ok
     verdict(
         ok,
-        "found the vault, read its docs by tier, cut the tree"
+        "found the vault through the tree, read its docs by tier"
         if ok
         else f"done={done} oneliners_first={oneliners_first} "
         f"detailed_ok={detailed_ok} filtered_after={filtered_after}",

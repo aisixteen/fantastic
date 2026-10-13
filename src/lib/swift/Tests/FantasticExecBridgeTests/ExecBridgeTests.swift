@@ -1438,6 +1438,14 @@
                 #expect(r["reason"].asString == "bad_arg", "\(r.serialize())")
                 #expect(r["arg"].asString == arg, "\(r.serialize())")
             }
+            // A wake-up is a monitor's: `notify`/`match`/`every` on `start` refuse naming
+            // `monitor` (they were dropped silently — e2e monitor, 2026-10-13).
+            for (arg, val): (String, JSON) in [("notify", .string("ai")), ("match", .string("WAKE")), ("every", .integer(5))] {
+                let r = await start([arg: val])
+                #expect(r["reason"].asString == "bad_arg", "\(r.serialize())")
+                #expect(r["arg"].asString == arg, "\(r.serialize())")
+                #expect((r["error"].asString ?? "").contains("`monitor` it"), "\(r.serialize())")
+            }
             let nulls = await start(["env": .null, "cwd": .null, "args": .array([.string("x")])])
             #expect(nulls["job_id"].asInt != nil, "an explicit null is absent: \(nulls.serialize())")
             _ = await kernel.send([Item(a, .object(["type": .string("stop")]))])[0].result

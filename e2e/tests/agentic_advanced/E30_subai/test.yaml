@@ -12,6 +12,10 @@ runtimes: [python, rust, swift]
 costs: turns
 # SINGLE LANE: the routine spawns live AI agents that share the proxy.
 long: true
+# 30 min (owner exception, 2026-10-13): it builds live agents, and every `docs`
+# reply leaves the view after one message, so planning re-pulls docs; 15 min stopped
+# it mid-build twice on rust, alone on the GPU.
+hard_stop_minutes: 30
 limits:
   idle_seconds: 60
   max_turns: 50

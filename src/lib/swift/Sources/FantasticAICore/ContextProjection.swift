@@ -546,6 +546,10 @@ extension AIBackend {
         out["context_window"] = .integer(AIContext.resolveContextWindow(agent, modelWindow: config.modelWindow))
         out["context_strategy"] = AIContext.strategy(agent)
         out["memory_store_id"] = agent.metaValue(forKey: "memory_store_id") ?? .null
+        // WHERE its key is read — `{store, ref}`, a pointer, never the secret. An agent
+        // copying this one's record needs it (e2e subai, 2026-10-13: a keyed door, and
+        // the template it was told to read did not show it).
+        out["credentials"] = agent.metaValue(forKey: "credentials") ?? .null
         return out
     }
 }

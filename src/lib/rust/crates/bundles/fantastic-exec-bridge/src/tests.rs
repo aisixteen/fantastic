@@ -2116,6 +2116,13 @@ async fn start_coerces_args_env_and_cwd_like_python() {
             "{r}"
         );
     }
+    // A wake-up is a monitor's: `notify`/`match`/`every` on `start` refuse naming
+    // `monitor` (they were dropped silently — e2e monitor, 2026-10-13).
+    for (arg, val) in [("notify", json!("ai")), ("match", json!("WAKE")), ("every", json!(5))] {
+        let r = call(json!({"type": "start", "command": "ls", arg: val})).await;
+        assert_eq!((&r["reason"], &r["arg"]), (&json!("bad_arg"), &json!(arg)), "{r}");
+        assert!(r["error"].as_str().unwrap_or("").contains("`monitor` it"), "{r}");
+    }
     let r = call(json!({"type": "start", "command": py.to_string_lossy(),
                         "args": ["-c", "pass"], "env": null, "cwd": null}))
     .await;

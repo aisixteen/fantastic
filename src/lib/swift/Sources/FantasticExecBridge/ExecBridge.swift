@@ -488,6 +488,14 @@
                     "start", gone,
                     "absent — `\(gone)` is the record's (update_agent \(agentId.value) \(gone)=…)")
             }
+            // A WAKE-UP is a monitor's, never the start's: a `notify` here used to be
+            // dropped silently, and the caller waited for a message nothing would send.
+            for gone in ["notify", "match", "every"] where !payload[gone].isNull {
+                return Refusal.bad(
+                    "start", gone,
+                    "absent — `start` sends no one anything; to be told what the job "
+                        + "prints (or when it ends), `monitor` it: job_id, notify, match, every")
+            }
             // `args` — python `payload.get("args", [])`: the KEY absent is `[]`, an
             // explicit null is not a list and refuses. Items are str/int/float — and a
             // bool IS an int in python, so `true` is legal and stringifies `True`.

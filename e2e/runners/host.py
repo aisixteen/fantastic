@@ -24,7 +24,7 @@ E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exis
 sys.path.insert(0, str(E2E))
 
 from backends import backend
-from helpers import memory
+from helpers import creds, memory
 from helpers import verdict
 from helpers.host.driver import BASE, HostKernel, ensure_runtime, runtime
 
@@ -87,7 +87,6 @@ def substitute(sc: dict) -> dict:
     return _json.loads(raw)
 
 
-
 def main(scenario_id: str) -> int:
     sc = load(scenario_id)
     rt, _ = runtime(REPO)
@@ -135,7 +134,8 @@ def main(scenario_id: str) -> int:
         store = k.create(
             parent_id=k.root_id,
             id="store",
-            handler_module="file_bridge.tools", allow=["."],
+            handler_module="file_bridge.tools",
+            allow=["."],
             root=".fantastic",
             ingress_rule="allow_all_ingress",
             callable_by={**BASE, "rest": "*"},
@@ -182,13 +182,17 @@ def main(scenario_id: str) -> int:
             else:
                 can_call[peer] = "*"
         # ITS MEMORY: the conversation lives in the kernel's `memory` store — the
-        # agent names it and may call it; the store's ingress for `ai` was seeded
-        # (every declared id may reach it).
+        # agent names it and may call it; the store accepts it (below, once the
+        # AI exists).
         can_call[memory.MEMORY] = "*"
+        # ITS KEY: a keyed plug's record names `credentials: {store: creds, ...}`,
+        # so the AI may `get` from `creds` (this half) and `creds` accepts it
+        # (below) — explicit, per agent; nothing is inherited.
+        if bk.key_ref:
+            can_call[creds.CREDS] = creds.GET
         # The plug's record (handler, model, endpoint, the one token budget, its
-        # sampling knobs) under this scenario's wiring. NOTHING TO DELIVER for a
-        # key: every backend reads it from the ENVIRONMENT, and the kernel was
-        # spawned with this process's env.
+        # sampling knobs) under this scenario's wiring; a keyed plug's record names
+        # its key in `creds` (the store reads the env var, `helpers/creds.py`).
         ai = k.create(
             parent_id=k.root_id,
             id="ai",
@@ -199,6 +203,17 @@ def main(scenario_id: str) -> int:
             ),
         )
         assert ai.get("id"), ai
+        # THE STORES' HALVES: `rest` is the parent of `memory` and `creds`, so it
+        # writes their `callable_by` — read, add `ai`, write back (whole field).
+        listed = k.send("kernel", {"type": "list_agents"})
+        recs = {a.get("id"): a for a in listed.get("agents") or []}
+        opens = {memory.MEMORY: "*", **({creds.CREDS: creds.GET} if bk.key_ref else {})}
+        for store_id, verbs in opens.items():
+            cb = {**(recs[store_id].get("callable_by") or {}), "ai": verbs}
+            out = k.send(
+                "kernel", {"type": "update_agent", "id": store_id, "callable_by": cb}
+            )
+            assert not (isinstance(out, dict) and out.get("error")), out
 
         first = k.send("ai", {"type": "send", "text": sc["task"], "client_id": "probe"})
         # WHOLE, never a 300-char head: the fault in a failed pass is what the
@@ -302,7 +317,9 @@ def main(scenario_id: str) -> int:
         if isinstance(rows, list):
             print(f"\n  --- {hist.get('total')} rows ---")
             for r in rows:
-                print(f"  {r.get('id')} ← {r.get('parent')} {str(r.get('kind')):8} {r.get('head', '')}")
+                print(
+                    f"  {r.get('id')} ← {r.get('parent')} {str(r.get('kind')):8} {r.get('head', '')}"
+                )
 
         for agent, got in seen.items():
             print(f"\n  {agent}.read -> {got}")
