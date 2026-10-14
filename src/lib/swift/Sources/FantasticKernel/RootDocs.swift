@@ -2,9 +2,8 @@
 //
 // `Resources/docs/` is a copy of python's `kernel_state/docs/`: `<key>.md` is a
 // topic, a sibling dir `<key>/` extends it with sub-docs (`<key>/<sub>`) —
-// nested dirs are tiers. The tree feeds BOTH the on-disk `.fantastic/docs/`
-// (seeded at boot, copy-if-missing) and `reflect readme=index` /
-// `readme=<key>` on the root. Mirrors Python's `Agent._readme_index` walk and
+// nested dirs are tiers. `KernelStateBundle.docs` serves it to `reflect
+// readme=index` / `readme=<key>` — never copied to disk. Mirrors Python's `Agent._readme_index` walk and
 // Rust's `fantastic_core::DOCS`.
 
 import FantasticJSON
@@ -103,22 +102,25 @@ public enum RootDocs {
         nodes.flatMap { [(key: $0.key, body: $0.body)] + flatten($0.children) }
     }
 
-    /// Seed `<workdir>/.fantastic/docs/<key>.md` from [`all`] — nested keys land
-    /// in nested dirs — copy-if-missing (preserves operator edits). Called at
-    /// boot beside `RootReadme.seed`. A failed write THROWS, as python's seed
-    /// raises (audit 2026-10-03, ARCH2-9).
-    public static func seed(workdir: URL) throws {
-        let dir =
-            workdir
-            .appendingPathComponent(".fantastic")
-            .appendingPathComponent("docs")
-        let fm = FileManager.default
-        for (key, body) in all {
-            let dest = dir.appendingPathComponent("\(key).md")
-            if fm.fileExists(atPath: dest.path) { continue }
-            try fm.createDirectory(
-                at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try body.write(to: dest, atomically: true, encoding: .utf8)
-        }
+    /// A bundle's flat `(key, body)` docs as the topic tree — a `/` in a key is
+    /// a tier, each tier ordered as python orders a `docs/` dir's files (by
+    /// `<stem>.md`), bodies in python text mode (C59). A tier whose parent
+    /// topic is absent is not listed, as python lists only `<key>.md` files.
+    public static func tree(_ flat: [(key: String, body: String)], prefix: String = "")
+        -> [Node]
+    {
+        flat
+            .compactMap { doc -> (stem: String, body: String)? in
+                guard doc.key.hasPrefix(prefix) else { return nil }
+                let stem = String(doc.key.dropFirst(prefix.count))
+                return stem.isEmpty || stem.contains("/") ? nil : (stem, doc.body)
+            }
+            .sorted { ($0.stem + ".md") < ($1.stem + ".md") }
+            .map { doc in
+                let key = prefix + doc.stem
+                return Node(
+                    key: key, body: pyUniversalNewlines(doc.body),
+                    children: tree(flat, prefix: key + "/"))
+            }
     }
 }

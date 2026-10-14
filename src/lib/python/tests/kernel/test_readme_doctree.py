@@ -9,8 +9,8 @@ a `docs/` topic tree. `reflect` gains a polymorphic `readme` value:
 The ROOT reflect always carries `readmes` (the index) + `docs` (a one-liner) —
 the manual's map is in front of a caller from the first round-trip.
 
-Tests use the `kernel` fixture (its root seeds `.fantastic/readme.md` + `docs/`
-on disk via `boot_root`→`write_record`).
+The tree is served from the bundle package — nothing is copied to disk
+(owner 2026-10-14).
 """
 
 from __future__ import annotations
@@ -44,19 +44,16 @@ def test_read_desc_prefers_quote_line():
 # ─── docs seeded on disk ───────────────────────────────────────
 
 
-def test_docs_tree_seeded_on_disk(kernel):
-    """The bootstrap seeds the `docs/` topic tree (nested tiers) beside the
-    root orientation readme."""
-    docs = Path(kernel._root_path) / "docs"
-    assert (docs / "self-extension.md").exists()
-    assert (docs / "reflect.md").exists()
-    # a nested tier
-    assert (docs / "frontend" / "html-agent.md").exists()
+async def test_docs_tree_served_from_the_bundle(kernel):
+    """The index lists the bundle's shipped topics (nested tiers) while no
+    `docs/` exists in the root's dir."""
+    keys = kernel._readme_keys()
+    assert {"self-extension", "reflect", "frontend/html-agent"} <= set(keys)
+    assert not (Path(kernel._root_path) / "docs").exists()
 
 
-async def test_docs_seeded_via_store(seeded_kernel, store_agent):
-    """When a persistence provider is wired, the docs tree seeds THROUGH it too
-    (copy-if-missing) — a freshly created keyed-doc agent gets its own tree."""
+async def test_no_docs_written_through_the_store(seeded_kernel, store_agent):
+    """A wired persistence provider gets records only — no docs tree."""
     persist(seeded_kernel)
     got = (
         await seeded_kernel.send(
@@ -71,8 +68,7 @@ async def test_docs_seeded_via_store(seeded_kernel, store_agent):
             ]
         )
     )[0]["result"]
-    assert isinstance(got.get("bytes"), (bytes, bytearray))
-    assert b"author" in bytes(got["bytes"]).lower()
+    assert not isinstance(got.get("bytes"), (bytes, bytearray)), got
 
 
 # ─── readme=true → short orientation ───────────────────────────

@@ -2,10 +2,7 @@
 //
 // `Resources/root_readme.md` is a byte-identical copy of the canonical
 // `python/bundled_agents/loader/kernel_state/src/kernel_state/readme.md`.
-// It is the one source that
-// feeds BOTH the on-disk `.fantastic/readme.md` (seeded at boot) and
-// `reflect readme=true` on the root — they must be identical. The
-// cross-runtime parity test byte-diffs all three.
+// It is what `reflect readme=true` on the root serves — never copied to disk.
 
 import Foundation
 
@@ -21,20 +18,4 @@ public enum RootReadme {
         }
         return s
     }()
-
-    /// Seed `<workdir>/.fantastic/readme.md` from [`text`] if missing.
-    /// Idempotent — preserves any operator edits. Mirrors Rust's
-    /// `seed_root_readme` and Python's `Core._seed_root_readme`. A failed write
-    /// THROWS, as python's seed raises (audit 2026-10-03, ARCH2-9).
-    public static func seed(workdir: URL) throws {
-        let dest = workdir
-            .appendingPathComponent(".fantastic")
-            .appendingPathComponent("readme.md")
-        let fm = FileManager.default
-        if fm.fileExists(atPath: dest.path) { return }
-        try fm.createDirectory(
-            at: dest.deletingLastPathComponent(),
-            withIntermediateDirectories: true)
-        try text.write(to: dest, atomically: true, encoding: .utf8)
-    }
 }

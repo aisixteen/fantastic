@@ -80,41 +80,6 @@ struct PersistenceLoudTests {
                 atPath: dir.appendingPathComponent(".fantastic/agents/store/agent.yaml").path))
         await k.shutdown()
     }
-
-    /// A refused SEED write is LOUD — the log and `persistence.error` — as a
-    /// refused record write is (python `_seed_doc_via_store` → `_persist_failed`).
-    /// Its reply used to be dropped, so a readme that never landed was invisible
-    /// (audit 2026-10-03, ARCH2-9).
-    @Test func aRefusedSeedWriteIsLoud() async throws {
-        let (k, dir) = diskKernel()
-        defer { try? FileManager.default.removeItem(at: dir) }
-        // A DIRECTORY where the probe's readme goes: the write cannot land.
-        let blocked = dir.appendingPathComponent(".fantastic/agents/probe/readme.md")
-        try FileManager.default.createDirectory(at: blocked, withIntermediateDirectories: true)
-        await createStore(k, ["allow": ["."]])
-        _ = await k.send([Item("kernel_state", ["type": "boot"])])
-        let lines = await RuntimeLog.capture {
-            _ = await k.send([
-                Item(
-                    "kernel_state",
-                    [
-                        "type": "create_agent", "parent_id": "kernel_state", "id": "probe",
-                        "handler_module": .string(ROOT_HANDLER_MODULE), "watch": false,
-                    ])
-            ])
-            await k.flushRecords()
-        }
-        #expect(
-            FileManager.default.fileExists(
-                atPath: dir.appendingPathComponent(".fantastic/agents/probe/agent.yaml").path))
-        let p = await persistence(k)
-        #expect(p["provider"].isNull, "\(p.serialize())")
-        #expect(p["error"]["path"] == "agents/probe/readme.md", "\(p.serialize())")
-        #expect(
-            lines.joined().contains("persist through 'store' failed: agents/probe/readme.md"),
-            "\(lines)")
-        await k.shutdown()
-    }
 }
 
 @Suite("the root loader's tree is the operator's")
@@ -183,46 +148,34 @@ struct RecordWritesThroughStoreTests {
         await k.shutdown()
     }
 
-    /// python seeds the sidecars ONLY after the write landed — and seeds the
-    /// bundle's `docs/` tree with its readme.
-    @Test func onlyALandedWriteSeedsTheReadmeAndDocs() async throws {
+    /// A landed record write copies NO readme or `docs/` beside it — the
+    /// bundle serves them (owner 2026-10-14).
+    @Test func aLandedWriteCopiesNoReadmeOrDocs() async throws {
         let fm = FileManager.default
-        for landed in [true, false] {
-            let (k, dir) = diskKernel()
-            defer { try? fm.removeItem(at: dir) }
-            // Refused: the record's own path is not exposed, its sidecars are.
-            let allow: JSON =
-                landed
-                ? ["."] : ["agent.yaml", "agents/probe/readme.md", "agents/probe/docs"]
-            await createStore(k, ["allow": allow])
-            _ = await k.send([Item("kernel_state", ["type": "boot"])])
-            _ = await k.send([
-                Item(
-                    "kernel_state",
-                    [
-                        "type": "create_agent", "parent_id": "kernel_state", "id": "probe",
-                        "handler_module": .string(ROOT_HANDLER_MODULE), "watch": false,
-                    ])
-            ])
-            _ = await RuntimeLog.capture { await k.flushRecords() }
-            let agentDir = dir.appendingPathComponent(".fantastic/agents/probe")
-            let firstDoc = try #require(RootDocs.all.first?.key)
-            #expect(
-                fm.fileExists(atPath: agentDir.appendingPathComponent("readme.md").path)
-                    == landed, "landed=\(landed)")
-            #expect(
-                fm.fileExists(atPath: agentDir.appendingPathComponent("docs/\(firstDoc).md").path)
-                    == landed, "landed=\(landed)")
-            await k.shutdown()
-        }
+        let (k, dir) = diskKernel()
+        defer { try? fm.removeItem(at: dir) }
+        await createStore(k, ["allow": ["."]])
+        _ = await k.send([Item("kernel_state", ["type": "boot"])])
+        _ = await k.send([
+            Item(
+                "kernel_state",
+                [
+                    "type": "create_agent", "parent_id": "kernel_state", "id": "probe",
+                    "handler_module": .string(ROOT_HANDLER_MODULE), "watch": false,
+                ])
+        ])
+        await k.flushRecords()
+        let agentDir = dir.appendingPathComponent(".fantastic/agents/probe")
+        #expect(fm.fileExists(atPath: agentDir.appendingPathComponent("agent.yaml").path))
+        #expect(!fm.fileExists(atPath: agentDir.appendingPathComponent("readme.md").path))
+        #expect(!fm.fileExists(atPath: agentDir.appendingPathComponent("docs").path))
+        await k.shutdown()
     }
 
     /// `flushRecords` returns once everything dirty has LANDED — also what the
     /// debounced writer took first. Past the 150 ms debounce the writer's own
     /// drain holds the probe's record; the flush used to find its queue empty and
-    /// return with that write still in flight, so `readme.md` was not there yet
-    /// (the parallel runner stretched `onlyALandedWriteSeedsTheReadmeAndDocs`
-    /// past the debounce the same way).
+    /// return with that write still in flight, so `agent.yaml` was not there yet.
     @Test func aFlushWaitsForTheDrainTheWriterAlreadyTook() async throws {
         let fm = FileManager.default
         for gapMs: UInt64 in [152, 160, 175] {
@@ -241,15 +194,8 @@ struct RecordWritesThroughStoreTests {
             try await Task.sleep(nanoseconds: gapMs * 1_000_000)
             await k.flushRecords()
             let agentDir = dir.appendingPathComponent(".fantastic/agents/probe")
-            let firstDoc = try #require(RootDocs.all.first?.key)
             #expect(
                 fm.fileExists(atPath: agentDir.appendingPathComponent("agent.yaml").path),
-                "gap=\(gapMs)ms")
-            #expect(
-                fm.fileExists(atPath: agentDir.appendingPathComponent("readme.md").path),
-                "gap=\(gapMs)ms")
-            #expect(
-                fm.fileExists(atPath: agentDir.appendingPathComponent("docs/\(firstDoc).md").path),
                 "gap=\(gapMs)ms")
             await k.shutdown()
         }

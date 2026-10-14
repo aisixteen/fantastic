@@ -18,7 +18,7 @@ import Foundation
 import OrderedCollections
 
 /// Files the KERNEL manages. A sidecar may not overwrite them.
-private let reservedBlobNames: Set<String> = [RECORD_FILE, "readme.md"]
+private let reservedBlobNames: Set<String> = [RECORD_FILE]
 
 extension Kernel {
     /// The kernel's BOOKKEEPING CALL to the store a sidecar persists through —

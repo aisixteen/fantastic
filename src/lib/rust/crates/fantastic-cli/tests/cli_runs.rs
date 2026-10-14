@@ -285,117 +285,11 @@ fn help_prints_cli_help_md_verbatim() {
     }
 }
 
-/// D6 — the root readme + `docs/` tree are seeded ONLY when the root record is
-/// seeded. python's cold seed rides `write_record`, which `main._bootstrap`
-/// calls under `if seeded:`; a workdir that already holds a parseable
-/// `.fantastic/agent.yaml` keeps whatever sidecars it has (measured against
-/// python 2026-09-20: it writes neither `readme.md` nor `docs/`).
+/// No readme or `docs/` is ever written into `.fantastic` — not with the cold
+/// root record, not through a wired store on a later root persist. The manual
+/// is served from the compiled bundle (owner 2026-10-14).
 #[test]
-fn the_root_readme_and_docs_are_seeded_only_with_the_root_record() {
-    // Virgin dir: both land, next to the record python writes.
-    let virgin = tempfile::TempDir::new().unwrap();
-    let out = Command::new(fantastic_bin())
-        .args(["kernel", "list_agents"])
-        .current_dir(virgin.path())
-        .output()
-        .expect("run fantastic in a virgin dir");
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(virgin.path().join(".fantastic/agent.yaml").exists());
-    assert!(virgin.path().join(".fantastic/readme.md").exists());
-    assert!(virgin
-        .path()
-        .join(".fantastic/docs/persistence.md")
-        .exists());
-
-    // A record already on disk: python seeds nothing, so neither does rust.
-    let seeded = tempfile::TempDir::new().unwrap();
-    let fdir = seeded.path().join(".fantastic");
-    std::fs::create_dir_all(&fdir).unwrap();
-    std::fs::write(
-        fdir.join("agent.yaml"),
-        r#"{"id": "kernel_state", "handler_module": "kernel_state.tools", "guid": "g"}"#,
-    )
-    .unwrap();
-    let out = Command::new(fantastic_bin())
-        .args(["kernel", "list_agents"])
-        .current_dir(seeded.path())
-        .output()
-        .expect("run fantastic over an existing root record");
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(
-        !fdir.join("readme.md").exists(),
-        "no readme without a record write"
-    );
-    assert!(
-        !fdir.join("docs").exists(),
-        "no docs/ without a record write"
-    );
-
-    // An UNPARSEABLE record is a reseed on both sides — sidecars land again.
-    let broken = tempfile::TempDir::new().unwrap();
-    let bdir = broken.path().join(".fantastic");
-    std::fs::create_dir_all(&bdir).unwrap();
-    std::fs::write(bdir.join("agent.yaml"), "{NOT_JSON").unwrap();
-    let out = Command::new(fantastic_bin())
-        .args(["kernel", "list_agents"])
-        .current_dir(broken.path())
-        .output()
-        .expect("run fantastic over a corrupt root record");
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(
-        bdir.join("readme.md").exists(),
-        "a reseed writes the readme"
-    );
-    assert!(
-        bdir.join("docs/persistence.md").exists(),
-        "and the docs tree"
-    );
-}
-
-/// A failed cold seed FAILS the invocation, as python's `write_record` raises.
-/// The result was dropped (`let _ =`), so a doc tree that never landed was
-/// invisible and the verb answered as if all was well (audit 2026-10-03,
-/// ARCH2-9).
-#[test]
-fn a_failed_cold_seed_fails_the_invocation() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let fdir = tmp.path().join(".fantastic");
-    std::fs::create_dir_all(&fdir).unwrap();
-    std::fs::write(fdir.join("docs"), "a FILE where the docs dir goes").unwrap();
-    let out = Command::new(fantastic_bin())
-        .args(["kernel", "list_agents"])
-        .current_dir(tmp.path())
-        .output()
-        .expect("run fantastic over a blocked docs dir");
-    assert!(
-        !out.status.success(),
-        "a seed that could not land must fail: stdout={}",
-        String::from_utf8_lossy(&out.stdout)
-    );
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.starts_with("[kernel] "), "{err}");
-}
-
-/// WARM SEED — every DRAINED root record write re-seeds `readme.md` AND the
-/// `docs/` tree THROUGH the store, not only the cold bootstrap (python
-/// `_persist_via_store` -> `_seed_readme_via_store`). Measured against python
-/// 2026-09-21: delete `.fantastic/docs` + `readme.md` with a store wired, cause
-/// a root persist, and both trees come back byte-identical. Copy-if-missing per
-/// file — an operator's edit survives.
-#[test]
-fn a_root_persist_reseeds_the_readme_and_docs_through_the_store() {
+fn no_readme_or_docs_land_in_dot_fantastic() {
     let tmp = tempfile::TempDir::new().unwrap();
     let fdir = tmp.path().join(".fantastic");
     let run = |args: &[&str]| {
@@ -410,7 +304,9 @@ fn a_root_persist_reseeds_the_readme_and_docs_through_the_store() {
             String::from_utf8_lossy(&out.stderr)
         );
     };
-    // Wire a store under the root — the provider the warm seed rides.
+    run(&["kernel", "list_agents"]);
+    assert!(fdir.join("agent.yaml").exists());
+    // A wired store and a root record write — the old warm-seed path.
     run(&[
         "kernel_state",
         "create_agent",
@@ -421,29 +317,18 @@ fn a_root_persist_reseeds_the_readme_and_docs_through_the_store() {
         "root=.fantastic",
         "ingress_rule=allow_all_ingress",
     ]);
-    // Wipe the whole tree AND keep one operator-edited doc to prove
-    // copy-if-missing.
-    std::fs::remove_dir_all(fdir.join("docs")).unwrap();
-    std::fs::remove_file(fdir.join("readme.md")).unwrap();
-    std::fs::create_dir_all(fdir.join("docs")).unwrap();
-    std::fs::write(fdir.join("docs/reflect.md"), "MINE").unwrap();
-    // A root record write — the drained persist carries the seed.
     run(&[
         "kernel",
         "update_agent",
         "id=kernel_state",
         "description=warm",
     ]);
-    assert!(fdir.join("readme.md").exists(), "readme re-seeded");
-    for (key, body) in fantastic_core::DOCS {
-        let path = fdir.join(format!("docs/{key}.md"));
-        let got = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{key}: {e}"));
-        if *key == "reflect" {
-            assert_eq!(got, "MINE", "an operator edit is never clobbered");
-        } else {
-            assert_eq!(&got, body, "{key} re-seeded byte-identical");
-        }
-    }
+    assert!(!fdir.join("readme.md").exists(), "no root readme copy");
+    assert!(!fdir.join("docs").exists(), "no docs/ copy");
+    assert!(
+        !fdir.join("agents/store/readme.md").exists(),
+        "no per-agent readme copy"
+    );
 }
 
 /// A14.2 — exactly one remaining word that is not `help`/`reflect`/`init`

@@ -232,15 +232,6 @@ public func startKernel(
         // landed minted a new guid every boot, breaking peers pinned to it.
         try Persistence.recordBytes(root.record().ordered)
             .write(to: rootRecordFile, options: .atomic)
-        // ONLY ON THE SEED, as python does: `_bootstrap` calls `write_record`
-        // (which is what seeds `readme.md` + the keyed `docs/` tree) under `if
-        // seeded`. Seeding on EVERY invocation put back a doc the operator had
-        // deleted — measured 2026-09-20: `docs/memory.md` and `docs/frontend/`
-        // removed by hand came back on the next `reflect`, where python leaves
-        // the tree as the operator left it. Copy-if-missing per file still
-        // holds, so an edited doc is never clobbered.
-        try RootReadme.seed(workdir: url)
-        try RootDocs.seed(workdir: url)
     }
 
     // Hydrate persisted children. Reads every

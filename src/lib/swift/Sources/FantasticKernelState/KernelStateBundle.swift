@@ -49,12 +49,12 @@ public final class KernelStateBundle: AgentBundle, @unchecked Sendable {
     public var verbs: [String] { Array((Self.verbsView.asObject ?? [:]).keys) }
     public var verbDocTable: JSON { Self.verbsView }
 
-    /// The SHORT orientation readme seeded into `.fantastic/readme.md`. The full
-    /// manual is the keyed doc tree — `reflect readme=index` / `=<key>`.
+    /// The SHORT orientation readme — `reflect readme=true` serves it from here.
+    /// The full manual is the keyed doc tree — `reflect readme=index` / `=<key>`.
     public var readme: String? { RootReadme.text }
 
-    /// The keyed manual — python's `kernel_state/docs/` package tree — seeded
-    /// beside the readme on every record write that lands.
+    /// The keyed manual — python's `kernel_state/docs/` package tree — served
+    /// from the bundle, never copied to disk.
     public var docs: [(key: String, body: String)] { RootDocs.all }
 
     private func withLock<T>(_ body: () -> T) -> T {
@@ -81,9 +81,15 @@ public final class KernelStateBundle: AgentBundle, @unchecked Sendable {
         case "boot":
             return try await boot(agent, kernel)
         case "load_tree":
+            let rootDir = try clampedRoot(agent, kernel)
+            // A session loader's namespace keeps no copy of its record: the
+            // walk is rooted at the LIVE one (owner 2026-10-14).
+            let live =
+                Kernel.canonPath(rootDir.path) == Kernel.canonPath(agent.rootPath.path)
+                ? nil : try? AgentRecord(json: .object(agent.record().ordered))
             return .object([
                 "records": .array(
-                    try Persistence.readTree(rootDir: clampedRoot(agent, kernel)).map { $0.json }
+                    try Persistence.readTree(rootDir: rootDir, live: live).map { $0.json }
                 ),
                 "version": .integer(Int64(KernelState.currentVersion)),
             ])
@@ -219,20 +225,10 @@ public final class KernelStateBundle: AgentBundle, @unchecked Sendable {
             return true
         }
         guard first else { return nil }
-        // A SESSION loader (a `root` meta pointing at a sub-namespace) seeds its
-        // namespace anchor so `read_tree` has a root to walk from — through the
-        // clamp, as python's `fs.Root(workdir, root)` does. A loader serving
-        // its own address touches no disk here (python compares the paths
-        // before it calls `fs`).
-        if let r = agent.metaValue(forKey: "root")?.asString, !r.isEmpty {
-            let rootDir = try clamped(r, kernel)
-            if Kernel.canonPath(rootDir.path) != Kernel.canonPath(agent.rootPath.path),
-                !FileManager.default.fileExists(
-                    atPath: rootDir.appendingPathComponent(RECORD_FILE).path)
-            {
-                try Self.writeRecord(at: rootDir, agent.record().ordered, kernel)
-            }
-        }
+        // A SESSION loader (a `root` meta pointing at a sub-namespace) writes no
+        // record of its own there: its one record lives in its parent's tree and
+        // `load_tree` walks the namespace from it (owner 2026-10-14 — a copy at
+        // `<root>/agent.yaml` froze and diverged).
         let installed = await kernel.bootRootLoader(agent)
         withLock {
             var e = state[agent.id.value] ?? LoaderState()
@@ -273,7 +269,7 @@ public final class KernelStateBundle: AgentBundle, @unchecked Sendable {
         } else {
             dir = try resolvePath(agent, kernel, id, rawParent.asString)
         }
-        try Self.writeRecord(at: try clamped(dir.path, kernel), record, kernel)
+        try Self.writeRecord(at: try clamped(dir.path, kernel), record)
         return .object(["ok": .bool(true)])
     }
 
@@ -373,7 +369,7 @@ public final class KernelStateBundle: AgentBundle, @unchecked Sendable {
         // restart boots the tree it stopped. The wire twin of `_testkit.persist`.
         if ProcessInfo.processInfo.environment["FANTASTIC_DEBUG_FLUSH"] == "1" {
             for a in kernel.allAgents() where !a.ephemeral {
-                try Self.writeRecord(at: try clamped(a.rootPath.path, kernel), a.record().ordered, kernel)
+                try Self.writeRecord(at: try clamped(a.rootPath.path, kernel), a.record().ordered)
             }
         }
     }
@@ -527,11 +523,11 @@ public final class KernelStateBundle: AgentBundle, @unchecked Sendable {
     /// Merge-write one record's `agent.yaml` at `dir` (the agent's own dir,
     /// already clamped). Reads any existing file and overlays only the
     /// kernel-managed keys, preserving unknown fields + sidecars. A write the OS
-    /// refuses RAISES, as `fs.write_text` does. Then seeds the bundle's
-    /// `readme.md` and `docs/` tree, copy-if-missing — the loader owns ALL of an
-    /// agent's disk sidecars. Python `write_record` + `_seed_readme`.
+    /// refuses RAISES, as `fs.write_text` does. A bundle's readme and `docs/`
+    /// are never copied — reflect serves them from the bundle. Python
+    /// `write_record`.
     static func writeRecord(
-        at dir: URL, _ record: OrderedDictionary<String, JSON>, _ kernel: Kernel
+        at dir: URL, _ record: OrderedDictionary<String, JSON>
     ) throws(PyError) {
         let file = dir.appendingPathComponent(RECORD_FILE)
         var onDisk = Persistence.readRecord(file) ?? [:]
@@ -540,16 +536,6 @@ public final class KernelStateBundle: AgentBundle, @unchecked Sendable {
             try fsWriteBytes(dir.path, RECORD_FILE, Persistence.recordBytes(onDisk), base: dir.path)
         } catch {
             throw raised(error)
-        }
-        guard let hm = record["handler_module"]?.asString, let bundle = kernel.bundles.get(hm)
-        else { return }
-        // Best effort, as python's `_seed_readme` (its broad `except` makes a
-        // seed that fails a no-op, never a failed write).
-        var docs: [(String, String)] = bundle.readme.map { [("readme.md", $0)] } ?? []
-        for (key, body) in bundle.docs { docs.append(("docs/\(key).md", body)) }
-        for (rel, body) in docs {
-            if (try? fsExists(dir.path, rel, base: dir.path)) != false { continue }
-            try? fsWriteBytes(dir.path, rel, Data(body.utf8), base: dir.path)
         }
     }
 

@@ -200,24 +200,12 @@ extension Kernel {
         return buf
     }
 
-    /// Is a store path present? python `_seed_doc_via_store`'s probe: ONE
-    /// `read_stream {path}` whose answer carries a chunk.
-    private func presentViaStore(_ storeId: AgentId, _ path: String) async -> Bool {
-        let (got, body) = await storeSendBinary(
-            storeId, .object(["type": .string("read_stream"), "path": .string(path)]), nil)
-        if case .object = got, body != nil { return true }
-        return false
-    }
-
     /// Persist an agent's record onto its per-agent `agent.yaml` THROUGH the
     /// discovered provider's `write` (merge-not-overwrite: read existing, overlay
     /// the kernel-managed keys, write back — sidecar fields survive). No-op in
     /// InMemory / ephemeral / no-provider-wired (RAM). If the provider is sealed
-    /// it refuses and the write doesn't land — NO fallback.
-    ///
-    /// ONLY A WRITE THAT LANDED SEEDS THE SIDECARS (python `_persist_via_store`
-    /// returns before `_seed_readme_via_store` on a failed write or rename):
-    /// the bundle's `readme.md` and its `docs/` tree, copy-if-missing.
+    /// it refuses and the write doesn't land — NO fallback. The record only: a
+    /// bundle's readme and docs are served from the bundle, never copied.
     public func persistRecord(_ agent: Agent) async {
         if storage.isInMemory || agent.ephemeral { return }
         guard let storeId = findStore(), let rootAgent = root else { return }
@@ -270,41 +258,6 @@ extension Kernel {
             return
         }
         persistLanded()
-        await seedSidecarsViaStore(storeId, reldir: reldir, agent.handlerModule)
-    }
-
-    /// Copy-if-missing the bundle's shipped `readme.md` AND its `docs/` topic
-    /// tree into the agent's dir THROUGH the provider — never clobber operator
-    /// edits. Python `_seed_readme_via_store`: the source is the installed
-    /// bundle, the sink the stream provider.
-    private func seedSidecarsViaStore(_ storeId: AgentId, reldir: String, _ hm: String?) async {
-        guard let hm, let bundle = bundles.get(hm) else { return }
-        let prefix = reldir.isEmpty ? "" : "\(reldir)/"
-        if let readme = bundle.readme {
-            await seedDocViaStore(storeId, "\(prefix)readme.md", readme)
-        }
-        for (key, body) in bundle.docs {
-            await seedDocViaStore(storeId, "\(prefix)docs/\(key).md", body)
-        }
-    }
-
-    /// One `.md` file through the provider, copy-if-missing. A refused write is
-    /// LOUD (`persistFailed`), as a record write is — python
-    /// `_seed_doc_via_store`: its reply used to be dropped, so a doc that never
-    /// landed was invisible (audit 2026-10-03, ARCH2-9).
-    private func seedDocViaStore(_ storeId: AgentId, _ path: String, _ content: String) async {
-        if await presentViaStore(storeId, path) { return }
-        let written = await storeSendBinary(
-            storeId,
-            .object([
-                "type": .string("write_stream"), "path": .string(path),
-                "truncate": .bool(true),
-            ]),
-            Data(content.utf8))
-        guard case .object = written.0, !pyTruthy(written.0["error"]) else {
-            persistFailed(storeId, path, written.0)
-            return
-        }
     }
 
     /// Remove an agent's dir THROUGH the provider (the `delete` verb). Never the

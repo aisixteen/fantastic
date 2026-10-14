@@ -464,28 +464,19 @@ struct RootBootTests {
                 == ["id", "handler_module", "can_call", "callable_by"], "\(parsed.serialize())")
     }
 
-    /// The readme + docs tree is seeded ONLY on the SEED boot, as python does
-    /// (`_bootstrap` seeds through `write_record` under `if seeded`). Swift
-    /// seeded on EVERY invocation, so a doc the operator deleted came back on
-    /// the next command.
-    @Test func docsAreSeededOnlyWhenTheRootIsSeeded() async throws {
+    /// No boot writes a readme or `docs/` into `.fantastic` — the seed boot
+    /// writes the root record alone; the manual is served from the bundle.
+    @Test func noBootWritesTheReadmeOrDocs() async throws {
         let tmp = makeTempDir()
         defer { try? FileManager.default.removeItem(at: tmp) }
         let fm = FileManager.default
-        // First boot: a virgin dir seeds the root record, the readme and docs.
-        _ = try await startKernel(workdir: tmp.path)
         let dot = tmp.appendingPathComponent(".fantastic")
-        let memory = dot.appendingPathComponent("docs/memory.md")
-        let frontend = dot.appendingPathComponent("docs/frontend")
-        #expect(fm.fileExists(atPath: memory.path), "the seed boot writes the doc tree")
-        #expect(fm.fileExists(atPath: frontend.path))
-        // The operator removes part of the tree; a second boot reads the root
-        // record, so nothing is re-seeded.
-        try fm.removeItem(at: memory)
-        try fm.removeItem(at: frontend)
-        _ = try await startKernel(workdir: tmp.path)
-        #expect(!fm.fileExists(atPath: memory.path), "a deleted doc stays deleted")
-        #expect(!fm.fileExists(atPath: frontend.path))
+        for _ in 0..<2 {
+            _ = try await startKernel(workdir: tmp.path)
+            #expect(fm.fileExists(atPath: dot.appendingPathComponent("agent.yaml").path))
+            #expect(!fm.fileExists(atPath: dot.appendingPathComponent("readme.md").path))
+            #expect(!fm.fileExists(atPath: dot.appendingPathComponent("docs").path))
+        }
     }
 
     /// A `.fantastic` that cannot be made, or a root record that cannot be

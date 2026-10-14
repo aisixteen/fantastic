@@ -94,12 +94,12 @@ struct ReflectUniformTests {
         #expect(node?["description"].asString == "holds my notes")
     }
 
-    @Test func readmeFlagTiersAndFallback() async {
-        let kernel = makeKernel()
+    @Test func readmeFlagTiersFromTheBundle() async {
+        let kernel = makeLoaderKernel()
         // default → no readme key.
         let plain = await kernel.send([Item("kernel_state", ["type": "reflect"])])[0].result
         #expect(plain["readme"] == nil || plain["readme"].isNull)
-        // readme=true on the root in-memory → embedded canonical readme.
+        // readme=true → the root bundle's readme (kernel_state's).
         let r = await kernel.send([Item("kernel_state", ["type": "reflect", "readme": true])])[0].result
         #expect(r["readme"].asString == RootReadme.text)
         #expect(r["readme"].asString?.hasPrefix("# This is a Fantastic kernel.") == true)
@@ -166,7 +166,7 @@ struct ReflectUniformTests {
     }
 
     @Test func readmeIndexKeyedViewAndErrors() async {
-        let kernel = makeKernel()
+        let kernel = makeLoaderKernel()
         // readme=index → the token-annotated topic tree.
         let idx = await kernel.send([Item("kernel_state", ["type": "reflect", "readme": "index"])])[0].result
         #expect(
@@ -191,7 +191,7 @@ struct ReflectUniformTests {
     /// dirs as tiers: the index lists `frontend` with `children`, a nested key
     /// opens by `frontend/routing`, and the error texts are python's `{sel!r}`.
     @Test func readmeTreeIsNestedLikePythons() async {
-        let kernel = makeKernel()
+        let kernel = makeLoaderKernel()
         let idx = await kernel.send([Item("kernel_state", ["type": "reflect", "readme": "index"])])[0].result
         let entries = idx["readme"]["index"].asArray ?? []
         // Python walks `sorted(d.iterdir())`: alphabetical, every `*.md`.
@@ -221,9 +221,11 @@ struct ReflectUniformTests {
         #expect(miss["readme"]["keys"].asArray?.map { $0.asString ?? "" }.contains("frontend/routing") == true)
         let esc = await kernel.send([Item("kernel_state", ["type": "reflect", "readme": "../root_readme"])])[0].result
         #expect(esc["readme"]["error"].asString == "bad key '../root_readme'")
+        // A `..` segment is a bad key even when it lands inside the tree —
+        // python's lexical check, never path resolution.
         let inside = await kernel.send([Item("kernel_state", ["type": "reflect", "readme": "frontend/../reflect"])])[0].result
-        #expect(inside["readme"]["key"].asString == "frontend/../reflect" && inside["readme"]["body"].asString != nil)
-        // The bundled tree equals python's docs dir (the seed copies it as is).
+        #expect(inside["readme"]["error"].asString == "bad key 'frontend/../reflect'")
+        // The bundled tree equals python's docs dir.
         let py = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -233,39 +235,6 @@ struct ReflectUniformTests {
             #expect(want == body, "docs/\(key).md differs from python's")
         }
         #expect(RootDocs.all.count == 14)
-    }
-
-    /// The seed writes the nested tree under `.fantastic/docs/`, copy-if-missing.
-    @Test func rootDocsSeedWritesNestedFiles() throws {
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("rootdocs_\(UUID().uuidString.prefix(8))")
-        defer { try? FileManager.default.removeItem(at: dir) }
-        try RootDocs.seed(workdir: dir)
-        let routing = dir.appendingPathComponent(".fantastic/docs/frontend/routing.md")
-        #expect(FileManager.default.fileExists(atPath: routing.path))
-        #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent(".fantastic/docs/system-verbs.md").path))
-        try "edited".write(to: routing, atomically: true, encoding: .utf8)
-        try RootDocs.seed(workdir: dir)
-        #expect(try String(contentsOf: routing, encoding: .utf8) == "edited")
-    }
-
-    /// A seed write that fails THROWS, as python's seed raises — `try?` dropped
-    /// it, so a doc tree that never landed was invisible (audit 2026-10-03,
-    /// ARCH2-9).
-    @Test func aFailedSeedWriteThrows() throws {
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("rootdocs_\(UUID().uuidString.prefix(8))")
-        defer { try? FileManager.default.removeItem(at: dir) }
-        let fdir = dir.appendingPathComponent(".fantastic")
-        try FileManager.default.createDirectory(at: fdir, withIntermediateDirectories: true)
-        try "a FILE where the docs dir goes".write(
-            to: fdir.appendingPathComponent("docs"), atomically: true, encoding: .utf8)
-        #expect(throws: (any Error).self) { try RootDocs.seed(workdir: dir) }
-        try "a FILE where readme.md's dir goes".write(
-            to: dir.appendingPathComponent("blocked"), atomically: true, encoding: .utf8)
-        #expect(throws: (any Error).self) {
-            try RootReadme.seed(workdir: dir.appendingPathComponent("blocked"))
-        }
     }
 
     @Test func nonRootHasNoReadmesFrame() async {
@@ -571,240 +540,120 @@ struct RootWithHandlerTests {
     }
 }
 
-/// Doc-tree reads on a REAL `docs/` dir (C33 R2-RFL-5, C59, C60, C62) — the
-/// disk-mode readme machinery drops the embedded-tree fallback entirely and
-/// reads straight off the filesystem, the way python's `pathlib` + `Path.read_
-/// text` do.
-@Suite("Readme doc tree — disk mode")
-struct ReadmeDiskModeTests {
-    /// A disk-backed, bare (no bundle) root whose `docs/` dir is seeded with
-    /// `files` (path relative to `docs/` → content) before any send.
-    private func makeDiskKernel(_ files: [String: String]) -> (kernel: Kernel, root: URL) {
+/// A bundle that ships a readme and a flat keyed docs table — the only place a
+/// manual lives (owner 2026-10-14: never copied to disk, never read from it).
+private struct DocsBundle: AgentBundle {
+    let name = "docs_probe"
+    let readme: String?
+    let docs: [(key: String, body: String)]
+
+    func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? { nil }
+}
+
+/// Doc-tree reads served from the agent's BUNDLE (C33 R2-RFL-5, C59) — python's
+/// `_readme_index`/`_readme_view` over the package `docs/`.
+@Suite("Readme doc tree — served from the bundle")
+struct ReadmeBundleDocsTests {
+    /// A DISK kernel whose root runs a [`DocsBundle`]; its dir holds a stray
+    /// `readme.md` and `docs/` that must never be read.
+    private func makeDocsKernel(
+        readme: String? = nil, _ docs: [(key: String, body: String)]
+    ) -> (kernel: Kernel, root: URL) {
         let storeRoot = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("readme_disk_\(UUID().uuidString.prefix(8))")
-        let docs = storeRoot.appendingPathComponent("docs")
+            .appendingPathComponent("readme_bundle_\(UUID().uuidString.prefix(8))")
         let fm = FileManager.default
-        try? fm.createDirectory(at: docs, withIntermediateDirectories: true)
-        for (path, content) in files {
-            let dest = docs.appendingPathComponent(path)
-            try? fm.createDirectory(
-                at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try? content.write(to: dest, atomically: true, encoding: .utf8)
-        }
-        let kernel = Kernel(storage: .disk(storeRoot), bundles: BundleRegistry())
-        let root = Agent(id: AgentId("kernel_state"), handlerModule: nil, parentId: nil, rootPath: storeRoot)
+        try? fm.createDirectory(
+            at: storeRoot.appendingPathComponent("docs"), withIntermediateDirectories: true)
+        try? "> stray\nDISK".write(
+            to: storeRoot.appendingPathComponent("docs/stray.md"), atomically: true, encoding: .utf8)
+        try? "DISK README".write(
+            to: storeRoot.appendingPathComponent("readme.md"), atomically: true, encoding: .utf8)
+        let registry = BundleRegistry()
+        registry.register("docs_probe.tools", DocsBundle(readme: readme, docs: docs))
+        let kernel = Kernel(storage: .disk(storeRoot), bundles: registry)
+        let root = Agent(
+            id: AgentId("kernel_state"), handlerModule: "docs_probe.tools", parentId: nil,
+            rootPath: storeRoot)
         kernel.register(root)
         kernel.setRoot(root)
         return (kernel, storeRoot)
     }
 
-    /// C62: a docs file literally named `.md` has NO suffix by python's
-    /// `Path.suffix` rule (the dot is the first character) — it is skipped,
-    /// not treated as a topic with an empty stem. Swift's old `hasSuffix`
-    /// check took it as a match and `dropLast(3)` gave stem `""`, which walked
-    /// back into `docs/` itself forever — measured: the kernel dies, REST
-    /// drops the connection. Here the kernel must simply stay alive and the
-    /// index must skip it.
-    @Test func aDocNamedDotMdIsSkippedLikePython() async throws {
-        let (kernel, root) = makeDiskKernel(["a.md": "> topic a\nbody", ".md": "must never be read"])
+    private func reflect(_ k: Kernel, _ readme: JSON) async -> JSON {
+        await k.send([Item("kernel_state", .object(["type": "reflect", "readme": readme]))])[0]
+            .result["readme"]
+    }
+
+    /// The bundle is the one source: the stray files on disk are never read.
+    @Test func nothingIsReadFromDisk() async throws {
+        let (kernel, root) = makeDocsKernel(readme: "BUNDLE README", [("a", "> a\nbody")])
         defer { try? FileManager.default.removeItem(at: root) }
-        let idx = await kernel.send([Item("kernel_state", ["type": "reflect", "readme": "index"])])[0].result
-        #expect(idx["readme"]["index"].asArray?.map { $0["key"].asString ?? "" } == ["a"], "\(idx)")
-        // The kernel is still alive — no infinite recursion.
-        let again = await kernel.send([Item("kernel_state", ["type": "reflect"])])[0].result
-        #expect(again["id"].asString == "kernel_state")
+        #expect(await reflect(kernel, true).asString == "BUNDLE README")
+        let idx = await reflect(kernel, "index")
+        #expect(idx["index"].asArray?.map { $0["key"].asString ?? "" } == ["a"], "\(idx)")
+        #expect(await reflect(kernel, "stray")["error"].asString == "no doc 'stray'")
+    }
+
+    /// A bundle with no readme and no docs answers `null` and `[]`.
+    @Test func aBundleWithoutDocsAnswersNullAndEmpty() async throws {
+        let (kernel, root) = makeDocsKernel([])
+        defer { try? FileManager.default.removeItem(at: root) }
+        #expect(await reflect(kernel, true).isNull)
+        #expect(await reflect(kernel, "index")["index"].asArray == [])
     }
 
     /// C59: `\r\n`/lone `\r` translate to `\n` before `body`/`desc`/`tokens`
-    /// are computed from it — python text mode, which `Path.read_text()` does
-    /// by default.
+    /// are computed from it — python text mode.
     @Test func docReadsTranslateNewlinesLikePythonTextMode() async throws {
-        let (kernel, root) = makeDiskKernel(["topic.md": "> desc\r\nline2\rline3\n"])
+        let (kernel, root) = makeDocsKernel([("topic", "> desc\r\nline2\rline3\n")])
         defer { try? FileManager.default.removeItem(at: root) }
-        let r = await kernel.send([Item("kernel_state", ["type": "reflect", "readme": "topic"])])[0]
-            .result
-        let body = r["readme"]["body"].asString ?? ""
+        let r = await reflect(kernel, "topic")
+        let body = r["body"].asString ?? ""
         #expect(body == "> desc\nline2\nline3\n", "\(r)")
-        #expect(r["readme"]["desc"].asString == "desc")
-        #expect(r["readme"]["tokens"].asInt == Int64((body.unicodeScalars.count + 3) / 4))
+        #expect(r["desc"].asString == "desc")
+        #expect(r["tokens"].asInt == Int64((body.unicodeScalars.count + 3) / 4))
     }
 
-    /// C60: python catches only `OSError` reading a doc — a `UnicodeDecodeError`
-    /// (a `ValueError`) is NOT caught, so it fails the WHOLE reflect, not just
-    /// the `readme` field. `readme=index` walks the same tree and fails the
-    /// same way, even though the caller never named the bad file.
-    @Test func nonUtf8DocFailsTheReflectLikePython() async throws {
-        let (kernel, root) = makeDiskKernel([:])
-        defer { try? FileManager.default.removeItem(at: root) }
-        let bad = Data([0x61, 0xFF, 0x62])  // 'a' 0xFF 'b' — invalid start byte
-        try bad.write(to: root.appendingPathComponent("docs/bad.md"))
-        let r = await kernel.send([Item("kernel_state", ["type": "reflect", "readme": "bad"])])[0]
-            .result
-        #expect(r["raised"].asBool == true, "\(r)")
-        #expect(
-            r["error"].asString
-                == "UnicodeDecodeError: 'utf-8' codec can't decode byte 0xff in position 1: invalid start byte",
-            "\(r)")
-        let idx = await kernel.send([Item("kernel_state", ["type": "reflect", "readme": "index"])])[0]
-            .result
-        #expect(idx["raised"].asBool == true, "\(idx)")
-    }
-
-    /// C12 — a duck-typed ROOT FRAME that raises FAILS the reflect, as python's
-    /// bare hook call does: the same non-UTF-8 doc that fails an explicit
-    /// `readme=` read fails a `detail=full` root reflect. It used to be
-    /// swallowed, and the reply carried no `persistence`/`guid`/`readmes`/`docs`/
-    /// `self_extension` with nothing to say why (audit 2026-10-03, ARCH2-9).
-    @Test func aRaisingRootFrameFailsTheReflect() async throws {
-        let storeRoot = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("readme_rootframe_\(UUID().uuidString.prefix(8))")
-        let docs = storeRoot.appendingPathComponent("docs")
-        try FileManager.default.createDirectory(at: docs, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: storeRoot) }
-        try Data([0x61, 0xFF, 0x62]).write(to: docs.appendingPathComponent("bad.md"))
-
-        let registry = BundleRegistry()
-        registry.register(ROOT_HANDLER_MODULE, KernelStateBundle())
-        let kernel = Kernel(storage: .disk(storeRoot), bundles: registry)
-        let root = Agent(
-            id: AgentId(ROOT_ID), handlerModule: ROOT_HANDLER_MODULE, parentId: nil,
-            rootPath: storeRoot)
-        kernel.register(root)
-        kernel.setRoot(root)
-
-        let fullCall = Item("kernel_state", ["type": "reflect", "detail": "full", "tree": "ids"])
-        let full = await kernel.send([fullCall])[0]
-        #expect(full.status == .failed, "\(full.result)")
-        #expect(full.result["raised"].asBool == true, "\(full.result)")
-        #expect(
-            full.result["error"].asString
-                == "UnicodeDecodeError: 'utf-8' codec can't decode byte 0xff in position 1: invalid start byte",
-            "\(full.result)")
-        // A distilled reflect builds no doc frame, so it still answers.
-        let distilled = await kernel.send([Item("kernel_state", ["type": "reflect", "tree": "ids"])])[0]
-        #expect(distilled.status == .completed, "\(distilled.result)")
-        #expect(distilled.result["persistence"].asObject != nil, "\(distilled.result)")
-    }
-
-    /// python 2026-09-20: the key check is LEXICAL and then the INDEX — a `..`
-    /// segment is a `bad key` whatever the filesystem holds, a listed key is
-    /// served, and an unlisted one is `no doc`; the disk is never asked.
-    @Test func diskReadmeViewKeyCheckIsLexicalThenTheIndex() async throws {
-        // `frontend.md` makes `frontend/*` part of the INDEX (a bare subdir is
-        // not listed, in python either).
-        let (kernel, root) = makeDiskKernel([
-            "frontend.md": "> frontend doc\nbody",
-            "frontend/routing.md": "> routing doc\nbody",
-            "frontend/html-agent.md": "> panel doc\nbody",
+    /// Tiers are ordered by `<stem>.md` like python's sorted dir walk, and a
+    /// tier whose parent topic is absent is not listed (python lists only
+    /// `<key>.md` files, so a bare subdir never appears).
+    @Test func tiersNestUnderTheirParentTopic() async throws {
+        let (kernel, root) = makeDocsKernel([
+            ("frontend/routing", "> routing doc\nbody"),
+            ("frontend", "> frontend doc\nbody"),
+            ("frontend/html-agent", "> panel doc\nbody"),
+            ("orphan/child", "> orphan\nbody"),
         ])
         defer { try? FileManager.default.removeItem(at: root) }
-        let inside = await kernel.send([
-            Item("kernel_state", ["type": "reflect", "readme": "frontend/../frontend/routing"])
-        ])[0].result
+        let idx = await reflect(kernel, "index")["index"]
+        #expect(idx.asArray?.map { $0["key"].asString ?? "" } == ["frontend"], "\(idx)")
         #expect(
-            inside["readme"]["error"].asString == "bad key 'frontend/../frontend/routing'",
-            "\(inside)")
-        let listed = await kernel.send([
-            Item("kernel_state", ["type": "reflect", "readme": "frontend/routing"])
-        ])[0].result
-        #expect(listed["readme"]["body"].asString?.contains("routing doc") == true, "\(listed)")
-        #expect(listed["readme"]["key"].asString == "frontend/routing")
-
-        let esc = await kernel.send([Item("kernel_state", ["type": "reflect", "readme": "../escape"])])[0]
-            .result
-        #expect(esc["readme"]["error"].asString == "bad key '../escape'", "\(esc)")
-
-        let throughFile = await kernel.send([
-            Item("kernel_state", ["type": "reflect", "readme": "frontend/html-agent/../routing"])
-        ])[0].result
-        #expect(
-            throughFile["readme"]["error"].asString == "bad key 'frontend/html-agent/../routing'",
-            "\(throughFile)")
-        let unlisted = await kernel.send([
-            Item("kernel_state", ["type": "reflect", "readme": "frontend/nothing"])
-        ])[0].result
-        #expect(unlisted["readme"]["error"].asString == "no doc 'frontend/nothing'", "\(unlisted)")
+            idx[0]["children"].asArray?.map { $0["key"].asString ?? "" }
+                == ["frontend/html-agent", "frontend/routing"])
     }
 
-    /// Python `_readme_view` after the key check: `f.resolve().relative_to(
-    /// d.resolve())` — a LISTED key whose file (or a dir on its path) is a
-    /// symlink out of `docs/` is `bad key`, never the outside body. Measured
-    /// on python with this exact tree: keys `['esc', 'linked',
-    /// 'linked/secret', 'real']`, `esc` and `linked/secret` → `bad key`.
-    @Test func diskReadmeSymlinkOutOfDocsIsABadKey() async throws {
-        let (kernel, root) = makeDiskKernel(["linked.md": "> linked parent\n", "real.md": "> real\nbody\n"])
+    /// python 2026-09-20: the key check is LEXICAL and then the INDEX — a `..`,
+    /// `.` or empty segment is a `bad key`, a listed key is served, an unlisted
+    /// one is `no doc`.
+    @Test func keyCheckIsLexicalThenTheIndex() async throws {
+        let (kernel, root) = makeDocsKernel([
+            ("frontend", "> frontend doc\nbody"),
+            ("frontend/routing", "> routing doc\nbody"),
+            ("frontend/html-agent", "> panel doc\nbody"),
+        ])
         defer { try? FileManager.default.removeItem(at: root) }
-        let fm = FileManager.default
-        let outside = root.appendingPathComponent("outside")
-        try fm.createDirectory(at: outside, withIntermediateDirectories: true)
-        try "> outside doc\nsecret\n".write(
-            to: outside.appendingPathComponent("secret.md"), atomically: true, encoding: .utf8)
-        let docs = root.appendingPathComponent("docs")
-        try fm.createSymbolicLink(
-            atPath: docs.appendingPathComponent("esc.md").path,
-            withDestinationPath: "../outside/secret.md")
-        try fm.createSymbolicLink(
-            atPath: docs.appendingPathComponent("linked").path, withDestinationPath: "../outside")
-        let keys: [JSON] = ["esc", "linked", "linked/secret", "real"]
-        for key in ["esc", "linked/secret"] {
-            let r = await kernel.send([
-                Item("kernel_state", ["type": "reflect", "readme": .string(key)])
-            ])[0].result
+        for key in [
+            "frontend/../frontend/routing", "frontend//routing", "./frontend/routing",
+            "../escape", "frontend/html-agent/../routing", "/",
+        ] {
             #expect(
-                r["readme"] == .object(["error": .string("bad key \(pyRepr(key))"), "keys": .array(keys)]),
-                "\(r)")
+                await reflect(kernel, .string(key))["error"].asString == "bad key \(pyRepr(key))",
+                "\(key)")
         }
-        let real = await kernel.send([Item("kernel_state", ["type": "reflect", "readme": "real"])])[0]
-            .result
-        #expect(real["readme"]["body"].asString == "> real\nbody\n", "\(real)")
-    }
-
-    /// Python `Path.is_file()` gates both the index walk and the view: a
-    /// `<key>.md` that is a directory or a FIFO is not a doc — absent from
-    /// `keys`, and `readme=<key>` is `no doc`. Measured on python: `dir` and
-    /// `pipe` → `no doc`, keys `['real']`. A FIFO used to be read by the walk
-    /// and blocked the reflect forever.
-    @Test func diskReadmeKeyThatIsNotARegularFileIsNoDoc() async throws {
-        let (kernel, root) = makeDiskKernel(["real.md": "> real\nbody\n"])
-        defer { try? FileManager.default.removeItem(at: root) }
-        let docs = root.appendingPathComponent("docs")
-        try FileManager.default.createDirectory(
-            at: docs.appendingPathComponent("dir.md"), withIntermediateDirectories: true)
-        #expect(mkfifo(docs.appendingPathComponent("pipe.md").path, 0o644) == 0)
-        for key in ["dir", "pipe"] {
-            let r = await kernel.send([
-                Item("kernel_state", ["type": "reflect", "readme": .string(key)])
-            ])[0].result
-            #expect(
-                r["readme"] == .object(["error": .string("no doc \(pyRepr(key))"), "keys": ["real"]]),
-                "\(r)")
-        }
-        let idx = await kernel.send([Item("kernel_state", ["type": "reflect", "readme": "index"])])[0]
-            .result
-        #expect(idx["readme"]["index"].asArray?.map { $0["key"].asString ?? "" } == ["real"], "\(idx)")
-    }
-
-    /// An empty/absent `docs/` is `{index: []}` — NOT the embedded canonical
-    /// tree (C33: disk mode drops that fallback entirely).
-    @Test func emptyDocsDirHasNoFallback() async throws {
-        let (kernel, root) = makeDiskKernel([:])
-        defer { try? FileManager.default.removeItem(at: root) }
-        let idx = await kernel.send([Item("kernel_state", ["type": "reflect", "readme": "index"])])[0]
-            .result
-        #expect(idx["readme"]["index"].asArray == [])
-    }
-
-    /// `readme=true` on disk: an EXISTING but empty `readme.md` answers `""`,
-    /// never the embedded canonical text; a missing one answers `null`. C33.
-    @Test func readmeTrueOnDiskHasNoEmbeddedFallback() async throws {
-        let (kernel, root) = makeDiskKernel([:])
-        defer { try? FileManager.default.removeItem(at: root) }
-        let missing = await kernel.send([Item("kernel_state", ["type": "reflect", "readme": true])])[0]
-            .result
-        #expect(missing["readme"].isNull, "\(missing)")
-        try "".write(to: root.appendingPathComponent("readme.md"), atomically: true, encoding: .utf8)
-        let empty = await kernel.send([Item("kernel_state", ["type": "reflect", "readme": true])])[0]
-            .result
-        #expect(empty["readme"].asString == "", "\(empty)")
+        let listed = await reflect(kernel, "/frontend/routing/")
+        #expect(listed["key"].asString == "frontend/routing", "\(listed)")
+        #expect(listed["body"].asString?.contains("routing doc") == true, "\(listed)")
+        #expect(Array(listed.asObject?.keys ?? []) == ["key", "desc", "tokens", "body"])
+        #expect(await reflect(kernel, "frontend/nothing")["error"].asString == "no doc 'frontend/nothing'")
     }
 }

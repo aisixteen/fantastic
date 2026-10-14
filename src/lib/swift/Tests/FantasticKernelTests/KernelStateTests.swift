@@ -159,8 +159,8 @@ struct KernelStateTests {
         ])
         await k.flushRecords()
         #expect(files.paths.contains("agents/early/agent.yaml"), "\(files.paths)")
-        // The drained write seeded the bundle's readme too.
-        #expect(files.paths.contains("agents/early/readme.md"), "\(files.paths)")
+        // The record only — no readme copy beside it.
+        #expect(!files.paths.contains("agents/early/readme.md"), "\(files.paths)")
     }
 
     /// C42: persisted `agent.yaml` bytes are python's `messages_yaml.dump(record)`

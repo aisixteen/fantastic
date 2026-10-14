@@ -225,7 +225,7 @@ struct BlobChannelTests {
     @Test func reservedAndEscapingNamesAreRefused() async {
         let files = Files()
         let k = await makeKernel(files)
-        for bad in ["agent.yaml", "readme.md", "a/b.yaml", ".hidden", "x..y"] {
+        for bad in ["agent.yaml", "a/b.yaml", ".hidden", "x..y"] {
             let r = await k.send([
                 Item(
                     AgentId("kernel"),

@@ -19,15 +19,15 @@ public protocol AgentBundle: Sendable {
     /// suffix.
     var name: String { get }
 
-    /// Optional README text seeded into `<agent_root>/readme.md` on
-    /// agent creation in Disk mode. Bundles that don't ship a readme
-    /// return `nil` (the default).
+    /// Optional README text — `reflect readme=true` serves it from here, never
+    /// from a copy on disk. Bundles that don't ship a readme return `nil` (the
+    /// default).
     var readme: String? { get }
 
     /// The bundle's shipped `docs/` topic tree, flattened pre-order as
     /// `(key, body)` (`<key>.md`, nested keys in nested dirs) — python's
-    /// package `docs/` resource. The loader seeds it beside the readme,
-    /// copy-if-missing, on every persist that lands. Default: none.
+    /// package `docs/` resource, served by `reflect readme=index`/`=<key>`.
+    /// Never copied to disk. Default: none.
     var docs: [(key: String, body: String)] { get }
 
     /// WHICH VERBS THIS BUNDLE DECLARES — python's module-level `VERBS` table,

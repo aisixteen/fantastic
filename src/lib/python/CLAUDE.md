@@ -73,7 +73,7 @@ answers `{type:"reflect"}` — the universal discovery verb.
 ```
 
 **No client library. The protocol IS the API.** A code agent (Claude,
-LLM CLI) bootstraps from `.fantastic/readme.md` on disk, or from a single
+LLM CLI) bootstraps from a single
 WS `kernel.reflect` round-trip (open `ws://host/<any-agent>/ws`, send a
 `call` frame with `target:"kernel", payload:{type:"reflect", readme:true}`).
 
@@ -639,8 +639,8 @@ they did not register.
 ## Self-bootstrap (for code agents)
 
 The substrate is self-describing through the root readme — which a code
-agent gets either by reading `.fantastic/readme.md` off disk (no process,
-no socket needed) or with one reflect:
+agent gets with one reflect (`fantastic reflect` one-shot, or over WS) —
+it is served from the kernel_state bundle, never copied to disk:
 
 Open `ws://host/<any-agent>/ws` and send
 `{"type":"call","target":"kernel","payload":{"type":"reflect","readme":true,"bundles":"all"},"id":"1"}`.
@@ -732,7 +732,8 @@ review, force-push surprise, polluted history) is high.
 - Project code lives in version-controlled files in this repo or
   user dirs. **`.fantastic/` is runtime state only** — agent.yaml
   records (the root's carries `guid` and the id counter's `next_id`), per-agent
-  sidecars (schedules.yaml, schedule_events.yaml), `lock.yaml`, `readme.md`. The
+  sidecars (schedules.yaml, schedule_events.yaml), `lock.yaml` — no readme or
+  `docs/` copies (reflect serves them from the bundle). The
   kernel writes NO message log: every message lives in a MEMORY STORE agent
   (`memory/ram_store`; rows keyed `<guid>|<agent id>`). The root's
   `memory_store_id` is mandatory for `kernel_start` (fail loud — "create a
@@ -774,8 +775,7 @@ serving a sub-namespace); **`static_loader`** — its manifest read; **`exec_bri
 path OUTSIDE the running dir by design (`~/.fantastic/credentials/<id>.yaml`, written
 0600 via `fs.write_text(..., mode=0o600)`, read via `fs.read_private` — one
 `O_NOFOLLOW` open judged by `fstat` on that descriptor), the one bundle that keeps
-secrets on disk. The substrate's fixed-path reads (`kernel/_lock.py`, `_env`,
-`Agent._read_readme`) use plain `pathlib` — the substrate is decoupled from bundles and
+secrets on disk. The substrate's fixed-path reads (`kernel/_lock.py`, `_env`) use plain `pathlib` — the substrate is decoupled from bundles and
 cannot import one. (`web` is clean: `/` is a 404 (it renders nothing), `/file/` proxies to
 gated agents, own assets are importlib package resources — no `fs`.)
 
@@ -791,9 +791,9 @@ be a fallback, which this kernel refuses):
   scratch dir, and a `credential_store`'s `file` backend (an absolute path, 0600).
 
 The ONLY disk code outside `fs`: the substrate's fixed-path bootstrap (`kernel/_lock.py`,
-`_env`, `Agent._read_readme` and its `docs/` topic-tree reads — the substrate is decoupled
-from bundles, cannot import one); `importlib.resources` reads of a bundle's OWN baked-in
-assets (readme/help/index/favicon — a package lookup, not an arbitrary path);
+`_env` — the substrate is decoupled from bundles, cannot import one);
+`importlib.resources` reads of a bundle's OWN baked-in assets (readme + `docs/` topic
+tree via `Agent._read_readme`, help/index/favicon — a package lookup, not an arbitrary path);
 `exec_bridge`'s process plumbing — `proc` lists `/proc` (Linux) for a job's session
 members and probes the child's `PATH` dirs for a bare command (`os.path.isfile` +
 `os.access`, metadata only), and `paste_image` creates its scratch dir with

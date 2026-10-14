@@ -419,31 +419,6 @@ pub async fn read_via_store(kernel: &Arc<Kernel>, store_id: &AgentId, path: &str
     }
 }
 
-/// ONE `read_stream` call — no offset, no pumping to EOF.
-///
-/// Mirrors python's `_persist_via_store`/`_seed_doc_via_store` merge and
-/// readme-probe reads exactly (C44/D6, C45): the provider's default chunk is
-/// 65536 bytes, so a record or readme bigger than that reads back as a
-/// PREFIX — python's own quirk, mirrored rather than "fixed" out from under
-/// it (D6: python is immutable). [`read_via_store`] (below) is the pump-to-EOF
-/// sibling `load_blob`/the ledger sidecar actually need and keep.
-///
-/// Returns `None` on an error reply (refused, missing file, sealed…),
-/// `Some(bytes)` on success — EMPTY bytes on success still counts as PRESENT
-/// (C45: `isinstance(got.get("bytes"), (bytes, bytearray))` is true for `b""`).
-async fn read_stream_once(kernel: &Arc<Kernel>, store_id: &AgentId, path: &str) -> Option<Vec<u8>> {
-    let (meta, body) = store_read(
-        kernel,
-        store_id,
-        serde_json::json!({"type": "read_stream", "path": path}),
-    )
-    .await;
-    if meta.get("error").is_some() {
-        return None;
-    }
-    Some(body.unwrap_or_default())
-}
-
 /// A fresh 8-hex-char tmp suffix beside the target — python
 /// `kernel_state.tools`' `f"{af}.tmp.{secrets.token_hex(4)}"`, drawn from the
 /// same OS CSPRNG `lifecycle::mint_id`/`mint_guid` use.
@@ -534,82 +509,6 @@ pub async fn persist(kernel: &Arc<Kernel>, loader: &Agent, agent: &Agent) -> Ker
     }
     persist_landed(kernel, &loader.id);
     Ok(true)
-}
-
-/// Seed a `readme.md` (the bundle ships it via `Bundle::readme()`) AND its
-/// keyed `docs/` tree (`Bundle::docs()`) into the agent's dir THROUGH the
-/// discovered provider — python `_seed_readme_via_store`. Copy-if-missing PER
-/// FILE — never clobber operator edits, an operator-EMPTIED file included (C45:
-/// "present" is any successful reply, zero bytes counts). No-op in InMemory /
-/// ephemeral / no-provider-wired.
-pub async fn seed_readme(
-    kernel: &Arc<Kernel>,
-    loader: &Agent,
-    agent: &Agent,
-    readme: Option<&str>,
-    docs: &[(&str, &str)],
-) -> KernelResult<()> {
-    if kernel.storage.is_in_memory() || agent.ephemeral {
-        return Ok(());
-    }
-    let Some(store_id) = find_store_for(kernel, loader) else {
-        return Ok(());
-    };
-    let reldir = loader_reldir(kernel, loader, &agent.root_path);
-    let prefix = if reldir.is_empty() {
-        String::new()
-    } else {
-        format!("{reldir}/")
-    };
-    if let Some(readme) = readme {
-        seed_doc(
-            kernel,
-            &loader.id,
-            &store_id,
-            &format!("{prefix}readme.md"),
-            readme,
-        )
-        .await;
-    }
-    for (key, body) in docs {
-        seed_doc(
-            kernel,
-            &loader.id,
-            &store_id,
-            &format!("{prefix}docs/{key}.md"),
-            body,
-        )
-        .await;
-    }
-    Ok(())
-}
-
-/// One sidecar doc THROUGH the provider, copy-if-missing — python
-/// `_seed_doc_via_store`. Already present is ANY successful reply, zero bytes
-/// included (C45); only an ERROR reply (missing file, refused…) means "not
-/// there, seed it." A refused WRITE doesn't land — no fallback — and is LOUD
-/// (`persist_failed`), as a record write is: its reply used to be dropped, so a
-/// doc that never landed was invisible (audit 2026-10-03, ARCH2-9).
-async fn seed_doc(
-    kernel: &Arc<Kernel>,
-    loader: &AgentId,
-    store_id: &AgentId,
-    path: &str,
-    body: &str,
-) {
-    if read_stream_once(kernel, store_id, path).await.is_some() {
-        return;
-    }
-    let written = store_write(
-        kernel,
-        store_id,
-        serde_json::json!({"type": "write_stream", "path": path, "bytes": null, "truncate": true}),
-        body.as_bytes().to_vec(),
-    )
-    .await;
-    if write_failed(&written) {
-        persist_failed(kernel, loader, store_id, path, &written);
-    }
 }
 
 /// Remove an agent's dir THROUGH the discovered provider (the `delete` verb is
@@ -1108,20 +1007,9 @@ async fn flush_records(
         if agent.ephemeral {
             continue;
         }
-        // EVERY LANDED WRITE SEEDS THE SIDECARS (python `_persist_via_store` →
-        // `_seed_readme_via_store`), not only the create that first made the
-        // record — a record written before a store was wired would otherwise
-        // never get its readme. A refused or failed write seeds nothing.
-        if !matches!(persist(kernel, &loader, &agent).await, Ok(true)) {
-            continue;
-        }
-        if let Some(bundle) = agent
-            .handler_module
-            .as_deref()
-            .and_then(|hm| kernel.bundles.get(hm))
-        {
-            let _ = seed_readme(kernel, &loader, &agent, bundle.readme(), bundle.docs()).await;
-        }
+        // The record only — a bundle's readme and docs are served from the
+        // bundle, never copied (owner 2026-10-14).
+        let _ = persist(kernel, &loader, &agent).await;
     }
     for (_, path) in forget {
         forget_path(kernel, &loader, &path).await;

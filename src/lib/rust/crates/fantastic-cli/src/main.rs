@@ -375,26 +375,6 @@ async fn dispatch(
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let workdir = std::env::current_dir()?;
 
-    // Seed `.fantastic/readme.md` + the `docs/` tree, in EVERY mode, but ONLY
-    // when the root record is being seeded too. python hangs the cold seed off
-    // `write_record` (`main._bootstrap`: `if seeded: write_record(...)` →
-    // `_seed_readme`), so a workdir that already carries a parseable
-    // `.fantastic/agent.yaml` gets NOTHING — rust used to write the readme and
-    // the whole docs tree on every invocation (measured 2026-09-20). A missing
-    // OR unparseable record reseeds, as `bootstrap`'s own `seeded` does.
-    // A failed seed write FAILS the invocation, as python's `write_record`
-    // raises: it was ignored, so a doc tree that never landed was invisible
-    // (audit 2026-10-03, ARCH2-9).
-    if fantastic_kernel::persistence::read_record_at(
-        &workdir.join(fantastic_kernel::persistence::ROOT_RECORD_PATH),
-    )
-    .ok()
-    .flatten()
-    .is_none()
-    {
-        fantastic_core::seed_root_readme(&workdir)?;
-    }
-
     // Mode 1: `help` / `-h` / `--help` as the FIRST word — later words are
     // IGNORED (`P/kernel/modes/dispatch.py:19-21`). python has already built the
     // kernel by now, so a virgin dir is seeded before the cheatsheet prints; the

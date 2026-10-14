@@ -385,8 +385,8 @@ struct FantasticCLI {
     /// A14.3's USAGE branch, factored out like `dispatchInit` so a test can
     /// pin the ORDER without the process-level `exit(2)`: python builds the
     /// kernel in `main` BEFORE `dispatch_argv` runs, so even `init`'s usage
-    /// error leaves the SEEDED root behind — `.fantastic/` + `agent.yaml` +
-    /// `readme.md` + `docs/**` (19 paths, measured). Same shape as the
+    /// error leaves the SEEDED root behind — `.fantastic/` + `agent.yaml`.
+    /// Same shape as the
     /// `.usage` branch; NO lock — python's `init` probes the lock only once
     /// it has both arguments. Rust mirrors it in
     /// `fantastic-cli/src/main.rs:407`.

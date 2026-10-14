@@ -57,11 +57,16 @@ public enum Persistence {
     /// (or its dir) linked outside, throws python's `ValueError` — `fs: path
     /// '<rel>' escapes root` — instead of hydrating records from another
     /// directory.
-    public static func readTree(rootDir: URL, fallbackRootId: String = "kernel_state")
+    ///
+    /// `live` is the root's LIVE record when the caller has one (a session
+    /// loader serving its namespace): the namespace keeps no copy of it on disk.
+    public static func readTree(
+        rootDir: URL, fallbackRootId: String = "kernel_state", live: AgentRecord? = nil
+    )
         throws(PyError) -> [AgentRecord]
     {
-        var rootRec: AgentRecord? = nil
-        if let obj = try readRecordClamped(rootDir, RECORD_FILE),
+        var rootRec: AgentRecord? = live
+        if rootRec == nil, let obj = try readRecordClamped(rootDir, RECORD_FILE),
             let rec = try? AgentRecord(json: .object(obj))
         {
             rootRec = rec

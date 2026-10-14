@@ -450,32 +450,21 @@ extension Kernel {
         return .node(.object(node))
     }
 
-    /// The addressed agent's readme.md (string) or null. Python's `readme`
-    /// property: `read_text(encoding="utf-8")` when the file exists, `None`
-    /// otherwise or on an `OSError`. NO on-disk fallback (C33): an existing
-    /// but empty file answers `""`, not the embedded canonical text — that
-    /// text is for the in-memory root ONLY, which has no on-disk file at all.
-    /// A non-UTF-8 file is NOT an `OSError` — it throws (C60).
+    /// The addressed agent's bundle readme (string) or null — served from the
+    /// bundle, never from a copy on disk (owner 2026-10-14). Python's text mode
+    /// (C59): `\r\n`/lone `\r` → `\n`.
     private func readReadme(_ target: Agent) throws(PyError) -> JSON {
-        if storage.isDisk {
-            guard let data = try? Data(contentsOf: target.readmeFile) else { return .null }
-            if let decodeError = pyUtf8DecodeError(data) {
-                throw PyError("UnicodeDecodeError", decodeError)
-            }
-            return .string(pyUniversalNewlines(String(decoding: data, as: UTF8.self)))
+        guard let hm = target.handlerModule, let text = bundles.get(hm)?.readme else {
+            return .null
         }
-        if target.parentId == nil {
-            return .string(RootReadme.text)
-        }
-        return .null
+        return .string(pyUniversalNewlines(text))
     }
 
     // ─── keyed / tiered doc tree ───────────────────────────────
     // The manual is a SHORT `readme.md` orientation + a `docs/` topic tree.
     // `reflect readme=index` lists it token-annotated; `reflect readme=<key>`
-    // drills one topic. Read from the seeded on-disk tree in disk mode; the
-    // in-memory root has no disk and serves the embedded docs — picked by the
-    // storage mode, never tried in sequence (mirrors `readReadme`).
+    // drills one topic. Served from the agent's bundle (`AgentBundle.docs`),
+    // never from a copy on disk (owner 2026-10-14).
 
     /// ~tokens for a doc: ceil(chars/4), matching ai_core's estimate (Unicode
     /// scalars = code points, so the advertised cost is stable across runtimes).
@@ -499,15 +488,11 @@ extension Kernel {
         return ""
     }
 
-    /// The topic TREE for an agent: the seeded on-disk `docs/` dir if present
-    /// (NO fallback — an empty/absent dir is `[]`, C33), else the embedded
-    /// canonical docs for the root (in-memory mode, swift-only). Nested dirs
-    /// are tiers — python's `_readme_index` walk (`RootDocs.walk`).
+    /// The topic TREE for an agent: its bundle's `docs`, nested by key (a `/`
+    /// in a key is a tier) — python's `_readme_index` over the package `docs/`.
     private func docsFor(_ target: Agent) throws(PyError) -> [RootDocs.Node] {
-        if storage.isDisk {
-            return try RootDocs.walk(target.rootPath.appendingPathComponent("docs"))
-        }
-        return target.parentId == nil ? RootDocs.tree : []
+        guard let hm = target.handlerModule, let bundle = bundles.get(hm) else { return [] }
+        return RootDocs.tree(bundle.docs)
     }
 
     /// Token-annotated topic index `[{key, desc, tokens, children?}]` — no
@@ -534,16 +519,9 @@ extension Kernel {
     /// Polymorphic `readme=<str>`: `"index"` → the token-annotated tree; a
     /// `<key>` → that topic's body + its immediate sub-docs' index; an
     /// unknown/escaping key → `{error, keys}` (the reply stays well-formed).
-    /// Python `_readme_view`, its texts included: `bad key` is a path that
-    /// resolves OUTSIDE `docs/`, `no doc` is one inside it with no file.
-    ///
-    /// DISK mode goes through [`readmeViewOnDisk`] — python's own path
-    /// semantics, straight off the real filesystem (R2-RFL-5). The in-memory
-    /// root (swift-only; python has no such mode) keeps the tree-search below.
+    /// Python `_readme_view`: the key is checked LEXICALLY, then against the
+    /// keys the index lists.
     private func readmeView(_ target: Agent, _ sel: String) throws(PyError) -> JSON {
-        if storage.isDisk {
-            return try readmeViewOnDisk(target.rootPath.appendingPathComponent("docs"), sel)
-        }
         let docs = try docsFor(target)
         if sel == "index" { return .object(["index": readmeIndex(docs)]) }
         let keys = JSON.array(RootDocs.keys(docs).map { .string($0) })
@@ -551,28 +529,18 @@ extension Kernel {
             sel
             .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
             .replacingOccurrences(of: "\\", with: "/")
-        // `docs/<safe>.md` resolved the way pathlib resolves it: `.` and empty
-        // segments vanish, `..` pops — and popping past the root is the clamp.
-        var stack: [String] = []
-        for part in safe.split(separator: "/", omittingEmptySubsequences: true) {
-            if part == "." { continue }
-            if part == ".." {
-                if stack.popLast() == nil {
-                    return .object(["error": .string("bad key \(pyRepr(sel))"), "keys": keys])
-                }
-                continue
-            }
-            stack.append(String(part))
+        let parts = safe.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        if safe.isEmpty || parts.contains(where: { $0 == "" || $0 == "." || $0 == ".." }) {
+            return .object(["error": .string("bad key \(pyRepr(sel))"), "keys": keys])
         }
-        let lookup = stack.joined(separator: "/")
         func find(_ nodes: [RootDocs.Node]) -> RootDocs.Node? {
             for n in nodes {
-                if n.key == lookup { return n }
+                if n.key == safe { return n }
                 if let hit = find(n.children) { return hit }
             }
             return nil
         }
-        guard !lookup.isEmpty, let hit = find(docs) else {
+        guard let hit = find(docs) else {
             return .object(["error": .string("no doc \(pyRepr(sel))"), "keys": keys])
         }
         var view: OrderedDictionary<String, JSON> = [
@@ -582,74 +550,6 @@ extension Kernel {
             "body": .string(hit.body),
         ]
         if !hit.children.isEmpty { view["children"] = readmeIndex(hit.children) }
-        return .object(view)
-    }
-
-
-    /// An absolute filesystem path's components (no leading empty piece).
-    private func absPathComponents(_ path: String) -> [String] {
-        path.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
-    }
-
-
-
-    /// DISK-mode `readme=<str>` — python's own semantics: a lexical key check,
-    /// then the index, then the file.
-    private func readmeViewOnDisk(_ docsDir: URL, _ sel: String) throws(PyError) -> JSON {
-        func keys() throws(PyError) -> JSON {
-            .array(RootDocs.keys(try RootDocs.walk(docsDir)).map { .string($0) })
-        }
-        if sel == "index" {
-            return .object(["index": readmeIndex(try RootDocs.walk(docsDir))])
-        }
-        let safe =
-            sel
-            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            .replacingOccurrences(of: "\\", with: "/")
-        // LEXICAL, then the key list — never the filesystem (python 2026-09-20):
-        // a `..` segment is a bad key whether or not the path it walked through
-        // exists, and a key is a doc only if the index lists it.
-        let parts = safe.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
-        if safe.isEmpty || parts.contains(where: { $0 == "" || $0 == "." || $0 == ".." }) {
-            return .object(["error": .string("bad key \(pyRepr(sel))"), "keys": try keys()])
-        }
-        guard RootDocs.keys(try RootDocs.walk(docsDir)).contains(safe) else {
-            return .object(["error": .string("no doc \(pyRepr(sel))"), "keys": try keys()])
-        }
-        let fPath = docsDir.appendingPathComponent(safe + ".md").path
-        let fm = FileManager.default
-        // CLAMPED INSIDE `docs/` once resolved (python `f.resolve().
-        // relative_to(d.resolve())`): a key that is a symlink out of the tree is
-        // a bad key, never the outside file's body. Then it must be a FILE.
-        let realDocs = (docsDir.path as NSString).resolvingSymlinksInPath
-        let realF = (fPath as NSString).resolvingSymlinksInPath
-        guard realF.hasPrefix(realDocs + "/") else {
-            return .object(["error": .string("bad key \(pyRepr(sel))"), "keys": try keys()])
-        }
-        guard RootDocs.pyIsFile(fPath) else {
-            return .object(["error": .string("no doc \(pyRepr(sel))"), "keys": try keys()])
-        }
-        guard let data = fm.contents(atPath: fPath) else {
-            return .object(["error": .string("unreadable \(pyRepr(sel))"), "keys": try keys()])
-        }
-        if let decodeError = pyUtf8DecodeError(data) {
-            throw PyError("UnicodeDecodeError", decodeError)
-        }
-        let body = pyUniversalNewlines(String(decoding: data, as: UTF8.self))
-        var view: OrderedDictionary<String, JSON> = [
-            "key": .string(safe),
-            "desc": .string(readDesc(body)),
-            "tokens": .integer(Int64(estTokens(body))),
-            "body": .string(body),
-        ]
-        // Children come from `docs/<safe>` (unresolved, same rules) — NEVER
-        // from a pre-walked index tree — keyed with the RAW `safe` prefix.
-        let subPath = docsDir.appendingPathComponent(safe).path
-        var isDir: ObjCBool = false
-        if fm.fileExists(atPath: subPath, isDirectory: &isDir), isDir.boolValue {
-            let children = try RootDocs.walk(URL(fileURLWithPath: subPath), prefix: safe + "/")
-            if !children.isEmpty { view["children"] = readmeIndex(children) }
-        }
         return .object(view)
     }
 

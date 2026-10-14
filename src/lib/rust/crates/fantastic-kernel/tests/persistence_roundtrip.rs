@@ -35,9 +35,8 @@ impl Bundle for NoopBundle {
     }
 }
 
-/// Like [`NoopBundle`], but ships a readme — the only way `seed_readme` (C45)
-/// ever runs: `flush_records` looks the created agent's `handler_module` up in
-/// the registry and only calls it when `Bundle::readme()` answers `Some`.
+/// Like [`NoopBundle`], but ships a readme — proof that even a bundle WITH a
+/// readme gets none copied beside its record.
 struct ReadmeBundle;
 
 #[async_trait]
@@ -693,55 +692,31 @@ impl Bundle for ArcBundle {
     }
 }
 
-/// C45: an operator-EMPTIED readme (present, zero bytes) is never reseeded —
-/// only a genuinely ABSENT file (an error reply) triggers the copy.
+/// A record write through the store copies NO readme beside it — a bundle's
+/// readme is served from the bundle (owner 2026-10-14), on create and on every
+/// later write.
 #[tokio::test]
-async fn an_emptied_readme_is_not_reseeded() {
+async fn a_record_write_copies_no_readme() {
     let tmp = fresh_workdir();
     let store_root = tmp.path();
     let kernel = kernel_at(store_root);
     fantastic_kernel::test_support::boot_root(&kernel).await;
     wire_store(&kernel, store_root).await;
-
-    let _ = kernel
-        .send(vec![Item::new(
-            AgentId::from("kernel_state"),
-            json!({
-                "type": "create_agent", "parent_id": "kernel",
-                "handler_module": "readme_bundle.tools", "id": "documented",
-            }),
-        )])
-        .await
-        .remove(0)
-        .result;
-    fantastic_kernel::test_support::settle_records().await;
-    let readme_path = store_root.join("agents/documented/readme.md");
-    assert_eq!(
-        std::fs::read_to_string(&readme_path).expect("seeded"),
-        "shipped readme text\n",
-        "first boot seeds the shipped text"
-    );
-
-    // The operator empties it — python's `_seed_doc_via_store` reads this as
-    // PRESENT (`isinstance(b"", bytes)` is true) and must leave it alone.
-    std::fs::write(&readme_path, b"").unwrap();
-    // Re-dirty the agent (an `update_agent` fires the "updated" state event
-    // the debounced writer watches) — `flush_records` re-seeds on every
-    // drained write, not only the create, see its own comment.
-    let _ = kernel
-        .send(vec![Item::new(
-            AgentId::from("kernel_state"),
-            json!({"type": "update_agent", "id": "documented", "display_name": "Documented"}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    fantastic_kernel::test_support::settle_records().await;
-    assert_eq!(
-        std::fs::read_to_string(&readme_path).expect("still there"),
-        "",
-        "an operator-emptied readme is NOT reseeded"
-    );
+    for payload in [
+        json!({
+            "type": "create_agent", "parent_id": "kernel",
+            "handler_module": "readme_bundle.tools", "id": "documented",
+        }),
+        json!({"type": "update_agent", "id": "documented", "display_name": "Documented"}),
+    ] {
+        let _ = kernel
+            .send(vec![Item::new(AgentId::from("kernel_state"), payload)])
+            .await;
+        fantastic_kernel::test_support::settle_records().await;
+        let dir = store_root.join("agents/documented");
+        assert!(dir.join("agent.yaml").exists());
+        assert!(!dir.join("readme.md").exists() && !dir.join("docs").exists());
+    }
 }
 
 /// Every payload the persistence provider `store` was handed — what its traffic
@@ -872,89 +847,5 @@ async fn a_failed_record_write_seeds_no_readme() {
     assert!(
         !paths.iter().any(|p| p.ends_with("readme.md")),
         "a failed write still seeded the readme: {paths:?}"
-    );
-}
-
-/// [`FakeStore`] that refuses a `write_stream` of any `readme.md` — the record
-/// lands, its readme does not.
-struct ReadmeRefusingStore(FakeStore);
-
-#[async_trait]
-impl Bundle for ReadmeRefusingStore {
-    fn name(&self) -> &str {
-        self.0.name()
-    }
-    async fn handle(
-        &self,
-        id: &AgentId,
-        payload: &Value,
-        kernel: &Arc<Kernel>,
-    ) -> Result<Reply, Box<dyn std::error::Error + Send + Sync>> {
-        self.0.handle(id, payload, kernel).await
-    }
-    async fn handle_binary(
-        &self,
-        id: &AgentId,
-        header: Value,
-        body: Option<fantastic_kernel::Blob>,
-        kernel: &Arc<Kernel>,
-    ) -> Result<(Reply, Option<fantastic_kernel::Blob>), Box<dyn std::error::Error + Send + Sync>>
-    {
-        let path = header.get("path").and_then(Value::as_str).unwrap_or("");
-        if header["type"] == "write_stream" && path.ends_with("readme.md") {
-            return Ok((
-                Some(json!({"error": "disk full", "reason": "bad_arg"})),
-                None,
-            ));
-        }
-        self.0.handle_binary(id, header, body, kernel).await
-    }
-}
-
-/// A refused SEED write is LOUD — stderr and `persistence.error` — as a refused
-/// record write is (python `_seed_doc_via_store` → `_persist_failed`). Its reply
-/// used to be dropped, so a readme that never landed was invisible (audit
-/// 2026-10-03, ARCH2-9).
-#[tokio::test]
-async fn a_refused_seed_write_is_loud() {
-    let tmp = fresh_workdir();
-    let store_root = tmp.path();
-    let mut kernel = Kernel::with_storage(StorageMode::Disk(store_root.to_path_buf()));
-    let mut reg = BundleRegistry::new();
-    reg.register("readme_bundle.tools", ReadmeBundle);
-    reg.register(
-        "file_bridge.tools",
-        ReadmeRefusingStore(FakeStore {
-            root: store_root.to_path_buf(),
-        }),
-    );
-    fantastic_kernel::test_support::register_root_loader(&mut reg);
-    kernel.bundles = reg;
-    let kernel = Arc::new(kernel);
-    let root = Agent::new(
-        AgentId::from("kernel_state"),
-        Some("kernel_state.tools".to_string()),
-        None,
-        Map::new(),
-        store_root.to_path_buf(),
-        false,
-    );
-    kernel.register(Arc::clone(&root));
-    kernel.set_root(Arc::clone(&root));
-    fantastic_kernel::test_support::boot_root(&kernel).await;
-    wire_store(&kernel, store_root).await;
-    let _ = kernel
-        .send(vec![Item::new(
-            AgentId::from("kernel_state"),
-            json!({"type": "create_agent", "parent_id": "kernel",
-                   "handler_module": "readme_bundle.tools", "id": "doc"}),
-        )])
-        .await;
-    fantastic_kernel::test_support::settle_records().await;
-    assert!(store_root.join("agents/doc/agent.yaml").exists());
-    assert!(!store_root.join("agents/doc/readme.md").exists());
-    assert_eq!(
-        fantastic_kernel::persistence::persist_error(&kernel),
-        Some(json!({"store": "store", "path": "agents/doc/readme.md", "error": "disk full"})),
     );
 }

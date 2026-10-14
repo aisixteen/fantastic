@@ -27,8 +27,6 @@ use async_trait::async_trait;
 use fantastic_file::fs as fantastic_fs;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
-use std::fs;
-use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -39,12 +37,12 @@ use fantastic_kernel::{persistence, AgentId, Kernel};
 /// The `handler_module` this bundle answers to — python's package path.
 pub const HANDLER_MODULE: &str = "kernel_state.tools";
 
-/// The SHORT orientation readme auto-seeded into `.fantastic/readme.md` on boot.
+/// The SHORT orientation readme — `reflect readme=true` serves it from here.
 /// The full manual is the keyed [`DOCS`] tree — `reflect readme=index` / `=<key>`.
 pub const README: &str = include_str!("readme.md");
 
 /// The manual, split into keyed topic docs (nested dirs = tiers via a `/` in the
-/// key). Seeded into `.fantastic/docs/<key>.md`; `reflect readme=index` lists them
+/// key), compiled in and never copied to disk; `reflect readme=index` lists them
 /// token-annotated and `reflect readme=<key>` drills one. Trimmed + reordered so a
 /// self-authoring model reaches `self-extension` first, not a system-manual dump.
 pub const DOCS: &[(&str, &str)] = &[
@@ -66,36 +64,6 @@ pub const DOCS: &[(&str, &str)] = &[
     ("terminal", include_str!("docs/terminal.md")),
     ("daemon", include_str!("docs/daemon.md")),
 ];
-
-/// Seed `<workdir>/.fantastic/readme.md` from [`README`] AND the [`DOCS`] tree
-/// into `<workdir>/.fantastic/docs/` if missing. Idempotent per file: preserves
-/// any user-edited content on subsequent calls.
-///
-/// The COLD half of python's `_seed_readme` (the bootstrap writes the root
-/// record before any provider can exist); the warm half rides the store in
-/// [`persistence::install_persist_writer`].
-pub fn seed_root_readme(workdir: &Path) -> io::Result<()> {
-    let fdir = workdir.join(".fantastic");
-    let dest = fdir.join("readme.md");
-    if !dest.exists() {
-        if let Some(parent) = dest.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(&dest, README)?;
-    }
-    let docs_dir = fdir.join("docs");
-    for (key, body) in DOCS {
-        let path = docs_dir.join(format!("{key}.md"));
-        if path.exists() {
-            continue;
-        }
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(&path, body)?;
-    }
-    Ok(())
-}
 
 /// The SHORT `self_extension` a DISTILLED root reflect carries — python
 /// `reflect_root_extra`'s non-full branch, verbatim.
@@ -268,8 +236,15 @@ fn read_record(root: &Path, rel: &str) -> Result<Option<Map<String, Value>>, Bun
 /// descendants), `parent_id` from DISK POSITION. A MISSING OR CORRUPT ROOT RECORD
 /// DOES NOT HIDE THE TREE: the children are walked under the default layout and
 /// parented to [`ROOT_ID`](fantastic_kernel::bootstrap::DEFAULT_ROOT_ID).
-fn read_tree(root: &Path) -> Result<Vec<Value>, BundleError> {
-    let Some(root_rec) = read_record(root, persistence::RECORD_FILE)? else {
+///
+/// `live` is the root's LIVE record when the caller has one (a session loader
+/// serving its namespace): the namespace keeps no copy of it on disk.
+fn read_tree(root: &Path, live: Option<Map<String, Value>>) -> Result<Vec<Value>, BundleError> {
+    let root_rec = match live {
+        Some(rec) => Some(rec),
+        None => read_record(root, persistence::RECORD_FILE)?,
+    };
+    let Some(root_rec) = root_rec else {
         let mut records = Vec::new();
         walk(
             root,
@@ -335,20 +310,10 @@ fn walk(
 
 impl KernelStateBundle {
     async fn boot(&self, agent: &Arc<Agent>, kernel: &Arc<Kernel>) -> Result<Value, BundleError> {
-        // A SESSION loader (a `root` meta pointing at a sub-namespace like
-        // `.fantastic/web/<session>/`) seeds its namespace ANCHOR
-        // (`<root>/agent.yaml`) so `load_tree` has a root to walk from after a
-        // restart — python `_boot`, FIRST and on every boot, through the clamp: a
-        // root outside the running dir raises.
-        let root_dir = loader_root(agent);
-        if root_dir != agent.root_path {
-            let anchor = clamp(kernel, &root_dir)?;
-            if !fantastic_fs::exists(&anchor, persistence::RECORD_FILE).map_err(raise_fs)? {
-                if let Value::Object(rec) = persistence::record_map(&agent.record()) {
-                    write_record(&anchor, &rec, kernel)?;
-                }
-            }
-        }
+        // A SESSION loader (a `root` meta pointing at a sub-namespace) writes no
+        // record of its own there: its one record lives in its parent's tree and
+        // `load_tree` walks the namespace from it (owner 2026-10-14 — a copy at
+        // `<root>/agent.yaml` froze and diverged).
         // IDEMPOTENT, as python's `_boot` is: a second boot installs nothing.
         {
             let mut st = self.state.lock().expect("kernel_state poisoned");
@@ -374,9 +339,18 @@ impl KernelStateBundle {
         agent: &Arc<Agent>,
         kernel: &Arc<Kernel>,
     ) -> Result<Value, BundleError> {
-        let root = clamp(kernel, &loader_root(agent))?;
+        let root_dir = loader_root(agent);
+        let live = if root_dir == agent.root_path {
+            None
+        } else {
+            match persistence::record_map(&agent.record()) {
+                Value::Object(rec) => Some(rec),
+                _ => None,
+            }
+        };
+        let root = clamp(kernel, &root_dir)?;
         Ok(json!({
-            "records": read_tree(&root)?,
+            "records": read_tree(&root, live)?,
             "version": fantastic_kernel::CURRENT_VERSION,
         }))
     }
@@ -419,7 +393,7 @@ impl KernelStateBundle {
             Some(a) => a.root_path.clone(),
             None => at.resolve(id, parent)?,
         };
-        write_record(&clamp(kernel, &path)?, record, kernel)?;
+        write_record(&clamp(kernel, &path)?, record)?;
         Ok(json!({ "ok": true }))
     }
 
@@ -473,12 +447,8 @@ fn guard_id(verb: &str, v: Option<&Value>) -> Option<Value> {
 /// Merge-write one record's `agent.yaml` in `root` (the agent's own dir, already
 /// clamped) — python `write_record`: read any existing file, overlay the
 /// record's keys (unknown fields + sidecars survive), write atomically through
-/// `fs` — a failed write RAISES — then seed the bundle's readme and docs.
-fn write_record(
-    root: &Path,
-    record: &Map<String, Value>,
-    kernel: &Kernel,
-) -> Result<(), BundleError> {
+/// `fs` — a failed write RAISES. A bundle's readme and docs are never copied.
+fn write_record(root: &Path, record: &Map<String, Value>) -> Result<(), BundleError> {
     let mut on_disk = read_record(root, persistence::RECORD_FILE)?.unwrap_or_default();
     for (k, v) in record {
         on_disk.insert(k.clone(), v.clone());
@@ -486,39 +456,7 @@ fn write_record(
     let body = fantastic_kernel::yaml_io::dump(&Value::Object(on_disk));
     fantastic_fs::write_bytes(root, persistence::RECORD_FILE, body.as_bytes(), true, None)
         .map_err(raise_fs)?;
-    seed_readme(root, record.get("handler_module"), kernel);
     Ok(())
-}
-
-/// python `_seed_readme`: the bundle's shipped `readme.md` AND its `docs/` tree
-/// into the agent's dir, copy-if-missing per file, THROUGH `fs`. A failure ends
-/// the seeding quietly (python swallows it).
-fn seed_readme(root: &Path, handler_module: Option<&Value>, kernel: &Kernel) {
-    let Some(bundle) = handler_module
-        .and_then(Value::as_str)
-        .filter(|h| !h.is_empty())
-        .and_then(|h| kernel.bundles.get(h))
-    else {
-        return;
-    };
-    let mut files: Vec<(String, &str)> = Vec::new();
-    if let Some(readme) = bundle.readme() {
-        files.push(("readme.md".to_string(), readme));
-    }
-    for (key, body) in bundle.docs() {
-        files.push((format!("docs/{key}.md"), body));
-    }
-    for (rel, body) in files {
-        match fantastic_fs::exists(root, &rel) {
-            Ok(true) => continue,
-            Ok(false) => {
-                if fantastic_fs::write_bytes(root, &rel, body.as_bytes(), true, None).is_err() {
-                    return;
-                }
-            }
-            Err(_) => return,
-        }
-    }
 }
 
 /// The children-container dir name for this loader's namespace (declared config;
@@ -718,7 +656,7 @@ impl Bundle for KernelStateBundle {
         // lets the UnicodeDecodeError out of `reflect_root_extra`, and the
         // substrate's merge site no longer swallows it (audit 2026-10-03,
         // ARCH2-9) — the full root reflect settles `failed` with that raise.
-        let readmes = fantastic_kernel::reflect::readme_index(&agent.root_path.join("docs"), "")?;
+        let readmes = fantastic_kernel::reflect::readme_index(DOCS, "");
         out.insert("readmes".to_string(), Value::Array(readmes));
         out.insert("docs".to_string(), json!(DOCS_LINE));
         out.insert("self_extension".to_string(), json!(SELF_EXTENSION_FULL));
@@ -756,7 +694,7 @@ impl Bundle for KernelStateBundle {
             let agents: Vec<Arc<Agent>> = kernel.agents.iter().map(|e| Arc::clone(&e)).collect();
             for a in agents.iter().filter(|a| !a.ephemeral) {
                 if let Value::Object(rec) = persistence::record_map(&a.record()) {
-                    write_record(&clamp(kernel, &a.root_path)?, &rec, kernel)?;
+                    write_record(&clamp(kernel, &a.root_path)?, &rec)?;
                 }
             }
         }

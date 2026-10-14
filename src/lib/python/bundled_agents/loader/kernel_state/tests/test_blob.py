@@ -91,7 +91,7 @@ async def test_load_absent_is_null_not_error(seeded_kernel, store_agent):
 
 
 @pytest.mark.parametrize(
-    "bad", ["agent.yaml", "readme.md", "../escape", "sub/dir.yaml", ".hidden"]
+    "bad", ["agent.yaml", "../escape", "sub/dir.yaml", ".hidden"]
 )
 async def test_guard_rejects_dangerous_names(seeded_kernel, store_agent, bad):
     aid = await _mk_target(seeded_kernel)

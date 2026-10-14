@@ -134,7 +134,7 @@ async def test_booted_loader_persists_via_discovered_provider(tmp_path, monkeypa
     """The stream-consumer path: an operator/LLM creates a PERSISTENT, gated
     file_bridge child rooted at `.fantastic`; the booted loader DISCOVERS it (by
     match, not a fixed id) and persists records THROUGH its `write_stream` — not
-    direct disk I/O. The record bytes + the seeded readme reach disk via the SINK,
+    direct disk I/O. The record bytes reach disk via the SINK (no readme copy),
     and delete recurses through the provider."""
     monkeypatch.chdir(tmp_path)
     root = boot_root()
@@ -174,7 +174,7 @@ async def test_booted_loader_persists_via_discovered_provider(tmp_path, monkeypa
         await asyncio.sleep(0.3)  # let the debounce flush stream the record
         assert (agent_dir / "agent.yaml").exists()
         assert yaml.safe_load((agent_dir / "agent.yaml").read_text())["x"] == 7
-        assert (agent_dir / "readme.md").exists()  # readme seeded via stream too
+        assert not (agent_dir / "readme.md").exists()  # served from the bundle
 
         (
             await root.send(
@@ -212,8 +212,8 @@ async def test_session_loader_serves_sub_namespace(tmp_path, monkeypatch):
         )
     )[0]["result"]
     sid = rec["id"]
-    # boot seeds the namespace anchor (read_tree needs a root agent.yaml)
-    assert (tmp_path / sess / "agent.yaml").exists()
+    # the namespace keeps no copy of the loader's record — it lives in the tree
+    assert not (tmp_path / sess / "agent.yaml").exists()
 
     # persist two JS view records (NOT live host agents) — they nest under
     # the session root. The JS root (canvas) sends parent_id = the session
@@ -257,12 +257,13 @@ async def test_session_loader_serves_sub_namespace(tmp_path, monkeypatch):
     assert (canvas_dir / "agent.yaml").exists()
     assert (term_dir / "agent.yaml").exists()
 
-    # load_tree reads the namespace back (anchor + canvas + term1)
+    # load_tree reads the namespace back, rooted at the loader's LIVE record
     reply = (await root.send([{"target": sid, "payload": {"type": "load_tree"}}]))[0][
         "result"
     ]
     by_id = {r["id"]: r for r in reply["records"]}
     assert {sid, "canvas", "term1"}.issubset(by_id)
+    assert by_id[sid] == root.ctx.agents[sid].record
     assert by_id["canvas"]["parent_id"] == sid  # disk position
     assert by_id["term1"]["parent_id"] == "canvas"
 

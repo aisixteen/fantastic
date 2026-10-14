@@ -23,7 +23,6 @@ use crate::kernel::Kernel;
 use crate::outcome::Status;
 use serde_json::{json, Map, Value};
 use std::future::Future;
-use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -34,8 +33,8 @@ const PURPOSE_KEYS: [&str; 1] = ["mode"];
 // ─── keyed / tiered doc tree ───────────────────────────────────
 // The root manual is a SHORT `readme.md` orientation + a `docs/` tree of topic
 // files (nested dirs = tiers, `/` in the key). `reflect readme=index` lists the
-// tree token-annotated; `reflect readme=<key>` drills one topic. Read from the
-// seeded on-disk tree (fantastic_core::seed_root_readme), mirroring the readme.
+// tree token-annotated; `reflect readme=<key>` drills one topic. Served from the
+// bundle's compiled `readme()`/`docs()` — nothing is copied to disk.
 
 /// ~tokens for a doc: ceil(chars/4), matching ai_core's estimate (CHARS, not
 /// bytes — Unicode-safe so the advertised cost is stable across runtimes).
@@ -64,36 +63,6 @@ fn read_desc(text: &str) -> String {
     String::new()
 }
 
-/// A doc file's raw bytes read in PYTHON TEXT MODE: UTF-8 decode, universal
-/// newlines (`\r\n` and lone `\r` → `\n`) — mirrors
-/// `pathlib.Path.read_text(encoding="utf-8")` (C59).
-///
-/// `Io` = the file could not be read at all (permission, races after an
-/// `is_file()` check) — every `_readme_*` call site in python catches ONLY
-/// `OSError` here and treats it as "no doc". `Decode` = the bytes are not
-/// valid UTF-8: python's `except OSError` does NOT catch
-/// `UnicodeDecodeError`, so this is NOT "unreadable" — it propagates out of
-/// the verb and fails the WHOLE reflect (C60). Callers turn it into that
-/// raise via [`decode_raise`].
-enum DocRead {
-    Ok(String),
-    Io,
-    Decode(String),
-}
-
-fn read_doc_text(path: &Path) -> DocRead {
-    let Ok(bytes) = std::fs::read(path) else {
-        return DocRead::Io;
-    };
-    match String::from_utf8(bytes) {
-        Ok(s) => DocRead::Ok(translate_newlines(&s)),
-        Err(e) => {
-            let bytes = e.as_bytes();
-            DocRead::Decode(utf8_error_text(bytes, &e.utf8_error()))
-        }
-    }
-}
-
 /// `\r\n` and a lone `\r` both become `\n` — python's universal-newlines text
 /// mode, applied to every doc/readme read (C59; rust/swift used to KEEP the
 /// CRs, so `tokens`/`desc` diverged from python's).
@@ -113,71 +82,39 @@ fn translate_newlines(s: &str) -> String {
     out
 }
 
-/// CPython's `UnicodeDecodeError` message for a `'utf-8' codec` failure:
-/// `"'utf-8' codec can't decode byte 0x.. in position N: <reason>"` (C60).
-fn utf8_error_text(bytes: &[u8], e: &std::str::Utf8Error) -> String {
-    let pos = e.valid_up_to();
-    let reason = match e.error_len() {
-        None => "unexpected end of data",
-        Some(1) => "invalid start byte",
-        Some(_) => "invalid continuation byte",
-    };
-    let byte = bytes.get(pos).copied().unwrap_or(0);
-    format!("'utf-8' codec can't decode byte 0x{byte:02x} in position {pos}: {reason}")
-}
-
-/// The reply python's dispatch builds for an uncaught exception — here a
-/// `UnicodeDecodeError` propagating out of a doc read (C60). Same shape as
-/// every other raised handler: `{"error": "<Class>: <message>", "raised":
-/// true}`, which settles the whole call `failed`.
-fn decode_raise(message: &str) -> Value {
-    json!({"error": format!("UnicodeDecodeError: {message}"), "raised": true})
-}
-
-/// Token-annotated topic index under `dir` (recursive; nesting preserved). Each
-/// entry `{key, desc, tokens, children?}` — NO body. Absent dir → empty.
-///
-/// `Err` = a doc under `dir` is not valid UTF-8 — python's `except OSError`
-/// does not catch that, so scanning the tree (index, keys-on-error, a
-/// directory view's children) raises and fails the whole reflect (C60).
-pub fn readme_index(dir: &Path, prefix: &str) -> Result<Vec<Value>, Value> {
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        return Ok(Vec::new());
-    };
-    let mut paths: Vec<_> = rd.flatten().map(|e| e.path()).collect();
-    paths.sort();
-    let mut entries = Vec::new();
-    for path in paths {
-        if !(path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("md")) {
-            continue;
-        }
-        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        let body = match read_doc_text(&path) {
-            DocRead::Ok(s) => s,
-            DocRead::Io => continue,
-            DocRead::Decode(msg) => return Err(decode_raise(&msg)),
-        };
-        let key = format!("{prefix}{stem}");
-        let mut entry = Map::new();
-        entry.insert("key".to_string(), json!(key));
-        entry.insert("desc".to_string(), json!(read_desc(&body)));
-        entry.insert("tokens".to_string(), json!(est_tokens(&body)));
-        let sub = dir.join(stem);
-        if sub.is_dir() {
-            let children = readme_index(&sub, &format!("{key}/"))?;
+/// Token-annotated topic index of a bundle's compiled `docs` table at the tier
+/// under `prefix` (recursive; nesting preserved). Each entry `{key, desc,
+/// tokens, children?}` — NO body. A tier is ordered as python orders the files
+/// of a `docs/` dir: by `<stem>.md`. The docs ship IN the bundle and are never
+/// copied to disk (owner 2026-10-14).
+pub fn readme_index(docs: &[(&str, &str)], prefix: &str) -> Vec<Value> {
+    let mut tier: Vec<(&str, &str)> = docs
+        .iter()
+        .filter_map(|(key, body)| {
+            let stem = key.strip_prefix(prefix)?;
+            (!stem.is_empty() && !stem.contains('/')).then_some((stem, *body))
+        })
+        .collect();
+    tier.sort_by_key(|(stem, _)| format!("{stem}.md"));
+    tier.into_iter()
+        .map(|(stem, body)| {
+            let body = translate_newlines(body);
+            let key = format!("{prefix}{stem}");
+            let mut entry = Map::new();
+            entry.insert("key".to_string(), json!(key));
+            entry.insert("desc".to_string(), json!(read_desc(&body)));
+            entry.insert("tokens".to_string(), json!(est_tokens(&body)));
+            let children = readme_index(docs, &format!("{key}/"));
             if !children.is_empty() {
                 entry.insert("children".to_string(), Value::Array(children));
             }
-        }
-        entries.push(Value::Object(entry));
-    }
-    Ok(entries)
+            Value::Object(entry)
+        })
+        .collect()
 }
 
-/// Flatten every doc key (for an unknown-key error reply).
-fn readme_keys(dir: &Path) -> Result<Vec<String>, Value> {
+/// Flatten every doc key the index lists (for an unknown-key error reply).
+fn readme_keys(docs: &[(&str, &str)]) -> Vec<String> {
     fn walk(entries: &[Value], out: &mut Vec<String>) {
         for e in entries {
             if let Some(k) = e.get("key").and_then(Value::as_str) {
@@ -189,70 +126,47 @@ fn readme_keys(dir: &Path) -> Result<Vec<String>, Value> {
         }
     }
     let mut out = Vec::new();
-    walk(&readme_index(dir, "")?, &mut out);
-    Ok(out)
+    walk(&readme_index(docs, ""), &mut out);
+    out
 }
 
 /// Polymorphic `readme=<str>`: `"index"` → the token-annotated tree; a `<key>` →
 /// that topic's body + its immediate sub-docs' index; unknown/escaping key →
-/// `{error, keys}` (the reply stays well-formed).
-///
-/// PORT OF PYTHON'S `_readme_view`, r2 correction R2-RFL-5: `safe` is the RAW
-/// (unrejected) string after `sel.strip("/").replace("\\", "/")`; `f = dir /
-/// (safe + ".md")` by plain concatenation, so `Path::join`'s own rules apply
-/// (an absolute `safe` REPLACES `dir` entirely — `\topic` → `/topic.md` →
-/// escapes and is a `bad key`; `//` inside `safe` collapses like any POSIX
-/// path). The CLAMP check is [`clamped_within`] (lexical, tolerates
-/// nonexistent components); the EXISTENCE check is a real `is_file()` on the
-/// UNRESOLVED `f` — the OS itself refuses to walk a `..` through a segment
-/// that is not really a directory (`frontend/html-agent/../routing` is
-/// `no doc` because `html-agent` is a FILE, not a dir, even though the
-/// clamp check alone would have allowed it).
-fn readme_view(dir: &Path, sel: &str) -> Result<Value, Value> {
+/// `{error, keys}` (the reply stays well-formed). Python's `_readme_view`: the
+/// key is checked LEXICALLY, then against the keys the index lists.
+fn readme_view(docs: &[(&str, &str)], sel: &str) -> Value {
     if sel == "index" {
-        return Ok(json!({ "index": readme_index(dir, "")? }));
+        return json!({ "index": readme_index(docs, "") });
     }
     let safe = sel.trim_matches('/').replace('\\', "/");
-    // LEXICAL, then the key list — never the filesystem (python 2026-09-20):
-    // a `..` segment is a bad key whether or not the path it walked through
-    // exists, and a key is a doc only if the index lists it.
     if safe.is_empty() || safe.split('/').any(|p| matches!(p, "" | "." | "..")) {
-        return Ok(json!({
+        return json!({
             "error": format!("bad key {}", fantastic_bundle::py_repr(sel)),
-            "keys": readme_keys(dir)?,
-        }));
+            "keys": readme_keys(docs),
+        });
     }
-    let keys = readme_keys(dir)?;
-    if !keys.contains(&safe) {
-        return Ok(json!({
+    let keys = readme_keys(docs);
+    let Some(body) = keys
+        .contains(&safe)
+        .then(|| docs.iter().find(|(k, _)| *k == safe).map(|(_, b)| *b))
+        .flatten()
+    else {
+        return json!({
             "error": format!("no doc {}", fantastic_bundle::py_repr(sel)),
             "keys": keys,
-        }));
-    }
-    let file = dir.join(format!("{safe}.md"));
-    let body = match read_doc_text(&file) {
-        DocRead::Ok(s) => s,
-        DocRead::Io => {
-            return Ok(json!({
-                "error": format!("unreadable {}", fantastic_bundle::py_repr(sel)),
-                "keys": readme_keys(dir)?,
-            }))
-        }
-        DocRead::Decode(msg) => return Err(decode_raise(&msg)),
+        });
     };
+    let body = translate_newlines(body);
     let mut view = Map::new();
     view.insert("key".to_string(), json!(safe));
     view.insert("desc".to_string(), json!(read_desc(&body)));
     view.insert("tokens".to_string(), json!(est_tokens(&body)));
     view.insert("body".to_string(), json!(body));
-    let sub = dir.join(&safe);
-    if sub.is_dir() {
-        let children = readme_index(&sub, &format!("{safe}/"))?;
-        if !children.is_empty() {
-            view.insert("children".to_string(), Value::Array(children));
-        }
+    let children = readme_index(docs, &format!("{safe}/"));
+    if !children.is_empty() {
+        view.insert("children".to_string(), Value::Array(children));
     }
-    Ok(Value::Object(view))
+    Value::Object(view)
 }
 
 /// Uniform reflect identity for a bare agent (the root, or any node with
@@ -542,33 +456,23 @@ pub async fn apply_reflect_flags(
     }
     // Polymorphic `readme`: `true` → the SHORT orientation readme.md (string or
     // null); `"index"` → the token-annotated topic tree; `"<key>"` → one topic's
-    // body + sub-docs' index. Read from the seeded on-disk tree, one agent at a time.
+    // body + sub-docs' index. Served from the agent's BUNDLE (compiled in), never
+    // from a copy on disk (owner 2026-10-14).
+    let bundle = target
+        .handler_module
+        .as_deref()
+        .and_then(|hm| kernel.bundles.get(hm));
     match payload.get("readme") {
         Some(Value::Bool(true)) => {
-            // python: `if p.exists(): try: return p.read_text(...) except
-            // OSError: return None`; a `UnicodeDecodeError` is not an
-            // `OSError` and propagates (C60).
-            let path = target.readme_file();
-            let readme = if path.exists() {
-                match read_doc_text(&path) {
-                    DocRead::Ok(s) => Some(s),
-                    DocRead::Io => None,
-                    DocRead::Decode(msg) => return Err(decode_raise(&msg)),
-                }
-            } else {
-                None
-            };
+            let readme = bundle.and_then(|b| b.readme()).map(translate_newlines);
             obj.insert(
                 "readme".to_string(),
-                match readme {
-                    Some(s) => Value::String(s),
-                    None => Value::Null,
-                },
+                readme.map_or(Value::Null, Value::String),
             );
         }
         Some(Value::String(sel)) if !sel.is_empty() => {
-            let docs_dir = target.root_path.join("docs");
-            obj.insert("readme".to_string(), readme_view(&docs_dir, sel)?);
+            let docs = bundle.map_or(&[][..], |b| b.docs());
+            obj.insert("readme".to_string(), readme_view(docs, sel));
         }
         _ => {}
     }

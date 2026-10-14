@@ -33,7 +33,6 @@ Disk layout (provider-relative, under `.fantastic`):
 from __future__ import annotations
 
 import asyncio
-import importlib.resources
 import os
 import posixpath
 import re
@@ -53,7 +52,6 @@ from kernel_state import yaml_io
 from kernel import CURRENT_VERSION
 from kernel._bundles import (
     _find_bundle_module,
-    bundle_package,
     clashes,
     import_handler,
     refuse_folder,
@@ -96,12 +94,16 @@ def _read_record(root_dir: fs.Root, rel: str) -> dict | None:
     return parsed if isinstance(parsed, dict) else None
 
 
-def read_tree(root_dir: fs.Root) -> list[dict]:
+def read_tree(root_dir: fs.Root, root_rec: dict | None = None) -> list[dict]:
     """Walk a `.fantastic` tree → flat list of records (root + descendants).
     `parent_id` comes from disk position (authoritative). Pure read; the
-    bootstrap calls this BEFORE any agent exists. Corrupt records skip."""
+    bootstrap calls this BEFORE any agent exists. Corrupt records skip.
+
+    `root_rec` is the root's LIVE record when the caller has one (a session
+    loader serving its namespace): the namespace keeps no copy of it on disk."""
     rd = root_dir
-    root_rec = _read_record(rd, _RECORD_FILE)
+    if root_rec is None:
+        root_rec = _read_record(rd, _RECORD_FILE)
     # A MISSING OR CORRUPT ROOT RECORD DOES NOT HIDE THE TREE. It used to return
     # `[]`, so the boot reseeded a fresh root and hydrated none of the children
     # sitting under `agents/` (measured 2026-09-16). The children are walked under
@@ -233,61 +235,12 @@ def _walk(
 def write_record(root_path: fs.Root, record: dict) -> None:
     """Merge-write one record's `agent.yaml` at `root_path` (the agent's own dir),
     THROUGH `fs` (atomic temp+rename). Reads any existing file and overlays only the
-    kernel-managed keys, preserving unknown fields + sidecars. Also seeds the bundle's
-    `readme.md` (copy-if-missing) — the loader owns ALL of an agent's disk sidecars."""
+    kernel-managed keys, preserving unknown fields + sidecars. A bundle's readme
+    and `docs/` are never copied here — `reflect` reads them from the bundle."""
     rp = root_path
     on_disk: dict[str, Any] = _read_record(rp, _RECORD_FILE) or {}
     on_disk.update(record)
     fs.write_text(rp, _RECORD_FILE, yaml_io.dump(on_disk))  # atomic
-    _seed_readme(rp, record.get("handler_module"))
-
-
-def _seed_readme(root_path: fs.Root, handler_module: str | None) -> None:
-    """Copy a bundle's shipped `readme.md` AND its `docs/` topic tree into the
-    agent's dir on first persist, THROUGH `fs`. Copy-if-missing per file (never
-    clobbers operator edits). The SOURCE is a package resource (installed code via
-    importlib, not user disk); only the WRITE goes through `fs`. The `docs/` tree
-    is what `reflect readme=index`/`readme=<key>` serves back."""
-    if not handler_module:
-        return
-    rp = root_path
-    pkg = bundle_package(handler_module)
-    if pkg is None:
-        return  # not a catalog bundle — nothing is imported to read it (ARCH2-1)
-    try:
-        base = importlib.resources.files(pkg)
-    except (ModuleNotFoundError, TypeError, AttributeError):
-        # No package to read from: a bundle of another runtime, a single-file
-        # module (TypeError), a synthetic test stub (AttributeError). Nothing
-        # to seed.
-        return
-    # The WRITES raise, as the record write above does: a failed seed used to
-    # be swallowed with the lookups, invisible (audit 2026-10-03, ARCH2-9).
-    readme = base / "readme.md"
-    if readme.is_file() and not fs.exists(rp, "readme.md"):
-        fs.write_text(rp, "readme.md", readme.read_text(encoding="utf-8"))
-    _seed_docs_local(base / "docs", rp, "docs")
-
-
-def _seed_docs_local(src_dir, rp: fs.Root, rel: str) -> None:
-    """Recursively copy a `docs/` topic tree (`.md` files; nested dirs = tiers)
-    into the agent's dir THROUGH `fs`. Copy-if-missing; `src_dir` is an importlib
-    Traversable (absent ⇒ `is_dir()` False ⇒ no-op)."""
-    try:
-        if not src_dir.is_dir():
-            return
-    except (FileNotFoundError, OSError, AttributeError):
-        return
-    for child in src_dir.iterdir():
-        childrel = f"{rel}/{child.name}"
-        if child.is_dir():
-            _seed_docs_local(child, rp, childrel)
-        elif (
-            child.is_file()
-            and child.name.endswith(".md")
-            and not fs.exists(rp, childrel)
-        ):
-            fs.write_text(rp, childrel, child.read_text(encoding="utf-8"))
 
 
 def rmtree(path: fs.Root) -> None:
@@ -487,7 +440,7 @@ async def _store_call(agent, store_id: str, payload: dict):
 async def _persist_via_store(
     agent, store_id: str, abs_path: Path, record: dict
 ) -> None:
-    """Write one record's agent.yaml (+ seed its readme) THROUGH the provider's
+    """Write one record's agent.yaml THROUGH the provider's
     stream verbs. Merge-not-overwrite: read the existing bytes, overlay the
     kernel-managed keys, write back — so sidecar fields survive. If the provider
     refuses (sealed, unexposed), the write doesn't land — NO fallback — and the
@@ -562,66 +515,6 @@ async def _persist_via_store(
         _persist_failed(agent, store_id, af, mv)
         return
     _persist_landed(agent)
-    await _seed_readme_via_store(agent, store_id, reldir, record.get("handler_module"))
-
-
-async def _seed_readme_via_store(
-    agent, store_id: str, reldir: str, handler_module: str | None
-) -> None:
-    """Copy-if-missing the bundle's shipped readme.md AND its `docs/` topic tree
-    into the agent's dir THROUGH the provider. Source is the installed package
-    (in-process resource); sink is the stream provider."""
-    if not handler_module:
-        return
-    pkg = bundle_package(handler_module)
-    if pkg is None:
-        return  # not a catalog bundle (see `_seed_readme`) — nothing to seed
-    prefix = f"{reldir}/" if reldir else ""
-    try:
-        base = importlib.resources.files(pkg)
-    except (ModuleNotFoundError, TypeError, AttributeError):
-        return  # no package to read from (see `_seed_readme`) — nothing to seed
-    await _seed_doc_via_store(agent, store_id, base / "readme.md", f"{prefix}readme.md")
-    await _seed_docs_via_store(agent, store_id, base / "docs", f"{prefix}docs")
-
-
-async def _seed_doc_via_store(agent, store_id: str, src, path: str) -> None:
-    """Copy one `.md` file THROUGH the provider, copy-if-missing (never clobber).
-    A refused write is LOUD (`_persist_failed`), as a record write is: its reply
-    used to be dropped, so a doc that never landed was invisible (audit
-    2026-10-03, ARCH2-9)."""
-    if not src.is_file():
-        return
-    got = await _store_call(agent, store_id, {"type": "read_stream", "path": path})
-    if isinstance(got, dict) and isinstance(got.get("bytes"), (bytes, bytearray)):
-        return
-    w = await _store_call(
-        agent,
-        store_id,
-        {
-            "type": "write_stream",
-            "path": path,
-            "bytes": src.read_text(encoding="utf-8").encode("utf-8"),
-            "truncate": True,
-        },
-    )
-    if not isinstance(w, dict) or w.get("error"):
-        _persist_failed(agent, store_id, path, w)
-
-
-async def _seed_docs_via_store(agent, store_id: str, src_dir, rel: str) -> None:
-    """Recursively copy a `docs/` topic tree THROUGH the provider (absent ⇒ no-op)."""
-    try:
-        if not src_dir.is_dir():
-            return
-    except (FileNotFoundError, OSError, AttributeError):
-        return
-    for child in src_dir.iterdir():
-        childrel = f"{rel}/{child.name}"
-        if child.is_dir():
-            await _seed_docs_via_store(agent, store_id, child, childrel)
-        elif child.is_file() and child.name.endswith(".md"):
-            await _seed_doc_via_store(agent, store_id, child, childrel)
 
 
 async def _forget_via_store(agent, store_id: str, abs_path: Path) -> None:
@@ -709,9 +602,9 @@ class _FlushLoop:
         ONE DRAIN AT A TIME. When it returns, every write that was dirty when it was
         called has LANDED — also the ones the debounced loop took first. It used to
         return at once when the loop held them, with their writes still in flight:
-        the flush came back before the record and its readme were on disk
-        (measured: a 0.152–0.160 s gap between `create` and `aflush`, just past the
-        debounce, left `agent.yaml`, `readme.md` and `docs/` unwritten)."""
+        the flush came back before the record was on disk (measured: a 0.152–0.160 s
+        gap between `create` and `aflush`, just past the debounce, left `agent.yaml`
+        unwritten)."""
         async with self._drain:
             store_id = _find_store(self.agent)
             if store_id is None:
@@ -876,13 +769,9 @@ async def _boot(id, payload, agent):
     was just read. Idempotent.
 
     A SESSION loader (a `root` meta pointing at a sub-namespace like
-    `.fantastic/web/<session>/`) also seeds its namespace anchor
-    (`<root>/agent.yaml`) so `read_tree` has a root to walk from — the
-    federated JS kernel's records nest under `<root>/agents/`."""
-    root_dir = _root(agent)
-    anchor = fs.Root(agent.ctx.workdir, root_dir)
-    if root_dir != agent._root_path and not fs.exists(anchor, _RECORD_FILE):
-        write_record(anchor, agent.record)
+    `.fantastic/web/<session>/`) writes no record of its own there: its one
+    record lives in its parent's tree, and `load_tree` walks the namespace from
+    it (owner 2026-10-14 — a copy at `<root>/agent.yaml` froze and diverged)."""
     rec = agent.record
     if rec.get("watch", True) is False:
         return
@@ -909,8 +798,10 @@ async def _load_tree(id, payload, agent):
     """args: none. Read this loader's subtree from disk → {records, version}.
     Flat list; parent_id encodes structure. Reads `root` if set (a session
     loader serving a sub-namespace), else the loader's own dir."""
+    root_dir = _root(agent)
+    live = agent.record if root_dir != agent._root_path else None
     return {
-        "records": read_tree(fs.Root(agent.ctx.workdir, _root(agent))),
+        "records": read_tree(fs.Root(agent.ctx.workdir, root_dir), live),
         "version": CURRENT_VERSION,
     }
 
@@ -999,7 +890,7 @@ async def _forget_record(id, payload, agent):
 # ─── arbitrary-blob persistence (the loader as the ONE store authority) ────
 
 
-_RESERVED_BLOB_NAMES = {_RECORD_FILE, "readme.md"}
+_RESERVED_BLOB_NAMES = {_RECORD_FILE}
 
 
 def _guard_blob_name(name) -> str | None:

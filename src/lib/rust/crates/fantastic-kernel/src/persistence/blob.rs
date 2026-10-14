@@ -19,7 +19,7 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 
 /// Files the KERNEL manages. A sidecar may not overwrite them.
-const RESERVED_BLOB_NAMES: [&str; 2] = [crate::persistence::RECORD_FILE, "readme.md"];
+const RESERVED_BLOB_NAMES: [&str; 1] = [crate::persistence::RECORD_FILE];
 
 /// Validate a blob filename: one bare segment, not kernel-managed, no escape or
 /// hidden name.

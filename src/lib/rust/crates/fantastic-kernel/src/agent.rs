@@ -285,11 +285,6 @@ impl Agent {
         self.root_path.join(crate::persistence::RECORD_FILE)
     }
 
-    /// Path of `readme.md` under `root_path` (seeded from the bundle).
-    pub fn readme_file(&self) -> PathBuf {
-        self.root_path.join("readme.md")
-    }
-
     /// Does this agent own a child with the given id?
     pub fn has_child(&self, id: &AgentId) -> bool {
         self.children

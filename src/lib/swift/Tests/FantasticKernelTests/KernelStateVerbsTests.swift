@@ -51,12 +51,11 @@ struct KernelStateVerbsTests {
         let sid = await session(k, root: sess)
         let ns = workdir.appendingPathComponent(sess)
         let fm = FileManager.default
-        // boot seeds the namespace anchor UNDER THE RUNNING DIR — and, as
-        // python's `write_record` does, the bundle's readme and docs beside it.
-        #expect(fm.fileExists(atPath: ns.appendingPathComponent("agent.yaml").path))
-        #expect(fm.fileExists(atPath: ns.appendingPathComponent("readme.md").path))
-        let firstDoc = try #require(RootDocs.all.first?.key)
-        #expect(fm.fileExists(atPath: ns.appendingPathComponent("docs/\(firstDoc).md").path))
+        // The namespace keeps no copy of the session's record, readme or docs
+        // — its one record lives in the host tree (owner 2026-10-14).
+        #expect(!fm.fileExists(atPath: ns.appendingPathComponent("agent.yaml").path))
+        #expect(!fm.fileExists(atPath: ns.appendingPathComponent("readme.md").path))
+        #expect(!fm.fileExists(atPath: ns.appendingPathComponent("docs").path))
         // reflect reports the root as configured — relative, as python prints it.
         let r = await send(k, sid, .object(["type": .string("reflect")]))
         #expect(r.result["root"].asString == sess, "\(r.result.serialize())")

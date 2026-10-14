@@ -3,7 +3,7 @@
 //! `flush_records` used to take the dirty queues and return. When the debounced
 //! writer's own drain had already taken them, the flush found them empty and
 //! returned AT ONCE — with that drain's record write still in flight, so a
-//! caller saw neither `agent.yaml` nor `readme.md` on disk.
+//! caller did not see `agent.yaml` on disk.
 //!
 //! The race is pinned here without a timing window: the store HOLDS the probe's
 //! record write until the test opens its gate, so the writer's drain is provably
@@ -22,8 +22,7 @@ use tokio::sync::{Notify, Semaphore};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
-/// A bundle that ships a readme, so a landed record write also seeds
-/// `readme.md` — the sidecar swift's caller found missing.
+/// A bundle that ships a readme — none is copied beside its record.
 struct ReadmeBundle;
 
 #[async_trait]
@@ -163,6 +162,6 @@ async fn a_flush_waits_for_the_drain_the_writer_already_took() {
         "flush_records returned while the writer's drain still held the record write"
     );
     assert!(record, "flush_records returned before agent.yaml landed");
-    assert!(readme, "flush_records returned before readme.md landed");
+    assert!(!readme, "a record write copies no readme.md");
     kernel.shutdown().await;
 }

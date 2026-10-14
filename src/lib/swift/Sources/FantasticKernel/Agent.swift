@@ -165,10 +165,6 @@ public final class Agent: @unchecked Sendable {
         rootPath.appendingPathComponent(name)
     }
 
-    public var readmeFile: URL {
-        rootPath.appendingPathComponent("readme.md")
-    }
-
     // ── children (cascade-delete + persist walk) ────────────────
 
     func insertChild(_ child: Agent) {

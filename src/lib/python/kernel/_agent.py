@@ -41,6 +41,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import importlib
+import importlib.resources
 import os
 import secrets
 import sys
@@ -98,6 +99,7 @@ from kernel._kernel import (
 from kernel._bundles import (
     _find_bundle_module,
     _in_catalog,
+    bundle_package,
     folder_rows,
     import_handler,
     is_folder,
@@ -433,21 +435,32 @@ class Agent:
         # "agents"); not hardcoded — see `Kernel.children_dir`.
         return self._root_path / self.ctx.children_dir
 
+    def _bundle_files(self):
+        """The agent's bundle package files (importlib Traversable), or None.
+        A shipped bundle's readme and `docs/` live IN the bundle — never copied
+        into the agent's dir (owner 2026-10-14)."""
+        pkg = bundle_package(self.handler_module) if self.handler_module else None
+        if pkg is None:
+            return None
+        try:
+            return importlib.resources.files(pkg)
+        except (ModuleNotFoundError, TypeError, AttributeError):
+            return None  # a single-file module or a synthetic stub ships none
+
     def _read_readme(self) -> str | None:
-        """The agent's own `readme.md` content, or None if it has none.
-        Read-only — the loader seeds the file (copy-if-missing) when it
-        persists the record; Agent just reads it back for `reflect`.
+        """The bundle's `readme.md`, or None if it ships none.
 
         For an agent whose manual is a keyed doc TREE (a `docs/` dir beside
         `readme.md`), this is the SHORT orientation; the topics are fetched by
         key via `_readme_view` (`readme=index` / `readme=<key>`)."""
-        p = self._root_path / "readme.md"
-        if p.exists():
-            try:
-                return p.read_text(encoding="utf-8")
-            except OSError:
-                return None
-        return None
+        base = self._bundle_files()
+        if base is None:
+            return None
+        p = base / "readme.md"
+        try:
+            return p.read_text(encoding="utf-8") if p.is_file() else None
+        except OSError:
+            return None
 
     # ─── keyed / tiered doc tree ───────────────────────────────
     # A bundle's manual may be a SHORT `readme.md` orientation + a `docs/`
@@ -461,8 +474,9 @@ class Agent:
     _CHARS_PER_TOKEN = 4  # mirrors ai_core.context.CHARS_PER_TOKEN (ceil-div)
 
     @property
-    def _docs_dir(self) -> Path:
-        return self._root_path / "docs"
+    def _docs_dir(self):
+        base = self._bundle_files()
+        return base / "docs" if base is not None else None
 
     @classmethod
     def _est_tokens(cls, text: str) -> int:
@@ -484,27 +498,28 @@ class Agent:
                 return s
         return ""
 
-    def _readme_index(self, base: Path | None = None, prefix: str = "") -> list[dict]:
+    def _readme_index(self, base=None, prefix: str = "") -> list[dict]:
         """Token-annotated topic index under `docs/` (recursive; nesting
         preserved). Each entry `{key, desc, tokens, children?}` — NO body."""
         d = base if base is not None else self._docs_dir
-        if not d.is_dir():
+        if d is None or not d.is_dir():
             return []
         entries: list[dict] = []
-        for f in sorted(d.iterdir()):
-            if not (f.is_file() and f.suffix == ".md"):
+        for f in sorted(d.iterdir(), key=lambda x: x.name):
+            if not (f.is_file() and f.name.endswith(".md")):
                 continue
             try:
                 body = f.read_text(encoding="utf-8")
             except OSError:
                 continue
-            key = prefix + f.stem
+            stem = f.name[: -len(".md")]
+            key = prefix + stem
             entry: dict[str, Any] = {
                 "key": key,
                 "desc": self._read_desc(body),
                 "tokens": self._est_tokens(body),
             }
-            sub = d / f.stem
+            sub = d / stem
             if sub.is_dir():
                 children = self._readme_index(sub, key + "/")
                 if children:
@@ -541,11 +556,9 @@ class Agent:
             return {"error": f"bad key {sel!r}", "keys": self._readme_keys()}
         if safe not in self._readme_keys():
             return {"error": f"no doc {sel!r}", "keys": self._readme_keys()}
-        f = d / (safe + ".md")
-        try:
-            f.resolve().relative_to(d.resolve())  # clamp inside docs/
-        except (ValueError, OSError):
-            return {"error": f"bad key {sel!r}", "keys": self._readme_keys()}
+        # `safe` is one of the keys the index listed, so it names a file the
+        # bundle ships — no path outside `docs/` can be one.
+        f = d.joinpath(*(safe + ".md").split("/"))
         if not f.is_file():
             return {"error": f"no doc {sel!r}", "keys": self._readme_keys()}
         try:
@@ -558,7 +571,7 @@ class Agent:
             "tokens": self._est_tokens(body),
             "body": body,
         }
-        sub = d / safe
+        sub = d.joinpath(*safe.split("/"))
         if sub.is_dir():
             children = self._readme_index(sub, safe + "/")
             if children:

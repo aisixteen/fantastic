@@ -11,27 +11,6 @@ fn readme_present_and_titled() {
 }
 
 #[test]
-fn seed_root_readme_writes_when_missing() {
-    let tmp = TempDir::new().unwrap();
-    seed_root_readme(tmp.path()).unwrap();
-    let path = tmp.path().join(".fantastic/readme.md");
-    assert!(path.exists());
-    let read = std::fs::read_to_string(&path).unwrap();
-    assert_eq!(read, README);
-}
-
-#[test]
-fn seed_root_readme_is_idempotent_and_preserves_edits() {
-    let tmp = TempDir::new().unwrap();
-    seed_root_readme(tmp.path()).unwrap();
-    let path = tmp.path().join(".fantastic/readme.md");
-    std::fs::write(&path, "USER EDIT").unwrap();
-    seed_root_readme(tmp.path()).unwrap();
-    let read = std::fs::read_to_string(&path).unwrap();
-    assert_eq!(read, "USER EDIT");
-}
-
-#[test]
 fn docs_tree_present_keyed_and_descriptored() {
     assert!(!DOCS.is_empty());
     assert!(DOCS.iter().any(|(k, _)| *k == "self-extension"));
@@ -49,16 +28,6 @@ fn docs_tree_present_keyed_and_descriptored() {
             "doc {k} must open with a `> ` descriptor line"
         );
     }
-}
-
-#[test]
-fn seed_root_readme_writes_docs_tree() {
-    let tmp = TempDir::new().unwrap();
-    seed_root_readme(tmp.path()).unwrap();
-    let se = tmp.path().join(".fantastic/docs/self-extension.md");
-    assert!(se.exists(), "docs/self-extension.md not seeded");
-    let want = DOCS.iter().find(|(k, _)| *k == "self-extension").unwrap().1;
-    assert_eq!(std::fs::read_to_string(&se).unwrap(), want);
 }
 
 /// A12.1 + A12.2 + A12.3 — the keyed doc tree IS python's: the same keys (no
@@ -121,27 +90,23 @@ fn root_readme_is_pythons_verbatim() {
     assert!(README.contains("type: docs"));
 }
 
-/// A12.1 — a nested tier seeds into its own directory, so `reflect
-/// readme=frontend/routing` has a file to read.
+/// A12.1 — the nested tiers are served from the compiled table: the index
+/// nests them under their parent topic, and nothing is written to disk.
 #[test]
-fn seed_root_readme_writes_nested_tiers() {
-    let tmp = TempDir::new().unwrap();
-    seed_root_readme(tmp.path()).unwrap();
-    let docs = tmp.path().join(".fantastic/docs");
-    for key in [
-        "frontend",
-        "frontend/html-agent",
-        "frontend/routing",
-        "orchestration",
-        "system-verbs",
-        "terminal",
-    ] {
-        let path = docs.join(format!("{key}.md"));
-        assert!(path.exists(), "{key} not seeded");
-        let want = DOCS.iter().find(|(k, _)| k == &key).unwrap().1;
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), want);
-    }
-    assert!(!docs.join("minds.md").exists(), "minds is gone");
+fn nested_tiers_index_from_the_table() {
+    let index = fantastic_kernel::reflect::readme_index(DOCS, "");
+    let frontend = index
+        .iter()
+        .find(|e| e["key"] == "frontend")
+        .expect("frontend topic");
+    let children: Vec<&str> = frontend["children"]
+        .as_array()
+        .expect("frontend tiers")
+        .iter()
+        .filter_map(|e| e["key"].as_str())
+        .collect();
+    assert_eq!(children, vec!["frontend/html-agent", "frontend/routing"]);
+    assert!(!index.iter().any(|e| e["key"] == "minds"), "minds is gone");
 }
 
 // ─── the kernel_state LOADER: the root's own bundle ──────────────────
@@ -201,7 +166,6 @@ async fn root_with_handler_reflects_identity() {
 async fn full_root_frame_key_order_is_pythons() {
     let tmp = TempDir::new().unwrap();
     let kernel = booted(&tmp);
-    seed_root_readme(tmp.path()).unwrap();
     let v = root_reflect(
         &kernel,
         json!({"type": "reflect", "detail": "full", "tree": "none"}),
@@ -246,38 +210,6 @@ async fn full_root_frame_key_order_is_pythons() {
         .iter()
         .any(|e| e["key"] == "self-extension"));
     assert!(v["docs"].as_str().unwrap().contains("keyed doc tree"));
-}
-
-/// A doc that will not decode FAILS the full root reflect, exactly as python
-/// does: `_readme_index` raises out of `reflect_root_extra`, and the substrate's
-/// merge site lets the raise through. It used to swallow it, and the reply
-/// carried none of persistence/guid/readmes/docs/self_extension with nothing to
-/// say why (audit 2026-10-03, ARCH2-9).
-#[tokio::test]
-async fn full_root_reflect_fails_when_a_doc_will_not_decode() {
-    let tmp = TempDir::new().unwrap();
-    let kernel = booted(&tmp);
-    let docs = kernel.root().expect("root").root_path.join("docs");
-    std::fs::create_dir_all(&docs).unwrap();
-    std::fs::write(docs.join("bad.md"), b"# head\n\xff\xfe not utf-8\n").unwrap();
-    let root = kernel.root().expect("root").id.clone();
-    let out = kernel
-        .send(vec![Item::new(
-            root,
-            json!({"type": "reflect", "detail": "full", "tree": "none"}),
-        )])
-        .await
-        .remove(0);
-    assert_eq!(
-        out.status,
-        fantastic_kernel::outcome::Status::Failed,
-        "{}",
-        out.result
-    );
-    assert_eq!(
-        out.result,
-        json!({"error": "UnicodeDecodeError: 'utf-8' codec can't decode byte 0xff in position 7: invalid start byte", "raised": true}),
-    );
 }
 
 /// C9: the FULL `self_extension` is python's text VERBATIM — and it ends at
@@ -513,7 +445,7 @@ async fn open_session(kernel: &Arc<Kernel>, sess_root: &std::path::Path) {
 }
 
 /// §6–7 (rust-only fixes, python `_resolve_path` + `_boot`): a session loader
-/// SEEDS its anchor `<root>/agent.yaml` at boot, a record it persists nests
+/// writes NO record of its own under its root, a record it persists nests
 /// directly under its own root (the parent chain stops at the LOADER, not at the
 /// kernel root through `web`), and after a restart `load_tree` returns it.
 #[tokio::test]
@@ -524,11 +456,10 @@ async fn a_session_loader_persists_a_canvas_that_survives_a_restart() {
     // ── life 1 ─────────────────────────────────────────────────────────
     let kernel = booted(&tmp);
     open_session(&kernel, &sess_root).await;
-    let anchor = sess_root.join("agent.yaml");
-    assert!(anchor.is_file(), "boot seeds the session anchor");
-    assert!(std::fs::read_to_string(&anchor)
-        .unwrap()
-        .starts_with("id: sess\n"));
+    assert!(
+        !sess_root.join("agent.yaml").exists(),
+        "the session's record lives in the host tree only"
+    );
     for (id, parent) in [("canvas", "sess"), ("term1", "canvas")] {
         let r = kernel
             .send(vec![Item::new(
@@ -699,7 +630,6 @@ async fn loader_record_verbs_are_clamped_to_the_running_dir() {
         fantastic_bundle::py_repr(&out_root)
     );
     for payload in [
-        json!({"type": "boot"}),
         json!({"type": "load_tree"}),
         json!({"type": "persist_record", "record": {"id": "ghost", "parent_id": "far"}}),
         json!({"type": "forget_record", "id": "ghost"}),
@@ -739,7 +669,7 @@ async fn loader_record_verbs_are_clamped_to_the_running_dir() {
         .await
         .remove(0);
     assert_ne!(out.status, fantastic_kernel::Status::Failed, "{out:?}");
-    assert!(tmp.path().join(".fantastic/near/agent.yaml").is_file());
+    assert!(!tmp.path().join(".fantastic/near/agent.yaml").exists());
     // python's reflect reports `str(_root(agent))` — the root as written.
     let reflect = kernel
         .send(vec![Item::new(
@@ -752,10 +682,10 @@ async fn loader_record_verbs_are_clamped_to_the_running_dir() {
     assert_eq!(reflect["root"], ".fantastic/near");
 }
 
-/// python `write_record` seeds the bundle's `readme.md` and `docs/` tree beside
-/// the record (copy-if-missing), and a write that fails RAISES.
+/// python `write_record` writes the record only — no readme or `docs/` copy —
+/// and a write that fails RAISES.
 #[tokio::test]
-async fn persist_record_seeds_readme_and_docs_and_raises_on_a_failed_write() {
+async fn persist_record_writes_the_record_only_and_raises_on_a_failed_write() {
     let tmp = TempDir::new().unwrap();
     let kernel = booted(&tmp);
     let root = kernel.root().expect("root").id.clone();
@@ -771,11 +701,8 @@ async fn persist_record_seeds_readme_and_docs_and_raises_on_a_failed_write() {
         .result;
     assert_eq!(r["ok"], json!(true), "{r}");
     let dir = tmp.path().join(".fantastic/agents/seeded");
-    assert_eq!(
-        std::fs::read_to_string(dir.join("readme.md")).unwrap(),
-        README
-    );
-    assert!(dir.join("docs/self-extension.md").is_file());
+    assert!(dir.join("agent.yaml").is_file());
+    assert!(!dir.join("readme.md").exists() && !dir.join("docs").exists());
 
     // `agent.yaml` is a DIRECTORY: the atomic rename onto it fails — raised.
     std::fs::create_dir_all(tmp.path().join(".fantastic/agents/blocked/agent.yaml/x")).unwrap();
@@ -793,17 +720,18 @@ async fn persist_record_seeds_readme_and_docs_and_raises_on_a_failed_write() {
     );
 }
 
-/// python `read_tree`: A MISSING OR CORRUPT ROOT RECORD DOES NOT HIDE THE TREE —
-/// the children under `agents/` come back parented to `kernel_state`.
+/// A session loader's `load_tree` is rooted at its LIVE record — a stale
+/// `<root>/agent.yaml` left by an older build is ignored, and the children
+/// under `agents/` come back parented to the loader.
 #[tokio::test]
-async fn load_tree_without_an_anchor_still_returns_the_children() {
+async fn load_tree_is_rooted_at_the_live_session_record() {
     let tmp = TempDir::new().unwrap();
     let kernel = booted(&tmp);
     let root = kernel.root().expect("root").id.clone();
     let sess = tmp.path().join(".fantastic/web/s9");
     std::fs::create_dir_all(sess.join("agents/canvas")).unwrap();
     std::fs::write(sess.join("agents/canvas/agent.yaml"), "id: canvas\n").unwrap();
-    std::fs::write(sess.join("agent.yaml"), "just a scalar\n").unwrap();
+    std::fs::write(sess.join("agent.yaml"), "id: stale\n").unwrap();
     let r = kernel
         .send(vec![Item::new(
             root.clone(),
@@ -823,9 +751,13 @@ async fn load_tree_without_an_anchor_still_returns_the_children() {
         .await
         .remove(0)
         .result;
+    let recs = tree["records"].as_array().expect("records");
+    assert_eq!(recs.len(), 2, "{tree}");
+    assert_eq!(recs[0]["id"], "s9", "{tree}");
+    assert_eq!(recs[0]["watch"], false, "the live record: {tree}");
     assert_eq!(
-        tree["records"],
-        json!([{"id": "canvas", "parent_id": "kernel_state"}]),
+        recs[1],
+        json!({"id": "canvas", "parent_id": "s9"}),
         "{tree}"
     );
 }

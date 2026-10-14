@@ -18,15 +18,12 @@
 //!   `bootstrap.rs` (creates `.fantastic`, reads the root record, writes the
 //!   virgin seed's root record), `persistence.rs` (`walk_tree` — the cold tree
 //!   read, also behind a loader's `disk_parents`; `read_record_at` /
-//!   `write_record_at`), `lock.rs` (`lock.yaml`) and `reflect.rs` (an agent's own
-//!   `readme.md` and `docs/` topic tree, read back for reflect);
+//!   `write_record_at`) and `lock.rs` (`lock.yaml`);
 //! - [`fantastic_bundle::realpath`] — the ONE copy of python's `os.path.realpath`,
 //!   shared by this module's clamp and the kernel's cold walk (`persistence.rs`
 //!   `clamp`): `lstat` + `readlink` per component, and `getcwd` for a relative
 //!   path — metadata only, it opens nothing;
-//! - `fantastic_core::seed_root_readme` — the cold copy-if-missing seed of
-//!   `.fantastic/readme.md` + `docs/` at a virgin bootstrap — and the
-//!   `fantastic-cli` binary's `.env` read (`load_dotenv`);
+//! - the `fantastic-cli` binary's `.env` read (`load_dotenv`);
 //! - `fantastic-exec-bridge`'s process plumbing: `spawn::all_pids` lists `/proc`
 //!   (Linux) for a job's session members; `spawn::resolve` probes the child's
 //!   `PATH` dirs for a bare command (`is_file` + `access` — metadata only; the OS

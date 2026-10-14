@@ -1,19 +1,16 @@
 """The ONE persistence algorithm kernel_state implements TWICE — once straight
-on `fs` (`write_record` / `_seed_readme`, the cold bootstrap path) and once
-THROUGH a discovered file_bridge store (`_persist_via_store`, the auto-flush) —
-pinned on both sinks.
+on `fs` (`write_record`, the cold bootstrap path) and once THROUGH a discovered
+file_bridge store (`_persist_via_store`, the auto-flush) — pinned on both sinks.
 
-Folding them into one algorithm over a sink interface (reduction candidate F)
-must keep, on EACH sink: copy-if-missing for readme.md and every tier of the
-`docs/` tree (an operator edit is never clobbered, a deleted doc is re-seeded),
-the merge that keeps unknown on-disk keys (a record larger than one 64 KiB
-read_stream chunk included), and the commit that never leaves a torn record.
+Each sink writes the RECORD only — a bundle's readme and `docs/` are served from
+the bundle, never copied (owner 2026-10-14) — with the merge that keeps unknown
+on-disk keys (a record larger than one 64 KiB read_stream chunk included) and the
+commit that never leaves a torn record.
 """
 
 from __future__ import annotations
 
 import asyncio
-import importlib.resources
 from pathlib import Path
 
 import pytest
@@ -26,69 +23,19 @@ from kernel_state.tools import on_shutdown, write_record
 
 from _testkit import boot_root
 
-PKG = importlib.resources.files("kernel_state")
-SHIPPED = {
-    "readme.md": (PKG / "readme.md").read_text(encoding="utf-8"),
-    "docs/memory.md": (PKG / "docs" / "memory.md").read_text(encoding="utf-8"),
-    "docs/frontend/routing.md": (PKG / "docs" / "frontend" / "routing.md").read_text(
-        encoding="utf-8"
-    ),
-    "docs/frontend/html-agent.md": (
-        PKG / "docs" / "frontend" / "html-agent.md"
-    ).read_text(encoding="utf-8"),
-}
-
 
 def _tree(d: Path) -> list[str]:
     return sorted(str(p.relative_to(d)) for p in d.rglob("*") if p.is_file())
 
 
-def _shipped_tree() -> list[str]:
-    out = ["readme.md"]
-
-    def walk(src, rel):
-        for c in src.iterdir():
-            if c.is_dir():
-                walk(c, f"{rel}/{c.name}")
-            elif c.name.endswith(".md"):
-                out.append(f"{rel}/{c.name}")
-
-    walk(PKG / "docs", "docs")
-    return sorted(out)
-
-
-def _edit_and_delete(d: Path) -> None:
-    (d / "readme.md").write_text("OPERATOR README")
-    (d / "docs" / "frontend" / "routing.md").write_text("OPERATOR ROUTING")
-    (d / "docs" / "memory.md").unlink()
-    (d / "docs" / "frontend" / "html-agent.md").unlink()
-
-
-def _assert_copy_if_missing(d: Path) -> None:
-    assert (d / "readme.md").read_text() == "OPERATOR README"
-    assert (d / "docs" / "frontend" / "routing.md").read_text() == "OPERATOR ROUTING"
-    # the deleted ones — a top tier and a nested tier — are re-seeded verbatim
-    assert (d / "docs" / "memory.md").read_text() == SHIPPED["docs/memory.md"]
-    assert (d / "docs" / "frontend" / "html-agent.md").read_text() == SHIPPED[
-        "docs/frontend/html-agent.md"
-    ]
-
-
 # ─── the direct sink (write_record) ──────────────────────────────────────────
 
 
-def test_direct_sink_seeds_every_tier_then_never_clobbers(tmp_path, monkeypatch):
+def test_direct_sink_writes_the_record_only(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    d = tmp_path / "rec"
     rec = {"id": "rec", "handler_module": "kernel_state.tools"}
     write_record(fs.Root(tmp_path, Path("rec")), rec)
-    assert _tree(d) == sorted(["agent.yaml", *_shipped_tree()])
-    assert (d / "docs" / "frontend" / "routing.md").read_text() == SHIPPED[
-        "docs/frontend/routing.md"
-    ]
-    _edit_and_delete(d)
-    write_record(fs.Root(tmp_path, Path("rec")), {**rec, "x": 1})
-    _assert_copy_if_missing(d)
+    assert _tree(tmp_path / "rec") == ["agent.yaml"]
 
 
 def test_direct_sink_merge_keeps_unknown_keys_and_key_order(tmp_path, monkeypatch):
@@ -100,27 +47,6 @@ def test_direct_sink_merge_keeps_unknown_keys_and_key_order(tmp_path, monkeypatc
     on_disk = yaml.safe_load((d / "agent.yaml").read_text())
     assert on_disk == {"id": "m", "unknown": "kept", "x": 2, "y": 3}
     assert list(on_disk) == ["id", "unknown", "x", "y"]
-
-
-def test_direct_sink_without_a_package_seeds_nothing(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    for hm in (None, "no_such_pkg_pin.tools", "kernel"):
-        write_record(fs.Root(tmp_path, Path("n")), {"id": "n", "handler_module": hm})
-    assert _tree(tmp_path / "n") == ["agent.yaml"]
-
-
-def test_direct_sink_a_failed_seed_write_raises(tmp_path, monkeypatch):
-    """A seed write that fails RAISES, as the record write does — it was
-    swallowed with the package lookups, so a doc tree that never landed was
-    invisible (audit 2026-10-03, ARCH2-9)."""
-    monkeypatch.chdir(tmp_path)
-    d = tmp_path / "blocked"
-    d.mkdir()
-    (d / "docs").write_text("a FILE where the docs dir goes")
-    rec = {"id": "blocked", "handler_module": "kernel_state.tools"}
-    with pytest.raises(OSError):
-        write_record(fs.Root(tmp_path, Path("blocked")), rec)
-    assert (d / "agent.yaml").exists()  # the record landed; the seed did not
 
 
 # ─── the store sink (the auto-flush through a discovered file_bridge) ────────
@@ -148,27 +74,17 @@ async def _flush(root) -> None:
     await root._fs_flush_loop.aflush()
 
 
-async def test_store_sink_seeds_every_tier_then_never_clobbers(wired, tmp_path):
+async def test_store_sink_writes_records_only(wired, tmp_path):
     root = wired
-    d = tmp_path / ".fantastic"
-    # the bootstrap seeded the root's docs straight on disk; edit + delete some
-    _edit_and_delete(d)
     root.ctx.update(root.id, note="touch")  # an `updated` event → persist via store
-    await _flush(root)
-    _assert_copy_if_missing(d)
-    assert yaml.safe_load((d / "agent.yaml").read_text())["note"] == "touch"
-
-
-async def test_store_sink_seeds_a_new_agents_whole_doc_tree(wired, tmp_path):
-    root = wired
     root.create("kernel_state.tools", id="session", watch=False, root="sess")
     await _flush(root)
-    d = tmp_path / ".fantastic" / "agents" / "session"
-    assert _tree(d) == sorted(["agent.yaml", *_shipped_tree()])
-    _edit_and_delete(d)
-    root.ctx.update("session", note=1)
-    await _flush(root)
-    _assert_copy_if_missing(d)
+    d = tmp_path / ".fantastic"
+    assert yaml.safe_load((d / "agent.yaml").read_text())["note"] == "touch"
+    assert not (d / "readme.md").exists() and not (d / "docs").exists()
+    assert _tree(d / "agents" / "session") == ["agent.yaml"]
+    # a session loader keeps no copy of its record in its namespace
+    assert not (tmp_path / "sess" / "agent.yaml").exists()
 
 
 async def test_store_sink_merge_keeps_unknown_keys_past_one_chunk(wired, tmp_path):
@@ -252,37 +168,6 @@ async def test_store_sink_a_failed_rename_leaves_the_old_record_and_the_tmp(
     ) in capsys.readouterr().err
 
 
-async def test_store_sink_a_refused_doc_seed_is_loud(
-    wired, tmp_path, monkeypatch, capsys
-):
-    """A refused seed write is LOUD — stderr and `persistence.error` — as a
-    refused record write is. Its reply used to be dropped, so a readme that
-    never landed was invisible (audit 2026-10-03, ARCH2-9)."""
-    root = wired
-    real = fbt.VERBS["write_stream"]
-
-    async def refuse_readmes(id, payload, kernel):
-        if str(payload.get("path", "")).endswith("readme.md"):
-            return {"error": "write_stream: disk full", "reason": "bad_arg"}
-        return await real(id, payload, kernel)
-
-    refuse_readmes.__doc__ = real.__doc__  # the store's reflect lists verb docs
-    monkeypatch.setitem(fbt.VERBS, "write_stream", refuse_readmes)
-    capsys.readouterr()
-    root.create("file_bridge.tools", id="seedless", allow=["."])
-    await _flush(root)
-    d = tmp_path / ".fantastic" / "agents" / "seedless"
-    assert (d / "agent.yaml").exists() and not (d / "readme.md").exists()
-    assert (
-        "  [kernel_state] persist through 'store' failed: agents/seedless/readme.md: "
-        "write_stream: disk full"
-    ) in capsys.readouterr().err
-    r = (await root.send([{"target": "kernel", "payload": {"type": "reflect"}}]))[0][
-        "result"
-    ]
-    assert r["persistence"]["error"]["path"] == "agents/seedless/readme.md", r
-
-
 async def test_store_sink_forget_removes_the_whole_subtree(wired, tmp_path):
     root = wired
     root.create("file_bridge.tools", id="parent", allow=["."])
@@ -308,7 +193,7 @@ async def test_a_flush_waits_for_the_drain_the_loop_already_took(
     loop took first. Past the 0.15 s debounce the loop's own drain holds the probe's
     record; the flush found the queue empty and returned with that write still in
     flight (measured: a 0.152–0.160 s gap between `create` and `aflush` left
-    `agent.yaml`, `readme.md` and `docs/` unwritten in 13/15 runs). The loop's write
+    `agent.yaml` unwritten in 13/15 runs). The loop's write
     is held here, so the overlap is certain, not a timing window."""
     root = wired
     real = kst._persist_via_store
@@ -329,7 +214,7 @@ async def test_a_flush_waits_for_the_drain_the_loop_already_took(
     release.set()
     await asyncio.wait_for(flush, 2)
     d = tmp_path / ".fantastic" / "agents" / "probe"
-    assert _tree(d) == sorted(["agent.yaml", *_shipped_tree()])
+    assert _tree(d) == ["agent.yaml"]
 
 
 # ─── the record verbs on the direct sink (persist_record / forget_record) ────

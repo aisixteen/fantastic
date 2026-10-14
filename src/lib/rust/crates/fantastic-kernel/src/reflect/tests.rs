@@ -220,53 +220,76 @@ fn est_tokens_matches_ceil_div_and_desc_prefers_quote() {
     assert_eq!(read_desc("# only a heading"), "");
 }
 
-/// Seed a minimal orientation + docs tree (with one nested tier) at `<base>`.
-fn seed_docs(base: &Path) {
-    let docs = base.join("docs");
-    std::fs::create_dir_all(docs.join("frontend")).unwrap();
-    std::fs::write(
-        base.join("readme.md"),
-        "# This is a Fantastic kernel.\n\nkeyed doc tree — reflect readme=index",
-    )
-    .unwrap();
-    std::fs::write(
-        docs.join("self-extension.md"),
-        "> author your own tools\n\n# Self-extension\nauthor durable tools here",
-    )
-    .unwrap();
-    std::fs::write(
-        docs.join("streams.md"),
-        "> byte streams\n\n# Streams\nchunked bytes",
-    )
-    .unwrap();
-    std::fs::write(
-        docs.join("frontend.md"),
-        "> two kernels\n\n# Frontend\nhost + browser",
-    )
-    .unwrap();
-    std::fs::write(
-        docs.join("frontend").join("routing.md"),
-        "> routing rule\n\n# Routing\nonly the js kernel",
-    )
-    .unwrap();
+/// A bundle that ships a readme and a keyed docs table — the only place a
+/// manual lives (owner 2026-10-14: never copied to disk).
+struct Docs {
+    readme: Option<&'static str>,
+    docs: &'static [(&'static str, &'static str)],
 }
 
-#[tokio::test]
-async fn readme_doctree_frame_index_view_and_errors() {
-    let tmp = tempfile::tempdir().unwrap();
-    let base = tmp.path().join(".fantastic");
-    seed_docs(&base);
-    let kernel = Arc::new(Kernel::new());
+#[async_trait::async_trait]
+impl crate::bundle::Bundle for Docs {
+    fn name(&self) -> &str {
+        "docs_probe"
+    }
+    fn readme(&self) -> Option<&'static str> {
+        self.readme
+    }
+    fn docs(&self) -> &'static [(&'static str, &'static str)] {
+        self.docs
+    }
+    async fn handle(
+        &self,
+        _agent_id: &AgentId,
+        _payload: &Value,
+        _kernel: &Arc<Kernel>,
+    ) -> Result<crate::bundle::Reply, crate::bundle::BundleError> {
+        Ok(None)
+    }
+}
+
+/// A kernel whose root runs a [`Docs`] bundle. The root's dir does not exist —
+/// nothing is read from disk.
+fn mk_docs_kernel(
+    readme: Option<&'static str>,
+    docs: &'static [(&'static str, &'static str)],
+) -> (Arc<Kernel>, Arc<Agent>) {
+    let mut kernel = Kernel::new();
+    let mut reg = crate::bundle::BundleRegistry::new();
+    reg.register("docs_probe.tools", Docs { readme, docs });
+    kernel.bundles = reg;
+    let kernel = Arc::new(kernel);
     let root = Agent::new(
         AgentId::from("kernel_state"),
-        None,
+        Some("docs_probe.tools".to_string()),
         None,
         Map::new(),
-        base,
+        Path::new("/tmp/nowhere/docs_probe").to_path_buf(),
         true,
     );
     kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
+    (kernel, root)
+}
+
+/// A minimal orientation + docs tree (with one nested tier).
+const README: &str = "# This is a Fantastic kernel.\n\nkeyed doc tree — reflect readme=index";
+const DOCS: &[(&str, &str)] = &[
+    (
+        "self-extension",
+        "> author your own tools\n\n# Self-extension\nauthor durable tools here",
+    ),
+    ("streams", "> byte streams\n\n# Streams\nchunked bytes"),
+    ("frontend", "> two kernels\n\n# Frontend\nhost + browser"),
+    (
+        "frontend/routing",
+        "> routing rule\n\n# Routing\nonly the js kernel",
+    ),
+];
+
+#[tokio::test]
+async fn readme_doctree_frame_index_view_and_errors() {
+    let (kernel, root) = mk_docs_kernel(Some(README), DOCS);
 
     // readme=true → the SHORT orientation string.
     let r = bare_reflect(
@@ -338,20 +361,7 @@ async fn readme_doctree_frame_index_view_and_errors() {
 /// that do exist, rather than serving a doc no other runtime has.
 #[tokio::test]
 async fn readme_minds_is_no_doc() {
-    let tmp = tempfile::tempdir().unwrap();
-    let base = tmp.path().join(".fantastic");
-    seed_docs(&base);
-    let kernel = Arc::new(Kernel::new());
-    let root = Agent::new(
-        AgentId::from("kernel_state"),
-        None,
-        None,
-        Map::new(),
-        base,
-        true,
-    );
-    kernel.register(Arc::clone(&root));
-    kernel.set_root(Arc::clone(&root));
+    let (kernel, root) = mk_docs_kernel(Some(README), DOCS);
 
     let r = bare_reflect(
         &kernel,
@@ -375,52 +385,23 @@ async fn non_root_has_no_readmes_frame() {
     assert!(r.get("docs").is_none());
 }
 
-/// Seed a docs tree exercising the R2-RFL-5 clamp/existence matrix: a REAL
-/// nested dir (`nested/`), a topic that is a FILE sitting where a later `..`
-/// wants to step through it as a dir (`frontend/html-agent.md`, no
-/// `frontend/html-agent/` dir), and a top-level topic (`topic.md`).
-fn seed_clamp_docs(base: &Path) {
-    let docs = base.join("docs");
-    std::fs::create_dir_all(docs.join("frontend")).unwrap();
-    std::fs::create_dir_all(docs.join("nested")).unwrap();
-    std::fs::write(
-        docs.join("frontend").join("routing.md"),
-        "> r\n\nrouting body",
-    )
-    .unwrap();
-    std::fs::write(
-        docs.join("frontend").join("html-agent.md"),
-        "> p\n\npanel body",
-    )
-    .unwrap();
-    std::fs::write(docs.join("nested").join("child.md"), "> c\n\nchild body").unwrap();
-    std::fs::write(docs.join("topic.md"), "> t\n\ntopic body").unwrap();
-}
-
-fn mk_clamp_kernel(base: std::path::PathBuf) -> (Arc<Kernel>, Arc<Agent>) {
-    let kernel = Arc::new(Kernel::new());
-    let root = Agent::new(
-        AgentId::from("kernel_state"),
-        None,
-        None,
-        Map::new(),
-        base,
-        true,
-    );
-    kernel.register(Arc::clone(&root));
-    kernel.set_root(Arc::clone(&root));
-    (kernel, root)
-}
+/// The R2-RFL-5 key matrix: a nested tier (`nested/child`), a topic with a
+/// tier (`frontend/…`) and a top-level topic.
+const CLAMP_DOCS: &[(&str, &str)] = &[
+    ("frontend", "> f\n\nfrontend body"),
+    ("frontend/routing", "> r\n\nrouting body"),
+    ("frontend/html-agent", "> p\n\npanel body"),
+    ("nested", "> n\n\nnested body"),
+    ("nested/child", "> c\n\nchild body"),
+    ("topic", "> t\n\ntopic body"),
+];
 
 /// C33 (python 2026-09-20): the key check is LEXICAL and then the INDEX — a
 /// `.`, `..` or empty segment is a `bad key` whatever the filesystem holds, and
-/// a key is a doc only if the index lists it; the disk is never asked.
+/// a key is a doc only if the index lists it.
 #[tokio::test]
 async fn readme_view_key_check_is_lexical_then_the_index() {
-    let tmp = tempfile::tempdir().unwrap();
-    let base = tmp.path().join(".fantastic");
-    seed_clamp_docs(&base);
-    let (kernel, root) = mk_clamp_kernel(base);
+    let (kernel, root) = mk_docs_kernel(None, CLAMP_DOCS);
 
     // `nested/../topic`: a `..` segment is a bad key even though `nested` is a
     // real directory and the target exists.
@@ -485,14 +466,8 @@ async fn readme_view_key_check_is_lexical_then_the_index() {
 /// stray `\r`s python's reader never produces.
 #[tokio::test]
 async fn doc_reads_translate_newlines_like_python_text_mode() {
-    let tmp = tempfile::tempdir().unwrap();
-    let base = tmp.path().join(".fantastic");
-    let docs = base.join("docs");
-    std::fs::create_dir_all(&docs).unwrap();
-    // 4 chars after translation ("a\nb\nc\n" minus... let's just measure): raw
-    // bytes below are "> desc\r\nbody\rline\r\n" (CRLF, lone CR, CRLF).
-    std::fs::write(docs.join("crlf.md"), b"> desc\r\nbody\rline\r\n").unwrap();
-    let (kernel, root) = mk_clamp_kernel(base);
+    // "> desc\r\nbody\rline\r\n" — CRLF, lone CR, CRLF.
+    let (kernel, root) = mk_docs_kernel(None, &[("crlf", "> desc\r\nbody\rline\r\n")]);
 
     let r = bare_reflect(
         &kernel,
@@ -510,57 +485,6 @@ async fn doc_reads_translate_newlines_like_python_text_mode() {
     // NOT the raw-byte count (20, which a CR-preserving reader would report).
     assert_eq!(r["readme"]["tokens"], 5);
     assert_eq!(r["readme"]["desc"], "desc");
-}
-
-/// C60: python catches only `OSError` around a doc read, so a
-/// `UnicodeDecodeError` is NOT "unreadable" — it propagates out of the verb
-/// and fails the WHOLE reflect, `{error: "UnicodeDecodeError: …", raised:
-/// true}`, exactly like any other raised handler.
-#[tokio::test]
-async fn a_non_utf8_doc_fails_the_reflect_like_python() {
-    let tmp = tempfile::tempdir().unwrap();
-    let base = tmp.path().join(".fantastic");
-    let docs = base.join("docs");
-    std::fs::create_dir_all(&docs).unwrap();
-    // 0xff can never start a UTF-8 sequence — CPython's own worked example.
-    std::fs::write(
-        docs.join("bad.md"),
-        [b'x', b'x', b'x', b'x', b'x', b'x', 0xff],
-    )
-    .unwrap();
-    let (kernel, root) = mk_clamp_kernel(base);
-
-    let mut reply = reflect_identity(&root);
-    let err = apply_reflect_flags(
-        &kernel,
-        &root,
-        &json!({"type":"reflect","tree":"none","readme":"bad"}),
-        &mut reply,
-    )
-    .await
-    .expect_err("a non-UTF-8 doc must raise, not answer 'unreadable'");
-    assert_eq!(
-        err["error"],
-        "UnicodeDecodeError: 'utf-8' codec can't decode byte 0xff in position \
-         6: invalid start byte"
-    );
-    assert_eq!(err["raised"], true);
-
-    // Same for the top-level `readme.md` orientation file (`readme=true`).
-    std::fs::write(root.root_path.join("readme.md"), [0xff, b'x']).unwrap();
-    let mut reply2 = reflect_identity(&root);
-    let err2 = apply_reflect_flags(
-        &kernel,
-        &root,
-        &json!({"type":"reflect","tree":"none","readme":true}),
-        &mut reply2,
-    )
-    .await
-    .expect_err("readme=true must raise the same way");
-    assert!(err2["error"]
-        .as_str()
-        .unwrap()
-        .starts_with("UnicodeDecodeError:"));
 }
 
 // ─── #1 / #7 — paged listings + the gate made readable ──────────────
