@@ -265,6 +265,12 @@ def main() -> bool:
                 card = await pg.until(f"!!document.querySelector('.agent-frame[data-id=\"{b}\"] .c-inquiry')", 12)
                 info["S10_card_text"] = await pg.js(f"document.querySelector('.agent-frame[data-id=\"{b}\"] .c-inquiry .c-inq-text')?.textContent")
                 info["S10_buttons"] = await pg.js(f"[...document.querySelectorAll('.agent-frame[data-id=\"{b}\"] .c-inquiry .c-inq-row button')].map(b=>b.textContent)")
+                # the card as the person sees it (artifact: s10_inquiry.png)
+                box = await pg.rect(f'.agent-frame[data-id="{b}"]')
+                if box:
+                    import base64
+                    shot = await pg.cdp("Page.captureScreenshot", format="png", clip={"x": box["x"], "y": box["y"], "width": box["w"], "height": box["h"], "scale": 1})
+                    (rig.art / "s10_inquiry.png").write_bytes(base64.b64decode(shot["data"]))
                 await pg.js(f"[...document.querySelectorAll('.agent-frame[data-id=\"{b}\"] .c-inquiry .c-inq-row button')].find(x=>x.textContent==='blue')?.click()")
                 answered = await pg.until(f"{dialog(b)}.includes('S10-done: blue')", 12)
                 info["S10_status"] = await pg.js(f"document.querySelector('.agent-frame[data-id=\"{b}\"] .c-inquiry .c-inq-status')?.textContent")
