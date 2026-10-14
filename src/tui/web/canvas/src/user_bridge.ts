@@ -3,8 +3,8 @@
 //
 //   · a call to host agent T  → `user.forward {target: T, payload}`;
 //   · a call to `user` itself  → its own payload;
-//   · watches, the state stream, socket lifecycle → the leg's own frames (the
-//                               lib bridge, unchanged).
+//   · emits, watches, the state stream, socket lifecycle → the leg's own
+//                               frames (the lib bridge, unchanged).
 
 import type { Bridge, Json, Kernel, Payload, WsBridge } from "./lib.ts";
 
@@ -31,9 +31,10 @@ export class UserBridge implements Bridge {
     return this.inner.forwardBinary(GATEWAY, this.wrap(target, payload));
   }
 
-  /** A host agent's inbox, fire-and-forget: `user` sends it as a call. */
+  /** A host agent's inbox, fire-and-forget: a real emit, the leg's own frame
+   *  (gated on the host as the leg's `emit`) — never a call. */
   emitRemote(target: string, payload: Payload): void {
-    void this.forward(target, { ...payload });
+    this.inner.emitRemote(target, payload);
   }
 
   // THE LEG'S OWN FRAMES: watches, the state stream, a socket's lifecycle.

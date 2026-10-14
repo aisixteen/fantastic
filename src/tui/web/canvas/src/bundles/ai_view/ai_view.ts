@@ -327,10 +327,20 @@ export const aiView: ViewBundle = {
 
     // client_id: stable per backend, localStorage so refresh keeps the thread
     const CLIENT_KEY = `ai_chat_client_id:${backend}`;
-    let clientId = localStorage.getItem(CLIENT_KEY);
+    // storage may be blocked (a private window): then the id lives for this mount
+    let clientId: string | null = null;
+    try {
+      clientId = localStorage.getItem(CLIENT_KEY);
+    } catch {
+      /* blocked storage */
+    }
     if (clientId === null) {
       clientId = "web_" + Math.random().toString(36).slice(2, 10);
-      localStorage.setItem(CLIENT_KEY, clientId);
+      try {
+        localStorage.setItem(CLIENT_KEY, clientId);
+      } catch {
+        /* blocked storage */
+      }
     }
     const tpl = record && typeof record["saved"] === "string" ? (record["saved"] as string) : "";
     $<HTMLElement>(".c-agent").textContent = tpl ? `✦ ${tpl} · ${backend}` : `${selfId} (client ${clientId})`;

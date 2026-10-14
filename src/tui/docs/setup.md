@@ -61,4 +61,4 @@ and its config, no id, key value or grants), loaded back into a set-up page, and
 one marked the default (`.preferred`). The double-click's `AI agent` makes a new
 AI agent from the default; another one is the AI cell's ⚙ settings → `‹ other
 set-ups`. A saved record on a handler that is not an AI is refused. Only the human
-saves them (a set-up page, or a file there): the home store serves the CLI alone.
+saves them (a set-up page, or a file there): the home store's grants admit `user` alone.

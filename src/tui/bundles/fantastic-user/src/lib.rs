@@ -25,7 +25,8 @@
 //!   What a name MEANS (a coding agent, an editor…) is the caller's to decide.
 //! - `reflect` — this agent, its verbs, and (when it can) its `can_call`.
 //! - every other verb is the lib's `user_probe` (the human as a test fixture:
-//!   `inquiry`, `inquiries`, `send`), unchanged.
+//!   `inquiry`, `inquiries`), unchanged — but its `send` (any payload to any
+//!   agent, as the human) is refused: every agent may `send` to `user`.
 
 pub mod grants;
 pub mod inquiries;
@@ -177,6 +178,14 @@ impl UserBundle {
             }
             item = item.with_binary(path, b.bytes);
         }
+        // the forward's secret marks under `payload` mark the onward send the same way
+        let marks: Vec<String> = fantastic_kernel::current_secret()
+            .into_iter()
+            .filter_map(|m| m.strip_prefix("payload.").map(str::to_string))
+            .collect();
+        if !marks.is_empty() {
+            item = item.with_secret(marks);
+        }
         Self::send_as(kernel, item).await
     }
 
@@ -309,6 +318,7 @@ impl Bundle for UserBundle {
             Value::Object(m) => m,
             _ => serde_json::Map::new(),
         };
+        v.remove("send");
         v.insert("forward".into(), json!("args: target:str (req), payload:dict (req), timeout:num? (none by default: the call lasts as long as the target takes) — `user` sends payload to target; the reply verbatim."));
         v.insert("inquiry".into(), json!("args: text:str (req), kind:str? (text|single|multi|confirm, default text), options:list? (required for single/multi), request_id:str? — ACCEPTED at once ({accepted, re}) and held for the person; the answer arrives LATER as `[reply to <re> · user inquiry] <answer>…</answer>` on your thread. Nothing suspends: keep working, or await."));
         v.insert("inquiries".into(), json!("args: asker:str? — {inquiries: [{re, asker, text, kind, options, request_id, ts}]}: the open questions (one asker's, when named)."));
@@ -321,6 +331,11 @@ impl Bundle for UserBundle {
     async fn handle(&self, agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Result<Reply, BundleError> {
         if let Some((r, _)) = self.run(agent_id, payload, None, kernel).await {
             return Ok(r);
+        }
+        // the probe's `send` (any payload to any agent, AS the human) is not
+        // the human's: every agent holds `send` on `user` for its messages
+        if s(payload, "type") == "send" {
+            return Ok(Some(refuse("unhandled", "user: `send` is not a verb of the human — use `forward` (the human's own calls)")));
         }
         let mut r = self.probe.handle(agent_id, payload, kernel).await?;
         if s(payload, "type") == "reflect" {

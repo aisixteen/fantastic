@@ -162,8 +162,8 @@ impl SetupBundle {
                 },
                 None => fail(format!("set_key_mode: mode {:?} — plain or secure", s(p, "mode"))),
             },
-            // The page sends this call with `secret: ["payload.secret"]`: the
-            // value reaches this code and no row, ledger or stream on either side.
+            // The page's call carries the value unmarked (the page kernel has no
+            // secret marks yet): its rows hold it. The onward `set` is marked.
             "store_key" => {
                 let (module, endpoint) = (s(p, "module"), s(p, "endpoint"));
                 let secret = p.get("secret").and_then(Value::as_str).unwrap_or("");

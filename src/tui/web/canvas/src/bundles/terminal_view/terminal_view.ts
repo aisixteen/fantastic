@@ -69,25 +69,16 @@ export const terminalView: ViewBundle = {
     const argv = Array.isArray(record?.["command"]) ? (record!["command"] as unknown[]).filter((a): a is string => typeof a === "string") : [];
     const host = new Host(kernel, selfId);
 
-    // lazy-load the vendored UMD bundles. As ES modules in the browser (the
-    // dev/importmap build) they attach Terminal / FitAddon to globalThis as a
-    // side effect; rolled up by esbuild (the js_kernel.zip build) the same
-    // ctors arrive on the module namespace instead. Read BOTH so either build
-    // works — the global branch and the CJS-namespace branch of the UMD.
-    const xt = (await import("@xterm/xterm")) as Record<string, unknown>;
-    const xtFit = (await import("@xterm/addon-fit")) as Record<string, unknown>;
+    // the vendored UMD bundles: an ES module (the canvas package is
+    // `"type": "module"`), so the UMD takes its GLOBAL branch — importing them
+    // sets globalThis.Terminal / globalThis.FitAddon.FitAddon, the one export
+    await import("@xterm/xterm");
+    await import("@xterm/addon-fit");
     const g = globalThis as unknown as Partial<XTermGlobals>;
-    const pick = (...cands: unknown[]): unknown => cands.find(Boolean);
-    const TerminalCtor = pick(
-      g.Terminal,
-      xt.Terminal,
-      (xt.default as { Terminal?: unknown } | undefined)?.Terminal,
-    ) as new (opts: unknown) => XTerm;
-    const FitAddonCtor = pick(
-      (g.FitAddon as { FitAddon?: unknown } | undefined)?.FitAddon,
-      xtFit.FitAddon,
-      (xtFit.default as { FitAddon?: unknown } | undefined)?.FitAddon,
-    ) as new () => unknown;
+    const TerminalCtor = g.Terminal;
+    const FitAddonCtor = g.FitAddon?.FitAddon;
+    if (typeof TerminalCtor !== "function") throw new Error("terminal_view: the vendored xterm set no globalThis.Terminal");
+    if (typeof FitAddonCtor !== "function") throw new Error("terminal_view: the vendored addon-fit set no globalThis.FitAddon.FitAddon");
     const term = new TerminalCtor({
       cursorBlink: true,
       fontSize: 13,
@@ -206,8 +197,10 @@ export const terminalView: ViewBundle = {
       close();
     };
 
-    const offOutput = host.on(backend, "output", (e) => (jobId === undefined ? early.push(e) : draw(e)));
-    const offDone = host.on(backend, "job_done", (e) => (jobId === undefined ? early.push(e) : ended(e)));
+    // held while an attach runs too: its ring replay covers what came before it
+    let attaching = false;
+    const offOutput = host.on(backend, "output", (e) => (jobId === undefined || attaching ? early.push(e) : draw(e)));
+    const offDone = host.on(backend, "job_done", (e) => (jobId === undefined || attaching ? early.push(e) : ended(e)));
 
     // THE LAST LAUNCHED COMMAND (owner 2026-10-12, `last_cmd.ts`): a bar on the
     // cell. NOTHING STARTS ON ITS OWN: past its first start (the placement), a
@@ -327,6 +320,9 @@ export const terminalView: ViewBundle = {
         heldChars = 0;
         term.reset();
       }
+      attaching = true;
+      // how many held frames the ring replay already holds (they landed before its reply)
+      let covered = 0;
       const st = (await host.call(backend, { type: "status" })) as { jobs?: Job[]; error?: string };
       const live = (st?.jobs ?? []).find((j) => j.pty === true && j.status === "running");
       const next = attachTo(last, typeof live?.job_id === "number", started);
@@ -335,7 +331,10 @@ export const terminalView: ViewBundle = {
         jobId = live.job_id;
         await host.call(backend, { type: "resize", job_id: jobId, cols: term.cols, rows: term.rows });
         const replay = (await host.call(backend, { type: "output", job_id: jobId })) as { output?: string };
-        if (replay && typeof replay.output === "string") term.write(replay.output);
+        if (replay && typeof replay.output === "string") {
+          covered = early.length;
+          term.write(replay.output);
+        }
         // THE PROGRAM REDRAWS (owner 2026-10-13, half-blank cells after a reload):
         // the ring drops its oldest bytes, so a full-screen program's last full
         // paint is often gone and the replay holds only partial updates; a resize
@@ -346,7 +345,13 @@ export const terminalView: ViewBundle = {
       } else if (next.start) {
         await startJob();
       }
-      for (const e of early.splice(0)) (e["type"] === "job_done" ? ended : draw)(e);
+      attaching = false;
+      early.splice(0).forEach((e, i) => {
+        if (e["type"] === "job_done") return ended(e);
+        // in the replay already: not drawn again, acked once (it was sent once)
+        if (i < covered && e["job_id"] === jobId) return ackChars(typeof e["data"] === "string" ? (e["data"] as string).length : 0);
+        draw(e);
+      });
       drawLast();
     };
     // START the cell's program (its first placement, or the human's ▶): once

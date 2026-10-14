@@ -118,8 +118,15 @@ export function mountPanel(ctx: ViewContext, body: () => string | Promise<string
             // listener attached anyway) would look like it worked and deliver
             // nothing, which is the worst of both.
             // a placeholder while the gate answers: a second watch is not doubled
-            watchOffs.set(src, () => {});
+            const pending = (): void => {};
+            watchOffs.set(src, pending);
             void asSelf("panel_watch", { src, watcher: selfId }).then((denied) => {
+              // unwatched or unmounted while the gate answered: undo the watch
+              // the kernel already holds, attach nothing
+              if (watchOffs.get(src) !== pending) {
+                if (denied === null) kernel.unwatch(src, selfId);
+                return;
+              }
               // host srcs → bridge.watchRemote
               if (denied !== null) {
                 watchOffs.delete(src);

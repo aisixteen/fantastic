@@ -171,7 +171,8 @@ export const backgroundsView: ViewBundle = {
       hint.innerHTML =
         "<b>Ask your AI agent to look around and add more backgrounds.</b><br>" +
         "Open an AI cell (double-click → <b>AI agent</b>) and say e.g. <i>“make three calm backgrounds for this canvas”</i> — " +
-        `it adds them here with <code>add</code> on this agent (<code>${ctx.selfId}</code>), and they stay.`;
+        `it adds them here with <code>add</code> on this agent (<code class="self"></code>), and they stay.`;
+      (hint.querySelector("code.self") as HTMLElement).textContent = ctx.selfId;
       root.append(hint);
       // ── THEMES ──
       const themes = (th["themes"] ?? []) as ThemeRow[];
@@ -213,7 +214,8 @@ export const backgroundsView: ViewBundle = {
       thint.innerHTML =
         "<b>To make a new theme, ask your AI agent.</b><br>" +
         "Open an AI cell (double-click → <b>AI agent</b>) and say e.g. <i>“add a theme for wide screens”</i> — " +
-        `it adds it here with <code>add_theme</code> on this agent (<code>${ctx.selfId}</code>).`;
+        `it adds it here with <code>add_theme</code> on this agent (<code class="self"></code>).`;
+      (thint.querySelector("code.self") as HTMLElement).textContent = ctx.selfId;
       root.append(thint);
       root.append(st);
     };

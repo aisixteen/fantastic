@@ -83,13 +83,14 @@ fn holders(h: &Host) -> Vec<String> {
 }
 
 /// What the canvas leg itself may do on `id`: WATCH it (a tab's terminal
-/// output, an AI's tokens ride the leg's own frames), and on the root also tap
-/// the state stream (the stream cell). Every call goes through `user` instead.
+/// output, an AI's tokens ride the leg's own frames), EMIT to it (a cell's
+/// `reload_html`, a panel's gated `emit`), and on the root also tap the state
+/// stream (the stream cell). Every call goes through `user` instead.
 fn leg_verbs(h: &Host, id: &str) -> Value {
     if id == h.root || id == "kernel" {
-        json!(["watch", "state_subscribe"])
+        json!(["watch", "emit", "state_subscribe"])
     } else {
-        json!(["watch"])
+        json!(["watch", "emit"])
     }
 }
 
@@ -107,6 +108,11 @@ fn union(had: Option<&Value>, add: &Value) -> Value {
     Value::Array(out)
 }
 
+/// The agents whose `callable_by` their own code narrows to `user` (the user's
+/// home files): no other holder is granted them here — `user` keeps its own
+/// side (its `can_call`), the leg its own verbs.
+const NARROWED: [&str; 2] = [crate::kern::saved::HOME_ID, crate::kern::user_store::ID];
+
 /// Grant every holder every verb on `ids` — both edges, BY ID (no subtree
 /// keys): each target's `callable_by` names each holder, and each holder's
 /// `can_call` names the target (and `kernel`); the canvas leg, both edges, its
@@ -121,7 +127,8 @@ pub async fn grant(h: &Host, ids: &[String]) -> Result<(), String> {
         }
         let mut cb = field(h, id, "callable_by");
         let mut changed = false;
-        for holder in holders.iter().filter(|x| *x != id) {
+        let narrowed = NARROWED.contains(&id.as_str());
+        for holder in holders.iter().filter(|x| *x != id && !narrowed) {
             if cb.get(holder) != Some(&all) {
                 cb.insert(holder.clone(), all.clone());
                 changed = true;
@@ -150,7 +157,7 @@ pub async fn grant(h: &Host, ids: &[String]) -> Result<(), String> {
         let mut cc = field(h, &holder, "can_call");
         let mut changed = false;
         for id in ids.iter().map(String::as_str).chain(["kernel"]) {
-            if id == holder || (id != "kernel" && !exists(h, id)) {
+            if id == holder || (id != "kernel" && !exists(h, id)) || (full && NARROWED.contains(&id) && holder != crate::env::HUMAN) {
                 continue;
             }
             // the leg's own: MERGED into what it holds (its calls to `user`)

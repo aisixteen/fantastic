@@ -14,13 +14,13 @@
 //!   └── fantastics/                0700   the stored locations (`user_store`)
 //! ```
 //!
-//! THE BINARY OWNS IT. Its directory and the callers it serves are fixed when the
-//! product registers it ([`UserHomeStore::new`]); nothing on a record can move it
-//! or widen who it answers. A project record naming this module — a cloned tree,
-//! an AI's `create_agent` — gets the same store with the same short caller list,
-//! so it can neither read another location nor reach it from an agent. (The lib
-//! session's analysis, 2026-09-30: a file_bridge rooted in home, even
-//! operator-set, would let a hydrated project record rewrite the owner's prefs.)
+//! THE BINARY OWNS IT. Its directory is fixed when the CLI registers it
+//! ([`UserHomeStore::new`]); nothing on a record can move it. A project record
+//! naming this module — a cloned tree, an AI's `create_agent` — gets the same
+//! store, so it cannot read another location. WHO reaches it is the record's
+//! grants (`callable_by`), as for every agent. (The lib session's analysis,
+//! 2026-09-30: a file_bridge rooted in home, even operator-set, would let a
+//! hydrated project record rewrite the owner's prefs.)
 //!
 //! A SAVED SET-UP IS NOT AN AGENT. It carries no identity, no per-project wiring and
 //! no authority — the creator adds those at instantiation — and it must pass the
@@ -119,17 +119,15 @@ pub fn home_dir_from_env() -> Result<PathBuf, String> {
     }
 }
 
-/// The store. Construct it with the dir and the callers it serves.
+/// The store. Construct it with its dir.
 pub struct UserHomeStore {
     home: Result<PathBuf, String>,
-    callers: Vec<String>,
 }
 
 impl UserHomeStore {
-    /// `home`: the resolved dir (or why there is none). `callers`: the ONLY agent
-    /// ids served, besides the operator.
-    pub fn new(home: Result<PathBuf, String>, callers: Vec<String>) -> Self {
-        Self { home, callers }
+    /// `home`: the resolved dir (or why there is none).
+    pub fn new(home: Result<PathBuf, String>) -> Self {
+        Self { home }
     }
 
     /// The saved set-ups dir for a READ: `None` when nothing was ever saved — a
@@ -151,24 +149,6 @@ impl UserHomeStore {
         let dir = saved_dir(home);
         private_dirs(home, &dir)?;
         Ok(dir)
-    }
-
-    /// Who may reach the owner's saved set-ups — decided HERE, not only by the
-    /// record's `callable_by`: the saved set-ups are the USER's resource, not this
-    /// project's, and a project record (cloned, or written by an AI) must not be
-    /// able to widen who reads or rewrites them. The caller is the dispatch's
-    /// ORIGIN (the handler's own "sender" is itself); a call relayed across a
-    /// bridge arrives as its leg, which is not one of the callers.
-    fn served(&self) -> Result<(), Value> {
-        match fantastic_kernel::send::current_origin() {
-            None => Ok(()),
-            Some(s) if self.callers.iter().any(|c| c == &s.0) => Ok(()),
-            Some(s) => Err(refusal_hint(
-                UNAUTHORIZED,
-                format!("user_home_store serves only the CLI ({}), not {}", self.callers.join(", "), s.0),
-                "saved set-ups are applied by the CLI when it creates an agent — no agent reaches them",
-            )),
-        }
     }
 }
 
@@ -396,7 +376,6 @@ impl UserHomeStore {
             "handler_module": HANDLER_MODULE,
             "sentence": "The user's saved set-ups: named agent-record blueprints in the home config dir, applied by the CLI when it creates an agent.",
             "dir": self.home.as_ref().map(|h| saved_dir(h).display().to_string()).ok(),
-            "serves": self.callers,
         })
     }
 }
@@ -428,9 +407,6 @@ impl Bundle for UserHomeStore {
         }
         if verb == "reflect" {
             return Ok(Some(self.reflect()));
-        }
-        if let Err(r) = self.served() {
-            return Ok(Some(r));
         }
         let out = match verb {
             "persist_record" => self.persist(payload, kernel),

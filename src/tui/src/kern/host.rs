@@ -82,14 +82,11 @@ fn registry(cwd: &std::path::Path) -> BundleRegistry {
     // record itself is only ever created by `fantastic mcp`, never by the
     // blueprint.
     reg.register(fantastic_web_mcp::HANDLER_MODULE, fantastic_web_mcp::WebMcpBundle);
-    // THE AI AGENT'S SAVED SET-UPS. Its directory and the ONE caller it serves (the
-    // human) are fixed here, by the binary — never by a record (`kern/saved`).
+    // THE AI AGENT'S SAVED SET-UPS. Its directory is fixed here, by the binary —
+    // never by a record; who reaches it is its `callable_by` (`kern/saved`).
     reg.register(
         fantastic_user_home_store::HANDLER_MODULE,
-        fantastic_user_home_store::UserHomeStore::new(
-            fantastic_user_home_store::home_dir_from_env(),
-            vec![crate::env::HUMAN.to_string()],
-        ),
+        fantastic_user_home_store::UserHomeStore::new(fantastic_user_home_store::home_dir_from_env()),
     );
     // THE USER STORE: the keys, set-ups and stored fantastic locations in the
     // user's home; "here" is this project's dir, fixed by the binary (`kern/user_store`).
@@ -379,6 +376,19 @@ impl Host {
             AgentId::from(self.cfg.user.as_str()),
             json!({"type": "forward", "target": target, "payload": payload}),
         );
+        k.send(vec![item]).await.remove(0)
+    }
+
+    /// [`Host::act`] with SECRET MARKS (`secret`, paths into `payload`): the
+    /// values reach the target's handler and show as `[secret]` in every row,
+    /// event and mirror — on the forward and on `user`'s onward send.
+    pub async fn act_secret(&self, target: &str, payload: Value, secret: &[&str]) -> Outcome {
+        let k = Arc::clone(&self.kernel);
+        let item = Item::new(
+            AgentId::from(self.cfg.user.as_str()),
+            json!({"type": "forward", "target": target, "payload": payload}),
+        )
+        .with_secret(secret.iter().map(|m| format!("payload.{m}")));
         k.send(vec![item]).await.remove(0)
     }
 

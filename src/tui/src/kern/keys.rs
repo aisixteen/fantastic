@@ -8,8 +8,9 @@
 //! - A key is a REF, `<provider>/<host>` (`responses/api.openai.com`), bound to
 //!   the endpoint's host: the store refuses to hand it out for any other host.
 //!   The ref is DECLARED on the store's record (`update_agent` on its `refs`),
-//!   then its value written by the operator with `secret: [payload.fields]` —
-//!   the value lands in no row, ledger or stream.
+//!   then its value written through `user.forward`, marked `secret` on the
+//!   forward and on `user`'s onward `set`: every row, event and mirror of
+//!   either call shows it as `[secret]`.
 //! - An AI agent NAMES its ref on its record (`credentials: {store, ref}`) and
 //!   its backend reads it before every request: a stored or rotated key is live
 //!   on the next call, with no restart. [`wire`] gives it the three grants that
@@ -140,7 +141,7 @@ pub async fn store(h: &Host, module: &str, endpoint: &str, secret: &str) -> Resu
     ensure_store(h).await?;
     // the ref is DECLARED first, on the store's record (`set` never creates one)
     declare(h, &r, &host_of(endpoint).unwrap_or_default()).await?;
-    let out = h.act(STORE, json!({"type": "set", "ref": r, "fields": {FIELD: secret}})).await.result;
+    let out = h.act_secret(STORE, json!({"type": "set", "ref": r, "fields": {FIELD: secret}}), &["fields.api_key"]).await.result;
     if let Some(e) = out.get("error").and_then(Value::as_str) {
         return Err(format!("the key was not stored: {e}"));
     }

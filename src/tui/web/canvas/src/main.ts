@@ -217,7 +217,8 @@ async function listCanvases(): Promise<Array<{ id: string; loader: string; root:
     const l = all.find((a) => a["parent_id"] === n["id"] && a["handler_module"] === LOADER_HM);
     if (typeof l?.["id"] !== "string") continue;
     const name = typeof n["display_name"] === "string" && n["display_name"] !== "" ? n["display_name"] : n["id"].replace(/^canvas_/, "");
-    out.push({ id: n["id"], loader: l["id"], root: typeof l["root"] === "string" ? l["root"] : ".fantastic/web", main: n["main"] === true, name });
+    if (typeof l["root"] !== "string" || l["root"] === "") throw new Error(`canvas ${n["id"]}: its page loader ${l["id"]} names no root`);
+    out.push({ id: n["id"], loader: l["id"], root: l["root"], main: n["main"] === true, name });
   }
   return out.sort((a, b) => Number(b.main) - Number(a.main) || (a.id < b.id ? -1 : 1));
 }

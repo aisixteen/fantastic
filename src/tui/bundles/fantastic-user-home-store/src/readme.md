@@ -2,8 +2,8 @@
 
 Named agent-record BLUEPRINTS kept in the user's home config dir
 (`FANTASTIC_HOME`, else `~/.config/fantastic`), one plain-text file per name
-under `agents/ai_agent/saved/`. The CLI owns it: the binary fixes its directory and the
-only callers it serves when it registers it — a record can do neither.
+under `agents/ai_agent/saved/`. The CLI owns it: the binary fixes its directory when it
+registers it — a record cannot move it. Who reaches it is its grants.
 
 A saved set-up is `handler_module` plus that bundle's config (endpoint, model,
 sampling, instructions, …). It never carries identity (`id`, `parent_id`,

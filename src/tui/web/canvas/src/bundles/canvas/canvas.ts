@@ -727,7 +727,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     const locked = bool(rec, "delete_lock");
     el.innerHTML = `
       <div class="frame-head">
-        <span class="id">${headTitle(title, rec.id)}</span>
+        <span class="id"></span>
         <span class="grip" title="drag to reorder">⠿</span>
         <span class="actions">
           <span class="pin" title="pin to the screen's bottom (mobile)">📌</span>
@@ -742,6 +742,15 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       <div class="resize-handle ne" data-corner="ne"></div>
       <div class="resize-handle nw" data-corner="nw"></div>
     `;
+    const name = headTitle(title, rec.id);
+    const idEl = el.querySelector(".frame-head .id") as HTMLElement;
+    idEl.textContent = name.id === null ? name.title : `${name.title} · `;
+    if (name.id !== null) {
+      const code = document.createElement("code");
+      code.style.cssText = "opacity:0.6;font-size:10px";
+      code.textContent = name.id;
+      idEl.appendChild(code);
+    }
     world.appendChild(el);
     const head = el.querySelector(".frame-head") as HTMLElement;
     head.addEventListener("mousedown", (e) => {

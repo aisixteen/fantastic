@@ -37,7 +37,7 @@ fn agent(id: &str, hm: Option<&str>, parent: Option<&str>, meta: Value) -> Arc<A
 
 fn kernel(home: &Path) -> Arc<Kernel> {
     let mut k = Kernel::new();
-    k.bundles.register(HANDLER_MODULE, UserHomeStore::new(Ok(home.to_path_buf()), vec!["user".into()]));
+    k.bundles.register(HANDLER_MODULE, UserHomeStore::new(Ok(home.to_path_buf())));
     k.bundles.register("demo_backend.tools", NeedsModel);
     let k = Arc::new(k);
     let root = agent("kernel_state", None, None, json!({"guid": "g1"}));
@@ -50,7 +50,7 @@ fn kernel(home: &Path) -> Arc<Kernel> {
         "home",
         Some(HANDLER_MODULE),
         Some("kernel_state"),
-        json!({"callable_by": {"user": "*", "ai": "*"}}),
+        json!({"callable_by": {"user": "*"}}),
     ));
     k
 }
@@ -104,16 +104,16 @@ async fn a_saved_setup_carries_no_identity_wiring_or_grants_and_passes_its_bundl
 }
 
 #[tokio::test]
-async fn only_the_cli_is_served_whatever_a_record_grants() {
+async fn the_grants_decide_who_is_served() {
     let td = tempfile::tempdir().unwrap();
     let home = td.path().join("home"); // created by the store, 0700
     let k = kernel(&home);
     // a read creates nothing on the user's disk
     assert!(call(&k, "user", json!({"type": "load_tree"})).await["saved"].as_array().unwrap().is_empty());
     assert!(!home.exists(), "listing an empty store must not create the home dir");
-    // `home`'s record grants `ai` everything; the store still refuses it.
+    // `home`'s record does not admit `ai`: the kernel refuses it.
     let r = call(&k, "ai", json!({"type": "load_tree"})).await;
-    assert_eq!(r["reason"], "unauthorized", "{r}");
+    assert!(!err(&r).is_empty(), "{r}");
     assert!(call(&k, "user", json!({"type": "load_tree"})).await.get("saved").is_some());
 }
 

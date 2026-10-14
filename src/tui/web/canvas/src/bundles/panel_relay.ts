@@ -9,7 +9,8 @@ import type { Json, Kernel, Payload } from "../lib.ts";
 //
 //   panel_send  {target, payload} → that call's result
 //   panel_emit  {target, payload} → an emit (a local agent's inbox, or a host
-//                                   agent's over the bridge); dropped if denied
+//                                   agent's over the bridge, gated by `emit` in
+//                                   this agent's can_call); dropped if denied
 //   panel_watch {src}             → null when allowed, else the refusal
 
 /** The verbs, when `payload` is one of them; undefined otherwise. */
@@ -19,10 +20,17 @@ export function panelRelay(kernel: Kernel, payload: Payload): Json | Promise<Jso
   switch (str(payload, "type")) {
     case "panel_send":
       return kernel.send([{ target, payload: inner }]).then((outs) => outs[0]!.result);
-    case "panel_emit":
-      if (kernel.get(target) !== undefined) kernel.emit(target, inner);
-      else kernel.emitRemote(target, inner);
+    case "panel_emit": {
+      if (kernel.get(target) !== undefined) {
+        kernel.emit(target, inner);
+        return null;
+      }
+      // a HOST agent: gated as `callHost` is — this agent's `can_call` must
+      // grant `emit` on the target; then a real emit, never a call
+      const denied = kernel.currentOrigin === null ? null : kernel.egressGate(kernel.currentOrigin, "emit", target);
+      if (denied === null) kernel.emitRemote(target, inner);
       return null;
+    }
     case "panel_watch":
       return kernel.watch(str(payload, "src"), str(payload, "watcher")) as unknown as Json;
     default:

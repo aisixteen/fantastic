@@ -103,8 +103,10 @@ test("an MCP server agent is drawn by its own view: url + tools, its grant refle
 
 test("a cell head names it once: the id beside the title only when they differ", async () => {
   const { headTitle } = await import("../src/bundles/canvas/host_views.ts");
-  assert.equal(headTitle("ai_view_e96d14e9", "ai_view_e96d14e9"), "ai_view_e96d14e9");
-  assert.match(headTitle("tree view", "tree_42511a66"), /^tree view · <code[^>]*>tree_42511a66<\/code>$/);
+  assert.deepEqual(headTitle("ai_view_e96d14e9", "ai_view_e96d14e9"), { title: "ai_view_e96d14e9", id: null });
+  assert.deepEqual(headTitle("tree view", "tree_42511a66"), { title: "tree view", id: "tree_42511a66" });
+  // record fields are text: markup in a display name stays a string
+  assert.deepEqual(headTitle("<img src=x onerror=alert(1)>", "c1"), { title: "<img src=x onerror=alert(1)>", id: "c1" });
 });
 
 test("the user store tile places a view of the host's user_store agent", async () => {
