@@ -64,31 +64,45 @@ authority, and file access is clamped to the directory the kernel runs in. One
 root `reflect` shows the whole landscape — which legs are open, what each agent
 may call. Report issues privately: see [`SECURITY.md`](SECURITY.md).
 
-## Run
-
-```sh
-podman run -d -p 127.0.0.1:8088:8088 -v "$PWD":/work \
-  ghcr.io/aisixteen/fantastic:arm64      # :amd64 on Intel/AMD; docker works the same
-```
-
-The image composes nothing on its own: give an AI the URL and a
-[recipe](container/recipes.md), and it builds on the folder mounted at `/work`.
-See [`container/README.md`](container/README.md).
-
 <!-- CLI SECTION — written and kept current by the CLI session; the lib side does not edit between these markers. -->
 
 ## The `fantastic` CLI
 
-`fantastic` runs the Rust kernel in-process in the current directory (`.fantastic/`),
-with a terminal UI, an optional browser canvas, and an MCP face for coding CLIs.
+`fantastic` runs the Rust kernel in-process in the current directory (`.fantastic/`):
+a terminal coder, a browser **canvas** where you build, run and engineer your own
+systems visually with an AI, and an MCP face for coding CLIs.
+
+```sh
+cargo install --path src/tui    # builds `fantastic` (Rust toolchain; the canvas is packed into the binary)
+```
+
+### Start with your coding agent
+
+Open your favourite CLI agent (Claude Code, Codex, Gemini CLI, …) in a project
+folder and paste:
+
+> Run `fantastic` and read what it prints. Explain to me what it is, then ask me
+> how I want to run it.
+
+Run without a terminal, as an agent's shell runs it, `fantastic` is in **doc
+mode**: it prints its readme and the command list, and starts and writes nothing.
+`fantastic readme [key]` opens any doc (`canvas`, `mcp`, `setup`, `bundles`, and
+the kernel's own). From there the agent can start it the way you choose, or wire
+itself in through `fantastic mcp`.
+
+### Commands
 
 ```sh
 fantastic                       # the terminal UI
-fantastic canvas                # plus the browser canvas
-fantastic ai vllm -p PORT       # the root AI on a backend (ollama, responses, anthropic too)
-fantastic mcp                   # MCP over stdio
+fantastic canvas [--port N]     # the browser canvas, headless: the kernel's messages stream in this terminal
+fantastic --headless            # no UI, no canvas: the message stream only
+fantastic ai vllm -p PORT       # the root AI on a backend (also ollama -p PORT, responses|anthropic --model M)
+fantastic run CMD [ARGS]        # your own program in a terminal (with canvas: a terminal cell)
+fantastic mcp                   # MCP over stdio for a coding CLI (attaches to a running kernel, or runs it)
 fantastic readme [key]          # the docs
 ```
+
+One kernel runs per folder; a bare `fantastic` started there while it runs attaches to it.
 
 <!-- /CLI SECTION -->
 
