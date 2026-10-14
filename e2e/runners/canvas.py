@@ -8,7 +8,7 @@ canvas and hands back on boot; a cell's backend is a direct child of
 
 1. builds the product (`fantastic`, whose build packs the canvas app and embeds
    `canvas.zip` — the `canvas_page` agent serves it);
-2. runs `fantastic --headless canvas --port N` over a fresh directory (it inits
+2. runs `fantastic canvas --port N` over a fresh directory (it inits
    from the blueprint and creates the canvas's page, leg, loader and backend);
 3. drives the page in headless Chrome (dblclick, typing, drag, close) and
    restarts the host between runs;
@@ -117,7 +117,7 @@ class Host:
         # The port is named on the first run, read from `web`'s
         # record after that.
         first = not (self.cwd / ".fantastic").exists()
-        args = ["--headless", "canvas", *(["--port", str(self.port)] if first else [])]
+        args = ["canvas", *(["--port", str(self.port)] if first else [])]
         with open(self.log, "a") as f:
             f.write("\n=== start\n")
         f = open(self.log, "a")
@@ -306,7 +306,7 @@ async def restart(spec, page: Page, host: Host, cwd: Path, url: str, state: dict
     # "already running" — even a --port that would change it (a swallowed
     # command confuses more than a refusal).
     if isinstance(spec, dict) and spec.get("wrong_port"):
-        r = subprocess.run([str(host.binary), "--headless", "canvas", "--port", str(host.port + 1)],
+        r = subprocess.run([str(host.binary), "canvas", "--port", str(host.port + 1)],
                            cwd=cwd, capture_output=True, text=True, timeout=60)
         said = r.stdout + r.stderr
         if r.returncode != 2 or "already running" not in said:
@@ -498,7 +498,7 @@ async def step(run: dict, page: Page, host: Host, cwd: Path, url: str, state: di
         r = rect_of(cwd, m.get("id", ""))
         if (r.get("x"), r.get("y")) != state.get("moved"):
             bad.append(f"position after restart {(r.get('x'), r.get('y'))} != {state.get('moved')}")
-    # `--headless`: the kernel's message stream is the host's stdout, one line
+    # `canvas` is headless: the kernel's message stream is the host's stdout, one line
     # per row (`[<id>] <agent> <kind|role> <verb>? · <first line>`), no escapes.
     if exp.get("stream"):
         run = host.log.read_text().split("=== start")[-1]

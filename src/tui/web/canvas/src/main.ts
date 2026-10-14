@@ -7,7 +7,7 @@ import { registerHtmlAgent } from "./bundles/html_agent/html_agent.ts";
 import { registerAgentView } from "./bundles/agent_view/agent_view.ts";
 import { mountCanvas } from "./bundles/canvas/canvas.ts";
 import { setCanvasNode } from "./bundles/canvas/host_views.ts";
-import { registerCanvas } from "./bundles/canvas/canvas_agent.ts";
+import { onHostStopping, registerCanvas } from "./bundles/canvas/canvas_agent.ts";
 import { registerBackground } from "./bundles/canvas/background_agent.ts";
 import { registerSelector } from "./bundles/canvas/selector_agent.ts";
 import { registerLayout } from "./bundles/canvas/layout.ts";
@@ -181,6 +181,10 @@ new Host(kernel, "canvas").on(BRIDGE, "changed", (ev) => {
 await Promise.all([watchPath(dir), ...folders.map((f) => watchPath(`${dir}/${f.name}`))]);
 inner.announce();
 loader.start();
+// THE HOST STOPS (its shutdown calls `<guid>|canvas` `host_stopping` before it
+// drains): the last records flushed, the loader stopped — no write lands mid-drain
+let stopping: Promise<void> | null = null;
+onHostStopping(() => (stopping ??= loader.stop()));
 
 // THE ROOT'S BOOT MINTS THE GUID (once; it persists with the root record) — the
 // canvas's identity as a PEER kernel: the bridge says `hello {guid}` with it, and

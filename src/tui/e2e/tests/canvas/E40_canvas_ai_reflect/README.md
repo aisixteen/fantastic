@@ -29,7 +29,7 @@ last answer names the terminal and html cells placed near it; the turns taken.
 
 Setup, all by the probe: the CLI binary built with the plug's backend feature;
 a throwaway `FANTASTIC_HOME` whose one saved set-up IS the plug's record (default);
-`fantastic --headless canvas --port N` in a fresh dir; headless Chrome drives
+`fantastic canvas --port N` in a fresh dir; headless Chrome drives
 the page: a terminal cell at the right, an html panel below it, then the AI
 cell at the left with the first turn "Hey! Look around and see whats on a canvas and a backend".
 

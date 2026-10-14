@@ -1,7 +1,7 @@
 """THE CANVAS TEST FIXTURE — one rig every CLI canvas test shares (E40 is its
 base).
 
-The fixture is the PRODUCT: the `fantastic-tui` binary, `fantastic --headless
+The fixture is the PRODUCT: the `fantastic-tui` binary, `fantastic
 canvas` in a fresh directory, a real headless Chrome over CDP. A live test takes
 its model from the kernel suite's plug (`BACKEND=…`, `e2e/backends`); a
 scripted test runs no model.
@@ -203,7 +203,7 @@ class Rig:
 
     def start(self) -> None:
         first = not (self.proj / ".fantastic").exists()
-        args = [str(self.binary), "--headless", "canvas", *(["--port", str(self.port)] if first else [])]
+        args = [str(self.binary), "canvas", *(["--port", str(self.port)] if first else [])]
         with open(self.log, "a") as f:
             f.write("\n=== start\n")
         self.host = subprocess.Popen(args, cwd=self.proj, env=self.env(), stdout=open(self.log, "a"), stderr=subprocess.STDOUT)

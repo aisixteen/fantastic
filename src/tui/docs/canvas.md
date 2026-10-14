@@ -2,8 +2,8 @@
 
 # The canvas
 
-`fantastic canvas [--port N]` runs the terminal UI and serves the canvas page
-from this binary. The page is its OWN kernel (in the browser) bridged to the
+`fantastic canvas [--port N]` runs headless — no terminal UI, the kernel's
+message stream on stdout — and serves the canvas page from this binary. The page is its OWN kernel (in the browser) bridged to the
 host kernel through the socket leg `canvas_ws`. It holds no memory store and no
 AI: every cell is a VIEW of a host agent (a terminal, an AI chat, a set-up
 cell) or page-side content (html, gl).

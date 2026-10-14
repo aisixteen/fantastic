@@ -1,12 +1,12 @@
 //! THE COMMAND LINE:
-//! `fantastic [--headless] [canvas [--port N]] [ai [BACKEND FLAGS…]] [run COMMAND [ARGS…]]`.
+//! `fantastic [canvas [--port N] | --headless] [ai [BACKEND FLAGS…]] [run COMMAND [ARGS…]]`.
 //!
 //! A RECIPE is a word that names agents. It ADDS them to the kernel only if they
 //! are missing — a recipe already applied adds nothing — and RUNS them. The
-//! terminal UI is the default and is always there unless `--headless`; the
-//! screen opens on the LAST recipe named (`fantastic canvas ai` runs both and
-//! shows the ai). Every recipe works without `canvas` (the terminal UI is then
-//! the only View).
+//! terminal UI is the default unless `canvas` or `--headless` is named; the
+//! screen opens on the LAST recipe named (`fantastic ai vllm -p 1 run htop`
+//! runs both and shows the terminal). Every recipe works without `canvas` (the
+//! terminal UI is then the only View).
 //!
 //! | recipe | adds (if missing) | shows |
 //! |--------|-------------------|-------|
@@ -23,8 +23,9 @@
 //! `--host` is `127.0.0.1` and `--kv-overflow` `evict` unless named. `run` takes
 //! EVERY word after it (the command's own flags included).
 //!
-//! `--headless`: no terminal UI; the kernel's message stream goes to stdout (it
-//! may stand anywhere: `fantastic canvas --headless` is the same).
+//! `canvas` IS HEADLESS (owner, 2026-10-15): no terminal UI — the browser is
+//! its View — and the kernel's message stream goes to stdout. `--headless`: the
+//! same with no canvas. Both together are refused: `canvas` says it already.
 //! `--port N` belongs to `canvas`; a new one overwrites the recorded. The first
 //! `canvas` without one picks a free port and records it; later runs reuse it. A kernel
 //! already running here refuses every argument (`run.rs`). `fantastic mcp` stays its own
@@ -61,7 +62,7 @@ impl Opts {
     }
 }
 
-const USAGE: &str = "run `fantastic [--headless] [canvas [--port N]] [ai [vllm|ollama|responses|anthropic …]] [run COMMAND …]`, `fantastic mcp`, `fantastic send <item>` or `fantastic readme [key]`";
+const USAGE: &str = "run `fantastic [canvas [--port N] | --headless] [ai [vllm|ollama|responses|anthropic …]] [run COMMAND …]`, `fantastic mcp`, `fantastic send <item>` or `fantastic readme [key]`";
 
 fn port_of(v: &str, flag: &str) -> Result<u16, String> {
     v.parse::<u16>().ok().filter(|p| *p > 0).ok_or_else(|| format!("{flag} must be 1..65535, got `{v}`"))
@@ -181,6 +182,11 @@ pub fn parse(args: &[String]) -> Result<Opts, String> {
         }
         i += 1;
     }
+    if o.headless && o.canvas() {
+        return Err("`canvas` runs headless already — run `fantastic canvas` (no --headless)".into());
+    }
+    // the canvas's View is the browser: no terminal UI, the stream on stdout
+    o.headless |= o.canvas();
     if o.port.is_some() && !o.canvas() {
         return Err("--port belongs to the `canvas` recipe".into());
     }
@@ -209,7 +215,7 @@ mod tests {
         let o = p("canvas ai").unwrap();
         assert_eq!(o.recipes, vec![Recipe::Canvas, Recipe::Ai]);
         assert_eq!(o.shows(), Some(Recipe::Ai));
-        assert!(o.canvas() && !o.headless && o.ai.is_none());
+        assert!(o.canvas() && o.headless && o.ai.is_none(), "the canvas runs headless");
         assert!(p("web").is_err(), "`web` is no longer a word");
         assert_eq!(p("ai canvas").unwrap().shows(), Some(Recipe::Canvas));
         assert_eq!(p("canvas ai canvas").unwrap().recipes, vec![Recipe::Ai, Recipe::Canvas], "named twice runs once, last");
@@ -225,8 +231,12 @@ mod tests {
     #[test]
     fn port_belongs_to_canvas() {
         assert_eq!(p("canvas --port 8123").unwrap().port, Some(8123));
-        assert!(p("canvas --headless").unwrap().headless, "a flag after the recipe counts the same");
-        assert!(p("canvas --headless").unwrap().port.is_none(), "no port: the first run picks one");
+        assert!(p("canvas").unwrap().headless, "the canvas is headless");
+        assert!(p("canvas").unwrap().port.is_none(), "no port: the first run picks one");
+        assert!(p("canvas --headless").is_err(), "canvas says headless already");
+        assert!(p("--headless canvas").is_err());
+        let h = p("--headless").unwrap();
+        assert!(h.headless && !h.canvas(), "--headless alone: no UI, no canvas");
         assert!(p("ai --port 8123").is_err());
         assert!(p("canvas --port 0").is_err());
     }
@@ -270,6 +280,6 @@ mod tests {
         assert_eq!(p("canvas run htop").unwrap().recipes, vec![Recipe::Canvas, Recipe::Run]);
         assert!(p("run").is_err());
         assert!(p("--headless run htop").is_err(), "headless with no canvas has no View for it");
-        assert!(p("--headless canvas run htop").is_ok());
+        assert!(p("canvas run htop").unwrap().headless, "a canvas terminal cell, no terminal UI");
     }
 }

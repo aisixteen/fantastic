@@ -64,7 +64,7 @@ fn main() -> Result<()> {
         // THE UI NEEDS A TERMINAL (it draws on `/dev/tty`): without one, say so
         // here — before fds 1 and 2 are pointed at the log file — and stop
         Ok(o) if !o.headless && std::fs::OpenOptions::new().read(true).write(true).open("/dev/tty").is_err() => {
-            eprintln!("fantastic: the UI needs a terminal — where there is none, run with --headless (e.g. `fantastic --headless canvas`)");
+            eprintln!("fantastic: the UI needs a terminal — where there is none, run `fantastic canvas` or `fantastic --headless`");
             std::process::exit(1);
         }
         Ok(o) => shell(o),

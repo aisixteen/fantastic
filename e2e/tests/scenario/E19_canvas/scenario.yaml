@@ -1,6 +1,6 @@
 # THE CANVAS, a thin web UI, end to end. No model. The runner builds the product
 # (whose build packs the canvas and embeds `canvas.zip`), runs
-# `fantastic --headless canvas --port N` over a fresh dir, and drives a REAL
+# `fantastic canvas --port N` over a fresh dir, and drives a REAL
 # headless Chrome over CDP against the page it announces: a double click opens the action popup, `terminal` there spawns one,
 # keystrokes run in it, a drag moves it, a restart rehydrates it, the close
 # button closes its view (the agent lives on). Every step is checked ON DISK too: the canvas's thin agents
@@ -24,13 +24,15 @@ runs:
     # the page seeds its root and the loader writes it under its own anchor
     expect:
       # nothing floats (owner 2026-10-08): no top bar, no sidebar — the background alone
-      files_exist: [.fantastic/web/agent.yaml, .fantastic/web/agents/canvas/agent.yaml, .fantastic/web/agents/canvas/agents/view_root/agent.yaml,
+      files_exist: [.fantastic/web/agents/canvas/agent.yaml, .fantastic/web/agents/canvas/agents/view_root/agent.yaml,
                     # THE HOST TREE (owner 2026-10-04): canvas_root holds the files, the page loader and the cells' backends directly
                     .fantastic/agents/user/agents/web/agents/canvas_page/agents/canvas_root/agent.yaml,
                     .fantastic/agents/user/agents/web/agents/canvas_page/agents/canvas_root/agents/static_files/agent.yaml,
                     .fantastic/agents/user/agents/web/agents/canvas_page/agents/canvas_root/agents/web_loader/agent.yaml]
-      # no backend folders any more
-      files_absent: [.fantastic/agents/user/agents/web/agents/canvas_page/agents/canvas_root/agents/backend,
+      # no backend folders any more; no sub-loader record at its root (the loader's
+      # record lives in the host tree)
+      files_absent: [.fantastic/web/agent.yaml,
+                     .fantastic/agents/user/agents/web/agents/canvas_page/agents/canvas_root/agents/backend,
                      .fantastic/agents/user/agents/web/agents/canvas_page/agents/canvas_root/agents/web_loader/agents/static_files]
       canvas_members: 0
       group_size: 0

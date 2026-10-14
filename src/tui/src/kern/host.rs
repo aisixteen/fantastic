@@ -23,6 +23,10 @@
 //! inside a bundle's handler is that agent's.
 
 use std::sync::Arc;
+use std::time::Duration;
+
+/// How long the pages get to stop writing before the kernel drains.
+pub(crate) const PAGE_STOP_GRACE: Duration = Duration::from_secs(5);
 
 use fantastic_kernel::{
     bootstrap::{self, BootstrapOptions},
@@ -346,14 +350,15 @@ impl Host {
         }
     }
 
-    /// Shut down IN THE KERNEL'S ORDER, on the runtime that booted it:
-    /// `Kernel::shutdown` first (drain, each agent's `shutdown` verb, cancel what
+    /// Shut down IN THE KERNEL'S ORDER, on the runtime that booted it: the
+    /// pages stop writing first ([`Host::stop_pages`]), then `Kernel::shutdown` (drain, each agent's `shutdown` verb, cancel what
     /// remains, the last execution rows flushed into the memory store, the
     /// records written, the teardown walk), and only then the lock release.
     /// Releasing the lock first used to lose the last execution.
     pub async fn shutdown(&self, paths: &Paths) {
         // The kernel lands every record and every message itself
         // (`flush_pending`) before its teardown walk; the lock goes last.
+        self.stop_pages().await;
         self.kernel.shutdown().await;
         // Every row has landed: the SQLite stores fold their WAL into the file
         // and close, so a stopped kernel leaves only `memory.db`.
@@ -363,6 +368,37 @@ impl Host {
         if let Err(e) = bootstrap::shutdown(&paths.cwd) {
             tracing::warn!("shutdown: {e}");
         }
+    }
+
+    /// THE PAGES STOP BEFORE THE DRAIN (owner, 2026-10-15): every connected
+    /// page kernel is called `<guid>|canvas` `host_stopping` — it flushes its
+    /// last records and writes no more — and the drain starts once each has
+    /// answered or [`PAGE_STOP_GRACE`] has passed. A write that would land
+    /// mid-drain is refused there; this makes none land.
+    async fn stop_pages(&self) {
+        let guids: std::collections::BTreeSet<String> = self
+            .kernel
+            .peer_rows()
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|r| r.get("guid").and_then(Value::as_str).map(str::to_string))
+            .collect();
+        let calls = guids.into_iter().map(|g| {
+            let k = Arc::clone(&self.kernel);
+            async move {
+                let item = Item::new(AgentId::from(format!("{g}|canvas").as_str()), json!({"type": "host_stopping"}));
+                match tokio::time::timeout(PAGE_STOP_GRACE, k.send(vec![item])).await {
+                    Err(_) => tracing::warn!("shutdown: page {g} did not stop within {PAGE_STOP_GRACE:?}"),
+                    Ok(mut out) => {
+                        if let Some(e) = out.remove(0).result.get("error").and_then(Value::as_str) {
+                            tracing::warn!("shutdown: page {g}: {e}");
+                        }
+                    }
+                }
+            }
+        });
+        futures_util::future::join_all(calls).await;
     }
 
     // ── acting ───────────────────────────────────────────────────────────

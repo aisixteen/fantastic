@@ -1,7 +1,7 @@
 """E40 canvas_ai_reflect — does an AI cell find the page kernel on its own?
 
 See README.md. The model comes from the plug (`BACKEND=…`, e2e/backends); the
-fixture is the PRODUCT (`fantastic --headless canvas`) driven through a real
+fixture is the PRODUCT (`fantastic canvas`) driven through a real
 headless Chrome — nothing here builds agents directly.
 """
 
@@ -132,7 +132,7 @@ def main() -> bool:
     proj.mkdir()
     log = tmp / "host.log"
     env = {**os.environ, "FANTASTIC_HOME": str(home)}
-    host = subprocess.Popen([str(binary), "--headless", "canvas", "--port", str(free_port())], cwd=proj, env=env,
+    host = subprocess.Popen([str(binary), "canvas", "--port", str(free_port())], cwd=proj, env=env,
                             stdout=open(log, "w"), stderr=subprocess.STDOUT)
     chrome = None
     try:

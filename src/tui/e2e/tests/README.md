@@ -3,7 +3,7 @@
 Run by the KERNEL suite's launcher (`e2e/run.py`, second discovery root), the
 model from its plug (`BACKEND=…`, `e2e/backends`). The fixture is the PRODUCT:
 `_lib/canvas_live.py` builds `fantastic-tui` with the plug's feature, a
-throwaway `FANTASTIC_HOME`, `fantastic --headless canvas` in a fresh dir
+throwaway `FANTASTIC_HOME`, `fantastic canvas` in a fresh dir
 (seeded as the product stores it), and drives a real headless Chrome over CDP.
 Evidence is the host's own stream (`[<id>] <page guid>|<agent> call <verb>`),
 the disk, and the page's DOM / frames.
