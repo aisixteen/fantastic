@@ -16,14 +16,10 @@ loaders:
         # table; `exec_bridge` would have to name an interpreter path), and
         # inventing a kernel mechanism to make a test expressible is not on.
         #
-        # WHY THE CONFTEST, MEASURED: a module registered by the validator
-        # resolved for `Agent._dispatch` but not for `Kernel.load` when the
-        # general runner ran ALONE (`pytest tests/agentic/test_manifest_contract.py`,
-        # which never imports the validator): the record was dropped on the PC-4
-        # reboot — stderr `[kernel] skipping agent slowbot: bundle
-        # lifecycle_probe.tools not installed in this runtime` — and the loader
-        # re-CREATED it, so PC-4 went red for this config and no other. Every
-        # invocation of the suite passes through the conftest, so resolution
+        # WHY THE CONFTEST: a module registered by the validator resolves for
+        # `Agent._dispatch` but not for `Kernel.load` when the general runner runs
+        # ALONE (it never imports the validator), so the record would be dropped
+        # on the PC-4 reboot and re-CREATED by the loader. Every invocation of the suite passes through the conftest, so resolution
         # couples nothing to collection order.
         - id: slowbot
           handler_module: lifecycle_probe.tools

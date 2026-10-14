@@ -3,7 +3,7 @@
 #
 #   state: accepted       — the owner decided; a line matching it does not stop a
 #                           run being CLEAN, and does not count against an item's
-#                           pass — even when the item is in landed.yaml (v6).
+#                           pass — even when the item is in landed.yaml.
 #   state: pending-owner  — the decision is not made. A line matching it counts
 #                           OPEN, and the run is not clean while it does.
 #
@@ -37,11 +37,11 @@ residuals:
     allowed_tail_regex: ".*"
     items: [A13.16, A13.17, A13.18]
     note: >
-      Measured 2026-10-01: python (uvicorn/websockets) answers the upgrade with
+      Python (uvicorn/websockets) answers the upgrade with
       6 headers in Title-Case (`Upgrade`, `Connection`, `Sec-WebSocket-Accept`,
       `Sec-WebSocket-Extensions`, `date`, `server: uvicorn`); rust and swift
       answer with 5, lowercase where their HTTP stack writes names verbatim, and
-      no `server`. 45 lines on rust, 60 on swift. The accept KEY is compared (as
+      no `server`. The accept KEY is compared (as
       `<WS_ACCEPT>`) in every handshake, and the status line is not a header.
       Blast radius: a handshake response header a port drops or adds hides here,
       except the deflate extension.
@@ -123,8 +123,7 @@ residuals:
     allowed_tail_regex: ".*"
     items: []
     note: >
-      `Connection` vs `connection` on the HTTP census — 136 lines on swift, 5 on
-      rust, one physical difference. Same client-library class as R-D4-9 and
+      `Connection` vs `connection` on the HTTP census — one physical difference. Same client-library class as R-D4-9 and
       R-D16-2: `http::HeaderName` is lowercase by construction and hyper's
       writer emits it verbatim, so rust cannot write a capitalised request
       header name at all, while python's client sends httpx's own casing; swift
@@ -145,7 +144,7 @@ residuals:
     allowed_tail_regex: ".*"
     items: [B4.6]
     note: >
-      Measured 2026-10-01: the two bodies are the same messages in a different
+      The two bodies are the same messages in a different
       key order plus the SDK's empty `tools` (we never send native tools — the
       tool grammar is raw text). Key order is never normalised (rules.yaml), so
       this is a residual, not a rule. Blast radius: the WHOLE ollama request body
@@ -168,7 +167,7 @@ residuals:
       rust and swift print none. A port's OWN error line is an `other` line and
       never matches, so a port that stops logging a failure at all is still a
       line only if python's closing line differs — the traceback body itself is
-      python's runtime, not ours. 39 lines on each port, 2026-10-01.
+      python's runtime, not ours.
 
   - id: R-L1-4
     decision: L1
@@ -225,8 +224,8 @@ residuals:
     items: [C74, A14.9]
     note: >
       Swift's JSON holds no integer past 64 bits, so its coercion leaves the
-      digits a string. The WIRE half of D13 is gone (python refuses such a value
-      at the wire since 2026-10-01); this is the cli's argv coercion, which no
+      digits a string. The WIRE half of D13 does not apply (python refuses such a
+      value at the wire); this is the cli's argv coercion, which no
       wire rule reaches. Scoped to the two captures that exist to test it; their
       whole `$.stdout` field is covered too — the digits fall past the 400-char
       excerpt a line carries, and the same text is compared line by line in the
@@ -258,10 +257,10 @@ residuals:
     allowed_tail_regex: ".*"
     items: []
     note: >
-      Owner decision A, 2026-10-04: rust and swift ship `foundation_models_backend`
-      (Apple's on-device model), python does not. Measured: +6 tokens on every
-      system prompt, budgets -6, +2 completed calls per agent the store family
-      pages with `bundles` and `limit 2`.
+      A by-design difference: rust and swift ship `foundation_models_backend`
+      (Apple's on-device model), python does not. A few more tokens on every
+      system prompt, budgets lower by the same, +2 completed calls per agent the
+      store family pages with `bundles` and `limit 2`.
 
 
   - id: R-L1-9
@@ -273,7 +272,7 @@ residuals:
     allowed_tail_regex: ".*"
     items: []
     note: >
-      Owner 2026-10-04: the ws CLIENT's upgrade request headers are its library's
+      The ws CLIENT's upgrade request headers are its library's
       (python's websockets sends `user-agent` and offers permessage-deflate; swift
       writes `connection: upgrade` lowercase). Pinned to the peer's `open` event.
 

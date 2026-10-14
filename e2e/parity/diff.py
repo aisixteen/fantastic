@@ -2138,7 +2138,7 @@ def cmd_status(diffdir: Path, proofs, landed, plan: Path) -> int:
                 continue
             ln = json.loads(line)
             # an ACCEPTED difference does not stop its items passing — that is
-            # what accepting it means (residuals.yaml v6)
+            # what accepting it means (residuals.yaml)
             if ln.get("verdict") == "residual-accepted":
                 continue
             touched |= set(ln.get("items") or [])

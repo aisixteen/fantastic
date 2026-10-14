@@ -5,9 +5,8 @@ config: docs.yaml
 
 name: docs
 description: >
-  A reflect says what an agent IS; how to CALL it is the `docs` kernel verb
-  (owner, 2026-10-05), answered by the root and gated like any kernel verb (owner,
-  2026-10-06). Oneliners carry each verb's signature,
+  A reflect says what an agent IS; how to CALL it is the `docs` kernel verb,
+  answered by the root and gated like any kernel verb. Oneliners carry each verb's signature,
   `detailed` the whole text. A reflect's tree can be cut to the branches a caller
   works on (`show_subtrees`) or around the ones it knows (`ignore_subtrees`, each
   pruned branch left as `{id, pruned: n}`).
